@@ -157,6 +157,7 @@ async function ensureReady(cwd: string): Promise<void> {
 	if (lspReadyCwds.has(normalized)) return;
 	try {
 		await ensureLspConfig(normalized);
+	// pi-lens-ignore: missing-error-propagation
 	} catch (err) {
 		console.error(`[pi-lens-mcp] initLSPConfig failed for ${normalized}: ${err}`);
 	}
