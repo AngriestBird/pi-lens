@@ -25,6 +25,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { normalizeMapKey } from "../path-utils.js";
+import { aliasedImportTargets } from "./tsconfig-paths.js";
 import { buildModuleGraph, type WorkspaceModule } from "./workspace-modules.js";
 
 /** True when `p` is inside (or equal to) `cwd` — blocks resolution escaping the workspace. */
@@ -239,6 +240,24 @@ function workspaceSubpathCandidates(pkgRoot: string, subpath: string): string[] 
 	return jsTsExtensionCandidates(base, strippedBase, ext);
 }
 
+/** Resolve tsconfig paths aliases before workspace-package matching. */
+export function resolveAliasedImport(
+	cwd: string,
+	specifier: string,
+	importerDir: string,
+): string[] {
+	for (const target of aliasedImportTargets(specifier, importerDir)) {
+		const ext = path.extname(target).toLowerCase();
+		const stripped = target.replace(JS_TS_EXT_RE, "");
+		const found = firstExistingFile(
+			cwd,
+			jsTsExtensionCandidates(target, stripped, ext),
+		);
+		if (found.length) return found;
+	}
+	return [];
+}
+
 /**
  * Resolve a bare specifier that names a sibling workspace package (npm/pnpm
  * workspaces, cargo, go.work — detected by `workspace-modules.ts`) to that
@@ -276,7 +295,12 @@ export function resolveWorkspacePackageImport(
  * both candidate lists.
  */
 function resolveJsTs(cwd: string, filePath: string, source: string): string[] {
-	if (!source.startsWith(".")) return resolveWorkspacePackageImport(cwd, source);
+	if (!source.startsWith(".")) {
+		const aliased = resolveAliasedImport(cwd, source, path.dirname(filePath));
+		return aliased.length
+			? aliased
+			: resolveWorkspacePackageImport(cwd, source);
+	}
 	return firstExistingFile(cwd, jsTsCandidatePaths(filePath, source));
 }
 
