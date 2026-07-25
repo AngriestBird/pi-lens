@@ -113,23 +113,38 @@ export function contentHash(content: string): string {
 	return crypto.createHash("sha256").update(content).digest("hex");
 }
 
-export function requestWarmDiagnostics(
+type WarmIpcOutcome<TResponse> =
+	| { available: true; response: TResponse }
+	| { available: false; reason: WarmDiagnosticsFailureReason };
+
+/**
+ * Shared one-shot request/response transport for the warm-attach IPC routes
+ * (#822): connect to the incumbent's PID-scoped endpoint, write one JSON
+ * line, read one JSON line back, classify. The per-route `validate` callback
+ * returns a failure reason for an on-time but unusable reply (schema skew,
+ * staleness) or `undefined` to accept it; transport failures map uniformly to
+ * timeout/ipc-error. One transport, N routes — the diagnostics and
+ * code-action clients cannot drift apart.
+ */
+function requestOverWarmIpc<TResponse>(
 	cwd: string,
 	incumbentPid: number,
-	file: string,
-	content: string,
 	timeoutMs: number,
-): Promise<WarmDiagnosticsResult> {
+	buildRequest: (deadlineAt: number) => unknown,
+	validate: (
+		result: TResponse,
+		deadlineAt: number,
+	) => WarmDiagnosticsFailureReason | undefined,
+): Promise<WarmIpcOutcome<TResponse>> {
 	return new Promise((resolve) => {
 		let settled = false;
-		const finish = (value: WarmDiagnosticsResult): void => {
+		const finish = (value: WarmIpcOutcome<TResponse>): void => {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
 			socket.destroy();
 			resolve(value);
 		};
-		const expectedHash = contentHash(content);
 		const deadlineAt = Date.now() + timeoutMs;
 		const socket = net.createConnection(
 			diagnosticsIpcPathForCwd(cwd, incumbentPid),
@@ -142,16 +157,7 @@ export function requestWarmDiagnostics(
 		);
 		timer.unref();
 		socket.on("connect", () => {
-			const request: WarmDiagnosticsRequest = {
-				route: "diagnostics",
-				version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
-				file,
-				cwd,
-				content,
-				contentHash: expectedHash,
-				deadlineAt,
-			};
-			socket.write(`${JSON.stringify(request)}\n`);
+			socket.write(`${JSON.stringify(buildRequest(deadlineAt))}\n`);
 		});
 		socket.on("data", (chunk: string) => {
 			buffer += chunk;
@@ -159,26 +165,19 @@ export function requestWarmDiagnostics(
 			if (newline === -1) return;
 			try {
 				const message = JSON.parse(buffer.slice(0, newline)) as {
-					result?: WarmDiagnosticsResponse;
+					result?: TResponse;
 					error?: string;
 				};
 				const result = message.result;
 				if (message.error || !result) {
 					finish({ available: false, reason: "ipc-error" });
-				} else if (
-					result.route !== "diagnostics" ||
-					result.version !== WARM_DIAGNOSTICS_SCHEMA_VERSION
-				) {
-					finish({ available: false, reason: "schema-mismatch" });
-				} else if (
-					!result.fresh ||
-					result.inconclusive ||
-					result.contentHash !== expectedHash ||
-					result.servedAt > deadlineAt
-				) {
-					finish({ available: false, reason: "stale-answer" });
-				} else {
+					return;
+				}
+				const reason = validate(result, deadlineAt);
+				if (reason === undefined) {
 					finish({ available: true, response: result });
+				} else {
+					finish({ available: false, reason });
 				}
 			} catch {
 				finish({ available: false, reason: "schema-mismatch" });
@@ -193,6 +192,47 @@ export function requestWarmDiagnostics(
 	});
 }
 
+export function requestWarmDiagnostics(
+	cwd: string,
+	incumbentPid: number,
+	file: string,
+	content: string,
+	timeoutMs: number,
+): Promise<WarmDiagnosticsResult> {
+	const expectedHash = contentHash(content);
+	return requestOverWarmIpc<WarmDiagnosticsResponse>(
+		cwd,
+		incumbentPid,
+		timeoutMs,
+		(deadlineAt): WarmDiagnosticsRequest => ({
+			route: "diagnostics",
+			version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
+			file,
+			cwd,
+			content,
+			contentHash: expectedHash,
+			deadlineAt,
+		}),
+		(result, deadlineAt) => {
+			if (
+				result.route !== "diagnostics" ||
+				result.version !== WARM_DIAGNOSTICS_SCHEMA_VERSION
+			) {
+				return "schema-mismatch";
+			}
+			if (
+				!result.fresh ||
+				result.inconclusive ||
+				result.contentHash !== expectedHash ||
+				result.servedAt > deadlineAt
+			) {
+				return "stale-answer";
+			}
+			return undefined;
+		},
+	);
+}
+
 export function requestWarmCodeActions(
 	cwd: string,
 	incumbentPid: number,
@@ -201,77 +241,38 @@ export function requestWarmCodeActions(
 	ranges: WarmCodeActionRange[],
 	timeoutMs: number,
 ): Promise<WarmCodeActionsResult> {
-	return new Promise((resolve) => {
-		let settled = false;
-		const deadlineAt = Date.now() + timeoutMs;
-		const socket = net.createConnection(
-			diagnosticsIpcPathForCwd(cwd, incumbentPid),
-		);
-		const finish = (value: WarmCodeActionsResult): void => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			socket.destroy();
-			resolve(value);
-		};
-		socket.setEncoding("utf8");
-		let buffer = "";
-		const timer = setTimeout(
-			() => finish({ available: false, reason: "timeout" }),
-			timeoutMs,
-		);
-		timer.unref();
-		socket.on("connect", () => {
-			const request: WarmCodeActionsRequest = {
-				route: "code-actions",
-				version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
-				file,
-				cwd,
-				contentHash: expectedContentHash,
-				ranges,
-				deadlineAt,
-			};
-			socket.write(`${JSON.stringify(request)}\n`);
-		});
-		socket.on("data", (chunk: string) => {
-			buffer += chunk;
-			const newline = buffer.indexOf("\n");
-			if (newline === -1) return;
-			try {
-				const message = JSON.parse(buffer.slice(0, newline)) as {
-					result?: WarmCodeActionsResponse;
-					error?: string;
-				};
-				const result = message.result;
-				if (message.error || !result) {
-					finish({ available: false, reason: "ipc-error" });
-				} else if (
-					result.route !== "code-actions" ||
-					result.version !== WARM_DIAGNOSTICS_SCHEMA_VERSION ||
-					!Array.isArray(result.actions) ||
-					result.actions.length !== ranges.length ||
-					result.actions.some((actions) => !Array.isArray(actions))
-				) {
-					finish({ available: false, reason: "schema-mismatch" });
-				} else if (
-					result.contentHash !== expectedContentHash ||
-					result.servedAt > deadlineAt
-				) {
-					finish({ available: false, reason: "stale-answer" });
-				} else {
-					finish({ available: true, response: result });
-				}
-			} catch {
-				finish({ available: false, reason: "schema-mismatch" });
+	return requestOverWarmIpc<WarmCodeActionsResponse>(
+		cwd,
+		incumbentPid,
+		timeoutMs,
+		(deadlineAt): WarmCodeActionsRequest => ({
+			route: "code-actions",
+			version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
+			file,
+			cwd,
+			contentHash: expectedContentHash,
+			ranges,
+			deadlineAt,
+		}),
+		(result, deadlineAt) => {
+			if (
+				result.route !== "code-actions" ||
+				result.version !== WARM_DIAGNOSTICS_SCHEMA_VERSION ||
+				!Array.isArray(result.actions) ||
+				result.actions.length !== ranges.length ||
+				result.actions.some((actions) => !Array.isArray(actions))
+			) {
+				return "schema-mismatch";
 			}
-		});
-		socket.on("error", () =>
-			finish({ available: false, reason: "ipc-error" }),
-		);
-		socket.on("close", () =>
-			finish({ available: false, reason: "ipc-error" }),
-		);
-	});
+			if (
+				result.contentHash !== expectedContentHash ||
+				result.servedAt > deadlineAt
+			) {
+				return "stale-answer";
+			}
+			return undefined;
+		},
+	);
 }
 
 /** One IPC request: analyze a file in the warm server process. */
