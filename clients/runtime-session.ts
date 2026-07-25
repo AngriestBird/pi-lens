@@ -11,6 +11,7 @@ import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
 import { getKnipIgnorePatterns } from "./file-utils.js";
 import { clearTsconfigPathsCache } from "./review-graph/tsconfig-paths.js";
+import { resetSafeSpawnWindowsCommandCache } from "./safe-spawn.js";
 import { resetWorkspaceTopology } from "./workspace-topology.js";
 import { GitleaksClient, type GitleaksResult } from "./gitleaks-client.js";
 import { OpengrepClient, type OpengrepResult } from "./opengrep-client.js";
@@ -1257,6 +1258,10 @@ export async function handleSessionStart(
 	// previously session-lived with no reset hook at all).
 	resetWorkspaceTopology();
 	clearTsconfigPathsCache();
+	// #817: PATH/PATHEXT command resolution is cached per (command, PATH, cwd);
+	// drop it each session so a PATH change (e.g. a tool installed mid-session
+	// in a prior session, or a differently-scoped shell) is picked up fresh.
+	resetSafeSpawnWindowsCommandCache();
 	runtime.resetForSession();
 
 	// Run log cleanup early in session start (non-blocking)
