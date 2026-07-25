@@ -100,8 +100,9 @@ export function getAmbientAbortSignal(): AbortSignal | undefined {
 // ============================================================================
 
 /**
- * Escape a single argument for cmd.exe when shell:true is required.
- * Only used on Windows to avoid DEP0190 (args+shell concatenation warning).
+ * Escape a single argument for the Windows command interpreter.
+ * The result is embedded in the `/c` command string below, so metacharacters
+ * must remain inside a quoted argument rather than becoming command syntax.
  */
 function cmdEscapeArg(arg: string): string {
 	if (!/[\s"&|<>^()]/.test(arg)) return arg;
@@ -109,7 +110,7 @@ function cmdEscapeArg(arg: string): string {
 }
 
 /**
- * Build the cmd.exe command string used for Windows `shell:true` spawning.
+ * Build the cmd.exe command string used for Windows wrapper spawning.
  *
  * The COMMAND must be escaped the same way as the args — escaping only the args
  * (the bug behind #214) means a tool whose resolved path contains a space (e.g.
@@ -174,23 +175,29 @@ export async function safeSpawnAsync(
 		let timedOut = false;
 		let killed = false;
 
-		// Spawn the process (non-blocking)
-		// On Windows, use shell mode for .cmd files (like pyright, biome).
-		// Bake args into the command string when shell:true to avoid DEP0190.
+		// Spawn the process (non-blocking). On Windows, invoke cmd.exe explicitly
+		// for PATH-resolved commands and .cmd/.bat wrappers. Keeping Node's
+		// `shell` option false is important: shell:true concatenates tainted
+		// arguments into a command line before spawning (CodeQL #17 / CWE-78).
 		const isWindows = process.platform === "win32";
-		// On Windows, prefix with `chcp 65001` to force UTF-8 code page for the
-		// cmd.exe session. Without this, tools that output UTF-8 (sg, biome, ruff,
-		// etc.) have their bytes decoded as the system code page (CP850/CP1252/
-		// CP936/CP932), producing garbled characters in stderr error messages.
+		// Prefix the Windows command with `chcp 65001` to force UTF-8 output.
+		// Without this, tools such as sg, biome, and ruff are decoded using the
+		// system code page (CP850/CP1252/CP936/CP932).
 		const spawnCmd = isWindows
-			? buildWindowsShellCommand(command, args)
+			? process.env.ComSpec || process.env.COMSPEC || "cmd.exe"
 			: command;
-		const spawnArgs = isWindows ? [] : args;
+		const spawnArgs = isWindows
+			? ["/d", "/s", "/c", buildWindowsShellCommand(command, args)]
+			: args;
 		const child = spawn(spawnCmd, spawnArgs, {
 			cwd: options?.cwd,
 			env: { ...process.env, ...options?.env },
 			windowsHide: true,
-			shell: isWindows,
+			shell: false,
+			// The `/c` payload is already quoted by buildWindowsShellCommand.
+			// Prevent Node from escaping those quotes a second time when it builds
+			// cmd.exe's Windows command line.
+			windowsVerbatimArguments: isWindows,
 		});
 
 		// #620: bracket this spawn's lifetime with a short-interval CPU/RSS poll

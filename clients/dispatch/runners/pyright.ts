@@ -103,6 +103,7 @@ const pyrightRunner: RunnerDefinition = {
 						? "warning"
 						: "none",
 			};
+		// pi-lens-ignore: missing-error-propagation
 		} catch {
 			console.error(
 				`[runner:pyright] JSON parse failed for ${ctx.filePath} — raw output: ${output.slice(0, 200)}`,
