@@ -28,6 +28,7 @@ import {
 	retagAuxiliaryDiagnostics,
 } from "../auxiliary-lsp.js";
 import { readFileContent } from "./utils.js";
+import { tryWarmAttachedDiagnostics } from "../../warm-attach.js";
 
 const LSP_MAX_FILE_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
 const LSP_MAX_FILE_LINES = RUNTIME_CONFIG.pipeline.lspMaxFileLines;
@@ -135,6 +136,7 @@ const lspRunner: RunnerDefinition = {
 		// one spawned server) — an empty `lspDiags` in that case is NOT a
 		// confirmed clean result and must not be reported as one (#570).
 		let diagnosticsInconclusive = false;
+		let usedWarmAttach = false;
 		let failureReason = "";
 		const content = readFileContent(ctx.filePath);
 		if (!content) {
@@ -154,7 +156,15 @@ const lspRunner: RunnerDefinition = {
 			ctx.pi.getFlag(f),
 		);
 		try {
-			const touched = await lspService.touchFile(ctx.filePath, content, {
+			const attached = await tryWarmAttachedDiagnostics(
+				ctx.filePath,
+				content,
+				Math.max(LSP_SPAWN_BUDGET_MS, LSP_DIAGNOSTICS_WAIT_MS),
+			);
+			usedWarmAttach = attached?.available === true;
+			const touched = attached?.available
+				? attached.response.diagnostics
+				: await lspService.touchFile(ctx.filePath, content, {
 				diagnostics: "document",
 				collectDiagnostics: true,
 				clientScope: auxiliaryServerIds.length > 0 ? "with-auxiliary" : "primary",
@@ -167,7 +177,9 @@ const lspRunner: RunnerDefinition = {
 				lspClientReady = false;
 			} else {
 				lspDiags = touched;
-				diagnosticsInconclusive = touched.inconclusive === true;
+				diagnosticsInconclusive =
+					(touched as typeof touched & { inconclusive?: boolean })
+						.inconclusive === true;
 			}
 		} catch (err) {
 			serverFailed = true;
@@ -249,6 +261,9 @@ const lspRunner: RunnerDefinition = {
 			.slice(0, MAX_CODE_ACTION_LOOKUPS);
 
 		await Promise.all(
+			usedWarmAttach
+				? []
+				:
 			blockingDiagIndexes.map(async ({ d, idx }) => {
 				try {
 					const start = d.range.start;

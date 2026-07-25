@@ -12,8 +12,12 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { McpAnalyzeResult } from "../../../clients/mcp/analyze.js";
 import {
+	contentHash,
+	diagnosticsIpcPathForCwd,
 	ipcPathForCwd,
+	requestWarmDiagnostics,
 	requestWarmAnalyze,
+	WARM_DIAGNOSTICS_SCHEMA_VERSION,
 } from "../../../clients/mcp/ipc.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -29,11 +33,94 @@ const SENTINEL = {
 
 let activeServer: net.Server | undefined;
 
-afterEach(async () => {
+afterEach(() => {
 	if (activeServer) {
-		await new Promise<void>((resolve) => activeServer?.close(() => resolve()));
+		(
+			activeServer as net.Server & { closeAllConnections?: () => void }
+		).closeAllConnections?.();
+		activeServer.close();
 		activeServer = undefined;
 	}
+});
+
+describe("requestWarmDiagnostics", () => {
+	it("round-trips a versioned, content-bound response", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-diag-"));
+		const pid = 99001;
+		activeServer = net.createServer((socket) => {
+			socket.setEncoding("utf8");
+			socket.once("data", (chunk: string) => {
+				const request = JSON.parse(chunk.trim()) as { contentHash: string };
+				socket.end(
+					`${JSON.stringify({
+						result: {
+							route: "diagnostics",
+							version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
+							diagnostics: [],
+							contentHash: request.contentHash,
+							servedAt: Date.now(),
+							fresh: true,
+							inconclusive: false,
+						},
+					})}\n`,
+				);
+			});
+		});
+		await new Promise<void>((resolve) =>
+			activeServer?.listen(diagnosticsIpcPathForCwd(cwd, pid), resolve),
+		);
+		const result = await requestWarmDiagnostics(
+			cwd,
+			pid,
+			"/x/app.ts",
+			"const x = 1;",
+			1000,
+		);
+		expect(result.available).toBe(true);
+		expect(result.available && result.response.contentHash).toBe(
+			contentHash("const x = 1;"),
+		);
+		removeTempDirSync(cwd);
+	});
+
+	it("rejects schema skew and fails open on errors", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-skew-"));
+		const pid = 99002;
+		activeServer = net.createServer((socket) => {
+			socket.once("data", () =>
+				socket.end(
+					`${JSON.stringify({
+						result: {
+							route: "diagnostics",
+							version: WARM_DIAGNOSTICS_SCHEMA_VERSION + 1,
+						},
+					})}\n`,
+				),
+			);
+		});
+		await new Promise<void>((resolve) =>
+			activeServer?.listen(diagnosticsIpcPathForCwd(cwd, pid), resolve),
+		);
+		await expect(
+			requestWarmDiagnostics(cwd, pid, "/x/app.ts", "x", 1000),
+		).resolves.toEqual({ available: false, reason: "schema-mismatch" });
+		removeTempDirSync(cwd);
+	});
+
+	it("fails open when the incumbent misses the deadline", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-timeout-"));
+		const pid = 99003;
+		activeServer = net.createServer(() => {
+			// Deliberately leave the request unanswered.
+		});
+		await new Promise<void>((resolve) =>
+			activeServer?.listen(diagnosticsIpcPathForCwd(cwd, pid), resolve),
+		);
+		await expect(
+			requestWarmDiagnostics(cwd, pid, "/x/app.ts", "x", 20),
+		).resolves.toEqual({ available: false, reason: "timeout" });
+		removeTempDirSync(cwd);
+	});
 });
 
 describe("ipcPathForCwd", () => {

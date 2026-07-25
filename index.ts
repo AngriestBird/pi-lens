@@ -64,6 +64,7 @@ import {
 	deregisterInstance,
 	registerInstance,
 } from "./clients/instance-registry.js";
+import { configureWarmAttach } from "./clients/warm-attach.js";
 import { checkCrossProcessLspBudget } from "./clients/lsp-budget.js";
 import { handleAgentEnd } from "./clients/runtime-agent-end.js";
 import {
@@ -1229,6 +1230,7 @@ export default function (pi: ExtensionAPI) {
 			// up to maxConcurrent redundant sweeps). Neither call is awaited —
 			// registry I/O and the reaper must never delay session start; both are
 			// internally best-effort (never throw).
+			await configureWarmAttach(ctx.cwd ?? process.cwd());
 			void registerInstance(ctx.cwd ?? process.cwd()).catch(() => {
 				// best-effort observability — never fail session_start over this
 			});

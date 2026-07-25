@@ -6,6 +6,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **Same-workspace warm LSP attach (opt-in soak)** (#822) — with `PI_LENS_WARM_ATTACH=1`, a new session discovers a PID-confirmed, heartbeat-fresh incumbent for the same workspace root and routes per-edit LSP diagnostic touches through its PID-scoped, versioned IPC endpoint instead of spawning a duplicate fleet. Content hashes and deadlines guard freshness; any IPC, schema, freshness, timeout, or incumbent-liveness failure permanently promotes the session to today's local LSP path. Decisions are logged as `lsp_warm_attach`.
+
 - **Resource-aware cross-process LSP budget policy** (closes #821) — budget pressure now shortens the current session's idle reset, lets pull-capable servers rely on pull diagnostics without a push-warm fallback, and can supplement the live-server ceiling with an opt-in aggregate RSS ceiling (`PI_LENS_LSP_BUDGET_RSS_MB`). Missing or stale resource samples fail open to count-only behavior; the existing kill switch disables every policy.
 
 - **Review-graph JavaScript/TypeScript import resolution now follows tsconfig project references** (#819) — a bare package import declared through `"references": [{"path": "../lib"}]` resolves to the referenced package's source entry after `paths` aliases and before workspace-package fallback, including transitive references with cycle protection and directory or direct-config targets.

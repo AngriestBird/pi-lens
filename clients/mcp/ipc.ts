@@ -18,6 +18,9 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { McpAnalyzeResult } from "./analyze.js";
+import type { LSPDiagnostic } from "../lsp/client.js";
+
+export const WARM_DIAGNOSTICS_SCHEMA_VERSION = 1;
 
 /**
  * Stable per-workspace endpoint path. The server (from its launch cwd) and the
@@ -38,6 +41,128 @@ export function ipcPathForCwd(cwd: string): string {
 		return `\\\\.\\pipe\\pi-lens-mcp-${hash}`;
 	}
 	return path.join(os.tmpdir(), `pi-lens-mcp-${hash}.sock`);
+}
+
+/** PID-scoped endpoint used by pi sessions. The legacy MCP analyze endpoint
+ * remains workspace-scoped for compatibility with the PostToolUse hook. */
+export function diagnosticsIpcPathForCwd(cwd: string, pid: number): string {
+	const base = ipcPathForCwd(cwd);
+	if (process.platform === "win32") return `${base}-diagnostics-${pid}`;
+	return base.replace(/\.sock$/, `-diagnostics-${pid}.sock`);
+}
+
+export interface WarmDiagnosticsRequest {
+	route: "diagnostics";
+	version: number;
+	file: string;
+	cwd: string;
+	content: string;
+	contentHash: string;
+	deadlineAt: number;
+}
+
+export interface WarmDiagnosticsResponse {
+	route: "diagnostics";
+	version: number;
+	diagnostics: LSPDiagnostic[];
+	contentHash: string;
+	servedAt: number;
+	fresh: boolean;
+	inconclusive: boolean;
+}
+
+export type WarmDiagnosticsFailureReason =
+	| "timeout"
+	| "ipc-error"
+	| "schema-mismatch"
+	| "stale-answer";
+
+export type WarmDiagnosticsResult =
+	| { available: true; response: WarmDiagnosticsResponse }
+	| { available: false; reason: WarmDiagnosticsFailureReason };
+
+export function contentHash(content: string): string {
+	return crypto.createHash("sha256").update(content).digest("hex");
+}
+
+export function requestWarmDiagnostics(
+	cwd: string,
+	incumbentPid: number,
+	file: string,
+	content: string,
+	timeoutMs: number,
+): Promise<WarmDiagnosticsResult> {
+	return new Promise((resolve) => {
+		let settled = false;
+		const finish = (value: WarmDiagnosticsResult): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			socket.destroy();
+			resolve(value);
+		};
+		const expectedHash = contentHash(content);
+		const deadlineAt = Date.now() + timeoutMs;
+		const socket = net.createConnection(
+			diagnosticsIpcPathForCwd(cwd, incumbentPid),
+		);
+		socket.setEncoding("utf8");
+		let buffer = "";
+		const timer = setTimeout(
+			() => finish({ available: false, reason: "timeout" }),
+			timeoutMs,
+		);
+		timer.unref();
+		socket.on("connect", () => {
+			const request: WarmDiagnosticsRequest = {
+				route: "diagnostics",
+				version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
+				file,
+				cwd,
+				content,
+				contentHash: expectedHash,
+				deadlineAt,
+			};
+			socket.write(`${JSON.stringify(request)}\n`);
+		});
+		socket.on("data", (chunk: string) => {
+			buffer += chunk;
+			const newline = buffer.indexOf("\n");
+			if (newline === -1) return;
+			try {
+				const message = JSON.parse(buffer.slice(0, newline)) as {
+					result?: WarmDiagnosticsResponse;
+					error?: string;
+				};
+				const result = message.result;
+				if (message.error || !result) {
+					finish({ available: false, reason: "ipc-error" });
+				} else if (
+					result.route !== "diagnostics" ||
+					result.version !== WARM_DIAGNOSTICS_SCHEMA_VERSION
+				) {
+					finish({ available: false, reason: "schema-mismatch" });
+				} else if (
+					!result.fresh ||
+					result.inconclusive ||
+					result.contentHash !== expectedHash ||
+					result.servedAt > deadlineAt
+				) {
+					finish({ available: false, reason: "stale-answer" });
+				} else {
+					finish({ available: true, response: result });
+				}
+			} catch {
+				finish({ available: false, reason: "schema-mismatch" });
+			}
+		});
+		socket.on("error", () =>
+			finish({ available: false, reason: "ipc-error" }),
+		);
+		socket.on("close", () =>
+			finish({ available: false, reason: "ipc-error" }),
+		);
+	});
 }
 
 /** One IPC request: analyze a file in the warm server process. */
