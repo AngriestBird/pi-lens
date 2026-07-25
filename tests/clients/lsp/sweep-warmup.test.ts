@@ -231,6 +231,15 @@ describe("runWorkspaceDiagnostics sweep-level warm-up behavior (#667)", () => {
  * warm-up, and if the retry also fails the server is reported in
  * `failedServerIds` and its files are skipped for the rest of the sweep and
  * reported UNCONFIRMED (not confirmed-clean).
+ *
+ * #799: marksman itself is now `silentOnClean: true` (`server-strategies.ts`)
+ * — a real timeout for it (no publish, notify succeeded) is CONFIRMED clean,
+ * not a failed warm-up (see `silent-clean-confirm.test.ts`). These "genuinely
+ * still cold" tests use a fictitious server id (`workspace-indexer-generic`,
+ * not present in `SERVER_DIAGNOSTIC_STRATEGIES`, so it falls back to
+ * `DEFAULT_STRATEGY` with `silentOnClean` unset) to keep exercising the
+ * distinct "the server truly never answered" failure mode the #744
+ * retry/skip machinery (and #799's negative cache) exists for.
  */
 function makeServer(id: string, ext: string, root: string) {
 	return {
@@ -314,14 +323,15 @@ describe("LSPService.ensureWarmForSweep warm-up retry/skip (#744)", () => {
 	it("retries exactly once when the first warm-up times out, then reports the still-cold server in failedServerIds", async () => {
 		const filePath = path.join(tmp, "a.md");
 		fs.writeFileSync(filePath, "# hi\n");
-		const marksman = makeServer("marksman", ".md", tmp);
+		const genericServer = makeServer("workspace-indexer-generic", ".md", tmp);
 		getServersForFileWithConfig.mockImplementation((fp: string) =>
-			fp.endsWith(".md") ? [marksman] : [],
+			fp.endsWith(".md") ? [genericServer] : [],
 		);
-		const { client, waitCalls } = makeControlledClient("marksman", tmp, [
-			"timeout",
-			"timeout",
-		]);
+		const { client, waitCalls } = makeControlledClient(
+			"workspace-indexer-generic",
+			tmp,
+			["timeout", "timeout"],
+		);
 		createLSPClient.mockResolvedValue(client);
 
 		const { LSPService } = await import("../../../clients/lsp/index.js");
@@ -332,7 +342,7 @@ describe("LSPService.ensureWarmForSweep warm-up retry/skip (#744)", () => {
 		});
 		expect(result.performedWarmup).toBe(true);
 		// Both attempts left the server cold → it's reported failed for this sweep.
-		expect(result.failedServerIds).toEqual(["marksman"]);
+		expect(result.failedServerIds).toEqual(["workspace-indexer-generic"]);
 		// Exactly two warm-up round trips: the initial attempt + one retry. Not
 		// one (no retry), not three (retry must fire at most once).
 		expect(waitCalls.length).toBe(2);
@@ -341,14 +351,15 @@ describe("LSPService.ensureWarmForSweep warm-up retry/skip (#744)", () => {
 	it("a server that warms on the retry participates normally (no failure, and a later warm-check is a no-op)", async () => {
 		const filePath = path.join(tmp, "b.md");
 		fs.writeFileSync(filePath, "# hi\n");
-		const marksman = makeServer("marksman", ".md", tmp);
+		const genericServer = makeServer("workspace-indexer-generic", ".md", tmp);
 		getServersForFileWithConfig.mockImplementation((fp: string) =>
-			fp.endsWith(".md") ? [marksman] : [],
+			fp.endsWith(".md") ? [genericServer] : [],
 		);
-		const { client, waitCalls } = makeControlledClient("marksman", tmp, [
-			"timeout",
-			"warm",
-		]);
+		const { client, waitCalls } = makeControlledClient(
+			"workspace-indexer-generic",
+			tmp,
+			["timeout", "warm"],
+		);
 		createLSPClient.mockResolvedValue(client);
 
 		const { LSPService } = await import("../../../clients/lsp/index.js");
@@ -372,16 +383,22 @@ describe("LSPService.ensureWarmForSweep warm-up retry/skip (#744)", () => {
 		fs.writeFileSync(path.join(tmp, "a.md"), "# a\n");
 		fs.writeFileSync(path.join(tmp, "b.md"), "# b\n");
 		fs.writeFileSync(path.join(tmp, "c.ts"), "const z = 1;\n");
-		const marksman = makeServer("marksman", ".md", tmp);
+		const genericServer = makeServer("workspace-indexer-generic", ".md", tmp);
 		const ts = makeServer("typescript", ".ts", tmp);
 		getServersForFileWithConfig.mockImplementation((fp: string) =>
-			fp.endsWith(".md") ? [marksman] : fp.endsWith(".ts") ? [ts] : [],
+			fp.endsWith(".md") ? [genericServer] : fp.endsWith(".ts") ? [ts] : [],
 		);
-		// marksman never warms (perpetual timeout); typescript warms immediately.
-		const marksmanClient = makeControlledClient("marksman", tmp, ["timeout"]);
+		// genericServer never warms (perpetual timeout); typescript warms immediately.
+		const genericClient = makeControlledClient(
+			"workspace-indexer-generic",
+			tmp,
+			["timeout"],
+		);
 		const tsClient = makeControlledClient("typescript", tmp, ["warm"]);
 		createLSPClient.mockImplementation(async (opts: { serverId: string }) =>
-			opts.serverId === "marksman" ? marksmanClient.client : tsClient.client,
+			opts.serverId === "workspace-indexer-generic"
+				? genericClient.client
+				: tsClient.client,
 		);
 
 		const { LSPService } = await import("../../../clients/lsp/index.js");
@@ -406,9 +423,198 @@ describe("LSPService.ensureWarmForSweep warm-up retry/skip (#744)", () => {
 			(cts as { skippedWarmupFailure?: boolean }).skippedWarmupFailure,
 		).toBeUndefined();
 
-		// marksman was touched ONLY by the two warm-up attempts — its per-file
+		// genericServer was touched ONLY by the two warm-up attempts — its per-file
 		// touches were skipped, so it never re-paid its timeout per markdown file
 		// (that would be 2 warm-up + 2 per-file = 4). This is the drag this fixes.
-		expect(marksmanClient.waitCalls.length).toBe(2);
+		expect(genericClient.waitCalls.length).toBe(2);
 	});
+});
+
+/**
+ * #799: a warm-up that ends inconclusive (initial + retry both leave a
+ * server cold) used to have NO memory across sweeps — a follow-up sweep in
+ * the same session re-paid the full initial-attempt + retry round trip all
+ * over again (observed live: "follow-up sweep re-paid everything"). The
+ * negative cache (`LSPState.demonstratedCold`) fixes that: a server known
+ * cold this session skips straight to the existing #744 group-skip
+ * accounting, and the cache is session-scoped — a brand new `LSPService`
+ * (what `resetLSPService` produces) starts clean.
+ */
+describe("LSPService.ensureWarmForSweep negative cache (#799)", () => {
+	let tmp: string;
+	beforeEach(() => {
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-warmup-799-"));
+		process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS = "50";
+		process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS = "0";
+	});
+	afterEach(() => {
+		delete process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS;
+		delete process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS;
+		fs.rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("a follow-up sweep against a server that stayed cold last time skips warm-up entirely instead of re-paying it", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const genericServer = makeServer("workspace-indexer-generic", ".md", tmp);
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".md") ? [genericServer] : [],
+		);
+		const { client, waitCalls } = makeControlledClient(
+			"workspace-indexer-generic",
+			tmp,
+			["timeout", "timeout"],
+		);
+		createLSPClient.mockResolvedValue(client);
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const first = await service.ensureWarmForSweep(filePath, { timeoutMs: 500 });
+		expect(first.performedWarmup).toBe(true);
+		expect(first.failedServerIds).toEqual(["workspace-indexer-generic"]);
+		expect(waitCalls.length).toBe(2); // initial attempt + retry
+
+		// A follow-up sweep (same session) must NOT re-run the warm-up round
+		// trip — it already knows this server is cold.
+		const second = await service.ensureWarmForSweep(filePath, {
+			timeoutMs: 500,
+		});
+		expect(second.performedWarmup).toBe(false);
+		expect(second.failedServerIds).toEqual(["workspace-indexer-generic"]);
+		expect(second.skippedFromCache).toBe(true);
+		expect(waitCalls.length).toBe(2); // unchanged — no new round trips
+	});
+
+	it("a server that later demonstrates readiness through an ordinary touch is removed from the cold set", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const genericServer = makeServer("workspace-indexer-generic", ".md", tmp);
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".md") ? [genericServer] : [],
+		);
+		const { client, waitCalls } = makeControlledClient(
+			"workspace-indexer-generic",
+			tmp,
+			["timeout", "timeout", "warm"],
+		);
+		createLSPClient.mockResolvedValue(client);
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const first = await service.ensureWarmForSweep(filePath, { timeoutMs: 500 });
+		expect(first.failedServerIds).toEqual(["workspace-indexer-generic"]);
+
+		// An ordinary confirmed touch (e.g. a real per-edit dispatch) proves the
+		// server is actually fine now — this must clear the negative cache.
+		await service.touchFile(filePath, "# hi\n", {
+			diagnostics: "document",
+			collectDiagnostics: true,
+			clientScope: "primary",
+			source: "test_recovery_touch",
+		});
+		expect(waitCalls.length).toBe(3);
+
+		// The next sweep must run the real check again (already-warm now, not
+		// cached-cold) — no warm-up round trip needed either way, but critically
+		// it must NOT report the server as still failed from the stale cache.
+		const second = await service.ensureWarmForSweep(filePath, {
+			timeoutMs: 500,
+		});
+		expect(second.failedServerIds).toEqual([]);
+		expect(waitCalls.length).toBe(3); // no extra round trip — already warm
+	});
+
+	it("a fresh LSPService instance (mirrors resetLSPService's session boundary) does not inherit the previous instance's cold cache", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const genericServer = makeServer("workspace-indexer-generic", ".md", tmp);
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".md") ? [genericServer] : [],
+		);
+		const { client, waitCalls } = makeControlledClient(
+			"workspace-indexer-generic",
+			tmp,
+			["timeout", "timeout"],
+		);
+		createLSPClient.mockResolvedValue(client);
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const firstSession = new LSPService();
+		const result = await firstSession.ensureWarmForSweep(filePath, {
+			timeoutMs: 500,
+		});
+		expect(result.failedServerIds).toEqual(["workspace-indexer-generic"]);
+		expect(waitCalls.length).toBe(2);
+
+		// `resetLSPService` discards the whole instance and creates a new one —
+		// simulate that boundary directly. The new instance's `demonstratedCold`
+		// must be empty, so it retries the warm-up fresh rather than trusting
+		// the previous session's negative cache.
+		const secondSession = new LSPService();
+		const again = await secondSession.ensureWarmForSweep(filePath, {
+			timeoutMs: 500,
+		});
+		expect(again.performedWarmup).toBe(true);
+		expect(again.skippedFromCache).toBeUndefined();
+		expect(waitCalls.length).toBe(4); // a fresh initial attempt + retry
+	});
+});
+
+/**
+ * #799: `ensureWarmForSweep`'s `warmupOverride` floor used to apply to EVERY
+ * attempt — the retry re-paid the full cold-start budget on top of the
+ * initial attempt, guaranteeing a 2x-budget burn for a server that simply
+ * never publishes (silentOnClean) as much as for a genuinely still-cold one.
+ * Only the FIRST attempt should get that floor; the retry should respect the
+ * server's own (much shorter) strategy wait.
+ */
+describe("ensureWarmForSweep warmupOverride floor scoping (#799)", () => {
+	let tmp: string;
+	beforeEach(() => {
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-warmup-floor-799-"));
+		process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS = "0";
+	});
+	afterEach(() => {
+		delete process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS;
+		fs.rmSync(tmp, { recursive: true, force: true });
+	});
+
+	it("floors the FIRST attempt to the requested warm-up budget, but the retry respects the server's own (shorter) strategy budget instead of re-flooring", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		// A fictitious server (not in SERVER_DIAGNOSTIC_STRATEGIES) falls back to
+		// DEFAULT_STRATEGY (aggregateWaitMs: 1500, no silentOnClean) — this
+		// isolates the floor-scoping behavior from #799's separate silent-clean
+		// confirm gate.
+		const genericServer = makeServer("workspace-indexer-generic", ".md", tmp);
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".md") ? [genericServer] : [],
+		);
+		const { client, waitCalls } = makeControlledClient(
+			"workspace-indexer-generic",
+			tmp,
+			["timeout", "timeout"],
+		);
+		createLSPClient.mockResolvedValue(client);
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		// Requested warm-up budget (50ms) is far below DEFAULT_STRATEGY's
+		// 1500ms aggregateWaitMs — attempt 1 must still floor UP to 1500ms (the
+		// cold-start protection #669 fixed), but attempt 2 must NOT re-floor:
+		// it should fall back to `Math.min(callerCap, strategyWait)` = 50ms.
+		await service.ensureWarmForSweep(filePath, { timeoutMs: 50 });
+		expect(waitCalls.length).toBe(2);
+		expect(waitCalls[0]!.ms).toBe(1500); // attempt 1: floored to strategyWait
+		expect(waitCalls[1]!.ms).toBe(50); // attempt 2: respects the caller cap
+	}, 10000);
 });
