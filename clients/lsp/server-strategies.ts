@@ -311,6 +311,18 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 			// once the index has already had a full aggregateWaitMs window.
 			workspaceIndexing: true,
 			workspaceIndexingWarmWaitMs: 250,
+			// #799: marksman is push-only and publishes NOTHING on a clean file —
+			// there is no pull fallback and no sync-confirm protocol (unlike
+			// typescript's tsserver commands), so a clean markdown file's touch
+			// waits its full budget with zero signal either way. Marking it
+			// `silentOnClean` lets the generic push-only clean-confirm gate
+			// (`touchFile`, the `classifyCascadeWaitTier`-driven fallback next to
+			// the tsserver sync-confirm block) treat "no publish within budget,
+			// notify succeeded" as CONFIRMED clean instead of inconclusive/timed
+			// out — closing the observed 2x20s-per-sweep burn on clean markdown
+			// (evidence: agents.md timed out at 20009ms/20014ms on both the
+			// warm-up attempt and its retry, with zero diagnostics either time).
+			silentOnClean: true,
 		},
 	};
 

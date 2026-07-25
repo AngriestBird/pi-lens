@@ -122,6 +122,21 @@ export interface LSPState {
 	 * `ensureWarmForSweep`): only a confirmed round trip counts as "warm".
 	 */
 	demonstratedReady: Set<string>;
+	/**
+	 * #799: key "serverId:root" (same identity as {@link demonstratedReady})
+	 * of every server whose `ensureWarmForSweep` warm-up ended inconclusive
+	 * this session (initial attempt + retry both left it without a confirmed
+	 * round trip — the same condition that populates `failedServerIds`). A
+	 * later sweep in the SAME session sees this and skips straight to the
+	 * caller's group-skip accounting instead of re-paying the warm-up
+	 * round trip (and its retry) all over again. Session-scoped like
+	 * `demonstratedReady`: a fresh `LSPService` (created by
+	 * `resetLSPService`) starts with an empty set, so a new session always
+	 * retries fresh. A key is removed the moment that server demonstrates
+	 * readiness through ANY path (see `markDemonstratedReadyKey`), so a
+	 * server that recovers later in the same session is never stuck cold.
+	 */
+	demonstratedCold: Set<string>;
 }
 
 const BROKEN_BASE_COOLDOWN_MS = 15_000;
@@ -392,6 +407,21 @@ export interface LSPTouchFileOptions {
 	 * and keeps the pre-existing ceiling-only semantics exactly as-is.
 	 */
 	warmupOverride?: boolean;
+	/**
+	 * #799: which `warmupOverride` attempt this touch is (1 = the first
+	 * round trip against a cold server, 2 = `ensureWarmForSweep`'s single
+	 * retry). Only the FIRST attempt gets the full cold-start floor
+	 * (`Math.max(callerCap, strategyWait)`) — a genuinely slow-to-index
+	 * server (tsserver-style) deserves that full window once. A retry
+	 * attempt already got that window and re-flooring it to another 20s
+	 * would silently double-pay the ceiling for a server whose real issue
+	 * is that it's `silentOnClean` and simply never publishes (marksman) —
+	 * that retry instead respects the server's own (much shorter) strategy
+	 * budget, same as a normal steady-state touch. Undefined/1 keeps
+	 * today's floor-every-attempt behavior; only `ensureWarmForSweep`'s
+	 * retry sets this to 2.
+	 */
+	warmupAttempt?: number;
 }
 
 export interface LSPWorkspaceDiagnosticResult {
@@ -741,6 +771,7 @@ export class LSPService {
 			inFlight: new Map(),
 			clientSpawnedAt: new Map(),
 			demonstratedReady: new Set(),
+			demonstratedCold: new Set(),
 		};
 	}
 
@@ -844,6 +875,10 @@ export class LSPService {
 
 	private markDemonstratedReadyKey(key: string): void {
 		this.state.demonstratedReady.add(key);
+		// #799: readiness through ANY path supersedes an earlier cold verdict —
+		// a server that recovers later in the session must not stay stuck in
+		// the negative cache.
+		this.state.demonstratedCold.delete(key);
 	}
 
 	/**
@@ -1695,6 +1730,14 @@ export class LSPService {
 					// if the strategy already wants more) rather than the normal
 					// ceiling — see `warmupOverride` doc on `LSPTouchFileOptions`.
 					if (options.warmupOverride) {
+						// #799: only the FIRST warm-up attempt for a cold server gets the
+						// floor — see the `warmupAttempt` doc on `LSPTouchFileOptions`.
+						if ((options.warmupAttempt ?? 1) > 1) {
+							return Math.min(
+								callerCap,
+								strategyWait > 0 ? strategyWait : callerCap,
+							);
+						}
 						return Math.max(callerCap, strategyWait > 0 ? strategyWait : 0);
 					}
 					return Math.min(callerCap, strategyWait > 0 ? strategyWait : callerCap);
@@ -1725,17 +1768,22 @@ export class LSPService {
 
 			// #707: evaluate the tsserver sync clean-confirm gate BEFORE the wait
 			// starts. Cheap synchronous gates first (notify succeeded, collecting,
-			// primary scope, strategy marked silentOnClean — only classic
-			// typescript-language-server carries that flag today), then the live
-			// capability-snapshot tier classification (`classifyCascadeWaitTier`,
-			// which also excludes native-ts7 via `launchVariant`). Non-typescript
-			// and pull-capable servers fail the synchronous `silentOnClean` gate and
-			// pay ZERO extra work — not even the snapshot read.
+			// primary scope, `serverId === "typescript"` — the sync commands this
+			// races are tsserver-specific protocol extensions, not a generic
+			// push-only capability, so #799 giving other servers (marksman) the
+			// SAME `silentOnClean` marker must not route them into a sync attempt
+			// that can never succeed for them), then the live capability-snapshot
+			// tier classification (`classifyCascadeWaitTier`, which also excludes
+			// native-ts7 via `launchVariant`). Every other server fails this
+			// synchronous gate and pays ZERO extra work — not even the snapshot
+			// read; a non-typescript `silentOnClean` server instead gets the
+			// generic (non-racing) clean-confirm fallback further below.
 			if (
 				!notifyWriteTimedOut &&
 				options.collectDiagnostics === true &&
 				clientScope === "primary" &&
 				spawned.length === 1 &&
+				spawned[0].client.serverId === "typescript" &&
 				getStrategy(spawned[0].client.serverId).silentOnClean === true
 			) {
 				try {
@@ -2018,6 +2066,65 @@ export class LSPService {
 				}
 			} catch {
 				// Any failure here falls through to today's inconclusive behavior.
+			}
+		}
+
+		// #799: generalize the "silent-clean push-only" confirm beyond
+		// typescript's active sync-command race above. That mechanism is
+		// TS-specific (`attemptTsserverSyncDiagnostics` races an actual
+		// `typescript.tsserverRequest` — no equivalent protocol exists for
+		// e.g. marksman) and is now scoped to `serverId === "typescript"`
+		// only (see the gate above), so it never fires for another
+		// `silentOnClean` server. This is the generic fallback for those
+		// servers: if the wait ran its full budget with a successful notify
+		// write and nothing published, and the live capability snapshot
+		// classifies this touch as tier3-silent (push-only + `silentOnClean`,
+		// #458's `classifyCascadeWaitTier`), that is not "still working" —
+		// `silentOnClean` means by definition this server publishes NOTHING
+		// on a clean transition, so a timeout under those conditions IS the
+		// confirmed-clean answer. `!tsserverSyncEligible` keeps this from
+		// ever double-deciding typescript's own touches — when the sync race
+		// was attempted and failed/was unavailable, typescript's existing
+		// "falls through to inconclusive, unchanged" contract (#707) is
+		// preserved exactly; typescript touches that never enter that gate
+		// (e.g. `collectDiagnostics: false`, like `ensureWarmForSweep`'s own
+		// warm-up call) are still eligible here as a genuine bonus fix. Scoped
+		// to `clientScope === "primary"`/`spawned.length === 1` exactly like
+		// the sync-eligible gate above (and like `ensureWarmForSweep`'s own
+		// `clientScope: "primary"` warm-up touch) so a multi-server
+		// with-auxiliary/all touch — where a partial timeout must stay
+		// cautious per the doc below — is never affected.
+		if (
+			diagnosticsTimedOut &&
+			!notifyWriteTimedOut &&
+			!tsserverSyncEligible &&
+			clientScope === "primary" &&
+			spawned.length === 1 &&
+			getStrategy(spawned[0].client.serverId).silentOnClean === true
+		) {
+			try {
+				const snapshots = await this.getCapabilitySnapshots(filePath);
+				if (
+					classifyCascadeWaitTier(this, filePath, snapshots) === "tier3-silent"
+				) {
+					diagnosticsTimedOut = false;
+					if (collected !== undefined) collected = mergeLspDiagnostics([]);
+					logLatency({
+						type: "phase",
+						phase: "lsp_silent_clean_confirm",
+						filePath: normalizedPath,
+						durationMs: Date.now() - startedAt,
+						metadata: {
+							source,
+							clientScope,
+							diagnosticsMode,
+							serverId: spawned[0].client.serverId,
+						},
+					});
+				}
+			} catch {
+				// Fail-safe: leave `diagnosticsTimedOut` as-is — today's inconclusive
+				// behavior.
 			}
 		}
 
@@ -2888,7 +2995,15 @@ export class LSPService {
 	async ensureWarmForSweep(
 		representativeFile: string,
 		options: { timeoutMs?: number; signal?: AbortSignal } = {},
-	): Promise<{ performedWarmup: boolean; failedServerIds: string[] }> {
+	): Promise<{
+		performedWarmup: boolean;
+		failedServerIds: string[];
+		/** #799: true when `failedServerIds` came from the negative cache
+		 * (`demonstratedCold`) rather than a fresh warm-up attempt — lets a
+		 * caller/log distinguish "we already knew this was cold" from "this
+		 * attempt just failed". */
+		skippedFromCache?: boolean;
+	}> {
 		if (this.checkDestroyed() || options.signal?.aborted) {
 			return { performedWarmup: false, failedServerIds: [] };
 		}
@@ -2914,6 +3029,41 @@ export class LSPService {
 			(key) => key === undefined || this.state.demonstratedReady.has(key),
 		);
 		if (alreadyWarm) return { performedWarmup: false, failedServerIds: [] };
+
+		// #799: negative cache. Every server that still needs warming (not
+		// already `demonstratedReady`) was ALSO left cold by a warm-up earlier
+		// this session (`demonstratedCold`, populated below when a warm-up's
+		// initial attempt + retry both fail) — skip straight to the group-skip
+		// accounting the caller already has for `failedServerIds`, instead of
+		// re-paying the initial-attempt + retry round trip all over again. A
+		// MIXED group (one server cached cold, another never tried) still runs
+		// the real warm-up — the never-tried server deserves its fair shot, and
+		// `touchFile`'s multi-server spawn already covers both in one call.
+		const cachedColdServerIds: string[] = [];
+		let allNonWarmCached = true;
+		for (let i = 0; i < servers.length; i++) {
+			const key = keys[i];
+			if (key === undefined || this.state.demonstratedReady.has(key)) continue;
+			if (this.state.demonstratedCold.has(key)) {
+				cachedColdServerIds.push(servers[i].id);
+			} else {
+				allNonWarmCached = false;
+			}
+		}
+		if (allNonWarmCached && cachedColdServerIds.length > 0) {
+			logLatency({
+				type: "phase",
+				phase: "lsp_sweep_warmup_cached_cold",
+				filePath: representativeFile,
+				durationMs: 0,
+				metadata: { serverIds: cachedColdServerIds },
+			});
+			return {
+				performedWarmup: false,
+				failedServerIds: cachedColdServerIds,
+				skippedFromCache: true,
+			};
+		}
 
 		let content: string;
 		try {
@@ -2968,6 +3118,9 @@ export class LSPService {
 				// warm-state `aggregateWaitMs` (e.g. 1000ms for typescript) instead
 				// of the requested 20000ms.
 				warmupOverride: true,
+				// #799: only attempt 1 gets the cold-start floor — see the
+				// `warmupAttempt` doc on `LSPTouchFileOptions`.
+				warmupAttempt: attempt,
 			});
 			await (options.signal
 				? Promise.race([
@@ -3034,6 +3187,16 @@ export class LSPService {
 				durationMs: 0,
 				metadata: { failedServerIds, timeoutMs },
 			});
+			// #799: record the negative cache so a LATER sweep this session
+			// skips straight past re-paying this warm-up (initial + retry).
+			// Cleared automatically the moment the server demonstrates
+			// readiness through any path (`markDemonstratedReadyKey`).
+			for (let i = 0; i < servers.length; i++) {
+				const key = keys[i];
+				if (key !== undefined && failedServerIds.includes(servers[i].id)) {
+					this.state.demonstratedCold.add(key);
+				}
+			}
 		}
 		return { performedWarmup: true, failedServerIds };
 	}
@@ -3450,6 +3613,11 @@ export class LSPService {
 							durationMs: 0,
 							metadata: {
 								failedServerIds: warmup.failedServerIds,
+								// #799: distinguishes a fresh warm-up failure from a
+								// negative-cache hit (this sweep never re-attempted warm-up
+								// at all — it was already known cold from earlier this
+								// session).
+								skippedFromCache: warmup.skippedFromCache ?? false,
 								skippedFiles: group.files.length,
 							},
 						});
