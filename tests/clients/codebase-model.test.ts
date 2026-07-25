@@ -8,6 +8,7 @@ import {
 	saveCodebaseModel,
 } from "../../clients/codebase-model.js";
 import type { FunctionCallGraph } from "../../clients/call-graph.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 // ── Fixture ───────────────────────────────────────────────────────────────────
 
@@ -29,7 +30,7 @@ function makeGraph(
 
 let tmpDir: string;
 beforeEach(() => { tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-model-")); });
-afterEach(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+afterEach(() => { removeTempDirSync(tmpDir); });
 
 // ── buildCodebaseModel ────────────────────────────────────────────────────────
 

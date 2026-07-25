@@ -11,6 +11,7 @@ import {
 	loadPiLensProjectConfig,
 	resetProjectLensConfigCache,
 } from "../../clients/project-lens-config.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 const dirs: string[] = [];
 
@@ -29,7 +30,7 @@ function writeConfig(dir: string, value: unknown): void {
 
 afterEach(() => {
 	resetProjectLensConfigCache();
-	for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+	for (const dir of dirs.splice(0)) removeTempDirSync(dir);
 });
 
 describe("nested project mutation controls (#792)", () => {

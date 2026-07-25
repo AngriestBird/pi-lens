@@ -15,6 +15,7 @@ import {
 	ipcPathForCwd,
 	requestWarmAnalyze,
 } from "../../../clients/mcp/ipc.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 const SENTINEL = {
 	filePath: "/x/app.ts",
@@ -81,14 +82,14 @@ describe("requestWarmAnalyze", () => {
 		expect(result).toEqual(SENTINEL);
 		expect(received).toEqual({ file: "/x/app.ts", cwd });
 
-		fs.rmSync(cwd, { recursive: true, force: true });
+		removeTempDirSync(cwd);
 	});
 
 	it("resolves undefined when no server is listening (cold fallback)", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-none-"));
 		const result = await requestWarmAnalyze(cwd, "/x/app.ts", 2000);
 		expect(result).toBeUndefined();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		removeTempDirSync(cwd);
 	});
 
 	it("resolves undefined when the server returns an error", async () => {
@@ -108,6 +109,6 @@ describe("requestWarmAnalyze", () => {
 
 		const result = await requestWarmAnalyze(cwd, "/x/app.ts");
 		expect(result).toBeUndefined();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		removeTempDirSync(cwd);
 	});
 });

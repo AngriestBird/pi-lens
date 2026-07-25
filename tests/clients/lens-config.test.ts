@@ -16,6 +16,7 @@ import {
 	resolvePiLensFlagWithSource,
 } from "../../clients/lens-config.js";
 import { EMPTY_PROJECT_CONFIG } from "../../clients/project-lens-config.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 const tmpDirs: string[] = [];
 let previousConfigPath: string | undefined;
@@ -46,7 +47,7 @@ afterEach(() => {
 	if (previousConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
 	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
 	for (const dir of tmpDirs.splice(0)) {
-		fs.rmSync(dir, { recursive: true, force: true });
+		removeTempDirSync(dir);
 	}
 });
 

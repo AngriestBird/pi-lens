@@ -48,6 +48,27 @@ async function runSessionStart(
 ) {
 	const env = setupTestEnvironment("pi-lens-runtime-session-");
 	setup?.(env.tmpDir);
+	// #810 root cause: in "full" mode with a package.json present,
+	// scheduleStartupScans (clients/runtime-session.ts) fires "todo" and
+	// "word-index" as fire-and-forget background tasks (setImmediate) that do
+	// REAL, unmocked fs reads against env.tmpDir (collectTodoBaselineItems /
+	// collectWordIndexDocs walk the project for real — unlike knip/jscpd/
+	// ast-grep-exports/etc, which this test stubs out entirely). Earlier
+	// versions of this helper returned as soon as handleSessionStart's own
+	// promise resolved and let the caller's `finally { env.cleanup() }` run
+	// immediately after — but those two tasks were often still mid-read at
+	// that point, so the recursive rm raced an open file handle inside
+	// tmpDir and threw EPERM on Windows (deterministic here, not a load
+	// flake). Track the real in-flight-scan set via
+	// markStartupScanInFlight/clearStartupScanInFlight (the same primitive
+	// production code uses, `clients/runtime-coordinator.ts`) and wait for
+	// "todo"/"word-index" to clear before returning, so cleanup never races
+	// them. call-graph/codebase-model are deliberately excluded — they're
+	// staggered 5+ seconds out by design (see taskDeferMsByName) and would
+	// slow every test down for no correctness benefit; by the time they
+	// fire (in a later test's turn), a stale/missing analysisRoot is a
+	// harmless no-op/caught-error path, not a handle race.
+	const inFlightScans = new Set<string>();
 	const notify = vi.fn();
 	const scanDirectory = vi.fn(() => ({ items: [] }));
 	const scanFile = vi.fn((): unknown[] => []);
@@ -78,8 +99,12 @@ async function runSessionStart(
 			runtime: {
 				sessionGeneration: 1,
 				isCurrentSession: () => true,
-				markStartupScanInFlight: () => {},
-				clearStartupScanInFlight: () => {},
+				markStartupScanInFlight: (name: string) => {
+					inFlightScans.add(name);
+				},
+				clearStartupScanInFlight: (name: string) => {
+					inFlightScans.delete(name);
+				},
 				complexityBaselines: new Map(),
 				resetForSession: () => {},
 				projectRoot: "",
@@ -138,8 +163,25 @@ async function runSessionStart(
 			resetLSPService,
 		} as any);
 
+		// The returned `cleanup` waits for the tmpDir-touching background scans
+		// to settle (see the #810 comment above `inFlightScans`) before deleting
+		// the directory — deliberately NOT awaited here at return time, since
+		// several tests assert on the deferred/not-yet-called state of these
+		// same background tasks immediately after `runSessionStart` resolves.
+		const cleanup = async (): Promise<void> => {
+			await vi.waitFor(
+				() => {
+					if (inFlightScans.has("todo") || inFlightScans.has("word-index")) {
+						throw new Error("background startup scans still touching tmpDir");
+					}
+				},
+				{ timeout: 2000 },
+			);
+			env.cleanup();
+		};
+
 		return {
-			env,
+			env: { ...env, cleanup },
 			notify,
 			scanDirectory,
 			scanFile,
@@ -330,7 +372,7 @@ describe("runtime-session notifications", () => {
 			expect(ensureTool).not.toHaveBeenCalled();
 			expect(resetLSPService).toHaveBeenCalledWith({ fast: true, reason: "session_start" });
 		} finally {
-			env.cleanup();
+			await env.cleanup();
 		}
 	});
 
@@ -356,7 +398,7 @@ describe("runtime-session notifications", () => {
 			expect(scanDirectory).not.toHaveBeenCalled();
 			expect(ensureTool).not.toHaveBeenCalled();
 		} finally {
-			env.cleanup();
+			await env.cleanup();
 		}
 	});
 
@@ -377,7 +419,7 @@ describe("runtime-session notifications", () => {
 			expect(scanFile).not.toHaveBeenCalled();
 			await vi.waitFor(() => expect(scanFile).toHaveBeenCalled());
 		} finally {
-			env.cleanup();
+			await env.cleanup();
 		}
 	});
 
@@ -414,7 +456,7 @@ describe("runtime-session notifications", () => {
 					),
 				).toBe(true);
 			} finally {
-				env.cleanup();
+				await env.cleanup();
 			}
 		} finally {
 			delete process.env.PI_LENS_FORCE_SLOW_FS;
@@ -470,7 +512,7 @@ describe("runtime-session notifications", () => {
 				).toBe(true);
 				expect(mockTouchFile).not.toHaveBeenCalled();
 			} finally {
-				env.cleanup();
+				await env.cleanup();
 			}
 		} finally {
 			delete process.env.PI_SUBAGENT_CHILD;
@@ -504,7 +546,7 @@ describe("runtime-session notifications", () => {
 					),
 				).toBe(false);
 			} finally {
-				env.cleanup();
+				await env.cleanup();
 			}
 		} finally {
 			delete process.env.PI_SUBAGENT_CHILD;
@@ -749,7 +791,7 @@ describe("runtime-session notifications", () => {
 			expect(knipAnalyze).toHaveBeenCalledTimes(1);
 			expect(jscpdEnsure).toHaveBeenCalledTimes(1);
 		} finally {
-			env.cleanup();
+			await env.cleanup();
 		}
 	});
 });

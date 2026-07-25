@@ -24,6 +24,7 @@ import type {
 	ProjectDiagnosticsDeltaReport,
 	ProjectDiagnosticsSnapshot,
 } from "../../clients/project-diagnostics/types.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 let tmp: string;
 let previousDataDir: string | undefined;
@@ -37,7 +38,7 @@ beforeEach(() => {
 afterEach(() => {
 	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 	else process.env.PILENS_DATA_DIR = previousDataDir;
-	fs.rmSync(tmp, { recursive: true, force: true });
+	removeTempDirSync(tmp);
 });
 
 function snapshot(

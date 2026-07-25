@@ -13,6 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLSPClient } from "../../../clients/lsp/client.js";
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_SERVER_PATH = path.join(
@@ -262,7 +263,7 @@ describe("LSP Client Integration — UTF-8 position encoding (#269)", () => {
 		}
 		client = undefined;
 		proc = undefined;
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		removeTempDirSync(tmpDir);
 		if (prevEnv === undefined) delete process.env.FAKE_LSP_POSITION_ENCODING;
 		else process.env.FAKE_LSP_POSITION_ENCODING = prevEnv;
 	});

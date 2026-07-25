@@ -13,6 +13,7 @@ import {
 	type FunctionCallGraph,
 } from "../../clients/call-graph.js";
 import type { Symbol, SymbolRef } from "../../clients/symbol-types.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -26,7 +27,7 @@ function ref(callerFile: string, refName: string, line = 5): SymbolRef {
 
 let tmpDir: string;
 beforeEach(() => { tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cg-")); });
-afterEach(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+afterEach(() => { removeTempDirSync(tmpDir); });
 
 // ── buildCallGraph ─────────────────────────────────────────────────────────────
 

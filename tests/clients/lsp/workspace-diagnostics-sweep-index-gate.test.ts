@@ -25,6 +25,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTempDirSync } from "../test-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -52,7 +53,7 @@ describe("runWorkspaceDiagnostics — sweep-scoped index gate for workspaceIndex
 		createLSPClient.mockReset();
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wsd-indexgate-"));
 	});
-	afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+	afterEach(() => removeTempDirSync(tmp));
 
 	it("gives the first same-sweep markdown file the full budget and later ones the short warm wait, while a genuine later timeout still reports timedOut", async () => {
 		const names = ["a.md", "b.md", "c.md"];

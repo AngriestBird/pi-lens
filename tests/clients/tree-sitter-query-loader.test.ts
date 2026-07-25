@@ -7,6 +7,7 @@ import {
 	isDisabledQueryFilePath,
 	TreeSitterQueryLoader,
 } from "../../clients/tree-sitter-query-loader.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 const tmpDirs: string[] = [];
 
@@ -24,7 +25,7 @@ function makeTempRulesRoot(): string {
 
 afterAll(() => {
 	for (const dir of tmpDirs) {
-		fs.rmSync(dir, { recursive: true, force: true });
+		removeTempDirSync(dir);
 	}
 });
 

@@ -15,6 +15,7 @@ import {
 	getWordIndexMaxFilesDerived,
 } from "../../clients/project-scale.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 const ENV_NAME = "PI_LENS_MAX_PROJECT_FILES";
 
@@ -30,7 +31,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	removeTempDirSync(tmpDir);
 	if (previousEnv === undefined) delete process.env[ENV_NAME];
 	else process.env[ENV_NAME] = previousEnv;
 	_resetProjectScaleBaseForTests();

@@ -20,6 +20,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTempDirSync } from "../test-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -85,7 +86,7 @@ describe("touchFile silent-clean push-only confirm (#799)", () => {
 		createLSPClient.mockReset();
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-silent-clean-"));
 	});
-	afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+	afterEach(() => removeTempDirSync(tmp));
 
 	it("(a) a silent-clean push-only server (marksman) resolves quickly as CONFIRMED clean (0 diagnostics), not inconclusive", async () => {
 		const filePath = path.join(tmp, "a.md");

@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTempDirSync } from "../test-utils.js";
 
 const handleSessionStart = vi.hoisted(() =>
 	vi.fn(async (_deps: unknown) => undefined),
@@ -78,7 +79,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	removeTempDirSync(tmpDir);
 });
 
 describe("runSessionStart", () => {

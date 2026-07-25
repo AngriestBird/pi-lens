@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTempDirSync } from "./test-utils.js";
 
 // The NDJSON disposition logger is isTestMode-gated (like every pi-lens
 // logger), so asserting the fields markDisposition passes requires mocking
@@ -54,7 +55,7 @@ afterEach(() => {
 	else process.env.PI_LENS_BUS_PUBLISH = originalBusEnv;
 	_resetDispositionPublishForTests();
 	_resetBusPublishForTests();
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	removeTempDirSync(tmpDir);
 });
 
 function cwd(): string {

@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { TreeSitterClient } from "../../clients/tree-sitter-client.js";
 import { TreeSitterQueryLoader } from "../../clients/tree-sitter-query-loader.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 const tmpDirs: string[] = [];
 
@@ -29,7 +30,7 @@ async function getCQuery(id: string) {
 
 afterAll(() => {
 	for (const dir of tmpDirs) {
-		fs.rmSync(dir, { recursive: true, force: true });
+		removeTempDirSync(dir);
 	}
 });
 

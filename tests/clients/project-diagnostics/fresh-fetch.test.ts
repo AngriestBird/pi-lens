@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BootstrapClients } from "../../../clients/bootstrap.js";
 import { fetchFreshProjectDiagnostics } from "../../../clients/project-diagnostics/fresh-fetch.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 // fetchFreshProjectDiagnostics calls each client through the plain
 // `BootstrapClients` interface, so a hand-rolled stub (not a real client
@@ -19,7 +20,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(tmp, { recursive: true, force: true });
+	removeTempDirSync(tmp);
 });
 
 function makeCacheManager() {

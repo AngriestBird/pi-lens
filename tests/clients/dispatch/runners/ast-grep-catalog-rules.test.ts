@@ -23,6 +23,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeTempDirSync } from "../../test-utils.js";
 
 const RULES_DIR = path.join(process.cwd(), "rules", "ast-grep-rules", "rules");
 
@@ -231,11 +232,7 @@ function runAstGrep(
 			fired: stdout.length > 0,
 		};
 	} finally {
-		try {
-			fs.rmSync(dir, { recursive: true, force: true });
-		} catch {
-			// best-effort cleanup
-		}
+		removeTempDirSync(dir);
 	}
 }
 
@@ -356,11 +353,7 @@ d("catalog rules with `fix:` field — CLI rewrite end-to-end", () => {
 				} catch (err) {
 					stdout = (err as { stdout?: string }).stdout ?? "";
 				} finally {
-					try {
-						fs.rmSync(dir, { recursive: true, force: true });
-					} catch {
-						// best-effort
-					}
+					removeTempDirSync(dir);
 				}
 				// `--json=compact` emits a single JSON array of findings.
 				// The first finding carries the `replacement` we want to

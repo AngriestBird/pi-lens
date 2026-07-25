@@ -6,6 +6,7 @@ import {
 	readJsonCache,
 	readJsonCacheAsync,
 } from "../../clients/json-cache-read.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 let tmpDir: string;
 
@@ -14,7 +15,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	removeTempDirSync(tmpDir);
 });
 
 function writeFile(name: string, content: string): string {

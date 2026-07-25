@@ -22,6 +22,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTempDirSync } from "../test-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -75,7 +76,7 @@ describe("LSPService.ensureWarmForSweep (#667)", () => {
 		createLSPClient.mockReset();
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-warmup-"));
 	});
-	afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+	afterEach(() => removeTempDirSync(tmp));
 
 	it("performs exactly one warm-up round trip against a cold server, then treats it as warm (pure decision-logic: fake client state)", async () => {
 		const filePath = path.join(tmp, "a.ts");
@@ -166,7 +167,7 @@ describe("runWorkspaceDiagnostics sweep-level warm-up behavior (#667)", () => {
 		createLSPClient.mockReset();
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-warmup-sweep-"));
 	});
-	afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+	afterEach(() => removeTempDirSync(tmp));
 
 	it("a cold sweep pays exactly one extra warm-up round trip before the per-file loop, on top of the normal per-file touches", async () => {
 		const names = ["a.ts", "b.ts", "c.ts"];
@@ -317,7 +318,7 @@ describe("LSPService.ensureWarmForSweep warm-up retry/skip (#744)", () => {
 	afterEach(() => {
 		delete process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS;
 		delete process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS;
-		fs.rmSync(tmp, { recursive: true, force: true });
+		removeTempDirSync(tmp);
 	});
 
 	it("retries exactly once when the first warm-up times out, then reports the still-cold server in failedServerIds", async () => {
@@ -453,7 +454,7 @@ describe("LSPService.ensureWarmForSweep negative cache (#799)", () => {
 	afterEach(() => {
 		delete process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS;
 		delete process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS;
-		fs.rmSync(tmp, { recursive: true, force: true });
+		removeTempDirSync(tmp);
 	});
 
 	it("a follow-up sweep against a server that stayed cold last time skips warm-up entirely instead of re-paying it", async () => {
@@ -584,7 +585,7 @@ describe("ensureWarmForSweep warmupOverride floor scoping (#799)", () => {
 	});
 	afterEach(() => {
 		delete process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS;
-		fs.rmSync(tmp, { recursive: true, force: true });
+		removeTempDirSync(tmp);
 	});
 
 	it("floors the FIRST attempt to the requested warm-up budget, but the retry respects the server's own (shorter) strategy budget instead of re-flooring", async () => {

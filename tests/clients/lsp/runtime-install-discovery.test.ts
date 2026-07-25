@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeTempDirSync } from "../test-utils.js";
 
 // Drive the candidate-resolution chain without touching disk/toolchains: mock
 // the launch primitive (reject-all → we just capture every candidate tried) and
@@ -155,7 +156,7 @@ describe("runtime-install / discovery server wiring (#241)", () => {
 			expect(res).toBeDefined();
 		} finally {
 			process.chdir(oldCwd);
-			fs.rmSync(tmp, { recursive: true, force: true });
+			removeTempDirSync(tmp);
 			vi.mocked(ensureTool).mockReset();
 			vi.mocked(ensureTool).mockResolvedValue(undefined);
 		}
@@ -210,8 +211,7 @@ describe("runtime-install / discovery server wiring (#241)", () => {
 				`--jvm-arg=-javaagent:${jar}`,
 			);
 		} finally {
-			const fs = await import("node:fs");
-			fs.rmSync(tmp, { recursive: true, force: true });
+			removeTempDirSync(tmp);
 		}
 	});
 });

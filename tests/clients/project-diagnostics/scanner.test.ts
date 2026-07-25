@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { scanProjectDiagnostics } from "../../../clients/project-diagnostics/scanner.js";
 import { loadProjectDiagnosticsSnapshot } from "../../../clients/project-diagnostics/cache.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 let tmp: string;
 
@@ -12,7 +13,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(tmp, { recursive: true, force: true });
+	removeTempDirSync(tmp);
 });
 
 describe("scanProjectDiagnostics home ceiling (#747/#250)", () => {

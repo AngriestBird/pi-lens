@@ -27,6 +27,7 @@ import {
 	rotateLogIfNeeded,
 } from "../../clients/log-cleanup.js";
 import { createNdjsonLogger } from "../../clients/ndjson-logger.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -36,7 +37,7 @@ beforeEach(() => {
 	dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-logclean-"));
 });
 afterEach(() => {
-	fs.rmSync(dir, { recursive: true, force: true });
+	removeTempDirSync(dir);
 });
 
 function write(name: string, ageDays = 0): string {
@@ -139,7 +140,7 @@ describe("getManagedLogFiles — auto-derivation", () => {
 			createNdjsonLogger({ filePath: path.join(otherDir, "elsewhere.log") });
 			expect(getManagedLogFiles(dir)).not.toContain("elsewhere.log");
 		} finally {
-			fs.rmSync(otherDir, { recursive: true, force: true });
+			removeTempDirSync(otherDir);
 		}
 	});
 

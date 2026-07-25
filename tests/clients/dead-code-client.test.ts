@@ -20,7 +20,7 @@ import {
 	getDeadCodeClients,
 	type DeadCodeResult,
 } from "../../clients/dead-code-client.js";
-import { setupTestEnvironment } from "./test-utils.js";
+import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
 const REPO_ROOT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -130,7 +130,7 @@ describe("PythonDeadCodeClient resolveProjectRoot (pin, refs #625)", () => {
 			const client = new PythonDeadCodeClient() as unknown as ResolveProjectRoot;
 			expect(client.resolveProjectRoot(nested, home)).toBeNull();
 		} finally {
-			fs.rmSync(tmpRoot, { recursive: true, force: true });
+			removeTempDirSync(tmpRoot);
 		}
 	});
 
@@ -146,7 +146,7 @@ describe("PythonDeadCodeClient resolveProjectRoot (pin, refs #625)", () => {
 			const client = new PythonDeadCodeClient() as unknown as ResolveProjectRoot;
 			expect(client.resolveProjectRoot(home, home)).toBeNull();
 		} finally {
-			fs.rmSync(tmpRoot, { recursive: true, force: true });
+			removeTempDirSync(tmpRoot);
 		}
 	});
 
@@ -180,7 +180,7 @@ describe("PythonDeadCodeClient resolveProjectRoot (pin, refs #625)", () => {
 			const resolved = client.resolveProjectRoot(nested);
 			expect(resolved).not.toBe(nested);
 		} finally {
-			fs.rmSync(tmpRoot, { recursive: true, force: true });
+			removeTempDirSync(tmpRoot);
 		}
 	});
 });

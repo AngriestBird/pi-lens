@@ -27,6 +27,7 @@ import {
 	writeFileAtomic,
 	writeFileAtomicAsync,
 } from "../../clients/atomic-write.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 let dir: string;
 
@@ -48,7 +49,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(dir, { recursive: true, force: true });
+	removeTempDirSync(dir);
 });
 
 describe("writeFileAtomic (sync)", () => {

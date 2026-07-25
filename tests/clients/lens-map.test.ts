@@ -18,6 +18,7 @@ import type {
 	ReviewGraphEdge,
 	ReviewGraphNode,
 } from "../../clients/review-graph/types.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 // aggregateGraphToFiles keys files via normalizeMapKey (same as the rest of the
 // review-graph stack) — on Windows that resolves a relative path like "a.ts"
@@ -615,14 +616,10 @@ describe("generateLensMap", () => {
 	afterEach(() => {
 		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 		else process.env.PILENS_DATA_DIR = previousDataDir;
-		// Retry cleanup: generateLensMap can still be flushing writes into the
-		// data dir when afterEach runs, which surfaces as ENOTEMPTY on Linux.
-		fs.rmSync(tmpDir, {
-			recursive: true,
-			force: true,
-			maxRetries: 5,
-			retryDelay: 100,
-		});
+		// generateLensMap can still be flushing writes into the data dir when
+		// afterEach runs, which surfaces as ENOTEMPTY on Linux — the shared
+		// helper's retry+warn (#810) covers this instead of a local retry.
+		removeTempDirSync(tmpDir);
 	});
 
 	it("writes a self-contained HTML file under the project data dir's reports/ folder", async () => {

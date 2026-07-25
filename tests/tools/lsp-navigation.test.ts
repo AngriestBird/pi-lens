@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTempDirSync } from "../clients/test-utils.js";
 
 const mocked = vi.hoisted(() => ({
 	service: null as unknown,
@@ -624,7 +625,7 @@ describe("lsp_navigation tool", () => {
 					.workspaceSymbol,
 			).toHaveBeenCalledWith("normalizeMapKey", filePath);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -659,7 +660,7 @@ describe("lsp_navigation tool", () => {
 					.workspaceSymbol,
 			).toHaveBeenCalledTimes(2);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -713,7 +714,7 @@ describe("lsp_navigation tool", () => {
 			expect(String(result.content[0]?.text)).toContain("normalizeReport");
 			expect(String(result.content[0]?.text)).toContain('"kind":"method"');
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -741,7 +742,7 @@ describe("lsp_navigation tool", () => {
 				strategy: "word-boundary",
 			});
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -764,7 +765,7 @@ describe("lsp_navigation tool", () => {
 				(mocked.service as { references: ReturnType<typeof vi.fn> }).references,
 			).toHaveBeenCalledWith(filePath, 0, 17);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -790,7 +791,7 @@ describe("lsp_navigation tool", () => {
 				strategy: "case-insensitive",
 			});
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -815,7 +816,7 @@ describe("lsp_navigation tool", () => {
 				(mocked.service as { references: ReturnType<typeof vi.fn> }).references,
 			).toHaveBeenCalledWith(filePath, 0, expectedCharacter0);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -842,7 +843,7 @@ describe("lsp_navigation tool", () => {
 				strategy: "fallback",
 			});
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -872,7 +873,7 @@ describe("lsp_navigation tool", () => {
 			).toHaveBeenCalledWith(filePath, 0, 2);
 			expect(result.details?.columnResolution).toBeUndefined();
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -896,7 +897,7 @@ describe("lsp_navigation tool", () => {
 				"references from usage sites can be partial",
 			);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -932,7 +933,7 @@ describe("lsp_navigation tool", () => {
 				other: 0,
 			});
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -986,7 +987,7 @@ describe("lsp_navigation tool", () => {
 					.getDiagnostics,
 			).toHaveBeenCalledWith(filePath);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -1032,7 +1033,7 @@ describe("lsp_navigation tool", () => {
 			expect(String(result.content[0]?.text)).toContain("typescript");
 			expect(result.details?.resultCount).toBe(1);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -1089,7 +1090,7 @@ describe("lsp_navigation tool", () => {
 				"const newName = 1;\nconsole.log(newName);\n",
 			);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 });

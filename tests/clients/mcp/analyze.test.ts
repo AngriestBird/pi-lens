@@ -13,6 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DispatchLatencyReport } from "../../../clients/dispatch/dispatcher.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 vi.mock("../../../clients/dispatch/dispatcher.js", async (importOriginal) => {
 	const mod =
@@ -118,7 +119,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	removeTempDirSync(tmpDir);
 });
 
 describe("analyzeFile", () => {

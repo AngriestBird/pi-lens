@@ -25,6 +25,7 @@ import {
 	WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 	type WorkspaceDiagnosticsCacheEntry,
 } from "../../../clients/lsp/workspace-diagnostics-cache.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 let tmp: string;
 
@@ -36,7 +37,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(tmp, { recursive: true, force: true });
+	removeTempDirSync(tmp);
 });
 
 function makeEntry(
@@ -301,7 +302,7 @@ describe("runWorkspaceDiagnostics cache integration (#671)", () => {
 		tmpSweep = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-sweep-cache-"));
 		fs.mkdirSync(path.join(tmpSweep, ".pi-lens"));
 	});
-	afterEach(() => fs.rmSync(tmpSweep, { recursive: true, force: true }));
+	afterEach(() => removeTempDirSync(tmpSweep));
 
 	it("a second identical sweep performs zero fresh diagnostics-wait calls (full cache hit)", async () => {
 		const names = ["a.ts", "b.ts", "c.ts"];

@@ -3,12 +3,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TodoScanner } from "../../clients/todo-scanner.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 const tempDirs: string[] = [];
 
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) {
-		fs.rmSync(dir, { recursive: true, force: true });
+		removeTempDirSync(dir);
 	}
 });
 
