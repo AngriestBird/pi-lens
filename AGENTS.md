@@ -433,7 +433,12 @@ avtc-pi-subagent's `PI_SUBAGENT_CHILD_AGENT` + `PI_SUBAGENT_PARENT_PID` pair
 (both non-empty — requiring the pair, not either var alone, guards against a
 false positive from an unrelated tool; #507). `getSubagentIdentity()` reports
 which vocabulary matched (`marker: "pi-subagents" | "avtc-pi-subagent"`),
-surfaced in the `subagent_light_mode` latency phase. All of this was built on
+plus the best-effort run ID, agent name, and validated positive parent PID.
+`registerInstance()` persists that identity under optional `InstanceEntry.subagent`
+(`agentName` becomes the registry-facing `agentType`) for concurrency-profile
+analysis (#822); primary sessions omit the field entirely, and loose registry
+reads preserve compatibility with entries written before it existed. The
+identity is also surfaced in the `subagent_light_mode` latency phase. All of this was built on
 reverse-engineered facts about those extensions and the pi SDK — nobody has
 promised us these stay true across releases. `docs/subagent-compat.md`
 records the exact pinned contracts (file + version last verified) and is
