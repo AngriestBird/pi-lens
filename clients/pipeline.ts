@@ -231,14 +231,14 @@ export interface PipelineContext {
 		writeIndex: number;
 	};
 	/** pi.getFlag accessor */
-	getFlag: (name: string) => boolean | string | undefined;
+	getFlag: (name: string, filePath?: string) => boolean | string | undefined;
 	/**
 	 * Optional: resolve which config tier (cli/project/global/default) decided
 	 * a mutation flag's value, for provenance in dbg/skip logs (#792). Absent
 	 * ⇒ logs omit the `source=` suffix (existing tests that don't wire this
 	 * through keep passing unchanged).
 	 */
-	getFlagSource?: (name: string) => PiLensFlagSource;
+	getFlagSource?: (name: string, filePath?: string) => PiLensFlagSource;
 	/** Debug logger */
 	dbg: (msg: string) => void;
 	/**
@@ -575,7 +575,7 @@ export async function runAutofix(
 	skipReason?: string;
 }> {
 	const { biomeClient, ruffClient, fixedThisTurn } = deps;
-	const noAutofix = getFlag("no-autofix");
+	const noAutofix = getFlag("no-autofix", filePath);
 	let fixedCount = 0;
 	const autofixTools: string[] = [];
 	const attemptedTools: string[] = [];
@@ -596,7 +596,7 @@ export async function runAutofix(
 	}
 
 	if (noAutofix) {
-		const source = getFlagSource?.("no-autofix");
+		const source = getFlagSource?.("no-autofix", filePath);
 		dbg(
 			`autofix: skipped for ${filePath} (--no-autofix${source ? `, source=${source}` : ""})`,
 		);
@@ -1118,7 +1118,7 @@ export async function runPipeline(
 	let formattersUsed: string[] = [];
 	let formatFailures: string[] = [];
 	const piChangedFiles = new Set<string>();
-	const autoformatDisabled = !!getFlag("no-autoformat");
+	const autoformatDisabled = !!getFlag("no-autoformat", filePath);
 	const immediateFormat = !!getFlag("immediate-format");
 	const formatDeferred =
 		!autoformatDisabled && !immediateFormat && !!fileContent;
@@ -1146,7 +1146,7 @@ export async function runPipeline(
 	} else if (formatDeferred) {
 		dbg(`autoformat: deferred until agent_end for ${filePath}`);
 	} else if (autoformatDisabled) {
-		const source = getFlagSource?.("no-autoformat");
+		const source = getFlagSource?.("no-autoformat", filePath);
 		dbg(
 			`autoformat: skipped for ${filePath} (--no-autoformat${source ? `, source=${source}` : ""})`,
 		);

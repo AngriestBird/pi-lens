@@ -45,9 +45,10 @@
  * higher precedence than) the root config's `ignore` patterns.
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { parseEnabledShape } from "./config-enabled-shape.js";
-import { walkUpDirs } from "./path-utils.js";
+import { isAtOrAboveHomeDir, walkUpDirs } from "./path-utils.js";
 
 const PROJECT_CONFIG_BASENAMES = [".pi-lens.json", "pi-lens.json"];
 
@@ -107,6 +108,10 @@ interface DiscoveryCacheEntry {
 /** Cache by absolute config path; we read each candidate's mtime before reuse. */
 const configCache = new Map<string, CacheEntry>();
 const discoveryCache = new Map<string, DiscoveryCacheEntry>();
+const inDirDiscoveryCache = new Map<
+	string,
+	{ dirMtimeMs: number; info: PiLensProjectConfigFileInfo | undefined }
+>();
 const warnedInvalidConfigs = new Set<string>();
 
 /**
@@ -134,6 +139,7 @@ export function loadPiLensProjectConfig(
 export function resetProjectLensConfigCache(): void {
 	configCache.clear();
 	discoveryCache.clear();
+	inDirDiscoveryCache.clear();
 	warnedInvalidConfigs.clear();
 }
 
@@ -154,10 +160,67 @@ export interface PiLensProjectConfigFileInfo {
 export function findPiLensConfigInDir(
 	dir: string,
 ): PiLensProjectConfigFileInfo | undefined {
+	const resolvedDir = path.resolve(dir);
+	const dirMtimeMs = safeDirMtimeMs(resolvedDir);
+	const cached = inDirDiscoveryCache.get(resolvedDir);
+	if (cached?.dirMtimeMs === dirMtimeMs) {
+		if (!cached.info) return undefined;
+		const stat = safeFileStat(cached.info.path);
+		if (stat?.isFile()) return { ...cached.info, mtimeMs: stat.mtimeMs };
+	}
 	for (const name of PROJECT_CONFIG_BASENAMES) {
-		const candidate = path.join(dir, name);
+		const candidate = path.join(resolvedDir, name);
 		const stat = safeFileStat(candidate);
-		if (stat?.isFile()) return { path: candidate, dir, mtimeMs: stat.mtimeMs };
+		if (stat?.isFile()) {
+			const info = {
+				path: candidate,
+				dir: resolvedDir,
+				mtimeMs: stat.mtimeMs,
+			};
+			inDirDiscoveryCache.set(resolvedDir, { dirMtimeMs, info });
+			return info;
+		}
+	}
+	inDirDiscoveryCache.set(resolvedDir, { dirMtimeMs, info: undefined });
+	return undefined;
+}
+
+export type ProjectMutationFlag =
+	| "no-autoformat"
+	| "no-autofix"
+	| "lens-actionable-warning-autofix";
+
+export interface NestedProjectMutationValue {
+	value: boolean;
+	dir: string;
+}
+
+/**
+ * Find the closest config, between an edited file and the project root, that
+ * explicitly defines one mutation flag. The walk uses the shared primitive
+ * and refuses to inspect HOME or any ancestor of HOME.
+ */
+export function findNestedProjectMutationValue(
+	name: ProjectMutationFlag,
+	editedFilePath: string,
+	projectRoot: string,
+	homeDir = os.homedir(),
+): NestedProjectMutationValue | undefined {
+	const root = path.resolve(projectRoot);
+	const start = path.dirname(path.resolve(editedFilePath));
+	for (const dir of walkUpDirs(start)) {
+		if (isAtOrAboveHomeDir(dir, homeDir)) break;
+		const rel = path.relative(root, dir);
+		if (rel.startsWith("..") || path.isAbsolute(rel)) break;
+		const config = loadPiLensConfigInDir(dir);
+		const enabled =
+			name === "no-autoformat"
+				? config.format?.enabled
+				: name === "no-autofix"
+					? config.autofix?.enabled
+					: config.actionableWarnings?.autoFix?.enabled;
+		if (enabled !== undefined) return { value: enabled, dir };
+		if (dir === root) break;
 	}
 	return undefined;
 }

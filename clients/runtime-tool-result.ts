@@ -45,9 +45,9 @@ interface ToolResultEvent {
 
 interface ToolResultDeps {
 	event: ToolResultEvent;
-	getFlag: (name: string) => boolean | string | undefined;
+	getFlag: (name: string, filePath?: string) => boolean | string | undefined;
 	/** Optional: provenance for dbg/skip logs — see `PipelineContext["getFlagSource"]` (#792). */
-	getFlagSource?: (name: string) => PiLensFlagSource;
+	getFlagSource?: (name: string, filePath?: string) => PiLensFlagSource;
 	dbg: (msg: string) => void;
 	runtime: RuntimeCoordinator;
 	cacheManager: CacheManager;
@@ -670,7 +670,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 
 	if (
 		!result.isError &&
-		!getFlag("no-autoformat") &&
+		!getFlag("no-autoformat", filePath) &&
 		!getFlag("immediate-format") &&
 		nodeFs.existsSync(filePath)
 	) {

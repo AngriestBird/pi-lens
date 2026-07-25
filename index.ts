@@ -454,27 +454,43 @@ export default function (pi: ExtensionAPI) {
 		"lens-actionable-warning-autofix",
 		"lens-actionable-warning-all",
 	]);
-	function getLensFlag(name: string): boolean | string | undefined {
+	function getLensFlag(
+		name: string,
+		editedFilePath?: string,
+	): boolean | string | undefined {
 		const cliValue = globalConfigOnlyFlags.has(name)
 			? undefined
 			: pi.getFlag(name);
 		const projectConfig = loadPiLensProjectConfig(runtime.projectRoot);
-		return resolvePiLensFlag(name, cliValue, globalConfig, projectConfig);
+		return resolvePiLensFlag(
+			name,
+			cliValue,
+			globalConfig,
+			projectConfig,
+			editedFilePath,
+			runtime.projectRoot,
+		);
 	}
 
 	// #792: sibling of getLensFlag reporting WHICH config tier decided the
 	// value, so mutation-skip dbg lines can name it (e.g. "source=project")
 	// instead of a bare boolean. Threaded to pipeline/agent_end via the
 	// optional `getFlagSource` field — zero effect on getLensFlag itself.
-	function getLensFlagSource(name: string): ReturnType<
+	function getLensFlagSource(name: string, editedFilePath?: string): ReturnType<
 		typeof resolvePiLensFlagWithSource
 	>["source"] {
 		const cliValue = globalConfigOnlyFlags.has(name)
 			? undefined
 			: pi.getFlag(name);
 		const projectConfig = loadPiLensProjectConfig(runtime.projectRoot);
-		return resolvePiLensFlagWithSource(name, cliValue, globalConfig, projectConfig)
-			.source;
+		return resolvePiLensFlagWithSource(
+			name,
+			cliValue,
+			globalConfig,
+			projectConfig,
+			editedFilePath,
+			runtime.projectRoot,
+		).source;
 	}
 
 	let lensEnabled = !getLensFlag("no-lens");
@@ -1460,8 +1476,10 @@ export default function (pi: ExtensionAPI) {
 				await loadBootstrapClients();
 			return await handleToolResult({
 				event: event as any,
-				getFlag: (name: string) => getLensFlag(name),
-				getFlagSource: (name: string) => getLensFlagSource(name),
+				getFlag: (name: string, filePath?: string) =>
+					getLensFlag(name, filePath),
+				getFlagSource: (name: string, filePath?: string) =>
+					getLensFlagSource(name, filePath),
 				dbg,
 				runtime,
 				cacheManager,
@@ -1563,8 +1581,10 @@ export default function (pi: ExtensionAPI) {
 			await flushDebouncedToolResults();
 			await handleAgentEnd({
 				ctxCwd: ctx.cwd,
-				getFlag: (name: string) => getLensFlag(name),
-				getFlagSource: (name: string) => getLensFlagSource(name),
+				getFlag: (name: string, filePath?: string) =>
+					getLensFlag(name, filePath),
+				getFlagSource: (name: string, filePath?: string) =>
+					getLensFlagSource(name, filePath),
 				notify: (msg, level) => ctx.ui.notify(msg, level),
 				dbg,
 				runtime,
