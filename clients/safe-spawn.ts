@@ -15,6 +15,8 @@
  */
 
 import { type SpawnOptions, spawn, spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { logLatency } from "./latency-logger.js";
 import { startSpawnUsageSampler } from "./resource-sampler.js";
 
@@ -130,6 +132,181 @@ export function buildWindowsShellCommand(
 }
 
 // ============================================================================
+// WINDOWS COMMAND RESOLUTION (#817)
+//
+// CodeQL flagged clients/safe-spawn.ts:192 (js/command-line-injection #17/#19,
+// js/shell-command-injection-from-environment #18): the old code always routed
+// EVERY Windows spawn through `cmd.exe /d /s /c <hand-built string>`, string-
+// concatenating caller-tainted `command`/`args` into a shell command line.
+// `%` cannot be escaped on a /c line (it expands even inside double quotes)
+// and cmd's quote-state toggling can defeat `""` doubling — the escaping was
+// unsound, not just a CodeQL false positive.
+//
+// The fix resolves `command` ourselves (a `where`-equivalent PATH + PATHEXT
+// walk) and only falls back to the cmd.exe wrapper for `.cmd`/`.bat` shims,
+// which cannot run without it. `.exe`/`.com` — the overwhelming majority of
+// spawns (sg, biome, ruff, git, node, where.exe...) — spawn directly with
+// `shell: false` and a real args array: no command line is ever built, so
+// there is nothing for cmd.exe to reinterpret.
+// ============================================================================
+
+interface ResolvedWindowsCommand {
+	/** Absolute path to the resolved executable. */
+	resolvedPath: string;
+	/** Lowercased extension including the leading dot, e.g. ".exe", ".cmd". */
+	ext: string;
+}
+
+/**
+ * Cached PATH + PATHEXT resolution results, keyed by
+ * `${command}\0${PATH}\0${cwd}` so a changed PATH or cwd never hits a stale
+ * entry. Session-lived (matches this repo's other resolution caches, e.g.
+ * `clients/workspace-topology.ts`'s `resetWorkspaceTopology`) — cleared via
+ * `resetSafeSpawnWindowsCommandCache()`, wired into `handleSessionStart`.
+ */
+const windowsCommandCache = new Map<string, ResolvedWindowsCommand | null>();
+
+/** Reset hook for session start — see `clients/runtime-session.ts`. */
+export function resetSafeSpawnWindowsCommandCache(): void {
+	windowsCommandCache.clear();
+}
+
+function getPathExts(): string[] {
+	const raw = process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD";
+	return raw
+		.split(";")
+		.map((ext) => ext.trim().toLowerCase())
+		.filter(Boolean);
+}
+
+function statIsFile(candidate: string): boolean {
+	try {
+		return fs.statSync(candidate).isFile();
+	} catch {
+		return false;
+	}
+}
+
+function resolveWindowsCommandUncached(
+	command: string,
+	cwd: string | undefined,
+): ResolvedWindowsCommand | null {
+	const pathExts = getPathExts();
+	const existingExt = path.extname(command).toLowerCase();
+	const hasKnownExt = pathExts.includes(existingExt);
+
+	const tryBase = (base: string): ResolvedWindowsCommand | null => {
+		if (hasKnownExt) {
+			return statIsFile(base) ? { resolvedPath: base, ext: existingExt } : null;
+		}
+		for (const ext of pathExts) {
+			const candidate = base + ext;
+			if (statIsFile(candidate)) return { resolvedPath: candidate, ext };
+		}
+		return null;
+	};
+
+	const hasPathSep = /[\\/]/.test(command);
+	if (hasPathSep || path.isAbsolute(command)) {
+		const base = path.isAbsolute(command)
+			? command
+			: path.resolve(cwd ?? process.cwd(), command);
+		return tryBase(base);
+	}
+
+	const pathDirs = (process.env.PATH ?? process.env.Path ?? "").split(";");
+	for (const dir of pathDirs) {
+		if (!dir) continue;
+		const found = tryBase(path.join(dir, command));
+		if (found) return found;
+	}
+	return null;
+}
+
+/** Cached `where`-equivalent: resolve `command` to a real file via PATH + PATHEXT. */
+function resolveWindowsCommand(
+	command: string,
+	cwd: string | undefined,
+): ResolvedWindowsCommand | null {
+	const cacheKey = `${command}\0${process.env.PATH ?? process.env.Path ?? ""}\0${cwd ?? ""}`;
+	if (windowsCommandCache.has(cacheKey)) {
+		return windowsCommandCache.get(cacheKey) ?? null;
+	}
+	const resolved = resolveWindowsCommandUncached(command, cwd);
+	windowsCommandCache.set(cacheKey, resolved);
+	return resolved;
+}
+
+/**
+ * Characters that make a cmd.exe `/c` command line unsound to build from
+ * caller-tainted input: `%`/`!` expand even inside double quotes and cannot
+ * be escaped on a `/c` line (only `%%` works, and only in batch files), `"`
+ * can toggle cmd's quote-parsing state past the doubling convention, and
+ * CR/LF let an argument masquerade as a second command. Reject rather than
+ * attempt to escape these (#817) — silent stripping would just move the
+ * unsoundness, not remove it.
+ */
+const CMD_UNSAFE_CHARS = /["%!\r\n]/;
+
+/** First caller-tainted value (command or an arg) that can't be safely
+ * passed through the .cmd/.bat cmd.exe wrapper, or `undefined` if all clear. */
+function findCmdUnsafeValue(
+	command: string,
+	args: string[],
+): string | undefined {
+	if (CMD_UNSAFE_CHARS.test(command)) return command;
+	return args.find((arg) => CMD_UNSAFE_CHARS.test(arg));
+}
+
+function synthesizeEnoentError(command: string): NodeJS.ErrnoException {
+	// Shaped like Node's native `spawn <cmd> ENOENT` error (message/code/
+	// syscall/path) so existing `err.message.includes("ENOENT")` /
+	// `err.code === "ENOENT"` call sites (e.g. sg-runner.ts, lsp/launch.ts)
+	// keep working now that Windows resolution happens before spawn instead
+	// of inside cmd.exe.
+	const err = new Error(`spawn ${command} ENOENT`) as NodeJS.ErrnoException;
+	err.code = "ENOENT";
+	err.syscall = "spawn";
+	err.path = command;
+	return err;
+}
+
+/**
+ * One-shot `chcp 65001` before the FIRST direct (.exe/.com) Windows spawn.
+ *
+ * Mechanism: `chcp` mutates the code page of the console the current process
+ * is attached to, and that mutation persists for the console's lifetime —
+ * it is not per-child-process state. The old cmd.exe-wrapper path re-ran
+ * `chcp 65001 >nul 2>&1 &&` on every single spawn, which was always
+ * redundant after the first call; memoizing here (module-level, once per
+ * process) is a strict improvement, not a behavior change. Runs through a
+ * tiny pinned cmd.exe spawn (same `%SystemRoot%\System32\cmd.exe` pin as
+ * `killTree` below) with a static, hardcoded command string — no caller-
+ * tainted data anywhere near it.
+ */
+let utf8ConsoleCodePageApplied = false;
+
+function ensureUtf8ConsoleCodePageOnce(): void {
+	if (utf8ConsoleCodePageApplied) return;
+	utf8ConsoleCodePageApplied = true;
+	try {
+		const cmdExe = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`;
+		spawnSync(cmdExe, ["/d", "/s", "/c", "chcp 65001 >nul 2>&1"], {
+			shell: false,
+			windowsHide: true,
+		});
+	} catch {
+		// Best-effort: worst case is non-ASCII tool output mis-decoded, not a
+		// spawn failure — never let this block the real spawn.
+	}
+}
+
+/** Test-only: allow tests to force the chcp one-shot to run again. */
+export function resetUtf8ConsoleCodePageStateForTests(): void {
+	utf8ConsoleCodePageApplied = false;
+}
+
+// ============================================================================
 // ASYNC VERSION (Recommended - Non-blocking)
 // ============================================================================
 
@@ -175,29 +352,80 @@ export async function safeSpawnAsync(
 		let timedOut = false;
 		let killed = false;
 
-		// Spawn the process (non-blocking). On Windows, invoke cmd.exe explicitly
-		// for PATH-resolved commands and .cmd/.bat wrappers. Keeping Node's
-		// `shell` option false is important: shell:true concatenates tainted
+		// Spawn the process (non-blocking). Keeping Node's `shell` option false
+		// is important on every path here: shell:true concatenates tainted
 		// arguments into a command line before spawning (CodeQL #17 / CWE-78).
+		//
+		// On Windows (#817): resolve `command` ourselves (PATH + PATHEXT walk,
+		// cached) instead of always routing through cmd.exe.
+		//   - .exe/.com  → spawn the resolved path directly, args stay a real
+		//     array, no shell involved at all (injection-proof).
+		//   - .cmd/.bat  → these are scripts cmd.exe must interpret (npm shims
+		//     are the common case), so keep the wrapper, but pin the
+		//     interpreter to %SystemRoot%\System32\cmd.exe (never trust
+		//     ComSpec — CodeQL #18) and VALIDATE args instead of trying to
+		//     escape them: reject anything containing `"`, `%`, `!`, or CR/LF
+		//     rather than spawn with an unsound escape.
+		//   - unresolvable → synthesize an ENOENT-shaped error instead of
+		//     letting cmd.exe report "not recognized" from inside a shell.
 		const isWindows = process.platform === "win32";
-		// Prefix the Windows command with `chcp 65001` to force UTF-8 output.
-		// Without this, tools such as sg, biome, and ruff are decoded using the
-		// system code page (CP850/CP1252/CP936/CP932).
-		const spawnCmd = isWindows
-			? process.env.ComSpec || process.env.COMSPEC || "cmd.exe"
-			: command;
-		const spawnArgs = isWindows
-			? ["/d", "/s", "/c", buildWindowsShellCommand(command, args)]
-			: args;
+		let spawnCmd = command;
+		let spawnArgs = args;
+		let windowsVerbatimArguments = false;
+		let resolutionError: Error | undefined;
+
+		if (isWindows) {
+			const resolved = resolveWindowsCommand(command, options?.cwd);
+			if (!resolved) {
+				resolutionError = synthesizeEnoentError(command);
+			} else if (resolved.ext === ".cmd" || resolved.ext === ".bat") {
+				// Validate the RESOLVED path (what actually gets interpolated
+				// into the /c line via buildWindowsShellCommand below), not the
+				// caller's original `command` string — a resolved path
+				// containing `%`/`!` would otherwise reach the shell unvalidated.
+				const unsafeValue = findCmdUnsafeValue(resolved.resolvedPath, args);
+				if (unsafeValue !== undefined) {
+					resolutionError = new Error(
+						`Refusing to spawn "${resolved.resolvedPath}" via cmd.exe: ` +
+							`${JSON.stringify(unsafeValue)} contains a character ("` +
+							`, %, !, or CR/LF) that cannot be safely escaped on a ` +
+							`cmd.exe /c command line (CWE-78, #817). Rename/quote the ` +
+							"value or invoke the tool without going through cmd.exe.",
+					);
+				} else {
+					// Pin the interpreter — never trust ComSpec/COMSPEC (#18): an
+					// env-controlled ComSpec could point anywhere.
+					spawnCmd = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`;
+					spawnArgs = [
+						"/d",
+						"/s",
+						"/c",
+						buildWindowsShellCommand(resolved.resolvedPath, args),
+					];
+					// The `/c` payload is already quoted by buildWindowsShellCommand.
+					// Prevent Node from escaping those quotes a second time when it
+					// builds cmd.exe's Windows command line.
+					windowsVerbatimArguments = true;
+				}
+			} else {
+				// .exe / .com: direct spawn, no cmd.exe anywhere in the picture.
+				ensureUtf8ConsoleCodePageOnce();
+				spawnCmd = resolved.resolvedPath;
+				spawnArgs = args;
+			}
+		}
+
+		if (resolutionError) {
+			resolve({ stdout: "", stderr: "", status: null, error: resolutionError });
+			return;
+		}
+
 		const child = spawn(spawnCmd, spawnArgs, {
 			cwd: options?.cwd,
 			env: { ...process.env, ...options?.env },
 			windowsHide: true,
 			shell: false,
-			// The `/c` payload is already quoted by buildWindowsShellCommand.
-			// Prevent Node from escaping those quotes a second time when it builds
-			// cmd.exe's Windows command line.
-			windowsVerbatimArguments: isWindows,
+			windowsVerbatimArguments,
 		});
 
 		// #620: bracket this spawn's lifetime with a short-interval CPU/RSS poll
@@ -390,32 +618,24 @@ export async function findCommandAsync(
 // ============================================================================
 
 /**
- * Escape an argument for Windows shell execution.
- * Handles spaces, quotes, $variables, and special characters.
- */
-function escapeWindowsArg(arg: string): string {
-	if (arg.includes("$")) {
-		return `'${arg.replace(/'/g, "'\\''")}'`;
-	}
-	if (!/[\s"]/.test(arg)) return arg;
-	return `"${arg.replace(/"/g, '""')}"`;
-}
-
-/**
- * Construct a command string for Windows shell execution.
- */
-function buildWindowsCommand(command: string, args: string[]): string {
-	const escapedArgs = args.map(escapeWindowsArg).join(" ");
-	return `${command} ${escapedArgs}`;
-}
-
-/**
  * ⚠️ DEPRECATED: Use safeSpawnAsync instead.
  *
  * This blocks the entire Node.js event loop until the process exits.
  * If the process hangs, pi will freeze.
  *
- * Kept for backward compatibility during migration.
+ * Kept for backward compatibility during migration (today's only caller:
+ * `test-runner-client.ts`'s synchronous pytest-on-PATH probe, called from a
+ * sync detection path with many sync callers/tests — not a trivial async
+ * migration, see #817 follow-up discussion).
+ *
+ * #817: the Windows branch used to build a `cmd.exe`/`shell:true` command
+ * line from unvalidated caller input (CodeQL #17/#18/#19), same unsoundness
+ * as the async version had. It now shares the exact same resolution/
+ * validation seams as `safeSpawnAsync` — `resolveWindowsCommand` (cached
+ * PATH+PATHEXT walk), direct `spawnSync(resolvedPath, args, { shell: false })`
+ * for `.exe`/`.com`, the pinned-cmd.exe wrapper + `findCmdUnsafeValue`
+ * rejection for `.cmd`/`.bat`, and a synthesized ENOENT when unresolvable.
+ * No `shell: true` anywhere.
  */
 export function safeSpawn(
 	command: string,
@@ -423,14 +643,59 @@ export function safeSpawn(
 	options?: SafeSpawnOptions,
 ): SpawnResult {
 	if (process.platform === "win32") {
-		// shell:true here is justified only because this deprecated sync function
-		// predates safeSpawnAsync. It will be eliminated when safeSpawn is removed.
-		const fullCommand = buildWindowsCommand(command, args);
-		const result = spawnSync(fullCommand, {
+		const resolved = resolveWindowsCommand(command, options?.cwd);
+		if (!resolved) {
+			return {
+				stdout: "",
+				stderr: "",
+				status: null,
+				error: synthesizeEnoentError(command),
+			};
+		}
+
+		let spawnCmd: string;
+		let spawnArgs: string[];
+		let windowsVerbatimArguments = false;
+
+		if (resolved.ext === ".cmd" || resolved.ext === ".bat") {
+			// Validate the value that actually gets interpolated into the /c
+			// line — the RESOLVED path, not the caller's original (possibly
+			// extensionless) `command` string — plus every arg.
+			const unsafeValue = findCmdUnsafeValue(resolved.resolvedPath, args);
+			if (unsafeValue !== undefined) {
+				return {
+					stdout: "",
+					stderr: "",
+					status: null,
+					error: new Error(
+						`Refusing to spawn "${resolved.resolvedPath}" via cmd.exe: ` +
+							`${JSON.stringify(unsafeValue)} contains a character ("` +
+							`, %, !, or CR/LF) that cannot be safely escaped on a ` +
+							`cmd.exe /c command line (CWE-78, #817). Rename/quote the ` +
+							"value or invoke the tool without going through cmd.exe.",
+					),
+				};
+			}
+			spawnCmd = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`;
+			spawnArgs = [
+				"/d",
+				"/s",
+				"/c",
+				buildWindowsShellCommand(resolved.resolvedPath, args),
+			];
+			windowsVerbatimArguments = true;
+		} else {
+			ensureUtf8ConsoleCodePageOnce();
+			spawnCmd = resolved.resolvedPath;
+			spawnArgs = args;
+		}
+
+		const result = spawnSync(spawnCmd, spawnArgs, {
 			...(options as SpawnOptions),
 			encoding: "utf-8",
-			shell: true,
+			shell: false,
 			windowsHide: true,
+			windowsVerbatimArguments,
 		});
 
 		return {
