@@ -2,10 +2,11 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../clients/dispatch/fact-store.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { _resetUntrackedIgnoredCacheForTests } from "../../clients/git-tracked-ignore.js";
+import { logLatency } from "../../clients/latency-logger.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import {
 	buildOrUpdateGraph,
@@ -22,6 +23,12 @@ import {
 } from "../../clients/review-graph/builder.js";
 import { clearModuleGraphCache } from "../../clients/review-graph/workspace-modules.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
+
+vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/latency-logger.js")>();
+	return { ...actual, logLatency: vi.fn() };
+});
 
 describe("review graph service", () => {
 	it("builds a TS graph and surfaces importers/callers without duplicate edges", async () => {
@@ -532,6 +539,49 @@ describe("review graph service", () => {
 			expect(
 				graph.changedSymbolsByFile.get(normalizeMapKey(changedPath)),
 			).toEqual(["changed"]);
+		} finally {
+			if (previous === undefined)
+				delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+			else process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = previous;
+			env.cleanup();
+		}
+	});
+
+	it("logs a review_graph_size_skip latency phase on truncation (#775 R3: no silent caps)", async () => {
+		const env = setupTestEnvironment("pi-lens-review-graph-cap-log-");
+		const previous = process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+		process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = "2";
+		(logLatency as ReturnType<typeof vi.fn>).mockClear();
+		try {
+			const changedPath = createTempFile(
+				env.tmpDir,
+				"src/changed.ts",
+				"export function changed() { return 1; }\n",
+			);
+			for (let i = 0; i < 3; i += 1) {
+				createTempFile(
+					env.tmpDir,
+					`src/extra-${i}.ts`,
+					`export function extra${i}() { return ${i}; }\n`,
+				);
+			}
+
+			const facts = new FactStore();
+			await buildOrUpdateGraph(env.tmpDir, [changedPath], facts);
+
+			const calls = (logLatency as ReturnType<typeof vi.fn>).mock.calls;
+			const skipCall = calls.find(
+				(args) => args[0]?.phase === "review_graph_size_skip",
+			);
+			expect(skipCall).toBeDefined();
+			expect(skipCall?.[0]).toMatchObject({
+				type: "phase",
+				phase: "review_graph_size_skip",
+				metadata: expect.objectContaining({
+					maxFileCount: 2,
+				}),
+			});
+			expect(skipCall?.[0]?.metadata?.sourceFileCount).toBeGreaterThan(2);
 		} finally {
 			if (previous === undefined)
 				delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;

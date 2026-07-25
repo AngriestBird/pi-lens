@@ -257,4 +257,118 @@ describe("loadPiLensProjectConfig", () => {
 		const cfg = loadPiLensProjectConfig(tmpDir);
 		expect(cfg.configPath).toBeUndefined();
 	});
+
+	describe("reviewGraph.maxFiles (#775 R2)", () => {
+		it("is undefined when the field is absent", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ ignore: [] }),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.reviewGraph).toBeUndefined();
+		});
+
+		it("parses a valid in-range value", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ reviewGraph: { maxFiles: 8000 } }),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.reviewGraph).toEqual({ maxFiles: 8000 });
+		});
+
+		it("tolerantly parses a numeric string, like maxProjectFiles", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ reviewGraph: { maxFiles: "8000" } }),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.reviewGraph).toEqual({ maxFiles: 8000 });
+		});
+
+		it("floors a fractional value", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ reviewGraph: { maxFiles: 8000.7 } }),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.reviewGraph).toEqual({ maxFiles: 8000 });
+		});
+
+		it("clamps a value below the minimum (100) without warning", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ reviewGraph: { maxFiles: 5 } }),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.reviewGraph).toEqual({ maxFiles: 100 });
+			expect(console.error).not.toHaveBeenCalled();
+		});
+
+		it("clamps a value above the maximum (20,000) without warning", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ reviewGraph: { maxFiles: 1_000_000 } }),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.reviewGraph).toEqual({ maxFiles: 20_000 });
+			expect(console.error).not.toHaveBeenCalled();
+		});
+
+		it("warns once and drops a non-numeric maxFiles", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ reviewGraph: { maxFiles: "not-a-number" } }),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.reviewGraph?.maxFiles).toBeUndefined();
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"reviewGraph.maxFiles must be a positive finite number",
+				),
+			);
+		});
+
+		it("warns once and drops a non-positive maxFiles", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ reviewGraph: { maxFiles: -5 } }),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.reviewGraph?.maxFiles).toBeUndefined();
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"reviewGraph.maxFiles must be a positive finite number",
+				),
+			);
+		});
+
+		it("warns once when reviewGraph itself is not an object", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ reviewGraph: "not-an-object" }),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.reviewGraph).toBeUndefined();
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining("reviewGraph must be an object"),
+			);
+		});
+
+		it("only warns once for repeated loads of the same invalid config", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ reviewGraph: { maxFiles: "bogus" } }),
+			);
+			// Two loads without resetting the cache in between — the warn-once
+			// dedupe (keyed by configPath:reason) must suppress the second call.
+			loadPiLensProjectConfig(tmpDir);
+			loadPiLensProjectConfig(tmpDir);
+			const calls = (console.error as unknown as { mock: { calls: unknown[][] } })
+				.mock.calls.filter((args) =>
+					String(args[0]).includes("reviewGraph.maxFiles"),
+				);
+			expect(calls.length).toBe(1);
+		});
+	});
 });

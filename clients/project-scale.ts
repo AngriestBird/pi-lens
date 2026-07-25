@@ -25,10 +25,18 @@
  *   | Subsystem                    | Ratio | Derived @ base 2,000 | Today  |
  *   |-------------------------------|-------|----------------------|--------|
  *   | project-diagnostics scanner   | 0.25× | 500                  | 500    |
- *   | review graph                  | 0.5×  | 1,000                | 1,000  |
+ *   | review graph (#775 R1: tapered above 4,000, see below) | 0.5× | 1,000 | 1,000 |
  *   | startup scan (source files)   | 1×    | 2,000                | 2,000  |
  *   | jscpd (dir entries)           | 3×    | 6,000                | 6,000  |
  *   | word index (files)            | 3×    | 6,000                | 6,000  |
+ *
+ * The review graph is the ONE budget in this table that stops being a flat
+ * ratio above a threshold: {@link getReviewGraphMaxFilesDerived} tapers its
+ * growth toward a hard ceiling instead of scaling linearly forever (or
+ * cliff-dropping like the pre-#775 flat cap did) — see that function's doc
+ * comment for the full rationale. Every OTHER row in this table (and the
+ * review graph itself at or below the taper's linear boundary) is still the
+ * flat ratio shown.
  *
  * `maxProjectFiles` resolution order (highest priority first) — NOTE this is
  * the base-value chain only; each subsystem's own PRE-EXISTING per-subsystem
@@ -131,9 +139,88 @@ export function getProjectDiagnosticsScannerMaxFiles(cwd?: string): number {
 	return deriveBudget(PROJECT_SCALE_RATIOS.projectDiagnosticsScanner, cwd);
 }
 
-/** Derived review-graph budget (files). See {@link deriveBudget}. */
+/**
+ * Review-graph budget: adaptive taper (#775 R1).
+ *
+ * At or below {@link REVIEW_GRAPH_LINEAR_CEILING_BASE} this is IDENTICAL to
+ * the flat `PROJECT_SCALE_RATIOS.reviewGraph` (0.5x) ratio every other
+ * caller of {@link deriveBudget} still uses — every existing small/medium
+ * project derivation (including the default-base 1,000-file case) is
+ * bit-for-bit unchanged by this function.
+ *
+ * Above that base, growth SLOWS instead of continuing linearly (a monorepo
+ * with a huge `maxProjectFiles` would otherwise get an equally huge,
+ * untested review-graph budget) or cutting off at a cliff (today's actual
+ * bug: a flat cap truncates the graph to empty above it, per #775's top
+ * risk). A hyperbolic taper closes the gap to
+ * {@link REVIEW_GRAPH_HARD_CEILING} asymptotically, never reaching or
+ * exceeding it: at `base = REVIEW_GRAPH_LINEAR_CEILING_BASE +
+ * REVIEW_GRAPH_TAPER_SCALE`, exactly HALF the remaining gap to the ceiling
+ * is closed (a standard property of this taper shape) — e.g. base 12,000
+ * (6x default) derives ~4,000 files; base 20,000 (10x default) derives
+ * ~4,667.
+ *
+ * {@link REVIEW_GRAPH_HARD_CEILING} (6,000) is not a fresh magic number: it
+ * reuses the SAME top-tier value {@link PROJECT_SCALE_RATIOS} already
+ * assigns jscpd/wordIndex at the default base (2,000 x 3 = 6,000), and is
+ * independently grounded in the review graph's OWN measured per-file cost.
+ * CHANGELOG 3.8.43 ("Persist review graph to disk") documents a full cold
+ * tree-sitter + import-fact build taking "2-4 s" at the then-1,000-file
+ * cap — roughly 2-4 ms/file. 6,000 files at that rate is a ~12-24 s
+ * worst-case COLD build, which only happens once per size tier: the same
+ * entry documents the disk-cached path costing "~20 ms JSON parse +
+ * rebuildIndexes" instead, and per-edit builds are incremental
+ * (see `diffSignatureMaps`) rather than full rebuilds.
+ */
+export const REVIEW_GRAPH_LINEAR_CEILING_BASE = 4_000;
+
+/**
+ * At `base = REVIEW_GRAPH_LINEAR_CEILING_BASE + REVIEW_GRAPH_TAPER_SCALE`
+ * the taper has closed exactly half the remaining gap to
+ * {@link REVIEW_GRAPH_HARD_CEILING} — see {@link taperedReviewGraphMaxFiles}.
+ */
+export const REVIEW_GRAPH_TAPER_SCALE = 8_000;
+
+/** See the rationale in {@link taperedReviewGraphMaxFiles}'s doc comment. */
+export const REVIEW_GRAPH_HARD_CEILING = 6_000;
+
+/**
+ * Pure taper function — see {@link getReviewGraphMaxFilesDerived}'s doc
+ * comment for the full rationale. Exported standalone so tests can probe
+ * the shape (below/at/above the linear boundary, ceiling asymptote)
+ * independent of `getProjectScaleBase`'s env/config resolution.
+ */
+export function taperedReviewGraphMaxFiles(base: number): number {
+	const linearValue = base * PROJECT_SCALE_RATIOS.reviewGraph;
+	if (base <= REVIEW_GRAPH_LINEAR_CEILING_BASE) {
+		return Math.max(1, Math.round(linearValue));
+	}
+	const boundaryValue =
+		REVIEW_GRAPH_LINEAR_CEILING_BASE * PROJECT_SCALE_RATIOS.reviewGraph;
+	const excess = base - REVIEW_GRAPH_LINEAR_CEILING_BASE;
+	const taperedExtra =
+		(REVIEW_GRAPH_HARD_CEILING - boundaryValue) *
+		(excess / (excess + REVIEW_GRAPH_TAPER_SCALE));
+	return Math.max(1, Math.round(boundaryValue + taperedExtra));
+}
+
+/**
+ * Derived review-graph budget (files), honoring — in priority order — the
+ * project's `.pi-lens.json#reviewGraph.maxFiles` knob (#775 R2, an explicit
+ * opt-in for repos that want a bigger graph than the taper would derive;
+ * see `project-lens-config.ts`), then {@link taperedReviewGraphMaxFiles} of
+ * the resolved `maxProjectFiles` base. Callers still check their own
+ * PRE-EXISTING `PI_LENS_REVIEW_GRAPH_MAX_FILES` env override BEFORE calling
+ * this (see `review-graph/builder.ts#getReviewGraphMaxFiles`) — that always
+ * wins outright, unchanged by this function.
+ */
 export function getReviewGraphMaxFilesDerived(cwd?: string): number {
-	return deriveBudget(PROJECT_SCALE_RATIOS.reviewGraph, cwd);
+	if (cwd) {
+		const config = loadPiLensProjectConfig(cwd);
+		const configOverride = config.reviewGraph?.maxFiles;
+		if (configOverride !== undefined) return configOverride;
+	}
+	return taperedReviewGraphMaxFiles(getProjectScaleBase(cwd));
 }
 
 /** Derived startup-scan budget (source files). See {@link deriveBudget}. */
