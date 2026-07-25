@@ -14,6 +14,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
 	buildWindowsShellCommand,
 	resetSafeSpawnWindowsCommandCache,
+	safeSpawn,
 	safeSpawnAsync,
 } from "../../clients/safe-spawn.js";
 
@@ -185,6 +186,88 @@ describe.runIf(process.platform === "win32")(
 			]);
 			expect(third.error).toBeUndefined();
 			expect(third.stdout).toContain("cache-3");
+		});
+	},
+);
+
+// ============================================================================
+// #817 follow-up — the deprecated SYNC `safeSpawn` had the identical
+// cmd.exe/shell:true unsoundness on Windows (its own live CodeQL sink, same
+// alerts). It now shares the exact same resolution/validation seams as the
+// async version. Mirrors the async describe block above, one representative
+// case per behavior (full matrix already covered on the async path).
+// ============================================================================
+describe.runIf(process.platform === "win32")(
+	"Windows command resolution — deprecated sync safeSpawn (#817)",
+	() => {
+		let fixtureDir: string;
+		let echoArgsScript: string;
+		let echoArgsCmd: string;
+
+		beforeAll(() => {
+			fixtureDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-safe-spawn-sync-817-"),
+			);
+			echoArgsScript = path.join(fixtureDir, "echo-args.js");
+			fs.writeFileSync(
+				echoArgsScript,
+				"process.stdout.write(JSON.stringify(process.argv.slice(2)));\n",
+				"utf-8",
+			);
+			echoArgsCmd = path.join(fixtureDir, "echo-args.cmd");
+			fs.writeFileSync(
+				echoArgsCmd,
+				`@echo off\r\n"${process.execPath}" "${echoArgsScript}" %*\r\n`,
+				"utf-8",
+			);
+		});
+
+		afterAll(() => {
+			fs.rmSync(fixtureDir, { recursive: true, force: true });
+		});
+
+		it("resolves a bare command via PATH+PATHEXT and spawns the .exe directly, no shell:true", () => {
+			const result = safeSpawn(path.basename(process.execPath), [
+				"-e",
+				"console.log('sync-direct-exe-ok')",
+			]);
+			expect(result.error).toBeUndefined();
+			expect(result.status).toBe(0);
+			expect(result.stdout).toContain("sync-direct-exe-ok");
+		});
+
+		it("a .cmd shim still executes through the pinned cmd.exe wrapper, args with spaces round-trip", () => {
+			const result = safeSpawn(echoArgsCmd, ["hello world", "plain"]);
+			expect(result.error).toBeUndefined();
+			expect(result.status).toBe(0);
+			expect(JSON.parse(result.stdout)).toEqual(["hello world", "plain"]);
+		});
+
+		it('a "%"-bearing arg targeting a .cmd shim is rejected loudly, nothing spawned', () => {
+			const result = safeSpawn(echoArgsCmd, ["%APPDATA%.md"]);
+			expect(result.error).toBeDefined();
+			expect(result.error?.message).toMatch(/cmd\.exe/i);
+			expect(result.status).toBeNull();
+			expect(result.stdout).toBe("");
+		});
+
+		it("the same %/quote arg passes through literally to a direct .exe spawn", () => {
+			const dangerous = 'weird"quote%percent!bang';
+			const result = safeSpawn(process.execPath, [echoArgsScript, dangerous]);
+			expect(result.error).toBeUndefined();
+			expect(result.status).toBe(0);
+			expect(JSON.parse(result.stdout)).toEqual([dangerous]);
+		});
+
+		it("an unresolvable command returns an ENOENT-shaped error", () => {
+			const result = safeSpawn(
+				"pi-lens-definitely-not-a-real-command-817-sync",
+				["--version"],
+			);
+			expect(result.status).toBeNull();
+			expect(result.error).toBeDefined();
+			expect(result.error?.message).toContain("ENOENT");
+			expect((result.error as NodeJS.ErrnoException).code).toBe("ENOENT");
 		});
 	},
 );

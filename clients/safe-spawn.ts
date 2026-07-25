@@ -379,7 +379,11 @@ export async function safeSpawnAsync(
 			if (!resolved) {
 				resolutionError = synthesizeEnoentError(command);
 			} else if (resolved.ext === ".cmd" || resolved.ext === ".bat") {
-				const unsafeValue = findCmdUnsafeValue(command, args);
+				// Validate the RESOLVED path (what actually gets interpolated
+				// into the /c line via buildWindowsShellCommand below), not the
+				// caller's original `command` string — a resolved path
+				// containing `%`/`!` would otherwise reach the shell unvalidated.
+				const unsafeValue = findCmdUnsafeValue(resolved.resolvedPath, args);
 				if (unsafeValue !== undefined) {
 					resolutionError = new Error(
 						`Refusing to spawn "${resolved.resolvedPath}" via cmd.exe: ` +
@@ -614,32 +618,24 @@ export async function findCommandAsync(
 // ============================================================================
 
 /**
- * Escape an argument for Windows shell execution.
- * Handles spaces, quotes, $variables, and special characters.
- */
-function escapeWindowsArg(arg: string): string {
-	if (arg.includes("$")) {
-		return `'${arg.replace(/'/g, "'\\''")}'`;
-	}
-	if (!/[\s"]/.test(arg)) return arg;
-	return `"${arg.replace(/"/g, '""')}"`;
-}
-
-/**
- * Construct a command string for Windows shell execution.
- */
-function buildWindowsCommand(command: string, args: string[]): string {
-	const escapedArgs = args.map(escapeWindowsArg).join(" ");
-	return `${command} ${escapedArgs}`;
-}
-
-/**
  * ⚠️ DEPRECATED: Use safeSpawnAsync instead.
  *
  * This blocks the entire Node.js event loop until the process exits.
  * If the process hangs, pi will freeze.
  *
- * Kept for backward compatibility during migration.
+ * Kept for backward compatibility during migration (today's only caller:
+ * `test-runner-client.ts`'s synchronous pytest-on-PATH probe, called from a
+ * sync detection path with many sync callers/tests — not a trivial async
+ * migration, see #817 follow-up discussion).
+ *
+ * #817: the Windows branch used to build a `cmd.exe`/`shell:true` command
+ * line from unvalidated caller input (CodeQL #17/#18/#19), same unsoundness
+ * as the async version had. It now shares the exact same resolution/
+ * validation seams as `safeSpawnAsync` — `resolveWindowsCommand` (cached
+ * PATH+PATHEXT walk), direct `spawnSync(resolvedPath, args, { shell: false })`
+ * for `.exe`/`.com`, the pinned-cmd.exe wrapper + `findCmdUnsafeValue`
+ * rejection for `.cmd`/`.bat`, and a synthesized ENOENT when unresolvable.
+ * No `shell: true` anywhere.
  */
 export function safeSpawn(
 	command: string,
@@ -647,14 +643,59 @@ export function safeSpawn(
 	options?: SafeSpawnOptions,
 ): SpawnResult {
 	if (process.platform === "win32") {
-		// shell:true here is justified only because this deprecated sync function
-		// predates safeSpawnAsync. It will be eliminated when safeSpawn is removed.
-		const fullCommand = buildWindowsCommand(command, args);
-		const result = spawnSync(fullCommand, {
+		const resolved = resolveWindowsCommand(command, options?.cwd);
+		if (!resolved) {
+			return {
+				stdout: "",
+				stderr: "",
+				status: null,
+				error: synthesizeEnoentError(command),
+			};
+		}
+
+		let spawnCmd: string;
+		let spawnArgs: string[];
+		let windowsVerbatimArguments = false;
+
+		if (resolved.ext === ".cmd" || resolved.ext === ".bat") {
+			// Validate the value that actually gets interpolated into the /c
+			// line — the RESOLVED path, not the caller's original (possibly
+			// extensionless) `command` string — plus every arg.
+			const unsafeValue = findCmdUnsafeValue(resolved.resolvedPath, args);
+			if (unsafeValue !== undefined) {
+				return {
+					stdout: "",
+					stderr: "",
+					status: null,
+					error: new Error(
+						`Refusing to spawn "${resolved.resolvedPath}" via cmd.exe: ` +
+							`${JSON.stringify(unsafeValue)} contains a character ("` +
+							`, %, !, or CR/LF) that cannot be safely escaped on a ` +
+							`cmd.exe /c command line (CWE-78, #817). Rename/quote the ` +
+							"value or invoke the tool without going through cmd.exe.",
+					),
+				};
+			}
+			spawnCmd = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`;
+			spawnArgs = [
+				"/d",
+				"/s",
+				"/c",
+				buildWindowsShellCommand(resolved.resolvedPath, args),
+			];
+			windowsVerbatimArguments = true;
+		} else {
+			ensureUtf8ConsoleCodePageOnce();
+			spawnCmd = resolved.resolvedPath;
+			spawnArgs = args;
+		}
+
+		const result = spawnSync(spawnCmd, spawnArgs, {
 			...(options as SpawnOptions),
 			encoding: "utf-8",
-			shell: true,
+			shell: false,
 			windowsHide: true,
+			windowsVerbatimArguments,
 		});
 
 		return {
