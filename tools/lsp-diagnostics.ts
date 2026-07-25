@@ -30,7 +30,7 @@ import {
 } from "../clients/dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../clients/file-role.js";
 import type { LSPDiagnostic } from "../clients/lsp/client.js";
-import { classifyCascadeWaitTier } from "../clients/lsp/cascade-tier.js";
+import { classifyCascadeWaitTier } from "../clients/lsp/wait-policy/index.js";
 import {
 	attemptTsserverSyncDiagnostics,
 } from "../clients/lsp/tsserver-sync.js";

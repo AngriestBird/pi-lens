@@ -40,7 +40,7 @@ vi.mock("../../clients/lsp/index.js", async () => {
 	};
 });
 
-vi.mock("../../clients/lsp/cascade-tier.js", () => ({
+vi.mock("../../clients/lsp/wait-policy/index.js", () => ({
 	classifyCascadeWaitTier: () => mocked.cascadeTier,
 }));
 
