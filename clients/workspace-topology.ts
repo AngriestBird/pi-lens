@@ -170,6 +170,56 @@ function walkStillFresh(dirMtimes: Array<{ dir: string; mtimeMs: number }>): boo
 }
 
 /**
+ * Shared core of the two nearest-marker walkers below: the cache check, the
+ * home-guarded/depth-capped upward loop, per-directory mtime recording, and
+ * the cache store live HERE once — callers supply only their cache-key
+ * suffix, their match predicate over a directory's marker index, and the
+ * identifying metadata for the cap-trip latency log. (Extracted for #812's
+ * Sonar new-code duplication gate: the two walkers previously each carried
+ * this skeleton verbatim.)
+ */
+function walkToNearestMatch(
+	startDir: string,
+	cacheSuffix: string,
+	matches: (markers: DirectoryMarkers) => boolean,
+	capMetadata: Record<string, unknown>,
+	homeDir: string,
+): string | undefined {
+	const key = walkCacheKey(startDir, cacheSuffix);
+	const cached = walkCache.get(key);
+	if (cached && walkStillFresh(cached.dirMtimes)) {
+		return cached.dir;
+	}
+
+	const dirMtimes: Array<{ dir: string; mtimeMs: number }> = [];
+	let found: string | undefined;
+	let depth = 0;
+	for (const dir of walkUpDirs(startDir)) {
+		if (isAtOrAboveHomeDir(dir, homeDir)) break;
+		if (depth >= MAX_WALK_DEPTH) {
+			logLatency({
+				type: "phase",
+				filePath: startDir,
+				phase: "workspace-topology-walk-cap",
+				durationMs: 0,
+				metadata: { ...capMetadata, depth, homeDir },
+			});
+			break;
+		}
+		const markers = getDirectoryMarkers(dir);
+		dirMtimes.push({ dir, mtimeMs: markers.dirMtimeMs });
+		if (matches(markers)) {
+			found = dir;
+			break;
+		}
+		depth += 1;
+	}
+
+	walkCache.set(key, { dir: found, dirMtimes });
+	return found;
+}
+
+/**
  * Walk up from `startDir` looking for the nearest directory whose marker
  * index has `markerKey` set (e.g. `"tsconfigPath"`, `"piLensConfigPath"`).
  * Shared walk discipline (AGENTS.md invariants):
@@ -187,38 +237,13 @@ export function findNearestDirWithMarker(
 	markerKey: keyof Omit<DirectoryMarkers, "dir" | "dirMtimeMs" | "entryNames">,
 	homeDir: string = os.homedir(),
 ): string | undefined {
-	const key = walkCacheKey(startDir, markerKey);
-	const cached = walkCache.get(key);
-	if (cached && walkStillFresh(cached.dirMtimes)) {
-		return cached.dir;
-	}
-
-	const dirMtimes: Array<{ dir: string; mtimeMs: number }> = [];
-	let found: string | undefined;
-	let depth = 0;
-	for (const dir of walkUpDirs(startDir)) {
-		if (isAtOrAboveHomeDir(dir, homeDir)) break;
-		if (depth >= MAX_WALK_DEPTH) {
-			logLatency({
-				type: "phase",
-				filePath: startDir,
-				phase: "workspace-topology-walk-cap",
-				durationMs: 0,
-				metadata: { markerKey, depth, homeDir },
-			});
-			break;
-		}
-		const markers = getDirectoryMarkers(dir);
-		dirMtimes.push({ dir, mtimeMs: markers.dirMtimeMs });
-		if (markers[markerKey]) {
-			found = dir;
-			break;
-		}
-		depth += 1;
-	}
-
-	walkCache.set(key, { dir: found, dirMtimes });
-	return found;
+	return walkToNearestMatch(
+		startDir,
+		markerKey,
+		(markers) => Boolean(markers[markerKey]),
+		{ markerKey },
+		homeDir,
+	);
 }
 
 /**
@@ -259,39 +284,13 @@ export function findNearestDirWithAnyBasename(
 	homeDir: string = os.homedir(),
 ): string | undefined {
 	if (basenames.length === 0) return undefined;
-
-	const key = walkCacheKey(startDir, `any:${basenames.join(String.fromCodePoint(1))}`);
-	const cached = walkCache.get(key);
-	if (cached && walkStillFresh(cached.dirMtimes)) {
-		return cached.dir;
-	}
-
-	const dirMtimes: Array<{ dir: string; mtimeMs: number }> = [];
-	let found: string | undefined;
-	let depth = 0;
-	for (const dir of walkUpDirs(startDir)) {
-		if (isAtOrAboveHomeDir(dir, homeDir)) break;
-		if (depth >= MAX_WALK_DEPTH) {
-			logLatency({
-				type: "phase",
-				filePath: startDir,
-				phase: "workspace-topology-walk-cap",
-				durationMs: 0,
-				metadata: { basenames, depth, homeDir },
-			});
-			break;
-		}
-		const markers = getDirectoryMarkers(dir);
-		dirMtimes.push({ dir, mtimeMs: markers.dirMtimeMs });
-		if (basenames.some((basename) => hasBasenameMarker(markers, basename))) {
-			found = dir;
-			break;
-		}
-		depth += 1;
-	}
-
-	walkCache.set(key, { dir: found, dirMtimes });
-	return found;
+	return walkToNearestMatch(
+		startDir,
+		`any:${basenames.join(String.fromCodePoint(1))}`,
+		(markers) => basenames.some((basename) => hasBasenameMarker(markers, basename)),
+		{ basenames },
+		homeDir,
+	);
 }
 
 export interface PiLensConfigMarker {
