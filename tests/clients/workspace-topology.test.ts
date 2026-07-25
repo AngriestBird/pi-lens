@@ -13,6 +13,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 import {
 	findGoverningTsconfigDir,
+	findNearestDirWithAnyBasename,
 	findNearestDirWithMarker,
 	findPiLensConfigMarkerInDir,
 	getDirectoryMarkers,
@@ -193,6 +194,123 @@ describe("findNearestDirWithMarker — walk cap + latency logging", () => {
 		const result = findNearestDirWithMarker(
 			deepStart,
 			"tsconfigPath",
+			path.join(path.parse(root).root, "definitely-not-a-real-home-zzz"),
+		);
+
+		expect(result).toBeUndefined();
+		expect(logSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				type: "phase",
+				phase: "workspace-topology-walk-cap",
+			}),
+		);
+	});
+});
+
+describe("DirectoryMarkers.entryNames — raw readdir names (#807)", () => {
+	it("exposes every immediate-child entry name, file and directory alike", () => {
+		write("tsconfig.json");
+		write("Cargo.toml");
+		fs.mkdirSync(path.join(root, "src"), { recursive: true });
+		const markers = getDirectoryMarkers(root);
+		expect(markers.entryNames.has("tsconfig.json")).toBe(true);
+		expect(markers.entryNames.has("Cargo.toml")).toBe(true);
+		expect(markers.entryNames.has("src")).toBe(true);
+		expect(markers.entryNames.has("does-not-exist.txt")).toBe(false);
+	});
+
+	it("is empty for a directory that does not exist", () => {
+		const markers = getDirectoryMarkers(path.join(root, "nope"));
+		expect(markers.entryNames.size).toBe(0);
+	});
+
+	it("comes from the same single readdir pass as the typed marker fields", () => {
+		write("tsconfig.json");
+		getDirectoryMarkers(root);
+		expect(fs.readdirSync).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("findNearestDirWithAnyBasename (#807)", () => {
+	it("walks up to the nearest ancestor containing any basename in the list", () => {
+		write("pyproject.toml");
+		const sub = path.join(root, "apps", "svc");
+		fs.mkdirSync(sub, { recursive: true });
+		expect(
+			findNearestDirWithAnyBasename(
+				sub,
+				["package.json", "pyproject.toml", "setup.py"],
+				"/nonexistent-home-zzz",
+			),
+		).toBe(root);
+	});
+
+	it("returns undefined when none of the basenames are found before the fs root", () => {
+		const sub = path.join(root, "apps", "svc");
+		fs.mkdirSync(sub, { recursive: true });
+		expect(
+			findNearestDirWithAnyBasename(sub, ["Cargo.toml"], "/nonexistent-home-zzz"),
+		).toBeUndefined();
+	});
+
+	it("resolves a multi-segment (nested path) marker via a confirming existsSync, not entryNames", () => {
+		write(path.join("prisma", "schema.prisma"), "datasource db {}\n");
+		const sub = path.join(root, "src");
+		fs.mkdirSync(sub, { recursive: true });
+		expect(
+			findNearestDirWithAnyBasename(
+				sub,
+				["prisma/schema.prisma"],
+				"/nonexistent-home-zzz",
+			),
+		).toBe(root);
+	});
+
+	it("never resolves a marker at or above the home-dir ceiling", () => {
+		write("package.json");
+		const project = path.join(root, "project", "src");
+		fs.mkdirSync(project, { recursive: true });
+		expect(
+			findNearestDirWithAnyBasename(project, ["package.json"], root),
+		).toBeUndefined();
+	});
+
+	it("returns undefined immediately for an empty basenames list", () => {
+		const sub = path.join(root, "src");
+		fs.mkdirSync(sub, { recursive: true });
+		expect(findNearestDirWithAnyBasename(sub, [], "/nonexistent-home-zzz")).toBeUndefined();
+	});
+
+	it("shares the per-directory readdir cache with findNearestDirWithMarker (no re-listing)", () => {
+		write("tsconfig.json");
+		const sub = path.join(root, "src");
+		fs.mkdirSync(sub, { recursive: true });
+
+		// Warm the per-directory cache via the typed-field walker first.
+		expect(findGoverningTsconfigDir(sub, "/nonexistent-home-zzz")).toBe(root);
+
+		vi.mocked(fs.readdirSync).mockClear();
+		expect(
+			findNearestDirWithAnyBasename(sub, ["tsconfig.json"], "/nonexistent-home-zzz"),
+		).toBe(root);
+		// Same directories, same cache — no fresh readdir needed.
+		expect(fs.readdirSync).not.toHaveBeenCalled();
+	});
+
+	it("caps the climb and logs a phase entry instead of truncating silently", () => {
+		const logSpy = vi
+			.spyOn(latencyLogger, "logLatency")
+			.mockImplementation(() => {});
+
+		const segments = Array.from({ length: 100 }, (_, i) => `level${i}`);
+		const deepStart = path.join(
+			path.parse(root).root,
+			"synthetic-any-basename-cap-test",
+			...segments,
+		);
+		const result = findNearestDirWithAnyBasename(
+			deepStart,
+			["package.json"],
 			path.join(path.parse(root).root, "definitely-not-a-real-home-zzz"),
 		);
 
