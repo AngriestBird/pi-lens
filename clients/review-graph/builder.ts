@@ -25,6 +25,7 @@ import {
 	jsTsCandidatePaths,
 	resolveAliasedImport,
 	resolveImportToFiles,
+	resolveProjectReferenceImport,
 	resolveWorkspacePackageImport,
 } from "./import-resolvers.js";
 import { RUNTIME_CONFIG } from "../runtime-config.js";
@@ -1059,9 +1060,14 @@ function localImportToFile(
 ): string | undefined {
 	if (!source.startsWith(".")) {
 		const aliased = resolveAliasedImport(cwd, source, path.dirname(filePath));
+		const referenced = aliased.length
+			? []
+			: resolveProjectReferenceImport(cwd, source, path.dirname(filePath));
 		const resolved = aliased.length
 			? aliased
-			: resolveWorkspacePackageImport(cwd, source);
+			: referenced.length
+				? referenced
+				: resolveWorkspacePackageImport(cwd, source);
 		for (const normalized of resolved) {
 			if (ignoredIds?.has(normalized)) continue;
 			return normalized;
