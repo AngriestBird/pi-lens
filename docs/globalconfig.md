@@ -61,7 +61,10 @@ In addition to the user-level `~/.pi-lens/config.json` above, pi-lens reads a pe
     "high-complexity": { "threshold": 25 },
     "high-fan-out": { "threshold": 30 }
   },
-  "maxProjectFiles": 5000
+  "maxProjectFiles": 5000,
+  "reviewGraph": {
+    "maxFiles": 12000
+  }
 }
 ```
 
@@ -120,7 +123,21 @@ Per-rule threshold overrides. Currently honored:
 
 ### `maxProjectFiles`
 
-Single scale knob (default `2000`) that a large-but-healthy repo can raise to scale five independent size budgets together instead of tripping each one separately: the project-diagnostics scanner (0.25×, default 500 files), the review graph (0.5×, default 1,000 files), the startup scan (1×, default 2,000 source files), jscpd (3×, default 6,000 directory entries), and the word index (3×, default 6,000 files). Raising it (e.g. to `5000`) scales all five proportionally. Each subsystem's own environment-variable override (e.g. `PI_LENS_REVIEW_GRAPH_MAX_FILES`, `PI_LENS_STARTUP_SCAN_MAX_ENTRIES`) still takes precedence over this knob when set, and a separate `PI_LENS_MAX_PROJECT_FILES` environment variable sits below `maxProjectFiles` but above the built-in default. See `clients/project-scale.ts` for the full ratio table and precedence order.
+Single scale knob (default `2000`) that a large-but-healthy repo can raise to scale five independent size budgets together instead of tripping each one separately: the project-diagnostics scanner (0.25×, default 500 files), the review graph (0.5× up to a point, default 1,000 files — see below), the startup scan (1×, default 2,000 source files), jscpd (3×, default 6,000 directory entries), and the word index (3×, default 6,000 files). Raising it (e.g. to `5000`) scales all five proportionally. Each subsystem's own environment-variable override (e.g. `PI_LENS_REVIEW_GRAPH_MAX_FILES`, `PI_LENS_STARTUP_SCAN_MAX_ENTRIES`) still takes precedence over this knob when set, and a separate `PI_LENS_MAX_PROJECT_FILES` environment variable sits below `maxProjectFiles` but above the built-in default. See `clients/project-scale.ts` for the full ratio table and precedence order.
+
+Unlike the other four, the review graph's budget stops scaling flatly at 0.5× once `maxProjectFiles` climbs past 4,000 — it tapers toward a 5,000-file ceiling instead of growing unbounded (#775). The binding constraint is the graph's disk-persist circuit-breaker (a 200,000-element cap in `review-graph/builder.ts` — above it the graph is never written to disk, so every session pays a full cold rebuild instead of the fast cached path engaging once); its higher per-file build cost than the other subsystems' walks is a secondary, independently-consistent reason. Below the 4,000 threshold (which covers every typical/default-sized project) it's the same flat 0.5× ratio as before. See `reviewGraph.maxFiles` below for an explicit opt-in past the taper.
+
+### `reviewGraph.maxFiles`
+
+Explicit override for the review graph's own file budget (#775), for monorepos that want a bigger graph than raising `maxProjectFiles` alone would derive. Since the graph's default 0.5× ratio no longer scales linearly forever above a threshold (it tapers toward a hard ceiling — see below), a repo that legitimately needs a larger graph than the taper gives can opt in explicitly here instead:
+
+```json
+{ "reviewGraph": { "maxFiles": 12000 } }
+```
+
+- Tolerantly parsed like `maxProjectFiles` (numeric strings coerce), clamped to `[100, 20000]` — an out-of-range value is silently clamped to the nearest bound rather than rejected (it's still a deliberate opt-in); a non-numeric or non-positive value is logged once and ignored.
+- Takes precedence over the adaptive taper described under `maxProjectFiles` above, but the pre-existing `PI_LENS_REVIEW_GRAPH_MAX_FILES` environment variable still wins outright over both when set.
+- Why the review graph tapers instead of scaling flatly like the other four budgets: its per-file cost (tree-sitter parse + import-fact extraction) is measurably higher than a directory-entry count or file-existence check, so an unbounded linear budget on a huge `maxProjectFiles` would risk a very slow cold build on the synchronous edit-hook path. See `clients/project-scale.ts`'s `taperedReviewGraphMaxFiles` doc comment for the exact shape and the measured per-file cost it's grounded in.
 
 ### Schema rules
 
