@@ -37,7 +37,7 @@ import {
 	negotiatePositionEncoding,
 	type PositionEncoding,
 } from "./position-encoding.js";
-import { getStrategy } from "./server-strategies.js";
+import { getStrategy } from "./wait-policy/index.js";
 import { WatchedFilesQueue } from "./watch-queue.js";
 
 // Opt-in publishDiagnostics trace (PILENS_PUB_DEBUG=1) — read once, negligible

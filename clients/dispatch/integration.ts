@@ -54,10 +54,10 @@ import type {
 } from "../cascade-types.js";
 import { getDiagnosticTracker } from "../diagnostic-tracker.js";
 import {
-	classifyCascadeWaitTier,
 	isTierAwareCascadeEnabled,
 	recordOutstandingCascadeTouch,
 } from "../lsp/cascade-tier.js";
+import { classifyCascadeWaitTier } from "../lsp/wait-policy/index.js";
 import { getServersForFileWithConfig } from "../lsp/config.js";
 import { getLSPService } from "../lsp/index.js";
 import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";

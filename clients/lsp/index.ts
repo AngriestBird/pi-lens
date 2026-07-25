@@ -31,9 +31,7 @@ import {
 } from "../path-utils.js";
 import type {
 	LSPClientInfo,
-	LSPOperationSupport,
 	LSPShutdownOptions,
-	LSPWorkspaceDiagnosticsSupport,
 } from "./client.js";
 import { createLSPClient } from "./client.js";
 import { getServersForFileWithConfig, getServerInitOverride } from "./config.js";
@@ -43,7 +41,13 @@ import {
 	LSP_SERVERS,
 	isDirectLspCommandTemporarilyUnavailable,
 } from "./server.js";
-import { getStrategy } from "./server-strategies.js";
+import {
+	classifyCascadeWaitTier,
+	classifyServerWaitTier,
+	getStrategy,
+	type LSPCapabilitySnapshot,
+} from "./wait-policy/index.js";
+export type { LSPCapabilitySnapshot } from "./wait-policy/index.js";
 import { raceToCompletion, type PromiseDescriptor } from "./aggregation.js";
 import {
 	applyWorkspaceEdit,
@@ -57,10 +61,6 @@ import {
 import {
 	attemptTsserverSyncDiagnostics,
 } from "./tsserver-sync.js";
-import {
-	classifyCascadeWaitTier,
-	classifyServerWaitTier,
-} from "./cascade-tier.js";
 import {
 	isWarmAttached,
 	tryWarmAttachedDiagnostics,
@@ -287,24 +287,6 @@ function logSessionStart(msg: string): void {
 export interface SpawnedServer {
 	client: LSPClientInfo;
 	info: LSPServerInfo;
-}
-
-export interface LSPCapabilitySnapshot {
-	serverId: string;
-	root: string;
-	operationSupport: LSPOperationSupport;
-	workspaceDiagnosticsSupport: LSPWorkspaceDiagnosticsSupport;
-	/** Commands the server advertised for workspace/executeCommand (the allowlist) */
-	advertisedCommands: string[];
-	/** Top-level keys of the raw ServerCapabilities advertised at initialize. */
-	rawCapabilityKeys: string[];
-	/** See `LSPServerInfo.spawn`'s `launchVariant` (server.ts) — which concrete
-	 *  binary/protocol variant this server instance is actually running (e.g.
-	 *  classic typescript-language-server vs TS7's native `tsc --lsp --stdio`,
-	 *  both under server id "typescript"). Undefined = single-variant server or
-	 *  an older client that predates this marker; consumers (the #458 cascade
-	 *  tier classifier) must treat that as classic/default behavior. */
-	launchVariant?: "classic" | "native-ts7";
 }
 
 export interface LSPRenameFileResult {
