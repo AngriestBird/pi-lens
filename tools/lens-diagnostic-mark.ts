@@ -98,8 +98,9 @@ function widgetCrossCheck(
 	);
 	if (matches.length === 0) return undefined;
 	if (matches.length === 1) return { line: matches[0].line, ambiguous: false };
-	const closest = matches.reduce((best, d) =>
-		Math.abs(d.line - callerLine) < Math.abs(best.line - callerLine) ? d : best,
+	const closest = matches.reduce(
+		(best, d) => (Math.abs(d.line - callerLine) < Math.abs(best.line - callerLine) ? d : best),
+		matches[0],
 	);
 	return { line: closest.line, ambiguous: true };
 }
