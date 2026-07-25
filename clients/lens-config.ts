@@ -2,7 +2,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseEnabledShape } from "./config-enabled-shape.js";
-import type { PiLensProjectConfig } from "./project-lens-config.js";
+import {
+	findNestedProjectMutationValue,
+	type PiLensProjectConfig,
+	type ProjectMutationFlag,
+} from "./project-lens-config.js";
 
 export type PiLensFormatMode = "deferred" | "immediate";
 
@@ -253,7 +257,12 @@ export function getGlobalTurnSummaryEnabled(configPath?: string): boolean {
 }
 
 /** Which tier decided a resolved flag's value — for provenance in debug/skip logs (#792). */
-export type PiLensFlagSource = "cli" | "project" | "global" | "default";
+export type PiLensFlagSource =
+	| "cli"
+	| "project"
+	| `nested-project:${string}`
+	| "global"
+	| "default";
 
 export interface ResolvedPiLensFlag {
 	value: boolean | string | undefined;
@@ -275,9 +284,31 @@ export function resolvePiLensFlagWithSource(
 	value: boolean | string | undefined,
 	config: PiLensGlobalConfig | undefined,
 	projectConfig?: PiLensProjectConfig,
+	editedFilePath?: string,
+	projectRoot?: string,
 ): ResolvedPiLensFlag {
 	if (value) return { value, source: "cli" };
+	const mutationFlag =
+		name === "no-autoformat" ||
+		name === "no-autofix" ||
+		name === "lens-actionable-warning-autofix"
+			? name
+			: undefined;
+	const nested =
+		mutationFlag && editedFilePath && projectRoot
+			? findNestedProjectMutationValue(
+					mutationFlag as ProjectMutationFlag,
+					editedFilePath,
+					projectRoot,
+				)
+			: undefined;
+	const nestedSource = nested
+		? path.resolve(nested.dir) === path.resolve(projectRoot!)
+			? "project"
+			: (`nested-project:${nested.dir}` as const)
+		: undefined;
 	if (name === "no-autoformat") {
+		if (nested) return { value: !nested.value, source: nestedSource! };
 		if (projectConfig?.format?.enabled !== undefined) {
 			return { value: !projectConfig.format.enabled, source: "project" };
 		}
@@ -287,6 +318,7 @@ export function resolvePiLensFlagWithSource(
 		return { value: false, source: "default" };
 	}
 	if (name === "no-autofix") {
+		if (nested) return { value: !nested.value, source: nestedSource! };
 		if (projectConfig?.autofix?.enabled !== undefined) {
 			return { value: !projectConfig.autofix.enabled, source: "project" };
 		}
@@ -308,6 +340,7 @@ export function resolvePiLensFlagWithSource(
 		return { value: enabled, source: enabled ? "global" : "default" };
 	}
 	if (name === "lens-actionable-warning-autofix") {
+		if (nested) return { value: nested.value, source: nestedSource! };
 		if (projectConfig?.actionableWarnings?.autoFix?.enabled !== undefined) {
 			return {
 				value: projectConfig.actionableWarnings.autoFix.enabled,
@@ -337,6 +370,15 @@ export function resolvePiLensFlag(
 	value: boolean | string | undefined,
 	config: PiLensGlobalConfig | undefined,
 	projectConfig?: PiLensProjectConfig,
+	editedFilePath?: string,
+	projectRoot?: string,
 ): boolean | string | undefined {
-	return resolvePiLensFlagWithSource(name, value, config, projectConfig).value;
+	return resolvePiLensFlagWithSource(
+		name,
+		value,
+		config,
+		projectConfig,
+		editedFilePath,
+		projectRoot,
+	).value;
 }

@@ -33,9 +33,9 @@ export const DEFERRED_FORMAT_STALE_AFTER_MS = 10 * 60_000;
 
 interface AgentEndDeps {
 	ctxCwd?: string;
-	getFlag: (name: string) => boolean | string | undefined;
+	getFlag: (name: string, filePath?: string) => boolean | string | undefined;
 	/** Optional: provenance for dbg/skip logs — see `PipelineContext["getFlagSource"]` (#792). */
-	getFlagSource?: (name: string) => PiLensFlagSource;
+	getFlagSource?: (name: string, filePath?: string) => PiLensFlagSource;
 	notify: (msg: string, level: "info" | "warning" | "error") => void;
 	dbg: (msg: string) => void;
 	runtime: RuntimeCoordinator;
@@ -108,6 +108,18 @@ export async function handleAgentEnd({
 			staleAfterMs,
 		);
 	const records = [...claimed, ...staleClaimed];
+	const rootActionableAutofixEnabled = !!getFlag(
+		"lens-actionable-warning-autofix",
+	);
+	// A path-aware source resolver signals that nested configs may re-enable
+	// actionable autofix even when the root default is off. Legacy/test hosts
+	// without that resolver keep the old fast exit and avoid a cache read.
+	const inspectActionableReport =
+		rootActionableAutofixEnabled && typeof cacheManager.readCache === "function"
+			? true
+			: getFlagSource !== undefined &&
+				typeof cacheManager.readCache === "function";
+	if (records.length === 0 && !inspectActionableReport) return undefined;
 	if (deferredToOwner.length > 0) {
 		dbg(
 			`agent_end deferred_format: leaving ${deferredToOwner.length} file(s) queued for their owning session (${deferredToOwner
@@ -139,9 +151,6 @@ export async function handleAgentEnd({
 			},
 		});
 	}
-	const actionableAutofixEnabled = !!getFlag("lens-actionable-warning-autofix");
-	if (records.length === 0 && !actionableAutofixEnabled) return undefined;
-
 	const startedAt = Date.now();
 	const summary: AgentEndFormatSummary = {
 		queued: records.length,
@@ -193,23 +202,22 @@ export async function handleAgentEnd({
 		});
 	}
 
-	const autoformatDisabled = !!getFlag("no-autoformat");
-	if (autoformatDisabled) {
-		const source = getFlagSource?.("no-autoformat");
-		if (records.length > 0) {
+	const formatRecords = records.filter((record) => {
+		const disabled = !!getFlag("no-autoformat", record.filePath);
+		if (disabled) {
+			const source = getFlagSource?.("no-autoformat", record.filePath);
 			dbg(
-				`agent_end deferred_format: skipping ${records.length} file(s) (--no-autoformat${source ? `, source=${source}` : ""})`,
+				`agent_end deferred_format: skipping ${record.filePath} (--no-autoformat${source ? `, source=${source}` : ""})`,
 			);
-		}
-		for (const record of records) {
 			summary.skipped.push({
 				filePath: record.filePath,
 				reason: "no-autoformat",
 			});
 		}
-	}
+		return !disabled;
+	});
 
-	if (!autoformatDisabled) {
+	if (formatRecords.length > 0) {
 		type FormatOutcome =
 			| { kind: "skipped"; filePath: string; reason: string }
 			| { kind: "failed"; filePath: string; message: string; fileStart: number }
@@ -224,7 +232,7 @@ export async function handleAgentEnd({
 		// Run all formatter subprocesses concurrently — no shared state touched here.
 		// bumpFileSeq / cacheManager mutations happen in the sequential pass below.
 		const outcomes = await Promise.all(
-			records.map(async (record): Promise<FormatOutcome> => {
+			formatRecords.map(async (record): Promise<FormatOutcome> => {
 				const fileStart = Date.now();
 				const filePath = path.resolve(record.filePath);
 				if (!nodeFs.existsSync(filePath)) {
@@ -352,14 +360,7 @@ export async function handleAgentEnd({
 		}
 	}
 
-	if (!actionableAutofixEnabled) {
-		const source = getFlagSource?.("lens-actionable-warning-autofix");
-		dbg(
-			`agent_end actionable_warnings_autofix: skipped (lens-actionable-warning-autofix disabled${source ? `, source=${source}` : ""})`,
-		);
-	}
-
-	if (actionableAutofixEnabled) {
+	if (inspectActionableReport) {
 		const actionReport = cacheManager.readCache<ActionableWarningsReport>(
 			"actionable-warnings",
 			ctxCwd ?? runtime.projectRoot,
@@ -370,8 +371,47 @@ export async function handleAgentEnd({
 				"agent_end actionable_warnings_autofix: cache missing or expired, skipping fixes",
 			);
 		} else {
+			const enabledFiles = actionReport.data.files.filter((file) => {
+				const enabled = !!getFlag(
+					"lens-actionable-warning-autofix",
+					file.filePath,
+				);
+				if (!enabled) {
+					const source = getFlagSource?.(
+						"lens-actionable-warning-autofix",
+						file.filePath,
+					);
+					dbg(
+						`agent_end actionable_warnings_autofix: skipped ${file.filePath} (disabled${source ? `, source=${source}` : ""})`,
+					);
+				}
+				return enabled;
+			});
+			const eligibleCount = enabledFiles.reduce(
+				(total, file) =>
+					total +
+					file.warnings.reduce(
+						(count, warning) =>
+							count +
+							(warning.suppressed
+								? 0
+								: warning.actions.filter((action) => action.autoFixEligible)
+										.length),
+						0,
+					),
+				0,
+			);
+			const eligibleReport: ActionableWarningsReport = {
+				...actionReport.data,
+				files: enabledFiles,
+				summary: {
+					...actionReport.data.summary,
+					files: enabledFiles.length,
+					autoFixEligible: eligibleCount,
+				},
+			};
 			const freshness = checkActionableWarningsReportFresh({
-				report: actionReport.data,
+				report: eligibleReport,
 				currentProjectSeq: runtime.projectSeq,
 				getFileSeq: (filePath) => runtime.getFileSeq(filePath),
 			});
@@ -384,10 +424,10 @@ export async function handleAgentEnd({
 				// publishFormatStart — only fires when the report is fresh AND
 				// has at least one autofix-eligible warning, right before
 				// applyConservativeActionableWarningFixes actually starts.
-				if (actionReport.data.summary.autoFixEligible > 0) {
+				if (eligibleReport.summary.autoFixEligible > 0) {
 					publishAutofixStart({
 						cwd: ctxCwd ?? runtime.projectRoot,
-						paths: actionReport.data.files
+						paths: eligibleReport.files
 							.filter((file) =>
 								file.warnings.some(
 									(warning) =>
@@ -396,14 +436,14 @@ export async function handleAgentEnd({
 								),
 							)
 							.map((file) => file.filePath),
-						eligibleCount: actionReport.data.summary.autoFixEligible,
+						eligibleCount: eligibleReport.summary.autoFixEligible,
 						dbg,
 					});
 				}
 				const fixStart = Date.now();
 				const fixSummary = await applyConservativeActionableWarningFixes({
 					cwd: ctxCwd ?? runtime.projectRoot,
-					report: actionReport.data,
+					report: eligibleReport,
 					dbg,
 				});
 				for (const changedFile of fixSummary.changedFiles) {

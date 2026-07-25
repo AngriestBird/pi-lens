@@ -85,7 +85,7 @@ synchronization, lint dispatch, actionable warning reports, or diagnostics.
 Precedence, highest to lowest:
 
 1. Explicit disabling CLI flags (`--no-autoformat`, `--no-autofix`) — always win.
-2. Project `.pi-lens.json` — wins over the global default in **either**
+2. Nearest defining project `.pi-lens.json` — wins over the global default in **either**
    direction, including re-enabling a mutation path the user's global config
    disabled (maintainer decision: a repo's own contract for its own files
    takes precedence over a user's blanket preference; there is currently no
@@ -96,9 +96,12 @@ Precedence, highest to lowest:
    doesn't say.
 4. Built-in default (`format`/`autofix` on, `actionableWarnings.autoFix` off).
 
-Nested/monorepo layering (a package-local `.pi-lens.json` overriding the
-repo-root config's mutation controls for just its own subtree, the way
-`ignore` already layers) is not implemented yet — tracked in #792.
+In a monorepo, mutation controls use **closest-wins per flag**. For each edited
+file, pi-lens walks from its directory to the project root. The nearest config
+that explicitly defines a flag wins; omitted flags continue inheriting from
+ancestors. For example, `packages/generated/.pi-lens.json` may set only
+`"format": { "enabled": false }`: files in that package skip formatting while
+still inheriting the repo root's `autofix.enabled`.
 
 ### `ignore`
 

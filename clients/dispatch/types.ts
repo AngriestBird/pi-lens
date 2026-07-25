@@ -34,7 +34,7 @@ export interface ModifiedRange {
 // --- API Interface ---
 
 export interface PiAgentAPI {
-	getFlag(flag: string): string | boolean | undefined;
+	getFlag(flag: string, filePath?: string): string | boolean | undefined;
 }
 
 // --- Output Semantics ---

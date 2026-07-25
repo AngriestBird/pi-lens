@@ -30,11 +30,18 @@ export function createMcpHost(
 	const config = loadPiLensGlobalConfig();
 	const projectConfig = loadPiLensProjectConfig(projectRoot);
 	return {
-		getFlag(name: string): boolean | string | undefined {
+		getFlag(name: string, filePath?: string): boolean | string | undefined {
 			if (overrides && Object.hasOwn(overrides, name)) {
 				return overrides[name];
 			}
-			return resolvePiLensFlag(name, undefined, config, projectConfig);
+			return resolvePiLensFlag(
+				name,
+				undefined,
+				config,
+				projectConfig,
+				filePath,
+				projectRoot,
+			);
 		},
 	};
 }
