@@ -38,6 +38,10 @@ import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics
 import { reconcileScanDiagnostics } from "../clients/widget-state.js";
 import { baseName, compactRenderResult } from "./render-compact.js";
 import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
+import {
+	isWarmAttached,
+	tryWarmAttachedDiagnostics,
+} from "../clients/warm-attach.js";
 
 const LANG_EXTENSIONS: Record<string, string[]> = {
 	".ts": [".ts", ".tsx", ".mts", ".cts"],
@@ -259,6 +263,7 @@ async function mapWithConcurrency<R>(
 			if (
 				first &&
 				lspService &&
+				!isWarmAttached() &&
 				typeof lspService.ensureWarmForSweep === "function"
 			) {
 				await lspService.ensureWarmForSweep(first, { signal });
@@ -621,6 +626,32 @@ async function collectDiagnosticsForFile(
 	let usedTouch = false;
 	try {
 		content = fs.readFileSync(absPath, "utf-8");
+		if (isWarmAttached()) {
+			// The local sweep's default service wait is bounded to the same
+			// 15-second per-file envelope used by the workspace sweep. An explicit
+			// waitMs remains the tighter caller-selected cap.
+			const attachedBudgetMs = waitMs ?? 15_000;
+			const attached = await tryWarmAttachedDiagnostics(
+				absPath,
+				content,
+				attachedBudgetMs,
+				"sweep",
+			);
+			if (attached?.available) {
+				const scopedDiagnostics =
+					serverScope === "primary"
+						? attached.response.diagnostics.filter(
+								(item) => item.source === primaryServerId(absPath),
+							)
+						: attached.response.diagnostics;
+				const filtered = applyAuxiliarySuppressions(
+					scopedDiagnostics,
+					content,
+					{ fileRole: detectFileRole(absPath, content) },
+				);
+				return { diagnostics: filtered, timedOut: false, content };
+			}
+		}
 		const serviceWithTouch = lspService as NonNullable<
 			ReturnType<typeof getLSPService>
 		> & {

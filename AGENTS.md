@@ -225,6 +225,9 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   `instances.json`. The LSP runner sends versioned, content-hash-bound,
   deadline-bounded diagnostic touches to its PID-scoped endpoint
   (`clients/warm-attach.ts` + `clients/mcp/ipc.ts`) and skips local pre-warm.
+  `lens_diagnostics mode=full` and `lsp_diagnostics` sweeps use the same seam
+  per file and suppress local group warm-up, pre-open, and workspace pull while
+  attached; a mid-sweep promotion resumes locally from the failed file onward.
   Any timeout, IPC/schema/freshness failure, or incumbent loss permanently
   promotes that session to the unchanged local path (no flapping). Attached
   sessions never own the incumbent's registered children; the #661 reaper
