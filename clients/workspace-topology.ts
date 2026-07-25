@@ -1,0 +1,264 @@
+/**
+ * Shared, memoized workspace-topology snapshot service (#806).
+ *
+ * Several subsystems each performed their own independent per-directory
+ * marker walk (`.pi-lens.json` discovery in `project-lens-config.ts`,
+ * governing-tsconfig discovery in `review-graph/tsconfig-paths.ts`,
+ * workspace-manifest presence checks in `review-graph/workspace-modules.ts`)
+ * — each with its own probe pattern and its own (or no) invalidation. In a
+ * large monorepo the same directory chain got re-walked and re-stat'ed by
+ * several subsystems per edit.
+ *
+ * This module is the single seam: `getDirectoryMarkers(dir)` collects ALL
+ * markers a directory can carry in ONE `readdir` pass (not N `existsSync`
+ * probes), cached per directory and invalidated by the directory's own
+ * mtime (the pattern `project-lens-config.ts`'s `inDirDiscoveryCache`
+ * established for #804). `findNearestDirWithMarker` layers the shared
+ * upward-walk discipline (`walkUpDirs` + `isAtOrAboveHomeDir` ceiling, an
+ * explicit depth cap with cap-trip latency logging — no silent truncation)
+ * on top of that per-directory cache.
+ *
+ * `resetWorkspaceTopology()` is wired into the session-reset path
+ * (`runtime-session.ts`'s `handleSessionStart`) so a directory's markers
+ * (and every consumer's own downstream cache layered on top) are re-read
+ * fresh on the next session, without a full process restart.
+ *
+ * Root/language-root resolution is NOT migrated here (#806 lists it as a
+ * later follow-up) — this module only indexes per-directory MARKERS, it
+ * does not decide what "the project root" is.
+ */
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { logLatency } from "./latency-logger.js";
+import { isAtOrAboveHomeDir, walkUpDirs } from "./path-utils.js";
+
+/** Depth cap on any upward marker walk — mirrors `findNearestMarkerRoot`'s bound. */
+const MAX_WALK_DEPTH = 64;
+
+const PI_LENS_CONFIG_BASENAMES = [".pi-lens.json", "pi-lens.json"] as const;
+
+/**
+ * Every marker pi-lens subsystems currently probe for, keyed by the basename
+ * on disk. Add a new marker here (not a private probe elsewhere) when a
+ * consumer needs another per-directory file presence check.
+ */
+export interface DirectoryMarkers {
+	dir: string;
+	/** mtime of the directory itself at scan time — the cache's invalidation key. */
+	dirMtimeMs: number;
+	/** Resolved path of `.pi-lens.json`, preferred over the no-dot fallback. */
+	piLensConfigPath: string | undefined;
+	tsconfigPath: string | undefined;
+	packageJsonPath: string | undefined;
+	pnpmWorkspaceYamlPath: string | undefined;
+	cargoTomlPath: string | undefined;
+	goWorkPath: string | undefined;
+}
+
+interface DirCacheEntry {
+	dirMtimeMs: number;
+	markers: DirectoryMarkers;
+}
+
+/** Per-directory marker cache — the shared seam every consumer reads through. */
+const dirMarkerCache = new Map<string, DirCacheEntry>();
+
+/** Cache for upward marker-walk results, keyed by `${startDir}\0${markerKey}`. */
+const walkCache = new Map<string, { dir: string | undefined; dirMtimes: Array<{ dir: string; mtimeMs: number }> }>();
+
+export function resetWorkspaceTopology(): void {
+	dirMarkerCache.clear();
+	walkCache.clear();
+}
+
+function safeDirMtimeMs(dir: string): number {
+	try {
+		return fs.statSync(dir).mtimeMs;
+	} catch {
+		return -1;
+	}
+}
+
+function safeIsFile(filePath: string): boolean {
+	try {
+		return fs.statSync(filePath).isFile();
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Single-pass marker scan for one directory: one `readdir` collects ALL
+ * markers pi-lens subsystems care about, cached and invalidated by the
+ * directory's own mtime (so an add/remove/rename inside `dir` — which bumps
+ * the directory's mtime on every platform pi-lens supports — drops the
+ * cached entry without a session restart).
+ */
+export function getDirectoryMarkers(dir: string): DirectoryMarkers {
+	const resolvedDir = path.resolve(dir);
+	const dirMtimeMs = safeDirMtimeMs(resolvedDir);
+	const cached = dirMarkerCache.get(resolvedDir);
+	if (cached && cached.dirMtimeMs === dirMtimeMs) {
+		return cached.markers;
+	}
+
+	let entries: fs.Dirent[] = [];
+	try {
+		entries = fs.readdirSync(resolvedDir, { withFileTypes: true });
+	} catch {
+		entries = [];
+	}
+	// `readdir`'s Dirent type does not follow symlinks (lstat semantics), so a
+	// symlinked marker file reports as neither file nor directory here. Track
+	// candidate names that exist as *some* dirent and resolve the handful of
+	// markers we actually care about with one confirming `stat` each — still
+	// a single directory listing, not N blind `existsSync` probes.
+	const present = new Set(entries.map((e) => e.name));
+
+	const resolveMarker = (basename: string): string | undefined => {
+		if (!present.has(basename)) return undefined;
+		const candidate = path.join(resolvedDir, basename);
+		return safeIsFile(candidate) ? candidate : undefined;
+	};
+
+	const piLensConfigPath =
+		resolveMarker(PI_LENS_CONFIG_BASENAMES[0]) ??
+		resolveMarker(PI_LENS_CONFIG_BASENAMES[1]);
+
+	const markers: DirectoryMarkers = {
+		dir: resolvedDir,
+		dirMtimeMs,
+		piLensConfigPath,
+		tsconfigPath: resolveMarker("tsconfig.json"),
+		packageJsonPath: resolveMarker("package.json"),
+		pnpmWorkspaceYamlPath: resolveMarker("pnpm-workspace.yaml"),
+		cargoTomlPath: resolveMarker("Cargo.toml"),
+		goWorkPath: resolveMarker("go.work"),
+	};
+	dirMarkerCache.set(resolvedDir, { dirMtimeMs, markers });
+	return markers;
+}
+
+function walkCacheKey(startDir: string, markerKey: keyof DirectoryMarkers): string {
+	return `${path.resolve(startDir)}\0${markerKey}`;
+}
+
+function walkStillFresh(dirMtimes: Array<{ dir: string; mtimeMs: number }>): boolean {
+	return dirMtimes.every(({ dir, mtimeMs }) => safeDirMtimeMs(dir) === mtimeMs);
+}
+
+/**
+ * Walk up from `startDir` looking for the nearest directory whose marker
+ * index has `markerKey` set (e.g. `"tsconfigPath"`, `"piLensConfigPath"`).
+ * Shared walk discipline (AGENTS.md invariants):
+ *   - Uses `walkUpDirs`, the single upward-climb primitive.
+ *   - Never resolves at or above `$HOME` via `isAtOrAboveHomeDir`.
+ *   - Depth-capped at `MAX_WALK_DEPTH`; a cap trip is logged as a latency
+ *     phase (not silently truncated) so a pathological deep tree is visible.
+ *
+ * Cached per `(startDir, markerKey)`, invalidated when any visited
+ * directory's mtime changes (the same "revalidate every dir on the path"
+ * pattern `project-lens-config.ts`'s `discoveryCache` established).
+ */
+export function findNearestDirWithMarker(
+	startDir: string,
+	markerKey: keyof Omit<DirectoryMarkers, "dir" | "dirMtimeMs">,
+	homeDir: string = os.homedir(),
+): string | undefined {
+	const key = walkCacheKey(startDir, markerKey);
+	const cached = walkCache.get(key);
+	if (cached && walkStillFresh(cached.dirMtimes)) {
+		return cached.dir;
+	}
+
+	const dirMtimes: Array<{ dir: string; mtimeMs: number }> = [];
+	let found: string | undefined;
+	let depth = 0;
+	for (const dir of walkUpDirs(startDir)) {
+		if (isAtOrAboveHomeDir(dir, homeDir)) break;
+		if (depth >= MAX_WALK_DEPTH) {
+			logLatency({
+				type: "phase",
+				filePath: startDir,
+				phase: "workspace-topology-walk-cap",
+				durationMs: 0,
+				metadata: { markerKey, depth, homeDir },
+			});
+			break;
+		}
+		const markers = getDirectoryMarkers(dir);
+		dirMtimes.push({ dir, mtimeMs: markers.dirMtimeMs });
+		if (markers[markerKey]) {
+			found = dir;
+			break;
+		}
+		depth += 1;
+	}
+
+	walkCache.set(key, { dir: found, dirMtimes });
+	return found;
+}
+
+export interface PiLensConfigMarker {
+	path: string;
+	dir: string;
+	mtimeMs: number;
+}
+
+/**
+ * `.pi-lens.json`/`pi-lens.json` directly IN `dir` — no upward walk. The
+ * shared-index equivalent of `project-lens-config.ts`'s old private
+ * `findPiLensConfigInDir` probe loop.
+ */
+export function findPiLensConfigMarkerInDir(dir: string): PiLensConfigMarker | undefined {
+	const markers = getDirectoryMarkers(dir);
+	if (!markers.piLensConfigPath) return undefined;
+	const stat = (() => {
+		try {
+			return fs.statSync(markers.piLensConfigPath!);
+		} catch {
+			return undefined;
+		}
+	})();
+	if (!stat?.isFile()) return undefined;
+	return { path: markers.piLensConfigPath, dir: markers.dir, mtimeMs: stat.mtimeMs };
+}
+
+/**
+ * Nearest directory (at or above `startDir`, home-guarded) that carries a
+ * `tsconfig.json` marker. The shared-index equivalent of
+ * `review-graph/tsconfig-paths.ts`'s old `findNearestContaining(key,
+ * ["tsconfig.json"])` call.
+ */
+export function findGoverningTsconfigDir(
+	startDir: string,
+	homeDir: string = os.homedir(),
+): string | undefined {
+	return findNearestDirWithMarker(startDir, "tsconfigPath", homeDir);
+}
+
+export interface WorkspaceManifestMarkers {
+	hasPnpmWorkspaceYaml: boolean;
+	hasGoWork: boolean;
+	hasCargoToml: boolean;
+	hasPackageJson: boolean;
+}
+
+/**
+ * Presence-only workspace manifest markers for `dir` — the shared-index
+ * equivalent of `workspace-modules.ts`'s old `detectWorkspaceType` probe
+ * (`pnpm-workspace.yaml` / `go.work` / `Cargo.toml` / `package.json`
+ * `existsSync` calls). Callers still read + parse the manifest CONTENT
+ * themselves (workspace globs, `[workspace]` section, `workspaces` field) —
+ * this only answers "is the marker file present".
+ */
+export function getWorkspaceManifestMarkers(dir: string): WorkspaceManifestMarkers {
+	const markers = getDirectoryMarkers(dir);
+	return {
+		hasPnpmWorkspaceYaml: markers.pnpmWorkspaceYamlPath !== undefined,
+		hasGoWork: markers.goWorkPath !== undefined,
+		hasCargoToml: markers.cargoTomlPath !== undefined,
+		hasPackageJson: markers.packageJsonPath !== undefined,
+	};
+}

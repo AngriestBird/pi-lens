@@ -10,6 +10,8 @@ import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
 import { getKnipIgnorePatterns } from "./file-utils.js";
+import { clearTsconfigPathsCache } from "./review-graph/tsconfig-paths.js";
+import { resetWorkspaceTopology } from "./workspace-topology.js";
 import { GitleaksClient, type GitleaksResult } from "./gitleaks-client.js";
 import { OpengrepClient, type OpengrepResult } from "./opengrep-client.js";
 import { TrivyClient, type TrivyResult } from "./trivy-client.js";
@@ -1247,6 +1249,14 @@ export async function handleSessionStart(
 	clearFileTimeSessions();
 	runtime.complexityBaselines.clear();
 	resetDispatchBaselines(ctxCwd);
+	// #806: drop the shared per-directory marker index (and any consumer
+	// cache layered on top, e.g. tsconfig-paths' matcher cache) so a
+	// `.pi-lens.json`/`tsconfig.json`/workspace-manifest edit made between
+	// sessions is picked up fresh instead of only on process restart — this
+	// also fixes #805's mid-session tsconfig staleness (the matcher cache was
+	// previously session-lived with no reset hook at all).
+	resetWorkspaceTopology();
+	clearTsconfigPathsCache();
 	runtime.resetForSession();
 
 	// Run log cleanup early in session start (non-blocking)
