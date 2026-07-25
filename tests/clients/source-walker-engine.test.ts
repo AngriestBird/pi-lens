@@ -21,6 +21,7 @@ import {
 	walkTreeStackSync,
 	type WalkDisposition,
 } from "../../clients/source-walker.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 const cleanups: Array<() => void> = [];
 
@@ -38,7 +39,7 @@ afterEach(() => {
  */
 function buildTree(): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "walker-engine-"));
-	cleanups.push(() => fs.rmSync(root, { recursive: true, force: true }));
+	cleanups.push(() => removeTempDirSync(root));
 	fs.writeFileSync(path.join(root, "a.txt"), "a");
 	fs.writeFileSync(path.join(root, "b.txt"), "b");
 	fs.mkdirSync(path.join(root, "dirA", "deep"), { recursive: true });

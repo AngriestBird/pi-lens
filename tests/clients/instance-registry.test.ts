@@ -11,6 +11,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTempDirSync } from "./test-utils.js";
 
 let dir: string;
 
@@ -25,7 +26,7 @@ describe("instance-registry", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(dir, { recursive: true, force: true });
+		removeTempDirSync(dir);
 	});
 
 	function registryFilePath(): string {

@@ -8,6 +8,7 @@ import {
 	applyWorkspaceEdit,
 	mergeWorkspaceTextEditsByPriority,
 } from "../../../clients/lsp/edits.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 describe("LSP workspace edits", () => {
 	it("throws a descriptive error for overlapping text edits", () => {
@@ -120,7 +121,7 @@ describe("LSP workspace edits", () => {
 				"Renamed old.ts → new.ts",
 			]);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 });

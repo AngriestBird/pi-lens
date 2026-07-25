@@ -14,6 +14,7 @@ import {
 	isBuildArtifact,
 	SOURCE_PRECEDENCE,
 } from "../clients/source-filter.js";
+import { removeTempDirSync } from "./clients/test-utils.js";
 
 /**
  * Probe counter shared with the `node:fs` mock below. `existsSync` can't be
@@ -53,7 +54,7 @@ function createTempDir(files: Record<string, string>): {
 	return {
 		dir,
 		cleanup: () => {
-			fs.rmSync(dir, { recursive: true, force: true });
+			removeTempDirSync(dir);
 		},
 	};
 }

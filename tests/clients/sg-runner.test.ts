@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTempDirSync } from "./test-utils.js";
 
 const safeSpawnAsync = vi.fn();
 const safeSpawn = vi.fn();
@@ -148,7 +149,7 @@ describe("SgRunner", () => {
 				expect(args).toContain("!profiles/**");
 				expect(args).toContain("!**/*.snap");
 			} finally {
-				fs.rmSync(root, { recursive: true, force: true });
+				removeTempDirSync(root);
 			}
 		});
 	});
@@ -259,7 +260,7 @@ describe("SgRunner", () => {
 				expect(result.error).toBeUndefined();
 				expect(result.matches).toHaveLength(1);
 			} finally {
-				fs.rmSync(root, { recursive: true, force: true });
+				removeTempDirSync(root);
 			}
 		});
 
@@ -285,7 +286,7 @@ describe("SgRunner", () => {
 				);
 				expect(allArgs).not.toContain("--update-all");
 			} finally {
-				fs.rmSync(root, { recursive: true, force: true });
+				removeTempDirSync(root);
 			}
 		});
 	});

@@ -10,12 +10,13 @@ import {
 	resolveLanguageRootForFile,
 } from "../../clients/language-profile.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 const dirs: string[] = [];
 
 afterEach(() => {
 	for (const dir of dirs.splice(0)) {
-		fs.rmSync(dir, { recursive: true, force: true });
+		removeTempDirSync(dir);
 	}
 });
 

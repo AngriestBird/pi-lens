@@ -8,6 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createMcpHost } from "../../../clients/mcp/host-shim.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 describe("createMcpHost", () => {
 	it("returns a PiAgentAPI with a getFlag method", () => {
@@ -69,8 +70,8 @@ describe("createMcpHost", () => {
 			expect(getFlag("no-autofix", projectA)).toBe(true);
 			expect(getFlag("no-autofix", projectB)).toBe(false);
 		} finally {
-			fs.rmSync(projectA, { recursive: true, force: true });
-			fs.rmSync(projectB, { recursive: true, force: true });
+			removeTempDirSync(projectA);
+			removeTempDirSync(projectB);
 		}
 	});
 
@@ -93,7 +94,7 @@ describe("createMcpHost", () => {
 			expect(host.getFlag("no-autofix")).toBe(true);
 			expect(host.getFlag("lens-actionable-warning-autofix")).toBe(false);
 		} finally {
-			fs.rmSync(projectRoot, { recursive: true, force: true });
+			removeTempDirSync(projectRoot);
 		}
 	});
 });

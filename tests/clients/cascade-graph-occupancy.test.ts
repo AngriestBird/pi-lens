@@ -30,6 +30,7 @@ import {
 	generateSourceTree,
 	measureMaxSyncBlockMs,
 } from "../support/perf-harness.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 // The async walk/stat yields every chunk, so its longest real sync block is
 // ~17-36ms at 1200 files (measured both standalone and inside vitest). The
@@ -52,7 +53,7 @@ beforeAll(() => {
 }, 60_000);
 
 afterAll(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	removeTempDirSync(tmpDir);
 });
 
 beforeEach(() => {

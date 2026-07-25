@@ -47,6 +47,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WatchedFilesQueue } from "../../../clients/lsp/watch-queue.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -76,7 +77,7 @@ describe("runWorkspaceDiagnostics — batch-open restores #271 coalescing for a 
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wsd-batchopen-"));
 	});
 
-	afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+	afterEach(() => removeTempDirSync(tmp));
 
 	it("fires the watched-files notification once for a sweep over N previously-unopened files, not once per file", async () => {
 		const fileNames = Array.from({ length: 20 }, (_, i) => `f${i}.ts`);
@@ -184,7 +185,7 @@ describe("runWorkspaceDiagnostics — pre-open is bounded, not just fast (#615)"
 	});
 
 	afterEach(() => {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		removeTempDirSync(tmp);
 		if (ORIGINAL_PER_FILE_MS === undefined) {
 			delete process.env.PI_LENS_LSP_WORKSPACE_PER_FILE_MS;
 		} else {

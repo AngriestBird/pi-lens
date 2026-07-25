@@ -24,6 +24,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
 import { collectSourceFiles } from "../../clients/source-filter.js";
 import { TreeSitterClient } from "../../clients/tree-sitter-client.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 let tmpDir: string;
 
@@ -63,7 +64,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	removeTempDirSync(tmpDir);
 	resetProjectLensConfigCache();
 });
 

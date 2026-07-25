@@ -26,6 +26,7 @@ import {
 	generateSourceTree,
 	measureMaxSyncBlockMs,
 } from "../support/perf-harness.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 // The pre-#368 non-yielding walk at the cap was ~130ms local / 300-500ms CI; the
 // yielding walk holds the loop only for one ~500-file chunk (~tens of ms). 100ms
@@ -43,7 +44,7 @@ beforeAll(() => {
 }, 60_000);
 
 afterAll(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	removeTempDirSync(tmpDir);
 });
 
 describe(`tool_result snapshot walk occupancy (~${TREE_SIZE} files)`, () => {

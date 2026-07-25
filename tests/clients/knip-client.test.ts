@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { KnipClient } from "../../clients/knip-client.js";
-import { setupTestEnvironment } from "./test-utils.js";
+import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
 vi.mock("../../clients/safe-spawn.js", () => ({
 	safeSpawnAsync: vi.fn(async () => ({
@@ -91,7 +91,7 @@ describe("knip-client", () => {
 
 			expect(client.resolveProjectRoot(nested, home)).toBeNull();
 		} finally {
-			fs.rmSync(tmpRoot, { recursive: true, force: true });
+			removeTempDirSync(tmpRoot);
 		}
 	});
 
@@ -113,7 +113,7 @@ describe("knip-client", () => {
 
 			expect(client.resolveProjectRoot(home, home)).toBeNull();
 		} finally {
-			fs.rmSync(tmpRoot, { recursive: true, force: true });
+			removeTempDirSync(tmpRoot);
 		}
 	});
 
@@ -155,7 +155,7 @@ describe("knip-client", () => {
 			const resolved = client.resolveProjectRoot(nested);
 			expect(resolved).not.toBe(nested);
 		} finally {
-			fs.rmSync(tmpRoot, { recursive: true, force: true });
+			removeTempDirSync(tmpRoot);
 		}
 	});
 
@@ -190,7 +190,7 @@ describe("knip-client", () => {
 			expect(result.summary).toMatch(/skipped|no project/i);
 			expect(runSpy).not.toHaveBeenCalled();
 		} finally {
-			fs.rmSync(tmpRoot, { recursive: true, force: true });
+			removeTempDirSync(tmpRoot);
 			vi.restoreAllMocks();
 		}
 	});

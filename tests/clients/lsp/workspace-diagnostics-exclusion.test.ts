@@ -18,6 +18,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { __collectWorkspaceDiagnosticFilesForTest } from "../../../clients/lsp/index.js";
 import { resetProjectLensConfigCache } from "../../../clients/project-lens-config.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 let tmpDir: string;
 
@@ -31,7 +32,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	removeTempDirSync(tmpDir);
 	resetProjectLensConfigCache();
 });
 

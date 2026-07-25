@@ -18,6 +18,7 @@ import {
 	getAstGrepRuleSources,
 	resolveBaselineSgconfig,
 } from "../../clients/sgconfig.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 const PRIMARY_RULES = path.join("rules", "ast-grep-rules", "rules");
 const SECONDARY_RULES = path.join(
@@ -173,18 +174,9 @@ afterEach(() => {
 		// Windows: the raw ast-grep LSP child spawned by the cliIt case can still
 		// hold a handle on the temp dir when teardown runs, making rmSync throw
 		// EPERM (teardown-only — the test's assertions have already passed).
-		// Retry briefly, then swallow: a leaked tmp dir is harmless, a red run
-		// from teardown is not.
-		try {
-			fs.rmSync(root, {
-				recursive: true,
-				force: true,
-				maxRetries: 5,
-				retryDelay: 100,
-			});
-		} catch {
-			// leave the tmp dir for the OS temp cleaner
-		}
+		// The shared helper's retry+warn (#810) swallows a final failure: a
+		// leaked tmp dir is harmless, a red run from teardown is not.
+		removeTempDirSync(root);
 	}
 });
 

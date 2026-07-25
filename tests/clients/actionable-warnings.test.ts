@@ -11,6 +11,7 @@ import {
 	type ActionableWarningsReport,
 } from "../../clients/actionable-warnings.js";
 import type { Diagnostic } from "../../clients/dispatch/types.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 vi.mock("../../clients/lsp/index.js", () => ({
 	getLSPService: () => ({
@@ -142,7 +143,7 @@ describe("actionable warnings", () => {
 				"Fixable warnings introduced this turn: 1",
 			);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTempDirSync(cwd);
 		}
 	});
 });

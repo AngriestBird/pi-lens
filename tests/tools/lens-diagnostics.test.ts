@@ -9,6 +9,7 @@ import {
 	_resetStateCacheForTests,
 } from "../../clients/diagnostic-dispositions.js";
 import { resetProjectLensConfigCache } from "../../clients/project-lens-config.js";
+import { removeTempDirSync } from "../clients/test-utils.js";
 
 const projectDiagnosticsMocks = vi.hoisted(() => ({
 	scanProjectDiagnostics: vi.fn(),
@@ -127,7 +128,7 @@ function withIgnoredFixture<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
 	);
 	resetProjectLensConfigCache();
 	return fn(cwd).finally(() => {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		removeTempDirSync(cwd);
 		resetProjectLensConfigCache();
 	});
 }
@@ -848,7 +849,7 @@ describe("lens_diagnostics mode=full", () => {
 				(result.details as { totalBlocking?: number }).totalBlocking ?? 0,
 			).toBe(0);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTempDirSync(cwd);
 			resetProjectLensConfigCache();
 		}
 	});
@@ -1877,7 +1878,7 @@ describe("lens_diagnostics paths", () => {
 				expect.objectContaining({ files: [fileA, fileB] }),
 			);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTempDirSync(cwd);
 		}
 	});
 
@@ -1912,7 +1913,7 @@ describe("lens_diagnostics paths", () => {
 			const passed = lspService.runWorkspaceDiagnostics.mock.calls[0][1];
 			expect(passed.files).toBeUndefined();
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTempDirSync(cwd);
 		}
 	});
 
@@ -1941,7 +1942,7 @@ describe("lens_diagnostics paths", () => {
 			expect(passed.files).toEqual([]);
 			expect(String(result.content[0].text)).toContain("deleted.ts");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTempDirSync(cwd);
 		}
 	});
 
@@ -2002,7 +2003,7 @@ describe("lens_diagnostics paths", () => {
 			expect(text).toContain("kept finding");
 			expect(text).not.toContain("excluded finding");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTempDirSync(cwd);
 		}
 	});
 
@@ -2054,7 +2055,7 @@ describe("lens_diagnostics paths", () => {
 			expect(text).toContain("keep.ts");
 			expect(text).not.toContain("outside.ts");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTempDirSync(cwd);
 		}
 	});
 
@@ -2094,7 +2095,7 @@ describe("lens_diagnostics paths", () => {
 			expect(text).toContain("not found");
 			expect(text).toContain("deleted-but-staged.ts");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			removeTempDirSync(cwd);
 		}
 	});
 });
@@ -2182,7 +2183,7 @@ describe("lens_diagnostics disposition read-filter (#755)", () => {
 		else process.env.PILENS_DATA_DIR = ddPrevDataDir;
 		_resetDeferredForTests();
 		_resetStateCacheForTests();
-		fs.rmSync(ddTmp, { recursive: true, force: true });
+		removeTempDirSync(ddTmp);
 	});
 
 	function markTool() {

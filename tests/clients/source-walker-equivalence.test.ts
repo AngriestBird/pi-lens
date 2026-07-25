@@ -37,6 +37,7 @@ import {
 	countSourceFilesWithinLimit,
 	countSourceFilesWithinLimitAsync,
 } from "../../clients/startup-scan.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 let tmpDir: string;
 
@@ -104,7 +105,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	removeTempDirSync(tmpDir);
 	_resetGeneratedArtifactCaches();
 });
 

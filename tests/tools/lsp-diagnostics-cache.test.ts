@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTempDirSync } from "../clients/test-utils.js";
 
 const mocked = vi.hoisted(() => ({ service: null as unknown }));
 const { getServersForFileWithConfig } = vi.hoisted(() => ({
@@ -74,7 +75,7 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		removeTempDirSync(tmpDir);
 	});
 
 	function writeFiles(names: string[]): string[] {

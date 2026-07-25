@@ -16,6 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { removeTempDirSync } from "../clients/test-utils.js";
 
 const SCRIPT = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
@@ -197,7 +198,7 @@ describe("analyze-pi-lens-logs.mjs", () => {
 	});
 
 	afterAll(() => {
-		fs.rmSync(root, { recursive: true, force: true });
+		removeTempDirSync(root);
 	});
 
 	it("discovers and parses the two new sources", () => {

@@ -10,6 +10,7 @@ import {
 } from "../../clients/diagnostic-dispositions.js";
 import { clearWidgetState, recordDiagnostics } from "../../clients/widget-state.js";
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
+import { removeTempDirSync } from "../clients/test-utils.js";
 
 let tmpDir: string;
 let previousDataDir: string | undefined;
@@ -26,7 +27,7 @@ beforeEach(() => {
 afterEach(() => {
 	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 	else process.env.PILENS_DATA_DIR = previousDataDir;
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	removeTempDirSync(tmpDir);
 	clearWidgetState();
 });
 

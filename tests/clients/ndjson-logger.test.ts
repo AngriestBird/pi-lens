@@ -6,6 +6,7 @@ import {
 	_exitFlushersForTest,
 	createNdjsonLogger,
 } from "../../clients/ndjson-logger.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 let tmpDir: string;
 let logFile: string;
@@ -17,7 +18,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	try {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		removeTempDirSync(tmpDir);
 	} catch {}
 });
 

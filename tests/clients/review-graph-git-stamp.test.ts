@@ -17,6 +17,7 @@ import {
 	resolveGitIdentity,
 } from "../../clients/review-graph/git-identity.js";
 import * as latencyLogger from "../../clients/latency-logger.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 // Mock out the expensive file system scanning — we only care about persist/
 // stamp behaviour, not real symbol extraction.
@@ -72,7 +73,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	for (const dir of dirs.splice(0)) {
-		fs.rmSync(dir, { recursive: true, force: true });
+		removeTempDirSync(dir);
 	}
 	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 	else process.env.PILENS_DATA_DIR = previousDataDir;

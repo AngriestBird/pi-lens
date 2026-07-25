@@ -30,6 +30,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WatchedFilesQueue } from "../../../clients/lsp/watch-queue.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -61,7 +62,7 @@ describe("runWorkspaceDiagnostics — pre-open is chunked, not whole-group (#621
 	});
 
 	afterEach(() => {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		removeTempDirSync(tmp);
 		if (ORIGINAL_CHUNK_ENV === undefined) {
 			delete process.env.PI_LENS_LSP_WORKSPACE_PREOPEN_CHUNK;
 		} else {

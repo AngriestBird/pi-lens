@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
 import { createPiMock } from "./support/pi-mock.js";
+import { removeTempDirSync } from "./clients/test-utils.js";
 
 // This suite predates the consolidated harness and is written against the
 // legacy `{ pi, handlers, commands }` shape. Adapt the canonical createPiMock
@@ -134,7 +135,7 @@ describe("index.ts integration", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		removeTempDirSync(tmpDir);
 		if (originalStartupMode === undefined)
 			delete process.env.PI_LENS_STARTUP_MODE;
 		else process.env.PI_LENS_STARTUP_MODE = originalStartupMode;
@@ -1076,7 +1077,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		removeTempDirSync(tmpDir);
 		if (originalStartupMode === undefined)
 			delete process.env.PI_LENS_STARTUP_MODE;
 		else process.env.PI_LENS_STARTUP_MODE = originalStartupMode;

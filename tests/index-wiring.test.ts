@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
 import extension from "../index.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
+import { removeTempDirSync } from "./clients/test-utils.js";
 
 // #643: the dynamic-tool-deactivation call now runs inside the session_start
 // handler rather than synchronously at registration time (see index.ts), so
@@ -186,7 +187,7 @@ describe("index.ts extension wiring", () => {
 			} finally {
 				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = prevDataDir;
-				fs.rmSync(tmp, { recursive: true, force: true });
+				removeTempDirSync(tmp);
 			}
 		});
 
@@ -219,7 +220,7 @@ describe("index.ts extension wiring", () => {
 			} finally {
 				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 				else process.env.PILENS_DATA_DIR = prevDataDir;
-				fs.rmSync(tmp, { recursive: true, force: true });
+				removeTempDirSync(tmp);
 			}
 		});
 
@@ -285,7 +286,7 @@ describe("index.ts extension wiring", () => {
 		afterEach(() => {
 			if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 			else process.env.PILENS_DATA_DIR = prevDataDir;
-			fs.rmSync(tmp, { recursive: true, force: true });
+			removeTempDirSync(tmp);
 		});
 
 		function seedTurnEndFindings(cwd: string, content: string): void {

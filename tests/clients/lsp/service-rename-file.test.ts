@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { LSPService } from "../../../clients/lsp/index.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
+import { removeTempDirSync } from "../test-utils.js";
 
 type MockRenameClient = {
 	root: string;
@@ -97,7 +98,7 @@ describe("LSPService.renameFile", () => {
 			expect(primary.didRenameFiles).toHaveBeenCalledWith(oldPath, newPath);
 			expect(secondary.didRenameFiles).toHaveBeenCalledWith(oldPath, newPath);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -125,7 +126,7 @@ describe("LSPService.renameFile", () => {
 			expect(fs.existsSync(oldPath)).toBe(true);
 			expect(fs.existsSync(newPath)).toBe(false);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -150,7 +151,7 @@ describe("LSPService.renameFile", () => {
 				"export const value = 1;\n",
 			);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -199,7 +200,7 @@ describe("LSPService.renameFile", () => {
 			expect(success.didRenameFiles).toHaveBeenCalledWith(oldPath, newPath);
 			expect(failing.didRenameFiles).toHaveBeenCalledWith(oldPath, newPath);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -225,7 +226,7 @@ describe("LSPService.renameFile", () => {
 			expect(fs.existsSync(newPath)).toBe(false);
 			expect(failing.didRenameFiles).not.toHaveBeenCalled();
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -254,7 +255,7 @@ describe("LSPService.renameFile", () => {
 			expect(fs.existsSync(oldPath)).toBe(false);
 			expect(fs.existsSync(newPath)).toBe(true);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 });

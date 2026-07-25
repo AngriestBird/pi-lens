@@ -9,6 +9,7 @@ import {
 	collectSourceFilesWithBudgetAsync,
 	DEFAULT_MAX_SCAN_ENTRIES,
 } from "../clients/source-filter.js";
+import { removeTempDirSync } from "./clients/test-utils.js";
 
 /**
  * Entry-budget bound for the collect walks (#760, the #758 escape class).
@@ -33,7 +34,7 @@ afterEach(() => {
  */
 function createMixedTree(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "source-filter-budget-"));
-	cleanups.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+	cleanups.push(() => removeTempDirSync(dir));
 
 	fs.writeFileSync(path.join(dir, "main.ts"), "export const a = 1;\n");
 	for (let d = 0; d < 4; d++) {

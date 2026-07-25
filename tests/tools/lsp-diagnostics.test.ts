@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTempDirSync } from "../clients/test-utils.js";
 
 const mocked = vi.hoisted(() => ({
 	service: null as unknown,
@@ -99,7 +100,7 @@ describe("lsp_diagnostics tool", () => {
 				(mocked.service as { openFile: ReturnType<typeof vi.fn> }).openFile,
 			).toHaveBeenCalledTimes(2);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -159,7 +160,7 @@ describe("lsp_diagnostics tool", () => {
 			expect(result.details?.mode).toBe("directory");
 			expect(result.details?.totalDiagnostics).toBe(0);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -210,7 +211,7 @@ describe("lsp_diagnostics tool", () => {
 			);
 			expect(opened).toEqual(["src/good.ts"]);
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -262,7 +263,7 @@ describe("lsp_diagnostics tool", () => {
 			if (prevConfig === undefined) delete process.env.PI_LENS_CONFIG_PATH;
 			else process.env.PI_LENS_CONFIG_PATH = prevConfig;
 			resetProjectLensConfigCache();
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			removeTempDirSync(tmpDir);
 		}
 	});
 
@@ -312,7 +313,7 @@ describe("lsp_diagnostics tool", () => {
 					"No diagnostics found.",
 				);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -340,7 +341,7 @@ describe("lsp_diagnostics tool", () => {
 					"Primary LSP (typescript): confirmed clean.\n\nNo auxiliary findings.",
 				);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -378,7 +379,7 @@ describe("lsp_diagnostics tool", () => {
 					"No diagnostics found.",
 				);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -410,7 +411,7 @@ describe("lsp_diagnostics tool", () => {
 					"No diagnostics found.",
 				);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -498,7 +499,7 @@ describe("lsp_diagnostics tool", () => {
 					"Primary LSP (typescript): confirmed clean.\n\nNo auxiliary findings.",
 				);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -548,7 +549,7 @@ describe("lsp_diagnostics tool", () => {
 					character: 8,
 				});
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -581,7 +582,7 @@ describe("lsp_diagnostics tool", () => {
 				expect(result.details?.unconfirmed).toBe(true);
 				expect(String(result.content[0]?.text)).toContain("unconfirmed");
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -613,7 +614,7 @@ describe("lsp_diagnostics tool", () => {
 				expect(result.details?.unconfirmed).toBe(true);
 				expect(executeCommand).not.toHaveBeenCalled();
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -639,7 +640,7 @@ describe("lsp_diagnostics tool", () => {
 				expect(result.isError).toBeUndefined();
 				expect(result.details?.unconfirmed).toBe(true);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -676,7 +677,7 @@ describe("lsp_diagnostics tool", () => {
 				expect(getAdvertisedCommands).not.toHaveBeenCalled();
 				expect(executeCommand).not.toHaveBeenCalled();
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 	});
@@ -719,7 +720,7 @@ describe("lsp_diagnostics tool", () => {
 					"No diagnostics found.",
 				);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -749,7 +750,7 @@ describe("lsp_diagnostics tool", () => {
 					"Primary LSP (typescript): confirmed clean.\n\nNo auxiliary findings.",
 				);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -790,7 +791,7 @@ describe("lsp_diagnostics tool", () => {
 				expect(result.details?.timedOutFiles).toBe(1);
 				expect(String(result.content[0]?.text)).toContain("timed out");
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 	});
@@ -835,7 +836,7 @@ describe("lsp_diagnostics tool", () => {
 					}),
 				]);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -859,7 +860,7 @@ describe("lsp_diagnostics tool", () => {
 
 				expect(reconcileScanDiagnosticsMock).not.toHaveBeenCalled();
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -888,7 +889,7 @@ describe("lsp_diagnostics tool", () => {
 
 				expect(reconcileScanDiagnosticsMock).not.toHaveBeenCalled();
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -917,7 +918,7 @@ describe("lsp_diagnostics tool", () => {
 				expect(confirmed).toBe(true);
 				expect(diags).toEqual([]);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -945,7 +946,7 @@ describe("lsp_diagnostics tool", () => {
 				);
 				expect(reconciledPaths.sort()).toEqual([bad, good].sort());
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 	});
@@ -996,7 +997,7 @@ describe("lsp_diagnostics tool", () => {
 					"Primary LSP (typescript): confirmed clean.\n\nNo auxiliary findings.",
 				);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -1023,7 +1024,7 @@ describe("lsp_diagnostics tool", () => {
 				expect(result.isError).toBeUndefined();
 				expect(result.details?.totalDiagnostics).toBe(1);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -1054,7 +1055,7 @@ describe("lsp_diagnostics tool", () => {
 				expect(result.isError).toBeUndefined();
 				expect(result.details?.totalDiagnostics).toBe(1);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 	});
@@ -1121,7 +1122,7 @@ describe("lsp_diagnostics tool", () => {
 				expect(text).toContain("not assignable");
 				expect(text).toContain("nested ternaries");
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -1159,7 +1160,7 @@ describe("lsp_diagnostics tool", () => {
 						.getDiagnostics,
 				).not.toHaveBeenCalled();
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -1218,7 +1219,7 @@ describe("lsp_diagnostics tool", () => {
 					"aux finding that primary scope must never see",
 				);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -1249,7 +1250,7 @@ describe("lsp_diagnostics tool", () => {
 				expect(result.details?.totalDiagnostics).toBe(1);
 				expect(String(result.content[0]?.text)).toContain("not assignable");
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -1282,7 +1283,7 @@ describe("lsp_diagnostics tool", () => {
 						.getDiagnostics,
 				).not.toHaveBeenCalled();
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -1311,7 +1312,7 @@ describe("lsp_diagnostics tool", () => {
 				expect(touchFile).not.toHaveBeenCalled();
 				expect(getDiagnostics).toHaveBeenCalledWith(clean, "full");
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 
@@ -1376,7 +1377,7 @@ describe("lsp_diagnostics tool", () => {
 					text.indexOf("Auxiliary findings"),
 				);
 			} finally {
-				fs.rmSync(tmpDir, { recursive: true, force: true });
+				removeTempDirSync(tmpDir);
 			}
 		});
 	});

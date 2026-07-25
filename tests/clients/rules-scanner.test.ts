@@ -7,6 +7,7 @@ import {
 	scanProjectRules,
 	type RuleScanResult,
 } from "../../clients/rules-scanner.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 function makeResult(count: number): RuleScanResult {
 	return {
@@ -45,7 +46,7 @@ describe("rules-scanner depth cap (#250/#747 class)", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		removeTempDirSync(tmp);
 	});
 
 	it("stops recursing past the depth cap while keeping shallow rules", () => {

@@ -9,6 +9,7 @@ import {
 	clearReviewGraphWorkspaceCache,
 	getLastGraphBuildInfo,
 } from "../../clients/review-graph/builder.js";
+import { removeTempDirSync } from "./test-utils.js";
 
 // Mock out the expensive file system scanning — we only care about cache behaviour
 vi.mock("../../clients/scan-utils.js", () => ({
@@ -24,7 +25,7 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 
 	afterEach(() => {
 		for (const dir of dirs.splice(0)) {
-			fs.rmSync(dir, { recursive: true, force: true });
+			removeTempDirSync(dir);
 		}
 	});
 

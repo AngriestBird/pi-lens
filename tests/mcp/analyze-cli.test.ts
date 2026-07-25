@@ -10,6 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { removeTempDirSync } from "../clients/test-utils.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const binJs = path.join(repoRoot, "mcp", "analyze-cli.js");
@@ -56,7 +57,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+	removeTempDirSync(tmpDir);
 });
 
 // Spawns a real node subprocess that loads the engine (tree-sitter/native) and

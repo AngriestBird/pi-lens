@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _resetSubagentModeForTests } from "../clients/subagent-mode.js";
 import { createPiMock } from "./support/pi-mock.js";
+import { removeTempDirSync } from "./clients/test-utils.js";
 
 const INTEGRATION_TIMEOUT_MS = 45_000;
 
@@ -55,7 +56,7 @@ describe("index.ts LSP idle reset", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		removeTempDirSync(tmpDir);
 		vi.unstubAllEnvs();
 		vi.restoreAllMocks();
 	});
