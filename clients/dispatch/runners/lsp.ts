@@ -28,7 +28,14 @@ import {
 	retagAuxiliaryDiagnostics,
 } from "../auxiliary-lsp.js";
 import { readFileContent } from "./utils.js";
-import { tryWarmAttachedDiagnostics } from "../../warm-attach.js";
+import {
+	tryWarmAttachedCodeActions,
+	tryWarmAttachedDiagnostics,
+} from "../../warm-attach.js";
+import {
+	contentHash,
+	WARM_CODE_ACTION_LOOKUP_LIMIT,
+} from "../../mcp/ipc.js";
 
 const LSP_MAX_FILE_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
 const LSP_MAX_FILE_LINES = RUNTIME_CONFIG.pipeline.lspMaxFileLines;
@@ -40,7 +47,6 @@ const LSP_SPAWN_BUDGET_MS = RUNTIME_CONFIG.pipeline.lspSpawnBudgetMs;
 // after the cap still land in the client's cache and surface on the
 // next edit. Overridable via PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS.
 const LSP_DIAGNOSTICS_WAIT_MS = 2500;
-const MAX_CODE_ACTION_LOOKUPS = 6;
 const MAX_CODE_ACTION_TITLES = 3;
 
 function normalizeActionTitle(title: string): string {
@@ -258,13 +264,33 @@ const lspRunner: RunnerDefinition = {
 		const blockingDiagIndexes = validLspDiags
 			.map((d, idx) => ({ d, idx }))
 			.filter(({ d }) => d.severity === 1)
-			.slice(0, MAX_CODE_ACTION_LOOKUPS);
+			.slice(0, WARM_CODE_ACTION_LOOKUP_LIMIT);
 
-		await Promise.all(
-			usedWarmAttach
-				? []
-				:
-			blockingDiagIndexes.map(async ({ d, idx }) => {
+		if (usedWarmAttach) {
+			// Diagnostics have already succeeded. Code actions are optional
+			// enrichment, so ANY IPC failure degrades to today's skip without
+			// promoting the attached session to a local LSP fleet.
+			const ranges = blockingDiagIndexes.map(({ d }) => ({
+				start: d.range.start,
+				end: d.range.end ?? d.range.start,
+			}));
+			const result = await tryWarmAttachedCodeActions(
+				ctx.filePath,
+				contentHash(content),
+				ranges,
+				LSP_DIAGNOSTICS_WAIT_MS,
+			);
+			if (result?.available) {
+				result.response.actions.forEach((actions, responseIndex) => {
+					const diagnosticIndex = blockingDiagIndexes[responseIndex]?.idx;
+					const suggestion = buildCodeActionSuggestion(actions);
+					if (diagnosticIndex !== undefined && suggestion) {
+						fixSuggestionByIndex.set(diagnosticIndex, suggestion);
+					}
+				});
+			}
+		} else {
+			await Promise.all(blockingDiagIndexes.map(async ({ d, idx }) => {
 				try {
 					const start = d.range.start;
 					const end = d.range.end ?? d.range.start;
@@ -282,8 +308,8 @@ const lspRunner: RunnerDefinition = {
 				} catch {
 					// Best-effort enrichment only; base diagnostics remain authoritative.
 				}
-			}),
-		);
+			}));
+		}
 
 		const diagnostics: Diagnostic[] = convertLspDiagnostics(
 			validLspDiags,

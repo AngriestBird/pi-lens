@@ -15,6 +15,7 @@ import {
 	contentHash,
 	diagnosticsIpcPathForCwd,
 	ipcPathForCwd,
+	requestWarmCodeActions,
 	requestWarmDiagnostics,
 	requestWarmAnalyze,
 	WARM_DIAGNOSTICS_SCHEMA_VERSION,
@@ -119,6 +120,83 @@ describe("requestWarmDiagnostics", () => {
 		await expect(
 			requestWarmDiagnostics(cwd, pid, "/x/app.ts", "x", 20),
 		).resolves.toEqual({ available: false, reason: "timeout" });
+		removeTempDirSync(cwd);
+	});
+});
+
+describe("requestWarmCodeActions", () => {
+	it("round-trips versioned code actions bound to the diagnostics hash", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-actions-"));
+		const pid = 99004;
+		const expectedHash = contentHash("const x = 1;");
+		activeServer = net.createServer((socket) => {
+			socket.setEncoding("utf8");
+			socket.once("data", (chunk: string) => {
+				const request = JSON.parse(chunk.trim()) as {
+					route: string;
+					contentHash: string;
+					ranges: unknown[];
+				};
+				expect(request.route).toBe("code-actions");
+				expect(request.ranges).toHaveLength(1);
+				socket.end(
+					`${JSON.stringify({
+						result: {
+							route: "code-actions",
+							version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
+							contentHash: request.contentHash,
+							servedAt: Date.now(),
+							actions: [[{ title: "Fix it", kind: "quickfix" }]],
+						},
+					})}\n`,
+				);
+			});
+		});
+		await new Promise<void>((resolve) =>
+			activeServer?.listen(diagnosticsIpcPathForCwd(cwd, pid), resolve),
+		);
+		const result = await requestWarmCodeActions(
+			cwd,
+			pid,
+			"/x/app.ts",
+			expectedHash,
+			[
+				{
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 1 },
+				},
+			],
+			1000,
+		);
+		expect(result.available).toBe(true);
+		expect(result.available && result.response.actions[0]?.[0]?.title).toBe(
+			"Fix it",
+		);
+		removeTempDirSync(cwd);
+	});
+
+	it("rejects code-action schema skew", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-actions-skew-"));
+		const pid = 99005;
+		activeServer = net.createServer((socket) => {
+			socket.once("data", () =>
+				socket.end(
+					`${JSON.stringify({
+						result: {
+							route: "code-actions",
+							version: WARM_DIAGNOSTICS_SCHEMA_VERSION + 1,
+							actions: [],
+						},
+					})}\n`,
+				),
+			);
+		});
+		await new Promise<void>((resolve) =>
+			activeServer?.listen(diagnosticsIpcPathForCwd(cwd, pid), resolve),
+		);
+		await expect(
+			requestWarmCodeActions(cwd, pid, "/x/app.ts", "hash", [], 1000),
+		).resolves.toEqual({ available: false, reason: "schema-mismatch" });
 		removeTempDirSync(cwd);
 	});
 });
