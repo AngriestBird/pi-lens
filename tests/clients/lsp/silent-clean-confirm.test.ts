@@ -20,6 +20,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
@@ -73,8 +74,54 @@ function makeSilentPushOnlyClient(serverId: string, root: string) {
 				return undefined;
 			}),
 			getDiagnostics: vi.fn(() => []),
+			// #814: never-publishes means nothing lands in the per-file cache
+			// either — the aggregate gate's "still outstanding" check reads this
+			// (`getAllDiagnostics().has(normalizedPath)`), same as the real
+			// client's `clearDiagnosticsForPath`-then-nothing-arrived state.
+			getAllDiagnostics: vi.fn(() => new Map()),
 		},
 		waitCalls,
+	};
+}
+
+/**
+ * #814: a server that DOES answer — either with real findings or a confirmed
+ * empty result — resolving quickly regardless of the requested wait budget
+ * (mirrors a fast push/pull confirmation, like `service-touch-collect.test.ts`'s
+ * canned-resolve mocks). `getAllDiagnostics` reports a fresh per-file entry
+ * (the same cache the real client clears on notify and repopulates on a real
+ * publish/pull), which is exactly the "answered" signal the aggregate gate's
+ * still-outstanding check relies on.
+ */
+function makePublishingClient(
+	serverId: string,
+	root: string,
+	filePath: string,
+	diagnostics: unknown[],
+) {
+	return {
+		isAlive: () => true,
+		shutdown: async () => {},
+		getWorkspaceDiagnosticsSupport: () => ({
+			advertised: false,
+			mode: "push-only" as const,
+			diagnosticProviderKind: "none",
+		}),
+		getOperationSupport: () => ({}),
+		getAdvertisedCommands: () => [],
+		getRawCapabilityKeys: () => [],
+		getLaunchVariant: () => undefined,
+		serverId,
+		root,
+		notify: { open: vi.fn(async () => {}) },
+		waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
+		getDiagnostics: vi.fn(() => diagnostics),
+		getAllDiagnostics: vi.fn(
+			() =>
+				new Map([
+					[normalizeMapKey(filePath), { diags: diagnostics, ts: Date.now() }],
+				]),
+		),
 	};
 }
 
@@ -126,7 +173,7 @@ describe("touchFile silent-clean push-only confirm (#799)", () => {
 		expect(warmup.failedServerIds).toEqual([]);
 	});
 
-	it("a non-primary/multi-server touch does NOT take the silent-clean shortcut (stays inconclusive, matching pre-#799 behavior)", async () => {
+	it("a non-primary/multi-server touch does NOT take the SINGLE-SERVER silent-clean shortcut (stays inconclusive, matching pre-#799 behavior)", async () => {
 		const filePath = path.join(tmp, "a.md");
 		fs.writeFileSync(filePath, "# hi\n");
 		const marksman = makeServer("marksman", ".md", tmp);
@@ -148,9 +195,206 @@ describe("touchFile silent-clean push-only confirm (#799)", () => {
 			source: "test",
 		});
 
-		// Multi-server touches are deliberately excluded from the fast path
-		// (see the gate's `spawned.length === 1` condition) — a partial timeout
-		// across servers must stay cautious, so this still reports inconclusive.
+		// This #799 gate is scoped to `spawned.length === 1` and never fires
+		// here. #814's generalized `clientScope: "all"` gate (see the describe
+		// block below) DOES now consider multi-server "all" touches — but it
+		// only resolves early when EVERY still-outstanding server is tier3-
+		// silent, and `typos` is an ordinary push-only server (not marked
+		// `silentOnClean`), so this touch still correctly stays inconclusive
+		// rather than wrongly treating typos' silence as confirmed-clean.
+		expect((result as { inconclusive?: boolean }).inconclusive).toBe(true);
+	});
+});
+
+describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
+	let tmp: string;
+	beforeEach(() => {
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-silent-clean-agg-"));
+	});
+	afterEach(() => removeTempDirSync(tmp));
+
+	it("(a) scope-all: one server publishes, the silent one doesn't — resolves as CONFIRMED clean (not inconclusive), publisher's diagnostics kept", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const marksman = makeServer("marksman", ".md", tmp);
+		const typos = makeServer("typos", ".md", tmp);
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".md") ? [marksman, typos] : [],
+		);
+		const finding = {
+			severity: 2 as const,
+			message: "possible typo",
+			range: {
+				start: { line: 0, character: 2 },
+				end: { line: 0, character: 4 },
+			},
+			source: "typos",
+		};
+		createLSPClient.mockImplementation(async (opts: { serverId: string }) => {
+			if (opts.serverId === "typos") {
+				return makePublishingClient("typos", tmp, filePath, [finding]);
+			}
+			return makeSilentPushOnlyClient(opts.serverId, tmp).client;
+		});
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const result = await service.touchFile(filePath, "# hi\n", {
+			diagnostics: "document",
+			collectDiagnostics: true,
+			clientScope: "all",
+			source: "lens_diagnostics_full",
+		});
+
+		expect((result as { inconclusive?: boolean }).inconclusive).toBeUndefined();
+		expect(result).toEqual([finding]);
+	});
+
+	it("(b) scope-all: the silent server's notify write TIMED OUT — falls back to today's timeout/inconclusive behavior", async () => {
+		const prev = process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "50";
+		try {
+			const filePath = path.join(tmp, "a.md");
+			fs.writeFileSync(filePath, "# hi\n");
+			const marksman = makeServer("marksman", ".md", tmp);
+			const typos = makeServer("typos", ".md", tmp);
+			getServersForFileWithConfig.mockImplementation((fp: string) =>
+				fp.endsWith(".md") ? [marksman, typos] : [],
+			);
+			const finding = {
+				severity: 2 as const,
+				message: "possible typo",
+				range: {
+					start: { line: 0, character: 2 },
+					end: { line: 0, character: 4 },
+				},
+				source: "typos",
+			};
+			createLSPClient.mockImplementation(
+				async (opts: { serverId: string }) => {
+					if (opts.serverId === "typos") {
+						return makePublishingClient("typos", tmp, filePath, [finding]);
+					}
+					// marksman's notify.open never resolves — the write itself
+					// never lands, so its silence has no basis to be read as
+					// "saw the file and stayed quiet because it's clean".
+					const { client } = makeSilentPushOnlyClient("marksman", tmp);
+					client.notify.open = vi.fn(() => new Promise(() => {}));
+					return client;
+				},
+			);
+
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			const service = new LSPService();
+
+			const result = await service.touchFile(filePath, "# hi\n", {
+				diagnostics: "document",
+				collectDiagnostics: true,
+				clientScope: "all",
+				source: "lens_diagnostics_full",
+			});
+
+			expect((result as { inconclusive?: boolean }).inconclusive).toBe(true);
+		} finally {
+			if (prev === undefined) delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+			else process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = prev;
+		}
+	});
+
+	it("(c) scope-all: an ordinary push-only (non-silentOnClean) straggler still runs to cap and stays inconclusive — no behavior change", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const marksman = makeServer("marksman", ".md", tmp);
+		const typos = makeServer("typos", ".md", tmp);
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".md") ? [marksman, typos] : [],
+		);
+		// Both servers are silent — marksman IS tier3-silent, but typos is an
+		// ordinary push-only server (no `silentOnClean` marker in
+		// server-strategies.ts), so its silence is genuinely ambiguous and must
+		// not be treated as confirmed-clean.
+		createLSPClient.mockImplementation(async (opts: { serverId: string }) => {
+			return makeSilentPushOnlyClient(opts.serverId, tmp).client;
+		});
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const result = await service.touchFile(filePath, "# hi\n", {
+			diagnostics: "document",
+			collectDiagnostics: true,
+			clientScope: "all",
+			source: "lens_diagnostics_full",
+		});
+
+		expect((result as { inconclusive?: boolean }).inconclusive).toBe(true);
+	});
+
+	it("(d) scope-all: EVERY spawned server is silent+tier3-silent — resolves at the max of their budgets as CONFIRMED clean", async () => {
+		const filePath = path.join(tmp, "a.ts");
+		fs.writeFileSync(filePath, "const x = 1;\n");
+		const marksman = makeServer("marksman", ".ts", tmp);
+		const typescript = makeServer("typescript", ".ts", tmp);
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".ts") ? [marksman, typescript] : [],
+		);
+		createLSPClient.mockImplementation(async (opts: { serverId: string }) => {
+			return makeSilentPushOnlyClient(opts.serverId, tmp).client;
+		});
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const startedAt = Date.now();
+		const result = await service.touchFile(filePath, "const x = 1;\n", {
+			diagnostics: "document",
+			collectDiagnostics: true,
+			clientScope: "all",
+			source: "lens_diagnostics_full",
+		});
+		const elapsedMs = Date.now() - startedAt;
+
+		expect(Array.isArray(result)).toBe(true);
+		expect(result).toHaveLength(0);
+		expect((result as { inconclusive?: boolean }).inconclusive).toBeUndefined();
+		// marksman (1500ms) and typescript (1000ms) — the touch waits for the
+		// SLOWER of the two (marksman), not a shortened window.
+		expect(elapsedMs).toBeGreaterThanOrEqual(1490);
+	});
+
+	it("(e) scope-all: classification throws — fails safe to today's timeout/inconclusive behavior", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const marksman = makeServer("marksman", ".md", tmp);
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".md") ? [marksman] : [],
+		);
+		createLSPClient.mockImplementation(async () => {
+			const { client } = makeSilentPushOnlyClient("marksman", tmp);
+			// Force the capability-snapshot probe (`getCapabilitySnapshots`,
+			// which reads `getAdvertisedCommands()` per live client) to throw —
+			// the gate's try/catch must fail safe to today's inconclusive
+			// behavior rather than propagating the error.
+			client.getAdvertisedCommands = () => {
+				throw new Error("boom");
+			};
+			return client;
+		});
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const result = await service.touchFile(filePath, "# hi\n", {
+			diagnostics: "document",
+			collectDiagnostics: true,
+			clientScope: "all",
+			source: "lens_diagnostics_full",
+		});
+
 		expect((result as { inconclusive?: boolean }).inconclusive).toBe(true);
 	});
 });

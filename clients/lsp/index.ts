@@ -56,7 +56,10 @@ import {
 import {
 	attemptTsserverSyncDiagnostics,
 } from "./tsserver-sync.js";
-import { classifyCascadeWaitTier } from "./cascade-tier.js";
+import {
+	classifyCascadeWaitTier,
+	classifyServerWaitTier,
+} from "./cascade-tier.js";
 
 // --- Init override helpers ---
 
@@ -2002,6 +2005,78 @@ export class LSPService {
 					},
 				});
 			}
+
+			// #814: capability-aware AGGREGATE wait — generalize #799's
+			// single-server (`clientScope === "primary" && spawned.length === 1`)
+			// silent-clean confirm to multi-server `clientScope: "all"` touches
+			// (`lens_diagnostics` mode=full per-file sweep, `lsp_diagnostics`
+			// `serverScope: "all"`). #799's gate never fires here (it's scoped to
+			// the primary hot path), so a scope-"all" touch where every OTHER
+			// spawned server already answered but one push-only `silentOnClean`
+			// server (marksman on a clean markdown file) never publishes still
+			// reported the WHOLE touch `inconclusive`/`diagnosticsTimedOut` even
+			// though the "silence" is exactly what that server's own known
+			// clean-behavior predicts — not an unresolved question.
+			//
+			// A spawned server counts as "still outstanding" when nothing landed
+			// in its per-file diagnostics cache for THIS touch — `getAllDiagnostics`
+			// is keyed by file and `clearDiagnosticsForPath` (`client.ts`) deletes
+			// that file's entry as part of the didOpen/didChange this touch just
+			// sent, so a present entry can only be a FRESH answer (found or a real
+			// confirmed-empty push/pull), never a stale one bleeding through from
+			// an earlier touch. This is the same "did anything publish for this
+			// file since we asked" signal `cascade-tier.ts`'s Tier-3 reconcile
+			// already trusts (#240 doctrine) — reused here, not reinvented.
+			//
+			// The touch stays inconclusive unless EVERY still-outstanding server
+			// is classified `tier3-silent` (push-only + `silentOnClean`, the same
+			// `classifyServerWaitTier` rule the single-server gate below and the
+			// cascade lane use) — one ordinary push-only straggler (still
+			// genuinely analyzing) or a pull-capable server that never answered
+			// keeps the touch cautious, matching #799's "err toward caution"
+			// posture for partial timeouts. `!notifyWriteTimedOut` (touch-wide)
+			// plus the per-server re-check below are the same "the notify write
+			// must have actually landed" conservatism #799 established — a
+			// server's silence is only evidence of "clean" when we know it saw
+			// the new content.
+			if (diagnosticsTimedOut && !notifyWriteTimedOut && clientScope === "all") {
+				try {
+					const outstanding = spawned.filter(
+						(entry) =>
+							!notifyWriteTimedOutServerIds.includes(entry.info.id) &&
+							!entry.client.getAllDiagnostics().has(normalizedPath),
+					);
+					if (outstanding.length > 0) {
+						const snapshots = await this.getCapabilitySnapshots(filePath);
+						const allSilent = outstanding.every(
+							(entry) =>
+								classifyServerWaitTier(
+									entry.client.serverId,
+									snapshots.find((s) => s.serverId === entry.client.serverId),
+								) === "tier3-silent",
+						);
+						if (allSilent) {
+							diagnosticsTimedOut = false;
+							logLatency({
+								type: "phase",
+								phase: "lsp_silent_clean_confirm",
+								filePath: normalizedPath,
+								durationMs: Date.now() - startedAt,
+								metadata: {
+									source,
+									clientScope,
+									diagnosticsMode,
+									aggregate: true,
+									serverIds: outstanding.map((entry) => entry.client.serverId),
+								},
+							});
+						}
+					}
+				} catch {
+					// Fail-safe: leave `diagnosticsTimedOut` as-is — today's
+					// inconclusive behavior, exactly like the single-server gate.
+				}
+			}
 		}
 
 		// #707: when the racing sync confirm won the wait, its answer IS the
@@ -2094,6 +2169,15 @@ export class LSPService {
 		// `clientScope: "primary"` warm-up touch) so a multi-server
 		// with-auxiliary/all touch — where a partial timeout must stay
 		// cautious per the doc below — is never affected.
+		//
+		// #814: this is now a SPECIAL CASE of the more general per-server gate
+		// above (the `clientScope === "all"` block right before the diagnostics-
+		// wait `if` closes) — for `spawned.length === 1`, "every still-outstanding
+		// server is tier3-silent" collapses to exactly this single-server check.
+		// Left in place unchanged (rather than deleted/rewritten to delegate to
+		// the new gate) per #814's scope: a future cleanup could fold this block
+		// into the general one once both have soaked, but that's a separate,
+		// lower-risk follow-up, not bundled into this fix.
 		if (
 			diagnosticsTimedOut &&
 			!notifyWriteTimedOut &&
