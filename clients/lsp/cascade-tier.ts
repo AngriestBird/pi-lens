@@ -81,7 +81,7 @@ export function _resetTierAwareCascadeEnabledForTests(): void {
 	_enabledCache = undefined;
 }
 
-export type CascadeWaitTier = "tier3-silent" | "waits";
+export type CascadeWaitTier = "pull-capable" | "tier3-silent" | "waits";
 
 /**
  * Classify a SINGLE server (by id, given its live capability snapshot — or
@@ -101,7 +101,8 @@ export function classifyServerWaitTier(
 	if (!snapshot) return "waits"; // no live snapshot yet — fail-safe
 
 	const mode = snapshot.workspaceDiagnosticsSupport?.mode;
-	if (mode !== "push-only") return "waits"; // pull servers are always affirmative
+	if (mode === "pull") return "pull-capable";
+	if (mode !== "push-only") return "waits";
 
 	const strategy = getStrategy(serverId);
 	if (strategy.silentOnClean !== true) return "waits"; // 2*/unknown push-only

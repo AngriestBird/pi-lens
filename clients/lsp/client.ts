@@ -244,7 +244,7 @@ export interface LSPClientInfo {
 	waitForDiagnostics(
 		filePath: string,
 		timeoutMs?: number,
-		options?: { minVersion?: number },
+		options?: { minVersion?: number; pullOnly?: boolean },
 	): Promise<void>;
 	/** Get all tracked diagnostics with timestamps (for cascade checking) */
 	getAllDiagnostics(): Map<string, { diags: LSPDiagnostic[]; ts: number }>;
@@ -1205,7 +1205,7 @@ export async function clientWaitForDiagnostics(
 	state: LSPClientState,
 	filePath: string,
 	timeoutMs: number,
-	options: { minVersion?: number } = {},
+	options: { minVersion?: number; pullOnly?: boolean } = {},
 ): Promise<void> {
 	const normalizedPath = normalizeMapKey(filePath);
 	const minVersion = options.minVersion;
@@ -1260,6 +1260,7 @@ export async function clientWaitForDiagnostics(
 			);
 			if (outcome.status === "clean") sawClean = true;
 		}
+		if (options.pullOnly) return;
 		if (outcome.status === "found" || sawClean) return;
 	}
 

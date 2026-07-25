@@ -22,6 +22,7 @@ import { recordLsp } from "../widget-state.js";
 import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { logLatency } from "../latency-logger.js";
+import { shouldPreferPullOnlyDiagnostics } from "../lsp-budget.js";
 import { withDeadline } from "../deadline-utils.js";
 import {
 	isAtOrAboveHomeDir,
@@ -1822,15 +1823,35 @@ export class LSPService {
 
 			// Per-server wait promises (each already bounded by its own
 			// perServerTimeout — unchanged from before R8).
+			let pressureSnapshots: LSPCapabilitySnapshot[] = [];
+			if (shouldPreferPullOnlyDiagnostics()) {
+				try {
+					pressureSnapshots = await this.getCapabilitySnapshots(filePath);
+				} catch {
+					// Fail-open: missing capability state keeps today's push fallback.
+				}
+			}
 			const perServerWaits = spawned.map((entry) => {
 				const serverTimeout = timeoutFor(entry.client.serverId);
 				const baseline = diagnosticBaselines.get(entry.client);
+				const pullOnly =
+					classifyServerWaitTier(
+						entry.client.serverId,
+						pressureSnapshots.find(
+							(snapshot) => snapshot.serverId === entry.client.serverId,
+						),
+					) === "pull-capable";
 				const wait =
 					!notifySkipped && Number.isFinite(baseline)
 						? entry.client.waitForDiagnostics(filePath, serverTimeout, {
 								minVersion: baseline,
+								...(pullOnly && { pullOnly: true }),
 							})
-						: entry.client.waitForDiagnostics(filePath, serverTimeout);
+						: pullOnly
+							? entry.client.waitForDiagnostics(filePath, serverTimeout, {
+									pullOnly: true,
+								})
+							: entry.client.waitForDiagnostics(filePath, serverTimeout);
 				return wait.catch(() => undefined);
 			});
 

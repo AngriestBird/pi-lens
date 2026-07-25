@@ -60,6 +60,76 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 		createLSPClient.mockReset();
 	});
 
+	it("uses pull-only diagnostics for a pull-capable server under budget pressure", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const {
+			checkCrossProcessLspBudget,
+			_resetLspBudgetDecisionForTests,
+		} = await import("../../../clients/lsp-budget.js");
+		const previousCeiling = process.env.PI_LENS_LSP_BUDGET_CEILING;
+		process.env.PI_LENS_LSP_BUDGET_CEILING = "1";
+		const service = new LSPService();
+		const client = {
+			serverId: "python",
+			isAlive: () => true,
+			shutdown: async () => {},
+			getWorkspaceDiagnosticsSupport: () => ({
+				advertised: true,
+				mode: "pull" as const,
+				diagnosticProviderKind: "object" as const,
+			}),
+			getOperationSupport: () => ({}),
+			getAdvertisedCommands: () => [],
+			getRawCapabilityKeys: () => ["diagnosticProvider"],
+			notify: { open: vi.fn().mockResolvedValue(undefined) },
+			waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
+			getDiagnostics: vi.fn(() => []),
+		};
+		createLSPClient.mockResolvedValue(client);
+		getServersForFileWithConfig.mockReturnValue([makeServer("python")]);
+
+		try {
+			await checkCrossProcessLspBudget({
+				registry: [
+					{
+						pid: 42,
+						startedAt: new Date().toISOString(),
+						projectRoot: "C:/repo",
+						lspChildren: [
+							{
+								pid: 43,
+								serverId: "python",
+								command: "pyright-langserver",
+								spawnedAt: new Date().toISOString(),
+							},
+						],
+						lspChildCount: 1,
+						rssBytes: 1,
+						heartbeatAt: new Date().toISOString(),
+					},
+				],
+				isPidAlive: () => true,
+			});
+			await service.touchFile(FILE, "print('x')\n", {
+				diagnostics: "document",
+				collectDiagnostics: true,
+				maxClientWaitMs: 25,
+				source: "test",
+			});
+
+			expect(client.waitForDiagnostics).toHaveBeenCalledWith(FILE, 25, {
+				pullOnly: true,
+			});
+		} finally {
+			_resetLspBudgetDecisionForTests();
+			if (previousCeiling === undefined) {
+				delete process.env.PI_LENS_LSP_BUDGET_CEILING;
+			} else {
+				process.env.PI_LENS_LSP_BUDGET_CEILING = previousCeiling;
+			}
+		}
+	});
+
 	it("returns merged diagnostics from touched clients", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
