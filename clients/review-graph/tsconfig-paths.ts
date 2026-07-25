@@ -159,7 +159,7 @@ export function aliasedImportTargets(
 			specifier.length - matcher.suffix.length,
 		);
 		if (!matcher.pattern.includes("*") && wildcard) continue;
-		return matcher.targets.map((target) => target.replace("*", wildcard));
+		return matcher.targets.map((target) => target.replaceAll("*", wildcard));
 	}
 	return [];
 }
