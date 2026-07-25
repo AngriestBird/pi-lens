@@ -157,20 +157,39 @@ export function getProjectDiagnosticsScannerMaxFiles(cwd?: string): number {
  * exceeding it: at `base = REVIEW_GRAPH_LINEAR_CEILING_BASE +
  * REVIEW_GRAPH_TAPER_SCALE`, exactly HALF the remaining gap to the ceiling
  * is closed (a standard property of this taper shape) — e.g. base 12,000
- * (6x default) derives ~4,000 files; base 20,000 (10x default) derives
- * ~4,667.
+ * (6x default) derives ~3,500 files; base 20,000 (10x default) derives
+ * ~4,000.
  *
- * {@link REVIEW_GRAPH_HARD_CEILING} (6,000) is not a fresh magic number: it
- * reuses the SAME top-tier value {@link PROJECT_SCALE_RATIOS} already
- * assigns jscpd/wordIndex at the default base (2,000 x 3 = 6,000), and is
- * independently grounded in the review graph's OWN measured per-file cost.
- * CHANGELOG 3.8.43 ("Persist review graph to disk") documents a full cold
- * tree-sitter + import-fact build taking "2-4 s" at the then-1,000-file
- * cap — roughly 2-4 ms/file. 6,000 files at that rate is a ~12-24 s
- * worst-case COLD build, which only happens once per size tier: the same
- * entry documents the disk-cached path costing "~20 ms JSON parse +
- * rebuildIndexes" instead, and per-edit builds are incremental
- * (see `diffSignatureMaps`) rather than full rebuilds.
+ * {@link REVIEW_GRAPH_HARD_CEILING} (5,000) is grounded FIRST by the
+ * strongest real constraint on this number — `review-graph/builder.ts`'s
+ * persist circuit-breaker (`GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT`, 200,000
+ * graph elements: file/symbol nodes + cross-file edges). Above that element
+ * count the graph is NEVER persisted to disk (logged + skipped, #260's OOM
+ * guard) — not "slow", but PERMANENTLY uncached, so every session pays a
+ * full cold build instead of the ~20 ms cached path (see the CHANGELOG
+ * timing note below) engaging exactly once. For symbol-dense repos, element
+ * count runs on the order of ~30/file (file node + per-symbol nodes +
+ * import/call/reference edges), so a hard ceiling must leave real headroom
+ * below 200,000 elements, not creep up to it: 5,000 files x ~30 ⇒ ~150,000
+ * elements, a ~25% margin. The earlier 6,000-file candidate (~180,000
+ * elements) left too little margin — a slightly denser-than-average repo at
+ * exactly the ceiling could tip over and silently lose persistence forever,
+ * the opposite of this issue's "no silent caps" goal. 5,000 is also still
+ * coherent with the jscpd/wordIndex 3x-ratio precedent (6,000 at the
+ * default base) as "the ceiling sits just below that established top
+ * tier" rather than an exact match, so it isn't a fresh unrelated
+ * constant either.
+ *
+ * SECOND, independently, the number is consistent with the review graph's
+ * own measured per-file BUILD cost: CHANGELOG 3.8.43 ("Persist review graph
+ * to disk") documents a full cold tree-sitter + import-fact build taking
+ * "2-4 s" at the then-1,000-file cap — roughly 2-4 ms/file. 5,000 files at
+ * that rate is a ~10-20 s worst-case cold build — tolerable as a rare
+ * one-time cost when the persist cap above is respected (the disk-cached
+ * path costs "~20 ms JSON parse + rebuildIndexes" instead, and per-edit
+ * builds are incremental — see `diffSignatureMaps`). This build-time
+ * argument alone would tolerate a larger ceiling; the persist-cap margin
+ * above is the binding constraint.
  */
 export const REVIEW_GRAPH_LINEAR_CEILING_BASE = 4_000;
 
@@ -182,7 +201,7 @@ export const REVIEW_GRAPH_LINEAR_CEILING_BASE = 4_000;
 export const REVIEW_GRAPH_TAPER_SCALE = 8_000;
 
 /** See the rationale in {@link taperedReviewGraphMaxFiles}'s doc comment. */
-export const REVIEW_GRAPH_HARD_CEILING = 6_000;
+export const REVIEW_GRAPH_HARD_CEILING = 5_000;
 
 /**
  * Pure taper function — see {@link getReviewGraphMaxFilesDerived}'s doc
