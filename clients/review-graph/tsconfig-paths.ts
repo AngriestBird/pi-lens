@@ -1,7 +1,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { findGoverningTsconfigDir } from "../workspace-topology.js";
+import {
+	findGoverningTsconfigDir,
+	getDirectoryMarkers,
+} from "../workspace-topology.js";
 
 export interface TsconfigPathMatcher {
 	pattern: string;
@@ -12,18 +15,25 @@ export interface TsconfigPathMatcher {
 
 interface TsconfigJson {
 	extends?: string;
+	references?: Array<{ path?: string }>;
+	include?: string[];
 	compilerOptions?: {
 		baseUrl?: string;
 		paths?: Record<string, string[]>;
+		rootDir?: string;
 	};
 }
 
 interface ParsedConfig {
 	baseUrl: string;
 	paths?: Record<string, string[]>;
+	rootDir?: string;
+	include?: string[];
+	references: string[];
 }
 
 const cache = new Map<string, TsconfigPathMatcher[]>();
+const referencesCache = new Map<string, Map<string, string>>();
 
 /** Strip JSONC comments and trailing commas without touching string contents. */
 function parseJsonc(content: string): unknown {
@@ -103,7 +113,108 @@ function readConfig(
 					]),
 				)
 			: inherited?.paths;
-	return { baseUrl, paths };
+	const rootDir =
+		typeof options?.rootDir === "string"
+			? path.resolve(path.dirname(normalized), options.rootDir)
+			: inherited?.rootDir;
+	const include = Array.isArray(json.include)
+		? json.include.filter((value): value is string => typeof value === "string")
+		: inherited?.include;
+	const references = Array.isArray(json.references)
+		? json.references
+				.map((reference) => reference?.path)
+				.filter(
+					(value): value is string =>
+						typeof value === "string" && value.startsWith("."),
+				)
+		: [];
+	return { baseUrl, paths, rootDir, include, references };
+}
+
+function resolveReferenceConfig(configPath: string, value: string): string | undefined {
+	const target = path.resolve(path.dirname(configPath), value);
+	try {
+		if (fs.statSync(target).isDirectory()) {
+			return getDirectoryMarkers(target).tsconfigPath;
+		}
+		if (fs.statSync(target).isFile()) return target;
+	} catch {
+		return undefined;
+	}
+	return undefined;
+}
+
+function includeRoot(configDir: string, pattern: string): string | undefined {
+	const wildcard = pattern.search(/[*?]/);
+	const prefix = wildcard === -1 ? pattern : pattern.slice(0, wildcard);
+	const trimmed = prefix.replace(/[\\/]+$/, "");
+	if (!trimmed) return undefined;
+	const resolved = path.resolve(configDir, trimmed);
+	return path.extname(resolved) ? path.dirname(resolved) : resolved;
+}
+
+function firstSourceEntry(configPath: string, parsed: ParsedConfig): string | undefined {
+	const configDir = path.dirname(configPath);
+	const roots = [
+		...(parsed.rootDir ? [parsed.rootDir] : []),
+		...(parsed.include ?? [])
+			.map((pattern) => includeRoot(configDir, pattern))
+			.filter((value): value is string => value !== undefined),
+	];
+	const candidates = [
+		...roots.flatMap((root) => [
+			path.join(root, "index.ts"),
+			path.join(root, "index.tsx"),
+		]),
+		path.join(configDir, "src", "index.ts"),
+		path.join(configDir, "src", "index.tsx"),
+		path.join(configDir, "index.ts"),
+		path.join(configDir, "index.tsx"),
+	];
+	for (const candidate of candidates) {
+		try {
+			if (fs.statSync(candidate).isFile()) return candidate;
+		} catch {
+			// Try the next conventional entry.
+		}
+	}
+	return undefined;
+}
+
+function collectReferencedProjects(
+	configPath: string,
+	result: Map<string, string>,
+	visited: Set<string>,
+): void {
+	const normalized = path.resolve(configPath);
+	if (visited.has(normalized)) return;
+	visited.add(normalized);
+	const parsed = readConfig(normalized, new Set());
+	if (!parsed) return;
+	for (const reference of parsed.references) {
+		const referencedConfig = resolveReferenceConfig(normalized, reference);
+		if (!referencedConfig) continue;
+		const referenced = readConfig(referencedConfig, new Set());
+		if (referenced) {
+			const packageJsonPath = getDirectoryMarkers(
+				path.dirname(referencedConfig),
+			).packageJsonPath;
+			const entry = firstSourceEntry(referencedConfig, referenced);
+			if (packageJsonPath && entry) {
+				try {
+					const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as {
+						name?: unknown;
+					};
+					if (typeof pkg.name === "string" && !result.has(pkg.name)) {
+						result.set(pkg.name, entry);
+					}
+				} catch {
+					// An unreadable adjacent package.json does not define a mapping.
+				}
+			}
+		}
+		collectReferencedProjects(referencedConfig, result, visited);
+	}
 }
 
 /** Find and parse the nearest governing tsconfig, cached per importer directory. */
@@ -164,6 +275,29 @@ export function aliasedImportTargets(
 	return [];
 }
 
+/** Resolve an exact package-name import through the governing config's project references. */
+export function referencedProjectImportTarget(
+	specifier: string,
+	importerDir: string,
+): string | undefined {
+	const key = path.resolve(importerDir);
+	let projects = referencesCache.get(key);
+	if (!projects) {
+		projects = new Map();
+		const configDir = findGoverningTsconfigDir(key);
+		if (configDir) {
+			collectReferencedProjects(
+				path.join(configDir, "tsconfig.json"),
+				projects,
+				new Set(),
+			);
+		}
+		referencesCache.set(key, projects);
+	}
+	return projects.get(specifier);
+}
+
 export function clearTsconfigPathsCache(): void {
 	cache.clear();
+	referencesCache.clear();
 }

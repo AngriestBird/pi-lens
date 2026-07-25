@@ -25,7 +25,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { normalizeMapKey } from "../path-utils.js";
-import { aliasedImportTargets } from "./tsconfig-paths.js";
+import {
+	aliasedImportTargets,
+	referencedProjectImportTarget,
+} from "./tsconfig-paths.js";
 import { buildModuleGraph, type WorkspaceModule } from "./workspace-modules.js";
 
 /** True when `p` is inside (or equal to) `cwd` — blocks resolution escaping the workspace. */
@@ -258,6 +261,16 @@ export function resolveAliasedImport(
 	return [];
 }
 
+/** Resolve an exact package name declared by a tsconfig project reference. */
+export function resolveProjectReferenceImport(
+	cwd: string,
+	specifier: string,
+	importerDir: string,
+): string[] {
+	const target = referencedProjectImportTarget(specifier, importerDir);
+	return target ? firstExistingFile(cwd, [target]) : [];
+}
+
 /**
  * Resolve a bare specifier that names a sibling workspace package (npm/pnpm
  * workspaces, cargo, go.work — detected by `workspace-modules.ts`) to that
@@ -297,8 +310,14 @@ export function resolveWorkspacePackageImport(
 function resolveJsTs(cwd: string, filePath: string, source: string): string[] {
 	if (!source.startsWith(".")) {
 		const aliased = resolveAliasedImport(cwd, source, path.dirname(filePath));
-		return aliased.length
-			? aliased
+		if (aliased.length) return aliased;
+		const referenced = resolveProjectReferenceImport(
+			cwd,
+			source,
+			path.dirname(filePath),
+		);
+		return referenced.length
+			? referenced
 			: resolveWorkspacePackageImport(cwd, source);
 	}
 	return firstExistingFile(cwd, jsTsCandidatePaths(filePath, source));

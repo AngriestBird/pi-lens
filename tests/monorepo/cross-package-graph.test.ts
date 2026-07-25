@@ -172,3 +172,89 @@ describe("monorepo cross-package graph edges (#775 item 1)", () => {
 		}
 	});
 });
+
+function projectReferenceFixture(withReferences: boolean, cycle = false): Monorepo {
+	return makeMonorepo({
+		// Deliberately exclude lib from npm workspaces: only the tsconfig reference
+		// can turn @scope/lib into a file edge.
+		workspaceGlobs: ["packages/app"],
+		packages: [
+			{
+				name: "@scope/app",
+				dir: "packages/app",
+				files: {
+					"tsconfig.json": JSON.stringify({
+						references: withReferences ? [{ path: "../lib" }] : [],
+					}),
+					"src/index.ts":
+						"import { value } from '@scope/lib';\nexport const result = value;\n",
+				},
+			},
+			{
+				name: "@scope/lib",
+				dir: "packages/lib",
+				files: {
+					"tsconfig.json": JSON.stringify({
+						compilerOptions: { rootDir: "src" },
+						references: cycle ? [{ path: "../app" }] : [],
+					}),
+					"src/index.ts": "export const value = 1;\n",
+				},
+			},
+		],
+	});
+}
+
+describe("monorepo tsconfig project-reference edges (#819)", () => {
+	afterEach(() => {
+		clearReviewGraphWorkspaceCache();
+		clearModuleGraphCache();
+	});
+
+	it("creates a file-level cross-package edge without aliases or workspace discovery", async () => {
+		const repo = projectReferenceFixture(true);
+		try {
+			const app = normalizeMapKey(repo.filePath("@scope/app", "src/index.ts"));
+			const lib = normalizeMapKey(repo.filePath("@scope/lib", "src/index.ts"));
+			const graph = await buildOrUpdateGraph(repo.root, [], new FactStore());
+			expect(
+				graph.edges.some(
+					(edge) =>
+						edge.kind === "imports" &&
+						edge.from === `file:${app}` &&
+						edge.to === `file:${lib}`,
+				),
+			).toBe(true);
+		} finally {
+			repo.cleanup();
+		}
+	});
+
+	it("terminates a project-reference cycle and preserves the import edge", async () => {
+		const repo = projectReferenceFixture(true, true);
+		try {
+			const lib = normalizeMapKey(repo.filePath("@scope/lib", "src/index.ts"));
+			const graph = await buildOrUpdateGraph(repo.root, [], new FactStore());
+			expect(graph.edges.some((edge) => edge.to === `file:${lib}`)).toBe(true);
+		} finally {
+			repo.cleanup();
+		}
+	});
+
+	it("leaves the same bare import external when no project reference exists", async () => {
+		const repo = projectReferenceFixture(false);
+		try {
+			const app = normalizeMapKey(repo.filePath("@scope/app", "src/index.ts"));
+			const graph = await buildOrUpdateGraph(repo.root, [], new FactStore());
+			expect(
+				graph.edges.some(
+					(edge) =>
+						edge.from === `file:${app}` &&
+						edge.to === "external:@scope/lib",
+				),
+			).toBe(true);
+		} finally {
+			repo.cleanup();
+		}
+	});
+});

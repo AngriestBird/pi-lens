@@ -5,6 +5,7 @@ import { resolveImportToFiles } from "../../../clients/review-graph/import-resol
 import {
 	clearTsconfigPathsCache,
 	parseTsconfigPaths,
+	referencedProjectImportTarget,
 } from "../../../clients/review-graph/tsconfig-paths.js";
 import { setupTestEnvironment } from "../test-utils.js";
 
@@ -104,5 +105,87 @@ describe("tsconfig paths import resolution (#775 R2)", () => {
 			}),
 		);
 		expect(parseTsconfigPaths(project, root)).toEqual([]);
+	});
+});
+
+describe("tsconfig project-reference resolution (#819)", () => {
+	it("maps a referenced directory's package name to its rootDir entry", () => {
+		write(
+			"packages/app/tsconfig.json",
+			JSON.stringify({ references: [{ path: "../lib" }] }),
+		);
+		write("packages/lib/package.json", JSON.stringify({ name: "@scope/lib" }));
+		write(
+			"packages/lib/tsconfig.json",
+			JSON.stringify({ compilerOptions: { rootDir: "source" } }),
+		);
+		const entry = write("packages/lib/source/index.ts");
+
+		expect(
+			referencedProjectImportTarget(
+				"@scope/lib",
+				path.join(root, "packages/app/src"),
+			),
+		).toBe(entry);
+	});
+
+	it("accepts a direct config-file reference and derives an include root", () => {
+		write(
+			"packages/app/tsconfig.json",
+			JSON.stringify({ references: [{ path: "../lib/tsconfig.build.json" }] }),
+		);
+		write("packages/lib/package.json", JSON.stringify({ name: "@scope/lib" }));
+		write(
+			"packages/lib/tsconfig.build.json",
+			JSON.stringify({ include: ["source/**/*"] }),
+		);
+		const entry = write("packages/lib/source/index.tsx");
+
+		expect(
+			referencedProjectImportTarget(
+				"@scope/lib",
+				path.join(root, "packages/app/src"),
+			),
+		).toBe(entry);
+	});
+
+	it("follows transitive references and terminates reference cycles", () => {
+		write(
+			"packages/app/tsconfig.json",
+			JSON.stringify({ references: [{ path: "../middle" }] }),
+		);
+		write(
+			"packages/middle/tsconfig.json",
+			JSON.stringify({ references: [{ path: "../app" }, { path: "../lib" }] }),
+		);
+		write(
+			"packages/middle/package.json",
+			JSON.stringify({ name: "@scope/middle" }),
+		);
+		write("packages/middle/src/index.ts");
+		write("packages/lib/tsconfig.json", "{}");
+		write("packages/lib/package.json", JSON.stringify({ name: "@scope/lib" }));
+		const entry = write("packages/lib/index.ts");
+
+		expect(
+			referencedProjectImportTarget(
+				"@scope/lib",
+				path.join(root, "packages/app/src"),
+			),
+		).toBe(entry);
+	});
+
+	it("keeps imports unresolved when the governing config has no references", () => {
+		write("packages/app/tsconfig.json", "{}");
+		write("packages/lib/package.json", JSON.stringify({ name: "@scope/lib" }));
+		write("packages/lib/tsconfig.json", "{}");
+		write("packages/lib/src/index.ts");
+
+		expect(
+			referencedProjectImportTarget(
+				"@scope/lib",
+				path.join(root, "packages/app/src"),
+			),
+		).toBeUndefined();
 	});
 });
