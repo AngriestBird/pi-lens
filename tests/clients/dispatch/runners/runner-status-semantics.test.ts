@@ -14,6 +14,10 @@ const touchFile = vi.fn();
 const getDiagnostics = vi.fn();
 const codeAction = vi.fn();
 const readFileContent = vi.fn(() => "const x = 1;\n");
+const warmAttach = vi.hoisted(() => ({
+	diagnostics: vi.fn(),
+	codeActions: vi.fn(),
+}));
 
 vi.mock("../../../../clients/safe-spawn.js", () => ({
 	safeSpawn,
@@ -38,6 +42,11 @@ vi.mock("../../../../clients/lsp/index.js", () => ({
 
 vi.mock("../../../../clients/dispatch/runners/utils.js", () => ({
 	readFileContent,
+}));
+
+vi.mock("../../../../clients/warm-attach.js", () => ({
+	tryWarmAttachedDiagnostics: warmAttach.diagnostics,
+	tryWarmAttachedCodeActions: warmAttach.codeActions,
 }));
 
 function ctx(
@@ -75,6 +84,9 @@ describe("runner status/semantic edge cases", () => {
 		readFileContent.mockReset();
 		readFileContent.mockReturnValue("const x = 1;\n");
 		supportsLSP.mockReturnValue(true);
+		warmAttach.diagnostics.mockReset();
+		warmAttach.codeActions.mockReset();
+		warmAttach.diagnostics.mockResolvedValue(undefined);
 	});
 
 	it("golangci-lint returns failed/blocking for error diagnostics", async () => {
@@ -348,6 +360,83 @@ describe("runner status/semantic edge cases", () => {
 			expect(result.diagnostics[0]?.fixSuggestion).toContain(
 				"Change type of 'a' to 'number'",
 			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("enriches warm-attached diagnostics with incumbent quickfixes", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-warm-fix-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const a: string = 1;\n");
+			warmAttach.diagnostics.mockResolvedValue({
+				available: true,
+				response: {
+					diagnostics: [
+						{
+							severity: 1,
+							message: "Type mismatch",
+							range: {
+								start: { line: 0, character: 6 },
+								end: { line: 0, character: 7 },
+							},
+						},
+					],
+				},
+			});
+			warmAttach.codeActions.mockResolvedValue({
+				available: true,
+				response: {
+					actions: [[{ title: "Change type", kind: "quickfix" }]],
+				},
+			});
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+
+			expect(result.diagnostics[0]?.fixSuggestion).toContain("Change type");
+			expect(touchFile).not.toHaveBeenCalled();
+			expect(codeAction).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps warm diagnostics and does not promote when enrichment fails", async () => {
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-warm-fix-fail-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const a: string = 1;\n");
+			warmAttach.diagnostics.mockResolvedValue({
+				available: true,
+				response: {
+					diagnostics: [
+						{
+							severity: 1,
+							message: "Type mismatch",
+							range: {
+								start: { line: 0, character: 6 },
+								end: { line: 0, character: 7 },
+							},
+						},
+					],
+				},
+			});
+			warmAttach.codeActions.mockResolvedValue({
+				available: false,
+				reason: "timeout",
+			});
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+
+			expect(result.diagnostics).toHaveLength(1);
+			expect(result.diagnostics[0]?.fixSuggestion).toBeUndefined();
+			expect(warmAttach.diagnostics).toHaveBeenCalledTimes(1);
+			expect(touchFile).not.toHaveBeenCalled();
 		} finally {
 			env.cleanup();
 		}

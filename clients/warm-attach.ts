@@ -14,9 +14,15 @@ import { getLSPService } from "./lsp/index.js";
 import {
 	contentHash,
 	diagnosticsIpcPathForCwd,
+	requestWarmCodeActions,
 	requestWarmDiagnostics,
+	type WarmCodeActionRange,
+	type WarmCodeActionsResult,
+	type WarmCodeActionsRequest,
+	type WarmCodeActionsResponse,
 	type WarmDiagnosticsRequest,
 	type WarmDiagnosticsResult,
+	WARM_CODE_ACTION_LOOKUP_LIMIT,
 	WARM_DIAGNOSTICS_SCHEMA_VERSION,
 } from "./mcp/ipc.js";
 import { normalizeFilePath } from "./path-utils.js";
@@ -26,9 +32,10 @@ interface AttachState {
 	incumbentPid?: number;
 	local: boolean;
 	server?: net.Server;
+	servedDiagnosticHashes: Map<string, string>;
 }
 
-const state: AttachState = { local: true };
+const state: AttachState = { local: true, servedDiagnosticHashes: new Map() };
 
 function record(
 	event: string,
@@ -66,8 +73,48 @@ export function selectWarmAttachIncumbent(
 }
 
 async function serveRequest(
-	req: WarmDiagnosticsRequest,
+	req: WarmDiagnosticsRequest | WarmCodeActionsRequest,
 ): Promise<{ result?: unknown; error?: string }> {
+	if (req.route === "code-actions") {
+		if (
+			req.version !== WARM_DIAGNOSTICS_SCHEMA_VERSION ||
+			req.ranges.length > WARM_CODE_ACTION_LOOKUP_LIMIT ||
+			Date.now() > req.deadlineAt ||
+			state.servedDiagnosticHashes.get(normalizeFilePath(req.file)) !==
+				req.contentHash
+		) {
+			return { error: "stale request" };
+		}
+		try {
+			const actions = await Promise.all(
+				req.ranges.map(async (range) => {
+					if (Date.now() > req.deadlineAt) {
+						throw new Error("deadline exceeded");
+					}
+					return getLSPService().codeAction(
+						req.file,
+						range.start.line,
+						range.start.character,
+						range.end.line,
+						range.end.character,
+					);
+				}),
+			);
+			const servedAt = Date.now();
+			if (servedAt > req.deadlineAt) return { error: "deadline exceeded" };
+			return {
+				result: {
+					route: "code-actions",
+					version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
+					contentHash: req.contentHash,
+					servedAt,
+					actions,
+				} satisfies WarmCodeActionsResponse,
+			};
+		} catch (error) {
+			return { error: String(error) };
+		}
+	}
 	if (
 		req.route !== "diagnostics" ||
 		req.version !== WARM_DIAGNOSTICS_SCHEMA_VERSION
@@ -86,6 +133,12 @@ async function serveRequest(
 		source: "warm-attach-incumbent",
 	});
 	const servedAt = Date.now();
+	if (servedAt <= req.deadlineAt && touched !== undefined && !touched.inconclusive) {
+		state.servedDiagnosticHashes.set(
+			normalizeFilePath(req.file),
+			req.contentHash,
+		);
+	}
 	return {
 		result: {
 			route: "diagnostics",
@@ -118,7 +171,9 @@ function startServer(cwd: string): void {
 			if (newline === -1) return;
 			void (async () => {
 				try {
-					const req = JSON.parse(buffer.slice(0, newline)) as WarmDiagnosticsRequest;
+					const req = JSON.parse(buffer.slice(0, newline)) as
+						| WarmDiagnosticsRequest
+						| WarmCodeActionsRequest;
 					socket.end(`${JSON.stringify(await serveRequest(req))}\n`);
 				} catch (error) {
 					socket.end(`${JSON.stringify({ error: String(error) })}\n`);
@@ -184,6 +239,31 @@ export async function tryWarmAttachedDiagnostics(
 	return result;
 }
 
+export async function tryWarmAttachedCodeActions(
+	file: string,
+	expectedContentHash: string,
+	ranges: WarmCodeActionRange[],
+	timeoutMs: number,
+): Promise<WarmCodeActionsResult | undefined> {
+	if (state.local || !state.cwd || !state.incumbentPid) return undefined;
+	const result = await requestWarmCodeActions(
+		state.cwd,
+		state.incumbentPid,
+		file,
+		expectedContentHash,
+		ranges,
+		timeoutMs,
+	);
+	if (result.available) {
+		record("code-actions-served", file, undefined, state.incumbentPid);
+	} else {
+		// Quickfixes are optional enrichment. Diagnostics already succeeded, so a
+		// code-action failure is deliberately softer and must not trigger takeover.
+		record("code-actions-skipped", file, result.reason, state.incumbentPid);
+	}
+	return result;
+}
+
 export function isWarmAttached(): boolean {
 	return !state.local && state.incumbentPid !== undefined;
 }
@@ -202,6 +282,7 @@ export function _resetWarmAttachForTests(): void {
 	state.cwd = undefined;
 	state.incumbentPid = undefined;
 	state.local = true;
+	state.servedDiagnosticHashes.clear();
 }
 
 export function _setWarmAttachForTests(cwd: string, incumbentPid: number): void {

@@ -18,9 +18,10 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { McpAnalyzeResult } from "./analyze.js";
-import type { LSPDiagnostic } from "../lsp/client.js";
+import type { LSPCodeAction, LSPDiagnostic } from "../lsp/client.js";
 
 export const WARM_DIAGNOSTICS_SCHEMA_VERSION = 1;
+export const WARM_CODE_ACTION_LOOKUP_LIMIT = 6;
 
 /**
  * Stable per-workspace endpoint path. The server (from its launch cwd) and the
@@ -70,6 +71,33 @@ export interface WarmDiagnosticsResponse {
 	fresh: boolean;
 	inconclusive: boolean;
 }
+
+export interface WarmCodeActionRange {
+	start: { line: number; character: number };
+	end: { line: number; character: number };
+}
+
+export interface WarmCodeActionsRequest {
+	route: "code-actions";
+	version: number;
+	file: string;
+	cwd: string;
+	contentHash: string;
+	ranges: WarmCodeActionRange[];
+	deadlineAt: number;
+}
+
+export interface WarmCodeActionsResponse {
+	route: "code-actions";
+	version: number;
+	contentHash: string;
+	servedAt: number;
+	actions: LSPCodeAction[][];
+}
+
+export type WarmCodeActionsResult =
+	| { available: true; response: WarmCodeActionsResponse }
+	| { available: false; reason: WarmDiagnosticsFailureReason };
 
 export type WarmDiagnosticsFailureReason =
 	| "timeout"
@@ -146,6 +174,87 @@ export function requestWarmDiagnostics(
 					!result.fresh ||
 					result.inconclusive ||
 					result.contentHash !== expectedHash ||
+					result.servedAt > deadlineAt
+				) {
+					finish({ available: false, reason: "stale-answer" });
+				} else {
+					finish({ available: true, response: result });
+				}
+			} catch {
+				finish({ available: false, reason: "schema-mismatch" });
+			}
+		});
+		socket.on("error", () =>
+			finish({ available: false, reason: "ipc-error" }),
+		);
+		socket.on("close", () =>
+			finish({ available: false, reason: "ipc-error" }),
+		);
+	});
+}
+
+export function requestWarmCodeActions(
+	cwd: string,
+	incumbentPid: number,
+	file: string,
+	expectedContentHash: string,
+	ranges: WarmCodeActionRange[],
+	timeoutMs: number,
+): Promise<WarmCodeActionsResult> {
+	return new Promise((resolve) => {
+		let settled = false;
+		const deadlineAt = Date.now() + timeoutMs;
+		const socket = net.createConnection(
+			diagnosticsIpcPathForCwd(cwd, incumbentPid),
+		);
+		const finish = (value: WarmCodeActionsResult): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			socket.destroy();
+			resolve(value);
+		};
+		socket.setEncoding("utf8");
+		let buffer = "";
+		const timer = setTimeout(
+			() => finish({ available: false, reason: "timeout" }),
+			timeoutMs,
+		);
+		timer.unref();
+		socket.on("connect", () => {
+			const request: WarmCodeActionsRequest = {
+				route: "code-actions",
+				version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
+				file,
+				cwd,
+				contentHash: expectedContentHash,
+				ranges,
+				deadlineAt,
+			};
+			socket.write(`${JSON.stringify(request)}\n`);
+		});
+		socket.on("data", (chunk: string) => {
+			buffer += chunk;
+			const newline = buffer.indexOf("\n");
+			if (newline === -1) return;
+			try {
+				const message = JSON.parse(buffer.slice(0, newline)) as {
+					result?: WarmCodeActionsResponse;
+					error?: string;
+				};
+				const result = message.result;
+				if (message.error || !result) {
+					finish({ available: false, reason: "ipc-error" });
+				} else if (
+					result.route !== "code-actions" ||
+					result.version !== WARM_DIAGNOSTICS_SCHEMA_VERSION ||
+					!Array.isArray(result.actions) ||
+					result.actions.length !== ranges.length ||
+					result.actions.some((actions) => !Array.isArray(actions))
+				) {
+					finish({ available: false, reason: "schema-mismatch" });
+				} else if (
+					result.contentHash !== expectedContentHash ||
 					result.servedAt > deadlineAt
 				) {
 					finish({ available: false, reason: "stale-answer" });

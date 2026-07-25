@@ -230,6 +230,12 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   attached; a mid-sweep promotion resumes locally from the failed file onward.
   Any timeout, IPC/schema/freshness failure, or incumbent loss permanently
   promotes that session to the unchanged local path (no flapping). Attached
+  dispatch runs request their bounded blocking-diagnostic code actions from the
+  incumbent only after it served the same file/content hash. This enrichment
+  is deliberately softer than diagnostics: timeout/schema/error skips
+  quickfixes and logs `code-actions-skipped` without promoting the session;
+  success logs `code-actions-served` under `lsp_warm_attach`.
+  Attached
   sessions never own the incumbent's registered children; the #661 reaper
   remains PID-death + child-identity guarded.
 - **Auto session on connect:** `PI_LENS_MCP_AUTO_SESSION=1` runs `session_start`

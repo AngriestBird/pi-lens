@@ -7,6 +7,7 @@ import {
 	_resetWarmAttachForTests,
 	_setWarmAttachForTests,
 	isWarmAttached,
+	tryWarmAttachedCodeActions,
 	tryWarmAttachedDiagnostics,
 } from "../../clients/warm-attach.js";
 
@@ -59,6 +60,20 @@ describe("selectWarmAttachIncumbent", () => {
 		expect(isWarmAttached()).toBe(false);
 		await tryWarmAttachedDiagnostics("app.ts", "x", 10);
 		expect(isWarmAttached()).toBe(false);
+		_resetWarmAttachForTests();
+	});
+
+	it("does not promote when optional code-action enrichment fails", async () => {
+		_setWarmAttachForTests(cwd, 999_998);
+		expect(isWarmAttached()).toBe(true);
+		const result = await tryWarmAttachedCodeActions(
+			"app.ts",
+			"diagnostics-hash",
+			[],
+			10,
+		);
+		expect(result?.available).toBe(false);
+		expect(isWarmAttached()).toBe(true);
 		_resetWarmAttachForTests();
 	});
 });
