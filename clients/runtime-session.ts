@@ -69,6 +69,7 @@ import {
 } from "./startup-scan.js";
 import type { TestRunnerClient } from "./test-runner-client.js";
 import type { TodoScanner } from "./todo-scanner.js";
+import { isWarmAttached } from "./warm-attach.js";
 
 interface SessionStartDeps {
 	ctxCwd?: string;
@@ -1443,7 +1444,9 @@ export async function handleSessionStart(
 	// the slow-FS probe above. Logged to the latency log so dogfooding can see
 	// how often subagent fan-outs engage it and what identity they carry.
 	const subagentSession = isSubagentSession();
-	if (subagentSession) {
+	if (isWarmAttached()) {
+		dbg("session_start lsp-warm: skipping pre-warm (attached to incumbent)");
+	} else if (subagentSession) {
 		const identity = getSubagentIdentity();
 		logLatency({
 			type: "phase",

@@ -220,6 +220,15 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   (LSP-complete) and the bin never loads the dispatch graph; falls back to cold
   no-LSP local analysis. `pilens_analyze` (warm) + the hook auto-register edited
   files into turn-state (`addModifiedRange`) so `pilens_turn_end` needs no file list.
+- **Same-workspace warm attach (#822, opt-in soak).** `PI_LENS_WARM_ATTACH=1`
+  selects a PID-confirmed, heartbeat-fresh same-root incumbent from
+  `instances.json`. The LSP runner sends versioned, content-hash-bound,
+  deadline-bounded diagnostic touches to its PID-scoped endpoint
+  (`clients/warm-attach.ts` + `clients/mcp/ipc.ts`) and skips local pre-warm.
+  Any timeout, IPC/schema/freshness failure, or incumbent loss permanently
+  promotes that session to the unchanged local path (no flapping). Attached
+  sessions never own the incumbent's registered children; the #661 reaper
+  remains PID-death + child-identity guarded.
 - **Auto session on connect:** `PI_LENS_MCP_AUTO_SESSION=1` runs `session_start`
   when the server boots (a Claude `SessionStart` hook can't warm the server's
   in-process LSP — separate process). Register: `claude mcp add --scope user

@@ -66,6 +66,16 @@ active; findings are still cached for `lens_diagnostics` and
 `/lens-health`. Useful when prompt-cache invalidation from injected
 messages is hurting throughput in long, cache-sensitive sessions.
 
+## LSP warm attach
+
+### `PI_LENS_WARM_ATTACH`
+
+Set to `1` to opt into the same-workspace warm-attach soak (#822). A second
+session reuses a live incumbent session's LSP diagnostics over local IPC.
+Unset or `0` preserves the prior local-LSP behavior exactly. Any transport,
+schema, freshness, deadline, or incumbent-liveness failure permanently falls
+back to a local LSP fleet for that session.
+
 ## Bus events
 
 ### `PI_LENS_BUS_PUBLISH`
