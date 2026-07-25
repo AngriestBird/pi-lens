@@ -260,7 +260,7 @@ export function findNearestDirWithAnyBasename(
 ): string | undefined {
 	if (basenames.length === 0) return undefined;
 
-	const key = walkCacheKey(startDir, `any:${basenames.join(String.fromCharCode(1))}`);
+	const key = walkCacheKey(startDir, `any:${basenames.join(String.fromCodePoint(1))}`);
 	const cached = walkCache.get(key);
 	if (cached && walkStillFresh(cached.dirMtimes)) {
 		return cached.dir;
