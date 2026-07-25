@@ -36,6 +36,10 @@ import { getGlobalPiLensDir } from "./file-utils.js";
 // import is actually invoked.
 import { realIsPidAlive } from "./instance-reaper.js";
 import { normalizeFilePath } from "./path-utils.js";
+import {
+	getSubagentIdentity,
+	isSubagentSession,
+} from "./subagent-mode.js";
 
 export interface LspChildEntry {
 	pid: number;
@@ -68,6 +72,14 @@ export interface InstanceEntry {
 	 *  read as "0% CPU". */
 	cpuPercent?: number;
 	heartbeatAt: string;
+	/** Best-effort identity for concurrency-profile analysis (#822). Absent
+	 *  entirely for primary sessions and tolerated as absent on old entries. */
+	subagent?: {
+		marker?: string;
+		agentType?: string;
+		parentPid?: number;
+		runId?: string;
+	};
 }
 
 interface RegistryFile {
@@ -172,6 +184,15 @@ export async function registerInstance(projectRoot: string): Promise<void> {
 	const now = new Date().toISOString();
 	const others = file.instances.filter((entry) => entry.pid !== pid);
 	const existing = file.instances.find((entry) => entry.pid === pid);
+	const identity = isSubagentSession() ? getSubagentIdentity() : undefined;
+	const subagent = identity
+		? {
+				marker: identity.marker,
+				agentType: identity.agentName,
+				parentPid: identity.parentPid,
+				runId: identity.runId,
+			}
+		: undefined;
 	others.push({
 		pid,
 		startedAt: existing?.startedAt ?? now,
@@ -180,6 +201,7 @@ export async function registerInstance(projectRoot: string): Promise<void> {
 		lspChildCount: existing?.lspChildren?.length ?? 0,
 		rssBytes: process.memoryUsage().rss,
 		heartbeatAt: now,
+		...(subagent ? { subagent } : {}),
 	});
 	await writeRegistryAsync({ instances: others });
 }

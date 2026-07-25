@@ -26,6 +26,7 @@ describe("instance-registry", () => {
 	});
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		removeTempDirSync(dir);
 	});
 
@@ -43,6 +44,84 @@ describe("instance-registry", () => {
 		expect(parsed.instances[0].pid).toBe(process.pid);
 		expect(parsed.instances[0].projectRoot).toContain("some/project");
 		expect(parsed.instances[0].lspChildren).toEqual([]);
+	});
+
+	it("persists subagent identity when registering a subagent session", async () => {
+		vi.stubEnv("PI_SUBAGENT_CHILD", "1");
+		vi.stubEnv("PI_SUBAGENT_CHILD_AGENT", "reviewer");
+		vi.stubEnv("PI_SUBAGENT_PARENT_PID", "12345");
+		vi.stubEnv("PI_SUBAGENT_RUN_ID", "run-822");
+		const { registerInstance } = await import("../../clients/instance-registry.js");
+
+		await registerInstance("/some/project");
+
+		const parsed = JSON.parse(fs.readFileSync(registryFilePath(), "utf-8"));
+		expect(parsed.instances[0].subagent).toEqual({
+			marker: "pi-subagents",
+			agentType: "reviewer",
+			parentPid: 12345,
+			runId: "run-822",
+		});
+	});
+
+	it("omits the subagent field entirely for a primary session", async () => {
+		vi.stubEnv("PI_SUBAGENT_CHILD", "");
+		vi.stubEnv("PI_SUBAGENT_CHILD_AGENT", "");
+		vi.stubEnv("PI_SUBAGENT_PARENT_PID", "");
+		vi.stubEnv("PI_SUBAGENT_RUN_ID", "");
+		const { registerInstance } = await import("../../clients/instance-registry.js");
+
+		await registerInstance("/some/project");
+
+		const parsed = JSON.parse(fs.readFileSync(registryFilePath(), "utf-8"));
+		expect(parsed.instances[0]).not.toHaveProperty("subagent");
+	});
+
+	it("round-trips mixed old and new registry entries through read, register, and reap", async () => {
+		const now = new Date().toISOString();
+		const oldEntry = {
+			pid: 424241,
+			startedAt: now,
+			projectRoot: "/old",
+			lspChildren: [],
+			lspChildCount: 0,
+			rssBytes: 1,
+			heartbeatAt: now,
+		};
+		const newEntry = {
+			...oldEntry,
+			pid: 424242,
+			projectRoot: "/new",
+			subagent: {
+				marker: "avtc-pi-subagent",
+				agentType: "reviewer",
+				parentPid: 12345,
+			},
+		};
+		fs.writeFileSync(
+			registryFilePath(),
+			JSON.stringify({ instances: [oldEntry, newEntry] }),
+			"utf-8",
+		);
+		const { readInstanceRegistry, registerInstance } = await import(
+			"../../clients/instance-registry.js"
+		);
+		const { decideOrphanReaping } = await import(
+			"../../clients/instance-reaper.js"
+		);
+
+		const before = await readInstanceRegistry();
+		expect(before).toHaveLength(2);
+		expect(() => decideOrphanReaping(before, () => true)).not.toThrow();
+		await expect(registerInstance("/current")).resolves.not.toThrow();
+
+		const after = await readInstanceRegistry();
+		expect(after).toHaveLength(3);
+		expect(after.find((entry) => entry.pid === oldEntry.pid)?.subagent).toBeUndefined();
+		expect(after.find((entry) => entry.pid === newEntry.pid)?.subagent).toEqual(
+			newEntry.subagent,
+		);
+		expect(() => decideOrphanReaping(after, () => true)).not.toThrow();
 	});
 
 	it("registerInstance overwrites (not duplicates) this pid's prior entry", async () => {
