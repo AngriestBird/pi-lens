@@ -1119,6 +1119,7 @@ async function ensureReviewGraphFacts(
 		// populated before the graph reads them.
 		await importFactProvider.run(ctx, facts);
 		await functionFactProvider.run(ctx, facts);
+	// pi-lens-ignore: missing-error-propagation
 	} catch (err) {
 		console.error(
 			`[pi-lens] review-graph structural facts disabled (degraded mode): ${

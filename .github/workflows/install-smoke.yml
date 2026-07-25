@@ -62,6 +62,8 @@ jobs:
         pm: [npm, pnpm, bun, yarn]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
@@ -84,6 +86,7 @@ jobs:
         shell: bash
         # --ignore-scripts: yarn's own postinstall isn't needed for the classic
         # CLI to function as the package manager under test.
+        # pi-lens-ignore: zizmor:adhoc-packages
         run: npm i -g --ignore-scripts yarn@1.22.22
 
       - name: Build + pack the current repo
@@ -112,6 +115,7 @@ jobs:
           # build-scripts gap we measure); that's expected, so don't let it fail
           # the step — the selftest below is the real gate.
           case "${{ matrix.pm }}" in
+            # pi-lens-ignore: zizmor:adhoc-packages
             npm)  npm  install "$TARBALL" ;;
             pnpm) pnpm add     "$TARBALL" || echo "::notice::pnpm exit $? (blocked build scripts — expected)" ;;
             bun)  bun  add     "$TARBALL" || echo "::notice::bun exit $? (blocked build scripts — expected)" ;;
@@ -147,6 +151,8 @@ jobs:
         pi_install: [npm-global, pnpm-global, bun-global, curl]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7 # for the RPC driver
+        with:
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
@@ -175,6 +181,7 @@ jobs:
           PKG="@earendil-works/pi-coding-agent@0.80.10"
           case "${{ matrix.pi_install }}" in
             npm-global)
+              # pi-lens-ignore: zizmor:adhoc-packages
               npm install -g --ignore-scripts "$PKG"
               echo "$(npm prefix -g)/bin" >> "$GITHUB_PATH"
               echo "NPMCMD=npm" >> "$GITHUB_ENV" ;;
@@ -261,6 +268,8 @@ jobs:
         pi_via: [mise-node, mise-npm-backend]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7 # RPC driver
+        with:
+          persist-credentials: false
 
       - name: Install mise (pinned + checksum-verified)
         shell: bash
@@ -310,6 +319,7 @@ jobs:
           set -uxo pipefail
           # Pinned deliberately (bump by hand — see #731): avoids an
           # unpinned global install pulling an arbitrary newest pnpm.
+          # pi-lens-ignore: zizmor:adhoc-packages
           npm install -g --ignore-scripts pnpm@11.15.1
           mise reshim
           pnpm --version
@@ -324,6 +334,7 @@ jobs:
           case "${{ matrix.pi_via }}" in
             mise-node)
               # node from mise; pi as a plain npm-global under that node.
+              # pi-lens-ignore: zizmor:adhoc-packages
               npm install -g --ignore-scripts "$PKG" ;;
             mise-npm-backend)
               # pi through mise's own npm backend — pi behind a mise tool-shim, the

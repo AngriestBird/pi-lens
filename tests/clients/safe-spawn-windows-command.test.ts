@@ -8,7 +8,10 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { buildWindowsShellCommand } from "../../clients/safe-spawn.js";
+import {
+	buildWindowsShellCommand,
+	safeSpawnAsync,
+} from "../../clients/safe-spawn.js";
 
 describe("buildWindowsShellCommand (Windows cmd.exe quoting — #214)", () => {
 	it("quotes a command path containing spaces", () => {
@@ -36,5 +39,20 @@ describe("buildWindowsShellCommand (Windows cmd.exe quoting — #214)", () => {
 		expect(buildWindowsShellCommand("go", ["version"])).toMatch(
 			/^chcp 65001 >nul 2>&1 && /,
 		);
+	});
+
+	it("keeps shell metacharacters inside one argument", () => {
+		const command = buildWindowsShellCommand("tool", ["safe & echo INJECTED"]);
+		expect(command).toContain('"safe & echo INJECTED"');
+	});
+});
+
+describe("safeSpawnAsync command-line injection regression (#17)", () => {
+	it("does not execute shell syntax supplied as an argument", async () => {
+		const result = await safeSpawnAsync("echo", ["safe & echo INJECTED"]);
+		expect(result.error).toBeUndefined();
+		expect(result.status).toBe(0);
+		expect(result.stdout).toContain("safe & echo INJECTED");
+		expect(result.stdout.trim().split(/\r?\n/)).toHaveLength(1);
 	});
 });
