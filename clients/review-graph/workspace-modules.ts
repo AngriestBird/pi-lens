@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectIgnoreMatcher, isExcludedDirName } from "../file-utils.js";
 import { normalizeMapKey } from "../path-utils.js";
+import { getWorkspaceManifestMarkers } from "../workspace-topology.js";
 
 export interface WorkspaceModule {
 	name: string;
@@ -64,21 +65,32 @@ function readJsonSafe(filePath: string): unknown {
 	}
 }
 
+/**
+ * Presence checks for the four workspace-manifest markers are sourced from
+ * the shared workspace-topology marker index (#806) — one `readdir` pass at
+ * `cwd` collects them alongside `.pi-lens.json`/`tsconfig.json` other
+ * consumers need for the SAME directory, instead of four independent
+ * `existsSync` probes. Manifest CONTENT (workspace globs, the `[workspace]`
+ * TOML section, the `workspaces` package.json field) is still read and
+ * parsed here — the topology index only answers "is the marker present".
+ */
 function detectWorkspaceType(cwd: string): WorkspaceType | null {
-	if (fs.existsSync(path.join(cwd, "pnpm-workspace.yaml"))) return "pnpm";
-	if (fs.existsSync(path.join(cwd, "go.work"))) return "go";
-	const cargoToml = path.join(cwd, "Cargo.toml");
-	if (fs.existsSync(cargoToml)) {
+	const markers = getWorkspaceManifestMarkers(cwd);
+	if (markers.hasPnpmWorkspaceYaml) return "pnpm";
+	if (markers.hasGoWork) return "go";
+	if (markers.hasCargoToml) {
 		try {
-			const content = fs.readFileSync(cargoToml, "utf-8");
+			const content = fs.readFileSync(path.join(cwd, "Cargo.toml"), "utf-8");
 			if (content.includes("[workspace]")) return "cargo";
 		} catch {}
 	}
-	const pkgJson = readJsonSafe(path.join(cwd, "package.json")) as
-		| PackageJson
-		| undefined;
-	const workspaces = normalizeWorkspacePatterns(pkgJson?.workspaces);
-	if (workspaces.length > 0) return "npm";
+	if (markers.hasPackageJson) {
+		const pkgJson = readJsonSafe(path.join(cwd, "package.json")) as
+			| PackageJson
+			| undefined;
+		const workspaces = normalizeWorkspacePatterns(pkgJson?.workspaces);
+		if (workspaces.length > 0) return "npm";
+	}
 	return null;
 }
 

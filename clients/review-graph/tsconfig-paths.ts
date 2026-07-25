@@ -1,10 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-	findNearestContaining,
-	isAtOrAboveHomeDir,
-} from "../path-utils.js";
+import { findGoverningTsconfigDir } from "../workspace-topology.js";
 
 export interface TsconfigPathMatcher {
 	pattern: string;
@@ -117,8 +114,11 @@ export function parseTsconfigPaths(
 	const key = path.resolve(cwd);
 	const cached = cache.get(key);
 	if (cached) return cached;
-	const configDir = findNearestContaining(key, ["tsconfig.json"]);
-	if (!configDir || isAtOrAboveHomeDir(configDir, homeDir)) {
+	// Home-guarding is enforced inside findGoverningTsconfigDir's walk itself
+	// (via workspace-topology's shared isAtOrAboveHomeDir ceiling), so a hit
+	// here is never at/above homeDir.
+	const configDir = findGoverningTsconfigDir(key, homeDir);
+	if (!configDir) {
 		cache.set(key, []);
 		return [];
 	}

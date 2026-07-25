@@ -49,6 +49,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { parseEnabledShape } from "./config-enabled-shape.js";
 import { isAtOrAboveHomeDir, walkUpDirs } from "./path-utils.js";
+import { findPiLensConfigMarkerInDir } from "./workspace-topology.js";
 
 const PROJECT_CONFIG_BASENAMES = [".pi-lens.json", "pi-lens.json"];
 
@@ -108,10 +109,6 @@ interface DiscoveryCacheEntry {
 /** Cache by absolute config path; we read each candidate's mtime before reuse. */
 const configCache = new Map<string, CacheEntry>();
 const discoveryCache = new Map<string, DiscoveryCacheEntry>();
-const inDirDiscoveryCache = new Map<
-	string,
-	{ dirMtimeMs: number; info: PiLensProjectConfigFileInfo | undefined }
->();
 const warnedInvalidConfigs = new Set<string>();
 
 /**
@@ -139,7 +136,6 @@ export function loadPiLensProjectConfig(
 export function resetProjectLensConfigCache(): void {
 	configCache.clear();
 	discoveryCache.clear();
-	inDirDiscoveryCache.clear();
 	warnedInvalidConfigs.clear();
 }
 
@@ -156,33 +152,18 @@ export interface PiLensProjectConfigFileInfo {
  * between the git root and a target file is checked for its OWN config
  * file, independent of whatever config `loadPiLensProjectConfig`'s upward
  * walk would find starting from `dir`.
+ *
+ * Sourced from the shared workspace-topology marker index (#806) — one
+ * `readdir` pass per directory visit collects this marker alongside
+ * `tsconfig.json`/workspace-manifest markers other consumers need for the
+ * SAME directory, instead of each subsystem re-probing it independently.
  */
 export function findPiLensConfigInDir(
 	dir: string,
 ): PiLensProjectConfigFileInfo | undefined {
-	const resolvedDir = path.resolve(dir);
-	const dirMtimeMs = safeDirMtimeMs(resolvedDir);
-	const cached = inDirDiscoveryCache.get(resolvedDir);
-	if (cached?.dirMtimeMs === dirMtimeMs) {
-		if (!cached.info) return undefined;
-		const stat = safeFileStat(cached.info.path);
-		if (stat?.isFile()) return { ...cached.info, mtimeMs: stat.mtimeMs };
-	}
-	for (const name of PROJECT_CONFIG_BASENAMES) {
-		const candidate = path.join(resolvedDir, name);
-		const stat = safeFileStat(candidate);
-		if (stat?.isFile()) {
-			const info = {
-				path: candidate,
-				dir: resolvedDir,
-				mtimeMs: stat.mtimeMs,
-			};
-			inDirDiscoveryCache.set(resolvedDir, { dirMtimeMs, info });
-			return info;
-		}
-	}
-	inDirDiscoveryCache.set(resolvedDir, { dirMtimeMs, info: undefined });
-	return undefined;
+	const marker = findPiLensConfigMarkerInDir(dir);
+	if (!marker) return undefined;
+	return { path: marker.path, dir: marker.dir, mtimeMs: marker.mtimeMs };
 }
 
 export type ProjectMutationFlag =
