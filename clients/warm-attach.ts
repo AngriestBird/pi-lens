@@ -30,13 +30,19 @@ interface AttachState {
 
 const state: AttachState = { local: true };
 
-function record(event: string, cwd: string, reason?: string, pid?: number): void {
+function record(
+	event: string,
+	cwd: string,
+	reason?: string,
+	pid?: number,
+	source?: "per-edit" | "sweep",
+): void {
 	logLatency({
 		type: "phase",
 		phase: "lsp_warm_attach",
 		filePath: cwd,
 		durationMs: 0,
-		metadata: { event, reason, incumbentPid: pid },
+		metadata: { event, reason, incumbentPid: pid, source },
 	});
 }
 
@@ -154,6 +160,7 @@ export async function tryWarmAttachedDiagnostics(
 	file: string,
 	content: string,
 	timeoutMs: number,
+	source: "per-edit" | "sweep" = "per-edit",
 ): Promise<WarmDiagnosticsResult | undefined> {
 	if (state.local || !state.cwd || !state.incumbentPid) return undefined;
 	const entries = await readInstanceRegistry();
@@ -169,7 +176,11 @@ export async function tryWarmAttachedDiagnostics(
 		content,
 		timeoutMs,
 	);
-	if (!result.available) promoteToLocal(result.reason);
+	if (!result.available) {
+		promoteToLocal(result.reason);
+	} else {
+		record("diagnostics-served", file, undefined, state.incumbentPid, source);
+	}
 	return result;
 }
 

@@ -6,11 +6,19 @@ import { removeTempDirSync } from "../clients/test-utils.js";
 
 const mocked = vi.hoisted(() => ({
 	service: null as unknown,
+	warmAttached: false,
+	attachedDiagnostics: vi.fn(),
 	// #533: classifyCascadeWaitTier is mocked at the module boundary so each
 	// test controls the "tier3-silent vs waits" verdict directly, without
 	// wiring the full getServersForFileWithConfig/capability-snapshot chain
 	// cascade-tier.test.ts already exercises for the classifier itself.
 	cascadeTier: "waits" as "waits" | "tier3-silent",
+}));
+
+vi.mock("../../clients/warm-attach.js", () => ({
+	isWarmAttached: () => mocked.warmAttached,
+	tryWarmAttachedDiagnostics: (...args: unknown[]) =>
+		mocked.attachedDiagnostics(...args),
 }));
 
 // #631: `groupFilesByPrimaryServer`/`runPerServerGroups` are the REAL
@@ -49,6 +57,8 @@ import { resetProjectLensConfigCache } from "../../clients/project-lens-config.j
 describe("lsp_diagnostics tool", () => {
 	beforeEach(() => {
 		mocked.cascadeTier = "waits";
+		mocked.warmAttached = false;
+		mocked.attachedDiagnostics.mockReset();
 		reconcileScanDiagnosticsMock.mockReset();
 		mocked.service = {
 			openFile: vi.fn().mockResolvedValue(undefined),
@@ -71,6 +81,58 @@ describe("lsp_diagnostics tool", () => {
 			getDiagnosticsHealth: vi.fn().mockReturnValue(undefined),
 			getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
 		};
+	});
+
+	it("uses attached diagnostics for a batch without local warm-up or touches", async () => {
+		const touchFile = vi.fn();
+		const ensureWarmForSweep = vi.fn();
+		(mocked.service as any).touchFile = touchFile;
+		(mocked.service as any).ensureWarmForSweep = ensureWarmForSweep;
+		mocked.warmAttached = true;
+		mocked.attachedDiagnostics.mockResolvedValue({
+			available: true,
+			response: {
+				diagnostics: [
+					{
+						severity: 1,
+						message: "from incumbent",
+						range: {
+							start: { line: 0, character: 0 },
+							end: { line: 0, character: 1 },
+						},
+						source: "ts",
+					},
+				],
+			},
+		});
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-diag-attached-"),
+		);
+		const file = path.join(tmpDir, "attached.ts");
+		fs.writeFileSync(file, "const value = 1;\n");
+
+		try {
+			const result = (await createLspDiagnosticsTool().execute(
+				"diag-attached",
+				{ paths: [file], severity: "all", waitMs: 321, serverScope: "all" },
+				new AbortController().signal,
+				null,
+				{ cwd: "." },
+			)) as any;
+
+			expect(result.details?.totalDiagnostics).toBe(1);
+			expect(String(result.content[0]?.text)).toContain("from incumbent");
+			expect(mocked.attachedDiagnostics).toHaveBeenCalledWith(
+				file,
+				"const value = 1;\n",
+				321,
+				"sweep",
+			);
+			expect(ensureWarmForSweep).not.toHaveBeenCalled();
+			expect(touchFile).not.toHaveBeenCalled();
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
 	});
 
 	it("checks explicit filePaths as a batch", async () => {

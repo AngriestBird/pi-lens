@@ -61,6 +61,10 @@ import {
 	classifyCascadeWaitTier,
 	classifyServerWaitTier,
 } from "./cascade-tier.js";
+import {
+	isWarmAttached,
+	tryWarmAttachedDiagnostics,
+} from "../warm-attach.js";
 
 // --- Init override helpers ---
 
@@ -3480,6 +3484,7 @@ export class LSPService {
 		const preOpenGroupFiles = async (
 			groupFiles: readonly string[],
 		): Promise<void> => {
+			if (isWarmAttached()) return;
 			for (const filePath of groupFiles) {
 				if (signal?.aborted) return;
 				let content: string;
@@ -3565,23 +3570,36 @@ export class LSPService {
 				// onTimeout:"undefined" so a hung file yields no diagnostics and the
 				// worker moves on; a real touchFile rejection still propagates to the
 				// catch below and is recorded as an error.
-				const diagnostics = await withDeadline(
-					this.touchFile(filePath, content, {
-						diagnostics: "document",
-						collectDiagnostics: true,
-						clientScope: "all",
-						source: "lens_diagnostics_full",
-						// #584: opengrep's findings for a full sweep come from the
-						// `opengrep-client.ts` CLI extractor (one project-wide scan,
-						// cached, read via extractors.ts) instead — see the
-						// `excludeServerIds` doc on `LSPTouchFileOptions`.
-						excludeServerIds: WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS,
-						// #645: lets a workspaceIndexing server (marksman) pay its
-						// full wait budget only once across this whole sweep.
-						sweepIndexGate,
-					}),
-					{ ms: perFileMs, onTimeout: "undefined" },
-				);
+				const attached = isWarmAttached()
+					? await tryWarmAttachedDiagnostics(
+							filePath,
+							content,
+							perFileMs,
+							"sweep",
+						)
+					: undefined;
+				if (attached && !attached.available) {
+					await this.ensureWarmForSweep(filePath, { signal });
+				}
+				const diagnostics = attached?.available
+					? attached.response.diagnostics
+					: await withDeadline(
+							this.touchFile(filePath, content, {
+								diagnostics: "document",
+								collectDiagnostics: true,
+								clientScope: "all",
+								source: "lens_diagnostics_full",
+								// #584: opengrep's findings for a full sweep come from the
+								// `opengrep-client.ts` CLI extractor (one project-wide scan,
+								// cached, read via extractors.ts) instead — see the
+								// `excludeServerIds` doc on `LSPTouchFileOptions`.
+								excludeServerIds: WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS,
+								// #645: lets a workspaceIndexing server (marksman) pay its
+								// full wait budget only once across this whole sweep.
+								sweepIndexGate,
+							}),
+							{ ms: perFileMs, onTimeout: "undefined" },
+						);
 				// #571: prefer #570's real per-touch inconclusive signal
 				// (`touchFile`'s non-enumerable `.inconclusive` flag — set when the
 				// notify write or the diagnostics wait itself timed out) over this
@@ -3666,7 +3684,11 @@ export class LSPService {
 			async (group) => {
 				if (signal?.aborted) return;
 				// Fast path: one project-wide pull for the whole group (opt-in).
-				if (workspacePullEnabled && !group.multiServer) {
+				if (
+					!isWarmAttached() &&
+					workspacePullEnabled &&
+					!group.multiServer
+				) {
 					const pulled = await this.tryWorkspacePull(group.files, perFileMs);
 					if (pulled) {
 						for (const result of pulled) {
@@ -3699,7 +3721,7 @@ export class LSPService {
 				// budget in one shot — the per-file "first N files eat individual
 				// timeouts" failure mode this fixes doesn't apply there.
 				const first = group.files[0];
-				if (first) {
+				if (first && !isWarmAttached()) {
 					const warmup = await this.ensureWarmForSweep(first, { signal });
 					if (signal?.aborted) return;
 					// #744: the group's primary server failed warm-up (initial round
