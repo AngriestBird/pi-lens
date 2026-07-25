@@ -23,6 +23,7 @@ import { collectProjectSourceFilesWithBudgetAsync } from "../project-scan-policy
 import { getReviewGraphMaxFilesDerived } from "../project-scale.js";
 import {
 	jsTsCandidatePaths,
+	resolveAliasedImport,
 	resolveImportToFiles,
 	resolveWorkspacePackageImport,
 } from "./import-resolvers.js";
@@ -1057,7 +1058,11 @@ function localImportToFile(
 	ignoredIds?: ReadonlySet<string>,
 ): string | undefined {
 	if (!source.startsWith(".")) {
-		for (const normalized of resolveWorkspacePackageImport(cwd, source)) {
+		const aliased = resolveAliasedImport(cwd, source, path.dirname(filePath));
+		const resolved = aliased.length
+			? aliased
+			: resolveWorkspacePackageImport(cwd, source);
+		for (const normalized of resolved) {
 			if (ignoredIds?.has(normalized)) continue;
 			return normalized;
 		}
