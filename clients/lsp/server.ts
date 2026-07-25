@@ -32,7 +32,7 @@ import { resolveOpengrepConfig } from "../opengrep-config.js";
 import { isZizmorAuditTarget, resolveZizmorGitHubToken } from "../zizmor-config.js";
 import { logLatency } from "../latency-logger.js";
 import { findLocalSgconfig, resolveBaselineSgconfig } from "../sgconfig.js";
-import { resolveAstGrepNativeExe } from "./server-strategies.js";
+import { resolveAstGrepNativeExe } from "./wait-policy/index.js";
 import { isCommandAvailableAsync, safeSpawnAsync } from "../safe-spawn.js";
 import { type LSPProcess, launchLSP } from "./launch.js";
 import { createLombokJdtlsArgs } from "./lombok.js";

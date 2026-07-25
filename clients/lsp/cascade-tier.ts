@@ -58,9 +58,13 @@ import { logCascade } from "../cascade-logger.js";
 import { logLatency } from "../latency-logger.js";
 import { normalizeMapKey } from "../path-utils.js";
 import { registerQuietWindowTask } from "../quiet-window.js";
-import { getServersForFileWithConfig } from "./config.js";
-import type { LSPCapabilitySnapshot, LSPService } from "./index.js";
-import { getStrategy } from "./server-strategies.js";
+import type { LSPService } from "./index.js";
+
+export {
+	classifyCascadeWaitTier,
+	classifyServerWaitTier,
+	type CascadeWaitTier,
+} from "./wait-policy/classification.js";
 
 // --- Kill switch (lazy, memoized — house style per clients/runtime-config.ts /
 // clients/quiet-window.ts's isQuietWindowEnabled) ---
@@ -79,72 +83,6 @@ export function isTierAwareCascadeEnabled(): boolean {
 /** Test-only: clear the memoized kill-switch read. */
 export function _resetTierAwareCascadeEnabledForTests(): void {
 	_enabledCache = undefined;
-}
-
-export type CascadeWaitTier = "pull-capable" | "tier3-silent" | "waits";
-
-/**
- * Classify a SINGLE server (by id, given its live capability snapshot — or
- * `undefined` when none exists yet) as cascade-lane Tier-3 (push-only,
- * silent-on-clean) or not. This is the per-server primitive both
- * `classifyCascadeWaitTier` (file's PRIMARY server only, the cascade lane's
- * original use) and #814's capability-aware AGGREGATE wait (`touchFile`'s
- * `clientScope: "all"` path, `clients/lsp/index.ts`) share — one
- * classification rule, not two copies that could drift. Ambiguous or missing
- * capability data is always `"waits"` (today's behavior) — this function must
- * never be the reason a real answer gets missed.
- */
-export function classifyServerWaitTier(
-	serverId: string,
-	snapshot: LSPCapabilitySnapshot | undefined,
-): CascadeWaitTier {
-	if (!snapshot) return "waits"; // no live snapshot yet — fail-safe
-
-	const mode = snapshot.workspaceDiagnosticsSupport?.mode;
-	if (mode === "pull") return "pull-capable";
-	if (mode !== "push-only") return "waits";
-
-	const strategy = getStrategy(serverId);
-	if (strategy.silentOnClean !== true) return "waits"; // 2*/unknown push-only
-
-	// #524/#529/#541/#558: `silentOnClean` on a server-id-keyed strategy is
-	// only proven against the variant it was actually measured against.
-	// "typescript" today means either classic typescript-language-server
-	// (confirmed silent-on-clean, 2026-07-12 dual-environment re-measurement)
-	// or TS7's native `tsc --lsp --stdio` (the SAME re-measurement found it
-	// publishes 2 version-less diagnostic sets on clean — NOT silent, a
-	// drift from the earlier #541 measurement). A native-ts7 snapshot must
-	// NOT inherit the classic verdict: fall through to "waits", the same
-	// ambiguous/fail-safe path an unmarked or non-push-only server already
-	// takes. `launchVariant === "classic"` or absent (older snapshots that
-	// predate the marker) keeps today's tier-3 behavior exactly.
-	if (snapshot.launchVariant === "native-ts7") return "waits";
-
-	return "tier3-silent";
-}
-
-/**
- * Classify whether `filePath`'s PRIMARY language server is a cascade-lane
- * Tier-3 (push-only, silent-on-clean) server. Ambiguous or missing capability
- * data is always `"waits"` (today's behavior) — this function must never be
- * the reason a real answer gets missed. Thin wrapper over
- * `classifyServerWaitTier` — resolves the file's primary server id/snapshot,
- * then defers to the shared per-server rule.
- */
-export function classifyCascadeWaitTier(
-	lspService: Pick<LSPService, "getCapabilitySnapshots">,
-	filePath: string,
-	snapshots: Awaited<ReturnType<LSPService["getCapabilitySnapshots"]>>,
-): CascadeWaitTier {
-	void lspService; // kept in the signature for call-site clarity/typing only
-	const servers = getServersForFileWithConfig(filePath).filter(
-		(s) => s.role !== "auxiliary",
-	);
-	const primary = servers[0];
-	if (!primary) return "waits";
-
-	const snapshot = snapshots.find((s) => s.serverId === primary.id);
-	return classifyServerWaitTier(primary.id, snapshot);
 }
 
 // --- Outstanding-touch registry -------------------------------------------
