@@ -7,7 +7,6 @@
  * Credit: alexx-ftw (PR #1)
  */
 
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { lazyEnvNumber } from "./env-utils.js";
@@ -23,6 +22,7 @@ import {
 	walkTreeStackSync,
 	type WalkVisitor,
 } from "./source-walker.js";
+import { getDirectoryMarkers } from "./workspace-topology.js";
 
 export const PROJECT_ROOT_MARKERS = [
 	".git",
@@ -167,14 +167,34 @@ export function isStartupScanVerdictFresh(
 	return now - verdict.computedAt < getStartupScanVerdictTtlMs();
 }
 
+/**
+ * Nearest ancestor (inclusive) of `startDir` containing any of
+ * `PROJECT_ROOT_MARKERS`, or `null` if none found before the filesystem root.
+ *
+ * #807: the per-directory marker check now reads through
+ * `workspace-topology.ts`'s `getDirectoryMarkers` (one cached `readdir` per
+ * directory) instead of doing `PROJECT_ROOT_MARKERS.length` separate
+ * `existsSync` stats per directory — same dedup win as the rest of the #806
+ * migration. Deliberately NOT routed through the topology service's
+ * home-guarded `findNearestDirWithMarker`/`findNearestDirWithAnyBasename`
+ * walkers, though: this function's callers (`computeStartupScanContext` /
+ * `resolveStartupScanContextAsync`, below) need the ACTUAL directory a marker
+ * resolved to — including one AT or ABOVE `$HOME` — to tell the
+ * `"home-dir"` verdict apart from `"no-project-root"` and to populate
+ * `scanRoot`/`projectRoot` for diagnostics (see the `startup-scan-home-ceiling`
+ * tests: a marker found in an ancestor of `$HOME` must still be *returned*
+ * here, with the home rejection applied by the caller). A guarded walker that
+ * stops before ever looking at/above `$HOME` would go blind exactly where
+ * this function's contract requires it to keep looking, silently turning a
+ * `"home-dir"` verdict into `"no-project-root"`. The walk-UP loop itself
+ * therefore stays hand-written, unbounded by `$HOME`/depth, matching its
+ * pre-#807 behavior exactly.
+ */
 export function findNearestProjectRoot(startDir: string): string | null {
 	let current = path.resolve(startDir);
 	while (true) {
-		if (
-			PROJECT_ROOT_MARKERS.some((marker) =>
-				fs.existsSync(path.join(current, marker)),
-			)
-		) {
+		const entryNames = getDirectoryMarkers(current).entryNames;
+		if (PROJECT_ROOT_MARKERS.some((marker) => entryNames.has(marker))) {
 			return current;
 		}
 		const parent = path.dirname(current);

@@ -8,6 +8,7 @@ import {
 } from "./language-policy.js";
 import { getSourceFiles } from "./scan-utils.js";
 import { readDirEntriesSafe, shouldRecurseIntoDir } from "./source-walker.js";
+import { findNearestDirWithAnyBasename } from "./workspace-topology.js";
 
 export const SUPPORTED_FILE_KINDS: readonly FileKind[] = [
 	"jsts",
@@ -120,28 +121,6 @@ const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	nix: ["flake.nix"],
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
 };
-
-function nearestRoot(
-	start: string,
-	markers: readonly string[],
-): string | undefined {
-	let dir = path.resolve(start);
-	const { root } = path.parse(dir);
-
-	while (true) {
-		for (const marker of markers) {
-			if (fs.existsSync(path.join(dir, marker))) {
-				return dir;
-			}
-		}
-		if (dir === root) break;
-		const parent = path.dirname(dir);
-		if (parent === dir) break;
-		dir = parent;
-	}
-
-	return undefined;
-}
 
 // Process-lifetime memo keyed on projectRoot. Only populated when the
 // caller did not pass an explicit `sourceFiles` array — the explicit-array
@@ -270,7 +249,17 @@ export function resolveLanguageRootForFile(
 		return path.resolve(workspaceRoot);
 	}
 
-	const found = nearestRoot(startDir, markers);
+	// #807: nearest-marker discovery now shares workspace-topology.ts's single
+	// walk/cache/invalidation seam instead of this file's own per-kind
+	// `existsSync` climb loop. `findNearestDirWithAnyBasename` additionally
+	// rejects a marker at/above `$HOME` (the pre-#807 loop didn't), matching
+	// the AGENTS.md walker invariant — harmless here because the
+	// workspace-relative check right below already discards any candidate
+	// outside `workspaceRoot`, and `workspaceRoot` is never at/above `$HOME`
+	// in practice. This keeps resolveLanguageRootForFile's OWN stricter
+	// workspace-relative policy check unchanged: the topology service only
+	// supplies discovery, not this function's policy.
+	const found = findNearestDirWithAnyBasename(startDir, markers);
 	if (!found) return path.resolve(workspaceRoot);
 
 	const workspace = path.resolve(workspaceRoot);
