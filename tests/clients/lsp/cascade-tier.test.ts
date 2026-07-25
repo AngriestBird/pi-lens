@@ -129,7 +129,7 @@ describe("classifyCascadeWaitTier", () => {
 		).toBe("tier3-silent");
 	});
 
-	it("classifies a pull-mode server as waits (tier 1/2, always affirmative)", () => {
+	it("classifies a pull-mode server as pull-capable", () => {
 		getServersForFileWithConfig.mockReturnValue([server("rust-analyzer")]);
 		const snapshots = [
 			{
@@ -143,7 +143,7 @@ describe("classifyCascadeWaitTier", () => {
 		];
 		expect(
 			mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any),
-		).toBe("waits");
+		).toBe("pull-capable");
 	});
 
 	it("classifies a push-only server WITHOUT silentOnClean (e.g. pyright, tier 2) as waits", () => {

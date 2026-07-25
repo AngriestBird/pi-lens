@@ -43,6 +43,10 @@ import {
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
 import { logLatency } from "./latency-logger.js";
+import {
+	getLspBudgetIdleTimeoutMs,
+	shouldShortenLspIdleTimeout,
+} from "./lsp-budget.js";
 import { updateHeartbeat } from "./instance-registry.js";
 import { emitLensTurnFindings } from "./lens-events.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
@@ -209,7 +213,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// pure waste under fan-out. Classify ONCE here so every tick in this call
 		// path shares the same answer. PI_LENS_SUBAGENT_FULL=1 restores 240s via
 		// isSubagentSession() returning false.
-		const idleResetMs = isSubagentSession() ? 60_000 : 240_000;
+		const idleResetMs =
+			isSubagentSession() || shouldShortenLspIdleTimeout()
+				? getLspBudgetIdleTimeoutMs()
+				: 240_000;
 		dbg(
 			`turn_end: no modified files, scheduling LSP idle reset (${idleResetMs / 1000}s)`,
 		);

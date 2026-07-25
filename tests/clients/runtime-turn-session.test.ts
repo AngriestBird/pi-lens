@@ -14,6 +14,10 @@ import {
 	cancelLSPIdleReset,
 	handleTurnEnd,
 } from "../../clients/runtime-turn.js";
+import {
+	checkCrossProcessLspBudget,
+	_resetLspBudgetDecisionForTests,
+} from "../../clients/lsp-budget.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 const EMPTY_KNIP_RESULT = {
@@ -53,6 +57,62 @@ function makeTurnEndDeps(
 // ── LSP idle reset ─────────────────────────────────────────────────────────────
 
 describe("LSP idle reset", () => {
+	it("uses the short idle timeout when the session-boundary budget is pressured", async () => {
+		const env = setupTestEnvironment("pi-lens-idle-budget-");
+		const runtime = new RuntimeCoordinator();
+		const cacheManager = new CacheManager(false);
+		const resetLSPService = vi.fn();
+		const previousCeiling = process.env.PI_LENS_LSP_BUDGET_CEILING;
+		process.env.PI_LENS_LSP_BUDGET_CEILING = "1";
+		_resetLspBudgetDecisionForTests();
+
+		vi.useFakeTimers();
+		try {
+			await checkCrossProcessLspBudget({
+				registry: [
+					{
+						pid: 42,
+						startedAt: new Date().toISOString(),
+						projectRoot: env.tmpDir,
+						lspChildren: [
+							{
+								pid: 43,
+								serverId: "python",
+								command: "pyright-langserver",
+								spawnedAt: new Date().toISOString(),
+							},
+						],
+						lspChildCount: 1,
+						rssBytes: 1,
+						heartbeatAt: new Date().toISOString(),
+					},
+				],
+				isPidAlive: () => true,
+			});
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, {
+					ctxCwd: env.tmpDir,
+					resetLSPService,
+				}),
+			);
+
+			await vi.advanceTimersByTimeAsync(59_999);
+			expect(resetLSPService).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1);
+			expect(resetLSPService).toHaveBeenCalledTimes(1);
+		} finally {
+			cancelLSPIdleReset();
+			_resetLspBudgetDecisionForTests();
+			vi.useRealTimers();
+			if (previousCeiling === undefined) {
+				delete process.env.PI_LENS_LSP_BUDGET_CEILING;
+			} else {
+				process.env.PI_LENS_LSP_BUDGET_CEILING = previousCeiling;
+			}
+			env.cleanup();
+		}
+	});
+
 	it("skips a pending idle reset after the session generation changes", async () => {
 		const env = setupTestEnvironment("pi-lens-idle-generation-");
 		const runtime = new RuntimeCoordinator();
