@@ -2205,6 +2205,24 @@ async function _doBuildGraph(
 		// project_report can render an honest "disabled at N files" hint instead
 		// of "retry shortly" — see getReviewGraphSizeSkipVerdict.
 		recordReviewGraphSizeSkip(cwd, filesToBuild.length, maxGraphFiles);
+		// #775 R3: `_lastGraphBuildInfo`/the size-skip verdict above are only
+		// SURFACED by callers that happen to read them (dispatch/integration.ts's
+		// cascade path logs a `graph_build` phase; lens-map.ts, project-report.ts,
+		// mcp/analyze.ts, runtime-session.ts, and tree-sitter.ts's runner do not).
+		// Log unconditionally here, at the one place every caller funnels through,
+		// so a monorepo crossing the cap is never a SILENT truncation — no caller
+		// wiring required (AGENTS.md: no silent caps).
+		logLatency({
+			type: "phase",
+			phase: "review_graph_size_skip",
+			filePath: cwd,
+			durationMs: 0,
+			metadata: {
+				cwd,
+				sourceFileCount: filesToBuild.length,
+				maxFileCount: maxGraphFiles,
+			},
+		});
 		_lastGraphBuildInfo = {
 			reused: false,
 			mode: "skipped",

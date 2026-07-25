@@ -23,9 +23,18 @@
  * (and every consumer's own downstream cache layered on top) are re-read
  * fresh on the next session, without a full process restart.
  *
- * Root/language-root resolution is NOT migrated here (#806 lists it as a
- * later follow-up) — this module only indexes per-directory MARKERS, it
- * does not decide what "the project root" is.
+ * #807 (second wave): `language-profile.ts`'s `resolveLanguageRootForFile`
+ * and `startup-scan.ts`'s `findNearestProjectRoot` route their per-directory
+ * marker checks through this module too — `findNearestDirWithAnyBasename`
+ * for the former (a home-guarded, depth-capped, walk-cached generalization of
+ * `findNearestDirWithMarker` for marker lists that aren't typed
+ * `DirectoryMarkers` fields), and a direct `getDirectoryMarkers(dir)`
+ * `entryNames` read for the latter (walk loop kept hand-written and
+ * NOT home-guarded — see that function's docstring for why). This module
+ * still only indexes per-directory MARKER PRESENCE; it does not decide what
+ * "the project root" is — that policy (which markers count, what wins when
+ * several qualify, whether a found root gets clamped back to the workspace)
+ * stays with each resolver.
  */
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -47,6 +56,17 @@ export interface DirectoryMarkers {
 	dir: string;
 	/** mtime of the directory itself at scan time — the cache's invalidation key. */
 	dirMtimeMs: number;
+	/**
+	 * Raw immediate-child entry names from this directory's single `readdir`
+	 * pass (#807) — type-agnostic (file OR directory dirents), unlike the
+	 * stat-confirmed `*Path` fields below. For callers doing a plain
+	 * `existsSync`-style basename-presence check (e.g. `.git`, which is a
+	 * directory for a normal clone but a file for a worktree, or a marker set
+	 * that isn't one of the typed fields yet) — see `findNearestDirWithAnyBasename`.
+	 * Not a substitute for the typed fields where the caller specifically
+	 * needs "and it's a file" confirmed.
+	 */
+	entryNames: ReadonlySet<string>;
 	/** Resolved path of `.pi-lens.json`, preferred over the no-dot fallback. */
 	piLensConfigPath: string | undefined;
 	tsconfigPath: string | undefined;
@@ -129,6 +149,7 @@ export function getDirectoryMarkers(dir: string): DirectoryMarkers {
 	const markers: DirectoryMarkers = {
 		dir: resolvedDir,
 		dirMtimeMs,
+		entryNames: present,
 		piLensConfigPath,
 		tsconfigPath: resolveMarker("tsconfig.json"),
 		packageJsonPath: resolveMarker("package.json"),
@@ -140,12 +161,62 @@ export function getDirectoryMarkers(dir: string): DirectoryMarkers {
 	return markers;
 }
 
-function walkCacheKey(startDir: string, markerKey: keyof DirectoryMarkers): string {
+function walkCacheKey(startDir: string, markerKey: string): string {
 	return `${path.resolve(startDir)}\0${markerKey}`;
 }
 
 function walkStillFresh(dirMtimes: Array<{ dir: string; mtimeMs: number }>): boolean {
 	return dirMtimes.every(({ dir, mtimeMs }) => safeDirMtimeMs(dir) === mtimeMs);
+}
+
+/**
+ * Shared core of the two nearest-marker walkers below: the cache check, the
+ * home-guarded/depth-capped upward loop, per-directory mtime recording, and
+ * the cache store live HERE once — callers supply only their cache-key
+ * suffix, their match predicate over a directory's marker index, and the
+ * identifying metadata for the cap-trip latency log. (Extracted for #812's
+ * Sonar new-code duplication gate: the two walkers previously each carried
+ * this skeleton verbatim.)
+ */
+function walkToNearestMatch(
+	startDir: string,
+	cacheSuffix: string,
+	matches: (markers: DirectoryMarkers) => boolean,
+	capMetadata: Record<string, unknown>,
+	homeDir: string,
+): string | undefined {
+	const key = walkCacheKey(startDir, cacheSuffix);
+	const cached = walkCache.get(key);
+	if (cached && walkStillFresh(cached.dirMtimes)) {
+		return cached.dir;
+	}
+
+	const dirMtimes: Array<{ dir: string; mtimeMs: number }> = [];
+	let found: string | undefined;
+	let depth = 0;
+	for (const dir of walkUpDirs(startDir)) {
+		if (isAtOrAboveHomeDir(dir, homeDir)) break;
+		if (depth >= MAX_WALK_DEPTH) {
+			logLatency({
+				type: "phase",
+				filePath: startDir,
+				phase: "workspace-topology-walk-cap",
+				durationMs: 0,
+				metadata: { ...capMetadata, depth, homeDir },
+			});
+			break;
+		}
+		const markers = getDirectoryMarkers(dir);
+		dirMtimes.push({ dir, mtimeMs: markers.dirMtimeMs });
+		if (matches(markers)) {
+			found = dir;
+			break;
+		}
+		depth += 1;
+	}
+
+	walkCache.set(key, { dir: found, dirMtimes });
+	return found;
 }
 
 /**
@@ -163,41 +234,63 @@ function walkStillFresh(dirMtimes: Array<{ dir: string; mtimeMs: number }>): boo
  */
 export function findNearestDirWithMarker(
 	startDir: string,
-	markerKey: keyof Omit<DirectoryMarkers, "dir" | "dirMtimeMs">,
+	markerKey: keyof Omit<DirectoryMarkers, "dir" | "dirMtimeMs" | "entryNames">,
 	homeDir: string = os.homedir(),
 ): string | undefined {
-	const key = walkCacheKey(startDir, markerKey);
-	const cached = walkCache.get(key);
-	if (cached && walkStillFresh(cached.dirMtimes)) {
-		return cached.dir;
-	}
+	return walkToNearestMatch(
+		startDir,
+		markerKey,
+		(markers) => Boolean(markers[markerKey]),
+		{ markerKey },
+		homeDir,
+	);
+}
 
-	const dirMtimes: Array<{ dir: string; mtimeMs: number }> = [];
-	let found: string | undefined;
-	let depth = 0;
-	for (const dir of walkUpDirs(startDir)) {
-		if (isAtOrAboveHomeDir(dir, homeDir)) break;
-		if (depth >= MAX_WALK_DEPTH) {
-			logLatency({
-				type: "phase",
-				filePath: startDir,
-				phase: "workspace-topology-walk-cap",
-				durationMs: 0,
-				metadata: { markerKey, depth, homeDir },
-			});
-			break;
-		}
-		const markers = getDirectoryMarkers(dir);
-		dirMtimes.push({ dir, mtimeMs: markers.dirMtimeMs });
-		if (markers[markerKey]) {
-			found = dir;
-			break;
-		}
-		depth += 1;
+/**
+ * Type-agnostic (file OR directory) `existsSync`-style presence check for
+ * `basename` inside the directory `markers` describes. Single-segment names
+ * (the common case) resolve against the shared per-directory `entryNames`
+ * set — no extra `stat`. A multi-segment name (e.g. `"prisma/schema.prisma"`,
+ * a nested path some `resolveLanguageRootForFile` marker lists use) falls
+ * back to one confirming `existsSync` — the directory's own readdir doesn't
+ * cover a grandchild, so this still costs one syscall for that shape, same
+ * as the pre-#807 hand-rolled loops it replaces.
+ */
+function hasBasenameMarker(markers: DirectoryMarkers, basename: string): boolean {
+	if (basename.includes("/") || basename.includes("\\")) {
+		return fs.existsSync(path.join(markers.dir, basename));
 	}
+	return markers.entryNames.has(basename);
+}
 
-	walkCache.set(key, { dir: found, dirMtimes });
-	return found;
+/**
+ * Walk up from `startDir` looking for the nearest directory containing ANY of
+ * `basenames` (`existsSync`-style, type-agnostic presence — see
+ * `hasBasenameMarker`). The generalized counterpart of
+ * `findNearestDirWithMarker` for callers whose marker set is a per-call list
+ * rather than one of `DirectoryMarkers`' typed fields (#807) — e.g.
+ * `resolveLanguageRootForFile`'s per-language-kind root-marker lists. Shares
+ * the exact same walk discipline (`walkUpDirs`, `isAtOrAboveHomeDir` ceiling,
+ * `MAX_WALK_DEPTH` cap with the same cap-trip latency log) and is backed by
+ * the same per-directory `getDirectoryMarkers` cache, so a directory chain
+ * already visited for one marker set isn't re-`readdir`'d for another.
+ *
+ * Cached per `(startDir, basenames)`, invalidated the same way as
+ * `findNearestDirWithMarker`.
+ */
+export function findNearestDirWithAnyBasename(
+	startDir: string,
+	basenames: readonly string[],
+	homeDir: string = os.homedir(),
+): string | undefined {
+	if (basenames.length === 0) return undefined;
+	return walkToNearestMatch(
+		startDir,
+		`any:${basenames.join(String.fromCodePoint(1))}`,
+		(markers) => basenames.some((basename) => hasBasenameMarker(markers, basename)),
+		{ basenames },
+		homeDir,
+	);
 }
 
 export interface PiLensConfigMarker {

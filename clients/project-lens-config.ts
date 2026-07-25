@@ -18,6 +18,19 @@
  *     five subsystem size budgets (project-diagnostics scanner, review graph,
  *     startup scan, jscpd, word index) as documented ratios of this value.
  *
+ *   - `reviewGraph.maxFiles` — explicit review-graph file-budget override
+ *     (#775 R2), for monorepos that want a bigger graph than
+ *     `project-scale.ts`'s adaptive taper would derive from
+ *     `maxProjectFiles` alone. Tolerantly parsed (numeric strings coerce via
+ *     `toPositiveFinite`, same as `maxProjectFiles`) and clamped to
+ *     `[100, 20_000]` — a value outside that range is silently clamped
+ *     rather than rejected (still an explicit, deliberate opt-in; only a
+ *     non-numeric/non-positive value warns and is dropped). Read by
+ *     `getReviewGraphMaxFilesDerived`, where it takes precedence over the
+ *     taper (but the subsystem's own PRE-EXISTING
+ *     `PI_LENS_REVIEW_GRAPH_MAX_FILES` env override still wins outright over
+ *     both, unchanged).
+ *
  *   - `format.enabled`, `autofix.enabled`, and
  *     `actionableWarnings.autoFix.enabled` — project-owned mutation controls.
  *     These can disable pi-lens writes while leaving diagnostics enabled.
@@ -48,6 +61,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseEnabledShape } from "./config-enabled-shape.js";
+import { toPositiveFinite } from "./env-utils.js";
 import { isAtOrAboveHomeDir, walkUpDirs } from "./path-utils.js";
 import { findPiLensConfigMarkerInDir } from "./workspace-topology.js";
 
@@ -62,6 +76,18 @@ export interface PiLensProjectMutationConfig {
 	/** Whether this mutation path is enabled for the project. */
 	enabled?: boolean;
 }
+
+export interface PiLensProjectReviewGraphConfig {
+	/**
+	 * Explicit review-graph file budget, clamped to `[100, 20_000]`.
+	 * `undefined` means "derive from `maxProjectFiles` via the taper".
+	 */
+	maxFiles?: number;
+}
+
+/** Clamp bounds for `reviewGraph.maxFiles` — see the field's doc comment above. */
+const REVIEW_GRAPH_MAX_FILES_MIN = 100;
+const REVIEW_GRAPH_MAX_FILES_MAX = 20_000;
 
 export interface PiLensProjectConfig {
 	/** gitignore-style glob patterns added to every diagnostic scan. */
@@ -82,6 +108,12 @@ export interface PiLensProjectConfig {
 	 * `undefined` means "use the env override / default chain".
 	 */
 	maxProjectFiles: number | undefined;
+	/**
+	 * Review-graph-specific overrides (#775 R2). `undefined` (the whole
+	 * object, or just `maxFiles`) means "use the adaptive taper" — see
+	 * `clients/project-scale.ts`'s `getReviewGraphMaxFilesDerived`.
+	 */
+	reviewGraph?: PiLensProjectReviewGraphConfig;
 	/** The parsed JSON as-is, for forward-compat consumers. */
 	raw: unknown;
 	/** Absolute path of the config file that was loaded, or undefined if none. */
@@ -92,6 +124,7 @@ export const EMPTY_PROJECT_CONFIG: PiLensProjectConfig = {
 	ignore: [],
 	rules: {},
 	maxProjectFiles: undefined,
+	reviewGraph: undefined,
 	raw: undefined,
 	configPath: undefined,
 };
@@ -387,6 +420,34 @@ function parseConfigFile(configPath: string): PiLensProjectConfig {
 		}
 	}
 
+	let reviewGraph: PiLensProjectReviewGraphConfig | undefined;
+	if (obj.reviewGraph !== undefined) {
+		if (
+			!obj.reviewGraph ||
+			typeof obj.reviewGraph !== "object" ||
+			Array.isArray(obj.reviewGraph)
+		) {
+			warnInvalidConfigOnce(configPath, "reviewGraph must be an object");
+		} else {
+			const rg = obj.reviewGraph as Record<string, unknown>;
+			if ("maxFiles" in rg) {
+				const parsed = toPositiveFinite(rg.maxFiles);
+				if (parsed > 0) {
+					const clamped = Math.min(
+						REVIEW_GRAPH_MAX_FILES_MAX,
+						Math.max(REVIEW_GRAPH_MAX_FILES_MIN, Math.floor(parsed)),
+					);
+					reviewGraph = { maxFiles: clamped };
+				} else {
+					warnInvalidConfigOnce(
+						configPath,
+						"reviewGraph.maxFiles must be a positive finite number",
+					);
+				}
+			}
+		}
+	}
+
 	return {
 		ignore,
 		rules,
@@ -394,6 +455,7 @@ function parseConfigFile(configPath: string): PiLensProjectConfig {
 		autofix,
 		actionableWarnings,
 		maxProjectFiles,
+		reviewGraph,
 		raw,
 		configPath,
 	};
