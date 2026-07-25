@@ -254,6 +254,12 @@ All pi packages are `@earendil-works/*` (migrated from `@mariozechner/*` in 0.74
 - **When told (or when you observe) that a PR merged, fast-forward local `master` immediately — don't ask first.** `git fetch origin master && git merge --ff-only origin/master` (check `git status --short` beforehand as usual; leave any unrelated stray modified files untouched). This is pre-authorized standing behavior, not a per-instance confirmation.
 - Lint gate is `tsc` (`npm run lint`); the repo has **no biome config or CI biome gate**, so biome's default formatting is *not* enforced — don't repo-wide reformat. Run the full suite (`npm test`) before pushing; `npm run build` first if stale JS may shadow source edits.
 
+## Issue triage (standing rule)
+
+- **Always triage new/untriaged issues** when a session touches the repo: `gh issue list --state open`, then for anything unlabeled or stale add `bug`/`enhancement`/`feature` + matching `area:*` labels (use the existing label set — `gh label list` — don't invent new ones), post a short status comment when related work has since merged (cross-link the PRs/issues), and close only with evidence (a merged PR, a log confirming the fix).
+- **External-contributor issues get priority** — they must not sit unlabeled (a first-time reporter's issue once sat 10 days untouched; see #673).
+- **Label issues you file yourself at creation time**, not in a later sweep.
+
 ## Commands
 ```
 npm test              # vitest run (all tests)
