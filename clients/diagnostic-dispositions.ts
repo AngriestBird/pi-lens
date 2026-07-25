@@ -100,7 +100,10 @@ interface DispositionStateFile {
 // hidden all session even if the flagged line itself is edited.
 const deferredThisSession = new Set<string>();
 
-function normalizeMessage(message: string): string {
+/** Exported (#802) so lens-diagnostic-mark's cross-check against live widget
+ * diagnostics matches a message the same way anchor derivation does — a
+ * second, slightly different normalizer would make a real match invisible. */
+export function normalizeMessage(message: string): string {
 	return message.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
