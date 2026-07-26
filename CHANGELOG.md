@@ -6,6 +6,14 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [3.8.72] - 2026-07-26
+
+### Added
+
 - **Subagent identity in the instance registry** (#822) — subagent sessions now persist their marker, agent type, parent PID, and run ID in `instances.json` for concurrency-profile analysis; primary and legacy entries remain unchanged.
 
 - **Same-workspace warm LSP attach (opt-in soak)** (#822) — with `PI_LENS_WARM_ATTACH=1`, a new session discovers a PID-confirmed, heartbeat-fresh incumbent for the same workspace root and routes per-edit and project-sweep LSP diagnostic touches through its PID-scoped, versioned IPC endpoint instead of spawning a duplicate fleet. Attached dispatch diagnostics now also request bounded code actions from the incumbent, preserving quickfix enrichment without creating a local client; enrichment failures skip quickfixes without promoting because the authoritative diagnostics already succeeded. Sweep warm-up, pre-open, and workspace-pull paths stay dormant while attached; a mid-sweep attach failure permanently promotes the session and resumes the remaining files locally. Content hashes and deadlines guard freshness; any IPC, schema, freshness, timeout, or incumbent-liveness failure permanently promotes the session to today's local LSP path. Decisions and per-file routing sources are logged as `lsp_warm_attach`.
