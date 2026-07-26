@@ -123,6 +123,12 @@ describe("markdownlint runner — fixable metadata", () => {
 			expect(args[1]).toMatch(/config[\\/]markdownlint[\\/]core\.json$/);
 			expect(fs.existsSync(args[1])).toBe(true);
 			expect(path.resolve(args[1])).not.toContain(path.basename(env.tmpDir));
+			const bundledConfig = JSON.parse(fs.readFileSync(args[1], "utf8")) as {
+				MD013?: boolean;
+				MD024?: { siblings_only?: boolean };
+			};
+			expect(bundledConfig.MD013).toBe(false);
+			expect(bundledConfig.MD024?.siblings_only).toBe(true);
 		} finally {
 			env.cleanup();
 		}
