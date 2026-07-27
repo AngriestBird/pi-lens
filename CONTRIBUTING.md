@@ -69,7 +69,7 @@ This avoids spending time on a direction the maintainers may not accept.
 ## How the codebase is organized
 
 | Area | Entry points | What lives there |
-|------|--------------|------------------|
+| ------ | -------------- | ------------------ |
 | Host adapters | `index.ts`, `mcp/server.ts` | pi extension entry and MCP mirror. New capabilities must go through `clients/lens-engine.ts` — never reach into internals from `mcp/server.ts`. |
 | Dispatch | `clients/dispatch/` | Runner registry, groups, diagnostics merging, cascade. |
 | Runners | `clients/dispatch/runners/*.ts` | One file per tool. Registered in `clients/dispatch/runners/index.ts`. |
@@ -252,7 +252,7 @@ pi-lens is released under the [MIT License](LICENSE). By contributing, you agree
 
 This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). Please read it before participating.
 
-If you land a pull request or report an issue that gets resolved, we'll add you to the [contributors table](README.md#contributors-) via [all-contributors](https://allcontributors.org/). If the all-contributors bot is installed, maintainers can comment `@all-contributors please add @username for code,bug`; otherwise update `.all-contributorsrc` and regenerate the table with `npx all-contributors-cli generate`.
+If you land a pull request or report an issue that gets resolved, we'll add you to the [contributors table](README.md#contributors-) via [all-contributors](https://allcontributors.org/). If the all-contributors bot is installed, maintainers can comment `@all-contributors please add @username for code,bug`; otherwise update `.all-contributorsrc` and regenerate the table with `npx all-contributors-cli generate`. Keep `wrapperTemplate` absent from `.all-contributorsrc`: the CLI inserts invalid `</tr><br />` separators whenever that option is present.
 
 ## Questions?
 
