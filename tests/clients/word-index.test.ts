@@ -171,6 +171,22 @@ describe("searchWordIndex priors", () => {
 		expect(results[0].file).toBe("src/widget.ts");
 	});
 
+	it("demotes vendor and generated-tree matches below equivalent source code", () => {
+		const index = buildWordIndex([
+			{ path: "src/widget.ts", content: "function renderWidget() {}" },
+			{ path: "vendor/widget.ts", content: "function renderWidget() {}" },
+			{ path: "dist/widget.js", content: "function renderWidget() {}" },
+		]);
+		const results = searchWordIndex(index, "render widget");
+		const source = results.find((result) => result.file === "src/widget.ts");
+		const vendor = results.find((result) => result.file === "vendor/widget.ts");
+		const generated = results.find((result) => result.file === "dist/widget.js");
+
+		expect(results[0].file).toBe("src/widget.ts");
+		expect(source?.score).toBeGreaterThan(vendor?.score ?? 0);
+		expect(source?.score).toBeGreaterThan(generated?.score ?? 0);
+	});
+
 	it("boosts a well-connected file via centrality", () => {
 		const files = [
 			{ path: "src/a.ts", content: "function sharedHelper() {}" },
