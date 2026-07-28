@@ -4,6 +4,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
+const { mockAuxiliaryLspAlive, mockResolveAstGrepNativeExe } = vi.hoisted(() => ({
+	mockAuxiliaryLspAlive: vi.fn().mockResolvedValue(false),
+	mockResolveAstGrepNativeExe: vi.fn().mockReturnValue(undefined),
+}));
+
+vi.mock("../../../../clients/lsp/index.js", () => ({
+	isAuxiliaryLspAlive: mockAuxiliaryLspAlive,
+}));
+
+vi.mock("../../../../clients/lsp/wait-policy/index.js", () => ({
+	resolveAstGrepNativeExe: mockResolveAstGrepNativeExe,
+}));
+
 // Mock heavy dependencies before importing the runner
 vi.mock("../../../../clients/tool-policy.js", () => ({
 	hasEslintConfig: vi.fn().mockReturnValue(false),
@@ -45,20 +58,67 @@ function createCtx(filePath: string, overrides: Partial<Record<string, unknown>>
 describe("ast-grep-napi runner — LSP supersede gate (#239 Phase 2)", () => {
 	beforeEach(() => {
 		vi.resetModules();
+		mockAuxiliaryLspAlive.mockResolvedValue(false);
+		mockResolveAstGrepNativeExe.mockReturnValue(undefined);
 	});
 
-	it("skips when the ast-grep LSP is enabled and its binary IS available", async () => {
+	it("skips when PATH fails but the bundled launcher binary resolves", async () => {
 		const env = setupTestEnvironment("pi-lens-ast-grep-gate-");
 		try {
 			const filePath = path.join(env.tmpDir, "file.ts");
 			fs.writeFileSync(filePath, "const r = arr.sort();\n"); // would match no-sort-without-comparator
+			mockResolveAstGrepNativeExe.mockReturnValue("/bundled/ast-grep.exe");
 			vi.doMock("@ast-grep/napi", () => ({ ts: { parse: vi.fn() } }));
 			const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
 			const result = await mod.default.run(
-				createCtx(filePath, { hasTool: async () => true }) as any,
+				createCtx(filePath, { hasTool: async () => false }) as any,
 			);
 			expect(result.status).toBe("skipped");
 			expect(result.diagnostics).toHaveLength(0);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("runs when the launcher binary and PATH are unavailable and no client is live", async () => {
+		const env = setupTestEnvironment("pi-lens-ast-grep-gate-");
+		try {
+			const filePath = path.join(env.tmpDir, "file.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			vi.doMock("@ast-grep/napi", () => ({
+				ts: {
+					parse: vi.fn().mockReturnValue({
+						root: () => ({
+							children: () => [],
+							kind: () => "program",
+							range: () => ({ start: { line: 0, column: 0 }, end: { line: 1, column: 0 } }),
+							findAll: () => [],
+						}),
+					}),
+				},
+			}));
+			const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const result = await mod.default.run(
+				createCtx(filePath, { hasTool: async () => false }) as any,
+			);
+			expect(result.status).toBe("succeeded");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("skips when a live ast-grep LSP client is handling the file regardless of PATH", async () => {
+		const env = setupTestEnvironment("pi-lens-ast-grep-gate-");
+		try {
+			const filePath = path.join(env.tmpDir, "file.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+			mockAuxiliaryLspAlive.mockResolvedValue(true);
+			vi.doMock("@ast-grep/napi", () => ({ ts: { parse: vi.fn() } }));
+			const mod = await import("../../../../clients/dispatch/runners/ast-grep-napi.js");
+			const result = await mod.default.run(
+				createCtx(filePath, { hasTool: async () => false }) as any,
+			);
+			expect(result.status).toBe("skipped");
 		} finally {
 			env.cleanup();
 		}

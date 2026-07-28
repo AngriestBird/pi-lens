@@ -1134,6 +1134,26 @@ export class LSPService {
 		return undefined;
 	}
 
+	/**
+	 * Read-only liveness check for one server/file pair. Unlike
+	 * `getClientForFile`, this never creates or warms a client; it only resolves
+	 * the server's root and checks the already-connected client map.
+	 */
+	async isServerAliveForFile(
+		serverId: string,
+		filePath: string,
+	): Promise<boolean> {
+		if (this.checkDestroyed()) return false;
+		for (const server of getServersForFileWithConfig(filePath)) {
+			if (server.id !== serverId) continue;
+			const root = await server.root(filePath);
+			if (!root) continue;
+			const key = `${server.id}:${normalizeMapKey(root)}`;
+			if (this.state.clients.get(key)?.isAlive()) return true;
+		}
+		return false;
+	}
+
 	private async ensureClientForServer(
 		filePath: string,
 		server: LSPServerInfo,
@@ -4131,6 +4151,18 @@ export function getLSPService(): LSPService {
 		globalLSPService = new LSPService(globalLSPGenerationHandoff);
 	}
 	return globalLSPService;
+}
+
+/**
+ * Cross-layer liveness seam for dispatch-side auxiliary gates. This is a
+ * liveness read only: it does not spawn, wait for initialization, or probe a
+ * binary.
+ */
+export async function isAuxiliaryLspAlive(
+	serverId: string,
+	filePath: string,
+): Promise<boolean> {
+	return getLSPService().isServerAliveForFile(serverId, filePath);
 }
 
 export function resetLSPService(options: LSPShutdownOptions = {}): void {

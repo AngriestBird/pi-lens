@@ -1,6 +1,12 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../../clients/dispatch/fact-store.js";
 import { createTempFile, setupTestEnvironment } from "../../test-utils.js";
+
+// These are NAPI fallback integration tests. Keep the launcher Gate-B signal
+// absent explicitly now that the default install includes a bundled binary.
+vi.mock("../../../../clients/lsp/wait-policy/index.js", () => ({
+	resolveAstGrepNativeExe: () => undefined,
+}));
 
 // Integration test: runs the REAL ast-grep-napi runner against fixtures so the
 // actual shipped YAML rules (loaded from rules/ast-grep-rules/rules) execute
