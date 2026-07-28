@@ -80,6 +80,7 @@ describe("lsp_diagnostics tool", () => {
 			}),
 			getDiagnosticsHealth: vi.fn().mockReturnValue(undefined),
 			getCapabilitySnapshots: vi.fn().mockResolvedValue([]),
+			runWorkspaceDiagnostics: vi.fn(),
 		};
 	});
 
@@ -161,8 +162,113 @@ describe("lsp_diagnostics tool", () => {
 			expect(
 				(mocked.service as { openFile: ReturnType<typeof vi.fn> }).openFile,
 			).toHaveBeenCalledTimes(2);
+			expect(
+				(mocked.service as { runWorkspaceDiagnostics: ReturnType<typeof vi.fn> })
+					.runWorkspaceDiagnostics,
+			).not.toHaveBeenCalled();
 		} finally {
 			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("reports normalized explicit paths in input order and rejects over-cap batches (#837)", async () => {
+		const tool = createLspDiagnosticsTool();
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-diag-contract-"),
+		);
+		const file = path.join(tmpDir, "one.ts");
+		fs.writeFileSync(file, "const value = 1;\n");
+		try {
+			const normalized = (await tool.execute(
+				"diag-normalized",
+				{ paths: [path.join(tmpDir, ".", "one.ts")] },
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			)) as any;
+			expect(normalized.details?.outcomes?.[0]?.file).toBe(path.normalize(file));
+
+			const overCap = (await tool.execute(
+				"diag-over-cap",
+				{ paths: Array.from({ length: 101 }, (_, i) => `f${i}.ts`) },
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			)) as any;
+			expect(overCap.isError).toBe(true);
+			expect(String(overCap.content[0]?.text)).toContain("at most 100");
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("returns honest mixed per-file outcomes and aggregate counts (#837)", async () => {
+		const tool = createLspDiagnosticsTool();
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-diag-outcomes-"),
+		);
+		const files = [
+			"clean.ts",
+			"bad.ts",
+			"unsupported.txt",
+			"unavailable.ts",
+		].map((name) => path.join(tmpDir, name));
+		for (const file of files) fs.writeFileSync(file, "const value = 1;\n");
+		(mocked.service as any).getDiagnosticsHealth = vi.fn((file: string) =>
+			file.endsWith("unavailable.ts")
+				? { health: "no_clients", serverCountAttempted: 1, serverCountReady: 0 }
+				: undefined,
+		);
+		try {
+			const result = (await tool.execute(
+				"diag-outcomes",
+				{ paths: files, concurrency: 2 },
+				new AbortController().signal,
+				null,
+				{ cwd: tmpDir },
+			)) as any;
+			expect(result.details?.outcomeCounts).toMatchObject({
+				clean: 1,
+				findings: 1,
+				unsupported: 1,
+				unavailable: 1,
+			});
+			expect(result.details?.outcomes.map((entry: any) => entry.file)).toEqual(files);
+			expect(String(result.content[0]?.text)).toContain("Outcomes:");
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("bounds an in-flight file and the whole batch on abort (#837)", async () => {
+		const previous = process.env.PI_LENS_LSP_BATCH_FILE_MS;
+		process.env.PI_LENS_LSP_BATCH_FILE_MS = "1000";
+		const tool = createLspDiagnosticsTool();
+		const controller = new AbortController();
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-diag-abort-contract-"),
+		);
+		const files = ["a.ts", "b.ts"].map((name) => path.join(tmpDir, name));
+		for (const file of files) fs.writeFileSync(file, "const value = 1;\n");
+		(mocked.service as any).touchFile = vi.fn(() => new Promise(() => {}));
+		const started = Date.now();
+		const pending = tool.execute(
+			"diag-abort-contract",
+			{ paths: files, concurrency: 1, waitMs: 1 },
+			controller.signal,
+			null,
+			{ cwd: process.cwd() },
+		);
+		setTimeout(() => controller.abort(), 20);
+		try {
+			const result = (await pending) as any;
+			expect(Date.now() - started).toBeLessThan(500);
+			expect(result.details?.outcomeCounts?.inconclusive).toBe(1);
+			expect(result.details?.incompleteFiles).toBe(1);
+		} finally {
+			removeTempDirSync(tmpDir);
+			if (previous === undefined) delete process.env.PI_LENS_LSP_BATCH_FILE_MS;
+			else process.env.PI_LENS_LSP_BATCH_FILE_MS = previous;
 		}
 	});
 
