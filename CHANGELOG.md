@@ -10,6 +10,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Multi-client LSP shutdown no longer serializes the grace-period tail** (#851) — retiring clients now tear down concurrently while generation handoff still waits for every client to settle; instance-registry child removals serialize their read-modify-write without serializing process kills.
+
 - **LSP singleton resets no longer overlap live server generations** (closes #850) — `resetLSPService()` still returns synchronously and may allocate a replacement service immediately, but that replacement's first spawn now waits for every older generation's asynchronous teardown to settle. Repeated resets destroy an intermediate waiting generation before it can spawn, and post-root/post-client-cleanup guards prevent a retired service from starting a late process outside `state.inFlight`. The handoff is cleared after its first wait, preserving normal within-generation warm reuse and its hot path; concurrent-secondary sessions still skip destructive reset through the existing ownership guard. New deterministic coverage holds the old client's shutdown open and proves current `master`'s pre-fix second spawn/three-generation accumulation cannot recur.
 
 ## [3.8.72] - 2026-07-26

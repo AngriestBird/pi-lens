@@ -193,6 +193,14 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   **`fresh` always cold-spawns the LSP, so it under-reports LSP on large projects
   within any per-call budget** — surfaced honestly via the `lsp` signal, never a
   silent "clean" 0. warm + an indexed server is the LSP-complete path.
+- **LSP reset teardown is concurrent but fully awaited (#851).**
+  `LSPService.shutdown()` starts every retiring client shutdown before awaiting
+  `Promise.allSettled`, so the process-kill grace tail is bounded by the slowest
+  client while per-client failures remain best-effort. The #850/#852 generation
+  handoff still waits for that service teardown before replacement spawn.
+  Client shutdown's fire-and-forget instance-registry removal is serialized at
+  its read-modify-write seam so concurrent removals cannot lose siblings;
+  process-tree kills remain concurrent.
 - **Warm-build staleness guard (#535).** The warm server lives for weeks, so it
   can silently keep serving OLD code after a `npm run build:dist`/merge changes
   `dist/mcp/server.js` on disk — dogfooding caught this live (a post-#517
