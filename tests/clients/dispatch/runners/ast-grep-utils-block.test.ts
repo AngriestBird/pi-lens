@@ -27,11 +27,9 @@ const RULES_DIR = path.join(process.cwd(), "rules", "ast-grep-rules", "rules");
 // this rule is verified end to end through the real runner now that that
 // gate is gone.
 //
-// The remaining two hit UNRELATED pre-existing gates inside the same
+// The remaining one hits an UNRELATED pre-existing gate inside the same
 // runner before the utils fix would ever matter:
-//   - unnecessary-react-hook is `language: Tsx`, and the runner's language
-//     filter only passes through "typescript"/"javascript" rule tags
-//   - rust-2024-let-chain-candidate is `language: Rust`; the @ast-grep/napi
+	//   - rust-2024-let-chain-candidate is `language: Rust`; the @ast-grep/napi
 //     build this repo ships doesn't even expose a Rust parser (its `Lang`
 //     enum is Html/JavaScript/Tsx/Css/TypeScript only) — Rust rules run via
 //     the ast-grep CLI/LSP only, already covered by
@@ -51,6 +49,7 @@ afterAll(() => {
 async function rulesFiredOn(
 	code: string,
 	sampleFile = "sample.ts",
+	log: (message: string) => void = () => {},
 ): Promise<Set<string>> {
 	const env = setupTestEnvironment("pi-lens-utils-block-sg-");
 	cleanups.push(env.cleanup);
@@ -73,7 +72,7 @@ async function rulesFiredOn(
 		// binary is available); simulate the binary absent so this runner's
 		// rule matching actually executes.
 		hasTool: async (cmd: string) => cmd !== "ast-grep",
-		log: () => {},
+		log,
 	};
 	const result = await runner.run(ctx as never);
 	return new Set(
@@ -94,6 +93,62 @@ describe("ast-grep NAPI utils: block passthrough (#663)", () => {
 			expect(
 				await rulesFiredOn("const o = { a: 1, b: 2 };\n"),
 			).not.toContain("no-dupe-keys");
+		});
+
+		it("TSX-tagged rules fire on a TSX file", async () => {
+			const fired = await rulesFiredOn(
+				"function usePlain() { return 42; }\nconst [value, setValue] = useState<number>(0);\n",
+				"sample.tsx",
+			);
+			expect(fired).toContain("unnecessary-react-hook");
+			expect(fired).toContain("redundant-usestate-type");
+		});
+
+		it("TSX-tagged rules do not cross-fire on a TypeScript file", async () => {
+			const fired = await rulesFiredOn(
+				"function usePlain() { return 42; }\nconst [value, setValue] = useState<number>(0);\n",
+				"sample.ts",
+			);
+			expect(fired).not.toContain("unnecessary-react-hook");
+			expect(fired).not.toContain("redundant-usestate-type");
+		});
+
+		it("logs unsupported-language rules once per rule", async () => {
+			const logs: string[] = [];
+			await rulesFiredOn("const value = 1;\n", "sample.ts", (message) =>
+				logs.push(message),
+			);
+			const pythonLogs = logs.filter((message) =>
+				message.includes('rule "no-compile-call"'),
+			);
+			expect(pythonLogs).toHaveLength(1);
+			expect(pythonLogs[0]).toContain('unsupported language "python"');
+		});
+
+		it("logs an unsupported Python rule for a .py file", async () => {
+			const env = setupTestEnvironment("pi-lens-utils-block-skip-");
+			try {
+				const filePath = createTempFile(env.tmpDir, "sample.py", "value = 1\n");
+				const { evaluateAstGrepRules } = await import(
+					"../../../../clients/dispatch/runners/ast-grep-napi.js"
+				);
+				const logs: string[] = [];
+				const seen = new Set<string>();
+				const options = {
+					log: (message: string) => logs.push(message),
+					unsupportedLanguageLog: seen,
+				};
+				const root = { findAll: () => [] };
+				evaluateAstGrepRules(filePath, root, env.tmpDir, "python", options);
+				evaluateAstGrepRules(filePath, root, env.tmpDir, "python", options);
+				const pythonLogs = logs.filter((message) =>
+					message.includes('rule "no-compile-call"'),
+				);
+				expect(pythonLogs).toHaveLength(1);
+				expect(pythonLogs[0]).toContain('unsupported language "python"');
+			} finally {
+				env.cleanup();
+			}
 		});
 		it("no-dupe-keys fires on a duplicate key/method pair", async () => {
 			expect(

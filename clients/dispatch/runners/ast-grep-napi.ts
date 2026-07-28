@@ -156,24 +156,28 @@ export function canHandle(filePath: string): boolean {
 /**
  * The TypeScript grammar is a syntactic superset of JavaScript, so a
  * `JavaScript`-tagged rule using generic node kinds (`variable_declarator`,
- * `assignment_expression`, …) still matches against a parsed `.ts`/`.tsx`
- * root — and vice versa isn't an issue since JS files never parse
+ * `assignment_expression`, …) still matches against a parsed `.ts` root
+ * — and vice versa isn't an issue since JS files never parse
  * TS-only syntax, but a `TypeScript`-tagged rule with a plain-JS-compatible
  * body would equally double-fire alongside a `JavaScript` twin on a `.ts`
  * file. Without this, `language:` reads as a real filter but isn't one for
  * ts↔js pairs, so twin rules sharing a base name (e.g. `hardcoded-url` /
  * `hardcoded-url-js`) both match the same construct in the SAME runner
- * invocation (#657). Returns undefined for extensions this scoping doesn't
- * apply to (css/html), where no filtering is added.
+ * invocation (#657). TSX is deliberately its own grammar here: the primary
+ * ast-grep CLI/LSP also treats `tsx` as distinct from `typescript`, so a
+ * language-tagged rule only runs on the exact grammar it names. Returns
+ * undefined for extensions this scoping doesn't apply to (css/html), where
+ * no filtering is added.
  */
 export function ruleLanguageForFile(
 	filePath: string,
-): "typescript" | "javascript" | undefined {
+): "typescript" | "tsx" | "javascript" | undefined {
 	const ext = path.extname(filePath).toLowerCase();
 	switch (ext) {
 		case ".ts":
-		case ".tsx":
 			return "typescript";
+		case ".tsx":
+			return "tsx";
 		case ".js":
 		case ".jsx":
 			return "javascript";
@@ -223,6 +227,8 @@ export interface AstGrepEvaluateOptions {
 	 * Best-effort only — never let a logging failure affect matching.
 	 */
 	log?: (message: string) => void;
+	/** Rule ids already reported as unsupported by the surrounding scan/run. */
+	unsupportedLanguageLog?: Set<string>;
 }
 
 function duplicateRuleIds(rules: YamlRule[]): string[] {
@@ -288,6 +294,7 @@ export function evaluateAstGrepRules(
 		options.maxTotalDiagnostics ?? MAX_TOTAL_DIAGNOSTICS;
 	const blockingOnly = options.blockingOnly === true;
 	const log = options.log;
+	const unsupportedLanguageLog = options.unsupportedLanguageLog ?? new Set<string>();
 
 	const diagnostics: Diagnostic[] = [];
 	const seenRuleIds = new Set<string>();
@@ -351,7 +358,18 @@ export function evaluateAstGrepRules(
 			}
 
 			const lang = rule.language?.toLowerCase();
-			if (lang && lang !== "typescript" && lang !== "javascript") {
+			if (
+				lang &&
+				lang !== "typescript" &&
+				lang !== "tsx" &&
+				lang !== "javascript"
+			) {
+				if (!unsupportedLanguageLog.has(rule.id)) {
+					unsupportedLanguageLog.add(rule.id);
+					log?.(
+						`ast-grep-napi: rule "${rule.id}" skipped — unsupported language "${lang}" for the NAPI fallback`,
+					);
+				}
 				continue;
 			}
 			// Scope TypeScript/JavaScript-tagged rules to the file's actual
