@@ -308,8 +308,21 @@ export async function recordLspChild(entry: RecordLspChildInput): Promise<void> 
 	await writeRegistryAsync(file);
 }
 
+// LSP client shutdown intentionally does not await registry removal (the
+// process-exiting path must stay non-blocking), but concurrent removals still
+// need to serialize their read-modify-write sequence or siblings can be lost
+// to last-writer-wins. Process kills remain fully concurrent; this queue only
+// covers the small best-effort registry mutation.
+let lspChildRemovalTail: Promise<void> = Promise.resolve();
+
 /** Remove an LSP child (by pid) from this process's entry. */
-export async function removeLspChild(pid: number): Promise<void> {
+export function removeLspChild(pid: number): Promise<void> {
+	const removal = lspChildRemovalTail.then(() => removeLspChildNow(pid));
+	lspChildRemovalTail = removal.catch(() => {});
+	return removal;
+}
+
+async function removeLspChildNow(pid: number): Promise<void> {
 	if (!isInstanceRegistryEnabled()) return;
 	const selfPid = process.pid;
 	const file = await readRegistryAsync();

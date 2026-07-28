@@ -23,12 +23,20 @@ function makeMessage(details: unknown) {
 	};
 }
 
+// Keep the test compatible with both the pre-outputPad and current pi API
+// while exercising the option added in pi-coding-agent 0.82.1.
+function makeRenderOptions(expanded: boolean) {
+	return { expanded, outputPad: 0 } as Parameters<
+		typeof renderTurnSummaryMessage
+	>[1];
+}
+
 describe("renderTurnSummaryMessage (#484)", () => {
 	it("returns undefined when details is missing", () => {
 		const theme = makeFakeTheme();
 		const result = renderTurnSummaryMessage(
 			makeMessage(undefined) as never,
-			{ expanded: false },
+			makeRenderOptions(false),
 			theme,
 		);
 		expect(result).toBeUndefined();
@@ -43,7 +51,7 @@ describe("renderTurnSummaryMessage (#484)", () => {
 		const theme = makeFakeTheme();
 		const component = renderTurnSummaryMessage(
 			makeMessage(details) as never,
-			{ expanded: false },
+			makeRenderOptions(false),
 			theme,
 		);
 		expect(component).toBeDefined();
@@ -72,7 +80,7 @@ describe("renderTurnSummaryMessage (#484)", () => {
 		const theme = makeFakeTheme();
 		const component = renderTurnSummaryMessage(
 			makeMessage(details) as never,
-			{ expanded: true },
+			makeRenderOptions(true),
 			theme,
 		);
 		const lines = component?.render(80) ?? [];
@@ -116,7 +124,7 @@ describe("renderTurnSummaryMessage (#484)", () => {
 
 		const component = renderTurnSummaryMessage(
 			makeMessage(details) as never,
-			{ expanded: false },
+			makeRenderOptions(false),
 			makeFakeTheme(),
 		);
 		const lines = component?.render(40) ?? [];
@@ -142,7 +150,7 @@ describe("renderTurnSummaryMessage (#484)", () => {
 
 		const component = renderTurnSummaryMessage(
 			makeMessage(details) as never,
-			{ expanded: true },
+			makeRenderOptions(true),
 			makeFakeTheme(),
 		);
 		const lines = component?.render(40) ?? [];
@@ -158,7 +166,7 @@ describe("renderTurnSummaryMessage (#484)", () => {
 		const details = collector.consume(1, () => "a.ts");
 		const component = renderTurnSummaryMessage(
 			makeMessage(details) as never,
-			{ expanded: false },
+			makeRenderOptions(false),
 			makeFakeTheme(),
 		);
 		const lines = component?.render(0) ?? [];
@@ -172,7 +180,7 @@ describe("renderTurnSummaryMessage (#484)", () => {
 		const details = collector.consume(1);
 		const component = renderTurnSummaryMessage(
 			makeMessage(details) as never,
-			{ expanded: false },
+			makeRenderOptions(false),
 			makeFakeTheme(),
 		);
 		expect(() => component?.invalidate()).not.toThrow();

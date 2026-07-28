@@ -757,8 +757,17 @@ export class LSPService {
 	private readonly notifyWriteBackpressureStreak = new Map<string, number>();
 	/** True after shutdown() has been called; blocks new operations */
 	private isDestroyed = false;
+	/**
+	 * #850: teardown completion for every singleton generation retired before
+	 * this service was published. Only replacement services receive one; direct
+	 * `new LSPService()` callers and the first singleton generation stay hot-path
+	 * identical. Cleared after the first completed wait so warm reuse never pays
+	 * a permanent promise/microtask tax.
+	 */
+	private generationHandoff: Promise<void> | undefined;
 
-	constructor() {
+	constructor(generationHandoff?: Promise<void>) {
+		this.generationHandoff = generationHandoff;
 		this.state = {
 			clients: new Map(),
 			servers: new Map(),
@@ -1129,8 +1138,17 @@ export class LSPService {
 		filePath: string,
 		server: LSPServerInfo,
 	): Promise<SpawnedServer | undefined> {
+		const handoff = this.generationHandoff;
+		if (handoff) {
+			await handoff;
+			if (this.generationHandoff === handoff) {
+				this.generationHandoff = undefined;
+			}
+			if (this.checkDestroyed()) return undefined;
+		}
+
 		const root = await server.root(filePath);
-		if (!root) return undefined;
+		if (!root || this.checkDestroyed()) return undefined;
 		const allowInstall = this.shouldAllowInstall(filePath, root);
 
 		const normalizedRoot = normalizeMapKey(root);
@@ -1228,6 +1246,11 @@ export class LSPService {
 		if (inFlight) {
 			return inFlight;
 		}
+
+		// `server.root()` and a dead client's shutdown above are both async. A
+		// reset during either gap may have completed without seeing this request in
+		// state.inFlight; never let that retired generation start a late spawn.
+		if (this.checkDestroyed()) return undefined;
 
 		const spawnPromise = this.spawnClient(
 			server,
@@ -4032,13 +4055,17 @@ export class LSPService {
 			},
 		});
 
-		for (const [_key, client] of this.state.clients) {
-			try {
-				await client.shutdown(options);
-			} catch {
-				// pi-lens-ignore: missing-error-propagation — per-client shutdown failure, must not abort remaining shutdowns
-			}
-		}
+		// Start every client teardown before awaiting any of them. A non-fast
+		// process-tree kill can spend its grace period per client, so awaiting in
+		// map order makes the reset tail O(clientCount * grace) instead of the
+		// maximum individual teardown. allSettled preserves the per-client
+		// best-effort contract: one failure must not prevent other clients from
+		// finishing, and the caller still waits for every teardown to settle.
+		await Promise.allSettled(
+			Array.from(this.state.clients.values(), (client) =>
+				Promise.resolve().then(() => client.shutdown(options)),
+			),
+		);
 		this.state.clients.clear();
 		this.state.broken.clear();
 		this.workspaceProbeLogged.clear();
@@ -4092,19 +4119,41 @@ export class LSPService {
 // --- Singleton Instance ---
 
 let globalLSPService: LSPService | null = null;
+/**
+ * #850: all singleton generations whose teardown is still pending. A new
+ * generation may be allocated synchronously, but its first spawn waits on this
+ * handoff so two generations can never own the same server/root concurrently.
+ */
+let globalLSPGenerationHandoff: Promise<void> | undefined;
 
 export function getLSPService(): LSPService {
 	if (!globalLSPService) {
-		globalLSPService = new LSPService();
+		globalLSPService = new LSPService(globalLSPGenerationHandoff);
 	}
 	return globalLSPService;
 }
 
 export function resetLSPService(options: LSPShutdownOptions = {}): void {
-	if (globalLSPService) {
-		globalLSPService.shutdown(options).catch(() => {});
-	}
+	const retiringService = globalLSPService;
 	globalLSPService = null;
+	if (!retiringService) return;
+
+	// shutdown() marks the service destroyed synchronously before its first
+	// await. Include both that teardown and every earlier pending generation:
+	// repeated resets may retire a replacement that is itself still waiting on
+	// its predecessor. allSettled keeps teardown best-effort without ever
+	// rejecting (and therefore permanently poisoning) the next generation.
+	const teardown = retiringService.shutdown(options);
+	const pending = globalLSPGenerationHandoff
+		? [globalLSPGenerationHandoff, teardown]
+		: [teardown];
+	const handoff = Promise.allSettled(pending).then(() => undefined);
+	globalLSPGenerationHandoff = handoff;
+	void handoff.then(() => {
+		if (globalLSPGenerationHandoff === handoff) {
+			globalLSPGenerationHandoff = undefined;
+		}
+	});
 }
 
 /**

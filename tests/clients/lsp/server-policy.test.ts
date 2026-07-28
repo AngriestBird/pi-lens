@@ -110,7 +110,7 @@ describe("lsp server policy", () => {
 		expect(root).toBe(path.dirname(file));
 	});
 
-	it("falls back to file directory when css root markers are missing", async () => {
+	it("resolves css roots from the fixture marker", async () => {
 		const { CssServer } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-css-fallback-root-"),
@@ -119,10 +119,13 @@ describe("lsp server policy", () => {
 
 		const file = path.join(tmp, "cases", "styles.css");
 		fs.mkdirSync(path.dirname(file), { recursive: true });
+		// Pin the nearest marker inside the fixture. Windows test environments may
+		// have a package.json in a real user-profile ancestor of os.tmpdir().
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
 		fs.writeFileSync(file, "body { color: red; }\n");
 
 		const root = await CssServer.root(file);
-		expect(root).toBe(path.dirname(file));
+		expect(root).toBe(tmp);
 	});
 
 	it("falls back to file directory when yaml root markers are missing", async () => {
