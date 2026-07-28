@@ -8,6 +8,12 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **`js-yaml` imports are compatible with v5** (refs #391, #843) — use the
+	package's namespace exports so the central accessor and YAML rule tooling work
+	with both the current v4 dependency and the upcoming v5 release. `@types/js-yaml`
+	remains temporarily because js-yaml 4.3.0 needs its declarations; remove it
+	with the v5 Dependabot upgrade once the bundled declarations are active.
+
 - **`build:dist` now compiles with TypeScript 7.0.2** (refs #809) — the dist emit pin moves from `typescript@6` to the same major as the dev dependency (#600); emitted output was verified byte-identical across all 328 files before the bump.
 
 ### Fixed
