@@ -84,6 +84,11 @@ describe("pilens_analyze (warm) maintains the review graph over MCP", () => {
 			"2025-06-18",
 		);
 		harness.notify("notifications/initialized");
+		// Pay the one-time server startup cost before the asserted request window.
+		await harness.request(2, "tools/call", {
+			name: "pilens_health",
+			arguments: {},
+		});
 	});
 
 	afterAll(() => {
@@ -187,6 +192,11 @@ describe("pilens_analyze (warm) also maintains the word index over MCP (#536 rid
 			"2025-06-18",
 		);
 		harness.notify("notifications/initialized");
+		// Pay the one-time server startup cost before the asserted request window.
+		await harness.request(2, "tools/call", {
+			name: "pilens_health",
+			arguments: {},
+		});
 	});
 
 	afterAll(() => {

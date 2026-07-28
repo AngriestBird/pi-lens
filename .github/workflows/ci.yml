@@ -74,6 +74,10 @@ jobs:
         run: npm run build
 
       - name: Run tests
+        env:
+          # Spawn-heavy MCP smokes retain a 20s local deadline but need room
+          # for loaded shared runners (#860).
+          PI_LENS_TEST_TIMEOUT_SCALE: '3'
         run: npm test
 
   # Simulates pi's real install path: a `git:` install runs `npm install
