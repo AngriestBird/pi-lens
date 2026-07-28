@@ -12,6 +12,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Missing tree-sitter defect-class metadata is now covered** (refs #863) — loop-termination and `finally` control-flow rules now declare their taxonomy classes, keeping the rule audit complete.
+
 - **MCP smoke deadlines scale under CI load (refs #860)** — the shared MCP
 	test harness keeps its 20s local default, accepts the
 	`PI_LENS_TEST_TIMEOUT_SCALE` multiplier, and the analyze-graph smoke pays
