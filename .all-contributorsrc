@@ -866,6 +866,15 @@
       "contributions": [
         "bug"
       ]
+    },
+    {
+      "login": "neumie",
+      "name": "Jakub Neumann",
+      "avatar_url": "https://avatars.githubusercontent.com/u/23665482?v=4",
+      "profile": "https://neumie.dev/",
+      "contributions": [
+        "code"
+      ]
     }
   ]
 }
