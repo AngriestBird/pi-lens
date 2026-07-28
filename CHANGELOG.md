@@ -8,6 +8,11 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **`@types/js-yaml` removed; js-yaml 5 migration complete** (closes #391) — with
+	js-yaml 5.2.2 in (#843) the package ships its own declarations, so the stub
+	types dev-dependency is gone and the lockfile regenerated. This completes the
+	v5 migration started with the namespace-import compatibility pass below.
+
 - **`js-yaml` imports are compatible with v5** (refs #391, #843) — use the
 	package's namespace exports so the central accessor and YAML rule tooling work
 	with both the current v4 dependency and the upcoming v5 release. `@types/js-yaml`
