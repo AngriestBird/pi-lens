@@ -201,6 +201,12 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   Client shutdown's fire-and-forget instance-registry removal is serialized at
   its read-modify-write seam so concurrent removals cannot lose siblings;
   process-tree kills remain concurrent.
+- **Auxiliary LSP liveness is a read-only dispatch seam (#868).**
+  `clients/lsp/index.ts` exposes `isAuxiliaryLspAlive(serverId, filePath)` for
+  Gate-B fallback decisions. It resolves the matching root and inspects only
+  the existing client map; it must never spawn or warm a client. Dispatch-side
+  code imports this seam from `lsp/index.ts`, while `dispatch/auxiliary-lsp.ts`
+  remains free of the reverse import to avoid the LSP/auxiliary cycle.
 - **Warm-build staleness guard (#535).** The warm server lives for weeks, so it
   can silently keep serving OLD code after a `npm run build:dist`/merge changes
   `dist/mcp/server.js` on disk — dogfooding caught this live (a post-#517

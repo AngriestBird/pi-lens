@@ -7,6 +7,9 @@ const logLatency = vi.fn();
 vi.mock("../../../../clients/latency-logger.js", () => ({
 	logLatency: (entry: unknown) => logLatency(entry),
 }));
+vi.mock("../../../../clients/lsp/wait-policy/index.js", () => ({
+	resolveAstGrepNativeExe: () => undefined,
+}));
 
 const RULES_DIR = path.join(process.cwd(), "rules", "ast-grep-rules", "rules");
 
