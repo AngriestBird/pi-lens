@@ -16,6 +16,14 @@ export const repoRoot = path.resolve(
 	"../..",
 );
 const serverJs = path.join(repoRoot, "mcp", "server.js");
+const DEFAULT_TIMEOUT_MS = 20_000;
+
+// Spawn-heavy MCP smokes keep a tight local deadline, while CI can compensate
+// for a loaded runner without changing the production server's budgets.
+const testTimeoutScale = (() => {
+	const parsed = Number(process.env.PI_LENS_TEST_TIMEOUT_SCALE ?? "1");
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+})();
 
 export interface McpHarnessOptions {
 	/** Project root the server operates on (--cwd). Defaults to the repo root. */
@@ -33,7 +41,8 @@ export class McpHarness {
 	private defaultTimeoutMs: number;
 
 	constructor(options: McpHarnessOptions = {}) {
-		this.defaultTimeoutMs = options.defaultTimeoutMs ?? 20_000;
+		this.defaultTimeoutMs =
+			options.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS * testTimeoutScale;
 		this.child = spawn(
 			process.execPath,
 			[serverJs, `--cwd=${options.cwd ?? repoRoot}`],

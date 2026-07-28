@@ -12,6 +12,11 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **MCP smoke deadlines scale under CI load (refs #860)** — the shared MCP
+	test harness keeps its 20s local default, accepts the
+	`PI_LENS_TEST_TIMEOUT_SCALE` multiplier, and the analyze-graph smoke pays
+	server startup through a throwaway health call before its assertions.
+
 - **TypeScript 7 compatibility fixes (refs #809)** — narrowed ast-grep search test details and made the LSP `workspace/applyEdit` response overload-compatible, unblocking Dependabot PR #600.
 
 - **ast-grep NAPI fallback now runs TSX-tagged rules and reports unsupported-language skips** (refs #282) — `.tsx` files use the `tsx` grammar for rule-language scoping, preserving the exact TypeScript/JavaScript twin behavior from #657; rules for languages the fallback cannot evaluate are logged once per rule instead of disappearing as zero matches.

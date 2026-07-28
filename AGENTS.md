@@ -307,6 +307,10 @@ node scripts/smoke-tools.mjs [--install] [--step2] [--verbose] [lang ...]   # li
 #   Lint covers ts/py/yaml/js/markdown/shell/css/html/toml/sql/dockerfile/terraform + toolchain-gated go/rust/csharp/powershell/zig/java/dart/php/ruby/kotlin/gleam/elixir (toolchain must be installed locally; CI nightly sets them up).
 curl -s "https://sonarcloud.io/api/hotspots/search?projectKey=apmantza_pi-lens&branch=master&status=TO_REVIEW&ps=100"   # list open SonarCloud security hotspots (public API, no auth). Triage: real fix vs mark-Safe (this project has had S5852 ReDoS false-positives on trusted bounded tool output).
 npm run logs:smells   # scripts/analyze-pi-lens-logs.mjs — scans ~/.pi-lens/*.log for operational smells (diagnostic-blockers, slow-hook-path ≥5s, slow-runners ≥2.5s, cascade-slow-graphs ≥1s, lsp-availability-noise, read-guard-friction). Flags: --since 3d (default 2d), --limit, --json. READ CRITICALLY: much volume is user-project diagnostics (not pi-lens bugs) + self-noise from temp:pi-lens-smoke-* (my own --install cold-tool runs). Real pi-lens smells: cascade-slow-graphs + slow-hook-path (cold LSP + cascade hot-path).
+#   MCP spawn smokes keep a 20s local per-request default; set
+#   PI_LENS_TEST_TIMEOUT_SCALE to a positive finite multiplier (CI uses 3) when
+#   loaded runners need a larger deadline. analyze-graph.smoke.test.ts warms
+#   the server with a throwaway pilens_health call before its assertions.
 ```
 
 Because many test imports use `.js` specifiers while the source of truth is `.ts`, recompile after TS changes before running tests when local `.js` artifacts may exist/stale:
