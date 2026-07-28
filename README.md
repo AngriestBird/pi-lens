@@ -195,6 +195,7 @@ Thanks goes to these wonderful people:
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/aaronkyriesenbach"><img src="https://avatars.githubusercontent.com/u/12665860?v=4" width="100px;" alt=""/><br /><sub><b>Aaron Ky-Riesenbach</b></sub></a><br /><a href="#bug-aaronkyriesenbach" title="Bug reports">🐛</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/LovelyLoong"><img src="https://avatars.githubusercontent.com/u/54889641?v=4" width="100px;" alt=""/><br /><sub><b>可爱的龙</b></sub></a><br /><a href="#bug-LovelyLoong" title="Bug reports">🐛</a></td>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/pppobear"><img src="https://avatars.githubusercontent.com/u/21952175?v=4" width="100px;" alt=""/><br /><sub><b>pppobear</b></sub></a><br /><a href="#bug-pppobear" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://neumie.dev/"><img src="https://avatars.githubusercontent.com/u/23665482?v=4" width="100px;" alt=""/><br /><sub><b>Jakub Neumann</b></sub></a><br /><a href="#code-neumie" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>
