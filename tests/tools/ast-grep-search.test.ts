@@ -20,6 +20,21 @@ function makeClient(
 	} as Parameters<typeof createAstGrepSearchTool>[0];
 }
 
+type SearchDetails = {
+	matchLocations?: Array<{
+		file: string;
+		line: number;
+		endLine: number;
+		readSlice: { path: string; offset: number; limit: number };
+	}>;
+	suggestedDump?: { tool: string; lang: string };
+	searchReads?: Array<{ file: string; startLine: number; endLine: number }>;
+};
+
+function asSearchDetails(details: unknown): SearchDetails {
+	return details as SearchDetails;
+}
+
 describe("ast_grep_search tool", () => {
 	describe("telemetry sanitization", () => {
 		it("escapes NUL bytes and truncates long subprocess errors", () => {
@@ -522,7 +537,7 @@ describe("ast_grep_search tool", () => {
 				{ cwd: "." },
 			);
 
-			expect(result.details.matchLocations).toEqual([
+			expect(asSearchDetails(result.details).matchLocations).toEqual([
 				{
 					file: "src/rule.ts",
 					line: 5,
@@ -530,7 +545,7 @@ describe("ast_grep_search tool", () => {
 					readSlice: { path: "src/rule.ts", offset: 2, limit: 7 },
 				},
 			]);
-			expect(result.details.suggestedDump).toBeUndefined();
+			expect(asSearchDetails(result.details).suggestedDump).toBeUndefined();
 		});
 
 		it("suggests ast_grep_dump for YAML-rule zero matches", async () => {
@@ -551,8 +566,8 @@ describe("ast_grep_search tool", () => {
 				{ cwd: "." },
 			);
 
-			expect(result.details.matchLocations).toEqual([]);
-			expect(result.details.suggestedDump).toMatchObject({
+			expect(asSearchDetails(result.details).matchLocations).toEqual([]);
+			expect(asSearchDetails(result.details).suggestedDump).toMatchObject({
 				tool: "ast_grep_dump",
 				lang: "typescript",
 			});
@@ -580,7 +595,7 @@ describe("ast_grep_search tool", () => {
 		expect(result.isError).toBeUndefined();
 		expect(search).toHaveBeenCalledOnce();
 		expect(String(result.content[0].text)).toContain("1 match");
-		expect(result.details.suggestedDump).toBeUndefined();
+		expect(asSearchDetails(result.details).suggestedDump).toBeUndefined();
 	});
 
 	it("returns read handles for matched locations", async () => {
@@ -611,7 +626,7 @@ describe("ast_grep_search tool", () => {
 			{ cwd: "." },
 		);
 
-		expect(result.details.matchLocations).toEqual([
+		expect(asSearchDetails(result.details).matchLocations).toEqual([
 			{
 				file: "src/a.ts",
 				line: 10,
@@ -619,10 +634,10 @@ describe("ast_grep_search tool", () => {
 				readSlice: { path: "src/a.ts", offset: 8, limit: 7 },
 			},
 		]);
-		expect(result.details.searchReads).toEqual([
+		expect(asSearchDetails(result.details).searchReads).toEqual([
 			{ file: "src/a.ts", startLine: 10, endLine: 12 },
 		]);
-		expect(result.details.suggestedDump).toBeUndefined();
+		expect(asSearchDetails(result.details).suggestedDump).toBeUndefined();
 	});
 
 	it("clamps and caps readSlice context", async () => {
@@ -647,7 +662,7 @@ describe("ast_grep_search tool", () => {
 			{ cwd: "." },
 		);
 
-		expect(result.details.matchLocations).toEqual([
+		expect(asSearchDetails(result.details).matchLocations).toEqual([
 			{
 				file: "src/near-top.ts",
 				line: 1,
@@ -683,7 +698,7 @@ describe("ast_grep_search tool", () => {
 			{ cwd: "." },
 		);
 
-		expect(result.details.matchLocations).toEqual([
+		expect(asSearchDetails(result.details).matchLocations).toEqual([
 			{
 				file: "src/default.ts",
 				line: 10,
@@ -715,7 +730,7 @@ describe("ast_grep_search tool", () => {
 			{ cwd: "." },
 		);
 
-		expect(result.details.matchLocations).toEqual([
+		expect(asSearchDetails(result.details).matchLocations).toEqual([
 			{
 				file: "src/no-margin.ts",
 				line: 10,
@@ -741,8 +756,8 @@ describe("ast_grep_search tool", () => {
 			{ cwd: "." },
 		);
 
-		expect(result.details.matchLocations).toEqual([]);
-		expect(result.details.searchReads).toEqual([]);
+		expect(asSearchDetails(result.details).matchLocations).toEqual([]);
+		expect(asSearchDetails(result.details).searchReads).toEqual([]);
 	});
 
 	it("returns clear errors for missing or unsafe pattern/lang inputs", async () => {
@@ -861,7 +876,7 @@ describe("ast_grep_search tool", () => {
 		);
 
 		expect(String(result.content[0].text)).toContain("ast_grep_dump");
-		expect(result.details.suggestedDump).toMatchObject({
+		expect(asSearchDetails(result.details).suggestedDump).toMatchObject({
 			tool: "ast_grep_dump",
 			lang: "typescript",
 		});
