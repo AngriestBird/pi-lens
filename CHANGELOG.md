@@ -8,9 +8,22 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **`js-yaml` imports are compatible with v5** (refs #391, #843) — use the
+	package's namespace exports so the central accessor and YAML rule tooling work
+	with both the current v4 dependency and the upcoming v5 release. `@types/js-yaml`
+	remains temporarily because js-yaml 4.3.0 needs its declarations; remove it
+	with the v5 Dependabot upgrade once the bundled declarations are active.
+
 - **`build:dist` now compiles with TypeScript 7.0.2** (refs #809) — the dist emit pin moves from `typescript@6` to the same major as the dev dependency (#600); emitted output was verified byte-identical across all 328 files before the bump.
 
 ### Fixed
+
+- **Missing tree-sitter defect-class metadata is now covered** (refs #863) — loop-termination and `finally` control-flow rules now declare their taxonomy classes, keeping the rule audit complete.
+
+- **MCP smoke deadlines scale under CI load (refs #860)** — the shared MCP
+	test harness keeps its 20s local default, accepts the
+	`PI_LENS_TEST_TIMEOUT_SCALE` multiplier, and the analyze-graph smoke pays
+	server startup through a throwaway health call before its assertions.
 
 - **TypeScript 7 compatibility fixes (refs #809)** — narrowed ast-grep search test details and made the LSP `workspace/applyEdit` response overload-compatible, unblocking Dependabot PR #600.
 
