@@ -38,7 +38,9 @@ describe("LSPService spawn-shutdown race (#706)", () => {
 		});
 
 		const mockKill = vi.fn();
+		let spawnEntered = false;
 		const spawn = vi.fn(async () => {
+			spawnEntered = true;
 			await spawnGate;
 			return {
 				process: {
@@ -70,13 +72,19 @@ describe("LSPService spawn-shutdown race (#706)", () => {
 
 		const file = "C:/repo/main.py";
 
-		// Start the spawn (will hang at spawnGate)
+		// Start the spawn and wait until server.spawn itself is hanging at
+		// spawnGate. The async root resolver yields first, so an immediate shutdown
+		// here would now be caught earlier by #850's post-root destroyed guard and
+		// would no longer exercise #706's raw-process Guard 1.
 		const spawnPromise = service.getClientForFile(file);
+		while (!spawnEntered) {
+			await Promise.resolve();
+		}
 
-		// Shut down the service while spawn is still pending
+		// Shut down the service while server.spawn is still pending.
 		const shutdownPromise = service.shutdown();
 
-		// Let the spawn resolve — service is already destroyed at this point
+		// Let the spawn resolve — service is already destroyed at this point.
 		resolveSpawn(undefined);
 
 		await shutdownPromise;
@@ -89,6 +97,35 @@ describe("LSPService spawn-shutdown race (#706)", () => {
 		// state.clients must remain empty
 		expect(service.getAliveClientCount()).toBe(0);
 		expect(service.getStatus()).toHaveLength(0);
+	});
+
+	it("does not start a spawn when shutdown races async root resolution", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		let resolveRoot!: (value: string) => void;
+		const rootGate = new Promise<string>((resolve) => {
+			resolveRoot = resolve;
+		});
+		const spawn = vi.fn();
+
+		getServersForFileWithConfig.mockReturnValue([
+			{
+				id: "python",
+				name: "Python",
+				extensions: [".py"],
+				root: () => rootGate,
+				spawn,
+			},
+		]);
+
+		const request = service.getClientForFile("C:/repo/main.py");
+		const shutdown = service.shutdown();
+		resolveRoot("C:/repo");
+
+		await shutdown;
+		expect(await request).toBeUndefined();
+		expect(spawn).not.toHaveBeenCalled();
+		expect(createLSPClient).not.toHaveBeenCalled();
 	});
 
 	it("shuts down client when shutdown races spawn after createLSPClient", async () => {
