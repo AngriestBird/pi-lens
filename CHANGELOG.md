@@ -10,6 +10,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **ast-grep NAPI fallback now runs TSX-tagged rules and reports unsupported-language skips** (refs #282) — `.tsx` files use the `tsx` grammar for rule-language scoping, preserving the exact TypeScript/JavaScript twin behavior from #657; rules for languages the fallback cannot evaluate are logged once per rule instead of disappearing as zero matches.
+
 ## [3.8.72] - 2026-07-26
 
 ### Added
