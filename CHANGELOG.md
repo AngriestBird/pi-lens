@@ -8,6 +8,14 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+### Fixed
+
+## [3.8.73] - 2026-07-28
+
+### Added
+
+### Changed
+
 - **`@types/js-yaml` removed; js-yaml 5 migration complete** (closes #391) — with
 	js-yaml 5.2.2 in (#843) the package ships its own declarations, so the stub
 	types dev-dependency is gone and the lockfile regenerated. This completes the
