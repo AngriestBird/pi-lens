@@ -1017,7 +1017,9 @@ export function setupIncomingHandlers(
 	// as every other edit.
 	state.connection.onRequest(
 		"workspace/applyEdit",
-		async (params: { edit?: { changes?: unknown; documentChanges?: unknown } }) => {
+		async (
+			params: { edit?: { changes?: unknown; documentChanges?: unknown } },
+		): Promise<{ applied: boolean; failureReason?: string }> => {
 			if (state.serverEditsAllowed <= 0 || !params?.edit) {
 				return { applied: false, failureReason: "edit not solicited" };
 			}

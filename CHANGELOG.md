@@ -4,6 +4,10 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **TypeScript 7 compatibility fixes (refs #809)** — narrowed ast-grep search test details and made the LSP `workspace/applyEdit` response overload-compatible, unblocking Dependabot PR #600.
+
 ### Added
 
 ### Changed
