@@ -4055,13 +4055,17 @@ export class LSPService {
 			},
 		});
 
-		for (const [_key, client] of this.state.clients) {
-			try {
-				await client.shutdown(options);
-			} catch {
-				// pi-lens-ignore: missing-error-propagation — per-client shutdown failure, must not abort remaining shutdowns
-			}
-		}
+		// Start every client teardown before awaiting any of them. A non-fast
+		// process-tree kill can spend its grace period per client, so awaiting in
+		// map order makes the reset tail O(clientCount * grace) instead of the
+		// maximum individual teardown. allSettled preserves the per-client
+		// best-effort contract: one failure must not prevent other clients from
+		// finishing, and the caller still waits for every teardown to settle.
+		await Promise.allSettled(
+			Array.from(this.state.clients.values(), (client) =>
+				Promise.resolve().then(() => client.shutdown(options)),
+			),
+		);
 		this.state.clients.clear();
 		this.state.broken.clear();
 		this.workspaceProbeLogged.clear();
