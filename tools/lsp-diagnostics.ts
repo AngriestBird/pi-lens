@@ -23,7 +23,7 @@ import {
 	type WorkspaceDiagnosticsCacheContext,
 } from "../clients/lsp/workspace-diagnostics-cache.js";
 import { primaryServerId } from "../clients/lsp/config.js";
-import { combineAbortSignals } from "../clients/deadline-utils.js";
+import { combineAbortSignals, withDeadline } from "../clients/deadline-utils.js";
 import {
 	applyAuxiliarySuppressions,
 	retagAuxiliaryDiagnostics,
@@ -82,6 +82,7 @@ const MAX_BATCH_FILES = 100;
 const MAX_DIAGNOSTICS = 200;
 const DEFAULT_BATCH_CONCURRENCY = 8;
 const MAX_BATCH_CONCURRENCY = 16;
+const DEFAULT_BATCH_FILE_DEADLINE_MS = 15_000;
 
 // LSP severities: 1=Error, 2=Warning, 3=Information, 4=Hint
 const SEVERITY_NAMES: Record<number, string> = {
@@ -134,8 +135,10 @@ type FileDiag = {
 type FileDiagnosticResult = {
 	file: string;
 	diagnostics: FileDiag[];
+	outcome?: BatchFileOutcome;
 	unavailable?: string;
 	error?: string;
+	inconclusiveReason?: string;
 	/**
 	 * #533: discriminated per-file outcome, mirroring the #240 doctrine at the
 	 * LSP layer (found | clean | unresolved) up through the tool's aggregation.
@@ -164,6 +167,20 @@ type FileDiagnosticResult = {
 	 */
 	primaryServerId?: string;
 };
+
+/** The only per-file states an explicit batch exposes to an agent. */
+type BatchFileOutcome =
+	| "clean"
+	| "findings"
+	| "unsupported"
+	| "unavailable"
+	| "failed"
+	| "inconclusive";
+
+function batchFileDeadlineMs(): number {
+	const raw = Number(process.env.PI_LENS_LSP_BATCH_FILE_MS);
+	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_BATCH_FILE_DEADLINE_MS;
+}
 
 // #646: `primaryServerId` moved to clients/lsp/config.ts so this tool and
 // tools/lens-diagnostics.ts's mode=full sweep share the exact same
@@ -363,6 +380,8 @@ export function createLspDiagnosticsTool(
 			cleanFiles?: number;
 			unconfirmedFiles?: number;
 			timedOutFiles?: number;
+			outcomeCounts?: Record<string, number>;
+			incompleteFiles?: number;
 			unconfirmed?: boolean;
 			timedOut?: boolean;
 		}>(({ details, args, isError, text }) => {
@@ -394,6 +413,19 @@ export function createLspDiagnosticsTool(
 				const suffix =
 					timedOutFiles > 0 ? ` (${timedOutFiles} timed out)` : "";
 				return `lsp_diagnostics${scope} — ${count} ${noun} · ${cleanFiles} clean · ${unconfirmedFiles} unconfirmed${suffix}`;
+			}
+			const outcomeCounts = details?.outcomeCounts;
+			const notConfirmed = outcomeCounts
+				? (outcomeCounts.inconclusive ?? 0) +
+					(outcomeCounts.unavailable ?? 0) +
+					(outcomeCounts.unsupported ?? 0) +
+					(outcomeCounts.failed ?? 0)
+				: 0;
+			if (notConfirmed > 0) {
+				return `lsp_diagnostics${scope} — ${count} ${noun} · ${notConfirmed} checks not confirmed`;
+			}
+			if ((details?.incompleteFiles ?? 0) > 0) {
+				return `lsp_diagnostics${scope} — incomplete (${details?.incompleteFiles} files not confirmed)`;
 			}
 			// Single-file mode: 0 diagnostics from an unconfirmed result — either a
 			// silent-on-clean server or (#570) a timed-out check — is not a clean
@@ -503,19 +535,34 @@ export function createLspDiagnosticsTool(
 				};
 			}
 
-			if (
-				Array.isArray(typedParams.paths) &&
-				typedParams.paths.length > 0
-			) {
-				const absPaths = typedParams.paths
-					.filter(
-						(entry): entry is string =>
-							typeof entry === "string" && entry.trim().length > 0,
-					)
-					.slice(0, MAX_BATCH_FILES)
-					.map((entry) =>
-						path.isAbsolute(entry) ? entry : path.resolve(cwd, entry),
-					);
+			if (Array.isArray(typedParams.paths) && typedParams.paths.length > 0) {
+				if (typedParams.paths.length > MAX_BATCH_FILES) {
+					return {
+						content: [{
+							type: "text" as const,
+							text: `paths accepts at most ${MAX_BATCH_FILES} files; received ${typedParams.paths.length}.`,
+						}],
+						isError: true,
+						details: { mode: "batch", filesChecked: 0 },
+					};
+				}
+				const rawPaths = typedParams.paths.filter(
+					(entry): entry is string =>
+						typeof entry === "string" && entry.trim().length > 0,
+				);
+				if (rawPaths.length !== typedParams.paths.length) {
+					return {
+						content: [{ type: "text" as const, text: "paths must contain non-empty file paths." }],
+						isError: true,
+						details: { mode: "batch", filesChecked: 0 },
+					};
+				}
+				// Preserve input order (including duplicate entries); normalize each
+				// path before grouping so Windows separators and dot segments cannot
+				// change cache/group identity. Explicit lists never enter the walker.
+				const absPaths = rawPaths.map((entry) =>
+					path.normalize(path.isAbsolute(entry) ? entry : path.resolve(cwd, entry)),
+				);
 				return runBatchFileDiagnostics(absPaths, severity, lspService, {
 					concurrency,
 					waitMs,
@@ -1145,6 +1192,33 @@ function tallyConfirmation(results: FileDiagnosticResult[]): {
 	return { clean, unconfirmed, timedOut };
 }
 
+function classifyBatchFileOutcome(result: FileDiagnosticResult): BatchFileOutcome {
+	if (result.error) return "failed";
+	// A timed-out/unconfirmed answer may contain partial findings, but it cannot
+	// honestly be called a complete findings result. Keep the raw findings for
+	// investigation while making the aggregate incomplete.
+	if (result.timedOut || result.confirmation === "unconfirmed") {
+		return "inconclusive";
+	}
+	if (result.diagnostics.length > 0) return "findings";
+	if (result.unavailable) {
+		return result.primaryServerId ? "unavailable" : "unsupported";
+	}
+	if (!result.primaryServerId) return "unsupported";
+	return "clean";
+}
+
+function inconclusiveBatchResult(file: string, reason: string): FileDiagnosticResult {
+	return {
+		file,
+		diagnostics: [],
+		confirmation: "unconfirmed",
+		timedOut: true,
+		outcome: "inconclusive",
+		inconclusiveReason: reason,
+	};
+}
+
 /**
  * #570: build the explanatory clause for a batch/directory result that has
  * unconfirmed files, distinguishing timed-out checks from the pre-existing
@@ -1202,6 +1276,8 @@ async function collectBatchDiagnostics(
 	clean: number;
 	unconfirmed: number;
 	timedOut: number;
+	outcomeCounts: Record<BatchFileOutcome, number>;
+	incompleteFiles: number;
 }> {
 	// #671: one cache context for this whole batch/directory sweep — loaded
 	// once, written back once after every file has been processed (see the
@@ -1217,8 +1293,8 @@ async function collectBatchDiagnostics(
 	const results = await mapWithConcurrency(
 		files,
 		options.concurrency,
-		(file) =>
-			collectFileDiagnosticResult(
+		async (file) => {
+			const work = collectFileDiagnosticResult(
 				file,
 				severity,
 				lspService,
@@ -1228,7 +1304,36 @@ async function collectBatchDiagnostics(
 				cacheCtx,
 				scopeKey,
 				resolvedCwd,
-			),
+			);
+			const bounded = withDeadline(work, {
+				ms: batchFileDeadlineMs(),
+				onTimeout: "undefined",
+				onReject: "undefined",
+			});
+			const result = options.signal
+				? await Promise.race([
+						bounded,
+						new Promise<FileDiagnosticResult | undefined>((resolve) => {
+							if (options.signal?.aborted) {
+								resolve(undefined);
+								return;
+							}
+							options.signal?.addEventListener("abort", () => resolve(undefined), {
+								once: true,
+							});
+						}),
+					])
+				: await bounded;
+			return (
+				result ??
+				inconclusiveBatchResult(
+					file,
+					options.signal?.aborted
+						? "Batch aborted before this file completed."
+						: `File check exceeded ${batchFileDeadlineMs()}ms.`,
+				)
+			);
+		},
 		lspService,
 		options.signal,
 		options.onProgress,
@@ -1248,6 +1353,14 @@ async function collectBatchDiagnostics(
 	const truncated = total > MAX_DIAGNOSTICS;
 	const display = truncated ? allDiags.slice(0, MAX_DIAGNOSTICS) : allDiags;
 	const { clean, unconfirmed, timedOut } = tallyConfirmation(results);
+	for (const result of results) {
+		result.outcome = classifyBatchFileOutcome(result);
+	}
+	const outcomeCounts = Object.fromEntries(
+		(["clean", "findings", "unsupported", "unavailable", "failed", "inconclusive"] as const).map(
+			(outcome) => [outcome, results.filter((result) => result.outcome === outcome).length],
+		),
+	) as Record<BatchFileOutcome, number>;
 	// Per-file primary-server lookup so a flattened multi-file `display` list
 	// can still be split into "primary findings" vs "auxiliary findings" —
 	// `clean`/`unconfirmed` above already reflect ONLY the primary server's
@@ -1273,6 +1386,8 @@ async function collectBatchDiagnostics(
 		clean,
 		unconfirmed,
 		timedOut,
+		outcomeCounts,
+		incompleteFiles: Math.max(0, files.length - results.length),
 	};
 }
 
@@ -1302,6 +1417,8 @@ async function runBatchFileDiagnostics(
 		clean,
 		unconfirmed,
 		timedOut,
+		outcomeCounts,
+		incompleteFiles,
 	} = await collectBatchDiagnostics(absPaths, severity, lspService, options);
 
 	const lines: string[] = [
@@ -1311,6 +1428,29 @@ async function runBatchFileDiagnostics(
 	];
 	if (options.waitMs !== undefined)
 		lines.push(`Wait budget: ${options.waitMs}ms`);
+	lines.push(
+		`Outcomes: ${Object.entries(outcomeCounts)
+			.map(([outcome, count]) => `${outcome}=${count}`)
+			.join(", ")}`,
+	);
+	const notConfirmed =
+		outcomeCounts.inconclusive +
+		outcomeCounts.unavailable +
+		outcomeCounts.unsupported +
+		outcomeCounts.failed +
+		incompleteFiles;
+	if (notConfirmed > 0) {
+		lines.push(
+			"",
+			`Checks not confirmed: ${notConfirmed} (inconclusive/unavailable/unsupported/failed or not started).`,
+		);
+	}
+	if (incompleteFiles > 0) {
+		lines.push(
+			"",
+			`Batch incomplete: ${incompleteFiles} file${incompleteFiles === 1 ? "" : "s"} were not confirmed because the batch was aborted.`,
+		);
+	}
 	if (fileErrors.length > 0) lines.push("", "File errors:", ...fileErrors);
 	if (lspHealthWarnings.length > 0) {
 		lines.push("", "LSP health warnings:", ...lspHealthWarnings.slice(0, 10));
@@ -1366,6 +1506,19 @@ async function runBatchFileDiagnostics(
 			cleanFiles: clean,
 			unconfirmedFiles: unconfirmed,
 			timedOutFiles: timedOut > 0 ? timedOut : undefined,
+			outcomes: results.map((result) => ({
+				file: result.file,
+				outcome: result.outcome,
+				reason: result.inconclusiveReason ?? result.error ?? result.unavailable,
+				primaryDiagnosticsCount: result.diagnostics.filter(
+					(diagnostic) => diagnostic.source === result.primaryServerId,
+				).length,
+				auxiliaryDiagnosticsCount: result.diagnostics.filter(
+					(diagnostic) => diagnostic.source !== result.primaryServerId,
+				).length,
+			})),
+			outcomeCounts,
+			incompleteFiles: incompleteFiles > 0 ? incompleteFiles : undefined,
 			fileErrors: fileErrors.length > 0 ? fileErrors : undefined,
 			lspHealthWarnings:
 				lspHealthWarnings.length > 0 ? lspHealthWarnings : undefined,

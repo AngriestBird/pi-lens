@@ -4,11 +4,25 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **TypeScript 7 compatibility fixes (refs #809)** — narrowed ast-grep search test details and made the LSP `workspace/applyEdit` response overload-compatible, unblocking Dependabot PR #600.
+
 ### Added
 
 ### Changed
 
 ### Fixed
+
+- **ast-grep NAPI fallback now runs TSX-tagged rules and reports unsupported-language skips** (refs #282) — `.tsx` files use the `tsx` grammar for rule-language scoping, preserving the exact TypeScript/JavaScript twin behavior from #657; rules for languages the fallback cannot evaluate are logged once per rule instead of disappearing as zero matches.
+
+- **CSS server root-policy coverage is hermetic on Windows** (refs #855) — the
+	server-policy fixture now pins its nearest `package.json` inside the temporary
+	workspace, so a marker in the host user's profile cannot change the result.
+
+- **Multi-client LSP shutdown no longer serializes the grace-period tail** (#851) — retiring clients now tear down concurrently while generation handoff still waits for every client to settle; instance-registry child removals serialize their read-modify-write without serializing process kills.
+
+- **LSP singleton resets no longer overlap live server generations** (closes #850) — `resetLSPService()` still returns synchronously and may allocate a replacement service immediately, but that replacement's first spawn now waits for every older generation's asynchronous teardown to settle. Repeated resets destroy an intermediate waiting generation before it can spawn, and post-root/post-client-cleanup guards prevent a retired service from starting a late process outside `state.inFlight`. The handoff is cleared after its first wait, preserving normal within-generation warm reuse and its hot path; concurrent-secondary sessions still skip destructive reset through the existing ownership guard. New deterministic coverage holds the old client's shutdown open and proves current `master`'s pre-fix second spawn/three-generation accumulation cannot recur.
 
 ## [3.8.72] - 2026-07-26
 
@@ -41,6 +55,8 @@ All notable changes to pi-lens will be documented in this file.
 - **New `project_report` registered tool (+ MCP mirror `pilens_project_report`)** (closes #773) — the top of the discovery funnel (`project_report` → `module_report` → `read_symbol`), answering "orient me in this project" purely from data the review graph already computes: a trust header (graph freshness, file coverage vs. the persisted project snapshot's file count, and the exact/import/receiver-type/name-only edge-resolution-quality mix, reusing `module_report`'s existing `resolution` tags), hubs (top fan-in files with `blastRadius` and a one-line role from their most-imported exported symbols), entry points (near-zero fan-in / high fan-out files), a directory-level subsystem map (first-path-segment clustering that collapses to a deeper segment only when one segment dominates the file set, directory-to-directory import edge counts, Tarjan-SCC cycle detection worst-first, and minority-direction layering violations for any directory pair with edges both ways), risk hotspots (fan-in × max per-symbol cyclomatic complexity), and suspected dead weight (zero-importer non-entry-point files, always shipped with a low-confidence disclaimer for dynamic-import/runtime-registration/test-only-reachability false positives). Every ranked list is capped by a single `limit` knob and re-rankable via an optional `focus` hint (module_report's `recommendedReads` ranking pattern). Read-only over the cached graph, mirroring `module_report`'s #256 no-build contract and `symbol_search`'s #348 cold-cache contract: a cold graph kicks off a single deduped background build (`buildOrUpdateGraph`, home-ceiling-guarded) and returns `available: false` with an actionable retry hint, never blocking the call. `view: "compact"` renders a line-oriented text summary instead of JSON, matching `module_report`'s convention. New engine module `clients/project-report.ts` (never imports from `tools/`, per the repo's layering rule) plus a thin `tools/project-report.ts` wrapper; registered as an always-active tool in `index.ts` alongside `module_report`/`symbol_search` (`tests/index-wiring.test.ts` updated), and mirrored in `mcp/server.ts` as `pilens_project_report` (schema/registration covered by `tests/mcp/server.smoke.test.ts`). Middle-man detection is deliberately NOT surfaced (a documented v1 deviation): the review graph doesn't persist that signal on symbol nodes today — `module_report` computes it per-file, on demand, from raw file content — and re-deriving it project-wide would mean re-scanning every class-bearing file on this never-blocks read path. New `tests/clients/project-report.test.ts` (cold path non-blocking + background build, all six warm-path section shapes, the `limit` knob scaling every cap, a synthetic-fixture directory cycle via Tarjan SCC, a synthetic-fixture minority-direction layering violation, the dead-weight disclaimer always present, and `focus` re-ranking hub order) and `tests/tools/project-report.test.ts` (cold/warm/compact-view wrapper behavior).
 
 ### Changed
+
+- **Explicit `lsp_diagnostics` file batches now expose a consolidated contract** (refs #837) — runtime path lists are normalized and rejected above the 100-file cap (never silently truncated), preserve input order, enforce bounded per-file deadlines and abort-aware completion, and return honest per-file outcomes (`clean`, `findings`, `unsupported`, `unavailable`, `failed`, `inconclusive`) with aggregate counts. Primary-language diagnostics remain separated from auxiliary findings, and incomplete batches are rendered as unconfirmed.
 
 - **Incumbent LSP wait policy now has one process-neutral module boundary** (#822) — per-server strategies, tier classification, and capability-snapshot types moved under `clients/lsp/wait-policy/` with compatibility re-exports at the old paths; this is an internal refactor with no behavior change.
 
