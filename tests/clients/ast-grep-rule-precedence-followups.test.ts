@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { js as sgJs, ts as sgTs } from "@ast-grep/napi";
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	evaluateAstGrepRules,
