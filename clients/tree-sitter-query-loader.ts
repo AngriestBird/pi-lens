@@ -176,18 +176,26 @@ export class TreeSitterQueryLoader {
 	}
 
 	/**
-	 * Load all queries from the rules/tree-sitter-queries directory
+	 * Load all queries from the rules/tree-sitter-queries directory.
+	 *
+	 * Returns the in-memory memo when the same root was already loaded.
+	 * `force: true` re-reads from disk even then — the memo has no notion of
+	 * rule-file mtimes, so a caller that KNOWS the files changed (the dispatch
+	 * runner's RuleCache-miss path: a miss means the rule-file fingerprint
+	 * moved) must force, or it gets the pre-edit rules back and persists them
+	 * under the fresh fingerprint (#878).
 	 */
 	async loadQueries(
 		rootDir = process.cwd(),
+		options: { force?: boolean } = {},
 	): Promise<Map<string, TreeSitterQuery[]>> {
 		const resolvedRoot = path.resolve(rootDir);
-		if (this.loaded && this.loadedRoot === resolvedRoot) return this.queries;
-
-		if (this.loadedRoot !== resolvedRoot) {
-			this.queries.clear();
-			this.loaded = false;
+		if (!options.force && this.loaded && this.loadedRoot === resolvedRoot) {
+			return this.queries;
 		}
+
+		this.queries.clear();
+		this.loaded = false;
 
 		// Load from user's project rules AND package built-in rules (coexist)
 		const queryDirs = [

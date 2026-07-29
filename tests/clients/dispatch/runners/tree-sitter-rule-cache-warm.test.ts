@@ -158,12 +158,18 @@ describe("tree-sitter runner — inherited rule-set fingerprint (#878)", () => {
 		await treeSitterRunner.run(warm.ctx);
 
 		// Edit the INHERITED typescript rule. Pre-fix this left the tsx
-		// fingerprint unchanged and run 3 hit the stale cache.
+		// fingerprint unchanged and run 3 hit the stale cache. Assert on the
+		// EDITED MESSAGE, not just the rule id — the id is identical pre/post
+		// edit, so a stale v1 rule set would still make a toContain("proj-marker")
+		// pass; only the v2 message proves run 3 re-read the rule from disk (the
+		// loader's in-memory memo used to hand back v1 on the cache miss and the
+		// runner persisted it under the fresh fingerprint).
 		writeRule(tsRulePath(), "marker v2 changed");
 		const afterInheritedEdit = env878.addFile("c.tsx", "debugger;\n");
-		expect(
-			firedRuleIds(await treeSitterRunner.run(afterInheritedEdit.ctx)),
-		).toContain("proj-marker");
+		const run3 = await treeSitterRunner.run(afterInheritedEdit.ctx);
+		expect(firedRuleIds(run3)).toContain("proj-marker");
+		const markerDiag = run3.diagnostics.find((d) => d.rule === "proj-marker");
+		expect(markerDiag?.message).toContain("marker v2 changed");
 
 		// Control: editing an UNRELATED language's rule must NOT invalidate.
 		writeRule(pyRulePath(), "py marker v2 changed");

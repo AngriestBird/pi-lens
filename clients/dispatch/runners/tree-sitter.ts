@@ -26,6 +26,7 @@ import {
 	queriesForLanguage,
 	queryLoader,
 	ruleFilesForLanguage,
+	ruleSourceLanguages,
 	type TreeSitterQuery,
 } from "../../tree-sitter-query-loader.js";
 import { classifyDefect } from "../diagnostic-taxonomy.js";
@@ -427,17 +428,22 @@ const treeSitterRunner: RunnerDefinition = {
 				)
 				.filter((q) => !isDisabledQueryFilePath(q.filePath));
 		} else {
-			// Load from disk
-			await queryLoader.loadQueries(ctx.cwd);
+			// A miss means the rule-file fingerprint moved (or no cache yet), so the
+			// loader's in-memory memo may hold the PRE-edit rules — without `force`
+			// it would hand those back and cache.set below would persist stale rules
+			// under the fresh fingerprint, poisoning every future process (#878).
+			await queryLoader.loadQueries(ctx.cwd, { force: true });
 
 			// The effective rule set is composed by the loader (tsx also runs the
 			// typescript rules; javascript deliberately does not — see
 			// ruleSourceLanguages in tree-sitter-query-loader.ts).
 			languageQueries = queriesForLanguage(
-				new Map([
-					[languageId, queryLoader.getQueriesForLanguage(languageId)],
-					["typescript", queryLoader.getQueriesForLanguage("typescript")],
-				]),
+				new Map(
+					ruleSourceLanguages(languageId).map((lang) => [
+						lang,
+						queryLoader.getQueriesForLanguage(lang),
+					]),
+				),
 				languageId,
 			);
 
