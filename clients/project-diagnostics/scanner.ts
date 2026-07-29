@@ -153,7 +153,14 @@ async function scanTreeSitterAndFactRules(
 			if (!langId && !factEligible) continue;
 			filesScanned++;
 
-			if (queryMap && langId && client) {
+			let content: string | null;
+			try {
+				content = fs.readFileSync(filePath, "utf-8");
+			} catch {
+				content = null;
+			}
+
+			if (queryMap && langId && client && content !== null) {
 				const queries = queriesForLanguage(queryMap, langId);
 				try {
 					// ONE tree walk for the whole rule set, not one per rule (#675).
@@ -164,6 +171,7 @@ async function scanTreeSitterAndFactRules(
 						{
 							maxResults: 50,
 						},
+						content,
 					);
 					for (const { queryDef: query, match } of found) {
 						treeSitter.push({
@@ -189,6 +197,9 @@ async function scanTreeSitterAndFactRules(
 
 			if (factEligible) {
 				facts.clearFileFactsFor(filePath);
+				// The tree-sitter sweep and fact chain consume the same bytes. Seed
+				// file.content so its provider does not read this file a second time.
+				facts.setFileFact(filePath, "file.content", content);
 				const ctx = createDispatchContext(filePath, cwd, pi, facts, false);
 				try {
 					await runProviders(ctx);
