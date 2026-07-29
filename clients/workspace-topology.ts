@@ -40,8 +40,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logLatency } from "./latency-logger.js";
-import { isAtOrAboveHomeDir, walkUpDirs } from "./path-utils.js";
-import { minimatch } from "./deps/minimatch.js";
+import {
+	isAtOrAboveHomeDir,
+	nameMatchesMarkerGlob,
+	walkUpDirs,
+} from "./path-utils.js";
 
 /** Depth cap on any upward marker walk — mirrors `findNearestMarkerRoot`'s bound. */
 const MAX_WALK_DEPTH = 64;
@@ -273,11 +276,11 @@ function hasBasenameMarker(markers: DirectoryMarkers, basename: string): boolean
 		return fs.existsSync(path.join(markers.dir, basename));
 	}
 	if (basename.includes("*")) {
+		// `entryFileNames` is already files/symlinks-only, so matching the cached
+		// names via the shared marker-glob helper preserves the same semantics as
+		// the Dirent-filtering probes without re-reading the directory.
 		return [...markers.entryFileNames].some((entryName) =>
-			minimatch(entryName, basename, {
-				dot: true,
-				nocase: process.platform === "win32",
-			}),
+			nameMatchesMarkerGlob(entryName, basename),
 		);
 	}
 	return markers.entryNames.has(basename);

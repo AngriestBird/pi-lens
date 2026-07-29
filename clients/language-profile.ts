@@ -1,7 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { detectFileKind, type FileKind } from "./file-kinds.js";
+import {
+	detectFileKind,
+	DOTNET_CSHARP_ROOT_MARKERS,
+	DOTNET_FSHARP_ROOT_MARKERS,
+	type FileKind,
+} from "./file-kinds.js";
 import { getProjectIgnoreMatcher } from "./file-utils.js";
+import { direntsHaveMarkerGlobMatch } from "./path-utils.js";
 import {
 	LANGUAGE_POLICY,
 	type ProjectLanguageProfile,
@@ -9,7 +15,6 @@ import {
 import { getSourceFiles } from "./scan-utils.js";
 import { readDirEntriesSafe, shouldRecurseIntoDir } from "./source-walker.js";
 import { findNearestDirWithAnyBasename } from "./workspace-topology.js";
-import { minimatch } from "./deps/minimatch.js";
 
 export const SUPPORTED_FILE_KINDS: readonly FileKind[] = [
 	"jsts",
@@ -78,8 +83,8 @@ const PROJECT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	terraform: [".terraform.lock.hcl"],
 	nix: ["flake.nix"],
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
-	csharp: ["*.csproj", "*.sln", "*.slnx"],
-	fsharp: ["*.fsproj", "*.sln"],
+	csharp: DOTNET_CSHARP_ROOT_MARKERS,
+	fsharp: DOTNET_FSHARP_ROOT_MARKERS,
 };
 
 const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
@@ -123,20 +128,16 @@ const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	terraform: [".terraform.lock.hcl"],
 	nix: ["flake.nix"],
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
-	csharp: ["*.csproj", "*.sln", "*.slnx"],
-	fsharp: ["*.fsproj", "*.sln"],
+	csharp: DOTNET_CSHARP_ROOT_MARKERS,
+	fsharp: DOTNET_FSHARP_ROOT_MARKERS,
 };
 
 function hasProjectMarker(projectRoot: string, marker: string): boolean {
 	if (!marker.includes("*")) return fs.existsSync(path.join(projectRoot, marker));
 	try {
-		return fs.readdirSync(projectRoot, { withFileTypes: true }).some(
-			(entry) =>
-				(entry.isFile() || entry.isSymbolicLink()) &&
-				minimatch(entry.name, marker, {
-					dot: true,
-					nocase: process.platform === "win32",
-				}),
+		return direntsHaveMarkerGlobMatch(
+			fs.readdirSync(projectRoot, { withFileTypes: true }),
+			marker,
 		);
 	} catch {
 		return false;
