@@ -237,46 +237,67 @@ async function scanAstGrepNapi(
 	if (!sgModule) return [];
 
 	const diagnostics: ProjectDiagnostic[] = [];
-	for (const filePath of files) {
-		if (isTestFile(filePath) || !astGrepCanHandle(filePath)) continue;
+	let filesScanned = 0;
+	const scan = async (): Promise<void> => {
+		for (const filePath of files) {
+			if (isTestFile(filePath) || !astGrepCanHandle(filePath)) continue;
 
-		let stats: fs.Stats;
-		try {
-			stats = fs.statSync(filePath);
-		} catch {
-			continue;
-		}
-		if (stats.size > AST_GREP_MAX_FILE_BYTES) continue;
-
-		const lang = astGrepGetLang(filePath, sgModule);
-		if (!lang) continue;
-
-		let content: string;
-		try {
-			content = fs.readFileSync(filePath, "utf-8");
-		} catch {
-			continue;
-		}
-
-		try {
-			const rootNode = lang.parse(content).root();
-			const fileDiagnostics = evaluateAstGrepRules(
-				filePath,
-				rootNode,
-				cwd,
-				"jsts",
-				{
-					maxMatchesPerRule: AST_GREP_SCAN_MAX_MATCHES_PER_RULE,
-					maxTotalDiagnostics: AST_GREP_SCAN_MAX_DIAGNOSTICS_PER_FILE,
-				},
-			);
-			for (const diagnostic of fileDiagnostics) {
-				diagnostics.push(fromDispatchDiagnostic(diagnostic, "ast-grep-napi"));
+			let stats: fs.Stats;
+			try {
+				stats = fs.statSync(filePath);
+			} catch {
+				continue;
 			}
-		} catch {
-			// Project scans are best-effort; one unparsable file must not abort the tool.
+			if (stats.size > AST_GREP_MAX_FILE_BYTES) continue;
+
+			const lang = astGrepGetLang(filePath, sgModule);
+			if (!lang) continue;
+
+			let content: string;
+			try {
+				content = fs.readFileSync(filePath, "utf-8");
+			} catch {
+				continue;
+			}
+			filesScanned++;
+
+			try {
+				const rootNode = lang.parse(content).root();
+				const fileDiagnostics = evaluateAstGrepRules(
+					filePath,
+					rootNode,
+					cwd,
+					"jsts",
+					{
+						maxMatchesPerRule: AST_GREP_SCAN_MAX_MATCHES_PER_RULE,
+						maxTotalDiagnostics: AST_GREP_SCAN_MAX_DIAGNOSTICS_PER_FILE,
+					},
+				);
+				for (const diagnostic of fileDiagnostics) {
+					diagnostics.push(fromDispatchDiagnostic(diagnostic, "ast-grep-napi"));
+				}
+			} catch {
+				// Project scans are best-effort; one unparsable file must not abort the tool.
+			}
 		}
+	};
+
+	const client = getSharedTreeSitterClient();
+	if (!client) {
+		await scan();
+		return diagnostics;
 	}
+
+	const startedAt = Date.now();
+	await client.withParseCacheMeasurement(scan, (stats) => {
+		logTreeSitterCacheStats({
+			scope: "project_diagnostics_ast_grep_scan",
+			filePath: cwd,
+			fileCount: filesScanned,
+			durationMs: Date.now() - startedAt,
+			stats,
+		});
+	});
 	return diagnostics;
 }
 
