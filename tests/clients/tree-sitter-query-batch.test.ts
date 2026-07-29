@@ -185,4 +185,102 @@ describe("runQueriesOnFile", () => {
 			expect(await client.runQueryOnFile(query!, goodFile, testCase.language)).toEqual([]);
 		}
 	});
+
+	describe("batch cache after grammar-load failures (#889)", () => {
+		it("retries the batch compile after a transient loadLanguage failure", async () => {
+			const env = setupTestEnvironment("pi-lens-batch-retry-");
+			cleanups.push(env.cleanup);
+			const file = createTempFile(env.tmpDir, "retry.ts", SOURCE);
+			const client = getSharedTreeSitterClient()!;
+			expect(await client.init()).toBe(true);
+
+			const state = client as unknown as {
+				loadLanguage: (languageId: string) => Promise<unknown>;
+				queryBatchCache: Map<string, unknown>;
+			};
+			const realLoadLanguage = state.loadLanguage.bind(client);
+			let failNext = true;
+			let loadCalls = 0;
+			state.loadLanguage = async (languageId: string) => {
+				loadCalls++;
+				if (failNext) {
+					failNext = false;
+					// Transient: offline lazy grammar fetch, mid-scan load error.
+					return null;
+				}
+				return realLoadLanguage(languageId);
+			};
+
+			// First scan: the batch compile can't load the grammar and must NOT
+			// cache null — the per-rule fallback still produces results.
+			const first = await client.runQueriesOnFile(RULES, file, "typescript");
+			expect(first.length).toBeGreaterThan(0);
+			expect(state.queryBatchCache.size).toBe(0);
+
+			// Second scan: the load succeeds, so the batch is compiled, cached,
+			// and returns byte-identical results.
+			const second = await client.runQueriesOnFile(RULES, file, "typescript");
+			expect(second).toEqual(first);
+			expect(state.queryBatchCache.size).toBe(1);
+			expect([...state.queryBatchCache.values()][0]).not.toBeNull();
+			// The batch path retried the load instead of staying on the fallback.
+			expect(loadCalls).toBeGreaterThanOrEqual(3);
+		});
+
+		it("bounds retries when the grammar never loads", async () => {
+			const env = setupTestEnvironment("pi-lens-batch-bound-");
+			cleanups.push(env.cleanup);
+			const client = getSharedTreeSitterClient()!;
+			expect(await client.init()).toBe(true);
+
+			const state = client as unknown as {
+				loadLanguage: (languageId: string) => Promise<unknown>;
+				compileQueryBatch: (
+					defs: TreeSitterQuery[],
+					languageId: string,
+				) => Promise<unknown>;
+				queryBatchCache: Map<string, unknown>;
+			};
+			let loadCalls = 0;
+			state.loadLanguage = async () => {
+				loadCalls++;
+				return null;
+			};
+
+			for (let i = 0; i < 5; i++) {
+				expect(await state.compileQueryBatch(RULES, "typescript")).toBeNull();
+			}
+			// After QUERY_BATCH_MAX_LOAD_FAILURES (3) consecutive load failures the
+			// miss is cached like any deterministic failure — no hot retry loop.
+			expect(loadCalls).toBe(3);
+			expect([...state.queryBatchCache.values()]).toEqual([null]);
+		});
+
+		it("caches a genuine compile failure permanently", async () => {
+			const env = setupTestEnvironment("pi-lens-batch-perm-");
+			cleanups.push(env.cleanup);
+			const client = getSharedTreeSitterClient()!;
+			expect(await client.init()).toBe(true);
+
+			const state = client as unknown as {
+				loadLanguage: (languageId: string) => Promise<unknown>;
+				compileQueryBatch: (
+					defs: TreeSitterQuery[],
+					languageId: string,
+				) => Promise<unknown>;
+			};
+			const broken = rule("broken-perm", "(node_that_does_not_exist) @X", {
+				metavars: ["X"],
+			});
+
+			// A rule set that cannot compile against this grammar is a
+			// deterministic failure — cached null on the first call.
+			expect(await state.compileQueryBatch([broken], "typescript")).toBeNull();
+
+			state.loadLanguage = async () => {
+				throw new Error("loadLanguage must not be retried for a cached miss");
+			};
+			expect(await state.compileQueryBatch([broken], "typescript")).toBeNull();
+		});
+	});
 });

@@ -47,6 +47,13 @@ import {
 // short-circuits (#262).
 const TREE_SITTER_MAX_SCAN_FILES = 20_000;
 
+// Consecutive grammar-load failures after which a batch cache key gives up and
+// caches null like any other deterministic failure. Bounds the retry loop when
+// a grammar simply never loads, while still letting a transient loadLanguage()
+// failure (offline lazy fetch, mid-scan load error) recover on a later scan
+// instead of paying the 3.3x per-rule fallback for the process lifetime (#889).
+const QUERY_BATCH_MAX_LOAD_FAILURES = 3;
+
 // --- Type Declarations (local, no import needed) ---
 
 // biome-ignore lint/suspicious/noExplicitAny: Language from web-tree-sitter
@@ -159,6 +166,8 @@ export class TreeSitterClient {
 	private queryCache = new Map<string, any>();
 	/** Combined multi-rule queries by language + rule-set identity (null = don't retry). */
 	private queryBatchCache = new Map<string, QueryBatch | null>();
+	/** Consecutive grammar-load failures per batch key — bounds load retries (#889). */
+	private queryBatchLoadFailures = new Map<string, number>();
 	private queryLoader = new TreeSitterQueryLoader();
 	private verbose: boolean;
 	private parserCounters = createParserCounters();
@@ -985,9 +994,28 @@ export class TreeSitterClient {
 		const cached = this.queryBatchCache.get(cacheKey);
 		if (cached !== undefined) return cached;
 
+		// A loadLanguage() failure is transient (offline lazy grammar fetch,
+		// transient mid-scan load error) — do NOT cache null for it, or every
+		// later scan pays the ~3.3x per-rule fallback for the process lifetime
+		// (#889). Retry on the next call, bounded so a grammar that never loads
+		// doesn't re-attempt every scan.
+		const language = await this.loadLanguage(languageId);
+		if (!language) {
+			const failures = (this.queryBatchLoadFailures.get(cacheKey) ?? 0) + 1;
+			if (failures >= QUERY_BATCH_MAX_LOAD_FAILURES) {
+				this.dbg(
+					`Batch: grammar for ${languageId} failed to load ${failures} times — caching miss`,
+				);
+				this.queryBatchLoadFailures.delete(cacheKey);
+				this.queryBatchCache.set(cacheKey, null);
+			} else {
+				this.queryBatchLoadFailures.set(cacheKey, failures);
+			}
+			return null;
+		}
+		this.queryBatchLoadFailures.delete(cacheKey);
+
 		const build = async (): Promise<QueryBatch | null> => {
-			const language = await this.loadLanguage(languageId);
-			if (!language) return null;
 			const Query = (await loadWebTreeSitter()).Query;
 
 			const entries: QueryBatchEntry[] = [];
@@ -1164,13 +1192,10 @@ export class TreeSitterClient {
 	 */
 	/** Generate cache key for compiled query */
 	private getQueryCacheKey(pattern: string, languageId: string): string {
-		// Simple hash for the query string
-		let hash = 0;
-		for (let i = 0; i < pattern.length; i++) {
-			const char = pattern.charCodeAt(i);
-			hash = ((hash << 5) - hash + char) | 0; // NOSONAR: intentional 32-bit truncation for hash stability, not float→int conversion
-		}
-		return `${languageId}:${hash.toString(36)}`;
+		// Full pattern text as the key. The previous 32-bit hash could collide
+		// across rules and permanently poison a cache slot with the wrong
+		// compiled query (or a null meant for a different rule set) (#889).
+		return `${languageId}:${pattern}`;
 	}
 
 	/** Compile a pattern into a tree-sitter Query with caching */
