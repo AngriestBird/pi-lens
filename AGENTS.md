@@ -833,6 +833,15 @@ For anything that goes through the `index.ts` entry — flag/command/tool/hook r
 
 Separate from the above — `tests/clients/dispatch/runners/*.test.ts` (and some `dispatch/rules/*`) build a `DispatchContext` (`clients/dispatch/types.ts`), not an `ExtensionAPI` mock. Use the shared `makeRunnerCtx(filePath, cwd, overrides?)` from `tests/support/runner-ctx.ts` instead of a local `createCtx(filePath, cwd)`: it fills in the real `DispatchContext` fields (`kind: "jsts"`, `fileRole: "source"`, `autofix: false`, `deltaMode: true`, a fresh `FactStore`, `hasTool` resolving `true`, no-op `log`) and lets a test override just what it needs (e.g. `{ kind: "python" }`, `{ autofix: true }`, a custom `hasTool`). `ruff.test.ts`, `oxlint.test.ts`, and `biome-check-runner.test.ts` are the migration template; the remaining ~23 `dispatch/runners`/`dispatch/rules` files with a bespoke `createCtx` are tracked in #187 for opportunistic follow-on migration.
 
+### Real-runner rule/dispatch tests (#448)
+
+Mock the **environment** (tool presence, network, abort/error injection) — never the **behavior under test** (parsing, matching, dispatch filtering, suppression). The #439/#440 bugs shipped because the tree-sitter runner's tests mocked the client, query loader, and review graph: a rule false-positive was invisible by construction. Rules of thumb:
+
+- Rule behavior and dispatch filtering (per-rule `skip_test_files`, `blockingOnly`/`inline_tier`, `modifiedRanges`, cache round-trips) get REAL-runner tests: real client + real query loader + fixture on disk, via `tests/support/real-runner-ctx.ts` — `makeRealRunnerEnv()` (multi-fixture, shared cwd) / `makeRealRunnerCtx()` (one-shot), `assertGrammarAvailable()` in `beforeAll` (a missing grammar degrades silently to zero matches — "doesn't fire" assertions are vacuous without the guard), `firedRuleIds()`, `napiFallbackHasTool`. Templates: `tree-sitter-skip-test-files.test.ts`, `tree-sitter-dispatch-behavior.test.ts`, `tree-sitter-rule-cache-warm.test.ts`.
+- A rule-bug fix ships a real-runner regression test (fixture in → assert fires/doesn't).
+- Fresh temp cwds mean every test runs COLD-cache; cache round-trip behavior needs a deliberate second run against the same env (`makeRealRunnerEnv` + two `addFile`s). That split is exactly where the #448 `skip_test_files`-dropped-on-cache-hit bug hid.
+- Mocked control-flow tests (availability gates, error paths) stay legitimate and complement the above; so do the ~20 CLI runner tests that mock `safeSpawnAsync` — the seam there is an external binary, with real coverage in the nightly `tool-smoke.yml`.
+
 ## Commit conventions
 
 - Always include the GitHub issue number in the commit subject line: `(closes #NNN)` or `(refs #NNN)`.

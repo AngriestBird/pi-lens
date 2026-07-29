@@ -111,6 +111,11 @@ predicates:
      client.runQueryOnFile(queryDef, filePath, "typescript")
    (TreeSitterClient compiles via the same WASM the runner uses.)
 
+✅ For rule-bug fixes, also add a real-runner regression test through
+   treeSitterRunner.run() via makeRealRunnerCtx (tests/support/real-runner-ctx.ts) —
+   runQueryOnFile bypasses dispatch (skip_test_files, tiers, delta, rule cache).
+   Template: tests/clients/dispatch/runners/tree-sitter-skip-test-files.test.ts.
+
 ✅ JS files also run typescript/ rules (shared grammar) — one rule in
    rules/tree-sitter-queries/typescript/ covers BOTH .ts and .js. No -js copy needed.
 

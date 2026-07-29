@@ -196,7 +196,8 @@ Tree-sitter rules live in `rules/tree-sitter-queries/<language>/`.
 1. Write a YAML query file. See `docs/custom-rules.md` and the `pi-lens-write-tree-sitter-rule` skill (`skills/pi-lens-write-tree-sitter-rule/SKILL.md`).
 2. Place it under the correct language directory (e.g. `rules/tree-sitter-queries/typescript/`).
 3. Disabled rules go in `rules/tree-sitter-queries/<language>-disabled/`.
-4. Add a test in `tests/clients/tree-sitter-*.test.ts`.
+4. Add a query-level test in `tests/clients/tree-sitter-*.test.ts` (real `runQueryOnFile` against a fixture).
+5. A rule-bug fix ships a real-runner regression test: fixture in, assert the rule fires or doesn't through `treeSitterRunner.run()` via `makeRealRunnerCtx` from `tests/support/real-runner-ctx.ts`. Template: `tests/clients/dispatch/runners/tree-sitter-skip-test-files.test.ts`. Query-level tests can't see dispatch behavior (skip_test_files, tiers, delta, cache round-trips) — that's where #440 hid.
 
 ### Centralization note
 
