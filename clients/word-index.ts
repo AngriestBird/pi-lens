@@ -91,7 +91,7 @@ const STOPWORDS = new Set([
 const TEST_VENDOR_RE =
 	/(?:(^|[\\/])(?:tests?|__tests__|spec|specs|__mocks__|vendor|node_modules|examples?|fixtures?|\.git|dist|build|coverage)([\\/]|$))|(?:\.(?:test|spec)\.[a-z]+$)/i;
 
-const DOC_FILE_RE = /\.(?:md|mdx|markdown|json|jsonc|txt|rst|lock|ya?ml|toml|csv)$/i;
+const DOC_FILE_RE = /\.(?:md|mdx|markdown|json|json5|jsonc|txt|rst|lock|ya?ml|toml|csv)$/i;
 
 const TEST_VENDOR_PENALTY = 0.3;
 const DOC_FILE_PENALTY = 0.5;
@@ -307,8 +307,14 @@ export async function collectWordIndexDocs(
 	// source files among a huge pile of non-source files can't force a
 	// full-tree walk either; an index over the truncated list is acceptable.
 	const maxFiles = getWordIndexMaxFilesDerived(root);
+	// #894 review: prioritize code kinds within the cap — with broadened
+	// enumeration, thousands of data/doc files (locale JSON, fixtures, …)
+	// ahead of the code dirs in walk order could exhaust `maxFiles` and evict
+	// real source files from the index entirely (DOC_FILE_PENALTY can't
+	// rescue a file that never made the slice).
 	const files = await collectSourceFilesAsync(root, {
 		maxFiles,
+		prioritizeCodeKinds: true,
 	});
 	if (!shouldContinue()) return [];
 	const docs: Array<{ path: string; content: string }> = [];

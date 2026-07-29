@@ -225,6 +225,27 @@ export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
 	],
 };
 
+// --- Shared Project Root Markers ---
+
+/**
+ * .NET project/solution root-marker globs (refs #895). Single source of truth
+ * consumed by BOTH root-resolution subsystems — language-profile.ts
+ * (PROJECT_MARKERS_BY_KIND / ROOT_MARKERS_BY_KIND) and lsp/server.ts
+ * (CSharpServer / OmniSharpServer / FSharpServer root detectors) — following
+ * the KIND_EXTENSIONS pattern: never hand-copy these lists at a call site.
+ * tests/clients/dotnet-root-markers.test.ts asserts both subsystems recognize
+ * every marker here, so a call site drifting from this list fails CI.
+ */
+export const DOTNET_CSHARP_ROOT_MARKERS: readonly string[] = [
+	"*.csproj",
+	"*.sln",
+	"*.slnx",
+];
+export const DOTNET_FSHARP_ROOT_MARKERS: readonly string[] = [
+	"*.fsproj",
+	"*.sln",
+];
+
 // Reverse map: extension → file kind (for fast lookup)
 const EXT_TO_KIND = new Map<string, FileKind>();
 for (const [kind, exts] of Object.entries(KIND_EXTENSIONS)) {
@@ -304,48 +325,86 @@ export function getFileKindsForExtension(ext: string): FileKind[] {
 	return kind ? [kind] : [];
 }
 
+// --- Code vs non-code kind classification (#894 review) ---------------------
+//
+// Broadened enumeration made data/doc/markup kinds (json/yaml/markdown/…)
+// visible to every project-wide walk. Those kinds must not outrank real
+// program source wherever a capped budget or a "dominant language" ranking is
+// involved: a TS repo with more .json/.yml than .ts files must still warm
+// tsserver first (#203), and 2000 locale/fixture JSON files ahead of the code
+// dirs must not exhaust a walk's file budget before any source file is seen.
+// This partition is the single authority for that distinction — every FileKind
+// MUST appear in exactly one of the two sets
+// (tests/clients/scannable-extension-coverage.test.ts enforces it, so a newly
+// registered kind cannot be silently unclassified).
+
+/** Kinds that are hand-written program source — prioritized in capped walks
+ * and in the dominant-language LSP warm ranking. */
+export const CODE_KINDS: ReadonlySet<FileKind> = new Set<FileKind>([
+	"clojure",
+	"cmake",
+	"csharp",
+	"cxx",
+	"dart",
+	"docker",
+	"elixir",
+	"fish",
+	"fsharp",
+	"gleam",
+	"go",
+	"haskell",
+	"java",
+	"jsts",
+	"kotlin",
+	"lua",
+	"nix",
+	"ocaml",
+	"php",
+	"powershell",
+	"prisma",
+	"python",
+	"ruby",
+	"rust",
+	"shell",
+	"sql",
+	"swift",
+	"terraform",
+	"zig",
+]);
+
+/** Data/doc/markup/config kinds — still enumerated (that's #894's point), but
+ * deprioritized against {@link CODE_KINDS} in budgeted walks and rankings. */
+export const NON_CODE_KINDS: ReadonlySet<FileKind> = new Set<FileKind>([
+	"css",
+	"html",
+	"json",
+	"markdown",
+	"toml",
+	"yaml",
+]);
+
 /**
  * Check if a file kind represents a code file (not config/markdown).
  */
 export function isCodeKind(kind: FileKind): boolean {
-	return [
-		"jsts",
-		"python",
-		"go",
-		"rust",
-		"cxx",
-		"fish",
-		"shell",
-		"ruby",
-		"html",
-		"php",
-		"powershell",
-		"prisma",
-		"csharp",
-		"fsharp",
-		"java",
-		"kotlin",
-		"swift",
-		"dart",
-		"lua",
-		"zig",
-		"haskell",
-		"elixir",
-		"gleam",
-		"ocaml",
-		"clojure",
-		"terraform",
-		"nix",
-	].includes(kind);
+	return CODE_KINDS.has(kind);
 }
 
 /**
- * Check if a file kind represents a text/config file.
+ * Check if a file kind represents a text/config/doc/markup file.
  */
 export function isConfigKind(kind: FileKind): boolean {
-	return ["json", "yaml", "markdown", "css", "sql", "docker", "cmake", "toml"].includes(
-		kind,
-	);
+	return NON_CODE_KINDS.has(kind);
+}
+
+/**
+ * Check if a file path resolves to a {@link CODE_KINDS} kind. Undetectable
+ * files (unknown extension, e.g. `.coffee` from SOURCE_PRECEDENCE) are
+ * non-code.
+ */
+export function isCodeKindFile(filePath: string): boolean {
+	const kind = detectFileKind(filePath);
+	return kind !== undefined && CODE_KINDS.has(kind);
 }
 
 /**

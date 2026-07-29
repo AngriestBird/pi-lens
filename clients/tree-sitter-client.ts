@@ -1578,7 +1578,18 @@ export class TreeSitterClient {
 				if (!caseNode) return false;
 				const body = this.switchCaseBodyStatements(caseNode);
 				if (body.length === 0) return false;
-				const last = body[body.length - 1];
+				let last = body[body.length - 1];
+				while (last.type === "statement_block") {
+					// A block-scoped case body terminates when its trailing statement
+					// terminates. Keep an empty block as the last node so it still
+					// reports fall-through.
+					const inner = (last.children ?? []).filter(
+						(c) => c.isNamed && !c.type.includes("comment"),
+					);
+					const next = inner[inner.length - 1];
+					if (!next) break;
+					last = next;
+				}
 				const TERMINATORS = new Set([
 					"break_statement",
 					"return_statement",

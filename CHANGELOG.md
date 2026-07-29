@@ -44,6 +44,41 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- Resolve nested C# and F# project roots for dotnet builds (refs #895).
+
+- **A mid-scan tree-sitter WASM abort no longer replaces the authoritative
+	project-diagnostics snapshot with a silently truncated result** (refs #891).
+	The partial scan is returned with `scanTruncated`, logs its completed/total
+	file counts and abort point, and leaves the previous complete cache intact.
+
+- **Block-wrapped switch cases no longer report false fall-through errors**
+	(refs #910) — `switch-case-termination` now follows trailing statement
+	blocks to recognize a nested `break`, `return`, `throw`, or `continue`, while
+	still flagging empty and non-terminating blocks.
+
+- **Project-wide enumeration now covers every registered file kind** (refs
+	#894) — `ALL_SCANNABLE_EXTENSIONS`, `WARMUP_SOURCE_EXTS`, and
+	`SUPPORTED_FILE_KINDS` now derive from the single `KIND_EXTENSIONS`
+	authority instead of three drifting language lists. TODO scans, symbol
+	search indexing, dominant-language LSP warmup, and language-profile
+	detection can now see Java, Swift, C/C++, PHP, and every other supported
+	kind. Code kinds keep priority over data/doc kinds (json/yaml/markdown/…)
+	inside the existing caps: the dominant-language LSP warm ranks code kinds
+	first, and the capped warmup/word-index walks fill code files before
+	non-code files, so a locale/fixture pile can't starve real languages.
+	Package-manager lockfiles (package-lock.json, pnpm-lock.yaml, …) are
+	filtered as generated artifacts, and the TODO scanner caps per-file reads
+	at 512 KiB. A coverage guard makes a newly registered kind automatically
+	enumerable — and classified as code or non-code — on both project-wide
+	paths.
+
+- **CMake files now reach a real LSP server** (refs #892) — the CMake policy's
+	previous `lsp` fallback had no registered server and silently produced no
+	diagnostics. `cmake-language-server` now covers both `.cmake` files and the
+	canonical `CMakeLists.txt` basename, with managed pip installation.
+- **Fish LSP policy is no longer dead wiring** (refs #893) — `fish-lsp` is now
+	registered for `.fish` files and auto-installed through npm; `fish_indent`
+	continues to run alongside it.
 - **Editing an inherited tree-sitter rule now invalidates the inheriting language's RuleCache** (refs #878) — the cache key fingerprinted only the language's OWN rules directory, but `tsx` also runs the `typescript` rule set (`queriesForLanguage`), so a typescript-rule edit left the tsx entry's hash unchanged and stale compiled rules kept being served from the on-disk cache until a tsx rule happened to change. The fingerprint now covers the full effective rule set via `ruleFilesForLanguage`, a new loader-owned seam that derives from the same rule-source composition as rule selection, so the cache key can't drift from what the runner actually runs. `CACHE_VERSION` bumped to `v6`.
 - **Small edits no longer pay the entity-extraction cost** (refs #885) — the
 	<5-line skip threshold only guarded the zero-diagnostics early return; a
