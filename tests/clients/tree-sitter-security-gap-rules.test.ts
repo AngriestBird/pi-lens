@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { TreeSitterClient } from "../../clients/tree-sitter-client.js";
+import { getSharedTreeSitterClient } from "../../clients/tree-sitter-shared.js";
 import { TreeSitterQueryLoader } from "../../clients/tree-sitter-query-loader.js";
 import { removeTempDirSync } from "./test-utils.js";
 
@@ -34,7 +34,7 @@ afterAll(() => {
 
 describe("tree-sitter security gap rules", () => {
 	it("matches python ssrf sink", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("python-ssrf");
 		const filePath = writeTempFile(
 			"py",
@@ -45,7 +45,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("does not match safe python literal URL request", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("python-ssrf");
 		const filePath = writeTempFile(
 			"py",
@@ -56,7 +56,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("matches python path traversal sink", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("python-path-traversal");
 		const filePath = writeTempFile("py", `open(base + user_path)\n`);
 		const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -64,7 +64,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("does not match static python file path", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("python-path-traversal");
 		const filePath = writeTempFile("py", `open("/tmp/safe.txt")\n`);
 		const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -72,7 +72,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("matches python sql injection sink", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("python-sql-injection");
 		const filePath = writeTempFile(
 			"py",
@@ -83,7 +83,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("does not match parameterized python sql", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("python-sql-injection");
 		const filePath = writeTempFile(
 			"py",
@@ -94,7 +94,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("does not match SQLAlchemy session.execute(stmt)", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("python-sql-injection");
 		const filePath = writeTempFile(
 			"py",
@@ -105,7 +105,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("does not match SQLAlchemy expression-builder execute calls", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("python-sql-injection");
 		const filePath = writeTempFile(
 			"py",
@@ -116,7 +116,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("matches raw cursor.execute(sql_identifier)", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("python-sql-injection");
 		const filePath = writeTempFile("py", `cursor.execute(sql)\n`);
 		const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -124,7 +124,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("matches python insecure deserialization sink", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("python-insecure-deserialization");
 		const filePath = writeTempFile(
 			"py",
@@ -135,7 +135,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("does not match safe python json deserialization", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("python-insecure-deserialization");
 		const filePath = writeTempFile("py", `import json\njson.loads(payload)\n`);
 		const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -143,7 +143,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("matches python weak hash usage and exposes metadata", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("python-weak-hash");
 		expect(query.cwe).toContain("CWE-327");
 		expect(query.owasp).toContain("A02");
@@ -155,7 +155,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("matches go sql injection sink", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("go-sql-injection");
 		const filePath = writeTempFile(
 			"go",
@@ -166,7 +166,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("does not match parameterized go sql", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("go-sql-injection");
 		const filePath = writeTempFile(
 			"go",
@@ -177,7 +177,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("matches typescript ssrf sink", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("ts-ssrf");
 		const filePath = writeTempFile("ts", `await fetch(userUrl);\n`);
 		const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -185,7 +185,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("matches go path traversal sink", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("go-path-traversal");
 		const filePath = writeTempFile(
 			"go",
@@ -196,7 +196,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("matches go insecure random usage", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("go-insecure-random");
 		const filePath = writeTempFile(
 			"go",
@@ -207,7 +207,7 @@ describe("tree-sitter security gap rules", () => {
 	});
 
 	it("matches typescript weak hash usage", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("ts-weak-hash");
 		const filePath = writeTempFile(
 			"ts",
