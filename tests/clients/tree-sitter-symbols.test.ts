@@ -31,6 +31,14 @@ const CASES: Record<string, SymbolCase> = {
 		src: "export function foo(){}\nclass C{}\n",
 		expect: ["foo", "C"],
 	},
+	// #887: the javascript grammar lacks the TS type-level node types, so it has
+	// its own SYMBOL_QUERIES entry (typescript's fails to compile against it).
+	// A class name is a plain (identifier) here, not a (type_identifier).
+	javascript: {
+		file: "a.js",
+		src: "export function foo(){}\nconst bar = () => 1;\nclass C{}\n",
+		expect: ["foo", "bar", "C"],
+	},
 	python: { file: "a.py", src: "def go():\n    pass\n", expect: ["go"] },
 	rust: { file: "a.rs", src: "fn foo() {}\n", expect: ["foo"] },
 	go: { file: "a.go", src: "package m\nfunc foo() {}\n", expect: ["foo"] },

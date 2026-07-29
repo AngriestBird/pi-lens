@@ -41,7 +41,10 @@ import { resolveImportToFiles } from "./review-graph/import-resolvers.js";
 import { buildSymbolId } from "./review-graph/symbol-id.js";
 import type { ReviewGraph, ReviewGraphEdgeKind } from "./review-graph/types.js";
 import type { Symbol as ExtractedSymbol } from "./symbol-types.js";
-import { getSharedTreeSitterClient } from "./tree-sitter-shared.js";
+import {
+	getSharedTreeSitterClient,
+	resolveTreeSitterLanguage,
+} from "./tree-sitter-shared.js";
 import {
 	type ImportRef,
 	TreeSitterSymbolExtractor,
@@ -337,10 +340,11 @@ export interface ReadEnclosingOptions {
 
 // kind -> tree-sitter languageId. The languageId keys BOTH the grammar map
 // (tree-sitter-client) and SYMBOL_QUERIES (tree-sitter-symbol-extractor), so it
-// must match a key present in both. jsts/cxx are resolved by extension below so
-// the JSX-aware tsx grammar and the c-vs-cpp split are honoured. Using these
-// gives the primary languages the same rich outline (classes/interfaces/types/
-// signatures) as every other language, not the functions-only FunctionSummary.
+// must match a key present in both. jsts/cxx are extension-split kinds resolved
+// through the SHARED ext→grammar resolver below (never a local extension map —
+// #887). Using these gives the primary languages the same rich outline
+// (classes/interfaces/types/signatures) as every other language, not the
+// functions-only FunctionSummary.
 const KIND_TO_TS_LANG: Record<string, string> = {
 	python: "python",
 	go: "go",
@@ -360,18 +364,26 @@ const KIND_TO_TS_LANG: Record<string, string> = {
 	// cxx resolved by extension below (c vs cpp)
 };
 
-function tsLangForFile(
+export function tsLangForFile(
 	filePath: string,
 	kind: string | undefined,
 ): string | undefined {
-	const ext = path.extname(filePath).toLowerCase();
-	if (kind === "cxx") {
-		return ext === ".c" || ext === ".h" ? "c" : "cpp";
-	}
+	// jsts/cxx are extension-split kinds: resolve them through the shared
+	// ext→grammar authority (tree-sitter-shared.ts EXT_TO_LANG) — the SAME
+	// resolver the dispatch tree-sitter runner, fact providers, project scanner
+	// and read expansion use — so a file is parsed and TreeCache-keyed
+	// (`languageId:path`) under exactly one grammar process-wide. #887: this
+	// used to hand-roll a local map that sent .js/.mjs/.cjs to the typescript
+	// grammar and .jsx to tsx, so every plain-JS file was parsed and cached
+	// twice under two grammars and ran TS-grammar symbol queries on JS trees.
+	// Extensions the shared map does not cover (.svelte/.vue for jsts; the
+	// module-interface/Objective-C/CUDA tail for cxx) keep the historical
+	// kind default.
 	if (kind === "jsts") {
-		// Route JSX-bearing files to the tsx grammar (downloaded), plain TS/JS to
-		// the typescript grammar; both share the same SYMBOL_QUERIES.
-		return ext === ".tsx" || ext === ".jsx" ? "tsx" : "typescript";
+		return resolveTreeSitterLanguage(filePath) ?? "typescript";
+	}
+	if (kind === "cxx") {
+		return resolveTreeSitterLanguage(filePath) ?? "cpp";
 	}
 	return kind ? KIND_TO_TS_LANG[kind] : undefined;
 }

@@ -461,6 +461,57 @@ const SYMBOL_QUERIES: Record<string, { defs: string; refs: string }> = {
 // symbol-extraction coverage to the grammar set we actually ship.
 SYMBOL_QUERIES.tsx = SYMBOL_QUERIES.typescript;
 
+// The javascript grammar shares TypeScript's EXECUTABLE node types
+// (function_declaration, arrow_function, variable_declarator, class_declaration,
+// method_definition, call_expression, member_expression, new_expression) but
+// NOT its type-level ones: interface_declaration, type_alias_declaration and
+// type_identifier do not exist in it, and a class name is a plain (identifier),
+// not a (type_identifier). A query naming a missing node type fails to COMPILE
+// outright (probed: "Bad node name 'type_identifier'"), so — unlike tsx — the
+// TypeScript defs/refs cannot be aliased; javascript gets the same queries minus
+// the type-only patterns. module-report resolves .js/.mjs/.cjs/.jsx to this
+// grammar via the shared EXT_TO_LANG (#887); interface/type symbols are a
+// TypeScript-language feature, so nothing is lost on real JS.
+SYMBOL_QUERIES.javascript = {
+	defs: `
+      ;; Function declarations: function foo(params) { }
+      (function_declaration
+        name: (identifier) @funcName
+        parameters: (formal_parameters) @funcParams
+        body: (statement_block) @funcBody) @funcDef
+
+      ;; Arrow functions: const foo = (params) => { }
+      (variable_declarator
+        name: (identifier) @arrowName
+        value: (arrow_function
+          parameters: (formal_parameters) @arrowParams
+          body: (_) @arrowBody)) @arrowDef
+
+      ;; Class declarations: class Foo { } — (identifier) name on this grammar.
+      (class_declaration
+        name: (identifier) @className) @classDef
+
+      ;; Method definitions: class Foo { bar() { } }
+      (method_definition
+        name: (property_identifier) @methodName
+        parameters: (formal_parameters) @methodParams) @methodDef
+    `,
+	refs: `
+      ;; Function/method calls: foo() or obj.bar()
+      (call_expression
+        function: (identifier) @callIdent) @callRef
+
+      (call_expression
+        function: (member_expression
+          object: (_)
+          property: (property_identifier) @callMethod)) @callMethodRef
+
+      ;; New expressions: new Foo()
+      (new_expression
+        constructor: (identifier) @newIdent) @newRef
+    `,
+};
+
 // Per-language import-source extraction (#249). Optional and independent of
 // SYMBOL_QUERIES: a language without an entry simply yields no imports (its
 // symbols still extract). Each query captures the import source text as
@@ -553,6 +604,11 @@ const IMPORT_QUERIES: Record<string, string> = {
         (#match? @_m "^(source|\\.)$"))
     `,
 };
+
+// import/export ... from "..." have the same (import_statement source: (string))
+// / (export_statement source: (string)) shape on the javascript grammar
+// (validated — compiles + captures), so the typescript query applies unchanged.
+IMPORT_QUERIES.javascript = IMPORT_QUERIES.typescript;
 
 export interface ImportRef {
 	/** Raw import source (quotes/whitespace stripped), e.g. "os.path", "fmt". */
