@@ -8,6 +8,7 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
 - Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
 
 - **A project scan runs its rule set in one tree walk, not one walk per rule**
