@@ -1,9 +1,19 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { scanProjectDiagnostics } from "../../../clients/project-diagnostics/scanner.js";
+import { LANGUAGE_TO_GRAMMAR } from "../../../clients/grammar-source.js";
 import { loadProjectDiagnosticsSnapshot } from "../../../clients/project-diagnostics/cache.js";
+import {
+	scanProjectDiagnostics,
+	TREE_SITTER_EXT_TO_LANG,
+} from "../../../clients/project-diagnostics/scanner.js";
+import {
+	getQueryLanguageKey,
+	isDisabledQueryDirectoryName,
+} from "../../../clients/tree-sitter-query-loader.js";
+import { EXT_TO_LANG } from "../../../clients/tree-sitter-shared.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 let tmp: string;
@@ -14,6 +24,60 @@ beforeEach(() => {
 
 afterEach(() => {
 	removeTempDirSync(tmp);
+});
+
+describe("TREE_SITTER_EXT_TO_LANG scan coverage (#882)", () => {
+	const REPO_ROOT = path.resolve(
+		path.dirname(fileURLToPath(import.meta.url)),
+		"../../..",
+	);
+	const QUERIES_DIR = path.join(REPO_ROOT, "rules", "tree-sitter-queries");
+
+	// Every non-disabled rules/tree-sitter-queries/<lang>/ dir whose <lang> is a
+	// loadable grammar. These are the languages a project scan CAN and SHOULD run
+	// tree-sitter rules for.
+	const ruleLanguagesWithGrammar = fs
+		.readdirSync(QUERIES_DIR, { withFileTypes: true })
+		.filter((d) => d.isDirectory() && !isDisabledQueryDirectoryName(d.name))
+		.filter((d) =>
+			fs
+				.readdirSync(path.join(QUERIES_DIR, d.name))
+				.some((f) => f.endsWith(".yml")),
+		)
+		.map((d) => getQueryLanguageKey(d.name))
+		.filter((lang) => lang in LANGUAGE_TO_GRAMMAR);
+
+	const coveredLangs = new Set(Object.values(TREE_SITTER_EXT_TO_LANG));
+
+	// The regression guard for #882: a language that has rules + a grammar but no
+	// extension in the scanner map is silently skipped by every project scan. If a
+	// future rule dir is added, this fails until its extension is registered.
+	it.each([...new Set(ruleLanguagesWithGrammar)].sort())(
+		"scans every rule language with a loadable grammar: %s",
+		(lang) => {
+			expect(coveredLangs.has(lang)).toBe(true);
+		},
+	);
+
+	it("covers the languages #882 called out (java, kotlin, csharp, cpp, css, php, c)", () => {
+		for (const lang of ["java", "kotlin", "csharp", "cpp", "css", "php", "c"]) {
+			expect(coveredLangs.has(lang)).toBe(true);
+		}
+	});
+
+	it("stays a superset of the shared per-edit resolver so the two can't drift", () => {
+		// The scanner map derives EXT_TO_LANG, then layers java/kotlin on top — so
+		// every per-edit-resolvable extension must resolve identically in a scan.
+		for (const [ext, lang] of Object.entries(EXT_TO_LANG)) {
+			expect(TREE_SITTER_EXT_TO_LANG[ext]).toBe(lang);
+		}
+	});
+
+	it("only maps extensions to loadable grammars", () => {
+		for (const lang of coveredLangs) {
+			expect(lang in LANGUAGE_TO_GRAMMAR).toBe(true);
+		}
+	});
 });
 
 describe("scanProjectDiagnostics home ceiling (#747/#250)", () => {

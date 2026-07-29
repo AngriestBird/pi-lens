@@ -19,7 +19,7 @@ describe("resolveTreeSitterLanguage", () => {
 		[".ts", "typescript"],
 		[".mts", "typescript"],
 		[".cts", "typescript"],
-		[".tsx", "tsx"], // JSX-capable grammar (differs from the scanner's query-keyed map)
+		[".tsx", "tsx"], // JSX-capable grammar; the scanner derives this same mapping
 		[".js", "javascript"],
 		[".mjs", "javascript"],
 		[".cjs", "javascript"],
