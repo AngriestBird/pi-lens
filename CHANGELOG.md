@@ -9,7 +9,8 @@ All notable changes to pi-lens will be documented in this file.
 - **`/lens-perf` surfaces slow phases in-session** (closes #767) — the command
 	shows independent top-five p50 and p99 rankings with sample counts for both
 	the current process session and the machine-wide active `latency.log` window.
-	It flushes pending writes, streams a bounded 10MB tail, caps retained samples,
+	It flushes pending writes, streams a tail bounded by the log rotation
+	threshold (`PI_LENS_MAX_LOG_SIZE_MB`, 10MB by default), caps retained samples,
 	and reports malformed/truncated input instead of silently reading it as clean.
 	Session startup total and scan-context computation are now logged as phases so
 	the startup regressions that motivated the command are visible there too.

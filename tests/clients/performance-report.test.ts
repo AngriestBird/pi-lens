@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { LatencyEntry } from "../../clients/latency-logger.js";
 import {
 	collectLatencyPerformance,
-	MAX_PERF_LOG_BYTES,
 	renderLatencyPerformanceReport,
+	resolveLogByteBudget,
 	summarizePhaseLatency,
 } from "../../clients/performance-report.js";
 import { removeTempDirSync } from "./test-utils.js";
@@ -315,7 +315,7 @@ describe("performance-report", () => {
 		const output = renderLatencyPerformanceReport({
 			logPath: "/tmp/latency.log",
 			topN: 3,
-			windowBytes: MAX_PERF_LOG_BYTES,
+			windowBytes: resolveLogByteBudget(),
 			windowTruncated: true,
 			logSamplesTruncated: true,
 			sessionSamplesTruncated: true,

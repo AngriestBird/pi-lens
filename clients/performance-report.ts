@@ -9,12 +9,13 @@ import { getMaxLogSizeMB } from "./log-cleanup.js";
 
 export const DEFAULT_PERF_TOP_N = 5;
 export const MAX_PERF_TOP_N = 50;
-export const MAX_PERF_LOG_BYTES = 10 * 1024 * 1024;
 export const MAX_PERF_PHASE_SAMPLES = 20_000;
 const PARSE_YIELD_EVERY = 500;
 
 // The window follows the same threshold that rotates the log out from under it.
-function resolveLogByteBudget(): number {
+// Exported so a test can size a fixture to the window it means to saturate
+// rather than to a second copy of the default that can drift out of agreement.
+export function resolveLogByteBudget(): number {
 	return getMaxLogSizeMB() * 1024 * 1024;
 }
 

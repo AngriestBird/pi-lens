@@ -1300,14 +1300,18 @@ export class TreeSitterClient {
 
 	private reportedCompileFailures = new Set<string>();
 
-	/** Warn once per rule whose query fails to compile against a grammar — a silently-dead rule needs a trail. */
+	/** Warn once per rule+grammar pair whose query fails to compile — a silently-dead rule needs a trail. */
 	private reportQueryCompileFailure(
 		ruleId: string,
 		languageId: string,
 		err: unknown,
 	): void {
-		if (this.reportedCompileFailures.has(ruleId)) return;
-		this.reportedCompileFailures.add(ruleId);
+		// Keyed by rule AND language: a rule can be dispatched against more than one
+		// grammar (`queriesForLanguage` hands the typescript set to tsx too), and
+		// failing on one must not mute the report for the others.
+		const key = `${ruleId}:${languageId}`;
+		if (this.reportedCompileFailures.has(key)) return;
+		this.reportedCompileFailures.add(key);
 		console.error(
 			`[pi-lens] tree-sitter rule '${ruleId}' failed to compile against '${languageId}' — ` +
 				`matches for this rule are silently dropped rather than reported. ` +
@@ -1366,6 +1370,24 @@ export class TreeSitterClient {
 	}
 
 	/**
+	 * Whether a `switch_case`'s next sibling is another label — `case "a": case
+	 * "b": handle()` groups two labels onto one body, which is idiomatic, not a
+	 * dead case.
+	 */
+	private nextSiblingIsSwitchLabel(caseNode: TreeSitterNode): boolean {
+		const siblings = (caseNode.parent?.children ?? []).filter(
+			(c) => c.isNamed && !c.type.includes("comment"),
+		);
+		// Match by source offset: web-tree-sitter hands out fresh node wrappers per
+		// access, so identity comparison against `caseNode` is not reliable.
+		const index = siblings.findIndex(
+			(c) => c.startIndex === caseNode.startIndex,
+		);
+		const next = index >= 0 ? siblings[index + 1] : undefined;
+		return next?.type === "switch_case" || next?.type === "switch_default";
+	}
+
+	/**
 	 * Whether a loop body contains a statement that can terminate the loop:
 	 * `return`/`throw` anywhere (they unwind past the loop), or a `break` that is
 	 * not swallowed by a nested loop/switch. Does not descend into nested
@@ -1395,7 +1417,14 @@ export class TreeSitterClient {
 			const t = child.type;
 			if (NESTED_FN.has(t)) continue;
 			if (t === "return_statement" || t === "throw_statement") return true;
-			if (t === "break_statement" && !insideNestedLoop) return true;
+			// A labeled `break outer;` is not swallowed by the nested loop it sits
+			// in. Which label it targets isn't resolved here — counting any labeled
+			// break as an exit errs toward not flagging, the safe direction for a
+			// blocking rule.
+			if (t === "break_statement") {
+				const labeled = (child.children ?? []).some((c) => c.isNamed);
+				if (!insideNestedLoop || labeled) return true;
+			}
 			if (this.bodyHasLoopExit(child, insideNestedLoop || NESTS_BREAK.has(t))) {
 				return true;
 			}
@@ -1558,9 +1587,12 @@ export class TreeSitterClient {
 				// A switch_case's named children are `[value, ...body statements]`
 				// (the case's statements are direct children, not a statement_block),
 				// so an empty case is one whose only named child is its `case <value>`.
+				// An empty case followed by another label is a fall-through group, not
+				// a dead case — only the last label of a group carries the body.
 				const caseNode = captures.CASE;
 				if (!caseNode) return false;
-				return this.switchCaseBodyStatements(caseNode).length === 0;
+				if (this.switchCaseBodyStatements(caseNode).length > 0) return false;
+				return !this.nextSiblingIsSwitchLabel(caseNode);
 			}
 			case "no_break_or_return_in_body": {
 				// infinite-loop: keep a `while(true)`/`for(;;)` whose body contains no
@@ -1820,7 +1852,7 @@ export class TreeSitterClient {
 				// The %(name)s style: counts as 1 with name
 				// The %% escape: doesn't count
 				let placeholderCount = 0;
-				let namedKeys: string[] = [];
+				const namedKeys: string[] = [];
 				// biome-ignore lint/suspicious/noExplicitAny: regex match
 				const positionalRegex = /%(?:\([^)]+\))?[#0\- +]*\d*(?:\.\d+)?[hlL]?[diouxXeEfFgGcrs%]/g;
 				// biome-ignore lint/suspicious/noExplicitAny: regex match
@@ -2081,10 +2113,20 @@ export class TreeSitterClient {
 				const params = captures.PARAMS;
 				if (!params) return true;
 				// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node
-				const count = (params.children ?? []).filter(
-					(c: any) => c.isNamed,
-				).length;
-				return count < 4;
+				const named = (params.children ?? []).filter((c: any) => c.isNamed);
+				// `def __exit__(self, *args)` / `(self, *exc_info)` are valid: the splat
+				// absorbs the whole exception triple, so it satisfies every remaining
+				// slot no matter how few named children the node has.
+				if (
+					named.some(
+						(c) =>
+							c.type === "list_splat_pattern" ||
+							c.type === "dictionary_splat_pattern",
+					)
+				) {
+					return false;
+				}
+				return named.length < 4;
 			}
 			case "ruby_empty_rescue": {
 				const bodyNode = captures.BODY;

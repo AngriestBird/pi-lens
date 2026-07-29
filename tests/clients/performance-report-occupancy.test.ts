@@ -4,13 +4,17 @@ import * as path from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import {
 	collectLatencyPerformance,
-	MAX_PERF_LOG_BYTES,
 	MAX_PERF_PHASE_SAMPLES,
+	resolveLogByteBudget,
 } from "../../clients/performance-report.js";
 import { measureMaxSyncBlockMs } from "../support/perf-harness.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 const MAX_SYNC_BLOCK_MS = 75;
+
+// Size the fixture to the window production actually reads, so the parse this
+// measures can't silently shrink if the rotation threshold or its default moves.
+const WINDOW_BYTES = resolveLogByteBudget();
 
 let tempDir: string;
 let logPath: string;
@@ -32,7 +36,7 @@ beforeAll(() => {
 	).join("");
 	fs.writeFileSync(
 		logPath,
-		chunk.repeat(Math.ceil(MAX_PERF_LOG_BYTES / Buffer.byteLength(chunk))),
+		chunk.repeat(Math.ceil(WINDOW_BYTES / Buffer.byteLength(chunk))),
 	);
 }, 30_000);
 
@@ -52,6 +56,10 @@ it("keeps /lens-perf log parsing below the event-loop occupancy budget", {
 			sessionStartedAt: 0,
 		});
 		retainedSamples = report.logWindow.sampleCount;
+		// Fail loudly if the fixture no longer fills the window — otherwise this
+		// keeps passing while measuring a parse it was never meant to.
+		expect(report.windowBytes).toBe(WINDOW_BYTES);
+		expect(report.windowTruncated).toBe(true);
 	});
 
 	expect(retainedSamples).toBe(MAX_PERF_PHASE_SAMPLES);
