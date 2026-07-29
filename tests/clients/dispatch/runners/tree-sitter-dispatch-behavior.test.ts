@@ -6,6 +6,10 @@
  * inline_tier blocking) and variable-shadowing (inline_tier review).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+	RunnerRegistry,
+	dispatchForFile,
+} from "../../../../clients/dispatch/dispatcher.js";
 import treeSitterRunner from "../../../../clients/dispatch/runners/tree-sitter.js";
 
 // Keep unrelated fire-and-forget review-graph enrichment out of real-runner tests.
@@ -74,5 +78,35 @@ describe("tree-sitter runner — dispatch filtering (#448)", () => {
 			.map((d) => d.line);
 		expect(fired).not.toContain("variable-shadowing");
 		expect(debuggerLines).toEqual([3]);
+	}, 30_000);
+
+	it("applies inline suppression to a diagnostic produced by the real rule", async () => {
+		const content = [
+			"function suppressed() {",
+			"\t// pi-lens-ignore: debugger-statement",
+			"\tdebugger;",
+			"}",
+			"function visible() {",
+			"\tdebugger;",
+			"}",
+			"",
+		].join("\n");
+		const { ctx, filePath } = env.addFile("suppression.ts", content, {
+			deltaMode: false,
+		});
+		ctx.facts.setFileFact(filePath, "file.content", content);
+		const registry = new RunnerRegistry();
+		registry.register(treeSitterRunner);
+
+		const result = await dispatchForFile(
+			ctx,
+			[{ mode: "all", runnerIds: [treeSitterRunner.id] }],
+			registry,
+		);
+		const debuggerLines = result.diagnostics
+			.filter((diagnostic) => diagnostic.rule === "debugger-statement")
+			.map((diagnostic) => diagnostic.line);
+
+		expect(debuggerLines).toEqual([6]);
 	}, 30_000);
 });
