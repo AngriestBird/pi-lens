@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import astGrepNapiRunner from "../../../../clients/dispatch/runners/ast-grep-napi.js";
 import type { Diagnostic } from "../../../../clients/dispatch/types.js";
 import {
+	linesFor,
 	makeRealRunnerEnv,
 	napiFallbackHasTool,
 	type RealRunnerEnv,
@@ -31,16 +32,6 @@ async function diagnosticsOn(
 ): Promise<Diagnostic[]> {
 	const { ctx } = env.addFile(sampleFile, code, { log });
 	return (await astGrepNapiRunner.run(ctx)).diagnostics;
-}
-
-function linesFor(diagnostics: Diagnostic[], rule: string): number[] {
-	return [
-		...new Set(
-			diagnostics
-				.filter((diagnostic) => diagnostic.rule === rule)
-				.map((diagnostic) => diagnostic.line ?? 0),
-		),
-	].sort((a, b) => a - b);
 }
 
 describe("ast-grep NAPI utils: block passthrough (#663)", () => {

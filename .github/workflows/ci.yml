@@ -70,6 +70,14 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
+      # The #448 CI-loud ast-grep-CLI guard (ast-grep-rule-tests.test.ts's
+      # "ast-grep CLI is installed in CI") depends on `ast-grep` resolving off
+      # PATH, which it does only implicitly today via `npm test`. Make that
+      # dependency explicit so a PATH regression fails here with a legible
+      # error instead of surfacing as an oblique test failure downstream.
+      - name: Verify ast-grep CLI is on PATH
+        run: npx ast-grep --version
+
       - name: Build
         run: npm run build
 

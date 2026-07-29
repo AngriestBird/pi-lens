@@ -30,10 +30,14 @@ import {
 } from "../../../support/real-runner-ctx.js";
 
 let env: RealRunnerEnv;
-afterAll(() => env.cleanup());
+afterAll(() => env?.cleanup());
 
 const ASSERT_SRC = "def f(x):\n    assert x > 0, 'x required'\n    return x\n";
 
+// [false, true] holds because each `it` below is single-language (python-only,
+// then typescript-only) — RuleCache is per-language, and its on-disk cache
+// under PI_LENS_HOME/projects/<slug> survives `env.cleanup()` (which only
+// removes the fixture cwd, not PI_LENS_HOME).
 function observedCacheHits(): Array<boolean | undefined> {
 	return logTreeSitter.mock.calls
 		.map(([entry]) => entry as { phase?: string; cacheHit?: boolean })

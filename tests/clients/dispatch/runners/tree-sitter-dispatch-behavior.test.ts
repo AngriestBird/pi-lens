@@ -25,7 +25,7 @@ import {
 	type RealRunnerEnv,
 } from "../../../support/real-runner-ctx.js";
 let env: RealRunnerEnv;
-afterAll(() => env.cleanup());
+afterAll(() => env?.cleanup());
 
 // Matches variable-shadowing and puts debugger statements on lines 3 and 8.
 const MIXED_SRC = [

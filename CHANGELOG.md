@@ -10,6 +10,12 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **tree-sitter runner no longer double-increments already 1-indexed
+	line/column** (refs #448) — dispositions recorded against the old off-by-one
+	are anchored (`clients/diagnostic-dispositions.ts`) to the wrong physical
+	line's content and will resurface once after upgrading; this is expected and
+	one-time, not a regression.
+
 ## [3.8.73] - 2026-07-28
 
 ### Added

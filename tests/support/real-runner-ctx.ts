@@ -16,11 +16,11 @@
  */
 
 import type {
+	Diagnostic,
 	DispatchContext,
 	RunnerResult,
 } from "../../clients/dispatch/types.js";
 import { detectFileKind } from "../../clients/file-kinds.js";
-import { flushReviewGraphPersistsForTests } from "../../clients/review-graph/builder.js";
 import { getSharedTreeSitterClient } from "../../clients/tree-sitter-shared.js";
 import { createTempFile, setupTestEnvironment } from "../clients/test-utils.js";
 import { makeRunnerCtx, type RunnerCtxOverrides } from "./runner-ctx.js";
@@ -44,6 +44,16 @@ export interface RealRunnerEnv {
  *
  * `defaults` apply to every ctx; `kind` uses production detection and fails
  * loudly for unknown fixture types unless the caller supplies an override.
+ *
+ * Tree-sitter suites built on this helper MUST `vi.mock`
+ * `clients/review-graph/service.js` so `recordEntitySnapshotDiff` returns an
+ * empty diff. A non-empty diff triggers the tree-sitter runner's
+ * fire-and-forget `runBlastRadiusInBackground`, gated by a module-global 5s
+ * `blastCooldownByFile` (`clients/dispatch/runners/tree-sitter.ts:40-41`) —
+ * left unmocked, that background work makes the suite order- and
+ * wall-clock-dependent and can race this helper's `cleanup()`. This helper
+ * can't register the mock itself: `vi.mock` is file-hoisted, so it must live
+ * in each suite file.
  */
 export function makeRealRunnerEnv(
 	defaults: RunnerCtxOverrides = {},
@@ -69,8 +79,6 @@ export function makeRealRunnerEnv(
 			};
 		},
 		cleanup() {
-			// Drain debounced review-graph persists before removing the fixture root.
-			flushReviewGraphPersistsForTests();
 			env.cleanup();
 		},
 	};
@@ -130,3 +138,14 @@ export function firedRuleIds(result: RunnerResult): Set<string> {
 /** LSP supersedes the napi matcher when the ast-grep binary is present; simulate it absent so the napi path actually executes. */
 export const napiFallbackHasTool = async (cmd: string): Promise<boolean> =>
 	cmd !== "ast-grep";
+
+/** Sorted, deduped line numbers where `rule` fired — shared across the ast-grep real-runner suites. */
+export function linesFor(diagnostics: Diagnostic[], rule: string): number[] {
+	return [
+		...new Set(
+			diagnostics
+				.filter((diagnostic) => diagnostic.rule === rule)
+				.map((diagnostic) => diagnostic.line ?? 0),
+		),
+	].sort((a, b) => a - b);
+}

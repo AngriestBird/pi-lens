@@ -27,7 +27,7 @@ import {
 } from "../../../support/real-runner-ctx.js";
 
 let env: RealRunnerEnv;
-afterAll(() => env.cleanup());
+afterAll(() => env?.cleanup());
 
 async function rulesFor(
 	relPath: string,
