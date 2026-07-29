@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { TreeSitterClient } from "../../clients/tree-sitter-client.js";
+import { getSharedTreeSitterClient } from "../../clients/tree-sitter-shared.js";
 import { TreeSitterQueryLoader } from "../../clients/tree-sitter-query-loader.js";
 import { removeTempDirSync } from "./test-utils.js";
 
@@ -33,7 +33,7 @@ afterAll(() => {
 
 describe("tree-sitter go rules", () => {
 	it("matches go-bare-error only when function returns error", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getGoQuery("go-bare-error");
 
 		const positivePath = writeTempGoFile(`package main
@@ -56,7 +56,7 @@ func run() int {
 	});
 
 	it("matches go-empty-if-err on empty err handler", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getGoQuery("go-empty-if-err");
 		const filePath = writeTempGoFile(`package main
 
@@ -73,7 +73,7 @@ func run() error {
 	});
 
 	it("matches go-ignored-call-result on discarded result", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getGoQuery("go-ignored-call-result");
 		const filePath = writeTempGoFile(`package main
 
@@ -87,7 +87,7 @@ func run() {
 	});
 
 	it("matches go-direct-panic on panic call", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getGoQuery("go-direct-panic");
 		const filePath = writeTempGoFile(`package main
 
@@ -103,7 +103,7 @@ func run(err error) {
 	});
 
 	it("matches go-log-fatal on terminating log call", async () => {
-		const client = new TreeSitterClient();
+		const client = getSharedTreeSitterClient()!;
 		const query = await getGoQuery("go-log-fatal");
 		const filePath = writeTempGoFile(`package main
 

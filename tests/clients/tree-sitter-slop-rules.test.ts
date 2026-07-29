@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { TreeSitterClient } from "../../clients/tree-sitter-client.js";
+import { getSharedTreeSitterClient } from "../../clients/tree-sitter-shared.js";
 import { TreeSitterQueryLoader } from "../../clients/tree-sitter-query-loader.js";
 import { removeTempDirSync } from "./test-utils.js";
 
@@ -35,7 +35,7 @@ afterAll(() => {
 describe("slop detection rules", () => {
 	describe("python-hallucinated-import", () => {
 		it("flags JSONResponse imported from requests", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("python-hallucinated-import");
 			const filePath = writeTempFile("py", `from requests import JSONResponse\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -43,7 +43,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags Depends imported from flask", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("python-hallucinated-import");
 			const filePath = writeTempFile("py", `from flask import Depends\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -51,7 +51,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags json.parse (JavaScript idiom)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("python-hallucinated-import");
 			const filePath = writeTempFile("py", `from json import parse\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -59,7 +59,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags dataclass imported from typing", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("python-hallucinated-import");
 			const filePath = writeTempFile("py", `from typing import dataclass\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -67,7 +67,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag correct dataclass import", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("python-hallucinated-import");
 			const filePath = writeTempFile("py", `from dataclasses import dataclass\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -75,7 +75,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag correct fastapi import", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("python-hallucinated-import");
 			const filePath = writeTempFile("py", `from fastapi import Depends\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -85,7 +85,7 @@ describe("slop detection rules", () => {
 
 	describe("python-cross-language-method", () => {
 		it("flags .push() on a list", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("python-cross-language-method");
 			const filePath = writeTempFile("py", `items.push(x)\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -93,7 +93,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags .equals() (Java idiom)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("python-cross-language-method");
 			const filePath = writeTempFile("py", `name.equals("foo")\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -101,7 +101,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags .forEach() (JavaScript idiom)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("python-cross-language-method");
 			const filePath = writeTempFile("py", `items.forEach(lambda x: print(x))\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -109,7 +109,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags .isEmpty() (Java idiom)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("python-cross-language-method");
 			const filePath = writeTempFile("py", `if s.isEmpty(): pass\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -117,7 +117,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag .append() (correct Python)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("python-cross-language-method");
 			const filePath = writeTempFile("py", `items.append(x)\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "python");
@@ -127,7 +127,7 @@ describe("slop detection rules", () => {
 
 	describe("ts-hallucinated-react-import", () => {
 		it("flags useRouter imported from react", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-hallucinated-react-import");
 			const filePath = writeTempFile("ts", `import { useRouter } from 'react';\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -135,7 +135,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags Link imported from react", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-hallucinated-react-import");
 			const filePath = writeTempFile("ts", `import { Link, Image } from 'react';\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -143,7 +143,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags getServerSideProps imported from react", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-hallucinated-react-import");
 			const filePath = writeTempFile("ts", `import { getServerSideProps } from 'react';\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -151,7 +151,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag useState imported from react", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-hallucinated-react-import");
 			const filePath = writeTempFile("ts", `import { useState, useEffect } from 'react';\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -159,7 +159,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag useRouter from next/navigation", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-hallucinated-react-import");
 			const filePath = writeTempFile("ts", `import { useRouter } from 'next/navigation';\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -169,7 +169,7 @@ describe("slop detection rules", () => {
 
 	describe("ts-react-antipatterns", () => {
 		it("flags setState inside a for-of loop", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-react-antipatterns");
 			const filePath = writeTempFile("ts", `for (const item of items) {\n  setCount(count + 1);\n}\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -177,7 +177,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags setState inside a while loop", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-react-antipatterns");
 			const filePath = writeTempFile("ts", `while (i < items.length) {\n  setItems([...items, i]);\n  i++;\n}\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -185,7 +185,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag setState outside a loop", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-react-antipatterns");
 			const filePath = writeTempFile("ts", `setCount(items.length);\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -193,7 +193,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag setTimeout inside a loop", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-react-antipatterns");
 			const filePath = writeTempFile(
 				"ts",
@@ -204,7 +204,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag setInterval inside a for loop", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-react-antipatterns");
 			const filePath = writeTempFile(
 				"ts",
@@ -217,7 +217,7 @@ describe("slop detection rules", () => {
 
 	describe("unsafe-regex", () => {
 		it("flags new RegExp with plain user-input interpolation", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("unsafe-regex");
 			const filePath = writeTempFile(
 				"ts",
@@ -228,7 +228,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag new RegExp when interpolation uses escapeRegExp", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("unsafe-regex");
 			const filePath = writeTempFile(
 				"ts",
@@ -239,7 +239,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag new RegExp when variable is named 'escaped'", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("unsafe-regex");
 			const filePath = writeTempFile(
 				"ts",
@@ -250,7 +250,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag new RegExp when interpolation uses .replace() chain (glob-to-regex pattern)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("unsafe-regex");
 			const filePath = writeTempFile(
 				"ts",
@@ -263,7 +263,7 @@ describe("slop detection rules", () => {
 
 	describe("long-parameter-list", () => {
 		it("flags a function with 6 required parameters", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("long-parameter-list");
 			const filePath = writeTempFile(
 				"ts",
@@ -274,7 +274,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag a function with 4 required + 2 optional parameters", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("long-parameter-list");
 			const filePath = writeTempFile(
 				"ts",
@@ -285,7 +285,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag a function with 4 required + 2 defaulted parameters", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("long-parameter-list");
 			const filePath = writeTempFile(
 				"ts",
@@ -298,7 +298,7 @@ describe("slop detection rules", () => {
 
 	describe("ts-xss-dom-sink", () => {
 		it("flags innerHTML = variable", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-xss-dom-sink");
 			const filePath = writeTempFile("ts", `el.innerHTML = userInput;\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -306,7 +306,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags outerHTML = call expression", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-xss-dom-sink");
 			const filePath = writeTempFile("ts", `el.outerHTML = getData();\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -314,7 +314,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags document.write(variable)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-xss-dom-sink");
 			const filePath = writeTempFile("ts", `document.write(content);\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -322,7 +322,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag innerHTML = string literal", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-xss-dom-sink");
 			const filePath = writeTempFile("ts", `el.innerHTML = "<b>safe</b>";\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -330,7 +330,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag textContent = variable (safe API)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-xss-dom-sink");
 			const filePath = writeTempFile("ts", `el.textContent = userInput;\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -340,7 +340,7 @@ describe("slop detection rules", () => {
 
 	describe("ts-dynamic-require", () => {
 		it("flags require(identifier)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-dynamic-require");
 			const filePath = writeTempFile("ts", `const mod = require(pluginName);\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -348,7 +348,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags require(member expression)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-dynamic-require");
 			const filePath = writeTempFile("ts", `const lib = require(config.libPath);\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -356,7 +356,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag require(string literal)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-dynamic-require");
 			const filePath = writeTempFile("ts", `const mod = require("./utils");\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -366,7 +366,7 @@ describe("slop detection rules", () => {
 
 	describe("ts-open-redirect", () => {
 		it("flags res.redirect(variable)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-open-redirect");
 			const filePath = writeTempFile("ts", `res.redirect(req.query.returnUrl);\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -374,7 +374,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags response.redirect(call expression)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-open-redirect");
 			const filePath = writeTempFile("ts", `response.redirect(getRedirectUrl());\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -382,7 +382,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags window.location.href = variable", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-open-redirect");
 			const filePath = writeTempFile("ts", `window.location.href = userInput;\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -390,7 +390,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag res.redirect(string literal)", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-open-redirect");
 			const filePath = writeTempFile("ts", `res.redirect("/home");\n`);
 			const matches = await client.runQueryOnFile(query, filePath, "typescript");
@@ -400,7 +400,7 @@ describe("slop detection rules", () => {
 
 	describe("ts-nosql-injection", () => {
 		it("flags $where with unquoted key", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-nosql-injection");
 			const filePath = writeTempFile(
 				"ts",
@@ -411,7 +411,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("flags $where with quoted key", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-nosql-injection");
 			const filePath = writeTempFile(
 				"ts",
@@ -422,7 +422,7 @@ describe("slop detection rules", () => {
 		});
 
 		it("does not flag safe MongoDB equality query", async () => {
-			const client = new TreeSitterClient();
+			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("ts-nosql-injection");
 			const filePath = writeTempFile(
 				"ts",

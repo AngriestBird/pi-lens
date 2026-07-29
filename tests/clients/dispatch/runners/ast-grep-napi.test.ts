@@ -228,6 +228,42 @@ describe("ast-grep-napi runner — skip paths", () => {
 	});
 });
 
+describe("ast-grep-napi runner — real shipped rule", () => {
+	it("loads and matches no-sort-without-comparator through the real YAML parser", async () => {
+		vi.resetModules();
+		mockAuxiliaryLspAlive.mockResolvedValue(false);
+		mockResolveAstGrepNativeExe.mockReturnValue(undefined);
+		vi.doUnmock("../../../../clients/dispatch/runners/yaml-rule-parser.js");
+		vi.doUnmock("../../../../clients/package-root.js");
+		// Earlier skip-path cases install per-test NAPI mocks. Replace any
+		// lingering doMock registration with the package's real implementation.
+		vi.doMock("@ast-grep/napi", async (importOriginal) => importOriginal());
+		const env = setupTestEnvironment("pi-lens-ast-grep-real-rule-");
+		try {
+			const filePath = path.join(env.tmpDir, "file.ts");
+			fs.writeFileSync(filePath, "const sorted = values.sort();\n");
+			const mod = await import(
+				"../../../../clients/dispatch/runners/ast-grep-napi.js"
+			);
+			expect(await mod.loadSg()).toBeDefined();
+
+			const result = await mod.default.run(
+				createCtx(filePath, {
+					cwd: env.tmpDir,
+					hasTool: async () => false,
+				}) as any,
+			);
+
+			expect(result.status).toBe("succeeded");
+			expect(result.diagnostics.map((diagnostic) => diagnostic.rule)).toContain(
+				"no-sort-without-comparator",
+			);
+		} finally {
+			env.cleanup();
+		}
+	}, 30_000);
+});
+
 describe("ast-grep-napi runner — metadata", () => {
 	it("has expected runner id and appliesTo", async () => {
 		vi.resetModules();
