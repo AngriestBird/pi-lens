@@ -109,25 +109,23 @@ function fromDispatchDiagnostic(
 	};
 }
 
-interface TreeSitterAndFactScan {
+interface FileMajorScan {
 	treeSitter: ProjectDiagnostic[];
 	factRules: ProjectDiagnostic[];
+	astGrep: ProjectDiagnostic[];
 }
 
 /**
- * One FILE-major pass for the two runners that both tree-sitter-parse the same
- * file (#675). Run phase-major, the fact rules re-parsed every file the
- * tree-sitter rules had already parsed — a 50-entry cache cannot span a
- * whole-project sweep, so all 357 of a 500-file scan's first touches missed on
- * capacity. Per file the second runner now reads the tree the first one just
- * cached. Results stay in separate lists so the snapshot's diagnostic order is
- * unchanged.
+ * One FILE-major pass for every in-process syntax consumer (#675/#896).
+ * Per-consumer gates preserve their distinct language and size eligibility,
+ * while separate result lists preserve the historical phase-major diagnostic
+ * ordering.
  */
-async function scanTreeSitterAndFactRules(
+async function scanFileMajorRules(
 	cwd: string,
 	files: string[],
 	signal?: AbortSignal,
-): Promise<TreeSitterAndFactScan> {
+): Promise<FileMajorScan> {
 	const client = getSharedTreeSitterClient();
 	const treeSitterReady =
 		!!client && client.isAvailable() && (await client.init());
@@ -141,7 +139,96 @@ async function scanTreeSitterAndFactRules(
 	const pi = { getFlag: () => undefined };
 	const treeSitter: ProjectDiagnostic[] = [];
 	const factRules: ProjectDiagnostic[] = [];
-	let filesScanned = 0;
+	const astGrep: ProjectDiagnostic[] = [];
+	const sgModule = await loadSg();
+	let phaseOneFilesScanned = 0;
+	let astGrepFilesScanned = 0;
+	let astGrepDurationMs = 0;
+
+	const scanTreeSitterFile = async (
+		filePath: string,
+		langId: string | undefined,
+		content: string | null,
+	): Promise<void> => {
+		if (!queryMap || !langId || !client || content === null) return;
+		const queries = queriesForLanguage(queryMap, langId);
+		try {
+			const found = await client.runQueriesOnFile(
+				queries,
+				filePath,
+				langId,
+				{ maxResults: 50 },
+				content,
+			);
+			for (const { queryDef: query, match } of found) {
+				treeSitter.push({
+					filePath,
+					line: match.line ?? 1,
+					column: match.column,
+					severity: query.severity === "error" ? "error" : query.severity,
+					semantic:
+						query.inline_tier === "blocking" || query.severity === "error"
+							? "blocking"
+							: "warning",
+					tool: "tree-sitter",
+					runner: "tree-sitter",
+					rule: query.id,
+					message: query.message,
+					source: "project-scan",
+				});
+			}
+		} catch {
+			// Continue scanning other rules/files.
+		}
+	};
+
+	const scanFactRulesFile = async (
+		filePath: string,
+		content: string | null,
+	): Promise<void> => {
+		facts.clearFileFactsFor(filePath);
+		// Seed the exact bytes already supplied to tree-sitter so the file-content
+		// provider is skipped by runProviders.
+		facts.setFileFact(filePath, "file.content", content);
+		const ctx = createDispatchContext(filePath, cwd, pi, facts, false);
+		try {
+			await runProviders(ctx);
+			for (const diagnostic of evaluateRules(ctx)) {
+				factRules.push(fromDispatchDiagnostic(diagnostic, "fact-rules"));
+			}
+		} catch {
+			// Project scans are best-effort; one unparsable file should not abort the tool.
+		}
+	};
+
+	const scanAstGrepFile = (
+		filePath: string,
+		content: string,
+		lang: NonNullable<ReturnType<typeof astGrepGetLang>>,
+	): void => {
+		const startedAt = Date.now();
+		try {
+			const rootNode = lang.parse(content).root();
+			const fileDiagnostics = evaluateAstGrepRules(
+				filePath,
+				rootNode,
+				cwd,
+				"jsts",
+				{
+					maxMatchesPerRule: AST_GREP_SCAN_MAX_MATCHES_PER_RULE,
+					maxTotalDiagnostics: AST_GREP_SCAN_MAX_DIAGNOSTICS_PER_FILE,
+				},
+			);
+			for (const diagnostic of fileDiagnostics) {
+				astGrep.push(fromDispatchDiagnostic(diagnostic, "ast-grep-napi"));
+			}
+		} catch {
+			// Project scans are best-effort; one unparsable file must not abort the tool.
+		} finally {
+			astGrepFilesScanned++;
+			astGrepDurationMs += Date.now() - startedAt;
+		}
+	};
 
 	const scan = async (): Promise<void> => {
 		for (const filePath of files) {
@@ -150,8 +237,18 @@ async function scanTreeSitterAndFactRules(
 			const ext = path.extname(filePath);
 			const langId = TREE_SITTER_EXT_TO_LANG[ext];
 			const factEligible = FACT_RULE_EXTENSIONS.has(ext);
-			if (!langId && !factEligible) continue;
-			filesScanned++;
+			let astGrepLang: ReturnType<typeof astGrepGetLang> | undefined;
+			if (sgModule && astGrepCanHandle(filePath)) {
+				try {
+					if (fs.statSync(filePath).size <= AST_GREP_MAX_FILE_BYTES) {
+						astGrepLang = astGrepGetLang(filePath, sgModule);
+					}
+				} catch {
+					// A missing file is ineligible for every content consumer below.
+				}
+			}
+			if (!langId && !factEligible && !astGrepLang) continue;
+			if (langId || factEligible) phaseOneFilesScanned++;
 
 			let content: string | null;
 			try {
@@ -160,62 +257,28 @@ async function scanTreeSitterAndFactRules(
 				content = null;
 			}
 
-			if (queryMap && langId && client && content !== null) {
-				const queries = queriesForLanguage(queryMap, langId);
-				try {
-					// ONE tree walk for the whole rule set, not one per rule (#675).
-					const found = await client.runQueriesOnFile(
-						queries,
-						filePath,
-						langId,
-						{
-							maxResults: 50,
-						},
-						content,
-					);
-					for (const { queryDef: query, match } of found) {
-						treeSitter.push({
-							filePath,
-							line: match.line ?? 1,
-							column: match.column,
-							severity: query.severity === "error" ? "error" : query.severity,
-							semantic:
-								query.inline_tier === "blocking" || query.severity === "error"
-									? "blocking"
-									: "warning",
-							tool: "tree-sitter",
-							runner: "tree-sitter",
-							rule: query.id,
-							message: query.message,
-							source: "project-scan",
-						});
-					}
-				} catch {
-					// Continue scanning other rules/files.
-				}
-			}
+			await scanTreeSitterFile(filePath, langId, content);
 
 			if (factEligible) {
-				facts.clearFileFactsFor(filePath);
-				// The tree-sitter sweep and fact chain consume the same bytes. Seed
-				// file.content so its provider does not read this file a second time.
-				facts.setFileFact(filePath, "file.content", content);
-				const ctx = createDispatchContext(filePath, cwd, pi, facts, false);
-				try {
-					await runProviders(ctx);
-					for (const diagnostic of evaluateRules(ctx)) {
-						factRules.push(fromDispatchDiagnostic(diagnostic, "fact-rules"));
-					}
-				} catch {
-					// Project scans are best-effort; one unparsable file should not abort the tool.
-				}
+				await scanFactRulesFile(filePath, content);
+			}
+
+			if (signal?.aborted) {
+				// The former phase-major scan never started ast-grep after a
+				// phase-one abort. Discard earlier ast-grep work from this merged
+				// pass to preserve that partial-result contract.
+				astGrep.length = 0;
+				break;
+			}
+			if (astGrepLang && content !== null) {
+				scanAstGrepFile(filePath, content, astGrepLang);
 			}
 		}
 	};
 
 	if (!client) {
 		await scan();
-		return { treeSitter, factRules };
+		return { treeSitter, factRules, astGrep };
 	}
 
 	const startedAt = Date.now();
@@ -223,93 +286,21 @@ async function scanTreeSitterAndFactRules(
 		logTreeSitterCacheStats({
 			scope: "project_diagnostics_scan",
 			filePath: cwd,
-			fileCount: filesScanned,
+			fileCount: phaseOneFilesScanned,
 			durationMs: Date.now() - startedAt,
 			stats,
 		});
 	});
-	return { treeSitter, factRules };
-}
-
-/**
- * Project-wide ast-grep pass via the bundled napi engine — no `ast-grep` binary
- * required (#308). In `lens_diagnostics mode=full` the ast-grep LSP already
- * covers the project WHEN its binary is present; this closes the no-binary gap
- * using the same Rust core + shipped ruleset. Findings dedup against the LSP's
- * (`filePath:line:rule`) in the full-mode merge, so running both never
- * double-reports. Iterates the SAME `files` list as the other scanners, so it
- * inherits identical exclusion/ignore/cap behavior automatically.
- */
-async function scanAstGrepNapi(
-	cwd: string,
-	files: string[],
-): Promise<ProjectDiagnostic[]> {
-	const sgModule = await loadSg();
-	if (!sgModule) return [];
-
-	const diagnostics: ProjectDiagnostic[] = [];
-	let filesScanned = 0;
-	const scan = async (): Promise<void> => {
-		for (const filePath of files) {
-			if (isTestFile(filePath) || !astGrepCanHandle(filePath)) continue;
-
-			let stats: fs.Stats;
-			try {
-				stats = fs.statSync(filePath);
-			} catch {
-				continue;
-			}
-			if (stats.size > AST_GREP_MAX_FILE_BYTES) continue;
-
-			const lang = astGrepGetLang(filePath, sgModule);
-			if (!lang) continue;
-
-			let content: string;
-			try {
-				content = fs.readFileSync(filePath, "utf-8");
-			} catch {
-				continue;
-			}
-			filesScanned++;
-
-			try {
-				const rootNode = lang.parse(content).root();
-				const fileDiagnostics = evaluateAstGrepRules(
-					filePath,
-					rootNode,
-					cwd,
-					"jsts",
-					{
-						maxMatchesPerRule: AST_GREP_SCAN_MAX_MATCHES_PER_RULE,
-						maxTotalDiagnostics: AST_GREP_SCAN_MAX_DIAGNOSTICS_PER_FILE,
-					},
-				);
-				for (const diagnostic of fileDiagnostics) {
-					diagnostics.push(fromDispatchDiagnostic(diagnostic, "ast-grep-napi"));
-				}
-			} catch {
-				// Project scans are best-effort; one unparsable file must not abort the tool.
-			}
-		}
-	};
-
-	const client = getSharedTreeSitterClient();
-	if (!client) {
-		await scan();
-		return diagnostics;
-	}
-
-	const startedAt = Date.now();
-	await client.withParseCacheMeasurement(scan, (stats) => {
+	await client.withParseCacheMeasurement(async () => {}, (stats) => {
 		logTreeSitterCacheStats({
 			scope: "project_diagnostics_ast_grep_scan",
 			filePath: cwd,
-			fileCount: filesScanned,
-			durationMs: Date.now() - startedAt,
+			fileCount: astGrepFilesScanned,
+			durationMs: astGrepDurationMs,
 			stats,
 		});
 	});
-	return diagnostics;
+	return { treeSitter, factRules, astGrep };
 }
 
 export async function scanProjectDiagnostics(
@@ -350,21 +341,19 @@ export async function scanProjectDiagnostics(
 				maxScanEntries: options.maxScanEntries,
 			});
 	const files = collected.files;
-	// Check cancellation at each phase boundary so a full-mode scan stops
-	// promptly when the agent/user aborts (#341). The per-phase runners are
-	// already file-capped, so phase granularity is enough to bound the work.
+	// Check cancellation before and during the file-major pass so a full-mode
+	// scan stops promptly when the agent/user aborts (#341).
 	const runners: string[] = [];
 	const diagnostics: ProjectDiagnostic[] = [];
 	if (!signal?.aborted) {
-		// Both runners parse the same file, so they share ONE file-major pass
-		// (#675) — the per-file order is what keeps the second one on a cache hit.
-		const scanned = await scanTreeSitterAndFactRules(cwd, files, signal);
+		// All in-process syntax consumers share one file-major pass (#675/#896).
+		const scanned = await scanFileMajorRules(cwd, files, signal);
 		diagnostics.push(...scanned.treeSitter, ...scanned.factRules);
 		runners.push("tree-sitter", "fact-rules");
-	}
-	if (!signal?.aborted) {
-		diagnostics.push(...(await scanAstGrepNapi(cwd, files)));
-		runners.push("ast-grep-napi");
+		if (!signal?.aborted) {
+			diagnostics.push(...scanned.astGrep);
+			runners.push("ast-grep-napi");
+		}
 	}
 	const snapshot: ProjectDiagnosticsSnapshot = {
 		version: PROJECT_DIAGNOSTICS_CACHE_VERSION,

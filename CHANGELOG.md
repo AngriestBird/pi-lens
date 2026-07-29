@@ -8,6 +8,12 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **Project diagnostics now use one file-major scan pass** (refs #896) —
+	tree-sitter rules, fact rules, and bundled ast-grep share each eligible
+	file's content read while retaining their individual extension/size gates,
+	diagnostic ordering, cancellation behavior, and latency telemetry. Full
+	review-graph builds likewise hash the bytes already read for extraction
+	instead of rereading every file after the graph is built.
 - Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
 - Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
 
