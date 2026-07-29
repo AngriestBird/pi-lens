@@ -1,6 +1,9 @@
 import { afterAll, describe, expect, it, vi } from "vitest";
-import { FactStore } from "../../../../clients/dispatch/fact-store.js";
-import { createTempFile, setupTestEnvironment } from "../../test-utils.js";
+import {
+	firedRuleIds,
+	makeRealRunnerCtx,
+	napiFallbackHasTool,
+} from "../../../support/real-runner-ctx.js";
 
 // These are NAPI fallback integration tests. Keep the launcher Gate-B signal
 // absent explicitly now that the default install includes a bundled binary.
@@ -20,38 +23,19 @@ afterAll(() => {
 
 async function rulesFiredOn(
 	code: string,
-	flags: Record<string, unknown> = {},
+	flags: Record<string, string | boolean | undefined> = {},
 	sampleFile = "sample.ts",
 ): Promise<Set<string>> {
-	const env = setupTestEnvironment("pi-lens-sonar-sg-");
-	cleanups.push(env.cleanup);
-	const filePath = createTempFile(env.tmpDir, sampleFile, code);
 	const mod = await import(
 		"../../../../clients/dispatch/runners/ast-grep-napi.js"
 	);
 	const runner = mod.default;
-	const ctx = {
-		filePath,
-		cwd: env.tmpDir,
-		kind: "jsts",
-		fileRole: "source",
+	const real = makeRealRunnerCtx(sampleFile, code, {
 		pi: { getFlag: (name: string) => flags[name] },
-		autofix: false,
-		deltaMode: true,
-		blockingOnly: false,
-		facts: new FactStore(),
-		// napi is the fallback now (the ast-grep LSP supersedes it when its binary
-		// is available, #239 Phase 2); simulate the binary absent so this runner's
-		// rule matching actually executes.
-		hasTool: async (cmd: string) => cmd !== "ast-grep",
-		log: () => {},
-	};
-	const result = await runner.run(ctx as never);
-	return new Set(
-		result.diagnostics
-			.map((d) => d.rule)
-			.filter((r): r is string => typeof r === "string"),
-	);
+		hasTool: napiFallbackHasTool,
+	});
+	cleanups.push(real.cleanup);
+	return firedRuleIds(await runner.run(real.ctx));
 }
 
 describe("ast-grep Sonar gap rules (integration via real runner)", () => {
