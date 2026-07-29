@@ -44,6 +44,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- Resolve nested C# and F# project roots for dotnet builds (refs #895).
+
 - **A mid-scan tree-sitter WASM abort no longer replaces the authoritative
 	project-diagnostics snapshot with a silently truncated result** (refs #891).
 	The partial scan is returned with `scanTruncated`, logs its completed/total
