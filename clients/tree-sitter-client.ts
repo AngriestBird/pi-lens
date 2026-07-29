@@ -1005,6 +1005,7 @@ export class TreeSitterClient {
 					// A rule that can't compile against THIS grammar is simply not
 					// applicable here (e.g. a `type_annotation` pattern on javascript).
 					this.dbg(`Batch: skipping ${queryDef.id} for ${languageId}: ${err}`);
+					this.reportQueryCompileFailure(queryDef.id, languageId, err);
 					continue;
 				}
 				const owner = entries.length;
@@ -1259,8 +1260,26 @@ export class TreeSitterClient {
 		} catch (err) {
 			this.reportWasmAbort(err);
 			this.dbg(`Raw query compilation failed (${queryId}): ${err}`);
+			this.reportQueryCompileFailure(queryId, languageId, err);
 			return null;
 		}
+	}
+
+	private reportedCompileFailures = new Set<string>();
+
+	/** Warn once per rule whose query fails to compile against a grammar — a silently-dead rule needs a trail. */
+	private reportQueryCompileFailure(
+		ruleId: string,
+		languageId: string,
+		err: unknown,
+	): void {
+		if (this.reportedCompileFailures.has(ruleId)) return;
+		this.reportedCompileFailures.add(ruleId);
+		console.error(
+			`[pi-lens] tree-sitter rule '${ruleId}' failed to compile against '${languageId}' — ` +
+				`matches for this rule are silently dropped rather than reported. ` +
+				`Fix the query in the rule definition to re-enable it. (${err})`,
+		);
 	}
 
 	private hasChildToken(node: TreeSitterNode, token: string): boolean {
