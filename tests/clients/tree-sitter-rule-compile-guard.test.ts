@@ -34,38 +34,9 @@ import { getSharedTreeSitterClient } from "../../clients/tree-sitter-shared.js";
  * broken" assertion enforces this).
  */
 const KNOWN_BROKEN = new Set<string>([
-	"cpp:no-scoped-lock-without-args",
-	"css:calc-spacing",
-	"go:go-mutex-copy",
-	"go:go-shared-map-write-goroutine",
-	"java:infinite-loop-java",
-	"java:no-double-checked-locking",
-	"java:no-field-shadowing",
-	"java:switch-fall-through",
-	"java:switch-non-case-labels",
-	"javascript:switch-case-termination-js",
-	"javascript:switch-non-case-labels-js",
-	"kotlin:prepared-statement-indices",
-	"php:this-in-static-context",
-	"python:in-operator-unsupported",
-	"python:no-super-torchscript",
-	"python:notimplemented-boolean-context",
-	"python:python-empty-except",
-	"python:yield-return-outside-function",
-	"ruby:ruby-command-injection",
-	"ruby:ruby-eval",
-	"ruby:ruby-insecure-deserialization",
-	"ruby:ruby-insecure-random",
-	"ruby:ruby-open-struct",
-	"ruby:ruby-string-eval",
-	"ruby:ruby-weak-hash",
-	"rust:rust-lock-held-across-await",
-	"typescript:duplicate-function-arg",
-	"typescript:empty-switch-case",
-	"typescript:infinite-loop",
-	"typescript:mixed-async-styles",
-	"typescript:switch-case-termination",
-	"typescript:ts-insecure-random",
+	// Empty since the #884 merge train (PRs #897, #898, #900, #901, #903)
+	// repaired all 32 rules this list was seeded with. Every shipped rule now
+	// compiles; a new entry here requires a linked issue.
 ]);
 
 /**
