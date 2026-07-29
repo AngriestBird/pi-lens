@@ -236,7 +236,14 @@ export class TreeCache {
 			if (content !== undefined) {
 				// The hash already proved the tree current: an mtime delta is a
 				// save-without-change (or touch/clock drift). Refresh metadata
-				// instead of invalidating (#890).
+				// instead of invalidating (#890). Caveat: this stamps the CURRENT
+				// disk mtime onto an entry validated against caller-supplied
+				// content — if that content lags a newer disk write, lastModified
+				// no longer vouches for the disk bytes. So lastModified means
+				// "mtime last observed on a hash-confirmed hit"; the content-less
+				// path below may only treat it as freshness proof while all
+				// callers pass content (today they all do — the undefined path is
+				// exercised only by tests).
 				if (stats.mtimeMs !== cached.lastModified) {
 					cached.lastModified = stats.mtimeMs;
 					this.debug(`Refreshed mtime on hash-matched entry: ${filePath}`);
