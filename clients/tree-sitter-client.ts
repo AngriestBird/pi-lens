@@ -1543,6 +1543,93 @@ export class TreeSitterClient {
 				]);
 				return !TERMINATORS.has(last.type);
 			}
+			case "no_break_or_return": {
+				// infinite-loop-java: keep a `while(true)`/`for(;;)` whose body has no
+				// break/return/throw reachable in this loop's scope.
+				const bodyNode = captures.BODY;
+				if (!bodyNode) return false;
+				return !this.bodyHasLoopExit(bodyNode, false);
+			}
+			case "is_double_checked_locking": {
+				// no-double-checked-locking: the query pins the if→synchronized→if
+				// shape; keep it only when both null-checks test the same field.
+				const outer = captures.FIELD?.text;
+				const inner = captures.FIELD2?.text;
+				return !!outer && outer === inner;
+			}
+			case "shadows_parent_field": {
+				// no-field-shadowing: keep only when the named parent class is
+				// declared in the same file and it declares a field with the same
+				// name. Cross-file inheritance can't be resolved here — fail closed.
+				const parentName = captures.PARENT?.text;
+				const fieldName = captures.NAME?.text;
+				if (!parentName || !fieldName) return false;
+				// biome-ignore lint/suspicious/noExplicitAny: AST traversal
+				let root: any = captures.NAME;
+				while (root.parent) root = root.parent;
+				// biome-ignore lint/suspicious/noExplicitAny: AST traversal
+				const stack: any[] = [root];
+				while (stack.length) {
+					const node = stack.pop();
+					if (
+						node.type === "class_declaration" &&
+						node.childForFieldName?.("name")?.text === parentName
+					) {
+						const body = node.childForFieldName?.("body");
+						for (const member of body?.children ?? []) {
+							if (member.type !== "field_declaration") continue;
+							for (const declarator of member.children ?? []) {
+								if (
+									declarator.type === "variable_declarator" &&
+									declarator.childForFieldName?.("name")?.text === fieldName
+								) {
+									return true;
+								}
+							}
+						}
+					}
+					for (const child of node.children ?? []) stack.push(child);
+				}
+				return false;
+			}
+			case "missing_break_between_cases": {
+				// switch-fall-through: keep when the labeled statement group contains
+				// no terminating statement at all — its control flow reaches the next
+				// case. The query already requires a following group.
+				const label = captures.LABEL;
+				const group = label?.parent;
+				if (!group) return false;
+				const TERMINATORS = new Set([
+					"break_statement",
+					"return_statement",
+					"throw_statement",
+					"continue_statement",
+					"yield_statement",
+				]);
+				for (const child of group.children ?? []) {
+					if (TERMINATORS.has(child.type)) return false;
+				}
+				return true;
+			}
+			case "scoped_lock_empty_args": {
+				// no-scoped-lock-without-args: the query only matches a bare
+				// `declarator: (identifier)` — an arg-taking declaration parses as an
+				// init/function declarator instead — so a match IS the defect. Keep it
+				// as long as the captured declarator has no sibling argument list.
+				const decl = captures.DECL;
+				if (!decl) return false;
+				for (const sibling of decl.parent?.children ?? []) {
+					if (sibling.type === "argument_list") return false;
+				}
+				return true;
+			}
+			case "calc_missing_spaces": {
+				// calc-spacing: keep a calc() whose +/- has an operand directly on
+				// both sides (e.g. `100%-20px`). A leading sign after `(` or a comma
+				// is legitimate and stays allowed.
+				const text = captures.EXPR?.text ?? "";
+				return /[\w%)][+-][\w.(]/.test(text);
+			}
 			case "bare_except_only": {
 				const clauseNode = captures.CLAUSE;
 				if (!clauseNode) return true;
