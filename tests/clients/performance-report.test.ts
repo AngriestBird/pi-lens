@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { LatencyEntry } from "../../clients/latency-logger.js";
 import {
 	collectLatencyPerformance,
+	MAX_PERF_LOG_BYTES,
 	renderLatencyPerformanceReport,
 	summarizePhaseLatency,
 } from "../../clients/performance-report.js";
@@ -78,6 +79,18 @@ describe("performance-report", () => {
 			p50Ms: 1,
 			p99Ms: 196,
 		});
+	});
+
+	it("honors a topN above the default and falls back to it when invalid", () => {
+		const entries = Array.from({ length: 12 }, (_, index) =>
+			phase(`p${index}`, index + 1),
+		);
+
+		expect(summarizePhaseLatency(entries, 8).slowestByP99).toHaveLength(8);
+		expect(summarizePhaseLatency(entries, 0).slowestByP99).toHaveLength(5);
+		expect(
+			summarizePhaseLatency(entries, Number.NaN).slowestByP99,
+		).toHaveLength(5);
 	});
 
 	it("separates generic phase names by tool", () => {
@@ -177,6 +190,51 @@ describe("performance-report", () => {
 		expect(report.logWindow.slowestByP99[0].phase).toBe("kept");
 	});
 
+	it("bounds the window by the log rotation threshold", async () => {
+		const logPath = path.join(tempDir, "latency.log");
+		const line = `${JSON.stringify(phase("bulk", 5))}\n`;
+		fs.writeFileSync(
+			logPath,
+			line.repeat(Math.ceil((1.5 * 1024 * 1024) / Buffer.byteLength(line))),
+		);
+		const previous = process.env.PI_LENS_MAX_LOG_SIZE_MB;
+		process.env.PI_LENS_MAX_LOG_SIZE_MB = "1";
+		try {
+			const report = await collectLatencyPerformance({
+				logPath,
+				processId: 7,
+				sessionStartedAt: 0,
+			});
+
+			expect(report.windowBytes).toBe(1024 * 1024);
+			expect(report.windowTruncated).toBe(true);
+			expect(renderLatencyPerformanceReport(report)).toContain(
+				"newest 1MB of the active log",
+			);
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_MAX_LOG_SIZE_MB;
+			else process.env.PI_LENS_MAX_LOG_SIZE_MB = previous;
+		}
+	});
+
+	it("reports the byte window actually used, not the default cap", async () => {
+		const logPath = path.join(tempDir, "latency.log");
+		const entry = JSON.stringify(phase("kept", 25));
+		fs.writeFileSync(logPath, `${"x".repeat(4096)}\n${entry}\n`);
+
+		const report = await collectLatencyPerformance({
+			logPath,
+			maxBytes: 2048,
+			processId: 7,
+			sessionStartedAt: 0,
+		});
+
+		expect(report.windowBytes).toBe(2048);
+		const output = renderLatencyPerformanceReport(report);
+		expect(output).toContain("newest 2KB of the active log");
+		expect(output).not.toContain("10MB");
+	});
+
 	it("keeps a complete line when the byte cap starts at its boundary", async () => {
 		const logPath = path.join(tempDir, "latency.log");
 		const first = JSON.stringify(phase("first", 10));
@@ -257,6 +315,7 @@ describe("performance-report", () => {
 		const output = renderLatencyPerformanceReport({
 			logPath: "/tmp/latency.log",
 			topN: 3,
+			windowBytes: MAX_PERF_LOG_BYTES,
 			windowTruncated: true,
 			logSamplesTruncated: true,
 			sessionSamplesTruncated: true,
