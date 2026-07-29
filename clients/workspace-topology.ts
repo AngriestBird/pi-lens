@@ -40,7 +40,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logLatency } from "./latency-logger.js";
-import { isAtOrAboveHomeDir, walkUpDirs } from "./path-utils.js";
+import {
+	isAtOrAboveHomeDir,
+	nameMatchesMarkerGlob,
+	walkUpDirs,
+} from "./path-utils.js";
 
 /** Depth cap on any upward marker walk — mirrors `findNearestMarkerRoot`'s bound. */
 const MAX_WALK_DEPTH = 64;
@@ -67,6 +71,8 @@ export interface DirectoryMarkers {
 	 * needs "and it's a file" confirmed.
 	 */
 	entryNames: ReadonlySet<string>;
+	/** Immediate-child file/symlink names, used for glob marker matching. */
+	entryFileNames: ReadonlySet<string>;
 	/** Resolved path of `.pi-lens.json`, preferred over the no-dot fallback. */
 	piLensConfigPath: string | undefined;
 	tsconfigPath: string | undefined;
@@ -135,6 +141,11 @@ export function getDirectoryMarkers(dir: string): DirectoryMarkers {
 	// markers we actually care about with one confirming `stat` each — still
 	// a single directory listing, not N blind `existsSync` probes.
 	const present = new Set(entries.map((e) => e.name));
+	const fileNames = new Set(
+		entries
+			.filter((entry) => entry.isFile() || entry.isSymbolicLink())
+			.map((entry) => entry.name),
+	);
 
 	const resolveMarker = (basename: string): string | undefined => {
 		if (!present.has(basename)) return undefined;
@@ -150,6 +161,7 @@ export function getDirectoryMarkers(dir: string): DirectoryMarkers {
 		dir: resolvedDir,
 		dirMtimeMs,
 		entryNames: present,
+		entryFileNames: fileNames,
 		piLensConfigPath,
 		tsconfigPath: resolveMarker("tsconfig.json"),
 		packageJsonPath: resolveMarker("package.json"),
@@ -234,7 +246,10 @@ function walkToNearestMatch(
  */
 export function findNearestDirWithMarker(
 	startDir: string,
-	markerKey: keyof Omit<DirectoryMarkers, "dir" | "dirMtimeMs" | "entryNames">,
+	markerKey: keyof Omit<
+		DirectoryMarkers,
+		"dir" | "dirMtimeMs" | "entryNames" | "entryFileNames"
+	>,
 	homeDir: string = os.homedir(),
 ): string | undefined {
 	return walkToNearestMatch(
@@ -259,6 +274,14 @@ export function findNearestDirWithMarker(
 function hasBasenameMarker(markers: DirectoryMarkers, basename: string): boolean {
 	if (basename.includes("/") || basename.includes("\\")) {
 		return fs.existsSync(path.join(markers.dir, basename));
+	}
+	if (basename.includes("*")) {
+		// `entryFileNames` is already files/symlinks-only, so matching the cached
+		// names via the shared marker-glob helper preserves the same semantics as
+		// the Dirent-filtering probes without re-reading the directory.
+		return [...markers.entryFileNames].some((entryName) =>
+			nameMatchesMarkerGlob(entryName, basename),
+		);
 	}
 	return markers.entryNames.has(basename);
 }

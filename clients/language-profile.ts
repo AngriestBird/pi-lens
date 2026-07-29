@@ -1,7 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { detectFileKind, type FileKind } from "./file-kinds.js";
+import {
+	detectFileKind,
+	DOTNET_CSHARP_ROOT_MARKERS,
+	DOTNET_FSHARP_ROOT_MARKERS,
+	type FileKind,
+} from "./file-kinds.js";
 import { getProjectIgnoreMatcher } from "./file-utils.js";
+import { direntsHaveMarkerGlobMatch } from "./path-utils.js";
 import {
 	LANGUAGE_POLICY,
 	type ProjectLanguageProfile,
@@ -77,6 +83,8 @@ const PROJECT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	terraform: [".terraform.lock.hcl"],
 	nix: ["flake.nix"],
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
+	csharp: DOTNET_CSHARP_ROOT_MARKERS,
+	fsharp: DOTNET_FSHARP_ROOT_MARKERS,
 };
 
 const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
@@ -120,7 +128,21 @@ const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	terraform: [".terraform.lock.hcl"],
 	nix: ["flake.nix"],
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
+	csharp: DOTNET_CSHARP_ROOT_MARKERS,
+	fsharp: DOTNET_FSHARP_ROOT_MARKERS,
 };
+
+function hasProjectMarker(projectRoot: string, marker: string): boolean {
+	if (!marker.includes("*")) return fs.existsSync(path.join(projectRoot, marker));
+	try {
+		return direntsHaveMarkerGlobMatch(
+			fs.readdirSync(projectRoot, { withFileTypes: true }),
+			marker,
+		);
+	} catch {
+		return false;
+	}
+}
 
 // Process-lifetime memo keyed on projectRoot. Only populated when the
 // caller did not pass an explicit `sourceFiles` array — the explicit-array
@@ -158,7 +180,7 @@ function computeProjectLanguageProfile(
 	for (const [kind, markers] of Object.entries(PROJECT_MARKERS_BY_KIND)) {
 		if (!markers) continue;
 		for (const marker of markers) {
-			if (fs.existsSync(path.join(projectRoot, marker))) {
+			if (hasProjectMarker(projectRoot, marker)) {
 				present[kind as FileKind] = true;
 				configured[kind as FileKind] = true;
 				break;
