@@ -412,28 +412,6 @@ function contentHashEntry(file: string): string {
 }
 
 /**
- * Async, chunked-yield content-hash map for a set of files. Used at full build
- * to record per-file content hashes so a later run can tell a *content* change
- * apart from pure mtime/size drift (formatter no-op, git checkout) — see
- * {@link confirmContentChanged}. Reads file bytes, so it runs only on the
- * (rare) full-build path, not the per-edit signature loop.
- */
-async function sourceHashMapAsync(
-	files: string[],
-): Promise<Map<string, string>> {
-	const hashes = new Map<string, string>();
-	let sinceYield = 0;
-	for (const file of files) {
-		hashes.set(file, contentHashEntry(file));
-		if (++sinceYield >= STAT_YIELD_EVERY) {
-			sinceYield = 0;
-			await yieldToLoop();
-		}
-	}
-	return hashes;
-}
-
-/**
  * #202: confirm which mtime/size-changed candidates actually changed CONTENT. A
  * candidate whose content hash matches the prior hash is pure mtime drift —
  * reusing its already-parsed graph nodes is safe. Returns the truly
@@ -1107,9 +1085,14 @@ async function ensureReviewGraphFacts(
 	filePath: string,
 	cwd: string,
 	facts: FactStore,
+	contentOverride?: string | null,
 ): Promise<void> {
 	const ctx = makeCtx(filePath, cwd, facts);
-	await fileContentProvider.run(ctx, facts);
+	if (contentOverride === undefined) {
+		await fileContentProvider.run(ctx, facts);
+	} else {
+		facts.setFileFact(filePath, "file.content", contentOverride);
+	}
 	// The import/function fact providers parse via the shared tree-sitter client
 	// (#419/#402 — no `typescript` compiler). Loaded on demand + run here so
 	// file.imports / file.reexports / file.functionSummaries are populated before
@@ -1408,15 +1391,17 @@ async function getExtractor(
 async function extractTreeSitterSymbols(
 	filePath: string,
 	languageId: string,
+	contentOverride?: string | null,
 ): Promise<ExtractedSymbols> {
 	const empty: ExtractedSymbols = { symbols: [], refs: [], imports: [] };
+	if (contentOverride === null) return empty;
 	const treeSitterClient = getSharedTreeSitterClient();
 	if (!treeSitterClient) return empty;
 	const initialized = await treeSitterClient.init();
 	if (!initialized) return empty;
 	const extractor = await getExtractor(languageId);
 	if (!extractor) return empty;
-	const content = fs.readFileSync(filePath, "utf-8");
+	const content = contentOverride ?? fs.readFileSync(filePath, "utf-8");
 	const extracted = await treeSitterClient.withParsedTree(
 		filePath,
 		languageId,
@@ -1668,13 +1653,17 @@ function addCxxIncludeEdges(
 	cwd: string,
 	filePath: string,
 	ignoredIds?: ReadonlySet<string>,
+	contentOverride?: string | null,
 ): void {
-	let content = "";
-	try {
-		content = fs.readFileSync(filePath, "utf-8");
-	} catch {
-		return;
+	let content = contentOverride;
+	if (content === undefined) {
+		try {
+			content = fs.readFileSync(filePath, "utf-8");
+		} catch {
+			return;
+		}
 	}
+	if (content === null) return;
 	const fromNode = ensureFileNode(graph, filePath, "cpp");
 	for (const line of content.split(/\r?\n/)) {
 		const source = parseLocalCxxInclude(line);
@@ -1733,6 +1722,7 @@ async function addFileToGraph(
 	file: string,
 	facts: FactStore,
 	ignoredIds?: ReadonlySet<string>,
+	contentOverride?: string | null,
 ): Promise<void> {
 	const kind = detectFileKind(file);
 	if (!kind || !MAIN_KINDS.has(kind)) return;
@@ -1740,15 +1730,21 @@ async function addFileToGraph(
 	// the incremental/cascade path (a changed *.test.ts) never adds them either.
 	if (detectFileRole(file) === "test") return;
 	if (kind === "jsts") {
-		await ensureReviewGraphFacts(file, cwd, facts);
+		await ensureReviewGraphFacts(file, cwd, facts, contentOverride);
 		addJsTsFile(graph, cwd, file, facts, ignoredIds);
 		return;
 	}
 	const languageId = mapKindToTreeSitterLanguage(kind, file);
 	if (!languageId) return;
-	const extracted = await extractTreeSitterSymbols(file, languageId);
+	const extracted = await extractTreeSitterSymbols(
+		file,
+		languageId,
+		contentOverride,
+	);
 	addTreeSitterFile(graph, cwd, file, languageId, extracted, ignoredIds);
-	if (kind === "cxx") addCxxIncludeEdges(graph, cwd, file, ignoredIds);
+	if (kind === "cxx") {
+		addCxxIncludeEdges(graph, cwd, file, ignoredIds, contentOverride);
+	}
 }
 
 function restoreValidIncomingEdges(
@@ -2369,9 +2365,22 @@ async function _doBuildGraph(
 	const graph = createEmptyGraph();
 	const treeSitterClient = getSharedTreeSitterClient();
 	const extractionStartedAt = Date.now();
+	const fileHashes = new Map<string, string>();
 	const extractFiles = async (): Promise<void> => {
 		for (const file of filesToBuild) {
-			await addFileToGraph(graph, cwd, file, facts, ignoredIds);
+			let content: string | null;
+			try {
+				const bytes = fs.readFileSync(file);
+				content = bytes.toString("utf-8");
+				fileHashes.set(
+					file,
+					createHash("sha256").update(bytes).digest("hex"),
+				);
+			} catch {
+				content = null;
+				fileHashes.set(file, "missing");
+			}
+			await addFileToGraph(graph, cwd, file, facts, ignoredIds, content);
 			if (normalizedChangedSet.has(file)) {
 				upsertChangedSymbols(graph, facts, file);
 			}
@@ -2394,10 +2403,8 @@ async function _doBuildGraph(
 	resolveDeferredSymbolEdges(graph);
 	graph.version = REVIEW_GRAPH_VERSION;
 	graph.builtAt = new Date().toISOString();
-	// #202: record per-file content hashes so the next run can tell a real
-	// content change apart from pure mtime/size drift. Only runs on the (rare)
-	// full-build path; the OS file cache is warm from the parse above.
-	const fileHashes = await sourceHashMapAsync(filesToBuild);
+	// #202: the full-build pass hashes the same bytes it supplies to extraction,
+	// so change detection does not reread every file after the graph is built.
 	// #459: full rebuild ⇒ new generation.
 	const generation = ++_graphGenerationCounter;
 	const graphSnapshot = cloneGraph(graph);
