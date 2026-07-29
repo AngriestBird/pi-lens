@@ -30,6 +30,7 @@ import {
 } from "./import-resolvers.js";
 import { RUNTIME_CONFIG } from "../runtime-config.js";
 import { buildQualifiedName, findOwnerName } from "../symbol-containment.js";
+import { logTreeSitterCacheStats } from "../tree-sitter-logger.js";
 import { getSharedTreeSitterClient } from "../tree-sitter-shared.js";
 import {
 	type ExtractedSymbols,
@@ -1413,12 +1414,16 @@ async function extractTreeSitterSymbols(
 	if (!treeSitterClient) return empty;
 	const initialized = await treeSitterClient.init();
 	if (!initialized) return empty;
-	const tree = await treeSitterClient.parseFile(filePath, languageId);
-	if (!tree) return empty;
 	const extractor = await getExtractor(languageId);
 	if (!extractor) return empty;
 	const content = fs.readFileSync(filePath, "utf-8");
-	return extractor.extract(tree, filePath, content);
+	const extracted = await treeSitterClient.withParsedTree(
+		filePath,
+		languageId,
+		content,
+		(tree) => extractor.extract(tree, filePath, content),
+	);
+	return extracted.parsed ? extracted.value : empty;
 }
 
 // #655: some grammars' SYMBOL_QUERIES match the SAME declaration node under two
@@ -2362,11 +2367,28 @@ async function _doBuildGraph(
 
 	// Tier 3: full build
 	const graph = createEmptyGraph();
-	for (const file of filesToBuild) {
-		await addFileToGraph(graph, cwd, file, facts, ignoredIds);
-		if (normalizedChangedSet.has(file)) {
-			upsertChangedSymbols(graph, facts, file);
+	const treeSitterClient = getSharedTreeSitterClient();
+	const extractionStartedAt = Date.now();
+	const extractFiles = async (): Promise<void> => {
+		for (const file of filesToBuild) {
+			await addFileToGraph(graph, cwd, file, facts, ignoredIds);
+			if (normalizedChangedSet.has(file)) {
+				upsertChangedSymbols(graph, facts, file);
+			}
 		}
+	};
+	if (treeSitterClient) {
+		await treeSitterClient.withParseCacheMeasurement(extractFiles, (stats) => {
+			logTreeSitterCacheStats({
+				scope: "review_graph_full",
+				filePath: cwd,
+				fileCount: filesToBuild.length,
+				durationMs: Date.now() - extractionStartedAt,
+				stats,
+			});
+		});
+	} else {
+		await extractFiles();
 	}
 
 	resolveDeferredSymbolEdges(graph);

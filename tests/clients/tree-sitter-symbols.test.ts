@@ -8,7 +8,7 @@
  * nodes in the review graph, surfaced only because nothing asserted extraction).
  */
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	grammarBlockReason,
 	LANGUAGE_TO_GRAMMAR,
@@ -44,7 +44,11 @@ const CASES: Record<string, SymbolCase> = {
 		expect: ["Foo"],
 	},
 	swift: { file: "a.swift", src: "func foo() {}\n", expect: ["foo"] },
-	kotlin: { file: "A.kt", src: "fun foo() {}\nclass Bar {}\n", expect: ["foo", "Bar"] },
+	kotlin: {
+		file: "A.kt",
+		src: "fun foo() {}\nclass Bar {}\n",
+		expect: ["foo", "Bar"],
+	},
 	dart: { file: "a.dart", src: "int foo() => 1;\n", expect: ["foo"] },
 	php: { file: "a.php", src: "<?php\nfunction foo() {}\n", expect: ["foo"] },
 	ocaml: { file: "a.ml", src: "let foo x = x\n", expect: ["foo"] },
@@ -64,6 +68,34 @@ let client: TreeSitterClient;
 beforeAll(async () => {
 	client = getSharedTreeSitterClient()!;
 	await client.init();
+});
+
+describe("TreeSitterSymbolExtractor abort handling", () => {
+	it("stops query compilation after a WASM abort", () => {
+		const reportWasmAbort = vi.fn(() => true);
+		const client = { reportWasmAbort } as unknown as TreeSitterClient;
+		const extractor = new TreeSitterSymbolExtractor("typescript", client);
+		const compileQuery = (
+			extractor as unknown as {
+				compileQuery: (
+					Query: new () => never,
+					language: unknown,
+					src: string,
+					label: string,
+				) => unknown;
+			}
+		).compileQuery.bind(extractor);
+		class AbortingQuery {
+			constructor() {
+				throw new Error("Aborted()");
+			}
+		}
+
+		expect(() =>
+			compileQuery(AbortingQuery as never, {}, "(x)", "defs"),
+		).toThrow("Aborted()");
+		expect(reportWasmAbort).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe("export-scope correctness (#256) — module exports vs function locals", () => {
@@ -172,7 +204,9 @@ describe("member visibility (#258) + function-local detection (#259)", () => {
 			const extractor = new TreeSitterSymbolExtractor("python", client);
 			await extractor.init();
 			const symbols = extractor.extract(tree!, fp, src).symbols;
-			expect(symbols.find((s) => s.name === "_internal")?.visibility).toBeUndefined();
+			expect(
+				symbols.find((s) => s.name === "_internal")?.visibility,
+			).toBeUndefined();
 		} finally {
 			env.cleanup();
 		}

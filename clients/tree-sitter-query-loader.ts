@@ -19,6 +19,51 @@ export function getQueryLanguageKey(directoryName: string): string {
 		: directoryName;
 }
 
+/**
+ * Languages that inherit the typescript rule set on top of their own.
+ *
+ * ONLY `tsx`: verified rule-for-rule identical on the same source parsed under
+ * both grammars (console-statement 16/16, ts-path-traversal 277/277, …), which
+ * makes sense — tsx IS typescript plus JSX. `javascript` is deliberately NOT
+ * here. It looks like it should be, and the merge existed for years, but the
+ * queries were compiled against the typescript grammar and run against
+ * javascript trees, so they matched nothing and nobody noticed. Compiled
+ * correctly they misfire: JS parameters are bare `(identifier)` where
+ * typescript has `required_parameter`, so `duplicate-function-arg` alone
+ * reports 59 phantom duplicates across 60 files. Re-enabling it needs the
+ * typescript rules validated against the javascript grammar first.
+ */
+const TYPESCRIPT_RULE_HEIRS = new Set(["tsx"]);
+
+/**
+ * The rule set that applies to a file parsed as `languageId`, in a stable order.
+ *
+ * Excludes `<language>-disabled/` rules. `getQueriesForLanguage` filtered these
+ * for the per-edit runner, but the project scanner read the raw loader map and
+ * ran them anyway — 1,936 of a scan's 2,590 tree-sitter findings came from
+ * rules somebody had explicitly switched off.
+ */
+export function queriesForLanguage(
+	queries: Map<string, TreeSitterQuery[]>,
+	languageId: string,
+): TreeSitterQuery[] {
+	const enabled = (langId: string): TreeSitterQuery[] =>
+		(queries.get(langId) ?? []).filter((q) => !isDisabledQueryFilePath(q.filePath));
+	const own = enabled(languageId);
+	if (!TYPESCRIPT_RULE_HEIRS.has(languageId)) return own;
+	return [...own, ...enabled("typescript")];
+}
+
+/**
+ * Drop a trailing ` # comment` from an unquoted YAML scalar. Quoted values keep
+ * their `#` (a message may legitimately contain one), matching YAML's rule that
+ * a comment only starts after whitespace outside quotes.
+ */
+function stripInlineComment(value: string): string {
+	if (value.startsWith('"') || value.startsWith("'")) return value;
+	return value.replace(/\s+#.*$/, "").trim();
+}
+
 export function isDisabledQueryFilePath(filePath: string): boolean {
 	const normalized = filePath.replaceAll("\\", "/");
 	const parts = normalized.split("/").filter(Boolean);
@@ -235,7 +280,14 @@ export class TreeSitterQueryLoader {
 			const match = line.match(/^([a-z_]+):\s*(.*)$/);
 			if (match) {
 				const key = match[1];
-				let value: string | string[] | boolean = match[2].trim();
+				// Strip a trailing YAML comment (` # …`) on unquoted scalars, as the
+				// array-item branch below already does. Without this, a rule written
+				// `post_filter: not_in_test_block  # skip test blocks` carried the
+				// whole comment as the filter NAME, so the filter never resolved and
+				// the rule reported unfiltered matches.
+				let value: string | string[] | boolean = stripInlineComment(
+					match[2].trim(),
+				);
 
 				// Handle arrays inline: metavars: [A, B, C]
 				if (value.startsWith("[") && value.endsWith("]")) {

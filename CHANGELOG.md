@@ -8,6 +8,30 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **A project scan runs its rule set in one tree walk, not one walk per rule**
+	(refs #675) — `runQueriesOnFile` compiles a language's rules into a single
+	multi-pattern query and maps matches back to the owning rule, keeping per-rule
+	metavars, predicates, post-filters, caps and ordering. Measured at 3.3× on
+	identical matches; the scan's tree-sitter phase went **14.4s → 3.6s** and a
+	full `mode=full` scan of pi-lens **24.4s → 12.2s**.
+- **Project scans parse each file once** (refs #675) — the tree-sitter rules and
+	the fact rules both tree-sitter-parse the same files, and running them as two
+	whole-project sweeps meant the second one re-parsed every file the first had
+	already parsed and evicted (357 of 357 first touches missed on capacity in a
+	500-file `mode=full` scan). They now share one file-major pass: **722 parses →
+	367, 892ms → 437ms of parse time, zero capacity misses**, same diagnostics in
+	the same order. The 50-entry cache is unchanged and was never the problem —
+	within a phase it already ran at a 96.8% hit rate, any capacity short of the
+	full working set saves nothing, and one big enough to hold it would cost
+	150-300MB of resident WASM trees.
+- **Tree-sitter cache pressure is measurable** (refs #675): every production
+	consumer, including partial-read expansion, uses the shared process-wide
+	client, and scope-isolated cache counters plus parser timing are emitted for
+	project scans and full review-graph builds.
+- **Dead incremental-parse cache API removed.** `TreeCache.incrementalUpdate`,
+	`calculateEdit`, and `invalidate` had no callers; the header's "10-100×
+	speedup on edits" was advertising a path nothing ever took.
+
 - **Faster LSP teardown and tool probes** (refs #448) — `killProcessTree`
 	resolves on the child's exit event instead of sleeping the full 1.5s
 	SIGTERM→SIGKILL escalation window (saves ~1.5s per graceful client
@@ -18,6 +42,33 @@ All notable changes to pi-lens will be documented in this file.
 ### Fixed
 
 - **`.dart` files are now included in project-wide source enumeration** (closes #880, refs #876) — `ALL_SCANNABLE_EXTENSIONS` (`clients/source-filter.ts`) and `WARMUP_SOURCE_EXTS` (`clients/language-profile.ts`) were missing `.dart`, so Dart projects were fully supported per-edit (LSP, `dart-analyze`, `dart format`, autofix) but skipped by project-wide scans and cold-start language-profile warmup.
+- **Tree-sitter rules were compiled against the wrong grammar** — a compiled
+	query is bound to the language it compiled against, and running it on a tree
+	from another grammar returns zero matches silently. Rules now compile against
+	the language the file is parsed as. This is why the javascript→typescript rule
+	merge never fired a single diagnostic in its life. That merge stays off — the
+	rules are written against typescript node types and misfire on JS — but the
+	same fix is what makes `.tsx` work.
+- **Project scans ran rules from `-disabled/` directories** — the per-edit runner
+	excluded them, the scanner read the raw loader map and ran them anyway.
+	**1,936 of a 500-file scan's 2,590 tree-sitter findings came from rules that
+	were explicitly switched off.** Rule-set selection now goes through one seam,
+	`queriesForLanguage`.
+- **`.tsx` parsed with the typescript grammar**, which produces ERROR nodes on
+	JSX, and under a different language id than the fact providers use — so every
+	`.tsx` file was parsed twice, once wrongly. It now parses as `tsx` and
+	inherits the typescript rule set, which is rule-for-rule identical on both
+	grammars. `.tsx` also gets those rules in the per-edit runner now, where it
+	previously saw only its own two JSX rules.
+- **An unimplemented `post_filter` reported every raw match instead of none.**
+	40 of the 84 filters rules reference have no implementation; the default now
+	drops the match and warns once. `duplicate-function-arg` (whose
+	`same_param_name` filter was never implemented) was reporting 59 phantom
+	duplicates across 60 files.
+- **YAML scalars kept their trailing comments** in the rule loader's hand-rolled
+	parser — `post_filter: not_in_test_block  # skip test blocks` carried the
+	comment as part of the filter name, so the filter silently never applied.
+
 - **tree-sitter runner no longer double-increments already 1-indexed
 	line/column** (refs #448) — dispositions recorded against the old off-by-one
 	are anchored (`clients/diagnostic-dispositions.ts`) to the wrong physical
