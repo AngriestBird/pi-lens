@@ -1876,6 +1876,66 @@ export class TreeSitterClient {
 						c.isNamed && c.type !== "pass_statement" && c.type !== "comment",
 				);
 			}
+			case "check_in_operator_types": {
+				// `in`/`not in` require __contains__, __iter__ or __getitem__. We can't
+				// do real type inference from a bare identifier, so only flag when the
+				// right-hand side is a literal of a type known NOT to support
+				// containment (None, bool, int, float) — identifiers, strings, lists,
+				// dicts, sets, tuples etc. are left alone to avoid false positives.
+				const target = captures.TARGET;
+				if (!target) return false;
+				return ["none", "true", "false", "integer", "float"].includes(
+					target.type,
+				);
+			}
+			case "torchscript_super_call": {
+				// The query only anchors on the `super()` call itself (so it can find
+				// it at any nesting depth inside the method body); this filter walks
+				// back up to confirm the enclosing method OR its class actually carries
+				// a @torch.jit.script / @jit.script decorator.
+				const call = captures.CALL;
+				if (!call) return false;
+				const isTorchScriptDecorated = (
+					node: TreeSitterNode | null | undefined,
+				): boolean => {
+					const decorated = node?.parent;
+					if (!decorated || decorated.type !== "decorated_definition")
+						return false;
+					// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node
+					return (decorated.children ?? []).some(
+						(c: any) =>
+							c.type === "decorator" &&
+							/^@(torch\.jit\.script|jit\.script)$/.test(c.text ?? ""),
+					);
+				};
+				const methodNode = this.navigator.findParent(call, [
+					"function_definition",
+				]);
+				if (!methodNode) return false;
+				const classNode = this.navigator.findParent(methodNode, [
+					"class_definition",
+				]);
+				return (
+					isTorchScriptDecorated(methodNode) || isTorchScriptDecorated(classNode)
+				);
+			}
+			case "exit_params_insufficient": {
+				// __exit__ must accept (self, exc_type, exc_value, traceback) — 4 named
+				// parameters total. The query captures the whole `parameters` node
+				// rather than binding each slot individually: tree-sitter's optional
+				// (`?`) quantifiers on consecutive anchored siblings match every valid
+				// sub-alignment (e.g. self+exc_type alone, or self+exc_type+exc_value),
+				// not just the maximal one, so per-slot captures produce spurious
+				// duplicate/partial matches for a single, fully-correct signature.
+				// Counting named children of the whole node sidesteps that entirely.
+				const params = captures.PARAMS;
+				if (!params) return true;
+				// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node
+				const count = (params.children ?? []).filter(
+					(c: any) => c.isNamed,
+				).length;
+				return count < 4;
+			}
 			case "ruby_empty_rescue": {
 				const bodyNode = captures.BODY;
 				if (!bodyNode) return true;
