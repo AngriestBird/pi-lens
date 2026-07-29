@@ -12,6 +12,7 @@ import {
 	firedRuleIds,
 	makeRealRunnerCtx,
 } from "../../../support/real-runner-ctx.js";
+import type { RunnerCtxOverrides } from "../../../support/runner-ctx.js";
 
 const cleanups: Array<() => void> = [];
 afterAll(() => {
@@ -43,9 +44,7 @@ const TWO_DEBUGGERS_SRC = [
 	"",
 ].join("\n");
 
-async function debuggerHits(
-	overrides: Parameters<typeof makeRealRunnerCtx>[2],
-) {
+async function debuggerHits(overrides: RunnerCtxOverrides) {
 	const real = makeRealRunnerCtx("two.ts", TWO_DEBUGGERS_SRC, overrides);
 	cleanups.push(real.cleanup);
 	const result = await treeSitterRunner.run(real.ctx);
@@ -90,6 +89,6 @@ describe("tree-sitter runner — dispatch filtering (#448)", () => {
 			blockingOnly: false,
 			modifiedRanges: [{ start: 1, end: 3 }],
 		});
-		expect(hits.map((d) => d.line).sort((a, b) => a - b)).toEqual([2, 8]);
+		expect(hits.map((d) => d.line ?? 0).sort((a, b) => a - b)).toEqual([2, 8]);
 	}, 30_000);
 });

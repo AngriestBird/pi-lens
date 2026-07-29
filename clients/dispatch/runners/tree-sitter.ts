@@ -545,8 +545,7 @@ const treeSitterRunner: RunnerDefinition = {
 						for (const match of matches) {
 							// match.line/column are already 1-indexed — the client emits
 							// startPosition.row + 1 (tree-sitter-client searchFileWithQuery).
-							const line = match.line;
-							const column = match.column;
+							const { line, column } = match;
 
 							// Modified-ranges gate only applies to blocking-tier diagnostics.
 							// Warning-tier diagnostics always flow through for logging.

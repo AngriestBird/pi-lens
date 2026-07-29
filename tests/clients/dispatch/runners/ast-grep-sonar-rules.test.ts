@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it, vi } from "vitest";
+import astGrepNapiRunner from "../../../../clients/dispatch/runners/ast-grep-napi.js";
 import {
 	firedRuleIds,
 	makeRealRunnerCtx,
@@ -26,16 +27,12 @@ async function rulesFiredOn(
 	flags: Record<string, string | boolean | undefined> = {},
 	sampleFile = "sample.ts",
 ): Promise<Set<string>> {
-	const mod = await import(
-		"../../../../clients/dispatch/runners/ast-grep-napi.js"
-	);
-	const runner = mod.default;
 	const real = makeRealRunnerCtx(sampleFile, code, {
 		pi: { getFlag: (name: string) => flags[name] },
 		hasTool: napiFallbackHasTool,
 	});
 	cleanups.push(real.cleanup);
-	return firedRuleIds(await runner.run(real.ctx));
+	return firedRuleIds(await astGrepNapiRunner.run(real.ctx));
 }
 
 describe("ast-grep Sonar gap rules (integration via real runner)", () => {

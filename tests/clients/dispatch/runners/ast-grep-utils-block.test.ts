@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
+import astGrepNapiRunner from "../../../../clients/dispatch/runners/ast-grep-napi.js";
 import {
 	firedRuleIds,
 	makeRealRunnerCtx,
@@ -63,16 +64,12 @@ async function rulesFiredOn(
 	sampleFile = "sample.ts",
 	log: (message: string) => void = () => {},
 ): Promise<Set<string>> {
-	const mod = await import(
-		"../../../../clients/dispatch/runners/ast-grep-napi.js"
-	);
-	const runner = mod.default;
 	const real = makeRealRunnerCtx(sampleFile, code, {
 		hasTool: napiFallbackHasTool,
 		log,
 	});
 	cleanups.push(real.cleanup);
-	return firedRuleIds(await runner.run(real.ctx));
+	return firedRuleIds(await astGrepNapiRunner.run(real.ctx));
 }
 
 describe("ast-grep NAPI utils: block passthrough (#663)", () => {
