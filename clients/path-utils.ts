@@ -11,11 +11,12 @@
  * - Always convert backslashes to forward slashes for Map key consistency
  */
 
-import { existsSync, realpathSync } from "node:fs";
+import { type Dirent, existsSync, realpathSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { dirname, win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { minimatch } from "./deps/minimatch.js";
 
 /**
  * Detect if a path is a Windows path (has drive letter or UNC prefix).
@@ -354,4 +355,37 @@ export function isExternalOrVendorFile(
 		? normalized.slice(rootNorm.length + 1)
 		: normalized;
 	return rel.split("/").some((seg) => VENDOR_DIR_NAMES.has(seg));
+}
+
+/**
+ * Shared marker-glob semantics for every "does this directory contain a file
+ * matching this glob" probe (#895 review): match against the entry NAME only,
+ * `dot: true` so dotfile markers match, `nocase` on win32 to match the
+ * filesystem (and the project ignore matcher). The three marker probes —
+ * language-profile.ts `hasProjectMarker`, workspace-topology.ts
+ * `hasBasenameMarker`, lsp/server.ts `markerExists` — must all route their
+ * glob matching through here rather than call minimatch with hand-copied
+ * options.
+ */
+export function nameMatchesMarkerGlob(name: string, pattern: string): boolean {
+	return minimatch(name, pattern, {
+		dot: true,
+		nocase: process.platform === "win32",
+	});
+}
+
+/**
+ * Files/symlinks-only marker-glob probe over a directory listing — a
+ * *directory* named like a marker (e.g. a `Foo.csproj/` dir) is not a project
+ * file (#201).
+ */
+export function direntsHaveMarkerGlobMatch(
+	entries: readonly Dirent[],
+	pattern: string,
+): boolean {
+	return entries.some(
+		(entry) =>
+			(entry.isFile() || entry.isSymbolicLink()) &&
+			nameMatchesMarkerGlob(entry.name, pattern),
+	);
 }

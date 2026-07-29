@@ -44,6 +44,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- Resolve nested C# and F# project roots for dotnet builds (refs #895).
+
 - **Project-wide enumeration now covers every registered file kind** (refs
 	#894) — `ALL_SCANNABLE_EXTENSIONS`, `WARMUP_SOURCE_EXTS`, and
 	`SUPPORTED_FILE_KINDS` now derive from the single `KIND_EXTENSIONS`
