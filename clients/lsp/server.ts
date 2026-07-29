@@ -18,11 +18,17 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { minimatch } from "../deps/minimatch.js";
 import { isTestMode } from "../env-utils.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
-import { KIND_EXTENSIONS } from "../file-kinds.js";
-import { isAtOrAboveHomeDir } from "../path-utils.js";
+import {
+	DOTNET_CSHARP_ROOT_MARKERS,
+	DOTNET_FSHARP_ROOT_MARKERS,
+	KIND_EXTENSIONS,
+} from "../file-kinds.js";
+import {
+	direntsHaveMarkerGlobMatch,
+	isAtOrAboveHomeDir,
+} from "../path-utils.js";
 import {
 	ensureTool,
 	getToolEnvironment,
@@ -852,15 +858,9 @@ async function markerExists(dir: string, pattern: string): Promise<boolean> {
 		const entries = await readdir(targetDir, { withFileTypes: true });
 		// Match files/symlinks only — a directory named like the marker (e.g. a
 		// `Foo.csproj/` dir) is not a project file. Case-insensitive on win32 to
-		// match the filesystem (and the project ignore matcher), via minimatch.
-		return entries.some(
-			(entry) =>
-				(entry.isFile() || entry.isSymbolicLink()) &&
-				minimatch(entry.name, basenamePattern, {
-					dot: true,
-					nocase: process.platform === "win32",
-				}),
-		);
+		// match the filesystem (and the project ignore matcher), via the shared
+		// marker-glob helper.
+		return direntsHaveMarkerGlobMatch(entries, basenamePattern);
 	} catch (err) {
 		if (isPermissionFsError(err)) {
 			logSessionStart(
@@ -1924,8 +1924,9 @@ export const CSharpServer: LSPServerInfo = {
 	extensions: KIND_EXTENSIONS["csharp"],
 	// No FileDirRoot fallback (#201): csharp-ls is a workspace server and should
 	// not spawn once per source directory before a .sln/.csproj exists. Glob root
-	// markers match real project filenames such as `App.csproj` / `App.sln`.
-	root: createRootDetector(["*.sln", "*.csproj", "*.slnx"]),
+	// markers match real project filenames such as `App.csproj` / `App.sln`
+	// (shared marker list — see file-kinds.ts, refs #895).
+	root: createRootDetector([...DOTNET_CSHARP_ROOT_MARKERS]),
 	async spawn(root, options) {
 		const candidates = dotnetToolCandidates("csharp-ls");
 
@@ -1949,7 +1950,7 @@ export const OmniSharpServer = createInteractiveServer({
 	id: "omnisharp",
 	name: "OmniSharp",
 	extensions: KIND_EXTENSIONS["csharp"],
-	root: createRootDetector(["*.sln", "*.csproj", "*.slnx"]),
+	root: createRootDetector([...DOTNET_CSHARP_ROOT_MARKERS]),
 	language: "csharp",
 	command: "OmniSharp",
 	args: ["--languageserver"],
@@ -1959,7 +1960,7 @@ export const FSharpServer: LSPServerInfo = {
 	id: "fsharp",
 	name: "FSAutocomplete",
 	extensions: KIND_EXTENSIONS["fsharp"],
-	root: createRootDetector(["*.sln", "*.fsproj"]),
+	root: createRootDetector([...DOTNET_FSHARP_ROOT_MARKERS]),
 	async spawn(root, options) {
 		// fsautocomplete is a `dotnet tool` (#241), exactly like csharp-ls: prefer a
 		// managed/.dotnet-tools copy, else `dotnet tool install` when the .NET SDK

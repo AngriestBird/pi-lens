@@ -44,6 +44,34 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- Resolve nested C# and F# project roots for dotnet builds (refs #895).
+
+- **A mid-scan tree-sitter WASM abort no longer replaces the authoritative
+	project-diagnostics snapshot with a silently truncated result** (refs #891).
+	The partial scan is returned with `scanTruncated`, logs its completed/total
+	file counts and abort point, and leaves the previous complete cache intact.
+
+- **Block-wrapped switch cases no longer report false fall-through errors**
+	(refs #910) — `switch-case-termination` now follows trailing statement
+	blocks to recognize a nested `break`, `return`, `throw`, or `continue`, while
+	still flagging empty and non-terminating blocks.
+
+- **Project-wide enumeration now covers every registered file kind** (refs
+	#894) — `ALL_SCANNABLE_EXTENSIONS`, `WARMUP_SOURCE_EXTS`, and
+	`SUPPORTED_FILE_KINDS` now derive from the single `KIND_EXTENSIONS`
+	authority instead of three drifting language lists. TODO scans, symbol
+	search indexing, dominant-language LSP warmup, and language-profile
+	detection can now see Java, Swift, C/C++, PHP, and every other supported
+	kind. Code kinds keep priority over data/doc kinds (json/yaml/markdown/…)
+	inside the existing caps: the dominant-language LSP warm ranks code kinds
+	first, and the capped warmup/word-index walks fill code files before
+	non-code files, so a locale/fixture pile can't starve real languages.
+	Package-manager lockfiles (package-lock.json, pnpm-lock.yaml, …) are
+	filtered as generated artifacts, and the TODO scanner caps per-file reads
+	at 512 KiB. A coverage guard makes a newly registered kind automatically
+	enumerable — and classified as code or non-code — on both project-wide
+	paths.
+
 - **CMake files now reach a real LSP server** (refs #892) — the CMake policy's
 	previous `lsp` fallback had no registered server and silently produced no
 	diagnostics. `cmake-language-server` now covers both `.cmake` files and the

@@ -191,6 +191,22 @@ describe("switch-case-termination (TS)", () => {
 			),
 		).toBe(0);
 	});
+
+	it.each([
+		["a block-wrapped terminating case", `{ const body = compute(); return body; }`, 0],
+		["a block-wrapped non-terminating case", `{ compute(); }`, 1],
+		["nested trailing blocks that terminate", `{ compute(); { return "one"; } }`, 0],
+		["an empty trailing block", `{ }`, 1],
+	])("%s", async (_name, caseBody, expected) => {
+		expect(
+			await count(
+				"switch-case-termination",
+				"ts",
+				"typescript",
+				`switch (x) {\n case 1: ${caseBody}\n case 2:\n  break;\n}`,
+			),
+		).toBe(expected);
+	});
 });
 
 describe("ts-insecure-random (TS)", () => {
@@ -238,6 +254,22 @@ describe("switch-case-termination-js (JS)", () => {
 				`switch (x) {\n case 1:\n  return "one";\n case 2:\n  break;\n}`,
 			),
 		).toBe(0);
+	});
+
+	it.each([
+		["a block-wrapped terminating case", `{ const body = compute(); return body; }`, 0],
+		["a block-wrapped non-terminating case", `{ compute(); }`, 1],
+		["nested trailing blocks that terminate", `{ compute(); { return "one"; } }`, 0],
+		["an empty trailing block", `{ }`, 1],
+	])("%s", async (_name, caseBody, expected) => {
+		expect(
+			await count(
+				"switch-case-termination-js",
+				"js",
+				"javascript",
+				`switch (x) {\n case 1: ${caseBody}\n case 2:\n  break;\n}`,
+			),
+		).toBe(expected);
 	});
 });
 
