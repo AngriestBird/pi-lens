@@ -16,7 +16,7 @@ import { isAtOrAboveHomeDir } from "../path-utils.js";
 import { getProjectDiagnosticsScannerMaxFiles } from "../project-scale.js";
 import { collectSourceFilesWithBudgetAsync } from "../source-filter.js";
 import { getSharedTreeSitterClient } from "../tree-sitter-shared.js";
-import { TreeSitterQueryLoader } from "../tree-sitter-query-loader.js";
+import { queryLoader } from "../tree-sitter-query-loader.js";
 import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
 	saveProjectDiagnosticsSnapshot,
@@ -132,8 +132,9 @@ async function scanTreeSitter(
 	if (!client || !client.isAvailable()) return [];
 	if (!(await client.init())) return [];
 
-	const loader = new TreeSitterQueryLoader();
-	const queryMap = await loader.loadQueries(cwd);
+	// Same singleton the dispatch runner uses (tree-sitter.ts:444) — memoized
+	// per root, so repeated scans stop re-reading the ~180 query YAMLs.
+	const queryMap = await queryLoader.loadQueries(cwd);
 	const diagnostics: ProjectDiagnostic[] = [];
 
 	for (const filePath of files) {

@@ -8,13 +8,21 @@
  * lsp_registry_write_failed and lsp_kill_escalation are fire-and-forget / platform-
  * specific paths; they are exercised via unit-level assertions on the catch handlers
  * rather than live-process integration tests (those would require a real filesystem
- * fault or POSIX SIGTERM + 1500ms real wait).
+ * fault, and killProcessTree resolves on the child's exit event rather than a real
+ * wait).
  */
 
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logLatency } from "../../../clients/latency-logger.js";
+
+// Every `client.js` import in this file is dynamic (inside the test bodies
+// below), so a plain assignment here — unlike integration.test.ts's static
+// import — lands well before SHUTDOWN_REQUEST_TIMEOUT_MS is read at module
+// load. 250ms (not lower) because the clean-shutdown test below has the fake
+// server actually reply, and that reply must win the race.
+process.env.PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS = "250";
 
 vi.mock("../../../clients/latency-logger.js", () => ({ logLatency: vi.fn() }));
 
@@ -154,8 +162,9 @@ describe("clientShutdown() — lsp_client_shutdown phase", () => {
 		});
 
 		// shutdown() sends the "shutdown" request; the fake server ignores it, so
-		// SHUTDOWN_REQUEST_TIMEOUT_MS (300ms in client.ts) fires and the catch
-		// sets shutdownRequestTimedOut=true before calling killProcessTree.
+		// SHUTDOWN_REQUEST_TIMEOUT_MS (default 1000ms in client.ts, 250ms here via
+		// the env override above) fires and the catch sets
+		// shutdownRequestTimedOut=true before calling killProcessTree.
 		await client.shutdown();
 		client = undefined;
 

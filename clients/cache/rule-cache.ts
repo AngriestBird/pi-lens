@@ -11,7 +11,9 @@ import * as path from "node:path";
 import { getProjectDataDir } from "../file-utils.js";
 import { readJsonCache } from "../json-cache-read.js";
 
-const CACHE_VERSION = "v3";
+// v4: cache skip_test_files + fix_action — v3 entries silently dropped them,
+// and ruleHash (rule-file mtimes) never invalidates on a code-only fix.
+export const CACHE_VERSION = "v4";
 
 export interface QueryCacheEntry {
 	version: string;
@@ -30,7 +32,9 @@ export interface QueryCacheEntry {
 		post_filter_params?: Record<string, any>;
 		defect_class?: string;
 		inline_tier?: "blocking" | "warning" | "review";
+		skip_test_files?: boolean;
 		has_fix?: boolean;
+		fix_action?: string;
 		filePath?: string;
 	}>;
 }
@@ -38,8 +42,10 @@ export interface QueryCacheEntry {
 export class RuleCache {
 	private cacheFile: string;
 	private cacheDir: string;
+	private language: string;
 
 	constructor(language: string, rootDir = process.cwd()) {
+		this.language = language;
 		this.cacheDir = path.join(getProjectDataDir(rootDir), "cache");
 		this.cacheFile = path.join(
 			this.cacheDir,
@@ -74,7 +80,10 @@ export class RuleCache {
 				this.cacheFile,
 				(parsed) => {
 					const entry = parsed as QueryCacheEntry;
-					if (entry.version !== CACHE_VERSION || entry.ruleHash !== currentHash) {
+					if (
+						entry.version !== CACHE_VERSION ||
+						entry.ruleHash !== currentHash
+					) {
 						return undefined; // Cache invalid
 					}
 					return entry;
@@ -96,8 +105,33 @@ export class RuleCache {
 				queries,
 			};
 			fs.writeFileSync(this.cacheFile, JSON.stringify(entry, null, 2));
+			this.pruneStaleVersions();
 		} catch {
 			// Cache write failure is non-fatal
+		}
+	}
+
+	// Orphaned `<language>-rules-v<N>.json` files from a prior CACHE_VERSION
+	// (e.g. v3 entries left behind by the #448 v3→v4 bump) never got cleaned up
+	// on their own — nothing ever read or removed them again once the version
+	// bumped. Delete every sibling for this language that isn't the current file.
+	private pruneStaleVersions(): void {
+		const currentName = path.basename(this.cacheFile);
+		const pattern = new RegExp(`^${this.language}-rules-v\\d+\\.json$`);
+		let dirents: string[];
+		try {
+			dirents = fs.readdirSync(this.cacheDir);
+		} catch {
+			return;
+		}
+		for (const name of dirents) {
+			if (name === currentName || !pattern.test(name)) continue;
+			try {
+				fs.unlinkSync(path.join(this.cacheDir, name));
+			} catch {
+				// Best-effort; ENOENT (already gone) or any other removal failure
+				// shouldn't undo the write that already succeeded above.
+			}
 		}
 	}
 

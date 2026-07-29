@@ -239,6 +239,12 @@ function runAstGrep(
 const cliAvailable = probeCli();
 const d = cliAvailable ? describe : describe.skip;
 
+// #448: a describe.skip on a missing CLI silently vanishes this whole
+// real-engine harness. Locally that's fine; in CI it must fail loud.
+it("ast-grep CLI is installed in CI", () => {
+	if (process.env.CI) expect(cliAvailable).toBe(true);
+});
+
 // A subset of the catalog rules have a non-trivial `fix:` field that the
 // ast-grep LSP surfaces as a codeAction. These are the rules where the
 // upstream catalog ships a mechanical rewrite (the others are either "manual

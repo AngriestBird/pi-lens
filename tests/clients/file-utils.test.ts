@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RuleCache } from "../../clients/cache/rule-cache.js";
+import { CACHE_VERSION, RuleCache } from "../../clients/cache/rule-cache.js";
 import { getGlobalPiLensDir, getProjectDataDir } from "../../clients/file-utils.js";
 import { appendToWorklog } from "../../clients/fix-worklog.js";
 
@@ -112,7 +112,7 @@ describe("getProjectDataDir", () => {
 					path.join(
 						getProjectDataDir(cwd),
 						"cache",
-						"typescript-rules-v3.json",
+						`typescript-rules-${CACHE_VERSION}.json`,
 					),
 				),
 			).toBe(true);

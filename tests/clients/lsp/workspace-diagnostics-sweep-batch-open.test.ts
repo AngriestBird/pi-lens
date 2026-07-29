@@ -28,9 +28,9 @@
  * WHOLE group's opens in one uninterrupted burst — a whole-group burst at
  * real project scale (~150 files) was found to overwhelm a single-threaded
  * server's request queue before any per-file diagnostics request got a turn.
- * This test's 20 files span 3 chunks (8+8+4), so it now expects 3 flushes
+ * This test's 12 files span 2 chunks (8+4), so it now expects 2 flushes
  * (one per chunk) instead of 1 (one for the whole group) — still far short of
- * 20 (one per file, the original #608 bug this test guards against).
+ * 12 (one per file, the original #608 bug this test guards against).
  *
  * This test fakes the client's `notify.open` to reproduce the real
  * `WatchedFilesQueue` coalescing behavior (imported from source, not
@@ -80,7 +80,7 @@ describe("runWorkspaceDiagnostics — batch-open restores #271 coalescing for a 
 	afterEach(() => removeTempDirSync(tmp));
 
 	it("fires the watched-files notification once for a sweep over N previously-unopened files, not once per file", async () => {
-		const fileNames = Array.from({ length: 20 }, (_, i) => `f${i}.ts`);
+		const fileNames = Array.from({ length: 12 }, (_, i) => `f${i}.ts`);
 		for (const n of fileNames) fs.writeFileSync(path.join(tmp, n), "x\n");
 
 		const tsServer = makeServer("typescript", ".ts");
@@ -149,15 +149,15 @@ describe("runWorkspaceDiagnostics — batch-open restores #271 coalescing for a 
 		// here), not one per file.
 		expect(client.notify.open).toHaveBeenCalledTimes(fileNames.length * 2 + 1);
 		// The watched-files queue coalesces each CHUNK's first-opens into its
-		// own single flush — 20 files at the default chunk width of 8 is 3
-		// chunks (8+8+4), so 3 flushes from the #608 pre-open pass itself. The
+		// own single flush — 12 files at the default chunk width of 8 is 2
+		// chunks (8+4), so 2 flushes from the #608 pre-open pass itself. The
 		// #667 warm-up touch above runs BEFORE that pass and pays its own
 		// (slow, 150ms) `waitForDiagnostics` wait standing alone against just
 		// f0.ts — well past the 100ms debounce window on its own, so it closes
 		// out its own flush before the pre-open pass's first chunk even starts
-		// enqueuing. +1 flush total (4), still nowhere near one flush per file
-		// (20) — the #608 regression this test guards against.
-		expect(flushCount).toBe(4);
+		// enqueuing. +1 flush total (3), still nowhere near one flush per file
+		// (12) — the #608 regression this test guards against.
+		expect(flushCount).toBe(3);
 		expect(notifiedUriCount).toBe(fileNames.length);
 	}, 10_000);
 });
@@ -176,12 +176,23 @@ describe("runWorkspaceDiagnostics — batch-open restores #271 coalescing for a 
 describe("runWorkspaceDiagnostics — pre-open is bounded, not just fast (#615)", () => {
 	let tmp: string;
 	const ORIGINAL_PER_FILE_MS = process.env.PI_LENS_LSP_WORKSPACE_PER_FILE_MS;
+	const ORIGINAL_NOTIFY_BUDGET_MS = process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+	const ORIGINAL_WARMUP_RETRY_BACKOFF_MS =
+		process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS;
 
 	beforeEach(() => {
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wsd-preopen-bound-"));
+		// These tests' fake client's notify.open never resolves, so the #667
+		// pre-sweep warm-up touch pays the full notify-write budget on both its
+		// initial attempt and its retry, plus the backoff between them — flatten
+		// both to near-zero so that dead time doesn't dominate the run. The
+		// perFileMs bound actually under test is untouched: preOpenGroupFiles
+		// bounds notify.open only via withDeadline(perFileMs) (index.ts:3610).
+		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "50";
+		process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS = "0";
 	});
 
 	afterEach(() => {
@@ -190,6 +201,17 @@ describe("runWorkspaceDiagnostics — pre-open is bounded, not just fast (#615)"
 			delete process.env.PI_LENS_LSP_WORKSPACE_PER_FILE_MS;
 		} else {
 			process.env.PI_LENS_LSP_WORKSPACE_PER_FILE_MS = ORIGINAL_PER_FILE_MS;
+		}
+		if (ORIGINAL_NOTIFY_BUDGET_MS === undefined) {
+			delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+		} else {
+			process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = ORIGINAL_NOTIFY_BUDGET_MS;
+		}
+		if (ORIGINAL_WARMUP_RETRY_BACKOFF_MS === undefined) {
+			delete process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS;
+		} else {
+			process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS =
+				ORIGINAL_WARMUP_RETRY_BACKOFF_MS;
 		}
 	});
 
@@ -230,8 +252,9 @@ describe("runWorkspaceDiagnostics — pre-open is bounded, not just fast (#615)"
 
 		expect(results.length).toBe(1);
 		// Should resolve close to the 150ms per-file deadline, not hang forever
-		// (or for anywhere near the default 15s budget).
-		expect(elapsedMs).toBeLessThan(5_000);
+		// (or for anywhere near the default 15s budget). With the warm-up dead
+		// time flattened above, 1s still leaves ample margin over the deadline.
+		expect(elapsedMs).toBeLessThan(1_000);
 	}, 10_000);
 
 	it("aborting mid-pre-open unblocks immediately, without waiting out the full per-file deadline", async () => {

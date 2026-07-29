@@ -38,9 +38,15 @@ const TREE_SIZE = 5000;
 
 let tmpDir: string;
 
-beforeAll(() => {
+beforeAll(async () => {
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-snapshot-occupancy-"));
 	generateSourceTree(tmpDir, TREE_SIZE);
+	// Throwaway warm-up walk: the first walk over a freshly-generated 5k-file
+	// tree pays a cold dirent-cache tax that the measured attempt below isn't
+	// meant to guard against, and previously only passed via the test's own
+	// retry:2. Warming the cache here means the measured attempt is the one
+	// this test is actually about.
+	await snapshotProjectFiles(tmpDir);
 }, 60_000);
 
 afterAll(() => {

@@ -465,7 +465,9 @@ const treeSitterRunner: RunnerDefinition = {
 					post_filter_params: q.post_filter_params,
 					defect_class: q.defect_class,
 					inline_tier: q.inline_tier,
+					skip_test_files: q.skip_test_files,
 					has_fix: q.has_fix,
+					fix_action: q.fix_action,
 					filePath: q.filePath,
 				})),
 			);
@@ -541,9 +543,9 @@ const treeSitterRunner: RunnerDefinition = {
 						);
 
 						for (const match of matches) {
-							// Get line/column from match (already 0-indexed from tree-sitter)
-							const line = match.line;
-							const column = match.column;
+							// match.line/column are already 1-indexed — the client emits
+							// startPosition.row + 1 (tree-sitter-client searchFileWithQuery).
+							const { line, column } = match;
 
 							// Modified-ranges gate only applies to blocking-tier diagnostics.
 							// Warning-tier diagnostics always flow through for logging.
@@ -554,7 +556,7 @@ const treeSitterRunner: RunnerDefinition = {
 							if (
 								ctx.blockingOnly &&
 								isSeverityBlocking &&
-								!isLineInModifiedRanges(line + 1, ctx.modifiedRanges)
+								!isLineInModifiedRanges(line, ctx.modifiedRanges)
 							) {
 								continue;
 							}
@@ -584,8 +586,8 @@ const treeSitterRunner: RunnerDefinition = {
 									(_, name) => match.captures[name]?.trim() ?? `{{${name}}}`,
 								),
 								filePath,
-								line: line + 1, // 1-indexed
-								column: column + 1, // 1-indexed
+								line,
+								column,
 								severity: query.severity,
 								semantic,
 								tool: "tree-sitter",

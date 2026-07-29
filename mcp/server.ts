@@ -116,7 +116,21 @@ const REBUILD_SCRIPT = resolveRebuildScript(SERVER_FILE);
 const STALENESS_STAT_PATH =
 	process.env.PI_LENS_MCP_STALENESS_STAT_PATH ?? SERVER_FILE;
 const BUILD_STAMP = computeBuildStamp(STALENESS_STAT_PATH);
-const STALENESS_GATE = new StalenessGate(BUILD_STAMP);
+
+// `PI_LENS_MCP_STALENESS_INTERVAL_MS` (test-only override): shrinks the
+// gate's re-stat throttle below its 1000ms default so a staleness smoke test
+// doesn't have to sleep out a full second per assertion. Parsed explicitly
+// rather than `Number(raw) || undefined` — that idiom would coerce a real
+// "0" override (disable the throttle entirely) back to the 1000ms default.
+const stalenessIntervalOverride = ((): number | undefined => {
+	const raw = process.env.PI_LENS_MCP_STALENESS_INTERVAL_MS;
+	if (raw === undefined) return undefined;
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+})();
+const STALENESS_GATE = new StalenessGate(BUILD_STAMP, {
+	checkIntervalMs: stalenessIntervalOverride,
+});
 
 /**
  * True when the warm server's loaded code is older than what's on disk right

@@ -42,3 +42,20 @@ process.env.PI_LENS_CONFIG_PATH = "/nonexistent-pi-lens-tests/config.json";
 process.env.PI_LENS_HOME = fs.mkdtempSync(
 	path.join(os.tmpdir(), "pi-lens-test-home-"),
 );
+
+// Hand this worker the suite-wide tool template's probe cache (built once by
+// prewarm-tool-home.ts globalSetup). ensureTool's probe-cache fast path then
+// resolves the template's already-installed binaries instead of paying a cold
+// npm install per worker. Entries point INTO the template dir — validated by
+// path+mtime on every read, and executed read-only, so sharing is safe.
+const toolTemplate = process.env.PI_LENS_TEST_TOOLS_TEMPLATE;
+if (toolTemplate) {
+	try {
+		fs.copyFileSync(
+			path.join(toolTemplate, "probe-cache.json"),
+			path.join(process.env.PI_LENS_HOME, "probe-cache.json"),
+		);
+	} catch {
+		// missing template file — worker simply runs cold, as before
+	}
+}

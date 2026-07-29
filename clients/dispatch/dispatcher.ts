@@ -24,6 +24,7 @@ import { isTestFile } from "../file-utils.js";
 import { getPrimaryDispatchGroup } from "../language-policy.js";
 import { resolveLanguageRootForFile } from "../language-profile.js";
 import { logLatency } from "../latency-logger.js";
+import { isSpawnableCommand } from "../installer/index.js";
 import { normalizeMapKey } from "../path-utils.js";
 import { loadPiLensProjectConfig } from "../project-lens-config.js";
 import { RUNTIME_CONFIG, getRunnerTimeoutFloorMs } from "../runtime-config.js";
@@ -105,6 +106,12 @@ async function checkToolAvailability(
 	const cached = facts.getSessionFact<boolean>(key);
 	if (cached !== undefined) {
 		return cached;
+	}
+	// A command that isn't even on disk can't pass a --version probe; the ~μs
+	// stat/PATH walk saves a guaranteed-to-fail spawn round-trip per cold tool.
+	if (!(await isSpawnableCommand(command))) {
+		facts.setSessionFact(key, false);
+		return false;
 	}
 	try {
 		const result = await safeSpawnAsync(command, ["--version"], {
