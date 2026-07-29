@@ -46,6 +46,7 @@ All notable changes to pi-lens will be documented in this file.
 
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 
+- **A transient grammar-load failure no longer disables batched rule scans for the process lifetime** (refs #889) — `compileQueryBatch` cached `null` on ANY `build()` failure, including a transient `loadLanguage()` miss (offline lazy grammar fetch, mid-scan load error), so every later scan fell back to the per-rule path and paid ~3.3× forever. Load failures are now distinguished from genuine batch-compile failures: they are not cached (the next scan retries the load and recovers), with retries bounded at 3 consecutive load failures per rule set before the miss is cached, so a grammar that never loads doesn't hot-loop. Deterministic compile failures still cache `null` permanently. The query/batch cache keys also switched from a collision-prone 32-bit hash to the full pattern text.
 - **module-report parses plain JS under the correct tree-sitter grammar** (closes
 	#887) — `tsLangForFile` hand-rolled a local extension map that sent
 	`.js`/`.mjs`/`.cjs` to the typescript grammar and `.jsx` to tsx, while every
