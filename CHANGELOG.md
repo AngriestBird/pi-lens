@@ -56,6 +56,32 @@ All notable changes to pi-lens will be documented in this file.
 	negative fixtures (`system` vs `File.read`, `Marshal.load` vs `YAML.safe_load`,
 	`rand` vs `SecureRandom`, `OpenStruct.new` vs `Struct.new`, `Digest::MD5` vs
 	`Digest::SHA256`, string vs block `class_eval`) pin the security intent.
+- **Six python rules never compiled or never fired** (refs #884) —
+	`python-empty-except` used a `body:` field that doesn't exist on
+	`except_clause`; `in-operator-unsupported` used bare `"in"`/`"not"` `"in"`
+	tokens the grammar doesn't expose that way (`not in` is a single token) and
+	only matched `identifier` targets, so `x in None` never matched at all;
+	`no-super-torchscript` looked for a `(call function: (identifier))` inside the
+	decorator (`@torch.jit.script` has no call — it's a bare `attribute`) and
+	expected the decorator directly on the method rather than the class;
+	`notimplemented-boolean-context` used `("and" | "or")` (not valid tree-sitter
+	query syntax — alternation is `[...]`) inside a non-existent `binary_operator`
+	form and `unary_operator operator: ("not")`, when python's logical `not` is
+	its own `not_operator` node with an `argument:` field;
+	`yield-return-outside-function` referenced a `yield_expression` node type that
+	doesn't exist in tree-sitter-python. All five queries are rewritten against
+	the real grammar (verified via AST dumps against `tree-sitter-python.wasm`);
+	`no-super-torchscript` and `in-operator-unsupported` gained
+	`torchscript_super_call` / `check_in_operator_types` post-filters
+	(`clients/tree-sitter-client.ts`) since neither had a working implementation
+	behind their declared `post_filter` name. `exit-signature-check` compiled
+	fine but its `@PARAM1?`/`@PARAM2?`/`@PARAM3?` captures never matched anything
+	— the `?` quantifier was written after the capture name instead of the node,
+	so the captured names were literally `PARAM1?`/`PARAM2?`/`PARAM3?` while the
+	post_filter read `captures.PARAM1`; fixed to capture the whole `parameters`
+	node and count named children instead (per-slot optional quantifiers turned
+	out to match every valid sub-alignment, not just the maximal one, producing
+	spurious duplicate matches for a fully-correct signature).
 - **Project scans run tree-sitter rules for every supported language, not just 10 extensions** (closes #882, refs #877, #880) — the scanner's `TREE_SITTER_EXT_TO_LANG` covered only ts/tsx/js/py/go/rs/rb, so files whose grammars and non-disabled rule dirs already exist (c, cpp, csharp, css, php, java, kotlin) were silently skipped by the tree-sitter phase of project scans. It now derives the shared per-edit resolver (`EXT_TO_LANG`) so c/cpp/csharp/php/css and the `.tsx`→tsx / `.jsx`→javascript nuances can't drift from the per-edit path, and layers java/kotlin on top (grammars + rule dirs exist but no per-edit `appliesTo`). A regression test asserts the map covers every non-disabled rule dir whose grammar is loadable.
 - **`.dart` files are now included in project-wide source enumeration** (closes #880, refs #876) — `ALL_SCANNABLE_EXTENSIONS` (`clients/source-filter.ts`) and `WARMUP_SOURCE_EXTS` (`clients/language-profile.ts`) were missing `.dart`, so Dart projects were fully supported per-edit (LSP, `dart-analyze`, `dart format`, autofix) but skipped by project-wide scans and cold-start language-profile warmup.
 - **Tree-sitter rules were compiled against the wrong grammar** — a compiled
