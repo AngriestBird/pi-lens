@@ -46,6 +46,16 @@ All notable changes to pi-lens will be documented in this file.
 
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 
+- **A mid-scan tree-sitter WASM abort no longer replaces the authoritative
+	project-diagnostics snapshot with a silently truncated result** (refs #891).
+	The partial scan is returned with `scanTruncated`, logs its completed/total
+	file counts and abort point, and leaves the previous complete cache intact.
+
+- **Block-wrapped switch cases no longer report false fall-through errors**
+	(refs #910) — `switch-case-termination` now follows trailing statement
+	blocks to recognize a nested `break`, `return`, `throw`, or `continue`, while
+	still flagging empty and non-terminating blocks.
+
 - **Project-wide enumeration now covers every registered file kind** (refs
 	#894) — `ALL_SCANNABLE_EXTENSIONS`, `WARMUP_SOURCE_EXTS`, and
 	`SUPPORTED_FILE_KINDS` now derive from the single `KIND_EXTENSIONS`

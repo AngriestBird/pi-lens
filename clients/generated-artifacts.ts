@@ -43,6 +43,7 @@ const GENERATED_HEADER_PATTERNS = [
 // at once. Compared lowercased, like GENERATED_DIR_NAMES.
 const LOCKFILE_NAMES = new Set([
 	"package-lock.json",
+	"packages.lock.json",
 	"npm-shrinkwrap.json",
 	"pnpm-lock.yaml",
 	"yarn.lock",
