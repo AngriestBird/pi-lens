@@ -402,12 +402,18 @@ export class TreeSitterQueryLoader {
 			const indent = indentMatch ? indentMatch[1].length : 0;
 			const trimmed = line.trim();
 
-			// Stop at new key with same or less indent (but not at comments)
-			if (
-				indent <= startIndent &&
-				trimmed.match(/^[a-z_]+:/) &&
-				!trimmed.startsWith("#")
-			) {
+			// Stop at a new top-level key (same or less indent than the key).
+			if (indent <= startIndent && trimmed.match(/^[a-z_]+:/)) {
+				break;
+			}
+
+			// A comment at or below the key's indent is a document-level comment
+			// that follows the block, not part of it — stop. Block-scalar content
+			// (including native tree-sitter predicate lines `#eq?`/`#match?`) is
+			// always MORE indented than the key, so those are preserved. Without
+			// this, a stray `# …` line between a `query: |` block and the next key
+			// was appended to the query and made it fail to compile (mixed-async).
+			if (trimmed.startsWith("#") && indent <= startIndent) {
 				break;
 			}
 
