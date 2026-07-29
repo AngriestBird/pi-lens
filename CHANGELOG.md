@@ -52,9 +52,15 @@ All notable changes to pi-lens will be documented in this file.
 	authority instead of three drifting language lists. TODO scans, symbol
 	search indexing, dominant-language LSP warmup, and language-profile
 	detection can now see Java, Swift, C/C++, PHP, and every other supported
-	kind; existing file/entry/size caps and generated-artifact filtering remain
-	unchanged. A coverage guard makes a newly registered kind automatically
-	enumerable on both project-wide paths.
+	kind. Code kinds keep priority over data/doc kinds (json/yaml/markdown/…)
+	inside the existing caps: the dominant-language LSP warm ranks code kinds
+	first, and the capped warmup/word-index walks fill code files before
+	non-code files, so a locale/fixture pile can't starve real languages.
+	Package-manager lockfiles (package-lock.json, pnpm-lock.yaml, …) are
+	filtered as generated artifacts, and the TODO scanner caps per-file reads
+	at 512 KiB. A coverage guard makes a newly registered kind automatically
+	enumerable — and classified as code or non-code — on both project-wide
+	paths.
 - **Small edits no longer pay the entity-extraction cost** (refs #885) — the
 	<5-line skip threshold only guarded the zero-diagnostics early return; a
 	second `extractEntitySnapshot` block ran unconditionally, so trivial edits

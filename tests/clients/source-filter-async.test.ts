@@ -173,6 +173,53 @@ describe("maxFiles cap (#250) — bounds the walk", () => {
 	});
 });
 
+describe("prioritizeCodeKinds (#894 review)", () => {
+	// Root-level files come before subdirectories in walk order, so the json
+	// pile fills the cap first — without prioritization, the code files under
+	// src/ would be evicted from the capped collection entirely.
+	function makeNoisyTree(): void {
+		for (let i = 0; i < 8; i++) {
+			fs.writeFileSync(path.join(tmpDir, `locale${i}.json`), `{"n": ${i}}\n`);
+		}
+		fs.mkdirSync(path.join(tmpDir, "src"), { recursive: true });
+		fs.writeFileSync(path.join(tmpDir, "src", "a.ts"), "export const a = 1;\n");
+		fs.writeFileSync(path.join(tmpDir, "src", "b.ts"), "export const b = 1;\n");
+	}
+
+	it("async: code files survive a cap exhausted by data files in walk order", async () => {
+		makeNoisyTree();
+		const files = await collectSourceFilesAsync(tmpDir, {
+			maxFiles: 4,
+			prioritizeCodeKinds: true,
+		});
+		expect(files.length).toBe(4);
+		expect(files.some((f) => f.endsWith("a.ts"))).toBe(true);
+		expect(files.some((f) => f.endsWith("b.ts"))).toBe(true);
+		// Code files sort ahead of the non-code fill.
+		expect(files[0].endsWith(".ts")).toBe(true);
+		expect(files[1].endsWith(".ts")).toBe(true);
+	});
+
+	it("sync: code files survive a cap exhausted by data files in walk order", () => {
+		makeNoisyTree();
+		const files = collectSourceFiles(tmpDir, {
+			maxFiles: 4,
+			prioritizeCodeKinds: true,
+		});
+		expect(files.length).toBe(4);
+		expect(files.some((f) => f.endsWith("a.ts"))).toBe(true);
+		expect(files.some((f) => f.endsWith("b.ts"))).toBe(true);
+	});
+
+	it("default (unprioritized) behavior is unchanged", async () => {
+		makeNoisyTree();
+		const files = await collectSourceFilesAsync(tmpDir, { maxFiles: 4 });
+		// Walk order fills the cap with the root-level json files.
+		expect(files.length).toBe(4);
+		expect(files.every((f) => f.endsWith(".json"))).toBe(true);
+	});
+});
+
 describe("generated-header read memo", () => {
 	it("reuses the header verdict on a repeat scan of unchanged files", async () => {
 		generateSourceTree(tmpDir, 400);

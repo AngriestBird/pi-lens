@@ -24,7 +24,7 @@ import {
 	isDeclarationFile,
 	isGeneratedOrArtifact,
 } from "./generated-artifacts.js";
-import { KIND_EXTENSIONS } from "./file-kinds.js";
+import { isCodeKindFile, KIND_EXTENSIONS } from "./file-kinds.js";
 import { normalizeEphemeralMapKey } from "./path-utils.js";
 import { isSlowFs, SLOW_FS_REDUCED_MAX_FILES } from "./slow-fs.js";
 import {
@@ -191,6 +191,49 @@ export interface SourceCollectionOptions {
 	 * consistently with startup-scan's entry budget. Refs #760.
 	 */
 	maxScanEntries?: number;
+	/**
+	 * Give CODE_KINDS files priority within the `maxFiles` cap (#894 review).
+	 * With broadened enumeration, a walk-order pile of data/doc files
+	 * (json/yaml/markdown/…) ahead of the code dirs could exhaust `maxFiles`
+	 * and evict real source files from a capped collection entirely (e.g. the
+	 * word index). When set, the walk keeps filling until `maxFiles` CODE
+	 * files are found (non-code files are buffered up to the remaining
+	 * budget), and the returned list is code files first, then non-code files
+	 * up to `maxFiles` total. Total work stays bounded by `maxScanEntries`
+	 * exactly as before. Default false — unprioritized walk order.
+	 */
+	prioritizeCodeKinds?: boolean;
+}
+
+/**
+ * Kept-files accumulator shared by the sync/async collectors, so the
+ * `prioritizeCodeKinds` policy (#894 review) lives in one place. In the
+ * default mode it is a plain array with the pre-existing `maxFiles` stop
+ * check; in prioritized mode code-kind files alone satisfy the cap and
+ * non-code files only fill whatever budget the code files leave unused.
+ */
+function createKeptFilesAccumulator(
+	maxFiles: number,
+	prioritizeCodeKinds: boolean,
+): { push(file: string): void; isFull(): boolean; list(): string[] } {
+	if (!prioritizeCodeKinds) {
+		const files: string[] = [];
+		return {
+			push: (file) => void files.push(file),
+			isFull: () => files.length >= maxFiles,
+			list: () => files,
+		};
+	}
+	const codeFiles: string[] = [];
+	const otherFiles: string[] = [];
+	return {
+		push(file) {
+			if (isCodeKindFile(file)) codeFiles.push(file);
+			else if (otherFiles.length < maxFiles) otherFiles.push(file);
+		},
+		isFull: () => codeFiles.length >= maxFiles,
+		list: () => [...codeFiles, ...otherFiles].slice(0, maxFiles),
+	};
 }
 
 /**
@@ -451,7 +494,10 @@ export function collectSourceFilesWithBudget(
 	const cfg = resolveCollectionConfig(rootDir, options, {
 		clampForSlowFsSyncWalk: true,
 	});
-	const files: string[] = [];
+	const kept = createKeptFilesAccumulator(
+		cfg.maxFiles,
+		options?.prioritizeCodeKinds === true,
+	);
 	// Per-walk sibling-probe memo (refs #191, item 1). Created here, discarded
 	// on return — never persisted across calls.
 	const probeCache = createArtifactProbeCache();
@@ -463,7 +509,7 @@ export function collectSourceFilesWithBudget(
 	// (#760), and a file that reaches `maxFiles` is the last one kept — the cap
 	// then trips on the following entry, matching the pre-#761 loop exactly.
 	walkTreeRecursiveSync(rootDir, (entry, fullPath) => {
-		if (files.length >= cfg.maxFiles) return "stop"; // hard cap (#250)
+		if (kept.isFull()) return "stop"; // hard cap (#250)
 		if (!chargeEntryBudget(budget)) return "stop"; // entry budget (#760)
 		const { recurseInto, keepFile } = classifyEntry(
 			entry,
@@ -472,10 +518,10 @@ export function collectSourceFilesWithBudget(
 			probeCache,
 		);
 		if (recurseInto) return "recurse";
-		if (keepFile) files.push(keepFile);
+		if (keepFile) kept.push(keepFile);
 		return "skip";
 	});
-	return { files, entryBudgetExceeded: budget.exceeded };
+	return { files: kept.list(), entryBudgetExceeded: budget.exceeded };
 }
 
 export function collectSourceFiles(
@@ -516,7 +562,10 @@ export async function collectSourceFilesWithBudgetAsync(
 ): Promise<SourceCollectionResult> {
 	const rootDir = path.resolve(dir);
 	const cfg = resolveCollectionConfig(rootDir, options);
-	const files: string[] = [];
+	const kept = createKeptFilesAccumulator(
+		cfg.maxFiles,
+		options?.prioritizeCodeKinds === true,
+	);
 	// Per-walk sibling-probe memo (refs #191, item 1). A single async walk is
 	// still one point-in-time snapshot despite yielding between chunks, so
 	// caching across the whole call remains invalidation-free.
@@ -540,8 +589,8 @@ export async function collectSourceFilesWithBudgetAsync(
 			);
 			if (recurseInto) return "recurse";
 			if (keepFile) {
-				files.push(keepFile);
-				if (files.length >= cfg.maxFiles) return "stop"; // hard cap (#250)
+				kept.push(keepFile);
+				if (kept.isFull()) return "stop"; // hard cap (#250)
 			}
 			return "skip";
 		},
@@ -558,7 +607,7 @@ export async function collectSourceFilesWithBudgetAsync(
 		},
 	);
 
-	return { files, entryBudgetExceeded: budget.exceeded };
+	return { files: kept.list(), entryBudgetExceeded: budget.exceeded };
 }
 
 /**
