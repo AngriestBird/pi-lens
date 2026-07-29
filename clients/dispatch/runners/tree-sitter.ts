@@ -465,7 +465,9 @@ const treeSitterRunner: RunnerDefinition = {
 					post_filter_params: q.post_filter_params,
 					defect_class: q.defect_class,
 					inline_tier: q.inline_tier,
+					skip_test_files: q.skip_test_files,
 					has_fix: q.has_fix,
+					fix_action: q.fix_action,
 					filePath: q.filePath,
 				})),
 			);

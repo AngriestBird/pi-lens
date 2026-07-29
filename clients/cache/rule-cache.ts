@@ -11,7 +11,9 @@ import * as path from "node:path";
 import { getProjectDataDir } from "../file-utils.js";
 import { readJsonCache } from "../json-cache-read.js";
 
-const CACHE_VERSION = "v3";
+// v4: cache skip_test_files + fix_action — v3 entries silently dropped them,
+// and ruleHash (rule-file mtimes) never invalidates on a code-only fix.
+export const CACHE_VERSION = "v4";
 
 export interface QueryCacheEntry {
 	version: string;
@@ -30,7 +32,9 @@ export interface QueryCacheEntry {
 		post_filter_params?: Record<string, any>;
 		defect_class?: string;
 		inline_tier?: "blocking" | "warning" | "review";
+		skip_test_files?: boolean;
 		has_fix?: boolean;
+		fix_action?: string;
 		filePath?: string;
 	}>;
 }

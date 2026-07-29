@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RuleCache } from "../../../clients/cache/rule-cache.js";
+import { CACHE_VERSION, RuleCache } from "../../../clients/cache/rule-cache.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 const cleanup: string[] = [];
@@ -71,6 +71,47 @@ describe("RuleCache", () => {
 		expect(consoleRule?.inline_tier).toBe("warning");
 	});
 
+	// #448: the set() projection in the tree-sitter runner once dropped
+	// skip_test_files and fix_action, silently killing the #440 test-file
+	// carve-out on every cache HIT. Pin every runner-consulted field.
+	it("preserves every runner-consulted field across a save+load roundtrip", () => {
+		const { cwd, ruleFile } = setupProject();
+		const cache = new RuleCache("python", cwd);
+
+		cache.set([ruleFile], [
+			{
+				id: "python-assert-production",
+				name: "Assert in production",
+				severity: "warning",
+				language: "python",
+				message: "assert is stripped by -O",
+				query: "(assert_statement) @a",
+				metavars: ["a"],
+				post_filter: "name_matches_param",
+				post_filter_params: { max: 3 },
+				defect_class: "safety",
+				inline_tier: "warning",
+				skip_test_files: true,
+				has_fix: true,
+				fix_action: "remove",
+				filePath: ruleFile,
+			},
+		]);
+
+		const loaded = cache.get([ruleFile])?.queries[0];
+		expect(loaded).toMatchObject({
+			severity: "warning",
+			post_filter: "name_matches_param",
+			post_filter_params: { max: 3 },
+			defect_class: "safety",
+			inline_tier: "warning",
+			skip_test_files: true,
+			has_fix: true,
+			fix_action: "remove",
+			filePath: ruleFile,
+		});
+	});
+
 	it("invalidates the cache when the schema version changes", () => {
 		const { cwd, ruleFile } = setupProject();
 		const cache = new RuleCache("typescript", cwd);
@@ -93,7 +134,7 @@ describe("RuleCache", () => {
 			cwd,
 			".pi-lens",
 			"cache",
-			"typescript-rules-v3.json",
+			`typescript-rules-${CACHE_VERSION}.json`,
 		);
 		expect(fs.existsSync(cacheFile)).toBe(true);
 
