@@ -543,7 +543,8 @@ const treeSitterRunner: RunnerDefinition = {
 						);
 
 						for (const match of matches) {
-							// Get line/column from match (already 0-indexed from tree-sitter)
+							// match.line/column are already 1-indexed — the client emits
+							// startPosition.row + 1 (tree-sitter-client searchFileWithQuery).
 							const line = match.line;
 							const column = match.column;
 
@@ -556,7 +557,7 @@ const treeSitterRunner: RunnerDefinition = {
 							if (
 								ctx.blockingOnly &&
 								isSeverityBlocking &&
-								!isLineInModifiedRanges(line + 1, ctx.modifiedRanges)
+								!isLineInModifiedRanges(line, ctx.modifiedRanges)
 							) {
 								continue;
 							}
@@ -586,8 +587,8 @@ const treeSitterRunner: RunnerDefinition = {
 									(_, name) => match.captures[name]?.trim() ?? `{{${name}}}`,
 								),
 								filePath,
-								line: line + 1, // 1-indexed
-								column: column + 1, // 1-indexed
+								line,
+								column,
 								severity: query.severity,
 								semantic,
 								tool: "tree-sitter",
