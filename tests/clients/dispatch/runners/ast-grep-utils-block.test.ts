@@ -42,7 +42,7 @@ const RULES_DIR = path.join(process.cwd(), "rules", "ast-grep-rules", "rules");
 //
 // The remaining one hits an UNRELATED pre-existing gate inside the same
 // runner before the utils fix would ever matter:
-	//   - rust-2024-let-chain-candidate is `language: Rust`; the @ast-grep/napi
+//   - rust-2024-let-chain-candidate is `language: Rust`; the @ast-grep/napi
 //     build this repo ships doesn't even expose a Rust parser (its `Lang`
 //     enum is Html/JavaScript/Tsx/Css/TypeScript only) — Rust rules run via
 //     the ast-grep CLI/LSP only, already covered by
@@ -75,14 +75,14 @@ async function rulesFiredOn(
 describe("ast-grep NAPI utils: block passthrough (#663)", () => {
 	describe("via the real runner front door (unblocked by any other gate)", () => {
 		it("no-dupe-keys fires on a real duplicate key", async () => {
-			expect(
-				await rulesFiredOn("const o = { a: 1, a: 2 };\n"),
-			).toContain("no-dupe-keys");
+			expect(await rulesFiredOn("const o = { a: 1, a: 2 };\n")).toContain(
+				"no-dupe-keys",
+			);
 		});
 		it("no-dupe-keys does not fire on distinct keys", async () => {
-			expect(
-				await rulesFiredOn("const o = { a: 1, b: 2 };\n"),
-			).not.toContain("no-dupe-keys");
+			expect(await rulesFiredOn("const o = { a: 1, b: 2 };\n")).not.toContain(
+				"no-dupe-keys",
+			);
 		});
 
 		it("TSX-tagged rules fire on a TSX file", async () => {
@@ -111,12 +111,22 @@ describe("ast-grep NAPI utils: block passthrough (#663)", () => {
 			);
 			// Bulk-expected skips (every non-jsts catalog rule) must not produce
 			// per-rule terminal lines — that spams the pi session (#282 follow-up).
-			expect(logs.filter((m) => m.includes("unsupported language"))).toHaveLength(0);
+			expect(
+				logs.filter((m) => m.includes("unsupported language")),
+			).toHaveLength(0);
 			const entries = logLatency.mock.calls
-				.map(([entry]) => entry as { phase?: string; metadata?: Record<string, unknown> })
+				.map(
+					([entry]) =>
+						entry as { phase?: string; metadata?: Record<string, unknown> },
+				)
 				.filter((e) => e.phase === "astgrep_napi_unsupported_rules_skipped");
 			expect(entries).toHaveLength(1);
-			const python = (entries[0].metadata?.skippedByLanguage as Record<string, { count: number; ruleIds: string[] }>).python;
+			const python = (
+				entries[0].metadata?.skippedByLanguage as Record<
+					string,
+					{ count: number; ruleIds: string[] }
+				>
+			).python;
 			expect(python.ruleIds).toContain("no-compile-call");
 			expect(python.count).toBe(python.ruleIds.length);
 		});
@@ -138,23 +148,31 @@ describe("ast-grep NAPI utils: block passthrough (#663)", () => {
 				const root = { findAll: () => [] };
 				evaluateAstGrepRules(filePath, root, env.tmpDir, "python", options);
 				evaluateAstGrepRules(filePath, root, env.tmpDir, "python", options);
-				expect(logs.filter((m) => m.includes("unsupported language"))).toHaveLength(0);
+				expect(
+					logs.filter((m) => m.includes("unsupported language")),
+				).toHaveLength(0);
 				const entries = logLatency.mock.calls
-					.map(([entry]) => entry as { phase?: string; metadata?: Record<string, unknown> })
+					.map(
+						([entry]) =>
+							entry as { phase?: string; metadata?: Record<string, unknown> },
+					)
 					.filter((e) => e.phase === "astgrep_napi_unsupported_rules_skipped");
 				// Second evaluation sees the shared dedup set already populated and
 				// emits nothing — one aggregate entry total, not one per evaluation.
 				expect(entries).toHaveLength(1);
-				const languages = entries[0].metadata?.skippedByLanguage as Record<string, { ruleIds: string[] }>;
+				const languages = entries[0].metadata?.skippedByLanguage as Record<
+					string,
+					{ ruleIds: string[] }
+				>;
 				expect(languages.python.ruleIds).toContain("no-compile-call");
 			} finally {
 				env.cleanup();
 			}
 		});
 		it("no-dupe-keys fires on a duplicate key/method pair", async () => {
-			expect(
-				await rulesFiredOn('const o = { a: 1, a() {} };\n'),
-			).toContain("no-dupe-keys");
+			expect(await rulesFiredOn("const o = { a: 1, a() {} };\n")).toContain(
+				"no-dupe-keys",
+			);
 		});
 
 		it("no-dupe-keys-js fires on a real duplicate key", async () => {
@@ -174,14 +192,14 @@ describe("ast-grep NAPI utils: block passthrough (#663)", () => {
 		// same fixture cases as rules/ast-grep-rules/rule-tests/
 		// no-dupe-class-members-test.yml's invalid: / valid: entries.
 		it("no-dupe-class-members fires on a duplicate method", async () => {
-			expect(
-				await rulesFiredOn("class A { foo() {} foo() {} }\n"),
-			).toContain("no-dupe-class-members");
+			expect(await rulesFiredOn("class A { foo() {} foo() {} }\n")).toContain(
+				"no-dupe-class-members",
+			);
 		});
 		it("no-dupe-class-members fires on a duplicate field", async () => {
-			expect(
-				await rulesFiredOn("class A { foo = 1; foo = 2; }\n"),
-			).toContain("no-dupe-class-members");
+			expect(await rulesFiredOn("class A { foo = 1; foo = 2; }\n")).toContain(
+				"no-dupe-class-members",
+			);
 		});
 		it("no-dupe-class-members does not fire on distinct members", async () => {
 			expect(
@@ -240,9 +258,7 @@ describe("ast-grep NAPI utils: block passthrough (#663)", () => {
 				"../../../../clients/dispatch/runners/yaml-rule-parser.js"
 			);
 			const rules = loadYamlRulesUncached(RULES_DIR);
-			const rule = rules.find(
-				(r) => r.id === "rust-2024-let-chain-candidate",
-			);
+			const rule = rules.find((r) => r.id === "rust-2024-let-chain-candidate");
 			expect(rule, "rust-2024-let-chain-candidate rule not found").toBeTruthy();
 			expect(
 				rule?.utils && Object.keys(rule.utils).length > 0,

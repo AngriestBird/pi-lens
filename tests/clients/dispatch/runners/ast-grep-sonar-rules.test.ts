@@ -152,9 +152,9 @@ describe("ast-grep Sonar gap rules (integration via real runner)", () => {
 	// `stopBy`, and rules that were dead under the old engine now fire.
 	describe("native engine (#206 migration)", () => {
 		it("flags for...in but not for...of", async () => {
-			expect(await rulesFiredOn("for (const k in obj) { use(k); }\n")).toContain(
-				"ts-in-operator-loop",
-			);
+			expect(
+				await rulesFiredOn("for (const k in obj) { use(k); }\n"),
+			).toContain("ts-in-operator-loop");
 			expect(
 				await rulesFiredOn("for (const v of arr) { use(v); }\n"),
 			).not.toContain("ts-in-operator-loop");
@@ -172,11 +172,7 @@ describe("ast-grep Sonar gap rules (integration via real runner)", () => {
 			// still holds (no cross-firing of the JS twin on a .ts file).
 			it("flags a chained ternary on .ts", async () => {
 				expect(
-					await rulesFiredOn(
-						"const x = a ? b : c ? d : e;\n",
-						{},
-						"sample.ts",
-					),
+					await rulesFiredOn("const x = a ? b : c ? d : e;\n", {}, "sample.ts"),
 				).toContain("nested-ternary");
 			});
 			it("flags a parenthesized nested ternary on .ts (needs stopBy: end)", async () => {
@@ -195,20 +191,12 @@ describe("ast-grep Sonar gap rules (integration via real runner)", () => {
 			});
 			it("does NOT cross-fire the JavaScript-tagged twin on a .ts file (#657)", async () => {
 				expect(
-					await rulesFiredOn(
-						"const x = a ? b : c ? d : e;\n",
-						{},
-						"sample.ts",
-					),
+					await rulesFiredOn("const x = a ? b : c ? d : e;\n", {}, "sample.ts"),
 				).not.toContain("nested-ternary-js");
 			});
 			it("flags a chained ternary on .js via the JavaScript-tagged twin", async () => {
 				expect(
-					await rulesFiredOn(
-						"const x = a ? b : c ? d : e;\n",
-						{},
-						"sample.js",
-					),
+					await rulesFiredOn("const x = a ? b : c ? d : e;\n", {}, "sample.js"),
 				).toContain("nested-ternary-js");
 			});
 			it("does NOT flag a single ternary on .js", async () => {
@@ -252,9 +240,9 @@ describe("ast-grep Sonar gap rules (integration via real runner)", () => {
 			// dedicated utils:-passthrough regression coverage across all 5
 			// affected rules).
 			it("flags a duplicate method", async () => {
-				expect(
-					await rulesFiredOn("class A { foo() {} foo() {} }\n"),
-				).toContain("no-dupe-class-members");
+				expect(await rulesFiredOn("class A { foo() {} foo() {} }\n")).toContain(
+					"no-dupe-class-members",
+				);
 			});
 		});
 
@@ -275,9 +263,9 @@ describe("ast-grep Sonar gap rules (integration via real runner)", () => {
 
 		describe("relational rules rewritten for napi (were dead under the old engine)", () => {
 			it("ts-object-hasown-check flags obj.hasOwnProperty(k)", async () => {
-				expect(
-					await rulesFiredOn("if (obj.hasOwnProperty(k)) {}\n"),
-				).toContain("ts-object-hasown-check");
+				expect(await rulesFiredOn("if (obj.hasOwnProperty(k)) {}\n")).toContain(
+					"ts-object-hasown-check",
+				);
 			});
 			it("ts-unnecessary-else-return flags if-return + else", async () => {
 				expect(
@@ -288,7 +276,9 @@ describe("ast-grep Sonar gap rules (integration via real runner)", () => {
 			});
 			it("redundant-state flags const-then-return (follows, immediate sibling)", async () => {
 				expect(
-					await rulesFiredOn("function f(){ const x = compute(); return x; }\n"),
+					await rulesFiredOn(
+						"function f(){ const x = compute(); return x; }\n",
+					),
 				).toContain("redundant-state");
 			});
 		});
