@@ -46,6 +46,19 @@ All notable changes to pi-lens will be documented in this file.
 
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 
+- **Small edits no longer pay the entity-extraction cost** (refs #885) — the
+	<5-line skip threshold only guarded the zero-diagnostics early return; a
+	second `extractEntitySnapshot` block ran unconditionally, so trivial edits
+	still spent ~500-800ms per dispatch and, on unsaved buffers, parsed stale
+	disk content (thrashing the parse-cache entry). Extraction is now one
+	threshold-guarded block that receives the same `file.content` override the
+	diagnostics phase used.
+- **The per-edit tree-sitter runner walks the tree once, not once per rule**
+	(refs #888) — the dispatch hot path ran ~30-40 `runQueryOnFile` walks per
+	edit behind a concurrency limiter that could not parallelize synchronous
+	WASM. It now calls `runQueriesOnFile` once (#675 batching) and distributes
+	the per-rule results; the per-rule `maxResults(10)` cap and modified-ranges
+	gating are unchanged.
 - **A transient grammar-load failure no longer disables batched rule scans for the process lifetime** (refs #889) — `compileQueryBatch` cached `null` on ANY `build()` failure, including a transient `loadLanguage()` miss (offline lazy grammar fetch, mid-scan load error), so every later scan fell back to the per-rule path and paid ~3.3× forever. Load failures are now distinguished from genuine batch-compile failures: they are not cached (the next scan retries the load and recovers), with retries bounded at 3 consecutive load failures per rule set before the miss is cached, so a grammar that never loads doesn't hot-loop. Deterministic compile failures still cache `null` permanently. The query/batch cache keys also switched from a collision-prone 32-bit hash to the full pattern text.
 - **module-report parses plain JS under the correct tree-sitter grammar** (closes
 	#887) — `tsLangForFile` hand-rolled a local extension map that sent
@@ -65,6 +78,11 @@ All notable changes to pi-lens will be documented in this file.
 	javascript set is the same queries minus the type-only patterns, with class
 	names matched as `(identifier)` instead of `(type_identifier)`.
 - **A rule whose query fails to compile now warns once instead of silently reporting nothing** (refs #884) — both compile paths (`compileQueryBatch`'s per-rule drop and `compileRawQuery`, which every per-edit `runQueryOnFile` call falls back on) previously either `dbg()`-logged (invisible without verbose mode) or returned `null`/`[]` with no trail at all. They now call a shared `reportQueryCompileFailure`, mirroring the existing unimplemented-`post_filter` warning: one `console.error` per broken rule id, not per file. A new compile-guard test (`tests/clients/tree-sitter-rule-compile-guard.test.ts`) compiles every non-disabled shipped rule against its real grammar and caught the 32 rules #884 reports as currently broken (tracked there in a shrink-only `KNOWN_BROKEN` allowlist so follow-up fix PRs are forced to remove their entries, and the list can't grow or go stale unnoticed).
+- **TreeCache mtime false misses and FIFO eviction** (closes #890) — a content
+	hash match is now authoritative: a save-without-change (same bytes, newer
+	mtime) is a cache hit that refreshes the entry's stat metadata instead of
+	invalidating and re-parsing, and `get()` re-inserts hit entries so eviction
+	is true LRU — hot per-edit files are no longer evicted by scan traffic.
 - **Eight enabled typescript/javascript tree-sitter rules whose queries never
 	compiled** (refs #884) — each had been silently dead since authoring because
 	its query failed to compile against the real grammar, so it matched nothing
