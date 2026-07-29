@@ -26,13 +26,12 @@ description: |
     func work(s *S) { s.mu.Lock() }
 
 query: |
-  (short_var_declaration
-    right: (call_expression
-      function: (selector_expression
-        operand: (identifier) @PKG
-        field: (field_identifier) @FN)
-      (#eq? @PKG "sync")
-      (#match? @FN "^(Mutex|RWMutex)$"))) @DECL
+  (parameter_declaration
+    type: (qualified_type
+      package: (package_identifier) @PKG
+      name: (type_identifier) @FN)
+    (#eq? @PKG "sync")
+    (#match? @FN "^(Mutex|RWMutex)$")) @DECL
 
 metavars:
   - PKG
