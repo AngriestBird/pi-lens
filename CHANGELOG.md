@@ -44,6 +44,10 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **A mid-scan tree-sitter WASM abort no longer replaces the authoritative
+	project-diagnostics snapshot with a silently truncated result** (refs #891).
+	The partial scan is returned with `scanTruncated`, logs its completed/total
+	file counts and abort point, and leaves the previous complete cache intact.
 - **Small edits no longer pay the entity-extraction cost** (refs #885) — the
 	<5-line skip threshold only guarded the zero-diagnostics early return; a
 	second `extractEntitySnapshot` block ran unconditionally, so trivial edits
