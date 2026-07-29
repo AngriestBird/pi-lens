@@ -5,22 +5,29 @@
  * is reachable there. Fixture rules: debugger-statement (severity error,
  * inline_tier blocking) and variable-shadowing (inline_tier review).
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import treeSitterRunner from "../../../../clients/dispatch/runners/tree-sitter.js";
+
+// Keep unrelated fire-and-forget review-graph enrichment out of real-runner tests.
+vi.mock(
+	"../../../../clients/review-graph/service.js",
+	async (importOriginal) => ({
+		...(await importOriginal<
+			typeof import("../../../../clients/review-graph/service.js")
+		>()),
+		recordEntitySnapshotDiff: () => ({ added: [], removed: [], modified: [] }),
+	}),
+);
 import {
 	assertGrammarAvailable,
 	firedRuleIds,
-	makeRealRunnerCtx,
+	makeRealRunnerEnv,
+	type RealRunnerEnv,
 } from "../../../support/real-runner-ctx.js";
-import type { RunnerCtxOverrides } from "../../../support/runner-ctx.js";
+let env: RealRunnerEnv;
+afterAll(() => env.cleanup());
 
-const cleanups: Array<() => void> = [];
-afterAll(() => {
-	for (const c of cleanups) c();
-});
-
-// Matches variable-shadowing's query shape (param redeclared via const) and
-// carries a debugger statement for the blocking tier.
+// Matches variable-shadowing and puts debugger statements on lines 3 and 8.
 const MIXED_SRC = [
 	"function process(data) {",
 	"\tconst data = 1;",
@@ -28,67 +35,44 @@ const MIXED_SRC = [
 	"\treturn data;",
 	"}",
 	"",
-].join("\n");
-
-// debugger; on source lines 2 and 8.
-const TWO_DEBUGGERS_SRC = [
-	"function a() {",
-	"\tdebugger;",
-	"}",
-	"",
-	"function b() {",
-	"\tconst x = 1;",
-	"\tvoid x;",
+	"function other() {",
 	"\tdebugger;",
 	"}",
 	"",
 ].join("\n");
-
-async function debuggerHits(overrides: RunnerCtxOverrides) {
-	const real = makeRealRunnerCtx("two.ts", TWO_DEBUGGERS_SRC, overrides);
-	cleanups.push(real.cleanup);
-	const result = await treeSitterRunner.run(real.ctx);
-	return result.diagnostics.filter((d) => d.rule === "debugger-statement");
-}
 
 describe("tree-sitter runner — dispatch filtering (#448)", () => {
-	beforeAll(() => assertGrammarAvailable("typescript"));
+	beforeAll(async () => {
+		env = makeRealRunnerEnv();
+		await assertGrammarAvailable("typescript");
+	});
 
-	// Positive first: a query that fails to compile under the bundled grammar
-	// returns 0 matches SILENTLY, which would make the blockingOnly negative
-	// below pass vacuously.
-	it("review-tier rules run when not blockingOnly", async () => {
-		const real = makeRealRunnerCtx("app.ts", MIXED_SRC);
-		cleanups.push(real.cleanup);
-		const fired = firedRuleIds(await treeSitterRunner.run(real.ctx));
+	// The positive review-tier assertion keeps both negative filters below from
+	// passing vacuously if the real query fails to compile.
+	it("runs review-tier rules and ignores modifiedRanges outside blockingOnly", async () => {
+		const { ctx } = env.addFile("all-diagnostics.ts", MIXED_SRC, {
+			modifiedRanges: [{ start: 1, end: 4 }],
+		});
+		const result = await treeSitterRunner.run(ctx);
+		const fired = firedRuleIds(result);
+		const debuggerLines = result.diagnostics
+			.filter((d) => d.rule === "debugger-statement")
+			.map((d) => d.line);
 		expect(fired).toContain("variable-shadowing");
-		expect(fired).toContain("debugger-statement");
+		expect(debuggerLines).toEqual([3, 8]);
 	}, 30_000);
 
-	it("blockingOnly filters review-tier rules pre-query", async () => {
-		const real = makeRealRunnerCtx("app.ts", MIXED_SRC, {
+	it("filters review-tier rules and gates blocking diagnostics to modifiedRanges", async () => {
+		const { ctx } = env.addFile("blocking-only.ts", MIXED_SRC, {
 			blockingOnly: true,
+			modifiedRanges: [{ start: 1, end: 4 }],
 		});
-		cleanups.push(real.cleanup);
-		const fired = firedRuleIds(await treeSitterRunner.run(real.ctx));
-		expect(fired).toContain("debugger-statement");
+		const result = await treeSitterRunner.run(ctx);
+		const fired = firedRuleIds(result);
+		const debuggerLines = result.diagnostics
+			.filter((d) => d.rule === "debugger-statement")
+			.map((d) => d.line);
 		expect(fired).not.toContain("variable-shadowing");
-	}, 30_000);
-
-	it("modifiedRanges gates blocking diagnostics to changed lines", async () => {
-		const hits = await debuggerHits({
-			blockingOnly: true,
-			modifiedRanges: [{ start: 1, end: 3 }],
-		});
-		expect(hits).toHaveLength(1);
-		expect(hits[0]?.line).toBe(2);
-	}, 30_000);
-
-	it("modifiedRanges do not gate when blockingOnly is false", async () => {
-		const hits = await debuggerHits({
-			blockingOnly: false,
-			modifiedRanges: [{ start: 1, end: 3 }],
-		});
-		expect(hits.map((d) => d.line ?? 0).sort((a, b) => a - b)).toEqual([2, 8]);
+		expect(debuggerLines).toEqual([3]);
 	}, 30_000);
 });

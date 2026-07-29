@@ -34,9 +34,15 @@ describe("makeRealRunnerEnv", () => {
 		expect(env.addFile("a.py", "").ctx.kind).toBe("python");
 		expect(env.addFile("a.ts", "").ctx.kind).toBe("jsts");
 
+		expect(env.addFile("a.yml", "").ctx.kind).toBe("yaml");
+
 		const forced = makeRealRunnerEnv({ kind: "go" });
 		cleanups.push(forced.cleanup);
 		expect(forced.addFile("a.py", "").ctx.kind).toBe("go");
+		expect(forced.addFile("b.py", "", { kind: "rust" }).ctx.kind).toBe("rust");
+		expect(() => env.addFile("unknown.fixture", "")).toThrow(
+			/Cannot derive a FileKind/,
+		);
 	});
 
 	it("temp cwd contains no isTestFile marker (would invert skip_test_files assertions)", () => {

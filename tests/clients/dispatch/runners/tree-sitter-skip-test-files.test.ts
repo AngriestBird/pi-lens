@@ -6,32 +6,44 @@
  * REAL runner (real client + real query loader) so the isTestFile filter is under
  * test, not mocked away.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import treeSitterRunner from "../../../../clients/dispatch/runners/tree-sitter.js";
+
+// Keep unrelated fire-and-forget review-graph enrichment out of real-runner tests.
+vi.mock(
+	"../../../../clients/review-graph/service.js",
+	async (importOriginal) => ({
+		...(await importOriginal<
+			typeof import("../../../../clients/review-graph/service.js")
+		>()),
+		recordEntitySnapshotDiff: () => ({ added: [], removed: [], modified: [] }),
+	}),
+);
 import {
 	assertGrammarAvailable,
 	firedRuleIds,
-	makeRealRunnerCtx,
+	makeRealRunnerEnv,
+	type RealRunnerEnv,
 } from "../../../support/real-runner-ctx.js";
 
-const cleanups: Array<() => void> = [];
-afterAll(() => {
-	for (const c of cleanups) c();
-});
+let env: RealRunnerEnv;
+afterAll(() => env.cleanup());
 
 async function rulesFor(
 	relPath: string,
 	content: string,
 ): Promise<Set<string>> {
-	const real = makeRealRunnerCtx(relPath, content);
-	cleanups.push(real.cleanup);
-	return firedRuleIds(await treeSitterRunner.run(real.ctx));
+	const { ctx } = env.addFile(relPath, content);
+	return firedRuleIds(await treeSitterRunner.run(ctx));
 }
 
 const ASSERT_SRC = "def f(x):\n    assert x > 0, 'x required'\n    return x\n";
 
 describe("tree-sitter runner — skip_test_files (#440)", () => {
-	beforeAll(() => assertGrammarAvailable("python"));
+	beforeAll(async () => {
+		env = makeRealRunnerEnv();
+		await assertGrammarAvailable("python");
+	});
 
 	it("flags python-assert-production in a production file", async () => {
 		expect(await rulesFor("app.py", ASSERT_SRC)).toContain(

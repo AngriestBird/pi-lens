@@ -197,7 +197,7 @@ Tree-sitter rules live in `rules/tree-sitter-queries/<language>/`.
 2. Place it under the correct language directory (e.g. `rules/tree-sitter-queries/typescript/`).
 3. Disabled rules go in `rules/tree-sitter-queries/<language>-disabled/`.
 4. Add a query-level test in `tests/clients/tree-sitter-*.test.ts` (real `runQueryOnFile` against a fixture).
-5. A rule-bug fix ships a real-runner regression test: fixture in, assert the rule fires or doesn't through `treeSitterRunner.run()` via `makeRealRunnerCtx` from `tests/support/real-runner-ctx.ts`. Template: `tests/clients/dispatch/runners/tree-sitter-skip-test-files.test.ts`. Query-level tests can't see dispatch behavior (skip_test_files, tiers, delta, cache round-trips) — that's where #440 hid.
+5. A rule-bug fix ships a real-runner regression test through `treeSitterRunner.run()` via `tests/support/real-runner-ctx.ts`. Prefer one suite-scoped `makeRealRunnerEnv`; batch related valid/invalid snippets and assert rule-specific lines. Query-level tests can't see dispatch behavior (`skip_test_files`, tiers, delta, cache round-trips). That's where #440 hid.
 
 ### Centralization note
 
