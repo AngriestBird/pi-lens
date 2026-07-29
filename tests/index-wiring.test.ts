@@ -65,6 +65,7 @@ const EXPECTED_COMMANDS = [
 	"lens-tdi",
 	"lens-map",
 	"lens-health",
+	"lens-perf",
 	"lens-tools",
 	"lens-allow-edit",
 ];
@@ -336,6 +337,21 @@ describe("index.ts extension wiring", () => {
 			const out = ctx.notifications.map((n) => n.message).join("\n");
 			expect(out).toContain("🩺 PI-LENS HEALTH");
 			expect(out).toContain("Event loop (session):");
+		});
+	});
+
+	describe("/lens-perf surfaces latency-log phase percentiles (#767)", () => {
+		it("includes current-session and active-log scopes", async () => {
+			const pi = createPiMock();
+			extension(pi.asExtensionAPI());
+			const ctx = makeCtx();
+
+			await pi.runCommand("lens-perf", "", ctx);
+
+			const out = ctx.notifications.map((n) => n.message).join("\n");
+			expect(out).toContain("⏱️ PI-LENS PERFORMANCE");
+			expect(out).toContain("Current process session");
+			expect(out).toContain("Machine-wide active log window");
 		});
 	});
 });

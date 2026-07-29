@@ -1,0 +1,463 @@
+import * as fs from "node:fs";
+import * as readline from "node:readline";
+import {
+	flushLatencyLog,
+	getLatencyLogPath,
+	type LatencyEntry,
+} from "./latency-logger.js";
+
+export const DEFAULT_PERF_TOP_N = 5;
+export const MAX_PERF_LOG_BYTES = 10 * 1024 * 1024;
+export const MAX_PERF_PHASE_SAMPLES = 20_000;
+const PARSE_YIELD_EVERY = 500;
+
+function boundedPositiveInteger(value: number, maximum: number): number {
+	return Number.isFinite(value) && value > 0
+		? Math.min(maximum, Math.max(1, Math.floor(value)))
+		: maximum;
+}
+
+export interface PhaseLatencySummary {
+	phase: string;
+	samples: number;
+	p50Ms: number;
+	p99Ms: number;
+}
+
+export interface PhaseLatencyScope {
+	sampleCount: number;
+	phaseCount: number;
+	oldestTs?: string;
+	newestTs?: string;
+	slowestByP50: PhaseLatencySummary[];
+	slowestByP99: PhaseLatencySummary[];
+}
+
+export interface LatencyPerformanceReport {
+	logPath: string;
+	topN: number;
+	windowTruncated: boolean;
+	logSamplesTruncated: boolean;
+	sessionSamplesTruncated: boolean;
+	totalPhaseSamples: number;
+	totalSessionPhaseSamples: number;
+	malformedLines: number;
+	invalidRecords: number;
+	session: PhaseLatencyScope;
+	logWindow: PhaseLatencyScope;
+}
+
+export interface CollectLatencyPerformanceOptions {
+	sessionStartedAt: number;
+	processId?: number;
+	topN?: number;
+	logPath?: string;
+	maxBytes?: number;
+	maxSamples?: number;
+}
+
+interface BoundedPhaseEntries {
+	values: LatencyEntry[];
+	nextIndex: number;
+	total: number;
+}
+
+interface PhaseLogTail {
+	logEntries: LatencyEntry[];
+	sessionEntries: LatencyEntry[];
+	windowTruncated: boolean;
+	logSamplesTruncated: boolean;
+	sessionSamplesTruncated: boolean;
+	totalPhaseSamples: number;
+	totalSessionPhaseSamples: number;
+	malformedLines: number;
+	invalidRecords: number;
+}
+
+interface RawPhaseLatencySummary extends PhaseLatencySummary {
+	p50RawMs: number;
+	p99RawMs: number;
+}
+
+function percentile(sorted: readonly number[], quantile: number): number {
+	const position = (sorted.length - 1) * quantile;
+	const lower = Math.floor(position);
+	const upper = Math.ceil(position);
+	return lower === upper
+		? sorted[lower]
+		: sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+}
+
+function roundedMs(value: number): number {
+	return Math.round(value * 10) / 10;
+}
+
+function isPhaseRecord(value: unknown): value is LatencyEntry {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const entry = value as Partial<LatencyEntry>;
+	return (
+		entry.type === "phase" &&
+		typeof entry.phase === "string" &&
+		entry.phase.trim().length > 0 &&
+		typeof entry.durationMs === "number" &&
+		Number.isFinite(entry.durationMs) &&
+		entry.durationMs >= 0 &&
+		(entry.toolName === undefined || typeof entry.toolName === "string") &&
+		(entry.ts === undefined || typeof entry.ts === "string") &&
+		(entry.startedAt === undefined || typeof entry.startedAt === "string") &&
+		(entry.pid === undefined ||
+			(typeof entry.pid === "number" && Number.isFinite(entry.pid)))
+	);
+}
+
+function isPhaseSample(value: unknown): value is LatencyEntry {
+	return isPhaseRecord(value) && value.durationMs > 0;
+}
+
+function phaseKey(entry: LatencyEntry): string {
+	const phase = entry.phase?.trim() as string;
+	const toolName = entry.toolName?.trim();
+	return toolName ? `${toolName}/${phase}` : phase;
+}
+
+function isCurrentSessionSample(
+	entry: LatencyEntry,
+	processId: number,
+	sessionStartedAt: number,
+): boolean {
+	if (entry.pid !== processId || typeof entry.ts !== "string") return false;
+	const finishedAt = Date.parse(entry.ts);
+	if (!Number.isFinite(finishedAt) || finishedAt < sessionStartedAt)
+		return false;
+	if (entry.startedAt === undefined) return true;
+	const startedAt = Date.parse(entry.startedAt);
+	return Number.isFinite(startedAt) && startedAt >= sessionStartedAt;
+}
+
+function retainEntry(
+	buffer: BoundedPhaseEntries,
+	entry: LatencyEntry,
+	limit: number,
+): void {
+	buffer.total += 1;
+	if (buffer.values.length < limit) {
+		buffer.values.push(entry);
+		return;
+	}
+	buffer.values[buffer.nextIndex] = entry;
+	buffer.nextIndex = (buffer.nextIndex + 1) % limit;
+}
+
+function orderedEntries(buffer: BoundedPhaseEntries): LatencyEntry[] {
+	return buffer.total > buffer.values.length
+		? [
+				...buffer.values.slice(buffer.nextIndex),
+				...buffer.values.slice(0, buffer.nextIndex),
+			]
+		: buffer.values;
+}
+
+export function summarizePhaseLatency(
+	entries: readonly LatencyEntry[],
+	topN = DEFAULT_PERF_TOP_N,
+): PhaseLatencyScope {
+	const durationsByPhase = new Map<string, number[]>();
+	let oldestTimestamp: { ms: number; iso: string } | undefined;
+	let newestTimestamp: { ms: number; iso: string } | undefined;
+	let sampleCount = 0;
+
+	for (const entry of entries) {
+		if (!isPhaseSample(entry)) continue;
+		const phase = phaseKey(entry);
+		const durations = durationsByPhase.get(phase) ?? [];
+		durations.push(entry.durationMs);
+		durationsByPhase.set(phase, durations);
+		sampleCount += 1;
+
+		if (typeof entry.ts === "string") {
+			const ms = Date.parse(entry.ts);
+			if (Number.isFinite(ms)) {
+				if (!oldestTimestamp || ms < oldestTimestamp.ms) {
+					oldestTimestamp = { ms, iso: entry.ts };
+				}
+				if (!newestTimestamp || ms > newestTimestamp.ms) {
+					newestTimestamp = { ms, iso: entry.ts };
+				}
+			}
+		}
+	}
+
+	const summaries: RawPhaseLatencySummary[] = Array.from(
+		durationsByPhase,
+		([phase, durations]) => {
+			const sorted = [...durations].sort((a, b) => a - b);
+			const p50RawMs = percentile(sorted, 0.5);
+			const p99RawMs = percentile(sorted, 0.99);
+			return {
+				phase,
+				samples: sorted.length,
+				p50Ms: roundedMs(p50RawMs),
+				p99Ms: roundedMs(p99RawMs),
+				p50RawMs,
+				p99RawMs,
+			};
+		},
+	);
+	const limit = boundedPositiveInteger(topN, DEFAULT_PERF_TOP_N);
+	const tieBreak = (a: RawPhaseLatencySummary, b: RawPhaseLatencySummary) =>
+		b.samples - a.samples || a.phase.localeCompare(b.phase);
+	const toPublic = ({
+		p50RawMs: _p50RawMs,
+		p99RawMs: _p99RawMs,
+		...summary
+	}: RawPhaseLatencySummary): PhaseLatencySummary => summary;
+	const slowestByP50 = [...summaries]
+		.sort(
+			(a, b) =>
+				b.p50RawMs - a.p50RawMs || b.p99RawMs - a.p99RawMs || tieBreak(a, b),
+		)
+		.slice(0, limit)
+		.map(toPublic);
+	const slowestByP99 = [...summaries]
+		.sort(
+			(a, b) =>
+				b.p99RawMs - a.p99RawMs || b.p50RawMs - a.p50RawMs || tieBreak(a, b),
+		)
+		.slice(0, limit)
+		.map(toPublic);
+
+	return {
+		sampleCount,
+		phaseCount: durationsByPhase.size,
+		oldestTs: oldestTimestamp?.iso,
+		newestTs: newestTimestamp?.iso,
+		slowestByP50,
+		slowestByP99,
+	};
+}
+
+async function readPhaseLogTail(
+	filePath: string,
+	maxBytes: number,
+	maxSamples: number,
+	processId: number,
+	sessionStartedAt: number,
+): Promise<PhaseLogTail> {
+	const empty = (): PhaseLogTail => ({
+		logEntries: [],
+		sessionEntries: [],
+		windowTruncated: false,
+		logSamplesTruncated: false,
+		sessionSamplesTruncated: false,
+		totalPhaseSamples: 0,
+		totalSessionPhaseSamples: 0,
+		malformedLines: 0,
+		invalidRecords: 0,
+	});
+	let handle: fs.promises.FileHandle | undefined;
+	try {
+		handle = await fs.promises.open(filePath, "r");
+		const stat = await handle.stat();
+		if (stat.size === 0) return empty();
+
+		const boundedBytes = boundedPositiveInteger(maxBytes, MAX_PERF_LOG_BYTES);
+		const sampleLimit = boundedPositiveInteger(
+			maxSamples,
+			MAX_PERF_PHASE_SAMPLES,
+		);
+		const start = Math.max(0, stat.size - boundedBytes);
+		let discardPartialFirstLine = false;
+		if (start > 0) {
+			const previousByte = Buffer.alloc(1);
+			const { bytesRead } = await handle.read(previousByte, 0, 1, start - 1);
+			discardPartialFirstLine = bytesRead === 1 && previousByte[0] !== 0x0a;
+		}
+
+		const stream = handle.createReadStream({
+			start,
+			end: stat.size - 1,
+			autoClose: false,
+			encoding: "utf8",
+		});
+		const lines = readline.createInterface({
+			input: stream,
+			crlfDelay: Infinity,
+		});
+		const logBuffer: BoundedPhaseEntries = {
+			values: [],
+			nextIndex: 0,
+			total: 0,
+		};
+		const sessionBuffer: BoundedPhaseEntries = {
+			values: [],
+			nextIndex: 0,
+			total: 0,
+		};
+		let malformedLines = 0;
+		let invalidRecords = 0;
+		let lineCount = 0;
+
+		for await (const line of lines) {
+			lineCount += 1;
+			if (lineCount % PARSE_YIELD_EVERY === 0) {
+				await new Promise<void>((resolve) => setImmediate(resolve));
+			}
+			if (discardPartialFirstLine) {
+				discardPartialFirstLine = false;
+				continue;
+			}
+			const trimmed = line.trim();
+			if (!trimmed) continue;
+			try {
+				const value: unknown = JSON.parse(trimmed);
+				if (isPhaseSample(value)) {
+					retainEntry(logBuffer, value, sampleLimit);
+					if (isCurrentSessionSample(value, processId, sessionStartedAt)) {
+						retainEntry(sessionBuffer, value, sampleLimit);
+					}
+				} else if (
+					!isPhaseRecord(value) &&
+					(!value ||
+						typeof value !== "object" ||
+						Array.isArray(value) ||
+						(value as Partial<LatencyEntry>).type === "phase")
+				) {
+					invalidRecords += 1;
+				}
+			} catch {
+				malformedLines += 1;
+			}
+		}
+
+		return {
+			logEntries: orderedEntries(logBuffer),
+			sessionEntries: orderedEntries(sessionBuffer),
+			windowTruncated: start > 0,
+			logSamplesTruncated: logBuffer.total > sampleLimit,
+			sessionSamplesTruncated: sessionBuffer.total > sampleLimit,
+			totalPhaseSamples: logBuffer.total,
+			totalSessionPhaseSamples: sessionBuffer.total,
+			malformedLines,
+			invalidRecords,
+		};
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return empty();
+		throw error;
+	} finally {
+		await handle?.close().catch(() => {});
+	}
+}
+
+export async function collectLatencyPerformance(
+	options: CollectLatencyPerformanceOptions,
+): Promise<LatencyPerformanceReport> {
+	await flushLatencyLog();
+	const logPath = options.logPath ?? getLatencyLogPath();
+	const processId = options.processId ?? process.pid;
+	const topN = boundedPositiveInteger(
+		options.topN ?? DEFAULT_PERF_TOP_N,
+		DEFAULT_PERF_TOP_N,
+	);
+	const tail = await readPhaseLogTail(
+		logPath,
+		options.maxBytes ?? MAX_PERF_LOG_BYTES,
+		options.maxSamples ?? MAX_PERF_PHASE_SAMPLES,
+		processId,
+		options.sessionStartedAt,
+	);
+
+	return {
+		logPath,
+		topN,
+		windowTruncated: tail.windowTruncated,
+		logSamplesTruncated: tail.logSamplesTruncated,
+		sessionSamplesTruncated: tail.sessionSamplesTruncated,
+		totalPhaseSamples: tail.totalPhaseSamples,
+		totalSessionPhaseSamples: tail.totalSessionPhaseSamples,
+		malformedLines: tail.malformedLines,
+		invalidRecords: tail.invalidRecords,
+		session: summarizePhaseLatency(tail.sessionEntries, topN),
+		logWindow: summarizePhaseLatency(tail.logEntries, topN),
+	};
+}
+
+function formatDuration(ms: number): string {
+	if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`;
+	if (ms > 0 && ms < 1) return `${ms.toFixed(2)}ms`;
+	return `${Number.isInteger(ms) ? ms : ms.toFixed(1)}ms`;
+}
+
+function formatTimestamp(ts: string): string {
+	const parsed = new Date(ts);
+	return Number.isFinite(parsed.getTime())
+		? `${parsed.toISOString().slice(0, 19).replace("T", " ")}Z`
+		: ts;
+}
+
+function renderRanking(
+	lines: string[],
+	label: string,
+	phases: readonly PhaseLatencySummary[],
+): void {
+	lines.push(`  ${label}:`);
+	for (const phase of phases) {
+		lines.push(
+			`    ${phase.phase}: p50 ${formatDuration(phase.p50Ms)}, p99 ${formatDuration(phase.p99Ms)}, n=${phase.samples}`,
+		);
+	}
+}
+
+function renderScope(
+	lines: string[],
+	label: string,
+	scope: PhaseLatencyScope,
+): void {
+	const range =
+		scope.oldestTs && scope.newestTs
+			? `, ${formatTimestamp(scope.oldestTs)} to ${formatTimestamp(scope.newestTs)}`
+			: "";
+	lines.push(
+		"",
+		`${label} (${scope.sampleCount} samples across ${scope.phaseCount} phases${range})`,
+	);
+	if (scope.slowestByP99.length === 0) {
+		lines.push("  No phase timings yet.");
+		return;
+	}
+
+	renderRanking(lines, "Highest p50", scope.slowestByP50);
+	renderRanking(lines, "Highest p99", scope.slowestByP99);
+}
+
+export function renderLatencyPerformanceReport(
+	report: LatencyPerformanceReport,
+): string {
+	const lines = [
+		"⏱️ PI-LENS PERFORMANCE",
+		`Top ${report.topN} sustained and tail latency phases.`,
+	];
+	renderScope(lines, "Current process session", report.session);
+	renderScope(lines, "Machine-wide active log window", report.logWindow);
+	lines.push("", `Source: ${report.logPath}`);
+	if (report.windowTruncated) {
+		lines.push(
+			`Both scopes use only the newest ${MAX_PERF_LOG_BYTES / (1024 * 1024)}MB of the active log.`,
+		);
+	}
+	if (report.sessionSamplesTruncated) {
+		lines.push(
+			`Session percentiles use the newest ${report.session.sampleCount.toLocaleString("en-US")} of ${report.totalSessionPhaseSamples.toLocaleString("en-US")} phase samples.`,
+		);
+	}
+	if (report.logSamplesTruncated) {
+		lines.push(
+			`Machine-wide percentiles use the newest ${report.logWindow.sampleCount.toLocaleString("en-US")} of ${report.totalPhaseSamples.toLocaleString("en-US")} phase samples.`,
+		);
+	}
+	if (report.malformedLines > 0 || report.invalidRecords > 0) {
+		lines.push(
+			`Skipped ${report.malformedLines} malformed line(s) and ${report.invalidRecords} invalid record(s).`,
+		);
+	}
+	return lines.join("\n");
+}

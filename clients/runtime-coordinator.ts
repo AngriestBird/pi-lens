@@ -131,9 +131,9 @@ export class RuntimeCoordinator {
 	// `lens-turn-summary` flag so it's a true no-op when the feature is off.
 	private readonly _turnSummary = new TurnSummaryCollector();
 
-	resetForSession(): void {
+	resetForSession(startedAt = Date.now()): void {
 		this._sessionGeneration += 1;
-		this._sessionStartedAt = Date.now();
+		this._sessionStartedAt = startedAt;
 		this._complexityBaselines.clear();
 		this._pipelineCrashCounts.clear();
 		this._cachedExports.clear();
