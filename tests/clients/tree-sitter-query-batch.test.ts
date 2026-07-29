@@ -13,6 +13,7 @@ import {
 	getSharedTreeSitterClient,
 } from "../../clients/tree-sitter-shared.js";
 import type { TreeSitterQuery } from "../../clients/tree-sitter-query-loader.js";
+import { TreeSitterQueryLoader } from "../../clients/tree-sitter-query-loader.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 const cleanups: Array<() => void> = [];
@@ -133,5 +134,55 @@ describe("runQueriesOnFile", () => {
 		);
 		expect(found.some(({ queryDef }) => queryDef.id === "broken")).toBe(false);
 		expect(found.some(({ queryDef }) => queryDef.id === "calls")).toBe(true);
+	});
+
+	it("compiles and matches the repaired Go, Rust, and Kotlin rules (#884)", async () => {
+		const env = setupTestEnvironment("pi-lens-884-rules-");
+		cleanups.push(env.cleanup);
+		const loader = new TreeSitterQueryLoader();
+		const loaded = await loader.loadQueries(process.cwd());
+		const client = getSharedTreeSitterClient()!;
+		expect(await client.init()).toBe(true);
+		const cases = [
+			{
+				id: "go-mutex-copy",
+				language: "go",
+				ext: "go",
+				bad: "package p\nfunc f(mu sync.Mutex) { use(mu) }\n",
+				good: "package p\nfunc f(mu *sync.Mutex) { use(mu) }\n",
+			},
+			{
+				id: "go-shared-map-write-goroutine",
+				language: "go",
+				ext: "go",
+				bad: "package p\nfunc f() { go func() { m[k] = v }() }\n",
+				good: "package p\nfunc f() { m[k] = v }\n",
+			},
+			{
+				id: "rust-lock-held-across-await",
+				language: "rust",
+				ext: "rs",
+				bad: "async fn f(state: S) { let guard = state.lock().await; work().await; drop(guard); }\n",
+				good: "async fn f(state: S) { { let guard = state.lock().await; use_guard(&guard); } work().await; }\n",
+			},
+			{
+				id: "prepared-statement-indices",
+				language: "kotlin",
+				ext: "kt",
+				bad: "fun f(stmt: S) { stmt.setString(0, value) }\n",
+				good: "fun f(stmt: S) { stmt.setString(1, value) }\n",
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const query = [...loaded.values()]
+				.flat()
+				.find((candidate) => candidate.id === testCase.id);
+			expect(query, testCase.id).toBeDefined();
+			const badFile = createTempFile(env.tmpDir, `bad.${testCase.ext}`, testCase.bad);
+			const goodFile = createTempFile(env.tmpDir, `good.${testCase.ext}`, testCase.good);
+			expect(await client.runQueryOnFile(query!, badFile, testCase.language)).not.toEqual([]);
+			expect(await client.runQueryOnFile(query!, goodFile, testCase.language)).toEqual([]);
+		}
 	});
 });
