@@ -17,6 +17,7 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`.dart` files are now included in project-wide source enumeration** (closes #880, refs #876) — `ALL_SCANNABLE_EXTENSIONS` (`clients/source-filter.ts`) and `WARMUP_SOURCE_EXTS` (`clients/language-profile.ts`) were missing `.dart`, so Dart projects were fully supported per-edit (LSP, `dart-analyze`, `dart format`, autofix) but skipped by project-wide scans and cold-start language-profile warmup.
 - **tree-sitter runner no longer double-increments already 1-indexed
 	line/column** (refs #448) — dispositions recorded against the old off-by-one
 	are anchored (`clients/diagnostic-dispositions.ts`) to the wrong physical

@@ -302,6 +302,7 @@ const WARMUP_SOURCE_EXTS = new Set([
 	".java",
 	".kt",
 	".swift",
+	".dart",
 	".c",
 	".cc",
 	".cpp",
