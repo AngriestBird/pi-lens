@@ -22,6 +22,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { _resetGeneratedArtifactCaches } from "../../clients/generated-artifacts.js";
 import {
+	ALL_SCANNABLE_EXTENSIONS,
 	collectSourceFiles,
 	collectSourceFilesAsync,
 	DEFAULT_MAX_SOURCE_FILES,
@@ -75,6 +76,30 @@ describe("collectSourceFilesAsync — correctness", () => {
 		const async = await collectSourceFilesAsync(tmpDir, opts);
 		expect(new Set(async)).toEqual(new Set(sync));
 		expect(async.every((f) => f.endsWith(".py"))).toBe(true);
+	});
+});
+
+describe("Dart source enumeration (#880)", () => {
+	it("ALL_SCANNABLE_EXTENSIONS includes .dart", () => {
+		expect(ALL_SCANNABLE_EXTENSIONS).toContain(".dart");
+	});
+
+	it("collectSourceFiles keeps .dart files", () => {
+		fs.writeFileSync(
+			path.join(tmpDir, "main.dart"),
+			"void main() {}\n",
+		);
+		const files = collectSourceFiles(tmpDir);
+		expect(files.some((f) => f.endsWith("main.dart"))).toBe(true);
+	});
+
+	it("collectSourceFilesAsync keeps .dart files", async () => {
+		fs.writeFileSync(
+			path.join(tmpDir, "main.dart"),
+			"void main() {}\n",
+		);
+		const files = await collectSourceFilesAsync(tmpDir);
+		expect(files.some((f) => f.endsWith("main.dart"))).toBe(true);
 	});
 });
 

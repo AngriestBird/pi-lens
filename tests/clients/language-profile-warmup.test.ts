@@ -68,4 +68,17 @@ describe("collectSourceFilesForWarmup (#250)", () => {
 			env.cleanup();
 		}
 	});
+
+	it("includes .dart files (#880)", async () => {
+		const env = setupTestEnvironment("pi-lens-warmup-dart-");
+		try {
+			createTempFile(env.tmpDir, "lib/main.dart", "void main() {}\n");
+			const files = (await collectSourceFilesForWarmup(env.tmpDir)).map((f) =>
+				f.replace(/\\/g, "/"),
+			);
+			expect(files.some((f) => f.endsWith("/lib/main.dart"))).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
 });

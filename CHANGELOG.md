@@ -41,6 +41,7 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`.dart` files are now included in project-wide source enumeration** (closes #880, refs #876) — `ALL_SCANNABLE_EXTENSIONS` (`clients/source-filter.ts`) and `WARMUP_SOURCE_EXTS` (`clients/language-profile.ts`) were missing `.dart`, so Dart projects were fully supported per-edit (LSP, `dart-analyze`, `dart format`, autofix) but skipped by project-wide scans and cold-start language-profile warmup.
 - **Tree-sitter rules were compiled against the wrong grammar** — a compiled
 	query is bound to the language it compiled against, and running it on a tree
 	from another grammar returns zero matches silently. Rules now compile against

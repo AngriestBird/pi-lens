@@ -118,6 +118,7 @@ export const ALL_SCANNABLE_EXTENSIONS = [
 	".rake",
 	".gemspec",
 	".ru",
+	".dart",
 ];
 
 /**
