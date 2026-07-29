@@ -1005,6 +1005,7 @@ export class TreeSitterClient {
 					// A rule that can't compile against THIS grammar is simply not
 					// applicable here (e.g. a `type_annotation` pattern on javascript).
 					this.dbg(`Batch: skipping ${queryDef.id} for ${languageId}: ${err}`);
+					this.reportQueryCompileFailure(queryDef.id, languageId, err);
 					continue;
 				}
 				const owner = entries.length;
@@ -1259,8 +1260,26 @@ export class TreeSitterClient {
 		} catch (err) {
 			this.reportWasmAbort(err);
 			this.dbg(`Raw query compilation failed (${queryId}): ${err}`);
+			this.reportQueryCompileFailure(queryId, languageId, err);
 			return null;
 		}
+	}
+
+	private reportedCompileFailures = new Set<string>();
+
+	/** Warn once per rule whose query fails to compile against a grammar — a silently-dead rule needs a trail. */
+	private reportQueryCompileFailure(
+		ruleId: string,
+		languageId: string,
+		err: unknown,
+	): void {
+		if (this.reportedCompileFailures.has(ruleId)) return;
+		this.reportedCompileFailures.add(ruleId);
+		console.error(
+			`[pi-lens] tree-sitter rule '${ruleId}' failed to compile against '${languageId}' — ` +
+				`matches for this rule are silently dropped rather than reported. ` +
+				`Fix the query in the rule definition to re-enable it. (${err})`,
+		);
 	}
 
 	private hasChildToken(node: TreeSitterNode, token: string): boolean {
@@ -1296,6 +1315,92 @@ export class TreeSitterClient {
 			"async_session",
 			"sync_session",
 		]).has(tail.toLowerCase());
+	}
+
+	/**
+	 * The body statements of a `switch_case`, in order. A switch_case's named
+	 * children are `[value, ...statements]` (its statements are direct children,
+	 * not a wrapping statement_block), so drop the leading `case <value>` and any
+	 * comments.
+	 */
+	private switchCaseBodyStatements(caseNode: TreeSitterNode): TreeSitterNode[] {
+		// biome-ignore lint/suspicious/noExplicitAny: AST child iteration
+		const named = (caseNode.children ?? []).filter(
+			(c: any) => c.isNamed && !c.type.includes("comment"),
+		);
+		// First named child is the case's value expression (`case <value>`).
+		return named.slice(1);
+	}
+
+	/**
+	 * Whether a loop body contains a statement that can terminate the loop:
+	 * `return`/`throw` anywhere (they unwind past the loop), or a `break` that is
+	 * not swallowed by a nested loop/switch. Does not descend into nested
+	 * functions, whose `return` exits the function rather than the loop.
+	 */
+	private bodyHasLoopExit(
+		node: TreeSitterNode,
+		insideNestedLoop: boolean,
+	): boolean {
+		const NESTS_BREAK = new Set([
+			"for_statement",
+			"for_in_statement",
+			"while_statement",
+			"do_statement",
+			"switch_statement",
+		]);
+		const NESTED_FN = new Set([
+			"function_declaration",
+			"function_expression",
+			"arrow_function",
+			"method_definition",
+			"generator_function",
+			"generator_function_declaration",
+			"class_declaration",
+		]);
+		for (const child of node.children ?? []) {
+			const t = child.type;
+			if (NESTED_FN.has(t)) continue;
+			if (t === "return_statement" || t === "throw_statement") return true;
+			if (t === "break_statement" && !insideNestedLoop) return true;
+			if (this.bodyHasLoopExit(child, insideNestedLoop || NESTS_BREAK.has(t))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Name of the binding a node's value flows into: the declared name of an
+	 * enclosing `variable_declarator`, or the left-hand side of an enclosing
+	 * `assignment_expression`. Returns "" if the node is not part of a binding
+	 * (the walk stops at function/block/program boundaries so it never reaches
+	 * out to an unrelated outer binding).
+	 */
+	private enclosingBindingName(node: TreeSitterNode | undefined): string {
+		let cur: TreeSitterNode | null | undefined = node?.parent;
+		for (let depth = 0; cur && depth < 12; depth++) {
+			const t = cur.type;
+			if (t === "variable_declarator") {
+				const name = cur.children?.find((c) => c.isNamed);
+				return name?.text ?? "";
+			}
+			if (t === "assignment_expression") {
+				return cur.children?.[0]?.text ?? "";
+			}
+			if (
+				t === "statement_block" ||
+				t === "program" ||
+				t === "function_declaration" ||
+				t === "function_expression" ||
+				t === "arrow_function" ||
+				t === "method_definition"
+			) {
+				return "";
+			}
+			cur = cur.parent;
+		}
+		return "";
 	}
 
 	private isSafeSqlAlchemyExpressionCall(node: TreeSitterNode): boolean {
@@ -1414,6 +1519,135 @@ export class TreeSitterClient {
 						c.type !== "block_comment",
 				);
 				return meaningful.length === 0;
+			}
+			case "is_empty_block": {
+				// empty-switch-case: keep a `switch_case` that has no body statements.
+				// A switch_case's named children are `[value, ...body statements]`
+				// (the case's statements are direct children, not a statement_block),
+				// so an empty case is one whose only named child is its `case <value>`.
+				const caseNode = captures.CASE;
+				if (!caseNode) return false;
+				return this.switchCaseBodyStatements(caseNode).length === 0;
+			}
+			case "no_break_or_return_in_body": {
+				// infinite-loop: keep a `while(true)`/`for(;;)` whose body contains no
+				// statement that can terminate the loop (break/return/throw). `continue`
+				// does not count — it keeps the loop running.
+				const bodyNode = captures.BODY;
+				if (!bodyNode) return false;
+				return !this.bodyHasLoopExit(bodyNode, false);
+			}
+			case "same_param_name": {
+				// duplicate-function-arg: keep the pair only when the two captured
+				// parameter identifiers share the same name.
+				const first = captures.PARAM1?.text;
+				const second = captures.NAME?.text;
+				return !!first && first === second;
+			}
+			case "no_terminating_statement": {
+				// switch-case-termination: keep a non-empty case (already known to be
+				// followed by another case via the query) whose last body statement is
+				// not a terminator, i.e. it falls through. Empty cases are handled by
+				// empty-switch-case, so require at least one body statement here.
+				const caseNode = captures.CASE;
+				if (!caseNode) return false;
+				const body = this.switchCaseBodyStatements(caseNode);
+				if (body.length === 0) return false;
+				const last = body[body.length - 1];
+				const TERMINATORS = new Set([
+					"break_statement",
+					"return_statement",
+					"throw_statement",
+					"continue_statement",
+				]);
+				return !TERMINATORS.has(last.type);
+			}
+			case "no_break_or_return": {
+				// infinite-loop-java: keep a `while(true)`/`for(;;)` whose body has no
+				// break/return/throw reachable in this loop's scope.
+				const bodyNode = captures.BODY;
+				if (!bodyNode) return false;
+				return !this.bodyHasLoopExit(bodyNode, false);
+			}
+			case "is_double_checked_locking": {
+				// no-double-checked-locking: the query pins the if→synchronized→if
+				// shape; keep it only when both null-checks test the same field.
+				const outer = captures.FIELD?.text;
+				const inner = captures.FIELD2?.text;
+				return !!outer && outer === inner;
+			}
+			case "shadows_parent_field": {
+				// no-field-shadowing: keep only when the named parent class is
+				// declared in the same file and it declares a field with the same
+				// name. Cross-file inheritance can't be resolved here — fail closed.
+				const parentName = captures.PARENT?.text;
+				const fieldName = captures.NAME?.text;
+				if (!parentName || !fieldName) return false;
+				// biome-ignore lint/suspicious/noExplicitAny: AST traversal
+				let root: any = captures.NAME;
+				while (root.parent) root = root.parent;
+				// biome-ignore lint/suspicious/noExplicitAny: AST traversal
+				const stack: any[] = [root];
+				while (stack.length) {
+					const node = stack.pop();
+					if (
+						node.type === "class_declaration" &&
+						node.childForFieldName?.("name")?.text === parentName
+					) {
+						const body = node.childForFieldName?.("body");
+						for (const member of body?.children ?? []) {
+							if (member.type !== "field_declaration") continue;
+							for (const declarator of member.children ?? []) {
+								if (
+									declarator.type === "variable_declarator" &&
+									declarator.childForFieldName?.("name")?.text === fieldName
+								) {
+									return true;
+								}
+							}
+						}
+					}
+					for (const child of node.children ?? []) stack.push(child);
+				}
+				return false;
+			}
+			case "missing_break_between_cases": {
+				// switch-fall-through: keep when the labeled statement group contains
+				// no terminating statement at all — its control flow reaches the next
+				// case. The query already requires a following group.
+				const label = captures.LABEL;
+				const group = label?.parent;
+				if (!group) return false;
+				const TERMINATORS = new Set([
+					"break_statement",
+					"return_statement",
+					"throw_statement",
+					"continue_statement",
+					"yield_statement",
+				]);
+				for (const child of group.children ?? []) {
+					if (TERMINATORS.has(child.type)) return false;
+				}
+				return true;
+			}
+			case "scoped_lock_empty_args": {
+				// no-scoped-lock-without-args: the query only matches a bare
+				// `declarator: (identifier)` — an arg-taking declaration parses as an
+				// init/function declarator instead — so a match IS the defect. Keep it
+				// as long as the captured declarator has no sibling argument list.
+				const decl = captures.DECL;
+				if (!decl) return false;
+				for (const sibling of decl.parent?.children ?? []) {
+					if (sibling.type === "argument_list") return false;
+				}
+				return true;
+			}
+			case "calc_missing_spaces": {
+				// calc-spacing: keep a calc() whose +/- has an operand directly on
+				// both sides (e.g. `100%-20px`). A leading sign after `(` or a comma
+				// is legitimate and stays allowed.
+				const text = captures.EXPR?.text ?? "";
+				return /[\w%)][+-][\w.(]/.test(text);
 			}
 			case "bare_except_only": {
 				const clauseNode = captures.CLAUSE;
@@ -1748,6 +1982,66 @@ export class TreeSitterClient {
 						c.isNamed && c.type !== "pass_statement" && c.type !== "comment",
 				);
 			}
+			case "check_in_operator_types": {
+				// `in`/`not in` require __contains__, __iter__ or __getitem__. We can't
+				// do real type inference from a bare identifier, so only flag when the
+				// right-hand side is a literal of a type known NOT to support
+				// containment (None, bool, int, float) — identifiers, strings, lists,
+				// dicts, sets, tuples etc. are left alone to avoid false positives.
+				const target = captures.TARGET;
+				if (!target) return false;
+				return ["none", "true", "false", "integer", "float"].includes(
+					target.type,
+				);
+			}
+			case "torchscript_super_call": {
+				// The query only anchors on the `super()` call itself (so it can find
+				// it at any nesting depth inside the method body); this filter walks
+				// back up to confirm the enclosing method OR its class actually carries
+				// a @torch.jit.script / @jit.script decorator.
+				const call = captures.CALL;
+				if (!call) return false;
+				const isTorchScriptDecorated = (
+					node: TreeSitterNode | null | undefined,
+				): boolean => {
+					const decorated = node?.parent;
+					if (!decorated || decorated.type !== "decorated_definition")
+						return false;
+					// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node
+					return (decorated.children ?? []).some(
+						(c: any) =>
+							c.type === "decorator" &&
+							/^@(torch\.jit\.script|jit\.script)$/.test(c.text ?? ""),
+					);
+				};
+				const methodNode = this.navigator.findParent(call, [
+					"function_definition",
+				]);
+				if (!methodNode) return false;
+				const classNode = this.navigator.findParent(methodNode, [
+					"class_definition",
+				]);
+				return (
+					isTorchScriptDecorated(methodNode) || isTorchScriptDecorated(classNode)
+				);
+			}
+			case "exit_params_insufficient": {
+				// __exit__ must accept (self, exc_type, exc_value, traceback) — 4 named
+				// parameters total. The query captures the whole `parameters` node
+				// rather than binding each slot individually: tree-sitter's optional
+				// (`?`) quantifiers on consecutive anchored siblings match every valid
+				// sub-alignment (e.g. self+exc_type alone, or self+exc_type+exc_value),
+				// not just the maximal one, so per-slot captures produce spurious
+				// duplicate/partial matches for a single, fully-correct signature.
+				// Counting named children of the whole node sidesteps that entirely.
+				const params = captures.PARAMS;
+				if (!params) return true;
+				// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node
+				const count = (params.children ?? []).filter(
+					(c: any) => c.isNamed,
+				).length;
+				return count < 4;
+			}
 			case "ruby_empty_rescue": {
 				const bodyNode = captures.BODY;
 				if (!bodyNode) return true;
@@ -1806,8 +2100,10 @@ export class TreeSitterClient {
 			case "ts_insecure_random_source": {
 				if (captures.OBJ?.text !== "Math" || captures.FN?.text !== "random")
 					return false;
-				// Only flag when assigned to a security-sensitive variable name
-				const varName = captures.VAR?.text ?? "";
+				// Only flag when the result flows into a security-sensitive binding.
+				// Walk up from the `Math.random()` call so chained forms such as
+				// `Math.random().toString(36)` are still attributed to their binding.
+				const varName = this.enclosingBindingName(captures.CALL ?? captures.VAR);
 				return /token|secret|password|key|nonce|salt|csrf|auth|session|credential|hash|otp|pin/i.test(
 					varName,
 				);
