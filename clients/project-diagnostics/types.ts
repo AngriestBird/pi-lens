@@ -40,6 +40,10 @@ export interface ProjectDiagnosticsSnapshot {
 	 * `unsafeRoot` this is NOT a refusal: a truncated analysis is still useful;
 	 * the flag only keeps a caller from reading the partial result as a
 	 * complete, clean sweep.
+	 *
+	 * Also true when tree-sitter's process-wide WASM runtime aborts during the
+	 * file-major pass. That partial result is returned for observability but is
+	 * never persisted over the last authoritative snapshot (#891).
 	 */
 	scanTruncated?: boolean;
 }

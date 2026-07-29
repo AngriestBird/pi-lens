@@ -1,7 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { detectFileKind, type FileKind } from "./file-kinds.js";
+import {
+	CODE_KINDS,
+	detectFileKind,
+	DOTNET_CSHARP_ROOT_MARKERS,
+	DOTNET_FSHARP_ROOT_MARKERS,
+	KIND_EXTENSIONS,
+	type FileKind,
+} from "./file-kinds.js";
 import { getProjectIgnoreMatcher } from "./file-utils.js";
+import { direntsHaveMarkerGlobMatch } from "./path-utils.js";
 import {
 	LANGUAGE_POLICY,
 	type ProjectLanguageProfile,
@@ -10,43 +18,10 @@ import { getSourceFiles } from "./scan-utils.js";
 import { readDirEntriesSafe, shouldRecurseIntoDir } from "./source-walker.js";
 import { findNearestDirWithAnyBasename } from "./workspace-topology.js";
 
-export const SUPPORTED_FILE_KINDS: readonly FileKind[] = [
-	"jsts",
-	"python",
-	"go",
-	"rust",
-	"cxx",
-	"cmake",
-	"fish",
-	"shell",
-	"json",
-	"markdown",
-	"css",
-	"yaml",
-	"sql",
-	"ruby",
-	"html",
-	"docker",
-	"php",
-	"powershell",
-	"prisma",
-	"csharp",
-	"fsharp",
-	"java",
-	"kotlin",
-	"swift",
-	"dart",
-	"lua",
-	"zig",
-	"haskell",
-	"elixir",
-	"gleam",
-	"ocaml",
-	"clojure",
-	"terraform",
-	"nix",
-	"toml",
-];
+/** Every registered kind participates in project-language detection (#894). */
+export const SUPPORTED_FILE_KINDS: readonly FileKind[] = Object.keys(
+	KIND_EXTENSIONS,
+) as FileKind[];
 
 const PROJECT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	jsts: ["package.json", "tsconfig.json", "jsconfig.json"],
@@ -77,6 +52,8 @@ const PROJECT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	terraform: [".terraform.lock.hcl"],
 	nix: ["flake.nix"],
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
+	csharp: DOTNET_CSHARP_ROOT_MARKERS,
+	fsharp: DOTNET_FSHARP_ROOT_MARKERS,
 };
 
 const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
@@ -120,7 +97,21 @@ const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	terraform: [".terraform.lock.hcl"],
 	nix: ["flake.nix"],
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
+	csharp: DOTNET_CSHARP_ROOT_MARKERS,
+	fsharp: DOTNET_FSHARP_ROOT_MARKERS,
 };
+
+function hasProjectMarker(projectRoot: string, marker: string): boolean {
+	if (!marker.includes("*")) return fs.existsSync(path.join(projectRoot, marker));
+	try {
+		return direntsHaveMarkerGlobMatch(
+			fs.readdirSync(projectRoot, { withFileTypes: true }),
+			marker,
+		);
+	} catch {
+		return false;
+	}
+}
 
 // Process-lifetime memo keyed on projectRoot. Only populated when the
 // caller did not pass an explicit `sourceFiles` array — the explicit-array
@@ -158,7 +149,7 @@ function computeProjectLanguageProfile(
 	for (const [kind, markers] of Object.entries(PROJECT_MARKERS_BY_KIND)) {
 		if (!markers) continue;
 		for (const marker of markers) {
-			if (fs.existsSync(path.join(projectRoot, marker))) {
+			if (hasProjectMarker(projectRoot, marker)) {
 				present[kind as FileKind] = true;
 				configured[kind as FileKind] = true;
 				break;
@@ -284,33 +275,21 @@ export function resolveLanguageRootForFile(
 // `languageProfileCache` so the subsequent sync caller skips the walk.
 // ---------------------------------------------------------------------------
 
-// Extensions accepted as project source files. Mirrors the discovery rules
-// used by scan-utils.ts but inlined here to keep this file self-contained
-// and avoid pulling in source-filter's heavier dependency graph during
-// warmup.
-const WARMUP_SOURCE_EXTS = new Set([
-	".ts",
-	".tsx",
-	".js",
-	".jsx",
-	".mjs",
-	".cjs",
-	".py",
-	".go",
-	".rs",
-	".rb",
-	".java",
-	".kt",
-	".swift",
-	".dart",
-	".c",
-	".cc",
-	".cpp",
-	".cxx",
-	".h",
-	".hpp",
-	".cs",
-]);
+// Keep the warmup walker lightweight (no source-filter dependency), but derive
+// its extension gate from the same authority as every other project-wide
+// enumeration. Generated-artifact filtering remains intentionally absent here:
+// warmup only needs language presence and never opens file contents.
+export const WARMUP_SOURCE_EXTS: ReadonlySet<string> = new Set(
+	SUPPORTED_FILE_KINDS.flatMap((kind) => KIND_EXTENSIONS[kind]),
+);
+
+// Extensions belonging to CODE_KINDS — same derivation, used to give program
+// source priority within the capped warmup budget (#894 review, see below).
+const WARMUP_CODE_EXTS: ReadonlySet<string> = new Set(
+	SUPPORTED_FILE_KINDS.filter((kind) => CODE_KINDS.has(kind)).flatMap(
+		(kind) => KIND_EXTENSIONS[kind],
+	),
+);
 
 // Language detection needs which languages are PRESENT, not every file — so the
 // warmup walk is hard-capped. Without this, a walk rooted at a too-broad directory
@@ -318,6 +297,13 @@ const WARMUP_SOURCE_EXTS = new Set([
 // entire tree — #250's multi-hour home-dir scans. Generous enough to detect every
 // language present in any real project (mirrors startup-scan's 2000 limit).
 const MAX_WARMUP_SOURCE_FILES = 2000;
+
+// Total matched-file ceiling for the warmup walk, as a multiple of `maxFiles`
+// (#894 review): with per-category budgets the walk no longer stops at the
+// first `maxFiles` matches, so this keeps its total work deterministic —
+// at the default budget it tolerates up to ~20k data/doc files ahead of the
+// code dirs before giving up on finding more code files.
+const MATCHED_FILES_CEILING_FACTOR = 10;
 
 export async function collectSourceFilesForWarmup(
 	rootDir: string,
@@ -331,10 +317,24 @@ export async function collectSourceFilesForWarmup(
 	// detection. Fail-open on no-git/spawn failure.
 	await ignoreMatcher.ensureTrackedIndex();
 	const stack = [root];
-	const out: string[] = [];
+	// #894 review: `maxFiles` is a PER-CATEGORY budget — code kinds and
+	// data/doc kinds (NON_CODE_KINDS: json/yaml/markdown/…) fill separate
+	// buffers. With a single shared budget, 2000+ locale/fixture JSON files
+	// encountered before the code dirs exhausted the cap and flipped
+	// `present[kind]` to false for the project's real languages. Each buffer
+	// keeps the original #250 cap; the walk stops once the code budget is
+	// full (real languages are then detected; extra non-code presence can't
+	// justify more walking) or after `MATCHED_FILES_CEILING_FACTOR * maxFiles`
+	// matching files total — a deterministic work bound in the same spirit as
+	// #250's cap, generous enough that a locale/fixture pile ahead of the code
+	// dirs can't starve detection, tight enough that a misrooted /
+	// data-dominated tree stays bounded (#250/#758 class).
+	const codeOut: string[] = [];
+	const nonCodeOut: string[] = [];
+	let matchedSeen = 0;
 	let processedSinceYield = 0;
 
-	while (stack.length > 0) {
+	walk: while (stack.length > 0) {
 		const current = stack.pop();
 		if (!current) continue;
 
@@ -353,9 +353,18 @@ export async function collectSourceFilesForWarmup(
 				if (ignoreMatcher.isIgnored(fullPath, false)) continue;
 				const ext = path.extname(entry.name).toLowerCase();
 				if (!WARMUP_SOURCE_EXTS.has(ext)) continue;
-				out.push(fullPath);
-				// Hard cap — language detection only needs presence (#250).
-				if (out.length >= maxFiles) return out;
+				matchedSeen += 1;
+				const bucket = WARMUP_CODE_EXTS.has(ext) ? codeOut : nonCodeOut;
+				// Per-category hard cap — language detection only needs
+				// presence (#250), so overflowing files of a full category
+				// are dropped rather than evicting the other category.
+				if (bucket.length < maxFiles) bucket.push(fullPath);
+				if (
+					codeOut.length >= maxFiles ||
+					matchedSeen >= MATCHED_FILES_CEILING_FACTOR * maxFiles
+				) {
+					break walk;
+				}
 			}
 			if (++processedSinceYield % yieldEvery === 0) {
 				// See countSourceFilesWithinLimitAsync for why setImmediate.
@@ -363,7 +372,7 @@ export async function collectSourceFilesForWarmup(
 			}
 		}
 	}
-	return out;
+	return [...codeOut, ...nonCodeOut];
 }
 
 export async function detectProjectLanguageProfileAsync(

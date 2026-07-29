@@ -8,14 +8,14 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
+- Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
 - **Project diagnostics now use one file-major scan pass** (refs #896) —
 	tree-sitter rules, fact rules, and bundled ast-grep share each eligible
 	file's content read while retaining their individual extension/size gates,
 	diagnostic ordering, cancellation behavior, and latency telemetry. Full
 	review-graph builds likewise hash the bytes already read for extraction
 	instead of rereading every file after the graph is built.
-- Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
-- Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
 
 - **A project scan runs its rule set in one tree walk, not one walk per rule**
 	(refs #675) — `runQueriesOnFile` compiles a language's rules into a single
@@ -50,6 +50,33 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- Resolve nested C# and F# project roots for dotnet builds (refs #895).
+
+- **A mid-scan tree-sitter WASM abort no longer replaces the authoritative
+	project-diagnostics snapshot with a silently truncated result** (refs #891).
+	The partial scan is returned with `scanTruncated`, logs its completed/total
+	file counts and abort point, and leaves the previous complete cache intact.
+
+- **Block-wrapped switch cases no longer report false fall-through errors**
+	(refs #910) — `switch-case-termination` now follows trailing statement
+	blocks to recognize a nested `break`, `return`, `throw`, or `continue`, while
+	still flagging empty and non-terminating blocks.
+
+- **Project-wide enumeration now covers every registered file kind** (refs
+	#894) — `ALL_SCANNABLE_EXTENSIONS`, `WARMUP_SOURCE_EXTS`, and
+	`SUPPORTED_FILE_KINDS` now derive from the single `KIND_EXTENSIONS`
+	authority instead of three drifting language lists. TODO scans, symbol
+	search indexing, dominant-language LSP warmup, and language-profile
+	detection can now see Java, Swift, C/C++, PHP, and every other supported
+	kind. Code kinds keep priority over data/doc kinds (json/yaml/markdown/…)
+	inside the existing caps: the dominant-language LSP warm ranks code kinds
+	first, and the capped warmup/word-index walks fill code files before
+	non-code files, so a locale/fixture pile can't starve real languages.
+	Package-manager lockfiles (package-lock.json, pnpm-lock.yaml, …) are
+	filtered as generated artifacts, and the TODO scanner caps per-file reads
+	at 512 KiB. A coverage guard makes a newly registered kind automatically
+	enumerable — and classified as code or non-code — on both project-wide
+	paths.
 - **Small edits no longer pay the entity-extraction cost** (refs #885) — the
 	<5-line skip threshold only guarded the zero-diagnostics early return; a
 	second `extractEntitySnapshot` block ran unconditionally, so trivial edits
