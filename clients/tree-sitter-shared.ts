@@ -48,11 +48,15 @@ export function _resetSharedTreeSitterClientForTests(): void {
 	_wasmAborted = false;
 }
 
-// Grammar selection by extension. `.tsx` → the tsx grammar (parses JSX); `.jsx` →
-// the javascript grammar. NOTE: the project scanner keeps its OWN ext→lang map
-// because its query lookup is keyed by language id (it maps `.tsx`→typescript to
-// reuse typescript queries) — do not fold that one in without re-keying its queries.
-const EXT_TO_LANG: Record<string, string> = {
+// Grammar selection by extension — the single ext→grammar-id authority. `.tsx` →
+// the tsx grammar (parses JSX); `.jsx` → the javascript grammar. The project
+// scanner (project-diagnostics/scanner.ts) DERIVES its map from this one so the
+// two can't drift: post-#877 both key `.tsx`→tsx (the old note here said the
+// scanner mapped `.tsx`→typescript to reuse typescript queries — that stopped
+// being true when #877 moved typescript-rule inheritance into
+// `queriesForLanguage`). The scanner layers only java/kotlin on top, whose
+// grammars + rule dirs exist but are not wired into a per-edit runner `appliesTo`.
+export const EXT_TO_LANG: Record<string, string> = {
 	".ts": "typescript",
 	".mts": "typescript",
 	".cts": "typescript",
@@ -90,7 +94,9 @@ const EXT_TO_LANG: Record<string, string> = {
 };
 
 /** Resolve a tree-sitter grammar/language id from a file path's extension. */
-export function resolveTreeSitterLanguage(filePath: string): string | undefined {
+export function resolveTreeSitterLanguage(
+	filePath: string,
+): string | undefined {
 	return EXT_TO_LANG[path.extname(filePath).toLowerCase()];
 }
 
@@ -107,7 +113,8 @@ export async function withTreeSitterRoot<T>(
 ): Promise<ParsedTreeOutcome<T>> {
 	const languageId = resolveTreeSitterLanguage(filePath);
 	const client = getSharedTreeSitterClient();
-	if (!languageId || !client || !(await client.init())) return { parsed: false };
+	if (!languageId || !client || !(await client.init()))
+		return { parsed: false };
 	return client.withParsedTree(filePath, languageId, content, (tree) =>
 		consume(tree.rootNode as TsNode),
 	);
@@ -117,7 +124,10 @@ export function childrenOfType(node: TsNode, type: string): TsNode[] {
 	return (node.children ?? []).filter((c: TsNode) => c && c.type === type);
 }
 
-export function firstChildOfType(node: TsNode, type: string): TsNode | undefined {
+export function firstChildOfType(
+	node: TsNode,
+	type: string,
+): TsNode | undefined {
 	return (node.children ?? []).find((c: TsNode) => c && c.type === type);
 }
 

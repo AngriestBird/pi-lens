@@ -6,8 +6,8 @@ import { runProviders } from "../dispatch/fact-runner.js";
 import { FactStore } from "../dispatch/fact-store.js";
 import {
 	canHandle as astGrepCanHandle,
-	evaluateAstGrepRules,
 	getLang as astGrepGetLang,
+	evaluateAstGrepRules,
 	loadSg,
 } from "../dispatch/runners/ast-grep-napi.js";
 import type { Diagnostic } from "../dispatch/types.js";
@@ -20,7 +20,10 @@ import {
 	queriesForLanguage,
 	queryLoader,
 } from "../tree-sitter-query-loader.js";
-import { getSharedTreeSitterClient } from "../tree-sitter-shared.js";
+import {
+	EXT_TO_LANG,
+	getSharedTreeSitterClient,
+} from "../tree-sitter-shared.js";
 import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
 	saveProjectDiagnosticsSnapshot,
@@ -48,26 +51,27 @@ const FACT_RULE_EXTENSIONS = new Set([
 	".mjs",
 	".cjs",
 ]);
-const TREE_SITTER_EXT_TO_LANG: Record<string, string> = {
-	".ts": "typescript",
-	".mts": "typescript",
-	".cts": "typescript",
-	// .tsx parses with the TSX grammar, not typescript: the typescript grammar
-	// produces ERROR nodes on JSX, and this id must match the one the fact
-	// providers resolve (`resolveTreeSitterLanguage`) or the file is parsed
-	// twice under two grammars. Typescript RULES still apply — see the
-	// query-set merge below, which compiles them against tsx.
-	".tsx": "tsx",
-	".js": "javascript",
-	".mjs": "javascript",
-	".cjs": "javascript",
-	".jsx": "javascript",
-	".py": "python",
-	".go": "go",
-	".rs": "rust",
-	".rb": "ruby",
+// Which languages the scan runs tree-sitter rules for: every language that has
+// (a loadable grammar) AND (a non-disabled rules/tree-sitter-queries/<lang>/ dir).
+//
+// The base is the shared per-edit resolver (EXT_TO_LANG — the single
+// ext→grammar-id authority), so c/cpp/csharp/php/css and the .tsx→tsx /
+// .jsx→javascript nuances can never drift from the per-edit path. `.tsx` resolves
+// to the tsx grammar (not typescript: the typescript grammar ERRORs on JSX);
+// typescript RULES still apply because `queriesForLanguage(...)` below merges the
+// typescript rule set onto tsx.
+//
+// java + kotlin are layered on here: they have loadable grammars and rule dirs
+// (java: 24 rules, kotlin: 1) but no per-edit runner `appliesTo` entry, so only
+// this broad project scan runs them. scanner.test.ts asserts this map covers
+// every non-disabled rule dir whose grammar is loadable, so adding a language dir
+// fails a test until its extension is registered here (or in EXT_TO_LANG).
+export const TREE_SITTER_EXT_TO_LANG: Record<string, string> = {
+	...EXT_TO_LANG,
+	".java": "java",
+	".kt": "kotlin",
+	".kts": "kotlin",
 };
-
 
 function normalizeSeverity(
 	severity: string | undefined,
@@ -153,9 +157,14 @@ async function scanTreeSitterAndFactRules(
 				const queries = queriesForLanguage(queryMap, langId);
 				try {
 					// ONE tree walk for the whole rule set, not one per rule (#675).
-					const found = await client.runQueriesOnFile(queries, filePath, langId, {
-						maxResults: 50,
-					});
+					const found = await client.runQueriesOnFile(
+						queries,
+						filePath,
+						langId,
+						{
+							maxResults: 50,
+						},
+					);
 					for (const { queryDef: query, match } of found) {
 						treeSitter.push({
 							filePath,

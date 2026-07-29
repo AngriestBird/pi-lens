@@ -41,6 +41,7 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Project scans run tree-sitter rules for every supported language, not just 10 extensions** (closes #882, refs #877, #880) — the scanner's `TREE_SITTER_EXT_TO_LANG` covered only ts/tsx/js/py/go/rs/rb, so files whose grammars and non-disabled rule dirs already exist (c, cpp, csharp, css, php, java, kotlin) were silently skipped by the tree-sitter phase of project scans. It now derives the shared per-edit resolver (`EXT_TO_LANG`) so c/cpp/csharp/php/css and the `.tsx`→tsx / `.jsx`→javascript nuances can't drift from the per-edit path, and layers java/kotlin on top (grammars + rule dirs exist but no per-edit `appliesTo`). A regression test asserts the map covers every non-disabled rule dir whose grammar is loadable.
 - **`.dart` files are now included in project-wide source enumeration** (closes #880, refs #876) — `ALL_SCANNABLE_EXTENSIONS` (`clients/source-filter.ts`) and `WARMUP_SOURCE_EXTS` (`clients/language-profile.ts`) were missing `.dart`, so Dart projects were fully supported per-edit (LSP, `dart-analyze`, `dart format`, autofix) but skipped by project-wide scans and cold-start language-profile warmup.
 - **Tree-sitter rules were compiled against the wrong grammar** — a compiled
 	query is bound to the language it compiled against, and running it on a tree
