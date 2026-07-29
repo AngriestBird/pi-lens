@@ -52,6 +52,12 @@ function probeCli(): boolean {
 const cliAvailable = probeCli();
 const d = cliAvailable ? describe : describe.skip;
 
+// #448: a describe.skip on a missing CLI silently vanishes this whole
+// real-engine harness. Locally that's fine; in CI it must fail loud.
+it("ast-grep CLI is installed in CI", () => {
+	if (process.env.CI) expect(cliAvailable).toBe(true);
+});
+
 d("shipped ast-grep rules have fixture-style valid/invalid tests", () => {
 	// Every test file in `rule-tests/` must (1) parse, (2) target a rule
 	// that actually exists in `rules/`, and (3) the rule YAML must name
