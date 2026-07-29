@@ -6,7 +6,9 @@ import {
 	readEnclosing,
 	readSymbol,
 	renderCompactModuleReport,
+	tsLangForFile,
 } from "../../clients/module-report.js";
+import { resolveTreeSitterLanguage } from "../../clients/tree-sitter-shared.js";
 import {
 	buildOrUpdateGraph,
 	clearReviewGraphWorkspaceCache,
@@ -1683,5 +1685,118 @@ describe("readSymbol — duplicate-name disambiguation (#523 item 4)", () => {
 
 		expect(result.found).toBe(true);
 		expect(result.ambiguous).toBeUndefined();
+	});
+});
+
+describe("tsLangForFile — shared grammar resolution (#887)", () => {
+	// module-report must agree with the shared ext→grammar resolver
+	// (tree-sitter-shared.ts EXT_TO_LANG) — the single authority every other
+	// tree-sitter consumer uses — so a file is parsed and TreeCache-keyed under
+	// exactly one grammar process-wide. Pre-#887 it hand-rolled a local map
+	// that sent .js/.mjs/.cjs to the typescript grammar and .jsx to tsx.
+	it.each([
+		["app.js", "javascript"],
+		["app.mjs", "javascript"],
+		["app.cjs", "javascript"],
+		["app.jsx", "javascript"],
+		["app.ts", "typescript"],
+		["app.mts", "typescript"],
+		["app.cts", "typescript"],
+		["app.tsx", "tsx"],
+	])(
+		"resolves jsts %s to %s — identical to the shared resolver",
+		(file, expected) => {
+			expect(tsLangForFile(file, "jsts")).toBe(expected);
+			expect(tsLangForFile(file, "jsts")).toBe(
+				resolveTreeSitterLanguage(file),
+			);
+		},
+	);
+
+	it("keeps the historical kind default for jsts extensions the shared map does not cover", () => {
+		expect(resolveTreeSitterLanguage("App.vue")).toBeUndefined();
+		expect(tsLangForFile("App.vue", "jsts")).toBe("typescript");
+		expect(tsLangForFile("App.svelte", "jsts")).toBe("typescript");
+	});
+
+	it("routes cxx through the shared resolver with a cpp fallback", () => {
+		expect(tsLangForFile("a.c", "cxx")).toBe("c");
+		expect(tsLangForFile("a.h", "cxx")).toBe("c");
+		expect(tsLangForFile("a.cpp", "cxx")).toBe("cpp");
+		expect(tsLangForFile("a.hpp", "cxx")).toBe("cpp");
+		// Not in the shared map — keeps the historical cpp default.
+		expect(resolveTreeSitterLanguage("a.mm")).toBeUndefined();
+		expect(tsLangForFile("a.mm", "cxx")).toBe("cpp");
+	});
+
+	it("keeps kind-based resolution for non-extension-split kinds", () => {
+		expect(tsLangForFile("a.py", "python")).toBe("python");
+		expect(tsLangForFile("a.go", "go")).toBe("go");
+		expect(tsLangForFile("a.sh", "shell")).toBe("bash");
+		expect(tsLangForFile("a.unknown", undefined)).toBeUndefined();
+	});
+});
+
+describe("moduleReport — JavaScript files parse under the javascript grammar (#887)", () => {
+	it("extracts a .js outline + cold-cache imports via the javascript grammar", async () => {
+		const env = makeEnv();
+		createTempFile(env.tmpDir, "dep.js", "export const d = 1;\n");
+		const file = createTempFile(
+			env.tmpDir,
+			"widget.js",
+			[
+				'import { d } from "./dep.js";',
+				'import { readFileSync } from "node:fs";',
+				"export function add(a, b) {",
+				"  return a + b;",
+				"}",
+				"export const mul = (a, b) => a * b;",
+				"export class Widget {",
+				"  render() { return d; }",
+				"}",
+			].join("\n"),
+		);
+
+		// Cold cache: no warmGraph(). Symbols + imports must come from the
+		// tree-sitter javascript path (pre-#887 this file parsed under the
+		// typescript grammar instead).
+		const report = await moduleReport(file, env.tmpDir);
+		expect(report.available).toBe(true);
+		expect(report.language).toBe("jsts");
+		expect(report.provenance?.symbols).toBe("syntax");
+
+		const names = [...report.api, ...report.internal].map((e) => e.name);
+		expect(names).toContain("add");
+		expect(names).toContain("mul");
+		expect(names).toContain("Widget");
+		const widget = [...report.api, ...report.internal].find(
+			(e) => e.name === "Widget",
+		);
+		expect(widget?.members?.map((m) => m.name)).toContain("render");
+
+		expect(report.imports.internal).toContain("dep.js");
+		expect(report.imports.external).toContain("node:fs");
+	});
+
+	it("extracts symbols from a .jsx file under the javascript grammar", async () => {
+		const env = makeEnv();
+		const file = createTempFile(
+			env.tmpDir,
+			"component.jsx",
+			[
+				"export function greet(name) {",
+				"  return `hi ${name}`;",
+				"}",
+				"export class Panel {",
+				"  show() { return true; }",
+				"}",
+			].join("\n"),
+		);
+
+		const report = await moduleReport(file, env.tmpDir);
+		expect(report.available).toBe(true);
+		const names = [...report.api, ...report.internal].map((e) => e.name);
+		expect(names).toContain("greet");
+		expect(names).toContain("Panel");
 	});
 });

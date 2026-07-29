@@ -44,6 +44,23 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **module-report parses plain JS under the correct tree-sitter grammar** (closes
+	#887) — `tsLangForFile` hand-rolled a local extension map that sent
+	`.js`/`.mjs`/`.cjs` to the typescript grammar and `.jsx` to tsx, while every
+	other tree-sitter consumer resolves those extensions to `javascript` via the
+	shared `EXT_TO_LANG` (`clients/tree-sitter-shared.ts`), so each plain-JS file
+	was parsed and cached twice under two grammars (TreeCache keys are
+	`languageId:path`) and ran TS-grammar symbol queries on JS trees. It now
+	routes the extension-split kinds (jsts, and the c-vs-cpp split for cxx)
+	through the shared `resolveTreeSitterLanguage`, keeping the historical kind
+	default only for extensions the shared map does not cover (`.svelte`/`.vue`,
+	the C++ module-interface/Objective-C tail). The symbol extractor gains a
+	dedicated `javascript` defs/refs/import query set: the TypeScript symbol
+	queries do NOT compile against the javascript grammar
+	(`interface_declaration`/`type_alias_declaration`/`type_identifier` do not
+	exist there — a query naming them fails with "Bad node name"), so the
+	javascript set is the same queries minus the type-only patterns, with class
+	names matched as `(identifier)` instead of `(type_identifier)`.
 - **A rule whose query fails to compile now warns once instead of silently reporting nothing** (refs #884) — both compile paths (`compileQueryBatch`'s per-rule drop and `compileRawQuery`, which every per-edit `runQueryOnFile` call falls back on) previously either `dbg()`-logged (invisible without verbose mode) or returned `null`/`[]` with no trail at all. They now call a shared `reportQueryCompileFailure`, mirroring the existing unimplemented-`post_filter` warning: one `console.error` per broken rule id, not per file. A new compile-guard test (`tests/clients/tree-sitter-rule-compile-guard.test.ts`) compiles every non-disabled shipped rule against its real grammar and caught the 32 rules #884 reports as currently broken (tracked there in a shrink-only `KNOWN_BROKEN` allowlist so follow-up fix PRs are forced to remove their entries, and the list can't grow or go stale unnoticed).
 - **Eight enabled typescript/javascript tree-sitter rules whose queries never
 	compiled** (refs #884) — each had been silently dead since authoring because
