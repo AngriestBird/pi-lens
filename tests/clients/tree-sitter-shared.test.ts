@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	_resetSharedTreeSitterClientForTests,
 	getSharedTreeSitterClient,
@@ -66,6 +66,56 @@ describe("shared TreeSitterClient singleton", () => {
 		expect(getSharedTreeSitterClient()).toBeNull();
 	});
 
+	it("poisons every consumer when the parser reports an actual abort", async () => {
+		const client = getSharedTreeSitterClient();
+		expect(client).not.toBeNull();
+		const state = client as unknown as {
+			parsers: Map<string, { parse: () => never }>;
+		};
+		const parse = vi.fn(() => {
+			throw new Error("Aborted()");
+		});
+		state.parsers.set("typescript", { parse });
+
+		await expect(
+			client!.parseFile("virtual.ts", "typescript", "const x = 1;"),
+		).resolves.toBeNull();
+		expect(isTreeSitterWasmAborted()).toBe(true);
+		expect(getSharedTreeSitterClient()).toBeNull();
+		expect(client!.isAvailable()).toBe(false);
+		await expect(
+			client!.parseFile("again.ts", "typescript", "const y = 2;"),
+		).resolves.toBeNull();
+		expect(parse).toHaveBeenCalledTimes(1);
+	});
+
+	it("poisons the client when retired-tree deletion aborts", async () => {
+		const client = getSharedTreeSitterClient();
+		expect(client).not.toBeNull();
+		const firstTree = {
+			rootNode: { type: "program" },
+			delete: () => {
+				throw new Error("abort()");
+			},
+		};
+		const secondTree = { rootNode: { type: "program" }, delete: vi.fn() };
+		const parse = vi
+			.fn()
+			.mockReturnValueOnce(firstTree)
+			.mockReturnValueOnce(secondTree);
+		const state = client as unknown as {
+			parsers: Map<string, { parse: typeof parse }>;
+		};
+		state.parsers.set("typescript", { parse });
+
+		await client!.parseFile("same.ts", "typescript", "const x = 1;");
+		await client!.parseFile("same.ts", "typescript", "const x = 2;");
+		for (let i = 0; i < 8; i++) await Promise.resolve();
+
+		expect(isTreeSitterWasmAborted()).toBe(true);
+		expect(getSharedTreeSitterClient()).toBeNull();
+	});
+
 	it("test reset restores a fresh, usable singleton", () => {
 		markTreeSitterWasmAborted();
 		expect(getSharedTreeSitterClient()).toBeNull();
@@ -81,7 +131,11 @@ describe("shared tree cache is reused across consumers (one parse per write)", (
 	it("re-parsing the same unchanged file returns the cached tree (no re-parse)", async () => {
 		const env = setupTestEnvironment("pi-lens-tscache-");
 		cleanups.push(env.cleanup);
-		const file = createTempFile(env.tmpDir, "reuse.ts", "export const x = 1;\n");
+		const file = createTempFile(
+			env.tmpDir,
+			"reuse.ts",
+			"export const x = 1;\n",
+		);
 
 		const client = getSharedTreeSitterClient();
 		expect(client).not.toBeNull();
@@ -99,7 +153,11 @@ describe("shared tree cache is reused across consumers (one parse per write)", (
 	it("two shared-client handles (e.g. runner + module-report) share one parse", async () => {
 		const env = setupTestEnvironment("pi-lens-tscache-x-");
 		cleanups.push(env.cleanup);
-		const file = createTempFile(env.tmpDir, "shared.ts", "export function f() {}\n");
+		const file = createTempFile(
+			env.tmpDir,
+			"shared.ts",
+			"export function f() {}\n",
+		);
 
 		// Both subsystems obtain the SAME process-wide client → the SAME tree cache.
 		const runnerClient = getSharedTreeSitterClient();
@@ -156,5 +214,16 @@ describe("eviction frees WASM trees without corrupting live parsing (#417 regres
 		const reparsed = await client!.parseFile(files[0], "typescript");
 		expect(reparsed).not.toBeNull();
 		expect(reparsed!.rootNode.type).toBe("program");
+		expect(client!.getParseCacheStats()).toMatchObject({
+			lookups: 62,
+			hits: 1,
+			misses: 61,
+			coldMisses: 60,
+			capacityMisses: 1,
+			sets: 61,
+			evictions: 11,
+			parserInvocations: 61,
+			parserFailures: 0,
+		});
 	});
 });

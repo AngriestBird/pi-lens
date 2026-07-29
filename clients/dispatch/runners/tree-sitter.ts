@@ -25,6 +25,7 @@ import {
 import { logTreeSitter } from "../../tree-sitter-logger.js";
 import {
 	isDisabledQueryFilePath,
+	queriesForLanguage,
 	queryLoader,
 	type TreeSitterQuery,
 } from "../../tree-sitter-query-loader.js";
@@ -443,12 +444,15 @@ const treeSitterRunner: RunnerDefinition = {
 			// Load from disk
 			await queryLoader.loadQueries(ctx.cwd);
 
-			languageQueries = queryLoader.getQueriesForLanguage(languageId);
-			if (languageId === "javascript") {
-				// JavaScript files also match TypeScript rules (shared grammar)
-				const tsQueries = queryLoader.getQueriesForLanguage("typescript");
-				languageQueries = [...languageQueries, ...tsQueries];
-			}
+			// javascript AND tsx inherit the typescript rule set (shared grammar
+			// family); .tsx used to see only its own two JSX rules.
+			languageQueries = queriesForLanguage(
+				new Map([
+					[languageId, queryLoader.getQueriesForLanguage(languageId)],
+					["typescript", queryLoader.getQueriesForLanguage("typescript")],
+				]),
+				languageId,
+			);
 
 			// Save to cache
 			cache.set(

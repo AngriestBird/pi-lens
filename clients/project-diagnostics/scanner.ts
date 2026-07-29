@@ -15,8 +15,12 @@ import { isTestFile } from "../file-utils.js";
 import { isAtOrAboveHomeDir } from "../path-utils.js";
 import { getProjectDiagnosticsScannerMaxFiles } from "../project-scale.js";
 import { collectSourceFilesWithBudgetAsync } from "../source-filter.js";
+import { logTreeSitterCacheStats } from "../tree-sitter-logger.js";
+import {
+	queriesForLanguage,
+	queryLoader,
+} from "../tree-sitter-query-loader.js";
 import { getSharedTreeSitterClient } from "../tree-sitter-shared.js";
-import { queryLoader } from "../tree-sitter-query-loader.js";
 import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
 	saveProjectDiagnosticsSnapshot,
@@ -48,7 +52,12 @@ const TREE_SITTER_EXT_TO_LANG: Record<string, string> = {
 	".ts": "typescript",
 	".mts": "typescript",
 	".cts": "typescript",
-	".tsx": "typescript",
+	// .tsx parses with the TSX grammar, not typescript: the typescript grammar
+	// produces ERROR nodes on JSX, and this id must match the one the fact
+	// providers resolve (`resolveTreeSitterLanguage`) or the file is parsed
+	// twice under two grammars. Typescript RULES still apply — see the
+	// query-set merge below, which compiles them against tsx.
+	".tsx": "tsx",
 	".js": "javascript",
 	".mjs": "javascript",
 	".cjs": "javascript",
@@ -96,83 +105,110 @@ function fromDispatchDiagnostic(
 	};
 }
 
-async function scanFactRules(
-	cwd: string,
-	files: string[],
-): Promise<ProjectDiagnostic[]> {
-	const facts = new FactStore();
-	const pi = { getFlag: () => undefined };
-	const diagnostics: ProjectDiagnostic[] = [];
-	for (const filePath of files) {
-		if (
-			isTestFile(filePath) ||
-			!FACT_RULE_EXTENSIONS.has(path.extname(filePath))
-		) {
-			continue;
-		}
-		facts.clearFileFactsFor(filePath);
-		const ctx = createDispatchContext(filePath, cwd, pi, facts, false);
-		try {
-			await runProviders(ctx);
-			for (const diagnostic of evaluateRules(ctx)) {
-				diagnostics.push(fromDispatchDiagnostic(diagnostic, "fact-rules"));
-			}
-		} catch {
-			// Project scans are best-effort; one unparsable file should not abort the tool.
-		}
-	}
-	return diagnostics;
+interface TreeSitterAndFactScan {
+	treeSitter: ProjectDiagnostic[];
+	factRules: ProjectDiagnostic[];
 }
 
-async function scanTreeSitter(
+/**
+ * One FILE-major pass for the two runners that both tree-sitter-parse the same
+ * file (#675). Run phase-major, the fact rules re-parsed every file the
+ * tree-sitter rules had already parsed — a 50-entry cache cannot span a
+ * whole-project sweep, so all 357 of a 500-file scan's first touches missed on
+ * capacity. Per file the second runner now reads the tree the first one just
+ * cached. Results stay in separate lists so the snapshot's diagnostic order is
+ * unchanged.
+ */
+async function scanTreeSitterAndFactRules(
 	cwd: string,
 	files: string[],
-): Promise<ProjectDiagnostic[]> {
+	signal?: AbortSignal,
+): Promise<TreeSitterAndFactScan> {
 	const client = getSharedTreeSitterClient();
-	if (!client || !client.isAvailable()) return [];
-	if (!(await client.init())) return [];
-
+	const treeSitterReady =
+		!!client && client.isAvailable() && (await client.init());
 	// Same singleton the dispatch runner uses (tree-sitter.ts:444) — memoized
 	// per root, so repeated scans stop re-reading the ~180 query YAMLs.
-	const queryMap = await queryLoader.loadQueries(cwd);
-	const diagnostics: ProjectDiagnostic[] = [];
+	const queryMap = treeSitterReady
+		? await queryLoader.loadQueries(cwd)
+		: undefined;
 
-	for (const filePath of files) {
-		if (isTestFile(filePath)) continue;
-		const langId = TREE_SITTER_EXT_TO_LANG[path.extname(filePath)];
-		if (!langId) continue;
-		const queries = [
-			...(queryMap.get(langId) ?? []),
-			...(langId === "javascript" ? (queryMap.get("typescript") ?? []) : []),
-		];
-		for (const query of queries) {
-			try {
-				const matches = await client.runQueryOnFile(query, filePath, langId, {
-					maxResults: 50,
-				});
-				for (const match of matches ?? []) {
-					diagnostics.push({
-						filePath,
-						line: match.line ?? 1,
-						column: match.column,
-						severity: query.severity === "error" ? "error" : query.severity,
-						semantic:
-							query.inline_tier === "blocking" || query.severity === "error"
-								? "blocking"
-								: "warning",
-						tool: "tree-sitter",
-						runner: "tree-sitter",
-						rule: query.id,
-						message: query.message,
-						source: "project-scan",
+	const facts = new FactStore();
+	const pi = { getFlag: () => undefined };
+	const treeSitter: ProjectDiagnostic[] = [];
+	const factRules: ProjectDiagnostic[] = [];
+	let filesScanned = 0;
+
+	const scan = async (): Promise<void> => {
+		for (const filePath of files) {
+			if (signal?.aborted) break;
+			if (isTestFile(filePath)) continue;
+			const ext = path.extname(filePath);
+			const langId = TREE_SITTER_EXT_TO_LANG[ext];
+			const factEligible = FACT_RULE_EXTENSIONS.has(ext);
+			if (!langId && !factEligible) continue;
+			filesScanned++;
+
+			if (queryMap && langId && client) {
+				const queries = queriesForLanguage(queryMap, langId);
+				try {
+					// ONE tree walk for the whole rule set, not one per rule (#675).
+					const found = await client.runQueriesOnFile(queries, filePath, langId, {
+						maxResults: 50,
 					});
+					for (const { queryDef: query, match } of found) {
+						treeSitter.push({
+							filePath,
+							line: match.line ?? 1,
+							column: match.column,
+							severity: query.severity === "error" ? "error" : query.severity,
+							semantic:
+								query.inline_tier === "blocking" || query.severity === "error"
+									? "blocking"
+									: "warning",
+							tool: "tree-sitter",
+							runner: "tree-sitter",
+							rule: query.id,
+							message: query.message,
+							source: "project-scan",
+						});
+					}
+				} catch {
+					// Continue scanning other rules/files.
 				}
-			} catch {
-				// Continue scanning other rules/files.
+			}
+
+			if (factEligible) {
+				facts.clearFileFactsFor(filePath);
+				const ctx = createDispatchContext(filePath, cwd, pi, facts, false);
+				try {
+					await runProviders(ctx);
+					for (const diagnostic of evaluateRules(ctx)) {
+						factRules.push(fromDispatchDiagnostic(diagnostic, "fact-rules"));
+					}
+				} catch {
+					// Project scans are best-effort; one unparsable file should not abort the tool.
+				}
 			}
 		}
+	};
+
+	if (!client) {
+		await scan();
+		return { treeSitter, factRules };
 	}
-	return diagnostics;
+
+	const startedAt = Date.now();
+	await client.withParseCacheMeasurement(scan, (stats) => {
+		logTreeSitterCacheStats({
+			scope: "project_diagnostics_scan",
+			filePath: cwd,
+			fileCount: filesScanned,
+			durationMs: Date.now() - startedAt,
+			stats,
+		});
+	});
+	return { treeSitter, factRules };
 }
 
 /**
@@ -279,12 +315,11 @@ export async function scanProjectDiagnostics(
 	const runners: string[] = [];
 	const diagnostics: ProjectDiagnostic[] = [];
 	if (!signal?.aborted) {
-		diagnostics.push(...(await scanTreeSitter(cwd, files)));
-		runners.push("tree-sitter");
-	}
-	if (!signal?.aborted) {
-		diagnostics.push(...(await scanFactRules(cwd, files)));
-		runners.push("fact-rules");
+		// Both runners parse the same file, so they share ONE file-major pass
+		// (#675) — the per-file order is what keeps the second one on a cache hit.
+		const scanned = await scanTreeSitterAndFactRules(cwd, files, signal);
+		diagnostics.push(...scanned.treeSitter, ...scanned.factRules);
+		runners.push("tree-sitter", "fact-rules");
 	}
 	if (!signal?.aborted) {
 		diagnostics.push(...(await scanAstGrepNapi(cwd, files)));

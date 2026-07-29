@@ -15,6 +15,7 @@
  *   "function $NAME($$$PARAMS) { $BODY }" matches function declarations
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
@@ -29,7 +30,12 @@ import { resolvePackagePath } from "./package-root.js";
 
 const _require = createRequire(import.meta.url);
 
-import { TreeCache } from "./tree-sitter-cache.js";
+import {
+	createTreeCacheCounters,
+	TreeCache,
+	type TreeCacheCounters,
+	type TreeCacheStats,
+} from "./tree-sitter-cache.js";
 import { TreeSitterNavigator } from "./tree-sitter-navigator.js";
 import {
 	type TreeSitterQuery,
@@ -85,6 +91,54 @@ export interface SearchPattern {
 	metavars: string[];
 }
 
+export interface TreeSitterParserCounters {
+	parserInvocations: number;
+	parserDurationMs: number;
+	parserFailures: number;
+}
+
+export interface TreeSitterParseCacheStats
+	extends TreeCacheStats,
+		TreeSitterParserCounters {}
+
+type ParseCacheMeasurement = TreeCacheCounters & TreeSitterParserCounters;
+
+/**
+ * Result of a cache-safe parse. `parsed: false` means the grammar/parse was
+ * unavailable — distinct from a consumer that legitimately returned null.
+ */
+export type ParsedTreeOutcome<T> = { parsed: true; value: T } | { parsed: false };
+
+const NOT_PARSED: ParsedTreeOutcome<never> = { parsed: false };
+
+interface QueryBatchEntry {
+	queryDef: TreeSitterQuery;
+	metavars: string[];
+	postFilter?: string;
+	postFilterParams?: unknown;
+}
+
+interface QueryBatch {
+	// biome-ignore lint/suspicious/noExplicitAny: compiled web-tree-sitter Query
+	query: any;
+	entries: QueryBatchEntry[];
+	/** patternIndex → index into `entries`. */
+	ownerOfPattern: number[];
+}
+
+function createParserCounters(): TreeSitterParserCounters {
+	return {
+		parserInvocations: 0,
+		parserDurationMs: 0,
+		parserFailures: 0,
+	};
+}
+
+export function isTreeSitterWasmAbortError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	return message.includes("Aborted") || message.includes("abort()");
+}
+
 // --- Parser Manager ---
 
 export class TreeSitterClient {
@@ -103,13 +157,90 @@ export class TreeSitterClient {
 	private LanguageLoader: any = null;
 	// biome-ignore lint/suspicious/noExplicitAny: Compiled query cache by language+pattern hash
 	private queryCache = new Map<string, any>();
+	/** Combined multi-rule queries by language + rule-set identity (null = don't retry). */
+	private queryBatchCache = new Map<string, QueryBatch | null>();
 	private queryLoader = new TreeSitterQueryLoader();
 	private verbose: boolean;
+	private parserCounters = createParserCounters();
+	private parseCacheMeasurement =
+		new AsyncLocalStorage<ParseCacheMeasurement>();
+	private activeMeasurements = 0;
+	private onWasmAbort: (() => void) | undefined;
+	private wasmAborted = false;
 
-	constructor(verbose = false) {
+	constructor(verbose = false, onWasmAbort?: () => void) {
 		this.grammarsDir = this.findGrammarsDir();
 		this.verbose = verbose;
-		this.treeCache = new TreeCache(50, verbose);
+		this.onWasmAbort = onWasmAbort;
+		this.treeCache = new TreeCache(
+			50,
+			verbose,
+			4096,
+			(key, amount) => {
+				const measurement = this.parseCacheMeasurement.getStore();
+				if (measurement) measurement[key] += amount;
+			},
+			(error) => this.reportWasmAbort(error),
+		);
+	}
+
+	private recordParserCounter(
+		key: keyof TreeSitterParserCounters,
+		amount = 1,
+	): void {
+		this.parserCounters[key] += amount;
+		const measurement = this.parseCacheMeasurement.getStore();
+		if (measurement) measurement[key] += amount;
+	}
+
+	reportWasmAbort(error: unknown): boolean {
+		if (!isTreeSitterWasmAbortError(error)) return false;
+		if (!this.wasmAborted) {
+			this.wasmAborted = true;
+			this.onWasmAbort?.();
+		}
+		return true;
+	}
+
+	getParseCacheStats(): TreeSitterParseCacheStats {
+		return {
+			...this.treeCache.getStats(),
+			...this.parserCounters,
+		};
+	}
+
+	async withParseCacheMeasurement<T>(
+		work: () => Promise<T>,
+		onComplete: (stats: TreeSitterParseCacheStats) => void,
+	): Promise<T> {
+		const measurement: ParseCacheMeasurement = {
+			...createTreeCacheCounters(),
+			...createParserCounters(),
+		};
+		this.activeMeasurements++;
+		try {
+			return await this.parseCacheMeasurement.run(measurement, async () => {
+				try {
+					return await work();
+				} finally {
+					const cacheStats = this.treeCache.getStats();
+					try {
+						onComplete({
+							...cacheStats,
+							...measurement,
+							misses: measurement.lookups - measurement.hits,
+						});
+					} catch {
+						// Telemetry must not fail the measured work.
+					}
+				}
+			});
+		} finally {
+			// On Node 22 an active AsyncLocalStorage keeps an async_hooks init hook
+			// enabled for every promise in the process, so release it once the last
+			// overlapping measurement is done rather than taxing the whole session.
+			if (--this.activeMeasurements === 0) this.parseCacheMeasurement.disable();
+		}
 	}
 
 	/** Debug logging helper */
@@ -313,6 +444,7 @@ export class TreeSitterClient {
 
 	/** Initialize tree-sitter WASM runtime */
 	async init(): Promise<boolean> {
+		if (this.wasmAborted) return false;
 		if (this.initialized) return true;
 		if (this.initPromise) return this.initPromise;
 
@@ -354,6 +486,7 @@ export class TreeSitterClient {
 				this.initialized = true;
 				return true;
 			} catch (err) {
+				this.reportWasmAbort(err);
 				this.dbg(`Init error: ${err}`);
 				return false;
 			} finally {
@@ -368,6 +501,7 @@ export class TreeSitterClient {
 	private async loadLanguage(
 		languageId: string,
 	): Promise<TreeSitterLanguage | null> {
+		if (this.wasmAborted) return null;
 		this.dbg(`Loading language: ${languageId}`);
 
 		if (this.languages.has(languageId)) {
@@ -427,6 +561,7 @@ export class TreeSitterClient {
 			}
 			return language;
 		} catch (err) {
+			this.reportWasmAbort(err);
 			this.dbg(`Language load error: ${err}`);
 			return null;
 		}
@@ -436,6 +571,7 @@ export class TreeSitterClient {
 	private async getParser(
 		languageId: string,
 	): Promise<TreeSitterParserInstance | null> {
+		if (this.wasmAborted) return null;
 		if (this.parsers.has(languageId)) {
 			return this.parsers.get(languageId)!;
 		}
@@ -449,41 +585,83 @@ export class TreeSitterClient {
 		return parser;
 	}
 
-	/** Parse a file and return the AST tree */
+	/**
+	 * Parse a file and return the AST tree. The tree stays valid only until the
+	 * caller's next `await` — prefer `withParsedTree`, which extracts inside the
+	 * cache-safe window (#417/#675).
+	 */
 	async parseFile(
 		filePath: string,
 		languageId: string,
 		contentOverride?: string,
 	): Promise<TreeSitterTree | null> {
+		const outcome = await this.parseFileAndUse(
+			filePath,
+			languageId,
+			contentOverride,
+			(tree) => tree,
+		);
+		return outcome.parsed ? outcome.value : null;
+	}
+
+	async withParsedTree<T>(
+		filePath: string,
+		languageId: string,
+		contentOverride: string | undefined,
+		consume: (tree: TreeSitterTree) => T,
+	): Promise<ParsedTreeOutcome<T>> {
+		return this.parseFileAndUse(filePath, languageId, contentOverride, consume);
+	}
+
+	private async parseFileAndUse<T>(
+		filePath: string,
+		languageId: string,
+		contentOverride: string | undefined,
+		consume: (tree: TreeSitterTree) => T,
+	): Promise<ParsedTreeOutcome<T>> {
 		this.dbg(`Parsing ${filePath} with language ${languageId}`);
 		const parser = await this.getParser(languageId);
 		if (!parser) {
 			this.dbg(`Failed to get parser for ${languageId}`);
-			return null;
+			return NOT_PARSED;
 		}
 
+		let tree: TreeSitterTree;
 		try {
 			const content = contentOverride ?? fs.readFileSync(filePath, "utf-8");
 			this.dbg(`File content length: ${content.length}`);
 
-			// Check cache first
 			const cachedTree = this.treeCache.get(filePath, content, languageId);
 			if (cachedTree) {
 				this.dbg(`Using cached tree for ${filePath}`);
-				return cachedTree;
+				tree = cachedTree;
+			} else {
+				const parseStartedAt = performance.now();
+				this.recordParserCounter("parserInvocations");
+				try {
+					tree = parser.parse(content);
+				} catch (err) {
+					this.recordParserCounter("parserFailures");
+					throw err;
+				} finally {
+					this.recordParserCounter(
+						"parserDurationMs",
+						performance.now() - parseStartedAt,
+					);
+				}
+				this.dbg(`Parsed, root node type: ${tree.rootNode.type}`);
+				this.treeCache.set(filePath, content, languageId, tree);
 			}
-
-			// Parse and cache
-			const tree = parser.parse(content);
-			this.dbg(`Parsed, root node type: ${tree.rootNode.type}`);
-
-			// Cache the tree
-			this.treeCache.set(filePath, content, languageId, tree);
-
-			return tree;
 		} catch (err) {
+			this.reportWasmAbort(err);
 			this.dbg(`Parse error: ${err}`);
-			return null;
+			return NOT_PARSED;
+		}
+		try {
+			return { parsed: true, value: consume(tree) };
+		} catch (error) {
+			this.reportWasmAbort(error);
+			throw error;
 		}
 	}
 
@@ -550,6 +728,7 @@ export class TreeSitterClient {
 
 	/** Check if tree-sitter is available (a core grammar resolves somewhere). */
 	isAvailable(): boolean {
+		if (this.wasmAborted) return false;
 		// Available if the core TS grammar resolves in ANY source dir — the bundled
 		// `grammars/` counts even when web-tree-sitter/grammars is empty (no
 		// postinstall on pnpm/bun, or a fresh CI checkout).
@@ -562,6 +741,7 @@ export class TreeSitterClient {
 
 	/** Check if specific language is supported */
 	async isLanguageSupported(languageId: string): Promise<boolean> {
+		if (this.wasmAborted) return false;
 		if (!this.initialized) await this.init();
 		const language = await this.loadLanguage(languageId);
 		return language !== null;
@@ -569,6 +749,7 @@ export class TreeSitterClient {
 
 	/** Get loaded language for symbol extraction */
 	getLanguage(languageId: string): TreeSitterLanguage | null {
+		if (this.wasmAborted) return null;
 		return this.languages.get(languageId) || null;
 	}
 
@@ -654,11 +835,17 @@ export class TreeSitterClient {
 			if (!ok) return [];
 		}
 
+		// Compile against the language the FILE is parsed as, never the query's
+		// own `language:` key. A Query is bound to the grammar it compiled
+		// against; run it on a tree from another grammar and tree-sitter returns
+		// zero matches forever — which is what the javascript→typescript rule
+		// merge had been doing (31 queries per JS file, structurally unable to
+		// fire). `getQueryCacheKey` already namespaces by language.
 		const compiled = await this.compileRawQuery(
 			queryDef.id,
 			queryDef.query,
 			queryDef.metavars,
-			queryDef.language || languageId,
+			languageId,
 			queryDef.post_filter,
 			queryDef.post_filter_params,
 		);
@@ -677,6 +864,181 @@ export class TreeSitterClient {
 
 		const maxResults = options.maxResults ?? 50;
 		return matches.slice(0, maxResults);
+	}
+
+	/**
+	 * Run a whole rule set against one file in a SINGLE tree walk (#675).
+	 *
+	 * Calling `runQueryOnFile` per rule re-walks the tree once per rule — ~34
+	 * walks per file on a project scan, measured at 3.3× the cost of one
+	 * combined query for byte-identical matches. Patterns are concatenated in
+	 * rule order and `match.patternIndex` maps back to the owning rule, so
+	 * per-rule metavars, predicates, post-filters and caps still apply and
+	 * results stay grouped in rule order. Rules that don't compile against this
+	 * language are dropped individually (never poisoning the batch), and a
+	 * combined query that fails to compile falls back to per-rule execution.
+	 */
+	async runQueriesOnFile(
+		queryDefs: TreeSitterQuery[],
+		filePath: string,
+		languageId: string,
+		options: { maxResults?: number } = {},
+		contentOverride?: string,
+	): Promise<Array<{ queryDef: TreeSitterQuery; match: StructuralMatch }>> {
+		if (queryDefs.length === 0) return [];
+		if (!this.initialized) {
+			const ok = await this.init();
+			if (!ok) return [];
+		}
+		const maxResults = options.maxResults ?? 50;
+
+		const batch = await this.compileQueryBatch(queryDefs, languageId);
+		if (!batch) {
+			// Fallback: one walk per rule, preserving rule order.
+			const results: Array<{
+				queryDef: TreeSitterQuery;
+				match: StructuralMatch;
+			}> = [];
+			for (const queryDef of queryDefs) {
+				const matches = await this.runQueryOnFile(
+					queryDef,
+					filePath,
+					languageId,
+					options,
+					contentOverride,
+				);
+				for (const match of matches) results.push({ queryDef, match });
+			}
+			return results;
+		}
+
+		const perQuery = new Map<number, StructuralMatch[]>();
+		await this.parseFileAndUse(filePath, languageId, contentOverride, (tree) => {
+			try {
+				for (const match of batch.query.matches(tree.rootNode)) {
+					const owner = batch.ownerOfPattern[match.patternIndex];
+					if (owner === undefined) continue;
+					const bucket = perQuery.get(owner) ?? [];
+					if (bucket.length >= maxResults) continue;
+					const entry = batch.entries[owner];
+					const captures: Record<string, TreeSitterNode> = {};
+					for (const capture of match.captures) {
+						if (entry.metavars.includes(capture.name)) {
+							captures[capture.name] = capture.node;
+						}
+					}
+					if (!this.evaluatePredicates(batch.query, match)) continue;
+					if (
+						entry.postFilter &&
+						!this.applyPostFilter(
+							entry.postFilter,
+							entry.postFilterParams,
+							captures,
+						)
+					) {
+						continue;
+					}
+					if (match.captures.length === 0) continue;
+					const firstNode = match.captures[0].node;
+					const textCaptures: Record<string, string> = {};
+					for (const [name, node] of Object.entries(captures)) {
+						textCaptures[name] = (node as TreeSitterNode).text;
+					}
+					bucket.push({
+						file: filePath,
+						line: firstNode.startPosition.row + 1,
+						column: firstNode.startPosition.column + 1,
+						matchedText: firstNode.text,
+						nodeType: firstNode.type as string | undefined,
+						captures: textCaptures,
+					});
+					perQuery.set(owner, bucket);
+				}
+			} catch (err) {
+				this.reportWasmAbort(err);
+				this.dbg(`Batched query matching error: ${err}`);
+			}
+		});
+
+		const results: Array<{ queryDef: TreeSitterQuery; match: StructuralMatch }> =
+			[];
+		for (let i = 0; i < batch.entries.length; i++) {
+			for (const match of perQuery.get(i) ?? []) {
+				results.push({ queryDef: batch.entries[i].queryDef, match });
+			}
+		}
+		return results;
+	}
+
+	/**
+	 * Compile `queryDefs` into one multi-pattern Query for `languageId`, with a
+	 * pattern-index → rule map. Cached per language + rule-set identity.
+	 */
+	private async compileQueryBatch(
+		queryDefs: TreeSitterQuery[],
+		languageId: string,
+	): Promise<QueryBatch | null> {
+		const cacheKey = this.getQueryCacheKey(
+			`batch:${queryDefs.map((q) => q.id).join("|")}`,
+			languageId,
+		);
+		const cached = this.queryBatchCache.get(cacheKey);
+		if (cached !== undefined) return cached;
+
+		const build = async (): Promise<QueryBatch | null> => {
+			const language = await this.loadLanguage(languageId);
+			if (!language) return null;
+			const Query = (await loadWebTreeSitter()).Query;
+
+			const entries: QueryBatchEntry[] = [];
+			const sources: string[] = [];
+			const ownerOfPattern: number[] = [];
+			for (const queryDef of queryDefs) {
+				let patternCount: number;
+				try {
+					// biome-ignore lint/suspicious/noExplicitAny: Language type compatibility
+					const probe = new Query(language as any, queryDef.query);
+					patternCount = probe.patternCount();
+					probe.delete?.();
+				} catch (err) {
+					if (this.reportWasmAbort(err)) return null;
+					// A rule that can't compile against THIS grammar is simply not
+					// applicable here (e.g. a `type_annotation` pattern on javascript).
+					this.dbg(`Batch: skipping ${queryDef.id} for ${languageId}: ${err}`);
+					continue;
+				}
+				const owner = entries.length;
+				entries.push({
+					queryDef,
+					metavars: queryDef.metavars ?? [],
+					postFilter: queryDef.post_filter,
+					postFilterParams: queryDef.post_filter_params,
+				});
+				sources.push(queryDef.query);
+				for (let i = 0; i < patternCount; i++) ownerOfPattern.push(owner);
+			}
+			if (entries.length === 0) return null;
+
+			try {
+				// biome-ignore lint/suspicious/noExplicitAny: Language type compatibility
+				const query = new Query(language as any, sources.join("\n"));
+				if (query.patternCount() !== ownerOfPattern.length) {
+					this.dbg(
+						`Batch pattern count mismatch for ${languageId} (${query.patternCount()} vs ${ownerOfPattern.length}) — falling back`,
+					);
+					return null;
+				}
+				return { query, entries, ownerOfPattern };
+			} catch (err) {
+				if (this.reportWasmAbort(err)) return null;
+				this.dbg(`Batch compile failed for ${languageId}: ${err}`);
+				return null;
+			}
+		};
+
+		const batch = await build();
+		this.queryBatchCache.set(cacheKey, batch);
+		return batch;
 	}
 
 	/**
@@ -847,13 +1209,14 @@ export class TreeSitterClient {
 			const Query = (await loadWebTreeSitter()).Query;
 			// biome-ignore lint/suspicious/noExplicitAny: Language type compatibility
 			const query = new Query(language as any, queryStr);
-			this.dbg(`Query compiled with ${query.patternCount} patterns`);
+			this.dbg(`Query compiled with ${query.patternCount()} patterns`);
 
 			const result = { query, metavars, postFilter, postFilterParams };
 			// Cache the compiled query
 			this.queryCache.set(cacheKey, result);
 			return result;
 		} catch (err) {
+			this.reportWasmAbort(err);
 			this.dbg(`Query compilation failed: ${err}`);
 			return null;
 		}
@@ -894,6 +1257,7 @@ export class TreeSitterClient {
 			this.queryCache.set(cacheKey, result);
 			return result;
 		} catch (err) {
+			this.reportWasmAbort(err);
 			this.dbg(`Raw query compilation failed (${queryId}): ${err}`);
 			return null;
 		}
@@ -1752,8 +2116,27 @@ export class TreeSitterClient {
 				return false;
 			}
 			default:
-				return true;
+				// A rule whose post_filter has no implementation cannot honour its
+				// own definition, so DROP the match instead of reporting every raw
+				// structural hit. Failing open here made `duplicate-function-arg`
+				// (`same_param_name`, unimplemented) fire on 59 of 60 files that
+				// contain no duplicate parameter at all.
+				this.reportMissingPostFilter(postFilter);
+				return false;
 		}
+	}
+
+	private reportedMissingPostFilters = new Set<string>();
+
+	/** Warn once per unimplemented post_filter — a silent rule needs a trail. */
+	private reportMissingPostFilter(postFilter: string): void {
+		if (this.reportedMissingPostFilters.has(postFilter)) return;
+		this.reportedMissingPostFilters.add(postFilter);
+		console.error(
+			`[pi-lens] tree-sitter rule post_filter '${postFilter}' is not implemented — ` +
+				`matches for the rules using it are suppressed rather than reported unfiltered. ` +
+				`Implement it in applyPostFilter (clients/tree-sitter-client.ts) to re-enable them.`,
+		);
 	}
 
 	/**
@@ -1781,60 +2164,60 @@ export class TreeSitterClient {
 		postFilterParams?: any,
 		contentOverride?: string,
 	): Promise<StructuralMatch[]> {
-		const tree = await this.parseFile(filePath, languageId, contentOverride);
-		if (!tree) return [];
-
 		const matches: StructuralMatch[] = [];
 
-		try {
-			const queryMatches = query.matches(tree.rootNode);
+		await this.parseFileAndUse(filePath, languageId, contentOverride, (tree) => {
+			try {
+				const queryMatches = query.matches(tree.rootNode);
 
-			for (const match of queryMatches) {
-				const captures: Record<string, TreeSitterNode> = {};
+				for (const match of queryMatches) {
+					const captures: Record<string, TreeSitterNode> = {};
 
-				for (const capture of match.captures) {
-					if (metavars.includes(capture.name)) {
-						captures[capture.name] = capture.node;
+					for (const capture of match.captures) {
+						if (metavars.includes(capture.name)) {
+							captures[capture.name] = capture.node;
+						}
+					}
+
+					// Evaluate #match? and #eq? predicates that web-tree-sitter doesn't enforce automatically
+					if (!this.evaluatePredicates(query, match)) {
+						continue;
+					}
+
+					if (
+						postFilter &&
+						!this.applyPostFilter(postFilter, postFilterParams, captures)
+					) {
+						continue;
+					}
+
+					if (match.captures.length > 0) {
+						const firstNode = match.captures[0].node;
+						const textCaptures: Record<string, string> = {};
+						for (const [name, node] of Object.entries(captures)) {
+							textCaptures[name] = (node as TreeSitterNode).text;
+						}
+						matches.push({
+							file: filePath,
+							line: firstNode.startPosition.row + 1,
+							column: firstNode.startPosition.column + 1,
+							matchedText: firstNode.text,
+							nodeType: firstNode.type as string | undefined,
+							captures: textCaptures,
+						});
 					}
 				}
 
-				// Evaluate #match? and #eq? predicates that web-tree-sitter doesn't enforce automatically
-				if (!this.evaluatePredicates(query, match)) {
-					continue;
+				if (matches.length > 0) {
+					this.dbg(
+						`Found ${matches.length} matches in ${path.basename(filePath)}`,
+					);
 				}
-
-				if (
-					postFilter &&
-					!this.applyPostFilter(postFilter, postFilterParams, captures)
-				) {
-					continue;
-				}
-
-				if (match.captures.length > 0) {
-					const firstNode = match.captures[0].node;
-					const textCaptures: Record<string, string> = {};
-					for (const [name, node] of Object.entries(captures)) {
-						textCaptures[name] = (node as TreeSitterNode).text;
-					}
-					matches.push({
-						file: filePath,
-						line: firstNode.startPosition.row + 1,
-						column: firstNode.startPosition.column + 1,
-						matchedText: firstNode.text,
-						nodeType: firstNode.type as string | undefined,
-						captures: textCaptures,
-					});
-				}
+			} catch (err) {
+				this.reportWasmAbort(err);
+				this.dbg(`Query matching error: ${err}`);
 			}
-
-			if (matches.length > 0) {
-				this.dbg(
-					`Found ${matches.length} matches in ${path.basename(filePath)}`,
-				);
-			}
-		} catch (err) {
-			this.dbg(`Query matching error: ${err}`);
-		}
+		});
 
 		return matches;
 	}

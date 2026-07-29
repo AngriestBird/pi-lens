@@ -1,8 +1,10 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolCall } from "../../clients/runtime-tool-call.js";
+import type { TreeSitterClient } from "../../clients/tree-sitter-client.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 // handleToolCall calls getLSPService() directly (not via DI, matching the
@@ -93,6 +95,69 @@ describe("handleToolCall", () => {
 		}
 	});
 
+	it("uses the shared tree-sitter client for partial-read expansion", async () => {
+		const env = setupTestEnvironment("pi-lens-runtime-tool-call-expansion-");
+		try {
+			const filePath = createTempFile(
+				env.tmpDir,
+				"src/expand.ts",
+				"function outer() {\n\treturn 1;\n}\n",
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const init = vi.fn().mockResolvedValue(false);
+			const client = { init } as unknown as TreeSitterClient;
+			const getTreeSitterClient = vi.fn(() => client);
+
+			await handleToolCall(
+				baseDeps({
+					runtime,
+					event: {
+						toolName: "read",
+						input: { path: filePath, offset: 2, limit: 1 },
+					},
+					ctx: { cwd: env.tmpDir },
+					getTreeSitterClient,
+				}),
+			);
+
+			expect(getTreeSitterClient).toHaveBeenCalledTimes(1);
+			expect(init).toHaveBeenCalledTimes(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("skips partial-read expansion when the shared runtime is poisoned", async () => {
+		const env = setupTestEnvironment("pi-lens-runtime-tool-call-poisoned-");
+		try {
+			const filePath = createTempFile(
+				env.tmpDir,
+				"src/poisoned.ts",
+				"function outer() {\n\treturn 1;\n}\n",
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const getTreeSitterClient = vi.fn(() => null);
+
+			await handleToolCall(
+				baseDeps({
+					runtime,
+					event: {
+						toolName: "read",
+						input: { path: filePath, offset: 2, limit: 1 },
+					},
+					ctx: { cwd: env.tmpDir },
+					getTreeSitterClient,
+				}),
+			);
+
+			expect(getTreeSitterClient).toHaveBeenCalledTimes(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("blocks an edit on an existing file that was never read (zero_read)", async () => {
 		const env = setupTestEnvironment("pi-lens-runtime-tool-call-edit-");
 		try {
@@ -101,6 +166,8 @@ describe("handleToolCall", () => {
 				"src/b.ts",
 				"function foo() {\n\treturn 1;\n}\n",
 			);
+			const beforeSession = new Date(Date.now() - 1000);
+			fs.utimesSync(filePath, beforeSession, beforeSession);
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
 

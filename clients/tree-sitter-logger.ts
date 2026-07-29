@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { isTestMode } from "./env-utils.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import { createNdjsonLogger } from "./ndjson-logger.js";
+import type { TreeSitterParseCacheStats } from "./tree-sitter-client.js";
 
 const TREE_SITTER_LOG_DIR = getGlobalPiLensDir();
 const TREE_SITTER_LOG_FILE = path.join(TREE_SITTER_LOG_DIR, "tree-sitter.log");
@@ -17,11 +18,13 @@ export interface TreeSitterLogEntry {
 		| "query_error"
 		| "runner_complete"
 		| "entity_diff"
-		| "blast_radius";
+		| "blast_radius"
+		| "cache_stats";
 	filePath: string;
 	languageId?: string;
 	queryId?: string;
 	status?: string;
+	durationMs?: number;
 	diagnostics?: number;
 	blocking?: number;
 	queryCount?: number;
@@ -32,11 +35,59 @@ export interface TreeSitterLogEntry {
 	metadata?: Record<string, unknown>;
 }
 
+const CACHE_COUNTER_KEYS = [
+	"lookups",
+	"hits",
+	"misses",
+	"coldMisses",
+	"capacityMisses",
+	"contentChangedMisses",
+	"mtimeMisses",
+	"statFailedMisses",
+	"sets",
+	"replacements",
+	"evictions",
+	"clears",
+	"ghostHistoryDrops",
+	"parserInvocations",
+	"parserDurationMs",
+	"parserFailures",
+] as const satisfies readonly (keyof TreeSitterParseCacheStats)[];
+
 export function logTreeSitter(entry: TreeSitterLogEntry): void {
 	if (isTestMode()) {
 		return;
 	}
 	writer.log({ ts: new Date().toISOString(), ...entry });
+}
+
+export function logTreeSitterCacheStats(options: {
+	scope: string;
+	filePath: string;
+	fileCount: number;
+	durationMs: number;
+	stats: TreeSitterParseCacheStats;
+}): void {
+	const delta = Object.fromEntries(
+		CACHE_COUNTER_KEYS.map((key) => [key, options.stats[key]]),
+	) as Record<(typeof CACHE_COUNTER_KEYS)[number], number>;
+	logTreeSitter({
+		phase: "cache_stats",
+		filePath: options.filePath,
+		durationMs: options.durationMs,
+		metadata: {
+			scope: options.scope,
+			fileCount: options.fileCount,
+			hitRate: delta.lookups > 0 ? delta.hits / delta.lookups : null,
+			delta,
+			resident: {
+				size: options.stats.size,
+				maxSize: options.stats.maxSize,
+				totalBytes: options.stats.totalBytes,
+				totalLines: options.stats.totalLines,
+			},
+		},
+	});
 }
 
 export function getTreeSitterLogPath(): string {
