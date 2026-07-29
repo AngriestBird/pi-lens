@@ -57,7 +57,7 @@ describe("dotnet root markers single source of truth (#895)", () => {
 			const project = path.join(workspace, "nested");
 			const file = path.join(project, "src", "Program.cs");
 			fs.mkdirSync(path.dirname(file), { recursive: true });
-			fs.writeFileSync(path.join(project, pattern.replace("*", "App")), "\n");
+			fs.writeFileSync(path.join(project, pattern.replaceAll("*", "App")), "\n");
 			fs.writeFileSync(file, "// test\n");
 
 			await expect(CSharpServer.root(file), pattern).resolves.toBe(project);
@@ -79,7 +79,7 @@ describe("dotnet root markers single source of truth (#895)", () => {
 			const project = path.join(workspace, "nested");
 			const file = path.join(project, "src", "Program.fs");
 			fs.mkdirSync(path.dirname(file), { recursive: true });
-			fs.writeFileSync(path.join(project, pattern.replace("*", "App")), "\n");
+			fs.writeFileSync(path.join(project, pattern.replaceAll("*", "App")), "\n");
 			fs.writeFileSync(file, "// test\n");
 
 			await expect(FSharpServer.root(file), pattern).resolves.toBe(project);
