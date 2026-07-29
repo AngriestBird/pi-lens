@@ -8,6 +8,13 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **Faster LSP teardown and tool probes** (refs #448) — `killProcessTree`
+	resolves on the child's exit event instead of sleeping the full 1.5s
+	SIGTERM→SIGKILL escalation window (saves ~1.5s per graceful client
+	shutdown); tool availability checks skip `--version` spawns for binaries
+	that aren't on disk and no longer re-verify a probe-cache-validated managed
+	install on every analyze.
+
 ### Fixed
 
 - **tree-sitter runner no longer double-increments already 1-indexed
