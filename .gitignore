@@ -5,6 +5,7 @@ features.md
 # pi-lens internal
 .pi-lens/
 .harness/
+.pi-subagents/
 
 # Session data
 .pisessionsummaries/
