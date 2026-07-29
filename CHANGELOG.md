@@ -44,6 +44,19 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Small edits no longer pay the entity-extraction cost** (refs #885) — the
+	<5-line skip threshold only guarded the zero-diagnostics early return; a
+	second `extractEntitySnapshot` block ran unconditionally, so trivial edits
+	still spent ~500-800ms per dispatch and, on unsaved buffers, parsed stale
+	disk content (thrashing the parse-cache entry). Extraction is now one
+	threshold-guarded block that receives the same `file.content` override the
+	diagnostics phase used.
+- **The per-edit tree-sitter runner walks the tree once, not once per rule**
+	(refs #888) — the dispatch hot path ran ~30-40 `runQueryOnFile` walks per
+	edit behind a concurrency limiter that could not parallelize synchronous
+	WASM. It now calls `runQueriesOnFile` once (#675 batching) and distributes
+	the per-rule results; the per-rule `maxResults(10)` cap and modified-ranges
+	gating are unchanged.
 - **module-report parses plain JS under the correct tree-sitter grammar** (closes
 	#887) — `tsLangForFile` hand-rolled a local extension map that sent
 	`.js`/`.mjs`/`.cjs` to the typescript grammar and `.jsx` to tsx, while every
