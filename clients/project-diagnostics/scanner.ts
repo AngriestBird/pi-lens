@@ -15,7 +15,10 @@ import { isTestFile } from "../file-utils.js";
 import { isAtOrAboveHomeDir } from "../path-utils.js";
 import { getProjectDiagnosticsScannerMaxFiles } from "../project-scale.js";
 import { collectSourceFilesWithBudgetAsync } from "../source-filter.js";
-import { logTreeSitterCacheStats } from "../tree-sitter-logger.js";
+import {
+	logTreeSitter,
+	logTreeSitterCacheStats,
+} from "../tree-sitter-logger.js";
 import {
 	queriesForLanguage,
 	queryLoader,
@@ -23,6 +26,7 @@ import {
 import {
 	EXT_TO_LANG,
 	getSharedTreeSitterClient,
+	isTreeSitterWasmAborted,
 } from "../tree-sitter-shared.js";
 import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
@@ -113,6 +117,8 @@ interface FileMajorScan {
 	treeSitter: ProjectDiagnostic[];
 	factRules: ProjectDiagnostic[];
 	astGrep: ProjectDiagnostic[];
+	filesScanned: number;
+	wasmAborted: boolean;
 }
 
 /**
@@ -144,6 +150,10 @@ async function scanFileMajorRules(
 	let phaseOneFilesScanned = 0;
 	let astGrepFilesScanned = 0;
 	let astGrepDurationMs = 0;
+	// #891: only fully completed files count — a wasm abort mid-file leaves that
+	// file out, so the caller can report a truncated filesScanned honestly.
+	let filesScanned = 0;
+	let wasmAborted = isTreeSitterWasmAborted();
 
 	const scanTreeSitterFile = async (
 		filePath: string,
@@ -232,7 +242,12 @@ async function scanFileMajorRules(
 
 	const scan = async (): Promise<void> => {
 		for (const filePath of files) {
-			if (signal?.aborted) break;
+			// #891: a wasm-level abort poisons the shared parser for the rest of the
+			// process — stop the whole pass, don't keep feeding it files.
+			if (signal?.aborted || isTreeSitterWasmAborted()) {
+				wasmAborted ||= isTreeSitterWasmAborted();
+				break;
+			}
 			if (isTestFile(filePath)) continue;
 			const ext = path.extname(filePath);
 			const langId = TREE_SITTER_EXT_TO_LANG[ext];
@@ -258,9 +273,17 @@ async function scanFileMajorRules(
 			}
 
 			await scanTreeSitterFile(filePath, langId, content);
+			if (isTreeSitterWasmAborted()) {
+				wasmAborted = true;
+				break;
+			}
 
 			if (factEligible) {
 				await scanFactRulesFile(filePath, content);
+				if (isTreeSitterWasmAborted()) {
+					wasmAborted = true;
+					break;
+				}
 			}
 
 			if (signal?.aborted) {
@@ -273,12 +296,18 @@ async function scanFileMajorRules(
 			if (astGrepLang && content !== null) {
 				scanAstGrepFile(filePath, content, astGrepLang);
 			}
+			filesScanned++;
+		}
+		if (wasmAborted) {
+			// Mirror the phase-major #891 contract: the ast-grep phase never ran
+			// after a wasm abort, so this merged pass discards its buffer too.
+			astGrep.length = 0;
 		}
 	};
 
 	if (!client) {
 		await scan();
-		return { treeSitter, factRules, astGrep };
+		return { treeSitter, factRules, astGrep, filesScanned, wasmAborted };
 	}
 
 	const startedAt = Date.now();
@@ -287,7 +316,10 @@ async function scanFileMajorRules(
 			scope: "project_diagnostics_scan",
 			filePath: cwd,
 			fileCount: phaseOneFilesScanned,
-			durationMs: Date.now() - startedAt,
+			// The merged pass interleaves ast-grep with the phase-one consumers;
+			// subtract its share so this metric stays comparable to the historical
+			// phase-major scans.
+			durationMs: Date.now() - startedAt - astGrepDurationMs,
 			stats,
 		});
 	});
@@ -300,7 +332,7 @@ async function scanFileMajorRules(
 			stats,
 		});
 	});
-	return { treeSitter, factRules, astGrep };
+	return { treeSitter, factRules, astGrep, filesScanned, wasmAborted };
 }
 
 export async function scanProjectDiagnostics(
@@ -345,12 +377,16 @@ export async function scanProjectDiagnostics(
 	// scan stops promptly when the agent/user aborts (#341).
 	const runners: string[] = [];
 	const diagnostics: ProjectDiagnostic[] = [];
+	let wasmAborted = false;
+	let filesScanned = files.length;
 	if (!signal?.aborted) {
 		// All in-process syntax consumers share one file-major pass (#675/#896).
 		const scanned = await scanFileMajorRules(cwd, files, signal);
 		diagnostics.push(...scanned.treeSitter, ...scanned.factRules);
 		runners.push("tree-sitter", "fact-rules");
-		if (!signal?.aborted) {
+		wasmAborted = scanned.wasmAborted;
+		if (wasmAborted) filesScanned = scanned.filesScanned;
+		if (!signal?.aborted && !wasmAborted) {
 			diagnostics.push(...scanned.astGrep);
 			runners.push("ast-grep-napi");
 		}
@@ -361,19 +397,34 @@ export async function scanProjectDiagnostics(
 		tier: options.tier,
 		scannedAt: new Date().toISOString(),
 		diagnostics,
-		filesScanned: files.length,
+		filesScanned,
 		runners,
 	};
 	// #760: only present when true — keeps existing snapshots/serializations
 	// byte-identical for the untruncated (normal) case.
 	if (collected.entryBudgetExceeded) snapshot.scanTruncated = true;
+	if (wasmAborted) {
+		snapshot.scanTruncated = true;
+		logTreeSitter({
+			phase: "runner_skip",
+			filePath: cwd,
+			status: "aborted",
+			reason: "wasm_aborted_mid_scan",
+			metadata: {
+				scope: "project_diagnostics_scan",
+				filesScanned,
+				totalFiles: files.length,
+				abortPoint: filesScanned + 1,
+			},
+		});
+	}
 	// A cancelled scan yields a partial snapshot; don't persist it as the
 	// authoritative cross-session cache — only a complete run is cacheable.
 	// Likewise, an explicit `files` scan (#461) only covers a caller-chosen
 	// subset (e.g. git-staged files), not the whole project — persisting it
 	// would poison the cross-session cache with a partial view that a later
 	// unscoped `refreshRunners=cached` read would wrongly trust as complete.
-	if (signal?.aborted || options.files) return snapshot;
+	if (signal?.aborted || options.files || wasmAborted) return snapshot;
 	saveProjectDiagnosticsSnapshot(cwd, snapshot);
 	return snapshot;
 }
