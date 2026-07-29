@@ -44,6 +44,11 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **The footer refreshes as LSP servers come online during a cold
+	`lens_diagnostics mode=full` sweep** (refs #798), instead of showing
+	`LSP Inactive` until turn end. The repaint captures UI methods during the
+	active tool event, so async warm-up never touches a stale session context.
+
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 
 - **A mid-scan tree-sitter WASM abort no longer replaces the authoritative
