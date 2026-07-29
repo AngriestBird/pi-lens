@@ -225,6 +225,27 @@ export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
 	],
 };
 
+// --- Shared Project Root Markers ---
+
+/**
+ * .NET project/solution root-marker globs (refs #895). Single source of truth
+ * consumed by BOTH root-resolution subsystems — language-profile.ts
+ * (PROJECT_MARKERS_BY_KIND / ROOT_MARKERS_BY_KIND) and lsp/server.ts
+ * (CSharpServer / OmniSharpServer / FSharpServer root detectors) — following
+ * the KIND_EXTENSIONS pattern: never hand-copy these lists at a call site.
+ * tests/clients/dotnet-root-markers.test.ts asserts both subsystems recognize
+ * every marker here, so a call site drifting from this list fails CI.
+ */
+export const DOTNET_CSHARP_ROOT_MARKERS: readonly string[] = [
+	"*.csproj",
+	"*.sln",
+	"*.slnx",
+];
+export const DOTNET_FSHARP_ROOT_MARKERS: readonly string[] = [
+	"*.fsproj",
+	"*.sln",
+];
+
 // Reverse map: extension → file kind (for fast lookup)
 const EXT_TO_KIND = new Map<string, FileKind>();
 for (const [kind, exts] of Object.entries(KIND_EXTENSIONS)) {
