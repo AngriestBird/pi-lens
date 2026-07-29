@@ -27,11 +27,10 @@ description: |
 query: |
   (switch_statement
     body: (switch_body
-      (switch_case
-        consequence: (statement_block) @BLOCK)))
+      (switch_case) @CASE))
 
 metavars:
-  - BLOCK
+  - CASE
 
 post_filter: is_empty_block
 
