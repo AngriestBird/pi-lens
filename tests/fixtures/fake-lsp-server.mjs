@@ -30,6 +30,7 @@ function decodeFrames(buffer) {
 let readBuffer = Buffer.alloc(0);
 let applyEditIdCounter = 9000;
 let pendingExec = null;
+const openDocuments = new Map();
 
 process.stdin.on("data", (chunk) => {
 	readBuffer = Buffer.concat([readBuffer, chunk]);
@@ -84,8 +85,20 @@ function handle(raw) {
 
 	// Ignore notifications without id
 	if (data.method === "initialized") return;
-	if (data.method === "textDocument/didOpen") return;
-	if (data.method === "textDocument/didChange") return;
+	if (data.method === "textDocument/didOpen") {
+		openDocuments.set(
+			data.params?.textDocument?.uri,
+			data.params?.textDocument?.text ?? "",
+		);
+		return;
+	}
+	if (data.method === "textDocument/didChange") {
+		const text = data.params?.contentChanges?.at(-1)?.text;
+		if (typeof text === "string") {
+			openDocuments.set(data.params?.textDocument?.uri, text);
+		}
+		return;
+	}
 	if (data.method === "workspace/didChangeConfiguration") return;
 	if (data.method === "workspace/didChangeWatchedFiles") {
 		// #271 smoke: echo each received batch back so an integration test can
@@ -225,14 +238,19 @@ function handle(raw) {
 
 	// Pull diagnostics
 	if (data.method === "textDocument/diagnostic") {
+		const text = openDocuments.get(data.params?.textDocument?.uri) ?? "";
 		send({
 			jsonrpc: "2.0",
 			id: data.id,
 			result: {
 				kind: "full",
-				items: [
+				items: text.includes("fake-lsp-clean")
+					? []
+					: [
 					{
 						severity: 1,
+						code: "FAKE1001",
+						source: "fake-lsp",
 						message:
 							"actual diagnostic\nfor further information visit https://example.test\nhttps://example.test/docs",
 						range: {
@@ -240,7 +258,7 @@ function handle(raw) {
 							end: { line: 0, character: 5 },
 						},
 					},
-				],
+					],
 			},
 		});
 		return;
