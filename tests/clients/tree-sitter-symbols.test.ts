@@ -14,6 +14,7 @@ import {
 	LANGUAGE_TO_GRAMMAR,
 } from "../../clients/grammar-source.js";
 import { getSharedTreeSitterClient } from "../../clients/tree-sitter-shared.js";
+import type { TreeSitterClient } from "../../clients/tree-sitter-client.js";
 import { TreeSitterSymbolExtractor } from "../../clients/tree-sitter-symbol-extractor.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
