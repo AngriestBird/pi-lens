@@ -36,6 +36,50 @@ export function getQueryLanguageKey(directoryName: string): string {
 const TYPESCRIPT_RULE_HEIRS = new Set(["tsx"]);
 
 /**
+ * The rule-source languages whose directories make up the effective rule set
+ * for a file parsed as `languageId`. This is the SINGLE SOURCE OF TRUTH for
+ * rule-set composition: `queriesForLanguage` (selection) and
+ * `ruleFilesForLanguage` (the RuleCache fingerprint, #878) both derive from
+ * it, so the cache key can never drift from the rules the runner actually runs.
+ */
+export function ruleSourceLanguages(languageId: string): string[] {
+	return TYPESCRIPT_RULE_HEIRS.has(languageId)
+		? [languageId, "typescript"]
+		: [languageId];
+}
+
+/**
+ * Every rule file contributing to the effective rule set for `languageId`,
+ * from BOTH the project's own `rules/tree-sitter-queries/` tree and the
+ * bundled built-ins, across every rule-source language.
+ *
+ * The dispatch runner hashes this list into the RuleCache key. Fingerprinting
+ * only the language's OWN directory missed inherited rule sets — tsx runs the
+ * typescript rules too, so editing a typescript rule never invalidated the tsx
+ * cache and stale compiled rules kept firing until the process restarted or a
+ * tsx rule happened to change (#878).
+ */
+export function ruleFilesForLanguage(
+	languageId: string,
+	rootDir = process.cwd(),
+): string[] {
+	const resolvedRoot = path.resolve(rootDir);
+	const files = new Set<string>();
+	for (const lang of ruleSourceLanguages(languageId)) {
+		for (const dir of [
+			path.join(resolvedRoot, "rules", "tree-sitter-queries", lang),
+			resolvePackagePath(import.meta.url, "rules", "tree-sitter-queries", lang),
+		]) {
+			if (!fs.existsSync(dir)) continue;
+			for (const f of fs.readdirSync(dir)) {
+				if (f.endsWith(".yml")) files.add(path.join(dir, f));
+			}
+		}
+	}
+	return [...files];
+}
+
+/**
  * The rule set that applies to a file parsed as `languageId`, in a stable order.
  *
  * Excludes `<language>-disabled/` rules. `getQueriesForLanguage` filtered these
@@ -49,9 +93,7 @@ export function queriesForLanguage(
 ): TreeSitterQuery[] {
 	const enabled = (langId: string): TreeSitterQuery[] =>
 		(queries.get(langId) ?? []).filter((q) => !isDisabledQueryFilePath(q.filePath));
-	const own = enabled(languageId);
-	if (!TYPESCRIPT_RULE_HEIRS.has(languageId)) return own;
-	return [...own, ...enabled("typescript")];
+	return ruleSourceLanguages(languageId).flatMap((langId) => enabled(langId));
 }
 
 /**
