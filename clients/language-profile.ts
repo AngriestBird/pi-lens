@@ -9,6 +9,7 @@ import {
 import { getSourceFiles } from "./scan-utils.js";
 import { readDirEntriesSafe, shouldRecurseIntoDir } from "./source-walker.js";
 import { findNearestDirWithAnyBasename } from "./workspace-topology.js";
+import { minimatch } from "./deps/minimatch.js";
 
 export const SUPPORTED_FILE_KINDS: readonly FileKind[] = [
 	"jsts",
@@ -77,6 +78,8 @@ const PROJECT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	terraform: [".terraform.lock.hcl"],
 	nix: ["flake.nix"],
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
+	csharp: ["*.csproj", "*.sln", "*.slnx"],
+	fsharp: ["*.fsproj", "*.sln"],
 };
 
 const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
@@ -120,7 +123,25 @@ const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	terraform: [".terraform.lock.hcl"],
 	nix: ["flake.nix"],
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
+	csharp: ["*.csproj", "*.sln", "*.slnx"],
+	fsharp: ["*.fsproj", "*.sln"],
 };
+
+function hasProjectMarker(projectRoot: string, marker: string): boolean {
+	if (!marker.includes("*")) return fs.existsSync(path.join(projectRoot, marker));
+	try {
+		return fs.readdirSync(projectRoot, { withFileTypes: true }).some(
+			(entry) =>
+				(entry.isFile() || entry.isSymbolicLink()) &&
+				minimatch(entry.name, marker, {
+					dot: true,
+					nocase: process.platform === "win32",
+				}),
+		);
+	} catch {
+		return false;
+	}
+}
 
 // Process-lifetime memo keyed on projectRoot. Only populated when the
 // caller did not pass an explicit `sourceFiles` array — the explicit-array
@@ -158,7 +179,7 @@ function computeProjectLanguageProfile(
 	for (const [kind, markers] of Object.entries(PROJECT_MARKERS_BY_KIND)) {
 		if (!markers) continue;
 		for (const marker of markers) {
-			if (fs.existsSync(path.join(projectRoot, marker))) {
+			if (hasProjectMarker(projectRoot, marker)) {
 				present[kind as FileKind] = true;
 				configured[kind as FileKind] = true;
 				break;

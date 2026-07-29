@@ -44,6 +44,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- Resolve nested C# and F# project roots for dotnet builds (refs #895).
+
 - **module-report parses plain JS under the correct tree-sitter grammar** (closes
 	#887) — `tsLangForFile` hand-rolled a local extension map that sent
 	`.js`/`.mjs`/`.cjs` to the typescript grammar and `.jsx` to tsx, while every
