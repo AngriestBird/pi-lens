@@ -267,6 +267,7 @@ async function extractEntitySnapshot(
 	client: TreeSitterClient,
 	filePath: string,
 	languageId: string,
+	contentOverride?: string,
 ): Promise<Map<string, string>> {
 	const defs = ENTITY_QUERIES[languageId] ?? [];
 	const snapshot = new Map<string, string>();
@@ -288,6 +289,10 @@ async function extractEntitySnapshot(
 			filePath,
 			languageId,
 			{ maxResults: 200 },
+			// Parse the same buffer content the diagnostics phase used (#885).
+			// Without this, unsaved buffers snapshot stale disk content and
+			// thrash the parse-cache entry the rule walk just populated.
+			contentOverride,
 		);
 
 		for (const match of matches) {
@@ -523,136 +528,126 @@ const treeSitterRunner: RunnerDefinition = {
 				? contentFromFacts
 				: undefined;
 
-		// Run queries in parallel with concurrency limit for optimal performance
-		const CONCURRENCY_LIMIT = 6;
-		const queryResults: Diagnostic[][] = [];
-
-		for (let i = 0; i < effectiveQueries.length; i += CONCURRENCY_LIMIT) {
-			// Yield the event loop between batches so already-resolved promises from
-			// other parallel groups (LSP, eslint skip, etc.) can drain. Each wasm query
-			// batch is synchronous CPU work that would otherwise pin the event loop for
-			// the full runner duration, making other runners' latency measurements wrong.
-			if (i > 0) await new Promise<void>((r) => setImmediate(r));
-			const batch = effectiveQueries.slice(i, i + CONCURRENCY_LIMIT);
-			const batchResults = await Promise.all(
-				batch.map(async (query) => {
-					const queryDiagnostics: Diagnostic[] = [];
-					try {
-						const matches = await client.runQueryOnFile(
-							query,
-							filePath,
-							languageId,
-							{ maxResults: 10 },
-							contentOverride,
-						);
-
-						for (const match of matches) {
-							// match.line/column are already 1-indexed — the client emits
-							// startPosition.row + 1 (tree-sitter-client searchFileWithQuery).
-							const { line, column } = match;
-
-							// Modified-ranges gate only applies to blocking-tier diagnostics.
-							// Warning-tier diagnostics always flow through for logging.
-							const isSeverityBlocking =
-								query.severity === "error" ||
-								query.inline_tier === "blocking" ||
-								SILENT_ERROR_QUERY_IDS.has(query.id);
-							if (
-								ctx.blockingOnly &&
-								isSeverityBlocking &&
-								!isLineInModifiedRanges(line, ctx.modifiedRanges)
-							) {
-								continue;
-							}
-
-							// Map severity to semantic
-							const semantic =
-								query.severity === "error"
-									? "blocking"
-									: query.severity === "warning"
-										? "warning"
-										: "none";
-							const defectClass =
-								(query.defect_class as any) ??
-								classifyDefect(query.id, "tree-sitter", query.message);
-							const suggestion =
-								query.has_fix && query.fix_action
-									? `${query.fix_action} this statement`
-									: semantic === "blocking"
-										? defaultFixSuggestion(defectClass, query.id)
-										: undefined;
-
-							const hasSuggestedFix = !!query.has_fix;
-							queryDiagnostics.push({
-								id: `tree-sitter:${query.id}:${line}`,
-								message: query.message.replace(
-									/\{\{(\w+)\}\}/g,
-									(_, name) => match.captures[name]?.trim() ?? `{{${name}}}`,
-								),
-								filePath,
-								line,
-								column,
-								severity: query.severity,
-								semantic,
-								tool: "tree-sitter",
-								rule: query.id,
-								defectClass,
-								// Surface fix intent to agent — tree-sitter never auto-applies;
-								// linters (biome/ruff/eslint) own the autofix phase.
-								fixable: hasSuggestedFix,
-								autoFixAvailable: false,
-								fixKind: hasSuggestedFix ? "suggestion" : undefined,
-								fixSuggestion: suggestion,
-								matchedText: match.matchedText || undefined,
-								astNodeType: match.nodeType || undefined,
-							});
-						}
-					} catch (err) {
-						// pi-lens-ignore: missing-error-propagation — per-query resilience loop, intentional
-						const msg = err instanceof Error ? err.message : String(err);
-						// Emscripten abort() corrupts the entire module-level wasm heap.
-						// Poison the singleton so no further queries attempt to use the dead runtime.
-						if (msg.includes("Aborted") || msg.includes("abort()")) {
-							markTreeSitterWasmAborted();
-							logTreeSitter({
-								phase: "query_error",
-								filePath,
-								languageId,
-								queryId: query.id,
-								error: "wasm_aborted_fatal",
-							});
-						} else {
-							console.error(`[tree-sitter] Query ${query.id} failed:`, err);
-							logTreeSitter({
-								phase: "query_error",
-								filePath,
-								languageId,
-								queryId: query.id,
-								error: msg,
-							});
-						}
-					}
-					return queryDiagnostics;
-				}),
+		// ONE tree walk for the whole effective rule set, not one per rule (#888).
+		// The per-rule loop re-walked the tree ~30-40 times per edit; the work is
+		// synchronous WASM, so the concurrency-limit batching only chunked CPU work
+		// without parallelizing anything. runQueriesOnFile concatenates the patterns
+		// in rule order and maps each match back to its owning rule, so the per-rule
+		// maxResults(10) cap, metavars, predicates and post-filters still apply and
+		// results stay grouped in rule order. The post-match gating below (modified
+		// ranges, severity mapping) is unchanged.
+		const diagnostics: Diagnostic[] = [];
+		try {
+			const found = await client.runQueriesOnFile(
+				effectiveQueries,
+				filePath,
+				languageId,
+				{ maxResults: 10 },
+				contentOverride,
 			);
-			queryResults.push(...batchResults);
+
+			for (const { queryDef: query, match } of found) {
+				// match.line/column are already 1-indexed — the client emits
+				// startPosition.row + 1 (tree-sitter-client searchFileWithQuery).
+				const { line, column } = match;
+
+				// Modified-ranges gate only applies to blocking-tier diagnostics.
+				// Warning-tier diagnostics always flow through for logging.
+				const isSeverityBlocking =
+					query.severity === "error" ||
+					query.inline_tier === "blocking" ||
+					SILENT_ERROR_QUERY_IDS.has(query.id);
+				if (
+					ctx.blockingOnly &&
+					isSeverityBlocking &&
+					!isLineInModifiedRanges(line, ctx.modifiedRanges)
+				) {
+					continue;
+				}
+
+				// Map severity to semantic
+				const semantic =
+					query.severity === "error"
+						? "blocking"
+						: query.severity === "warning"
+							? "warning"
+							: "none";
+				const defectClass =
+					(query.defect_class as any) ??
+					classifyDefect(query.id, "tree-sitter", query.message);
+				const suggestion =
+					query.has_fix && query.fix_action
+						? `${query.fix_action} this statement`
+						: semantic === "blocking"
+							? defaultFixSuggestion(defectClass, query.id)
+							: undefined;
+
+				const hasSuggestedFix = !!query.has_fix;
+				diagnostics.push({
+					id: `tree-sitter:${query.id}:${line}`,
+					message: query.message.replace(
+						/\{\{(\w+)\}\}/g,
+						(_, name) => match.captures[name]?.trim() ?? `{{${name}}}`,
+					),
+					filePath,
+					line,
+					column,
+					severity: query.severity,
+					semantic,
+					tool: "tree-sitter",
+					rule: query.id,
+					defectClass,
+					// Surface fix intent to agent — tree-sitter never auto-applies;
+					// linters (biome/ruff/eslint) own the autofix phase.
+					fixable: hasSuggestedFix,
+					autoFixAvailable: false,
+					fixKind: hasSuggestedFix ? "suggestion" : undefined,
+					fixSuggestion: suggestion,
+					matchedText: match.matchedText || undefined,
+					astNodeType: match.nodeType || undefined,
+				});
+			}
+		} catch (err) {
+			// pi-lens-ignore: missing-error-propagation — per-dispatch resilience, intentional
+			const msg = err instanceof Error ? err.message : String(err);
+			// Emscripten abort() corrupts the entire module-level wasm heap.
+			// Poison the singleton so no further queries attempt to use the dead runtime.
+			if (msg.includes("Aborted") || msg.includes("abort()")) {
+				markTreeSitterWasmAborted();
+				logTreeSitter({
+					phase: "query_error",
+					filePath,
+					languageId,
+					error: "wasm_aborted_fatal",
+				});
+			} else {
+				console.error("[tree-sitter] Batched query run failed:", err);
+				logTreeSitter({
+					phase: "query_error",
+					filePath,
+					languageId,
+					error: msg,
+				});
+			}
 		}
 
-		// Flatten all query results into final diagnostics array
-		const diagnostics: Diagnostic[] = queryResults.flat();
-
-		// Skip expensive entity extraction for trivial changes (< 5 lines)
-		// This avoids ~500-800ms overhead for small edits like single-line fixes
+		// Skip expensive entity extraction for trivial changes (< 5 lines).
+		// Before #885 this threshold only guarded the zero-diagnostics early
+		// return below; a second extractEntitySnapshot block ran UNCONDITIONALLY
+		// after it, so small edits (skipEntityExtraction=true) still paid the
+		// ~500-800ms snapshot cost on every dispatch. One guarded block now
+		// serves both paths.
 		const totalLinesChanged = getTotalLinesChanged(ctx.modifiedRanges);
 		const skipEntityExtraction =
 			totalLinesChanged < ENTITY_EXTRACTION_LINE_THRESHOLD;
 
-		if (diagnostics.length === 0 && !skipEntityExtraction) {
+		if (!skipEntityExtraction) {
 			try {
 				const snapshot = await extractEntitySnapshot(
 					client,
 					filePath,
 					languageId,
+					contentOverride,
 				);
 				const diff = recordEntitySnapshotDiff(ctx.facts, filePath, snapshot);
 				const changedEntityKeys = [
@@ -695,7 +690,9 @@ const treeSitterRunner: RunnerDefinition = {
 			} catch {
 				/* entity snapshot / blast-radius enrichment is best-effort */
 			}
+		}
 
+		if (diagnostics.length === 0) {
 			logTreeSitter({
 				phase: "runner_complete",
 				filePath,
@@ -714,48 +711,6 @@ const treeSitterRunner: RunnerDefinition = {
 		const blockingCount = diagnostics.filter(
 			(d) => d.semantic === "blocking",
 		).length;
-		try {
-			const snapshot = await extractEntitySnapshot(
-				client,
-				filePath,
-				languageId,
-			);
-			const diff = recordEntitySnapshotDiff(ctx.facts, filePath, snapshot);
-			const changedEntityKeys = [
-				...diff.added,
-				...diff.modified,
-				...diff.removed,
-			];
-
-			if (changedEntityKeys.length > 0) {
-				logTreeSitter({
-					phase: "entity_diff",
-					filePath,
-					languageId,
-					metadata: {
-						added: diff.added,
-						modified: diff.modified,
-						removed: diff.removed,
-						totalChanged: changedEntityKeys.length,
-					},
-				});
-
-				const lastBlast = blastCooldownByFile.get(filePath) ?? 0;
-				if (Date.now() - lastBlast < BLAST_COOLDOWN_MS) {
-					logTreeSitter({
-						phase: "blast_radius",
-						filePath,
-						languageId,
-						metadata: { skipped: "cooldown", cooldownMs: BLAST_COOLDOWN_MS },
-					});
-				} else {
-					blastCooldownByFile.set(filePath, Date.now());
-					runBlastRadiusInBackground(ctx.cwd, filePath, languageId, ctx.facts);
-				}
-			}
-		} catch {
-			// best-effort experimental telemetry only
-		}
 
 		logTreeSitter({
 			phase: "runner_complete",
