@@ -8,6 +8,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
+
 - **A project scan runs its rule set in one tree walk, not one walk per rule**
 	(refs #675) — `runQueriesOnFile` compiles a language's rules into a single
 	multi-pattern query and maps matches back to the owning rule, keeping per-rule
