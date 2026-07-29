@@ -55,9 +55,7 @@ describe("tree-sitter runner — rule cache round-trip (#448)", () => {
 		const suggestionFor = async (relPath: string) => {
 			const { ctx } = env.addFile(relPath, "debugger;\n");
 			const result = await treeSitterRunner.run(ctx);
-			const d = result.diagnostics.find(
-				(x) => x.rule === "debugger-statement",
-			);
+			const d = result.diagnostics.find((x) => x.rule === "debugger-statement");
 			expect(d).toBeDefined();
 			return d?.fixSuggestion;
 		};

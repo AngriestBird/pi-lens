@@ -19,7 +19,10 @@ afterAll(() => {
 	for (const c of cleanups) c();
 });
 
-async function rulesFor(relPath: string, content: string): Promise<Set<string>> {
+async function rulesFor(
+	relPath: string,
+	content: string,
+): Promise<Set<string>> {
 	const real = makeRealRunnerCtx(relPath, content);
 	cleanups.push(real.cleanup);
 	return firedRuleIds(await treeSitterRunner.run(real.ctx));

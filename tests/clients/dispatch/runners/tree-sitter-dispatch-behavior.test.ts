@@ -43,7 +43,9 @@ const TWO_DEBUGGERS_SRC = [
 	"",
 ].join("\n");
 
-async function debuggerHits(overrides: Parameters<typeof makeRealRunnerCtx>[2]) {
+async function debuggerHits(
+	overrides: Parameters<typeof makeRealRunnerCtx>[2],
+) {
 	const real = makeRealRunnerCtx("two.ts", TWO_DEBUGGERS_SRC, overrides);
 	cleanups.push(real.cleanup);
 	const result = await treeSitterRunner.run(real.ctx);
