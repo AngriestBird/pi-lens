@@ -43,6 +43,23 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **module-report parses plain JS under the correct tree-sitter grammar** (closes
+	#887) — `tsLangForFile` hand-rolled a local extension map that sent
+	`.js`/`.mjs`/`.cjs` to the typescript grammar and `.jsx` to tsx, while every
+	other tree-sitter consumer resolves those extensions to `javascript` via the
+	shared `EXT_TO_LANG` (`clients/tree-sitter-shared.ts`), so each plain-JS file
+	was parsed and cached twice under two grammars (TreeCache keys are
+	`languageId:path`) and ran TS-grammar symbol queries on JS trees. It now
+	routes the extension-split kinds (jsts, and the c-vs-cpp split for cxx)
+	through the shared `resolveTreeSitterLanguage`, keeping the historical kind
+	default only for extensions the shared map does not cover (`.svelte`/`.vue`,
+	the C++ module-interface/Objective-C tail). The symbol extractor gains a
+	dedicated `javascript` defs/refs/import query set: the TypeScript symbol
+	queries do NOT compile against the javascript grammar
+	(`interface_declaration`/`type_alias_declaration`/`type_identifier` do not
+	exist there — a query naming them fails with "Bad node name"), so the
+	javascript set is the same queries minus the type-only patterns, with class
+	names matched as `(identifier)` instead of `(type_identifier)`.
 - **Seven ruby security rules never compiled and never produced a finding** (refs
 	#884) — `ruby-command-injection`, `ruby-eval`, `ruby-insecure-deserialization`,
 	`ruby-insecure-random`, `ruby-open-struct`, `ruby-string-eval` and

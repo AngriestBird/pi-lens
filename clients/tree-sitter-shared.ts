@@ -50,8 +50,10 @@ export function _resetSharedTreeSitterClientForTests(): void {
 
 // Grammar selection by extension — the single ext→grammar-id authority. `.tsx` →
 // the tsx grammar (parses JSX); `.jsx` → the javascript grammar. The project
-// scanner (project-diagnostics/scanner.ts) DERIVES its map from this one so the
-// two can't drift: post-#877 both key `.tsx`→tsx (the old note here said the
+// scanner (project-diagnostics/scanner.ts) DERIVES its map from this one and
+// module-report (module-report.ts `tsLangForFile`, #887) resolves its
+// extension-split kinds (jsts/cxx) through `resolveTreeSitterLanguage` below,
+// so neither can drift: post-#877 both key `.tsx`→tsx (the old note here said the
 // scanner mapped `.tsx`→typescript to reuse typescript queries — that stopped
 // being true when #877 moved typescript-rule inheritance into
 // `queriesForLanguage`). The scanner layers only java/kotlin on top, whose
