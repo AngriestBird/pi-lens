@@ -44,6 +44,10 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Block-wrapped switch cases no longer report false fall-through errors**
+	(refs #910) — `switch-case-termination` now follows trailing statement
+	blocks to recognize a nested `break`, `return`, `throw`, or `continue`, while
+	still flagging empty and non-terminating blocks.
 - **Small edits no longer pay the entity-extraction cost** (refs #885) — the
 	<5-line skip threshold only guarded the zero-diagnostics early return; a
 	second `extractEntitySnapshot` block ran unconditionally, so trivial edits
