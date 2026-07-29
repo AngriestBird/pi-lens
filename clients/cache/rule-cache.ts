@@ -13,7 +13,11 @@ import { readJsonCache } from "../json-cache-read.js";
 
 // v4: cache skip_test_files + fix_action — v3 entries silently dropped them,
 // and ruleHash (rule-file mtimes) never invalidates on a code-only fix.
-export const CACHE_VERSION = "v4";
+// v5 (#675): rule SELECTION changed in code — javascript no longer inherits the
+// typescript rule set and tsx now does. A v4 entry holds the old merge, and
+// queries now compile against the file's parse language, so replaying it would
+// fire typescript rules on javascript trees for real this time.
+export const CACHE_VERSION = "v5";
 
 export interface QueryCacheEntry {
 	version: string;

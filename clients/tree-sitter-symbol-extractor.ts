@@ -596,7 +596,7 @@ export class TreeSitterSymbolExtractor {
 
 	async init(): Promise<boolean> {
 		try {
-			// Get language from client
+			if (!(await this.client.isLanguageSupported(this.languageId))) return false;
 			const language = this.client.getLanguage(this.languageId);
 			if (!language) return false;
 
@@ -632,6 +632,7 @@ export class TreeSitterSymbolExtractor {
 			}
 			return Boolean(this.defQuery || this.importQuery);
 		} catch (err) {
+			this.client.reportWasmAbort(err);
 			console.error(
 				`[symbol-extractor] Failed to init ${this.languageId}:`,
 				err,
@@ -645,6 +646,7 @@ export class TreeSitterSymbolExtractor {
 		try {
 			return new Query(language, src);
 		} catch (err) {
+			if (this.client.reportWasmAbort(err)) throw err;
 			console.error(
 				`[symbol-extractor] ${this.languageId} ${label} query failed: ${(err as Error).message}`,
 			);
@@ -669,7 +671,7 @@ export class TreeSitterSymbolExtractor {
 		// Extract definitions (guarded — a language's defs query may have failed to
 		// compile while its imports query succeeded, or vice versa).
 		if (this.defQuery) {
-			for (const match of this.defQuery.matches(tree.rootNode)) {
+			for (const match of this.queryMatches(this.defQuery, tree.rootNode)) {
 				const symbol = this.parseDefMatch(match, relativePath, content);
 				if (symbol) symbols.push(symbol);
 			}
@@ -677,7 +679,7 @@ export class TreeSitterSymbolExtractor {
 
 		// Extract references
 		if (this.refQuery) {
-			for (const match of this.refQuery.matches(tree.rootNode)) {
+			for (const match of this.queryMatches(this.refQuery, tree.rootNode)) {
 				const ref = this.parseRefMatch(match, relativePath);
 				if (ref) refs.push(ref);
 			}
@@ -686,13 +688,22 @@ export class TreeSitterSymbolExtractor {
 		// Extract imports (optional — only for languages with an IMPORT_QUERIES entry)
 		const imports: ImportRef[] = [];
 		if (this.importQuery) {
-			for (const match of this.importQuery.matches(tree.rootNode)) {
+			for (const match of this.queryMatches(this.importQuery, tree.rootNode)) {
 				const ref = parseImportMatch(match);
 				if (ref) imports.push(ref);
 			}
 		}
 
 		return { symbols, refs, imports };
+	}
+
+	private queryMatches(query: any, rootNode: any): any[] {
+		try {
+			return query.matches(rootNode);
+		} catch (error) {
+			this.client.reportWasmAbort(error);
+			throw error;
+		}
 	}
 
 	// biome-ignore lint/suspicious/noExplicitAny: Match type

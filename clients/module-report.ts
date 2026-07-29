@@ -426,7 +426,8 @@ async function extractFile(
 ): Promise<{
 	symbols: ExtractedSymbol[];
 	imports: ImportRef[];
-	root?: ModuleReportNode;
+	callbacks: ModuleCallbackEntry[];
+	callbackError?: string;
 	error?: string;
 	warnings?: string[];
 }> {
@@ -436,6 +437,7 @@ async function extractFile(
 			return {
 				symbols: [],
 				imports: [],
+				callbacks: [],
 				error: "tree-sitter runtime unavailable (wasm aborted)",
 			};
 		}
@@ -444,29 +446,59 @@ async function extractFile(
 			return {
 				symbols: [],
 				imports: [],
+				callbacks: [],
 				error: "tree-sitter runtime failed to initialize",
 			};
 		}
-		const tree = await tsClient.parseFile(absPath, languageId);
-		if (!tree) {
+		const extractor = await getExtractor(languageId);
+		const extracted = await tsClient.withParsedTree(
+			absPath,
+			languageId,
+			content,
+			(tree) => {
+				const warnings = extractor
+					? []
+					: [`Symbol extractor not available for ${languageId}`];
+				const result = extractor
+					? extractor.extract(tree, absPath, content)
+					: { symbols: [], imports: [] };
+				const owners = result.symbols
+					.filter((candidate) => !candidate.local)
+					.map((candidate) => ({
+						name: candidate.name,
+						startLine: candidate.line,
+						endLine: candidate.endLine ?? candidate.line,
+					}));
+				let callbacks: ModuleCallbackEntry[] = [];
+				let callbackError: string | undefined;
+				try {
+					callbacks = extractCallbacks(
+						tree.rootNode as unknown as ModuleReportNode,
+						owners,
+						languageId,
+						warnings,
+					);
+				} catch (error) {
+					callbackError = diagnosticMessage(error);
+				}
+				return {
+					symbols: result.symbols,
+					imports: result.imports,
+					callbacks,
+					callbackError,
+					warnings,
+				};
+			},
+		);
+		if (!extracted.parsed) {
 			return {
 				symbols: [],
 				imports: [],
+				callbacks: [],
 				error: `tree-sitter failed to parse as ${languageId}`,
 			};
 		}
-		const extractor = await getExtractor(languageId);
-		const root = tree.rootNode as unknown as ModuleReportNode;
-		if (!extractor) {
-			return {
-				symbols: [],
-				imports: [],
-				root,
-				warnings: [`Symbol extractor not available for ${languageId}`],
-			};
-		}
-		const result = extractor.extract(tree, absPath, content);
-		return { symbols: result.symbols, imports: result.imports, root };
+		return extracted.value;
 	} catch (err) {
 		const message = diagnosticMessage(err);
 		logLatency({
@@ -476,7 +508,7 @@ async function extractFile(
 			durationMs: 0,
 			metadata: { error: message },
 		});
-		return { symbols: [], imports: [], error: message };
+		return { symbols: [], imports: [], callbacks: [], error: message };
 	}
 }
 
@@ -1655,7 +1687,8 @@ export async function moduleReport(
 	const {
 		symbols: extracted,
 		imports: extractedImports,
-		root,
+		callbacks,
+		callbackError,
 		error: extractionError,
 		warnings: extractionWarnings,
 	} = languageId
@@ -1663,7 +1696,8 @@ export async function moduleReport(
 		: {
 				symbols: [],
 				imports: [],
-				root: undefined,
+				callbacks: [],
+				callbackError: undefined,
 				error: undefined,
 				warnings: undefined,
 			};
@@ -1702,19 +1736,15 @@ export async function moduleReport(
 
 	const api = topLevel.filter((entry) => entry.exported);
 	const internal = topLevel.filter((entry) => !entry.exported);
-	let callbacks: ModuleCallbackEntry[] = [];
 	const warnings: string[] = [...(extractionWarnings ?? [])];
-	try {
-		callbacks = extractCallbacks(root, entries, languageId, warnings);
-	} catch (err) {
-		const message = diagnosticMessage(err);
-		warnings.push(`Failed to extract callbacks: ${message}`);
+	if (callbackError) {
+		warnings.push(`Failed to extract callbacks: ${callbackError}`);
 		logLatency({
 			type: "phase",
 			phase: "module_report_callback_extract_error",
 			filePath: absPath,
 			durationMs: 0,
-			metadata: { error: message },
+			metadata: { error: callbackError },
 		});
 	}
 
@@ -2158,7 +2188,8 @@ export async function readSymbol(
 
 	const {
 		symbols,
-		root,
+		callbacks: allCallbacks,
+		callbackError,
 		error: extractionError,
 		warnings: extractionWarnings,
 	} = await extractFile(absPath, languageId, content);
@@ -2211,19 +2242,8 @@ export async function readSymbol(
 		};
 	}
 
-	const owners = symbols
-		.filter((candidate) => !candidate.local)
-		.map((candidate) => ({
-			name: candidate.name,
-			startLine: candidate.line,
-			endLine: candidate.endLine ?? candidate.line,
-		}));
-	let allCallbacks: ModuleCallbackEntry[];
-	const callbackWarnings = [...(extractionWarnings ?? [])];
-	try {
-		allCallbacks = extractCallbacks(root, owners, languageId, callbackWarnings);
-	} catch (err) {
-		const message = `Callback extraction failed: ${diagnosticMessage(err)}`;
+	if (callbackError) {
+		const message = `Callback extraction failed: ${callbackError}`;
 		logLatency({
 			type: "phase",
 			phase: "read_symbol_callback_extract_error",
@@ -2234,6 +2254,7 @@ export async function readSymbol(
 		log(false);
 		return { found: false, path: absPath, name: symbolName, error: message };
 	}
+	const callbackWarnings = [...(extractionWarnings ?? [])];
 	const callback = allCallbacks.find(
 		(candidate) => candidate.name === symbolName,
 	);
@@ -2444,7 +2465,8 @@ export async function readEnclosing(
 
 	const {
 		symbols,
-		root,
+		callbacks,
+		callbackError,
 		error: extractionError,
 		warnings: extractionWarnings,
 	} = await extractFile(absPath, languageId, content);
@@ -2461,19 +2483,9 @@ export async function readEnclosing(
 	const filters = new Set(
 		(options?.kinds ?? []).map((value) => value.toLowerCase()),
 	);
-	const owners = symbols
-		.filter((candidate) => !candidate.local)
-		.map((candidate) => ({
-			name: candidate.name,
-			startLine: candidate.line,
-			endLine: candidate.endLine ?? candidate.line,
-		}));
 	const warnings = [...(extractionWarnings ?? [])];
-	let callbacks: ModuleCallbackEntry[] = [];
-	try {
-		callbacks = extractCallbacks(root, owners, languageId, warnings);
-	} catch (err) {
-		const message = `Callback extraction failed: ${diagnosticMessage(err)}`;
+	if (callbackError) {
+		const message = `Callback extraction failed: ${callbackError}`;
 		warnings.push(message);
 		logLatency({
 			type: "phase",

@@ -39,12 +39,7 @@ import {
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { handleToolResult } from "./runtime-tool-result.js";
 import { isToolCallEventType } from "./tool-event.js";
-import { TreeSitterClient } from "./tree-sitter-client.js";
-
-// The read-expansion tree-sitter client is only ever consulted from the
-// tool_call path (opportunistic partial-read expansion below), so it lives
-// here as a module-level singleton rather than being threaded through deps.
-const _readExpansionClient = new TreeSitterClient();
+import { getSharedTreeSitterClient } from "./tree-sitter-shared.js";
 
 const LSP_TOOLCALL_NAV_TOUCH_BUDGET_MS = Math.max(
 	0,
@@ -261,6 +256,7 @@ interface ToolCallDeps {
 		},
 	) => void;
 	resetLSPService: (options?: LSPShutdownOptions) => void;
+	getTreeSitterClient?: typeof getSharedTreeSitterClient;
 }
 
 export type ToolCallResult = { block: true; reason?: string } | void;
@@ -279,6 +275,7 @@ export async function handleToolCall(
 		ensureLSPConfigInitialized,
 		updateLspStatus,
 		resetLSPService,
+		getTreeSitterClient = getSharedTreeSitterClient,
 	} = deps;
 
 	const toolName = (event as { toolName?: string }).toolName ?? "";
@@ -436,7 +433,7 @@ export async function handleToolCall(
 		  }
 		| undefined;
 
-	if (
+	const readExpansionClient =
 		toolName === "read" &&
 		!getFlag("no-lsp") &&
 		!isExternalOrVendor &&
@@ -444,6 +441,13 @@ export async function handleToolCall(
 		readInput &&
 		requestedReadLimit != null &&
 		requestedReadLimit <= EXPANSION_LIMIT_LINES
+			? getTreeSitterClient()
+			: null;
+	if (
+		readExpansionClient &&
+		filePath &&
+		readInput &&
+		requestedReadLimit != null
 	) {
 		const totalLines =
 			effectiveReadLimit != null && requestedReadLimit == null
@@ -455,7 +459,7 @@ export async function handleToolCall(
 				requestedReadOffset,
 				requestedReadLimit,
 				totalLines,
-				_readExpansionClient,
+				readExpansionClient,
 			);
 			if (expansion) {
 				readInput.offset = expansion.newOffset;

@@ -5,6 +5,8 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
 	getQueryLanguageKey,
 	isDisabledQueryFilePath,
+	queriesForLanguage,
+	type TreeSitterQuery,
 	TreeSitterQueryLoader,
 } from "../../clients/tree-sitter-query-loader.js";
 import { removeTempDirSync } from "./test-utils.js";
@@ -182,5 +184,72 @@ has_fix: false
 				"rules/tree-sitter-queries/typescript/console-statement.yml",
 			),
 		).toBe(false);
+	});
+});
+
+describe("scalar values drop trailing YAML comments", () => {
+	it("keeps a commented post_filter usable as a filter name", async () => {
+		const root = makeTempRulesRoot();
+		writeRule(
+			root,
+			"rules/tree-sitter-queries/typescript/commented-scalar.yml",
+			`id: commented-scalar
+name: Commented Scalar
+severity: warning
+category: quality
+language: typescript
+message: "uses # in a quoted message"
+post_filter: not_in_test_block  # skip test blocks
+query: |
+  (identifier) @X
+metavars: [X]
+`,
+		);
+
+		const loader = new TreeSitterQueryLoader();
+		await loader.loadQueries(root);
+		const query = loader.getQueryById("commented-scalar");
+		// Carrying the comment into the name meant the filter never resolved and
+		// the rule reported every raw match unfiltered.
+		expect(query?.post_filter).toBe("not_in_test_block");
+		expect(query?.message).toBe("uses # in a quoted message");
+	});
+});
+
+describe("queriesForLanguage", () => {
+	const rule = (id: string, filePath: string): TreeSitterQuery =>
+		({ id, filePath }) as TreeSitterQuery;
+
+	const map = new Map<string, TreeSitterQuery[]>([
+		[
+			"typescript",
+			[
+				rule("ts-on", "rules/tree-sitter-queries/typescript/on.yml"),
+				rule("ts-off", "rules/tree-sitter-queries/typescript-disabled/off.yml"),
+			],
+		],
+		["tsx", [rule("tsx-own", "rules/tree-sitter-queries/tsx/own.yml")]],
+		["javascript", [rule("js-own", "rules/tree-sitter-queries/javascript/own.yml")]],
+	]);
+
+	it("never returns a rule from a -disabled directory", () => {
+		expect(queriesForLanguage(map, "typescript").map((q) => q.id)).toEqual([
+			"ts-on",
+		]);
+	});
+
+	it("gives tsx the typescript rule set on top of its own", () => {
+		expect(queriesForLanguage(map, "tsx").map((q) => q.id)).toEqual([
+			"tsx-own",
+			"ts-on",
+		]);
+	});
+
+	it("does NOT give javascript the typescript rule set", () => {
+		// Those rules are written against the typescript grammar: on a javascript
+		// tree `duplicate-function-arg` alone reported 59 phantom duplicates.
+		expect(queriesForLanguage(map, "javascript").map((q) => q.id)).toEqual([
+			"js-own",
+		]);
 	});
 });
