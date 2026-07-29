@@ -8,6 +8,7 @@ import { deadCodeIssueCount } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
 import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
+import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
 import { getKnipIgnorePatterns } from "./file-utils.js";
 import { clearTsconfigPathsCache } from "./review-graph/tsconfig-paths.js";
@@ -244,7 +245,7 @@ async function igniteDominantLanguageWarm(
 
 		const lspService = getLSPService();
 		const { collectSourceFilesAsync } = await import("./source-filter.js");
-		const { detectFileKind } = await import("./file-kinds.js");
+		const { CODE_KINDS, detectFileKind } = await import("./file-kinds.js");
 		// Async, event-loop-yielding walk (deferred off the interactive path).
 		// inspectGeneratedHeaders:false keeps the walk to directory reads only — no
 		// per-file content opens — so we never hold a file handle (cheaper, and it
@@ -259,7 +260,7 @@ async function igniteDominantLanguageWarm(
 		// than reused from languageProfile.counts, which is left empty on the
 		// no-warm-caches startup path (detectProjectLanguageProfile is called with
 		// an empty file list there).
-		const counts = new Map<string, number>();
+		const counts = new Map<FileKind, number>();
 		for (const f of files) {
 			const kind = detectFileKind(f);
 			if (kind) counts.set(kind, (counts.get(kind) ?? 0) + 1);
@@ -270,9 +271,21 @@ async function igniteDominantLanguageWarm(
 		}
 		const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
 
+		// #894 review: data/doc kinds (json/yaml/markdown/…) have builtin LSP
+		// servers too, and broadened enumeration makes them countable — so a TS
+		// repo with more .json/.yml than .ts files would otherwise warm the
+		// json/yaml server while tsserver still pays the ~5s cold-spawn stall
+		// this warm exists to prevent (#203). Rank CODE_KINDS first; non-code
+		// kinds stay as a fallback so a pure-config/docs repo still warms its
+		// dominant server.
+		const warmOrder = [
+			...ranked.filter(([kind]) => CODE_KINDS.has(kind)),
+			...ranked.filter(([kind]) => !CODE_KINDS.has(kind)),
+		];
+
 		// Walk languages by descending count; warm the first that has both an LSP
 		// server and a representative on-disk file.
-		for (const [kind] of ranked) {
+		for (const [kind] of warmOrder) {
 			const sample = files.find(
 				(f) => detectFileKind(f) === kind && lspService.supportsLSP(f),
 			);

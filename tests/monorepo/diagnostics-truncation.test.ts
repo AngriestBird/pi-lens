@@ -45,7 +45,9 @@ describe("diagnostics-scanner truncation surfacing (#775 item 6)", () => {
 				maxScanEntries: 1000,
 			});
 			expect(snapshot.scanTruncated).toBeUndefined();
-			expect(snapshot.filesScanned).toBe(2);
+			// Two TS sources plus the fixture's package.json and package-lock.json:
+			// JSON is a supported kind and project-wide enumeration includes it.
+			expect(snapshot.filesScanned).toBe(4);
 		} finally {
 			repo.cleanup();
 		}
@@ -90,7 +92,8 @@ describe("diagnostics-scanner truncation surfacing (#775 item 6)", () => {
 			// untruncated small fixture stays untruncated through the seam too).
 			const snapshot = await projectScan(repo.root, 100);
 			expect(snapshot.scanTruncated).toBeUndefined();
-			expect(snapshot.filesScanned).toBe(6);
+			// Six TS sources plus the fixture's two package metadata JSON files.
+			expect(snapshot.filesScanned).toBe(8);
 			expect("scanTruncated" in snapshot).toBe(false);
 		} finally {
 			repo.cleanup();
