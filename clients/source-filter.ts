@@ -24,6 +24,7 @@ import {
 	isDeclarationFile,
 	isGeneratedOrArtifact,
 } from "./generated-artifacts.js";
+import { KIND_EXTENSIONS } from "./file-kinds.js";
 import { normalizeEphemeralMapKey } from "./path-utils.js";
 import { isSlowFs, SLOW_FS_REDUCED_MAX_FILES } from "./slow-fs.js";
 import {
@@ -99,26 +100,19 @@ export const SOURCE_PRECEDENCE: Record<string, string[]> = {
 };
 
 /**
- * All extensions that could be source or artifacts, in precedence order.
+ * Every extension belonging to a supported file kind. KIND_EXTENSIONS is the
+ * single language-extension authority; deriving here makes a newly registered
+ * kind project-scannable without a second hand-maintained list (#894).
+ *
+ * SOURCE_PRECEDENCE contributes `.coffee`, the one legacy shadowing source that
+ * is intentionally not a supported FileKind. Generated files and declarations
+ * are narrowed by generated-artifacts.ts after this extension gate.
  */
 export const ALL_SCANNABLE_EXTENSIONS = [
-	".ts",
-	".tsx",
-	".js",
-	".jsx",
-	".mjs",
-	".cjs",
-	".vue",
-	".svelte",
-	".coffee",
-	".py",
-	".go",
-	".rs",
-	".rb",
-	".rake",
-	".gemspec",
-	".ru",
-	".dart",
+	...new Set([
+		...Object.values(KIND_EXTENSIONS).flat(),
+		...Object.keys(SOURCE_PRECEDENCE),
+	]),
 ];
 
 /**

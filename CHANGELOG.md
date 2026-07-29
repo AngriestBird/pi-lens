@@ -44,6 +44,15 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Project-wide enumeration now covers every registered file kind** (refs
+	#894) — `ALL_SCANNABLE_EXTENSIONS`, `WARMUP_SOURCE_EXTS`, and
+	`SUPPORTED_FILE_KINDS` now derive from the single `KIND_EXTENSIONS`
+	authority instead of three drifting language lists. TODO scans, symbol
+	search indexing, dominant-language LSP warmup, and language-profile
+	detection can now see Java, Swift, C/C++, PHP, and every other supported
+	kind; existing file/entry/size caps and generated-artifact filtering remain
+	unchanged. A coverage guard makes a newly registered kind automatically
+	enumerable on both project-wide paths.
 - **Small edits no longer pay the entity-extraction cost** (refs #885) — the
 	<5-line skip threshold only guarded the zero-diagnostics early return; a
 	second `extractEntitySnapshot` block ran unconditionally, so trivial edits

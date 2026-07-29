@@ -1,6 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { detectFileKind, type FileKind } from "./file-kinds.js";
+import {
+	detectFileKind,
+	KIND_EXTENSIONS,
+	type FileKind,
+} from "./file-kinds.js";
 import { getProjectIgnoreMatcher } from "./file-utils.js";
 import {
 	LANGUAGE_POLICY,
@@ -10,43 +14,10 @@ import { getSourceFiles } from "./scan-utils.js";
 import { readDirEntriesSafe, shouldRecurseIntoDir } from "./source-walker.js";
 import { findNearestDirWithAnyBasename } from "./workspace-topology.js";
 
-export const SUPPORTED_FILE_KINDS: readonly FileKind[] = [
-	"jsts",
-	"python",
-	"go",
-	"rust",
-	"cxx",
-	"cmake",
-	"fish",
-	"shell",
-	"json",
-	"markdown",
-	"css",
-	"yaml",
-	"sql",
-	"ruby",
-	"html",
-	"docker",
-	"php",
-	"powershell",
-	"prisma",
-	"csharp",
-	"fsharp",
-	"java",
-	"kotlin",
-	"swift",
-	"dart",
-	"lua",
-	"zig",
-	"haskell",
-	"elixir",
-	"gleam",
-	"ocaml",
-	"clojure",
-	"terraform",
-	"nix",
-	"toml",
-];
+/** Every registered kind participates in project-language detection (#894). */
+export const SUPPORTED_FILE_KINDS: readonly FileKind[] = Object.keys(
+	KIND_EXTENSIONS,
+) as FileKind[];
 
 const PROJECT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	jsts: ["package.json", "tsconfig.json", "jsconfig.json"],
@@ -284,33 +255,13 @@ export function resolveLanguageRootForFile(
 // `languageProfileCache` so the subsequent sync caller skips the walk.
 // ---------------------------------------------------------------------------
 
-// Extensions accepted as project source files. Mirrors the discovery rules
-// used by scan-utils.ts but inlined here to keep this file self-contained
-// and avoid pulling in source-filter's heavier dependency graph during
-// warmup.
-const WARMUP_SOURCE_EXTS = new Set([
-	".ts",
-	".tsx",
-	".js",
-	".jsx",
-	".mjs",
-	".cjs",
-	".py",
-	".go",
-	".rs",
-	".rb",
-	".java",
-	".kt",
-	".swift",
-	".dart",
-	".c",
-	".cc",
-	".cpp",
-	".cxx",
-	".h",
-	".hpp",
-	".cs",
-]);
+// Keep the warmup walker lightweight (no source-filter dependency), but derive
+// its extension gate from the same authority as every other project-wide
+// enumeration. Generated-artifact filtering remains intentionally absent here:
+// warmup only needs language presence and never opens file contents.
+export const WARMUP_SOURCE_EXTS: ReadonlySet<string> = new Set(
+	SUPPORTED_FILE_KINDS.flatMap((kind) => KIND_EXTENSIONS[kind]),
+);
 
 // Language detection needs which languages are PRESENT, not every file — so the
 // warmup walk is hard-capped. Without this, a walk rooted at a too-broad directory

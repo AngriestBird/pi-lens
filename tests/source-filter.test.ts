@@ -535,8 +535,8 @@ describe("collectSourceFiles", () => {
 
 	it("should handle directories with no matching files", () => {
 		const { dir, cleanup } = createTempDir({
-			"readme.md": "# readme",
-			"data.json": '{"key": "value"}',
+			"image.png": "not really an image",
+			"notes.txt": "plain text",
 		});
 
 		const result = collectSourceFiles(dir);
