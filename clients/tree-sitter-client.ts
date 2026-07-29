@@ -1298,6 +1298,92 @@ export class TreeSitterClient {
 		]).has(tail.toLowerCase());
 	}
 
+	/**
+	 * The body statements of a `switch_case`, in order. A switch_case's named
+	 * children are `[value, ...statements]` (its statements are direct children,
+	 * not a wrapping statement_block), so drop the leading `case <value>` and any
+	 * comments.
+	 */
+	private switchCaseBodyStatements(caseNode: TreeSitterNode): TreeSitterNode[] {
+		// biome-ignore lint/suspicious/noExplicitAny: AST child iteration
+		const named = (caseNode.children ?? []).filter(
+			(c: any) => c.isNamed && !c.type.includes("comment"),
+		);
+		// First named child is the case's value expression (`case <value>`).
+		return named.slice(1);
+	}
+
+	/**
+	 * Whether a loop body contains a statement that can terminate the loop:
+	 * `return`/`throw` anywhere (they unwind past the loop), or a `break` that is
+	 * not swallowed by a nested loop/switch. Does not descend into nested
+	 * functions, whose `return` exits the function rather than the loop.
+	 */
+	private bodyHasLoopExit(
+		node: TreeSitterNode,
+		insideNestedLoop: boolean,
+	): boolean {
+		const NESTS_BREAK = new Set([
+			"for_statement",
+			"for_in_statement",
+			"while_statement",
+			"do_statement",
+			"switch_statement",
+		]);
+		const NESTED_FN = new Set([
+			"function_declaration",
+			"function_expression",
+			"arrow_function",
+			"method_definition",
+			"generator_function",
+			"generator_function_declaration",
+			"class_declaration",
+		]);
+		for (const child of node.children ?? []) {
+			const t = child.type;
+			if (NESTED_FN.has(t)) continue;
+			if (t === "return_statement" || t === "throw_statement") return true;
+			if (t === "break_statement" && !insideNestedLoop) return true;
+			if (this.bodyHasLoopExit(child, insideNestedLoop || NESTS_BREAK.has(t))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Name of the binding a node's value flows into: the declared name of an
+	 * enclosing `variable_declarator`, or the left-hand side of an enclosing
+	 * `assignment_expression`. Returns "" if the node is not part of a binding
+	 * (the walk stops at function/block/program boundaries so it never reaches
+	 * out to an unrelated outer binding).
+	 */
+	private enclosingBindingName(node: TreeSitterNode | undefined): string {
+		let cur: TreeSitterNode | null | undefined = node?.parent;
+		for (let depth = 0; cur && depth < 12; depth++) {
+			const t = cur.type;
+			if (t === "variable_declarator") {
+				const name = cur.children?.find((c) => c.isNamed);
+				return name?.text ?? "";
+			}
+			if (t === "assignment_expression") {
+				return cur.children?.[0]?.text ?? "";
+			}
+			if (
+				t === "statement_block" ||
+				t === "program" ||
+				t === "function_declaration" ||
+				t === "function_expression" ||
+				t === "arrow_function" ||
+				t === "method_definition"
+			) {
+				return "";
+			}
+			cur = cur.parent;
+		}
+		return "";
+	}
+
 	private isSafeSqlAlchemyExpressionCall(node: TreeSitterNode): boolean {
 		if (node.type !== "call") return false;
 		const callee = node.children?.[0]?.text ?? "";
@@ -1414,6 +1500,48 @@ export class TreeSitterClient {
 						c.type !== "block_comment",
 				);
 				return meaningful.length === 0;
+			}
+			case "is_empty_block": {
+				// empty-switch-case: keep a `switch_case` that has no body statements.
+				// A switch_case's named children are `[value, ...body statements]`
+				// (the case's statements are direct children, not a statement_block),
+				// so an empty case is one whose only named child is its `case <value>`.
+				const caseNode = captures.CASE;
+				if (!caseNode) return false;
+				return this.switchCaseBodyStatements(caseNode).length === 0;
+			}
+			case "no_break_or_return_in_body": {
+				// infinite-loop: keep a `while(true)`/`for(;;)` whose body contains no
+				// statement that can terminate the loop (break/return/throw). `continue`
+				// does not count — it keeps the loop running.
+				const bodyNode = captures.BODY;
+				if (!bodyNode) return false;
+				return !this.bodyHasLoopExit(bodyNode, false);
+			}
+			case "same_param_name": {
+				// duplicate-function-arg: keep the pair only when the two captured
+				// parameter identifiers share the same name.
+				const first = captures.PARAM1?.text;
+				const second = captures.NAME?.text;
+				return !!first && first === second;
+			}
+			case "no_terminating_statement": {
+				// switch-case-termination: keep a non-empty case (already known to be
+				// followed by another case via the query) whose last body statement is
+				// not a terminator, i.e. it falls through. Empty cases are handled by
+				// empty-switch-case, so require at least one body statement here.
+				const caseNode = captures.CASE;
+				if (!caseNode) return false;
+				const body = this.switchCaseBodyStatements(caseNode);
+				if (body.length === 0) return false;
+				const last = body[body.length - 1];
+				const TERMINATORS = new Set([
+					"break_statement",
+					"return_statement",
+					"throw_statement",
+					"continue_statement",
+				]);
+				return !TERMINATORS.has(last.type);
 			}
 			case "bare_except_only": {
 				const clauseNode = captures.CLAUSE;
@@ -1806,8 +1934,10 @@ export class TreeSitterClient {
 			case "ts_insecure_random_source": {
 				if (captures.OBJ?.text !== "Math" || captures.FN?.text !== "random")
 					return false;
-				// Only flag when assigned to a security-sensitive variable name
-				const varName = captures.VAR?.text ?? "";
+				// Only flag when the result flows into a security-sensitive binding.
+				// Walk up from the `Math.random()` call so chained forms such as
+				// `Math.random().toString(36)` are still attributed to their binding.
+				const varName = this.enclosingBindingName(captures.CALL ?? captures.VAR);
 				return /token|secret|password|key|nonce|salt|csrf|auth|session|credential|hash|otp|pin/i.test(
 					varName,
 				);

@@ -9,6 +9,7 @@ All notable changes to pi-lens will be documented in this file.
 ### Changed
 
 - Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
+- Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
 
 - **A project scan runs its rule set in one tree walk, not one walk per rule**
 	(refs #675) — `runQueriesOnFile` compiles a language's rules into a single
@@ -43,6 +44,46 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Eight enabled typescript/javascript tree-sitter rules whose queries never
+	compiled** (refs #884) — each had been silently dead since authoring because
+	its query failed to compile against the real grammar, so it matched nothing
+	and reported no diagnostics. Repaired against the actual node/field names and
+	verified end-to-end (matches the bug, leaves correct code alone):
+	`empty-switch-case`, `switch-case-termination`, `switch-case-termination-js`
+	(switch cases carry their statements as direct `body:` children, not a
+	`consequence: (statement_block)`); `infinite-loop` (`while (true)` wraps the
+	condition in a `parenthesized_expression`; `for (;;)` has an `empty_statement`
+	condition, not `(null)`); `duplicate-function-arg` (typescript parameters are
+	`required_parameter`, not bare `(identifier)`; now also catches non-adjacent
+	duplicates); `mixed-async-styles` (no `async_modifier` node — match the `async`
+	token); `switch-non-case-labels` (JS) (a `labeled_statement` lives inside a
+	`switch_case`, not directly under `switch_body`); and `ts-insecure-random`
+	(the inline `(?i)` regex flag is invalid in JS `RegExp` — dropped the
+	redundant name predicate and let the post-filter do the case-insensitive
+	check, walking up from the `Math.random()` call so chained forms like
+	`Math.random().toString(36)` are still attributed to their binding). Also
+	implemented the four post-filters these rules referenced but that were never
+	defined (`is_empty_block`, `no_break_or_return_in_body`, `same_param_name`,
+	`no_terminating_statement`), which the batch runner had been failing closed on.
+- **A column-0 comment after a `query: |` block no longer breaks the rule**
+	(refs #884) — the query-block extractor kept every line more-indented than the
+	key (to preserve `#eq?`/`#match?` predicate lines) but did not stop at a
+	document-level `# …` comment sitting between the block and the next key, so the
+	comment was appended to the query and made it fail to compile. This is what
+	kept `mixed-async-styles` dead even after its query was otherwise correct.
+- **Seven ruby security rules never compiled and never produced a finding** (refs
+	#884) — `ruby-command-injection`, `ruby-eval`, `ruby-insecure-deserialization`,
+	`ruby-insecure-random`, `ruby-open-struct`, `ruby-string-eval` and
+	`ruby-weak-hash` were authored against JavaScript-grammar node names
+	(`call_expression`, `method_call`, `command`, `interpolated_string`) that do not
+	exist in tree-sitter-ruby, so every one failed to compile with a "Bad node name"
+	error and was silently skipped. Each query is rewritten against the real ruby
+	grammar (`call` with `method:`/`receiver:` fields, `scope_resolution` receivers
+	for `Digest::MD5`, `string` for interpolated literals), with `#match?`/`#eq?`
+	predicates moved inside the pattern's outermost parens. Per-rule positive and
+	negative fixtures (`system` vs `File.read`, `Marshal.load` vs `YAML.safe_load`,
+	`rand` vs `SecureRandom`, `OpenStruct.new` vs `Struct.new`, `Digest::MD5` vs
+	`Digest::SHA256`, string vs block `class_eval`) pin the security intent.
 - **Project scans run tree-sitter rules for every supported language, not just 10 extensions** (closes #882, refs #877, #880) — the scanner's `TREE_SITTER_EXT_TO_LANG` covered only ts/tsx/js/py/go/rs/rb, so files whose grammars and non-disabled rule dirs already exist (c, cpp, csharp, css, php, java, kotlin) were silently skipped by the tree-sitter phase of project scans. It now derives the shared per-edit resolver (`EXT_TO_LANG`) so c/cpp/csharp/php/css and the `.tsx`→tsx / `.jsx`→javascript nuances can't drift from the per-edit path, and layers java/kotlin on top (grammars + rule dirs exist but no per-edit `appliesTo`). A regression test asserts the map covers every non-disabled rule dir whose grammar is loadable.
 - **`.dart` files are now included in project-wide source enumeration** (closes #880, refs #876) — `ALL_SCANNABLE_EXTENSIONS` (`clients/source-filter.ts`) and `WARMUP_SOURCE_EXTS` (`clients/language-profile.ts`) were missing `.dart`, so Dart projects were fully supported per-edit (LSP, `dart-analyze`, `dart format`, autofix) but skipped by project-wide scans and cold-start language-profile warmup.
 - **Tree-sitter rules were compiled against the wrong grammar** — a compiled
