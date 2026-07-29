@@ -23,6 +23,9 @@ vi.mock("../../../../clients/safe-spawn.js", () => ({
 
 vi.mock("../../../../clients/installer/index.js", () => ({
 	ensureTool: vi.fn(async () => null),
+	// Pass the on-disk pre-check so these tests keep exercising the --version
+	// probe path through the mocked safeSpawnAsync.
+	isSpawnableCommand: vi.fn(async () => true),
 }));
 
 vi.mock("../../../../clients/package-manager.js", async (importOriginal) => ({
@@ -301,15 +304,13 @@ describe("runner-helpers availability checker", () => {
 
 			const checker = createAvailabilityChecker("ruff", ".exe");
 
-			vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation(
-				async (cmd) => {
-					const text = String(cmd);
-					if (text.includes(dirB.tmpDir)) {
-						return { stdout: "ruff 1.0.0", stderr: "", status: 0 };
-					}
-					return { stdout: "", stderr: "not found", status: 1 };
-				},
-			);
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation(async (cmd) => {
+				const text = String(cmd);
+				if (text.includes(dirB.tmpDir)) {
+					return { stdout: "ruff 1.0.0", stderr: "", status: 0 };
+				}
+				return { stdout: "", stderr: "not found", status: 1 };
+			});
 
 			expect(await checker.isAvailableAsync(dirA.tmpDir)).toBe(false);
 			expect(await checker.isAvailableAsync(dirB.tmpDir)).toBe(true);

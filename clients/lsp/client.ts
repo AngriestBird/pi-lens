@@ -270,7 +270,9 @@ export interface LSPClientInfo {
 	 */
 	requestWorkspaceDiagnostics(
 		budgetMs: number,
-	): Promise<Array<{ filePath: string; diagnostics: LSPDiagnostic[] }> | undefined>;
+	): Promise<
+		Array<{ filePath: string; diagnostics: LSPDiagnostic[] }> | undefined
+	>;
 	/** Capability snapshot for navigation/edit operations */
 	getOperationSupport(): LSPOperationSupport;
 	/** Commands the server advertised for workspace/executeCommand (the allowlist) */
@@ -603,6 +605,8 @@ export async function killProcessTree(
 		unref?: () => void;
 		exitCode?: number | null;
 		signalCode?: NodeJS.Signals | null;
+		once?: (event: "exit", listener: () => void) => unknown;
+		off?: (event: "exit", listener: () => void) => unknown;
 	},
 	pid: number,
 	options: LSPShutdownOptions = {},
@@ -730,10 +734,27 @@ export async function killProcessTree(
 			proc.unref?.();
 			return;
 		}
-		// SIGTERM → 1.5s → SIGKILL escalation.
-		// SIGTERM alone can leave zombie processes if the server hangs.
-		await new Promise<void>((resolve) => setTimeout(resolve, 1500));
-		if (!(proc as { killed?: boolean }).killed) {
+		// SIGTERM → exit-or-1.5s → SIGKILL escalation. SIGTERM alone can leave
+		// zombie processes if the server hangs — but a server that dies promptly
+		// must resolve on its exit event, not sleep the full escalation window
+		// (that unconditional 1500ms was the whole cost of every graceful LSP
+		// teardown, ×N clients per session and per test).
+		const exitedInTime = await new Promise<boolean>((resolve) => {
+			if (proc.exitCode != null || proc.signalCode != null) {
+				resolve(true);
+				return;
+			}
+			const onExit = (): void => {
+				clearTimeout(timer);
+				resolve(true);
+			};
+			const timer = setTimeout(() => {
+				proc.off?.("exit", onExit);
+				resolve(false);
+			}, 1500);
+			proc.once?.("exit", onExit);
+		});
+		if (!exitedInTime && !(proc as { killed?: boolean }).killed) {
 			logLatency({
 				type: "phase",
 				phase: "lsp_kill_escalation",
@@ -891,7 +912,11 @@ export function setupIncomingHandlers(
 ): void {
 	state.connection.onNotification(
 		"textDocument/publishDiagnostics",
-		(params: { uri: string; diagnostics?: LSPDiagnostic[]; version?: number }) => {
+		(params: {
+			uri: string;
+			diagnostics?: LSPDiagnostic[];
+			version?: number;
+		}) => {
 			const filePath = uriToPath(params.uri);
 			const normalizedPath = normalizeMapKey(filePath);
 			const newDiags = normalizeLspDiagnostics(params.diagnostics || []);
@@ -1017,9 +1042,9 @@ export function setupIncomingHandlers(
 	// as every other edit.
 	state.connection.onRequest(
 		"workspace/applyEdit",
-		async (
-			params: { edit?: { changes?: unknown; documentChanges?: unknown } },
-		): Promise<{ applied: boolean; failureReason?: string }> => {
+		async (params: {
+			edit?: { changes?: unknown; documentChanges?: unknown };
+		}): Promise<{ applied: boolean; failureReason?: string }> => {
 			if (state.serverEditsAllowed <= 0 || !params?.edit) {
 				return { applied: false, failureReason: "edit not solicited" };
 			}
@@ -1121,7 +1146,9 @@ async function clientRequestPullDiagnostics(
 				kind?: string;
 				items?: LSPDiagnostic[];
 				relatedDocuments?: Record<string, { items?: LSPDiagnostic[] }>;
-			}>(state.connection, "textDocument/diagnostic", { textDocument: { uri } }),
+			}>(state.connection, "textDocument/diagnostic", {
+				textDocument: { uri },
+			}),
 			Math.max(1, Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs)),
 		);
 
@@ -1172,7 +1199,9 @@ async function clientRequestPullDiagnostics(
 export async function clientRequestWorkspaceDiagnostics(
 	state: LSPClientState,
 	budgetMs: number,
-): Promise<Array<{ filePath: string; diagnostics: LSPDiagnostic[] }> | undefined> {
+): Promise<
+	Array<{ filePath: string; diagnostics: LSPDiagnostic[] }> | undefined
+> {
 	if (!isClientAlive(state)) return undefined;
 	if (!state.workspaceDiagnosticsSupport.workspaceDiagnostics) return undefined;
 	try {
@@ -1237,7 +1266,11 @@ export async function clientWaitForDiagnostics(
 		// `hasFreshDiagnostics()`, which is unconditionally true when there is no
 		// version baseline (`minVersion === undefined`), so a failed pull returned
 		// 0 and was read as a fresh clean.
-		let outcome = await clientRequestPullDiagnostics(state, filePath, timeoutMs);
+		let outcome = await clientRequestPullDiagnostics(
+			state,
+			filePath,
+			timeoutMs,
+		);
 		if (outcome.status === "found") return;
 		let sawClean = outcome.status === "clean";
 
@@ -1251,7 +1284,10 @@ export async function clientWaitForDiagnostics(
 		// Retry within budget to catch incremental servers whose first pull is
 		// empty while analysis is still running (rust-analyzer). A `clean` seen at
 		// any point is a valid affirmative answer for this touch.
-		while (outcome.status !== "found" && Date.now() - startedAt < retryBudgetMs) {
+		while (
+			outcome.status !== "found" &&
+			Date.now() - startedAt < retryBudgetMs
+		) {
 			await new Promise((resolve) =>
 				setTimeout(resolve, PULL_DIAGNOSTICS_RETRY_INTERVAL_MS),
 			);
@@ -2418,7 +2454,6 @@ function isStreamError(err: unknown): boolean {
 }
 
 // Using shared path utilities from path-utils.ts
-
 
 function positiveIntFromEnv(name: string, fallback: number): number {
 	const raw = process.env[name];

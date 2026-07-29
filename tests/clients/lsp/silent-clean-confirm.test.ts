@@ -132,8 +132,16 @@ describe("touchFile silent-clean push-only confirm (#799)", () => {
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-silent-clean-"));
+		// Flat, tiny diagnostics-wait budget so the mocked servers' real
+		// waitForDiagnostics sleep resolves in ~50ms instead of paying marksman's
+		// real 1500ms strategy budget — keeps these tests fast without changing
+		// the gate under test (readEnvDiagnosticsWaitMs, index.ts).
+		process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS = "50";
 	});
-	afterEach(() => removeTempDirSync(tmp));
+	afterEach(() => {
+		delete process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS;
+		removeTempDirSync(tmp);
+	});
 
 	it("(a) a silent-clean push-only server (marksman) resolves quickly as CONFIRMED clean (0 diagnostics), not inconclusive", async () => {
 		const filePath = path.join(tmp, "a.md");
@@ -160,10 +168,11 @@ describe("touchFile silent-clean push-only confirm (#799)", () => {
 		expect(result).toHaveLength(0);
 		expect((result as { inconclusive?: boolean }).inconclusive).toBeUndefined();
 
-		// Marksman's own strategy budget (1500ms, server-strategies.ts) is what
-		// the wait actually paid — not some other unrelated ceiling.
+		// The env override (set in beforeEach) is what the wait actually pays
+		// here — marksman's real 1500ms strategy budget is covered separately by
+		// sweep-warmup.test.ts:128.
 		expect(waitCalls.length).toBe(1);
-		expect(waitCalls[0]!.ms).toBe(1500);
+		expect(waitCalls[0]!.ms).toBe(50);
 
 		// A confirmed-clean touch marks the server demonstratedReady — proven
 		// indirectly via ensureWarmForSweep treating a subsequent sweep as a
@@ -213,8 +222,16 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
 		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-silent-clean-agg-"));
+		// Flat, tiny diagnostics-wait budget so the mocked servers' real
+		// waitForDiagnostics sleep resolves in ~50ms instead of paying their real
+		// (1000-1500ms) strategy budgets — keeps these tests fast without
+		// changing the gate under test (readEnvDiagnosticsWaitMs, index.ts).
+		process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS = "50";
 	});
-	afterEach(() => removeTempDirSync(tmp));
+	afterEach(() => {
+		delete process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS;
+		removeTempDirSync(tmp);
+	});
 
 	it("(a) scope-all: one server publishes, the silent one doesn't — resolves as CONFIRMED clean (not inconclusive), publisher's diagnostics kept", async () => {
 		const filePath = path.join(tmp, "a.md");
@@ -335,6 +352,10 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 	});
 
 	it("(d) scope-all: EVERY spawned server is silent+tier3-silent — resolves at the max of their budgets as CONFIRMED clean", async () => {
+		// This test asserts the REAL per-server strategy budgets (marksman
+		// 1500ms, typescript 1000ms) are what get paid — undo the describe's
+		// env override so it isn't flattened to 50ms like its siblings.
+		delete process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS;
 		const filePath = path.join(tmp, "a.ts");
 		fs.writeFileSync(filePath, "const x = 1;\n");
 		const marksman = makeServer("marksman", ".ts", tmp);

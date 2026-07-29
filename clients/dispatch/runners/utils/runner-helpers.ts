@@ -11,7 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getGlobalPiLensDir } from "../../../file-utils.js";
-import { ensureTool } from "../../../installer/index.js";
+import { ensureTool, isSpawnableCommand } from "../../../installer/index.js";
 import {
 	getServersForFileWithConfig,
 	isServerDisabled,
@@ -285,26 +285,26 @@ async function verifyOrInstallCommand(
 	versionArgs: string[] = ["--version"],
 	timeout = 5000,
 ): Promise<string | null> {
-	const versionCheck = await safeSpawnAsync(command, versionArgs, {
-		timeout,
-		cwd,
-	});
-	if (!versionCheck.error && versionCheck.status === 0) {
-		return command;
+	// Skip the --version spawn when the command isn't even on disk — the ~μs
+	// stat/PATH walk beats a guaranteed-to-fail spawn round-trip.
+	if (await isSpawnableCommand(command)) {
+		const versionCheck = await safeSpawnAsync(command, versionArgs, {
+			timeout,
+			cwd,
+		});
+		if (!versionCheck.error && versionCheck.status === 0) {
+			return command;
+		}
 	}
 	if (!shouldAutoInstallTool(toolId)) {
 		return null;
 	}
-	const installed = await ensureTool(toolId);
-	if (!installed) return null;
-	const installedCheck = await safeSpawnAsync(installed, versionArgs, {
-		timeout,
-		cwd,
-	});
-	if (installedCheck.error || installedCheck.status !== 0) {
-		return null;
-	}
-	return installed;
+	// ensureTool's result is already trusted: a probe-cache hit validated
+	// path+mtime, and a fresh install verified the binary. Re-probing
+	// --version here booted the tool's node shim once per invocation for
+	// zero new information; a broken install now surfaces as the runner's
+	// own spawn error instead of a silent null.
+	return (await ensureTool(toolId)) ?? null;
 }
 
 export async function resolveCommandArgsWithInstallFallback(

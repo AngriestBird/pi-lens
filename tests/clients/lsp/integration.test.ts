@@ -10,7 +10,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// SHUTDOWN_REQUEST_TIMEOUT_MS is read at MODULE LOAD in client.ts, so the env
+// override must land before the static import below evaluates — vi.hoisted
+// runs this ahead of every import in the file. Shrinks the "cold start
+// shutdown falls back to process kill" test's real wait for a server that
+// never replies to the shutdown request; that fake server's ignore branch
+// never replies either way, so there's no race and the assertions are
+// magnitude-independent.
+vi.hoisted(() => {
+	process.env.PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS = "150";
+});
 import { createLSPClient } from "../../../clients/lsp/client.js";
 import { launchLSP, stopLSP } from "../../../clients/lsp/launch.js";
 import { removeTempDirSync } from "../test-utils.js";

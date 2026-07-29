@@ -1380,7 +1380,7 @@ export function resetProbeCacheStateForTesting(): void {
  * Catches broken symlinks (stat throws ENOENT or returns size 0) without
  * spawning a process — ~μs per candidate vs ~50ms for which/where.
  */
-async function isCommandAvailable(
+export async function isCommandAvailable(
 	command: string,
 	_args?: string[],
 ): Promise<boolean> {
@@ -1412,6 +1412,23 @@ async function isCommandAvailable(
 	}
 
 	return false;
+}
+
+/**
+ * Can `command` even be spawned? Path-bearing commands stat the file directly;
+ * bare names walk PATH. ~μs either way — callers use this to skip a `--version`
+ * probe that is guaranteed to fail with a full spawn round-trip.
+ */
+export async function isSpawnableCommand(command: string): Promise<boolean> {
+	if (/[\\/]/.test(command)) {
+		try {
+			const stat = statSync(command);
+			return stat.isFile() && stat.size > 0;
+		} catch {
+			return false;
+		}
+	}
+	return isCommandAvailable(command);
 }
 
 // --- Verification Functions

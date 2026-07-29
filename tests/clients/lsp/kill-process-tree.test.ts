@@ -128,5 +128,30 @@ describe("killProcessTree", () => {
 
 			expect(processKillSpy).toHaveBeenCalledWith(-4242, "SIGKILL");
 		});
+
+		it("resolves on the process's exit event without waiting out the escalation window", async () => {
+			// A graceful shutdown (server honored `exit`) used to still sleep the
+			// full 1500ms before checking whether to SIGKILL — every LSP teardown
+			// paid the window even when the process was already dead.
+			let exitListener: (() => void) | undefined;
+			const proc = {
+				kill: vi.fn(() => true),
+				unref: vi.fn(),
+				once: vi.fn((event: string, listener: () => void) => {
+					if (event === "exit") exitListener = listener;
+				}),
+				off: vi.fn(),
+			};
+			const done = killProcessTree(proc, 4242, {});
+
+			expect(processKillSpy).toHaveBeenCalledWith(-4242, "SIGTERM");
+			expect(exitListener).toBeDefined();
+			exitListener?.();
+			// No timer advance: with fake timers active, resolution proves the
+			// exit event settled the wait, not the 1500ms escalation timer.
+			await done;
+
+			expect(processKillSpy).not.toHaveBeenCalledWith(-4242, "SIGKILL");
+		});
 	});
 });

@@ -35,8 +35,19 @@ export default defineConfig({
 		globalSetup: [
 			"./tests/support/check-build-freshness.ts",
 			"./tests/support/prewarm-grammars.ts",
+			// After check-build-freshness: the seed analyze runs the in-place build.
+			"./tests/support/prewarm-tool-home.ts",
 		],
 		setupFiles: ["./tests/support/vitest-setup.ts"],
+		// Local runs: cap forks at half the cores (measured 2026-07-29 on a
+		// 16-core host, post dead-wait removal: 8 forks ≈ 40s / 9-11 GB peak
+		// RSS; 6 forks ≈ 44s / 8 GB; the old uncapped 15 forks gave the same
+		// memory for a slower wall). CI keeps vitest's default — its 4-core
+		// runner has no worker headroom to give back. Memory-constrained runs:
+		// PI_LENS_TEST_MAX_WORKERS=6.
+		maxWorkers: process.env.CI
+			? undefined
+			: Number(process.env.PI_LENS_TEST_MAX_WORKERS) || "50%",
 		execArgv: [
 			`--max-old-space-size=${process.env.PI_LENS_TEST_WORKER_HEAP_MB || 4096}`,
 		],
