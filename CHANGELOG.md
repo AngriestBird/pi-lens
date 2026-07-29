@@ -77,6 +77,14 @@ All notable changes to pi-lens will be documented in this file.
 	at 512 KiB. A coverage guard makes a newly registered kind automatically
 	enumerable — and classified as code or non-code — on both project-wide
 	paths.
+
+- **CMake files now reach a real LSP server** (refs #892) — the CMake policy's
+	previous `lsp` fallback had no registered server and silently produced no
+	diagnostics. `cmake-language-server` now covers both `.cmake` files and the
+	canonical `CMakeLists.txt` basename, with managed pip installation.
+- **Fish LSP policy is no longer dead wiring** (refs #893) — `fish-lsp` is now
+	registered for `.fish` files and auto-installed through npm; `fish_indent`
+	continues to run alongside it.
 - **Small edits no longer pay the entity-extraction cost** (refs #885) — the
 	<5-line skip threshold only guarded the zero-diagnostics early return; a
 	second `extractEntitySnapshot` block ran unconditionally, so trivial edits
