@@ -4,6 +4,8 @@ import {
 	getLspCapableKinds,
 	getPrimaryDispatchGroup,
 } from "../../clients/language-policy.js";
+import { KIND_EXTENSIONS } from "../../clients/file-kinds.js";
+import { LSP_SERVERS } from "../../clients/lsp/server.js";
 import { getDefaultStartupTools } from "../../clients/language-profile.js";
 
 describe("language-policy", () => {
@@ -19,6 +21,24 @@ describe("language-policy", () => {
 		// markdown gained a primary LSP (marksman, #274).
 		expect(kinds).toContain("markdown");
 		expect(kinds).not.toContain("sql");
+	});
+
+	it("backs every LSP-capable kind with a registered primary server", () => {
+		const primaryTokens = new Set(
+			LSP_SERVERS.filter((server) => server.role !== "auxiliary").flatMap(
+				(server) => server.extensions.map((token) => token.toLowerCase()),
+			),
+		);
+		const missing = getLspCapableKinds().filter(
+			(kind) =>
+				!KIND_EXTENSIONS[kind].some((extension) =>
+					primaryTokens.has(extension.toLowerCase()),
+				),
+		);
+		expect(
+			missing,
+			`lspCapable kind(s) without a registered primary server: ${missing.join(", ")}`,
+		).toEqual([]);
 	});
 
 	it("gates config-sensitive startup defaults while keeping core defaults", () => {

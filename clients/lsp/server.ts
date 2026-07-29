@@ -2290,6 +2290,44 @@ export const BashServer: LSPServerInfo = {
 	},
 };
 
+export const FishServer: LSPServerInfo = {
+	id: "fish",
+	name: "Fish Language Server",
+	extensions: KIND_EXTENSIONS["fish"],
+	root: RootWithFallback(createRootDetector([".git"])),
+	spawn(root, options) {
+		return resolveAndLaunch(
+			{
+				candidates: nodeBinCandidates(root, "fish-lsp"),
+				args: ["start"],
+				cwd: root,
+				managedToolId: "fish-lsp",
+			},
+			options?.allowInstall,
+		);
+	},
+};
+
+export const CMakeServer: LSPServerInfo = {
+	id: "cmake",
+	name: "CMake Language Server",
+	// CMake's canonical project file has no .cmake suffix. The configured-server
+	// matcher supports exact basenames as well as extensions.
+	extensions: [...KIND_EXTENSIONS["cmake"], "CMakeLists.txt"],
+	root: RootWithFallback(createRootDetector(["CMakeLists.txt", ".git"])),
+	spawn(root, options) {
+		return resolveAndLaunch(
+			{
+				candidates: ["cmake-language-server"],
+				args: [],
+				cwd: root,
+				managedToolId: "cmake-language-server",
+			},
+			options?.allowInstall,
+		);
+	},
+};
+
 export const DockerServer: LSPServerInfo = {
 	id: "docker",
 	name: "Dockerfile Language Server",
@@ -2832,6 +2870,8 @@ export const LSP_SERVERS: LSPServerInfo[] = [
 	TerraformServer,
 	NixServer,
 	BashServer,
+	FishServer,
+	CMakeServer,
 	DockerServer,
 	YamlServer,
 	JsonServer,
