@@ -50,6 +50,11 @@ All notable changes to pi-lens will be documented in this file.
 	project-diagnostics snapshot with a silently truncated result** (refs #891).
 	The partial scan is returned with `scanTruncated`, logs its completed/total
 	file counts and abort point, and leaves the previous complete cache intact.
+
+- **Block-wrapped switch cases no longer report false fall-through errors**
+	(refs #910) — `switch-case-termination` now follows trailing statement
+	blocks to recognize a nested `break`, `return`, `throw`, or `continue`, while
+	still flagging empty and non-terminating blocks.
 - **Small edits no longer pay the entity-extraction cost** (refs #885) — the
 	<5-line skip threshold only guarded the zero-diagnostics early return; a
 	second `extractEntitySnapshot` block ran unconditionally, so trivial edits
