@@ -187,8 +187,8 @@ describe("scanProjectDiagnostics home ceiling (#747/#250)", () => {
 	});
 });
 
-describe("scanProjectDiagnostics FactStore content lifecycle (#886)", () => {
-	it("releases each file's full content after its consumers finish", async () => {
+describe("scanProjectDiagnostics FactStore lifecycle (#886, #939)", () => {
+	it("releases every file fact after its consumers finish", async () => {
 		const files = ["a.ts", "b.ts", "c.ts"].map((name, index) => {
 			const filePath = path.join(tmp, name);
 			fs.writeFileSync(
@@ -198,24 +198,33 @@ describe("scanProjectDiagnostics FactStore content lifecycle (#886)", () => {
 			return filePath;
 		});
 		const released = new Set<string>();
-		const original = FactStore.prototype.deleteFileFact;
-		const deleteSpy = vi
-			.spyOn(FactStore.prototype, "deleteFileFact")
+		const occupiedFiles = new Set<string>();
+		let peakOccupiedFiles = 0;
+		const originalSet = FactStore.prototype.setFileFact;
+		const setSpy = vi
+			.spyOn(FactStore.prototype, "setFileFact")
 			.mockImplementation(function (
 				this: FactStore,
 				filePath: string,
 				factId: string,
+				value: unknown,
 			) {
-				if (factId === "file.content") {
-					expect(this.getFileFact(filePath, factId)).toContain(
-						"full-content-marker",
-					);
-					original.call(this, filePath, factId);
-					expect(this.getFileFact(filePath, factId)).toBeUndefined();
-					released.add(path.resolve(filePath));
-					return;
+				originalSet.call(this, filePath, factId, value);
+				occupiedFiles.add(path.resolve(filePath));
+				peakOccupiedFiles = Math.max(peakOccupiedFiles, occupiedFiles.size);
+			});
+		const originalClear = FactStore.prototype.clearFileFactsFor;
+		const clearSpy = vi
+			.spyOn(FactStore.prototype, "clearFileFactsFor")
+			.mockImplementation(function (this: FactStore, filePath: string) {
+				const resolved = path.resolve(filePath);
+				const hadContent = this.hasFileFact(filePath, "file.content");
+				originalClear.call(this, filePath);
+				if (hadContent) {
+					expect(this.hasFileFact(filePath, "file.content")).toBe(false);
+					released.add(resolved);
 				}
-				original.call(this, filePath, factId);
+				occupiedFiles.delete(resolved);
 			});
 
 		try {
@@ -225,9 +234,12 @@ describe("scanProjectDiagnostics FactStore content lifecycle (#886)", () => {
 				files,
 			});
 		} finally {
-			deleteSpy.mockRestore();
+			clearSpy.mockRestore();
+			setSpy.mockRestore();
 		}
 
 		expect(released).toEqual(new Set(files.map((file) => path.resolve(file))));
+		expect(peakOccupiedFiles).toBe(1);
+		expect(occupiedFiles.size).toBe(0);
 	});
 });

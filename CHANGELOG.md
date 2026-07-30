@@ -25,9 +25,10 @@ All notable changes to pi-lens will be documented in this file.
 	with the cap plus both `.pi-lens.json#maxProjectFiles` and
 	`PI_LENS_REVIEW_GRAPH_MAX_FILES` controls, keeping disabled data distinct from
 	a genuinely empty/cold graph.
-- **Project scans release each processed file's full source content** (refs #886)
-	instead of retaining every source string in their shared `FactStore` until the
-	scan ends; derived per-file facts and session facts remain available.
+- **Project scans release every scan-local fact after each file** (refs #886,
+	#939) instead of retaining source content, imports, summaries, and other
+	derived per-file facts until the scan ends. The live dispatch store remains
+	untouched; only the scanner-owned store is cleared.
 - Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
 - Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
 - **Project diagnostics now use one file-major scan pass** (refs #896) —
