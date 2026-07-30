@@ -18,9 +18,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	vi.restoreAllMocks();
-	try {
-		removeTempDirSync(tmpDir);
-	} catch {}
+	removeTempDirSync(tmpDir);
 });
 
 function readLines(file: string): string[] {
@@ -134,6 +132,34 @@ describe("createNdjsonLogger", () => {
 		logger.append('{"raw":true}');
 		await logger.flush();
 		expect(fs.readFileSync(logFile, "utf-8")).toBe('{"raw":true}\n');
+	});
+
+	it("redacts secrets from structured and pre-serialized log lines", async () => {
+		const githubToken = `ghp_${"a".repeat(36)}`;
+		const jwt = [
+			"ey",
+			"JhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature_value",
+		].join("");
+		const logger = createNdjsonLogger({ filePath: logFile });
+		logger.log({ message: githubToken });
+		logger.append(JSON.stringify({ message: jwt }));
+		logger.log({ [githubToken]: true });
+		logger.append(
+			JSON.stringify({
+				message: `before ${["-----BEGIN ", "PRIVATE KEY-----"].join("")}\nprivate material`,
+			}),
+		);
+		await logger.flush();
+
+		const lines = readLines(logFile).map((line) => JSON.parse(line));
+		expect(lines).toEqual([
+			{ message: "[REDACTED:github-token]" },
+			{ message: "[REDACTED:jwt]" },
+			{ "[REDACTED:github-token]": true },
+			{ message: "before [REDACTED:private-key]" },
+		]);
+		expect(fs.readFileSync(logFile, "utf-8")).not.toContain(githubToken);
+		expect(fs.readFileSync(logFile, "utf-8")).not.toContain(jwt);
 	});
 
 	it("flushSync drains buffered lines synchronously (exit-handler path)", () => {

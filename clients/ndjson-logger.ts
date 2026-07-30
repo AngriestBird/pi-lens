@@ -14,6 +14,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { redactSecrets } from "./redact/secrets.js";
 
 /** A queued write ("line") or an in-band truncate op (latency clear). */
 type QueueItem = { kind: "line"; line: string } | { kind: "truncate" };
@@ -32,9 +33,9 @@ export interface NdjsonLoggerOptions {
 }
 
 export interface NdjsonLogger {
-	/** Serialize `obj` to one NDJSON line and enqueue it (async write). */
+	/** Serialize `obj`, redact secrets, and enqueue one NDJSON line. */
 	log(obj: unknown): void;
-	/** Enqueue an already-serialized line (must NOT include the trailing newline). */
+	/** Redact and enqueue a serialized line without a trailing newline. */
 	append(line: string): void;
 	/** Enqueue a truncate op in the same serialized queue (clear-without-racing). */
 	truncate(): void;
@@ -46,6 +47,14 @@ export interface NdjsonLogger {
 
 function resolve(v: string | (() => string)): string {
 	return typeof v === "function" ? v() : v;
+}
+
+function runBestEffort(operation: () => void): void {
+	try {
+		operation();
+	} catch {
+		return;
+	}
 }
 
 // One shared exit handler flushes every logger — avoids an EventEmitter
@@ -88,11 +97,7 @@ function registerExitFlusher(flushSync: () => void): void {
 	if (!exitHandlerRegistered) {
 		exitHandlerRegistered = true;
 		process.on("exit", () => {
-			for (const flush of exitFlushers) {
-				try {
-					flush();
-				} catch {}
-			}
+			for (const flush of exitFlushers) runBestEffort(flush);
 		});
 	}
 }
@@ -109,10 +114,10 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 
 	function ensureDir(file: string): void {
 		if (ensuredDir) return;
-		try {
+		runBestEffort(() => {
 			fs.mkdirSync(path.dirname(file), { recursive: true });
 			ensuredDir = true;
-		} catch {}
+		});
 	}
 
 	function rotateIfNeeded(file: string): void {
@@ -123,9 +128,7 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 			const backup = options.backupPath
 				? resolve(options.backupPath)
 				: `${file}.1`;
-			try {
-				fs.rmSync(backup, { force: true });
-			} catch {}
+			runBestEffort(() => fs.rmSync(backup, { force: true }));
 			fs.renameSync(file, backup);
 		} catch {
 			// no file yet, or rename raced — nothing to rotate
@@ -144,13 +147,9 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 				item.kind === "line"
 					? queue.findIndex((queued) => queued.kind === "truncate")
 					: 0;
+			const pendingEnd = truncateIndex === -1 ? queue.length : truncateIndex;
 			const pending =
-				item.kind === "truncate"
-					? [item]
-					: queue.slice(
-							0,
-							truncateIndex === -1 ? queue.length : truncateIndex,
-						);
+				item.kind === "truncate" ? [item] : queue.slice(0, pendingEnd);
 			inFlightBatch = pending;
 			try {
 				if (item.kind === "truncate") {
@@ -160,10 +159,7 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 					await fs.promises.appendFile(
 						file,
 						pending
-							.map(
-								(queued) =>
-									(queued as { kind: "line"; line: string }).line,
-							)
+							.map((queued) => (queued as { kind: "line"; line: string }).line)
 							.join(""),
 					);
 				}
@@ -186,9 +182,11 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 		// re-checks queue.length, so items enqueued mid-drain are picked up before
 		// the promise settles — no stranded item, no second concurrent drainer.
 		if (!drainPromise) {
-			drainPromise = Promise.resolve().then(drainLoop).finally(() => {
-				drainPromise = null;
-			});
+			drainPromise = Promise.resolve()
+				.then(drainLoop)
+				.finally(() => {
+					drainPromise = null;
+				});
 		}
 		return drainPromise;
 	}
@@ -211,14 +209,14 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 			const item = queue.shift() as QueueItem;
 			const file = resolve(options.filePath);
 			ensureDir(file);
-			try {
+			runBestEffort(() => {
 				if (item.kind === "truncate") {
 					fs.writeFileSync(file, "");
 				} else {
 					rotateIfNeeded(file);
 					fs.appendFileSync(file, item.line);
 				}
-			} catch {}
+			});
 		}
 	}
 
@@ -228,10 +226,14 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 
 	return {
 		log(obj: unknown): void {
-			enqueue({ kind: "line", line: `${JSON.stringify(obj)}\n` });
+			const serialized = String(JSON.stringify(obj));
+			enqueue({
+				kind: "line",
+				line: `${redactSecrets(serialized)}\n`,
+			});
 		},
 		append(line: string): void {
-			enqueue({ kind: "line", line: `${line}\n` });
+			enqueue({ kind: "line", line: `${redactSecrets(line)}\n` });
 		},
 		truncate(): void {
 			enqueue({ kind: "truncate" });
