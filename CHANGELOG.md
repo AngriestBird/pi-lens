@@ -4,6 +4,12 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Session-start latency is attributable end to end** (refs #948) â€” latency
+	telemetry now separates host boot from pi-lens evaluation and records quick
+	and full session-start totals, pre-handler/bootstrap work, runtime reset,
+	log cleanup, LSP reset, sequence/snapshot reads (including snapshot bytes),
+	and delayed warmup scan/profile/index phases.
+
 - **Warm LSP names enrich tree-sitter read expansion** (refs #158) â€” partial
 	read expansion keeps tree-sitter's line boundaries authoritative, but an
 	already-open document with an already-active LSP can now replace the display
