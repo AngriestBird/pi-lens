@@ -12,9 +12,7 @@ import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { isTestMode } from "../env-utils.js";
 import {
-	getGlobalPiLensDir,
 	getProjectIgnoreMatcher,
 	isExcludedDirName,
 } from "../file-utils.js";
@@ -22,6 +20,7 @@ import { recordLsp } from "../widget-state.js";
 import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { logLatency } from "../latency-logger.js";
+import { logSessionStart } from "../sessionstart-logger.js";
 import { shouldPreferPullOnlyDiagnostics } from "../lsp-budget.js";
 import { withDeadline } from "../deadline-utils.js";
 import {
@@ -268,22 +267,6 @@ const EARLY_UNBLOCK_GRACE_MS = Math.max(
 	) || 400,
 );
 const CASCADE_DIAGNOSTICS_TTL_MS = 240_000;
-const SESSIONSTART_LOG_DIR = getGlobalPiLensDir();
-const SESSIONSTART_LOG = path.join(SESSIONSTART_LOG_DIR, "sessionstart.log");
-
-function logSessionStart(msg: string): void {
-	if (isTestMode()) {
-		return;
-	}
-	const line = `[${new Date().toISOString()}] ${msg}\n`;
-	void fs
-		.mkdir(SESSIONSTART_LOG_DIR, { recursive: true })
-		.then(() => fs.appendFile(SESSIONSTART_LOG, line))
-		.catch(() => {
-			// best-effort logging
-		});
-}
-
 export interface SpawnedServer {
 	client: LSPClientInfo;
 	info: LSPServerInfo;

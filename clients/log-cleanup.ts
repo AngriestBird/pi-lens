@@ -30,19 +30,6 @@ const LOG_DIR = getGlobalPiLensDir();
 const LOGS_SUBDIR = path.join(LOG_DIR, "logs");
 
 /**
- * Logs that write via some mechanism OTHER than the shared
- * `createNdjsonLogger` (clients/ndjson-logger.ts), so they can't self-register
- * into its file registry. Keep this list as small as possible — anything that
- * can reasonably move onto the shared writer should, so there's only one
- * place left to remember by hand.
- *
- *   - sessionstart.log — written by a handful of modules (installer/index.ts,
- *     lsp/index.ts, lsp/launch.ts, lsp/server.ts, index.ts) via a bespoke
- *     `fs.appendFile`, predating ndjson-logger.
- */
-const UNMANAGED_STRAGGLER_LOG_FILES = ["sessionstart.log"];
-
-/**
  * Every global `.log` pi-lens writes under ~/.pi-lens, resolved dynamically so
  * rotation and the storage summary can't drift out of sync with what's
  * actually written — that drift is exactly what left
@@ -62,14 +49,11 @@ const UNMANAGED_STRAGGLER_LOG_FILES = ["sessionstart.log"];
  *      a file has content on disk, this catches it regardless of import
  *      timing; an unregistered file that doesn't exist yet has nothing to
  *      clean up anyway.
- *   3. `UNMANAGED_STRAGGLER_LOG_FILES` — the handful of logs that don't go
- *      through `createNdjsonLogger` at all and so can never self-register.
- *
  * `dir` is overridable for tests; production callers use the default
  * (real `~/.pi-lens`).
  */
 export function getManagedLogFiles(dir: string = LOG_DIR): string[] {
-	const names = new Set<string>(UNMANAGED_STRAGGLER_LOG_FILES);
+	const names = new Set<string>();
 
 	for (const absPath of getRegisteredLogFiles()) {
 		if (path.dirname(absPath) === dir) {

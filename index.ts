@@ -1,5 +1,4 @@
 import * as nodeFs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AstGrepClient } from "./clients/ast-grep-client.js";
@@ -129,6 +128,7 @@ import {
 	shouldLogWorstBlock,
 	startEventLoopMonitor,
 } from "./clients/event-loop-monitor.js";
+import { logSessionStart } from "./clients/sessionstart-logger.js";
 
 // First executable statement: every import above has been evaluated, so the
 // full load/transpile cost has been paid. Capture it now.
@@ -140,21 +140,8 @@ startEventLoopMonitor();
 // *new* worst freeze per turn, not the same growing max). (#192)
 let lastLoggedLoopWorstMs = 0;
 
-const DEBUG_LOG_DIR = path.join(os.homedir(), ".pi-lens");
-const DEBUG_LOG = path.join(DEBUG_LOG_DIR, "sessionstart.log");
 function dbg(msg: string) {
-	// Skip file logging during tests to isolate test output from production logs
-	if (process.env.PI_LENS_TEST_MODE === "1" || process.env.VITEST) {
-		return;
-	}
-	const line = `[${new Date().toISOString()}] ${msg}\n`;
-	try {
-		nodeFs.mkdirSync(DEBUG_LOG_DIR, { recursive: true });
-		nodeFs.appendFileSync(DEBUG_LOG, line);
-	} catch (e) {
-		// Pipeline error logged
-		console.error("[pi-lens-debug] write failed:", e);
-	}
+	logSessionStart(msg);
 }
 
 /**

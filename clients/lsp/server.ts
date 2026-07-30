@@ -10,15 +10,12 @@
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import {
 	access,
-	appendFile,
-	mkdir,
 	readFile,
 	readdir,
 	stat,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { isTestMode } from "../env-utils.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import {
 	DOTNET_CSHARP_ROOT_MARKERS,
@@ -37,6 +34,7 @@ import {
 import { resolveOpengrepConfig } from "../opengrep-config.js";
 import { isZizmorAuditTarget, resolveZizmorGitHubToken } from "../zizmor-config.js";
 import { logLatency } from "../latency-logger.js";
+import { logSessionStart } from "../sessionstart-logger.js";
 import { findLocalSgconfig, resolveBaselineSgconfig } from "../sgconfig.js";
 import { resolveAstGrepNativeExe } from "./wait-policy/index.js";
 import { isCommandAvailableAsync, safeSpawnAsync } from "../safe-spawn.js";
@@ -183,21 +181,7 @@ function markDirectLspCommandUnavailable(command: string): void {
 	directLspCommandSkipLoggedUntil.delete(command);
 }
 
-const SESSIONSTART_LOG_DIR = getGlobalPiLensDir();
-const SESSIONSTART_LOG = path.join(SESSIONSTART_LOG_DIR, "sessionstart.log");
 const PI_LENS_BIN_DIR = path.join(getGlobalPiLensDir(), "bin");
-
-function logSessionStart(message: string): void {
-	if (isTestMode()) {
-		return;
-	}
-	const line = `[${new Date().toISOString()}] ${message}\n`;
-	mkdir(SESSIONSTART_LOG_DIR, { recursive: true })
-		.then(() => appendFile(SESSIONSTART_LOG, line))
-		.catch(() => {
-			// best-effort logging
-		});
-}
 
 // ---------------------------------------------------------------------------
 // Unified binary resolution + launch
