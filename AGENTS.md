@@ -66,6 +66,11 @@ Whole-project loops that reuse one `FactStore` must delete `file.content` after
 that file's consumers finish (in a `finally` so abort/error exits release it).
 Keep derived file facts and session facts: later cross-file consumers may still
 need those, but no scan may retain every processed file's full source string.
+The folded project-diagnostics scanner publishes graph-facing structural facts
+through `clients/review-graph/shared-extraction-ir.ts` only after a file fully
+completes. Entries are compact extracted values (never content or WASM trees),
+content-hash checked by every graph consumer, and extraction failures are
+incomplete/rejected; cold graph callers remain independent and parse normally.
 
 ## MCP mirror (second host adapter — `mcp/` + `clients/lens-engine.ts`)
 

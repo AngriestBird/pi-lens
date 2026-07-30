@@ -32,17 +32,20 @@ vi.mock("../../../clients/tree-sitter-shared.js", async (importOriginal) => {
 	};
 });
 
-vi.mock("../../../clients/tree-sitter-query-loader.js", async (importOriginal) => {
-	const actual =
-		await importOriginal<
-			typeof import("../../../clients/tree-sitter-query-loader.js")
-		>();
-	return {
-		...actual,
-		queryLoader: { loadQueries: async () => new Map() },
-		queriesForLanguage: () => [{ id: "test", query: "(identifier) @id" }],
-	};
-});
+vi.mock(
+	"../../../clients/tree-sitter-query-loader.js",
+	async (importOriginal) => {
+		const actual =
+			await importOriginal<
+				typeof import("../../../clients/tree-sitter-query-loader.js")
+			>();
+		return {
+			...actual,
+			queryLoader: { loadQueries: async () => new Map() },
+			queriesForLanguage: () => [{ id: "test", query: "(identifier) @id" }],
+		};
+	},
+);
 
 vi.mock(
 	"../../../clients/dispatch/runners/ast-grep-napi.js",
@@ -66,12 +69,36 @@ vi.mock("../../../clients/tree-sitter-logger.js", () => ({
 	logTreeSitterCacheStats: vi.fn(),
 }));
 
+vi.mock("../../../clients/review-graph/builder.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<
+			typeof import("../../../clients/review-graph/builder.js")
+		>();
+	return {
+		...actual,
+		captureReviewGraphStructuralIr: async () => ({
+			complete: true,
+			structural: {
+				kind: "jsts" as const,
+				imports: [],
+				reexports: [],
+				functionSummaries: [],
+			},
+		}),
+	};
+});
+
+import { createHash } from "node:crypto";
 import {
 	loadProjectDiagnosticsSnapshot,
 	saveProjectDiagnosticsSnapshot,
 } from "../../../clients/project-diagnostics/cache.js";
 import { scanProjectDiagnostics } from "../../../clients/project-diagnostics/scanner.js";
 import type { ProjectDiagnosticsSnapshot } from "../../../clients/project-diagnostics/types.js";
+import {
+	clearReviewGraphFileIr,
+	getFreshReviewGraphFileIr,
+} from "../../../clients/review-graph/shared-extraction-ir.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 let tmp: string;
@@ -106,6 +133,7 @@ beforeEach(() => {
 	state.abortAfter = Number.POSITIVE_INFINITY;
 	state.parseCalls = 0;
 	state.log.mockClear();
+	clearReviewGraphFileIr(tmp);
 });
 
 afterEach(() => {
@@ -124,6 +152,22 @@ describe("project diagnostics mid-scan WASM abort (#891)", () => {
 		expect(result.treeSitterStatus).toBe("wasm_aborted_restart_required");
 		expect(result.filesScanned).toBe(1);
 		expect(state.parseCalls).toBe(2);
+		const a = fs.readFileSync(path.join(tmp, "a.ts"), "utf8");
+		const b = fs.readFileSync(path.join(tmp, "b.ts"), "utf8");
+		expect(
+			getFreshReviewGraphFileIr(
+				tmp,
+				path.join(tmp, "a.ts"),
+				createHash("sha256").update(a).digest("hex"),
+			),
+		).toBeDefined();
+		expect(
+			getFreshReviewGraphFileIr(
+				tmp,
+				path.join(tmp, "b.ts"),
+				createHash("sha256").update(b).digest("hex"),
+			),
+		).toBeUndefined();
 		expect(loadProjectDiagnosticsSnapshot(tmp)).toEqual(prior);
 		expect(state.log).toHaveBeenCalledWith(
 			expect.objectContaining({

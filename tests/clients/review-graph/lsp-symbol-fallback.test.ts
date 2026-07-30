@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../../clients/dispatch/fact-store.js";
+import { getOpenDocumentSymbols } from "../../../clients/lsp-document-symbols.js";
 import {
 	buildOrUpdateGraph,
 	clearReviewGraphWorkspaceCache,
@@ -7,7 +9,10 @@ import {
 	flushReviewGraphPersistsForTests,
 	getCachedReviewGraph,
 } from "../../../clients/review-graph/builder.js";
-import { getOpenDocumentSymbols } from "../../../clients/lsp-document-symbols.js";
+import {
+	clearReviewGraphFileIr,
+	publishReviewGraphFileIr,
+} from "../../../clients/review-graph/shared-extraction-ir.js";
 import { logReviewGraph } from "../../../clients/review-graph-logger.js";
 import { createTempFile, setupTestEnvironment } from "../test-utils.js";
 
@@ -31,6 +36,7 @@ const range = (start: number, end: number) => ({
 afterEach(() => {
 	flushReviewGraphPersistsForTests();
 	clearReviewGraphWorkspaceCache();
+	clearReviewGraphFileIr();
 	vi.clearAllMocks();
 });
 
@@ -45,9 +51,7 @@ describe("review graph LSP symbol fallback (#307)", () => {
 					name: "ReviewManager",
 					kind: 5,
 					range: range(0, 8),
-					children: [
-						{ name: "runSynthesis", kind: 6, range: range(2, 5) },
-					],
+					children: [{ name: "runSynthesis", kind: 6, range: range(2, 5) }],
 				},
 			]);
 			const graph = await buildOrUpdateGraph(
@@ -58,11 +62,15 @@ describe("review graph LSP symbol fallback (#307)", () => {
 			const lspNodes = [...graph.nodes.values()].filter(
 				(node) => node.provenance === "lsp",
 			);
-			expect(lspNodes.map((node) => node.qualifiedName ?? node.symbolName)).toEqual(
-				["ReviewManager", "ReviewManager.runSynthesis"],
-			);
-			const parent = lspNodes.find((node) => node.symbolName === "ReviewManager")!;
-			const child = lspNodes.find((node) => node.symbolName === "runSynthesis")!;
+			expect(
+				lspNodes.map((node) => node.qualifiedName ?? node.symbolName),
+			).toEqual(["ReviewManager", "ReviewManager.runSynthesis"]);
+			const parent = lspNodes.find(
+				(node) => node.symbolName === "ReviewManager",
+			)!;
+			const child = lspNodes.find(
+				(node) => node.symbolName === "runSynthesis",
+			)!;
 			expect(graph.edges).toContainEqual({
 				from: parent.id,
 				to: child.id,
@@ -172,6 +180,31 @@ describe("review graph LSP symbol fallback (#307)", () => {
 				),
 			).toBe(true);
 			expect(getOpenDocumentSymbols).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("treats a successful empty scanner IR as authoritative", async () => {
+		const env = setupTestEnvironment("pi-lens-graph-lsp-ir-empty-");
+		try {
+			const content = "// legitimately no declarations\n";
+			const file = createTempFile(env.tmpDir, "lib/main.dart", content);
+			publishReviewGraphFileIr(env.tmpDir, {
+				filePath: file,
+				contentHash: createHash("sha256").update(content).digest("hex"),
+				complete: true,
+				structural: {
+					kind: "tree-sitter",
+					languageId: "dart",
+					extracted: { symbols: [], refs: [], imports: [] },
+				},
+			});
+			await buildOrUpdateGraph(env.tmpDir, [file], new FactStore());
+			expect(getOpenDocumentSymbols).not.toHaveBeenCalled();
+			expect(logReviewGraph).not.toHaveBeenCalledWith(
+				expect.objectContaining({ phase: "lsp_symbol_fallback" }),
+			);
 		} finally {
 			env.cleanup();
 		}
