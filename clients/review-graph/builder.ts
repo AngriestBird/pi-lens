@@ -901,6 +901,7 @@ function graphPersistMaxElements(): number {
 }
 
 interface PendingPersist {
+	cwd: string;
 	cacheDir: string;
 	cachePath: string;
 	data: PersistedGraphData;
@@ -1001,23 +1002,10 @@ function ensurePersistExitHook(): void {
 	if (_persistExitHookInstalled) return;
 	_persistExitHookInstalled = true;
 	process.once("exit", () => {
-		for (const [key, pending] of _pendingPersist) {
-			try {
-				fs.mkdirSync(pending.cacheDir, { recursive: true });
-				// Same atomic tmp+rename as writePending (via clients/atomic-write.ts,
-				// #762): even at teardown a crash mid-write must not leave a
-				// truncated snapshot for the next start.
-				writeFileAtomic(pending.cachePath, JSON.stringify(pending.data));
-			} catch (err) {
-				recordPersistFailure(
-					key,
-					"exit_flush_failed",
-					err instanceof Error ? err.message : String(err),
-				);
-				flushReviewGraphLogSync();
-			}
+		for (const pending of [..._pendingPersist.values()]) {
+			const result = flushReviewGraphPersist(pending.cwd);
+			if (!result.ok) flushReviewGraphLogSync();
 		}
-		_pendingPersist.clear();
 	});
 }
 
@@ -1073,7 +1061,7 @@ function persistGraph(
 		gitStamp,
 	};
 	const key = normalizeMapKey(cwd);
-	_pendingPersist.set(key, { cacheDir, cachePath, data, elementCount });
+	_pendingPersist.set(key, { cwd, cacheDir, cachePath, data, elementCount });
 	logReviewGraph({
 		cwd,
 		phase: "persist_scheduled",
@@ -1098,6 +1086,65 @@ function persistGraph(
 /** Test hook: force any pending debounced persist to write immediately. */
 export function flushReviewGraphPersistsForTests(): void {
 	for (const key of [..._pendingPersist.keys()]) writePending(key);
+}
+
+export interface ReviewGraphPersistFlushResult {
+	ok: boolean;
+	path?: string;
+	bytes?: number;
+	elements?: number;
+	reason?: string;
+}
+
+/**
+ * Force and verify one workspace's queued graph snapshot before a standalone
+ * process exits. This is the out-of-band counterpart to the teardown hook:
+ * it consumes the same persist payload and uses the same atomic writer.
+ */
+export function flushReviewGraphPersist(
+	cwd: string,
+): ReviewGraphPersistFlushResult {
+	const key = normalizeMapKey(cwd);
+	const pending = _pendingPersist.get(key);
+	if (!pending) {
+		return { ok: false, reason: "no graph snapshot was queued for persistence" };
+	}
+	_pendingPersist.delete(key);
+	const timer = _persistTimers.get(key);
+	if (timer) {
+		clearTimeout(timer);
+		_persistTimers.delete(key);
+	}
+
+	const startedAt = Date.now();
+	try {
+		const json = JSON.stringify(pending.data);
+		const bytes = Buffer.byteLength(json);
+		fs.mkdirSync(pending.cacheDir, { recursive: true });
+		writeFileAtomic(pending.cachePath, json);
+		logLatency({
+			type: "phase",
+			phase: "review_graph_persist",
+			filePath: pending.cachePath,
+			durationMs: Date.now() - startedAt,
+			metadata: { elements: pending.elementCount, bytes },
+		});
+		logReviewGraph({
+			cwd: pending.cwd,
+			phase: "persist_succeeded",
+			elements: pending.elementCount,
+		});
+		return {
+			ok: true,
+			path: pending.cachePath,
+			bytes,
+			elements: pending.elementCount,
+		};
+	} catch (err) {
+		const reason = err instanceof Error ? err.message : String(err);
+		recordPersistFailure(pending.cwd, "forced_flush_failed", reason);
+		return { ok: false, reason };
+	}
 }
 
 /**

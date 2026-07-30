@@ -75,7 +75,8 @@ describe("project_report tool", () => {
 			expect(result.details.hint).toBe(
 				"review graph disabled: project has more than 2 files (cap 2) — " +
 					"raise maxProjectFiles in .pi-lens.json or set " +
-					"PI_LENS_REVIEW_GRAPH_MAX_FILES",
+					"PI_LENS_REVIEW_GRAPH_MAX_FILES; for CI/cron, run npx pi-lens " +
+					"build-graph after configuring the cap",
 			);
 			expect(result.details.hint).not.toContain("project has 3 files");
 		} finally {

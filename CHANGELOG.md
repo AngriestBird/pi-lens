@@ -4,6 +4,13 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
+	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
+	persist path for CI/cron, forces the debounced snapshot write before exit,
+	and prints file/node/edge/element counts, JSON bytes, and duration. Unsafe
+	roots, build errors/skips, persist failures, and persist-cap trips exit
+	non-zero with their reason instead of silently leaving no snapshot.
+
 - **Raise and instrument the review-graph persist ceiling** (refs #936) — the
 	default `GRAPH_PERSIST_MAX_ELEMENTS` cap is now 500,000 (still overrideable
 	through `PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS`), matching measured startup

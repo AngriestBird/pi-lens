@@ -907,7 +907,8 @@ describe("moduleReport — review-graph who-uses-this", () => {
 			expect(report.warnings).toContain(
 				"who-uses-this is unavailable: review graph disabled because the project " +
 					"has more than 2 files (cap 2) — raise maxProjectFiles in " +
-					".pi-lens.json or set PI_LENS_REVIEW_GRAPH_MAX_FILES",
+					".pi-lens.json or set PI_LENS_REVIEW_GRAPH_MAX_FILES; for CI/cron, " +
+					"run npx pi-lens build-graph after configuring the cap",
 			);
 			expect(renderCompactModuleReport(report)).toContain(
 				"WARNING: who-uses-this is unavailable: review graph disabled",
