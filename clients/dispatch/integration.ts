@@ -775,7 +775,19 @@ export async function computeCascadeForFile(
 		const graphBuildInfo = getLastGraphBuildInfo();
 		const workspaceKey = normalizeMapKey(cwd);
 		const cachedReverseDeps = reverseDepsIndexCache.get(workspaceKey);
-		const importChanges = getGraphImportChanges(graph);
+		const importDelta = getGraphImportChanges(graph);
+		// A one-step delta is only usable against an index cached at exactly the
+		// delta's predecessor generation. Builds minted elsewhere (mcp analyze,
+		// lens-map, session warm) advance generations whose import changes this
+		// delta does not cover — reusing/patching across that gap stamps a stale
+		// index as current, and generation equality then hides the loss forever
+		// (#939 review finding 1).
+		const deltaContiguous =
+			importDelta !== undefined &&
+			importDelta.fromGeneration !== undefined &&
+			cachedReverseDeps !== undefined &&
+			cachedReverseDeps.generation === importDelta.fromGeneration;
+		const importChanges = deltaContiguous ? importDelta.changes : undefined;
 		const importsChanged = importChanges?.some(
 			(change) =>
 				change.existedBefore !== change.existsAfter ||

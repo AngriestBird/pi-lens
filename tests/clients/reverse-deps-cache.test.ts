@@ -287,7 +287,10 @@ describe("reverse-deps index cache (#459)", () => {
 			mocks.getLastGraphBuildInfo.mockReturnValue(
 				buildInfo({ mode: "seq-fastpath", reused: true, graphChanged: true }),
 			);
-			mocks.getGraphImportChanges.mockReturnValue([
+			mocks.getGraphImportChanges.mockReturnValue({
+				// One-step delta from the index's cached generation (1) — contiguous.
+				fromGeneration: 1,
+				changes: [
 				{
 					filePath: primary,
 					existedBefore: true,
@@ -295,7 +298,8 @@ describe("reverse-deps index cache (#459)", () => {
 					priorTargets: [],
 					newTargets: [],
 				},
-			]);
+				],
+			});
 			await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 2,
 				writeSeq: 2,
@@ -333,7 +337,10 @@ describe("reverse-deps index cache (#459)", () => {
 			mocks.getLastGraphBuildInfo.mockReturnValue(
 				buildInfo({ mode: "seq-fastpath", reused: true, graphChanged: true }),
 			);
-			mocks.getGraphImportChanges.mockReturnValue([
+			mocks.getGraphImportChanges.mockReturnValue({
+				// One-step delta from the index's cached generation (1) — contiguous.
+				fromGeneration: 1,
+				changes: [
 				{
 					filePath: primary,
 					existedBefore: true,
@@ -341,7 +348,8 @@ describe("reverse-deps index cache (#459)", () => {
 					priorTargets: [],
 					newTargets: [target],
 				},
-			]);
+				],
+			});
 			await computeCascadeForFile(primary, env.tmpDir, {
 				turnSeq: 2,
 				writeSeq: 2,

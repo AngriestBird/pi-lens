@@ -1925,12 +1925,22 @@ export interface GraphFileImportChange {
 	newTargets: string[];
 }
 
-const _graphImportChanges = new WeakMap<ReviewGraph, GraphFileImportChange[]>();
+export interface GraphImportDelta {
+	/** buildGeneration of the predecessor graph this delta was computed
+	 * against. A consumer holding an index cached at any OTHER generation must
+	 * NOT reuse/patch with this delta — generations minted by other call sites
+	 * (mcp analyze, lens-map, session warm builds) carry import changes this
+	 * one-step delta does not cover (#939 review). */
+	fromGeneration: number | undefined;
+	changes: GraphFileImportChange[];
+}
 
-/** Import-edge delta produced by this exact returned graph instance. */
+const _graphImportChanges = new WeakMap<ReviewGraph, GraphImportDelta>();
+
+/** One-step import-edge delta produced by this exact returned graph instance. */
 export function getGraphImportChanges(
 	graph: ReviewGraph,
-): readonly GraphFileImportChange[] | undefined {
+): GraphImportDelta | undefined {
 	return _graphImportChanges.get(graph);
 }
 
@@ -2142,6 +2152,7 @@ async function tryIncrementalFromCache(
 		hashes.set(file, contentHashEntry(file));
 	}
 
+	const priorGeneration = cached.graph.buildGeneration;
 	const graph = cloneGraph(cached.graph);
 	const importChanges = await updateGraphFiles(
 		graph,
@@ -2169,7 +2180,10 @@ async function tryIncrementalFromCache(
 		graph,
 	);
 	_lastGraphBuildInfo = { reused: true, mode: "incremental", graphChanged: true };
-	_graphImportChanges.set(graph, importChanges);
+	_graphImportChanges.set(graph, {
+		fromGeneration: priorGeneration,
+		changes: importChanges,
+	});
 	ctx.facts.setSessionFact("session.reviewGraph", graph);
 	return graph;
 }
@@ -2285,6 +2299,7 @@ async function trySeqFastpath(
 	// Incremental re-extract over exactly the changed files. Reuses the SAME
 	// machinery as the signature-diff incremental path (updateGraphFiles), so
 	// there's no second incremental implementation.
+	const priorGeneration = cached.graph.buildGeneration;
 	const graph = cloneGraph(cached.graph);
 	let importChanges: GraphFileImportChange[];
 	try {
@@ -2329,7 +2344,10 @@ async function trySeqFastpath(
 	// #459: filesToUpdate was non-empty — this fastpath re-extracted real files,
 	// so (unlike the no-op branch above) the graph object did change.
 	_lastGraphBuildInfo = { reused: true, mode: "seq-fastpath", graphChanged: true };
-	_graphImportChanges.set(graph, importChanges);
+	_graphImportChanges.set(graph, {
+		fromGeneration: priorGeneration,
+		changes: importChanges,
+	});
 	facts.setSessionFact("session.reviewGraph", graph);
 	return { graph };
 }

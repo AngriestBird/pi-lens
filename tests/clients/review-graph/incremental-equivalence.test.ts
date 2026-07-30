@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, beforeAll, afterAll } from "vitest";
 import { FactStore } from "../../../clients/dispatch/fact-store.js";
 import {
 	_getReviewGraphCacheStateForTests,
@@ -117,6 +117,19 @@ function writeChanges(
 }
 
 describe("review-graph incremental/full-build equivalence (#939)", () => {
+	// The "rebuilt from scratch" reference must NOT silently take the
+	// incremental path: if a debounced persist flushes mid-test, the next
+	// "full" build hits the disk tier and reuses updateGraphFiles — the same
+	// code under test, so a systematic bug would diverge both sides
+	// identically and the comparison would pass (#939 review finding 2).
+	// Pushing the debounce past the test lifetime keeps the reference honest.
+	beforeAll(() => {
+		process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "3600000";
+	});
+	afterAll(() => {
+		delete process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS;
+	});
+
 	for (const seed of [93901, 93902, 93903]) {
 		it(`matches nodes, edges, indexes, and signatures for seed ${seed}`, {
 			timeout: 120_000,
