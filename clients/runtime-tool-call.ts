@@ -18,6 +18,12 @@ import { LANGUAGE_POLICY } from "./language-policy.js";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import { getLSPService } from "./lsp/index.js";
 import {
+	findDocumentSymbolAtLine,
+	getOpenDocumentSymbols,
+	lspSymbolKindName,
+	qualifiedLspSymbolName,
+} from "./lsp-document-symbols.js";
+import {
 	computeTrailingWhitespaceOldTextPatch,
 	findUniqueMatchLineRange,
 } from "./oldtext-autopatch.js";
@@ -467,7 +473,33 @@ export async function handleToolCall(
 				effectiveReadOffset = expansion.newOffset;
 				effectiveReadLimit = expansion.newLimit;
 				expandedByLsp = true;
-				enclosingSymbol = expansion.enclosingSymbol;
+				let enriched = false;
+				let enrichedAncestry = expansion.ancestry;
+				const lspSymbols = await getOpenDocumentSymbols(filePath);
+				const located = lspSymbols
+					? findDocumentSymbolAtLine(
+							lspSymbols,
+							expansion.enclosingSymbol.startLine,
+						)
+					: undefined;
+				if (located) {
+					enclosingSymbol = {
+						...expansion.enclosingSymbol,
+						name: qualifiedLspSymbolName(located),
+						kind: lspSymbolKindName(located.symbol.kind),
+					};
+					enrichedAncestry = located.ancestry.map((entry) => ({
+						name: entry.name,
+						kind: lspSymbolKindName(entry.kind),
+						startLine:
+							((entry.range ?? entry.location?.range)?.start.line ?? 0) + 1,
+						endLine:
+							((entry.range ?? entry.location?.range)?.end.line ?? 0) + 1,
+					}));
+					enriched = true;
+				} else {
+					enclosingSymbol = expansion.enclosingSymbol;
+				}
 				logReadGuardEvent({
 					event: "ts_range_expanded",
 					sessionId: runtime.telemetrySessionId,
@@ -476,18 +508,19 @@ export async function handleToolCall(
 					requestedLimit: requestedReadLimit,
 					effectiveOffset: expansion.newOffset,
 					effectiveLimit: expansion.newLimit,
-					symbol: expansion.enclosingSymbol.name,
-					symbolKind: expansion.enclosingSymbol.kind,
+					symbol: enclosingSymbol.name,
+					symbolKind: enclosingSymbol.kind,
 					symbolStartLine: expansion.enclosingSymbol.startLine,
 					symbolEndLine: expansion.enclosingSymbol.endLine,
 					metadata: {
+						enriched,
 						durationMs: expansion.durationMs,
 						budgetMs: EXPANSION_BUDGET_MS,
 					},
 				});
 				const symbolPath = [
-					...(expansion.ancestry ?? []).map((a) => a.name),
-					expansion.enclosingSymbol.name,
+					...(enrichedAncestry ?? []).map((a) => a.name),
+					enclosingSymbol.name,
 				].join(" → ");
 				dbg(
 					`ts expanded read: ${path.basename(filePath)} ` +

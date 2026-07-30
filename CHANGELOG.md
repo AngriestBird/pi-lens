@@ -4,6 +4,14 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Warm LSP names enrich tree-sitter read expansion** (refs #158) â€” partial
+	read expansion keeps tree-sitter's line boundaries authoritative, but an
+	already-open document with an already-active LSP can now replace the display
+	name/kind from `documentSymbol` (including `Class.method` ancestry) within a
+	150 ms best-effort ceiling. Cold, closed, unsupported, timed-out, or failed
+	servers retain the tree-sitter identity, and `ts_range_expanded` records
+	whether enrichment succeeded.
+
 - **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
 	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
 	persist path for CI/cron, forces the debounced snapshot write before exit,
