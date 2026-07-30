@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { PI_LENS_EVAL_STARTED_MS } from "./startup-marker.js";
 
 /**
  * Startup timing for pi-lens.
@@ -36,4 +37,14 @@ export function markPiLensLoaded(): number {
 /** ms from pi process start to pi-lens load-complete, or undefined if unmarked. */
 export function getPiLensLoadMs(): number | undefined {
 	return loadMs;
+}
+
+/** ms from host process start until pi-lens evaluation began. */
+export const PI_LENS_HOST_BOOT_MS = Math.round(PI_LENS_EVAL_STARTED_MS);
+
+/** pi-lens module-graph evaluation time once markPiLensLoaded() has run. */
+export function getPiLensEvalMs(): number | undefined {
+	return loadMs === undefined
+		? undefined
+		: Math.max(0, loadMs - PI_LENS_HOST_BOOT_MS);
 }

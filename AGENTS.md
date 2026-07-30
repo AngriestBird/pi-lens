@@ -234,13 +234,24 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   within any per-call budget** — surfaced honestly via the `lsp` signal, never a
   silent "clean" 0. warm + an indexed server is the LSP-complete path.
 - **LSP reset teardown is concurrent but fully awaited (#851).**
-  `LSPService.shutdown()` starts every retiring client shutdown before awaiting
-  `Promise.allSettled`, so the process-kill grace tail is bounded by the slowest
-  client while per-client failures remain best-effort. The #850/#852 generation
-  handoff still waits for that service teardown before replacement spawn.
+	`LSPService.shutdown()` starts every retiring client shutdown before awaiting
+	`Promise.allSettled`, so the process-kill grace tail is bounded by the slowest
+	client while per-client failures remain best-effort. The #850/#852 generation
+	handoff still waits for that service teardown before replacement spawn.
+  Its existing `lsp_service_reset` latency phase is emitted after teardown and
+  reports the real end-to-end reset duration (plus reason/alive-client metadata),
+  not a zero-duration initiation marker (#948).
   Client shutdown's fire-and-forget instance-registry removal is serialized at
   its read-modify-write seam so concurrent removals cannot lose siblings;
-  process-tree kills remain concurrent.
+	process-tree kills remain concurrent.
+- **Session-start timing is end-to-end attributable (#948).** `index.ts` imports
+  `clients/startup-marker.ts` first, then logs `host_boot`, `extension_eval`, and
+  the continuity `extension_loaded` record. Primary session starts pass the host
+  hook/bootstrap timestamps into `handleSessionStart`, which records pre-handler,
+  runtime-reset, cleanup, sequence/snapshot (with bytes/freshness/seq), total, and
+  delayed warmup child phases in `latency.log`; concurrent secondaries emit only
+  `concurrent_session_bind`. Keep logging fire-and-forget and preserve contiguous
+  top-level timing so quick-start child durations remain within ~10 ms of total.
 - **Incremental review-graph snapshots are immutable by replacement (#939).**
   `updateGraphFiles` performs all node/edge edits on a clone, rebuilds derived
   indexes once at the end, then stores that finished graph directly in
