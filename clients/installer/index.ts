@@ -91,7 +91,12 @@ async function acquireInstallLock(): Promise<{
 	reason?: string;
 }> {
 	await fs.mkdir(TOOLS_DIR, { recursive: true });
-	const timeoutMs = Number(process.env.PI_LENS_INSTALL_LOCK_TIMEOUT_MS) || 30_000;
+	// #946 review F2: the waiter's bound must exceed the owner's install bound
+	// (PI_LENS_INSTALL_TIMEOUT_MS, default 120s) — a 30s waiter gave up on a
+	// legitimate slow install and reported the tool unavailable for the whole
+	// session even though it arrived seconds later.
+	const timeoutMs =
+		Number(process.env.PI_LENS_INSTALL_LOCK_TIMEOUT_MS) || 150_000;
 	const deadline = Date.now() + timeoutMs;
 	let lastOwner = "unknown owner";
 
@@ -131,16 +136,44 @@ async function acquireInstallLock(): Promise<{
 					await fs.readFile(INSTALL_LOCK_PATH, "utf8"),
 				) as InstallLockOwner;
 				lastOwner = `pid=${owner.pid} createdAt=${owner.createdAt}`;
+				// #946 review F1: PID liveness alone cannot detect a hard-killed
+				// owner whose PID Windows has recycled — that lock would poison
+				// every future install with a full-timeout wait. A lock older
+				// than any legitimate install (owner install bound + slack) is
+				// stale regardless of what the PID now points at.
+				const maxAgeMs =
+					(Number(process.env.PI_LENS_INSTALL_TIMEOUT_MS) || 120_000) +
+					60_000;
+				const expired =
+					Number.isFinite(owner.createdAt) &&
+					Date.now() - owner.createdAt > maxAgeMs;
 				if (
-					Number.isInteger(owner.pid) &&
-					owner.pid > 0 &&
-					!isProcessAlive(owner.pid)
+					expired ||
+					(Number.isInteger(owner.pid) &&
+						owner.pid > 0 &&
+						!isProcessAlive(owner.pid))
 				) {
 					await fs.rm(INSTALL_LOCK_PATH, { force: true });
 					continue;
 				}
-			} catch {
-				lastOwner = "unreadable owner (not safely recoverable)";
+			} catch (readError) {
+				lastOwner = "unreadable owner";
+				// An unreadable/empty lock has no createdAt to age out — fall
+				// back to the file's own mtime for the max-age check so it is
+				// eventually recoverable (#946 review F1/F6).
+				try {
+					const stat = await fs.stat(INSTALL_LOCK_PATH);
+					const maxAgeMs =
+						(Number(process.env.PI_LENS_INSTALL_TIMEOUT_MS) || 120_000) +
+						60_000;
+					if (Date.now() - stat.mtimeMs > maxAgeMs) {
+						await fs.rm(INSTALL_LOCK_PATH, { force: true });
+						continue;
+					}
+				} catch {
+					// stat raced a release — loop and retry acquisition.
+				}
+				void readError;
 			}
 			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
@@ -1355,18 +1388,37 @@ function scheduleProbeFlush(): void {
 	_probeCacheFlushTimer.unref?.();
 }
 
+let _probeCacheWriteInFlight: Promise<void> | null = null;
+
 /** Await pending probe-cache persistence before a one-shot process exits. */
 export async function flushProbeCache(): Promise<void> {
 	if (_probeCacheFlushTimer !== null) {
 		clearTimeout(_probeCacheFlushTimer);
 		_probeCacheFlushTimer = null;
 	}
-	if (!_probeCacheDirty || _probeCache === null) return;
+	// #946 review F4: if the 300ms timer's write already started, the dirty
+	// flag is false but the write may still be in flight — an immediate
+	// process.exit would truncate it. Always await the in-flight write.
+	if (!_probeCacheDirty || _probeCache === null) {
+		await _probeCacheWriteInFlight;
+		return;
+	}
 	_probeCacheDirty = false;
+	const write = (async () => {
+		try {
+			await fs.writeFile(
+				PROBE_CACHE_PATH,
+				JSON.stringify(_probeCache, null, 2),
+			);
+		} catch {
+			// Cache persistence is best effort; discovery remains authoritative.
+		}
+	})();
+	_probeCacheWriteInFlight = write;
 	try {
-		await fs.writeFile(PROBE_CACHE_PATH, JSON.stringify(_probeCache, null, 2));
-	} catch {
-		// Cache persistence is best effort; discovery remains authoritative.
+		await write;
+	} finally {
+		if (_probeCacheWriteInFlight === write) _probeCacheWriteInFlight = null;
 	}
 }
 
