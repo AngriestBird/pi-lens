@@ -104,6 +104,7 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 
 	const queue: QueueItem[] = [];
 	let drainPromise: Promise<void> | null = null;
+	let inFlightBatch: QueueItem[] | null = null;
 	let ensuredDir = false;
 
 	function ensureDir(file: string): void {
@@ -139,17 +140,43 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 			const item = queue[0];
 			const file = resolve(options.filePath);
 			ensureDir(file);
+			const truncateIndex =
+				item.kind === "line"
+					? queue.findIndex((queued) => queued.kind === "truncate")
+					: 0;
+			const pending =
+				item.kind === "truncate"
+					? [item]
+					: queue.slice(
+							0,
+							truncateIndex === -1 ? queue.length : truncateIndex,
+						);
+			inFlightBatch = pending;
 			try {
 				if (item.kind === "truncate") {
 					await fs.promises.writeFile(file, "");
 				} else {
 					rotateIfNeeded(file);
-					await fs.promises.appendFile(file, item.line);
+					await fs.promises.appendFile(
+						file,
+						pending
+							.map(
+								(queued) =>
+									(queued as { kind: "line"; line: string }).line,
+							)
+							.join(""),
+					);
 				}
 			} catch {
 				// telemetry is best-effort
 			}
-			queue.shift();
+			for (const written of pending) {
+				// flushSync may have drained this prefix while the append was in
+				// flight. Never remove newer items from a later enqueue.
+				if (queue[0] !== written) break;
+				queue.shift();
+			}
+			if (inFlightBatch === pending) inFlightBatch = null;
 		}
 	}
 
@@ -159,7 +186,7 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 		// re-checks queue.length, so items enqueued mid-drain are picked up before
 		// the promise settles — no stranded item, no second concurrent drainer.
 		if (!drainPromise) {
-			drainPromise = drainLoop().finally(() => {
+			drainPromise = Promise.resolve().then(drainLoop).finally(() => {
 				drainPromise = null;
 			});
 		}
@@ -173,8 +200,13 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 
 	function flushSync(): void {
 		// Drain the in-memory queue synchronously — safe at process exit.
-		while (queue.length > 0) {
-			const item = queue.shift() as QueueItem;
+		const ownedPrefix =
+			inFlightBatch &&
+			inFlightBatch.every((item, index) => queue[index] === item)
+				? inFlightBatch.length
+				: 0;
+		while (queue.length > ownedPrefix) {
+			const [item] = queue.splice(ownedPrefix, 1);
 			const file = resolve(options.filePath);
 			ensureDir(file);
 			try {

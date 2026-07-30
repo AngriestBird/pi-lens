@@ -66,6 +66,8 @@ function logSessionStart(msg: string): void {
 	if (isTestMode()) {
 		return;
 	}
+	// Crash-adjacent: keep this write synchronous so a hard launch failure
+	// cannot discard the final diagnostic from an async logger queue.
 	const line = `[${new Date().toISOString()}] ${msg}\n`;
 	try {
 		fs.mkdirSync(SESSIONSTART_LOG_DIR, { recursive: true });

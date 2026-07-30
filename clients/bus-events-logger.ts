@@ -39,7 +39,10 @@ import { createNdjsonLogger } from "./ndjson-logger.js";
 
 const BUS_EVENTS_LOG_FILE = path.join(getGlobalPiLensDir(), "bus-events.log");
 
-const writer = createNdjsonLogger({ filePath: BUS_EVENTS_LOG_FILE });
+const writer = createNdjsonLogger({
+	filePath: BUS_EVENTS_LOG_FILE,
+	maxBytes: 10 * 1024 * 1024,
+});
 
 export type BusEventName =
 	| "pilens:files:touched"

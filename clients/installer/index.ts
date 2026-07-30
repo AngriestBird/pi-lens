@@ -56,7 +56,7 @@ import path from "node:path";
 
 const _installerRequire = createRequire(import.meta.url);
 import { createGunzip } from "node:zlib";
-import { isTestMode } from "../env-utils.js";
+import { logSessionStart } from "../sessionstart-logger.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import {
 	allAvailableGlobalBinDirs,
@@ -74,8 +74,6 @@ const GITHUB_BIN_DIR = path.join(getGlobalPiLensDir(), "bin");
 // Debug flag - set via PI_LENS_DEBUG=1 or --debug
 const DEBUG =
 	process.env.PI_LENS_DEBUG === "1" || process.argv.includes("--debug");
-const SESSIONSTART_LOG_DIR = getGlobalPiLensDir();
-const SESSIONSTART_LOG = path.join(SESSIONSTART_LOG_DIR, "sessionstart.log");
 
 /**
  * Log debug messages only when DEBUG is enabled
@@ -84,19 +82,6 @@ function debugLog(...args: unknown[]): void {
 	if (DEBUG) {
 		console.error("[auto-install:debug]", ...args);
 	}
-}
-
-function logSessionStart(msg: string): void {
-	if (isTestMode()) {
-		return;
-	}
-	const line = `[${new Date().toISOString()}] ${msg}\n`;
-	void fs
-		.mkdir(SESSIONSTART_LOG_DIR, { recursive: true })
-		.then(() => fs.appendFile(SESSIONSTART_LOG, line))
-		.catch(() => {
-			// best-effort logging
-		});
 }
 
 // --- Tool Definitions ---

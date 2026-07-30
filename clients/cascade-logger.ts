@@ -6,7 +6,10 @@ import { createNdjsonLogger } from "./ndjson-logger.js";
 const CASCADE_LOG_DIR = getGlobalPiLensDir();
 const CASCADE_LOG_FILE = path.join(CASCADE_LOG_DIR, "cascade.log");
 
-const writer = createNdjsonLogger({ filePath: CASCADE_LOG_FILE });
+const writer = createNdjsonLogger({
+	filePath: CASCADE_LOG_FILE,
+	maxBytes: 10 * 1024 * 1024,
+});
 
 export interface CascadeLogEntry {
 	ts?: string;
