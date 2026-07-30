@@ -16,6 +16,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
@@ -987,10 +988,17 @@ export class TreeSitterClient {
 		queryDefs: TreeSitterQuery[],
 		languageId: string,
 	): Promise<QueryBatch | null> {
-		const cacheKey = this.getQueryCacheKey(
-			`batch:${queryDefs.map((q) => q.id).join("|")}`,
-			languageId,
-		);
+		// Key on rule CONTENT, not just ids: the batch stores each queryDef (its
+		// message reaches diagnostics) and the compiled patterns. Rule ids are
+		// stable across edits, so an id-only key kept serving the pre-edit batch
+		// for the process lifetime even after the runner reloaded the rules from
+		// disk on a RuleCache miss (#878). sha256 keeps the key bounded without
+		// #889's 32-bit collision risk.
+		const identity = crypto
+			.createHash("sha256")
+			.update(JSON.stringify(queryDefs))
+			.digest("hex");
+		const cacheKey = this.getQueryCacheKey(`batch:${identity}`, languageId);
 		const cached = this.queryBatchCache.get(cacheKey);
 		if (cached !== undefined) return cached;
 

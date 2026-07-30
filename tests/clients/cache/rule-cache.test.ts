@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CACHE_VERSION, RuleCache } from "../../../clients/cache/rule-cache.js";
+import { ruleFilesForLanguage } from "../../../clients/tree-sitter-query-loader.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 const cleanup: string[] = [];
@@ -153,6 +154,72 @@ describe("RuleCache", () => {
 		);
 		expect(fs.existsSync(staleFile)).toBe(false);
 		expect(fs.existsSync(currentFile)).toBe(true);
+	});
+
+	// #878: the cache key fingerprints the full EFFECTIVE rule set, so an edit
+	// to an inherited rule file (tsx runs the typescript rules) must invalidate
+	// the inheriting language's entry — pre-fix only the language's OWN
+	// directory was hashed and the stale compiled rules kept running.
+	it("invalidates an inheriting language's cache when an inherited rule file changes", () => {
+		const { cwd } = setupProject();
+		const tsxRule = path.join(
+			cwd,
+			"rules",
+			"tree-sitter-queries",
+			"tsx",
+			"own.yml",
+		);
+		const tsRule = path.join(
+			cwd,
+			"rules",
+			"tree-sitter-queries",
+			"typescript",
+			"inherited.yml",
+		);
+		const pyRule = path.join(
+			cwd,
+			"rules",
+			"tree-sitter-queries",
+			"python",
+			"unrelated.yml",
+		);
+		for (const f of [tsxRule, tsRule, pyRule]) {
+			fs.mkdirSync(path.dirname(f), { recursive: true });
+			fs.writeFileSync(f, "id: x\nquery: (identifier) @X\n", "utf-8");
+		}
+
+		const cache = new RuleCache("tsx", cwd);
+		const queries = [
+			{
+				id: "fake",
+				name: "Fake",
+				severity: "warning",
+				language: "tsx",
+				message: "",
+				query: "(x) @x",
+				metavars: ["x"],
+				has_fix: false,
+				filePath: tsxRule,
+			},
+		];
+
+		// Cold: nothing cached. Warm: hit.
+		expect(cache.get(ruleFilesForLanguage("tsx", cwd))).toBeNull();
+		cache.set(ruleFilesForLanguage("tsx", cwd), queries);
+		expect(cache.get(ruleFilesForLanguage("tsx", cwd))).not.toBeNull();
+
+		// Editing an INHERITED (typescript) rule invalidates the tsx entry.
+		fs.writeFileSync(
+			tsRule,
+			"id: x\nquery: (identifier) @X\n# changed\n",
+			"utf-8",
+		);
+		expect(cache.get(ruleFilesForLanguage("tsx", cwd))).toBeNull();
+
+		// Control: an unrelated language's rule change does NOT invalidate it.
+		cache.set(ruleFilesForLanguage("tsx", cwd), queries);
+		fs.writeFileSync(pyRule, "id: y\nquery: (block) @B\n# changed\n", "utf-8");
+		expect(cache.get(ruleFilesForLanguage("tsx", cwd))).not.toBeNull();
 	});
 
 	it("invalidates the cache when the schema version changes", () => {

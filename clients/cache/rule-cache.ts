@@ -17,7 +17,12 @@ import { readJsonCache } from "../json-cache-read.js";
 // typescript rule set and tsx now does. A v4 entry holds the old merge, and
 // queries now compile against the file's parse language, so replaying it would
 // fire typescript rules on javascript trees for real this time.
-export const CACHE_VERSION = "v5";
+// v6 (#878): the ruleHash FINGERPRINT now covers the full effective rule set —
+// inherited rule-source directories (tsx also runs typescript rules), not just
+// the language's own. A v5 tsx entry was hashed over tsx files only, so a
+// typescript-rule edit never invalidated it; v5 entries self-miss anyway (the
+// hash input set changed), the bump just makes the semantics break explicit.
+export const CACHE_VERSION = "v6";
 
 export interface QueryCacheEntry {
 	version: string;

@@ -1012,6 +1012,7 @@ export default function (pi: ExtensionAPI) {
 			// a scan-originated write can't clobber a concurrent newer per-edit
 			// write (or vice versa).
 			() => runtime.nextWriteIndex(),
+			captureLspStatusRepaint,
 		),
 		createLspDiagnosticsTool(
 			// #571: same reconciliation wiring as lens_diagnostics mode=full, for
