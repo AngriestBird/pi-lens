@@ -2071,8 +2071,9 @@ function addTreeSitterFile(
 
 /**
  * Add documentSymbol results only after tree-sitter produced no declarations.
- * Hierarchical responses preserve their parent/child containment; flat
- * SymbolInformation results attach directly to the file.
+ * Hierarchical responses preserve their parent/child containment. Flat
+ * SymbolInformation results (including native TypeScript 7) recover the same
+ * containment through `containerName` when the owner is present in the result.
  */
 export function addLspFallbackSymbols(
 	graph: ReviewGraph,
@@ -2083,6 +2084,22 @@ export function addLspFallbackSymbols(
 	const normalized = normalizeMapKey(filePath);
 	const fileNodeId = `file:${normalized}`;
 	let added = 0;
+	const flatOwnerIds = new Map<string, string>();
+	for (const symbol of symbols) {
+		const range = symbol.range ?? symbol.location?.range;
+		if (!range) continue;
+		const kind = lspSymbolKindName(symbol.kind);
+		const id = buildSymbolId(
+			normalized,
+			symbol.name,
+			kind,
+			range.start.line + 1,
+		);
+		flatOwnerIds.set(symbol.name, id);
+		if (symbol.containerName) {
+			flatOwnerIds.set(`${symbol.containerName}.${symbol.name}`, id);
+		}
+	}
 	const visit = (
 		items: LSPSymbol[],
 		parentId: string,
@@ -2120,7 +2137,15 @@ export function addLspFallbackSymbols(
 					...featureHintMetadata(`${symbol.name} ${normalized}`),
 				},
 			});
-			addEdge(graph, { from: parentId, to: symbolId, kind: "contains" });
+			const resolvedParentId =
+				ancestry.length === 0 && symbol.containerName
+					? (flatOwnerIds.get(symbol.containerName) ?? parentId)
+					: parentId;
+			addEdge(graph, {
+				from: resolvedParentId,
+				to: symbolId,
+				kind: "contains",
+			});
 			addEdge(graph, { from: fileNodeId, to: symbolId, kind: "defines" });
 			added++;
 			if (symbol.children) {

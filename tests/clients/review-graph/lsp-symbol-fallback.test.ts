@@ -90,6 +90,45 @@ describe("review graph LSP symbol fallback (#307)", () => {
 		}
 	});
 
+	it("recovers native-TS7-shaped flat containment from containerName", async () => {
+		const env = setupTestEnvironment("pi-lens-graph-lsp-flat-");
+		try {
+			const file = createTempFile(env.tmpDir, "lib/main.dart", "// opaque\n");
+			vi.mocked(getOpenDocumentSymbols).mockResolvedValue([
+				{
+					name: "ReviewManager",
+					kind: 5,
+					location: { uri: "file:///main.ts", range: range(0, 8) },
+				},
+				{
+					name: "runSynthesis",
+					containerName: "ReviewManager",
+					kind: 6,
+					location: { uri: "file:///main.ts", range: range(2, 5) },
+				},
+			]);
+			const graph = await buildOrUpdateGraph(
+				env.tmpDir,
+				[file],
+				new FactStore(),
+			);
+			const parent = [...graph.nodes.values()].find(
+				(node) => node.symbolName === "ReviewManager",
+			)!;
+			const child = [...graph.nodes.values()].find(
+				(node) => node.symbolName === "runSynthesis",
+			)!;
+			expect(child.qualifiedName).toBe("ReviewManager.runSynthesis");
+			expect(graph.edges).toContainEqual({
+				from: parent.id,
+				to: child.id,
+				kind: "contains",
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("logs and degrades when no warm/open server is available", async () => {
 		const env = setupTestEnvironment("pi-lens-graph-lsp-cold-");
 		try {

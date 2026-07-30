@@ -15,9 +15,10 @@ All notable changes to pi-lens will be documented in this file.
 - **Review-graph LSP fallback nodes** (refs #307) â€” when tree-sitter yields
 	zero declarations, the builder may use `documentSymbol` from an already-live,
 	already-open capable server. Nodes carry `provenance: "lsp"`, hierarchical
-	containment survives persistence, productive tree-sitter files never pay the
-	request, and unavailable/failed fallback attempts degrade without opening or
-	spawning while remaining visible in `review-graph.log`.
+	containment survives persistence (including flat native-TypeScript-7 results
+	reconstructed through `containerName`), productive tree-sitter files never
+	pay the request, and unavailable/failed fallback attempts degrade without
+	opening or spawning while remaining visible in `review-graph.log`.
 - **Installer subprocesses are lifetime-coupled** (refs #945) — npm, pip, gem,
 	and archive extraction now use the shared safe-spawn path, await full Windows
 	process-tree termination on timeout, and synchronously clean registered
