@@ -562,7 +562,10 @@ const _sizeSkipTtl = lazyEnvNumber(
 export const _resetReviewGraphSizeSkipTtlForTests = _sizeSkipTtl._resetForTests;
 
 export interface ReviewGraphSizeSkipVerdict {
-	/** Graph-relevant source files found on the skipped walk. */
+	/**
+	 * Graph-relevant source files observed before the capped walk stopped.
+	 * This is the maxFileCount+1 sentinel, NOT the project's exact file count.
+	 */
 	sourceFileCount: number;
 	/** The cap (derived `maxProjectFiles` or `PI_LENS_REVIEW_GRAPH_MAX_FILES`) that was exceeded. */
 	maxFileCount: number;
