@@ -307,6 +307,10 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
 - **The bin target is `dist/`.** After changing MCP/engine/runner code, run
   `npm run build:dist` so the user-scoped server (`dist/mcp/server.js`) picks it up
   on the next Claude session. (`bin`: `pi-lens-mcp`, `pi-lens-analyze`.)
+- **Out-of-band graph builds** use `npx pi-lens build-graph [--cwd <dir>]`.
+  The CLI reuses `buildOrUpdateGraph` plus the builder's queued atomic persist
+  payload, force-flushes it before exit, and treats every build/persist skip or
+  failure as non-zero; keep it aligned with session graph config and persistence.
 - **Dogfooding found two dormant pi features** (fixed/flagged, not the MCP's fault):
   the cold-LSP-returns-0 honesty bug (`runners/lsp.ts` — `touched === undefined`
   now → `skipped`, not a false `succeeded`), and **`runtime.errorDebtBaseline` is

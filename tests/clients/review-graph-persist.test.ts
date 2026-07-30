@@ -4,9 +4,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { FactStore } from "../../clients/dispatch/fact-store.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import {
+	_resetReviewGraphBuildAttemptsForTests,
 	buildOrUpdateGraph,
 	clearReviewGraphWorkspaceCache,
 	flushReviewGraphPersistsForTests,
+	getLastReviewGraphBuildAttempt,
+	GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT,
 } from "../../clients/review-graph/builder.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
@@ -19,6 +22,7 @@ afterEach(() => {
 	flushReviewGraphPersistsForTests(); // drain any pending debounced write/timer
 	while (cleanups.length) cleanups.pop()?.();
 	clearReviewGraphWorkspaceCache();
+	_resetReviewGraphBuildAttemptsForTests();
 	// Restore the test-default synchronous persist + uncapped size.
 	process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "0";
 	delete process.env.PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS;
@@ -43,6 +47,10 @@ async function waitForFile(p: string, attempts = 20): Promise<boolean> {
 }
 
 describe("review-graph persist circuit-breaker (#260)", () => {
+	it("defaults to the measured 500,000-element ceiling (#936)", () => {
+		expect(GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT).toBe(500_000);
+	});
+
 	it("size cap: skips the write when the graph exceeds the element ceiling", async () => {
 		const env = makeEnv();
 		createTempFile(env.tmpDir, "a.ts", "export function foo() {\n  return 1;\n}\n");
@@ -63,6 +71,14 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		flushReviewGraphPersistsForTests();
 		await new Promise((r) => setTimeout(r, 100)); // let any errant write land
 		expect(fs.existsSync(cachePath)).toBe(false);
+		const attempt = getLastReviewGraphBuildAttempt(env.tmpDir);
+		expect(attempt).toMatchObject({ outcome: "succeeded" });
+		expect(attempt?.reason).toMatch(
+			/persist element cap exceeded \(\d+ elements > 1 cap\)/,
+		);
+		expect(attempt?.reason).toContain(
+			"PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS",
+		);
 	});
 
 	it("size cap: writes normally when under the ceiling", async () => {

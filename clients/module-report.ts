@@ -1769,7 +1769,8 @@ export async function moduleReport(
 			`who-uses-this is unavailable: review graph disabled because the project ` +
 				`has more than ${graphFileCap} files (cap ${graphFileCap}) — raise ` +
 				"maxProjectFiles in .pi-lens.json or set " +
-				"PI_LENS_REVIEW_GRAPH_MAX_FILES",
+				"PI_LENS_REVIEW_GRAPH_MAX_FILES; for CI/cron, run npx pi-lens " +
+				"build-graph after configuring the cap",
 		);
 	}
 

@@ -748,7 +748,8 @@ export async function projectReport(
 				hint:
 					`review graph disabled: project has more than ${sizeSkip.maxFileCount} files ` +
 					`(cap ${sizeSkip.maxFileCount}) — raise maxProjectFiles in .pi-lens.json ` +
-					"or set PI_LENS_REVIEW_GRAPH_MAX_FILES",
+					"or set PI_LENS_REVIEW_GRAPH_MAX_FILES; for CI/cron, run " +
+					"npx pi-lens build-graph after configuring the cap",
 				...(lastBuildAttempt ? { lastBuildAttempt } : {}),
 				...(view ? { view } : {}),
 			};

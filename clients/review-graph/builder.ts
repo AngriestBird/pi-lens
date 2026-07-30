@@ -913,7 +913,7 @@ export function isReviewGraphMigrationNeeded(cwd: string): boolean {
 //      log + skip rather than OOM the host; same fail-closed spirit as the
 //      read-guard).
 const GRAPH_PERSIST_DEBOUNCE_MS_DEFAULT = 1500;
-const GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT = 200_000;
+export const GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT = 500_000;
 
 function graphPersistDebounceMs(): number {
 	const raw = Number(process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS);
@@ -1049,26 +1049,12 @@ function ensurePersistExitHook(): void {
 	if (_persistExitHookInstalled) return;
 	_persistExitHookInstalled = true;
 	process.once("exit", () => {
-		for (const [key, pending] of _pendingPersist) {
-			try {
-				fs.mkdirSync(pending.cacheDir, { recursive: true });
-				// Same atomic tmp+rename as writePending (via clients/atomic-write.ts,
-				// #762): even at teardown a crash mid-write must not leave a
-				// truncated snapshot for the next start.
-				writeFileAtomic(
-					pending.cachePath,
-					JSON.stringify(persistedData(pending)),
-				);
-			} catch (err) {
-				recordPersistFailure(
-					key,
-					"exit_flush_failed",
-					err instanceof Error ? err.message : String(err),
-				);
-				flushReviewGraphLogSync();
-			}
+		for (const key of [..._pendingPersist.keys()]) {
+			// Shared with the CLI's forced flush — same persistedData DTO, same
+			// atomic writer (#762), distinct failure label per source.
+			const result = flushReviewGraphPersist(key, "exit_hook");
+			if (!result.ok) flushReviewGraphLogSync();
 		}
-		_pendingPersist.clear();
 	});
 }
 
@@ -1090,7 +1076,9 @@ function persistGraph(
 			durationMs: 0,
 			metadata: { skipped: "size_cap", elements: elementCount, cap },
 		});
-		const reason = `persist element cap exceeded (${elementCount} > ${cap}); graph remains available only in this process`;
+		const reason =
+			`persist element cap exceeded (${elementCount} elements > ${cap} cap); ` +
+			"raise PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS; graph remains available only in this process";
 		recordBuildAttempt(cwd, "succeeded", reason);
 		logReviewGraph({
 			cwd,
@@ -1146,6 +1134,76 @@ function persistGraph(
 /** Test hook: force any pending debounced persist to write immediately. */
 export function flushReviewGraphPersistsForTests(): void {
 	for (const key of [..._pendingPersist.keys()]) writePending(key);
+}
+
+export interface ReviewGraphPersistFlushResult {
+	ok: boolean;
+	path?: string;
+	bytes?: number;
+	elements?: number;
+	reason?: string;
+}
+
+/**
+ * Force and verify one workspace's queued graph snapshot before a standalone
+ * process exits. This is the out-of-band counterpart to the teardown hook:
+ * it consumes the same persist payload and uses the same atomic writer.
+ */
+/** On-disk snapshot path for a workspace — for standalone tools that must
+ * distinguish "snapshot already current" from "persist never happened". */
+export function reviewGraphCachePath(cwd: string): string {
+	return path.join(getProjectDataDir(cwd), "cache", GRAPH_CACHE_FILENAME);
+}
+
+export function flushReviewGraphPersist(
+	cwd: string,
+	source: "cli" | "exit_hook" = "cli",
+): ReviewGraphPersistFlushResult {
+	const key = normalizeMapKey(cwd);
+	const pending = _pendingPersist.get(key);
+	if (!pending) {
+		return { ok: false, reason: "no graph snapshot was queued for persistence" };
+	}
+	_pendingPersist.delete(key);
+	const timer = _persistTimers.get(key);
+	if (timer) {
+		clearTimeout(timer);
+		_persistTimers.delete(key);
+	}
+
+	const startedAt = Date.now();
+	try {
+		const json = JSON.stringify(persistedData(pending));
+		const bytes = Buffer.byteLength(json);
+		fs.mkdirSync(pending.cacheDir, { recursive: true });
+		writeFileAtomic(pending.cachePath, json);
+		logLatency({
+			type: "phase",
+			phase: "review_graph_persist",
+			filePath: pending.cachePath,
+			durationMs: Date.now() - startedAt,
+			metadata: { elements: pending.elementCount, bytes },
+		});
+		logReviewGraph({
+			cwd,
+			phase: "persist_succeeded",
+			elements: pending.elementCount,
+		});
+		return {
+			ok: true,
+			path: pending.cachePath,
+			bytes,
+			elements: pending.elementCount,
+		};
+	} catch (err) {
+		const reason = err instanceof Error ? err.message : String(err);
+		recordPersistFailure(
+			cwd,
+			source === "exit_hook" ? "exit_flush_failed" : "forced_flush_failed",
+			reason,
+		);
+		return { ok: false, reason };
+	}
 }
 
 /**

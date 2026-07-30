@@ -4,6 +4,21 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
+	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
+	persist path for CI/cron, forces the debounced snapshot write before exit,
+	and prints file/node/edge/element counts, JSON bytes, and duration. Unsafe
+	roots, build errors/skips, persist failures, and persist-cap trips exit
+	non-zero with their reason instead of silently leaving no snapshot.
+
+- **Raise and instrument the review-graph persist ceiling** (refs #936) — the
+	default `GRAPH_PERSIST_MAX_ELEMENTS` cap is now 500,000 (still overrideable
+	through `PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS`), matching measured startup
+	load/reindex costs and allowing the ~208,000-element #919 repository to
+	persist. A cap trip logs `persist_skipped` and records an actionable build
+	attempt reason with the observed count, cap, and override knob so
+	`project_report` exposes the failure.
+
 - **Logger hot paths now coalesce queued lines and rotate during long sessions** (refs #935) — contiguous NDJSON entries drain through one append up to each truncate boundary while retaining peek-then-remove exit safety and one-write cross-process atomicity. `sessionstart.log` now uses one shared asynchronous writer for ordinary diagnostics (with the crash-adjacent LSP launch write intentionally synchronous), and latency/cascade/tree-sitter/bus-event logs enforce the existing 10 MB cap in process.
 
 ### Added
