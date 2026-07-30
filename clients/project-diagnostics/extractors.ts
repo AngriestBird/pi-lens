@@ -43,12 +43,17 @@ interface ProjectDiagnosticExtractor<T> {
 	adapt: (cwd: string, result: T) => ProjectDiagnostic[];
 }
 
+export interface FailedProjectAnalyzer {
+	id: string;
+	summary: string;
+}
+
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous result types per row
 const EXTRACTORS: ProjectDiagnosticExtractor<any>[] = [
 	{
 		id: "knip",
 		cacheKeys: ["knip"],
-		adapt: (cwd, r: { issues?: KnipIssue[] }) =>
+		adapt: (cwd, r: { success?: boolean; issues?: KnipIssue[] }) =>
 			knipIssuesToProjectDiagnostics(cwd, r.issues ?? []),
 	},
 	{
@@ -145,10 +150,16 @@ export function warmTriggerFor(extractorId: string): string {
 export function extractCachedProjectDiagnostics(
 	cacheManager: CacheManager,
 	cwd: string,
-): { diagnostics: ProjectDiagnostic[]; runners: string[]; cold: string[] } {
+): {
+	diagnostics: ProjectDiagnostic[];
+	runners: string[];
+	cold: string[];
+	failed: FailedProjectAnalyzer[];
+} {
 	const diagnostics: ProjectDiagnostic[] = [];
 	const runners: string[] = [];
 	const cold: string[] = [];
+	const failed: FailedProjectAnalyzer[] = [];
 	for (const extractor of EXTRACTORS) {
 		let data: unknown;
 		for (const key of extractor.cacheKeys) {
@@ -162,11 +173,24 @@ export function extractCachedProjectDiagnostics(
 			cold.push(extractor.id);
 			continue;
 		}
+		if (
+			typeof data === "object" &&
+			data !== null &&
+			"success" in data &&
+			data.success === false
+		) {
+			const summary =
+				"summary" in data && typeof data.summary === "string"
+					? data.summary
+					: "analyzer reported an unsuccessful run";
+			failed.push({ id: extractor.id, summary });
+			continue;
+		}
 		const adapted = extractor.adapt(cwd, data);
 		if (adapted.length > 0) {
 			diagnostics.push(...adapted);
 			runners.push(extractor.id);
 		}
 	}
-	return { diagnostics, runners, cold };
+	return { diagnostics, runners, cold, failed };
 }

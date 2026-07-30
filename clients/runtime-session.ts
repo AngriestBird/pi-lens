@@ -639,9 +639,11 @@ function scheduleStartupScans(
 				getKnipIgnorePatterns(),
 			);
 			if (!runtime.isCurrentSession(sessionGeneration)) return;
-			cacheManager.writeCache("knip", knipResult, analysisRoot, {
-				scanDurationMs: Date.now() - startMs,
-			});
+			if (knipResult.success) {
+				cacheManager.writeCache("knip", knipResult, analysisRoot, {
+					scanDurationMs: Date.now() - startMs,
+				});
+			}
 			dbg(`session_start Knip scan done (${Date.now() - startMs}ms)`);
 		}
 	});
@@ -676,9 +678,11 @@ function scheduleStartupScans(
 					isTsProject,
 				);
 				if (!runtime.isCurrentSession(sessionGeneration)) return;
-				cacheManager.writeCache(scannerKey, jscpdResult, analysisRoot, {
-					scanDurationMs: Date.now() - startMs,
-				});
+				if (jscpdResult.success) {
+					cacheManager.writeCache(scannerKey, jscpdResult, analysisRoot, {
+						scanDurationMs: Date.now() - startMs,
+					});
+				}
 				dbg(
 					`session_start jscpd scan done (${Date.now() - startMs}ms, isTsProject=${isTsProject})`,
 				);
@@ -711,9 +715,11 @@ function scheduleStartupScans(
 				const startMs = Date.now();
 				const result = await client.analyze(analysisRoot);
 				if (!runtime.isCurrentSession(sessionGeneration)) return undefined;
-				cacheManager.writeCache(cacheKey, result, analysisRoot, {
-					scanDurationMs: Date.now() - startMs,
-				});
+				if (result.success) {
+					cacheManager.writeCache(cacheKey, result, analysisRoot, {
+						scanDurationMs: Date.now() - startMs,
+					});
+				}
 				logDeadCodeScan({
 					language: client.language,
 					success: result.success,
@@ -762,9 +768,11 @@ function scheduleStartupScans(
 		const startMs = Date.now();
 		const result = await govulncheckClient.analyze(analysisRoot);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
-		cacheManager.writeCache("govulncheck", result, analysisRoot, {
-			scanDurationMs: Date.now() - startMs,
-		});
+		if (result.success) {
+			cacheManager.writeCache("govulncheck", result, analysisRoot, {
+				scanDurationMs: Date.now() - startMs,
+			});
+		}
 		dbg(
 			`session_start govulncheck: ${result.findings.length} reachable findings (${Date.now() - startMs}ms)`,
 		);
@@ -798,9 +806,11 @@ function scheduleStartupScans(
 		const startMs = Date.now();
 		const result = await gitleaksClient.scan(analysisRoot);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
-		cacheManager.writeCache("gitleaks", result, analysisRoot, {
-			scanDurationMs: Date.now() - startMs,
-		});
+		if (result.success) {
+			cacheManager.writeCache("gitleaks", result, analysisRoot, {
+				scanDurationMs: Date.now() - startMs,
+			});
+		}
 		dbg(
 			`session_start gitleaks: ${result.findings.length} findings (${Date.now() - startMs}ms)`,
 		);
@@ -836,9 +846,11 @@ function scheduleStartupScans(
 		const startMs = Date.now();
 		const result = await opengrepClient.scan(analysisRoot);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
-		cacheManager.writeCache("opengrep", result, analysisRoot, {
-			scanDurationMs: Date.now() - startMs,
-		});
+		if (result.success) {
+			cacheManager.writeCache("opengrep", result, analysisRoot, {
+				scanDurationMs: Date.now() - startMs,
+			});
+		}
 		dbg(
 			`session_start opengrep: ${result.findings.length} findings (${Date.now() - startMs}ms)`,
 		);
@@ -904,9 +916,11 @@ function scheduleStartupScans(
 		const startMs = Date.now();
 		const result = await trivyClient.scan(analysisRoot);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
-		cacheManager.writeCache("trivy", result, analysisRoot, {
-			scanDurationMs: Date.now() - startMs,
-		});
+		if (result.success) {
+			cacheManager.writeCache("trivy", result, analysisRoot, {
+				scanDurationMs: Date.now() - startMs,
+			});
+		}
 		dbg(
 			`session_start trivy: ${result.findings.length} CVE findings (${Date.now() - startMs}ms)`,
 		);

@@ -179,6 +179,7 @@ export function createLensDiagnosticsTool(
 			totalErrors?: number;
 			totalWarnings?: number;
 			coldRunners?: string[];
+			failedAnalyzers?: { id: string; summary: string }[];
 		}>(({ details, args, isError, text }) => {
 			// Streaming progress partials render the live bar (see scanningSummaryLine)
 			// instead of the details-driven summary, which would show "0 diagnostics"
@@ -197,22 +198,26 @@ export function createLensDiagnosticsTool(
 				details?.coldRunners && details.coldRunners.length > 0
 					? ` (${details.coldRunners.length} cold: ${details.coldRunners.join(", ")})`
 					: "";
+			const failedSuffix =
+				details?.failedAnalyzers && details.failedAnalyzers.length > 0
+					? ` (${details.failedAnalyzers.length} failed: ${details.failedAnalyzers.map((item) => item.id).join(", ")})`
+					: "";
 			if (mode === "delta") {
 				const aw = details?.actionableWarnings ?? 0;
 				const cq = details?.qualityIssues ?? 0;
 				const pd = details?.projectDiagnostics ?? 0;
 				if (aw + cq + pd === 0)
-					return `lens_diagnostics delta — clean${coldSuffix}`;
-				return `lens_diagnostics delta — ${aw} actionable · ${cq} quality · ${pd} project${coldSuffix}`;
+					return `lens_diagnostics delta — clean${coldSuffix}${failedSuffix}`;
+				return `lens_diagnostics delta — ${aw} actionable · ${cq} quality · ${pd} project${coldSuffix}${failedSuffix}`;
 			}
 			const b = details?.totalBlocking ?? 0;
 			const e = details?.totalErrors ?? 0;
 			const w = details?.totalWarnings ?? 0;
 			const files = details?.filesWithIssues ?? details?.filesChecked ?? 0;
 			if (b + e + w === 0) {
-				return `lens_diagnostics ${mode} — clean (${files} files)${coldSuffix}`;
+				return `lens_diagnostics ${mode} — clean (${files} files)${coldSuffix}${failedSuffix}`;
 			}
-			return `lens_diagnostics ${mode} — ${b} blocking · ${e} errors · ${w} warnings (${files} files)${coldSuffix}`;
+			return `lens_diagnostics ${mode} — ${b} blocking · ${e} errors · ${w} warnings (${files} files)${coldSuffix}${failedSuffix}`;
 		}),
 		parameters: Type.Object({
 			mode: Type.Optional(
@@ -1151,6 +1156,7 @@ async function formatFullMode(
 				diagnostics: [],
 				runners: [],
 				cold: [],
+				failed: [],
 				timings: {},
 			});
 	const [rawLspResults, rawProjectSnapshot, extracted] = await Promise.all([
@@ -1379,6 +1385,13 @@ async function formatFullMode(
 						", ",
 					)}. These analyzers have not contributed to this result — absence of their findings is NOT a clean verdict.`
 			: "";
+	const failedAnalyzers = extracted.failed ?? [];
+	const failedNote =
+		failedAnalyzers.length > 0
+			? `\n\nfailed (ran, but no trustworthy result): ${failedAnalyzers
+					.map(({ id, summary }) => `${id} — ${summary}`)
+					.join(", ")}. These analyzers were not cached and will be retried; absence of their findings is NOT a clean verdict.`
+			: "";
 	// #747/#250: the cheap project-diagnostics scan (scanProjectDiagnostics) and
 	// the LSP workspace sweep (collectWorkspaceDiagnosticFiles) both refuse to
 	// WALK from a cwd at/above $HOME — from there, walking would enumerate every
@@ -1429,6 +1442,7 @@ async function formatFullMode(
 		details: {
 			...result.details,
 			coldRunners: extracted.cold,
+			failedAnalyzers,
 			analyzerTimingsMs: extracted.timings,
 			analyzersAborted: extracted.aborted ?? false,
 			analyzersAbortedIds: extracted.abortedIds ?? [],
@@ -1484,6 +1498,7 @@ async function formatFullMode(
 						unconfirmedLspNote +
 						lspPrimaryVsAuxiliaryNote +
 						coldNote +
+						failedNote +
 						walkUnsafeRootNote +
 						scanTruncatedNote +
 						abortedNote +
@@ -1497,6 +1512,7 @@ async function formatFullMode(
 	if (
 		missingNote ||
 		coldNote ||
+		failedNote ||
 		walkUnsafeRootNote ||
 		scanTruncatedNote ||
 		abortedNote ||
@@ -1513,6 +1529,7 @@ async function formatFullMode(
 						unconfirmedLspNote +
 						lspPrimaryVsAuxiliaryNote +
 						coldNote +
+						failedNote +
 						walkUnsafeRootNote +
 						scanTruncatedNote +
 						abortedNote +

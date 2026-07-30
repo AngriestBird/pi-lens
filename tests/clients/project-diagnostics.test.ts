@@ -706,6 +706,25 @@ describe("extractCachedProjectDiagnostics (registry)", () => {
 		);
 		expect(cold).not.toContain("jscpd");
 	});
+
+	it("reports an unsuccessful cached analyzer as failed, not clean or cold (#925)", () => {
+		const result = extractCachedProjectDiagnostics(
+			cacheManagerWith({
+				knip: {
+					success: false,
+					issues: [],
+					summary: "knip timed out",
+				},
+			}),
+			tmp,
+		);
+		expect(result.diagnostics).toEqual([]);
+		expect(result.runners).not.toContain("knip");
+		expect(result.cold).not.toContain("knip");
+		expect(result.failed).toEqual([
+			{ id: "knip", summary: "knip timed out" },
+		]);
+	});
 });
 
 describe("scanProjectDiagnostics", () => {

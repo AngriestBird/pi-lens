@@ -1175,6 +1175,31 @@ describe("lens_diagnostics mode=full", () => {
 		).toContain("knip");
 	});
 
+	it("mode=full renders failed analyzers as unknown, not clean (#925)", async () => {
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: [],
+			cold: [],
+			failed: [{ id: "knip", summary: "knip timed out" }],
+			timings: { knip: 30_000 },
+		});
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cached",
+		});
+		const text = String(result.content[0].text);
+		expect(text).toContain("failed (ran, but no trustworthy result)");
+		expect(text).toContain("knip — knip timed out");
+		expect(text).toContain("NOT a clean verdict");
+		expect(
+			(result.details as { failedAnalyzers?: unknown[] }).failedAnalyzers,
+		).toEqual([{ id: "knip", summary: "knip timed out" }]);
+	});
+
 	it("mode=full without refreshRunners never reports cold extractors (they weren't requested)", async () => {
 		mockSummaries.length = 0;
 		const lspService = {
