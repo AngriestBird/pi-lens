@@ -211,6 +211,7 @@ function fakeAccess(...allowed: string[]): void {
 const savedPiLensHome = process.env.PI_LENS_HOME;
 
 beforeEach(() => {
+	delete process.env.PI_LENS_DISABLE_TOOL_INSTALL;
 	delete process.env.PI_LENS_HOME;
 	vi.clearAllMocks();
 	spawnCalls.length = 0;
@@ -222,6 +223,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	process.env.PI_LENS_DISABLE_TOOL_INSTALL = "1";
 	if (savedPiLensHome === undefined) delete process.env.PI_LENS_HOME;
 	else process.env.PI_LENS_HOME = savedPiLensHome;
 	vi.useRealTimers();

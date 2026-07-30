@@ -14,6 +14,11 @@ All notable changes to pi-lens will be documented in this file.
 	before stale recovery, bounds lock waits with an honest error, and rechecks
 	discovery after acquisition to avoid duplicate package-manager runs.
 
+- **Ordinary tests never install managed tools** (refs #945) — Vitest sets
+	`PI_LENS_DISABLE_TOOL_INSTALL=1`, its prewarm step creates a local synthetic
+	oxlint probe-cache entry without networking, and one-shot analysis explicitly
+	awaits probe-cache persistence before exit.
+
 - **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
 	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
 	persist path for CI/cron, forces the debounced snapshot write before exit,

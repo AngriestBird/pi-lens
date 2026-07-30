@@ -1344,14 +1344,24 @@ async function readProbeCache(): Promise<ProbeCache> {
 function scheduleProbeFlush(): void {
 	if (_probeCacheFlushTimer !== null) return;
 	_probeCacheFlushTimer = setTimeout(() => {
-		_probeCacheFlushTimer = null;
-		if (!_probeCacheDirty || _probeCache === null) return;
-		_probeCacheDirty = false;
-		void fs
-			.writeFile(PROBE_CACHE_PATH, JSON.stringify(_probeCache, null, 2))
-			.catch(() => {});
+		void flushProbeCache();
 	}, 300);
 	_probeCacheFlushTimer.unref?.();
+}
+
+/** Await pending probe-cache persistence before a one-shot process exits. */
+export async function flushProbeCache(): Promise<void> {
+	if (_probeCacheFlushTimer !== null) {
+		clearTimeout(_probeCacheFlushTimer);
+		_probeCacheFlushTimer = null;
+	}
+	if (!_probeCacheDirty || _probeCache === null) return;
+	_probeCacheDirty = false;
+	try {
+		await fs.writeFile(PROBE_CACHE_PATH, JSON.stringify(_probeCache, null, 2));
+	} catch {
+		// Cache persistence is best effort; discovery remains authoritative.
+	}
 }
 
 function isAstGrepVersionOutput(output: string): boolean {
@@ -3133,6 +3143,12 @@ async function installGemTool(
  * Install a tool by ID
  */
 export async function installTool(toolId: string): Promise<boolean> {
+	if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
+		logSessionStart(
+			`auto-install ${toolId}: refused — PI_LENS_DISABLE_TOOL_INSTALL=1`,
+		);
+		return false;
+	}
 	const tool = TOOLS.find((t) => t.id === toolId);
 	if (!tool) {
 		logSessionStart(`auto-install ${toolId}: unknown tool id`);
@@ -3262,6 +3278,12 @@ export async function ensureTool(
 			);
 			return cacheResolvedPath(await getToolPath(toolId));
 		}
+		if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
+			logSessionStart(
+				`auto-install ensure ${toolId}: refused — PI_LENS_DISABLE_TOOL_INSTALL=1`,
+			);
+			return undefined;
+		}
 
 		const lock = await acquireInstallLock();
 		if (!lock.release) {
@@ -3369,6 +3391,12 @@ export async function ensureTool(
 		if (opts?.allowInstall === false) {
 			logSessionStart(
 				`auto-install ensure ${toolId}: install disabled — discovery only, not found (${Date.now() - ensureStartMs}ms)`,
+			);
+			return undefined;
+		}
+		if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
+			logSessionStart(
+				`auto-install ensure ${toolId}: refused — PI_LENS_DISABLE_TOOL_INSTALL=1 (${Date.now() - ensureStartMs}ms)`,
 			);
 			return undefined;
 		}

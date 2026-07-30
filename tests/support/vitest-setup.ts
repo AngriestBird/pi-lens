@@ -9,6 +9,7 @@ import * as path from "node:path";
 // behaviour). Tests that exercise the throttle override this in their own body
 // and call `flushReviewGraphPersistsForTests()`.
 process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "0";
+process.env.PI_LENS_DISABLE_TOOL_INSTALL = "1";
 
 // Same rationale, word index (#348 phase 2): per-edit updates schedule a
 // debounced persist through the shared project-snapshot file. Default to a
