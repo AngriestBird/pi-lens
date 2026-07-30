@@ -79,8 +79,18 @@ const cases = [
 		replacement: "[REDACTED:sendgrid-key]",
 	},
 	{
-		name: "OpenAI key",
+		name: "OpenAI project key",
 		secret: `sk-proj-${"j".repeat(48)}`,
+		replacement: "[REDACTED:openai-key]",
+	},
+	{
+		name: "OpenAI service-account key",
+		secret: `sk-svcacct-${"k".repeat(48)}`,
+		replacement: "[REDACTED:openai-key]",
+	},
+	{
+		name: "OpenAI legacy base62 key",
+		secret: `sk-${"A1b2".repeat(12)}`,
 		replacement: "[REDACTED:openai-key]",
 	},
 	{
@@ -118,6 +128,36 @@ describe("redactSecrets", () => {
 		expect(redactSecrets(nestedJwt)).toBe(
 			`${["ey", "Jaaaaa.key.."].join("")}[REDACTED:jwt]`,
 		);
+	});
+
+	it("redacts real OpenAI keys but never kebab-case identifiers", () => {
+		// Hits: modern prefixes and a strict legacy base62 key (>=40 alnum, has a digit).
+		expect(redactSecrets(`sk-proj-${"a".repeat(24)}`)).toBe(
+			"[REDACTED:openai-key]",
+		);
+		expect(redactSecrets(`sk-svcacct-${"b".repeat(24)}`)).toBe(
+			"[REDACTED:openai-key]",
+		);
+		const legacyKey = `sk-${"c3D4".repeat(12)}`;
+		expect(redactSecrets(legacyKey)).toBe("[REDACTED:openai-key]");
+		expect(redactSecrets(`token=${legacyKey} done`)).toBe(
+			"token=[REDACTED:openai-key] done",
+		);
+
+		// Misses: kebab-case slugs (a '-' ends the base62 suffix well short of 40).
+		for (const slug of [
+			"sk-skeleton-loading-placeholder",
+			"sk-button-large",
+			"sk-proj-short",
+		]) {
+			expect(redactSecrets(slug)).toBe(slug);
+		}
+		// Miss: >=40 chars but no digit — legacy keys always carry digits.
+		const noDigit = `sk-${"z".repeat(48)}`;
+		expect(redactSecrets(noDigit)).toBe(noDigit);
+		// Miss: has a digit but only 39 alnum chars — below the length bar.
+		const tooShort = `sk-${"y".repeat(38)}7`;
+		expect(redactSecrets(tooShort)).toBe(tooShort);
 	});
 
 	it("redacts complete and unterminated PEM private keys", () => {
