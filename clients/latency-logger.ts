@@ -2,13 +2,14 @@ import * as path from "node:path";
 import { isTestMode } from "./env-utils.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import { createNdjsonLogger } from "./ndjson-logger.js";
+import { getMaxLogSizeMB } from "./log-cleanup.js";
 
 const LATENCY_LOG_DIR = getGlobalPiLensDir();
 const LATENCY_LOG_FILE = path.join(LATENCY_LOG_DIR, "latency.log");
 
 const writer = createNdjsonLogger({
 	filePath: LATENCY_LOG_FILE,
-	maxBytes: 10 * 1024 * 1024,
+	maxBytes: getMaxLogSizeMB() * 1024 * 1024,
 });
 
 export interface LatencyEntry {

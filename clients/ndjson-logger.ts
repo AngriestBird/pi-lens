@@ -200,13 +200,15 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 
 	function flushSync(): void {
 		// Drain the in-memory queue synchronously — safe at process exit.
-		const ownedPrefix =
-			inFlightBatch &&
-			inFlightBatch.every((item, index) => queue[index] === item)
-				? inFlightBatch.length
-				: 0;
-		while (queue.length > ownedPrefix) {
-			const [item] = queue.splice(ownedPrefix, 1);
+		// The in-flight async batch is INCLUDED even though its appendFile may
+		// also land: if the process dies before the threadpool issues that
+		// write, skipping the prefix would drop the whole batch. The per-line
+		// writer deliberately traded duplicate lines at exit for never-drops
+		// (#935 review) — keep that trade. The drain-loop completion handler
+		// only shifts items still at the queue head (identity-checked), so a
+		// queue emptied here is simply left alone by the async loop.
+		while (queue.length > 0) {
+			const item = queue.shift() as QueueItem;
 			const file = resolve(options.filePath);
 			ensureDir(file);
 			try {

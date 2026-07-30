@@ -2,13 +2,14 @@ import * as path from "node:path";
 import { isTestMode } from "./env-utils.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import { createNdjsonLogger } from "./ndjson-logger.js";
+import { getMaxLogSizeMB } from "./log-cleanup.js";
 
 const CASCADE_LOG_DIR = getGlobalPiLensDir();
 const CASCADE_LOG_FILE = path.join(CASCADE_LOG_DIR, "cascade.log");
 
 const writer = createNdjsonLogger({
 	filePath: CASCADE_LOG_FILE,
-	maxBytes: 10 * 1024 * 1024,
+	maxBytes: getMaxLogSizeMB() * 1024 * 1024,
 });
 
 export interface CascadeLogEntry {

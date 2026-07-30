@@ -146,7 +146,13 @@ describe("createNdjsonLogger", () => {
 		expect(readLines(logFile)).toHaveLength(2);
 	});
 
-	it("flushSync does not double-write an async-owned batch or remove newer lines", async () => {
+	it("flushSync writes the in-flight batch (dupes over drops) and never removes newer lines", async () => {
+		// #935 review: if the process dies before an in-flight threadpool
+		// append issues, a skipped prefix would drop the whole batch. flushSync
+		// therefore rewrites the in-flight batch synchronously — a duplicate
+		// line when the async write ALSO landed is the accepted cost, a dropped
+		// line is not. The async completion handler must still leave the
+		// (now-empty) queue alone.
 		let release: (() => void) | undefined;
 		const realAppendFile = fs.promises.appendFile.bind(fs.promises);
 		const appendFile = vi
@@ -161,18 +167,24 @@ describe("createNdjsonLogger", () => {
 		logger.log({ async: 1 });
 
 		// Let the first append reach disk while keeping its promise unresolved,
-		// then enqueue a remainder owned only by flushSync.
+		// then enqueue a remainder and flush everything synchronously.
 		await vi.waitFor(() => expect(appendFile).toHaveBeenCalledTimes(1));
 		logger.log({ sync: 2 });
 		logger.flushSync();
+		// The in-flight line appears twice (async write landed AND flushSync
+		// rewrote it — never-drops), the newer line exactly once.
 		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
+			{ async: 1 },
 			{ async: 1 },
 			{ sync: 2 },
 		]);
 
 		release?.();
 		await logger.flush();
+		// Async completion must not shift the newer items flushSync already
+		// wrote, nor re-write anything.
 		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
+			{ async: 1 },
 			{ async: 1 },
 			{ sync: 2 },
 		]);
