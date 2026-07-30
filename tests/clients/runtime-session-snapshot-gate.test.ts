@@ -21,6 +21,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	_resetProjectSnapshotParseCacheForTests,
 	buildProjectSnapshotFromRuntime,
 	getProjectSnapshotMetaPath,
 	getProjectSnapshotPath,
@@ -149,6 +150,10 @@ describe("session_start snapshot meta-gate (#947)", () => {
 		process.env.PI_LENS_STARTUP_MODE = "quick";
 		readJsonCacheSpy.mockClear();
 		logLatencySpy.mockClear();
+		// Simulate a fresh process: the in-process parse cache (#947 commit 3)
+		// must not serve these assertions — session start should parse a body
+		// written by a PREVIOUS process.
+		_resetProjectSnapshotParseCacheForTests();
 	});
 
 	afterEach(() => {
@@ -167,6 +172,9 @@ describe("session_start snapshot meta-gate (#947)", () => {
 			const cwd = makeProject(env);
 			// Fresh RuntimeCoordinator with no change log → effectiveSeq 0.
 			seedSnapshot(cwd, 0);
+			// Drop the cache entry the seed's own save primed — a real session
+			// start parses a body written by another process.
+			_resetProjectSnapshotParseCacheForTests();
 
 			const deps = makeDeps(cwd);
 			await handleSessionStart(deps);
@@ -245,6 +253,7 @@ describe("session_start snapshot meta-gate (#947)", () => {
 		try {
 			const cwd = makeProject(env);
 			seedSnapshot(cwd, 0);
+			_resetProjectSnapshotParseCacheForTests();
 			fs.unlinkSync(getProjectSnapshotMetaPath(cwd));
 
 			const deps = makeDeps(cwd);

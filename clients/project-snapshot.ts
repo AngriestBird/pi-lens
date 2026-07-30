@@ -157,12 +157,65 @@ export function isProjectSnapshotMetaStale(
 	);
 }
 
+/**
+ * In-process parse cache for the snapshot body, keyed by file path and
+ * validated by mtime. The body is large (40-112MB observed) and several
+ * session-start/background consumers parse it seconds after we ourselves
+ * wrote it — `saveRuntimeProjectSnapshot` alone re-parsed the file it had
+ * just written 2-3x per session (~300-600ms of event-loop blocks). A hit
+ * returns the already-parsed object; any external write changes the mtime
+ * and forces a re-parse. #947.
+ *
+ * Deferred: gzipping the snapshot (as the review graph already does via its
+ * worker-thread persist, `clients/review-graph/persist-worker.ts`) should
+ * follow that same pattern — worker-offloaded stringify+gzip with
+ * generation-gated promotion — rather than a sync gzip on the save path.
+ */
+interface SnapshotParseCacheEntry {
+	mtimeMs: number;
+	snapshot: ProjectSnapshot | null;
+}
+const SNAPSHOT_PARSE_CACHE_MAX = 4;
+const snapshotParseCache = new Map<string, SnapshotParseCacheEntry>();
+
+function cacheParsedSnapshot(
+	snapshotPath: string,
+	entry: SnapshotParseCacheEntry,
+): void {
+	// Refresh recency (Map preserves insertion order).
+	snapshotParseCache.delete(snapshotPath);
+	snapshotParseCache.set(snapshotPath, entry);
+	while (snapshotParseCache.size > SNAPSHOT_PARSE_CACHE_MAX) {
+		const oldest = snapshotParseCache.keys().next().value;
+		if (oldest === undefined) break;
+		snapshotParseCache.delete(oldest);
+	}
+}
+
+/** Test hook: drop all cached parses (per-worker isolation). */
+export function _resetProjectSnapshotParseCacheForTests(): void {
+	snapshotParseCache.clear();
+}
+
 export function loadProjectSnapshot(cwd: string): ProjectSnapshot | null {
-	const snapshot = readJsonCache<ProjectSnapshot>(
-		getProjectSnapshotPath(cwd),
-		(parsed) => parseSnapshot(parsed) ?? undefined,
-	);
-	return snapshot ?? null;
+	const snapshotPath = getProjectSnapshotPath(cwd);
+	let mtimeMs: number;
+	try {
+		mtimeMs = fs.statSync(snapshotPath).mtimeMs;
+	} catch {
+		// Missing snapshots are the normal cold-start case.
+		snapshotParseCache.delete(snapshotPath);
+		return null;
+	}
+	const cached = snapshotParseCache.get(snapshotPath);
+	if (cached && cached.mtimeMs === mtimeMs) return cached.snapshot;
+	const snapshot =
+		readJsonCache<ProjectSnapshot>(
+			snapshotPath,
+			(parsed) => parseSnapshot(parsed) ?? undefined,
+		) ?? null;
+	cacheParsedSnapshot(snapshotPath, { mtimeMs, snapshot });
+	return snapshot;
 }
 
 export function saveProjectSnapshot(
@@ -171,7 +224,22 @@ export function saveProjectSnapshot(
 ): void {
 	const snapshotPath = getProjectSnapshotPath(cwd);
 	fs.mkdirSync(path.dirname(snapshotPath), { recursive: true });
-	fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));
+	// Compact serialization (no pretty-print): ~30% smaller at the observed
+	// 40-112MB sizes, which directly shrinks both the write and every later
+	// read+parse on session start. #947.
+	fs.writeFileSync(snapshotPath, JSON.stringify(snapshot));
+	// Prime the parse cache with the object we just wrote so the next
+	// loadProjectSnapshot (e.g. saveRuntimeProjectSnapshot's merge read
+	// seconds later) doesn't re-parse our own write. Best-effort: a failed
+	// stat just means the next load re-parses.
+	try {
+		cacheParsedSnapshot(snapshotPath, {
+			mtimeMs: fs.statSync(snapshotPath).mtimeMs,
+			snapshot,
+		});
+	} catch {
+		snapshotParseCache.delete(snapshotPath);
+	}
 	fs.writeFileSync(
 		getProjectSnapshotMetaPath(cwd),
 		JSON.stringify({
