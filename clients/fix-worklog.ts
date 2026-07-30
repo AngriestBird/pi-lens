@@ -82,7 +82,13 @@ export function readWorklog(cwd: string): WorklogEntry[] {
 		return raw
 			.split(/\r?\n/)
 			.filter(Boolean)
-			.map((line) => JSON.parse(line) as WorklogEntry);
+			.flatMap((line) => {
+				try {
+					return [JSON.parse(line) as WorklogEntry];
+				} catch {
+					return [];
+				}
+			});
 	} catch {
 		return [];
 	}

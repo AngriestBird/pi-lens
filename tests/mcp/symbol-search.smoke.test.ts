@@ -95,6 +95,7 @@ describe("pilens_symbol_search over MCP (tiny project, pre-seeded index)", () =>
 		expect((res.result as { isError?: boolean }).isError).toBeFalsy();
 		const payload = parseTrailer(res) as {
 			query: string;
+			coverage: { files: number; truncated: boolean };
 			results: Array<{
 				file: string;
 				score: number;
@@ -105,6 +106,8 @@ describe("pilens_symbol_search over MCP (tiny project, pre-seeded index)", () =>
 				lines?: unknown;
 			}>;
 		};
+		expect(payload.coverage).toEqual({ files: 1, truncated: false });
+		expect(textOf(res)).toContain("Index covers 1 files.");
 		expect(payload.results.length).toBeGreaterThan(0);
 		const hit = payload.results[0];
 		expect(hit.file.replace(/\\/g, "/")).toBe("auth.ts");
