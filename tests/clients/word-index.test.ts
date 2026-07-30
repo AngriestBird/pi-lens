@@ -4,6 +4,7 @@ import {
 	buildWordIndex,
 	centralityFromReverseDeps,
 	deserializeWordIndex,
+	getWordIndexBuildStatus,
 	searchWordIndex,
 	serializeWordIndex,
 	splitIdentifier,
@@ -321,11 +322,45 @@ describe("triggerBackgroundWordIndexBuild (#348 cold-query stampede guard)", () 
 			expect(messages.some((m) => m.includes("at/above home directory"))).toBe(
 				true,
 			);
+			expect(getWordIndexBuildStatus(env.tmpDir)).toMatchObject({
+				state: "refused",
+				reason: expect.stringContaining("at/above home directory"),
+			});
 			// Give any (wrongly) scheduled build a beat to persist, then confirm
 			// nothing was written.
 			await new Promise((resolve) => setTimeout(resolve, 250));
 			expect(loadProjectSnapshot(env.tmpDir)?.wordIndex).toBeUndefined();
 		} finally {
+			env.cleanup();
+		}
+	}, 10_000);
+
+	it("remembers a failed build outcome after the in-flight attempt ends (#926)", async () => {
+		const env = setupTestEnvironment("pi-lens-wordindex-failed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		try {
+			createTempFile(env.tmpDir, "src/a.ts", "export function helperA() {}");
+			process.env.PILENS_DATA_DIR = createTempFile(
+				env.tmpDir,
+				"not-a-directory",
+				"occupied",
+			);
+			const messages: string[] = [];
+			triggerBackgroundWordIndexBuild(env.tmpDir, (message) =>
+				messages.push(message),
+			);
+
+			await vi.waitFor(() => {
+				expect(getWordIndexBuildStatus(env.tmpDir)?.state).toBe("failed");
+			});
+			expect(getWordIndexBuildStatus(env.tmpDir)).toMatchObject({
+				state: "failed",
+				reason: expect.any(String),
+			});
+			expect(messages.some((message) => message.includes("failed"))).toBe(true);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
 			env.cleanup();
 		}
 	}, 10_000);

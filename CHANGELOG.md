@@ -59,6 +59,10 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Cold `symbol_search` failures are now observable and honest** (refs #926) —
+	unavailable results distinguish an active build, a safety refusal, and the
+	last build's failure, while background build/persist errors reach a persistent
+	NDJSON log.
 - **Failed heavyweight analyzers no longer masquerade as clean runs** (refs #925) —
 	unsuccessful results are reported distinctly, omitted from cache so the next
 	session retries, and valid fix-worklog records survive neighboring corrupt lines.

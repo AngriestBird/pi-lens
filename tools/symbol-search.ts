@@ -34,6 +34,7 @@ export function createSymbolSearchTool(getProjectRoot: () => string) {
 			query?: string;
 			count?: number;
 			hint?: string;
+			unavailableReason?: string;
 		}>(({ details, isError }) => {
 			if (isError || details?.available === false) {
 				return `symbol_search "${details?.query ?? ""}" — unavailable${details?.hint ? `: ${details.hint}` : ""}`;
@@ -104,6 +105,7 @@ export function createSymbolSearchTool(getProjectRoot: () => string) {
 						available: false,
 						query: result.query,
 						hint: result.hint,
+						unavailableReason: result.unavailableReason,
 					},
 				};
 			}

@@ -74,8 +74,12 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   phase 1 gave the word index a load→rebuild-if-stale→persist lifecycle in ALL
   startup modes — quick-mode's cold-start warmup pass now also refreshes it, not
   just the full-mode session task — and a cold query (no index yet) triggers one
-  bounded background build per cwd instead of blocking, returning `available: false`
-  - an actionable retry hint. Hits carry `startLine`/`endLine` (best-matching line;
+  bounded background build per cwd instead of blocking. Its `available: false`
+  result distinguishes `building`, a safety `refused` outcome, and
+  `last-build-failed`; the per-cwd guard remembers the last outcome and
+  `clients/word-index-logger.ts` persists cold-build/debounced-persist failures
+  through `createNdjsonLogger` instead of swallowing them. Hits carry
+  `startLine`/`endLine` (best-matching line;
   `offset=startLine, limit=endLine-startLine+1`) instead of a raw `lines[]` array or
   a per-hit `read` block — #517 conformity, same as module_report below), `pilens_module_report` (navigable outline + signatures
   the outline is module-level declarations + class members only — function-locals

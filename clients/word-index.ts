@@ -572,11 +572,22 @@ export function deserializeWordIndex(
 // single background build, keyed by the resolved cwd so a burst of queries in
 // the same cold window only pays for one walk, and returns immediately.
 
-const inFlightBuilds = new Set<string>();
+export type WordIndexBuildStatus =
+	| { state: "building" }
+	| { state: "refused"; reason: string }
+	| { state: "failed"; reason: string };
+
+const buildStatuses = new Map<string, WordIndexBuildStatus>();
+
+export function getWordIndexBuildStatus(
+	cwd: string,
+): WordIndexBuildStatus | undefined {
+	return buildStatuses.get(path.resolve(cwd));
+}
 
 /** Test-only: reset the in-flight-build guard between test files/cases. */
 export function _resetWordIndexBuildGuardForTests(): void {
-	inFlightBuilds.clear();
+	buildStatuses.clear();
 }
 
 /**
@@ -591,7 +602,7 @@ export function triggerBackgroundWordIndexBuild(
 	cwd: string,
 	dbg?: (msg: string) => void,
 	options: { homeDir?: string } = {},
-): void {
+): WordIndexBuildStatus {
 	const key = path.resolve(cwd);
 	// #747 hardening: this trigger is the one word-index build path with NO
 	// session lifecycle in front of it (cold `symbol_search` queries, in-process
@@ -600,13 +611,16 @@ export function triggerBackgroundWordIndexBuild(
 	// a home-rooted cwd. Apply the same `isAtOrAboveHomeDir` ceiling here so a
 	// cold query from $HOME never starts a whole-home walk-and-read.
 	if (isAtOrAboveHomeDir(key, options.homeDir)) {
-		dbg?.(
-			`word-index cold-build: skipped — root at/above home directory (${key})`,
-		);
-		return;
+		const reason = `root at/above home directory (${key})`;
+		dbg?.(`word-index cold-build: skipped — ${reason}`);
+		const status = { state: "refused", reason } as const;
+		buildStatuses.set(key, status);
+		return status;
 	}
-	if (inFlightBuilds.has(key)) return;
-	inFlightBuilds.add(key);
+	const current = buildStatuses.get(key);
+	if (current?.state === "building") return current;
+	const status = { state: "building" } as const;
+	buildStatuses.set(key, status);
 	void (async () => {
 		const startMs = Date.now();
 		try {
@@ -631,12 +645,14 @@ export function triggerBackgroundWordIndexBuild(
 			dbg?.(
 				`word-index cold-build: ${index.docCount} files, ${index.postings.size} tokens (${Date.now() - startMs}ms)`,
 			);
+			buildStatuses.delete(key);
 		} catch (err) {
-			dbg?.(`word-index cold-build: failed: ${err}`);
-		} finally {
-			inFlightBuilds.delete(key);
+			const reason = err instanceof Error ? err.message : String(err);
+			buildStatuses.set(key, { state: "failed", reason });
+			dbg?.(`word-index cold-build: failed: ${reason}`);
 		}
 	})();
+	return status;
 }
 
 // --- Debounced per-edit persist (#348 phase 2) --------------------------------
