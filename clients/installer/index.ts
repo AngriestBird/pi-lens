@@ -47,7 +47,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, unlinkSync } from "node:fs";
 import fs from "node:fs/promises";
 import https from "node:https";
 import { createRequire } from "node:module";
@@ -68,6 +68,87 @@ import { safeSpawnAsync } from "../safe-spawn.js";
 
 // Global installation directory for pi-lens tools
 const TOOLS_DIR = path.join(getGlobalPiLensDir(), "tools");
+const INSTALL_LOCK_PATH = path.join(TOOLS_DIR, ".install.lock");
+const activeInstallLocks = new Set<string>();
+let installLockExitCleanupRegistered = false;
+
+interface InstallLockOwner {
+	pid: number;
+	createdAt: number;
+}
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+async function acquireInstallLock(): Promise<{
+	release?: () => Promise<void>;
+	reason?: string;
+}> {
+	await fs.mkdir(TOOLS_DIR, { recursive: true });
+	const timeoutMs = Number(process.env.PI_LENS_INSTALL_LOCK_TIMEOUT_MS) || 30_000;
+	const deadline = Date.now() + timeoutMs;
+	let lastOwner = "unknown owner";
+
+	while (Date.now() < deadline) {
+		try {
+			const handle = await fs.open(INSTALL_LOCK_PATH, "wx");
+			await handle.writeFile(
+				JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+			);
+			await handle.close();
+			activeInstallLocks.add(INSTALL_LOCK_PATH);
+			if (!installLockExitCleanupRegistered) {
+				installLockExitCleanupRegistered = true;
+				process.once("exit", () => {
+					for (const lockPath of activeInstallLocks) {
+						try {
+							unlinkSync(lockPath);
+						} catch {
+							// Best effort; the next owner verifies this PID is dead.
+						}
+					}
+				});
+			}
+			let released = false;
+			return {
+				release: async () => {
+					if (released) return;
+					released = true;
+					activeInstallLocks.delete(INSTALL_LOCK_PATH);
+					await fs.rm(INSTALL_LOCK_PATH, { force: true });
+				},
+			};
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			try {
+				const owner = JSON.parse(
+					await fs.readFile(INSTALL_LOCK_PATH, "utf8"),
+				) as InstallLockOwner;
+				lastOwner = `pid=${owner.pid} createdAt=${owner.createdAt}`;
+				if (
+					Number.isInteger(owner.pid) &&
+					owner.pid > 0 &&
+					!isProcessAlive(owner.pid)
+				) {
+					await fs.rm(INSTALL_LOCK_PATH, { force: true });
+					continue;
+				}
+			} catch {
+				lastOwner = "unreadable owner (not safely recoverable)";
+			}
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+	}
+	return {
+		reason: `timed out after ${timeoutMs}ms waiting for shared tools install lock (${lastOwner})`,
+	};
+}
 
 // Directory for GitHub-downloaded binaries
 const GITHUB_BIN_DIR = path.join(getGlobalPiLensDir(), "bin");
@@ -3182,8 +3263,17 @@ export async function ensureTool(
 			return cacheResolvedPath(await getToolPath(toolId));
 		}
 
-		// Force download
-		const installed = await installTool(toolId);
+		const lock = await acquireInstallLock();
+		if (!lock.release) {
+			logSessionStart(`auto-install ensure ${toolId}: ${lock.reason}`);
+			return undefined;
+		}
+		let installed: boolean;
+		try {
+			installed = await installTool(toolId);
+		} finally {
+			await lock.release();
+		}
 		if (!installed) {
 			logSessionStart(
 				`auto-install ensure ${toolId}: force reinstall failed (${Date.now() - ensureStartMs}ms)`,
@@ -3283,7 +3373,25 @@ export async function ensureTool(
 			return undefined;
 		}
 
-		const installed = await installTool(toolId);
+		const lock = await acquireInstallLock();
+		if (!lock.release) {
+			logSessionStart(`auto-install ensure ${toolId}: ${lock.reason}`);
+			return undefined;
+		}
+		let installed: boolean;
+		try {
+			// Cross-process double-check: the lock waiter may now observe the tool
+			// installed by its predecessor and must not run a second package manager.
+			const installedByPeer = await getToolPath(toolId);
+			if (installedByPeer) {
+				resolvedPathCache.set(toolId, installedByPeer);
+				void updateProbeCache(toolId, installedByPeer);
+				return installedByPeer;
+			}
+			installed = await installTool(toolId);
+		} finally {
+			await lock.release();
+		}
 		if (!installed) {
 			logSessionStart(
 				`auto-install ensure ${toolId}: unavailable (${Date.now() - ensureStartMs}ms)`,

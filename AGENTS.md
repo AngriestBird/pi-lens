@@ -50,6 +50,10 @@ Installer package-manager and archive-extraction subprocesses must use
 This gives timeouts an awaited Windows tree-kill and prevents interrupted parent
 processes from orphaning package-manager descendants; do not reintroduce raw
 `spawn(..., { shell: true })` for install mutations.
+All mutations of the shared managed `tools/` tree are also serialized by its
+atomic `.install.lock`; after waiting, re-run discovery before installing because
+the preceding process may already have satisfied the request. A lock is stale
+only after its recorded PID is confirmed dead.
 
 Whole-project loops that reuse one `FactStore` must delete `file.content` after
 that file's consumers finish (in a `finally` so abort/error exits release it).

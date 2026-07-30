@@ -9,6 +9,11 @@ All notable changes to pi-lens will be documented in this file.
 	process-tree termination on timeout, and synchronously clean registered
 	installer children during parent exit/signals.
 
+- **Managed tool installs are cross-process serialized** (refs #945) — a
+	dependency-free atomic lock protects the shared tools tree, verifies owners
+	before stale recovery, bounds lock waits with an honest error, and rechecks
+	discovery after acquisition to avoid duplicate package-manager runs.
+
 - **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
 	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
 	persist path for CI/cron, forces the debounced snapshot write before exit,

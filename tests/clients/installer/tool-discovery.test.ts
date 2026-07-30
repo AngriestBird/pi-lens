@@ -81,6 +81,13 @@ const mockFsStat = vi.hoisted(() => vi.fn());
 const mockFsWriteFile = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const mockFsMkdir = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const mockFsAppendFile = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const mockFsOpen = vi.hoisted(() =>
+	vi.fn().mockResolvedValue({
+		writeFile: vi.fn().mockResolvedValue(undefined),
+		close: vi.fn().mockResolvedValue(undefined),
+	}),
+);
+const mockFsRm = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 
 vi.mock("node:fs/promises", () => ({
 	default: {
@@ -90,6 +97,8 @@ vi.mock("node:fs/promises", () => ({
 		writeFile: mockFsWriteFile,
 		mkdir: mockFsMkdir,
 		appendFile: mockFsAppendFile,
+		open: mockFsOpen,
+		rm: mockFsRm,
 	},
 	readFile: mockFsReadFile,
 	access: mockFsAccess,
@@ -97,6 +106,8 @@ vi.mock("node:fs/promises", () => ({
 	writeFile: mockFsWriteFile,
 	mkdir: mockFsMkdir,
 	appendFile: mockFsAppendFile,
+	open: mockFsOpen,
+	rm: mockFsRm,
 }));
 
 // ── child_process spawn mock ────────────────────────────────────────────
