@@ -211,6 +211,11 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   the existing client map; it must never spawn or warm a client. Dispatch-side
   code imports this seam from `lsp/index.ts`, while `dispatch/auxiliary-lsp.ts`
   remains free of the reverse import to avoid the LSP/auxiliary cycle.
+- **LSP circuit-breaker health includes absent clients (#927).**
+  `LSPService.getBrokenStatus()` is a read-only projection of temporary
+  cooldowns and session-permanent disablement; `pilens_health` renders those
+  server/root pairs even though `getStatus()` correctly contains live clients
+  only. Keep health/status calls spawn-free.
 - **Warm-build staleness guard (#535).** The warm server lives for weeks, so it
   can silently keep serving OLD code after a `npm run build:dist`/merge changes
   `dist/mcp/server.js` on disk — dogfooding caught this live (a post-#517

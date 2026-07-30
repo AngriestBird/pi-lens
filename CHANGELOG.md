@@ -59,6 +59,9 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`pilens_health` keeps disabled LSP servers visible** (refs #927) —
+	permanently broken server/root pairs now render with their failure count, and
+	temporary circuit-breaker cooldowns expose their retry deadline.
 - **Cold `symbol_search` failures are now observable and honest** (refs #926) —
 	unavailable results distinguish an active build, a safety refusal, and the
 	last build's failure, while background build/persist errors reach a persistent

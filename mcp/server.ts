@@ -40,6 +40,7 @@ import {
 	ensureLspConfig,
 	ipcPathForCwd,
 	lspStatus,
+	renderLspBrokenStatusLines,
 	type McpAnalyzeResult,
 	moduleReport,
 	projectReport,
@@ -1270,7 +1271,7 @@ async function callTool(
 	}
 
 	if (name === "pilens_health") {
-		const { aliveClients, servers } = lspStatus();
+		const { aliveClients, servers, brokenServers } = lspStatus();
 		const last = recentLatency(1)[0];
 		const stats = diagnosticStats();
 		const autoSession = getAutoSessionStatus();
@@ -1287,6 +1288,7 @@ async function callTool(
 				(server) =>
 					`  ${server.connected ? "✓" : "✗"} ${server.serverId} (${server.root})`,
 			),
+			...renderLspBrokenStatusLines(brokenServers),
 			last
 				? `Last dispatch: ${path.basename(last.filePath)} — ${last.totalDurationMs}ms, ${last.totalDiagnostics} diagnostic(s)`
 				: "Last dispatch: none yet",
@@ -1304,6 +1306,7 @@ async function callTool(
 		return toolText(lines.join("\n"), {
 			aliveClients,
 			servers,
+			brokenServers,
 			lastDispatch: last
 				? {
 						filePath: last.filePath,

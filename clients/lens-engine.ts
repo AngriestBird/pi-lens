@@ -153,12 +153,27 @@ export function treeSitterRuntimeStatus(): TreeSitterRuntimeStatus {
 export interface LspStatus {
 	aliveClients: number;
 	servers: Array<{ serverId: string; root: string; connected: boolean }>;
+	brokenServers: ReturnType<ReturnType<typeof getLSPService>["getBrokenStatus"]>;
 }
 
 /** Alive LSP client count + per-server status. */
 export function lspStatus(): LspStatus {
 	const lsp = getLSPService();
-	return { aliveClients: lsp.getAliveClientCount(), servers: lsp.getStatus() };
+	return {
+		aliveClients: lsp.getAliveClientCount(),
+		servers: lsp.getStatus(),
+		brokenServers: lsp.getBrokenStatus(),
+	};
+}
+
+export function renderLspBrokenStatusLines(
+	brokenServers: LspStatus["brokenServers"],
+): string[] {
+	return brokenServers.map((server) =>
+		server.permanentlyBroken
+			? `  ✗ ${server.serverId} — disabled after ${server.failures} failures (${server.root})`
+			: `  ✗ ${server.serverId} — cooling down after ${server.failures} failure(s) until ${new Date(server.cooldownUntil).toISOString()} (${server.root})`,
+	);
 }
 
 /** Session diagnostic counters (shown / auto-fixed / unresolved …). */
