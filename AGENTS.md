@@ -57,6 +57,9 @@ only after its recorded PID is confirmed dead.
 Vitest sets `PI_LENS_DISABLE_TOOL_INSTALL=1` before global setup and workers;
 ordinary tests must remain network/install-free. Real installer integration
 tests must explicitly opt in and use an isolated `PI_LENS_HOME`.
+Installer lifecycle integration tests use a fake package manager and isolated
+home; `PI_LENS_INSTALL_TIMEOUT_MS` exists to keep timeout coverage fast and
+must not become a production policy default.
 
 Whole-project loops that reuse one `FactStore` must delete `file.content` after
 that file's consumers finish (in a `finally` so abort/error exits release it).

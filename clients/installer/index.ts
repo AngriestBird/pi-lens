@@ -1309,6 +1309,12 @@ export const TOOLS: ToolDefinition[] = [
 ];
 
 const ensureInFlight = new Map<string, Promise<string | undefined>>();
+const installFailureReasons = new Map<string, string>();
+
+/** Last honest install refusal/failure reason for callers that need diagnostics. */
+export function getInstallFailureReason(toolId: string): string | undefined {
+	return installFailureReasons.get(toolId);
+}
 
 // Session-lifetime cache: once a tool path is resolved, skip the process-spawn check on subsequent calls.
 const resolvedPathCache = new Map<string, string>();
@@ -1460,6 +1466,7 @@ export function resetProbeCacheStateForTesting(): void {
 	_probeCacheDirty = false;
 	resolvedPathCache.clear();
 	ensureInFlight.clear();
+	installFailureReasons.clear();
 	lastManagedInstallVersion.clear();
 	if (_probeCacheFlushTimer !== null) {
 		clearTimeout(_probeCacheFlushTimer);
@@ -2864,7 +2871,11 @@ async function installNpmTool(
 		// Resolve the package manager for the tools dir and build install args.
 		const isWindows = process.platform === "win32";
 		const pm = await resolveNodePackageManager(TOOLS_DIR);
-		const pmCommand = pmBinary(pm);
+		const testNpmScript =
+			process.env.PI_LENS_TEST_MODE === "1"
+				? process.env.PI_LENS_TEST_NPM_SCRIPT
+				: undefined;
+		const pmCommand = testNpmScript ? process.execPath : pmBinary(pm);
 		// Use --ignore-scripts unless the package explicitly needs postinstall
 		// (e.g. biome downloads a platform-specific native binary via postinstall).
 		const needsScripts = NEEDS_POSTINSTALL.has(packageName);
@@ -2872,7 +2883,8 @@ async function installNpmTool(
 			ignoreScripts: !needsScripts,
 		});
 
-		const INSTALL_TIMEOUT_MS = 120_000;
+		const INSTALL_TIMEOUT_MS =
+			Number(process.env.PI_LENS_INSTALL_TIMEOUT_MS) || 120_000;
 		const runInstallAttempt = async (
 			args: string[],
 		): Promise<{ ok: boolean; stderr: string }> => {
@@ -2888,7 +2900,10 @@ async function installNpmTool(
 			};
 		};
 
-		let outcome = await runInstallAttempt(baseInstallArgs);
+		let outcome = await runInstallAttempt([
+			...(testNpmScript ? [testNpmScript] : []),
+			...baseInstallArgs,
+		]);
 
 		// --legacy-peer-deps is npm-only; retry just npm's ERESOLVE failures.
 		const erResolve =
@@ -2905,7 +2920,10 @@ async function installNpmTool(
 			logSessionStart(
 				`auto-install npm ${packageName}: retry with --legacy-peer-deps after ERESOLVE`,
 			);
-			outcome = await runInstallAttempt(retryArgs);
+			outcome = await runInstallAttempt([
+				...(testNpmScript ? [testNpmScript] : []),
+				...retryArgs,
+			]);
 		}
 
 		if (!outcome.ok) {
@@ -3144,6 +3162,10 @@ async function installGemTool(
  */
 export async function installTool(toolId: string): Promise<boolean> {
 	if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
+		installFailureReasons.set(
+			toolId,
+			"installation disabled by PI_LENS_DISABLE_TOOL_INSTALL=1",
+		);
 		logSessionStart(
 			`auto-install ${toolId}: refused — PI_LENS_DISABLE_TOOL_INSTALL=1`,
 		);
@@ -3241,6 +3263,7 @@ export async function ensureTool(
 	toolId: string,
 	opts?: { forceReinstall?: boolean; allowInstall?: boolean },
 ): Promise<string | undefined> {
+	installFailureReasons.delete(toolId);
 	const cacheResolvedPath = (result: string | undefined): string | undefined => {
 		if (result) {
 			resolvedPathCache.set(toolId, result);
@@ -3279,6 +3302,10 @@ export async function ensureTool(
 			return cacheResolvedPath(await getToolPath(toolId));
 		}
 		if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
+			installFailureReasons.set(
+				toolId,
+				"installation disabled by PI_LENS_DISABLE_TOOL_INSTALL=1",
+			);
 			logSessionStart(
 				`auto-install ensure ${toolId}: refused — PI_LENS_DISABLE_TOOL_INSTALL=1`,
 			);
@@ -3395,6 +3422,10 @@ export async function ensureTool(
 			return undefined;
 		}
 		if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
+			installFailureReasons.set(
+				toolId,
+				"installation disabled by PI_LENS_DISABLE_TOOL_INSTALL=1",
+			);
 			logSessionStart(
 				`auto-install ensure ${toolId}: refused — PI_LENS_DISABLE_TOOL_INSTALL=1 (${Date.now() - ensureStartMs}ms)`,
 			);
@@ -3403,6 +3434,7 @@ export async function ensureTool(
 
 		const lock = await acquireInstallLock();
 		if (!lock.release) {
+			installFailureReasons.set(toolId, lock.reason ?? "install lock failed");
 			logSessionStart(`auto-install ensure ${toolId}: ${lock.reason}`);
 			return undefined;
 		}

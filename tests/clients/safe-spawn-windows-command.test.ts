@@ -54,7 +54,13 @@ describe("buildWindowsShellCommand (Windows cmd.exe quoting — #214)", () => {
 
 describe("safeSpawnAsync command-line injection regression (#17)", () => {
 	it("does not execute shell syntax supplied as an argument", async () => {
-		const result = await safeSpawnAsync("echo", ["safe & echo INJECTED"]);
+		// Use a real executable on every platform; `echo` is only a cmd.exe shell
+		// builtin on Windows and therefore cannot exercise direct safe spawning.
+		const result = await safeSpawnAsync(process.execPath, [
+			"-e",
+			"console.log(process.argv[1])",
+			"safe & echo INJECTED",
+		]);
 		expect(result.error).toBeUndefined();
 		expect(result.status).toBe(0);
 		expect(result.stdout).toContain("safe & echo INJECTED");

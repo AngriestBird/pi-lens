@@ -70,8 +70,23 @@ export interface SafeSpawnOptions {
 	lifetimeCoupled?: boolean;
 }
 
-const lifetimeCoupledPids = new Set<number>();
-let lifetimeCleanupInstalled = false;
+interface LifetimeCleanupState {
+	pids: Set<number>;
+	installed: boolean;
+}
+
+// Vitest reloads modules inside a reused worker. Keep this registry on the
+// process so those module instances share one signal/exit listener set.
+const lifetimeStateKey = Symbol.for("pi-lens.safe-spawn.lifetime-state");
+const processWithLifetimeState = process as typeof process & {
+	[lifetimeStateKey]?: LifetimeCleanupState;
+};
+const lifetimeState =
+	processWithLifetimeState[lifetimeStateKey] ??
+	(processWithLifetimeState[lifetimeStateKey] = {
+		pids: new Set<number>(),
+		installed: false,
+	});
 
 function killPidTreeSync(pid: number): void {
 	if (process.platform === "win32") {
@@ -91,14 +106,14 @@ function killPidTreeSync(pid: number): void {
 }
 
 function installLifetimeCleanup(): void {
-	if (lifetimeCleanupInstalled) return;
-	lifetimeCleanupInstalled = true;
+	if (lifetimeState.installed) return;
+	lifetimeState.installed = true;
 	process.once("exit", () => {
-		for (const pid of lifetimeCoupledPids) killPidTreeSync(pid);
+		for (const pid of lifetimeState.pids) killPidTreeSync(pid);
 	});
 	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as NodeJS.Signals[]) {
 		process.once(signal, () => {
-			for (const pid of lifetimeCoupledPids) killPidTreeSync(pid);
+			for (const pid of lifetimeState.pids) killPidTreeSync(pid);
 			process.kill(process.pid, signal);
 		});
 	}
@@ -470,7 +485,7 @@ export async function safeSpawnAsync(
 		});
 		if (options?.lifetimeCoupled && child.pid) {
 			installLifetimeCleanup();
-			lifetimeCoupledPids.add(child.pid);
+			lifetimeState.pids.add(child.pid);
 		}
 
 		// #620: bracket this spawn's lifetime with a short-interval CPU/RSS poll
@@ -571,7 +586,7 @@ export async function safeSpawnAsync(
 		child.on("close", async (code, signal) => {
 			clearTimeout(timeoutId);
 			abortSignal?.removeEventListener("abort", onAbort);
-			if (child.pid) lifetimeCoupledPids.delete(child.pid);
+			if (child.pid) lifetimeState.pids.delete(child.pid);
 			await killPromise;
 			const resourceUsage = finishResourceUsage();
 
@@ -601,7 +616,7 @@ export async function safeSpawnAsync(
 		child.on("error", (err) => {
 			clearTimeout(timeoutId);
 			abortSignal?.removeEventListener("abort", onAbort);
-			if (child.pid) lifetimeCoupledPids.delete(child.pid);
+			if (child.pid) lifetimeState.pids.delete(child.pid);
 			const resourceUsage = finishResourceUsage();
 			resolve({ stdout, stderr, status: null, error: err, resourceUsage });
 		});

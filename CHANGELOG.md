@@ -19,6 +19,11 @@ All notable changes to pi-lens will be documented in this file.
 	oxlint probe-cache entry without networking, and one-shot analysis explicitly
 	awaits probe-cache persistence before exit.
 
+- **Installer orphan/locking regressions are process-tested** (refs #945) —
+	fake package-manager coverage verifies Windows timeout tree-kill, exactly one
+	install across concurrent processes, explicit install-disable refusal, and
+	Vitest's default no-install environment.
+
 - **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
 	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
 	persist path for CI/cron, forces the debounced snapshot write before exit,
