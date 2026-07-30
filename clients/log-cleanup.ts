@@ -106,16 +106,21 @@ export interface LogCleanupConfig {
 	maxSizeMB: number;
 }
 
+/** Rotation threshold for every active `~/.pi-lens/*.log`, in MB. */
+export function getMaxLogSizeMB(): number {
+	return Math.max(
+		1,
+		Number.parseInt(process.env.PI_LENS_MAX_LOG_SIZE_MB ?? "10", 10) || 10,
+	);
+}
+
 function getConfig(): LogCleanupConfig {
 	return {
 		retentionDays: Math.max(
 			1,
 			Number.parseInt(process.env.PI_LENS_LOG_RETENTION_DAYS ?? "7", 10) || 7,
 		),
-		maxSizeMB: Math.max(
-			1,
-			Number.parseInt(process.env.PI_LENS_MAX_LOG_SIZE_MB ?? "10", 10) || 10,
-		),
+		maxSizeMB: getMaxLogSizeMB(),
 	};
 }
 

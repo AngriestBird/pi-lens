@@ -9,6 +9,12 @@
  * against its language's real grammar so a newly-broken query fails CI
  * instead of silently returning nothing forever.
  *
+ * It sweeps the rule set each language is actually DISPATCHED (
+ * `queriesForLanguage`), not the raw loader map, so a rule is also compiled
+ * against every grammar that inherits it — the typescript set is handed to tsx,
+ * and a rule that compiles against typescript but not tsx is dead on every
+ * `.tsx` file with nothing else to notice.
+ *
  * KNOWN_BROKEN is the exact list of rules broken at the time #884 was filed
  * (recorded by running this same compile sweep). It exists ONLY so this test
  * can ship before the (in-progress, parallel) rule fixes land — every entry
@@ -22,6 +28,7 @@ import { describe, expect, it } from "vitest";
 import { LANGUAGE_TO_GRAMMAR } from "../../clients/grammar-source.js";
 import {
 	isDisabledQueryFilePath,
+	queriesForLanguage,
 	TreeSitterQueryLoader,
 } from "../../clients/tree-sitter-query-loader.js";
 import { getSharedTreeSitterClient } from "../../clients/tree-sitter-shared.js";
@@ -77,10 +84,19 @@ describe("tree-sitter rule compile guard (#884)", () => {
 		const uncheckedLanguages = new Set<string>();
 		let checked = 0;
 
-		for (const [languageKey, langQueries] of queries.entries()) {
-			const enabled = langQueries.filter(
-				(q) => !isDisabledQueryFilePath(q.filePath),
-			);
+		// Sweep the DISPATCHED rule set per language, not the raw loader map: a rule
+		// is also run against every language that inherits it (`queriesForLanguage`
+		// hands the whole typescript set to tsx), and a rule that compiles against
+		// its own grammar but not against an inheriting one is silently dead in
+		// exactly the way this guard exists to catch. Union in the loader's own keys
+		// so a language with rules but no grammar mapping is still surfaced below.
+		const languageKeys = new Set([
+			...queries.keys(),
+			...Object.keys(LANGUAGE_TO_GRAMMAR),
+		]);
+
+		for (const languageKey of languageKeys) {
+			const enabled = queriesForLanguage(queries, languageKey);
 			if (enabled.length === 0) continue;
 
 			if (!(languageKey in LANGUAGE_TO_GRAMMAR)) {

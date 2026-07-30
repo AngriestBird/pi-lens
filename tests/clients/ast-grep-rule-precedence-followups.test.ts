@@ -147,7 +147,16 @@ function findCli(): string | undefined {
 			encoding: "utf8",
 			shell: process.platform === "win32",
 		});
-		if (result.status === 0) return command;
+		// The output must identify ast-grep, not merely exit 0: on Linux `sg` is
+		// util-linux's setgid runner, which exits 0 for `--version` and then fails
+		// every `scan --config` call — so the cliIt tests below ran against the
+		// wrong binary and asserted on its usage error. Same check the production
+		// probes apply (clients/sg-runner.ts `probeCommand`,
+		// clients/dispatch/runners/utils/runner-helpers.ts).
+		const version = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+		if (result.status === 0 && /\bast[- ]grep\b/i.test(version)) {
+			return command;
+		}
 	}
 	return undefined;
 }
