@@ -74,6 +74,9 @@ interface TreeSitterNode {
 	startPosition: { row: number; column: number };
 	startIndex: number;
 	endIndex: number;
+	/** web-tree-sitter field accessor — optional so mock nodes in tests
+	 * without field support still satisfy the interface. */
+	childForFieldName?: (field: string) => TreeSitterNode | null;
 }
 
 interface TreeSitterParserInstance {
@@ -1554,38 +1557,65 @@ export class TreeSitterClient {
 			case "unsafe_regex_dynamic_identifier": {
 				// unsafe-regex is intentionally a coarse advisory heuristic. When the
 				// interpolation is a plain identifier, recover the common safe-before-
-				// assignment pattern without pretending to perform whole-program dataflow:
-				// find that identifier's same-file variable initializer and look for an
-				// escape-like callee or a replace() call in it.
-				const interpolation = captures.INTERPOLATION?.text ?? "";
-				const identifier = interpolation.match(
-					/^\$\{\s*([A-Za-z_$][\w$]*)\s*\}$/,
-				)?.[1];
-				if (!identifier || !rootNode) return true;
+				// assignment pattern without pretending to perform whole-program
+				// dataflow. #949 review hardening: the LAST write (declarator or
+				// assignment) textually BEFORE the use decides — a later reassignment
+				// to user input un-suppresses, and an unrelated declaration after the
+				// use never suppresses. Initializers come from the "value" field (a
+				// type annotation is not an initializer), and bare .replace("a","b")
+				// is not escaping — only escape-named callees or .replace(/regex/
+				// count. Any internal error keeps the diagnostic: never silently
+				// suppress via a filter crash, and a throw here would abort the whole
+				// file's batch.
+				try {
+					const interpolationNode = captures.INTERPOLATION;
+					const interpolation = interpolationNode?.text ?? "";
+					const identifier = interpolation.match(
+						/^\$\{\s*([A-Za-z_$][\w$]*)\s*\}$/,
+					)?.[1];
+					if (!identifier || !rootNode || !interpolationNode) return true;
+					const useRow = interpolationNode.startPosition.row;
 
-				const hasEscapeSignal = (text: string): boolean =>
-					/\b(?:escape|Escape)\w*\s*\(|\.\s*replace\s*\(/.test(text);
-				const stack: TreeSitterNode[] = [rootNode];
-				while (stack.length > 0) {
-					const node = stack.pop();
-					if (!node) continue;
-					if (node.type === "variable_declarator") {
-						const named = node.children.filter((child) => child.isNamed);
-						const name = named.find(
-							(child) =>
-								(child.type === "identifier" ||
-									child.type === "type_identifier") &&
-								child.text === identifier,
-						);
-						if (name) {
-							const nameIndex = named.indexOf(name);
-							const initializer = named[nameIndex + 1];
-							if (initializer && hasEscapeSignal(initializer.text)) return false;
+					const hasEscapeSignal = (text: string): boolean =>
+						/\b(?:escape|Escape)\w*\s*\(/.test(text) ||
+						/\.\s*replace\s*\(\s*\//.test(text);
+
+					// Track the last write to the identifier before the use site.
+					let lastWriteRow = -1;
+					let lastWriteSafe = false;
+					const consider = (
+						row: number,
+						valueText: string | undefined,
+					): void => {
+						if (row >= useRow || row < lastWriteRow) return;
+						lastWriteRow = row;
+						lastWriteSafe =
+							valueText !== undefined && hasEscapeSignal(valueText);
+					};
+
+					const stack: TreeSitterNode[] = [rootNode];
+					while (stack.length > 0) {
+						const node = stack.pop();
+						if (!node) continue;
+						if (node.type === "variable_declarator") {
+							const name = node.childForFieldName?.("name");
+							if (name?.text === identifier) {
+								const initializer = node.childForFieldName?.("value");
+								consider(node.startPosition.row, initializer?.text);
+							}
+						} else if (node.type === "assignment_expression") {
+							const left = node.childForFieldName?.("left");
+							if (left?.type === "identifier" && left.text === identifier) {
+								const right = node.childForFieldName?.("right");
+								consider(node.startPosition.row, right?.text);
+							}
 						}
+						stack.push(...node.children);
 					}
-					stack.push(...node.children);
+					return lastWriteRow >= 0 && lastWriteSafe ? false : true;
+				} catch {
+					return true;
 				}
-				return true;
 			}
 			case "is_generator_with_valued_return": {
 				const returnNode = captures.RETURN;
