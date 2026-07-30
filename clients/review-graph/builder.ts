@@ -1733,8 +1733,23 @@ async function addFileToGraph(
 	// the incremental/cascade path (a changed *.test.ts) never adds them either.
 	if (detectFileRole(file) === "test") return;
 	if (kind === "jsts") {
-		await ensureReviewGraphFacts(file, cwd, facts, contentOverride);
-		addJsTsFile(graph, cwd, file, facts, ignoredIds);
+		// Release content ONLY when this builder seeded it. The incremental
+		// per-edit path receives the LIVE dispatch FactStore (via the
+		// fire-and-forget blast-radius build), and the dispatch still reads
+		// file.content after its runner groups settle — inline suppressions,
+		// dispositions, and fact rules would race a delete and silently see
+		// undefined. Content the dispatch put there is the dispatch's to free.
+		const dispatchOwnsContent =
+			facts.getFileFact<string>(file, "file.content") !== undefined &&
+			contentOverride == null;
+		try {
+			await ensureReviewGraphFacts(file, cwd, facts, contentOverride);
+			addJsTsFile(graph, cwd, file, facts, ignoredIds);
+		} finally {
+			// The graph has copied every durable value it needs. Keep derived facts
+			// available to callers, but do not retain full source in a shared store.
+			if (!dispatchOwnsContent) facts.deleteFileFact(file, "file.content");
+		}
 		return;
 	}
 	const languageId = mapKindToTreeSitterLanguage(kind, file);
