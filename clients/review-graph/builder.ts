@@ -884,7 +884,7 @@ export function isReviewGraphMigrationNeeded(cwd: string): boolean {
 //      log + skip rather than OOM the host; same fail-closed spirit as the
 //      read-guard).
 const GRAPH_PERSIST_DEBOUNCE_MS_DEFAULT = 1500;
-const GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT = 200_000;
+export const GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT = 500_000;
 
 function graphPersistDebounceMs(): number {
 	const raw = Number(process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS);
@@ -1039,7 +1039,9 @@ function persistGraph(
 			durationMs: 0,
 			metadata: { skipped: "size_cap", elements: elementCount, cap },
 		});
-		const reason = `persist element cap exceeded (${elementCount} > ${cap}); graph remains available only in this process`;
+		const reason =
+			`persist element cap exceeded (${elementCount} elements > ${cap} cap); ` +
+			"raise PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS; graph remains available only in this process";
 		recordBuildAttempt(cwd, "succeeded", reason);
 		logReviewGraph({
 			cwd,
