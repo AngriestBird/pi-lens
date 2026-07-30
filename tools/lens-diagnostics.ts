@@ -81,6 +81,7 @@ type LSPServiceLike = ReturnType<typeof getLSPService> & {
 			maxFiles?: number;
 			signal?: AbortSignal;
 			onProgress?: (completed: number, total: number) => void;
+			onServerReady?: () => void;
 			files?: string[];
 		},
 	) => Promise<WorkspaceLspDiagnosticResult[]>;
@@ -130,6 +131,10 @@ export function createLensDiagnosticsTool(
 	// same file. Optional/undefined in tests — an omitted writeIndex always
 	// proceeds (see `reconcileScanDiagnostics`'s doc comment).
 	nextWriteIndex?: () => number,
+	// #798/#338: capture host UI methods synchronously from the active tool event.
+	// The returned closure is safe for the later async sweep to invoke because it
+	// never dereferences the session-guarded ctx.ui getter.
+	captureLspStatusRepaint?: (ctx: unknown) => (() => void) | undefined,
 ) {
 	return {
 		name: "lens_diagnostics" as const,
@@ -281,6 +286,7 @@ export function createLensDiagnosticsTool(
 			onUpdate: unknown,
 			ctx: { cwd?: string; signal?: AbortSignal },
 		) {
+			const repaintLspStatus = captureLspStatusRepaint?.(ctx);
 			const mode = (params.mode as string | undefined) ?? "delta";
 			const severity = (params.severity as string | undefined) ?? "all";
 			const refreshRunners = params.refreshRunners;
@@ -347,6 +353,7 @@ export function createLensDiagnosticsTool(
 					signal: fullSignal,
 					wallClockMs: FULL_SCAN_WALL_CLOCK_MS,
 					onProgress,
+					onServerReady: repaintLspStatus,
 					pathsScope,
 					nextWriteIndex,
 				});
@@ -1091,6 +1098,7 @@ async function formatFullMode(
 		signal?: AbortSignal;
 		wallClockMs?: number;
 		onProgress?: (completed: number, total: number) => void;
+		onServerReady?: () => void;
 		pathsScope?: PathsScope;
 		nextWriteIndex?: () => number;
 	} = {},
@@ -1150,6 +1158,7 @@ async function formatFullMode(
 			maxFiles: options.maxLspFiles,
 			signal,
 			onProgress: options.onProgress,
+			onServerReady: options.onServerReady,
 			files: explicitFiles,
 		}),
 		getProjectDiagnosticsSnapshotForFullMode(cwd, {
