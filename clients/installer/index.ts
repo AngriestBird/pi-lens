@@ -47,7 +47,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, unlinkSync } from "node:fs";
 import fs from "node:fs/promises";
 import https from "node:https";
 import { createRequire } from "node:module";
@@ -64,9 +64,124 @@ import {
 	pmBinary,
 	resolveNodePackageManager,
 } from "../package-manager.js";
+import { safeSpawnAsync } from "../safe-spawn.js";
 
 // Global installation directory for pi-lens tools
 const TOOLS_DIR = path.join(getGlobalPiLensDir(), "tools");
+const INSTALL_LOCK_PATH = path.join(TOOLS_DIR, ".install.lock");
+const activeInstallLocks = new Set<string>();
+let installLockExitCleanupRegistered = false;
+
+interface InstallLockOwner {
+	pid: number;
+	createdAt: number;
+}
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+async function acquireInstallLock(): Promise<{
+	release?: () => Promise<void>;
+	reason?: string;
+}> {
+	await fs.mkdir(TOOLS_DIR, { recursive: true });
+	// #946 review F2: the waiter's bound must exceed the owner's install bound
+	// (PI_LENS_INSTALL_TIMEOUT_MS, default 120s) — a 30s waiter gave up on a
+	// legitimate slow install and reported the tool unavailable for the whole
+	// session even though it arrived seconds later.
+	const timeoutMs =
+		Number(process.env.PI_LENS_INSTALL_LOCK_TIMEOUT_MS) || 150_000;
+	const deadline = Date.now() + timeoutMs;
+	let lastOwner = "unknown owner";
+
+	while (Date.now() < deadline) {
+		try {
+			const handle = await fs.open(INSTALL_LOCK_PATH, "wx");
+			await handle.writeFile(
+				JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+			);
+			await handle.close();
+			activeInstallLocks.add(INSTALL_LOCK_PATH);
+			if (!installLockExitCleanupRegistered) {
+				installLockExitCleanupRegistered = true;
+				process.once("exit", () => {
+					for (const lockPath of activeInstallLocks) {
+						try {
+							unlinkSync(lockPath);
+						} catch {
+							// Best effort; the next owner verifies this PID is dead.
+						}
+					}
+				});
+			}
+			let released = false;
+			return {
+				release: async () => {
+					if (released) return;
+					released = true;
+					activeInstallLocks.delete(INSTALL_LOCK_PATH);
+					await fs.rm(INSTALL_LOCK_PATH, { force: true });
+				},
+			};
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			try {
+				const owner = JSON.parse(
+					await fs.readFile(INSTALL_LOCK_PATH, "utf8"),
+				) as InstallLockOwner;
+				lastOwner = `pid=${owner.pid} createdAt=${owner.createdAt}`;
+				// #946 review F1: PID liveness alone cannot detect a hard-killed
+				// owner whose PID Windows has recycled — that lock would poison
+				// every future install with a full-timeout wait. A lock older
+				// than any legitimate install (owner install bound + slack) is
+				// stale regardless of what the PID now points at.
+				const maxAgeMs =
+					(Number(process.env.PI_LENS_INSTALL_TIMEOUT_MS) || 120_000) +
+					60_000;
+				const expired =
+					Number.isFinite(owner.createdAt) &&
+					Date.now() - owner.createdAt > maxAgeMs;
+				if (
+					expired ||
+					(Number.isInteger(owner.pid) &&
+						owner.pid > 0 &&
+						!isProcessAlive(owner.pid))
+				) {
+					await fs.rm(INSTALL_LOCK_PATH, { force: true });
+					continue;
+				}
+			} catch (readError) {
+				lastOwner = "unreadable owner";
+				// An unreadable/empty lock has no createdAt to age out — fall
+				// back to the file's own mtime for the max-age check so it is
+				// eventually recoverable (#946 review F1/F6).
+				try {
+					const stat = await fs.stat(INSTALL_LOCK_PATH);
+					const maxAgeMs =
+						(Number(process.env.PI_LENS_INSTALL_TIMEOUT_MS) || 120_000) +
+						60_000;
+					if (Date.now() - stat.mtimeMs > maxAgeMs) {
+						await fs.rm(INSTALL_LOCK_PATH, { force: true });
+						continue;
+					}
+				} catch {
+					// stat raced a release — loop and retry acquisition.
+				}
+				void readError;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 100));
+		}
+	}
+	return {
+		reason: `timed out after ${timeoutMs}ms waiting for shared tools install lock (${lastOwner})`,
+	};
+}
 
 // Directory for GitHub-downloaded binaries
 const GITHUB_BIN_DIR = path.join(getGlobalPiLensDir(), "bin");
@@ -1227,6 +1342,12 @@ export const TOOLS: ToolDefinition[] = [
 ];
 
 const ensureInFlight = new Map<string, Promise<string | undefined>>();
+const installFailureReasons = new Map<string, string>();
+
+/** Last honest install refusal/failure reason for callers that need diagnostics. */
+export function getInstallFailureReason(toolId: string): string | undefined {
+	return installFailureReasons.get(toolId);
+}
 
 // Session-lifetime cache: once a tool path is resolved, skip the process-spawn check on subsequent calls.
 const resolvedPathCache = new Map<string, string>();
@@ -1262,14 +1383,43 @@ async function readProbeCache(): Promise<ProbeCache> {
 function scheduleProbeFlush(): void {
 	if (_probeCacheFlushTimer !== null) return;
 	_probeCacheFlushTimer = setTimeout(() => {
-		_probeCacheFlushTimer = null;
-		if (!_probeCacheDirty || _probeCache === null) return;
-		_probeCacheDirty = false;
-		void fs
-			.writeFile(PROBE_CACHE_PATH, JSON.stringify(_probeCache, null, 2))
-			.catch(() => {});
+		void flushProbeCache();
 	}, 300);
 	_probeCacheFlushTimer.unref?.();
+}
+
+let _probeCacheWriteInFlight: Promise<void> | null = null;
+
+/** Await pending probe-cache persistence before a one-shot process exits. */
+export async function flushProbeCache(): Promise<void> {
+	if (_probeCacheFlushTimer !== null) {
+		clearTimeout(_probeCacheFlushTimer);
+		_probeCacheFlushTimer = null;
+	}
+	// #946 review F4: if the 300ms timer's write already started, the dirty
+	// flag is false but the write may still be in flight — an immediate
+	// process.exit would truncate it. Always await the in-flight write.
+	if (!_probeCacheDirty || _probeCache === null) {
+		await _probeCacheWriteInFlight;
+		return;
+	}
+	_probeCacheDirty = false;
+	const write = (async () => {
+		try {
+			await fs.writeFile(
+				PROBE_CACHE_PATH,
+				JSON.stringify(_probeCache, null, 2),
+			);
+		} catch {
+			// Cache persistence is best effort; discovery remains authoritative.
+		}
+	})();
+	_probeCacheWriteInFlight = write;
+	try {
+		await write;
+	} finally {
+		if (_probeCacheWriteInFlight === write) _probeCacheWriteInFlight = null;
+	}
 }
 
 function isAstGrepVersionOutput(output: string): boolean {
@@ -1368,6 +1518,7 @@ export function resetProbeCacheStateForTesting(): void {
 	_probeCacheDirty = false;
 	resolvedPathCache.clear();
 	ensureInFlight.clear();
+	installFailureReasons.clear();
 	lastManagedInstallVersion.clear();
 	if (_probeCacheFlushTimer !== null) {
 		clearTimeout(_probeCacheFlushTimer);
@@ -2662,25 +2813,16 @@ async function installArchiveTool(
 		const tarBin = isWindows
 			? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\tar.exe`
 			: "tar";
-		const extracted = await new Promise<{ ok: boolean; stderr: string }>(
-			(resolve) => {
-				const proc = spawn(tarBin, tarArgs, {
-					cwd: TOOLS_DIR,
-					stdio: ["ignore", "ignore", "pipe"],
-				});
-				let stderr = "";
-				proc.stderr?.on("data", (d) => (stderr += d));
-				const timer = setTimeout(() => {
-					proc.kill();
-					resolve({ ok: false, stderr: "extraction timed out" });
-				}, 120_000);
-				proc.on("exit", (code) => {
-					clearTimeout(timer);
-					resolve({ ok: code === 0, stderr });
-				});
-				proc.on("error", (err) => resolve({ ok: false, stderr: err.message }));
-			},
-		);
+		const extractResult = await safeSpawnAsync(tarBin, tarArgs, {
+			cwd: TOOLS_DIR,
+			timeout: 120_000,
+			ignoreAmbientSignal: true,
+			lifetimeCoupled: true,
+		});
+		const extracted = {
+			ok: extractResult.status === 0,
+			stderr: extractResult.error?.message ?? extractResult.stderr,
+		};
 		await fs.rm(tmpArchive, { force: true });
 		if (!extracted.ok) {
 			logSessionStart(
@@ -2781,7 +2923,11 @@ async function installNpmTool(
 		// Resolve the package manager for the tools dir and build install args.
 		const isWindows = process.platform === "win32";
 		const pm = await resolveNodePackageManager(TOOLS_DIR);
-		const pmCommand = pmBinary(pm);
+		const testNpmScript =
+			process.env.PI_LENS_TEST_MODE === "1"
+				? process.env.PI_LENS_TEST_NPM_SCRIPT
+				: undefined;
+		const pmCommand = testNpmScript ? process.execPath : pmBinary(pm);
 		// Use --ignore-scripts unless the package explicitly needs postinstall
 		// (e.g. biome downloads a platform-specific native binary via postinstall).
 		const needsScripts = NEEDS_POSTINSTALL.has(packageName);
@@ -2789,39 +2935,27 @@ async function installNpmTool(
 			ignoreScripts: !needsScripts,
 		});
 
-		const INSTALL_TIMEOUT_MS = 120_000;
+		const INSTALL_TIMEOUT_MS =
+			Number(process.env.PI_LENS_INSTALL_TIMEOUT_MS) || 120_000;
 		const runInstallAttempt = async (
 			args: string[],
-		): Promise<{ ok: boolean; stderr: string }> =>
-			new Promise((resolve) => {
-				const proc = spawn(pmCommand, args, {
-					cwd: TOOLS_DIR,
-					stdio: ["ignore", "pipe", "pipe"],
-					shell: isWindows, // Required for .cmd files on Windows
-				});
-
-				let stderr = "";
-				proc.stderr?.on("data", (data) => (stderr += data));
-
-				const timer = setTimeout(() => {
-					proc.kill();
-					resolve({
-						ok: false,
-						stderr: `install timed out after ${INSTALL_TIMEOUT_MS / 1000}s`,
-					});
-				}, INSTALL_TIMEOUT_MS);
-
-				proc.on("exit", (code) => {
-					clearTimeout(timer);
-					resolve({ ok: code === 0, stderr });
-				});
-				proc.on("error", (err) => {
-					clearTimeout(timer);
-					resolve({ ok: false, stderr: err.message });
-				});
+		): Promise<{ ok: boolean; stderr: string }> => {
+			const result = await safeSpawnAsync(pmCommand, args, {
+				cwd: TOOLS_DIR,
+				timeout: INSTALL_TIMEOUT_MS,
+				ignoreAmbientSignal: true,
+				lifetimeCoupled: true,
 			});
+			return {
+				ok: result.status === 0,
+				stderr: result.error?.message ?? result.stderr,
+			};
+		};
 
-		let outcome = await runInstallAttempt(baseInstallArgs);
+		let outcome = await runInstallAttempt([
+			...(testNpmScript ? [testNpmScript] : []),
+			...baseInstallArgs,
+		]);
 
 		// --legacy-peer-deps is npm-only; retry just npm's ERESOLVE failures.
 		const erResolve =
@@ -2838,7 +2972,10 @@ async function installNpmTool(
 			logSessionStart(
 				`auto-install npm ${packageName}: retry with --legacy-peer-deps after ERESOLVE`,
 			);
-			outcome = await runInstallAttempt(retryArgs);
+			outcome = await runInstallAttempt([
+				...(testNpmScript ? [testNpmScript] : []),
+				...retryArgs,
+			]);
 		}
 
 		if (!outcome.ok) {
@@ -2936,29 +3073,15 @@ async function installPipTool(
 
 		let lastError = "";
 		for (const candidate of pipCandidates) {
-			const outcome = await new Promise<{ ok: boolean; error: string }>(
-				(resolve) => {
-					const proc = spawn(candidate.command, candidate.args, {
-						stdio: ["ignore", "pipe", "pipe"],
-						shell: isWindows, // Required for .cmd files on Windows
-					});
-
-					let stderr = "";
-					proc.stderr?.on("data", (data) => (stderr += data));
-
-					proc.on("exit", (code) => {
-						if (code === 0) {
-							resolve({ ok: true, error: "" });
-						} else {
-							resolve({ ok: false, error: stderr.trim() });
-						}
-					});
-
-					proc.on("error", (err) => {
-						resolve({ ok: false, error: err.message });
-					});
-				},
-			);
+			const pipResult = await safeSpawnAsync(candidate.command, candidate.args, {
+				timeout: 120_000,
+				ignoreAmbientSignal: true,
+				lifetimeCoupled: true,
+			});
+			const outcome = {
+				ok: pipResult.status === 0,
+				error: (pipResult.error?.message ?? pipResult.stderr).trim(),
+			};
 
 			if (outcome.ok) {
 				// Ensure user-level scripts directory is available in current process PATH.
@@ -3057,24 +3180,19 @@ async function installGemTool(
 	packageName: string,
 ): Promise<string | undefined> {
 	try {
-		const isWindows = process.platform === "win32";
-		const outcome = await new Promise<{ ok: boolean; error: string }>(
-			(resolve) => {
-				const proc = spawn("gem", ["install", packageName, "--no-document"], {
-					stdio: ["ignore", "pipe", "pipe"],
-					shell: isWindows,
-				});
-
-				let stderr = "";
-				proc.stderr?.on("data", (data) => (stderr += data));
-				proc.on("exit", (code) => {
-					resolve({ ok: code === 0, error: stderr.trim() });
-				});
-				proc.on("error", (err) => {
-					resolve({ ok: false, error: err.message });
-				});
+		const gemResult = await safeSpawnAsync(
+			"gem",
+			["install", packageName, "--no-document"],
+			{
+				timeout: 120_000,
+				ignoreAmbientSignal: true,
+				lifetimeCoupled: true,
 			},
 		);
+		const outcome = {
+			ok: gemResult.status === 0,
+			error: (gemResult.error?.message ?? gemResult.stderr).trim(),
+		};
 
 		if (!outcome.ok) {
 			throw new Error(
@@ -3095,6 +3213,16 @@ async function installGemTool(
  * Install a tool by ID
  */
 export async function installTool(toolId: string): Promise<boolean> {
+	if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
+		installFailureReasons.set(
+			toolId,
+			"installation disabled by PI_LENS_DISABLE_TOOL_INSTALL=1",
+		);
+		logSessionStart(
+			`auto-install ${toolId}: refused — PI_LENS_DISABLE_TOOL_INSTALL=1`,
+		);
+		return false;
+	}
 	const tool = TOOLS.find((t) => t.id === toolId);
 	if (!tool) {
 		logSessionStart(`auto-install ${toolId}: unknown tool id`);
@@ -3187,6 +3315,7 @@ export async function ensureTool(
 	toolId: string,
 	opts?: { forceReinstall?: boolean; allowInstall?: boolean },
 ): Promise<string | undefined> {
+	installFailureReasons.delete(toolId);
 	const cacheResolvedPath = (result: string | undefined): string | undefined => {
 		if (result) {
 			resolvedPathCache.set(toolId, result);
@@ -3224,9 +3353,28 @@ export async function ensureTool(
 			);
 			return cacheResolvedPath(await getToolPath(toolId));
 		}
+		if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
+			installFailureReasons.set(
+				toolId,
+				"installation disabled by PI_LENS_DISABLE_TOOL_INSTALL=1",
+			);
+			logSessionStart(
+				`auto-install ensure ${toolId}: refused — PI_LENS_DISABLE_TOOL_INSTALL=1`,
+			);
+			return undefined;
+		}
 
-		// Force download
-		const installed = await installTool(toolId);
+		const lock = await acquireInstallLock();
+		if (!lock.release) {
+			logSessionStart(`auto-install ensure ${toolId}: ${lock.reason}`);
+			return undefined;
+		}
+		let installed: boolean;
+		try {
+			installed = await installTool(toolId);
+		} finally {
+			await lock.release();
+		}
 		if (!installed) {
 			logSessionStart(
 				`auto-install ensure ${toolId}: force reinstall failed (${Date.now() - ensureStartMs}ms)`,
@@ -3325,8 +3473,37 @@ export async function ensureTool(
 			);
 			return undefined;
 		}
+		if (process.env.PI_LENS_DISABLE_TOOL_INSTALL === "1") {
+			installFailureReasons.set(
+				toolId,
+				"installation disabled by PI_LENS_DISABLE_TOOL_INSTALL=1",
+			);
+			logSessionStart(
+				`auto-install ensure ${toolId}: refused — PI_LENS_DISABLE_TOOL_INSTALL=1 (${Date.now() - ensureStartMs}ms)`,
+			);
+			return undefined;
+		}
 
-		const installed = await installTool(toolId);
+		const lock = await acquireInstallLock();
+		if (!lock.release) {
+			installFailureReasons.set(toolId, lock.reason ?? "install lock failed");
+			logSessionStart(`auto-install ensure ${toolId}: ${lock.reason}`);
+			return undefined;
+		}
+		let installed: boolean;
+		try {
+			// Cross-process double-check: the lock waiter may now observe the tool
+			// installed by its predecessor and must not run a second package manager.
+			const installedByPeer = await getToolPath(toolId);
+			if (installedByPeer) {
+				resolvedPathCache.set(toolId, installedByPeer);
+				void updateProbeCache(toolId, installedByPeer);
+				return installedByPeer;
+			}
+			installed = await installTool(toolId);
+		} finally {
+			await lock.release();
+		}
 		if (!installed) {
 			logSessionStart(
 				`auto-install ensure ${toolId}: unavailable (${Date.now() - ensureStartMs}ms)`,
