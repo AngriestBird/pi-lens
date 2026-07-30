@@ -6,7 +6,7 @@ import { getLSPService } from "./lsp/index.js";
 // measured p50 3.70 ms / p95 5.28 ms. Keep generous headroom for slower hosts.
 export const LSP_DOCUMENT_SYMBOL_TIMEOUT_MS = 150;
 
-const SYMBOL_KIND_NAMES: Record<number, string> = {
+export const SYMBOL_KIND_NAMES: Record<number, string> = {
 	1: "file",
 	2: "module",
 	3: "namespace",
