@@ -10,6 +10,12 @@ All notable changes to pi-lens will be documented in this file.
 
 - Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
 - Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
+- **Project diagnostics now use one file-major scan pass** (refs #896) —
+	tree-sitter rules, fact rules, and bundled ast-grep share each eligible
+	file's content read while retaining their individual extension/size gates,
+	diagnostic ordering, cancellation behavior, and latency telemetry. Full
+	review-graph builds likewise hash the bytes already read for extraction
+	instead of rereading every file after the graph is built.
 
 - **A project scan runs its rule set in one tree walk, not one walk per rule**
 	(refs #675) — `runQueriesOnFile` compiles a language's rules into a single
@@ -76,6 +82,15 @@ All notable changes to pi-lens will be documented in this file.
 	at 512 KiB. A coverage guard makes a newly registered kind automatically
 	enumerable — and classified as code or non-code — on both project-wide
 	paths.
+
+- **CMake files now reach a real LSP server** (refs #892) — the CMake policy's
+	previous `lsp` fallback had no registered server and silently produced no
+	diagnostics. `cmake-language-server` now covers both `.cmake` files and the
+	canonical `CMakeLists.txt` basename, with managed pip installation.
+- **Fish LSP policy is no longer dead wiring** (refs #893) — `fish-lsp` is now
+	registered for `.fish` files and auto-installed through npm; `fish_indent`
+	continues to run alongside it.
+- **Editing an inherited tree-sitter rule now invalidates the inheriting language's RuleCache** (refs #878) — the cache key fingerprinted only the language's OWN rules directory, but `tsx` also runs the `typescript` rule set (`queriesForLanguage`), so a typescript-rule edit left the tsx entry's hash unchanged and stale compiled rules kept being served from the on-disk cache until a tsx rule happened to change. The fingerprint now covers the full effective rule set via `ruleFilesForLanguage`, a new loader-owned seam that derives from the same rule-source composition as rule selection, so the cache key can't drift from what the runner actually runs. The runner's cache-miss path also forces the query loader past its in-memory memo (`loadQueries(root, { force: true })`) — a correct key alone wasn't enough: the memo ignores rule-file mtimes, so within one process a miss re-persisted the PRE-edit rules under the fresh fingerprint and the staleness then survived restarts. The client's compiled-batch cache is likewise now keyed on rule content instead of rule ids — ids are stable across edits, so the shared client kept serving the pre-edit compiled patterns (and messages) for the process lifetime even after the reload. `CACHE_VERSION` bumped to `v6`.
 - **Small edits no longer pay the entity-extraction cost** (refs #885) — the
 	<5-line skip threshold only guarded the zero-diagnostics early return; a
 	second `extractEntitySnapshot` block ran unconditionally, so trivial edits
