@@ -44,6 +44,12 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`pilens_rebuild` can no longer destroy an npm-installed pi-lens** (refs
+	#920) — rebuilds are refused before spawning a package script unless the
+	package is a source checkout with `tsconfig.dist.json` outside
+	`node_modules`; installed servers also omit the tool from `tools/list`, so
+	subagent allowlists cannot discover it.
+
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 
 - **A mid-scan tree-sitter WASM abort no longer replaces the authoritative
