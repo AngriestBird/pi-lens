@@ -25,6 +25,8 @@ export interface ProjectDiagnosticsSnapshot {
 	diagnostics: ProjectDiagnostic[];
 	filesScanned: number;
 	runners: string[];
+	/** Visible degraded state after the process-wide WASM runtime aborts. */
+	treeSitterStatus?: "wasm_aborted_restart_required";
 	/**
 	 * True when the scan refused to walk because `cwd` resolved at or above the
 	 * home directory (#747/#250 escape class) — `diagnostics` is empty and

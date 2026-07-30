@@ -121,6 +121,7 @@ describe("project diagnostics mid-scan WASM abort (#891)", () => {
 		const result = await scanProjectDiagnostics({ cwd: tmp, tier: "cheap" });
 
 		expect(result.scanTruncated).toBe(true);
+		expect(result.treeSitterStatus).toBe("wasm_aborted_restart_required");
 		expect(result.filesScanned).toBe(1);
 		expect(state.parseCalls).toBe(2);
 		expect(loadProjectDiagnosticsSnapshot(tmp)).toEqual(prior);

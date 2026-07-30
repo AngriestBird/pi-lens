@@ -13,6 +13,8 @@ export interface LatencyEntry {
 	type: "runner" | "tool_result" | "phase";
 	/** ISO timestamp when this entry was written (= finish time for runners) */
 	ts?: string;
+	/** Process that wrote the entry; used to isolate current-session telemetry. */
+	pid?: number;
 	/** ISO timestamp when the runner/phase started — diff with ts = durationMs */
 	startedAt?: string;
 	toolName?: string;
@@ -41,7 +43,7 @@ export function logLatency(entry: LatencyEntry): void {
 	if (isTestMode()) {
 		return;
 	}
-	writer.log({ ts: new Date().toISOString(), ...entry });
+	writer.log({ ...entry, ts: new Date().toISOString(), pid: process.pid });
 }
 
 export function getLatencyLogPath(): string {

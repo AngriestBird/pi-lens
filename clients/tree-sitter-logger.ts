@@ -16,6 +16,7 @@ export interface TreeSitterLogEntry {
 		| "runner_skip"
 		| "queries_loaded"
 		| "query_error"
+		| "runtime_abort"
 		| "runner_complete"
 		| "entity_diff"
 		| "blast_radius"

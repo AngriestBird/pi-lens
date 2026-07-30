@@ -6,6 +6,7 @@ pi-lens registers the following slash commands with the pi host:
 - `/lens-context-toggle` — toggle automatic context injection on/off for the session (tools/LSP/read-guard/formatting stay active)
 - `/lens-widget-toggle` — show/hide the pi-lens diagnostics widget below the editor
 - `/lens-health` — runtime health, latency, and diagnostic telemetry
+- `/lens-perf` — independent top-five p50 and p99 rankings for the current process session and machine-wide active latency-log window
 - `/lens-allow-edit <path>` — override the read-before-edit guard for a single edit
 - `/lens-tools` — tool installation status: globally installed, auto-installed, or npx fallback
 - `/lens-tdi` — Technical Debt Index (TDI) and project health trend

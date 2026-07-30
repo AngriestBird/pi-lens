@@ -3400,6 +3400,9 @@ export class LSPService {
 			maxFiles?: number;
 			signal?: AbortSignal;
 			onProgress?: (completed: number, total: number) => void;
+			/** Called after a cold sweep warm-up successfully brings a server group
+			 * online. The caller may use this to refresh host observability UI. */
+			onServerReady?: () => void;
 			/**
 			 * Explicit file list (#461): skip the project walk entirely and route
 			 * exactly these files through the sweep. Used by lens_diagnostics'
@@ -3842,6 +3845,7 @@ export class LSPService {
 						options.onProgress?.(completed, files.length);
 						return;
 					}
+					if (warmup.performedWarmup) options.onServerReady?.();
 				}
 				// #608/#621: batch-open a CHUNK of this group's files before
 				// waiting on diagnostics for any of them individually — see
