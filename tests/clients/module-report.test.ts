@@ -883,6 +883,42 @@ describe("moduleReport — review-graph who-uses-this", () => {
 		).toBeFalsy();
 	});
 
+	it("#921: file-cap-disabled graph is machine-readable and warned, not reported as genuinely empty", async () => {
+		const env = makeEnv();
+		const previous = process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+		process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = "2";
+		try {
+			const file = createTempFile(
+				env.tmpDir,
+				"a.ts",
+				"export function foo(): number { return 1; }\n",
+			);
+			createTempFile(env.tmpDir, "b.ts", "export const b = 2;\n");
+			createTempFile(env.tmpDir, "c.ts", "export const c = 3;\n");
+			await warmGraph(env.tmpDir);
+
+			const report = await moduleReport(file, env.tmpDir, {
+				blastRadius: true,
+			});
+
+			expect(report.provenance?.usedBy).toBe("unavailable:file-cap");
+			expect(report.provenance?.blastRadius).toBe("unavailable:file-cap");
+			expect(report.semantic.source).toBe("unavailable:file-cap");
+			expect(report.warnings).toContain(
+				"who-uses-this is unavailable: review graph disabled because the project " +
+					"has more than 2 files (cap 2) — raise maxProjectFiles in " +
+					".pi-lens.json or set PI_LENS_REVIEW_GRAPH_MAX_FILES",
+			);
+			expect(renderCompactModuleReport(report)).toContain(
+				"WARNING: who-uses-this is unavailable: review graph disabled",
+			);
+		} finally {
+			if (previous === undefined)
+				delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+			else process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = previous;
+		}
+	});
+
 	it("drops a function-local declaration from the outline entirely (#259, supersedes #256 routing)", async () => {
 		const env = makeEnv();
 		const file = createTempFile(

@@ -135,8 +135,13 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   report as line-oriented TEXT (one line per symbol/callback) instead of
   JSON — same data, roughly a quarter of the token cost, opt-in (default
   stays JSON). Reports also carry section-level `provenance`
-  (`syntax`, `cached-review-graph`, `heuristic-tree-sitter`, `none`) so agents
-  can tell facts from cache/heuristic sections without per-flag JSON bloat. Pass
+  (`syntax`, `cached-review-graph`, `heuristic-tree-sitter`, `none`, plus
+  `unavailable:file-cap` for graph-backed sections when the capped source walk
+  disabled the graph) so agents can tell facts from cache/heuristic sections
+  without per-flag JSON bloat. A capped `module_report` also uses
+  `semantic.source: "unavailable:file-cap"` and warns with the cap plus both
+  configuration knobs; `project_report` says “more than N files (cap N)” because
+  the walk stops at cap+1 and never knows the exact project count (#921). Pass
   `blastRadius: true` for the cross-file **blast radius** (#304):
   transitive dependents aggregated to ranked file `read` args — read-only over
   the *cached* graph (omitted when cold), the single successor to the removed
