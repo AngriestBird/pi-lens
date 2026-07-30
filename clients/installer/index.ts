@@ -64,6 +64,7 @@ import {
 	pmBinary,
 	resolveNodePackageManager,
 } from "../package-manager.js";
+import { safeSpawnAsync } from "../safe-spawn.js";
 
 // Global installation directory for pi-lens tools
 const TOOLS_DIR = path.join(getGlobalPiLensDir(), "tools");
@@ -2662,25 +2663,16 @@ async function installArchiveTool(
 		const tarBin = isWindows
 			? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\tar.exe`
 			: "tar";
-		const extracted = await new Promise<{ ok: boolean; stderr: string }>(
-			(resolve) => {
-				const proc = spawn(tarBin, tarArgs, {
-					cwd: TOOLS_DIR,
-					stdio: ["ignore", "ignore", "pipe"],
-				});
-				let stderr = "";
-				proc.stderr?.on("data", (d) => (stderr += d));
-				const timer = setTimeout(() => {
-					proc.kill();
-					resolve({ ok: false, stderr: "extraction timed out" });
-				}, 120_000);
-				proc.on("exit", (code) => {
-					clearTimeout(timer);
-					resolve({ ok: code === 0, stderr });
-				});
-				proc.on("error", (err) => resolve({ ok: false, stderr: err.message }));
-			},
-		);
+		const extractResult = await safeSpawnAsync(tarBin, tarArgs, {
+			cwd: TOOLS_DIR,
+			timeout: 120_000,
+			ignoreAmbientSignal: true,
+			lifetimeCoupled: true,
+		});
+		const extracted = {
+			ok: extractResult.status === 0,
+			stderr: extractResult.error?.message ?? extractResult.stderr,
+		};
 		await fs.rm(tmpArchive, { force: true });
 		if (!extracted.ok) {
 			logSessionStart(
@@ -2792,34 +2784,18 @@ async function installNpmTool(
 		const INSTALL_TIMEOUT_MS = 120_000;
 		const runInstallAttempt = async (
 			args: string[],
-		): Promise<{ ok: boolean; stderr: string }> =>
-			new Promise((resolve) => {
-				const proc = spawn(pmCommand, args, {
-					cwd: TOOLS_DIR,
-					stdio: ["ignore", "pipe", "pipe"],
-					shell: isWindows, // Required for .cmd files on Windows
-				});
-
-				let stderr = "";
-				proc.stderr?.on("data", (data) => (stderr += data));
-
-				const timer = setTimeout(() => {
-					proc.kill();
-					resolve({
-						ok: false,
-						stderr: `install timed out after ${INSTALL_TIMEOUT_MS / 1000}s`,
-					});
-				}, INSTALL_TIMEOUT_MS);
-
-				proc.on("exit", (code) => {
-					clearTimeout(timer);
-					resolve({ ok: code === 0, stderr });
-				});
-				proc.on("error", (err) => {
-					clearTimeout(timer);
-					resolve({ ok: false, stderr: err.message });
-				});
+		): Promise<{ ok: boolean; stderr: string }> => {
+			const result = await safeSpawnAsync(pmCommand, args, {
+				cwd: TOOLS_DIR,
+				timeout: INSTALL_TIMEOUT_MS,
+				ignoreAmbientSignal: true,
+				lifetimeCoupled: true,
 			});
+			return {
+				ok: result.status === 0,
+				stderr: result.error?.message ?? result.stderr,
+			};
+		};
 
 		let outcome = await runInstallAttempt(baseInstallArgs);
 
@@ -2936,29 +2912,15 @@ async function installPipTool(
 
 		let lastError = "";
 		for (const candidate of pipCandidates) {
-			const outcome = await new Promise<{ ok: boolean; error: string }>(
-				(resolve) => {
-					const proc = spawn(candidate.command, candidate.args, {
-						stdio: ["ignore", "pipe", "pipe"],
-						shell: isWindows, // Required for .cmd files on Windows
-					});
-
-					let stderr = "";
-					proc.stderr?.on("data", (data) => (stderr += data));
-
-					proc.on("exit", (code) => {
-						if (code === 0) {
-							resolve({ ok: true, error: "" });
-						} else {
-							resolve({ ok: false, error: stderr.trim() });
-						}
-					});
-
-					proc.on("error", (err) => {
-						resolve({ ok: false, error: err.message });
-					});
-				},
-			);
+			const pipResult = await safeSpawnAsync(candidate.command, candidate.args, {
+				timeout: 120_000,
+				ignoreAmbientSignal: true,
+				lifetimeCoupled: true,
+			});
+			const outcome = {
+				ok: pipResult.status === 0,
+				error: (pipResult.error?.message ?? pipResult.stderr).trim(),
+			};
 
 			if (outcome.ok) {
 				// Ensure user-level scripts directory is available in current process PATH.
@@ -3057,24 +3019,19 @@ async function installGemTool(
 	packageName: string,
 ): Promise<string | undefined> {
 	try {
-		const isWindows = process.platform === "win32";
-		const outcome = await new Promise<{ ok: boolean; error: string }>(
-			(resolve) => {
-				const proc = spawn("gem", ["install", packageName, "--no-document"], {
-					stdio: ["ignore", "pipe", "pipe"],
-					shell: isWindows,
-				});
-
-				let stderr = "";
-				proc.stderr?.on("data", (data) => (stderr += data));
-				proc.on("exit", (code) => {
-					resolve({ ok: code === 0, error: stderr.trim() });
-				});
-				proc.on("error", (err) => {
-					resolve({ ok: false, error: err.message });
-				});
+		const gemResult = await safeSpawnAsync(
+			"gem",
+			["install", packageName, "--no-document"],
+			{
+				timeout: 120_000,
+				ignoreAmbientSignal: true,
+				lifetimeCoupled: true,
 			},
 		);
+		const outcome = {
+			ok: gemResult.status === 0,
+			error: (gemResult.error?.message ?? gemResult.stderr).trim(),
+		};
 
 		if (!outcome.ok) {
 			throw new Error(

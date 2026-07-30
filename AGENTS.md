@@ -45,6 +45,12 @@ tools/                    ast-grep-search, lsp-navigation tool handlers
 tests/                    Vitest test suite (mirrors clients/ structure)
 ```
 
+Installer package-manager and archive-extraction subprocesses must use
+`safeSpawnAsync` with `lifetimeCoupled: true` and `ignoreAmbientSignal: true`.
+This gives timeouts an awaited Windows tree-kill and prevents interrupted parent
+processes from orphaning package-manager descendants; do not reintroduce raw
+`spawn(..., { shell: true })` for install mutations.
+
 Whole-project loops that reuse one `FactStore` must delete `file.content` after
 that file's consumers finish (in a `finally` so abort/error exits release it).
 Keep derived file facts and session facts: later cross-file consumers may still

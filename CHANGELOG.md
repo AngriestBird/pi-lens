@@ -4,6 +4,11 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Installer subprocesses are lifetime-coupled** (refs #945) — npm, pip, gem,
+	and archive extraction now use the shared safe-spawn path, await full Windows
+	process-tree termination on timeout, and synchronously clean registered
+	installer children during parent exit/signals.
+
 - **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
 	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
 	persist path for CI/cron, forces the debounced snapshot write before exit,

@@ -61,6 +61,47 @@ export interface SafeSpawnOptions {
 	 * affects spawn behavior.
 	 */
 	resourceLabel?: string;
+	/**
+	 * Couple a long-lived, side-effecting child to this Node process. Registered
+	 * children are synchronously tree-killed during process exit/signals.
+	 * Windows Job Objects would make this kernel-enforced, but require a native
+	 * dependency; keep this dependency-free fallback until that follow-up.
+	 */
+	lifetimeCoupled?: boolean;
+}
+
+const lifetimeCoupledPids = new Set<number>();
+let lifetimeCleanupInstalled = false;
+
+function killPidTreeSync(pid: number): void {
+	if (process.platform === "win32") {
+		const taskkill = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\taskkill.exe`;
+		spawnSync(taskkill, ["/F", "/T", "/PID", String(pid)], {
+			shell: false,
+			windowsHide: true,
+			stdio: "ignore",
+		});
+		return;
+	}
+	try {
+		process.kill(pid, "SIGKILL");
+	} catch {
+		// Child already exited.
+	}
+}
+
+function installLifetimeCleanup(): void {
+	if (lifetimeCleanupInstalled) return;
+	lifetimeCleanupInstalled = true;
+	process.once("exit", () => {
+		for (const pid of lifetimeCoupledPids) killPidTreeSync(pid);
+	});
+	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as NodeJS.Signals[]) {
+		process.once(signal, () => {
+			for (const pid of lifetimeCoupledPids) killPidTreeSync(pid);
+			process.kill(process.pid, signal);
+		});
+	}
 }
 
 // ============================================================================
@@ -427,6 +468,10 @@ export async function safeSpawnAsync(
 			shell: false,
 			windowsVerbatimArguments,
 		});
+		if (options?.lifetimeCoupled && child.pid) {
+			installLifetimeCleanup();
+			lifetimeCoupledPids.add(child.pid);
+		}
 
 		// #620: bracket this spawn's lifetime with a short-interval CPU/RSS poll
 		// (started right here, stopped in the "close" handler below) so transient
@@ -447,13 +492,21 @@ export async function safeSpawnAsync(
 		// On Windows, shell:true means child.pid is cmd.exe — child.kill() only
 		// kills the wrapper, leaving the actual subprocess (e.g. knip/npx) alive
 		// as an orphan. Use taskkill /F /T to kill the full process tree instead.
-		const killTree = () => {
+		const killTree = async (): Promise<void> => {
 			if (isWindows && child.pid && child.pid > 0) {
 				const taskkill = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\taskkill.exe`;
 				try {
-					spawn(taskkill, ["/F", "/T", "/PID", String(child.pid)], {
-						shell: false,
-						windowsHide: true,
+					await new Promise<void>((done) => {
+						const killer = spawn(taskkill, ["/F", "/T", "/PID", String(child.pid)], {
+							shell: false,
+							windowsHide: true,
+							stdio: "ignore",
+						});
+						killer.once("close", () => done());
+						killer.once("error", () => {
+							child.kill("SIGKILL");
+							done();
+						});
 					});
 				} catch {
 					child.kill("SIGKILL");
@@ -470,7 +523,7 @@ export async function safeSpawnAsync(
 		const onAbort = () => {
 			if (!killed && !child.killed) {
 				killed = true;
-				killTree();
+				void killTree();
 			}
 		};
 		abortSignal?.addEventListener("abort", onAbort, { once: true });
@@ -482,11 +535,12 @@ export async function safeSpawnAsync(
 		child.stderr?.on("data", (data) => (stderr += data));
 
 		// Timeout handling - KILL the process, don't just abandon it
+		let killPromise: Promise<void> | undefined;
 		const timeoutId = setTimeout(() => {
 			timedOut = true;
 			if (!killed && !child.killed) {
 				killed = true;
-				killTree();
+				killPromise = killTree();
 			}
 		}, timeout);
 
@@ -514,9 +568,11 @@ export async function safeSpawnAsync(
 		};
 
 		// Process completion
-		child.on("close", (code, signal) => {
+		child.on("close", async (code, signal) => {
 			clearTimeout(timeoutId);
 			abortSignal?.removeEventListener("abort", onAbort);
+			if (child.pid) lifetimeCoupledPids.delete(child.pid);
+			await killPromise;
 			const resourceUsage = finishResourceUsage();
 
 			if (timedOut) {
@@ -545,6 +601,7 @@ export async function safeSpawnAsync(
 		child.on("error", (err) => {
 			clearTimeout(timeoutId);
 			abortSignal?.removeEventListener("abort", onAbort);
+			if (child.pid) lifetimeCoupledPids.delete(child.pid);
 			const resourceUsage = finishResourceUsage();
 			resolve({ stdout, stderr, status: null, error: err, resourceUsage });
 		});
