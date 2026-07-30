@@ -35,6 +35,8 @@ export interface WordIndex {
 	docLengths: Map<string, number>;
 	totalTokens: number;
 	docCount: number;
+	/** True when source collection hit its file cap, so searches may be incomplete. */
+	truncated?: boolean;
 	/**
 	 * Forward index (#348 phase 2): file → (token → distinct-line count for that
 	 * token in that file). Mirrors exactly what the postings list holds for this
@@ -149,7 +151,7 @@ export function tokenizeLine(line: string): string[] {
  * that repeats an identifier. Document length is the total indexed token count.
  */
 export function buildWordIndex(
-	files: Array<{ path: string; content: string }>,
+	files: Array<{ path: string; content: string }> & { truncated?: boolean },
 ): WordIndex {
 	const postings = new Map<string, WordHit[]>();
 	const docLengths = new Map<string, number>();
@@ -178,7 +180,14 @@ export function buildWordIndex(
 		totalTokens += docLength;
 	}
 
-	return { postings, docLengths, totalTokens, docCount: files.length, forward };
+	return {
+		postings,
+		docLengths,
+		totalTokens,
+		docCount: files.length,
+		truncated: files.truncated ?? false,
+		forward,
+	};
 }
 
 /**
@@ -296,7 +305,9 @@ export const WORD_INDEX_MAX_BYTES = 512 * 1024;
 export async function collectWordIndexDocs(
 	root: string,
 	shouldContinue: () => boolean = () => true,
-): Promise<Array<{ path: string; content: string }>> {
+): Promise<
+	Array<{ path: string; content: string }> & { truncated: boolean }
+> {
 	const { collectSourceFilesAsync } = await import("./source-filter.js");
 	// #747 hardening: pass the cap INTO the walk — without it,
 	// `collectSourceFilesAsync` defaults to an unbounded traversal and the
@@ -316,8 +327,12 @@ export async function collectWordIndexDocs(
 		maxFiles,
 		prioritizeCodeKinds: true,
 	});
-	if (!shouldContinue()) return [];
-	const docs: Array<{ path: string; content: string }> = [];
+	const truncated = files.length === maxFiles;
+	const docs = Object.assign(
+		[] as Array<{ path: string; content: string }>,
+		{ truncated },
+	);
+	if (!shouldContinue()) return docs;
 	let processed = 0;
 	for (const file of files.slice(0, maxFiles)) {
 		try {
@@ -459,6 +474,10 @@ export interface SerializedWordIndex {
 	/** Parallel to {@link files}: indexed token count per file. */
 	docLengths: number[];
 	totalTokens: number;
+	/** Number of files actually represented in this index. */
+	indexedFileCount?: number;
+	/** True when source collection reached its configured file cap. */
+	truncated?: boolean;
 	/**
 	 * Forward index (#348 phase 2): `[fileIdx, [[token, lineCount], …]]` per
 	 * file. Optional so pre-phase-2 snapshots parse unchanged. When ABSENT on
@@ -499,6 +518,8 @@ export function serializeWordIndex(index: WordIndex): SerializedWordIndex {
 		postings,
 		docLengths: files.map((file) => index.docLengths.get(file) ?? 0),
 		totalTokens: index.totalTokens,
+		indexedFileCount: index.docCount,
+		truncated: index.truncated,
 		forward,
 	};
 }
@@ -557,6 +578,7 @@ export function deserializeWordIndex(
 		totalTokens:
 			typeof data.totalTokens === "number" ? data.totalTokens : 0,
 		docCount: data.files.length,
+		truncated: data.truncated === true,
 		forward,
 	};
 }
@@ -572,11 +594,22 @@ export function deserializeWordIndex(
 // single background build, keyed by the resolved cwd so a burst of queries in
 // the same cold window only pays for one walk, and returns immediately.
 
-const inFlightBuilds = new Set<string>();
+export type WordIndexBuildStatus =
+	| { state: "building" }
+	| { state: "refused"; reason: string }
+	| { state: "failed"; reason: string };
+
+const buildStatuses = new Map<string, WordIndexBuildStatus>();
+
+export function getWordIndexBuildStatus(
+	cwd: string,
+): WordIndexBuildStatus | undefined {
+	return buildStatuses.get(path.resolve(cwd));
+}
 
 /** Test-only: reset the in-flight-build guard between test files/cases. */
 export function _resetWordIndexBuildGuardForTests(): void {
-	inFlightBuilds.clear();
+	buildStatuses.clear();
 }
 
 /**
@@ -591,7 +624,7 @@ export function triggerBackgroundWordIndexBuild(
 	cwd: string,
 	dbg?: (msg: string) => void,
 	options: { homeDir?: string } = {},
-): void {
+): WordIndexBuildStatus {
 	const key = path.resolve(cwd);
 	// #747 hardening: this trigger is the one word-index build path with NO
 	// session lifecycle in front of it (cold `symbol_search` queries, in-process
@@ -600,13 +633,16 @@ export function triggerBackgroundWordIndexBuild(
 	// a home-rooted cwd. Apply the same `isAtOrAboveHomeDir` ceiling here so a
 	// cold query from $HOME never starts a whole-home walk-and-read.
 	if (isAtOrAboveHomeDir(key, options.homeDir)) {
-		dbg?.(
-			`word-index cold-build: skipped — root at/above home directory (${key})`,
-		);
-		return;
+		const reason = `root at/above home directory (${key})`;
+		dbg?.(`word-index cold-build: skipped — ${reason}`);
+		const status = { state: "refused", reason } as const;
+		buildStatuses.set(key, status);
+		return status;
 	}
-	if (inFlightBuilds.has(key)) return;
-	inFlightBuilds.add(key);
+	const current = buildStatuses.get(key);
+	if (current?.state === "building") return current;
+	const status = { state: "building" } as const;
+	buildStatuses.set(key, status);
 	void (async () => {
 		const startMs = Date.now();
 		try {
@@ -631,12 +667,14 @@ export function triggerBackgroundWordIndexBuild(
 			dbg?.(
 				`word-index cold-build: ${index.docCount} files, ${index.postings.size} tokens (${Date.now() - startMs}ms)`,
 			);
+			buildStatuses.delete(key);
 		} catch (err) {
-			dbg?.(`word-index cold-build: failed: ${err}`);
-		} finally {
-			inFlightBuilds.delete(key);
+			const reason = err instanceof Error ? err.message : String(err);
+			buildStatuses.set(key, { state: "failed", reason });
+			dbg?.(`word-index cold-build: failed: ${reason}`);
 		}
 	})();
+	return status;
 }
 
 // --- Debounced per-edit persist (#348 phase 2) --------------------------------

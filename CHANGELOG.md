@@ -27,6 +27,9 @@ All notable changes to pi-lens will be documented in this file.
 	with the cap plus both `.pi-lens.json#maxProjectFiles` and
 	`PI_LENS_REVIEW_GRAPH_MAX_FILES` controls, keeping disabled data distinct from
 	a genuinely empty/cold graph.
+- **Project scans release each processed file's full source content** (refs #886)
+	instead of retaining every source string in their shared `FactStore` until the
+	scan ends; derived per-file facts and session facts remain available.
 - Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
 - Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
 - **Project diagnostics now use one file-major scan pass** (refs #896) —
@@ -69,6 +72,21 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Capped word indexes disclose partial coverage** (refs #928) — snapshots now
+	persist indexed-file count and truncation state, and both `symbol_search`
+	surfaces report coverage instead of presenting capped zero-hit results as
+	authoritative.
+- **`pilens_health` keeps disabled LSP servers visible** (refs #927) —
+	permanently broken server/root pairs now render with their failure count, and
+	temporary circuit-breaker cooldowns expose their retry deadline.
+- **Cold `symbol_search` failures are now observable and honest** (refs #926) —
+	unavailable results distinguish an active build, a safety refusal, and the
+	last build's failure, while background build/persist errors reach a persistent
+	NDJSON log.
+- **Failed heavyweight analyzers no longer masquerade as clean runs** (refs #925) —
+	unsuccessful results are reported distinctly, omitted from cache so the next
+	session retries, and valid fix-worklog records survive neighboring corrupt lines.
+
 - **The footer refreshes as LSP servers come online during a cold
 	`lens_diagnostics mode=full` sweep** (refs #798), instead of showing
 	`LSP Inactive` until turn end. The repaint captures UI methods during the
@@ -87,6 +105,12 @@ All notable changes to pi-lens will be documented in this file.
 	package is a source checkout with `tsconfig.dist.json` outside
 	`node_modules`; installed servers also omit the tool from `tools/list`, so
 	subagent allowlists cannot discover it.
+- **Review-graph background failures are no longer silent** (refs #919) —
+	`project_report`/`pilens_project_report` now surface the most recent build
+	attempt and its terminal skip/failure reason, including the persistence
+	element circuit-breaker. A dedicated `~/.pi-lens/review-graph.log` records
+	build and persistence starts, successes, skips, and failures, so a rejected
+	fire-and-forget build or an over-cap graph cannot look perpetually in progress.
 
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 

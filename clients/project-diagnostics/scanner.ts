@@ -272,31 +272,37 @@ async function scanFileMajorRules(
 				content = null;
 			}
 
-			await scanTreeSitterFile(filePath, langId, content);
-			if (isTreeSitterWasmAborted()) {
-				wasmAborted = true;
-				break;
-			}
-
-			if (factEligible) {
-				await scanFactRulesFile(filePath, content);
+			try {
+				await scanTreeSitterFile(filePath, langId, content);
 				if (isTreeSitterWasmAborted()) {
 					wasmAborted = true;
 					break;
 				}
-			}
 
-			if (signal?.aborted) {
-				// The former phase-major scan never started ast-grep after a
-				// phase-one abort. Discard earlier ast-grep work from this merged
-				// pass to preserve that partial-result contract.
-				astGrep.length = 0;
-				break;
+				if (factEligible) {
+					await scanFactRulesFile(filePath, content);
+					if (isTreeSitterWasmAborted()) {
+						wasmAborted = true;
+						break;
+					}
+				}
+
+				if (signal?.aborted) {
+					// The former phase-major scan never started ast-grep after a
+					// phase-one abort. Discard earlier ast-grep work from this merged
+					// pass to preserve that partial-result contract.
+					astGrep.length = 0;
+					break;
+				}
+				if (astGrepLang && content !== null) {
+					scanAstGrepFile(filePath, content, astGrepLang);
+				}
+				filesScanned++;
+			} finally {
+				// The shared scan store keeps derived facts for any later cross-file
+				// consumer, but no consumer after this iteration needs the source bytes.
+				facts.deleteFileFact(filePath, "file.content");
 			}
-			if (astGrepLang && content !== null) {
-				scanAstGrepFile(filePath, content, astGrepLang);
-			}
-			filesScanned++;
 		}
 		if (wasmAborted) {
 			// Mirror the phase-major #891 contract: the ast-grep phase never ran
