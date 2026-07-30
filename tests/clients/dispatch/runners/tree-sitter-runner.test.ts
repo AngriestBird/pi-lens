@@ -45,6 +45,8 @@ async function loadRunnerWithClient(isAvailable: boolean, initResult: boolean) {
 		queriesForLanguage: (queries: Map<string, unknown[]>, languageId: string) =>
 			queries.get(languageId) ?? [],
 		isDisabledQueryFilePath: () => false,
+		ruleFilesForLanguage: () => [],
+		ruleSourceLanguages: (languageId: string) => [languageId],
 	}));
 	vi.doMock("../../../../clients/cache/rule-cache.js", () => ({
 		RuleCache: class {
@@ -110,6 +112,8 @@ async function loadRunnerWithQueries(queries: unknown[]) {
 		queriesForLanguage: (q: Map<string, unknown[]>, languageId: string) =>
 			q.get(languageId) ?? [],
 		isDisabledQueryFilePath: () => false,
+		ruleFilesForLanguage: () => [],
+		ruleSourceLanguages: (languageId: string) => [languageId],
 	}));
 	vi.doMock("../../../../clients/cache/rule-cache.js", () => ({
 		RuleCache: class {
@@ -173,6 +177,8 @@ describe("tree-sitter runner — metadata", () => {
 			queriesForLanguage: (queries: Map<string, unknown[]>, languageId: string) =>
 				queries.get(languageId) ?? [],
 			isDisabledQueryFilePath: () => false,
+			ruleFilesForLanguage: () => [],
+			ruleSourceLanguages: (languageId: string) => [languageId],
 		}));
 		vi.doMock("../../../../clients/cache/rule-cache.js", () => ({
 			RuleCache: class {
