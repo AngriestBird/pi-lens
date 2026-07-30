@@ -361,6 +361,8 @@ export interface SymbolSearchResult {
 	available: boolean;
 	query: string;
 	results: SymbolSearchHit[];
+	/** Coverage of the persisted/warm index used for this answer. */
+	coverage?: { files: number; truncated: boolean };
 	/** Actionable guidance when `available` is false (#348 decision 3): the
 	 * index build was kicked off in the background (deduped per cwd), never
 	 * blocking this call — retry shortly. */
@@ -475,6 +477,7 @@ export async function symbolSearch(
 		available: true,
 		query,
 		results: hits,
+		coverage: { files: index.docCount, truncated: index.truncated === true },
 		snapshotGeneratedAt: snapshot?.generatedAt,
 	};
 }

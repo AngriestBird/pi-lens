@@ -78,7 +78,10 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   result distinguishes `building`, a safety `refused` outcome, and
   `last-build-failed`; the per-cwd guard remembers the last outcome and
   `clients/word-index-logger.ts` persists cold-build/debounced-persist failures
-  through `createNdjsonLogger` instead of swallowing them. Hits carry
+  through `createNdjsonLogger` instead of swallowing them. Serialized indexes
+  also carry `indexedFileCount`/`truncated` (missing fields on legacy snapshots
+  mean not truncated); both symbol-search surfaces return `coverage` and warn
+  when the file cap makes results partial. Hits carry
   `startLine`/`endLine` (best-matching line;
   `offset=startLine, limit=endLine-startLine+1`) instead of a raw `lines[]` array or
   a per-hit `read` block — #517 conformity, same as module_report below), `pilens_module_report` (navigable outline + signatures

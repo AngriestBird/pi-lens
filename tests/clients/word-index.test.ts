@@ -268,6 +268,27 @@ describe("serializeWordIndex / deserializeWordIndex", () => {
 		expect(handler![1]).toEqual(expect.arrayContaining([0, 1]));
 	});
 
+	it("round-trips indexed-file coverage and truncation (#928)", () => {
+		const cappedFiles = Object.assign([...files], { truncated: true });
+		const serialized = serializeWordIndex(buildWordIndex(cappedFiles));
+		expect(serialized.indexedFileCount).toBe(2);
+		expect(serialized.truncated).toBe(true);
+		expect(deserializeWordIndex(serialized)).toMatchObject({
+			docCount: 2,
+			truncated: true,
+		});
+	});
+
+	it("treats missing legacy coverage fields as not truncated (#928)", () => {
+		const serialized = serializeWordIndex(buildWordIndex(files));
+		delete serialized.indexedFileCount;
+		delete serialized.truncated;
+		expect(deserializeWordIndex(serialized)).toMatchObject({
+			docCount: 2,
+			truncated: false,
+		});
+	});
+
 	it("returns null for malformed serialized input", () => {
 		expect(deserializeWordIndex(null)).toBeNull();
 		expect(deserializeWordIndex({} as never)).toBeNull();

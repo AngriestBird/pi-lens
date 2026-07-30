@@ -59,6 +59,10 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Capped word indexes disclose partial coverage** (refs #928) — snapshots now
+	persist indexed-file count and truncation state, and both `symbol_search`
+	surfaces report coverage instead of presenting capped zero-hit results as
+	authoritative.
 - **`pilens_health` keeps disabled LSP servers visible** (refs #927) —
 	permanently broken server/root pairs now render with their failure count, and
 	temporary circuit-breaker cooldowns expose their retry deadline.

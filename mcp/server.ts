@@ -1011,7 +1011,14 @@ async function callTool(
 			? args.paths.filter((p): p is string => typeof p === "string")
 			: undefined;
 		const lang = typeof args.lang === "string" ? args.lang : undefined;
-		const { available, results, hint, snapshotGeneratedAt } = await symbolSearch(
+		const {
+			available,
+			results,
+			hint,
+			unavailableReason,
+			coverage,
+			snapshotGeneratedAt,
+		} = await symbolSearch(
 			query,
 			cwd,
 			limit,
@@ -1020,18 +1027,23 @@ async function callTool(
 		if (!available) {
 			return toolText(
 				hint ?? "No word index for this workspace yet — run pilens_session_start first.",
-				{ available: false, query, hint },
+				{ available: false, query, hint, unavailableReason },
 				true,
 			);
 		}
 		const stalenessNote = graphStalenessNote(snapshotGeneratedAt, "Project snapshot");
 		if (results.length === 0) {
 			return toolText(
-				`No files matched "${query}".` + (stalenessNote ? `\n\n${stalenessNote}` : ""),
+				`No files matched "${query}".` +
+					(coverage
+						? `\nIndex covers ${coverage.files} files${coverage.truncated ? " (capped — results may be incomplete)" : ""}.`
+						: "") +
+					(stalenessNote ? `\n\n${stalenessNote}` : ""),
 				{
 					available: true,
 					query,
 					results: [],
+					coverage,
 					...(stalenessNote ? { staleness: stalenessNote } : {}),
 				},
 				true,
@@ -1046,6 +1058,11 @@ async function callTool(
 					`line ${result.startLine})`,
 			),
 			...(stalenessNote ? ["", stalenessNote] : []),
+			...(coverage
+				? [
+						`Index covers ${coverage.files} files${coverage.truncated ? " (capped — results may be incomplete)" : ""}.`,
+					]
+				: []),
 		];
 		// Compact (unindented) JSON — matches the module_report / read_symbol
 		// convention (#517): an agent parses this payload, it doesn't read it
@@ -1055,6 +1072,7 @@ async function callTool(
 			lines.join("\n"),
 			{
 				query,
+				coverage,
 				results: results.map((result) => {
 					const relFile = path.relative(cwd, result.file);
 					return {

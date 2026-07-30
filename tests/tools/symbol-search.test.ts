@@ -30,8 +30,9 @@ afterEach(() => {
 function warmWordIndexSnapshot(
 	tmpDir: string,
 	files: Array<{ path: string; content: string }>,
+	truncated = false,
 ): void {
-	const index = buildWordIndex(files);
+	const index = buildWordIndex(Object.assign(files, { truncated }));
 	saveProjectSnapshot(tmpDir, {
 		version: PROJECT_SNAPSHOT_VERSION,
 		projectRoot: tmpDir,
@@ -43,9 +44,39 @@ function warmWordIndexSnapshot(
 		cachedExports: [],
 		wordIndex: serializeWordIndex(index),
 	});
+
 }
 
 describe("symbol_search tool", () => {
+	it("zero-hit output warns when the index is capped and exposes coverage (#928)", async () => {
+		const env = setupTestEnvironment("pi-lens-symbolsearch-capped-");
+		try {
+			warmWordIndexSnapshot(
+				env.tmpDir,
+				[{ path: "src/auth.ts", content: "export const authenticate = true;" }],
+				true,
+			);
+			const tool = createSymbolSearchTool(() => env.tmpDir);
+			const result = await tool.execute(
+				"1",
+				{ query: "definitely absent identifier" },
+				undefined,
+				null,
+				{ cwd: env.tmpDir },
+			);
+			expect(String(result.content[0]?.text)).toContain(
+				"Index covers 1 files (capped — results may be incomplete).",
+			);
+			expect(result.details).toMatchObject({
+				available: true,
+				count: 0,
+				coverage: { files: 1, truncated: true },
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("cold path: returns available:false with an actionable hint and kicks off a background build", async () => {
 		const env = setupTestEnvironment("pi-lens-symbolsearch-cold-");
 		try {
