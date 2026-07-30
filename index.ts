@@ -871,6 +871,26 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("lens-perf", {
+		description:
+			"Show the slowest latency-log phases by p50 and p99 for the current process session and machine-wide active log window. Usage: /lens-perf",
+		handler: async (_args, ctx) => {
+			try {
+				const { collectLatencyPerformance, renderLatencyPerformanceReport } =
+					await import("./clients/performance-report.js");
+				const report = await collectLatencyPerformance({
+					sessionStartedAt: runtime.sessionStartedAt,
+				});
+				ctx.ui.notify(renderLatencyPerformanceReport(report), "info");
+			} catch (err) {
+				ctx.ui.notify(
+					`Failed to read performance telemetry: ${err instanceof Error ? err.message : String(err)}`,
+					"error",
+				);
+			}
+		},
+	});
+
 	pi.registerCommand("lens-tools", {
 		description:
 			"Show pi-lens tool installation status: globally installed, auto-installed, or npx fallback. Usage: /lens-tools",
@@ -1012,6 +1032,7 @@ export default function (pi: ExtensionAPI) {
 			// a scan-originated write can't clobber a concurrent newer per-edit
 			// write (or vice versa).
 			() => runtime.nextWriteIndex(),
+			captureLspStatusRepaint,
 		),
 		createLspDiagnosticsTool(
 			// #571: same reconciliation wiring as lens_diagnostics mode=full, for

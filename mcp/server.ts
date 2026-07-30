@@ -58,6 +58,7 @@ import {
 	scanTruncationNotice,
 	summarizeScan,
 	symbolSearch,
+	treeSitterRuntimeStatus,
 	type WarmAnalyzeRequest,
 } from "../clients/lens-engine.js";
 import { createAstGrepReplaceTool } from "../tools/ast-grep-replace.js";
@@ -1012,6 +1013,9 @@ async function callTool(
 			topFiles,
 			sample: deduped.slice(0, 40),
 			...(snapshot.scanTruncated ? { scanTruncated: true } : {}),
+			...(snapshot.treeSitterStatus
+				? { treeSitterStatus: snapshot.treeSitterStatus }
+				: {}),
 		});
 	}
 
@@ -1291,10 +1295,14 @@ async function callTool(
 		const last = recentLatency(1)[0];
 		const stats = diagnosticStats();
 		const autoSession = getAutoSessionStatus();
+		const treeSitter = treeSitterRuntimeStatus();
 		// #620: best-effort — a footprint read failure must never break the rest
 		// of pilens_health's (much older, more load-bearing) reporting.
 		const footprint = await resourceFootprint().catch(() => null);
 		const lines = [
+			treeSitter.wasmAborted
+				? `Tree-sitter: DEGRADED — WASM runtime aborted${treeSitter.abortedAt ? ` at ${treeSitter.abortedAt}` : ""}; restart this server to recover`
+				: "Tree-sitter: available",
 			`LSP: ${aliveClients} alive client(s)`,
 			...servers.map(
 				(server) =>
@@ -1330,6 +1338,7 @@ async function callTool(
 				unresolved: stats.totalUnresolved,
 			},
 			autoSession,
+			treeSitter,
 			resourceFootprint: footprint,
 		});
 	}

@@ -46,13 +46,13 @@ afterAll(() => {
 });
 
 describe("empty-switch-case (TS)", () => {
-	it("matches a case with no body", async () => {
+	it("matches a case with no body and no following label", async () => {
 		expect(
 			await count(
 				"empty-switch-case",
 				"ts",
 				"typescript",
-				`switch (x) {\n case 1:\n case 2:\n  doWork();\n  break;\n}`,
+				`switch (x) {\n case 1:\n  doWork();\n  break;\n case 2:\n}`,
 			),
 		).toBeGreaterThan(0);
 	});
@@ -64,6 +64,30 @@ describe("empty-switch-case (TS)", () => {
 				"ts",
 				"typescript",
 				`switch (x) {\n case 1:\n  doWork();\n  break;\n case 2:\n  other();\n  break;\n}`,
+			),
+		).toBe(0);
+	});
+
+	it("does not match grouped labels sharing the next case's body", async () => {
+		// `case "a": case "b": handle()` is idiomatic fall-through grouping, not a
+		// dead case — flagging it made every grouped switch a blocking error.
+		expect(
+			await count(
+				"empty-switch-case",
+				"ts",
+				"typescript",
+				`switch (x) {\n case "a":\n case "b":\n  handle();\n  break;\n}`,
+			),
+		).toBe(0);
+	});
+
+	it("does not match a label grouped onto a following default", async () => {
+		expect(
+			await count(
+				"empty-switch-case",
+				"ts",
+				"typescript",
+				`switch (x) {\n case 1:\n  handle();\n  break;\n case 2:\n default:\n  other();\n}`,
 			),
 		).toBe(0);
 	});
@@ -83,7 +107,12 @@ describe("infinite-loop (TS)", () => {
 
 	it("matches for(;;) with no exit", async () => {
 		expect(
-			await count("infinite-loop", "ts", "typescript", `for (;;) {\n tick();\n}`),
+			await count(
+				"infinite-loop",
+				"ts",
+				"typescript",
+				`for (;;) {\n tick();\n}`,
+			),
 		).toBeGreaterThan(0);
 	});
 
@@ -94,6 +123,19 @@ describe("infinite-loop (TS)", () => {
 				"ts",
 				"typescript",
 				`while (true) {\n if (done) break;\n doWork();\n}`,
+			),
+		).toBe(0);
+	});
+
+	it("does not match while(true) exited by a labeled break from a nested loop", async () => {
+		// A plain `break` inside a nested loop is swallowed by it, but `break outer;`
+		// leaves the labeled loop — the loop is not infinite.
+		expect(
+			await count(
+				"infinite-loop",
+				"ts",
+				"typescript",
+				`outer: while (true) {\n for (const a of b) {\n  if (a) break outer;\n }\n}`,
 			),
 		).toBe(0);
 	});
@@ -193,9 +235,17 @@ describe("switch-case-termination (TS)", () => {
 	});
 
 	it.each([
-		["a block-wrapped terminating case", `{ const body = compute(); return body; }`, 0],
+		[
+			"a block-wrapped terminating case",
+			`{ const body = compute(); return body; }`,
+			0,
+		],
 		["a block-wrapped non-terminating case", `{ compute(); }`, 1],
-		["nested trailing blocks that terminate", `{ compute(); { return "one"; } }`, 0],
+		[
+			"nested trailing blocks that terminate",
+			`{ compute(); { return "one"; } }`,
+			0,
+		],
 		["an empty trailing block", `{ }`, 1],
 	])("%s", async (_name, caseBody, expected) => {
 		expect(
@@ -257,9 +307,17 @@ describe("switch-case-termination-js (JS)", () => {
 	});
 
 	it.each([
-		["a block-wrapped terminating case", `{ const body = compute(); return body; }`, 0],
+		[
+			"a block-wrapped terminating case",
+			`{ const body = compute(); return body; }`,
+			0,
+		],
 		["a block-wrapped non-terminating case", `{ compute(); }`, 1],
-		["nested trailing blocks that terminate", `{ compute(); { return "one"; } }`, 0],
+		[
+			"nested trailing blocks that terminate",
+			`{ compute(); { return "one"; } }`,
+			0,
+		],
 		["an empty trailing block", `{ }`, 1],
 	])("%s", async (_name, caseBody, expected) => {
 		expect(

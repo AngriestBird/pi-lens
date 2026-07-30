@@ -123,6 +123,7 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 		};
 		expect(result.content[0].type).toBe("text");
 		expect(result.content[0].text).toContain("LSP:");
+		expect(result.content[0].text).toContain("Tree-sitter: available");
 		// #544: this harness never sets PI_LENS_MCP_AUTO_SESSION, so the health
 		// response must report the feature as off (`null`), distinguishable from
 		// "attempted and failed" — not merely omit the field.
@@ -133,8 +134,14 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 		expect(jsonMatch).toBeTruthy();
 		const payload = JSON.parse(jsonMatch?.[1] ?? "{}") as {
 			autoSession: unknown;
+			treeSitter: unknown;
 		};
 		expect(payload.autoSession).toBeNull();
+		expect(payload.treeSitter).toEqual({
+			available: true,
+			wasmAborted: false,
+			recovery: "not_required",
+		});
 	}, 25_000);
 
 	it("answers tools/call pilens_diagnostics (lens_diagnostics, delta mode)", async () => {

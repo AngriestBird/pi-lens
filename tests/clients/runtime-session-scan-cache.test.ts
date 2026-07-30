@@ -41,14 +41,26 @@ vi.mock("../../clients/lsp/index.js", () => ({
 }));
 
 const resolveStartupScanContextSpy = vi.hoisted(() => vi.fn());
+const resolveStartupScanContextAsyncSpy = vi.hoisted(() => vi.fn());
+const logLatencySpy = vi.hoisted(() => vi.fn());
+
+vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/latency-logger.js")>();
+	return { ...actual, logLatency: logLatencySpy };
+});
 
 vi.mock("../../clients/startup-scan.js", async (importOriginal) => {
 	const actual =
 		await importOriginal<typeof import("../../clients/startup-scan.js")>();
 	resolveStartupScanContextSpy.mockImplementation(actual.resolveStartupScanContext);
+	resolveStartupScanContextAsyncSpy.mockImplementation(
+		actual.resolveStartupScanContextAsync,
+	);
 	return {
 		...actual,
 		resolveStartupScanContext: resolveStartupScanContextSpy,
+		resolveStartupScanContextAsync: resolveStartupScanContextAsyncSpy,
 	};
 });
 
@@ -105,6 +117,8 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 		restoreStartupMode = setStartupMode("full");
 		previousDataDir = process.env.PILENS_DATA_DIR;
 		resolveStartupScanContextSpy.mockClear();
+		resolveStartupScanContextAsyncSpy.mockClear();
+		logLatencySpy.mockClear();
 		_resetStartupScanVerdictTtlForTests();
 	});
 
@@ -125,8 +139,27 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 			const cwd = path.join(env.tmpDir, "project");
 			createTempFile(env.tmpDir, "project/index.ts", "export const x = 1;\n");
 
-			await handleSessionStart(makeDeps(cwd));
+			const deps = makeDeps(cwd);
+			await handleSessionStart(deps);
 			expect(resolveStartupScanContextSpy).toHaveBeenCalledTimes(1);
+			expect(logLatencySpy).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "session_start_scan_context_compute",
+					metadata: { mode: "full" },
+				}),
+			);
+			expect(logLatencySpy).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "session_start_total",
+					metadata: { mode: "full" },
+				}),
+			);
+			const totalEntry = logLatencySpy.mock.calls
+				.map(([entry]) => entry)
+				.find((entry) => entry.phase === "session_start_total");
+			expect(Date.parse(totalEntry.startedAt)).toBe(
+				deps.runtime.sessionStartedAt,
+			);
 
 			const snapshotPath = getProjectSnapshotPath(cwd);
 			expect(fs.existsSync(snapshotPath)).toBe(true);
@@ -139,9 +172,18 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 			// persisted verdict is fresh — resolveStartupScanContext must NOT be
 			// called again.
 			resolveStartupScanContextSpy.mockClear();
+			logLatencySpy.mockClear();
 			const dbgLog: string[] = [];
 			await handleSessionStart(makeDeps(cwd, (msg) => dbgLog.push(msg)));
 			expect(resolveStartupScanContextSpy).not.toHaveBeenCalled();
+			expect(logLatencySpy).not.toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "session_start_scan_context_compute",
+				}),
+			);
+			expect(logLatencySpy).toHaveBeenCalledWith(
+				expect.objectContaining({ phase: "session_start_total" }),
+			);
 			expect(dbgLog).toContainEqual(
 				expect.stringContaining("session_start scan-context source=snapshot"),
 			);
@@ -215,6 +257,68 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 			expect(resolveStartupScanContextSpy).toHaveBeenCalledTimes(1);
 		} finally {
 			delete process.env.PI_LENS_STARTUP_SCAN_VERDICT_TTL_MS;
+			env.cleanup();
+		}
+	});
+
+	it("logs total latency on the quick startup path", async () => {
+		restoreStartupMode();
+		restoreStartupMode = setStartupMode("quick");
+		const env = setupTestEnvironment("pi-lens-scan-cache-quick-");
+		const globals = globalThis as unknown as {
+			__piLensWarmupScheduled?: boolean;
+		};
+		const previousWarmup = globals.__piLensWarmupScheduled;
+		globals.__piLensWarmupScheduled = true;
+		try {
+			await handleSessionStart(makeDeps(env.tmpDir));
+			expect(logLatencySpy).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "session_start_total",
+					metadata: { mode: "quick" },
+				}),
+			);
+		} finally {
+			globals.__piLensWarmupScheduled = previousWarmup;
+			env.cleanup();
+		}
+	});
+
+	it("logs the deferred quick-mode scan-context computation", async () => {
+		restoreStartupMode();
+		restoreStartupMode = setStartupMode("quick");
+		const env = setupTestEnvironment("pi-lens-scan-cache-quick-warmup-");
+		const globals = globalThis as unknown as {
+			__piLensWarmupScheduled?: boolean;
+		};
+		const previousWarmup = globals.__piLensWarmupScheduled;
+		const previousDelay = process.env.PI_LENS_WARMUP_DELAY_MS;
+		globals.__piLensWarmupScheduled = false;
+		process.env.PI_LENS_WARMUP_DELAY_MS = "1";
+		resolveStartupScanContextAsyncSpy.mockResolvedValueOnce({
+			cwd: env.tmpDir,
+			scanRoot: env.tmpDir,
+			canWarmCaches: false,
+			reason: "no-project-root",
+			sourceFileCount: 0,
+			computedAt: Date.now(),
+		});
+		vi.useFakeTimers();
+		try {
+			await handleSessionStart(makeDeps(env.tmpDir));
+			await vi.advanceTimersByTimeAsync(1);
+			expect(resolveStartupScanContextAsyncSpy).toHaveBeenCalledTimes(1);
+			expect(logLatencySpy).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "session_start_scan_context_compute",
+					metadata: { mode: "quick-background" },
+				}),
+			);
+		} finally {
+			vi.useRealTimers();
+			globals.__piLensWarmupScheduled = previousWarmup;
+			if (previousDelay === undefined) delete process.env.PI_LENS_WARMUP_DELAY_MS;
+			else process.env.PI_LENS_WARMUP_DELAY_MS = previousDelay;
 			env.cleanup();
 		}
 	});

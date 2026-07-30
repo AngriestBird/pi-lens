@@ -551,6 +551,20 @@ const LSP_FIXTURES = [
 		tools: ["clojure-lsp"],
 	},
 	{
+		lang: "fish",
+		dir: "tests/fixtures/tool-smoke/fish",
+		file: "bad.fish",
+		serverHint: "fish-lsp",
+		tools: ["fish-lsp"],
+	},
+	{
+		lang: "cmake",
+		dir: "tests/fixtures/tool-smoke/cmake",
+		file: "CMakeLists.txt",
+		serverHint: "cmake-language-server",
+		tools: ["cmake-language-server"],
+	},
+	{
 		lang: "nix",
 		dir: "tests/fixtures/tool-smoke/nix",
 		file: "flake.nix",

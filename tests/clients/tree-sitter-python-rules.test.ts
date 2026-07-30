@@ -250,6 +250,23 @@ describe("python tree-sitter rules", () => {
 
 			expect(matches).toHaveLength(0);
 		});
+
+		it.each(["*args", "*exc_info", "exc_type, *rest", "**kw"])(
+			"does not flag __exit__ whose splat absorbs the triple: (self, %s)",
+			async (tail) => {
+				// A splat accepts the whole (exc_type, exc_value, traceback) triple, so
+				// counting named parameter children under-counts a valid signature.
+				const client = getSharedTreeSitterClient()!;
+				const query = await getQuery("exit-signature-check");
+				const filePath = writeTempFile(
+					`class MyContext:\n    def __exit__(self, ${tail}):\n        return False\n`,
+				);
+
+				const matches = await client.runQueryOnFile(query, filePath, "python");
+
+				expect(matches).toHaveLength(0);
+			},
+		);
 	});
 
 	describe("return-in-generator", () => {

@@ -1170,8 +1170,17 @@ export async function handleSessionStart(
 							`warmup: scan-context reused from cache (canWarm=${scan.canWarmCaches}${scan.reason ? `, reason=${scan.reason}` : ""})`,
 						);
 					} else {
+						const scanContextStartedAt = Date.now();
 						scan =
 							await startupScanModule.resolveStartupScanContextAsync(warmupCwd);
+						logLatency({
+							type: "phase",
+							phase: "session_start_scan_context_compute",
+							filePath: warmupCwd,
+							startedAt: new Date(scanContextStartedAt).toISOString(),
+							durationMs: Date.now() - scanContextStartedAt,
+							metadata: { mode: "quick-background" },
+						});
 						warmupDbg(
 							`warmup: scan-context done in ${Date.now() - warmupStartedAt}ms (canWarm=${scan.canWarmCaches})`,
 						);
@@ -1276,7 +1285,7 @@ export async function handleSessionStart(
 	// drop it each session so a PATH change (e.g. a tool installed mid-session
 	// in a prior session, or a differently-scoped shell) is picked up fresh.
 	resetSafeSpawnWindowsCommandCache();
-	runtime.resetForSession();
+	runtime.resetForSession(sessionStartMs);
 
 	// Run log cleanup early in session start (non-blocking)
 	const logCleanup = runLogCleanup(dbg);
@@ -1328,9 +1337,16 @@ export async function handleSessionStart(
 		dbg(
 			"session_start: quick mode active - skipping slow tool probes, language profiling, preinstall, scans, and error debt baseline",
 		);
-		dbg(
-			`session_start total: ${Date.now() - sessionStartMs}ms (interactive path)`,
-		);
+		const totalDurationMs = Date.now() - sessionStartMs;
+		dbg(`session_start total: ${totalDurationMs}ms (interactive path)`);
+		logLatency({
+			type: "phase",
+			phase: "session_start_total",
+			filePath: cwd,
+			startedAt: new Date(sessionStartMs).toISOString(),
+			durationMs: totalDurationMs,
+			metadata: { mode: startupMode },
+		});
 		return;
 	}
 
@@ -1381,9 +1397,21 @@ export async function handleSessionStart(
 			? freshSnapshot.startupScan
 			: undefined;
 	const startupScanSource = cachedStartupScan ? "snapshot" : "computed";
-	const startupScan: StartupScanContext = cachedStartupScan
-		? { ...cachedStartupScan, cwd: path.resolve(cwd) }
-		: resolveStartupScanContext(cwd);
+	let startupScan: StartupScanContext;
+	if (cachedStartupScan) {
+		startupScan = { ...cachedStartupScan, cwd: path.resolve(cwd) };
+	} else {
+		const scanContextStartedAt = Date.now();
+		startupScan = resolveStartupScanContext(cwd);
+		logLatency({
+			type: "phase",
+			phase: "session_start_scan_context_compute",
+			filePath: cwd,
+			startedAt: new Date(scanContextStartedAt).toISOString(),
+			durationMs: Date.now() - scanContextStartedAt,
+			metadata: { mode: startupMode },
+		});
+	}
 	phase("scan-context");
 	dbg(`session_start scan-context source=${startupScanSource}`);
 	const scanRoot = startupScan.projectRoot ?? cwd;
@@ -1653,7 +1681,16 @@ export async function handleSessionStart(
 
 	setSessionLanguages(languageProfile.detectedKinds);
 
+	const totalDurationMs = Date.now() - sessionStartMs;
 	dbg(
-		`session_start total: ${Date.now() - sessionStartMs}ms (interactive path; background tasks may continue)`,
+		`session_start total: ${totalDurationMs}ms (interactive path; background tasks may continue)`,
 	);
+	logLatency({
+		type: "phase",
+		phase: "session_start_total",
+		filePath: cwd,
+		startedAt: new Date(sessionStartMs).toISOString(),
+		durationMs: totalDurationMs,
+		metadata: { mode: startupMode },
+	});
 }

@@ -28,6 +28,10 @@ import { getLSPService } from "./lsp/index.js";
 import { getOrLoadWarmWordIndex } from "./mcp/analyze.js";
 import { scanProjectDiagnostics } from "./project-diagnostics/scanner.js";
 import type { ProjectDiagnosticsSnapshot } from "./project-diagnostics/types.js";
+import {
+	getTreeSitterRuntimeStatus,
+	type TreeSitterRuntimeStatus,
+} from "./tree-sitter-shared.js";
 import * as path from "node:path";
 import { minimatch } from "./deps/minimatch.js";
 import { normalizeMapKey } from "./path-utils.js";
@@ -122,13 +126,28 @@ export function projectScan(
  * Returns `undefined` when the scan was not truncated (no line to append).
  */
 export function scanTruncationNotice(
-	snapshot: Pick<ProjectDiagnosticsSnapshot, "scanTruncated" | "filesScanned">,
+	snapshot: Pick<
+		ProjectDiagnosticsSnapshot,
+		"scanTruncated" | "filesScanned" | "treeSitterStatus"
+	>,
 ): string | undefined {
 	if (!snapshot.scanTruncated) return undefined;
+	if (snapshot.treeSitterStatus === "wasm_aborted_restart_required") {
+		return (
+			`⚠ Scan stopped after ${snapshot.filesScanned} complete file(s): the ` +
+			"tree-sitter WASM runtime aborted. Results are partial and were not cached; " +
+			"restart the pi-lens extension/MCP server to restore structural analysis."
+		);
+	}
 	return (
 		`⚠ Scan truncated at ${snapshot.filesScanned} file(s) — results are partial; ` +
 		"raise maxProjectFiles in .pi-lens.json to scan fully."
 	);
+}
+
+/** Process-wide tree-sitter health for host status surfaces. */
+export function treeSitterRuntimeStatus(): TreeSitterRuntimeStatus {
+	return getTreeSitterRuntimeStatus();
 }
 
 export interface LspStatus {
