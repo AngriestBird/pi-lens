@@ -17,6 +17,11 @@ import { detectFileRole } from "../file-role.js";
 import { getProjectDataDir } from "../file-utils.js";
 import { collectUntrackedIgnoredIds } from "../git-tracked-ignore.js";
 import { logLatency } from "../latency-logger.js";
+import { containerNameChain,
+	getOpenDocumentSymbols,
+	lspSymbolKindName,
+} from "../lsp-document-symbols.js";
+import type { LSPSymbol } from "../lsp/client.js";
 import {
 	isAtOrAboveHomeDir,
 	normalizeFilePath,
@@ -2064,6 +2069,95 @@ function addTreeSitterFile(
 	}
 }
 
+/**
+ * Add documentSymbol results only after tree-sitter produced no declarations.
+ * Hierarchical responses preserve their parent/child containment. Flat
+ * SymbolInformation results (including native TypeScript 7) recover the same
+ * containment through `containerName` when the owner is present in the result.
+ */
+export function addLspFallbackSymbols(
+	graph: ReviewGraph,
+	filePath: string,
+	languageId: string,
+	symbols: LSPSymbol[],
+): number {
+	const normalized = normalizeMapKey(filePath);
+	const fileNodeId = `file:${normalized}`;
+	let added = 0;
+	const flatOwnerIds = new Map<string, string>();
+	for (const symbol of symbols) {
+		const range = symbol.range ?? symbol.location?.range;
+		if (!range) continue;
+		const kind = lspSymbolKindName(symbol.kind);
+		const id = buildSymbolId(
+			normalized,
+			symbol.name,
+			kind,
+			range.start.line + 1,
+		);
+		flatOwnerIds.set(symbol.name, id);
+		if (symbol.containerName) {
+			flatOwnerIds.set(`${symbol.containerName}.${symbol.name}`, id);
+		}
+	}
+	const visit = (
+		items: LSPSymbol[],
+		parentId: string,
+		ancestry: string[],
+	): void => {
+		for (const symbol of items) {
+			const range = symbol.range ?? symbol.location?.range;
+			if (!range) continue;
+			const line = range.start.line + 1;
+			const kind = lspSymbolKindName(symbol.kind);
+			const symbolId = buildSymbolId(normalized, symbol.name, kind, line);
+			// Shared with the read-path enrichment (#951 Sonar dedup): flat
+			// results qualify through the full containerName chain, not just
+			// the immediate owner.
+			const owners =
+				ancestry.length > 0
+					? ancestry
+					: containerNameChain(symbol, symbols);
+			const qualifiedName =
+				owners.length > 0
+					? [...owners, symbol.name].join(".")
+					: undefined;
+			addNode(graph, {
+				id: symbolId,
+				kind: "symbol",
+				language: languageId,
+				filePath: normalized,
+				symbolName: symbol.name,
+				symbolKind: kind,
+				...(qualifiedName ? { qualifiedName } : {}),
+				provenance: "lsp",
+				metadata: {
+					line,
+					column: range.start.character,
+					endLine: range.end.line + 1,
+					...featureHintMetadata(`${symbol.name} ${normalized}`),
+				},
+			});
+			const resolvedParentId =
+				ancestry.length === 0 && symbol.containerName
+					? (flatOwnerIds.get(symbol.containerName) ?? parentId)
+					: parentId;
+			addEdge(graph, {
+				from: resolvedParentId,
+				to: symbolId,
+				kind: "contains",
+			});
+			addEdge(graph, { from: fileNodeId, to: symbolId, kind: "defines" });
+			added++;
+			if (symbol.children) {
+				visit(symbol.children, symbolId, [...owners, symbol.name]);
+			}
+		}
+	};
+	visit(symbols, fileNodeId, []);
+	return added;
+}
+
 function ensureFileNode(
 	graph: ReviewGraph,
 	filePath: string,
@@ -2232,6 +2326,22 @@ async function addFileToGraph(
 		contentOverride,
 	);
 	addTreeSitterFile(graph, cwd, file, languageId, extracted, ignoredIds);
+	if (extracted.symbols.length === 0) {
+		const lspSymbols = await getOpenDocumentSymbols(file);
+		const added = lspSymbols
+			? addLspFallbackSymbols(graph, file, languageId, lspSymbols)
+			: 0;
+		logReviewGraph({
+			phase: "lsp_symbol_fallback",
+			cwd,
+			reason: lspSymbols
+				? added > 0
+					? "added"
+					: "empty-response"
+				: "unavailable-or-failed",
+			nodes: added,
+		});
+	}
 	if (kind === "cxx") {
 		addCxxIncludeEdges(graph, cwd, file, ignoredIds, contentOverride);
 	}

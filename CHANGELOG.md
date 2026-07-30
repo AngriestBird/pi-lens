@@ -4,6 +4,21 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Warm LSP names enrich tree-sitter read expansion** (refs #158) â€” partial
+	read expansion keeps tree-sitter's line boundaries authoritative, but an
+	already-open document with an already-active LSP can now replace the display
+	name/kind from `documentSymbol` (including `Class.method` ancestry) within a
+	150 ms best-effort ceiling. Cold, closed, unsupported, timed-out, or failed
+	servers retain the tree-sitter identity, and `ts_range_expanded` records
+	whether enrichment succeeded.
+
+- **Review-graph LSP fallback nodes** (refs #307) â€” when tree-sitter yields
+	zero declarations, the builder may use `documentSymbol` from an already-live,
+	already-open capable server. Nodes carry `provenance: "lsp"`, hierarchical
+	containment survives persistence (including flat native-TypeScript-7 results
+	reconstructed through `containerName`), productive tree-sitter files never
+	pay the request, and unavailable/failed fallback attempts degrade without
+	opening or spawning while remaining visible in `review-graph.log`.
 - **Installer subprocesses are lifetime-coupled** (refs #945) — npm, pip, gem,
 	and archive extraction now use the shared safe-spawn path, await full Windows
 	process-tree termination on timeout, and synchronously clean registered
