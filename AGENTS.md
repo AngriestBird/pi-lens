@@ -45,6 +45,11 @@ tools/                    ast-grep-search, lsp-navigation tool handlers
 tests/                    Vitest test suite (mirrors clients/ structure)
 ```
 
+Whole-project loops that reuse one `FactStore` must delete `file.content` after
+that file's consumers finish (in a `finally` so abort/error exits release it).
+Keep derived file facts and session facts: later cross-file consumers may still
+need those, but no scan may retain every processed file's full source string.
+
 ## MCP mirror (second host adapter — `mcp/` + `clients/lens-engine.ts`)
 
 pi-lens is also exposed as an **MCP server** so it can be used / live-tested /

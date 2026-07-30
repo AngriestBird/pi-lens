@@ -8,6 +8,9 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **Project scans release each processed file's full source content** (refs #886)
+	instead of retaining every source string in their shared `FactStore` until the
+	scan ends; derived per-file facts and session facts remain available.
 - Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
 - Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
 - **Project diagnostics now use one file-major scan pass** (refs #896) —

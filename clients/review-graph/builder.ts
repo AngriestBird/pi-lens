@@ -1730,8 +1730,14 @@ async function addFileToGraph(
 	// the incremental/cascade path (a changed *.test.ts) never adds them either.
 	if (detectFileRole(file) === "test") return;
 	if (kind === "jsts") {
-		await ensureReviewGraphFacts(file, cwd, facts, contentOverride);
-		addJsTsFile(graph, cwd, file, facts, ignoredIds);
+		try {
+			await ensureReviewGraphFacts(file, cwd, facts, contentOverride);
+			addJsTsFile(graph, cwd, file, facts, ignoredIds);
+		} finally {
+			// The graph has copied every durable value it needs. Keep derived facts
+			// available to callers, but do not retain full source in a shared store.
+			facts.deleteFileFact(file, "file.content");
+		}
 		return;
 	}
 	const languageId = mapKindToTreeSitterLanguage(kind, file);
