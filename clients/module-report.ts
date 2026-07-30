@@ -22,9 +22,10 @@
  *      snapshot) for who-uses-this / flags / imports — never a build. Cold cache
  *      → outline only.
  * `semantic.source` reflects who-uses-this provenance: "review-graph" when the
- * cached graph backs it, else "none" (cold). Live-LSP enrichment is re-homed to
- * #236, where LSP writes provenance-tagged edges INTO the graph (once, persisted)
- * for this path to read as "graph-lsp". That logic lives in clients/module-report-lsp.ts.
+ * cached graph backs it, "unavailable:file-cap" when a size verdict disabled the
+ * graph, else "none" (cold). Live-LSP enrichment is re-homed to #236, where LSP
+ * writes provenance-tagged edges INTO the graph (once, persisted) for this path
+ * to read as "graph-lsp". That logic lives in clients/module-report-lsp.ts.
  *
  * Guard integrity: moduleReport injects NO read records — an outline is not
  * "having seen the body". readSymbol returns the actual body lines so the host
@@ -239,14 +240,14 @@ export interface ModuleReport {
 	provenance?: {
 		symbols: "syntax" | "none";
 		imports: "cached-review-graph" | "syntax" | "none";
-		usedBy: "cached-review-graph" | "none";
+		usedBy: "cached-review-graph" | "unavailable:file-cap" | "none";
 		callbacks: "heuristic-tree-sitter" | "none";
-		blastRadius?: "cached-review-graph" | "none";
+		blastRadius?: "cached-review-graph" | "unavailable:file-cap" | "none";
 	};
 	semantic: {
 		/** Provenance of who-uses-this: AST review graph, future graph-LSP edges
-		 * (#236), or none (cold cache). */
-		source: "review-graph" | "graph-lsp" | "none";
+		 * (#236), an explicit graph-unavailable reason, or none (cold cache). */
+		source: "review-graph" | "graph-lsp" | "unavailable:file-cap" | "none";
 		references: boolean;
 		implementations: boolean;
 	};
@@ -1721,9 +1722,13 @@ export async function moduleReport(
 	// synchronous full build re-runs every fact provider (TS-compiler ASTs for
 	// jsts) and two racing builds OOM'd pi (#256). Cold cache → outline-only.
 	let graph: ReviewGraph | undefined;
+	let graphFileCap: number | undefined;
 	try {
-		const { getCachedReviewGraph } = await import("./review-graph/builder.js");
+		const { getCachedReviewGraph, getReviewGraphSizeSkipVerdict } = await import(
+			"./review-graph/builder.js"
+		);
 		graph = getCachedReviewGraph(cwd);
+		graphFileCap = getReviewGraphSizeSkipVerdict(cwd)?.maxFileCount;
 	} catch {
 		graph = undefined;
 	}
@@ -1758,6 +1763,14 @@ export async function moduleReport(
 			durationMs: 0,
 			metadata: { error: callbackError },
 		});
+	}
+	if (graphFileCap !== undefined) {
+		warnings.push(
+			`who-uses-this is unavailable: review graph disabled because the project ` +
+				`has more than ${graphFileCap} files (cap ${graphFileCap}) — raise ` +
+				"maxProjectFiles in .pi-lens.json or set " +
+				"PI_LENS_REVIEW_GRAPH_MAX_FILES",
+		);
 	}
 
 	// Imports: the warm review graph is source-of-truth; on a cold cache (or a
@@ -1823,7 +1836,12 @@ export async function moduleReport(
 	} else if (graph) {
 		importsProvenance = "cached-review-graph";
 	}
-	const blastRadiusProvenance = blastRadius ? "cached-review-graph" : "none";
+	const unavailableGraphProvenance = graphFileCap !== undefined
+		? "unavailable:file-cap"
+		: "none";
+	const blastRadiusProvenance = blastRadius
+		? "cached-review-graph"
+		: unavailableGraphProvenance;
 	const report: ModuleReport = {
 		available: entries.length > 0 || hasGraphNode,
 		staleness: entries.length === 0 && !hasGraphNode ? "unavailable" : "fresh",
@@ -1854,7 +1872,9 @@ export async function moduleReport(
 		provenance: {
 			symbols: languageId ? "syntax" : "none",
 			imports: importsProvenance,
-			usedBy: hasGraphNode ? "cached-review-graph" : "none",
+			usedBy: hasGraphNode
+				? "cached-review-graph"
+				: unavailableGraphProvenance,
 			callbacks: languageId && !summaryView ? "heuristic-tree-sitter" : "none",
 			...(options?.blastRadius
 				? { blastRadius: blastRadiusProvenance }
@@ -1864,7 +1884,7 @@ export async function moduleReport(
 			// Provenance of who-uses-this / references. The AST review graph is the
 			// only source on this read path; "graph-lsp" is reserved for #236 (LSP
 			// writes provenance edges INTO the graph). Cold cache → "none".
-			source: hasGraphNode ? "review-graph" : "none",
+			source: hasGraphNode ? "review-graph" : unavailableGraphProvenance,
 			references: hasGraphNode,
 			implementations: false,
 		},
@@ -2002,6 +2022,9 @@ export function renderCompactModuleReport(report: ModuleReport): string {
 		`${report.path} ${report.language ?? "?"} ${report.lineCount ?? "?"}L — ` +
 			`${report.summary.symbols} symbols, ${report.summary.exports} exported${importsSuffix}`,
 	];
+	for (const warning of report.warnings ?? []) {
+		lines.push(`WARNING: ${warning}`);
+	}
 
 	if (report.api.length > 0) {
 		lines.push("API:");

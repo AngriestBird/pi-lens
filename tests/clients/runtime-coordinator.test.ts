@@ -12,6 +12,15 @@ describe("RuntimeCoordinator", () => {
 		expect(runtimeState._readGuard).toBeNull();
 	});
 
+	it("accepts the hook-start boundary when resetting a session", () => {
+		const runtime = new RuntimeCoordinator();
+		const hookStartedAt = Date.now() - 250;
+
+		runtime.resetForSession(hookStartedAt);
+
+		expect(runtime.sessionStartedAt).toBe(hookStartedAt);
+	});
+
 	it("tracks first-read LSP warming and suppresses duplicate warmups", () => {
 		const runtime = new RuntimeCoordinator();
 		const filePath = "/tmp/example.ts";

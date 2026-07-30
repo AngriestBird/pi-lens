@@ -67,7 +67,7 @@ Rule source: `rules/tree-sitter-queries/<language>/`.
 | `go-ignored-call-result` | warning | error-handling | Call result assigned to '_' — verify this discard is intentional |
 | `go-insecure-random` | warning | security | Insecure randomness source detected — use crypto/rand for security-sensitive values |
 | `go-log-fatal` | warning | reliability | log.Fatal/log.Panic terminates execution — prefer returning errors from core logic |
-| `go-mutex-copy` | warning | concurrency | sync.Mutex copied by value — copy breaks the lock; use a pointer receiver or embed via pointer |
+| `go-mutex-copy` | warning | concurrency | sync.Mutex parameter taken by value — the callee locks a copy; take *sync.Mutex instead |
 | `go-path-traversal` | warning | security | Potential path traversal sink — sanitize and constrain file paths |
 | `go-shared-map-write-goroutine` | error | concurrency | Map write inside goroutine may race — guard with synchronization or ownership boundaries |
 | `go-sql-injection` | error | security | Potential SQL injection sink — use parameterized queries |
@@ -216,7 +216,7 @@ Rule source: `rules/tree-sitter-queries/<language>/`.
 | `deep-promise-chain` | warning | complexity | Promise chain {{M1}} → {{M2}} → {{M3}} → {{M4}} — consider async/await |
 | `default-not-last` | error | maintainability | default clause should be the last case |
 | `duplicate-function-arg` | error | reliability | Duplicate parameter name '{{NAME}}' |
-| `empty-switch-case` | error | reliability | Switch case should not be empty |
+| `empty-switch-case` | error | reliability | Switch case is empty and shares no body with a following label |
 | `infinite-loop` | error | reliability | Loop appears to be infinite with no termination condition |
 | `mixed-async-styles` | warning | style | Mixed async/await + promise chains — use consistent async style |
 | `no-console-in-tests` | warning | testing | console.{{METHOD}} in test block — use proper assertions or logging |

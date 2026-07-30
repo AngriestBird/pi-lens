@@ -16,6 +16,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
@@ -114,7 +115,9 @@ type ParseCacheMeasurement = TreeCacheCounters & TreeSitterParserCounters;
  * Result of a cache-safe parse. `parsed: false` means the grammar/parse was
  * unavailable — distinct from a consumer that legitimately returned null.
  */
-export type ParsedTreeOutcome<T> = { parsed: true; value: T } | { parsed: false };
+export type ParsedTreeOutcome<T> =
+	| { parsed: true; value: T }
+	| { parsed: false };
 
 const NOT_PARSED: ParsedTreeOutcome<never> = { parsed: false };
 
@@ -534,7 +537,9 @@ export class TreeSitterClient {
 		// grammar-health nightly is what decides membership of BLOCKED_GRAMMARS.
 		const blockReason = grammarBlockReason(grammarFile);
 		if (blockReason) {
-			this.dbg(`Grammar ${grammarFile} blocked on this runtime — ${blockReason}`);
+			this.dbg(
+				`Grammar ${grammarFile} blocked on this runtime — ${blockReason}`,
+			);
 			return null;
 		}
 
@@ -922,55 +927,62 @@ export class TreeSitterClient {
 		}
 
 		const perQuery = new Map<number, StructuralMatch[]>();
-		await this.parseFileAndUse(filePath, languageId, contentOverride, (tree) => {
-			try {
-				for (const match of batch.query.matches(tree.rootNode)) {
-					const owner = batch.ownerOfPattern[match.patternIndex];
-					if (owner === undefined) continue;
-					const bucket = perQuery.get(owner) ?? [];
-					if (bucket.length >= maxResults) continue;
-					const entry = batch.entries[owner];
-					const captures: Record<string, TreeSitterNode> = {};
-					for (const capture of match.captures) {
-						if (entry.metavars.includes(capture.name)) {
-							captures[capture.name] = capture.node;
+		await this.parseFileAndUse(
+			filePath,
+			languageId,
+			contentOverride,
+			(tree) => {
+				try {
+					for (const match of batch.query.matches(tree.rootNode)) {
+						const owner = batch.ownerOfPattern[match.patternIndex];
+						if (owner === undefined) continue;
+						const bucket = perQuery.get(owner) ?? [];
+						if (bucket.length >= maxResults) continue;
+						const entry = batch.entries[owner];
+						const captures: Record<string, TreeSitterNode> = {};
+						for (const capture of match.captures) {
+							if (entry.metavars.includes(capture.name)) {
+								captures[capture.name] = capture.node;
+							}
 						}
+						if (!this.evaluatePredicates(batch.query, match)) continue;
+						if (
+							entry.postFilter &&
+							!this.applyPostFilter(
+								entry.postFilter,
+								entry.postFilterParams,
+								captures,
+							)
+						) {
+							continue;
+						}
+						if (match.captures.length === 0) continue;
+						const firstNode = match.captures[0].node;
+						const textCaptures: Record<string, string> = {};
+						for (const [name, node] of Object.entries(captures)) {
+							textCaptures[name] = (node as TreeSitterNode).text;
+						}
+						bucket.push({
+							file: filePath,
+							line: firstNode.startPosition.row + 1,
+							column: firstNode.startPosition.column + 1,
+							matchedText: firstNode.text,
+							nodeType: firstNode.type as string | undefined,
+							captures: textCaptures,
+						});
+						perQuery.set(owner, bucket);
 					}
-					if (!this.evaluatePredicates(batch.query, match)) continue;
-					if (
-						entry.postFilter &&
-						!this.applyPostFilter(
-							entry.postFilter,
-							entry.postFilterParams,
-							captures,
-						)
-					) {
-						continue;
-					}
-					if (match.captures.length === 0) continue;
-					const firstNode = match.captures[0].node;
-					const textCaptures: Record<string, string> = {};
-					for (const [name, node] of Object.entries(captures)) {
-						textCaptures[name] = (node as TreeSitterNode).text;
-					}
-					bucket.push({
-						file: filePath,
-						line: firstNode.startPosition.row + 1,
-						column: firstNode.startPosition.column + 1,
-						matchedText: firstNode.text,
-						nodeType: firstNode.type as string | undefined,
-						captures: textCaptures,
-					});
-					perQuery.set(owner, bucket);
+				} catch (err) {
+					this.reportWasmAbort(err);
+					this.dbg(`Batched query matching error: ${err}`);
 				}
-			} catch (err) {
-				this.reportWasmAbort(err);
-				this.dbg(`Batched query matching error: ${err}`);
-			}
-		});
+			},
+		);
 
-		const results: Array<{ queryDef: TreeSitterQuery; match: StructuralMatch }> =
-			[];
+		const results: Array<{
+			queryDef: TreeSitterQuery;
+			match: StructuralMatch;
+		}> = [];
 		for (let i = 0; i < batch.entries.length; i++) {
 			for (const match of perQuery.get(i) ?? []) {
 				results.push({ queryDef: batch.entries[i].queryDef, match });
@@ -987,10 +999,17 @@ export class TreeSitterClient {
 		queryDefs: TreeSitterQuery[],
 		languageId: string,
 	): Promise<QueryBatch | null> {
-		const cacheKey = this.getQueryCacheKey(
-			`batch:${queryDefs.map((q) => q.id).join("|")}`,
-			languageId,
-		);
+		// Key on rule CONTENT, not just ids: the batch stores each queryDef (its
+		// message reaches diagnostics) and the compiled patterns. Rule ids are
+		// stable across edits, so an id-only key kept serving the pre-edit batch
+		// for the process lifetime even after the runner reloaded the rules from
+		// disk on a RuleCache miss (#878). sha256 keeps the key bounded without
+		// #889's 32-bit collision risk.
+		const identity = crypto
+			.createHash("sha256")
+			.update(JSON.stringify(queryDefs))
+			.digest("hex");
+		const cacheKey = this.getQueryCacheKey(`batch:${identity}`, languageId);
 		const cached = this.queryBatchCache.get(cacheKey);
 		if (cached !== undefined) return cached;
 
@@ -1292,14 +1311,18 @@ export class TreeSitterClient {
 
 	private reportedCompileFailures = new Set<string>();
 
-	/** Warn once per rule whose query fails to compile against a grammar — a silently-dead rule needs a trail. */
+	/** Warn once per rule+grammar pair whose query fails to compile — a silently-dead rule needs a trail. */
 	private reportQueryCompileFailure(
 		ruleId: string,
 		languageId: string,
 		err: unknown,
 	): void {
-		if (this.reportedCompileFailures.has(ruleId)) return;
-		this.reportedCompileFailures.add(ruleId);
+		// Keyed by rule AND language: a rule can be dispatched against more than one
+		// grammar (`queriesForLanguage` hands the typescript set to tsx too), and
+		// failing on one must not mute the report for the others.
+		const key = `${ruleId}:${languageId}`;
+		if (this.reportedCompileFailures.has(key)) return;
+		this.reportedCompileFailures.add(key);
 		console.error(
 			`[pi-lens] tree-sitter rule '${ruleId}' failed to compile against '${languageId}' — ` +
 				`matches for this rule are silently dropped rather than reported. ` +
@@ -1358,6 +1381,24 @@ export class TreeSitterClient {
 	}
 
 	/**
+	 * Whether a `switch_case`'s next sibling is another label — `case "a": case
+	 * "b": handle()` groups two labels onto one body, which is idiomatic, not a
+	 * dead case.
+	 */
+	private nextSiblingIsSwitchLabel(caseNode: TreeSitterNode): boolean {
+		const siblings = (caseNode.parent?.children ?? []).filter(
+			(c) => c.isNamed && !c.type.includes("comment"),
+		);
+		// Match by source offset: web-tree-sitter hands out fresh node wrappers per
+		// access, so identity comparison against `caseNode` is not reliable.
+		const index = siblings.findIndex(
+			(c) => c.startIndex === caseNode.startIndex,
+		);
+		const next = index >= 0 ? siblings[index + 1] : undefined;
+		return next?.type === "switch_case" || next?.type === "switch_default";
+	}
+
+	/**
 	 * Whether a loop body contains a statement that can terminate the loop:
 	 * `return`/`throw` anywhere (they unwind past the loop), or a `break` that is
 	 * not swallowed by a nested loop/switch. Does not descend into nested
@@ -1387,7 +1428,14 @@ export class TreeSitterClient {
 			const t = child.type;
 			if (NESTED_FN.has(t)) continue;
 			if (t === "return_statement" || t === "throw_statement") return true;
-			if (t === "break_statement" && !insideNestedLoop) return true;
+			// A labeled `break outer;` is not swallowed by the nested loop it sits
+			// in. Which label it targets isn't resolved here — counting any labeled
+			// break as an exit errs toward not flagging, the safe direction for a
+			// blocking rule.
+			if (t === "break_statement") {
+				const labeled = (child.children ?? []).some((c) => c.isNamed);
+				if (!insideNestedLoop || labeled) return true;
+			}
 			if (this.bodyHasLoopExit(child, insideNestedLoop || NESTS_BREAK.has(t))) {
 				return true;
 			}
@@ -1469,7 +1517,9 @@ export class TreeSitterClient {
 			for (const stmt of body.children ?? []) {
 				if (stmt.type !== "expression_statement") continue;
 				// biome-ignore lint/suspicious/noExplicitAny: AST traversal
-				const assignment = stmt.children?.find((c: any) => c.type === "assignment");
+				const assignment = stmt.children?.find(
+					(c: any) => c.type === "assignment",
+				);
 				if (!assignment) continue;
 				// biome-ignore lint/suspicious/noExplicitAny: LHS check
 				// LHS text may include a leading whitespace token from the AST
@@ -1550,9 +1600,12 @@ export class TreeSitterClient {
 				// A switch_case's named children are `[value, ...body statements]`
 				// (the case's statements are direct children, not a statement_block),
 				// so an empty case is one whose only named child is its `case <value>`.
+				// An empty case followed by another label is a fall-through group, not
+				// a dead case — only the last label of a group carries the body.
 				const caseNode = captures.CASE;
 				if (!caseNode) return false;
-				return this.switchCaseBodyStatements(caseNode).length === 0;
+				if (this.switchCaseBodyStatements(caseNode).length > 0) return false;
+				return !this.nextSiblingIsSwitchLabel(caseNode);
 			}
 			case "no_break_or_return_in_body": {
 				// infinite-loop: keep a `while(true)`/`for(;;)` whose body contains no
@@ -1728,13 +1781,19 @@ export class TreeSitterClient {
 				const mod = captures.MOD?.text ?? "";
 				if (mod !== "re") return false;
 				const func = captures.FUNC?.text ?? "";
-				if (!/^(compile|match|search|fullmatch|findall|finditer|sub|subn|split)$/.test(func)) {
+				if (
+					!/^(compile|match|search|fullmatch|findall|finditer|sub|subn|split)$/.test(
+						func,
+					)
+				) {
 					return false;
 				}
 				const argsNode = captures.ARGS;
 				if (!argsNode) return false;
 				// biome-ignore lint/suspicious/noExplicitAny: AST iteration
-				const firstNamed = (argsNode.children ?? []).find((c: any) => c.isNamed);
+				const firstNamed = (argsNode.children ?? []).find(
+					(c: any) => c.isNamed,
+				);
 				if (!firstNamed) return false;
 				return firstNamed.type === "identifier";
 			}
@@ -1777,8 +1836,7 @@ export class TreeSitterClient {
 						// Has a value child (not just the `return` keyword)
 						// biome-ignore lint/suspicious/noExplicitAny: child check
 						const hasValue = node.children.some(
-							(c: any) =>
-								c.isNamed && c.type !== "comment",
+							(c: any) => c.isNamed && c.type !== "comment",
 						);
 						if (hasValue) return true;
 					}
@@ -1812,9 +1870,10 @@ export class TreeSitterClient {
 				// The %(name)s style: counts as 1 with name
 				// The %% escape: doesn't count
 				let placeholderCount = 0;
-				let namedKeys: string[] = [];
+				const namedKeys: string[] = [];
 				// biome-ignore lint/suspicious/noExplicitAny: regex match
-				const positionalRegex = /%(?:\([^)]+\))?[#0\- +]*\d*(?:\.\d+)?[hlL]?[diouxXeEfFgGcrs%]/g;
+				const positionalRegex =
+					/%(?:\([^)]+\))?[#0\- +]*\d*(?:\.\d+)?[hlL]?[diouxXeEfFgGcrs%]/g;
 				// biome-ignore lint/suspicious/noExplicitAny: regex match
 				const positionalMatches = fmt.match(positionalRegex) ?? [];
 				for (const m of positionalMatches) {
@@ -1849,7 +1908,9 @@ export class TreeSitterClient {
 				}
 				// Positional: count tuple args
 				if (argsNode.type === "tuple") {
-					const argCount = (argsNode.children ?? []).filter((c: any) => c.isNamed).length;
+					const argCount = (argsNode.children ?? []).filter(
+						(c: any) => c.isNamed,
+					).length;
 					if (argCount !== placeholderCount) return true;
 				}
 				return false;
@@ -1860,9 +1921,9 @@ export class TreeSitterClient {
 				const text = policyNode.text ?? "";
 				// Match patterns indicating public access
 				const patterns = [
-					/"Principal"\s*:\s*"\*"/,  // direct wildcard
-					/"Principal"\s*:\s*\{\s*"AWS"\s*:\s*"\*"\s*\}/,  // AWS wildcard
-					/"Effect"\s*:\s*"Allow"[\s\S]*?"Action"\s*:\s*"\*"[\s\S]*?"Resource"\s*:\s*"\*"/,  // full admin
+					/"Principal"\s*:\s*"\*"/, // direct wildcard
+					/"Principal"\s*:\s*\{\s*"AWS"\s*:\s*"\*"\s*\}/, // AWS wildcard
+					/"Effect"\s*:\s*"Allow"[\s\S]*?"Action"\s*:\s*"\*"[\s\S]*?"Resource"\s*:\s*"\*"/, // full admin
 					/"Principal"\s*:\s*"\*"/,
 				];
 				return patterns.some((p) => p.test(text));
@@ -1919,7 +1980,8 @@ export class TreeSitterClient {
 				// Count required params (excluding defaults)
 				// biome-ignore lint/suspicious/noExplicitAny: AST iteration
 				const paramCount = (paramsNode.children ?? []).filter((c: any) => {
-					if (c.type !== "identifier" && c.type !== "typed_parameter") return false;
+					if (c.type !== "identifier" && c.type !== "typed_parameter")
+						return false;
 					if (c.text.includes("=")) return false;
 					return true;
 				}).length;
@@ -1965,7 +2027,7 @@ export class TreeSitterClient {
 				);
 			}
 			case "check_secret_pattern": {
-				const varName = (captures.VARNAME?.text ?? "");
+				const varName = captures.VARNAME?.text ?? "";
 				const varNameLower = varName.toLowerCase();
 				// Skip UPPER_CASE constants — they're module-level constants
 				// (e.g. `GITHUB_TYPE_FOR_PERSONAL_API_KEY = "..."`), not secrets.
@@ -2058,7 +2120,8 @@ export class TreeSitterClient {
 					"class_definition",
 				]);
 				return (
-					isTorchScriptDecorated(methodNode) || isTorchScriptDecorated(classNode)
+					isTorchScriptDecorated(methodNode) ||
+					isTorchScriptDecorated(classNode)
 				);
 			}
 			case "exit_params_insufficient": {
@@ -2073,10 +2136,20 @@ export class TreeSitterClient {
 				const params = captures.PARAMS;
 				if (!params) return true;
 				// biome-ignore lint/suspicious/noExplicitAny: tree-sitter node
-				const count = (params.children ?? []).filter(
-					(c: any) => c.isNamed,
-				).length;
-				return count < 4;
+				const named = (params.children ?? []).filter((c: any) => c.isNamed);
+				// `def __exit__(self, *args)` / `(self, *exc_info)` are valid: the splat
+				// absorbs the whole exception triple, so it satisfies every remaining
+				// slot no matter how few named children the node has.
+				if (
+					named.some(
+						(c) =>
+							c.type === "list_splat_pattern" ||
+							c.type === "dictionary_splat_pattern",
+					)
+				) {
+					return false;
+				}
+				return named.length < 4;
 			}
 			case "ruby_empty_rescue": {
 				const bodyNode = captures.BODY;
@@ -2139,7 +2212,9 @@ export class TreeSitterClient {
 				// Only flag when the result flows into a security-sensitive binding.
 				// Walk up from the `Math.random()` call so chained forms such as
 				// `Math.random().toString(36)` are still attributed to their binding.
-				const varName = this.enclosingBindingName(captures.CALL ?? captures.VAR);
+				const varName = this.enclosingBindingName(
+					captures.CALL ?? captures.VAR,
+				);
 				return /token|secret|password|key|nonce|salt|csrf|auth|session|credential|hash|otp|pin/i.test(
 					varName,
 				);
@@ -2498,58 +2573,63 @@ export class TreeSitterClient {
 	): Promise<StructuralMatch[]> {
 		const matches: StructuralMatch[] = [];
 
-		await this.parseFileAndUse(filePath, languageId, contentOverride, (tree) => {
-			try {
-				const queryMatches = query.matches(tree.rootNode);
+		await this.parseFileAndUse(
+			filePath,
+			languageId,
+			contentOverride,
+			(tree) => {
+				try {
+					const queryMatches = query.matches(tree.rootNode);
 
-				for (const match of queryMatches) {
-					const captures: Record<string, TreeSitterNode> = {};
+					for (const match of queryMatches) {
+						const captures: Record<string, TreeSitterNode> = {};
 
-					for (const capture of match.captures) {
-						if (metavars.includes(capture.name)) {
-							captures[capture.name] = capture.node;
+						for (const capture of match.captures) {
+							if (metavars.includes(capture.name)) {
+								captures[capture.name] = capture.node;
+							}
+						}
+
+						// Evaluate #match? and #eq? predicates that web-tree-sitter doesn't enforce automatically
+						if (!this.evaluatePredicates(query, match)) {
+							continue;
+						}
+
+						if (
+							postFilter &&
+							!this.applyPostFilter(postFilter, postFilterParams, captures)
+						) {
+							continue;
+						}
+
+						if (match.captures.length > 0) {
+							const firstNode = match.captures[0].node;
+							const textCaptures: Record<string, string> = {};
+							for (const [name, node] of Object.entries(captures)) {
+								textCaptures[name] = (node as TreeSitterNode).text;
+							}
+							matches.push({
+								file: filePath,
+								line: firstNode.startPosition.row + 1,
+								column: firstNode.startPosition.column + 1,
+								matchedText: firstNode.text,
+								nodeType: firstNode.type as string | undefined,
+								captures: textCaptures,
+							});
 						}
 					}
 
-					// Evaluate #match? and #eq? predicates that web-tree-sitter doesn't enforce automatically
-					if (!this.evaluatePredicates(query, match)) {
-						continue;
+					if (matches.length > 0) {
+						this.dbg(
+							`Found ${matches.length} matches in ${path.basename(filePath)}`,
+						);
 					}
-
-					if (
-						postFilter &&
-						!this.applyPostFilter(postFilter, postFilterParams, captures)
-					) {
-						continue;
-					}
-
-					if (match.captures.length > 0) {
-						const firstNode = match.captures[0].node;
-						const textCaptures: Record<string, string> = {};
-						for (const [name, node] of Object.entries(captures)) {
-							textCaptures[name] = (node as TreeSitterNode).text;
-						}
-						matches.push({
-							file: filePath,
-							line: firstNode.startPosition.row + 1,
-							column: firstNode.startPosition.column + 1,
-							matchedText: firstNode.text,
-							nodeType: firstNode.type as string | undefined,
-							captures: textCaptures,
-						});
-					}
+				} catch (err) {
+					this.reportWasmAbort(err);
+					this.dbg(`Query matching error: ${err}`);
 				}
-
-				if (matches.length > 0) {
-					this.dbg(
-						`Found ${matches.length} matches in ${path.basename(filePath)}`,
-					);
-				}
-			} catch (err) {
-				this.reportWasmAbort(err);
-				this.dbg(`Query matching error: ${err}`);
-			}
-		});
+			},
+		);
 
 		return matches;
 	}

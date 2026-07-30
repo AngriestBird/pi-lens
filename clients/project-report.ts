@@ -746,8 +746,8 @@ export async function projectReport(
 			return {
 				available: false,
 				hint:
-					`review graph disabled: project has ${sizeSkip.sourceFileCount} files, ` +
-					`cap is ${sizeSkip.maxFileCount} — raise maxProjectFiles in .pi-lens.json ` +
+					`review graph disabled: project has more than ${sizeSkip.maxFileCount} files ` +
+					`(cap ${sizeSkip.maxFileCount}) — raise maxProjectFiles in .pi-lens.json ` +
 					"or set PI_LENS_REVIEW_GRAPH_MAX_FILES",
 				...(lastBuildAttempt ? { lastBuildAttempt } : {}),
 				...(view ? { view } : {}),
