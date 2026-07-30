@@ -14,6 +14,10 @@ import type { Diagnostic } from "../dispatch/types.js";
 import { isTestFile } from "../file-utils.js";
 import { isAtOrAboveHomeDir } from "../path-utils.js";
 import { getProjectDiagnosticsScannerMaxFiles } from "../project-scale.js";
+import { captureReviewGraphStructuralIr } from "../review-graph/builder.js";
+import { publishReviewGraphFileIr,
+	reviewGraphIrContentHash,
+} from "../review-graph/shared-extraction-ir.js";
 import { collectSourceFilesWithBudgetAsync } from "../source-filter.js";
 import {
 	logTreeSitter,
@@ -287,6 +291,26 @@ async function scanFileMajorRules(
 					}
 				}
 
+				let graphIr:
+					| Awaited<ReturnType<typeof captureReviewGraphStructuralIr>>
+					| undefined;
+				if (content !== null) {
+					try {
+						graphIr = await captureReviewGraphStructuralIr(
+							filePath,
+							cwd,
+							content,
+							facts,
+						);
+					} catch {
+						graphIr = { complete: false };
+					}
+					if (isTreeSitterWasmAborted()) {
+						wasmAborted = true;
+						break;
+					}
+				}
+
 				if (signal?.aborted) {
 					// The former phase-major scan never started ast-grep after a
 					// phase-one abort. Discard earlier ast-grep work from this merged
@@ -296,6 +320,17 @@ async function scanFileMajorRules(
 				}
 				if (astGrepLang && content !== null) {
 					scanAstGrepFile(filePath, content, astGrepLang);
+				}
+				if (signal?.aborted) break;
+				if (content !== null && graphIr?.complete && graphIr.structural) {
+					// Publish only consumable entries (the registry also enforces
+					// this) — and hash via the shared contract so producer and
+					// consumer can never diverge (#955 review).
+					publishReviewGraphFileIr(cwd, {
+						filePath,
+						contentHash: reviewGraphIrContentHash(content),
+						...graphIr,
+					});
 				}
 				filesScanned++;
 			} finally {
@@ -329,15 +364,18 @@ async function scanFileMajorRules(
 			stats,
 		});
 	});
-	await client.withParseCacheMeasurement(async () => {}, (stats) => {
-		logTreeSitterCacheStats({
-			scope: "project_diagnostics_ast_grep_scan",
-			filePath: cwd,
-			fileCount: astGrepFilesScanned,
-			durationMs: astGrepDurationMs,
-			stats,
-		});
-	});
+	await client.withParseCacheMeasurement(
+		async () => {},
+		(stats) => {
+			logTreeSitterCacheStats({
+				scope: "project_diagnostics_ast_grep_scan",
+				filePath: cwd,
+				fileCount: astGrepFilesScanned,
+				durationMs: astGrepDurationMs,
+				stats,
+			});
+		},
+	);
 	return { treeSitter, factRules, astGrep, filesScanned, wasmAborted };
 }
 

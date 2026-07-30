@@ -4,6 +4,15 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Project scans feed compact structural IR into review-graph builds** (refs
+	#939) — each fully completed scanner file publishes content-hash-bound
+	imports, reexports, function summaries, symbols, and references. A following
+	or overlapping graph build reuses only exact-hash, successful entries;
+	stale, failed, absent, and cold one-shot paths parse normally. The handoff
+	retains neither source content nor WASM trees, and cancelled scans expose
+	only files completed before cancellation.
+
+- **Session-start latency is attributable end to end** (refs #948) â€” latency
 - **Session-start latency is attributable end to end** (refs #948) — latency
 	telemetry now separates host boot from pi-lens evaluation and records quick
 	and full session-start totals, pre-handler/bootstrap work, runtime reset,
