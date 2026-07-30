@@ -18,9 +18,18 @@ import {
 	type ParsedTreeOutcome,
 	TreeSitterClient,
 } from "./tree-sitter-client.js";
+import { logTreeSitter } from "./tree-sitter-logger.js";
 
 let _shared: TreeSitterClient | null = null;
 let _wasmAborted = false;
+let _wasmAbortedAt: string | undefined;
+
+export interface TreeSitterRuntimeStatus {
+	available: boolean;
+	wasmAborted: boolean;
+	recovery: "restart_required" | "not_required";
+	abortedAt?: string;
+}
 
 /** The process-wide TreeSitterClient, or null once the WASM runtime has aborted. */
 export function getSharedTreeSitterClient(): TreeSitterClient | null {
@@ -33,19 +42,43 @@ export function isTreeSitterWasmAborted(): boolean {
 	return _wasmAborted;
 }
 
+/** Machine-readable process-wide runtime health for status/reporting surfaces. */
+export function getTreeSitterRuntimeStatus(): TreeSitterRuntimeStatus {
+	return {
+		available: !_wasmAborted,
+		wasmAborted: _wasmAborted,
+		recovery: _wasmAborted ? "restart_required" : "not_required",
+		...(_wasmAbortedAt ? { abortedAt: _wasmAbortedAt } : {}),
+	};
+}
+
 /**
  * Poison the singleton after an unrecoverable Emscripten abort() — the module-level
  * WASM heap is corrupted, so no client can be used again this process.
  */
 export function markTreeSitterWasmAborted(): void {
+	if (_wasmAborted) return;
 	_wasmAborted = true;
+	_wasmAbortedAt = new Date().toISOString();
 	_shared = null;
+	console.error(
+		"[pi-lens] tree-sitter WASM runtime aborted; structural analysis is disabled " +
+			"for this process. Restart the pi-lens extension/MCP server to recover.",
+	);
+	logTreeSitter({
+		phase: "runtime_abort",
+		filePath: process.cwd(),
+		status: "degraded",
+		reason: "wasm_aborted_restart_required",
+		metadata: { abortedAt: _wasmAbortedAt },
+	});
 }
 
 /** Test-only: reset the singleton + abort flag. */
 export function _resetSharedTreeSitterClientForTests(): void {
 	_shared = null;
 	_wasmAborted = false;
+	_wasmAbortedAt = undefined;
 }
 
 // Grammar selection by extension — the single ext→grammar-id authority. `.tsx` →
