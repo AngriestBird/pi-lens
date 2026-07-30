@@ -4,6 +4,17 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Review-graph persistence no longer serializes or compresses on the event
+	loop** (refs #939) — debounced snapshots are materialized in one lazy,
+	unref'd worker and streamed through gzip into the new canonical
+	`review-graph.json.gz` cache. The main thread promotes only the current
+	generation's atomic staged file, so the synchronous CLI/exit flush can
+	supersede an in-flight worker without a stale overwrite. Loads retain one
+	release of fallback support for legacy uncompressed `review-graph.json`
+	snapshots; worker failures are logged and degrade to a synchronous persist.
+	Persist telemetry now records element count, raw/gzip bytes, serialization
+	and write time, and whether the work was offloaded.
+
 - **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
 	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
 	persist path for CI/cron, forces the debounced snapshot write before exit,

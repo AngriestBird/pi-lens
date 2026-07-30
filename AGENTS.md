@@ -37,6 +37,7 @@ clients/
   reverse-deps.ts         Snapshot-backed reverse dependency index/query helpers
   word-index.ts           Identifier inverted index + BM25 ranking (#162) — built in the session scan, persisted in the snapshot; consumed by BOTH the pi symbol_search tool and the MCP pilens_symbol_search mirror (#348 phase 1); lifecycle = load → rebuild-if-stale (seq) → persist in all startup modes, plus a cold-query background build
   review-graph/query.ts   Graph queries incl computeImpactCascade (one-hop, used by the cascade) + computeTransitiveImpact (depth-bounded BFS, used by module_report's blastRadius section #304)
+  review-graph/persist-worker.ts  Lazy shared worker for debounced review-graph JSON serialization + streamed gzip persistence; main thread generation-gates canonical promotion
   installer/index.ts      Auto-install + ensureTool; probe-cache.json for fast restarts. Strategies: npm/pip/gem/github + maven (fat JAR → java -jar launcher) + archive (tree). github API is token-authed (api.github.com only, Authorization dropped on cross-host redirect — unauth=60/hr silently fails CI installs); tar extract is recursive-find (handles FLAT tarballs like gleam, not --strip-components). GITHUB_TOOLS kept in sync with the registry by tool-registry-consistency.test.ts
   lsp/                    40+ LSP server IDs (incl. CMake via cmake-language-server and Fish via fish-lsp; opengrep + ast-grep + zizmor + typos are cross-cutting AUXILIARY diagnostic LSPs — role:"auxiliary", #111/#239/#272/#283), config, lifecycle. clojure-lsp + gleam now auto-install via github (native binary / flat tarball). zizmor (GitHub Actions security, `zizmor --lsp`) attaches to YAML; advisory unless the repo ships zizmor.yml; online audits need a token (env or `gh auth token`) via clients/zizmor-config.ts. typos (source-code spell checker, `typos-lsp`, native win-arm64 build) attaches to the code-aux set PLUS markdown (#283 option B); allow-list dictionary (only KNOWN misspellings) so low-FP; advisory (default WARNING) unless the repo ships typos.toml via clients/typos-config.ts
   dispatch/               Pipeline dispatcher + 47 registered runners (incl. spotbugs — flag-gated via withSpotbugsGroup, #133). Auxiliary LSPs (opengrep, ast-grep, zizmor, typos, …) are NOT runners — they attach via the lsp runner's with-auxiliary path; see clients/dispatch/auxiliary-lsp.ts
@@ -307,6 +308,14 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
 - **The bin target is `dist/`.** After changing MCP/engine/runner code, run
   `npm run build:dist` so the user-scoped server (`dist/mcp/server.js`) picks it up
   on the next Claude session. (`bin`: `pi-lens-mcp`, `pi-lens-analyze`.)
+- **Review-graph snapshot persistence is worker-offloaded (#939).** The
+  canonical cache is `review-graph.json.gz` (legacy uncompressed
+  `review-graph.json` is load-only fallback for one release). Debounced writes
+  use one lazy unref'd worker that stringifies and streams gzip into an atomic
+  generation-specific stage; only the main thread promotes a completion whose
+  generation is still current. `flushReviewGraphPersist` remains synchronous
+  for the CLI/exit hook and invalidates any in-flight generation before its
+  own gzip write, so a late worker can never overwrite the forced snapshot.
 - **Out-of-band graph builds** use `npx pi-lens build-graph [--cwd <dir>]`.
   The CLI reuses `buildOrUpdateGraph` plus the builder's queued atomic persist
   payload, force-flushes it before exit, and treats every build/persist skip or

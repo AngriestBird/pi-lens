@@ -30,6 +30,11 @@ export interface ReviewGraphLogEntry {
 	elements?: number;
 	cap?: number;
 	error?: string;
+	rawBytes?: number;
+	gzBytes?: number;
+	serializeMs?: number;
+	writeMs?: number;
+	offloaded?: boolean;
 }
 
 export function logReviewGraph(entry: ReviewGraphLogEntry): void {
