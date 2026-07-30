@@ -299,9 +299,9 @@ async function scanFileMajorRules(
 				}
 				filesScanned++;
 			} finally {
-				// The shared scan store keeps derived facts for any later cross-file
-				// consumer, but no consumer after this iteration needs the source bytes.
-				facts.deleteFileFact(filePath, "file.content");
+				// This store belongs to the scan, and every consumer of this file's
+				// content and derived facts has completed by the end of the iteration.
+				facts.clearFileFactsFor(filePath);
 			}
 		}
 		if (wasmAborted) {
