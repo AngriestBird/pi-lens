@@ -41,7 +41,7 @@ export interface WriteFileAtomicOptions {
 }
 
 /**
- * Synchronous atomic write: `fs.writeFileSync` to `${targetPath}.tmp-${pid}`,
+ * Synchronous atomic write of text or binary data to `${targetPath}.tmp-${pid}`,
  * then `fs.renameSync` over `targetPath`. On any failure (from either step),
  * attempts a best-effort `fs.rmSync(tmp, { force: true })` cleanup, then
  * either swallows (default) or rethrows per `options.bestEffort`.
@@ -52,13 +52,13 @@ export interface WriteFileAtomicOptions {
  */
 export function writeFileAtomic(
 	targetPath: string,
-	data: string,
+	data: string | Uint8Array,
 	options?: WriteFileAtomicOptions,
 ): void {
 	const bestEffort = options?.bestEffort ?? true;
 	const tmpPath = `${targetPath}.tmp-${process.pid}`;
 	try {
-		fs.writeFileSync(tmpPath, data, "utf-8");
+		fs.writeFileSync(tmpPath, data, typeof data === "string" ? "utf-8" : undefined);
 		fs.renameSync(tmpPath, targetPath);
 	} catch (err) {
 		try {
@@ -78,13 +78,17 @@ export function writeFileAtomic(
  */
 export async function writeFileAtomicAsync(
 	targetPath: string,
-	data: string,
+	data: string | Uint8Array,
 	options?: WriteFileAtomicOptions,
 ): Promise<void> {
 	const bestEffort = options?.bestEffort ?? true;
 	const tmpPath = `${targetPath}.tmp-${process.pid}`;
 	try {
-		await fs.promises.writeFile(tmpPath, data, "utf-8");
+		await fs.promises.writeFile(
+			tmpPath,
+			data,
+			typeof data === "string" ? "utf-8" : undefined,
+		);
 		await fs.promises.rename(tmpPath, targetPath);
 	} catch (err) {
 		try {
