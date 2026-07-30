@@ -814,6 +814,12 @@ export function renderCompactProjectReport(report: ProjectReport): string {
 		return `project_report — unavailable${report.hint ? `: ${report.hint}` : ""}`;
 	}
 	const lines: string[] = [];
+	// #919: an available graph whose persist failed serves this process fine
+	// but leaves the NEXT session cold — compact view must say so, not only
+	// the JSON view.
+	if (report.lastBuildAttempt?.reason) {
+		lines.push(`! build: ${report.lastBuildAttempt.reason}`);
+	}
 	const t = report.trust;
 	if (t) {
 		lines.push(

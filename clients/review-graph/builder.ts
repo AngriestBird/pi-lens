@@ -605,7 +605,17 @@ function recordBuildAttempt(
 }
 
 function recordPersistFailure(cwd: string, reason: string, error: string): void {
-	recordBuildAttempt(cwd, "succeeded", `graph built but persistence failed: ${error}`);
+	// A debounced persist can fail AFTER a newer build already recorded
+	// "failed" or "running" for this cwd — don't relabel a dead/in-flight
+	// build as succeeded; only annotate a record that says succeeded.
+	const prior = _buildAttempts.get(normalizeMapKey(cwd));
+	if (prior === undefined || prior.outcome === "succeeded") {
+		recordBuildAttempt(
+			cwd,
+			"succeeded",
+			`graph built but persistence failed: ${error}`,
+		);
+	}
 	logReviewGraph({
 		cwd,
 		phase: "persist_failed",
