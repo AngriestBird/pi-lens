@@ -1,21 +1,8 @@
-// Global setup: seed a shared managed-tools template once per suite run.
-//
-// Every worker gets a fresh empty PI_LENS_HOME (vitest-setup.ts), so any test
-// that drives the real analyze pipeline (mcp/analyze-cli, the MCP server
-// smokes) used to pay a cold `ensureTool("oxlint")` npm install PER WORKER —
-// seconds each, network-dependent, and the source of wild run-to-run variance
-// (one analyze-cli file run measured 14s vs 47s on install luck alone). Build
-// the install once into a lockfile-keyed template under os.tmpdir() and hand
-// workers its probe-cache.json; ensureTool's probe-cache fast path then
-// resolves the template's binaries (read-only, safe to share) with zero
-// spawns. If the seed fails (offline), workers just fall back to the old
-// cold-install behavior.
-import { spawnSync } from "node:child_process";
+// Global setup: seed a synthetic, network-free oxlint tool template once.
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { removeTempDirSync } from "../clients/test-utils.js";
 
 // Under the installer's 24h probe-cache TTL so a handed-out cache is never
 // already expired mid-run.
@@ -44,41 +31,33 @@ export default function prewarmToolHome(): void {
 		// no template yet — build one below
 	}
 
-	const seedDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-tools-seed-"));
-	try {
-		const fixture = path.join(seedDir, "seed.ts");
-		fs.writeFileSync(fixture, "console.log(1);\n");
-		const runSeed = () =>
-			spawnSync(
-				process.execPath,
-				[
-					path.join(repoRoot, "mcp", "analyze-cli.js"),
-					`--file=${fixture}`,
-					`--cwd=${seedDir}`,
-				],
-				{
-					env: {
-						...process.env,
-						PI_LENS_HOME: template,
-						PI_LENS_CONFIG_PATH: "/nonexistent-pi-lens-tests/config.json",
-					},
-					timeout: 120_000,
-					stdio: "ignore",
+	fs.mkdirSync(path.join(template, "bin"), { recursive: true });
+	const shim = path.join(
+		template,
+		"bin",
+		process.platform === "win32" ? "oxlint.cmd" : "oxlint",
+	);
+	fs.writeFileSync(
+		shim,
+		process.platform === "win32"
+			? "@echo off\r\nexit /b 0\r\n"
+			: "#!/bin/sh\nexit 0\n",
+		{ mode: 0o750 },
+	);
+	const stat = fs.statSync(shim);
+	fs.writeFileSync(
+		probeCache,
+		JSON.stringify(
+			{
+				oxlint: {
+					path: shim,
+					mtimeMs: stat.mtimeMs,
+					cachedAt: Date.now(),
 				},
-			);
-		runSeed();
-		// The installer's probe-cache flush is a 300ms unref'd debounce, so a
-		// fast exit can drop it; a second (now warm, discovery-only) run rewrites
-		// the entries and stays alive past the flush.
-		if (!fs.existsSync(probeCache)) runSeed();
-		if (fs.existsSync(probeCache)) {
-			process.env.PI_LENS_TEST_TOOLS_TEMPLATE = template;
-		} else {
-			console.warn(
-				"[prewarm-tool-home] seed analyze produced no probe-cache; workers run with cold tool homes",
-			);
-		}
-	} finally {
-		removeTempDirSync(seedDir);
-	}
+			},
+			null,
+			2,
+		),
+	);
+	process.env.PI_LENS_TEST_TOOLS_TEMPLATE = template;
 }

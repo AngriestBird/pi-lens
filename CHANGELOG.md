@@ -4,6 +4,25 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Installer subprocesses are lifetime-coupled** (refs #945) — npm, pip, gem,
+	and archive extraction now use the shared safe-spawn path, await full Windows
+	process-tree termination on timeout, and synchronously clean registered
+	installer children during parent exit/signals.
+
+- **Managed tool installs are cross-process serialized** (refs #945) — a
+	dependency-free atomic lock protects the shared tools tree, verifies owners
+	before stale recovery, bounds lock waits with an honest error, and rechecks
+	discovery after acquisition to avoid duplicate package-manager runs.
+
+- **Ordinary tests never install managed tools** (refs #945) — Vitest sets
+	`PI_LENS_DISABLE_TOOL_INSTALL=1`, its prewarm step creates a local synthetic
+	oxlint probe-cache entry without networking, and one-shot analysis explicitly
+	awaits probe-cache persistence before exit.
+
+- **Installer orphan/locking regressions are process-tested** (refs #945) —
+	fake package-manager coverage verifies Windows timeout tree-kill, exactly one
+	install across concurrent processes, explicit install-disable refusal, and
+	Vitest's default no-install environment.
 - **Review-graph persistence no longer serializes or compresses on the event
 	loop** (refs #939) — debounced snapshots are materialized in one lazy,
 	unref'd worker and streamed through gzip into the new canonical

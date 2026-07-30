@@ -94,6 +94,9 @@ async function main(): Promise<void> {
 			registerTurnState: true,
 		});
 	}
+	// One-shot consumers cannot rely on the installer's unref'd debounce.
+	const { flushProbeCache } = await import("../clients/installer/index.js");
+	await flushProbeCache();
 
 	if (result.counts.diagnostics === 0) process.exit(0); // clean → no noise
 
