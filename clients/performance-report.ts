@@ -284,6 +284,17 @@ async function readPhaseLogTail(
 	try {
 		handle = await fs.promises.open(filePath, "r");
 		const stat = await handle.stat();
+		if (!stat.isFile()) {
+			// POSIX rejects opening a directory with EISDIR, but Windows opens it
+			// successfully with size 0 — which would fall into the empty() branch
+			// and conflate "unreadable path" with "no data yet". Throw the same
+			// error POSIX would so both platforms surface the bad path.
+			const notAFile = new Error(
+				`EISDIR: illegal operation on a directory, read '${filePath}'`,
+			) as NodeJS.ErrnoException;
+			notAFile.code = "EISDIR";
+			throw notAFile;
+		}
 		if (stat.size === 0) return empty();
 
 		const sampleLimit = boundedPositiveInteger(

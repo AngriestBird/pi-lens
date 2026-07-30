@@ -17,6 +17,14 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **Review-graph file-cap degradation is now explicit and count-honest** (refs
+	#921) — `project_report` says a capped project has “more than N files” instead
+	of presenting the cap+1 early-exit sentinel as an exact count. `module_report`
+	now marks graph-backed `usedBy`, blast-radius provenance, and
+	`semantic.source` as `unavailable:file-cap` and emits an actionable warning
+	with the cap plus both `.pi-lens.json#maxProjectFiles` and
+	`PI_LENS_REVIEW_GRAPH_MAX_FILES` controls, keeping disabled data distinct from
+	a genuinely empty/cold graph.
 - Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
 - Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
 - **Project diagnostics now use one file-major scan pass** (refs #896) —
@@ -87,6 +95,11 @@ All notable changes to pi-lens will be documented in this file.
 	deliberately unsafe: every new client imports the same cached `web-tree-sitter`
 	ES module and therefore reuses its corrupted Emscripten heap; restarting the
 	host is the isolation boundary.
+- **`pilens_rebuild` can no longer destroy an npm-installed pi-lens** (refs
+	#920) — rebuilds are refused before spawning a package script unless the
+	package is a source checkout with `tsconfig.dist.json` outside
+	`node_modules`; installed servers also omit the tool from `tools/list`, so
+	subagent allowlists cannot discover it.
 
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 
