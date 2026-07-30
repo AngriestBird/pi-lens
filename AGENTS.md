@@ -616,6 +616,8 @@ The GitHub release body is derived from the curated `CHANGELOG.md` section for t
 
 **Rule catalogs.** `docs/ast-grep_rules_catalog.md` + `docs/tree-sitter_rules_catalog.md` list every bundled rule **per language** and are **generated** — edit the rule files, not the docs, then `npm run docs:rule-catalogs` (`scripts/gen-rule-catalogs.mjs`). A `--check` run (in `tests/scripts/rule-catalogs.test.ts`) fails if they drift. ast-grep covers pi-lens-authored (`rules/ast-grep-rules/rules/`) + vendored CodeRabbit (`coderabbit/rules/`); tree-sitter covers `rules/tree-sitter-queries/<language>/`.
 
+**Tree-sitter post-filters.** Query rules may use the TypeScript-side `applyPostFilter` seam for bounded same-file AST checks that predicates cannot express; batched and single-rule execution both pass the parsed root. New filters must be implemented in `clients/tree-sitter-client.ts` because unknown filters fail closed.
+
 ## Build & packaging: precompiled dist + resource resolution (hard-won — #182)
 
 pi-lens ships **precompiled JS**, not TypeScript source, so pi doesn't jiti-transpile ~200 files on every cold start (~3.5s → ~1.5s; the load cost is logged as `pi-lens loaded: <ms>ms … (from dist|source)` in `sessionstart.log` + `extension_loaded` in `latency.log`).

@@ -239,7 +239,7 @@ Rule source: `rules/tree-sitter-queries/<language>/`.
 | `ts-ssrf` | error | security | Potential SSRF sink — validate and allowlist outbound URLs |
 | `ts-weak-hash` | error | security | Weak hash primitive selected (md5/sha1) — use sha256+ for security-sensitive contexts |
 | `ts-xss-dom-sink` | error | security | XSS risk — dynamic value written to innerHTML/outerHTML or document.write() |
-| `unsafe-regex` | error | security | Dynamic regex from user input — can cause ReDoS (Regular Expression Denial of Service) |
+| `unsafe-regex` | warning | security | Dynamic regex from user input — can cause ReDoS (Regular Expression Denial of Service) |
 | `variable-shadowing` | warning | maintainability | Variable '{{NAME}}' shadows a parameter — use a distinct name |
 
 ## Disabled rules
