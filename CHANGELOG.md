@@ -23,6 +23,11 @@ All notable changes to pi-lens will be documented in this file.
 	fake package-manager coverage verifies Windows timeout tree-kill, exactly one
 	install across concurrent processes, explicit install-disable refusal, and
 	Vitest's default no-install environment.
+- **Downgrade TypeScript `unsafe-regex` to advisory and suppress escaped-before-
+  assignment false positives** (refs #932) — the coarse dynamic `RegExp`
+  heuristic no longer blocks edits and recognizes escape/replace calls in a
+  same-file identifier initializer; structural ReDoS detection remains with
+  the `redos-nested-quantifier` ast-grep rule.
 - **Review-graph persistence no longer serializes or compresses on the event
 	loop** (refs #939) — debounced snapshots are materialized in one lazy,
 	unref'd worker and streamed through gzip into the new canonical
