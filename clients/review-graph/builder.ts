@@ -1869,13 +1869,50 @@ function restoreValidIncomingEdges(
 	rebuildIndexes(graph);
 }
 
+export interface GraphFileImportChange {
+	filePath: string;
+	existedBefore: boolean;
+	existsAfter: boolean;
+	priorTargets: string[];
+	newTargets: string[];
+}
+
+const _graphImportChanges = new WeakMap<ReviewGraph, GraphFileImportChange[]>();
+
+/** Import-edge delta produced by this exact returned graph instance. */
+export function getGraphImportChanges(
+	graph: ReviewGraph,
+): readonly GraphFileImportChange[] | undefined {
+	return _graphImportChanges.get(graph);
+}
+
+function importTargetsForFile(graph: ReviewGraph, filePath: string): string[] {
+	const normalized = normalizeMapKey(filePath);
+	const fileNodeId = graph.fileNodes.get(normalized) ?? `file:${normalized}`;
+	const targets = new Set<string>();
+	// Cached graph snapshots intentionally omit derived indexes; read the
+	// canonical edge collection so the delta is correct before the first rebuild.
+	for (const edge of graph.edges) {
+		if (edge.from !== fileNodeId) continue;
+		if (edge.kind !== "imports") continue;
+		const target = graph.nodes.get(edge.to)?.filePath;
+		if (target) targets.add(normalizeMapKey(target));
+	}
+	return [...targets].sort((a, b) => a.localeCompare(b));
+}
+
 async function updateGraphFiles(
 	graph: ReviewGraph,
 	cwd: string,
 	files: string[],
 	facts: FactStore,
 	ignoredIds?: ReadonlySet<string>,
-): Promise<void> {
+): Promise<GraphFileImportChange[]> {
+	const prior = files.map((file) => ({
+		filePath: normalizeMapKey(file),
+		existedBefore: graph.fileNodes.has(normalizeMapKey(file)),
+		priorTargets: importTargetsForFile(graph, file),
+	}));
 	const preservedIncoming: ReviewGraphEdge[] = [];
 	for (const file of files) {
 		preservedIncoming.push(...removeFileOwnedGraphData(graph, file));
@@ -1887,6 +1924,13 @@ async function updateGraphFiles(
 	for (const file of files) {
 		upsertChangedSymbols(graph, facts, file);
 	}
+	return prior.map(({ filePath, existedBefore, priorTargets }) => ({
+		filePath,
+		existedBefore,
+		existsAfter: graph.fileNodes.has(filePath),
+		priorTargets,
+		newTargets: importTargetsForFile(graph, filePath),
+	}));
 }
 
 function resolveDeferredSymbolEdges(graph: ReviewGraph): void {
@@ -2047,7 +2091,13 @@ async function tryIncrementalFromCache(
 	}
 
 	const graph = cloneGraph(cached.graph);
-	await updateGraphFiles(graph, ctx.cwd, filesToUpdate, ctx.facts, ctx.ignoredIds);
+	const importChanges = await updateGraphFiles(
+		graph,
+		ctx.cwd,
+		filesToUpdate,
+		ctx.facts,
+		ctx.ignoredIds,
+	);
 	// #459: real re-extract ⇒ new generation.
 	const generation = ++_graphGenerationCounter;
 	const graphSnapshot = cloneGraph(graph);
@@ -2068,6 +2118,7 @@ async function tryIncrementalFromCache(
 	);
 	_lastGraphBuildInfo = { reused: true, mode: "incremental", graphChanged: true };
 	graph.buildGeneration = generation;
+	_graphImportChanges.set(graph, importChanges);
 	ctx.facts.setSessionFact("session.reviewGraph", graph);
 	return graph;
 }
@@ -2180,8 +2231,15 @@ async function trySeqFastpath(
 	// machinery as the signature-diff incremental path (updateGraphFiles), so
 	// there's no second incremental implementation.
 	const graph = cloneGraph(cached.graph);
+	let importChanges: GraphFileImportChange[];
 	try {
-		await updateGraphFiles(graph, cwd, filesToUpdate, facts, ignoredIds);
+		importChanges = await updateGraphFiles(
+			graph,
+			cwd,
+			filesToUpdate,
+			facts,
+			ignoredIds,
+		);
 	} catch {
 		return { fallback: "stat-error" };
 	}
@@ -2217,6 +2275,7 @@ async function trySeqFastpath(
 	// so (unlike the no-op branch above) the graph object did change.
 	_lastGraphBuildInfo = { reused: true, mode: "seq-fastpath", graphChanged: true };
 	graph.buildGeneration = generation;
+	_graphImportChanges.set(graph, importChanges);
 	facts.setSessionFact("session.reviewGraph", graph);
 	return { graph };
 }

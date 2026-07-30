@@ -7,6 +7,7 @@ import {
 	type ProjectSnapshot,
 	type ProjectSnapshotFile,
 } from "./project-snapshot.js";
+import type { GraphFileImportChange } from "./review-graph/builder.js";
 import type { ReviewGraph } from "./review-graph/types.js";
 
 export interface ReverseDependencyIndex {
@@ -87,6 +88,44 @@ export function buildReverseDependencyIndexFromGraph(args: {
 	}
 
 	return normalizeIndex(index);
+}
+
+/** Apply per-file import-target deltas without walking the full review graph. */
+export function patchReverseDependencyIndex(
+	index: ReverseDependencyIndex,
+	changes: readonly GraphFileImportChange[],
+): ReverseDependencyIndex {
+	const imports = { ...index.imports };
+	const importedBy = { ...index.importedBy };
+
+	for (const change of changes) {
+		const file = normalizeMapKey(change.filePath);
+		for (const target of sortedUnique(change.priorTargets)) {
+			importedBy[target] = sortedUnique(
+				(importedBy[target] ?? []).filter(
+					(importer) => normalizeMapKey(importer) !== file,
+				),
+			);
+		}
+		if (change.existsAfter) {
+			const newTargets = sortedUnique(change.newTargets);
+			imports[file] = newTargets;
+			importedBy[file] ??= [];
+			for (const target of newTargets) {
+				importedBy[target] = sortedUnique([...(importedBy[target] ?? []), file]);
+			}
+		} else {
+			delete imports[file];
+			delete importedBy[file];
+		}
+	}
+
+	return normalizeIndex({
+		...index,
+		generatedAt: new Date().toISOString(),
+		imports,
+		importedBy,
+	});
 }
 
 export function buildReverseDependencyIndexFromSnapshot(

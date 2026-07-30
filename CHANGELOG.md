@@ -17,6 +17,10 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **Reverse-dependency indexes update at import-edge granularity** (refs #939)
+	instead of rebuilding from every graph edge after a one-file edit. Body-only
+	edits reuse the cached index without rewriting the project snapshot; import
+	changes patch only the touched `imports` and `importedBy` buckets.
 - **Review-graph file-cap degradation is now explicit and count-honest** (refs
 	#921) — `project_report` says a capped project has “more than N files” instead
 	of presenting the cap+1 early-exit sentinel as an exact count. `module_report`
