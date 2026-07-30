@@ -1644,11 +1644,12 @@ export class TreeSitterClient {
 					const declaration = captures.DECL;
 					const resource = captures.RESOURCE?.text ?? "";
 					if (!declaration || !resource) return true;
-					let ancestor: TreeSitterNode | null | undefined = declaration.parent;
-					for (let depth = 0; ancestor && depth < 16; depth++) {
-						if (ancestor.type === "resource_specification") return false;
-						ancestor = ancestor.parent;
-					}
+					// (#956 review: the old resource_specification ANCESTOR walk was
+					// dead code — the query only matches local_variable_declaration,
+					// which the Java grammar never places inside a try header. The
+					// real try-with-resources shapes are handled in the scope scan
+					// below: a `resource` node naming this variable covers both
+					// `try (Type x = …)` and the Java 9 `try (x)` form.)
 					const scope =
 						this.navigator.findParent(declaration, [
 							"method_declaration",
@@ -1656,6 +1657,7 @@ export class TreeSitterClient {
 							"block",
 						]) ?? rootNode;
 					if (!scope) return true;
+					const resourceWord = new RegExp(`\b${resource}\b`);
 					const stack = [scope];
 					for (let visited = 0; stack.length > 0 && visited < 10_000; visited++) {
 						const node = stack.pop();
@@ -1664,6 +1666,12 @@ export class TreeSitterClient {
 							node.type === "method_invocation" &&
 							node.childForFieldName?.("object")?.text === resource &&
 							node.childForFieldName?.("name")?.text === "close"
+						) {
+							return false;
+						}
+						if (
+							node.type === "resource" &&
+							resourceWord.test(node.text ?? "")
 						) {
 							return false;
 						}
@@ -1687,18 +1695,29 @@ export class TreeSitterClient {
 					for (let visited = 0; stack.length > 0 && visited < 10_000; visited++) {
 						const node = stack.pop();
 						if (!node) break;
-						// Any conditional branch is a plausible base case. This errs
-						// toward suppressing a blocking diagnostic, never inventing one.
+						// Any conditional or loop construct is a plausible base-case
+						// guard (#956 review: while/for-guarded recursion and ternary
+						// base cases are common). This errs toward suppressing a
+						// blocking diagnostic, never inventing one.
 						if (
 							node.type === "if_statement" ||
 							node.type === "switch_expression" ||
-							node.type === "switch_statement"
+							node.type === "switch_statement" ||
+							node.type === "while_statement" ||
+							node.type === "do_statement" ||
+							node.type === "for_statement" ||
+							node.type === "enhanced_for_statement" ||
+							node.type === "ternary_expression"
 						) {
 							return false;
 						}
 						stack.push(...(node.children ?? []));
 					}
-					return true;
+					// Cap exhausted without a verdict: this rule is BLOCKING, so a
+					// >10k-node method whose guard sits beyond the budget must not
+					// become a silent blocking FP — suppress instead (#956 review;
+					// the advisory filters keep their keep-the-diagnostic default).
+					return stack.length > 0 ? false : true;
 				} catch {
 					return true;
 				}

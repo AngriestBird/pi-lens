@@ -650,9 +650,11 @@ The GitHub release body is derived from the curated `CHANGELOG.md` section for t
 
 **Tree-sitter post-filters.** Query rules may use the TypeScript-side
 `applyPostFilter` seam for bounded same-file AST checks that predicates cannot
-express; batched and single-rule execution both pass the parsed root. The
-catalog currently references 68 distinct filters, all implemented (72 switch
-cases total, including inline/internal compatibility cases). Unknown names fail
+express; batched and single-rule execution both pass the parsed root. Every
+YAML `post_filter` must have a switch implementation — the invariant test in
+`tests/clients/tree-sitter-879-post-filters.test.ts` enforces this against the
+real rule files and real switch source (do not hand-maintain counts here).
+Unknown names fail
 closed: every raw match is dropped and one error is logged per process. A new
 filter therefore ships with a bounded traversal, a `try/catch` that returns
 `true` (keep the diagnostic if filtering fails), and real hit+miss tests; if
