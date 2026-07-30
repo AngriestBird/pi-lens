@@ -60,6 +60,8 @@ export {
 } from "./mcp/ipc.js";
 export {
 	analyzeFileFresh,
+	canRebuildPiLens,
+	REBUILD_UNAVAILABLE_MESSAGE,
 	resolveRebuildScript,
 	runRebuild,
 	type ScanDiagnostic,

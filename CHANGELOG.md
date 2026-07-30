@@ -72,6 +72,11 @@ All notable changes to pi-lens will be documented in this file.
 	deliberately unsafe: every new client imports the same cached `web-tree-sitter`
 	ES module and therefore reuses its corrupted Emscripten heap; restarting the
 	host is the isolation boundary.
+- **`pilens_rebuild` can no longer destroy an npm-installed pi-lens** (refs
+	#920) — rebuilds are refused before spawning a package script unless the
+	package is a source checkout with `tsconfig.dist.json` outside
+	`node_modules`; installed servers also omit the tool from `tools/list`, so
+	subagent allowlists cannot discover it.
 
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 
