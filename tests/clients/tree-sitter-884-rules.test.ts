@@ -107,7 +107,12 @@ describe("infinite-loop (TS)", () => {
 
 	it("matches for(;;) with no exit", async () => {
 		expect(
-			await count("infinite-loop", "ts", "typescript", `for (;;) {\n tick();\n}`),
+			await count(
+				"infinite-loop",
+				"ts",
+				"typescript",
+				`for (;;) {\n tick();\n}`,
+			),
 		).toBeGreaterThan(0);
 	});
 
@@ -230,9 +235,17 @@ describe("switch-case-termination (TS)", () => {
 	});
 
 	it.each([
-		["a block-wrapped terminating case", `{ const body = compute(); return body; }`, 0],
+		[
+			"a block-wrapped terminating case",
+			`{ const body = compute(); return body; }`,
+			0,
+		],
 		["a block-wrapped non-terminating case", `{ compute(); }`, 1],
-		["nested trailing blocks that terminate", `{ compute(); { return "one"; } }`, 0],
+		[
+			"nested trailing blocks that terminate",
+			`{ compute(); { return "one"; } }`,
+			0,
+		],
 		["an empty trailing block", `{ }`, 1],
 	])("%s", async (_name, caseBody, expected) => {
 		expect(
@@ -294,9 +307,17 @@ describe("switch-case-termination-js (JS)", () => {
 	});
 
 	it.each([
-		["a block-wrapped terminating case", `{ const body = compute(); return body; }`, 0],
+		[
+			"a block-wrapped terminating case",
+			`{ const body = compute(); return body; }`,
+			0,
+		],
 		["a block-wrapped non-terminating case", `{ compute(); }`, 1],
-		["nested trailing blocks that terminate", `{ compute(); { return "one"; } }`, 0],
+		[
+			"nested trailing blocks that terminate",
+			`{ compute(); { return "one"; } }`,
+			0,
+		],
 		["an empty trailing block", `{ }`, 1],
 	])("%s", async (_name, caseBody, expected) => {
 		expect(
