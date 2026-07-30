@@ -60,8 +60,10 @@ import type {
 	ReviewGraphPersistWorkerResult,
 } from "./persist-worker.js";
 import {
+	clearReviewGraphFileIr,
 	getFreshReviewGraphFileIr,
 	type ReviewGraphStructuralIr,
+	reviewGraphIrContentHash,
 } from "./shared-extraction-ir.js";
 
 // v3 (#260): test files are no longer indexed. Bumping the version makes
@@ -123,7 +125,7 @@ const MAIN_KIND_EXTENSIONS: string[] = Array.from(MAIN_KINDS).flatMap(
 	(kind) => KIND_EXTENSIONS[kind as keyof typeof KIND_EXTENSIONS] ?? [],
 );
 const CHANGED_SYMBOLS_PREFIX = "session.reviewGraph.changedSymbols:";
-const extractorCache = new Map<string, TreeSitterSymbolExtractor>();
+const extractorCache = new Map<string, TreeSitterSymbolExtractor | null>();
 
 // Per-invocation Promise cache: deduplicates concurrent buildOrUpdateGraph calls
 // for the same (cwd, changedFiles). Cleared at the start of each pipeline
@@ -1872,7 +1874,14 @@ async function getExtractor(
 	if (!client) return null;
 	const extractor = new TreeSitterSymbolExtractor(languageId, client);
 	const ok = await extractor.init();
-	if (!ok) return null;
+	if (!ok) {
+		// Memoize failures too (#955 review): the scan loop probes the
+		// extractor once per file, and an unmemoized grammar-load failure
+		// re-attempted resolution (possibly a lazy fetch) for every file of
+		// that language. A restart re-probes; within a process, one verdict.
+		extractorCache.set(languageId, null);
+		return null;
+	}
 	extractorCache.set(languageId, extractor);
 	return extractor;
 }
@@ -2371,7 +2380,7 @@ async function addFileToGraph(
 	if (detectFileRole(file) === "test") return;
 	const contentHash =
 		typeof contentOverride === "string"
-			? createHash("sha256").update(contentOverride).digest("hex")
+			? reviewGraphIrContentHash(contentOverride)
 			: undefined;
 	const sharedIr = contentHash
 		? getFreshReviewGraphFileIr(cwd, file, contentHash)?.structural
@@ -2418,11 +2427,14 @@ async function addFileToGraph(
 		irExtracted ??
 		(await extractTreeSitterSymbols(file, languageId, contentOverride));
 	addTreeSitterFile(graph, cwd, file, languageId, extracted, ignoredIds);
-	// A successfully extracted empty shared IR is authoritative. Only the direct
-	// extraction path asks warm/open LSP for a fallback; failed scanner
-	// extraction is never published as fresh and therefore arrives here via
-	// that direct path.
-	if (!irExtracted && extracted.symbols.length === 0) {
+	// Zero symbols consults the warm/open LSP fallback REGARDLESS of whether
+	// the symbols came from shared IR or direct extraction (#955 review): a
+	// degraded extractor (defs query failed to compile — init() deliberately
+	// succeeds, the documented kotlin case) yields parsed-true/empty, and
+	// treating that as authoritative would silently lose a whole language's
+	// symbols whenever a scan preceded the build. For genuinely empty files
+	// the fallback is a no-op unless the file is open in a warm client.
+	if (extracted.symbols.length === 0) {
 		const lspSymbols = await getOpenDocumentSymbols(file);
 		const added = lspSymbols
 			? addLspFallbackSymbols(graph, file, languageId, lspSymbols)
@@ -3164,8 +3176,19 @@ async function _doBuildGraph(
 			}
 		}
 	};
+	const extractAndDrainIr = async (): Promise<void> => {
+		try {
+			await extractFiles();
+		} finally {
+			// The build consumed every fresh entry (consume-once deletes them);
+			// leftovers are stale/test/non-build files nothing will ever read.
+			// Clearing here bounds the registry to the scan-to-build window
+			// (#955 review — the #886 retention class).
+			clearReviewGraphFileIr(cwd);
+		}
+	};
 	if (treeSitterClient) {
-		await treeSitterClient.withParseCacheMeasurement(extractFiles, (stats) => {
+		await treeSitterClient.withParseCacheMeasurement(extractAndDrainIr, (stats) => {
 			logTreeSitterCacheStats({
 				scope: "review_graph_full",
 				filePath: cwd,
@@ -3175,7 +3198,7 @@ async function _doBuildGraph(
 			});
 		});
 	} else {
-		await extractFiles();
+		await extractAndDrainIr();
 	}
 
 	resolveDeferredSymbolEdges(graph);

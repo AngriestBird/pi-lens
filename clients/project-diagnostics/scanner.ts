@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createDispatchContext } from "../dispatch/dispatcher.js";
@@ -16,7 +15,9 @@ import { isTestFile } from "../file-utils.js";
 import { isAtOrAboveHomeDir } from "../path-utils.js";
 import { getProjectDiagnosticsScannerMaxFiles } from "../project-scale.js";
 import { captureReviewGraphStructuralIr } from "../review-graph/builder.js";
-import { publishReviewGraphFileIr } from "../review-graph/shared-extraction-ir.js";
+import { publishReviewGraphFileIr,
+	reviewGraphIrContentHash,
+} from "../review-graph/shared-extraction-ir.js";
 import { collectSourceFilesWithBudgetAsync } from "../source-filter.js";
 import {
 	logTreeSitter,
@@ -321,10 +322,13 @@ async function scanFileMajorRules(
 					scanAstGrepFile(filePath, content, astGrepLang);
 				}
 				if (signal?.aborted) break;
-				if (content !== null && graphIr) {
+				if (content !== null && graphIr?.complete && graphIr.structural) {
+					// Publish only consumable entries (the registry also enforces
+					// this) — and hash via the shared contract so producer and
+					// consumer can never diverge (#955 review).
 					publishReviewGraphFileIr(cwd, {
 						filePath,
-						contentHash: createHash("sha256").update(content).digest("hex"),
+						contentHash: reviewGraphIrContentHash(content),
 						...graphIr,
 					});
 				}

@@ -185,7 +185,13 @@ describe("review graph LSP symbol fallback (#307)", () => {
 		}
 	});
 
-	it("treats a successful empty scanner IR as authoritative", async () => {
+	it("empty scanner IR still consults the warm LSP fallback (#955 review)", async () => {
+		// A degraded extractor (defs query failed to compile — init() succeeds,
+		// the documented kotlin case) publishes parsed-true/empty IR. Treating
+		// that as authoritative silently lost the whole language's symbols on
+		// warm builds; empty symbols now always take the fallback gate. For a
+		// genuinely empty file the fallback is a no-op unless the file is open
+		// in a warm client — which is exactly when LSP recovery is wanted.
 		const env = setupTestEnvironment("pi-lens-graph-lsp-ir-empty-");
 		try {
 			const content = "// legitimately no declarations\n";
@@ -201,10 +207,7 @@ describe("review graph LSP symbol fallback (#307)", () => {
 				},
 			});
 			await buildOrUpdateGraph(env.tmpDir, [file], new FactStore());
-			expect(getOpenDocumentSymbols).not.toHaveBeenCalled();
-			expect(logReviewGraph).not.toHaveBeenCalledWith(
-				expect.objectContaining({ phase: "lsp_symbol_fallback" }),
-			);
+			expect(getOpenDocumentSymbols).toHaveBeenCalled();
 		} finally {
 			env.cleanup();
 		}

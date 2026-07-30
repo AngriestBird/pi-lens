@@ -11,8 +11,11 @@ import {
 } from "../../../clients/review-graph/builder.js";
 import {
 	clearReviewGraphFileIr,
+	getFreshReviewGraphFileIr,
 	getReviewGraphIrStats,
+	publishReviewGraphFileIr,
 	resetReviewGraphIrStats,
+	reviewGraphIrContentHash,
 } from "../../../clients/review-graph/shared-extraction-ir.js";
 import type { ReviewGraph } from "../../../clients/review-graph/types.js";
 import { removeTempDirSync } from "../test-utils.js";
@@ -136,5 +139,56 @@ describe("scanner to review-graph structural IR (#939)", () => {
 		clearGraphCache();
 		const right = await buildOrUpdateGraph(rightRoot, [], new FactStore());
 		expect(shape(left, leftRoot)).toEqual(shape(right, rightRoot));
+	});
+
+	it("registry lifecycle: consume-once, publish guard, stale-only rejection (#955 review)", () => {
+		clearReviewGraphFileIr();
+		resetReviewGraphIrStats();
+		const cwd = path.join(os.tmpdir(), "ir-lifecycle-root");
+		const hash = reviewGraphIrContentHash("const a = 1;");
+		const structural = {
+			kind: "tree-sitter" as const,
+			languageId: "python",
+			extracted: { symbols: [], refs: [], imports: [] },
+		};
+		// Incomplete / structural-less entries are never stored.
+		publishReviewGraphFileIr(cwd, {
+			filePath: "/p/a.py",
+			contentHash: hash,
+			complete: false,
+		});
+		publishReviewGraphFileIr(cwd, {
+			filePath: "/p/a.py",
+			contentHash: hash,
+			complete: true,
+		});
+		expect(getFreshReviewGraphFileIr(cwd, "/p/a.py", hash)).toBeUndefined();
+		// Absence is not "rejected" — only present-but-stale counts.
+		expect(getReviewGraphIrStats().rejected).toBe(0);
+
+		publishReviewGraphFileIr(cwd, {
+			filePath: "/p/a.py",
+			contentHash: hash,
+			complete: true,
+			structural,
+		});
+		// A transient failed re-publication must not clobber a valid entry.
+		publishReviewGraphFileIr(cwd, {
+			filePath: "/p/a.py",
+			contentHash: hash,
+			complete: false,
+		});
+		// Stale lookup: present but wrong hash → rejected, entry retained.
+		expect(
+			getFreshReviewGraphFileIr(cwd, "/p/a.py", "different"),
+		).toBeUndefined();
+		expect(getReviewGraphIrStats().rejected).toBe(1);
+		// Fresh lookup consumes the entry…
+		expect(getFreshReviewGraphFileIr(cwd, "/p/a.py", hash)).toBeDefined();
+		// …exactly once (consume-once bounds retention and kills aliasing).
+		expect(getFreshReviewGraphFileIr(cwd, "/p/a.py", hash)).toBeUndefined();
+		expect(getReviewGraphIrStats().accepted).toBe(1);
+		clearReviewGraphFileIr();
+		resetReviewGraphIrStats();
 	});
 });
