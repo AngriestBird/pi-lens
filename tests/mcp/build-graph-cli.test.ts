@@ -77,6 +77,17 @@ describe("pi-lens build-graph CLI", () => {
 		expect(snapshots).toHaveLength(1);
 	});
 
+	it("re-run on an unchanged project reports snapshot-current and exits 0", async () => {
+		// #943 review blocker: the disk-cache hit queues no persist, and the
+		// old CLI treated the empty flush as failure — a nightly cron on a
+		// quiet repo failed every run after the first.
+		const first = await runCli(["build-graph", "--cwd", projectDir], dataDir);
+		expect(first.code).toBe(0);
+		const second = await runCli(["build-graph", "--cwd", projectDir], dataDir);
+		expect(second.code).toBe(0);
+		expect(second.stdout).toContain("snapshot already current");
+	});
+
 	it("fails loudly for an unsafe home root", async () => {
 		const result = await runCli(
 			["build-graph", `--cwd=${os.homedir()}`],

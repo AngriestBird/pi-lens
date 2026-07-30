@@ -1,12 +1,22 @@
 #!/usr/bin/env node
 
+// The CLI flushes the snapshot explicitly and verifies the write — a user
+// debounce (especially 0) races the fire-and-forget background writer and can
+// consume the pending payload before our flush sees it (#943 review). The
+// builder reads this env lazily on every persist, so forcing it here (before
+// any build runs; import hoisting is irrelevant) keeps the queued payload in
+// place for flushReviewGraphPersist to claim.
+process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "3600000";
+
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { FactStore } from "../clients/dispatch/fact-store.js";
 import {
 	buildOrUpdateGraph,
 	flushReviewGraphPersist,
+	getLastGraphBuildInfo,
 	getLastReviewGraphBuildAttempt,
+	reviewGraphCachePath,
 } from "../clients/review-graph/builder.js";
 
 function cwdArg(): string {
@@ -21,9 +31,18 @@ function cwdArg(): string {
 	return process.cwd();
 }
 
+/** Sentinel so main()'s catch doesn't double-print a reason fail() already wrote. */
+const FAILED = Symbol("build-graph-failed");
+
+// Soft-fail: write the reason, set the exit code, and let the event loop
+// drain naturally. A hard process.exit(1) here aborted with a libuv
+// assertion on Windows whenever async fs handles (log appends) were still
+// live (#943 review finding 3). Exit hooks (persist teardown, log flushSync)
+// still run on natural exit.
 function fail(reason: string): never {
 	process.stderr.write(`pi-lens build-graph failed: ${reason}\n`);
-	process.exit(1);
+	process.exitCode = 1;
+	throw FAILED;
 }
 
 async function buildGraph(): Promise<void> {
@@ -44,7 +63,26 @@ async function buildGraph(): Promise<void> {
 	}
 
 	const persisted = flushReviewGraphPersist(cwd);
-	if (!persisted.ok) fail(persisted.reason ?? "graph snapshot was not persisted");
+	if (!persisted.ok) {
+		// An unchanged repo queues no persist — the disk-cache hit and the
+		// pure-drift incremental path both deliberately skip rewriting the
+		// blob. That is SUCCESS for a scheduled build (#943 review finding 1:
+		// a nightly cron on a quiet repo must not fail every run), provided
+		// the snapshot actually exists on disk.
+		const buildInfo = getLastGraphBuildInfo();
+		const snapshotPath = reviewGraphCachePath(cwd);
+		if (!buildInfo.graphChanged && fs.existsSync(snapshotPath)) {
+			const bytes = fs.statSync(snapshotPath).size;
+			const durationMs = Date.now() - startedAt;
+			process.stdout.write(
+				`pi-lens build-graph: snapshot already current (mode=${buildInfo.mode}) ` +
+					`files=${graph.fileNodes.size} nodes=${graph.nodes.size} ` +
+					`edges=${graph.edges.length} jsonBytes=${bytes} durationMs=${durationMs}\n`,
+			);
+			return;
+		}
+		fail(persisted.reason ?? "graph snapshot was not persisted");
+	}
 
 	const durationMs = Date.now() - startedAt;
 	process.stdout.write(
@@ -62,4 +100,10 @@ async function main(): Promise<void> {
 	await buildGraph();
 }
 
-main().catch((err) => fail(err instanceof Error ? err.message : String(err)));
+main().catch((err) => {
+	if (err === FAILED) return;
+	process.stderr.write(
+		`pi-lens build-graph failed: ${err instanceof Error ? err.message : String(err)}\n`,
+	);
+	process.exitCode = 1;
+});

@@ -1003,7 +1003,7 @@ function ensurePersistExitHook(): void {
 	_persistExitHookInstalled = true;
 	process.once("exit", () => {
 		for (const pending of [..._pendingPersist.values()]) {
-			const result = flushReviewGraphPersist(pending.cwd);
+			const result = flushReviewGraphPersist(pending.cwd, "exit_hook");
 			if (!result.ok) flushReviewGraphLogSync();
 		}
 	});
@@ -1101,8 +1101,15 @@ export interface ReviewGraphPersistFlushResult {
  * process exits. This is the out-of-band counterpart to the teardown hook:
  * it consumes the same persist payload and uses the same atomic writer.
  */
+/** On-disk snapshot path for a workspace — for standalone tools that must
+ * distinguish "snapshot already current" from "persist never happened". */
+export function reviewGraphCachePath(cwd: string): string {
+	return path.join(getProjectDataDir(cwd), "cache", GRAPH_CACHE_FILENAME);
+}
+
 export function flushReviewGraphPersist(
 	cwd: string,
+	source: "cli" | "exit_hook" = "cli",
 ): ReviewGraphPersistFlushResult {
 	const key = normalizeMapKey(cwd);
 	const pending = _pendingPersist.get(key);
@@ -1142,7 +1149,11 @@ export function flushReviewGraphPersist(
 		};
 	} catch (err) {
 		const reason = err instanceof Error ? err.message : String(err);
-		recordPersistFailure(pending.cwd, "forced_flush_failed", reason);
+		recordPersistFailure(
+			pending.cwd,
+			source === "exit_hook" ? "exit_flush_failed" : "forced_flush_failed",
+			reason,
+		);
 		return { ok: false, reason };
 	}
 }
