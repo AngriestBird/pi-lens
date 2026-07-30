@@ -28,6 +28,8 @@ export interface ReviewGraphNode {
 	 * always resolves correctly there.
 	 */
 	qualifiedName?: string;
+	/** Origin of fallback-derived symbol data. Omitted for tree-sitter/fact nodes. */
+	provenance?: "lsp";
 	metadata?: Record<string, unknown>;
 }
 

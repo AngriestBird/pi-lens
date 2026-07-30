@@ -255,6 +255,16 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   the existing client map; it must never spawn or warm a client. Dispatch-side
   code imports this seam from `lsp/index.ts`, while `dispatch/auxiliary-lsp.ts`
   remains free of the reverse import to avoid the LSP/auxiliary cycle.
+- **Document-symbol enrichment is warm-and-open only (#158).**
+  `clients/lsp-document-symbols.ts` requests `textDocument/documentSymbol`
+  through `getWarmClientForFile` only when the exact document is already open
+  and the capability is advertised; it never spawns or opens. Read expansion
+  gives that request 150 ms and uses it only for name/kind/ancestry â€” the
+  tree-sitter range remains authoritative, with silent fallback on every miss.
+  The review-graph builder also uses this seam as a strict zero-tree-sitter-
+  symbol fallback (#307), never from `module_report`: LSP nodes persist with
+  `provenance:"lsp"`, and hierarchical children become symbol containment
+  edges. Every attempted fallback is recorded in `review-graph.log`.
 - **LSP circuit-breaker health includes absent clients (#927).**
   `LSPService.getBrokenStatus()` is a read-only projection of temporary
   cooldowns and session-permanent disablement; `pilens_health` renders those
