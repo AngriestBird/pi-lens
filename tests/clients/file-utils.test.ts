@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CACHE_VERSION, RuleCache } from "../../clients/cache/rule-cache.js";
 import { getGlobalPiLensDir, getProjectDataDir } from "../../clients/file-utils.js";
-import { appendToWorklog } from "../../clients/fix-worklog.js";
+import { appendToWorklog, readWorklog } from "../../clients/fix-worklog.js";
 
 const originalDataDir = process.env.PILENS_DATA_DIR;
 const originalHome = process.env.PI_LENS_HOME;
@@ -93,6 +93,47 @@ describe("getProjectDataDir", () => {
 		expect(
 			fs.existsSync(path.join(getProjectDataDir(cwd), "worklog.jsonl")),
 		).toBe(true);
+	});
+
+	it("redacts credential-shaped text from worklog diagnostic messages", () => {
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-worklog-redact-"),
+		);
+		process.env.PILENS_DATA_DIR = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-global-data-"),
+		);
+		const token = `ghp_${"a".repeat(36)}`;
+
+		appendToWorklog(
+			cwd,
+			[
+				{
+					id: "secret-scan",
+					tool: "gitleaks",
+					severity: "warning",
+					semantic: "warning",
+					filePath: path.join(cwd, "src", "config.ts"),
+					message: `hardcoded token ${token} detected`,
+					rule: "no-secrets",
+					line: 1,
+					column: 1,
+					fixable: false,
+				},
+			],
+			true,
+		);
+
+		const raw = fs.readFileSync(
+			path.join(getProjectDataDir(cwd), "worklog.jsonl"),
+			"utf8",
+		);
+		expect(raw).not.toContain(token);
+
+		const entries = readWorklog(cwd);
+		expect(entries).toHaveLength(1);
+		expect(entries[0].message).toBe(
+			"hardcoded token [REDACTED:github-token] detected",
+		);
 	});
 
 	it("stores rule cache under the configured data directory", () => {
