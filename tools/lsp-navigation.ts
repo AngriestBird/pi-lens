@@ -18,6 +18,7 @@ import {
 import { getLSPService } from "../clients/lsp/index.js";
 import type { SearchReadLocation } from "../clients/search-read-registration.js";
 import { buildLspNavigationEnvelope } from "./lsp-structured-output.js";
+import { SYMBOL_KIND_NAMES } from "../clients/lsp-document-symbols.js";
 
 const VALID_OPERATIONS = [
 	"definition",
@@ -310,36 +311,12 @@ type SymbolMatch = {
 	range?: Record<string, unknown>;
 };
 
-const SYMBOL_KIND_LABELS: Record<number, string> = {
-	2: "module",
-	3: "namespace",
-	4: "package",
-	5: "class",
-	6: "method",
-	7: "property",
-	8: "field",
-	9: "constructor",
-	10: "enum",
-	11: "interface",
-	12: "function",
-	13: "variable",
-	14: "constant",
-	15: "string",
-	16: "number",
-	17: "boolean",
-	18: "array",
-	19: "object",
-	20: "key",
-	21: "null",
-	22: "enumMember",
-	23: "struct",
-	24: "event",
-	25: "operator",
-	26: "typeParameter",
-};
 
 function symbolKindLabel(kind: number | undefined): string {
-	return kind == null ? "symbol" : (SYMBOL_KIND_LABELS[kind] ?? "symbol");
+	// Single source of truth for LSP SymbolKind names (#883 doctrine; the
+	// Sonar-flagged duplicate table lived here). Navigation keeps its own
+	// "symbol" fallback for unknown kinds instead of the lsp-symbol-<n> form.
+	return kind == null ? "symbol" : (SYMBOL_KIND_NAMES[kind] ?? "symbol");
 }
 
 function rangeStart(range: Record<string, unknown> | undefined): {
