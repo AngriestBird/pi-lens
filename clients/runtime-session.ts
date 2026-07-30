@@ -1301,6 +1301,48 @@ export async function handleSessionStart(
 						startedAt: new Date(wordIndexStartedAt).toISOString(),
 						durationMs: Date.now() - wordIndexStartedAt,
 					});
+					// #947: fold the dominant-language LSP pre-warm into this
+					// warmup pass. The first-session-of-process heuristic forces
+					// quick mode, and the pre-warm below is gated on
+					// allowBootstrapTasks (full mode only) — so it NEVER ran in
+					// practice and every session's first edit paid a cold LSP
+					// spawn (~750ms wait + ~2.5s spawn, measured). Fire it here
+					// instead: off the interactive path, once per process (the
+					// __piLensWarmupScheduled guard above), generation-guarded
+					// inside igniteDominantLanguageWarm, and honoring the same
+					// skips as the full-mode path — subagent light mode (#449),
+					// warm-attach (#822), the no-lsp flag, and the
+					// canWarmCaches guard (the early return above). Concurrent
+					// secondaries never reach handleSessionStart at all (the
+					// #473 guard in index.ts), so they never schedule this
+					// warmup in the first place.
+					const lspPrewarmStartedAt = Date.now();
+					if (deps.getFlag("no-lsp")) {
+						warmupDbg("warmup: skipping LSP pre-warm (no-lsp)");
+					} else if (isSubagentSession()) {
+						warmupDbg("warmup: skipping LSP pre-warm (subagent session)");
+					} else if (isWarmAttached()) {
+						warmupDbg(
+							"warmup: skipping LSP pre-warm (attached to incumbent)",
+						);
+					} else {
+						await igniteDominantLanguageWarm(
+							languageRoot,
+							deps.runtime,
+							deps.runtime.sessionGeneration,
+							warmupDbg,
+						);
+						logLatency({
+							type: "phase",
+							phase: "warmup_lsp_prewarm",
+							filePath: warmupCwd,
+							startedAt: new Date(lspPrewarmStartedAt).toISOString(),
+							durationMs: Date.now() - lspPrewarmStartedAt,
+						});
+						warmupDbg(
+							`warmup: lsp-prewarm done in ${Date.now() - lspPrewarmStartedAt}ms`,
+						);
+					}
 					warmupDbg(`warmup: total ${Date.now() - warmupStartedAt}ms`);
 				} catch (err) {
 					warmupDbg(`warmup: error ${err}`);
