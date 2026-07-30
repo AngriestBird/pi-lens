@@ -18,6 +18,7 @@ export interface ReviewGraphLogEntry {
 		| "build_succeeded"
 		| "build_skipped"
 		| "build_failed"
+		| "lsp_symbol_fallback"
 		| "persist_scheduled"
 		| "persist_succeeded"
 		| "persist_skipped"

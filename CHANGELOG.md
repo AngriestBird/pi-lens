@@ -12,6 +12,13 @@ All notable changes to pi-lens will be documented in this file.
 	servers retain the tree-sitter identity, and `ts_range_expanded` records
 	whether enrichment succeeded.
 
+- **Review-graph LSP fallback nodes** (refs #307) â€” when tree-sitter yields
+	zero declarations, the builder may use `documentSymbol` from an already-live,
+	already-open capable server. Nodes carry `provenance: "lsp"`, hierarchical
+	containment survives persistence, productive tree-sitter files never pay the
+	request, and unavailable/failed fallback attempts degrade without opening or
+	spawning while remaining visible in `review-graph.log`.
+
 - **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
 	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
 	persist path for CI/cron, forces the debounced snapshot write before exit,

@@ -1,0 +1,140 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { FactStore } from "../../../clients/dispatch/fact-store.js";
+import {
+	buildOrUpdateGraph,
+	clearReviewGraphWorkspaceCache,
+	flushReviewGraphPersist,
+	flushReviewGraphPersistsForTests,
+	getCachedReviewGraph,
+} from "../../../clients/review-graph/builder.js";
+import { getOpenDocumentSymbols } from "../../../clients/lsp-document-symbols.js";
+import { logReviewGraph } from "../../../clients/review-graph-logger.js";
+import { createTempFile, setupTestEnvironment } from "../test-utils.js";
+
+vi.mock("../../../clients/lsp-document-symbols.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<
+			typeof import("../../../clients/lsp-document-symbols.js")
+		>();
+	return { ...actual, getOpenDocumentSymbols: vi.fn() };
+});
+vi.mock("../../../clients/review-graph-logger.js", () => ({
+	logReviewGraph: vi.fn(),
+	flushReviewGraphLogSync: vi.fn(),
+}));
+
+const range = (start: number, end: number) => ({
+	start: { line: start, character: 0 },
+	end: { line: end, character: 1 },
+});
+
+afterEach(() => {
+	flushReviewGraphPersistsForTests();
+	clearReviewGraphWorkspaceCache();
+	vi.clearAllMocks();
+});
+
+describe("review graph LSP symbol fallback (#307)", () => {
+	it("adds hierarchical LSP nodes with provenance and persists them", async () => {
+		const env = setupTestEnvironment("pi-lens-graph-lsp-");
+		try {
+			const file = createTempFile(env.tmpDir, "lib/main.dart", "// opaque\n");
+			process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "100000";
+			vi.mocked(getOpenDocumentSymbols).mockResolvedValue([
+				{
+					name: "ReviewManager",
+					kind: 5,
+					range: range(0, 8),
+					children: [
+						{ name: "runSynthesis", kind: 6, range: range(2, 5) },
+					],
+				},
+			]);
+			const graph = await buildOrUpdateGraph(
+				env.tmpDir,
+				[file],
+				new FactStore(),
+			);
+			const lspNodes = [...graph.nodes.values()].filter(
+				(node) => node.provenance === "lsp",
+			);
+			expect(lspNodes.map((node) => node.qualifiedName ?? node.symbolName)).toEqual(
+				["ReviewManager", "ReviewManager.runSynthesis"],
+			);
+			const parent = lspNodes.find((node) => node.symbolName === "ReviewManager")!;
+			const child = lspNodes.find((node) => node.symbolName === "runSynthesis")!;
+			expect(graph.edges).toContainEqual({
+				from: parent.id,
+				to: child.id,
+				kind: "contains",
+			});
+			expect(logReviewGraph).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "lsp_symbol_fallback",
+					reason: "added",
+					nodes: 2,
+				}),
+			);
+
+			expect(flushReviewGraphPersist(env.tmpDir, "cli").ok).toBe(true);
+			clearReviewGraphWorkspaceCache(env.tmpDir);
+			const loaded = getCachedReviewGraph(env.tmpDir);
+			expect(
+				[...(loaded?.nodes.values() ?? [])].filter(
+					(node) => node.provenance === "lsp",
+				),
+			).toHaveLength(2);
+		} finally {
+			process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "0";
+			env.cleanup();
+		}
+	});
+
+	it("logs and degrades when no warm/open server is available", async () => {
+		const env = setupTestEnvironment("pi-lens-graph-lsp-cold-");
+		try {
+			const file = createTempFile(env.tmpDir, "lib/main.dart", "// opaque\n");
+			vi.mocked(getOpenDocumentSymbols).mockResolvedValue(undefined);
+			const graph = await buildOrUpdateGraph(
+				env.tmpDir,
+				[file],
+				new FactStore(),
+			);
+			expect(
+				[...graph.nodes.values()].some((node) => node.provenance === "lsp"),
+			).toBe(false);
+			expect(logReviewGraph).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "lsp_symbol_fallback",
+					reason: "unavailable-or-failed",
+				}),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("never requests document symbols for a productive fact extractor", async () => {
+		const env = setupTestEnvironment("pi-lens-graph-lsp-productive-");
+		try {
+			const file = createTempFile(
+				env.tmpDir,
+				"src/main.ts",
+				"export function productive() { return 1; }\n",
+			);
+			const graph = await buildOrUpdateGraph(
+				env.tmpDir,
+				[file],
+				new FactStore(),
+			);
+			expect(
+				[...graph.nodes.values()].some(
+					(node) => node.symbolName === "productive",
+				),
+			).toBe(true);
+			expect(getOpenDocumentSymbols).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+});
