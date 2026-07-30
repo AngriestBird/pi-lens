@@ -405,6 +405,7 @@ export async function scanProjectDiagnostics(
 	if (collected.entryBudgetExceeded) snapshot.scanTruncated = true;
 	if (wasmAborted) {
 		snapshot.scanTruncated = true;
+		snapshot.treeSitterStatus = "wasm_aborted_restart_required";
 		logTreeSitter({
 			phase: "runner_skip",
 			filePath: cwd,

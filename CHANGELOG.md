@@ -54,6 +54,15 @@ All notable changes to pi-lens will be documented in this file.
 	`lens_diagnostics mode=full` sweep** (refs #798), instead of showing
 	`LSP Inactive` until turn end. The repaint captures UI methods during the
 	active tool event, so async warm-up never touches a stale session context.
+- **Tree-sitter WASM aborts are now visible instead of silently disabling
+	structural analysis for the rest of the process** (refs #915). The shared
+	runtime records a process-wide, timestamped `restart_required` health state,
+	logs a one-time actionable error, exposes it through `pilens_health`, and
+	marks project-scan responses with `treeSitterStatus`. A poisoned scan remains
+	truncated and never replaces the last complete snapshot. In-process retry is
+	deliberately unsafe: every new client imports the same cached `web-tree-sitter`
+	ES module and therefore reuses its corrupted Emscripten heap; restarting the
+	host is the isolation boundary.
 
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 
