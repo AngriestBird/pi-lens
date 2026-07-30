@@ -72,6 +72,21 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Capped word indexes disclose partial coverage** (refs #928) — snapshots now
+	persist indexed-file count and truncation state, and both `symbol_search`
+	surfaces report coverage instead of presenting capped zero-hit results as
+	authoritative.
+- **`pilens_health` keeps disabled LSP servers visible** (refs #927) —
+	permanently broken server/root pairs now render with their failure count, and
+	temporary circuit-breaker cooldowns expose their retry deadline.
+- **Cold `symbol_search` failures are now observable and honest** (refs #926) —
+	unavailable results distinguish an active build, a safety refusal, and the
+	last build's failure, while background build/persist errors reach a persistent
+	NDJSON log.
+- **Failed heavyweight analyzers no longer masquerade as clean runs** (refs #925) —
+	unsuccessful results are reported distinctly, omitted from cache so the next
+	session retries, and valid fix-worklog records survive neighboring corrupt lines.
+
 - **The footer refreshes as LSP servers come online during a cold
 	`lens_diagnostics mode=full` sweep** (refs #798), instead of showing
 	`LSP Inactive` until turn end. The repaint captures UI methods during the

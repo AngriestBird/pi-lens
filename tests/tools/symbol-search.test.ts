@@ -12,7 +12,13 @@ import {
 	clearReviewGraphWorkspaceCache,
 	getCachedReviewGraph,
 } from "../../clients/review-graph/builder.js";
-import { buildWordIndex, serializeWordIndex, _resetWordIndexBuildGuardForTests } from "../../clients/word-index.js";
+import {
+	buildWordIndex,
+	getWordIndexBuildStatus,
+	serializeWordIndex,
+	triggerBackgroundWordIndexBuild,
+	_resetWordIndexBuildGuardForTests,
+} from "../../clients/word-index.js";
 import { createSymbolSearchTool } from "../../tools/symbol-search.js";
 import { createTempFile, setupTestEnvironment } from "../clients/test-utils.js";
 
@@ -24,8 +30,9 @@ afterEach(() => {
 function warmWordIndexSnapshot(
 	tmpDir: string,
 	files: Array<{ path: string; content: string }>,
+	truncated = false,
 ): void {
-	const index = buildWordIndex(files);
+	const index = buildWordIndex(Object.assign(files, { truncated }));
 	saveProjectSnapshot(tmpDir, {
 		version: PROJECT_SNAPSHOT_VERSION,
 		projectRoot: tmpDir,
@@ -37,9 +44,39 @@ function warmWordIndexSnapshot(
 		cachedExports: [],
 		wordIndex: serializeWordIndex(index),
 	});
+
 }
 
 describe("symbol_search tool", () => {
+	it("zero-hit output warns when the index is capped and exposes coverage (#928)", async () => {
+		const env = setupTestEnvironment("pi-lens-symbolsearch-capped-");
+		try {
+			warmWordIndexSnapshot(
+				env.tmpDir,
+				[{ path: "src/auth.ts", content: "export const authenticate = true;" }],
+				true,
+			);
+			const tool = createSymbolSearchTool(() => env.tmpDir);
+			const result = await tool.execute(
+				"1",
+				{ query: "definitely absent identifier" },
+				undefined,
+				null,
+				{ cwd: env.tmpDir },
+			);
+			expect(String(result.content[0]?.text)).toContain(
+				"Index covers 1 files (capped — results may be incomplete).",
+			);
+			expect(result.details).toMatchObject({
+				available: true,
+				count: 0,
+				coverage: { files: 1, truncated: true },
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("cold path: returns available:false with an actionable hint and kicks off a background build", async () => {
 		const env = setupTestEnvironment("pi-lens-symbolsearch-cold-");
 		try {
@@ -72,6 +109,41 @@ describe("symbol_search tool", () => {
 				{ timeout: 5000 },
 			);
 		} finally {
+			env.cleanup();
+		}
+	}, 10_000);
+
+	it("cold path exposes the last build failure instead of claiming only that it is building (#926)", async () => {
+		const env = setupTestEnvironment("pi-lens-symbolsearch-failed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		try {
+			createTempFile(env.tmpDir, "src/auth.ts", "export const authenticate = true;");
+			process.env.PILENS_DATA_DIR = createTempFile(
+				env.tmpDir,
+				"occupied-data-root",
+				"not a directory",
+			);
+			triggerBackgroundWordIndexBuild(env.tmpDir);
+			await vi.waitFor(() => {
+				expect(getWordIndexBuildStatus(env.tmpDir)?.state).toBe("failed");
+			});
+
+			const tool = createSymbolSearchTool(() => env.tmpDir);
+			const result = await tool.execute(
+				"1",
+				{ query: "authenticate" },
+				undefined,
+				null,
+				{ cwd: env.tmpDir },
+			);
+			expect(result.details).toMatchObject({
+				available: false,
+				unavailableReason: "last-build-failed",
+			});
+			expect(String(result.content[0]?.text)).toMatch(/last word index build failed/i);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
 			env.cleanup();
 		}
 	}, 10_000);

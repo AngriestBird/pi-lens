@@ -4090,6 +4090,33 @@ export class LSPService {
 	}
 
 	/**
+	 * Read-only circuit-breaker status, including server/root pairs that have no
+	 * live client and would therefore be absent from getStatus().
+	 */
+	getBrokenStatus(): Array<{
+		serverId: string;
+		root: string;
+		failures: number;
+		permanentlyBroken: boolean;
+		cooldownUntil: number;
+	}> {
+		const keys = new Set([
+			...this.state.broken.keys(),
+			...this.permanentlyBroken,
+		]);
+		return [...keys].map((key) => {
+			const separator = key.indexOf(":");
+			return {
+				serverId: separator >= 0 ? key.slice(0, separator) : key,
+				root: separator >= 0 ? key.slice(separator + 1) : "",
+				failures: this.failureCounts.get(key) ?? 0,
+				permanentlyBroken: this.permanentlyBroken.has(key),
+				cooldownUntil: this.state.broken.get(key) ?? 0,
+			};
+		});
+	}
+
+	/**
 	 * Count clients that are currently alive (connected and initialized).
 	 * Lightweight — does not spawn or wait for anything.
 	 */

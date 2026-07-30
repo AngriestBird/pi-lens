@@ -34,6 +34,7 @@ export function createSymbolSearchTool(getProjectRoot: () => string) {
 			query?: string;
 			count?: number;
 			hint?: string;
+			unavailableReason?: string;
 		}>(({ details, isError }) => {
 			if (isError || details?.available === false) {
 				return `symbol_search "${details?.query ?? ""}" — unavailable${details?.hint ? `: ${details.hint}` : ""}`;
@@ -104,15 +105,27 @@ export function createSymbolSearchTool(getProjectRoot: () => string) {
 						available: false,
 						query: result.query,
 						hint: result.hint,
+						unavailableReason: result.unavailableReason,
 					},
 				};
 			}
 			if (result.results.length === 0) {
+				const coverageLine = result.coverage
+					? `Index covers ${result.coverage.files} files${result.coverage.truncated ? " (capped — results may be incomplete)" : ""}.`
+					: "";
 				return {
 					content: [
-						{ type: "text" as const, text: `No files matched "${params.query}".` },
+						{
+							type: "text" as const,
+							text: `No files matched "${params.query}".${coverageLine ? `\n${coverageLine}` : ""}`,
+						},
 					],
-					details: { available: true, query: result.query, count: 0 },
+					details: {
+						available: true,
+						query: result.query,
+						count: 0,
+						coverage: result.coverage,
+					},
 				};
 			}
 			const lines = [
@@ -122,6 +135,11 @@ export function createSymbolSearchTool(getProjectRoot: () => string) {
 						`  ${i + 1}. ${path.relative(cwd, hit.file)} ` +
 						`(score ${hit.score.toFixed(2)}, ${hit.hits} hit(s), line ${hit.startLine})`,
 				),
+				...(result.coverage
+					? [
+							`Index covers ${result.coverage.files} files${result.coverage.truncated ? " (capped — results may be incomplete)" : ""}.`,
+						]
+					: []),
 			];
 			// Compact (unindented) JSON payload, matching module_report/read_symbol
 			// (#517): path relative-to-cwd once per hit, no per-hit `read` block —
@@ -129,6 +147,7 @@ export function createSymbolSearchTool(getProjectRoot: () => string) {
 			const payload = {
 				available: true,
 				query: result.query,
+				coverage: result.coverage,
 				results: result.results.map((hit) => {
 					const relFile = path.relative(cwd, hit.file);
 					return {
@@ -150,6 +169,7 @@ export function createSymbolSearchTool(getProjectRoot: () => string) {
 					available: true,
 					query: result.query,
 					count: result.results.length,
+					coverage: result.coverage,
 				},
 			};
 		},
