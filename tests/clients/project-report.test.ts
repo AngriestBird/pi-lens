@@ -6,6 +6,7 @@ import {
 	renderCompactProjectReport,
 } from "../../clients/project-report.js";
 import {
+	_resetReviewGraphBuildAttemptsForTests,
 	buildOrUpdateGraph,
 	clearReviewGraphWorkspaceCache,
 	getCachedReviewGraph,
@@ -20,6 +21,7 @@ const cleanups: Array<() => void> = [];
 afterEach(() => {
 	while (cleanups.length) cleanups.pop()?.();
 	clearReviewGraphWorkspaceCache();
+	_resetReviewGraphBuildAttemptsForTests();
 	_resetProjectReportBuildGuardForTests();
 });
 
@@ -55,6 +57,48 @@ describe("projectReport — cold path (#773)", () => {
 			},
 			{ timeout: 10_000, interval: 100 },
 		);
+	});
+
+	it("surfaces a graph that cannot be persisted (#919)", async () => {
+		const env = makeEnv();
+		createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");
+		createTempFile(env.tmpDir, "src/b.ts", "export const b = 2;\n");
+		const previousCap = process.env.PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS;
+		process.env.PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS = "1";
+		try {
+			await warmGraph(env.tmpDir);
+			const report = await projectReport(env.tmpDir);
+			expect(report.available).toBe(true);
+			expect(report.lastBuildAttempt).toMatchObject({ outcome: "succeeded" });
+			expect(report.lastBuildAttempt?.reason).toContain(
+				"persist element cap exceeded",
+			);
+		} finally {
+			if (previousCap === undefined) {
+				delete process.env.PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS;
+			} else {
+				process.env.PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS = previousCap;
+			}
+		}
+	});
+
+	it("surfaces a rejected background-class build (#919)", async () => {
+		const env = makeEnv();
+		createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");
+		const facts = new FactStore();
+		vi.spyOn(facts, "setSessionFact").mockImplementation(() => {
+			throw new Error("synthetic graph build death");
+		});
+
+		await expect(buildOrUpdateGraph(env.tmpDir, [], facts)).rejects.toThrow(
+			"synthetic graph build death",
+		);
+		const report = await projectReport(env.tmpDir);
+		expect(report.available).toBe(true);
+		expect(report.lastBuildAttempt).toMatchObject({
+			outcome: "failed",
+			reason: "synthetic graph build death",
+		});
 	});
 });
 

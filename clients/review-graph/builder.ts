@@ -31,6 +31,10 @@ import {
 import { RUNTIME_CONFIG } from "../runtime-config.js";
 import { buildQualifiedName, findOwnerName } from "../symbol-containment.js";
 import { logTreeSitterCacheStats } from "../tree-sitter-logger.js";
+import {
+	flushReviewGraphLogSync,
+	logReviewGraph,
+} from "../review-graph-logger.js";
 import { getSharedTreeSitterClient } from "../tree-sitter-shared.js";
 import {
 	type ExtractedSymbols,
@@ -570,6 +574,46 @@ export interface ReviewGraphSizeSkipVerdict {
 	skippedAt: number;
 }
 
+export interface ReviewGraphBuildAttempt {
+	when: string;
+	outcome: "running" | "succeeded" | "skipped" | "failed";
+	reason?: string;
+}
+
+const _buildAttempts = new Map<string, ReviewGraphBuildAttempt>();
+
+export function getLastReviewGraphBuildAttempt(
+	cwd: string,
+): ReviewGraphBuildAttempt | undefined {
+	return _buildAttempts.get(normalizeMapKey(cwd));
+}
+
+export function _resetReviewGraphBuildAttemptsForTests(): void {
+	_buildAttempts.clear();
+}
+
+function recordBuildAttempt(
+	cwd: string,
+	outcome: ReviewGraphBuildAttempt["outcome"],
+	reason?: string,
+): void {
+	_buildAttempts.set(normalizeMapKey(cwd), {
+		when: new Date().toISOString(),
+		outcome,
+		...(reason ? { reason } : {}),
+	});
+}
+
+function recordPersistFailure(cwd: string, reason: string, error: string): void {
+	recordBuildAttempt(cwd, "succeeded", `graph built but persistence failed: ${error}`);
+	logReviewGraph({
+		cwd,
+		phase: "persist_failed",
+		reason,
+		error,
+	});
+}
+
 const _sizeSkipVerdicts = new Map<string, ReviewGraphSizeSkipVerdict>();
 
 /** Test-only: clears every recorded size-skip verdict. */
@@ -888,6 +932,7 @@ function writePending(key: string): void {
 	try {
 		json = JSON.stringify(pending.data);
 	} catch (err) {
+		recordPersistFailure(key, "serialize_failed", (err as Error).message);
 		console.error(
 			"[review-graph] cache serialize failed:",
 			(err as Error).message,
@@ -903,6 +948,7 @@ function writePending(key: string): void {
 	});
 	fs.mkdir(pending.cacheDir, { recursive: true }, (mkdirErr) => {
 		if (mkdirErr) {
+			recordPersistFailure(key, "cache_dir_creation_failed", mkdirErr.message);
 			console.error(
 				"[review-graph] cache dir creation failed:",
 				mkdirErr.message,
@@ -932,16 +978,24 @@ function writePending(key: string): void {
 		const tmpPath = `${pending.cachePath}.tmp-${process.pid}`;
 		fs.writeFile(tmpPath, json, "utf-8", (writeErr) => {
 			if (writeErr) {
+				recordPersistFailure(key, "cache_write_failed", writeErr.message);
 				console.error("[review-graph] cache write failed:", writeErr.message);
 				return;
 			}
 			fs.rename(tmpPath, pending.cachePath, (renameErr) => {
 				if (renameErr) {
+					recordPersistFailure(key, "cache_rename_failed", renameErr.message);
 					console.error(
 						"[review-graph] cache rename failed:",
 						renameErr.message,
 					);
 					fs.rm(tmpPath, { force: true }, () => {});
+				} else {
+					logReviewGraph({
+						cwd: key,
+						phase: "persist_succeeded",
+						elements: pending.elementCount,
+					});
 				}
 			});
 		});
@@ -956,15 +1010,20 @@ function ensurePersistExitHook(): void {
 	if (_persistExitHookInstalled) return;
 	_persistExitHookInstalled = true;
 	process.once("exit", () => {
-		for (const [, pending] of _pendingPersist) {
+		for (const [key, pending] of _pendingPersist) {
 			try {
 				fs.mkdirSync(pending.cacheDir, { recursive: true });
 				// Same atomic tmp+rename as writePending (via clients/atomic-write.ts,
 				// #762): even at teardown a crash mid-write must not leave a
 				// truncated snapshot for the next start.
 				writeFileAtomic(pending.cachePath, JSON.stringify(pending.data));
-			} catch {
-				// Teardown is best-effort; a missed persist just re-confirms next start.
+			} catch (err) {
+				recordPersistFailure(
+					key,
+					"exit_flush_failed",
+					err instanceof Error ? err.message : String(err),
+				);
+				flushReviewGraphLogSync();
 			}
 		}
 		_pendingPersist.clear();
@@ -988,6 +1047,15 @@ function persistGraph(
 			filePath: cwd,
 			durationMs: 0,
 			metadata: { skipped: "size_cap", elements: elementCount, cap },
+		});
+		const reason = `persist element cap exceeded (${elementCount} > ${cap}); graph remains available only in this process`;
+		recordBuildAttempt(cwd, "succeeded", reason);
+		logReviewGraph({
+			cwd,
+			phase: "persist_skipped",
+			reason: "element_cap_exceeded",
+			elements: elementCount,
+			cap,
 		});
 		return;
 	}
@@ -1013,6 +1081,12 @@ function persistGraph(
 	};
 	const key = normalizeMapKey(cwd);
 	_pendingPersist.set(key, { cacheDir, cachePath, data, elementCount });
+	logReviewGraph({
+		cwd,
+		phase: "persist_scheduled",
+		elements: elementCount,
+		cap,
+	});
 	ensurePersistExitHook();
 
 	const debounce = graphPersistDebounceMs();
@@ -2431,10 +2505,51 @@ export function buildOrUpdateGraph(
 	const cached = _buildCache.get(cacheKey);
 	if (cached) return cached;
 
-	const promise = _doBuildGraph(cwd, changedFiles, facts, seqHint).catch((err) => {
-		_buildCache.delete(cacheKey);
-		throw err as Error;
-	});
+	const startedAt = Date.now();
+	recordBuildAttempt(cwd, "running");
+	logReviewGraph({ cwd, phase: "build_started" });
+	const promise = _doBuildGraph(cwd, changedFiles, facts, seqHint)
+		.then((graph) => {
+			const sizeSkip = getReviewGraphSizeSkipVerdict(cwd);
+			const unsafeRoot = isAtOrAboveHomeDir(path.resolve(cwd));
+			if (sizeSkip || unsafeRoot) {
+				const reason = sizeSkip
+					? `source file cap exceeded (${sizeSkip.sourceFileCount} > ${sizeSkip.maxFileCount})`
+					: "unsafe_root";
+				recordBuildAttempt(cwd, "skipped", reason);
+				logReviewGraph({
+					cwd,
+					phase: "build_skipped",
+					reason,
+					durationMs: Date.now() - startedAt,
+				});
+			} else {
+				const prior = getLastReviewGraphBuildAttempt(cwd);
+				recordBuildAttempt(cwd, "succeeded", prior?.reason);
+				logReviewGraph({
+					cwd,
+					phase: "build_succeeded",
+					durationMs: Date.now() - startedAt,
+					nodes: graph.nodes.size,
+					edges: graph.edges.length,
+					...(prior?.reason ? { reason: prior.reason } : {}),
+				});
+			}
+			return graph;
+		})
+		.catch((err) => {
+			_buildCache.delete(cacheKey);
+			const reason = err instanceof Error ? err.message : String(err);
+			recordBuildAttempt(cwd, "failed", reason);
+			logReviewGraph({
+				cwd,
+				phase: "build_failed",
+				reason,
+				durationMs: Date.now() - startedAt,
+				error: reason,
+			});
+			throw err as Error;
+		});
 	_buildCache.set(cacheKey, promise);
 	return promise;
 }

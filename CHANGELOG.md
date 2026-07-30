@@ -44,6 +44,13 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Review-graph background failures are no longer silent** (refs #919) —
+	`project_report`/`pilens_project_report` now surface the most recent build
+	attempt and its terminal skip/failure reason, including the persistence
+	element circuit-breaker. A dedicated `~/.pi-lens/review-graph.log` records
+	build and persistence starts, successes, skips, and failures, so a rejected
+	fire-and-forget build or an over-cap graph cannot look perpetually in progress.
+
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 
 - **A mid-scan tree-sitter WASM abort no longer replaces the authoritative

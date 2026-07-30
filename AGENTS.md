@@ -351,7 +351,7 @@ const cacheFile = path.join(getProjectDataDir(cwd), "cache", "my-file.json");
 
 **Project-scoped** (must use `getProjectDataDir`): caches, snapshots, indexes, worklogs, change-log, code-quality-warnings, actionable-warning-state, review-graph, install-choices.
 
-**Machine-global** (all routed through `getGlobalPiLensDir()`, `clients/file-utils.ts` — never hand-rolled `os.homedir()` + `.pi-lens`): latency.log, cascade.log, tree-sitter.log, sessionstart.log, read-guard.log, actionable-warnings.log, dead-code.log, diagnostic-logger's `logs/`, tools/, bin/, intelephense/, probe-cache.json, and the #449 instance registry (`instances.json`). These are shared across all projects. `getGlobalPiLensDir()` respects `PI_LENS_HOME` (#525) — the machine-scoped sibling of `PILENS_DATA_DIR` above; setting it relocates the entire `~/.pi-lens` root for every one of those writers in one shot, since they all route through this single function.
+**Machine-global** (all routed through `getGlobalPiLensDir()`, `clients/file-utils.ts` — never hand-rolled `os.homedir()` + `.pi-lens`): latency.log, cascade.log, review-graph.log, tree-sitter.log, sessionstart.log, read-guard.log, actionable-warnings.log, dead-code.log, diagnostic-logger's `logs/`, tools/, bin/, intelephense/, probe-cache.json, and the #449 instance registry (`instances.json`). These are shared across all projects. `getGlobalPiLensDir()` respects `PI_LENS_HOME` (#525) — the machine-scoped sibling of `PILENS_DATA_DIR` above; setting it relocates the entire `~/.pi-lens` root for every one of those writers in one shot, since they all route through this single function.
 
 Never write `path.join(cwd, ".pi-lens", ...)` for a project cache — it breaks when `PILENS_DATA_DIR` is set. Likewise never write `path.join(os.homedir(), ".pi-lens", ...)` directly for machine-global state — always call `getGlobalPiLensDir()`, or `PI_LENS_HOME` silently stops covering that writer.
 
@@ -363,6 +363,7 @@ Never write `path.join(cwd, ".pi-lens", ...)` for a project cache — it breaks 
 
 - `~/.pi-lens/sessionstart.log` — timestamped lines for every session_start event and tool lifecycle; includes project snapshot probe/miss/load summaries, seeded project/file sequence counts, scan-context/profile cache source, and deferred task queued/run timings
 - `~/.pi-lens/cascade.log` — NDJSON cascade graph/neighbor diagnostics, including reverse-dependency cache refresh/load/merge events (`phase: "reverse_deps_cache"`)
+- `~/.pi-lens/review-graph.log` — NDJSON review-graph build and persistence outcomes
 - `~/.pi-lens/latency.log` — NDJSON per-runner timings
 - `~/.pi-lens/tree-sitter.log` — NDJSON tree-sitter runner activity plus aggregate `cache_stats` entries for project-diagnostics and full review-graph phases; scope-isolated measurements include lookup/miss reasons, capacity misses, evictions, parser invocations/time, and resident source bytes/lines
 - `~/.pi-lens/read-guard.log` — NDJSON for every read-guard verdict, autopatch, and preflight block (rotates at 1 MiB); key events: `edit_blocked`, `edit_warned`, `edit_preflight_blocked`, `oldtext_not_found`, `oldtext_trailing_ws_autopatched`, `oldtext_indent_autopatched`, `oldtext_escape_autopatched`
