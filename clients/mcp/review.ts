@@ -8,6 +8,8 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
 	type NodePackageManager,
 	pmBinary,
@@ -99,11 +101,25 @@ export function analyzeFileFresh(
 export interface RebuildOutcome {
 	ok: boolean;
 	script: string;
-	/** Package manager used to run the script (e.g. for the caller's headline). */
-	packageManager: NodePackageManager;
+	/** Package manager used to run the script (absent when preflight refused it). */
+	packageManager?: NodePackageManager;
 	durationMs: number;
 	output: string;
 }
+
+/**
+ * Rebuilds are safe only from a source checkout. Published packages contain
+ * `dist/` but not tsconfig.dist.json, and build:dist deletes dist before tsc.
+ * The node_modules check also refuses unusual installs that happen to carry a
+ * stray tsconfig.
+ */
+export function canRebuildPiLens(repoRoot: string): boolean {
+	const inNodeModules = /(^|[\\/])node_modules([\\/]|$)/i.test(repoRoot);
+	return !inNodeModules && existsSync(join(repoRoot, "tsconfig.dist.json"));
+}
+
+export const REBUILD_UNAVAILABLE_MESSAGE =
+	"pilens_rebuild is unavailable in an installed pi-lens package. Rebuilding is only safe from a source checkout containing tsconfig.dist.json; reinstall or update pi-lens through your package manager instead.";
 
 /**
  * Run `<pm> run <script>` in the pi-lens repo, where `<pm>` is resolved from the
@@ -116,6 +132,14 @@ export async function runRebuild(
 	timeoutMs = 300_000,
 ): Promise<RebuildOutcome> {
 	const start = Date.now();
+	if (!canRebuildPiLens(repoRoot)) {
+		return {
+			ok: false,
+			script,
+			durationMs: Date.now() - start,
+			output: REBUILD_UNAVAILABLE_MESSAGE,
+		};
+	}
 	const packageManager = await resolveNodePackageManager(repoRoot);
 	const res = await safeSpawnAsync(
 		pmBinary(packageManager),

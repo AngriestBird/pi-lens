@@ -68,8 +68,14 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   `npm install --omit=dev` does **not** omit `optionalDependencies` (only
   `--omit=optional` does, which pi doesn't pass), so even an "optional" SDK would
   weigh every pi-lens install. ~200 LOC beats a dep for a tools-only server.
-- **16 tools:** `pilens_analyze` (per-edit; `mode: warm|fresh`), `pilens_diagnostics`,
-  `pilens_project_scan`, `pilens_latency`, `pilens_health`, `pilens_rebuild`,
+- **16 tools in a source checkout (15 in an installed package):** `pilens_analyze`
+  (per-edit; `mode: warm|fresh`), `pilens_diagnostics`,
+  `pilens_project_scan`, `pilens_latency`, `pilens_health`, `pilens_rebuild`
+  (source checkouts only: `clients/mcp/review.ts`'s shared
+  `canRebuildPiLens` requires `tsconfig.dist.json` and rejects `node_modules`;
+  the server omits the tool when unsafe and `runRebuild` repeats the preflight
+  before resolving a package manager or spawning, because published packages
+  omit the tsconfig while `build:dist` destructively deletes `dist/` first),
   `pilens_session_start` / `pilens_turn_end` (drive the REAL lifecycle handlers —
   not re-implementations — via `clients/mcp/session.ts`), `pilens_ast_grep_search`
   / `pilens_ast_grep_replace`, `pilens_lsp_navigation` / `pilens_lsp_diagnostics`,
@@ -134,8 +140,13 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   report as line-oriented TEXT (one line per symbol/callback) instead of
   JSON — same data, roughly a quarter of the token cost, opt-in (default
   stays JSON). Reports also carry section-level `provenance`
-  (`syntax`, `cached-review-graph`, `heuristic-tree-sitter`, `none`) so agents
-  can tell facts from cache/heuristic sections without per-flag JSON bloat. Pass
+  (`syntax`, `cached-review-graph`, `heuristic-tree-sitter`, `none`, plus
+  `unavailable:file-cap` for graph-backed sections when the capped source walk
+  disabled the graph) so agents can tell facts from cache/heuristic sections
+  without per-flag JSON bloat. A capped `module_report` also uses
+  `semantic.source: "unavailable:file-cap"` and warns with the cap plus both
+  configuration knobs; `project_report` says “more than N files (cap N)” because
+  the walk stops at cap+1 and never knows the exact project count (#921). Pass
   `blastRadius: true` for the cross-file **blast radius** (#304):
   transitive dependents aggregated to ranked file `read` args — read-only over
   the *cached* graph (omitted when cold), the single successor to the removed
@@ -368,7 +379,7 @@ Never write `path.join(cwd, ".pi-lens", ...)` for a project cache — it breaks 
 
 - `~/.pi-lens/sessionstart.log` — timestamped lines for every session_start event and tool lifecycle; includes project snapshot probe/miss/load summaries, seeded project/file sequence counts, scan-context/profile cache source, and deferred task queued/run timings
 - `~/.pi-lens/cascade.log` — NDJSON cascade graph/neighbor diagnostics, including reverse-dependency cache refresh/load/merge events (`phase: "reverse_deps_cache"`)
-- `~/.pi-lens/latency.log` — NDJSON per-runner timings
+- `~/.pi-lens/latency.log` — NDJSON per-runner timings. Every new entry includes a logger-owned writer `pid`; `/lens-perf` (#767, `clients/performance-report.ts`) uses `pid` plus `RuntimeCoordinator.sessionStartedAt` to isolate the current process session from the machine-global log, and separately shows independent top-five p50/p99 rankings for the machine-wide active window's positive-duration `type:"phase"` records (`toolName/phase` when a tool name exists, linear-interpolated percentiles). `handleSessionStart` logs `session_start_total` on quick and full paths plus `session_start_scan_context_compute` around the actual sync/background scan-context walk, so the startup regression that motivated #767 is visible. The command flushes this process's buffered writer first, streams at most the newest `PI_LENS_MAX_LOG_SIZE_MB` (default 10MB, the same threshold that rotates the log), chunk-yields every 500 parsed lines, keeps at most the newest 20,000 phase samples, discards a partial first line after a tail seek, reports both caps, and skips malformed NDJSON lines rather than turning one partial append into an empty report.
 - `~/.pi-lens/tree-sitter.log` — NDJSON tree-sitter runner activity plus aggregate `cache_stats` entries for project-diagnostics and full review-graph phases; scope-isolated measurements include lookup/miss reasons, capacity misses, evictions, parser invocations/time, and resident source bytes/lines
 - `~/.pi-lens/read-guard.log` — NDJSON for every read-guard verdict, autopatch, and preflight block (rotates at 1 MiB); key events: `edit_blocked`, `edit_warned`, `edit_preflight_blocked`, `oldtext_not_found`, `oldtext_trailing_ws_autopatched`, `oldtext_indent_autopatched`, `oldtext_escape_autopatched`
 - `~/.pi-lens/actionable-warnings.log` — NDJSON for the actionable-warnings advisory pipeline (rotates at 1 MiB); events: `report_started`, `lsp_file_checked`, `lsp_file_skipped`, `report_complete`, `advisory_injected`, `advisory_skipped`

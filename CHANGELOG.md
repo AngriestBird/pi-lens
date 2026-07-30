@@ -6,8 +6,25 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **`/lens-perf` surfaces slow phases in-session** (closes #767) — the command
+	shows independent top-five p50 and p99 rankings with sample counts for both
+	the current process session and the machine-wide active `latency.log` window.
+	It flushes pending writes, streams a tail bounded by the log rotation
+	threshold (`PI_LENS_MAX_LOG_SIZE_MB`, 10MB by default), caps retained samples,
+	and reports malformed/truncated input instead of silently reading it as clean.
+	Session startup total and scan-context computation are now logged as phases so
+	the startup regressions that motivated the command are visible there too.
+
 ### Changed
 
+- **Review-graph file-cap degradation is now explicit and count-honest** (refs
+	#921) — `project_report` says a capped project has “more than N files” instead
+	of presenting the cap+1 early-exit sentinel as an exact count. `module_report`
+	now marks graph-backed `usedBy`, blast-radius provenance, and
+	`semantic.source` as `unavailable:file-cap` and emits an actionable warning
+	with the cap plus both `.pi-lens.json#maxProjectFiles` and
+	`PI_LENS_REVIEW_GRAPH_MAX_FILES` controls, keeping disabled data distinct from
+	a genuinely empty/cold graph.
 - **Project scans release each processed file's full source content** (refs #886)
 	instead of retaining every source string in their shared `FactStore` until the
 	scan ends; derived per-file facts and session facts remain available.
@@ -57,6 +74,20 @@ All notable changes to pi-lens will be documented in this file.
 	`lens_diagnostics mode=full` sweep** (refs #798), instead of showing
 	`LSP Inactive` until turn end. The repaint captures UI methods during the
 	active tool event, so async warm-up never touches a stale session context.
+- **Tree-sitter WASM aborts are now visible instead of silently disabling
+	structural analysis for the rest of the process** (refs #915). The shared
+	runtime records a process-wide, timestamped `restart_required` health state,
+	logs a one-time actionable error, exposes it through `pilens_health`, and
+	marks project-scan responses with `treeSitterStatus`. A poisoned scan remains
+	truncated and never replaces the last complete snapshot. In-process retry is
+	deliberately unsafe: every new client imports the same cached `web-tree-sitter`
+	ES module and therefore reuses its corrupted Emscripten heap; restarting the
+	host is the isolation boundary.
+- **`pilens_rebuild` can no longer destroy an npm-installed pi-lens** (refs
+	#920) — rebuilds are refused before spawning a package script unless the
+	package is a source checkout with `tsconfig.dist.json` outside
+	`node_modules`; installed servers also omit the tool from `tools/list`, so
+	subagent allowlists cannot discover it.
 
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 

@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
+import { getLatencyLogPath } from "../clients/latency-logger.js";
 import extension from "../index.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
@@ -65,6 +66,7 @@ const EXPECTED_COMMANDS = [
 	"lens-tdi",
 	"lens-map",
 	"lens-health",
+	"lens-perf",
 	"lens-tools",
 	"lens-allow-edit",
 ];
@@ -336,6 +338,43 @@ describe("index.ts extension wiring", () => {
 			const out = ctx.notifications.map((n) => n.message).join("\n");
 			expect(out).toContain("🩺 PI-LENS HEALTH");
 			expect(out).toContain("Event loop (session):");
+		});
+	});
+
+	describe("/lens-perf surfaces latency-log phase percentiles (#767)", () => {
+		// The command reads getLatencyLogPath() with no seam, so seed that exact
+		// file (inside the per-worker PI_LENS_HOME) or the report is empty and the
+		// parse/rank path goes untested.
+		afterEach(() => {
+			fs.rmSync(getLatencyLogPath(), { force: true });
+		});
+
+		it("ranks phases read from the latency log", async () => {
+			fs.mkdirSync(path.dirname(getLatencyLogPath()), { recursive: true });
+			const fixture = [100, 100, 100]
+				.map((durationMs) =>
+					JSON.stringify({
+						type: "phase",
+						phase: "wiring-fixture",
+						filePath: "fixture.ts",
+						durationMs,
+						pid: process.pid,
+						ts: new Date().toISOString(),
+					}),
+				)
+				.join("\n");
+			fs.writeFileSync(getLatencyLogPath(), `${fixture}\n`);
+			const pi = createPiMock();
+			extension(pi.asExtensionAPI());
+			const ctx = makeCtx();
+
+			await pi.runCommand("lens-perf", "", ctx);
+
+			const out = ctx.notifications.map((n) => n.message).join("\n");
+			expect(out).toContain("⏱️ PI-LENS PERFORMANCE");
+			expect(out).toContain("Current process session");
+			expect(out).toContain("Machine-wide active log window");
+			expect(out).toContain("wiring-fixture: p50 100ms, p99 100ms, n=3");
 		});
 	});
 });

@@ -16,6 +16,10 @@ process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "0";
 // this in their own body and call `flushWordIndexPersistsForTests()`.
 process.env.PI_LENS_WORD_INDEX_PERSIST_DEBOUNCE_MS = "0";
 
+// Pin the log rotation threshold to its default. It also bounds /lens-perf's
+// read window, so an ambient value would resize what the perf tests parse.
+process.env.PI_LENS_MAX_LOG_SIZE_MB = "10";
+
 // Hermeticity: never let the developer's PERSONAL ~/.pi-lens/config.json leak
 // into test behavior. Seen live 2026-07-11: opting into `turnSummary.enabled`
 // on this machine flipped the #484 "default off-by-default" integration test
