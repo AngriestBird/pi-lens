@@ -952,6 +952,7 @@ export class TreeSitterClient {
 								entry.postFilter,
 								entry.postFilterParams,
 								captures,
+								tree.rootNode,
 							)
 						) {
 							continue;
@@ -1494,6 +1495,7 @@ export class TreeSitterClient {
 		postFilter: string,
 		postFilterParams: any,
 		captures: Record<string, TreeSitterNode>,
+		rootNode?: TreeSitterNode,
 	): boolean {
 		/**
 		 * Extract the list of declared slot names from a class_definition's
@@ -1549,6 +1551,42 @@ export class TreeSitterClient {
 		}
 
 		switch (postFilter) {
+			case "unsafe_regex_dynamic_identifier": {
+				// unsafe-regex is intentionally a coarse advisory heuristic. When the
+				// interpolation is a plain identifier, recover the common safe-before-
+				// assignment pattern without pretending to perform whole-program dataflow:
+				// find that identifier's same-file variable initializer and look for an
+				// escape-like callee or a replace() call in it.
+				const interpolation = captures.INTERPOLATION?.text ?? "";
+				const identifier = interpolation.match(
+					/^\$\{\s*([A-Za-z_$][\w$]*)\s*\}$/,
+				)?.[1];
+				if (!identifier || !rootNode) return true;
+
+				const hasEscapeSignal = (text: string): boolean =>
+					/\b(?:escape|Escape)\w*\s*\(|\.\s*replace\s*\(/.test(text);
+				const stack: TreeSitterNode[] = [rootNode];
+				while (stack.length > 0) {
+					const node = stack.pop();
+					if (!node) continue;
+					if (node.type === "variable_declarator") {
+						const named = node.children.filter((child) => child.isNamed);
+						const name = named.find(
+							(child) =>
+								(child.type === "identifier" ||
+									child.type === "type_identifier") &&
+								child.text === identifier,
+						);
+						if (name) {
+							const nameIndex = named.indexOf(name);
+							const initializer = named[nameIndex + 1];
+							if (initializer && hasEscapeSignal(initializer.text)) return false;
+						}
+					}
+					stack.push(...node.children);
+				}
+				return true;
+			}
 			case "is_generator_with_valued_return": {
 				const returnNode = captures.RETURN;
 				const functionNode =
@@ -2597,7 +2635,12 @@ export class TreeSitterClient {
 
 						if (
 							postFilter &&
-							!this.applyPostFilter(postFilter, postFilterParams, captures)
+							!this.applyPostFilter(
+								postFilter,
+								postFilterParams,
+								captures,
+								tree.rootNode,
+							)
 						) {
 							continue;
 						}
