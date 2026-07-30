@@ -1,0 +1,187 @@
+import { performance } from "node:perf_hooks";
+import { describe, expect, it } from "vitest";
+import { redactSecrets } from "../../../clients/redact/secrets.js";
+
+const JWT = [
+	"ey",
+	"JhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature_value",
+].join("");
+const JWE = ["ey", "JhbGciOiJIUzI1NiJ9..aXY.Y2lwaGVydGV4dA.dGFn"].join("");
+
+function privateKeyBegin(label: string): string {
+	return `-----BEGIN ${label}-----`;
+}
+
+function privateKeyEnd(label: string): string {
+	return `-----END ${label}-----`;
+}
+
+const cases = [
+	{
+		name: "GitHub token",
+		secret: `ghp_${"a".repeat(36)}`,
+		replacement: "[REDACTED:github-token]",
+	},
+	{
+		name: "GitHub fine-grained token",
+		secret: `github_pat_${"a".repeat(22)}_${"b".repeat(40)}`,
+		replacement: "[REDACTED:github-token]",
+	},
+	{
+		name: "AWS access key",
+		secret: `AKIA${"A".repeat(16)}`,
+		replacement: "[REDACTED:aws-access-key]",
+	},
+	{
+		name: "AWS temporary access key",
+		secret: `ASIA${"B".repeat(16)}`,
+		replacement: "[REDACTED:aws-access-key]",
+	},
+	{
+		name: "Slack token",
+		secret: ["xox", "b-123456789012-123456789012-abcdefghijklmnop"].join(""),
+		replacement: "[REDACTED:slack-token]",
+	},
+	{
+		name: "Stripe secret key",
+		secret: `sk_live_${"c".repeat(24)}`,
+		replacement: "[REDACTED:stripe-key]",
+	},
+	{
+		name: "Stripe restricted key",
+		secret: `rk_test_${"d".repeat(24)}`,
+		replacement: "[REDACTED:stripe-key]",
+	},
+	{
+		name: "GitLab token",
+		secret: `glpat-${"e".repeat(24)}`,
+		replacement: "[REDACTED:gitlab-token]",
+	},
+	{
+		name: "Google API key",
+		secret: `AIza${"f".repeat(35)}`,
+		replacement: "[REDACTED:google-api-key]",
+	},
+	{
+		name: "Google OAuth secret",
+		secret: `GOCSPX-${"g".repeat(28)}`,
+		replacement: "[REDACTED:google-oauth-secret]",
+	},
+	{
+		name: "SendGrid key",
+		secret: `SG.${"h".repeat(22)}.${"i".repeat(43)}`,
+		replacement: "[REDACTED:sendgrid-key]",
+	},
+	{
+		name: "OpenAI key",
+		secret: `sk-proj-${"j".repeat(48)}`,
+		replacement: "[REDACTED:openai-key]",
+	},
+	{
+		name: "JWT",
+		secret: JWT,
+		replacement: "[REDACTED:jwt]",
+	},
+	{
+		name: "five-part JWE",
+		secret: JWE,
+		replacement: "[REDACTED:jwt]",
+	},
+];
+
+describe("redactSecrets", () => {
+	it.each(cases)("redacts a $name", (testCase) => {
+		expect(redactSecrets(`before ${testCase.secret} after`)).toBe(
+			`before ${testCase.replacement} after`,
+		);
+	});
+
+	it("recognizes token prefixes inside hostile surrounding text", () => {
+		const githubToken = `ghp_${"a".repeat(36)}`;
+		const awsKey = `AKIA${"A".repeat(16)}`;
+		const jwt = JWT;
+		expect(redactSecrets(`x${githubToken}`)).toBe("x[REDACTED:github-token]");
+		expect(redactSecrets(`_${awsKey}`)).toBe("_[REDACTED:aws-access-key]");
+		expect(redactSecrets(`a${jwt}`)).toBe("a[REDACTED:jwt]");
+		const malformedSendGrid = `SG.zz${awsKey}.${"x".repeat(44)}`;
+		expect(redactSecrets(malformedSendGrid)).toBe(
+			`SG.zz[REDACTED:aws-access-key].${"x".repeat(44)}`,
+		);
+		const failedJwtPrefix = ["ey", "Jaaaaa."].join("");
+		expect(redactSecrets(`${failedJwtPrefix}${githubToken}`)).toBe(
+			`${failedJwtPrefix}[REDACTED:github-token]`,
+		);
+		const nestedJwt = ["ey", `Jaaaaa.key..${jwt}`].join("");
+		expect(redactSecrets(nestedJwt)).toBe(
+			`${["ey", "Jaaaaa.key.."].join("")}[REDACTED:jwt]`,
+		);
+	});
+
+	it("redacts complete and unterminated PEM private keys", () => {
+		const pem = [
+			privateKeyBegin("RSA PRIVATE KEY"),
+			"c2VjcmV0LWtleS1tYXRlcmlhbA==",
+			privateKeyEnd("RSA PRIVATE KEY"),
+		].join("\n");
+
+		expect(redactSecrets(`before ${pem} after`)).toBe(
+			"before [REDACTED:private-key] after",
+		);
+		expect(
+			redactSecrets(
+				`before ${privateKeyBegin("OPENSSH PRIVATE KEY")}\nprivate material`,
+			),
+		).toBe("before [REDACTED:private-key]");
+	});
+
+	it("redacts PEM blocks inside JSON-escaped text without corrupting JSON", () => {
+		const serialized = JSON.stringify({
+			message: `before ${privateKeyBegin("PRIVATE KEY")}\nsecret\n${privateKeyEnd("PRIVATE KEY")} after`,
+		});
+		const parsed = JSON.parse(redactSecrets(serialized)) as { message: string };
+
+		expect(parsed.message).toBe("before [REDACTED:private-key] after");
+
+		const unterminated = JSON.stringify({
+			message: `before ${privateKeyBegin("PRIVATE KEY")}\nsecret`,
+			after: true,
+		});
+		const unterminatedParsed = JSON.parse(redactSecrets(unterminated)) as {
+			message: string;
+			after: boolean;
+		};
+		expect(unterminatedParsed).toEqual({
+			message: "before [REDACTED:private-key]",
+			after: true,
+		});
+	});
+
+	it("requires a valid JWT shape and preserves trailing dot segments", () => {
+		const jwt = JWT;
+		const invalidJwt = ["ey", "Jaaaaa.."].join("");
+		expect(redactSecrets(invalidJwt)).toBe(invalidJwt);
+		expect(redactSecrets(`${jwt}.word`)).toBe("[REDACTED:jwt].word");
+	});
+
+	it("leaves benign text and public certificates untouched", () => {
+		const benign = [
+			"ghp_short",
+			"AKIA_TOO_SHORT",
+			["ey", "Jnot-a-jwt"].join(""),
+			"sk-test-value",
+			"-----BEGIN CERTIFICATE-----",
+			"public material",
+			"-----END CERTIFICATE-----",
+		].join("\n");
+
+		expect(redactSecrets(benign)).toBe(benign);
+	});
+
+	it("handles large prefix-heavy non-matches without catastrophic backtracking", () => {
+		const input = ["ey", "J-"].join("").repeat(32_000);
+		const startedAt = performance.now();
+
+		expect(redactSecrets(input)).toBe(input);
+		expect(performance.now() - startedAt).toBeLessThan(1_000);
+	});
+});

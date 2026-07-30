@@ -346,6 +346,13 @@ All notable changes to pi-lens will be documented in this file.
 	line's content and will resurface once after upgrading; this is expected and
 	one-time, not a regression.
 
+### Security
+
+- **Debug logs redact credential-shaped text before it reaches disk** (closes
+	#327). The shared NDJSON boundary scrubs private keys, provider tokens, AWS
+	access keys, and JWT/JWE compact tokens with deterministic linear scanners.
+	The synchronous crash-adjacent LSP launch diagnostic uses the same redactor.
+
 ## [3.8.73] - 2026-07-28
 
 ### Added
