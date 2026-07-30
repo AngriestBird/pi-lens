@@ -17,6 +17,11 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **Incremental review-graph updates avoid redundant whole-graph copies and
+	index rebuilds** (refs #939) — file re-extraction now rebuilds derived indexes
+	once, immutable edges are array-copied without cloning every edge object, the
+	updated graph itself becomes the workspace snapshot, and debounced persistence
+	defers its O(graph) array materialization until the quiet-window flush.
 - **Reverse-dependency indexes update at import-edge granularity** (refs #939)
 	instead of rebuilding from every graph edge after a one-file edit. Body-only
 	edits reuse the cached index without rewriting the project snapshot; import
