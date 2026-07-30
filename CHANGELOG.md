@@ -4,6 +4,12 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Session-start latency is attributable end to end** (refs #948) â€” latency
+	telemetry now separates host boot from pi-lens evaluation and records quick
+	and full session-start totals, pre-handler/bootstrap work, runtime reset,
+	log cleanup, LSP reset, sequence/snapshot reads (including snapshot bytes),
+	and delayed warmup scan/profile/index phases.
+
 - **Installer subprocesses are lifetime-coupled** (refs #945) — npm, pip, gem,
 	and archive extraction now use the shared safe-spawn path, await full Windows
 	process-tree termination on timeout, and synchronously clean registered

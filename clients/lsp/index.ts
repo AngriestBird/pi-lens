@@ -4026,6 +4026,7 @@ export class LSPService {
 	 * Shutdown all LSP clients
 	 */
 	async shutdown(options: LSPShutdownOptions = {}): Promise<void> {
+		const resetStartedAt = Date.now();
 		if (this.checkDestroyed()) return;
 		this.isDestroyed = true;
 
@@ -4049,19 +4050,6 @@ export class LSPService {
 		// snapshot of what was released by this reset (post-teardown the count
 		// would always be zero, which is useless for root-cause analysis).
 		const aliveClients = this.getAliveClientCount();
-		logLatency({
-			type: "phase",
-			phase: "lsp_service_reset",
-			filePath: "",
-			durationMs: 0,
-			metadata: {
-				reason: options.reason ?? null,
-				aliveClients,
-				fast: !!options.fast,
-				processExiting: !!options.processExiting,
-			},
-		});
-
 		// Start every client teardown before awaiting any of them. A non-fast
 		// process-tree kill can spend its grace period per client, so awaiting in
 		// map order makes the reset tail O(clientCount * grace) instead of the
@@ -4073,6 +4061,19 @@ export class LSPService {
 				Promise.resolve().then(() => client.shutdown(options)),
 			),
 		);
+		logLatency({
+			type: "phase",
+			phase: "lsp_service_reset",
+			filePath: "",
+			startedAt: new Date(resetStartedAt).toISOString(),
+			durationMs: Date.now() - resetStartedAt,
+			metadata: {
+				reason: options.reason ?? null,
+				aliveClients,
+				fast: !!options.fast,
+				processExiting: !!options.processExiting,
+			},
+		});
 		this.state.clients.clear();
 		this.state.broken.clear();
 		this.workspaceProbeLogged.clear();
