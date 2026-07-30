@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Worker } from "node:worker_threads";
-import { gunzipSync, gzipSync } from "node:zlib";
+import { constants as zlibConstants, gunzipSync, gzipSync } from "node:zlib";
+import { fileURLToPath } from "node:url";
 import { writeFileAtomic } from "../atomic-write.js";
 import type { FactStore } from "../dispatch/fact-store.js";
 import { fileContentProvider } from "../dispatch/facts/file-content.js";
@@ -882,13 +883,31 @@ function getPersistedReviewGraphVersion(cwd: string): string | null {
 	const cachePath = path.join(cacheDir, GRAPH_CACHE_FILENAME);
 	const legacyPath = path.join(cacheDir, LEGACY_GRAPH_CACHE_FILENAME);
 	if (fs.existsSync(cachePath)) {
+		// #950 review F4: never inflate+parse the whole multi-MB snapshot just
+		// to read the version. `version` is serialized first, so decompressing
+		// the first few KB (Z_SYNC_FLUSH tolerates the truncated stream) is
+		// enough to sniff it — the gz analogue of the legacy 200-byte header
+		// read below.
+		let fd: number | undefined;
 		try {
-			const data = JSON.parse(
-				gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"),
-			) as Pick<PersistedGraphData, "version">;
-			return typeof data.version === "string" ? data.version : null;
+			fd = fs.openSync(cachePath, "r");
+			const compressed = Buffer.alloc(4096);
+			const n = fs.readSync(fd, compressed, 0, compressed.length, 0);
+			const head = gunzipSync(compressed.subarray(0, n), {
+				finishFlush: zlibConstants.Z_SYNC_FLUSH,
+			}).toString("utf-8");
+			const match = head.match(/"version"\s*:\s*"([^"]+)"/);
+			return match ? match[1] : null;
 		} catch {
 			return null;
+		} finally {
+			if (fd !== undefined) {
+				try {
+					fs.closeSync(fd);
+				} catch {
+					/* ignore */
+				}
+			}
 		}
 	}
 	let fd: number | undefined;
@@ -988,92 +1007,6 @@ function persistedData(pending: PendingPersist): PersistedGraphData {
 	};
 }
 
-/*
-function writePending(key: string): void {
-	const pending = _pendingPersist.get(key);
-	if (!pending) return;
-	_pendingPersist.delete(key);
-	const timer = _persistTimers.get(key);
-	if (timer) {
-		clearTimeout(timer);
-		_persistTimers.delete(key);
-	}
-	const startedAt = Date.now();
-	let json: string;
-	try {
-		json = JSON.stringify(persistedData(pending));
-	} catch (err) {
-		recordPersistFailure(key, "serialize_failed", (err as Error).message);
-		console.error(
-			"[review-graph] cache serialize failed:",
-			(err as Error).message,
-		);
-		return;
-	}
-	logLatency({
-		type: "phase",
-		phase: "review_graph_persist",
-		filePath: pending.cachePath,
-		durationMs: Date.now() - startedAt,
-		metadata: { elements: pending.elementCount, bytes: json.length },
-	});
-	fs.mkdir(pending.cacheDir, { recursive: true }, (mkdirErr) => {
-		if (mkdirErr) {
-			recordPersistFailure(key, "cache_dir_creation_failed", mkdirErr.message);
-			console.error(
-				"[review-graph] cache dir creation failed:",
-				mkdirErr.message,
-			);
-			return;
-		}
-		// Write-to-temp + rename so the snapshot lands atomically: a reader
-		// (another process's blind load, or the tier-2 disk load in tests) must
-		// never see a created-but-partially-written file — that parses as
-		// corrupt and silently forces a full rebuild. rename() replaces the
-		// destination atomically on both POSIX and Windows (libuv uses
-		// MOVEFILE_REPLACE_EXISTING).
-		//
-		// #762: intentionally NOT migrated onto clients/atomic-write.ts's
-		// writeFileAtomic/writeFileAtomicAsync. This callback-style writer
-		// (fs.mkdir/writeFile/rename, not fs.promises) logs a DIFFERENT,
-		// step-specific console.error per failure (mkdir vs write vs rename) so
-		// operators can tell which stage failed; the shared helper collapses all
-		// failures into one silent (bestEffort) or one rethrown (non-bestEffort)
-		// outcome and has no hook for per-step logging. Forcing this onto the
-		// helper would either lose that diagnostic granularity or require
-		// awaiting a promise-based helper from a plain `void`-returning
-		// fire-and-forget function, changing this path from non-blocking
-		// callback I/O to an async microtask chain. The sync exit-hook writer
-		// just below (`ensurePersistExitHook`) uses the shared helper instead —
-		// it has no per-step logging to preserve.
-		const tmpPath = `${pending.cachePath}.tmp-${process.pid}`;
-		fs.writeFile(tmpPath, json, "utf-8", (writeErr) => {
-			if (writeErr) {
-				recordPersistFailure(key, "cache_write_failed", writeErr.message);
-				console.error("[review-graph] cache write failed:", writeErr.message);
-				return;
-			}
-			fs.rename(tmpPath, pending.cachePath, (renameErr) => {
-				if (renameErr) {
-					recordPersistFailure(key, "cache_rename_failed", renameErr.message);
-					console.error(
-						"[review-graph] cache rename failed:",
-						renameErr.message,
-					);
-					fs.rm(tmpPath, { force: true }, () => {});
-				} else {
-					logReviewGraph({
-						cwd: key,
-						phase: "persist_succeeded",
-						elements: pending.elementCount,
-					});
-				}
-			});
-		});
-	});
-}
-
-*/
 
 function logPersistSuccess(
 	key: string,
@@ -1125,11 +1058,14 @@ function writePendingOnMainThread(
 			writeMs: performance.now() - writeStarted,
 			offloaded: false,
 		});
-	if (reason) {
+		if (reason) {
+			// The persist SUCCEEDED via fallback — log the degradation under its
+			// own phase, not persist_failed (#950 review F7: a success followed
+			// by persist_failed read as contradiction in telemetry).
 			_lastWorkerFallbackReasonForTests = reason;
 			logReviewGraph({
 				cwd: key,
-				phase: "persist_failed",
+				phase: "worker_fallback",
 				reason: "worker_fallback",
 				error: reason,
 				offloaded: false,
@@ -1178,6 +1114,7 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 			offloaded: true,
 		});
 	} catch (err) {
+		fs.rm(result.stagePath, { force: true }, () => {});
 		writePendingOnMainThread(
 			key,
 			pending,
@@ -1196,17 +1133,50 @@ function handleWorkerDeath(reason: string): void {
 	}
 }
 
+function resolvePersistWorkerPath(): string | undefined {
+	// esbuild's dist bundle does NOT rewrite new URL(...) asset refs, so from
+	// the bundled dist/index.js a sibling ./persist-worker.js resolves beside
+	// the BUNDLE where nothing exists (#950 review F1 — the worker silently
+	// never ran in production). Try the compiled-sibling layout first (source
+	// checkout / unbundled dist/clients tree), then the dist-tree path
+	// relative to the bundle entry.
+	const candidates = [
+		new URL("./persist-worker.js", import.meta.url),
+		new URL("./clients/review-graph/persist-worker.js", import.meta.url),
+	];
+	for (const url of candidates) {
+		try {
+			const resolved = fileURLToPath(url);
+			if (fs.existsSync(resolved)) return resolved;
+		} catch {
+			/* try next layout */
+		}
+	}
+	return undefined;
+}
+
 function getPersistWorker(): Worker | undefined {
 	if (_workerDisabled) return undefined;
 	if (_persistWorker) return _persistWorker;
 	try {
-		const worker = new Worker(new URL("./persist-worker.js", import.meta.url));
+		const workerPath = resolvePersistWorkerPath();
+		if (workerPath === undefined) {
+			handleWorkerDeath("persist worker script not found in any layout");
+			return undefined;
+		}
+		const worker = new Worker(workerPath);
 		worker.unref();
 		worker.on("message", handleWorkerResult);
 		worker.on("error", (err: Error) => handleWorkerDeath(err.message));
 		worker.on("exit", (code) => {
-			if (_persistWorker === worker && code !== 0) {
+			if (_persistWorker !== worker) return;
+			if (code !== 0) {
 				handleWorkerDeath(`persist worker exited with code ${code}`);
+			} else {
+				// Clean exit (unref'd worker at teardown, or host recycling):
+				// drop the stale reference so a later persist respawns instead
+				// of posting into a dead worker (#950 review F7).
+				_persistWorker = undefined;
 			}
 		});
 		_persistWorker = worker;
@@ -1271,6 +1241,27 @@ function ensurePersistExitHook(): void {
 	});
 }
 
+// #950 review F3: a process that dies between a worker's staged write and its
+// promotion leaves review-graph.json.gz.stage-<pid>-<gen> (and the worker's
+// .tmp-<pid>) behind forever — the exit hook can't run handleWorkerResult's rm.
+// Sweep leftovers from PRIOR processes once per cache dir; our own live stage
+// files carry this pid and are skipped.
+const _sweptStageDirs = new Set<string>();
+function sweepStaleStageFiles(cacheDir: string): void {
+	if (_sweptStageDirs.has(cacheDir)) return;
+	_sweptStageDirs.add(cacheDir);
+	fs.readdir(cacheDir, (err, entries) => {
+		if (err) return;
+		const ownMarker = `.stage-${process.pid}-`;
+		for (const entry of entries) {
+			const isStage =
+				entry.includes(".stage-") || /\.tmp-\d+$/.test(entry);
+			if (!isStage || entry.includes(ownMarker)) continue;
+			fs.rm(path.join(cacheDir, entry), { force: true }, () => {});
+		}
+	});
+}
+
 function persistGraph(
 	cwd: string,
 	signature: string,
@@ -1304,6 +1295,7 @@ function persistGraph(
 	}
 	const cacheDir = path.join(getProjectDataDir(cwd), "cache");
 	const cachePath = path.join(cacheDir, GRAPH_CACHE_FILENAME);
+	sweepStaleStageFiles(cacheDir);
 	// #300: resolve the git stamp fresh at persist time (HEAD changes on
 	// commit/checkout, so it isn't cached like the gitdir location — but these
 	// are plain fs reads, cheap even called per-persist). undefined for
@@ -1409,13 +1401,18 @@ export function flushReviewGraphPersist(
 	source: "cli" | "exit_hook" = "cli",
 ): ReviewGraphPersistFlushResult {
 	const key = normalizeMapKey(cwd);
+	// #950 review F2: pick the NEWEST generation across the debounced pending
+	// entry AND every in-flight worker request, and remove ALL of them — the
+	// old first-match scan could force-write a stale generation and then let
+	// a newer in-flight worker result pass the (reset) generation gate after
+	// the flush. Removed requests' late results hit the no-request branch in
+	// handleWorkerResult, which deletes their stage files.
 	let pending = _pendingPersist.get(key);
-	if (!pending) {
-		for (const [id, request] of _workerRequests) {
-			if (request.key !== key) continue;
+	for (const [id, request] of [..._workerRequests]) {
+		if (request.key !== key) continue;
+		_workerRequests.delete(id);
+		if (!pending || request.pending.generation > pending.generation) {
 			pending = request.pending;
-			_workerRequests.delete(id);
-			break;
 		}
 	}
 	if (!pending) {
@@ -1424,7 +1421,10 @@ export function flushReviewGraphPersist(
 	// Invalidate every staged worker completion before doing the forced write.
 	// Workers never promote their own stage file, so a late result can only be
 	// discarded by handleWorkerResult and cannot overwrite this snapshot.
-	_persistGenerations.set(key, pending.generation + 1);
+	_persistGenerations.set(
+		key,
+		Math.max(_persistGenerations.get(key) ?? 0, pending.generation) + 1,
+	);
 	_pendingPersist.delete(key);
 	const timer = _persistTimers.get(key);
 	if (timer) {

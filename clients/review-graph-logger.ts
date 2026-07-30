@@ -21,7 +21,8 @@ export interface ReviewGraphLogEntry {
 		| "persist_scheduled"
 		| "persist_succeeded"
 		| "persist_skipped"
-		| "persist_failed";
+		| "persist_failed"
+		| "worker_fallback";
 	cwd: string;
 	reason?: string;
 	durationMs?: number;
