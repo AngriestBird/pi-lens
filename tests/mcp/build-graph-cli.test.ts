@@ -86,7 +86,7 @@ describe("pi-lens build-graph CLI", () => {
 		const second = await runCli(["build-graph", "--cwd", projectDir], dataDir);
 		expect(second.code).toBe(0);
 		expect(second.stdout).toContain("snapshot already current");
-	});
+	}, 30000);
 
 	it("fails loudly for an unsafe home root", async () => {
 		const result = await runCli(

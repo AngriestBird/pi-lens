@@ -930,7 +930,6 @@ function graphPersistMaxElements(): number {
 }
 
 interface PendingPersist {
-	cwd: string;
 	cacheDir: string;
 	cachePath: string;
 	signature: string;
