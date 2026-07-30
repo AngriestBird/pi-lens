@@ -7,6 +7,8 @@ const JWT = [
 	"JhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature_value",
 ].join("");
 const JWE = ["ey", "JhbGciOiJIUzI1NiJ9..aXY.Y2lwaGVydGV4dA.dGFn"].join("");
+const GITHUB_TOKEN = `ghp_${"a".repeat(36)}`;
+const AWS_KEY = `AKIA${"A".repeat(16)}`;
 
 function privateKeyBegin(label: string): string {
 	return `-----BEGIN ${label}-----`;
@@ -16,10 +18,14 @@ function privateKeyEnd(label: string): string {
 	return `-----END ${label}-----`;
 }
 
+function privateKeyBlock(label: string): string {
+	return [privateKeyBegin(label), "secret", privateKeyEnd(label)].join("\n");
+}
+
 const cases = [
 	{
 		name: "GitHub token",
-		secret: `ghp_${"a".repeat(36)}`,
+		secret: GITHUB_TOKEN,
 		replacement: "[REDACTED:github-token]",
 	},
 	{
@@ -29,7 +35,7 @@ const cases = [
 	},
 	{
 		name: "AWS access key",
-		secret: `AKIA${"A".repeat(16)}`,
+		secret: AWS_KEY,
 		replacement: "[REDACTED:aws-access-key]",
 	},
 	{
@@ -97,21 +103,18 @@ describe("redactSecrets", () => {
 	});
 
 	it("recognizes token prefixes inside hostile surrounding text", () => {
-		const githubToken = `ghp_${"a".repeat(36)}`;
-		const awsKey = `AKIA${"A".repeat(16)}`;
-		const jwt = JWT;
-		expect(redactSecrets(`x${githubToken}`)).toBe("x[REDACTED:github-token]");
-		expect(redactSecrets(`_${awsKey}`)).toBe("_[REDACTED:aws-access-key]");
-		expect(redactSecrets(`a${jwt}`)).toBe("a[REDACTED:jwt]");
-		const malformedSendGrid = `SG.zz${awsKey}.${"x".repeat(44)}`;
+		expect(redactSecrets(`x${GITHUB_TOKEN}`)).toBe("x[REDACTED:github-token]");
+		expect(redactSecrets(`_${AWS_KEY}`)).toBe("_[REDACTED:aws-access-key]");
+		expect(redactSecrets(`a${JWT}`)).toBe("a[REDACTED:jwt]");
+		const malformedSendGrid = `SG.zz${AWS_KEY}.${"x".repeat(44)}`;
 		expect(redactSecrets(malformedSendGrid)).toBe(
 			`SG.zz[REDACTED:aws-access-key].${"x".repeat(44)}`,
 		);
 		const failedJwtPrefix = ["ey", "Jaaaaa."].join("");
-		expect(redactSecrets(`${failedJwtPrefix}${githubToken}`)).toBe(
+		expect(redactSecrets(`${failedJwtPrefix}${GITHUB_TOKEN}`)).toBe(
 			`${failedJwtPrefix}[REDACTED:github-token]`,
 		);
-		const nestedJwt = ["ey", `Jaaaaa.key..${jwt}`].join("");
+		const nestedJwt = ["ey", `Jaaaaa.key..${JWT}`].join("");
 		expect(redactSecrets(nestedJwt)).toBe(
 			`${["ey", "Jaaaaa.key.."].join("")}[REDACTED:jwt]`,
 		);
@@ -157,10 +160,9 @@ describe("redactSecrets", () => {
 	});
 
 	it("requires a valid JWT shape and preserves trailing dot segments", () => {
-		const jwt = JWT;
 		const invalidJwt = ["ey", "Jaaaaa.."].join("");
 		expect(redactSecrets(invalidJwt)).toBe(invalidJwt);
-		expect(redactSecrets(`${jwt}.word`)).toBe("[REDACTED:jwt].word");
+		expect(redactSecrets(`${JWT}.word`)).toBe("[REDACTED:jwt].word");
 	});
 
 	it("leaves benign text and public certificates untouched", () => {
@@ -175,6 +177,84 @@ describe("redactSecrets", () => {
 		].join("\n");
 
 		expect(redactSecrets(benign)).toBe(benign);
+	});
+
+	it("ends a token at the ASCII alphanumeric range edges", () => {
+		for (const char of ["/", ":", "@", "[", "`", "{"]) {
+			expect(redactSecrets(`${GITHUB_TOKEN}${char}tail`)).toBe(
+				`[REDACTED:github-token]${char}tail`,
+			);
+		}
+		expect(redactSecrets(`ghp_${"a".repeat(33)}0Zz`)).toBe(
+			"[REDACTED:github-token]",
+		);
+	});
+
+	it("treats non-ASCII characters as token terminators", () => {
+		expect(redactSecrets(`${GITHUB_TOKEN}😀tail`)).toBe(
+			"[REDACTED:github-token]😀tail",
+		);
+		expect(redactSecrets(`${GITHUB_TOKEN}é`)).toBe("[REDACTED:github-token]é");
+		const tooShort = `ghp_${"a".repeat(19)}😀`;
+		expect(redactSecrets(tooShort)).toBe(tooShort);
+	});
+
+	it("requires uppercase alphanumerics for AWS access keys", () => {
+		expect(redactSecrets(`${AWS_KEY}bcd`)).toBe("[REDACTED:aws-access-key]bcd");
+		expect(redactSecrets(`ASIA${"9".repeat(16)}😀`)).toBe(
+			"[REDACTED:aws-access-key]😀",
+		);
+		const tooShort = `AKIA${"A".repeat(15)}z`;
+		expect(redactSecrets(tooShort)).toBe(tooShort);
+	});
+
+	it("accepts only uppercase, digit and space characters in a PEM label", () => {
+		expect(redactSecrets(privateKeyBlock("RSA PRIVATE KEY 2"))).toBe(
+			"[REDACTED:private-key]",
+		);
+
+		for (const label of ["PRIVATE KEYÉ", "PRIVATE KEY😀", "Rsa PRIVATE KEY"]) {
+			const rejected = `${privateKeyBegin(label)}\nsecret\n`;
+			expect(redactSecrets(rejected)).toBe(rejected);
+		}
+	});
+
+	it("keeps scanning for secrets after each replacement", () => {
+		expect(redactSecrets(`${GITHUB_TOKEN},${AWS_KEY},${JWT}`)).toBe(
+			"[REDACTED:github-token],[REDACTED:aws-access-key],[REDACTED:jwt]",
+		);
+		expect(redactSecrets(`ghp_short ${GITHUB_TOKEN}`)).toBe(
+			"ghp_short [REDACTED:github-token]",
+		);
+		expect(redactSecrets(GITHUB_TOKEN)).toBe("[REDACTED:github-token]");
+	});
+
+	it("walks past non-private PEM blocks to reach later private keys", () => {
+		const cert = [
+			"-----BEGIN CERTIFICATE-----",
+			"public material",
+			"-----END CERTIFICATE-----",
+		].join("\n");
+		const key = privateKeyBlock("PRIVATE KEY");
+
+		expect(redactSecrets(`${cert}\n${key}\ntail`)).toBe(
+			`${cert}\n[REDACTED:private-key]\ntail`,
+		);
+		expect(redactSecrets(`${key}\n${cert}\n${key}`)).toBe(
+			`[REDACTED:private-key]\n${cert}\n[REDACTED:private-key]`,
+		);
+	});
+
+	it("stops at an orphaned or mismatched PEM header", () => {
+		const orphanBegin = "before -----BEGIN ";
+		expect(redactSecrets(orphanBegin)).toBe(orphanBegin);
+
+		const mismatchedEnd = [
+			privateKeyBegin("PRIVATE KEY"),
+			"secret",
+			privateKeyEnd("OTHER KEY"),
+		].join("\n");
+		expect(redactSecrets(mismatchedEnd)).toBe("[REDACTED:private-key]");
 	});
 
 	it("handles large prefix-heavy non-matches without catastrophic backtracking", () => {

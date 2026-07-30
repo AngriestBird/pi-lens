@@ -44,9 +44,12 @@ interface PrefixedSecret {
 	replacement: string;
 }
 
+function codePointOf(char: string | undefined): number {
+	return char?.codePointAt(0) ?? -1;
+}
+
 function isAsciiAlphaNumeric(char: string | undefined): boolean {
-	if (char === undefined) return false;
-	const code = char.charCodeAt(0);
+	const code = codePointOf(char);
 	return (
 		(code >= 48 && code <= 57) ||
 		(code >= 65 && code <= 90) ||
@@ -55,8 +58,7 @@ function isAsciiAlphaNumeric(char: string | undefined): boolean {
 }
 
 function isUpperAlphaNumeric(char: string | undefined): boolean {
-	if (char === undefined) return false;
-	const code = char.charCodeAt(0);
+	const code = codePointOf(char);
 	return (code >= 48 && code <= 57) || (code >= 65 && code <= 90);
 }
 
@@ -401,7 +403,7 @@ function redactScannedSecrets(options: RedactScannerOptions): string {
 	let result = "";
 	const position: ScanPosition = { text: options.text, start: 0 };
 
-	for (; cursor < options.text.length; ) {
+	while (cursor < options.text.length) {
 		position.start = cursor;
 		const scan = options.scanner(position);
 		if (!scan) {
@@ -437,7 +439,7 @@ function isPrivateKeyLabel(label: string): boolean {
 		return false;
 	}
 	for (const char of label) {
-		const code = char.charCodeAt(0);
+		const code = codePointOf(char);
 		if (char !== " " && (code < 48 || code > 57) && (code < 65 || code > 90)) {
 			return false;
 		}
@@ -463,7 +465,7 @@ function redactPrivateKeyBlocks(text: string): string {
 	let cursor = 0;
 	let result = "";
 
-	for (; cursor < text.length; ) {
+	while (cursor < text.length) {
 		const begin = text.indexOf(PEM_BEGIN, cursor);
 		if (begin === -1) return result + text.slice(cursor);
 
