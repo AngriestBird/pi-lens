@@ -485,17 +485,23 @@ export async function handleToolCall(
 				if (located) {
 					enclosingSymbol = {
 						...expansion.enclosingSymbol,
-						name: qualifiedLspSymbolName(located),
+						name: qualifiedLspSymbolName(located, lspSymbols),
 						kind: lspSymbolKindName(located.symbol.kind),
 					};
-					enrichedAncestry = located.ancestry.map((entry) => ({
-						name: entry.name,
-						kind: lspSymbolKindName(entry.kind),
-						startLine:
-							((entry.range ?? entry.location?.range)?.start.line ?? 0) + 1,
-						endLine:
-							((entry.range ?? entry.location?.range)?.end.line ?? 0) + 1,
-					}));
+					// Flat SymbolInformation results (native-ts7's real shape) carry
+					// no hierarchy — an empty LSP ancestry must NOT wipe the real
+					// tree-sitter chain (#951 review finding 1). Enrich only when
+					// the LSP actually provided one.
+					if (located.ancestry.length > 0) {
+						enrichedAncestry = located.ancestry.map((entry) => ({
+							name: entry.name,
+							kind: lspSymbolKindName(entry.kind),
+							startLine:
+								((entry.range ?? entry.location?.range)?.start.line ?? 0) + 1,
+							endLine:
+								((entry.range ?? entry.location?.range)?.end.line ?? 0) + 1,
+						}));
+					}
 					enriched = true;
 				} else {
 					enclosingSymbol = expansion.enclosingSymbol;

@@ -17,7 +17,7 @@ import { detectFileRole } from "../file-role.js";
 import { getProjectDataDir } from "../file-utils.js";
 import { collectUntrackedIgnoredIds } from "../git-tracked-ignore.js";
 import { logLatency } from "../latency-logger.js";
-import {
+import { containerNameChain,
 	getOpenDocumentSymbols,
 	lspSymbolKindName,
 } from "../lsp-document-symbols.js";
@@ -2111,12 +2111,13 @@ export function addLspFallbackSymbols(
 			const line = range.start.line + 1;
 			const kind = lspSymbolKindName(symbol.kind);
 			const symbolId = buildSymbolId(normalized, symbol.name, kind, line);
+			// Shared with the read-path enrichment (#951 Sonar dedup): flat
+			// results qualify through the full containerName chain, not just
+			// the immediate owner.
 			const owners =
 				ancestry.length > 0
 					? ancestry
-					: symbol.containerName
-						? [symbol.containerName]
-						: [];
+					: containerNameChain(symbol, symbols);
 			const qualifiedName =
 				owners.length > 0
 					? [...owners, symbol.name].join(".")

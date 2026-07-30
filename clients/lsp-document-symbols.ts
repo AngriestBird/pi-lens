@@ -104,12 +104,38 @@ export function findDocumentSymbolAtLine(
 	return best;
 }
 
-export function qualifiedLspSymbolName(located: LocatedDocumentSymbol): string {
+/**
+ * Full owner chain for a FLAT SymbolInformation result: hierarchical results
+ * carry ancestry directly, but native-ts7 (measured: TypeScript 7.0.2 via
+ * tsc --lsp) returns flat symbols whose only containment signal is the
+ * immediate `containerName`. Walk containerName links through the full result
+ * so nested owners qualify completely (Outer.Inner.method, #951 review) —
+ * cycle-guarded and depth-capped.
+ */
+export function containerNameChain(
+	symbol: LSPSymbol,
+	allSymbols: readonly LSPSymbol[] | undefined,
+): string[] {
+	const chain: string[] = [];
+	const seen = new Set<string>();
+	let container = symbol.containerName;
+	while (container && !seen.has(container) && chain.length < 10) {
+		chain.unshift(container);
+		seen.add(container);
+		container = allSymbols?.find(
+			(candidate) => candidate.name === container,
+		)?.containerName;
+	}
+	return chain;
+}
+
+export function qualifiedLspSymbolName(
+	located: LocatedDocumentSymbol,
+	allSymbols?: readonly LSPSymbol[],
+): string {
 	const owners =
 		located.ancestry.length > 0
 			? located.ancestry.map((entry) => entry.name)
-			: located.symbol.containerName
-				? [located.symbol.containerName]
-				: [];
+			: containerNameChain(located.symbol, allSymbols);
 	return [...owners, located.symbol.name].join(".");
 }
