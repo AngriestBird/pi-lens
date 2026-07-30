@@ -8,7 +8,9 @@ import {
 	getProjectSnapshotPath,
 	hydrateRuntimeFromProjectSnapshot,
 	isProjectSnapshotFresh,
+	isProjectSnapshotMetaStale,
 	loadProjectSnapshot,
+	readProjectSnapshotMeta,
 	saveProjectSnapshot,
 	saveRuntimeProjectSnapshot,
 } from "../../clients/project-snapshot.js";
@@ -301,5 +303,45 @@ describe("project snapshot", () => {
 				["fromSnapshot", path.join(cwd, "src", "a.ts")],
 			]);
 			expect(target.projectRulesScan.hasCustomRules).toBe(true);
+		}));
+
+	it("meta sidecar round-trips and drives the staleness gate (#947)", () =>
+		withProjectDataDir((cwd) => {
+			const runtime = new RuntimeCoordinator();
+			runtime.seedProjectSequence(7);
+			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime }));
+
+			const meta = readProjectSnapshotMeta(cwd);
+			expect(meta).toMatchObject({
+				version: PROJECT_SNAPSHOT_VERSION,
+				seq: 7,
+			});
+			expect(typeof meta?.timestamp).toBe("string");
+			expect(isProjectSnapshotMetaStale(meta!, 7)).toBe(false);
+			// seq mismatch → stale; version mismatch → stale (the exact fields
+			// isProjectSnapshotFresh checks on the parsed body).
+			expect(isProjectSnapshotMetaStale(meta!, 8)).toBe(true);
+			expect(
+				isProjectSnapshotMetaStale(
+					{ ...meta!, version: PROJECT_SNAPSHOT_VERSION + 1 },
+					7,
+				),
+			).toBe(true);
+		}));
+
+	it("meta sidecar reader fails open: missing / corrupt / wrong-shaped meta → null (#947)", () =>
+		withProjectDataDir((cwd) => {
+			// Missing entirely.
+			expect(readProjectSnapshotMeta(cwd)).toBeNull();
+
+			// Corrupt JSON.
+			const metaPath = getProjectSnapshotMetaPath(cwd);
+			fs.mkdirSync(path.dirname(metaPath), { recursive: true });
+			fs.writeFileSync(metaPath, "{ not json");
+			expect(readProjectSnapshotMeta(cwd)).toBeNull();
+
+			// Wrong shape (missing seq).
+			fs.writeFileSync(metaPath, JSON.stringify({ version: 2 }));
+			expect(readProjectSnapshotMeta(cwd)).toBeNull();
 		}));
 });

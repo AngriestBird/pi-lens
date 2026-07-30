@@ -41,7 +41,9 @@ import {
 	getProjectSnapshotPath,
 	hydrateRuntimeFromProjectSnapshot,
 	isProjectSnapshotFresh,
+	isProjectSnapshotMetaStale,
 	loadProjectSnapshot,
+	readProjectSnapshotMeta,
 	saveRuntimeProjectSnapshot,
 	type ProjectSnapshot,
 } from "./project-snapshot.js";
@@ -131,6 +133,36 @@ function resolveSnapshotRoot(cwd: string): string {
 		return resolvedCwd;
 	}
 	return nearest;
+}
+
+/**
+ * #947: meta-first staleness gate. Both interactive paths used to sync-parse
+ * the whole `project-snapshot.json` body (110-130ms at 40MB, ~0.5s at the
+ * observed 112MB) BEFORE checking freshness — wasted work in the 71% of
+ * sessions where the snapshot turns out stale. Read the tiny meta sidecar
+ * (`project-snapshot.meta.json`, written on every save) first; when it says
+ * stale (seq or version mismatch — the exact fields `isProjectSnapshotFresh`
+ * checks), skip the body parse entirely. Callers already tolerate a missing
+ * snapshot (fail-open contract). A missing meta file (legacy install, or a
+ * snapshot written before the sidecar existed) falls through to parsing the
+ * body exactly as before.
+ */
+function loadSnapshotBodyUnlessStale(args: {
+	root: string;
+	currentProjectSeq: number;
+	dbg: (msg: string) => void;
+}): { snapshot: ProjectSnapshot | null; skippedStale: boolean } {
+	const meta = readProjectSnapshotMeta(args.root);
+	if (meta && isProjectSnapshotMetaStale(meta, args.currentProjectSeq)) {
+		args.dbg(
+			`project_snapshot: meta gate stale (metaSeq=${meta.seq} metaVersion=${meta.version} current=${args.currentProjectSeq}) — skipping body parse`,
+		);
+		return { snapshot: null, skippedStale: true };
+	}
+	return {
+		snapshot: loadProjectSnapshot(args.root),
+		skippedStale: false,
+	};
 }
 
 function describeSnapshotMiss(
@@ -1471,7 +1503,12 @@ export async function handleSessionStart(
 		} catch {
 			// Missing snapshots are the normal cold-start case.
 		}
-		const snapshot = loadProjectSnapshot(snapshotRoot);
+		const snapshotGate = loadSnapshotBodyUnlessStale({
+			root: snapshotRoot,
+			currentProjectSeq: effectiveSeq,
+			dbg,
+		});
+		const snapshot = snapshotGate.snapshot;
 		const snapshotFresh = isProjectSnapshotFresh(snapshot, effectiveSeq);
 		logLatency({
 			type: "phase",
@@ -1483,6 +1520,7 @@ export async function handleSessionStart(
 				bytes: snapshotBytes,
 				fresh: snapshotFresh,
 				seq: snapshot?.seq ?? null,
+				...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
 			},
 		});
 		logProjectSnapshotProbe({
@@ -1557,7 +1595,12 @@ export async function handleSessionStart(
 	} catch {
 		// Missing snapshots are the normal cold-start case.
 	}
-	const snapshot = loadProjectSnapshot(snapshotRoot);
+	const snapshotGate = loadSnapshotBodyUnlessStale({
+		root: snapshotRoot,
+		currentProjectSeq: effectiveSeq,
+		dbg,
+	});
+	const snapshot = snapshotGate.snapshot;
 	const snapshotFresh = isProjectSnapshotFresh(snapshot, effectiveSeq);
 	logLatency({
 		type: "phase",
@@ -1569,6 +1612,7 @@ export async function handleSessionStart(
 			bytes: snapshotBytes,
 			fresh: snapshotFresh,
 			seq: snapshot?.seq ?? null,
+			...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
 		},
 	});
 	logProjectSnapshotProbe({

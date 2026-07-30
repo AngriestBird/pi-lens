@@ -110,6 +110,53 @@ function parseSnapshot(value: unknown): ProjectSnapshot | null {
 	};
 }
 
+export interface ProjectSnapshotMeta {
+	timestamp: string;
+	version: number;
+	seq: number;
+}
+
+function parseSnapshotMeta(value: unknown): ProjectSnapshotMeta | null {
+	if (!value || typeof value !== "object") return null;
+	const meta = value as Partial<ProjectSnapshotMeta>;
+	if (typeof meta.version !== "number") return null;
+	if (typeof meta.seq !== "number") return null;
+	return {
+		timestamp: typeof meta.timestamp === "string" ? meta.timestamp : "",
+		version: meta.version,
+		seq: meta.seq,
+	};
+}
+
+/**
+ * Read the tiny meta sidecar (`project-snapshot.meta.json`) WITHOUT parsing
+ * the (potentially 40-112MB) snapshot body. Written on every save; absent on
+ * legacy installs — callers must treat a `null` return as "no opinion" and
+ * fall through to parsing the body. #947.
+ */
+export function readProjectSnapshotMeta(cwd: string): ProjectSnapshotMeta | null {
+	const meta = readJsonCache<ProjectSnapshotMeta>(
+		getProjectSnapshotMetaPath(cwd),
+		(parsed) => parseSnapshotMeta(parsed) ?? undefined,
+	);
+	return meta ?? null;
+}
+
+/**
+ * Cheap staleness verdict from the meta sidecar alone. When this returns
+ * true, the snapshot body CANNOT be fresh (isProjectSnapshotFresh would
+ * reject it on the same two fields), so the expensive body parse can be
+ * skipped entirely. #947.
+ */
+export function isProjectSnapshotMetaStale(
+	meta: ProjectSnapshotMeta,
+	currentProjectSeq: number,
+): boolean {
+	return (
+		meta.version !== PROJECT_SNAPSHOT_VERSION || meta.seq !== currentProjectSeq
+	);
+}
+
 export function loadProjectSnapshot(cwd: string): ProjectSnapshot | null {
 	const snapshot = readJsonCache<ProjectSnapshot>(
 		getProjectSnapshotPath(cwd),
@@ -127,15 +174,11 @@ export function saveProjectSnapshot(
 	fs.writeFileSync(snapshotPath, JSON.stringify(snapshot, null, 2));
 	fs.writeFileSync(
 		getProjectSnapshotMetaPath(cwd),
-		JSON.stringify(
-			{
-				timestamp: snapshot.generatedAt,
-				version: snapshot.version,
-				seq: snapshot.seq,
-			},
-			null,
-			2,
-		),
+		JSON.stringify({
+			timestamp: snapshot.generatedAt,
+			version: snapshot.version,
+			seq: snapshot.seq,
+		}),
 	);
 }
 
