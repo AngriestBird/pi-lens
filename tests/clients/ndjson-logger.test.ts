@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	_exitFlushersForTest,
 	createNdjsonLogger,
@@ -17,6 +17,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	try {
 		removeTempDirSync(tmpDir);
 	} catch {}
@@ -28,6 +29,7 @@ function readLines(file: string): string[] {
 
 describe("createNdjsonLogger", () => {
 	it("serializes a burst of log() calls in enqueue order", async () => {
+		const appendFile = vi.spyOn(fs.promises, "appendFile");
 		const logger = createNdjsonLogger({ filePath: logFile });
 		for (let i = 0; i < 50; i++) {
 			logger.log({ i });
@@ -39,6 +41,26 @@ describe("createNdjsonLogger", () => {
 		lines.forEach((line, idx) => {
 			expect(JSON.parse(line)).toEqual({ i: idx });
 		});
+		expect(appendFile).toHaveBeenCalledTimes(1);
+	});
+
+	it("splits batches at truncate boundaries", async () => {
+		const appendFile = vi.spyOn(fs.promises, "appendFile");
+		const writeFile = vi.spyOn(fs.promises, "writeFile");
+		const logger = createNdjsonLogger({ filePath: logFile });
+		logger.log({ before: 1 });
+		logger.log({ before: 2 });
+		logger.truncate();
+		logger.log({ after: 1 });
+		logger.log({ after: 2 });
+		await logger.flush();
+
+		expect(appendFile).toHaveBeenCalledTimes(2);
+		expect(writeFile).toHaveBeenCalledTimes(1);
+		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
+			{ after: 1 },
+			{ after: 2 },
+		]);
 	});
 
 	it("flush() resolves only once everything enqueued is on disk", async () => {
@@ -122,6 +144,50 @@ describe("createNdjsonLogger", () => {
 		// would. Everything buffered must land on disk.
 		logger.flushSync();
 		expect(readLines(logFile)).toHaveLength(2);
+	});
+
+	it("flushSync writes the in-flight batch (dupes over drops) and never removes newer lines", async () => {
+		// #935 review: if the process dies before an in-flight threadpool
+		// append issues, a skipped prefix would drop the whole batch. flushSync
+		// therefore rewrites the in-flight batch synchronously — a duplicate
+		// line when the async write ALSO landed is the accepted cost, a dropped
+		// line is not. The async completion handler must still leave the
+		// (now-empty) queue alone.
+		let release: (() => void) | undefined;
+		const realAppendFile = fs.promises.appendFile.bind(fs.promises);
+		const appendFile = vi
+			.spyOn(fs.promises, "appendFile")
+			.mockImplementationOnce(async (file, data, options) => {
+				await realAppendFile(file, data, options);
+				await new Promise<void>((resolve) => {
+					release = resolve;
+				});
+			});
+		const logger = createNdjsonLogger({ filePath: logFile });
+		logger.log({ async: 1 });
+
+		// Let the first append reach disk while keeping its promise unresolved,
+		// then enqueue a remainder and flush everything synchronously.
+		await vi.waitFor(() => expect(appendFile).toHaveBeenCalledTimes(1));
+		logger.log({ sync: 2 });
+		logger.flushSync();
+		// The in-flight line appears twice (async write landed AND flushSync
+		// rewrote it — never-drops), the newer line exactly once.
+		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
+			{ async: 1 },
+			{ async: 1 },
+			{ sync: 2 },
+		]);
+
+		release?.();
+		await logger.flush();
+		// Async completion must not shift the newer items flushSync already
+		// wrote, nor re-write anything.
+		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
+			{ async: 1 },
+			{ async: 1 },
+			{ sync: 2 },
+		]);
 	});
 
 	it("registers the logger's flushSync in the shared exit flusher set", () => {
