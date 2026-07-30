@@ -648,7 +648,16 @@ The GitHub release body is derived from the curated `CHANGELOG.md` section for t
 
 **Rule catalogs.** `docs/ast-grep_rules_catalog.md` + `docs/tree-sitter_rules_catalog.md` list every bundled rule **per language** and are **generated** — edit the rule files, not the docs, then `npm run docs:rule-catalogs` (`scripts/gen-rule-catalogs.mjs`). A `--check` run (in `tests/scripts/rule-catalogs.test.ts`) fails if they drift. ast-grep covers pi-lens-authored (`rules/ast-grep-rules/rules/`) + vendored CodeRabbit (`coderabbit/rules/`); tree-sitter covers `rules/tree-sitter-queries/<language>/`.
 
-**Tree-sitter post-filters.** Query rules may use the TypeScript-side `applyPostFilter` seam for bounded same-file AST checks that predicates cannot express; batched and single-rule execution both pass the parsed root. New filters must be implemented in `clients/tree-sitter-client.ts` because unknown filters fail closed.
+**Tree-sitter post-filters.** Query rules may use the TypeScript-side
+`applyPostFilter` seam for bounded same-file AST checks that predicates cannot
+express; batched and single-rule execution both pass the parsed root. The
+catalog currently references 68 distinct filters, all implemented (72 switch
+cases total, including inline/internal compatibility cases). Unknown names fail
+closed: every raw match is dropped and one error is logged per process. A new
+filter therefore ships with a bounded traversal, a `try/catch` that returns
+`true` (keep the diagnostic if filtering fails), and real hit+miss tests; if
+that cannot be done honestly with captures plus same-file AST context, remove
+or make the rule advisory instead of adding a placeholder name.
 
 ## Build & packaging: precompiled dist + resource resolution (hard-won — #182)
 

@@ -153,6 +153,13 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Tree-sitter post-filters no longer leave silently dead rules** (refs #879) â€”
+	the 25 unknown filter references were resolved by implementing eight bounded,
+	fail-open-on-filter-error AST checks, expressing two conditions directly in
+	their queries, and removing fifteen rules whose promised semantic/framework
+	analysis could not be supported honestly. Coarse resource, assertion, and
+	sensitive-`memset` heuristics are advisory rather than blocking.
+
 - **Capped word indexes disclose partial coverage** (refs #928) — snapshots now
 	persist indexed-file count and truncation state, and both `symbol_search`
 	surfaces report coverage instead of presenting capped zero-hit results as
