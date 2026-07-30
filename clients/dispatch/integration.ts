@@ -64,11 +64,13 @@ import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";
 import { getProjectIgnoreMatcher } from "../file-utils.js";
 import {
 	clearReviewGraphWorkspaceCache,
+	getGraphImportChanges,
 	getLastGraphBuildInfo,
 } from "../review-graph/builder.js";
 import {
 	buildReverseDependencyIndexFromGraph,
 	getAffectedFilesFromIndex,
+	patchReverseDependencyIndex,
 	writeReverseDependencyIndexToSnapshot,
 	type ReverseDependencyIndex,
 } from "../reverse-deps.js";
@@ -773,17 +775,40 @@ export async function computeCascadeForFile(
 		const graphBuildInfo = getLastGraphBuildInfo();
 		const workspaceKey = normalizeMapKey(cwd);
 		const cachedReverseDeps = reverseDepsIndexCache.get(workspaceKey);
+		const importDelta = getGraphImportChanges(graph);
+		// A one-step delta is only usable against an index cached at exactly the
+		// delta's predecessor generation. Builds minted elsewhere (mcp analyze,
+		// lens-map, session warm) advance generations whose import changes this
+		// delta does not cover — reusing/patching across that gap stamps a stale
+		// index as current, and generation equality then hides the loss forever
+		// (#939 review finding 1).
+		const deltaContiguous =
+			importDelta !== undefined &&
+			importDelta.fromGeneration !== undefined &&
+			cachedReverseDeps !== undefined &&
+			cachedReverseDeps.generation === importDelta.fromGeneration;
+		const importChanges = deltaContiguous ? importDelta.changes : undefined;
+		const importsChanged = importChanges?.some(
+			(change) =>
+				change.existedBefore !== change.existsAfter ||
+				change.priorTargets.length !== change.newTargets.length ||
+				change.priorTargets.some(
+					(target, index) => target !== change.newTargets[index],
+				),
+		);
 		const canReuse =
 			reverseDepsReuseEnabled() &&
 			cachedReverseDeps !== undefined &&
-			graph.buildGeneration !== undefined &&
-			cachedReverseDeps.generation === graph.buildGeneration;
+			((graph.buildGeneration !== undefined &&
+				cachedReverseDeps.generation === graph.buildGeneration) ||
+				(importChanges !== undefined && !importsChanged));
 
 		let reverseDepsIndex: ReverseDependencyIndex;
 		let reverseDepsSaved: boolean;
 		if (canReuse && cachedReverseDeps) {
 			reverseDepsIndex = cachedReverseDeps.index;
 			reverseDepsSaved = cachedReverseDeps.savedToSnapshot;
+			cachedReverseDeps.generation = graph.buildGeneration;
 			logCascade({
 				phase: "reverse_deps_cache",
 				filePath,
@@ -793,6 +818,31 @@ export async function computeCascadeForFile(
 					savedToSnapshot: reverseDepsSaved,
 					importsFileCount: Object.keys(reverseDepsIndex.imports).length,
 					importedByFileCount: Object.keys(reverseDepsIndex.importedBy).length,
+				},
+			});
+		} else if (cachedReverseDeps && importChanges && importsChanged) {
+			reverseDepsIndex = patchReverseDependencyIndex(
+				cachedReverseDeps.index,
+				importChanges,
+			);
+			reverseDepsSaved = writeReverseDependencyIndexToSnapshot({
+				cwd,
+				index: reverseDepsIndex,
+				dbg,
+			});
+			reverseDepsIndexCache.set(workspaceKey, {
+				index: reverseDepsIndex,
+				savedToSnapshot: reverseDepsSaved,
+				generation: graph.buildGeneration,
+			});
+			logCascade({
+				phase: "reverse_deps_cache",
+				filePath,
+				durationMs: Date.now() - graphStart,
+				metadata: {
+					action: "patched_import_changes",
+					changedFileCount: importChanges.length,
+					savedToSnapshot: reverseDepsSaved,
 				},
 			});
 		} else {

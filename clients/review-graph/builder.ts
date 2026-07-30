@@ -199,11 +199,38 @@ export function clearGraphCache(): void {
 	_buildCache.clear();
 }
 
-export function clearReviewGraphWorkspaceCache(): void {
-	_buildCache.clear();
-	_workspaceGraphCache.clear();
-	_sizeSkipVerdicts.clear();
+export function clearReviewGraphWorkspaceCache(cwd?: string): void {
+	if (cwd === undefined) {
+		_buildCache.clear();
+		_workspaceGraphCache.clear();
+		_sizeSkipVerdicts.clear();
+	} else {
+		const normalized = normalizeMapKey(cwd);
+		for (const key of _buildCache.keys()) {
+			if (normalizeMapKey(key).startsWith(`${normalized}|`)) {
+				_buildCache.delete(key);
+			}
+		}
+		_workspaceGraphCache.delete(normalized);
+		_sizeSkipVerdicts.delete(normalized);
+	}
 	_lastGraphBuildInfo = { reused: false, mode: "full", graphChanged: true };
+}
+
+export function _getReviewGraphCacheStateForTests(cwd: string):
+	| {
+			signature: string;
+			fileSignatures: Map<string, string>;
+			fileHashes?: Map<string, string>;
+		}
+	| undefined {
+	const cached = _workspaceGraphCache.get(normalizeMapKey(cwd));
+	if (!cached) return undefined;
+	return {
+		signature: cached.signature,
+		fileSignatures: new Map(cached.fileSignatures),
+		fileHashes: cached.fileHashes ? new Map(cached.fileHashes) : undefined,
+	};
 }
 
 // #300 Edge 2: the review-graph's cross-worktree isolation is INCIDENTAL to
@@ -348,7 +375,9 @@ function cloneGraph(graph: ReviewGraph): ReviewGraph {
 		version: graph.version,
 		builtAt: graph.builtAt,
 		nodes: new Map(graph.nodes),
-		edges: graph.edges.map((edge) => ({ ...edge })),
+		// Edges are immutable values: update paths replace/filter entries rather
+		// than mutating them, so copying the array is sufficient isolation.
+		edges: [...graph.edges],
 		edgesByFrom: new Map(),
 		edgesByTo: new Map(),
 		fileNodes: new Map(),
@@ -904,11 +933,30 @@ interface PendingPersist {
 	cwd: string;
 	cacheDir: string;
 	cachePath: string;
-	data: PersistedGraphData;
+	signature: string;
+	fileSignatures: Map<string, string>;
+	fileHashes?: Map<string, string>;
+	graph: ReviewGraph;
+	gitStamp?: { headCommit: string; worktreeRoot: string };
 	elementCount: number;
 }
 const _pendingPersist = new Map<string, PendingPersist>();
 const _persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function persistedData(pending: PendingPersist): PersistedGraphData {
+	return {
+		version: pending.graph.version,
+		builtAt: pending.graph.builtAt,
+		signature: pending.signature,
+		fileSignatures: Array.from(pending.fileSignatures.entries()),
+		fileHashes: pending.fileHashes
+			? Array.from(pending.fileHashes.entries())
+			: undefined,
+		nodes: Array.from(pending.graph.nodes.entries()),
+		edges: pending.graph.edges,
+		gitStamp: pending.gitStamp,
+	};
+}
 
 function writePending(key: string): void {
 	const pending = _pendingPersist.get(key);
@@ -922,7 +970,7 @@ function writePending(key: string): void {
 	const startedAt = Date.now();
 	let json: string;
 	try {
-		json = JSON.stringify(pending.data);
+		json = JSON.stringify(persistedData(pending));
 	} catch (err) {
 		recordPersistFailure(key, "serialize_failed", (err as Error).message);
 		console.error(
@@ -1002,8 +1050,10 @@ function ensurePersistExitHook(): void {
 	if (_persistExitHookInstalled) return;
 	_persistExitHookInstalled = true;
 	process.once("exit", () => {
-		for (const pending of [..._pendingPersist.values()]) {
-			const result = flushReviewGraphPersist(pending.cwd, "exit_hook");
+		for (const key of [..._pendingPersist.keys()]) {
+			// Shared with the CLI's forced flush — same persistedData DTO, same
+			// atomic writer (#762), distinct failure label per source.
+			const result = flushReviewGraphPersist(key, "exit_hook");
 			if (!result.ok) flushReviewGraphLogSync();
 		}
 	});
@@ -1047,21 +1097,20 @@ function persistGraph(
 	// are plain fs reads, cheap even called per-persist). undefined for
 	// non-git cwds, which serializes as `gitStamp: undefined` → omitted key.
 	const gitStamp = resolveGitIdentity(cwd);
-	// Build the serializable shape now (cheap array views over the snapshot the
-	// caller already cloned), but defer the expensive stringify+write to the
-	// debounced flush so a burst of edits collapses to a single write.
-	const data: PersistedGraphData = {
-		version: graph.version,
-		builtAt: graph.builtAt,
-		signature,
-		fileSignatures: Array.from(fileSignatures.entries()),
-		fileHashes: fileHashes ? Array.from(fileHashes.entries()) : undefined,
-		nodes: Array.from(graph.nodes.entries()),
-		edges: graph.edges,
-		gitStamp,
-	};
+	// Retain the immutable snapshot inputs and build their O(graph) serializable
+	// arrays only after the quiet window. Replacing a pending entry during an edit
+	// burst now avoids both serialization and the pre-serialization full copies.
 	const key = normalizeMapKey(cwd);
-	_pendingPersist.set(key, { cwd, cacheDir, cachePath, data, elementCount });
+	_pendingPersist.set(key, {
+		cacheDir,
+		cachePath,
+		signature,
+		fileSignatures,
+		fileHashes,
+		graph,
+		gitStamp,
+		elementCount,
+	});
 	logReviewGraph({
 		cwd,
 		phase: "persist_scheduled",
@@ -1125,7 +1174,7 @@ export function flushReviewGraphPersist(
 
 	const startedAt = Date.now();
 	try {
-		const json = JSON.stringify(pending.data);
+		const json = JSON.stringify(persistedData(pending));
 		const bytes = Buffer.byteLength(json);
 		fs.mkdirSync(pending.cacheDir, { recursive: true });
 		writeFileAtomic(pending.cachePath, json);
@@ -1137,7 +1186,7 @@ export function flushReviewGraphPersist(
 			metadata: { elements: pending.elementCount, bytes },
 		});
 		logReviewGraph({
-			cwd: pending.cwd,
+			cwd,
 			phase: "persist_succeeded",
 			elements: pending.elementCount,
 		});
@@ -1150,7 +1199,7 @@ export function flushReviewGraphPersist(
 	} catch (err) {
 		const reason = err instanceof Error ? err.message : String(err);
 		recordPersistFailure(
-			pending.cwd,
+			cwd,
 			source === "exit_hook" ? "exit_flush_failed" : "forced_flush_failed",
 			reason,
 		);
@@ -1859,7 +1908,6 @@ function removeFileOwnedGraphData(
 		return !toRemoved;
 	});
 	for (const id of removedIds) graph.nodes.delete(id);
-	rebuildIndexes(graph);
 	return preservedIncomingSymbolEdges;
 }
 
@@ -1926,7 +1974,48 @@ function restoreValidIncomingEdges(
 		graph.edges.push(edge);
 		existing.add(key);
 	}
-	rebuildIndexes(graph);
+}
+
+export interface GraphFileImportChange {
+	filePath: string;
+	existedBefore: boolean;
+	existsAfter: boolean;
+	priorTargets: string[];
+	newTargets: string[];
+}
+
+export interface GraphImportDelta {
+	/** buildGeneration of the predecessor graph this delta was computed
+	 * against. A consumer holding an index cached at any OTHER generation must
+	 * NOT reuse/patch with this delta — generations minted by other call sites
+	 * (mcp analyze, lens-map, session warm builds) carry import changes this
+	 * one-step delta does not cover (#939 review). */
+	fromGeneration: number | undefined;
+	changes: GraphFileImportChange[];
+}
+
+const _graphImportChanges = new WeakMap<ReviewGraph, GraphImportDelta>();
+
+/** One-step import-edge delta produced by this exact returned graph instance. */
+export function getGraphImportChanges(
+	graph: ReviewGraph,
+): GraphImportDelta | undefined {
+	return _graphImportChanges.get(graph);
+}
+
+function importTargetsForFile(graph: ReviewGraph, filePath: string): string[] {
+	const normalized = normalizeMapKey(filePath);
+	const fileNodeId = graph.fileNodes.get(normalized) ?? `file:${normalized}`;
+	const targets = new Set<string>();
+	// Cached graph snapshots intentionally omit derived indexes; read the
+	// canonical edge collection so the delta is correct before the first rebuild.
+	for (const edge of graph.edges) {
+		if (edge.from !== fileNodeId) continue;
+		if (edge.kind !== "imports") continue;
+		const target = graph.nodes.get(edge.to)?.filePath;
+		if (target) targets.add(normalizeMapKey(target));
+	}
+	return [...targets].sort((a, b) => a.localeCompare(b));
 }
 
 async function updateGraphFiles(
@@ -1935,21 +2024,37 @@ async function updateGraphFiles(
 	files: string[],
 	facts: FactStore,
 	ignoredIds?: ReadonlySet<string>,
-): Promise<void> {
+): Promise<GraphFileImportChange[]> {
+	const prior = files.map((file) => ({
+		filePath: normalizeMapKey(file),
+		existedBefore: graph.fileNodes.has(normalizeMapKey(file)),
+		priorTargets: importTargetsForFile(graph, file),
+	}));
 	const preservedIncoming: ReviewGraphEdge[] = [];
 	for (const file of files) {
 		preservedIncoming.push(...removeFileOwnedGraphData(graph, file));
 		await addFileToGraph(graph, cwd, file, facts, ignoredIds);
 	}
 	restoreValidIncomingEdges(graph, preservedIncoming);
-	resolveDeferredSymbolEdges(graph);
+	resolveDeferredSymbolEdges(graph, false);
+	rebuildIndexes(graph);
 	graph.changedSymbolsByFile.clear();
 	for (const file of files) {
 		upsertChangedSymbols(graph, facts, file);
 	}
+	return prior.map(({ filePath, existedBefore, priorTargets }) => ({
+		filePath,
+		existedBefore,
+		existsAfter: graph.fileNodes.has(filePath),
+		priorTargets,
+		newTargets: importTargetsForFile(graph, filePath),
+	}));
 }
 
-function resolveDeferredSymbolEdges(graph: ReviewGraph): void {
+function resolveDeferredSymbolEdges(
+	graph: ReviewGraph,
+	rebuild = true,
+): void {
 	const symbolNameToIds = new Map<string, string[]>();
 	for (const node of graph.nodes.values()) {
 		if (node.kind !== "symbol" || !node.symbolName) continue;
@@ -1988,7 +2093,7 @@ function resolveDeferredSymbolEdges(graph: ReviewGraph): void {
 		// confirmed graph node.
 		return edge;
 	});
-	rebuildIndexes(graph);
+	if (rebuild) rebuildIndexes(graph);
 }
 
 interface CachedGraphEntry {
@@ -2106,16 +2211,23 @@ async function tryIncrementalFromCache(
 		hashes.set(file, contentHashEntry(file));
 	}
 
+	const priorGeneration = cached.graph.buildGeneration;
 	const graph = cloneGraph(cached.graph);
-	await updateGraphFiles(graph, ctx.cwd, filesToUpdate, ctx.facts, ctx.ignoredIds);
+	const importChanges = await updateGraphFiles(
+		graph,
+		ctx.cwd,
+		filesToUpdate,
+		ctx.facts,
+		ctx.ignoredIds,
+	);
 	// #459: real re-extract ⇒ new generation.
 	const generation = ++_graphGenerationCounter;
-	const graphSnapshot = cloneGraph(graph);
+	graph.buildGeneration = generation;
 	_workspaceGraphCache.set(ctx.normalizedCwd, {
 		signature: ctx.signature,
 		fileSignatures: new Map(ctx.fileSignatures),
 		fileHashes: hashes,
-		graph: graphSnapshot,
+		graph,
 		buildGeneration: generation,
 		...verifiedCacheFields(ctx.seqAtBuildStart),
 	});
@@ -2124,10 +2236,13 @@ async function tryIncrementalFromCache(
 		ctx.signature,
 		ctx.fileSignatures,
 		hashes,
-		graphSnapshot,
+		graph,
 	);
 	_lastGraphBuildInfo = { reused: true, mode: "incremental", graphChanged: true };
-	graph.buildGeneration = generation;
+	_graphImportChanges.set(graph, {
+		fromGeneration: priorGeneration,
+		changes: importChanges,
+	});
 	ctx.facts.setSessionFact("session.reviewGraph", graph);
 	return graph;
 }
@@ -2177,7 +2292,11 @@ async function trySeqFastpath(
 	}
 
 	// Condition 3: bounded change set. changed ∪ changedFiles(param), normalized.
-	const changedSet = new Set(seqHint.getFilesChangedSince(cached.builtAtProjectSeq));
+	const changedSet = new Set(
+		seqHint
+			.getFilesChangedSince(cached.builtAtProjectSeq)
+			.map((file) => normalizeMapKey(file)),
+	);
 	for (const file of normalizedChanged) changedSet.add(file);
 	const changed = [...changedSet];
 	if (changed.length > SEQ_FASTPATH_MAX_CHANGES) {
@@ -2239,9 +2358,17 @@ async function trySeqFastpath(
 	// Incremental re-extract over exactly the changed files. Reuses the SAME
 	// machinery as the signature-diff incremental path (updateGraphFiles), so
 	// there's no second incremental implementation.
+	const priorGeneration = cached.graph.buildGeneration;
 	const graph = cloneGraph(cached.graph);
+	let importChanges: GraphFileImportChange[];
 	try {
-		await updateGraphFiles(graph, cwd, filesToUpdate, facts, ignoredIds);
+		importChanges = await updateGraphFiles(
+			graph,
+			cwd,
+			filesToUpdate,
+			facts,
+			ignoredIds,
+		);
 	} catch {
 		return { fallback: "stat-error" };
 	}
@@ -2259,12 +2386,12 @@ async function trySeqFastpath(
 
 	// #459: real re-extract ⇒ new generation.
 	const generation = ++_graphGenerationCounter;
-	const graphSnapshot = cloneGraph(graph);
+	graph.buildGeneration = generation;
 	_workspaceGraphCache.set(normalizedCwd, {
 		signature: nextSignature,
 		fileSignatures: nextSignatures,
 		fileHashes: nextHashes,
-		graph: graphSnapshot,
+		graph,
 		buildGeneration: generation,
 		// Build-start seq, not stamp-time: see verifiedCacheFields — a bump that
 		// interleaved during updateGraphFiles' awaits must be re-diffed next build.
@@ -2272,11 +2399,14 @@ async function trySeqFastpath(
 		lastFullVerifyMs: cached.lastFullVerifyMs,
 		fastPathSinceVerify: sinceVerify + 1,
 	});
-	persistGraph(cwd, nextSignature, nextSignatures, nextHashes, graphSnapshot);
+	persistGraph(cwd, nextSignature, nextSignatures, nextHashes, graph);
 	// #459: filesToUpdate was non-empty — this fastpath re-extracted real files,
 	// so (unlike the no-op branch above) the graph object did change.
 	_lastGraphBuildInfo = { reused: true, mode: "seq-fastpath", graphChanged: true };
-	graph.buildGeneration = generation;
+	_graphImportChanges.set(graph, {
+		fromGeneration: priorGeneration,
+		changes: importChanges,
+	});
 	facts.setSessionFact("session.reviewGraph", graph);
 	return { graph };
 }

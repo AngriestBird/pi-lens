@@ -34,6 +34,15 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **Incremental review-graph updates avoid redundant whole-graph copies and
+	index rebuilds** (refs #939) — file re-extraction now rebuilds derived indexes
+	once, immutable edges are array-copied without cloning every edge object, the
+	updated graph itself becomes the workspace snapshot, and debounced persistence
+	defers its O(graph) array materialization until the quiet-window flush.
+- **Reverse-dependency indexes update at import-edge granularity** (refs #939)
+	instead of rebuilding from every graph edge after a one-file edit. Body-only
+	edits reuse the cached index without rewriting the project snapshot; import
+	changes patch only the touched `imports` and `importedBy` buckets.
 - **Review-graph file-cap degradation is now explicit and count-honest** (refs
 	#921) — `project_report` says a capped project has “more than N files” instead
 	of presenting the cap+1 early-exit sentinel as an exact count. `module_report`
@@ -42,9 +51,10 @@ All notable changes to pi-lens will be documented in this file.
 	with the cap plus both `.pi-lens.json#maxProjectFiles` and
 	`PI_LENS_REVIEW_GRAPH_MAX_FILES` controls, keeping disabled data distinct from
 	a genuinely empty/cold graph.
-- **Project scans release each processed file's full source content** (refs #886)
-	instead of retaining every source string in their shared `FactStore` until the
-	scan ends; derived per-file facts and session facts remain available.
+- **Project scans release every scan-local fact after each file** (refs #886,
+	#939) instead of retaining source content, imports, summaries, and other
+	derived per-file facts until the scan ends. The live dispatch store remains
+	untouched; only the scanner-owned store is cleared.
 - Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
 - Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
 - **Project diagnostics now use one file-major scan pass** (refs #896) —

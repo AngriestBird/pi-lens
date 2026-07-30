@@ -224,6 +224,14 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   Client shutdown's fire-and-forget instance-registry removal is serialized at
   its read-modify-write seam so concurrent removals cannot lose siblings;
   process-tree kills remain concurrent.
+- **Incremental review-graph snapshots are immutable by replacement (#939).**
+  `updateGraphFiles` performs all node/edge edits on a clone, rebuilds derived
+  indexes once at the end, then stores that finished graph directly in
+  `_workspaceGraphCache`; do not mutate a cached/returned graph outside the
+  builder. Graph edges are immutable values (updates replace/filter entries),
+  which makes an array-only edge clone safe. Debounced persistence retains the
+  finished graph/maps and materializes serialization arrays only at flush time,
+  so callers must likewise replace rather than mutate those snapshots.
 - **Auxiliary LSP liveness is a read-only dispatch seam (#868).**
   `clients/lsp/index.ts` exposes `isAuxiliaryLspAlive(serverId, filePath)` for
   Gate-B fallback decisions. It resolves the matching root and inspects only
