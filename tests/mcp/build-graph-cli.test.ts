@@ -73,7 +73,7 @@ describe("pi-lens build-graph CLI", () => {
 		);
 		const snapshots = fs
 			.readdirSync(dataDir, { recursive: true })
-			.filter((entry) => String(entry).endsWith("review-graph.json"));
+			.filter((entry) => String(entry).endsWith("review-graph.json.gz"));
 		expect(snapshots).toHaveLength(1);
 	});
 

@@ -18,6 +18,40 @@ All notable changes to pi-lens will be documented in this file.
 	containment survives persistence, productive tree-sitter files never pay the
 	request, and unavailable/failed fallback attempts degrade without opening or
 	spawning while remaining visible in `review-graph.log`.
+- **Installer subprocesses are lifetime-coupled** (refs #945) — npm, pip, gem,
+	and archive extraction now use the shared safe-spawn path, await full Windows
+	process-tree termination on timeout, and synchronously clean registered
+	installer children during parent exit/signals.
+
+- **Managed tool installs are cross-process serialized** (refs #945) — a
+	dependency-free atomic lock protects the shared tools tree, verifies owners
+	before stale recovery, bounds lock waits with an honest error, and rechecks
+	discovery after acquisition to avoid duplicate package-manager runs.
+
+- **Ordinary tests never install managed tools** (refs #945) — Vitest sets
+	`PI_LENS_DISABLE_TOOL_INSTALL=1`, its prewarm step creates a local synthetic
+	oxlint probe-cache entry without networking, and one-shot analysis explicitly
+	awaits probe-cache persistence before exit.
+
+- **Installer orphan/locking regressions are process-tested** (refs #945) —
+	fake package-manager coverage verifies Windows timeout tree-kill, exactly one
+	install across concurrent processes, explicit install-disable refusal, and
+	Vitest's default no-install environment.
+- **Downgrade TypeScript `unsafe-regex` to advisory and suppress escaped-before-
+  assignment false positives** (refs #932) — the coarse dynamic `RegExp`
+  heuristic no longer blocks edits and recognizes escape/replace calls in a
+  same-file identifier initializer; structural ReDoS detection remains with
+  the `redos-nested-quantifier` ast-grep rule.
+- **Review-graph persistence no longer serializes or compresses on the event
+	loop** (refs #939) — debounced snapshots are materialized in one lazy,
+	unref'd worker and streamed through gzip into the new canonical
+	`review-graph.json.gz` cache. The main thread promotes only the current
+	generation's atomic staged file, so the synchronous CLI/exit flush can
+	supersede an in-flight worker without a stale overwrite. Loads retain one
+	release of fallback support for legacy uncompressed `review-graph.json`
+	snapshots; worker failures are logged and degrade to a synchronous persist.
+	Persist telemetry now records element count, raw/gzip bytes, serialization
+	and write time, and whether the work was offloaded.
 
 - **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
 	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
