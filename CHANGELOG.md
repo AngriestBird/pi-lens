@@ -4,8 +4,6 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
-### Fixed
-
 - **Guarded Windows CPU/RSS resource sampling so a best-effort sampler can no
 	longer crash the pi host** (refs #620, #533) — `clients/resource-sampler.ts`
 	sampled CPU%/RSS via `pidusage`, whose Windows path shells out to `gwmi`
