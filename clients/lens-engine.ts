@@ -28,6 +28,10 @@ import { getLSPService } from "./lsp/index.js";
 import { getOrLoadWarmWordIndex } from "./mcp/analyze.js";
 import { scanProjectDiagnostics } from "./project-diagnostics/scanner.js";
 import type { ProjectDiagnosticsSnapshot } from "./project-diagnostics/types.js";
+import {
+	getTreeSitterRuntimeStatus,
+	type TreeSitterRuntimeStatus,
+} from "./tree-sitter-shared.js";
 import * as path from "node:path";
 import { minimatch } from "./deps/minimatch.js";
 import { normalizeMapKey } from "./path-utils.js";
@@ -36,10 +40,12 @@ import type { ReviewGraph } from "./review-graph/types.js";
 import {
 	centralityFromReverseDeps,
 	deserializeWordIndex,
+	getWordIndexBuildStatus,
 	type RankedFile,
 	searchWordIndex,
 	triggerBackgroundWordIndexBuild,
 } from "./word-index.js";
+import { wordIndexDebug } from "./word-index-logger.js";
 
 // --- Facades (re-exported so adapters import only this module) ---------------
 
@@ -56,6 +62,8 @@ export {
 } from "./mcp/ipc.js";
 export {
 	analyzeFileFresh,
+	canRebuildPiLens,
+	REBUILD_UNAVAILABLE_MESSAGE,
 	resolveRebuildScript,
 	runRebuild,
 	type ScanDiagnostic,
@@ -120,24 +128,54 @@ export function projectScan(
  * Returns `undefined` when the scan was not truncated (no line to append).
  */
 export function scanTruncationNotice(
-	snapshot: Pick<ProjectDiagnosticsSnapshot, "scanTruncated" | "filesScanned">,
+	snapshot: Pick<
+		ProjectDiagnosticsSnapshot,
+		"scanTruncated" | "filesScanned" | "treeSitterStatus"
+	>,
 ): string | undefined {
 	if (!snapshot.scanTruncated) return undefined;
+	if (snapshot.treeSitterStatus === "wasm_aborted_restart_required") {
+		return (
+			`⚠ Scan stopped after ${snapshot.filesScanned} complete file(s): the ` +
+			"tree-sitter WASM runtime aborted. Results are partial and were not cached; " +
+			"restart the pi-lens extension/MCP server to restore structural analysis."
+		);
+	}
 	return (
 		`⚠ Scan truncated at ${snapshot.filesScanned} file(s) — results are partial; ` +
 		"raise maxProjectFiles in .pi-lens.json to scan fully."
 	);
 }
 
+/** Process-wide tree-sitter health for host status surfaces. */
+export function treeSitterRuntimeStatus(): TreeSitterRuntimeStatus {
+	return getTreeSitterRuntimeStatus();
+}
+
 export interface LspStatus {
 	aliveClients: number;
 	servers: Array<{ serverId: string; root: string; connected: boolean }>;
+	brokenServers: ReturnType<ReturnType<typeof getLSPService>["getBrokenStatus"]>;
 }
 
 /** Alive LSP client count + per-server status. */
 export function lspStatus(): LspStatus {
 	const lsp = getLSPService();
-	return { aliveClients: lsp.getAliveClientCount(), servers: lsp.getStatus() };
+	return {
+		aliveClients: lsp.getAliveClientCount(),
+		servers: lsp.getStatus(),
+		brokenServers: lsp.getBrokenStatus(),
+	};
+}
+
+export function renderLspBrokenStatusLines(
+	brokenServers: LspStatus["brokenServers"],
+): string[] {
+	return brokenServers.map((server) =>
+		server.permanentlyBroken
+			? `  ✗ ${server.serverId} — disabled after ${server.failures} failures (${server.root})`
+			: `  ✗ ${server.serverId} — cooling down after ${server.failures} failure(s) until ${new Date(server.cooldownUntil).toISOString()} (${server.root})`,
+	);
 }
 
 /** Session diagnostic counters (shown / auto-fixed / unresolved …). */
@@ -325,10 +363,14 @@ export interface SymbolSearchResult {
 	available: boolean;
 	query: string;
 	results: SymbolSearchHit[];
+	/** Coverage of the persisted/warm index used for this answer. */
+	coverage?: { files: number; truncated: boolean };
 	/** Actionable guidance when `available` is false (#348 decision 3): the
 	 * index build was kicked off in the background (deduped per cwd), never
 	 * blocking this call — retry shortly. */
 	hint?: string;
+	/** Why an unavailable index cannot currently answer authoritatively. */
+	unavailableReason?: "building" | "refused" | "last-build-failed";
 	/**
 	 * ISO timestamp the persisted project snapshot (`ProjectSnapshot.generatedAt`)
 	 * was last written — the snapshot backs BOTH the word index this search ranks
@@ -393,12 +435,29 @@ export async function symbolSearch(
 	const snapshot = loadProjectSnapshot(cwd);
 	const index = getOrLoadWarmWordIndex(cwd) ?? deserializeWordIndex(snapshot?.wordIndex);
 	if (!index) {
-		triggerBackgroundWordIndexBuild(cwd);
+		const priorStatus = getWordIndexBuildStatus(cwd);
+		const status =
+			priorStatus?.state === "refused"
+				? priorStatus
+				: triggerBackgroundWordIndexBuild(cwd, wordIndexDebug(cwd));
+		const unavailableReason =
+			priorStatus?.state === "failed"
+				? "last-build-failed"
+				: status.state === "refused"
+					? "refused"
+					: "building";
+		const hint =
+			unavailableReason === "refused"
+				? `Word index build was refused for safety: ${status.state === "refused" ? status.reason : "unsafe workspace root"}. Run symbol_search from inside a project directory.`
+				: unavailableReason === "last-build-failed"
+					? `The last word index build failed: ${priorStatus?.state === "failed" ? priorStatus.reason : "unknown error"}. A retry is now running in the background.`
+					: "Word index is building in the background for this workspace — retry this query shortly.";
 		return {
 			available: false,
 			query,
 			results: [],
-			hint: "Word index is building in the background for this workspace — retry this query shortly.",
+			unavailableReason,
+			hint,
 		};
 	}
 	// Boost well-connected files using the snapshot's reverse-dependency
@@ -420,6 +479,7 @@ export async function symbolSearch(
 		available: true,
 		query,
 		results: hits,
+		coverage: { files: index.docCount, truncated: index.truncated === true },
 		snapshotGeneratedAt: snapshot?.generatedAt,
 	};
 }

@@ -6,6 +6,8 @@ import {
 	getQueryLanguageKey,
 	isDisabledQueryFilePath,
 	queriesForLanguage,
+	ruleFilesForLanguage,
+	ruleSourceLanguages,
 	type TreeSitterQuery,
 	TreeSitterQueryLoader,
 } from "../../clients/tree-sitter-query-loader.js";
@@ -251,5 +253,51 @@ describe("queriesForLanguage", () => {
 		expect(queriesForLanguage(map, "javascript").map((q) => q.id)).toEqual([
 			"js-own",
 		]);
+	});
+});
+
+describe("ruleSourceLanguages / ruleFilesForLanguage (#878)", () => {
+	it("mirrors the rule-set composition queriesForLanguage applies", () => {
+		// tsx is the one typescript-rule heir; javascript is deliberately not.
+		expect(ruleSourceLanguages("tsx")).toEqual(["tsx", "typescript"]);
+		expect(ruleSourceLanguages("typescript")).toEqual(["typescript"]);
+		expect(ruleSourceLanguages("javascript")).toEqual(["javascript"]);
+		expect(ruleSourceLanguages("python")).toEqual(["python"]);
+	});
+
+	it("enumerates project-local rule files across every rule-source language", () => {
+		const root = makeTempRulesRoot();
+		writeRule(root, "rules/tree-sitter-queries/tsx/own.yml", "id: tsx-own\n");
+		writeRule(
+			root,
+			"rules/tree-sitter-queries/typescript/inherited.yml",
+			"id: ts-rule\n",
+		);
+		writeRule(
+			root,
+			"rules/tree-sitter-queries/python/unrelated.yml",
+			"id: py-rule\n",
+		);
+		// Non-.yml files never load, so they must not fingerprint either.
+		writeRule(
+			root,
+			"rules/tree-sitter-queries/typescript/notes.txt",
+			"not a rule\n",
+		);
+
+		const files = ruleFilesForLanguage("tsx", root).map((f) =>
+			f.replaceAll("\\", "/"),
+		);
+		expect(files.some((f) => f.endsWith("tsx/own.yml"))).toBe(true);
+		expect(files.some((f) => f.endsWith("typescript/inherited.yml"))).toBe(true);
+		expect(files.some((f) => f.endsWith("python/unrelated.yml"))).toBe(false);
+		expect(files.some((f) => f.endsWith("notes.txt"))).toBe(false);
+
+		// A non-heir language fingerprints only its own directory.
+		const pyFiles = ruleFilesForLanguage("python", root).map((f) =>
+			f.replaceAll("\\", "/"),
+		);
+		expect(pyFiles.some((f) => f.endsWith("python/unrelated.yml"))).toBe(true);
+		expect(pyFiles.some((f) => f.endsWith("typescript/inherited.yml"))).toBe(false);
 	});
 });

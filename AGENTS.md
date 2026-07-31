@@ -35,15 +35,42 @@ clients/
   project-snapshot.ts     Versioned seq-stamped project snapshot cache
   project-changes.ts      Append-only project/file sequence change log
   reverse-deps.ts         Snapshot-backed reverse dependency index/query helpers
-  word-index.ts           Identifier inverted index + BM25 ranking (#162) — built in the session scan, persisted in the snapshot; consumed by BOTH the pi symbol_search tool and the MCP pilens_symbol_search mirror (#348 phase 1); lifecycle = load → rebuild-if-stale (seq) → persist in all startup modes, plus a cold-query background build
+  word-index.ts           Identifier inverted index + BM25 ranking (#162) — built in the session scan, persisted with per-file mtimes in the snapshot; consumed by BOTH the pi symbol_search tool and the MCP pilens_symbol_search mirror (#348 phase 1); session warmup stats the bounded current file set and incrementally refreshes stale/new/deleted documents (full rebuild for legacy format, refresh failure, or >30% set churn), plus a cold-query background build
   review-graph/query.ts   Graph queries incl computeImpactCascade (one-hop, used by the cascade) + computeTransitiveImpact (depth-bounded BFS, used by module_report's blastRadius section #304)
+  review-graph/persist-worker.ts  Lazy shared worker for debounced review-graph JSON serialization + streamed gzip persistence; main thread generation-gates canonical promotion
   installer/index.ts      Auto-install + ensureTool; probe-cache.json for fast restarts. Strategies: npm/pip/gem/github + maven (fat JAR → java -jar launcher) + archive (tree). github API is token-authed (api.github.com only, Authorization dropped on cross-host redirect — unauth=60/hr silently fails CI installs); tar extract is recursive-find (handles FLAT tarballs like gleam, not --strip-components). GITHUB_TOOLS kept in sync with the registry by tool-registry-consistency.test.ts
-  lsp/                    40 LSP server IDs (incl. opengrep + ast-grep + zizmor + typos, cross-cutting AUXILIARY diagnostic LSPs — role:"auxiliary", #111/#239/#272/#283), config, lifecycle. clojure-lsp + gleam now auto-install via github (native binary / flat tarball). zizmor (GitHub Actions security, `zizmor --lsp`) attaches to YAML; advisory unless the repo ships zizmor.yml; online audits need a token (env or `gh auth token`) via clients/zizmor-config.ts. typos (source-code spell checker, `typos-lsp`, native win-arm64 build) attaches to the code-aux set PLUS markdown (#283 option B); allow-list dictionary (only KNOWN misspellings) so low-FP; advisory (default WARNING) unless the repo ships typos.toml via clients/typos-config.ts
+  lsp/                    40+ LSP server IDs (incl. CMake via cmake-language-server and Fish via fish-lsp; opengrep + ast-grep + zizmor + typos are cross-cutting AUXILIARY diagnostic LSPs — role:"auxiliary", #111/#239/#272/#283), config, lifecycle. clojure-lsp + gleam now auto-install via github (native binary / flat tarball). zizmor (GitHub Actions security, `zizmor --lsp`) attaches to YAML; advisory unless the repo ships zizmor.yml; online audits need a token (env or `gh auth token`) via clients/zizmor-config.ts. typos (source-code spell checker, `typos-lsp`, native win-arm64 build) attaches to the code-aux set PLUS markdown (#283 option B); allow-list dictionary (only KNOWN misspellings) so low-FP; advisory (default WARNING) unless the repo ships typos.toml via clients/typos-config.ts
   dispatch/               Pipeline dispatcher + 47 registered runners (incl. spotbugs — flag-gated via withSpotbugsGroup, #133). Auxiliary LSPs (opengrep, ast-grep, zizmor, typos, …) are NOT runners — they attach via the lsp runner's with-auxiliary path; see clients/dispatch/auxiliary-lsp.ts
   widget-state.ts         Footer widget rendering (@earendil-works/pi-tui)
 tools/                    ast-grep-search, lsp-navigation tool handlers
 tests/                    Vitest test suite (mirrors clients/ structure)
 ```
+
+Installer package-manager and archive-extraction subprocesses must use
+`safeSpawnAsync` with `lifetimeCoupled: true` and `ignoreAmbientSignal: true`.
+This gives timeouts an awaited Windows tree-kill and prevents interrupted parent
+processes from orphaning package-manager descendants; do not reintroduce raw
+`spawn(..., { shell: true })` for install mutations.
+All mutations of the shared managed `tools/` tree are also serialized by its
+atomic `.install.lock`; after waiting, re-run discovery before installing because
+the preceding process may already have satisfied the request. A lock is stale
+only after its recorded PID is confirmed dead.
+Vitest sets `PI_LENS_DISABLE_TOOL_INSTALL=1` before global setup and workers;
+ordinary tests must remain network/install-free. Real installer integration
+tests must explicitly opt in and use an isolated `PI_LENS_HOME`.
+Installer lifecycle integration tests use a fake package manager and isolated
+home; `PI_LENS_INSTALL_TIMEOUT_MS` exists to keep timeout coverage fast and
+must not become a production policy default.
+
+Whole-project loops that reuse one `FactStore` must delete `file.content` after
+that file's consumers finish (in a `finally` so abort/error exits release it).
+Keep derived file facts and session facts: later cross-file consumers may still
+need those, but no scan may retain every processed file's full source string.
+The folded project-diagnostics scanner publishes graph-facing structural facts
+through `clients/review-graph/shared-extraction-ir.ts` only after a file fully
+completes. Entries are compact extracted values (never content or WASM trees),
+content-hash checked by every graph consumer, and extraction failures are
+incomplete/rejected; cold graph callers remain independent and parse normally.
 
 ## MCP mirror (second host adapter — `mcp/` + `clients/lens-engine.ts`)
 
@@ -63,8 +90,14 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   `npm install --omit=dev` does **not** omit `optionalDependencies` (only
   `--omit=optional` does, which pi doesn't pass), so even an "optional" SDK would
   weigh every pi-lens install. ~200 LOC beats a dep for a tools-only server.
-- **16 tools:** `pilens_analyze` (per-edit; `mode: warm|fresh`), `pilens_diagnostics`,
-  `pilens_project_scan`, `pilens_latency`, `pilens_health`, `pilens_rebuild`,
+- **16 tools in a source checkout (15 in an installed package):** `pilens_analyze`
+  (per-edit; `mode: warm|fresh`), `pilens_diagnostics`,
+  `pilens_project_scan`, `pilens_latency`, `pilens_health`, `pilens_rebuild`
+  (source checkouts only: `clients/mcp/review.ts`'s shared
+  `canRebuildPiLens` requires `tsconfig.dist.json` and rejects `node_modules`;
+  the server omits the tool when unsafe and `runRebuild` repeats the preflight
+  before resolving a package manager or spawning, because published packages
+  omit the tsconfig while `build:dist` destructively deletes `dist/` first),
   `pilens_session_start` / `pilens_turn_end` (drive the REAL lifecycle handlers —
   not re-implementations — via `clients/mcp/session.ts`), `pilens_ast_grep_search`
   / `pilens_ast_grep_replace`, `pilens_lsp_navigation` / `pilens_lsp_diagnostics`,
@@ -74,8 +107,15 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   phase 1 gave the word index a load→rebuild-if-stale→persist lifecycle in ALL
   startup modes — quick-mode's cold-start warmup pass now also refreshes it, not
   just the full-mode session task — and a cold query (no index yet) triggers one
-  bounded background build per cwd instead of blocking, returning `available: false`
-  - an actionable retry hint. Hits carry `startLine`/`endLine` (best-matching line;
+  bounded background build per cwd instead of blocking. Its `available: false`
+  result distinguishes `building`, a safety `refused` outcome, and
+  `last-build-failed`; the per-cwd guard remembers the last outcome and
+  `clients/word-index-logger.ts` persists cold-build/debounced-persist failures
+  through `createNdjsonLogger` instead of swallowing them. Serialized indexes
+  also carry `indexedFileCount`/`truncated` (missing fields on legacy snapshots
+  mean not truncated); both symbol-search surfaces return `coverage` and warn
+  when the file cap makes results partial. Hits carry
+  `startLine`/`endLine` (best-matching line;
   `offset=startLine, limit=endLine-startLine+1`) instead of a raw `lines[]` array or
   a per-hit `read` block — #517 conformity, same as module_report below), `pilens_module_report` (navigable outline + signatures
   the outline is module-level declarations + class members only — function-locals
@@ -129,8 +169,13 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   report as line-oriented TEXT (one line per symbol/callback) instead of
   JSON — same data, roughly a quarter of the token cost, opt-in (default
   stays JSON). Reports also carry section-level `provenance`
-  (`syntax`, `cached-review-graph`, `heuristic-tree-sitter`, `none`) so agents
-  can tell facts from cache/heuristic sections without per-flag JSON bloat. Pass
+  (`syntax`, `cached-review-graph`, `heuristic-tree-sitter`, `none`, plus
+  `unavailable:file-cap` for graph-backed sections when the capped source walk
+  disabled the graph) so agents can tell facts from cache/heuristic sections
+  without per-flag JSON bloat. A capped `module_report` also uses
+  `semantic.source: "unavailable:file-cap"` and warns with the cap plus both
+  configuration knobs; `project_report` says “more than N files (cap N)” because
+  the walk stops at cap+1 and never knows the exact project count (#921). Pass
   `blastRadius: true` for the cross-file **blast radius** (#304):
   transitive dependents aggregated to ranked file `read` args — read-only over
   the *cached* graph (omitted when cold), the single successor to the removed
@@ -194,19 +239,53 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   within any per-call budget** — surfaced honestly via the `lsp` signal, never a
   silent "clean" 0. warm + an indexed server is the LSP-complete path.
 - **LSP reset teardown is concurrent but fully awaited (#851).**
-  `LSPService.shutdown()` starts every retiring client shutdown before awaiting
-  `Promise.allSettled`, so the process-kill grace tail is bounded by the slowest
-  client while per-client failures remain best-effort. The #850/#852 generation
-  handoff still waits for that service teardown before replacement spawn.
+	`LSPService.shutdown()` starts every retiring client shutdown before awaiting
+	`Promise.allSettled`, so the process-kill grace tail is bounded by the slowest
+	client while per-client failures remain best-effort. The #850/#852 generation
+	handoff still waits for that service teardown before replacement spawn.
+  Its existing `lsp_service_reset` latency phase is emitted after teardown and
+  reports the real end-to-end reset duration (plus reason/alive-client metadata),
+  not a zero-duration initiation marker (#948).
   Client shutdown's fire-and-forget instance-registry removal is serialized at
   its read-modify-write seam so concurrent removals cannot lose siblings;
-  process-tree kills remain concurrent.
+	process-tree kills remain concurrent.
+- **Session-start timing is end-to-end attributable (#948).** `index.ts` imports
+  `clients/startup-marker.ts` first, then logs `host_boot`, `extension_eval`, and
+  the continuity `extension_loaded` record. Primary session starts pass the host
+  hook/bootstrap timestamps into `handleSessionStart`, which records pre-handler,
+  runtime-reset, cleanup, sequence/snapshot (with bytes/freshness/seq), total, and
+  delayed warmup child phases in `latency.log`; concurrent secondaries emit only
+  `concurrent_session_bind`. Keep logging fire-and-forget and preserve contiguous
+  top-level timing so quick-start child durations remain within ~10 ms of total.
+- **Incremental review-graph snapshots are immutable by replacement (#939).**
+  `updateGraphFiles` performs all node/edge edits on a clone, rebuilds derived
+  indexes once at the end, then stores that finished graph directly in
+  `_workspaceGraphCache`; do not mutate a cached/returned graph outside the
+  builder. Graph edges are immutable values (updates replace/filter entries),
+  which makes an array-only edge clone safe. Debounced persistence retains the
+  finished graph/maps and materializes serialization arrays only at flush time,
+  so callers must likewise replace rather than mutate those snapshots.
 - **Auxiliary LSP liveness is a read-only dispatch seam (#868).**
   `clients/lsp/index.ts` exposes `isAuxiliaryLspAlive(serverId, filePath)` for
   Gate-B fallback decisions. It resolves the matching root and inspects only
   the existing client map; it must never spawn or warm a client. Dispatch-side
   code imports this seam from `lsp/index.ts`, while `dispatch/auxiliary-lsp.ts`
   remains free of the reverse import to avoid the LSP/auxiliary cycle.
+- **Document-symbol enrichment is warm-and-open only (#158).**
+  `clients/lsp-document-symbols.ts` requests `textDocument/documentSymbol`
+  through `getWarmClientForFile` only when the exact document is already open
+  and the capability is advertised; it never spawns or opens. Read expansion
+  gives that request 150 ms and uses it only for name/kind/ancestry â€” the
+  tree-sitter range remains authoritative, with silent fallback on every miss.
+  The review-graph builder also uses this seam as a strict zero-tree-sitter-
+  symbol fallback (#307), never from `module_report`: LSP nodes persist with
+  `provenance:"lsp"`, and hierarchical children become symbol containment
+  edges. Every attempted fallback is recorded in `review-graph.log`.
+- **LSP circuit-breaker health includes absent clients (#927).**
+  `LSPService.getBrokenStatus()` is a read-only projection of temporary
+  cooldowns and session-permanent disablement; `pilens_health` renders those
+  server/root pairs even though `getStatus()` correctly contains live clients
+  only. Keep health/status calls spawn-free.
 - **Warm-build staleness guard (#535).** The warm server lives for weeks, so it
   can silently keep serving OLD code after a `npm run build:dist`/merge changes
   `dist/mcp/server.js` on disk — dogfooding caught this live (a post-#517
@@ -271,6 +350,26 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
 - **The bin target is `dist/`.** After changing MCP/engine/runner code, run
   `npm run build:dist` so the user-scoped server (`dist/mcp/server.js`) picks it up
   on the next Claude session. (`bin`: `pi-lens-mcp`, `pi-lens-analyze`.)
+- **Review-graph persist caps are partial, never absent or silently complete
+  (#936).** `GRAPH_PERSIST_MAX_ELEMENTS` counts nodes + edges (default 500,000).
+  Above it, `builder.ts` keeps whole-file node groups ranked through the shared
+  reverse-dependency-centrality seam, then induced edges up to the cap. The gzip
+  snapshot carries exact total/persisted node+edge counts; read-only consumers
+  may load it and must surface `persistCoverage.partial`, while the incremental
+  build tier rejects it as a complete base. Keep this on the existing worker,
+  generation-staged promotion, and sync-flush path.
+- **Review-graph snapshot persistence is worker-offloaded (#939).** The
+  canonical cache is `review-graph.json.gz` (legacy uncompressed
+  `review-graph.json` is load-only fallback for one release). Debounced writes
+  use one lazy unref'd worker that stringifies and streams gzip into an atomic
+  generation-specific stage; only the main thread promotes a completion whose
+  generation is still current. `flushReviewGraphPersist` remains synchronous
+  for the CLI/exit hook and invalidates any in-flight generation before its
+  own gzip write, so a late worker can never overwrite the forced snapshot.
+- **Out-of-band graph builds** use `npx pi-lens build-graph [--cwd <dir>]`.
+  The CLI reuses `buildOrUpdateGraph` plus the builder's queued atomic persist
+  payload, force-flushes it before exit, and treats every build/persist skip or
+  failure as non-zero; keep it aligned with session graph config and persistence.
 - **Dogfooding found two dormant pi features** (fixed/flagged, not the MCP's fault):
   the cold-LSP-returns-0 honesty bug (`runners/lsp.ts` — `touched === undefined`
   now → `skipped`, not a false `succeeded`), and **`runtime.errorDebtBaseline` is
@@ -281,6 +380,12 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   the spawn smokes don't exercise them.
 
 ## Package scope
+
+LSP server definitions resolve in `clients/lsp/config.ts` as project
+`.pi-lens/lsp.json` (including its legacy project filenames) over machine-global
+`getGlobalPiLensDir()/lsp.json` over built-in defaults. `servers` and
+`serverOverrides` merge by ID; project `disabledServers` and `warmFiles` replace
+the global arrays when present.
 
 All pi packages are `@earendil-works/*` (migrated from `@mariozechner/*` in 0.74.0). Peer dep: `@earendil-works/pi-coding-agent`. Runtime dep: `@earendil-works/pi-tui`.
 
@@ -351,7 +456,7 @@ const cacheFile = path.join(getProjectDataDir(cwd), "cache", "my-file.json");
 
 **Project-scoped** (must use `getProjectDataDir`): caches, snapshots, indexes, worklogs, change-log, code-quality-warnings, actionable-warning-state, review-graph, install-choices.
 
-**Machine-global** (all routed through `getGlobalPiLensDir()`, `clients/file-utils.ts` — never hand-rolled `os.homedir()` + `.pi-lens`): latency.log, cascade.log, tree-sitter.log, sessionstart.log, read-guard.log, actionable-warnings.log, dead-code.log, diagnostic-logger's `logs/`, tools/, bin/, intelephense/, probe-cache.json, and the #449 instance registry (`instances.json`). These are shared across all projects. `getGlobalPiLensDir()` respects `PI_LENS_HOME` (#525) — the machine-scoped sibling of `PILENS_DATA_DIR` above; setting it relocates the entire `~/.pi-lens` root for every one of those writers in one shot, since they all route through this single function.
+**Machine-global** (all routed through `getGlobalPiLensDir()`, `clients/file-utils.ts` — never hand-rolled `os.homedir()` + `.pi-lens`): latency.log, cascade.log, review-graph.log, tree-sitter.log, sessionstart.log, read-guard.log, actionable-warnings.log, dead-code.log, diagnostic-logger's `logs/`, tools/, bin/, intelephense/, probe-cache.json, and the #449 instance registry (`instances.json`). These are shared across all projects. `getGlobalPiLensDir()` respects `PI_LENS_HOME` (#525) — the machine-scoped sibling of `PILENS_DATA_DIR` above; setting it relocates the entire `~/.pi-lens` root for every one of those writers in one shot, since they all route through this single function.
 
 Never write `path.join(cwd, ".pi-lens", ...)` for a project cache — it breaks when `PILENS_DATA_DIR` is set. Likewise never write `path.join(os.homedir(), ".pi-lens", ...)` directly for machine-global state — always call `getGlobalPiLensDir()`, or `PI_LENS_HOME` silently stops covering that writer.
 
@@ -359,11 +464,14 @@ Never write `path.join(cwd, ".pi-lens", ...)` for a project cache — it breaks 
 
 ## Debug logs
 
-**All NDJSON debug loggers write through one buffered async writer** — `clients/ndjson-logger.ts` `createNdjsonLogger` (#454): `log()` is sync-call/async-write (serialized drain, no `appendFileSync` on the per-edit hot path), rotation + truncate are in-band queue ops, and a single shared `process.on("exit")` handler sync-flushes every logger. **A test (or any in-process reader) that reads a log file right after logging MUST `await` that module's exported `flush<X>Log()` first** — the line may still be in the write queue. New logger = one `createNdjsonLogger` call in a thin module keeping its own schema/API; don't hand-roll append/rotate again.
+**All debug loggers write through one buffered async writer** — `clients/ndjson-logger.ts` `createNdjsonLogger` (#454/#935): `log()` is sync-call/async-write (serialized drain, no `appendFileSync` on the per-edit hot path); contiguous queued lines coalesce into one O_APPEND write up to a truncate boundary, while peek-then-remove plus identity-checked completion preserves exit-flush safety. Rotation + truncate are in-band queue ops, and a single shared `process.on("exit")` handler sync-flushes every logger. `sessionstart.log`'s ordinary writers all route through the single module-level instance in `clients/sessionstart-logger.ts`; the sole exception is `clients/lsp/launch.ts`'s intentionally synchronous crash-adjacent final diagnostic. Latency/cascade/tree-sitter/bus-event loggers rotate in process at `getMaxLogSizeMB()` (PI_LENS_MAX_LOG_SIZE_MB, default 10 MB) — the SAME source cleanup and `/lens-perf`'s tail bound read, so raising the env var moves all three together. Exit-flush contract: flushSync drains the whole queue INCLUDING an in-flight async batch — duplicate lines at exit are accepted over dropped lines (#935 review). One deliberate durability trade: `dbg()` lines are buffered, so a hard kill (SIGKILL/native crash) can lose the tail that the old per-call appendFileSync would have kept; launch.ts's sync exception covers the spawn-crash case. **A test (or any in-process reader) that reads a log file right after logging MUST `await` that module's exported `flush<X>Log()` first** — the line may still be in the write queue. New logger = one `createNdjsonLogger` call in a thin module keeping its own schema/API; don't hand-roll append/rotate again.
+
+**Secret redaction is part of the write boundary (#327).** `log()` redacts the serialized line, including string values and property names; `append()` redacts raw lines before enqueue; and the synchronous LSP launch writer calls the same pure helper. Keep token detection deterministic and linear because hostile logger text is untrusted. The external PSES process owns its nested `pses.log`, so this JavaScript boundary cannot filter it.
 
 - `~/.pi-lens/sessionstart.log` — timestamped lines for every session_start event and tool lifecycle; includes project snapshot probe/miss/load summaries, seeded project/file sequence counts, scan-context/profile cache source, and deferred task queued/run timings
 - `~/.pi-lens/cascade.log` — NDJSON cascade graph/neighbor diagnostics, including reverse-dependency cache refresh/load/merge events (`phase: "reverse_deps_cache"`)
-- `~/.pi-lens/latency.log` — NDJSON per-runner timings
+- `~/.pi-lens/review-graph.log` — NDJSON review-graph build and persistence outcomes
+- `~/.pi-lens/latency.log` — NDJSON per-runner timings. Every new entry includes a logger-owned writer `pid`; `/lens-perf` (#767, `clients/performance-report.ts`) uses `pid` plus `RuntimeCoordinator.sessionStartedAt` to isolate the current process session from the machine-global log, and separately shows independent top-five p50/p99 rankings for the machine-wide active window's positive-duration `type:"phase"` records (`toolName/phase` when a tool name exists, linear-interpolated percentiles). `handleSessionStart` logs `session_start_total` on quick and full paths plus `session_start_scan_context_compute` around the actual sync/background scan-context walk, so the startup regression that motivated #767 is visible. The command flushes this process's buffered writer first, streams at most the newest `PI_LENS_MAX_LOG_SIZE_MB` (default 10MB, the same threshold that rotates the log), chunk-yields every 500 parsed lines, keeps at most the newest 20,000 phase samples, discards a partial first line after a tail seek, reports both caps, and skips malformed NDJSON lines rather than turning one partial append into an empty report.
 - `~/.pi-lens/tree-sitter.log` — NDJSON tree-sitter runner activity plus aggregate `cache_stats` entries for project-diagnostics and full review-graph phases; scope-isolated measurements include lookup/miss reasons, capacity misses, evictions, parser invocations/time, and resident source bytes/lines
 - `~/.pi-lens/read-guard.log` — NDJSON for every read-guard verdict, autopatch, and preflight block (rotates at 1 MiB); key events: `edit_blocked`, `edit_warned`, `edit_preflight_blocked`, `oldtext_not_found`, `oldtext_trailing_ws_autopatched`, `oldtext_indent_autopatched`, `oldtext_escape_autopatched`
 - `~/.pi-lens/actionable-warnings.log` — NDJSON for the actionable-warnings advisory pipeline (rotates at 1 MiB); events: `report_started`, `lsp_file_checked`, `lsp_file_skipped`, `report_complete`, `advisory_injected`, `advisory_skipped`
@@ -558,6 +666,19 @@ The GitHub release body is derived from the curated `CHANGELOG.md` section for t
 - **Contributor table generation:** `.all-contributorsrc` must not define `wrapperTemplate`. `all-contributors-cli` hardcodes invalid `</tr><br />` row separators whenever a custom wrapper is present; omit that property and let the CLI's default wrapper generate the table. After generation, verify the contributor block contains no `</tr><br />` separators.
 
 **Rule catalogs.** `docs/ast-grep_rules_catalog.md` + `docs/tree-sitter_rules_catalog.md` list every bundled rule **per language** and are **generated** — edit the rule files, not the docs, then `npm run docs:rule-catalogs` (`scripts/gen-rule-catalogs.mjs`). A `--check` run (in `tests/scripts/rule-catalogs.test.ts`) fails if they drift. ast-grep covers pi-lens-authored (`rules/ast-grep-rules/rules/`) + vendored CodeRabbit (`coderabbit/rules/`); tree-sitter covers `rules/tree-sitter-queries/<language>/`.
+
+**Tree-sitter post-filters.** Query rules may use the TypeScript-side
+`applyPostFilter` seam for bounded same-file AST checks that predicates cannot
+express; batched and single-rule execution both pass the parsed root. Every
+YAML `post_filter` must have a switch implementation — the invariant test in
+`tests/clients/tree-sitter-879-post-filters.test.ts` enforces this against the
+real rule files and real switch source (do not hand-maintain counts here).
+Unknown names fail
+closed: every raw match is dropped and one error is logged per process. A new
+filter therefore ships with a bounded traversal, a `try/catch` that returns
+`true` (keep the diagnostic if filtering fails), and real hit+miss tests; if
+that cannot be done honestly with captures plus same-file AST context, remove
+or make the rule advisory instead of adding a placeholder name.
 
 ## Build & packaging: precompiled dist + resource resolution (hard-won — #182)
 
@@ -884,3 +1005,9 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
 - **Project-wide extension enumeration derives from `KIND_EXTENSIONS`** (#894). `ALL_SCANNABLE_EXTENSIONS`, `WARMUP_SOURCE_EXTS`, and `SUPPORTED_FILE_KINDS` must never regain hand-maintained per-language lists; adding a file kind in `clients/file-kinds.ts` automatically makes source scans and language-profile warmup see it. Preserve consumer-specific narrowing with an explicit `extensions` override at that call site, not by narrowing the shared defaults.
 - Numeric inputs from env vars or JSON config that flow into `Math.max` / `Math.min` must be coerced through a `Number.isFinite(n) && n > 0` guard. `Number(undefined) === NaN`, and a single NaN argument makes `Math.max` return NaN, which `setTimeout` silently treats as 0.
 - **Cross-process LSP pressure is one session-boundary snapshot** (`clients/lsp-budget.ts`, #821): count pressure and the optional complete/fresh aggregate-RSS ceiling (`PI_LENS_LSP_BUDGET_RSS_MB`) feed one cached decision used for auxiliary shedding, the current session's short idle reset, and pull-only diagnostics. Missing/stale RSS samples fail open to count-only; capability decisions reuse `classifyServerWaitTier` (`"pull-capable"`), and the `PI_LENS_CROSS_PROCESS_BUDGET=0` kill switch disables every policy.
+- **Detached LSP footer repaints use event-captured UI methods** (#338/#798).
+  `lens_diagnostics mode=full` passes an `onServerReady` callback into the
+  workspace sweep so each successful cold group warm-up refreshes the footer.
+  Capture `ctx.ui.setStatus` and `ctx.ui.theme` while the host event is active;
+  async sweep/timer callbacks must never dereference `ctx.ui`, which can become
+  stale after session replacement.

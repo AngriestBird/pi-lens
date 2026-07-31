@@ -122,3 +122,7 @@ AGENTS.md
 autoresearch.jsonl
 coverage/
 PR_issues_Audit.md
+
+# plegma worker handoff artifacts (never commit)
+.plegma-envelope.json
+.plegma/

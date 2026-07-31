@@ -6,6 +6,7 @@ pi-lens registers the following slash commands with the pi host:
 - `/lens-context-toggle` — toggle automatic context injection on/off for the session (tools/LSP/read-guard/formatting stay active)
 - `/lens-widget-toggle` — show/hide the pi-lens diagnostics widget below the editor
 - `/lens-health` — runtime health, latency, and diagnostic telemetry
+- `/lens-perf` — independent top-five p50 and p99 rankings for the current process session and machine-wide active latency-log window
 - `/lens-allow-edit <path>` — override the read-before-edit guard for a single edit
 - `/lens-tools` — tool installation status: globally installed, auto-installed, or npx fallback
 - `/lens-tdi` — Technical Debt Index (TDI) and project health trend
@@ -14,3 +15,16 @@ pi-lens registers the following slash commands with the pi host:
   the project data dir, path shown on completion)
 
 For runtime startup flags (`--no-lens`, `--no-lsp`, etc.) see [`usage.md`](usage.md).
+
+## Standalone CLI
+
+Build and persist the review graph out of band for CI or cron:
+
+```bash
+npx pi-lens build-graph [--cwd <dir>]
+```
+
+The command uses the same graph builder, project configuration, file cap, and
+persist cap as an interactive session. It prints file/node/edge/element count,
+snapshot JSON bytes, and duration on success; an unsafe root, build skip/error,
+or failed/skipped persistence exits non-zero with the reason on stderr.

@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Diagnostic } from "./dispatch/types.js";
 import { getProjectDataDir } from "./file-utils.js";
+import { redactSecrets } from "./redact/secrets.js";
 
 // --- Types ---
 
@@ -67,7 +68,11 @@ export function appendToWorklog(
 					return JSON.stringify(entry);
 				})
 				.join("\n") + "\n";
-		fs.appendFileSync(worklogPath, lines, "utf8");
+		// Diagnostic messages can quote offending source lines (e.g. a
+		// secret-scanner finding), so scrub credential-shaped text before the
+		// worklog reaches disk — same boundary contract as the NDJSON loggers
+		// (#327). Replacements are JSON-string-safe, so each line stays parseable.
+		fs.appendFileSync(worklogPath, redactSecrets(lines), "utf8");
 	} catch {
 		// Non-fatal — worklog write failure should never surface to the agent
 	}
@@ -82,7 +87,13 @@ export function readWorklog(cwd: string): WorklogEntry[] {
 		return raw
 			.split(/\r?\n/)
 			.filter(Boolean)
-			.map((line) => JSON.parse(line) as WorklogEntry);
+			.flatMap((line) => {
+				try {
+					return [JSON.parse(line) as WorklogEntry];
+				} catch {
+					return [];
+				}
+			});
 	} catch {
 		return [];
 	}
