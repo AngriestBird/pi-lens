@@ -77,6 +77,38 @@ const grammarHeavyInclude = [
 	"tests/clients/project-diagnostics/scanner.test.ts",
 ];
 
+// Tier 2 fix (#902): event-loop *occupancy* guards (measureMaxSyncBlockMs —
+// see tests/support/perf-harness.ts) measure the longest synchronous stretch
+// the code under test holds the loop, via an independent setImmediate
+// sampler. That sampler is a real event-loop citizen: it only gets scheduled
+// when the OS actually gives this process a turn. Under the "default"
+// project's `maxWorkers: "50%"` — dozens of sibling forks doing grammar
+// compiles, `ast-grep`/biome child-process spawns, and LSP server smoke
+// tests all competing for cores — the sampler itself can be descheduled for
+// a while, which the guard cannot tell apart from the code under test
+// actually blocking. That's a scheduling-jitter false positive, not the
+// regression the guard exists to catch (confirmed 2026-07-31: both files
+// pass cleanly and repeatedly run solo; they only fail mid-"default"-project
+// full-suite runs, alongside grammar/CLI-heavy sibling files). Widening the
+// ms threshold can't absorb this without also hiding the real ~800ms+
+// non-yielding-walk regression the tests guard against (#188/#191/#192) —
+// so, same fix shape as the grammar-heavy project above: reduce how much
+// sibling-fork noise coincides with the *measurement window* itself, not
+// how tolerant the measurement is. A capped, phased-last project means by
+// the time these run, the default project's fork storm (and grammar-heavy's
+// smaller one) has already fully drained, so the sampler only ever
+// contends with (at most) one other file in this group.
+const timingSensitiveInclude = [
+	"tests/clients/source-walk-occupancy.test.ts",
+	"tests/clients/source-filter-async.test.ts",
+	// Same measureMaxSyncBlockMs sampler + same contention-starvation flake
+	// (observed 2026-07-31: cold buildOrUpdateGraph blew the 300ms budget at
+	// ~82s under a full-suite fork storm, exhausting its retry:2). Its
+	// existing retry isn't enough on its own; phasing it here removes the
+	// sibling-fork noise the sampler was actually measuring.
+	"tests/clients/cascade-graph-occupancy.test.ts",
+];
+
 export default defineConfig({
 	test: {
 		exclude: sharedExclude,
@@ -88,7 +120,11 @@ export default defineConfig({
 			{
 				test: {
 					name: "default",
-					exclude: [...sharedExclude, ...grammarHeavyInclude],
+					exclude: [
+						...sharedExclude,
+						...grammarHeavyInclude,
+						...timingSensitiveInclude,
+					],
 					globalSetup: sharedGlobalSetup,
 					setupFiles: sharedSetupFiles,
 					maxWorkers: sharedMaxWorkers,
@@ -132,6 +168,30 @@ export default defineConfig({
 					// bump lives on the top-level `test` block below instead —
 					// applies to both projects, which only makes the default
 					// project's teardown MORE forgiving, never less.
+					hookTimeout: 60_000,
+				},
+			},
+			{
+				test: {
+					name: "timing-sensitive",
+					include: timingSensitiveInclude,
+					exclude: sharedExclude,
+					globalSetup: sharedGlobalSetup,
+					setupFiles: sharedSetupFiles,
+					execArgv: sharedExecArgv,
+					// Small cap (not full serialization — these two files can still
+					// share the phase) so the event-loop-occupancy sampler in each
+					// (measureMaxSyncBlockMs, see perf-harness.ts) isn't competing
+					// with a large fork pool for CPU turns while it's mid-measurement.
+					maxWorkers: 2,
+					// Its own phase, after both "default" and "grammar-heavy" drain
+					// (required anyway once maxWorkers differs from "default" — see
+					// the grammar-heavy project above). By running last and alone,
+					// these occupancy guards get a (near-)quiet host for their
+					// measurement window instead of racing the full-suite fork storm
+					// that was intermittently starving their sampler and tripping the
+					// budget on ambient scheduling delay, not a real regression.
+					sequence: { groupOrder: 2 },
 					hookTimeout: 60_000,
 				},
 			},
