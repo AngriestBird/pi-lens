@@ -40,6 +40,15 @@ export interface FunctionSummary {
 	isPassThroughWrapper: boolean;
 	passThroughTarget?: string;
 	isBoundaryWrapper: boolean;
+	/**
+	 * The function/method declaration has an explicit `: Promise<...>` return
+	 * type annotation. An `async` function with no `await` but a declared
+	 * Promise return type is usually there to satisfy an interface/type
+	 * contract (e.g. implementing `ApiKeyAuth.resolve(): Promise<Result>`
+	 * with a synchronous body) — `async` can't be dropped without breaking
+	 * the signature, so it isn't noise (#970).
+	 */
+	hasExplicitPromiseReturnType?: boolean;
 	/** McCabe cyclomatic complexity (branches + 1) */
 	cyclomaticComplexity: number;
 	/** Maximum control-flow nesting depth within the function */
@@ -298,6 +307,19 @@ function collectReceiverTypes(
 	return types;
 }
 
+/**
+ * Does this function/method declaration have an explicit `: Promise<...>`
+ * return type? The `type_annotation` for a return type is a DIRECT child of
+ * the function node itself (after `formal_parameters`, before the body) —
+ * distinct from a parameter's own `type_annotation`, which is nested inside
+ * `formal_parameters` and therefore invisible to `firstChildOfType` here.
+ */
+function hasExplicitPromiseReturnType(node: TsNode): boolean {
+	const returnType = firstChildOfType(node, "type_annotation");
+	if (!returnType) return false;
+	return /:\s*Promise\b/.test(returnType.text);
+}
+
 function hasAwaitInNode(node: TsNode): boolean {
 	let found = false;
 	walk(node, (n) => {
@@ -373,6 +395,7 @@ export const functionFactProvider: FactProvider = {
 						isPassThroughWrapper: passThrough.pass,
 						passThroughTarget: passThrough.target,
 						isBoundaryWrapper,
+						hasExplicitPromiseReturnType: hasExplicitPromiseReturnType(node),
 						cyclomaticComplexity: calcCyclomaticComplexity(body),
 						maxNestingDepth: calcMaxNestingDepth(body),
 						outgoingCalls: collectOutgoingCalls(body),
