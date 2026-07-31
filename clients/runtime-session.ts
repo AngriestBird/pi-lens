@@ -473,13 +473,20 @@ async function collectTodoBaselineItems(
 // rebuild and persist. Called from the full-mode background task AND the
 // quick-mode cold-start warmup pass (below) so every startup mode ends up
 // with a queryable index once per session, off the hot path.
+interface WordIndexWarmupResult {
+	mode: "full" | "incremental";
+	refreshed: number;
+	dropped: number;
+	reused: number;
+}
+
 async function buildOrRefreshWordIndex(args: {
 	runtime: RuntimeCoordinator;
 	sessionGeneration: number;
 	analysisRoot: string;
 	snapshotRoot: string;
 	dbg: (msg: string) => void;
-}): Promise<void> {
+}): Promise<WordIndexWarmupResult | undefined> {
 	const { runtime, sessionGeneration, analysisRoot, snapshotRoot, dbg } = args;
 	if (!runtime.isCurrentSession(sessionGeneration)) return;
 	const startMs = Date.now();
@@ -487,15 +494,40 @@ async function buildOrRefreshWordIndex(args: {
 	const latestSeq = readLatestProjectSequence(snapshotRoot);
 	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
 	const snapshot = loadProjectSnapshot(snapshotRoot);
-	if (isProjectSnapshotFresh(snapshot, effectiveSeq) && snapshot.wordIndex) {
-		const { deserializeWordIndex } = await import("./word-index.js");
+	if (snapshot?.wordIndex) {
+		const { deserializeWordIndex, refreshWordIndexIncrementally } = await import(
+			"./word-index.js"
+		);
 		const index = deserializeWordIndex(snapshot.wordIndex);
 		if (index) {
-			runtime.wordIndex = index;
-			dbg(
-				`session_start word-index: reused fresh snapshot (seq=${effectiveSeq}, ${index.docCount} files, ${Date.now() - startMs}ms)`,
-			);
-			return;
+			try {
+				const result = await refreshWordIndexIncrementally(
+					index,
+					analysisRoot,
+					() => runtime.isCurrentSession(sessionGeneration),
+				);
+				if (!runtime.isCurrentSession(sessionGeneration)) return;
+				runtime.wordIndex = index;
+				// A stale project seq must be advanced even when mtimes prove every
+				// indexed document reusable. Fresh snapshots with no changes avoid
+				// an unnecessary rewrite of the large shared snapshot.
+				if (
+					!isProjectSnapshotFresh(snapshot, effectiveSeq) ||
+					result.refreshed > 0 ||
+					result.dropped > 0 ||
+					snapshot.wordIndex.truncated !== index.truncated
+				) {
+					saveRuntimeProjectSnapshot({ cwd: snapshotRoot, runtime, dbg });
+				}
+				dbg(
+					`session_start word-index: incremental (seq=${effectiveSeq}, refreshed=${result.refreshed}, dropped=${result.dropped}, reused=${result.reused}, ${Date.now() - startMs}ms)`,
+				);
+				return result;
+			} catch (err) {
+				dbg(
+					`session_start word-index: incremental refresh failed; falling back to full rebuild (${err})`,
+				);
+			}
 		}
 	}
 
@@ -516,6 +548,12 @@ async function buildOrRefreshWordIndex(args: {
 		`session_start word-index: rebuilt (absent/stale, seq=${effectiveSeq}) ` +
 			`${runtime.wordIndex.docCount} files, ${runtime.wordIndex.postings.size} tokens (${Date.now() - startMs}ms)`,
 	);
+	return {
+		mode: "full",
+		refreshed: runtime.wordIndex.docCount,
+		dropped: 0,
+		reused: 0,
+	};
 }
 
 // Fire off heavy scans as background tasks — don't block session start.
@@ -1316,7 +1354,7 @@ export async function handleSessionStart(
 					// runTask above; this is the quick-mode equivalent, once per
 					// process, off the hot path.
 					const wordIndexStartedAt = Date.now();
-					await buildOrRefreshWordIndex({
+					const wordIndexResult = await buildOrRefreshWordIndex({
 						runtime: deps.runtime,
 						sessionGeneration: deps.runtime.sessionGeneration,
 						analysisRoot: languageRoot,
@@ -1332,6 +1370,7 @@ export async function handleSessionStart(
 						filePath: warmupCwd,
 						startedAt: new Date(wordIndexStartedAt).toISOString(),
 						durationMs: Date.now() - wordIndexStartedAt,
+						metadata: wordIndexResult ? { ...wordIndexResult } : undefined,
 					});
 					// #947: fold the dominant-language LSP pre-warm into this
 					// warmup pass. The first-session-of-process heuristic forces
