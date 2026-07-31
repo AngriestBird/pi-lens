@@ -136,6 +136,49 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		expect((loaded?.nodes.size ?? 0) + (loaded?.edges.length ?? 0)).toBeLessThanOrEqual(4);
 	});
 
+	it("a partial cached graph never seeds a build (no silent-partial, no laundering; #936 review)", async () => {
+		const env = makeEnv();
+		createTempFile(env.tmpDir, "hot.ts", "export function hot() { return 1 }\n");
+		createTempFile(
+			env.tmpDir,
+			"user.ts",
+			'import { hot } from "./hot.js";\nexport const used = hot();\n',
+		);
+		const files = [
+			path.join(env.tmpDir, "hot.ts"),
+			path.join(env.tmpDir, "user.ts"),
+		];
+		process.env.PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS = "4";
+		const built = await buildOrUpdateGraph(env.tmpDir, files, new FactStore());
+		flushReviewGraphPersistsForTests();
+		await waitForReviewGraphPersistsForTests();
+
+		// A read consumer (symbol search / project report) warms the SHARED
+		// in-memory cache with the partial snapshot via getCachedReviewGraph.
+		clearReviewGraphWorkspaceCache(env.tmpDir);
+		const partial = getCachedReviewGraph(env.tmpDir);
+		expect(partial?.persistCoverage?.partial).toBe(true); // precondition
+
+		// A build now shares that poisoned cache. It MUST NOT reuse or extend the
+		// partial graph: the returned session graph must be the COMPLETE freshly
+		// built graph (full node/edge count, no coverage marker), never the
+		// capped-away partial served as authoritative.
+		const rebuilt = await buildOrUpdateGraph(env.tmpDir, files, new FactStore());
+		expect(rebuilt.persistCoverage).toBeUndefined();
+		expect(rebuilt.nodes.size).toBe(built.nodes.size);
+		expect(rebuilt.edges.length).toBe(built.edges.length);
+
+		// And the on-disk snapshot stays honestly partial — an incremental
+		// extension of the partial base would have re-persisted it as
+		// partial:false, laundering it into a "complete" snapshot forever.
+		flushReviewGraphPersistsForTests();
+		await waitForReviewGraphPersistsForTests();
+		const raw = JSON.parse(
+			gunzipSync(fs.readFileSync(cachePathFor(env.tmpDir))).toString("utf-8"),
+		);
+		expect(raw.coverage?.partial).toBe(true);
+	});
+
 	it("size cap: writes normally when under the ceiling", async () => {
 		const env = makeEnv();
 		createTempFile(env.tmpDir, "a.ts", "export function foo() {\n  return 1;\n}\n");

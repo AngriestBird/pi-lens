@@ -419,6 +419,10 @@ function cloneGraph(graph: ReviewGraph): ReviewGraph {
 		fileNodes: new Map(),
 		symbolNodesByFile: new Map(),
 		changedSymbolsByFile: new Map(graph.changedSymbolsByFile),
+		// Carry the partial-coverage marker so a clone can never silently pose as
+		// a complete graph (#936 review). The build path additionally refuses a
+		// partial base outright; this keeps any other cloner honest.
+		persistCoverage: graph.persistCoverage,
 	};
 }
 
@@ -3155,7 +3159,14 @@ async function _doBuildGraph(
 	const signature = sourceSignatureFromMap(fileSignatures);
 
 	// Tier 1: in-memory cache (hot path — same process, already built this session)
-	const memCached = _workspaceGraphCache.get(normalizedCwd);
+	let memCached = _workspaceGraphCache.get(normalizedCwd);
+	// A partial graph (hydrated from a capped snapshot for read-only orientation
+	// via getCachedReviewGraph) can share this cache. It MUST NOT seed a build:
+	// serving it silently drops the capped-away nodes/edges, and extending then
+	// re-persisting it would launder partial coverage onto disk as a complete
+	// snapshot (#936 review). Ignore it here — the disk tier rejects a partial
+	// base too, so the build falls through to a full rebuild.
+	if (memCached?.graph.persistCoverage?.partial) memCached = undefined;
 	if (memCached?.signature === signature) {
 		const graph = cloneGraph(memCached.graph);
 		rebuildIndexes(graph);
