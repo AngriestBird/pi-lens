@@ -4,6 +4,7 @@ import {
 	buildWordIndex,
 	centralityFromReverseDeps,
 	deserializeWordIndex,
+	getWordIndexBuildStatus,
 	searchWordIndex,
 	serializeWordIndex,
 	splitIdentifier,
@@ -267,9 +268,36 @@ describe("serializeWordIndex / deserializeWordIndex", () => {
 		expect(handler![1]).toEqual(expect.arrayContaining([0, 1]));
 	});
 
+	it("round-trips indexed-file coverage and truncation (#928)", () => {
+		const cappedFiles = Object.assign([...files], { truncated: true });
+		const serialized = serializeWordIndex(buildWordIndex(cappedFiles));
+		expect(serialized.indexedFileCount).toBe(2);
+		expect(serialized.truncated).toBe(true);
+		expect(deserializeWordIndex(serialized)).toMatchObject({
+			docCount: 2,
+			truncated: true,
+		});
+	});
+
+	it("treats missing legacy coverage fields as not truncated (#928)", () => {
+		const serialized = serializeWordIndex(buildWordIndex(files));
+		delete serialized.indexedFileCount;
+		delete serialized.truncated;
+		expect(deserializeWordIndex(serialized)).toMatchObject({
+			docCount: 2,
+			truncated: false,
+		});
+	});
+
 	it("returns null for malformed serialized input", () => {
 		expect(deserializeWordIndex(null)).toBeNull();
 		expect(deserializeWordIndex({} as never)).toBeNull();
+	});
+
+	it("treats a legacy serializer version as a cache miss (#958)", () => {
+		const serialized = serializeWordIndex(buildWordIndex(files));
+		const legacy = { ...serialized, version: 1 };
+		expect(deserializeWordIndex(legacy as never)).toBeNull();
 	});
 });
 
@@ -321,11 +349,45 @@ describe("triggerBackgroundWordIndexBuild (#348 cold-query stampede guard)", () 
 			expect(messages.some((m) => m.includes("at/above home directory"))).toBe(
 				true,
 			);
+			expect(getWordIndexBuildStatus(env.tmpDir)).toMatchObject({
+				state: "refused",
+				reason: expect.stringContaining("at/above home directory"),
+			});
 			// Give any (wrongly) scheduled build a beat to persist, then confirm
 			// nothing was written.
 			await new Promise((resolve) => setTimeout(resolve, 250));
 			expect(loadProjectSnapshot(env.tmpDir)?.wordIndex).toBeUndefined();
 		} finally {
+			env.cleanup();
+		}
+	}, 10_000);
+
+	it("remembers a failed build outcome after the in-flight attempt ends (#926)", async () => {
+		const env = setupTestEnvironment("pi-lens-wordindex-failed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		try {
+			createTempFile(env.tmpDir, "src/a.ts", "export function helperA() {}");
+			process.env.PILENS_DATA_DIR = createTempFile(
+				env.tmpDir,
+				"not-a-directory",
+				"occupied",
+			);
+			const messages: string[] = [];
+			triggerBackgroundWordIndexBuild(env.tmpDir, (message) =>
+				messages.push(message),
+			);
+
+			await vi.waitFor(() => {
+				expect(getWordIndexBuildStatus(env.tmpDir)?.state).toBe("failed");
+			});
+			expect(getWordIndexBuildStatus(env.tmpDir)).toMatchObject({
+				state: "failed",
+				reason: expect.any(String),
+			});
+			expect(messages.some((message) => message.includes("failed"))).toBe(true);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
 			env.cleanup();
 		}
 	}, 10_000);

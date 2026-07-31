@@ -19,6 +19,7 @@ import path from "node:path";
 import { isTestMode } from "../env-utils.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import { findGlobalBinary } from "../package-manager.js";
+import { redactSecrets } from "../redact/secrets.js";
 
 export interface LSPProcess {
 	process: ChildProcess;
@@ -66,7 +67,9 @@ function logSessionStart(msg: string): void {
 	if (isTestMode()) {
 		return;
 	}
-	const line = `[${new Date().toISOString()}] ${msg}\n`;
+	// Crash-adjacent: keep this write synchronous so a hard launch failure
+	// cannot discard the final diagnostic from an async logger queue.
+	const line = redactSecrets(`[${new Date().toISOString()}] ${msg}\n`);
 	try {
 		fs.mkdirSync(SESSIONSTART_LOG_DIR, { recursive: true });
 		fs.appendFileSync(SESSIONSTART_LOG, line);
@@ -666,11 +669,11 @@ export async function launchLSP(
 			const startupFailureWindowMs = ((): number => {
 				if (options?.startupFailureWindowMs) {
 					return options.startupFailureWindowMs;
-				} else if (isWindows && needsShell) {
-					return WINDOWS_NAV_STARTUP_FAILURE_WINDOW_MS;
-				} else {
-					return DEFAULT_STARTUP_FAILURE_WINDOW_MS;
 				}
+				if (isWindows && needsShell) {
+					return WINDOWS_NAV_STARTUP_FAILURE_WINDOW_MS;
+				}
+				return DEFAULT_STARTUP_FAILURE_WINDOW_MS;
 			})();
 
 			// Give shell-backed Windows launches a slightly longer window because
@@ -767,7 +770,10 @@ export async function stopLSP(handle: LSPProcess): Promise<void> {
 			// tree-kill a PID we no longer own — fall back to handle.process.kill(),
 			// which on Windows signals via the retained process HANDLE (not the raw
 			// PID), so it's a safe no-op on an already-exited child.
-			if (handle.process.exitCode !== null || handle.process.signalCode !== null)
+			if (
+				handle.process.exitCode !== null ||
+				handle.process.signalCode !== null
+			)
 				return false;
 			try {
 				// Absolute path avoids PATH-resolution substitution on Windows.

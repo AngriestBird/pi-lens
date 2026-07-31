@@ -161,10 +161,6 @@ describe("getManagedLogFiles — auto-derivation", () => {
 		expect(managed).not.toContain("cascade.log.2026-03-01");
 	});
 
-	it("always includes the sessionstart.log straggler (not on createNdjsonLogger)", () => {
-		expect(getManagedLogFiles(dir)).toContain("sessionstart.log");
-	});
-
 	it("includes bus-events.log once its logger is constructed — the #551 gap this PR closes", () => {
 		createNdjsonLogger({ filePath: path.join(dir, "bus-events.log") });
 

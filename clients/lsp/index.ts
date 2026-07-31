@@ -12,9 +12,7 @@ import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { isTestMode } from "../env-utils.js";
 import {
-	getGlobalPiLensDir,
 	getProjectIgnoreMatcher,
 	isExcludedDirName,
 } from "../file-utils.js";
@@ -22,6 +20,7 @@ import { recordLsp } from "../widget-state.js";
 import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { logLatency } from "../latency-logger.js";
+import { logSessionStart } from "../sessionstart-logger.js";
 import { shouldPreferPullOnlyDiagnostics } from "../lsp-budget.js";
 import { withDeadline } from "../deadline-utils.js";
 import {
@@ -268,22 +267,6 @@ const EARLY_UNBLOCK_GRACE_MS = Math.max(
 	) || 400,
 );
 const CASCADE_DIAGNOSTICS_TTL_MS = 240_000;
-const SESSIONSTART_LOG_DIR = getGlobalPiLensDir();
-const SESSIONSTART_LOG = path.join(SESSIONSTART_LOG_DIR, "sessionstart.log");
-
-function logSessionStart(msg: string): void {
-	if (isTestMode()) {
-		return;
-	}
-	const line = `[${new Date().toISOString()}] ${msg}\n`;
-	void fs
-		.mkdir(SESSIONSTART_LOG_DIR, { recursive: true })
-		.then(() => fs.appendFile(SESSIONSTART_LOG, line))
-		.catch(() => {
-			// best-effort logging
-		});
-}
-
 export interface SpawnedServer {
 	client: LSPClientInfo;
 	info: LSPServerInfo;
@@ -3400,6 +3383,9 @@ export class LSPService {
 			maxFiles?: number;
 			signal?: AbortSignal;
 			onProgress?: (completed: number, total: number) => void;
+			/** Called after a cold sweep warm-up successfully brings a server group
+			 * online. The caller may use this to refresh host observability UI. */
+			onServerReady?: () => void;
 			/**
 			 * Explicit file list (#461): skip the project walk entirely and route
 			 * exactly these files through the sweep. Used by lens_diagnostics'
@@ -3842,6 +3828,7 @@ export class LSPService {
 						options.onProgress?.(completed, files.length);
 						return;
 					}
+					if (warmup.performedWarmup) options.onServerReady?.();
 				}
 				// #608/#621: batch-open a CHUNK of this group's files before
 				// waiting on diagnostics for any of them individually — see
@@ -4039,6 +4026,7 @@ export class LSPService {
 	 * Shutdown all LSP clients
 	 */
 	async shutdown(options: LSPShutdownOptions = {}): Promise<void> {
+		const resetStartedAt = Date.now();
 		if (this.checkDestroyed()) return;
 		this.isDestroyed = true;
 
@@ -4062,19 +4050,6 @@ export class LSPService {
 		// snapshot of what was released by this reset (post-teardown the count
 		// would always be zero, which is useless for root-cause analysis).
 		const aliveClients = this.getAliveClientCount();
-		logLatency({
-			type: "phase",
-			phase: "lsp_service_reset",
-			filePath: "",
-			durationMs: 0,
-			metadata: {
-				reason: options.reason ?? null,
-				aliveClients,
-				fast: !!options.fast,
-				processExiting: !!options.processExiting,
-			},
-		});
-
 		// Start every client teardown before awaiting any of them. A non-fast
 		// process-tree kill can spend its grace period per client, so awaiting in
 		// map order makes the reset tail O(clientCount * grace) instead of the
@@ -4086,6 +4061,19 @@ export class LSPService {
 				Promise.resolve().then(() => client.shutdown(options)),
 			),
 		);
+		logLatency({
+			type: "phase",
+			phase: "lsp_service_reset",
+			filePath: "",
+			startedAt: new Date(resetStartedAt).toISOString(),
+			durationMs: Date.now() - resetStartedAt,
+			metadata: {
+				reason: options.reason ?? null,
+				aliveClients,
+				fast: !!options.fast,
+				processExiting: !!options.processExiting,
+			},
+		});
 		this.state.clients.clear();
 		this.state.broken.clear();
 		this.workspaceProbeLogged.clear();
@@ -4099,6 +4087,33 @@ export class LSPService {
 		return Array.from(this.state.clients.entries()).map(([key, client]) => {
 			const [serverId, root] = key.split(":");
 			return { serverId, root, connected: client.isAlive() };
+		});
+	}
+
+	/**
+	 * Read-only circuit-breaker status, including server/root pairs that have no
+	 * live client and would therefore be absent from getStatus().
+	 */
+	getBrokenStatus(): Array<{
+		serverId: string;
+		root: string;
+		failures: number;
+		permanentlyBroken: boolean;
+		cooldownUntil: number;
+	}> {
+		const keys = new Set([
+			...this.state.broken.keys(),
+			...this.permanentlyBroken,
+		]);
+		return [...keys].map((key) => {
+			const separator = key.indexOf(":");
+			return {
+				serverId: separator >= 0 ? key.slice(0, separator) : key,
+				root: separator >= 0 ? key.slice(separator + 1) : "",
+				failures: this.failureCounts.get(key) ?? 0,
+				permanentlyBroken: this.permanentlyBroken.has(key),
+				cooldownUntil: this.state.broken.get(key) ?? 0,
+			};
 		});
 	}
 

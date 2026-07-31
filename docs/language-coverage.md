@@ -15,7 +15,7 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | Ruby                  | ✓   | lsp, rubocop, tree-sitter                                                                                      | rubocop, standardrb     |
 | C/C++                 | ✓   | lsp, cpp-check, tree-sitter                                                                                    | clang-format            |
 | Shell                 | ✓   | lsp, shellcheck                                                                                                | shfmt                   |
-| Fish                  | ✓   | lsp, fish-indent                                                                                               | fish_indent             |
+| Fish                  | ✓ (fish-lsp) | lsp, fish-indent                                                                                      | fish_indent             |
 | CSS/SCSS/Less         | ✓   | lsp, stylelint                                                                                                 | biome, prettier         |
 | HTML                  | ✓   | lsp, htmlhint                                                                                                  | prettier                |
 | YAML                  | ✓   | lsp, yamllint, actionlint (GitHub workflows)                                                                   | prettier                |
@@ -45,4 +45,4 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | Terraform             | ✓   | lsp, tflint                                                                                                    | terraform fmt           |
 | Nix                   | ✓   | lsp                                                                                                            | nixfmt                  |
 | TOML                  | ✓   | lsp, taplo                                                                                                     | taplo                   |
-| CMake                 | ✓   | lsp                                                                                                            | cmake-format            |
+| CMake                 | ✓ (cmake-language-server) | lsp                                                                                           | cmake-format            |

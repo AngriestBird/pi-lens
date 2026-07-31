@@ -1,5 +1,5 @@
+import "./clients/startup-marker.js";
 import * as nodeFs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AstGrepClient } from "./clients/ast-grep-client.js";
@@ -115,7 +115,9 @@ import { createProjectReportTool } from "./tools/project-report.js";
 import { createSymbolSearchTool } from "./tools/symbol-search.js";
 import { logLatency } from "./clients/latency-logger.js";
 import {
+	getPiLensEvalMs,
 	markPiLensLoaded,
+	PI_LENS_HOST_BOOT_MS,
 	PI_LENS_LOADED_FROM,
 } from "./clients/startup-timing.js";
 import { toRunnerDisplayPath } from "./clients/dispatch/runner-context.js";
@@ -129,10 +131,13 @@ import {
 	shouldLogWorstBlock,
 	startEventLoopMonitor,
 } from "./clients/event-loop-monitor.js";
+import { logSessionStart } from "./clients/sessionstart-logger.js";
+import { logConcurrentSessionBind } from "./clients/session-start-observability.js";
 
 // First executable statement: every import above has been evaluated, so the
 // full load/transpile cost has been paid. Capture it now.
 const PI_LENS_LOAD_MS = markPiLensLoaded();
+const PI_LENS_EVAL_MS = getPiLensEvalMs() ?? 0;
 // Start the event-loop occupancy monitor as early as possible so startup
 // blocks are captured. Native histogram — no per-event overhead. (#192)
 startEventLoopMonitor();
@@ -140,21 +145,8 @@ startEventLoopMonitor();
 // *new* worst freeze per turn, not the same growing max). (#192)
 let lastLoggedLoopWorstMs = 0;
 
-const DEBUG_LOG_DIR = path.join(os.homedir(), ".pi-lens");
-const DEBUG_LOG = path.join(DEBUG_LOG_DIR, "sessionstart.log");
 function dbg(msg: string) {
-	// Skip file logging during tests to isolate test output from production logs
-	if (process.env.PI_LENS_TEST_MODE === "1" || process.env.VITEST) {
-		return;
-	}
-	const line = `[${new Date().toISOString()}] ${msg}\n`;
-	try {
-		nodeFs.mkdirSync(DEBUG_LOG_DIR, { recursive: true });
-		nodeFs.appendFileSync(DEBUG_LOG, line);
-	} catch (e) {
-		// Pipeline error logged
-		console.error("[pi-lens-debug] write failed:", e);
-	}
+	logSessionStart(msg);
 }
 
 /**
@@ -185,6 +177,20 @@ logLatency({
 	filePath: "<pi-lens>",
 	phase: "extension_loaded",
 	durationMs: PI_LENS_LOAD_MS,
+	metadata: { loadedFrom: PI_LENS_LOADED_FROM },
+});
+logLatency({
+	type: "phase",
+	filePath: "<pi-lens>",
+	phase: "host_boot",
+	durationMs: PI_LENS_HOST_BOOT_MS,
+	metadata: { loadedFrom: PI_LENS_LOADED_FROM },
+});
+logLatency({
+	type: "phase",
+	filePath: "<pi-lens>",
+	phase: "extension_eval",
+	durationMs: PI_LENS_EVAL_MS,
 	metadata: { loadedFrom: PI_LENS_LOADED_FROM },
 });
 
@@ -871,6 +877,26 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("lens-perf", {
+		description:
+			"Show the slowest latency-log phases by p50 and p99 for the current process session and machine-wide active log window. Usage: /lens-perf",
+		handler: async (_args, ctx) => {
+			try {
+				const { collectLatencyPerformance, renderLatencyPerformanceReport } =
+					await import("./clients/performance-report.js");
+				const report = await collectLatencyPerformance({
+					sessionStartedAt: runtime.sessionStartedAt,
+				});
+				ctx.ui.notify(renderLatencyPerformanceReport(report), "info");
+			} catch (err) {
+				ctx.ui.notify(
+					`Failed to read performance telemetry: ${err instanceof Error ? err.message : String(err)}`,
+					"error",
+				);
+			}
+		},
+	});
+
 	pi.registerCommand("lens-tools", {
 		description:
 			"Show pi-lens tool installation status: globally installed, auto-installed, or npx fallback. Usage: /lens-tools",
@@ -1012,6 +1038,7 @@ export default function (pi: ExtensionAPI) {
 			// a scan-originated write can't clobber a concurrent newer per-edit
 			// write (or vice versa).
 			() => runtime.nextWriteIndex(),
+			captureLspStatusRepaint,
 		),
 		createLspDiagnosticsTool(
 			// #571: same reconciliation wiring as lens_diagnostics mode=full, for
@@ -1144,6 +1171,7 @@ export default function (pi: ExtensionAPI) {
 	// --- Events ---
 
 	pi.on("session_start", async (event, ctx) => {
+		const sessionStartFiredAt = Date.now();
 		try {
 			dbg("session_start fired");
 
@@ -1209,16 +1237,10 @@ export default function (pi: ExtensionAPI) {
 				dbg(
 					`session_start: concurrent secondary detected (count=${sessionStartDecision.secondaryCount}) — skipping handleSessionStart`,
 				);
-				logLatency({
-					type: "phase",
-					filePath: "<pi-lens>",
-					phase: "concurrent_session_bind",
-					durationMs: 0,
-					metadata: {
-						secondaryCount: sessionStartDecision.secondaryCount,
-						sessionReason,
-						sameCwd: (ctx as { cwd?: string })?.cwd === process.cwd(),
-					},
+				logConcurrentSessionBind({
+					secondaryCount: sessionStartDecision.secondaryCount,
+					sessionReason,
+					sameCwd: (ctx as { cwd?: string })?.cwd === process.cwd(),
 				});
 				return;
 			}
@@ -1287,6 +1309,7 @@ export default function (pi: ExtensionAPI) {
 				dbg(`lsp config init failed: ${cfgErr}`);
 			}
 
+			const bootstrapClientsStartedAt = Date.now();
 			const {
 				metricsClient,
 				todoScanner,
@@ -1304,8 +1327,16 @@ export default function (pi: ExtensionAPI) {
 				rustClient,
 				deadCodeClients,
 			} = await loadBootstrapClients();
+			const bootstrapClientsDurationMs =
+				Date.now() - bootstrapClientsStartedAt;
+			const handlerEnteredAt = Date.now();
 			await handleSessionStart({
 				ctxCwd: ctx.cwd,
+				sessionStartFiredAt,
+				sessionReason,
+				handlerEnteredAt,
+				bootstrapClientsStartedAt,
+				bootstrapClientsDurationMs,
 				getFlag: (name: string) => getLensFlag(name),
 				notify: (msg, level) => ctx.ui.notify(msg, level),
 				dbg,

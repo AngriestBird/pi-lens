@@ -9,6 +9,7 @@
 	},
 	"main": "./dist/index.js",
 	"bin": {
+		"pi-lens": "dist/mcp/cli.js",
 		"pi-lens-mcp": "dist/mcp/server.js",
 		"pi-lens-analyze": "dist/mcp/analyze-cli.js"
 	},

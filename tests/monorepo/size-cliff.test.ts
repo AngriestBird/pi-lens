@@ -22,13 +22,9 @@
  *         tier, so a caller reading `module_report`/`symbol_search` after the
  *         repo crosses the cap sees a cold cache rather than a graph
  *         reflecting a smaller, stale past state.
- *       - `module_report`'s `usedBy`/`semantic.source` degrade to `"none"`
- *         exactly like an ordinary cold cache (no graph at all) — there is no
- *         distinct signal for "skipped for size" vs. "never warmed" at this
- *         read layer either (the distinct signal lives in
- *         `getReviewGraphSizeSkipVerdict`, which `project_report` reads
- *         instead — see `project-report.test.ts`... `project-report`'s own
- *         hint-text assertions cover that consumer).
+ *       - #921: `module_report` exposes `"unavailable:file-cap"` in its
+ *         graph-backed provenance/semantic fields and renders the cap/config
+ *         warning, rather than looking identical to an ordinary cold cache.
  */
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -161,7 +157,7 @@ describe("monorepo size-cliff behavior (#775 item 2)", () => {
 			}
 		});
 
-		it("module_report degrades usedBy/semantic.source to 'none' identically to a cold cache", async () => {
+		it("#921: module_report distinguishes a size-skipped graph from a genuinely cold cache", async () => {
 			previousEnv = process.env[ENV_REVIEW_GRAPH_MAX];
 			process.env[ENV_REVIEW_GRAPH_MAX] = "3";
 			const repo = fixtureWithSourceFiles(4);
@@ -169,11 +165,16 @@ describe("monorepo size-cliff behavior (#775 item 2)", () => {
 				await buildOrUpdateGraph(repo.root, [], new FactStore());
 				const file = repo.filePath("@scope/a", "src/file0.ts");
 				const report = await moduleReport(file, repo.root);
-				expect(report.provenance?.usedBy).toBe("none");
-				expect(report.semantic.source).toBe("none");
-				// No warning distinguishes "size-skipped" from "never warmed" at
-				// module_report's read layer — the distinct signal instead lives in
-				// getReviewGraphSizeSkipVerdict (#782), which project_report surfaces.
+				expect(report.provenance?.usedBy).toBe("unavailable:file-cap");
+				expect(report.semantic.source).toBe("unavailable:file-cap");
+				expect(
+					report.warnings?.some(
+						(w) =>
+							w.includes("more than 3 files (cap 3)") &&
+							w.includes("maxProjectFiles") &&
+							w.includes("PI_LENS_REVIEW_GRAPH_MAX_FILES"),
+					),
+				).toBe(true);
 				expect(report.graphBuiltAt).toBeUndefined();
 			} finally {
 				repo.cleanup();

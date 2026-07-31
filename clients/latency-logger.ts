@@ -1,18 +1,23 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { isTestMode } from "./env-utils.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import { createNdjsonLogger } from "./ndjson-logger.js";
+import { getMaxLogSizeMB } from "./log-cleanup.js";
 
 const LATENCY_LOG_DIR = getGlobalPiLensDir();
 const LATENCY_LOG_FILE = path.join(LATENCY_LOG_DIR, "latency.log");
 
-const writer = createNdjsonLogger({ filePath: LATENCY_LOG_FILE });
+const writer = createNdjsonLogger({
+	filePath: LATENCY_LOG_FILE,
+	maxBytes: getMaxLogSizeMB() * 1024 * 1024,
+});
 
 export interface LatencyEntry {
 	type: "runner" | "tool_result" | "phase";
 	/** ISO timestamp when this entry was written (= finish time for runners) */
 	ts?: string;
+	/** Process that wrote the entry; used to isolate current-session telemetry. */
+	pid?: number;
 	/** ISO timestamp when the runner/phase started — diff with ts = durationMs */
 	startedAt?: string;
 	toolName?: string;
@@ -41,7 +46,7 @@ export function logLatency(entry: LatencyEntry): void {
 	if (isTestMode()) {
 		return;
 	}
-	writer.log({ ts: new Date().toISOString(), ...entry });
+	writer.log({ ...entry, ts: new Date().toISOString(), pid: process.pid });
 }
 
 export function getLatencyLogPath(): string {
@@ -51,19 +56,6 @@ export function getLatencyLogPath(): string {
 /** Resolve once all enqueued latency writes are on disk (tests/shutdown). */
 export function flushLatencyLog(): Promise<void> {
 	return writer.flush();
-}
-
-export function readLatencyLog(limit = 100): LatencyEntry[] {
-	try {
-		const content = fs.readFileSync(LATENCY_LOG_FILE, "utf-8");
-		const lines = content.trim().split(/\r?\n/).filter(Boolean);
-		return lines
-			.slice(-limit)
-			.map((line) => JSON.parse(line))
-			.reverse();
-	} catch {
-		return [];
-	}
 }
 
 export function clearLatencyLog(): void {

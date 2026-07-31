@@ -1,14 +1,26 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+const readJsonCacheSpy = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/json-cache-read.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/json-cache-read.js")>();
+	readJsonCacheSpy.mockImplementation(actual.readJsonCache);
+	return { ...actual, readJsonCache: readJsonCacheSpy };
+});
+
 import {
 	PROJECT_SNAPSHOT_VERSION,
+	_resetProjectSnapshotParseCacheForTests,
 	buildProjectSnapshotFromRuntime,
 	getProjectSnapshotMetaPath,
 	getProjectSnapshotPath,
 	hydrateRuntimeFromProjectSnapshot,
 	isProjectSnapshotFresh,
+	isProjectSnapshotMetaStale,
 	loadProjectSnapshot,
+	readProjectSnapshotMeta,
 	saveProjectSnapshot,
 	saveRuntimeProjectSnapshot,
 } from "../../clients/project-snapshot.js";
@@ -301,5 +313,107 @@ describe("project snapshot", () => {
 				["fromSnapshot", path.join(cwd, "src", "a.ts")],
 			]);
 			expect(target.projectRulesScan.hasCustomRules).toBe(true);
+		}));
+
+	it("meta sidecar round-trips and drives the staleness gate (#947)", () =>
+		withProjectDataDir((cwd) => {
+			const runtime = new RuntimeCoordinator();
+			runtime.seedProjectSequence(7);
+			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime }));
+
+			const meta = readProjectSnapshotMeta(cwd);
+			expect(meta).toMatchObject({
+				version: PROJECT_SNAPSHOT_VERSION,
+				seq: 7,
+			});
+			expect(typeof meta?.timestamp).toBe("string");
+			expect(isProjectSnapshotMetaStale(meta!, 7)).toBe(false);
+			// seq mismatch → stale; version mismatch → stale (the exact fields
+			// isProjectSnapshotFresh checks on the parsed body).
+			expect(isProjectSnapshotMetaStale(meta!, 8)).toBe(true);
+			expect(
+				isProjectSnapshotMetaStale(
+					{ ...meta!, version: PROJECT_SNAPSHOT_VERSION + 1 },
+					7,
+				),
+			).toBe(true);
+		}));
+
+	it("meta sidecar reader fails open: missing / corrupt / wrong-shaped meta → null (#947)", () =>
+		withProjectDataDir((cwd) => {
+			// Missing entirely.
+			expect(readProjectSnapshotMeta(cwd)).toBeNull();
+
+			// Corrupt JSON.
+			const metaPath = getProjectSnapshotMetaPath(cwd);
+			fs.mkdirSync(path.dirname(metaPath), { recursive: true });
+			fs.writeFileSync(metaPath, "{ not json");
+			expect(readProjectSnapshotMeta(cwd)).toBeNull();
+
+			// Wrong shape (missing seq).
+			fs.writeFileSync(metaPath, JSON.stringify({ version: 2 }));
+			expect(readProjectSnapshotMeta(cwd)).toBeNull();
+		}));
+
+	it("serializes the snapshot body compactly, and still reads legacy pretty-printed bodies (#947)", () =>
+		withProjectDataDir((cwd) => {
+			const runtime = new RuntimeCoordinator();
+			runtime.seedProjectSequence(7);
+			const snapshot = buildProjectSnapshotFromRuntime({ cwd, runtime });
+			saveProjectSnapshot(cwd, snapshot);
+
+			// Compact: no pretty-print newlines; exactly the minimal JSON form.
+			const raw = fs.readFileSync(getProjectSnapshotPath(cwd), "utf-8");
+			expect(raw).not.toContain("\n");
+			expect(raw).toBe(JSON.stringify(JSON.parse(raw)));
+
+			// Legacy pretty-printed bodies (written by older pi-lens versions)
+			// must still parse.
+			_resetProjectSnapshotParseCacheForTests();
+			fs.writeFileSync(
+				getProjectSnapshotPath(cwd),
+				JSON.stringify(snapshot, null, 2),
+			);
+			const bumped = new Date(Date.now() + 5000);
+			fs.utimesSync(getProjectSnapshotPath(cwd), bumped, bumped);
+			expect(loadProjectSnapshot(cwd)?.seq).toBe(7);
+		}));
+
+	it("caches the parsed body per (cwd, mtime): save primes the cache, loads hit it, external writes invalidate (#947)", () =>
+		withProjectDataDir((cwd) => {
+			_resetProjectSnapshotParseCacheForTests();
+			const runtime = new RuntimeCoordinator();
+			runtime.seedProjectSequence(7);
+			runtime.cachedExports.set("makeThing", path.join(cwd, "src", "a.ts"));
+			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime }));
+			readJsonCacheSpy.mockClear();
+
+			// Hit: a load right after our own save (the saveRuntimeProjectSnapshot
+			// merge-read pattern) must NOT re-read/re-parse the file.
+			const first = loadProjectSnapshot(cwd);
+			expect(first?.seq).toBe(7);
+			expect(readJsonCacheSpy).not.toHaveBeenCalled();
+
+			// A repeat load serves the same parsed object.
+			expect(loadProjectSnapshot(cwd)).toBe(first);
+			expect(readJsonCacheSpy).not.toHaveBeenCalled();
+
+			// An external write (different mtime) invalidates → re-parse.
+			const other = new RuntimeCoordinator();
+			other.seedProjectSequence(9);
+			const snapshotPath = getProjectSnapshotPath(cwd);
+			fs.writeFileSync(
+				snapshotPath,
+				JSON.stringify(buildProjectSnapshotFromRuntime({ cwd, runtime: other })),
+			);
+			const bumped = new Date(Date.now() + 5000);
+			fs.utimesSync(snapshotPath, bumped, bumped);
+			const third = loadProjectSnapshot(cwd);
+			expect(readJsonCacheSpy).toHaveBeenCalled();
+			expect(third?.seq).toBe(9);
+
+			// Deleting the file invalidates and fails open to null.
+			fs.unlinkSync(snapshotPath);
+			expect(loadProjectSnapshot(cwd)).toBeNull();
 		}));
 });

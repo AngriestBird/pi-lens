@@ -5,6 +5,8 @@
  * production. Each test here runs the runner twice against the SAME cwd so run
  * 2 rehydrates from the cache written by run 1.
  */
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import treeSitterRunner from "../../../../clients/dispatch/runners/tree-sitter.js";
 
@@ -86,5 +88,94 @@ describe("tree-sitter runner — rule cache round-trip (#448)", () => {
 		expect(await suggestionFor("a.ts")).toBe("remove this statement");
 		expect(await suggestionFor("b.ts")).toBe("remove this statement");
 		expect(observedCacheHits()).toEqual([false, true]);
+	}, 30_000);
+});
+
+// #878 — the RuleCache key fingerprinted only the language's OWN rules
+// directory, but tsx also RUNS the typescript rule set (queriesForLanguage).
+// A typescript-rule edit therefore never invalidated the on-disk tsx cache:
+// the next process computed the same hash over the unchanged tsx files and
+// served the stale compiled rules. The fingerprint now covers the full
+// effective rule set, so an inherited-rule edit must force a miss, while an
+// unrelated language's rule edit must not.
+describe("tree-sitter runner — inherited rule-set fingerprint (#878)", () => {
+	let env878: RealRunnerEnv;
+	beforeAll(async () => {
+		env878 = makeRealRunnerEnv();
+		await assertGrammarAvailable("tsx");
+	});
+	afterAll(() => env878?.cleanup());
+
+	const tsRulePath = () =>
+		path.join(
+			env878.cwd,
+			"rules",
+			"tree-sitter-queries",
+			"typescript",
+			"proj-marker-ts.yml",
+		);
+	const pyRulePath = () =>
+		path.join(
+			env878.cwd,
+			"rules",
+			"tree-sitter-queries",
+			"python",
+			"proj-marker-py.yml",
+		);
+	const writeRule = (file: string, message: string) => {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(
+			file,
+			[
+				"id: proj-marker",
+				"name: Project Marker",
+				"severity: warning",
+				"category: general",
+				`message: "${message}"`,
+				"query: |",
+				"  (debugger_statement) @DBG",
+				"metavars: [DBG]",
+				"",
+			].join("\n"),
+			"utf-8",
+		);
+	};
+
+	it("an inherited typescript-rule edit invalidates the tsx cache; a python-rule edit does not", async () => {
+		writeRule(tsRulePath(), "marker v1");
+		writeRule(pyRulePath(), "py marker v1");
+		logTreeSitter.mockClear();
+
+		// Run 1 (cold): populates the on-disk tsx cache; the project-local
+		// typescript rule fires through the inherited rule set.
+		const cold = env878.addFile("a.tsx", "debugger;\n");
+		expect(
+			firedRuleIds(await treeSitterRunner.run(cold.ctx)),
+		).toContain("proj-marker");
+
+		// Run 2 (warm): same rules on disk → cache hit.
+		const warm = env878.addFile("b.tsx", "debugger;\n");
+		await treeSitterRunner.run(warm.ctx);
+
+		// Edit the INHERITED typescript rule. Pre-fix this left the tsx
+		// fingerprint unchanged and run 3 hit the stale cache. Assert on the
+		// EDITED MESSAGE, not just the rule id — the id is identical pre/post
+		// edit, so a stale v1 rule set would still make a toContain("proj-marker")
+		// pass; only the v2 message proves run 3 re-read the rule from disk (the
+		// loader's in-memory memo used to hand back v1 on the cache miss and the
+		// runner persisted it under the fresh fingerprint).
+		writeRule(tsRulePath(), "marker v2 changed");
+		const afterInheritedEdit = env878.addFile("c.tsx", "debugger;\n");
+		const run3 = await treeSitterRunner.run(afterInheritedEdit.ctx);
+		expect(firedRuleIds(run3)).toContain("proj-marker");
+		const markerDiag = run3.diagnostics.find((d) => d.rule === "proj-marker");
+		expect(markerDiag?.message).toContain("marker v2 changed");
+
+		// Control: editing an UNRELATED language's rule must NOT invalidate.
+		writeRule(pyRulePath(), "py marker v2 changed");
+		const afterUnrelatedEdit = env878.addFile("d.tsx", "debugger;\n");
+		await treeSitterRunner.run(afterUnrelatedEdit.ctx);
+
+		expect(observedCacheHits()).toEqual([false, true, false, true]);
 	}, 30_000);
 });

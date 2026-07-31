@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	_resetSharedTreeSitterClientForTests,
 	getSharedTreeSitterClient,
+	getTreeSitterRuntimeStatus,
 	isTreeSitterWasmAborted,
 	markTreeSitterWasmAborted,
 	resolveTreeSitterLanguage,
@@ -64,6 +65,20 @@ describe("shared TreeSitterClient singleton", () => {
 		expect(isTreeSitterWasmAborted()).toBe(true);
 		// Every consumer now gets null and must skip tree-sitter work.
 		expect(getSharedTreeSitterClient()).toBeNull();
+		expect(getTreeSitterRuntimeStatus()).toMatchObject({
+			available: false,
+			wasmAborted: true,
+			recovery: "restart_required",
+			abortedAt: expect.any(String),
+		});
+	});
+
+	it("reports healthy status before an abort", () => {
+		expect(getTreeSitterRuntimeStatus()).toEqual({
+			available: true,
+			wasmAborted: false,
+			recovery: "not_required",
+		});
 	});
 
 	it("poisons every consumer when the parser reports an actual abort", async () => {

@@ -2,7 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { FactStore } from "../../../clients/dispatch/fact-store.js";
 import { LANGUAGE_TO_GRAMMAR } from "../../../clients/grammar-source.js";
 import { loadProjectDiagnosticsSnapshot } from "../../../clients/project-diagnostics/cache.js";
 import {
@@ -183,5 +184,62 @@ describe("scanProjectDiagnostics home ceiling (#747/#250)", () => {
 		});
 
 		expect(snapshot.unsafeRoot).toBeUndefined();
+	});
+});
+
+describe("scanProjectDiagnostics FactStore lifecycle (#886, #939)", () => {
+	it("releases every file fact after its consumers finish", async () => {
+		const files = ["a.ts", "b.ts", "c.ts"].map((name, index) => {
+			const filePath = path.join(tmp, name);
+			fs.writeFileSync(
+				filePath,
+				`export const value${index} = "${name}-full-content-marker";\n`,
+			);
+			return filePath;
+		});
+		const released = new Set<string>();
+		const occupiedFiles = new Set<string>();
+		let peakOccupiedFiles = 0;
+		const originalSet = FactStore.prototype.setFileFact;
+		const setSpy = vi
+			.spyOn(FactStore.prototype, "setFileFact")
+			.mockImplementation(function (
+				this: FactStore,
+				filePath: string,
+				factId: string,
+				value: unknown,
+			) {
+				originalSet.call(this, filePath, factId, value);
+				occupiedFiles.add(path.resolve(filePath));
+				peakOccupiedFiles = Math.max(peakOccupiedFiles, occupiedFiles.size);
+			});
+		const originalClear = FactStore.prototype.clearFileFactsFor;
+		const clearSpy = vi
+			.spyOn(FactStore.prototype, "clearFileFactsFor")
+			.mockImplementation(function (this: FactStore, filePath: string) {
+				const resolved = path.resolve(filePath);
+				const hadContent = this.hasFileFact(filePath, "file.content");
+				originalClear.call(this, filePath);
+				if (hadContent) {
+					expect(this.hasFileFact(filePath, "file.content")).toBe(false);
+					released.add(resolved);
+				}
+				occupiedFiles.delete(resolved);
+			});
+
+		try {
+			await scanProjectDiagnostics({
+				cwd: tmp,
+				tier: "cheap",
+				files,
+			});
+		} finally {
+			clearSpy.mockRestore();
+			setSpy.mockRestore();
+		}
+
+		expect(released).toEqual(new Set(files.map((file) => path.resolve(file))));
+		expect(peakOccupiedFiles).toBe(1);
+		expect(occupiedFiles.size).toBe(0);
 	});
 });

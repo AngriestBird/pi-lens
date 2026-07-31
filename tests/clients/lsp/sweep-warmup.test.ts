@@ -205,9 +205,13 @@ describe("runWorkspaceDiagnostics sweep-level warm-up behavior (#667)", () => {
 
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
-		const results = await service.runWorkspaceDiagnostics(tmp);
+		const onServerReady = vi.fn();
+		const results = await service.runWorkspaceDiagnostics(tmp, {
+			onServerReady,
+		});
 
 		expect(results.length).toBe(3);
+		expect(onServerReady).toHaveBeenCalledOnce();
 		// 3 real per-file sweep touches + exactly 1 extra warm-up round trip
 		// against whichever file the sweep grouped first — NOT a blind delay
 		// per file, one deliberate warm-up for the whole (single-server) group.
@@ -238,8 +242,12 @@ describe("runWorkspaceDiagnostics sweep-level warm-up behavior (#667)", () => {
 		});
 		expect(waitCalls.length).toBe(1);
 
-		const results = await service.runWorkspaceDiagnostics(tmp);
+		const onServerReady = vi.fn();
+		const results = await service.runWorkspaceDiagnostics(tmp, {
+			onServerReady,
+		});
 		expect(results.length).toBe(3);
+		expect(onServerReady).not.toHaveBeenCalled();
 		// Exactly the 3 real per-file touches — the pre-sweep warm-up check
 		// found the server already demonstrated ready and skipped it (no 4th,
 		// warm-up-only call).
