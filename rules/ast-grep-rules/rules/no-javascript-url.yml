@@ -15,13 +15,35 @@ note: |
   `.only`/`.skip`/`.each` variants): a test asserting that a guard REJECTS a
   `javascript:` URL — e.g. `expect(openBrowser("javascript:...")).toBe(false)`
   — is the adversarial input the code is meant to reject, not a real sink.
+
+  Also excludes literals used as the needle in a defensive string check —
+  `url.startsWith("javascript:")`, `.endsWith(...)`, `.includes(...)`,
+  `.indexOf(...)`, `.search(...)`, `.match(...)` — or as one side of an
+  equality/inequality comparison (`url === "javascript:..."`). These are the
+  code detecting/rejecting a javascript: URL, not introducing one (refs
+  #533). Deliberately NOT excluded: `.replace(...)`/`.replaceAll(...)`,
+  since the literal there could be the replacement (second) argument —
+  i.e. the malicious payload being substituted IN — and excluding the
+  whole call would hide that true positive.
 rule:
   kind: string
   regex: '^"javascript:'
   not:
-    inside:
-      stopBy: end
-      kind: call_expression
-      has:
-        field: function
-        regex: "^(expect|it|test|describe)(\\.\\w+)?$"
+    any:
+      - inside:
+          stopBy: end
+          kind: call_expression
+          has:
+            field: function
+            regex: "^(expect|it|test|describe)(\\.\\w+)?$"
+      - inside:
+          stopBy: end
+          kind: call_expression
+          has:
+            field: function
+            regex: "\\.(startsWith|endsWith|includes|indexOf|search|match)$"
+      - inside:
+          stopBy: end
+          kind: binary_expression
+          has:
+            regex: "^(===|!==|==|!=)$"

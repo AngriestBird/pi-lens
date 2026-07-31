@@ -8,7 +8,12 @@ valid:
     it("rejects javascript: urls", () => {
       expect(openBrowser("javascript:alert(1)")).toBe(false);
     });
+  - 'const links = arr.filter((l) => !l.startsWith("javascript:"))'
+  - 'if (url.includes("javascript:")) return null;'
+  - 'const isBlocked = url === "javascript:alert(1)"'
+  - 'const safe = url !== "javascript:alert(1)"'
 invalid:
   - 'a.href = "javascript:alert(1)"'
   - 'a.href = "javascript:void(0)"'
   - 'const u = "javascript:alert(1)"'
+  - 'a.href = str.replace("http:", "javascript:alert(1)")'
