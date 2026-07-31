@@ -205,4 +205,10 @@ Thanks goes to these wonderful people:
 
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
+The following commit identities also appear in `git shortlog -sne HEAD` but are
+not represented in the generated table above: Anas Alsbei, Claude,
+Christopher Patti,
+dependabot[bot], Fabio-D, github-actions[bot], JSup, Kenny McCormick,
+Max Lupus, Moritz Hofmann, ricardo, and root.
+
 If you land a pull request or report an issue that gets fixed, we'll add you here.
