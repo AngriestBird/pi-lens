@@ -1200,6 +1200,70 @@ describe("lens_diagnostics mode=full", () => {
 		).toEqual([{ id: "knip", summary: "knip timed out" }]);
 	});
 
+	// #1004 review follow-up (honesty gap, #533): unlike every other
+	// fresh-fetch analyzer (a FRESH whole-project scan each call), test-runner
+	// is cache-read only — its findings only ever reflect the (targeted,
+	// cascade-aware) test file(s) touched by the most recent edit's turn_end
+	// fire, never a whole-project run. When it's warm-with-findings this must
+	// be called out explicitly, not folded silently into `runners`/
+	// `diagnostics` alongside the genuinely-project-wide analyzers.
+	it("mode=full notes test-runner coverage is edit-scoped, not project-wide, whenever it contributed findings (#1004)", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
+			undefined,
+		);
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [
+				{
+					filePath: "/proj/src/a.test.ts",
+					line: 17,
+					severity: "error",
+					semantic: "blocking",
+					tool: "test-runner",
+					runner: "vitest",
+					rule: "test:vitest",
+					message: "foo works: expected true to be false",
+					source: "project-scan",
+				},
+			],
+			runners: ["test-runner"],
+			cold: [],
+			timings: {},
+		});
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cached",
+		});
+
+		const text = String(result.content[0].text);
+		expect(text).toContain("edit-scoped");
+		expect(text).toContain("NOT a full-project run");
+	});
+
+	it("mode=full does NOT emit the test-runner edit-scoped caveat when test-runner didn't contribute", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: ["jscpd"],
+			cold: ["test-runner"],
+			timings: { jscpd: 5 },
+		});
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cached",
+		});
+
+		expect(String(result.content[0].text)).not.toContain("edit-scoped");
+	});
+
 	it("mode=full without refreshRunners never reports cold extractors (they weren't requested)", async () => {
 		mockSummaries.length = 0;
 		const lspService = {

@@ -67,7 +67,18 @@
  * "ran clean") and `abortedIds` (so a caller can render a more honest reason
  * than "not applicable").
  *
- * Refs: #585, #313 (the SecurityScanClient de-dupe prerequisite)
+ * One analyzer does NOT follow the trigger-or-join shape above: `test-runner`
+ * (#1004). Its "scan" is the per-edit turn_end test fire (`runtime-turn.ts`),
+ * which only ever runs the targeted/cascade-aware test files touched by a
+ * turn's edits — there is no whole-project run to trigger here, and forcing
+ * one on every mode=full call would be exactly the double-spawn-a-heavy-
+ * analyzer cost the de-dupe guards above exist to avoid. Its task is a plain
+ * cache-read of the `"test-runner-findings"` key turn_end already wrote,
+ * mirroring the pre-#585 `extractCachedProjectDiagnostics` registry's
+ * "test-runner" row (cache-only, never triggers a run) rather than the
+ * fresh-run pattern every other task here uses — see that task's own comment.
+ *
+ * Refs: #585, #313 (the SecurityScanClient de-dupe prerequisite), #1004
  */
 
 import * as fs from "node:fs";
@@ -86,6 +97,8 @@ import { jscpdResultToProjectDiagnostics } from "./runner-adapters/jscpd.js";
 import { knipIssuesToProjectDiagnostics } from "./runner-adapters/knip.js";
 import { circularDepsToProjectDiagnostics } from "./runner-adapters/madge.js";
 import { opengrepResultToProjectDiagnostics } from "./runner-adapters/opengrep.js";
+import type { TestRunnerFindingsCache } from "./runner-adapters/runner-findings.js";
+import { testRunnerFindingsToProjectDiagnostics } from "./runner-adapters/runner-findings.js";
 import { trivyResultToProjectDiagnostics } from "./runner-adapters/trivy.js";
 import type { ProjectDiagnostic } from "./types.js";
 import type { FailedProjectAnalyzer } from "./extractors.js";
@@ -119,8 +132,12 @@ export interface FreshProjectDiagnosticsResult {
 /** The heavyweight analyzers surfaced in `lens_diagnostics mode=full` — this is
  *  now the single source of truth for that list (#585 removed the parallel
  *  cache-only `EXTRACTORS` registry that used to shadow it). `warmTriggerFor`
- *  (extractors.ts) is keyed by these same ids for the "cold" honesty note. */
-const ANALYZER_IDS = [
+ *  (extractors.ts) is keyed by these same ids for the "cold" honesty note.
+ *  Exported so `tests/clients/project-diagnostics/analyzer-coverage.test.ts`
+ *  (#1004's guardrail) can assert every session-start/turn-end analyzer cache
+ *  writer id is a member — the exact #585-class check that would have caught
+ *  opengrep's (and then test-runner's, #1004) omission before it shipped. */
+export const ANALYZER_IDS = [
 	"knip",
 	"jscpd",
 	"madge",
@@ -129,6 +146,7 @@ const ANALYZER_IDS = [
 	"opengrep",
 	"trivy",
 	"dead-code",
+	"test-runner",
 ] as const;
 
 function pushUnique(list: string[], id: string): void {
@@ -430,6 +448,50 @@ export async function fetchFreshProjectDiagnostics(
 						Date.now() - startMs,
 					);
 				}),
+			);
+		}),
+
+		// test-runner — CACHE-READ only, unlike every task above (#1004). Its
+		// session cadence doesn't fit the "trigger-or-join a fresh run" shape the
+		// rest of this module uses: the actual scan is the per-edit turn_end fire
+		// in `runtime-turn.ts`, which only ever runs the (targeted, cascade-aware)
+		// test files touched by THIS turn's edits — there is no "whole project"
+		// test run to (re-)trigger here, and unconditionally spawning a full suite
+		// on every mode=full call would be the exact "heavy re-run on every call"
+		// cost this module's other tasks avoid via de-dupe/gating. So this task
+		// instead peeks at the `"test-runner-findings"` cache turn_end already
+		// wrote — the same cache key, the same adapter
+		// (`testRunnerFindingsToProjectDiagnostics`), and the same cache-only
+		// contract the pre-#585 `extractCachedProjectDiagnostics` registry's
+		// "test-runner" row used (see extractors.ts's removal note) — before #585
+		// dropped that reader without replacing this one row's semantics here.
+		// Deliberately never calls `writeCache`: there is nothing fresher to write
+		// back, only what turn_end already produced.
+		//
+		// No double-count / honesty gap (#533): `consumeTestFindings`
+		// (`runtime-context.ts`) reads-and-clears this SAME cache key once, to
+		// inject a one-shot "fix before continuing" message into the NEXT turn.
+		// This task only ever reads (never clears) it, so it can't race that
+		// consumption into re-delivering a message twice — at most it surfaces
+		// the same underlying failures a second time, through a different
+		// surface (the mode=full project snapshot) that was previously silently
+		// empty for this analyzer. If `consumeTestFindings` already cleared the
+		// cache before this runs, this task correctly sees nothing and reports
+		// `cold` rather than inventing stale data.
+		task("test-runner", async () => {
+			const startMs = Date.now();
+			const cached = cacheManager.readCache<TestRunnerFindingsCache>(
+				"test-runner-findings",
+				analysisRoot,
+			);
+			if (!cached?.data) {
+				cold.push("test-runner");
+				return;
+			}
+			record(
+				"test-runner",
+				testRunnerFindingsToProjectDiagnostics(cached.data),
+				Date.now() - startMs,
 			);
 		}),
 	];

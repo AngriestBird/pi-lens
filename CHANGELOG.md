@@ -66,6 +66,43 @@ All notable changes to pi-lens will be documented in this file.
 	registry that shadowed `ANALYZER_IDS` and let opengrep silently diverge — was
 	removed so a single source of truth (#883) remains.
 
+- **Fixed: test-runner findings now surface project-wide in `lens_diagnostics
+	mode=full`** (closes #1004, refs #585, #533) — the same `ANALYZER_IDS`
+	omission #585/#1003 fixed for opengrep also orphaned test-runner: the
+	per-edit turn_end test fire (`runtime-turn.ts`) caches failures under
+	`"test-runner-findings"`, but `fetchFreshProjectDiagnostics`
+	(`project-diagnostics/fresh-fetch.ts`) never read that cache back, so test
+	failures never reached the agent for unedited/project-wide `mode=full`
+	calls. Unlike opengrep/gitleaks/trivy, this is wired as a CACHE-READ (not a
+	fresh scan): test-runner has no "whole project" run to trigger — turn_end
+	only ever runs the targeted, cascade-aware test files touched by that
+	turn's edits — so `fetchFreshProjectDiagnostics` now peeks at the same
+	`"test-runner-findings"` cache key (never re-running the suite, never
+	writing back) and adapts it via the existing
+	`testRunnerFindingsToProjectDiagnostics`. Added a coverage guardrail
+	(`tests/clients/project-diagnostics/analyzer-coverage.test.ts`) that greps
+	the real session-start (`runHeavyweightTask`) and EVERY turn_end
+	`cacheManager.writeCache` call site in `runtime-turn.ts` (excluding a
+	short, explicit bookkeeping exclude-list — `errorDebt`/`turn-end-findings`/
+	`turn-end-findings-last` — that isn't analyzer-shaped) and asserts every
+	remaining id is a member of `ANALYZER_IDS`, so this whole #585 bug class
+	can't silently regress again for a future analyzer added to EITHER writer.
+	Adversarial review also caught two honesty/fidelity gaps in the initial
+	fix: (1) test-runner is cache-read, edit-scoped (the targeted test files
+	touched by the most recent turn's edits), unlike every other analyzer's
+	fresh whole-project scan — `mode=full` now emits an explicit "coverage is
+	edit-scoped, NOT a full-project run" caveat whenever test-runner
+	contributed findings (not only when cold), and a `stale` cached result
+	(the turn advanced before the test run finished) is prefixed
+	`[stale — from a prior turn]` in its diagnostic message, matching the
+	one-shot turn-context message's own stale wording; (2) `TestFailure.location`
+	(`"file.ts:42"`, set by the vitest/jest JSON parser in
+	`test-runner-client.ts`) never reached `ProjectDiagnostic.line`, so every
+	test-runner finding rendered as `L?:` — `runner-adapters/runner-findings.ts`
+	now parses a numeric trailing `:line[:col]` out of `location` (left alone
+	for pytest/mix's non-numeric `location` strings, which carry a test name or
+	module, not a line).
+
 - **Guarded Windows CPU/RSS resource sampling so a best-effort sampler can no
 	longer crash the pi host** (refs #620, #533) — `clients/resource-sampler.ts`
 	sampled CPU%/RSS via `pidusage`, whose Windows path shells out to `gwmi`
