@@ -14,10 +14,16 @@ All notable changes to pi-lens will be documented in this file.
 	`.match`, or one side of an `===`/`!==`/`==`/`!=` comparison — deliberately
 	NOT `.replace`/`.replaceAll`, since the literal there could be the malicious
 	replacement argument rather than the defensive search argument, and
-	excluding the whole call would hide that true positive. Added valid
-	fixtures reproducing the filter FP and an invalid fixture
-	(`str.replace("http:", "javascript:alert(1)")`) confirming the
-	replace-based sink is still caught.
+	excluding the whole call would hide that true positive. Both new exclusions
+	deliberately avoid `stopBy: end` (unlike the pre-existing test-literal
+	exclusion, which needs it) so the literal must be a DIRECT argument/operand
+	of the defensive call/comparison, not merely somewhere in its subtree — an
+	adversarial review caught that `stopBy: end` let a real sink smuggled
+	inside the call/comparison (e.g. `candidates.includes(link.href =
+	"javascript:...")`, a comma-operator sink, or `(a.href = "javascript:...")
+	=== expected`) go unflagged. Added valid fixtures reproducing the filter FP
+	and invalid fixtures for the replace-based sink and all three smuggled-sink
+	bypasses, confirmed against the real ast-grep 0.45.0 binary.
 
 - **Contained spawn/callback failures that could crash the host (pidusage bug
 	class)** (refs #533) — a best-effort telemetry sampler recently killed a live

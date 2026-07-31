@@ -25,6 +25,20 @@ note: |
   since the literal there could be the replacement (second) argument —
   i.e. the malicious payload being substituted IN — and excluding the
   whole call would hide that true positive.
+
+  IMPORTANT: unlike the expect/it/test/describe exclusion above, these two
+  new exclusions deliberately do NOT use `stopBy: end`. `inside` without
+  `stopBy` only checks the immediate parent, so the literal must be a
+  DIRECT argument/operand of the defensive call/comparison — not merely
+  somewhere in its subtree. Without this constraint, a real sink smuggled
+  inside the call/comparison would go unflagged, e.g.
+  `candidates.includes(link.href = "javascript:alert(1)")` (assignment
+  nested in `.includes()`'s argument), `arr.includes((a.href =
+  "javascript:...", true))` (comma operator), or `(a.href =
+  "javascript:...") === expected` (assignment nested in a `===` operand) —
+  in all three the literal's immediate parent is the assignment
+  expression, not the `arguments`/`binary_expression` node, so it stays
+  flagged.
 rule:
   kind: string
   regex: '^"javascript:'
@@ -37,13 +51,13 @@ rule:
             field: function
             regex: "^(expect|it|test|describe)(\\.\\w+)?$"
       - inside:
-          stopBy: end
-          kind: call_expression
-          has:
-            field: function
-            regex: "\\.(startsWith|endsWith|includes|indexOf|search|match)$"
+          kind: arguments
+          inside:
+            kind: call_expression
+            has:
+              field: function
+              regex: "\\.(startsWith|endsWith|includes|indexOf|search|match)$"
       - inside:
-          stopBy: end
           kind: binary_expression
           has:
             regex: "^(===|!==|==|!=)$"
