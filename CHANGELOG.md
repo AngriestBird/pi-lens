@@ -4,6 +4,16 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **`pi-lens build-graph` honestly reports a capped, over-the-cap persist**
+	(closes #924, refs #936 limit 3) — the CLI's build-attempt check no longer
+	mistakes the benign "succeeded, but persisted a partial subgraph" reason
+	(#960's over-cap circuit-breaker) for a hard failure: it now exits 0 and
+	prints a `PARTIAL persist` line with `persistedNodes=X/Y`,
+	`persistedEdges=X/Y`, and the cap that was hit, instead of either silently
+	reporting "done" or failing loudly on a build/persist that actually
+	succeeded. `flushReviewGraphPersist()` now returns the persisted
+	`coverage` so any standalone caller can make the same distinction.
+
 - **`ts-ssrf` no longer trusts naming convention as proof of a fixed URL**
 	(fixes #963) — the post-filter now resolves a bare `fetch(IDENT)` argument
 	against the file's AST and exempts it only when `IDENT` provably resolves
