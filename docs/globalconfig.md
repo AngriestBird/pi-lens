@@ -2,6 +2,41 @@
 
 pi-lens reads optional user preferences from `~/.pi-lens/config.json` (`%USERPROFILE%\\.pi-lens\\config.json` on Windows). Unknown keys are ignored, and missing or invalid config falls back to defaults.
 
+## Every toggle, both ways
+
+Each runtime toggle is settable from the CLI *and* from `config.json`. The two are driven by one declarative registry (`clients/lens-flag-registry.ts`), so neither surface can gain a toggle the other lacks.
+
+| CLI flag | `config.json` key | Default |
+| --- | --- | --- |
+| `--no-lens` | `lens.enabled` | `true` |
+| `--no-lsp` | `lsp.enabled` | `true` |
+| `--no-tests` | `tests.enabled` | `true` |
+| `--no-delta` | `delta.enabled` | `true` |
+| `--no-opengrep` | `opengrep.enabled` | `true` |
+| `--no-read-guard` | `readGuard.enabled` | `true` |
+| `--no-autoformat` | `format.enabled` | `true` |
+| `--no-autofix` | `autofix.enabled` | `true` |
+| `--no-lens-context` | `contextInjection.enabled` | `true` |
+| `--lens-guard` | `guard.enabled` | `false` |
+| `--immediate-format` | `format.mode` (`"immediate"`) | `"deferred"` |
+| `--lens-turn-summary` | `turnSummary.enabled` | `false` |
+| `--lens-actionable-warnings` | `actionableWarnings.enabled` | `false` |
+| `--lens-actionable-warning-actions` | `actionableWarnings.includeLspCodeActions` | `false` |
+| `--lens-actionable-warning-autofix` | `actionableWarnings.autoFix.enabled` | `false` |
+| `--lens-actionable-warning-all` | `actionableWarnings.deltaOnly` (`false`) | `true` |
+
+Keys are positive (`"enabled": true` means the feature runs), so a `--no-*` flag corresponds to setting its key `false`. A `no-*` flag on the command line is a one-way switch: it can disable, never re-enable, so `--no-lsp` wins over `lsp.enabled: true` but nothing on the CLI overrides `lsp.enabled: false`. Set the key back to `true` to re-enable.
+
+Resolution order for a single toggle, highest first:
+
+1. Environment variable, where one is bound (`PI_LENS_NO_CONTEXT_INJECTION=1`).
+2. The CLI flag.
+3. The nearest `.pi-lens.json` that defines the key, for the three mutation controls only (see [Mutation controls](#mutation-controls)).
+4. `~/.pi-lens/config.json`.
+5. The built-in default.
+
+## Examples
+
 Hide the diagnostics widget by default, run formatting immediately after write/edit tool calls instead of at `agent_end`, and enable actionable warnings with conservative autofix:
 
 ```json
@@ -41,9 +76,23 @@ Hide the diagnostics widget by default, run formatting immediately after write/e
 
 `contextInjection.enabled` (default `true`) controls whether pi-lens prepends automatic findings — session-start guidance, turn-end findings, and test findings — into the next model turn. Set it to `false` (or use `--no-lens-context` / `PI_LENS_NO_CONTEXT_INJECTION=1` / `/lens-context-toggle`) to keep tools, LSP, read-guard, and formatting running while avoiding the prompt-cache invalidation that injected messages cause in long, cache-sensitive sessions. Findings are still cached, so `lens_diagnostics` and `/lens-health` keep working.
 
-`actionableWarnings.enabled` gates the turn_end report. `includeLspCodeActions` fetches LSP code actions for each warning (requires an active language server). `deltaOnly` (default `true`) limits the report to lines touched in the current turn. `autoFix.enabled` applies conservative LSP quickfixes at `agent_end`; `autoFix.maxFixes` caps the number applied per turn (default `5`).
+`actionableWarnings.enabled` gates the turn_end report. `includeLspCodeActions` fetches LSP code actions for each warning (requires an active language server). `deltaOnly` (default `true`) limits the report to lines touched in the current turn. `autoFix.enabled` applies conservative LSP quickfixes at `agent_end`; `autoFix.maxFixes` caps the number applied per turn (default `5`, must be a non-negative whole number). `maxFixes: 0` keeps the report and applies nothing, which is a useful halfway step before enabling `autoFix` for real. Unlike the toggles in the table above there is no CLI counterpart, since it takes a number rather than being on or off.
 
 `ignore` is an array of gitignore-style glob patterns excluded from pi-lens scans across **every** project — the global counterpart to the per-project `.pi-lens.json` `ignore` below. Precedence is lowest: a project `.gitignore` or `.pi-lens.json` (including a `!negation`) overrides it, so you can globally hide e.g. `scratch/**` and still re-include it in one repo.
+
+Turn subsystems off globally instead of retyping flags every session:
+
+```json
+{
+  "lsp": { "enabled": false },
+  "tests": { "enabled": false },
+  "opengrep": { "enabled": false },
+  "readGuard": { "enabled": false },
+  "guard": { "enabled": true }
+}
+```
+
+`lens.enabled: false` starts every session with pi-lens off (the `--no-lens` equivalent); `/lens-toggle` still re-enables it for one session. `lsp.enabled: false` falls back to language-specific checkers such as pyright. `tests.enabled: false` skips the on-write test runner. `delta.enabled: false` reports every diagnostic rather than only ones introduced this turn. `opengrep.enabled: false` detaches the Opengrep security scanner. `readGuard.enabled: false` turns off the read-before-edit monitor. `guard.enabled: true` opts into the experimental commit/push blocker.
 
 ## Project Config
 
@@ -142,6 +191,7 @@ Explicit override for the review graph's own file budget (#775), for monorepos t
 ### Schema rules
 
 - Unknown top-level keys and unknown rule ids are ignored, so a forward-compat file with extra fields (e.g. an LSP `servers` block from `lsp.json`) won't break the parse.
+- Every toggle key in the table above must be a boolean, and its containing section must be an object. A wrong type is logged once and the key is treated as absent, so the flag falls through to its default rather than the whole file being rejected.
 - A malformed JSON file is logged once and treated as "no config" — your diagnostics never get blocked by a syntax error in your own config.
 - Rule thresholds must be positive finite numbers; invalid, zero, or negative values are logged once and ignored.
 - Mutation-control `enabled` values must be booleans; invalid values are logged once and ignored.

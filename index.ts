@@ -41,6 +41,7 @@ import {
 	resolvePiLensFlag,
 	resolvePiLensFlagWithSource,
 } from "./clients/lens-config.js";
+import { LENS_FLAGS } from "./clients/lens-flag-registry.js";
 import { loadPiLensProjectConfig } from "./clients/project-lens-config.js";
 import { initLensEvents } from "./clients/lens-events.js";
 import { wireBusEmitter } from "./clients/bus-publish.js";
@@ -374,104 +375,26 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Flags ---
 
-	pi.registerFlag("no-lens", {
-		description:
-			"Start pi-lens disabled for this session. Re-enable with /lens-toggle.",
-		type: "boolean",
-		default: false,
-	});
-
-	pi.registerFlag("no-lsp", {
-		description:
-			"Disable unified LSP diagnostics and use language-specific fallbacks (for example pyright)",
-		type: "boolean",
-		default: false,
-	});
-
-	pi.registerFlag("no-autoformat", {
-		description:
-			"Disable automatic formatting entirely (deferred format runs at agent_end by default)",
-		type: "boolean",
-		default: false,
-	});
-
-	pi.registerFlag("immediate-format", {
-		description:
-			"Run automatic formatting immediately after each write/edit instead of deferring to agent_end",
-		type: "boolean",
-		default: false,
-	});
-
-	pi.registerFlag("no-autofix", {
-		description: "Disable auto-fixing of lint issues (Biome, Ruff, ESLint)",
-		type: "boolean",
-		default: false,
-	});
-
-	pi.registerFlag("no-tests", {
-		description: "Disable test runner on write",
-		type: "boolean",
-		default: false,
-	});
-
-	pi.registerFlag("no-delta", {
-		description: "Disable delta mode (show all diagnostics, not just new ones)",
-		type: "boolean",
-		default: false,
-	});
-
-	pi.registerFlag("lens-guard", {
-		description:
-			"Experimental: block git commit/push when unresolved pi-lens blockers exist",
-		type: "boolean",
-		default: false,
-	});
-
-	pi.registerFlag("no-opengrep", {
-		description:
-			"Disable the Opengrep security scanner (a default-on auxiliary LSP; auto-installs, uses repo rules if present else the login-free 'auto' ruleset)",
-		type: "boolean",
-		default: false,
-	});
-
-	pi.registerFlag("no-read-guard", {
-		description: "Disable read-before-edit behavior monitor",
-		type: "boolean",
-		default: false,
-	});
-
-	pi.registerFlag("no-lens-context", {
-		description:
-			"Disable automatic context injection (session-start guidance, turn-end & test findings) while keeping tools, LSP, read-guard, and formatting active. Toggle with /lens-context-toggle. Also via contextInjection.enabled=false in config or PI_LENS_NO_CONTEXT_INJECTION=1.",
-		type: "boolean",
-		default: false,
-	});
-
-	pi.registerFlag("lens-turn-summary", {
-		description:
-			"Opt-in: persist a per-turn transcript entry summarizing diagnostics found, autofixes applied, and autoformats applied this turn (#484). Collapsed one-line, expandable in place. Default off. Also via turnSummary.enabled=true in ~/.pi-lens/config.json.",
-		type: "boolean",
-		default: false,
-	});
+	// #166: registration is driven by clients/lens-flag-registry.ts, the same
+	// declarative array that drives config parsing and precedence resolution, so
+	// a flag cannot exist on the CLI without a config key (or vice versa).
+	for (const spec of LENS_FLAGS) {
+		pi.registerFlag(spec.name, {
+			description: spec.description,
+			type: "boolean",
+			default: spec.default,
+		});
+	}
 
 	const globalConfig = loadPiLensGlobalConfig();
-	const globalConfigOnlyFlags = new Set([
-		"lens-actionable-warnings",
-		"lens-actionable-warning-actions",
-		"lens-actionable-warning-autofix",
-		"lens-actionable-warning-all",
-	]);
 	function getLensFlag(
 		name: string,
 		editedFilePath?: string,
 	): boolean | string | undefined {
-		const cliValue = globalConfigOnlyFlags.has(name)
-			? undefined
-			: pi.getFlag(name);
 		const projectConfig = loadPiLensProjectConfig(runtime.projectRoot);
 		return resolvePiLensFlag(
 			name,
-			cliValue,
+			pi.getFlag(name),
 			globalConfig,
 			projectConfig,
 			editedFilePath,
@@ -486,13 +409,10 @@ export default function (pi: ExtensionAPI) {
 	function getLensFlagSource(name: string, editedFilePath?: string): ReturnType<
 		typeof resolvePiLensFlagWithSource
 	>["source"] {
-		const cliValue = globalConfigOnlyFlags.has(name)
-			? undefined
-			: pi.getFlag(name);
 		const projectConfig = loadPiLensProjectConfig(runtime.projectRoot);
 		return resolvePiLensFlagWithSource(
 			name,
-			cliValue,
+			pi.getFlag(name),
 			globalConfig,
 			projectConfig,
 			editedFilePath,
@@ -503,10 +423,9 @@ export default function (pi: ExtensionAPI) {
 	let lensEnabled = !getLensFlag("no-lens");
 	// Automatic context injection (the `context` hook). Independent of lensEnabled
 	// so tools/LSP/read-guard/formatting keep running when it is off. Precedence:
-	// env override → CLI flag → global config (resolved inside getLensFlag).
-	let contextInjectionEnabled =
-		process.env.PI_LENS_NO_CONTEXT_INJECTION !== "1" &&
-		!getLensFlag("no-lens-context");
+	// env override → CLI flag → global config, all resolved inside getLensFlag
+	// from the registry's PI_LENS_NO_CONTEXT_INJECTION env binding (#166).
+	let contextInjectionEnabled = !getLensFlag("no-lens-context");
 	let lensWidgetVisible = globalConfig?.widget?.visible !== false;
 	// #190 Phase 2: snapshot of the source session's diagnostics, captured at
 	// `session_before_fork` and adopted by the forked session at the subsequent

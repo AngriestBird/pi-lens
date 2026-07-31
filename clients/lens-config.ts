@@ -1,14 +1,24 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { parseEnabledShape } from "./config-enabled-shape.js";
+import {
+	assignFlagConfigSection,
+	flagValueFromConfig,
+	getLensFlagSpec,
+	LENS_FLAGS,
+	readFlagConfigValue,
+} from "./lens-flag-registry.js";
 import {
 	findNestedProjectMutationValue,
 	type PiLensProjectConfig,
-	type ProjectMutationFlag,
 } from "./project-lens-config.js";
 
 export type PiLensFormatMode = "deferred" | "immediate";
+
+/** The `{ enabled?: boolean }` section every registry flag key lives under. */
+export interface PiLensToggleConfig {
+	enabled?: boolean;
+}
 
 export interface PiLensGlobalConfig {
 	/**
@@ -30,6 +40,20 @@ export interface PiLensGlobalConfig {
 		/** Whether the diagnostics widget is visible when a session starts. */
 		visible?: boolean;
 	};
+	/** Whether pi-lens runs at all this session (`--no-lens`). */
+	lens?: PiLensToggleConfig;
+	/** Whether unified LSP diagnostics run (`--no-lsp`). */
+	lsp?: PiLensToggleConfig;
+	/** Whether the test runner fires on write (`--no-tests`). */
+	tests?: PiLensToggleConfig;
+	/** Whether delta mode limits diagnostics to new ones (`--no-delta`). */
+	delta?: PiLensToggleConfig;
+	/** Whether the experimental commit/push blocker runs (`--lens-guard`). */
+	guard?: PiLensToggleConfig;
+	/** Whether the Opengrep auxiliary LSP attaches (`--no-opengrep`). */
+	opengrep?: PiLensToggleConfig;
+	/** Whether the read-before-edit behavior monitor runs (`--no-read-guard`). */
+	readGuard?: PiLensToggleConfig;
 	format?: {
 		/** Whether auto-formatting is enabled. */
 		enabled?: boolean;
@@ -54,6 +78,11 @@ export interface PiLensGlobalConfig {
 		autoFix?: {
 			/** Experimental conservative agent_end warning autofix. Defaults false. */
 			enabled?: boolean;
+			/**
+			 * Cap on quickfixes applied per turn. Defaults 5. `0` keeps the report
+			 * but applies nothing. Documented since #792 but only wired up in #166.
+			 */
+			maxFixes?: number;
 		};
 	};
 	contextInjection?: {
@@ -104,6 +133,12 @@ export function resetGlobalConfigWarnCache(): void {
 	warnedInvalidGlobalConfigs.clear();
 }
 
+function asConfigObject(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
 export function loadPiLensGlobalConfig(
 	configPath = getPiLensGlobalConfigPath(),
 ): PiLensGlobalConfig | undefined {
@@ -114,113 +149,71 @@ export function loadPiLensGlobalConfig(
 		const raw = parsed as Record<string, unknown>;
 		const warnInvalid = (reason: string) =>
 			warnInvalidGlobalConfigOnce(configPath, reason);
-		const dispatchRaw = raw.dispatch;
-		const dispatch =
-			dispatchRaw && typeof dispatchRaw === "object"
-				? (dispatchRaw as Record<string, unknown>)
-				: undefined;
-		const widgetRaw = raw.widget;
-		const widget =
-			widgetRaw && typeof widgetRaw === "object"
-				? (widgetRaw as Record<string, unknown>)
-				: undefined;
-		const format = parseEnabledShape(raw.format, "format", warnInvalid);
-		const autofix = parseEnabledShape(raw.autofix, "autofix", warnInvalid);
-		const formatModeRaw = raw.format;
-		const formatModeSource =
-			formatModeRaw && typeof formatModeRaw === "object"
-				? (formatModeRaw as Record<string, unknown>)
-				: undefined;
-		const actionableWarningsRaw = raw.actionableWarnings;
-		const actionableWarnings =
-			actionableWarningsRaw && typeof actionableWarningsRaw === "object"
-				? (actionableWarningsRaw as Record<string, unknown>)
-				: undefined;
-		const actionableWarningsAutoFix = parseEnabledShape(
-			actionableWarnings?.autoFix,
-			"actionableWarnings.autoFix",
-			warnInvalid,
-		);
-		const contextInjectionRaw = raw.contextInjection;
-		const contextInjection =
-			contextInjectionRaw && typeof contextInjectionRaw === "object"
-				? (contextInjectionRaw as Record<string, unknown>)
-				: undefined;
-		const turnSummaryRaw = raw.turnSummary;
-		const turnSummary =
-			turnSummaryRaw && typeof turnSummaryRaw === "object"
-				? (turnSummaryRaw as Record<string, unknown>)
-				: undefined;
-		const formatMode =
-			formatModeSource?.mode === "immediate" ||
-			formatModeSource?.mode === "deferred"
-				? (formatModeSource.mode as PiLensFormatMode)
-				: undefined;
+		const config: Record<string, unknown> = {};
+
+		for (const spec of LENS_FLAGS) {
+			if (spec.readGlobal) continue;
+			assignFlagConfigSection(raw, config, spec.configKey, warnInvalid);
+		}
+
 		const ignore = Array.isArray(raw.ignore)
 			? raw.ignore.filter((p): p is string => typeof p === "string")
 			: undefined;
+		if (ignore && ignore.length > 0) config.ignore = ignore;
 
-		return {
-			ignore: ignore && ignore.length > 0 ? ignore : undefined,
-			dispatch: dispatch
-				? {
-						runnerTimeoutFloorMs:
-							typeof dispatch.runnerTimeoutFloorMs === "number" &&
-							Number.isFinite(dispatch.runnerTimeoutFloorMs) &&
-							dispatch.runnerTimeoutFloorMs > 0
-								? dispatch.runnerTimeoutFloorMs
-								: undefined,
-					}
-				: undefined,
-			widget: widget
-				? {
-						visible:
-							typeof widget.visible === "boolean" ? widget.visible : undefined,
-					}
-				: undefined,
-			format: format
-				? {
-						enabled: format.enabled,
-						mode: formatMode,
-					}
-				: undefined,
-			autofix: autofix ? { enabled: autofix.enabled } : undefined,
-			actionableWarnings: actionableWarnings
-				? {
-						enabled:
-							typeof actionableWarnings.enabled === "boolean"
-								? actionableWarnings.enabled
-								: undefined,
-						includeLspCodeActions:
-							typeof actionableWarnings.includeLspCodeActions === "boolean"
-								? actionableWarnings.includeLspCodeActions
-								: undefined,
-						deltaOnly:
-							typeof actionableWarnings.deltaOnly === "boolean"
-								? actionableWarnings.deltaOnly
-								: undefined,
-						autoFix: actionableWarningsAutoFix
-							? { enabled: actionableWarningsAutoFix.enabled }
-							: undefined,
-					}
-				: undefined,
-			contextInjection: contextInjection
-				? {
-						enabled:
-							typeof contextInjection.enabled === "boolean"
-								? contextInjection.enabled
-								: undefined,
-					}
-				: undefined,
-			turnSummary: turnSummary
-				? {
-						enabled:
-							typeof turnSummary.enabled === "boolean"
-								? turnSummary.enabled
-								: undefined,
-					}
-				: undefined,
-		};
+		const dispatch = asConfigObject(raw.dispatch);
+		if (dispatch) {
+			config.dispatch = {
+				runnerTimeoutFloorMs:
+					typeof dispatch.runnerTimeoutFloorMs === "number" &&
+					Number.isFinite(dispatch.runnerTimeoutFloorMs) &&
+					dispatch.runnerTimeoutFloorMs > 0
+						? dispatch.runnerTimeoutFloorMs
+						: undefined,
+			};
+		}
+
+		const autoFix = asConfigObject(
+			asConfigObject(raw.actionableWarnings)?.autoFix,
+		);
+		if (autoFix && "maxFixes" in autoFix) {
+			if (
+				typeof autoFix.maxFixes === "number" &&
+				Number.isFinite(autoFix.maxFixes) &&
+				autoFix.maxFixes >= 0
+			) {
+				config.actionableWarnings ??= {};
+				const warnings = config.actionableWarnings as Record<string, unknown>;
+				warnings.autoFix ??= {};
+				(warnings.autoFix as Record<string, unknown>).maxFixes = Math.floor(
+					autoFix.maxFixes,
+				);
+			} else {
+				warnInvalid(
+					"actionableWarnings.autoFix.maxFixes must be a non-negative finite number",
+				);
+			}
+		}
+
+		const widget = asConfigObject(raw.widget);
+		if (widget) {
+			config.widget = {
+				visible:
+					typeof widget.visible === "boolean" ? widget.visible : undefined,
+			};
+		}
+
+		const format = asConfigObject(raw.format);
+		if (format) {
+			config.format ??= {};
+			const formatSection = config.format as Record<string, unknown>;
+			formatSection.mode =
+				format.mode === "immediate" || format.mode === "deferred"
+					? format.mode
+					: undefined;
+		}
+
+		return config as PiLensGlobalConfig;
 	} catch {
 		return undefined;
 	}
@@ -256,8 +249,17 @@ export function getGlobalTurnSummaryEnabled(configPath?: string): boolean {
 	return loadPiLensGlobalConfig(configPath)?.turnSummary?.enabled === true;
 }
 
+/** Per-turn quickfix cap; undefined means "use the built-in default of 5". */
+export function getGlobalActionableWarningMaxFixes(
+	configPath?: string,
+): number | undefined {
+	return loadPiLensGlobalConfig(configPath)?.actionableWarnings?.autoFix
+		?.maxFixes;
+}
+
 /** Which tier decided a resolved flag's value — for provenance in debug/skip logs (#792). */
 export type PiLensFlagSource =
+	| "env"
 	| "cli"
 	| "project"
 	| `nested-project:${string}`
@@ -275,9 +277,16 @@ export interface ResolvedPiLensFlag {
  * returning the `source` so callers can log e.g.
  * "(--no-autofix, source=project)" instead of a bare boolean (#792).
  *
- * Precedence (unchanged, maintainer decision — project wins over global,
- * including re-enabling; only an explicit CLI disabling flag outranks
- * project config): cli → project → global → default.
+ * Every tier is driven by `clients/lens-flag-registry.ts` (#166): the spec's
+ * `configKey` is read out of each config object rather than matched by a
+ * per-flag branch, so a new toggle needs no change here at all.
+ *
+ * Precedence: env → cli → nested-project → project → global → default.
+ * Project tiers apply to `scope: "project"` flags only (maintainer decision —
+ * project wins over global, including re-enabling; only an explicit CLI
+ * disabling flag outranks project config). A name with no registry entry
+ * passes its CLI value straight through, which is how untyped string flags
+ * like `--lens-opengrep-config` keep working.
  */
 export function resolvePiLensFlagWithSource(
 	name: string,
@@ -287,82 +296,44 @@ export function resolvePiLensFlagWithSource(
 	editedFilePath?: string,
 	projectRoot?: string,
 ): ResolvedPiLensFlag {
+	const spec = getLensFlagSpec(name);
+	if (spec?.env && process.env[spec.env] === "1") {
+		return { value: true, source: "env" };
+	}
 	if (value) return { value, source: "cli" };
-	const mutationFlag =
-		name === "no-autoformat" ||
-		name === "no-autofix" ||
-		name === "lens-actionable-warning-autofix"
-			? name
-			: undefined;
-	const nested =
-		mutationFlag && editedFilePath && projectRoot
-			? findNestedProjectMutationValue(
-					mutationFlag as ProjectMutationFlag,
-					editedFilePath,
-					projectRoot,
-				)
-			: undefined;
-	const nestedSource = nested
-		? path.resolve(nested.dir) === path.resolve(projectRoot!)
-			? "project"
-			: (`nested-project:${nested.dir}` as const)
-		: undefined;
-	if (name === "no-autoformat") {
-		if (nested) return { value: !nested.value, source: nestedSource! };
-		if (projectConfig?.format?.enabled !== undefined) {
-			return { value: !projectConfig.format.enabled, source: "project" };
-		}
-		if (config?.format?.enabled === false) {
-			return { value: true, source: "global" };
-		}
-		return { value: false, source: "default" };
-	}
-	if (name === "no-autofix") {
-		if (nested) return { value: !nested.value, source: nestedSource! };
-		if (projectConfig?.autofix?.enabled !== undefined) {
-			return { value: !projectConfig.autofix.enabled, source: "project" };
-		}
-		if (config?.autofix?.enabled === false) {
-			return { value: true, source: "global" };
-		}
-		return { value: false, source: "default" };
-	}
-	if (name === "immediate-format") {
-		const immediate = config?.format?.mode === "immediate";
-		return { value: immediate, source: immediate ? "global" : "default" };
-	}
-	if (name === "lens-actionable-warnings") {
-		const enabled = config?.actionableWarnings?.enabled === true;
-		return { value: enabled, source: enabled ? "global" : "default" };
-	}
-	if (name === "lens-actionable-warning-actions") {
-		const enabled = config?.actionableWarnings?.includeLspCodeActions === true;
-		return { value: enabled, source: enabled ? "global" : "default" };
-	}
-	if (name === "lens-actionable-warning-autofix") {
-		if (nested) return { value: nested.value, source: nestedSource! };
-		if (projectConfig?.actionableWarnings?.autoFix?.enabled !== undefined) {
+	if (!spec) return { value, source: "default" };
+
+	if (spec.scope === "project") {
+		const nested =
+			editedFilePath && projectRoot
+				? findNestedProjectMutationValue(spec, editedFilePath, projectRoot)
+				: undefined;
+		if (nested) {
 			return {
-				value: projectConfig.actionableWarnings.autoFix.enabled,
+				value: flagValueFromConfig(spec, nested.value),
+				source:
+					path.resolve(nested.dir) === path.resolve(projectRoot as string)
+						? "project"
+						: (`nested-project:${nested.dir}` as const),
+			};
+		}
+		const projectValue = readFlagConfigValue(projectConfig, spec.configKey);
+		if (projectValue !== undefined) {
+			return {
+				value: flagValueFromConfig(spec, projectValue),
 				source: "project",
 			};
 		}
-		const enabled = config?.actionableWarnings?.autoFix?.enabled === true;
-		return { value: enabled, source: enabled ? "global" : "default" };
 	}
-	if (name === "lens-actionable-warning-all") {
-		const all = config?.actionableWarnings?.deltaOnly === false;
-		return { value: all, source: all ? "global" : "default" };
+
+	const globalValue = spec.readGlobal
+		? spec.readGlobal((config ?? {}) as Record<string, unknown>)
+		: readFlagConfigValue(config, spec.configKey);
+	if (globalValue !== undefined) {
+		return { value: flagValueFromConfig(spec, globalValue), source: "global" };
 	}
-	if (name === "no-lens-context") {
-		const disabled = config?.contextInjection?.enabled === false;
-		return { value: disabled, source: disabled ? "global" : "default" };
-	}
-	if (name === "lens-turn-summary") {
-		const enabled = config?.turnSummary?.enabled === true;
-		return { value: enabled, source: enabled ? "global" : "default" };
-	}
-	return { value, source: "default" };
+
+	return { value: spec.default, source: "default" };
 }
 
 export function resolvePiLensFlag(

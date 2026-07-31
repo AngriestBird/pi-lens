@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
 import { getLatencyLogPath } from "../clients/latency-logger.js";
+import { LENS_FLAGS } from "../clients/lens-flag-registry.js";
 import extension from "../index.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
@@ -46,19 +47,10 @@ vi.mock("../clients/runtime-session.js", () => ({
 // The contract index.ts wires into the host. If a registration is dropped or
 // renamed, this catches it — the kind of glue that was previously untested
 // (#171) and that the dist-packaging breakage showed we need to guard.
-const EXPECTED_FLAGS = [
-	"no-lens",
-	"no-lsp",
-	"no-autoformat",
-	"immediate-format",
-	"no-autofix",
-	"no-tests",
-	"no-delta",
-	"lens-guard",
-	"no-opengrep",
-	"no-read-guard",
-	"no-lens-context",
-];
+// Flags are DERIVED from the registry rather than restated (#166): the old
+// hand-written list had already drifted (it was missing `lens-turn-summary`),
+// which is the same drift class the registry exists to make impossible.
+const EXPECTED_FLAGS = LENS_FLAGS.map((spec) => spec.name);
 const EXPECTED_COMMANDS = [
 	"lens-toggle",
 	"lens-context-toggle",
@@ -115,6 +107,23 @@ describe("index.ts extension wiring", () => {
 			}
 			for (const h of EXPECTED_HOOKS) {
 				expect(pi.getHandlers(h).length, `hook: ${h}`).toBeGreaterThan(0);
+			}
+		});
+
+		// #166: EXACTLY the registry, in registry order, with each spec's own
+		// description and default. A flag registered outside the registry (or a
+		// registry entry that never reaches the host) is the drift this closes.
+		it("registers exactly the flag registry, description and default included", () => {
+			const pi = createPiMock();
+			extension(pi.asExtensionAPI());
+
+			expect([...pi.flags.keys()]).toEqual(EXPECTED_FLAGS);
+			for (const spec of LENS_FLAGS) {
+				expect(pi.flags.get(spec.name), `flag: ${spec.name}`).toEqual({
+					description: spec.description,
+					type: "boolean",
+					default: spec.default,
+				});
 			}
 		});
 

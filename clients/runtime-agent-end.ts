@@ -1,24 +1,27 @@
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import {
+	type ActionableWarningsReport,
 	applyConservativeActionableWarningFixes,
 	checkActionableWarningsReportFresh,
-	type ActionableWarningsReport,
 } from "./actionable-warnings.js";
-import type { CacheManager } from "./cache-manager.js";
-import type { FormatService } from "./format-service.js";
-import { logLatency } from "./latency-logger.js";
-import { resyncLspFile, runFormatPhase } from "./pipeline.js";
 import { publishFilesTouched } from "./bus-publish.js";
+import type { CacheManager } from "./cache-manager.js";
 import {
 	publishAutofixStart,
 	publishFormatStart,
 } from "./format-events-publish.js";
+import type { FormatService } from "./format-service.js";
+import { logLatency } from "./latency-logger.js";
+import {
+	getGlobalActionableWarningMaxFixes,
+	type PiLensFlagSource,
+} from "./lens-config.js";
+import { resyncLspFile, runFormatPhase } from "./pipeline.js";
 import {
 	appendProjectChange,
 	type ProjectChangeSource,
 } from "./project-changes.js";
-import type { PiLensFlagSource } from "./lens-config.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 
 /**
@@ -444,6 +447,7 @@ export async function handleAgentEnd({
 				const fixSummary = await applyConservativeActionableWarningFixes({
 					cwd: ctxCwd ?? runtime.projectRoot,
 					report: eligibleReport,
+					maxFixes: getGlobalActionableWarningMaxFixes(),
 					dbg,
 				});
 				for (const changedFile of fixSummary.changedFiles) {

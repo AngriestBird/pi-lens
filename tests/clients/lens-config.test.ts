@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	getGlobalActionableWarningMaxFixes,
 	getGlobalAutofixEnabled,
 	getGlobalAutoformatEnabled,
 	getGlobalContextInjectionEnabled,
@@ -15,11 +16,17 @@ import {
 	resolvePiLensFlag,
 	resolvePiLensFlagWithSource,
 } from "../../clients/lens-config.js";
+import {
+	getLensFlagSpec,
+	LENS_FLAGS,
+	type LensFlagSpec,
+} from "../../clients/lens-flag-registry.js";
 import { EMPTY_PROJECT_CONFIG } from "../../clients/project-lens-config.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 const tmpDirs: string[] = [];
 let previousConfigPath: string | undefined;
+let previousEnvValues = new Map<string, string | undefined>();
 
 function makeTempHome(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-config-"));
@@ -34,8 +41,34 @@ function writeConfig(home: string, contents: string): string {
 	return configPath;
 }
 
+/** Build the nested object a spec's dotted `configKey` reads from. */
+function configFor(configKey: string, value: unknown): Record<string, unknown> {
+	const segments = configKey.split(".");
+	const root: Record<string, unknown> = {};
+	let node = root;
+	for (const segment of segments.slice(0, -1)) {
+		node[segment] = {};
+		node = node[segment] as Record<string, unknown>;
+	}
+	node[segments[segments.length - 1]] = value;
+	return root;
+}
+
+/** The config value that makes a spec's flag resolve to `true`. */
+function enablingConfigValue(spec: LensFlagSpec): unknown {
+	if (spec.name === "immediate-format") return "immediate";
+	return !spec.negated;
+}
+
 beforeEach(() => {
 	previousConfigPath = process.env.PI_LENS_CONFIG_PATH;
+	previousEnvValues = new Map(
+		LENS_FLAGS.filter((spec) => spec.env).map((spec) => [
+			spec.env as string,
+			process.env[spec.env as string],
+		]),
+	);
+	for (const name of previousEnvValues.keys()) delete process.env[name];
 	delete process.env.PI_LENS_CONFIG_PATH;
 	resetGlobalConfigWarnCache();
 	vi.spyOn(console, "error").mockImplementation(() => {});
@@ -46,6 +79,10 @@ afterEach(() => {
 	resetGlobalConfigWarnCache();
 	if (previousConfigPath === undefined) delete process.env.PI_LENS_CONFIG_PATH;
 	else process.env.PI_LENS_CONFIG_PATH = previousConfigPath;
+	for (const [name, value] of previousEnvValues) {
+		if (value === undefined) delete process.env[name];
+		else process.env[name] = value;
+	}
 	for (const dir of tmpDirs.splice(0)) {
 		removeTempDirSync(dir);
 	}
@@ -537,6 +574,24 @@ describe("global pi-lens config", () => {
 			).toEqual({ value: false, source: "default" });
 		});
 
+		it("reports source=env when a registry env binding forces the flag on", () => {
+			const spec = getLensFlagSpec("no-lens-context") as LensFlagSpec;
+			expect(spec.env).toBe("PI_LENS_NO_CONTEXT_INJECTION");
+
+			process.env.PI_LENS_NO_CONTEXT_INJECTION = "1";
+			// Outranks even a global config that explicitly re-enables injection.
+			expect(
+				resolvePiLensFlagWithSource("no-lens-context", false, {
+					contextInjection: { enabled: true },
+				}),
+			).toEqual({ value: true, source: "env" });
+
+			process.env.PI_LENS_NO_CONTEXT_INJECTION = "0";
+			expect(
+				resolvePiLensFlagWithSource("no-lens-context", false, {}),
+			).toEqual({ value: false, source: "default" });
+		});
+
 		it("resolvePiLensFlag delegates to resolvePiLensFlagWithSource with zero behavior change", () => {
 			const globalConfig = { autofix: { enabled: false } };
 			const projectConfig = {
@@ -551,6 +606,232 @@ describe("global pi-lens config", () => {
 					projectConfig,
 				).value,
 			);
+		});
+	});
+
+	// #166: the registry is the single source of truth, so coverage is asserted
+	// over EVERY entry rather than a hand-picked subset. A new flag with no
+	// config wiring fails here the moment it lands.
+	describe("flag registry coverage (#166)", () => {
+		it.each(LENS_FLAGS.map((spec) => [spec.name, spec] as const))(
+			"%s is settable from config.json and reports source=global",
+			(_name, spec) => {
+				const config = configFor(spec.configKey, enablingConfigValue(spec));
+				expect(
+					resolvePiLensFlagWithSource(spec.name, false, config),
+				).toEqual({ value: true, source: "global" });
+			},
+		);
+
+		it.each(LENS_FLAGS.map((spec) => [spec.name, spec] as const))(
+			"%s falls back to its registry default when config is silent",
+			(_name, spec) => {
+				expect(resolvePiLensFlagWithSource(spec.name, false, {})).toEqual({
+					value: spec.default,
+					source: "default",
+				});
+				expect(
+					resolvePiLensFlagWithSource(spec.name, undefined, undefined),
+				).toEqual({ value: spec.default, source: "default" });
+			},
+		);
+
+		it.each(LENS_FLAGS.map((spec) => [spec.name, spec] as const))(
+			"%s honors an explicit CLI value over config.json",
+			(_name, spec) => {
+				const disabling = configFor(
+					spec.configKey,
+					spec.name === "immediate-format" ? "deferred" : spec.negated,
+				);
+				expect(resolvePiLensFlagWithSource(spec.name, true, disabling)).toEqual(
+					{ value: true, source: "cli" },
+				);
+			},
+		);
+
+		// The gap this issue reported: seven flags were registered on the CLI but
+		// fell straight through the resolver, so config.json could never set them.
+		it.each([
+			["no-lens", "lens"],
+			["no-lsp", "lsp"],
+			["no-tests", "tests"],
+			["no-delta", "delta"],
+			["no-opengrep", "opengrep"],
+			["no-read-guard", "readGuard"],
+		] as const)(
+			"%s is disabled by %s.enabled=false in the parsed global config",
+			(flag, section) => {
+				const home = makeTempHome();
+				const configPath = writeConfig(
+					home,
+					JSON.stringify({ [section]: { enabled: false } }),
+				);
+
+				const config = loadPiLensGlobalConfig(configPath);
+				expect(config).toEqual({ [section]: { enabled: false } });
+				expect(resolvePiLensFlag(flag, false, config)).toBe(true);
+				// enabled=true is the built-in behavior, so the flag stays off.
+				expect(
+					resolvePiLensFlag(flag, false, { [section]: { enabled: true } }),
+				).toBe(false);
+			},
+		);
+
+		it("lens-guard is enabled by guard.enabled=true (the one positive backfill)", () => {
+			const home = makeTempHome();
+			const configPath = writeConfig(
+				home,
+				JSON.stringify({ guard: { enabled: true } }),
+			);
+
+			const config = loadPiLensGlobalConfig(configPath);
+			expect(config).toEqual({ guard: { enabled: true } });
+			expect(resolvePiLensFlag("lens-guard", false, config)).toBe(true);
+			expect(
+				resolvePiLensFlag("lens-guard", false, { guard: { enabled: false } }),
+			).toBe(false);
+		});
+
+		it("parses every registry key out of one config.json", () => {
+			const home = makeTempHome();
+			const raw: Record<string, unknown> = {};
+			for (const spec of LENS_FLAGS) {
+				const segments = spec.configKey.split(".");
+				let node = raw;
+				for (const segment of segments.slice(0, -1)) {
+					node[segment] ??= {};
+					node = node[segment] as Record<string, unknown>;
+				}
+				node[segments[segments.length - 1]] = enablingConfigValue(spec);
+			}
+			const configPath = writeConfig(home, JSON.stringify(raw));
+
+			const config = loadPiLensGlobalConfig(configPath);
+			for (const spec of LENS_FLAGS) {
+				expect(
+					resolvePiLensFlag(spec.name, false, config),
+					`flag: ${spec.name}`,
+				).toBe(true);
+			}
+		});
+
+		it("warns once and ignores a non-boolean value at any registry key", () => {
+			const home = makeTempHome();
+			const configPath = writeConfig(
+				home,
+				JSON.stringify({ lsp: { enabled: "no" }, guard: 7 }),
+			);
+
+			const config = loadPiLensGlobalConfig(configPath);
+			expect(config?.lsp?.enabled).toBeUndefined();
+			expect(config?.guard).toBeUndefined();
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining("lsp.enabled must be a boolean"),
+			);
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining("guard must be an object"),
+			);
+			expect(resolvePiLensFlag("no-lsp", false, config)).toBe(false);
+			expect(resolvePiLensFlag("lens-guard", false, config)).toBe(false);
+
+			const callsAfterFirst = (console.error as ReturnType<typeof vi.fn>).mock
+				.calls.length;
+			loadPiLensGlobalConfig(configPath);
+			expect(
+				(console.error as ReturnType<typeof vi.fn>).mock.calls.length,
+			).toBe(callsAfterFirst);
+		});
+
+		// Documented in globalconfig.md since #792, but no loader read it until
+		// #166 — agent_end always used the hardcoded default of 5.
+		it("parses actionableWarnings.autoFix.maxFixes", () => {
+			const home = makeTempHome();
+			const configPath = writeConfig(
+				home,
+				JSON.stringify({ actionableWarnings: { autoFix: { maxFixes: 12 } } }),
+			);
+
+			expect(loadPiLensGlobalConfig(configPath)).toEqual({
+				actionableWarnings: { autoFix: { maxFixes: 12 } },
+			});
+			expect(getGlobalActionableWarningMaxFixes(configPath)).toBe(12);
+		});
+
+		it("accepts maxFixes=0 as 'report but fix nothing', not as absent", () => {
+			const home = makeTempHome();
+			const configPath = writeConfig(
+				home,
+				JSON.stringify({
+					actionableWarnings: { autoFix: { enabled: true, maxFixes: 0 } },
+				}),
+			);
+
+			expect(getGlobalActionableWarningMaxFixes(configPath)).toBe(0);
+			// The toggle beside it still resolves normally.
+			expect(
+				resolvePiLensFlag(
+					"lens-actionable-warning-autofix",
+					false,
+					loadPiLensGlobalConfig(configPath),
+				),
+			).toBe(true);
+		});
+
+		it("warns once and ignores a negative or non-numeric maxFixes", () => {
+			const home = makeTempHome();
+			const negativePath = writeConfig(
+				home,
+				JSON.stringify({ actionableWarnings: { autoFix: { maxFixes: -1 } } }),
+			);
+			expect(getGlobalActionableWarningMaxFixes(negativePath)).toBeUndefined();
+
+			const stringPath = writeConfig(
+				home,
+				JSON.stringify({ actionableWarnings: { autoFix: { maxFixes: "5" } } }),
+			);
+			expect(getGlobalActionableWarningMaxFixes(stringPath)).toBeUndefined();
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"actionableWarnings.autoFix.maxFixes must be a non-negative finite number",
+				),
+			);
+		});
+
+		it("defaults maxFixes to undefined so the caller's built-in 5 applies", () => {
+			const home = makeTempHome();
+			const configPath = writeConfig(
+				home,
+				JSON.stringify({ actionableWarnings: { autoFix: { enabled: true } } }),
+			);
+			expect(getGlobalActionableWarningMaxFixes(configPath)).toBeUndefined();
+			expect(
+				getGlobalActionableWarningMaxFixes(path.join(home, "nope.json")),
+			).toBeUndefined();
+		});
+
+		it("only project-scoped flags read .pi-lens.json", () => {
+			const projectScoped = LENS_FLAGS.filter(
+				(spec) => spec.scope === "project",
+			).map((spec) => spec.name);
+			expect(projectScoped).toEqual([
+				"no-autoformat",
+				"no-autofix",
+				"lens-actionable-warning-autofix",
+			]);
+
+			// A global-scoped key sitting in a project config decides nothing.
+			const projectConfig = {
+				...EMPTY_PROJECT_CONFIG,
+				raw: { lsp: { enabled: false } },
+			};
+			expect(
+				resolvePiLensFlagWithSource(
+					"no-lsp",
+					false,
+					undefined,
+					projectConfig,
+				),
+			).toEqual({ value: false, source: "default" });
 		});
 	});
 });

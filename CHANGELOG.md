@@ -167,6 +167,42 @@ All notable changes to pi-lens will be documented in this file.
 	for each subprocess before starting the next. Behavior-preserving: same
 	per-file results, same final circular-dep state, same `dbg` logs — only
 	wall-clock time changes.
+- **Every runtime toggle is now settable from BOTH the CLI and
+	`~/.pi-lens/config.json`, driven by one declarative registry** (closes #166) —
+	the flag/config mapping used to live in two disconnected places (twelve
+	`pi.registerFlag` calls in `index.ts` and an if/else chain in
+	`resolvePiLensFlagWithSource`), which let coverage gaps open and persist.
+	Seven flags were registered on the CLI but fell straight through the
+	resolver, so config could never set them: `--no-lens`, `--no-lsp`,
+	`--no-tests`, `--no-delta`, `--lens-guard`, `--no-opengrep`, and
+	`--no-read-guard`. They now read `lens.enabled`, `lsp.enabled`,
+	`tests.enabled`, `delta.enabled`, `guard.enabled`, `opengrep.enabled`, and
+	`readGuard.enabled` (positive keys — a `--no-*` flag is the key set `false`).
+	The four actionable-warning toggles went the other way: they were
+	config-only and are now registered CLI flags too
+	(`--lens-actionable-warnings`, `--lens-actionable-warning-actions`,
+	`--lens-actionable-warning-autofix`, `--lens-actionable-warning-all`).
+	`clients/lens-flag-registry.ts` is the single source both surfaces read, so
+	they cannot diverge again; the wiring test derives its expected flag set from
+	it rather than restating it (the old hand-written list had already drifted,
+	missing `lens-turn-summary`).
+
+- **`actionableWarnings.autoFix.maxFixes` is now actually read** (#166) —
+	documented in `globalconfig.md` since #792 but no loader ever parsed it, so
+	`agent_end` always used the hardcoded default of 5 no matter what the config
+	said. Same defect class as the seven flags above: a documented config key
+	with nothing wiring it to the code that consumes it. Accepts any
+	non-negative whole number; `0` keeps the warning report while applying
+	nothing.
+
+- **Flag provenance gained an `env` tier and reports the global tier more
+	accurately** (#166) — `PI_LENS_NO_CONTEXT_INJECTION` moved out of a
+	hardcoded check in `index.ts` into the registry's `env` binding, so it
+	resolves through the same chain as everything else (env → cli →
+	nested-project → project → global → default) and reports `source: "env"`.
+	The global tier now reports `source: "global"` whenever the key is present,
+	not only when it happens to differ from the built-in default. Affects debug
+	and mutation-skip log lines only, no resolved values change.
 
 - **Word-index build/refresh/persist outcomes are now durably observable**
 	(refs #958, #926, #533) — every word-index signal previously rode solely on
