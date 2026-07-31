@@ -19,6 +19,27 @@ export interface ReverseDependencyIndex {
 	source: "review-graph" | "project-snapshot";
 }
 
+/**
+ * Rank files by the reverse-dependency centrality used throughout discovery:
+ * most importers first, then most outgoing dependencies, then stable path.
+ */
+export function rankFilesByReverseDependencyCentrality(
+	index: ReverseDependencyIndex,
+): string[] {
+	const files = new Set([
+		...Object.keys(index.imports),
+		...Object.keys(index.importedBy),
+	]);
+	return [...files].sort((a, b) => {
+		const fanIn = (index.importedBy[b]?.length ?? 0) -
+			(index.importedBy[a]?.length ?? 0);
+		if (fanIn !== 0) return fanIn;
+		const fanOut = (index.imports[b]?.length ?? 0) -
+			(index.imports[a]?.length ?? 0);
+		return fanOut || a.localeCompare(b);
+	});
+}
+
 function sortedUnique(values: Iterable<string>): string[] {
 	return [...new Set([...values].map((value) => normalizeMapKey(value)))].sort(
 		(a, b) => a.localeCompare(b),

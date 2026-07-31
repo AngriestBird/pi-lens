@@ -82,6 +82,8 @@ export interface ProjectReportTrust {
 	/** True when coverage is low enough that whole subsystems may be
 	 * invisible to every other section below. */
 	lowCoverage: boolean;
+	/** Exact element coverage when persistence capped this on-disk graph. */
+	persistCoverage?: ReviewGraph["persistCoverage"];
 	/** Human-readable call-outs for the two flags above — always non-empty
 	 * when `stale` or `lowCoverage` is true (#773: "must say so explicitly"). */
 	notes: string[];
@@ -300,7 +302,8 @@ function computeTrust(graph: ReviewGraph, cwd: string): ProjectReportTrust {
 
 	const ageMs = Date.now() - Date.parse(graph.builtAt);
 	const stale = Number.isFinite(ageMs) && ageMs > STALE_THRESHOLD_MS;
-	const lowCoverage = coverage < LOW_COVERAGE_THRESHOLD;
+	const lowCoverage =
+		coverage < LOW_COVERAGE_THRESHOLD || graph.persistCoverage?.partial === true;
 
 	const notes: string[] = [];
 	if (stale) {
@@ -310,9 +313,16 @@ function computeTrust(graph: ReviewGraph, cwd: string): ProjectReportTrust {
 		);
 	}
 	if (lowCoverage) {
-		notes.push(
-			`Low coverage: only ${filesCovered}/${filesTotal} project files (${Math.round(coverage * 100)}%) are in the graph — whole subsystems may be invisible below.`,
-		);
+		if (graph.persistCoverage?.partial) {
+			const p = graph.persistCoverage;
+			notes.push(
+				`Partial persisted graph: ${p.persistedNodes}/${p.totalNodes} nodes and ${p.persistedEdges}/${p.totalEdges} edges were retained under the ${p.cap}-element cap — whole subsystems may be invisible below.`,
+			);
+		} else {
+			notes.push(
+				`Low coverage: only ${filesCovered}/${filesTotal} project files (${Math.round(coverage * 100)}%) are in the graph — whole subsystems may be invisible below.`,
+			);
+		}
 	}
 
 	return {
@@ -329,6 +339,9 @@ function computeTrust(graph: ReviewGraph, cwd: string): ProjectReportTrust {
 		},
 		stale,
 		lowCoverage,
+		persistCoverage: graph.persistCoverage?.partial
+			? graph.persistCoverage
+			: undefined,
 		notes,
 	};
 }

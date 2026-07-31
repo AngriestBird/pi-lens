@@ -20,6 +20,7 @@ export interface ReviewGraphLogEntry {
 		| "build_failed"
 		| "lsp_symbol_fallback"
 		| "persist_scheduled"
+		| "persist_partial"
 		| "persist_succeeded"
 		| "persist_skipped"
 		| "persist_failed"
@@ -30,6 +31,7 @@ export interface ReviewGraphLogEntry {
 	nodes?: number;
 	edges?: number;
 	elements?: number;
+	persistedElements?: number;
 	cap?: number;
 	error?: string;
 	rawBytes?: number;
