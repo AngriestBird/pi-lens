@@ -681,6 +681,41 @@ describe("project snapshot worker persist (#958)", () => {
 			).toEqual([]);
 		}));
 
+	it("read-your-writes across the legacy-upgrade window: an in-flight write shadows a stale legacy .json (#958)", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			resetProjectSnapshotPersistWorkerForTests();
+			// Simulate the one-release upgrade window from a pre-#958 install: only
+			// a legacy uncompressed body is on disk (a real, positive mtime); no .gz
+			// exists yet. The save baseline must key off THIS body, not gz-only —
+			// otherwise the load gate rejects our fresh in-process write and serves
+			// the stale legacy body to a merge-consumer, dropping fields.
+			const stale = new RuntimeCoordinator();
+			stale.seedProjectSequence(3);
+			const legacyPath = getProjectSnapshotLegacyPath(cwd);
+			fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+			fs.writeFileSync(
+				legacyPath,
+				JSON.stringify(buildProjectSnapshotFromRuntime({ cwd, runtime: stale })),
+			);
+
+			// Hold the worker write in-flight so the fresh gz is not promoted yet.
+			process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS = "300";
+			const fresh = new RuntimeCoordinator();
+			fresh.seedProjectSequence(8);
+			saveProjectSnapshot(
+				cwd,
+				buildProjectSnapshotFromRuntime({ cwd, runtime: fresh }),
+			);
+
+			// gz not promoted yet — only the legacy body (+ a stage file) on disk.
+			expect(fs.existsSync(getProjectSnapshotPath(cwd))).toBe(false);
+			// A merge-consumer loading now must see our fresh in-process object
+			// (seq 8), NOT the stale legacy body (seq 3) it would otherwise re-read.
+			expect(loadProjectSnapshot(cwd)?.seq).toBe(8);
+
+			await waitForProjectSnapshotPersistsForTests();
+		}));
+
 	it("worker death degrades to a logged main-thread persist (honesty, #533)", async () =>
 		withProjectDataDirAsync(async (cwd) => {
 			resetProjectSnapshotPersistWorkerForTests();

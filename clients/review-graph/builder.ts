@@ -1055,6 +1055,10 @@ interface PendingCheckpointWrite {
 }
 const _checkpointGenerations = new Map<string, number>();
 const _checkpointWorkerRequests = new Map<number, PendingCheckpointWrite>();
+// Test-observable: how many checkpoint writes actually took the OFFLOADED
+// (worker) path rather than the synchronous fallback, so a test can assert the
+// offload really fired instead of passing trivially on a completed build.
+let _checkpointOffloadCountForTests = 0;
 
 function persistedData(pending: PendingPersist): PersistedGraphData {
 	return {
@@ -1720,6 +1724,7 @@ function writeReviewGraphCheckpoint(
 				: undefined,
 	};
 	worker.postMessage(request);
+	_checkpointOffloadCountForTests++;
 }
 
 /** Synchronous checkpoint write — the worker-unavailable fallback and the
@@ -1993,6 +1998,12 @@ export function resetReviewGraphPersistWorkerForTests(): void {
 	_lastWorkerFallbackReasonForTests = undefined;
 	_checkpointWorkerRequests.clear();
 	_checkpointGenerations.clear();
+	_checkpointOffloadCountForTests = 0;
+}
+
+/** Test-only: count of checkpoint writes that took the offloaded worker path. */
+export function getCheckpointOffloadCountForTests(): number {
+	return _checkpointOffloadCountForTests;
 }
 
 export function getReviewGraphWorkerFallbackReasonForTests():

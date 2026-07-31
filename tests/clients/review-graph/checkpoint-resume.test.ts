@@ -9,6 +9,7 @@ import {
 	clearGraphCache,
 	clearReviewGraphWorkspaceCache,
 	getCachedReviewGraph,
+	getCheckpointOffloadCountForTests,
 	resetReviewGraphPersistWorkerForTests,
 	reviewGraphCachePath,
 	waitForReviewGraphPersistsForTests,
@@ -191,6 +192,12 @@ describe("review-graph resumable checkpoint (#936 limit 2)", () => {
 		const graph = await buildOrUpdateGraph(root, [], new FactStore());
 		// Let any in-flight offloaded checkpoint promotion settle.
 		await waitForReviewGraphPersistsForTests();
+
+		// The offload path actually fired (not the sync fallback, and not zero
+		// checkpoints) — otherwise the assertions below hold trivially for any
+		// completed build. Two strides fire for 6 files at EVERY=2 (after files 2
+		// and 4; the last chunk is skipped since remainingAfter < EVERY).
+		expect(getCheckpointOffloadCountForTests()).toBeGreaterThanOrEqual(1);
 
 		// The offloaded checkpoints never corrupted the built graph: it matches a
 		// cold build exactly.

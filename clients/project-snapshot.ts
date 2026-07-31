@@ -720,15 +720,17 @@ export function saveProjectSnapshot(
 
 	// Record the authoritative in-process write BEFORE handing the body off, so
 	// a merge-read between now and the worker's promotion sees our own object
-	// (the on-disk gz still holds the previous generation until promotion). The
+	// (the on-disk body still holds the previous generation until promotion). The
 	// pre-write mtime is our baseline: while disk stays at it (or below), our
-	// object wins; a promotion or an external write moves past it.
-	let knownMtime = Number.NEGATIVE_INFINITY;
-	try {
-		knownMtime = fs.statSync(gzPath).mtimeMs;
-	} catch {
-		/* no prior gz body — baseline stays -Infinity */
-	}
+	// object wins; a promotion or an external write moves past it. Baseline off
+	// the CURRENTLY-RESOLVED body — which is the legacy uncompressed
+	// `project-snapshot.json` in the one-release upgrade window before the first
+	// gz promotion — not gz-only: statting only gzPath there would leave the
+	// baseline at -Infinity, so the load gate (which resolves the legacy body's
+	// real, positive mtime) would reject our own fresh write and serve the stale
+	// legacy body to a merge-consumer, silently dropping this snapshot's fields.
+	const priorBody = resolveSnapshotBodyPath(cwd);
+	const knownMtime = priorBody ? priorBody.mtimeMs : Number.NEGATIVE_INFINITY;
 	authoritativeSnapshots.set(key, { snapshot, knownMtime });
 	// A stale disk-parse-cache entry for this path must not out-vote the fresh
 	// authoritative write once the latter is dropped (oversized bodies).
