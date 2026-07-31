@@ -1546,10 +1546,33 @@ export class TreeSitterClient {
 						hasNonConstBinding = true;
 					}
 				}
-			} else if (node.type === "assignment_expression") {
+			} else if (
+				node.type === "assignment_expression" ||
+				node.type === "augmented_assignment_expression"
+			) {
 				const left = node.childForFieldName?.("left");
 				if (left?.type === "identifier" && left.text === name) {
 					hasReassignment = true;
+				} else if (
+					(left?.type === "member_expression" ||
+						left?.type === "subscript_expression") &&
+					left.childForFieldName?.("object")?.type === "identifier" &&
+					left.childForFieldName?.("object")?.text === name
+				) {
+					// Property/subscript write to the bound receiver
+					// (`name.<prop> = …` / `name[…] = …`). Any origin/host/path/
+					// protocol/port/href mutation re-taints the destination after
+					// construction, so fail closed and treat it as a reassignment
+					// (#1008). The ONE safe exception is a query-string-only write
+					// (`name.search = …`), which never alters the origin;
+					// `name.searchParams.<method>(…)` is a call_expression (not an
+					// assignment) and so never reaches this branch, staying exempt.
+					const searchOnly =
+						left.type === "member_expression" &&
+						left.childForFieldName?.("property")?.text === "search";
+					if (!searchOnly) {
+						hasReassignment = true;
+					}
 				}
 			}
 			for (const child of node.children ?? []) stack.push(child);
@@ -1633,10 +1656,7 @@ export class TreeSitterClient {
 	): boolean {
 		if (base.type === "string") return true;
 		if (base.type === "identifier") {
-			return (
-				this.resolvesToFileLiteralConst(base.text, rootNode) ||
-				this.isImportedBinding(base.text, rootNode)
-			);
+			return this.isFixedBaseIdentifier(base, rootNode);
 		}
 		if (base.type === "template_string") {
 			for (const child of base.children ?? []) {
@@ -1645,15 +1665,120 @@ export class TreeSitterClient {
 				if (
 					!inner ||
 					inner.type !== "identifier" ||
-					!(
-						this.resolvesToFileLiteralConst(inner.text, rootNode) ||
-						this.isImportedBinding(inner.text, rootNode)
-					)
+					!this.isFixedBaseIdentifier(inner, rootNode)
 				) {
 					return false;
 				}
 			}
 			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * True when the identifier `ident` (used as, or inside, a `new URL` base) is
+	 * a provably fixed origin AT ITS USE SITE. A file-local literal `const` is
+	 * only trusted when no nearer binding shadows it: `resolveFileConstValueNode`
+	 * already fails closed on any `let`/`var` of the same name and on multiple
+	 * `const` declarators, but function/method PARAMETERS are not variable
+	 * declarators and so slip past that gate — a request-tainted parameter base
+	 * would otherwise be exempted merely because an unrelated same-named
+	 * module-level `const` literal exists (#1008). So we additionally refuse the
+	 * file-const path when an enclosing function on the path from the use site to
+	 * the module root binds a parameter of the same name. Imported bindings stay
+	 * trusted unconditionally (imported-base-as-fixed is sound; see #1000).
+	 */
+	private isFixedBaseIdentifier(
+		ident: TreeSitterNode,
+		rootNode: TreeSitterNode,
+	): boolean {
+		const name = ident.text;
+		if (
+			!this.isShadowedByEnclosingParam(ident, name) &&
+			this.resolvesToFileLiteralConst(name, rootNode)
+		) {
+			return true;
+		}
+		return this.isImportedBinding(name, rootNode);
+	}
+
+	/**
+	 * True when some function/method/arrow on the ancestor chain of `node` (up to
+	 * the module root) binds a PARAMETER named `name` — i.e. `name` at `node`'s
+	 * location resolves to a parameter, not to an outer `const`. Only binding
+	 * positions are inspected (a parameter's `pattern`, including destructured
+	 * bindings); default-value expressions (`= expr`) are uses, not bindings, and
+	 * are skipped so an outer const referenced in a default is not mistaken for a
+	 * shadow. Fail-closed bias: unknown parameter shapes that surface a matching
+	 * identifier in a binding position are treated as a shadow.
+	 */
+	private isShadowedByEnclosingParam(
+		node: TreeSitterNode,
+		name: string,
+	): boolean {
+		const FUNCTION_TYPES = new Set([
+			"function_declaration",
+			"function_expression",
+			"generator_function",
+			"generator_function_declaration",
+			"arrow_function",
+			"method_definition",
+		]);
+		let current: TreeSitterNode | null | undefined = node.parent;
+		while (current) {
+			if (FUNCTION_TYPES.has(current.type)) {
+				// Bare-identifier arrow parameter: `name => …`.
+				const bare = current.childForFieldName?.("parameter");
+				if (bare?.type === "identifier" && bare.text === name) return true;
+				const params = current.childForFieldName?.("parameters");
+				if (params && this.paramsBindName(params, name)) return true;
+			}
+			current = current.parent;
+		}
+		return false;
+	}
+
+	/** True when a `formal_parameters` node binds `name` in any binding position. */
+	private paramsBindName(params: TreeSitterNode, name: string): boolean {
+		for (const param of params.children ?? []) {
+			if (!param.isNamed) continue;
+			// required_parameter / optional_parameter carry the binding in `pattern`
+			// and the default (a use, not a binding) in `value`.
+			const pattern =
+				param.type === "required_parameter" ||
+				param.type === "optional_parameter"
+					? param.childForFieldName?.("pattern")
+					: param;
+			if (pattern && this.patternBindsName(pattern, name)) return true;
+		}
+		return false;
+	}
+
+	/**
+	 * True when a binding pattern (`identifier`, or a destructuring
+	 * object/array/rest pattern) introduces `name`. Walks the pattern but skips
+	 * `assignment_pattern` default values (`= expr`), which are uses.
+	 */
+	private patternBindsName(pattern: TreeSitterNode, name: string): boolean {
+		if (pattern.type === "identifier") return pattern.text === name;
+		const stack: TreeSitterNode[] = [pattern];
+		while (stack.length > 0) {
+			const n = stack.pop();
+			if (!n) continue;
+			if (
+				(n.type === "identifier" ||
+					n.type === "shorthand_property_identifier_pattern") &&
+				n.text === name
+			) {
+				return true;
+			}
+			if (n.type === "assignment_pattern") {
+				// Only the left (binding) side introduces names; skip the default.
+				const left = n.childForFieldName?.("left") ?? n.children?.[0];
+				if (left) stack.push(left);
+				continue;
+			}
+			for (const c of n.children ?? []) stack.push(c);
 		}
 		return false;
 	}
