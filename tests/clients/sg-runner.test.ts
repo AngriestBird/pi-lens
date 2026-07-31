@@ -316,4 +316,28 @@ describe("SgRunner", () => {
 			expect(argv).toContain("$A && $B || $$$REST");
 		});
 	});
+
+	// #533 — the pidusage bug class: a SYNCHRONOUS `spawn()` throw inside
+	// `exec()`'s Promise executor (Windows `spawn UNKNOWN`/EINVAL) must not
+	// reject/crash the host — `exec` is contracted to always resolve with an
+	// `error`, exactly like an asynchronously-emitted spawn `'error'` event.
+	describe("exec() contains a synchronous spawn throw (#533)", () => {
+		it("resolves gracefully instead of rejecting when spawn throws sync", async () => {
+			const { SgRunner } = await import("../../clients/sg-runner.js");
+			const runner = new SgRunner();
+			// A NUL byte in an argv element makes Node's real `spawn()` throw
+			// SYNCHRONOUSLY (ERR_INVALID_ARG_VALUE) from inside the executor — the
+			// same detached-throw shape as the Windows `spawn UNKNOWN` failure.
+			(runner as unknown as { sgCommand: string }).sgCommand =
+				process.execPath;
+			(runner as unknown as { sgArgsPrefix: string[] }).sgArgsPrefix = [
+				String.fromCharCode(0), // NUL byte -> spawn() throws synchronously
+			];
+
+			// Must RESOLVE (never reject); the failure surfaces in `error`.
+			const result = await runner.exec(["-p", "x"]);
+			expect(result.matches).toEqual([]);
+			expect(result.error).toBeTruthy();
+		});
+	});
 });

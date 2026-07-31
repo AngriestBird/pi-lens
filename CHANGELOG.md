@@ -4,6 +4,24 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Contained spawn/callback failures that could crash the host (pidusage bug
+	class)** (refs #533) — a best-effort telemetry sampler recently killed a live
+	pi host with `Error: spawn UNKNOWN` (uncaughtException) because a bundled
+	dep's `child_process.spawn(...)` threw SYNCHRONOUSLY with no try/catch, from
+	a detached context the caller's `try/await/catch` could not contain. Audited
+	every spawn/detached-callback site in `clients/` and hardened the at-risk
+	best-effort/background ones to the repo's existing guard shape (try/catch
+	around the synchronous `spawn` + resolve gracefully, matching the async
+	`'error'`-listener path): `safeSpawnAsync`'s core spawn (the shared wrapper
+	dozens of best-effort callers rely on to NEVER reject), its Windows
+	`killPidTreeSync` (runs from `process` exit/signal handlers, where a throw
+	becomes an uncaughtException during shutdown; the POSIX branch was already
+	guarded), `SgRunner.exec`'s three ast-grep spawn branches, all six installer
+	tool-discovery/verify probes, the PSScriptAnalyzer runner's `spawnPs`, and
+	the MCP `analyzeFileFresh` worker fork. A synchronous spawn throw now
+	resolves the operation's normal failure value instead of escaping as an
+	unhandledRejection/uncaughtException. Behavior-preserving otherwise.
+
 - **Fixed: opengrep security findings now surface project-wide in
 	`lens_diagnostics mode=full`** (refs #585, #584, #533) — opengrep's
 	whole-tree CLI scan ran at session-start and cached its findings, and the
