@@ -1512,6 +1512,9 @@ export interface ReviewGraphPersistFlushResult {
 	bytes?: number;
 	elements?: number;
 	reason?: string;
+	/** Honest total-vs-persisted counts when the cap forced a partial snapshot
+	 * (#936 limit 3) — standalone callers must surface this, not just "ok". */
+	coverage?: ReviewGraphPersistCoverage;
 }
 
 /**
@@ -1604,6 +1607,7 @@ export function flushReviewGraphPersist(
 			path: pending.cachePath,
 			bytes: gzip.byteLength,
 			elements: pending.elementCount,
+			coverage: pending.graph.persistCoverage,
 		};
 	} catch (err) {
 		const reason = err instanceof Error ? err.message : String(err);
