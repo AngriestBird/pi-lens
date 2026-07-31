@@ -1554,6 +1554,186 @@ export class TreeSitterClient {
 		}
 
 		switch (postFilter) {
+			case "differs_only_by_case": {
+				try {
+					const field = captures.FIELD?.text ?? "";
+					const method = captures.METHOD?.text ?? "";
+					return (
+						field !== method &&
+						field.toLocaleLowerCase() === method.toLocaleLowerCase()
+					);
+				} catch {
+					return true;
+				}
+			}
+			case "in_default_package": {
+				try {
+					if (!rootNode) return true;
+					return !(rootNode.children ?? []).some(
+						(node) => node.type === "package_declaration",
+					);
+				} catch {
+					return true;
+				}
+			}
+			case "missing_mimetype_and_download_name": {
+				try {
+					const firstArg = captures.FIRST_ARG;
+					if (!firstArg) return true;
+					// Flask can infer a MIME type from a filesystem path. The warning
+					// is for file-like objects, where it needs an explicit MIME type or
+					// download name.
+					if (firstArg.type === "string") return false;
+					const args = firstArg.parent;
+					if (!args) return true;
+					return !(args.children ?? []).some((node) => {
+						if (node.type !== "keyword_argument") return false;
+						const name = node.childForFieldName?.("name")?.text;
+						return name === "mimetype" || name === "download_name";
+					});
+				} catch {
+					return true;
+				}
+			}
+			case "missing_super_call": {
+				try {
+					const body = captures.BODY;
+					const method = captures.METHOD?.text ?? "";
+					if (!body || !method) return true;
+					const stack = [body];
+					for (let visited = 0; stack.length > 0 && visited < 10_000; visited++) {
+						const node = stack.pop();
+						if (!node) break;
+						if (
+							node.type === "method_invocation" &&
+							node.childForFieldName?.("object")?.text === "super" &&
+							node.childForFieldName?.("name")?.text === method
+						) {
+							return false;
+						}
+						stack.push(...(node.children ?? []));
+					}
+					return true;
+				} catch {
+					return true;
+				}
+			}
+			case "no_assertion_call": {
+				try {
+					const body = captures.BODY;
+					if (!body) return true;
+					const assertionNames =
+						/^(?:assert\w*|fail|verify|expect|check|assume\w*)$/i;
+					const stack = [body];
+					for (let visited = 0; stack.length > 0 && visited < 10_000; visited++) {
+						const node = stack.pop();
+						if (!node) break;
+						if (node.type === "method_invocation") {
+							const name = node.childForFieldName?.("name")?.text ?? "";
+							if (assertionNames.test(name)) return false;
+						}
+						stack.push(...(node.children ?? []));
+					}
+					return true;
+				} catch {
+					return true;
+				}
+			}
+			case "not_closed_or_try_with_resources": {
+				try {
+					const declaration = captures.DECL;
+					const resource = captures.RESOURCE?.text ?? "";
+					if (!declaration || !resource) return true;
+					// (#956 review: the old resource_specification ANCESTOR walk was
+					// dead code — the query only matches local_variable_declaration,
+					// which the Java grammar never places inside a try header. The
+					// real try-with-resources shapes are handled in the scope scan
+					// below: a `resource` node naming this variable covers both
+					// `try (Type x = …)` and the Java 9 `try (x)` form.)
+					const scope =
+						this.navigator.findParent(declaration, [
+							"method_declaration",
+							"constructor_declaration",
+							"block",
+						]) ?? rootNode;
+					if (!scope) return true;
+					const resourceWord = new RegExp(`\b${resource}\b`);
+					const stack = [scope];
+					for (let visited = 0; stack.length > 0 && visited < 10_000; visited++) {
+						const node = stack.pop();
+						if (!node) break;
+						if (
+							node.type === "method_invocation" &&
+							node.childForFieldName?.("object")?.text === resource &&
+							node.childForFieldName?.("name")?.text === "close"
+						) {
+							return false;
+						}
+						if (
+							node.type === "resource" &&
+							resourceWord.test(node.text ?? "")
+						) {
+							return false;
+						}
+						stack.push(...(node.children ?? []));
+					}
+					return true;
+				} catch {
+					return true;
+				}
+			}
+			case "same_method_no_base_case": {
+				try {
+					const method = captures.NAME?.text ?? "";
+					if (!method || captures.RECURSE?.text !== method) return false;
+					const call = captures.CALL;
+					const declaration = call
+						? this.navigator.findParent(call, ["method_declaration"])
+						: undefined;
+					if (!declaration) return true;
+					const stack = [declaration];
+					for (let visited = 0; stack.length > 0 && visited < 10_000; visited++) {
+						const node = stack.pop();
+						if (!node) break;
+						// Any conditional or loop construct is a plausible base-case
+						// guard (#956 review: while/for-guarded recursion and ternary
+						// base cases are common). This errs toward suppressing a
+						// blocking diagnostic, never inventing one.
+						if (
+							node.type === "if_statement" ||
+							node.type === "switch_expression" ||
+							node.type === "switch_statement" ||
+							node.type === "while_statement" ||
+							node.type === "do_statement" ||
+							node.type === "for_statement" ||
+							node.type === "enhanced_for_statement" ||
+							node.type === "ternary_expression"
+						) {
+							return false;
+						}
+						stack.push(...(node.children ?? []));
+					}
+					// Cap exhausted without a verdict: this rule is BLOCKING, so a
+					// >10k-node method whose guard sits beyond the budget must not
+					// become a silent blocking FP — suppress instead (#956 review;
+					// the advisory filters keep their keep-the-diagnostic default).
+					return stack.length > 0 ? false : true;
+				} catch {
+					return true;
+				}
+			}
+			case "memset_for_sensitive_data": {
+				try {
+					const destination = captures.DEST?.text ?? "";
+					const value = captures.VALUE?.text?.trim() ?? "";
+					if (!/^(?:0|0x0+|NULL|nullptr)$/.test(value)) return false;
+					return /(?:pass(?:word)?|passwd|secret|token|api_?key|private_?key|credential|auth|pin)/i.test(
+						destination,
+					);
+				} catch {
+					return true;
+				}
+			}
 			case "unsafe_regex_dynamic_identifier": {
 				// unsafe-regex is intentionally a coarse advisory heuristic. When the
 				// interpolation is a plain identifier, recover the common safe-before-

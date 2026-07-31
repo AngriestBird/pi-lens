@@ -66,6 +66,11 @@ Whole-project loops that reuse one `FactStore` must delete `file.content` after
 that file's consumers finish (in a `finally` so abort/error exits release it).
 Keep derived file facts and session facts: later cross-file consumers may still
 need those, but no scan may retain every processed file's full source string.
+The folded project-diagnostics scanner publishes graph-facing structural facts
+through `clients/review-graph/shared-extraction-ir.ts` only after a file fully
+completes. Entries are compact extracted values (never content or WASM trees),
+content-hash checked by every graph consumer, and extraction failures are
+incomplete/rejected; cold graph callers remain independent and parse normally.
 
 ## MCP mirror (second host adapter — `mcp/` + `clients/lens-engine.ts`)
 
@@ -648,7 +653,18 @@ The GitHub release body is derived from the curated `CHANGELOG.md` section for t
 
 **Rule catalogs.** `docs/ast-grep_rules_catalog.md` + `docs/tree-sitter_rules_catalog.md` list every bundled rule **per language** and are **generated** — edit the rule files, not the docs, then `npm run docs:rule-catalogs` (`scripts/gen-rule-catalogs.mjs`). A `--check` run (in `tests/scripts/rule-catalogs.test.ts`) fails if they drift. ast-grep covers pi-lens-authored (`rules/ast-grep-rules/rules/`) + vendored CodeRabbit (`coderabbit/rules/`); tree-sitter covers `rules/tree-sitter-queries/<language>/`.
 
-**Tree-sitter post-filters.** Query rules may use the TypeScript-side `applyPostFilter` seam for bounded same-file AST checks that predicates cannot express; batched and single-rule execution both pass the parsed root. New filters must be implemented in `clients/tree-sitter-client.ts` because unknown filters fail closed.
+**Tree-sitter post-filters.** Query rules may use the TypeScript-side
+`applyPostFilter` seam for bounded same-file AST checks that predicates cannot
+express; batched and single-rule execution both pass the parsed root. Every
+YAML `post_filter` must have a switch implementation — the invariant test in
+`tests/clients/tree-sitter-879-post-filters.test.ts` enforces this against the
+real rule files and real switch source (do not hand-maintain counts here).
+Unknown names fail
+closed: every raw match is dropped and one error is logged per process. A new
+filter therefore ships with a bounded traversal, a `try/catch` that returns
+`true` (keep the diagnostic if filtering fails), and real hit+miss tests; if
+that cannot be done honestly with captures plus same-file AST context, remove
+or make the rule advisory instead of adding a placeholder name.
 
 ## Build & packaging: precompiled dist + resource resolution (hard-won — #182)
 

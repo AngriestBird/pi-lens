@@ -4,6 +4,13 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Project scans feed compact structural IR into review-graph builds** (refs
+	#939) — each fully completed scanner file publishes content-hash-bound
+	imports, reexports, function summaries, symbols, and references. A following
+	or overlapping graph build reuses only exact-hash, successful entries;
+	stale, failed, absent, and cold one-shot paths parse normally. The handoff
+	retains neither source content nor WASM trees, and cancelled scans expose
+	only files completed before cancellation.
 - **Session-start performance: LSP pre-warm, snapshot meta-gate, compact cached snapshot** (refs #947) — three
 	measured startup wins: (1) the dominant-language LSP pre-warm was gated on
 	full startup mode that the first-session heuristic never allows (82 quick
@@ -23,12 +30,13 @@ All notable changes to pi-lens will be documented in this file.
 	pi-lens itself wrote seconds earlier.
 
 - **Session-start latency is attributable end to end** (refs #948) â€” latency
+- **Session-start latency is attributable end to end** (refs #948) — latency
 	telemetry now separates host boot from pi-lens evaluation and records quick
 	and full session-start totals, pre-handler/bootstrap work, runtime reset,
 	log cleanup, LSP reset, sequence/snapshot reads (including snapshot bytes),
 	and delayed warmup scan/profile/index phases.
 
-- **Warm LSP names enrich tree-sitter read expansion** (refs #158) â€” partial
+- **Warm LSP names enrich tree-sitter read expansion** (refs #158) — partial
 	read expansion keeps tree-sitter's line boundaries authoritative, but an
 	already-open document with an already-active LSP can now replace the display
 	name/kind from `documentSymbol` (including `Class.method` ancestry) within a
@@ -36,7 +44,7 @@ All notable changes to pi-lens will be documented in this file.
 	servers retain the tree-sitter identity, and `ts_range_expanded` records
 	whether enrichment succeeded.
 
-- **Review-graph LSP fallback nodes** (refs #307) â€” when tree-sitter yields
+- **Review-graph LSP fallback nodes** (refs #307) — when tree-sitter yields
 	zero declarations, the builder may use `documentSymbol` from an already-live,
 	already-open capable server. Nodes carry `provenance: "lsp"`, hierarchical
 	containment survives persistence (including flat native-TypeScript-7 results
@@ -170,6 +178,13 @@ All notable changes to pi-lens will be documented in this file.
 	install on every analyze.
 
 ### Fixed
+
+- **Tree-sitter post-filters no longer leave silently dead rules** (refs #879) —
+	the 25 unknown filter references were resolved by implementing eight bounded,
+	fail-open-on-filter-error AST checks, expressing two conditions directly in
+	their queries, and removing fifteen rules whose promised semantic/framework
+	analysis could not be supported honestly. Coarse resource, assertion, and
+	sensitive-`memset` heuristics are advisory rather than blocking.
 
 - **Capped word indexes disclose partial coverage** (refs #928) — snapshots now
 	persist indexed-file count and truncation state, and both `symbol_search`

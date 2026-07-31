@@ -8,7 +8,10 @@ import { writeFileAtomic } from "../atomic-write.js";
 import type { FactStore } from "../dispatch/fact-store.js";
 import { fileContentProvider } from "../dispatch/facts/file-content.js";
 import type { FunctionSummary } from "../dispatch/facts/function-facts.js";
-import type { ImportEntry } from "../dispatch/facts/import-facts.js";
+import type {
+	ImportEntry,
+	ReExportEntry,
+} from "../dispatch/facts/import-facts.js";
 import type { DispatchContext } from "../dispatch/types.js";
 import { lazyEnvNumber } from "../env-utils.js";
 import { featureHintMetadata } from "../feature-hints.js";
@@ -48,6 +51,7 @@ import {
 	type ExtractedSymbols,
 	TreeSitterSymbolExtractor,
 } from "../tree-sitter-symbol-extractor.js";
+import { withTreeSitterRoot } from "../tree-sitter-shared.js";
 import { resolveGitIdentity } from "./git-identity.js";
 import { buildSymbolId } from "./symbol-id.js";
 import type { ReviewGraph, ReviewGraphEdge, ReviewGraphNode } from "./types.js";
@@ -55,6 +59,12 @@ import type {
 	ReviewGraphPersistWorkerRequest,
 	ReviewGraphPersistWorkerResult,
 } from "./persist-worker.js";
+import {
+	clearReviewGraphFileIr,
+	getFreshReviewGraphFileIr,
+	type ReviewGraphStructuralIr,
+	reviewGraphIrContentHash,
+} from "./shared-extraction-ir.js";
 
 // v3 (#260): test files are no longer indexed. Bumping the version makes
 // loadPersistedGraph reject any v2 snapshot (which still contains test-file
@@ -115,7 +125,7 @@ const MAIN_KIND_EXTENSIONS: string[] = Array.from(MAIN_KINDS).flatMap(
 	(kind) => KIND_EXTENSIONS[kind as keyof typeof KIND_EXTENSIONS] ?? [],
 );
 const CHANGED_SYMBOLS_PREFIX = "session.reviewGraph.changedSymbols:";
-const extractorCache = new Map<string, TreeSitterSymbolExtractor>();
+const extractorCache = new Map<string, TreeSitterSymbolExtractor | null>();
 
 // Per-invocation Promise cache: deduplicates concurrent buildOrUpdateGraph calls
 // for the same (cwd, changedFiles). Cleared at the start of each pipeline
@@ -1864,7 +1874,14 @@ async function getExtractor(
 	if (!client) return null;
 	const extractor = new TreeSitterSymbolExtractor(languageId, client);
 	const ok = await extractor.init();
-	if (!ok) return null;
+	if (!ok) {
+		// Memoize failures too (#955 review): the scan loop probes the
+		// extractor once per file, and an unmemoized grammar-load failure
+		// re-attempted resolution (possibly a lazy fetch) for every file of
+		// that language. A restart re-probes; within a process, one verdict.
+		extractorCache.set(languageId, null);
+		return null;
+	}
 	extractorCache.set(languageId, extractor);
 	return extractor;
 }
@@ -1890,6 +1907,69 @@ async function extractTreeSitterSymbols(
 		(tree) => extractor.extract(tree, filePath, content),
 	);
 	return extracted.parsed ? extracted.value : empty;
+}
+
+/**
+ * Extract the compact graph-facing facts while the scanner's parse is still
+ * hot. The caller publishes the result only after every consumer of that file
+ * has completed, so cancellation can never expose an in-progress entry.
+ */
+export async function captureReviewGraphStructuralIr(
+	filePath: string,
+	cwd: string,
+	content: string,
+	facts: FactStore,
+): Promise<{ complete: boolean; structural?: ReviewGraphStructuralIr }> {
+	const kind = detectFileKind(filePath);
+	if (!kind || !MAIN_KINDS.has(kind) || detectFileRole(filePath) === "test") {
+		return { complete: true };
+	}
+	if (kind === "jsts") {
+		if (
+			!facts.hasFileFact(filePath, "file.imports") ||
+			!facts.hasFileFact(filePath, "file.reexports") ||
+			!facts.hasFileFact(filePath, "file.functionSummaries")
+		) {
+			await ensureReviewGraphFacts(filePath, cwd, facts, content);
+		}
+		const parsed = await withTreeSitterRoot(filePath, content, () => true);
+		if (!parsed.parsed) return { complete: false };
+		return {
+			complete: true,
+			structural: {
+				kind: "jsts",
+				imports: facts.getFileFact<ImportEntry[]>(filePath, "file.imports") ?? [],
+				reexports:
+					facts.getFileFact<ReExportEntry[]>(filePath, "file.reexports") ?? [],
+				functionSummaries:
+					facts.getFileFact<FunctionSummary[]>(
+						filePath,
+						"file.functionSummaries",
+					) ?? [],
+			},
+		};
+	}
+	const languageId = mapKindToTreeSitterLanguage(kind, filePath);
+	if (!languageId) return { complete: true };
+	const client = getSharedTreeSitterClient();
+	if (!client || !(await client.init())) return { complete: false };
+	const extractor = await getExtractor(languageId);
+	if (!extractor) return { complete: false };
+	const result = await client.withParsedTree(
+		filePath,
+		languageId,
+		content,
+		(tree) => extractor.extract(tree, filePath, content),
+	);
+	if (!result.parsed) return { complete: false };
+	return {
+		complete: true,
+		structural: {
+			kind: "tree-sitter",
+			languageId,
+			extracted: result.value,
+		},
+	};
 }
 
 // #655: some grammars' SYMBOL_QUERIES match the SAME declaration node under two
@@ -2298,6 +2378,13 @@ async function addFileToGraph(
 	// #260: tests aren't graph-relevant — guard the per-file chokepoint too so
 	// the incremental/cascade path (a changed *.test.ts) never adds them either.
 	if (detectFileRole(file) === "test") return;
+	const contentHash =
+		typeof contentOverride === "string"
+			? reviewGraphIrContentHash(contentOverride)
+			: undefined;
+	const sharedIr = contentHash
+		? getFreshReviewGraphFileIr(cwd, file, contentHash)?.structural
+		: undefined;
 	if (kind === "jsts") {
 		// Release content ONLY when this builder seeded it. The incremental
 		// per-edit path receives the LIVE dispatch FactStore (via the
@@ -2309,7 +2396,18 @@ async function addFileToGraph(
 			facts.getFileFact<string>(file, "file.content") !== undefined &&
 			contentOverride == null;
 		try {
-			await ensureReviewGraphFacts(file, cwd, facts, contentOverride);
+			if (sharedIr?.kind === "jsts") {
+				facts.setFileFact(file, "file.content", contentOverride ?? "");
+				facts.setFileFact(file, "file.imports", sharedIr.imports);
+				facts.setFileFact(file, "file.reexports", sharedIr.reexports);
+				facts.setFileFact(
+					file,
+					"file.functionSummaries",
+					sharedIr.functionSummaries,
+				);
+			} else {
+				await ensureReviewGraphFacts(file, cwd, facts, contentOverride);
+			}
 			addJsTsFile(graph, cwd, file, facts, ignoredIds);
 		} finally {
 			// The graph has copied every durable value it needs. Keep derived facts
@@ -2320,12 +2418,22 @@ async function addFileToGraph(
 	}
 	const languageId = mapKindToTreeSitterLanguage(kind, file);
 	if (!languageId) return;
-	const extracted = await extractTreeSitterSymbols(
-		file,
-		languageId,
-		contentOverride,
-	);
+	const irExtracted =
+		sharedIr?.kind === "tree-sitter" &&
+		sharedIr.languageId === languageId
+			? sharedIr.extracted
+			: undefined;
+	const extracted =
+		irExtracted ??
+		(await extractTreeSitterSymbols(file, languageId, contentOverride));
 	addTreeSitterFile(graph, cwd, file, languageId, extracted, ignoredIds);
+	// Zero symbols consults the warm/open LSP fallback REGARDLESS of whether
+	// the symbols came from shared IR or direct extraction (#955 review): a
+	// degraded extractor (defs query failed to compile — init() deliberately
+	// succeeds, the documented kotlin case) yields parsed-true/empty, and
+	// treating that as authoritative would silently lose a whole language's
+	// symbols whenever a scan preceded the build. For genuinely empty files
+	// the fallback is a no-op unless the file is open in a warm client.
 	if (extracted.symbols.length === 0) {
 		const lspSymbols = await getOpenDocumentSymbols(file);
 		const added = lspSymbols
@@ -3068,8 +3176,19 @@ async function _doBuildGraph(
 			}
 		}
 	};
+	const extractAndDrainIr = async (): Promise<void> => {
+		try {
+			await extractFiles();
+		} finally {
+			// The build consumed every fresh entry (consume-once deletes them);
+			// leftovers are stale/test/non-build files nothing will ever read.
+			// Clearing here bounds the registry to the scan-to-build window
+			// (#955 review — the #886 retention class).
+			clearReviewGraphFileIr(cwd);
+		}
+	};
 	if (treeSitterClient) {
-		await treeSitterClient.withParseCacheMeasurement(extractFiles, (stats) => {
+		await treeSitterClient.withParseCacheMeasurement(extractAndDrainIr, (stats) => {
 			logTreeSitterCacheStats({
 				scope: "review_graph_full",
 				filePath: cwd,
@@ -3079,7 +3198,7 @@ async function _doBuildGraph(
 			});
 		});
 	} else {
-		await extractFiles();
+		await extractAndDrainIr();
 	}
 
 	resolveDeferredSymbolEdges(graph);
