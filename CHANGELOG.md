@@ -4,6 +4,29 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Fixed: opengrep security findings now surface project-wide in
+	`lens_diagnostics mode=full`** (refs #585, #584, #533) — opengrep's
+	whole-tree CLI scan ran at session-start and cached its findings, and the
+	cache-only extractor registry (`project-diagnostics/extractors.ts`) even
+	registered an `"opengrep"` row — but #585 replaced that registry in
+	production with `fetchFreshProjectDiagnostics`
+	(`project-diagnostics/fresh-fetch.ts`), whose `ANALYZER_IDS` list omitted
+	opengrep. Net: opengrep scanned + cached, yet nothing production read it
+	back, so semgrep-grade security findings (ERROR→blocking, CWE-tagged) never
+	reached the agent for unedited/project-wide files — a scan-and-orphan
+	honesty gap (#533). `fetchFreshProjectDiagnostics` now runs opengrep the
+	same way it runs gitleaks/trivy: an availability probe (opengrep is
+	structurally always-on, so no static project-type gate), then a fresh scan
+	that JOINS the session-start scan of the same root via
+	`SecurityScanClient.dedupeScan` rather than double-spawning a heavy scan,
+	with the result written back to cache and adapted to project diagnostics.
+	The per-edit aux-LSP push path (`clientScope: with-auxiliary`,
+	`AUXILIARY_LSP_PROFILES`) was verified already-working and is untouched;
+	opengrep stays excluded from the push-only LSP workspace sweep (#584). The
+	now-dead cache-only `extractCachedProjectDiagnostics` reader — the parallel
+	registry that shadowed `ANALYZER_IDS` and let opengrep silently diverge — was
+	removed so a single source of truth (#883) remains.
+
 - **Guarded Windows CPU/RSS resource sampling so a best-effort sampler can no
 	longer crash the pi host** (refs #620, #533) — `clients/resource-sampler.ts`
 	sampled CPU%/RSS via `pidusage`, whose Windows path shells out to `gwmi`
