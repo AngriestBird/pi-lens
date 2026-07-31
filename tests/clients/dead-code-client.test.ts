@@ -6,7 +6,6 @@
  * on PATH, and skips cleanly otherwise (mirrors the LSP smoke-skip pattern).
  */
 
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
@@ -20,6 +19,7 @@ import {
 	getDeadCodeClients,
 	type DeadCodeResult,
 } from "../../clients/dead-code-client.js";
+import { safeSpawn } from "../../clients/safe-spawn.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
 const REPO_ROOT = path.resolve(
@@ -39,16 +39,22 @@ const VULTURE_OUTPUT = [
 ].join("\n");
 
 function vultureAvailable(): boolean {
+	// #902: was `execFileSync(cmd[0], cmd[1], { stdio: "pipe" })`. On Windows,
+	// pip's console_scripts launcher for `vulture` is a bare-extension shim
+	// resolved via PATH+PATHEXT, which raw execFileSync (shell:false, no
+	// PATHEXT walk) can silently fail to find under load — a probe failure
+	// here means the whole guarded suite skips, so a spurious failure isn't
+	// just noise, it's a false "vulture unavailable" that hides real
+	// coverage. `safeSpawn` (shared with production, `clients/safe-spawn.ts`)
+	// resolves the command via a cached PATH+PATHEXT walk, same hardening
+	// #817 already gave the real dispatch spawn path (single source of
+	// truth, #883).
 	for (const cmd of [
 		["vulture", ["--version"]],
 		["python", ["-m", "vulture", "--version"]],
 	] as const) {
-		try {
-			execFileSync(cmd[0], cmd[1], { stdio: "pipe" });
-			return true;
-		} catch {
-			/* try next */
-		}
+		const result = safeSpawn(cmd[0], [...cmd[1]]);
+		if (result.status === 0 && !result.error) return true;
 	}
 	return false;
 }

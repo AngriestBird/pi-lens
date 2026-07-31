@@ -323,6 +323,20 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Remaining test-suite spawns routed off `shell:true` to close the Windows-spawn flake class** (refs #902) —
+	`tests/clients/ast-grep-rule-precedence-followups.test.ts` (CLI probe + `runCli`),
+	`tests/clients/coderabbit-ast-grep-rules.test.ts` (vendored-catalog smoke),
+	`tests/clients/dispatch/runners/ast-grep-playground-verify.test.ts` (async `runVerify`),
+	`tests/clients/dead-code-client.test.ts` (vulture probe), and
+	`tests/clients/lsp/clangd-lazy-indexing.test.ts` (clangd `where`/`which` probe) now spawn
+	through the hardened `safeSpawn`/`safeSpawnAsync` (`clients/safe-spawn.ts`, #817) instead of
+	a raw `execFileSync`/`spawnSync`/`spawn`/`execSync` with a fresh, uncached `cmd.exe` wrapper
+	per call — the documented intermittent ENOENT/EAGAIN source under windows-latest CI's
+	parallel process-creation pressure. Completes the sweep PR #993 started for the two
+	ast-grep runner test files; `git` spawns are left as-is (no `.cmd` shim, so out of the flake
+	class) and the `mcp/*` and MCP harness spawns that need bidirectional stdin streaming are
+	left as-is (`safeSpawnAsync` only exposes a close-based result, not a live stdin/stdout pipe).
+
 - **Tree-sitter post-filters no longer leave silently dead rules** (refs #879) —
 	the 25 unknown filter references were resolved by implementing eight bounded,
 	fail-open-on-filter-error AST checks, expressing two conditions directly in

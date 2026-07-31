@@ -1,10 +1,10 @@
-import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { js as sgJs, ts as sgTs } from "@ast-grep/napi";
 import * as yaml from "js-yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { safeSpawn } from "../../clients/safe-spawn.js";
 import {
 	evaluateAstGrepRules,
 	type AstGrepEvaluateOptions,
@@ -143,10 +143,16 @@ function napiDiagnostics(
 
 function findCli(): string | undefined {
 	for (const command of ["ast-grep", "sg"]) {
-		const result = spawnSync(command, ["--version"], {
-			encoding: "utf8",
-			shell: process.platform === "win32",
-		});
+		// #902: was `spawnSync(command, ..., { shell: process.platform ===
+		// "win32" })` — a fresh, uncached cmd.exe wrapper per call that
+		// intermittently failed to spawn at all under the process-creation
+		// pressure of a full parallel test-suite run on windows-latest CI
+		// (ENOENT/EAGAIN from the OS, not a real "CLI unavailable" signal).
+		// `safeSpawn` (shared with production, `clients/safe-spawn.ts`)
+		// resolves the command via a cached PATH+PATHEXT walk and spawns the
+		// resolved .exe/.com directly — same hardening #817 already gave the
+		// real dispatch spawn path (single source of truth, #883).
+		const result = safeSpawn(command, ["--version"]);
 		// The output must identify ast-grep, not merely exit 0: on Linux `sg` is
 		// util-linux's setgid runner, which exits 0 for `--version` and then fails
 		// every `scan --config` call — so the cliIt tests below ran against the
@@ -154,7 +160,7 @@ function findCli(): string | undefined {
 		// probes apply (clients/sg-runner.ts `probeCommand`,
 		// clients/dispatch/runners/utils/runner-helpers.ts).
 		const version = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-		if (result.status === 0 && /\bast[- ]grep\b/i.test(version)) {
+		if (result.status === 0 && !result.error && /\bast[- ]grep\b/i.test(version)) {
 			return command;
 		}
 	}
@@ -166,14 +172,20 @@ const cliIt = astGrepCli ? it : it.skip;
 
 function runCli(configPath: string, filePath: string) {
 	if (!astGrepCli) throw new Error("ast-grep CLI unavailable");
-	return spawnSync(
-		astGrepCli,
-		["scan", "--config", configPath, "--json=compact", filePath],
-		{
-			encoding: "utf8",
-			shell: process.platform === "win32",
-		},
-	);
+	// #902: safeSpawn instead of raw spawnSync(..., { shell: true }) — see
+	// findCli comment above.
+	const result = safeSpawn(astGrepCli, [
+		"scan",
+		"--config",
+		configPath,
+		"--json=compact",
+		filePath,
+	]);
+	return {
+		status: result.status,
+		stderr: result.stderr,
+		stdout: result.stdout,
+	};
 }
 
 afterEach(() => {
