@@ -538,6 +538,130 @@ describe("knip turn-end backoff", () => {
 	});
 });
 
+// ── Call-graph impact delta persistence (#179 / #533) ────────────────────────
+
+describe("turn_end call-graph impact — persists to the delta report", () => {
+	// A tiny two-hop caller chain: editing foo.ts:doThing has a direct caller
+	// (bar.ts:callerFn → WillBreak) and an indirect caller (baz.ts:grandCaller →
+	// MayBreak). impact() BFS surfaces both; the adapter attributes them to the
+	// CALLER files. The turn-state key for the edited file is "src/foo.ts", so
+	// the call-graph callee key must be prefixed with that exact string.
+	function makeCallGraph() {
+		return {
+			callees: new Map(),
+			callers: new Map<string, Set<string>>([
+				["src/foo.ts:doThing", new Set(["src/bar.ts:callerFn"])],
+				["src/bar.ts:callerFn", new Set(["src/baz.ts:grandCaller"])],
+			]),
+			edges: [],
+			inDegree: new Map(),
+			unresolvedRefs: 0,
+			totalRefs: 0,
+			builtAt: new Date().toISOString(),
+		} as any;
+	}
+
+	function seedEditedFoo(env: ReturnType<typeof setupTestEnvironment>) {
+		const filePath = path.join(env.tmpDir, "src/foo.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "export function doThing() { return 1; }\n");
+		return filePath;
+	}
+
+	it("persists call-graph diagnostics + source on a call-graph-ONLY turn (no knip delta)", async () => {
+		const env = setupTestEnvironment("pi-lens-callgraph-only-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "cg-only-session" });
+			runtime.callGraph = makeCallGraph();
+			const cacheManager = new CacheManager(false);
+			seedEditedFoo(env);
+			cacheManager.addModifiedRange(
+				path.join(env.tmpDir, "src/foo.ts"),
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
+
+			// lens_diagnostics only ever reads the PERSISTED delta report — assert the
+			// call-graph findings actually reached disk (the #533 silent-vanish bug).
+			const report = loadProjectDiagnosticsDeltaReport(env.tmpDir);
+			expect(report, "delta report was not written at all").toBeDefined();
+			expect(report?.sources).toContain("call-graph");
+			expect(report?.diagnostics).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						runner: "call-graph",
+						rule: "call-graph:willbreak",
+						severity: "warning",
+						filePath: path.join(env.tmpDir, "src/bar.ts"),
+					}),
+				]),
+			);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("persists BOTH knip and call-graph entries on a mixed turn", async () => {
+		const env = setupTestEnvironment("pi-lens-callgraph-mixed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "cg-mixed-session" });
+			runtime.callGraph = makeCallGraph();
+			const cacheManager = new CacheManager(false);
+			const filePath = seedEditedFoo(env);
+			cacheManager.addModifiedRange(
+				filePath,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, {
+					ctxCwd: env.tmpDir,
+					knipClient: {
+						ensureAvailable: async () => true,
+						analyze: async () => ({
+							...EMPTY_KNIP_RESULT,
+							issues: [
+								{ type: "unlisted", name: "left-pad", file: filePath, line: 1 },
+							],
+						}),
+					},
+				}),
+			);
+
+			const report = loadProjectDiagnosticsDeltaReport(env.tmpDir);
+			expect(report).toBeDefined();
+			// Pre-fix, the report was serialized with only knip's entries and
+			// "call-graph" was appended afterwards → discarded. Both must survive.
+			expect(report?.sources).toEqual(
+				expect.arrayContaining(["knip", "call-graph"]),
+			);
+			expect(report?.diagnostics.some((d) => d.runner === "knip")).toBe(true);
+			expect(report?.diagnostics.some((d) => d.runner === "call-graph")).toBe(
+				true,
+			);
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+});
+
 // ── sessionId stamped into turn state ─────────────────────────────────────────
 
 describe("addModifiedRange sessionId stamping", () => {

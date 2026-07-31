@@ -22,6 +22,40 @@ All notable changes to pi-lens will be documented in this file.
 	or path comes from a function parameter, `process.env`/config (including a
 	const initialized from `process.env`), request data, or a parsed
 	redirect/`location` value — a missed SSRF stays far worse than one FP.
+	Adversarial review then closed two bypasses in that exemption: (1) a
+	post-construction origin mutation (`u.host = req.x` / `u.href = …` /
+	`u["host"] = …`, incl. augmented assignments) now re-taints the receiver and
+	fails closed — only query-only writes (`u.search`/`u.searchParams`) stay
+	exempt; (2) a request-tainted function *parameter* base is no longer exempted
+	just because an unrelated same-named module-level `const` literal exists
+	(scope-aware shadow check; imported bases stay trusted).
+- **Normalized call-graph impact checks into structured `ProjectDiagnostic`s**
+	(refs #179) — the last remaining adapter gap in #179's normalization sweep.
+	`runtime-turn.ts`'s turn-end call-graph impact check (WillBreak/MayBreak
+	callers of symbols edited this turn, via `impact()`/`call-graph.ts`) was
+	advisory-text only, unlike the other 9 runners already normalized through
+	`runner-adapters/*.ts`. Added `callGraphImpactToProjectDiagnostics`
+	(`project-diagnostics/runner-adapters/call-graph-impact.ts`), a pure mapper
+	attributing each diagnostic to the CALLER's file (no line — `impact()`'s
+	`ImpactResult` never carries one, and the underlying call-graph symbol
+	table only has a placeholder `line: 1`, so inventing one would be a fake
+	location). Severity is deliberately capped below this codebase's
+	"blocking" hard-stop tier for BOTH WillBreak and MayBreak (#533 honesty):
+	`impact()` is a name-resolution heuristic with no type information, so a
+	resolved caller is never a confirmed break. Wired at turn-end (not
+	`fresh-fetch.ts`/`ANALYZER_IDS`) since impact analysis is inherently
+	per-turn-edit, not a whole-project scan — same reasoning that keeps
+	test-runner's own turn-end fire out of that registry. The existing
+	human-readable advisory string is kept as-is (separate surface, same
+	dual-surface pattern already used by knip's turn-end delta). The call-graph
+	block now runs BEFORE the single `writeProjectDiagnosticsDeltaReport`
+	serialization point (alongside knip's delta push) rather than after it —
+	previously it pushed into `projectDiagnosticsDelta`/`projectDiagnosticsSources`
+	past the one-shot write, so a call-graph-only turn persisted nothing and a
+	mixed turn dropped the call-graph entries, leaving `lens_diagnostics` (a
+	pure reader of the persisted report) unable to ever surface the findings
+	(#533). Covered by a new `handleTurnEnd`-level regression test asserting the
+	persisted report for both call-graph-only and mixed turns.
 - **Fixed: `no-javascript-url`/`no-javascript-url-js` no longer flag defensive
 	`javascript:`-URL filters** (refs #533) — a dogfood run flagged code that was
 	*rejecting* `javascript:` links (e.g. `url.startsWith("javascript:")` inside a

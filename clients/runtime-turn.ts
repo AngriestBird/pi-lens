@@ -803,6 +803,57 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// Session summaries are intentionally suppressed at turn_end to avoid
 	// distracting the agent with non-blocking telemetry.
 
+	// Call-graph impact analysis — surface WillBreak/MayBreak callers for modified
+	// symbols. MUST run BEFORE the writeProjectDiagnosticsDeltaReport serialization
+	// below: it is a delta contributor (like knip above), pushing into
+	// projectDiagnosticsDelta / projectDiagnosticsSources. If it ran after the
+	// single write, a call-graph-only turn would persist nothing and a mixed turn
+	// would drop the call-graph entries — so lens_diagnostics (which only reads the
+	// persisted report) would never surface the findings (#179/#533).
+	if (runtime.callGraph && files.length > 0) {
+		try {
+			const { impact, formatImpact } = await import("./call-graph.js");
+			const { callGraphImpactToProjectDiagnostics } = await import(
+				"./project-diagnostics/runner-adapters/call-graph-impact.js"
+			);
+			const impactLines: string[] = [];
+			const impactFindings: { calleeKey: string; results: ReturnType<typeof impact> }[] =
+				[];
+			for (const filePath of files.slice(0, 5)) {
+				// Find callee keys for this file in the call graph
+				const fileCallerKeys = [...runtime.callGraph.callers.keys()].filter(
+					(k) => k.startsWith(`${filePath}:`),
+				);
+				for (const calleeKey of fileCallerKeys.slice(0, 3)) {
+					const results = impact(runtime.callGraph, calleeKey);
+					if (results.length > 0) {
+						impactFindings.push({ calleeKey, results });
+						const summary = formatImpact(results, cwd);
+						if (summary)
+							impactLines.push(`  ${calleeKey.split(":").pop()}: ${summary}`);
+					}
+				}
+			}
+			if (impactLines.length > 0) {
+				advisoryParts.push(
+					`📊 Call-graph impact (changed symbols have callers):\n${impactLines.join("\n")}`,
+				);
+			}
+			if (impactFindings.length > 0) {
+				const impactDiagnostics = callGraphImpactToProjectDiagnostics(
+					cwd,
+					impactFindings,
+				);
+				if (impactDiagnostics.length > 0) {
+					projectDiagnosticsDelta.push(...impactDiagnostics);
+					projectDiagnosticsSources.add("call-graph");
+				}
+			}
+		} catch {
+			// Non-fatal — call graph is best-effort
+		}
+	}
+
 	if (projectDiagnosticsDelta.length > 0) {
 		writeProjectDiagnosticsDeltaReport(cwd, {
 			version: PROJECT_DIAGNOSTICS_CACHE_VERSION,
@@ -897,35 +948,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					error: err instanceof Error ? err.message : String(err),
 				},
 			});
-		}
-	}
-
-	// Call-graph impact analysis — surface WillBreak/MayBreak callers for modified symbols
-	if (runtime.callGraph && files.length > 0) {
-		try {
-			const { impact, formatImpact } = await import("./call-graph.js");
-			const impactLines: string[] = [];
-			for (const filePath of files.slice(0, 5)) {
-				// Find callee keys for this file in the call graph
-				const fileCallerKeys = [...runtime.callGraph.callers.keys()].filter(
-					(k) => k.startsWith(`${filePath}:`),
-				);
-				for (const calleeKey of fileCallerKeys.slice(0, 3)) {
-					const results = impact(runtime.callGraph, calleeKey);
-					if (results.length > 0) {
-						const summary = formatImpact(results, cwd);
-						if (summary)
-							impactLines.push(`  ${calleeKey.split(":").pop()}: ${summary}`);
-					}
-				}
-			}
-			if (impactLines.length > 0) {
-				advisoryParts.push(
-					`📊 Call-graph impact (changed symbols have callers):\n${impactLines.join("\n")}`,
-				);
-			}
-		} catch {
-			// Non-fatal — call graph is best-effort
 		}
 	}
 
