@@ -140,13 +140,20 @@ describe("review-graph incremental/full-build equivalence (#939)", () => {
 					(Math.imul(randomState, 1_103_515_245) + 12_345) >>> 0;
 				return randomState / 0x1_0000_0000;
 			};
-			const incrementalRoot = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-inc-eq-a-"),
-			);
-			const fullRoot = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-inc-eq-b-"),
-			);
-			roots.push(incrementalRoot, fullRoot);
+			// Both arms share ONE mkdtemp'd parent with fixed subpaths (rather
+			// than two independent mkdtemp roots) so their absolute paths can
+			// never diverge in length/shape — cheap defense-in-depth against any
+			// future path-derived metadata leaking a difference between the
+			// incremental and full-rebuild arms. The actual root cause (a
+			// feature-hint classifier reading the absolute temp path) is already
+			// fixed at the source (#962/#972); this only guards against a
+			// regression reintroducing that class of bug.
+			const pairRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-inc-eq-"));
+			const incrementalRoot = path.join(pairRoot, "incremental");
+			const fullRoot = path.join(pairRoot, "full");
+			fs.mkdirSync(incrementalRoot, { recursive: true });
+			fs.mkdirSync(fullRoot, { recursive: true });
+			roots.push(pairRoot);
 			const state = new Map<string, string>([
 				["src/a.ts", "export const alpha = 1;\n"],
 				[

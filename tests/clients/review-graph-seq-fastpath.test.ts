@@ -197,7 +197,14 @@ describe("review-graph seq fast path (#451)", () => {
 		}
 	});
 
-	it("periodic re-verify (every 20th build) resumes the full sweep", async () => {
+	// This test drives ~21 real `buildOrUpdateGraph` calls (one seed build plus
+	// up to 21 fast-path builds looking for the every-20th re-verify) — a
+	// time-budget issue, not a hang, under the default 5000ms timeout: it's
+	// comfortably under budget isolated, but under full-suite parallel fork
+	// contention that many sequential real builds can tip past 5s. Give it
+	// the same kind of generous headroom as `tests/index-integration.test.ts`'s
+	// `INTEGRATION_TIMEOUT_MS` — a genuine hang still fails, just later.
+	it("periodic re-verify (every 20th build) resumes the full sweep", { timeout: 30_000 }, async () => {
 		const env = setupTestEnvironment("pi-lens-seqfp-verify-");
 		try {
 			const aPath = createTempFile(
