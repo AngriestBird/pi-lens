@@ -30,6 +30,7 @@ import {
 	getDefaultStartupTools,
 } from "./language-profile.js";
 import { logLatency } from "./latency-logger.js";
+import { logWordIndex } from "./word-index-logger.js";
 import { runLogCleanup } from "./log-cleanup.js";
 import { setSessionLanguages } from "./widget-state.js";
 import { initLSPConfig, loadLSPConfig } from "./lsp/config.js";
@@ -523,11 +524,32 @@ async function buildOrRefreshWordIndex(args: {
 				dbg(
 					`session_start word-index: incremental (seq=${effectiveSeq}, refreshed=${result.refreshed}, dropped=${result.dropped}, skipped=${result.skipped}, reused=${result.reused}, ${Date.now() - startMs}ms)`,
 				);
+				// M2, #958: the incremental-vs-full decision + honest coverage
+				// (indexedFileCount/truncated/skipped), independent of host `dbg`.
+				logWordIndex({
+					phase: "incremental_refresh",
+					cwd: snapshotRoot,
+					trigger: "session_start",
+					durationMs: Date.now() - startMs,
+					indexedFileCount: index.docCount,
+					tokens: index.postings.size,
+					truncated: index.truncated,
+					refreshed: result.refreshed,
+					dropped: result.dropped,
+					skipped: result.skipped,
+					reused: result.reused,
+				});
 				return result;
 			} catch (err) {
 				dbg(
 					`session_start word-index: incremental refresh failed; falling back to full rebuild (${err})`,
 				);
+				logWordIndex({
+					phase: "incremental_fallback",
+					cwd: snapshotRoot,
+					trigger: "session_start",
+					reason: err instanceof Error ? err.message : String(err),
+				});
 			}
 		}
 	}
@@ -549,10 +571,24 @@ async function buildOrRefreshWordIndex(args: {
 		`session_start word-index: rebuilt (absent/stale, seq=${effectiveSeq}) ` +
 			`${runtime.wordIndex.docCount} files, ${runtime.wordIndex.postings.size} tokens (${Date.now() - startMs}ms)`,
 	);
+	// M2, #958: full-rebuild decision + honest coverage. `docs.skipped` (L1)
+	// counts files the walk saw but could not index (unreadable / over the byte
+	// cap) so a partial index is never reported as complete (#533).
+	logWordIndex({
+		phase: "full_rebuild",
+		cwd: snapshotRoot,
+		trigger: "session_start",
+		durationMs: Date.now() - startMs,
+		indexedFileCount: runtime.wordIndex.docCount,
+		tokens: runtime.wordIndex.postings.size,
+		truncated: runtime.wordIndex.truncated,
+		skipped: docs.skipped,
+	});
 	return {
 		mode: "full",
 		refreshed: runtime.wordIndex.docCount,
 		dropped: 0,
+		skipped: docs.skipped,
 		reused: 0,
 	};
 }
