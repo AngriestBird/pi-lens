@@ -7,6 +7,7 @@
 
 import * as path from "node:path";
 import { RuleCache } from "../../cache/rule-cache.js";
+import { minimatch } from "../../deps/minimatch.js";
 import { isTestFile } from "../../file-utils.js";
 import {
 	buildOrUpdateGraph,
@@ -355,6 +356,28 @@ function getTotalLinesChanged(
 /** Threshold: skip entity extraction for changes under 5 lines */
 const ENTITY_EXTRACTION_LINE_THRESHOLD = 5;
 
+/**
+ * `filePath` relative to `root`, forward-slashed, for matching a rule's
+ * `ignore_paths` globs. Falls back to the absolute (slash-normalized) path
+ * when `filePath` isn't under `root` (e.g. an out-of-tree temp file), so a
+ * glob like `scripts/**` simply never matches rather than throwing.
+ */
+function relativeForIgnoreGlob(filePath: string, root: string): string {
+	const rel = path.relative(root, filePath);
+	const normalized = (rel.startsWith("..") ? filePath : rel).split(path.sep).join("/");
+	return normalized;
+}
+
+function matchesIgnorePaths(
+	filePath: string,
+	root: string,
+	patterns: string[] | undefined,
+): boolean {
+	if (!patterns || patterns.length === 0) return false;
+	const rel = relativeForIgnoreGlob(filePath, root);
+	return patterns.some((pattern) => minimatch(rel, pattern, { dot: true }));
+}
+
 const treeSitterRunner: RunnerDefinition = {
 	id: "tree-sitter",
 	appliesTo: ["jsts", "python", "go", "rust", "ruby", "cxx", "csharp", "php", "css"],
@@ -463,6 +486,7 @@ const treeSitterRunner: RunnerDefinition = {
 					defect_class: q.defect_class,
 					inline_tier: q.inline_tier,
 					skip_test_files: q.skip_test_files,
+					ignore_paths: q.ignore_paths,
 					has_fix: q.has_fix,
 					fix_action: q.fix_action,
 					filePath: q.filePath,
@@ -491,11 +515,20 @@ const treeSitterRunner: RunnerDefinition = {
 		// python-assert-production — `assert` is the idiomatic test assertion) opt
 		// out via `skip_test_files` while the runner otherwise runs on test files.
 		const fileIsTest = isTestFile(filePath);
+		// Per-rule path carve-out (#965): a rule that's noise on CLI scripts or a
+		// project's own logging sink (e.g. no-console-except-error firing inside
+		// scripts/** or lib/logger.ts) opts out via `ignore_paths`, the same way
+		// `skip_test_files` opts a rule out of test files above.
+		const ignoreRoot = ctx.projectRoot ?? ctx.cwd;
 		const effectiveQueries = (
 			ctx.blockingOnly
 				? languageQueries.filter((q) => q.inline_tier !== "review")
 				: languageQueries
-		).filter((q) => !(fileIsTest && q.skip_test_files));
+		).filter(
+			(q) =>
+				!(fileIsTest && q.skip_test_files) &&
+				!matchesIgnorePaths(filePath, ignoreRoot, q.ignore_paths),
+		);
 
 		logTreeSitter({
 			phase: "queries_loaded",

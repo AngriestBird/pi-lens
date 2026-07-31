@@ -149,6 +149,18 @@ export interface TreeSitterQuery {
 	 * matter there), so this is a deliberate per-rule carve-out.
 	 */
 	skip_test_files?: boolean;
+	/**
+	 * Skip this rule on files whose path (relative to the project root,
+	 * forward-slashed) matches any of these glob patterns — e.g. a
+	 * `scripts` directory glob plus a `logger.ts` basename glob for a
+	 * debug-output rule that's expected to fire in CLI entry points and the
+	 * logging sink itself (#965). Same shape/matching as the ast-grep YAML
+	 * rule `ignores` field (`clients/dispatch/runners/yaml-rule-parser.ts`)
+	 * — kept as a separate opt-in field (not reusing `skip_test_files`'s
+	 * boolean) since "is a test file" and "is a CLI script / logger" are
+	 * unrelated axes a rule may need independently.
+	 */
+	ignore_paths?: string[];
 	has_fix: boolean;
 	fix_action?: string;
 	examples?: {
@@ -290,6 +302,9 @@ export class TreeSitterQueryLoader {
 					? (String(parsed.inline_tier) as "blocking" | "warning" | "review")
 					: undefined,
 				skip_test_files: parsed.skip_test_files === true,
+				ignore_paths: Array.isArray(parsed.ignore_paths)
+					? parsed.ignore_paths.map(String)
+					: undefined,
 				// Parse predicates if present
 				predicates: Array.isArray(parsed.predicates)
 					? parsed.predicates.map((p: any) => ({
