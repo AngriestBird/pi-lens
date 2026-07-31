@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { writeFileAtomic } from "./atomic-write.js";
 import { getProjectDataDir } from "./file-utils.js";
 import { readJsonCache } from "./json-cache-read.js";
 import { normalizeMapKey } from "./path-utils.js";
@@ -173,6 +174,20 @@ export function isProjectSnapshotMetaStale(
  */
 interface SnapshotParseCacheEntry {
 	mtimeMs: number;
+	/**
+	 * Size in bytes at cache time. FAT/exFAT round `mtime` to a 2s bucket, so
+	 * two writes inside the same bucket can report an IDENTICAL `mtimeMs` even
+	 * though the body changed — mtime alone would then serve a stale cached
+	 * parse for a file that was, in fact, just rewritten. `size` is already
+	 * computed for free at both cache-write sites (the `fs.statSync` call
+	 * below, and the byte-length check in `saveProjectSnapshot`), so requiring
+	 * it to also match is a free, defensive tiebreaker: a same-bucket rewrite
+	 * that also happens to keep the exact same byte length still slips
+	 * through, but that residual case is the same fail-open/self-healing
+	 * posture as the rest of this cache (worst case: one stale read until the
+	 * next external write changes the size or crosses an mtime bucket).
+	 */
+	size: number;
 	snapshot: ProjectSnapshot | null;
 }
 const SNAPSHOT_PARSE_CACHE_MAX = 4;
@@ -205,28 +220,30 @@ export function _resetProjectSnapshotParseCacheForTests(): void {
 export function loadProjectSnapshot(cwd: string): ProjectSnapshot | null {
 	const snapshotPath = getProjectSnapshotPath(cwd);
 	let mtimeMs: number;
+	let size: number;
 	try {
-		mtimeMs = fs.statSync(snapshotPath).mtimeMs;
+		const stat = fs.statSync(snapshotPath);
+		mtimeMs = stat.mtimeMs;
+		size = stat.size;
 	} catch {
 		// Missing snapshots are the normal cold-start case.
 		snapshotParseCache.delete(snapshotPath);
 		return null;
 	}
 	const cached = snapshotParseCache.get(snapshotPath);
-	if (cached && cached.mtimeMs === mtimeMs) return cached.snapshot;
+	// Both mtime AND size must match (see the `size` field doc on
+	// SnapshotParseCacheEntry for why: coarse FAT/exFAT mtime resolution can
+	// otherwise alias a just-rewritten file onto a stale cache entry).
+	if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
+		return cached.snapshot;
+	}
 	const snapshot =
 		readJsonCache<ProjectSnapshot>(
 			snapshotPath,
 			(parsed) => parseSnapshot(parsed) ?? undefined,
 		) ?? null;
-	let fileBytes = 0;
-	try {
-		fileBytes = fs.statSync(snapshotPath).size;
-	} catch {
-		/* raced a delete — skip caching */
-	}
-	if (fileBytes > 0 && fileBytes <= SNAPSHOT_PARSE_CACHE_MAX_BYTES) {
-		cacheParsedSnapshot(snapshotPath, { mtimeMs, snapshot });
+	if (size > 0 && size <= SNAPSHOT_PARSE_CACHE_MAX_BYTES) {
+		cacheParsedSnapshot(snapshotPath, { mtimeMs, size, snapshot });
 	} else {
 		snapshotParseCache.delete(snapshotPath);
 	}
@@ -238,13 +255,46 @@ export function saveProjectSnapshot(
 	snapshot: ProjectSnapshot,
 ): void {
 	const snapshotPath = getProjectSnapshotPath(cwd);
+	const metaPath = getProjectSnapshotMetaPath(cwd);
 	fs.mkdirSync(path.dirname(snapshotPath), { recursive: true });
 	// Compact serialization (no pretty-print): ~30% smaller at the observed
 	// 40-112MB sizes, which directly shrinks both the write and every later
 	// read+parse on session start. #947.
 	const serialized = JSON.stringify(snapshot);
+
+	// #958: meta is written FIRST, body SECOND — the reverse of the original
+	// order. A crash/failure between the two writes can now only produce
+	// "meta already claims the new seq, body hasn't caught up yet" (the meta
+	// races ahead). The meta-first gate (isProjectSnapshotMetaStale) reads
+	// that as *fresh* and falls through to parsing the body, whose own
+	// embedded `seq` is still the old one, so `isProjectSnapshotFresh`
+	// correctly rejects it as stale on the body's own merits — one wasted
+	// parse, self-healing, no data lost. The OLD body-then-meta order could
+	// instead leave an old-seq meta sitting over a freshly written body,
+	// which the meta-first gate discards WITHOUT ever reading it — throwing
+	// away a genuinely fresh snapshot. That direction is not recoverable
+	// until the next save, so it's the one this reorder eliminates.
+	//
+	// Both writes go through the shared atomic tmp+rename helper so a
+	// concurrent reader never observes a torn (partially written) file
+	// either way. The meta write uses `bestEffort: false`: if the (tiny,
+	// unlikely-to-fail) meta write itself fails, the body write below is
+	// skipped entirely — the save is simply lost this round (fail-open,
+	// caught by `saveRuntimeProjectSnapshot`'s own try/catch) rather than
+	// silently leaving a stale meta in place while the body writer stampedes
+	// ahead with a fresh body under it, which would reintroduce the exact
+	// skew direction being fixed here.
+	writeFileAtomic(
+		metaPath,
+		JSON.stringify({
+			timestamp: snapshot.generatedAt,
+			version: snapshot.version,
+			seq: snapshot.seq,
+		}),
+		{ bestEffort: false },
+	);
 	try {
-		fs.writeFileSync(snapshotPath, serialized);
+		writeFileAtomic(snapshotPath, serialized, { bestEffort: false });
 	} catch (err) {
 		// #957 review: callers mutate the loaded (= cached) object in place
 		// before saving. If the body write fails (disk full, AV/OneDrive
@@ -260,9 +310,11 @@ export function saveProjectSnapshot(
 	// stat just means the next load re-parses. Oversized bodies are never
 	// cached (see SNAPSHOT_PARSE_CACHE_MAX_BYTES).
 	try {
-		if (Buffer.byteLength(serialized) <= SNAPSHOT_PARSE_CACHE_MAX_BYTES) {
+		const size = Buffer.byteLength(serialized);
+		if (size <= SNAPSHOT_PARSE_CACHE_MAX_BYTES) {
 			cacheParsedSnapshot(snapshotPath, {
 				mtimeMs: fs.statSync(snapshotPath).mtimeMs,
+				size,
 				snapshot,
 			});
 		} else {
@@ -271,14 +323,6 @@ export function saveProjectSnapshot(
 	} catch {
 		snapshotParseCache.delete(snapshotPath);
 	}
-	fs.writeFileSync(
-		getProjectSnapshotMetaPath(cwd),
-		JSON.stringify({
-			timestamp: snapshot.generatedAt,
-			version: snapshot.version,
-			seq: snapshot.seq,
-		}),
-	);
 }
 
 export function buildProjectSnapshotFromRuntime(args: {
