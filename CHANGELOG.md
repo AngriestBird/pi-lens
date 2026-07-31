@@ -4,6 +4,22 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Parallelized the per-turn madge dependency check** (refs #766) — the
+	turn-end circular-dependency pass previously ran one `await checkFile()`
+	per import-changed file in a sequential `for…await` loop, serializing N
+	madge subprocess spawns. `DependencyChecker.checkFilesBatch()` now runs
+	those spawns concurrently (bounded to 6 in flight) via a new turn-end
+	entry point. `DependencyChecker` keeps its circular-dep findings
+	(`lastCircular`/`circularFiles`) as shared instance state that a single-file
+	check overwrites wholesale, so naively parallelizing risked one file's
+	spawn clobbering a sibling's write depending on subprocess completion
+	order. The fix keeps every spawn's result local until all have settled,
+	then folds them into the shared state in original file order — matching
+	the sequential loop's file-by-file overwrite exactly, just without waiting
+	for each subprocess before starting the next. Behavior-preserving: same
+	per-file results, same final circular-dep state, same `dbg` logs — only
+	wall-clock time changes.
+
 - **Word-index build/refresh/persist outcomes are now durably observable**
 	(refs #958, #926, #533) — every word-index signal previously rode solely on
 	the optional `dbg` callback, a documented no-op in the MCP host where
