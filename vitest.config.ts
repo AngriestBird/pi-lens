@@ -101,6 +101,12 @@ const grammarHeavyInclude = [
 const timingSensitiveInclude = [
 	"tests/clients/source-walk-occupancy.test.ts",
 	"tests/clients/source-filter-async.test.ts",
+	// Same measureMaxSyncBlockMs sampler + same contention-starvation flake
+	// (observed 2026-07-31: cold buildOrUpdateGraph blew the 300ms budget at
+	// ~82s under a full-suite fork storm, exhausting its retry:2). Its
+	// existing retry isn't enough on its own; phasing it here removes the
+	// sibling-fork noise the sampler was actually measuring.
+	"tests/clients/cascade-graph-occupancy.test.ts",
 ];
 
 export default defineConfig({
