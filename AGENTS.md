@@ -381,6 +381,12 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
 
 ## Package scope
 
+LSP server definitions resolve in `clients/lsp/config.ts` as project
+`.pi-lens/lsp.json` (including its legacy project filenames) over machine-global
+`getGlobalPiLensDir()/lsp.json` over built-in defaults. `servers` and
+`serverOverrides` merge by ID; project `disabledServers` and `warmFiles` replace
+the global arrays when present.
+
 All pi packages are `@earendil-works/*` (migrated from `@mariozechner/*` in 0.74.0). Peer dep: `@earendil-works/pi-coding-agent`. Runtime dep: `@earendil-works/pi-tui`.
 
 ## Git & PR workflow
