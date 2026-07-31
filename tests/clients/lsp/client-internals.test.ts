@@ -66,6 +66,33 @@ describe("CLIENT_CAPABILITIES (#278 regression)", () => {
 	});
 });
 
+describe("workDoneProgress capability (#974)", () => {
+	// pi-lens never consumes `$/progress` notifications, so advertising
+	// window.workDoneProgress only invites servers to open progress tokens
+	// that go nowhere — and opengrep's `--experimental` LSP mode crash-loops
+	// when it can't parse pi-lens's spec-correct `{"result": null}` reply to
+	// the `window/workDoneProgress/create` request that capability solicits.
+	it("does not advertise window.workDoneProgress", () => {
+		expect(CLIENT_CAPABILITIES.window).not.toHaveProperty("workDoneProgress");
+	});
+
+	it("still answers an unsolicited window/workDoneProgress/create request without throwing", async () => {
+		const state = createMockState();
+		setupIncomingHandlers(state, {});
+
+		const onRequest = vi.mocked(state.connection.onRequest);
+		const registered = onRequest.mock.calls.find(
+			(c) => c[0] === "window/workDoneProgress/create",
+		);
+		expect(registered, "handler registered as a defensive no-op").toBeDefined();
+
+		const handler = registered![1] as (...args: unknown[]) => unknown;
+		await expect(
+			handler({ token: "some-progress-token" }),
+		).resolves.toBeUndefined();
+	});
+});
+
 function createMockConnection(): MessageConnection {
 	return {
 		sendNotification: vi.fn().mockResolvedValue(undefined),
