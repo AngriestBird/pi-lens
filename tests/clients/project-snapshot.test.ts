@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { gunzipSync, gzipSync } from "node:zlib";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const readJsonCacheSpy = vi.hoisted(() => vi.fn());
 vi.mock("../../clients/json-cache-read.js", async (importOriginal) => {
@@ -32,15 +33,21 @@ import {
 	PROJECT_SNAPSHOT_VERSION,
 	_resetProjectSnapshotParseCacheForTests,
 	buildProjectSnapshotFromRuntime,
+	flushProjectSnapshotPersistsForTests,
+	getProjectSnapshotLegacyPath,
 	getProjectSnapshotMetaPath,
 	getProjectSnapshotPath,
+	getProjectSnapshotPersistErrorForTests,
 	hydrateRuntimeFromProjectSnapshot,
 	isProjectSnapshotFresh,
 	isProjectSnapshotMetaStale,
 	loadProjectSnapshot,
 	readProjectSnapshotMeta,
+	resetProjectSnapshotPersistWorkerForTests,
 	saveProjectSnapshot,
 	saveRuntimeProjectSnapshot,
+	terminateProjectSnapshotPersistWorkerForTests,
+	waitForProjectSnapshotPersistsForTests,
 } from "../../clients/project-snapshot.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { buildWordIndex, searchWordIndex } from "../../clients/word-index.js";
@@ -62,7 +69,42 @@ function withProjectDataDir<T>(fn: (cwd: string) => T): T {
 	}
 }
 
+// Async counterpart: the worker-persist tests await in-flight writes, so
+// cleanup must run only AFTER the body resolves (the sync variant's `finally`
+// would delete the tmp dir mid-write).
+async function withProjectDataDirAsync(
+	fn: (cwd: string) => Promise<void>,
+): Promise<void> {
+	const env = setupTestEnvironment("project-snapshot-");
+	const previousDataDir = process.env.PILENS_DATA_DIR;
+	process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+	try {
+		await fn(path.join(env.tmpDir, "project"));
+	} finally {
+		if (previousDataDir === undefined) {
+			delete process.env.PILENS_DATA_DIR;
+		} else {
+			process.env.PILENS_DATA_DIR = previousDataDir;
+		}
+		env.cleanup();
+	}
+}
+
 describe("project snapshot", () => {
+	// These cover the SAVE/LOAD SEMANTICS, not the worker offload itself, so
+	// they force the synchronous main-thread body writer (`PI_LENS_SNAPSHOT_
+	// PERSIST_SYNC`) — a save then leaves the gz body on disk immediately, no
+	// async drain needed. The worker path (generation gating, fallback,
+	// round-trip) is exercised in its own describe block below. #958.
+	beforeEach(() => {
+		process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC = "1";
+		_resetProjectSnapshotParseCacheForTests();
+		resetProjectSnapshotPersistWorkerForTests();
+	});
+	afterEach(() => {
+		delete process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC;
+	});
+
 	it("builds, saves, and loads a runtime snapshot", () =>
 		withProjectDataDir((cwd) => {
 			const runtime = new RuntimeCoordinator();
@@ -373,28 +415,52 @@ describe("project snapshot", () => {
 			expect(readProjectSnapshotMeta(cwd)).toBeNull();
 		}));
 
-	it("serializes the snapshot body compactly, and still reads legacy pretty-printed bodies (#947)", () =>
+	it("writes a gzip body that round-trips through load (#958)", () =>
+		withProjectDataDir((cwd) => {
+			const runtime = new RuntimeCoordinator();
+			runtime.seedProjectSequence(7);
+			runtime.cachedExports.set("makeThing", path.join(cwd, "src", "a.ts"));
+			const snapshot = buildProjectSnapshotFromRuntime({ cwd, runtime });
+			saveProjectSnapshot(cwd, snapshot);
+
+			// The canonical body is gzip (magic bytes 0x1f 0x8b) and decompresses
+			// to the exact compact JSON — no pretty-print newlines.
+			const gz = fs.readFileSync(getProjectSnapshotPath(cwd));
+			expect(gz.subarray(0, 2)).toEqual(Buffer.from([0x1f, 0x8b]));
+			const json = gunzipSync(gz).toString("utf-8");
+			expect(json).not.toContain("\n");
+			expect(JSON.parse(json).seq).toBe(7);
+
+			// A fresh reader (no authoritative in-process write) must reconstruct
+			// the snapshot from disk alone.
+			_resetProjectSnapshotParseCacheForTests();
+			expect(loadProjectSnapshot(cwd)).toMatchObject({
+				seq: 7,
+				cachedExports: [["makeThing", path.join(cwd, "src", "a.ts")]],
+			});
+		}));
+
+	it("reads a legacy uncompressed .json body when no .gz is present (#958 one-release fallback)", () =>
 		withProjectDataDir((cwd) => {
 			const runtime = new RuntimeCoordinator();
 			runtime.seedProjectSequence(7);
 			const snapshot = buildProjectSnapshotFromRuntime({ cwd, runtime });
-			saveProjectSnapshot(cwd, snapshot);
 
-			// Compact: no pretty-print newlines; exactly the minimal JSON form.
-			const raw = fs.readFileSync(getProjectSnapshotPath(cwd), "utf-8");
-			expect(raw).not.toContain("\n");
-			expect(raw).toBe(JSON.stringify(JSON.parse(raw)));
+			// Simulate an install upgraded from the pre-#958 format: only the
+			// uncompressed body exists (pretty-printed, as older versions wrote).
+			const legacyPath = getProjectSnapshotLegacyPath(cwd);
+			fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+			fs.writeFileSync(legacyPath, JSON.stringify(snapshot, null, 2));
+			expect(fs.existsSync(getProjectSnapshotPath(cwd))).toBe(false);
 
-			// Legacy pretty-printed bodies (written by older pi-lens versions)
-			// must still parse.
 			_resetProjectSnapshotParseCacheForTests();
-			fs.writeFileSync(
-				getProjectSnapshotPath(cwd),
-				JSON.stringify(snapshot, null, 2),
-			);
-			const bumped = new Date(Date.now() + 5000);
-			fs.utimesSync(getProjectSnapshotPath(cwd), bumped, bumped);
 			expect(loadProjectSnapshot(cwd)?.seq).toBe(7);
+
+			// Once a fresh gz body is written, the stale legacy sibling is removed
+			// so the two formats never coexist.
+			saveProjectSnapshot(cwd, snapshot);
+			expect(fs.existsSync(getProjectSnapshotPath(cwd))).toBe(true);
+			expect(fs.existsSync(legacyPath)).toBe(false);
 		}));
 
 	it("a crash between the meta and body writes leaves meta ahead, never behind (#958)", () =>
@@ -416,16 +482,24 @@ describe("project snapshot", () => {
 
 			const advanced = new RuntimeCoordinator();
 			advanced.seedProjectSequence(4);
-			expect(() =>
-				saveProjectSnapshot(
-					cwd,
-					buildProjectSnapshotFromRuntime({ cwd, runtime: advanced }),
-				),
-			).toThrow();
+			// The body write now happens on the (sync) persist path, whose failure
+			// is caught and surfaced via the persist-error hook rather than thrown
+			// back to the caller — the meta write above already landed. Honesty
+			// (#533): the failure must be recorded, not silently swallowed.
+			saveProjectSnapshot(
+				cwd,
+				buildProjectSnapshotFromRuntime({ cwd, runtime: advanced }),
+			);
+			expect(getProjectSnapshotPersistErrorForTests()).toMatch(
+				/simulated crash before body write/,
+			);
 			writeFileAtomicSpy.mockImplementation(realWriteFileAtomicHolder.current);
 
 			// Meta now claims seq 4 (written first, successfully); the body on
-			// disk is still the OLD seq-3 body (its rename never completed).
+			// disk is still the OLD seq-3 body (its rename never completed). The
+			// failed write also dropped the authoritative in-process entry, so a
+			// load reflects what is ACTUALLY on disk (seq 3), never the seq-4
+			// object we failed to persist.
 			const meta = readProjectSnapshotMeta(cwd);
 			expect(meta?.seq).toBe(4);
 			const loaded = loadProjectSnapshot(cwd);
@@ -489,41 +563,143 @@ describe("project snapshot", () => {
 			expect(isProjectSnapshotFresh(bodyAfter, 9)).toBe(true);
 		}));
 
-	it("caches the parsed body per (cwd, mtime): save primes the cache, loads hit it, external writes invalidate (#947)", () =>
+	it("read-your-writes: a load after save serves the in-process object; an external write supersedes it (#947/#958)", () =>
 		withProjectDataDir((cwd) => {
 			_resetProjectSnapshotParseCacheForTests();
 			const runtime = new RuntimeCoordinator();
 			runtime.seedProjectSequence(7);
 			runtime.cachedExports.set("makeThing", path.join(cwd, "src", "a.ts"));
-			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime }));
-			readJsonCacheSpy.mockClear();
+			const saved = buildProjectSnapshotFromRuntime({ cwd, runtime });
+			saveProjectSnapshot(cwd, saved);
 
-			// Hit: a load right after our own save (the saveRuntimeProjectSnapshot
-			// merge-read pattern) must NOT re-read/re-parse the file.
+			// Read-your-writes: a load right after our own save (the
+			// saveRuntimeProjectSnapshot merge-read pattern) is served from the
+			// authoritative in-process entry — the exact object we just saved,
+			// even though the gz body was written by the (here sync) persist path.
 			const first = loadProjectSnapshot(cwd);
-			expect(first?.seq).toBe(7);
-			expect(readJsonCacheSpy).not.toHaveBeenCalled();
+			expect(first).toBe(saved);
+			expect(loadProjectSnapshot(cwd)).toBe(saved);
 
-			// A repeat load serves the same parsed object.
-			expect(loadProjectSnapshot(cwd)).toBe(first);
-			expect(readJsonCacheSpy).not.toHaveBeenCalled();
-
-			// An external write (different mtime) invalidates → re-parse.
+			// An external writer moves the gz body past our own write (newer
+			// mtime) → the authoritative entry is abandoned and disk wins.
 			const other = new RuntimeCoordinator();
 			other.seedProjectSequence(9);
-			const snapshotPath = getProjectSnapshotPath(cwd);
+			const gzPath = getProjectSnapshotPath(cwd);
 			fs.writeFileSync(
-				snapshotPath,
-				JSON.stringify(buildProjectSnapshotFromRuntime({ cwd, runtime: other })),
+				gzPath,
+				gzipSync(
+					JSON.stringify(
+						buildProjectSnapshotFromRuntime({ cwd, runtime: other }),
+					),
+				),
 			);
 			const bumped = new Date(Date.now() + 5000);
-			fs.utimesSync(snapshotPath, bumped, bumped);
+			fs.utimesSync(gzPath, bumped, bumped);
 			const third = loadProjectSnapshot(cwd);
-			expect(readJsonCacheSpy).toHaveBeenCalled();
+			expect(third).not.toBe(saved);
 			expect(third?.seq).toBe(9);
 
-			// Deleting the file invalidates and fails open to null.
-			fs.unlinkSync(snapshotPath);
+			// Deleting the body fails open to null.
+			fs.unlinkSync(gzPath);
 			expect(loadProjectSnapshot(cwd)).toBeNull();
+		}));
+});
+
+describe("project snapshot worker persist (#958)", () => {
+	// This block exercises the ACTUAL worker offload (default production path):
+	// no PI_LENS_SNAPSHOT_PERSIST_SYNC, so the body is stringified+gzipped on a
+	// worker thread and promoted under a generation gate.
+	afterEach(async () => {
+		flushProjectSnapshotPersistsForTests();
+		await waitForProjectSnapshotPersistsForTests();
+		resetProjectSnapshotPersistWorkerForTests();
+		_resetProjectSnapshotParseCacheForTests();
+		delete process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS;
+	});
+
+	async function waitForFile(p: string, attempts = 40): Promise<boolean> {
+		for (let i = 0; i < attempts; i++) {
+			if (fs.existsSync(p)) return true;
+			await new Promise((r) => setTimeout(r, 25));
+		}
+		return fs.existsSync(p);
+	}
+
+	it("worker gzip round-trips through the load path", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			resetProjectSnapshotPersistWorkerForTests();
+			const runtime = new RuntimeCoordinator();
+			runtime.seedProjectSequence(7);
+			runtime.cachedExports.set("makeThing", path.join(cwd, "src", "a.ts"));
+			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime }));
+
+			const gzPath = getProjectSnapshotPath(cwd);
+			expect(await waitForFile(gzPath)).toBe(true);
+			await waitForProjectSnapshotPersistsForTests();
+			// Written by the worker: real gzip magic bytes.
+			expect(fs.readFileSync(gzPath).subarray(0, 2)).toEqual(
+				Buffer.from([0x1f, 0x8b]),
+			);
+
+			// A fresh reader reconstructs the snapshot from the worker-written gz.
+			_resetProjectSnapshotParseCacheForTests();
+			expect(loadProjectSnapshot(cwd)).toMatchObject({
+				seq: 7,
+				cachedExports: [["makeThing", path.join(cwd, "src", "a.ts")]],
+			});
+		}));
+
+	it("a slow generation-N worker write does NOT clobber a newer generation-N+1 body", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			resetProjectSnapshotPersistWorkerForTests();
+			// Delay every worker write so generation N is still in-flight when
+			// generation N+1 is scheduled and lands.
+			process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS = "150";
+
+			const old = new RuntimeCoordinator();
+			old.seedProjectSequence(3);
+			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime: old }));
+
+			const fresh = new RuntimeCoordinator();
+			fresh.seedProjectSequence(4);
+			saveProjectSnapshot(
+				cwd,
+				buildProjectSnapshotFromRuntime({ cwd, runtime: fresh }),
+			);
+
+			// Let BOTH delayed worker writes complete. The generation gate must
+			// discard the stale gen-N (seq 3) result and keep only gen-N+1 (seq 4).
+			await waitForProjectSnapshotPersistsForTests();
+			await new Promise((r) => setTimeout(r, 100));
+
+			_resetProjectSnapshotParseCacheForTests();
+			expect(loadProjectSnapshot(cwd)?.seq).toBe(4);
+			// No stray stage files left behind.
+			const cacheDir = path.dirname(getProjectSnapshotPath(cwd));
+			expect(
+				fs.readdirSync(cacheDir).filter((f) => f.includes(".stage-")),
+			).toEqual([]);
+		}));
+
+	it("worker death degrades to a logged main-thread persist (honesty, #533)", async () =>
+		withProjectDataDirAsync(async (cwd) => {
+			resetProjectSnapshotPersistWorkerForTests();
+			process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS = "1000";
+			const runtime = new RuntimeCoordinator();
+			runtime.seedProjectSequence(5);
+			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime }));
+
+			// Kill the worker mid-write: the queued body must fall back to the
+			// synchronous main-thread writer, not silently vanish.
+			await terminateProjectSnapshotPersistWorkerForTests();
+			await waitForProjectSnapshotPersistsForTests();
+
+			const gzPath = getProjectSnapshotPath(cwd);
+			expect(await waitForFile(gzPath)).toBe(true);
+			expect(getProjectSnapshotPersistErrorForTests()).toMatch(
+				/exited|unavailable|terminated/i,
+			);
+			_resetProjectSnapshotParseCacheForTests();
+			expect(loadProjectSnapshot(cwd)?.seq).toBe(5);
 		}));
 });

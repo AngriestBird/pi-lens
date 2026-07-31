@@ -4,6 +4,25 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Project snapshot body is now written gzipped by a worker thread** (refs
+	#958 item 2) — the snapshot body (40-112MB observed) is persisted as
+	`project-snapshot.json.gz`, with the `JSON.stringify` + gzip run on a worker
+	thread off the save path, mirroring the review graph's
+	`persist-worker.ts`/generation-gated-promotion pattern (gzip measured 5-10x
+	on top of the #957 compaction win; the review-graph's own measurement was
+	60MB → 1.4MB). A slow worker write for generation N is discarded rather than
+	promoted over a newer generation N+1 already on disk, and the loader still
+	reads the previous uncompressed `project-snapshot.json` for one compatibility
+	release so an upgrade never loses a snapshot. The save path deliberately does
+	NOT sync-gzip (the #950 review measured a naïve sync gzip regressing host
+	memory by +656MB); when the worker is unavailable/dies the pending body falls
+	back to a synchronous main-thread gzip write, surfaced via the logger rather
+	than silently presented as saved (#533). Read-your-writes across the async
+	promotion is preserved by an in-process authoritative "latest write" that
+	`loadProjectSnapshot` consults before disk, so the merge-write callers
+	(`saveRuntimeProjectSnapshot`, word index, reverse deps) never observe a
+	stale body in the promotion window.
+
 - **`pi-lens build-graph` honestly reports a capped, over-the-cap persist**
 	(closes #924, refs #936 limit 3) — the CLI's build-attempt check no longer
 	mistakes the benign "succeeded, but persisted a partial subgraph" reason

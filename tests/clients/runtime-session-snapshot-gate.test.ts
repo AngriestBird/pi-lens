@@ -25,6 +25,8 @@ import {
 	buildProjectSnapshotFromRuntime,
 	getProjectSnapshotMetaPath,
 	getProjectSnapshotPath,
+	getSnapshotBodyReadCountForTests,
+	resetSnapshotBodyReadCountForTests,
 	saveProjectSnapshot,
 } from "../../clients/project-snapshot.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
@@ -111,9 +113,10 @@ function seedSnapshot(cwd: string, seq: number): void {
 }
 
 function snapshotBodyReads(): number {
-	return readJsonCacheSpy.mock.calls.filter(([p]) =>
-		String(p).endsWith("project-snapshot.json"),
-	).length;
+	// #958: the body is gzip and read via gunzip+JSON.parse (bypassing
+	// readJsonCache), so body parses are counted through the dedicated hook
+	// rather than the readJsonCache spy (which still tracks the tiny meta reads).
+	return getSnapshotBodyReadCountForTests();
 }
 
 function snapshotMetaReads(): number {
@@ -148,8 +151,13 @@ describe("session_start snapshot meta-gate (#947)", () => {
 		globals.__piLensFirstSessionDone = true;
 		globals.__piLensWarmupScheduled = true;
 		process.env.PI_LENS_STARTUP_MODE = "quick";
+		// #958: force the synchronous body writer so `seedSnapshot` lands the gz
+		// body on disk before session start reads it (the worker offload is
+		// covered by project-snapshot.test.ts).
+		process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC = "1";
 		readJsonCacheSpy.mockClear();
 		logLatencySpy.mockClear();
+		resetSnapshotBodyReadCountForTests();
 		// Simulate a fresh process: the in-process parse cache (#947 commit 3)
 		// must not serve these assertions — session start should parse a body
 		// written by a PREVIOUS process.
@@ -161,6 +169,7 @@ describe("session_start snapshot meta-gate (#947)", () => {
 		globals.__piLensWarmupScheduled = prevWarmup;
 		if (prevStartupMode === undefined) delete process.env.PI_LENS_STARTUP_MODE;
 		else process.env.PI_LENS_STARTUP_MODE = prevStartupMode;
+		delete process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC;
 		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 		else process.env.PILENS_DATA_DIR = previousDataDir;
 	});
