@@ -4,6 +4,44 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Review-graph checkpoint discards and write failures are now observable**
+	(refs #936, #533) — a present resume checkpoint that's rejected now logs
+	`checkpoint_discarded` with a `reason` (`corrupt`, `version_mismatch`,
+	`not_in_progress`, `git_stamp_mismatch`, `ignored_ids_mismatch`,
+	`removed_file`, `all_stale`) instead of silently falling back to a full cold
+	rebuild, and a failed checkpoint write (worker error/death, promote failure,
+	sync-write failure) logs `checkpoint_write_failed` — so "why isn't my
+	checkpoint resuming / persisting?" is diagnosable from `review-graph.log`.
+
+- **The review-graph resume checkpoint (#936) now offloads its gzip to the
+	shared persist worker** (refs #958, #883) — mid-build checkpoint writes
+	previously ran a synchronous `gzipSync` of the growing graph on the event
+	loop; they now stream the stringify+gzip through the same worker the
+	authoritative snapshot uses (via the newly-shared `writeGzipStageFile` core),
+	generation-gated so a slow write can't clobber a newer checkpoint or
+	resurrect one after the build completes and retires it, and falling back to a
+	synchronous write when the worker is unavailable. Best-effort as before — a
+	lost checkpoint only costs a cold rebuild.
+
+- **Project snapshot body is now written gzipped by a worker thread** (refs
+	#958 item 2) — the snapshot body (40-112MB observed) is persisted as
+	`project-snapshot.json.gz`, with the `JSON.stringify` + gzip run on a worker
+	thread off the save path, mirroring the review graph's
+	`persist-worker.ts`/generation-gated-promotion pattern (gzip measured 5-10x
+	on top of the #957 compaction win; the review-graph's own measurement was
+	60MB → 1.4MB). A slow worker write for generation N is discarded rather than
+	promoted over a newer generation N+1 already on disk, and the loader still
+	reads the previous uncompressed `project-snapshot.json` for one compatibility
+	release so an upgrade never loses a snapshot. The save path deliberately does
+	NOT sync-gzip (the #950 review measured a naïve sync gzip regressing host
+	memory by +656MB); when the worker is unavailable/dies the pending body falls
+	back to a synchronous main-thread gzip write, surfaced via the logger rather
+	than silently presented as saved (#533). Read-your-writes across the async
+	promotion is preserved by an in-process authoritative "latest write" that
+	`loadProjectSnapshot` consults before disk, so the merge-write callers
+	(`saveRuntimeProjectSnapshot`, word index, reverse deps) never observe a
+	stale body in the promotion window.
+
 - **The review-graph full build is now resumable across sessions** (refs #936
 	limit 2) — a cold full build (walk + tree-sitter parse of every source file)
 	previously restarted from scratch every session, so on a large repo with

@@ -17,6 +17,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	buildProjectSnapshotFromRuntime,
@@ -116,6 +117,10 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 	beforeEach(() => {
 		restoreStartupMode = setStartupMode("full");
 		previousDataDir = process.env.PILENS_DATA_DIR;
+		// #958: force the synchronous snapshot body writer so the gz body a
+		// session-start save produces is on disk immediately for the assertions
+		// below (the worker offload is covered by project-snapshot.test.ts).
+		process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC = "1";
 		resolveStartupScanContextSpy.mockClear();
 		resolveStartupScanContextAsyncSpy.mockClear();
 		logLatencySpy.mockClear();
@@ -126,6 +131,7 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 		restoreStartupMode();
 		if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 		else process.env.PILENS_DATA_DIR = previousDataDir;
+		delete process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC;
 		_resetStartupScanVerdictTtlForTests();
 	});
 
@@ -163,7 +169,9 @@ describe("startup-scan verdict cache in session_start (#699)", () => {
 
 			const snapshotPath = getProjectSnapshotPath(cwd);
 			expect(fs.existsSync(snapshotPath)).toBe(true);
-			const snapshot = JSON.parse(fs.readFileSync(snapshotPath, "utf-8"));
+			const snapshot = JSON.parse(
+				gunzipSync(fs.readFileSync(snapshotPath)).toString("utf-8"),
+			);
 			expect(snapshot.startupScan).toBeDefined();
 			expect(snapshot.startupScan.canWarmCaches).toBe(true);
 			expect(typeof snapshot.startupScan.computedAt).toBe("number");

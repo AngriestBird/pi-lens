@@ -9,7 +9,10 @@ import {
 	clearGraphCache,
 	clearReviewGraphWorkspaceCache,
 	getCachedReviewGraph,
+	getCheckpointOffloadCountForTests,
+	resetReviewGraphPersistWorkerForTests,
 	reviewGraphCachePath,
+	waitForReviewGraphPersistsForTests,
 } from "../../../clients/review-graph/builder.js";
 import type { ReviewGraph } from "../../../clients/review-graph/types.js";
 import { removeTempDirSync } from "../test-utils.js";
@@ -24,6 +27,7 @@ const roots: string[] = [];
 afterEach(() => {
 	clearReviewGraphWorkspaceCache();
 	clearGraphCache();
+	resetReviewGraphPersistWorkerForTests();
 	delete process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER;
 	delete process.env.PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES;
 	delete process.env.PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS;
@@ -173,6 +177,40 @@ describe("review-graph resumable checkpoint (#936 limit 2)", () => {
 		expect(graphShape(resumed, resumeRoot)).toEqual(
 			graphShape(cold.graph, cold.root),
 		);
+	});
+
+	it("offloads mid-build checkpoints to the persist worker without corrupting the result, and retires them on completion", async () => {
+		const root = makeRoot("pi-lens-ckpt-offload-", SOURCES);
+		// Fire an in-loop checkpoint every 2 files with no interval floor, so a
+		// 6-file cold build posts offloaded checkpoints mid-extraction (worker
+		// enabled — no TEST_STOP_AFTER, which would force the synchronous seam).
+		process.env.PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES = "2";
+		process.env.PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS = "0";
+		clearReviewGraphWorkspaceCache(root);
+		clearGraphCache();
+
+		const graph = await buildOrUpdateGraph(root, [], new FactStore());
+		// Let any in-flight offloaded checkpoint promotion settle.
+		await waitForReviewGraphPersistsForTests();
+
+		// The offload path actually fired (not the sync fallback, and not zero
+		// checkpoints) — otherwise the assertions below hold trivially for any
+		// completed build. Two strides fire for 6 files at EVERY=2 (after files 2
+		// and 4; the last chunk is skipped since remainingAfter < EVERY).
+		expect(getCheckpointOffloadCountForTests()).toBeGreaterThanOrEqual(1);
+
+		// The offloaded checkpoints never corrupted the built graph: it matches a
+		// cold build exactly.
+		const cold = await coldBuild(SOURCES);
+		expect(graphShape(graph, root)).toEqual(graphShape(cold.graph, cold.root));
+		expect(graph.persistCoverage?.inProgress).not.toBe(true);
+		expect(graph.persistCoverage?.partial).not.toBe(true);
+
+		// A completed build retires its checkpoint AND a late offloaded promotion
+		// cannot resurrect it: deleteReviewGraphCheckpoint bumps the checkpoint
+		// generation, so any stage still in flight at completion is gated out.
+		await waitFor(() => _readReviewGraphCheckpointForTests(root) === null);
+		expect(_readReviewGraphCheckpointForTests(root)).toBeNull();
 	});
 
 	it("never serves a mid-build checkpoint as a complete graph", async () => {

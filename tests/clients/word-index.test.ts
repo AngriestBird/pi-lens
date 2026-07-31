@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	buildWordIndex,
 	centralityFromReverseDeps,
@@ -302,7 +302,21 @@ describe("serializeWordIndex / deserializeWordIndex", () => {
 });
 
 describe("triggerBackgroundWordIndexBuild (#348 cold-query stampede guard)", () => {
+	beforeEach(() => {
+		// #958: the snapshot body is written by a worker thread by default. This
+		// suite seeds a snapshot and then triggers a background word-index build
+		// that reads it back (via `project-snapshot.js`) to preserve unrelated
+		// fields — but the test's own seed save goes through `project-snapshot.ts`,
+		// a DISTINCT module instance whose in-process authoritative-write map the
+		// build cannot see. Pre-#958 the synchronous disk write bridged the two;
+		// forcing the sync writer restores that so the cross-module read observes
+		// the seed on disk. (The async worker offload is covered directly by
+		// project-snapshot.test.ts.) Production imports `.js` everywhere — a single
+		// module instance — so the authoritative map bridges this without disk.
+		process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC = "1";
+	});
 	afterEach(() => {
+		delete process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC;
 		_resetWordIndexBuildGuardForTests();
 	});
 

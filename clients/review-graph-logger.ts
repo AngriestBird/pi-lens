@@ -27,7 +27,13 @@ export interface ReviewGraphLogEntry {
 		| "worker_fallback"
 		// #936 limit 2: cross-session resumable full build (checkpointing).
 		| "checkpoint_written"
-		| "checkpoint_resumed";
+		| "checkpoint_resumed"
+		// A present checkpoint was rejected (fail-open to a cold build) — `reason`
+		// says why, so "why isn't my checkpoint resuming?" is diagnosable.
+		| "checkpoint_discarded"
+		// An offloaded/sync checkpoint WRITE failed — resume won't be available
+		// next session; `reason` carries the cause.
+		| "checkpoint_write_failed";
 	cwd: string;
 	reason?: string;
 	durationMs?: number;
