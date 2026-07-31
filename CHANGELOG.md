@@ -4,6 +4,14 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Session warmup refreshes the word index incrementally** (refs #958) —
+	the persisted serializer now carries per-file mtimes. Startup still performs
+	the bounded source walk, but reuses unchanged postings, re-tokenizes only
+	stale/new files, and drops deleted files; legacy indexes, refresh failures,
+	and file-set churn above 30% fall back to a full rebuild. The current derived
+	file cap and `truncated` state are re-evaluated on every refresh, and
+	`warmup_word_index` telemetry records mode/refreshed/dropped/reused counts.
+
 - **Project scans feed compact structural IR into review-graph builds** (refs
 	#939) — each fully completed scanner file publishes content-hash-bound
 	imports, reexports, function summaries, symbols, and references. A following

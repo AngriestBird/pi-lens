@@ -293,6 +293,12 @@ describe("serializeWordIndex / deserializeWordIndex", () => {
 		expect(deserializeWordIndex(null)).toBeNull();
 		expect(deserializeWordIndex({} as never)).toBeNull();
 	});
+
+	it("treats a legacy serializer version as a cache miss (#958)", () => {
+		const serialized = serializeWordIndex(buildWordIndex(files));
+		const legacy = { ...serialized, version: 1 };
+		expect(deserializeWordIndex(legacy as never)).toBeNull();
+	});
 });
 
 describe("triggerBackgroundWordIndexBuild (#348 cold-query stampede guard)", () => {
