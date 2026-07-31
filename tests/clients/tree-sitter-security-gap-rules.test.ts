@@ -286,6 +286,104 @@ describe("tree-sitter security gap rules", () => {
 		expect(matches.length).toBeGreaterThan(0);
 	});
 
+	// #1000: fixed outbound endpoints built with `new URL(literal, fixedBase)`
+	// must not be reported. Origin+path are fully fixed; dynamic query params
+	// added via `searchParams.set(...)` do not control the destination.
+	it("does not flag fetch of a new URL(literal, file-local const base).toString() (#1000)", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			'const BASE = "https://api.example.com";\n' +
+				"const authUrl = new URL(\"auth/authorize\", `${BASE}/`);\n" +
+				'authUrl.searchParams.set("callback_url", cb);\n' +
+				"await fetch(authUrl.toString());\n",
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBe(0);
+	});
+
+	it("does not flag fetch of a new URL(literal, imported base).toString() with an aliased URL ctor (#1000)", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			'import { URL as NodeURL } from "node:url";\n' +
+				'import { BASE_URL_CLINE } from "../../constants.ts";\n' +
+				"const authUrl = new NodeURL(\"auth/authorize\", `${BASE_URL_CLINE}/`);\n" +
+				'authUrl.searchParams.set("callback_url", cb);\n' +
+				"await fetch(authUrl.toString());\n",
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBe(0);
+	});
+
+	it("does not flag fetch of a single-arg new URL(literal).href (#1000)", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			'const u = new URL("https://api.example.com/v1/userinfo");\n' +
+				"await fetch(u.href);\n",
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBe(0);
+	});
+
+	// The exemption must NOT neuter real SSRF detection. Each case below MUST
+	// still fire — they fail if the new-URL exemption is broadened past "literal
+	// path + provably-fixed base".
+	it("still flags fetch of new URL(literal, base-from-function-param).toString() (#1000)", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			"function f(base) {\n" +
+				"  const u = new URL(\"auth\", `${base}/`);\n" +
+				"  return fetch(u.toString());\n" +
+				"}\n",
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBeGreaterThan(0);
+	});
+
+	it("still flags fetch of new URL(tainted-path, fixed-base).toString() (#1000)", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			'const u = new URL(req.query.next, "https://api.example.com");\n' +
+				"await fetch(u.toString());\n",
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBeGreaterThan(0);
+	});
+
+	it("still flags fetch of new URL(literal, env-derived const base).toString() (#1000 over-exempt guard)", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			"const BASE = process.env.API_BASE;\n" +
+				"const u = new URL(\"auth\", `${BASE}/`);\n" +
+				"await fetch(u.toString());\n",
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBeGreaterThan(0);
+	});
+
+	it("still flags fetch of new URL(user-controlled redirect/location).toString() (#1000)", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			"const u = new URL(resp.headers.location);\n" +
+				"await fetch(u.toString());\n",
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBeGreaterThan(0);
+	});
+
 	it("matches go path traversal sink", async () => {
 		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("go-path-traversal");

@@ -4,6 +4,24 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Fixed: `ts-ssrf` no longer flags fixed/const endpoint URLs built with
+	`new URL(...)` as SSRF sinks, while still catching tainted URLs** (closes
+	#1000, refs #533, #963) — a project-wide pi-free scan flagged fixed outbound
+	OAuth/profile endpoints as SSRF: `fetch(authUrl.toString())` where
+	`authUrl = new URL("auth/authorize", \`${BASE_URL_CLINE}/\`)` with a fixed
+	(module-const or imported) base. The `ts_ssrf_sink` post-filter already
+	exempted a `fetch()` of a file-local `const` literal string (#963) but had no
+	awareness of the `new URL(literalPath, fixedBase)` shape, so
+	`url.toString()`/`url.href` fell through to the broad taint heuristic. Extended
+	the post-filter to also exempt `fetch(u.toString())`/`fetch(u.href)` when `u`
+	resolves (same file) to a clean `const u = new URL(<literalPath>, <fixedBase>)`
+	— literal path plus a base that is a literal, a file-local literal `const`, or
+	an import binding (the `URL` ctor may be aliased, e.g. `NodeURL`). Query params
+	added later via `searchParams.set(...)` don't control origin/path and never
+	taint the destination. Still fires (regression fixtures added) when the base
+	or path comes from a function parameter, `process.env`/config (including a
+	const initialized from `process.env`), request data, or a parsed
+	redirect/`location` value — a missed SSRF stays far worse than one FP.
 - **Fixed: `no-javascript-url`/`no-javascript-url-js` no longer flag defensive
 	`javascript:`-URL filters** (refs #533) — a dogfood run flagged code that was
 	*rejecting* `javascript:` links (e.g. `url.startsWith("javascript:")` inside a

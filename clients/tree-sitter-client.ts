@@ -1506,6 +1506,25 @@ export class TreeSitterClient {
 		name: string,
 		rootNode: TreeSitterNode,
 	): boolean {
+		const valueNode = this.resolveFileConstValueNode(name, rootNode);
+		if (!valueNode) return false;
+		return this.isFixedUrlLiteralExpr(valueNode);
+	}
+
+	/**
+	 * Resolves `name` to the initializer value node of its *single, clean*
+	 * file-local `const` declarator, or `null` when resolution must be refused.
+	 *
+	 * Refusal (returns `null`) on any of: no declarator; more than one
+	 * declarator (shadowed/ambiguous — don't guess); a `let`/`var` binding for
+	 * the same name anywhere; or a reassignment (`name = ...`) anywhere in the
+	 * file. This is the shared, provenance-safe gate used by every "provably
+	 * fixed value" check; callers inspect the returned value node themselves.
+	 */
+	private resolveFileConstValueNode(
+		name: string,
+		rootNode: TreeSitterNode,
+	): TreeSitterNode | null {
 		const constDeclarators: TreeSitterNode[] = [];
 		let hasNonConstBinding = false;
 		let hasReassignment = false;
@@ -1539,18 +1558,159 @@ export class TreeSitterClient {
 		// Ambiguous (shadowed/duplicated), reassigned anywhere, or backed by a
 		// non-const binding somewhere in the file: refuse to resolve.
 		if (hasNonConstBinding || hasReassignment || constDeclarators.length !== 1) {
-			return false;
+			return null;
 		}
+		return constDeclarators[0].childForFieldName?.("value") ?? null;
+	}
 
-		const valueNode = constDeclarators[0].childForFieldName?.("value");
-		if (!valueNode) return false;
-		if (valueNode.type === "string") return true;
-		if (valueNode.type === "template_string") {
-			return !(valueNode.children ?? []).some(
+	/**
+	 * True when `node` is a self-contained fixed URL string: a plain string
+	 * literal, or a template literal with no `${...}` substitutions.
+	 */
+	private isFixedUrlLiteralExpr(node: TreeSitterNode): boolean {
+		if (node.type === "string") return true;
+		if (node.type === "template_string") {
+			return !(node.children ?? []).some(
 				(c) => c.type === "template_substitution",
 			);
 		}
 		return false;
+	}
+
+	/**
+	 * True when `name` is a binding introduced by an `import` in this file
+	 * (named/aliased/default/namespace). An import binding is immutable and its
+	 * value is fixed at module-load time from source — it is never request- or
+	 * attacker-scoped, so an imported base URL is treated as fixed. (Limitation:
+	 * we cannot see the exporting module, so an imported value that is itself
+	 * `process.env.X` in another file is not distinguished — an accepted, bounded
+	 * gap; direct env/param/request taint at the sink still fires.)
+	 */
+	private isImportedBinding(name: string, rootNode: TreeSitterNode): boolean {
+		return this.importedAs(name, rootNode) !== null;
+	}
+
+	/**
+	 * If `name` is an import binding, returns the *imported* name (e.g. `URL`
+	 * for `import { URL as NodeURL }` → `importedAs("NodeURL") === "URL"`, and
+	 * `importedAs("URL") === "URL"`). Returns `null` when `name` is not imported.
+	 */
+	private importedAs(name: string, rootNode: TreeSitterNode): string | null {
+		const stack: TreeSitterNode[] = [rootNode];
+		while (stack.length > 0) {
+			const node = stack.pop();
+			if (!node) continue;
+			if (node.type === "import_specifier") {
+				const nameNode = node.childForFieldName?.("name");
+				const aliasNode = node.childForFieldName?.("alias");
+				const local = (aliasNode ?? nameNode)?.text;
+				if (local === name) return nameNode?.text ?? null;
+			} else if (
+				node.type === "namespace_import" ||
+				node.type === "import_clause"
+			) {
+				// `import X from …` / `import * as X from …` — default/namespace
+				// local binding is a direct identifier child.
+				for (const c of node.children ?? []) {
+					if (c.type === "identifier" && c.text === name) return name;
+				}
+			}
+			for (const child of node.children ?? []) stack.push(child);
+		}
+		return null;
+	}
+
+	/**
+	 * True when `base` (the second argument of `new URL(path, base)`) is a
+	 * provably fixed origin: a literal/substitution-free template, an identifier
+	 * resolving to a file-local literal `const` or an import binding, or a
+	 * template whose every `${…}` substitution is such an identifier. Anything
+	 * else (function params, `process.env.X`, member expressions, calls) fails.
+	 */
+	private isFixedUrlBaseExpr(
+		base: TreeSitterNode,
+		rootNode: TreeSitterNode,
+	): boolean {
+		if (base.type === "string") return true;
+		if (base.type === "identifier") {
+			return (
+				this.resolvesToFileLiteralConst(base.text, rootNode) ||
+				this.isImportedBinding(base.text, rootNode)
+			);
+		}
+		if (base.type === "template_string") {
+			for (const child of base.children ?? []) {
+				if (child.type !== "template_substitution") continue;
+				const inner = (child.children ?? []).find((c) => c.isNamed);
+				if (
+					!inner ||
+					inner.type !== "identifier" ||
+					!(
+						this.resolvesToFileLiteralConst(inner.text, rootNode) ||
+						this.isImportedBinding(inner.text, rootNode)
+					)
+				) {
+					return false;
+				}
+			}
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * True when `name` resolves (same file) to a `const` initialized with
+	 * `new URL(<literalPath>, <fixedBase>)` — a fully fixed destination origin
+	 * and path. Query parameters added later via `url.searchParams.set(...)` do
+	 * not alter origin/path, so they never taint the destination. The `URL`
+	 * constructor may be imported under an alias (e.g. `NodeURL`).
+	 */
+	private resolvesToFixedNewUrlConst(
+		name: string,
+		rootNode: TreeSitterNode,
+	): boolean {
+		const value = this.resolveFileConstValueNode(name, rootNode);
+		if (!value || value.type !== "new_expression") return false;
+
+		const ctor = value.childForFieldName?.("constructor");
+		const ctorName = ctor?.text ?? "";
+		const isUrlCtor =
+			ctorName === "URL" ||
+			(ctor?.type === "identifier" &&
+				this.importedAs(ctorName, rootNode) === "URL");
+		if (!isUrlCtor) return false;
+
+		const args = (value.childForFieldName?.("arguments")?.children ?? []).filter(
+			(c) => c.isNamed && c.type !== "comment",
+		);
+		if (args.length === 0) return false;
+		// First arg (relative path / full URL) must be a literal.
+		if (!this.isFixedUrlLiteralExpr(args[0])) return false;
+		// Single-arg form: `new URL("https://host/path")` — already fully fixed.
+		if (args.length === 1) return true;
+		// Two-arg form: base must resolve to a fixed origin.
+		return this.isFixedUrlBaseExpr(args[1], rootNode);
+	}
+
+	/**
+	 * For a fetch URL argument of the form `u.toString()` (call_expression) or
+	 * `u.href` (member_expression), returns the receiver identifier name `u`
+	 * (only for the `toString`/`href` accessors a `URL` yields). Returns `null`
+	 * for any other shape so the caller falls through to taint heuristics.
+	 */
+	private newUrlBaseVarName(urlNode: TreeSitterNode): string | null {
+		let member: TreeSitterNode | null | undefined;
+		if (urlNode.type === "call_expression") {
+			member = urlNode.childForFieldName?.("function");
+		} else if (urlNode.type === "member_expression") {
+			member = urlNode;
+		}
+		if (!member || member.type !== "member_expression") return null;
+		const prop = member.childForFieldName?.("property")?.text;
+		if (prop !== "toString" && prop !== "href") return null;
+		const object = member.childForFieldName?.("object");
+		if (object?.type !== "identifier") return null;
+		return object.text;
 	}
 
 	private isSafeSqlAlchemyExpressionCall(node: TreeSitterNode): boolean {
@@ -2516,6 +2676,18 @@ export class TreeSitterClient {
 					this.resolvesToFileLiteralConst(urlText, rootNode)
 				) {
 					return false;
+				}
+				// `fetch(u.toString())` / `fetch(u.href)` where `u` is a file-local
+				// `const u = new URL(<literalPath>, <fixedBase>)`. The origin+path are
+				// fully fixed; dynamic query params set later via
+				// `u.searchParams.set(...)` don't control the destination. Anything we
+				// cannot prove fixed (param/env/member/tainted base) falls through to
+				// the broad heuristic and still fires. See #1000.
+				if (rootNode && captures.URL) {
+					const urlVar = this.newUrlBaseVarName(captures.URL);
+					if (urlVar && this.resolvesToFixedNewUrlConst(urlVar, rootNode)) {
+						return false;
+					}
 				}
 				// Only flag when the URL argument looks like it could carry external
 				// input: member expressions (req.url, ctx.query.x) or identifiers
