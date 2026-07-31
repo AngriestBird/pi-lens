@@ -405,7 +405,16 @@ const INITIALIZE_TIMEOUT_MS = positiveIntFromEnv(
  */
 export const CLIENT_CAPABILITIES = {
 	general: { positionEncodings: ADVERTISED_POSITION_ENCODINGS },
-	window: { workDoneProgress: true },
+	// #974: workDoneProgress is intentionally NOT advertised. pi-lens never
+	// consumes `$/progress` notifications (grepped: zero listeners anywhere in
+	// clients/), so declaring the capability only invites servers to open
+	// progress tokens pi-lens will silently ignore — and opengrep's
+	// `--experimental` LSP mode crash-loops when it can't parse our
+	// spec-correct `{"result": null}` reply to its
+	// `window/workDoneProgress/create` request. "Only advertise what you
+	// implement" — the `window/workDoneProgress/create` handler below stays as
+	// a defensive no-op in case a server ignores capabilities and asks anyway.
+	window: {},
 	workspace: {
 		workspaceFolders: true,
 		configuration: true,
