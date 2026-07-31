@@ -49,6 +49,8 @@ export interface WordIndex {
 	 * incremental primitive available" and fall back to a full rebuild.
 	 */
 	forward?: Map<string, Map<string, number>>;
+	/** File mtimes captured when each document was tokenized (#958). */
+	fileMtimes: Map<string, number>;
 }
 
 export interface RankedFile {
@@ -151,14 +153,17 @@ export function tokenizeLine(line: string): string[] {
  * that repeats an identifier. Document length is the total indexed token count.
  */
 export function buildWordIndex(
-	files: Array<{ path: string; content: string }> & { truncated?: boolean },
+	files: Array<{ path: string; content: string; mtimeMs?: number }> & {
+		truncated?: boolean;
+	},
 ): WordIndex {
 	const postings = new Map<string, WordHit[]>();
 	const docLengths = new Map<string, number>();
 	const forward = new Map<string, Map<string, number>>();
+	const fileMtimes = new Map<string, number>();
 	let totalTokens = 0;
 
-	for (const { path: filePath, content } of files) {
+	for (const { path: filePath, content, mtimeMs } of files) {
 		const lines = content.split(/\r?\n/);
 		let docLength = 0;
 		const tokenLineCounts = new Map<string, number>();
@@ -177,6 +182,7 @@ export function buildWordIndex(
 		}
 		docLengths.set(filePath, docLength);
 		forward.set(filePath, tokenLineCounts);
+		fileMtimes.set(filePath, mtimeMs ?? 0);
 		totalTokens += docLength;
 	}
 
@@ -187,6 +193,7 @@ export function buildWordIndex(
 		docCount: files.length,
 		truncated: files.truncated ?? false,
 		forward,
+		fileMtimes,
 	};
 }
 
@@ -217,6 +224,7 @@ export function removeWordIndexDocument(
 	const docLength = index.docLengths.get(filePath) ?? 0;
 	index.docLengths.delete(filePath);
 	index.forward.delete(filePath);
+	index.fileMtimes.delete(filePath);
 	index.totalTokens -= docLength;
 	index.docCount = Math.max(0, index.docCount - 1);
 	return true;
@@ -276,6 +284,12 @@ export function updateWordIndexDocument(
 
 	index.docLengths.set(doc.path, docLength);
 	index.forward.set(doc.path, tokenLineCounts);
+	// Per-edit callers generally already have content but not a stat. -1 is an
+	// impossible real mtime, so it deliberately makes the document stale at the
+	// next startup refresh (`-1 !== realMtime` always) — unlike 0, which is a
+	// legal on-disk mtime (SOURCE_DATE_EPOCH=0, archive extraction) and would
+	// collide, leaving such a file never re-tokenized (#958 review F2).
+	index.fileMtimes.set(doc.path, -1);
 	index.totalTokens += docLength;
 	index.docCount += 1;
 	return true;
@@ -306,7 +320,9 @@ export async function collectWordIndexDocs(
 	root: string,
 	shouldContinue: () => boolean = () => true,
 ): Promise<
-	Array<{ path: string; content: string }> & { truncated: boolean }
+	Array<{ path: string; content: string; mtimeMs: number }> & {
+		truncated: boolean;
+	}
 > {
 	const { collectSourceFilesAsync } = await import("./source-filter.js");
 	// #747 hardening: pass the cap INTO the walk — without it,
@@ -329,7 +345,7 @@ export async function collectWordIndexDocs(
 	});
 	const truncated = files.length === maxFiles;
 	const docs = Object.assign(
-		[] as Array<{ path: string; content: string }>,
+		[] as Array<{ path: string; content: string; mtimeMs: number }>,
 		{ truncated },
 	);
 	if (!shouldContinue()) return docs;
@@ -338,7 +354,11 @@ export async function collectWordIndexDocs(
 		try {
 			const stat = fs.statSync(file);
 			if (stat.size <= WORD_INDEX_MAX_BYTES) {
-				docs.push({ path: file, content: fs.readFileSync(file, "utf-8") });
+				docs.push({
+					path: file,
+					content: fs.readFileSync(file, "utf-8"),
+					mtimeMs: stat.mtimeMs,
+				});
 			}
 		} catch {
 			// unreadable / vanished file — skip
@@ -349,6 +369,106 @@ export async function collectWordIndexDocs(
 		}
 	}
 	return docs;
+}
+
+export interface WordIndexRefreshResult {
+	mode: "incremental";
+	refreshed: number;
+	dropped: number;
+	/** Files that were stale but unreadable this pass; posting left intact. */
+	skipped: number;
+	reused: number;
+}
+
+const WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD = 0.3;
+
+/**
+ * Refresh a serializer-v2 index from the current bounded source-file set.
+ * The walk/stat pass is cheap; only stale/new documents are read and tokenized.
+ * Throws when the index cannot be updated safely so callers can full-rebuild.
+ */
+export async function refreshWordIndexIncrementally(
+	index: WordIndex,
+	root: string,
+	shouldContinue: () => boolean = () => true,
+): Promise<WordIndexRefreshResult> {
+	if (!index.forward || !index.fileMtimes) {
+		throw new Error("word index lacks incremental metadata");
+	}
+	const { collectSourceFilesAsync } = await import("./source-filter.js");
+	const maxFiles = getWordIndexMaxFilesDerived(root);
+	const walked = await collectSourceFilesAsync(root, {
+		maxFiles,
+		prioritizeCodeKinds: true,
+	});
+	if (!shouldContinue()) throw new Error("word index refresh superseded");
+
+	const current = new Map<string, number>();
+	for (const file of walked) {
+		try {
+			const stat = fs.statSync(file);
+			if (stat.size <= WORD_INDEX_MAX_BYTES) current.set(file, stat.mtimeMs);
+		} catch {
+			// A file vanishing between walk and stat is simply absent.
+		}
+	}
+
+	const oldSet = new Set(index.docLengths.keys());
+	let changedSet = 0;
+	for (const file of oldSet) if (!current.has(file)) changedSet++;
+	for (const file of current.keys()) if (!oldSet.has(file)) changedSet++;
+	const denominator = Math.max(oldSet.size, current.size, 1);
+	if (changedSet / denominator > WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD) {
+		throw new Error("word index file-set churn exceeds incremental threshold");
+	}
+
+	let dropped = 0;
+	for (const file of oldSet) {
+		if (!current.has(file)) {
+			if (!removeWordIndexDocument(index, file)) {
+				throw new Error(`failed to drop word-index document: ${file}`);
+			}
+			dropped++;
+		}
+	}
+
+	let refreshed = 0;
+	let skipped = 0;
+	let processed = 0;
+	for (const [file, mtimeMs] of current) {
+		if (index.fileMtimes.get(file) !== mtimeMs) {
+			// A file the walk/stat pass saw can still fail to read here — a
+			// transient exclusive lock (antivirus, an editor, a build step) or a
+			// file that vanished in the interim. Match collectWordIndexDocs'
+			// tolerance: skip this one file and leave its existing posting (and
+			// its old mtime, so it is retried next session) rather than aborting
+			// the whole incremental pass into a full rebuild (#958 review F1).
+			let content: string;
+			try {
+				content = fs.readFileSync(file, "utf-8");
+			} catch {
+				skipped++;
+				continue;
+			}
+			if (!updateWordIndexDocument(index, { path: file, content })) {
+				throw new Error(`failed to refresh word-index document: ${file}`);
+			}
+			index.fileMtimes.set(file, mtimeMs);
+			refreshed++;
+		}
+		if (++processed % 100 === 0) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			if (!shouldContinue()) throw new Error("word index refresh superseded");
+		}
+	}
+	index.truncated = walked.length === maxFiles;
+	return {
+		mode: "incremental",
+		refreshed,
+		dropped,
+		skipped,
+		reused: current.size - refreshed - skipped,
+	};
 }
 
 /**
@@ -467,6 +587,8 @@ export function centralityFromReverseDeps(
 // --- Persistence (compact JSON for the project snapshot) ---------------------
 
 export interface SerializedWordIndex {
+	/** Serializer version; pre-v2 indexes lack per-file freshness metadata. */
+	version: 2;
 	/** Distinct file paths; postings reference files by index to shrink the JSON. */
 	files: string[];
 	/** token → flat [fileIdx, line, fileIdx, line, …] pairs. */
@@ -478,6 +600,8 @@ export interface SerializedWordIndex {
 	indexedFileCount?: number;
 	/** True when source collection reached its configured file cap. */
 	truncated?: boolean;
+	/** Parallel to {@link files}: mtime at which each document was tokenized. */
+	fileMtimes: number[];
 	/**
 	 * Forward index (#348 phase 2): `[fileIdx, [[token, lineCount], …]]` per
 	 * file. Optional so pre-phase-2 snapshots parse unchanged. When ABSENT on
@@ -514,12 +638,14 @@ export function serializeWordIndex(index: WordIndex): SerializedWordIndex {
 			: undefined;
 
 	return {
+		version: 2,
 		files,
 		postings,
 		docLengths: files.map((file) => index.docLengths.get(file) ?? 0),
 		totalTokens: index.totalTokens,
 		indexedFileCount: index.docCount,
 		truncated: index.truncated,
+		fileMtimes: files.map((file) => index.fileMtimes.get(file) ?? 0),
 		forward,
 	};
 }
@@ -529,14 +655,19 @@ export function deserializeWordIndex(
 ): WordIndex | null {
 	if (
 		!data ||
+		data.version !== 2 ||
 		!Array.isArray(data.files) ||
 		!Array.isArray(data.postings) ||
-		!Array.isArray(data.docLengths)
+		!Array.isArray(data.docLengths) ||
+		!Array.isArray(data.fileMtimes) ||
+		data.fileMtimes.length !== data.files.length
 	) {
 		return null;
 	}
 	const docLengths = new Map<string, number>();
+	const fileMtimes = new Map<string, number>();
 	data.files.forEach((file, i) => docLengths.set(file, data.docLengths[i] ?? 0));
+	data.files.forEach((file, i) => fileMtimes.set(file, data.fileMtimes[i] ?? 0));
 
 	const postings = new Map<string, WordHit[]>();
 	for (const [token, flat] of data.postings) {
@@ -580,6 +711,7 @@ export function deserializeWordIndex(
 		docCount: data.files.length,
 		truncated: data.truncated === true,
 		forward,
+		fileMtimes,
 	};
 }
 

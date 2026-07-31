@@ -1,0 +1,201 @@
+import * as fs from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	buildWordIndex,
+	collectWordIndexDocs,
+	refreshWordIndexIncrementally,
+	searchWordIndex,
+	updateWordIndexDocument,
+} from "../../clients/word-index.js";
+import { _resetProjectScaleBaseForTests } from "../../clients/project-scale.js";
+import { createTempFile, setupTestEnvironment } from "./test-utils.js";
+
+// A controllable read-failure set: only readFileSync is overridden (statSync,
+// the walk, and every write helper delegate to the real fs), so a path in
+// `failReads` looks present-and-stat-able but throws on read — the transient
+// exclusive-lock scenario, portably and without ESM namespace-spy limits.
+const { failReads } = vi.hoisted(() => ({ failReads: new Set<string>() }));
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return {
+		...actual,
+		default: actual,
+		readFileSync: ((path: unknown, options?: unknown) => {
+			if (typeof path === "string" && failReads.has(path)) {
+				throw Object.assign(new Error("EBUSY: resource busy or locked"), {
+					code: "EBUSY",
+				});
+			}
+			return (actual.readFileSync as (...a: unknown[]) => unknown)(
+				path,
+				options,
+			);
+		}) as typeof fs.readFileSync,
+	};
+});
+
+afterEach(() => {
+	delete process.env.PI_LENS_MAX_PROJECT_FILES;
+	_resetProjectScaleBaseForTests();
+	failReads.clear();
+	vi.restoreAllMocks();
+});
+
+describe("session-start incremental word-index refresh (#958)", () => {
+	it("reads and refreshes exactly one stale file while reusing the rest", async () => {
+		const env = setupTestEnvironment("pi-lens-word-refresh-stale-");
+		try {
+			const a = createTempFile(env.tmpDir, "src/a.ts", "export const oldZephyr = 1;");
+			createTempFile(env.tmpDir, "src/b.ts", "export const stableBeta = 2;");
+			createTempFile(env.tmpDir, "src/c.ts", "export const stableGamma = 3;");
+			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+
+			fs.writeFileSync(a, "export const newQuartz = 1;", "utf8");
+			const future = new Date(Date.now() + 2_000);
+			fs.utimesSync(a, future, future);
+			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+
+			expect(result).toEqual({
+				mode: "incremental",
+				refreshed: 1,
+				dropped: 0,
+				skipped: 0,
+				reused: 2,
+			});
+			expect(searchWordIndex(index, "newQuartz")[0]?.file).toBe(a);
+			expect(searchWordIndex(index, "oldZephyr")).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("skips an unreadable stale file instead of aborting the whole pass (#958 review F1)", async () => {
+		const env = setupTestEnvironment("pi-lens-word-refresh-unreadable-");
+		try {
+			// Distinct, non-overlapping identifiers: the tokenizer splits camelCase
+			// into shared subtokens, so any shared stem would let a query match via
+			// a surviving posting and mask the behavior under test.
+			const locked = createTempFile(
+				env.tmpDir,
+				"src/locked.ts",
+				"export const mackerel = 1;",
+			);
+			const other = createTempFile(
+				env.tmpDir,
+				"src/other.ts",
+				"export const walrus = 2;",
+			);
+			createTempFile(env.tmpDir, "src/third.ts", "export const parsnip = 3;");
+			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+
+			// Both files change on disk; `locked` then throws on read (a transient
+			// exclusive lock — antivirus, an editor, a build step — that the walk
+			// and statSync don't see). statSync must still succeed so the file is a
+			// current, stale entry rather than a dropped one.
+			fs.writeFileSync(locked, "export const tugboat = 1;", "utf8");
+			fs.writeFileSync(other, "export const cinnamon = 2;", "utf8");
+			const future = new Date(Date.now() + 2_000);
+			fs.utimesSync(locked, future, future);
+			fs.utimesSync(other, future, future);
+			failReads.add(locked);
+
+			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+
+			// The whole pass survived: the readable stale file refreshed, the
+			// unreadable one was skipped (its old posting kept), not a rebuild.
+			expect(result.mode).toBe("incremental");
+			expect(result.skipped).toBe(1);
+			expect(result.refreshed).toBe(1);
+			expect(searchWordIndex(index, "cinnamon")[0]?.file).toBe(other);
+			// Skipped file keeps its prior posting rather than vanishing, and its
+			// new (unread) content is NOT indexed.
+			expect(searchWordIndex(index, "mackerel")[0]?.file).toBe(locked);
+			expect(searchWordIndex(index, "tugboat")).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("drops a deleted file", async () => {
+		const env = setupTestEnvironment("pi-lens-word-refresh-delete-");
+		try {
+			const deleted = createTempFile(
+				env.tmpDir,
+				"src/deleted.ts",
+				"export const deletedZephyr = 1;",
+			);
+			createTempFile(env.tmpDir, "src/kept.ts", "export const keptQuartz = 2;");
+			createTempFile(env.tmpDir, "src/kept2.ts", "export const keptTwo = 2;");
+			createTempFile(env.tmpDir, "src/kept3.ts", "export const keptThree = 3;");
+			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+			fs.unlinkSync(deleted);
+
+			expect(await refreshWordIndexIncrementally(index, env.tmpDir)).toMatchObject({
+				refreshed: 0,
+				dropped: 1,
+				reused: 3,
+			});
+			expect(searchWordIndex(index, "deletedZephyr")).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("re-tokenizes an edited file whose disk mtime is the Unix epoch (#958 review F2)", async () => {
+		const env = setupTestEnvironment("pi-lens-word-refresh-epoch-");
+		try {
+			// Distinct, non-overlapping identifiers (see the F1 test note).
+			const edited = createTempFile(
+				env.tmpDir,
+				"src/edited.ts",
+				"export const mackerel = 1;",
+			);
+			createTempFile(env.tmpDir, "src/keep.ts", "export const walrus = 2;");
+			createTempFile(env.tmpDir, "src/keep2.ts", "export const parsnip = 3;");
+			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+
+			// A per-edit update stamps the impossible-mtime sentinel (never 0).
+			updateWordIndexDocument(index, {
+				path: edited,
+				content: "export const tugboat = 1;",
+			});
+
+			// The on-disk file lands at the Unix epoch — a legal mtime some tools
+			// produce (archive extraction, SOURCE_DATE_EPOCH=0). With a 0 sentinel
+			// this would compare equal and never refresh; the sentinel must differ.
+			fs.writeFileSync(edited, "export const cinnamon = 1;", "utf8");
+			const epoch = new Date(0);
+			fs.utimesSync(edited, epoch, epoch);
+
+			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+
+			expect(result.refreshed).toBe(1);
+			expect(searchWordIndex(index, "cinnamon")[0]?.file).toBe(edited);
+			expect(searchWordIndex(index, "tugboat")).toEqual([]);
+			expect(searchWordIndex(index, "mackerel")).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("re-evaluates the derived cap and flips truncated on growth", async () => {
+		const env = setupTestEnvironment("pi-lens-word-refresh-cap-");
+		try {
+			process.env.PI_LENS_MAX_PROJECT_FILES = "2"; // word-index ratio => cap 6
+			_resetProjectScaleBaseForTests();
+			for (let i = 0; i < 5; i++) {
+				createTempFile(env.tmpDir, `src/f${i}.ts`, `export const value${i} = ${i};`);
+			}
+			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+			expect(index.truncated).toBe(false);
+
+			createTempFile(env.tmpDir, "src/f5.ts", "export const value5 = 5;");
+			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			expect(result.refreshed).toBe(1);
+			expect(index.docCount).toBe(6);
+			expect(index.truncated).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
