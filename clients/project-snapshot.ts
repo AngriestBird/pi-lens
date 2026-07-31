@@ -511,17 +511,22 @@ function writeSnapshotBodyOnMainThread(
 	reason?: string,
 ): void {
 	if (reason) {
-		// A real degradation, not the "sync mode by default" case (no reason):
-		// the persist worker died/was unavailable and we fell back to a
-		// synchronous main-thread gzip, which is the +656MB-risk path (#950).
-		// Surface this explicitly rather than burying it in an
-		// `offloaded:false` success line below.
+		// We took the synchronous main-thread gzip path (the +656MB-risk path,
+		// #950) instead of the worker. Surface it rather than burying it in an
+		// `offloaded:false` success line below. `degraded` distinguishes a REAL
+		// degradation (worker died/unavailable/promote-failed) from the benign
+		// `exit_hook` teardown flush, so an operator triaging worker health isn't
+		// misled by normal process-exit flushes.
 		logLatency({
 			type: "phase",
 			phase: "project_snapshot_worker_fallback",
 			filePath: pending.gzPath,
 			durationMs: 0,
-			metadata: { reason, seq: pending.snapshot.seq },
+			metadata: {
+				reason,
+				seq: pending.snapshot.seq,
+				degraded: reason !== "exit_hook",
+			},
 		});
 	}
 	try {
