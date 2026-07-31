@@ -14,6 +14,16 @@ All notable changes to pi-lens will be documented in this file.
 	succeeded. `flushReviewGraphPersist()` now returns the persisted
 	`coverage` so any standalone caller can make the same distinction.
 
+- **Bundled default typos allowlist for projects without their own config**
+	(fixes #967) — the `typos` auxiliary LSP now injects a small pi-lens-shipped
+	`_typos.toml` (`rules/typos/_typos.toml`, `[default.extend-identifiers]`
+	only: `dito`, `unparseable`) via `initializationOptions.config` whenever a
+	project has no `typos.toml`/`_typos.toml`/`.typos.toml` of its own. A
+	project's own config still always wins outright: when one is found,
+	pi-lens injects nothing at all (rather than letting typos-lsp merge ours
+	on top and risk our defaults outranking the team's own allowlist on key
+	collisions).
+
 - **`ts-ssrf` no longer trusts naming convention as proof of a fixed URL**
 	(fixes #963) — the post-filter now resolves a bare `fetch(IDENT)` argument
 	against the file's AST and exempts it only when `IDENT` provably resolves

@@ -36,6 +36,8 @@ import { isZizmorAuditTarget, resolveZizmorGitHubToken } from "../zizmor-config.
 import { logLatency } from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import { findLocalSgconfig, resolveBaselineSgconfig } from "../sgconfig.js";
+import { findLocalTyposConfig } from "../typos-config.js";
+import { resolvePackagePath } from "../package-root.js";
 import { resolveAstGrepNativeExe } from "./wait-policy/index.js";
 import { isCommandAvailableAsync, safeSpawnAsync } from "../safe-spawn.js";
 import { type LSPProcess, launchLSP } from "./launch.js";
@@ -2802,6 +2804,22 @@ const TYPOS_EXTENSIONS: readonly string[] = Array.from(
 	new Set([...OPENGREP_EXTENSIONS, ...KIND_EXTENSIONS["markdown"]]),
 );
 
+// #967: typos-lsp's `initializationOptions.config` is a filesystem PATH to a
+// config file (confirmed against upstream source — crates/typos-lsp/src/lsp.rs
+// reads `config` as a string and tilde-expands it into a PathBuf; it is never
+// an inline TOML string nor a parsed table). typos-lsp then MERGES that config
+// with any repo-local one it discovers itself, with the injected config
+// taking precedence on key collisions — so a project's own config must never
+// be injected alongside ours (see findLocalTyposConfig below): honoring an
+// existing project config means injecting NOTHING, letting typos-lsp read the
+// project's file untouched.
+function typosInitialization(root: string): Record<string, unknown> | undefined {
+	if (findLocalTyposConfig(root)) return undefined;
+	return {
+		config: resolvePackagePath(import.meta.url, "rules", "typos", "_typos.toml"),
+	};
+}
+
 export const TyposServer: LSPServerInfo = {
 	id: "typos",
 	name: "typos Spell Checker",
@@ -2812,7 +2830,7 @@ export const TyposServer: LSPServerInfo = {
 	root: RootWithFallback(NearestRoot([".git"]), async () => process.cwd()),
 	availabilityKey: "typos-lsp",
 	async spawn(root, options) {
-		return resolveAndLaunch(
+		const launched = await resolveAndLaunch(
 			{
 				candidates: ["typos-lsp"],
 				args: [],
@@ -2821,6 +2839,9 @@ export const TyposServer: LSPServerInfo = {
 			},
 			options?.allowInstall,
 		);
+		if (!launched) return undefined;
+		const initialization = typosInitialization(root);
+		return initialization ? { ...launched, initialization } : launched;
 	},
 	autoInstall: async () => Boolean(await ensureTool("typos-lsp")),
 };
