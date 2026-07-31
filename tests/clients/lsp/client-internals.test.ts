@@ -81,12 +81,15 @@ describe("workDoneProgress capability (#974)", () => {
 		setupIncomingHandlers(state, {});
 
 		const onRequest = vi.mocked(state.connection.onRequest);
-		const registered = onRequest.mock.calls.find(
+		const calls = onRequest.mock.calls as unknown as Array<
+			[string, (...args: unknown[]) => unknown]
+		>;
+		const registered = calls.find(
 			(c) => c[0] === "window/workDoneProgress/create",
 		);
 		expect(registered, "handler registered as a defensive no-op").toBeDefined();
 
-		const handler = registered![1] as (...args: unknown[]) => unknown;
+		const handler = registered![1];
 		await expect(
 			handler({ token: "some-progress-token" }),
 		).resolves.toBeUndefined();
