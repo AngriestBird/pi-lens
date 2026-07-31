@@ -10,6 +10,24 @@ vi.mock("../../clients/json-cache-read.js", async (importOriginal) => {
 	return { ...actual, readJsonCache: readJsonCacheSpy };
 });
 
+// #958: intercepts saveProjectSnapshot's writes at the atomic-write boundary
+// so a single test can simulate "the process died right after the meta
+// write, before the body write" without touching real fs internals — the
+// mock defaults to the real implementation and only one test overrides it.
+const writeFileAtomicSpy = vi.hoisted(() => vi.fn());
+const realWriteFileAtomicHolder = vi.hoisted(() => ({
+	current: undefined as unknown as (
+		...args: Parameters<typeof import("../../clients/atomic-write.js").writeFileAtomic>
+	) => void,
+}));
+vi.mock("../../clients/atomic-write.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/atomic-write.js")>();
+	realWriteFileAtomicHolder.current = actual.writeFileAtomic;
+	writeFileAtomicSpy.mockImplementation(actual.writeFileAtomic);
+	return { ...actual, writeFileAtomic: writeFileAtomicSpy };
+});
+
 import {
 	PROJECT_SNAPSHOT_VERSION,
 	_resetProjectSnapshotParseCacheForTests,
@@ -377,6 +395,98 @@ describe("project snapshot", () => {
 			const bumped = new Date(Date.now() + 5000);
 			fs.utimesSync(getProjectSnapshotPath(cwd), bumped, bumped);
 			expect(loadProjectSnapshot(cwd)?.seq).toBe(7);
+		}));
+
+	it("a crash between the meta and body writes leaves meta ahead, never behind (#958)", () =>
+		withProjectDataDir((cwd) => {
+			const seed = new RuntimeCoordinator();
+			seed.seedProjectSequence(3);
+			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime: seed }));
+
+			// Simulate the process dying right after the meta write lands but
+			// before the body write does, by making only the body's
+			// writeFileAtomic call fail (the meta call still runs for real).
+			const bodyPath = getProjectSnapshotPath(cwd);
+			writeFileAtomicSpy.mockImplementation((targetPath, data, options) => {
+				if (targetPath === bodyPath) {
+					throw new Error("simulated crash before body write");
+				}
+				return realWriteFileAtomicHolder.current(targetPath, data, options);
+			});
+
+			const advanced = new RuntimeCoordinator();
+			advanced.seedProjectSequence(4);
+			expect(() =>
+				saveProjectSnapshot(
+					cwd,
+					buildProjectSnapshotFromRuntime({ cwd, runtime: advanced }),
+				),
+			).toThrow();
+			writeFileAtomicSpy.mockImplementation(realWriteFileAtomicHolder.current);
+
+			// Meta now claims seq 4 (written first, successfully); the body on
+			// disk is still the OLD seq-3 body (its rename never completed).
+			const meta = readProjectSnapshotMeta(cwd);
+			expect(meta?.seq).toBe(4);
+			const loaded = loadProjectSnapshot(cwd);
+			expect(loaded?.seq).toBe(3);
+			// The gate's cheap check (meta alone) says "not proven stale" — it
+			// falls through to the body parse, which then correctly rejects the
+			// old body against the real current seq. Self-healing: one wasted
+			// parse, nothing silently served as fresh.
+			expect(isProjectSnapshotMetaStale(meta!, 4)).toBe(false);
+			expect(isProjectSnapshotFresh(loaded, 4)).toBe(false);
+		}));
+
+	it("meta-first write order: an old-seq meta can never sit over a fresh body (#958)", () =>
+		withProjectDataDir((cwd) => {
+			// Simulate the exact crash window #958 fixes: a meta write that
+			// captures seq 9 lands, but the body write that should follow it
+			// never happens (process died first) — reproduced here by writing
+			// meta directly for a NEWER seq than the body currently on disk.
+			const runtime = new RuntimeCoordinator();
+			runtime.seedProjectSequence(5);
+			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime }));
+			expect(loadProjectSnapshot(cwd)?.seq).toBe(5);
+
+			fs.writeFileSync(
+				getProjectSnapshotMetaPath(cwd),
+				JSON.stringify({
+					timestamp: new Date().toISOString(),
+					version: PROJECT_SNAPSHOT_VERSION,
+					seq: 9,
+				}),
+			);
+
+			// The meta now claims seq 9 while the body on disk is still seq 5.
+			// This is the "meta races ahead" skew — self-healing by design: the
+			// gate's cheap meta check reads this as fresh (so it does NOT skip
+			// the body parse), but the body's own embedded seq then correctly
+			// fails the real freshness check against seq 9. No caller ever sees
+			// the stale body reported as fresh, and nothing was discarded that
+			// shouldn't have been.
+			const meta = readProjectSnapshotMeta(cwd)!;
+			expect(isProjectSnapshotMetaStale(meta, 9)).toBe(false);
+			const loaded = loadProjectSnapshot(cwd);
+			expect(loaded?.seq).toBe(5);
+			expect(isProjectSnapshotFresh(loaded, 9)).toBe(false);
+
+			// Prove the OTHER skew direction — old-seq meta over a fresh body —
+			// can no longer be produced by saveProjectSnapshot itself: a full
+			// save at a NEW seq must leave the meta at that same new seq, never
+			// behind the body it just wrote.
+			const advanced = new RuntimeCoordinator();
+			advanced.seedProjectSequence(9);
+			saveProjectSnapshot(
+				cwd,
+				buildProjectSnapshotFromRuntime({ cwd, runtime: advanced }),
+			);
+			const metaAfter = readProjectSnapshotMeta(cwd)!;
+			const bodyAfter = loadProjectSnapshot(cwd);
+			expect(metaAfter.seq).toBe(9);
+			expect(bodyAfter?.seq).toBe(9);
+			expect(isProjectSnapshotMetaStale(metaAfter, 9)).toBe(false);
+			expect(isProjectSnapshotFresh(bodyAfter, 9)).toBe(true);
 		}));
 
 	it("caches the parsed body per (cwd, mtime): save primes the cache, loads hit it, external writes invalidate (#947)", () =>
