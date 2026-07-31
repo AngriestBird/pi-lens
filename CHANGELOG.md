@@ -4,6 +4,25 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Closed four observability gaps in recently-changed typos-config and
+	project-snapshot code** (refs #533) — none of these change behavior, only
+	what's now logged: (1) the typos LSP's inject-vs-step-aside decision
+	(#967) now logs a `typos_config_resolved` phase in `latency.log` /
+	`sessionstart.log` with `mode: "project_config" | "injected_default"` and
+	the resolved `configPath`, so which typos config is actually active is no
+	longer a guess; (2) a project-snapshot body persist that falls back to the
+	synchronous main-thread gzip because the persist worker died/was
+	unavailable now logs an explicit `project_snapshot_worker_fallback` phase
+	with the `reason` (previously only visible via a test-only variable, or
+	buried in an `offloaded:false` success line) — this is the +656MB-risk
+	degraded path from #950; (3) a corrupt/truncated gzipped snapshot body
+	(gunzip/JSON.parse failure) now logs `project_snapshot_body_corrupt`
+	before failing open to a rebuild, instead of being indistinguishable from
+	"no snapshot yet"; (4) dropping the in-process authoritative snapshot
+	entry for an oversized (>24MB) body now logs
+	`project_snapshot_authoritative_dropped_oversized` — low-priority, but no
+	longer silent.
+
 - **Review-graph checkpoint discards and write failures are now observable**
 	(refs #936, #533) — a present resume checkpoint that's rejected now logs
 	`checkpoint_discarded` with a `reason` (`corrupt`, `version_mismatch`,
