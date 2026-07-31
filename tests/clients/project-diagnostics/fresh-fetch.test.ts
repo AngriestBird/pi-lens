@@ -486,7 +486,11 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			failed: 1,
 			duration: 42,
 			failures: [
-				{ name: "foo works", message: "expected true to be false" },
+				{
+					name: "foo works",
+					message: "expected true to be false",
+					location: "src/foo.test.ts:17",
+				},
 			],
 		};
 		(cacheManager.readCache as ReturnType<typeof vi.fn>).mockImplementation(
@@ -514,8 +518,13 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		);
 		expect(result.runners).toContain("test-runner");
 		const diag = result.diagnostics.find((d) => d.tool === "test-runner");
+		// #1004 review follow-up: `TestFailure.location` ("relPath:line") must
+		// reach `ProjectDiagnostic.line` — before the fix every test-runner
+		// finding rendered as `L?:` in lens-diagnostics, unlike jscpd/knip/madge
+		// which all carry real line numbers.
 		expect(diag).toMatchObject({
 			filePath: testResult.file,
+			line: 17,
 			severity: "error",
 			semantic: "blocking",
 			tool: "test-runner",
@@ -523,6 +532,40 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			rule: "test:vitest",
 			message: "foo works: expected true to be false",
 		});
+	});
+
+	// #1004 review follow-up (honesty gap, #533): test-runner's cache can be
+	// STALE (the turn advanced before the test run finished —
+	// `runtime-turn.ts`'s `stale` flag) — mode=full must not present a stale
+	// result as if it were fresh, the same way the one-shot turn-context
+	// message already prefixes stale failures.
+	it("prefixes test-runner findings with a stale marker when the cache says stale (#1004)", async () => {
+		const cacheManager = makeCacheManager();
+		const testResult = {
+			file: path.join(path.resolve(tmp), "src/bar.test.ts"),
+			runner: "vitest",
+			passed: 0,
+			failed: 1,
+			duration: 10,
+			failures: [{ name: "bar works", message: "boom" }],
+		};
+		(cacheManager.readCache as ReturnType<typeof vi.fn>).mockImplementation(
+			(scanner: string) => {
+				if (scanner === "test-runner-findings") {
+					return {
+						data: { content: "FAIL", stale: true, results: [testResult] },
+						meta: { timestamp: new Date().toISOString() },
+					};
+				}
+				return null;
+			},
+		);
+		const clients = makeClients();
+
+		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+
+		const diag = result.diagnostics.find((d) => d.tool === "test-runner");
+		expect(diag?.message).toMatch(/^\[stale/);
 	});
 
 	it("reports test-runner cold (not clean) when no turn_end cache exists yet (#1004)", async () => {

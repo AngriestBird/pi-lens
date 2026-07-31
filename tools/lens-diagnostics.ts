@@ -1385,6 +1385,24 @@ async function formatFullMode(
 						", ",
 					)}. These analyzers have not contributed to this result — absence of their findings is NOT a clean verdict.`
 			: "";
+	// #1004: unlike every other analyzer above (knip/jscpd/madge/gitleaks/
+	// govulncheck/opengrep/trivy/dead-code all run a FRESH whole-project scan
+	// per the fresh-fetch.ts header, so "clean" there really does mean "the
+	// whole project was checked this call"), test-runner has no whole-project
+	// run to trigger: its cache only ever reflects the (targeted,
+	// cascade-aware) test file(s) touched by the MOST RECENT edit's turn_end
+	// fire (`runtime-turn.ts`). Folding it into `runners`/`diagnostics` with no
+	// distinguishing note — as opposed to when it's cold, which already gets
+	// `coldNote` above — would let a caller mistake "test-runner ran
+	// project-wide and is clean" for "it only ever saw the 2 files edited an
+	// hour ago", exactly the false-empty/false-confidence #533 this whole
+	// module exists to prevent. Fires whenever test-runner CONTRIBUTED
+	// (`runners`), independent of whether it also has cold/failed entries this
+	// call — a caller needs this caveat on every mode=full response where
+	// test-runner findings are present, not only some.
+	const testRunnerEditScopedNote = extracted.runners.includes("test-runner")
+		? `\n\ntest-runner coverage is edit-scoped, NOT a full-project run: its findings only reflect the test file(s) touched by the most recent edit's turn_end fire, not a fresh whole-project test suite run (mode=full never re-runs the suite — see fresh-fetch.ts). Absence of test-runner findings elsewhere in the project is NOT a clean verdict, and presence here does not mean "just checked" — it may be from several turns ago.`
+		: "";
 	const failedAnalyzers = extracted.failed ?? [];
 	const failedNote =
 		failedAnalyzers.length > 0
@@ -1498,6 +1516,7 @@ async function formatFullMode(
 						unconfirmedLspNote +
 						lspPrimaryVsAuxiliaryNote +
 						coldNote +
+						testRunnerEditScopedNote +
 						failedNote +
 						walkUnsafeRootNote +
 						scanTruncatedNote +
@@ -1512,6 +1531,7 @@ async function formatFullMode(
 	if (
 		missingNote ||
 		coldNote ||
+		testRunnerEditScopedNote ||
 		failedNote ||
 		walkUnsafeRootNote ||
 		scanTruncatedNote ||
@@ -1529,6 +1549,7 @@ async function formatFullMode(
 						unconfirmedLspNote +
 						lspPrimaryVsAuxiliaryNote +
 						coldNote +
+						testRunnerEditScopedNote +
 						failedNote +
 						walkUnsafeRootNote +
 						scanTruncatedNote +
