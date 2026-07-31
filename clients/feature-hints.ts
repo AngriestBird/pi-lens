@@ -35,7 +35,7 @@ function hasHintToken(value: string, tokens: readonly string[]): boolean {
 					...(token === "github" ? ["GitHub"] : []),
 					...(token === "gitlab" ? ["GitLab"] : []),
 				])
-				.join("|")})(?=[A-Z]|$)`,
+				.join("|")})(?=[A-Z]|[/_.\\-\\s]|$)`,
 		).test(value)
 	);
 }
