@@ -137,6 +137,29 @@ export function impact(
 }
 
 /**
+ * Splits a `SymbolKey` into its file and symbol-name parts. Two shapes exist
+ * (see `buildCallGraph` above): the normal `"filePath:symbolName"` form, and
+ * the file-level fallback `"file:filePath"` used when no enclosing symbol was
+ * found for a call site (module-level code). Splitting at the LAST colon
+ * (rather than a naive `split(":")`) means a Windows drive letter in
+ * `filePath` (`C:\...`) is never mistaken for the name/file separator; the
+ * `"file:"` fallback is matched as a literal prefix first so it isn't
+ * misparsed by the same last-colon rule.
+ */
+export function parseSymbolKey(key: SymbolKey): {
+	filePath: string;
+	symbolName?: string;
+} {
+	if (key.startsWith("file:")) {
+		return { filePath: key.slice("file:".length) };
+	}
+	const idx = key.lastIndexOf(":");
+	if (idx === -1) return { filePath: key };
+	const symbolName = key.slice(idx + 1);
+	return { filePath: key.slice(0, idx), symbolName: symbolName || undefined };
+}
+
+/**
  * Format an impact result set as a compact human-readable summary.
  * Example: "handleToolResult (WillBreak) → handleAgentEnd (MayBreak) → 3 Review callers"
  */

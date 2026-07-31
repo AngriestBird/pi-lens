@@ -18,6 +18,7 @@ import { govulncheckResultToProjectDiagnostics } from "../../clients/project-dia
 import { trivyResultToProjectDiagnostics } from "../../clients/project-diagnostics/runner-adapters/trivy.js";
 import { opengrepResultToProjectDiagnostics } from "../../clients/project-diagnostics/runner-adapters/opengrep.js";
 import { deadCodeResultToProjectDiagnostics } from "../../clients/project-diagnostics/runner-adapters/dead-code.js";
+import { callGraphImpactToProjectDiagnostics } from "../../clients/project-diagnostics/runner-adapters/call-graph-impact.js";
 import { scanProjectDiagnostics } from "../../clients/project-diagnostics/scanner.js";
 import type {
 	ProjectDiagnosticsDeltaReport,
@@ -306,6 +307,73 @@ describe("project diagnostics adapters", () => {
 		]);
 		// Same member set → emitted once (one diagnostic per file, not per anchor).
 		expect(diags).toHaveLength(2);
+	});
+
+	it("maps call-graph impact findings to non-blocking diagnostics on the CALLER's file, with no line", () => {
+		const diags = callGraphImpactToProjectDiagnostics(tmp, [
+			{
+				calleeKey: "src/b.ts:changedFn",
+				results: [
+					{ symbolKey: "src/a.ts:directCaller", depth: 1, severity: "WillBreak" },
+					{ symbolKey: "src/c.ts:indirectCaller", depth: 2, severity: "MayBreak" },
+					{ symbolKey: "src/d.ts:farCaller", depth: 3, severity: "Review" },
+				],
+			},
+		]);
+
+		// Review tier is dropped — too diluted at that BFS depth to attribute
+		// to a specific caller (mirrors formatImpact's own count-only treatment).
+		expect(diags).toHaveLength(2);
+
+		const willBreak = diags.find((d) => d.rule === "call-graph:willbreak");
+		expect(willBreak).toMatchObject({
+			filePath: path.join(tmp, "src/a.ts"),
+			severity: "warning",
+			semantic: "warning",
+			tool: "call-graph",
+			runner: "call-graph",
+			source: "project-scan",
+		});
+		expect(willBreak?.line).toBeUndefined();
+		expect(willBreak?.message).toContain("directCaller");
+		expect(willBreak?.message).toContain("changedFn");
+
+		const mayBreak = diags.find((d) => d.rule === "call-graph:maybreak");
+		expect(mayBreak).toMatchObject({
+			filePath: path.join(tmp, "src/c.ts"),
+			severity: "info",
+			semantic: "warning",
+		});
+		expect(mayBreak?.line).toBeUndefined();
+
+		// Never escalates to this codebase's hard-stop tier (#533 honesty) —
+		// impact() has no type info, so a resolved caller is never a CONFIRMED
+		// break.
+		expect(diags.every((d) => d.semantic !== "blocking")).toBe(true);
+	});
+
+	it("dedupes the same caller reached via multiple edited symbols, keeping the higher severity", () => {
+		const diags = callGraphImpactToProjectDiagnostics(tmp, [
+			{
+				calleeKey: "src/b.ts:changedFnOne",
+				results: [
+					{ symbolKey: "src/a.ts:sharedCaller", depth: 2, severity: "MayBreak" },
+				],
+			},
+			{
+				calleeKey: "src/b.ts:changedFnTwo",
+				results: [
+					{ symbolKey: "src/a.ts:sharedCaller", depth: 1, severity: "WillBreak" },
+				],
+			},
+		]);
+
+		expect(diags).toHaveLength(1);
+		expect(diags[0]).toMatchObject({
+			filePath: path.join(tmp, "src/a.ts"),
+			severity: "warning", // WillBreak wins over the earlier MayBreak hit
+			rule: "call-graph:willbreak",
+		});
 	});
 
 	it("maps gitleaks secrets to BLOCKING diagnostics", () => {
