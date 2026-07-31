@@ -55,6 +55,16 @@
       ]
     },
     {
+      "login": "AngriestBird",
+      "name": "Kenneth McCormick",
+      "avatar_url": "https://avatars.githubusercontent.com/u/12663269?v=4",
+      "profile": "https://github.com/AngriestBird",
+      "contributions": [
+        "bug",
+        "code"
+      ]
+    },
+    {
       "login": "anh-chu",
       "name": "Anh Chu",
       "avatar_url": "https://avatars.githubusercontent.com/u/34973633?v=4",
@@ -356,6 +366,44 @@
       "name": "정제훈",
       "avatar_url": "https://avatars.githubusercontent.com/u/19837403?v=4",
       "profile": "https://github.com/PeraSite",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "ymek",
+      "name": "Myke Stubbs",
+      "avatar_url": "https://avatars.githubusercontent.com/u/300569?v=4",
+      "profile": "https://github.com/ymek",
+      "contributions": [
+        "code",
+        "bug"
+      ]
+    },
+    {
+      "login": "JSap0914",
+      "name": "JSap0914",
+      "avatar_url": "https://avatars.githubusercontent.com/u/116227558?v=4",
+      "profile": "https://github.com/JSap0914",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "knthmn",
+      "name": "Kent Hou Man",
+      "avatar_url": "https://avatars.githubusercontent.com/u/60438008?v=4",
+      "profile": "https://github.com/knthmn",
+      "contributions": [
+        "code",
+        "bug"
+      ]
+    },
+    {
+      "login": "neumie",
+      "name": "Jakub Neumann",
+      "avatar_url": "https://avatars.githubusercontent.com/u/23665482?v=4",
+      "profile": "https://neumie.dev/",
       "contributions": [
         "code"
       ]
@@ -795,50 +843,11 @@
       ]
     },
     {
-      "login": "ymek",
-      "name": "Myke Stubbs",
-      "avatar_url": "https://avatars.githubusercontent.com/u/300569?v=4",
-      "profile": "https://github.com/ymek",
-      "contributions": [
-        "code",
-        "bug"
-      ]
-    },
-    {
       "login": "black-snow",
       "name": "Ronald",
       "avatar_url": "https://avatars.githubusercontent.com/u/579733?v=4",
       "profile": "https://github.com/black-snow",
       "contributions": [
-        "bug"
-      ]
-    },
-    {
-      "login": "JSap0914",
-      "name": "JSap0914",
-      "avatar_url": "https://avatars.githubusercontent.com/u/116227558?v=4",
-      "profile": "https://github.com/JSap0914",
-      "contributions": [
-        "code"
-      ]
-    },
-    {
-      "login": "AngriestBird",
-      "name": "Kenneth McCormick",
-      "avatar_url": "https://avatars.githubusercontent.com/u/12663269?v=4",
-      "profile": "https://github.com/AngriestBird",
-      "contributions": [
-        "bug",
-        "code"
-      ]
-    },
-    {
-      "login": "knthmn",
-      "name": "Kent Hou Man",
-      "avatar_url": "https://avatars.githubusercontent.com/u/60438008?v=4",
-      "profile": "https://github.com/knthmn",
-      "contributions": [
-        "code",
         "bug"
       ]
     },
@@ -867,15 +876,6 @@
       "profile": "https://github.com/pppobear",
       "contributions": [
         "bug"
-      ]
-    },
-    {
-      "login": "neumie",
-      "name": "Jakub Neumann",
-      "avatar_url": "https://avatars.githubusercontent.com/u/23665482?v=4",
-      "profile": "https://neumie.dev/",
-      "contributions": [
-        "code"
       ]
     }
   ]
