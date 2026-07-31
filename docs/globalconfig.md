@@ -98,6 +98,8 @@ Turn subsystems off globally instead of retyping flags every session:
 
 In addition to the user-level `~/.pi-lens/config.json` above, pi-lens reads a per-project `.pi-lens.json` (or `pi-lens.json`) at the project root. Walked upward from the cwd, so a monorepo can keep the config at the repo root and have every subdir pick it up. The schema is intentionally small — only fields pi-lens actually honors:
 
+Note that most toggles from the table above are **user-level only**. Of them, a project config honors just the three [mutation controls](#mutation-controls) (`format.enabled`, `autofix.enabled`, `actionableWarnings.autoFix.enabled`). Putting something like `"lsp": { "enabled": false }` in a `.pi-lens.json` is silently ignored, since unknown keys never fail the parse. Set it in `~/.pi-lens/config.json` or pass `--no-lsp` instead.
+
 ```json
 {
   "ignore": [
