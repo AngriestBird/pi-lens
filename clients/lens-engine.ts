@@ -45,7 +45,6 @@ import {
 	searchWordIndex,
 	triggerBackgroundWordIndexBuild,
 } from "./word-index.js";
-import { wordIndexDebug } from "./word-index-logger.js";
 
 // --- Facades (re-exported so adapters import only this module) ---------------
 
@@ -439,7 +438,7 @@ export async function symbolSearch(
 		const status =
 			priorStatus?.state === "refused"
 				? priorStatus
-				: triggerBackgroundWordIndexBuild(cwd, wordIndexDebug(cwd));
+				: triggerBackgroundWordIndexBuild(cwd);
 		const unavailableReason =
 			priorStatus?.state === "failed"
 				? "last-build-failed"

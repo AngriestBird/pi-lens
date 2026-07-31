@@ -22,6 +22,7 @@ import {
 	type DebounceScheduler,
 } from "./persist-debounce.js";
 import { getWordIndexMaxFilesDerived } from "./project-scale.js";
+import { logWordIndex } from "./word-index-logger.js";
 
 export interface WordHit {
 	file: string;
@@ -322,6 +323,14 @@ export async function collectWordIndexDocs(
 ): Promise<
 	Array<{ path: string; content: string; mtimeMs: number }> & {
 		truncated: boolean;
+		/**
+		 * Files the walk enumerated but this pass could NOT index — unreadable
+		 * (vanished / locked) or over `WORD_INDEX_MAX_BYTES`. Surfaced (L1, #958)
+		 * so the full-build path can report coverage honestly (#533) instead of
+		 * silently dropping them with no count, the way the incremental path
+		 * already reports its own `skipped`.
+		 */
+		skipped: number;
 	}
 > {
 	const { collectSourceFilesAsync } = await import("./source-filter.js");
@@ -346,7 +355,7 @@ export async function collectWordIndexDocs(
 	const truncated = files.length === maxFiles;
 	const docs = Object.assign(
 		[] as Array<{ path: string; content: string; mtimeMs: number }>,
-		{ truncated },
+		{ truncated, skipped: 0 },
 	);
 	if (!shouldContinue()) return docs;
 	let processed = 0;
@@ -359,9 +368,15 @@ export async function collectWordIndexDocs(
 					content: fs.readFileSync(file, "utf-8"),
 					mtimeMs: stat.mtimeMs,
 				});
+			} else {
+				// Over the byte cap — enumerated but deliberately not indexed. Count
+				// it (L1, #958) so callers can keep coverage honest instead of the
+				// old silent drop.
+				docs.skipped += 1;
 			}
 		} catch {
-			// unreadable / vanished file — skip
+			// unreadable / vanished file — skip, but count it (see above).
+			docs.skipped += 1;
 		}
 		if (++processed % 100 === 0) {
 			await new Promise<void>((resolve) => setImmediate(resolve));
@@ -767,6 +782,12 @@ export function triggerBackgroundWordIndexBuild(
 	if (isAtOrAboveHomeDir(key, options.homeDir)) {
 		const reason = `root at/above home directory (${key})`;
 		dbg?.(`word-index cold-build: skipped — ${reason}`);
+		logWordIndex({
+			phase: "cold_build_refused",
+			cwd: key,
+			trigger: "cold_query",
+			reason,
+		});
 		const status = { state: "refused", reason } as const;
 		buildStatuses.set(key, status);
 		return status;
@@ -799,11 +820,30 @@ export function triggerBackgroundWordIndexBuild(
 			dbg?.(
 				`word-index cold-build: ${index.docCount} files, ${index.postings.size} tokens (${Date.now() - startMs}ms)`,
 			);
+			// M2, #958: durable decision/coverage record for the MCP-critical cold
+			// path (this is where symbol_search reads the index and dbg is a no-op).
+			logWordIndex({
+				phase: "cold_build",
+				cwd: key,
+				trigger: "cold_query",
+				durationMs: Date.now() - startMs,
+				indexedFileCount: index.docCount,
+				tokens: index.postings.size,
+				truncated: index.truncated,
+				skipped: docs.skipped,
+			});
 			buildStatuses.delete(key);
 		} catch (err) {
 			const reason = err instanceof Error ? err.message : String(err);
 			buildStatuses.set(key, { state: "failed", reason });
 			dbg?.(`word-index cold-build: failed: ${reason}`);
+			logWordIndex({
+				phase: "cold_build_failed",
+				cwd: key,
+				trigger: "cold_query",
+				durationMs: Date.now() - startMs,
+				error: reason,
+			});
 		}
 	})();
 	return status;
@@ -881,6 +921,16 @@ async function writeWordIndexSnapshot(
 		);
 	} catch (err) {
 		dbg?.(`word-index persist: failed: ${err}`);
+		// M3, #958: a swallowed persist means every LATER symbol_search reads a
+		// stale index with no trace — the exact silent-failure this durable log
+		// exists to surface (dbg is a no-op in the MCP host).
+		logWordIndex({
+			phase: "persist_failed",
+			cwd: path.resolve(cwd),
+			trigger: "per_edit",
+			indexedFileCount: index.docCount,
+			error: err instanceof Error ? err.message : String(err),
+		});
 	}
 }
 

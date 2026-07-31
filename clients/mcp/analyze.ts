@@ -36,7 +36,6 @@ import {
 	WORD_INDEX_MAX_BYTES,
 	type WordIndex,
 } from "../word-index.js";
-import { wordIndexDebug } from "../word-index-logger.js";
 import { createMcpHost } from "./host-shim.js";
 
 // #536: module-scoped FactStore for the warm-analyze graph seam, mirroring the
@@ -366,7 +365,7 @@ export async function analyzeFile(
 				} else {
 					updateWordIndexDocument(warmIndex, { path: absPath, content });
 				}
-				scheduleWordIndexPersist(cwd, warmIndex, wordIndexDebug(cwd));
+				scheduleWordIndexPersist(cwd, warmIndex);
 			} catch {
 				// unreadable/deleted, or an update failure — best-effort, same as the
 				// graph update above.

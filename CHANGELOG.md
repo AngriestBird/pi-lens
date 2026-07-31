@@ -4,6 +4,21 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Word-index build/refresh/persist outcomes are now durably observable**
+	(refs #958, #926, #533) — every word-index signal previously rode solely on
+	the optional `dbg` callback, a documented no-op in the MCP host where
+	`symbol_search` reads the index. The structured logger (`~/.pi-lens/
+	word-index.log`, shared `createNdjsonLogger` infra) now records, independent
+	of `dbg`: the full-rebuild-vs-incremental decision plus honest coverage
+	(`indexedFileCount`/`truncated` and `refreshed`/`dropped`/`skipped`/`reused`
+	counts) for both the session-start and cold-query (MCP) build paths; a
+	swallowed snapshot **persist failure** as `persist_failed` (a silent stale
+	index otherwise leaves no trace); and the safety refusal for a root at/above
+	`$HOME`. The full-build collector (`collectWordIndexDocs`) now also returns a
+	`skipped` count for files it enumerated but could not index (over the byte
+	cap / unreadable), so a partial index is never reported as complete. The
+	fragile string-parsing `dbg` adapter this replaces is removed.
+
 - **Review-graph checkpoint discards and write failures are now observable**
 	(refs #936, #533) — a present resume checkpoint that's rejected now logs
 	`checkpoint_discarded` with a `reason` (`corrupt`, `version_mismatch`,
