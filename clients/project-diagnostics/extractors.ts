@@ -42,6 +42,8 @@ const WARM_TRIGGER: Record<string, string> = {
 	opengrep: "runs at session-start",
 	trivy: "runs at session-start",
 	"dead-code": "runs at session-start (Python projects only)",
+	"test-runner":
+		"fires per-edit at turn_end (only after a source file with a discoverable test companion is edited)",
 };
 
 export function warmTriggerFor(analyzerId: string): string {

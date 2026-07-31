@@ -45,6 +45,25 @@ All notable changes to pi-lens will be documented in this file.
 	registry that shadowed `ANALYZER_IDS` and let opengrep silently diverge — was
 	removed so a single source of truth (#883) remains.
 
+- **Fixed: test-runner findings now surface project-wide in `lens_diagnostics
+	mode=full`** (closes #1004, refs #585, #533) — the same `ANALYZER_IDS`
+	omission #585/#1003 fixed for opengrep also orphaned test-runner: the
+	per-edit turn_end test fire (`runtime-turn.ts`) caches failures under
+	`"test-runner-findings"`, but `fetchFreshProjectDiagnostics`
+	(`project-diagnostics/fresh-fetch.ts`) never read that cache back, so test
+	failures never reached the agent for unedited/project-wide `mode=full`
+	calls. Unlike opengrep/gitleaks/trivy, this is wired as a CACHE-READ (not a
+	fresh scan): test-runner has no "whole project" run to trigger — turn_end
+	only ever runs the targeted, cascade-aware test files touched by that
+	turn's edits — so `fetchFreshProjectDiagnostics` now peeks at the same
+	`"test-runner-findings"` cache key (never re-running the suite, never
+	writing back) and adapts it via the existing
+	`testRunnerFindingsToProjectDiagnostics`. Added a coverage guardrail
+	(`tests/clients/project-diagnostics/analyzer-coverage.test.ts`) that greps
+	the real session-start (`runHeavyweightTask`) and turn_end cache-writer
+	call sites and asserts every id is a member of `ANALYZER_IDS`, so this
+	whole #585 bug class can't silently regress again for a future analyzer.
+
 - **Guarded Windows CPU/RSS resource sampling so a best-effort sampler can no
 	longer crash the pi host** (refs #620, #533) — `clients/resource-sampler.ts`
 	sampled CPU%/RSS via `pidusage`, whose Windows path shells out to `gwmi`
