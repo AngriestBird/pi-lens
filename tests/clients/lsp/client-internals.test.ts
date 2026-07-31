@@ -17,6 +17,7 @@ import {
 	clientWaitForDiagnostics,
 	handleNotifyChange,
 	navRequest,
+	resolveConfigurationSection,
 	runServerCommand,
 	setupIncomingHandlers,
 	stripDiagnosticNoiseLines,
@@ -191,6 +192,97 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 	}
 	return state;
 }
+
+describe("resolveConfigurationSection (#983)", () => {
+	const initialization = {
+		scan: { configuration: ["auto"], onlyGitDirty: false, jobs: 16 },
+		metrics: { enabled: false },
+		doHover: false,
+	};
+
+	it("returns the whole blob for an item with no section", () => {
+		expect(resolveConfigurationSection(initialization, undefined)).toBe(
+			initialization,
+		);
+	});
+
+	it("resolves a top-level section", () => {
+		expect(resolveConfigurationSection(initialization, "metrics")).toEqual({
+			enabled: false,
+		});
+	});
+
+	it("resolves a nested dot-path section", () => {
+		expect(resolveConfigurationSection(initialization, "scan.jobs")).toBe(16);
+	});
+
+	it("returns null for an unknown section instead of the whole blob", () => {
+		expect(resolveConfigurationSection(initialization, "unknown.section")).toBe(
+			null,
+		);
+		expect(resolveConfigurationSection(initialization, "scan.nope")).toBe(null);
+	});
+
+	it("returns null for an unknown section when initialization is undefined", () => {
+		expect(resolveConfigurationSection(undefined, "anything")).toBe(null);
+	});
+});
+
+describe("workspace/configuration handler (#983)", () => {
+	// Per the LSP spec the response array's length MUST equal
+	// params.items.length, one resolved value per requested item — not a
+	// fixed single-element array duplicating the whole blob for every item.
+	it("returns one resolved entry per requested item, mixing known and unknown sections", async () => {
+		const initialization = {
+			scan: { jobs: 16 },
+			metrics: { enabled: false },
+		};
+		const state = createMockState();
+		setupIncomingHandlers(state, initialization);
+
+		const onRequest = vi.mocked(state.connection.onRequest);
+		const calls = onRequest.mock.calls as unknown as Array<
+			[string, (params: unknown) => Promise<unknown[]>]
+		>;
+		const registered = calls.find(
+			(c) => c[0] === "workspace/configuration",
+		);
+		expect(registered).toBeDefined();
+		const handler = registered![1];
+
+		const result = await handler({
+			items: [
+				{ section: "scan" },
+				{ section: "metrics.enabled" },
+				{ section: "nonexistent.section" },
+				{},
+			],
+		});
+
+		expect(result).toEqual([
+			{ jobs: 16 },
+			false,
+			null,
+			initialization,
+		]);
+	});
+
+	it("returns an empty array when the server requests zero items", async () => {
+		const state = createMockState();
+		setupIncomingHandlers(state, { scan: { jobs: 16 } });
+
+		const onRequest = vi.mocked(state.connection.onRequest);
+		const calls = onRequest.mock.calls as unknown as Array<
+			[string, (params: unknown) => Promise<unknown[]>]
+		>;
+		const registered = calls.find(
+			(c) => c[0] === "workspace/configuration",
+		);
+		const handler = registered![1];
+
+		expect(await handler({ items: [] })).toEqual([]);
+	});
+});
 
 describe("stripDiagnosticNoiseLines", () => {
 	it("removes bare URL and further-information diagnostic lines", () => {

@@ -915,6 +915,35 @@ export function applyDynamicCapabilities(state: LSPClientState): void {
 	}
 }
 
+/**
+ * Resolve a `workspace/configuration` request item's `section` (a dot-path,
+ * e.g. "scan.jobs") against the server's `initializationOptions` blob.
+ * - No section (undefined/empty) → the whole blob, per spec ("if a scope
+ *   isn't asked for" the client returns the full settings for that scope).
+ * - An unresolvable path → `null`, never the whole blob — a server asking
+ *   for a section it doesn't get must not silently receive unrelated config.
+ * Exported for the #983 regression test.
+ */
+export function resolveConfigurationSection(
+	initialization: Record<string, unknown> | undefined,
+	section: string | undefined,
+): unknown {
+	if (!initialization) return section ? null : {};
+	if (!section) return initialization;
+	let cur: unknown = initialization;
+	for (const part of section.split(".")) {
+		if (
+			typeof cur !== "object" ||
+			cur === null ||
+			!Object.prototype.hasOwnProperty.call(cur, part)
+		) {
+			return null;
+		}
+		cur = (cur as Record<string, unknown>)[part];
+	}
+	return cur;
+}
+
 // Exported (only) so tests can invoke the publishDiagnostics notification
 // handler directly against a mock LSPClientState/connection without spawning
 // a real language server. Not part of the public client API surface.
@@ -1074,9 +1103,21 @@ export function setupIncomingHandlers(
 			}
 		},
 	);
-	state.connection.onRequest("workspace/configuration", async () => [
-		initialization ?? {},
-	]);
+	// #983: the LSP spec requires the response array to have exactly one entry
+	// per requested item, each resolved against that item's `section` (a
+	// dot-path into the server's config, e.g. "scan.jobs") — not a fixed
+	// single-element array duplicating the whole blob for every item. An item
+	// with no `section` gets the whole blob (that's what "no section" means
+	// per spec); an unresolvable section gets `null`, never the whole blob.
+	state.connection.onRequest(
+		"workspace/configuration",
+		async (params: { items?: Array<{ section?: string }> }) => {
+			const items = params?.items ?? [];
+			return items.map((item) =>
+				resolveConfigurationSection(initialization, item?.section),
+			);
+		},
+	);
 	state.connection.onRequest("window/workDoneProgress/create", async () => {});
 }
 
