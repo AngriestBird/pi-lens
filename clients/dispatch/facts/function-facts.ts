@@ -48,7 +48,7 @@ export interface FunctionSummary {
 	 * with a synchronous body) — `async` can't be dropped without breaking
 	 * the signature, so it isn't noise (#970).
 	 */
-	hasExplicitPromiseReturnType: boolean;
+	hasExplicitPromiseReturnType?: boolean;
 	/** McCabe cyclomatic complexity (branches + 1) */
 	cyclomaticComplexity: number;
 	/** Maximum control-flow nesting depth within the function */
