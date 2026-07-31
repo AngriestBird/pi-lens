@@ -1428,11 +1428,19 @@ function isAstGrepVersionOutput(output: string): boolean {
 
 async function verifyAstGrepProbePath(binPath: string): Promise<boolean> {
 	return new Promise((resolve) => {
-		const proc = spawn(binPath, ["--version"], {
-			stdio: ["ignore", "pipe", "pipe"],
-			shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(binPath),
-			timeout: 5000,
-		});
+		let proc: ReturnType<typeof spawn>;
+		try {
+			proc = spawn(binPath, ["--version"], {
+				stdio: ["ignore", "pipe", "pipe"],
+				shell: process.platform === "win32" && /\.(cmd|bat)$/i.test(binPath),
+				timeout: 5000,
+			});
+		} catch {
+			// SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL, the pidusage
+			// bug class, #533) — best-effort probe, resolve rather than reject.
+			resolve(false);
+			return;
+		}
 		let output = "";
 		proc.stdout?.on("data", (data) => (output += data));
 		proc.stderr?.on("data", (data) => (output += data));
@@ -1672,11 +1680,22 @@ async function verifyToolBinary(
 
 		// When shell:true (Windows .cmd), bake args into the command string to avoid DEP0190.
 		const spawnCmd = useShell ? `"${execPath}" --version` : execPath;
-		const proc = spawn(spawnCmd, useShell ? [] : ["--version"], {
-			timeout: 10000,
-			stdio: ["ignore", "pipe", "pipe"],
-			shell: useShell,
-		});
+		let proc: ReturnType<typeof spawn>;
+		try {
+			proc = spawn(spawnCmd, useShell ? [] : ["--version"], {
+				timeout: 10000,
+				stdio: ["ignore", "pipe", "pipe"],
+				shell: useShell,
+			});
+		} catch (err) {
+			// SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL, the pidusage
+			// bug class, #533) — best-effort verify, resolve rather than reject.
+			logSessionStart(
+				`auto-install verify: spawn threw for ${binPath} (${err instanceof Error ? err.message : String(err)})`,
+			);
+			resolve(false);
+			return;
+		}
 
 		let stdout = "";
 		let stderr = "";
@@ -1767,11 +1786,19 @@ export async function getAllToolStatuses(): Promise<ToolStatus[]> {
 			status.path = tool.checkCommand;
 			// Try to get version
 			const versionResult = await new Promise<string>((resolve) => {
-				const proc = spawn(tool.checkCommand, ["--version"], {
-					stdio: ["ignore", "pipe", "pipe"],
-					shell: process.platform === "win32",
-					timeout: 5000,
-				});
+				let proc: ReturnType<typeof spawn>;
+				try {
+					proc = spawn(tool.checkCommand, ["--version"], {
+						stdio: ["ignore", "pipe", "pipe"],
+						shell: process.platform === "win32",
+						timeout: 5000,
+					});
+				} catch {
+					// SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL, the
+					// pidusage bug class, #533) — best-effort, resolve empty version.
+					resolve("");
+					return;
+				}
 				let out = "";
 				proc.stdout?.on("data", (d) => (out += d));
 				proc.stderr?.on("data", (d) => (out += d));
@@ -2272,10 +2299,18 @@ async function getPythonUserBaseCandidates(): Promise<string[]> {
 			const spawnCmd = isWin
 				? [probe.command, ...probe.args].join(" ")
 				: probe.command;
-			const proc = spawn(spawnCmd, isWin ? [] : probe.args, {
-				stdio: ["ignore", "pipe", "pipe"],
-				shell: isWin,
-			});
+			let proc: ReturnType<typeof spawn>;
+			try {
+				proc = spawn(spawnCmd, isWin ? [] : probe.args, {
+					stdio: ["ignore", "pipe", "pipe"],
+					shell: isWin,
+				});
+			} catch {
+				// SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL, the
+				// pidusage bug class, #533) — best-effort probe, resolve empty.
+				resolve("");
+				return;
+			}
 
 			let stdout = "";
 			proc.stdout?.on("data", (data: Buffer | string) => (stdout += data));
@@ -2368,11 +2403,19 @@ function runCommand(
 	cwd: string,
 ): Promise<boolean> {
 	return new Promise((resolve) => {
-		const proc = spawn(command, args, {
-			cwd,
-			stdio: "ignore",
-			shell: process.platform === "win32",
-		});
+		let proc: ReturnType<typeof spawn>;
+		try {
+			proc = spawn(command, args, {
+				cwd,
+				stdio: "ignore",
+				shell: process.platform === "win32",
+			});
+		} catch {
+			// SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL, the pidusage
+			// bug class, #533) — resolve false rather than reject/crash.
+			resolve(false);
+			return;
+		}
 		proc.on("exit", (code) => resolve(code === 0));
 		proc.on("error", () => resolve(false));
 	});
@@ -3087,14 +3130,22 @@ async function installPipTool(
 				// Ensure user-level scripts directory is available in current process PATH.
 				// This helps tools installed via `pip install --user` become immediately callable.
 				const userBaseResult = await new Promise<string>((resolve) => {
-					const probe = spawn(
-						candidate.command,
-						["-m", "site", "--user-base"],
-						{
-							stdio: ["ignore", "pipe", "pipe"],
-							shell: isWindows,
-						},
-					);
+					let probe: ReturnType<typeof spawn>;
+					try {
+						probe = spawn(
+							candidate.command,
+							["-m", "site", "--user-base"],
+							{
+								stdio: ["ignore", "pipe", "pipe"],
+								shell: isWindows,
+							},
+						);
+					} catch {
+						// SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL, the
+						// pidusage bug class, #533) — best-effort probe, resolve empty.
+						resolve("");
+						return;
+					}
 					let stdout = "";
 					probe.stdout?.on("data", (data) => (stdout += data));
 					probe.on("exit", (code) => {

@@ -14,7 +14,12 @@
  * - To: await safeSpawnAsync(cmd, args, opts)
  */
 
-import { type SpawnOptions, spawn, spawnSync } from "node:child_process";
+import {
+	type ChildProcess,
+	type SpawnOptions,
+	spawn,
+	spawnSync,
+} from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { logLatency } from "./latency-logger.js";
@@ -90,12 +95,19 @@ const lifetimeState =
 
 function killPidTreeSync(pid: number): void {
 	if (process.platform === "win32") {
-		const taskkill = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\taskkill.exe`;
-		spawnSync(taskkill, ["/F", "/T", "/PID", String(pid)], {
-			shell: false,
-			windowsHide: true,
-			stdio: "ignore",
-		});
+		try {
+			const taskkill = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\taskkill.exe`;
+			spawnSync(taskkill, ["/F", "/T", "/PID", String(pid)], {
+				shell: false,
+				windowsHide: true,
+				stdio: "ignore",
+			});
+		} catch {
+			// Runs from process `exit`/signal handlers — a SYNCHRONOUS spawn throw
+			// (Windows `spawn UNKNOWN`/EINVAL, the pidusage bug class, #533) would
+			// become an uncaughtException during shutdown. Best-effort tree-kill:
+			// swallow it, mirroring the already-guarded POSIX branch below.
+		}
 		return;
 	}
 	try {
@@ -476,13 +488,31 @@ export async function safeSpawnAsync(
 			return;
 		}
 
-		const child = spawn(spawnCmd, spawnArgs, {
-			cwd: options?.cwd,
-			env: { ...process.env, ...options?.env },
-			windowsHide: true,
-			shell: false,
-			windowsVerbatimArguments,
-		});
+		let child: ChildProcess;
+		try {
+			child = spawn(spawnCmd, spawnArgs, {
+				cwd: options?.cwd,
+				env: { ...process.env, ...options?.env },
+				windowsHide: true,
+				shell: false,
+				windowsVerbatimArguments,
+			});
+		} catch (err) {
+			// A SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL — the
+			// pidusage bug class, #533) must NOT reject this Promise: every caller
+			// relies on safeSpawnAsync never rejecting (they inspect result.error),
+			// and many invoke it fire-and-forget in best-effort/background paths, so
+			// a rejection here could surface as an unhandledRejection that crashes
+			// the host. Resolve the failure gracefully instead — same contract as an
+			// asynchronously-emitted `'error'` event (handled below).
+			resolve({
+				stdout: "",
+				stderr: "",
+				status: null,
+				error: err instanceof Error ? err : new Error(String(err)),
+			});
+			return;
+		}
 		if (options?.lifetimeCoupled && child.pid) {
 			installLifetimeCleanup();
 			lifetimeState.pids.add(child.pid);

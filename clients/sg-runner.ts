@@ -355,46 +355,60 @@ export class SgRunner {
 			const isWindows = process.platform === "win32";
 			const hasBash = process.env.MSYSTEM || process.env.GIT_SHELL;
 
-			let proc;
-			if (isWindows && hasBash) {
-				// Run via bash (Git Bash/MSYS2) so $-metavariables in ast-grep
-				// patterns aren't shell-expanded. Pass the command + args as
-				// POSITIONAL parameters (`"$0"`/`"$@"`) instead of interpolating
-				// them into the -c string: bash re-emits `"$@"` verbatim — no
-				// parameter expansion, no word-splitting — so patterns stay literal
-				// AND an environment-derived command path cannot inject shell
-				// (fixes CodeQL js/shell-command-injection-from-environment). This
-				// also removes the brittle hand-rolled quoting it replaced.
-				proc = spawn("bash", buildBashRunArgs(command.cmd, allArgs), {
-					stdio: ["ignore", "pipe", "pipe"],
-					windowsHide: true,
-				});
-			} else if (isWindows) {
-				// Fallback: shell:true needed for npm-installed .cmd wrappers on Windows.
-				// Pass cmd and args separately — do not concatenate into one string.
-				proc = spawn(command.cmd, allArgs.map(escapeWindowsArg), {
-					stdio: ["ignore", "pipe", "pipe"],
-					shell: true,
-					windowsHide: true,
-				});
-			} else {
-				// Unix: normal spawn without shell
-				proc = spawn(command.cmd, allArgs, {
-					stdio: ["ignore", "pipe", "pipe"],
-				});
-			}
-
-			let stdout = "";
-			let stderr = "";
-
-			proc.stdout.on("data", (data: Buffer) => (stdout += data.toString()));
-			proc.stderr.on("data", (data: Buffer) => (stderr += data.toString()));
-
 			const empty = (): SgResult => ({
 				matches: [],
 				totalMatches: 0,
 				truncated: false,
 			});
+
+			let proc: ReturnType<typeof spawn>;
+			try {
+				if (isWindows && hasBash) {
+					// Run via bash (Git Bash/MSYS2) so $-metavariables in ast-grep
+					// patterns aren't shell-expanded. Pass the command + args as
+					// POSITIONAL parameters (`"$0"`/`"$@"`) instead of interpolating
+					// them into the -c string: bash re-emits `"$@"` verbatim — no
+					// parameter expansion, no word-splitting — so patterns stay literal
+					// AND an environment-derived command path cannot inject shell
+					// (fixes CodeQL js/shell-command-injection-from-environment). This
+					// also removes the brittle hand-rolled quoting it replaced.
+					proc = spawn("bash", buildBashRunArgs(command.cmd, allArgs), {
+						stdio: ["ignore", "pipe", "pipe"],
+						windowsHide: true,
+					});
+				} else if (isWindows) {
+					// Fallback: shell:true needed for npm-installed .cmd wrappers on Windows.
+					// Pass cmd and args separately — do not concatenate into one string.
+					proc = spawn(command.cmd, allArgs.map(escapeWindowsArg), {
+						stdio: ["ignore", "pipe", "pipe"],
+						shell: true,
+						windowsHide: true,
+					});
+				} else {
+					// Unix: normal spawn without shell
+					proc = spawn(command.cmd, allArgs, {
+						stdio: ["ignore", "pipe", "pipe"],
+					});
+				}
+			} catch (err) {
+				// A SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL — the
+				// pidusage bug class, #533) would reject this Promise; `exec` is
+				// contracted to always resolve (callers read `error`, never catch),
+				// so resolve gracefully instead of letting it escape as an
+				// unhandledRejection. Async spawn `'error'` events are already
+				// handled by the `proc.on("error", ...)` listener below.
+				resolve({
+					...empty(),
+					error: err instanceof Error ? err.message : String(err),
+				});
+				return;
+			}
+
+			let stdout = "";
+			let stderr = "";
+
+			proc.stdout?.on("data", (data: Buffer) => (stdout += data.toString()));
+			proc.stderr?.on("data", (data: Buffer) => (stderr += data.toString()));
 
 			proc.on("error", (err: Error) => {
 				if (err.message.includes("ENOENT")) {
