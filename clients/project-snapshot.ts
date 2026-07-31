@@ -341,9 +341,18 @@ function readSnapshotBody(bodyPath: string, gz: boolean): {
 		const json = gunzipSync(fs.readFileSync(bodyPath)).toString("utf-8");
 		const snapshot = parseSnapshot(JSON.parse(json)) ?? null;
 		return { snapshot, rawBytes: Buffer.byteLength(json) };
-	} catch {
+	} catch (err) {
 		// Corrupt / truncated gz, or a parse failure: fail open exactly like
-		// readJsonCache does — a null return rebuilds the snapshot.
+		// readJsonCache does — a null return rebuilds the snapshot. Log it so a
+		// corrupt body is diagnosable rather than indistinguishable from "no
+		// snapshot yet" (both return a null snapshot here).
+		logLatency({
+			type: "phase",
+			phase: "project_snapshot_body_corrupt",
+			filePath: bodyPath,
+			durationMs: 0,
+			metadata: { error: err instanceof Error ? err.message : String(err) },
+		});
 		return { snapshot: null, rawBytes: 0 };
 	}
 }
@@ -477,6 +486,15 @@ function reconcileAuthoritativeAfterWrite(
 	// a superseding save already replaced it with a newer object.
 	if (!entry || entry.snapshot !== pending.snapshot) return;
 	if (rawBytes > SNAPSHOT_PARSE_CACHE_MAX_BYTES) {
+		// Benign but invisible otherwise: the next load will re-parse this body
+		// from disk instead of serving the in-process object.
+		logLatency({
+			type: "phase",
+			phase: "project_snapshot_authoritative_dropped_oversized",
+			filePath: pending.gzPath,
+			durationMs: 0,
+			metadata: { rawBytes, maxBytes: SNAPSHOT_PARSE_CACHE_MAX_BYTES },
+		});
 		authoritativeSnapshots.delete(pending.key);
 		return;
 	}
@@ -492,6 +510,25 @@ function writeSnapshotBodyOnMainThread(
 	pending: PendingSnapshotBody,
 	reason?: string,
 ): void {
+	if (reason) {
+		// We took the synchronous main-thread gzip path (the +656MB-risk path,
+		// #950) instead of the worker. Surface it rather than burying it in an
+		// `offloaded:false` success line below. `degraded` distinguishes a REAL
+		// degradation (worker died/unavailable/promote-failed) from the benign
+		// `exit_hook` teardown flush, so an operator triaging worker health isn't
+		// misled by normal process-exit flushes.
+		logLatency({
+			type: "phase",
+			phase: "project_snapshot_worker_fallback",
+			filePath: pending.gzPath,
+			durationMs: 0,
+			metadata: {
+				reason,
+				seq: pending.snapshot.seq,
+				degraded: reason !== "exit_hook",
+			},
+		});
+	}
 	try {
 		const serializeStarted = performance.now();
 		const json = JSON.stringify(pending.snapshot);

@@ -19,6 +19,25 @@ All notable changes to pi-lens will be documented in this file.
 	cap / unreadable), so a partial index is never reported as complete. The
 	fragile string-parsing `dbg` adapter this replaces is removed.
 
+- **Closed four observability gaps in recently-changed typos-config and
+	project-snapshot code** (refs #533) — none of these change behavior, only
+	what's now logged: (1) the typos LSP's inject-vs-step-aside decision
+	(#967) now logs a `typos_config_resolved` phase in `latency.log` /
+	`sessionstart.log` with `mode: "project_config" | "injected_default"` and
+	the resolved `configPath`, so which typos config is actually active is no
+	longer a guess; (2) a project-snapshot body persist that falls back to the
+	synchronous main-thread gzip because the persist worker died/was
+	unavailable now logs an explicit `project_snapshot_worker_fallback` phase
+	with the `reason` (previously only visible via a test-only variable, or
+	buried in an `offloaded:false` success line) — this is the +656MB-risk
+	degraded path from #950; (3) a corrupt/truncated gzipped snapshot body
+	(gunzip/JSON.parse failure) now logs `project_snapshot_body_corrupt`
+	before failing open to a rebuild, instead of being indistinguishable from
+	"no snapshot yet"; (4) dropping the in-process authoritative snapshot
+	entry for an oversized (>24MB) body now logs
+	`project_snapshot_authoritative_dropped_oversized` — low-priority, but no
+	longer silent.
+
 - **Review-graph checkpoint discards and write failures are now observable**
 	(refs #936, #533) — a present resume checkpoint that's rejected now logs
 	`checkpoint_discarded` with a `reason` (`corrupt`, `version_mismatch`,
@@ -318,6 +337,20 @@ All notable changes to pi-lens will be documented in this file.
 	install on every analyze.
 
 ### Fixed
+
+- **Remaining test-suite spawns routed off `shell:true` to close the Windows-spawn flake class** (refs #902) —
+	`tests/clients/ast-grep-rule-precedence-followups.test.ts` (CLI probe + `runCli`),
+	`tests/clients/coderabbit-ast-grep-rules.test.ts` (vendored-catalog smoke),
+	`tests/clients/dispatch/runners/ast-grep-playground-verify.test.ts` (async `runVerify`),
+	`tests/clients/dead-code-client.test.ts` (vulture probe), and
+	`tests/clients/lsp/clangd-lazy-indexing.test.ts` (clangd `where`/`which` probe) now spawn
+	through the hardened `safeSpawn`/`safeSpawnAsync` (`clients/safe-spawn.ts`, #817) instead of
+	a raw `execFileSync`/`spawnSync`/`spawn`/`execSync` with a fresh, uncached `cmd.exe` wrapper
+	per call — the documented intermittent ENOENT/EAGAIN source under windows-latest CI's
+	parallel process-creation pressure. Completes the sweep PR #993 started for the two
+	ast-grep runner test files; `git` spawns are left as-is (no `.cmd` shim, so out of the flake
+	class) and the `mcp/*` and MCP harness spawns that need bidirectional stdin streaming are
+	left as-is (`safeSpawnAsync` only exposes a close-based result, not a live stdin/stdout pipe).
 
 - **Tree-sitter post-filters no longer leave silently dead rules** (refs #879) —
 	the 25 unknown filter references were resolved by implementing eight bounded,

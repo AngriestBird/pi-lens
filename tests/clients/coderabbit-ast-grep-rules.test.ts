@@ -1,9 +1,9 @@
-import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import * as yaml from "js-yaml";
 import { resolveAstGrepNativeExe } from "../../clients/lsp/wait-policy/index.js";
+import { safeSpawn } from "../../clients/safe-spawn.js";
 import { getAstGrepRuleSources } from "../../clients/sgconfig.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
@@ -139,17 +139,20 @@ describe("vendored CodeRabbit ast-grep rules", () => {
 			const astGrepExe = resolveAstGrepNativeExe();
 			expect(astGrepExe).toBeDefined();
 
-			expect(() =>
-				execFileSync(
-					astGrepExe!,
-					["scan", "--config", configPath, fixtures],
-					{
-						cwd: env.tmpDir,
-						encoding: "utf8",
-						stdio: ["ignore", "pipe", "pipe"],
-					},
-				),
-			).not.toThrow();
+			// #902: was `execFileSync(..., { shell: true })`-adjacent raw spawn.
+			// `astGrepExe` is already an absolute path resolved via
+			// `require.resolve` (no PATH/PATHEXT walk needed), but routing it
+			// through `safeSpawn` (shared with production, `clients/safe-spawn.ts`)
+			// keeps a single spawn strategy for every ast-grep invocation in this
+			// test tree (single source of truth, #883) instead of a second,
+			// hand-rolled one here.
+			const result = safeSpawn(
+				astGrepExe!,
+				["scan", "--config", configPath, fixtures],
+				{ cwd: env.tmpDir },
+			);
+			expect(result.error, result.stderr).toBeUndefined();
+			expect(result.status, result.stderr).toBe(0);
 		} finally {
 			env.cleanup();
 		}

@@ -2814,10 +2814,32 @@ const TYPOS_EXTENSIONS: readonly string[] = Array.from(
 // existing project config means injecting NOTHING, letting typos-lsp read the
 // project's file untouched.
 function typosInitialization(root: string): Record<string, unknown> | undefined {
-	if (findLocalTyposConfig(root)) return undefined;
-	return {
-		config: resolvePackagePath(import.meta.url, "rules", "typos", "_typos.toml"),
-	};
+	const localConfig = findLocalTyposConfig(root);
+	if (localConfig) {
+		logLatency({
+			type: "phase",
+			phase: "typos_config_resolved",
+			filePath: root,
+			durationMs: 0,
+			metadata: { mode: "project_config", configPath: localConfig },
+		});
+		logSessionStart(
+			`typos config resolved mode=project_config configPath=${localConfig}`,
+		);
+		return undefined;
+	}
+	const configPath = resolvePackagePath(import.meta.url, "rules", "typos", "_typos.toml");
+	logLatency({
+		type: "phase",
+		phase: "typos_config_resolved",
+		filePath: root,
+		durationMs: 0,
+		metadata: { mode: "injected_default", configPath },
+	});
+	logSessionStart(
+		`typos config resolved mode=injected_default configPath=${configPath}`,
+	);
+	return { config: configPath };
 }
 
 export const TyposServer: LSPServerInfo = {
