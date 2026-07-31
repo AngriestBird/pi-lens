@@ -164,10 +164,9 @@ export function getProjectDiagnosticsScannerMaxFiles(cwd?: string): number {
  * strongest real constraint on this number — `review-graph/builder.ts`'s
  * persist circuit-breaker (`GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT`, 500,000
  * graph elements: file/symbol nodes + cross-file edges). Above that element
- * count the graph is NEVER persisted to disk (logged + skipped, #260's OOM
- * guard) — not "slow", but PERMANENTLY uncached, so every session pays a
- * full cold build instead of the ~20 ms cached path (see the CHANGELOG
- * timing note below) engaging exactly once. For symbol-dense repos, element
+ * count only a centrality-ranked, honestly-marked partial graph is persisted
+ * (#936). Read-only orientation can use it, but the build tier rejects it as
+ * a complete incremental base. For symbol-dense repos, element
  * count runs on the order of ~30/file (file node + per-symbol nodes +
  * import/call/reference edges), so a hard ceiling must leave real headroom
  * below 500,000 elements. The file ceiling remains conservative because it

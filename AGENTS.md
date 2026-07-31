@@ -350,6 +350,14 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
 - **The bin target is `dist/`.** After changing MCP/engine/runner code, run
   `npm run build:dist` so the user-scoped server (`dist/mcp/server.js`) picks it up
   on the next Claude session. (`bin`: `pi-lens-mcp`, `pi-lens-analyze`.)
+- **Review-graph persist caps are partial, never absent or silently complete
+  (#936).** `GRAPH_PERSIST_MAX_ELEMENTS` counts nodes + edges (default 500,000).
+  Above it, `builder.ts` keeps whole-file node groups ranked through the shared
+  reverse-dependency-centrality seam, then induced edges up to the cap. The gzip
+  snapshot carries exact total/persisted node+edge counts; read-only consumers
+  may load it and must surface `persistCoverage.partial`, while the incremental
+  build tier rejects it as a complete base. Keep this on the existing worker,
+  generation-staged promotion, and sync-flush path.
 - **Review-graph snapshot persistence is worker-offloaded (#939).** The
   canonical cache is `review-graph.json.gz` (legacy uncompressed
   `review-graph.json` is load-only fallback for one release). Debounced writes
