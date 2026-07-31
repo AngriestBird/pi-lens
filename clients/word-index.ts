@@ -919,6 +919,17 @@ async function writeWordIndexSnapshot(
 		dbg?.(
 			`word-index persist: ${index.docCount} files, ${index.postings.size} tokens`,
 		);
+		// #958 review F1: durably record persist SUCCESS too, not just failures —
+		// in the MCP host (`dbg` is a no-op) this is the only signal that the index
+		// is actually being kept fresh across edits. Debounced (~1.5s), so not
+		// spammy. Mirrors the review graph's persist_succeeded.
+		logWordIndex({
+			phase: "persist_succeeded",
+			cwd: path.resolve(cwd),
+			trigger: "per_edit",
+			indexedFileCount: index.docCount,
+			tokens: index.postings.size,
+		});
 	} catch (err) {
 		dbg?.(`word-index persist: failed: ${err}`);
 		// M3, #958: a swallowed persist means every LATER symbol_search reads a

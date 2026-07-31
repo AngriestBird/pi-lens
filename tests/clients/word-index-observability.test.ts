@@ -23,7 +23,6 @@ vi.mock("../../clients/word-index-logger.js", () => ({
 	logWordIndex: logSpy,
 	getWordIndexLogPath: () => "/dev/null/word-index.log",
 	flushWordIndexLog: vi.fn().mockResolvedValue(undefined),
-	flushWordIndexLogSync: vi.fn(),
 }));
 
 vi.mock("../../clients/project-snapshot.js", async (importOriginal) => {
@@ -46,6 +45,11 @@ beforeEach(() => {
 	logSpy.mockClear();
 	failPersist.value = false;
 	process.env.PI_LENS_WORD_INDEX_PERSIST_DEBOUNCE_MS = "0";
+	// The persist merges into the project snapshot, whose body write defaults to
+	// a worker thread (#958 item 2); force the sync writer so a successful
+	// persist test doesn't leave a worker handle open (this suite tests the
+	// word-index log, not the snapshot offload).
+	process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC = "1";
 });
 afterEach(async () => {
 	const { flushWordIndexPersistsForTests, _resetWordIndexBuildGuardForTests } =
@@ -53,6 +57,7 @@ afterEach(async () => {
 	flushWordIndexPersistsForTests();
 	_resetWordIndexBuildGuardForTests();
 	delete process.env.PI_LENS_WORD_INDEX_PERSIST_DEBOUNCE_MS;
+	delete process.env.PI_LENS_SNAPSHOT_PERSIST_SYNC;
 	vi.restoreAllMocks();
 });
 
@@ -108,6 +113,43 @@ describe("word-index observability (#958)", () => {
 					error: expect.stringContaining("ENOSPC"),
 				}),
 			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("F1: a successful debounced persist emits a persist_succeeded record (the MCP-host freshness signal the old dbg adapter provided)", async () => {
+		const env = setupTestEnvironment("pi-lens-word-persist-ok-");
+		try {
+			const {
+				buildWordIndex,
+				scheduleWordIndexPersist,
+				flushWordIndexPersistsForTests,
+			} = await import("../../clients/word-index.js");
+			const index = buildWordIndex([
+				{ path: "a.ts", content: "export const alpha = 1;" },
+			]);
+
+			scheduleWordIndexPersist(env.tmpDir, index);
+			flushWordIndexPersistsForTests();
+			await flushMicrotasks();
+
+			const ok = logSpy.mock.calls.find(
+				(c) => c[0]?.phase === "persist_succeeded",
+			);
+			expect(ok).toBeDefined();
+			expect(ok?.[0]).toEqual(
+				expect.objectContaining({
+					phase: "persist_succeeded",
+					trigger: "per_edit",
+					indexedFileCount: 1,
+					tokens: expect.any(Number),
+				}),
+			);
+			// And no persist_failed on the success path.
+			expect(
+				logSpy.mock.calls.find((c) => c[0]?.phase === "persist_failed"),
+			).toBeUndefined();
 		} finally {
 			env.cleanup();
 		}

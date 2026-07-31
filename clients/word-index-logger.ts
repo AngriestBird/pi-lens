@@ -45,6 +45,9 @@ export type WordIndexLogPhase =
 	| "cold_build_refused"
 	/** Cold-query background build (build or persist) failed. */
 	| "cold_build_failed"
+	/** A debounced snapshot persist landed — confirms the index is kept fresh
+	 *  across edits (the durable record the MCP host's no-op `dbg` couldn't give). */
+	| "persist_succeeded"
 	/** A snapshot persist swallowed its error — every later query reads stale. */
 	| "persist_failed";
 
@@ -66,9 +69,14 @@ export interface WordIndexLogEntry {
 	/** Incremental: docs removed because they left the current file set. */
 	dropped?: number;
 	/**
-	 * Docs the walk saw but could not index this pass — unreadable / over the
-	 * byte cap. Surfaced on BOTH build paths so coverage stays honest (#533): a
-	 * skipped file is NOT silently treated as indexed or reused.
+	 * Files the walk enumerated but did NOT (re)index this pass — meaning is
+	 * per-phase (surfaced on both paths so coverage stays honest, #533):
+	 *  - full_rebuild: unreadable OR over the byte cap → genuinely ABSENT from
+	 *    the index (never counted as indexed).
+	 *  - incremental_refresh: stale files that failed to re-read this pass → their
+	 *    PRIOR postings are retained (and old mtime kept, so retried next pass);
+	 *    over-cap files are excluded from the index as on the full path.
+	 * Either way a skipped file is never counted as freshly indexed or reused.
 	 */
 	skipped?: number;
 	/** Incremental: docs reused unchanged (the whole point — reused ≫ refreshed). */
@@ -93,9 +101,4 @@ export function getWordIndexLogPath(): string {
 /** Resolve once all enqueued word-index writes are on disk (tests/shutdown). */
 export function flushWordIndexLog(): Promise<void> {
 	return writer.flush();
-}
-
-/** Teardown-only: force queued entries to disk before the process exits. */
-export function flushWordIndexLogSync(): void {
-	writer.flushSync();
 }
