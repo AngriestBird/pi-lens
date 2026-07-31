@@ -4,6 +4,29 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Guarded Windows CPU/RSS resource sampling so a best-effort sampler can no
+	longer crash the pi host** (refs #620, #533) — `clients/resource-sampler.ts`
+	sampled CPU%/RSS via `pidusage`, whose Windows path shells out to `gwmi`
+	through an internal `spawn(..., { shell: "powershell.exe" })` that has no
+	try/catch and runs from inside a ChildProcess `close` callback. Under real
+	Windows handle/commit pressure that spawn can throw `spawn UNKNOWN`
+	(errno -4094) **synchronously in that detached callback**, which the call
+	site's `try { await pidusage() } catch {}` cannot catch → `uncaughtException`
+	→ the whole host process dies (observed live). pidusage 4.0.1 offers no
+	option to avoid the gwmi path. The sampler now runs its OWN fully guarded
+	`Get-CimInstance Win32_Process` query on Windows (never calling `pidusage`
+	there), mirroring the existing `findDescendantPidsWindows` guard: a
+	synchronous spawn throw, a child `error` event, and a non-zero/garbage exit
+	all resolve to a partial/empty map — the sampler can now only ever lose a
+	data point, never throw into the heartbeat/spawn path. RSS comes from
+	`WorkingSetSize`; CPU% is preserved via the same KernelModeTime/UserModeTime
+	delta-over-elapsed-wall-time computation gwmi uses (a small per-pid history
+	tracks the prior cumulative CPU time). Linux/macOS keep using `pidusage`
+	(procfs/`ps` — not the crash vector) unchanged. A pid absent from the
+	returned map still means "unsampled this tick", never zero.
+
 - **Parallelized the per-turn madge dependency check** (refs #766) — the
 	turn-end circular-dependency pass previously ran one `await checkFile()`
 	per import-changed file in a sequential `for…await` loop, serializing N
