@@ -61,6 +61,17 @@ export interface YamlRule {
 	// through unchanged. Without it, `matches: <name>` can't resolve and the
 	// rule silently produces zero matches (#663).
 	utils?: Record<string, YamlRuleCondition>;
+	/**
+	 * Skip this rule on files whose path (relative to the project root,
+	 * forward-slashed) matches any of these glob patterns — e.g. a
+	 * `scripts` directory glob plus a `logger.ts` basename glob for a
+	 * debug-output rule that's expected to fire in CLI entry points and the
+	 * logging sink itself (#965). Mirrors the tree-sitter query loader's
+	 * `ignore_paths` field (`clients/tree-sitter-query-loader.ts`) — same
+	 * shape/matching, kept as a separate opt-in per-rule field rather than a
+	 * blanket path exclusion so most rules are unaffected.
+	 */
+	ignores?: string[];
 }
 
 interface CachedRules {
