@@ -93,13 +93,15 @@ All notable changes to pi-lens will be documented in this file.
 	roots, build errors/skips, persist failures, and persist-cap trips exit
 	non-zero with their reason instead of silently leaving no snapshot.
 
-- **Raise and instrument the review-graph persist ceiling** (refs #936) — the
+- **Raise and make the review-graph persist ceiling useful** (refs #936) — the
 	default `GRAPH_PERSIST_MAX_ELEMENTS` cap is now 500,000 (still overrideable
 	through `PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS`), matching measured startup
 	load/reindex costs and allowing the ~208,000-element #919 repository to
-	persist. A cap trip logs `persist_skipped` and records an actionable build
-	attempt reason with the observed count, cap, and override knob so
-	`project_report` exposes the failure.
+	persist completely. Above the cap, persistence retains whole-file node groups
+	in existing reverse-dependency-centrality order plus induced edges that fit,
+	instead of dropping the snapshot. Exact total-versus-persisted node/edge
+	counts are stored and surfaced; read-only queries may use the partial graph,
+	while incremental builds reject it as a complete base.
 
 - **Logger hot paths now coalesce queued lines and rotate during long sessions** (refs #935) — contiguous NDJSON entries drain through one append up to each truncate boundary while retaining peek-then-remove exit safety and one-write cross-process atomicity. `sessionstart.log` now uses one shared asynchronous writer for ordinary diagnostics (with the crash-adjacent LSP launch write intentionally synchronous), and latency/cascade/tree-sitter/bus-event logs enforce the existing 10 MB cap in process.
 

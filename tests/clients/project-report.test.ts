@@ -59,7 +59,7 @@ describe("projectReport — cold path (#773)", () => {
 		);
 	});
 
-	it("surfaces a graph that cannot be persisted (#919)", async () => {
+	it("surfaces partial persistence honestly (#919/#936)", async () => {
 		const env = makeEnv();
 		createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");
 		createTempFile(env.tmpDir, "src/b.ts", "export const b = 2;\n");
@@ -70,9 +70,9 @@ describe("projectReport — cold path (#773)", () => {
 			const report = await projectReport(env.tmpDir);
 			expect(report.available).toBe(true);
 			expect(report.lastBuildAttempt).toMatchObject({ outcome: "succeeded" });
-			expect(report.lastBuildAttempt?.reason).toContain(
-				"persist element cap exceeded",
-			);
+		expect(report.lastBuildAttempt?.reason).toContain(
+			"persisted partial review graph",
+		);
 		} finally {
 			if (previousCap === undefined) {
 				delete process.env.PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS;

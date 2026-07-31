@@ -89,6 +89,13 @@ export interface ReviewGraph {
 	symbolNodesByFile: Map<string, string[]>;
 	changedSymbolsByFile: Map<string, string[]>;
 	/**
+	 * On-disk persistence coverage. Present on graphs hydrated from a snapshot
+	 * written by the capped persistence path. A partial graph is useful for
+	 * read-only orientation, but MUST NOT be treated as a complete incremental
+	 * build base.
+	 */
+	persistCoverage?: ReviewGraphPersistCoverage;
+	/**
 	 * #459: process-local monotonic stamp identifying the graph CONTENT this
 	 * instance was built from. Two returned graphs share a generation iff no
 	 * graph-mutating build happened between them, so caches of graph-derived
@@ -98,6 +105,15 @@ export interface ReviewGraph {
 	 * paths that never reuse (mode "skipped") ⇒ derived caches must rebuild.
 	 */
 	buildGeneration?: number;
+}
+
+export interface ReviewGraphPersistCoverage {
+	partial: boolean;
+	cap: number;
+	totalNodes: number;
+	totalEdges: number;
+	persistedNodes: number;
+	persistedEdges: number;
 }
 
 export interface ImpactCascadeResult {

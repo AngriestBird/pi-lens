@@ -40,6 +40,10 @@ import {
 	resolveWorkspacePackageImport,
 } from "./import-resolvers.js";
 import { RUNTIME_CONFIG } from "../runtime-config.js";
+import {
+	buildReverseDependencyIndexFromGraph,
+	rankFilesByReverseDependencyCentrality,
+} from "../reverse-deps.js";
 import { buildQualifiedName, findOwnerName } from "../symbol-containment.js";
 import { logTreeSitterCacheStats } from "../tree-sitter-logger.js";
 import {
@@ -54,7 +58,12 @@ import {
 import { withTreeSitterRoot } from "../tree-sitter-shared.js";
 import { resolveGitIdentity } from "./git-identity.js";
 import { buildSymbolId } from "./symbol-id.js";
-import type { ReviewGraph, ReviewGraphEdge, ReviewGraphNode } from "./types.js";
+import type {
+	ReviewGraph,
+	ReviewGraphEdge,
+	ReviewGraphNode,
+	ReviewGraphPersistCoverage,
+} from "./types.js";
 import type {
 	ReviewGraphPersistWorkerRequest,
 	ReviewGraphPersistWorkerResult,
@@ -344,7 +353,10 @@ export function getCachedReviewGraph(cwd: string): ReviewGraph | undefined {
 	// skip the disk read. loadPersistedGraph already rebuilt the indexes.
 	// #300: this read is BLIND — nothing downstream content-verifies it, so a
 	// stamped snapshot from a different HEAD/worktree must be dropped here.
-	const disk = loadPersistedGraph(cwd, { verifyGitStamp: true });
+	const disk = loadPersistedGraph(cwd, {
+		verifyGitStamp: true,
+		allowPartial: true,
+	});
 	if (!disk) return undefined;
 	_workspaceGraphCache.set(key, {
 		signature: disk.signature,
@@ -819,6 +831,8 @@ interface PersistedGraphData {
 	fileHashes?: Array<[string, string]>;
 	nodes: Array<[string, ReviewGraphNode]>;
 	edges: ReviewGraphEdge[];
+	/** Honest total-vs-persisted counts for capped snapshots (#936). */
+	coverage?: ReviewGraphPersistCoverage;
 	// #300: git identity captured at persist time (fs-resolved, no `git` spawn —
 	// see git-identity.ts). Optional so an older snapshot without a stamp still
 	// loads exactly as before — only a PRESENT stamp that MISMATCHES the current
@@ -828,7 +842,7 @@ interface PersistedGraphData {
 
 function loadPersistedGraph(
 	cwd: string,
-	opts?: { verifyGitStamp?: boolean },
+	opts?: { verifyGitStamp?: boolean; allowPartial?: boolean },
 ): {
 	signature: string;
 	fileSignatures: Map<string, string>;
@@ -844,6 +858,7 @@ function loadPersistedGraph(
 			: fs.readFileSync(legacyPath, "utf-8");
 		const data = JSON.parse(raw) as PersistedGraphData;
 		if (data.version !== REVIEW_GRAPH_VERSION) return null;
+		if (data.coverage?.partial && !opts?.allowPartial) return null;
 		if (opts?.verifyGitStamp && data.gitStamp) {
 			// #300: a stamped snapshot must match the CURRENT repo identity. This
 			// closes the "worktree removed + re-added at the same path for a
@@ -875,6 +890,7 @@ function loadPersistedGraph(
 			fileNodes: new Map(),
 			symbolNodesByFile: new Map(),
 			changedSymbolsByFile: new Map(),
+			persistCoverage: data.coverage,
 		};
 		rebuildIndexes(graph);
 		return {
@@ -964,9 +980,9 @@ export function isReviewGraphMigrationNeeded(cwd: string): boolean {
 // especially when it overlapped the next build or the host's tsc. Two guards:
 //   1. Coalesce: a burst of edits schedules ONE write after a quiet window,
 //      instead of one full serialize per turn (the spike multiplier).
-//   2. Ceiling: refuse to serialize a graph above an element cap (fail-safe —
-//      log + skip rather than OOM the host; same fail-closed spirit as the
-//      read-guard).
+//   2. Ceiling: serialize only a centrality-ranked subgraph above the element
+//      cap. Its coverage marker stays honest without risking the full-graph OOM
+//      that introduced this guard.
 const GRAPH_PERSIST_DEBOUNCE_MS_DEFAULT = 1500;
 export const GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT = 500_000;
 
@@ -1018,8 +1034,88 @@ function persistedData(pending: PendingPersist): PersistedGraphData {
 			: undefined,
 		nodes: Array.from(pending.graph.nodes.entries()),
 		edges: pending.graph.edges,
+		coverage: pending.graph.persistCoverage,
 		gitStamp: pending.gitStamp,
 	};
+}
+
+function graphCoverage(
+	graph: ReviewGraph,
+	cap: number,
+): ReviewGraphPersistCoverage {
+	return {
+		partial: false,
+		cap,
+		totalNodes: graph.nodes.size,
+		totalEdges: graph.edges.length,
+		persistedNodes: graph.nodes.size,
+		persistedEdges: graph.edges.length,
+	};
+}
+
+/**
+ * Keep whole per-file node groups in reverse-dependency-centrality order, then
+ * retain as many induced edges as fit. The node budget mirrors the source
+ * graph's node/edge ratio so symbol-dense and edge-dense repositories both
+ * retain a useful mix instead of allowing either side to consume the cap.
+ */
+function capGraphForPersist(
+	cwd: string,
+	graph: ReviewGraph,
+	cap: number,
+): ReviewGraph {
+	const totalElements = graph.nodes.size + graph.edges.length;
+	const nodeBudget = Math.max(
+		1,
+		Math.floor((cap * graph.nodes.size) / totalElements),
+	);
+	const reverseDeps = buildReverseDependencyIndexFromGraph({ cwd, graph });
+	const rankedFiles = rankFilesByReverseDependencyCentrality(reverseDeps);
+	const nodeIdsByFile = new Map<string, string[]>();
+	for (const [id, node] of graph.nodes) {
+		if (!node.filePath) continue;
+		const ids = nodeIdsByFile.get(node.filePath) ?? [];
+		ids.push(id);
+		nodeIdsByFile.set(node.filePath, ids);
+	}
+
+	const keptIds = new Set<string>();
+	for (const filePath of rankedFiles) {
+		const ids = nodeIdsByFile.get(filePath) ?? [];
+		if (ids.length === 0) continue;
+		const effectiveNodeBudget =
+			keptIds.size === 0 ? Math.max(nodeBudget, Math.min(cap, ids.length)) : nodeBudget;
+		if (keptIds.size + ids.length > effectiveNodeBudget) continue;
+		for (const id of ids) keptIds.add(id);
+	}
+	const nodes = new Map(
+		[...graph.nodes].filter(([id]) => keptIds.has(id)),
+	);
+	const edgeBudget = Math.max(0, cap - nodes.size);
+	const edges = graph.edges
+		.filter((edge) => keptIds.has(edge.from) && keptIds.has(edge.to))
+		.slice(0, edgeBudget);
+	const coverage: ReviewGraphPersistCoverage = {
+		partial: true,
+		cap,
+		totalNodes: graph.nodes.size,
+		totalEdges: graph.edges.length,
+		persistedNodes: nodes.size,
+		persistedEdges: edges.length,
+	};
+	const capped: ReviewGraph = {
+		...graph,
+		nodes,
+		edges,
+		edgesByFrom: new Map(),
+		edgesByTo: new Map(),
+		fileNodes: new Map(),
+		symbolNodesByFile: new Map(),
+		changedSymbolsByFile: new Map(),
+		persistCoverage: coverage,
+	};
+	rebuildIndexes(capped);
+	return capped;
 }
 
 
@@ -1284,29 +1380,42 @@ function persistGraph(
 	fileHashes: Map<string, string> | undefined,
 	graph: ReviewGraph,
 ): void {
-	const elementCount = graph.nodes.size + graph.edges.length;
+	const totalElementCount = graph.nodes.size + graph.edges.length;
 	const cap = graphPersistMaxElements();
-	if (elementCount > cap) {
-		// Fail-safe: a runaway graph would OOM the host on serialize. Skip + log.
+	const persistedGraph =
+		totalElementCount > cap
+			? capGraphForPersist(cwd, graph, cap)
+			: { ...graph, persistCoverage: graphCoverage(graph, cap) };
+	const elementCount =
+		persistedGraph.nodes.size + persistedGraph.edges.length;
+	if (totalElementCount > cap) {
+		const coverage = persistedGraph.persistCoverage;
+		if (!coverage) return;
 		logLatency({
 			type: "phase",
 			phase: "review_graph_persist",
 			filePath: cwd,
 			durationMs: 0,
-			metadata: { skipped: "size_cap", elements: elementCount, cap },
+			metadata: {
+				partial: true,
+				totalElements: totalElementCount,
+				persistedElements: elementCount,
+				cap,
+			},
 		});
 		const reason =
-			`persist element cap exceeded (${elementCount} elements > ${cap} cap); ` +
-			"raise PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS; graph remains available only in this process";
+			`persisted partial review graph (${elementCount}/${totalElementCount} elements; ` +
+			`${coverage.persistedNodes}/${coverage.totalNodes} nodes, ` +
+			`${coverage.persistedEdges}/${coverage.totalEdges} edges; ${cap} cap)`;
 		recordBuildAttempt(cwd, "succeeded", reason);
 		logReviewGraph({
 			cwd,
-			phase: "persist_skipped",
+			phase: "persist_partial",
 			reason: "element_cap_exceeded",
-			elements: elementCount,
+			elements: totalElementCount,
+			persistedElements: elementCount,
 			cap,
 		});
-		return;
 	}
 	const cacheDir = path.join(getProjectDataDir(cwd), "cache");
 	const cachePath = path.join(cacheDir, GRAPH_CACHE_FILENAME);
@@ -1328,7 +1437,7 @@ function persistGraph(
 		signature,
 		fileSignatures,
 		fileHashes,
-		graph,
+		graph: persistedGraph,
 		gitStamp,
 		elementCount,
 		generation,

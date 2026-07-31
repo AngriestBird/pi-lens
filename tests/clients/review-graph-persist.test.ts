@@ -61,7 +61,7 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		expect(GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT).toBe(500_000);
 	});
 
-	it("size cap: skips the write when the graph exceeds the element ceiling", async () => {
+	it("size cap: persists an honestly-marked useful partial graph", async () => {
 		const env = makeEnv();
 		createTempFile(env.tmpDir, "a.ts", "export function foo() {\n  return 1;\n}\n");
 		createTempFile(
@@ -71,24 +71,69 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		);
 		const cachePath = cachePathFor(env.tmpDir);
 		// A two-file project is well above 1 element (file + symbol nodes + edges).
-		process.env.PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS = "1";
+		process.env.PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS = "4";
 
-		await buildOrUpdateGraph(
+		const built = await buildOrUpdateGraph(
 			env.tmpDir,
 			[path.join(env.tmpDir, "a.ts"), path.join(env.tmpDir, "b.ts")],
 			new FactStore(),
 		);
 		flushReviewGraphPersistsForTests();
-		await new Promise((r) => setTimeout(r, 100)); // let any errant write land
-		expect(fs.existsSync(cachePath)).toBe(false);
+		expect(await waitForFile(cachePath)).toBe(true);
+		await waitForReviewGraphPersistsForTests();
+		const raw = JSON.parse(
+			gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"),
+		);
+		expect(raw.coverage).toEqual({
+			partial: true,
+			cap: 4,
+			totalNodes: built.nodes.size,
+			totalEdges: built.edges.length,
+			persistedNodes: raw.nodes.length,
+			persistedEdges: raw.edges.length,
+		});
+		expect(raw.nodes.length + raw.edges.length).toBeLessThanOrEqual(4);
+		expect(raw.nodes.length).toBeGreaterThan(0);
+		expect(
+			raw.nodes.some(
+				([, node]: [string, { filePath?: string }]) =>
+					node.filePath?.endsWith("/a.ts") ||
+					node.filePath?.endsWith("\\a.ts"),
+			),
+		).toBe(true);
 		const attempt = getLastReviewGraphBuildAttempt(env.tmpDir);
 		expect(attempt).toMatchObject({ outcome: "succeeded" });
-		expect(attempt?.reason).toMatch(
-			/persist element cap exceeded \(\d+ elements > 1 cap\)/,
+		expect(attempt?.reason).toMatch(/persisted partial review graph \(\d+\/\d+ elements/);
+	});
+
+	it("round-trips partial coverage without presenting it as complete", async () => {
+		const env = makeEnv();
+		createTempFile(env.tmpDir, "hot.ts", "export function hot() { return 1 }\n");
+		createTempFile(
+			env.tmpDir,
+			"user.ts",
+			'import { hot } from "./hot.js";\nexport const used = hot();\n',
 		);
-		expect(attempt?.reason).toContain(
-			"PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS",
+		process.env.PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS = "4";
+		const built = await buildOrUpdateGraph(
+			env.tmpDir,
+			[path.join(env.tmpDir, "hot.ts"), path.join(env.tmpDir, "user.ts")],
+			new FactStore(),
 		);
+		flushReviewGraphPersistsForTests();
+		await waitForReviewGraphPersistsForTests();
+
+		clearReviewGraphWorkspaceCache(env.tmpDir);
+		const loaded = getCachedReviewGraph(env.tmpDir);
+		expect(loaded?.persistCoverage).toMatchObject({
+			partial: true,
+			cap: 4,
+			totalNodes: built.nodes.size,
+			totalEdges: built.edges.length,
+		});
+		expect(loaded?.persistCoverage?.persistedNodes).toBe(loaded?.nodes.size);
+		expect(loaded?.persistCoverage?.persistedEdges).toBe(loaded?.edges.length);
+		expect((loaded?.nodes.size ?? 0) + (loaded?.edges.length ?? 0)).toBeLessThanOrEqual(4);
 	});
 
 	it("size cap: writes normally when under the ceiling", async () => {
