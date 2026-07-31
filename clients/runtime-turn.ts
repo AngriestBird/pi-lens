@@ -634,9 +634,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			dbg(
 				`turn_end: madge checking ${madgeFiles.length} file(s) for circular deps`,
 			);
+			// Checked concurrently (bounded) rather than one `await` per file —
+			// the shared circular-dep state update is deferred/folded inside
+			// checkFilesBatch so concurrent spawns can't clobber each other (#766).
+			const absFiles = madgeFiles.map((file) => path.resolve(cwd, file));
+			const depResults = await depChecker.checkFilesBatch(absFiles, cwd);
 			for (const file of madgeFiles) {
 				const absPath = path.resolve(cwd, file);
-				const depResult = await depChecker.checkFile(absPath, cwd);
+				const depResult = depResults.get(absPath);
+				if (!depResult) continue;
 				if (depResult.localSkips && depResult.localSkips > 0) {
 					// Not silent: a skipped LOCAL import means madge couldn't resolve
 					// it into the graph, so a cycle through it would be missed.

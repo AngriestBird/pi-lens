@@ -93,6 +93,33 @@ interface FileImports {
 	timestamp: number;
 }
 
+/**
+ * Defensive cap on concurrent madge spawns for a single `checkFilesBatch`
+ * call. A turn usually only touches 1-3 import-changed files, so this rarely
+ * binds — it just guards against a pathological turn (bulk rename/move) from
+ * fork-bombing subprocesses.
+ */
+const MADGE_BATCH_CONCURRENCY = 6;
+
+/** Run `mapper` over `items` with at most `concurrency` in flight at once. */
+async function mapWithConcurrency<T>(
+	items: T[],
+	concurrency: number,
+	mapper: (item: T) => Promise<void>,
+): Promise<void> {
+	if (items.length === 0) return;
+	let nextIndex = 0;
+	const workerCount = Math.max(1, Math.min(concurrency, items.length));
+	const workers = Array.from({ length: workerCount }, async () => {
+		while (true) {
+			const index = nextIndex++;
+			if (index >= items.length) return;
+			await mapper(items[index]);
+		}
+	});
+	await Promise.all(workers);
+}
+
 // --- Client ---
 
 export class DependencyChecker {
@@ -334,6 +361,49 @@ export class DependencyChecker {
 		normalized: string,
 		projectRoot: string,
 	): Promise<DepCheckResult> {
+		const spawnResult = await this.runMadgeSpawn(normalized, projectRoot);
+		if (!spawnResult.ok) {
+			return {
+				hasCircular: false,
+				circular: [],
+				checked: false,
+				cacheHit: false,
+			};
+		}
+
+		this.lastCircular = spawnResult.circular;
+		this.circularFiles = spawnResult.circularFiles;
+
+		return {
+			hasCircular: spawnResult.circular.length > 0,
+			circular: spawnResult.circular.filter(
+				(d) => d.file === normalized || d.path.includes(normalized),
+			),
+			checked: true,
+			cacheHit: false,
+			localSkips: spawnResult.localSkips,
+		};
+	}
+
+	/**
+	 * Run madge on a single file and parse its cycle output. Pure: unlike
+	 * `runCheckFile`, this does NOT mutate `lastCircular`/`circularFiles` — it
+	 * hands the parsed result back so callers can apply the shared-state update
+	 * themselves (`runCheckFile` does so immediately; `checkFilesBatch` defers
+	 * it so concurrent spawns can't clobber each other's writes, see #766).
+	 */
+	private async runMadgeSpawn(
+		normalized: string,
+		projectRoot: string,
+	): Promise<
+		| {
+				ok: true;
+				circular: CircularDep[];
+				circularFiles: Set<string>;
+				localSkips: number;
+		  }
+		| { ok: false }
+	> {
 		this.log(
 			`Imports changed for ${path.basename(normalized)}, checking dependencies...`,
 		);
@@ -352,12 +422,7 @@ export class DependencyChecker {
 
 			if (result.error) {
 				this.log(`Check error: ${result.error.message}`);
-				return {
-					hasCircular: false,
-					circular: [],
-					checked: false,
-					cacheHit: false,
-				};
+				return { ok: false };
 			}
 
 			const output = result.stdout || "[]";
@@ -381,9 +446,6 @@ export class DependencyChecker {
 				});
 			}
 
-			this.lastCircular = circular;
-			this.circularFiles = circularFiles;
-
 			const skips = parseMadgeSkips(result.stderr || "");
 			if (skips.local.length > 0) {
 				this.log(
@@ -391,24 +453,141 @@ export class DependencyChecker {
 				);
 			}
 
-			return {
-				hasCircular: circular.length > 0,
-				circular: circular.filter(
-					(d) => d.file === normalized || d.path.includes(normalized),
+			return { ok: true, circular, circularFiles, localSkips: skips.local.length };
+		} catch (err: any) {
+			this.log(`Check error: ${err.message}`);
+			return { ok: false };
+		}
+	}
+
+	/** Build the cache-hit `DepCheckResult` for `normalized` from current shared state. */
+	private buildCachedResult(normalized: string): DepCheckResult {
+		return {
+			hasCircular: this.circularFiles.has(normalized),
+			circular: this.lastCircular.filter(
+				(d) => d.file === normalized || d.path.includes(normalized),
+			),
+			checked: true,
+			cacheHit: true,
+		};
+	}
+
+	/**
+	 * Batch-check multiple files for circular deps in one turn-end pass,
+	 * running the madge subprocess spawns concurrently (bounded by
+	 * `MADGE_BATCH_CONCURRENCY`) instead of one at a time (#766).
+	 *
+	 * Equivalence with the sequential `for…await checkFile(file)` loop it
+	 * replaces:
+	 *  - Classification (existence + `importsChanged`) runs synchronously in
+	 *    original array order first — identical to what each sequential
+	 *    `checkFile()` call would do, including the `importCache` side effect.
+	 *  - Only the actual madge spawns for import-changed ("miss") files run
+	 *    concurrently; each one's parsed result stays LOCAL (no shared-state
+	 *    write) until every spawn has settled.
+	 *  - The shared `lastCircular`/`circularFiles` state is then folded by
+	 *    replaying the miss results in ORIGINAL array order (not completion
+	 *    order), so the final state — and each cache-hit file's result, which
+	 *    reads the state as of its position in the array — is byte-for-byte
+	 *    what the sequential last-write-wins loop would have produced. No
+	 *    concurrent write can clobber another's, because none are applied
+	 *    until after `Promise.all` resolves.
+	 */
+	async checkFilesBatch(
+		filePaths: string[],
+		cwd?: string,
+	): Promise<Map<string, DepCheckResult>> {
+		const projectRoot = path.resolve(cwd || process.cwd());
+		const results = new Map<string, DepCheckResult>();
+
+		type Entry =
+			| { kind: "missing"; file: string }
+			| { kind: "hit"; file: string; normalized: string }
+			| { kind: "miss"; file: string; normalized: string };
+
+		const entries: Entry[] = [];
+		for (const file of filePaths) {
+			const normalized = path.resolve(projectRoot, file);
+			if (!fs.existsSync(normalized)) {
+				entries.push({ kind: "missing", file });
+				continue;
+			}
+			entries.push(
+				this.importsChanged(normalized)
+					? { kind: "miss", file, normalized }
+					: { kind: "hit", file, normalized },
+			);
+		}
+
+		const missEntries = entries.filter(
+			(e): e is Extract<Entry, { kind: "miss" }> => e.kind === "miss",
+		);
+
+		const notAvailableResult: DepCheckResult = {
+			hasCircular: false,
+			circular: [],
+			checked: false,
+			cacheHit: false,
+		};
+
+		if (missEntries.length > 0 && !(await this.ensureAvailable())) {
+			// madge unavailable: mirrors checkFile()'s "not available" branch for
+			// every miss; hits still read whatever shared state already exists.
+			for (const entry of entries) {
+				if (entry.kind === "hit") {
+					results.set(entry.file, this.buildCachedResult(entry.normalized));
+				} else {
+					results.set(entry.file, notAvailableResult);
+				}
+			}
+			return results;
+		}
+
+		// Run the concurrent (bounded) madge spawns for the miss set only. Each
+		// result stays local — keyed by normalized path — until folded below.
+		const spawnResults = new Map<
+			string,
+			Awaited<ReturnType<DependencyChecker["runMadgeSpawn"]>>
+		>();
+		await mapWithConcurrency(missEntries, MADGE_BATCH_CONCURRENCY, async (entry) => {
+			spawnResults.set(
+				entry.normalized,
+				await this.runMadgeSpawn(entry.normalized, projectRoot),
+			);
+		});
+
+		// Fold in original order: each miss overwrites the shared state exactly
+		// as the sequential loop would, and each hit is resolved against the
+		// state as folded up to (but not past) its own position.
+		for (const entry of entries) {
+			if (entry.kind === "missing") {
+				results.set(entry.file, notAvailableResult);
+				continue;
+			}
+			if (entry.kind === "hit") {
+				results.set(entry.file, this.buildCachedResult(entry.normalized));
+				continue;
+			}
+			const spawnResult = spawnResults.get(entry.normalized);
+			if (!spawnResult || !spawnResult.ok) {
+				results.set(entry.file, notAvailableResult);
+				continue;
+			}
+			this.lastCircular = spawnResult.circular;
+			this.circularFiles = spawnResult.circularFiles;
+			results.set(entry.file, {
+				hasCircular: spawnResult.circular.length > 0,
+				circular: spawnResult.circular.filter(
+					(d) =>
+						d.file === entry.normalized || d.path.includes(entry.normalized),
 				),
 				checked: true,
 				cacheHit: false,
-				localSkips: skips.local.length,
-			};
-		} catch (err: any) {
-			this.log(`Check error: ${err.message}`);
-			return {
-				hasCircular: false,
-				circular: [],
-				checked: false,
-				cacheHit: false,
-			};
+				localSkips: spawnResult.localSkips,
+			});
 		}
+
+		return results;
 	}
 
 	/**
