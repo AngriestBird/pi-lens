@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { parentPort } from "node:worker_threads";
 import { createGzip } from "node:zlib";
 
 export interface GzipStageWriteMetrics {
@@ -11,6 +12,29 @@ export interface GzipStageWriteMetrics {
 	gzBytes: number;
 	serializeMs: number;
 	writeMs: number;
+}
+
+/** Common request envelope every gzip-stage persist worker receives. Concrete
+ * workers extend this with their own routing fields (e.g. `cwd`, `elements`). */
+export interface GzipStageWorkerRequest {
+	id: number;
+	generation: number;
+	stagePath: string;
+	data: unknown;
+	testDelayMs?: number;
+}
+
+/** Common result envelope: the routing fields the worker echoes back, plus the
+ * write metrics (all optional — absent together with `error` set on failure). */
+export interface GzipStageWorkerResult {
+	id: number;
+	generation: number;
+	stagePath: string;
+	rawBytes?: number;
+	gzBytes?: number;
+	serializeMs?: number;
+	writeMs?: number;
+	error?: string;
 }
 
 /**
@@ -65,4 +89,44 @@ export async function writeGzipStageFile(
 		await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
 		throw err;
 	}
+}
+
+/**
+ * Install the standard gzip-stage persist worker message loop on `parentPort`:
+ * for each request, build the routing-field base result, run the shared
+ * {@link writeGzipStageFile}, and post back the base merged with either the
+ * write metrics or an `error`. Both persist workers (review-graph,
+ * project-snapshot) use this so the loop + error mapping live in one place;
+ * each supplies only how to derive its own result's routing fields from the
+ * request. Throws immediately if loaded outside a worker thread.
+ */
+export function serveGzipStageWorker<
+	Req extends GzipStageWorkerRequest,
+	Base extends { id: number; generation: number; stagePath: string },
+>(buildBaseResult: (request: Req) => Base): void {
+	const port = parentPort;
+	if (!port) {
+		throw new Error("gzip stage persist worker requires a parent port");
+	}
+	port.on("message", (request: Req) => {
+		void (async () => {
+			const result: Base & GzipStageWorkerResult = {
+				...buildBaseResult(request),
+			};
+			try {
+				const metrics = await writeGzipStageFile(
+					request.data,
+					request.stagePath,
+					request.testDelayMs,
+				);
+				result.rawBytes = metrics.rawBytes;
+				result.gzBytes = metrics.gzBytes;
+				result.serializeMs = metrics.serializeMs;
+				result.writeMs = metrics.writeMs;
+			} catch (err) {
+				result.error = err instanceof Error ? err.message : String(err);
+			}
+			port.postMessage(result);
+		})();
+	});
 }
