@@ -18,6 +18,7 @@ import {
 	isAtOrAboveHomeDir,
 	normalizeFilePath,
 	normalizeMapKey,
+	toProjectRelativePath,
 } from "../path-utils.js";
 import { collectProjectSourceFilesWithBudgetAsync } from "../project-scan-policy.js";
 import { getReviewGraphMaxFilesDerived } from "../project-scale.js";
@@ -1144,6 +1145,7 @@ function addJsTsFile(
 	ignoredIds?: ReadonlySet<string>,
 ): void {
 	const normalized = normalizeMapKey(filePath);
+	const hintPath = toProjectRelativePath(normalized, cwd);
 	const content = facts.getFileFact<string>(normalized, "file.content") ?? "";
 	const fileNodeId = `file:${normalized}`;
 	addNode(graph, {
@@ -1153,7 +1155,7 @@ function addJsTsFile(
 		filePath: normalized,
 		metadata: {
 			lineCount: content.split("\n").length,
-			...featureHintMetadata(normalized),
+			...featureHintMetadata(hintPath),
 		},
 	});
 
@@ -1241,7 +1243,7 @@ function addJsTsFile(
 				maxNestingDepth: fn.maxNestingDepth,
 				isBoundaryWrapper: fn.isBoundaryWrapper,
 				isPassThroughWrapper: fn.isPassThroughWrapper,
-				...featureHintMetadata(`${fn.name} ${normalized}`),
+				...featureHintMetadata(`${fn.name} ${hintPath}`),
 			},
 		});
 		addEdge(graph, { from: fileNodeId, to: symbolId, kind: "contains" });
@@ -1472,13 +1474,14 @@ function addTreeSitterFile(
 	ignoredIds?: ReadonlySet<string>,
 ): void {
 	const normalized = normalizeMapKey(filePath);
+	const hintPath = toProjectRelativePath(normalized, cwd);
 	const fileNodeId = `file:${normalized}`;
 	addNode(graph, {
 		id: fileNodeId,
 		kind: "file",
 		language: languageId,
 		filePath: normalized,
-		metadata: featureHintMetadata(normalized),
+		metadata: featureHintMetadata(hintPath),
 	});
 
 	const dedupedSymbols = dedupeSamePositionSymbols(extracted.symbols);
@@ -1520,7 +1523,7 @@ function addTreeSitterFile(
 				line: symbol.line,
 				column: symbol.column,
 				signature: symbol.signature,
-				...featureHintMetadata(`${symbol.name} ${normalized}`),
+				...featureHintMetadata(`${symbol.name} ${hintPath}`),
 			},
 		});
 		addEdge(graph, { from: fileNodeId, to: symbolId, kind: "contains" });
@@ -1572,6 +1575,7 @@ function addTreeSitterFile(
 				const toNode = ensureFileNode(
 					graph,
 					target,
+					cwd,
 					mapKindToTreeSitterLanguage(detectFileKind(target), target) ??
 						languageId,
 				);
@@ -1606,9 +1610,11 @@ function addTreeSitterFile(
 function ensureFileNode(
 	graph: ReviewGraph,
 	filePath: string,
+	cwd: string,
 	languageId: string,
 ): string {
 	const normalized = normalizeMapKey(filePath);
+	const hintPath = toProjectRelativePath(normalized, cwd);
 	const existing = graph.fileNodes.get(normalized);
 	if (existing) return existing;
 	const fileNodeId = `file:${normalized}`;
@@ -1617,7 +1623,7 @@ function ensureFileNode(
 		kind: "file",
 		language: languageId,
 		filePath: normalized,
-		metadata: featureHintMetadata(normalized),
+		metadata: featureHintMetadata(hintPath),
 	});
 	return fileNodeId;
 }
@@ -1675,7 +1681,7 @@ function addCxxIncludeEdges(
 	} catch {
 		return;
 	}
-	const fromNode = ensureFileNode(graph, filePath, "cpp");
+	const fromNode = ensureFileNode(graph, filePath, cwd, "cpp");
 	for (const line of content.split(/\r?\n/)) {
 		const source = parseLocalCxxInclude(line);
 		if (!source) continue;
@@ -1684,7 +1690,7 @@ function addCxxIncludeEdges(
 		// untracked-AND-gitignored include target never becomes a node.
 		if (!target || ignoredIds?.has(target)) continue;
 		const languageId = mapKindToTreeSitterLanguage("cxx", target) ?? "cpp";
-		const toNode = ensureFileNode(graph, target, languageId);
+		const toNode = ensureFileNode(graph, target, cwd, languageId);
 		addEdge(graph, {
 			from: fromNode,
 			to: toNode,

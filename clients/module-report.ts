@@ -36,7 +36,7 @@ import * as path from "node:path";
 import { detectFileKind } from "./file-kinds.js";
 import { logLatency } from "./latency-logger.js";
 import { annotateMiddleMan } from "./middle-man-analysis.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { normalizeMapKey, toProjectRelativePath } from "./path-utils.js";
 import { resolveImportToFiles } from "./review-graph/import-resolvers.js";
 import { buildSymbolId } from "./review-graph/symbol-id.js";
 import type { ReviewGraph, ReviewGraphEdgeKind } from "./review-graph/types.js";
@@ -586,11 +586,7 @@ function resolveUsedBy(
 // `read` args) keep the absolute path so the host's Read tool resolves them
 // unambiguously; only display fields (`path`, `usedBy.file`, imports) relativize.
 function toDisplayPath(p: string, projectRoot: string): string {
-	if (!path.isAbsolute(p)) return p.replace(/\\/g, "/");
-	const rel = path.relative(projectRoot, p);
-	return rel && !rel.startsWith("..")
-		? rel.replace(/\\/g, "/")
-		: p.replace(/\\/g, "/");
+	return toProjectRelativePath(p, projectRoot);
 }
 
 function collectImports(
