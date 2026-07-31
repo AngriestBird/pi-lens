@@ -168,6 +168,17 @@ d("shipped ast-grep rules have fixture-style valid/invalid tests", () => {
 		// shell:true so Windows .cmd shim resolves; -c explicit because
 		// pi-lens's internal runner uses `.sgconfig.yml` (with the dot)
 		// while ast-grep's default is `sgconfig.yml` (no dot).
+		//
+		// Explicit generous timeout (#902): this shells out to the ast-grep
+		// CLI to run every rule's whole valid/invalid fixture corpus in one
+		// process — solo it's under ~1s, but the default 5s vitest test
+		// timeout got tripped under parallel-suite CPU/NAPI contention (other
+		// forks competing for cores while this one spawns+waits on a child
+		// process). 60s matches the CLI-shellout precedent in
+		// ast-grep-playground-verify.test.ts. A real regression here is the
+		// CLI itself reporting failing rule(s) (asserted below), which still
+		// fails at any timeout — this only buys headroom against scheduling
+		// jitter delaying when the child process gets scheduled.
 		let stdout = "";
 		let stderr = "";
 		let exitCode = 0;
@@ -244,5 +255,5 @@ d("shipped ast-grep rules have fixture-style valid/invalid tests", () => {
 				: // All remaining failures are JSX CLI framework gaps — pass.
 					`All non-framework-gap rule fixtures pass; the ${cliFrameworkGap.size} JSX rule failure(s) (${Array.from(cliFrameworkGap).join(", ")}) are an ast-grep 0.42.0 CLI limitation (no jsx_* kind support in the pattern matcher), not rule bugs. napi + the production dispatch path fire them correctly.`,
 		).toBe(true);
-	});
+	}, 60_000);
 });

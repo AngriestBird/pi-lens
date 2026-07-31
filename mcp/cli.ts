@@ -58,7 +58,13 @@ async function buildGraph(): Promise<void> {
 	const startedAt = Date.now();
 	const graph = await buildOrUpdateGraph(cwd, [], new FactStore());
 	const attempt = getLastReviewGraphBuildAttempt(cwd);
-	if (!attempt || attempt.outcome !== "succeeded" || attempt.reason) {
+	// "succeeded" can still carry a `reason` string — persistGraph() stamps one
+	// on to explain a partial (over-cap) persist, which is NOT a failure (#960
+	// made a capped persist honest-but-successful). Only "failed"/"skipped"
+	// (unsafe_root, source-file cap, thrown build error) are real failures; a
+	// benign reason on a succeeded build is surfaced later via coverage
+	// instead of being treated as fatal here.
+	if (!attempt || attempt.outcome !== "succeeded") {
 		fail(attempt?.reason ?? attempt?.outcome ?? "build produced no result");
 	}
 
@@ -85,6 +91,21 @@ async function buildGraph(): Promise<void> {
 	}
 
 	const durationMs = Date.now() - startedAt;
+	const coverage = persisted.coverage;
+	if (coverage?.partial) {
+		// #533/#936 honesty: an over-cap build DID succeed and DID persist, but
+		// only a subgraph — say so plainly instead of printing the same line a
+		// full build would, which would silently misrepresent a capped repo as
+		// fully covered.
+		process.stdout.write(
+			`pi-lens build-graph: PARTIAL persist (cap=${coverage.cap} exceeded) ` +
+				`files=${graph.fileNodes.size} nodes=${graph.nodes.size} ` +
+				`edges=${graph.edges.length} persistedNodes=${coverage.persistedNodes}/${coverage.totalNodes} ` +
+				`persistedEdges=${coverage.persistedEdges}/${coverage.totalEdges} ` +
+				`elements=${persisted.elements} jsonBytes=${persisted.bytes} durationMs=${durationMs}\n`,
+		);
+		return;
+	}
 	process.stdout.write(
 		`pi-lens build-graph: files=${graph.fileNodes.size} nodes=${graph.nodes.size} ` +
 			`edges=${graph.edges.length} elements=${persisted.elements} ` +
