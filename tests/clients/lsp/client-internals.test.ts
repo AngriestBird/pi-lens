@@ -211,13 +211,14 @@ describe("workspace/configuration handler (#983)", () => {
 		setupIncomingHandlers(state, initialization);
 
 		const onRequest = vi.mocked(state.connection.onRequest);
-		const registered = onRequest.mock.calls.find(
+		const calls = onRequest.mock.calls as unknown as Array<
+			[string, (params: unknown) => Promise<unknown[]>]
+		>;
+		const registered = calls.find(
 			(c) => c[0] === "workspace/configuration",
 		);
 		expect(registered).toBeDefined();
-		const handler = registered![1] as (
-			params: unknown,
-		) => Promise<unknown[]>;
+		const handler = registered![1];
 
 		const result = await handler({
 			items: [
@@ -241,12 +242,13 @@ describe("workspace/configuration handler (#983)", () => {
 		setupIncomingHandlers(state, { scan: { jobs: 16 } });
 
 		const onRequest = vi.mocked(state.connection.onRequest);
-		const registered = onRequest.mock.calls.find(
+		const calls = onRequest.mock.calls as unknown as Array<
+			[string, (params: unknown) => Promise<unknown[]>]
+		>;
+		const registered = calls.find(
 			(c) => c[0] === "workspace/configuration",
 		);
-		const handler = registered![1] as (
-			params: unknown,
-		) => Promise<unknown[]>;
+		const handler = registered![1];
 
 		expect(await handler({ items: [] })).toEqual([]);
 	});
