@@ -135,6 +135,15 @@ export function normalizeMapKey(filePath: string): string {
 	return normalizeFilePath(filePath);
 }
 
+/** Human-facing path relative to a project root when the file is inside it. */
+export function toProjectRelativePath(filePath: string, projectRoot: string): string {
+	if (!path.isAbsolute(filePath)) return filePath.replace(/\\/g, "/");
+	const relative = path.relative(path.resolve(projectRoot), filePath);
+	return relative && !relative.startsWith("..") && !path.isAbsolute(relative)
+		? relative.replace(/\\/g, "/")
+		: filePath.replace(/\\/g, "/");
+}
+
 /**
  * Cheap, syntactic-only Map key normalization: slash-fold + (on Windows)
  * lowercase. No `realpathSync` / filesystem I/O.
