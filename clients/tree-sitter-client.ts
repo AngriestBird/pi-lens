@@ -1480,6 +1480,79 @@ export class TreeSitterClient {
 		return "";
 	}
 
+	/**
+	 * Resolves `name` (as used in the *same file*) to a provably fixed URL:
+	 * a `const` declarator whose initializer is a string literal, or a
+	 * template literal with no `${...}` substitutions.
+	 *
+	 * This is deliberately conservative — naming convention (e.g.
+	 * SCREAMING_SNAKE_CASE) proves nothing about provenance, so it is never
+	 * consulted here. Any of the following makes resolution fail (and the
+	 * caller must then treat the identifier as potentially tainted):
+	 *   - no declarator found for `name` in this file;
+	 *   - more than one declarator for `name` (ambiguous/shadowed — refuse
+	 *     rather than guess which one applies at the use site);
+	 *   - declared with `let`/`var` (not `const`);
+	 *   - the identifier is reassigned anywhere in the file
+	 *     (`name = ...`), even if the declaration itself is `const`-like in
+	 *     spirit — this also catches destructuring/compound-assignment
+	 *     edge cases conservatively since we only special-case a clean
+	 *     assignment_expression;
+	 *   - the initializer is not a plain string/no-substitution template
+	 *     literal (e.g. `process.env.X`, a function call, a member
+	 *     expression, another identifier).
+	 */
+	private resolvesToFileLiteralConst(
+		name: string,
+		rootNode: TreeSitterNode,
+	): boolean {
+		const constDeclarators: TreeSitterNode[] = [];
+		let hasNonConstBinding = false;
+		let hasReassignment = false;
+
+		const stack: TreeSitterNode[] = [rootNode];
+		while (stack.length > 0) {
+			const node = stack.pop();
+			if (!node) continue;
+			if (node.type === "variable_declarator") {
+				const nameNode = node.childForFieldName?.("name");
+				if (nameNode?.type === "identifier" && nameNode.text === name) {
+					const decl = node.parent;
+					const isConst =
+						decl?.type === "lexical_declaration" &&
+						(decl.children ?? []).some((c) => c.type === "const");
+					if (isConst) {
+						constDeclarators.push(node);
+					} else {
+						hasNonConstBinding = true;
+					}
+				}
+			} else if (node.type === "assignment_expression") {
+				const left = node.childForFieldName?.("left");
+				if (left?.type === "identifier" && left.text === name) {
+					hasReassignment = true;
+				}
+			}
+			for (const child of node.children ?? []) stack.push(child);
+		}
+
+		// Ambiguous (shadowed/duplicated), reassigned anywhere, or backed by a
+		// non-const binding somewhere in the file: refuse to resolve.
+		if (hasNonConstBinding || hasReassignment || constDeclarators.length !== 1) {
+			return false;
+		}
+
+		const valueNode = constDeclarators[0].childForFieldName?.("value");
+		if (!valueNode) return false;
+		if (valueNode.type === "string") return true;
+		if (valueNode.type === "template_string") {
+			return !(valueNode.children ?? []).some(
+				(c) => c.type === "template_substitution",
+			);
+		}
+		return false;
+	}
+
 	private isSafeSqlAlchemyExpressionCall(node: TreeSitterNode): boolean {
 		if (node.type !== "call") return false;
 		const callee = node.children?.[0]?.text ?? "";
@@ -2427,6 +2500,23 @@ export class TreeSitterClient {
 					"delete",
 				]);
 				if (!allowedFns.has(fn)) return false;
+				// A bare identifier that provably resolves (in this file) to a
+				// `const` initialized with a fixed string/template literal is a
+				// genuinely fixed URL — exempt it regardless of naming
+				// convention (SCREAMING_SNAKE_CASE proves nothing about
+				// provenance; see #963). Anything we cannot definitively prove
+				// falls through to the existing broad heuristic below, so
+				// member expressions, non-literal consts, reassigned
+				// bindings, and unresolved identifiers all keep being
+				// evaluated for taint as before — a false positive here is
+				// acceptable, a missed SSRF is not.
+				if (
+					rootNode &&
+					captures.URL?.type === "identifier" &&
+					this.resolvesToFileLiteralConst(urlText, rootNode)
+				) {
+					return false;
+				}
 				// Only flag when the URL argument looks like it could carry external
 				// input: member expressions (req.url, ctx.query.x) or identifiers
 				// whose names suggest user/external provenance. Plain generic names

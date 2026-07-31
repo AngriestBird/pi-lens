@@ -4,6 +4,17 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **`ts-ssrf` no longer trusts naming convention as proof of a fixed URL**
+	(fixes #963) — the post-filter now resolves a bare `fetch(IDENT)` argument
+	against the file's AST and exempts it only when `IDENT` provably resolves
+	to a single `const` declarator initialized with a string literal (or a
+	template literal with no `${...}` substitutions). SCREAMING_SNAKE_CASE
+	naming is no longer sufficient by itself: `const TARGET_URL = req.query.url`
+	still flags, since the identifier's *initializer* — not its name — is
+	what's checked. Ambiguous/shadowed declarations, `let`/`var` bindings,
+	reassigned identifiers, and unresolved identifiers all fall through to the
+	existing broad heuristic and keep being flagged.
+
 - **Session warmup refreshes the word index incrementally** (refs #958) —
 	the persisted serializer now carries per-file mtimes. Startup still performs
 	the bounded source walk, but reuses unchanged postings, re-tokenizes only
