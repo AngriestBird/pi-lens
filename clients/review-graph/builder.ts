@@ -1286,7 +1286,15 @@ function handleCheckpointWorkerResult(
 	_checkpointWorkerRequests.delete(result.id);
 	// Best-effort: a failed offload just means no checkpoint for this stride —
 	// the prior stride's checkpoint is still on disk and the next stride retries.
+	// Still surface it: a SYSTEMIC failure (disk full, perms, worker crash-loop)
+	// makes resume silently never work, and `checkpoint_written` just stops.
 	if (result.error || result.gzBytes === undefined) {
+		logReviewGraph({
+			cwd: cp.cwd,
+			phase: "checkpoint_write_failed",
+			reason: "worker_error",
+			error: result.error ?? "worker returned no gz metrics",
+		});
 		fs.rm(result.stagePath, { force: true }, () => {});
 		return;
 	}
@@ -1309,7 +1317,13 @@ function handleCheckpointWorkerResult(
 			target: cp.target,
 			offloaded: true,
 		});
-	} catch {
+	} catch (err) {
+		logReviewGraph({
+			cwd: cp.cwd,
+			phase: "checkpoint_write_failed",
+			reason: "promote_failed",
+			error: err instanceof Error ? err.message : String(err),
+		});
 		fs.rm(result.stagePath, { force: true }, () => {});
 	}
 }
@@ -1327,6 +1341,12 @@ function handleWorkerDeath(reason: string): void {
 	const checkpoints = [..._checkpointWorkerRequests.values()];
 	_checkpointWorkerRequests.clear();
 	for (const cp of checkpoints) {
+		logReviewGraph({
+			cwd: cp.cwd,
+			phase: "checkpoint_write_failed",
+			reason: "worker_death",
+			error: reason,
+		});
 		fs.rm(cp.stagePath, { force: true }, () => {});
 	}
 }
@@ -1694,8 +1714,15 @@ function writeReviewGraphCheckpoint(
 	const cacheDir = path.dirname(checkpointPath);
 	try {
 		fs.mkdirSync(cacheDir, { recursive: true });
-	} catch {
-		return; // can't stage — skip this stride (best-effort)
+	} catch (err) {
+		// Can't stage — skip this stride (best-effort), but surface it.
+		logReviewGraph({
+			cwd,
+			phase: "checkpoint_write_failed",
+			reason: "mkdir_failed",
+			error: err instanceof Error ? err.message : String(err),
+		});
+		return;
 	}
 	sweepStaleStageFiles(cacheDir);
 	ensurePersistExitHook();
@@ -1748,8 +1775,15 @@ function writeReviewGraphCheckpointSync(
 			processed: counts.processed,
 			target: counts.target,
 		});
-	} catch {
-		// Best-effort: a failed checkpoint just means no resume next session.
+	} catch (err) {
+		// Best-effort: a failed checkpoint just means no resume next session —
+		// but surface it so a persistent write failure isn't invisible.
+		logReviewGraph({
+			cwd,
+			phase: "checkpoint_write_failed",
+			reason: "sync_write_failed",
+			error: err instanceof Error ? err.message : String(err),
+		});
 	}
 }
 
@@ -1789,10 +1823,21 @@ function loadReviewGraphCheckpoint(
 			gunzipSync(fs.readFileSync(checkpointPath)).toString("utf-8"),
 		) as ReviewGraphCheckpointData;
 	} catch {
+		// A checkpoint file was present but unreadable — the operator would
+		// otherwise see a full cold rebuild with no hint the checkpoint existed.
+		logReviewGraph({ cwd, phase: "checkpoint_discarded", reason: "corrupt" });
 		deleteReviewGraphCheckpoint(cwd);
 		return null;
 	}
 	if (data.version !== REVIEW_GRAPH_VERSION || data.inProgress !== true) {
+		logReviewGraph({
+			cwd,
+			phase: "checkpoint_discarded",
+			reason:
+				data.version !== REVIEW_GRAPH_VERSION
+					? "version_mismatch"
+					: "not_in_progress",
+		});
 		deleteReviewGraphCheckpoint(cwd);
 		return null;
 	}
@@ -1803,6 +1848,11 @@ function loadReviewGraphCheckpoint(
 			(current.headCommit !== data.gitStamp.headCommit ||
 				current.worktreeRoot !== data.gitStamp.worktreeRoot)
 		) {
+			logReviewGraph({
+				cwd,
+				phase: "checkpoint_discarded",
+				reason: "git_stamp_mismatch",
+			});
 			deleteReviewGraphCheckpoint(cwd);
 			return null;
 		}
@@ -1889,6 +1939,13 @@ async function tryResumeFromCheckpoint(
 	const loaded = loadReviewGraphCheckpoint(cwd);
 	if (!loaded) return null;
 	if (loaded.ignoredIdsHash !== hashIgnoredIds(ignoredIds)) {
+		logReviewGraph({
+			cwd,
+			phase: "checkpoint_discarded",
+			reason: "ignored_ids_mismatch",
+			processed: loaded.processedHashes.size,
+			target: filesToBuild.length,
+		});
 		deleteReviewGraphCheckpoint(cwd);
 		return null;
 	}
@@ -1897,6 +1954,13 @@ async function tryResumeFromCheckpoint(
 	// kept importer's edges stale — fail open rather than serve a wrong graph.
 	for (const file of loaded.processedHashes.keys()) {
 		if (!targetSet.has(file)) {
+			logReviewGraph({
+				cwd,
+				phase: "checkpoint_discarded",
+				reason: "removed_file",
+				processed: loaded.processedHashes.size,
+				target: filesToBuild.length,
+			});
 			deleteReviewGraphCheckpoint(cwd);
 			return null;
 		}
@@ -1916,6 +1980,13 @@ async function tryResumeFromCheckpoint(
 	}
 	if (reusableHashes.size === 0) {
 		// Nothing survivable — no benefit over a cold build; discard.
+		logReviewGraph({
+			cwd,
+			phase: "checkpoint_discarded",
+			reason: "all_stale",
+			stale: stale.length,
+			target: filesToBuild.length,
+		});
 		deleteReviewGraphCheckpoint(cwd);
 		return null;
 	}

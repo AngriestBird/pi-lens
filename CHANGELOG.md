@@ -4,6 +4,15 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Review-graph checkpoint discards and write failures are now observable**
+	(refs #936, #533) — a present resume checkpoint that's rejected now logs
+	`checkpoint_discarded` with a `reason` (`corrupt`, `version_mismatch`,
+	`not_in_progress`, `git_stamp_mismatch`, `ignored_ids_mismatch`,
+	`removed_file`, `all_stale`) instead of silently falling back to a full cold
+	rebuild, and a failed checkpoint write (worker error/death, promote failure,
+	sync-write failure) logs `checkpoint_write_failed` — so "why isn't my
+	checkpoint resuming / persisting?" is diagnosable from `review-graph.log`.
+
 - **The review-graph resume checkpoint (#936) now offloads its gzip to the
 	shared persist worker** (refs #958, #883) — mid-build checkpoint writes
 	previously ran a synchronous `gzipSync` of the growing graph on the event
