@@ -1035,6 +1035,27 @@ let _persistWorkerRequestId = 0;
 let _workerDisabled = false;
 let _lastWorkerFallbackReasonForTests: string | undefined;
 
+// #936/#958 follow-up: the mid-build resume checkpoint offloads its stringify+
+// gzip to the SAME shared persist worker (keeping the gzip of a growing graph
+// off the event loop during a background build). Tracked in a disjoint id/
+// generation space so handleWorkerResult routes a checkpoint promotion — a
+// distinct target path — without touching the authoritative-persist path. A
+// checkpoint write is best-effort: a lost one only costs a cold rebuild, so a
+// worker failure/death just drops it (the prior stride's checkpoint stays on
+// disk) rather than falling back like the authoritative persist does.
+interface PendingCheckpointWrite {
+	cwd: string;
+	generation: number;
+	checkpointPath: string;
+	stagePath: string;
+	nodes: number;
+	edges: number;
+	processed: number;
+	target: number;
+}
+const _checkpointGenerations = new Map<string, number>();
+const _checkpointWorkerRequests = new Map<number, PendingCheckpointWrite>();
+
 function persistedData(pending: PendingPersist): PersistedGraphData {
 	return {
 		version: pending.graph.version,
@@ -1202,6 +1223,14 @@ function writePendingOnMainThread(
 }
 
 function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
+	// Checkpoint offloads share this worker but promote to a different target;
+	// route them out before the authoritative-persist path (disjoint id space,
+	// so a checkpoint id is never also an authoritative one).
+	const checkpoint = _checkpointWorkerRequests.get(result.id);
+	if (checkpoint) {
+		handleCheckpointWorkerResult(checkpoint, result);
+		return;
+	}
 	const request = _workerRequests.get(result.id);
 	if (!request) {
 		fs.rm(result.stagePath, { force: true }, () => {});
@@ -1246,6 +1275,41 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 	}
 }
 
+function handleCheckpointWorkerResult(
+	cp: PendingCheckpointWrite,
+	result: ReviewGraphPersistWorkerResult,
+): void {
+	_checkpointWorkerRequests.delete(result.id);
+	// Best-effort: a failed offload just means no checkpoint for this stride —
+	// the prior stride's checkpoint is still on disk and the next stride retries.
+	if (result.error || result.gzBytes === undefined) {
+		fs.rm(result.stagePath, { force: true }, () => {});
+		return;
+	}
+	// Generation gate: a newer checkpoint stride, or build completion / a
+	// discarded resume (deleteReviewGraphCheckpoint bumps the generation before
+	// removing the file), supersedes this write — discard the stale stage rather
+	// than resurrect a checkpoint over a fresher one or a completed build.
+	if (_checkpointGenerations.get(cp.cwd) !== cp.generation) {
+		fs.rm(result.stagePath, { force: true }, () => {});
+		return;
+	}
+	try {
+		fs.renameSync(result.stagePath, cp.checkpointPath);
+		logReviewGraph({
+			cwd: cp.cwd,
+			phase: "checkpoint_written",
+			nodes: cp.nodes,
+			edges: cp.edges,
+			processed: cp.processed,
+			target: cp.target,
+			offloaded: true,
+		});
+	} catch {
+		fs.rm(result.stagePath, { force: true }, () => {});
+	}
+}
+
 function handleWorkerDeath(reason: string): void {
 	_persistWorker = undefined;
 	_workerDisabled = true;
@@ -1253,6 +1317,13 @@ function handleWorkerDeath(reason: string): void {
 	_workerRequests.clear();
 	for (const { key, pending } of requests) {
 		writePendingOnMainThread(key, pending, reason);
+	}
+	// Best-effort checkpoints don't fall back (no retained DTO to pin heap); drop
+	// their in-flight requests and clean up any stage files they may have left.
+	const checkpoints = [..._checkpointWorkerRequests.values()];
+	_checkpointWorkerRequests.clear();
+	for (const cp of checkpoints) {
+		fs.rm(cp.stagePath, { force: true }, () => {});
 	}
 }
 
@@ -1553,11 +1624,36 @@ function hashIgnoredIds(ignoredIds: ReadonlySet<string> | undefined): string {
 	return createHash("sha256").update(joined).digest("hex");
 }
 
+/** Assemble the checkpoint DTO from the current PRE-resolution graph. Isolated
+ * so both the offloaded and synchronous writers serialize identical bytes. */
+function buildReviewGraphCheckpointData(
+	cwd: string,
+	graph: ReviewGraph,
+	processedHashes: Map<string, string>,
+	targetFileCount: number,
+	ignoredIds: ReadonlySet<string> | undefined,
+): ReviewGraphCheckpointData {
+	return {
+		version: REVIEW_GRAPH_VERSION,
+		builtAt: new Date().toISOString(),
+		inProgress: true,
+		targetFileCount,
+		processedFiles: Array.from(processedHashes.entries()),
+		ignoredIdsHash: hashIgnoredIds(ignoredIds),
+		nodes: Array.from(graph.nodes.entries()),
+		edges: graph.edges,
+		gitStamp: resolveGitIdentity(cwd),
+	};
+}
+
 /**
- * Write a mid-build checkpoint for `cwd`. Best-effort and synchronous (mirrors
- * the exit-hook flush): a lost checkpoint only costs a cold rebuild next time.
- * `graph` MUST be pre-resolution; `processedHashes` MUST contain exactly the
- * files already folded into it.
+ * Write a mid-build checkpoint for `cwd`. Best-effort. `graph` MUST be
+ * pre-resolution; `processedHashes` MUST contain exactly the files already
+ * folded into it. The stringify+gzip is offloaded to the shared persist worker
+ * (keeping the gzip of a growing graph off the event loop during a background
+ * build), generation-gated so a slow write can't clobber a newer checkpoint or
+ * resurrect one over a completed build; it falls back to a synchronous write
+ * when the worker is unavailable. A lost checkpoint only costs a cold rebuild.
  */
 function writeReviewGraphCheckpoint(
 	cwd: string,
@@ -1566,29 +1662,86 @@ function writeReviewGraphCheckpoint(
 	targetFileCount: number,
 	ignoredIds: ReadonlySet<string> | undefined,
 ): void {
+	const generation = (_checkpointGenerations.get(cwd) ?? 0) + 1;
+	_checkpointGenerations.set(cwd, generation);
+	let data: ReviewGraphCheckpointData;
 	try {
-		const cacheDir = path.join(getProjectDataDir(cwd), "cache");
-		const data: ReviewGraphCheckpointData = {
-			version: REVIEW_GRAPH_VERSION,
-			builtAt: new Date().toISOString(),
-			inProgress: true,
-			targetFileCount,
-			processedFiles: Array.from(processedHashes.entries()),
-			ignoredIdsHash: hashIgnoredIds(ignoredIds),
-			nodes: Array.from(graph.nodes.entries()),
-			edges: graph.edges,
-			gitStamp: resolveGitIdentity(cwd),
-		};
-		const gzip = gzipSync(JSON.stringify(data));
-		fs.mkdirSync(cacheDir, { recursive: true });
-		writeFileAtomic(reviewGraphCheckpointPath(cwd), gzip, { bestEffort: true });
-		logReviewGraph({
+		data = buildReviewGraphCheckpointData(
 			cwd,
-			phase: "checkpoint_written",
+			graph,
+			processedHashes,
+			targetFileCount,
+			ignoredIds,
+		);
+	} catch {
+		return; // best-effort — building the DTO failed, skip this stride
+	}
+	const worker = _workerDisabled ? undefined : getPersistWorker();
+	if (!worker) {
+		writeReviewGraphCheckpointSync(cwd, data, {
 			nodes: graph.nodes.size,
 			edges: graph.edges.length,
 			processed: processedHashes.size,
 			target: targetFileCount,
+		});
+		return;
+	}
+	const checkpointPath = reviewGraphCheckpointPath(cwd);
+	const cacheDir = path.dirname(checkpointPath);
+	try {
+		fs.mkdirSync(cacheDir, { recursive: true });
+	} catch {
+		return; // can't stage — skip this stride (best-effort)
+	}
+	sweepStaleStageFiles(cacheDir);
+	ensurePersistExitHook();
+	const id = ++_persistWorkerRequestId;
+	const stagePath = `${checkpointPath}.stage-${process.pid}-${generation}`;
+	_checkpointWorkerRequests.set(id, {
+		cwd,
+		generation,
+		checkpointPath,
+		stagePath,
+		nodes: graph.nodes.size,
+		edges: graph.edges.length,
+		processed: processedHashes.size,
+		target: targetFileCount,
+	});
+	const request: ReviewGraphPersistWorkerRequest = {
+		id,
+		cwd,
+		generation,
+		stagePath,
+		data,
+		elements: graph.nodes.size + graph.edges.length,
+		testDelayMs:
+			process.env.NODE_ENV === "test"
+				? Number(process.env.PI_LENS_TEST_PERSIST_WORKER_DELAY_MS) || undefined
+				: undefined,
+	};
+	worker.postMessage(request);
+}
+
+/** Synchronous checkpoint write — the worker-unavailable fallback and the
+ * teardown/test-seam path where an async promotion couldn't land in time. */
+function writeReviewGraphCheckpointSync(
+	cwd: string,
+	data: ReviewGraphCheckpointData,
+	counts: { nodes: number; edges: number; processed: number; target: number },
+): void {
+	try {
+		const gzip = gzipSync(JSON.stringify(data));
+		fs.mkdirSync(path.dirname(reviewGraphCheckpointPath(cwd)), {
+			recursive: true,
+		});
+		writeFileAtomic(reviewGraphCheckpointPath(cwd), gzip, { bestEffort: true });
+		logReviewGraph({
+			cwd,
+			phase: "checkpoint_written",
+			nodes: counts.nodes,
+			edges: counts.edges,
+			processed: counts.processed,
+			target: counts.target,
 		});
 	} catch {
 		// Best-effort: a failed checkpoint just means no resume next session.
@@ -1596,8 +1749,11 @@ function writeReviewGraphCheckpoint(
 }
 
 /** Remove the checkpoint once a complete authoritative graph exists (or when a
- * stale checkpoint is discarded). Best-effort. */
+ * stale checkpoint is discarded). Best-effort. Bumps the checkpoint generation
+ * first so any still-in-flight offloaded write for `cwd` is gated out and can
+ * never re-create the file after this delete. */
 function deleteReviewGraphCheckpoint(cwd: string): void {
+	_checkpointGenerations.set(cwd, (_checkpointGenerations.get(cwd) ?? 0) + 1);
 	fs.rm(reviewGraphCheckpointPath(cwd), { force: true }, () => {});
 }
 
@@ -1812,9 +1968,15 @@ export function flushReviewGraphPersistsForTests(): void {
 	}
 }
 
-/** Test-only: wait until worker requests have either landed or degraded. */
+/** Test-only: wait until worker requests (authoritative persist AND offloaded
+ * checkpoint) have either landed or degraded. */
 export async function waitForReviewGraphPersistsForTests(): Promise<void> {
-	for (let attempts = 0; attempts < 200 && _workerRequests.size > 0; attempts++) {
+	for (
+		let attempts = 0;
+		attempts < 200 &&
+		(_workerRequests.size > 0 || _checkpointWorkerRequests.size > 0);
+		attempts++
+	) {
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
 }
@@ -1829,6 +1991,8 @@ export async function terminateReviewGraphPersistWorkerForTests(): Promise<void>
 export function resetReviewGraphPersistWorkerForTests(): void {
 	_workerDisabled = false;
 	_lastWorkerFallbackReasonForTests = undefined;
+	_checkpointWorkerRequests.clear();
+	_checkpointGenerations.clear();
 }
 
 export function getReviewGraphWorkerFallbackReasonForTests():
@@ -3654,18 +3818,29 @@ async function _doBuildGraph(
 			extractedCount++;
 			filesSinceCheckpoint++;
 			// Test seam: simulate a session killed mid-build after N files, having
-			// just written a checkpoint. The next (un-stopped) build resumes it.
+			// just written a checkpoint. Write SYNCHRONOUSLY so the checkpoint is
+			// deterministically on disk before the abort throw — the offloaded path
+			// would not have promoted yet. The next (un-stopped) build resumes it.
 			if (
 				Number.isFinite(testStopAfter) &&
 				testStopAfter > 0 &&
 				extractedCount >= testStopAfter
 			) {
-				writeReviewGraphCheckpoint(
+				writeReviewGraphCheckpointSync(
 					cwd,
-					graph,
-					fileHashes,
-					filesToBuild.length,
-					ignoredIds,
+					buildReviewGraphCheckpointData(
+						cwd,
+						graph,
+						fileHashes,
+						filesToBuild.length,
+						ignoredIds,
+					),
+					{
+						nodes: graph.nodes.size,
+						edges: graph.edges.length,
+						processed: fileHashes.size,
+						target: filesToBuild.length,
+					},
 				);
 				throw new Error("__review_graph_checkpoint_test_abort__");
 			}

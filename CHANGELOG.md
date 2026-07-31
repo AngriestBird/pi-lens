@@ -4,6 +4,16 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **The review-graph resume checkpoint (#936) now offloads its gzip to the
+	shared persist worker** (refs #958, #883) — mid-build checkpoint writes
+	previously ran a synchronous `gzipSync` of the growing graph on the event
+	loop; they now stream the stringify+gzip through the same worker the
+	authoritative snapshot uses (via the newly-shared `writeGzipStageFile` core),
+	generation-gated so a slow write can't clobber a newer checkpoint or
+	resurrect one after the build completes and retires it, and falling back to a
+	synchronous write when the worker is unavailable. Best-effort as before — a
+	lost checkpoint only costs a cold rebuild.
+
 - **Project snapshot body is now written gzipped by a worker thread** (refs
 	#958 item 2) — the snapshot body (40-112MB observed) is persisted as
 	`project-snapshot.json.gz`, with the `JSON.stringify` + gzip run on a worker
