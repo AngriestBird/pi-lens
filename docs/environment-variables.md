@@ -1,6 +1,6 @@
 # Environment Variables
 
-All pi-lens environment variables. Read at process start; set them in the
+Selected pi-lens environment variables. Read at process start; set them in the
 shell that launches pi (`export …` in bash, `setx …` in PowerShell, or in
 your process manager / CI config). The `--flag` form on the pi command
 line takes precedence over the env var when both are set; the
@@ -30,6 +30,15 @@ out of the workspace.
 `~/.pi-lens/bin/` regardless (and are reused across projects); the
 machine-global logs at `~/.pi-lens/{latency,cascade,tree-sitter,
 read-guard,…}.log` likewise stay put.
+
+## Machine-global directory
+
+### `PI_LENS_HOME`
+
+Override the machine-global pi-lens directory. This relocates global logs,
+managed tools, install caches, and the instance registry from the default
+`~/.pi-lens/` root to the supplied path. This is separate from
+`PILENS_DATA_DIR`, which controls per-project state.
 
 ## Startup mode
 
@@ -89,5 +98,5 @@ misbehaves.
 
 ## Related
 
-- `~/.pi-lens/config.json` schema — `## Global Config` in [README.md](../README.md#global-config)
-- CLI flags — `## Run` in [README.md](../README.md#run)
+- `~/.pi-lens/config.json` schema — [Global and project config](globalconfig.md)
+- CLI flags — [Runtime flags](usage.md#runtime-flags)

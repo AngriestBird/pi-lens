@@ -1,6 +1,6 @@
 # pi-lens as an MCP server — implementation plan
 
-> Local working doc. **Not committed.** Tracks the design + progress for exposing
+> Local working doc. Tracks the design + progress for exposing
 > pi-lens to Claude (Claude Code) as an MCP server, built so a *real review loop*
 > can be created (Claude commits → Claude measures the commit's actual impact,
 > not inferred from logs the user pastes).
@@ -17,7 +17,7 @@
 
 The host coupling is **thin**. Everything under `clients/` operates on
 `(filePath, content, cwd)` — the host SDK (`@earendil-works/pi-coding-agent`) is
-imported **only** in `index.ts` (the pi adapter), `commands/`, and tests.
+imported **only** in `index.ts` (the pi adapter) and tests.
 
 Confirmed reuse points:
 
@@ -244,12 +244,12 @@ Initial assumption ("knip/jscpd are booboo-only") was **wrong**. Verified:
 |-------|---------|------|
 | per-edit | `dispatchLintWithResult` | LSP, tree-sitter, ast-grep, fact-rules, biome/ruff/eslint/oxlint |
 | per-turn | `handleTurnEnd` (`runtime-turn.ts`) | **knip** (`:298`), **jscpd** (incremental, `getFilesForJscpd`), **madge/dep circular** (`:426`), **cascade merge** (`:175`), **tests** (`:461`), actionable/code-quality warnings aggregation, project-diagnostics delta |
-| per-session | `handleSessionStart` (`runtime-session.ts`) | **jscpd full scan** (`:505`), knip, type-coverage, dep, govulncheck, gitleaks, todo, complexity baselines, dominant-language **LSP warm** (#203), **error-debt baseline** (tests/build pass-state) |
+| per-session | `handleSessionStart` (`runtime-session.ts`) | **jscpd full scan** (`:505`), knip, type-coverage, dep, govulncheck, gitleaks, todo, complexity baselines, dominant-language **LSP warm** (#203). The production path does not currently populate the error-debt baseline. |
 
-The MCP server invokes **none** of the lifecycle handlers — only the per-edit
-layer. That is precisely why knip / jscpd / cascade / actionable+code-quality
-warnings / baselines are all absent, and why the first analyze (and every
-`fresh`) pays a cold LSP (no session-start warm ran).
+The initial MCP implementation invoked **none** of the lifecycle handlers —
+only the per-edit layer. The shipped server now exposes `pilens_session_start`
+and `pilens_turn_end`, which drive the real handlers; `fresh` analysis still
+pays a cold LSP because it starts a new worker without session-start warming.
 
 ## Revised recommendation — drive the real lifecycle, don't re-plumb
 
@@ -272,7 +272,8 @@ Rather than re-implementing knip/jscpd/cascade/warnings as bespoke MCP tools,
 **run pi's own handlers**:
 
 - `pilens_session_start` (or auto-init on first call) → `handleSessionStart` →
-  jscpd/knip/type-cov/dep full scan + **error-debt baseline** + LSP warm (also
+  jscpd/knip/type-cov/dep full scan + LSP warm (the error-debt baseline is not
+  currently populated by the production session-start path; this also
   fixes D at the source).
 - `pilens_turn_end` → `handleTurnEnd` → knip/jscpd incremental + cascade + dep +
   tests + the actionable/code-quality aggregation.
@@ -281,12 +282,13 @@ Rather than re-implementing knip/jscpd/cascade/warnings as bespoke MCP tools,
 This reconstructs the genuine **edit → turn → session** loop and answers the
 knip/jscpd/cascade/warnings questions "for free" (same code pi runs). Cost: wire
 the `deps` bundle the handlers need — `loadBootstrapClients()` (host-neutral) +
-`getFlag`/`notify` stubs + a `RuntimeCoordinator`. `index.ts`'s `session_start`/
-`turn_end` wiring is the exact template; coupling stays thin.
+`getFlag`/`notify` stubs + a `RuntimeCoordinator`. This was the original wiring
+cost; `index.ts`'s `session_start`/`turn_end` wiring remains the exact template
+and the shipped `clients/mcp/session.ts` keeps the coupling thin.
 
-The killer unlock: with the **error-debt baseline** from session_start, the MCP
-can report "did this change flip tests/build green→red" — the regression delta
-pitched as the real debug signal, currently impossible because no baseline runs.
+An error-debt baseline would allow the MCP to report whether a change flipped
+tests/build from green to red, but the production session-start path does not
+currently populate that baseline, so this regression delta is not available.
 
 ### Plan: Tier 1 then Tier 2
 
@@ -335,9 +337,8 @@ needed for `fresh` (new process) and for files outside the warmed dominant langu
       session unit tests; live `pilens_session_start` smoke confirmed end-to-end.
   - This exposes the previously-absent layers: knip dead-code, jscpd duplication,
     dep-circular, tests, cascade, actionable/code-quality aggregation (turn_end);
-    LSP warm + error-debt + complexity baselines + project scans (session_start).
-  - **The green→red delta**: session_start sets `runtime.errorDebtBaseline`
-    (tests/build pass-state); turn_end writes the pending check against it.
+    LSP warm + complexity baselines + project scans (session_start). The
+    error-debt baseline remains unpopulated by the production session-start path.
 - [ ] Tier 2 follow-ups: have warm `pilens_analyze` auto-register edited files into
       turn-state (so `turn_end` needs no explicit file list); surface the error-debt
       green→red delta directly in the turn_end result; let session_start optionally
