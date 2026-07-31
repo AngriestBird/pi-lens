@@ -176,6 +176,11 @@ interface SnapshotParseCacheEntry {
 	snapshot: ProjectSnapshot | null;
 }
 const SNAPSHOT_PARSE_CACHE_MAX = 4;
+// #957 review: the cache exists to avoid re-parsing NORMAL snapshots within a
+// session. A 112MB-class body parses to hundreds of MB of heap — pinning that
+// for process lifetime inverts the win, so oversized bodies are simply never
+// cached (they re-parse per read, exactly the pre-#947 behavior).
+const SNAPSHOT_PARSE_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 const snapshotParseCache = new Map<string, SnapshotParseCacheEntry>();
 
 function cacheParsedSnapshot(
@@ -214,7 +219,17 @@ export function loadProjectSnapshot(cwd: string): ProjectSnapshot | null {
 			snapshotPath,
 			(parsed) => parseSnapshot(parsed) ?? undefined,
 		) ?? null;
-	cacheParsedSnapshot(snapshotPath, { mtimeMs, snapshot });
+	let fileBytes = 0;
+	try {
+		fileBytes = fs.statSync(snapshotPath).size;
+	} catch {
+		/* raced a delete — skip caching */
+	}
+	if (fileBytes > 0 && fileBytes <= SNAPSHOT_PARSE_CACHE_MAX_BYTES) {
+		cacheParsedSnapshot(snapshotPath, { mtimeMs, snapshot });
+	} else {
+		snapshotParseCache.delete(snapshotPath);
+	}
 	return snapshot;
 }
 
@@ -227,16 +242,32 @@ export function saveProjectSnapshot(
 	// Compact serialization (no pretty-print): ~30% smaller at the observed
 	// 40-112MB sizes, which directly shrinks both the write and every later
 	// read+parse on session start. #947.
-	fs.writeFileSync(snapshotPath, JSON.stringify(snapshot));
+	const serialized = JSON.stringify(snapshot);
+	try {
+		fs.writeFileSync(snapshotPath, serialized);
+	} catch (err) {
+		// #957 review: callers mutate the loaded (= cached) object in place
+		// before saving. If the body write fails (disk full, AV/OneDrive
+		// lock), the cache would keep serving that never-persisted state
+		// under the old mtime — drop the entry so the next load re-reads
+		// what is actually on disk.
+		snapshotParseCache.delete(snapshotPath);
+		throw err;
+	}
 	// Prime the parse cache with the object we just wrote so the next
 	// loadProjectSnapshot (e.g. saveRuntimeProjectSnapshot's merge read
 	// seconds later) doesn't re-parse our own write. Best-effort: a failed
-	// stat just means the next load re-parses.
+	// stat just means the next load re-parses. Oversized bodies are never
+	// cached (see SNAPSHOT_PARSE_CACHE_MAX_BYTES).
 	try {
-		cacheParsedSnapshot(snapshotPath, {
-			mtimeMs: fs.statSync(snapshotPath).mtimeMs,
-			snapshot,
-		});
+		if (Buffer.byteLength(serialized) <= SNAPSHOT_PARSE_CACHE_MAX_BYTES) {
+			cacheParsedSnapshot(snapshotPath, {
+				mtimeMs: fs.statSync(snapshotPath).mtimeMs,
+				snapshot,
+			});
+		} else {
+			snapshotParseCache.delete(snapshotPath);
+		}
 	} catch {
 		snapshotParseCache.delete(snapshotPath);
 	}

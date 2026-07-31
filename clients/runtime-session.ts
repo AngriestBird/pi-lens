@@ -1358,12 +1358,29 @@ export async function handleSessionStart(
 							"warmup: skipping LSP pre-warm (attached to incumbent)",
 						);
 					} else {
-						await igniteDominantLanguageWarm(
-							languageRoot,
-							deps.runtime,
-							deps.runtime.sessionGeneration,
-							warmupDbg,
+						// #957 review: honor explicit warmFiles (#203) like the full
+						// path does — configured projects warm exactly what they
+						// asked for; dominant-language warm is the fallback.
+						const lspConfig = await loadLSPConfig(warmupCwd).catch(
+							() => ({ warmFiles: [] as string[] }),
 						);
+						const warmFiles = lspConfig.warmFiles ?? [];
+						if (warmFiles.length > 0) {
+							await igniteWarmFiles(
+								warmupCwd,
+								warmFiles,
+								deps.runtime,
+								deps.runtime.sessionGeneration,
+								warmupDbg,
+							);
+						} else {
+							await igniteDominantLanguageWarm(
+								languageRoot,
+								deps.runtime,
+								deps.runtime.sessionGeneration,
+								warmupDbg,
+							);
+						}
 						logLatency({
 							type: "phase",
 							phase: "warmup_lsp_prewarm",
