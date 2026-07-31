@@ -102,6 +102,16 @@ function makeClients(
 				scannedAt: "now",
 			}),
 		},
+		// opengrep is structurally always-on (no static project gate) — the stub
+		// defaults to available + a clean scan; individual tests override `scan`.
+		opengrepClient: {
+			ensureAvailable: vi.fn().mockResolvedValue(true),
+			scan: vi.fn().mockResolvedValue({
+				success: true,
+				findings: [],
+				scannedAt: "now",
+			}),
+		},
 		deadCodeClients: [],
 		// The remaining BootstrapClients fields are unused by fetchFreshProjectDiagnostics.
 	} as unknown as BootstrapClients;
@@ -178,6 +188,7 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			"madge",
 			"gitleaks",
 			"govulncheck",
+			"opengrep",
 			"trivy",
 			"dead-code",
 		]);
@@ -391,6 +402,72 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			path.resolve(tmp),
 			expect.anything(),
 		);
+	});
+
+	// #585 regression: opengrep was registered in the cache-only extractor
+	// registry (extractors.ts) but MISSING from this fresh-fetch path, so its
+	// session-start scan cached findings that `lens_diagnostics mode=full` never
+	// read back — a scan-and-orphan honesty gap (#533). It must surface here the
+	// same way gitleaks/trivy do: fresh scan → cache write → adapted diagnostics.
+	it("surfaces opengrep findings (ERROR→blocking, CWE-tagged) and caches them (#585)", async () => {
+		const cacheManager = makeCacheManager();
+		const clients = makeClients();
+		(clients.opengrepClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue({
+			success: true,
+			scannedAt: "now",
+			findings: [
+				{
+					checkId: "python.lang.security.audit.subprocess-shell-true",
+					path: "src/run.py",
+					startLine: 7,
+					startCol: 3,
+					endLine: 7,
+					endCol: 20,
+					message: "shell=True is dangerous",
+					severity: "ERROR",
+					cwe: ["CWE-78: OS Command Injection"],
+				},
+			],
+		});
+
+		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+
+		// Structurally always-on: no static project gate, only an availability
+		// probe — the scan runs even on a bare tmp dir with no manifest/marker.
+		expect(clients.opengrepClient.scan).toHaveBeenCalledTimes(1);
+		expect(clients.opengrepClient.scan).toHaveBeenCalledWith(path.resolve(tmp));
+		expect(cacheManager.writeCache).toHaveBeenCalledWith(
+			"opengrep",
+			expect.objectContaining({ success: true }),
+			path.resolve(tmp),
+			expect.objectContaining({ scanDurationMs: expect.any(Number) }),
+		);
+		expect(result.runners).toContain("opengrep");
+		const diag = result.diagnostics.find((d) => d.runner === "opengrep");
+		expect(diag).toMatchObject({
+			filePath: path.join(path.resolve(tmp), "src/run.py"),
+			line: 7,
+			column: 3,
+			severity: "error",
+			semantic: "blocking",
+			tool: "opengrep",
+			rule: "opengrep:python.lang.security.audit.subprocess-shell-true",
+			message: "shell=True is dangerous (CWE-78: OS Command Injection)",
+		});
+	});
+
+	it("reports opengrep cold (not clean) when the tool isn't available (#585)", async () => {
+		const cacheManager = makeCacheManager();
+		const clients = makeClients();
+		(
+			clients.opengrepClient.ensureAvailable as ReturnType<typeof vi.fn>
+		).mockResolvedValue(false);
+
+		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+
+		expect(clients.opengrepClient.scan).not.toHaveBeenCalled();
+		expect(result.cold).toContain("opengrep");
+		expect(result.runners).not.toContain("opengrep");
 	});
 
 	it("runs every applicable dead-code language client and reports 'dead-code' cold only when none apply", async () => {

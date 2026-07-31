@@ -22,6 +22,50 @@ All notable changes to pi-lens will be documented in this file.
 	resolves the operation's normal failure value instead of escaping as an
 	unhandledRejection/uncaughtException. Behavior-preserving otherwise.
 
+- **Fixed: opengrep security findings now surface project-wide in
+	`lens_diagnostics mode=full`** (refs #585, #584, #533) — opengrep's
+	whole-tree CLI scan ran at session-start and cached its findings, and the
+	cache-only extractor registry (`project-diagnostics/extractors.ts`) even
+	registered an `"opengrep"` row — but #585 replaced that registry in
+	production with `fetchFreshProjectDiagnostics`
+	(`project-diagnostics/fresh-fetch.ts`), whose `ANALYZER_IDS` list omitted
+	opengrep. Net: opengrep scanned + cached, yet nothing production read it
+	back, so semgrep-grade security findings (ERROR→blocking, CWE-tagged) never
+	reached the agent for unedited/project-wide files — a scan-and-orphan
+	honesty gap (#533). `fetchFreshProjectDiagnostics` now runs opengrep the
+	same way it runs gitleaks/trivy: an availability probe (opengrep is
+	structurally always-on, so no static project-type gate), then a fresh scan
+	that JOINS the session-start scan of the same root via
+	`SecurityScanClient.dedupeScan` rather than double-spawning a heavy scan,
+	with the result written back to cache and adapted to project diagnostics.
+	The per-edit aux-LSP push path (`clientScope: with-auxiliary`,
+	`AUXILIARY_LSP_PROFILES`) was verified already-working and is untouched;
+	opengrep stays excluded from the push-only LSP workspace sweep (#584). The
+	now-dead cache-only `extractCachedProjectDiagnostics` reader — the parallel
+	registry that shadowed `ANALYZER_IDS` and let opengrep silently diverge — was
+	removed so a single source of truth (#883) remains.
+
+- **Guarded Windows CPU/RSS resource sampling so a best-effort sampler can no
+	longer crash the pi host** (refs #620, #533) — `clients/resource-sampler.ts`
+	sampled CPU%/RSS via `pidusage`, whose Windows path shells out to `gwmi`
+	through an internal `spawn(..., { shell: "powershell.exe" })` that has no
+	try/catch and runs from inside a ChildProcess `close` callback. Under real
+	Windows handle/commit pressure that spawn can throw `spawn UNKNOWN`
+	(errno -4094) **synchronously in that detached callback**, which the call
+	site's `try { await pidusage() } catch {}` cannot catch → `uncaughtException`
+	→ the whole host process dies (observed live). pidusage 4.0.1 offers no
+	option to avoid the gwmi path. The sampler now runs its OWN fully guarded
+	`Get-CimInstance Win32_Process` query on Windows (never calling `pidusage`
+	there), mirroring the existing `findDescendantPidsWindows` guard: a
+	synchronous spawn throw, a child `error` event, and a non-zero/garbage exit
+	all resolve to a partial/empty map — the sampler can now only ever lose a
+	data point, never throw into the heartbeat/spawn path. RSS comes from
+	`WorkingSetSize`; CPU% is preserved via the same KernelModeTime/UserModeTime
+	delta-over-elapsed-wall-time computation gwmi uses (a small per-pid history
+	tracks the prior cumulative CPU time). Linux/macOS keep using `pidusage`
+	(procfs/`ps` — not the crash vector) unchanged. A pid absent from the
+	returned map still means "unsampled this tick", never zero.
+
 - **Parallelized the per-turn madge dependency check** (refs #766) — the
 	turn-end circular-dependency pass previously ran one `await checkFile()`
 	per import-changed file in a sequential `for…await` loop, serializing N
