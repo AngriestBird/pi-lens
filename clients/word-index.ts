@@ -284,9 +284,12 @@ export function updateWordIndexDocument(
 
 	index.docLengths.set(doc.path, docLength);
 	index.forward.set(doc.path, tokenLineCounts);
-	// Per-edit callers generally already have content but not a stat. A zero
-	// freshness stamp deliberately makes the document stale at next startup.
-	index.fileMtimes.set(doc.path, 0);
+	// Per-edit callers generally already have content but not a stat. -1 is an
+	// impossible real mtime, so it deliberately makes the document stale at the
+	// next startup refresh (`-1 !== realMtime` always) — unlike 0, which is a
+	// legal on-disk mtime (SOURCE_DATE_EPOCH=0, archive extraction) and would
+	// collide, leaving such a file never re-tokenized (#958 review F2).
+	index.fileMtimes.set(doc.path, -1);
 	index.totalTokens += docLength;
 	index.docCount += 1;
 	return true;
@@ -372,6 +375,8 @@ export interface WordIndexRefreshResult {
 	mode: "incremental";
 	refreshed: number;
 	dropped: number;
+	/** Files that were stale but unreadable this pass; posting left intact. */
+	skipped: number;
 	reused: number;
 }
 
@@ -428,10 +433,23 @@ export async function refreshWordIndexIncrementally(
 	}
 
 	let refreshed = 0;
+	let skipped = 0;
 	let processed = 0;
 	for (const [file, mtimeMs] of current) {
 		if (index.fileMtimes.get(file) !== mtimeMs) {
-			const content = fs.readFileSync(file, "utf-8");
+			// A file the walk/stat pass saw can still fail to read here — a
+			// transient exclusive lock (antivirus, an editor, a build step) or a
+			// file that vanished in the interim. Match collectWordIndexDocs'
+			// tolerance: skip this one file and leave its existing posting (and
+			// its old mtime, so it is retried next session) rather than aborting
+			// the whole incremental pass into a full rebuild (#958 review F1).
+			let content: string;
+			try {
+				content = fs.readFileSync(file, "utf-8");
+			} catch {
+				skipped++;
+				continue;
+			}
 			if (!updateWordIndexDocument(index, { path: file, content })) {
 				throw new Error(`failed to refresh word-index document: ${file}`);
 			}
@@ -448,7 +466,8 @@ export async function refreshWordIndexIncrementally(
 		mode: "incremental",
 		refreshed,
 		dropped,
-		reused: current.size - refreshed,
+		skipped,
+		reused: current.size - refreshed - skipped,
 	};
 }
 

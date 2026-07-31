@@ -477,6 +477,7 @@ interface WordIndexWarmupResult {
 	mode: "full" | "incremental";
 	refreshed: number;
 	dropped: number;
+	skipped?: number;
 	reused: number;
 }
 
@@ -520,7 +521,7 @@ async function buildOrRefreshWordIndex(args: {
 					saveRuntimeProjectSnapshot({ cwd: snapshotRoot, runtime, dbg });
 				}
 				dbg(
-					`session_start word-index: incremental (seq=${effectiveSeq}, refreshed=${result.refreshed}, dropped=${result.dropped}, reused=${result.reused}, ${Date.now() - startMs}ms)`,
+					`session_start word-index: incremental (seq=${effectiveSeq}, refreshed=${result.refreshed}, dropped=${result.dropped}, skipped=${result.skipped}, reused=${result.reused}, ${Date.now() - startMs}ms)`,
 				);
 				return result;
 			} catch (err) {
