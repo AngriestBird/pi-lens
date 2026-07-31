@@ -23,9 +23,12 @@ function resolveImpactFile(cwd: string, filePath: string): string {
 }
 
 /**
- * #883 single-source-of-truth: reuses `parseSymbolKey` (`call-graph.ts`) —
- * the same key-splitting logic `formatImpact` relies on — rather than
- * re-implementing symbol-key parsing here.
+ * #883 single-source-of-truth: reuses `parseSymbolKey` (`call-graph.ts`)
+ * rather than re-implementing symbol-key parsing here. Note this is stricter
+ * than `formatImpact`'s inline `.split(":").pop()`: `parseSymbolKey` splits at
+ * the LAST colon (drive-letter-safe on Windows) and understands the `file:`
+ * module-level fallback shape, neither of which the `formatImpact` shortcut
+ * handles — so this is the canonical parser, not merely a shared copy of it.
  */
 function displayName(key: SymbolKey): string {
 	return parseSymbolKey(key).symbolName ?? key;

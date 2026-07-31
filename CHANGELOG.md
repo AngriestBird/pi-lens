@@ -22,7 +22,15 @@ All notable changes to pi-lens will be documented in this file.
 	per-turn-edit, not a whole-project scan — same reasoning that keeps
 	test-runner's own turn-end fire out of that registry. The existing
 	human-readable advisory string is kept as-is (separate surface, same
-	dual-surface pattern already used by knip's turn-end delta).
+	dual-surface pattern already used by knip's turn-end delta). The call-graph
+	block now runs BEFORE the single `writeProjectDiagnosticsDeltaReport`
+	serialization point (alongside knip's delta push) rather than after it —
+	previously it pushed into `projectDiagnosticsDelta`/`projectDiagnosticsSources`
+	past the one-shot write, so a call-graph-only turn persisted nothing and a
+	mixed turn dropped the call-graph entries, leaving `lens_diagnostics` (a
+	pure reader of the persisted report) unable to ever surface the findings
+	(#533). Covered by a new `handleTurnEnd`-level regression test asserting the
+	persisted report for both call-graph-only and mixed turns.
 
 - **Fixed: `no-javascript-url`/`no-javascript-url-js` no longer flag defensive
 	`javascript:`-URL filters** (refs #533) — a dogfood run flagged code that was
