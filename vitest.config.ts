@@ -80,6 +80,10 @@ const grammarHeavyInclude = [
 export default defineConfig({
 	test: {
 		exclude: sharedExclude,
+		// Root-config-only in Vitest 4 (see the grammar-heavy project's comment
+		// below) — applies to every project's fork teardown, not just the
+		// grammar-heavy one, which is strictly more forgiving everywhere else.
+		teardownTimeout: 30_000,
 		projects: [
 			{
 				test: {
@@ -123,8 +127,12 @@ export default defineConfig({
 					// Supplement, not a substitute for the maxForks cap above: give
 					// fork teardown more headroom in case a heavy grammar compile is
 					// still finishing when a test file's hooks wrap up.
+					// NOTE: Vitest 4's per-project `ProjectConfig` type excludes
+					// `teardownTimeout` (it moved to root-config-only), so the 30s
+					// bump lives on the top-level `test` block below instead —
+					// applies to both projects, which only makes the default
+					// project's teardown MORE forgiving, never less.
 					hookTimeout: 60_000,
-					teardownTimeout: 30_000,
 				},
 			},
 		],
