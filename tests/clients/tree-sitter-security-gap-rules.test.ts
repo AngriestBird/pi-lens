@@ -184,6 +184,108 @@ describe("tree-sitter security gap rules", () => {
 		expect(matches.length).toBeGreaterThan(0);
 	});
 
+	// Regression coverage for #963: naming convention alone (e.g.
+	// SCREAMING_SNAKE_CASE) must never be trusted as proof of a fixed URL.
+	// Only a provably literal-initialized `const` in the same file is exempt.
+	it("does not flag fetch of a const initialized with a string literal (#963)", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			`const OPENAI_URL = "https://api.openai.com/v1";\nawait fetch(OPENAI_URL);\n`,
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBe(0);
+	});
+
+	it("does not flag fetch of a lowercase const initialized with a string literal", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			`const targetUrl = "https://example.com/api";\nawait fetch(targetUrl);\n`,
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBe(0);
+	});
+
+	it("does not flag fetch of a const initialized with a substitution-free template literal", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			"const OPENAI_URL = `https://api.openai.com/v1`;\nawait fetch(OPENAI_URL);\n",
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBe(0);
+	});
+
+	it("still flags fetch of an all-caps identifier assigned from tainted input (#963 regression this rework must not repeat)", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			`const TARGET_URL = req.query.url;\nawait fetch(TARGET_URL);\n`,
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBeGreaterThan(0);
+	});
+
+	it("still flags fetch of an all-caps identifier assigned from a function call", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			`const TARGET_URL = getUserSuppliedUrl();\nawait fetch(TARGET_URL);\n`,
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBeGreaterThan(0);
+	});
+
+	it("still flags fetch of an all-caps identifier assigned from a member expression", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			`const TARGET_URL = settings.remoteEndpoint;\nawait fetch(TARGET_URL);\n`,
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBeGreaterThan(0);
+	});
+
+	it("still flags fetch of an all-caps identifier that is a function parameter", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			`async function callWebhook(WEBHOOK_URL) {\n  await fetch(WEBHOOK_URL);\n}\n`,
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBeGreaterThan(0);
+	});
+
+	it("still flags fetch of a member expression (unchanged broad net)", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			`await fetch(settings.endpoint);\n`,
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBeGreaterThan(0);
+	});
+
+	it("still flags fetch of a const reassigned after a literal initializer", async () => {
+		const client = getSharedTreeSitterClient()!;
+		const query = await getQuery("ts-ssrf");
+		const filePath = writeTempFile(
+			"ts",
+			`let TARGET_URL = "https://example.com";\nTARGET_URL = req.query.url;\nawait fetch(TARGET_URL);\n`,
+		);
+		const matches = await client.runQueryOnFile(query, filePath, "typescript");
+		expect(matches.length).toBeGreaterThan(0);
+	});
+
 	it("matches go path traversal sink", async () => {
 		const client = getSharedTreeSitterClient()!;
 		const query = await getQuery("go-path-traversal");
