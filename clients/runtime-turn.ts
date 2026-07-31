@@ -904,7 +904,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	if (runtime.callGraph && files.length > 0) {
 		try {
 			const { impact, formatImpact } = await import("./call-graph.js");
+			const { callGraphImpactToProjectDiagnostics } = await import(
+				"./project-diagnostics/runner-adapters/call-graph-impact.js"
+			);
 			const impactLines: string[] = [];
+			const impactFindings: { calleeKey: string; results: ReturnType<typeof impact> }[] =
+				[];
 			for (const filePath of files.slice(0, 5)) {
 				// Find callee keys for this file in the call graph
 				const fileCallerKeys = [...runtime.callGraph.callers.keys()].filter(
@@ -913,6 +918,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				for (const calleeKey of fileCallerKeys.slice(0, 3)) {
 					const results = impact(runtime.callGraph, calleeKey);
 					if (results.length > 0) {
+						impactFindings.push({ calleeKey, results });
 						const summary = formatImpact(results, cwd);
 						if (summary)
 							impactLines.push(`  ${calleeKey.split(":").pop()}: ${summary}`);
@@ -923,6 +929,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				advisoryParts.push(
 					`📊 Call-graph impact (changed symbols have callers):\n${impactLines.join("\n")}`,
 				);
+			}
+			if (impactFindings.length > 0) {
+				const impactDiagnostics = callGraphImpactToProjectDiagnostics(
+					cwd,
+					impactFindings,
+				);
+				if (impactDiagnostics.length > 0) {
+					projectDiagnosticsDelta.push(...impactDiagnostics);
+					projectDiagnosticsSources.add("call-graph");
+				}
 			}
 		} catch {
 			// Non-fatal — call graph is best-effort

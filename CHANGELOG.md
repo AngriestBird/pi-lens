@@ -4,6 +4,26 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Normalized call-graph impact checks into structured `ProjectDiagnostic`s**
+	(refs #179) — the last remaining adapter gap in #179's normalization sweep.
+	`runtime-turn.ts`'s turn-end call-graph impact check (WillBreak/MayBreak
+	callers of symbols edited this turn, via `impact()`/`call-graph.ts`) was
+	advisory-text only, unlike the other 9 runners already normalized through
+	`runner-adapters/*.ts`. Added `callGraphImpactToProjectDiagnostics`
+	(`project-diagnostics/runner-adapters/call-graph-impact.ts`), a pure mapper
+	attributing each diagnostic to the CALLER's file (no line — `impact()`'s
+	`ImpactResult` never carries one, and the underlying call-graph symbol
+	table only has a placeholder `line: 1`, so inventing one would be a fake
+	location). Severity is deliberately capped below this codebase's
+	"blocking" hard-stop tier for BOTH WillBreak and MayBreak (#533 honesty):
+	`impact()` is a name-resolution heuristic with no type information, so a
+	resolved caller is never a confirmed break. Wired at turn-end (not
+	`fresh-fetch.ts`/`ANALYZER_IDS`) since impact analysis is inherently
+	per-turn-edit, not a whole-project scan — same reasoning that keeps
+	test-runner's own turn-end fire out of that registry. The existing
+	human-readable advisory string is kept as-is (separate surface, same
+	dual-surface pattern already used by knip's turn-end delta).
+
 - **Fixed: `no-javascript-url`/`no-javascript-url-js` no longer flag defensive
 	`javascript:`-URL filters** (refs #533) — a dogfood run flagged code that was
 	*rejecting* `javascript:` links (e.g. `url.startsWith("javascript:")` inside a
