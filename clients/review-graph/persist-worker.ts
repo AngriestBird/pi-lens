@@ -1,9 +1,5 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import { parentPort } from "node:worker_threads";
-import { createGzip } from "node:zlib";
+import { writeGzipStageFile } from "../gzip-stage-write.js";
 
 export interface ReviewGraphPersistWorkerRequest {
 	id: number;
@@ -36,35 +32,20 @@ async function persist(request: ReviewGraphPersistWorkerRequest): Promise<void> 
 		stagePath: request.stagePath,
 		elements: request.elements,
 	};
-	const tmpPath = `${request.stagePath}.tmp-${process.pid}`;
+	// Shared streamed-gzip stage write (clients/gzip-stage-write.ts) — see there
+	// for why the gzip runs off the main thread.
 	try {
-		if (request.testDelayMs) {
-			await new Promise((resolve) => setTimeout(resolve, request.testDelayMs));
-		}
-		const serializeStarted = performance.now();
-		const json = JSON.stringify(request.data);
-		result.serializeMs = performance.now() - serializeStarted;
-		result.rawBytes = Buffer.byteLength(json);
-
-		const writeStarted = performance.now();
-		await fs.promises.mkdir(path.dirname(request.stagePath), { recursive: true });
-		const chunks = function* () {
-			const chunkChars = 256 * 1024;
-			for (let offset = 0; offset < json.length; offset += chunkChars) {
-				yield json.slice(offset, offset + chunkChars);
-			}
-		};
-		await pipeline(
-			Readable.from(chunks()),
-			createGzip(),
-			fs.createWriteStream(tmpPath),
+		const metrics = await writeGzipStageFile(
+			request.data,
+			request.stagePath,
+			request.testDelayMs,
 		);
-		await fs.promises.rename(tmpPath, request.stagePath);
-		result.writeMs = performance.now() - writeStarted;
-		result.gzBytes = (await fs.promises.stat(request.stagePath)).size;
+		result.rawBytes = metrics.rawBytes;
+		result.gzBytes = metrics.gzBytes;
+		result.serializeMs = metrics.serializeMs;
+		result.writeMs = metrics.writeMs;
 	} catch (err) {
 		result.error = err instanceof Error ? err.message : String(err);
-		await fs.promises.rm(tmpPath, { force: true }).catch(() => {});
 	}
 	parentPort?.postMessage(result);
 }
