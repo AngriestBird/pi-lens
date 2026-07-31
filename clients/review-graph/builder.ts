@@ -827,6 +827,13 @@ function rebuildIndexes(graph: ReviewGraph): void {
 
 const GRAPH_CACHE_FILENAME = "review-graph.json.gz";
 const LEGACY_GRAPH_CACHE_FILENAME = "review-graph.json";
+// #936 limit 2: the mid-build resume checkpoint lives in its OWN file, distinct
+// from the authoritative `review-graph.json.gz`. Keeping it separate is the
+// core honesty guarantee — `loadPersistedGraph` / `getCachedReviewGraph` only
+// ever read the authoritative snapshot, so a mid-build checkpoint can never be
+// laundered to a consumer as a complete graph. It is read back exclusively by
+// the full-build resume path (`loadReviewGraphCheckpoint`).
+const GRAPH_CHECKPOINT_FILENAME = "review-graph.checkpoint.json.gz";
 
 interface PersistedGraphData {
 	version: string;
@@ -1466,6 +1473,330 @@ function persistGraph(
 	// Don't keep the event loop alive solely for a cache write.
 	if (typeof timer.unref === "function") timer.unref();
 	_persistTimers.set(key, timer);
+}
+
+// --- Cross-session resumable full build (checkpointing, #936 limit 2) ---
+// A full build walks + tree-sitter-parses every source file, then resolves
+// cross-file edges once at the end. On a large repo with short-lived sessions
+// that whole pass can be killed before it finishes and, with no checkpoint,
+// the next session starts from scratch — so it may NEVER complete. During the
+// full-build extraction loop we periodically snapshot the PRE-resolution graph
+// plus the exact set of files already folded into it (with content hashes) to
+// a dedicated checkpoint file. A later session resumes from that snapshot,
+// re-walking only files that changed/appeared since, and finishes the build.
+//
+// Correctness (equivalence to a cold full build) rests on one property of the
+// extraction: `addFileToGraph`'s per-file contribution (the nodes it adds and
+// the edges it adds, with their metadata) depends ONLY on that file's content
+// and the cwd — never on other files or on processing order, because ALL
+// cross-file linking is deferred to `resolveDeferredSymbolEdges`, run once
+// after every file is in. So the pre-resolution graph is the order-independent
+// union of per-file contributions (shared placeholder / imported-file stub
+// nodes are created idempotently by id). Resuming therefore reconstructs the
+// identical pre-resolution graph as long as the reused files' contributions
+// are still current — which the content-hash + ignored-id + git gates below
+// enforce, failing open to a cold build on any doubt.
+
+const GRAPH_CHECKPOINT_EVERY_FILES_DEFAULT = 250;
+const GRAPH_CHECKPOINT_MIN_INTERVAL_MS_DEFAULT = 5_000;
+
+function graphCheckpointEveryFiles(): number {
+	const raw = Number(process.env.PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES);
+	return Number.isFinite(raw) && raw > 0
+		? Math.floor(raw)
+		: GRAPH_CHECKPOINT_EVERY_FILES_DEFAULT;
+}
+
+function graphCheckpointMinIntervalMs(): number {
+	const raw = Number(process.env.PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS);
+	return Number.isFinite(raw) && raw >= 0
+		? raw
+		: GRAPH_CHECKPOINT_MIN_INTERVAL_MS_DEFAULT;
+}
+
+interface ReviewGraphCheckpointData {
+	version: string;
+	builtAt: string;
+	/**
+	 * Honesty marker (#936): this payload is a MID-BUILD snapshot, never a
+	 * complete graph. Only the resume path in `_doBuildGraph` ever reads it.
+	 */
+	inProgress: true;
+	/** Total files this build is walking toward — telemetry only. */
+	targetFileCount: number;
+	/** Files whose per-file contribution is already in `nodes`/`edges`, keyed to
+	 * the sha256 of the exact bytes extracted, so a later session can detect and
+	 * re-walk any that changed since. */
+	processedFiles: Array<[string, string]>;
+	/** Fingerprint of the untracked-AND-ignored id set (#694) used during
+	 * extraction. It steers import-edge target resolution, so a change would make
+	 * reused files' edges stale — resume fails open to a cold build on mismatch. */
+	ignoredIdsHash: string;
+	/** PRE-resolution nodes (resolveDeferredSymbolEdges has NOT run). */
+	nodes: Array<[string, ReviewGraphNode]>;
+	/** PRE-resolution edges (cross-file `calls`/`references` still point at
+	 * unresolved placeholder nodes). */
+	edges: ReviewGraphEdge[];
+	gitStamp?: { headCommit: string; worktreeRoot: string };
+}
+
+function reviewGraphCheckpointPath(cwd: string): string {
+	return path.join(getProjectDataDir(cwd), "cache", GRAPH_CHECKPOINT_FILENAME);
+}
+
+/** Stable fingerprint of the untracked-ignored id set. `undefined` (fetch
+ * degraded / not requested) hashes distinctly from an empty set, so a resume
+ * only reuses a checkpoint built under the same ignore state. */
+function hashIgnoredIds(ignoredIds: ReadonlySet<string> | undefined): string {
+	if (ignoredIds === undefined) return "unavailable";
+	const joined = [...ignoredIds].sort((a, b) => a.localeCompare(b)).join(" ");
+	return createHash("sha256").update(joined).digest("hex");
+}
+
+/**
+ * Write a mid-build checkpoint for `cwd`. Best-effort and synchronous (mirrors
+ * the exit-hook flush): a lost checkpoint only costs a cold rebuild next time.
+ * `graph` MUST be pre-resolution; `processedHashes` MUST contain exactly the
+ * files already folded into it.
+ */
+function writeReviewGraphCheckpoint(
+	cwd: string,
+	graph: ReviewGraph,
+	processedHashes: Map<string, string>,
+	targetFileCount: number,
+	ignoredIds: ReadonlySet<string> | undefined,
+): void {
+	try {
+		const cacheDir = path.join(getProjectDataDir(cwd), "cache");
+		const data: ReviewGraphCheckpointData = {
+			version: REVIEW_GRAPH_VERSION,
+			builtAt: new Date().toISOString(),
+			inProgress: true,
+			targetFileCount,
+			processedFiles: Array.from(processedHashes.entries()),
+			ignoredIdsHash: hashIgnoredIds(ignoredIds),
+			nodes: Array.from(graph.nodes.entries()),
+			edges: graph.edges,
+			gitStamp: resolveGitIdentity(cwd),
+		};
+		const gzip = gzipSync(JSON.stringify(data));
+		fs.mkdirSync(cacheDir, { recursive: true });
+		writeFileAtomic(reviewGraphCheckpointPath(cwd), gzip, { bestEffort: true });
+		logReviewGraph({
+			cwd,
+			phase: "checkpoint_written",
+			nodes: graph.nodes.size,
+			edges: graph.edges.length,
+			processed: processedHashes.size,
+			target: targetFileCount,
+		});
+	} catch {
+		// Best-effort: a failed checkpoint just means no resume next session.
+	}
+}
+
+/** Remove the checkpoint once a complete authoritative graph exists (or when a
+ * stale checkpoint is discarded). Best-effort. */
+function deleteReviewGraphCheckpoint(cwd: string): void {
+	fs.rm(reviewGraphCheckpointPath(cwd), { force: true }, () => {});
+}
+
+interface LoadedReviewGraphCheckpoint {
+	/** Hydrated PRE-resolution graph, marked partial + inProgress. */
+	graph: ReviewGraph;
+	processedHashes: Map<string, string>;
+	ignoredIdsHash: string;
+	targetFileCount: number;
+}
+
+/**
+ * Read back a checkpoint for `cwd`, gated on the graph version (single source of
+ * truth: {@link REVIEW_GRAPH_VERSION}) and, when both stamps resolve, the git
+ * identity — the same drop-on-mismatch guard `loadPersistedGraph` uses. Returns
+ * null (and best-effort deletes an unusable file) when absent/stale/corrupt.
+ * The returned graph carries `persistCoverage.inProgress` so it can never be
+ * mistaken for a complete graph if it escapes the resume path.
+ */
+function loadReviewGraphCheckpoint(
+	cwd: string,
+): LoadedReviewGraphCheckpoint | null {
+	const checkpointPath = reviewGraphCheckpointPath(cwd);
+	let data: ReviewGraphCheckpointData;
+	try {
+		if (!fs.existsSync(checkpointPath)) return null;
+		data = JSON.parse(
+			gunzipSync(fs.readFileSync(checkpointPath)).toString("utf-8"),
+		) as ReviewGraphCheckpointData;
+	} catch {
+		deleteReviewGraphCheckpoint(cwd);
+		return null;
+	}
+	if (data.version !== REVIEW_GRAPH_VERSION || data.inProgress !== true) {
+		deleteReviewGraphCheckpoint(cwd);
+		return null;
+	}
+	if (data.gitStamp) {
+		const current = resolveGitIdentity(cwd);
+		if (
+			current &&
+			(current.headCommit !== data.gitStamp.headCommit ||
+				current.worktreeRoot !== data.gitStamp.worktreeRoot)
+		) {
+			deleteReviewGraphCheckpoint(cwd);
+			return null;
+		}
+	}
+	const totalNodes = data.nodes.length;
+	const totalEdges = data.edges.length;
+	const graph: ReviewGraph = {
+		version: data.version,
+		builtAt: data.builtAt,
+		nodes: new Map(data.nodes),
+		edges: data.edges,
+		edgesByFrom: new Map(),
+		edgesByTo: new Map(),
+		fileNodes: new Map(),
+		symbolNodesByFile: new Map(),
+		changedSymbolsByFile: new Map(),
+		persistCoverage: {
+			partial: true,
+			inProgress: true,
+			cap: 0,
+			totalNodes,
+			totalEdges,
+			persistedNodes: totalNodes,
+			persistedEdges: totalEdges,
+		},
+	};
+	rebuildIndexes(graph);
+	return {
+		graph,
+		processedHashes: new Map(data.processedFiles),
+		ignoredIdsHash: data.ignoredIdsHash,
+		targetFileCount: data.targetFileCount,
+	};
+}
+
+/**
+ * Drop nodes with no `filePath` (shared placeholder / imported-file-stub /
+ * external / module nodes) that no edge references after a stale-file eviction.
+ * A cold full build's pre-resolution graph never contains such zero-edge
+ * placeholders (each is created immediately before an edge to it, and the full
+ * path removes no edges), so pruning them makes a reconciled resume graph
+ * node-for-node identical to a cold build BEFORE `resolveDeferredSymbolEdges`
+ * runs. Must be called only on a pre-resolution graph.
+ */
+function pruneOrphanNonFileNodes(graph: ReviewGraph): void {
+	const referenced = new Set<string>();
+	for (const edge of graph.edges) {
+		referenced.add(edge.from);
+		referenced.add(edge.to);
+	}
+	for (const [id, node] of graph.nodes) {
+		if (!node.filePath && !referenced.has(id)) graph.nodes.delete(id);
+	}
+}
+
+interface ResumedBuild {
+	graph: ReviewGraph;
+	fileHashes: Map<string, string>;
+	remaining: string[];
+}
+
+/**
+ * Attempt to resume a full build for `cwd` from a prior session's checkpoint.
+ * Returns a seed graph (the reconciled pre-resolution checkpoint), the content
+ * hashes of the files it reuses, and the list of files still to extract; or
+ * null when there is no usable checkpoint (caller does a cold full build).
+ *
+ * Reconciliation vs. the CURRENT target file set (`filesToBuild`):
+ *  - A processed file no longer in the target set (deleted/renamed/now-excluded)
+ *    can invalidate OTHER kept files' import edges, which this pass does not
+ *    rebuild — so ANY such removal fails open to a cold build (correctness over
+ *    reuse, per #936).
+ *  - A processed file still present but whose content changed is evicted and
+ *    re-walked (its contribution is self-contained; cross-file links re-resolve
+ *    globally at the end).
+ *  - The ignored-id fingerprint must match (import-edge resolution depends on
+ *    it), else fail open.
+ */
+async function tryResumeFromCheckpoint(
+	cwd: string,
+	filesToBuild: string[],
+	ignoredIds: ReadonlySet<string> | undefined,
+): Promise<ResumedBuild | null> {
+	const loaded = loadReviewGraphCheckpoint(cwd);
+	if (!loaded) return null;
+	if (loaded.ignoredIdsHash !== hashIgnoredIds(ignoredIds)) {
+		deleteReviewGraphCheckpoint(cwd);
+		return null;
+	}
+	const targetSet = new Set(filesToBuild);
+	// Removed-file guard: a processed file gone from the target set can leave a
+	// kept importer's edges stale — fail open rather than serve a wrong graph.
+	for (const file of loaded.processedHashes.keys()) {
+		if (!targetSet.has(file)) {
+			deleteReviewGraphCheckpoint(cwd);
+			return null;
+		}
+	}
+	// Detect content changes among processed files (chunked stat/hash sweep).
+	const reusableHashes = new Map<string, string>();
+	const stale: string[] = [];
+	let sinceYield = 0;
+	for (const [file, priorHash] of loaded.processedHashes) {
+		const currentHash = contentHashEntry(file);
+		if (currentHash === priorHash) reusableHashes.set(file, currentHash);
+		else stale.push(file);
+		if (++sinceYield >= STAT_YIELD_EVERY) {
+			sinceYield = 0;
+			await yieldToLoop();
+		}
+	}
+	if (reusableHashes.size === 0) {
+		// Nothing survivable — no benefit over a cold build; discard.
+		deleteReviewGraphCheckpoint(cwd);
+		return null;
+	}
+	const graph = loaded.graph;
+	// Evict every stale (content-changed) processed file so its outdated
+	// contribution is replaced by a fresh walk below.
+	for (const file of stale) removeFileOwnedGraphData(graph, file);
+	pruneOrphanNonFileNodes(graph);
+	graph.changedSymbolsByFile = new Map();
+	const remaining = filesToBuild.filter((file) => !reusableHashes.has(file));
+	logReviewGraph({
+		cwd,
+		phase: "checkpoint_resumed",
+		reused: reusableHashes.size,
+		stale: stale.length,
+		remaining: remaining.length,
+		target: filesToBuild.length,
+	});
+	return { graph, fileHashes: reusableHashes, remaining };
+}
+
+/** Test-only: inspect the on-disk resume checkpoint for `cwd` (raw payload),
+ * or null when none is present. Lets tests assert the honesty marker and the
+ * recorded processed-file set without exporting the whole checkpoint machinery. */
+export function _readReviewGraphCheckpointForTests(cwd: string):
+	| {
+			inProgress: boolean;
+			processedFiles: string[];
+			nodeCount: number;
+			edgeCount: number;
+			persistCoverage: ReviewGraphPersistCoverage | undefined;
+	  }
+	| null {
+	const loaded = loadReviewGraphCheckpoint(cwd);
+	if (!loaded) return null;
+	return {
+		inProgress: loaded.graph.persistCoverage?.inProgress === true,
+		processedFiles: [...loaded.processedHashes.keys()],
+		nodeCount: loaded.graph.nodes.size,
+		edgeCount: loaded.graph.edges.length,
+		persistCoverage: loaded.graph.persistCoverage,
+	};
 }
 
 /** Test hook: force any pending debounced persist to write immediately. */
@@ -3281,13 +3612,29 @@ async function _doBuildGraph(
 		}
 	}
 
-	// Tier 3: full build
-	const graph = createEmptyGraph();
+	// Tier 3: full build — resumed from a prior session's checkpoint when one is
+	// present and still current (#936 limit 2), else cold from an empty graph.
+	const resumed = await tryResumeFromCheckpoint(cwd, filesToBuild, ignoredIds);
+	const graph = resumed?.graph ?? createEmptyGraph();
+	const filesToExtract = resumed?.remaining ?? filesToBuild;
 	const treeSitterClient = getSharedTreeSitterClient();
 	const extractionStartedAt = Date.now();
-	const fileHashes = new Map<string, string>();
+	// Seeded with the reused files' hashes on resume so the completed snapshot
+	// still records a hash for every file (needed by #202 incremental next time).
+	const fileHashes = resumed?.fileHashes ?? new Map<string, string>();
+	// #936: after each file, snapshot the PRE-resolution graph + processed-file
+	// hashes so a killed session can resume. Gated by BOTH a file-count stride
+	// and a min wall-time interval so a long build pays only a handful of writes.
+	const checkpointEvery = graphCheckpointEveryFiles();
+	const checkpointMinIntervalMs = graphCheckpointMinIntervalMs();
+	const testStopAfter = Number(
+		process.env.PI_LENS_GRAPH_CHECKPOINT_TEST_STOP_AFTER,
+	);
+	let filesSinceCheckpoint = 0;
+	let lastCheckpointMs = Date.now();
+	let extractedCount = 0;
 	const extractFiles = async (): Promise<void> => {
-		for (const file of filesToBuild) {
+		for (const file of filesToExtract) {
 			let content: string | null;
 			try {
 				const bytes = fs.readFileSync(file);
@@ -3303,6 +3650,40 @@ async function _doBuildGraph(
 			await addFileToGraph(graph, cwd, file, facts, ignoredIds, content);
 			if (normalizedChangedSet.has(file)) {
 				upsertChangedSymbols(graph, facts, file);
+			}
+			extractedCount++;
+			filesSinceCheckpoint++;
+			// Test seam: simulate a session killed mid-build after N files, having
+			// just written a checkpoint. The next (un-stopped) build resumes it.
+			if (
+				Number.isFinite(testStopAfter) &&
+				testStopAfter > 0 &&
+				extractedCount >= testStopAfter
+			) {
+				writeReviewGraphCheckpoint(
+					cwd,
+					graph,
+					fileHashes,
+					filesToBuild.length,
+					ignoredIds,
+				);
+				throw new Error("__review_graph_checkpoint_test_abort__");
+			}
+			const remainingAfter = filesToExtract.length - extractedCount;
+			if (
+				filesSinceCheckpoint >= checkpointEvery &&
+				remainingAfter >= checkpointEvery &&
+				Date.now() - lastCheckpointMs >= checkpointMinIntervalMs
+			) {
+				writeReviewGraphCheckpoint(
+					cwd,
+					graph,
+					fileHashes,
+					filesToBuild.length,
+					ignoredIds,
+				);
+				filesSinceCheckpoint = 0;
+				lastCheckpointMs = Date.now();
 			}
 		}
 	};
@@ -3331,9 +3712,26 @@ async function _doBuildGraph(
 		await extractAndDrainIr();
 	}
 
+	// #936: a changed file that was REUSED from the checkpoint (unchanged content)
+	// is never revisited by the extraction loop above, so run its changed-symbol
+	// upsert here — matching what a cold build's inline pass would have done.
+	if (resumed) {
+		for (const file of normalizedChangedSet) {
+			if (resumed.fileHashes.has(file)) {
+				upsertChangedSymbols(graph, facts, file);
+			}
+		}
+	}
+
 	resolveDeferredSymbolEdges(graph);
 	graph.version = REVIEW_GRAPH_VERSION;
 	graph.builtAt = new Date().toISOString();
+	// #936: the build is now complete over the full target set — drop the
+	// in-progress/partial marker a resumed seed carried so the finished graph is
+	// never mistaken for (or persisted as) a partial one, and retire the
+	// checkpoint now that an authoritative snapshot supersedes it.
+	graph.persistCoverage = undefined;
+	deleteReviewGraphCheckpoint(cwd);
 	// #202: the full-build pass hashes the same bytes it supplies to extraction,
 	// so change detection does not reread every file after the graph is built.
 	// #459: full rebuild ⇒ new generation.

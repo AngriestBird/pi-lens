@@ -24,7 +24,10 @@ export interface ReviewGraphLogEntry {
 		| "persist_succeeded"
 		| "persist_skipped"
 		| "persist_failed"
-		| "worker_fallback";
+		| "worker_fallback"
+		// #936 limit 2: cross-session resumable full build (checkpointing).
+		| "checkpoint_written"
+		| "checkpoint_resumed";
 	cwd: string;
 	reason?: string;
 	durationMs?: number;
@@ -39,6 +42,12 @@ export interface ReviewGraphLogEntry {
 	serializeMs?: number;
 	writeMs?: number;
 	offloaded?: boolean;
+	// #936: checkpoint telemetry (files processed / reused / re-walked / target).
+	processed?: number;
+	reused?: number;
+	stale?: number;
+	remaining?: number;
+	target?: number;
 }
 
 export function logReviewGraph(entry: ReviewGraphLogEntry): void {

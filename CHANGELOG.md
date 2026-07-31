@@ -4,6 +4,27 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **The review-graph full build is now resumable across sessions** (refs #936
+	limit 2) — a cold full build (walk + tree-sitter parse of every source file)
+	previously restarted from scratch every session, so on a large repo with
+	short-lived sessions it could never finish. The extraction loop now
+	periodically checkpoints the PRE-resolution graph plus the exact set of files
+	already folded into it (with content hashes) to a dedicated
+	`review-graph.checkpoint.json.gz`, and a later session resumes from it,
+	re-walking only files that changed/appeared since. The checkpoint lives in
+	its own file (never the authoritative `review-graph.json.gz`) and its
+	hydrated graph carries `persistCoverage.inProgress` on top of `partial`, so
+	no reader (`getCachedReviewGraph`, `loadPersistedGraph`) can ever serve or
+	launder a mid-build checkpoint as a complete graph (honesty doctrine, #533).
+	Resume equivalence to a cold build is guaranteed by `addFileToGraph`'s
+	per-file contribution being order-independent (all cross-file linking is
+	deferred to `resolveDeferredSymbolEdges`): content-changed processed files
+	are evicted and re-walked, orphaned placeholder nodes are pruned, and any
+	removed file, ignored-id-set change, version bump, or git-identity mismatch
+	fails open to a cold build rather than risking a wrong graph. Checkpoint
+	stride/interval are tunable via `PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES` /
+	`PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS`.
+
 - **`pi-lens build-graph` honestly reports a capped, over-the-cap persist**
 	(closes #924, refs #936 limit 3) — the CLI's build-attempt check no longer
 	mistakes the benign "succeeded, but persisted a partial subgraph" reason

@@ -114,6 +114,17 @@ export interface ReviewGraphPersistCoverage {
 	totalEdges: number;
 	persistedNodes: number;
 	persistedEdges: number;
+	/**
+	 * #936 limit 2: set on a graph hydrated from a mid-build RESUME CHECKPOINT —
+	 * a snapshot taken while a full build was still walking files, so its
+	 * nodes/edges cover only the files processed so far AND its cross-file
+	 * `calls`/`references` edges are still unresolved (resolveDeferredSymbolEdges
+	 * has not run). Strictly stronger than `partial`: such a graph is never
+	 * complete AND never query-ready. It exists solely to seed the next session's
+	 * full build (see `loadReviewGraphCheckpoint`); no read accessor ever serves
+	 * it. Always accompanied by `partial: true`.
+	 */
+	inProgress?: true;
 }
 
 export interface ImpactCascadeResult {
