@@ -23,6 +23,52 @@ All notable changes to pi-lens will be documented in this file.
 	(`saveRuntimeProjectSnapshot`, word index, reverse deps) never observe a
 	stale body in the promotion window.
 
+- **The review-graph full build is now resumable across sessions** (refs #936
+	limit 2) — a cold full build (walk + tree-sitter parse of every source file)
+	previously restarted from scratch every session, so on a large repo with
+	short-lived sessions it could never finish. The extraction loop now
+	periodically checkpoints the PRE-resolution graph plus the exact set of files
+	already folded into it (with content hashes) to a dedicated
+	`review-graph.checkpoint.json.gz`, and a later session resumes from it,
+	re-walking only files that changed/appeared since. The checkpoint lives in
+	its own file (never the authoritative `review-graph.json.gz`) and its
+	hydrated graph carries `persistCoverage.inProgress` on top of `partial`, so
+	no reader (`getCachedReviewGraph`, `loadPersistedGraph`) can ever serve or
+	launder a mid-build checkpoint as a complete graph (honesty doctrine, #533).
+	Resume equivalence to a cold build is guaranteed by `addFileToGraph`'s
+	per-file contribution being order-independent (all cross-file linking is
+	deferred to `resolveDeferredSymbolEdges`): content-changed processed files
+	are evicted and re-walked, orphaned placeholder nodes are pruned, and any
+	removed file, ignored-id-set change, version bump, or git-identity mismatch
+	fails open to a cold build rather than risking a wrong graph. Checkpoint
+	stride/interval are tunable via `PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES` /
+	`PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS`.
+
+- **Stabilized the two remaining flaky/environment-sensitive tests tracked in
+	#902.** LSP workspace-diagnostics sweep flush-count assertions
+	(`workspace-diagnostics-sweep-batch-open.test.ts`,
+	`workspace-diagnostics-sweep-preopen-chunk.test.ts`) pinned an exact flush
+	count, but the pre-open pass's real `fs.promises.readFile` genuinely races
+	the real 100ms `WatchedFilesQueue` debounce timer — under full-suite
+	scheduler contention that can legitimately fragment or merge a chunk's
+	flush by one. Replaced the exact-count assertions with invariant checks
+	(coalescing happened; nowhere near one flush per file; no lost/duplicated
+	URIs) that tolerate that jitter without losing the #608/#621 regression
+	coverage — a test-robustness fix, not a product bug. Separately, two
+	ast-grep dispatch test harnesses
+	(`ast-grep-rule-tests.test.ts`, `ast-grep-catalog-rules.test.ts`) shelled
+	out to the real `ast-grep` CLI via a raw `execFileSync(..., { shell: true
+	})` per call — an uncached cmd.exe wrapper on Windows whose own exit code
+	can mask the real child's and which can intermittently fail to spawn at
+	all under the process-creation pressure of a full parallel test run.
+	Switched both to the already-hardened `safeSpawn` (`clients/safe-spawn.ts`,
+	#817) — cached PATH+PATHEXT resolution, direct `.exe`/`.com` spawn with no
+	shell involved — the same deterministic resolution production dispatch
+	already relies on. The third tracked item
+	(`startup-overhead.test.ts`'s "quick mode self-reports within 100ms")
+	was already reworked to a generous fixed budget + `retry: 2` in an earlier
+	pass; confirmed still adequate, no further change needed.
+
 - **`pi-lens build-graph` honestly reports a capped, over-the-cap persist**
 	(closes #924, refs #936 limit 3) — the CLI's build-attempt check no longer
 	mistakes the benign "succeeded, but persisted a partial subgraph" reason
