@@ -41,7 +41,9 @@ import {
 	getProjectSnapshotPath,
 	hydrateRuntimeFromProjectSnapshot,
 	isProjectSnapshotFresh,
+	isProjectSnapshotMetaStale,
 	loadProjectSnapshot,
+	readProjectSnapshotMeta,
 	saveRuntimeProjectSnapshot,
 	type ProjectSnapshot,
 } from "./project-snapshot.js";
@@ -131,6 +133,36 @@ function resolveSnapshotRoot(cwd: string): string {
 		return resolvedCwd;
 	}
 	return nearest;
+}
+
+/**
+ * #947: meta-first staleness gate. Both interactive paths used to sync-parse
+ * the whole `project-snapshot.json` body (110-130ms at 40MB, ~0.5s at the
+ * observed 112MB) BEFORE checking freshness — wasted work in the 71% of
+ * sessions where the snapshot turns out stale. Read the tiny meta sidecar
+ * (`project-snapshot.meta.json`, written on every save) first; when it says
+ * stale (seq or version mismatch — the exact fields `isProjectSnapshotFresh`
+ * checks), skip the body parse entirely. Callers already tolerate a missing
+ * snapshot (fail-open contract). A missing meta file (legacy install, or a
+ * snapshot written before the sidecar existed) falls through to parsing the
+ * body exactly as before.
+ */
+function loadSnapshotBodyUnlessStale(args: {
+	root: string;
+	currentProjectSeq: number;
+	dbg: (msg: string) => void;
+}): { snapshot: ProjectSnapshot | null; skippedStale: boolean } {
+	const meta = readProjectSnapshotMeta(args.root);
+	if (meta && isProjectSnapshotMetaStale(meta, args.currentProjectSeq)) {
+		args.dbg(
+			`project_snapshot: meta gate stale (metaSeq=${meta.seq} metaVersion=${meta.version} current=${args.currentProjectSeq}) — skipping body parse`,
+		);
+		return { snapshot: null, skippedStale: true };
+	}
+	return {
+		snapshot: loadProjectSnapshot(args.root),
+		skippedStale: false,
+	};
 }
 
 function describeSnapshotMiss(
@@ -1301,6 +1333,65 @@ export async function handleSessionStart(
 						startedAt: new Date(wordIndexStartedAt).toISOString(),
 						durationMs: Date.now() - wordIndexStartedAt,
 					});
+					// #947: fold the dominant-language LSP pre-warm into this
+					// warmup pass. The first-session-of-process heuristic forces
+					// quick mode, and the pre-warm below is gated on
+					// allowBootstrapTasks (full mode only) — so it NEVER ran in
+					// practice and every session's first edit paid a cold LSP
+					// spawn (~750ms wait + ~2.5s spawn, measured). Fire it here
+					// instead: off the interactive path, once per process (the
+					// __piLensWarmupScheduled guard above), generation-guarded
+					// inside igniteDominantLanguageWarm, and honoring the same
+					// skips as the full-mode path — subagent light mode (#449),
+					// warm-attach (#822), the no-lsp flag, and the
+					// canWarmCaches guard (the early return above). Concurrent
+					// secondaries never reach handleSessionStart at all (the
+					// #473 guard in index.ts), so they never schedule this
+					// warmup in the first place.
+					const lspPrewarmStartedAt = Date.now();
+					if (deps.getFlag("no-lsp")) {
+						warmupDbg("warmup: skipping LSP pre-warm (no-lsp)");
+					} else if (isSubagentSession()) {
+						warmupDbg("warmup: skipping LSP pre-warm (subagent session)");
+					} else if (isWarmAttached()) {
+						warmupDbg(
+							"warmup: skipping LSP pre-warm (attached to incumbent)",
+						);
+					} else {
+						// #957 review: honor explicit warmFiles (#203) like the full
+						// path does — configured projects warm exactly what they
+						// asked for; dominant-language warm is the fallback.
+						const lspConfig = await loadLSPConfig(warmupCwd).catch(
+							() => ({ warmFiles: [] as string[] }),
+						);
+						const warmFiles = lspConfig.warmFiles ?? [];
+						if (warmFiles.length > 0) {
+							await igniteWarmFiles(
+								warmupCwd,
+								warmFiles,
+								deps.runtime,
+								deps.runtime.sessionGeneration,
+								warmupDbg,
+							);
+						} else {
+							await igniteDominantLanguageWarm(
+								languageRoot,
+								deps.runtime,
+								deps.runtime.sessionGeneration,
+								warmupDbg,
+							);
+						}
+						logLatency({
+							type: "phase",
+							phase: "warmup_lsp_prewarm",
+							filePath: warmupCwd,
+							startedAt: new Date(lspPrewarmStartedAt).toISOString(),
+							durationMs: Date.now() - lspPrewarmStartedAt,
+						});
+						warmupDbg(
+							`warmup: lsp-prewarm done in ${Date.now() - lspPrewarmStartedAt}ms`,
+						);
+					}
 					warmupDbg(`warmup: total ${Date.now() - warmupStartedAt}ms`);
 				} catch (err) {
 					warmupDbg(`warmup: error ${err}`);
@@ -1429,7 +1520,12 @@ export async function handleSessionStart(
 		} catch {
 			// Missing snapshots are the normal cold-start case.
 		}
-		const snapshot = loadProjectSnapshot(snapshotRoot);
+		const snapshotGate = loadSnapshotBodyUnlessStale({
+			root: snapshotRoot,
+			currentProjectSeq: effectiveSeq,
+			dbg,
+		});
+		const snapshot = snapshotGate.snapshot;
 		const snapshotFresh = isProjectSnapshotFresh(snapshot, effectiveSeq);
 		logLatency({
 			type: "phase",
@@ -1441,6 +1537,7 @@ export async function handleSessionStart(
 				bytes: snapshotBytes,
 				fresh: snapshotFresh,
 				seq: snapshot?.seq ?? null,
+				...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
 			},
 		});
 		logProjectSnapshotProbe({
@@ -1515,7 +1612,12 @@ export async function handleSessionStart(
 	} catch {
 		// Missing snapshots are the normal cold-start case.
 	}
-	const snapshot = loadProjectSnapshot(snapshotRoot);
+	const snapshotGate = loadSnapshotBodyUnlessStale({
+		root: snapshotRoot,
+		currentProjectSeq: effectiveSeq,
+		dbg,
+	});
+	const snapshot = snapshotGate.snapshot;
 	const snapshotFresh = isProjectSnapshotFresh(snapshot, effectiveSeq);
 	logLatency({
 		type: "phase",
@@ -1527,6 +1629,7 @@ export async function handleSessionStart(
 			bytes: snapshotBytes,
 			fresh: snapshotFresh,
 			seq: snapshot?.seq ?? null,
+			...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
 		},
 	});
 	logProjectSnapshotProbe({

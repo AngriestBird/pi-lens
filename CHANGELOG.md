@@ -11,6 +11,23 @@ All notable changes to pi-lens will be documented in this file.
 	stale, failed, absent, and cold one-shot paths parse normally. The handoff
 	retains neither source content nor WASM trees, and cancelled scans expose
 	only files completed before cancellation.
+- **Session-start performance: LSP pre-warm, snapshot meta-gate, compact cached snapshot** (refs #947) — three
+	measured startup wins: (1) the dominant-language LSP pre-warm was gated on
+	full startup mode that the first-session heuristic never allows (82 quick
+	vs 0 full starts in 31k dogfood log lines), so it now runs inside the
+	quick-mode +2s background warmup pass — once per process,
+	generation-guarded, honoring subagent light mode, warm-attach, the
+	`no-lsp` flag, and the `canWarmCaches` guard, with a `warmup_lsp_prewarm`
+	phase record; (2) session start no longer sync-parses the whole
+	`project-snapshot.json` body (110-130ms at 40MB, ~0.5s at 112MB) before
+	checking freshness — the tiny `project-snapshot.meta.json` sidecar is read
+	first and a stale seq/version skips the body parse entirely
+	(`session_start_snapshot_load` records `skippedStale: true`), with
+	missing-meta installs falling back to the legacy parse; (3) the snapshot
+	is serialized compactly (~30% smaller) and its parsed body is cached
+	in-process per (path, mtime), so `saveRuntimeProjectSnapshot` and the
+	session-start/word-index/scan-context consumers no longer re-parse a file
+	pi-lens itself wrote seconds earlier.
 
 - **Session-start latency is attributable end to end** (refs #948) â€” latency
 - **Session-start latency is attributable end to end** (refs #948) — latency
