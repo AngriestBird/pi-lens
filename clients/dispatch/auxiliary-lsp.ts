@@ -99,6 +99,36 @@ export function isNosemgrepSuppressed(
 	);
 }
 
+/**
+ * zizmor's own native inline suppression: `# zizmor: ignore[audit-id[,audit-id]]`
+ * on the finding's own line (https://docs.zizmor.sh/usage/#ignoring-results —
+ * zizmor calls this "inline ignores"). Honoring it here mirrors
+ * `isNosemgrepSuppressed` for Opengrep — a per-finding suppression path a repo
+ * can reach for even without its own `zizmor.yml` (#971): e.g. a `# zizmor:
+ * ignore[artipacked]` on a checkout-only job's `actions/checkout` step, or
+ * `# zizmor: ignore[adhoc-packages]` on a `npm pack` tarball's local install
+ * line, both cases the audit has no way to tell "checkout-only, no artifact
+ * upload" or "this is testing our own just-built tarball" apart from a
+ * remote-package install without this local, human-authored signal.
+ */
+const ZIZMOR_IGNORE_RE = /#\s*zizmor:\s*ignore\[([^\]]+)\]/i;
+export function isZizmorIgnoreSuppressed(
+	d: LSPDiagnostic,
+	content: string,
+): boolean {
+	const startLine = d.range?.start?.line; // 0-based
+	if (startLine == null) return false;
+	const line = content.split("\n")[startLine];
+	if (!line) return false;
+	const match = ZIZMOR_IGNORE_RE.exec(line);
+	if (!match) return false;
+	const ruleId = String(d.code ?? "").toLowerCase();
+	return match[1]
+		.split(",")
+		.map((s) => s.trim().toLowerCase())
+		.includes(ruleId);
+}
+
 // #277 R7: every profile below used this exact same rule (ERROR-severity
 // findings block only when the workspace opted into curated/authored rules;
 // everything else stays advisory) — shared here instead of copy-pasted per
@@ -166,6 +196,11 @@ export const AUXILIARY_LSP_PROFILES: readonly AuxiliaryLspProfile[] = [
 		semantic: blockOnErrorWhenAllowed,
 		defectClass: (d) =>
 			classifyDefect(String(d.code ?? ""), "zizmor", d.message ?? ""),
+		// Honor zizmor's own native per-finding suppression (#971) — a documented
+		// escape hatch for a workflow-context judgment call the audit itself has no
+		// way to make (checkout-only vs. artifact-uploading job; a locally-built
+		// tarball install vs. an arbitrary remote package).
+		isSuppressed: isZizmorIgnoreSuppressed,
 	},
 	{
 		serverId: "typos",
