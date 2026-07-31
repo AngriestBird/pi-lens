@@ -21,7 +21,7 @@ import * as path from "node:path";
 import { FactStore } from "./dispatch/fact-store.js";
 import { getProjectDataDir } from "./file-utils.js";
 import { collectUntrackedIgnoredIds } from "./git-tracked-ignore.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { normalizeMapKey, toProjectRelativePath } from "./path-utils.js";
 import { buildOrUpdateGraph } from "./review-graph/service.js";
 import type { ReviewGraph } from "./review-graph/types.js";
 import { detectFileRole } from "./file-role.js";
@@ -1154,11 +1154,7 @@ export { parseUntrackedIgnoredOutput } from "./git-tracked-ignore.js";
 // sits under the project root, else the absolute (slash-normalized) path.
 // Mirrors module-report.ts's toDisplayPath convention.
 function toDisplayPath(p: string, projectRoot: string): string {
-	if (!path.isAbsolute(p)) return p.replace(/\\/g, "/");
-	const rel = path.relative(projectRoot, p);
-	return rel && !rel.startsWith("..")
-		? rel.replace(/\\/g, "/")
-		: p.replace(/\\/g, "/");
+	return toProjectRelativePath(p, projectRoot);
 }
 
 /**
