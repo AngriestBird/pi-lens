@@ -25,6 +25,31 @@ All notable changes to pi-lens will be documented in this file.
 	stride/interval are tunable via `PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES` /
 	`PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS`.
 
+- **Stabilized the two remaining flaky/environment-sensitive tests tracked in
+	#902.** LSP workspace-diagnostics sweep flush-count assertions
+	(`workspace-diagnostics-sweep-batch-open.test.ts`,
+	`workspace-diagnostics-sweep-preopen-chunk.test.ts`) pinned an exact flush
+	count, but the pre-open pass's real `fs.promises.readFile` genuinely races
+	the real 100ms `WatchedFilesQueue` debounce timer — under full-suite
+	scheduler contention that can legitimately fragment or merge a chunk's
+	flush by one. Replaced the exact-count assertions with invariant checks
+	(coalescing happened; nowhere near one flush per file; no lost/duplicated
+	URIs) that tolerate that jitter without losing the #608/#621 regression
+	coverage — a test-robustness fix, not a product bug. Separately, two
+	ast-grep dispatch test harnesses
+	(`ast-grep-rule-tests.test.ts`, `ast-grep-catalog-rules.test.ts`) shelled
+	out to the real `ast-grep` CLI via a raw `execFileSync(..., { shell: true
+	})` per call — an uncached cmd.exe wrapper on Windows whose own exit code
+	can mask the real child's and which can intermittently fail to spawn at
+	all under the process-creation pressure of a full parallel test run.
+	Switched both to the already-hardened `safeSpawn` (`clients/safe-spawn.ts`,
+	#817) — cached PATH+PATHEXT resolution, direct `.exe`/`.com` spawn with no
+	shell involved — the same deterministic resolution production dispatch
+	already relies on. The third tracked item
+	(`startup-overhead.test.ts`'s "quick mode self-reports within 100ms")
+	was already reworked to a generous fixed budget + `retry: 2` in an earlier
+	pass; confirmed still adequate, no further change needed.
+
 - **`pi-lens build-graph` honestly reports a capped, over-the-cap persist**
 	(closes #924, refs #936 limit 3) — the CLI's build-attempt check no longer
 	mistakes the benign "succeeded, but persisted a partial subgraph" reason

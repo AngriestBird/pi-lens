@@ -155,10 +155,24 @@ describe("runWorkspaceDiagnostics — batch-open restores #271 coalescing for a 
 		// (slow, 150ms) `waitForDiagnostics` wait standing alone against just
 		// f0.ts — well past the 100ms debounce window on its own, so it closes
 		// out its own flush before the pre-open pass's first chunk even starts
-		// enqueuing. +1 flush total (3), still nowhere near one flush per file
-		// (12) — the #608 regression this test guards against.
-		expect(flushCount).toBe(3);
-		expect(notifiedUriCount).toBe(fileNames.length);
+		// enqueuing. That predicts 3 flushes total (2 chunks + 1 warm-up),
+		// still nowhere near one flush per file (12) — the #608 regression
+		// this test guards against.
+		//
+		// The EXACT count is not pinned, though: `preOpenGroupFiles` (product
+		// code) does a real `await nodeFs.promises.readFile` per file ahead of
+		// each `notify.open`, racing the real 100ms debounce timer. Under
+		// scheduler contention (full test-suite parallelism) that real I/O can
+		// occasionally spread a single chunk's opens fractionally past the
+		// window (one extra flush) — legitimate scheduling variance, not a
+		// product bug (#902). So assert the invariant this test actually
+		// guards — coalescing happened (not one flush for the whole sweep,
+		// and nowhere near one per file) — with headroom for that jitter,
+		// rather than the single exact number.
+		expect(flushCount).toBeGreaterThan(1);
+		expect(flushCount).toBeLessThanOrEqual(5); // 3 expected + jitter headroom
+		expect(flushCount).toBeLessThan(fileNames.length); // never one-per-file (#608)
+		expect(notifiedUriCount).toBe(fileNames.length); // no lost/duplicated URIs
 	}, 10_000);
 });
 
