@@ -35,11 +35,13 @@ import {
 import {
 	analyzeFile,
 	analyzeFileFresh,
+	canRebuildPiLens,
 	createMcpHost,
 	diagnosticStats,
 	ensureLspConfig,
 	ipcPathForCwd,
 	lspStatus,
+	renderLspBrokenStatusLines,
 	type McpAnalyzeResult,
 	moduleReport,
 	projectReport,
@@ -57,6 +59,7 @@ import {
 	scanTruncationNotice,
 	summarizeScan,
 	symbolSearch,
+	treeSitterRuntimeStatus,
 	type WarmAnalyzeRequest,
 } from "../clients/lens-engine.js";
 import { createAstGrepReplaceTool } from "../tools/ast-grep-replace.js";
@@ -164,7 +167,11 @@ function findRepoRoot(start: string): string {
 	return path.resolve(start, "..", "..");
 }
 
-const REPO_ROOT = findRepoRoot(SERVER_DIR);
+// Test-only override lets the stdio smoke exercise the published-package shape
+// without copying the whole compiled server tree under node_modules.
+const REPO_ROOT = process.env.PI_LENS_MCP_REPO_ROOT
+	? path.resolve(process.env.PI_LENS_MCP_REPO_ROOT)
+	: findRepoRoot(SERVER_DIR);
 
 async function ensureReady(cwd: string): Promise<void> {
 	const normalized = path.resolve(cwd);
@@ -467,7 +474,7 @@ function schemaWithCwd(parameters: unknown): Record<string, unknown> {
 	};
 }
 
-const TOOLS = [
+const ALL_TOOLS = [
 	{
 		name: "pilens_analyze",
 		description:
@@ -845,6 +852,12 @@ const TOOLS = [
 		inputSchema: schemaWithCwd(lspDiagnosticsTool.parameters),
 	},
 ];
+// #920: published packages cannot rebuild themselves safely because their
+// build config is intentionally not shipped. Do not advertise the destructive
+// capability to clients/subagent allowlists; callTool retains its own guard.
+const TOOLS = canRebuildPiLens(REPO_ROOT)
+	? ALL_TOOLS
+	: ALL_TOOLS.filter((tool) => tool.name !== "pilens_rebuild");
 
 function formatAnalyze(
 	result: McpAnalyzeResult,
@@ -930,6 +943,16 @@ async function callTool(
 
 	if (name === "pilens_rebuild") {
 		const outcome = await runRebuild(REPO_ROOT, REBUILD_SCRIPT);
+		if (!outcome.packageManager) {
+			return {
+				...toolText(outcome.output, {
+					ok: false,
+					script: outcome.script,
+					repoRoot: REPO_ROOT,
+				}),
+				isError: true,
+			};
+		}
 		const runCmd = `${outcome.packageManager} run ${outcome.script}`;
 		const headline = outcome.ok
 			? `✓ rebuild succeeded (${runCmd}, ${outcome.durationMs}ms). Fresh analyses now reflect the latest build.`
@@ -991,6 +1014,9 @@ async function callTool(
 			topFiles,
 			sample: deduped.slice(0, 40),
 			...(snapshot.scanTruncated ? { scanTruncated: true } : {}),
+			...(snapshot.treeSitterStatus
+				? { treeSitterStatus: snapshot.treeSitterStatus }
+				: {}),
 		});
 	}
 
@@ -1006,7 +1032,14 @@ async function callTool(
 			? args.paths.filter((p): p is string => typeof p === "string")
 			: undefined;
 		const lang = typeof args.lang === "string" ? args.lang : undefined;
-		const { available, results, hint, snapshotGeneratedAt } = await symbolSearch(
+		const {
+			available,
+			results,
+			hint,
+			unavailableReason,
+			coverage,
+			snapshotGeneratedAt,
+		} = await symbolSearch(
 			query,
 			cwd,
 			limit,
@@ -1015,18 +1048,23 @@ async function callTool(
 		if (!available) {
 			return toolText(
 				hint ?? "No word index for this workspace yet — run pilens_session_start first.",
-				{ available: false, query, hint },
+				{ available: false, query, hint, unavailableReason },
 				true,
 			);
 		}
 		const stalenessNote = graphStalenessNote(snapshotGeneratedAt, "Project snapshot");
 		if (results.length === 0) {
 			return toolText(
-				`No files matched "${query}".` + (stalenessNote ? `\n\n${stalenessNote}` : ""),
+				`No files matched "${query}".` +
+					(coverage
+						? `\nIndex covers ${coverage.files} files${coverage.truncated ? " (capped — results may be incomplete)" : ""}.`
+						: "") +
+					(stalenessNote ? `\n\n${stalenessNote}` : ""),
 				{
 					available: true,
 					query,
 					results: [],
+					coverage,
 					...(stalenessNote ? { staleness: stalenessNote } : {}),
 				},
 				true,
@@ -1041,6 +1079,11 @@ async function callTool(
 					`line ${result.startLine})`,
 			),
 			...(stalenessNote ? ["", stalenessNote] : []),
+			...(coverage
+				? [
+						`Index covers ${coverage.files} files${coverage.truncated ? " (capped — results may be incomplete)" : ""}.`,
+					]
+				: []),
 		];
 		// Compact (unindented) JSON — matches the module_report / read_symbol
 		// convention (#517): an agent parses this payload, it doesn't read it
@@ -1050,6 +1093,7 @@ async function callTool(
 			lines.join("\n"),
 			{
 				query,
+				coverage,
 				results: results.map((result) => {
 					const relFile = path.relative(cwd, result.file);
 					return {
@@ -1266,19 +1310,24 @@ async function callTool(
 	}
 
 	if (name === "pilens_health") {
-		const { aliveClients, servers } = lspStatus();
+		const { aliveClients, servers, brokenServers } = lspStatus();
 		const last = recentLatency(1)[0];
 		const stats = diagnosticStats();
 		const autoSession = getAutoSessionStatus();
+		const treeSitter = treeSitterRuntimeStatus();
 		// #620: best-effort — a footprint read failure must never break the rest
 		// of pilens_health's (much older, more load-bearing) reporting.
 		const footprint = await resourceFootprint().catch(() => null);
 		const lines = [
+			treeSitter.wasmAborted
+				? `Tree-sitter: DEGRADED — WASM runtime aborted${treeSitter.abortedAt ? ` at ${treeSitter.abortedAt}` : ""}; restart this server to recover`
+				: "Tree-sitter: available",
 			`LSP: ${aliveClients} alive client(s)`,
 			...servers.map(
 				(server) =>
 					`  ${server.connected ? "✓" : "✗"} ${server.serverId} (${server.root})`,
 			),
+			...renderLspBrokenStatusLines(brokenServers),
 			last
 				? `Last dispatch: ${path.basename(last.filePath)} — ${last.totalDurationMs}ms, ${last.totalDiagnostics} diagnostic(s)`
 				: "Last dispatch: none yet",
@@ -1296,6 +1345,7 @@ async function callTool(
 		return toolText(lines.join("\n"), {
 			aliveClients,
 			servers,
+			brokenServers,
 			lastDispatch: last
 				? {
 						filePath: last.filePath,
@@ -1309,6 +1359,7 @@ async function callTool(
 				unresolved: stats.totalUnresolved,
 			},
 			autoSession,
+			treeSitter,
 			resourceFootprint: footprint,
 		});
 	}

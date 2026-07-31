@@ -507,6 +507,58 @@ describe("lens_diagnostics mode=full", () => {
 		});
 	});
 
+	it("uses an event-captured repaint when a server becomes ready mid-sweep (#798/#338)", async () => {
+		const repaint = vi.fn();
+		const capture = vi.fn(() => repaint);
+		let releaseSweep!: () => void;
+		const sweepReleased = new Promise<void>((resolve) => {
+			releaseSweep = resolve;
+		});
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn(
+				async (
+					_cwd: string,
+					options: { onServerReady?: () => void },
+				) => {
+					await sweepReleased;
+					options.onServerReady?.();
+					return [];
+				},
+			),
+		};
+		const tool = createLensDiagnosticsTool(
+			makeCacheManager({}) as any,
+			() => "/proj",
+			() => lspService as any,
+			async () => {},
+			undefined,
+			capture,
+		);
+		let sessionActive = true;
+		const ctx = {
+			cwd: "/proj",
+			get ui() {
+				if (!sessionActive) throw new Error("stale session context");
+				return {};
+			},
+		};
+
+		const execution = tool.execute(
+			"1",
+			{ mode: "full" },
+			undefined,
+			null,
+			ctx,
+		);
+		await vi.waitFor(() => expect(capture).toHaveBeenCalledWith(ctx));
+		sessionActive = false;
+		releaseSweep();
+		await expect(execution).resolves.toBeDefined();
+
+		expect(repaint).toHaveBeenCalledOnce();
+		expect(capture).toHaveBeenCalledOnce();
+	});
+
 	it("reconciles a confirmed per-file LSP result into the footer via reconcileScanDiagnostics (#571)", async () => {
 		const lspService = {
 			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
@@ -1121,6 +1173,31 @@ describe("lens_diagnostics mode=full", () => {
 		expect(
 			(result.details as { coldRunners?: string[] }).coldRunners,
 		).toContain("knip");
+	});
+
+	it("mode=full renders failed analyzers as unknown, not clean (#925)", async () => {
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: [],
+			cold: [],
+			failed: [{ id: "knip", summary: "knip timed out" }],
+			timings: { knip: 30_000 },
+		});
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cached",
+		});
+		const text = String(result.content[0].text);
+		expect(text).toContain("failed (ran, but no trustworthy result)");
+		expect(text).toContain("knip — knip timed out");
+		expect(text).toContain("NOT a clean verdict");
+		expect(
+			(result.details as { failedAnalyzers?: unknown[] }).failedAnalyzers,
+		).toEqual([{ id: "knip", summary: "knip timed out" }]);
 	});
 
 	it("mode=full without refreshRunners never reports cold extractors (they weren't requested)", async () => {

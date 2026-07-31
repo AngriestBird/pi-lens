@@ -84,6 +84,7 @@ import { knipIssuesToProjectDiagnostics } from "./runner-adapters/knip.js";
 import { circularDepsToProjectDiagnostics } from "./runner-adapters/madge.js";
 import { trivyResultToProjectDiagnostics } from "./runner-adapters/trivy.js";
 import type { ProjectDiagnostic } from "./types.js";
+import type { FailedProjectAnalyzer } from "./extractors.js";
 
 export interface FreshProjectDiagnosticsResult {
 	diagnostics: ProjectDiagnostic[];
@@ -92,6 +93,8 @@ export interface FreshProjectDiagnosticsResult {
 	/** Extractor ids skipped this run (not applicable / tool unavailable, OR
 	 *  aborted before settling — see `abortedIds`). */
 	cold: string[];
+	/** Analyzers that ran but explicitly reported failure. */
+	failed: FailedProjectAnalyzer[];
 	/** Wall-clock ms spent per extractor id that actually ran (join time
 	 *  included when this call joined an already-in-flight scan). */
 	timings: Record<string, number>;
@@ -160,6 +163,7 @@ export async function fetchFreshProjectDiagnostics(
 			diagnostics: [],
 			runners: [],
 			cold: [...ANALYZER_IDS],
+			failed: [],
 			timings: {},
 			unsafeRoot: true,
 		};
@@ -167,6 +171,7 @@ export async function fetchFreshProjectDiagnostics(
 	const diagnostics: ProjectDiagnostic[] = [];
 	const runners: string[] = [];
 	const cold: string[] = [];
+	const failed: FailedProjectAnalyzer[] = [];
 	const timings: Record<string, number> = {};
 	const settledIds = new Set<string>();
 
@@ -176,6 +181,19 @@ export async function fetchFreshProjectDiagnostics(
 			diagnostics.push(...adapted);
 			pushUnique(runners, id);
 		}
+	}
+
+	function recordFailed(
+		id: string,
+		result: { summary?: string } | object,
+	): void {
+		failed.push({
+			id,
+			summary:
+				"summary" in result && typeof result.summary === "string"
+					? result.summary
+					: "analyzer reported an unsuccessful run",
+		});
 	}
 
 	function task(id: string, run: () => Promise<void>): Promise<void> {
@@ -191,6 +209,10 @@ export async function fetchFreshProjectDiagnostics(
 				analysisRoot,
 				getKnipIgnorePatterns(),
 			);
+			if (!result.success) {
+				recordFailed("knip", result);
+				return;
+			}
 			cacheManager.writeCache("knip", result, analysisRoot, {
 				scanDurationMs: Date.now() - startMs,
 			});
@@ -219,6 +241,10 @@ export async function fetchFreshProjectDiagnostics(
 				undefined,
 				isTsProject,
 			);
+			if (!result.success) {
+				recordFailed("jscpd", result);
+				return;
+			}
 			cacheManager.writeCache(scannerKey, result, analysisRoot, {
 				scanDurationMs: Date.now() - startMs,
 			});
@@ -269,6 +295,10 @@ export async function fetchFreshProjectDiagnostics(
 			const result = await clients.gitleaksClient.scan(analysisRoot, {
 				requireSignal: false,
 			});
+			if (!result.success) {
+				recordFailed("gitleaks", result);
+				return;
+			}
 			cacheManager.writeCache("gitleaks", result, analysisRoot, {
 				scanDurationMs: Date.now() - startMs,
 			});
@@ -291,6 +321,10 @@ export async function fetchFreshProjectDiagnostics(
 			}
 			const startMs = Date.now();
 			const result = await clients.govulncheckClient.analyze(analysisRoot);
+			if (!result.success) {
+				recordFailed("govulncheck", result);
+				return;
+			}
 			cacheManager.writeCache("govulncheck", result, analysisRoot, {
 				scanDurationMs: Date.now() - startMs,
 			});
@@ -313,6 +347,10 @@ export async function fetchFreshProjectDiagnostics(
 			}
 			const startMs = Date.now();
 			const result = await clients.trivyClient.scan(analysisRoot);
+			if (!result.success) {
+				recordFailed("trivy", result);
+				return;
+			}
 			cacheManager.writeCache("trivy", result, analysisRoot, {
 				scanDurationMs: Date.now() - startMs,
 			});
@@ -339,6 +377,10 @@ export async function fetchFreshProjectDiagnostics(
 					const cacheKey = `dead-code-${client.id}`;
 					const startMs = Date.now();
 					const result = await client.analyze(analysisRoot);
+					if (!result.success) {
+						recordFailed("dead-code", result);
+						return;
+					}
 					cacheManager.writeCache(cacheKey, result, analysisRoot, {
 						scanDurationMs: Date.now() - startMs,
 					});
@@ -377,8 +419,16 @@ export async function fetchFreshProjectDiagnostics(
 	if (outcome === "aborted") {
 		const abortedIds = ANALYZER_IDS.filter((id) => !settledIds.has(id));
 		for (const id of abortedIds) pushUnique(cold, id);
-		return { diagnostics, runners, cold, timings, aborted: true, abortedIds };
+		return {
+			diagnostics,
+			runners,
+			cold,
+			failed,
+			timings,
+			aborted: true,
+			abortedIds,
+		};
 	}
 
-	return { diagnostics, runners, cold, timings };
+	return { diagnostics, runners, cold, failed, timings };
 }

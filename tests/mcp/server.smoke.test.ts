@@ -7,6 +7,8 @@
  * that is the project's standing build-before-vitest rule.
  */
 
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { McpHarness, repoRoot } from "./harness.js";
@@ -77,6 +79,40 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 		expect(diagnosticsTool?.inputSchema.properties).toHaveProperty("paths");
 	}, 25_000);
 
+	it("does not advertise rebuild from an installed package", async () => {
+		const installedRoot = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-installed-"),
+		);
+		const installedHarness = new McpHarness({
+			env: { PI_LENS_MCP_REPO_ROOT: installedRoot },
+		});
+		try {
+			const listed = await installedHarness.request(20, "tools/list");
+			const tools = (
+				listed.result as { tools: { name: string }[] }
+			).tools.map((tool) => tool.name);
+			expect(tools).not.toContain("pilens_rebuild");
+
+			// Defense in depth: a client that calls the hidden tool directly still
+			// reaches runRebuild's preflight and gets a tool-level error.
+			const called = await installedHarness.request(21, "tools/call", {
+				name: "pilens_rebuild",
+				arguments: {},
+			});
+			const result = called.result as {
+				content: { text: string }[];
+				isError?: boolean;
+			};
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain(
+				"unavailable in an installed pi-lens package",
+			);
+		} finally {
+			installedHarness.dispose();
+			fs.rmSync(installedRoot, { recursive: true, force: true });
+		}
+	}, 25_000);
+
 	it("answers tools/call pilens_health with LSP + dispatch state", async () => {
 		const res = await harness.request(5, "tools/call", {
 			name: "pilens_health",
@@ -87,6 +123,7 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 		};
 		expect(result.content[0].type).toBe("text");
 		expect(result.content[0].text).toContain("LSP:");
+		expect(result.content[0].text).toContain("Tree-sitter: available");
 		// #544: this harness never sets PI_LENS_MCP_AUTO_SESSION, so the health
 		// response must report the feature as off (`null`), distinguishable from
 		// "attempted and failed" — not merely omit the field.
@@ -97,8 +134,14 @@ describe("pi-lens MCP server (stdio smoke)", { retry: 2 }, () => {
 		expect(jsonMatch).toBeTruthy();
 		const payload = JSON.parse(jsonMatch?.[1] ?? "{}") as {
 			autoSession: unknown;
+			treeSitter: unknown;
 		};
 		expect(payload.autoSession).toBeNull();
+		expect(payload.treeSitter).toEqual({
+			available: true,
+			wasmAborted: false,
+			recovery: "not_required",
+		});
 	}, 25_000);
 
 	it("answers tools/call pilens_diagnostics (lens_diagnostics, delta mode)", async () => {

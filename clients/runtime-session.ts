@@ -41,7 +41,9 @@ import {
 	getProjectSnapshotPath,
 	hydrateRuntimeFromProjectSnapshot,
 	isProjectSnapshotFresh,
+	isProjectSnapshotMetaStale,
 	loadProjectSnapshot,
+	readProjectSnapshotMeta,
 	saveRuntimeProjectSnapshot,
 	type ProjectSnapshot,
 } from "./project-snapshot.js";
@@ -74,6 +76,12 @@ import { isWarmAttached } from "./warm-attach.js";
 
 interface SessionStartDeps {
 	ctxCwd?: string;
+	/** Host hook timestamp, so total includes work before this handler is entered. */
+	sessionStartFiredAt?: number;
+	sessionReason?: string;
+	handlerEnteredAt?: number;
+	bootstrapClientsStartedAt?: number;
+	bootstrapClientsDurationMs?: number;
 	getFlag: (name: string) => boolean | string | undefined;
 	notify: (msg: string, level: "info" | "warning" | "error") => void;
 	dbg: (msg: string) => void;
@@ -125,6 +133,36 @@ function resolveSnapshotRoot(cwd: string): string {
 		return resolvedCwd;
 	}
 	return nearest;
+}
+
+/**
+ * #947: meta-first staleness gate. Both interactive paths used to sync-parse
+ * the whole `project-snapshot.json` body (110-130ms at 40MB, ~0.5s at the
+ * observed 112MB) BEFORE checking freshness — wasted work in the 71% of
+ * sessions where the snapshot turns out stale. Read the tiny meta sidecar
+ * (`project-snapshot.meta.json`, written on every save) first; when it says
+ * stale (seq or version mismatch — the exact fields `isProjectSnapshotFresh`
+ * checks), skip the body parse entirely. Callers already tolerate a missing
+ * snapshot (fail-open contract). A missing meta file (legacy install, or a
+ * snapshot written before the sidecar existed) falls through to parsing the
+ * body exactly as before.
+ */
+function loadSnapshotBodyUnlessStale(args: {
+	root: string;
+	currentProjectSeq: number;
+	dbg: (msg: string) => void;
+}): { snapshot: ProjectSnapshot | null; skippedStale: boolean } {
+	const meta = readProjectSnapshotMeta(args.root);
+	if (meta && isProjectSnapshotMetaStale(meta, args.currentProjectSeq)) {
+		args.dbg(
+			`project_snapshot: meta gate stale (metaSeq=${meta.seq} metaVersion=${meta.version} current=${args.currentProjectSeq}) — skipping body parse`,
+		);
+		return { snapshot: null, skippedStale: true };
+	}
+	return {
+		snapshot: loadProjectSnapshot(args.root),
+		skippedStale: false,
+	};
 }
 
 function describeSnapshotMiss(
@@ -435,13 +473,21 @@ async function collectTodoBaselineItems(
 // rebuild and persist. Called from the full-mode background task AND the
 // quick-mode cold-start warmup pass (below) so every startup mode ends up
 // with a queryable index once per session, off the hot path.
+interface WordIndexWarmupResult {
+	mode: "full" | "incremental";
+	refreshed: number;
+	dropped: number;
+	skipped?: number;
+	reused: number;
+}
+
 async function buildOrRefreshWordIndex(args: {
 	runtime: RuntimeCoordinator;
 	sessionGeneration: number;
 	analysisRoot: string;
 	snapshotRoot: string;
 	dbg: (msg: string) => void;
-}): Promise<void> {
+}): Promise<WordIndexWarmupResult | undefined> {
 	const { runtime, sessionGeneration, analysisRoot, snapshotRoot, dbg } = args;
 	if (!runtime.isCurrentSession(sessionGeneration)) return;
 	const startMs = Date.now();
@@ -449,15 +495,40 @@ async function buildOrRefreshWordIndex(args: {
 	const latestSeq = readLatestProjectSequence(snapshotRoot);
 	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
 	const snapshot = loadProjectSnapshot(snapshotRoot);
-	if (isProjectSnapshotFresh(snapshot, effectiveSeq) && snapshot.wordIndex) {
-		const { deserializeWordIndex } = await import("./word-index.js");
+	if (snapshot?.wordIndex) {
+		const { deserializeWordIndex, refreshWordIndexIncrementally } = await import(
+			"./word-index.js"
+		);
 		const index = deserializeWordIndex(snapshot.wordIndex);
 		if (index) {
-			runtime.wordIndex = index;
-			dbg(
-				`session_start word-index: reused fresh snapshot (seq=${effectiveSeq}, ${index.docCount} files, ${Date.now() - startMs}ms)`,
-			);
-			return;
+			try {
+				const result = await refreshWordIndexIncrementally(
+					index,
+					analysisRoot,
+					() => runtime.isCurrentSession(sessionGeneration),
+				);
+				if (!runtime.isCurrentSession(sessionGeneration)) return;
+				runtime.wordIndex = index;
+				// A stale project seq must be advanced even when mtimes prove every
+				// indexed document reusable. Fresh snapshots with no changes avoid
+				// an unnecessary rewrite of the large shared snapshot.
+				if (
+					!isProjectSnapshotFresh(snapshot, effectiveSeq) ||
+					result.refreshed > 0 ||
+					result.dropped > 0 ||
+					snapshot.wordIndex.truncated !== index.truncated
+				) {
+					saveRuntimeProjectSnapshot({ cwd: snapshotRoot, runtime, dbg });
+				}
+				dbg(
+					`session_start word-index: incremental (seq=${effectiveSeq}, refreshed=${result.refreshed}, dropped=${result.dropped}, skipped=${result.skipped}, reused=${result.reused}, ${Date.now() - startMs}ms)`,
+				);
+				return result;
+			} catch (err) {
+				dbg(
+					`session_start word-index: incremental refresh failed; falling back to full rebuild (${err})`,
+				);
+			}
 		}
 	}
 
@@ -478,6 +549,12 @@ async function buildOrRefreshWordIndex(args: {
 		`session_start word-index: rebuilt (absent/stale, seq=${effectiveSeq}) ` +
 			`${runtime.wordIndex.docCount} files, ${runtime.wordIndex.postings.size} tokens (${Date.now() - startMs}ms)`,
 	);
+	return {
+		mode: "full",
+		refreshed: runtime.wordIndex.docCount,
+		dropped: 0,
+		reused: 0,
+	};
 }
 
 // Fire off heavy scans as background tasks — don't block session start.
@@ -639,9 +716,11 @@ function scheduleStartupScans(
 				getKnipIgnorePatterns(),
 			);
 			if (!runtime.isCurrentSession(sessionGeneration)) return;
-			cacheManager.writeCache("knip", knipResult, analysisRoot, {
-				scanDurationMs: Date.now() - startMs,
-			});
+			if (knipResult.success) {
+				cacheManager.writeCache("knip", knipResult, analysisRoot, {
+					scanDurationMs: Date.now() - startMs,
+				});
+			}
 			dbg(`session_start Knip scan done (${Date.now() - startMs}ms)`);
 		}
 	});
@@ -676,9 +755,11 @@ function scheduleStartupScans(
 					isTsProject,
 				);
 				if (!runtime.isCurrentSession(sessionGeneration)) return;
-				cacheManager.writeCache(scannerKey, jscpdResult, analysisRoot, {
-					scanDurationMs: Date.now() - startMs,
-				});
+				if (jscpdResult.success) {
+					cacheManager.writeCache(scannerKey, jscpdResult, analysisRoot, {
+						scanDurationMs: Date.now() - startMs,
+					});
+				}
 				dbg(
 					`session_start jscpd scan done (${Date.now() - startMs}ms, isTsProject=${isTsProject})`,
 				);
@@ -711,9 +792,11 @@ function scheduleStartupScans(
 				const startMs = Date.now();
 				const result = await client.analyze(analysisRoot);
 				if (!runtime.isCurrentSession(sessionGeneration)) return undefined;
-				cacheManager.writeCache(cacheKey, result, analysisRoot, {
-					scanDurationMs: Date.now() - startMs,
-				});
+				if (result.success) {
+					cacheManager.writeCache(cacheKey, result, analysisRoot, {
+						scanDurationMs: Date.now() - startMs,
+					});
+				}
 				logDeadCodeScan({
 					language: client.language,
 					success: result.success,
@@ -762,9 +845,11 @@ function scheduleStartupScans(
 		const startMs = Date.now();
 		const result = await govulncheckClient.analyze(analysisRoot);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
-		cacheManager.writeCache("govulncheck", result, analysisRoot, {
-			scanDurationMs: Date.now() - startMs,
-		});
+		if (result.success) {
+			cacheManager.writeCache("govulncheck", result, analysisRoot, {
+				scanDurationMs: Date.now() - startMs,
+			});
+		}
 		dbg(
 			`session_start govulncheck: ${result.findings.length} reachable findings (${Date.now() - startMs}ms)`,
 		);
@@ -798,9 +883,11 @@ function scheduleStartupScans(
 		const startMs = Date.now();
 		const result = await gitleaksClient.scan(analysisRoot);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
-		cacheManager.writeCache("gitleaks", result, analysisRoot, {
-			scanDurationMs: Date.now() - startMs,
-		});
+		if (result.success) {
+			cacheManager.writeCache("gitleaks", result, analysisRoot, {
+				scanDurationMs: Date.now() - startMs,
+			});
+		}
 		dbg(
 			`session_start gitleaks: ${result.findings.length} findings (${Date.now() - startMs}ms)`,
 		);
@@ -836,9 +923,11 @@ function scheduleStartupScans(
 		const startMs = Date.now();
 		const result = await opengrepClient.scan(analysisRoot);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
-		cacheManager.writeCache("opengrep", result, analysisRoot, {
-			scanDurationMs: Date.now() - startMs,
-		});
+		if (result.success) {
+			cacheManager.writeCache("opengrep", result, analysisRoot, {
+				scanDurationMs: Date.now() - startMs,
+			});
+		}
 		dbg(
 			`session_start opengrep: ${result.findings.length} findings (${Date.now() - startMs}ms)`,
 		);
@@ -904,9 +993,11 @@ function scheduleStartupScans(
 		const startMs = Date.now();
 		const result = await trivyClient.scan(analysisRoot);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
-		cacheManager.writeCache("trivy", result, analysisRoot, {
-			scanDurationMs: Date.now() - startMs,
-		});
+		if (result.success) {
+			cacheManager.writeCache("trivy", result, analysisRoot, {
+				scanDurationMs: Date.now() - startMs,
+			});
+		}
 		dbg(
 			`session_start trivy: ${result.findings.length} CVE findings (${Date.now() - startMs}ms)`,
 		);
@@ -1083,7 +1174,37 @@ export const SESSION_START_GUIDANCE: string[] = [
 export async function handleSessionStart(
 	deps: SessionStartDeps,
 ): Promise<void> {
-	const sessionStartMs = Date.now();
+	const handlerEnteredAt = Date.now();
+	const sessionStartMs = deps.sessionStartFiredAt ?? handlerEnteredAt;
+	const cwdForTelemetry = deps.ctxCwd ?? process.cwd();
+	if (
+		deps.bootstrapClientsStartedAt !== undefined &&
+		deps.bootstrapClientsDurationMs !== undefined
+	) {
+		logLatency({
+			type: "phase",
+			filePath: cwdForTelemetry,
+			phase: "bootstrap_clients_load",
+			startedAt: new Date(deps.bootstrapClientsStartedAt).toISOString(),
+			durationMs: deps.bootstrapClientsDurationMs,
+			metadata: {
+				parent: "session_start_prehandler",
+				reason: deps.sessionReason,
+			},
+		});
+	}
+	if (deps.sessionStartFiredAt !== undefined) {
+		logLatency({
+			type: "phase",
+			filePath: cwdForTelemetry,
+			phase: "session_start_prehandler",
+			startedAt: new Date(deps.sessionStartFiredAt).toISOString(),
+			durationMs:
+				(deps.handlerEnteredAt ?? handlerEnteredAt) -
+				deps.sessionStartFiredAt,
+			metadata: { reason: deps.sessionReason },
+		});
+	}
 	// Cold-start input-latency mitigation. The first `session_start` of
 	// the process — i.e. the one that fires immediately after the user
 	// launches `pi` — must return as fast as possible so the TUI input
@@ -1141,6 +1262,7 @@ export async function handleSessionStart(
 			void (async () => {
 				try {
 					warmupDbg("warmup: starting background warmup");
+					const scanContextStartedAt = Date.now();
 					// Dynamic imports keep the warmup pipeline off the hot
 					// startup path — these modules don't load until the timer
 					// fires, well after the TUI is interactive.
@@ -1172,6 +1294,14 @@ export async function handleSessionStart(
 					} else {
 						scan =
 							await startupScanModule.resolveStartupScanContextAsync(warmupCwd);
+						logLatency({
+							type: "phase",
+							phase: "session_start_scan_context_compute",
+							filePath: warmupCwd,
+							startedAt: new Date(scanContextStartedAt).toISOString(),
+							durationMs: Date.now() - scanContextStartedAt,
+							metadata: { mode: "quick-background" },
+						});
 						warmupDbg(
 							`warmup: scan-context done in ${Date.now() - warmupStartedAt}ms (canWarm=${scan.canWarmCaches})`,
 						);
@@ -1184,6 +1314,13 @@ export async function handleSessionStart(
 							dbg: warmupDbg,
 						});
 					}
+					logLatency({
+						type: "phase",
+						phase: "warmup_scan_context",
+						filePath: warmupCwd,
+						startedAt: new Date(scanContextStartedAt).toISOString(),
+						durationMs: Date.now() - scanContextStartedAt,
+					});
 					// Respect the startup-scan guard (#250): canWarmCaches is false for
 					// home-dir / no-project-root / too-many-source-files. Proceeding into
 					// the language-profile source walk in those cases lets it root at an
@@ -1204,6 +1341,13 @@ export async function handleSessionStart(
 					warmupDbg(
 						`warmup: language-profile done in ${Date.now() - languageProfileStartedAt}ms`,
 					);
+					logLatency({
+						type: "phase",
+						phase: "warmup_language_profile",
+						filePath: warmupCwd,
+						startedAt: new Date(languageProfileStartedAt).toISOString(),
+						durationMs: Date.now() - languageProfileStartedAt,
+					});
 					// #348: fold the word-index build/refresh into this existing
 					// cold-start warmup pass so quick-mode (and any session whose very
 					// first session_start is forced quick) still ends up with a
@@ -1211,7 +1355,7 @@ export async function handleSessionStart(
 					// runTask above; this is the quick-mode equivalent, once per
 					// process, off the hot path.
 					const wordIndexStartedAt = Date.now();
-					await buildOrRefreshWordIndex({
+					const wordIndexResult = await buildOrRefreshWordIndex({
 						runtime: deps.runtime,
 						sessionGeneration: deps.runtime.sessionGeneration,
 						analysisRoot: languageRoot,
@@ -1221,11 +1365,86 @@ export async function handleSessionStart(
 					warmupDbg(
 						`warmup: word-index done in ${Date.now() - wordIndexStartedAt}ms`,
 					);
+					logLatency({
+						type: "phase",
+						phase: "warmup_word_index",
+						filePath: warmupCwd,
+						startedAt: new Date(wordIndexStartedAt).toISOString(),
+						durationMs: Date.now() - wordIndexStartedAt,
+						metadata: wordIndexResult ? { ...wordIndexResult } : undefined,
+					});
+					// #947: fold the dominant-language LSP pre-warm into this
+					// warmup pass. The first-session-of-process heuristic forces
+					// quick mode, and the pre-warm below is gated on
+					// allowBootstrapTasks (full mode only) — so it NEVER ran in
+					// practice and every session's first edit paid a cold LSP
+					// spawn (~750ms wait + ~2.5s spawn, measured). Fire it here
+					// instead: off the interactive path, once per process (the
+					// __piLensWarmupScheduled guard above), generation-guarded
+					// inside igniteDominantLanguageWarm, and honoring the same
+					// skips as the full-mode path — subagent light mode (#449),
+					// warm-attach (#822), the no-lsp flag, and the
+					// canWarmCaches guard (the early return above). Concurrent
+					// secondaries never reach handleSessionStart at all (the
+					// #473 guard in index.ts), so they never schedule this
+					// warmup in the first place.
+					const lspPrewarmStartedAt = Date.now();
+					if (deps.getFlag("no-lsp")) {
+						warmupDbg("warmup: skipping LSP pre-warm (no-lsp)");
+					} else if (isSubagentSession()) {
+						warmupDbg("warmup: skipping LSP pre-warm (subagent session)");
+					} else if (isWarmAttached()) {
+						warmupDbg(
+							"warmup: skipping LSP pre-warm (attached to incumbent)",
+						);
+					} else {
+						// #957 review: honor explicit warmFiles (#203) like the full
+						// path does — configured projects warm exactly what they
+						// asked for; dominant-language warm is the fallback.
+						const lspConfig = await loadLSPConfig(warmupCwd).catch(
+							() => ({ warmFiles: [] as string[] }),
+						);
+						const warmFiles = lspConfig.warmFiles ?? [];
+						if (warmFiles.length > 0) {
+							await igniteWarmFiles(
+								warmupCwd,
+								warmFiles,
+								deps.runtime,
+								deps.runtime.sessionGeneration,
+								warmupDbg,
+							);
+						} else {
+							await igniteDominantLanguageWarm(
+								languageRoot,
+								deps.runtime,
+								deps.runtime.sessionGeneration,
+								warmupDbg,
+							);
+						}
+						logLatency({
+							type: "phase",
+							phase: "warmup_lsp_prewarm",
+							filePath: warmupCwd,
+							startedAt: new Date(lspPrewarmStartedAt).toISOString(),
+							durationMs: Date.now() - lspPrewarmStartedAt,
+						});
+						warmupDbg(
+							`warmup: lsp-prewarm done in ${Date.now() - lspPrewarmStartedAt}ms`,
+						);
+					}
 					warmupDbg(`warmup: total ${Date.now() - warmupStartedAt}ms`);
 				} catch (err) {
 					warmupDbg(`warmup: error ${err}`);
 					// Allow a future session to retry the warmup.
 					processGlobals.__piLensWarmupScheduled = false;
+				} finally {
+					logLatency({
+						type: "phase",
+						phase: "warmup_total",
+						filePath: warmupCwd,
+						startedAt: new Date(warmupStartedAt).toISOString(),
+						durationMs: Date.now() - warmupStartedAt,
+					});
 				}
 			})();
 		}, warmupDelayMs);
@@ -1276,10 +1495,27 @@ export async function handleSessionStart(
 	// drop it each session so a PATH change (e.g. a tool installed mid-session
 	// in a prior session, or a differently-scoped shell) is picked up fresh.
 	resetSafeSpawnWindowsCommandCache();
-	runtime.resetForSession();
+	runtime.resetForSession(sessionStartMs);
+	logLatency({
+		type: "phase",
+		phase: "session_start_runtime_reset",
+		filePath: ctxCwd ?? process.cwd(),
+		startedAt: new Date(handlerEnteredAt).toISOString(),
+		durationMs: Date.now() - handlerEnteredAt,
+		metadata: { mode: startupMode, reason: deps.sessionReason },
+	});
 
 	// Run log cleanup early in session start (non-blocking)
+	const logCleanupStartedAt = Date.now();
 	const logCleanup = runLogCleanup(dbg);
+	logLatency({
+		type: "phase",
+		phase: "session_start_log_cleanup",
+		filePath: ctxCwd ?? process.cwd(),
+		startedAt: new Date(logCleanupStartedAt).toISOString(),
+		durationMs: Date.now() - logCleanupStartedAt,
+		metadata: { mode: startupMode, reason: deps.sessionReason },
+	});
 	if (logCleanup.cleaned > 0 || logCleanup.rotated > 0) {
 		notify(`🧹 ${logCleanup.report}`, "info");
 	}
@@ -1297,8 +1533,17 @@ export async function handleSessionStart(
 	const cwd = ctxCwd ?? process.cwd();
 	if (quickMode) {
 		runtime.projectRoot = cwd;
+		const sequenceReadStartedAt = Date.now();
 		const snapshotRoot = resolveSnapshotRoot(cwd);
 		const latestSeq = readLatestProjectSequence(snapshotRoot);
+		logLatency({
+			type: "phase",
+			phase: "session_start_sequence_read",
+			filePath: cwd,
+			startedAt: new Date(sequenceReadStartedAt).toISOString(),
+			durationMs: Date.now() - sequenceReadStartedAt,
+			metadata: { entries: latestSeq.fileSeqByPath.size },
+		});
 		runtime.seedProjectSequence?.(
 			latestSeq.projectSeq,
 			latestSeq.fileSeqByPath,
@@ -1307,14 +1552,41 @@ export async function handleSessionStart(
 		dbg(
 			`session_start sequence: projectSeq=${effectiveSeq} fileSeqEntries=${latestSeq.fileSeqByPath.size}`,
 		);
-		const snapshot = loadProjectSnapshot(snapshotRoot);
+		const snapshotLoadStartedAt = Date.now();
+		const snapshotPath = getProjectSnapshotPath(snapshotRoot);
+		let snapshotBytes = 0;
+		try {
+			snapshotBytes = nodeFs.statSync(snapshotPath).size;
+		} catch {
+			// Missing snapshots are the normal cold-start case.
+		}
+		const snapshotGate = loadSnapshotBodyUnlessStale({
+			root: snapshotRoot,
+			currentProjectSeq: effectiveSeq,
+			dbg,
+		});
+		const snapshot = snapshotGate.snapshot;
+		const snapshotFresh = isProjectSnapshotFresh(snapshot, effectiveSeq);
+		logLatency({
+			type: "phase",
+			phase: "session_start_snapshot_load",
+			filePath: cwd,
+			startedAt: new Date(snapshotLoadStartedAt).toISOString(),
+			durationMs: Date.now() - snapshotLoadStartedAt,
+			metadata: {
+				bytes: snapshotBytes,
+				fresh: snapshotFresh,
+				seq: snapshot?.seq ?? null,
+				...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
+			},
+		});
 		logProjectSnapshotProbe({
 			dbg,
 			root: snapshotRoot,
 			currentProjectSeq: effectiveSeq,
 			snapshot,
 		});
-		if (isProjectSnapshotFresh(snapshot, effectiveSeq)) {
+		if (snapshotFresh) {
 			hydrateRuntimeFromProjectSnapshot(runtime, snapshot);
 		}
 		const quickTools: string[] = [];
@@ -1328,9 +1600,16 @@ export async function handleSessionStart(
 		dbg(
 			"session_start: quick mode active - skipping slow tool probes, language profiling, preinstall, scans, and error debt baseline",
 		);
-		dbg(
-			`session_start total: ${Date.now() - sessionStartMs}ms (interactive path)`,
-		);
+		const totalDurationMs = Date.now() - sessionStartMs;
+		dbg(`session_start total: ${totalDurationMs}ms (interactive path)`);
+		logLatency({
+			type: "phase",
+			phase: "session_start_total",
+			filePath: cwd,
+			startedAt: new Date(sessionStartMs).toISOString(),
+			durationMs: totalDurationMs,
+			metadata: { mode: startupMode, reason: deps.sessionReason },
+		});
 		return;
 	}
 
@@ -1348,24 +1627,58 @@ export async function handleSessionStart(
 		}
 	}
 
+	const sequenceReadStartedAt = Date.now();
 	const snapshotRoot = resolveSnapshotRoot(cwd);
 	const latestSeq = readLatestProjectSequence(snapshotRoot);
+	logLatency({
+		type: "phase",
+		phase: "session_start_sequence_read",
+		filePath: cwd,
+		startedAt: new Date(sequenceReadStartedAt).toISOString(),
+		durationMs: Date.now() - sequenceReadStartedAt,
+		metadata: { entries: latestSeq.fileSeqByPath.size },
+	});
 	runtime.seedProjectSequence?.(latestSeq.projectSeq, latestSeq.fileSeqByPath);
 	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
 	dbg(
 		`session_start sequence: projectSeq=${effectiveSeq} fileSeqEntries=${latestSeq.fileSeqByPath.size}`,
 	);
 
-	const snapshot = loadProjectSnapshot(snapshotRoot);
+	const snapshotLoadStartedAt = Date.now();
+	const snapshotPath = getProjectSnapshotPath(snapshotRoot);
+	let snapshotBytes = 0;
+	try {
+		snapshotBytes = nodeFs.statSync(snapshotPath).size;
+	} catch {
+		// Missing snapshots are the normal cold-start case.
+	}
+	const snapshotGate = loadSnapshotBodyUnlessStale({
+		root: snapshotRoot,
+		currentProjectSeq: effectiveSeq,
+		dbg,
+	});
+	const snapshot = snapshotGate.snapshot;
+	const snapshotFresh = isProjectSnapshotFresh(snapshot, effectiveSeq);
+	logLatency({
+		type: "phase",
+		phase: "session_start_snapshot_load",
+		filePath: cwd,
+		startedAt: new Date(snapshotLoadStartedAt).toISOString(),
+		durationMs: Date.now() - snapshotLoadStartedAt,
+		metadata: {
+			bytes: snapshotBytes,
+			fresh: snapshotFresh,
+			seq: snapshot?.seq ?? null,
+			...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
+		},
+	});
 	logProjectSnapshotProbe({
 		dbg,
 		root: snapshotRoot,
 		currentProjectSeq: effectiveSeq,
 		snapshot,
 	});
-	const freshSnapshot = isProjectSnapshotFresh(snapshot, effectiveSeq)
-		? snapshot
-		: null;
+	const freshSnapshot = snapshotFresh ? snapshot : null;
 	if (freshSnapshot) {
 		hydrateRuntimeFromProjectSnapshot(runtime, freshSnapshot);
 	}
@@ -1381,9 +1694,21 @@ export async function handleSessionStart(
 			? freshSnapshot.startupScan
 			: undefined;
 	const startupScanSource = cachedStartupScan ? "snapshot" : "computed";
-	const startupScan: StartupScanContext = cachedStartupScan
-		? { ...cachedStartupScan, cwd: path.resolve(cwd) }
-		: resolveStartupScanContext(cwd);
+	let startupScan: StartupScanContext;
+	if (cachedStartupScan) {
+		startupScan = { ...cachedStartupScan, cwd: path.resolve(cwd) };
+	} else {
+		const scanContextStartedAt = Date.now();
+		startupScan = resolveStartupScanContext(cwd);
+		logLatency({
+			type: "phase",
+			phase: "session_start_scan_context_compute",
+			filePath: cwd,
+			startedAt: new Date(scanContextStartedAt).toISOString(),
+			durationMs: Date.now() - scanContextStartedAt,
+			metadata: { mode: startupMode },
+		});
+	}
 	phase("scan-context");
 	dbg(`session_start scan-context source=${startupScanSource}`);
 	const scanRoot = startupScan.projectRoot ?? cwd;
@@ -1653,7 +1978,16 @@ export async function handleSessionStart(
 
 	setSessionLanguages(languageProfile.detectedKinds);
 
+	const totalDurationMs = Date.now() - sessionStartMs;
 	dbg(
-		`session_start total: ${Date.now() - sessionStartMs}ms (interactive path; background tasks may continue)`,
+		`session_start total: ${totalDurationMs}ms (interactive path; background tasks may continue)`,
 	);
+	logLatency({
+		type: "phase",
+		phase: "session_start_total",
+		filePath: cwd,
+		startedAt: new Date(sessionStartMs).toISOString(),
+		durationMs: totalDurationMs,
+		metadata: { mode: startupMode, reason: deps.sessionReason },
+	});
 }

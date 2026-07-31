@@ -35,6 +35,7 @@ function makeCacheManager() {
 function makeClients(
 	overrides: Partial<{
 		knipIssues: unknown[];
+		knipResult: unknown;
 		jscpdAvailable: boolean;
 		jscpdResult: unknown;
 		madgeAvailable: boolean;
@@ -43,15 +44,17 @@ function makeClients(
 ): BootstrapClients {
 	return {
 		knipClient: {
-			analyze: vi.fn().mockResolvedValue({
-				success: true,
-				issues: overrides.knipIssues ?? [],
-				unusedExports: [],
-				unusedFiles: [],
-				unusedDeps: [],
-				unlistedDeps: [],
-				summary: "ok",
-			}),
+			analyze: vi.fn().mockResolvedValue(
+				overrides.knipResult ?? {
+					success: true,
+					issues: overrides.knipIssues ?? [],
+					unusedExports: [],
+					unusedFiles: [],
+					unusedDeps: [],
+					unlistedDeps: [],
+					summary: "ok",
+				},
+			),
 		},
 		jscpdClient: {
 			ensureAvailable: vi
@@ -125,6 +128,30 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		expect(result.runners).toContain("knip");
 		expect(result.diagnostics.length).toBeGreaterThan(0);
 		expect(result.timings.knip).toBeGreaterThanOrEqual(0);
+	});
+
+	it("reports a failed knip run and does not cache it (#925)", async () => {
+		const cacheManager = makeCacheManager();
+		const clients = makeClients({
+			knipResult: {
+				success: false,
+				issues: [],
+				summary: "knip process failed",
+			},
+		});
+
+		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+
+		expect(result.failed).toEqual([
+			{ id: "knip", summary: "knip process failed" },
+		]);
+		expect(result.runners).not.toContain("knip");
+		expect(cacheManager.writeCache).not.toHaveBeenCalledWith(
+			"knip",
+			expect.anything(),
+			expect.anything(),
+			expect.anything(),
+		);
 	});
 
 	// #747: cwd at — or above — $HOME must never spawn a single analyzer; the

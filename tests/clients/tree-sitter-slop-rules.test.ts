@@ -215,7 +215,74 @@ describe("slop detection rules", () => {
 		});
 	});
 
-	describe("unsafe-regex", () => {
+		describe("unsafe-regex", () => {
+		it("is advisory rather than blocking", async () => {
+			const query = await getQuery("unsafe-regex");
+			expect(query.severity).toBe("warning");
+			expect(query.inline_tier).toBe("warning");
+		});
+
+		it("does not flag an escaped identifier initialized through map", async () => {
+			const client = getSharedTreeSitterClient()!;
+			const query = await getQuery("unsafe-regex");
+			const filePath = writeTempFile(
+				"ts",
+				`const alternation = markers.map((m) => escapeRegExp(m).replace(/\\\\s+/g, "\\\\s+")).join("|");
+				const r = new RegExp(\`\\\\b(\${alternation})\\\\b\`, "gi");`,
+			);
+			const matches = await client.runQueryOnFile(query, filePath, "typescript");
+			expect(matches).toHaveLength(0);
+		});
+
+		it("suppresses when the declarator has a type annotation (value field, not positional)", async () => {
+			const client = getSharedTreeSitterClient()!;
+			const query = await getQuery("unsafe-regex");
+			const filePath = writeTempFile(
+				"ts",
+				`const alternation: string = markers.map((m) => escapeRegExp(m)).join("|");
+				const r = new RegExp(\`\b(\${alternation})\b\`, "gi");`,
+			);
+			const matches = await client.runQueryOnFile(query, filePath, "typescript");
+			expect(matches).toHaveLength(0);
+		});
+
+		it("still flags when the identifier is reassigned to user input after escaping", async () => {
+			const client = getSharedTreeSitterClient()!;
+			const query = await getQuery("unsafe-regex");
+			const filePath = writeTempFile(
+				"ts",
+				`let alternation = escapeRegExp(seed);
+				alternation = req.query.q;
+				const r = new RegExp(\`\${alternation}\`, "gi");`,
+			);
+			const matches = await client.runQueryOnFile(query, filePath, "typescript");
+			expect(matches.length).toBeGreaterThan(0);
+		});
+
+		it("still flags when the only same-named safe declaration comes after the use", async () => {
+			const client = getSharedTreeSitterClient()!;
+			const query = await getQuery("unsafe-regex");
+			const filePath = writeTempFile(
+				"ts",
+				`function build(pat: string) { return new RegExp(\`\${pat}\`); }
+				const pat = escapeRegExp(seed);`,
+			);
+			const matches = await client.runQueryOnFile(query, filePath, "typescript");
+			expect(matches.length).toBeGreaterThan(0);
+		});
+
+		it("does not treat a plain string replace as escaping", async () => {
+			const client = getSharedTreeSitterClient()!;
+			const query = await getQuery("unsafe-regex");
+			const filePath = writeTempFile(
+				"ts",
+				`const pat = userInput.replace("a", "b");
+				const r = new RegExp(\`\${pat}\`);`,
+			);
+			const matches = await client.runQueryOnFile(query, filePath, "typescript");
+			expect(matches.length).toBeGreaterThan(0);
+		});
+
 		it("flags new RegExp with plain user-input interpolation", async () => {
 			const client = getSharedTreeSitterClient()!;
 			const query = await getQuery("unsafe-regex");

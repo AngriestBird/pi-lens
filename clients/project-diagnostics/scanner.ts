@@ -14,6 +14,10 @@ import type { Diagnostic } from "../dispatch/types.js";
 import { isTestFile } from "../file-utils.js";
 import { isAtOrAboveHomeDir } from "../path-utils.js";
 import { getProjectDiagnosticsScannerMaxFiles } from "../project-scale.js";
+import { captureReviewGraphStructuralIr } from "../review-graph/builder.js";
+import { publishReviewGraphFileIr,
+	reviewGraphIrContentHash,
+} from "../review-graph/shared-extraction-ir.js";
 import { collectSourceFilesWithBudgetAsync } from "../source-filter.js";
 import {
 	logTreeSitter,
@@ -113,27 +117,25 @@ function fromDispatchDiagnostic(
 	};
 }
 
-interface TreeSitterAndFactScan {
+interface FileMajorScan {
 	treeSitter: ProjectDiagnostic[];
 	factRules: ProjectDiagnostic[];
+	astGrep: ProjectDiagnostic[];
 	filesScanned: number;
 	wasmAborted: boolean;
 }
 
 /**
- * One FILE-major pass for the two runners that both tree-sitter-parse the same
- * file (#675). Run phase-major, the fact rules re-parsed every file the
- * tree-sitter rules had already parsed — a 50-entry cache cannot span a
- * whole-project sweep, so all 357 of a 500-file scan's first touches missed on
- * capacity. Per file the second runner now reads the tree the first one just
- * cached. Results stay in separate lists so the snapshot's diagnostic order is
- * unchanged.
+ * One FILE-major pass for every in-process syntax consumer (#675/#896).
+ * Per-consumer gates preserve their distinct language and size eligibility,
+ * while separate result lists preserve the historical phase-major diagnostic
+ * ordering.
  */
-async function scanTreeSitterAndFactRules(
+async function scanFileMajorRules(
 	cwd: string,
 	files: string[],
 	signal?: AbortSignal,
-): Promise<TreeSitterAndFactScan> {
+): Promise<FileMajorScan> {
 	const client = getSharedTreeSitterClient();
 	const treeSitterReady =
 		!!client && client.isAvailable() && (await client.init());
@@ -147,136 +149,78 @@ async function scanTreeSitterAndFactRules(
 	const pi = { getFlag: () => undefined };
 	const treeSitter: ProjectDiagnostic[] = [];
 	const factRules: ProjectDiagnostic[] = [];
+	const astGrep: ProjectDiagnostic[] = [];
+	const sgModule = await loadSg();
+	let phaseOneFilesScanned = 0;
+	let astGrepFilesScanned = 0;
+	let astGrepDurationMs = 0;
+	// #891: only fully completed files count — a wasm abort mid-file leaves that
+	// file out, so the caller can report a truncated filesScanned honestly.
 	let filesScanned = 0;
-	const wasmAbortedAtStart = isTreeSitterWasmAborted();
-	let wasmAborted = wasmAbortedAtStart;
+	let wasmAborted = isTreeSitterWasmAborted();
 
-	const scan = async (): Promise<void> => {
-		for (const filePath of files) {
-			if (signal?.aborted || isTreeSitterWasmAborted()) {
-				wasmAborted ||= isTreeSitterWasmAborted();
-				break;
+	const scanTreeSitterFile = async (
+		filePath: string,
+		langId: string | undefined,
+		content: string | null,
+	): Promise<void> => {
+		if (!queryMap || !langId || !client || content === null) return;
+		const queries = queriesForLanguage(queryMap, langId);
+		try {
+			const found = await client.runQueriesOnFile(
+				queries,
+				filePath,
+				langId,
+				{ maxResults: 50 },
+				content,
+			);
+			for (const { queryDef: query, match } of found) {
+				treeSitter.push({
+					filePath,
+					line: match.line ?? 1,
+					column: match.column,
+					severity: query.severity === "error" ? "error" : query.severity,
+					semantic:
+						query.inline_tier === "blocking" || query.severity === "error"
+							? "blocking"
+							: "warning",
+					tool: "tree-sitter",
+					runner: "tree-sitter",
+					rule: query.id,
+					message: query.message,
+					source: "project-scan",
+				});
 			}
-			if (isTestFile(filePath)) continue;
-			const ext = path.extname(filePath);
-			const langId = TREE_SITTER_EXT_TO_LANG[ext];
-			const factEligible = FACT_RULE_EXTENSIONS.has(ext);
-			if (!langId && !factEligible) continue;
-
-			if (queryMap && langId && client) {
-				const queries = queriesForLanguage(queryMap, langId);
-				try {
-					// ONE tree walk for the whole rule set, not one per rule (#675).
-					const found = await client.runQueriesOnFile(
-						queries,
-						filePath,
-						langId,
-						{
-							maxResults: 50,
-						},
-					);
-					for (const { queryDef: query, match } of found) {
-						treeSitter.push({
-							filePath,
-							line: match.line ?? 1,
-							column: match.column,
-							severity: query.severity === "error" ? "error" : query.severity,
-							semantic:
-								query.inline_tier === "blocking" || query.severity === "error"
-									? "blocking"
-									: "warning",
-							tool: "tree-sitter",
-							runner: "tree-sitter",
-							rule: query.id,
-							message: query.message,
-							source: "project-scan",
-						});
-					}
-				} catch {
-					// Continue scanning other rules/files.
-				}
-				if (isTreeSitterWasmAborted()) {
-					wasmAborted = true;
-					break;
-				}
-			}
-
-			if (factEligible) {
-				facts.clearFileFactsFor(filePath);
-				const ctx = createDispatchContext(filePath, cwd, pi, facts, false);
-				try {
-					await runProviders(ctx);
-					for (const diagnostic of evaluateRules(ctx)) {
-						factRules.push(fromDispatchDiagnostic(diagnostic, "fact-rules"));
-					}
-				} catch {
-					// Project scans are best-effort; one unparsable file should not abort the tool.
-				}
-				if (isTreeSitterWasmAborted()) {
-					wasmAborted = true;
-					break;
-				}
-			}
-			filesScanned++;
+		} catch {
+			// Continue scanning other rules/files.
 		}
 	};
 
-	if (!client) {
-		await scan();
-		return { treeSitter, factRules, filesScanned, wasmAborted };
-	}
-
-	const startedAt = Date.now();
-	await client.withParseCacheMeasurement(scan, (stats) => {
-		logTreeSitterCacheStats({
-			scope: "project_diagnostics_scan",
-			filePath: cwd,
-			fileCount: filesScanned,
-			durationMs: Date.now() - startedAt,
-			stats,
-		});
-	});
-	return { treeSitter, factRules, filesScanned, wasmAborted };
-}
-
-/**
- * Project-wide ast-grep pass via the bundled napi engine — no `ast-grep` binary
- * required (#308). In `lens_diagnostics mode=full` the ast-grep LSP already
- * covers the project WHEN its binary is present; this closes the no-binary gap
- * using the same Rust core + shipped ruleset. Findings dedup against the LSP's
- * (`filePath:line:rule`) in the full-mode merge, so running both never
- * double-reports. Iterates the SAME `files` list as the other scanners, so it
- * inherits identical exclusion/ignore/cap behavior automatically.
- */
-async function scanAstGrepNapi(
-	cwd: string,
-	files: string[],
-): Promise<ProjectDiagnostic[]> {
-	const sgModule = await loadSg();
-	if (!sgModule) return [];
-
-	const diagnostics: ProjectDiagnostic[] = [];
-	for (const filePath of files) {
-		if (isTestFile(filePath) || !astGrepCanHandle(filePath)) continue;
-
-		let stats: fs.Stats;
+	const scanFactRulesFile = async (
+		filePath: string,
+		content: string | null,
+	): Promise<void> => {
+		facts.clearFileFactsFor(filePath);
+		// Seed the exact bytes already supplied to tree-sitter so the file-content
+		// provider is skipped by runProviders.
+		facts.setFileFact(filePath, "file.content", content);
+		const ctx = createDispatchContext(filePath, cwd, pi, facts, false);
 		try {
-			stats = fs.statSync(filePath);
+			await runProviders(ctx);
+			for (const diagnostic of evaluateRules(ctx)) {
+				factRules.push(fromDispatchDiagnostic(diagnostic, "fact-rules"));
+			}
 		} catch {
-			continue;
+			// Project scans are best-effort; one unparsable file should not abort the tool.
 		}
-		if (stats.size > AST_GREP_MAX_FILE_BYTES) continue;
+	};
 
-		const lang = astGrepGetLang(filePath, sgModule);
-		if (!lang) continue;
-
-		let content: string;
-		try {
-			content = fs.readFileSync(filePath, "utf-8");
-		} catch {
-			continue;
-		}
-
+	const scanAstGrepFile = (
+		filePath: string,
+		content: string,
+		lang: NonNullable<ReturnType<typeof astGrepGetLang>>,
+	): void => {
+		const startedAt = Date.now();
 		try {
 			const rootNode = lang.parse(content).root();
 			const fileDiagnostics = evaluateAstGrepRules(
@@ -290,13 +234,149 @@ async function scanAstGrepNapi(
 				},
 			);
 			for (const diagnostic of fileDiagnostics) {
-				diagnostics.push(fromDispatchDiagnostic(diagnostic, "ast-grep-napi"));
+				astGrep.push(fromDispatchDiagnostic(diagnostic, "ast-grep-napi"));
 			}
 		} catch {
 			// Project scans are best-effort; one unparsable file must not abort the tool.
+		} finally {
+			astGrepFilesScanned++;
+			astGrepDurationMs += Date.now() - startedAt;
 		}
+	};
+
+	const scan = async (): Promise<void> => {
+		for (const filePath of files) {
+			// #891: a wasm-level abort poisons the shared parser for the rest of the
+			// process — stop the whole pass, don't keep feeding it files.
+			if (signal?.aborted || isTreeSitterWasmAborted()) {
+				wasmAborted ||= isTreeSitterWasmAborted();
+				break;
+			}
+			if (isTestFile(filePath)) continue;
+			const ext = path.extname(filePath);
+			const langId = TREE_SITTER_EXT_TO_LANG[ext];
+			const factEligible = FACT_RULE_EXTENSIONS.has(ext);
+			let astGrepLang: ReturnType<typeof astGrepGetLang> | undefined;
+			if (sgModule && astGrepCanHandle(filePath)) {
+				try {
+					if (fs.statSync(filePath).size <= AST_GREP_MAX_FILE_BYTES) {
+						astGrepLang = astGrepGetLang(filePath, sgModule);
+					}
+				} catch {
+					// A missing file is ineligible for every content consumer below.
+				}
+			}
+			if (!langId && !factEligible && !astGrepLang) continue;
+			if (langId || factEligible) phaseOneFilesScanned++;
+
+			let content: string | null;
+			try {
+				content = fs.readFileSync(filePath, "utf-8");
+			} catch {
+				content = null;
+			}
+
+			try {
+				await scanTreeSitterFile(filePath, langId, content);
+				if (isTreeSitterWasmAborted()) {
+					wasmAborted = true;
+					break;
+				}
+
+				if (factEligible) {
+					await scanFactRulesFile(filePath, content);
+					if (isTreeSitterWasmAborted()) {
+						wasmAborted = true;
+						break;
+					}
+				}
+
+				let graphIr:
+					| Awaited<ReturnType<typeof captureReviewGraphStructuralIr>>
+					| undefined;
+				if (content !== null) {
+					try {
+						graphIr = await captureReviewGraphStructuralIr(
+							filePath,
+							cwd,
+							content,
+							facts,
+						);
+					} catch {
+						graphIr = { complete: false };
+					}
+					if (isTreeSitterWasmAborted()) {
+						wasmAborted = true;
+						break;
+					}
+				}
+
+				if (signal?.aborted) {
+					// The former phase-major scan never started ast-grep after a
+					// phase-one abort. Discard earlier ast-grep work from this merged
+					// pass to preserve that partial-result contract.
+					astGrep.length = 0;
+					break;
+				}
+				if (astGrepLang && content !== null) {
+					scanAstGrepFile(filePath, content, astGrepLang);
+				}
+				if (signal?.aborted) break;
+				if (content !== null && graphIr?.complete && graphIr.structural) {
+					// Publish only consumable entries (the registry also enforces
+					// this) — and hash via the shared contract so producer and
+					// consumer can never diverge (#955 review).
+					publishReviewGraphFileIr(cwd, {
+						filePath,
+						contentHash: reviewGraphIrContentHash(content),
+						...graphIr,
+					});
+				}
+				filesScanned++;
+			} finally {
+				// This store belongs to the scan, and every consumer of this file's
+				// content and derived facts has completed by the end of the iteration.
+				facts.clearFileFactsFor(filePath);
+			}
+		}
+		if (wasmAborted) {
+			// Mirror the phase-major #891 contract: the ast-grep phase never ran
+			// after a wasm abort, so this merged pass discards its buffer too.
+			astGrep.length = 0;
+		}
+	};
+
+	if (!client) {
+		await scan();
+		return { treeSitter, factRules, astGrep, filesScanned, wasmAborted };
 	}
-	return diagnostics;
+
+	const startedAt = Date.now();
+	await client.withParseCacheMeasurement(scan, (stats) => {
+		logTreeSitterCacheStats({
+			scope: "project_diagnostics_scan",
+			filePath: cwd,
+			fileCount: phaseOneFilesScanned,
+			// The merged pass interleaves ast-grep with the phase-one consumers;
+			// subtract its share so this metric stays comparable to the historical
+			// phase-major scans.
+			durationMs: Date.now() - startedAt - astGrepDurationMs,
+			stats,
+		});
+	});
+	await client.withParseCacheMeasurement(
+		async () => {},
+		(stats) => {
+			logTreeSitterCacheStats({
+				scope: "project_diagnostics_ast_grep_scan",
+				filePath: cwd,
+				fileCount: astGrepFilesScanned,
+				durationMs: astGrepDurationMs,
+				stats,
+			});
+		},
+	);
+	return { treeSitter, factRules, astGrep, filesScanned, wasmAborted };
 }
 
 export async function scanProjectDiagnostics(
@@ -337,25 +417,23 @@ export async function scanProjectDiagnostics(
 				maxScanEntries: options.maxScanEntries,
 			});
 	const files = collected.files;
-	// Check cancellation at each phase boundary so a full-mode scan stops
-	// promptly when the agent/user aborts (#341). The per-phase runners are
-	// already file-capped, so phase granularity is enough to bound the work.
+	// Check cancellation before and during the file-major pass so a full-mode
+	// scan stops promptly when the agent/user aborts (#341).
 	const runners: string[] = [];
 	const diagnostics: ProjectDiagnostic[] = [];
 	let wasmAborted = false;
 	let filesScanned = files.length;
 	if (!signal?.aborted) {
-		// Both runners parse the same file, so they share ONE file-major pass
-		// (#675) — the per-file order is what keeps the second one on a cache hit.
-		const scanned = await scanTreeSitterAndFactRules(cwd, files, signal);
+		// All in-process syntax consumers share one file-major pass (#675/#896).
+		const scanned = await scanFileMajorRules(cwd, files, signal);
 		diagnostics.push(...scanned.treeSitter, ...scanned.factRules);
 		runners.push("tree-sitter", "fact-rules");
 		wasmAborted = scanned.wasmAborted;
 		if (wasmAborted) filesScanned = scanned.filesScanned;
-	}
-	if (!signal?.aborted && !wasmAborted) {
-		diagnostics.push(...(await scanAstGrepNapi(cwd, files)));
-		runners.push("ast-grep-napi");
+		if (!signal?.aborted && !wasmAborted) {
+			diagnostics.push(...scanned.astGrep);
+			runners.push("ast-grep-napi");
+		}
 	}
 	const snapshot: ProjectDiagnosticsSnapshot = {
 		version: PROJECT_DIAGNOSTICS_CACHE_VERSION,
@@ -371,6 +449,7 @@ export async function scanProjectDiagnostics(
 	if (collected.entryBudgetExceeded) snapshot.scanTruncated = true;
 	if (wasmAborted) {
 		snapshot.scanTruncated = true;
+		snapshot.treeSitterStatus = "wasm_aborted_restart_required";
 		logTreeSitter({
 			phase: "runner_skip",
 			filePath: cwd,

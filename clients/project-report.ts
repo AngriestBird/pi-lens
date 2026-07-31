@@ -36,7 +36,6 @@
 
 import * as path from "node:path";
 import { normalizeMapKey } from "./path-utils.js";
-import { isAtOrAboveHomeDir } from "./path-utils.js";
 import { loadProjectSnapshot } from "./project-snapshot.js";
 import type { ReviewGraph } from "./review-graph/types.js";
 
@@ -155,6 +154,13 @@ export interface ProjectReport {
 	/** Actionable guidance when `available` is false: a background build was
 	 * kicked off (deduped per cwd), never blocking this call. */
 	hint?: string;
+	/** Most recent background/build attempt, including terminal skip/failure
+	 * reasons so a cold report never masquerades as perpetual progress. */
+	lastBuildAttempt?: {
+		when: string;
+		outcome: "running" | "succeeded" | "skipped" | "failed";
+		reason?: string;
+	};
 	view?: "compact";
 	trust?: ProjectReportTrust;
 	hubs?: ProjectReportHub[];
@@ -679,10 +685,9 @@ export function _resetProjectReportBuildGuardForTests(): void {
 	inFlightGraphBuilds.clear();
 }
 
-function triggerBackgroundGraphBuild(cwd: string): void {
+function triggerBackgroundGraphBuild(cwd: string): boolean {
 	const key = normalizeMapKey(path.resolve(cwd));
-	if (isAtOrAboveHomeDir(key)) return;
-	if (inFlightGraphBuilds.has(key)) return;
+	if (inFlightGraphBuilds.has(key)) return false;
 	inFlightGraphBuilds.add(key);
 	void (async () => {
 		try {
@@ -690,11 +695,12 @@ function triggerBackgroundGraphBuild(cwd: string): void {
 			const { FactStore } = await import("./dispatch/fact-store.js");
 			await buildOrUpdateGraph(key, [], new FactStore());
 		} catch {
-			// Best-effort warmth, not a request the caller is waiting on.
+			// buildOrUpdateGraph records the durable failure and surfaced status.
 		} finally {
 			inFlightGraphBuilds.delete(key);
 		}
 	})();
+	return true;
 }
 
 // --- entry point ---------------------------------------------------------------
@@ -712,9 +718,11 @@ export async function projectReport(
 	const focusTerms = normalizeFocus(options?.focus);
 	const view = options?.view;
 
-	const { getCachedReviewGraph, getReviewGraphSizeSkipVerdict } = await import(
-		"./review-graph/builder.js"
-	);
+	const {
+		getCachedReviewGraph,
+		getReviewGraphSizeSkipVerdict,
+		getLastReviewGraphBuildAttempt,
+	} = await import("./review-graph/builder.js");
 	let graph: ReviewGraph | undefined;
 	try {
 		graph = getCachedReviewGraph(cwd);
@@ -734,21 +742,31 @@ export async function projectReport(
 			sizeSkip = undefined;
 		}
 		if (sizeSkip) {
+			const lastBuildAttempt = getLastReviewGraphBuildAttempt(cwd);
 			return {
 				available: false,
 				hint:
-					`review graph disabled: project has ${sizeSkip.sourceFileCount} files, ` +
-					`cap is ${sizeSkip.maxFileCount} — raise maxProjectFiles in .pi-lens.json ` +
-					"or set PI_LENS_REVIEW_GRAPH_MAX_FILES",
+					`review graph disabled: project has more than ${sizeSkip.maxFileCount} files ` +
+					`(cap ${sizeSkip.maxFileCount}) — raise maxProjectFiles in .pi-lens.json ` +
+					"or set PI_LENS_REVIEW_GRAPH_MAX_FILES; for CI/cron, run " +
+					"npx pi-lens build-graph after configuring the cap",
+				...(lastBuildAttempt ? { lastBuildAttempt } : {}),
 				...(view ? { view } : {}),
 			};
 		}
-		triggerBackgroundGraphBuild(cwd);
+		const previousAttempt = getLastReviewGraphBuildAttempt(cwd);
+		const kickedOff = triggerBackgroundGraphBuild(cwd);
+		const lastBuildAttempt = previousAttempt ?? getLastReviewGraphBuildAttempt(cwd);
 		return {
 			available: false,
 			hint:
-				"No review graph cached for this workspace yet — a build was kicked " +
-				"off in the background; retry this call shortly.",
+				lastBuildAttempt?.outcome === "failed" ||
+				lastBuildAttempt?.outcome === "skipped"
+					? `Review graph unavailable: ${lastBuildAttempt.reason ?? lastBuildAttempt.outcome}. A retry was ${kickedOff ? "started" : "not started"}.`
+					: kickedOff
+						? "No review graph cached for this workspace yet — a build was kicked off in the background; retry this call shortly."
+						: "No review graph cached for this workspace yet — the background build is still running; retry this call shortly.",
+			...(lastBuildAttempt ? { lastBuildAttempt } : {}),
 			...(view ? { view } : {}),
 		};
 	}
@@ -766,9 +784,11 @@ export async function projectReport(
 	const subsystems = computeSubsystems(graph, cwd, limit);
 	const riskHotspots = computeRiskHotspots(graph, degrees, cwd, limit, focusTerms);
 	const deadWeight = computeDeadWeight(graph, degrees, entryPointFiles, cwd, limit);
+	const lastBuildAttempt = getLastReviewGraphBuildAttempt(cwd);
 
 	return {
 		available: true,
+		...(lastBuildAttempt ? { lastBuildAttempt } : {}),
 		...(view ? { view } : {}),
 		trust,
 		hubs,
@@ -795,6 +815,12 @@ export function renderCompactProjectReport(report: ProjectReport): string {
 		return `project_report — unavailable${report.hint ? `: ${report.hint}` : ""}`;
 	}
 	const lines: string[] = [];
+	// #919: an available graph whose persist failed serves this process fine
+	// but leaves the NEXT session cold — compact view must say so, not only
+	// the JSON view.
+	if (report.lastBuildAttempt?.reason) {
+		lines.push(`! build: ${report.lastBuildAttempt.reason}`);
+	}
 	const t = report.trust;
 	if (t) {
 		lines.push(

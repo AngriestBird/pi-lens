@@ -189,6 +189,7 @@ export interface LSPOperationSupport {
 export interface LSPSymbol {
 	name: string;
 	kind: number;
+	containerName?: string;
 	location?: LSPLocation;
 	range?: LSPLocation["range"];
 	selectionRange?: LSPLocation["range"];
@@ -334,6 +335,8 @@ export interface LSPClientInfo {
 	): Promise<LSPSignatureHelp | null>;
 	/** Symbols in a document */
 	documentSymbol(filePath: string): Promise<LSPSymbol[]>;
+	/** Whether this exact document has already been opened on the server. */
+	isDocumentOpen(filePath: string): boolean;
 	/** Workspace-wide symbol search */
 	workspaceSymbol(query: string): Promise<LSPSymbol[]>;
 	/** Available code actions at a range */
@@ -2191,6 +2194,10 @@ export async function createLSPClient(options: {
 				filePath,
 			);
 			return result ?? [];
+		},
+
+		isDocumentOpen(filePath) {
+			return state.openDocuments.has(normalizeMapKey(filePath));
 		},
 
 		async workspaceSymbol(query) {

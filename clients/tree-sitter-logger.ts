@@ -3,11 +3,15 @@ import { isTestMode } from "./env-utils.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import { createNdjsonLogger } from "./ndjson-logger.js";
 import type { TreeSitterParseCacheStats } from "./tree-sitter-client.js";
+import { getMaxLogSizeMB } from "./log-cleanup.js";
 
 const TREE_SITTER_LOG_DIR = getGlobalPiLensDir();
 const TREE_SITTER_LOG_FILE = path.join(TREE_SITTER_LOG_DIR, "tree-sitter.log");
 
-const writer = createNdjsonLogger({ filePath: TREE_SITTER_LOG_FILE });
+const writer = createNdjsonLogger({
+	filePath: TREE_SITTER_LOG_FILE,
+	maxBytes: getMaxLogSizeMB() * 1024 * 1024,
+});
 
 export interface TreeSitterLogEntry {
 	ts?: string;
@@ -16,6 +20,7 @@ export interface TreeSitterLogEntry {
 		| "runner_skip"
 		| "queries_loaded"
 		| "query_error"
+		| "runtime_abort"
 		| "runner_complete"
 		| "entity_diff"
 		| "blast_radius"

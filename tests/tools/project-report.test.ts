@@ -56,6 +56,37 @@ describe("project_report tool", () => {
 		}
 	});
 
+	it("#921: describes a capped graph without fabricating the sentinel as an exact file count", async () => {
+		const env = setupTestEnvironment("pi-lens-projreport-tool-");
+		const previous = process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+		process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = "2";
+		try {
+			createTempFile(env.tmpDir, "a.ts", "export const a = 1;\n");
+			createTempFile(env.tmpDir, "b.ts", "export const b = 2;\n");
+			createTempFile(env.tmpDir, "c.ts", "export const c = 3;\n");
+			await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+
+			const tool = createProjectReportTool(() => env.tmpDir);
+			const result = await tool.execute("1", {}, undefined, null, {
+				cwd: env.tmpDir,
+			});
+
+			expect(result.isError).toBe(true);
+			expect(result.details.hint).toBe(
+				"review graph disabled: project has more than 2 files (cap 2) — " +
+					"raise maxProjectFiles in .pi-lens.json or set " +
+					"PI_LENS_REVIEW_GRAPH_MAX_FILES; for CI/cron, run npx pi-lens " +
+					"build-graph after configuring the cap",
+			);
+			expect(result.details.hint).not.toContain("project has 3 files");
+		} finally {
+			if (previous === undefined)
+				delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+			else process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = previous;
+			env.cleanup();
+		}
+	});
+
 	it("supports view:compact line-oriented rendering", async () => {
 		const env = setupTestEnvironment("pi-lens-projreport-tool-");
 		try {

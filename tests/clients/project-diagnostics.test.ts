@@ -706,6 +706,25 @@ describe("extractCachedProjectDiagnostics (registry)", () => {
 		);
 		expect(cold).not.toContain("jscpd");
 	});
+
+	it("reports an unsuccessful cached analyzer as failed, not clean or cold (#925)", () => {
+		const result = extractCachedProjectDiagnostics(
+			cacheManagerWith({
+				knip: {
+					success: false,
+					issues: [],
+					summary: "knip timed out",
+				},
+			}),
+			tmp,
+		);
+		expect(result.diagnostics).toEqual([]);
+		expect(result.runners).not.toContain("knip");
+		expect(result.cold).not.toContain("knip");
+		expect(result.failed).toEqual([
+			{ id: "knip", summary: "knip timed out" },
+		]);
+	});
 });
 
 describe("scanProjectDiagnostics", () => {
@@ -814,6 +833,45 @@ describe("scanProjectDiagnostics", () => {
 				}),
 			]),
 		);
+	});
+
+	it("preserves phase-major diagnostic ordering in the merged file pass (#896)", async () => {
+		const srcDir = path.join(tmp, "src");
+		fs.mkdirSync(srcDir, { recursive: true });
+		const filePath = path.join(srcDir, "combined.ts");
+		fs.writeFileSync(
+			filePath,
+			[
+				"function inner(value: number) { return value; }",
+				"function wrapper(value: number) {",
+				"  return inner(value);",
+				"}",
+				'function notify() { alert("hi"); }',
+			].join("\n"),
+		);
+
+		const result = await scanProjectDiagnostics({
+			cwd: tmp,
+			tier: "cheap",
+			maxFiles: 10,
+		});
+
+		const factIndex = result.diagnostics.findIndex(
+			(d) => d.filePath === filePath && d.runner === "fact-rules",
+		);
+		const astGrepIndex = result.diagnostics.findIndex(
+			(d) =>
+				d.filePath === filePath &&
+				d.runner === "ast-grep-napi" &&
+				d.rule === "no-alert",
+		);
+		expect(factIndex).toBeGreaterThanOrEqual(0);
+		expect(astGrepIndex).toBeGreaterThan(factIndex);
+		expect(result.runners).toEqual([
+			"tree-sitter",
+			"fact-rules",
+			"ast-grep-napi",
+		]);
 	});
 
 	it("excludes ignored/excluded files from the ast-grep scan (#308)", async () => {

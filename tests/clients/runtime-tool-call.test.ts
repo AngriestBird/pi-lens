@@ -12,8 +12,12 @@ import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 // a real LSP client — auto-touch is best-effort/fire-and-forget so a stub
 // touchFile that resolves immediately is enough to observe its call args.
 const touchFileMock = vi.fn().mockResolvedValue(undefined);
+const getWarmClientForFileMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("../../clients/lsp/index.js", () => ({
-	getLSPService: () => ({ touchFile: touchFileMock }),
+	getLSPService: () => ({
+		touchFile: touchFileMock,
+		getWarmClientForFile: getWarmClientForFileMock,
+	}),
 	resetLSPService: () => {},
 }));
 

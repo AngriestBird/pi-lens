@@ -162,7 +162,7 @@ export function getProjectDiagnosticsScannerMaxFiles(cwd?: string): number {
  *
  * {@link REVIEW_GRAPH_HARD_CEILING} (5,000) is grounded FIRST by the
  * strongest real constraint on this number — `review-graph/builder.ts`'s
- * persist circuit-breaker (`GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT`, 200,000
+ * persist circuit-breaker (`GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT`, 500,000
  * graph elements: file/symbol nodes + cross-file edges). Above that element
  * count the graph is NEVER persisted to disk (logged + skipped, #260's OOM
  * guard) — not "slow", but PERMANENTLY uncached, so every session pays a
@@ -170,11 +170,10 @@ export function getProjectDiagnosticsScannerMaxFiles(cwd?: string): number {
  * timing note below) engaging exactly once. For symbol-dense repos, element
  * count runs on the order of ~30/file (file node + per-symbol nodes +
  * import/call/reference edges), so a hard ceiling must leave real headroom
- * below 200,000 elements, not creep up to it: 5,000 files x ~30 ⇒ ~150,000
- * elements, a ~25% margin. The earlier 6,000-file candidate (~180,000
- * elements) left too little margin — a slightly denser-than-average repo at
- * exactly the ceiling could tip over and silently lose persistence forever,
- * the opposite of this issue's "no silent caps" goal. 5,000 is also still
+ * below 500,000 elements. The file ceiling remains conservative because it
+ * also bounds cold-build latency; the persist cap has independent measured
+ * headroom through a roughly 420,000-element / 10,000-file graph (#936).
+ * 5,000 is also still
  * coherent with the jscpd/wordIndex 3x-ratio precedent (6,000 at the
  * default base) as "the ceiling sits just below that established top
  * tier" rather than an exact match, so it isn't a fresh unrelated

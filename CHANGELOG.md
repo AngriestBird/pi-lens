@@ -4,12 +4,155 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Session warmup refreshes the word index incrementally** (refs #958) —
+	the persisted serializer now carries per-file mtimes. Startup still performs
+	the bounded source walk, but reuses unchanged postings, re-tokenizes only
+	stale/new files, and drops deleted files; legacy indexes, refresh failures,
+	and file-set churn above 30% fall back to a full rebuild. The current derived
+	file cap and `truncated` state are re-evaluated on every refresh, and
+	`warmup_word_index` telemetry records mode/refreshed/dropped/reused counts.
+
+- **Project scans feed compact structural IR into review-graph builds** (refs
+	#939) — each fully completed scanner file publishes content-hash-bound
+	imports, reexports, function summaries, symbols, and references. A following
+	or overlapping graph build reuses only exact-hash, successful entries;
+	stale, failed, absent, and cold one-shot paths parse normally. The handoff
+	retains neither source content nor WASM trees, and cancelled scans expose
+	only files completed before cancellation.
+- **Session-start performance: LSP pre-warm, snapshot meta-gate, compact cached snapshot** (refs #947) — three
+	measured startup wins: (1) the dominant-language LSP pre-warm was gated on
+	full startup mode that the first-session heuristic never allows (82 quick
+	vs 0 full starts in 31k dogfood log lines), so it now runs inside the
+	quick-mode +2s background warmup pass — once per process,
+	generation-guarded, honoring subagent light mode, warm-attach, the
+	`no-lsp` flag, and the `canWarmCaches` guard, with a `warmup_lsp_prewarm`
+	phase record; (2) session start no longer sync-parses the whole
+	`project-snapshot.json` body (110-130ms at 40MB, ~0.5s at 112MB) before
+	checking freshness — the tiny `project-snapshot.meta.json` sidecar is read
+	first and a stale seq/version skips the body parse entirely
+	(`session_start_snapshot_load` records `skippedStale: true`), with
+	missing-meta installs falling back to the legacy parse; (3) the snapshot
+	is serialized compactly (~30% smaller) and its parsed body is cached
+	in-process per (path, mtime), so `saveRuntimeProjectSnapshot` and the
+	session-start/word-index/scan-context consumers no longer re-parse a file
+	pi-lens itself wrote seconds earlier.
+
+- **Session-start latency is attributable end to end** (refs #948) â€” latency
+- **Session-start latency is attributable end to end** (refs #948) — latency
+	telemetry now separates host boot from pi-lens evaluation and records quick
+	and full session-start totals, pre-handler/bootstrap work, runtime reset,
+	log cleanup, LSP reset, sequence/snapshot reads (including snapshot bytes),
+	and delayed warmup scan/profile/index phases.
+
+- **Warm LSP names enrich tree-sitter read expansion** (refs #158) — partial
+	read expansion keeps tree-sitter's line boundaries authoritative, but an
+	already-open document with an already-active LSP can now replace the display
+	name/kind from `documentSymbol` (including `Class.method` ancestry) within a
+	150 ms best-effort ceiling. Cold, closed, unsupported, timed-out, or failed
+	servers retain the tree-sitter identity, and `ts_range_expanded` records
+	whether enrichment succeeded.
+
+- **Review-graph LSP fallback nodes** (refs #307) — when tree-sitter yields
+	zero declarations, the builder may use `documentSymbol` from an already-live,
+	already-open capable server. Nodes carry `provenance: "lsp"`, hierarchical
+	containment survives persistence (including flat native-TypeScript-7 results
+	reconstructed through `containerName`), productive tree-sitter files never
+	pay the request, and unavailable/failed fallback attempts degrade without
+	opening or spawning while remaining visible in `review-graph.log`.
+- **Installer subprocesses are lifetime-coupled** (refs #945) — npm, pip, gem,
+	and archive extraction now use the shared safe-spawn path, await full Windows
+	process-tree termination on timeout, and synchronously clean registered
+	installer children during parent exit/signals.
+
+- **Managed tool installs are cross-process serialized** (refs #945) — a
+	dependency-free atomic lock protects the shared tools tree, verifies owners
+	before stale recovery, bounds lock waits with an honest error, and rechecks
+	discovery after acquisition to avoid duplicate package-manager runs.
+
+- **Ordinary tests never install managed tools** (refs #945) — Vitest sets
+	`PI_LENS_DISABLE_TOOL_INSTALL=1`, its prewarm step creates a local synthetic
+	oxlint probe-cache entry without networking, and one-shot analysis explicitly
+	awaits probe-cache persistence before exit.
+
+- **Installer orphan/locking regressions are process-tested** (refs #945) —
+	fake package-manager coverage verifies Windows timeout tree-kill, exactly one
+	install across concurrent processes, explicit install-disable refusal, and
+	Vitest's default no-install environment.
+- **Downgrade TypeScript `unsafe-regex` to advisory and suppress escaped-before-
+  assignment false positives** (refs #932) — the coarse dynamic `RegExp`
+  heuristic no longer blocks edits and recognizes escape/replace calls in a
+  same-file identifier initializer; structural ReDoS detection remains with
+  the `redos-nested-quantifier` ast-grep rule.
+- **Review-graph persistence no longer serializes or compresses on the event
+	loop** (refs #939) — debounced snapshots are materialized in one lazy,
+	unref'd worker and streamed through gzip into the new canonical
+	`review-graph.json.gz` cache. The main thread promotes only the current
+	generation's atomic staged file, so the synchronous CLI/exit flush can
+	supersede an in-flight worker without a stale overwrite. Loads retain one
+	release of fallback support for legacy uncompressed `review-graph.json`
+	snapshots; worker failures are logged and degrade to a synchronous persist.
+	Persist telemetry now records element count, raw/gzip bytes, serialization
+	and write time, and whether the work was offloaded.
+
+- **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
+	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
+	persist path for CI/cron, forces the debounced snapshot write before exit,
+	and prints file/node/edge/element counts, JSON bytes, and duration. Unsafe
+	roots, build errors/skips, persist failures, and persist-cap trips exit
+	non-zero with their reason instead of silently leaving no snapshot.
+
+- **Raise and instrument the review-graph persist ceiling** (refs #936) — the
+	default `GRAPH_PERSIST_MAX_ELEMENTS` cap is now 500,000 (still overrideable
+	through `PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS`), matching measured startup
+	load/reindex costs and allowing the ~208,000-element #919 repository to
+	persist. A cap trip logs `persist_skipped` and records an actionable build
+	attempt reason with the observed count, cap, and override knob so
+	`project_report` exposes the failure.
+
+- **Logger hot paths now coalesce queued lines and rotate during long sessions** (refs #935) — contiguous NDJSON entries drain through one append up to each truncate boundary while retaining peek-then-remove exit safety and one-write cross-process atomicity. `sessionstart.log` now uses one shared asynchronous writer for ordinary diagnostics (with the crash-adjacent LSP launch write intentionally synchronous), and latency/cascade/tree-sitter/bus-event logs enforce the existing 10 MB cap in process.
+
 ### Added
+
+- **`/lens-perf` surfaces slow phases in-session** (closes #767) — the command
+	shows independent top-five p50 and p99 rankings with sample counts for both
+	the current process session and the machine-wide active `latency.log` window.
+	It flushes pending writes, streams a tail bounded by the log rotation
+	threshold (`PI_LENS_MAX_LOG_SIZE_MB`, 10MB by default), caps retained samples,
+	and reports malformed/truncated input instead of silently reading it as clean.
+	Session startup total and scan-context computation are now logged as phases so
+	the startup regressions that motivated the command are visible there too.
 
 ### Changed
 
+- **Incremental review-graph updates avoid redundant whole-graph copies and
+	index rebuilds** (refs #939) — file re-extraction now rebuilds derived indexes
+	once, immutable edges are array-copied without cloning every edge object, the
+	updated graph itself becomes the workspace snapshot, and debounced persistence
+	defers its O(graph) array materialization until the quiet-window flush.
+- **Reverse-dependency indexes update at import-edge granularity** (refs #939)
+	instead of rebuilding from every graph edge after a one-file edit. Body-only
+	edits reuse the cached index without rewriting the project snapshot; import
+	changes patch only the touched `imports` and `importedBy` buckets.
+- **Review-graph file-cap degradation is now explicit and count-honest** (refs
+	#921) — `project_report` says a capped project has “more than N files” instead
+	of presenting the cap+1 early-exit sentinel as an exact count. `module_report`
+	now marks graph-backed `usedBy`, blast-radius provenance, and
+	`semantic.source` as `unavailable:file-cap` and emits an actionable warning
+	with the cap plus both `.pi-lens.json#maxProjectFiles` and
+	`PI_LENS_REVIEW_GRAPH_MAX_FILES` controls, keeping disabled data distinct from
+	a genuinely empty/cold graph.
+- **Project scans release every scan-local fact after each file** (refs #886,
+	#939) instead of retaining source content, imports, summaries, and other
+	derived per-file facts until the scan ends. The live dispatch store remains
+	untouched; only the scanner-owned store is cleared.
 - Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
 - Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
+- **Project diagnostics now use one file-major scan pass** (refs #896) —
+	tree-sitter rules, fact rules, and bundled ast-grep share each eligible
+	file's content read while retaining their individual extension/size gates,
+	diagnostic ordering, cancellation behavior, and latency telemetry. Full
+	review-graph builds likewise hash the bytes already read for extraction
+	instead of rereading every file after the graph is built.
 
 - **A project scan runs its rule set in one tree walk, not one walk per rule**
 	(refs #675) — `runQueriesOnFile` compiles a language's rules into a single
@@ -44,6 +187,53 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Tree-sitter post-filters no longer leave silently dead rules** (refs #879) —
+	the 25 unknown filter references were resolved by implementing eight bounded,
+	fail-open-on-filter-error AST checks, expressing two conditions directly in
+	their queries, and removing fifteen rules whose promised semantic/framework
+	analysis could not be supported honestly. Coarse resource, assertion, and
+	sensitive-`memset` heuristics are advisory rather than blocking.
+
+- **Capped word indexes disclose partial coverage** (refs #928) — snapshots now
+	persist indexed-file count and truncation state, and both `symbol_search`
+	surfaces report coverage instead of presenting capped zero-hit results as
+	authoritative.
+- **`pilens_health` keeps disabled LSP servers visible** (refs #927) —
+	permanently broken server/root pairs now render with their failure count, and
+	temporary circuit-breaker cooldowns expose their retry deadline.
+- **Cold `symbol_search` failures are now observable and honest** (refs #926) —
+	unavailable results distinguish an active build, a safety refusal, and the
+	last build's failure, while background build/persist errors reach a persistent
+	NDJSON log.
+- **Failed heavyweight analyzers no longer masquerade as clean runs** (refs #925) —
+	unsuccessful results are reported distinctly, omitted from cache so the next
+	session retries, and valid fix-worklog records survive neighboring corrupt lines.
+
+- **The footer refreshes as LSP servers come online during a cold
+	`lens_diagnostics mode=full` sweep** (refs #798), instead of showing
+	`LSP Inactive` until turn end. The repaint captures UI methods during the
+	active tool event, so async warm-up never touches a stale session context.
+- **Tree-sitter WASM aborts are now visible instead of silently disabling
+	structural analysis for the rest of the process** (refs #915). The shared
+	runtime records a process-wide, timestamped `restart_required` health state,
+	logs a one-time actionable error, exposes it through `pilens_health`, and
+	marks project-scan responses with `treeSitterStatus`. A poisoned scan remains
+	truncated and never replaces the last complete snapshot. In-process retry is
+	deliberately unsafe: every new client imports the same cached `web-tree-sitter`
+	ES module and therefore reuses its corrupted Emscripten heap; restarting the
+	host is the isolation boundary.
+- **`pilens_rebuild` can no longer destroy an npm-installed pi-lens** (refs
+	#920) — rebuilds are refused before spawning a package script unless the
+	package is a source checkout with `tsconfig.dist.json` outside
+	`node_modules`; installed servers also omit the tool from `tools/list`, so
+	subagent allowlists cannot discover it.
+- **Review-graph background failures are no longer silent** (refs #919) —
+	`project_report`/`pilens_project_report` now surface the most recent build
+	attempt and its terminal skip/failure reason, including the persistence
+	element circuit-breaker. A dedicated `~/.pi-lens/review-graph.log` records
+	build and persistence starts, successes, skips, and failures, so a rejected
+	fire-and-forget build or an over-cap graph cannot look perpetually in progress.
+
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 
 - **A mid-scan tree-sitter WASM abort no longer replaces the authoritative
@@ -71,6 +261,15 @@ All notable changes to pi-lens will be documented in this file.
 	at 512 KiB. A coverage guard makes a newly registered kind automatically
 	enumerable — and classified as code or non-code — on both project-wide
 	paths.
+
+- **CMake files now reach a real LSP server** (refs #892) — the CMake policy's
+	previous `lsp` fallback had no registered server and silently produced no
+	diagnostics. `cmake-language-server` now covers both `.cmake` files and the
+	canonical `CMakeLists.txt` basename, with managed pip installation.
+- **Fish LSP policy is no longer dead wiring** (refs #893) — `fish-lsp` is now
+	registered for `.fish` files and auto-installed through npm; `fish_indent`
+	continues to run alongside it.
+- **Editing an inherited tree-sitter rule now invalidates the inheriting language's RuleCache** (refs #878) — the cache key fingerprinted only the language's OWN rules directory, but `tsx` also runs the `typescript` rule set (`queriesForLanguage`), so a typescript-rule edit left the tsx entry's hash unchanged and stale compiled rules kept being served from the on-disk cache until a tsx rule happened to change. The fingerprint now covers the full effective rule set via `ruleFilesForLanguage`, a new loader-owned seam that derives from the same rule-source composition as rule selection, so the cache key can't drift from what the runner actually runs. The runner's cache-miss path also forces the query loader past its in-memory memo (`loadQueries(root, { force: true })`) — a correct key alone wasn't enough: the memo ignores rule-file mtimes, so within one process a miss re-persisted the PRE-edit rules under the fresh fingerprint and the staleness then survived restarts. The client's compiled-batch cache is likewise now keyed on rule content instead of rule ids — ids are stable across edits, so the shared client kept serving the pre-edit compiled patterns (and messages) for the process lifetime even after the reload. `CACHE_VERSION` bumped to `v6`.
 - **Small edits no longer pay the entity-extraction cost** (refs #885) — the
 	<5-line skip threshold only guarded the zero-diagnostics early return; a
 	second `extractEntitySnapshot` block ran unconditionally, so trivial edits
@@ -208,6 +407,13 @@ All notable changes to pi-lens will be documented in this file.
 	are anchored (`clients/diagnostic-dispositions.ts`) to the wrong physical
 	line's content and will resurface once after upgrading; this is expected and
 	one-time, not a regression.
+
+### Security
+
+- **Debug logs redact credential-shaped text before it reaches disk** (closes
+	#327). The shared NDJSON boundary scrubs private keys, provider tokens, AWS
+	access keys, and JWT/JWE compact tokens with deterministic linear scanners.
+	The synchronous crash-adjacent LSP launch diagnostic uses the same redactor.
 
 ## [3.8.73] - 2026-07-28
 

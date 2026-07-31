@@ -1,5 +1,8 @@
 import { defineConfig } from "vitest/config";
 
+// Applies to globalSetup as well as workers: ordinary tests never install tools.
+process.env.PI_LENS_DISABLE_TOOL_INSTALL ??= "1";
+
 // Minimal config — vitest defaults (test discovery, pools, etc.) are preserved.
 // Additions:
 //  - globalSetup fails fast on a stale in-place build, so tests can't silently
