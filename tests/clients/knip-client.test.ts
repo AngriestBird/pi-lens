@@ -3,7 +3,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { getProjectDataDir } from "../../clients/file-utils.js";
-import { KnipClient } from "../../clients/knip-client.js";
+import {
+	KnipClient,
+	readOverridePinnedPackageNames,
+} from "../../clients/knip-client.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
 vi.mock("../../clients/safe-spawn.js", () => ({
@@ -345,6 +348,91 @@ describe("knip-client", () => {
 		expect(result.issues).toHaveLength(1);
 		expect(result.unlistedDeps).toHaveLength(1);
 		expect(result.unlistedDeps[0].name).toBe("@acme/pkg");
+	});
+
+	it("readOverridePinnedPackageNames collects overrides/resolutions/pnpm.overrides keys (#968)", () => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-overrides-");
+		try {
+			fs.writeFileSync(
+				path.join(tmpDir, "package.json"),
+				JSON.stringify({
+					name: "demo",
+					overrides: { "brace-expansion": "^2.0.0" },
+					resolutions: { protobufjs: "^7.6.5" },
+					pnpm: { overrides: { "nested-pkg": { "sub-pkg": "^1.0.0" } } },
+				}),
+			);
+
+			const names = readOverridePinnedPackageNames(tmpDir);
+			expect(names.has("brace-expansion")).toBe(true);
+			expect(names.has("protobufjs")).toBe(true);
+			expect(names.has("nested-pkg")).toBe(true);
+			expect(names.has("sub-pkg")).toBe(true);
+			expect(names.has("unrelated-pkg")).toBe(false);
+		} finally {
+			cleanup();
+		}
+	});
+
+	it("readOverridePinnedPackageNames degrades to an empty set on missing/malformed package.json", () => {
+		const tmpRoot = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-knip-overrides-missing-"),
+		);
+		try {
+			expect(readOverridePinnedPackageNames(tmpRoot).size).toBe(0);
+		} finally {
+			removeTempDirSync(tmpRoot);
+		}
+	});
+
+	it("does not report an unused devDependency that's also an overrides-only security pin (#968)", async () => {
+		const { tmpDir, cleanup } = setupTestEnvironment(
+			"pi-lens-knip-overrides-e2e-",
+		);
+		try {
+			fs.writeFileSync(
+				path.join(tmpDir, "package.json"),
+				JSON.stringify({
+					name: "demo",
+					overrides: { "brace-expansion": "^2.0.0" },
+					devDependencies: { "brace-expansion": "^2.0.0", "real-unused": "^1.0.0" },
+				}),
+			);
+
+			const safeSpawnMod = await import("../../clients/safe-spawn.js");
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValueOnce({
+				error: null,
+				status: 0,
+				stdout: JSON.stringify({
+					issues: [
+						{
+							file: "package.json",
+							devDependencies: [
+								{ name: "brace-expansion" },
+								{ name: "real-unused" },
+							],
+						},
+					],
+				}),
+				stderr: "",
+			} as never);
+
+			const client = new KnipClient(false) as unknown as {
+				runAnalyze: (d: string) => Promise<{
+					unusedDeps: Array<{ name: string; type: string }>;
+					issues: unknown[];
+				}>;
+			};
+			const result = await client.runAnalyze(tmpDir);
+
+			// The overrides-pinned dep is dropped; a genuinely unused devDependency
+			// with no overrides entry still gets reported.
+			expect(result.unusedDeps.map((d) => d.name)).toEqual(["real-unused"]);
+			expect(result.issues).toHaveLength(1);
+		} finally {
+			cleanup();
+			vi.restoreAllMocks();
+		}
 	});
 
 	it("routes enumMembers into unusedExports (grouped format)", () => {

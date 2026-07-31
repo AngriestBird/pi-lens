@@ -53,6 +53,42 @@ const EMPTY_RESULT: Omit<KnipResult, "summary"> = {
 
 const ANALYSIS_TIMEOUT_MS = 30_000;
 
+/**
+ * Every package name referenced as a KEY (at any nesting depth — npm's
+ * `overrides` and pnpm's `pnpm.overrides` allow nested "for this dependency's
+ * sub-dependency" overrides) in `package.json`'s `overrides`, `resolutions`
+ * (Yarn's equivalent), or `pnpm.overrides` fields. These are the project's
+ * own explicit signal that a package is deliberately present to pin a
+ * resolution — not a source-imported dependency knip's import graph can see.
+ * Missing/malformed `package.json` degrades to an empty set (never throws) —
+ * this is a best-effort narrowing, not a required input.
+ */
+export function readOverridePinnedPackageNames(targetDir: string): Set<string> {
+	const names = new Set<string>();
+	let pkg: Record<string, unknown>;
+	try {
+		pkg = JSON.parse(
+			fs.readFileSync(path.join(targetDir, "package.json"), "utf-8"),
+		);
+	} catch {
+		return names;
+	}
+
+	const collectKeys = (value: unknown): void => {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return;
+		for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+			names.add(key);
+			collectKeys(nested);
+		}
+	};
+
+	collectKeys(pkg.overrides);
+	collectKeys(pkg.resolutions);
+	collectKeys((pkg.pnpm as { overrides?: unknown } | undefined)?.overrides);
+
+	return names;
+}
+
 // --- Client ---
 
 export class KnipClient {
@@ -263,7 +299,45 @@ export class KnipClient {
 			};
 		}
 
-		return this.parseOutput(output);
+		return this.dropOverridePinnedDeps(this.parseOutput(output), targetDir);
+	}
+
+	/**
+	 * Drop `dependency`/`devDependency` issues for a package that's also
+	 * referenced as an npm `overrides` (or Yarn `resolutions` / pnpm
+	 * `pnpm.overrides`) key in this project's `package.json` (#968).
+	 *
+	 * A direct devDependency whose only job is pinning a vulnerable
+	 * transitive/peer resolution has no source import — that's WORKING AS
+	 * INTENDED, not dead code, and knip has no concept of "this dependency
+	 * exists only to satisfy an overrides entry" (it only sees imports).
+	 * `overrides`/`resolutions` are the project's own explicit, unambiguous
+	 * signal that the package is deliberately present — the same class of
+	 * signal `hardcoded-url`'s `SCREAMING_SNAKE_CASE` constant-name carve-out
+	 * and `ts-ssrf`'s constant-identifier carve-out lean on elsewhere in this
+	 * codebase — so this narrows the finding rather than suppressing
+	 * `dependency`/`devDependency` issues wholesale: a devDependency that
+	 * ISN'T also an overrides/resolutions key is still reported.
+	 */
+	private dropOverridePinnedDeps(
+		result: KnipResult,
+		targetDir: string,
+	): KnipResult {
+		if (result.unusedDeps.length === 0) return result;
+		const pinned = readOverridePinnedPackageNames(targetDir);
+		if (pinned.size === 0) return result;
+
+		const isPinnedDepIssue = (issue: KnipIssue): boolean =>
+			(issue.type === "dependency" || issue.type === "devDependency") &&
+			(pinned.has(issue.name) || (!!issue.package && pinned.has(issue.package)));
+
+		const issues = result.issues.filter((issue) => !isPinnedDepIssue(issue));
+		const unusedDeps = result.unusedDeps.filter(
+			(issue) => !isPinnedDepIssue(issue),
+		);
+		return unusedDeps.length === result.unusedDeps.length
+			? result
+			: { ...result, issues, unusedDeps };
 	}
 
 	private async getKnipEnvironment(targetDir: string): Promise<NodeJS.ProcessEnv> {
