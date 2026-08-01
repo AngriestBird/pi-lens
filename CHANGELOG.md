@@ -4,6 +4,30 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Session-start perf: bound the change-log replay + defer log cleanup (closes #1019)** —
+	the interactive session-start path recomputed the project sequence by reading
+	the ENTIRE append-only change log and folding every line — and each fold does a
+	`normalizeMapKey`/`realpathSync.native()` syscall per historical entry, so the
+	`session_start_sequence_read` phase (measured ~94ms, ~47% of a 200ms warm start)
+	grew unbounded with total log length, not the working set. The project snapshot
+	now embeds the DERIVED sequence index (`projectSeq` + per-file `fileSeqByPath`)
+	as of its `seq` (`clients/project-snapshot.ts`), mirrored into the tiny
+	`project-snapshot.meta.json` sidecar so session-start can hydrate it WITHOUT
+	parsing the 40-112MB body (preserving the #947 skip-stale optimization).
+	`readLatestProjectSequence` (`clients/project-changes.ts`) gained an optional
+	base param: it hydrates that index (O(files-in-snapshot), keys already
+	normalized → no per-key `realpath`) and folds ONLY entries with
+	`seq > snapshot.seq` — O(changes-since-snapshot). The fold uses the SAME
+	`Math.max`/`normalizeMapKey` the full replay does, so the result is
+	byte-identical to a full replay (proven by an equivalence test suite covering
+	no-new-entries, new/existing files, deletes, gaps/out-of-order, and the empty
+	log) and order-independent. Correctness-first fallbacks to a full replay: a
+	legacy/missing meta with no embedded index, a version-mismatched meta, and a
+	snapshot whose `seq` is AHEAD of the log (truncation/rotation) — it never serves
+	a wrong seq. Wired into BOTH the quick/interactive and the full session-start
+	paths. Secondary: `log_cleanup` (~7ms) was moved off the synchronous critical
+	path into a deferred `setImmediate` (it still runs every session and notifies
+	async — nothing on the hot path consumed its result).
 - **Cascade honesty: degraded/uncomputed impact no longer renders as clean (refs #1023, closes #1023)** —
 	the cascade impact subsystem previously emitted an all-clear that was
 	indistinguishable from "genuinely nothing impacted" whenever it could NOT

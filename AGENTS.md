@@ -257,10 +257,22 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   `clients/startup-marker.ts` first, then logs `host_boot`, `extension_eval`, and
   the continuity `extension_loaded` record. Primary session starts pass the host
   hook/bootstrap timestamps into `handleSessionStart`, which records pre-handler,
-  runtime-reset, cleanup, sequence/snapshot (with bytes/freshness/seq), total, and
+  runtime-reset, sequence/snapshot (with bytes/freshness/seq), total, and
   delayed warmup child phases in `latency.log`; concurrent secondaries emit only
   `concurrent_session_bind`. Keep logging fire-and-forget and preserve contiguous
   top-level timing so quick-start child durations remain within ~10 ms of total.
+  #1019: `session_start_log_cleanup` is now emitted from a deferred `setImmediate`
+  (its `metadata.deferred:true`), NOT synchronously in the awaited chain, so it is
+  no longer a top-level critical-path phase — do not re-add it to the contiguous
+  top-level sum. **`session_start_sequence_read` is bounded** by a snapshot-embedded
+  sequence index (`SnapshotSequenceIndex`, mirrored in the meta sidecar): the quick
+  and full paths pass `snapshotSequenceBase(root)` to `readLatestProjectSequence`,
+  which folds only change-log entries with `seq > snapshot.seq` on top of the
+  hydrated base (O(changes-since-snapshot)) instead of replaying the whole log,
+  with a full-replay fallback for legacy/version-mismatch/ahead-of-log bases. The
+  embedded index is written by `buildProjectSnapshotFromRuntime` from the runtime's
+  live `{projectSeq, getFileSeqEntries()}` (always consistent with `snapshot.seq`);
+  side-writes (word-index/reverse-deps) carry it forward via their `existing` spread.
 - **Incremental review-graph snapshots are immutable by replacement (#939).**
   `updateGraphFiles` performs all node/edge edits on a clone, rebuilds derived
   indexes once at the end, then stores that finished graph directly in

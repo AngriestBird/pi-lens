@@ -136,6 +136,34 @@ describe("project snapshot", () => {
 			expect(isProjectSnapshotFresh(loaded, 7)).toBe(true);
 		}));
 
+	it("embeds the derived sequence index in BOTH the body and the meta sidecar (#1019)", () =>
+		withProjectDataDir((cwd) => {
+			// A runtime with a real per-file sequence state at seq=3.
+			const runtime = new RuntimeCoordinator();
+			runtime.bumpFileSeq(path.join(cwd, "src", "a.ts")); // seq 1, a:1
+			runtime.bumpFileSeq(path.join(cwd, "src", "a.ts")); // seq 2, a:2
+			runtime.bumpFileSeq(path.join(cwd, "src", "b.ts")); // seq 3, b:1
+			expect(runtime.projectSeq).toBe(3);
+
+			const snapshot = buildProjectSnapshotFromRuntime({ cwd, runtime });
+			// Body carries it, consistent with `seq`.
+			expect(snapshot.sequenceIndex?.projectSeq).toBe(3);
+			expect(snapshot.sequenceIndex?.projectSeq).toBe(snapshot.seq);
+			saveProjectSnapshot(cwd, snapshot);
+
+			// Round-trips through the body...
+			const loaded = loadProjectSnapshot(cwd);
+			expect(loaded?.sequenceIndex?.projectSeq).toBe(3);
+			// ...and, crucially, through the CHEAP meta sidecar (read without
+			// parsing the body) so the interactive path can hydrate the base.
+			const meta = readProjectSnapshotMeta(cwd);
+			expect(meta?.seq).toBe(3);
+			expect(meta?.sequenceIndex?.projectSeq).toBe(3);
+			const metaFiles = new Map(meta?.sequenceIndex?.fileSeqByPath ?? []);
+			// Keys are the same normalizeMapKey form the change-log replay uses.
+			expect([...metaFiles.values()].sort()).toEqual([1, 2]);
+		}));
+
 	it("persists the word index and hydrates a searchable copy", () =>
 		withProjectDataDir((cwd) => {
 			const runtime = new RuntimeCoordinator();

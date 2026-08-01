@@ -50,6 +50,21 @@ export interface ProjectSnapshotSymbol {
 	endLine?: number;
 }
 
+/**
+ * The derived project-changes sequence index as of `ProjectSnapshot.seq`
+ * (#1019). Persisting it lets session-start BOUND the change-log replay: hydrate
+ * this (O(files)) then fold only entries with `seq > snapshot.seq`
+ * (O(changes-since-snapshot)) instead of replaying the entire append-only log.
+ * `projectSeq` is invariably `=== snapshot.seq` (both come from the same
+ * `runtime.projectSeq` moment); `fileSeqByPath` uses the same
+ * `normalizeMapKey(path.resolve())` keys as the change-log replay, so no
+ * re-normalization (and no per-key `realpath` syscall) is needed on hydrate.
+ */
+export interface SnapshotSequenceIndex {
+	projectSeq: number;
+	fileSeqByPath: Array<[filePath: string, fileSeq: number]>;
+}
+
 export interface ProjectSnapshot {
 	version: typeof PROJECT_SNAPSHOT_VERSION;
 	projectRoot: string;
@@ -59,11 +74,26 @@ export interface ProjectSnapshot {
 	symbols: Record<string, ProjectSnapshotSymbol[]>;
 	reverseDeps: Record<string, string[]>;
 	cachedExports: Array<[name: string, filePath: string]>;
+	sequenceIndex?: SnapshotSequenceIndex;
 	wordIndex?: SerializedWordIndex;
 	projectRulesScan?: RuleScanResult;
 	startupScan?: StartupScanContext;
 	languageProfile?: ProjectLanguageProfile;
 	conventions?: ProjectConventions;
+}
+
+function parseSequenceIndex(value: unknown): SnapshotSequenceIndex | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const index = value as Partial<SnapshotSequenceIndex>;
+	if (typeof index.projectSeq !== "number") return undefined;
+	if (!Array.isArray(index.fileSeqByPath)) return undefined;
+	const fileSeqByPath = index.fileSeqByPath.filter(
+		(entry): entry is [string, number] =>
+			Array.isArray(entry) &&
+			typeof entry[0] === "string" &&
+			typeof entry[1] === "number",
+	);
+	return { projectSeq: index.projectSeq, fileSeqByPath };
 }
 
 // #958 item 2: the canonical snapshot body is now streamed gzip
@@ -131,6 +161,7 @@ function parseSnapshot(value: unknown): ProjectSnapshot | null {
 				typeof entry[0] === "string" &&
 				typeof entry[1] === "string",
 		),
+		sequenceIndex: parseSequenceIndex(snapshot.sequenceIndex),
 		wordIndex: snapshot.wordIndex,
 		projectRulesScan: snapshot.projectRulesScan,
 		startupScan: snapshot.startupScan,
@@ -143,6 +174,13 @@ export interface ProjectSnapshotMeta {
 	timestamp: string;
 	version: number;
 	seq: number;
+	/**
+	 * The derived sequence index as of `seq` (#1019), MIRRORED here from the
+	 * snapshot body so session-start can bound the change-log replay WITHOUT
+	 * parsing the (40-112MB) body — which would forfeit the #947 skip-stale
+	 * optimization. Absent on legacy metas (pre-#1019) → callers full-replay.
+	 */
+	sequenceIndex?: SnapshotSequenceIndex;
 }
 
 function parseSnapshotMeta(value: unknown): ProjectSnapshotMeta | null {
@@ -154,6 +192,7 @@ function parseSnapshotMeta(value: unknown): ProjectSnapshotMeta | null {
 		timestamp: typeof meta.timestamp === "string" ? meta.timestamp : "",
 		version: meta.version,
 		seq: meta.seq,
+		sequenceIndex: parseSequenceIndex(meta.sequenceIndex),
 	};
 }
 
@@ -751,6 +790,14 @@ export function saveProjectSnapshot(
 			timestamp: snapshot.generatedAt,
 			version: snapshot.version,
 			seq: snapshot.seq,
+			// #1019: mirror the derived sequence index (kept consistent with `seq`
+			// because both are stamped from the same runtime moment) so the
+			// interactive path can hydrate it from the tiny sidecar. Omitted when
+			// absent so a non-runtime side-write (word-index/reverse-deps) that
+			// carried no index doesn't stamp an empty one.
+			...(snapshot.sequenceIndex
+				? { sequenceIndex: snapshot.sequenceIndex }
+				: {}),
 		}),
 		{ bestEffort: false },
 	);
@@ -873,6 +920,15 @@ export function buildProjectSnapshotFromRuntime(args: {
 		cachedExports: [...args.runtime.cachedExports.entries()].sort((a, b) =>
 			a[0].localeCompare(b[0]),
 		),
+		// #1019: capture the runtime's live sequence index AT this seq. The runtime
+		// is seeded from the change log at session start and bumped in lockstep with
+		// every append, so `getFileSeqEntries()` IS the fold of the log up to
+		// `projectSeq` — and its keys are already `normalizeMapKey(path.resolve())`,
+		// the exact form the change-log replay produces.
+		sequenceIndex: {
+			projectSeq: args.runtime.projectSeq,
+			fileSeqByPath: args.runtime.getFileSeqEntries(),
+		},
 		wordIndex: args.runtime.wordIndex
 			? serializeWordIndex(args.runtime.wordIndex)
 			: undefined,
