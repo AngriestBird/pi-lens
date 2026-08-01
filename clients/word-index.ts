@@ -16,7 +16,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isAtOrAboveHomeDir } from "./path-utils.js";
+import { PathKeyedMap } from "./path-keyed-map.js";
+import { isAtOrAboveHomeDir, normalizeEphemeralMapKey } from "./path-utils.js";
 import {
 	createDebounceScheduler,
 	type DebounceScheduler,
@@ -29,11 +30,29 @@ export interface WordHit {
 	line: number;
 }
 
+/**
+ * The single normalizer every word-index path key folds through (#1025). The
+ * CHEAP form — slash-fold + win32-lowercase, NO filesystem I/O — because the
+ * index is a hot, single-process, in-memory structure whose keys this process
+ * produces itself (`collectSourceFilesAsync`'s walk, `path.resolve` at the
+ * per-edit seams). `normalizeMapKey`'s `realpathSync` per call would be wrong on
+ * the BM25 path. Applied at BOTH the build seam and the per-edit update seam so
+ * a file's on-disk casing (walk) and its tool-input casing (edit) can no longer
+ * diverge into a duplicate doc entry with stale postings (the #1025 item #2
+ * bug). Kept as a named alias so every seam is grep-visible and provably shares
+ * ONE normalizer with the {@link PathKeyedMap}s below.
+ */
+export const wordIndexKey = normalizeEphemeralMapKey;
+
 export interface WordIndex {
 	/** token → postings (one entry per (file,line) the token appears on). */
 	postings: Map<string, WordHit[]>;
-	/** file → number of indexed tokens (document length, for BM25 normalization). */
-	docLengths: Map<string, number>;
+	/**
+	 * file → number of indexed tokens (document length, for BM25 normalization).
+	 * Path-keyed via {@link wordIndexKey} ({@link PathKeyedMap}) so build-form and
+	 * edit-form keys for the same file collapse to one entry (#1025).
+	 */
+	docLengths: PathKeyedMap<number>;
 	totalTokens: number;
 	docCount: number;
 	/** True when source collection hit its file cap, so searches may be incomplete. */
@@ -49,9 +68,9 @@ export interface WordIndex {
 	 * need incremental updates must treat a missing forward index as "no
 	 * incremental primitive available" and fall back to a full rebuild.
 	 */
-	forward?: Map<string, Map<string, number>>;
+	forward?: PathKeyedMap<Map<string, number>>;
 	/** File mtimes captured when each document was tokenized (#958). */
-	fileMtimes: Map<string, number>;
+	fileMtimes: PathKeyedMap<number>;
 }
 
 export interface RankedFile {
@@ -159,9 +178,9 @@ export function buildWordIndex(
 	},
 ): WordIndex {
 	const postings = new Map<string, WordHit[]>();
-	const docLengths = new Map<string, number>();
-	const forward = new Map<string, Map<string, number>>();
-	const fileMtimes = new Map<string, number>();
+	const docLengths = new PathKeyedMap<number>(wordIndexKey);
+	const forward = new PathKeyedMap<Map<string, number>>(wordIndexKey);
+	const fileMtimes = new PathKeyedMap<number>(wordIndexKey);
 	let totalTokens = 0;
 
 	for (const { path: filePath, content, mtimeMs } of files) {
@@ -214,10 +233,16 @@ export function removeWordIndexDocument(
 	const tokenLineCounts = index.forward.get(filePath);
 	if (!tokenLineCounts) return false;
 
+	// `postings` is token-keyed (not a PathKeyedMap), so its `WordHit.file`
+	// display strings must be compared through the SAME normalizer the path maps
+	// use — otherwise a build-form hit (`SUB/a.ts`) survives an edit-form removal
+	// (`sub/a.ts`) on a case-insensitive FS and lingers as a stale posting
+	// (the #1025 item #2 bug this fix closes).
+	const removedKey = wordIndexKey(filePath);
 	for (const token of tokenLineCounts.keys()) {
 		const arr = index.postings.get(token);
 		if (!arr) continue;
-		const next = arr.filter((hit) => hit.file !== filePath);
+		const next = arr.filter((hit) => wordIndexKey(hit.file) !== removedKey);
 		if (next.length > 0) index.postings.set(token, next);
 		else index.postings.delete(token);
 	}
@@ -418,30 +443,46 @@ export async function refreshWordIndexIncrementally(
 	});
 	if (!shouldContinue()) throw new Error("word index refresh superseded");
 
-	const current = new Map<string, number>();
+	// This set-difference must run in the SAME normalized key space the path
+	// maps use (#1025 review). Otherwise a file whose stored displayPath became
+	// the edit form (last-writer-wins after a case/separator-divergent per-edit
+	// update) no longer string-matches its walk form here — even though
+	// `fileMtimes.get(walkForm)` folds and hits — which would (1) double-count
+	// churn (the same file scored as both "dropped" and "added"), possibly
+	// crossing the threshold and forcing a needless full rebuild, and (2) drop
+	// then re-add an unchanged file, opening a regression window because the drop
+	// loop runs BEFORE the re-read: a transient read failure (skipped++) would
+	// strand the file with no postings. Keying `current` and `oldSet` through
+	// `wordIndexKey` keeps build/edit/refresh convergent; `current`'s value
+	// retains the raw walk path for the stat/read and for the display key.
+	const current = new Map<string, { path: string; mtimeMs: number }>();
 	for (const file of walked) {
 		try {
 			const stat = fs.statSync(file);
-			if (stat.size <= WORD_INDEX_MAX_BYTES) current.set(file, stat.mtimeMs);
+			if (stat.size <= WORD_INDEX_MAX_BYTES) {
+				current.set(wordIndexKey(file), { path: file, mtimeMs: stat.mtimeMs });
+			}
 		} catch {
 			// A file vanishing between walk and stat is simply absent.
 		}
 	}
 
-	const oldSet = new Set(index.docLengths.keys());
+	const oldSet = new Set([...index.docLengths.keys()].map(wordIndexKey));
 	let changedSet = 0;
-	for (const file of oldSet) if (!current.has(file)) changedSet++;
-	for (const file of current.keys()) if (!oldSet.has(file)) changedSet++;
+	for (const key of oldSet) if (!current.has(key)) changedSet++;
+	for (const key of current.keys()) if (!oldSet.has(key)) changedSet++;
 	const denominator = Math.max(oldSet.size, current.size, 1);
 	if (changedSet / denominator > WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD) {
 		throw new Error("word index file-set churn exceeds incremental threshold");
 	}
 
 	let dropped = 0;
-	for (const file of oldSet) {
-		if (!current.has(file)) {
-			if (!removeWordIndexDocument(index, file)) {
-				throw new Error(`failed to drop word-index document: ${file}`);
+	for (const key of oldSet) {
+		if (!current.has(key)) {
+			// `key` is already folded; removeWordIndexDocument re-folds it
+			// idempotently via the PathKeyedMap, so the drop hits the right entry.
+			if (!removeWordIndexDocument(index, key)) {
+				throw new Error(`failed to drop word-index document: ${key}`);
 			}
 			dropped++;
 		}
@@ -450,7 +491,7 @@ export async function refreshWordIndexIncrementally(
 	let refreshed = 0;
 	let skipped = 0;
 	let processed = 0;
-	for (const [file, mtimeMs] of current) {
+	for (const { path: file, mtimeMs } of current.values()) {
 		if (index.fileMtimes.get(file) !== mtimeMs) {
 			// A file the walk/stat pass saw can still fail to read here — a
 			// transient exclusive lock (antivirus, an editor, a build step) or a
@@ -679,8 +720,8 @@ export function deserializeWordIndex(
 	) {
 		return null;
 	}
-	const docLengths = new Map<string, number>();
-	const fileMtimes = new Map<string, number>();
+	const docLengths = new PathKeyedMap<number>(wordIndexKey);
+	const fileMtimes = new PathKeyedMap<number>(wordIndexKey);
 	data.files.forEach((file, i) => docLengths.set(file, data.docLengths[i] ?? 0));
 	data.files.forEach((file, i) => fileMtimes.set(file, data.fileMtimes[i] ?? 0));
 
@@ -698,9 +739,9 @@ export function deserializeWordIndex(
 		if (hits.length > 0) postings.set(token, hits);
 	}
 
-	let forward: Map<string, Map<string, number>> | undefined;
+	let forward: PathKeyedMap<Map<string, number>> | undefined;
 	if (Array.isArray(data.forward)) {
-		forward = new Map();
+		forward = new PathKeyedMap<Map<string, number>>(wordIndexKey);
 		for (const entry of data.forward) {
 			if (!Array.isArray(entry) || entry.length !== 2) continue;
 			const [fileIdx, tokenCounts] = entry;
