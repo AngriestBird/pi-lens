@@ -77,6 +77,7 @@ migrate-*.js
 !docs/mcp.md
 !docs/module-report-read-symbol.md
 !docs/environment-variables.md
+!docs/settings.md
 !docs/fable.md
 !docs/subagent-compat.md
 !docs/dispositions.md
