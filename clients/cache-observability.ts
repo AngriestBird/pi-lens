@@ -112,8 +112,15 @@ function hashFirstMessage(first: { role?: unknown; content?: unknown }): string 
  *     benign session boundary logs a spurious `cache_prefix_break`, and a
  *     concurrent subagent + its parent stomp each other's baseline, each
  *     emitting a false positive — fatal for a signal whose value is trust);
- *   - resume / reload reuse the SAME id → the baseline persists in-process, so a
- *     genuine break induced by the resume is still caught (no blinding reset).
+ *   - an IN-PROCESS reload / resume reuses the SAME id → the baseline is still in
+ *     this map, so a genuine break is caught (no blinding reset). NOTE: a full
+ *     process restart (quit → `pi --session <id>`) starts a NEW process with an
+ *     empty map, so the first post-restart `context` re-anchors a fresh baseline
+ *     rather than comparing across the restart. That's acceptable here — this is a
+ *     pure observability signal (at worst a missed `cache_prefix_break` log on the
+ *     first post-restart turn, never a user-facing action) — unlike genuine
+ *     session state (read guard #1041, widget #190) which IS rehydrated from the
+ *     sidecar.
  *
  * Bounded as an insertion-ordered LRU (evict oldest-inserted past the cap) so a
  * long-lived process cycling through many sessions can't grow this unbounded.
