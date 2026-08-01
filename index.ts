@@ -207,6 +207,23 @@ function log(_msg: string) {
 	// Previously tied to --lens-verbose flag, now disabled
 }
 
+/**
+ * The pi SDK invalidates a captured `pi`/command ctx after a session
+ * replacement or reload (ctx.newSession/fork/switchSession/reload); every later
+ * `pi.*` call then throws with this signature (installed SDK:
+ * core/extensions/loader.js `assertActive`). We match by message — not `===` a
+ * captured instance — so a fire-and-forget task that races a session swap can
+ * recognise the benign stale-ctx throw and degrade to a no-op. Substring-matched
+ * on the stable "stale after session replacement or reload" phrase so it
+ * survives incidental wording changes around it.
+ */
+function isStaleExtensionCtxError(err: unknown): boolean {
+	return (
+		err instanceof Error &&
+		err.message.includes("stale after session replacement or reload")
+	);
+}
+
 // --- State ---
 
 const runtime = new RuntimeCoordinator();
@@ -1736,7 +1753,31 @@ export default function (pi: ExtensionAPI) {
 		registerQuietWindowTask("turn_summary_emit", () => {
 			const emitCtx = _turnSummaryEmitCtx;
 			if (!emitCtx || !emitCtx.isLensEnabled()) return;
-			if (!emitCtx.getLensFlag("lens-turn-summary")) return;
+			// The captured `pi` can go STALE between the activation that set this
+			// holder and this fire-and-forget quiet-window run: an interim
+			// newSession/fork/switchSession/reload invalidates the runtime, after
+			// which any `pi.*` call — the getFlag below (reached first), or the
+			// sendMessage later — throws the SDK's stale-ctx guard. That is benign
+			// here: the session this run's summary belonged to is gone, so there is
+			// nothing to emit into. Treat it as a no-op, NOT a task failure — this
+			// exact throw at the flag read (outside the sendMessage try/catch)
+			// spammed the live-dogfood sessionstart.log 55× as `quiet_window:
+			// task "turn_summary_emit" failed` — the single most frequent error in
+			// that log. A non-stale error still propagates to the scheduler so it
+			// is recorded (ok:false) + logged with its stack.
+			let turnSummaryEnabled: boolean | string | undefined;
+			try {
+				turnSummaryEnabled = emitCtx.getLensFlag("lens-turn-summary");
+			} catch (err) {
+				if (isStaleExtensionCtxError(err)) {
+					dbg(
+						"turn_summary_emit: skipped — captured pi ctx is stale (session replaced/reloaded before the quiet window ran)",
+					);
+					return;
+				}
+				throw err;
+			}
+			if (!turnSummaryEnabled) return;
 			if (runtime.turnSummary.isEmpty()) return;
 			const summaryStart = Date.now();
 			const cwd = runtime.projectRoot || process.cwd();
@@ -1756,6 +1797,12 @@ export default function (pi: ExtensionAPI) {
 						details,
 					});
 				} catch (sendErr) {
+					if (isStaleExtensionCtxError(sendErr)) {
+						dbg(
+							"turn_summary_emit: skipped emit — pi ctx went stale (session replaced/reloaded)",
+						);
+						return;
+					}
 					dbg(`turn-summary sendMessage failed: ${sendErr}`);
 				}
 			} else {

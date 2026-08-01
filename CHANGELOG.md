@@ -4,6 +4,33 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **`turn_summary_emit` quiet-window task no longer fails on a stale pi ctx (the #483 quiet window's most frequent live-dogfood error — 55×)** —
+	the `agent_settled` quiet-window task `turn_summary_emit` reads the
+	`lens-turn-summary` flag through `pi.getFlag()` (via `getLensFlag`). The task
+	holder's `pi` is refreshed on every activation, but the quiet window is fired
+	fire-and-forget from `agent_settled`, so an interim session
+	replacement/reload (`ctx.newSession/fork/switchSession/reload` — common in the
+	in-process subagent flow #473) invalidates that captured `pi`; the very next
+	`pi.getFlag()` then throws the SDK's stale-ctx guard. That throw sat OUTSIDE
+	the existing `sendMessage` try/catch, so it escaped the task and the scheduler
+	logged `quiet_window: task "turn_summary_emit" failed: … stale after session
+	replacement or reload` — 55 times across two weeks of dogfooding, the single
+	most frequent error in `~/.pi-lens/sessionstart.log`, and it fired even with
+	the feature OFF (the flag READ throws before the flag value is known). Fix:
+	the task now recognises the stale-ctx throw (new `isStaleExtensionCtxError`
+	message matcher) at both pi touch points (flag read + emit) and degrades to a
+	logged no-op — the session that run's summary belonged to is gone, so there is
+	nothing to emit into — while a genuine error still propagates to the scheduler
+	(recorded `ok:false`). User impact was minimal (a lost summary for the exact
+	settle that raced a session swap, plus log noise), not silent feature
+	degradation: in steady state the task runs `ok:true`. Separately, the
+	quiet-window runner now logs the failing task's **stack** (not just `${err}`'s
+	message) so the next failure is diagnosable from the log alone; it remains
+	strictly non-fatal (per-task try/catch, `runQuietWindow` never rethrows, and
+	`agent_settled` invokes it fire-and-forget — a failing task can never break the
+	turn). Regression test drives the registered task against a `pi` whose
+	`getFlag` throws the stale-ctx error and asserts a no-op (no throw, no emit);
+	it fails pre-fix.
 - **Word index no longer serves stale postings after a case/separator-divergent edit (refs #1025, closes #1025 item #2)** —
 	the word index's `docLengths`/`forward`/`fileMtimes` maps are keyed on file
 	paths, but the full/incremental BUILD keyed on the on-disk casing the

@@ -160,7 +160,16 @@ export async function runQuietWindow(deps: QuietWindowDeps): Promise<void> {
 				await task.fn();
 			} catch (err) {
 				ok = false;
-				dbg(`quiet_window: task "${task.name}" failed: ${err}`);
+				// Surface the stack (not just the message) so the next failure is
+				// diagnosable from the log alone — a task can fail dozens of times
+				// and `${err}` (message only) may not pin the throw site. Still
+				// non-fatal: the loop continues and runQuietWindow never rethrows
+				// (see the finally below), so one bad task can't break the turn.
+				const detail =
+					err instanceof Error
+						? (err.stack ?? `${err.name}: ${err.message}`)
+						: String(err);
+				dbg(`quiet_window: task "${task.name}" failed: ${detail}`);
 			}
 			results.push({
 				name: task.name,
