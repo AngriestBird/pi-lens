@@ -4,11 +4,6 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	getGlobalActionableWarningMaxFixes,
-	getGlobalAutofixEnabled,
-	getGlobalAutoformatEnabled,
-	getGlobalContextInjectionEnabled,
-	getGlobalImmediateFormatDefault,
-	getGlobalTurnSummaryEnabled,
 	getGlobalWidgetDefaultVisible,
 	getPiLensGlobalConfigPath,
 	loadPiLensGlobalConfig,
@@ -134,8 +129,10 @@ describe("global pi-lens config", () => {
 			},
 		});
 		expect(getGlobalWidgetDefaultVisible(configPath)).toBe(false);
-		expect(getGlobalAutoformatEnabled(configPath)).toBe(true);
-		expect(getGlobalImmediateFormatDefault(configPath)).toBe(true);
+		const parsed = loadPiLensGlobalConfig(configPath);
+		// format.enabled:true → --no-autoformat stays off; mode:"immediate" → on.
+		expect(resolvePiLensFlag("no-autoformat", false, parsed)).toBe(false);
+		expect(resolvePiLensFlag("immediate-format", false, parsed)).toBe(true);
 	});
 
 	it("warns once on an unknown top-level config key but not on recognized ones", () => {
@@ -186,8 +183,11 @@ describe("global pi-lens config", () => {
 		expect(loadPiLensGlobalConfig(configPath)).toEqual({
 			format: { enabled: false, mode: undefined },
 		});
-		expect(getGlobalAutoformatEnabled(configPath)).toBe(false);
-		expect(getGlobalImmediateFormatDefault(configPath)).toBe(false);
+		const parsed = loadPiLensGlobalConfig(configPath);
+		// format.enabled:false → --no-autoformat resolves on; invalid mode falls
+		// back so immediate-format stays off.
+		expect(resolvePiLensFlag("no-autoformat", false, parsed)).toBe(true);
+		expect(resolvePiLensFlag("immediate-format", false, parsed)).toBe(false);
 	});
 
 	it("resolves formatting flags from global config unless CLI flags are set", () => {
@@ -307,7 +307,9 @@ describe("global pi-lens config", () => {
 		expect(loadPiLensGlobalConfig(configPath)).toEqual({
 			contextInjection: { enabled: false },
 		});
-		expect(getGlobalContextInjectionEnabled(configPath)).toBe(false);
+		expect(
+			resolvePiLensFlag("no-lens-context", false, loadPiLensGlobalConfig(configPath)),
+		).toBe(true);
 
 		// no-lens-context flag is true (i.e. "disable") when config disables injection
 		expect(
@@ -333,20 +335,33 @@ describe("global pi-lens config", () => {
 	it("defaults context injection to enabled when unset", () => {
 		const home = makeTempHome();
 		const configPath = writeConfig(home, JSON.stringify({ widget: {} }));
-		expect(getGlobalContextInjectionEnabled(configPath)).toBe(true);
-		// missing config file → enabled
+		// context injection default-on → no-lens-context resolves off (false).
 		expect(
-			getGlobalContextInjectionEnabled(path.join(home, "nope.json")),
-		).toBe(true);
+			resolvePiLensFlag("no-lens-context", false, loadPiLensGlobalConfig(configPath)),
+		).toBe(false);
+		// missing config file → still default-on
+		expect(
+			resolvePiLensFlag(
+				"no-lens-context",
+				false,
+				loadPiLensGlobalConfig(path.join(home, "nope.json")),
+			),
+		).toBe(false);
 	});
 
 	it("defaults turnSummary to disabled (opt-in, #484)", () => {
 		const home = makeTempHome();
-		expect(getGlobalTurnSummaryEnabled(path.join(home, "nope.json"))).toBe(
-			false,
-		);
+		expect(
+			resolvePiLensFlag(
+				"lens-turn-summary",
+				false,
+				loadPiLensGlobalConfig(path.join(home, "nope.json")),
+			),
+		).toBe(false);
 		const configPath = writeConfig(home, JSON.stringify({ widget: {} }));
-		expect(getGlobalTurnSummaryEnabled(configPath)).toBe(false);
+		expect(
+			resolvePiLensFlag("lens-turn-summary", false, loadPiLensGlobalConfig(configPath)),
+		).toBe(false);
 		expect(resolvePiLensFlag("lens-turn-summary", false, {})).toBe(false);
 	});
 
@@ -359,7 +374,9 @@ describe("global pi-lens config", () => {
 		expect(loadPiLensGlobalConfig(configPath)).toEqual({
 			turnSummary: { enabled: true },
 		});
-		expect(getGlobalTurnSummaryEnabled(configPath)).toBe(true);
+		expect(
+			resolvePiLensFlag("lens-turn-summary", false, loadPiLensGlobalConfig(configPath)),
+		).toBe(true);
 		expect(
 			resolvePiLensFlag("lens-turn-summary", false, {
 				turnSummary: { enabled: true },
@@ -440,14 +457,26 @@ describe("global pi-lens config", () => {
 			expect(loadPiLensGlobalConfig(configPath)).toEqual({
 				autofix: { enabled: false },
 			});
-			expect(getGlobalAutofixEnabled(configPath)).toBe(false);
+			// autofix.enabled:false → --no-autofix resolves on (true).
+			expect(
+				resolvePiLensFlag("no-autofix", false, loadPiLensGlobalConfig(configPath)),
+			).toBe(true);
 		});
 
 		it("defaults autofix to enabled when config is missing or silent", () => {
 			const home = makeTempHome();
-			expect(getGlobalAutofixEnabled(path.join(home, "nope.json"))).toBe(true);
+			// autofix default-on → no-autofix resolves off (false).
+			expect(
+				resolvePiLensFlag(
+					"no-autofix",
+					false,
+					loadPiLensGlobalConfig(path.join(home, "nope.json")),
+				),
+			).toBe(false);
 			const configPath = writeConfig(home, JSON.stringify({ widget: {} }));
-			expect(getGlobalAutofixEnabled(configPath)).toBe(true);
+			expect(
+				resolvePiLensFlag("no-autofix", false, loadPiLensGlobalConfig(configPath)),
+			).toBe(false);
 		});
 
 		it("global autofix.enabled=false disables --no-autofix's default", () => {
@@ -529,6 +558,97 @@ describe("global pi-lens config", () => {
 					"actionableWarnings.autoFix.enabled must be a boolean",
 				),
 			);
+		});
+	});
+
+	// #533: three sibling global scalars used to coerce a present-but-malformed
+	// value to undefined SILENTLY, unlike actionableWarnings.autoFix.maxFixes
+	// which already warned. These pin down that they now warn on present-invalid
+	// input and — the false-positive guard — stay silent when the key is absent.
+	describe("malformed global scalar value warns (#533 value-warn parity)", () => {
+		function warnedFor(substring: string): boolean {
+			return (console.error as ReturnType<typeof vi.fn>).mock.calls
+				.flat()
+				.some((arg) => typeof arg === "string" && arg.includes(substring));
+		}
+
+		it("warns once on a present-but-invalid widget.visible; absent stays silent", () => {
+			const home = makeTempHome();
+			const badPath = writeConfig(
+				home,
+				JSON.stringify({ widget: { visible: "yes" } }),
+			);
+			expect(loadPiLensGlobalConfig(badPath)).toEqual({
+				widget: { visible: undefined },
+			});
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining("widget.visible must be a boolean"),
+			);
+			const callsAfterFirst = (console.error as ReturnType<typeof vi.fn>).mock
+				.calls.length;
+			loadPiLensGlobalConfig(badPath);
+			expect(
+				(console.error as ReturnType<typeof vi.fn>).mock.calls.length,
+			).toBe(callsAfterFirst);
+
+			// Absent visible → no warn (false-positive guard).
+			const silentHome = makeTempHome();
+			const silentPath = writeConfig(silentHome, JSON.stringify({ widget: {} }));
+			loadPiLensGlobalConfig(silentPath);
+			expect(warnedFor("widget.visible")).toBe(true);
+			(console.error as ReturnType<typeof vi.fn>).mockClear();
+			loadPiLensGlobalConfig(silentPath);
+			expect(warnedFor("widget.visible")).toBe(false);
+		});
+
+		it("warns once on a present-but-invalid format.mode; absent stays silent", () => {
+			const home = makeTempHome();
+			const badPath = writeConfig(
+				home,
+				JSON.stringify({ format: { mode: "immedaite" } }),
+			);
+			expect(loadPiLensGlobalConfig(badPath)).toEqual({
+				format: { mode: undefined },
+			});
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining('format.mode must be "immediate" or "deferred"'),
+			);
+
+			// A config with only format.enabled (no mode) must NOT warn about mode.
+			(console.error as ReturnType<typeof vi.fn>).mockClear();
+			const silentHome = makeTempHome();
+			const silentPath = writeConfig(
+				silentHome,
+				JSON.stringify({ format: { enabled: true } }),
+			);
+			loadPiLensGlobalConfig(silentPath);
+			expect(warnedFor("format.mode")).toBe(false);
+		});
+
+		it("warns once on a present-but-invalid dispatch.runnerTimeoutFloorMs; absent stays silent", () => {
+			const home = makeTempHome();
+			const badPath = writeConfig(
+				home,
+				JSON.stringify({ dispatch: { runnerTimeoutFloorMs: "180000" } }),
+			);
+			expect(loadPiLensGlobalConfig(badPath)).toEqual({
+				dispatch: { runnerTimeoutFloorMs: undefined },
+			});
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"dispatch.runnerTimeoutFloorMs must be a positive finite number",
+				),
+			);
+
+			// An empty dispatch object (no floor key) must NOT warn.
+			(console.error as ReturnType<typeof vi.fn>).mockClear();
+			const silentHome = makeTempHome();
+			const silentPath = writeConfig(
+				silentHome,
+				JSON.stringify({ dispatch: {} }),
+			);
+			loadPiLensGlobalConfig(silentPath);
+			expect(warnedFor("dispatch.runnerTimeoutFloorMs")).toBe(false);
 		});
 	});
 

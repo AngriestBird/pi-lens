@@ -63,7 +63,11 @@ import * as path from "node:path";
 import { toPositiveFinite } from "./env-utils.js";
 import {
 	assignFlagConfigSection,
+	flagConfigSectionKeys,
+	GLOBAL_NON_FLAG_CONFIG_SECTIONS,
+	LENS_FLAGS,
 	type LensFlagSpec,
+	PROJECT_FOREIGN_CONFIG_NAMESPACES,
 	PROJECT_SCOPED_LENS_FLAGS,
 	readFlagConfigValue,
 } from "./lens-flag-registry.js";
@@ -71,6 +75,21 @@ import { isAtOrAboveHomeDir, walkUpDirs } from "./path-utils.js";
 import { findPiLensConfigMarkerInDir } from "./workspace-topology.js";
 
 const PROJECT_CONFIG_BASENAMES = [".pi-lens.json", "pi-lens.json"];
+
+/**
+ * The project loader's OWN recognized top-level keys — the non-flag sections it
+ * parses itself. The project-scoped flag sections (`format`, `autofix`,
+ * `actionableWarnings`) are NOT listed here; they are derived from
+ * `PROJECT_SCOPED_LENS_FLAGS` so the registry stays the single source of truth
+ * (#883). Foreign namespaces the shared file also carries live in
+ * `PROJECT_FOREIGN_CONFIG_NAMESPACES` beside the registry.
+ */
+const PROJECT_OWN_CONFIG_KEYS = [
+	"ignore",
+	"rules",
+	"maxProjectFiles",
+	"reviewGraph",
+] as const;
 
 export interface PiLensProjectRuleConfig {
 	/** Optional override for the rule's primary numeric threshold. */
@@ -414,6 +433,41 @@ function parseConfigFile(configPath: string): PiLensProjectConfig {
 					);
 				}
 			}
+		}
+	}
+
+	// #533 hygiene: mirror the global loader's unknown-key warn so a typo in a
+	// shared `.pi-lens.json` (e.g. `maxProjectFile`, `lps`) produces a signal
+	// instead of silently doing nothing. The recognized set is single-sourced
+	// (#883): the project loader's own keys + the project-scoped flag sections
+	// (registry-derived) + the foreign namespaces the LSP loader reads from this
+	// same file. A key recognized ONLY at global scope (e.g. `lsp`, `tests`,
+	// `delta`) gets a distinct, honest signal that it does nothing here rather
+	// than being lumped in with typos — docs previously called this "silently
+	// ignored".
+	const knownProjectKeys = new Set<string>([
+		...PROJECT_OWN_CONFIG_KEYS,
+		...flagConfigSectionKeys(PROJECT_SCOPED_LENS_FLAGS),
+		...PROJECT_FOREIGN_CONFIG_NAMESPACES,
+	]);
+	const globalScopeOnlyKeys = new Set<string>(
+		[
+			...flagConfigSectionKeys(LENS_FLAGS),
+			...GLOBAL_NON_FLAG_CONFIG_SECTIONS,
+		].filter((key) => !knownProjectKeys.has(key)),
+	);
+	for (const key of Object.keys(obj)) {
+		if (knownProjectKeys.has(key)) continue;
+		if (globalScopeOnlyKeys.has(key)) {
+			warnInvalidConfigOnce(
+				configPath,
+				`"${key}" is a global-only pi-lens setting and is not honored in a project .pi-lens.json (set it in ~/.pi-lens/config.json or pass the matching CLI flag); ignored`,
+			);
+		} else {
+			warnInvalidConfigOnce(
+				configPath,
+				`unknown key "${key}" is not a recognized pi-lens setting (check for a typo); ignored`,
+			);
 		}
 	}
 

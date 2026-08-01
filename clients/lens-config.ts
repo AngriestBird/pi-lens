@@ -3,8 +3,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	assignFlagConfigSection,
+	flagConfigSectionKeys,
 	flagValueFromConfig,
 	getLensFlagSpec,
+	GLOBAL_NON_FLAG_CONFIG_SECTIONS,
 	LENS_FLAGS,
 	readFlagConfigValue,
 } from "./lens-flag-registry.js";
@@ -163,14 +165,20 @@ export function loadPiLensGlobalConfig(
 
 		const dispatch = asConfigObject(raw.dispatch);
 		if (dispatch) {
-			config.dispatch = {
-				runnerTimeoutFloorMs:
-					typeof dispatch.runnerTimeoutFloorMs === "number" &&
-					Number.isFinite(dispatch.runnerTimeoutFloorMs) &&
-					dispatch.runnerTimeoutFloorMs > 0
-						? dispatch.runnerTimeoutFloorMs
-						: undefined,
-			};
+			const floor = dispatch.runnerTimeoutFloorMs;
+			if (typeof floor === "number" && Number.isFinite(floor) && floor > 0) {
+				config.dispatch = { runnerTimeoutFloorMs: floor };
+			} else {
+				// #533: warn only when the key is PRESENT but malformed — an absent
+				// key stays silent so a config that never mentions it is not falsely
+				// flagged. Same warn-once path as the maxFixes case below.
+				if ("runnerTimeoutFloorMs" in dispatch) {
+					warnInvalid(
+						"dispatch.runnerTimeoutFloorMs must be a positive finite number",
+					);
+				}
+				config.dispatch = { runnerTimeoutFloorMs: undefined };
+			}
 		}
 
 		const autoFix = asConfigObject(
@@ -197,35 +205,44 @@ export function loadPiLensGlobalConfig(
 
 		const widget = asConfigObject(raw.widget);
 		if (widget) {
-			config.widget = {
-				visible:
-					typeof widget.visible === "boolean" ? widget.visible : undefined,
-			};
+			if (typeof widget.visible === "boolean") {
+				config.widget = { visible: widget.visible };
+			} else {
+				// #533: present-but-wrong-type warns; absent stays silent.
+				if ("visible" in widget) {
+					warnInvalid("widget.visible must be a boolean");
+				}
+				config.widget = { visible: undefined };
+			}
 		}
 
 		const format = asConfigObject(raw.format);
 		if (format) {
 			config.format ??= {};
 			const formatSection = config.format as Record<string, unknown>;
-			formatSection.mode =
-				format.mode === "immediate" || format.mode === "deferred"
-					? format.mode
-					: undefined;
+			if (format.mode === "immediate" || format.mode === "deferred") {
+				formatSection.mode = format.mode;
+			} else {
+				// #533: a present-but-invalid mode (e.g. "immedaite") warns and
+				// falls back; an absent mode stays silent.
+				if ("mode" in format) {
+					warnInvalid('format.mode must be "immediate" or "deferred"');
+				}
+				formatSection.mode = undefined;
+			}
 		}
 
 		// #533 hygiene: a completely unknown top-level key (e.g. a typo like
 		// `lps` for `lsp`) is otherwise dropped silently, so a setting the user
 		// thought they made does nothing with no signal. Warn once per key. The
-		// recognized set is derived from the flag registry (#883 single source
-		// of truth) plus the non-flag global sections handled above; `$schema`
-		// is allowed for editor JSON-schema associations.
+		// recognized set is single-sourced (#883): the flag sections derived
+		// from the registry plus the declared non-flag global sections
+		// (`GLOBAL_NON_FLAG_CONFIG_SECTIONS`, which co-locates `$schema` and the
+		// hand-parsed namespaces beside the registry). Adding a flag needs no
+		// edit here; adding a namespace is a one-line edit in that one constant.
 		const knownGlobalConfigKeys = new Set<string>([
-			...LENS_FLAGS.map((spec) => spec.configKey.split(".")[0]),
-			"ignore",
-			"dispatch",
-			"actionableWarnings",
-			"widget",
-			"$schema",
+			...flagConfigSectionKeys(LENS_FLAGS),
+			...GLOBAL_NON_FLAG_CONFIG_SECTIONS,
 		]);
 		for (const key of Object.keys(raw)) {
 			if (!knownGlobalConfigKeys.has(key)) {
@@ -247,28 +264,6 @@ export function getGlobalIgnorePatterns(configPath?: string): string[] {
 
 export function getGlobalWidgetDefaultVisible(configPath?: string): boolean {
 	return loadPiLensGlobalConfig(configPath)?.widget?.visible !== false;
-}
-
-export function getGlobalAutoformatEnabled(configPath?: string): boolean {
-	return loadPiLensGlobalConfig(configPath)?.format?.enabled !== false;
-}
-
-export function getGlobalAutofixEnabled(configPath?: string): boolean {
-	return loadPiLensGlobalConfig(configPath)?.autofix?.enabled !== false;
-}
-
-export function getGlobalImmediateFormatDefault(configPath?: string): boolean {
-	return loadPiLensGlobalConfig(configPath)?.format?.mode === "immediate";
-}
-
-export function getGlobalContextInjectionEnabled(configPath?: string): boolean {
-	return (
-		loadPiLensGlobalConfig(configPath)?.contextInjection?.enabled !== false
-	);
-}
-
-export function getGlobalTurnSummaryEnabled(configPath?: string): boolean {
-	return loadPiLensGlobalConfig(configPath)?.turnSummary?.enabled === true;
 }
 
 /** Per-turn quickfix cap; undefined means "use the built-in default of 5". */
