@@ -116,6 +116,11 @@ import { createProjectReportTool } from "./tools/project-report.js";
 import { createSymbolSearchTool } from "./tools/symbol-search.js";
 import { logLatency } from "./clients/latency-logger.js";
 import {
+	clearCachePrefixSession,
+	logCacheUsage,
+	observeCachePrefix,
+} from "./clients/cache-observability.js";
+import {
 	getPiLensEvalMs,
 	markPiLensLoaded,
 	PI_LENS_HOST_BOOT_MS,
@@ -1769,6 +1774,12 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		// #1018: drop this (primary) session's prefix baseline now it has ended,
+		// so its entry is reclaimed promptly instead of lingering until the LRU
+		// evicts it. Respects the #473 guard above (a concurrent-secondary
+		// shutdown returned already, so its entry is left for the LRU backstop).
+		clearCachePrefixSession(stableSessionId);
+
 		cancelLSPIdleReset();
 		// #449 slice 1: SYNC-only deregistration (no child spawns — see the
 		// processExiting note below); safe to call unconditionally here.
@@ -1783,6 +1794,26 @@ export default function (pi: ExtensionAPI) {
 		// cross-process instance registry's orphan reaper as the backstop (#472).
 		resetLSPService({ fast: true, processExiting: true, reason: "session_shutdown" });
 	});
+
+	// --- Prompt-cache response-side usage observability (#1018) ---
+	// On each assistant message_end, append ONE `cache_usage` latency record with
+	// the provider-reported token/cost breakdown. `message_end` is a newer host
+	// event; register defensively (clients/agent-nudge.ts pattern) — guard `pi.on`,
+	// wrap in try/catch, and never throw out of the handler — so an older pi host
+	// that never fires it simply produces no records rather than crashing wireup.
+	try {
+		// biome-ignore lint/suspicious/noExplicitAny: message_end overload absent on older host types
+		(pi as any).on?.("message_end", (event: { message?: unknown } | unknown) => {
+			if (!lensEnabled) return;
+			try {
+				logCacheUsage((event as { message?: unknown })?.message, dbg);
+			} catch (err) {
+				dbg(`message_end handler error: ${err}`);
+			}
+		});
+	} catch (err) {
+		dbg(`message_end subscribe failed (older pi host?): ${err}`);
+	}
 
 	// --- Inject turn-end findings into next agent turn ---
 	// jscpd, madge, and turn-end delta results are cached at turn_end and consumed here
@@ -1829,9 +1860,34 @@ export default function (pi: ExtensionAPI) {
 			event: { messages?: Array<{ role: string; content: unknown }> } | unknown,
 			ctx: { cwd?: string },
 		) => {
-			if (!lensEnabled || !contextInjectionEnabled) return;
+			if (!lensEnabled) return;
 			try {
 				const cwd = ctx.cwd ?? process.cwd();
+
+				const existingMessages =
+					(event as { messages?: Array<{ role: string; content: unknown }> })
+						?.messages ?? [];
+
+				// #1018 request-side prefix-stability guard. Pure observation — it runs
+				// on EVERY context call (including non-injecting turns and, above, when
+				// injection is disabled) so a cache-prefix break caused by pi-lens OR
+				// anything else is caught, and it never alters the return value below.
+				// Keyed by the STABLE per-session id (`ctx.sessionManager.getSessionId()`,
+				// same source session_start/#473 use) so a concurrent in-process subagent
+				// gets its own baseline instead of stomping the parent's, and tagged with
+				// the read-only #473 classification so the log is self-describing.
+				const prefixSessionId = getStableSessionId(ctx);
+				observeCachePrefix(
+					existingMessages,
+					runtime.turnIndex,
+					prefixSessionId,
+					classifyCurrentSessionEmission(ctx, prefixSessionId),
+					dbg,
+				);
+
+				// Injection is separately gated; when disabled we still observed above.
+				if (!contextInjectionEnabled) return;
+
 				const turnEndFindings = consumeTurnEndFindings(cacheManager, cwd);
 				const sessionGuidance = consumeSessionStartGuidance(cacheManager, cwd);
 				const testFindings = consumeTestFindings(cacheManager, cwd);
@@ -1843,10 +1899,6 @@ export default function (pi: ExtensionAPI) {
 					...(agentNudge?.messages ?? []),
 				];
 				if (injectedMessages.length === 0) return;
-
-				const existingMessages =
-					(event as { messages?: Array<{ role: string; content: unknown }> })
-						?.messages ?? [];
 
 				// Empty transcript (no turns yet): fall back to prepend semantics —
 				// there is no trailing user message to sit before, and we must never

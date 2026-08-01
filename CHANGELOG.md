@@ -4,6 +4,29 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Prompt-cache observability (refs #1018, closes #1018)** — two provider-independent
+	signals now land in `~/.pi-lens/latency.log` as `type: "phase"` records.
+	(1) Response-side: a defensively feature-detected `message_end` subscription
+	(clients/agent-nudge.ts pattern — guarded, never throws on older hosts) logs one
+	`cache_usage` record per assistant message that carries a `usage`, with
+	`metadata: { provider, model, cacheRead, cacheWrite, input, output, cost }`
+	(provider/model read straight off the assistant message; `cost` is the total).
+	Messages with no usage (or non-assistant messages) are skipped rather than
+	logged as zeros. (2) Request-side: the existing `context` handler now hashes
+	`messages[0]` on every call and logs a `cache_prefix_break` record
+	(`metadata: { turnIndex, previousHash, currentHash, sessionId, sessionRole }`,
+	plus a baseline record on first observation) whenever that hash changes
+	turn-over-turn — a regression guard that flags anything (pi-lens or otherwise)
+	breaking the byte-stable prefix #1016 established. The baseline is keyed by the
+	stable per-session id (`ctx.sessionManager.getSessionId()`) in a small bounded
+	LRU, so a resume/reload keeps comparing against its own baseline while a
+	new/fork or a concurrent in-process subagent (#473) gets an independent baseline
+	instead of a spurious cross-session break; each record is tagged with the
+	read-only #473 `sessionRole` classification, and a primary `session_shutdown`
+	drops the ended session's entry. The hash is pure observation: it never changes
+	the handler's injection behavior or return value, and runs even on non-injecting
+	turns. New `clients/cache-observability.ts`; no new dependencies.
+
 - **Cache-friendly ephemeral context injection (refs #1016, closes #1016)** — the
 	`context` event handler in `index.ts` now splices pi-lens's ephemeral turn-end
 	findings in **immediately before the final message** instead of prepending them
