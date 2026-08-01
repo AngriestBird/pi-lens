@@ -216,6 +216,47 @@ export function getLensFlagSpec(name: string): LensFlagSpec | undefined {
 export const PROJECT_SCOPED_LENS_FLAGS: readonly LensFlagSpec[] =
 	LENS_FLAGS.filter((spec) => spec.scope === "project");
 
+function asConfigObject(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+interface FlagConfigPath {
+	source: Record<string, unknown>;
+	segments: string[];
+}
+
+function resolveFlagConfigPath(
+	raw: Record<string, unknown>,
+	configKey: string,
+	warnInvalid?: (reason: string) => void,
+): FlagConfigPath | undefined {
+	const segments = configKey.split(".");
+	let source = raw;
+	for (let i = 0; i < segments.length - 1; i++) {
+		const object = asConfigObject(source);
+		if (!object) return undefined;
+
+		const segment = segments[i];
+		if (!(segment in object)) return undefined;
+
+		const next = asConfigObject(object[segment]);
+		if (!next) {
+			if (warnInvalid) {
+				warnInvalid(`${segments.slice(0, i + 1).join(".")} must be an object`);
+			}
+			return undefined;
+		}
+
+		source = next;
+	}
+
+	const finalSource = asConfigObject(source);
+	if (!finalSource) return undefined;
+	return { source: finalSource, segments };
+}
+
 /**
  * Read the boolean at a spec's dotted `configKey` out of an already-parsed
  * config object. Returns undefined when any segment is missing or the leaf is
@@ -225,15 +266,15 @@ export function readFlagConfigValue(
 	config: unknown,
 	configKey: string,
 ): boolean | undefined {
-	const segments = configKey.split(".");
-	let node: unknown = config;
-	for (const segment of segments.slice(0, -1)) {
-		if (!node || typeof node !== "object") return undefined;
-		node = (node as Record<string, unknown>)[segment];
-	}
-	if (!node || typeof node !== "object") return undefined;
-	const leaf = (node as Record<string, unknown>)[segments[segments.length - 1]];
-	return typeof leaf === "boolean" ? leaf : undefined;
+	const path = resolveFlagConfigPath(
+		config as Record<string, unknown>,
+		configKey,
+	);
+	if (!path) return undefined;
+
+	const leaf = path.segments[path.segments.length - 1];
+	const value = path.source[leaf];
+	return typeof value === "boolean" ? value : undefined;
 }
 
 /** Turn a config-tier boolean into the flag's value, honoring `negated`. */
@@ -242,12 +283,6 @@ export function flagValueFromConfig(
 	configValue: boolean,
 ): boolean {
 	return spec.negated ? !configValue : configValue;
-}
-
-function asConfigObject(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" && !Array.isArray(value)
-		? (value as Record<string, unknown>)
-		: undefined;
 }
 
 /**
@@ -265,27 +300,20 @@ export function assignFlagConfigSection(
 	configKey: string,
 	warnInvalid: (reason: string) => void,
 ): void {
-	const segments = configKey.split(".");
-	let source = raw;
+	const path = resolveFlagConfigPath(raw, configKey, warnInvalid);
+	if (!path) return;
+
 	let target = out;
-	for (let i = 0; i < segments.length - 1; i++) {
-		const segment = segments[i];
-		if (!(segment in source)) return;
-		const next = asConfigObject(source[segment]);
-		if (!next) {
-			warnInvalid(`${segments.slice(0, i + 1).join(".")} must be an object`);
-			return;
-		}
-		source = next;
+	for (const segment of path.segments.slice(0, -1)) {
 		target[segment] ??= {};
 		target = target[segment] as Record<string, unknown>;
 	}
 
-	const leaf = segments[segments.length - 1];
-	if (leaf in source && typeof source[leaf] !== "boolean") {
+	const leaf = path.segments[path.segments.length - 1];
+	if (leaf in path.source && typeof path.source[leaf] !== "boolean") {
 		warnInvalid(`${configKey} must be a boolean`);
 		target[leaf] = undefined;
 		return;
 	}
-	target[leaf] = source[leaf];
+	target[leaf] = path.source[leaf];
 }
