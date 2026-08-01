@@ -276,7 +276,7 @@ describe("changelog lib — lintSectionBody / lintUnreleased", () => {
   it("treats a null/missing body as clean", () => {
     // extractSection returns null for an absent section.
     expect(lintUnreleased("# Changelog\n\nno sections here")).toEqual([]);
-    expect(lintSectionBody(null as unknown as string)).toEqual([]);
+    expect(lintSectionBody(null)).toEqual([]);
   });
 });
 
