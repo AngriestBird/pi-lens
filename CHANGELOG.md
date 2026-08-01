@@ -4,6 +4,34 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Cascade honesty: degraded/uncomputed impact no longer renders as clean (refs #1023, closes #1023)** —
+	the cascade impact subsystem previously emitted an all-clear that was
+	indistinguishable from "genuinely nothing impacted" whenever it could NOT
+	compute impact: the review graph was size-skipped (`too_many_files` over
+	`PI_LENS_REVIEW_GRAPH_MAX_FILES`) or root-skipped (`unsafe_root`), the changed
+	file had no graph node, or the deferred compute threw — a silent under-report
+	exactly where downstream breakage is most likely (large/over-cap monorepos)
+	(#533). Impact results now carry a first-class `indeterminate` marker
+	(`clients/review-graph/types.ts`) set ONLY on a degraded/cold/errored/
+	missing-node compute; the already-known degraded state is threaded from
+	`getLastGraphBuildInfo().mode`/`skipReason` at the compute call site (no
+	re-derivation), a `missing_node` marker comes straight from
+	`computeImpactCascade`, and a thrown compute is tagged in the pipeline catch. A
+	new `indeterminate` `CascadeSkipReason` flows to the EXISTING turn-end seam
+	(`clients/runtime-turn.ts`), which renders a short honest note in the ADVISORY
+	tier ("Cascade could not compute downstream impact … a clean cascade result
+	does not cover them") instead of silence. The advisory tier (not the blocker
+	tier) is deliberate: an over-cap monorepo skips the graph on every edit, so a
+	blocker would fire hard and never clear turn state every turn (over-escalation,
+	the mirror of the silent-all-clear bug). A HEALTHY graph with a genuinely empty
+	dependent set stays silent (keyed strictly off the degraded mode/marker, never
+	off `neighbors.length === 0` alone — no crying wolf). Companion: the Tier-3 quiet-window reconcile
+	(`clients/lsp/cascade-tier.ts`) now RE-INJECTS a `resolved-found` cold-neighbor
+	error through the same neighbor→turn-end formatting via an `onResolvedFound`
+	callback wired in `index.ts`, instead of leaving it logs-only. The
+	neighbor-touch/freshness pipeline (neighborTouchCache, recentlyCleanNeighborCache,
+	the 40-neighbor budget, tier-aware touch model, deferred cascade flow) is
+	untouched.
 - **Disposition marks under a nested monorepo language root are no longer silently dropped (refs #1030, closes #1030; pairs with #1024)** —
 	a `false-positive`/`flagged`/`defer` mark recorded via `lens_diagnostic_mark`
 	was invisible to the per-edit dispatch filter for every file living under a

@@ -58,6 +58,8 @@ import {
 	readCrossProcessTouchesForTurnStart,
 } from "./clients/recent-touches.js";
 import { registerCascadeTierReconcileTask } from "./clients/lsp/cascade-tier.js";
+import { formatCascadeNeighborDiagnostics } from "./clients/cascade-format.js";
+import { convertLspDiagnostics } from "./clients/dispatch/utils/lsp-diagnostics.js";
 import { initLSPConfig } from "./clients/lsp/config.js";
 import { getLSPService, resetLSPService } from "./clients/lsp/index.js";
 import { sweepOrphans, sweepUntrackedOrphans } from "./clients/instance-reaper.js";
@@ -1661,7 +1663,51 @@ export default function (pi: ExtensionAPI) {
 	registerBuiltinQuietWindowTasks(() => runtime);
 	// #458: reconcile any cascade-lane Tier-3 touches that skipped their
 	// in-lane wait (clients/lsp/cascade-tier.ts) in the same quiet window.
-	registerCascadeTierReconcileTask(() => getLSPService());
+	// #1023: re-inject a cold-snapshot neighbor whose error resolved after the
+	// turn ended through the SAME turn-end cascade seam (append a CascadeRun the
+	// next turn_end merges), reusing the existing neighbor→turn-end formatting —
+	// previously this outcome was logs-only, a silent under-report (#533).
+	registerCascadeTierReconcileTask(() => getLSPService(), {
+		onResolvedFound: ({ filePath, diagnostics }) => {
+			const cwd = runtime.projectRoot;
+			const diags = convertLspDiagnostics(
+				diagnostics.filter((d) => d.severity === 1),
+				filePath,
+				{ tool: "lsp" },
+			);
+			if (diags.length === 0) return;
+			const neighbors = [
+				{
+					filePath,
+					reason: "references" as const,
+					diagnostics: diags,
+					lspTouched: true,
+				},
+			];
+			const formatted = formatCascadeNeighborDiagnostics(cwd, neighbors, {
+				noun: "cold neighbor",
+			});
+			if (!formatted) return;
+			runtime.appendCascadeRun({
+				filePath,
+				result: {
+					filePath,
+					impact: {
+						filePath,
+						changedSymbols: [],
+						directImporters: [],
+						directCallers: [],
+						neighborFiles: [filePath],
+						riskFlags: [],
+					},
+					neighbors,
+					formatted,
+				},
+				neighborCount: 1,
+				diagnosticCount: diags.length,
+			});
+		},
+	});
 	// #484: emit the opt-in run summary entry HERE, not at turn_end. The SDK's
 	// sendCustomMessage STEERS the live model conversation when the session
 	// isStreaming, and turn_end can fire mid-stream; at agent_settled the

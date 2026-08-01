@@ -1379,6 +1379,13 @@ export async function runPipeline(
 						neighborCount: 0,
 						diagnosticCount: 0,
 						skipReason: "error",
+						// #1023: a thrown compute is ALSO "couldn't compute downstream
+						// impact" — carry an indeterminate marker so turn_end surfaces an
+						// honest advisory instead of the error skip being logs-only.
+						indeterminate: {
+							reason: "error",
+							detail: "cascade computation failed",
+						},
 					};
 				},
 			);

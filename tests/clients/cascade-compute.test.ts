@@ -799,7 +799,11 @@ describe("computeCascadeForFile", () => {
 		}
 	});
 
-	it("returns undefined for empty/clean cascade output", async () => {
+	// #1023 over-correction guard: a HEALTHY graph (mode "full") with a genuinely
+	// empty dependent set is a real clean leaf — it must stay `no_neighbors`, NOT
+	// `indeterminate`, and emit NO advisory. The `impact()` helper carries no
+	// `indeterminate` marker, and the default build-info mode is "full".
+	it("returns no_neighbors (not indeterminate) for a healthy graph with zero dependents", async () => {
 		const env = setupTestEnvironment("cascade-empty-");
 		try {
 			const primary = path.join(env.tmpDir, "primary.ts");
@@ -817,6 +821,85 @@ describe("computeCascadeForFile", () => {
 			const run = await computeCascadeForFile(primary, env.tmpDir, { turnSeq: 1, writeSeq: 1 });
 			expect(run.result).toBeUndefined();
 			expect(run.skipReason).toBe("no_neighbors");
+			expect(run.indeterminate).toBeUndefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #1023: a MISSING-NODE compute (computeImpactCascade marks the result
+	// indeterminate because the changed file has no graph node) must NOT collapse
+	// into `no_neighbors` — it is "couldn't compute", not "nothing impacted".
+	it("returns indeterminate when the impact result is marked indeterminate (missing node)", async () => {
+		const env = setupTestEnvironment("cascade-missing-node-");
+		try {
+			const primary = path.join(env.tmpDir, "primary.ts");
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			mocks.computeImpactCascade.mockReturnValue({
+				...impact(primary, []),
+				indeterminate: { reason: "missing_node" },
+			});
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile: vi.fn(),
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			const run = await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+			expect(run.result).toBeUndefined();
+			expect(run.skipReason).toBe("indeterminate");
+			expect(run.indeterminate?.reason).toBe("missing_node");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #1023: a SIZE-SKIPPED graph (getLastGraphBuildInfo().mode === "skipped",
+	// too_many_files) — the ALREADY-KNOWN degraded state is threaded onto the
+	// result at the compute site. Every edit computes zero neighbors against the
+	// empty graph; this must surface as `indeterminate`, not a silent all-clear.
+	it("returns indeterminate when the review graph was size-skipped (too_many_files)", async () => {
+		const env = setupTestEnvironment("cascade-size-skip-");
+		try {
+			const primary = path.join(env.tmpDir, "primary.ts");
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			// A healthy-looking (non-marked) empty impact — the degradation is known
+			// ONLY via the build-info slot, exactly as in production.
+			mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile: vi.fn(),
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			const { _setLastGraphBuildInfoForTests } = await import(
+				"../../clients/review-graph/builder.js"
+			);
+			_setLastGraphBuildInfoForTests({
+				reused: false,
+				mode: "skipped",
+				skipReason: "too_many_files",
+				sourceFileCount: 5000,
+				maxFileCount: 4000,
+			} as any);
+
+			const run = await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+			expect(run.result).toBeUndefined();
+			expect(run.skipReason).toBe("indeterminate");
+			expect(run.indeterminate?.reason).toBe("graph_degraded");
+			expect(run.indeterminate?.detail).toContain("5000");
 		} finally {
 			env.cleanup();
 		}

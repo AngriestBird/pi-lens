@@ -303,6 +303,14 @@ export function getLastGraphBuildInfo(): GraphBuildInfo {
 }
 
 /**
+ * Test-only: force the last-build-info slot (e.g. to simulate a `too_many_files`
+ * size-skip without walking a real over-cap repo). #1023 degraded-path coverage.
+ */
+export function _setLastGraphBuildInfoForTests(info: GraphBuildInfo): void {
+	_lastGraphBuildInfo = info;
+}
+
+/**
  * Read-only access to the already-built review graph for `cwd` — NEVER builds.
  * Returns a query-ready clone of the in-memory cached graph if one exists, else
  * undefined. For read-substitute callers (module_report, #256) that must not
