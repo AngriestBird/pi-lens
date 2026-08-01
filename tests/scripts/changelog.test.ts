@@ -21,6 +21,8 @@ import {
   unreleasedHasEntries,
   promoteUnreleased,
   summarizeSection,
+  lintSectionBody,
+  lintUnreleased,
 } from "../../scripts/lib/changelog.mjs";
 
 const REPO_ROOT = path.resolve(
@@ -196,6 +198,88 @@ describe("changelog lib — summarizeSection", () => {
   });
 });
 
+// The linter mirrors the two ways summarizeSection silently mangled the
+// v3.8.74 release notes: entries added above the first `### ` heading were
+// dropped, and hard-wrapped bold titles rendered truncated without their refs.
+describe("changelog lib — lintSectionBody / lintUnreleased", () => {
+  it("passes a well-formed section", () => {
+    const body = [
+      "### Added",
+      "",
+      "- **A new thing (#10)** — with prose that wraps",
+      "  onto a continuation line, which is fine.",
+      "",
+      "### Fixed",
+      "",
+      "- **A fix (refs #20, closes #20)** — details.",
+      "",
+    ].join("\n");
+    expect(lintSectionBody(body)).toEqual([]);
+  });
+
+  it("flags an orphan entry above the first `### ` heading", () => {
+    const body = [
+      "- **Dropped by the summarizer (#1)** — no heading above it.",
+      "",
+      "### Fixed",
+      "",
+      "- **A fix (#2)** — fine.",
+      "",
+    ].join("\n");
+    const problems = lintSectionBody(body);
+    expect(problems).toHaveLength(1);
+    expect(problems[0].kind).toBe("orphan");
+    expect(problems[0].text).toContain("Dropped by the summarizer");
+  });
+
+  it("flags a bold title whose `**` does not close on the first line", () => {
+    const body = [
+      "### Fixed",
+      "",
+      "- **A title that wraps across a line break",
+      "  and only closes here (refs #33)** — prose.",
+      "",
+    ].join("\n");
+    const problems = lintSectionBody(body);
+    expect(problems).toHaveLength(1);
+    expect(problems[0].kind).toBe("wrapped-title");
+  });
+
+  it("does not flag indented continuation lines that start with `-`", () => {
+    const body = [
+      "### Changed",
+      "",
+      "- **Real entry (#4)** — a list follows:",
+      "  - an indented sub-bullet, not a top-level entry",
+      "  - another one",
+      "",
+    ].join("\n");
+    expect(lintSectionBody(body)).toEqual([]);
+  });
+
+  it("reports both problem kinds together", () => {
+    const body = [
+      "- **Orphan and wrapped at once",
+      "  closes here (#5)** — prose.",
+      "",
+      "### Fixed",
+      "",
+      "- **Clean (#6)** — ok.",
+      "",
+    ].join("\n");
+    const kinds = lintSectionBody(body)
+      .map((p) => p.kind)
+      .sort();
+    expect(kinds).toEqual(["orphan", "wrapped-title"]);
+  });
+
+  it("treats a null/missing body as clean", () => {
+    // extractSection returns null for an absent section.
+    expect(lintUnreleased("# Changelog\n\nno sections here")).toEqual([]);
+    expect(lintSectionBody(null)).toEqual([]);
+  });
+});
+
 describe("repo CHANGELOG.md contract", () => {
   it("has an Unreleased section (may be empty right after a release bump)", () => {
     // Existence, not entries: `changelog:release` promotes [Unreleased] to a
@@ -203,6 +287,19 @@ describe("repo CHANGELOG.md contract", () => {
     // fail on every release commit. `npm run changelog:check` guards the
     // has-entries precondition at the point it actually matters (pre-bump).
     expect(extractSection(CHANGELOG, "Unreleased")).not.toBeNull();
+  });
+
+  // Regression guard for the v3.8.74 release-notes breakage: new entries must be
+  // authored so the summarizer can render them — under a `### ` heading and with
+  // a single-line bold title. Fails at PR time on a malformed [Unreleased] entry.
+  it("has no [Unreleased] entries the release-notes summarizer would mangle", () => {
+    const problems = lintUnreleased(CHANGELOG);
+    expect(
+      problems,
+      `Malformed [Unreleased] entries:\n${problems
+        .map((p) => `  [${p.kind}] ${p.text}`)
+        .join("\n")}`,
+    ).toEqual([]);
   });
 
   // The CHANGELOG begins at the 3.x line; pre-3.x tags predate it (the backfill

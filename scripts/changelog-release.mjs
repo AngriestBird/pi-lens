@@ -14,7 +14,11 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { promoteUnreleased, unreleasedHasEntries } from "./lib/changelog.mjs";
+import {
+  promoteUnreleased,
+  unreleasedHasEntries,
+  lintUnreleased,
+} from "./lib/changelog.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CHANGELOG_PATH = join(__dirname, "..", "CHANGELOG.md");
@@ -38,6 +42,23 @@ function main() {
   if (args.check) {
     if (!unreleasedHasEntries(text)) {
       console.error("`## [Unreleased]` has no entries to release.");
+      process.exit(1);
+    }
+    // Reject entries the release-notes summarizer would silently mangle
+    // (orphan bullets outside a `### ` heading; wrapped bold titles). Caught
+    // here so a bad entry fails at PR/release time, not after a broken release.
+    const problems = lintUnreleased(text);
+    if (problems.length) {
+      console.error(
+        "`## [Unreleased]` has entries the release-notes summarizer would drop or truncate:",
+      );
+      for (const p of problems) {
+        const hint =
+          p.kind === "orphan"
+            ? "move it under a `### Added/Changed/Fixed/Security` heading"
+            : "put the whole `**bold title (refs #NNN)**` on one line";
+        console.error(`  - [${p.kind}] "${p.text}" — ${hint}`);
+      }
       process.exit(1);
     }
     console.log("[Unreleased] has entries — ready to release.");
