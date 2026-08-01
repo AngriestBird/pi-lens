@@ -357,11 +357,65 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			},
 		});
 	}
+	// #1023: surface an HONEST note whenever a cascade run could not compute
+	// downstream impact (degraded/over-cap graph, missing node, or a thrown
+	// compute) — never a silent all-clear (#533). This goes to the ADVISORY tier,
+	// NOT the blocker tier: in an over-cap monorepo the graph is `skipped` on
+	// every edit, so a blocker would fire hard and never clear turn state every
+	// turn (over-escalation — the mirror of the silent-all-clear bug). Advisory
+	// still reaches the agent, just without the blocker mechanics. Keyed strictly
+	// off the `indeterminate` marker threaded by the compute; a healthy build
+	// with a genuinely empty dependent set carries no marker and stays silent
+	// (over-correction guard).
+	const indeterminateRuns = cascadeRuns.filter((r) => r.indeterminate);
+	if (indeterminateRuns.length > 0) {
+		const byDetail = new Map<string, string[]>();
+		for (const r of indeterminateRuns) {
+			const detail =
+				r.indeterminate?.detail ??
+				(r.indeterminate?.reason === "missing_node"
+					? "changed file not in the review graph"
+					: "review graph unavailable");
+			const files = byDetail.get(detail) ?? [];
+			files.push(toRunnerDisplayPath(cwd, r.filePath));
+			byDetail.set(detail, files);
+		}
+		const lines: string[] = [];
+		for (const [detail, filesRaw] of byDetail) {
+			const files = [...new Set(filesRaw)];
+			const shown = files.slice(0, 5).join(", ");
+			const more = files.length > 5 ? ` (+${files.length - 5} more)` : "";
+			lines.push(`  • ${detail}: ${shown}${more}`);
+		}
+		const fileCount = new Set(
+			indeterminateRuns.map((r) => normalizeMapKey(r.filePath)),
+		).size;
+		const reasons = [...byDetail.keys()].join("; ");
+		// Factual/informational phrasing — the advisory tier wraps this with an
+		// "ℹ️ Advisory — no action required this turn:" label, so an imperative
+		// ("review dependents manually") would contradict it. The #533 substance
+		// stays: a clean cascade result does NOT cover these files' dependents.
+		advisoryParts.push(
+			`Cascade could not compute downstream impact for ${fileCount} edited file(s) this turn — ` +
+				`the review graph was unavailable (${reasons}), so their dependents were not ` +
+				`cascade-checked and a clean cascade result does not cover them.\n${lines.join("\n")}`,
+		);
+		logCascade({
+			phase: "cascade_indeterminate",
+			filePath: files[0] ?? cwd,
+			metadata: {
+				fileCount,
+				reasons: indeterminateRuns.map((r) => r.indeterminate?.reason),
+			},
+		});
+	}
+
 	const cascadeSkipped: Record<CascadeSkipReason, number> = {
 		blockers: 0,
 		non_code: 0,
 		no_neighbors: 0,
 		clean: 0,
+		indeterminate: 0,
 		error: 0,
 	};
 	for (const r of cascadeRuns) {

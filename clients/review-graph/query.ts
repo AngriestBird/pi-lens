@@ -128,6 +128,10 @@ export function computeImpactCascade(
 	const normalizedFile = normalizeMapKey(changedFile);
 	const fileNodeId = graph.fileNodes.get(normalizedFile);
 	if (!fileNodeId) {
+		// #1023: the changed file has no node in the graph — we CANNOT enumerate
+		// its dependents, so this empty result is "couldn't compute", NOT "nothing
+		// depends on it". Mark it indeterminate so callers surface an honest
+		// advisory instead of an all-clear (#533).
 		return {
 			filePath: normalizedFile,
 			changedSymbols: [],
@@ -135,6 +139,7 @@ export function computeImpactCascade(
 			directCallers: [],
 			neighborFiles: [],
 			riskFlags: [],
+			indeterminate: { reason: "missing_node" },
 		};
 	}
 

@@ -1,5 +1,10 @@
 import type { Diagnostic } from "./dispatch/types.js";
-import type { ImpactCascadeResult } from "./review-graph/types.js";
+import type {
+	CascadeIndeterminate,
+	ImpactCascadeResult,
+} from "./review-graph/types.js";
+
+export type { CascadeIndeterminate };
 
 export interface CascadeNeighborResult {
 	filePath: string;
@@ -22,6 +27,7 @@ export type CascadeSkipReason =
 	| "non_code"    // file kind not eligible for cascade
 	| "no_neighbors" // reverse-dep lookup found no importing files
 	| "clean"       // neighbors found but none had new diagnostics
+	| "indeterminate" // #1023: impact could NOT be computed (degraded/cold/missing-node graph) — surfaced as an honest advisory, never as a silent all-clear
 	| "error";      // the deferred compute rejected (never surfaced inline)
 
 /**
@@ -34,4 +40,11 @@ export interface CascadeRun {
 	neighborCount: number;
 	diagnosticCount: number;
 	skipReason?: CascadeSkipReason;
+	/**
+	 * #1023: set when the impact compute was DEGRADED/COLD/ERRORED (see
+	 * {@link CascadeIndeterminate}). Carries the detail the turn-end seam renders
+	 * into an honest "downstream impact not computed" advisory. Decoupled from
+	 * `skipReason` so a thrown compute (`skipReason: "error"`) can surface too.
+	 */
+	indeterminate?: CascadeIndeterminate;
 }

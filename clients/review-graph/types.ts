@@ -127,6 +127,27 @@ export interface ReviewGraphPersistCoverage {
 	inProgress?: true;
 }
 
+/**
+ * #1023: why a cascade impact compute could NOT be trusted as a complete
+ * dependent set — as opposed to a genuinely-empty one. Only ever set on a
+ * DEGRADED/COLD/ERRORED/MISSING-NODE compute; a healthy graph with a real
+ * leaf file (node present, zero incoming edges) never carries this and stays
+ * silent (the over-correction guard: a true clean edit must not cry wolf).
+ */
+export type CascadeIndeterminateReason =
+	| "graph_degraded" // review graph skipped (too_many_files / unsafe_root)
+	| "missing_node" // changed file has no node in the (otherwise-built) graph
+	| "error"; // the deferred compute threw before producing a result
+
+export interface CascadeIndeterminate {
+	reason: CascadeIndeterminateReason;
+	/** Short human detail for the honest turn-end advisory. */
+	detail?: string;
+	/** Populated for `graph_degraded` from getLastGraphBuildInfo(). */
+	sourceFileCount?: number;
+	maxFileCount?: number;
+}
+
 export interface ImpactCascadeResult {
 	filePath: string;
 	changedSymbols: string[];
@@ -134,4 +155,11 @@ export interface ImpactCascadeResult {
 	directCallers: string[];
 	neighborFiles: string[];
 	riskFlags: string[];
+	/**
+	 * #1023: present ONLY when impact could not be computed (degraded/cold/
+	 * errored graph, or the changed file has no graph node). Absent means the
+	 * dependent set below is TRUSTWORTHY — an empty `neighborFiles` then means a
+	 * genuine clean leaf, not a silent under-report.
+	 */
+	indeterminate?: CascadeIndeterminate;
 }

@@ -126,4 +126,116 @@ describe("cascade turn-end merge", () => {
 			env.cleanup();
 		}
 	});
+
+	// #1023: a degraded/indeterminate cascade run must surface an HONEST note at
+	// turn_end (today it was a silent all-clear — the #533 bug). It lands in the
+	// ADVISORY tier (not the blocker tier) so an over-cap monorepo does not fire a
+	// hard blocker every turn. Keyed off the `indeterminate` marker on the run.
+	it("surfaces an indeterminate advisory when a cascade run could not compute impact", async () => {
+		const env = setupTestEnvironment("cascade-indeterminate-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const primary = path.join(env.tmpDir, "over-cap.ts");
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			cacheManager.addModifiedRange(
+				primary,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+
+			runtime.appendCascadeRun({
+				filePath: primary,
+				result: undefined,
+				neighborCount: 0,
+				diagnosticCount: 0,
+				skipReason: "indeterminate",
+				indeterminate: {
+					reason: "graph_degraded",
+					detail: "review graph disabled — 5000 files over the 4000 cap",
+					sourceFileCount: 5000,
+					maxFileCount: 4000,
+				},
+			});
+
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			const findings = consumeTurnEndFindings(cacheManager, env.tmpDir);
+			const content = findings?.messages[0]?.content ?? "";
+			expect(content).toContain("Cascade could not compute downstream impact");
+			expect(content).toContain("a clean cascade result does not cover them");
+			expect(content).toContain("over-cap.ts");
+			expect(content).toContain("5000 files over the 4000 cap");
+			// Advisory tier, not blocker tier: it carries the advisory label and
+			// must NOT read as a hard blocker imperative.
+			expect(content).toContain("Advisory — no action required this turn");
+			expect(content).not.toContain("review dependents manually");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #1023 over-correction guard: a HEALTHY run that genuinely found no
+	// dependents (skipReason "no_neighbors", no indeterminate marker) must NOT
+	// emit the advisory — a real clean leaf edit stays silent (no crying wolf).
+	it("stays silent for a healthy no_neighbors run (no over-correction)", async () => {
+		const env = setupTestEnvironment("cascade-clean-leaf-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const primary = path.join(env.tmpDir, "leaf.ts");
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			cacheManager.addModifiedRange(
+				primary,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+
+			runtime.appendCascadeRun({
+				filePath: primary,
+				result: undefined,
+				neighborCount: 0,
+				diagnosticCount: 0,
+				skipReason: "no_neighbors",
+			});
+
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			const findings = consumeTurnEndFindings(cacheManager, env.tmpDir);
+			const content = findings?.messages[0]?.content ?? "";
+			expect(content).not.toContain("Cascade could not compute downstream impact");
+		} finally {
+			env.cleanup();
+		}
+	});
 });

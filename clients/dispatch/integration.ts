@@ -906,6 +906,30 @@ export async function computeCascadeForFile(
 		});
 
 		impact = computeImpactCascade(graph, normalizedFile, cwd);
+		// #1023: buildOrUpdateGraph returns an EMPTY graph (seeded only with the
+		// changed file's own symbols) when the repo is over
+		// PI_LENS_REVIEW_GRAPH_MAX_FILES (`too_many_files`) or the root is unsafe
+		// (`unsafe_root`) — both stamp mode "skipped" on the already-read
+		// graphBuildInfo. Computing impact against that empty graph yields zero
+		// neighbors for EVERY edit, indistinguishable from a genuine clean leaf.
+		// Thread the ALREADY-KNOWN degraded state (never re-derived) onto the
+		// result so the turn-end seam surfaces an honest advisory instead of a
+		// silent all-clear (#533). Keyed strictly off the degraded build mode —
+		// NOT off `neighborFiles.length === 0` — so a healthy build with a real
+		// empty dependent set stays silent (no crying wolf).
+		if (graphBuildInfo.mode === "skipped" && !impact.indeterminate) {
+			impact.indeterminate = {
+				reason: "graph_degraded",
+				detail:
+					graphBuildInfo.skipReason === "too_many_files"
+						? `review graph disabled — ${graphBuildInfo.sourceFileCount ?? "?"} files over the ${graphBuildInfo.maxFileCount ?? "?"} cap`
+						: graphBuildInfo.skipReason === "unsafe_root"
+							? "review graph skipped — workspace root is at/above home dir"
+							: `review graph unavailable (${graphBuildInfo.skipReason ?? "skipped"})`,
+				sourceFileCount: graphBuildInfo.sourceFileCount,
+				maxFileCount: graphBuildInfo.maxFileCount,
+			};
+		}
 		const reverseDepNeighbors = getAffectedFilesFromIndex(
 			reverseDepsIndex,
 			normalizedFile,
@@ -1489,6 +1513,20 @@ export async function computeCascadeForFile(
 	cascadeSessionStats.coldSnapshotTouches += coldSnapshotPaths.length;
 
 	if (!formatted) {
+		// #1023: an indeterminate compute (degraded/cold/missing-node graph) must
+		// NOT collapse into "no_neighbors" — that is the exact silent all-clear the
+		// bug is about. Distinguish it by the marker threaded onto `impact`, never
+		// by `visibleNeighbors.length === 0` alone (a healthy leaf is also empty).
+		if (impact.indeterminate) {
+			return {
+				filePath,
+				result: undefined,
+				neighborCount: visibleNeighbors.length,
+				diagnosticCount: diagCount,
+				skipReason: "indeterminate",
+				indeterminate: impact.indeterminate,
+			};
+		}
 		const skipReason: CascadeSkipReason =
 			visibleNeighbors.length === 0 ? "no_neighbors" : "clean";
 		return {
@@ -1509,6 +1547,10 @@ export async function computeCascadeForFile(
 		result: { filePath, impact, neighbors: visibleNeighbors, formatted },
 		neighborCount: visibleNeighbors.length,
 		diagnosticCount: diagCount,
+		// #1023: even when some fallback neighbors surfaced, a degraded graph means
+		// the dependent set is INCOMPLETE — carry the marker so the turn-end seam
+		// still notes downstream impact was under-computed this turn.
+		...(impact.indeterminate && { indeterminate: impact.indeterminate }),
 	};
 }
 

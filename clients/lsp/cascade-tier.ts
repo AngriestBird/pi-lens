@@ -58,6 +58,7 @@ import { logCascade } from "../cascade-logger.js";
 import { logLatency } from "../latency-logger.js";
 import { normalizeMapKey } from "../path-utils.js";
 import { registerQuietWindowTask } from "../quiet-window.js";
+import type { LSPDiagnostic } from "./client.js";
 import type { LSPService } from "./index.js";
 
 export {
@@ -135,6 +136,13 @@ export interface ReconcileOutcome {
 	outcome: "resolved-found" | "resolved-clean" | "unresolved";
 	ageMs: number;
 	diagnosticCount?: number;
+	/**
+	 * #1023: the actual published diagnostics for a `resolved-found` outcome, so
+	 * the reconcile task can RE-INJECT them into the agent-facing cascade output
+	 * (a cold-snapshot neighbor error that resolved after the turn ended must not
+	 * stay logs-only). Populated only for `resolved-found`.
+	 */
+	diagnostics?: LSPDiagnostic[];
 }
 
 /**
@@ -194,12 +202,15 @@ export async function reconcileOutstandingCascadeTouches(
 				});
 				continue;
 			}
+			const found = entry.diags.length > 0;
 			outcomes.push({
 				filePath: touch.filePath,
 				serverId: touch.serverId,
-				outcome: entry.diags.length > 0 ? "resolved-found" : "resolved-clean",
+				outcome: found ? "resolved-found" : "resolved-clean",
 				ageMs,
 				diagnosticCount: entry.diags.length,
+				// #1023: carry the diagnostics so the task can re-surface them.
+				...(found && { diagnostics: entry.diags }),
 			});
 		} catch (err) {
 			outcomes.push({
@@ -222,6 +233,24 @@ export async function reconcileOutstandingCascadeTouches(
 
 let _reconcileTaskRegistered = false;
 
+/** #1023: a `resolved-found` neighbor error to re-inject into agent-facing output. */
+export interface ResolvedFoundNeighbor {
+	filePath: string;
+	serverId: string;
+	diagnostics: LSPDiagnostic[];
+}
+
+export interface CascadeTierReconcileOptions {
+	/**
+	 * #1023: called (best-effort) for each `resolved-found` outcome so the caller
+	 * can RE-INJECT the neighbor error through the same turn-end cascade seam
+	 * instead of leaving it logs-only. Wired in index.ts to build a CascadeRun via
+	 * the existing neighbor→turn-end formatting and append it to the runtime.
+	 * Never called for `resolved-clean`/`unresolved`.
+	 */
+	onResolvedFound?: (neighbor: ResolvedFoundNeighbor) => void;
+}
+
 /**
  * Register the Tier-3 reconcile task with the quiet-window scheduler
  * (`clients/quiet-window.ts`). Idempotent — safe to call more than once
@@ -229,6 +258,7 @@ let _reconcileTaskRegistered = false;
  */
 export function registerCascadeTierReconcileTask(
 	getLspService: () => Pick<LSPService, "getWarmClientForFile">,
+	options: CascadeTierReconcileOptions = {},
 ): void {
 	if (_reconcileTaskRegistered) return;
 	_reconcileTaskRegistered = true;
@@ -238,6 +268,22 @@ export function registerCascadeTierReconcileTask(
 		if (_outstandingTouches.size === 0) return;
 		const outcomes = await reconcileOutstandingCascadeTouches(getLspService());
 		if (outcomes.length === 0) return;
+
+		// #1023: re-inject each resolved-found neighbor error so it reaches the
+		// agent (previously logs-only). Isolated per-outcome — a throwing callback
+		// must not drop the log line or the sibling re-injections.
+		for (const o of outcomes) {
+			if (o.outcome !== "resolved-found" || !o.diagnostics?.length) continue;
+			try {
+				options.onResolvedFound?.({
+					filePath: o.filePath,
+					serverId: o.serverId,
+					diagnostics: o.diagnostics,
+				});
+			} catch {
+				// best-effort surfacing; the log below is the durable record.
+			}
+		}
 
 		let resolvedFound = 0;
 		let resolvedClean = 0;
