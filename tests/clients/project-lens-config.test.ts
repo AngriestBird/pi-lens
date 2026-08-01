@@ -457,4 +457,204 @@ describe("loadPiLensProjectConfig", () => {
 			expect(typoWarns.length).toBe(1);
 		});
 	});
+
+	// `rules.<id>.disable` / `rules.<id>.select` are the project-level rule
+	// policy — output-only filtering applied by the dispatcher and the
+	// `lens_diagnostics` tool. Disable wins over select (explicit exclusion
+	// trumps explicit inclusion). The matcher normalizes rule ids so an entry
+	// listed as `no-eval` covers `ast-grep:no-eval` and `no-eval-js` (the same
+	// normalization the inline suppression parser already uses).
+	describe("rules.<id>.disable / rules.<id>.select", () => {
+		it("parses a disable list alongside a threshold", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					rules: {
+						"high-complexity": {
+							threshold: 25,
+							disable: ["no-eval", "no-debugger"],
+						},
+					},
+				}),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules["high-complexity"]).toEqual({
+				threshold: 25,
+				disable: ["no-eval", "no-debugger"],
+			});
+		});
+
+		it("parses a select list without any threshold", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					rules: {
+						"high-complexity": { select: ["no-eval", "no-debugger"] },
+					},
+				}),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules["high-complexity"]).toEqual({
+				select: ["no-eval", "no-debugger"],
+			});
+		});
+
+		it("accepts a policy-only entry (no threshold, only disable/select)", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					rules: {
+						"unused-var": { disable: ["no-unused-vars"] },
+					},
+				}),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules["unused-var"]).toEqual({
+				disable: ["no-unused-vars"],
+			});
+		});
+
+		it("filters non-string entries out of disable/select lists", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					rules: {
+						"high-complexity": {
+							disable: ["no-eval", 42, null, "no-debugger", { x: 1 }],
+						},
+					},
+				}),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules["high-complexity"]?.disable).toEqual([
+				"no-eval",
+				"no-debugger",
+			]);
+		});
+
+		it("trims whitespace around list entries", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					rules: {
+						"high-complexity": { disable: ["  no-eval  ", " no-debugger"] },
+					},
+				}),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules["high-complexity"]?.disable).toEqual([
+				"no-eval",
+				"no-debugger",
+			]);
+		});
+
+		it("warns once and drops a non-array disable", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					rules: { "high-complexity": { disable: "no-eval" } },
+				}),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules["high-complexity"]?.disable).toBeUndefined();
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"rules.high-complexity.disable must be an array of strings",
+				),
+			);
+		});
+
+		it("warns once and drops a non-array select", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					rules: { "high-complexity": { select: { id: "no-eval" } } },
+				}),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules["high-complexity"]?.select).toBeUndefined();
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"rules.high-complexity.select must be an array of strings",
+				),
+			);
+		});
+
+		it("warns once and drops an empty disable list", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					rules: { "high-complexity": { disable: [] } },
+				}),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules["high-complexity"]?.disable).toBeUndefined();
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"rules.high-complexity.disable must be a non-empty array of strings",
+				),
+			);
+		});
+
+		it("warns once and drops an empty/non-string select list", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					rules: { "high-complexity": { select: [42, null, true] } },
+				}),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules["high-complexity"]?.select).toBeUndefined();
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"rules.high-complexity.select must be a non-empty array of strings",
+				),
+			);
+		});
+
+		it("preserves threshold when an invalid disable value is dropped", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					rules: { "high-complexity": { threshold: 25, disable: "bad" } },
+				}),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules["high-complexity"]?.threshold).toBe(25);
+			expect(cfg.rules["high-complexity"]?.disable).toBeUndefined();
+		});
+
+		it("preserves both disable and select when both are valid", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					rules: {
+						"high-complexity": {
+							disable: ["no-eval"],
+							select: ["no-debugger"],
+						},
+					},
+				}),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules["high-complexity"]?.disable).toEqual(["no-eval"]);
+			expect(cfg.rules["high-complexity"]?.select).toEqual(["no-debugger"]);
+		});
+
+		it("does not warn on a forward-compat entry with no recognized fields", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					rules: {
+						"future-rule": { unrelated: true },
+					},
+				}),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			// No recognized fields → entry not stored (forward-compat). No
+			// warning emitted either, since unrecognized keys are silently
+			// ignored for forward-compat rules per the existing describe block.
+			expect(cfg.rules["future-rule"]).toBeUndefined();
+		});
+	});
 });

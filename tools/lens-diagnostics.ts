@@ -20,6 +20,9 @@ import {
 	getDisposition,
 } from "../clients/diagnostic-dispositions.js";
 import { applyInlineSuppressions } from "../clients/dispatch/inline-suppressions.js";
+import { normalizeRuleForDedup } from "../clients/dispatch/rule-id-normalize.js";
+import { applyRulePolicy, rulePolicyMapFromConfig } from "../clients/dispatch/rule-policy.js";
+import { loadPiLensProjectConfig } from "../clients/project-lens-config.js";
 import { compactRenderResult } from "./render-compact.js";
 import { combineAbortSignals } from "../clients/deadline-utils.js";
 import { getProjectIgnoreMatcher } from "../clients/file-utils.js";
@@ -413,11 +416,16 @@ function appendProjectDiagnosticsDeltaLines(
  * delta mode re-serves them. Anchored via `projectDiagnosticToWidget` so the
  * (tool, rule) an agent's mark binds to matches mode=full's own project-runner
  * filter (`applyInlineSuppressionsToSummaries`), keeping the two paths in
- * agreement. Weak-anchored → no file read.
+ * agreement. Weak-anchored → no file read. Also applies the project's
+ * `.pi-lens.json` `rules.<id>.disable`/`select` policy so a project's policy
+ * overlays the same delta report cache; the cache is otherwise insensitive to
+ * a project-config edit (the per-edit path picks it up immediately, but a
+ * non-dispatch tool query would replay the pre-edit state).
  */
 function filterDeltaReportDispositions(
 	report: ProjectDiagnosticsDeltaReport | undefined,
 	cwd: string,
+	policyMap: ReturnType<typeof rulePolicyMapFromConfig>,
 ): ProjectDiagnosticsDeltaReport | undefined {
 	if (!report?.diagnostics.length) return report;
 	const kept = report.diagnostics.filter(
@@ -425,9 +433,20 @@ function filterDeltaReportDispositions(
 			applyWeakDispositions([projectDiagnosticToWidget(d)], cwd, d.filePath)
 				.length === 1,
 	);
-	return kept.length === report.diagnostics.length
-		? report
-		: { ...report, diagnostics: kept };
+	const policyKept = applyRulePolicy(kept, policyMap);
+	if (policyKept.length === report.diagnostics.length) return report;
+	return { ...report, diagnostics: policyKept };
+}
+
+/**
+ * Cache the load rule-policy map from a project's `.pi-lens.json` — same
+ * source the per-edit dispatch path uses, so a project's policy applies
+ * consistently across every output surface. Filtered to entries that actually
+ * have a `disable`/`select` list (thresholds are handled elsewhere), so the
+ * hot path returns undefined for the common case and stays cheap.
+ */
+function loadProjectRulePolicyMap(cwd: string) {
+	return rulePolicyMapFromConfig(loadPiLensProjectConfig(cwd).rules);
 }
 
 function formatDeltaMode(
@@ -446,9 +465,17 @@ function formatDeltaMode(
 	);
 	const actionable = actionableEntry?.data;
 	const quality = qualityEntry?.data;
+	// Project rule policy (`.pi-lens.json` `rules.<id>.disable` /
+	// `rules.<id>.select`) — output-only filtering applied consistently across
+	// every mode. The cache-only delta/all paths would otherwise leak project-
+	// policy oversight (the per-edit dispatch already filters, but the cache
+	// snapshots predate the user's project config edit and would replay
+	// filtered findings). Weak-anchored like weak disposition — zero I/O.
+	const policyMap = loadProjectRulePolicyMap(cwd);
 	const projectDelta = filterDeltaReportDispositions(
 		loadProjectDiagnosticsDeltaReport(cwd),
 		cwd,
+		policyMap,
 	);
 	const ignoreFile = createCurrentIgnoreFilter(cwd);
 	const includeFile = (filePath: string) =>
@@ -462,14 +489,20 @@ function formatDeltaMode(
 		.filter((file) => includeFile(file.filePath))
 		.map((file) => ({
 			filePath: file.filePath,
-			warnings: applyWeakDispositions(file.warnings ?? [], cwd, file.filePath),
+			warnings: applyRulePolicy(
+				applyWeakDispositions(file.warnings ?? [], cwd, file.filePath),
+				policyMap,
+			),
 		}))
 		.filter((file) => file.warnings.length > 0);
 	const qualityFiles = (quality?.files ?? [])
 		.filter((file) => includeFile(file.filePath))
 		.map((file) => ({
 			filePath: file.filePath,
-			warnings: applyWeakDispositions(file.warnings ?? [], cwd, file.filePath),
+			warnings: applyRulePolicy(
+				applyWeakDispositions(file.warnings ?? [], cwd, file.filePath),
+				policyMap,
+			),
 		}))
 		.filter((file) => file.warnings.length > 0);
 
@@ -527,7 +560,10 @@ function formatDeltaMode(
 			.filter((f) => includeFile(f.filePath))
 			.map((f) => ({
 				...f,
-				diagnostics: applyWeakDispositions(f.diagnostics, cwd, f.filePath),
+				diagnostics: applyRulePolicy(
+					applyWeakDispositions(f.diagnostics, cwd, f.filePath),
+					policyMap,
+				),
 			}))
 			.filter((f) => f.diagnostics.length > 0);
 		const carriedIssues = carried.reduce((n, f) => n + f.diagnostics.length, 0);
@@ -717,6 +753,23 @@ function filterProjectDiagnosticsDeltaReport(
 	};
 }
 
+/**
+ * Apply the project rule policy to a project-diagnostics snapshot/delta
+ * report's `diagnostics` list, in place of the collection's shape. Used by
+ * `formatFullMode` so `projectSnapshot.diagnostics.length` /
+ * `projectDelta.diagnostics.length` — which feed both the merged summaries
+ * and the `details.projectDiagnostics`/`details.projectDiagnosticsDelta`
+ * counts — already reflect the policy instead of reporting a pre-policy
+ * count that disagrees with the rendered text.
+ */
+function applyProjectRulePolicy<T extends { diagnostics: ProjectDiagnostic[] }>(
+	value: T | undefined,
+	policyMap: ReturnType<typeof rulePolicyMapFromConfig>,
+): T | undefined {
+	if (!value) return undefined;
+	return { ...value, diagnostics: applyRulePolicy(value.diagnostics, policyMap) };
+}
+
 /** A diagnostic counts as error-like when it blocks or has error severity. */
 function isErrorLike(d: WidgetDiagnostic): boolean {
 	return d.semantic === "blocking" || d.severity === "error";
@@ -788,10 +841,11 @@ function projectDiagnosticToWidget(
 // violation must collapse to one finding in mode=full's merge regardless of which
 // engine produced it. Strip the `ast-grep:` source prefix and the `-js` language
 // suffix (the napi runner already treats `<id>` / `<id>-js` as one rule) so the
-// LSP sweep and the napi scan don't double-report the same line.
-function normalizeRuleForDedup(ruleId: string): string {
-	return ruleId.replace(/^ast-grep:/, "").replace(/-js$/, "");
-}
+// LSP sweep and the napi scan don't double-report the same line. The
+// normalization itself now lives in `clients/dispatch/rule-id-normalize.ts` so the
+// inline suppression parser, the project rule-policy matcher, and dedup all apply
+// the same canonical form — `normalizeRuleForDedup` is the back-compat alias it
+// re-exports.
 
 function diagnosticDedupKey(
 	filePath: string,
@@ -974,10 +1028,17 @@ function mergeDiagnosticsWithWidgetSummaries(
  * a read failure is fail-safe (keep the diagnostics rather than hide a finding on
  * an I/O error). Re-summarizes so the blocking/error/warning counts reflect the
  * suppression.
+ *
+ * Also applies the project's `.pi-lens.json` `rules.<id>.disable`/`select`
+ * policy AFTER inline suppression / disposition so the same set of findings
+ * the per-edit `dispatcher.ts` filters is what's rendered here. The policy
+ * map is passed in (computed once per `formatFullMode` call) rather than
+ * re-deriving per file — see `loadProjectRulePolicyMap(cwd)`.
  */
 async function applyInlineSuppressionsToSummaries(
 	summaries: FileDiagnosticSummary[],
 	cwd: string,
+	policyMap: ReturnType<typeof rulePolicyMapFromConfig>,
 ): Promise<FileDiagnosticSummary[]> {
 	return Promise.all(
 		summaries.map(async (summary) => {
@@ -994,11 +1055,16 @@ async function applyInlineSuppressionsToSummaries(
 			// diagnostics from a fresh LSP sweep/project scan that never went
 			// through that path, so without this a disposed finding reappears here.
 			const kept = applyDispositions(inlineKept, cwd, summary.filePath, content);
+			// Project rule policy (`.pi-lens.json` `rules.<id>.disable`/`select`).
+			// Applied after inline suppression / disposition so the policy's
+			// output-only filtering affects the same surface the per-edit path
+			// produces (no double-counting, no leftover policy-rejected findings).
+			const policyKept = applyRulePolicy(kept, policyMap);
 			// Tag `flagged` diagnostics for the render loop (formatAllMode). Content
 			// is already in hand here (unlike mode=all/delta's cache-only path), so
 			// this is the one place the tag can be computed without adding I/O to
 			// the "instant" modes.
-			for (const d of kept) {
+			for (const d of policyKept) {
 				// flagged is weak-anchored (module doc, diagnostic-dispositions.ts) so
 				// the tag survives incidental edits to the flagged line itself.
 				const { weak } = anchorsForDiagnostic(cwd, summary.filePath, d, content);
@@ -1006,10 +1072,10 @@ async function applyInlineSuppressionsToSummaries(
 					(d as { flagged?: boolean }).flagged = true;
 				}
 			}
-			if (kept.length === summary.diagnostics.length) return summary;
+			if (policyKept.length === summary.diagnostics.length) return summary;
 			return summarizeDiagnostics(
 				summary.filePath,
-				kept,
+				policyKept,
 				summary.hasFinalSnapshot,
 			);
 		}),
@@ -1233,6 +1299,17 @@ async function formatFullMode(
 			// Never let a footer-reconciliation hiccup fail the scan itself.
 		}
 	}
+	// Project rule policy (`.pi-lens.json` `rules.<id>.disable`/`select`) —
+	// loaded once per mode=full call, BEFORE `projectSnapshot`/`projectDelta`
+	// are built below, so `.diagnostics.length` on both (which feeds
+	// `details.projectDiagnostics`/`details.projectDiagnosticsDelta` as well
+	// as the merge into `summaries`) is the POST-policy count. Threaded into
+	// `applyInlineSuppressionsToSummaries` too (idempotent re-apply there) so
+	// the merged summaries honor the same policy the per-edit dispatch path
+	// applies. A project config read failure is treated as "no policy"
+	// (defensive, matches the `applyInlineSuppressionsToSummaries` read-error
+	// discipline).
+	const policyMap = loadProjectRulePolicyMap(cwd);
 	const scannedSnapshot = filterProjectDiagnosticsSnapshot(
 		rawProjectSnapshot,
 		includeFile,
@@ -1250,15 +1327,21 @@ async function formatFullMode(
 	// computed above, in the SAME `Promise.all` as the LSP sweep (#613) — only
 	// when the caller opted into project-runner state (otherwise it's the
 	// `Promise.resolve({...})` stub from `analyzersPromise` above).
-	const projectSnapshot = foldExtraDiagnosticsIntoSnapshot(
-		scannedSnapshot,
-		extracted.diagnostics.filter((d) => includeFile(d.filePath)),
-		extracted.runners,
-		cwd,
+	const projectSnapshot = applyProjectRulePolicy(
+		foldExtraDiagnosticsIntoSnapshot(
+			scannedSnapshot,
+			extracted.diagnostics.filter((d) => includeFile(d.filePath)),
+			extracted.runners,
+			cwd,
+		),
+		policyMap,
 	);
-	const projectDelta = filterProjectDiagnosticsDeltaReport(
-		loadProjectDiagnosticsDeltaReport(cwd),
-		includeFile,
+	const projectDelta = applyProjectRulePolicy(
+		filterProjectDiagnosticsDeltaReport(
+			loadProjectDiagnosticsDeltaReport(cwd),
+			includeFile,
+		),
+		policyMap,
 	);
 	// #630: only the CONFIRMED LSP results contribute diagnostics to the merge
 	// — an unconfirmed (timed-out/errored) file's placeholder `[]` must not be
@@ -1275,6 +1358,7 @@ async function formatFullMode(
 			projectDelta,
 		),
 		cwd,
+		policyMap,
 	);
 	const result = formatAllMode(cwd, severity, summaries, {
 		mode: "full",
@@ -1594,13 +1678,22 @@ function formatAllMode(
 	// post-dispatch lens_diagnostic_mark (suppress/defer) would otherwise still
 	// show here. Re-apply the weak filter (zero I/O) for the cache-only path and
 	// re-summarize so blocking/error/warning counts reflect the drop.
+	// Same project rule policy (`.pi-lens.json` `rules.<id>.disable`/`select`)
+	// overlays both modes: mode=full re-applies it after inline suppression /
+	// disposition (zero I/O), mode=all applies it here on the cache-only path.
+	// The full path's policyMover is loaded below in `applyInlineSuppressionsToSummaries`.
+	const policyMap = loadProjectRulePolicyMap(cwd);
 	const dispositioned = isFullMode
 		? summaries
 		: summaries.map((s) => {
 				const kept = applyWeakDispositions(s.diagnostics ?? [], cwd, s.filePath);
-				return kept.length === (s.diagnostics?.length ?? 0)
-					? s
-					: summarizeDiagnostics(s.filePath, kept, s.hasFinalSnapshot);
+				const policyKept = applyRulePolicy(kept, policyMap);
+				if (
+					policyKept.length === kept.length &&
+					kept.length === (s.diagnostics?.length ?? 0)
+				)
+					return s;
+				return summarizeDiagnostics(s.filePath, policyKept, s.hasFinalSnapshot);
 			});
 	const visibleSummaries = dispositioned.filter((s) => includeFile(s.filePath));
 
