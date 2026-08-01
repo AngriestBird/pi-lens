@@ -4,6 +4,479 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+### Fixed
+
+## [3.8.74] - 2026-08-01
+
+### Added
+
+- **🙏 Huge thanks to @AngriestBird (Kenny McCormick), this round's standout community contributor** — five merged PRs landed this release: a single source of truth for CLI flags (#1011), secret redaction at the log-write boundary (#954), new slash commands (#906), tree-cache performance improvements (#877), and a test harness for rule-dispatch behavior (#871). Sustained, high-quality work spanning perf, security, config, and test infrastructure — thank you.
+
+- **Prompt-cache observability (refs #1018, closes #1018)** — two provider-independent
+	signals now land in `~/.pi-lens/latency.log` as `type: "phase"` records.
+	(1) Response-side: a defensively feature-detected `message_end` subscription
+	(clients/agent-nudge.ts pattern — guarded, never throws on older hosts) logs one
+	`cache_usage` record per assistant message that carries a `usage`, with
+	`metadata: { provider, model, cacheRead, cacheWrite, input, output, cost }`
+	(provider/model read straight off the assistant message; `cost` is the total).
+	Messages with no usage (or non-assistant messages) are skipped rather than
+	logged as zeros. (2) Request-side: the existing `context` handler now hashes
+	`messages[0]` on every call and logs a `cache_prefix_break` record
+	(`metadata: { turnIndex, previousHash, currentHash, sessionId, sessionRole }`,
+	plus a baseline record on first observation) whenever that hash changes
+	turn-over-turn — a regression guard that flags anything (pi-lens or otherwise)
+	breaking the byte-stable prefix #1016 established. The baseline is keyed by the
+	stable per-session id (`ctx.sessionManager.getSessionId()`) in a small bounded
+	LRU, so a resume/reload keeps comparing against its own baseline while a
+	new/fork or a concurrent in-process subagent (#473) gets an independent baseline
+	instead of a spurious cross-session break; each record is tagged with the
+	read-only #473 `sessionRole` classification, and a primary `session_shutdown`
+	drops the ended session's entry. The hash is pure observation: it never changes
+	the handler's injection behavior or return value, and runs even on non-injecting
+	turns. New `clients/cache-observability.ts`; no new dependencies.
+
+- **Word-index build/refresh/persist outcomes are now durably observable**
+	(refs #958, #926, #533) — every word-index signal previously rode solely on
+	the optional `dbg` callback, a documented no-op in the MCP host where
+	`symbol_search` reads the index. The structured logger (`~/.pi-lens/
+	word-index.log`, shared `createNdjsonLogger` infra) now records, independent
+	of `dbg`: the full-rebuild-vs-incremental decision plus honest coverage
+	(`indexedFileCount`/`truncated` and `refreshed`/`dropped`/`skipped`/`reused`
+	counts) for both the session-start and cold-query (MCP) build paths; a
+	swallowed snapshot **persist failure** as `persist_failed` (a silent stale
+	index otherwise leaves no trace); and the safety refusal for a root at/above
+	`$HOME`. The full-build collector (`collectWordIndexDocs`) now also returns a
+	`skipped` count for files it enumerated but could not index (over the byte
+	cap / unreadable), so a partial index is never reported as complete. The
+	fragile string-parsing `dbg` adapter this replaces is removed.
+
+- **Closed four observability gaps in recently-changed typos-config and
+	project-snapshot code** (refs #533) — none of these change behavior, only
+	what's now logged: (1) the typos LSP's inject-vs-step-aside decision
+	(#967) now logs a `typos_config_resolved` phase in `latency.log` /
+	`sessionstart.log` with `mode: "project_config" | "injected_default"` and
+	the resolved `configPath`, so which typos config is actually active is no
+	longer a guess; (2) a project-snapshot body persist that falls back to the
+	synchronous main-thread gzip because the persist worker died/was
+	unavailable now logs an explicit `project_snapshot_worker_fallback` phase
+	with the `reason` (previously only visible via a test-only variable, or
+	buried in an `offloaded:false` success line) — this is the +656MB-risk
+	degraded path from #950; (3) a corrupt/truncated gzipped snapshot body
+	(gunzip/JSON.parse failure) now logs `project_snapshot_body_corrupt`
+	before failing open to a rebuild, instead of being indistinguishable from
+	"no snapshot yet"; (4) dropping the in-process authoritative snapshot
+	entry for an oversized (>24MB) body now logs
+	`project_snapshot_authoritative_dropped_oversized` — low-priority, but no
+	longer silent.
+
+- **Review-graph checkpoint discards and write failures are now observable**
+	(refs #936, #533) — a present resume checkpoint that's rejected now logs
+	`checkpoint_discarded` with a `reason` (`corrupt`, `version_mismatch`,
+	`not_in_progress`, `git_stamp_mismatch`, `ignored_ids_mismatch`,
+	`removed_file`, `all_stale`) instead of silently falling back to a full cold
+	rebuild, and a failed checkpoint write (worker error/death, promote failure,
+	sync-write failure) logs `checkpoint_write_failed` — so "why isn't my
+	checkpoint resuming / persisting?" is diagnosable from `review-graph.log`.
+
+- **The review-graph full build is now resumable across sessions** (refs #936
+	limit 2) — a cold full build (walk + tree-sitter parse of every source file)
+	previously restarted from scratch every session, so on a large repo with
+	short-lived sessions it could never finish. The extraction loop now
+	periodically checkpoints the PRE-resolution graph plus the exact set of files
+	already folded into it (with content hashes) to a dedicated
+	`review-graph.checkpoint.json.gz`, and a later session resumes from it,
+	re-walking only files that changed/appeared since. The checkpoint lives in
+	its own file (never the authoritative `review-graph.json.gz`) and its
+	hydrated graph carries `persistCoverage.inProgress` on top of `partial`, so
+	no reader (`getCachedReviewGraph`, `loadPersistedGraph`) can ever serve or
+	launder a mid-build checkpoint as a complete graph (honesty doctrine, #533).
+	Resume equivalence to a cold build is guaranteed by `addFileToGraph`'s
+	per-file contribution being order-independent (all cross-file linking is
+	deferred to `resolveDeferredSymbolEdges`): content-changed processed files
+	are evicted and re-walked, orphaned placeholder nodes are pruned, and any
+	removed file, ignored-id-set change, version bump, or git-identity mismatch
+	fails open to a cold build rather than risking a wrong graph. Checkpoint
+	stride/interval are tunable via `PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES` /
+	`PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS`.
+
+- **Bundled default typos allowlist for projects without their own config**
+	(fixes #967) — the `typos` auxiliary LSP now injects a small pi-lens-shipped
+	`_typos.toml` (`rules/typos/_typos.toml`, `[default.extend-identifiers]`
+	only: `dito`, `unparseable`) via `initializationOptions.config` whenever a
+	project has no `typos.toml`/`_typos.toml`/`.typos.toml` of its own. A
+	project's own config still always wins outright: when one is found,
+	pi-lens injects nothing at all (rather than letting typos-lsp merge ours
+	on top and risk our defaults outranking the team's own allowlist on key
+	collisions).
+
+- **Session-start latency is attributable end to end** (refs #948) — latency
+	telemetry now separates host boot from pi-lens evaluation and records quick
+	and full session-start totals, pre-handler/bootstrap work, runtime reset,
+	log cleanup, LSP reset, sequence/snapshot reads (including snapshot bytes),
+	and delayed warmup scan/profile/index phases.
+
+- **Review-graph LSP fallback nodes** (refs #307) — when tree-sitter yields
+	zero declarations, the builder may use `documentSymbol` from an already-live,
+	already-open capable server. Nodes carry `provenance: "lsp"`, hierarchical
+	containment survives persistence (including flat native-TypeScript-7 results
+	reconstructed through `containerName`), productive tree-sitter files never
+	pay the request, and unavailable/failed fallback attempts degrade without
+	opening or spawning while remaining visible in `review-graph.log`.
+
+- **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
+	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
+	persist path for CI/cron, forces the debounced snapshot write before exit,
+	and prints file/node/edge/element counts, JSON bytes, and duration. Unsafe
+	roots, build errors/skips, persist failures, and persist-cap trips exit
+	non-zero with their reason instead of silently leaving no snapshot.
+
+- **`/lens-perf` surfaces slow phases in-session** (closes #767) — the command
+	shows independent top-five p50 and p99 rankings with sample counts for both
+	the current process session and the machine-wide active `latency.log` window.
+	It flushes pending writes, streams a tail bounded by the log rotation
+	threshold (`PI_LENS_MAX_LOG_SIZE_MB`, 10MB by default), caps retained samples,
+	and reports malformed/truncated input instead of silently reading it as clean.
+	Session startup total and scan-context computation are now logged as phases so
+	the startup regressions that motivated the command are visible there too.
+
+### Changed
+
+- **Session-start perf: bound the change-log replay + defer log cleanup (closes #1019)** —
+	the interactive session-start path recomputed the project sequence by reading
+	the ENTIRE append-only change log and folding every line — and each fold does a
+	`normalizeMapKey`/`realpathSync.native()` syscall per historical entry, so the
+	`session_start_sequence_read` phase (measured ~94ms, ~47% of a 200ms warm start)
+	grew unbounded with total log length, not the working set. The project snapshot
+	now embeds the DERIVED sequence index (`projectSeq` + per-file `fileSeqByPath`)
+	as of its `seq` (`clients/project-snapshot.ts`), mirrored into the tiny
+	`project-snapshot.meta.json` sidecar so session-start can hydrate it WITHOUT
+	parsing the 40-112MB body (preserving the #947 skip-stale optimization).
+	`readLatestProjectSequence` (`clients/project-changes.ts`) gained an optional
+	base param: it hydrates that index (O(files-in-snapshot), keys already
+	normalized → no per-key `realpath`) and folds ONLY entries with
+	`seq > snapshot.seq` — O(changes-since-snapshot). The fold uses the SAME
+	`Math.max`/`normalizeMapKey` the full replay does, so the result is
+	byte-identical to a full replay (proven by an equivalence test suite covering
+	no-new-entries, new/existing files, deletes, gaps/out-of-order, and the empty
+	log) and order-independent. Correctness-first fallbacks to a full replay: a
+	legacy/missing meta with no embedded index, a version-mismatched meta, and a
+	snapshot whose `seq` is AHEAD of the log (truncation/rotation) — it never serves
+	a wrong seq. Wired into BOTH the quick/interactive and the full session-start
+	paths. Secondary: `log_cleanup` (~7ms) was moved off the synchronous critical
+	path into a deferred `setImmediate` (it still runs every session and notifies
+	async — nothing on the hot path consumed its result).
+
+- **Config-consistency pass on the #166 flag registry (refs #166, #533)** — the
+	#883 registry core (scope split, precedence, negation) was audited consistent
+	and left untouched; the gaps were all in #533 malformed/unknown-input
+	signalling, asymmetric between the global and project loaders. (1) The
+	project loader (`.pi-lens.json`) now warns once on an unrecognized top-level
+	key — a typo like `maxProjectFile` or `lps` previously did nothing silently —
+	while tolerating the foreign namespaces the shared file legitimately carries
+	for the LSP loader (`servers`, `serverOverrides`, `disabledServers`,
+	`warmFiles`, plus `$schema`); a user-level-only lens key placed at project
+	scope (e.g. `lsp`, `tests`, `delta`) gets a distinct "not honored at project
+	scope" signal instead of being lumped in with typos. (2) The recognized-key
+	catalogs are single-sourced (#883): `GLOBAL_NON_FLAG_CONFIG_SECTIONS` and
+	`PROJECT_FOREIGN_CONFIG_NAMESPACES` are declared once beside `LENS_FLAGS`, and
+	both loaders derive flag sections from the registry, so adding a namespace is
+	a one-line edit and adding a flag needs none — replacing a drift-prone inline
+	literal set in the global loader. (3) Three global scalars
+	(`dispatch.runnerTimeoutFloorMs`, `widget.visible`, `format.mode`) that
+	silently coerced a present-but-malformed value to `undefined` now warn on
+	invalid input through the same path as `actionableWarnings.autoFix.maxFixes`,
+	while staying silent when the key is absent (no false warnings). (4) Removed
+	five dead global-only accessors that bypassed the precedence chain
+	(`getGlobalAutoformatEnabled`, `getGlobalAutofixEnabled`,
+	`getGlobalImmediateFormatDefault`, `getGlobalContextInjectionEnabled`,
+	`getGlobalTurnSummaryEnabled`) — no non-test callers existed. (5) Updated
+	`docs/globalconfig.md`, whose "unknown keys are ignored" claim was stale.
+
+- **Normalized call-graph impact checks into structured `ProjectDiagnostic`s**
+	(refs #179) — the last remaining adapter gap in #179's normalization sweep.
+	`runtime-turn.ts`'s turn-end call-graph impact check (WillBreak/MayBreak
+	callers of symbols edited this turn, via `impact()`/`call-graph.ts`) was
+	advisory-text only, unlike the other 9 runners already normalized through
+	`runner-adapters/*.ts`. Added `callGraphImpactToProjectDiagnostics`
+	(`project-diagnostics/runner-adapters/call-graph-impact.ts`), a pure mapper
+	attributing each diagnostic to the CALLER's file (no line — `impact()`'s
+	`ImpactResult` never carries one, and the underlying call-graph symbol
+	table only has a placeholder `line: 1`, so inventing one would be a fake
+	location). Severity is deliberately capped below this codebase's
+	"blocking" hard-stop tier for BOTH WillBreak and MayBreak (#533 honesty):
+	`impact()` is a name-resolution heuristic with no type information, so a
+	resolved caller is never a confirmed break. Wired at turn-end (not
+	`fresh-fetch.ts`/`ANALYZER_IDS`) since impact analysis is inherently
+	per-turn-edit, not a whole-project scan — same reasoning that keeps
+	test-runner's own turn-end fire out of that registry. The existing
+	human-readable advisory string is kept as-is (separate surface, same
+	dual-surface pattern already used by knip's turn-end delta). The call-graph
+	block now runs BEFORE the single `writeProjectDiagnosticsDeltaReport`
+	serialization point (alongside knip's delta push) rather than after it —
+	previously it pushed into `projectDiagnosticsDelta`/`projectDiagnosticsSources`
+	past the one-shot write, so a call-graph-only turn persisted nothing and a
+	mixed turn dropped the call-graph entries, leaving `lens_diagnostics` (a
+	pure reader of the persisted report) unable to ever surface the findings
+	(#533). Covered by a new `handleTurnEnd`-level regression test asserting the
+	persisted report for both call-graph-only and mixed turns.
+
+- **Parallelized the per-turn madge dependency check** (refs #766) — the
+	turn-end circular-dependency pass previously ran one `await checkFile()`
+	per import-changed file in a sequential `for…await` loop, serializing N
+	madge subprocess spawns. `DependencyChecker.checkFilesBatch()` now runs
+	those spawns concurrently (bounded to 6 in flight) via a new turn-end
+	entry point. `DependencyChecker` keeps its circular-dep findings
+	(`lastCircular`/`circularFiles`) as shared instance state that a single-file
+	check overwrites wholesale, so naively parallelizing risked one file's
+	spawn clobbering a sibling's write depending on subprocess completion
+	order. The fix keeps every spawn's result local until all have settled,
+	then folds them into the shared state in original file order — matching
+	the sequential loop's file-by-file overwrite exactly, just without waiting
+	for each subprocess before starting the next. Behavior-preserving: same
+	per-file results, same final circular-dep state, same `dbg` logs — only
+	wall-clock time changes.
+
+- **Every runtime toggle is now settable from BOTH the CLI and
+	`~/.pi-lens/config.json`, driven by one declarative registry** (closes #166) —
+	the flag/config mapping used to live in two disconnected places (twelve
+	`pi.registerFlag` calls in `index.ts` and an if/else chain in
+	`resolvePiLensFlagWithSource`), which let coverage gaps open and persist.
+	Seven flags were registered on the CLI but fell straight through the
+	resolver, so config could never set them: `--no-lens`, `--no-lsp`,
+	`--no-tests`, `--no-delta`, `--lens-guard`, `--no-opengrep`, and
+	`--no-read-guard`. They now read `lens.enabled`, `lsp.enabled`,
+	`tests.enabled`, `delta.enabled`, `guard.enabled`, `opengrep.enabled`, and
+	`readGuard.enabled` (positive keys — a `--no-*` flag is the key set `false`).
+	The four actionable-warning toggles went the other way: they were
+	config-only and are now registered CLI flags too
+	(`--lens-actionable-warnings`, `--lens-actionable-warning-actions`,
+	`--lens-actionable-warning-autofix`, `--lens-actionable-warning-all`).
+	`clients/lens-flag-registry.ts` is the single source both surfaces read, so
+	they cannot diverge again; the wiring test derives its expected flag set from
+	it rather than restating it (the old hand-written list had already drifted,
+	missing `lens-turn-summary`).
+
+- **`actionableWarnings.autoFix.maxFixes` is now actually read** (#166) —
+	documented in `globalconfig.md` since #792 but no loader ever parsed it, so
+	`agent_end` always used the hardcoded default of 5 no matter what the config
+	said. Same defect class as the seven flags above: a documented config key
+	with nothing wiring it to the code that consumes it. Accepts any
+	non-negative whole number; `0` keeps the warning report while applying
+	nothing.
+
+- **Flag provenance gained an `env` tier and reports the global tier more
+	accurately** (#166) — `PI_LENS_NO_CONTEXT_INJECTION` moved out of a
+	hardcoded check in `index.ts` into the registry's `env` binding, so it
+	resolves through the same chain as everything else (env → cli →
+	nested-project → project → global → default) and reports `source: "env"`.
+	The global tier now reports `source: "global"` whenever the key is present,
+	not only when it happens to differ from the built-in default. Affects debug
+	and mutation-skip log lines only, no resolved values change.
+
+- **Unknown top-level keys in `~/.pi-lens/config.json` now warn once instead of
+	being dropped silently** (#166, refs #533) — a typo like `lps` for `lsp`
+	previously did nothing with no signal. The recognized-key set is derived from
+	the flag registry (`LENS_FLAGS`) plus the non-flag sections (`ignore`,
+	`dispatch`, `actionableWarnings`, `widget`) and `$schema`, so it stays in sync
+	with the single source of truth; anything else logs one `[pi-lens] ignoring
+	invalid global config …: unknown key "…"` line and is ignored.
+
+- **The review-graph resume checkpoint (#936) now offloads its gzip to the
+	shared persist worker** (refs #958, #883) — mid-build checkpoint writes
+	previously ran a synchronous `gzipSync` of the growing graph on the event
+	loop; they now stream the stringify+gzip through the same worker the
+	authoritative snapshot uses (via the newly-shared `writeGzipStageFile` core),
+	generation-gated so a slow write can't clobber a newer checkpoint or
+	resurrect one after the build completes and retires it, and falling back to a
+	synchronous write when the worker is unavailable. Best-effort as before — a
+	lost checkpoint only costs a cold rebuild.
+
+- **Project snapshot body is now written gzipped by a worker thread** (refs
+	#958 item 2) — the snapshot body (40-112MB observed) is persisted as
+	`project-snapshot.json.gz`, with the `JSON.stringify` + gzip run on a worker
+	thread off the save path, mirroring the review graph's
+	`persist-worker.ts`/generation-gated-promotion pattern (gzip measured 5-10x
+	on top of the #957 compaction win; the review-graph's own measurement was
+	60MB → 1.4MB). A slow worker write for generation N is discarded rather than
+	promoted over a newer generation N+1 already on disk, and the loader still
+	reads the previous uncompressed `project-snapshot.json` for one compatibility
+	release so an upgrade never loses a snapshot. The save path deliberately does
+	NOT sync-gzip (the #950 review measured a naïve sync gzip regressing host
+	memory by +656MB); when the worker is unavailable/dies the pending body falls
+	back to a synchronous main-thread gzip write, surfaced via the logger rather
+	than silently presented as saved (#533). Read-your-writes across the async
+	promotion is preserved by an in-process authoritative "latest write" that
+	`loadProjectSnapshot` consults before disk, so the merge-write callers
+	(`saveRuntimeProjectSnapshot`, word index, reverse deps) never observe a
+	stale body in the promotion window.
+
+- **Session warmup refreshes the word index incrementally** (refs #958) —
+	the persisted serializer now carries per-file mtimes. Startup still performs
+	the bounded source walk, but reuses unchanged postings, re-tokenizes only
+	stale/new files, and drops deleted files; legacy indexes, refresh failures,
+	and file-set churn above 30% fall back to a full rebuild. The current derived
+	file cap and `truncated` state are re-evaluated on every refresh, and
+	`warmup_word_index` telemetry records mode/refreshed/dropped/reused counts.
+
+- **Project scans feed compact structural IR into review-graph builds** (refs
+	#939) — each fully completed scanner file publishes content-hash-bound
+	imports, reexports, function summaries, symbols, and references. A following
+	or overlapping graph build reuses only exact-hash, successful entries;
+	stale, failed, absent, and cold one-shot paths parse normally. The handoff
+	retains neither source content nor WASM trees, and cancelled scans expose
+	only files completed before cancellation.
+
+- **Session-start performance: LSP pre-warm, snapshot meta-gate, compact cached snapshot** (refs #947) — three
+	measured startup wins: (1) the dominant-language LSP pre-warm was gated on
+	full startup mode that the first-session heuristic never allows (82 quick
+	vs 0 full starts in 31k dogfood log lines), so it now runs inside the
+	quick-mode +2s background warmup pass — once per process,
+	generation-guarded, honoring subagent light mode, warm-attach, the
+	`no-lsp` flag, and the `canWarmCaches` guard, with a `warmup_lsp_prewarm`
+	phase record; (2) session start no longer sync-parses the whole
+	`project-snapshot.json` body (110-130ms at 40MB, ~0.5s at 112MB) before
+	checking freshness — the tiny `project-snapshot.meta.json` sidecar is read
+	first and a stale seq/version skips the body parse entirely
+	(`session_start_snapshot_load` records `skippedStale: true`), with
+	missing-meta installs falling back to the legacy parse; (3) the snapshot
+	is serialized compactly (~30% smaller) and its parsed body is cached
+	in-process per (path, mtime), so `saveRuntimeProjectSnapshot` and the
+	session-start/word-index/scan-context consumers no longer re-parse a file
+	pi-lens itself wrote seconds earlier.
+
+- **Warm LSP names enrich tree-sitter read expansion** (refs #158) — partial
+	read expansion keeps tree-sitter's line boundaries authoritative, but an
+	already-open document with an already-active LSP can now replace the display
+	name/kind from `documentSymbol` (including `Class.method` ancestry) within a
+	150 ms best-effort ceiling. Cold, closed, unsupported, timed-out, or failed
+	servers retain the tree-sitter identity, and `ts_range_expanded` records
+	whether enrichment succeeded.
+
+- **Installer subprocesses are lifetime-coupled** (refs #945) — npm, pip, gem,
+	and archive extraction now use the shared safe-spawn path, await full Windows
+	process-tree termination on timeout, and synchronously clean registered
+	installer children during parent exit/signals.
+
+- **Managed tool installs are cross-process serialized** (refs #945) — a
+	dependency-free atomic lock protects the shared tools tree, verifies owners
+	before stale recovery, bounds lock waits with an honest error, and rechecks
+	discovery after acquisition to avoid duplicate package-manager runs.
+
+- **Ordinary tests never install managed tools** (refs #945) — Vitest sets
+	`PI_LENS_DISABLE_TOOL_INSTALL=1`, its prewarm step creates a local synthetic
+	oxlint probe-cache entry without networking, and one-shot analysis explicitly
+	awaits probe-cache persistence before exit.
+
+- **Installer orphan/locking regressions are process-tested** (refs #945) —
+	fake package-manager coverage verifies Windows timeout tree-kill, exactly one
+	install across concurrent processes, explicit install-disable refusal, and
+	Vitest's default no-install environment.
+
+- **Downgrade TypeScript `unsafe-regex` to advisory and suppress escaped-before-
+  assignment false positives** (refs #932) — the coarse dynamic `RegExp`
+  heuristic no longer blocks edits and recognizes escape/replace calls in a
+  same-file identifier initializer; structural ReDoS detection remains with
+  the `redos-nested-quantifier` ast-grep rule.
+
+- **Review-graph persistence no longer serializes or compresses on the event
+	loop** (refs #939) — debounced snapshots are materialized in one lazy,
+	unref'd worker and streamed through gzip into the new canonical
+	`review-graph.json.gz` cache. The main thread promotes only the current
+	generation's atomic staged file, so the synchronous CLI/exit flush can
+	supersede an in-flight worker without a stale overwrite. Loads retain one
+	release of fallback support for legacy uncompressed `review-graph.json`
+	snapshots; worker failures are logged and degrade to a synchronous persist.
+	Persist telemetry now records element count, raw/gzip bytes, serialization
+	and write time, and whether the work was offloaded.
+
+- **Raise and make the review-graph persist ceiling useful** (refs #936) — the
+	default `GRAPH_PERSIST_MAX_ELEMENTS` cap is now 500,000 (still overrideable
+	through `PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS`), matching measured startup
+	load/reindex costs and allowing the ~208,000-element #919 repository to
+	persist completely. Above the cap, persistence retains whole-file node groups
+	in existing reverse-dependency-centrality order plus induced edges that fit,
+	instead of dropping the snapshot. Exact total-versus-persisted node/edge
+	counts are stored and surfaced; read-only queries may use the partial graph,
+	while incremental builds reject it as a complete base.
+
+- **Logger hot paths now coalesce queued lines and rotate during long sessions** (refs #935) — contiguous NDJSON entries drain through one append up to each truncate boundary while retaining peek-then-remove exit safety and one-write cross-process atomicity. `sessionstart.log` now uses one shared asynchronous writer for ordinary diagnostics (with the crash-adjacent LSP launch write intentionally synchronous), and latency/cascade/tree-sitter/bus-event logs enforce the existing 10 MB cap in process.
+
+- **Incremental review-graph updates avoid redundant whole-graph copies and
+	index rebuilds** (refs #939) — file re-extraction now rebuilds derived indexes
+	once, immutable edges are array-copied without cloning every edge object, the
+	updated graph itself becomes the workspace snapshot, and debounced persistence
+	defers its O(graph) array materialization until the quiet-window flush.
+
+- **Reverse-dependency indexes update at import-edge granularity** (refs #939)
+	instead of rebuilding from every graph edge after a one-file edit. Body-only
+	edits reuse the cached index without rewriting the project snapshot; import
+	changes patch only the touched `imports` and `importedBy` buckets.
+
+- **Review-graph file-cap degradation is now explicit and count-honest** (refs
+	#921) — `project_report` says a capped project has “more than N files” instead
+	of presenting the cap+1 early-exit sentinel as an exact count. `module_report`
+	now marks graph-backed `usedBy`, blast-radius provenance, and
+	`semantic.source` as `unavailable:file-cap` and emits an actionable warning
+	with the cap plus both `.pi-lens.json#maxProjectFiles` and
+	`PI_LENS_REVIEW_GRAPH_MAX_FILES` controls, keeping disabled data distinct from
+	a genuinely empty/cold graph.
+
+- **Project scans release every scan-local fact after each file** (refs #886,
+	#939) instead of retaining source content, imports, summaries, and other
+	derived per-file facts until the scan ends. The live dispatch store remains
+	untouched; only the scanner-owned store is cleared.
+
+- Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
+
+- Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
+
+- **Project diagnostics now use one file-major scan pass** (refs #896) —
+	tree-sitter rules, fact rules, and bundled ast-grep share each eligible
+	file's content read while retaining their individual extension/size gates,
+	diagnostic ordering, cancellation behavior, and latency telemetry. Full
+	review-graph builds likewise hash the bytes already read for extraction
+	instead of rereading every file after the graph is built.
+
+- **A project scan runs its rule set in one tree walk, not one walk per rule**
+	(refs #675) — `runQueriesOnFile` compiles a language's rules into a single
+	multi-pattern query and maps matches back to the owning rule, keeping per-rule
+	metavars, predicates, post-filters, caps and ordering. Measured at 3.3× on
+	identical matches; the scan's tree-sitter phase went **14.4s → 3.6s** and a
+	full `mode=full` scan of pi-lens **24.4s → 12.2s**.
+
+- **Project scans parse each file once** (refs #675) — the tree-sitter rules and
+	the fact rules both tree-sitter-parse the same files, and running them as two
+	whole-project sweeps meant the second one re-parsed every file the first had
+	already parsed and evicted (357 of 357 first touches missed on capacity in a
+	500-file `mode=full` scan). They now share one file-major pass: **722 parses →
+	367, 892ms → 437ms of parse time, zero capacity misses**, same diagnostics in
+	the same order. The 50-entry cache is unchanged and was never the problem —
+	within a phase it already ran at a 96.8% hit rate, any capacity short of the
+	full working set saves nothing, and one big enough to hold it would cost
+	150-300MB of resident WASM trees.
+
+- **Tree-sitter cache pressure is measurable** (refs #675): every production
+	consumer, including partial-read expansion, uses the shared process-wide
+	client, and scope-isolated cache counters plus parser timing are emitted for
+	project scans and full review-graph builds.
+
+- **Dead incremental-parse cache API removed.** `TreeCache.incrementalUpdate`,
+	`calculateEdit`, and `invalidate` had no callers; the header's "10-100×
+	speedup on edits" was advertising a path nothing ever took.
+
+- **Faster LSP teardown and tool probes** (refs #448) — `killProcessTree`
+	resolves on the child's exit event instead of sleeping the full 1.5s
+	SIGTERM→SIGKILL escalation window (saves ~1.5s per graceful client
+	shutdown); tool availability checks skip `--version` spawns for binaries
+	that aren't on disk and no longer re-verify a probe-cache-validated managed
+	install on every analyze.
+
+### Fixed
+
 - **Read-before-edit guard now survives a session resume (#1041)** — the
 	guard's read-set was in-memory only, so a `pi --session <id>` resume (which
 	resets the runtime to a fresh empty guard) falsely `zero_read`-blocked the
@@ -43,6 +516,7 @@ All notable changes to pi-lens will be documented in this file.
 	turn). Regression test drives the registered task against a `pi` whose
 	`getFlag` throws the stale-ctx error and asserts a no-op (no throw, no emit);
 	it fails pre-fix.
+
 - **Word index no longer serves stale postings after a case/separator-divergent edit (refs #1025, closes #1025 item #2)** —
 	the word index's `docLengths`/`forward`/`fileMtimes` maps are keyed on file
 	paths, but the full/incremental BUILD keyed on the on-disk casing the
@@ -72,30 +546,7 @@ All notable changes to pi-lens will be documented in this file.
 	for a follow-up (unproven trigger, and their correct normalizer is the
 	realpath-based `normalizeMapKey` matching the file's own `_fileSeq` convention —
 	a larger, higher-risk change across the concurrent-session drain logic).
-- **Session-start perf: bound the change-log replay + defer log cleanup (closes #1019)** —
-	the interactive session-start path recomputed the project sequence by reading
-	the ENTIRE append-only change log and folding every line — and each fold does a
-	`normalizeMapKey`/`realpathSync.native()` syscall per historical entry, so the
-	`session_start_sequence_read` phase (measured ~94ms, ~47% of a 200ms warm start)
-	grew unbounded with total log length, not the working set. The project snapshot
-	now embeds the DERIVED sequence index (`projectSeq` + per-file `fileSeqByPath`)
-	as of its `seq` (`clients/project-snapshot.ts`), mirrored into the tiny
-	`project-snapshot.meta.json` sidecar so session-start can hydrate it WITHOUT
-	parsing the 40-112MB body (preserving the #947 skip-stale optimization).
-	`readLatestProjectSequence` (`clients/project-changes.ts`) gained an optional
-	base param: it hydrates that index (O(files-in-snapshot), keys already
-	normalized → no per-key `realpath`) and folds ONLY entries with
-	`seq > snapshot.seq` — O(changes-since-snapshot). The fold uses the SAME
-	`Math.max`/`normalizeMapKey` the full replay does, so the result is
-	byte-identical to a full replay (proven by an equivalence test suite covering
-	no-new-entries, new/existing files, deletes, gaps/out-of-order, and the empty
-	log) and order-independent. Correctness-first fallbacks to a full replay: a
-	legacy/missing meta with no embedded index, a version-mismatched meta, and a
-	snapshot whose `seq` is AHEAD of the log (truncation/rotation) — it never serves
-	a wrong seq. Wired into BOTH the quick/interactive and the full session-start
-	paths. Secondary: `log_cleanup` (~7ms) was moved off the synchronous critical
-	path into a deferred `setImmediate` (it still runs every session and notifies
-	async — nothing on the hot path consumed its result).
+
 - **Cascade honesty: degraded/uncomputed impact no longer renders as clean (refs #1023, closes #1023)** —
 	the cascade impact subsystem previously emitted an all-clear that was
 	indistinguishable from "genuinely nothing impacted" whenever it could NOT
@@ -124,6 +575,7 @@ All notable changes to pi-lens will be documented in this file.
 	neighbor-touch/freshness pipeline (neighborTouchCache, recentlyCleanNeighborCache,
 	the 40-neighbor budget, tier-aware touch model, deferred cascade flow) is
 	untouched.
+
 - **Disposition marks under a nested monorepo language root are no longer silently dropped (refs #1030, closes #1030; pairs with #1024)** —
 	a `false-positive`/`flagged`/`defer` mark recorded via `lens_diagnostic_mark`
 	was invisible to the per-edit dispatch filter for every file living under a
@@ -171,6 +623,7 @@ All notable changes to pi-lens will be documented in this file.
 	form re-anchor to the canonical id; a stale orphan is re-derivable and simply
 	reappears once for the agent to re-mark (identical to today's pre-fix
 	behavior), so no read-time legacy fallback is needed.
+
 - **`lens_diagnostics mode=all` no longer replays a resolved blocker (refs #1020, closes #1020)** —
 	the widget-state `files` map was keyed by the raw, non-normalized path string,
 	so the SAME file could land under two different key forms in one session:
@@ -193,29 +646,6 @@ All notable changes to pi-lens will be documented in this file.
 	The human-readable display path on each record is preserved verbatim (rendering
 	and path-relative math unchanged). No new dependencies.
 
-- **Prompt-cache observability (refs #1018, closes #1018)** — two provider-independent
-	signals now land in `~/.pi-lens/latency.log` as `type: "phase"` records.
-	(1) Response-side: a defensively feature-detected `message_end` subscription
-	(clients/agent-nudge.ts pattern — guarded, never throws on older hosts) logs one
-	`cache_usage` record per assistant message that carries a `usage`, with
-	`metadata: { provider, model, cacheRead, cacheWrite, input, output, cost }`
-	(provider/model read straight off the assistant message; `cost` is the total).
-	Messages with no usage (or non-assistant messages) are skipped rather than
-	logged as zeros. (2) Request-side: the existing `context` handler now hashes
-	`messages[0]` on every call and logs a `cache_prefix_break` record
-	(`metadata: { turnIndex, previousHash, currentHash, sessionId, sessionRole }`,
-	plus a baseline record on first observation) whenever that hash changes
-	turn-over-turn — a regression guard that flags anything (pi-lens or otherwise)
-	breaking the byte-stable prefix #1016 established. The baseline is keyed by the
-	stable per-session id (`ctx.sessionManager.getSessionId()`) in a small bounded
-	LRU, so a resume/reload keeps comparing against its own baseline while a
-	new/fork or a concurrent in-process subagent (#473) gets an independent baseline
-	instead of a spurious cross-session break; each record is tagged with the
-	read-only #473 `sessionRole` classification, and a primary `session_shutdown`
-	drops the ended session's entry. The hash is pure observation: it never changes
-	the handler's injection behavior or return value, and runs even on non-injecting
-	turns. New `clients/cache-observability.ts`; no new dependencies.
-
 - **Cache-friendly ephemeral context injection (refs #1016, closes #1016)** — the
 	`context` event handler in `index.ts` now splices pi-lens's ephemeral turn-end
 	findings in **immediately before the final message** instead of prepending them
@@ -237,31 +667,6 @@ All notable changes to pi-lens will be documented in this file.
 	prior transcript as an untouched cache prefix. Changes shipped `dist` behavior
 	(the handler lives in the bundled dist path).
 
-- **Config-consistency pass on the #166 flag registry (refs #166, #533)** — the
-	#883 registry core (scope split, precedence, negation) was audited consistent
-	and left untouched; the gaps were all in #533 malformed/unknown-input
-	signalling, asymmetric between the global and project loaders. (1) The
-	project loader (`.pi-lens.json`) now warns once on an unrecognized top-level
-	key — a typo like `maxProjectFile` or `lps` previously did nothing silently —
-	while tolerating the foreign namespaces the shared file legitimately carries
-	for the LSP loader (`servers`, `serverOverrides`, `disabledServers`,
-	`warmFiles`, plus `$schema`); a user-level-only lens key placed at project
-	scope (e.g. `lsp`, `tests`, `delta`) gets a distinct "not honored at project
-	scope" signal instead of being lumped in with typos. (2) The recognized-key
-	catalogs are single-sourced (#883): `GLOBAL_NON_FLAG_CONFIG_SECTIONS` and
-	`PROJECT_FOREIGN_CONFIG_NAMESPACES` are declared once beside `LENS_FLAGS`, and
-	both loaders derive flag sections from the registry, so adding a namespace is
-	a one-line edit and adding a flag needs none — replacing a drift-prone inline
-	literal set in the global loader. (3) Three global scalars
-	(`dispatch.runnerTimeoutFloorMs`, `widget.visible`, `format.mode`) that
-	silently coerced a present-but-malformed value to `undefined` now warn on
-	invalid input through the same path as `actionableWarnings.autoFix.maxFixes`,
-	while staying silent when the key is absent (no false warnings). (4) Removed
-	five dead global-only accessors that bypassed the precedence chain
-	(`getGlobalAutoformatEnabled`, `getGlobalAutofixEnabled`,
-	`getGlobalImmediateFormatDefault`, `getGlobalContextInjectionEnabled`,
-	`getGlobalTurnSummaryEnabled`) — no non-test callers existed. (5) Updated
-	`docs/globalconfig.md`, whose "unknown keys are ignored" claim was stale.
 - **Fixed: `ts-ssrf` no longer flags fixed/const endpoint URLs built with
 	`new URL(...)` as SSRF sinks, while still catching tainted URLs** (closes
 	#1000, refs #533, #963) — a project-wide pi-free scan flagged fixed outbound
@@ -287,33 +692,7 @@ All notable changes to pi-lens will be documented in this file.
 	exempt; (2) a request-tainted function *parameter* base is no longer exempted
 	just because an unrelated same-named module-level `const` literal exists
 	(scope-aware shadow check; imported bases stay trusted).
-- **Normalized call-graph impact checks into structured `ProjectDiagnostic`s**
-	(refs #179) — the last remaining adapter gap in #179's normalization sweep.
-	`runtime-turn.ts`'s turn-end call-graph impact check (WillBreak/MayBreak
-	callers of symbols edited this turn, via `impact()`/`call-graph.ts`) was
-	advisory-text only, unlike the other 9 runners already normalized through
-	`runner-adapters/*.ts`. Added `callGraphImpactToProjectDiagnostics`
-	(`project-diagnostics/runner-adapters/call-graph-impact.ts`), a pure mapper
-	attributing each diagnostic to the CALLER's file (no line — `impact()`'s
-	`ImpactResult` never carries one, and the underlying call-graph symbol
-	table only has a placeholder `line: 1`, so inventing one would be a fake
-	location). Severity is deliberately capped below this codebase's
-	"blocking" hard-stop tier for BOTH WillBreak and MayBreak (#533 honesty):
-	`impact()` is a name-resolution heuristic with no type information, so a
-	resolved caller is never a confirmed break. Wired at turn-end (not
-	`fresh-fetch.ts`/`ANALYZER_IDS`) since impact analysis is inherently
-	per-turn-edit, not a whole-project scan — same reasoning that keeps
-	test-runner's own turn-end fire out of that registry. The existing
-	human-readable advisory string is kept as-is (separate surface, same
-	dual-surface pattern already used by knip's turn-end delta). The call-graph
-	block now runs BEFORE the single `writeProjectDiagnosticsDeltaReport`
-	serialization point (alongside knip's delta push) rather than after it —
-	previously it pushed into `projectDiagnosticsDelta`/`projectDiagnosticsSources`
-	past the one-shot write, so a call-graph-only turn persisted nothing and a
-	mixed turn dropped the call-graph entries, leaving `lens_diagnostics` (a
-	pure reader of the persisted report) unable to ever surface the findings
-	(#533). Covered by a new `handleTurnEnd`-level regression test asserting the
-	persisted report for both call-graph-only and mixed turns.
+
 - **Fixed: `no-javascript-url`/`no-javascript-url-js` no longer flag defensive
 	`javascript:`-URL filters** (refs #533) — a dogfood run flagged code that was
 	*rejecting* `javascript:` links (e.g. `url.startsWith("javascript:")` inside a
@@ -434,159 +813,6 @@ All notable changes to pi-lens will be documented in this file.
 	(procfs/`ps` — not the crash vector) unchanged. A pid absent from the
 	returned map still means "unsampled this tick", never zero.
 
-- **Parallelized the per-turn madge dependency check** (refs #766) — the
-	turn-end circular-dependency pass previously ran one `await checkFile()`
-	per import-changed file in a sequential `for…await` loop, serializing N
-	madge subprocess spawns. `DependencyChecker.checkFilesBatch()` now runs
-	those spawns concurrently (bounded to 6 in flight) via a new turn-end
-	entry point. `DependencyChecker` keeps its circular-dep findings
-	(`lastCircular`/`circularFiles`) as shared instance state that a single-file
-	check overwrites wholesale, so naively parallelizing risked one file's
-	spawn clobbering a sibling's write depending on subprocess completion
-	order. The fix keeps every spawn's result local until all have settled,
-	then folds them into the shared state in original file order — matching
-	the sequential loop's file-by-file overwrite exactly, just without waiting
-	for each subprocess before starting the next. Behavior-preserving: same
-	per-file results, same final circular-dep state, same `dbg` logs — only
-	wall-clock time changes.
-- **Every runtime toggle is now settable from BOTH the CLI and
-	`~/.pi-lens/config.json`, driven by one declarative registry** (closes #166) —
-	the flag/config mapping used to live in two disconnected places (twelve
-	`pi.registerFlag` calls in `index.ts` and an if/else chain in
-	`resolvePiLensFlagWithSource`), which let coverage gaps open and persist.
-	Seven flags were registered on the CLI but fell straight through the
-	resolver, so config could never set them: `--no-lens`, `--no-lsp`,
-	`--no-tests`, `--no-delta`, `--lens-guard`, `--no-opengrep`, and
-	`--no-read-guard`. They now read `lens.enabled`, `lsp.enabled`,
-	`tests.enabled`, `delta.enabled`, `guard.enabled`, `opengrep.enabled`, and
-	`readGuard.enabled` (positive keys — a `--no-*` flag is the key set `false`).
-	The four actionable-warning toggles went the other way: they were
-	config-only and are now registered CLI flags too
-	(`--lens-actionable-warnings`, `--lens-actionable-warning-actions`,
-	`--lens-actionable-warning-autofix`, `--lens-actionable-warning-all`).
-	`clients/lens-flag-registry.ts` is the single source both surfaces read, so
-	they cannot diverge again; the wiring test derives its expected flag set from
-	it rather than restating it (the old hand-written list had already drifted,
-	missing `lens-turn-summary`).
-
-- **`actionableWarnings.autoFix.maxFixes` is now actually read** (#166) —
-	documented in `globalconfig.md` since #792 but no loader ever parsed it, so
-	`agent_end` always used the hardcoded default of 5 no matter what the config
-	said. Same defect class as the seven flags above: a documented config key
-	with nothing wiring it to the code that consumes it. Accepts any
-	non-negative whole number; `0` keeps the warning report while applying
-	nothing.
-
-- **Flag provenance gained an `env` tier and reports the global tier more
-	accurately** (#166) — `PI_LENS_NO_CONTEXT_INJECTION` moved out of a
-	hardcoded check in `index.ts` into the registry's `env` binding, so it
-	resolves through the same chain as everything else (env → cli →
-	nested-project → project → global → default) and reports `source: "env"`.
-	The global tier now reports `source: "global"` whenever the key is present,
-	not only when it happens to differ from the built-in default. Affects debug
-	and mutation-skip log lines only, no resolved values change.
-
-- **Unknown top-level keys in `~/.pi-lens/config.json` now warn once instead of
-	being dropped silently** (#166, refs #533) — a typo like `lps` for `lsp`
-	previously did nothing with no signal. The recognized-key set is derived from
-	the flag registry (`LENS_FLAGS`) plus the non-flag sections (`ignore`,
-	`dispatch`, `actionableWarnings`, `widget`) and `$schema`, so it stays in sync
-	with the single source of truth; anything else logs one `[pi-lens] ignoring
-	invalid global config …: unknown key "…"` line and is ignored.
-
-- **Word-index build/refresh/persist outcomes are now durably observable**
-	(refs #958, #926, #533) — every word-index signal previously rode solely on
-	the optional `dbg` callback, a documented no-op in the MCP host where
-	`symbol_search` reads the index. The structured logger (`~/.pi-lens/
-	word-index.log`, shared `createNdjsonLogger` infra) now records, independent
-	of `dbg`: the full-rebuild-vs-incremental decision plus honest coverage
-	(`indexedFileCount`/`truncated` and `refreshed`/`dropped`/`skipped`/`reused`
-	counts) for both the session-start and cold-query (MCP) build paths; a
-	swallowed snapshot **persist failure** as `persist_failed` (a silent stale
-	index otherwise leaves no trace); and the safety refusal for a root at/above
-	`$HOME`. The full-build collector (`collectWordIndexDocs`) now also returns a
-	`skipped` count for files it enumerated but could not index (over the byte
-	cap / unreadable), so a partial index is never reported as complete. The
-	fragile string-parsing `dbg` adapter this replaces is removed.
-
-- **Closed four observability gaps in recently-changed typos-config and
-	project-snapshot code** (refs #533) — none of these change behavior, only
-	what's now logged: (1) the typos LSP's inject-vs-step-aside decision
-	(#967) now logs a `typos_config_resolved` phase in `latency.log` /
-	`sessionstart.log` with `mode: "project_config" | "injected_default"` and
-	the resolved `configPath`, so which typos config is actually active is no
-	longer a guess; (2) a project-snapshot body persist that falls back to the
-	synchronous main-thread gzip because the persist worker died/was
-	unavailable now logs an explicit `project_snapshot_worker_fallback` phase
-	with the `reason` (previously only visible via a test-only variable, or
-	buried in an `offloaded:false` success line) — this is the +656MB-risk
-	degraded path from #950; (3) a corrupt/truncated gzipped snapshot body
-	(gunzip/JSON.parse failure) now logs `project_snapshot_body_corrupt`
-	before failing open to a rebuild, instead of being indistinguishable from
-	"no snapshot yet"; (4) dropping the in-process authoritative snapshot
-	entry for an oversized (>24MB) body now logs
-	`project_snapshot_authoritative_dropped_oversized` — low-priority, but no
-	longer silent.
-
-- **Review-graph checkpoint discards and write failures are now observable**
-	(refs #936, #533) — a present resume checkpoint that's rejected now logs
-	`checkpoint_discarded` with a `reason` (`corrupt`, `version_mismatch`,
-	`not_in_progress`, `git_stamp_mismatch`, `ignored_ids_mismatch`,
-	`removed_file`, `all_stale`) instead of silently falling back to a full cold
-	rebuild, and a failed checkpoint write (worker error/death, promote failure,
-	sync-write failure) logs `checkpoint_write_failed` — so "why isn't my
-	checkpoint resuming / persisting?" is diagnosable from `review-graph.log`.
-
-- **The review-graph resume checkpoint (#936) now offloads its gzip to the
-	shared persist worker** (refs #958, #883) — mid-build checkpoint writes
-	previously ran a synchronous `gzipSync` of the growing graph on the event
-	loop; they now stream the stringify+gzip through the same worker the
-	authoritative snapshot uses (via the newly-shared `writeGzipStageFile` core),
-	generation-gated so a slow write can't clobber a newer checkpoint or
-	resurrect one after the build completes and retires it, and falling back to a
-	synchronous write when the worker is unavailable. Best-effort as before — a
-	lost checkpoint only costs a cold rebuild.
-
-- **Project snapshot body is now written gzipped by a worker thread** (refs
-	#958 item 2) — the snapshot body (40-112MB observed) is persisted as
-	`project-snapshot.json.gz`, with the `JSON.stringify` + gzip run on a worker
-	thread off the save path, mirroring the review graph's
-	`persist-worker.ts`/generation-gated-promotion pattern (gzip measured 5-10x
-	on top of the #957 compaction win; the review-graph's own measurement was
-	60MB → 1.4MB). A slow worker write for generation N is discarded rather than
-	promoted over a newer generation N+1 already on disk, and the loader still
-	reads the previous uncompressed `project-snapshot.json` for one compatibility
-	release so an upgrade never loses a snapshot. The save path deliberately does
-	NOT sync-gzip (the #950 review measured a naïve sync gzip regressing host
-	memory by +656MB); when the worker is unavailable/dies the pending body falls
-	back to a synchronous main-thread gzip write, surfaced via the logger rather
-	than silently presented as saved (#533). Read-your-writes across the async
-	promotion is preserved by an in-process authoritative "latest write" that
-	`loadProjectSnapshot` consults before disk, so the merge-write callers
-	(`saveRuntimeProjectSnapshot`, word index, reverse deps) never observe a
-	stale body in the promotion window.
-
-- **The review-graph full build is now resumable across sessions** (refs #936
-	limit 2) — a cold full build (walk + tree-sitter parse of every source file)
-	previously restarted from scratch every session, so on a large repo with
-	short-lived sessions it could never finish. The extraction loop now
-	periodically checkpoints the PRE-resolution graph plus the exact set of files
-	already folded into it (with content hashes) to a dedicated
-	`review-graph.checkpoint.json.gz`, and a later session resumes from it,
-	re-walking only files that changed/appeared since. The checkpoint lives in
-	its own file (never the authoritative `review-graph.json.gz`) and its
-	hydrated graph carries `persistCoverage.inProgress` on top of `partial`, so
-	no reader (`getCachedReviewGraph`, `loadPersistedGraph`) can ever serve or
-	launder a mid-build checkpoint as a complete graph (honesty doctrine, #533).
-	Resume equivalence to a cold build is guaranteed by `addFileToGraph`'s
-	per-file contribution being order-independent (all cross-file linking is
-	deferred to `resolveDeferredSymbolEdges`): content-changed processed files
-	are evicted and re-walked, orphaned placeholder nodes are pruned, and any
-	removed file, ignored-id-set change, version bump, or git-identity mismatch
-	fails open to a cold build rather than risking a wrong graph. Checkpoint
-	stride/interval are tunable via `PI_LENS_GRAPH_CHECKPOINT_EVERY_FILES` /
-	`PI_LENS_GRAPH_CHECKPOINT_MIN_INTERVAL_MS`.
-
 - **Stabilized the two remaining flaky/environment-sensitive tests tracked in
 	#902.** LSP workspace-diagnostics sweep flush-count assertions
 	(`workspace-diagnostics-sweep-batch-open.test.ts`,
@@ -622,16 +848,6 @@ All notable changes to pi-lens will be documented in this file.
 	succeeded. `flushReviewGraphPersist()` now returns the persisted
 	`coverage` so any standalone caller can make the same distinction.
 
-- **Bundled default typos allowlist for projects without their own config**
-	(fixes #967) — the `typos` auxiliary LSP now injects a small pi-lens-shipped
-	`_typos.toml` (`rules/typos/_typos.toml`, `[default.extend-identifiers]`
-	only: `dito`, `unparseable`) via `initializationOptions.config` whenever a
-	project has no `typos.toml`/`_typos.toml`/`.typos.toml` of its own. A
-	project's own config still always wins outright: when one is found,
-	pi-lens injects nothing at all (rather than letting typos-lsp merge ours
-	on top and risk our defaults outranking the team's own allowlist on key
-	collisions).
-
 - **`ts-ssrf` no longer trusts naming convention as proof of a fixed URL**
 	(fixes #963) — the post-filter now resolves a bare `fetch(IDENT)` argument
 	against the file's AST and exempts it only when `IDENT` provably resolves
@@ -642,191 +858,6 @@ All notable changes to pi-lens will be documented in this file.
 	what's checked. Ambiguous/shadowed declarations, `let`/`var` bindings,
 	reassigned identifiers, and unresolved identifiers all fall through to the
 	existing broad heuristic and keep being flagged.
-
-- **Session warmup refreshes the word index incrementally** (refs #958) —
-	the persisted serializer now carries per-file mtimes. Startup still performs
-	the bounded source walk, but reuses unchanged postings, re-tokenizes only
-	stale/new files, and drops deleted files; legacy indexes, refresh failures,
-	and file-set churn above 30% fall back to a full rebuild. The current derived
-	file cap and `truncated` state are re-evaluated on every refresh, and
-	`warmup_word_index` telemetry records mode/refreshed/dropped/reused counts.
-
-- **Project scans feed compact structural IR into review-graph builds** (refs
-	#939) — each fully completed scanner file publishes content-hash-bound
-	imports, reexports, function summaries, symbols, and references. A following
-	or overlapping graph build reuses only exact-hash, successful entries;
-	stale, failed, absent, and cold one-shot paths parse normally. The handoff
-	retains neither source content nor WASM trees, and cancelled scans expose
-	only files completed before cancellation.
-- **Session-start performance: LSP pre-warm, snapshot meta-gate, compact cached snapshot** (refs #947) — three
-	measured startup wins: (1) the dominant-language LSP pre-warm was gated on
-	full startup mode that the first-session heuristic never allows (82 quick
-	vs 0 full starts in 31k dogfood log lines), so it now runs inside the
-	quick-mode +2s background warmup pass — once per process,
-	generation-guarded, honoring subagent light mode, warm-attach, the
-	`no-lsp` flag, and the `canWarmCaches` guard, with a `warmup_lsp_prewarm`
-	phase record; (2) session start no longer sync-parses the whole
-	`project-snapshot.json` body (110-130ms at 40MB, ~0.5s at 112MB) before
-	checking freshness — the tiny `project-snapshot.meta.json` sidecar is read
-	first and a stale seq/version skips the body parse entirely
-	(`session_start_snapshot_load` records `skippedStale: true`), with
-	missing-meta installs falling back to the legacy parse; (3) the snapshot
-	is serialized compactly (~30% smaller) and its parsed body is cached
-	in-process per (path, mtime), so `saveRuntimeProjectSnapshot` and the
-	session-start/word-index/scan-context consumers no longer re-parse a file
-	pi-lens itself wrote seconds earlier.
-
-- **Session-start latency is attributable end to end** (refs #948) â€” latency
-- **Session-start latency is attributable end to end** (refs #948) — latency
-	telemetry now separates host boot from pi-lens evaluation and records quick
-	and full session-start totals, pre-handler/bootstrap work, runtime reset,
-	log cleanup, LSP reset, sequence/snapshot reads (including snapshot bytes),
-	and delayed warmup scan/profile/index phases.
-
-- **Warm LSP names enrich tree-sitter read expansion** (refs #158) — partial
-	read expansion keeps tree-sitter's line boundaries authoritative, but an
-	already-open document with an already-active LSP can now replace the display
-	name/kind from `documentSymbol` (including `Class.method` ancestry) within a
-	150 ms best-effort ceiling. Cold, closed, unsupported, timed-out, or failed
-	servers retain the tree-sitter identity, and `ts_range_expanded` records
-	whether enrichment succeeded.
-
-- **Review-graph LSP fallback nodes** (refs #307) — when tree-sitter yields
-	zero declarations, the builder may use `documentSymbol` from an already-live,
-	already-open capable server. Nodes carry `provenance: "lsp"`, hierarchical
-	containment survives persistence (including flat native-TypeScript-7 results
-	reconstructed through `containerName`), productive tree-sitter files never
-	pay the request, and unavailable/failed fallback attempts degrade without
-	opening or spawning while remaining visible in `review-graph.log`.
-- **Installer subprocesses are lifetime-coupled** (refs #945) — npm, pip, gem,
-	and archive extraction now use the shared safe-spawn path, await full Windows
-	process-tree termination on timeout, and synchronously clean registered
-	installer children during parent exit/signals.
-
-- **Managed tool installs are cross-process serialized** (refs #945) — a
-	dependency-free atomic lock protects the shared tools tree, verifies owners
-	before stale recovery, bounds lock waits with an honest error, and rechecks
-	discovery after acquisition to avoid duplicate package-manager runs.
-
-- **Ordinary tests never install managed tools** (refs #945) — Vitest sets
-	`PI_LENS_DISABLE_TOOL_INSTALL=1`, its prewarm step creates a local synthetic
-	oxlint probe-cache entry without networking, and one-shot analysis explicitly
-	awaits probe-cache persistence before exit.
-
-- **Installer orphan/locking regressions are process-tested** (refs #945) —
-	fake package-manager coverage verifies Windows timeout tree-kill, exactly one
-	install across concurrent processes, explicit install-disable refusal, and
-	Vitest's default no-install environment.
-- **Downgrade TypeScript `unsafe-regex` to advisory and suppress escaped-before-
-  assignment false positives** (refs #932) — the coarse dynamic `RegExp`
-  heuristic no longer blocks edits and recognizes escape/replace calls in a
-  same-file identifier initializer; structural ReDoS detection remains with
-  the `redos-nested-quantifier` ast-grep rule.
-- **Review-graph persistence no longer serializes or compresses on the event
-	loop** (refs #939) — debounced snapshots are materialized in one lazy,
-	unref'd worker and streamed through gzip into the new canonical
-	`review-graph.json.gz` cache. The main thread promotes only the current
-	generation's atomic staged file, so the synchronous CLI/exit flush can
-	supersede an in-flight worker without a stale overwrite. Loads retain one
-	release of fallback support for legacy uncompressed `review-graph.json`
-	snapshots; worker failures are logged and degrade to a synchronous persist.
-	Persist telemetry now records element count, raw/gzip bytes, serialization
-	and write time, and whether the work was offloaded.
-
-- **Standalone out-of-band review-graph build CLI** (refs #924) — `npx pi-lens
-	build-graph [--cwd <dir>]` reuses the session builder and queued atomic
-	persist path for CI/cron, forces the debounced snapshot write before exit,
-	and prints file/node/edge/element counts, JSON bytes, and duration. Unsafe
-	roots, build errors/skips, persist failures, and persist-cap trips exit
-	non-zero with their reason instead of silently leaving no snapshot.
-
-- **Raise and make the review-graph persist ceiling useful** (refs #936) — the
-	default `GRAPH_PERSIST_MAX_ELEMENTS` cap is now 500,000 (still overrideable
-	through `PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS`), matching measured startup
-	load/reindex costs and allowing the ~208,000-element #919 repository to
-	persist completely. Above the cap, persistence retains whole-file node groups
-	in existing reverse-dependency-centrality order plus induced edges that fit,
-	instead of dropping the snapshot. Exact total-versus-persisted node/edge
-	counts are stored and surfaced; read-only queries may use the partial graph,
-	while incremental builds reject it as a complete base.
-
-- **Logger hot paths now coalesce queued lines and rotate during long sessions** (refs #935) — contiguous NDJSON entries drain through one append up to each truncate boundary while retaining peek-then-remove exit safety and one-write cross-process atomicity. `sessionstart.log` now uses one shared asynchronous writer for ordinary diagnostics (with the crash-adjacent LSP launch write intentionally synchronous), and latency/cascade/tree-sitter/bus-event logs enforce the existing 10 MB cap in process.
-
-### Added
-
-- **`/lens-perf` surfaces slow phases in-session** (closes #767) — the command
-	shows independent top-five p50 and p99 rankings with sample counts for both
-	the current process session and the machine-wide active `latency.log` window.
-	It flushes pending writes, streams a tail bounded by the log rotation
-	threshold (`PI_LENS_MAX_LOG_SIZE_MB`, 10MB by default), caps retained samples,
-	and reports malformed/truncated input instead of silently reading it as clean.
-	Session startup total and scan-context computation are now logged as phases so
-	the startup regressions that motivated the command are visible there too.
-
-### Changed
-
-- **Incremental review-graph updates avoid redundant whole-graph copies and
-	index rebuilds** (refs #939) — file re-extraction now rebuilds derived indexes
-	once, immutable edges are array-copied without cloning every edge object, the
-	updated graph itself becomes the workspace snapshot, and debounced persistence
-	defers its O(graph) array materialization until the quiet-window flush.
-- **Reverse-dependency indexes update at import-edge granularity** (refs #939)
-	instead of rebuilding from every graph edge after a one-file edit. Body-only
-	edits reuse the cached index without rewriting the project snapshot; import
-	changes patch only the touched `imports` and `importedBy` buckets.
-- **Review-graph file-cap degradation is now explicit and count-honest** (refs
-	#921) — `project_report` says a capped project has “more than N files” instead
-	of presenting the cap+1 early-exit sentinel as an exact count. `module_report`
-	now marks graph-backed `usedBy`, blast-radius provenance, and
-	`semantic.source` as `unavailable:file-cap` and emits an actionable warning
-	with the cap plus both `.pi-lens.json#maxProjectFiles` and
-	`PI_LENS_REVIEW_GRAPH_MAX_FILES` controls, keeping disabled data distinct from
-	a genuinely empty/cold graph.
-- **Project scans release every scan-local fact after each file** (refs #886,
-	#939) instead of retaining source content, imports, summaries, and other
-	derived per-file facts until the scan ends. The live dispatch store remains
-	untouched; only the scanner-owned store is cleared.
-- Repair eight non-compiling Java, C++, CSS and PHP tree-sitter rules (refs #884).
-- Repair four non-compiling Go, Rust, and Kotlin tree-sitter rules (refs #884).
-- **Project diagnostics now use one file-major scan pass** (refs #896) —
-	tree-sitter rules, fact rules, and bundled ast-grep share each eligible
-	file's content read while retaining their individual extension/size gates,
-	diagnostic ordering, cancellation behavior, and latency telemetry. Full
-	review-graph builds likewise hash the bytes already read for extraction
-	instead of rereading every file after the graph is built.
-
-- **A project scan runs its rule set in one tree walk, not one walk per rule**
-	(refs #675) — `runQueriesOnFile` compiles a language's rules into a single
-	multi-pattern query and maps matches back to the owning rule, keeping per-rule
-	metavars, predicates, post-filters, caps and ordering. Measured at 3.3× on
-	identical matches; the scan's tree-sitter phase went **14.4s → 3.6s** and a
-	full `mode=full` scan of pi-lens **24.4s → 12.2s**.
-- **Project scans parse each file once** (refs #675) — the tree-sitter rules and
-	the fact rules both tree-sitter-parse the same files, and running them as two
-	whole-project sweeps meant the second one re-parsed every file the first had
-	already parsed and evicted (357 of 357 first touches missed on capacity in a
-	500-file `mode=full` scan). They now share one file-major pass: **722 parses →
-	367, 892ms → 437ms of parse time, zero capacity misses**, same diagnostics in
-	the same order. The 50-entry cache is unchanged and was never the problem —
-	within a phase it already ran at a 96.8% hit rate, any capacity short of the
-	full working set saves nothing, and one big enough to hold it would cost
-	150-300MB of resident WASM trees.
-- **Tree-sitter cache pressure is measurable** (refs #675): every production
-	consumer, including partial-read expansion, uses the shared process-wide
-	client, and scope-isolated cache counters plus parser timing are emitted for
-	project scans and full review-graph builds.
-- **Dead incremental-parse cache API removed.** `TreeCache.incrementalUpdate`,
-	`calculateEdit`, and `invalidate` had no callers; the header's "10-100×
-	speedup on edits" was advertising a path nothing ever took.
-
-- **Faster LSP teardown and tool probes** (refs #448) — `killProcessTree`
-	resolves on the child's exit event instead of sleeping the full 1.5s
-	SIGTERM→SIGKILL escalation window (saves ~1.5s per graceful client
-	shutdown); tool availability checks skip `--version` spawns for binaries
-	that aren't on disk and no longer re-verify a probe-cache-validated managed
-	install on every analyze.
-
-### Fixed
 
 - **Remaining test-suite spawns routed off `shell:true` to close the Windows-spawn flake class** (refs #902) —
 	`tests/clients/ast-grep-rule-precedence-followups.test.ts` (CLI probe + `runCli`),
@@ -853,13 +884,16 @@ All notable changes to pi-lens will be documented in this file.
 	persist indexed-file count and truncation state, and both `symbol_search`
 	surfaces report coverage instead of presenting capped zero-hit results as
 	authoritative.
+
 - **`pilens_health` keeps disabled LSP servers visible** (refs #927) —
 	permanently broken server/root pairs now render with their failure count, and
 	temporary circuit-breaker cooldowns expose their retry deadline.
+
 - **Cold `symbol_search` failures are now observable and honest** (refs #926) —
 	unavailable results distinguish an active build, a safety refusal, and the
 	last build's failure, while background build/persist errors reach a persistent
 	NDJSON log.
+
 - **Failed heavyweight analyzers no longer masquerade as clean runs** (refs #925) —
 	unsuccessful results are reported distinctly, omitted from cache so the next
 	session retries, and valid fix-worklog records survive neighboring corrupt lines.
@@ -868,6 +902,7 @@ All notable changes to pi-lens will be documented in this file.
 	`lens_diagnostics mode=full` sweep** (refs #798), instead of showing
 	`LSP Inactive` until turn end. The repaint captures UI methods during the
 	active tool event, so async warm-up never touches a stale session context.
+
 - **Tree-sitter WASM aborts are now visible instead of silently disabling
 	structural analysis for the rest of the process** (refs #915). The shared
 	runtime records a process-wide, timestamped `restart_required` health state,
@@ -877,11 +912,13 @@ All notable changes to pi-lens will be documented in this file.
 	deliberately unsafe: every new client imports the same cached `web-tree-sitter`
 	ES module and therefore reuses its corrupted Emscripten heap; restarting the
 	host is the isolation boundary.
+
 - **`pilens_rebuild` can no longer destroy an npm-installed pi-lens** (refs
 	#920) — rebuilds are refused before spawning a package script unless the
 	package is a source checkout with `tsconfig.dist.json` outside
 	`node_modules`; installed servers also omit the tool from `tools/list`, so
 	subagent allowlists cannot discover it.
+
 - **Review-graph background failures are no longer silent** (refs #919) —
 	`project_report`/`pilens_project_report` now surface the most recent build
 	attempt and its terminal skip/failure reason, including the persistence
@@ -921,10 +958,13 @@ All notable changes to pi-lens will be documented in this file.
 	previous `lsp` fallback had no registered server and silently produced no
 	diagnostics. `cmake-language-server` now covers both `.cmake` files and the
 	canonical `CMakeLists.txt` basename, with managed pip installation.
+
 - **Fish LSP policy is no longer dead wiring** (refs #893) — `fish-lsp` is now
 	registered for `.fish` files and auto-installed through npm; `fish_indent`
 	continues to run alongside it.
+
 - **Editing an inherited tree-sitter rule now invalidates the inheriting language's RuleCache** (refs #878) — the cache key fingerprinted only the language's OWN rules directory, but `tsx` also runs the `typescript` rule set (`queriesForLanguage`), so a typescript-rule edit left the tsx entry's hash unchanged and stale compiled rules kept being served from the on-disk cache until a tsx rule happened to change. The fingerprint now covers the full effective rule set via `ruleFilesForLanguage`, a new loader-owned seam that derives from the same rule-source composition as rule selection, so the cache key can't drift from what the runner actually runs. The runner's cache-miss path also forces the query loader past its in-memory memo (`loadQueries(root, { force: true })`) — a correct key alone wasn't enough: the memo ignores rule-file mtimes, so within one process a miss re-persisted the PRE-edit rules under the fresh fingerprint and the staleness then survived restarts. The client's compiled-batch cache is likewise now keyed on rule content instead of rule ids — ids are stable across edits, so the shared client kept serving the pre-edit compiled patterns (and messages) for the process lifetime even after the reload. `CACHE_VERSION` bumped to `v6`.
+
 - **Small edits no longer pay the entity-extraction cost** (refs #885) — the
 	<5-line skip threshold only guarded the zero-diagnostics early return; a
 	second `extractEntitySnapshot` block ran unconditionally, so trivial edits
@@ -932,13 +972,16 @@ All notable changes to pi-lens will be documented in this file.
 	disk content (thrashing the parse-cache entry). Extraction is now one
 	threshold-guarded block that receives the same `file.content` override the
 	diagnostics phase used.
+
 - **The per-edit tree-sitter runner walks the tree once, not once per rule**
 	(refs #888) — the dispatch hot path ran ~30-40 `runQueryOnFile` walks per
 	edit behind a concurrency limiter that could not parallelize synchronous
 	WASM. It now calls `runQueriesOnFile` once (#675 batching) and distributes
 	the per-rule results; the per-rule `maxResults(10)` cap and modified-ranges
 	gating are unchanged.
+
 - **A transient grammar-load failure no longer disables batched rule scans for the process lifetime** (refs #889) — `compileQueryBatch` cached `null` on ANY `build()` failure, including a transient `loadLanguage()` miss (offline lazy grammar fetch, mid-scan load error), so every later scan fell back to the per-rule path and paid ~3.3× forever. Load failures are now distinguished from genuine batch-compile failures: they are not cached (the next scan retries the load and recovers), with retries bounded at 3 consecutive load failures per rule set before the miss is cached, so a grammar that never loads doesn't hot-loop. Deterministic compile failures still cache `null` permanently. The query/batch cache keys also switched from a collision-prone 32-bit hash to the full pattern text.
+
 - **module-report parses plain JS under the correct tree-sitter grammar** (closes
 	#887) — `tsLangForFile` hand-rolled a local extension map that sent
 	`.js`/`.mjs`/`.cjs` to the typescript grammar and `.jsx` to tsx, while every
@@ -956,12 +999,15 @@ All notable changes to pi-lens will be documented in this file.
 	exist there — a query naming them fails with "Bad node name"), so the
 	javascript set is the same queries minus the type-only patterns, with class
 	names matched as `(identifier)` instead of `(type_identifier)`.
+
 - **A rule whose query fails to compile now warns once instead of silently reporting nothing** (refs #884) — both compile paths (`compileQueryBatch`'s per-rule drop and `compileRawQuery`, which every per-edit `runQueryOnFile` call falls back on) previously either `dbg()`-logged (invisible without verbose mode) or returned `null`/`[]` with no trail at all. They now call a shared `reportQueryCompileFailure`, mirroring the existing unimplemented-`post_filter` warning: one `console.error` per broken rule id, not per file. A new compile-guard test (`tests/clients/tree-sitter-rule-compile-guard.test.ts`) compiles every non-disabled shipped rule against its real grammar and caught the 32 rules #884 reports as currently broken (tracked there in a shrink-only `KNOWN_BROKEN` allowlist so follow-up fix PRs are forced to remove their entries, and the list can't grow or go stale unnoticed).
+
 - **TreeCache mtime false misses and FIFO eviction** (closes #890) — a content
 	hash match is now authoritative: a save-without-change (same bytes, newer
 	mtime) is a cache hit that refreshes the entry's stat metadata instead of
 	invalidating and re-parsing, and `get()` re-inserts hit entries so eviction
 	is true LRU — hot per-edit files are no longer evicted by scan traffic.
+
 - **Eight enabled typescript/javascript tree-sitter rules whose queries never
 	compiled** (refs #884) — each had been silently dead since authoring because
 	its query failed to compile against the real grammar, so it matched nothing
@@ -983,12 +1029,14 @@ All notable changes to pi-lens will be documented in this file.
 	implemented the four post-filters these rules referenced but that were never
 	defined (`is_empty_block`, `no_break_or_return_in_body`, `same_param_name`,
 	`no_terminating_statement`), which the batch runner had been failing closed on.
+
 - **A column-0 comment after a `query: |` block no longer breaks the rule**
 	(refs #884) — the query-block extractor kept every line more-indented than the
 	key (to preserve `#eq?`/`#match?` predicate lines) but did not stop at a
 	document-level `# …` comment sitting between the block and the next key, so the
 	comment was appended to the query and made it fail to compile. This is what
 	kept `mixed-async-styles` dead even after its query was otherwise correct.
+
 - **Seven ruby security rules never compiled and never produced a finding** (refs
 	#884) — `ruby-command-injection`, `ruby-eval`, `ruby-insecure-deserialization`,
 	`ruby-insecure-random`, `ruby-open-struct`, `ruby-string-eval` and
@@ -1002,6 +1050,7 @@ All notable changes to pi-lens will be documented in this file.
 	negative fixtures (`system` vs `File.read`, `Marshal.load` vs `YAML.safe_load`,
 	`rand` vs `SecureRandom`, `OpenStruct.new` vs `Struct.new`, `Digest::MD5` vs
 	`Digest::SHA256`, string vs block `class_eval`) pin the security intent.
+
 - **Six python rules never compiled or never fired** (refs #884) —
 	`python-empty-except` used a `body:` field that doesn't exist on
 	`except_clause`; `in-operator-unsupported` used bare `"in"`/`"not"` `"in"`
@@ -1028,8 +1077,11 @@ All notable changes to pi-lens will be documented in this file.
 	node and count named children instead (per-slot optional quantifiers turned
 	out to match every valid sub-alignment, not just the maximal one, producing
 	spurious duplicate matches for a fully-correct signature).
+
 - **Project scans run tree-sitter rules for every supported language, not just 10 extensions** (closes #882, refs #877, #880) — the scanner's `TREE_SITTER_EXT_TO_LANG` covered only ts/tsx/js/py/go/rs/rb, so files whose grammars and non-disabled rule dirs already exist (c, cpp, csharp, css, php, java, kotlin) were silently skipped by the tree-sitter phase of project scans. It now derives the shared per-edit resolver (`EXT_TO_LANG`) so c/cpp/csharp/php/css and the `.tsx`→tsx / `.jsx`→javascript nuances can't drift from the per-edit path, and layers java/kotlin on top (grammars + rule dirs exist but no per-edit `appliesTo`). A regression test asserts the map covers every non-disabled rule dir whose grammar is loadable.
+
 - **`.dart` files are now included in project-wide source enumeration** (closes #880, refs #876) — `ALL_SCANNABLE_EXTENSIONS` (`clients/source-filter.ts`) and `WARMUP_SOURCE_EXTS` (`clients/language-profile.ts`) were missing `.dart`, so Dart projects were fully supported per-edit (LSP, `dart-analyze`, `dart format`, autofix) but skipped by project-wide scans and cold-start language-profile warmup.
+
 - **Tree-sitter rules were compiled against the wrong grammar** — a compiled
 	query is bound to the language it compiled against, and running it on a tree
 	from another grammar returns zero matches silently. Rules now compile against
@@ -1037,22 +1089,26 @@ All notable changes to pi-lens will be documented in this file.
 	merge never fired a single diagnostic in its life. That merge stays off — the
 	rules are written against typescript node types and misfire on JS — but the
 	same fix is what makes `.tsx` work.
+
 - **Project scans ran rules from `-disabled/` directories** — the per-edit runner
 	excluded them, the scanner read the raw loader map and ran them anyway.
 	**1,936 of a 500-file scan's 2,590 tree-sitter findings came from rules that
 	were explicitly switched off.** Rule-set selection now goes through one seam,
 	`queriesForLanguage`.
+
 - **`.tsx` parsed with the typescript grammar**, which produces ERROR nodes on
 	JSX, and under a different language id than the fact providers use — so every
 	`.tsx` file was parsed twice, once wrongly. It now parses as `tsx` and
 	inherits the typescript rule set, which is rule-for-rule identical on both
 	grammars. `.tsx` also gets those rules in the per-edit runner now, where it
 	previously saw only its own two JSX rules.
+
 - **An unimplemented `post_filter` reported every raw match instead of none.**
 	40 of the 84 filters rules reference have no implementation; the default now
 	drops the match and warns once. `duplicate-function-arg` (whose
 	`same_param_name` filter was never implemented) was reporting 59 phantom
 	duplicates across 60 files.
+
 - **YAML scalars kept their trailing comments** in the rule loader's hand-rolled
 	parser — `post_filter: not_in_test_block  # skip test blocks` carried the
 	comment as part of the filter name, so the filter silently never applied.
