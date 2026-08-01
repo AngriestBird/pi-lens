@@ -235,4 +235,46 @@ describe("post-filter repairs (#879)", () => {
 			),
 		).toBe(1);
 	});
+
+	it("flags only true bare except, not dotted/qualified exception types", async () => {
+		// Qualified/dotted exception types (e.g. `asyncio.TimeoutError`) parse as
+		// an `attribute` node in tree-sitter-python, not `identifier`. The
+		// bare-except post-filter must recognize this as a typed except.
+		const fixture = [
+			"try:",
+			"    pass",
+			"except ValueError:",
+			"    pass",
+			"except asyncio.TimeoutError:",
+			"    pass",
+			"except json.JSONDecodeError:",
+			"    pass",
+			"except (KeyError, TypeError):",
+			"    pass",
+			"except Exception as e:",
+			"    pass",
+			"except:",
+			"    pass",
+		].join("\n");
+		// Only the final bare `except:` should match.
+		expect(await count("bare-except", "py", "python", fixture)).toBe(1);
+		// A single qualified except must NOT match.
+		expect(
+			await count(
+				"bare-except",
+				"py",
+				"python",
+				"try:\n    pass\nexcept module.Error:\n    pass",
+			),
+		).toBe(0);
+		// A single bare `except:` MUST match.
+		expect(
+			await count(
+				"bare-except",
+				"py",
+				"python",
+				"try:\n    pass\nexcept:\n    pass",
+			),
+		).toBe(1);
+	});
 });
