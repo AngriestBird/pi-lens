@@ -77,18 +77,22 @@ import { findPiLensConfigMarkerInDir } from "./workspace-topology.js";
 const PROJECT_CONFIG_BASENAMES = [".pi-lens.json", "pi-lens.json"];
 
 /**
- * The project loader's OWN recognized top-level keys — the non-flag sections it
- * parses itself. The project-scoped flag sections (`format`, `autofix`,
- * `actionableWarnings`) are NOT listed here; they are derived from
- * `PROJECT_SCOPED_LENS_FLAGS` so the registry stays the single source of truth
- * (#883). Foreign namespaces the shared file also carries live in
- * `PROJECT_FOREIGN_CONFIG_NAMESPACES` beside the registry.
+ * The project loader's OWN recognized top-level keys — pi-lens-native sections,
+ * whether parsed here into typed fields (`ignore`, `rules`, `maxProjectFiles`,
+ * `reviewGraph`) or read off `PiLensProjectConfig.raw` by another pi-lens
+ * consumer (`trivy`, read via `.raw` in `trivy-client.ts`). The project-scoped
+ * flag sections (`format`, `autofix`, `actionableWarnings`) are NOT listed here;
+ * they are derived from `PROJECT_SCOPED_LENS_FLAGS` so the registry stays the
+ * single source of truth (#883). Foreign (non-pi-lens) namespaces the shared
+ * file also carries live in `PROJECT_FOREIGN_CONFIG_NAMESPACES` beside the
+ * registry.
  */
 const PROJECT_OWN_CONFIG_KEYS = [
 	"ignore",
 	"rules",
 	"maxProjectFiles",
 	"reviewGraph",
+	"trivy",
 ] as const;
 
 export interface PiLensProjectRuleConfig {

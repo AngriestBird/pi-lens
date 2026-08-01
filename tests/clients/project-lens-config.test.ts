@@ -415,6 +415,17 @@ describe("loadPiLensProjectConfig", () => {
 			expect(console.error).not.toHaveBeenCalled();
 		});
 
+		it("does NOT warn on the pi-lens-native `trivy` key (read via .raw)", () => {
+			// `trivy.enabled`/`trivy.minSeverity` are read off PiLensProjectConfig.raw
+			// by trivy-client.ts — a legitimate opt-in, must not look like a typo.
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ trivy: { enabled: true, minSeverity: "HIGH" } }),
+			);
+			loadPiLensProjectConfig(tmpDir);
+			expect(console.error).not.toHaveBeenCalled();
+		});
+
 		it("signals that a global-only lens key is not honored at project scope", () => {
 			fs.writeFileSync(
 				path.join(tmpDir, ".pi-lens.json"),
