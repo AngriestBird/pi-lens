@@ -769,9 +769,17 @@ export async function dispatchForFile(
 	// #690: agent/user disposition layer — drop false-positive/suppress marks
 	// and anything deferred this session. flagged marks are left in place;
 	// lens_diagnostics tags them at render time via the same anchor.
+	//
+	// #1030: anchor + store MUST key off the PROJECT ROOT, not ctx.cwd. In a
+	// monorepo ctx.cwd is the nested language root (resolveLanguageRootForFile,
+	// used for tool/config resolution), but the mark tool writes dispositions
+	// under runtime.projectRoot. Keying the read on ctx.cwd computed a different
+	// anchor AND opened a different diagnostic-dispositions.json (getProjectDataDir
+	// is keyed on cwd), so every false-positive/flagged/defer on a file under a
+	// nested marker silently no-op'd. Read from the project root to match the write.
 	const dispositionFiltered = applyDispositions(
 		inlineSuppressed,
-		ctx.cwd,
+		ctx.projectRoot ?? ctx.cwd,
 		ctx.filePath,
 		fileContent,
 	);

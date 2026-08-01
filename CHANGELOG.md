@@ -4,6 +4,29 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Disposition marks under a nested monorepo language root are no longer silently dropped (refs #1030, closes #1030; pairs with #1024)** —
+	a `false-positive`/`flagged`/`defer` mark recorded via `lens_diagnostic_mark`
+	was invisible to the per-edit dispatch filter for every file living under a
+	nested language-root marker (`packages/app/tsconfig.json`, a nested
+	`package.json`/`pyproject.toml`/`go.mod`/etc.) in a monorepo. The mark tool
+	writes dispositions keyed on the **project root** (`runtime.projectRoot`), but
+	`dispatcher.ts`'s `applyDispositions` read keyed on `ctx.cwd`, which
+	`createDispatchContext` resolves to the nearest **language root** via
+	`resolveLanguageRootForFile` (a dispatch-internal tool/config-resolution
+	detail). Because both the anchor AND the persisted store location
+	(`getProjectDataDir`, keyed on `cwd`) derive from that base, write and read
+	computed different anchors AND opened entirely different
+	`diagnostic-dispositions.json` files — a total, deterministic failure (not
+	probabilistic) for every file under a nested marker. The tool returned success
+	while dispatch never saw the mark (a #533 honesty failure); `suppress` survived
+	only via its independent inline `pi-lens-ignore` comment. Fixed by reading the
+	disposition layer from the project root (`ctx.projectRoot`, already computed in
+	`createDispatchContext`), matching the write side — anchor base and store base
+	now agree on both sides. `resolveLanguageRootForFile` is untouched and still
+	drives actual dispatch/tool-root resolution. Orthogonal to #1024 (which fixes
+	the path *form* of the anchor); the two compose for a monorepo-stable anchor.
+	No new dependencies.
+
 - **`lens_diagnostics mode=all` no longer replays a resolved blocker (refs #1020, closes #1020)** —
 	the widget-state `files` map was keyed by the raw, non-normalized path string,
 	so the SAME file could land under two different key forms in one session:
