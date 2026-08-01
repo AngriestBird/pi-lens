@@ -6,6 +6,10 @@
 
 pi-lens gives AI coding agents fast, language-aware feedback while they write/edit.
 
+> **Working in this project as an AI agent?** Read the [agent guide](docs/agent-guide.md)
+> for how pi-lens surfaces diagnostics (honesty labels, blockers, read-before-edit)
+> and how to respond.
+
 ## What It Does
 
 - LSP diagnostics and navigation across supported languages
@@ -47,6 +51,7 @@ pi install git:github.com/apmantza/pi-lens
 
 ## Documentation
 
+- [Agent guide](docs/agent-guide.md) — how an AI agent should consume and respond to pi-lens
 - [Agent tools](docs/agent-tools.md) — pi tool names, scopes, and arguments
 - [Usage guide](docs/usage.md) — lifecycle, tool behavior, MCP notes, and
   troubleshooting
