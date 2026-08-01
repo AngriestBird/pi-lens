@@ -323,7 +323,12 @@ describe("index.ts extension wiring", () => {
 			// Flip it on through the real command handler.
 			await pi.runCommand("lens-context-toggle", "", makeCtx({ cwd: tmp }));
 
-			// Now the same hook prepends the cached findings ahead of existing messages.
+			// Now the same hook injects the cached findings into the transcript.
+			// The lone existing message is a `system` message (not a plain user
+			// prompt), so the #1016 placement guard appends the findings after it
+			// rather than prepending — the original message stays first (so a real
+			// user prompt / system preamble keeps its position and the prompt-cache
+			// prefix), and the findings land at the tail.
 			const on = (await pi.emit(
 				"context",
 				{ messages: existing },
@@ -331,8 +336,8 @@ describe("index.ts extension wiring", () => {
 			)) as { messages: Array<{ role: string; content: string }> } | undefined;
 
 			expect(on?.messages, "expected injected messages").toBeDefined();
-			expect(on?.messages[0].content).toMatch(/TESTFINDINGS_XYZZY/);
-			expect(on?.messages.at(-1)).toEqual({ role: "system", content: "orig" });
+			expect(on?.messages[0]).toEqual({ role: "system", content: "orig" });
+			expect(on?.messages.at(-1)?.content).toMatch(/TESTFINDINGS_XYZZY/);
 		});
 	});
 
