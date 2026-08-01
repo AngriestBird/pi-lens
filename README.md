@@ -61,6 +61,8 @@ pi install git:github.com/apmantza/pi-lens
 - [Tools and commands](docs/tools.md) — runtime flags and slash commands
 - [Diagnostic dispositions](docs/dispositions.md) — triage: false-positive,
   suppress, defer, flagged-to-fix
+- [Settings](docs/settings.md) — the configuration hub: defaults, env vars, CLI
+  flags, and global vs project config at a glance
 - [Configuration](docs/globalconfig.md) — global and project config files
 - [Environment variables](docs/environment-variables.md) — common env vars and
   full reference
