@@ -419,11 +419,33 @@ describe("project rule precedence follow-ups", { timeout: HEAVY_IO_TIMEOUT_MS },
 			if (!spawned) throw new Error("ast-grep LSP did not spawn");
 			expect(spawned.process.args).toContain("--config");
 
+			// #1022: use the server's OWN configured initialize budget (as
+			// production does at clients/lsp/index.ts:1358 —
+			// `initializeTimeoutMs: server.initializeTimeoutMs`) as the shared
+			// LSP timing budget here, instead of a shorter, invented constant.
+			// ast-grep's real budget (clients/lsp/server.ts,
+			// `AstGrepServer.initializeTimeoutMs`) is deliberately generous
+			// because the first scan of a session compiles the full rule set
+			// (~350 files incl. the CodeRabbit catalog) — and that compile cost
+			// can land either during the `initialize` handshake OR while
+			// computing the first document's diagnostics, depending on when
+			// the server actually parses the rule config. `waitForDiagnostics`
+			// (clients/lsp/client.ts) resolves silently on timeout rather than
+			// throwing, so a too-short wait here doesn't surface as a timeout
+			// error — it surfaces as a false "diagnostic not found" assertion
+			// failure, which is exactly what #1022 observed. A hardcoded 5s
+			// budget for either step undercut the server's own declared cost
+			// by 3x and could starve under full-parallel-suite CPU contention
+			// (this file is now also phased into its own low-concurrency
+			// vitest project — see vitest.config.ts's `lsp-spawn-heavy`
+			// project — so this budget-alignment is belt-and-braces, not the
+			// sole fix for the contention itself).
+			const lspBudgetMs = server.initializeTimeoutMs ?? 15_000;
 			const client = await createLSPClient({
 				serverId: "ast-grep",
 				process: spawned.process,
 				root,
-				initializeTimeoutMs: 5_000,
+				initializeTimeoutMs: lspBudgetMs,
 			});
 			try {
 				const minVersion = client.diagnosticsVersion;
@@ -432,7 +454,7 @@ describe("project rule precedence follow-ups", { timeout: HEAVY_IO_TIMEOUT_MS },
 					fs.readFileSync(filePath, "utf8"),
 					"typescript",
 				);
-				await client.waitForDiagnostics(filePath, 5_000, { minVersion });
+				await client.waitForDiagnostics(filePath, lspBudgetMs, { minVersion });
 				expect(
 					client
 						.getDiagnostics(filePath)
@@ -446,7 +468,12 @@ describe("project rule precedence follow-ups", { timeout: HEAVY_IO_TIMEOUT_MS },
 				await client.shutdown({ fast: true });
 			}
 		},
-		15_000,
+		// #1022: was a hardcoded 15_000 — too tight once both the initialize
+		// step and the diagnostics wait above can each legitimately consume up
+		// to the server's own ~15s budget. Give room for both budgets in
+		// sequence plus normal spawn/teardown overhead, rather than another
+		// disagreeing magic number.
+		40_000,
 	);
 
 	it("keeps TypeScript and JavaScript project winners aligned in NAPI", () => {
