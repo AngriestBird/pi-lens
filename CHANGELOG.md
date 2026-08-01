@@ -4,6 +4,27 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Cache-friendly ephemeral context injection (refs #1016, closes #1016)** — the
+	`context` event handler in `index.ts` now splices pi-lens's ephemeral turn-end
+	findings in **immediately before the final message** instead of prepending them
+	at message index 0. Prepending flipped `messages[0]` every turn, which
+	invalidated the entire prompt-cache prefix on every prefix-caching provider
+	(Anthropic, Bedrock, and OpenAI — all key the cache on the exact token prefix).
+	Inserting before the last message keeps `messages[0]` (the real first user turn)
+	byte-stable so the prior conversation stays cached, while still keeping the real
+	user prompt as the trailing message — preserving the trailing-`user` cache
+	breakpoint and the historical `fe0ed5da` guarantee that input is never empty (the
+	existing transcript is always preserved, never dropped; an empty transcript falls
+	back to the prior prepend-only behavior). Because the `context` event fires
+	before **every** provider call (not just at turn boundaries), a trailing-role
+	guard (`isPlainUserPrompt`) only splices before the last message when it is a
+	plain user prompt; when the tail is a mid-loop `tool_result` (or assistant/tool
+	message) the findings are **appended** after the whole transcript instead — a
+	pure append that both preserves the `tool_use`↔`tool_result` adjacency all three
+	providers require (splicing between them is an HTTP 400) and keeps the entire
+	prior transcript as an untouched cache prefix. Changes shipped `dist` behavior
+	(the handler lives in the bundled dist path).
+
 - **Config-consistency pass on the #166 flag registry (refs #166, #533)** — the
 	#883 registry core (scope split, precedence, negation) was audited consistent
 	and left untouched; the gaps were all in #533 malformed/unknown-input
