@@ -341,16 +341,16 @@ describe("anchor path-form stability (#1024 — write raw vs read normalized)", 
 		const normalizedCwd = normalizeMapKey(projectDir);
 		const normalizedFile = normalizeMapKey(fileOnDisk);
 
-		// Only meaningful where the raw write form and the normalized read form
-		// yield DIFFERENT relative paths (Windows realpath casing / symlink
-		// resolution) — that divergence is the whole bug. On a case-sensitive,
-		// no-realpath platform the two coincide and there is nothing to regress,
-		// so skip honestly rather than assert a vacuous truth.
-		const rawRel = path.relative(projectDir, rawFile).replace(/\\/g, "/");
-		const normRel = path
-			.relative(normalizedCwd, normalizedFile)
-			.replace(/\\/g, "/");
-		if (rawRel === normRel) return;
+		// This mis-cased scenario only reproduces the bug on a CASE-INSENSITIVE
+		// filesystem, where `SUB/a.ts` and the real `sub/a.ts` are the SAME file —
+		// so a raw mis-cased write and a realpath-canonicalized read SHOULD collapse
+		// to one anchor. On a case-sensitive FS (Linux CI) they are genuinely
+		// DIFFERENT files: realpath of the non-existent `SUB` can't unify them and
+		// must not, so there is nothing to regress. Probe the actual filesystem (not
+		// the OS name) and skip honestly when mis-casing doesn't alias. (The prior
+		// `rawRel === normRel` guard mis-fired on Linux — the forms differ textually
+		// there but never alias — which surfaced as a CI failure on #1024's PR.)
+		if (!fs.existsSync(rawFile)) return;
 
 		const diag = { tool: "eslint", rule: "no-bad", message: "bad call", line: 1 };
 		markDisposition(
