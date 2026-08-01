@@ -32,6 +32,74 @@ All notable changes to pi-lens will be documented in this file.
 	neighbor-touch/freshness pipeline (neighborTouchCache, recentlyCleanNeighborCache,
 	the 40-neighbor budget, tier-aware touch model, deferred cascade flow) is
 	untouched.
+- **Disposition marks under a nested monorepo language root are no longer silently dropped (refs #1030, closes #1030; pairs with #1024)** —
+	a `false-positive`/`flagged`/`defer` mark recorded via `lens_diagnostic_mark`
+	was invisible to the per-edit dispatch filter for every file living under a
+	nested language-root marker (`packages/app/tsconfig.json`, a nested
+	`package.json`/`pyproject.toml`/`go.mod`/etc.) in a monorepo. The mark tool
+	writes dispositions keyed on the **project root** (`runtime.projectRoot`), but
+	`dispatcher.ts`'s `applyDispositions` read keyed on `ctx.cwd`, which
+	`createDispatchContext` resolves to the nearest **language root** via
+	`resolveLanguageRootForFile` (a dispatch-internal tool/config-resolution
+	detail). Because both the anchor AND the persisted store location
+	(`getProjectDataDir`, keyed on `cwd`) derive from that base, write and read
+	computed different anchors AND opened entirely different
+	`diagnostic-dispositions.json` files — a total, deterministic failure (not
+	probabilistic) for every file under a nested marker. The tool returned success
+	while dispatch never saw the mark (a #533 honesty failure); `suppress` survived
+	only via its independent inline `pi-lens-ignore` comment. Fixed by reading the
+	disposition layer from the project root (`ctx.projectRoot`, already computed in
+	`createDispatchContext`), matching the write side — anchor base and store base
+	now agree on both sides. `resolveLanguageRootForFile` is untouched and still
+	drives actual dispatch/tool-root resolution. Orthogonal to #1024 (which fixes
+	the path *form* of the anchor); the two compose for a monorepo-stable anchor.
+	No new dependencies.
+
+- **Disposition anchor path-form stability (refs #1024, closes #1024)** — the
+	`dd:`/`ddw:` disposition anchors (clients/diagnostic-dispositions.ts) are now
+	derived from a single canonical path form, closing a #533-adjacent
+	dropped-signal bug (sibling of #210/#1020). `relativeFile` — the chokepoint
+	both `computeStrictAnchor` and `computeWeakAnchor` route through — computed
+	`path.relative` on whichever raw path form the caller happened to hold: the
+	mark tool (tools/lens-diagnostic-mark.ts) passes a RAW `cwd` /
+	`path.resolve(cwd, arg)`, while the dispatch read side
+	(clients/dispatch/dispatcher.ts `createDispatchContext`) passes
+	`normalizeMapKey`-canonicalized (realpath'd) cwd/filePath. When the two forms
+	diverged (Windows drive/segment case, symlink/realpath), the agent's own
+	`false-positive`/`flagged` mark anchored under one id and the later
+	`applyDispositions` lookup under another, so the mark was invisible and the
+	"resolved" diagnostic kept re-firing / re-blocking every turn. Fix routes
+	BOTH `cwd` and `filePath` through `normalizeMapKey` inside `relativeFile`
+	(the same normalizer the read side already relies on — the #210 "every guard
+	map keys through `normalizeFilePath`" invariant), so write and read derive
+	identical anchors regardless of the form the caller passed. Anchor semantics
+	are unchanged: strict (`dd:`, line-hash) vs weak (`ddw:`) split, the prefixes,
+	and the `..`-escape fallback all behave exactly as before — only the path
+	component is now form-stable. Existing on-disk marks written under the old raw
+	form re-anchor to the canonical id; a stale orphan is re-derivable and simply
+	reappears once for the agent to re-mark (identical to today's pre-fix
+	behavior), so no read-time legacy fallback is needed.
+- **`lens_diagnostics mode=all` no longer replays a resolved blocker (refs #1020, closes #1020)** —
+	the widget-state `files` map was keyed by the raw, non-normalized path string,
+	so the SAME file could land under two different key forms in one session:
+	the forward-slash form (`C:/…/x.ts`) the LSP client + cascade fold produce via
+	`normalizeFilePath`, and the backslash form (`C:\…\x.ts`) that `mode=full`'s
+	clean reconcile (`result.filePath`) and `path.resolve`/event inputs produce on
+	Windows. A stale blocking entry and the fresh clean entry then coexisted as two
+	separate map entries. `mode=full` rendered clean because its merge re-keys every
+	summary through `path.resolve`, but `mode=all`'s `formatAllMode` reads
+	`getFileDiagnosticSummaries()` verbatim with no dedup, so it saw both and
+	rendered the stale entry's `blocking:1` as a 🔴 — a resolved state that replayed
+	as still-broken on every `mode=all` (worst on Windows + resumed sessions), and a
+	#533 honesty failure since the tool prompt tells agents to use `mode=all` to
+	verify no blockers remain. Fixed at source: every write/read seam on the `files`
+	map (and the `diagnosticsWriteGuard`) now folds its key through one normalizer,
+	`normalizeEphemeralMapKey` (slash-fold + win32-lowercase, no filesystem I/O —
+	chosen over the `realpathSync`-backed `normalizeMapKey` because this is a hot
+	write path), and `importWidgetState` folds persisted keys on rehydrate so a
+	`/`-key snapshot and a fresh `\`-key write collapse across a resumed session.
+	The human-readable display path on each record is preserved verbatim (rendering
+	and path-relative math unchanged). No new dependencies.
 
 - **Prompt-cache observability (refs #1018, closes #1018)** — two provider-independent
 	signals now land in `~/.pi-lens/latency.log` as `type: "phase"` records.
