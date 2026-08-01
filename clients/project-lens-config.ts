@@ -60,8 +60,13 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { parseEnabledShape } from "./config-enabled-shape.js";
 import { toPositiveFinite } from "./env-utils.js";
+import {
+	assignFlagConfigSection,
+	type LensFlagSpec,
+	PROJECT_SCOPED_LENS_FLAGS,
+	readFlagConfigValue,
+} from "./lens-flag-registry.js";
 import { isAtOrAboveHomeDir, walkUpDirs } from "./path-utils.js";
 import { findPiLensConfigMarkerInDir } from "./workspace-topology.js";
 
@@ -199,11 +204,6 @@ export function findPiLensConfigInDir(
 	return { path: marker.path, dir: marker.dir, mtimeMs: marker.mtimeMs };
 }
 
-export type ProjectMutationFlag =
-	| "no-autoformat"
-	| "no-autofix"
-	| "lens-actionable-warning-autofix";
-
 export interface NestedProjectMutationValue {
 	value: boolean;
 	dir: string;
@@ -215,7 +215,7 @@ export interface NestedProjectMutationValue {
  * and refuses to inspect HOME or any ancestor of HOME.
  */
 export function findNestedProjectMutationValue(
-	name: ProjectMutationFlag,
+	spec: LensFlagSpec,
 	editedFilePath: string,
 	projectRoot: string,
 	homeDir = os.homedir(),
@@ -227,12 +227,7 @@ export function findNestedProjectMutationValue(
 		const rel = path.relative(root, dir);
 		if (rel.startsWith("..") || path.isAbsolute(rel)) break;
 		const config = loadPiLensConfigInDir(dir);
-		const enabled =
-			name === "no-autoformat"
-				? config.format?.enabled
-				: name === "no-autofix"
-					? config.autofix?.enabled
-					: config.actionableWarnings?.autoFix?.enabled;
+		const enabled = readFlagConfigValue(config, spec.configKey);
 		if (enabled !== undefined) return { value: enabled, dir };
 		if (dir === root) break;
 	}
@@ -325,16 +320,6 @@ function warnInvalidConfigOnce(configPath: string, reason: string): void {
 	);
 }
 
-function parseEnabledConfig(
-	configPath: string,
-	fieldPath: string,
-	value: unknown,
-): PiLensProjectMutationConfig | undefined {
-	return parseEnabledShape(value, fieldPath, (reason) =>
-		warnInvalidConfigOnce(configPath, reason),
-	);
-}
-
 function parseConfigFile(configPath: string): PiLensProjectConfig {
 	let raw: unknown;
 	try {
@@ -358,28 +343,12 @@ function parseConfigFile(configPath: string): PiLensProjectConfig {
 	const ignore = Array.isArray(obj.ignore)
 		? obj.ignore.filter((p): p is string => typeof p === "string")
 		: [];
-	const format = parseEnabledConfig(configPath, "format", obj.format);
-	const autofix = parseEnabledConfig(configPath, "autofix", obj.autofix);
-	const actionableWarningsRaw =
-		obj.actionableWarnings &&
-		typeof obj.actionableWarnings === "object" &&
-		!Array.isArray(obj.actionableWarnings)
-			? (obj.actionableWarnings as Record<string, unknown>)
-			: undefined;
-	if (obj.actionableWarnings !== undefined && !actionableWarningsRaw) {
-		warnInvalidConfigOnce(
-			configPath,
-			"actionableWarnings must be an object",
+	const mutations: Record<string, unknown> = {};
+	for (const spec of PROJECT_SCOPED_LENS_FLAGS) {
+		assignFlagConfigSection(obj, mutations, spec.configKey, (reason) =>
+			warnInvalidConfigOnce(configPath, reason),
 		);
 	}
-	const actionableWarningsAutoFix = parseEnabledConfig(
-		configPath,
-		"actionableWarnings.autoFix",
-		actionableWarningsRaw?.autoFix,
-	);
-	const actionableWarnings = actionableWarningsRaw
-		? { autoFix: actionableWarningsAutoFix }
-		: undefined;
 
 	const rules: Record<string, PiLensProjectRuleConfig> = {};
 	if (obj.rules && typeof obj.rules === "object" && !Array.isArray(obj.rules)) {
@@ -451,9 +420,10 @@ function parseConfigFile(configPath: string): PiLensProjectConfig {
 	return {
 		ignore,
 		rules,
-		format,
-		autofix,
-		actionableWarnings,
+		...(mutations as Pick<
+			PiLensProjectConfig,
+			"format" | "autofix" | "actionableWarnings"
+		>),
 		maxProjectFiles,
 		reviewGraph,
 		raw,

@@ -7,6 +7,10 @@ import {
 	resolvePiLensFlagWithSource,
 } from "../../clients/lens-config.js";
 import {
+	getLensFlagSpec,
+	type LensFlagSpec,
+} from "../../clients/lens-flag-registry.js";
+import {
 	findNestedProjectMutationValue,
 	loadPiLensProjectConfig,
 	resetProjectLensConfigCache,
@@ -14,6 +18,7 @@ import {
 import { removeTempDirSync } from "./test-utils.js";
 
 const dirs: string[] = [];
+const noAutoformat = getLensFlagSpec("no-autoformat") as LensFlagSpec;
 
 function fixture(): { root: string; pkg: string; file: string } {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-nested-mutation-"));
@@ -84,7 +89,7 @@ describe("nested project mutation controls (#792)", () => {
 		const { root, pkg, file } = fixture();
 		writeConfig(root, { format: { enabled: false } });
 		expect(
-			findNestedProjectMutationValue("no-autoformat", file, root, pkg),
+			findNestedProjectMutationValue(noAutoformat, file, root, pkg),
 		).toBeUndefined();
 	});
 
@@ -92,14 +97,14 @@ describe("nested project mutation controls (#792)", () => {
 		const { root, pkg, file } = fixture();
 		writeConfig(pkg, { format: { enabled: false } });
 		expect(
-			findNestedProjectMutationValue("no-autoformat", file, root)?.value,
+			findNestedProjectMutationValue(noAutoformat, file, root)?.value,
 		).toBe(false);
 		writeConfig(pkg, { format: { enabled: true }, extra: "changes-size" });
 		const configPath = path.join(pkg, ".pi-lens.json");
 		const now = new Date(Date.now() + 2_000);
 		fs.utimesSync(configPath, now, now);
 		expect(
-			findNestedProjectMutationValue("no-autoformat", file, root)?.value,
+			findNestedProjectMutationValue(noAutoformat, file, root)?.value,
 		).toBe(true);
 	});
 });

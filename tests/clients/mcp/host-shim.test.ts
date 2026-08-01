@@ -97,4 +97,26 @@ describe("createMcpHost", () => {
 			removeTempDirSync(projectRoot);
 		}
 	});
+
+	// #166: this host passes no CLI value, so an undecided registry flag used to
+	// come back `undefined` and now comes back its registered `false` default.
+	// Both are falsy and every consumer tests truthiness or `=== true`
+	// (auxiliary-lsp's kill-switch check), so nothing broke — but pin the
+	// resolved shape so a future resolver change cannot silently flip it back
+	// and turn a `=== false` comparison somewhere into a dormant bug.
+	it("returns a registry flag's boolean default, not undefined (#166)", () => {
+		const projectRoot = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-mcp-default-shape-"),
+		);
+		try {
+			const host = createMcpHost(undefined, projectRoot);
+			for (const flag of ["no-lsp", "no-tests", "no-delta", "lens-guard"]) {
+				expect(host.getFlag(flag), `flag: ${flag}`).toBe(false);
+			}
+			// A name with no registry entry still passes through as undefined.
+			expect(host.getFlag("lens-opengrep-config")).toBeUndefined();
+		} finally {
+			removeTempDirSync(projectRoot);
+		}
+	});
 });

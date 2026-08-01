@@ -89,7 +89,20 @@ pi --no-tests            # Skip test runner
 pi --no-delta            # Disable delta mode (show all diagnostics, not just new ones)
 pi --lens-guard          # Block git commit/push when unresolved blockers exist (experimental)
 pi --no-opengrep         # Disable the Opengrep security scanner (default-on auxiliary LSP)
+pi --no-read-guard       # Disable the read-before-edit behavior monitor
+pi --lens-turn-summary   # Persist a per-turn summary of diagnostics, autofixes, and autoformats
+
+# Actionable warnings (all default off)
+pi --lens-actionable-warnings          # Report fixable warnings at turn end
+pi --lens-actionable-warning-actions   # Enrich the report with LSP code-action titles
+pi --lens-actionable-warning-autofix   # Apply conservative LSP quickfixes at agent_end
+pi --lens-actionable-warning-all       # Report every warning, not just this turn's
 ```
+
+Every one of these has a `~/.pi-lens/config.json` equivalent, so you can set it
+once instead of per session. See
+[Global and Project Config](globalconfig.md#every-toggle-both-ways) for the
+flag-to-key table and the precedence order.
 
 ## Rules
 
