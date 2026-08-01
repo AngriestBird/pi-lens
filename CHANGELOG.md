@@ -4,6 +4,35 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Word index no longer serves stale postings after a case/separator-divergent edit (refs #1025, closes #1025 item #2)** —
+	the word index's `docLengths`/`forward`/`fileMtimes` maps are keyed on file
+	paths, but the full/incremental BUILD keyed on the on-disk casing the
+	`readdirSync` walk reports while the per-edit UPDATE seams
+	(`clients/dispatch/integration.ts`, `clients/mcp/analyze.ts`) key via
+	`path.resolve()` on the raw tool-input path. When those forms differed only by
+	separator (`\` vs `/`, always) or case (on a case-insensitive FS), the plain-`Map`
+	keying made `forward.has(doc.path)` MISS, so the stale build-form entry was never
+	removed — a duplicate doc entry with stale postings served until a full rebuild,
+	silently degrading `symbol_search` relevance (the path-key divergence class,
+	#1020/#210). Fix: a new typed **`PathKeyedMap<V>`** primitive
+	(`clients/path-keyed-map.ts`) folds every key through a caller-supplied
+	normalizer INTERNALLY, so keying a raw path is structurally impossible; the word
+	index now routes all three path maps through it using the shared, exported
+	`wordIndexKey` (= `normalizeEphemeralMapKey` — cheap slash-fold + win32-lowercase,
+	NO `realpathSync`, so the hot BM25 path adds no filesystem I/O), and the
+	token-keyed `postings` cleanup compares `WordHit.file` through the same
+	normalizer, and the incremental-refresh set-difference
+	(`refreshWordIndexIncrementally`) now computes its `current`/`oldSet` keys in
+	that same normalized space (previously raw-keyed — a file whose stored display
+	path became the edit form would have been double-counted as churn and
+	dropped-then-re-added, defeating the incremental path and opening a
+	drop-before-readd regression window). `PathKeyedMap` stores each value's
+	ORIGINAL display path, so `symbol_search`/rendering surfaces still see the
+	on-disk form, not the folded key. Build-form, edit-form, and refresh keys now
+	converge on ONE entry regardless of casing/separator. The runtime-coordinator suspect maps (#1025 item #4) are left
+	for a follow-up (unproven trigger, and their correct normalizer is the
+	realpath-based `normalizeMapKey` matching the file's own `_fileSeq` convention —
+	a larger, higher-risk change across the concurrent-session drain logic).
 - **Session-start perf: bound the change-log replay + defer log cleanup (closes #1019)** —
 	the interactive session-start path recomputed the project sequence by reading
 	the ENTIRE append-only change log and folding every line — and each fold does a

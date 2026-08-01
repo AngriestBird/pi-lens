@@ -351,10 +351,11 @@ export async function analyzeFile(
 		// (`scheduleWordIndexPersist`, `PI_LENS_WORD_INDEX_PERSIST_DEBOUNCE_MS`)
 		// pi's path uses — no second persist mechanism.
 		//
-		// Key shape: `path.resolve(absPath)`, matching the build path's own keys
-		// (collectWordIndexDocs → collectSourceFilesAsync), NOT normalizeMapKey —
-		// see updateWordIndexForCascade's doc comment for why a mismatched key
-		// silently orphans a duplicate entry instead of replacing it.
+		// Key shape: `absPath` (`path.resolve` of the tool-input path). Since #1025
+		// the word index's path maps fold every key through `wordIndexKey`
+		// INTERNALLY (PathKeyedMap), so this edit-form key and the build path's
+		// walk-derived key converge on the same entry regardless of casing/
+		// separator — the old duplicate-orphan hazard is gone at the map layer.
 		const warmIndex = getOrLoadWarmWordIndex(cwd);
 		if (warmIndex) {
 			try {

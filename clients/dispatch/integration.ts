@@ -722,17 +722,15 @@ export async function computeCascadeForFile(
 	// `wordIndex`/`fileContent` doc comments for the cold/no-forward-index
 	// no-op rules.
 	//
-	// Deliberately keyed by `path.resolve(filePath)`, NOT `normalizedFile`
-	// (which is `normalizeMapKey`'d — realpath-canonicalized + lowercased on
-	// Windows). The word index's OWN keys come from `collectWordIndexDocs` →
-	// `collectSourceFilesAsync`'s file walk, which yields plain
-	// `path.resolve()`-joined paths (native separators, on-disk casing as
-	// reported by the walk, no realpath call). Keying this update with the
-	// cascade's normalized key would silently create a SECOND, orphaned entry
-	// next to the walker's original-cased entry instead of replacing it —
-	// exactly the kind of divergence the equivalence-property test is meant to
-	// catch, so the key shape here must match the build path's, not the
-	// cascade/graph's own (different) normalization scheme.
+	// Keyed by `path.resolve(filePath)` (native separators, tool-input casing).
+	// Since #1025 the word index's path maps are `PathKeyedMap`s that fold every
+	// key through `wordIndexKey` (`normalizeEphemeralMapKey` — slash-fold +
+	// win32-lowercase) INTERNALLY, so this per-edit key and the build path's own
+	// walk-derived key (`collectWordIndexDocs` → `collectSourceFilesAsync`)
+	// collapse to the same entry regardless of on-disk-vs-input casing/separator.
+	// The old hazard — this update silently orphaning a SECOND entry next to the
+	// walker's original-cased one — is now structurally impossible at the map
+	// layer, so this seam no longer has to hand-match the build path's key shape.
 	updateWordIndexForCascade({
 		wordIndex,
 		filePath: nodePath.resolve(filePath),
