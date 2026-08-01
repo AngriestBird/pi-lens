@@ -176,6 +176,64 @@ export function unreleasedHasEntries(text) {
   return body !== null && /^\s*[-*]\s/m.test(body);
 }
 
+/**
+ * Lint a section body for entries the release-notes summarizer
+ * (`summarizeSection`) would silently mangle. Returns a list of problems; an
+ * empty list means clean. Two failure modes, both learned from real broken
+ * v3.8.74 release notes:
+ *
+ *   1. `orphan` — a top-level `- ` entry that appears BEFORE the first `### `
+ *      category heading. `summarizeSection` only emits entries under a heading
+ *      (it skips lines while `heading === null`), so an orphan entry is dropped
+ *      from the release body entirely.
+ *   2. `wrapped-title` — a `- **…` entry whose bold title's closing `**` is not
+ *      on the same physical line as the opening. `summarizeSection` reads only
+ *      the entry's first line and emits only the text inside `**…**`, so a
+ *      wrapped title renders truncated AND drops any `(refs #NNN)` that trails
+ *      onto the continuation line.
+ *
+ * Line numbers are 1-based within the passed body.
+ *
+ * @param {string} body a section body (e.g. `extractSection(text, "Unreleased")`)
+ * @returns {Array<{ kind: "orphan" | "wrapped-title", line: number, text: string }>}
+ */
+export function lintSectionBody(body) {
+  const problems = [];
+  if (typeof body !== "string") return problems;
+  const lines = body.split(/\r?\n/);
+  let seenHeading = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trimEnd();
+    if (/^#{2,4}\s/.test(line)) {
+      seenHeading = true;
+      continue;
+    }
+    // Only column-0 `- ` bullets are top-level entries; indented continuation
+    // lines (tab/space + `-`) are part of the preceding entry's prose.
+    const entry = line.match(/^-\s+(.*)$/);
+    if (!entry) continue;
+    if (!seenHeading) {
+      problems.push({ kind: "orphan", line: i + 1, text: entry[1] });
+    }
+    if (entry[1].startsWith("**") && (line.match(/\*\*/g) || []).length < 2) {
+      problems.push({ kind: "wrapped-title", line: i + 1, text: entry[1] });
+    }
+  }
+  return problems;
+}
+
+/**
+ * Lint the `## [Unreleased]` section — the one authors edit per-PR — so a
+ * malformed entry is caught at PR time instead of at release. `[]` when clean.
+ * See {@link lintSectionBody} for the two problem kinds.
+ *
+ * @param {string} text full CHANGELOG.md contents
+ * @returns {ReturnType<typeof lintSectionBody>}
+ */
+export function lintUnreleased(text) {
+  return lintSectionBody(extractSection(text, "Unreleased"));
+}
+
 const EMPTY_UNRELEASED = [
   "## [Unreleased]",
   "",
