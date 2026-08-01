@@ -1546,4 +1546,51 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		await driveEditThenTurnEnd(handlers, filePath);
 		await expect(fireAgentSettled(handlers)).resolves.not.toThrow();
 	}, INTEGRATION_TIMEOUT_MS);
+
+	it("no-ops (does not fail the quiet-window task) when the captured pi ctx has gone stale", async () => {
+		vi.doMock("../clients/pipeline.js", () => ({
+			runPipeline: vi.fn(async () => workingPipelineResult()),
+		}));
+		mockSuiteDeps();
+
+		const filePath = path.join(tmpDir, "src", "app.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "export const x = 1;\n");
+
+		const { default: registerExtension } = await import("../index.ts");
+		const { pi, handlers, sentMessages } = createMockPi({
+			"lens-turn-summary": true,
+		});
+		registerExtension(pi as any);
+
+		// Populate the run's collector so the task would proceed past isEmpty()
+		// on a live ctx — proving the guard added by the fix, not an empty-run
+		// early return, is what makes this a no-op.
+		await driveEditThenTurnEnd(handlers, filePath);
+
+		// Simulate the SDK invalidating the captured pi after a session
+		// replacement/reload (newSession/fork/switchSession/reload): from then on
+		// every `pi.*` call throws the stale-ctx guard. The turn_summary_emit task
+		// hits pi.getFlag (via getLensFlag) FIRST — outside the sendMessage
+		// try/catch — so pre-fix that throw propagated out of the task and the
+		// real scheduler logged it 55× in live dogfood as `task
+		// "turn_summary_emit" failed` (the log's most frequent error).
+		const STALE_MSG =
+			"This extension ctx is stale after session replacement or reload. " +
+			"Do not use a captured pi or command ctx after ctx.newSession(), " +
+			"ctx.fork(), ctx.switchSession(), or ctx.reload().";
+		(pi as unknown as Record<string, unknown>).getFlag = () => {
+			throw new Error(STALE_MSG);
+		};
+
+		const task = quietTasks.find((t) => t.name === "turn_summary_emit");
+		expect(task).toBeDefined();
+		// Run the task directly: the suite's runQuietWindow stub swallows task
+		// throws (mirroring the real scheduler), so driving fireAgentSettled would
+		// hide the regression. Awaiting the task itself surfaces it — pre-fix this
+		// rejects with the stale-ctx Error; post-fix it resolves to a no-op.
+		await expect((async () => task?.fn())()).resolves.toBeUndefined();
+		// Nothing is emitted into the replaced session.
+		expect(sentMessages).toHaveLength(0);
+	}, INTEGRATION_TIMEOUT_MS);
 });
