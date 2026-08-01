@@ -4,6 +4,31 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Disposition anchor path-form stability (refs #1024, closes #1024)** — the
+	`dd:`/`ddw:` disposition anchors (clients/diagnostic-dispositions.ts) are now
+	derived from a single canonical path form, closing a #533-adjacent
+	dropped-signal bug (sibling of #210/#1020). `relativeFile` — the chokepoint
+	both `computeStrictAnchor` and `computeWeakAnchor` route through — computed
+	`path.relative` on whichever raw path form the caller happened to hold: the
+	mark tool (tools/lens-diagnostic-mark.ts) passes a RAW `cwd` /
+	`path.resolve(cwd, arg)`, while the dispatch read side
+	(clients/dispatch/dispatcher.ts `createDispatchContext`) passes
+	`normalizeMapKey`-canonicalized (realpath'd) cwd/filePath. When the two forms
+	diverged (Windows drive/segment case, symlink/realpath), the agent's own
+	`false-positive`/`flagged` mark anchored under one id and the later
+	`applyDispositions` lookup under another, so the mark was invisible and the
+	"resolved" diagnostic kept re-firing / re-blocking every turn. Fix routes
+	BOTH `cwd` and `filePath` through `normalizeMapKey` inside `relativeFile`
+	(the same normalizer the read side already relies on — the #210 "every guard
+	map keys through `normalizeFilePath`" invariant), so write and read derive
+	identical anchors regardless of the form the caller passed. Anchor semantics
+	are unchanged: strict (`dd:`, line-hash) vs weak (`ddw:`) split, the prefixes,
+	and the `..`-escape fallback all behave exactly as before — only the path
+	component is now form-stable. Existing on-disk marks written under the old raw
+	form re-anchor to the canonical id; a stale orphan is re-derivable and simply
+	reappears once for the agent to re-mark (identical to today's pre-fix
+	behavior), so no read-time legacy fallback is needed.
+
 - **Prompt-cache observability (refs #1018, closes #1018)** — two provider-independent
 	signals now land in `~/.pi-lens/latency.log` as `type: "phase"` records.
 	(1) Response-side: a defensively feature-detected `message_end` subscription

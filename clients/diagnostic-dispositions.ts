@@ -107,9 +107,29 @@ export function normalizeMessage(message: string): string {
 	return message.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+// Anchor derivation chokepoint (#1024, #210 class): the `dd:`/`ddw:` id builders
+// (computeStrictAnchor/computeWeakAnchor) both derive their path component here,
+// so a mark and its later lookup diverge whenever the two callers pass different
+// path FORMS of the same file. That is exactly the bug: the mark tool
+// (lens-diagnostic-mark.ts) passes a RAW cwd / `path.resolve(cwd, arg)`, while
+// the dispatch read side (dispatcher.ts createDispatchContext) passes
+// `normalizeMapKey`-canonicalized cwd/filePath — so a Windows drive/segment
+// case, symlink/realpath, or slash difference between the two forms silently
+// orphans the agent's own false-positive/flagged mark (a #533 dropped-signal).
+// Canonicalize BOTH inputs through `normalizeMapKey` (the SAME normalizer the
+// read side already relies on — realpathSync.native on Windows) BEFORE computing
+// the relative path, so write and read produce identical anchors regardless of
+// the form the caller held. `normalizeMapKey` is idempotent, so the already-
+// canonicalized read side is unaffected; the realpath I/O is acceptable here
+// because dispositions are marked/applied far less often than the per-write
+// widget hot path, and the read side already pays exactly this cost. Semantics
+// are unchanged: the `..`-escape fallback still returns the canonical filePath,
+// only now in the same canonical form the non-escape branch uses.
 function relativeFile(filePath: string, cwd: string): string {
-	const rel = path.relative(cwd, filePath).replace(/\\/g, "/");
-	return rel && !rel.startsWith("..") ? rel : normalizeMapKey(filePath);
+	const canonicalCwd = normalizeMapKey(cwd);
+	const canonicalFile = normalizeMapKey(filePath);
+	const rel = path.relative(canonicalCwd, canonicalFile).replace(/\\/g, "/");
+	return rel && !rel.startsWith("..") ? rel : canonicalFile;
 }
 
 export interface DispositionAnchorArgs {

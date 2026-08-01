@@ -31,6 +31,7 @@ import {
 	markDisposition,
 } from "../../clients/diagnostic-dispositions.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
+import { normalizeMapKey } from "../../clients/path-utils.js";
 
 let tmpDir: string;
 let previousDataDir: string | undefined;
@@ -310,6 +311,60 @@ describe("markDisposition + applyDispositions (#690)", () => {
 		// serving the stale single-entry snapshot from the first read.
 		const kept = applyDispositions([diag, diag2], cwd(), filePath(), content);
 		expect(kept.map((d) => d.rule)).toEqual(["no-bad"]);
+	});
+});
+
+describe("anchor path-form stability (#1024 — write raw vs read normalized)", () => {
+	// The mark tool (lens-diagnostic-mark.ts) anchors a disposition under a RAW
+	// cwd / `path.resolve(cwd, arg)` path, while the dispatch read side
+	// (dispatcher.ts) looks it up under the `normalizeMapKey`-canonicalized form.
+	// Before #1024, `relativeFile` computed `path.relative` on whichever form the
+	// caller passed, so a Windows drive/segment case (or symlink/realpath)
+	// difference between the two forms silently orphaned the agent's own mark and
+	// the "resolved" diagnostic kept re-firing (a #533 dropped-signal). The fix
+	// canonicalizes both inputs through `normalizeMapKey` inside `relativeFile`,
+	// so write and read derive identical anchors regardless of the form held.
+	it("finds a false-positive mark written under a raw (mis-cased) path form when applied via the normalizeMapKey form", () => {
+		const projectDir = cwd();
+		// Real on-disk casing: lowercase `sub`.
+		const subDirOnDisk = path.join(projectDir, "sub");
+		fs.mkdirSync(subDirOnDisk, { recursive: true });
+		const fileOnDisk = path.join(subDirOnDisk, "a.ts");
+		const content = "const target = bad();\n";
+		fs.writeFileSync(fileOnDisk, content);
+
+		// WRITE form: a mis-cased segment (`SUB`), as a raw path.resolve(cwd, arg)
+		// that never went through realpath canonicalization would carry.
+		const rawFile = path.join(projectDir, "SUB", "a.ts");
+		// READ form: the normalizeMapKey-canonicalized cwd/filePath the dispatcher
+		// derives in createDispatchContext.
+		const normalizedCwd = normalizeMapKey(projectDir);
+		const normalizedFile = normalizeMapKey(fileOnDisk);
+
+		// Only meaningful where the raw write form and the normalized read form
+		// yield DIFFERENT relative paths (Windows realpath casing / symlink
+		// resolution) — that divergence is the whole bug. On a case-sensitive,
+		// no-realpath platform the two coincide and there is nothing to regress,
+		// so skip honestly rather than assert a vacuous truth.
+		const rawRel = path.relative(projectDir, rawFile).replace(/\\/g, "/");
+		const normRel = path
+			.relative(normalizedCwd, normalizedFile)
+			.replace(/\\/g, "/");
+		if (rawRel === normRel) return;
+
+		const diag = { tool: "eslint", rule: "no-bad", message: "bad call", line: 1 };
+		markDisposition(
+			projectDir,
+			{ cwd: projectDir, filePath: rawFile, ...diag, content },
+			"false-positive",
+		);
+
+		// Pre-fix: the raw-form write anchored under `SUB/a.ts` while this
+		// normalized-form read derives `sub/a.ts`, so the mark is not found and the
+		// diagnostic survives (kept === [diag]). Post-fix both derive the same
+		// canonical anchor, so the mark is found and the diagnostic is suppressed.
+		const kept = applyDispositions([diag], normalizedCwd, normalizedFile, content);
+		expect(kept).toEqual([]);
 	});
 });
 
