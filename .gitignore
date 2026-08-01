@@ -59,12 +59,12 @@ migrate-*.js
 !LICENSE
 !SECURITY.md
 !docs/audit1.md
+!docs/agent-guide.md
 !docs/agent-tools.md
 !docs/ast-grep_rules_catalog.md
 !docs/tree-sitter_rules_catalog.md
 !docs/custom-rules.md
 !docs/dependencies.md
-!docs/env_variables.md
 !docs/features.md
 !docs/globalconfig.md
 !docs/language-coverage.md
@@ -77,6 +77,7 @@ migrate-*.js
 !docs/mcp.md
 !docs/module-report-read-symbol.md
 !docs/environment-variables.md
+!docs/settings.md
 !docs/fable.md
 !docs/subagent-compat.md
 !docs/dispositions.md
