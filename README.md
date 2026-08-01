@@ -57,8 +57,8 @@ pi install git:github.com/apmantza/pi-lens
 - [Diagnostic dispositions](docs/dispositions.md) — triage: false-positive,
   suppress, defer, flagged-to-fix
 - [Configuration](docs/globalconfig.md) — global and project config files
-- [Environment variables](docs/env_variables.md) — common env vars and full
-  reference link
+- [Environment variables](docs/environment-variables.md) — common env vars and
+  full reference
 - [Language coverage](docs/language-coverage.md) — supported languages, runners,
   and formatters
 - [Dependencies](docs/dependencies.md) — auto-install policy and external tools

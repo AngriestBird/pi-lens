@@ -1,8 +1,9 @@
 # Settings
 
 How pi-lens is configured, and what you can change. This page is the overview
-hub and the environment-variable reference. For the full per-field docs of the
-config JSON, see the [Configuration reference](./globalconfig.md); for the CLI
+hub. For the full per-field docs of the config JSON, see the
+[Configuration reference](./globalconfig.md); for the complete environment-variable
+reference, see [Environment variables](./environment-variables.md); for the CLI
 flags in context, see [Usage](./usage.md).
 
 pi-lens ships with sensible defaults, so **zero configuration is needed** — it
@@ -154,81 +155,27 @@ vice versa); only an explicit disabling CLI flag (`--no-autoformat`,
 
 ## Environment variables
 
-Read once at process start. Set them in the launching shell (`export VAR=…` in
-bash, `$env:VAR = "…"` in PowerShell), your process manager, or CI config. Where
-a variable overlaps a config key, the config JSON value takes precedence unless
-noted otherwise (the two scale knobs below sit *between* config and the built-in
-default).
+Environment variables are read once at process start; set them in the launching
+shell (`export VAR=…` in bash, `$env:VAR = "…"` in PowerShell), your process
+manager, or CI config. The handful you are most likely to reach for:
 
-Boolean-style variables are compared literally against `"1"` or `"0"` — only the
-exact string flips the switch.
+- `PI_LENS_NO_CONTEXT_INJECTION=1` — disable automatic context injection while
+  keeping tools, LSP, read-guard, and formatting active.
+- `PILENS_DATA_DIR` — relocate per-project persistent state (caches, snapshot,
+  review graph) out of the workspace.
+- `PI_LENS_HOME` — relocate the machine-global root (logs, tool binaries, install
+  caches, instance registry).
+- `PI_LENS_MAX_PROJECT_FILES` — base project-size scale knob (default `2000`).
+- `PI_LENS_STARTUP_MODE` — force the startup path: `full`, `minimal`, or `quick`.
 
-### Config location
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `PI_LENS_CONFIG_PATH` | `~/.pi-lens/config.json` | Override the path of the global config file. |
-| `PI_LENS_HOME` | `~/.pi-lens` | Relocate the entire machine-global root — logs, tool binaries, install caches, and the cross-process instance registry. |
-| `PILENS_DATA_DIR` | `~/.pi-lens/projects/<slug>` | Relocate **per-project** persistent state (scanner caches, snapshot, change-log, review graph) out of the workspace; each project gets its own subdirectory. |
-
-`PI_LENS_HOME` is machine-scoped; `PILENS_DATA_DIR` is per-project. They are
-independent.
-
-### Install control
-
-| Variable | Set to | Effect |
-| --- | --- | --- |
-| `PI_LENS_AUTO_INSTALL` | `1` | Auto-approve tool installs non-interactively (same as `--auto-install`). |
-| `PI_LENS_DISABLE_LSP_INSTALL` | `1` | Do not auto-install language servers. |
-| `PI_LENS_DISABLE_TOOL_INSTALL` | `1` | Do not auto-install managed tools (formatters, linters, scanners). |
-
-### Scale and limits
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `PI_LENS_MAX_PROJECT_FILES` | `2000` | Base project-size scale knob; sits below a project's `maxProjectFiles` config value but above the built-in default. Derives five subsystem budgets together. |
-| `PI_LENS_REVIEW_GRAPH_MAX_FILES` | derived from `maxProjectFiles` | Override the review graph's own file budget; wins outright over both the config `reviewGraph.maxFiles` and the adaptive taper. |
-| `PI_LENS_STARTUP_SCAN_MAX_ENTRIES` | `50000` | Directory-entry ceiling for the startup source-count walk (a raw tree-walk safety valve). |
-| `PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS` | `500000` | Element-count ceiling above which the review graph persists only a ranked partial snapshot instead of the whole graph. |
-| `PI_LENS_RUNNER_TIMEOUT_FLOOR_MS` | `0` (no floor) | Minimum wall-clock budget (ms) for every dispatch runner; effective timeout is `max(runner budget, floor)`. Also settable via `dispatch.runnerTimeoutFloorMs`, which wins when both are set. |
-
-### Kill-switches
-
-| Variable | Set to | Effect |
-| --- | --- | --- |
-| `PI_LENS_NO_CONTEXT_INJECTION` | `1` | Disable automatic context injection (same as `--no-lens-context` / `contextInjection.enabled: false`). Tools, LSP, read-guard, and formatting stay active; findings are still cached for `lens_diagnostics` and `/lens-health`. |
-| `PI_LENS_CONCURRENT_SESSION_GUARD` | `0` | Disable the concurrent-session guard (the guard is on by default). |
-
-### Language-specific
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `PI_LENS_VULTURE_MIN_CONFIDENCE` | `60` | Minimum confidence (0–100) for the Python dead-code (Vulture) scanner; out-of-range values are clamped. |
-| `PI_LENS_JAVA_LOMBOK` | (unset) | Set to `0` to disable auto-attaching the Lombok javaagent to the Java language server. |
-| `PI_LENS_LOMBOK_JAR` | (auto-resolved) | Explicit path to a Lombok jar for the Java language server (`LOMBOK_JAR` is also honored). |
-
-### Diagnostics and logging
-
-| Variable | Default | Effect |
-| --- | --- | --- |
-| `PI_LENS_STARTUP_MODE` | auto-selected | Force the session-startup path: `full`, `minimal`, or `quick`. |
-| `PI_LENS_DEBUG` | (unset) | Set to `1` for verbose installer debug logging (same as `--debug`). |
-| `PI_LENS_LOG_RETENTION_DAYS` | `7` | Days to keep rotated logs before cleanup. |
-| `PI_LENS_MAX_LOG_SIZE_MB` | `10` | Max log size (MB) before rotation. |
-
-### Advanced tuning knobs
-
-pi-lens also has many advanced/internal tuning variables — LSP timeouts and
-memory budgets, debounce intervals (`PI_LENS_LSP_*`, and others). These are for
-edge-case tuning and are documented in the source; enumerate them with
-`grep PI_LENS_ clients/`. A few additional user-facing ones (per-project data
-directory, warm-attach soak, bus events, project-map node cap) are covered in
-[Environment variables](./environment-variables.md).
+**Full environment-variable reference:** [environment-variables.md](./environment-variables.md)
+— every supported variable with its default, behavior, and precedence (install
+control, scale/limit knobs, logging, language-specific, and more).
 
 ## See also
 
 - [Configuration reference](./globalconfig.md) — full field-by-field docs for
   `~/.pi-lens/config.json` and `.pi-lens.json`.
 - [Usage](./usage.md) — the CLI flags in context.
-- [Environment variables](./environment-variables.md) — additional runtime
-  variables.
+- [Environment variables](./environment-variables.md) — the complete
+  environment-variable reference.

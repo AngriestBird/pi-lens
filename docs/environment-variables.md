@@ -1,10 +1,41 @@
 # Environment Variables
 
-Selected pi-lens environment variables. Read at process start; set them in the
-shell that launches pi (`export …` in bash, `setx …` in PowerShell, or in
-your process manager / CI config). The `--flag` form on the pi command
-line takes precedence over the env var when both are set; the
-`config.json` form below takes precedence over both.
+The complete pi-lens environment-variable reference. Every variable here is read
+at process start; set it in the shell that launches pi (`export …` in bash,
+`$env:VAR = "…"` / `setx …` in PowerShell), your process manager, or CI config.
+
+Boolean-style variables are compared literally against `"1"` or `"0"` — only the
+exact string flips the switch.
+
+**Precedence** varies by variable and is noted in each section, because the env
+tier sits in a different place depending on what the variable controls:
+
+- **Path / directory overrides** (`PILENS_DATA_DIR`, `PI_LENS_HOME`,
+  `PI_LENS_CONFIG_PATH`) have no CLI or config-key equivalent, so the env var is
+  the only surface.
+- **The registry-bound toggle** (`PI_LENS_NO_CONTEXT_INJECTION`) resolves through
+  the flag registry, where **env is the highest tier** — it outranks both the
+  `--no-lens-context` CLI flag and the `contextInjection.enabled` config key
+  (`clients/lens-config.ts` resolution order: `env → cli → project → global →
+  default`).
+- **Scale / limit knobs** (`PI_LENS_MAX_PROJECT_FILES` and friends) sit *between*
+  the matching `config.json` value and the built-in default — the config value
+  wins when present, else the env var, else the default. A few are outright
+  overrides that win over everything; each says so below.
+
+For the readable overview of all three configuration surfaces (env, CLI flags,
+config JSON) and how they interact, see [Settings](settings.md).
+
+## Config location
+
+### `PI_LENS_CONFIG_PATH`
+
+Override the path of the global config file. **Default:** `~/.pi-lens/config.json`
+(`%USERPROFILE%\.pi-lens\config.json` on Windows). When set, the value is
+resolved to an absolute path and used verbatim.
+
+**When to set it:** keeping the config under version control or a dotfiles
+manager at a non-default location, or pointing CI at a fixture config.
 
 ## Data directory
 
@@ -36,9 +67,9 @@ read-guard,…}.log` likewise stay put.
 ### `PI_LENS_HOME`
 
 Override the machine-global pi-lens directory. This relocates global logs,
-managed tools, install caches, and the instance registry from the default
-`~/.pi-lens/` root to the supplied path. This is separate from
-`PILENS_DATA_DIR`, which controls per-project state.
+managed tools, install caches, and the cross-process instance registry from the
+default `~/.pi-lens/` root to the supplied path. This is separate from
+`PILENS_DATA_DIR`, which controls per-project state; the two are independent.
 
 ## Startup mode
 
@@ -57,12 +88,54 @@ repo skip the counting walk entirely; a repo that shrinks below the threshold
 recovers when the TTL expires. Other verdicts use content-based freshness and
 ignore this setting.
 
-## Project map
+## Scale and limits
 
-### `PI_LENS_MAP_MAX_NODES`
+### `PI_LENS_MAX_PROJECT_FILES`
 
-Node cap for `/lens-map` (default 500). Graphs with more files keep only the
-highest-degree ones and render a visible truncation note.
+Base project-size scale knob (default `2000`). It derives five subsystem size
+budgets together. In precedence it sits **below** a project's `maxProjectFiles`
+config value and **above** the built-in default: a `.pi-lens.json`
+`maxProjectFiles` wins when present, otherwise this env var, otherwise `2000`.
+
+### `PI_LENS_REVIEW_GRAPH_MAX_FILES`
+
+Override the review graph's own file budget. This wins **outright** over both the
+config `reviewGraph.maxFiles` value and the adaptive taper derived from
+`maxProjectFiles` — it is checked at the call site before any derivation.
+
+### `PI_LENS_STARTUP_SCAN_MAX_ENTRIES`
+
+Directory-entry ceiling for the startup source-count walk (default `50000`). This
+bounds directory entries *visited* — a raw tree-walk safety valve — and is
+deliberately **not** derived from `maxProjectFiles`, since the healthy ratio of
+entries-visited to source-files-kept varies wildly by project shape.
+
+### `PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS`
+
+Element-count ceiling (default `500000`) above which the review graph persists
+only a ranked partial snapshot instead of the whole graph.
+
+### `PI_LENS_RUNNER_TIMEOUT_FLOOR_MS`
+
+Minimum wall-clock budget (ms) for every dispatch runner; the effective timeout
+is `max(runner budget, floor)`. **Default:** `0` (no floor). Also settable via
+the `dispatch.runnerTimeoutFloorMs` config key, which wins when both are set.
+
+## Install control
+
+### `PI_LENS_AUTO_INSTALL`
+
+Set to `1` to auto-approve tool installs non-interactively (same as
+`--auto-install`). Off by default — installs prompt interactively.
+
+### `PI_LENS_DISABLE_LSP_INSTALL`
+
+Set to `1` to skip auto-installing language servers. Off by default.
+
+### `PI_LENS_DISABLE_TOOL_INSTALL`
+
+Set to `1` to skip auto-installing managed tools (formatters, linters,
+scanners). Off by default.
 
 ## Context injection
 
@@ -75,6 +148,18 @@ active; findings are still cached for `lens_diagnostics` and
 `/lens-health`. Useful when prompt-cache invalidation from injected
 messages is hurting throughput in long, cache-sensitive sessions.
 
+This variable is bound into the flag registry, where **the env tier is highest**:
+`PI_LENS_NO_CONTEXT_INJECTION=1` outranks the `--no-lens-context` CLI flag and the
+`contextInjection.enabled` config key when they disagree.
+
+## Concurrent-session guard
+
+### `PI_LENS_CONCURRENT_SESSION_GUARD`
+
+Set to `0` to disable the concurrent-session guard. The guard is **on** by
+default; it prevents a newly starting same-workspace session from resetting the
+warm LSP of a live incumbent session.
+
 ## LSP warm attach
 
 ### `PI_LENS_WARM_ATTACH`
@@ -84,6 +169,31 @@ session reuses a live incumbent session's LSP diagnostics over local IPC.
 Unset or `0` preserves the prior local-LSP behavior exactly. Any transport,
 schema, freshness, deadline, or incumbent-liveness failure permanently falls
 back to a local LSP fleet for that session.
+
+## Language-specific
+
+### `PI_LENS_VULTURE_MIN_CONFIDENCE`
+
+Minimum confidence for the Python dead-code (Vulture) scanner. **Default:** `60`.
+Accepts `0`–`100`; out-of-range values are clamped into that range.
+
+### `PI_LENS_JAVA_LOMBOK`
+
+Set to `0` to disable auto-attaching the Lombok javaagent to the Java language
+server. Lombok support is on by default when a Lombok jar is resolved.
+
+### `PI_LENS_LOMBOK_JAR`
+
+Explicit path to a Lombok jar for the Java language server, used when
+auto-resolution does not find one. The legacy `LOMBOK_JAR` variable is also
+honored.
+
+## Project map
+
+### `PI_LENS_MAP_MAX_NODES`
+
+Node cap for `/lens-map` (default 500). Graphs with more files keep only the
+highest-degree ones and render a visible truncation note.
 
 ## Bus events
 
@@ -96,7 +206,30 @@ never affects the write path's own success or latency, so this switch exists
 purely to opt out of the broadcast, e.g. if another extension's bus listener
 misbehaves.
 
+## Diagnostics and logging
+
+### `PI_LENS_DEBUG`
+
+Set to `1` for verbose installer/debug logging (same as `--debug`). Off by
+default.
+
+### `PI_LENS_LOG_RETENTION_DAYS`
+
+Days to keep rotated logs before cleanup. **Default:** `7`.
+
+### `PI_LENS_MAX_LOG_SIZE_MB`
+
+Maximum log size (MB) before rotation. **Default:** `10`.
+
+## Advanced tuning knobs
+
+pi-lens also has many advanced/internal tuning variables — LSP timeouts and
+memory budgets, debounce intervals (`PI_LENS_LSP_*`, and others). These are for
+edge-case tuning, are not part of the supported surface above, and are documented
+in the source; enumerate them with `grep PI_LENS_ clients/`.
+
 ## Related
 
+- [Settings](settings.md) — the configuration overview hub (env, CLI, config).
 - `~/.pi-lens/config.json` schema — [Global and project config](globalconfig.md)
 - CLI flags — [Runtime flags](usage.md#runtime-flags)
