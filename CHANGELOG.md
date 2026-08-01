@@ -4,6 +4,31 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Config-consistency pass on the #166 flag registry (refs #166, #533)** — the
+	#883 registry core (scope split, precedence, negation) was audited consistent
+	and left untouched; the gaps were all in #533 malformed/unknown-input
+	signalling, asymmetric between the global and project loaders. (1) The
+	project loader (`.pi-lens.json`) now warns once on an unrecognized top-level
+	key — a typo like `maxProjectFile` or `lps` previously did nothing silently —
+	while tolerating the foreign namespaces the shared file legitimately carries
+	for the LSP loader (`servers`, `serverOverrides`, `disabledServers`,
+	`warmFiles`, plus `$schema`); a user-level-only lens key placed at project
+	scope (e.g. `lsp`, `tests`, `delta`) gets a distinct "not honored at project
+	scope" signal instead of being lumped in with typos. (2) The recognized-key
+	catalogs are single-sourced (#883): `GLOBAL_NON_FLAG_CONFIG_SECTIONS` and
+	`PROJECT_FOREIGN_CONFIG_NAMESPACES` are declared once beside `LENS_FLAGS`, and
+	both loaders derive flag sections from the registry, so adding a namespace is
+	a one-line edit and adding a flag needs none — replacing a drift-prone inline
+	literal set in the global loader. (3) Three global scalars
+	(`dispatch.runnerTimeoutFloorMs`, `widget.visible`, `format.mode`) that
+	silently coerced a present-but-malformed value to `undefined` now warn on
+	invalid input through the same path as `actionableWarnings.autoFix.maxFixes`,
+	while staying silent when the key is absent (no false warnings). (4) Removed
+	five dead global-only accessors that bypassed the precedence chain
+	(`getGlobalAutoformatEnabled`, `getGlobalAutofixEnabled`,
+	`getGlobalImmediateFormatDefault`, `getGlobalContextInjectionEnabled`,
+	`getGlobalTurnSummaryEnabled`) — no non-test callers existed. (5) Updated
+	`docs/globalconfig.md`, whose "unknown keys are ignored" claim was stale.
 - **Fixed: `ts-ssrf` no longer flags fixed/const endpoint URLs built with
 	`new URL(...)` as SSRF sinks, while still catching tainted URLs** (closes
 	#1000, refs #533, #963) — a project-wide pi-free scan flagged fixed outbound

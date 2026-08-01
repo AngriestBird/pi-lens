@@ -372,4 +372,89 @@ describe("loadPiLensProjectConfig", () => {
 			expect(calls.length).toBe(1);
 		});
 	});
+
+	// #533/#883: a shared `.pi-lens.json` typo must produce a signal, but the
+	// file is ALSO the LSP loader's home, so foreign namespaces must stay
+	// silent, and a user-level-only lens key gets a distinct scope signal.
+	describe("unknown-key warnings (#533)", () => {
+		function warnedFor(substring: string): boolean {
+			return (console.error as ReturnType<typeof vi.fn>).mock.calls
+				.flat()
+				.some((arg) => typeof arg === "string" && arg.includes(substring));
+		}
+
+		it("warns on a typo'd top-level key", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ maxProjectFile: 5000, lps: { enabled: false } }),
+			);
+			loadPiLensProjectConfig(tmpDir);
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining('unknown key "maxProjectFile"'),
+			);
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining('unknown key "lps"'),
+			);
+		});
+
+		it("does NOT warn on foreign LSP namespaces or $schema", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({
+					$schema: "https://example.com/pi-lens.json",
+					servers: { foo: { name: "foo" } },
+					serverOverrides: { rust: {} },
+					disabledServers: ["go"],
+					warmFiles: ["src/main.ts"],
+					// Legitimate project keys alongside them.
+					ignore: ["dist/**"],
+					format: { enabled: false },
+				}),
+			);
+			loadPiLensProjectConfig(tmpDir);
+			expect(console.error).not.toHaveBeenCalled();
+		});
+
+		it("does NOT warn on the pi-lens-native `trivy` key (read via .raw)", () => {
+			// `trivy.enabled`/`trivy.minSeverity` are read off PiLensProjectConfig.raw
+			// by trivy-client.ts — a legitimate opt-in, must not look like a typo.
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ trivy: { enabled: true, minSeverity: "HIGH" } }),
+			);
+			loadPiLensProjectConfig(tmpDir);
+			expect(console.error).not.toHaveBeenCalled();
+		});
+
+		it("signals that a global-only lens key is not honored at project scope", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ lsp: { enabled: false }, tests: { enabled: false } }),
+			);
+			loadPiLensProjectConfig(tmpDir);
+			expect(warnedFor("not honored in a project")).toBe(true);
+			expect(warnedFor('"lsp"')).toBe(true);
+			expect(warnedFor('"tests"')).toBe(true);
+			// It is NOT reported as a typo — it is a real key, wrong scope.
+			expect(warnedFor('unknown key "lsp"')).toBe(false);
+		});
+
+		it("warns once for the same typo across re-parses (warn-once dedup)", async () => {
+			const p = path.join(tmpDir, ".pi-lens.json");
+			fs.writeFileSync(p, JSON.stringify({ maxProjectFile: 5000 }));
+			loadPiLensProjectConfig(tmpDir);
+			// Force a re-parse (new mtime) WITHOUT clearing the warn-once cache.
+			await new Promise((r) => setTimeout(r, 20));
+			fs.writeFileSync(p, JSON.stringify({ maxProjectFile: 5000, ignore: [] }));
+			loadPiLensProjectConfig(tmpDir);
+			const typoWarns = (console.error as ReturnType<typeof vi.fn>).mock.calls
+				.flat()
+				.filter(
+					(arg) =>
+						typeof arg === "string" &&
+						arg.includes('unknown key "maxProjectFile"'),
+				);
+			expect(typoWarns.length).toBe(1);
+		});
+	});
 });

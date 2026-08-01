@@ -1,6 +1,6 @@
 # Configuration
 
-pi-lens reads optional user preferences from `~/.pi-lens/config.json` (`%USERPROFILE%\\.pi-lens\\config.json` on Windows). Unknown keys are ignored, and missing or invalid config falls back to defaults.
+pi-lens reads optional user preferences from `~/.pi-lens/config.json` (`%USERPROFILE%\\.pi-lens\\config.json` on Windows). An unrecognized top-level key is logged once (to surface a typo like `lps` for `lsp`) and then ignored; `$schema` is always allowed for editor JSON-schema association. Missing or invalid config falls back to defaults.
 
 ## Every toggle, both ways
 
@@ -98,7 +98,7 @@ Turn subsystems off globally instead of retyping flags every session:
 
 In addition to the user-level `~/.pi-lens/config.json` above, pi-lens reads a per-project `.pi-lens.json` (or `pi-lens.json`) at the project root. Walked upward from the cwd, so a monorepo can keep the config at the repo root and have every subdir pick it up. The schema is intentionally small — only fields pi-lens actually honors:
 
-Note that most toggles from the table above are **user-level only**. Of them, a project config honors just the three [mutation controls](#mutation-controls) (`format.enabled`, `autofix.enabled`, `actionableWarnings.autoFix.enabled`). Putting something like `"lsp": { "enabled": false }` in a `.pi-lens.json` is silently ignored, since unknown keys never fail the parse. Set it in `~/.pi-lens/config.json` or pass `--no-lsp` instead.
+Note that most toggles from the table above are **user-level only**. Of them, a project config honors just the three [mutation controls](#mutation-controls) (`format.enabled`, `autofix.enabled`, `actionableWarnings.autoFix.enabled`). Putting a user-level toggle such as `"lsp": { "enabled": false }` in a `.pi-lens.json` is **not** honored at project scope; pi-lens now logs a one-time warning saying so rather than dropping it silently, so you get a signal instead of a setting that quietly does nothing. Set it in `~/.pi-lens/config.json` or pass `--no-lsp` instead. A genuinely unrecognized key (a typo) is likewise logged once. Foreign namespaces that a shared `.pi-lens.json` legitimately carries for the LSP loader (`servers`, `serverOverrides`, `disabledServers`, `warmFiles`) and `$schema` are tolerated without warning.
 
 ```json
 {
@@ -192,7 +192,7 @@ Explicit override for the review graph's own file budget (#775), for monorepos t
 
 ### Schema rules
 
-- Unknown top-level keys and unknown rule ids are ignored, so a forward-compat file with extra fields (e.g. an LSP `servers` block from `lsp.json`) won't break the parse.
+- Unknown rule ids are ignored (forward-compat). Unrecognized **top-level** keys are logged once and then ignored — never fatal to the parse. The LSP namespaces a shared file legitimately carries (`servers`, `serverOverrides`, `disabledServers`, `warmFiles`) and `$schema` are tolerated silently; a user-level-only lens key placed here (e.g. `lsp`, `tests`, `delta`) is logged as "not honored at project scope"; anything else is logged as a likely typo. The raw parsed JSON is still exposed for forward-compat consumers regardless.
 - Every toggle key in the table above must be a boolean, and its containing section must be an object. A wrong type is logged once and the key is treated as absent, so the flag falls through to its default rather than the whole file being rejected.
 - A malformed JSON file is logged once and treated as "no config" — your diagnostics never get blocked by a syntax error in your own config.
 - Rule thresholds must be positive finite numbers; invalid, zero, or negative values are logged once and ignored.
