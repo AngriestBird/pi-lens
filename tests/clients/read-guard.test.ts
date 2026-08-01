@@ -1136,6 +1136,40 @@ describe("ReadGuard export/import across resume (#1041)", () => {
 			env.cleanup();
 		}
 	});
+
+	it("degrades to a no-op on a malformed payload instead of throwing", () => {
+		const env = setupTestEnvironment("read-guard-resume-malformed-");
+		try {
+			const guard = createReadGuard("session-x");
+
+			// `reads` is not an array (corrupt / hand-edited sidecar).
+			const nonArrayReads = {
+				version: 1,
+				reads: {} as unknown,
+			} as unknown as import("../../clients/read-guard.js").PersistedReadGuardState;
+			expect(() => guard.importState(nonArrayReads)).not.toThrow();
+			expect(guard.importState(nonArrayReads)).toEqual({
+				imported: 0,
+				dropped: 0,
+			});
+
+			// `reads` array with a non-tuple element mixed in with a valid one.
+			const badElement = {
+				version: 1,
+				reads: [[normalizeFilePath("/src/x.ts"), []], 5],
+			} as unknown as import("../../clients/read-guard.js").PersistedReadGuardState;
+			expect(() => guard.importState(badElement)).not.toThrow();
+			expect(guard.importState(badElement)).toEqual({
+				imported: 0,
+				dropped: 0,
+			});
+
+			// The map is uncorrupted — nothing was recorded.
+			expect(guard.getReadHistory("/src/x.ts")).toHaveLength(0);
+		} finally {
+			env.cleanup();
+		}
+	});
 });
 
 // --- Helpers ---

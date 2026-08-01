@@ -780,8 +780,17 @@ export class ReadGuard {
 	} {
 		const result = { imported: 0, dropped: 0 };
 		if (!state || state.version !== READ_GUARD_STATE_VERSION) return result;
-		for (const entry of state.reads ?? []) {
+		// A corrupt/hand-edited sidecar must degrade to "no prior reads", never
+		// throw: loadSessionState validates only version/widget, so a malformed
+		// `reads` reaches here. If importState threw, the session_start try/catch
+		// would abort the ENTIRE rehydration (incl. widget + mountLensWidget)
+		// rather than just skipping the read-set.
+		if (!Array.isArray(state.reads)) return result;
+		for (const entry of state.reads) {
+			// Skip anything that isn't a well-formed [key, records] tuple.
+			if (!Array.isArray(entry) || entry.length !== 2) continue;
 			const [rawPath, records] = entry;
+			if (typeof rawPath !== "string") continue;
 			if (!Array.isArray(records) || records.length === 0) continue;
 			const filePath = this.key(rawPath);
 			let lines: string[];
