@@ -27,6 +27,30 @@ All notable changes to pi-lens will be documented in this file.
 	the path *form* of the anchor); the two compose for a monorepo-stable anchor.
 	No new dependencies.
 
+- **Disposition anchor path-form stability (refs #1024, closes #1024)** — the
+	`dd:`/`ddw:` disposition anchors (clients/diagnostic-dispositions.ts) are now
+	derived from a single canonical path form, closing a #533-adjacent
+	dropped-signal bug (sibling of #210/#1020). `relativeFile` — the chokepoint
+	both `computeStrictAnchor` and `computeWeakAnchor` route through — computed
+	`path.relative` on whichever raw path form the caller happened to hold: the
+	mark tool (tools/lens-diagnostic-mark.ts) passes a RAW `cwd` /
+	`path.resolve(cwd, arg)`, while the dispatch read side
+	(clients/dispatch/dispatcher.ts `createDispatchContext`) passes
+	`normalizeMapKey`-canonicalized (realpath'd) cwd/filePath. When the two forms
+	diverged (Windows drive/segment case, symlink/realpath), the agent's own
+	`false-positive`/`flagged` mark anchored under one id and the later
+	`applyDispositions` lookup under another, so the mark was invisible and the
+	"resolved" diagnostic kept re-firing / re-blocking every turn. Fix routes
+	BOTH `cwd` and `filePath` through `normalizeMapKey` inside `relativeFile`
+	(the same normalizer the read side already relies on — the #210 "every guard
+	map keys through `normalizeFilePath`" invariant), so write and read derive
+	identical anchors regardless of the form the caller passed. Anchor semantics
+	are unchanged: strict (`dd:`, line-hash) vs weak (`ddw:`) split, the prefixes,
+	and the `..`-escape fallback all behave exactly as before — only the path
+	component is now form-stable. Existing on-disk marks written under the old raw
+	form re-anchor to the canonical id; a stale orphan is re-derivable and simply
+	reappears once for the agent to re-mark (identical to today's pre-fix
+	behavior), so no read-time legacy fallback is needed.
 - **`lens_diagnostics mode=all` no longer replays a resolved blocker (refs #1020, closes #1020)** —
 	the widget-state `files` map was keyed by the raw, non-normalized path string,
 	so the SAME file could land under two different key forms in one session:

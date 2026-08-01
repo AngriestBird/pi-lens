@@ -109,6 +109,31 @@ const timingSensitiveInclude = [
 	"tests/clients/cascade-graph-occupancy.test.ts",
 ];
 
+// #1022 fix: the "workspace LSP winner" case in this file spawns a REAL
+// ast-grep LSP child process and waits on its `initialize` handshake plus
+// its first-document diagnostics — both bounded by ast-grep's own
+// deliberately-generous initializeTimeoutMs (~15s, see clients/lsp/server.ts)
+// because the first scan of a session compiles the full rule set (~350
+// files incl. the CodeRabbit catalog). `client.waitForDiagnostics`
+// (clients/lsp/client.ts) resolves SILENTLY on timeout rather than throwing,
+// so under the "default" project's `maxWorkers: "50%"` fork storm — dozens
+// of sibling forks doing grammar compiles and their own process spawns —
+// CPU contention can starve this real spawn past its budget, and that
+// starvation surfaces not as a timeout but as a false "diagnostic not
+// found" assertion failure (confirmed via 2026-08-01 repro: solo run green
+// every time, full-suite run intermittently red on exactly this case).
+// Same fix shape as grammar-heavy/timing-sensitive above: phase this file
+// into its own low-concurrency, last-running project so its real-LSP-spawn
+// budget window never has to compete with the rest of the suite's fork
+// storm for CPU turns. This removes the CONTENTION rather than just
+// widening the timeout (see the companion budget-alignment fix in the test
+// file itself, which corrects the timeout values to match ast-grep's own
+// declared budget instead of a shorter invented constant — belt-and-braces,
+// not a substitute for phasing).
+const lspSpawnHeavyInclude = [
+	"tests/clients/ast-grep-rule-precedence-followups.test.ts",
+];
+
 export default defineConfig({
 	test: {
 		exclude: sharedExclude,
@@ -124,6 +149,7 @@ export default defineConfig({
 						...sharedExclude,
 						...grammarHeavyInclude,
 						...timingSensitiveInclude,
+						...lspSpawnHeavyInclude,
 					],
 					globalSetup: sharedGlobalSetup,
 					setupFiles: sharedSetupFiles,
@@ -192,6 +218,32 @@ export default defineConfig({
 					// that was intermittently starving their sampler and tripping the
 					// budget on ambient scheduling delay, not a real regression.
 					sequence: { groupOrder: 2 },
+					hookTimeout: 60_000,
+				},
+			},
+			{
+				test: {
+					name: "lsp-spawn-heavy",
+					include: lspSpawnHeavyInclude,
+					exclude: sharedExclude,
+					globalSetup: sharedGlobalSetup,
+					setupFiles: sharedSetupFiles,
+					execArgv: sharedExecArgv,
+					// Full serialization, not just a cap: this is a single file, so
+					// there are no siblings to share the phase with anyway — the
+					// point is to guarantee zero overlap with the "default" project's
+					// fork storm (the actual contention source, see #1022 above), not
+					// to bound intra-project concurrency.
+					maxWorkers: 1,
+					// Last phase: by the time this runs, "default", "grammar-heavy",
+					// and "timing-sensitive" have all fully drained, so the real
+					// ast-grep LSP spawn's initialize/diagnostics budget window gets
+					// a quiet host instead of racing the rest of the suite.
+					sequence: { groupOrder: 3 },
+					// Real LSP process spawn + rule-set compile can legitimately use
+					// most of its declared ~15s budget twice over (initialize, then
+					// first-document diagnostics) before shutdown; give teardown the
+					// same headroom as the other heavy projects.
 					hookTimeout: 60_000,
 				},
 			},
