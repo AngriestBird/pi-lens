@@ -54,8 +54,7 @@ All notable changes to pi-lens will be documented in this file.
 	cap / unreadable), so a partial index is never reported as complete. The
 	fragile string-parsing `dbg` adapter this replaces is removed.
 
-- **Closed four observability gaps in recently-changed typos-config and
-	project-snapshot code** (refs #533) — none of these change behavior, only
+- **Closed four observability gaps in recently-changed typos-config and project-snapshot code (refs #533)** — none of these change behavior, only
 	what's now logged: (1) the typos LSP's inject-vs-step-aside decision
 	(#967) now logs a `typos_config_resolved` phase in `latency.log` /
 	`sessionstart.log` with `mode: "project_config" | "injected_default"` and
@@ -240,8 +239,7 @@ All notable changes to pi-lens will be documented in this file.
 	per-file results, same final circular-dep state, same `dbg` logs — only
 	wall-clock time changes.
 
-- **Every runtime toggle is now settable from BOTH the CLI and
-	`~/.pi-lens/config.json`, driven by one declarative registry** (closes #166) —
+- **Every runtime toggle is now settable from BOTH the CLI and `~/.pi-lens/config.json`, driven by one declarative registry (closes #166)** —
 	the flag/config mapping used to live in two disconnected places (twelve
 	`pi.registerFlag` calls in `index.ts` and an if/else chain in
 	`resolvePiLensFlagWithSource`), which let coverage gaps open and persist.
@@ -268,8 +266,7 @@ All notable changes to pi-lens will be documented in this file.
 	non-negative whole number; `0` keeps the warning report while applying
 	nothing.
 
-- **Flag provenance gained an `env` tier and reports the global tier more
-	accurately** (#166) — `PI_LENS_NO_CONTEXT_INJECTION` moved out of a
+- **Flag provenance gained an `env` tier and reports the global tier more accurately** (#166) — `PI_LENS_NO_CONTEXT_INJECTION` moved out of a
 	hardcoded check in `index.ts` into the registry's `env` binding, so it
 	resolves through the same chain as everything else (env → cli →
 	nested-project → project → global → default) and reports `source: "env"`.
@@ -277,16 +274,14 @@ All notable changes to pi-lens will be documented in this file.
 	not only when it happens to differ from the built-in default. Affects debug
 	and mutation-skip log lines only, no resolved values change.
 
-- **Unknown top-level keys in `~/.pi-lens/config.json` now warn once instead of
-	being dropped silently** (#166, refs #533) — a typo like `lps` for `lsp`
+- **Unknown top-level keys in `~/.pi-lens/config.json` now warn once instead of being dropped silently** (#166, refs #533) — a typo like `lps` for `lsp`
 	previously did nothing with no signal. The recognized-key set is derived from
 	the flag registry (`LENS_FLAGS`) plus the non-flag sections (`ignore`,
 	`dispatch`, `actionableWarnings`, `widget`) and `$schema`, so it stays in sync
 	with the single source of truth; anything else logs one `[pi-lens] ignoring
 	invalid global config …: unknown key "…"` line and is ignored.
 
-- **The review-graph resume checkpoint (#936) now offloads its gzip to the
-	shared persist worker** (refs #958, #883) — mid-build checkpoint writes
+- **The review-graph resume checkpoint (#936) now offloads its gzip to the shared persist worker (refs #958, #883)** — mid-build checkpoint writes
 	previously ran a synchronous `gzipSync` of the growing graph on the event
 	loop; they now stream the stringify+gzip through the same worker the
 	authoritative snapshot uses (via the newly-shared `writeGzipStageFile` core),
@@ -376,14 +371,12 @@ All notable changes to pi-lens will be documented in this file.
 	install across concurrent processes, explicit install-disable refusal, and
 	Vitest's default no-install environment.
 
-- **Downgrade TypeScript `unsafe-regex` to advisory and suppress escaped-before-
-  assignment false positives** (refs #932) — the coarse dynamic `RegExp`
+- **Downgrade TypeScript `unsafe-regex` to advisory and suppress escaped-before- assignment false positives (refs #932)** — the coarse dynamic `RegExp`
   heuristic no longer blocks edits and recognizes escape/replace calls in a
   same-file identifier initializer; structural ReDoS detection remains with
   the `redos-nested-quantifier` ast-grep rule.
 
-- **Review-graph persistence no longer serializes or compresses on the event
-	loop** (refs #939) — debounced snapshots are materialized in one lazy,
+- **Review-graph persistence no longer serializes or compresses on the event loop (refs #939)** — debounced snapshots are materialized in one lazy,
 	unref'd worker and streamed through gzip into the new canonical
 	`review-graph.json.gz` cache. The main thread promotes only the current
 	generation's atomic staged file, so the synchronous CLI/exit flush can
@@ -405,8 +398,7 @@ All notable changes to pi-lens will be documented in this file.
 
 - **Logger hot paths now coalesce queued lines and rotate during long sessions** (refs #935) — contiguous NDJSON entries drain through one append up to each truncate boundary while retaining peek-then-remove exit safety and one-write cross-process atomicity. `sessionstart.log` now uses one shared asynchronous writer for ordinary diagnostics (with the crash-adjacent LSP launch write intentionally synchronous), and latency/cascade/tree-sitter/bus-event logs enforce the existing 10 MB cap in process.
 
-- **Incremental review-graph updates avoid redundant whole-graph copies and
-	index rebuilds** (refs #939) — file re-extraction now rebuilds derived indexes
+- **Incremental review-graph updates avoid redundant whole-graph copies and index rebuilds (refs #939)** — file re-extraction now rebuilds derived indexes
 	once, immutable edges are array-copied without cloning every edge object, the
 	updated graph itself becomes the workspace snapshot, and debounced persistence
 	defers its O(graph) array materialization until the quiet-window flush.
@@ -667,9 +659,7 @@ All notable changes to pi-lens will be documented in this file.
 	prior transcript as an untouched cache prefix. Changes shipped `dist` behavior
 	(the handler lives in the bundled dist path).
 
-- **Fixed: `ts-ssrf` no longer flags fixed/const endpoint URLs built with
-	`new URL(...)` as SSRF sinks, while still catching tainted URLs** (closes
-	#1000, refs #533, #963) — a project-wide pi-free scan flagged fixed outbound
+- **Fixed: `ts-ssrf` no longer flags fixed/const endpoint URLs built with `new URL(...)` as SSRF sinks, while still catching tainted URLs (closes #1000, refs #533, #963)** — a project-wide pi-free scan flagged fixed outbound
 	OAuth/profile endpoints as SSRF: `fetch(authUrl.toString())` where
 	`authUrl = new URL("auth/authorize", \`${BASE_URL_CLINE}/\`)` with a fixed
 	(module-const or imported) base. The `ts_ssrf_sink` post-filter already
@@ -693,8 +683,7 @@ All notable changes to pi-lens will be documented in this file.
 	just because an unrelated same-named module-level `const` literal exists
 	(scope-aware shadow check; imported bases stay trusted).
 
-- **Fixed: `no-javascript-url`/`no-javascript-url-js` no longer flag defensive
-	`javascript:`-URL filters** (refs #533) — a dogfood run flagged code that was
+- **Fixed: `no-javascript-url`/`no-javascript-url-js` no longer flag defensive `javascript:`-URL filters (refs #533)** — a dogfood run flagged code that was
 	*rejecting* `javascript:` links (e.g. `url.startsWith("javascript:")` inside a
 	guard) as if it were introducing one. The rule matched the `javascript:`
 	string literal alone with no way to tell "used as a sink" from "used to
@@ -714,8 +703,7 @@ All notable changes to pi-lens will be documented in this file.
 	and invalid fixtures for the replace-based sink and all three smuggled-sink
 	bypasses, confirmed against the real ast-grep 0.45.0 binary.
 
-- **Contained spawn/callback failures that could crash the host (pidusage bug
-	class)** (refs #533) — a best-effort telemetry sampler recently killed a live
+- **Contained spawn/callback failures that could crash the host (pidusage bug class) (refs #533)** — a best-effort telemetry sampler recently killed a live
 	pi host with `Error: spawn UNKNOWN` (uncaughtException) because a bundled
 	dep's `child_process.spawn(...)` threw SYNCHRONOUSLY with no try/catch, from
 	a detached context the caller's `try/await/catch` could not contain. Audited
@@ -732,8 +720,7 @@ All notable changes to pi-lens will be documented in this file.
 	resolves the operation's normal failure value instead of escaping as an
 	unhandledRejection/uncaughtException. Behavior-preserving otherwise.
 
-- **Fixed: opengrep security findings now surface project-wide in
-	`lens_diagnostics mode=full`** (refs #585, #584, #533) — opengrep's
+- **Fixed: opengrep security findings now surface project-wide in `lens_diagnostics mode=full` (refs #585, #584, #533)** — opengrep's
 	whole-tree CLI scan ran at session-start and cached its findings, and the
 	cache-only extractor registry (`project-diagnostics/extractors.ts`) even
 	registered an `"opengrep"` row — but #585 replaced that registry in
@@ -755,8 +742,7 @@ All notable changes to pi-lens will be documented in this file.
 	registry that shadowed `ANALYZER_IDS` and let opengrep silently diverge — was
 	removed so a single source of truth (#883) remains.
 
-- **Fixed: test-runner findings now surface project-wide in `lens_diagnostics
-	mode=full`** (closes #1004, refs #585, #533) — the same `ANALYZER_IDS`
+- **Fixed: test-runner findings now surface project-wide in `lens_diagnostics mode=full` (closes #1004, refs #585, #533)** — the same `ANALYZER_IDS`
 	omission #585/#1003 fixed for opengrep also orphaned test-runner: the
 	per-edit turn_end test fire (`runtime-turn.ts`) caches failures under
 	`"test-runner-findings"`, but `fetchFreshProjectDiagnostics`
@@ -792,8 +778,7 @@ All notable changes to pi-lens will be documented in this file.
 	for pytest/mix's non-numeric `location` strings, which carry a test name or
 	module, not a line).
 
-- **Guarded Windows CPU/RSS resource sampling so a best-effort sampler can no
-	longer crash the pi host** (refs #620, #533) — `clients/resource-sampler.ts`
+- **Guarded Windows CPU/RSS resource sampling so a best-effort sampler can no longer crash the pi host (refs #620, #533)** — `clients/resource-sampler.ts`
 	sampled CPU%/RSS via `pidusage`, whose Windows path shells out to `gwmi`
 	through an internal `spawn(..., { shell: "powershell.exe" })` that has no
 	try/catch and runs from inside a ChildProcess `close` callback. Under real
@@ -813,8 +798,7 @@ All notable changes to pi-lens will be documented in this file.
 	(procfs/`ps` — not the crash vector) unchanged. A pid absent from the
 	returned map still means "unsampled this tick", never zero.
 
-- **Stabilized the two remaining flaky/environment-sensitive tests tracked in
-	#902.** LSP workspace-diagnostics sweep flush-count assertions
+- **Stabilized the two remaining flaky/environment-sensitive tests tracked in #902.** LSP workspace-diagnostics sweep flush-count assertions
 	(`workspace-diagnostics-sweep-batch-open.test.ts`,
 	`workspace-diagnostics-sweep-preopen-chunk.test.ts`) pinned an exact flush
 	count, but the pre-open pass's real `fs.promises.readFile` genuinely races
@@ -898,13 +882,11 @@ All notable changes to pi-lens will be documented in this file.
 	unsuccessful results are reported distinctly, omitted from cache so the next
 	session retries, and valid fix-worklog records survive neighboring corrupt lines.
 
-- **The footer refreshes as LSP servers come online during a cold
-	`lens_diagnostics mode=full` sweep** (refs #798), instead of showing
+- **The footer refreshes as LSP servers come online during a cold `lens_diagnostics mode=full` sweep (refs #798)**, instead of showing
 	`LSP Inactive` until turn end. The repaint captures UI methods during the
 	active tool event, so async warm-up never touches a stale session context.
 
-- **Tree-sitter WASM aborts are now visible instead of silently disabling
-	structural analysis for the rest of the process** (refs #915). The shared
+- **Tree-sitter WASM aborts are now visible instead of silently disabling structural analysis for the rest of the process (refs #915)**. The shared
 	runtime records a process-wide, timestamped `restart_required` health state,
 	logs a one-time actionable error, exposes it through `pilens_health`, and
 	marks project-scan responses with `treeSitterStatus`. A poisoned scan remains
@@ -928,8 +910,7 @@ All notable changes to pi-lens will be documented in this file.
 
 - Resolve nested C# and F# project roots for dotnet builds (refs #895).
 
-- **A mid-scan tree-sitter WASM abort no longer replaces the authoritative
-	project-diagnostics snapshot with a silently truncated result** (refs #891).
+- **A mid-scan tree-sitter WASM abort no longer replaces the authoritative project-diagnostics snapshot with a silently truncated result (refs #891)**.
 	The partial scan is returned with `scanTruncated`, logs its completed/total
 	file counts and abort point, and leaves the previous complete cache intact.
 
@@ -1008,8 +989,7 @@ All notable changes to pi-lens will be documented in this file.
 	invalidating and re-parsing, and `get()` re-inserts hit entries so eviction
 	is true LRU — hot per-edit files are no longer evicted by scan traffic.
 
-- **Eight enabled typescript/javascript tree-sitter rules whose queries never
-	compiled** (refs #884) — each had been silently dead since authoring because
+- **Eight enabled typescript/javascript tree-sitter rules whose queries never compiled (refs #884)** — each had been silently dead since authoring because
 	its query failed to compile against the real grammar, so it matched nothing
 	and reported no diagnostics. Repaired against the actual node/field names and
 	verified end-to-end (matches the bug, leaves correct code alone):
@@ -1113,8 +1093,7 @@ All notable changes to pi-lens will be documented in this file.
 	parser — `post_filter: not_in_test_block  # skip test blocks` carried the
 	comment as part of the filter name, so the filter silently never applied.
 
-- **tree-sitter runner no longer double-increments already 1-indexed
-	line/column** (refs #448) — dispositions recorded against the old off-by-one
+- **tree-sitter runner no longer double-increments already 1-indexed line/column (refs #448)** — dispositions recorded against the old off-by-one
 	are anchored (`clients/diagnostic-dispositions.ts`) to the wrong physical
 	line's content and will resurface once after upgrading; this is expected and
 	one-time, not a regression.
