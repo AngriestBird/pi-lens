@@ -1623,6 +1623,45 @@ describe("lens_diagnostics mode=all", () => {
 		expect(String(result.content[0].text)).toContain("No files diagnosed");
 	});
 
+	it("reports clean after a same-file backslash reconcile clears a forward-slash blocker (#1020)", async () => {
+		// Exercise the SOURCE fix end-to-end through the tool: drive the REAL
+		// widget-state (bypassing this file's module mock via importActual), record
+		// a stale blocker under the forward-slash form, then reconcile the SAME file
+		// clean under the backslash form — the exact mixed-key split that made
+		// mode=all replay a resolved blocker. Bridge the real summaries into the
+		// tool's mocked `getFileDiagnosticSummaries` so the tool sees precisely what
+		// the fixed widget state exposes.
+		const realWS = await vi.importActual<
+			typeof import("../../clients/widget-state.js")
+		>("../../clients/widget-state.js");
+		realWS.clearWidgetState();
+		try {
+			realWS.recordDiagnostics(
+				"/proj/src/dup.ts",
+				[
+					{
+						severity: "error",
+						semantic: "blocking",
+						message: "stale blocker",
+						rule: "X",
+					},
+				],
+				1,
+			);
+			realWS.reconcileScanDiagnostics("\\proj\\src\\dup.ts", [], true, 2);
+
+			mockSummaries.length = 0;
+			mockSummaries.push(...realWS.getFileDiagnosticSummaries());
+			// Pre-fix: two summaries reach the tool, one still blocking:1 → 🔴.
+			const result = await run(makeTool(), { mode: "all" });
+			const text = String(result.content[0].text);
+			expect(text).not.toContain("🔴");
+			expect(text).toContain("No");
+		} finally {
+			realWS.clearWidgetState();
+		}
+	});
+
 	it("flushes pending dispatches before reading (so just-fixed files refresh)", async () => {
 		const flush = vi.fn(async () => {});
 		const tool = createLensDiagnosticsTool(
