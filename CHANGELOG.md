@@ -228,6 +228,14 @@ All notable changes to pi-lens will be documented in this file.
 	not only when it happens to differ from the built-in default. Affects debug
 	and mutation-skip log lines only, no resolved values change.
 
+- **Unknown top-level keys in `~/.pi-lens/config.json` now warn once instead of
+	being dropped silently** (#166, refs #533) — a typo like `lps` for `lsp`
+	previously did nothing with no signal. The recognized-key set is derived from
+	the flag registry (`LENS_FLAGS`) plus the non-flag sections (`ignore`,
+	`dispatch`, `actionableWarnings`, `widget`) and `$schema`, so it stays in sync
+	with the single source of truth; anything else logs one `[pi-lens] ignoring
+	invalid global config …: unknown key "…"` line and is ignored.
+
 - **Word-index build/refresh/persist outcomes are now durably observable**
 	(refs #958, #926, #533) — every word-index signal previously rode solely on
 	the optional `dbg` callback, a documented no-op in the MCP host where

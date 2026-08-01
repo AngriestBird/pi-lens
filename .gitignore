@@ -126,3 +126,7 @@ PR_issues_Audit.md
 # plegma worker handoff artifacts (never commit)
 .plegma-envelope.json
 .plegma/
+
+# C# build output from dotnet-build test fixtures (never commit)
+tests/fixtures/**/obj/
+tests/fixtures/**/bin/

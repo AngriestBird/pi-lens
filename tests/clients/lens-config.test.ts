@@ -138,6 +138,44 @@ describe("global pi-lens config", () => {
 		expect(getGlobalImmediateFormatDefault(configPath)).toBe(true);
 	});
 
+	it("warns once on an unknown top-level config key but not on recognized ones", () => {
+		const home = makeTempHome();
+		const configPath = writeConfig(
+			home,
+			JSON.stringify({
+				lps: { enabled: false }, // typo of lsp.enabled
+				lsp: { enabled: false }, // recognized flag key — must NOT warn
+				$schema: "https://example.com/schema.json", // allowed, must NOT warn
+			}),
+		);
+
+		expect(loadPiLensGlobalConfig(configPath)).toEqual({ lsp: { enabled: false } });
+		expect(console.error).toHaveBeenCalledWith(
+			expect.stringContaining('unknown key "lps"'),
+		);
+		// The recognized `lsp` key and the allowed `$schema` must not warn.
+		const warnedForLsp = (console.error as ReturnType<typeof vi.fn>).mock.calls
+			.flat()
+			.some(
+				(arg) =>
+					typeof arg === "string" &&
+					arg.includes('unknown key "lsp"') === true,
+			);
+		expect(warnedForLsp).toBe(false);
+		const warnedForSchema = (console.error as ReturnType<typeof vi.fn>).mock.calls
+			.flat()
+			.some((arg) => typeof arg === "string" && arg.includes("$schema"));
+		expect(warnedForSchema).toBe(false);
+
+		// Warn-once: repeated loads do not add further warnings for the same key.
+		const callsAfterFirst = (console.error as ReturnType<typeof vi.fn>).mock.calls
+			.length;
+		loadPiLensGlobalConfig(configPath);
+		expect(
+			(console.error as ReturnType<typeof vi.fn>).mock.calls.length,
+		).toBe(callsAfterFirst);
+	});
+
 	it("ignores invalid format modes", () => {
 		const home = makeTempHome();
 		const configPath = writeConfig(

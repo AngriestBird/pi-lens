@@ -213,6 +213,28 @@ export function loadPiLensGlobalConfig(
 					: undefined;
 		}
 
+		// #533 hygiene: a completely unknown top-level key (e.g. a typo like
+		// `lps` for `lsp`) is otherwise dropped silently, so a setting the user
+		// thought they made does nothing with no signal. Warn once per key. The
+		// recognized set is derived from the flag registry (#883 single source
+		// of truth) plus the non-flag global sections handled above; `$schema`
+		// is allowed for editor JSON-schema associations.
+		const knownGlobalConfigKeys = new Set<string>([
+			...LENS_FLAGS.map((spec) => spec.configKey.split(".")[0]),
+			"ignore",
+			"dispatch",
+			"actionableWarnings",
+			"widget",
+			"$schema",
+		]);
+		for (const key of Object.keys(raw)) {
+			if (!knownGlobalConfigKeys.has(key)) {
+				warnInvalid(
+					`unknown key "${key}" is not a recognized pi-lens setting (check for a typo); ignored`,
+				);
+			}
+		}
+
 		return config as PiLensGlobalConfig;
 	} catch {
 		return undefined;
