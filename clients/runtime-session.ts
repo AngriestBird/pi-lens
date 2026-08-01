@@ -37,13 +37,17 @@ import { initLSPConfig, loadLSPConfig } from "./lsp/config.js";
 import { getLSPService } from "./lsp/index.js";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import type { MetricsClient } from "./metrics-client.js";
-import { readLatestProjectSequence } from "./project-changes.js";
+import {
+	type ProjectSequenceBase,
+	readLatestProjectSequence,
+} from "./project-changes.js";
 import {
 	getProjectSnapshotPath,
 	hydrateRuntimeFromProjectSnapshot,
 	isProjectSnapshotFresh,
 	isProjectSnapshotMetaStale,
 	loadProjectSnapshot,
+	PROJECT_SNAPSHOT_VERSION,
 	readProjectSnapshotMeta,
 	saveRuntimeProjectSnapshot,
 	type ProjectSnapshot,
@@ -148,6 +152,29 @@ function resolveSnapshotRoot(cwd: string): string {
  * snapshot written before the sidecar existed) falls through to parsing the
  * body exactly as before.
  */
+/**
+ * #1019: build the bounded-replay base from the snapshot's tiny meta sidecar.
+ * The sequence index is mirrored into the meta (not just the body) precisely so
+ * this read is cheap — reading it does NOT parse the 40-112MB body, preserving
+ * the #947 skip-stale optimization. Returns `undefined` (→ full replay) for a
+ * legacy meta with no embedded index, a version-mismatched meta (a foreign
+ * snapshot generation), or a missing meta. A seq-stale meta is NOT rejected
+ * here — folding the newer entries onto it is the whole point; the base's
+ * trustworthiness against a truncated/ahead log is guarded inside
+ * `readLatestProjectSequence` itself.
+ */
+function snapshotSequenceBase(root: string): ProjectSequenceBase | undefined {
+	const meta = readProjectSnapshotMeta(root);
+	if (!meta || meta.version !== PROJECT_SNAPSHOT_VERSION) return undefined;
+	const index = meta.sequenceIndex;
+	if (!index) return undefined;
+	return {
+		projectSeq: index.projectSeq,
+		fileSeqByPath: index.fileSeqByPath,
+		sinceSeq: meta.seq,
+	};
+}
+
 function loadSnapshotBodyUnlessStale(args: {
 	root: string;
 	currentProjectSeq: number;
@@ -493,7 +520,10 @@ async function buildOrRefreshWordIndex(args: {
 	if (!runtime.isCurrentSession(sessionGeneration)) return;
 	const startMs = Date.now();
 
-	const latestSeq = readLatestProjectSequence(snapshotRoot);
+	const latestSeq = readLatestProjectSequence(
+		snapshotRoot,
+		snapshotSequenceBase(snapshotRoot),
+	);
 	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
 	const snapshot = loadProjectSnapshot(snapshotRoot);
 	if (snapshot?.wordIndex) {
@@ -1541,20 +1571,36 @@ export async function handleSessionStart(
 		metadata: { mode: startupMode, reason: deps.sessionReason },
 	});
 
-	// Run log cleanup early in session start (non-blocking)
-	const logCleanupStartedAt = Date.now();
-	const logCleanup = runLogCleanup(dbg);
-	logLatency({
-		type: "phase",
-		phase: "session_start_log_cleanup",
-		filePath: ctxCwd ?? process.cwd(),
-		startedAt: new Date(logCleanupStartedAt).toISOString(),
-		durationMs: Date.now() - logCleanupStartedAt,
-		metadata: { mode: startupMode, reason: deps.sessionReason },
+	// #1019: log cleanup is deferred OFF the interactive critical path. It does
+	// synchronous fs sweeps (~7ms) whose only consumer is an async notification —
+	// nothing on the hot path reads its result — so running it inline just taxed
+	// every session start. It still runs every session (correctness unchanged),
+	// now on the next tick, and notifies when done. Errors are swallowed to a
+	// dbg line: a best-effort log sweep must never surface as a session failure.
+	const cleanupCwd = ctxCwd ?? process.cwd();
+	setImmediate(() => {
+		const logCleanupStartedAt = Date.now();
+		try {
+			const logCleanup = runLogCleanup(dbg);
+			logLatency({
+				type: "phase",
+				phase: "session_start_log_cleanup",
+				filePath: cleanupCwd,
+				startedAt: new Date(logCleanupStartedAt).toISOString(),
+				durationMs: Date.now() - logCleanupStartedAt,
+				metadata: {
+					mode: startupMode,
+					reason: deps.sessionReason,
+					deferred: true,
+				},
+			});
+			if (logCleanup.cleaned > 0 || logCleanup.rotated > 0) {
+				notify(`🧹 ${logCleanup.report}`, "info");
+			}
+		} catch (err) {
+			dbg(`session_start: deferred log cleanup failed: ${err}`);
+		}
 	});
-	if (logCleanup.cleaned > 0 || logCleanup.rotated > 0) {
-		notify(`🧹 ${logCleanup.report}`, "info");
-	}
 	dbg(`session_start startup mode: ${startupMode}`);
 
 	if (!getFlag("no-lsp")) {
@@ -1571,7 +1617,10 @@ export async function handleSessionStart(
 		runtime.projectRoot = cwd;
 		const sequenceReadStartedAt = Date.now();
 		const snapshotRoot = resolveSnapshotRoot(cwd);
-		const latestSeq = readLatestProjectSequence(snapshotRoot);
+		const latestSeq = readLatestProjectSequence(
+			snapshotRoot,
+			snapshotSequenceBase(snapshotRoot),
+		);
 		logLatency({
 			type: "phase",
 			phase: "session_start_sequence_read",
@@ -1665,7 +1714,10 @@ export async function handleSessionStart(
 
 	const sequenceReadStartedAt = Date.now();
 	const snapshotRoot = resolveSnapshotRoot(cwd);
-	const latestSeq = readLatestProjectSequence(snapshotRoot);
+	const latestSeq = readLatestProjectSequence(
+		snapshotRoot,
+		snapshotSequenceBase(snapshotRoot),
+	);
 	logLatency({
 		type: "phase",
 		phase: "session_start_sequence_read",

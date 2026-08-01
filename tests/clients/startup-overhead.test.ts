@@ -171,12 +171,14 @@ describe("startup overhead — interactive path regression guard", () => {
 			const phases = new Map(
 				latencyEntries.map((entry) => [entry.phase, entry]),
 			);
+			// #1019: session_start_log_cleanup is intentionally NOT asserted here —
+			// it was deferred off the critical path (setImmediate) and so is not
+			// emitted synchronously within handleSessionStart's awaited chain.
 			expect([...phases.keys()]).toEqual(
 				expect.arrayContaining([
 					"bootstrap_clients_load",
 					"session_start_prehandler",
 					"session_start_runtime_reset",
-					"session_start_log_cleanup",
 					"session_start_sequence_read",
 					"session_start_snapshot_load",
 					"session_start_total",
@@ -199,7 +201,6 @@ describe("startup overhead — interactive path regression guard", () => {
 			const topLevel = [
 				"session_start_prehandler",
 				"session_start_runtime_reset",
-				"session_start_log_cleanup",
 				"session_start_sequence_read",
 				"session_start_snapshot_load",
 			];
