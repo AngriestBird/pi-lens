@@ -2349,6 +2349,7 @@ export class TreeSitterClient {
 				if (!clauseNode) return true;
 				// A typed `except` clause has a named child for the exception
 				// spec — one of: identifier (e.g. `except ValueError`),
+				// attribute (e.g. `except asyncio.TimeoutError` — dotted name),
 				// tuple (e.g. `except (E, F)`), or as_pattern (e.g. `except E as e`).
 				// Bare `except:` has NO named children (just the `except` keyword,
 				// the `:` colon, and the body block).
@@ -2357,6 +2358,7 @@ export class TreeSitterClient {
 					if (!c.isNamed) return false;
 					return (
 						c.type === "identifier" ||
+						c.type === "attribute" ||
 						c.type === "tuple" ||
 						c.type === "as_pattern" ||
 						c.type === "parenthesized_expression"
