@@ -4,6 +4,18 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+- **Read-before-edit guard now survives a session resume (#1041)** — the
+	guard's read-set was in-memory only, so a `pi --session <id>` resume (which
+	resets the runtime to a fresh empty guard) falsely `zero_read`-blocked the
+	first edit of any file read in the prior session. The read-set now rides the
+	same #190 `PersistedSessionState` save/load path that widget diagnostics use:
+	`ReadGuard.exportState()`/`importState()` persist and rehydrate `reads`,
+	reconciling each read against current disk (line-hash verified) so a resume
+	drops any read whose file changed or vanished — a rehydrated read never masks
+	a real staleness. Forked sessions adopt the parent's read-set via the same
+	in-memory hand-off as widget state. Backward-compatible: the field is optional
+	and pre-#1041 persisted sessions load cleanly as "no prior reads".
+
 - **`turn_summary_emit` quiet-window task no longer fails on a stale pi ctx (the #483 quiet window's most frequent live-dogfood error — 55×)** —
 	the `agent_settled` quiet-window task `turn_summary_emit` reads the
 	`lens-turn-summary` flag through `pi.getFlag()` (via `getLensFlag`). The task
