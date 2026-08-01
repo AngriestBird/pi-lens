@@ -10,6 +10,7 @@ import {
 	getFileDiagnostics,
 	getFileDiagnosticSummaries,
 	getSessionLanguages,
+	importWidgetState,
 	reconcileScanDiagnostics,
 	recordDiagnostics,
 	recordFormatter,
@@ -762,6 +763,82 @@ describe("reconcileScanDiagnostics — full-scan/on-demand footer reconciliation
 		const result = getFileDiagnostics(filePath);
 		expect(result).toHaveLength(1);
 		expect(result?.[0]?.message).toBe("untokened confirmed scan");
+	});
+});
+
+describe("path-key normalization — same file under mixed separators collapses to one entry (#1020)", () => {
+	// The two forms differ ONLY in separator direction, so they fold to the same
+	// key on every platform (`normalizeEphemeralMapKey` converts `\`→`/` always,
+	// and additionally lowercases on win32). This is the exact split that made a
+	// resolved blocker replay on mode=all: the LSP/cascade fold records the
+	// forward-slash form, while mode=full's clean reconcile writes the backslash
+	// form (path.resolve / result.filePath on Windows).
+	const fwd = "C:/proj/dup.ts";
+	const back = "C:\\proj\\dup.ts";
+
+	it("a clean backslash-key reconcile overwrites a stale forward-slash-key blocker → one entry, blocking:0", () => {
+		recordDiagnostics(
+			fwd,
+			[
+				{
+					severity: "error",
+					semantic: "blocking",
+					message: "stale blocker",
+					rule: "X",
+				},
+			],
+			1,
+		);
+		reconcileScanDiagnostics(back, [], true, 2);
+
+		const summaries = getFileDiagnosticSummaries();
+		// Pre-fix: TWO entries (raw keys never collapsed) and the forward-slash one
+		// still reads blocking:1 — the #1020 replay.
+		expect(summaries).toHaveLength(1);
+		expect(summaries[0]?.blocking).toBe(0);
+		expect(summaries[0]?.diagnostics).toEqual([]);
+	});
+
+	it("importWidgetState folds a persisted forward-slash key so a later backslash reconcile hits the same entry", () => {
+		importWidgetState({
+			version: 1,
+			sessionLanguages: [],
+			files: [
+				{
+					filePath: fwd,
+					runners: [],
+					formatters: [],
+					diagnostics: [
+						{
+							severity: "error",
+							semantic: "blocking",
+							message: "persisted blocker",
+							rule: "X",
+						},
+					],
+					allDiagnostics: [
+						{
+							severity: "error",
+							semantic: "blocking",
+							message: "persisted blocker",
+							rule: "X",
+						},
+					],
+					diagnosticCounts: { blocking: 1, errors: 1, warnings: 0 },
+					hasFinalDiagnosticsSnapshot: true,
+					touchedAt: Date.now(),
+				},
+			],
+		});
+
+		// After resume, the clean full-scan reconcile arrives under the backslash
+		// form. Without the rehydrate fold, the persisted `/`-key stays split from
+		// this `\`-key and the blocker survives.
+		reconcileScanDiagnostics(back, [], true, 5);
+
+		const summaries = getFileDiagnosticSummaries();
+		expect(summaries).toHaveLength(1);
+		expect(summaries[0]?.blocking).toBe(0);
 	});
 });
 

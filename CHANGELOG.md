@@ -28,6 +28,27 @@ All notable changes to pi-lens will be documented in this file.
 	form re-anchor to the canonical id; a stale orphan is re-derivable and simply
 	reappears once for the agent to re-mark (identical to today's pre-fix
 	behavior), so no read-time legacy fallback is needed.
+- **`lens_diagnostics mode=all` no longer replays a resolved blocker (refs #1020, closes #1020)** —
+	the widget-state `files` map was keyed by the raw, non-normalized path string,
+	so the SAME file could land under two different key forms in one session:
+	the forward-slash form (`C:/…/x.ts`) the LSP client + cascade fold produce via
+	`normalizeFilePath`, and the backslash form (`C:\…\x.ts`) that `mode=full`'s
+	clean reconcile (`result.filePath`) and `path.resolve`/event inputs produce on
+	Windows. A stale blocking entry and the fresh clean entry then coexisted as two
+	separate map entries. `mode=full` rendered clean because its merge re-keys every
+	summary through `path.resolve`, but `mode=all`'s `formatAllMode` reads
+	`getFileDiagnosticSummaries()` verbatim with no dedup, so it saw both and
+	rendered the stale entry's `blocking:1` as a 🔴 — a resolved state that replayed
+	as still-broken on every `mode=all` (worst on Windows + resumed sessions), and a
+	#533 honesty failure since the tool prompt tells agents to use `mode=all` to
+	verify no blockers remain. Fixed at source: every write/read seam on the `files`
+	map (and the `diagnosticsWriteGuard`) now folds its key through one normalizer,
+	`normalizeEphemeralMapKey` (slash-fold + win32-lowercase, no filesystem I/O —
+	chosen over the `realpathSync`-backed `normalizeMapKey` because this is a hot
+	write path), and `importWidgetState` folds persisted keys on rehydrate so a
+	`/`-key snapshot and a fresh `\`-key write collapse across a resumed session.
+	The human-readable display path on each record is preserved verbatim (rendering
+	and path-relative math unchanged). No new dependencies.
 
 - **Prompt-cache observability (refs #1018, closes #1018)** — two provider-independent
 	signals now land in `~/.pi-lens/latency.log` as `type: "phase"` records.

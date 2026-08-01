@@ -2,8 +2,43 @@ import { stat } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { visibleWidth } from "./deps/pi-tui.js";
+import { normalizeEphemeralMapKey } from "./path-utils.js";
 import { fitLine } from "./tui-fit.js";
 import { WriteOrderingGuard } from "./write-ordering-guard.js";
+
+/**
+ * Canonical key for the `files` map (and `diagnosticsWriteGuard`) — #1020.
+ *
+ * The SAME file reaches this module under DIFFERENT path forms in one session:
+ * forward-slash (`C:/…/x.ts`) from the LSP client + cascade fold via
+ * `normalizeFilePath`, and backslash (`C:\…\x.ts`) from mode=full's reconcile
+ * writing `result.filePath` and from `path.resolve`/event inputs on Windows.
+ * Keyed raw, those coexisted as two entries: `mode=full` re-keyed on read and
+ * the clean entry hid the stale one, but `mode=all`'s `formatAllMode` reads the
+ * summaries verbatim and rendered the stale `blocking:1` as a 🔴 (#1020) — a
+ * resolved state that replayed as still-broken on every `mode=all`.
+ *
+ * `normalizeEphemeralMapKey` (slash-fold + win32-lowercase, NO filesystem I/O)
+ * is chosen over `normalizeMapKey`/`normalizeFilePath`, which call
+ * `realpathSync.native()` — real disk I/O on EVERY diagnostic/runner/formatter
+ * write, far too heavy for this hot path. The key only needs to be a stable
+ * syntactic fold that collapses `\`↔`/` and Windows drive-letter case, which
+ * this does; on-disk canonical casing is irrelevant for merely deduplicating a
+ * process-local footer cache. The human-readable path is preserved separately
+ * on the record's `filePath` (see `toDisplayPath`) for rendering/summaries.
+ */
+function fileMapKey(filePath: string): string {
+	return normalizeEphemeralMapKey(filePath);
+}
+
+// The record keeps a real, human-readable display path in `FileRecord.filePath`
+// (drives the widget render, `getFileDiagnosticSummaries`, and diagnostic URIs).
+// It is the VERBATIM path the first writer for a given key supplied — never the
+// lowercased/normalized `fileMapKey`, which would render an ugly all-lowercase
+// path on Windows. Only the MAP KEY is normalized; the display path is
+// unchanged from pre-#1020 behavior, so rendering and path-relative math are
+// unaffected. First writer wins the display form (later writes for the same
+// normalized key reuse the existing record).
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -155,7 +190,11 @@ export function importWidgetState(state: PersistedWidgetState | undefined): bool
 	// "superseded" against a stale token.
 	diagnosticsWriteGuard.clear();
 	for (const f of state.files ?? []) {
-		files.set(f.filePath, {
+		// Fold persisted keys through the same normalizer as live writes (#1020),
+		// or a persisted forward-slash key stays split from a fresh backslash key
+		// across a resumed session — a primary repro condition. Keep a readable
+		// display path on the record.
+		files.set(fileMapKey(f.filePath), {
 			filePath: f.filePath,
 			runners: new Map(f.runners ?? []),
 			formatters: new Map(f.formatters ?? []),
@@ -210,7 +249,7 @@ export function recordFormatter(
 	const rec = getOrCreate(filePath);
 	rec.formatters.set(formatter, { changed, success });
 	rec.touchedAt = Date.now();
-	files.set(filePath, rec);
+	files.set(fileMapKey(filePath), rec);
 	requestRender();
 }
 
@@ -225,7 +264,7 @@ export function recordRunner(
 	rec.runners.set(runnerId, { status, count: diagnosticCount, durationMs });
 	rec.hasFinalDiagnosticsSnapshot = false;
 	rec.touchedAt = Date.now();
-	files.set(filePath, rec);
+	files.set(fileMapKey(filePath), rec);
 	requestRender();
 }
 
@@ -261,7 +300,7 @@ export function recordDiagnostics(
 	// the `clients/mcp/analyze.ts` on-demand call site, which has no per-edit
 	// ordering token) always proceeds, same as version-less LSP servers in the
 	// #555 guard.
-	if (!diagnosticsWriteGuard.shouldWrite(filePath, writeIndex)) return;
+	if (!diagnosticsWriteGuard.shouldWrite(fileMapKey(filePath), writeIndex)) return;
 
 	const rec = getOrCreate(filePath);
 	const base = pathToFileURL(filePath).href;
@@ -297,7 +336,7 @@ export function recordDiagnostics(
 	rec.allDiagnostics = normalized;
 	rec.hasFinalDiagnosticsSnapshot = true;
 	rec.touchedAt = Date.now();
-	files.set(filePath, rec);
+	files.set(fileMapKey(filePath), rec);
 	requestRender();
 }
 
@@ -361,13 +400,15 @@ export function reconcileScanDiagnostics(
 export async function reconcileStaleWidgetFiles(): Promise<number> {
 	const entries = [...files.entries()];
 	const staleKeys = await Promise.all(
-		entries.map(async ([filePath, rec]) => {
+		// `mapKey` is the normalized `files` key (used for deletion); stat the
+		// record's real display path, not the lowercased key (#1020).
+		entries.map(async ([mapKey, rec]) => {
 			try {
-				const st = await stat(filePath);
+				const st = await stat(rec.filePath);
 				// +1ms tolerance: a freshly-recorded file has touchedAt >= mtime.
-				return st.mtimeMs > rec.touchedAt + 1 ? filePath : undefined;
+				return st.mtimeMs > rec.touchedAt + 1 ? mapKey : undefined;
 			} catch {
-				return filePath; // deleted / unreadable → drop
+				return mapKey; // deleted / unreadable → drop
 			}
 		}),
 	);
@@ -449,12 +490,14 @@ export function getFileDiagnosticSummaries(): FileDiagnosticSummary[] {
  * been recorded (caller must not confuse "never seen" with "seen and clean";
  * an explicit `[]` from `recordDiagnostics` is a real empty array here).
  *
- * NOTE: `filePath` must be the exact string used to record the file — the
- * `files` map key is NOT normalized (pre-existing; see `getOrCreate`), so
- * callers should pass through the same value they gave `recordDiagnostics`.
+ * The `files` map key is normalized through `fileMapKey` (#1020), so any path
+ * form of the same file — forward-slash, backslash, or a different Windows
+ * drive-letter case — resolves to the same record. This read-side fold MUST
+ * stay identical to the write-side fold, or a file recorded under one form
+ * would silently read as `undefined` under another (e.g. via bus-publish).
  */
 export function getFileDiagnostics(filePath: string): WidgetDiagnostic[] | undefined {
-	const rec = files.get(filePath);
+	const rec = files.get(fileMapKey(filePath));
 	if (!rec) return undefined;
 	return rec.allDiagnostics.map((d) => ({ ...d }));
 }
@@ -780,8 +823,10 @@ function truncateBasename(name: string, maxWidth: number): string {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function getOrCreate(filePath: string): FileRecord {
+	// Look up by the normalized key so mixed path forms of the same file share
+	// ONE record (#1020); keep the caller's verbatim path as the display path.
 	return (
-		files.get(filePath) ?? {
+		files.get(fileMapKey(filePath)) ?? {
 			filePath,
 			runners: new Map(),
 			formatters: new Map(),
