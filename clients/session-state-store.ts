@@ -14,6 +14,7 @@ import * as path from "node:path";
 import { writeFileAtomicAsync } from "./atomic-write.js";
 import { getProjectDataDir } from "./file-utils.js";
 import { readJsonCacheAsync } from "./json-cache-read.js";
+import type { PersistedReadGuardState } from "./read-guard.js";
 import type { PersistedWidgetState } from "./widget-state.js";
 
 const STATE_VERSION = 1;
@@ -23,6 +24,14 @@ export interface PersistedSessionState {
 	sessionId: string;
 	savedAt: number;
 	widget: PersistedWidgetState;
+	/**
+	 * Read-before-edit guard read-set (#1041). Optional and additive: sessions
+	 * persisted before this field existed simply omit it, and load cleanly as
+	 * "no prior reads" — so STATE_VERSION is deliberately NOT bumped (a bump
+	 * would reject those older files entirely and lose their widget rehydration
+	 * too). Rehydrated with disk-staleness reconciliation by ReadGuard.importState.
+	 */
+	readGuard?: PersistedReadGuardState;
 }
 
 /**
@@ -69,6 +78,7 @@ export async function saveSessionState(
 	cwd: string,
 	sessionId: string | undefined,
 	widget: PersistedWidgetState,
+	readGuard?: PersistedReadGuardState,
 ): Promise<void> {
 	if (!sessionId || !sessionId.trim()) return;
 	try {
@@ -79,6 +89,7 @@ export async function saveSessionState(
 			sessionId,
 			savedAt: Date.now(),
 			widget,
+			...(readGuard ? { readGuard } : {}),
 		};
 		const file = sessionFilePath(cwd, sessionId);
 		// bestEffort (default): a failed write/rename just means this snapshot is

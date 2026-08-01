@@ -90,6 +90,24 @@ export interface ReadGuardConfig {
 	}>;
 }
 
+/**
+ * Serializable snapshot of the guard's read-set (#1041). The in-memory `reads`
+ * map is process-bound, so a `pi --session <id>` resume — which resets the
+ * runtime to a fresh empty guard — used to falsely `zero_read`-block the first
+ * edit of any file the prior session had read. Persisting `reads` on the SAME
+ * #190 `PersistedSessionState` path that widget diagnostics ride lets a resumed
+ * session rehydrate its read history. Only `reads` is persisted: edits/written
+ * markers are re-derivable and `reads` is the payload that gates `checkEdit`.
+ * Keys are `normalizeFilePath` form (see {@link ReadGuard.key}) so the round
+ * trip re-folds identically on Windows/Linux.
+ */
+export interface PersistedReadGuardState {
+	version: number;
+	reads: Array<[string, ReadRecord[]]>;
+}
+
+const READ_GUARD_STATE_VERSION = 1;
+
 // --- Constants ---
 
 const DEFAULT_CONFIG: ReadGuardConfig = {
@@ -722,6 +740,72 @@ export class ReadGuard {
 	 */
 	getReadHistory(filePath: string): ReadRecord[] {
 		return this.reads.get(this.key(filePath)) ?? [];
+	}
+
+	/**
+	 * Snapshot the read-set for persistence across a session resume (#1041).
+	 * Mirrors widget-state's `exportWidgetState`: the Map is emitted as
+	 * `[key, records]` tuples, keys already in `normalizeFilePath` form. Only
+	 * `reads` is serialized — it is the payload `checkEdit`'s zero-read/coverage
+	 * checks consult. Safe to call even when the guard is disabled (an empty or
+	 * never-populated `reads` simply exports zero entries).
+	 */
+	exportState(): PersistedReadGuardState {
+		return {
+			version: READ_GUARD_STATE_VERSION,
+			reads: [...this.reads.entries()].map(([key, records]) => [
+				key,
+				records.map((record) => ({ ...record })),
+			]),
+		};
+	}
+
+	/**
+	 * Rehydrate a persisted read-set (#1041) into this (fresh, post-resume)
+	 * guard, with mandatory staleness reconciliation: each read is re-verified
+	 * against the CURRENT on-disk content via its recorded `lineHashes`, and any
+	 * read whose file changed (or no longer exists, or that carries no verifiable
+	 * hashes) is DROPPED. A rehydrated read must never mask a real staleness — a
+	 * resume must not let the agent edit a file that changed on disk while it
+	 * believed it held a fresh read. Kept reads are replayed through
+	 * {@link recordRead}, which re-keys through {@link key} (idempotent — the
+	 * exported keys are already normalized) and re-stamps FileTime so the next
+	 * `checkEdit` sees a consistent baseline. Version-guarded and null-safe:
+	 * `undefined` / a mismatched version / a missing field loads as "no prior
+	 * reads". Returns a count of imported vs dropped reads for logging.
+	 */
+	importState(state: PersistedReadGuardState | undefined): {
+		imported: number;
+		dropped: number;
+	} {
+		const result = { imported: 0, dropped: 0 };
+		if (!state || state.version !== READ_GUARD_STATE_VERSION) return result;
+		for (const entry of state.reads ?? []) {
+			const [rawPath, records] = entry;
+			if (!Array.isArray(records) || records.length === 0) continue;
+			const filePath = this.key(rawPath);
+			let lines: string[];
+			try {
+				lines = splitLines(fs.readFileSync(filePath, "utf-8"));
+			} catch {
+				// File gone since it was read → drop every read for it.
+				result.dropped += records.length;
+				continue;
+			}
+			for (const record of records) {
+				const rehydrated: ReadRecord = { ...record, filePath };
+				// readHashesStillMatch returns false when the recorded hashes no
+				// longer match disk OR when the read captured no hashes — both
+				// unverifiable, so both drop (safety over convenience).
+				if (this.readHashesStillMatch(rehydrated, lines)) {
+					this.recordRead(rehydrated);
+					result.imported += 1;
+				} else {
+					result.dropped += 1;
+				}
+			}
+		}
+		return result;
 	}
 
 	/**

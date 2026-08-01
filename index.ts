@@ -18,6 +18,7 @@ import {
 	setRenderCallback,
 } from "./clients/widget-state.js";
 import { selectLspStatus } from "./clients/lsp-status.js";
+import type { PersistedReadGuardState } from "./clients/read-guard.js";
 import {
 	dropStaleFiles,
 	loadSessionState,
@@ -456,6 +457,10 @@ export default function (pi: ExtensionAPI) {
 	// `session_start` (reason="fork"). In-memory hand-off (same process) — avoids
 	// deriving the source id from a file path (the id lives in the file header).
 	let pendingForkSnapshot: PersistedWidgetState | undefined;
+	// #1041: the source session's read-guard read-set, stashed at
+	// `session_before_fork` alongside the widget snapshot so a forked session
+	// adopts its parent's read history (same in-memory hand-off pattern).
+	let pendingForkReadGuard: PersistedReadGuardState | undefined;
 	type LensWidgetTui = { requestRender: () => void };
 	type LensWidgetTheme = { fg: (color: string, s: string) => string };
 	type LensWidgetComponent = {
@@ -1335,25 +1340,39 @@ export default function (pi: ExtensionAPI) {
 				importWidgetState(pendingForkSnapshot);
 				const forkedFileCount = pendingForkSnapshot.files.length;
 				pendingForkSnapshot = undefined;
+				// #1041: adopt the source session's read history (staleness-reconciled
+				// against current disk) so the fork isn't zero-read-blocked on files
+				// the parent already read.
+				let forkReadImport: { imported: number; dropped: number } | undefined;
+				if (pendingForkReadGuard) {
+					forkReadImport = runtime.readGuard.importState(pendingForkReadGuard);
+					pendingForkReadGuard = undefined;
+				}
 				if (stableSessionId) {
 					void saveSessionState(
 						ctx.cwd ?? process.cwd(),
 						stableSessionId,
 						exportWidgetState(),
+						runtime.readGuard.exportState(),
 					);
 				}
 				dbg(
-					`session_start: fork — branched ${forkedFileCount} file(s) from source`,
+					`session_start: fork — branched ${forkedFileCount} file(s) from source` +
+						(forkReadImport
+							? `, read-guard +${forkReadImport.imported} (dropped ${forkReadImport.dropped})`
+							: ""),
 				);
 			} else if (startMode === "keep") {
 				dbg("session_start: reload — keeping widget state");
 			} else if (startMode === "clean") {
 				pendingForkSnapshot = undefined;
+				pendingForkReadGuard = undefined;
 				clearWidgetState();
 				dbg("session_start: new — clean widget");
 			} else {
 				// maybe-rehydrate: covers resume AND startup (e.g. `pi --session <id>`)
 				pendingForkSnapshot = undefined;
+				pendingForkReadGuard = undefined;
 				clearWidgetState();
 				if (stableSessionId) {
 					const persisted = await loadSessionState(
@@ -1369,9 +1388,20 @@ export default function (pi: ExtensionAPI) {
 						);
 						const dropped = persisted.widget.files.length - fresh.files.length;
 						importWidgetState(fresh);
+						// #1041: rehydrate the read-before-edit guard's read-set on the
+						// SAME path so the first post-resume edit of a previously-read
+						// file isn't falsely zero-read-blocked. importState reconciles
+						// each read against current disk (drops changed/missing files),
+						// so a resume never masks a real staleness.
+						const readImport = runtime.readGuard.importState(
+							persisted.readGuard,
+						);
 						dbg(
 							`session_start: ${reasonLabel} ${stableSessionId} — rehydrated ${fresh.files.length} file(s)` +
-								(dropped > 0 ? `, dropped ${dropped} stale` : ""),
+								(dropped > 0 ? `, dropped ${dropped} stale` : "") +
+								(readImport.imported > 0 || readImport.dropped > 0
+									? `; read-guard +${readImport.imported} read(s) (dropped ${readImport.dropped} stale)`
+									: ""),
 						);
 					} else {
 						dbg(
@@ -1399,8 +1429,12 @@ export default function (pi: ExtensionAPI) {
 	(pi as any).on("session_before_fork", () => {
 		try {
 			pendingForkSnapshot = exportWidgetState();
+			// #1041: the source guard is still live here (reset happens in the
+			// fork's own session_start, which fires later), so this captures the
+			// parent's read-set for the fork to adopt.
+			pendingForkReadGuard = runtime.readGuard.exportState();
 			dbg(
-				`session_before_fork: stashed ${pendingForkSnapshot.files.length} file(s) for the fork`,
+				`session_before_fork: stashed ${pendingForkSnapshot.files.length} file(s) + ${pendingForkReadGuard.reads.length} read-guard file(s) for the fork`,
 			);
 		} catch (forkErr) {
 			dbg(`session_before_fork crashed: ${forkErr}`);
@@ -1642,6 +1676,9 @@ export default function (pi: ExtensionAPI) {
 					ctx.cwd ?? process.cwd(),
 					runtime.telemetrySessionId,
 					exportWidgetState(),
+					// #1041: persist the read-guard read-set on the same snapshot so a
+					// later resume can rehydrate it (reconciled against disk on load).
+					runtime.readGuard.exportState(),
 				);
 			}
 
