@@ -8,6 +8,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **Review-graph persistence lifecycle telemetry (refs #1048)** — `review-graph.log` now correlates graph/build and persistence generations, sequence hints, graph timestamps/counts, coalescing and supersession, worker outcomes, and fallback status with bounded metadata, while preventing stale-generation fallback writes; source contents and paths are never added to the new metadata.
+
 - **Prompt-cache context attribution (refs #1018)** — add bounded `cache_context` latency records that correlate context injection sources, placement, message counts, sizes, and privacy-preserving hashes with provider `cache_usage` by session/turn, while keeping provider cache misses and local prefix changes distinct.
 - **Friendlier AST search (refs #125)** — correct agent-facing examples, add exact grammar-kind and explicit recursive descendant searches, bound explicit path lists, keep pagination output aligned with `maxMatches`, and document lazy-tool activation timing.
 
@@ -670,8 +672,8 @@ All notable changes to pi-lens will be documented in this file.
  awareness of the `new URL(literalPath, fixedBase)`shape, so
  `url.toString()`/`url.href` fell through to the broad taint heuristic. Extended
  the post-filter to also exempt `fetch(u.toString())`/`fetch(u.href)` when `u`
- resolves (same file) to a clean `const u = new URL(<literalPath>, <fixedBase>)`
- — literal path plus a base that is a literal, a file-local literal `const`, or
+resolves (same file) to a clean `const u = new URL(<literalPath>, <fixedBase>)`
+— literal path plus a base that is a literal, a file-local literal `const`, or
  an import binding (the`URL` ctor may be aliased, e.g. `NodeURL`). Query params
  added later via`searchParams.set(...)` don't control origin/path and never
  taint the destination. Still fires (regression fixtures added) when the base
