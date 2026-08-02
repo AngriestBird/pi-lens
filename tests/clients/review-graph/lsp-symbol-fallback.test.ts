@@ -23,7 +23,10 @@ vi.mock("../../../clients/lsp-document-symbols.js", async (importOriginal) => {
 		>();
 	return { ...actual, getOpenDocumentSymbols: vi.fn() };
 });
-vi.mock("../../../clients/review-graph-logger.js", () => ({
+vi.mock("../../../clients/review-graph-logger.js", async (importOriginal) => ({
+	...(await importOriginal<
+		typeof import("../../../clients/review-graph-logger.js")
+	>()),
 	logReviewGraph: vi.fn(),
 	flushReviewGraphLogSync: vi.fn(),
 }));

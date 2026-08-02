@@ -20,7 +20,8 @@ import { detectFileRole } from "../file-role.js";
 import { getProjectDataDir } from "../file-utils.js";
 import { collectUntrackedIgnoredIds } from "../git-tracked-ignore.js";
 import { logLatency } from "../latency-logger.js";
-import { containerNameChain,
+import {
+	containerNameChain,
 	getOpenDocumentSymbols,
 	lspSymbolKindName,
 } from "../lsp-document-symbols.js";
@@ -50,6 +51,10 @@ import { logTreeSitterCacheStats } from "../tree-sitter-logger.js";
 import {
 	flushReviewGraphLogSync,
 	logReviewGraph,
+	makeReviewGraphBuildMetadata,
+	type ReviewGraphBuildMode,
+	type ReviewGraphBuildMetadata,
+	type ReviewGraphPersistenceMetadata,
 } from "../review-graph-logger.js";
 import { getSharedTreeSitterClient } from "../tree-sitter-shared.js";
 import {
@@ -170,6 +175,9 @@ const _workspaceGraphCache = new Map<
 // let a new build collide with a generation a derived-data cache recorded
 // earlier in the same process).
 let _graphGenerationCounter = 0;
+// Build invocation identity is separate from graph content generation: cached
+// builds can reuse content while still needing a stable lifecycle join key.
+let _buildIdCounter = 0;
 
 /**
  * RuntimeCoordinator sequence hint (#451). Threaded from the deferred cascade so
@@ -191,6 +199,7 @@ const SEQ_FASTPATH_REVERIFY_EVERY = 20;
 
 type SeqFastpathFallback =
 	| "no-seq"
+	| "partial-base"
 	| "too-many-changes"
 	| "new-file"
 	| "verify-due"
@@ -202,7 +211,10 @@ export type GraphBuildInfo = {
 	mode: "full" | "cached" | "incremental" | "skipped" | "seq-fastpath";
 	skipReason?: string;
 	sourceFileCount?: number;
+	sourceFileCountTruncated?: boolean;
 	maxFileCount?: number;
+	/** Reason the graph was successfully built but persisted only partially. */
+	persistReason?: string;
 	/** When the seq fast path was attempted but fell back to the sweep (#451). */
 	seqFastpathFallback?: SeqFastpathFallback;
 	/**
@@ -218,6 +230,20 @@ export type GraphBuildInfo = {
 	graphChanged: boolean;
 };
 
+function graphLogMetadata(
+	graph: ReviewGraph,
+	options: {
+		buildId?: number;
+		projectSeq?: number;
+		seqHint?: boolean;
+		mode?: ReviewGraphBuildMode;
+		sourceFileCount?: number;
+		sourceFileCountTruncated?: boolean;
+	} = {},
+): ReviewGraphBuildMetadata {
+	return makeReviewGraphBuildMetadata(graph, options);
+}
+
 function seqFastpathEnabled(): boolean {
 	const raw = process.env.PI_LENS_GRAPH_SEQ_FASTPATH;
 	return raw !== "0" && raw !== "false";
@@ -228,6 +254,27 @@ let _lastGraphBuildInfo: GraphBuildInfo = {
 	mode: "full",
 	graphChanged: true,
 };
+// The global slot above is retained for legacy status surfaces, but overlapping
+// deferred builds need a per-result identity for lifecycle telemetry.
+const _graphBuildInfoByGraph = new WeakMap<ReviewGraph, GraphBuildInfo>();
+
+function setGraphBuildInfo(graph: ReviewGraph, info: GraphBuildInfo): void {
+	_lastGraphBuildInfo = info;
+	_graphBuildInfoByGraph.set(graph, info);
+}
+
+export function getGraphBuildInfoForGraph(graph: ReviewGraph): GraphBuildInfo {
+	return _graphBuildInfoByGraph.get(graph) ?? _lastGraphBuildInfo;
+}
+
+function updateGraphBuildInfo(
+	graph: ReviewGraph,
+	patch: Partial<GraphBuildInfo>,
+): GraphBuildInfo {
+	const info = { ...getGraphBuildInfoForGraph(graph), ...patch };
+	setGraphBuildInfo(graph, info);
+	return info;
+}
 
 export function clearGraphCache(): void {
 	_buildCache.clear();
@@ -256,7 +303,7 @@ export function _getReviewGraphCacheStateForTests(cwd: string):
 			signature: string;
 			fileSignatures: Map<string, string>;
 			fileHashes?: Map<string, string>;
-		}
+	  }
 	| undefined {
 	const cached = _workspaceGraphCache.get(normalizeMapKey(cwd));
 	if (!cached) return undefined;
@@ -433,6 +480,11 @@ function cloneGraph(graph: ReviewGraph): ReviewGraph {
 		// partial base outright; this keeps any other cloner honest.
 		persistCoverage: graph.persistCoverage,
 	};
+}
+
+/** Refresh the content timestamp only when an incremental path changed graph data. */
+function refreshGraphBuiltAt(graph: ReviewGraph): void {
+	graph.builtAt = new Date().toISOString();
 }
 
 function sourceSignatureEntry(file: string): string {
@@ -629,6 +681,8 @@ export interface ReviewGraphSizeSkipVerdict {
 	sourceFileCount: number;
 	/** The cap (derived `maxProjectFiles` or `PI_LENS_REVIEW_GRAPH_MAX_FILES`) that was exceeded. */
 	maxFileCount: number;
+	/** `sourceFileCount` is maxFileCount+1 sentinel data, not an exact total. */
+	sourceFileCountTruncated: true;
 	/** Wall-clock (`Date.now()`) the skip was recorded — see {@link getReviewGraphSizeSkipVerdict}. */
 	skippedAt: number;
 }
@@ -636,6 +690,7 @@ export interface ReviewGraphSizeSkipVerdict {
 export interface ReviewGraphBuildAttempt {
 	when: string;
 	outcome: "running" | "succeeded" | "skipped" | "failed";
+	buildId?: number;
 	reason?: string;
 }
 
@@ -655,24 +710,54 @@ function recordBuildAttempt(
 	cwd: string,
 	outcome: ReviewGraphBuildAttempt["outcome"],
 	reason?: string,
+	buildId?: number,
 ): void {
-	_buildAttempts.set(normalizeMapKey(cwd), {
+	const key = normalizeMapKey(cwd);
+	const prior = _buildAttempts.get(key);
+	// Build IDs are assigned at start, so a terminal event from an older
+	// overlapping build must never overwrite the newest build's status/reason.
+	// Keep the newest started attempt as the project-report truth source.
+	if (
+		prior?.buildId !== undefined &&
+		(buildId === undefined || buildId < prior.buildId)
+	) {
+		return;
+	}
+	_buildAttempts.set(key, {
 		when: new Date().toISOString(),
 		outcome,
+		...(buildId === undefined ? {} : { buildId }),
 		...(reason ? { reason } : {}),
 	});
 }
 
-function recordPersistFailure(cwd: string, reason: string, error: string): void {
+function recordPersistFailure(
+	cwd: string,
+	reason: string,
+	error: string,
+	pending?: PendingPersist,
+	workerState?: {
+		started: boolean;
+		completed: boolean;
+		fallbackReason?: string;
+	},
+): void {
 	// A debounced persist can fail AFTER a newer build already recorded
 	// "failed" or "running" for this cwd — don't relabel a dead/in-flight
 	// build as succeeded; only annotate a record that says succeeded.
 	const prior = _buildAttempts.get(normalizeMapKey(cwd));
-	if (prior === undefined || prior.outcome === "succeeded") {
+	const pendingBuildId = pending?.graphMetadata.buildId;
+	const belongsToCurrentBuild =
+		pendingBuildId === undefined || prior?.buildId === pendingBuildId;
+	if (
+		belongsToCurrentBuild &&
+		(prior === undefined || prior.outcome === "succeeded")
+	) {
 		recordBuildAttempt(
 			cwd,
 			"succeeded",
 			`graph built but persistence failed: ${error}`,
+			pendingBuildId,
 		);
 	}
 	logReviewGraph({
@@ -680,6 +765,17 @@ function recordPersistFailure(cwd: string, reason: string, error: string): void 
 		phase: "persist_failed",
 		reason,
 		error,
+		...(pending
+			? {
+					observability: persistObservability(pending, {
+						status: "failed",
+						reason: workerState?.fallbackReason ?? reason,
+						workerStarted: workerState?.started,
+						workerCompleted: workerState?.completed,
+						...(workerState?.fallbackReason ? { workerFallback: true } : {}),
+					}),
+				}
+			: {}),
 	});
 }
 
@@ -698,6 +794,7 @@ function recordReviewGraphSizeSkip(
 	_sizeSkipVerdicts.set(normalizeMapKey(cwd), {
 		sourceFileCount,
 		maxFileCount,
+		sourceFileCountTruncated: true,
 		skippedAt: Date.now(),
 	});
 }
@@ -728,7 +825,27 @@ export function getReviewGraphSizeSkipVerdict(
 	return verdict;
 }
 
-async function getGraphSourceFiles(cwd: string): Promise<string[]> {
+interface GraphSourceFilesResult {
+	files: string[];
+	/** Number of source files represented by this walk; a lower bound when truncated. */
+	sourceFileCount: number;
+	/** Per-build file cap captured before the asynchronous walk begins. */
+	maxFileCount: number;
+	entryBudgetExceeded: boolean;
+}
+
+// Test-only override so the entry-budget propagation contract can be exercised
+// without constructing a 200k-entry fixture tree.
+let _reviewGraphEntryBudgetForTests: number | undefined;
+export function _setReviewGraphEntryBudgetForTests(
+	maxScanEntries?: number,
+): void {
+	_reviewGraphEntryBudgetForTests = maxScanEntries;
+}
+
+async function getGraphSourceFiles(
+	cwd: string,
+): Promise<GraphSourceFilesResult> {
 	// Async, chunked-yield walk (identical output to the sync collector) so the
 	// per-edit cascade graph rebuild doesn't block the event loop on a large repo.
 	//
@@ -738,18 +855,19 @@ async function getGraphSourceFiles(cwd: string): Promise<string[]> {
 	// the cap is hit the caller skips the build on count alone, so the unfiltered
 	// over-limit list is all it needs — see _doBuildGraph's too_many_files branch.
 	const maxGraphFiles = getReviewGraphMaxFiles(cwd);
-	// #760: the maxFiles cap above bounds results FOUND, not entries VISITED —
-	// a mixed tree with few source files among a huge pile of non-source files
-	// never trips it. The walk's default entry budget (DEFAULT_MAX_SCAN_ENTRIES)
-	// bounds the visit count; a truncated best-effort list is acceptable for the
-	// graph (it degrades to a partial graph, same as maxFiles trimming), so just
-	// log the truncation for observability rather than failing the build.
+	// #760: the maxFiles cap bounds results FOUND, not entries VISITED. A mixed
+	// tree with few source files among a huge pile of non-source files can trip the
+	// entry budget first. That result is a useful partial graph, but its lower-bound
+	// count MUST travel with the graph and persistence metadata; it is never clean.
 	const { files: collected, entryBudgetExceeded } =
 		await collectProjectSourceFilesWithBudgetAsync(cwd, {
 			// Only walk graph-relevant extensions so the cap counts what the graph
 			// keeps (post-filter), not JSON/YAML/MD noise it would discard anyway.
 			extensions: MAIN_KIND_EXTENSIONS,
 			maxFiles: maxGraphFiles + 1,
+			...(_reviewGraphEntryBudgetForTests === undefined
+				? {}
+				: { maxScanEntries: _reviewGraphEntryBudgetForTests }),
 		});
 	if (entryBudgetExceeded) {
 		logLatency({
@@ -763,7 +881,12 @@ async function getGraphSourceFiles(cwd: string): Promise<string[]> {
 	if (collected.length > maxGraphFiles) {
 		// Contents are unused by the too_many_files branch; return the capped list
 		// so the caller's `length > maxGraphFiles` check still trips.
-		return collected;
+		return {
+			files: collected,
+			sourceFileCount: collected.length,
+			maxFileCount: maxGraphFiles,
+			entryBudgetExceeded,
+		};
 	}
 	const result: string[] = [];
 	let sinceYield = 0;
@@ -788,7 +911,12 @@ async function getGraphSourceFiles(cwd: string): Promise<string[]> {
 			await yieldToLoop();
 		}
 	}
-	return result;
+	return {
+		files: result,
+		sourceFileCount: result.length,
+		maxFileCount: maxGraphFiles,
+		entryBudgetExceeded,
+	};
 }
 
 function addNode(graph: ReviewGraph, node: ReviewGraphNode): void {
@@ -966,7 +1094,9 @@ function getPersistedReviewGraphVersion(cwd: string): string | null {
 		fd = fs.openSync(legacyPath, "r");
 		const buf = Buffer.alloc(200);
 		const n = fs.readSync(fd, buf, 0, 200, 0);
-		const match = buf.toString("utf-8", 0, n).match(/"version"\s*:\s*"([^"]+)"/);
+		const match = buf
+			.toString("utf-8", 0, n)
+			.match(/"version"\s*:\s*"([^"]+)"/);
 		return match ? match[1] : null;
 	} catch {
 		return null;
@@ -1030,6 +1160,9 @@ interface PendingPersist {
 	gitStamp?: { headCommit: string; worktreeRoot: string };
 	elementCount: number;
 	generation: number;
+	attemptId: number;
+	graphMetadata: ReviewGraphBuildMetadata;
+	persistenceMetadata: ReviewGraphPersistenceMetadata;
 }
 const _pendingPersist = new Map<string, PendingPersist>();
 const _persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -1040,7 +1173,9 @@ const _workerRequests = new Map<
 >();
 let _persistWorker: Worker | undefined;
 let _persistWorkerRequestId = 0;
+let _persistAttemptId = 0;
 let _workerDisabled = false;
+let _persistWorkerUnavailableReason: string | undefined;
 let _lastWorkerFallbackReasonForTests: string | undefined;
 
 // #936/#958 follow-up: the mid-build resume checkpoint offloads its stringify+
@@ -1084,17 +1219,41 @@ function persistedData(pending: PendingPersist): PersistedGraphData {
 	};
 }
 
+function countRetainedSourceFiles(
+	graph: ReviewGraph,
+	sourceFilePaths?: Iterable<string>,
+): number {
+	if (sourceFilePaths === undefined) return graph.fileNodes.size;
+	const sourceKeys = new Set<string>();
+	for (const filePath of sourceFilePaths) {
+		sourceKeys.add(normalizeMapKey(filePath));
+	}
+	let retained = 0;
+	for (const filePath of sourceKeys) {
+		if (graph.fileNodes.has(filePath)) retained++;
+	}
+	return retained;
+}
+
 function graphCoverage(
 	graph: ReviewGraph,
 	cap: number,
+	sourceFileCount = graph.persistCoverage?.totalFiles ?? graph.fileNodes.size,
+	sourceFilesTruncated = graph.persistCoverage?.sourceFilesTruncated === true,
+	sourceFilePaths?: Iterable<string>,
 ): ReviewGraphPersistCoverage {
+	const inherited = graph.persistCoverage;
 	return {
-		partial: false,
+		partial: inherited?.partial === true || sourceFilesTruncated,
 		cap,
 		totalNodes: graph.nodes.size,
 		totalEdges: graph.edges.length,
 		persistedNodes: graph.nodes.size,
 		persistedEdges: graph.edges.length,
+		totalFiles: sourceFileCount,
+		persistedFiles: countRetainedSourceFiles(graph, sourceFilePaths),
+		...(sourceFilesTruncated ? { sourceFilesTruncated: true } : {}),
+		...(inherited?.inProgress ? { inProgress: true } : {}),
 	};
 }
 
@@ -1108,6 +1267,11 @@ function capGraphForPersist(
 	cwd: string,
 	graph: ReviewGraph,
 	cap: number,
+	options: {
+		sourceFileCount?: number;
+		sourceFilesTruncated?: boolean;
+		sourceFilePaths?: Iterable<string>;
+	} = {},
 ): ReviewGraph {
 	const totalElements = graph.nodes.size + graph.edges.length;
 	const nodeBudget = Math.max(
@@ -1129,13 +1293,13 @@ function capGraphForPersist(
 		const ids = nodeIdsByFile.get(filePath) ?? [];
 		if (ids.length === 0) continue;
 		const effectiveNodeBudget =
-			keptIds.size === 0 ? Math.max(nodeBudget, Math.min(cap, ids.length)) : nodeBudget;
+			keptIds.size === 0
+				? Math.max(nodeBudget, Math.min(cap, ids.length))
+				: nodeBudget;
 		if (keptIds.size + ids.length > effectiveNodeBudget) continue;
 		for (const id of ids) keptIds.add(id);
 	}
-	const nodes = new Map(
-		[...graph.nodes].filter(([id]) => keptIds.has(id)),
-	);
+	const nodes = new Map([...graph.nodes].filter(([id]) => keptIds.has(id)));
 	const edgeBudget = Math.max(0, cap - nodes.size);
 	const edges = graph.edges
 		.filter((edge) => keptIds.has(edge.from) && keptIds.has(edge.to))
@@ -1147,6 +1311,16 @@ function capGraphForPersist(
 		totalEdges: graph.edges.length,
 		persistedNodes: nodes.size,
 		persistedEdges: edges.length,
+		totalFiles:
+			options.sourceFileCount ??
+			graph.persistCoverage?.totalFiles ??
+			graph.fileNodes.size,
+		persistedFiles: 0,
+		...(options.sourceFilesTruncated ||
+		graph.persistCoverage?.sourceFilesTruncated
+			? { sourceFilesTruncated: true as const }
+		: {}),
+		...(graph.persistCoverage?.inProgress ? { inProgress: true as const } : {}),
 	};
 	const capped: ReviewGraph = {
 		...graph,
@@ -1157,12 +1331,29 @@ function capGraphForPersist(
 		fileNodes: new Map(),
 		symbolNodesByFile: new Map(),
 		changedSymbolsByFile: new Map(),
-		persistCoverage: coverage,
+		persistCoverage: undefined,
 	};
 	rebuildIndexes(capped);
+	coverage.persistedFiles = countRetainedSourceFiles(
+		capped,
+		options.sourceFilePaths,
+	);
+	capped.persistCoverage = coverage;
 	return capped;
 }
 
+function persistObservability(
+	pending: PendingPersist,
+	patch: Partial<ReviewGraphPersistenceMetadata>,
+): {
+	graph: ReviewGraphBuildMetadata;
+	persistence: ReviewGraphPersistenceMetadata;
+} {
+	return {
+		graph: pending.graphMetadata,
+		persistence: { ...pending.persistenceMetadata, ...patch },
+	};
+}
 
 function logPersistSuccess(
 	key: string,
@@ -1174,6 +1365,11 @@ function logPersistSuccess(
 		writeMs: number;
 		offloaded: boolean;
 	},
+	workerState: {
+		started: boolean;
+		completed: boolean;
+		fallback?: boolean;
+	} = { started: false, completed: false },
 ): void {
 	logLatency({
 		type: "phase",
@@ -1187,6 +1383,12 @@ function logPersistSuccess(
 		phase: "persist_succeeded",
 		elements: pending.elementCount,
 		...stats,
+		observability: persistObservability(pending, {
+			status: "succeeded",
+			workerStarted: workerState.started,
+			workerCompleted: workerState.completed,
+			...(workerState.fallback ? { workerFallback: true } : {}),
+		}),
 	});
 }
 
@@ -1194,6 +1396,11 @@ function writePendingOnMainThread(
 	key: string,
 	pending: PendingPersist,
 	reason?: string,
+	workerState: {
+		started: boolean;
+		completed: boolean;
+		fallbackReason?: string;
+	} = { started: false, completed: false },
 ): void {
 	const serializeStarted = performance.now();
 	try {
@@ -1207,13 +1414,22 @@ function writePendingOnMainThread(
 		fs.rmSync(path.join(pending.cacheDir, LEGACY_GRAPH_CACHE_FILENAME), {
 			force: true,
 		});
-		logPersistSuccess(key, pending, {
-			rawBytes,
-			gzBytes: gzip.byteLength,
-			serializeMs,
-			writeMs: performance.now() - writeStarted,
-			offloaded: false,
-		});
+		logPersistSuccess(
+			key,
+			pending,
+			{
+				rawBytes,
+				gzBytes: gzip.byteLength,
+				serializeMs,
+				writeMs: performance.now() - writeStarted,
+				offloaded: false,
+			},
+			{
+				started: workerState.started,
+				completed: workerState.completed,
+				fallback: Boolean(reason),
+			},
+		);
 		if (reason) {
 			// The persist SUCCEEDED via fallback — log the degradation under its
 			// own phase, not persist_failed (#950 review F7: a success followed
@@ -1225,11 +1441,24 @@ function writePendingOnMainThread(
 				reason: "worker_fallback",
 				error: reason,
 				offloaded: false,
+				observability: persistObservability(pending, {
+					status: "fallback",
+					workerStarted: workerState.started,
+					workerCompleted: workerState.completed,
+					workerFallback: true,
+					reason: workerState.fallbackReason ?? "worker_fallback",
+				}),
 			});
 		}
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		recordPersistFailure(key, "cache_write_failed", message);
+		recordPersistFailure(
+			key,
+			"cache_write_failed",
+			message,
+			pending,
+			workerState,
+		);
 		console.error("[review-graph] cache persist failed:", message);
 	}
 }
@@ -1250,6 +1479,23 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 	}
 	_workerRequests.delete(result.id);
 	const { key, pending } = request;
+	const currentGeneration = _persistGenerations.get(key);
+	if (currentGeneration !== result.generation) {
+		fs.rm(result.stagePath, { force: true }, () => {});
+		logReviewGraph({
+			cwd: key,
+			phase: "persist_skipped",
+			reason: "superseded",
+			observability: persistObservability(pending, {
+				status: "superseded",
+				supersededByGeneration: currentGeneration,
+				reason: "newer_generation_scheduled",
+				workerStarted: true,
+				workerCompleted: true,
+			}),
+		});
+		return;
+	}
 	if (
 		result.error ||
 		result.rawBytes === undefined ||
@@ -1258,11 +1504,16 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 		result.writeMs === undefined
 	) {
 		fs.rm(result.stagePath, { force: true }, () => {});
-		writePendingOnMainThread(key, pending, result.error ?? "invalid worker result");
-		return;
-	}
-	if (_persistGenerations.get(key) !== result.generation) {
-		fs.rm(result.stagePath, { force: true }, () => {});
+		writePendingOnMainThread(
+			key,
+			pending,
+			result.error ?? "invalid worker result",
+			{
+				started: true,
+				completed: true,
+				fallbackReason: result.error ? "worker_error" : "invalid_worker_result",
+			},
+		);
 		return;
 	}
 	try {
@@ -1270,19 +1521,29 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 		fs.rmSync(path.join(pending.cacheDir, LEGACY_GRAPH_CACHE_FILENAME), {
 			force: true,
 		});
-		logPersistSuccess(key, pending, {
-			rawBytes: result.rawBytes,
-			gzBytes: result.gzBytes,
-			serializeMs: result.serializeMs,
-			writeMs: result.writeMs,
-			offloaded: true,
-		});
+		logPersistSuccess(
+			key,
+			pending,
+			{
+				rawBytes: result.rawBytes,
+				gzBytes: result.gzBytes,
+				serializeMs: result.serializeMs,
+				writeMs: result.writeMs,
+				offloaded: true,
+			},
+			{ started: true, completed: true },
+		);
 	} catch (err) {
 		fs.rm(result.stagePath, { force: true }, () => {});
 		writePendingOnMainThread(
 			key,
 			pending,
 			err instanceof Error ? err.message : String(err),
+			{
+				started: true,
+				completed: true,
+				fallbackReason: "promotion_failed",
+			},
 		);
 	}
 }
@@ -1337,12 +1598,32 @@ function handleCheckpointWorkerResult(
 }
 
 function handleWorkerDeath(reason: string): void {
+	_persistWorkerUnavailableReason = reason;
 	_persistWorker = undefined;
 	_workerDisabled = true;
 	const requests = [..._workerRequests.values()];
 	_workerRequests.clear();
 	for (const { key, pending } of requests) {
-		writePendingOnMainThread(key, pending, reason);
+		if (_persistGenerations.get(key) !== pending.generation) {
+			logReviewGraph({
+				cwd: key,
+				phase: "persist_skipped",
+				reason: "superseded",
+				observability: persistObservability(pending, {
+					status: "superseded",
+					supersededByGeneration: _persistGenerations.get(key),
+					reason: "worker_death_after_newer_generation",
+					workerStarted: true,
+					workerCompleted: false,
+				}),
+			});
+			continue;
+		}
+		writePendingOnMainThread(key, pending, reason, {
+			started: true,
+			completed: false,
+			fallbackReason: "worker_death",
+		});
 	}
 	// Best-effort checkpoints don't fall back (no retained DTO to pin heap); drop
 	// their in-flight requests and clean up any stage files they may have left.
@@ -1396,12 +1677,18 @@ function getPersistWorker(): Worker | undefined {
 		worker.on("error", (err: Error) => handleWorkerDeath(err.message));
 		worker.on("exit", (code) => {
 			if (_persistWorker !== worker) return;
-			if (code !== 0) {
-				handleWorkerDeath(`persist worker exited with code ${code}`);
+			const hasPendingRequests =
+				_workerRequests.size > 0 || _checkpointWorkerRequests.size > 0;
+			if (code !== 0 || hasPendingRequests) {
+				handleWorkerDeath(
+					code !== 0
+						? `persist worker exited with code ${code}`
+						: "persist worker exited with pending requests",
+				);
 			} else {
-				// Clean exit (unref'd worker at teardown, or host recycling):
-				// drop the stale reference so a later persist respawns instead
-				// of posting into a dead worker (#950 review F7).
+				// Clean exit with no pending work (unref'd worker at teardown, or host
+				// recycling): drop the stale reference so a later persist respawns
+				// instead of posting into a dead worker (#950 review F7).
 				_persistWorker = undefined;
 			}
 		});
@@ -1424,7 +1711,13 @@ function writePending(key: string): void {
 	}
 	const worker = getPersistWorker();
 	if (!worker) {
-		writePendingOnMainThread(key, pending, "persist worker unavailable");
+		const unavailableReason =
+			_persistWorkerUnavailableReason ?? "persist worker unavailable";
+		writePendingOnMainThread(key, pending, unavailableReason, {
+			started: false,
+			completed: false,
+			fallbackReason: unavailableReason,
+		});
 		return;
 	}
 	const id = ++_persistWorkerRequestId;
@@ -1449,22 +1742,32 @@ function writePending(key: string): void {
 // snapshot isn't lost. Sync writes only (no child spawn — see the teardown
 // libuv hazard); best-effort.
 let _persistExitHookInstalled = false;
+function flushPendingReviewGraphPersistsAtExit(): void {
+	const keys = new Set([
+		..._pendingPersist.keys(),
+		...[..._workerRequests.values()].map((request) => request.key),
+	]);
+	for (const key of keys) {
+		// Shared with the CLI's forced flush — same persistedData DTO, same
+		// atomic writer (#762), distinct failure label per source.
+		flushReviewGraphPersist(key, "exit_hook");
+	}
+	// The review-graph logger's shared process-exit flusher was registered
+	// before this hook. Flush again after emitting exit-hook outcomes so a
+	// successful forced write cannot leave its lifecycle event buffered.
+	flushReviewGraphLogSync();
+	void _persistWorker?.terminate();
+}
+
+/** Test-only seam for the exit-hook ordering/durability contract. */
+export function flushReviewGraphPersistsForExitForTests(): void {
+	flushPendingReviewGraphPersistsAtExit();
+}
+
 function ensurePersistExitHook(): void {
 	if (_persistExitHookInstalled) return;
 	_persistExitHookInstalled = true;
-	process.once("exit", () => {
-		const keys = new Set([
-			..._pendingPersist.keys(),
-			...[..._workerRequests.values()].map((request) => request.key),
-		]);
-		for (const key of keys) {
-			// Shared with the CLI's forced flush — same persistedData DTO, same
-			// atomic writer (#762), distinct failure label per source.
-			const result = flushReviewGraphPersist(key, "exit_hook");
-			if (!result.ok) flushReviewGraphLogSync();
-		}
-		void _persistWorker?.terminate();
-	});
+	process.once("exit", flushPendingReviewGraphPersistsAtExit);
 }
 
 // #950 review F3: a process that dies between a worker's staged write and its
@@ -1480,8 +1783,7 @@ function sweepStaleStageFiles(cacheDir: string): void {
 		if (err) return;
 		const ownMarker = `.stage-${process.pid}-`;
 		for (const entry of entries) {
-			const isStage =
-				entry.includes(".stage-") || /\.tmp-\d+$/.test(entry);
+			const isStage = entry.includes(".stage-") || /\.tmp-\d+$/.test(entry);
 			if (!isStage || entry.includes(ownMarker)) continue;
 			fs.rm(path.join(cacheDir, entry), { force: true }, () => {});
 		}
@@ -1494,15 +1796,41 @@ function persistGraph(
 	fileSignatures: Map<string, string>,
 	fileHashes: Map<string, string> | undefined,
 	graph: ReviewGraph,
-): void {
+	options: {
+		buildId?: number;
+		projectSeq?: number;
+		seqHint?: boolean;
+		mode?: ReviewGraphBuildMode;
+		sourceFileCount?: number;
+		sourceFilesTruncated?: boolean;
+		sourceFilePaths?: Iterable<string>;
+	} = {},
+): string | undefined {
 	const totalElementCount = graph.nodes.size + graph.edges.length;
 	const cap = graphPersistMaxElements();
+	const sourceFileCount = options.sourceFileCount ?? fileSignatures.size;
+	const sourceFilePaths = options.sourceFilePaths ?? fileSignatures.keys();
 	const persistedGraph =
 		totalElementCount > cap
-			? capGraphForPersist(cwd, graph, cap)
-			: { ...graph, persistCoverage: graphCoverage(graph, cap) };
-	const elementCount =
-		persistedGraph.nodes.size + persistedGraph.edges.length;
+			? capGraphForPersist(cwd, graph, cap, {
+					sourceFileCount,
+					sourceFilesTruncated: options.sourceFilesTruncated,
+					sourceFilePaths,
+				})
+			: {
+					...graph,
+					persistCoverage: graphCoverage(
+						graph,
+						cap,
+						sourceFileCount,
+						options.sourceFilesTruncated,
+						sourceFilePaths,
+					),
+				};
+	const elementCount = persistedGraph.nodes.size + persistedGraph.edges.length;
+	const sourceWalkPartial =
+		persistedGraph.persistCoverage?.sourceFilesTruncated === true;
+	let persistReason: string | undefined;
 	if (totalElementCount > cap) {
 		const coverage = persistedGraph.persistCoverage;
 		if (!coverage) return;
@@ -1518,19 +1846,12 @@ function persistGraph(
 				cap,
 			},
 		});
-		const reason =
+		persistReason =
 			`persisted partial review graph (${elementCount}/${totalElementCount} elements; ` +
 			`${coverage.persistedNodes}/${coverage.totalNodes} nodes, ` +
 			`${coverage.persistedEdges}/${coverage.totalEdges} edges; ${cap} cap)`;
-		recordBuildAttempt(cwd, "succeeded", reason);
-		logReviewGraph({
-			cwd,
-			phase: "persist_partial",
-			reason: "element_cap_exceeded",
-			elements: totalElementCount,
-			persistedElements: elementCount,
-			cap,
-		});
+	} else if (sourceWalkPartial) {
+		persistReason = "persisted partial review graph (source walk entry budget)";
 	}
 	const cacheDir = path.join(getProjectDataDir(cwd), "cache");
 	const cachePath = path.join(cacheDir, GRAPH_CACHE_FILENAME);
@@ -1544,9 +1865,32 @@ function persistGraph(
 	// arrays only after the quiet window. Replacing a pending entry during an edit
 	// burst now avoids both serialization and the pre-serialization full copies.
 	const key = normalizeMapKey(cwd);
-	const generation = (_persistGenerations.get(key) ?? 0) + 1;
+	const priorGeneration = _persistGenerations.get(key);
+	const existingPending = _pendingPersist.get(key);
+	const existingTimer = _persistTimers.get(key);
+	const generation = (priorGeneration ?? 0) + 1;
+	const attemptId = ++_persistAttemptId;
+	const coalesced = Boolean(existingPending || existingTimer);
 	_persistGenerations.set(key, generation);
-	_pendingPersist.set(key, {
+	const graphMetadata = graphLogMetadata(persistedGraph, {
+		...options,
+		sourceFileCount,
+		sourceFileCountTruncated:
+			persistedGraph.persistCoverage?.sourceFilesTruncated === true,
+	});
+	const persistenceMetadata: ReviewGraphPersistenceMetadata = {
+		generation,
+		attemptId,
+		status: "scheduled",
+		...(priorGeneration === undefined
+			? {}
+			: {
+					supersededGeneration: priorGeneration,
+					coalesced,
+					reason: coalesced ? "debounced_coalescing" : "in_flight_supersession",
+				}),
+	};
+	const pending: PendingPersist = {
 		cacheDir,
 		cachePath,
 		signature,
@@ -1556,12 +1900,51 @@ function persistGraph(
 		gitStamp,
 		elementCount,
 		generation,
-	});
+		attemptId,
+		graphMetadata,
+		persistenceMetadata,
+	};
+	if (existingPending) {
+		logReviewGraph({
+			cwd: key,
+			phase: "persist_skipped",
+			reason: "superseded",
+			observability: persistObservability(existingPending, {
+				status: "superseded",
+				supersededByGeneration: generation,
+				reason: "newer_generation_scheduled",
+				workerStarted: false,
+				workerCompleted: false,
+			}),
+		});
+	}
+	_pendingPersist.set(key, pending);
+	if (totalElementCount > cap || sourceWalkPartial) {
+		logReviewGraph({
+			cwd,
+			phase: "persist_partial",
+			reason:
+				totalElementCount > cap
+					? "element_cap_exceeded"
+					: "source_walk_entry_budget",
+			elements: totalElementCount,
+			persistedElements: elementCount,
+			cap,
+			observability: {
+				graph: graphMetadata,
+				persistence: persistenceMetadata,
+			},
+		});
+	}
 	logReviewGraph({
 		cwd,
 		phase: "persist_scheduled",
 		elements: elementCount,
 		cap,
+		observability: {
+			graph: graphMetadata,
+			persistence: persistenceMetadata,
+		},
 	});
 	ensurePersistExitHook();
 
@@ -1570,12 +1953,13 @@ function persistGraph(
 	if (existing) clearTimeout(existing);
 	if (debounce === 0) {
 		writePending(key);
-		return;
+		return persistReason;
 	}
 	const timer = setTimeout(() => writePending(key), debounce);
 	// Don't keep the event loop alive solely for a cache write.
 	if (typeof timer.unref === "function") timer.unref();
 	_persistTimers.set(key, timer);
+	return persistReason;
 }
 
 // --- Cross-session resumable full build (checkpointing, #936 limit 2) ---
@@ -1885,9 +2269,17 @@ function loadReviewGraphCheckpoint(
 			totalEdges,
 			persistedNodes: totalNodes,
 			persistedEdges: totalEdges,
+			totalFiles: data.targetFileCount,
+			persistedFiles: 0,
 		},
 	};
 	rebuildIndexes(graph);
+	if (graph.persistCoverage) {
+		graph.persistCoverage.persistedFiles = countRetainedSourceFiles(
+			graph,
+			data.processedFiles.map(([filePath]) => filePath),
+		);
+	}
 	return {
 		graph,
 		processedHashes: new Map(data.processedFiles),
@@ -2019,15 +2411,13 @@ async function tryResumeFromCheckpoint(
 /** Test-only: inspect the on-disk resume checkpoint for `cwd` (raw payload),
  * or null when none is present. Lets tests assert the honesty marker and the
  * recorded processed-file set without exporting the whole checkpoint machinery. */
-export function _readReviewGraphCheckpointForTests(cwd: string):
-	| {
-			inProgress: boolean;
-			processedFiles: string[];
-			nodeCount: number;
-			edgeCount: number;
-			persistCoverage: ReviewGraphPersistCoverage | undefined;
-	  }
-	| null {
+export function _readReviewGraphCheckpointForTests(cwd: string): {
+	inProgress: boolean;
+	processedFiles: string[];
+	nodeCount: number;
+	edgeCount: number;
+	persistCoverage: ReviewGraphPersistCoverage | undefined;
+} | null {
 	const loaded = loadReviewGraphCheckpoint(cwd);
 	if (!loaded) return null;
 	return {
@@ -2074,6 +2464,8 @@ export async function terminateReviewGraphPersistWorkerForTests(): Promise<void>
 /** Test-only: restore worker creation after a deliberate death. */
 export function resetReviewGraphPersistWorkerForTests(): void {
 	_workerDisabled = false;
+	_persistWorker = undefined;
+	_persistWorkerUnavailableReason = undefined;
 	_lastWorkerFallbackReasonForTests = undefined;
 	_checkpointWorkerRequests.clear();
 	_checkpointGenerations.clear();
@@ -2125,15 +2517,37 @@ export function flushReviewGraphPersist(
 	// the flush. Removed requests' late results hit the no-request branch in
 	// handleWorkerResult, which deletes their stage files.
 	let pending = _pendingPersist.get(key);
+	const removedWorkerRequests: PendingPersist[] = [];
+	let selectedWorkerRequest: PendingPersist | undefined;
 	for (const [id, request] of [..._workerRequests]) {
 		if (request.key !== key) continue;
 		_workerRequests.delete(id);
+		removedWorkerRequests.push(request.pending);
 		if (!pending || request.pending.generation > pending.generation) {
 			pending = request.pending;
+			selectedWorkerRequest = request.pending;
 		}
 	}
+	for (const removed of removedWorkerRequests) {
+		if (!pending || removed.generation === pending.generation) continue;
+		logReviewGraph({
+			cwd: key,
+			phase: "persist_skipped",
+			reason: "superseded",
+			observability: persistObservability(removed, {
+				status: "superseded",
+				supersededByGeneration: pending.generation,
+				reason: "forced_flush_newest_generation",
+				workerStarted: true,
+				workerCompleted: false,
+			}),
+		});
+	}
 	if (!pending) {
-		return { ok: false, reason: "no graph snapshot was queued for persistence" };
+		return {
+			ok: false,
+			reason: "no graph snapshot was queued for persistence",
+		};
 	}
 	// Invalidate every staged worker completion before doing the forced write.
 	// Workers never promote their own stage file, so a late result can only be
@@ -2186,6 +2600,12 @@ export function flushReviewGraphPersist(
 			serializeMs,
 			writeMs,
 			offloaded: false,
+			observability: persistObservability(pending, {
+				status: "succeeded",
+				reason: source === "exit_hook" ? "exit_flush" : "forced_flush",
+				workerStarted: selectedWorkerRequest !== undefined,
+				workerCompleted: false,
+			}),
 		});
 		return {
 			ok: true,
@@ -2200,6 +2620,14 @@ export function flushReviewGraphPersist(
 			cwd,
 			source === "exit_hook" ? "exit_flush_failed" : "forced_flush_failed",
 			reason,
+			pending,
+			selectedWorkerRequest
+				? {
+						started: true,
+						completed: false,
+						fallbackReason: "forced_flush_write_failed",
+					}
+				: undefined,
 		);
 		return { ok: false, reason };
 	}
@@ -2303,7 +2731,7 @@ async function ensureReviewGraphFacts(
 		// populated before the graph reads them.
 		await importFactProvider.run(ctx, facts);
 		await functionFactProvider.run(ctx, facts);
-	// pi-lens-ignore: missing-error-propagation
+		// pi-lens-ignore: missing-error-propagation
 	} catch (err) {
 		console.error(
 			`[pi-lens] review-graph structural facts disabled (degraded mode): ${
@@ -2344,7 +2772,12 @@ function addJsTsFile(
 		) ?? [];
 
 	for (const entry of imports) {
-		const localFile = localImportToFile(cwd, normalized, entry.source, ignoredIds);
+		const localFile = localImportToFile(
+			cwd,
+			normalized,
+			entry.source,
+			ignoredIds,
+		);
 		if (localFile) {
 			const targetId = `file:${localFile}`;
 			if (!graph.nodes.has(targetId)) {
@@ -2378,7 +2811,12 @@ function addJsTsFile(
 	// hint — third-party/stdlib imports have no graph file to narrow to.
 	const importedNameToFile = new Map<string, string>();
 	for (const entry of imports) {
-		const localFile = localImportToFile(cwd, normalized, entry.source, ignoredIds);
+		const localFile = localImportToFile(
+			cwd,
+			normalized,
+			entry.source,
+			ignoredIds,
+		);
 		if (!localFile) continue;
 		for (const name of entry.names) importedNameToFile.set(name, localFile);
 		if (entry.defaultName) importedNameToFile.set(entry.defaultName, localFile);
@@ -2469,7 +2907,10 @@ function addJsTsFile(
 						language: "jsts",
 						symbolName: site.method,
 						qualifiedName: `${receiverClass}.${site.method}`,
-						metadata: { unresolvedName: callText, ambiguousCandidates: candidates.length },
+						metadata: {
+							unresolvedName: callText,
+							ambiguousCandidates: candidates.length,
+						},
 					});
 				}
 				addEdge(graph, {
@@ -2547,26 +2988,42 @@ function mapKindToTreeSitterLanguage(
 	filePath?: string,
 ): string | undefined {
 	switch (kind) {
-		case "python": return "python";
-		case "go": return "go";
-		case "rust": return "rust";
-		case "ruby": return "ruby";
+		case "python":
+			return "python";
+		case "go":
+			return "go";
+		case "rust":
+			return "rust";
+		case "ruby":
+			return "ruby";
 		case "cxx": {
 			const ext = filePath ? path.extname(filePath).toLowerCase() : "";
 			return ext === ".c" || ext === ".h" ? "c" : "cpp";
 		}
-		case "java": return "java";
-		case "kotlin": return "kotlin";
-		case "dart": return "dart";
-		case "elixir": return "elixir";
-		case "csharp": return "csharp";
-		case "php": return "php";
-		case "swift": return "swift";
-		case "lua": return "lua";
-		case "ocaml": return "ocaml";
-		case "zig": return "zig";
-		case "shell": return "bash";
-		default: return undefined;
+		case "java":
+			return "java";
+		case "kotlin":
+			return "kotlin";
+		case "dart":
+			return "dart";
+		case "elixir":
+			return "elixir";
+		case "csharp":
+			return "csharp";
+		case "php":
+			return "php";
+		case "swift":
+			return "swift";
+		case "lua":
+			return "lua";
+		case "ocaml":
+			return "ocaml";
+		case "zig":
+			return "zig";
+		case "shell":
+			return "bash";
+		default:
+			return undefined;
 	}
 }
 
@@ -2642,7 +3099,8 @@ export async function captureReviewGraphStructuralIr(
 			complete: true,
 			structural: {
 				kind: "jsts",
-				imports: facts.getFileFact<ImportEntry[]>(filePath, "file.imports") ?? [],
+				imports:
+					facts.getFileFact<ImportEntry[]>(filePath, "file.imports") ?? [],
 				reexports:
 					facts.getFileFact<ReExportEntry[]>(filePath, "file.reexports") ?? [],
 				functionSummaries:
@@ -2901,13 +3359,9 @@ export function addLspFallbackSymbols(
 			// results qualify through the full containerName chain, not just
 			// the immediate owner.
 			const owners =
-				ancestry.length > 0
-					? ancestry
-					: containerNameChain(symbol, symbols);
+				ancestry.length > 0 ? ancestry : containerNameChain(symbol, symbols);
 			const qualifiedName =
-				owners.length > 0
-					? [...owners, symbol.name].join(".")
-					: undefined;
+				owners.length > 0 ? [...owners, symbol.name].join(".") : undefined;
 			addNode(graph, {
 				id: symbolId,
 				kind: "symbol",
@@ -3127,8 +3581,7 @@ async function addFileToGraph(
 	const languageId = mapKindToTreeSitterLanguage(kind, file);
 	if (!languageId) return;
 	const irExtracted =
-		sharedIr?.kind === "tree-sitter" &&
-		sharedIr.languageId === languageId
+		sharedIr?.kind === "tree-sitter" && sharedIr.languageId === languageId
 			? sharedIr.extracted
 			: undefined;
 	const extracted =
@@ -3257,10 +3710,7 @@ async function updateGraphFiles(
 	}));
 }
 
-function resolveDeferredSymbolEdges(
-	graph: ReviewGraph,
-	rebuild = true,
-): void {
+function resolveDeferredSymbolEdges(graph: ReviewGraph, rebuild = true): void {
 	const symbolNameToIds = new Map<string, string[]>();
 	for (const node of graph.nodes.values()) {
 		if (node.kind !== "symbol" || !node.symbolName) continue;
@@ -3313,6 +3763,9 @@ interface CachedGraphEntry {
 
 interface IncrementalCtx {
 	cwd: string;
+	buildId?: number;
+	seqHint?: boolean;
+	mode?: ReviewGraphBuildMode;
 	normalizedCwd: string;
 	normalizedChanged: string[];
 	fileSignatures: Map<string, string>;
@@ -3404,7 +3857,11 @@ async function tryIncrementalFromCache(
 			...verifiedCacheFields(ctx.seqAtBuildStart),
 		});
 		// #260: pure drift leaves the graph unchanged — don't rewrite the disk blob.
-		_lastGraphBuildInfo = { reused: true, mode: "cached", graphChanged: false };
+		setGraphBuildInfo(graph, {
+			reused: true,
+			mode: "cached",
+			graphChanged: false,
+		});
 		graph.buildGeneration = generation;
 		ctx.facts.setSessionFact("session.reviewGraph", graph);
 		return graph;
@@ -3426,6 +3883,7 @@ async function tryIncrementalFromCache(
 		ctx.facts,
 		ctx.ignoredIds,
 	);
+	refreshGraphBuiltAt(graph);
 	// #459: real re-extract ⇒ new generation.
 	const generation = ++_graphGenerationCounter;
 	graph.buildGeneration = generation;
@@ -3437,14 +3895,25 @@ async function tryIncrementalFromCache(
 		buildGeneration: generation,
 		...verifiedCacheFields(ctx.seqAtBuildStart),
 	});
-	persistGraph(
+	const persistReason = persistGraph(
 		ctx.cwd,
 		ctx.signature,
 		ctx.fileSignatures,
 		hashes,
 		graph,
+		{
+			buildId: ctx.buildId,
+			projectSeq: ctx.seqAtBuildStart,
+			seqHint: ctx.seqHint,
+			mode: ctx.mode,
+		},
 	);
-	_lastGraphBuildInfo = { reused: true, mode: "incremental", graphChanged: true };
+	setGraphBuildInfo(graph, {
+		reused: true,
+		mode: "incremental",
+		...(persistReason ? { persistReason } : {}),
+		graphChanged: true,
+	});
 	_graphImportChanges.set(graph, {
 		fromGeneration: priorGeneration,
 		changes: importChanges,
@@ -3472,6 +3941,7 @@ type SeqFastpathResult =
  */
 async function trySeqFastpath(
 	cwd: string,
+	buildId: number | undefined,
 	normalizedCwd: string,
 	normalizedChanged: string[],
 	facts: FactStore,
@@ -3480,7 +3950,12 @@ async function trySeqFastpath(
 	ignoredIds?: ReadonlySet<string>,
 ): Promise<SeqFastpathResult> {
 	const cached = _workspaceGraphCache.get(normalizedCwd);
-	// Condition 2: need an in-process entry that recorded a build seq.
+	// Condition 2: need an in-process complete entry that recorded a build seq.
+	// A capped or entry-budget-truncated graph is read-only orientation data, not
+	// a safe incremental base; force the next build through a complete walk.
+	if (cached?.graph.persistCoverage?.partial) {
+		return { fallback: "partial-base" };
+	}
 	if (!cached || cached.builtAtProjectSeq === undefined) {
 		return { fallback: "no-seq" };
 	}
@@ -3493,7 +3968,10 @@ async function trySeqFastpath(
 			? Number.POSITIVE_INFINITY
 			: now - cached.lastFullVerifyMs;
 	const sinceVerify = cached.fastPathSinceVerify ?? 0;
-	if (ageMs > SEQ_FASTPATH_REVERIFY_MS || sinceVerify >= SEQ_FASTPATH_REVERIFY_EVERY) {
+	if (
+		ageMs > SEQ_FASTPATH_REVERIFY_MS ||
+		sinceVerify >= SEQ_FASTPATH_REVERIFY_EVERY
+	) {
 		return { fallback: "verify-due" };
 	}
 
@@ -3514,7 +3992,7 @@ async function trySeqFastpath(
 	// (a genuine new file — updateGraphFiles' remove-then-add handles the add). A
 	// changed file that no longer exists on disk is a DELETION: incremental has no
 	// node-removal here, so fall back to the sweep (simple + correct).
-	const filesToUpdate: string[] = [];
+	const candidateFiles: string[] = [];
 	for (const file of changed) {
 		const known = cached.fileSignatures.has(file);
 		let existsOnDisk = false;
@@ -3537,10 +4015,17 @@ async function trySeqFastpath(
 			// non-source sibling (config, doc) is simply not graph material.
 			if (!hasGraphKindExtension(file)) continue;
 		}
-		filesToUpdate.push(file);
+		candidateFiles.push(file);
 	}
 
-	if (filesToUpdate.length === 0) {
+	// A pi-observed write can advance projectSeq without changing bytes (format
+	// no-op, save, or an idempotent edit). Confirm content before re-extracting so
+	// the seq fast path does not refresh builtAt or claim graphChanged for drift.
+	const { trulyChanged, hashes } = await confirmContentChanged(
+		candidateFiles,
+		cached.fileHashes,
+	);
+	if (trulyChanged.length === 0) {
 		// Nothing graph-relevant actually changed. Reuse the cached graph as-is,
 		// refresh changed-symbol annotations, bump the fast-path counter.
 		const graph = cloneGraph(cached.graph);
@@ -3551,19 +4036,31 @@ async function trySeqFastpath(
 		}
 		// Stamp the seq captured at BUILD START — a bump that raced in during this
 		// build has seq > stamp and is re-diffed next build, never missed.
+		const nextSignatures = new Map(cached.fileSignatures);
+		for (const file of candidateFiles) {
+			nextSignatures.set(file, sourceSignatureEntry(file));
+		}
+		cached.signature = sourceSignatureFromMap(nextSignatures);
+		cached.fileSignatures = nextSignatures;
+		cached.fileHashes = hashes;
 		cached.builtAtProjectSeq = seqAtBuildStart;
 		cached.fastPathSinceVerify = sinceVerify + 1;
 		// #459: nothing graph-relevant changed — this is a genuine no-op reuse.
 		const generation = (cached.buildGeneration ??= ++_graphGenerationCounter);
-		_lastGraphBuildInfo = { reused: true, mode: "seq-fastpath", graphChanged: false };
+		setGraphBuildInfo(graph, {
+			reused: true,
+			mode: "seq-fastpath",
+			graphChanged: false,
+		});
 		graph.buildGeneration = generation;
 		facts.setSessionFact("session.reviewGraph", graph);
 		return { graph };
 	}
 
-	// Incremental re-extract over exactly the changed files. Reuses the SAME
-	// machinery as the signature-diff incremental path (updateGraphFiles), so
+	// Incremental re-extract over exactly the content-changed files. Reuses the
+	// SAME machinery as the signature-diff incremental path (updateGraphFiles), so
 	// there's no second incremental implementation.
+	const filesToUpdate = trulyChanged;
 	const priorGeneration = cached.graph.buildGeneration;
 	const graph = cloneGraph(cached.graph);
 	let importChanges: GraphFileImportChange[];
@@ -3578,15 +4075,14 @@ async function trySeqFastpath(
 	} catch {
 		return { fallback: "stat-error" };
 	}
+	refreshGraphBuiltAt(graph);
 
 	// Update fileSignatures/fileHashes for ONLY the touched files (stat/hash just
 	// those — the whole point of the fast path). Recompute the aggregate signature
 	// the same way the incremental branch does (sourceSignatureFromMap).
 	const nextSignatures = new Map(cached.fileSignatures);
-	const nextHashes = new Map(cached.fileHashes ?? new Map<string, string>());
-	for (const file of filesToUpdate) {
+	for (const file of candidateFiles) {
 		nextSignatures.set(file, sourceSignatureEntry(file));
-		nextHashes.set(file, contentHashEntry(file));
 	}
 	const nextSignature = sourceSignatureFromMap(nextSignatures);
 
@@ -3596,7 +4092,7 @@ async function trySeqFastpath(
 	_workspaceGraphCache.set(normalizedCwd, {
 		signature: nextSignature,
 		fileSignatures: nextSignatures,
-		fileHashes: nextHashes,
+		fileHashes: hashes,
 		graph,
 		buildGeneration: generation,
 		// Build-start seq, not stamp-time: see verifiedCacheFields — a bump that
@@ -3605,10 +4101,27 @@ async function trySeqFastpath(
 		lastFullVerifyMs: cached.lastFullVerifyMs,
 		fastPathSinceVerify: sinceVerify + 1,
 	});
-	persistGraph(cwd, nextSignature, nextSignatures, nextHashes, graph);
+	const persistReason = persistGraph(
+		cwd,
+		nextSignature,
+		nextSignatures,
+		hashes,
+		graph,
+		{
+			buildId,
+			projectSeq: seqAtBuildStart,
+			seqHint: true,
+			mode: "seq-fastpath",
+		},
+	);
 	// #459: filesToUpdate was non-empty — this fastpath re-extracted real files,
 	// so (unlike the no-op branch above) the graph object did change.
-	_lastGraphBuildInfo = { reused: true, mode: "seq-fastpath", graphChanged: true };
+	setGraphBuildInfo(graph, {
+		reused: true,
+		mode: "seq-fastpath",
+		...(persistReason ? { persistReason } : {}),
+		graphChanged: true,
+	});
 	_graphImportChanges.set(graph, {
 		fromGeneration: priorGeneration,
 		changes: importChanges,
@@ -3622,6 +4135,7 @@ async function _doBuildGraph(
 	changedFiles: string[],
 	facts: FactStore,
 	seqHint?: GraphSeqHint,
+	buildId?: number,
 ): Promise<ReviewGraph> {
 	const normalizedCwd = normalizeMapKey(cwd);
 	const normalizedChanged = changedFiles.map((file) => normalizeMapKey(file));
@@ -3653,14 +4167,14 @@ async function _doBuildGraph(
 		for (const file of normalizedChanged) {
 			upsertChangedSymbols(graph, facts, file);
 		}
-		_lastGraphBuildInfo = {
+		setGraphBuildInfo(graph, {
 			reused: false,
 			mode: "skipped",
 			skipReason: "unsafe_root",
 			// #459: never persisted/reused, same as the too_many_files skip below —
 			// treat as changed so dependents never trust stale derived state.
 			graphChanged: true,
-		};
+		});
 		facts.setSessionFact("session.reviewGraph", graph);
 		return graph;
 	}
@@ -3685,6 +4199,7 @@ async function _doBuildGraph(
 	if (seqHint && seqAtBuildStart !== undefined && seqFastpathEnabled()) {
 		const fast = await trySeqFastpath(
 			cwd,
+			buildId,
 			normalizedCwd,
 			normalizedChanged,
 			facts,
@@ -3696,9 +4211,12 @@ async function _doBuildGraph(
 		seqFastpathFallback = fast.fallback;
 	}
 
-	const filesToBuild = await getGraphSourceFiles(cwd);
+	const sourceCollection = await getGraphSourceFiles(cwd);
+	const filesToBuild = sourceCollection.files;
+	const sourceFileCount = sourceCollection.sourceFileCount;
+	const sourceFilesTruncated = sourceCollection.entryBudgetExceeded;
 	const ignoredIds = await ignoredIdsPromise;
-	const maxGraphFiles = getReviewGraphMaxFiles(cwd);
+	const maxGraphFiles = sourceCollection.maxFileCount;
 	if (filesToBuild.length > maxGraphFiles) {
 		const graph = createEmptyGraph();
 		graph.version = REVIEW_GRAPH_VERSION;
@@ -3710,7 +4228,7 @@ async function _doBuildGraph(
 		// any graph cached/persisted from before the repo crossed the cap, and so
 		// project_report can render an honest "disabled at N files" hint instead
 		// of "retry shortly" — see getReviewGraphSizeSkipVerdict.
-		recordReviewGraphSizeSkip(cwd, filesToBuild.length, maxGraphFiles);
+		recordReviewGraphSizeSkip(cwd, sourceFileCount, maxGraphFiles);
 		// #775 R3: `_lastGraphBuildInfo`/the size-skip verdict above are only
 		// SURFACED by callers that happen to read them (dispatch/integration.ts's
 		// cascade path logs a `graph_build` phase; lens-map.ts, project-report.ts,
@@ -3725,15 +4243,17 @@ async function _doBuildGraph(
 			durationMs: 0,
 			metadata: {
 				cwd,
-				sourceFileCount: filesToBuild.length,
+				sourceFileCount,
 				maxFileCount: maxGraphFiles,
 			},
 		});
-		_lastGraphBuildInfo = {
+		setGraphBuildInfo(graph, {
 			reused: false,
 			mode: "skipped",
 			skipReason: "too_many_files",
-			sourceFileCount: filesToBuild.length,
+			sourceFileCount,
+			sourceFileCountTruncated:
+				sourceFilesTruncated || filesToBuild.length > maxGraphFiles,
 			maxFileCount: maxGraphFiles,
 			seqFastpathFallback,
 			// #459: a fresh empty graph is returned every call on this path (never
@@ -3741,7 +4261,7 @@ async function _doBuildGraph(
 			// derived state across skip/unskip transitions. Deliberately NOT stamped
 			// with a buildGeneration: absent ⇒ derived caches rebuild every time.
 			graphChanged: true,
-		};
+		});
 		facts.setSessionFact("session.reviewGraph", graph);
 		return graph;
 	}
@@ -3749,12 +4269,14 @@ async function _doBuildGraph(
 	// previously recorded size-skip verdict immediately (rather than waiting
 	// out the TTL) so a shrink or a raised cap re-enables reads the moment a
 	// build actually succeeds.
-	clearReviewGraphSizeSkip(cwd);
+	if (!sourceFilesTruncated) clearReviewGraphSizeSkip(cwd);
 	const fileSignatures = await sourceSignatureMapAsync(filesToBuild);
 	const signature = sourceSignatureFromMap(fileSignatures);
 
 	// Tier 1: in-memory cache (hot path — same process, already built this session)
-	let memCached = _workspaceGraphCache.get(normalizedCwd);
+	let memCached = sourceFilesTruncated
+		? undefined
+		: _workspaceGraphCache.get(normalizedCwd);
 	// A partial graph (hydrated from a capped snapshot for read-only orientation
 	// via getCachedReviewGraph) can share this cache. It MUST NOT seed a build:
 	// serving it silently drops the capped-away nodes/edges, and extending then
@@ -3774,13 +4296,14 @@ async function _doBuildGraph(
 		// later fast path diffs from here and the periodic re-verify resets.
 		Object.assign(memCached, verifiedCacheFields(seqAtBuildStart));
 		// #459: content unchanged ⇒ carry the entry's generation forward.
-		const generation = (memCached.buildGeneration ??= ++_graphGenerationCounter);
-		_lastGraphBuildInfo = {
+		const generation = (memCached.buildGeneration ??=
+			++_graphGenerationCounter);
+		setGraphBuildInfo(graph, {
 			reused: true,
 			mode: "cached",
 			seqFastpathFallback,
 			graphChanged: false,
-		};
+		});
 		graph.buildGeneration = generation;
 		facts.setSessionFact("session.reviewGraph", graph);
 		return graph;
@@ -3788,6 +4311,9 @@ async function _doBuildGraph(
 	if (memCached) {
 		const incremental = await tryIncrementalFromCache(memCached, {
 			cwd,
+			buildId,
+			seqHint: seqHint !== undefined,
+			mode: "incremental",
 			normalizedCwd,
 			normalizedChanged,
 			fileSignatures,
@@ -3797,7 +4323,7 @@ async function _doBuildGraph(
 			ignoredIds,
 		});
 		if (incremental) {
-			_lastGraphBuildInfo.seqFastpathFallback = seqFastpathFallback;
+			updateGraphBuildInfo(incremental, { seqFastpathFallback });
 			return incremental;
 		}
 	}
@@ -3807,7 +4333,7 @@ async function _doBuildGraph(
 	// #202 content-hash confirm below already content-verify the load, and
 	// dropping on every HEAD move would force a full whole-repo rebuild after
 	// each plain `git commit` (HEAD moves, files unchanged).
-	const diskCached = loadPersistedGraph(cwd);
+	const diskCached = sourceFilesTruncated ? null : loadPersistedGraph(cwd);
 	if (diskCached?.signature === signature) {
 		const graph = cloneGraph(diskCached.graph);
 		rebuildIndexes(graph);
@@ -3827,12 +4353,12 @@ async function _doBuildGraph(
 			buildGeneration: generation,
 			...verifiedCacheFields(seqAtBuildStart),
 		});
-		_lastGraphBuildInfo = {
+		setGraphBuildInfo(graph, {
 			reused: true,
 			mode: "cached",
 			seqFastpathFallback,
 			graphChanged: false,
-		};
+		});
 		graph.buildGeneration = generation;
 		facts.setSessionFact("session.reviewGraph", graph);
 		return graph;
@@ -3851,6 +4377,9 @@ async function _doBuildGraph(
 			},
 			{
 				cwd,
+				buildId,
+				seqHint: seqHint !== undefined,
+				mode: "incremental",
 				normalizedCwd,
 				normalizedChanged,
 				fileSignatures,
@@ -3861,14 +4390,16 @@ async function _doBuildGraph(
 			},
 		);
 		if (incremental) {
-			_lastGraphBuildInfo.seqFastpathFallback = seqFastpathFallback;
+			updateGraphBuildInfo(incremental, { seqFastpathFallback });
 			return incremental;
 		}
 	}
 
 	// Tier 3: full build — resumed from a prior session's checkpoint when one is
 	// present and still current (#936 limit 2), else cold from an empty graph.
-	const resumed = await tryResumeFromCheckpoint(cwd, filesToBuild, ignoredIds);
+	const resumed = sourceFilesTruncated
+		? null
+		: await tryResumeFromCheckpoint(cwd, filesToBuild, ignoredIds);
 	const graph = resumed?.graph ?? createEmptyGraph();
 	const filesToExtract = resumed?.remaining ?? filesToBuild;
 	const treeSitterClient = getSharedTreeSitterClient();
@@ -3893,10 +4424,7 @@ async function _doBuildGraph(
 			try {
 				const bytes = fs.readFileSync(file);
 				content = bytes.toString("utf-8");
-				fileHashes.set(
-					file,
-					createHash("sha256").update(bytes).digest("hex"),
-				);
+				fileHashes.set(file, createHash("sha256").update(bytes).digest("hex"));
 			} catch {
 				content = null;
 				fileHashes.set(file, "missing");
@@ -3964,15 +4492,18 @@ async function _doBuildGraph(
 		}
 	};
 	if (treeSitterClient) {
-		await treeSitterClient.withParseCacheMeasurement(extractAndDrainIr, (stats) => {
-			logTreeSitterCacheStats({
-				scope: "review_graph_full",
-				filePath: cwd,
-				fileCount: filesToBuild.length,
-				durationMs: Date.now() - extractionStartedAt,
-				stats,
-			});
-		});
+		await treeSitterClient.withParseCacheMeasurement(
+			extractAndDrainIr,
+			(stats) => {
+				logTreeSitterCacheStats({
+					scope: "review_graph_full",
+					filePath: cwd,
+					fileCount: filesToBuild.length,
+					durationMs: Date.now() - extractionStartedAt,
+					stats,
+				});
+			},
+		);
 	} else {
 		await extractAndDrainIr();
 	}
@@ -3995,13 +4526,25 @@ async function _doBuildGraph(
 	// in-progress/partial marker a resumed seed carried so the finished graph is
 	// never mistaken for (or persisted as) a partial one, and retire the
 	// checkpoint now that an authoritative snapshot supersedes it.
-	graph.persistCoverage = undefined;
+	graph.persistCoverage = sourceFilesTruncated
+		? graphCoverage(
+				graph,
+				graphPersistMaxElements(),
+				sourceFileCount,
+				true,
+				filesToBuild,
+			)
+		: undefined;
 	deleteReviewGraphCheckpoint(cwd);
 	// #202: the full-build pass hashes the same bytes it supplies to extraction,
 	// so change detection does not reread every file after the graph is built.
 	// #459: full rebuild ⇒ new generation.
 	const generation = ++_graphGenerationCounter;
 	const graphSnapshot = cloneGraph(graph);
+	rebuildIndexes(graphSnapshot);
+	// Keep the content generation on the persisted snapshot instance too, so
+	// scheduled persistence logs join the same graph identity as build success.
+	graphSnapshot.buildGeneration = generation;
 	_workspaceGraphCache.set(normalizedCwd, {
 		signature,
 		fileSignatures: new Map(fileSignatures),
@@ -4010,13 +4553,30 @@ async function _doBuildGraph(
 		buildGeneration: generation,
 		...verifiedCacheFields(seqAtBuildStart),
 	});
-	persistGraph(cwd, signature, fileSignatures, fileHashes, graphSnapshot); // fire-and-forget
-	_lastGraphBuildInfo = {
+	const persistReason = persistGraph(
+		cwd,
+		signature,
+		fileSignatures,
+		fileHashes,
+		graphSnapshot,
+		{
+			buildId,
+			projectSeq: seqAtBuildStart,
+			seqHint: seqHint !== undefined,
+			mode: "full",
+			sourceFileCount,
+			sourceFilesTruncated,
+		},
+	); // fire-and-forget
+	setGraphBuildInfo(graph, {
 		reused: false,
 		mode: "full",
+		sourceFileCount,
+		sourceFileCountTruncated: sourceFilesTruncated,
 		seqFastpathFallback,
+		...(persistReason ? { persistReason } : {}),
 		graphChanged: true,
-	};
+	});
 	graph.buildGeneration = generation;
 	facts.setSessionFact("session.reviewGraph", graph);
 	return graph;
@@ -4033,33 +4593,66 @@ export function buildOrUpdateGraph(
 	if (cached) return cached;
 
 	const startedAt = Date.now();
-	recordBuildAttempt(cwd, "running");
-	logReviewGraph({ cwd, phase: "build_started" });
-	const promise = _doBuildGraph(cwd, changedFiles, facts, seqHint)
+	const buildId = ++_buildIdCounter;
+	recordBuildAttempt(cwd, "running", undefined, buildId);
+	const startedProjectSeq = seqHint?.projectSeq();
+	logReviewGraph({
+		cwd,
+		phase: "build_started",
+		observability: {
+			graph: {
+				buildId,
+				...(startedProjectSeq === undefined
+					? {}
+					: { projectSeq: startedProjectSeq }),
+				...(seqHint === undefined ? {} : { seqHint: true }),
+				nodes: 0,
+				edges: 0,
+			},
+		},
+	});
+	const promise = _doBuildGraph(cwd, changedFiles, facts, seqHint, buildId)
 		.then((graph) => {
-			const sizeSkip = getReviewGraphSizeSkipVerdict(cwd);
-			const unsafeRoot = isAtOrAboveHomeDir(path.resolve(cwd));
-			if (sizeSkip || unsafeRoot) {
-				const reason = sizeSkip
-					? `source file cap exceeded (${sizeSkip.sourceFileCount} > ${sizeSkip.maxFileCount})`
-					: "unsafe_root";
-				recordBuildAttempt(cwd, "skipped", reason);
+			const buildInfo = getGraphBuildInfoForGraph(graph);
+			if (buildInfo.mode === "skipped") {
+				const reason = buildInfo.skipReason ?? "skipped";
+				recordBuildAttempt(cwd, "skipped", reason, buildId);
 				logReviewGraph({
 					cwd,
 					phase: "build_skipped",
 					reason,
 					durationMs: Date.now() - startedAt,
+					observability: {
+						graph: graphLogMetadata(graph, {
+							buildId,
+							projectSeq: startedProjectSeq,
+							seqHint: seqHint !== undefined,
+							mode: buildInfo.mode,
+							sourceFileCount: buildInfo.sourceFileCount,
+							sourceFileCountTruncated: buildInfo.sourceFileCountTruncated,
+						}),
+					},
 				});
 			} else {
-				const prior = getLastReviewGraphBuildAttempt(cwd);
-				recordBuildAttempt(cwd, "succeeded", prior?.reason);
+				const reason = buildInfo.persistReason;
+				recordBuildAttempt(cwd, "succeeded", reason, buildId);
 				logReviewGraph({
 					cwd,
 					phase: "build_succeeded",
 					durationMs: Date.now() - startedAt,
 					nodes: graph.nodes.size,
 					edges: graph.edges.length,
-					...(prior?.reason ? { reason: prior.reason } : {}),
+					...(reason ? { reason } : {}),
+					observability: {
+						graph: graphLogMetadata(graph, {
+							buildId,
+							projectSeq: startedProjectSeq,
+							seqHint: seqHint !== undefined,
+							mode: buildInfo.mode,
+							sourceFileCount: buildInfo.sourceFileCount,
+							sourceFileCountTruncated: buildInfo.sourceFileCountTruncated,
+						}),
+					},
 				});
 			}
 			return graph;
@@ -4067,13 +4660,21 @@ export function buildOrUpdateGraph(
 		.catch((err) => {
 			_buildCache.delete(cacheKey);
 			const reason = err instanceof Error ? err.message : String(err);
-			recordBuildAttempt(cwd, "failed", reason);
+			recordBuildAttempt(cwd, "failed", reason, buildId);
 			logReviewGraph({
 				cwd,
 				phase: "build_failed",
 				reason,
 				durationMs: Date.now() - startedAt,
 				error: reason,
+				observability: {
+					graph: {
+						buildId,
+						...(seqHint === undefined ? {} : { seqHint: true }),
+						nodes: 0,
+						edges: 0,
+					},
+				},
 			});
 			throw err as Error;
 		});
@@ -4087,9 +4688,7 @@ export function buildOrUpdateGraph(
  * refs come from "references" edges. Line numbers are unavailable here (not stored in graph
  * nodes), so caller attribution falls back to file-level keys in buildCallGraph.
  */
-export function extractSymbolsAndRefsFromGraph(
-	graph: ReviewGraph,
-): {
+export function extractSymbolsAndRefsFromGraph(graph: ReviewGraph): {
 	allSymbols: Map<string, import("../symbol-types.js").Symbol[]>;
 	allRefs: Map<string, import("../symbol-types.js").SymbolRef[]>;
 } {
@@ -4118,7 +4717,7 @@ export function extractSymbolsAndRefsFromGraph(
 			const callerFile = edge.from.slice("file:".length);
 			const refName = edge.to.startsWith("symbol-name:")
 				? edge.to.slice("symbol-name:".length)
-				: edge.to.split(":").pop() ?? edge.to;
+				: (edge.to.split(":").pop() ?? edge.to);
 			const ref: import("../symbol-types.js").SymbolRef = {
 				symbolId: `${callerFile}:${refName}`,
 				filePath: callerFile,

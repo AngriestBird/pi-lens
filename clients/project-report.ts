@@ -202,7 +202,10 @@ function toDisplayPath(p: string, projectRoot: string): string {
 		: p.replace(/\\/g, "/");
 }
 
-function suggestedNext(displayPath: string): { tool: "module_report"; path: string } {
+function suggestedNext(displayPath: string): {
+	tool: "module_report";
+	path: string;
+} {
 	return { tool: "module_report", path: displayPath };
 }
 
@@ -271,7 +274,8 @@ function computeTrust(graph: ReviewGraph, cwd: string): ProjectReportTrust {
 	const filesCovered = graph.fileNodes.size;
 	const snapshot = loadProjectSnapshot(cwd);
 	const snapshotFileCount = snapshot ? Object.keys(snapshot.files).length : 0;
-	const filesTotal = Math.max(filesCovered, snapshotFileCount);
+	const persistedTotal = graph.persistCoverage?.totalFiles ?? 0;
+	const filesTotal = Math.max(filesCovered, snapshotFileCount, persistedTotal);
 	const coverage = filesTotal > 0 ? filesCovered / filesTotal : 1;
 
 	let exact = 0;
@@ -303,7 +307,8 @@ function computeTrust(graph: ReviewGraph, cwd: string): ProjectReportTrust {
 	const ageMs = Date.now() - Date.parse(graph.builtAt);
 	const stale = Number.isFinite(ageMs) && ageMs > STALE_THRESHOLD_MS;
 	const lowCoverage =
-		coverage < LOW_COVERAGE_THRESHOLD || graph.persistCoverage?.partial === true;
+		coverage < LOW_COVERAGE_THRESHOLD ||
+		graph.persistCoverage?.partial === true;
 
 	const notes: string[] = [];
 	if (stale) {
@@ -315,9 +320,17 @@ function computeTrust(graph: ReviewGraph, cwd: string): ProjectReportTrust {
 	if (lowCoverage) {
 		if (graph.persistCoverage?.partial) {
 			const p = graph.persistCoverage;
-			notes.push(
-				`Partial persisted graph: ${p.persistedNodes}/${p.totalNodes} nodes and ${p.persistedEdges}/${p.totalEdges} edges were retained under the ${p.cap}-element cap — whole subsystems may be invisible below.`,
-			);
+			const totalFiles = p.totalFiles ?? filesCovered;
+			const persistedFiles = p.persistedFiles ?? filesCovered;
+			if (p.sourceFilesTruncated) {
+				notes.push(
+					`Partial source walk: at least ${totalFiles} source files were represented before the visited-entry budget stopped enumeration; ${persistedFiles} files are in this graph.`,
+				);
+			} else {
+				notes.push(
+					`Partial persisted graph: ${p.persistedNodes}/${p.totalNodes} nodes, ${p.persistedEdges}/${p.totalEdges} edges, and ${persistedFiles}/${totalFiles} files were retained under the ${p.cap}-element cap — whole subsystems may be invisible below.`,
+				);
+			}
 		} else {
 			notes.push(
 				`Low coverage: only ${filesCovered}/${filesTotal} project files (${Math.round(coverage * 100)}%) are in the graph — whole subsystems may be invisible below.`,
@@ -447,7 +460,10 @@ function computeEntryPoints(
 // top-level dir still gets useful sub-clustering instead of one blob node).
 const DOMINANCE_THRESHOLD = 0.4;
 
-function directoryClusters(filePaths: string[], cwd: string): Map<string, string> {
+function directoryClusters(
+	filePaths: string[],
+	cwd: string,
+): Map<string, string> {
 	const segmentsOf = (filePath: string) =>
 		toDisplayPath(filePath, cwd).split("/").filter(Boolean);
 	const topCounts = new Map<string, number>();
@@ -483,7 +499,10 @@ function directoryClusters(filePaths: string[], cwd: string): Map<string, string
 
 // Tarjan SCC over the (small, directory-granularity) cluster graph — finds
 // every strongly-connected component, i.e. every directory-level import cycle.
-function tarjanSCCs(nodes: string[], adjacency: Map<string, Set<string>>): string[][] {
+function tarjanSCCs(
+	nodes: string[],
+	adjacency: Map<string, Set<string>>,
+): string[][] {
 	let index = 0;
 	const indices = new Map<string, number>();
 	const lowlink = new Map<string, number>();
@@ -593,13 +612,16 @@ function computeSubsystems(
 	for (const edge of edges) {
 		adjacency.get(edge.from)?.add(edge.to);
 	}
-	const sccs = tarjanSCCs(directories, adjacency).filter((scc) => scc.length > 1);
+	const sccs = tarjanSCCs(directories, adjacency).filter(
+		(scc) => scc.length > 1,
+	);
 	const cycles: DirectoryCycle[] = sccs
 		.map((scc) => {
 			const members = new Set(scc);
 			let edgeCount = 0;
 			for (const edge of edges) {
-				if (members.has(edge.from) && members.has(edge.to)) edgeCount += edge.count;
+				if (members.has(edge.from) && members.has(edge.to))
+					edgeCount += edge.count;
 			}
 			return { dirs: [...scc].sort((a, b) => a.localeCompare(b)), edgeCount };
 		})
@@ -627,7 +649,8 @@ function computeRiskHotspots(
 			const symbolIds = graph.symbolNodesByFile.get(filePath) ?? [];
 			let maxComplexity = 0;
 			for (const symbolId of symbolIds) {
-				const complexity = graph.nodes.get(symbolId)?.metadata?.cyclomaticComplexity;
+				const complexity =
+					graph.nodes.get(symbolId)?.metadata?.cyclomaticComplexity;
 				if (typeof complexity === "number" && complexity > maxComplexity) {
 					maxComplexity = complexity;
 				}
@@ -769,7 +792,8 @@ export async function projectReport(
 		}
 		const previousAttempt = getLastReviewGraphBuildAttempt(cwd);
 		const kickedOff = triggerBackgroundGraphBuild(cwd);
-		const lastBuildAttempt = previousAttempt ?? getLastReviewGraphBuildAttempt(cwd);
+		const lastBuildAttempt =
+			previousAttempt ?? getLastReviewGraphBuildAttempt(cwd);
 		return {
 			available: false,
 			hint:
@@ -795,8 +819,20 @@ export async function projectReport(
 		focusTerms,
 	);
 	const subsystems = computeSubsystems(graph, cwd, limit);
-	const riskHotspots = computeRiskHotspots(graph, degrees, cwd, limit, focusTerms);
-	const deadWeight = computeDeadWeight(graph, degrees, entryPointFiles, cwd, limit);
+	const riskHotspots = computeRiskHotspots(
+		graph,
+		degrees,
+		cwd,
+		limit,
+		focusTerms,
+	);
+	const deadWeight = computeDeadWeight(
+		graph,
+		degrees,
+		entryPointFiles,
+		cwd,
+		limit,
+	);
 	const lastBuildAttempt = getLastReviewGraphBuildAttempt(cwd);
 
 	return {
@@ -848,7 +884,9 @@ export function renderCompactProjectReport(report: ProjectReport): string {
 		lines.push("HUBS:");
 		for (const h of report.hubs) {
 			const role = h.role ? ` — ${h.role}` : "";
-			lines.push(`  ${h.file}${role}; ${h.fanIn} importer(s), blastRadius ${h.blastRadius}`);
+			lines.push(
+				`  ${h.file}${role}; ${h.fanIn} importer(s), blastRadius ${h.blastRadius}`,
+			);
 		}
 	}
 	if (report.entryPoints?.length) {
@@ -859,7 +897,9 @@ export function renderCompactProjectReport(report: ProjectReport): string {
 	}
 	if (report.subsystems) {
 		const s = report.subsystems;
-		lines.push(`SUBSYSTEMS: ${s.directories.length} directories, ${s.edges.length} cross-dir edge group(s)`);
+		lines.push(
+			`SUBSYSTEMS: ${s.directories.length} directories, ${s.edges.length} cross-dir edge group(s)`,
+		);
 		if (s.cycles.length > 0) {
 			lines.push("  CYCLES:");
 			for (const c of s.cycles) {

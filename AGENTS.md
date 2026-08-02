@@ -370,10 +370,19 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   (#936).** `GRAPH_PERSIST_MAX_ELEMENTS` counts nodes + edges (default 500,000).
   Above it, `builder.ts` keeps whole-file node groups ranked through the shared
   reverse-dependency-centrality seam, then induced edges up to the cap. The gzip
-  snapshot carries exact total/persisted node+edge counts; read-only consumers
+  snapshot carries exact total/persisted node+edge/file counts; read-only consumers
   may load it and must surface `persistCoverage.partial`, while the incremental
-  build tier rejects it as a complete base. Keep this on the existing worker,
-  generation-staged promotion, and sync-flush path.
+  build tier rejects it as a complete base. A source walk stopped by the visited-entry
+  budget also persists `sourceFilesTruncated:true` with a lower-bound file count —
+  never clear that marker or describe the graph as complete. Capture the file cap
+  before the asynchronous walk and derive terminal success/skip from the returned
+  graph, not a shared concurrent-build verdict. Keep this on the existing worker,
+  generation-staged promotion, and sync-flush path. Persisted-file counts are
+  intersections with the source-file universe, not every resolved import stub;
+  lifecycle graph/cascade consumers use graph-local metadata, and project-report
+  attempt state is ordered by build ID, so overlapping builds cannot borrow
+  another build's mode or reason. Cascade treats any partial coverage as
+  indeterminate rather than a clean zero-neighbor result.
 - **Review-graph snapshot persistence is worker-offloaded (#939).** The
   canonical cache is `review-graph.json.gz` (legacy uncompressed
   `review-graph.json` is load-only fallback for one release). Debounced writes
@@ -486,7 +495,7 @@ Never write `path.join(cwd, ".pi-lens", ...)` for a project cache — it breaks 
 
 - `~/.pi-lens/sessionstart.log` — timestamped lines for every session_start event and tool lifecycle; includes project snapshot probe/miss/load summaries, seeded project/file sequence counts, scan-context/profile cache source, and deferred task queued/run timings
 - `~/.pi-lens/cascade.log` — NDJSON cascade graph/neighbor diagnostics, including reverse-dependency cache refresh/load/merge events (`phase: "reverse_deps_cache"`)
-- `~/.pi-lens/review-graph.log` — NDJSON review-graph build and persistence outcomes
+- `~/.pi-lens/review-graph.log` — NDJSON review-graph build and persistence outcomes; lifecycle entries carry bounded build/persist generations, per-build captured sequence/mode, counts/timestamps, explicit partial-persistence coverage, process identity, and coalescing/supersession/fallback status without source contents. `latency.log` keeps only the separate persistence timing phase; do not duplicate this lifecycle metadata there.
 - `~/.pi-lens/latency.log` — NDJSON per-runner timings. Every new entry includes a logger-owned writer `pid`; `/lens-perf` (#767, `clients/performance-report.ts`) uses `pid` plus `RuntimeCoordinator.sessionStartedAt` to isolate the current process session from the machine-global log, and separately shows independent top-five p50/p99 rankings for the machine-wide active window's positive-duration `type:"phase"` records (`toolName/phase` when a tool name exists, linear-interpolated percentiles). `handleSessionStart` logs `session_start_total` on quick and full paths plus `session_start_scan_context_compute` around the actual sync/background scan-context walk, so the startup regression that motivated #767 is visible. The command flushes this process's buffered writer first, streams at most the newest `PI_LENS_MAX_LOG_SIZE_MB` (default 10MB, the same threshold that rotates the log), chunk-yields every 500 parsed lines, keeps at most the newest 20,000 phase samples, discards a partial first line after a tail seek, reports both caps, and skips malformed NDJSON lines rather than turning one partial append into an empty report.
 - `~/.pi-lens/latency.log` `cache_context` records are the privacy-preserving request-side context audit: the `pi-lens-context-handler` observed stage, injection sources/placement, bounded counts/sizes, and hashes only. Content/structural hash truncation is explicit and yields `unknown`, never an exact unchanged claim. `cache_prefix_break` remains a local first-message stability signal, not proof of a provider cache miss; `cache_usage` is provider-reported, has no request-id correlation, and its `RuntimeCoordinator` turn is process-global (concurrent secondary sessions omit it).
 - `~/.pi-lens/tree-sitter.log` — NDJSON tree-sitter runner activity plus aggregate `cache_stats` entries for project-diagnostics and full review-graph phases; scope-isolated measurements include lookup/miss reasons, capacity misses, evictions, parser invocations/time, and resident source bytes/lines
