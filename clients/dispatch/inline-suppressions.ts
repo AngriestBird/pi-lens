@@ -10,6 +10,8 @@
  * diagnostic or the line immediately above it.
  */
 
+import { normalizeRuleId } from "./rule-id-normalize.js";
+
 export interface SuppressibleDiagnostic {
 	line?: number;
 	rule?: string;
@@ -21,13 +23,12 @@ const SUPPRESS_RE = /(?:\/\/|#)\s*pi-lens-ignore:\s*(.+)/;
 /**
  * Normalize a rule id to the form a user writes in a `pi-lens-ignore` comment.
  * The napi scan and the ast-grep LSP tag the same rule as `ast-grep:<id>` /
- * `<id>-js` in some surfaces (see `normalizeRuleForDedup` in lens-diagnostics);
+ * `<id>-js` in some surfaces (see the dedup key in lens-diagnostics);
  * a user's bare `<id>` must still suppress those, so we match the normalized form
- * as well as the raw one.
+ * as well as the raw one. Shared via `rule-id-normalize.ts` so the inline
+ * suppression parser and the project rule policy matcher apply the same
+ * normalization.
  */
-function normalizeSuppressRule(ruleId: string): string {
-	return ruleId.replace(/^ast-grep:/, "").replace(/-js$/, "");
-}
 
 /**
  * Drop diagnostics suppressed by an inline `pi-lens-ignore: <rule[,rule2]>`
@@ -66,7 +67,7 @@ export function applyInlineSuppressions<T extends SuppressibleDiagnostic>(
 		const rawId = d.rule ?? d.id ?? "";
 		const line = d.line ?? 1;
 		if (suppressed.has(`${line}:${rawId}`)) return false;
-		const normId = normalizeSuppressRule(rawId);
+		const normId = normalizeRuleId(rawId);
 		return normId === rawId || !suppressed.has(`${line}:${normId}`);
 	});
 }

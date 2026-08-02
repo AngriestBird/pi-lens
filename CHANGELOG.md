@@ -6,6 +6,61 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **Project-level rule policy via `.pi-lens.json` `rules.<id>.disable` / `rules.<id>.select`** — a project's own config can now narrow what diagnostics actually surface.
+	Filtering is output-only, so the baseline, widget state, and dedup cache stay
+	authoritative and a policy edit never corrupts or resets delta tracking.
+	Matching is project-wide: the `<id>` key is a grouping label, not a filter
+	scope. Every `disable` list across every key unions into one drop list, and
+	every `select` list unions into one allowlist, so
+	`"security": { "disable": ["no-eval"] }` works without `security` being a real
+	rule id. Disable wins over select project-wide, even across different keys.
+	A non-empty `select` anywhere silences every rule not listed, project-wide, so
+	it is a big hammer (documented as such). Findings that carry no rule id at all
+	are exempt from select, since `Diagnostic.id` is a dedup key rather than a rule
+	id and measuring it against an allowlist would have silently dropped blocking
+	findings like eslint parse errors. A user lists `no-eval` once and the filter
+	covers `no-eval`, `ast-grep:no-eval`, and `no-eval-js`, reusing the rule-id
+	normalization that `inline-suppressions.ts` and `tools/lens-diagnostics.ts`'s
+	dedup already applied, now consolidated in
+	`clients/dispatch/rule-id-normalize.ts` so the three surfaces cannot drift.
+	That normalization conflates a rule whose real name ends in `-js` with its stem
+	(`prefer-js` with `prefer`), which is now pinned by tests and called out in the
+	docs. The policy applies on the per-edit dispatch path
+	(`clients/dispatch/dispatcher.ts`, resolved from the project root so a
+	package-local `.pi-lens.json` in a monorepo cannot shadow the root's policy,
+	matching the root `lens_diagnostics` already used) and across the
+	`lens_diagnostics` tool's `mode=delta`, `mode=all`, and `mode=full` paths. Each
+	loads the policy map once per call, filters after inline suppression and
+	disposition, and re-summarizes so the blocking/error/warning counts reflect the
+	drop, including delta mode's carried-over tally and mode=full's structured
+	`details` counts. Silencing a rule is not the same as fixing it: the stored
+	delta baseline is deliberately unfiltered, so dispatch compares against a
+	policy-filtered view of it. Otherwise every disabled finding would sit in the
+	"fixed" set on every single dispatch and inflate the agent's resolved tally
+	(`trackAgentFixed`) for as long as the rule stayed off. In the project-config
+	loader (`clients/project-lens-config.ts`) the lists are tolerantly parsed: a
+	non-array, an empty array, or an all-whitespace array is logged once and
+	dropped, matching the existing threshold-validation warn-once contract.
+	Threshold-only entries are unaffected, and policy-only entries (no `threshold`)
+	coexist cleanly. A `rules.<key>` whose value is not an object, or whose keys are
+	all unrecognized, now warns instead of failing silent. That covers the two
+	shapes a user is most likely to reach for first, both of which parse as valid
+	JSON and do nothing: the lists written directly under `rules`, and `only`
+	instead of `select`. New `tests/clients/dispatch/rule-policy.test.ts` (32 tests:
+	matcher, normalization, project-wide grouping, disable-wins-select, the `-js`
+	conflation, the rule-less select exemption, and the hot-path fast return),
+	`tests/clients/dispatch/rule-policy-dispatcher.test.ts` (13 tests covering
+	dispatch integration including monorepo root-versus-nested config resolution,
+	baseline integrity, and the resolved-tally guard),
+	`tests/clients/dispatch/rule-id-normalize.test.ts` (7 tests), and
+	`tests/tools/lens-diagnostics-rule-policy.test.ts` (14 tests covering the three
+	mode paths, `select` on the cache-only paths, the delta carried-over tally, the
+	project-diagnostics delta report, and mode=full's structured details).
+	Docs: `docs/settings.md` and `docs/globalconfig.md` gained the project-wide
+	schema, precedence, the select warning, and the `-js` caveat. #533 hygiene is
+	preserved, so typo and unknown-key warnings still surface and foreign LSP
+	namespaces stay silent.
+
 ### Changed
 
 - **Prompt-cache context attribution (refs #1018)** — add bounded `cache_context` latency records that correlate context injection sources, placement, message counts, sizes, and privacy-preserving hashes with provider `cache_usage` by session/turn, while keeping provider cache misses and local prefix changes distinct.

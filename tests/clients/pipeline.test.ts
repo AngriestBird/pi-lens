@@ -182,6 +182,43 @@ describe("Pipeline", () => {
 		expect(result.fileModified).toBe(false);
 	});
 
+	it("passes the workspace root to dispatch when cwd is a nested language root", async () => {
+		const nestedDir = path.join(tmpDir, "packages", "pkg-a");
+		fs.mkdirSync(nestedDir, { recursive: true });
+		const filePath = createTempFile(nestedDir, "nested.ts", "const x = 1;\n");
+		vi.mocked(dispatchLintWithResult).mockResolvedValue({
+			diagnostics: [],
+			blockers: [],
+			warnings: [],
+			baselineWarningCount: 0,
+			fixed: [],
+			resolvedCount: 0,
+			output: "",
+			blockerOutput: "",
+			hasBlockers: false,
+		});
+
+		await runPipeline(
+			createMockContext(filePath, {
+				cwd: nestedDir,
+				projectRoot: tmpDir,
+			}),
+			createMockDeps(),
+		);
+
+		expect(vi.mocked(dispatchLintWithResult)).toHaveBeenCalledWith(
+			filePath,
+			nestedDir,
+			expect.objectContaining({ getFlag: expect.any(Function) }),
+			undefined,
+			expect.objectContaining({
+				model: "unknown",
+				sessionId: "unknown",
+			}),
+			{ projectRoot: tmpDir },
+		);
+	});
+
 	describe("Format phase", () => {
 		it("defers format by default", async () => {
 			const filePath = createTempFile(tmpDir, "unformatted.ts", "const x=1");
