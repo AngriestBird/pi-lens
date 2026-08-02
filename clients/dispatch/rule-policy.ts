@@ -94,17 +94,17 @@ function matchesRule(entry: string, raw: string, normalized: string): boolean {
 
 /**
  * Filter an array of diagnostics (returns a new array) by the project rule
- * policy map. Only `rule` is consulted: `Diagnostic.id` is a dedup key
- * (`eslint:unknown:12`), not a rule id, so measuring it against a project-wide
- * `select` allowlist would silently drop every rule-less finding, including
- * blocking ones like an eslint parse error. A diagnostic with no `rule` has
- * nothing to match on and is kept untouched.
+ * policy map. `rule` is preferred; code-only diagnostics use `code` as their
+ * policy key so project-diagnostics details and rendered summaries cannot
+ * disagree about a finding that has no explicit rule field. `Diagnostic.id`
+ * remains a dedup key (`eslint:unknown:12`), not a policy key, so id-only
+ * findings (including blocking parse errors) remain exempt.
  *
  * Used by both the per-edit dispatcher and the `lens-diagnostics` tool's
  * `mode=delta`/`mode=all`/`mode=full` paths so a project's own policy
  * applies consistently across every output surface.
  */
-export function applyRulePolicy<T extends { rule?: string }>(
+export function applyRulePolicy<T extends { rule?: string; code?: string }>(
 	diagnostics: T[],
 	policyMap: Record<string, unknown> | undefined,
 ): T[] {
@@ -126,7 +126,7 @@ export function applyRulePolicy<T extends { rule?: string }>(
 	if (!hasFilter) return diagnostics;
 
 	return diagnostics.filter((d) => {
-		const ruleId = d.rule;
+		const ruleId = d.rule ?? d.code;
 		if (!ruleId) return true;
 		const { dropped } = evaluateRulePolicy(ruleId, policyMap as RulePolicyMap);
 		return !dropped;

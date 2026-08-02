@@ -591,6 +591,47 @@ describe("lens_diagnostics rule policy — mode=full (active scan)", () => {
 		expect(text).not.toContain("MSG-LSP-NO-EVAL");
 	});
 
+	it("applies policy even when a fresh full-mode file cannot be reread", async () => {
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({
+				rules: { "no-eval": { disable: ["no-eval"] } },
+			}),
+		);
+		// The LSP sweep can return a diagnostic for a file that disappears before
+		// the content-based suppression pass. Policy filtering must not depend on
+		// that second read succeeding.
+		const filePath = path.join(tmpDir, "src", "deleted.ts");
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{
+					filePath,
+					diagnostics: [
+						{
+							severity: 2,
+							message: "MSG-LSP-NO-EVAL-DELETED",
+							range: {
+								start: { line: 1, character: 0 },
+								end: { line: 1, character: 5 },
+							},
+							source: "ast-grep",
+							code: "no-eval",
+						},
+					],
+					count: 1,
+				},
+			]),
+		};
+
+		const result = await run(
+			makeTool(tmpDir, {}, lspService),
+			{ mode: "full" },
+			tmpDir,
+		);
+		const text = String(result.content[0].text);
+		expect(text).not.toContain("MSG-LSP-NO-EVAL-DELETED");
+	});
+
 	it("drops a disabled rule from the project-diagnostics snapshot", async () => {
 		fs.writeFileSync(
 			path.join(tmpDir, ".pi-lens.json"),
@@ -650,6 +691,52 @@ describe("lens_diagnostics rule policy — mode=full (active scan)", () => {
 		const text = String(result.content[0].text);
 		expect(text).toContain("MSG-PROJECT-NO-DEBUGGER");
 		expect(text).not.toContain("MSG-PROJECT-NO-EVAL");
+	});
+
+	it("applies policy consistently to code-only project diagnostics", async () => {
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({
+				rules: { "no-eval": { disable: ["no-eval"] } },
+			}),
+		);
+		const filePath = path.join(tmpDir, "src", "foo.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "// empty file\n");
+
+		projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue({
+			version: 1,
+			cwd: tmpDir,
+			tier: "cheap",
+			scannedAt: "2026-01-01T00:00:00.000Z",
+			filesScanned: 1,
+			runners: ["tree-sitter"],
+			diagnostics: [
+				{
+					filePath,
+					line: 5,
+					severity: "warning",
+					semantic: "warning",
+					tool: "tree-sitter",
+					runner: "tree-sitter",
+					code: "no-eval",
+					message: "MSG-CODE-ONLY-NO-EVAL",
+					source: "project-scan",
+				},
+			],
+		});
+
+		const result = await run(
+			makeTool(tmpDir, {}, { runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]) }),
+			{ mode: "full", refreshRunners: "cached" },
+			tmpDir,
+		);
+		const text = String(result.content[0].text);
+		const details = result.details as {
+			projectDiagnostics?: { diagnostics: number };
+		};
+		expect(details.projectDiagnostics?.diagnostics).toBe(0);
+		expect(text).not.toContain("MSG-CODE-ONLY-NO-EVAL");
 	});
 
 	it("details.projectDiagnostics/projectDiagnosticsDelta counts reflect the post-policy set", async () => {

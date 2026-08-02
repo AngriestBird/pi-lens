@@ -1043,7 +1043,17 @@ async function applyInlineSuppressionsToSummaries(
 			try {
 				content = await fs.readFile(summary.filePath, "utf8");
 			} catch {
-				return summary; // never hide a finding on a read error
+				// Inline suppression/disposition remains fail-open when the file cannot
+				// be read, but project policy does not depend on content and must still
+				// be applied so a fresh full-mode result cannot bypass `disable`/`select`.
+				const policyKept = applyRulePolicy(summary.diagnostics, policyMap);
+				return policyKept.length === summary.diagnostics.length
+					? summary
+					: summarizeDiagnostics(
+							summary.filePath,
+							policyKept,
+							summary.hasFinalSnapshot,
+						);
 			}
 			const inlineKept = applyInlineSuppressions(summary.diagnostics, content);
 			// #690: same false-positive/suppress/defer disposition filter the

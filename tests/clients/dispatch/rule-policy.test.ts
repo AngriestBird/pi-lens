@@ -207,15 +207,25 @@ describe("rule-policy.applyRulePolicy", () => {
 	it("keeps diagnostics without a recognizable rule id", () => {
 		const diagnostics = [
 			{ rule: "no-eval" }, // rule matches disable list → dropped
-			{ id: "anonymous" }, // no rule, has id — kept untouched
-			{}, // no rule or id at all — kept untouched
+			{ id: "anonymous" }, // no rule or code, has id — kept untouched
+			{}, // no rule or code at all — kept untouched
 		];
 		const policyMap = { "no-eval": { disable: ["no-eval"] } };
 		const result = applyRulePolicy(diagnostics, policyMap);
 		expect(result).toHaveLength(2);
-		// The first element should be the id-only diagnostic (no rule dropped).
+		// The first element should be the id-only diagnostic (no rule or code).
 		expect(result[0]).toEqual({ id: "anonymous" });
 		expect(result[1]).toEqual({});
+	});
+
+	it("uses a code-only diagnostic as its policy key", () => {
+		const diagnostics = [
+			{ code: "no-eval" },
+			{ code: "no-debugger" },
+		];
+		const policyMap = { "no-eval": { disable: ["no-eval"] } };
+		const result = applyRulePolicy(diagnostics, policyMap);
+		expect(result).toEqual([{ code: "no-debugger" }]);
 	});
 
 	it("returns the same array reference when no policy applies", () => {
