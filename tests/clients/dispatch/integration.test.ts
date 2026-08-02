@@ -5,6 +5,7 @@
  * with mocked dispatcher to avoid real tool spawning.
  */
 
+import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	dispatchLintWithResult,
@@ -12,6 +13,7 @@ import {
 	resetDispatchBaselines,
 	shouldDispatch,
 } from "../../../clients/dispatch/integration.js";
+import { normalizeMapKey } from "../../../clients/path-utils.js";
 
 // Mock dispatcher internals to avoid real runner execution
 vi.mock("../../../clients/dispatch/dispatcher.js", async (importOriginal) => {
@@ -188,6 +190,23 @@ describe("Dispatch Integration", () => {
 			expect(
 				vi.mocked(dispatchForFile).mock.calls.at(-1)?.[0].blockingOnly,
 			).toBe(false);
+		});
+
+		it("carries the authoritative workspace root separately from a language root", async () => {
+			await dispatchLintWithResult(
+				"app.ts",
+				"/repo/packages/pkg-a",
+				{ getFlag: () => false },
+				undefined,
+				undefined,
+				{ projectRoot: "/repo" },
+			);
+
+		const ctx = vi.mocked(dispatchForFile).mock.calls.at(-1)?.[0];
+		expect(ctx?.cwd).toBe(
+			normalizeMapKey(path.resolve("/repo/packages/pkg-a")),
+		);
+		expect(ctx?.projectRoot).toBe(normalizeMapKey(path.resolve("/repo")));
 		});
 	});
 

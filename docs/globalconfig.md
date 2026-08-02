@@ -167,10 +167,52 @@ Note: `maxProjectFiles` (below) is discovered differently — via an upward walk
 
 ### `rules`
 
-Per-rule threshold overrides. Currently honored:
+Per-rule threshold overrides and policy filters. Currently honored:
 
 - `high-complexity.threshold` — cyclomatic complexity (default `15`)
 - `high-fan-out.threshold` — distinct function calls (default `20`)
+- `<id>.disable` — disable diagnostics for the listed rule ids (output-only
+  filter). Same rule-id normalization as `pi-lens-ignore`: a user lists
+  `no-eval` once and the filter covers `no-eval`, `ast-grep:no-eval`, and
+  `no-eval-js`. Side effect: a rule whose real name genuinely ends in `-js`
+  (e.g. `prefer-js`) is conflated with its stem (`prefer`) — disabling or
+  selecting one also disables or selects the other.
+- `<id>.select` — allowlist of rule ids; only the listed rule ids survive
+  filtering. Disable wins over select project-wide, even when the two lists
+  are configured under different keys.
+
+The `<id>` key is a grouping label only — it does not scope which rules the
+`disable`/`select` list underneath it can match. Matching is **project-wide**:
+every `disable` list across every key is unioned into one drop list, and
+every `select` list across every key is unioned into one allowlist. So
+`"security": { "disable": ["no-eval"] }` disables `no-eval` regardless of
+`security` being the rule's own id, and two keys can each contribute to the
+same select union.
+
+```json
+{
+  "rules": {
+    "high-complexity": { "threshold": 25 },
+    "high-fan-out": { "threshold": 30 },
+    "no-eval": { "disable": ["no-eval", "no-eval-js", "ast-grep:no-eval"] },
+    "my-rule-set": { "select": ["rule-a", "rule-b"] }
+  }
+}
+```
+
+**Warning:** because select is project-wide, a non-empty `select` list
+*anywhere* in `rules` silences every rule not in that list, across the whole
+project — including tsc/eslint findings, not just the rule types you're
+thinking about when you write it. It's a big hammer; reach for `disable`
+instead unless you actually want an allowlist over everything. Findings that
+carry no rule id at all (an eslint parse error, for example) are exempt from
+select, so an allowlist can never hide them.
+
+Disable and select are output-only filters applied AFTER inline suppression,
+disposition, and dedup — the project-level policy never widens the trusted
+surface area (widget state, baseline, dedup cache stay authoritative). The
+baseline still records the full unfiltered set so a project-config edit does
+not corrupt delta baselines.
 
 ### `maxProjectFiles`
 
@@ -197,5 +239,6 @@ Explicit override for the review graph's own file budget (#775), for monorepos t
 - A malformed JSON file is logged once and treated as "no config" — your diagnostics never get blocked by a syntax error in your own config.
 - Rule thresholds must be positive finite numbers; invalid, zero, or negative values are logged once and ignored.
 - Mutation-control `enabled` values must be booleans; invalid values are logged once and ignored.
+- `rules.<id>.disable` and `rules.<id>.select` must each be a non-empty array of non-empty strings; a non-array value, an empty array, or an all-whitespace array is logged once and the entry is dropped. A policy-only entry (no `threshold`) is honored. A policy entry with an invalid value still keeps any valid `threshold` alongside it.
 - The depth sub-threshold of `high-complexity` (default `6`) is intentionally not exposed; only the cyclomatic-complexity knob ships today to keep the schema tight.
 - The file is mtime-cached, so editing it takes effect on the next scan without restarting the agent.
