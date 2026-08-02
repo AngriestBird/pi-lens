@@ -228,6 +228,97 @@ describe("lens_diagnostics rule policy — delta mode", () => {
 		expect(result.details).toMatchObject({ qualityIssues: 1 });
 	});
 
+	it("a project-wide select narrows the actionable warnings cache", async () => {
+		// select is the big hammer — a call site that forgets the filter fails
+		// open here, so the cache-only paths need their own coverage, not just
+		// mode=full's.
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({
+				rules: { "my-rule-set": { select: ["no-debugger"] } },
+			}),
+		);
+		const tool = makeTool(tmpDir, {
+			"actionable-warnings": {
+				files: [
+					{
+						filePath: path.join(tmpDir, "src/foo.ts"),
+						warnings: [
+							{
+								line: 1,
+								rule: "no-eval",
+								tool: "ast-grep",
+								message: "MSG-NO-EVAL",
+							},
+							{
+								line: 2,
+								rule: "no-debugger",
+								tool: "ast-grep",
+								message: "MSG-NO-DEBUGGER",
+							},
+						],
+					},
+				],
+				summary: { warnings: 2 },
+			},
+		});
+
+		const result = await run(tool, { mode: "delta" }, tmpDir);
+		const text = String(result.content[0].text);
+		expect(text).toContain("MSG-NO-DEBUGGER");
+		expect(text).not.toContain("MSG-NO-EVAL");
+		expect(result.details).toMatchObject({ actionableWarnings: 1 });
+	});
+
+	it("drops a disabled rule from the project-diagnostics delta report", async () => {
+		// filterDeltaReportDispositions is reached only from formatDeltaMode —
+		// mode=full's coverage of the same report says nothing about this path.
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({
+				rules: { "no-eval": { disable: ["no-eval"] } },
+			}),
+		);
+		const filePath = path.join(tmpDir, "src/foo.ts");
+		projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue({
+			version: 1,
+			cwd: tmpDir,
+			generatedAt: "2026-01-01T00:00:00.000Z",
+			sessionId: "s1",
+			turnIndex: 1,
+			diagnostics: [
+				{
+					filePath,
+					line: 7,
+					severity: "warning",
+					semantic: "warning",
+					tool: "tree-sitter",
+					runner: "tree-sitter",
+					rule: "no-eval",
+					message: "MSG-DELTA-NO-EVAL",
+					source: "project-scan",
+				},
+				{
+					filePath,
+					line: 8,
+					severity: "warning",
+					semantic: "warning",
+					tool: "tree-sitter",
+					runner: "tree-sitter",
+					rule: "no-debugger",
+					message: "MSG-DELTA-NO-DEBUGGER",
+					source: "project-scan",
+				},
+			],
+			sources: ["tree-sitter"],
+		});
+
+		const result = await run(makeTool(tmpDir), { mode: "delta" }, tmpDir);
+		const text = String(result.content[0].text);
+		expect(text).toContain("MSG-DELTA-NO-DEBUGGER");
+		expect(text).not.toContain("MSG-DELTA-NO-EVAL");
+	});
+
 	it("does not change output when no project rule policy is configured", async () => {
 		// No `.pi-lens.json` is written → no policy applies → keep everything.
 		const tool = makeTool(tmpDir, {
@@ -326,6 +417,44 @@ describe("lens_diagnostics rule policy — mode=all (cache-only)", () => {
 		expect(text).toContain("MSG-NO-DEBUGGER");
 		expect(text).not.toContain("MSG-NO-EVAL");
 		// Counts reflect the policy drop.
+		expect(result.details).toMatchObject({ totalWarnings: 1 });
+	});
+
+	it("a project-wide select narrows a file's cached widget diagnostics", async () => {
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({
+				rules: { "my-rule-set": { select: ["no-debugger"] } },
+			}),
+		);
+		mockSummaries.push({
+			filePath: path.join(tmpDir, "src/foo.ts"),
+			blocking: 0,
+			errors: 0,
+			warnings: 2,
+			hasFinalSnapshot: true,
+			diagnostics: [
+				{
+					severity: "warning",
+					message: "MSG-NO-EVAL",
+					line: 1,
+					rule: "no-eval",
+					tool: "ast-grep",
+				},
+				{
+					severity: "warning",
+					message: "MSG-NO-DEBUGGER",
+					line: 2,
+					rule: "no-debugger",
+					tool: "ast-grep",
+				},
+			],
+		});
+
+		const result = await run(makeTool(tmpDir), { mode: "all" }, tmpDir);
+		const text = String(result.content[0].text);
+		expect(text).toContain("MSG-NO-DEBUGGER");
+		expect(text).not.toContain("MSG-NO-EVAL");
 		expect(result.details).toMatchObject({ totalWarnings: 1 });
 	});
 

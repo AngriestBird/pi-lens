@@ -33,19 +33,29 @@ All notable changes to pi-lens will be documented in this file.
 	loads the policy map once per call, filters after inline suppression and
 	disposition, and re-summarizes so the blocking/error/warning counts reflect the
 	drop, including delta mode's carried-over tally and mode=full's structured
-	`details` counts. In the project-config loader
-	(`clients/project-lens-config.ts`) the lists are tolerantly parsed: a non-array,
-	an empty array, or an all-whitespace array is logged once and dropped, matching
-	the existing threshold-validation warn-once contract. Threshold-only entries are
-	unaffected, and policy-only entries (no `threshold`) coexist cleanly. New
-	`tests/clients/dispatch/rule-policy.test.ts` (32 tests: matcher, normalization,
-	project-wide grouping, disable-wins-select, the `-js` conflation, the rule-less
-	select exemption, and the hot-path fast return),
-	`tests/clients/dispatch/rule-policy-dispatcher.test.ts` (10 tests covering
-	dispatch integration including monorepo root-versus-nested config resolution),
-	`tests/clients/dispatch/rule-id-normalize.test.ts` (8 tests), and
-	`tests/tools/lens-diagnostics-rule-policy.test.ts` (11 tests covering the three
-	mode paths, the delta carried-over tally, and mode=full's structured details).
+	`details` counts. Silencing a rule is not the same as fixing it: the stored
+	delta baseline is deliberately unfiltered, so dispatch compares against a
+	policy-filtered view of it. Otherwise every disabled finding would sit in the
+	"fixed" set on every single dispatch and inflate the agent's resolved tally
+	(`trackAgentFixed`) for as long as the rule stayed off. In the project-config
+	loader (`clients/project-lens-config.ts`) the lists are tolerantly parsed: a
+	non-array, an empty array, or an all-whitespace array is logged once and
+	dropped, matching the existing threshold-validation warn-once contract.
+	Threshold-only entries are unaffected, and policy-only entries (no `threshold`)
+	coexist cleanly. A `rules.<key>` whose value is not an object, or whose keys are
+	all unrecognized, now warns instead of failing silent. That covers the two
+	shapes a user is most likely to reach for first, both of which parse as valid
+	JSON and do nothing: the lists written directly under `rules`, and `only`
+	instead of `select`. New `tests/clients/dispatch/rule-policy.test.ts` (32 tests:
+	matcher, normalization, project-wide grouping, disable-wins-select, the `-js`
+	conflation, the rule-less select exemption, and the hot-path fast return),
+	`tests/clients/dispatch/rule-policy-dispatcher.test.ts` (13 tests covering
+	dispatch integration including monorepo root-versus-nested config resolution,
+	baseline integrity, and the resolved-tally guard),
+	`tests/clients/dispatch/rule-id-normalize.test.ts` (7 tests), and
+	`tests/tools/lens-diagnostics-rule-policy.test.ts` (14 tests covering the three
+	mode paths, `select` on the cache-only paths, the delta carried-over tally, the
+	project-diagnostics delta report, and mode=full's structured details).
 	Docs: `docs/settings.md` and `docs/globalconfig.md` gained the project-wide
 	schema, precedence, the select warning, and the `-js` caveat. #533 hygiene is
 	preserved, so typo and unknown-key warnings still surface and foreign LSP

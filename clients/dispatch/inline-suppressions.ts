@@ -23,7 +23,7 @@ const SUPPRESS_RE = /(?:\/\/|#)\s*pi-lens-ignore:\s*(.+)/;
 /**
  * Normalize a rule id to the form a user writes in a `pi-lens-ignore` comment.
  * The napi scan and the ast-grep LSP tag the same rule as `ast-grep:<id>` /
- * `<id>-js` in some surfaces (see `normalizeRuleForDedup` in lens-diagnostics);
+ * `<id>-js` in some surfaces (see the dedup key in lens-diagnostics);
  * a user's bare `<id>` must still suppress those, so we match the normalized form
  * as well as the raw one. Shared via `rule-id-normalize.ts` so the inline
  * suppression parser and the project rule policy matcher apply the same

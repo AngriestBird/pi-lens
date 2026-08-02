@@ -801,18 +801,21 @@ export async function dispatchForFile(
 	// the same root here keeps the two surfaces in agreement. `ctx.projectConfig`
 	// itself is untouched — thresholds and mutation flags keep their existing
 	// language-root resolution.
-	const policyKept = applyRulePolicy(
-		dispositionFiltered,
-		rulePolicyMapFromConfig(
-			loadPiLensProjectConfig(ctx.projectRoot ?? ctx.cwd).rules,
-		),
+	const rulePolicy = rulePolicyMapFromConfig(
+		loadPiLensProjectConfig(ctx.projectRoot ?? ctx.cwd).rules,
 	);
+	const policyKept = applyRulePolicy(dispositionFiltered, rulePolicy);
 	let visibleDiagnostics = policyKept;
 	let resolvedCount = 0;
 	if (ctx.deltaMode && previousBaseline) {
+		// Silencing a rule is not fixing it. The stored baseline is deliberately
+		// unfiltered (below), so compare against a policy-filtered view of it —
+		// otherwise every disabled finding sits in `fixed` on every dispatch and
+		// inflates the agent's resolved tally (trackAgentFixed) forever. Only
+		// `fixed` changes: policy-dropped ids are absent from `after` either way.
 		const filtered = filterDelta(
 			visibleDiagnostics,
-			previousBaseline,
+			applyRulePolicy(previousBaseline, rulePolicy),
 			(d) => d.id,
 		);
 		visibleDiagnostics = promoteDeltaUnusedToBlockers(filtered.new);

@@ -22,6 +22,7 @@ import type {
 	RunnerDefinition,
 	RunnerGroup,
 } from "../../../clients/dispatch/types.js";
+import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { resetProjectLensConfigCache } from "../../../clients/project-lens-config.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -462,5 +463,111 @@ describe("dispatcher filter — resolves the policy from the project root, not t
 		const groups: RunnerGroup[] = [{ mode: "all", runnerIds: ["ast-grep"] }];
 		const result = await dispatchForFile(ctx, groups, registry);
 		expect(result.diagnostics).toHaveLength(0);
+	});
+});
+
+describe("dispatcher filter — delta baseline integrity", () => {
+	function policyDiagnostics(): Diagnostic[] {
+		return [
+			{
+				id: "no-eval-1",
+				message: "no-eval",
+				filePath: path.join(tmpDir, "a.ts"),
+				severity: "warning",
+				semantic: "warning",
+				tool: "ast-grep",
+				rule: "no-eval",
+				line: 1,
+			},
+			{
+				id: "no-debugger-1",
+				message: "no-debugger",
+				filePath: path.join(tmpDir, "a.ts"),
+				severity: "warning",
+				semantic: "warning",
+				tool: "ast-grep",
+				rule: "no-debugger",
+				line: 2,
+			},
+		];
+	}
+
+	function disableNoEval() {
+		fs.writeFileSync(
+			path.join(tmpDir, ".pi-lens.json"),
+			JSON.stringify({ rules: { "no-eval": { disable: ["no-eval"] } } }),
+		);
+	}
+
+	function registryFor(diagnostics: Diagnostic[]): RunnerRegistry {
+		const registry = new RunnerRegistry();
+		registry.register(mockRunner("ast-grep", diagnostics));
+		return registry;
+	}
+
+	const groups: RunnerGroup[] = [{ mode: "all", runnerIds: ["ast-grep"] }];
+
+	it("stores the policy-dropped diagnostic in the session baseline", async () => {
+		// Filtering is output-only: the persisted baseline must keep the full
+		// deduped set so removing the disable later doesn't report the rule as
+		// newly introduced. Moving applyRulePolicy above the baseline write
+		// breaks this and nothing else.
+		disableNoEval();
+		const facts = new FactStore();
+		const ctx = makeContext(tmpDir, facts);
+
+		const result = await dispatchForFile(
+			ctx,
+			groups,
+			registryFor(policyDiagnostics()),
+		);
+		expect(result.diagnostics.map((d) => d.rule)).toEqual(["no-debugger"]);
+
+		const baseline = facts.getSessionFact<Diagnostic[]>(
+			`session.baseline.${normalizeMapKey(ctx.filePath)}`,
+		);
+		expect(baseline?.map((d) => d.rule).sort()).toEqual([
+			"no-debugger",
+			"no-eval",
+		]);
+	});
+
+	it("does not count a policy-dropped rule as resolved on a later dispatch", async () => {
+		// The baseline is unfiltered by design, so `fixed` has to be measured
+		// against a policy-filtered view of it. Otherwise a disabled rule sits in
+		// `fixed` on every single dispatch and inflates trackAgentFixed forever.
+		disableNoEval();
+		const facts = new FactStore();
+
+		await dispatchForFile(
+			makeContext(tmpDir, facts),
+			groups,
+			registryFor(policyDiagnostics()),
+		);
+		const second = await dispatchForFile(
+			makeContext(tmpDir, facts),
+			groups,
+			registryFor(policyDiagnostics()),
+		);
+		expect(second.resolvedCount).toBe(0);
+	});
+
+	it("still counts a genuinely fixed rule as resolved", async () => {
+		// Guards the fix from over-correcting: a rule that stops firing and is
+		// NOT policy-dropped must still land in `fixed`.
+		disableNoEval();
+		const facts = new FactStore();
+
+		await dispatchForFile(
+			makeContext(tmpDir, facts),
+			groups,
+			registryFor(policyDiagnostics()),
+		);
+		const second = await dispatchForFile(
+			makeContext(tmpDir, facts),
+			groups,
+			registryFor(policyDiagnostics().filter((d) => d.rule === "no-eval")),
+		);
+		expect(second.resolvedCount).toBe(1);
 	});
 });

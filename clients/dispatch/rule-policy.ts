@@ -13,13 +13,13 @@
  * configured under.
  *
  * Match normalization is consolidated with the rest of the rule-id surfaces:
- * `inline-suppressions.ts` and `lens-diagnostics.ts`'s `normalizeRuleForDedup`
+ * `inline-suppressions.ts` and `lens-diagnostics.ts`'s `normalizeRuleId`
  * both strip the `ast-grep:` prefix and the `-js` suffix, so a user listing
  * `no-eval` once under `disable` covers both the LSP tag (`ast-grep:no-eval`)
  * and the napi tag (`no-eval` / `no-eval-js`). Sharing the normalization keeps
  * the three surfaces from drifting.
  */
-import { normalizeRuleForDedup } from "./rule-id-normalize.js";
+import { normalizeRuleId } from "./rule-id-normalize.js";
 
 export interface RulePolicyEntry {
 	disable?: string[];
@@ -57,7 +57,7 @@ export function evaluateRulePolicy(
 ): { dropped: boolean } {
 	if (!policyMap) return { dropped: false };
 	const raw = ruleId || "";
-	const norm = normalizeRuleForDedup(raw);
+	const norm = normalizeRuleId(raw);
 
 	if (scanList(policyMap, (e) => e.disable, raw, norm).matched) {
 		return { dropped: true };
@@ -89,7 +89,7 @@ function scanList(
 
 function matchesRule(entry: string, raw: string, normalized: string): boolean {
 	if (entry === raw) return true;
-	return normalizeRuleForDedup(entry) === normalized;
+	return normalizeRuleId(entry) === normalized;
 }
 
 /**

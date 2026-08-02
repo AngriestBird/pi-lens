@@ -548,6 +548,50 @@ describe("loadPiLensProjectConfig", () => {
 			]);
 		});
 
+		it("warns when the lists are written directly under rules (#444's own example)", () => {
+			// `{"rules": {"disable": [...]}}` is the shape the issue proposed and
+			// the most likely thing a user tries. It parses as valid JSON and has
+			// zero effect, so it has to say so rather than fail silent.
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ rules: { disable: ["no-eval"] } }),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules.disable).toBeUndefined();
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"rules.disable must be an object with threshold, disable, or select",
+				),
+			);
+		});
+
+		it("warns on a rule entry whose only key is unrecognized (e.g. #444's `only`)", () => {
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ rules: { "no-eval": { only: ["no-eval"] } } }),
+			);
+			const cfg = loadPiLensProjectConfig(tmpDir);
+			expect(cfg.rules["no-eval"]).toBeUndefined();
+			expect(console.error).toHaveBeenCalledWith(
+				expect.stringContaining(
+					"rules.no-eval has no recognized setting (threshold, disable, select)",
+				),
+			);
+		});
+
+		it("does not warn twice when a recognized field was merely malformed", () => {
+			// `disable` already warned about its own shape — adding a second
+			// "no recognized setting" line for the same entry would be noise.
+			fs.writeFileSync(
+				path.join(tmpDir, ".pi-lens.json"),
+				JSON.stringify({ rules: { "no-eval": { disable: "no-eval" } } }),
+			);
+			loadPiLensProjectConfig(tmpDir);
+			expect(console.error).not.toHaveBeenCalledWith(
+				expect.stringContaining("has no recognized setting"),
+			);
+		});
+
 		it("warns once and drops a non-array disable", () => {
 			fs.writeFileSync(
 				path.join(tmpDir, ".pi-lens.json"),

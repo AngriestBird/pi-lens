@@ -12,30 +12,23 @@
  * the contract the matcher guarantees.
  */
 import { describe, expect, it } from "vitest";
-import {
-	normalizeRuleForDedup,
-	normalizeRuleId,
-} from "../../../clients/dispatch/rule-id-normalize.js";
+import { normalizeRuleId } from "../../../clients/dispatch/rule-id-normalize.js";
 
 describe("rule-id-normalize", () => {
 	it("strips the ast-grep: prefix", () => {
 		expect(normalizeRuleId("ast-grep:no-eval")).toBe("no-eval");
-		expect(normalizeRuleForDedup("ast-grep:no-eval")).toBe("no-eval");
 	});
 
 	it("strips the -js suffix", () => {
 		expect(normalizeRuleId("no-eval-js")).toBe("no-eval");
-		expect(normalizeRuleForDedup("no-eval-js")).toBe("no-eval");
 	});
 
 	it("strips both forms (ast-grep: prefix + -js suffix)", () => {
 		expect(normalizeRuleId("ast-grep:no-eval-js")).toBe("no-eval");
-		expect(normalizeRuleForDedup("ast-grep:no-eval-js")).toBe("no-eval");
 	});
 
 	it("is a no-op on a bare rule id", () => {
 		expect(normalizeRuleId("no-eval")).toBe("no-eval");
-		expect(normalizeRuleForDedup("no-eval")).toBe("no-eval");
 	});
 
 	it("is idempotent (normalize is a fixed point)", () => {
@@ -63,21 +56,5 @@ describe("rule-id-normalize", () => {
 		// module's doc comment and docs/globalconfig.md.
 		expect(normalizeRuleId("prefer-js")).toBe(normalizeRuleId("prefer"));
 		expect(normalizeRuleId("prefer-js")).toBe("prefer");
-	});
-
-	it("normalizeRuleForDedup is the same as normalizeRuleId", () => {
-		// Back-compat alias must remain identical to canonical form — the
-		// dedup path in `tools/lens-diagnostics.ts` was the first user, and
-		// it shares the strip pipeline.
-		const samples = [
-			"no-eval",
-			"ast-grep:no-eval",
-			"no-eval-js",
-			"ast-grep:no-eval-js",
-			"high-complexity",
-		];
-		for (const sample of samples) {
-			expect(normalizeRuleForDedup(sample)).toBe(normalizeRuleId(sample));
-		}
 	});
 });

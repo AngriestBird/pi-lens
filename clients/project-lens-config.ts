@@ -428,7 +428,14 @@ function parseConfigFile(configPath: string): PiLensProjectConfig {
 	if (obj.rules && typeof obj.rules === "object" && !Array.isArray(obj.rules)) {
 		const rawRules = obj.rules as Record<string, unknown>;
 		for (const [ruleId, ruleCfg] of Object.entries(rawRules)) {
+			// #444's own example writes the lists directly under `rules` (`rules.
+			// disable`), which lands here as an array and would otherwise be
+			// dropped without a word — the one shape a user is most likely to try.
 			if (!ruleCfg || typeof ruleCfg !== "object" || Array.isArray(ruleCfg)) {
+				warnInvalidConfigOnce(
+					configPath,
+					`rules.${ruleId} must be an object with threshold, disable, or select; ignored`,
+				);
 				continue;
 			}
 			const r = ruleCfg as Record<string, unknown>;
@@ -465,8 +472,20 @@ function parseConfigFile(configPath: string): PiLensProjectConfig {
 			}
 			// Honor both threshold-only and policy-only entries; only drop if
 			// the entry had no recognized fields at all (e.g. { unrelated: true }).
+			// A recognized-but-malformed field already warned above, so only warn
+			// here when nothing recognized was spelled at all — #444 proposed
+			// `only` rather than `select`, and that typo must not fail silent.
 			if (entry.threshold !== undefined || entry.disable || entry.select) {
 				rules[ruleId] = entry;
+			} else if (
+				!("threshold" in r) &&
+				!("disable" in r) &&
+				!("select" in r)
+			) {
+				warnInvalidConfigOnce(
+					configPath,
+					`rules.${ruleId} has no recognized setting (threshold, disable, select); ignored`,
+				);
 			}
 		}
 	}

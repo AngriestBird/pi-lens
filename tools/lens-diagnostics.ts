@@ -18,9 +18,10 @@ import {
 	applyDispositions,
 	applyWeakDispositions,
 	getDisposition,
+	type DispositionCandidate,
 } from "../clients/diagnostic-dispositions.js";
 import { applyInlineSuppressions } from "../clients/dispatch/inline-suppressions.js";
-import { normalizeRuleForDedup } from "../clients/dispatch/rule-id-normalize.js";
+import { normalizeRuleId } from "../clients/dispatch/rule-id-normalize.js";
 import { applyRulePolicy, rulePolicyMapFromConfig } from "../clients/dispatch/rule-policy.js";
 import { loadPiLensProjectConfig } from "../clients/project-lens-config.js";
 import { compactRenderResult } from "./render-compact.js";
@@ -439,11 +440,12 @@ function filterDeltaReportDispositions(
 }
 
 /**
- * Cache the load rule-policy map from a project's `.pi-lens.json` — same
- * source the per-edit dispatch path uses, so a project's policy applies
- * consistently across every output surface. Filtered to entries that actually
- * have a `disable`/`select` list (thresholds are handled elsewhere), so the
- * hot path returns undefined for the common case and stays cheap.
+ * Load the rule-policy map from a project's `.pi-lens.json` — same source the
+ * per-edit dispatch path uses, so a project's policy applies consistently
+ * across every output surface. `loadPiLensProjectConfig` is mtime-cached, and
+ * the map is filtered to entries that actually have a `disable`/`select` list
+ * (thresholds are handled elsewhere), so the common case returns undefined and
+ * the filter step is skipped outright.
  */
 function loadProjectRulePolicyMap(cwd: string) {
 	return rulePolicyMapFromConfig(loadPiLensProjectConfig(cwd).rules);
@@ -485,26 +487,21 @@ function formatDeltaMode(
 	// the weak disposition filter (suppress/defer) here so a mark converges
 	// immediately, not only on the next edit. Weak-anchored → zero file I/O, so
 	// this stays "instant" (see applyWeakDispositions).
-	const actionableFiles = (actionable?.files ?? [])
-		.filter((file) => includeFile(file.filePath))
-		.map((file) => ({
-			filePath: file.filePath,
-			warnings: applyRulePolicy(
-				applyWeakDispositions(file.warnings ?? [], cwd, file.filePath),
-				policyMap,
-			),
-		}))
-		.filter((file) => file.warnings.length > 0);
-	const qualityFiles = (quality?.files ?? [])
-		.filter((file) => includeFile(file.filePath))
-		.map((file) => ({
-			filePath: file.filePath,
-			warnings: applyRulePolicy(
-				applyWeakDispositions(file.warnings ?? [], cwd, file.filePath),
-				policyMap,
-			),
-		}))
-		.filter((file) => file.warnings.length > 0);
+	const visibleWarningFiles = <W extends DispositionCandidate>(
+		files: Array<{ filePath: string; warnings?: W[] }> | undefined,
+	) =>
+		(files ?? [])
+			.filter((file) => includeFile(file.filePath))
+			.map((file) => ({
+				filePath: file.filePath,
+				warnings: applyRulePolicy(
+					applyWeakDispositions(file.warnings ?? [], cwd, file.filePath),
+					policyMap,
+				),
+			}))
+			.filter((file) => file.warnings.length > 0);
+	const actionableFiles = visibleWarningFiles(actionable?.files);
+	const qualityFiles = visibleWarningFiles(quality?.files);
 
 	const lines: string[] = [];
 
@@ -844,14 +841,13 @@ function projectDiagnosticToWidget(
 // LSP sweep and the napi scan don't double-report the same line. The
 // normalization itself now lives in `clients/dispatch/rule-id-normalize.ts` so the
 // inline suppression parser, the project rule-policy matcher, and dedup all apply
-// the same canonical form — `normalizeRuleForDedup` is the back-compat alias it
-// re-exports.
+// the same canonical form.
 
 function diagnosticDedupKey(
 	filePath: string,
 	diagnostic: WidgetDiagnostic,
 ): string {
-	const ruleId = normalizeRuleForDedup(diagnostic.rule ?? diagnostic.tool ?? "");
+	const ruleId = normalizeRuleId(diagnostic.rule ?? diagnostic.tool ?? "");
 	return [path.resolve(filePath), diagnostic.line ?? "?", ruleId].join(":");
 }
 
