@@ -31,6 +31,8 @@ export interface ReviewGraphBuildMetadata {
 	seqHint?: boolean;
 	mode?: ReviewGraphBuildMode;
 	sourceFiles?: number;
+	/** True when sourceFiles is a lower bound from a truncated source walk. */
+	sourceFilesTruncated?: boolean;
 	nodes: number;
 	edges: number;
 	/** Exact complete-vs-partial coverage of the persisted graph snapshot. */
@@ -41,12 +43,7 @@ export interface ReviewGraphBuildMetadata {
 export interface ReviewGraphPersistenceMetadata {
 	generation: number;
 	attemptId: number;
-	status:
-		| "scheduled"
-		| "succeeded"
-		| "failed"
-		| "fallback"
-		| "superseded";
+	status: "scheduled" | "succeeded" | "failed" | "fallback" | "superseded";
 	supersededGeneration?: number;
 	supersededByGeneration?: number;
 	coalesced?: boolean;
@@ -67,6 +64,7 @@ export interface ReviewGraphBuildMetadataOptions {
 	seqHint?: boolean;
 	mode?: ReviewGraphBuildMode;
 	sourceFileCount?: number;
+	sourceFileCountTruncated?: boolean;
 }
 
 /**
@@ -77,7 +75,12 @@ export interface ReviewGraphBuildMetadataOptions {
 export function makeReviewGraphBuildMetadata(
 	graph: Pick<
 		ReviewGraph,
-		"buildGeneration" | "builtAt" | "nodes" | "edges" | "fileNodes" | "persistCoverage"
+		| "buildGeneration"
+		| "builtAt"
+		| "nodes"
+		| "edges"
+		| "fileNodes"
+		| "persistCoverage"
 	>,
 	options: ReviewGraphBuildMetadataOptions = {},
 ): ReviewGraphBuildMetadata {
@@ -93,6 +96,10 @@ export function makeReviewGraphBuildMetadata(
 		...(options.seqHint === undefined ? {} : { seqHint: options.seqHint }),
 		...(options.mode === undefined ? {} : { mode: options.mode }),
 		sourceFiles: options.sourceFileCount ?? graph.fileNodes.size,
+		...(options.sourceFileCountTruncated ||
+		graph.persistCoverage?.sourceFilesTruncated
+			? { sourceFilesTruncated: true }
+			: {}),
 		nodes: graph.nodes.size,
 		edges: graph.edges.length,
 		...(graph.persistCoverage

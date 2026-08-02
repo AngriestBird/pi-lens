@@ -26,9 +26,7 @@ function makeSeqHint(): GraphSeqHint & {
 	return {
 		projectSeq: () => projectSeq,
 		getFilesChangedSince: (seq: number) =>
-			[...lastSeq.entries()]
-				.filter(([, s]) => s > seq)
-				.map(([key]) => key),
+			[...lastSeq.entries()].filter(([, s]) => s > seq).map(([key]) => key),
 		bump: (filePath: string) => {
 			projectSeq += 1;
 			lastSeq.set(normalizeMapKey(filePath), projectSeq);
@@ -210,7 +208,9 @@ describe("review-graph seq fast path (#451)", () => {
 	// contention that many sequential real builds can tip past 5s. Give it
 	// the same kind of generous headroom as `tests/index-integration.test.ts`'s
 	// `INTEGRATION_TIMEOUT_MS` — a genuine hang still fails, just later.
-	it("periodic re-verify (every 20th build) resumes the full sweep", { timeout: 30_000 }, async () => {
+	it("periodic re-verify (every 20th build) resumes the full sweep", {
+		timeout: 30_000,
+	}, async () => {
 		const env = setupTestEnvironment("pi-lens-seqfp-verify-");
 		try {
 			const aPath = createTempFile(
@@ -267,6 +267,46 @@ describe("review-graph seq fast path (#451)", () => {
 			clearGraphCache();
 			await buildOrUpdateGraph(env.tmpDir, [aPath], facts);
 			expect(getLastGraphBuildInfo().mode).toBe("cached");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("same-content seq bumps stay a no-op and keep builtAt stable", async () => {
+		const env = setupTestEnvironment("pi-lens-seqfp-same-content-");
+		try {
+			const aPath = createTempFile(
+				env.tmpDir,
+				"src/a.ts",
+				["export function alpha() { return 1; }", ""].join("\n"),
+			);
+			const facts = new FactStore();
+			const hint = makeSeqHint();
+
+			clearGraphCache();
+			const initial = await buildOrUpdateGraph(
+				env.tmpDir,
+				[aPath],
+				facts,
+				hint,
+			);
+			fs.writeFileSync(
+				aPath,
+				["export function alpha() { return 1; }", ""].join("\n"),
+			);
+			hint.bump(aPath);
+			clearGraphCache();
+			const rebuilt = await buildOrUpdateGraph(
+				env.tmpDir,
+				[aPath],
+				facts,
+				hint,
+			);
+
+			expect(getLastGraphBuildInfo().mode).toBe("seq-fastpath");
+			expect(getLastGraphBuildInfo().graphChanged).toBe(false);
+			expect(rebuilt.builtAt).toBe(initial.builtAt);
+			expect(rebuilt.buildGeneration).toBe(initial.buildGeneration);
 		} finally {
 			env.cleanup();
 		}

@@ -6,6 +6,7 @@ import { FactStore } from "../../clients/dispatch/fact-store.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import {
 	_resetReviewGraphBuildAttemptsForTests,
+	_setReviewGraphEntryBudgetForTests,
 	buildOrUpdateGraph,
 	clearGraphCache,
 	clearReviewGraphWorkspaceCache,
@@ -47,10 +48,12 @@ afterEach(async () => {
 	while (cleanups.length) cleanups.pop()?.();
 	clearReviewGraphWorkspaceCache();
 	_resetReviewGraphBuildAttemptsForTests();
+	_setReviewGraphEntryBudgetForTests();
 	vi.clearAllMocks();
 	// Restore the test-default synchronous persist + uncapped size.
 	process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "0";
 	delete process.env.PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS;
+	delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
 	delete process.env.PI_LENS_TEST_PERSIST_WORKER_DELAY_MS;
 });
 
@@ -75,6 +78,82 @@ async function waitForFile(p: string, attempts = 20): Promise<boolean> {
 describe("review-graph persist circuit-breaker (#260)", () => {
 	it("defaults to the measured 500,000-element ceiling (#936)", () => {
 		expect(GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT).toBe(500_000);
+	});
+
+	it("entry-budget truncation remains visibly partial through persistence", async () => {
+		const env = makeEnv();
+		createTempFile(env.tmpDir, "src/a.ts", "export const a = 1;\n");
+		createTempFile(env.tmpDir, "src/b.ts", "export const b = 2;\n");
+		_setReviewGraphEntryBudgetForTests(2);
+
+		const built = await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+		await waitForReviewGraphPersistsForTests();
+
+		expect(built.persistCoverage).toEqual(
+			expect.objectContaining({
+				partial: true,
+				sourceFilesTruncated: true,
+				totalFiles: expect.any(Number),
+				persistedFiles: expect.any(Number),
+			}),
+		);
+		const success = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
+			.find((entry) => entry.phase === "persist_succeeded");
+		expect(success?.observability?.graph?.persistCoverage).toEqual(
+			expect.objectContaining({ partial: true, sourceFilesTruncated: true }),
+		);
+		const partial = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
+			.find((entry) => entry.phase === "persist_partial");
+		expect(partial?.reason).toBe("source_walk_entry_budget");
+	});
+
+	it("overlapping builds use each returned graph's skip outcome", async () => {
+		const env = makeEnv();
+		const files: string[] = [];
+		for (let i = 0; i < 20; i++) {
+			files.push(
+				createTempFile(
+					env.tmpDir,
+					`src/file-${i}.ts`,
+					`export const value${i} = ${i};\n`,
+				),
+			);
+		}
+		process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = "1000";
+		const fullBuild = buildOrUpdateGraph(
+			env.tmpDir,
+			[files[0]],
+			new FactStore(),
+		);
+		process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = "2";
+		const skippedBuild = buildOrUpdateGraph(
+			env.tmpDir,
+			[files[1]],
+			new FactStore(),
+		);
+		await Promise.all([fullBuild, skippedBuild]);
+
+		const entries = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry);
+		expect(
+			entries.some(
+				(entry) =>
+					entry.phase === "build_succeeded" &&
+					entry.observability?.graph?.mode === "full",
+			),
+		).toBe(true);
+		expect(
+			entries.some(
+				(entry) =>
+					entry.phase === "build_skipped" &&
+					entry.reason === "too_many_files",
+			),
+		).toBe(true);
 	});
 
 	it("size cap: persists an honestly-marked useful partial graph", async () => {
@@ -104,14 +183,18 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		const raw = JSON.parse(
 			gunzipSync(fs.readFileSync(cachePath)).toString("utf-8"),
 		);
-		expect(raw.coverage).toEqual({
-			partial: true,
-			cap: 4,
-			totalNodes: built.nodes.size,
-			totalEdges: built.edges.length,
-			persistedNodes: raw.nodes.length,
-			persistedEdges: raw.edges.length,
-		});
+		expect(raw.coverage).toEqual(
+			expect.objectContaining({
+				partial: true,
+				cap: 4,
+				totalNodes: built.nodes.size,
+				totalEdges: built.edges.length,
+				persistedNodes: raw.nodes.length,
+				persistedEdges: raw.edges.length,
+				totalFiles: built.fileNodes.size,
+				persistedFiles: expect.any(Number),
+			}),
+		);
 		expect(raw.nodes.length + raw.edges.length).toBeLessThanOrEqual(4);
 		expect(raw.nodes.length).toBeGreaterThan(0);
 		expect(
@@ -125,7 +208,9 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		expect(attempt?.reason).toMatch(
 			/persisted partial review graph \(\d+\/\d+ elements/,
 		);
-		const entries = vi.mocked(logReviewGraph).mock.calls.map(([entry]) => entry);
+		const entries = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry);
 		const partial = entries.find((entry) => entry.phase === "persist_partial");
 		expect(partial?.observability).toEqual({
 			graph: expect.objectContaining({
@@ -137,13 +222,15 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 			}),
 			persistence: expect.objectContaining({ status: "scheduled" }),
 		});
-		const success = entries.find((entry) => entry.phase === "persist_succeeded");
+		const success = entries.find(
+			(entry) => entry.phase === "persist_succeeded",
+		);
 		expect(success?.observability?.graph?.persistCoverage).toEqual(
 			expect.objectContaining({
-			partial: true,
-			totalNodes: built.nodes.size,
-			totalEdges: built.edges.length,
-		}),
+				partial: true,
+				totalNodes: built.nodes.size,
+				totalEdges: built.edges.length,
+			}),
 		);
 	});
 
@@ -397,11 +484,7 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 			[incrementalPath],
 			incrementalFacts,
 		);
-		createTempFile(
-			incrementalEnv.tmpDir,
-			"a.ts",
-			"export const after = 3;\n",
-		);
+		createTempFile(incrementalEnv.tmpDir, "a.ts", "export const after = 3;\n");
 		clearGraphCache();
 		vi.mocked(logReviewGraph).mockClear();
 
@@ -419,7 +502,8 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 			.mock.calls.map(([entry]) => entry)
 			.filter((entry) => entry.phase === "build_succeeded");
 		const incrementalSuccess = successes.find(
-			(entry) => path.resolve(entry.cwd) === path.resolve(incrementalEnv.tmpDir),
+			(entry) =>
+				path.resolve(entry.cwd) === path.resolve(incrementalEnv.tmpDir),
 		);
 		const fullSuccess = successes.find(
 			(entry) => path.resolve(entry.cwd) === path.resolve(fullEnv.tmpDir),
@@ -466,11 +550,7 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 			"export const exitFlush = 1;\n",
 		);
 		process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "100000";
-		await buildOrUpdateGraph(
-			env.tmpDir,
-			[sourcePath],
-			new FactStore(),
-		);
+		await buildOrUpdateGraph(env.tmpDir, [sourcePath], new FactStore());
 
 		flushReviewGraphPersistsForExitForTests();
 		expect(vi.mocked(flushReviewGraphLogSync)).toHaveBeenCalled();
@@ -614,11 +694,7 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		);
 		process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "0";
 		process.env.PI_LENS_TEST_PERSIST_WORKER_DELAY_MS = "1000";
-		await buildOrUpdateGraph(
-			env.tmpDir,
-			[sourcePath],
-			new FactStore(),
-		);
+		await buildOrUpdateGraph(env.tmpDir, [sourcePath], new FactStore());
 
 		expect(flushReviewGraphPersist(env.tmpDir).ok).toBe(true);
 		const success = vi

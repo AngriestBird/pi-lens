@@ -370,9 +370,13 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   (#936).** `GRAPH_PERSIST_MAX_ELEMENTS` counts nodes + edges (default 500,000).
   Above it, `builder.ts` keeps whole-file node groups ranked through the shared
   reverse-dependency-centrality seam, then induced edges up to the cap. The gzip
-  snapshot carries exact total/persisted node+edge counts; read-only consumers
+  snapshot carries exact total/persisted node+edge/file counts; read-only consumers
   may load it and must surface `persistCoverage.partial`, while the incremental
-  build tier rejects it as a complete base. Keep this on the existing worker,
+  build tier rejects it as a complete base. A source walk stopped by the visited-entry
+  budget also persists `sourceFilesTruncated:true` with a lower-bound file count —
+  never clear that marker or describe the graph as complete. Capture the file cap
+  before the asynchronous walk and derive terminal success/skip from the returned
+  graph, not a shared concurrent-build verdict. Keep this on the existing worker,
   generation-staged promotion, and sync-flush path.
 - **Review-graph snapshot persistence is worker-offloaded (#939).** The
   canonical cache is `review-graph.json.gz` (legacy uncompressed

@@ -114,6 +114,12 @@ export interface ReviewGraphPersistCoverage {
 	totalEdges: number;
 	persistedNodes: number;
 	persistedEdges: number;
+	/** Source files represented by the graph; a lower bound when truncated. */
+	totalFiles: number;
+	/** Source files retained in the persisted graph after element capping. */
+	persistedFiles: number;
+	/** The source walk stopped at its visited-entry budget. */
+	sourceFilesTruncated?: true;
 	/**
 	 * #936 limit 2: set on a graph hydrated from a mid-build RESUME CHECKPOINT —
 	 * a snapshot taken while a full build was still walking files, so its

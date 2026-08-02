@@ -104,9 +104,7 @@ describe("review graph service", () => {
 			// The *.test.ts file is not graph-relevant: no node, no edges.
 			expect(graph.fileNodes.has(normalizeMapKey(testPath))).toBe(false);
 			expect(
-				graph.edges.some(
-					(e) => e.from === `file:${normalizeMapKey(testPath)}`,
-				),
+				graph.edges.some((e) => e.from === `file:${normalizeMapKey(testPath)}`),
 			).toBe(false);
 
 			// Incremental guard: passing the test file as a changed file must not
@@ -350,11 +348,7 @@ describe("review graph service", () => {
 			);
 
 			const facts = new FactStore();
-			const graph = await buildOrUpdateGraph(
-				env.tmpDir,
-				[aPath],
-				facts,
-			);
+			const graph = await buildOrUpdateGraph(env.tmpDir, [aPath], facts);
 
 			const helperCallEdge = graph.edges.find(
 				(e) =>
@@ -934,7 +928,9 @@ describe("review graph - workspace-package bare specifiers (#775)", () => {
 	});
 
 	it("a non-workspace bare specifier stays an external node, not a fabricated file edge", async () => {
-		const env = setupTestEnvironment("pi-lens-review-graph-workspace-external-");
+		const env = setupTestEnvironment(
+			"pi-lens-review-graph-workspace-external-",
+		);
 		try {
 			createTempFile(
 				env.tmpDir,
@@ -958,9 +954,7 @@ describe("review graph - workspace-package bare specifiers (#775)", () => {
 			expect(
 				graph.edges.some(
 					(e) =>
-						e.from === aId &&
-						e.kind === "imports" &&
-						e.to === "external:react",
+						e.from === aId && e.kind === "imports" && e.to === "external:react",
 				),
 			).toBe(true);
 		} finally {
