@@ -1227,25 +1227,24 @@ function logPersistSuccess(
 		fallback?: boolean;
 	} = { started: false, completed: false },
 ): void {
-	const observability = persistObservability(pending, {
-		status: "succeeded",
-		workerStarted: workerState.started,
-		workerCompleted: workerState.completed,
-		...(workerState.fallback ? { workerFallback: true } : {}),
-	});
 	logLatency({
 		type: "phase",
 		phase: "review_graph_persist",
 		filePath: pending.cachePath,
 		durationMs: stats.serializeMs + stats.writeMs,
-		metadata: { elements: pending.elementCount, ...stats, observability },
+		metadata: { elements: pending.elementCount, ...stats },
 	});
 	logReviewGraph({
 		cwd: key,
 		phase: "persist_succeeded",
 		elements: pending.elementCount,
 		...stats,
-		observability,
+		observability: persistObservability(pending, {
+			status: "succeeded",
+			workerStarted: workerState.started,
+			workerCompleted: workerState.completed,
+			...(workerState.fallback ? { workerFallback: true } : {}),
+		}),
 	});
 }
 

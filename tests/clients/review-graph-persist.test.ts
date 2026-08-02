@@ -19,7 +19,6 @@ import {
 	waitForReviewGraphPersistsForTests,
 } from "../../clients/review-graph/builder.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
-import { logLatency } from "../../clients/latency-logger.js";
 import { logReviewGraph } from "../../clients/review-graph-logger.js";
 
 vi.mock("../../clients/review-graph-logger.js", async (importOriginal) => ({
@@ -28,11 +27,6 @@ vi.mock("../../clients/review-graph-logger.js", async (importOriginal) => ({
 	>()),
 	logReviewGraph: vi.fn(),
 	flushReviewGraphLogSync: vi.fn(),
-}));
-
-vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
-	...(await importOriginal<typeof import("../../clients/latency-logger.js")>()),
-	logLatency: vi.fn(),
 }));
 
 // Circuit-breaker for the review-graph persist (#260): the whole-graph
@@ -257,21 +251,6 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		);
 		expect(succeeded?.observability?.persistence?.generation).toBe(
 			scheduled?.observability?.persistence?.generation,
-		);
-		const latencyPersist = vi.mocked(logLatency).mock.calls.find(
-			([entry]) => entry.phase === "review_graph_persist",
-		)?.[0];
-		expect(latencyPersist?.metadata?.observability).toEqual(
-			expect.objectContaining({
-			graph: expect.objectContaining({
-				graphGeneration: built.buildGeneration,
-				builtAt: built.builtAt,
-			}),
-			persistence: expect.objectContaining({
-				generation: scheduled?.observability?.persistence?.generation,
-				status: "succeeded",
-			}),
-		}),
 		);
 		const completed = vi.mocked(logReviewGraph).mock.calls.find(
 			([entry]) => entry.phase === "build_succeeded",
