@@ -152,6 +152,56 @@ describe("SgRunner", () => {
 				removeTempDirSync(root);
 			}
 		});
+
+		it("reports invalid generated-rule CLI output instead of an empty success", async () => {
+			const root = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-sg-invalid-"),
+			);
+			try {
+				safeSpawnAsync.mockResolvedValueOnce({
+					status: 8,
+					error: undefined,
+					stdout: "",
+					stderr: "invalid node kind: definitely_not_a_kind",
+				});
+				const { SgRunner } = await import("../../clients/sg-runner.js");
+				const result = await new SgRunner().tempScanDetailedAsync(
+					root,
+					"bad",
+					"id: bad\nlanguage: TypeScript\nrule: { kind: definitely_not_a_kind }\n",
+				);
+
+				expect(result.matches).toEqual([]);
+				expect(result.failure).toBe("cli-failure");
+				expect(result.error).toContain("invalid node kind");
+			} finally {
+				removeTempDirSync(root);
+			}
+		});
+
+		it("preserves status-one empty output as a genuine no-match", async () => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-sg-empty-"));
+			try {
+				safeSpawnAsync.mockResolvedValueOnce({
+					status: 1,
+					error: undefined,
+					stdout: "",
+					stderr: "",
+				});
+				const { SgRunner } = await import("../../clients/sg-runner.js");
+				const result = await new SgRunner().tempScanDetailedAsync(
+					root,
+					"empty",
+					"id: empty\nrule: { kind: function_declaration }\n",
+				);
+
+				expect(result.matches).toEqual([]);
+				expect(result.failure).toBeUndefined();
+				expect(result.error).toBeUndefined();
+			} finally {
+				removeTempDirSync(root);
+			}
+		});
 	});
 
 	describe("formatMatches()", () => {
@@ -161,7 +211,10 @@ describe("SgRunner", () => {
 			const matches = [
 				{
 					file: "src/foo.ts",
-					range: { start: { line: 0, column: 0 }, end: { line: 0, column: 10 } },
+					range: {
+						start: { line: 0, column: 0 },
+						end: { line: 0, column: 10 },
+					},
 					text: "console.log(x)",
 					language: "TypeScript",
 				},
@@ -177,7 +230,10 @@ describe("SgRunner", () => {
 			const matches = [
 				{
 					file: "src/foo.ts",
-					range: { start: { line: 0, column: 0 }, end: { line: 0, column: 10 } },
+					range: {
+						start: { line: 0, column: 0 },
+						end: { line: 0, column: 10 },
+					},
 					text: "console.log(x)",
 				},
 			];
@@ -191,11 +247,22 @@ describe("SgRunner", () => {
 			const matches = [
 				{
 					file: "src/foo.ts",
-					range: { start: { line: 0, column: 0 }, end: { line: 0, column: 20 } },
+					range: {
+						start: { line: 0, column: 0 },
+						end: { line: 0, column: 20 },
+					},
 					text: "console.log(msg)",
 					language: "TypeScript",
 					metaVariables: {
-						single: { MSG: { text: "msg", range: { start: { line: 0, column: 12 }, end: { line: 0, column: 15 } } } },
+						single: {
+							MSG: {
+								text: "msg",
+								range: {
+									start: { line: 0, column: 12 },
+									end: { line: 0, column: 15 },
+								},
+							},
+						},
 						multi: {},
 						transformed: {},
 					},
@@ -296,7 +363,14 @@ describe("SgRunner", () => {
 			const { buildBashRunArgs } = await import("../../clients/sg-runner.js");
 			expect(
 				buildBashRunArgs("ast-grep", ["run", "-p", "console.log($MSG)"]),
-			).toEqual(["-c", '"$0" "$@"', "ast-grep", "run", "-p", "console.log($MSG)"]);
+			).toEqual([
+				"-c",
+				'"$0" "$@"',
+				"ast-grep",
+				"run",
+				"-p",
+				"console.log($MSG)",
+			]);
 		});
 
 		it("never interpolates the command path into the script (no env-path injection)", async () => {
@@ -328,8 +402,7 @@ describe("SgRunner", () => {
 			// A NUL byte in an argv element makes Node's real `spawn()` throw
 			// SYNCHRONOUSLY (ERR_INVALID_ARG_VALUE) from inside the executor — the
 			// same detached-throw shape as the Windows `spawn UNKNOWN` failure.
-			(runner as unknown as { sgCommand: string }).sgCommand =
-				process.execPath;
+			(runner as unknown as { sgCommand: string }).sgCommand = process.execPath;
 			(runner as unknown as { sgArgsPrefix: string[] }).sgArgsPrefix = [
 				String.fromCharCode(0), // NUL byte -> spawn() throws synchronously
 			];

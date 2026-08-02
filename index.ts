@@ -63,7 +63,10 @@ import { formatCascadeNeighborDiagnostics } from "./clients/cascade-format.js";
 import { convertLspDiagnostics } from "./clients/dispatch/utils/lsp-diagnostics.js";
 import { initLSPConfig } from "./clients/lsp/config.js";
 import { getLSPService, resetLSPService } from "./clients/lsp/index.js";
-import { sweepOrphans, sweepUntrackedOrphans } from "./clients/instance-reaper.js";
+import {
+	sweepOrphans,
+	sweepUntrackedOrphans,
+} from "./clients/instance-reaper.js";
 import {
 	deregisterInstance,
 	registerInstance,
@@ -121,6 +124,7 @@ import { logLatency } from "./clients/latency-logger.js";
 import {
 	clearCachePrefixSession,
 	logCacheUsage,
+	observeCacheContext,
 	observeCachePrefix,
 } from "./clients/cache-observability.js";
 import {
@@ -168,7 +172,10 @@ function dbg(msg: string) {
 function getStableSessionId(ctx: unknown): string | undefined {
 	try {
 		return (
-			ctx as { sessionManager?: { getSessionId?: () => string } } | null | undefined
+			ctx as
+				| { sessionManager?: { getSessionId?: () => string } }
+				| null
+				| undefined
 		)?.sessionManager?.getSessionId?.();
 	} catch {
 		return undefined;
@@ -431,9 +438,10 @@ export default function (pi: ExtensionAPI) {
 	// value, so mutation-skip dbg lines can name it (e.g. "source=project")
 	// instead of a bare boolean. Threaded to pipeline/agent_end via the
 	// optional `getFlagSource` field — zero effect on getLensFlag itself.
-	function getLensFlagSource(name: string, editedFilePath?: string): ReturnType<
-		typeof resolvePiLensFlagWithSource
-	>["source"] {
+	function getLensFlagSource(
+		name: string,
+		editedFilePath?: string,
+	): ReturnType<typeof resolvePiLensFlagWithSource>["source"] {
 		const projectConfig = loadPiLensProjectConfig(runtime.projectRoot);
 		return resolvePiLensFlagWithSource(
 			name,
@@ -513,9 +521,15 @@ export default function (pi: ExtensionAPI) {
 	// hosts without registerMessageRenderer simply never get a renderer
 	// registered (the raw `content` fallback text still shows since sendMessage
 	// itself is guarded the same way at the emit site below).
-	if (typeof (pi as { registerMessageRenderer?: unknown }).registerMessageRenderer === "function") {
+	if (
+		typeof (pi as { registerMessageRenderer?: unknown })
+			.registerMessageRenderer === "function"
+	) {
 		try {
-			pi.registerMessageRenderer(TURN_SUMMARY_CUSTOM_TYPE, renderTurnSummaryMessage);
+			pi.registerMessageRenderer(
+				TURN_SUMMARY_CUSTOM_TYPE,
+				renderTurnSummaryMessage,
+			);
 		} catch (registerRendererErr) {
 			dbg(`turn-summary renderer registration failed: ${registerRendererErr}`);
 		}
@@ -1020,7 +1034,7 @@ export default function (pi: ExtensionAPI) {
 		),
 	];
 
-	// Situational tools (5): registered but, on hosts that support pi's dynamic
+	// Situational tools (6): registered but, on hosts that support pi's dynamic
 	// tooling (`pi.getActiveTools`/`pi.setActiveTools`), left inactive at load —
 	// deactivated in the block below right after registration. The model
 	// activates the ones it needs via `pi_lens_activate_tools`. On hosts without
@@ -1042,7 +1056,8 @@ export default function (pi: ExtensionAPI) {
 		},
 		{
 			name: "ast_grep_replace",
-			summary: "AST-aware structural code rewrite/refactor (ast-grep patterns).",
+			summary:
+				"AST-aware structural code rewrite/refactor (ast-grep patterns).",
 		},
 		{
 			name: "ast_grep_outline",
@@ -1081,7 +1096,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// Dynamic tooling (#pi 0.80.x+): deactivate the 5 situational tools so they
+	// Dynamic tooling (#pi 0.80.x+): deactivate the 6 situational tools so they
 	// start inactive and the model must call `pi_lens_activate_tools` to bring
 	// them in (next-turn visibility, per the docs' loader pattern). This used
 	// to run synchronously right here, immediately after registration — but
@@ -1148,9 +1163,7 @@ export default function (pi: ExtensionAPI) {
 				) {
 					const lazyNames = new Set(LAZY_TOOL_CATALOG.map((t) => t.name));
 					const active = piWithActiveTools.getActiveTools();
-					const initiallyActive = active.filter(
-						(name) => !lazyNames.has(name),
-					);
+					const initiallyActive = active.filter((name) => !lazyNames.has(name));
 					piWithActiveTools.setActiveTools(initiallyActive);
 				}
 			} catch (deactivateErr) {
@@ -1275,8 +1288,7 @@ export default function (pi: ExtensionAPI) {
 				rustClient,
 				deadCodeClients,
 			} = await loadBootstrapClients();
-			const bootstrapClientsDurationMs =
-				Date.now() - bootstrapClientsStartedAt;
+			const bootstrapClientsDurationMs = Date.now() - bootstrapClientsStartedAt;
 			const handlerEnteredAt = Date.now();
 			await handleSessionStart({
 				ctxCwd: ctx.cwd,
@@ -1863,16 +1875,19 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 	try {
-		(pi as any).on("agent_settled", (_event: unknown, ctx: { cwd?: string }) => {
-			if (!lensEnabled) return;
-			void runQuietWindow({
-				runtime,
-				dbg,
-				cwd: ctx?.cwd,
-			}).catch((err) => {
-				dbg(`quiet_window crashed: ${err}`);
-			});
-		});
+		(pi as any).on(
+			"agent_settled",
+			(_event: unknown, ctx: { cwd?: string }) => {
+				if (!lensEnabled) return;
+				void runQuietWindow({
+					runtime,
+					dbg,
+					cwd: ctx?.cwd,
+				}).catch((err) => {
+					dbg(`quiet_window crashed: ${err}`);
+				});
+			},
+		);
 	} catch (registerErr) {
 		dbg(`agent_settled registration failed (older pi host?): ${registerErr}`);
 	}
@@ -1900,7 +1915,9 @@ export default function (pi: ExtensionAPI) {
 		const shutdownClassification = noteSessionShutdown(ctx, stableSessionId);
 		if (shutdownClassification === "secondary") {
 			decrementSecondarySessionCount();
-			dbg("session_shutdown: concurrent secondary — skipping shared-infra teardown");
+			dbg(
+				"session_shutdown: concurrent secondary — skipping shared-infra teardown",
+			);
 			return;
 		}
 
@@ -1922,7 +1939,11 @@ export default function (pi: ExtensionAPI) {
 		// children when a parent dies) — they rely on stdin EOF, LSP
 		// `initialize.processId` self-watchdog compliance, and the #449/#472
 		// cross-process instance registry's orphan reaper as the backstop (#472).
-		resetLSPService({ fast: true, processExiting: true, reason: "session_shutdown" });
+		resetLSPService({
+			fast: true,
+			processExiting: true,
+			reason: "session_shutdown",
+		});
 	});
 
 	// --- Prompt-cache response-side usage observability (#1018) ---
@@ -1933,10 +1954,15 @@ export default function (pi: ExtensionAPI) {
 	// that never fires it simply produces no records rather than crashing wireup.
 	try {
 		// biome-ignore lint/suspicious/noExplicitAny: message_end overload absent on older host types
-		(pi as any).on?.("message_end", (event: { message?: unknown } | unknown) => {
+		(pi as any).on?.("message_end", (event: unknown, ctx: unknown) => {
 			if (!lensEnabled) return;
 			try {
-				logCacheUsage((event as { message?: unknown })?.message, dbg);
+				const sessionId = getStableSessionId(ctx);
+				logCacheUsage((event as { message?: unknown })?.message, dbg, {
+					sessionId,
+					sessionRole: classifyCurrentSessionEmission(ctx, sessionId),
+					turnIndex: runtime.turnIndex,
+				});
 			} catch (err) {
 				dbg(`message_end handler error: ${err}`);
 			}
@@ -1990,51 +2016,97 @@ export default function (pi: ExtensionAPI) {
 			event: { messages?: Array<{ role: string; content: unknown }> } | unknown,
 			ctx: { cwd?: string },
 		) => {
-			if (!lensEnabled) return;
+			// #1018: context telemetry deliberately runs even when the lens or its
+			// injection toggle is off, so an A/B run has a no-injection observation.
+			const existingMessages =
+				(event as { messages?: Array<{ role: string; content: unknown }> })
+					?.messages ?? [];
+			const prefixSessionId = getStableSessionId(ctx);
+			const sessionRole = classifyCurrentSessionEmission(ctx, prefixSessionId);
+			const prefixObservation = observeCachePrefix(
+				existingMessages,
+				runtime.turnIndex,
+				prefixSessionId,
+				sessionRole,
+				dbg,
+			);
+			const effectiveInjectionEnabled = lensEnabled && contextInjectionEnabled;
+			let telemetryLogged = false;
+			const logContextObservation = (
+				resultMessages: Array<{ role: string; content: unknown }>,
+				placement: "prepend" | "insert-before-final" | "append" | "none",
+				injectionSources: Array<
+					"session-guidance" | "turn-findings" | "test-findings" | "agent-nudge"
+				>,
+				injectedMessages: Array<{ role: string; content: unknown }>,
+			) => {
+				if (telemetryLogged) return;
+				telemetryLogged = true;
+				observeCacheContext({
+					existingMessages,
+					resultMessages,
+					sessionId: prefixSessionId,
+					sessionRole,
+					turnIndex: runtime.turnIndex,
+					injectionEnabled: effectiveInjectionEnabled,
+					injectionSources,
+					injectedMessages,
+					placement,
+					prefixObservation,
+					dbg,
+				});
+			};
 			try {
 				const cwd = ctx.cwd ?? process.cwd();
 
-				const existingMessages =
-					(event as { messages?: Array<{ role: string; content: unknown }> })
-						?.messages ?? [];
-
-				// #1018 request-side prefix-stability guard. Pure observation — it runs
-				// on EVERY context call (including non-injecting turns and, above, when
-				// injection is disabled) so a cache-prefix break caused by pi-lens OR
-				// anything else is caught, and it never alters the return value below.
-				// Keyed by the STABLE per-session id (`ctx.sessionManager.getSessionId()`,
-				// same source session_start/#473 use) so a concurrent in-process subagent
-				// gets its own baseline instead of stomping the parent's, and tagged with
-				// the read-only #473 classification so the log is self-describing.
-				const prefixSessionId = getStableSessionId(ctx);
-				observeCachePrefix(
-					existingMessages,
-					runtime.turnIndex,
-					prefixSessionId,
-					classifyCurrentSessionEmission(ctx, prefixSessionId),
-					dbg,
-				);
-
-				// Injection is separately gated; when disabled we still observed above.
-				if (!contextInjectionEnabled) return;
+				if (!effectiveInjectionEnabled) {
+					logContextObservation(existingMessages, "none", [], []);
+					return;
+				}
 
 				const turnEndFindings = consumeTurnEndFindings(cacheManager, cwd);
 				const sessionGuidance = consumeSessionStartGuidance(cacheManager, cwd);
 				const testFindings = consumeTestFindings(cacheManager, cwd);
 				const agentNudge = consumeAgentNudge(dbg);
-				const injectedMessages = [
-					...(sessionGuidance?.messages ?? []),
-					...(turnEndFindings?.messages ?? []),
-					...(testFindings?.messages ?? []),
-					...(agentNudge?.messages ?? []),
-				];
-				if (injectedMessages.length === 0) return;
+				const sourceMessages = [
+					{
+						source: "session-guidance" as const,
+						messages: sessionGuidance?.messages ?? [],
+					},
+					{
+						source: "turn-findings" as const,
+						messages: turnEndFindings?.messages ?? [],
+					},
+					{
+						source: "test-findings" as const,
+						messages: testFindings?.messages ?? [],
+					},
+					{
+						source: "agent-nudge" as const,
+						messages: agentNudge?.messages ?? [],
+					},
+				].filter((source) => source.messages.length > 0);
+				const injectedMessages = sourceMessages.flatMap(
+					(source) => source.messages,
+				);
+				const injectionSources = sourceMessages.map((source) => source.source);
+				if (injectedMessages.length === 0) {
+					logContextObservation(existingMessages, "none", [], []);
+					return;
+				}
 
 				// Empty transcript (no turns yet): fall back to prepend semantics —
 				// there is no trailing user message to sit before, and we must never
 				// emit empty input (fe0ed5da: OpenAI Responses fails on empty input).
 				if (existingMessages.length === 0) {
-					return { messages: [...injectedMessages] };
+					const resultMessages = [...injectedMessages];
+					logContextObservation(
+						resultMessages,
+						"prepend",
+						injectionSources,
+						injectedMessages,
+					);
+					return { messages: resultMessages };
 				}
 
 				const lastMessage = existingMessages[existingMessages.length - 1];
@@ -2046,19 +2118,33 @@ export default function (pi: ExtensionAPI) {
 					// Append after the whole transcript — pure append preserves the
 					// adjacency AND leaves the entire prior transcript as an untouched
 					// cache prefix.
-					return { messages: [...existingMessages, ...injectedMessages] };
+					const resultMessages = [...existingMessages, ...injectedMessages];
+					logContextObservation(
+						resultMessages,
+						"append",
+						injectionSources,
+						injectedMessages,
+					);
+					return { messages: resultMessages };
 				}
 
 				// Insert the injected block just before the final message so
 				// messages[0] stays stable and the real user prompt stays trailing.
-				return {
-					messages: [
-						...existingMessages.slice(0, -1),
-						...injectedMessages,
-						lastMessage,
-					],
-				};
+				const resultMessages = [
+					...existingMessages.slice(0, -1),
+					...injectedMessages,
+					lastMessage,
+				];
+				logContextObservation(
+					resultMessages,
+					"insert-before-final",
+					injectionSources,
+					injectedMessages,
+				);
+				return { messages: resultMessages };
 			} catch (err) {
+				if (!telemetryLogged)
+					logContextObservation(existingMessages, "none", [], []);
 				dbg(`context event error: ${err}`);
 			}
 		},
