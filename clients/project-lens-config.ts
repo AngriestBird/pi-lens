@@ -98,6 +98,28 @@ const PROJECT_OWN_CONFIG_KEYS = [
 export interface PiLensProjectRuleConfig {
 	/** Optional override for the rule's primary numeric threshold. */
 	threshold?: number;
+	/**
+	 * Project-level disable list — rule ids whose diagnostics the project's
+	 * `.pi-lens.json` deliberately turns off. Output-only filtering (the
+	 * diagnostics are still recorded: widget state, baseline, and dispatch
+	 * dedup see them), so a project's own policy never widens the trusted
+	 * surface area beyond what the user actually sees. Matching is PROJECT-
+	 * WIDE: the `<id>` key this list lives under is a grouping label only, not
+	 * a filter scope — every `disable` list across every `rules.<key>` entry
+	 * is unioned before matching. Disable is stronger than `select` (below) —
+	 * a rule on both lists is dropped.
+	 */
+	disable?: string[];
+	/**
+	 * Project-level allowlist — when the UNION of `select` lists across every
+	 * `rules.<key>` entry is non-empty, ONLY the rule ids in that union
+	 * survive filtering; everything else is dropped, project-wide (an absent
+	 * or empty union everywhere is "no restriction"). Like `disable`, the
+	 * `<id>` key this list lives under does not scope which rules it can
+	 * match. A rule on both `select` and `disable` is dropped (disable wins —
+	 * explicit exclusion trumps explicit inclusion).
+	 */
+	select?: string[];
 }
 
 export interface PiLensProjectMutationConfig {
@@ -343,6 +365,35 @@ function warnInvalidConfigOnce(configPath: string, reason: string): void {
 	);
 }
 
+function parseRulePolicyList(
+	configPath: string,
+	ruleId: string,
+	key: "disable" | "select",
+	value: unknown,
+): { list: string[]; invalid: boolean } {
+	if (!Array.isArray(value)) {
+		warnInvalidConfigOnce(
+			configPath,
+			`rules.${ruleId}.${key} must be an array of strings`,
+		);
+		return { list: [], invalid: true };
+	}
+	const list: string[] = [];
+	for (const entry of value) {
+		if (typeof entry !== "string") continue;
+		const trimmed = entry.trim();
+		if (trimmed.length > 0) list.push(trimmed);
+	}
+	if (list.length === 0) {
+		warnInvalidConfigOnce(
+			configPath,
+			`rules.${ruleId}.${key} must be a non-empty array of strings`,
+		);
+		return { list: [], invalid: true };
+	}
+	return { list, invalid: false };
+}
+
 function parseConfigFile(configPath: string): PiLensProjectConfig {
 	let raw: unknown;
 	try {
@@ -377,20 +428,63 @@ function parseConfigFile(configPath: string): PiLensProjectConfig {
 	if (obj.rules && typeof obj.rules === "object" && !Array.isArray(obj.rules)) {
 		const rawRules = obj.rules as Record<string, unknown>;
 		for (const [ruleId, ruleCfg] of Object.entries(rawRules)) {
+			// #444's own example writes the lists directly under `rules` (`rules.
+			// disable`), which lands here as an array and would otherwise be
+			// dropped without a word — the one shape a user is most likely to try.
 			if (!ruleCfg || typeof ruleCfg !== "object" || Array.isArray(ruleCfg)) {
+				warnInvalidConfigOnce(
+					configPath,
+					`rules.${ruleId} must be an object with threshold, disable, or select; ignored`,
+				);
 				continue;
 			}
 			const r = ruleCfg as Record<string, unknown>;
+			const entry: PiLensProjectRuleConfig = {};
 			if (
 				typeof r.threshold === "number" &&
 				Number.isFinite(r.threshold) &&
 				r.threshold > 0
 			) {
-				rules[ruleId] = { threshold: r.threshold };
+				entry.threshold = r.threshold;
 			} else if ("threshold" in r) {
 				warnInvalidConfigOnce(
 					configPath,
 					`rules.${ruleId}.threshold must be a positive finite number`,
+				);
+			}
+			if ("disable" in r) {
+				const parsed = parseRulePolicyList(
+					configPath,
+					ruleId,
+					"disable",
+					r.disable,
+				);
+				if (!parsed.invalid) entry.disable = parsed.list;
+			}
+			if ("select" in r) {
+				const parsed = parseRulePolicyList(
+					configPath,
+					ruleId,
+					"select",
+					r.select,
+				);
+				if (!parsed.invalid) entry.select = parsed.list;
+			}
+			// Honor both threshold-only and policy-only entries; only drop if
+			// the entry had no recognized fields at all (e.g. { unrelated: true }).
+			// A recognized-but-malformed field already warned above, so only warn
+			// here when nothing recognized was spelled at all — #444 proposed
+			// `only` rather than `select`, and that typo must not fail silent.
+			if (entry.threshold !== undefined || entry.disable || entry.select) {
+				rules[ruleId] = entry;
+			} else if (
+				!("threshold" in r) &&
+				!("disable" in r) &&
+				!("select" in r)
+			) {
+				warnInvalidConfigOnce(
+					configPath,
+					`rules.${ruleId} has no recognized setting (threshold, disable, select); ignored`,
 				);
 			}
 		}

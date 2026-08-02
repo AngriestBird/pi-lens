@@ -87,6 +87,8 @@ field docs.
 | `actionableWarnings.autoFix.maxFixes` | global | `5` | Cap on quickfixes applied per turn (`0` = report only) |
 | `rules.high-complexity.threshold` | project | `15` | Cyclomatic-complexity threshold |
 | `rules.high-fan-out.threshold` | project | `20` | Distinct-function-call threshold |
+| `rules.<id>.disable` | project | absent | Disable diagnostics for a rule (output-only filter, project-wide; same normalization as `pi-lens-ignore`) |
+| `rules.<id>.select` | project | absent | Allowlist of rule ids (output-only filter, project-wide across every key; disable wins over select) |
 | `maxProjectFiles` | project | `2000` | Base scale knob; derives five subsystem size budgets |
 | `reviewGraph.maxFiles` | project | derived (clamped `100`–`20000`) | Explicit review-graph file budget |
 | `trivy.enabled` / `trivy.minSeverity` | project | off | Opt-in Trivy vulnerability scanning |
@@ -140,7 +142,8 @@ tolerated without warning; anything else is logged once as a likely typo.
   "ignore": ["**/*.test.ts", "vendor/**"],
   "rules": {
     "high-complexity": { "threshold": 25 },
-    "high-fan-out": { "threshold": 30 }
+    "high-fan-out": { "threshold": 30 },
+    "no-eval": { "disable": ["no-eval", "ast-grep:no-eval", "no-eval-js"] }
   },
   "maxProjectFiles": 5000,
   "format": { "enabled": false }

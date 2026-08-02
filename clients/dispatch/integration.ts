@@ -1697,6 +1697,7 @@ export async function dispatchLint(
 	cwd: string,
 	pi: PiAgentAPI,
 	modifiedRanges?: ModifiedRange[],
+	projectRoot?: string,
 ): Promise<string> {
 	// By default, only run BLOCKING rules for fast feedback on file write
 	// Uses persistent sessionBaselines so delta mode actually filters
@@ -1708,6 +1709,7 @@ export async function dispatchLint(
 		sessionFacts,
 		true,
 		modifiedRanges,
+		projectRoot,
 	);
 	sessionFacts.clearFileFactsFor(ctx.filePath);
 
@@ -1736,7 +1738,7 @@ export async function dispatchLintWithResult(
 	pi: PiAgentAPI,
 	modifiedRanges?: ModifiedRange[],
 	logContext?: LogContext,
-	options?: { blockingOnly?: boolean },
+	options?: { blockingOnly?: boolean; projectRoot?: string },
 ): Promise<DispatchResult> {
 	// Default true preserves the per-edit fast path (errors only). Callers that
 	// want the full picture (warnings + structural smells), e.g. the MCP review
@@ -1748,6 +1750,7 @@ export async function dispatchLintWithResult(
 		sessionFacts,
 		options?.blockingOnly ?? true,
 		modifiedRanges,
+		options?.projectRoot,
 	);
 	sessionFacts.clearFileFactsFor(ctx.filePath);
 
@@ -1818,7 +1821,11 @@ export async function dispatchLintDetailed(
 	filePath: string,
 	cwd: string,
 	pi: PiAgentAPI,
-	options?: { blockingOnly?: boolean; modifiedRanges?: ModifiedRange[] },
+	options?: {
+		blockingOnly?: boolean;
+		modifiedRanges?: ModifiedRange[];
+		projectRoot?: string;
+	},
 ): Promise<{ result: DispatchResult; runners: RunnerOutcome[] }> {
 	const empty: DispatchResult = {
 		diagnostics: [],
@@ -1839,6 +1846,7 @@ export async function dispatchLintDetailed(
 		sessionFacts,
 		options?.blockingOnly ?? false,
 		options?.modifiedRanges,
+		options?.projectRoot,
 	);
 	sessionFacts.clearFileFactsFor(ctx.filePath);
 

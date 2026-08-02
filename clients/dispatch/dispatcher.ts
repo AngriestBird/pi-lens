@@ -35,6 +35,7 @@ import { applyDispositions } from "../diagnostic-dispositions.js";
 import { applyInlineSuppressions } from "./inline-suppressions.js";
 import { getToolPlan } from "./plan.js";
 import { resolveRunnerPath } from "./runner-context.js";
+import { applyRulePolicy, rulePolicyMapFromConfig } from "./rule-policy.js";
 import { getToolProfile } from "./tool-profile.js";
 import type {
 	Diagnostic,
@@ -155,9 +156,13 @@ export function createDispatchContext(
 	facts: FactStore,
 	blockingOnly?: boolean,
 	modifiedRanges?: import("./types.js").ModifiedRange[],
+	/** Authoritative workspace root; `cwd` may be a nested language root. */
+	projectRoot?: string,
 ): DispatchContext {
 	const absoluteFilePath = resolveRunnerPath(cwd, filePath);
-	const normalizedProjectRoot = normalizeMapKey(path.resolve(cwd));
+	const normalizedProjectRoot = normalizeMapKey(
+		path.resolve(projectRoot ?? cwd),
+	);
 	const normalizedCwd = normalizeMapKey(
 		resolveLanguageRootForFile(absoluteFilePath, cwd),
 	);
@@ -783,12 +788,38 @@ export async function dispatchForFile(
 		ctx.filePath,
 		fileContent,
 	);
-	let visibleDiagnostics = dispositionFiltered;
+	// Project rule policy (`.pi-lens.json` `rules.<id>.disable`/`select`) —
+	// output-only filtering applied AFTER inline suppression / disposition so
+	// the project's policy overlays the same set the renderer would see, but
+	// BEFORE widget state / baseline-related processing. The baseline below
+	// still uses `dedupedDiagnostics` (the unfiltered set), so editing a
+	// project's policy doesn't reset / corrupt delta baselines — the
+	// user-authored baseline comparison remains authoritative.
+	//
+	// Resolved from `ctx.projectRoot` (falling back to `ctx.cwd`), NOT
+	// `ctx.projectConfig` — `ctx.projectConfig` is loaded from the nested
+	// LANGUAGE root (`resolveLanguageRootForFile`), so in a monorepo where a
+	// package directory has its own `.pi-lens.json`, `discoverPiLensProjectConfig`'s
+	// upward walk stops there and never sees a repo-root policy.
+	// `lens_diagnostics` loads its policy map from `runtime.projectRoot`; using
+	// the same root here keeps the two surfaces in agreement. `ctx.projectConfig`
+	// itself is untouched — thresholds and mutation flags keep their existing
+	// language-root resolution.
+	const rulePolicy = rulePolicyMapFromConfig(
+		loadPiLensProjectConfig(ctx.projectRoot ?? ctx.cwd).rules,
+	);
+	const policyKept = applyRulePolicy(dispositionFiltered, rulePolicy);
+	let visibleDiagnostics = policyKept;
 	let resolvedCount = 0;
 	if (ctx.deltaMode && previousBaseline) {
+		// Silencing a rule is not fixing it. The stored baseline is deliberately
+		// unfiltered (below), so compare against a policy-filtered view of it —
+		// otherwise every disabled finding sits in `fixed` on every dispatch and
+		// inflates the agent's resolved tally (trackAgentFixed) forever. Only
+		// `fixed` changes: policy-dropped ids are absent from `after` either way.
 		const filtered = filterDelta(
 			visibleDiagnostics,
-			previousBaseline,
+			applyRulePolicy(previousBaseline, rulePolicy),
 			(d) => d.id,
 		);
 		visibleDiagnostics = promoteDeltaUnusedToBlockers(filtered.new);
