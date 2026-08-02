@@ -150,18 +150,28 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		expect(
 			entries.some(
 				(entry) =>
-					entry.phase === "build_skipped" &&
-					entry.reason === "too_many_files",
+					entry.phase === "build_skipped" && entry.reason === "too_many_files",
 			),
 		).toBe(true);
+		const fullSuccess = entries.find(
+			(entry) =>
+				entry.phase === "build_succeeded" &&
+				entry.observability?.graph?.mode === "full",
+		);
+		expect(fullSuccess?.reason).toBeUndefined();
 	});
 
 	it("size cap: persists an honestly-marked useful partial graph", async () => {
 		const env = makeEnv();
 		createTempFile(
 			env.tmpDir,
+			"a.test.ts",
+			"export const fixtureOnly = 1;\n",
+		);
+		createTempFile(
+			env.tmpDir,
 			"a.ts",
-			"export function foo() {\n  return 1;\n}\n",
+			'import "./a.test.js";\nexport function foo() {\n  return 1;\n}\n',
 		);
 		createTempFile(
 			env.tmpDir,
@@ -191,9 +201,12 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 				totalEdges: built.edges.length,
 				persistedNodes: raw.nodes.length,
 				persistedEdges: raw.edges.length,
-				totalFiles: built.fileNodes.size,
+				totalFiles: 2,
 				persistedFiles: expect.any(Number),
 			}),
+		);
+		expect(raw.coverage.persistedFiles).toBeLessThanOrEqual(
+			raw.coverage.totalFiles,
 		);
 		expect(raw.nodes.length + raw.edges.length).toBeLessThanOrEqual(4);
 		expect(raw.nodes.length).toBeGreaterThan(0);

@@ -64,8 +64,8 @@ import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";
 import { getProjectIgnoreMatcher } from "../file-utils.js";
 import {
 	clearReviewGraphWorkspaceCache,
+	getGraphBuildInfoForGraph,
 	getGraphImportChanges,
-	getLastGraphBuildInfo,
 } from "../review-graph/builder.js";
 import {
 	buildReverseDependencyIndexFromGraph,
@@ -352,9 +352,7 @@ function withPrimaryPolicyGroup(
 		? groups
 		: groups
 				.map((group) => {
-					const runnerIds = group.runnerIds.filter(
-						(id) => id !== "lsp",
-					);
+					const runnerIds = group.runnerIds.filter((id) => id !== "lsp");
 					if (runnerIds.length === 0) return null;
 					return {
 						...group,
@@ -770,7 +768,7 @@ export async function computeCascadeForFile(
 		// cache hits then never heal. Generation equality can't be clobbered into
 		// a false positive: a graph-mutating build always mints a new generation.
 		// An unstamped graph (mode "skipped") always rebuilds.
-		const graphBuildInfo = getLastGraphBuildInfo();
+		const graphBuildInfo = getGraphBuildInfoForGraph(graph);
 		const workspaceKey = normalizeMapKey(cwd);
 		const cachedReverseDeps = reverseDepsIndexCache.get(workspaceKey);
 		const importDelta = getGraphImportChanges(graph);

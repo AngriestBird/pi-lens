@@ -135,7 +135,9 @@ describe("computeCascadeForFile", () => {
 			});
 
 			expect(touchFile).not.toHaveBeenCalled();
-			expect(result?.result?.neighbors[0]?.diagnostics[0]?.filePath).toBe(neighbor);
+			expect(result?.result?.neighbors[0]?.diagnostics[0]?.filePath).toBe(
+				neighbor,
+			);
 			expect(result?.result?.formatted).toContain("neighbor.ts");
 		} finally {
 			env.cleanup();
@@ -357,7 +359,9 @@ describe("computeCascadeForFile", () => {
 			});
 
 			expect(touchFile).not.toHaveBeenCalled();
-			expect(result?.result?.neighbors.some((n) => n.reason === "fallback")).toBe(true);
+			expect(
+				result?.result?.neighbors.some((n) => n.reason === "fallback"),
+			).toBe(true);
 			expect(result?.result?.formatted).toContain("fallback error");
 		} finally {
 			env.cleanup();
@@ -512,10 +516,8 @@ describe("computeCascadeForFile", () => {
 				getDiagnostics: vi.fn(),
 			});
 
-			const {
-				computeCascadeForFile,
-				resetDispatchBaselines: _reset,
-			} = await import("../../clients/dispatch/integration.js");
+			const { computeCascadeForFile, resetDispatchBaselines: _reset } =
+				await import("../../clients/dispatch/integration.js");
 			const { _resetTierAwareCascadeEnabledForTests } = await import(
 				"../../clients/lsp/cascade-tier.js"
 			);
@@ -685,7 +687,9 @@ describe("computeCascadeForFile", () => {
 			});
 
 			expect(touchFile).toHaveBeenCalledTimes(2);
-			expect(second?.result?.neighbors[0]?.diagnostics[0]?.message).toBe("error2");
+			expect(second?.result?.neighbors[0]?.diagnostics[0]?.message).toBe(
+				"error2",
+			);
 		} finally {
 			env.cleanup();
 		}
@@ -818,7 +822,10 @@ describe("computeCascadeForFile", () => {
 			const { computeCascadeForFile } = await import(
 				"../../clients/dispatch/integration.js"
 			);
-			const run = await computeCascadeForFile(primary, env.tmpDir, { turnSeq: 1, writeSeq: 1 });
+			const run = await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
 			expect(run.result).toBeUndefined();
 			expect(run.skipReason).toBe("no_neighbors");
 			expect(run.indeterminate).toBeUndefined();
