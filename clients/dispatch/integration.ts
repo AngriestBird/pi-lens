@@ -908,22 +908,30 @@ export async function computeCascadeForFile(
 		// changed file's own symbols) when the repo is over
 		// PI_LENS_REVIEW_GRAPH_MAX_FILES (`too_many_files`) or the root is unsafe
 		// (`unsafe_root`) — both stamp mode "skipped" on the already-read
-		// graphBuildInfo. Computing impact against that empty graph yields zero
-		// neighbors for EVERY edit, indistinguishable from a genuine clean leaf.
-		// Thread the ALREADY-KNOWN degraded state (never re-derived) onto the
-		// result so the turn-end seam surfaces an honest advisory instead of a
-		// silent all-clear (#533). Keyed strictly off the degraded build mode —
-		// NOT off `neighborFiles.length === 0` — so a healthy build with a real
-		// empty dependent set stays silent (no crying wolf).
-		if (graphBuildInfo.mode === "skipped" && !impact.indeterminate) {
+		// graphBuildInfo. A capped or entry-budget-truncated graph is also not a
+		// complete dependent set even though it has nodes, so it must not look like
+		// a clean leaf. Thread the ALREADY-KNOWN degraded state (never re-derived)
+		// onto the result so the turn-end seam surfaces an honest advisory instead
+		// of a silent all-clear (#533). Keyed strictly off the graph's explicit
+		// degraded marker, NOT off `neighborFiles.length === 0`.
+		if (
+			(graphBuildInfo.mode === "skipped" ||
+				graph.persistCoverage?.partial === true) &&
+			!impact.indeterminate
+		) {
+			const coverage = graph.persistCoverage;
 			impact.indeterminate = {
 				reason: "graph_degraded",
 				detail:
-					graphBuildInfo.skipReason === "too_many_files"
-						? `review graph disabled — ${graphBuildInfo.sourceFileCount ?? "?"} files over the ${graphBuildInfo.maxFileCount ?? "?"} cap`
-						: graphBuildInfo.skipReason === "unsafe_root"
-							? "review graph skipped — workspace root is at/above home dir"
-							: `review graph unavailable (${graphBuildInfo.skipReason ?? "skipped"})`,
+					graphBuildInfo.mode === "skipped"
+						? graphBuildInfo.skipReason === "too_many_files"
+							? `review graph disabled — ${graphBuildInfo.sourceFileCount ?? "?"} files over the ${graphBuildInfo.maxFileCount ?? "?"} cap`
+							: graphBuildInfo.skipReason === "unsafe_root"
+								? "review graph skipped — workspace root is at/above home dir"
+								: `review graph unavailable (${graphBuildInfo.skipReason ?? "skipped"})`
+						: coverage?.sourceFilesTruncated
+							? "review graph partial — source walk stopped at its visited-entry budget"
+							: "review graph partial — persisted graph coverage is incomplete",
 				sourceFileCount: graphBuildInfo.sourceFileCount,
 				maxFileCount: graphBuildInfo.maxFileCount,
 			};

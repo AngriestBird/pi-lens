@@ -860,6 +860,48 @@ describe("computeCascadeForFile", () => {
 		}
 	});
 
+	it("returns indeterminate when the review graph source walk was truncated", async () => {
+		const env = setupTestEnvironment("cascade-source-budget-");
+		try {
+			const primary = path.join(env.tmpDir, "primary.ts");
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			mocks.buildOrUpdateGraph.mockResolvedValue({
+				...emptyGraph(),
+				persistCoverage: {
+					partial: true,
+					cap: 500_000,
+					totalNodes: 0,
+					totalEdges: 0,
+					persistedNodes: 0,
+					persistedEdges: 0,
+					totalFiles: 2,
+					persistedFiles: 0,
+					sourceFilesTruncated: true,
+				},
+			});
+			mocks.computeImpactCascade.mockReturnValue(impact(primary, []));
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile: vi.fn(),
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			const run = await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+			expect(run.result).toBeUndefined();
+			expect(run.skipReason).toBe("indeterminate");
+			expect(run.indeterminate?.reason).toBe("graph_degraded");
+			expect(run.indeterminate?.detail).toContain("source walk");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// #1023: a SIZE-SKIPPED graph (getLastGraphBuildInfo().mode === "skipped",
 	// too_many_files) — the ALREADY-KNOWN degraded state is threaded onto the
 	// result at the compute site. Every edit computes zero neighbors against the

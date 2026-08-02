@@ -377,7 +377,8 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   never clear that marker or describe the graph as complete. Capture the file cap
   before the asynchronous walk and derive terminal success/skip from the returned
   graph, not a shared concurrent-build verdict. Keep this on the existing worker,
-  generation-staged promotion, and sync-flush path.
+  generation-staged promotion, and sync-flush path. Cascade treats any partial
+  coverage as indeterminate rather than a clean zero-neighbor result.
 - **Review-graph snapshot persistence is worker-offloaded (#939).** The
   canonical cache is `review-graph.json.gz` (legacy uncompressed
   `review-graph.json` is load-only fallback for one release). Debounced writes
