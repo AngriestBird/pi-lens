@@ -7,19 +7,25 @@ import { getProjectDataDir } from "../../clients/file-utils.js";
 import {
 	_resetReviewGraphBuildAttemptsForTests,
 	buildOrUpdateGraph,
+	clearGraphCache,
 	clearReviewGraphWorkspaceCache,
 	flushReviewGraphPersist,
+	flushReviewGraphPersistsForExitForTests,
 	flushReviewGraphPersistsForTests,
 	getCachedReviewGraph,
 	getLastReviewGraphBuildAttempt,
 	getReviewGraphWorkerFallbackReasonForTests,
 	GRAPH_PERSIST_MAX_ELEMENTS_DEFAULT,
+	type GraphSeqHint,
 	resetReviewGraphPersistWorkerForTests,
 	terminateReviewGraphPersistWorkerForTests,
 	waitForReviewGraphPersistsForTests,
 } from "../../clients/review-graph/builder.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
-import { logReviewGraph } from "../../clients/review-graph-logger.js";
+import {
+	flushReviewGraphLogSync,
+	logReviewGraph,
+} from "../../clients/review-graph-logger.js";
 
 vi.mock("../../clients/review-graph-logger.js", async (importOriginal) => ({
 	...(await importOriginal<
@@ -73,7 +79,11 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 
 	it("size cap: persists an honestly-marked useful partial graph", async () => {
 		const env = makeEnv();
-		createTempFile(env.tmpDir, "a.ts", "export function foo() {\n  return 1;\n}\n");
+		createTempFile(
+			env.tmpDir,
+			"a.ts",
+			"export function foo() {\n  return 1;\n}\n",
+		);
 		createTempFile(
 			env.tmpDir,
 			"b.ts",
@@ -107,18 +117,43 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		expect(
 			raw.nodes.some(
 				([, node]: [string, { filePath?: string }]) =>
-					node.filePath?.endsWith("/a.ts") ||
-					node.filePath?.endsWith("\\a.ts"),
+					node.filePath?.endsWith("/a.ts") || node.filePath?.endsWith("\\a.ts"),
 			),
 		).toBe(true);
 		const attempt = getLastReviewGraphBuildAttempt(env.tmpDir);
 		expect(attempt).toMatchObject({ outcome: "succeeded" });
-		expect(attempt?.reason).toMatch(/persisted partial review graph \(\d+\/\d+ elements/);
+		expect(attempt?.reason).toMatch(
+			/persisted partial review graph \(\d+\/\d+ elements/,
+		);
+		const entries = vi.mocked(logReviewGraph).mock.calls.map(([entry]) => entry);
+		const partial = entries.find((entry) => entry.phase === "persist_partial");
+		expect(partial?.observability).toEqual({
+			graph: expect.objectContaining({
+				persistCoverage: expect.objectContaining({
+					partial: true,
+					totalNodes: built.nodes.size,
+					totalEdges: built.edges.length,
+				}),
+			}),
+			persistence: expect.objectContaining({ status: "scheduled" }),
+		});
+		const success = entries.find((entry) => entry.phase === "persist_succeeded");
+		expect(success?.observability?.graph?.persistCoverage).toEqual(
+			expect.objectContaining({
+			partial: true,
+			totalNodes: built.nodes.size,
+			totalEdges: built.edges.length,
+		}),
+		);
 	});
 
 	it("round-trips partial coverage without presenting it as complete", async () => {
 		const env = makeEnv();
-		createTempFile(env.tmpDir, "hot.ts", "export function hot() { return 1 }\n");
+		createTempFile(
+			env.tmpDir,
+			"hot.ts",
+			"export function hot() { return 1 }\n",
+		);
 		createTempFile(
 			env.tmpDir,
 			"user.ts",
@@ -143,12 +178,18 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		});
 		expect(loaded?.persistCoverage?.persistedNodes).toBe(loaded?.nodes.size);
 		expect(loaded?.persistCoverage?.persistedEdges).toBe(loaded?.edges.length);
-		expect((loaded?.nodes.size ?? 0) + (loaded?.edges.length ?? 0)).toBeLessThanOrEqual(4);
+		expect(
+			(loaded?.nodes.size ?? 0) + (loaded?.edges.length ?? 0),
+		).toBeLessThanOrEqual(4);
 	});
 
 	it("a partial cached graph never seeds a build (no silent-partial, no laundering; #936 review)", async () => {
 		const env = makeEnv();
-		createTempFile(env.tmpDir, "hot.ts", "export function hot() { return 1 }\n");
+		createTempFile(
+			env.tmpDir,
+			"hot.ts",
+			"export function hot() { return 1 }\n",
+		);
 		createTempFile(
 			env.tmpDir,
 			"user.ts",
@@ -173,7 +214,11 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		// partial graph: the returned session graph must be the COMPLETE freshly
 		// built graph (full node/edge count, no coverage marker), never the
 		// capped-away partial served as authoritative.
-		const rebuilt = await buildOrUpdateGraph(env.tmpDir, files, new FactStore());
+		const rebuilt = await buildOrUpdateGraph(
+			env.tmpDir,
+			files,
+			new FactStore(),
+		);
 		expect(rebuilt.persistCoverage).toBeUndefined();
 		expect(rebuilt.nodes.size).toBe(built.nodes.size);
 		expect(rebuilt.edges.length).toBe(built.edges.length);
@@ -191,7 +236,11 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 
 	it("size cap: writes normally when under the ceiling", async () => {
 		const env = makeEnv();
-		createTempFile(env.tmpDir, "a.ts", "export function foo() {\n  return 1;\n}\n");
+		createTempFile(
+			env.tmpDir,
+			"a.ts",
+			"export function foo() {\n  return 1;\n}\n",
+		);
 		const cachePath = cachePathFor(env.tmpDir);
 		process.env.PI_LENS_GRAPH_PERSIST_MAX_ELEMENTS = "1000000";
 
@@ -206,7 +255,11 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 
 	it("debounce: defers the write until the quiet window / flush", async () => {
 		const env = makeEnv();
-		createTempFile(env.tmpDir, "a.ts", "export function foo() {\n  return 1;\n}\n");
+		createTempFile(
+			env.tmpDir,
+			"a.ts",
+			"export function foo() {\n  return 1;\n}\n",
+		);
 		const cachePath = cachePathFor(env.tmpDir);
 		process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "100000"; // effectively never
 
@@ -215,11 +268,19 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 			[path.join(env.tmpDir, "a.ts")],
 			new FactStore(),
 		);
-		const entries = vi.mocked(logReviewGraph).mock.calls.map(([entry]) => entry);
+		const entries = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry);
 		const started = entries.find((entry) => entry.phase === "build_started");
-		const scheduled = entries.find((entry) => entry.phase === "persist_scheduled");
+		const scheduled = entries.find(
+			(entry) => entry.phase === "persist_scheduled",
+		);
 		expect(started?.observability?.graph).toEqual(
-			expect.objectContaining({ buildId: expect.any(Number), nodes: 0, edges: 0 }),
+			expect.objectContaining({
+				buildId: expect.any(Number),
+				nodes: 0,
+				edges: 0,
+			}),
 		);
 		expect(scheduled?.observability).toEqual({
 			graph: expect.objectContaining({
@@ -235,7 +296,9 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 				status: "scheduled",
 			}),
 		});
-		expect(JSON.stringify(scheduled?.observability)).not.toContain("export function");
+		expect(JSON.stringify(scheduled?.observability)).not.toContain(
+			"export function",
+		);
 		expect(JSON.stringify(scheduled?.observability)).not.toContain(env.tmpDir);
 		await new Promise((r) => setTimeout(r, 60));
 		// Scheduled but not yet flushed → no file on disk.
@@ -243,18 +306,18 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 
 		flushReviewGraphPersistsForTests();
 		expect(await waitForFile(cachePath)).toBe(true);
-		const succeeded = vi.mocked(logReviewGraph).mock.calls.find(
-			([entry]) => entry.phase === "persist_succeeded",
-		)?.[0];
+		const succeeded = vi
+			.mocked(logReviewGraph)
+			.mock.calls.find(([entry]) => entry.phase === "persist_succeeded")?.[0];
 		expect(succeeded?.observability?.persistence).toEqual(
 			expect.objectContaining({ status: "succeeded" }),
 		);
 		expect(succeeded?.observability?.persistence?.generation).toBe(
 			scheduled?.observability?.persistence?.generation,
 		);
-		const completed = vi.mocked(logReviewGraph).mock.calls.find(
-			([entry]) => entry.phase === "build_succeeded",
-		)?.[0];
+		const completed = vi
+			.mocked(logReviewGraph)
+			.mock.calls.find(([entry]) => entry.phase === "build_succeeded")?.[0];
 		expect(completed?.observability?.graph).toEqual(
 			expect.objectContaining({
 				buildId: started?.observability?.graph?.buildId,
@@ -273,8 +336,9 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		await buildOrUpdateGraph(env.tmpDir, [first], new FactStore());
 		const second = createTempFile(env.tmpDir, "b.ts", "export const b = 2;\n");
 		await buildOrUpdateGraph(env.tmpDir, [first, second], new FactStore());
-		const scheduled = vi.mocked(logReviewGraph).mock.calls
-			.map(([entry]) => entry)
+		const scheduled = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
 			.filter((entry) => entry.phase === "persist_scheduled");
 		expect(scheduled).toHaveLength(2);
 		const firstPersistence = scheduled[0].observability?.persistence;
@@ -287,34 +351,162 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 				reason: "debounced_coalescing",
 			}),
 		);
+		const superseded = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
+			.find(
+				(entry) =>
+					entry.phase === "persist_skipped" &&
+					entry.observability?.persistence?.generation ===
+						firstPersistence?.generation,
+			);
+		expect(superseded?.observability?.persistence).toEqual(
+			expect.objectContaining({
+				status: "superseded",
+				supersededByGeneration: secondPersistence?.generation,
+				reason: "newer_generation_scheduled",
+			}),
+		);
 		flushReviewGraphPersistsForTests();
 		await waitForReviewGraphPersistsForTests();
-		const success = vi.mocked(logReviewGraph).mock.calls
-			.map(([entry]) => entry)
+		const success = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
 			.find((entry) => entry.phase === "persist_succeeded");
 		expect(success?.observability?.persistence?.generation).toBe(
 			secondPersistence?.generation,
 		);
 	});
 
+	it("correlates build mode with each returned graph across workspaces", async () => {
+		const incrementalEnv = makeEnv();
+		const fullEnv = makeEnv();
+		const incrementalPath = createTempFile(
+			incrementalEnv.tmpDir,
+			"a.ts",
+			"export const before = 1;\n",
+		);
+		const fullPath = createTempFile(
+			fullEnv.tmpDir,
+			"b.ts",
+			"export const full = 2;\n",
+		);
+		const incrementalFacts = new FactStore();
+		await buildOrUpdateGraph(
+			incrementalEnv.tmpDir,
+			[incrementalPath],
+			incrementalFacts,
+		);
+		createTempFile(
+			incrementalEnv.tmpDir,
+			"a.ts",
+			"export const after = 3;\n",
+		);
+		clearGraphCache();
+		vi.mocked(logReviewGraph).mockClear();
+
+		await Promise.all([
+			buildOrUpdateGraph(
+				incrementalEnv.tmpDir,
+				[incrementalPath],
+				incrementalFacts,
+			),
+			buildOrUpdateGraph(fullEnv.tmpDir, [fullPath], new FactStore()),
+		]);
+
+		const successes = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
+			.filter((entry) => entry.phase === "build_succeeded");
+		const incrementalSuccess = successes.find(
+			(entry) => path.resolve(entry.cwd) === path.resolve(incrementalEnv.tmpDir),
+		);
+		const fullSuccess = successes.find(
+			(entry) => path.resolve(entry.cwd) === path.resolve(fullEnv.tmpDir),
+		);
+		expect(incrementalSuccess?.observability?.graph?.mode).toBe("incremental");
+		expect(fullSuccess?.observability?.graph?.mode).toBe("full");
+	});
+
+	it("uses the build-start sequence in build_succeeded telemetry", async () => {
+		const env = makeEnv();
+		const sourcePath = createTempFile(
+			env.tmpDir,
+			"a.ts",
+			"export const value = 1;\n",
+		);
+		process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "100000";
+		let projectSeq = 10;
+		const seqHint: GraphSeqHint = {
+			projectSeq: () => projectSeq,
+			getFilesChangedSince: () => [],
+		};
+
+		const build = buildOrUpdateGraph(
+			env.tmpDir,
+			[sourcePath],
+			new FactStore(),
+			seqHint,
+		);
+		projectSeq = 11;
+		await build;
+
+		const succeeded = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
+			.find((entry) => entry.phase === "build_succeeded");
+		expect(succeeded?.observability?.graph?.projectSeq).toBe(10);
+	});
+
+	it("flushes exit-hook lifecycle events after forced persistence", async () => {
+		const env = makeEnv();
+		const sourcePath = createTempFile(
+			env.tmpDir,
+			"a.ts",
+			"export const exitFlush = 1;\n",
+		);
+		process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "100000";
+		await buildOrUpdateGraph(
+			env.tmpDir,
+			[sourcePath],
+			new FactStore(),
+		);
+
+		flushReviewGraphPersistsForExitForTests();
+		expect(vi.mocked(flushReviewGraphLogSync)).toHaveBeenCalled();
+		const success = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
+			.find(
+				(entry) =>
+					entry.phase === "persist_succeeded" &&
+					entry.observability?.persistence?.reason === "exit_flush",
+			);
+		expect(success).toBeDefined();
+	});
+
 	it("does not fall back an older worker generation after a newer one is scheduled", async () => {
 		const env = makeEnv();
 		const first = createTempFile(env.tmpDir, "a.ts", "export const a = 1;\n");
 		process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "0";
-		process.env.PI_LENS_TEST_PERSIST_WORKER_DELAY_MS = "1000";
+		process.env.PI_LENS_TEST_PERSIST_WORKER_DELAY_MS = "10000";
 		await buildOrUpdateGraph(env.tmpDir, [first], new FactStore());
 		const second = createTempFile(env.tmpDir, "b.ts", "export const b = 2;\n");
 		process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "100000";
 		await buildOrUpdateGraph(env.tmpDir, [first, second], new FactStore());
 		await terminateReviewGraphPersistWorkerForTests();
 		await waitForReviewGraphPersistsForTests();
-		const skipped = vi.mocked(logReviewGraph).mock.calls
-			.map(([entry]) => entry)
+		const skipped = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
 			.find(
 				(entry) =>
 					entry.phase === "persist_skipped" &&
-					entry.reason === "superseded",
+					entry.reason === "superseded" &&
+					entry.observability?.persistence?.reason ===
+						"worker_death_after_newer_generation",
 			);
+
 		expect(skipped?.observability?.persistence).toEqual(
 			expect.objectContaining({
 				status: "superseded",
@@ -323,12 +515,14 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 			}),
 		);
 		expect(
-			vi.mocked(logReviewGraph).mock.calls.some(
-				([entry]) =>
-					entry.phase === "worker_fallback" &&
-					entry.observability?.persistence?.generation ===
-						skipped?.observability?.persistence?.generation,
-			),
+			vi
+				.mocked(logReviewGraph)
+				.mock.calls.some(
+					([entry]) =>
+						entry.phase === "worker_fallback" &&
+						entry.observability?.persistence?.generation ===
+							skipped?.observability?.persistence?.generation,
+				),
 		).toBe(false);
 		flushReviewGraphPersistsForTests();
 		await waitForReviewGraphPersistsForTests();
@@ -406,7 +600,41 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		expect(flushReviewGraphPersist(env.tmpDir).ok).toBe(true);
 		await waitForReviewGraphPersistsForTests();
 		clearReviewGraphWorkspaceCache(env.tmpDir);
-		expect(getCachedReviewGraph(env.tmpDir)?.nodes.size).toBe(newGraph.nodes.size);
+		expect(getCachedReviewGraph(env.tmpDir)?.nodes.size).toBe(
+			newGraph.nodes.size,
+		);
+	});
+
+	it("forced flush records when it selected an in-flight worker snapshot", async () => {
+		const env = makeEnv();
+		const sourcePath = createTempFile(
+			env.tmpDir,
+			"a.ts",
+			"export const inFlight = 1;\n",
+		);
+		process.env.PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS = "0";
+		process.env.PI_LENS_TEST_PERSIST_WORKER_DELAY_MS = "1000";
+		await buildOrUpdateGraph(
+			env.tmpDir,
+			[sourcePath],
+			new FactStore(),
+		);
+
+		expect(flushReviewGraphPersist(env.tmpDir).ok).toBe(true);
+		const success = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
+			.find(
+				(entry) =>
+					entry.phase === "persist_succeeded" &&
+					entry.observability?.persistence?.reason === "forced_flush",
+			);
+		expect(success?.observability?.persistence).toEqual(
+			expect.objectContaining({
+				workerStarted: true,
+				workerCompleted: false,
+			}),
+		);
 	});
 
 	it("worker death degrades to a logged main-thread persist", async () => {
@@ -425,11 +653,13 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		expect(getReviewGraphWorkerFallbackReasonForTests()).toMatch(
 			/exited|unavailable/,
 		);
-		const fallback = vi.mocked(logReviewGraph).mock.calls
-			.map(([entry]) => entry)
+		const fallback = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
 			.find((entry) => entry.phase === "worker_fallback");
-		const success = vi.mocked(logReviewGraph).mock.calls
-			.map(([entry]) => entry)
+		const success = vi
+			.mocked(logReviewGraph)
+			.mock.calls.map(([entry]) => entry)
 			.find((entry) => entry.phase === "persist_succeeded");
 		expect(fallback?.observability?.persistence).toEqual(
 			expect.objectContaining({

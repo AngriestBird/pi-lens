@@ -2,7 +2,10 @@ import * as path from "node:path";
 import { isTestMode } from "./env-utils.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import { createNdjsonLogger } from "./ndjson-logger.js";
-import type { ReviewGraph } from "./review-graph/types.js";
+import type {
+	ReviewGraph,
+	ReviewGraphPersistCoverage,
+} from "./review-graph/types.js";
 
 const REVIEW_GRAPH_LOG_DIR = getGlobalPiLensDir();
 const REVIEW_GRAPH_LOG_FILE = path.join(
@@ -30,6 +33,8 @@ export interface ReviewGraphBuildMetadata {
 	sourceFiles?: number;
 	nodes: number;
 	edges: number;
+	/** Exact complete-vs-partial coverage of the persisted graph snapshot. */
+	persistCoverage?: ReviewGraphPersistCoverage;
 }
 
 /** Parent-side persistence lifecycle identity/status. */
@@ -70,7 +75,10 @@ export interface ReviewGraphBuildMetadataOptions {
  * signature-map count when the build has one, otherwise the graph file index.
  */
 export function makeReviewGraphBuildMetadata(
-	graph: Pick<ReviewGraph, "buildGeneration" | "builtAt" | "nodes" | "edges" | "fileNodes">,
+	graph: Pick<
+		ReviewGraph,
+		"buildGeneration" | "builtAt" | "nodes" | "edges" | "fileNodes" | "persistCoverage"
+	>,
 	options: ReviewGraphBuildMetadataOptions = {},
 ): ReviewGraphBuildMetadata {
 	return {
@@ -87,11 +95,16 @@ export function makeReviewGraphBuildMetadata(
 		sourceFiles: options.sourceFileCount ?? graph.fileNodes.size,
 		nodes: graph.nodes.size,
 		edges: graph.edges.length,
+		...(graph.persistCoverage
+			? { persistCoverage: graph.persistCoverage }
+			: {}),
 	};
 }
 
 export interface ReviewGraphLogEntry {
 	ts?: string;
+	/** Logger process identity for machine-global log correlation. */
+	pid?: number;
 	phase:
 		| "build_started"
 		| "build_succeeded"
@@ -141,7 +154,7 @@ export function logReviewGraph(entry: ReviewGraphLogEntry): void {
 	if (isTestMode()) {
 		return;
 	}
-	writer.log({ ts: new Date().toISOString(), ...entry });
+	writer.log({ ts: new Date().toISOString(), ...entry, pid: process.pid });
 }
 
 export function getReviewGraphLogPath(): string {

@@ -487,16 +487,18 @@ describe("review graph service", () => {
 			);
 
 			const facts = new FactStore();
-			await buildOrUpdateGraph(env.tmpDir, [aPath], facts);
+			const initialGraph = await buildOrUpdateGraph(env.tmpDir, [aPath], facts);
 			clearGraphCache();
 			createTempFile(
 				env.tmpDir,
 				"src/a.ts",
 				"export function alpha() { return 222; }\n",
 			);
+			await new Promise((resolve) => setTimeout(resolve, 5));
 
 			const graph = await buildOrUpdateGraph(env.tmpDir, [aPath], facts);
 			expect(getLastGraphBuildInfo()).toMatchObject({ mode: "incremental" });
+			expect(graph.builtAt).not.toBe(initialGraph.builtAt);
 			const impact = computeImpactCascade(graph, aPath);
 			expect(impact.directImporters).toContain(normalizeMapKey(bPath));
 			expect(impact.directCallers).toContain(normalizeMapKey(bPath));

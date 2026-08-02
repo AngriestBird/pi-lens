@@ -67,7 +67,12 @@ describe("review-graph seq fast path (#451)", () => {
 
 			// First hinted build records builtAtProjectSeq (full sweep — no prior entry).
 			clearGraphCache();
-			await buildOrUpdateGraph(env.tmpDir, [aPath], facts, hint);
+			const initialGraph = await buildOrUpdateGraph(
+				env.tmpDir,
+				[aPath],
+				facts,
+				hint,
+			);
 			expect(getLastGraphBuildInfo().mode).toBe("full");
 
 			// Edit a.ts on disk AND simulate its coordinator bump.
@@ -86,6 +91,7 @@ describe("review-graph seq fast path (#451)", () => {
 			clearGraphCache();
 			const graph = await buildOrUpdateGraph(env.tmpDir, [aPath], facts, hint);
 			expect(getLastGraphBuildInfo().mode).toBe("seq-fastpath");
+			expect(graph.builtAt).not.toBe(initialGraph.builtAt);
 			// The edit is reflected: gamma is now a symbol node.
 			const hasGamma = [...graph.nodes.values()].some(
 				(n) => n.symbolName === "gamma",

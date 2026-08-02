@@ -20,7 +20,8 @@ import { detectFileRole } from "../file-role.js";
 import { getProjectDataDir } from "../file-utils.js";
 import { collectUntrackedIgnoredIds } from "../git-tracked-ignore.js";
 import { logLatency } from "../latency-logger.js";
-import { containerNameChain,
+import {
+	containerNameChain,
 	getOpenDocumentSymbols,
 	lspSymbolKindName,
 } from "../lsp-document-symbols.js";
@@ -248,6 +249,27 @@ let _lastGraphBuildInfo: GraphBuildInfo = {
 	mode: "full",
 	graphChanged: true,
 };
+// The global slot above is retained for legacy status surfaces, but overlapping
+// deferred builds need a per-result identity for lifecycle telemetry.
+const _graphBuildInfoByGraph = new WeakMap<ReviewGraph, GraphBuildInfo>();
+
+function setGraphBuildInfo(graph: ReviewGraph, info: GraphBuildInfo): void {
+	_lastGraphBuildInfo = info;
+	_graphBuildInfoByGraph.set(graph, info);
+}
+
+function getGraphBuildInfoForGraph(graph: ReviewGraph): GraphBuildInfo {
+	return _graphBuildInfoByGraph.get(graph) ?? _lastGraphBuildInfo;
+}
+
+function updateGraphBuildInfo(
+	graph: ReviewGraph,
+	patch: Partial<GraphBuildInfo>,
+): GraphBuildInfo {
+	const info = { ...getGraphBuildInfoForGraph(graph), ...patch };
+	setGraphBuildInfo(graph, info);
+	return info;
+}
 
 export function clearGraphCache(): void {
 	_buildCache.clear();
@@ -276,7 +298,7 @@ export function _getReviewGraphCacheStateForTests(cwd: string):
 			signature: string;
 			fileSignatures: Map<string, string>;
 			fileHashes?: Map<string, string>;
-		}
+	  }
 	| undefined {
 	const cached = _workspaceGraphCache.get(normalizeMapKey(cwd));
 	if (!cached) return undefined;
@@ -453,6 +475,11 @@ function cloneGraph(graph: ReviewGraph): ReviewGraph {
 		// partial base outright; this keeps any other cloner honest.
 		persistCoverage: graph.persistCoverage,
 	};
+}
+
+/** Refresh the content timestamp only when an incremental path changed graph data. */
+function refreshGraphBuiltAt(graph: ReviewGraph): void {
+	graph.builtAt = new Date().toISOString();
 }
 
 function sourceSignatureEntry(file: string): string {
@@ -688,6 +715,11 @@ function recordPersistFailure(
 	reason: string,
 	error: string,
 	pending?: PendingPersist,
+	workerState?: {
+		started: boolean;
+		completed: boolean;
+		fallbackReason?: string;
+	},
 ): void {
 	// A debounced persist can fail AFTER a newer build already recorded
 	// "failed" or "running" for this cwd — don't relabel a dead/in-flight
@@ -709,7 +741,12 @@ function recordPersistFailure(
 			? {
 					observability: persistObservability(pending, {
 						status: "failed",
-						reason,
+						reason: workerState?.fallbackReason ?? reason,
+						workerStarted: workerState?.started,
+						workerCompleted: workerState?.completed,
+						...(workerState?.fallbackReason
+							? { workerFallback: true }
+							: {}),
 					}),
 				}
 			: {}),
@@ -999,7 +1036,9 @@ function getPersistedReviewGraphVersion(cwd: string): string | null {
 		fd = fs.openSync(legacyPath, "r");
 		const buf = Buffer.alloc(200);
 		const n = fs.readSync(fd, buf, 0, 200, 0);
-		const match = buf.toString("utf-8", 0, n).match(/"version"\s*:\s*"([^"]+)"/);
+		const match = buf
+			.toString("utf-8", 0, n)
+			.match(/"version"\s*:\s*"([^"]+)"/);
 		return match ? match[1] : null;
 	} catch {
 		return null;
@@ -1166,13 +1205,13 @@ function capGraphForPersist(
 		const ids = nodeIdsByFile.get(filePath) ?? [];
 		if (ids.length === 0) continue;
 		const effectiveNodeBudget =
-			keptIds.size === 0 ? Math.max(nodeBudget, Math.min(cap, ids.length)) : nodeBudget;
+			keptIds.size === 0
+				? Math.max(nodeBudget, Math.min(cap, ids.length))
+				: nodeBudget;
 		if (keptIds.size + ids.length > effectiveNodeBudget) continue;
 		for (const id of ids) keptIds.add(id);
 	}
-	const nodes = new Map(
-		[...graph.nodes].filter(([id]) => keptIds.has(id)),
-	);
+	const nodes = new Map([...graph.nodes].filter(([id]) => keptIds.has(id)));
 	const edgeBudget = Math.max(0, cap - nodes.size);
 	const edges = graph.edges
 		.filter((edge) => keptIds.has(edge.from) && keptIds.has(edge.to))
@@ -1200,11 +1239,13 @@ function capGraphForPersist(
 	return capped;
 }
 
-
 function persistObservability(
 	pending: PendingPersist,
 	patch: Partial<ReviewGraphPersistenceMetadata>,
-): { graph: ReviewGraphBuildMetadata; persistence: ReviewGraphPersistenceMetadata } {
+): {
+	graph: ReviewGraphBuildMetadata;
+	persistence: ReviewGraphPersistenceMetadata;
+} {
 	return {
 		graph: pending.graphMetadata,
 		persistence: { ...pending.persistenceMetadata, ...patch },
@@ -1308,7 +1349,13 @@ function writePendingOnMainThread(
 		}
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		recordPersistFailure(key, "cache_write_failed", message, pending);
+		recordPersistFailure(
+			key,
+			"cache_write_failed",
+			message,
+			pending,
+			workerState,
+		);
 		console.error("[review-graph] cache persist failed:", message);
 	}
 }
@@ -1526,12 +1573,18 @@ function getPersistWorker(): Worker | undefined {
 		worker.on("error", (err: Error) => handleWorkerDeath(err.message));
 		worker.on("exit", (code) => {
 			if (_persistWorker !== worker) return;
-			if (code !== 0) {
-				handleWorkerDeath(`persist worker exited with code ${code}`);
+			const hasPendingRequests =
+				_workerRequests.size > 0 || _checkpointWorkerRequests.size > 0;
+			if (code !== 0 || hasPendingRequests) {
+				handleWorkerDeath(
+					code !== 0
+						? `persist worker exited with code ${code}`
+						: "persist worker exited with pending requests",
+				);
 			} else {
-				// Clean exit (unref'd worker at teardown, or host recycling):
-				// drop the stale reference so a later persist respawns instead
-				// of posting into a dead worker (#950 review F7).
+				// Clean exit with no pending work (unref'd worker at teardown, or host
+				// recycling): drop the stale reference so a later persist respawns
+				// instead of posting into a dead worker (#950 review F7).
 				_persistWorker = undefined;
 			}
 		});
@@ -1583,22 +1636,32 @@ function writePending(key: string): void {
 // snapshot isn't lost. Sync writes only (no child spawn — see the teardown
 // libuv hazard); best-effort.
 let _persistExitHookInstalled = false;
+function flushPendingReviewGraphPersistsAtExit(): void {
+	const keys = new Set([
+		..._pendingPersist.keys(),
+		...[..._workerRequests.values()].map((request) => request.key),
+	]);
+	for (const key of keys) {
+		// Shared with the CLI's forced flush — same persistedData DTO, same
+		// atomic writer (#762), distinct failure label per source.
+		flushReviewGraphPersist(key, "exit_hook");
+	}
+	// The review-graph logger's shared process-exit flusher was registered
+	// before this hook. Flush again after emitting exit-hook outcomes so a
+	// successful forced write cannot leave its lifecycle event buffered.
+	flushReviewGraphLogSync();
+	void _persistWorker?.terminate();
+}
+
+/** Test-only seam for the exit-hook ordering/durability contract. */
+export function flushReviewGraphPersistsForExitForTests(): void {
+	flushPendingReviewGraphPersistsAtExit();
+}
+
 function ensurePersistExitHook(): void {
 	if (_persistExitHookInstalled) return;
 	_persistExitHookInstalled = true;
-	process.once("exit", () => {
-		const keys = new Set([
-			..._pendingPersist.keys(),
-			...[..._workerRequests.values()].map((request) => request.key),
-		]);
-		for (const key of keys) {
-			// Shared with the CLI's forced flush — same persistedData DTO, same
-			// atomic writer (#762), distinct failure label per source.
-			const result = flushReviewGraphPersist(key, "exit_hook");
-			if (!result.ok) flushReviewGraphLogSync();
-		}
-		void _persistWorker?.terminate();
-	});
+	process.once("exit", flushPendingReviewGraphPersistsAtExit);
 }
 
 // #950 review F3: a process that dies between a worker's staged write and its
@@ -1614,8 +1677,7 @@ function sweepStaleStageFiles(cacheDir: string): void {
 		if (err) return;
 		const ownMarker = `.stage-${process.pid}-`;
 		for (const entry of entries) {
-			const isStage =
-				entry.includes(".stage-") || /\.tmp-\d+$/.test(entry);
+			const isStage = entry.includes(".stage-") || /\.tmp-\d+$/.test(entry);
 			if (!isStage || entry.includes(ownMarker)) continue;
 			fs.rm(path.join(cacheDir, entry), { force: true }, () => {});
 		}
@@ -1641,8 +1703,7 @@ function persistGraph(
 		totalElementCount > cap
 			? capGraphForPersist(cwd, graph, cap)
 			: { ...graph, persistCoverage: graphCoverage(graph, cap) };
-	const elementCount =
-		persistedGraph.nodes.size + persistedGraph.edges.length;
+	const elementCount = persistedGraph.nodes.size + persistedGraph.edges.length;
 	if (totalElementCount > cap) {
 		const coverage = persistedGraph.persistCoverage;
 		if (!coverage) return;
@@ -1663,14 +1724,6 @@ function persistGraph(
 			`${coverage.persistedNodes}/${coverage.totalNodes} nodes, ` +
 			`${coverage.persistedEdges}/${coverage.totalEdges} edges; ${cap} cap)`;
 		recordBuildAttempt(cwd, "succeeded", reason);
-		logReviewGraph({
-			cwd,
-			phase: "persist_partial",
-			reason: "element_cap_exceeded",
-			elements: totalElementCount,
-			persistedElements: elementCount,
-			cap,
-		});
 	}
 	const cacheDir = path.join(getProjectDataDir(cwd), "cache");
 	const cachePath = path.join(cacheDir, GRAPH_CACHE_FILENAME);
@@ -1704,9 +1757,7 @@ function persistGraph(
 			: {
 					supersededGeneration: priorGeneration,
 					coalesced,
-					reason: coalesced
-						? "debounced_coalescing"
-						: "in_flight_supersession",
+					reason: coalesced ? "debounced_coalescing" : "in_flight_supersession",
 				}),
 	};
 	const pending: PendingPersist = {
@@ -1723,7 +1774,35 @@ function persistGraph(
 		graphMetadata,
 		persistenceMetadata,
 	};
+	if (existingPending) {
+		logReviewGraph({
+			cwd: key,
+			phase: "persist_skipped",
+			reason: "superseded",
+			observability: persistObservability(existingPending, {
+				status: "superseded",
+				supersededByGeneration: generation,
+				reason: "newer_generation_scheduled",
+				workerStarted: false,
+				workerCompleted: false,
+			}),
+		});
+	}
 	_pendingPersist.set(key, pending);
+	if (totalElementCount > cap) {
+		logReviewGraph({
+			cwd,
+			phase: "persist_partial",
+			reason: "element_cap_exceeded",
+			elements: totalElementCount,
+			persistedElements: elementCount,
+			cap,
+			observability: {
+				graph: graphMetadata,
+				persistence: persistenceMetadata,
+			},
+		});
+	}
 	logReviewGraph({
 		cwd,
 		phase: "persist_scheduled",
@@ -2190,15 +2269,13 @@ async function tryResumeFromCheckpoint(
 /** Test-only: inspect the on-disk resume checkpoint for `cwd` (raw payload),
  * or null when none is present. Lets tests assert the honesty marker and the
  * recorded processed-file set without exporting the whole checkpoint machinery. */
-export function _readReviewGraphCheckpointForTests(cwd: string):
-	| {
-			inProgress: boolean;
-			processedFiles: string[];
-			nodeCount: number;
-			edgeCount: number;
-			persistCoverage: ReviewGraphPersistCoverage | undefined;
-	  }
-	| null {
+export function _readReviewGraphCheckpointForTests(cwd: string): {
+	inProgress: boolean;
+	processedFiles: string[];
+	nodeCount: number;
+	edgeCount: number;
+	persistCoverage: ReviewGraphPersistCoverage | undefined;
+} | null {
 	const loaded = loadReviewGraphCheckpoint(cwd);
 	if (!loaded) return null;
 	return {
@@ -2245,6 +2322,7 @@ export async function terminateReviewGraphPersistWorkerForTests(): Promise<void>
 /** Test-only: restore worker creation after a deliberate death. */
 export function resetReviewGraphPersistWorkerForTests(): void {
 	_workerDisabled = false;
+	_persistWorker = undefined;
 	_lastWorkerFallbackReasonForTests = undefined;
 	_checkpointWorkerRequests.clear();
 	_checkpointGenerations.clear();
@@ -2297,12 +2375,14 @@ export function flushReviewGraphPersist(
 	// handleWorkerResult, which deletes their stage files.
 	let pending = _pendingPersist.get(key);
 	const removedWorkerRequests: PendingPersist[] = [];
+	let selectedWorkerRequest: PendingPersist | undefined;
 	for (const [id, request] of [..._workerRequests]) {
 		if (request.key !== key) continue;
 		_workerRequests.delete(id);
 		removedWorkerRequests.push(request.pending);
 		if (!pending || request.pending.generation > pending.generation) {
 			pending = request.pending;
+			selectedWorkerRequest = request.pending;
 		}
 	}
 	for (const removed of removedWorkerRequests) {
@@ -2321,7 +2401,10 @@ export function flushReviewGraphPersist(
 		});
 	}
 	if (!pending) {
-		return { ok: false, reason: "no graph snapshot was queued for persistence" };
+		return {
+			ok: false,
+			reason: "no graph snapshot was queued for persistence",
+		};
 	}
 	// Invalidate every staged worker completion before doing the forced write.
 	// Workers never promote their own stage file, so a late result can only be
@@ -2377,7 +2460,7 @@ export function flushReviewGraphPersist(
 			observability: persistObservability(pending, {
 				status: "succeeded",
 				reason: source === "exit_hook" ? "exit_flush" : "forced_flush",
-				workerStarted: false,
+				workerStarted: selectedWorkerRequest !== undefined,
 				workerCompleted: false,
 			}),
 		});
@@ -2395,6 +2478,13 @@ export function flushReviewGraphPersist(
 			source === "exit_hook" ? "exit_flush_failed" : "forced_flush_failed",
 			reason,
 			pending,
+			selectedWorkerRequest
+				? {
+						started: true,
+						completed: false,
+						fallbackReason: "forced_flush_write_failed",
+					}
+				: undefined,
 		);
 		return { ok: false, reason };
 	}
@@ -2498,7 +2588,7 @@ async function ensureReviewGraphFacts(
 		// populated before the graph reads them.
 		await importFactProvider.run(ctx, facts);
 		await functionFactProvider.run(ctx, facts);
-	// pi-lens-ignore: missing-error-propagation
+		// pi-lens-ignore: missing-error-propagation
 	} catch (err) {
 		console.error(
 			`[pi-lens] review-graph structural facts disabled (degraded mode): ${
@@ -2539,7 +2629,12 @@ function addJsTsFile(
 		) ?? [];
 
 	for (const entry of imports) {
-		const localFile = localImportToFile(cwd, normalized, entry.source, ignoredIds);
+		const localFile = localImportToFile(
+			cwd,
+			normalized,
+			entry.source,
+			ignoredIds,
+		);
 		if (localFile) {
 			const targetId = `file:${localFile}`;
 			if (!graph.nodes.has(targetId)) {
@@ -2573,7 +2668,12 @@ function addJsTsFile(
 	// hint — third-party/stdlib imports have no graph file to narrow to.
 	const importedNameToFile = new Map<string, string>();
 	for (const entry of imports) {
-		const localFile = localImportToFile(cwd, normalized, entry.source, ignoredIds);
+		const localFile = localImportToFile(
+			cwd,
+			normalized,
+			entry.source,
+			ignoredIds,
+		);
 		if (!localFile) continue;
 		for (const name of entry.names) importedNameToFile.set(name, localFile);
 		if (entry.defaultName) importedNameToFile.set(entry.defaultName, localFile);
@@ -2664,7 +2764,10 @@ function addJsTsFile(
 						language: "jsts",
 						symbolName: site.method,
 						qualifiedName: `${receiverClass}.${site.method}`,
-						metadata: { unresolvedName: callText, ambiguousCandidates: candidates.length },
+						metadata: {
+							unresolvedName: callText,
+							ambiguousCandidates: candidates.length,
+						},
 					});
 				}
 				addEdge(graph, {
@@ -2742,26 +2845,42 @@ function mapKindToTreeSitterLanguage(
 	filePath?: string,
 ): string | undefined {
 	switch (kind) {
-		case "python": return "python";
-		case "go": return "go";
-		case "rust": return "rust";
-		case "ruby": return "ruby";
+		case "python":
+			return "python";
+		case "go":
+			return "go";
+		case "rust":
+			return "rust";
+		case "ruby":
+			return "ruby";
 		case "cxx": {
 			const ext = filePath ? path.extname(filePath).toLowerCase() : "";
 			return ext === ".c" || ext === ".h" ? "c" : "cpp";
 		}
-		case "java": return "java";
-		case "kotlin": return "kotlin";
-		case "dart": return "dart";
-		case "elixir": return "elixir";
-		case "csharp": return "csharp";
-		case "php": return "php";
-		case "swift": return "swift";
-		case "lua": return "lua";
-		case "ocaml": return "ocaml";
-		case "zig": return "zig";
-		case "shell": return "bash";
-		default: return undefined;
+		case "java":
+			return "java";
+		case "kotlin":
+			return "kotlin";
+		case "dart":
+			return "dart";
+		case "elixir":
+			return "elixir";
+		case "csharp":
+			return "csharp";
+		case "php":
+			return "php";
+		case "swift":
+			return "swift";
+		case "lua":
+			return "lua";
+		case "ocaml":
+			return "ocaml";
+		case "zig":
+			return "zig";
+		case "shell":
+			return "bash";
+		default:
+			return undefined;
 	}
 }
 
@@ -2837,7 +2956,8 @@ export async function captureReviewGraphStructuralIr(
 			complete: true,
 			structural: {
 				kind: "jsts",
-				imports: facts.getFileFact<ImportEntry[]>(filePath, "file.imports") ?? [],
+				imports:
+					facts.getFileFact<ImportEntry[]>(filePath, "file.imports") ?? [],
 				reexports:
 					facts.getFileFact<ReExportEntry[]>(filePath, "file.reexports") ?? [],
 				functionSummaries:
@@ -3096,13 +3216,9 @@ export function addLspFallbackSymbols(
 			// results qualify through the full containerName chain, not just
 			// the immediate owner.
 			const owners =
-				ancestry.length > 0
-					? ancestry
-					: containerNameChain(symbol, symbols);
+				ancestry.length > 0 ? ancestry : containerNameChain(symbol, symbols);
 			const qualifiedName =
-				owners.length > 0
-					? [...owners, symbol.name].join(".")
-					: undefined;
+				owners.length > 0 ? [...owners, symbol.name].join(".") : undefined;
 			addNode(graph, {
 				id: symbolId,
 				kind: "symbol",
@@ -3322,8 +3438,7 @@ async function addFileToGraph(
 	const languageId = mapKindToTreeSitterLanguage(kind, file);
 	if (!languageId) return;
 	const irExtracted =
-		sharedIr?.kind === "tree-sitter" &&
-		sharedIr.languageId === languageId
+		sharedIr?.kind === "tree-sitter" && sharedIr.languageId === languageId
 			? sharedIr.extracted
 			: undefined;
 	const extracted =
@@ -3452,10 +3567,7 @@ async function updateGraphFiles(
 	}));
 }
 
-function resolveDeferredSymbolEdges(
-	graph: ReviewGraph,
-	rebuild = true,
-): void {
+function resolveDeferredSymbolEdges(graph: ReviewGraph, rebuild = true): void {
 	const symbolNameToIds = new Map<string, string[]>();
 	for (const node of graph.nodes.values()) {
 		if (node.kind !== "symbol" || !node.symbolName) continue;
@@ -3602,7 +3714,11 @@ async function tryIncrementalFromCache(
 			...verifiedCacheFields(ctx.seqAtBuildStart),
 		});
 		// #260: pure drift leaves the graph unchanged — don't rewrite the disk blob.
-		_lastGraphBuildInfo = { reused: true, mode: "cached", graphChanged: false };
+		setGraphBuildInfo(graph, {
+			reused: true,
+			mode: "cached",
+			graphChanged: false,
+		});
 		graph.buildGeneration = generation;
 		ctx.facts.setSessionFact("session.reviewGraph", graph);
 		return graph;
@@ -3624,6 +3740,7 @@ async function tryIncrementalFromCache(
 		ctx.facts,
 		ctx.ignoredIds,
 	);
+	refreshGraphBuiltAt(graph);
 	// #459: real re-extract ⇒ new generation.
 	const generation = ++_graphGenerationCounter;
 	graph.buildGeneration = generation;
@@ -3635,20 +3752,17 @@ async function tryIncrementalFromCache(
 		buildGeneration: generation,
 		...verifiedCacheFields(ctx.seqAtBuildStart),
 	});
-	persistGraph(
-		ctx.cwd,
-		ctx.signature,
-		ctx.fileSignatures,
-		hashes,
-		graph,
-		{
-			buildId: ctx.buildId,
-			projectSeq: ctx.seqAtBuildStart,
-			seqHint: ctx.seqHint,
-			mode: ctx.mode,
-		},
-	);
-	_lastGraphBuildInfo = { reused: true, mode: "incremental", graphChanged: true };
+	persistGraph(ctx.cwd, ctx.signature, ctx.fileSignatures, hashes, graph, {
+		buildId: ctx.buildId,
+		projectSeq: ctx.seqAtBuildStart,
+		seqHint: ctx.seqHint,
+		mode: ctx.mode,
+	});
+	setGraphBuildInfo(graph, {
+		reused: true,
+		mode: "incremental",
+		graphChanged: true,
+	});
 	_graphImportChanges.set(graph, {
 		fromGeneration: priorGeneration,
 		changes: importChanges,
@@ -3698,7 +3812,10 @@ async function trySeqFastpath(
 			? Number.POSITIVE_INFINITY
 			: now - cached.lastFullVerifyMs;
 	const sinceVerify = cached.fastPathSinceVerify ?? 0;
-	if (ageMs > SEQ_FASTPATH_REVERIFY_MS || sinceVerify >= SEQ_FASTPATH_REVERIFY_EVERY) {
+	if (
+		ageMs > SEQ_FASTPATH_REVERIFY_MS ||
+		sinceVerify >= SEQ_FASTPATH_REVERIFY_EVERY
+	) {
 		return { fallback: "verify-due" };
 	}
 
@@ -3760,7 +3877,11 @@ async function trySeqFastpath(
 		cached.fastPathSinceVerify = sinceVerify + 1;
 		// #459: nothing graph-relevant changed — this is a genuine no-op reuse.
 		const generation = (cached.buildGeneration ??= ++_graphGenerationCounter);
-		_lastGraphBuildInfo = { reused: true, mode: "seq-fastpath", graphChanged: false };
+		setGraphBuildInfo(graph, {
+			reused: true,
+			mode: "seq-fastpath",
+			graphChanged: false,
+		});
 		graph.buildGeneration = generation;
 		facts.setSessionFact("session.reviewGraph", graph);
 		return { graph };
@@ -3783,6 +3904,7 @@ async function trySeqFastpath(
 	} catch {
 		return { fallback: "stat-error" };
 	}
+	refreshGraphBuiltAt(graph);
 
 	// Update fileSignatures/fileHashes for ONLY the touched files (stat/hash just
 	// those — the whole point of the fast path). Recompute the aggregate signature
@@ -3810,15 +3932,19 @@ async function trySeqFastpath(
 		lastFullVerifyMs: cached.lastFullVerifyMs,
 		fastPathSinceVerify: sinceVerify + 1,
 	});
-		persistGraph(cwd, nextSignature, nextSignatures, nextHashes, graph, {
-			buildId,
-			projectSeq: seqAtBuildStart,
-			seqHint: true,
-			mode: "seq-fastpath",
-		});
+	persistGraph(cwd, nextSignature, nextSignatures, nextHashes, graph, {
+		buildId,
+		projectSeq: seqAtBuildStart,
+		seqHint: true,
+		mode: "seq-fastpath",
+	});
 	// #459: filesToUpdate was non-empty — this fastpath re-extracted real files,
 	// so (unlike the no-op branch above) the graph object did change.
-	_lastGraphBuildInfo = { reused: true, mode: "seq-fastpath", graphChanged: true };
+	setGraphBuildInfo(graph, {
+		reused: true,
+		mode: "seq-fastpath",
+		graphChanged: true,
+	});
 	_graphImportChanges.set(graph, {
 		fromGeneration: priorGeneration,
 		changes: importChanges,
@@ -3864,14 +3990,14 @@ async function _doBuildGraph(
 		for (const file of normalizedChanged) {
 			upsertChangedSymbols(graph, facts, file);
 		}
-		_lastGraphBuildInfo = {
+		setGraphBuildInfo(graph, {
 			reused: false,
 			mode: "skipped",
 			skipReason: "unsafe_root",
 			// #459: never persisted/reused, same as the too_many_files skip below —
 			// treat as changed so dependents never trust stale derived state.
 			graphChanged: true,
-		};
+		});
 		facts.setSessionFact("session.reviewGraph", graph);
 		return graph;
 	}
@@ -3941,7 +4067,7 @@ async function _doBuildGraph(
 				maxFileCount: maxGraphFiles,
 			},
 		});
-		_lastGraphBuildInfo = {
+		setGraphBuildInfo(graph, {
 			reused: false,
 			mode: "skipped",
 			skipReason: "too_many_files",
@@ -3953,7 +4079,7 @@ async function _doBuildGraph(
 			// derived state across skip/unskip transitions. Deliberately NOT stamped
 			// with a buildGeneration: absent ⇒ derived caches rebuild every time.
 			graphChanged: true,
-		};
+		});
 		facts.setSessionFact("session.reviewGraph", graph);
 		return graph;
 	}
@@ -3986,13 +4112,14 @@ async function _doBuildGraph(
 		// later fast path diffs from here and the periodic re-verify resets.
 		Object.assign(memCached, verifiedCacheFields(seqAtBuildStart));
 		// #459: content unchanged ⇒ carry the entry's generation forward.
-		const generation = (memCached.buildGeneration ??= ++_graphGenerationCounter);
-		_lastGraphBuildInfo = {
+		const generation = (memCached.buildGeneration ??=
+			++_graphGenerationCounter);
+		setGraphBuildInfo(graph, {
 			reused: true,
 			mode: "cached",
 			seqFastpathFallback,
 			graphChanged: false,
-		};
+		});
 		graph.buildGeneration = generation;
 		facts.setSessionFact("session.reviewGraph", graph);
 		return graph;
@@ -4012,7 +4139,7 @@ async function _doBuildGraph(
 			ignoredIds,
 		});
 		if (incremental) {
-			_lastGraphBuildInfo.seqFastpathFallback = seqFastpathFallback;
+			updateGraphBuildInfo(incremental, { seqFastpathFallback });
 			return incremental;
 		}
 	}
@@ -4042,12 +4169,12 @@ async function _doBuildGraph(
 			buildGeneration: generation,
 			...verifiedCacheFields(seqAtBuildStart),
 		});
-		_lastGraphBuildInfo = {
+		setGraphBuildInfo(graph, {
 			reused: true,
 			mode: "cached",
 			seqFastpathFallback,
 			graphChanged: false,
-		};
+		});
 		graph.buildGeneration = generation;
 		facts.setSessionFact("session.reviewGraph", graph);
 		return graph;
@@ -4079,7 +4206,7 @@ async function _doBuildGraph(
 			},
 		);
 		if (incremental) {
-			_lastGraphBuildInfo.seqFastpathFallback = seqFastpathFallback;
+			updateGraphBuildInfo(incremental, { seqFastpathFallback });
 			return incremental;
 		}
 	}
@@ -4111,10 +4238,7 @@ async function _doBuildGraph(
 			try {
 				const bytes = fs.readFileSync(file);
 				content = bytes.toString("utf-8");
-				fileHashes.set(
-					file,
-					createHash("sha256").update(bytes).digest("hex"),
-				);
+				fileHashes.set(file, createHash("sha256").update(bytes).digest("hex"));
 			} catch {
 				content = null;
 				fileHashes.set(file, "missing");
@@ -4182,15 +4306,18 @@ async function _doBuildGraph(
 		}
 	};
 	if (treeSitterClient) {
-		await treeSitterClient.withParseCacheMeasurement(extractAndDrainIr, (stats) => {
-			logTreeSitterCacheStats({
-				scope: "review_graph_full",
-				filePath: cwd,
-				fileCount: filesToBuild.length,
-				durationMs: Date.now() - extractionStartedAt,
-				stats,
-			});
-		});
+		await treeSitterClient.withParseCacheMeasurement(
+			extractAndDrainIr,
+			(stats) => {
+				logTreeSitterCacheStats({
+					scope: "review_graph_full",
+					filePath: cwd,
+					fileCount: filesToBuild.length,
+					durationMs: Date.now() - extractionStartedAt,
+					stats,
+				});
+			},
+		);
 	} else {
 		await extractAndDrainIr();
 	}
@@ -4237,12 +4364,12 @@ async function _doBuildGraph(
 		seqHint: seqHint !== undefined,
 		mode: "full",
 	}); // fire-and-forget
-	_lastGraphBuildInfo = {
+	setGraphBuildInfo(graph, {
 		reused: false,
 		mode: "full",
 		seqFastpathFallback,
 		graphChanged: true,
-	};
+	});
 	graph.buildGeneration = generation;
 	facts.setSessionFact("session.reviewGraph", graph);
 	return graph;
@@ -4286,6 +4413,7 @@ export function buildOrUpdateGraph(
 					? `source file cap exceeded (${sizeSkip.sourceFileCount} > ${sizeSkip.maxFileCount})`
 					: "unsafe_root";
 				recordBuildAttempt(cwd, "skipped", reason);
+				const buildInfo = getGraphBuildInfoForGraph(graph);
 				logReviewGraph({
 					cwd,
 					phase: "build_skipped",
@@ -4294,13 +4422,16 @@ export function buildOrUpdateGraph(
 					observability: {
 						graph: graphLogMetadata(graph, {
 							buildId,
+							projectSeq: startedProjectSeq,
 							seqHint: seqHint !== undefined,
-							mode: "skipped",
+							mode: buildInfo.mode,
+							sourceFileCount: buildInfo.sourceFileCount,
 						}),
 					},
 				});
 			} else {
 				const prior = getLastReviewGraphBuildAttempt(cwd);
+				const buildInfo = getGraphBuildInfoForGraph(graph);
 				recordBuildAttempt(cwd, "succeeded", prior?.reason);
 				logReviewGraph({
 					cwd,
@@ -4312,9 +4443,9 @@ export function buildOrUpdateGraph(
 					observability: {
 						graph: graphLogMetadata(graph, {
 							buildId,
-							projectSeq: seqHint?.projectSeq(),
+							projectSeq: startedProjectSeq,
 							seqHint: seqHint !== undefined,
-							mode: getLastGraphBuildInfo().mode,
+							mode: buildInfo.mode,
 						}),
 					},
 				});
@@ -4352,9 +4483,7 @@ export function buildOrUpdateGraph(
  * refs come from "references" edges. Line numbers are unavailable here (not stored in graph
  * nodes), so caller attribution falls back to file-level keys in buildCallGraph.
  */
-export function extractSymbolsAndRefsFromGraph(
-	graph: ReviewGraph,
-): {
+export function extractSymbolsAndRefsFromGraph(graph: ReviewGraph): {
 	allSymbols: Map<string, import("../symbol-types.js").Symbol[]>;
 	allRefs: Map<string, import("../symbol-types.js").SymbolRef[]>;
 } {
@@ -4383,7 +4512,7 @@ export function extractSymbolsAndRefsFromGraph(
 			const callerFile = edge.from.slice("file:".length);
 			const refName = edge.to.startsWith("symbol-name:")
 				? edge.to.slice("symbol-name:".length)
-				: edge.to.split(":").pop() ?? edge.to;
+				: (edge.to.split(":").pop() ?? edge.to);
 			const ref: import("../symbol-types.js").SymbolRef = {
 				symbolId: `${callerFile}:${refName}`,
 				filePath: callerFile,
