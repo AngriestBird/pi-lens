@@ -59,22 +59,32 @@ export function evaluateRulePolicy(
 	const raw = ruleId || "";
 	const norm = normalizeRuleForDedup(raw);
 
-	for (const entry of Object.values(policyMap)) {
-		if (!entry) continue;
-		for (const d of entry.disable ?? []) {
-			if (matchesRule(d, raw, norm)) return { dropped: true };
-		}
+	if (scanList(policyMap, (e) => e.disable, raw, norm).matched) {
+		return { dropped: true };
 	}
+	const select = scanList(policyMap, (e) => e.select, raw, norm);
+	return { dropped: select.sawEntry && !select.matched };
+}
 
-	let hasSelect = false;
+/**
+ * Union one list (`disable` or `select`) across every key in the map and test
+ * the rule against it. `sawEntry` reports whether the union was non-empty,
+ * which is what makes a `select` union restrictive rather than absent.
+ */
+function scanList(
+	policyMap: RulePolicyMap,
+	pick: (entry: RulePolicyEntry) => string[] | undefined,
+	raw: string,
+	norm: string,
+): { matched: boolean; sawEntry: boolean } {
+	let sawEntry = false;
 	for (const entry of Object.values(policyMap)) {
-		if (!entry) continue;
-		for (const s of entry.select ?? []) {
-			hasSelect = true;
-			if (matchesRule(s, raw, norm)) return { dropped: false };
+		for (const candidate of (entry && pick(entry)) ?? []) {
+			sawEntry = true;
+			if (matchesRule(candidate, raw, norm)) return { matched: true, sawEntry };
 		}
 	}
-	return { dropped: hasSelect };
+	return { matched: false, sawEntry };
 }
 
 function matchesRule(entry: string, raw: string, normalized: string): boolean {
