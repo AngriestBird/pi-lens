@@ -159,6 +159,11 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 				entry.observability?.graph?.mode === "full",
 		);
 		expect(fullSuccess?.reason).toBeUndefined();
+		// The newer skipped attempt remains the project-report truth source even
+		// when the older full build finishes afterward.
+		expect(getLastReviewGraphBuildAttempt(env.tmpDir)).toMatchObject({
+			outcome: "skipped",
+		});
 	});
 
 	it("size cap: persists an honestly-marked useful partial graph", async () => {
@@ -227,6 +232,7 @@ describe("review-graph persist circuit-breaker (#260)", () => {
 		const partial = entries.find((entry) => entry.phase === "persist_partial");
 		expect(partial?.observability).toEqual({
 			graph: expect.objectContaining({
+				sourceFiles: 2,
 				persistCoverage: expect.objectContaining({
 					partial: true,
 					totalNodes: built.nodes.size,

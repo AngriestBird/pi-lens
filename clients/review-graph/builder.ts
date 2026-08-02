@@ -712,7 +712,18 @@ function recordBuildAttempt(
 	reason?: string,
 	buildId?: number,
 ): void {
-	_buildAttempts.set(normalizeMapKey(cwd), {
+	const key = normalizeMapKey(cwd);
+	const prior = _buildAttempts.get(key);
+	// Build IDs are assigned at start, so a terminal event from an older
+	// overlapping build must never overwrite the newest build's status/reason.
+	// Keep the newest started attempt as the project-report truth source.
+	if (
+		prior?.buildId !== undefined &&
+		(buildId === undefined || buildId < prior.buildId)
+	) {
+		return;
+	}
+	_buildAttempts.set(key, {
 		when: new Date().toISOString(),
 		outcome,
 		...(buildId === undefined ? {} : { buildId }),
@@ -1863,9 +1874,7 @@ function persistGraph(
 	_persistGenerations.set(key, generation);
 	const graphMetadata = graphLogMetadata(persistedGraph, {
 		...options,
-		sourceFileCount:
-			persistedGraph.persistCoverage?.persistedFiles ??
-			persistedGraph.fileNodes.size,
+		sourceFileCount,
 		sourceFileCountTruncated:
 			persistedGraph.persistCoverage?.sourceFilesTruncated === true,
 	});

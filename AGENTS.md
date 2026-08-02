@@ -379,8 +379,9 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   graph, not a shared concurrent-build verdict. Keep this on the existing worker,
   generation-staged promotion, and sync-flush path. Persisted-file counts are
   intersections with the source-file universe, not every resolved import stub;
-  build/cascade consumers use graph-local metadata so overlapping builds cannot
-  borrow another build's mode or reason. Cascade treats any partial coverage as
+  lifecycle graph/cascade consumers use graph-local metadata, and project-report
+  attempt state is ordered by build ID, so overlapping builds cannot borrow
+  another build's mode or reason. Cascade treats any partial coverage as
   indeterminate rather than a clean zero-neighbor result.
 - **Review-graph snapshot persistence is worker-offloaded (#939).** The
   canonical cache is `review-graph.json.gz` (legacy uncompressed
