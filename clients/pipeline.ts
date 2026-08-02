@@ -221,7 +221,10 @@ function exceedsLspSyncLimits(
 
 export interface PipelineContext {
 	filePath: string;
+	/** Language/tool root used for runner execution and config resolution. */
 	cwd: string;
+	/** Authoritative workspace root used for project-wide policy and state. */
+	projectRoot?: string;
 	toolName: string;
 	modifiedRanges?: { start: number; end: number }[];
 	telemetry?: {
@@ -858,7 +861,6 @@ export async function runAutofix(
 				dbg(`autofix: oxlint --fix fixed ${filePath}`);
 				needsContentRefresh = true;
 			}
-			continue;
 		}
 	}
 
@@ -1232,6 +1234,7 @@ export async function runPipeline(
 			turnIndex: ctx.telemetry?.turnIndex ?? 0,
 			writeIndex: ctx.telemetry?.writeIndex ?? 0,
 		},
+		{ projectRoot: ctx.projectRoot },
 	);
 	recordDiagnostics(
 		filePath,

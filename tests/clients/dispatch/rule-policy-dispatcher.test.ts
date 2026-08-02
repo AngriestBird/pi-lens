@@ -450,15 +450,17 @@ describe("dispatcher filter — resolves the policy from the project root, not t
 
 		const ctx = createDispatchContext(
 			filePath,
-			tmpDir,
+			pkgDir,
 			{ getFlag: () => false },
 			new FactStore(),
 			false,
+			undefined,
+			tmpDir,
 		);
-		// Confirm the language root actually resolved to the nested package —
-		// otherwise this test wouldn't be exercising the bug at all.
-		expect(ctx.cwd).toBe(pkgDir);
-		expect(ctx.projectRoot).toBe(tmpDir);
+		// Confirm the language root and authoritative workspace root are distinct —
+		// otherwise this test wouldn't exercise the production monorepo boundary.
+		expect(ctx.cwd).toBe(normalizeMapKey(pkgDir));
+		expect(ctx.projectRoot).toBe(normalizeMapKey(tmpDir));
 
 		const groups: RunnerGroup[] = [{ mode: "all", runnerIds: ["ast-grep"] }];
 		const result = await dispatchForFile(ctx, groups, registry);

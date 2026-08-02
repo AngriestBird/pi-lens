@@ -156,9 +156,13 @@ export function createDispatchContext(
 	facts: FactStore,
 	blockingOnly?: boolean,
 	modifiedRanges?: import("./types.js").ModifiedRange[],
+	/** Authoritative workspace root; `cwd` may be a nested language root. */
+	projectRoot?: string,
 ): DispatchContext {
 	const absoluteFilePath = resolveRunnerPath(cwd, filePath);
-	const normalizedProjectRoot = normalizeMapKey(path.resolve(cwd));
+	const normalizedProjectRoot = normalizeMapKey(
+		path.resolve(projectRoot ?? cwd),
+	);
 	const normalizedCwd = normalizeMapKey(
 		resolveLanguageRootForFile(absoluteFilePath, cwd),
 	);

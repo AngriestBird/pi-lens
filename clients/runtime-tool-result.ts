@@ -578,6 +578,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		{
 			filePath,
 			cwd: dispatchCwd,
+			projectRoot: turnStateCwd,
 			toolName: event.toolName,
 			modifiedRanges,
 			telemetry: {
