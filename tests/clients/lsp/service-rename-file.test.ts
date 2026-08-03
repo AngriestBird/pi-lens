@@ -11,7 +11,9 @@ type MockRenameClient = {
 	root: string;
 	isAlive: ReturnType<typeof vi.fn>;
 	isDocumentOpen: ReturnType<typeof vi.fn>;
+	getDocumentUri: ReturnType<typeof vi.fn>;
 	closeDocument: ReturnType<typeof vi.fn>;
+	notify: { open: ReturnType<typeof vi.fn> };
 	willRenameFiles: ReturnType<typeof vi.fn>;
 	didRenameFiles: ReturnType<typeof vi.fn>;
 };
@@ -21,7 +23,9 @@ function makeClient(root: string, edit: unknown): MockRenameClient {
 		root,
 		isAlive: vi.fn(() => true),
 		isDocumentOpen: vi.fn(() => false),
+		getDocumentUri: vi.fn(() => undefined),
 		closeDocument: vi.fn(async () => undefined),
+		notify: { open: vi.fn(async () => undefined) },
 		willRenameFiles: vi.fn(async () => edit),
 		didRenameFiles: vi.fn(async () => undefined),
 	};
@@ -262,7 +266,7 @@ describe("LSPService.renameFile", () => {
 		}
 	});
 
-	it("still notifies about a rename when best-effort document close fails", async () => {
+	it("aborts and resynchronizes when document close fails", async () => {
 		const tmpDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-lsp-rename-file-"),
 		);
@@ -276,13 +280,38 @@ describe("LSPService.renameFile", () => {
 		addClient(service, "typescript", tmpDir, client);
 
 		try {
-			const result = await service.renameFile(oldPath, newPath, {
-				cwd: tmpDir,
-				apply: true,
-			});
+			await expect(
+				service.renameFile(oldPath, newPath, { cwd: tmpDir, apply: true }),
+			).rejects.toThrow(/didClose failed; rename aborted/);
+			expect(fs.existsSync(oldPath)).toBe(true);
+			expect(fs.existsSync(newPath)).toBe(false);
+			expect(client.didRenameFiles).not.toHaveBeenCalled();
+			expect(client.notify.open).toHaveBeenCalledWith(
+				oldPath,
+				expect.any(String),
+				"plaintext",
+				true,
+				true,
+			);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
 
-			expect(result.didRenameFailures).toEqual([]);
-			expect(client.didRenameFiles).toHaveBeenCalledWith(oldPath, newPath);
+	it("preserves the URI spelling used to open the old document", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-rename-file-"));
+		const oldPath = path.join(tmpDir, "old.ts");
+		const newPath = path.join(tmpDir, "new.ts");
+		fs.writeFileSync(oldPath, "value\n", "utf-8");
+		const originalUri = `file://${tmpDir.replace(/\\/g, "/")}/OLD.ts`;
+		const client = makeClient(tmpDir, null);
+		client.isDocumentOpen.mockReturnValue(true);
+		client.getDocumentUri.mockReturnValue(originalUri);
+		const service = new LSPService();
+		addClient(service, "typescript", tmpDir, client);
+		try {
+			await service.renameFile(oldPath, newPath, { cwd: tmpDir, apply: true });
+			expect(client.didRenameFiles).toHaveBeenCalledWith(oldPath, newPath, originalUri);
 		} finally {
 			removeTempDirSync(tmpDir);
 		}

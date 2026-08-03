@@ -3007,6 +3007,40 @@ export class LSPService {
 		}
 
 		const applied = await applyWorkspaceEdit(merged.edit, cwd);
+		const openDocuments = activeClients
+			.filter(({ client }) => client.isDocumentOpen(oldFilePath))
+			.map(({ serverId, client }) => ({
+				serverId,
+				client,
+				oldUri: client.getDocumentUri(oldFilePath),
+			}));
+		const closeFailures: Array<{ serverId: string; error: string }> = [];
+		await Promise.all(
+			openDocuments.map(async ({ serverId, client }) => {
+				try {
+					await client.closeDocument(oldFilePath);
+				} catch (err) {
+					closeFailures.push({
+						serverId,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				}
+			}),
+		);
+		if (closeFailures.length > 0) {
+			// Do not rename or send didRenameFiles while any server still has the
+			// old document open. Re-open/resync every affected client so a partial
+			// close cannot leave an in-memory document behind the disk contents.
+			const content = await fs.readFile(oldFilePath, "utf-8");
+			await Promise.all(
+				openDocuments.map(({ client }) =>
+					client.notify.open(oldFilePath, content, "plaintext", true, true),
+				),
+			);
+			throw new Error(
+				`workspace/didClose failed; rename aborted: ${closeFailures.map((failure) => `${failure.serverId}: ${failure.error}`).join("; ")}`,
+			);
+		}
 		await fs.mkdir(path.dirname(newFilePath), { recursive: true });
 		await fs.rename(oldFilePath, newFilePath);
 		const relOld =
@@ -3019,15 +3053,13 @@ export class LSPService {
 
 		await Promise.all(
 			activeClients.map(async ({ serverId, client }) => {
-				if (client.isDocumentOpen(oldFilePath)) {
-					try {
-						await client.closeDocument(oldFilePath);
-					} catch {
-						// Best-effort close: still notify the server about the completed rename.
-					}
-				}
+				const opened = openDocuments.find((entry) => entry.serverId === serverId);
 				try {
-					await client.didRenameFiles(oldFilePath, newFilePath);
+					if (opened?.oldUri) {
+						await client.didRenameFiles(oldFilePath, newFilePath, opened.oldUri);
+					} else {
+						await client.didRenameFiles(oldFilePath, newFilePath);
+					}
 				} catch (err) {
 					didRenameFailures.push({
 						serverId,

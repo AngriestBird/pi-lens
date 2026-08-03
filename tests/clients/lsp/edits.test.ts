@@ -6,8 +6,10 @@ import { describe, expect, it } from "vitest";
 import {
 	applyTextEditsToString,
 	applyWorkspaceEdit,
+	__planWorkspaceEditForTest,
 	mergeWorkspaceTextEditsByPriority,
 } from "../../../clients/lsp/edits.js";
+import { measureMaxSyncBlockMs } from "../../support/perf-harness.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 describe("LSP workspace edits", () => {
@@ -347,8 +349,8 @@ describe("LSP workspace edits", () => {
 					},
 					tmpDir,
 				),
-			).rejects.toThrow(/no rollback performed:[\s\S]*new\/child\.ts/);
-			expect(fs.readFileSync(destinationChild, "utf-8")).toBe("new");
+			).rejects.toThrow(/rename destination already exists/);
+			expect(fs.readFileSync(destinationChild, "utf-8")).toBe("old");
 			expect(fs.existsSync(path.join(oldDir, "source.ts"))).toBe(true);
 		} finally {
 			removeTempDirSync(tmpDir);
@@ -378,7 +380,11 @@ describe("LSP workspace edits", () => {
 								},
 							],
 						},
-						{ kind: "delete", uri: pathToFileURL(doomedDir).href },
+						{
+					kind: "delete",
+					uri: pathToFileURL(doomedDir).href,
+					options: { recursive: true },
+				},
 					],
 				},
 				tmpDir,
@@ -389,9 +395,119 @@ describe("LSP workspace edits", () => {
 				"Applied 1 edit(s) to doomed/nested/child.ts",
 				"Deleted doomed",
 			]);
-			expect(result.files).toEqual([childPath, doomedDir]);
+			expect(result.files).toEqual([
+				childPath.replace(/\\/g, "/"),
+				doomedDir.replace(/\\/g, "/"),
+			]);
 		} finally {
 			removeTempDirSync(tmpDir);
 		}
+	});
+
+	it("preflights a later missing text document before writing an earlier one", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
+		const firstPath = path.join(tmpDir, "first.ts");
+		const missingPath = path.join(tmpDir, "missing.ts");
+		fs.writeFileSync(firstPath, "first", "utf-8");
+		try {
+			await expect(applyWorkspaceEdit({ changes: {
+				[pathToFileURL(firstPath).href]: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } }, newText: "changed" }],
+				[pathToFileURL(missingPath).href]: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "missing" }],
+			} }, tmpDir)).rejects.toThrow(/text edit target is not a file/);
+			expect(fs.readFileSync(firstPath, "utf-8")).toBe("first");
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	it.each([
+		["utf-8", 1, 5],
+		["utf-16", 1, 3],
+		["utf-32", 1, 2],
+	] as const)("applies astral positions in %s encoding", (encoding, start, end) => {
+		expect(applyTextEditsToString("a😀é", [{ range: { start: { line: 0, character: start }, end: { line: 0, character: end } }, newText: "X" }], encoding)).toBe("aXé");
+	});
+
+	it("rejects malformed, out-of-bounds, and unsupported edits", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
+		const filePath = path.join(tmpDir, "file.ts");
+		fs.writeFileSync(filePath, "abc", "utf-8");
+		const uri = pathToFileURL(filePath).href;
+		try {
+			expect(() => applyTextEditsToString("abc", [{ range: { start: { line: 0.5, character: 0 }, end: { line: 0, character: 0 } }, newText: "x" }])).toThrow(/overlapping|outside|range/);
+			await expect(applyWorkspaceEdit({ changes: { [uri]: [{ range: { start: { line: 0, character: 4 }, end: { line: 0, character: 4 } }, newText: "x" }] } }, tmpDir)).rejects.toThrow(/outside line/);
+			await expect(applyWorkspaceEdit({ documentChanges: [{ kind: "watch", uri }] }, tmpDir)).rejects.toThrow(/unsupported workspace resource operation/);
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	it("rejects stale versioned text document edits before mutation", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
+		const filePath = path.join(tmpDir, "versioned.ts");
+		fs.writeFileSync(filePath, "old", "utf-8");
+		try {
+			await expect(applyWorkspaceEdit({ documentChanges: [{ textDocument: { uri: pathToFileURL(filePath).href, version: 2 }, edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "new" }] }] }, tmpDir, { documentVersions: new Map([[filePath, 1]]) })).rejects.toThrow(/stale text document version/);
+			expect(fs.readFileSync(filePath, "utf-8")).toBe("old");
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	it("confines file URIs and rejects duplicate resources", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
+		const outside = path.join(path.dirname(tmpDir), "outside.ts");
+		const inside = path.join(tmpDir, "inside.ts");
+		fs.writeFileSync(outside, "outside", "utf-8");
+		try {
+			await expect(applyWorkspaceEdit({ changes: { [pathToFileURL(outside).href]: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "x" }] } }, tmpDir)).rejects.toThrow(/escapes workspace/);
+			await expect(applyWorkspaceEdit({ documentChanges: [{ kind: "create", uri: pathToFileURL(inside).href, options: { ignoreIfExists: true } }, { kind: "create", uri: pathToFileURL(inside).href, options: { ignoreIfExists: true } }] }, tmpDir)).rejects.toThrow(/duplicate workspace resource/);
+			await expect(applyWorkspaceEdit({ changes: { https: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "x" }] } }, tmpDir)).rejects.toThrow(/invalid workspace edit URI/);
+		} finally { removeTempDirSync(tmpDir); removeTempDirSync(outside); }
+	});
+
+	it("rejects symlink escapes during workspace-edit preflight", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
+		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-outside-"));
+		const outsideFile = path.join(outsideDir, "outside.ts");
+		const linkDir = path.join(tmpDir, "linked");
+		fs.writeFileSync(outsideFile, "outside", "utf-8");
+		try {
+			try { fs.symlinkSync(outsideDir, linkDir, process.platform === "win32" ? "junction" : "dir"); } catch { return; }
+			await expect(applyWorkspaceEdit({ changes: {
+				[pathToFileURL(path.join(linkDir, "outside.ts")).href]: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 7 } }, newText: "changed" }],
+			} }, tmpDir)).rejects.toThrow(/escapes workspace/);
+			expect(fs.readFileSync(outsideFile, "utf-8")).toBe("outside");
+		} finally { removeTempDirSync(tmpDir); removeTempDirSync(outsideDir); }
+	});
+
+	it("keeps large text/resource planning occupancy bounded", { timeout: 30_000 }, async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-plan-"));
+		const changes: Record<string, unknown[]> = {};
+		const documentChanges: unknown[] = [];
+		const count = 400;
+		for (let index = 0; index < count; index++) {
+			const filePath = path.join(tmpDir, `file-${index}.ts`);
+			fs.writeFileSync(filePath, "old", "utf-8");
+			const uri = pathToFileURL(filePath).href;
+			changes[uri] = [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "new" }];
+			documentChanges.push({ kind: "create", uri, options: { ignoreIfExists: true } });
+		}
+		try {
+			let planned = 0;
+			const maxBlock = await measureMaxSyncBlockMs(async () => {
+				planned = __planWorkspaceEditForTest({ changes, documentChanges });
+			});
+			expect(planned).toBe(count * 2);
+			expect(maxBlock).toBeLessThan(300);
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	it("honors resource operation options", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
+		const filePath = path.join(tmpDir, "existing.ts");
+		fs.writeFileSync(filePath, "old", "utf-8");
+		try {
+			const ignored = await applyWorkspaceEdit({ documentChanges: [{ kind: "create", uri: pathToFileURL(filePath).href, options: { ignoreIfExists: true } }] }, tmpDir);
+			expect(ignored.descriptions).toEqual([]);
+			await expect(applyWorkspaceEdit({ documentChanges: [{ kind: "create", uri: pathToFileURL(filePath).href }] }, tmpDir)).rejects.toThrow(/already exists/);
+			await expect(applyWorkspaceEdit({ documentChanges: [{ kind: "create", uri: pathToFileURL(filePath).href, options: { recursive: true } }] }, tmpDir)).rejects.toThrow(/invalid create.options.recursive/);
+			await applyWorkspaceEdit({ documentChanges: [{ kind: "create", uri: pathToFileURL(filePath).href, options: { overwrite: true } }] }, tmpDir);
+			expect(fs.readFileSync(filePath, "utf-8")).toBe("");
+		} finally { removeTempDirSync(tmpDir); }
 	});
 });

@@ -26,7 +26,10 @@ import {
 } from "../deps/vscode-jsonrpc.js";
 import { getAmbientAbortSignal } from "../safe-spawn.js";
 
-import { applyWorkspaceEdit } from "./edits.js";
+import {
+	applyWorkspaceEdit,
+	normalizeWorkspaceEditToUtf16,
+} from "./edits.js";
 import { recordLspChild, removeLspChild } from "../instance-registry.js";
 import type { LSPProcess } from "./launch.js";
 import { normalizeMapKey, uriToPath } from "./path-utils.js";
@@ -337,6 +340,8 @@ export interface LSPClientInfo {
 	documentSymbol(filePath: string): Promise<LSPSymbol[]>;
 	/** Whether this exact document has already been opened on the server. */
 	isDocumentOpen(filePath: string): boolean;
+	/** URI spelling used when this document was opened. */
+	getDocumentUri(filePath: string): string | undefined;
 	/** Close an open document, if present, without opening or spawning anything. */
 	closeDocument(filePath: string): Promise<void>;
 	/** Workspace-wide symbol search */
@@ -362,7 +367,12 @@ export interface LSPClientInfo {
 		newFilePath: string,
 	): Promise<LSPWorkspaceEdit | null>;
 	/** Notify server after a source file rename. */
-	didRenameFiles(oldFilePath: string, newFilePath: string): Promise<void>;
+	didRenameFiles(
+		oldFilePath: string,
+		newFilePath: string,
+		oldUri?: string,
+		newUri?: string,
+	): Promise<void>;
 	/** Go to implementation */
 	implementation(
 		filePath: string,
@@ -553,6 +563,8 @@ export interface LSPClientState {
 	 *  as fresh so version-less servers keep working. */
 	readonly diagnosticDocVersions: Map<string, number>;
 	readonly openDocuments: Set<string>;
+	/** Original URI spelling for each open document; path keys are normalized. */
+	readonly openDocumentUris?: Map<string, string>;
 	readonly pendingOpens: Set<string>;
 	/** Mutable: updated by applyDynamicCapabilities after registerCapability events */
 	workspaceDiagnosticsSupport: LSPWorkspaceDiagnosticsSupport;
@@ -1095,6 +1107,10 @@ export function setupIncomingHandlers(
 				await applyWorkspaceEdit(
 					params.edit as Parameters<typeof applyWorkspaceEdit>[0],
 					state.root,
+					{
+						positionEncoding: state.positionEncoding,
+						documentVersions: state.documentVersions,
+					},
 				);
 				return { applied: true };
 			} catch (err) {
@@ -1406,8 +1422,8 @@ export async function handleNotifyOpen(
 	silent = false,
 ): Promise<void> {
 	if (!isClientAlive(state)) return;
-	const uri = pathToFileURL(filePath).href;
 	const normalizedPath = normalizeMapKey(filePath);
+	const uri = state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href;
 
 	if (
 		state.openDocuments.has(normalizedPath) ||
@@ -1429,12 +1445,14 @@ export async function handleNotifyOpen(
 				textDocument: { uri },
 			});
 			state.openDocuments.delete(normalizedPath);
+			state.openDocumentUris?.delete(normalizedPath);
 			state.documentVersions.set(normalizedPath, 0);
 			if (!isClientAlive(state)) return;
 			await safeSendNotification(state.connection, "textDocument/didOpen", {
 				textDocument: { uri, languageId, version: 0, text: content },
 			});
 			state.openDocuments.add(normalizedPath);
+			state.openDocumentUris?.set(normalizedPath, uri);
 			return;
 		}
 		await safeSendNotification(state.connection, "textDocument/didChange", {
@@ -1478,6 +1496,7 @@ export async function handleNotifyOpen(
 	});
 	state.pendingOpens.delete(normalizedPath);
 	state.openDocuments.add(normalizedPath);
+	state.openDocumentUris?.set(normalizedPath, uri);
 }
 
 export async function handleNotifyChange(
@@ -1486,8 +1505,8 @@ export async function handleNotifyChange(
 	content: string,
 ): Promise<void> {
 	if (!isClientAlive(state)) return;
-	const uri = pathToFileURL(filePath).href;
 	const normalizedPath = normalizeMapKey(filePath);
+	const uri = state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href;
 
 	if (!state.openDocuments.has(normalizedPath)) {
 		// Safety fallback: keep protocol ordering valid even if caller sends
@@ -1497,6 +1516,7 @@ export async function handleNotifyChange(
 		});
 		state.documentVersions.set(normalizedPath, 0);
 		state.openDocuments.add(normalizedPath);
+		state.openDocumentUris?.set(normalizedPath, uri);
 		return;
 	}
 
@@ -1525,6 +1545,7 @@ export async function clientShutdown(
 	state.pendingDiagnostics.clear();
 	state.pendingOpens.clear();
 	state.openDocuments.clear();
+	state.openDocumentUris?.clear();
 	// #271: drop any pending watched-files batch + its timer (a dying client's
 	// queued FS changes are moot, and the timer must not outlive the connection).
 	state.watchQueue?.cancel();
@@ -1717,13 +1738,43 @@ export async function runServerCommand(
 	}
 }
 
+function validateWorkspaceEditVersions(
+	state: LSPClientState,
+	edit: { documentChanges?: unknown[] },
+): void {
+	for (const change of edit.documentChanges ?? []) {
+		if (typeof change !== "object" || change === null || !("textDocument" in change)) continue;
+		const textDocument = (change as { textDocument?: { uri?: unknown; version?: unknown } }).textDocument;
+		if (!textDocument || typeof textDocument.uri !== "string" || textDocument.version == null) continue;
+		const current = state.documentVersions.get(normalizeMapKey(uriToPath(textDocument.uri)));
+		if (current === undefined || current !== textDocument.version) {
+			throw new Error(`stale workspace edit document version for ${textDocument.uri}`);
+		}
+	}
+}
+
+async function normalizeClientWorkspaceEdit(
+	state: LSPClientState,
+	edit: LSPWorkspaceEdit,
+): Promise<LSPWorkspaceEdit> {
+	validateWorkspaceEditVersions(state, edit);
+	return (await normalizeWorkspaceEditToUtf16(edit, state.positionEncoding)) as LSPWorkspaceEdit;
+}
+
 async function resolveCodeActionBestEffort(
 	state: LSPClientState,
 	action: LSPCodeAction,
 ): Promise<LSPCodeAction> {
-	if (!isClientAlive(state) || action.edit) return action;
+	if (!isClientAlive(state)) return action;
+	if (action.edit) {
+		return {
+			...action,
+			edit: await normalizeClientWorkspaceEdit(state, action.edit as LSPWorkspaceEdit),
+		};
+	}
+	let resolved: LSPCodeAction | null | undefined;
 	try {
-		const resolved = await withTimeout(
+		resolved = await withTimeout(
 			safeSendRequest<LSPCodeAction>(
 				state.connection,
 				"codeAction/resolve",
@@ -1731,13 +1782,16 @@ async function resolveCodeActionBestEffort(
 			),
 			NAV_REQUEST_TIMEOUT_MS,
 		);
-		if (!resolved || typeof resolved !== "object") return action;
-		return { ...action, ...resolved };
 	} catch {
 		// codeAction/resolve is optional. Keep the original lightweight action when
 		// the server does not support resolve or fails to populate an edit.
 		return action;
 	}
+	if (!resolved || typeof resolved !== "object") return action;
+	const merged = { ...action, ...resolved };
+	return merged.edit
+		? { ...merged, edit: await normalizeClientWorkspaceEdit(state, merged.edit as LSPWorkspaceEdit) }
+		: merged;
 }
 
 // --- Client Factory ---
@@ -1910,6 +1964,7 @@ export async function createLSPClient(options: {
 		documentVersions: new Map(),
 		diagnosticDocVersions: new Map(),
 		openDocuments: new Set(),
+		openDocumentUris: new Map(),
 		pendingOpens: new Set(),
 		// these are filled in after initialize — cast to avoid two-phase init
 		workspaceDiagnosticsSupport:
@@ -2089,12 +2144,12 @@ export async function createLSPClient(options: {
 		},
 
 		getTrackedDiagnosticPaths() {
-			return [
-				...new Set([
-					...state.pushDiagnostics.keys(),
-					...state.documentPullDiagnostics.keys(),
-				]),
-			];
+			return [...new Set([
+				...state.pushDiagnostics.keys(),
+				...state.documentPullDiagnostics.keys(),
+			])].map((filePath) =>
+				process.platform === "win32" ? filePath.replace(/\//g, "\\") : filePath,
+			);
 		},
 
 		pruneDiagnostics(predicate) {
@@ -2252,6 +2307,10 @@ export async function createLSPClient(options: {
 			return state.openDocuments.has(normalizeMapKey(filePath));
 		},
 
+		getDocumentUri(filePath) {
+			return state.openDocumentUris?.get(normalizeMapKey(filePath));
+		},
+
 		async workspaceSymbol(query) {
 			if (!isClientAlive(state)) return [];
 			// Route through navRequest for the shared withTimeout ceiling — a hung
@@ -2308,7 +2367,7 @@ export async function createLSPClient(options: {
 				},
 				filePath,
 			);
-			return result ?? null;
+			return result ? await normalizeClientWorkspaceEdit(state, result) : null;
 		},
 
 		async closeDocument(filePath) {
@@ -2316,9 +2375,12 @@ export async function createLSPClient(options: {
 			const normalizedPath = normalizeMapKey(filePath);
 			if (!state.openDocuments.has(normalizedPath)) return;
 			await safeSendNotification(state.connection, "textDocument/didClose", {
-				textDocument: { uri: pathToFileURL(filePath).href },
+				textDocument: {
+					uri: state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href,
+				},
 			});
 			state.openDocuments.delete(normalizedPath);
+			state.openDocumentUris?.delete(normalizedPath);
 			state.documentVersions.delete(normalizedPath);
 			clearDiagnosticsForPath(state, normalizedPath);
 		},
@@ -2336,16 +2398,16 @@ export async function createLSPClient(options: {
 					],
 				},
 			);
-			return result ?? null;
+			return result ? await normalizeClientWorkspaceEdit(state, result) : null;
 		},
 
-		async didRenameFiles(oldFilePath, newFilePath) {
+		async didRenameFiles(oldFilePath, newFilePath, oldUri, newUri) {
 			if (!isClientAlive(state)) return;
 			await safeSendNotification(state.connection, "workspace/didRenameFiles", {
 				files: [
 					{
-						oldUri: pathToFileURL(oldFilePath).href,
-						newUri: pathToFileURL(newFilePath).href,
+						oldUri: oldUri ?? pathToFileURL(oldFilePath).href,
+						newUri: newUri ?? pathToFileURL(newFilePath).href,
 					},
 				],
 			});
