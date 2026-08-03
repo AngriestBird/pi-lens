@@ -737,6 +737,8 @@ pi-lens's lifecycle hooks (`session_start`, `tool_call`, `tool_result`, `context
 
 ## Internal edit substrate direction
 
+**LSP workspace-edit ordering is transactional only at validation time.** `clients/lsp/edits.ts` plans `documentChanges` in declared order, flushing queued text edits before resource operations on the same URI/subtree, and validates every text-edit batch before the first filesystem mutation. Preserve original-array order for equal-position inserts and collapse only byte-identical non-empty duplicate edits; later filesystem failures remain no-rollback and must keep the existing partial-application error.
+
 Phase 6 in `implementation.md` is intentionally **not** a public `lens_edit` tool. It should be an internal mutation substrate to reduce failed edits in pi-lens-owned paths while preserving the native agent edit lifecycle:
 
 ```text

@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { uriToPath } from "./path-utils.js";
+import { isUnderDir, pathsEqual, uriToPath } from "./path-utils.js";
 
 export interface LSPPosition {
 	line: number;
@@ -94,29 +94,58 @@ export function rangesOverlap(a: LSPRange, b: LSPRange): boolean {
 	);
 }
 
-export function applyTextEditsToString(
-	content: string,
-	edits: LSPTextEdit[],
-): string {
-	const sortedEdits = [...edits].sort((a, b) => {
-		const lineDelta = b.range.start.line - a.range.start.line;
-		return lineDelta !== 0
-			? lineDelta
-			: b.range.start.character - a.range.start.character;
-	});
+function positionsEqual(a: LSPPosition, b: LSPPosition): boolean {
+	return a.line === b.line && a.character === b.character;
+}
 
-	for (let index = 0; index < sortedEdits.length - 1; index++) {
-		const later = sortedEdits[index]?.range;
-		const earlier = sortedEdits[index + 1]?.range;
+function rangesEqual(a: LSPRange, b: LSPRange): boolean {
+	return positionsEqual(a.start, b.start) && positionsEqual(a.end, b.end);
+}
+
+function isEmptyRange(range: LSPRange): boolean {
+	return positionsEqual(range.start, range.end);
+}
+
+function sortAndValidateTextEdits(edits: LSPTextEdit[]): LSPTextEdit[] {
+	const sorted = edits
+		.map((edit, index) => ({ edit, index }))
+		.sort((a, b) => {
+			const positionDelta = comparePosition(b.edit.range.start, a.edit.range.start);
+			return positionDelta !== 0 ? positionDelta : b.index - a.index;
+		})
+		.map(({ edit }) => edit);
+	const unique: LSPTextEdit[] = [];
+	for (const edit of sorted) {
+		const previous = unique[unique.length - 1];
+		if (
+			previous &&
+			!isEmptyRange(edit.range) &&
+			rangesEqual(previous.range, edit.range) &&
+			previous.newText === edit.newText
+		) {
+			continue;
+		}
+		unique.push(edit);
+	}
+
+	for (let index = 0; index < unique.length - 1; index++) {
+		const later = unique[index]?.range;
+		const earlier = unique[index + 1]?.range;
 		if (later && earlier && comparePosition(earlier.end, later.start) > 0) {
 			throw new Error(
 				`overlapping LSP edits: ${formatRange(earlier)} conflicts with ${formatRange(later)}`,
 			);
 		}
 	}
+	return unique;
+}
 
+export function applyTextEditsToString(
+	content: string,
+	edits: LSPTextEdit[],
+): string {
 	const lines = content.split("\n");
-	for (const edit of sortedEdits) {
+	for (const edit of sortAndValidateTextEdits(edits)) {
 		const { start, end } = edit.range;
 		if (start.line === end.line) {
 			const line = lines[start.line] ?? "";
@@ -231,6 +260,82 @@ export function mergeWorkspaceTextEditsByPriority(
 	return { edit: { changes }, droppedConflicts, inputEditCount, serverIds };
 }
 
+type WorkspaceEditOp =
+	| { kind: "text"; uri: string; edits: LSPTextEdit[] }
+	| CreateFileOp
+	| RenameFileOp
+	| DeleteFileOp;
+
+function planWorkspaceEdit(edit: {
+	changes?: Record<string, unknown[]>;
+	documentChanges?: unknown[];
+}): WorkspaceEditOp[] {
+	const ops: WorkspaceEditOp[] = [];
+	const pending = new Map<string, LSPTextEdit[]>();
+	const queue = (uri: string, edits: unknown[]) => {
+		const textEdits = edits.filter(isTextEdit);
+		if (textEdits.length === 0) return;
+		const existing = pending.get(uri);
+		if (existing) existing.push(...textEdits);
+		else pending.set(uri, [...textEdits]);
+	};
+	const flushUri = (uri: string) => {
+		const edits = pending.get(uri);
+		if (!edits) return;
+		pending.delete(uri);
+		ops.push({ kind: "text", uri, edits });
+	};
+	const flushSubtree = (uri: string) => {
+		const targetPath = uriToPath(uri);
+		for (const candidate of [...pending.keys()]) {
+			const candidatePath = uriToPath(candidate);
+			if (
+				pathsEqual(candidatePath, targetPath) ||
+				isUnderDir(candidatePath, targetPath)
+			) {
+				flushUri(candidate);
+			}
+		}
+	};
+
+	for (const [uri, edits] of Object.entries(edit.changes ?? {})) {
+		queue(uri, edits);
+	}
+	for (const change of edit.documentChanges ?? []) {
+		if (isTextDocumentEdit(change)) {
+			queue(change.textDocument.uri, change.edits);
+			continue;
+		}
+		if (typeof change !== "object" || change === null || !("kind" in change)) {
+			continue;
+		}
+		const kind = (change as { kind?: unknown }).kind;
+		if (kind === "create" && typeof (change as CreateFileOp).uri === "string") {
+			const op = change as CreateFileOp;
+			flushUri(op.uri);
+			ops.push(op);
+		} else if (
+			kind === "rename" &&
+			typeof (change as RenameFileOp).oldUri === "string" &&
+			typeof (change as RenameFileOp).newUri === "string"
+		) {
+			const op = change as RenameFileOp;
+			flushSubtree(op.oldUri);
+			flushSubtree(op.newUri);
+			ops.push(op);
+		} else if (
+			kind === "delete" &&
+			typeof (change as DeleteFileOp).uri === "string"
+		) {
+			const op = change as DeleteFileOp;
+			flushSubtree(op.uri);
+			ops.push(op);
+		}
+	}
+	for (const uri of [...pending.keys()]) flushUri(uri);
+	return ops;
+}
+
 function relativeToCwd(filePath: string, cwd: string): string {
 	const rel = path.relative(cwd, filePath) || path.basename(filePath);
 	return rel.replace(/\\/g, "/");
@@ -287,29 +392,25 @@ export async function applyWorkspaceEdit(
 ): Promise<AppliedWorkspaceEdit> {
 	const descriptions: string[] = [];
 	const touchedFiles = new Set<string>();
-	const textEditsByUri = flattenWorkspaceTextEdits(edit);
+	const planned = planWorkspaceEdit(edit).map((op): WorkspaceEditOp =>
+		op.kind === "text"
+			? { ...op, edits: sortAndValidateTextEdits(op.edits) }
+			: op,
+	);
 
 	try {
-		for (const [uri, edits] of textEditsByUri) {
-			const filePath = uriToPath(uri);
-			const content = await fs.readFile(filePath, "utf-8");
-			const updated = applyTextEditsToString(content, edits);
-			await fs.writeFile(filePath, updated, "utf-8");
-			touchedFiles.add(filePath);
-			descriptions.push(
-				`Applied ${edits.length} edit(s) to ${relativeToCwd(filePath, cwd)}`,
-			);
-		}
-
-		for (const change of edit.documentChanges ?? []) {
-			if (typeof change !== "object" || change === null || !("kind" in change))
-				continue;
-			const kind = (change as { kind?: unknown }).kind;
-			if (
-				kind === "create" &&
-				typeof (change as CreateFileOp).uri === "string"
-			) {
-				const filePath = uriToPath((change as CreateFileOp).uri);
+		for (const op of planned) {
+			if (op.kind === "text") {
+				const filePath = uriToPath(op.uri);
+				const content = await fs.readFile(filePath, "utf-8");
+				const updated = applyTextEditsToString(content, op.edits);
+				await fs.writeFile(filePath, updated, "utf-8");
+				touchedFiles.add(filePath);
+				descriptions.push(
+					`Applied ${op.edits.length} edit(s) to ${relativeToCwd(filePath, cwd)}`,
+				);
+			} else if (op.kind === "create") {
+				const filePath = uriToPath(op.uri);
 				await fs.mkdir(path.dirname(filePath), { recursive: true });
 				await fs
 					.writeFile(filePath, "", { flag: "wx" })
@@ -318,13 +419,9 @@ export async function applyWorkspaceEdit(
 					});
 				touchedFiles.add(filePath);
 				descriptions.push(`Created ${relativeToCwd(filePath, cwd)}`);
-			} else if (
-				kind === "rename" &&
-				typeof (change as RenameFileOp).oldUri === "string" &&
-				typeof (change as RenameFileOp).newUri === "string"
-			) {
-				const oldPath = uriToPath((change as RenameFileOp).oldUri);
-				const newPath = uriToPath((change as RenameFileOp).newUri);
+			} else if (op.kind === "rename") {
+				const oldPath = uriToPath(op.oldUri);
+				const newPath = uriToPath(op.newUri);
 				await fs.mkdir(path.dirname(newPath), { recursive: true });
 				await fs.rename(oldPath, newPath);
 				touchedFiles.add(oldPath);
@@ -332,11 +429,8 @@ export async function applyWorkspaceEdit(
 				descriptions.push(
 					`Renamed ${relativeToCwd(oldPath, cwd)} → ${relativeToCwd(newPath, cwd)}`,
 				);
-			} else if (
-				kind === "delete" &&
-				typeof (change as DeleteFileOp).uri === "string"
-			) {
-				const filePath = uriToPath((change as DeleteFileOp).uri);
+			} else if (op.kind === "delete") {
+				const filePath = uriToPath(op.uri);
 				await fs.rm(filePath, { recursive: true, force: true });
 				touchedFiles.add(filePath);
 				descriptions.push(`Deleted ${relativeToCwd(filePath, cwd)}`);

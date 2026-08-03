@@ -3019,6 +3019,13 @@ export class LSPService {
 
 		await Promise.all(
 			activeClients.map(async ({ serverId, client }) => {
+				if (client.isDocumentOpen(oldFilePath)) {
+					try {
+						await client.closeDocument(oldFilePath);
+					} catch {
+						// Best-effort close: still notify the server about the completed rename.
+					}
+				}
 				try {
 					await client.didRenameFiles(oldFilePath, newFilePath);
 				} catch (err) {

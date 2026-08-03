@@ -337,6 +337,8 @@ export interface LSPClientInfo {
 	documentSymbol(filePath: string): Promise<LSPSymbol[]>;
 	/** Whether this exact document has already been opened on the server. */
 	isDocumentOpen(filePath: string): boolean;
+	/** Close an open document, if present, without opening or spawning anything. */
+	closeDocument(filePath: string): Promise<void>;
 	/** Workspace-wide symbol search */
 	workspaceSymbol(query: string): Promise<LSPSymbol[]>;
 	/** Available code actions at a range */
@@ -2307,6 +2309,18 @@ export async function createLSPClient(options: {
 				filePath,
 			);
 			return result ?? null;
+		},
+
+		async closeDocument(filePath) {
+			if (!isClientAlive(state)) return;
+			const normalizedPath = normalizeMapKey(filePath);
+			if (!state.openDocuments.has(normalizedPath)) return;
+			await safeSendNotification(state.connection, "textDocument/didClose", {
+				textDocument: { uri: pathToFileURL(filePath).href },
+			});
+			state.openDocuments.delete(normalizedPath);
+			state.documentVersions.delete(normalizedPath);
+			clearDiagnosticsForPath(state, normalizedPath);
 		},
 
 		async willRenameFiles(oldFilePath, newFilePath) {
