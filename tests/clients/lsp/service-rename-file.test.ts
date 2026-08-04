@@ -303,7 +303,7 @@ describe("LSPService.renameFile", () => {
 		const oldPath = path.join(tmpDir, "old.ts");
 		const newPath = path.join(tmpDir, "new.ts");
 		fs.writeFileSync(oldPath, "value\n", "utf-8");
-		const originalUri = `file://${tmpDir.replace(/\\/g, "/")}/OLD.ts`;
+		const originalUri = `file://localhost/${tmpDir.replace(/\\/g, "/")}/OLD%2Ets`;
 		const client = makeClient(tmpDir, null);
 		client.isDocumentOpen.mockReturnValue(true);
 		client.getDocumentUri.mockReturnValue(originalUri);
@@ -311,7 +311,12 @@ describe("LSPService.renameFile", () => {
 		addClient(service, "typescript", tmpDir, client);
 		try {
 			await service.renameFile(oldPath, newPath, { cwd: tmpDir, apply: true });
-			expect(client.didRenameFiles).toHaveBeenCalledWith(oldPath, newPath, originalUri);
+			expect(client.didRenameFiles).toHaveBeenCalledWith(
+				oldPath,
+				newPath,
+				originalUri,
+				`file://localhost/${tmpDir.replace(/\\/g, "/")}/new%2Ets`,
+			);
 		} finally {
 			removeTempDirSync(tmpDir);
 		}
@@ -338,6 +343,46 @@ describe("LSPService.renameFile", () => {
 		}
 	});
 
+	it("validates both rename resources before soliciting server edits, including previews", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-rename-file-"));
+		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-rename-outside-"));
+		const source = path.join(tmpDir, "inside.ts");
+		const importPath = path.join(tmpDir, "import.ts");
+		const outsideSource = path.join(outsideDir, "outside.ts");
+		const outsideDestination = path.join(outsideDir, "moved.ts");
+		fs.writeFileSync(source, "inside", "utf-8");
+		fs.writeFileSync(outsideSource, "outside", "utf-8");
+		fs.writeFileSync(importPath, "import './inside';", "utf-8");
+		const client = makeClient(tmpDir, {
+			changes: {
+				[pathToFileURL(importPath).href]: [{
+					range: { start: { line: 0, character: 8 }, end: { line: 0, character: 15 } },
+					newText: "./moved",
+				}],
+			},
+		});
+		const service = new LSPService();
+		addClient(service, "typescript", tmpDir, client);
+		try {
+			for (const apply of [false, true]) {
+				await expect(service.renameFile(source, outsideDestination, { cwd: tmpDir, apply }))
+					.rejects.toThrow(/escapes workspace/);
+				expect(fs.readFileSync(importPath, "utf-8")).toBe("import './inside';");
+			}
+			await expect(service.renameFile(outsideSource, path.join(tmpDir, "inside-dest.ts"), {
+				cwd: tmpDir,
+				apply: false,
+			})).rejects.toThrow(/escapes workspace/);
+			expect(client.willRenameFiles).not.toHaveBeenCalled();
+			expect(fs.existsSync(source)).toBe(true);
+			expect(fs.existsSync(outsideSource)).toBe(true);
+			expect(fs.existsSync(outsideDestination)).toBe(false);
+		} finally {
+			removeTempDirSync(tmpDir);
+			removeTempDirSync(outsideDir);
+		}
+	});
+
 	it("rejects a rename destination outside the workspace, including traversal", async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-rename-file-"));
 		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-rename-outside-"));
@@ -358,7 +403,7 @@ describe("LSPService.renameFile", () => {
 		}
 	});
 
-	it("rejects a rename through a symlinked workspace directory", async () => {
+	it("rejects a rename through a symlinked workspace directory", async ({ skip }) => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-rename-file-"));
 		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-rename-outside-"));
 		const source = path.join(tmpDir, "inside.ts");
@@ -367,7 +412,8 @@ describe("LSPService.renameFile", () => {
 		try {
 			try {
 				fs.symlinkSync(outsideDir, path.join(tmpDir, "linked"), process.platform === "win32" ? "junction" : "dir");
-			} catch {
+			} catch (err) {
+				skip(`symlink/junction setup unavailable: ${err instanceof Error ? err.message : String(err)}`);
 				return;
 			}
 			await expect(

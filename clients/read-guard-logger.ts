@@ -237,6 +237,7 @@ function shouldLogEvent(event: string): boolean {
 		event === "edit_partial_apply_skipped" ||
 		event === "edit_post_edit_pipeline_failed" ||
 		event === "edit_batch_summary" ||
+		event === "edit_batch_summary_overflow" ||
 		event === "touched_lines_missing"
 	);
 }

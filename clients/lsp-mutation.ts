@@ -44,8 +44,10 @@ export interface LspMutationContext {
 	emitSummary?: boolean;
 	/** True once at least one bounded mutation summary has been emitted. */
 	summaryEmitted?: boolean;
-	/** Number of per-request summaries emitted for this outer mutation. */
+	/** Number of per-request summaries emitted for this outer mutation (max 100). */
 	summaryCount?: number;
+	/** True once the bounded per-request summary limit has been exceeded. */
+	summaryOverflowed?: boolean;
 	/** Bounded per-batch dedupe for the existing turn-summary autofix publisher. */
 	autofixRecordedPaths?: Set<string>;
 }
@@ -335,6 +337,19 @@ export function recordLspMutation(
 					considered: telemetry.considered,
 					completed: telemetry.completed,
 					failedCount: telemetry.failedCount,
+				},
+			});
+		} else if (!context.summaryOverflowed) {
+			context.summaryOverflowed = true;
+			logReadGuardEvent({
+				event: "edit_batch_summary_overflow",
+				correlationId: context.correlationId,
+				filePath: combined.files[0] ?? context.cwd,
+				metadata: {
+					tool: context.tool,
+					source: context.source,
+					summaryLimit: MAX_SUMMARIES_PER_CONTEXT,
+					suppressedSummaries: "one or more",
 				},
 			});
 		}

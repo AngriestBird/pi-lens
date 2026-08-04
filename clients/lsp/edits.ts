@@ -575,18 +575,48 @@ async function resolveExistingAncestor(filePath: string): Promise<string> {
 	}
 }
 
+async function createWorkspaceUriConfiner(
+	cwd: string,
+): Promise<(uri: string) => Promise<string>> {
+	const root = await resolveExistingAncestor(cwd);
+	return async (uri: string): Promise<string> => {
+		let filePath = "";
+		try {
+			const parsed = new URL(uri);
+			if (parsed.protocol !== "file:" || (parsed.host !== "" && parsed.hostname !== "localhost")) throw new Error("URI must be a local file URI");
+			filePath = uriToPath(uri);
+		} catch (err) {
+			throw new Error(`invalid workspace edit URI ${uri}: ${err instanceof Error ? err.message : String(err)}`);
+		}
+		if (!path.isAbsolute(filePath)) throw new Error(`workspace edit path escapes workspace: ${uri}`);
+		const resolved = await resolveExistingAncestor(filePath);
+		if (!isUnderDir(resolved, root)) throw new Error(`workspace edit path escapes workspace: ${uri}`);
+		return filePath;
+	};
+}
+
+/** Validate a resource-only workspace edit without applying any mutation. */
+export async function validateWorkspaceEdit(
+	edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] },
+	cwd: string,
+): Promise<void> {
+	const planned = planWorkspaceEdit(edit);
+	await preflightWorkspaceEdit(planned, cwd, {});
+}
+
 async function preflightWorkspaceEdit(
 	planned: WorkspaceEditOp[],
 	cwd: string,
 	options: ApplyWorkspaceEditOptions,
 ): Promise<{ text: Map<WorkspaceEditOp, LSPTextEdit[]>; ignored: Set<WorkspaceEditOp> }> {
-	const root = await resolveExistingAncestor(cwd);
+	const confine = await createWorkspaceUriConfiner(cwd);
 	const virtual = new Map<string, VirtualFile>();
 	const virtualMoves: Array<{
 		from: string;
 		to: string;
 		directory: boolean;
 	}> = [];
+	const virtualTombstones: Array<{ path: string; directory: boolean }> = [];
 	const text = new Map<WorkspaceEditOp, LSPTextEdit[]>();
 	const ignored = new Set<WorkspaceEditOp>();
 	const resolveVirtualPath = (filePath: string): string | undefined => {
@@ -606,7 +636,22 @@ async function preflightWorkspaceEdit(
 		}
 		return resolved;
 	};
+	const isTombstoned = (filePath: string): boolean =>
+		virtualTombstones.some(
+			(tombstone) =>
+				pathsEqual(filePath, tombstone.path) ||
+				(tombstone.directory && isUnderDir(filePath, tombstone.path)),
+		);
+	const clearTombstonesUnder = (filePath: string): void => {
+		for (let index = virtualTombstones.length - 1; index >= 0; index--) {
+			const tombstone = virtualTombstones[index];
+			if (pathsEqual(tombstone.path, filePath) || isUnderDir(tombstone.path, filePath)) {
+				virtualTombstones.splice(index, 1);
+			}
+		}
+	};
 	const stateFor = async (filePath: string): Promise<VirtualFile> => {
+		if (isTombstoned(filePath)) return { exists: false, directory: false };
 		const physicalPath = resolveVirtualPath(filePath);
 		if (!physicalPath) return { exists: false, directory: false };
 		const key = normalizeMapKey(physicalPath);
@@ -616,20 +661,6 @@ async function preflightWorkspaceEdit(
 		const value = { exists: Boolean(stat), directory: stat?.isDirectory() ?? false };
 		virtual.set(key, value);
 		return value;
-	};
-	const confine = async (uri: string): Promise<string> => {
-		let filePath = "";
-		try {
-			const parsed = new URL(uri);
-			if (parsed.protocol !== "file:" || (parsed.host !== "" && parsed.hostname !== "localhost")) throw new Error("URI must be a local file URI");
-			filePath = uriToPath(uri);
-		} catch (err) {
-			throw new Error(`invalid workspace edit URI ${uri}: ${err instanceof Error ? err.message : String(err)}`);
-		}
-		if (!path.isAbsolute(filePath)) throw new Error(`workspace edit path escapes workspace: ${uri}`);
-		const resolved = await resolveExistingAncestor(filePath);
-		if (!isUnderDir(resolved, root)) throw new Error(`workspace edit path escapes workspace: ${uri}`);
-		return filePath;
 	};
 	const contentFor = async (filePath: string, state: VirtualFile): Promise<string> => {
 		if (!state.exists || state.directory) throw new Error(`text edit target is not a file: ${filePath}`);
@@ -663,6 +694,7 @@ async function preflightWorkspaceEdit(
 				if (!op.options?.overwrite || state.directory) throw new Error(`create target already exists: ${filePath}`);
 				state.content = "";
 			} else {
+				clearTombstonesUnder(filePath);
 				state.exists = true;
 				state.directory = false;
 				state.content = "";
@@ -681,6 +713,7 @@ async function preflightWorkspaceEdit(
 				if (op.options?.ignoreIfExists) { ignored.add(op); continue; }
 				if (!op.options?.overwrite) throw new Error(`rename destination already exists: ${newPath}`);
 			}
+			clearTombstonesUnder(newPath);
 			if (!source.directory) await contentFor(oldPath, source);
 			// Keep descendants lazy: a later text edit under a renamed directory
 			// resolves through this virtual move to the original physical path.
@@ -698,6 +731,7 @@ async function preflightWorkspaceEdit(
 			if (state.directory && !op.options?.recursive) throw new Error(`delete directory requires recursive: ${filePath}`);
 			state.exists = false;
 			state.content = undefined;
+			virtualTombstones.push({ path: filePath, directory: state.directory });
 		}
 	}
 	return { text, ignored };

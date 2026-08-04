@@ -314,6 +314,26 @@ describe("LSP workspace edits", () => {
 		expect(telemetry.editBatchSummary.indexesTruncated).toBe(true);
 	});
 
+	it("limits solicited mutation summaries to 100 and reports overflow", () => {
+		const context: LspMutationContext = {
+			cwd: ".",
+			correlationId: "summary-cap-1",
+			tool: "workspace/applyEdit",
+			source: "lsp-edit",
+		};
+		for (let index = 0; index < 100; index++) {
+			recordLspMutation(context, { bookkeep: false });
+		}
+		expect(context.summaryCount).toBe(100);
+		expect(context.summaryOverflowed).toBeUndefined();
+
+		// The 101st solicited request is bounded but not silently represented as
+		// another per-request summary: one aggregate overflow marker is emitted.
+		recordLspMutation(context, { bookkeep: false });
+		expect(context.summaryCount).toBe(100);
+		expect(context.summaryOverflowed).toBe(true);
+	});
+
 	it("applies text edits before resource renames", async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
 		const oldPath = path.join(tmpDir, "old.ts");
@@ -481,6 +501,68 @@ describe("LSP workspace edits", () => {
 		}
 	});
 
+	it("rejects edits under a recursively deleted renamed directory", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
+		const oldDir = path.join(tmpDir, "old");
+		const newDir = path.join(tmpDir, "new");
+		const childPath = path.join(newDir, "child.ts");
+		fs.mkdirSync(oldDir);
+		fs.writeFileSync(path.join(oldDir, "child.ts"), "old", "utf-8");
+
+		try {
+			await expect(applyWorkspaceEdit({
+				documentChanges: [
+					{ kind: "rename", oldUri: pathToFileURL(oldDir).href, newUri: pathToFileURL(newDir).href },
+					{ kind: "delete", uri: pathToFileURL(newDir).href, options: { recursive: true } },
+					{
+						textDocument: { uri: pathToFileURL(childPath).href },
+						edits: [{
+							range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } },
+							newText: "changed",
+						}],
+					},
+				],
+			}, tmpDir)).rejects.toThrow(/text edit target is not a file/);
+			expect(fs.existsSync(oldDir)).toBe(true);
+			expect(fs.existsSync(newDir)).toBe(false);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("preserves nested rename chains when deleting the remaining parent subtree", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
+		const oldDir = path.join(tmpDir, "old");
+		const newDir = path.join(tmpDir, "new");
+		const movedDir = path.join(tmpDir, "moved");
+		const childPath = path.join(movedDir, "child.ts");
+		fs.mkdirSync(oldDir);
+		fs.mkdirSync(path.join(oldDir, "sub"));
+		fs.writeFileSync(path.join(oldDir, "sub", "child.ts"), "old", "utf-8");
+
+		try {
+			await applyWorkspaceEdit({
+				documentChanges: [
+					{ kind: "rename", oldUri: pathToFileURL(oldDir).href, newUri: pathToFileURL(newDir).href },
+					{ kind: "rename", oldUri: pathToFileURL(path.join(newDir, "sub")).href, newUri: pathToFileURL(movedDir).href },
+					{ kind: "delete", uri: pathToFileURL(newDir).href, options: { recursive: true } },
+					{
+						textDocument: { uri: pathToFileURL(childPath).href },
+						edits: [{
+							range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } },
+							newText: "changed",
+						}],
+					},
+				],
+			}, tmpDir);
+
+			expect(fs.readFileSync(childPath, "utf-8")).toBe("changed");
+			expect(fs.existsSync(newDir)).toBe(false);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
 	it("flushes destination-subtree edits before a directory rename", async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
 		const oldDir = path.join(tmpDir, "old");
@@ -630,14 +712,19 @@ describe("LSP workspace edits", () => {
 		} finally { removeTempDirSync(tmpDir); removeTempDirSync(outside); }
 	});
 
-	it("rejects symlink escapes during workspace-edit preflight", async () => {
+	it("rejects symlink escapes during workspace-edit preflight", async ({ skip }) => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
 		const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-outside-"));
 		const outsideFile = path.join(outsideDir, "outside.ts");
 		const linkDir = path.join(tmpDir, "linked");
 		fs.writeFileSync(outsideFile, "outside", "utf-8");
 		try {
-			try { fs.symlinkSync(outsideDir, linkDir, process.platform === "win32" ? "junction" : "dir"); } catch { return; }
+			try {
+				fs.symlinkSync(outsideDir, linkDir, process.platform === "win32" ? "junction" : "dir");
+			} catch (err) {
+				skip(`symlink/junction setup unavailable: ${err instanceof Error ? err.message : String(err)}`);
+				return;
+			}
 			await expect(applyWorkspaceEdit({ changes: {
 				[pathToFileURL(path.join(linkDir, "outside.ts")).href]: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 7 } }, newText: "changed" }],
 			} }, tmpDir)).rejects.toThrow(/escapes workspace/);
