@@ -745,6 +745,8 @@ pi-lens's lifecycle hooks (`session_start`, `tool_call`, `tool_result`, `context
 
 ## Internal edit substrate direction
 
+**LSP workspace-edit ordering is transactional only at validation time.** `clients/lsp/edits.ts` plans `documentChanges` in declared order, flushing queued text edits before resource operations on the same URI/subtree, and validates every text-edit batch before the first filesystem mutation. Preserve original-array order for equal-position inserts and collapse only byte-identical non-empty duplicate edits; later filesystem failures remain no-rollback and must keep the existing partial-application error.
+
 Phase 6 in `implementation.md` is intentionally **not** a public `lens_edit` tool. It should be an internal mutation substrate to reduce failed edits in pi-lens-owned paths while preserving the native agent edit lifecycle:
 
 ```text
@@ -756,6 +758,8 @@ seq/hash/range validation → atomic apply → read-guard stamp → seq/change-l
 ```
 
 Use it first for partial apply, then LSP workspace edits/actionable autofix. It must not bypass read guard for normal agent edits, replace oldText autopatch, guess stale ranges, or apply project-wide edits by default.
+
+Workspace edits (`clients/lsp/edits.ts`) are strict and confined: shape/URI/resource preconditions, document versions, text bounds, and all text reads are preflighted before mutation; only an unexpected filesystem failure after that preflight retains the documented no-rollback boundary. Incoming server positions are normalized from the negotiated encoding against the same virtual post-resource content/path model used by application, so ordered rename/create/delete followed by descendant text edits works before destinations exist on disk; a failed range remains fail-closed. Rename notification state preserves the original opened URI plus its authority/encoding spelling for the destination; a failed `didClose` aborts/resynchronizes instead of sending `didRenameFiles`. `rename_file` validates both resource paths and preconditions through a read-only call to this same apply/confinement seam before soliciting any `willRenameFiles` edits (including previews), then routes its disk resource operation back through the seam (never a direct mkdir/rename). Preflight lazily maps renamed directory descendants and tracks subtree tombstones so ordered edits after rename/delete chains cannot resurrect deleted children without walking the whole tree. Mutation telemetry describes normalized edits; each solicited request gets one bounded, sequence-tagged summary under its outer correlation ID, with an explicit aggregate overflow marker after the 100-summary cap.
 
 ## SDK-reuse boundaries (deliberate — don't naively "simplify")
 

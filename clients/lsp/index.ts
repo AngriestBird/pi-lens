@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL, URL } from "node:url";
 import {
 	getProjectIgnoreMatcher,
 	isExcludedDirName,
@@ -56,6 +57,7 @@ import {
 	applyWorkspaceEdit,
 	mergeWorkspaceTextEditsByPriority,
 	summarizeWorkspaceEdit,
+	validateWorkspaceEdit,
 } from "./edits.js";
 import {
 	buildScopeKey,
@@ -68,6 +70,51 @@ import {
 	isWarmAttached,
 	tryWarmAttachedDiagnostics,
 } from "../warm-attach.js";
+
+function destinationUriPreservingSpelling(
+	oldUri: string,
+	oldFilePath: string,
+	newFilePath: string,
+): string {
+	const canonical = pathToFileURL(newFilePath);
+	try {
+		const original = new URL(oldUri);
+		const authority = /^file:\/\/([^/]*)/i.exec(oldUri)?.[1] ?? "";
+		if (
+			original.protocol !== "file:" ||
+			(original.host !== "" && original.hostname !== "localhost")
+		) {
+			return canonical.href;
+		}
+		const canonicalDestination = () =>
+			`${original.protocol}//${authority}${canonical.pathname}`;
+		const oldParent = path.resolve(path.dirname(oldFilePath));
+		const newParent = path.resolve(path.dirname(newFilePath));
+		if (normalizeMapKey(oldParent) !== normalizeMapKey(newParent)) {
+			return canonicalDestination();
+		}
+		const slash = original.pathname.lastIndexOf("/");
+		if (slash < 0) return canonicalDestination();
+		let rawName = canonical.pathname.slice(canonical.pathname.lastIndexOf("/") + 1);
+		const oldRawName = original.pathname.slice(slash + 1);
+		const oldName = decodeURIComponent(oldRawName);
+		const expectedOldName = path.basename(oldFilePath);
+		if (oldName.toLowerCase() !== expectedOldName.toLowerCase()) {
+			return canonicalDestination();
+		}
+		// Keep non-canonical percent-encoding choices from the URI that was
+		// opened (for example `%2E` instead of `.`) while using the new path's
+		// exact basename. The authority and directory spelling are preserved too.
+		for (const match of oldRawName.matchAll(/%([0-9a-f]{2})/gi)) {
+			const encoded = match[0];
+			const decoded = String.fromCharCode(Number.parseInt(match[1], 16));
+			rawName = rawName.split(decoded).join(encoded);
+		}
+		return `${original.protocol}//${authority}${original.pathname.slice(0, slash + 1)}${rawName}`;
+	} catch {
+		return canonical.href;
+	}
+}
 
 // --- Init override helpers ---
 
@@ -2961,6 +3008,23 @@ export class LSPService {
 	): Promise<LSPRenameFileResult> {
 		const cwd = options.cwd;
 		const apply = options.apply ?? false;
+		// Validate the complete resource operation before asking any server for
+		// willRenameFiles edits. This is a read-only preflight, but it reuses the
+		// same confinement, realpath/symlink, existence, and destination checks as
+		// the eventual apply path, so an invalid rename cannot first mutate an
+		// in-workspace file through returned text edits (including previews).
+		await validateWorkspaceEdit(
+			{
+				documentChanges: [
+					{
+						kind: "rename",
+						oldUri: pathToFileURL(oldFilePath).href,
+						newUri: pathToFileURL(newFilePath).href,
+					},
+				],
+			},
+			cwd,
+		);
 		const priorityServerIds = getServersForFileWithConfig(oldFilePath).map(
 			(server) => server.id,
 		);
@@ -3030,9 +3094,66 @@ export class LSPService {
 			}
 			throw err;
 		}
+		const openDocuments = activeClients
+			.filter(({ client }) => client.isDocumentOpen(oldFilePath))
+			.map(({ serverId, client }) => ({
+				serverId,
+				client,
+				oldUri: client.getDocumentUri(oldFilePath),
+			}));
+		const closeFailures: Array<{ serverId: string; error: string }> = [];
+		await Promise.all(
+			openDocuments.map(async ({ serverId, client }) => {
+				try {
+					await client.closeDocument(oldFilePath);
+					return undefined;
+				} catch (err) {
+					closeFailures.push({
+						serverId,
+						error: err instanceof Error ? err.message : String(err),
+					});
+					return undefined;
+				}
+			}),
+		);
+		if (closeFailures.length > 0) {
+			if (options.mutationContext) {
+				recordLspMutation(options.mutationContext, {
+					results: [applied],
+					status: "failed",
+				});
+			}
+			// Do not rename or send didRenameFiles while any server still has the
+			// old document open. Re-open/resync every affected client so a partial
+			// close cannot leave an in-memory document behind the disk contents.
+			const content = await fs.readFile(oldFilePath, "utf-8");
+			await Promise.all(
+				openDocuments.map(({ client }) =>
+					client.notify.open(oldFilePath, content, "plaintext", true, true),
+				),
+			);
+			throw new Error(
+				`workspace/didClose failed; rename aborted: ${closeFailures.map((failure) => `${failure.serverId}: ${failure.error}`).join("; ")}`,
+			);
+		}
+		let renameApplied;
 		try {
-			await fs.mkdir(path.dirname(newFilePath), { recursive: true });
-			await fs.rename(oldFilePath, newFilePath);
+			// Route the resource mutation through the same preflight confinement,
+			// realpath and symlink policy as all other workspace edits. Do not
+			// duplicate that security boundary with a direct mkdir/rename pair.
+			renameApplied = await applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{
+							kind: "rename",
+							oldUri: pathToFileURL(oldFilePath).href,
+							newUri: pathToFileURL(newFilePath).href,
+						},
+					],
+				},
+				cwd,
+				{ observe: false },
+			);
 		} catch (err) {
 			if (options.mutationContext) {
 				recordLspMutation(options.mutationContext, {
@@ -3052,13 +3173,29 @@ export class LSPService {
 
 		await Promise.all(
 			activeClients.map(async ({ serverId, client }) => {
+				const opened = openDocuments.find((entry) => entry.serverId === serverId);
 				try {
-					await client.didRenameFiles(oldFilePath, newFilePath);
+					if (opened?.oldUri) {
+						await client.didRenameFiles(
+							oldFilePath,
+							newFilePath,
+							opened.oldUri,
+							destinationUriPreservingSpelling(
+								opened.oldUri,
+								oldFilePath,
+								newFilePath,
+							),
+						);
+					} else {
+						await client.didRenameFiles(oldFilePath, newFilePath);
+					}
+					return undefined;
 				} catch (err) {
 					didRenameFailures.push({
 						serverId,
 						error: err instanceof Error ? err.message : String(err),
 					});
+					return undefined;
 				}
 			}),
 		);
@@ -3070,17 +3207,23 @@ export class LSPService {
 					{
 						...applied,
 						files,
-						operationTotal: applied.operationTotal + 1,
-						appliedOperationTotal: applied.appliedOperationTotal + 1,
-						appliedOperationIndexes: [...applied.appliedOperationIndexes, applied.operationTotal],
+						operationTotal: applied.operationTotal + renameApplied.operationTotal,
+						appliedOperationTotal: applied.appliedOperationTotal + renameApplied.appliedOperationTotal,
+						appliedOperationIndexes: [
+							...applied.appliedOperationIndexes,
+							...renameApplied.appliedOperationIndexes.map(
+								(index) => applied.operationTotal + index,
+							),
+						],
 						operationCounts: {
-							...applied.operationCounts,
-							rename: applied.operationCounts.rename + 1,
+							textEdits: applied.operationCounts.textEdits + renameApplied.operationCounts.textEdits,
+							create: applied.operationCounts.create + renameApplied.operationCounts.create,
+							rename: applied.operationCounts.rename + renameApplied.operationCounts.rename,
+							delete: applied.operationCounts.delete + renameApplied.operationCounts.delete,
 						},
 						fileDetails: [
 							...applied.fileDetails,
-							{ filePath: oldFilePath, range: { start: 1, end: 1 }, importsChanged: true },
-							{ filePath: newFilePath, range: { start: 1, end: 1 }, importsChanged: true },
+							...renameApplied.fileDetails,
 						],
 					},
 				],
