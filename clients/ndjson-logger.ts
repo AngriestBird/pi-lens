@@ -171,10 +171,10 @@ if (isSharedWriterState(existingGlobalState)) {
 	ndjsonGlobalState = (globalStateHost[NDJSON_GLOBAL_STATE_KEY] = {
 		schema: NDJSON_GLOBAL_STATE_SCHEMA,
 		version: NDJSON_GLOBAL_STATE_VERSION,
-		writers: new Map(),
-		exitFlushers: new Set(),
+		writers: new Map<string, NdjsonWriterState>(),
+		exitFlushers: new Set<() => void>(),
 		exitHandlerRegistered: false,
-		registeredLogFiles: new Set(),
+		registeredLogFiles: new Set<string>(),
 	});
 } else if (isLegacyGlobalState(existingGlobalState)) {
 	// Do not mutate or replace this state: its private queues and exit flusher
@@ -183,11 +183,11 @@ if (isSharedWriterState(existingGlobalState)) {
 	legacyGlobalState = existingGlobalState;
 }
 
-const exitFlushers =
+const exitFlushers: Set<() => void> =
 	ndjsonGlobalState?.exitFlushers ??
 	legacyGlobalState?.exitFlushers ??
 	new Set<() => void>();
-const registeredLogFiles =
+const registeredLogFiles: Set<string> =
 	ndjsonGlobalState?.registeredLogFiles ??
 	legacyGlobalState?.registeredLogFiles ??
 	new Set<string>();
