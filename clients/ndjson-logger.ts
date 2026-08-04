@@ -14,6 +14,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { normalizeFilePath } from "./path-utils.js";
 import { redactSecrets } from "./redact/secrets.js";
 
 /** A queued write ("line") or an in-band truncate op (latency clear). */
@@ -67,7 +68,20 @@ function runBestEffort(operation: () => void): void {
 // registers one process listener per graph and recreates the warning. Symbol.for
 // gives those graphs one process-wide state without exposing a public global
 // property name.
+interface NdjsonWriterState {
+	file: string;
+	maxBytes?: number;
+	backupPath?: string;
+	queue: QueueItem[];
+	drainPromise: Promise<void> | null;
+	inFlightBatch: QueueItem[] | null;
+	ensuredDir: boolean;
+	/** One canonical exit flusher per file, never one per logger facade. */
+	exitFlusher: () => void;
+}
+
 interface NdjsonGlobalState {
+	writers: Map<string, NdjsonWriterState>;
 	exitFlushers: Set<() => void>;
 	exitHandlerRegistered: boolean;
 	registeredLogFiles: Set<string>;
@@ -77,17 +91,25 @@ const NDJSON_GLOBAL_STATE_KEY = Symbol.for("pi-lens.ndjson-logger.state");
 const globalStateHost = globalThis as typeof globalThis & {
 	[key: symbol]: NdjsonGlobalState | undefined;
 };
+const existingGlobalState = globalStateHost[NDJSON_GLOBAL_STATE_KEY];
 const ndjsonGlobalState =
-	globalStateHost[NDJSON_GLOBAL_STATE_KEY] ??
+	existingGlobalState ??
 	(globalStateHost[NDJSON_GLOBAL_STATE_KEY] = {
+		writers: new Map(),
 		exitFlushers: new Set(),
 		exitHandlerRegistered: false,
 		registeredLogFiles: new Set(),
 	});
+// Keep any state created by an older module graph rather than replacing it.
+// In particular, its already-registered exit handler must retain its flusher
+// set so queued lines cannot disappear during a hot reload.
+ndjsonGlobalState.writers ??= new Map();
+ndjsonGlobalState.exitFlushers ??= new Set();
+ndjsonGlobalState.registeredLogFiles ??= new Set();
 const exitFlushers = ndjsonGlobalState.exitFlushers;
 const registeredLogFiles = ndjsonGlobalState.registeredLogFiles;
 
-/** Test-only view of the registered exit flushers (see ndjson-logger.test.ts). */
+/** Test-only view of the canonical per-file exit flushers (see ndjson-logger.test.ts). */
 export function _exitFlushersForTest(): ReadonlySet<() => void> {
 	return exitFlushers;
 }
@@ -114,8 +136,8 @@ export function _resetRegisteredLogFilesForTest(): void {
 	registeredLogFiles.clear();
 }
 
-function registerExitFlusher(flushSync: () => void): void {
-	exitFlushers.add(flushSync);
+function registerWriter(state: NdjsonWriterState): void {
+	if (!exitFlushers.has(state.exitFlusher)) exitFlushers.add(state.exitFlusher);
 	if (!ndjsonGlobalState.exitHandlerRegistered) {
 		ndjsonGlobalState.exitHandlerRegistered = true;
 		process.on("exit", () => {
@@ -124,127 +146,161 @@ function registerExitFlusher(flushSync: () => void): void {
 	}
 }
 
-export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
-	if (typeof options.filePath === "string") {
-		registeredLogFiles.add(options.filePath);
-	}
+function normalizeLogPath(file: string): string {
+	return normalizeFilePath(path.resolve(file));
+}
 
-	const queue: QueueItem[] = [];
-	let drainPromise: Promise<void> | null = null;
-	let inFlightBatch: QueueItem[] | null = null;
-	let ensuredDir = false;
-
-	function ensureDir(file: string): void {
-		if (ensuredDir) return;
+function flushStateSync(state: NdjsonWriterState): void {
+	// Drain the in-memory queue synchronously — safe at process exit.
+	// The in-flight async batch is INCLUDED even though its appendFile may
+	// also land: if the process dies before the threadpool issues that
+	// write, skipping the prefix would drop the whole batch. The per-line
+	// writer deliberately traded duplicate lines at exit for never-drops
+	// (#935 review) — keep that trade. The drain-loop completion handler
+	// only shifts items still at the queue head (identity-checked), so a
+	// queue emptied here is simply left alone by the async loop.
+	while (state.queue.length > 0) {
+		const item = state.queue.shift() as QueueItem;
+		ensureDir(state);
 		runBestEffort(() => {
-			fs.mkdirSync(path.dirname(file), { recursive: true });
-			ensuredDir = true;
+			if (item.kind === "truncate") {
+				fs.writeFileSync(state.file, "");
+			} else {
+				rotateIfNeeded(state);
+				fs.appendFileSync(state.file, item.line);
+			}
 		});
 	}
+}
 
-	function rotateIfNeeded(file: string): void {
-		if (options.maxBytes === undefined) return;
+function createWriterState(
+	file: string,
+	maxBytes?: number,
+	backupPath?: string,
+): NdjsonWriterState {
+	const existing = ndjsonGlobalState.writers.get(file);
+	if (existing) {
+		// A partially initialized global state from another graph still needs to
+		// be enrolled, but it must never get a second queue or exit flusher.
+		if (!exitFlushers.has(existing.exitFlusher)) registerWriter(existing);
+		return existing;
+	}
+
+	const state = {} as NdjsonWriterState;
+	state.file = file;
+	state.maxBytes = maxBytes;
+	state.backupPath = backupPath;
+	state.queue = [];
+	state.drainPromise = null;
+	state.inFlightBatch = null;
+	state.ensuredDir = false;
+	state.exitFlusher = () => flushStateSync(state);
+	ndjsonGlobalState.writers.set(file, state);
+	registerWriter(state);
+	return state;
+}
+
+function ensureDir(state: NdjsonWriterState): void {
+	if (state.ensuredDir) return;
+	runBestEffort(() => {
+		fs.mkdirSync(path.dirname(state.file), { recursive: true });
+		state.ensuredDir = true;
+	});
+}
+
+function rotateIfNeeded(state: NdjsonWriterState): void {
+	if (state.maxBytes === undefined) return;
+	try {
+		const size = fs.statSync(state.file).size;
+		if (size < state.maxBytes) return;
+		const backup = state.backupPath ?? `${state.file}.1`;
+		runBestEffort(() => fs.rmSync(backup, { force: true }));
+		fs.renameSync(state.file, backup);
+	} catch {
+		// no file yet, or rename raced — nothing to rotate
+	}
+}
+
+async function drainLoop(state: NdjsonWriterState): Promise<void> {
+	// Peek, write, then remove — an item stays in the queue until it is on
+	// disk, so a teardown flushSync (which abandons this async loop) never
+	// drops an item this loop had already dequeued but not yet written.
+	while (state.queue.length > 0) {
+		const item = state.queue[0];
+		ensureDir(state);
+		const truncateIndex =
+			item.kind === "line"
+				? state.queue.findIndex((queued) => queued.kind === "truncate")
+				: 0;
+		const pendingEnd = truncateIndex === -1 ? state.queue.length : truncateIndex;
+		const pending =
+			item.kind === "truncate"
+				? [item]
+				: state.queue.slice(0, pendingEnd);
+		state.inFlightBatch = pending;
 		try {
-			const size = fs.statSync(file).size;
-			if (size < options.maxBytes) return;
-			const backup = options.backupPath
-				? resolve(options.backupPath)
-				: `${file}.1`;
-			runBestEffort(() => fs.rmSync(backup, { force: true }));
-			fs.renameSync(file, backup);
+			if (item.kind === "truncate") {
+				await fs.promises.writeFile(state.file, "");
+			} else {
+				rotateIfNeeded(state);
+				await fs.promises.appendFile(
+					state.file,
+					pending
+						.map((queued) => (queued as { kind: "line"; line: string }).line)
+						.join(""),
+				);
+			}
 		} catch {
-			// no file yet, or rename raced — nothing to rotate
+			// telemetry is best-effort
 		}
+		for (const written of pending) {
+			// flushSync may have drained this prefix while the append is in
+			// flight. Never remove newer items from a later enqueue.
+			if (state.queue[0] !== written) break;
+			state.queue.shift();
+		}
+		if (state.inFlightBatch === pending) state.inFlightBatch = null;
+	}
+}
+
+function drain(state: NdjsonWriterState): Promise<void> {
+	// Serialize: a single in-flight drain owns the canonical per-file queue.
+	// This guard lives in global state, so module re-evaluation cannot create a
+	// second drainer for the same path.
+	if (!state.drainPromise) {
+		state.drainPromise = Promise.resolve()
+			.then(() => drainLoop(state))
+			.finally(() => {
+				state.drainPromise = null;
+			});
+	}
+	return state.drainPromise;
+}
+
+export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
+	const states = new Set<NdjsonWriterState>();
+
+	function stateForCall(): NdjsonWriterState {
+		const file = normalizeLogPath(resolve(options.filePath));
+		const backupPath =
+			options.maxBytes !== undefined && options.backupPath
+				? normalizeLogPath(resolve(options.backupPath))
+				: undefined;
+		const state = createWriterState(file, options.maxBytes, backupPath);
+		states.add(state);
+		return state;
 	}
 
-	async function drainLoop(): Promise<void> {
-		// Peek, write, then remove — an item stays in the queue until it is on
-		// disk, so a teardown flushSync (which abandons this async loop) never
-		// drops an item this loop had already dequeued but not yet written.
-		while (queue.length > 0) {
-			const item = queue[0];
-			const file = resolve(options.filePath);
-			ensureDir(file);
-			const truncateIndex =
-				item.kind === "line"
-					? queue.findIndex((queued) => queued.kind === "truncate")
-					: 0;
-			const pendingEnd = truncateIndex === -1 ? queue.length : truncateIndex;
-			const pending =
-				item.kind === "truncate" ? [item] : queue.slice(0, pendingEnd);
-			inFlightBatch = pending;
-			try {
-				if (item.kind === "truncate") {
-					await fs.promises.writeFile(file, "");
-				} else {
-					rotateIfNeeded(file);
-					await fs.promises.appendFile(
-						file,
-						pending
-							.map((queued) => (queued as { kind: "line"; line: string }).line)
-							.join(""),
-					);
-				}
-			} catch {
-				// telemetry is best-effort
-			}
-			for (const written of pending) {
-				// flushSync may have drained this prefix while the append was in
-				// flight. Never remove newer items from a later enqueue.
-				if (queue[0] !== written) break;
-				queue.shift();
-			}
-			if (inFlightBatch === pending) inFlightBatch = null;
-		}
-	}
-
-	function drain(): Promise<void> {
-		// Serialize: a single in-flight drain owns the queue. flush() awaits this
-		// same promise, so it never resolves before pending writes land. The loop
-		// re-checks queue.length, so items enqueued mid-drain are picked up before
-		// the promise settles — no stranded item, no second concurrent drainer.
-		if (!drainPromise) {
-			drainPromise = Promise.resolve()
-				.then(drainLoop)
-				.finally(() => {
-					drainPromise = null;
-				});
-		}
-		return drainPromise;
+	if (typeof options.filePath === "string") {
+		const state = stateForCall();
+		registeredLogFiles.add(state.file);
 	}
 
 	function enqueue(item: QueueItem): void {
-		queue.push(item);
-		void drain();
+		const state = stateForCall();
+		state.queue.push(item);
+		void drain(state);
 	}
-
-	function flushSync(): void {
-		// Drain the in-memory queue synchronously — safe at process exit.
-		// The in-flight async batch is INCLUDED even though its appendFile may
-		// also land: if the process dies before the threadpool issues that
-		// write, skipping the prefix would drop the whole batch. The per-line
-		// writer deliberately traded duplicate lines at exit for never-drops
-		// (#935 review) — keep that trade. The drain-loop completion handler
-		// only shifts items still at the queue head (identity-checked), so a
-		// queue emptied here is simply left alone by the async loop.
-		while (queue.length > 0) {
-			const item = queue.shift() as QueueItem;
-			const file = resolve(options.filePath);
-			ensureDir(file);
-			runBestEffort(() => {
-				if (item.kind === "truncate") {
-					fs.writeFileSync(file, "");
-				} else {
-					rotateIfNeeded(file);
-					fs.appendFileSync(file, item.line);
-				}
-			});
-		}
-	}
-
-	// Best-effort teardown flush of anything still buffered, via the single
-	// shared exit handler. appendFileSync is fine here — not the hot path.
-	registerExitFlusher(flushSync);
 
 	return {
 		log(obj: unknown): void {
@@ -261,8 +317,10 @@ export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 			enqueue({ kind: "truncate" });
 		},
 		async flush(): Promise<void> {
-			await drain();
+			await Promise.all([...states].map((state) => drain(state)));
 		},
-		flushSync,
+		flushSync(): void {
+			for (const state of states) flushStateSync(state);
+		},
 	};
 }

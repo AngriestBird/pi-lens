@@ -216,13 +216,18 @@ describe("createNdjsonLogger", () => {
 		]);
 	});
 
-	it("registers the logger's flushSync in the shared exit flusher set", () => {
+	it("registers one canonical per-file flusher", () => {
 		const before = _exitFlushersForTest().size;
-		const logger = createNdjsonLogger({ filePath: logFile });
-		// One shared process 'exit' handler flushes all loggers, so we assert the
-		// logger's flushSync is enrolled rather than counting process listeners.
+		createNdjsonLogger({ filePath: logFile });
+		const second = createNdjsonLogger({
+			filePath: path.join(tmpDir, ".", "test.log"),
+		});
+		// The shared process 'exit' handler owns one flusher per canonical file,
+		// not one closure per logger facade.
 		expect(_exitFlushersForTest().size).toBe(before + 1);
-		expect(_exitFlushersForTest().has(logger.flushSync)).toBe(true);
+		second.log({ canonical: true });
+		second.flushSync();
+		expect(readLines(logFile)).toHaveLength(1);
 	});
 
 	it("keeps a single shared process 'exit' listener regardless of logger count", () => {
@@ -234,12 +239,62 @@ describe("createNdjsonLogger", () => {
 		expect(process.listenerCount("exit")).toBe(count);
 	});
 
-	it("shares the exit listener across module re-evaluation", async () => {
+	it("shares the writer and queued operations across module re-evaluation", async () => {
 		const count = process.listenerCount("exit");
+		const first = createNdjsonLogger({ filePath: logFile, maxBytes: 40 });
+		// Leave this queued while the module graph is re-evaluated.
+		first.log({ source: "before-reload", payload: "x".repeat(20) });
+
+		const flusherCount = _exitFlushersForTest().size;
 		vi.resetModules();
 		const freshModule = await import("../../clients/ndjson-logger.js");
-		freshModule.createNdjsonLogger({ filePath: path.join(tmpDir, "fresh.log") });
+		const second = freshModule.createNdjsonLogger({
+			filePath: path.join(tmpDir, ".", "test.log"),
+			maxBytes: 40,
+		});
 		expect(process.listenerCount("exit")).toBe(count);
+		expect(freshModule._exitFlushersForTest().size).toBe(flusherCount);
+
+		second.log({ source: "after-reload", payload: "y".repeat(20) });
+		await Promise.all([first.flush(), second.flush()]);
+		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
+			{ source: "before-reload", payload: "x".repeat(20) },
+			{ source: "after-reload", payload: "y".repeat(20) },
+		]);
+
+		// Rotation and truncate are also serialized through the same state.
+		second.log({ source: "rotated", payload: "z".repeat(20) });
+		await second.flush();
+		expect(readLines(`${logFile}.1`).map((line) => JSON.parse(line))).toEqual([
+			{ source: "before-reload", payload: "x".repeat(20) },
+			{ source: "after-reload", payload: "y".repeat(20) },
+		]);
+		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
+			{ source: "rotated", payload: "z".repeat(20) },
+		]);
+
+		first.truncate();
+		second.log({ source: "after-truncate" });
+		await Promise.all([first.flush(), second.flush()]);
+		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
+			{ source: "after-truncate" },
+		]);
+	});
+
+	it("keeps distinct paths isolated", async () => {
+		const firstPath = path.join(tmpDir, "first.log");
+		const secondPath = path.join(tmpDir, "second.log");
+		const first = createNdjsonLogger({ filePath: firstPath });
+		const second = createNdjsonLogger({ filePath: secondPath });
+		first.log({ path: "first" });
+		second.log({ path: "second" });
+		await Promise.all([first.flush(), second.flush()]);
+		expect(readLines(firstPath).map((line) => JSON.parse(line))).toEqual([
+			{ path: "first" },
+		]);
+		expect(readLines(secondPath).map((line) => JSON.parse(line))).toEqual([
+			{ path: "second" },
+		]);
 	});
 
 	it("swallows write errors (best-effort telemetry)", async () => {
