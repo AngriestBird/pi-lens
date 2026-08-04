@@ -60,8 +60,32 @@ function runBestEffort(operation: () => void): void {
 // One shared exit handler flushes every logger — avoids an EventEmitter
 // MaxListeners warning once more than ~10 loggers exist (we ship eight, plus
 // diagnostic + test instances). No child spawning at teardown (#234).
-const exitFlushers = new Set<() => void>();
-let exitHandlerRegistered = false;
+//
+// Keep the registry on globalThis as well as in module state. Vitest can
+// re-evaluate this module after vi.resetModules(), and pi can load the source
+// and compiled entry through separate module graphs; a module-local guard then
+// registers one process listener per graph and recreates the warning. Symbol.for
+// gives those graphs one process-wide state without exposing a public global
+// property name.
+interface NdjsonGlobalState {
+	exitFlushers: Set<() => void>;
+	exitHandlerRegistered: boolean;
+	registeredLogFiles: Set<string>;
+}
+
+const NDJSON_GLOBAL_STATE_KEY = Symbol.for("pi-lens.ndjson-logger.state");
+const globalStateHost = globalThis as typeof globalThis & {
+	[key: symbol]: NdjsonGlobalState | undefined;
+};
+const ndjsonGlobalState =
+	globalStateHost[NDJSON_GLOBAL_STATE_KEY] ??
+	(globalStateHost[NDJSON_GLOBAL_STATE_KEY] = {
+		exitFlushers: new Set(),
+		exitHandlerRegistered: false,
+		registeredLogFiles: new Set(),
+	});
+const exitFlushers = ndjsonGlobalState.exitFlushers;
+const registeredLogFiles = ndjsonGlobalState.registeredLogFiles;
 
 /** Test-only view of the registered exit flushers (see ndjson-logger.test.ts). */
 export function _exitFlushersForTest(): ReadonlySet<() => void> {
@@ -80,8 +104,6 @@ export function _exitFlushersForTest(): ReadonlySet<() => void> {
 // `logs/{date}.jsonl`) is deliberately NOT registered: those already live
 // under the `logs/` subdirectory and are covered by log-cleanup's separate
 // `*.jsonl` daily-log sweep, not the single-file rotation list.
-const registeredLogFiles = new Set<string>();
-
 /** Every absolute path registered by a static-filePath createNdjsonLogger instance. */
 export function getRegisteredLogFiles(): ReadonlySet<string> {
 	return registeredLogFiles;
@@ -94,8 +116,8 @@ export function _resetRegisteredLogFilesForTest(): void {
 
 function registerExitFlusher(flushSync: () => void): void {
 	exitFlushers.add(flushSync);
-	if (!exitHandlerRegistered) {
-		exitHandlerRegistered = true;
+	if (!ndjsonGlobalState.exitHandlerRegistered) {
+		ndjsonGlobalState.exitHandlerRegistered = true;
 		process.on("exit", () => {
 			for (const flush of exitFlushers) runBestEffort(flush);
 		});

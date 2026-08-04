@@ -234,6 +234,14 @@ describe("createNdjsonLogger", () => {
 		expect(process.listenerCount("exit")).toBe(count);
 	});
 
+	it("shares the exit listener across module re-evaluation", async () => {
+		const count = process.listenerCount("exit");
+		vi.resetModules();
+		const freshModule = await import("../../clients/ndjson-logger.js");
+		freshModule.createNdjsonLogger({ filePath: path.join(tmpDir, "fresh.log") });
+		expect(process.listenerCount("exit")).toBe(count);
+	});
+
 	it("swallows write errors (best-effort telemetry)", async () => {
 		// Point at a path whose parent is a file, so mkdir/append fail.
 		const asFile = path.join(tmpDir, "not-a-dir");
