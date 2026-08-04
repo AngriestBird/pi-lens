@@ -9,7 +9,11 @@
  *
  * Errors are swallowed best-effort, matching every current logger. A
  * best-effort SYNC flush is registered on `process.on("exit")` (appendFileSync
- * is fine at exit — not the hot path; no child spawning, #234).
+ * is fine at exit — not the hot path; no child spawning, #234). Normal drains
+ * use promise-based mkdir/stat/remove/rename; synchronous filesystem calls are
+ * reserved for the exit flusher. A module graph with the pre-7e4b9120 private
+ * queue shape is fenced rather than adopted, because its queues cannot be
+ * migrated safely.
  */
 
 import * as fs from "node:fs";
@@ -75,13 +79,25 @@ interface NdjsonWriterState {
 	queue: QueueItem[];
 	drainPromise: Promise<void> | null;
 	inFlightBatch: QueueItem[] | null;
+	/** Operations to replay after a late in-flight write (truncate ordering). */
+	syncRepairItems: QueueItem[] | null;
 	ensuredDir: boolean;
 	/** One canonical exit flusher per file, never one per logger facade. */
 	exitFlusher: () => void;
 }
 
+const NDJSON_GLOBAL_STATE_VERSION = 1;
+
 interface NdjsonGlobalState {
+	/** Versioned protocol: only states with shared writer queues are adoptable. */
+	version: number;
 	writers: Map<string, NdjsonWriterState>;
+	exitFlushers: Set<() => void>;
+	exitHandlerRegistered: boolean;
+	registeredLogFiles: Set<string>;
+}
+
+interface LegacyNdjsonGlobalState {
 	exitFlushers: Set<() => void>;
 	exitHandlerRegistered: boolean;
 	registeredLogFiles: Set<string>;
@@ -89,25 +105,62 @@ interface NdjsonGlobalState {
 
 const NDJSON_GLOBAL_STATE_KEY = Symbol.for("pi-lens.ndjson-logger.state");
 const globalStateHost = globalThis as typeof globalThis & {
-	[key: symbol]: NdjsonGlobalState | undefined;
+	[key: symbol]: unknown;
 };
 const existingGlobalState = globalStateHost[NDJSON_GLOBAL_STATE_KEY];
-const ndjsonGlobalState =
-	existingGlobalState ??
-	(globalStateHost[NDJSON_GLOBAL_STATE_KEY] = {
+
+function isSharedWriterState(value: unknown): value is NdjsonGlobalState {
+	if (!value || typeof value !== "object") return false;
+	const candidate = value as Partial<NdjsonGlobalState>;
+	return (
+		(candidate.version === undefined ||
+			candidate.version === NDJSON_GLOBAL_STATE_VERSION) &&
+		candidate.writers instanceof Map &&
+		candidate.exitFlushers instanceof Set &&
+		candidate.registeredLogFiles instanceof Set &&
+		typeof candidate.exitHandlerRegistered === "boolean"
+	);
+}
+
+function isLegacyGlobalState(value: unknown): value is LegacyNdjsonGlobalState {
+	if (!value || typeof value !== "object") return false;
+	const candidate = value as Partial<LegacyNdjsonGlobalState>;
+	return (
+		candidate.exitFlushers instanceof Set &&
+		candidate.registeredLogFiles instanceof Set &&
+		typeof candidate.exitHandlerRegistered === "boolean"
+	);
+}
+
+let ndjsonGlobalState: NdjsonGlobalState | undefined;
+let legacyGlobalState: LegacyNdjsonGlobalState | undefined;
+if (isSharedWriterState(existingGlobalState)) {
+	// 7e4b9120 introduced the shared `writers` map without a version marker.
+	// That shape is bridgeable, so upgrade it in place rather than creating a
+	// competing queue. Pre-7e4b9120 graphs have no map and are fenced below.
+	existingGlobalState.version = NDJSON_GLOBAL_STATE_VERSION;
+	ndjsonGlobalState = existingGlobalState;
+} else if (existingGlobalState === undefined) {
+	ndjsonGlobalState = (globalStateHost[NDJSON_GLOBAL_STATE_KEY] = {
+		version: NDJSON_GLOBAL_STATE_VERSION,
 		writers: new Map(),
 		exitFlushers: new Set(),
 		exitHandlerRegistered: false,
 		registeredLogFiles: new Set(),
 	});
-// Keep any state created by an older module graph rather than replacing it.
-// In particular, its already-registered exit handler must retain its flusher
-// set so queued lines cannot disappear during a hot reload.
-ndjsonGlobalState.writers ??= new Map();
-ndjsonGlobalState.exitFlushers ??= new Set();
-ndjsonGlobalState.registeredLogFiles ??= new Set();
-const exitFlushers = ndjsonGlobalState.exitFlushers;
-const registeredLogFiles = ndjsonGlobalState.registeredLogFiles;
+} else if (isLegacyGlobalState(existingGlobalState)) {
+	// Do not mutate or replace this state: its private queues and exit flusher
+	// closures are not observable, so adopting it would falsely claim safety.
+	// New facades fail closed in requireCurrentGlobalState().
+	legacyGlobalState = existingGlobalState;
+}
+
+const exitFlushers =
+	ndjsonGlobalState?.exitFlushers ?? legacyGlobalState?.exitFlushers ?? new Set();
+const registeredLogFiles =
+	ndjsonGlobalState?.registeredLogFiles ??
+	legacyGlobalState?.registeredLogFiles ??
+	new Set<string>();
 
 /** Test-only view of the canonical per-file exit flushers (see ndjson-logger.test.ts). */
 export function _exitFlushersForTest(): ReadonlySet<() => void> {
@@ -136,10 +189,20 @@ export function _resetRegisteredLogFilesForTest(): void {
 	registeredLogFiles.clear();
 }
 
+function requireCurrentGlobalState(): NdjsonGlobalState {
+	if (ndjsonGlobalState) return ndjsonGlobalState;
+	throw new Error(
+		"createNdjsonLogger: incompatible module graph state; a pre-7e4b9120 " +
+			"logger graph may still own private queues. Restart the process before " +
+			"loading the current logger graph",
+	);
+}
+
 function registerWriter(state: NdjsonWriterState): void {
+	const globalState = requireCurrentGlobalState();
 	if (!exitFlushers.has(state.exitFlusher)) exitFlushers.add(state.exitFlusher);
-	if (!ndjsonGlobalState.exitHandlerRegistered) {
-		ndjsonGlobalState.exitHandlerRegistered = true;
+	if (!globalState.exitHandlerRegistered) {
+		globalState.exitHandlerRegistered = true;
 		process.on("exit", () => {
 			for (const flush of exitFlushers) runBestEffort(flush);
 		});
@@ -162,26 +225,45 @@ function assertCompatibleWriterOptions(
 	);
 }
 
+function applyQueueItemSync(state: NdjsonWriterState, item: QueueItem): void {
+	ensureDirSync(state);
+	runBestEffort(() => {
+		if (item.kind === "truncate") {
+			fs.writeFileSync(state.file, "");
+		} else {
+			rotateIfNeededSync(state);
+			fs.appendFileSync(state.file, item.line);
+		}
+	});
+}
+
 function flushStateSync(state: NdjsonWriterState): void {
 	// Drain the in-memory queue synchronously — safe at process exit.
 	// The in-flight async batch is INCLUDED even though its appendFile may
 	// also land: if the process dies before the threadpool issues that
 	// write, skipping the prefix would drop the whole batch. The per-line
 	// writer deliberately traded duplicate lines at exit for never-drops
-	// (#935 review) — keep that trade. The drain-loop completion handler
-	// only shifts items still at the queue head (identity-checked), so a
-	// queue emptied here is simply left alone by the async loop.
+	// (#935 review) — keep that trade. If a late in-flight append crosses a
+	// truncate, the post-truncate operations are replayed after that append
+	// completes so pre-truncate data cannot be reintroduced.
+	const inFlight = state.inFlightBatch;
+	const inFlightAtHead =
+		inFlight !== null &&
+		inFlight.every((item, index) => state.queue[index] === item);
+	const repairStart = inFlightAtHead
+		? inFlight?.[0]?.kind === "truncate"
+			? 0
+			: state.queue.findIndex((item) => item.kind === "truncate")
+		: -1;
+	if (state.syncRepairItems) {
+		state.syncRepairItems.push(...state.queue);
+	} else if (repairStart >= 0) {
+		state.syncRepairItems = state.queue.slice(repairStart);
+	}
+
 	while (state.queue.length > 0) {
 		const item = state.queue.shift() as QueueItem;
-		ensureDir(state);
-		runBestEffort(() => {
-			if (item.kind === "truncate") {
-				fs.writeFileSync(state.file, "");
-			} else {
-				rotateIfNeeded(state);
-				fs.appendFileSync(state.file, item.line);
-			}
-		});
+		applyQueueItemSync(state, item);
 	}
 }
 
@@ -190,7 +272,8 @@ function createWriterState(
 	maxBytes?: number,
 	backupPath?: string,
 ): NdjsonWriterState {
-	const existing = ndjsonGlobalState.writers.get(file);
+	const globalState = requireCurrentGlobalState();
+	const existing = globalState.writers.get(file);
 	if (existing) {
 		// A partially initialized global state from another graph still needs to
 		// be enrolled, but it must never get a second queue or exit flusher.
@@ -206,14 +289,15 @@ function createWriterState(
 	state.queue = [];
 	state.drainPromise = null;
 	state.inFlightBatch = null;
+	state.syncRepairItems = null;
 	state.ensuredDir = false;
 	state.exitFlusher = () => flushStateSync(state);
-	ndjsonGlobalState.writers.set(file, state);
+	globalState.writers.set(file, state);
 	registerWriter(state);
 	return state;
 }
 
-function ensureDir(state: NdjsonWriterState): void {
+function ensureDirSync(state: NdjsonWriterState): void {
 	if (state.ensuredDir) return;
 	runBestEffort(() => {
 		fs.mkdirSync(path.dirname(state.file), { recursive: true });
@@ -221,7 +305,17 @@ function ensureDir(state: NdjsonWriterState): void {
 	});
 }
 
-function rotateIfNeeded(state: NdjsonWriterState): void {
+async function ensureDirAsync(state: NdjsonWriterState): Promise<void> {
+	if (state.ensuredDir) return;
+	try {
+		await fs.promises.mkdir(path.dirname(state.file), { recursive: true });
+		state.ensuredDir = true;
+	} catch {
+		// telemetry is best-effort
+	}
+}
+
+function rotateIfNeededSync(state: NdjsonWriterState): void {
 	if (state.maxBytes === undefined) return;
 	try {
 		const size = fs.statSync(state.file).size;
@@ -234,13 +328,43 @@ function rotateIfNeeded(state: NdjsonWriterState): void {
 	}
 }
 
+async function rotateIfNeeded(state: NdjsonWriterState): Promise<void> {
+	if (state.maxBytes === undefined) return;
+	try {
+		const stats = await fs.promises.stat(state.file);
+		if (stats.size < state.maxBytes) return;
+		const backup = state.backupPath ?? `${state.file}.1`;
+		await fs.promises.rm(backup, { force: true });
+		await fs.promises.rename(state.file, backup);
+	} catch {
+		// no file yet, or rename raced — nothing to rotate
+	}
+}
+
+async function applyQueueItemAsync(
+	state: NdjsonWriterState,
+	item: QueueItem,
+): Promise<void> {
+	await ensureDirAsync(state);
+	try {
+		if (item.kind === "truncate") {
+			await fs.promises.writeFile(state.file, "");
+		} else {
+			await rotateIfNeeded(state);
+			await fs.promises.appendFile(state.file, item.line);
+		}
+	} catch {
+		// telemetry is best-effort
+	}
+}
+
 async function drainLoop(state: NdjsonWriterState): Promise<void> {
 	// Peek, write, then remove — an item stays in the queue until it is on
 	// disk, so a teardown flushSync (which abandons this async loop) never
 	// drops an item this loop had already dequeued but not yet written.
 	while (state.queue.length > 0) {
 		const item = state.queue[0];
-		ensureDir(state);
+		await ensureDirAsync(state);
 		const truncateIndex =
 			item.kind === "line"
 				? state.queue.findIndex((queued) => queued.kind === "truncate")
@@ -255,7 +379,7 @@ async function drainLoop(state: NdjsonWriterState): Promise<void> {
 			if (item.kind === "truncate") {
 				await fs.promises.writeFile(state.file, "");
 			} else {
-				rotateIfNeeded(state);
+				await rotateIfNeeded(state);
 				await fs.promises.appendFile(
 					state.file,
 					pending
@@ -272,7 +396,16 @@ async function drainLoop(state: NdjsonWriterState): Promise<void> {
 			if (state.queue[0] !== written) break;
 			state.queue.shift();
 		}
-		if (state.inFlightBatch === pending) state.inFlightBatch = null;
+		if (state.inFlightBatch === pending) {
+			state.inFlightBatch = null;
+			const repairItems = state.syncRepairItems;
+			state.syncRepairItems = null;
+			if (repairItems) {
+				for (const repairItem of repairItems) {
+					await applyQueueItemAsync(state, repairItem);
+				}
+			}
+		}
 	}
 }
 

@@ -248,24 +248,34 @@ describe("createNdjsonLogger", () => {
 
 	it("shares the writer and queued operations across module re-evaluation", async () => {
 		const count = process.listenerCount("exit");
-		const first = createNdjsonLogger({ filePath: logFile, maxBytes: 40 });
-		// Leave this queued while the module graph is re-evaluated.
+		let releaseFirstAppend: (() => void) | undefined;
+		const realAppendFile = fs.promises.appendFile.bind(fs.promises);
+		const appendFile = vi
+			.spyOn(fs.promises, "appendFile")
+			.mockImplementationOnce(async (file, data, options) => {
+				await new Promise<void>((resolve) => {
+					releaseFirstAppend = resolve;
+				});
+				return realAppendFile(file, data, options);
+			});
+		const first = createNdjsonLogger({ filePath: logFile, maxBytes: 100 });
 		first.log({ source: "before-reload", payload: "x".repeat(20) });
+		await vi.waitFor(() => expect(appendFile).toHaveBeenCalledTimes(1));
 
 		const flusherCount = _exitFlushersForTest().size;
 		vi.resetModules();
 		const freshModule = await import("../../clients/ndjson-logger.js");
 		const second = freshModule.createNdjsonLogger({
 			filePath: path.join(tmpDir, ".", "test.log"),
-			maxBytes: 40,
+			maxBytes: 100,
 		});
 		expect(process.listenerCount("exit")).toBe(count);
 		expect(freshModule._exitFlushersForTest().size).toBe(flusherCount);
 
 		second.log({ source: "after-reload", payload: "y".repeat(20) });
+		expect(appendFile).toHaveBeenCalledTimes(1);
+		releaseFirstAppend?.();
 		await Promise.all([first.flush(), second.flush()]);
-		// Both lines are larger than maxBytes as a batch. They are still written
-		// to the active file because rotation happens before, not after, a write.
 		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
 			{ source: "before-reload", payload: "x".repeat(20) },
 			{ source: "after-reload", payload: "y".repeat(20) },
@@ -289,6 +299,57 @@ describe("createNdjsonLogger", () => {
 		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
 			{ source: "after-truncate" },
 		]);
+	});
+
+	it("repairs a late append that would otherwise reintroduce pre-truncate data", async () => {
+		let releaseAppend: (() => void) | undefined;
+		const realAppendFile = fs.promises.appendFile.bind(fs.promises);
+		vi.spyOn(fs.promises, "appendFile").mockImplementationOnce(
+			async (file, data, options) => {
+				await new Promise<void>((resolve) => {
+					releaseAppend = resolve;
+				});
+				return realAppendFile(file, data, options);
+			},
+		);
+		const logger = createNdjsonLogger({ filePath: logFile });
+		logger.log({ before: true });
+		await vi.waitFor(() => expect(releaseAppend).toBeDefined());
+		logger.truncate();
+		logger.log({ after: true });
+		logger.flushSync();
+		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
+			{ after: true },
+		]);
+
+		releaseAppend?.();
+		await logger.flush();
+		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
+			{ after: true },
+		]);
+	});
+
+	it("fences a pre-7e4b9120 private-queue module graph without dropping its exit flusher", async () => {
+		const key = Symbol.for("pi-lens.ndjson-logger.state");
+		const globalHost = globalThis as unknown as Record<symbol, unknown>;
+		const previous = globalHost[key];
+		const legacyFlusher = vi.fn();
+		globalHost[key] = {
+			exitFlushers: new Set([legacyFlusher]),
+			exitHandlerRegistered: true,
+			registeredLogFiles: new Set([logFile]),
+		};
+		try {
+			vi.resetModules();
+			const freshModule = await import("../../clients/ndjson-logger.js");
+			expect(freshModule._exitFlushersForTest()).toContain(legacyFlusher);
+			expect(() => freshModule.createNdjsonLogger({ filePath: logFile })).toThrow(
+				/pre-7e4b9120.*private queues/,
+			);
+		} finally {
+			globalHost[key] = previous;
+			vi.resetModules();
+		}
 	});
 
 	it("rejects incompatible options for one canonical path", () => {
