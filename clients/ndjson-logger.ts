@@ -150,6 +150,18 @@ function normalizeLogPath(file: string): string {
 	return normalizeFilePath(path.resolve(file));
 }
 
+function assertCompatibleWriterOptions(
+	existing: NdjsonWriterState,
+	maxBytes?: number,
+	backupPath?: string,
+): void {
+	if (existing.maxBytes === maxBytes && existing.backupPath === backupPath) return;
+	throw new Error(
+		`createNdjsonLogger: incompatible options for shared path ${existing.file}; ` +
+		`the first writer's maxBytes/backupPath must be reused`,
+	);
+}
+
 function flushStateSync(state: NdjsonWriterState): void {
 	// Drain the in-memory queue synchronously — safe at process exit.
 	// The in-flight async batch is INCLUDED even though its appendFile may
@@ -182,6 +194,7 @@ function createWriterState(
 	if (existing) {
 		// A partially initialized global state from another graph still needs to
 		// be enrolled, but it must never get a second queue or exit flusher.
+		assertCompatibleWriterOptions(existing, maxBytes, backupPath);
 		if (!exitFlushers.has(existing.exitFlusher)) registerWriter(existing);
 		return existing;
 	}
@@ -279,19 +292,40 @@ function drain(state: NdjsonWriterState): Promise<void> {
 
 export function createNdjsonLogger(options: NdjsonLoggerOptions): NdjsonLogger {
 	const states = new Set<NdjsonWriterState>();
+	// Static logger paths are canonicalized once. Lazy diagnostic paths are
+	// resolved at enqueue time, but each resolved raw path is canonicalized only
+	// once (normally once per date), keeping realpath work off the hot path.
+	const canonicalPaths = new Map<string, string>();
+	const staticFile =
+		typeof options.filePath === "string"
+			? normalizeLogPath(options.filePath)
+			: undefined;
+	const staticBackupPath =
+		typeof options.backupPath === "string" && options.maxBytes !== undefined
+			? normalizeLogPath(options.backupPath)
+			: undefined;
+
+	function canonicalPath(file: string): string {
+		const raw = path.resolve(file);
+		const cached = canonicalPaths.get(raw);
+		if (cached) return cached;
+		const normalized = normalizeLogPath(raw);
+		canonicalPaths.set(raw, normalized);
+		return normalized;
+	}
 
 	function stateForCall(): NdjsonWriterState {
-		const file = normalizeLogPath(resolve(options.filePath));
+		const file = staticFile ?? canonicalPath(resolve(options.filePath));
 		const backupPath =
 			options.maxBytes !== undefined && options.backupPath
-				? normalizeLogPath(resolve(options.backupPath))
+				? (staticBackupPath ?? canonicalPath(resolve(options.backupPath)))
 				: undefined;
 		const state = createWriterState(file, options.maxBytes, backupPath);
 		states.add(state);
 		return state;
 	}
 
-	if (typeof options.filePath === "string") {
+	if (staticFile !== undefined) {
 		const state = stateForCall();
 		registeredLogFiles.add(state.file);
 	}

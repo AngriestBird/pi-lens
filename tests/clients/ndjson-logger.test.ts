@@ -84,20 +84,27 @@ describe("createNdjsonLogger", () => {
 
 	it("rotates to <file>.1 at the byte threshold", async () => {
 		const backup = `${logFile}.1`;
-		// Small threshold so a couple of lines trip it.
+		// Keep each line below the threshold. Rotation is checked before a batch,
+		// so the second line may take the active file over the limit; the third
+		// line is the one that rotates the first two.
 		const logger = createNdjsonLogger({ filePath: logFile, maxBytes: 40 });
+		const first = '{"entry":"1234567890123456789"}';
+		const second = '{"entry":"abcdefghijABCDEFGHIJ"}';
+		const third = '{"entry":"third"}';
 
-		logger.log({ payload: "first-entry-under-threshold" });
+		logger.append(first);
 		await logger.flush();
-		// Below threshold on the first write — no rotation yet.
 		expect(fs.existsSync(backup)).toBe(false);
 
-		logger.log({ payload: "second-entry-trips-rotation" });
+		logger.append(second);
 		await logger.flush();
-		// The pre-existing file exceeded maxBytes, so it was renamed to .1 and
-		// the new line landed in a fresh primary file.
-		expect(fs.existsSync(backup)).toBe(true);
-		expect(readLines(logFile)).toHaveLength(1);
+		expect(fs.existsSync(backup)).toBe(false);
+		expect(readLines(logFile)).toEqual([first, second]);
+
+		logger.append(third);
+		await logger.flush();
+		expect(readLines(backup)).toEqual([first, second]);
+		expect(readLines(logFile)).toEqual([third]);
 	});
 
 	it("never rotates when maxBytes is absent", async () => {
@@ -257,12 +264,15 @@ describe("createNdjsonLogger", () => {
 
 		second.log({ source: "after-reload", payload: "y".repeat(20) });
 		await Promise.all([first.flush(), second.flush()]);
+		// Both lines are larger than maxBytes as a batch. They are still written
+		// to the active file because rotation happens before, not after, a write.
 		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
 			{ source: "before-reload", payload: "x".repeat(20) },
 			{ source: "after-reload", payload: "y".repeat(20) },
 		]);
 
-		// Rotation and truncate are also serialized through the same state.
+		// Rotation and truncate are also serialized through the same state. The
+		// next write rotates the oversized active batch, preserving every line.
 		second.log({ source: "rotated", payload: "z".repeat(20) });
 		await second.flush();
 		expect(readLines(`${logFile}.1`).map((line) => JSON.parse(line))).toEqual([
@@ -279,6 +289,22 @@ describe("createNdjsonLogger", () => {
 		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
 			{ source: "after-truncate" },
 		]);
+	});
+
+	it("rejects incompatible options for one canonical path", () => {
+		createNdjsonLogger({ filePath: logFile, maxBytes: 40 });
+		const samePath = path.join(tmpDir, ".", "test.log");
+
+		expect(() =>
+			createNdjsonLogger({ filePath: samePath, maxBytes: 80 }),
+		).toThrow(/incompatible options.*maxBytes\/backupPath/);
+		expect(() =>
+			createNdjsonLogger({
+				filePath: samePath,
+				maxBytes: 40,
+				backupPath: path.join(tmpDir, "custom.backup"),
+			}),
+		).toThrow(/incompatible options.*maxBytes\/backupPath/);
 	});
 
 	it("keeps distinct paths isolated", async () => {
