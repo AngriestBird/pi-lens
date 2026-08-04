@@ -12,8 +12,11 @@
  * is fine at exit — not the hot path; no child spawning, #234). Normal drains
  * use promise-based mkdir/append/truncate, while rotation stays synchronous
  * inside the already-deferred drain so it cannot race a flushSync rename. A
- * module graph with the pre-7e4b9120 private queue shape is fenced rather than
- * adopted, because its queues cannot be migrated safely.
+ * The shared writer state uses the `NDJSON_GLOBAL_STATE_SCHEMA` protocol:
+ * version 1 (the 6a8a0994 shape) is upgraded in place to current version 2,
+ * retaining its queues while replacing stale exit flushers. A pre-7e4b9120
+ * private-queue shape is fenced rather than adopted, because its queues cannot
+ * be migrated safely.
  */
 
 import * as fs from "node:fs";
@@ -86,10 +89,13 @@ interface NdjsonWriterState {
 	exitFlusher: () => void;
 }
 
-const NDJSON_GLOBAL_STATE_VERSION = 1;
+const NDJSON_GLOBAL_STATE_SCHEMA = "pi-lens.ndjson-logger.state";
+const NDJSON_LEGACY_GLOBAL_STATE_VERSION = 1;
+const NDJSON_GLOBAL_STATE_VERSION = 2;
 
 interface NdjsonGlobalState {
 	/** Versioned protocol: only states with shared writer queues are adoptable. */
+	schema: string;
 	version: number;
 	writers: Map<string, NdjsonWriterState>;
 	exitFlushers: Set<() => void>;
@@ -109,24 +115,19 @@ const globalStateHost = globalThis as typeof globalThis & {
 };
 const existingGlobalState = globalStateHost[NDJSON_GLOBAL_STATE_KEY];
 
-function isPreVersionedGlobalState(value: unknown): boolean {
-	return (
-		value !== undefined &&
-		typeof value === "object" &&
-		value !== null &&
-		!("version" in value)
-	);
-}
-
-const upgradingPreVersionedState =
-	isPreVersionedGlobalState(existingGlobalState);
-
 function isSharedWriterState(value: unknown): value is NdjsonGlobalState {
 	if (!value || typeof value !== "object") return false;
 	const candidate = value as Partial<NdjsonGlobalState>;
+	const knownSchema =
+		candidate.schema === undefined ||
+		candidate.schema === NDJSON_GLOBAL_STATE_SCHEMA;
+	const knownVersion =
+		candidate.version === undefined ||
+		candidate.version === NDJSON_LEGACY_GLOBAL_STATE_VERSION ||
+		candidate.version === NDJSON_GLOBAL_STATE_VERSION;
 	return (
-		(candidate.version === undefined ||
-			candidate.version === NDJSON_GLOBAL_STATE_VERSION) &&
+		knownSchema &&
+		knownVersion &&
 		candidate.writers instanceof Map &&
 		candidate.exitFlushers instanceof Set &&
 		candidate.registeredLogFiles instanceof Set &&
@@ -147,10 +148,14 @@ function isLegacyGlobalState(value: unknown): value is LegacyNdjsonGlobalState {
 let ndjsonGlobalState: NdjsonGlobalState | undefined;
 let legacyGlobalState: LegacyNdjsonGlobalState | undefined;
 if (isSharedWriterState(existingGlobalState)) {
-	// 7e4b9120 introduced the shared `writers` map without a version marker.
-	// That shape is bridgeable, so upgrade it in place rather than creating a
-	// competing queue. Pre-7e4b9120 graphs have no map and are fenced below.
-	if (upgradingPreVersionedState) {
+	// The 7e4b9120 graph had no version marker and 6a8a0994 used version 1.
+	// Both shapes are bridgeable: retain their queues, but replace every stale
+	// exit flusher with a closure from this module graph. A current state is
+	// left untouched so it keeps exactly one canonical flusher per writer.
+	const needsFlusherMigration =
+		existingGlobalState.schema !== NDJSON_GLOBAL_STATE_SCHEMA ||
+		existingGlobalState.version !== NDJSON_GLOBAL_STATE_VERSION;
+	if (needsFlusherMigration) {
 		for (const state of existingGlobalState.writers.values()) {
 			const staleExitFlusher = state.exitFlusher;
 			const currentExitFlusher = () => flushStateSync(state);
@@ -159,10 +164,12 @@ if (isSharedWriterState(existingGlobalState)) {
 			existingGlobalState.exitFlushers.add(currentExitFlusher);
 		}
 	}
+	existingGlobalState.schema = NDJSON_GLOBAL_STATE_SCHEMA;
 	existingGlobalState.version = NDJSON_GLOBAL_STATE_VERSION;
 	ndjsonGlobalState = existingGlobalState;
 } else if (existingGlobalState === undefined) {
 	ndjsonGlobalState = (globalStateHost[NDJSON_GLOBAL_STATE_KEY] = {
+		schema: NDJSON_GLOBAL_STATE_SCHEMA,
 		version: NDJSON_GLOBAL_STATE_VERSION,
 		writers: new Map(),
 		exitFlushers: new Set(),
