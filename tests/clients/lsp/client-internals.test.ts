@@ -18,6 +18,7 @@ import {
 	clientRequestWorkspaceDiagnostics,
 	clientShutdown,
 	clientWaitForDiagnostics,
+	normalizeClientWorkspaceEdit,
 	handleNotifyChange,
 	navRequest,
 	resolveConfigurationSection,
@@ -30,6 +31,7 @@ import {
 } from "../../../clients/lsp/client.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 import { WatchedFilesQueue } from "../../../clients/lsp/watch-queue.js";
+import { applyWorkspaceEdit } from "../../../clients/lsp/edits.js";
 
 const TEST_FILE = "/project/app.ts";
 const TEST_KEY = normalizeMapKey(TEST_FILE);
@@ -67,6 +69,83 @@ describe("CLIENT_CAPABILITIES (#278 regression)", () => {
 			(CLIENT_CAPABILITIES.textDocument.publishDiagnostics as { versionSupport?: boolean })
 				.versionSupport,
 		).toBe(true);
+	});
+});
+
+describe("client workspace edit normalization", () => {
+	it("normalizes a rename-then-descendant edit against virtual post-resource content", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-client-edit-"));
+		const oldDir = path.join(root, "oldDir");
+		const newDir = path.join(root, "newDir");
+		const oldFile = path.join(oldDir, "file.ts");
+		const newFile = path.join(newDir, "file.ts");
+		fs.mkdirSync(oldDir);
+		fs.writeFileSync(oldFile, "const café = 1;\n", "utf-8");
+		const state = createMockState({ root, positionEncoding: "utf-8" });
+		const edit = {
+			documentChanges: [
+				{
+					kind: "rename",
+					oldUri: pathToFileURL(oldDir).href,
+					newUri: pathToFileURL(newDir).href,
+				},
+				{
+					textDocument: { uri: pathToFileURL(newFile).href },
+					edits: [{
+						range: {
+							start: { line: 0, character: 14 },
+							end: { line: 0, character: 15 },
+						},
+						newText: "2",
+					}],
+				},
+			],
+		};
+
+		try {
+			const normalized = await normalizeClientWorkspaceEdit(state, edit);
+			const textChange = (normalized.documentChanges?.[1] as { edits: Array<{ range: { start: { character: number }; end: { character: number } } }> }).edits[0];
+			expect(textChange.range.start.character).toBe(13);
+			expect(textChange.range.end.character).toBe(14);
+			await applyWorkspaceEdit(normalized, root);
+			expect(fs.readFileSync(newFile, "utf-8")).toBe("const café = 2;\n");
+			expect(fs.existsSync(oldDir)).toBe(false);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects an invalid UTF-8 range after a virtual rename without mutation", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-client-edit-"));
+		const oldDir = path.join(root, "oldDir");
+		const newDir = path.join(root, "newDir");
+		const oldFile = path.join(oldDir, "file.ts");
+		const newFile = path.join(newDir, "file.ts");
+		fs.mkdirSync(oldDir);
+		fs.writeFileSync(oldFile, "const café = 1;\n", "utf-8");
+		const state = createMockState({ root, positionEncoding: "utf-8" });
+
+		try {
+			await expect(normalizeClientWorkspaceEdit(state, {
+				documentChanges: [
+					{ kind: "rename", oldUri: pathToFileURL(oldDir).href, newUri: pathToFileURL(newDir).href },
+					{
+						textDocument: { uri: pathToFileURL(newFile).href },
+						edits: [{
+							range: {
+								start: { line: 0, character: 99 },
+								end: { line: 0, character: 99 },
+							},
+							newText: "x",
+						}],
+					},
+				],
+			})).rejects.toThrow(/outside line/);
+			expect(fs.existsSync(oldFile)).toBe(true);
+			expect(fs.existsSync(newFile)).toBe(false);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

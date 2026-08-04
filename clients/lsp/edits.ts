@@ -287,6 +287,16 @@ function utf16Position(content: string, position: LSPPosition, encoding: Positio
 	throw new Error(`text edit character ${position.character} is not a ${encoding} boundary`);
 }
 
+function normalizedTextEditKey(edit: LSPTextEdit): string {
+	return JSON.stringify([
+		edit.range.start.line,
+		edit.range.start.character,
+		edit.range.end.line,
+		edit.range.end.character,
+		edit.newText,
+	]);
+}
+
 function normalizeTextEditsForContent(content: string, edits: LSPTextEdit[], encoding: PositionEncoding): LSPTextEdit[] {
 	const lines = content.split("\n");
 	const converted = edits.map((edit) => {
@@ -321,35 +331,48 @@ export function applyTextEditsToString(content: string, edits: LSPTextEdit[], po
 export async function normalizeWorkspaceEditToUtf16(
 	edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] },
 	positionEncoding: PositionEncoding,
+	cwd: string,
 ): Promise<{ changes?: Record<string, unknown[]>; documentChanges?: unknown[] }> {
 	parseWorkspaceEdit(edit);
 	if (positionEncoding === "utf-16") return edit;
-	const readContent = async (uri: string): Promise<string> => {
-		try {
-			return await fs.readFile(uriToPath(uri), "utf-8");
-		} catch {
-			return "";
+
+	// Use the same ordered planner and virtual resource/content model as the
+	// eventual apply. This is important for edits such as rename(oldDir, newDir)
+	// followed by a text edit at newDir/file.ts: the destination is not on disk
+	// yet, but its content is available through the virtual move.
+	const planned = planWorkspaceEdit(edit, true);
+	const prepared = await preflightWorkspaceEdit(planned, cwd, { positionEncoding });
+	const normalizedByOrigin = new Map<string, LSPTextEdit[]>();
+	for (const op of planned) {
+		if (op.kind !== "text") continue;
+		for (const origin of op.origins ?? []) {
+			normalizedByOrigin.set(
+				textEditOriginKey(origin),
+				prepared.textByOrigin.get(textEditOriginKey(origin)) ?? [],
+			);
 		}
-	};
+	}
+
 	const changes: Record<string, unknown[]> = {};
-	for (const [uri, rawEdits] of Object.entries(edit.changes ?? {})) {
-		const content = await readContent(uri);
-		changes[uri] = normalizeTextEditsForContent(content, parseTextEdits(rawEdits, `changes[${uri}]`), positionEncoding);
+	for (const uri of Object.keys(edit.changes ?? {})) {
+		changes[uri] = normalizedByOrigin.get(textEditOriginKey({ kind: "changes", uri, edits: [] })) ?? [];
 	}
 	const documentChanges: unknown[] = [];
-	for (const change of edit.documentChanges ?? []) {
-		const text = parseTextDocumentEdit(change, "documentChanges");
+	for (const [index, change] of (edit.documentChanges ?? []).entries()) {
+		const text = parseTextDocumentEdit(change, `documentChanges[${index}]`);
 		if (!text) {
 			documentChanges.push(change);
 			continue;
 		}
-		const content = await readContent(text.textDocument.uri);
 		documentChanges.push({
-			...change as Record<string, unknown>,
-			edits: normalizeTextEditsForContent(content, text.edits as LSPTextEdit[], positionEncoding),
+			...(change as Record<string, unknown>),
+			edits: normalizedByOrigin.get(textEditOriginKey({ kind: "documentChanges", index, edits: [] })) ?? [],
 		});
 	}
-	return { ...(edit.changes !== undefined ? { changes } : {}), ...(edit.documentChanges !== undefined ? { documentChanges } : {}) };
+	return {
+		...(edit.changes !== undefined ? { changes } : {}),
+		...(edit.documentChanges !== undefined ? { documentChanges } : {}),
+	};
 }
 
 export function flattenWorkspaceTextEdits(edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] }): Map<string, LSPTextEdit[]> {
@@ -411,14 +434,33 @@ export function mergeWorkspaceTextEditsByPriority(entries: Array<{ serverId: str
 	return { edit: { changes }, droppedConflicts, inputEditCount, serverIds };
 }
 
+type TextEditOrigin =
+	| { kind: "changes"; uri: string; edits: LSPTextEdit[] }
+	| { kind: "documentChanges"; index: number; edits: LSPTextEdit[] };
+
 type WorkspaceEditOp =
-	| { kind: "text"; uri: string; edits: LSPTextEdit[]; version?: number | null }
+	| {
+			kind: "text";
+			uri: string;
+			edits: LSPTextEdit[];
+			version?: number | null;
+			origins?: TextEditOrigin[];
+		}
 	| CreateFileOp
 	| RenameFileOp
 	| DeleteFileOp;
 
 function pathIndexKey(uri: string): string {
 	return normalizeMapKey(uriToPath(uri));
+}
+
+function textEditOriginKey(origin: TextEditOrigin): string {
+	// This is an input-container identity, not a filesystem/resource key. Keep
+	// the original URI spelling so two equivalent `changes` keys cannot overwrite
+	// each other's normalized output while the planner still coalesces them.
+	return origin.kind === "changes"
+		? `changes:${origin.uri}`
+		: `documentChanges:${origin.index}`;
 }
 
 function parseResource(change: Record<string, unknown>): WorkspaceEditOp {
@@ -429,10 +471,18 @@ function parseResource(change: Record<string, unknown>): WorkspaceEditOp {
 	throw new Error(`unsupported workspace resource operation: ${String(kind)}`);
 }
 
-function planWorkspaceEdit(edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] }): WorkspaceEditOp[] {
+function planWorkspaceEdit(
+	edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] },
+	trackOrigins = false,
+): WorkspaceEditOp[] {
 	parseWorkspaceEdit(edit);
 	const ops: WorkspaceEditOp[] = [];
-	const pending = new Map<string, { uri: string; edits: LSPTextEdit[]; version?: number | null }>();
+	const pending = new Map<string, {
+		uri: string;
+		edits: LSPTextEdit[];
+		version?: number | null;
+		origins?: TextEditOrigin[];
+	}>();
 	const descendants = new Map<string, Set<string>>();
 	const indexedAncestors = new Map<string, string[]>();
 	const seenResources = new Set<string>();
@@ -454,7 +504,12 @@ function planWorkspaceEdit(edit: { changes?: Record<string, unknown[]>; document
 		for (const ancestor of indexedAncestors.get(key) ?? []) descendants.get(ancestor)?.delete(key);
 		indexedAncestors.delete(key);
 	};
-	const queue = (uri: string, edits: LSPTextEdit[], version?: number | null): void => {
+	const queue = (
+		uri: string,
+		edits: LSPTextEdit[],
+		version: number | null | undefined,
+		origin?: TextEditOrigin,
+	): void => {
 		const key = pathIndexKey(uri);
 		const existing = pending.get(key);
 		if (existing) {
@@ -462,10 +517,15 @@ function planWorkspaceEdit(edit: { changes?: Record<string, unknown[]>; document
 				throw new Error(`conflicting text document versions for ${uri}`);
 			}
 			existing.edits.push(...edits);
+			if (origin) (existing.origins ??= []).push(origin);
 			if (existing.version === undefined) existing.version = version;
 			return;
 		}
-		pending.set(key, { uri, edits: [...edits], version });
+		if (origin) {
+			pending.set(key, { uri, edits: [...edits], version, origins: [origin] });
+		} else {
+			pending.set(key, { uri, edits: [...edits], version });
+		}
 		addIndex(key);
 	};
 	const flushUri = (uri: string): void => {
@@ -474,7 +534,17 @@ function planWorkspaceEdit(edit: { changes?: Record<string, unknown[]>; document
 		if (!item) return;
 		pending.delete(key);
 		removeIndex(key);
-		ops.push({ kind: "text", uri: item.uri, edits: item.edits, version: item.version });
+		if (item.origins) {
+			ops.push({
+				kind: "text",
+				uri: item.uri,
+				edits: item.edits,
+				version: item.version,
+				origins: item.origins,
+			});
+		} else {
+			ops.push({ kind: "text", uri: item.uri, edits: item.edits, version: item.version });
+		}
 	};
 	const flushSubtree = (uri: string): void => {
 		const key = pathIndexKey(uri);
@@ -483,11 +553,30 @@ function planWorkspaceEdit(edit: { changes?: Record<string, unknown[]>; document
 			if (item) flushUri(item.uri);
 		}
 	};
-	for (const [uri, edits] of Object.entries(edit.changes ?? {})) queue(uri, parseTextEdits(edits, `changes[${uri}]`));
+	for (const [uri, edits] of Object.entries(edit.changes ?? {})) {
+		const parsed = parseTextEdits(edits, `changes[${uri}]`);
+		queue(
+			uri,
+			parsed,
+			undefined,
+			trackOrigins ? { kind: "changes", uri, edits: parsed } : undefined,
+		);
+	}
 	for (const [index, change] of (edit.documentChanges ?? []).entries()) {
 		const text = parseTextDocumentEdit(change, `documentChanges[${index}]`);
 		if (text) {
-			queue(text.textDocument.uri, text.edits as LSPTextEdit[], text.textDocument.version);
+			queue(
+				text.textDocument.uri,
+				text.edits as LSPTextEdit[],
+				text.textDocument.version,
+				trackOrigins
+					? {
+						kind: "documentChanges",
+						index,
+						edits: text.edits as LSPTextEdit[],
+					}
+					: undefined,
+			);
 			continue;
 		}
 		const resource = parseResource(change as Record<string, unknown>);
@@ -608,7 +697,11 @@ async function preflightWorkspaceEdit(
 	planned: WorkspaceEditOp[],
 	cwd: string,
 	options: ApplyWorkspaceEditOptions,
-): Promise<{ text: Map<WorkspaceEditOp, LSPTextEdit[]>; ignored: Set<WorkspaceEditOp> }> {
+): Promise<{
+	text: Map<WorkspaceEditOp, LSPTextEdit[]>;
+	textByOrigin: Map<string, LSPTextEdit[]>;
+	ignored: Set<WorkspaceEditOp>;
+}> {
 	const confine = await createWorkspaceUriConfiner(cwd);
 	const virtual = new Map<string, VirtualFile>();
 	const virtualMoves: Array<{
@@ -618,6 +711,7 @@ async function preflightWorkspaceEdit(
 	}> = [];
 	const virtualTombstones: Array<{ path: string; directory: boolean }> = [];
 	const text = new Map<WorkspaceEditOp, LSPTextEdit[]>();
+	const textByOrigin = new Map<string, LSPTextEdit[]>();
 	const ignored = new Set<WorkspaceEditOp>();
 	const resolveVirtualPath = (filePath: string): string | undefined => {
 		let resolved = filePath;
@@ -680,8 +774,26 @@ async function preflightWorkspaceEdit(
 				if (current === undefined || current !== op.version) throw new Error(`stale text document version for ${filePath}: expected ${op.version}, current ${current ?? "unknown"}`);
 			}
 			const content = await contentFor(filePath, state);
-			const normalized = normalizeTextEditsForContent(content, op.edits, options.positionEncoding ?? "utf-16");
+			const encoding = options.positionEncoding ?? "utf-16";
+			const normalized = normalizeTextEditsForContent(content, op.edits, encoding);
 			text.set(op, normalized);
+
+			// Keep the normalized edits attached to their original LSP containers.
+			// A planner operation can combine `changes` with a documentChanges text
+			// edit for the same URI, so the combined validation above remains the
+			// authority while this assignment preserves version/resource ordering.
+			const available = new Set(normalized.map(normalizedTextEditKey));
+			const assigned = new Set<string>();
+			for (const origin of op.origins ?? []) {
+				const originEdits = normalizeTextEditsForContent(content, origin.edits, encoding);
+				const owned = originEdits.filter((edit) => {
+					const key = normalizedTextEditKey(edit);
+					if (!available.has(key) || assigned.has(key)) return false;
+					assigned.add(key);
+					return true;
+				});
+				textByOrigin.set(textEditOriginKey(origin), owned);
+			}
 			state.content = applyTextEditsToString(content, normalized);
 			continue;
 		}
@@ -734,7 +846,7 @@ async function preflightWorkspaceEdit(
 			virtualTombstones.push({ path: filePath, directory: state.directory });
 		}
 	}
-	return { text, ignored };
+	return { text, textByOrigin, ignored };
 }
 
 /**

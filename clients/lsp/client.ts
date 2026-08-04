@@ -1780,12 +1780,12 @@ function validateWorkspaceEditVersions(
 	}
 }
 
-async function normalizeClientWorkspaceEdit(
+export async function normalizeClientWorkspaceEdit(
 	state: LSPClientState,
 	edit: LSPWorkspaceEdit,
 ): Promise<LSPWorkspaceEdit> {
 	validateWorkspaceEditVersions(state, edit);
-	return (await normalizeWorkspaceEditToUtf16(edit, state.positionEncoding)) as LSPWorkspaceEdit;
+	return (await normalizeWorkspaceEditToUtf16(edit, state.positionEncoding, state.root)) as LSPWorkspaceEdit;
 }
 
 async function resolveCodeActionBestEffort(
