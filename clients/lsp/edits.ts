@@ -287,16 +287,6 @@ function utf16Position(content: string, position: LSPPosition, encoding: Positio
 	throw new Error(`text edit character ${position.character} is not a ${encoding} boundary`);
 }
 
-function normalizedTextEditKey(edit: LSPTextEdit): string {
-	return JSON.stringify([
-		edit.range.start.line,
-		edit.range.start.character,
-		edit.range.end.line,
-		edit.range.end.character,
-		edit.newText,
-	]);
-}
-
 function normalizeTextEditsForContent(content: string, edits: LSPTextEdit[], encoding: PositionEncoding): LSPTextEdit[] {
 	const lines = content.split("\n");
 	const converted = edits.map((edit) => {
@@ -782,17 +772,14 @@ async function preflightWorkspaceEdit(
 			// A planner operation can combine `changes` with a documentChanges text
 			// edit for the same URI, so the combined validation above remains the
 			// authority while this assignment preserves version/resource ordering.
-			const available = new Set(normalized.map(normalizedTextEditKey));
-			const assigned = new Set<string>();
 			for (const origin of op.origins ?? []) {
-				const originEdits = normalizeTextEditsForContent(content, origin.edits, encoding);
-				const owned = originEdits.filter((edit) => {
-					const key = normalizedTextEditKey(edit);
-					if (!available.has(key) || assigned.has(key)) return false;
-					assigned.add(key);
-					return true;
-				});
-				textByOrigin.set(textEditOriginKey(origin), owned);
+				// Origins are already validated together above, but must retain
+				// multiplicity: identical zero-width insertions are meaningful and
+				// must not be deduplicated while restoring the original containers.
+				textByOrigin.set(
+					textEditOriginKey(origin),
+					normalizeTextEditsForContent(content, origin.edits, encoding),
+				);
 			}
 			state.content = applyTextEditsToString(content, normalized);
 			continue;
@@ -810,6 +797,8 @@ async function preflightWorkspaceEdit(
 				state.exists = true;
 				state.directory = false;
 				state.content = "";
+				const physicalPath = resolveVirtualPath(filePath);
+				if (physicalPath) virtual.set(normalizeMapKey(physicalPath), state);
 			}
 			continue;
 		}

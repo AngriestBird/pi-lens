@@ -115,6 +115,62 @@ describe("client workspace edit normalization", () => {
 		}
 	});
 
+	it.each(["utf-8", "utf-32"] as const)(
+		"preserves duplicate zero-width edits during %s normalization",
+		async (positionEncoding) => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-client-edit-"));
+			const filePath = path.join(root, "file.ts");
+			fs.writeFileSync(filePath, "a\n", "utf-8");
+			const state = createMockState({ root, positionEncoding });
+			try {
+				const normalized = await normalizeClientWorkspaceEdit(state, {
+					documentChanges: [{
+						textDocument: { uri: pathToFileURL(filePath).href },
+						edits: [
+							{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "x" },
+							{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "x" },
+						],
+					}],
+				});
+				const textChange = normalized.documentChanges?.[0] as { edits: unknown[] };
+				expect(textChange.edits).toHaveLength(2);
+				await applyWorkspaceEdit(normalized, root);
+				expect(fs.readFileSync(filePath, "utf-8")).toBe("xxa\n");
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it.each(["utf-8", "utf-32"] as const)(
+		"supports delete-create-text ordering during %s normalization",
+		async (positionEncoding) => {
+			const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-client-edit-"));
+			const filePath = path.join(root, "file.ts");
+			fs.writeFileSync(filePath, "old\n", "utf-8");
+			const state = createMockState({ root, positionEncoding });
+			try {
+				const normalized = await normalizeClientWorkspaceEdit(state, {
+					documentChanges: [
+						{ kind: "delete", uri: pathToFileURL(filePath).href },
+						{ kind: "create", uri: pathToFileURL(filePath).href },
+						{
+							textDocument: { uri: pathToFileURL(filePath).href },
+							edits: [{
+								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+								newText: "new\n",
+							}],
+						},
+					],
+				});
+				await applyWorkspaceEdit(normalized, root);
+				expect(fs.readFileSync(filePath, "utf-8")).toBe("new\n");
+			} finally {
+				fs.rmSync(root, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("rejects an invalid UTF-8 range after a virtual rename without mutation", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-client-edit-"));
 		const oldDir = path.join(root, "oldDir");
