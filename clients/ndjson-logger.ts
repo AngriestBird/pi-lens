@@ -10,10 +10,10 @@
  * Errors are swallowed best-effort, matching every current logger. A
  * best-effort SYNC flush is registered on `process.on("exit")` (appendFileSync
  * is fine at exit — not the hot path; no child spawning, #234). Normal drains
- * use promise-based mkdir/stat/remove/rename; synchronous filesystem calls are
- * reserved for the exit flusher. A module graph with the pre-7e4b9120 private
- * queue shape is fenced rather than adopted, because its queues cannot be
- * migrated safely.
+ * use promise-based mkdir/append/truncate, while rotation stays synchronous
+ * inside the already-deferred drain so it cannot race a flushSync rename. A
+ * module graph with the pre-7e4b9120 private queue shape is fenced rather than
+ * adopted, because its queues cannot be migrated safely.
  */
 
 import * as fs from "node:fs";
@@ -109,6 +109,18 @@ const globalStateHost = globalThis as typeof globalThis & {
 };
 const existingGlobalState = globalStateHost[NDJSON_GLOBAL_STATE_KEY];
 
+function isPreVersionedGlobalState(value: unknown): boolean {
+	return (
+		value !== undefined &&
+		typeof value === "object" &&
+		value !== null &&
+		!("version" in value)
+	);
+}
+
+const upgradingPreVersionedState =
+	isPreVersionedGlobalState(existingGlobalState);
+
 function isSharedWriterState(value: unknown): value is NdjsonGlobalState {
 	if (!value || typeof value !== "object") return false;
 	const candidate = value as Partial<NdjsonGlobalState>;
@@ -138,6 +150,15 @@ if (isSharedWriterState(existingGlobalState)) {
 	// 7e4b9120 introduced the shared `writers` map without a version marker.
 	// That shape is bridgeable, so upgrade it in place rather than creating a
 	// competing queue. Pre-7e4b9120 graphs have no map and are fenced below.
+	if (upgradingPreVersionedState) {
+		for (const state of existingGlobalState.writers.values()) {
+			const staleExitFlusher = state.exitFlusher;
+			const currentExitFlusher = () => flushStateSync(state);
+			state.exitFlusher = currentExitFlusher;
+			existingGlobalState.exitFlushers.delete(staleExitFlusher);
+			existingGlobalState.exitFlushers.add(currentExitFlusher);
+		}
+	}
 	existingGlobalState.version = NDJSON_GLOBAL_STATE_VERSION;
 	ndjsonGlobalState = existingGlobalState;
 } else if (existingGlobalState === undefined) {
@@ -156,7 +177,9 @@ if (isSharedWriterState(existingGlobalState)) {
 }
 
 const exitFlushers =
-	ndjsonGlobalState?.exitFlushers ?? legacyGlobalState?.exitFlushers ?? new Set();
+	ndjsonGlobalState?.exitFlushers ??
+	legacyGlobalState?.exitFlushers ??
+	new Set<() => void>();
 const registeredLogFiles =
 	ndjsonGlobalState?.registeredLogFiles ??
 	legacyGlobalState?.registeredLogFiles ??
@@ -231,7 +254,7 @@ function applyQueueItemSync(state: NdjsonWriterState, item: QueueItem): void {
 		if (item.kind === "truncate") {
 			fs.writeFileSync(state.file, "");
 		} else {
-			rotateIfNeededSync(state);
+			rotateIfNeeded(state);
 			fs.appendFileSync(state.file, item.line);
 		}
 	});
@@ -315,7 +338,7 @@ async function ensureDirAsync(state: NdjsonWriterState): Promise<void> {
 	}
 }
 
-function rotateIfNeededSync(state: NdjsonWriterState): void {
+function rotateIfNeeded(state: NdjsonWriterState): void {
 	if (state.maxBytes === undefined) return;
 	try {
 		const size = fs.statSync(state.file).size;
@@ -323,19 +346,6 @@ function rotateIfNeededSync(state: NdjsonWriterState): void {
 		const backup = state.backupPath ?? `${state.file}.1`;
 		runBestEffort(() => fs.rmSync(backup, { force: true }));
 		fs.renameSync(state.file, backup);
-	} catch {
-		// no file yet, or rename raced — nothing to rotate
-	}
-}
-
-async function rotateIfNeeded(state: NdjsonWriterState): Promise<void> {
-	if (state.maxBytes === undefined) return;
-	try {
-		const stats = await fs.promises.stat(state.file);
-		if (stats.size < state.maxBytes) return;
-		const backup = state.backupPath ?? `${state.file}.1`;
-		await fs.promises.rm(backup, { force: true });
-		await fs.promises.rename(state.file, backup);
 	} catch {
 		// no file yet, or rename raced — nothing to rotate
 	}
@@ -350,7 +360,11 @@ async function applyQueueItemAsync(
 		if (item.kind === "truncate") {
 			await fs.promises.writeFile(state.file, "");
 		} else {
-			await rotateIfNeeded(state);
+			// Rotation is deliberately synchronous here. This function is only
+			// reached from the already-deferred drain, and keeping stat/rm/rename
+			// in one synchronous section prevents flushSync from racing a late
+			// async rename after it has written new data.
+			rotateIfNeeded(state);
 			await fs.promises.appendFile(state.file, item.line);
 		}
 	} catch {
@@ -379,7 +393,10 @@ async function drainLoop(state: NdjsonWriterState): Promise<void> {
 			if (item.kind === "truncate") {
 				await fs.promises.writeFile(state.file, "");
 			} else {
-				await rotateIfNeeded(state);
+				// Rotation is kept synchronous inside the deferred drain. The
+				// append remains async, but no awaited rotation step can run after
+				// flushSync has written to the active file.
+				rotateIfNeeded(state);
 				await fs.promises.appendFile(
 					state.file,
 					pending

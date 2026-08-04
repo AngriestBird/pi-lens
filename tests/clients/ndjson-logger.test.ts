@@ -301,6 +301,58 @@ describe("createNdjsonLogger", () => {
 		]);
 	});
 
+	it("keeps rotation ahead of an exit flush while an append is in flight", async () => {
+		fs.writeFileSync(logFile, "seed-data\n");
+		let releaseRotation: (() => void) | undefined;
+		const rotationGate = new Promise<void>((resolve) => {
+			releaseRotation = resolve;
+		});
+		let releaseAppend: (() => void) | undefined;
+		const realAppendFile = fs.promises.appendFile.bind(fs.promises);
+		const appendFile = vi
+			.spyOn(fs.promises, "appendFile")
+			.mockImplementationOnce(async (file, data, options) => {
+				await new Promise<void>((resolve) => {
+					releaseAppend = resolve;
+				});
+				return realAppendFile(file, data, options);
+			});
+		const asyncStat = vi
+			.spyOn(fs.promises, "stat")
+			.mockImplementation(async () => {
+				await rotationGate;
+				return { size: Number.MAX_SAFE_INTEGER } as fs.Stats;
+			});
+		const logger = createNdjsonLogger({ filePath: logFile, maxBytes: 1 });
+
+		try {
+			logger.log({ first: true });
+			await vi.waitFor(() =>
+				expect(appendFile.mock.calls.length + asyncStat.mock.calls.length).toBe(1),
+			);
+			// Rotation must have completed before the first awaited append. A
+			// promise-based stat would still be gated here and let flushSync write
+			// new data before a late rename removed or reordered it.
+			logger.log({ afterFlush: true });
+			logger.flushSync();
+			expect(asyncStat).not.toHaveBeenCalled();
+			expect(readLines(`${logFile}.1`)).toEqual(["seed-data"]);
+			expect(readLines(logFile).map((line) => JSON.parse(line))).toContainEqual({
+				afterFlush: true,
+			});
+
+			releaseAppend?.();
+			await logger.flush();
+			expect(readLines(`${logFile}.1`)).toEqual(["seed-data"]);
+			expect(readLines(logFile).map((line) => JSON.parse(line))).toContainEqual({
+				afterFlush: true,
+			});
+		} finally {
+			releaseRotation?.();
+			releaseAppend?.();
+		}
+	});
+
 	it("repairs a late append that would otherwise reintroduce pre-truncate data", async () => {
 		let releaseAppend: (() => void) | undefined;
 		const realAppendFile = fs.promises.appendFile.bind(fs.promises);
@@ -327,6 +379,62 @@ describe("createNdjsonLogger", () => {
 		expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual([
 			{ after: true },
 		]);
+	});
+
+	it("upgrades a pre-versioned writer through a parent module graph", async () => {
+		let releaseAppend: (() => void) | undefined;
+		const realAppendFile = fs.promises.appendFile.bind(fs.promises);
+		const appendFile = vi
+			.spyOn(fs.promises, "appendFile")
+			.mockImplementationOnce(async (file, data, options) => {
+				await new Promise<void>((resolve) => {
+					releaseAppend = resolve;
+				});
+				return realAppendFile(file, data, options);
+			});
+		const oldFacade = createNdjsonLogger({ filePath: logFile });
+		oldFacade.log({ queuedBeforeUpgrade: true });
+		oldFacade.log({ queuedAfterFirstAppend: true });
+		await vi.waitFor(() => expect(appendFile).toHaveBeenCalledTimes(1));
+
+		const key = Symbol.for("pi-lens.ndjson-logger.state");
+		const globalHost = globalThis as unknown as Record<symbol, unknown>;
+		const globalState = globalHost[key] as {
+			version?: number;
+			writers: Map<string, { file: string; exitFlusher: () => void }>;
+			exitFlushers: Set<() => void>;
+		};
+		const writerState = [...globalState.writers.values()].find((state) =>
+			path.normalize(state.file).endsWith(path.normalize(logFile)),
+		);
+		expect(writerState).toBeDefined();
+		const staleExitFlusher = writerState?.exitFlusher;
+		delete globalState.version;
+
+		try {
+			// Import through a real logger facade, rather than re-evaluating the
+			// current module directly. This is the parent-module graph shape that
+			// can leave an older child graph's closure in the shared registry.
+			vi.resetModules();
+			await import("../../clients/sessionstart-logger.js");
+
+			expect(globalState.version).toBe(1);
+			expect(writerState?.exitFlusher).not.toBe(staleExitFlusher);
+			expect(globalState.exitFlushers).not.toContain(staleExitFlusher);
+			expect(globalState.exitFlushers).toContain(writerState?.exitFlusher);
+			// The current flusher must drain the old facade's queue, including the
+			// item enqueued by the old module graph after its first append started.
+			for (const flush of globalState.exitFlushers) flush();
+			expect(readLines(logFile).map((line) => JSON.parse(line))).toEqual(
+				expect.arrayContaining([
+					{ queuedBeforeUpgrade: true },
+					{ queuedAfterFirstAppend: true },
+				]),
+			);
+		} finally {
+			releaseAppend?.();
+			await oldFacade.flush();
+		}
 	});
 
 	it("fences a pre-7e4b9120 private-queue module graph without dropping its exit flusher", async () => {
