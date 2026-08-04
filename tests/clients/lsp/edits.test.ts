@@ -128,9 +128,22 @@ describe("LSP workspace edits", () => {
 					},
 				},
 				tmpDir,
+				{
+					mutationContext: {
+						cwd: tmpDir,
+						correlationId: "duplicate-edit-1",
+						tool: "workspace/applyEdit",
+						source: "lsp-edit",
+						emitSummary: false,
+					},
+				},
 			);
 
 			expect(fs.readFileSync(filePath, "utf-8")).toBe("aXc");
+			expect(result.operationTotal).toBe(1);
+			expect(result.appliedOperationTotal).toBe(1);
+			expect(result.appliedOperationIndexes).toEqual([0]);
+			expect(result.operationCounts.textEdits).toBe(1);
 			expect(result.descriptions).toEqual([
 				"Applied 1 edit(s) to duplicate.ts",
 			]);
@@ -422,6 +435,46 @@ describe("LSP workspace edits", () => {
 			expect(result.descriptions).toEqual([
 				"Applied 1 edit(s) to old/child.ts",
 				"Renamed old → new",
+			]);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("lazily maps text edits under a renamed directory", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
+		const oldDir = path.join(tmpDir, "old");
+		const newDir = path.join(tmpDir, "new");
+		const oldChild = path.join(oldDir, "child.ts");
+		const newChild = path.join(newDir, "child.ts");
+		fs.mkdirSync(oldDir);
+		fs.writeFileSync(oldChild, "old", "utf-8");
+
+		try {
+			const result = await applyWorkspaceEdit({
+				documentChanges: [
+					{
+						kind: "rename",
+						oldUri: pathToFileURL(oldDir).href,
+						newUri: pathToFileURL(newDir).href,
+					},
+					{
+						textDocument: { uri: pathToFileURL(newChild).href },
+						edits: [{
+							range: {
+								start: { line: 0, character: 0 },
+								end: { line: 0, character: 3 },
+							},
+							newText: "new",
+						}],
+					},
+				],
+			}, tmpDir);
+
+			expect(fs.readFileSync(newChild, "utf-8")).toBe("new");
+			expect(result.descriptions).toEqual([
+				"Renamed old → new",
+				"Applied 1 edit(s) to new/child.ts",
 			]);
 		} finally {
 			removeTempDirSync(tmpDir);

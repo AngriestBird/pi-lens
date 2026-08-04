@@ -540,18 +540,15 @@ async function lstatOrMissing(filePath: string): Promise<Stats | undefined> {
 	}
 }
 
-async function assertParentIsUsable(filePath: string, virtual: Map<string, VirtualFile>): Promise<void> {
+async function assertParentIsUsable(
+	filePath: string,
+	stateFor: (filePath: string) => Promise<VirtualFile>,
+): Promise<void> {
 	let current = path.dirname(filePath);
 	while (true) {
-		const key = normalizeMapKey(current);
-		const known = virtual.get(key);
-		if (known) {
-			if (!known.exists || !known.directory) throw new Error(`resource parent is not a directory: ${current}`);
-			return;
-		}
-		const stat = await lstatOrMissing(current);
-		if (stat) {
-			if (!stat.isDirectory()) throw new Error(`resource parent is not a directory: ${current}`);
+		const known = await stateFor(current);
+		if (known.exists) {
+			if (!known.directory) throw new Error(`resource parent is not a directory: ${current}`);
 			return;
 		}
 		const parent = path.dirname(current);
@@ -585,13 +582,37 @@ async function preflightWorkspaceEdit(
 ): Promise<{ text: Map<WorkspaceEditOp, LSPTextEdit[]>; ignored: Set<WorkspaceEditOp> }> {
 	const root = await resolveExistingAncestor(cwd);
 	const virtual = new Map<string, VirtualFile>();
+	const virtualMoves: Array<{
+		from: string;
+		to: string;
+		directory: boolean;
+	}> = [];
 	const text = new Map<WorkspaceEditOp, LSPTextEdit[]>();
 	const ignored = new Set<WorkspaceEditOp>();
+	const resolveVirtualPath = (filePath: string): string | undefined => {
+		let resolved = filePath;
+		for (let index = virtualMoves.length - 1; index >= 0; index--) {
+			const move = virtualMoves[index];
+			if (isUnderDir(resolved, move.to) &&
+				(move.directory || pathsEqual(resolved, move.to))) {
+				const suffix = path.relative(move.to, resolved);
+				resolved = suffix ? path.join(move.from, suffix) : move.from;
+				continue;
+			}
+			if (isUnderDir(resolved, move.from) &&
+				(move.directory || pathsEqual(resolved, move.from))) {
+				return undefined;
+			}
+		}
+		return resolved;
+	};
 	const stateFor = async (filePath: string): Promise<VirtualFile> => {
-		const key = normalizeMapKey(filePath);
+		const physicalPath = resolveVirtualPath(filePath);
+		if (!physicalPath) return { exists: false, directory: false };
+		const key = normalizeMapKey(physicalPath);
 		const known = virtual.get(key);
 		if (known) return known;
-		const stat = await lstatOrMissing(filePath);
+		const stat = await lstatOrMissing(physicalPath);
 		const value = { exists: Boolean(stat), directory: stat?.isDirectory() ?? false };
 		virtual.set(key, value);
 		return value;
@@ -613,8 +634,11 @@ async function preflightWorkspaceEdit(
 	const contentFor = async (filePath: string, state: VirtualFile): Promise<string> => {
 		if (!state.exists || state.directory) throw new Error(`text edit target is not a file: ${filePath}`);
 		if (state.content !== undefined) return state.content;
-		state.content = await fs.readFile(filePath, "utf-8");
-		return state.content;
+		const physicalPath = resolveVirtualPath(filePath);
+		if (!physicalPath) throw new Error(`text edit target does not exist: ${filePath}`);
+		const content = await fs.readFile(physicalPath, "utf-8");
+		state.content = content;
+		return content;
 	};
 	for (const op of planned) {
 		if (op.kind === "text") {
@@ -633,7 +657,7 @@ async function preflightWorkspaceEdit(
 		if (op.kind === "create") {
 			const filePath = await confine(op.uri);
 			const state = await stateFor(filePath);
-			await assertParentIsUsable(filePath, virtual);
+			await assertParentIsUsable(filePath, stateFor);
 			if (state.exists) {
 				if (op.options?.ignoreIfExists) { ignored.add(op); continue; }
 				if (!op.options?.overwrite || state.directory) throw new Error(`create target already exists: ${filePath}`);
@@ -652,14 +676,17 @@ async function preflightWorkspaceEdit(
 			const source = await stateFor(oldPath);
 			const destination = await stateFor(newPath);
 			if (!source.exists) throw new Error(`rename source does not exist: ${oldPath}`);
-			await assertParentIsUsable(newPath, virtual);
+			await assertParentIsUsable(newPath, stateFor);
 			if (destination.exists) {
 				if (op.options?.ignoreIfExists) { ignored.add(op); continue; }
 				if (!op.options?.overwrite) throw new Error(`rename destination already exists: ${newPath}`);
 			}
 			if (!source.directory) await contentFor(oldPath, source);
-			virtual.set(normalizeMapKey(newPath), { ...source });
-			virtual.set(normalizeMapKey(oldPath), { exists: false, directory: false });
+			// Keep descendants lazy: a later text edit under a renamed directory
+			// resolves through this virtual move to the original physical path.
+			// This preserves ordered workspace-edit semantics without walking the
+			// entire subtree during preflight.
+			virtualMoves.push({ from: oldPath, to: newPath, directory: source.directory });
 			continue;
 		}
 		const filePath = await confine(op.uri);
@@ -695,17 +722,10 @@ export async function applyWorkspaceEdit(
 	let operationIndex = 0;
 	const operationCounts = { textEdits: 0, create: 0, rename: 0, delete: 0 };
 	const planned = planWorkspaceEdit(edit);
-	for (const op of planned) {
-		if (op.kind === "text") operationCounts.textEdits += op.edits.length;
-		else operationCounts[op.kind]++;
-	}
-	const operationTotal =
-		operationCounts.textEdits +
-		operationCounts.create +
-		operationCounts.rename +
-		operationCounts.delete;
+	let operationTotal = 0;
+	let prepared: Awaited<ReturnType<typeof preflightWorkspaceEdit>>;
 	const operationSize = (op: WorkspaceEditOp): number =>
-		op.kind === "text" ? op.edits.length : 1;
+		op.kind === "text" ? (prepared.text.get(op)?.length ?? 0) : 1;
 	const markApplied = (op: WorkspaceEditOp): void => {
 		const count = operationSize(op);
 		for (let index = 0; index < count; index++) {
@@ -728,9 +748,14 @@ export async function applyWorkspaceEdit(
 		operationCounts,
 		fileDetails,
 	});
-	let prepared: Awaited<ReturnType<typeof preflightWorkspaceEdit>>;
 	try {
 		prepared = await preflightWorkspaceEdit(planned, cwd, options);
+		for (const op of planned) {
+			const size = operationSize(op);
+			if (op.kind === "text") operationCounts.textEdits += size;
+			else operationCounts[op.kind]++;
+			operationTotal += size;
+		}
 		for (const op of planned) {
 			if (prepared.ignored.has(op)) {
 				skipOperation(op);
@@ -739,6 +764,10 @@ export async function applyWorkspaceEdit(
 			if (op.kind === "text") {
 				const filePath = uriToPath(op.uri);
 				const edits = prepared.text.get(op) ?? [];
+				if (edits.length === 0) {
+					skipOperation(op);
+					continue;
+				}
 				const content = await fs.readFile(filePath, "utf-8");
 				const updated = applyTextEditsToString(content, edits, "utf-16");
 				await fs.writeFile(filePath, updated, "utf-8");

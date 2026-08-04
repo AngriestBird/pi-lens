@@ -112,6 +112,29 @@ describe("solicited workspace/applyEdit observability", () => {
 		expect(fs.readFileSync(filePath, "utf8")).toBe("const new = 1;\n");
 		expect(written).toEqual([filePath]);
 		expect(state.activeMutationContext?.summaryEmitted).toBe(true);
+		expect(state.activeMutationContext?.summaryCount).toBe(1);
+
+		// A later solicited request must retain its own terminal summary even
+		// when the first request already emitted an empty/success summary.
+		fs.writeFileSync(filePath, "const old = 1;\n", "utf8");
+		const second = await handler!({
+			edit: {
+				changes: {
+					[pathToFileURL(filePath).href]: [
+						{
+							range: {
+								start: { line: 0, character: 6 },
+								end: { line: 0, character: 9 },
+							},
+							newText: "second",
+						},
+					],
+				},
+			},
+		});
+		await expect(Promise.resolve(second)).resolves.toMatchObject({ applied: true });
+		expect(fs.readFileSync(filePath, "utf8")).toBe("const second = 1;\n");
+		expect(state.activeMutationContext?.summaryCount).toBe(2);
 
 		fs.writeFileSync(filePath, "const old = 1;\n", "utf8");
 		state.serverEditsAllowed = 0;

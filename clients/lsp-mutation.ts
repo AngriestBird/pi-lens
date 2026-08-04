@@ -42,8 +42,10 @@ export interface LspMutationContext {
 	dbg?: (message: string) => void;
 	/** Batch callers can defer the single terminal log until all edits are attempted. */
 	emitSummary?: boolean;
-	/** Internal duplicate/debounce guard for a logical mutation request. */
+	/** True once at least one bounded mutation summary has been emitted. */
 	summaryEmitted?: boolean;
+	/** Number of per-request summaries emitted for this outer mutation. */
+	summaryCount?: number;
 	/** Bounded per-batch dedupe for the existing turn-summary autofix publisher. */
 	autofixRecordedPaths?: Set<string>;
 }
@@ -77,6 +79,7 @@ export interface LspMutationTelemetry {
 }
 
 const MAX_SAMPLES = 100;
+const MAX_SUMMARIES_PER_CONTEXT = 100;
 
 export function newLspMutationCorrelationId(toolCallId?: string): string {
 	return getReadGuardCorrelationId(toolCallId ? { toolCallId } : {});
@@ -308,26 +311,33 @@ export function recordLspMutation(
 		bookkeepLspMutation(context, combined.files, combined.fileDetails);
 	}
 	const telemetry = telemetryFor(context, options);
-	if (context.emitSummary !== false && !context.summaryEmitted) {
+	if (context.emitSummary !== false) {
+		const summaryCount = context.summaryCount ?? 0;
 		context.summaryEmitted = true;
-		logReadGuardEvent({
-			event: "edit_batch_summary",
-			correlationId: context.correlationId,
-			filePath: combined.files[0] ?? context.cwd,
-			metadata: {
-				tool: context.tool,
-				source: context.source,
-				outcome: telemetry.editBatchSummary.terminalStatus,
-				editBatchSummary: telemetry.editBatchSummary,
-				operationCounts: telemetry.operationCounts,
-				sampledPaths: telemetry.sampledPaths,
-				sampledPathsTotal: telemetry.sampledPathsTotal,
-				sampledPathsTruncated: telemetry.sampledPathsTruncated,
-				considered: telemetry.considered,
-				completed: telemetry.completed,
-				failedCount: telemetry.failedCount,
-			},
-		});
+		if (summaryCount < MAX_SUMMARIES_PER_CONTEXT) {
+			context.summaryCount = summaryCount + 1;
+			logReadGuardEvent({
+				event: "edit_batch_summary",
+				correlationId: context.correlationId,
+				filePath: combined.files[0] ?? context.cwd,
+				metadata: {
+					tool: context.tool,
+					source: context.source,
+					outcome: telemetry.editBatchSummary.terminalStatus,
+					// The outer correlation identifies the soliciting tool call; the
+					// bounded sequence distinguishes multiple applyEdit requests within it.
+					summaryIndex: summaryCount,
+					editBatchSummary: telemetry.editBatchSummary,
+					operationCounts: telemetry.operationCounts,
+					sampledPaths: telemetry.sampledPaths,
+					sampledPathsTotal: telemetry.sampledPathsTotal,
+					sampledPathsTruncated: telemetry.sampledPathsTruncated,
+					considered: telemetry.considered,
+					completed: telemetry.completed,
+					failedCount: telemetry.failedCount,
+				},
+			});
+		}
 	}
 	return telemetry;
 }

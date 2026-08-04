@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
 	getProjectIgnoreMatcher,
 	isExcludedDirName,
@@ -3072,9 +3073,24 @@ export class LSPService {
 				`workspace/didClose failed; rename aborted: ${closeFailures.map((failure) => `${failure.serverId}: ${failure.error}`).join("; ")}`,
 			);
 		}
+		let renameApplied;
 		try {
-			await fs.mkdir(path.dirname(newFilePath), { recursive: true });
-			await fs.rename(oldFilePath, newFilePath);
+			// Route the resource mutation through the same preflight confinement,
+			// realpath and symlink policy as all other workspace edits. Do not
+			// duplicate that security boundary with a direct mkdir/rename pair.
+			renameApplied = await applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{
+							kind: "rename",
+							oldUri: pathToFileURL(oldFilePath).href,
+							newUri: pathToFileURL(newFilePath).href,
+						},
+					],
+				},
+				cwd,
+				{ observe: false },
+			);
 		} catch (err) {
 			if (options.mutationContext) {
 				recordLspMutation(options.mutationContext, {
@@ -3119,20 +3135,23 @@ export class LSPService {
 					{
 						...applied,
 						files,
-						operationTotal: applied.operationTotal + 1,
-						appliedOperationTotal: applied.appliedOperationTotal + 1,
+						operationTotal: applied.operationTotal + renameApplied.operationTotal,
+						appliedOperationTotal: applied.appliedOperationTotal + renameApplied.appliedOperationTotal,
 						appliedOperationIndexes: [
 							...applied.appliedOperationIndexes,
-							applied.operationTotal,
+							...renameApplied.appliedOperationIndexes.map(
+								(index) => applied.operationTotal + index,
+							),
 						],
 						operationCounts: {
-							...applied.operationCounts,
-							rename: applied.operationCounts.rename + 1,
+							textEdits: applied.operationCounts.textEdits + renameApplied.operationCounts.textEdits,
+							create: applied.operationCounts.create + renameApplied.operationCounts.create,
+							rename: applied.operationCounts.rename + renameApplied.operationCounts.rename,
+							delete: applied.operationCounts.delete + renameApplied.operationCounts.delete,
 						},
 						fileDetails: [
 							...applied.fileDetails,
-							{ filePath: oldFilePath, range: { start: 1, end: 1 }, importsChanged: true },
-							{ filePath: newFilePath, range: { start: 1, end: 1 }, importsChanged: true },
+							...renameApplied.fileDetails,
 						],
 					},
 				],
