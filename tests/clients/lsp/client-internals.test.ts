@@ -30,6 +30,7 @@ import {
 	type LSPDiagnostic,
 } from "../../../clients/lsp/client.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
+import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
 import { WatchedFilesQueue } from "../../../clients/lsp/watch-queue.js";
 import { applyWorkspaceEdit } from "../../../clients/lsp/edits.js";
 
@@ -366,6 +367,8 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 		diagnosticsVersion: 0,
 		documentVersions: new Map(),
 		diagnosticDocVersions: new Map(),
+		documentContentHashes: new Map(),
+		diagnosticBindings: new Map(),
 		openDocuments: new Set(),
 		pendingOpens: new Set(),
 		workspaceDiagnosticsSupport: {
@@ -943,6 +946,133 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 		const cached = state.pushDiagnostics.get(TEST_KEY);
 		expect(cached).toBeDefined();
 		expect(cached?.[0]?.message).toBe("version-less diagnostic");
+	});
+
+	// #1095: content binding capture on the publish path.
+	it("binds the stored diagnostics to the sent content fingerprint when the publish version matches (T1)", async () => {
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		const content = "const x = 1;\n";
+		// Mirror production: the document is open and a didChange sends version 2,
+		// fingerprinting the exact payload text at send time (never a disk read).
+		state.openDocuments.add(TEST_KEY);
+		state.documentVersions.set(TEST_KEY, 1);
+		await handleNotifyChange(state, TEST_FILE, content);
+		expect(state.documentContentHashes.get(TEST_KEY)).toEqual({
+			version: 2,
+			hash: hashDiagnosticContent(content),
+		});
+
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			version: 2,
+			diagnostics: [
+				{
+					severity: 1,
+					message: "current diagnostic",
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 0 },
+					},
+				},
+			],
+		});
+		await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+
+		expect(state.diagnosticBindings.get(TEST_KEY)).toEqual({
+			version: 2,
+			contentHash: hashDiagnosticContent(content),
+		});
+	});
+
+	it("records NO binding for a superseded push — server lags a didChange (T2)", async () => {
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		// Two edits landed; the latest sent version is 2 with its own fingerprint.
+		state.documentVersions.set(TEST_KEY, 2);
+		state.documentContentHashes.set(TEST_KEY, {
+			version: 2,
+			hash: hashDiagnosticContent("const x = 2;\n"),
+		});
+
+		// A late push still analyzing edit #1 (version 1 < 2) — dropped before cache.
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			version: 1,
+			diagnostics: [
+				{
+					severity: 1,
+					message: "stale diagnostic from edit #1",
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 0 },
+					},
+				},
+			],
+		});
+		await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+
+		// No diagnostics cached AND no binding recorded for the superseded push.
+		expect(state.pushDiagnostics.has(TEST_KEY)).toBe(false);
+		expect(state.diagnosticBindings.has(TEST_KEY)).toBe(false);
+	});
+
+	it("records NO contentHash when the server omits version — version-less binding stays unknown (T3)", async () => {
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		// Even with a sent fingerprint on record, a version-less publish must not
+		// bind — otherwise version-less servers would change behavior.
+		state.documentContentHashes.set(TEST_KEY, {
+			version: 0,
+			hash: hashDiagnosticContent("const x = 1;\n"),
+		});
+
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			version: undefined,
+			diagnostics: [
+				{
+					severity: 1,
+					message: "version-less diagnostic",
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 0 },
+					},
+				},
+			],
+		});
+		await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+
+		expect(state.pushDiagnostics.has(TEST_KEY)).toBe(true);
+		expect(state.diagnosticBindings.has(TEST_KEY)).toBe(false);
+	});
+
+	it("binds version but no contentHash when the sent fingerprint is for a different version (I3 fallback → unknown)", async () => {
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		state.documentVersions.set(TEST_KEY, 2);
+		// The only fingerprint we hold is for an OLDER version (1) — cannot bind
+		// version 2's content, so contentHash is left undefined → verifier "unknown".
+		state.documentContentHashes.set(TEST_KEY, {
+			version: 1,
+			hash: hashDiagnosticContent("old"),
+		});
+
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			version: 2,
+			diagnostics: [
+				{
+					severity: 1,
+					message: "current diagnostic",
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 0 },
+					},
+				},
+			],
+		});
+		await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+
+		const binding = state.diagnosticBindings.get(TEST_KEY);
+		expect(binding?.version).toBe(2);
+		expect(binding?.contentHash).toBeUndefined();
 	});
 });
 

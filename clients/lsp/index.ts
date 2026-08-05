@@ -38,6 +38,15 @@ import {
 	type LspMutationContext,
 } from "../lsp-mutation.js";
 import { createLSPClient } from "./client.js";
+import {
+	bindingStateLabel,
+	composeBoundToCurrentDisk,
+	createDiskBindingCache,
+	type BoundToCurrentDisk,
+	type DiagnosticBinding,
+	type DiskBindingCache,
+	type StoredDiagnosticBinding,
+} from "./diagnostic-binding.js";
 import { getServersForFileWithConfig, getServerInitOverride } from "./config.js";
 import { getLanguageId } from "./language.js";
 import type { LSPServerInfo } from "./server.js";
@@ -772,6 +781,13 @@ export class LSPService {
 	 * those falls through to a fresh check rather than serving a stale result.
 	 */
 	private readonly lastKnownContentHash = new Map<string, string>();
+	/**
+	 * #1095: lazily verifies a stored {@link DiagnosticBinding} against current
+	 * disk bytes, memoizing the disk fingerprint per (file, mtime) so repeated
+	 * binding reads across `touchFile`/`getAllDiagnostics` within a session don't
+	 * re-hash unchanged files. Owned by the service so the memo is shared.
+	 */
+	private readonly diskBindingCache: DiskBindingCache = createDiskBindingCache();
 	private readonly lastDiagnosticsHealth = new Map<
 		string,
 		LSPDiagnosticsHealth
@@ -1540,6 +1556,18 @@ export class LSPService {
 				 * bonus field, not a shape change).
 				 */
 				inconclusive?: boolean;
+				/**
+				 * #1095: content binding of the merged result — {version?,
+				 * contentHash?, boundToCurrentDisk} answering "were these
+				 * diagnostics computed against what's on disk now?" composed across
+				 * every contributing client. `boundToCurrentDisk === false` means
+				 * the server's view diverged from disk (a stale-but-fresh-looking
+				 * result); consumers must demote such a result to inconclusive
+				 * rather than trust it. "unknown" (version-less server, or disk
+				 * unreadable) preserves pre-#1095 behavior. Non-enumerable, like
+				 * `inconclusive`.
+				 */
+				binding?: DiagnosticBinding;
 			})
 		| undefined
 	> {
@@ -2413,6 +2441,27 @@ export class LSPService {
 			});
 		}
 
+		// #1095: attach the merged content binding (non-enumerable, like
+		// `inconclusive`) so a consumer can ask whether these diagnostics were
+		// computed against current disk. Composed across every spawned client so a
+		// single client whose view diverged from disk marks the whole merged result
+		// mismatched. Disk verify is lazy + memoized per (file, mtime).
+		let binding: DiagnosticBinding | undefined;
+		if (collected !== undefined) {
+			binding = this.mergeBinding(
+				filePath,
+				// Optional-chain so a client without the getter (test doubles, a
+				// partially-mocked client) yields "unknown" rather than throwing —
+				// unknown preserves pre-#1095 behavior for that contributor.
+				spawned.map((entry) => entry.client.getDiagnosticBinding?.(filePath)),
+			);
+			Object.defineProperty(collected, "binding", {
+				value: binding,
+				enumerable: false,
+				configurable: true,
+			});
+		}
+
 		// Only refresh the recent-touches entry when we actually pushed. Skipping
 		// here keeps the original push timestamp intact so the debounce window
 		// expires naturally instead of being extended by every reuse.
@@ -2432,6 +2481,13 @@ export class LSPService {
 				source,
 				failureKind: "success",
 				collectedDiagnostics: collected?.length,
+				// #1095: observability so an unbinding server is diagnosable —
+				// "bound" (matches disk) / "mismatch" (diverged) / "unknown"
+				// (version-less server or disk unreadable). Absent for non-collecting
+				// touches (no merged result to bind).
+				...(binding !== undefined && {
+					bindingState: bindingStateLabel(binding.boundToCurrentDisk),
+				}),
 				notifySkipped,
 				notifyWriteTimedOut,
 				// #743: per-server detail — which servers' writes actually timed out.
@@ -2713,6 +2769,39 @@ export class LSPService {
 
 	private hashContent(content: string): string {
 		return createHash("sha256").update(content).digest("hex");
+	}
+
+	/**
+	 * #1095: compose the content `binding` for a merged diagnostics result across
+	 * the clients that contributed to it (primary + any auxiliaries). Verifies
+	 * each contributor's stored binding against current disk lazily (memoized per
+	 * file+mtime by {@link diskBindingCache}) and composes per
+	 * {@link composeBoundToCurrentDisk}: ANY contributor mismatches disk → false;
+	 * else all "unknown" (or no contributors) → "unknown"; else true. The
+	 * surfaced version/contentHash come from the first contributor that carries
+	 * them — informational only; the load-bearing field is `boundToCurrentDisk`.
+	 */
+	private mergeBinding(
+		filePath: string,
+		stored: readonly (StoredDiagnosticBinding | undefined)[],
+	): DiagnosticBinding {
+		const verdicts: BoundToCurrentDisk[] = [];
+		let version: number | undefined;
+		let contentHash: string | undefined;
+		for (const entry of stored) {
+			verdicts.push(
+				this.diskBindingCache.boundToCurrentDisk(filePath, entry ?? {}),
+			);
+			if (version === undefined && entry?.version !== undefined) {
+				version = entry.version;
+				contentHash = entry.contentHash;
+			}
+		}
+		return {
+			version,
+			contentHash,
+			boundToCurrentDisk: composeBoundToCurrentDisk(verdicts),
+		};
 	}
 
 	/**
@@ -4150,11 +4239,28 @@ export class LSPService {
 	 * Get all diagnostics across all tracked files (for cascade checking)
 	 */
 	async getAllDiagnostics(): Promise<
-		Map<string, { diags: import("./client.js").LSPDiagnostic[]; ts: number }>
+		Map<
+			string,
+			{
+				diags: import("./client.js").LSPDiagnostic[];
+				ts: number;
+				binding?: DiagnosticBinding;
+			}
+		>
 	> {
 		const all = new Map<
 			string,
-			{ diags: import("./client.js").LSPDiagnostic[]; ts: number }
+			{
+				diags: import("./client.js").LSPDiagnostic[];
+				ts: number;
+				binding?: DiagnosticBinding;
+			}
+		>();
+		// #1095: per-file stored bindings across every contributing client, merged
+		// into one `boundToCurrentDisk` verdict after the client loop.
+		const bindingsByPath = new Map<
+			string,
+			(StoredDiagnosticBinding | undefined)[]
 		>();
 		const now = Date.now();
 		for (const [_key, client] of this.state.clients) {
@@ -4191,7 +4297,19 @@ export class LSPService {
 				} else {
 					all.set(filePath, { diags: [...entry.diags], ts: entry.ts });
 				}
+				const list = bindingsByPath.get(filePath) ?? [];
+				list.push(entry.binding);
+				bindingsByPath.set(filePath, list);
 			}
+		}
+		// Resolve the composed content binding per file once all contributors are
+		// merged — a single client whose view diverged from disk marks the whole
+		// merged entry mismatched (#1095).
+		for (const [filePath, entry] of all) {
+			entry.binding = this.mergeBinding(
+				filePath,
+				bindingsByPath.get(filePath) ?? [],
+			);
 		}
 		return all;
 	}

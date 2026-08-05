@@ -26,6 +26,10 @@ import {
 } from "../deps/vscode-jsonrpc.js";
 import { getAmbientAbortSignal } from "../safe-spawn.js";
 import {
+	hashDiagnosticContent,
+	type StoredDiagnosticBinding,
+} from "./diagnostic-binding.js";
+import {
 	newLspMutationCorrelationId,
 	type LspMutationContext,
 } from "../lsp-mutation.js";
@@ -247,6 +251,14 @@ export interface LSPClientInfo {
 		change(filePath: string, content: string): Promise<void>;
 	};
 	getDiagnostics(filePath: string): LSPDiagnostic[];
+	/**
+	 * #1095: the stored content binding for the diagnostics currently tracked
+	 * for `filePath` — {version?, contentHash?} of the document version those
+	 * diagnostics were computed against. `undefined` when nothing is tracked or
+	 * the server never reported a version (a version-less server → caller treats
+	 * the binding as "unknown", i.e. pre-#1095 behavior).
+	 */
+	getDiagnosticBinding(filePath: string): StoredDiagnosticBinding | undefined;
 	/** Monotonic counter bumped when fresh diagnostics are stored for this client. */
 	readonly diagnosticsVersion: number;
 	waitForDiagnostics(
@@ -254,8 +266,13 @@ export interface LSPClientInfo {
 		timeoutMs?: number,
 		options?: { minVersion?: number; pullOnly?: boolean },
 	): Promise<void>;
-	/** Get all tracked diagnostics with timestamps (for cascade checking) */
-	getAllDiagnostics(): Map<string, { diags: LSPDiagnostic[]; ts: number }>;
+	/** Get all tracked diagnostics with timestamps (for cascade checking). #1095:
+	 *  each entry also carries the stored content `binding` (absent when no
+	 *  version-bearing publish set it). */
+	getAllDiagnostics(): Map<
+		string,
+		{ diags: LSPDiagnostic[]; ts: number; binding?: StoredDiagnosticBinding }
+	>;
 	pruneDiagnostics(
 		predicate: (
 			filePath: string,
@@ -567,6 +584,22 @@ export interface LSPClientState {
 	 *  reports a version; absent entries mean "version unknown" and are treated
 	 *  as fresh so version-less servers keep working. */
 	readonly diagnosticDocVersions: Map<string, number>;
+	/** #1095: the exact content fingerprint of the LAST didOpen/didChange payload
+	 *  we sent for a path, tagged with the document version it was sent as.
+	 *  Captured at SEND time on in-memory content (never a disk read on the
+	 *  notification path) so a later `publishDiagnostics` echoing that version can
+	 *  bind its diagnostics to the content they were computed against. */
+	readonly documentContentHashes: Map<
+		string,
+		{ version: number; hash: string }
+	>;
+	/** #1095: the content binding for the diagnostics currently stored for a path
+	 *  — {version, contentHash} of the document those diagnostics were computed
+	 *  against. Set only when the accepted publish carried a version; a version-
+	 *  less server never populates this, so its binding reads "unknown" and
+	 *  behavior is unchanged. Kept in lockstep with `pushDiagnostics`: written on
+	 *  publish accept, cleared by `clearDiagnosticsForPath`. */
+	readonly diagnosticBindings: Map<string, StoredDiagnosticBinding>;
 	readonly openDocuments: Set<string>;
 	/** Original URI spelling for each open document; path keys are normalized. */
 	readonly openDocumentUris?: Map<string, string>;
@@ -883,8 +916,33 @@ function clearDiagnosticsForPath(
 	state.documentPullDiagnostics?.delete(normalizedPath);
 	state.documentPullDiagnosticTimestamps?.delete(normalizedPath);
 	state.diagnosticDocVersions?.delete(normalizedPath);
+	// #1095: a cleared path must never serve a stale content binding alongside a
+	// later publish — drop it with the diagnostics it described. (The last-sent
+	// `documentContentHashes` record is intentionally retained: it describes what
+	// we sent, which the NEXT publish for that version still needs to bind to.)
+	state.diagnosticBindings?.delete(normalizedPath);
 	legacy.diagnostics?.delete(normalizedPath);
 	legacy.diagnosticTimestamps?.delete(normalizedPath);
+}
+
+/**
+ * #1095: fingerprint the EXACT didOpen/didChange payload text at SEND time and
+ * tag it with the document version it was sent as, so a later
+ * `publishDiagnostics` echoing that version can bind its diagnostics to the
+ * content they were computed against. Runs on in-memory content — never a disk
+ * read on the notification path (I1). Bounded by the same file-size gates the
+ * caller already applies to the content it hands us.
+ */
+function recordSentContent(
+	state: LSPClientState,
+	normalizedPath: string,
+	version: number,
+	content: string,
+): void {
+	state.documentContentHashes.set(normalizedPath, {
+		version,
+		hash: hashDiagnosticContent(content),
+	});
 }
 
 // Methods that can be registered dynamically and map to operationSupport keys
@@ -998,6 +1056,27 @@ export function setupIncomingHandlers(
 				if (docVersion !== undefined) {
 					state.diagnosticDocVersions.set(normalizedPath, docVersion);
 				}
+				recordBinding();
+			};
+			// #1095: bind the just-stored diagnostics to the content they were
+			// computed against. Only when the server reported a version AND we still
+			// hold the sent-content fingerprint for exactly that version — otherwise
+			// no contentHash is recorded, so the binding reads "unknown" and a
+			// version-less server behaves exactly as before. Runs at the same
+			// write-time moment as `pushDiagnostics.set` (superseded pushes are
+			// dropped before this via `isSupersededPush`, so a binding never lags the
+			// latest sent version).
+			const recordBinding = (): void => {
+				if (docVersion === undefined) {
+					state.diagnosticBindings.delete(normalizedPath);
+					return;
+				}
+				const sent = state.documentContentHashes.get(normalizedPath);
+				state.diagnosticBindings.set(normalizedPath, {
+					version: docVersion,
+					contentHash:
+						sent && sent.version === docVersion ? sent.hash : undefined,
+				});
 			};
 
 			// Late/superseded-push guard: if the server stamped this push with a
@@ -1472,6 +1551,7 @@ export async function handleNotifyOpen(
 			await safeSendNotification(state.connection, "textDocument/didOpen", {
 				textDocument: { uri, languageId, version: 0, text: content },
 			});
+			recordSentContent(state, normalizedPath, 0, content);
 			state.openDocuments.add(normalizedPath);
 			state.openDocumentUris?.set(normalizedPath, uri);
 			return;
@@ -1480,6 +1560,7 @@ export async function handleNotifyOpen(
 			textDocument: { uri, version },
 			contentChanges: [{ text: content }],
 		});
+		recordSentContent(state, normalizedPath, version, content);
 		return;
 	}
 
@@ -1515,6 +1596,7 @@ export async function handleNotifyOpen(
 	await safeSendNotification(state.connection, "textDocument/didOpen", {
 		textDocument: { uri, languageId, version: 0, text: content },
 	});
+	recordSentContent(state, normalizedPath, 0, content);
 	state.pendingOpens.delete(normalizedPath);
 	state.openDocuments.add(normalizedPath);
 	state.openDocumentUris?.set(normalizedPath, uri);
@@ -1536,6 +1618,7 @@ export async function handleNotifyChange(
 			textDocument: { uri, languageId: "plaintext", version: 0, text: content },
 		});
 		state.documentVersions.set(normalizedPath, 0);
+		recordSentContent(state, normalizedPath, 0, content);
 		state.openDocuments.add(normalizedPath);
 		state.openDocumentUris?.set(normalizedPath, uri);
 		return;
@@ -1550,6 +1633,7 @@ export async function handleNotifyChange(
 		textDocument: { uri, version },
 		contentChanges: [{ text: content }],
 	});
+	recordSentContent(state, normalizedPath, version, content);
 }
 
 export async function clientShutdown(
@@ -1990,6 +2074,8 @@ export async function createLSPClient(options: {
 		diagnosticsVersion: 0,
 		documentVersions: new Map(),
 		diagnosticDocVersions: new Map(),
+		documentContentHashes: new Map(),
+		diagnosticBindings: new Map(),
 		openDocuments: new Set(),
 		openDocumentUris: new Map(),
 		pendingOpens: new Set(),
@@ -2153,8 +2239,15 @@ export async function createLSPClient(options: {
 			return getMergedDiagnosticsForPath(state, normalizeMapKey(filePath));
 		},
 
+		getDiagnosticBinding(filePath) {
+			return state.diagnosticBindings.get(normalizeMapKey(filePath));
+		},
+
 		getAllDiagnostics() {
-			const result = new Map<string, { diags: LSPDiagnostic[]; ts: number }>();
+			const result = new Map<
+				string,
+				{ diags: LSPDiagnostic[]; ts: number; binding?: StoredDiagnosticBinding }
+			>();
 			const keys = new Set([
 				...state.pushDiagnostics.keys(),
 				...state.documentPullDiagnostics.keys(),
@@ -2166,6 +2259,7 @@ export async function createLSPClient(options: {
 						state.pushDiagnosticTimestamps.get(key) ?? 0,
 						state.documentPullDiagnosticTimestamps.get(key) ?? 0,
 					),
+					binding: state.diagnosticBindings.get(key),
 				});
 			}
 			return result;
