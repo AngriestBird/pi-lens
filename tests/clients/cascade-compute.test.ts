@@ -953,4 +953,201 @@ describe("computeCascadeForFile", () => {
 			env.cleanup();
 		}
 	});
+
+	// #1093/#1092: the cascade computes the correcting cross-file truth for every
+	// edited file's dependents, but that truth used to be display-only and was
+	// never reconciled into the footer widget. So a finding in A caused by B,
+	// fixed by editing B, survived in A's footer forever (A's own mtime never
+	// advanced). These prove the confirmed neighbor results now reconcile into
+	// widget state — INCLUDING the confirmed-clean `[]` case — while inconclusive
+	// results and stale write-ordering tokens are respected.
+	describe("neighbor reconciliation into widget state (#1093/#1092)", () => {
+		it("a confirmed-CLEAN passive snapshot clears a neighbor's now-stale footer entry", async () => {
+			const env = setupTestEnvironment("cascade-reconcile-clean-");
+			try {
+				const primary = path.join(env.tmpDir, "src", "primary.ts");
+				const neighbor = path.join(env.tmpDir, "src", "neighbor.ts");
+				fs.mkdirSync(path.dirname(primary), { recursive: true });
+				fs.writeFileSync(primary, "export const x = 1;\n");
+				fs.writeFileSync(neighbor, "import { x } from './primary';\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				// Passive snapshot for the neighbor is now CLEAN (the fix to `primary`
+				// resolved the cross-file error) — a valid, confirmed observation.
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi
+						.fn()
+						.mockResolvedValue(
+							new Map([
+								[
+									neighbor.split(path.sep).join("/"),
+									{ diags: [], ts: Date.now() },
+								],
+							]),
+						),
+					touchFile: vi.fn(),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const { recordDiagnostics, getFileDiagnostics } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				// A stale footer entry for the neighbor, left over from before the fix.
+				recordDiagnostics(
+					neighbor,
+					[{ severity: "error", message: "cross-file error (already fixed)" }],
+					1,
+				);
+				expect(getFileDiagnostics(neighbor)).toHaveLength(1);
+
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+
+				// Pre-fix: cascade never reconciled → the stale entry survived.
+				expect(getFileDiagnostics(neighbor)).toEqual([]);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("a confirmed active touch writes the neighbor's diagnostics into the footer", async () => {
+			const env = setupTestEnvironment("cascade-reconcile-dirty-");
+			try {
+				const primary = path.join(env.tmpDir, "model.py");
+				const neighbor = path.join(env.tmpDir, "api.py");
+				fs.writeFileSync(primary, "class User: pass\n");
+				fs.writeFileSync(neighbor, "from model import User\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile: vi.fn().mockResolvedValue([lspError("python broken")]),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const { getFileDiagnostics } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				// Pre-fix: cascade output was display-only → nothing written here.
+				const diags = getFileDiagnostics(neighbor);
+				expect(diags).toHaveLength(1);
+				expect(diags?.[0]?.message).toBe("python broken");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("an INCONCLUSIVE neighbor result (rejected touch → passive fallback) does NOT overwrite an existing footer entry", async () => {
+			const env = setupTestEnvironment("cascade-reconcile-inconclusive-");
+			try {
+				const primary = path.join(env.tmpDir, "model.py");
+				const neighbor = path.join(env.tmpDir, "api.py");
+				fs.writeFileSync(primary, "class User: pass\n");
+				fs.writeFileSync(neighbor, "from model import User\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				// The touch REJECTS — the neighbor falls back to a passive/stale
+				// snapshot, which is NOT a confirmed observation and must not be
+				// reconciled (#571 confirmed-only contract).
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile: vi.fn().mockRejectedValue(new Error("touch timed out")),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const { recordDiagnostics, getFileDiagnostics } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				// A real prior confirmed-dirty entry that must survive.
+				recordDiagnostics(
+					neighbor,
+					[{ severity: "error", message: "real prior finding" }],
+					1,
+				);
+
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+
+				const diags = getFileDiagnostics(neighbor);
+				expect(diags).toHaveLength(1);
+				expect(diags?.[0]?.message).toBe("real prior finding");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("a cascade reconcile with an OLDER writeSeq does not clobber a newer per-edit record; a NEWER writeSeq does win", async () => {
+			const env = setupTestEnvironment("cascade-reconcile-ordering-");
+			try {
+				const primary = path.join(env.tmpDir, "src", "primary.ts");
+				const neighbor = path.join(env.tmpDir, "src", "shared.ts");
+				fs.mkdirSync(path.dirname(primary), { recursive: true });
+				fs.writeFileSync(primary, "export const x = 1;\n");
+				fs.writeFileSync(neighbor, "import { x } from './primary';\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				// No snapshot → cold-snapshot touch path; touch confirms an error.
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile: vi.fn().mockResolvedValue([lspError("cascade result")]),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile, resetDispatchBaselines } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const { recordDiagnostics, getFileDiagnostics } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				// A NEWER per-edit record for the neighbor (higher writeIndex 10).
+				recordDiagnostics(
+					neighbor,
+					[{ severity: "warning", message: "newer per-edit result" }],
+					10,
+				);
+
+				// Cascade launched from an OLDER primary edit (writeSeq 3) lands late —
+				// its reconcile must be dropped by the WriteOrderingGuard.
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 3,
+				});
+				expect(getFileDiagnostics(neighbor)?.[0]?.message).toBe(
+					"newer per-edit result",
+				);
+
+				// A later cascade with a NEWER writeSeq (20) is allowed to win —
+				// proves the reconcile is actually firing (not silently a no-op) and
+				// the token really is the cascade's writeSeq.
+				resetDispatchBaselines();
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 20,
+				});
+				expect(getFileDiagnostics(neighbor)?.[0]?.message).toBe(
+					"cascade result",
+				);
+			} finally {
+				env.cleanup();
+			}
+		});
+	});
 });

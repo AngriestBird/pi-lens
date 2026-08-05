@@ -92,6 +92,7 @@ import {
 	WORD_INDEX_MAX_BYTES,
 	type WordIndex,
 } from "../word-index.js";
+import { reconcileScanDiagnostics } from "../widget-state.js";
 // Register fact providers. All register eagerly here (the dispatch entry) — the
 // tree-sitter-backed providers included, since the parsing stack loads
 // `web-tree-sitter` lazily inside client.init(), not at module import, so it
@@ -1191,6 +1192,15 @@ export async function computeCascadeForFile(
 				snapshotAgeSec,
 			});
 
+			// #1093: a valid passive snapshot IS a confirmed observation of this
+			// neighbor's current state (#571 semantics) — reconcile it into the
+			// footer widget, INCLUDING the confirmed-clean `[]` case, so a fix-edit
+			// to the primary that resolves a cross-file finding in this neighbor
+			// clears the neighbor's now-stale footer entry (the #1092 defect). Keyed
+			// by the primary edit's `writeSeq` so a genuinely newer per-edit write
+			// for this neighbor still wins the WriteOrderingGuard.
+			reconcileScanDiagnostics(neighborPath, diags, true, writeSeq);
+
 			neighbors.push({
 				filePath: neighborPath,
 				reason: neighborReason(importerSet, callerSet, neighborPath),
@@ -1408,6 +1418,18 @@ export async function computeCascadeForFile(
 					lspServerCount: configuredServerCount,
 					coldSnapshot: isColdSnapshot,
 				});
+
+				// #1093: a completed active touch IS a confirmed observation (#571
+				// semantics) — reconcile it into the footer widget, INCLUDING the
+				// confirmed-clean `[]` case, so a fix-edit to the primary that
+				// resolves a cross-file finding in this neighbor clears the
+				// neighbor's now-stale footer entry (the #1092 defect). Keyed by the
+				// primary edit's `writeSeq` so a genuinely newer per-edit write for
+				// this neighbor still wins the WriteOrderingGuard. The tier-3-silent
+				// skip, recently-clean cache, and rejected-touch fallback paths are
+				// deliberately NOT reconciled — they are inconclusive/stale, never a
+				// confirmed observation (#571's confirmed-only contract).
+				reconcileScanDiagnostics(neighborPath, diags, true, writeSeq);
 
 				return {
 					filePath: neighborPath,

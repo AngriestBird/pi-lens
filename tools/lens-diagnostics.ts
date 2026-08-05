@@ -101,6 +101,11 @@ type WorkspaceLspDiagnosticResult = {
 	// file's per-file check didn't complete within budget (or threw), so
 	// `diagnostics` is a default-empty placeholder, not a confirmed result.
 	timedOut?: boolean;
+	// #1093: set only for cache-hit results (a replay of an older scan) — the
+	// wall-clock time the diagnostics were originally observed. Threaded into the
+	// footer reconcile so a cache-served mode=full doesn't re-arm the widget's
+	// mtime-staleness gate. See LSPWorkspaceDiagnosticResult.observedAt.
+	observedAt?: number;
 };
 
 // Wall-clock ceiling for the whole mode=full scan. Even with per-file budgets
@@ -1300,6 +1305,13 @@ async function formatFullMode(
 				retagged,
 				true,
 				nextWriteIndex?.(),
+				// #1093: `observedAt` is set only when this result was served from
+				// the workspace-diagnostics cache (a replay of an older scan) —
+				// stamp `touchedAt` with when it was scanned, not now(), so a
+				// mode=full that only re-serves the cache can't keep a resolved
+				// finding on screen by re-arming the mtime gate. Undefined for
+				// freshly-touched results (observed now).
+				result.observedAt,
 			);
 		} catch {
 			// Never let a footer-reconciliation hiccup fail the scan itself.

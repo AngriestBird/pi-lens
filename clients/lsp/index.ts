@@ -483,6 +483,16 @@ export interface LSPWorkspaceDiagnosticResult {
 	 * reads honestly as "skipped after failed warm-up" rather than "ran clean".
 	 */
 	skippedWarmupFailure?: boolean;
+	/**
+	 * #1093: wall-clock time (ms) these diagnostics were actually OBSERVED, set
+	 * ONLY for results served from the workspace-diagnostics cache (a replay of
+	 * an older scan). Absent for freshly-touched results (observed now). Callers
+	 * reconciling this into the footer widget must pass it as the `observedAt`
+	 * stamp so a cache-hit replay doesn't re-arm the mtime-staleness gate
+	 * (`reconcileStaleWidgetFiles`) and keep a resolved finding on screen (the
+	 * #1092 touchedAt-re-arming defect).
+	 */
+	observedAt?: number;
 }
 
 /**
@@ -3655,6 +3665,10 @@ export class LSPService {
 					filePath,
 					diagnostics: cached.diagnostics,
 					count: cached.count,
+					// #1093: a cache hit replays an older observation — carry its
+					// scan time so mode=full's footer reconcile stamps `touchedAt`
+					// with when the truth was seen, not now().
+					observedAt: cached.scannedAt,
 				});
 			} else {
 				filesToTouch.push(filePath);

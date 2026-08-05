@@ -175,6 +175,15 @@ export function buildScopeKey(
 export interface WorkspaceDiagnosticsCacheLookup {
 	diagnostics: LSPDiagnostic[];
 	count: number;
+	/**
+	 * Wall-clock time (ms) the cached diagnostics were originally scanned
+	 * (`entry.scannedAt`). A cache HIT is a replay of an OLD observation, not a
+	 * fresh one — callers reconciling this back into the footer widget must
+	 * stamp `touchedAt` with THIS value, never `Date.now()`, or a repeat check
+	 * that merely re-serves the cache would permanently disarm the widget's
+	 * mtime-staleness gate (#1093 / #1092).
+	 */
+	scannedAt: number;
 }
 
 /**
@@ -242,7 +251,11 @@ export function createWorkspaceDiagnosticsCacheContext(
 			const entry = entries[cacheKeyFor(filePath)];
 			if (!entry || entry.scopeKey !== scopeKey) return undefined;
 			if (!isEntryFresh(filePath, entry, getImports)) return undefined;
-			return { diagnostics: entry.diagnostics, count: entry.count };
+			return {
+				diagnostics: entry.diagnostics,
+				count: entry.count,
+				scannedAt: entry.scannedAt,
+			};
 		},
 		record(filePath, scopeKey, diagnostics, mtimeMs) {
 			entries[cacheKeyFor(filePath)] = {

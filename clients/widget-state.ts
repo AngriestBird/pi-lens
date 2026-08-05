@@ -292,6 +292,15 @@ export function recordDiagnostics(
 		semantic?: string;
 	}>,
 	writeIndex?: number,
+	// #1093: when the truth was OBSERVED, not when it's being written. Defaults
+	// to `Date.now()` for the per-edit/live path (observed now). A reconcile
+	// replaying a CACHED view (e.g. the workspace-diagnostics cache-hit branch in
+	// `tools/lsp-diagnostics.ts`) must pass the cache entry's own scan timestamp
+	// here — otherwise a repeat "fresh check" that merely re-serves a stale
+	// cached view keeps bumping `touchedAt` to now(), permanently disarming
+	// `reconcileStaleWidgetFiles`'s `mtimeMs > touchedAt` gate so a resolved
+	// finding renders forever (the #1092 touchedAt-re-arming defect).
+	observedAt?: number,
 ): void {
 	// Drop a write that's superseded by a later same-turn edit to this file
 	// whose pipeline finished first (same race class as #555). No cache write,
@@ -335,7 +344,7 @@ export function recordDiagnostics(
 	rec.diagnostics = capStoredDiagnostics(normalized);
 	rec.allDiagnostics = normalized;
 	rec.hasFinalDiagnosticsSnapshot = true;
-	rec.touchedAt = Date.now();
+	rec.touchedAt = observedAt ?? Date.now();
 	files.set(fileMapKey(filePath), rec);
 	requestRender();
 }
@@ -367,6 +376,13 @@ export function recordDiagnostics(
  * write for the same file — an omitted `writeIndex` always proceeds (same
  * version-less fallback `recordDiagnostics` already documents), which is
  * only safe for callers with no ordering token to give (e.g. tests).
+ *
+ * `observedAt` (#1093) is the wall-clock time the diagnostics were actually
+ * OBSERVED — pass it whenever the reconciled result is a replay of an older
+ * CACHED observation (the workspace-diagnostics cache-hit branch), so
+ * `touchedAt` records when the truth was seen, not when it was written. Omit
+ * it for genuinely fresh observations (a just-completed touch/scan), which are
+ * observed now.
  */
 export function reconcileScanDiagnostics(
 	filePath: string,
@@ -382,9 +398,10 @@ export function reconcileScanDiagnostics(
 	}>,
 	confirmed: boolean,
 	writeIndex?: number,
+	observedAt?: number,
 ): void {
 	if (!confirmed) return;
-	recordDiagnostics(filePath, diagnostics, writeIndex);
+	recordDiagnostics(filePath, diagnostics, writeIndex, observedAt);
 }
 
 /**
