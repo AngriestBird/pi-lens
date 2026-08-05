@@ -1178,6 +1178,65 @@ describe("moduleReport — call-graph reader surface (#1070)", () => {
 		expect(report.callGraph?.reason).toBe("review-graph-missing");
 		expect(getCachedReviewGraph(env.tmpDir)).toBeUndefined();
 	});
+
+	it("#921: reports file-cap (never zero calls) when the review graph is disabled over the project file cap", async () => {
+		const env = makeEnv();
+		const previous = process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+		process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = "2";
+		try {
+			const file = createTempFile(env.tmpDir, "a.ts", "export function foo(): number { return 1; }\n");
+			createTempFile(env.tmpDir, "b.ts", "export const b = 2;\n");
+			createTempFile(env.tmpDir, "c.ts", "export const c = 3;\n");
+			await warmGraph(env.tmpDir);
+
+			const report = await moduleReport(file, env.tmpDir, { callGraph: true });
+
+			expect(report.callGraph).toMatchObject({
+				available: false,
+				reason: "file-cap",
+			});
+			// The honesty contract in the tool description ("unavailable cache state
+			// is never reported as zero calls") extends to callers/callees staying
+			// empty arrays alongside the explicit reason, not a fabricated shape.
+			expect(report.callGraph?.callers).toEqual([]);
+			expect(report.callGraph?.callees).toEqual([]);
+			expect(report.provenance?.callGraph).toBe("unavailable:file-cap");
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+			else process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = previous;
+		}
+	});
+
+	it("carries provenance.callGraph across available and unavailable states", async () => {
+		const env = makeEnv();
+		createTempFile(
+			env.tmpDir,
+			"a.ts",
+			"export function foo(): number {\n  return helper();\n}\nfunction helper(): number { return 1; }\n",
+		);
+		await warmCallGraph(env.tmpDir);
+
+		const available = await moduleReport("a.ts", env.tmpDir, { callGraph: true });
+		expect(available.callGraph?.available).toBe(true);
+		expect(available.provenance?.callGraph).toBe("cached-call-graph");
+
+		// callGraph omitted from the request entirely → provenance.callGraph must
+		// not be reported at all (it's opt-in, like blastRadius).
+		const notRequested = await moduleReport("a.ts", env.tmpDir);
+		expect(notRequested.callGraph).toBeUndefined();
+		expect(notRequested.provenance?.callGraph).toBeUndefined();
+
+		// A cold project (no graph at all) requesting callGraph is unavailable,
+		// with a "none" provenance — not "cached-call-graph" and not silently
+		// indistinguishable from "unavailable:file-cap".
+		const coldEnv = makeEnv();
+		createTempFile(coldEnv.tmpDir, "a.ts", "export function foo(): number { return 1; }\n");
+		clearReviewGraphWorkspaceCache();
+		const cold = await moduleReport("a.ts", coldEnv.tmpDir, { callGraph: true });
+		expect(cold.callGraph?.available).toBe(false);
+		expect(cold.callGraph?.reason).toBe("review-graph-missing");
+		expect(cold.provenance?.callGraph).toBe("none");
+	});
 });
 
 describe("moduleReport — cold-cache imports (#301)", () => {
