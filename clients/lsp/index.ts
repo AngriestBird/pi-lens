@@ -492,6 +492,16 @@ export interface LSPWorkspaceDiagnosticResult {
 	 * reads honestly as "skipped after failed warm-up" rather than "ran clean".
 	 */
 	skippedWarmupFailure?: boolean;
+	/**
+	 * #1093: wall-clock time (ms) these diagnostics were actually OBSERVED, set
+	 * ONLY for results served from the workspace-diagnostics cache (a replay of
+	 * an older scan). Absent for freshly-touched results (observed now). Callers
+	 * reconciling this into the footer widget must pass it as the `observedAt`
+	 * stamp so a cache-hit replay doesn't re-arm the mtime-staleness gate
+	 * (`reconcileStaleWidgetFiles`) and keep a resolved finding on screen (the
+	 * #1092 touchedAt-re-arming defect).
+	 */
+	observedAt?: number;
 }
 
 /**
@@ -2258,6 +2268,15 @@ export class LSPService {
 						spawned.flatMap((entry) => entry.client.getDiagnostics(filePath)),
 					)
 			: undefined;
+		// #1095 (P3-b): whether `collected` came from a tsserver sync confirm
+		// (`tsserverSyncRequest`) rather than the publish cache. A sync-confirmed
+		// result is authoritative for the CURRENT buffer but is NOT tied to the
+		// publish-path content binding (`diagnosticBindings`, set on publish), so
+		// composing that binding here could let a STALE publish fingerprint demote a
+		// genuinely-fresh sync answer to `false`. The end-of-wait fallback below can
+		// also set this. When true, the binding is surfaced as "unknown" (honest,
+		// non-demoting) rather than the stale publish binding.
+		let syncConfirmed = tsserverSyncConfirmed !== undefined;
 
 		// #707 end-of-wait fallback: when the racing confirm did NOT decide the
 		// wait (sync unavailable/failed mid-race, or push resolved as a bare
@@ -2289,6 +2308,7 @@ export class LSPService {
 					// Sync answered — confirmed result (clean or with diagnostics).
 					// Clear the timed-out flag so the touch is no longer inconclusive.
 					diagnosticsTimedOut = false;
+					syncConfirmed = true;
 					collected = syncResult.length > 0
 						? mergeLspDiagnostics(syncResult)
 						: [];
@@ -2448,13 +2468,20 @@ export class LSPService {
 		// mismatched. Disk verify is lazy + memoized per (file, mtime).
 		let binding: DiagnosticBinding | undefined;
 		if (collected !== undefined) {
-			binding = this.mergeBinding(
-				filePath,
-				// Optional-chain so a client without the getter (test doubles, a
-				// partially-mocked client) yields "unknown" rather than throwing —
-				// unknown preserves pre-#1095 behavior for that contributor.
-				spawned.map((entry) => entry.client.getDiagnosticBinding?.(filePath)),
-			);
+			binding = syncConfirmed
+				? // #1095 (P3-b): a tsserver sync-confirmed result is authoritative for
+					// the current buffer but not tied to the publish-path fingerprint —
+					// surface "unknown" so a stale publish binding can't demote it.
+					{ boundToCurrentDisk: "unknown" }
+				: this.mergeBinding(
+						filePath,
+						// Optional-chain so a client without the getter (test doubles, a
+						// partially-mocked client) yields "unknown" rather than throwing —
+						// unknown preserves pre-#1095 behavior for that contributor.
+						spawned.map((entry) =>
+							entry.client.getDiagnosticBinding?.(filePath),
+						),
+					);
 			Object.defineProperty(collected, "binding", {
 				value: binding,
 				enumerable: false,
@@ -3739,11 +3766,22 @@ export class LSPService {
 				filePath,
 				workspaceSweepScopeKey,
 			);
-			if (cached) {
+			// #1095 (P2-1 bug-class sweep): both sweeps share cache entries under the
+			// same scopeKey, so this service sweep must apply the SAME content-binding
+			// gate the tools/lsp-diagnostics.ts sibling site does — an entry whose
+			// recorded fingerprint no longer matches disk (bytes changed WITHOUT an
+			// mtime bump the freshness check would catch, exactly what contentHash
+			// exists to detect) must NOT be replayed and reconciled as confirmed via
+			// mode=full. On a mismatch, fall through to a fresh touch.
+			if (cached && cached.binding.boundToCurrentDisk !== false) {
 				cachedResults.push({
 					filePath,
 					diagnostics: cached.diagnostics,
 					count: cached.count,
+					// #1093: a cache hit replays an older observation — carry its
+					// scan time so mode=full's footer reconcile stamps `touchedAt`
+					// with when the truth was seen, not now().
+					observedAt: cached.scannedAt,
 				});
 			} else {
 				filesToTouch.push(filePath);
@@ -4302,14 +4340,22 @@ export class LSPService {
 				bindingsByPath.set(filePath, list);
 			}
 		}
-		// Resolve the composed content binding per file once all contributors are
-		// merged — a single client whose view diverged from disk marks the whole
-		// merged entry mismatched (#1095).
+		// #1095 (P2-2): expose the composed content binding per file LAZILY — the
+		// disk stat+hash verify only runs when a consumer actually reads `.binding`.
+		// The current caller (the cascade, once per edit turn) does NOT read it yet
+		// (binding adoption in cascade/integration.ts is deferred to the second PR),
+		// so this leaves ZERO eager disk cost while still surfacing the field for the
+		// consumer that arrives next. Non-enumerable so incidental spread/serialize
+		// (e.g. logging) can't trigger a stat storm; memoized per entry so repeated
+		// reads verify once.
 		for (const [filePath, entry] of all) {
-			entry.binding = this.mergeBinding(
-				filePath,
-				bindingsByPath.get(filePath) ?? [],
-			);
+			const stored = bindingsByPath.get(filePath) ?? [];
+			let memo: DiagnosticBinding | undefined;
+			Object.defineProperty(entry, "binding", {
+				enumerable: false,
+				configurable: true,
+				get: () => (memo ??= this.mergeBinding(filePath, stored)),
+			});
 		}
 		return all;
 	}

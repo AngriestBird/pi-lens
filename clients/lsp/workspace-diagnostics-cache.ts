@@ -203,6 +203,15 @@ export interface WorkspaceDiagnosticsCacheLookup {
 	 * persisted cache binds by content fingerprint, not LSP document version.
 	 */
 	binding: DiagnosticBinding;
+	/**
+	 * Wall-clock time (ms) the cached diagnostics were originally scanned
+	 * (`entry.scannedAt`). A cache HIT is a replay of an OLD observation, not a
+	 * fresh one — callers reconciling this back into the footer widget must
+	 * stamp `touchedAt` with THIS value, never `Date.now()`, or a repeat check
+	 * that merely re-serves the cache would permanently disarm the widget's
+	 * mtime-staleness gate (#1093 / #1092).
+	 */
+	scannedAt: number;
 }
 
 /**
@@ -285,6 +294,7 @@ export function createWorkspaceDiagnosticsCacheContext(
 						contentHash: entry.contentHash,
 					}),
 				},
+				scannedAt: entry.scannedAt,
 			};
 		},
 		record(filePath, scopeKey, diagnostics, mtimeMs, contentHash) {

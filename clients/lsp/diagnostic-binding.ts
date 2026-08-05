@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
+import { PathKeyedMap } from "../path-keyed-map.js";
+import { normalizeEphemeralMapKey } from "../path-utils.js";
 
 /**
  * #1095: bind LSP diagnostics to the document CONTENT they were computed
@@ -106,8 +108,23 @@ export interface DiskBindingCache {
 	): BoundToCurrentDisk;
 }
 
+/**
+ * Bound on the per-(file,mtime) disk-fingerprint memo. The memo grows by one
+ * entry per distinct tracked file; a full clear on overflow (rather than an LRU)
+ * is fine because each entry is a pure, cheaply-recomputed derivation of disk
+ * bytes — the worst case after a clear is one extra re-hash per file. Keeps the
+ * map from growing unbounded across a long-lived session.
+ */
+const DISK_BINDING_MEMO_MAX = 4096;
+
 export function createDiskBindingCache(): DiskBindingCache {
-	const diskHashByPath = new Map<string, { mtimeMs: number; hash: string }>();
+	// #1025: key through PathKeyedMap + normalizeEphemeralMapKey so two forms of
+	// the same path (`SUB\a.ts` vs `sub/a.ts`) can't produce a duplicate memo or a
+	// false miss. Ephemeral (slash-fold + win32-lowercase, no realpath I/O) — the
+	// keys are file paths this process is already stat'ing on the hot read path.
+	const diskHashByPath = new PathKeyedMap<{ mtimeMs: number; hash: string }>(
+		normalizeEphemeralMapKey,
+	);
 	return {
 		boundToCurrentDisk(filePath, stored) {
 			// No fingerprint captured (version-less server) → unknown, never false.
@@ -129,6 +146,9 @@ export function createDiskBindingCache(): DiskBindingCache {
 					return "unknown";
 				}
 				cached = { mtimeMs, hash: diskHash };
+				if (diskHashByPath.size >= DISK_BINDING_MEMO_MAX) {
+					diskHashByPath.clear();
+				}
 				diskHashByPath.set(filePath, cached);
 			}
 			return cached.hash === stored.contentHash;

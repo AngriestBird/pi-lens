@@ -1534,6 +1534,12 @@ export async function handleNotifyOpen(
 		// preserveDiagnostics: skip cache clear for format-only resyncs so
 		// waitForDiagnostics fast-paths instead of waiting up to 5s for TypeScript
 		// to re-publish what it already knows (formatting doesn't change semantics).
+		// #1095 note: this also retains the prior content `binding`. Until the
+		// server republishes for the new version, a binding read compares the OLD
+		// content hash against the NEW disk bytes → boundToCurrentDisk `false` →
+		// the consumer demotes to inconclusive. That's the SAFE (#533) direction (a
+		// transient "unconfirmed", never a false-clean), self-healing on the next
+		// publish — not a correctness hazard, unlike the reopen false-TRUE above.
 		if (!preserveDiagnostics) {
 			clearDiagnosticsForPath(state, normalizedPath);
 		}
@@ -1546,12 +1552,21 @@ export async function handleNotifyOpen(
 			});
 			state.openDocuments.delete(normalizedPath);
 			state.openDocumentUris?.delete(normalizedPath);
-			state.documentVersions.set(normalizedPath, 0);
+			// #1095 (P2-3): carry the version counter FORWARD across the
+			// close+reopen instead of resetting to 0. LSP lets a didOpen use any
+			// version, and reusing 0 for successive resyncs made the version
+			// ambiguous — a late publish for an earlier resync's content echoed the
+			// SAME 0 as the current send, so the superseded-push guard (0 < 0 is
+			// false) accepted it and `recordBinding` bound STALE diagnostics to the
+			// CURRENT content's fingerprint → an affirmative boundToCurrentDisk TRUE
+			// for a stale view (worse than "unknown"). Monotonic versions make that
+			// late echo strictly older → dropped by isSupersededPush → never bound.
+			state.documentVersions.set(normalizedPath, version);
 			if (!isClientAlive(state)) return;
 			await safeSendNotification(state.connection, "textDocument/didOpen", {
-				textDocument: { uri, languageId, version: 0, text: content },
+				textDocument: { uri, languageId, version, text: content },
 			});
-			recordSentContent(state, normalizedPath, 0, content);
+			recordSentContent(state, normalizedPath, version, content);
 			state.openDocuments.add(normalizedPath);
 			state.openDocumentUris?.set(normalizedPath, uri);
 			return;

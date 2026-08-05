@@ -1074,6 +1074,59 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 		expect(binding?.version).toBe(2);
 		expect(binding?.contentHash).toBeUndefined();
 	});
+
+	// #1095 (P2-3): reopenOnResync servers (opengrep) close+reopen on every
+	// resync. Resetting the version to 0 each time made a late publish for an
+	// EARLIER resync's content echo the SAME 0 as the current send, so the
+	// superseded guard accepted it and bound STALE diagnostics to the CURRENT
+	// content's fingerprint (an affirmative false-TRUE). Monotonic versions across
+	// reopen make the late echo strictly older → dropped → never bound.
+	it("does not bind a late publish from an earlier reopen-resync as current (monotonic reopen)", async () => {
+		const state = createMockState({ serverId: "opengrep" });
+		let handler: ((params: PublishDiagnosticsParams) => void) | undefined;
+		(
+			state.connection.onNotification as unknown as ReturnType<typeof vi.fn>
+		).mockImplementation(
+			(method: string, cb: (params: PublishDiagnosticsParams) => void) => {
+				if (method === "textDocument/publishDiagnostics") handler = cb;
+			},
+		);
+		setupIncomingHandlers(state, undefined);
+
+		// The document is already open (an earlier resync established it at v3).
+		state.openDocuments.add(TEST_KEY);
+		state.documentVersions.set(TEST_KEY, 3);
+
+		// Resync #1 (content_A): opengrep reopen path carries the version FORWARD.
+		await handleNotifyOpen(state, TEST_FILE, "const a = 1;\n", "plaintext");
+		expect(state.documentVersions.get(TEST_KEY)).toBe(4);
+		// Resync #2 (content_B): version advances again — no reuse of 0.
+		await handleNotifyOpen(state, TEST_FILE, "const a = 2;\n", "plaintext");
+		expect(state.documentVersions.get(TEST_KEY)).toBe(5);
+
+		// opengrep's LATE publish still analyzing resync #1 echoes the stale v4.
+		handler?.({
+			uri: pathToFileURL(TEST_FILE).href,
+			version: 4,
+			diagnostics: [
+				{
+					severity: 1,
+					message: "stale finding from resync #1",
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 0 },
+					},
+				},
+			],
+		});
+		// opengrep debounceMs is 250 — wait past it for the (dropped) timer.
+		await new Promise((resolve) => setTimeout(resolve, 350));
+
+		// v4 < current v5 → superseded → dropped: no stale diagnostics cached and,
+		// critically, NO binding of resync #1's diagnostics to resync #2's content.
+		expect(state.pushDiagnostics.has(TEST_KEY)).toBe(false);
+		expect(state.diagnosticBindings.has(TEST_KEY)).toBe(false);
+	});
 });
 
 describe("clientWaitForDiagnostics — pull mode (#240)", () => {
