@@ -8,6 +8,7 @@ import {
 	clearGraphCache,
 	clearReviewGraphWorkspaceCache,
 	getLastGraphBuildInfo,
+	getReviewGraphCacheIdentity,
 } from "../../clients/review-graph/builder.js";
 import { removeTempDirSync } from "./test-utils.js";
 
@@ -162,6 +163,43 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 		expect(getLastGraphBuildInfo().mode).toBe("full");
 		expect(g3.buildGeneration).toBeDefined();
 		expect(g3.buildGeneration).not.toBe(g1.buildGeneration);
+	});
+
+	// #1088: getReviewGraphCacheIdentity's consistency guard used to compare
+	// `version` (the constant schema tag, e.g. "v8" — identical for every live
+	// graph), so it could never detect that a caller's `graph` reference had
+	// gone stale relative to the workspace cache (the concrete race: a session
+	// call-graph task computes a projection from an older `graph` instance
+	// while a concurrent cascade build replaces `_workspaceGraphCache` with a
+	// newer one before the identity lookup runs). Comparing `buildGeneration`
+	// — the per-content generation stamp that travels with each graph instance
+	// (#459) — actually distinguishes "the graph I have" from "the graph
+	// currently cached".
+	it("rejects a stale graph instance's identity once the workspace cache has moved on (#1088)", async () => {
+		const facts = new FactStore();
+		const cwd = tmpDir();
+		const file = path.join(cwd, "gen.ts");
+		fs.writeFileSync(file, "export function genA() {\n\treturn 1;\n}\n");
+
+		const g1 = await buildOrUpdateGraph(cwd, [file], facts);
+		expect(g1.buildGeneration).toBeDefined();
+		// g1 is current: its identity resolves.
+		expect(getReviewGraphCacheIdentity(cwd, g1)).toBeDefined();
+
+		// A real content-changing rebuild replaces the workspace cache with a
+		// NEW graph instance carrying a NEW buildGeneration, simulating the
+		// concurrent build that raced ahead of a caller still holding `g1`.
+		clearReviewGraphWorkspaceCache();
+		clearGraphCache();
+		const g3 = await buildOrUpdateGraph(cwd, [file], facts);
+		expect(g3.buildGeneration).not.toBe(g1.buildGeneration);
+
+		// The caller's stale `g1` reference must NOT resolve an identity now
+		// that the cache holds a different graph — that would let a stale
+		// projection be persisted under the newer (still-live) signature.
+		expect(getReviewGraphCacheIdentity(cwd, g1)).toBeUndefined();
+		// The current graph still resolves normally.
+		expect(getReviewGraphCacheIdentity(cwd, g3)).toBeDefined();
 	});
 
 	it("resolves to a ReviewGraph with version and builtAt fields", async () => {
