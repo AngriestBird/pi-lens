@@ -6,6 +6,28 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **LSP diagnostics content binding (refs #1095, first PR)** — diagnostics are now
+	bound to the document content they were computed against, so a consumer can ask
+	"were these diagnostics computed against what's on disk now?" instead of inferring
+	staleness purely from mtime/TTL proxies. When a `publishDiagnostics` notification
+	echoes a document `version`, the owning client binds the stored diagnostics to a
+	content fingerprint captured at didOpen/didChange SEND time (never a disk read on
+	the notification path). `getAllDiagnostics`/`touchFile` results and the
+	workspace-diagnostics cache lookup expose a `binding`
+	`{version?, contentHash?, boundToCurrentDisk: boolean | "unknown"}`, with
+	`boundToCurrentDisk` verified lazily against disk (memoized per file+mtime, reading
+	with the identical raw-UTF-8 transform the payload was built with, so CRLF/BOM files
+	round-trip correctly). Across multiple contributing clients the merged binding is
+	`false` if ANY contributor mismatches disk, `"unknown"` if all are unknown, else
+	`true`. `tools/lsp-diagnostics.ts` adopts it: a result whose binding demonstrably
+	mismatches disk (`boundToCurrentDisk === false`) is demoted to inconclusive — even a
+	non-empty result no longer re-cements the footer with a stale view (the #1092
+	re-cementing path). Servers that never report a version yield binding `"unknown"` and
+	behave exactly as before (zero regression). Binding state (`bound`/`mismatch`/
+	`unknown`) is logged in the `lsp_touch_file` latency metadata so an unbinding server
+	is diagnosable. Non-goals (stated for follow-ups): cascade adoption in
+	`clients/dispatch/integration.ts` (#1094 in flight), pull-diagnostics resultIds,
+	widget per-entry timestamps (#1093), aux retag (#1094).
 - **Project-level rule policy via `.pi-lens.json` `rules.<id>.disable` / `rules.<id>.select`** — a project's own config can now narrow what diagnostics actually surface.
 	Filtering is output-only, so the baseline, widget state, and dedup cache stay
 	authoritative and a policy edit never corrupts or resets delta tracking.
