@@ -179,7 +179,13 @@ describe("WorkspaceDiagnosticsCacheContext (#671)", () => {
 		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
 		const mtimeMs = fs.statSync(filePath).mtimeMs;
 		ctx.record(filePath, "all|", [], mtimeMs);
-		expect(ctx.lookup(filePath, "all|")).toEqual({ diagnostics: [], count: 0 });
+		// #1093: lookup also surfaces the entry's original `scannedAt` so a
+		// cache-hit footer reconcile can stamp `touchedAt` at observation time.
+		expect(ctx.lookup(filePath, "all|")).toEqual({
+			diagnostics: [],
+			count: 0,
+			scannedAt: expect.any(Number),
+		});
 	});
 
 	it("a lookup under a DIFFERENT scopeKey never sees an entry recorded under another scope", () => {
@@ -214,6 +220,7 @@ describe("WorkspaceDiagnosticsCacheContext (#671)", () => {
 		expect(second.lookup(filePath, "all|")).toEqual({
 			diagnostics: diag,
 			count: 1,
+			scannedAt: expect.any(Number),
 		});
 	});
 

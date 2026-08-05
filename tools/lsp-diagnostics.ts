@@ -885,6 +885,12 @@ function reconcileWidgetFromLspResult(
 	nextWriteIndex: (() => number) | undefined,
 	cwd: string,
 	content: string | undefined,
+	// #1093: when these `rawDiags` were actually OBSERVED. Fresh touches observe
+	// now (`undefined` → `Date.now()`); a cache HIT replays diagnostics scanned
+	// earlier, so its caller passes the cache entry's `scannedAt` here so the
+	// footer's `touchedAt` isn't re-armed to now() and the mtime-staleness gate
+	// stays live (the #1092 re-arming defect).
+	observedAt?: number,
 ): void {
 	const confirmed = rawDiags.length > 0 || confirmation !== "unconfirmed";
 	if (!confirmed) return;
@@ -900,7 +906,7 @@ function reconcileWidgetFromLspResult(
 			content ?? "",
 			{ cwd, fileRole: detectFileRole(file, content) },
 		);
-		reconcileScanDiagnostics(file, retagged, true, nextWriteIndex?.());
+		reconcileScanDiagnostics(file, retagged, true, nextWriteIndex?.(), observedAt);
 	} catch {
 		// Never let a footer-reconciliation hiccup fail the diagnostics check.
 	}
@@ -946,6 +952,11 @@ async function collectFileDiagnosticResult(
 			// filtered at write time (this same code path); no file content was
 			// cached alongside them, so `undefined` here is a safe re-check, not
 			// a gap.
+			// #1093: this is a CACHE HIT — a replay of an OLD observation. Stamp the
+			// footer's `touchedAt` with the cache entry's original `scannedAt`, NOT
+			// now(), or a repeat check that only re-serves the cache would keep
+			// re-arming the mtime-staleness gate and a resolved finding would render
+			// forever (the #1092 defect).
 			reconcileWidgetFromLspResult(
 				file,
 				cached.diagnostics,
@@ -953,6 +964,7 @@ async function collectFileDiagnosticResult(
 				nextWriteIndex,
 				cwd,
 				undefined,
+				cached.scannedAt,
 			);
 			return {
 				file,
