@@ -1173,11 +1173,18 @@ describe("computeCascadeForFile", () => {
 				fs.writeFileSync(primary, "class User: pass\n");
 				fs.writeFileSync(neighbor, "from model import User\n");
 				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
-				// The touch resolves `[]` but carries the non-enumerable
-				// `inconclusive: true` flag (the diagnostics wait lapsed its budget) —
-				// NOT a confirmed clean. Reconciling it as clean would wipe a live
-				// finding (the #533 false-clean trap).
-				const inconclusive = Object.assign([], { inconclusive: true });
+				// The touch resolves `[]` but carries the `inconclusive: true` flag
+				// (the diagnostics wait lapsed its budget) — NOT a confirmed clean.
+				// Reconciling it as clean would wipe a live finding (the #533
+				// false-clean trap). Set the flag exactly as the real `touchFile`
+				// does — a NON-enumerable property — so this test also catches a
+				// future regression where the code copies/spreads the array (which
+				// drops a non-enumerable flag) before reading `inconclusive`.
+				const inconclusive: unknown[] = [];
+				Object.defineProperty(inconclusive, "inconclusive", {
+					value: true,
+					enumerable: false,
+				});
 				mocks.getLSPService.mockReturnValue({
 					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
 					touchFile: vi.fn().mockResolvedValue(inconclusive),
@@ -1330,6 +1337,74 @@ describe("computeCascadeForFile", () => {
 				fs.utimesSync(neighbor, mtime, mtime);
 				expect(await reconcileStaleWidgetFiles()).toBe(1);
 				expect(getFileDiagnostics(neighbor)).toBeUndefined();
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("does NOT double-count or escalate a neighbor's auxiliary (opengrep) finding present in the cascade payload", async () => {
+			const env = setupTestEnvironment("cascade-reconcile-aux-");
+			try {
+				const primary = path.join(env.tmpDir, "model.py");
+				const neighbor = path.join(env.tmpDir, "api.py");
+				fs.writeFileSync(primary, "class User: pass\n");
+				fs.writeFileSync(neighbor, "from model import User\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				// The touch (clientScope:"all") pulls the neighbor's OWN auxiliary
+				// finding — opengrep tags its LSP diagnostics `source: "Semgrep"` —
+				// alongside no genuine language-server error.
+				const semgrep = {
+					severity: 1 as const,
+					message: "opengrep: audit finding",
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 1 },
+					},
+					code: "rules.audit",
+					source: "Semgrep",
+				};
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile: vi.fn().mockResolvedValue([semgrep]),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const { recordDiagnostics, getFileDiagnostics } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				// The neighbor already carries this opengrep finding, correctly tagged
+				// and advisory (semantic "warning"), from its own per-edit dispatch.
+				recordDiagnostics(
+					neighbor,
+					[
+						{
+							tool: "opengrep",
+							severity: "error",
+							semantic: "warning",
+							message: "opengrep: audit finding",
+						},
+					],
+					1,
+				);
+
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+
+				// The cascade excludes auxiliary-sourced diagnostics from what it
+				// reconciles, so the finding is neither duplicated nor re-written as a
+				// blocking tool:"lsp" error — the neighbor's own correctly-tagged
+				// advisory entry survives, exactly once. Pre-fix: two entries, one of
+				// them escalated to tool:"lsp"/blocking.
+				const diags = getFileDiagnostics(neighbor);
+				expect(diags).toHaveLength(1);
+				expect(diags?.[0]?.tool).toBe("opengrep");
+				expect(diags?.[0]?.semantic).not.toBe("blocking");
 			} finally {
 				env.cleanup();
 			}

@@ -93,6 +93,7 @@ import {
 	type WordIndex,
 } from "../word-index.js";
 import { reconcileCascadeNeighborLspErrors } from "../widget-state.js";
+import { findAuxiliaryProfileForSource } from "./auxiliary-lsp.js";
 // Register fact providers. All register eagerly here (the dispatch entry) — the
 // tree-sitter-backed providers included, since the parsing stack loads
 // `web-tree-sitter` lazily inside client.init(), not at module import, so it
@@ -481,6 +482,44 @@ function ensureCascadeTurnScope(turnSeq: number): void {
 const CASCADE_TTL_MS = 240_000;
 const MAX_PER_FILE = RUNTIME_CONFIG.pipeline.cascadeMaxDiagnosticsPerFile;
 const MAX_FILES = RUNTIME_CONFIG.pipeline.cascadeMaxFiles;
+
+/**
+ * The genuine language-server ERROR diagnostics from a cascade neighbor
+ * re-check, ready to reconcile into the footer widget (#1093).
+ *
+ * Drops any diagnostic whose `source` matches an auxiliary-LSP profile
+ * (opengrep/ast-grep/zizmor/typos — `findAuxiliaryProfileForSource`). The
+ * cascade's `convertLspDiagnostics` tags everything `tool: "lsp"`,
+ * `semantic: "blocking"` and — unlike every OTHER widget writer
+ * (`runners/lsp.ts`, `tools/lsp-diagnostics.ts`, `tools/lens-diagnostics.ts`) —
+ * never runs `retagAuxiliaryDiagnostics`. Since `getAllDiagnostics` /
+ * `touchFile({clientScope:"all"})` include the auxiliary servers' findings,
+ * writing them here would (a) DOUBLE-COUNT a neighbor's own correctly-tagged aux
+ * entry and (b) ESCALATE an advisory/suppressed aux finding into a blocking
+ * `tool:"lsp"` error, bypassing aux policy (semantic downgrade, native
+ * `# nosemgrep`/`zizmor:ignore` suppression, `skipTestFiles`). Aux findings are
+ * per-file lint/security signals the neighbor's OWN per-edit runners own; they
+ * are not cross-file impact, so the cascade simply excludes them and the merge
+ * (`reconcileCascadeNeighborLspErrors`) preserves the neighbor's existing aux
+ * entries untouched. This keeps `isLspErrorEntry`'s "tool === 'lsp' uniquely
+ * identifies a genuine language-server entry" contract true for what we write.
+ *
+ * The DISPLAY list (`diags` at each call site) is deliberately left as-is —
+ * that is pre-existing cascade output behavior, out of scope for #1093.
+ */
+function cascadeReconcilableLspErrors(
+	rawDiags: readonly import("../lsp/client.js").LSPDiagnostic[],
+	neighborPath: string,
+): ReturnType<typeof convertLspDiagnostics> {
+	return convertLspDiagnostics(
+		rawDiags
+			.filter(
+				(d) => d.severity === 1 && !findAuxiliaryProfileForSource(d.source),
+			)
+			.slice(0, MAX_PER_FILE),
+		neighborPath,
+	);
+}
 
 // #459: the reverse-dependency index is a pure function of the review graph.
 // Rebuilding it (O(graph edges)) and re-writing it to the project snapshot
@@ -1197,14 +1236,29 @@ export async function computeCascadeForFile(
 			// the footer widget, INCLUDING the confirmed-clean `[]` case, so a
 			// fix-edit to the primary that resolves a cross-file error in this
 			// neighbor clears the neighbor's now-stale footer entry (the #1092
-			// defect). MERGE (LSP errors only) so a live biome/ruff finding or LSP
-			// warning on the neighbor is preserved. Keyed by the primary edit's
+			// defect). MERGE (genuine LSP errors only — auxiliary findings excluded,
+			// see `cascadeReconcilableLspErrors`) so a live biome/ruff/aux finding or
+			// LSP warning on the neighbor is preserved. Keyed by the primary edit's
 			// `writeSeq` so a genuinely newer per-edit write still wins the
 			// WriteOrderingGuard. `observedAt = entry.ts` (the snapshot's own publish
 			// time, up to CASCADE_TTL_MS old) — NOT now() — so replaying an aging
 			// snapshot never re-arms the mtime-staleness gate (the same #1092
 			// re-arming defect this PR fixes for cache hits).
-			reconcileCascadeNeighborLspErrors(neighborPath, diags, writeSeq, entry.ts);
+			//
+			// #1093 known edge (P3, follow-up): this stamps the WHOLE merged record's
+			// single `touchedAt` with `entry.ts`, including PRESERVED entries that may
+			// have been observed more recently. If the neighbor's mtime later falls
+			// between `entry.ts` and a preserved entry's real observation time,
+			// `reconcileStaleWidgetFiles` drops the whole record — including those
+			// newer findings. The real fix is per-entry observation timestamps, which
+			// is out of scope here and folded into the structural redesign under
+			// #1093.
+			reconcileCascadeNeighborLspErrors(
+				neighborPath,
+				cascadeReconcilableLspErrors(entry.diags, neighborPath),
+				writeSeq,
+				entry.ts,
+			);
 
 			neighbors.push({
 				filePath: neighborPath,
@@ -1443,8 +1497,9 @@ export async function computeCascadeForFile(
 				// (#571) — reconcile it into the footer widget, INCLUDING the
 				// confirmed-clean `[]` case, so a fix-edit to the primary that
 				// resolves a cross-file error in this neighbor clears the neighbor's
-				// now-stale footer entry (the #1092 defect). MERGE (LSP errors only)
-				// so a live biome/ruff finding or LSP warning survives this
+				// now-stale footer entry (the #1092 defect). MERGE (genuine LSP errors
+				// only — auxiliary findings excluded, see `cascadeReconcilableLspErrors`)
+				// so a live biome/ruff/aux finding or LSP warning survives this
 				// errors-only re-check. Keyed by the primary edit's `writeSeq` so a
 				// genuinely newer per-edit write still wins the WriteOrderingGuard.
 				// `observedAt` stays now (a fresh touch). The inconclusive touch, the
@@ -1452,7 +1507,11 @@ export async function computeCascadeForFile(
 				// within-turn cache hit, and the rejected-touch fallback are all
 				// deliberately NOT reconciled — none is a confirmed observation.
 				if (!inconclusive) {
-					reconcileCascadeNeighborLspErrors(neighborPath, diags, writeSeq);
+					reconcileCascadeNeighborLspErrors(
+						neighborPath,
+						cascadeReconcilableLspErrors(rawDiags, neighborPath),
+						writeSeq,
+					);
 				}
 
 				return {
