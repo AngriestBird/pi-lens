@@ -101,6 +101,10 @@ const grammarHeavyInclude = [
 const timingSensitiveInclude = [
 	"tests/clients/source-walk-occupancy.test.ts",
 	"tests/clients/source-filter-async.test.ts",
+	// Workspace-edit planning also uses the independent occupancy sampler; keep
+	// its measurement window out of the default fork storm while the guard still
+	// catches a genuinely non-yielding planner.
+	"tests/clients/lsp/edits.test.ts",
 	// Same measureMaxSyncBlockMs sampler + same contention-starvation flake
 	// (observed 2026-07-31: cold buildOrUpdateGraph blew the 300ms budget at
 	// ~82s under a full-suite fork storm, exhausting its retry:2). Its
