@@ -312,8 +312,25 @@ export function recordDiagnostics(
 	if (!diagnosticsWriteGuard.shouldWrite(fileMapKey(filePath), writeIndex)) return;
 
 	const rec = getOrCreate(filePath);
+	commitDiagnostics(rec, filePath, normalizeDiagnostics(filePath, diagnostics), observedAt);
+}
+
+/** Map the raw diagnostic shape callers pass into stored {@link WidgetDiagnostic}s. */
+function normalizeDiagnostics(
+	filePath: string,
+	diagnostics: Array<{
+		tool?: string;
+		rule?: string;
+		id?: string;
+		message?: string;
+		line?: number;
+		column?: number;
+		severity?: string;
+		semantic?: string;
+	}>,
+): WidgetDiagnostic[] {
 	const base = pathToFileURL(filePath).href;
-	const normalized = diagnostics.map((d) => {
+	return diagnostics.map((d) => {
 		const rule = d.rule ?? d.id;
 		const uri =
 			d.line != null
@@ -330,7 +347,18 @@ export function recordDiagnostics(
 			uri,
 		} satisfies WidgetDiagnostic;
 	});
+}
 
+/** Store `normalized` as the record's complete diagnostic set: recompute counts,
+ * cap the display list, stamp `touchedAt` (at `observedAt` when given, else now
+ * — #1093), persist, and re-render. The caller decides what `normalized`
+ * contains (a full replace, or a merge — see `reconcileCascadeNeighborLspErrors`). */
+function commitDiagnostics(
+	rec: FileRecord,
+	filePath: string,
+	normalized: WidgetDiagnostic[],
+	observedAt: number | undefined,
+): void {
 	let blocking = 0;
 	let errors = 0;
 	let warnings = 0;
@@ -347,6 +375,62 @@ export function recordDiagnostics(
 	rec.touchedAt = observedAt ?? Date.now();
 	files.set(fileMapKey(filePath), rec);
 	requestRender();
+}
+
+/**
+ * A stored diagnostic that came from a language SERVER (tsserver, pyright, …)
+ * AND is an error/blocking finding. `convertLspDiagnostics` tags every
+ * language-server diagnostic with `tool: "lsp"` and `retagAuxiliaryDiagnostics`
+ * re-tags auxiliary-LSP findings (opengrep/ast-grep/zizmor/typos) to their real
+ * tool id, so `tool === "lsp"` uniquely identifies a genuine language-server
+ * entry. Used by the cascade merge below to decide which existing entries an
+ * errors-only LSP re-check is entitled to replace.
+ */
+function isLspErrorEntry(d: WidgetDiagnostic): boolean {
+	return d.tool === "lsp" && (d.semantic === "blocking" || d.severity === "error");
+}
+
+/**
+ * Reconcile a CONFIRMED cascade neighbor re-check (#1093) into the footer,
+ * MERGING rather than whole-replacing (unlike `recordDiagnostics`).
+ *
+ * The cascade only re-checks a neighbor through its LANGUAGE SERVER, and only
+ * for ERRORS (`severity === 1`; see `clients/dispatch/integration.ts`). A plain
+ * full-replace would therefore erase the neighbor's live findings from OTHER
+ * sources that the cascade never re-examined — biome/ruff/ast-grep runner
+ * findings, and even the language server's own WARNINGS — turning a
+ * cross-file-error re-check into a silent false-clean for everything else
+ * (#533). So we replace ONLY the existing LSP-error entries
+ * (`isLspErrorEntry`) with the cascade's fresh LSP errors and preserve
+ * everything else verbatim. A stale LSP warning or biome finding therefore
+ * survives an errors-only cascade — correct, because this check never looked at
+ * it; it self-corrects on the next per-edit dispatch or a `lens_diagnostics`
+ * scan (which DO re-examine every source).
+ *
+ * Only ever call this for a CONFIRMED result (a valid passive snapshot or a
+ * completed, NON-inconclusive active touch — #571). `writeIndex` and
+ * `observedAt` behave exactly as in `recordDiagnostics`.
+ */
+export function reconcileCascadeNeighborLspErrors(
+	filePath: string,
+	lspErrorDiagnostics: Array<{
+		tool?: string;
+		rule?: string;
+		id?: string;
+		message?: string;
+		line?: number;
+		column?: number;
+		severity?: string;
+		semantic?: string;
+	}>,
+	writeIndex?: number,
+	observedAt?: number,
+): void {
+	if (!diagnosticsWriteGuard.shouldWrite(fileMapKey(filePath), writeIndex)) return;
+	const rec = getOrCreate(filePath);
+	const incoming = normalizeDiagnostics(filePath, lspErrorDiagnostics);
+	const preserved = rec.allDiagnostics.filter((d) => !isLspErrorEntry(d));
+	commitDiagnostics(rec, filePath, [...incoming, ...preserved], observedAt);
 }
 
 /**

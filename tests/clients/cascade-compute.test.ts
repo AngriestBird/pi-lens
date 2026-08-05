@@ -995,10 +995,18 @@ describe("computeCascadeForFile", () => {
 					"../../clients/widget-state.js"
 				);
 
-				// A stale footer entry for the neighbor, left over from before the fix.
+				// A stale LSP footer entry for the neighbor, left over from before the
+				// fix (the per-edit LSP runner tags language-server findings tool:"lsp").
 				recordDiagnostics(
 					neighbor,
-					[{ severity: "error", message: "cross-file error (already fixed)" }],
+					[
+						{
+							tool: "lsp",
+							severity: "error",
+							semantic: "blocking",
+							message: "cross-file error (already fixed)",
+						},
+					],
 					1,
 				);
 				expect(getFileDiagnostics(neighbor)).toHaveLength(1);
@@ -1117,10 +1125,17 @@ describe("computeCascadeForFile", () => {
 					"../../clients/widget-state.js"
 				);
 
-				// A NEWER per-edit record for the neighbor (higher writeIndex 10).
+				// A NEWER per-edit LSP-error record for the neighbor (writeIndex 10).
 				recordDiagnostics(
 					neighbor,
-					[{ severity: "warning", message: "newer per-edit result" }],
+					[
+						{
+							tool: "lsp",
+							severity: "error",
+							semantic: "blocking",
+							message: "newer per-edit result",
+						},
+					],
 					10,
 				);
 
@@ -1145,6 +1160,176 @@ describe("computeCascadeForFile", () => {
 				expect(getFileDiagnostics(neighbor)?.[0]?.message).toBe(
 					"cascade result",
 				);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("an INCONCLUSIVE active touch (resolved [] carrying the inconclusive flag) does NOT wipe a live footer finding", async () => {
+			const env = setupTestEnvironment("cascade-reconcile-inconclusive-touch-");
+			try {
+				const primary = path.join(env.tmpDir, "model.py");
+				const neighbor = path.join(env.tmpDir, "api.py");
+				fs.writeFileSync(primary, "class User: pass\n");
+				fs.writeFileSync(neighbor, "from model import User\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				// The touch resolves `[]` but carries the non-enumerable
+				// `inconclusive: true` flag (the diagnostics wait lapsed its budget) —
+				// NOT a confirmed clean. Reconciling it as clean would wipe a live
+				// finding (the #533 false-clean trap).
+				const inconclusive = Object.assign([], { inconclusive: true });
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile: vi.fn().mockResolvedValue(inconclusive),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const { recordDiagnostics, getFileDiagnostics } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				// A live LSP error already recorded for the neighbor.
+				recordDiagnostics(
+					neighbor,
+					[
+						{
+							tool: "lsp",
+							severity: "error",
+							semantic: "blocking",
+							message: "live cross-file error",
+						},
+					],
+					1,
+				);
+
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+
+				// Pre-fix: the inconclusive `[]` reconciled as confirmed-clean and the
+				// live finding was wiped. It must survive an unconfirmed touch.
+				const diags = getFileDiagnostics(neighbor);
+				expect(diags).toHaveLength(1);
+				expect(diags?.[0]?.message).toBe("live cross-file error");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("a confirmed LSP-clean cascade clears the neighbor's LSP error but PRESERVES a live biome finding (merge, not replace)", async () => {
+			const env = setupTestEnvironment("cascade-reconcile-merge-");
+			try {
+				const primary = path.join(env.tmpDir, "src", "primary.ts");
+				const neighbor = path.join(env.tmpDir, "src", "neighbor.ts");
+				fs.mkdirSync(path.dirname(primary), { recursive: true });
+				fs.writeFileSync(primary, "export const x = 1;\n");
+				fs.writeFileSync(neighbor, "import { x } from './primary';\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				// Passive snapshot reports the neighbor LSP-clean.
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi
+						.fn()
+						.mockResolvedValue(
+							new Map([
+								[
+									neighbor.split(path.sep).join("/"),
+									{ diags: [], ts: Date.now() },
+								],
+							]),
+						),
+					touchFile: vi.fn(),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const { recordDiagnostics, getFileDiagnostics } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				// The neighbor's live footer state: a biome error (a source the cascade
+				// never re-checks) AND an LSP error (which it does).
+				recordDiagnostics(
+					neighbor,
+					[
+						{ tool: "biome", severity: "error", message: "biome: unused var" },
+						{
+							tool: "lsp",
+							severity: "error",
+							semantic: "blocking",
+							message: "lsp: cross-file error",
+						},
+					],
+					1,
+				);
+				expect(getFileDiagnostics(neighbor)).toHaveLength(2);
+
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+
+				// The errors-only LSP re-check cleared its own stale error but must NOT
+				// touch the biome finding. Pre-fix (full replace): the biome error was
+				// silently wiped — a new automatic false-clean channel.
+				const diags = getFileDiagnostics(neighbor);
+				expect(diags?.map((d) => d.message)).toEqual(["biome: unused var"]);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("a passive-snapshot reconcile stamps touchedAt at the snapshot's publish time (entry.ts), not now", async () => {
+			const env = setupTestEnvironment("cascade-reconcile-snapshot-obs-");
+			try {
+				const primary = path.join(env.tmpDir, "src", "primary.ts");
+				const neighbor = path.join(env.tmpDir, "src", "neighbor.ts");
+				fs.mkdirSync(path.dirname(primary), { recursive: true });
+				fs.writeFileSync(primary, "export const x = 1;\n");
+				fs.writeFileSync(neighbor, "import { x } from './primary';\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				// The snapshot is 20s old (still within CASCADE_TTL_MS) and reports an
+				// error — a valid, confirmed observation, but an AGING one.
+				const snapshotTs = Date.now() - 20_000;
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(
+						new Map([
+							[
+								neighbor.split(path.sep).join("/"),
+								{ diags: [lspError("snapshot error")], ts: snapshotTs },
+							],
+						]),
+					),
+					touchFile: vi.fn(),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const { getFileDiagnostics, reconcileStaleWidgetFiles } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+				expect(getFileDiagnostics(neighbor)).toHaveLength(1);
+
+				// The neighbor file changed 10s ago — AFTER the snapshot's publish time
+				// but before now. touchedAt must be the snapshot's `ts` (now-20s), so
+				// the mtime-staleness gate drops the entry. Pre-fix (touchedAt=now, the
+				// re-arming defect this PR fixes for cache hits): it would survive.
+				const mtime = new Date(Date.now() - 10_000);
+				fs.utimesSync(neighbor, mtime, mtime);
+				expect(await reconcileStaleWidgetFiles()).toBe(1);
+				expect(getFileDiagnostics(neighbor)).toBeUndefined();
 			} finally {
 				env.cleanup();
 			}

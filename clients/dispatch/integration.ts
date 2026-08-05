@@ -92,7 +92,7 @@ import {
 	WORD_INDEX_MAX_BYTES,
 	type WordIndex,
 } from "../word-index.js";
-import { reconcileScanDiagnostics } from "../widget-state.js";
+import { reconcileCascadeNeighborLspErrors } from "../widget-state.js";
 // Register fact providers. All register eagerly here (the dispatch entry) — the
 // tree-sitter-backed providers included, since the parsing stack loads
 // `web-tree-sitter` lazily inside client.init(), not at module import, so it
@@ -1193,13 +1193,18 @@ export async function computeCascadeForFile(
 			});
 
 			// #1093: a valid passive snapshot IS a confirmed observation of this
-			// neighbor's current state (#571 semantics) — reconcile it into the
-			// footer widget, INCLUDING the confirmed-clean `[]` case, so a fix-edit
-			// to the primary that resolves a cross-file finding in this neighbor
-			// clears the neighbor's now-stale footer entry (the #1092 defect). Keyed
-			// by the primary edit's `writeSeq` so a genuinely newer per-edit write
-			// for this neighbor still wins the WriteOrderingGuard.
-			reconcileScanDiagnostics(neighborPath, diags, true, writeSeq);
+			// neighbor's current LSP-error state (#571 semantics) — reconcile it into
+			// the footer widget, INCLUDING the confirmed-clean `[]` case, so a
+			// fix-edit to the primary that resolves a cross-file error in this
+			// neighbor clears the neighbor's now-stale footer entry (the #1092
+			// defect). MERGE (LSP errors only) so a live biome/ruff finding or LSP
+			// warning on the neighbor is preserved. Keyed by the primary edit's
+			// `writeSeq` so a genuinely newer per-edit write still wins the
+			// WriteOrderingGuard. `observedAt = entry.ts` (the snapshot's own publish
+			// time, up to CASCADE_TTL_MS old) — NOT now() — so replaying an aging
+			// snapshot never re-arms the mtime-staleness gate (the same #1092
+			// re-arming defect this PR fixes for cache hits).
+			reconcileCascadeNeighborLspErrors(neighborPath, diags, writeSeq, entry.ts);
 
 			neighbors.push({
 				filePath: neighborPath,
@@ -1380,6 +1385,17 @@ export async function computeCascadeForFile(
 					clientScope: "all",
 				});
 				if (!rawDiags) return undefined;
+				// #1093/#571: a touch may resolve `[]` while carrying a non-enumerable
+				// `inconclusive: true` (the notify/diagnostics wait hit its deadline —
+				// e.g. the tight 1000ms cold-snapshot budget on a slow server). An
+				// inconclusive `[]` is NOT a confirmed-clean result: treating it as one
+				// would WIPE a live footer finding as clean (the #533 false-clean trap,
+				// worse than the stale-display bug). Mirror tools/lsp-diagnostics.ts's
+				// gate on this exact flag — a confirmed result reconciles and may seed
+				// the recently-clean cache; an inconclusive one does neither (else the
+				// short-circuit on the next cascade would make the wipe self-sustain).
+				const inconclusive =
+					(rawDiags as { inconclusive?: boolean }).inconclusive === true;
 				// #692: `source: "cascade"` no longer overrides `rule` (see the
 				// doc comment on the sibling call above) — dropped rather than
 				// migrated to `scanOrigin` since cascade output never touches
@@ -1399,10 +1415,13 @@ export async function computeCascadeForFile(
 					});
 				}
 				if (diags.length === 0) {
-					recentlyCleanNeighborCache.set(cacheKey, {
-						turnSeq,
-						checkedAt: Date.now(),
-					});
+					// Only a CONFIRMED clean touch may seed the recently-clean cache.
+					if (!inconclusive) {
+						recentlyCleanNeighborCache.set(cacheKey, {
+							turnSeq,
+							checkedAt: Date.now(),
+						});
+					}
 				} else {
 					recentlyCleanNeighborCache.delete(cacheKey);
 				}
@@ -1419,17 +1438,22 @@ export async function computeCascadeForFile(
 					coldSnapshot: isColdSnapshot,
 				});
 
-				// #1093: a completed active touch IS a confirmed observation (#571
-				// semantics) — reconcile it into the footer widget, INCLUDING the
+				// #1093: a completed, CONFIRMED (non-inconclusive) active touch is a
+				// confirmed observation of this neighbor's current LSP-error state
+				// (#571) — reconcile it into the footer widget, INCLUDING the
 				// confirmed-clean `[]` case, so a fix-edit to the primary that
-				// resolves a cross-file finding in this neighbor clears the
-				// neighbor's now-stale footer entry (the #1092 defect). Keyed by the
-				// primary edit's `writeSeq` so a genuinely newer per-edit write for
-				// this neighbor still wins the WriteOrderingGuard. The tier-3-silent
-				// skip, recently-clean cache, and rejected-touch fallback paths are
-				// deliberately NOT reconciled — they are inconclusive/stale, never a
-				// confirmed observation (#571's confirmed-only contract).
-				reconcileScanDiagnostics(neighborPath, diags, true, writeSeq);
+				// resolves a cross-file error in this neighbor clears the neighbor's
+				// now-stale footer entry (the #1092 defect). MERGE (LSP errors only)
+				// so a live biome/ruff finding or LSP warning survives this
+				// errors-only re-check. Keyed by the primary edit's `writeSeq` so a
+				// genuinely newer per-edit write still wins the WriteOrderingGuard.
+				// `observedAt` stays now (a fresh touch). The inconclusive touch, the
+				// tier-3-silent skip, the recently-clean short-circuit, the
+				// within-turn cache hit, and the rejected-touch fallback are all
+				// deliberately NOT reconciled — none is a confirmed observation.
+				if (!inconclusive) {
+					reconcileCascadeNeighborLspErrors(neighborPath, diags, writeSeq);
+				}
 
 				return {
 					filePath: neighborPath,
