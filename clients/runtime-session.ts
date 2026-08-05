@@ -662,36 +662,40 @@ function scheduleStartupScans(
 		"ast-grep exports": 5400,
 		"project index": 5400,
 	};
-	const runTask = (name: string, task: () => Promise<void>): void => {
+	const runTask = (name: string, task: () => Promise<void>): Promise<void> => {
 		const queuedAt = Date.now();
 		dbg(`session_start task ${name}: scheduled`);
 		runtime.markStartupScanInFlight(name, sessionGeneration);
-		const fire = (): void => {
-			const startedAt = Date.now();
-			dbg(`session_start task ${name}: start queuedMs=${startedAt - queuedAt}`);
-			void task()
-				.then(() => {
-					dbg(
-						`session_start task ${name}: success runMs=${Date.now() - startedAt} queuedMs=${startedAt - queuedAt}`,
-					);
-				})
-				.catch((err) => {
-					dbg(`session_start: ${name} background scan failed: ${err}`);
-					dbg(
-						`session_start task ${name}: failed runMs=${Date.now() - startedAt} queuedMs=${startedAt - queuedAt}`,
-					);
-				})
-				.finally(() => {
-					runtime.clearStartupScanInFlight(name, sessionGeneration);
-					dbg(`session_start task ${name}: end`);
-				});
-		};
-		const delay = taskDeferMsByName[name] ?? 0;
-		if (delay > 0) {
-			setTimeout(fire, delay);
-		} else {
-			setImmediate(fire);
-		}
+		const completion = new Promise<void>((resolve) => {
+			const fire = (): void => {
+				const startedAt = Date.now();
+				dbg(`session_start task ${name}: start queuedMs=${startedAt - queuedAt}`);
+				void task()
+					.then(() => {
+						dbg(
+							`session_start task ${name}: success runMs=${Date.now() - startedAt} queuedMs=${startedAt - queuedAt}`,
+						);
+					})
+					.catch((err) => {
+						dbg(`session_start: ${name} background scan failed: ${err}`);
+						dbg(
+							`session_start task ${name}: failed runMs=${Date.now() - startedAt} queuedMs=${startedAt - queuedAt}`,
+						);
+					})
+					.finally(() => {
+						runtime.clearStartupScanInFlight(name, sessionGeneration);
+						dbg(`session_start task ${name}: end`);
+						resolve();
+					});
+			};
+			const delay = taskDeferMsByName[name] ?? 0;
+			if (delay > 0) {
+				setTimeout(fire, delay);
+			} else {
+				setImmediate(fire);
+			}
+		});
+		return completion;
 	};
 
 	const canRunJsTsHeavyScans = canRunStartupHeavyScans(languageProfile, "jsts");
@@ -1070,61 +1074,63 @@ function scheduleStartupScans(
 	});
 
 	// call-graph — build function-level call graph from review graph data
-	runTask("call-graph", async () => {
+	const callGraphTask = runTask("call-graph", async () => {
 		const { FactStore } = await import("./dispatch/fact-store.js");
 		const {
 			buildOrUpdateGraph,
 			extractSymbolsAndRefsFromGraph,
-			isReviewGraphMigrationNeeded,
+			getReviewGraphCacheIdentity,
 		} = await import("./review-graph/builder.js");
-		const {
-			buildCallGraph,
-			saveCallGraph,
-			loadCallGraph,
-			staleFiles,
-			readMtimes,
-		} = await import("./call-graph.js");
+		const { buildCallGraph, saveCallGraph, loadCallGraph } = await import(
+			"./call-graph.js"
+		);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
 		const startMs = Date.now();
-		// Try loading from cache first
-		const cached = loadCallGraph(snapshotRoot);
-		if (cached) {
-			const cachedFiles = [...cached.fileMtimes.keys()];
-			const stale = staleFiles(cached.fileMtimes, cachedFiles);
-			// #260: a stale REVIEW-graph version must force a rebuild even when the
-			// (separate) call-graph cache is fresh — otherwise an upgrade that
-			// invalidated the persisted graph (e.g. v2→v3 test exclusion) leaves
-			// reads cold until the next edit. The version check is cheap (file head).
-			if (
-				stale.length === 0 &&
-				cachedFiles.length > 0 &&
-				!isReviewGraphMigrationNeeded(analysisRoot)
-			) {
-				runtime.callGraph = cached.graph;
-				dbg(
-					`session_start call-graph: loaded from cache (${cached.graph.edges.length} edges, ${Date.now() - startMs}ms)`,
-				);
-				return;
-			}
-		}
-		// Build from the review graph (reuses already-parsed data, no re-parse)
+		// Build (or hydrate) the canonical review graph first. The call graph is a
+		// derived projection of that graph, so its freshness is the review graph's
+		// version/signature—not a second source walk and mtime policy.
 		const sessionFacts = new FactStore();
 		const graph = await buildOrUpdateGraph(analysisRoot, [], sessionFacts);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
-		const { allSymbols, allRefs } = extractSymbolsAndRefsFromGraph(graph);
-		const callGraph = buildCallGraph(allSymbols, allRefs);
+		const identity = getReviewGraphCacheIdentity(analysisRoot, graph);
+		if (!identity) {
+			dbg("session_start call-graph: canonical review-graph identity unavailable");
+			return;
+		}
+		const cached = loadCallGraph(snapshotRoot, {
+			reviewGraphVersion: identity.version,
+			reviewGraphSignature: identity.signature,
+		});
+		if (cached) {
+			runtime.callGraph = cached.graph;
+			dbg(
+				`session_start call-graph: loaded from cache (${cached.graph.edges.length} edges, ${cached.graph.callers.size} callee entries, ${Date.now() - startMs}ms)`,
+			);
+			return;
+		}
+		// Build from the canonical review graph (reuses already-parsed data, no
+		// duplicate parser or source walk).
+		const { allSymbols, allRefs, coverage } = extractSymbolsAndRefsFromGraph(graph);
+		const callGraph = buildCallGraph(allSymbols, allRefs, coverage);
 		runtime.callGraph = callGraph;
-		const mtimes = readMtimes([...allSymbols.keys()]);
-		saveCallGraph(snapshotRoot, callGraph, mtimes);
+		saveCallGraph(snapshotRoot, callGraph, {
+			reviewGraphVersion: identity.version,
+			reviewGraphSignature: identity.signature,
+		});
 		dbg(
 			`session_start call-graph: built ${callGraph.edges.length} edges, ${callGraph.callers.size} callee entries (${Date.now() - startMs}ms)`,
 		);
 	});
 
 	// codebase-model — build mental model from call graph (internal-only until validated)
+	// Keep this deferred, but await the call-graph task's completion rather than
+	// racing its independently deferred timer. Otherwise a slow graph build leaves
+	// `runtime.callGraph` unset at this task's start and loses the model for the
+	// entire session (#1070).
 	runTask("codebase-model", async () => {
+		await callGraphTask;
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
-		if (!runtime.callGraph) return; // call-graph task may not have completed yet
+		if (!runtime.callGraph) return;
 		const { buildCodebaseModel, saveCodebaseModel } = await import(
 			"./codebase-model.js"
 		);

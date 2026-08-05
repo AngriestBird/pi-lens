@@ -7,22 +7,65 @@ import {
 	formatImpact,
 	impact,
 	loadCallGraph,
-	readMtimes,
 	saveCallGraph,
-	staleFiles,
 	type FunctionCallGraph,
 } from "../../clients/call-graph.js";
 import type { Symbol, SymbolRef } from "../../clients/symbol-types.js";
+import { getProjectDataDir } from "../../clients/file-utils.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
-function sym(filePath: string, name: string, kind: Symbol["kind"] = "function", line = 1): Symbol {
-	return { id: `${filePath}:${name}`, name, kind, filePath, line, column: 1, isExported: true };
+function sym(filePath: string, name: string, kind: Symbol["kind"] = "function", line = 1, endLine?: number): Symbol {
+	return { id: `${filePath}:${name}`, name, kind, filePath, line, ...(endLine === undefined ? {} : { endLine }), column: 1, isExported: true };
 }
 
 function ref(callerFile: string, refName: string, line = 5): SymbolRef {
 	return { symbolId: `${callerFile}:${refName}`, filePath: callerFile, line, column: 1 };
+}
+
+function validPersistedCallGraph(): Record<string, unknown> {
+	const callerFile = "/proj/a.ts";
+	const calleeFile = "/proj/b.ts";
+	const callerKey = `${callerFile}:caller`;
+	const calleeKey = `${calleeFile}:callee`;
+	return {
+		version: 5,
+		builtAt: "2026-08-04T00:00:00.000Z",
+		reviewGraphVersion: "v9",
+		reviewGraphSignature: "sig-valid",
+		edges: [{
+			callerFile,
+			callerSymbol: "caller",
+			callerKey,
+			calleeFile,
+			calleeSymbol: "callee",
+			calleeKey,
+			evidenceKind: "calls",
+			resolution: "exact",
+			evidenceCount: 1,
+			weight: 1,
+		}],
+		callees: [[callerKey, [calleeKey]]],
+		callers: [[calleeKey, [callerKey]]],
+		inDegree: [[calleeKey, 1]],
+		totalRefs: 1,
+		unresolvedRefs: 0,
+		coverage: {
+			totalEvidence: 1,
+			callsEvidence: 1,
+			referencesEvidence: 0,
+			eligibleEvidence: 1,
+			resolvedEvidence: 1,
+			unresolvedEvidence: 0,
+			typeOnlyEvidence: 0,
+			unsupportedEvidence: 0,
+			sameFileEvidence: 0,
+			duplicateEvidence: 0,
+			complete: true,
+			languages: { typescript: "complete" },
+		},
+	};
 }
 
 let tmpDir: string;
@@ -32,6 +75,12 @@ afterEach(() => { removeTempDirSync(tmpDir); });
 // ── buildCallGraph ─────────────────────────────────────────────────────────────
 
 describe("buildCallGraph", () => {
+	it("does not claim complete coverage for an empty direct graph", () => {
+		const graph = buildCallGraph(new Map(), new Map());
+		expect(graph.edges).toHaveLength(0);
+		expect(graph.coverage?.complete).toBe(false);
+	});
+
 	it("resolves a cross-file call and populates both directions", () => {
 		const fileA = "/proj/a.ts";
 		const fileB = "/proj/b.ts";
@@ -74,6 +123,29 @@ describe("buildCallGraph", () => {
 		expect(graph.callers.size).toBe(0);
 	});
 
+	it("uses the file-level fallback after a completed function", () => {
+		const fileA = "/proj/a.ts";
+		const fileB = "/proj/b.ts";
+		const graph = buildCallGraph(
+			new Map([[fileA, [sym(fileA, "done", "function", 1, 3)]], [fileB, [sym(fileB, "init")]]]),
+			new Map([[fileA, [ref(fileA, "init", 5)]]]),
+		);
+		expect(graph.callees.has(`file:${fileA}`)).toBe(true);
+		expect(graph.callees.has(`${fileA}:done`)).toBe(false);
+	});
+
+	it("respects nested and adjacent function end boundaries", () => {
+		const fileA = "/proj/a.ts";
+		const fileB = "/proj/b.ts";
+		const graph = buildCallGraph(
+			new Map([[fileA, [sym(fileA, "outer", "function", 1, 10), sym(fileA, "inner", "function", 3, 5)]], [fileB, [sym(fileB, "target")]]]),
+			new Map([[fileA, [ref(fileA, "target", 4), ref(fileA, "target", 7), ref(fileA, "target", 12)]]]),
+		);
+		expect(graph.callees.has(`${fileA}:inner`)).toBe(true);
+		expect(graph.callees.has(`${fileA}:outer`)).toBe(true);
+		expect(graph.callees.has(`file:${fileA}`)).toBe(true);
+	});
+
 	it("applies ambiguity discounting when multiple files define same name", () => {
 		const fileA = "/proj/a.ts";
 		const fileB = "/proj/b.ts";
@@ -90,9 +162,112 @@ describe("buildCallGraph", () => {
 
 		const graph = buildCallGraph(allSymbols, allRefs);
 
-		// Two defs → weight = 0.5 each
+		// Legacy name-only resolution retains every cross-file candidate; no
+		// candidate may disappear merely because Map iteration happened to put it
+		// second.
+		expect(graph.edges.map((edge) => edge.calleeKey).sort()).toEqual(
+			[`${fileB}:shared`, `${fileC}:shared`].sort(),
+		);
 		for (const edge of graph.edges) {
 			expect(edge.weight).toBe(0.5);
+			expect(edge.resolution).toBe("name-only");
+		}
+		expect(graph.coverage).toMatchObject({
+			totalEvidence: 1,
+			eligibleEvidence: 1,
+			resolvedEvidence: 1,
+			duplicateEvidence: 0,
+		});
+	});
+
+	it("round-trips ambiguous legacy evidence without false semantic staleness", () => {
+		process.env.PILENS_DATA_DIR = tmpDir;
+		try {
+			const fileA = "/proj/a.ts";
+			const fileB = "/proj/b.ts";
+			const fileC = "/proj/c.ts";
+			const graph = buildCallGraph(
+				new Map([
+					[fileA, [sym(fileA, "caller")]],
+					[fileB, [sym(fileB, "shared")]],
+					[fileC, [sym(fileC, "shared")]],
+				]),
+				new Map([[fileA, [ref(fileA, "shared")]]]),
+			);
+
+			saveCallGraph("/proj", graph, { reviewGraphVersion: "v7", reviewGraphSignature: "sig-ambiguous" });
+			expect(loadCallGraph("/proj")?.graph.coverage).toMatchObject({
+				totalEvidence: 1,
+				resolvedEvidence: 1,
+			});
+		} finally {
+			delete process.env.PILENS_DATA_DIR;
+		}
+	});
+
+	it("classifies canonical same-file evidence as unsupported and persists cross-file edges", () => {
+		process.env.PILENS_DATA_DIR = tmpDir;
+		try {
+			const fileA = "/proj/a.ts";
+			const fileB = "/proj/b.ts";
+			const sameFileId = `${fileA}:target:function:3`;
+			const crossFileId = `${fileB}:remote:function:3`;
+			const callerId = `${fileA}:caller:function:10`;
+			const graph = buildCallGraph(
+				new Map([
+					[fileA, [{ ...sym(fileA, "target", "function", 3), id: sameFileId }, { ...sym(fileA, "caller", "function", 10), id: callerId }]],
+					[fileB, [{ ...sym(fileB, "remote", "function", 3), id: crossFileId }]],
+				]),
+				new Map([[fileA, [
+					{ ...ref(fileA, "target", 4), targetId: sameFileId, evidenceKind: "calls", referenceKind: "call", resolution: "exact" },
+					{ ...ref(fileA, "remote", 11), targetId: crossFileId, callerSymbolId: callerId, evidenceKind: "calls", referenceKind: "call", resolution: "exact" },
+				]]]),
+				{ totalEvidence: 2, callsEvidence: 2, referencesEvidence: 0, eligibleEvidence: 2, resolvedEvidence: 2, unresolvedEvidence: 0, typeOnlyEvidence: 0, unsupportedEvidence: 0, sameFileEvidence: 0, duplicateEvidence: 0, complete: true },
+			);
+			expect(graph.edges).toHaveLength(1);
+			expect(graph.coverage).toMatchObject({ resolvedEvidence: 1, eligibleEvidence: 1, sameFileEvidence: 1, unsupportedEvidence: 0, complete: true });
+			saveCallGraph("/proj", graph, { reviewGraphVersion: "v7", reviewGraphSignature: "sig-same-file" });
+			const loaded = loadCallGraph("/proj");
+			expect(loaded?.graph.callees.get(callerId)).toEqual(new Set([crossFileId]));
+			expect(loaded?.graph.callers.get(crossFileId)).toEqual(new Set([callerId]));
+			expect(loaded?.graph.coverage).toMatchObject({ resolvedEvidence: 1, sameFileEvidence: 1, unsupportedEvidence: 0, complete: true });
+		} finally {
+			delete process.env.PILENS_DATA_DIR;
+		}
+	});
+
+	it("counts duplicate evidence once while keeping centrality on logical edges", () => {
+		const fileA = "/proj/a.ts";
+		const fileB = "/proj/b.ts";
+		const callerId = `${fileA}:caller:function:1`;
+		const calleeId = `${fileB}:callee:function:1`;
+		const allSymbols = new Map<string, Symbol[]>([
+			[fileA, [{ ...sym(fileA, "caller"), id: callerId }]],
+			[fileB, [{ ...sym(fileB, "callee"), id: calleeId }]],
+		]);
+		const allRefs = new Map<string, SymbolRef[]>([
+			[fileA, [
+				{ ...ref(fileA, "callee"), targetId: calleeId, callerSymbolId: callerId, evidenceKind: "calls", referenceKind: "call" },
+				{ ...ref(fileA, "callee", 6), targetId: calleeId, callerSymbolId: callerId, evidenceKind: "calls", referenceKind: "call" },
+			]],
+		]);
+
+		const graph = buildCallGraph(allSymbols, allRefs);
+		expect(graph.edges).toHaveLength(1);
+		expect(graph.edges[0].evidenceCount).toBe(2);
+		expect(graph.coverage).toMatchObject({ totalEvidence: 2, duplicateEvidence: 1, eligibleEvidence: 2, resolvedEvidence: 2 });
+		expect(graph.inDegree.get(calleeId)).toBe(1);
+		process.env.PILENS_DATA_DIR = tmpDir;
+		try {
+			saveCallGraph("/proj", graph, { reviewGraphVersion: "v7", reviewGraphSignature: "sig-duplicate" });
+			const loaded = loadCallGraph("/proj");
+			expect(loaded?.graph.edges[0].evidenceCount).toBe(2);
+			expect(loaded?.graph.coverage?.duplicateEvidence).toBe(1);
+			expect(loaded?.graph.callees.get(callerId)).toEqual(new Set([calleeId]));
+			expect(loaded?.graph.callers.get(calleeId)).toEqual(new Set([callerId]));
+			expect(loaded?.graph.inDegree.get(calleeId)).toBe(1);
+		} finally {
+			delete process.env.PILENS_DATA_DIR;
 		}
 	});
 
@@ -274,6 +449,17 @@ describe("formatImpact()", () => {
 		expect(summary).toContain("handleRequest");
 	});
 
+	it("formats Windows-style paths relative to the project root", () => {
+		const root = path.join(tmpDir, "Repo");
+		const caller = path.join(root, "src", "caller.ts").replace(/\\/g, "\\\\");
+		const result = [{
+			symbolKey: `${caller}:caller`,
+			depth: 1,
+			severity: "WillBreak" as const,
+		}];
+		expect(formatImpact(result, root.toLowerCase())).toContain("src/caller.ts");
+	});
+
 	it("mentions Review count when present", () => {
 		const g = makeGraph([
 			{ callerKey: "/proj/a.ts:A", calleeKey: "/proj/b.ts:B" },
@@ -301,9 +487,8 @@ describe("saveCallGraph / loadCallGraph", () => {
 		const allRefs = new Map([[fileA, [ref(fileA, "callee", 5)]]]);
 
 		const graph = buildCallGraph(allSymbols, allRefs);
-		const mtimes = new Map([[fileA, 1234], [fileB, 5678]]);
 
-		saveCallGraph("/proj", graph, mtimes);
+		saveCallGraph("/proj", graph, { reviewGraphVersion: "v7", reviewGraphSignature: "sig-roundtrip" });
 		const loaded = loadCallGraph("/proj");
 
 		expect(loaded).toBeDefined();
@@ -311,9 +496,157 @@ describe("saveCallGraph / loadCallGraph", () => {
 		const calleeKey = `${fileB}:callee`;
 		expect(loaded?.graph.callees.get(callerKey)?.has(calleeKey)).toBe(true);
 		expect(loaded?.graph.callers.get(calleeKey)?.has(callerKey)).toBe(true);
-		expect(loaded?.fileMtimes.get(fileA)).toBe(1234);
 
 		delete process.env.PILENS_DATA_DIR;
+	});
+
+	it("reconstructs legacy evidence totals when coverage metadata is absent", () => {
+		process.env.PILENS_DATA_DIR = tmpDir;
+		const fileA = "/proj/a.ts";
+		const fileB = "/proj/b.ts";
+		const callerKey = `${fileA}:caller`;
+		const calleeKey = `${fileB}:callee`;
+		const cacheFile = path.join(getProjectDataDir("/proj"), "cache", "call-graph.json");
+		fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+		fs.writeFileSync(cacheFile, JSON.stringify({
+			version: 4,
+			builtAt: "legacy",
+			fileMtimes: {},
+			edges: [{ callerFile: fileA, callerKey, calleeFile: fileB, calleeSymbol: "callee", calleeKey, weight: 1 }],
+			callees: [[callerKey, [calleeKey]]],
+			callers: [[calleeKey, [callerKey]]],
+			inDegree: [[calleeKey, 1]],
+		}), "utf-8");
+
+		// v4 is legacy: no canonical review-graph identity means unavailable,
+		// rather than a seemingly clean migrated projection.
+		expect(loadCallGraph("/proj")).toBeUndefined();
+		delete process.env.PILENS_DATA_DIR;
+	});
+
+	it("round-trips evidence metadata and coverage", () => {
+		process.env.PILENS_DATA_DIR = tmpDir;
+		const fileA = "/proj/a.ts";
+		const fileB = "/proj/b.ts";
+		const callerId = `${fileA}:caller:function:4`;
+		const calleeId = `${fileB}:target:method:27`;
+		const allSymbols = new Map<string, Symbol[]>([
+			[fileA, [{ id: callerId, name: "caller", kind: "function", filePath: fileA, line: 4, column: 2, isExported: true }]],
+			[fileB, [{ id: calleeId, name: "target", kind: "method", filePath: fileB, line: 27, column: 3, isExported: true }]],
+		]);
+		const allRefs = new Map<string, SymbolRef[]>([[fileA, [{
+			symbolId: `${fileA}:target`,
+			symbolName: "target",
+			filePath: fileA,
+			line: 9,
+			column: 7,
+			evidenceKind: "calls",
+			referenceKind: "call",
+			targetId: calleeId,
+			callerSymbolId: callerId,
+			resolution: "import",
+		}]]]);
+		const coverage = {
+			totalEvidence: 1,
+			callsEvidence: 1,
+			referencesEvidence: 0,
+			eligibleEvidence: 1,
+			resolvedEvidence: 1,
+			unresolvedEvidence: 0,
+			typeOnlyEvidence: 0,
+			unsupportedEvidence: 0,
+			sameFileEvidence: 0,
+			duplicateEvidence: 0,
+			complete: true,
+		};
+		const graph = buildCallGraph(allSymbols, allRefs, coverage);
+		saveCallGraph("/proj", graph, { reviewGraphVersion: "v8", reviewGraphSignature: "sig-evidence" });
+		const loaded = loadCallGraph("/proj");
+		expect(loaded?.graph.edges[0]).toMatchObject({
+			calleeKey: calleeId,
+			calleeSymbol: "target",
+			calleeKind: "method",
+			evidenceKind: "calls",
+			resolution: "import",
+		});
+		expect(loaded?.graph.coverage).toMatchObject({ callsEvidence: 1, complete: true });
+		delete process.env.PILENS_DATA_DIR;
+	});
+
+	it("rejects parseable JSON with inconsistent adjacency and centrality", () => {
+		process.env.PILENS_DATA_DIR = tmpDir;
+		const cacheFile = path.join(getProjectDataDir("/proj"), "cache", "call-graph.json");
+		const caller = "/proj/a.ts:caller";
+		const callee = "/proj/b.ts:callee";
+		fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+		fs.writeFileSync(cacheFile, JSON.stringify({
+			version: 4,
+			builtAt: "bad-but-parseable",
+			fileMtimes: {},
+			edges: [{ callerFile: "/proj/a.ts", callerKey: caller, calleeFile: "/proj/b.ts", calleeSymbol: "callee", calleeKey: callee, evidenceCount: 1, weight: 1 }],
+			callees: [[caller, [callee]]],
+			callers: [[callee, [caller]]],
+			inDegree: [[callee, 2]],
+			totalRefs: 1,
+			unresolvedRefs: 0,
+			coverage: { totalEvidence: 1, callsEvidence: 1, referencesEvidence: 0, eligibleEvidence: 1, resolvedEvidence: 1, unresolvedEvidence: 0, typeOnlyEvidence: 0, unsupportedEvidence: 0, sameFileEvidence: 0, duplicateEvidence: 0, complete: false },
+		}), "utf-8");
+		expect(loadCallGraph("/proj")).toBeUndefined();
+		delete process.env.PILENS_DATA_DIR;
+	});
+
+	it("rejects complete coverage that contains unsupported evidence", () => {
+		process.env.PILENS_DATA_DIR = tmpDir;
+		const cacheFile = path.join(getProjectDataDir("/proj"), "cache", "call-graph.json");
+		fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+		fs.writeFileSync(cacheFile, JSON.stringify({
+			version: 4, builtAt: "bad-coverage", fileMtimes: {}, edges: [], callees: [], callers: [], inDegree: [],
+			totalRefs: 1, unresolvedRefs: 0,
+			coverage: { totalEvidence: 1, callsEvidence: 1, referencesEvidence: 0, eligibleEvidence: 0, resolvedEvidence: 0, unresolvedEvidence: 0, typeOnlyEvidence: 0, unsupportedEvidence: 1, sameFileEvidence: 0, duplicateEvidence: 0, complete: true },
+		}), "utf-8");
+		expect(loadCallGraph("/proj")).toBeUndefined();
+		delete process.env.PILENS_DATA_DIR;
+	});
+
+	it("rejects malformed v5 semantic fields instead of serving a partial graph", () => {
+		const mutations: Array<[string, (raw: Record<string, any>) => void]> = [
+			["non-boolean coverage.complete", (raw) => { raw.coverage.complete = "true"; }],
+			["unknown evidence enum", (raw) => { raw.edges[0].evidenceKind = "not-an-evidence-kind"; }],
+			["unknown resolution enum", (raw) => { raw.edges[0].resolution = "guessed"; }],
+			["empty graph identity", (raw) => { raw.reviewGraphSignature = ""; }],
+			["empty edge identity", (raw) => { raw.edges[0].calleeSymbol = ""; }],
+			["edge/file identity mismatch", (raw) => { raw.edges[0].calleeFile = "/proj/other.ts"; }],
+			["duplicate logical edges", (raw) => { raw.edges.push({ ...raw.edges[0] }); }],
+			["duplicate adjacency targets", (raw) => { raw.callees[0][1].push(raw.callees[0][1][0]); }],
+			["duplicate adjacency entries", (raw) => { raw.callers.push([...raw.callers[0]]); }],
+		];
+
+		for (const [label, mutate] of mutations) {
+			process.env.PILENS_DATA_DIR = tmpDir;
+			try {
+				const raw = validPersistedCallGraph();
+				mutate(raw);
+				const cacheFile = path.join(getProjectDataDir("/proj"), "cache", "call-graph.json");
+				fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+				fs.writeFileSync(cacheFile, JSON.stringify(raw), "utf-8");
+				expect(loadCallGraph("/proj"), label).toBeUndefined();
+			} finally {
+				delete process.env.PILENS_DATA_DIR;
+			}
+		}
+	});
+
+	it("accepts a strict v5 cache with consistent semantic metadata", () => {
+		process.env.PILENS_DATA_DIR = tmpDir;
+		try {
+			const raw = validPersistedCallGraph();
+			const cacheFile = path.join(getProjectDataDir("/proj"), "cache", "call-graph.json");
+			fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+			fs.writeFileSync(cacheFile, JSON.stringify(raw), "utf-8");
+			expect(loadCallGraph("/proj")?.graph.coverage).toMatchObject({ complete: true, totalEvidence: 1 });
+		} finally {
+			delete process.env.PILENS_DATA_DIR;
+		}
 	});
 
 	it("returns undefined for missing cache", () => {
@@ -323,50 +656,3 @@ describe("saveCallGraph / loadCallGraph", () => {
 	});
 });
 
-// ── staleFiles ─────────────────────────────────────────────────────────────────
-
-describe("staleFiles", () => {
-	it("returns files whose mtime differs", () => {
-		const fileA = path.join(tmpDir, "a.ts");
-		fs.writeFileSync(fileA, "x");
-		const mtime = fs.statSync(fileA).mtimeMs;
-
-		// File with wrong mtime → stale
-		const stale = staleFiles(new Map([[fileA, mtime - 1000]]), [fileA]);
-		expect(stale).toContain(fileA);
-	});
-
-	it("returns file as stale if not in mtime map", () => {
-		const fileA = path.join(tmpDir, "new.ts");
-		fs.writeFileSync(fileA, "x");
-
-		const stale = staleFiles(new Map(), [fileA]);
-		expect(stale).toContain(fileA);
-	});
-
-	it("does not return file as stale when mtime matches", () => {
-		const fileA = path.join(tmpDir, "fresh.ts");
-		fs.writeFileSync(fileA, "x");
-		const mtime = fs.statSync(fileA).mtimeMs;
-
-		const stale = staleFiles(new Map([[fileA, mtime]]), [fileA]);
-		expect(stale).not.toContain(fileA);
-	});
-});
-
-describe("readMtimes", () => {
-	it("reads current mtimes for existing files", () => {
-		const fileA = path.join(tmpDir, "a.ts");
-		fs.writeFileSync(fileA, "x");
-
-		const mtimes = readMtimes([fileA]);
-		expect(mtimes.has(fileA)).toBe(true);
-		expect(typeof mtimes.get(fileA)).toBe("number");
-	});
-
-	it("skips files that do not exist", () => {
-		const missing = path.join(tmpDir, "missing.ts");
-		const mtimes = readMtimes([missing]);
-		expect(mtimes.has(missing)).toBe(false);
-	});
-});

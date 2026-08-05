@@ -917,26 +917,43 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// would drop the call-graph entries — so lens_diagnostics (which only reads the
 	// persisted report) would never surface the findings (#179/#533).
 	if (runtime.callGraph && files.length > 0) {
-		try {
-			const { impact, formatImpact } = await import("./call-graph.js");
-			const { callGraphImpactToProjectDiagnostics } = await import(
-				"./project-diagnostics/runner-adapters/call-graph-impact.js"
+		const coverage = runtime.callGraph.coverage;
+		if (!coverage || coverage.complete !== true) {
+			// An incomplete graph can still contain useful edges, but emitting them
+			// as ordinary impact findings would turn unsupported/partial extraction
+			// into an authoritative-looking clean result for the rest of the file.
+			// Keep the limitation visible and require a complete graph for this
+			// user-facing impact surface (#1070).
+			advisoryParts.push(
+				"Call-graph impact was not emitted because call-graph extraction coverage is incomplete; " +
+					"the affected files may have unreported callers.",
 			);
+		} else {
+			try {
+				const { impact, formatImpact, parseSymbolKey } = await import("./call-graph.js");
+				const { callGraphImpactToProjectDiagnostics } = await import(
+					"./project-diagnostics/runner-adapters/call-graph-impact.js"
+				);
 			const impactLines: string[] = [];
 			const impactFindings: { calleeKey: string; results: ReturnType<typeof impact> }[] =
 				[];
 			for (const filePath of files.slice(0, 5)) {
-				// Find callee keys for this file in the call graph
-				const fileCallerKeys = [...runtime.callGraph.callers.keys()].filter(
-					(k) => k.startsWith(`${filePath}:`),
-				);
+				// Turn-state files may be cwd-relative while graph keys are absolute,
+				// and persisted graphs can contain either slash style/casing. Compare
+				// through the shared normalized path seam; keep the original filePath
+				// only for display and diagnostics.
+				const changedFileKey = normalizeMapKey(resolveRunnerPath(cwd, filePath));
+				const fileCallerKeys = [...runtime.callGraph.callers.keys()].filter((k) => {
+					const graphFilePath = parseSymbolKey(k).filePath;
+					return normalizeMapKey(resolveRunnerPath(cwd, graphFilePath)) === changedFileKey;
+				});
 				for (const calleeKey of fileCallerKeys.slice(0, 3)) {
 					const results = impact(runtime.callGraph, calleeKey);
 					if (results.length > 0) {
 						impactFindings.push({ calleeKey, results });
 						const summary = formatImpact(results, cwd);
 						if (summary)
-							impactLines.push(`  ${calleeKey.split(":").pop()}: ${summary}`);
+							impactLines.push(`  ${parseSymbolKey(calleeKey).symbolName ?? calleeKey}: ${summary}`);
 					}
 				}
 			}
@@ -955,8 +972,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					projectDiagnosticsSources.add("call-graph");
 				}
 			}
+			// Non-fatal — call graph is best-effort
 		} catch {
 			// Non-fatal — call graph is best-effort
+		}
 		}
 	}
 
