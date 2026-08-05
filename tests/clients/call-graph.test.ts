@@ -573,24 +573,23 @@ describe("saveCallGraph / loadCallGraph", () => {
 		delete process.env.PILENS_DATA_DIR;
 	});
 
+	// These two fixtures MUST be v5 with a valid canonical identity — a v4 (or
+	// identity-less) fixture is rejected by loadCallGraph's version/identity gate
+	// (call-graph.ts ~787-788) before validatePersistedCallGraph ever runs, which
+	// would make these tests pass even if the semantic validator were deleted
+	// (the vacuous-test class flagged in #1089). Each test's own comment records
+	// the specific validator check it exercises, and that check was confirmed to
+	// fail pre-fix by temporarily disabling it (see #1089 fix commit).
 	it("rejects parseable JSON with inconsistent adjacency and centrality", () => {
 		process.env.PILENS_DATA_DIR = tmpDir;
 		const cacheFile = path.join(getProjectDataDir("/proj"), "cache", "call-graph.json");
-		const caller = "/proj/a.ts:caller";
-		const callee = "/proj/b.ts:callee";
 		fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-		fs.writeFileSync(cacheFile, JSON.stringify({
-			version: 4,
-			builtAt: "bad-but-parseable",
-			fileMtimes: {},
-			edges: [{ callerFile: "/proj/a.ts", callerKey: caller, calleeFile: "/proj/b.ts", calleeSymbol: "callee", calleeKey: callee, evidenceCount: 1, weight: 1 }],
-			callees: [[caller, [callee]]],
-			callers: [[callee, [caller]]],
-			inDegree: [[callee, 2]],
-			totalRefs: 1,
-			unresolvedRefs: 0,
-			coverage: { totalEvidence: 1, callsEvidence: 1, referencesEvidence: 0, eligibleEvidence: 1, resolvedEvidence: 1, unresolvedEvidence: 0, typeOnlyEvidence: 0, unsupportedEvidence: 0, sameFileEvidence: 0, duplicateEvidence: 0, complete: false },
-		}), "utf-8");
+		const raw = validPersistedCallGraph() as { edges: Array<{ calleeKey: string }>; inDegree: unknown };
+		// The persisted inDegree for the callee (2) disagrees with what the single
+		// edge actually implies (1) — exercises the actualInDegree/expectedInDegree
+		// cross-check (call-graph.ts ~767-769), not just adjacency shape.
+		raw.inDegree = [[raw.edges[0].calleeKey, 2]];
+		fs.writeFileSync(cacheFile, JSON.stringify(raw), "utf-8");
 		expect(loadCallGraph("/proj")).toBeUndefined();
 		delete process.env.PILENS_DATA_DIR;
 	});
@@ -599,11 +598,27 @@ describe("saveCallGraph / loadCallGraph", () => {
 		process.env.PILENS_DATA_DIR = tmpDir;
 		const cacheFile = path.join(getProjectDataDir("/proj"), "cache", "call-graph.json");
 		fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-		fs.writeFileSync(cacheFile, JSON.stringify({
-			version: 4, builtAt: "bad-coverage", fileMtimes: {}, edges: [], callees: [], callers: [], inDegree: [],
-			totalRefs: 1, unresolvedRefs: 0,
-			coverage: { totalEvidence: 1, callsEvidence: 1, referencesEvidence: 0, eligibleEvidence: 0, resolvedEvidence: 0, unresolvedEvidence: 0, typeOnlyEvidence: 0, unsupportedEvidence: 1, sameFileEvidence: 0, duplicateEvidence: 0, complete: true },
-		}), "utf-8");
+		const raw = validPersistedCallGraph() as { coverage: Record<string, unknown>; totalRefs: number };
+		// complete: true with unsupportedEvidence > 0 exercises the honesty check
+		// at call-graph.ts ~686 ("complete" must mean nothing was unsupported) —
+		// keep every other coverage identity/sum invariant (incl. raw.totalRefs,
+		// which must track coverage.totalEvidence per the ~736 cross-check) so
+		// this is the ONE thing that fails.
+		raw.coverage = {
+			totalEvidence: 2,
+			callsEvidence: 1,
+			referencesEvidence: 1,
+			eligibleEvidence: 1,
+			resolvedEvidence: 1,
+			unresolvedEvidence: 0,
+			typeOnlyEvidence: 0,
+			unsupportedEvidence: 1,
+			sameFileEvidence: 0,
+			duplicateEvidence: 0,
+			complete: true,
+		};
+		raw.totalRefs = 2;
+		fs.writeFileSync(cacheFile, JSON.stringify(raw), "utf-8");
 		expect(loadCallGraph("/proj")).toBeUndefined();
 		delete process.env.PILENS_DATA_DIR;
 	});
@@ -653,6 +668,73 @@ describe("saveCallGraph / loadCallGraph", () => {
 		process.env.PILENS_DATA_DIR = tmpDir;
 		expect(loadCallGraph("/nonexistent")).toBeUndefined();
 		delete process.env.PILENS_DATA_DIR;
+	});
+
+	// #1089: "freshness is owned exclusively by the review-graph snapshot" (see
+	// the module doc comment) is only true if callers actually pass
+	// `expectedIdentity` and loadCallGraph actually enforces it. Before this
+	// change, no test anywhere in the suite passed `expectedIdentity` — a
+	// regression that dropped the check (the #210/#1020 stale-replay class)
+	// would have shipped green.
+	describe("canonical-freshness invariant (expectedIdentity)", () => {
+		it("rejects a cache saved under one reviewGraphVersion when loaded expecting another", () => {
+			process.env.PILENS_DATA_DIR = tmpDir;
+			try {
+				const raw = validPersistedCallGraph();
+				const cacheFile = path.join(getProjectDataDir("/proj"), "cache", "call-graph.json");
+				fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+				fs.writeFileSync(cacheFile, JSON.stringify(raw), "utf-8");
+				// Sanity: loads fine with no expectation, or a matching one.
+				expect(loadCallGraph("/proj")).toBeDefined();
+				expect(
+					loadCallGraph("/proj", { reviewGraphVersion: "v9", reviewGraphSignature: "sig-valid" }),
+				).toBeDefined();
+				// A different reviewGraphVersion is a stale-replay: reject.
+				expect(
+					loadCallGraph("/proj", { reviewGraphVersion: "v10", reviewGraphSignature: "sig-valid" }),
+				).toBeUndefined();
+			} finally {
+				delete process.env.PILENS_DATA_DIR;
+			}
+		});
+
+		it("rejects a cache saved under one reviewGraphSignature when loaded expecting another", () => {
+			process.env.PILENS_DATA_DIR = tmpDir;
+			try {
+				const raw = validPersistedCallGraph();
+				const cacheFile = path.join(getProjectDataDir("/proj"), "cache", "call-graph.json");
+				fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+				fs.writeFileSync(cacheFile, JSON.stringify(raw), "utf-8");
+				// Same version, but the source content signature moved on — this is
+				// exactly the case a changed file must invalidate.
+				expect(
+					loadCallGraph("/proj", { reviewGraphVersion: "v9", reviewGraphSignature: "sig-newer" }),
+				).toBeUndefined();
+			} finally {
+				delete process.env.PILENS_DATA_DIR;
+			}
+		});
+
+		it("loads successfully when the expected identity matches exactly", () => {
+			process.env.PILENS_DATA_DIR = tmpDir;
+			try {
+				const raw = validPersistedCallGraph();
+				const cacheFile = path.join(getProjectDataDir("/proj"), "cache", "call-graph.json");
+				fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+				fs.writeFileSync(cacheFile, JSON.stringify(raw), "utf-8");
+				const loaded = loadCallGraph("/proj", {
+					reviewGraphVersion: "v9",
+					reviewGraphSignature: "sig-valid",
+				});
+				expect(loaded).toBeDefined();
+				expect(loaded?.identity).toEqual({
+					reviewGraphVersion: "v9",
+					reviewGraphSignature: "sig-valid",
+				});
+			} finally {
+				delete process.env.PILENS_DATA_DIR;
+			}
+		});
 	});
 });
 
