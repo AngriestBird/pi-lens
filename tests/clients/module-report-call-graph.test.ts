@@ -54,6 +54,7 @@ const CALL_FIXTURES: FixtureCase[] = [
 	{ language: "zig", directory: "zig", target: "callee.zig", callerFile: "caller.zig", caller: "caller", callee: "helper", callerKind: "function", calleeKind: "function", callerLine: 1, calleeLine: 1 },
 	{ language: "bash", directory: "bash", target: "callee.sh", callerFile: "caller.sh", caller: "caller", callee: "helper", callerKind: "function", calleeKind: "function", callerLine: 1, calleeLine: 1 },
 	{ language: "elixir", directory: "elixir", target: "callee.ex", callerFile: "caller.ex", caller: "caller", callee: "helper", callerKind: "function", calleeKind: "function", callerLine: 2, calleeLine: 2 },
+	{ language: "swift", directory: "swift", target: "callee.swift", callerFile: "caller.swift", caller: "caller", callee: "helper", callerKind: "function", calleeKind: "function", callerLine: 1, calleeLine: 1 },
 	{ language: "java", directory: "java-call", target: "Callee.java", callerFile: "Caller.java", caller: "caller", callee: "helper", callerKind: "method", calleeKind: "method", callerLine: 2, calleeLine: 2 },
 	{ language: "kotlin", directory: "kotlin-call", target: "Callee.kt", callerFile: "Caller.kt", caller: "caller", callee: "helper", callerKind: "function", calleeKind: "function", callerLine: 2, calleeLine: 2 },
 ];
@@ -123,6 +124,7 @@ function makeFixtureProject(directory: string) {
 		kotlin: "Callee.kt",
 		"java-call": "Callee.java",
 		"kotlin-call": "Callee.kt",
+		swift: "callee.swift",
 		dart: "callee.dart",
 	};
 	return {
