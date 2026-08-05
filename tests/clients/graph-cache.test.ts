@@ -10,7 +10,11 @@ import {
 	getLastGraphBuildInfo,
 	getReviewGraphCacheIdentity,
 } from "../../clients/review-graph/builder.js";
-import { removeTempDirSync } from "./test-utils.js";
+import {
+	createTempFile,
+	removeTempDirSync,
+	setupTestEnvironment,
+} from "./test-utils.js";
 
 // Mock out the expensive file system scanning — we only care about cache behaviour
 vi.mock("../../clients/scan-utils.js", () => ({
@@ -186,9 +190,11 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 		// g1 is current: its identity resolves.
 		expect(getReviewGraphCacheIdentity(cwd, g1)).toBeDefined();
 
-		// A real content-changing rebuild replaces the workspace cache with a
-		// NEW graph instance carrying a NEW buildGeneration, simulating the
-		// concurrent build that raced ahead of a caller still holding `g1`.
+		// Clearing BOTH caches forces a full rebuild (content is unchanged —
+		// the workspace-cache clear alone is what makes it "full"), which
+		// replaces the workspace cache with a NEW graph instance carrying a
+		// NEW buildGeneration, simulating the concurrent build that raced
+		// ahead of a caller still holding `g1`.
 		clearReviewGraphWorkspaceCache();
 		clearGraphCache();
 		const g3 = await buildOrUpdateGraph(cwd, [file], facts);
@@ -200,6 +206,51 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 		expect(getReviewGraphCacheIdentity(cwd, g1)).toBeUndefined();
 		// The current graph still resolves normally.
 		expect(getReviewGraphCacheIdentity(cwd, g3)).toBeDefined();
+	});
+
+	// #1088 round 2: the guard must compare the cache ENTRY's generation stamp,
+	// not the stored graph OBJECT's — the pure-drift reuse path stores an
+	// unstamped `cloneGraph` copy in the workspace cache and stamps only the
+	// returned instance, so an object-stamp compare rejects the very graph a
+	// reuse build just returned (identity undefined → the session call-graph
+	// task bails → call graph silently off after any mtime-only drift).
+	// Uses a real project dir (not this file's mocked-walk tmpDir): the drift
+	// branch only fires when the size:mtimeMs signature diverges while the
+	// content hash confirms nothing changed. NOTE: the fixture must not be
+	// named `gen.ts` — the source walk's generated-artifact name heuristic
+	// silently drops it and the walk (and thus the signature) comes up empty.
+	it("resolves the identity of the graph returned by a pure-drift reuse build (#1088)", async () => {
+		const env = setupTestEnvironment("pi-lens-graph-drift-");
+		try {
+			const facts = new FactStore();
+			const file = createTempFile(
+				env.tmpDir,
+				"src/alpha.ts",
+				"export function alphaFn() {\n\treturn 1;\n}\n",
+			);
+
+			const g1 = await buildOrUpdateGraph(env.tmpDir, [file], facts);
+			expect(g1.buildGeneration).toBeDefined();
+			expect(getReviewGraphCacheIdentity(env.tmpDir, g1)).toBeDefined();
+
+			// mtime-only touch: signature diverges, content hash confirms
+			// unchanged → the pure-drift reuse path replaces the workspace
+			// entry with a fresh (unstamped) clone of the cached graph.
+			clearGraphCache();
+			const bumped = new Date(Date.now() + 5_000);
+			fs.utimesSync(file, bumped, bumped);
+			const g2 = await buildOrUpdateGraph(env.tmpDir, [file], facts);
+			expect(getLastGraphBuildInfo()).toMatchObject({
+				reused: true,
+				graphChanged: false,
+			});
+			expect(g2.buildGeneration).toBe(g1.buildGeneration);
+			// The graph the reuse build just returned must resolve an identity.
+			expect(getReviewGraphCacheIdentity(env.tmpDir, g2)).toBeDefined();
+		} finally {
+			clearReviewGraphWorkspaceCache();
+			env.cleanup();
+		}
 	});
 
 	it("resolves to a ReviewGraph with version and builtAt fields", async () => {

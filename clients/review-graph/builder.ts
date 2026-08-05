@@ -346,10 +346,21 @@ export function getReviewGraphCacheIdentity(
 	// every live graph, so comparing it can never detect that `graph` is a
 	// stale instance the workspace cache has since replaced (e.g. a concurrent
 	// build racing between this caller's projection snapshot and its identity
-	// lookup). `buildGeneration` is the per-content generation stamp (#459)
-	// that travels with the graph instance, so it actually distinguishes "the
-	// graph I have" from "the graph currently cached".
-	if (graph && cached.graph.buildGeneration !== graph.buildGeneration) return undefined;
+	// lookup). Compare the ENTRY's generation stamp (#459), not the stored
+	// graph object's: reuse paths store an unstamped `cloneGraph` copy and
+	// stamp only the returned instance, so `cached.graph.buildGeneration` is
+	// undefined on every drift-reuse / disk-hit entry while the caller's graph
+	// carries the entry's generation. The both-undefined case is legitimate
+	// only for the tier-3 hydration entry, where the caller holds the exact
+	// stored instance — anything else unstamped must not resolve an identity
+	// (e.g. the size-skip empty graph racing a hydrated entry).
+	if (graph) {
+		if (cached.buildGeneration === undefined && graph.buildGeneration === undefined) {
+			if (cached.graph !== graph) return undefined;
+		} else if (cached.buildGeneration !== graph.buildGeneration) {
+			return undefined;
+		}
+	}
 	const version = graph?.version ?? cached.graph.version;
 	if (typeof version !== "string" || version.length === 0 ||
 		typeof cached.signature !== "string") {
