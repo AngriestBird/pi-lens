@@ -45,7 +45,10 @@ import { warmTriggerFor } from "../clients/project-diagnostics/extractors.js";
 import type { FreshProjectDiagnosticsResult } from "../clients/project-diagnostics/fresh-fetch.js";
 import { fetchFreshProjectDiagnostics } from "../clients/project-diagnostics/fresh-fetch.js";
 import { loadBootstrapClients } from "../clients/bootstrap.js";
-import { scanTruncationNotice } from "../clients/lens-engine.js";
+import {
+	generatedSkipNotice,
+	scanTruncationNotice,
+} from "../clients/lens-engine.js";
 import { scanProjectDiagnostics } from "../clients/project-diagnostics/scanner.js";
 import type {
 	ProjectDiagnostic,
@@ -1533,6 +1536,14 @@ async function formatFullMode(
 	const scanTruncatedNote = scanTruncatedNoticeText
 		? `\n\n${scanTruncatedNoticeText}`
 		: "";
+	// #1107 phase 2: same "reached the seam, nothing rendered it" gap as #784
+	// above, for the generated-name/dir skip counters.
+	const generatedSkipNoticeText = projectSnapshot
+		? generatedSkipNotice(projectSnapshot)
+		: undefined;
+	const generatedSkipNote = generatedSkipNoticeText
+		? `\n\n${generatedSkipNoticeText}`
+		: "";
 	const abortedNote =
 		abortedIds.size > 0
 			? `\n\nstopped mid-scan (still running in the background, not reflected in this result): ${[
@@ -1592,6 +1603,14 @@ async function formatFullMode(
 			// #784: lets a caller check "was the cheap project scan truncated"
 			// without parsing the text note.
 			projectScanTruncated: projectSnapshot?.scanTruncated ?? false,
+			// #1107 phase 2: same machine-readable convention, for the
+			// generated-name/dir skip counters.
+			...(projectSnapshot?.generatedFileSkips
+				? { projectGeneratedFileSkips: projectSnapshot.generatedFileSkips }
+				: {}),
+			...(projectSnapshot?.generatedDirSkips
+				? { projectGeneratedDirSkips: projectSnapshot.generatedDirSkips }
+				: {}),
 		},
 	};
 	// Stopped mid-scan: the results above are whatever completed before the abort.
@@ -1622,6 +1641,7 @@ async function formatFullMode(
 						failedNote +
 						walkUnsafeRootNote +
 						scanTruncatedNote +
+						generatedSkipNote +
 						abortedNote +
 						freshNote +
 						missingNote,
@@ -1637,6 +1657,7 @@ async function formatFullMode(
 		failedNote ||
 		walkUnsafeRootNote ||
 		scanTruncatedNote ||
+		generatedSkipNote ||
 		abortedNote ||
 		freshNote ||
 		unconfirmedLspNote ||
@@ -1655,6 +1676,7 @@ async function formatFullMode(
 						failedNote +
 						walkUnsafeRootNote +
 						scanTruncatedNote +
+						generatedSkipNote +
 						abortedNote +
 						freshNote +
 						missingNote,

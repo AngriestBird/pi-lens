@@ -146,6 +146,34 @@ export function scanTruncationNotice(
 	);
 }
 
+/**
+ * #1107 phase 2: `generatedFileSkips`/`generatedDirSkips` reach this seam via
+ * `ProjectDiagnosticsSnapshot` but need explicit rendering, same pattern as
+ * `scanTruncationNotice` above — otherwise a user has no way to learn the
+ * generated-name heuristic silently excluded files/directories short of
+ * reading `latency.log`'s `source_walk_skip_summary` line directly. Returns
+ * `undefined` when neither counter is set (nothing to append).
+ */
+export function generatedSkipNotice(
+	snapshot: Pick<
+		ProjectDiagnosticsSnapshot,
+		"generatedFileSkips" | "generatedDirSkips"
+	>,
+): string | undefined {
+	const files = snapshot.generatedFileSkips ?? 0;
+	const dirs = snapshot.generatedDirSkips ?? 0;
+	if (files === 0 && dirs === 0) return undefined;
+	const parts: string[] = [];
+	if (files > 0) parts.push(`${files} file(s)`);
+	if (dirs > 0) parts.push(`${dirs} director${dirs === 1 ? "y" : "ies"}`);
+	return (
+		`ℹ ${parts.join(" and ")} excluded by generated-name heuristics — ` +
+		"a real hand-written file/directory whose name looks generated (e.g. " +
+		"`gen.ts`, `generated/`) can be excluded too; pass includeGenerated to " +
+		"scan without this filter if you suspect a false skip."
+	);
+}
+
 /** Process-wide tree-sitter health for host status surfaces. */
 export function treeSitterRuntimeStatus(): TreeSitterRuntimeStatus {
 	return getTreeSitterRuntimeStatus();

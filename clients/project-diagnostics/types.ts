@@ -48,6 +48,26 @@ export interface ProjectDiagnosticsSnapshot {
 	 * never persisted over the last authoritative snapshot (#891).
 	 */
 	scanTruncated?: boolean;
+	/**
+	 * #1107 phase 2: source files this scan's walk KEPT OUT because they
+	 * matched a generated/artifact NAME or content-header heuristic
+	 * (`source-filter.ts`'s `generatedOrArtifactSkips` counter) — i.e. the
+	 * "N files excluded by generated-name heuristics" tool-facing
+	 * observability the issue asked for, so a user doesn't have to read
+	 * latency.log to see the hole. Only present (and only nonzero) when this
+	 * scan actually walked (`options.files` scans never populate it, matching
+	 * `scanTruncated`/`entryBudgetExceeded`'s existing convention).
+	 */
+	generatedFileSkips?: number;
+	/**
+	 * #1107 phase 2: whole DIRECTORIES this scan's walk pruned because their
+	 * NAME looked generated (`shouldRecurseIntoDir`'s
+	 * `isGeneratedArtifactDirectoryName` branch; `generatedDirSkips` on
+	 * `SourceCollectionResult`) — one count per directory pruned, not per file
+	 * inside it (the directory's contents are never enumerated). Same
+	 * presence convention as `generatedFileSkips`.
+	 */
+	generatedDirSkips?: number;
 }
 
 export interface ProjectDiagnosticsDeltaReport {

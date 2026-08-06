@@ -47,6 +47,7 @@ import {
 	projectReport,
 	projectScan,
 	readEnclosing,
+	generatedSkipNotice,
 	readSymbol,
 	recentLatency,
 	renderCompactModuleReport,
@@ -1019,6 +1020,10 @@ async function callTool(
 		// explicitly — mirrors the #777 warm-skip notify's override-hint wording.
 		const truncationNotice = scanTruncationNotice(snapshot);
 		if (truncationNotice) summaryLines.push(truncationNotice);
+		// #1107 phase 2: same "reached the seam but nothing rendered it" gap as
+		// #784's scanTruncationNotice, for the generated-name skip counters.
+		const skipNotice = generatedSkipNotice(snapshot);
+		if (skipNotice) summaryLines.push(skipNotice);
 		return toolText(summaryLines.join("\n"), {
 			filesScanned: snapshot.filesScanned,
 			runners: snapshot.runners,
@@ -1030,6 +1035,12 @@ async function callTool(
 			...(snapshot.scanTruncated ? { scanTruncated: true } : {}),
 			...(snapshot.treeSitterStatus
 				? { treeSitterStatus: snapshot.treeSitterStatus }
+				: {}),
+			...(snapshot.generatedFileSkips
+				? { generatedFileSkips: snapshot.generatedFileSkips }
+				: {}),
+			...(snapshot.generatedDirSkips
+				? { generatedDirSkips: snapshot.generatedDirSkips }
 				: {}),
 		});
 	}

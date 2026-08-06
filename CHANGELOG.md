@@ -6,6 +6,54 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **Source-walk generated-artifact escape hatch (closes #1107, phase 2 of 2)** — three pieces, building on phase 1's
+	counters (#1111):
+	1. **Directory-level skip counting.** `shouldRecurseIntoDir`'s
+		`isGeneratedArtifactDirectoryName` branch (`clients/source-walker.ts`)
+		pruned whole directories (`generated/`, `codegen/`, `__generated__/`, …)
+		with zero counting — an entire directory of real files reported zero.
+		`SourceCollectionResult` gains `generatedDirSkips`, threaded through the
+		same `SourceWalkSkipCounters` seam and the `source_walk_skip_summary`
+		log line: one count per PRUNED DIRECTORY, never per file inside it
+		(enumerating the contents would defeat the pruning). The
+		`SourceCollectionResult` docblock's former "KNOWN GAP" note is now the
+		real field doc.
+	2. **Tool-facing surfacing.** `ProjectDiagnosticsSnapshot` gains
+		`generatedFileSkips`/`generatedDirSkips` (only present, like
+		`scanTruncated`, on a walk that actually ran); `lens-engine.ts`'s new
+		`generatedSkipNotice` renders them into a one-line notice mirroring
+		`scanTruncationNotice`'s (#784) style, wired into both
+		`pilens_project_scan` (`mcp/server.ts`) and `lens_diagnostics`
+		(`tools/lens-diagnostics.ts`). `module_report` has no walk-backed
+		section of its own to thread this through (it reads the cached review
+		graph, built asynchronously elsewhere) — surfaced in the
+		project-diagnostics path only.
+	3. **Content-probe escape hatch (the actual behavior change).** A file
+		matching a generated-artifact NAME pattern but with no other evidence is
+		now KEPT instead of silently dropped. `generated-artifacts.ts` splits
+		its path check into STRONG evidence (a generated directory segment, a
+		lockfile — always conclusive, never rescued) and WEAK evidence (the
+		filename-regex patterns, e.g. `gen.ts`, `foo_generated.go`,
+		`bar.min.js`); `classifyGeneratedOrArtifact` requires a WEAK match to be
+		corroborated by a generated-code header in the first 4 KB before
+		treating it as an artifact — cheapest-first, with the sibling-source
+		probe (`findSourceSibling`/`isBuildArtifact`) already checked upstream
+		by every walk-driven caller. With NEITHER piece of evidence, the file is
+		KEPT and counted under the new `generatedNameOverrides` counter (also in
+		the rollup log line), so the heuristic's rescues stay observable.
+		Shipped **ungated**: the existing `LENS_FLAGS`/`.pi-lens.json` toggle
+		registry is sized for whole-subsystem behavior (lsp/tests/delta/…), not
+		a narrow heuristic refinement, and `SourceCollectionOptions.includeGenerated`
+		already gives callers a full opt-out. Documented tradeoff: a false-KEEP
+		(one extra file an agent must judge) is preferred over the prior
+		silent false-DROP (a real file invisibly never analyzed) — this changes
+		walk output for review-graph/word-index/project-diagnostics/call-graph:
+		a repo with a real `gen.ts` gains coverage (intended), and a repo with a
+		headerless generated file with no source twin also gains coverage
+		(accepted per the issue). Invariant preserved for lockfiles, declaration
+		files, and anything the ignore-matcher/extension filter already
+		excluded — none of those are ever rescued.
+
 - **Source-walk skip observability (refs #1107, phase 1 of 2)** — the source
 	walk silently dropped real files whose NAMES match generated-artifact
 	heuristics (a real `src/gen.ts` was invisible to
