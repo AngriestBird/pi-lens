@@ -691,6 +691,27 @@ const AUTO_INSTALLABLE_DEFAULT_FORMATTERS = new Map<string, string>([
 	["ktlint", "ktlint"],
 ]);
 
+const FORMATTER_POLICY_BY_FILENAME = new Map<string, FormatterPolicy>([
+	[
+		"terragrunt.hcl",
+		{
+			formatterNames: ["terragrunt-hcl"],
+			defaultFormatter: "terragrunt-hcl",
+			defaultWhenUnconfigured: true,
+			gate: "smart-default",
+		},
+	],
+	[
+		"root.hcl",
+		{
+			formatterNames: ["terragrunt-hcl"],
+			defaultFormatter: "terragrunt-hcl",
+			defaultWhenUnconfigured: true,
+			gate: "smart-default",
+		},
+	],
+]);
+
 export function getFormatterPolicyForExtension(
 	ext: string,
 ): FormatterPolicy | undefined {
@@ -700,6 +721,10 @@ export function getFormatterPolicyForExtension(
 export function getFormatterPolicyForFile(
 	filePath: string,
 ): FormatterPolicy | undefined {
+	const byFilename = FORMATTER_POLICY_BY_FILENAME.get(
+		path.basename(filePath).toLowerCase(),
+	);
+	if (byFilename) return byFilename;
 	return getFormatterPolicyForExtension(path.extname(filePath));
 }
 
@@ -789,6 +814,7 @@ export type LintRunnerName =
 	| "shellcheck"
 	| "fish-indent"
 	| "tflint"
+	| "terragrunt"
 	| "credo"
 	| "cpp-check"
 	| "dart-analyze"
@@ -1338,6 +1364,16 @@ export function getLinterPolicyForFile(
 			runnerNames: ["hadolint"],
 			preferredRunners: ["hadolint"],
 			defaultRunner: "hadolint",
+			defaultWhenUnconfigured: true,
+			gate: "smart-default",
+		};
+	}
+
+	if (["terragrunt.hcl", "root.hcl"].includes(path.basename(filePath).toLowerCase())) {
+		return {
+			runnerNames: ["terragrunt"],
+			preferredRunners: ["terragrunt"],
+			defaultRunner: "terragrunt",
 			defaultWhenUnconfigured: true,
 			gate: "smart-default",
 		};

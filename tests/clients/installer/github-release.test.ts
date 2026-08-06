@@ -94,6 +94,32 @@ describe("GitHub release asset selection", () => {
 		});
 	});
 
+	// Terragrunt ships bare per-platform binaries; win32/arm64 falls back to the
+	// x64 binary (Windows emulation) because no arm64 asset exists upstream.
+	describe("terragrunt asset patterns", () => {
+		it.each([
+			["linux", "x64", "terragrunt_linux_amd64"],
+			["linux", "arm64", "terragrunt_linux_arm64"],
+			["darwin", "x64", "terragrunt_darwin_amd64"],
+			["darwin", "arm64", "terragrunt_darwin_arm64"],
+			["win32", "x64", "terragrunt_windows_amd64.exe"],
+			["win32", "arm64", "terragrunt_windows_amd64.exe"],
+		] as const)("%s/%s → %s", async (platform, arch, expected) => {
+			const { resolveGitHubAsset } = await import(
+				"../../../clients/installer/index.ts"
+			);
+			expect(resolveGitHubAsset("terragrunt", platform, arch)).toBe(expected);
+		});
+
+		it("does not select a binary for an incompatible arch", async () => {
+			const { resolveGitHubAsset } = await import(
+				"../../../clients/installer/index.ts"
+			);
+			expect(resolveGitHubAsset("terragrunt", "linux", "ia32")).toBeUndefined();
+			expect(resolveGitHubAsset("terragrunt", "win32", "ia32")).toBeUndefined();
+		});
+	});
+
 	describe("windows archive binary names", () => {
 		it("resolves shellcheck/tflint zip binaries to .exe on Windows", async () => {
 			const {

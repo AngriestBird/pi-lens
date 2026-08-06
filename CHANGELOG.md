@@ -86,6 +86,17 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **Terragrunt linting and formatting** — `terragrunt.hcl` and `root.hcl` now
+	get a dedicated `terragrunt` file kind (filename-detected only; a plain
+	`.hcl` file stays unmapped). New `terragrunt` dispatch runner wraps
+	`terragrunt hcl validate --json`, and a `terragrunt-hcl` formatter wraps
+	`terragrunt hcl fmt`. Terragrunt has no LSP, so it's runner/formatter only.
+	The `terragrunt` binary installs the same way as tflint (GitHub release,
+	bare per-platform binaries). Also added `.tf` (Terraform) to the
+	`trivy-config` runner's `appliesTo`, gated behind the existing
+	`trivy.enabled` opt-in — terragrunt itself stays excluded from trivy, since
+	trivy evaluates the Terraform language, not terragrunt config.
+
 - **Source-walk generated-artifact escape hatch (closes #1107, phase 2 of 2)** — three pieces, building on phase 1's
 	counters (#1111):
 	1. **Directory-level skip counting.** `shouldRecurseIntoDir`'s

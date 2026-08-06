@@ -42,6 +42,7 @@ export type FileKind =
 	| "sql" // SQL
 	| "swift" // Swift
 	| "terraform" // Terraform
+	| "terragrunt" // Terragrunt
 	| "toml" // TOML
 	| "yaml" // YAML
 	| "zig" // Zig
@@ -212,6 +213,7 @@ export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
 		".tf",
 		".tfvars",
 	],
+	terragrunt: [],
 	toml: [
 		".toml",
 	],
@@ -265,6 +267,7 @@ const SPECIAL_FILENAMES: Array<{ pattern: RegExp; kind: FileKind }> = [
 	{ pattern: /^CMakeLists\.txt$/i, kind: "cmake" },
 	{ pattern: /^Makefile$/i, kind: "shell" },
 	{ pattern: /^Dockerfile(\.\w+)?$/i, kind: "docker" },
+	{ pattern: /^(terragrunt|root)\.hcl$/i, kind: "terragrunt" },
 ];
 
 // --- Detection Functions ---
@@ -369,6 +372,7 @@ export const CODE_KINDS: ReadonlySet<FileKind> = new Set<FileKind>([
 	"sql",
 	"swift",
 	"terraform",
+	"terragrunt",
 	"zig",
 ]);
 
@@ -445,6 +449,7 @@ export function getFileKindLabel(kind: FileKind): string {
 		ocaml: "OCaml",
 		clojure: "Clojure",
 		terraform: "Terraform",
+		terragrunt: "Terragrunt",
 		nix: "Nix",
 		toml: "TOML",
 	};
@@ -519,6 +524,7 @@ export function getLanguageId(kind: FileKind): string {
 		ocaml: "ocaml",
 		clojure: "clojure",
 		terraform: "terraform",
+		terragrunt: "terragrunt",
 		nix: "nix",
 		toml: "toml",
 	};

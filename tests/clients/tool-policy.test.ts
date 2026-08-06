@@ -191,6 +191,19 @@ describe("tool-policy", () => {
 			defaultFormatter: "taplo",
 			defaultWhenUnconfigured: true,
 		});
+		expect(getFormatterPolicyForFile("/tmp/terragrunt.hcl")).toMatchObject({
+			defaultFormatter: "terragrunt-hcl",
+			defaultWhenUnconfigured: true,
+		});
+		expect(getFormatterPolicyForFile("/tmp/root.hcl")).toMatchObject({
+			defaultFormatter: "terragrunt-hcl",
+			defaultWhenUnconfigured: true,
+		});
+		expect(getFormatterPolicyForFile("/tmp/Terragrunt.HCL")).toMatchObject({
+			defaultFormatter: "terragrunt-hcl",
+			defaultWhenUnconfigured: true,
+		});
+		expect(getFormatterPolicyForFile("/tmp/foo.hcl")).toBeUndefined();
 	});
 
 	it("chooses autofix tools from config-aware smart defaults", () => {
@@ -299,6 +312,22 @@ describe("tool-policy", () => {
 			preferredRunners: ["yamllint"],
 			gate: "smart-default",
 		});
+		expect(getLinterPolicyForFile("/tmp/terragrunt.hcl", {})).toMatchObject({
+			preferredRunners: ["terragrunt"],
+			defaultRunner: "terragrunt",
+			gate: "smart-default",
+		});
+		expect(getLinterPolicyForFile("/tmp/root.hcl", {})).toMatchObject({
+			preferredRunners: ["terragrunt"],
+			defaultRunner: "terragrunt",
+			gate: "smart-default",
+		});
+		expect(getLinterPolicyForFile("/tmp/Root.HCL", {})).toMatchObject({
+			preferredRunners: ["terragrunt"],
+			defaultRunner: "terragrunt",
+			gate: "smart-default",
+		});
+		expect(getLinterPolicyForFile("/tmp/foo.hcl", {})).toBeUndefined();
 		expect(getLinterPolicyForFile("/tmp/file.md", {})).toMatchObject({
 			preferredRunners: ["markdownlint"],
 			gate: "smart-default",

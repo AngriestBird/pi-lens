@@ -545,6 +545,70 @@ describe("getFormattersForFile — policy selection", () => {
 		expect(formatters.map((f) => f.name)).toEqual(["ocamlformat"]);
 	});
 
+	it("uses terragrunt-hcl as the smart default for terragrunt.hcl when available", async () => {
+		await withPathShim("terragrunt", async () => {
+			const filePath = fileIn(tmpDir, "terragrunt.hcl");
+			const formatters = await getFormattersForFile(filePath, tmpDir);
+			expect(formatters.map((f) => f.name)).toEqual(["terragrunt-hcl"]);
+		});
+	});
+
+	it("uses terragrunt-hcl as the smart default for root.hcl when available", async () => {
+		await withPathShim("terragrunt", async () => {
+			const filePath = fileIn(tmpDir, "root.hcl");
+			const formatters = await getFormattersForFile(filePath, tmpDir);
+			expect(formatters.map((f) => f.name)).toEqual(["terragrunt-hcl"]);
+		});
+	});
+
+	it("matches terragrunt-hcl for Terragrunt.HCL regardless of case", async () => {
+		await withPathShim("terragrunt", async () => {
+			const filePath = fileIn(tmpDir, "Terragrunt.HCL");
+			const formatters = await getFormattersForFile(filePath, tmpDir);
+			expect(formatters.map((f) => f.name)).toEqual(["terragrunt-hcl"]);
+		});
+	});
+
+	it("does not match terragrunt-hcl for a generic .hcl file", async () => {
+		await withPathShim("terragrunt", async () => {
+			const formatters = await getFormattersForFile(
+				fileIn(tmpDir, "packer.hcl"),
+				tmpDir,
+			);
+			expect(formatters).toEqual([]);
+		});
+	});
+
+	it("plain .hcl cached first does not suppress terragrunt.hcl in the same dir", async () => {
+		await withPathShim("terragrunt", async () => {
+			const plain = await getFormattersForFile(
+				fileIn(tmpDir, ".terraform.lock.hcl"),
+				tmpDir,
+			);
+			expect(plain).toEqual([]);
+			const terragrunt = await getFormattersForFile(
+				fileIn(tmpDir, "terragrunt.hcl"),
+				tmpDir,
+			);
+			expect(terragrunt.map((f) => f.name)).toEqual(["terragrunt-hcl"]);
+		});
+	});
+
+	it("terragrunt.hcl cached first does not leak its formatter onto plain .hcl", async () => {
+		await withPathShim("terragrunt", async () => {
+			const terragrunt = await getFormattersForFile(
+				fileIn(tmpDir, "terragrunt.hcl"),
+				tmpDir,
+			);
+			expect(terragrunt.map((f) => f.name)).toEqual(["terragrunt-hcl"]);
+			const plain = await getFormattersForFile(
+				fileIn(tmpDir, ".terraform.lock.hcl"),
+				tmpDir,
+			);
+			expect(plain).toEqual([]);
+		});
+	});
+
 	it("uses taplo as the smart default for TOML files when available", async () => {
 		await withPathShim("taplo", async () => {
 			const filePath = fileIn(tmpDir, "config.toml");

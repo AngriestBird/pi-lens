@@ -1066,6 +1066,34 @@ export const TOOLS: ToolDefinition[] = [
 		},
 	},
 	{
+		// Terragrunt ships a bare native binary per platform on GitHub releases.
+		// Windows arm64 uses the x64 binary through Windows' built-in emulation —
+		// there is no terragrunt_windows_arm64.exe upstream.
+		id: "terragrunt",
+		name: "terragrunt",
+		checkCommand: "terragrunt",
+		checkArgs: ["--version"],
+		installStrategy: "github",
+		binaryName: "terragrunt",
+		github: {
+			repo: "gruntwork-io/terragrunt",
+			assetMatch: (platform, arch) => {
+				if (arch !== "x64" && arch !== "arm64") return undefined;
+				if (platform === "linux")
+					return arch === "arm64"
+						? "terragrunt_linux_arm64"
+						: "terragrunt_linux_amd64";
+				if (platform === "darwin")
+					return arch === "arm64"
+						? "terragrunt_darwin_arm64"
+						: "terragrunt_darwin_amd64";
+				if (platform === "win32") return "terragrunt_windows_amd64.exe";
+				return undefined;
+			},
+			// bare binary — no binaryInArchive
+		},
+	},
+	{
 		id: "gitleaks",
 		name: "gitleaks",
 		checkCommand: "gitleaks",
@@ -3660,6 +3688,7 @@ export const GITHUB_TOOLS = [
 	"zizmor",
 	"typos-lsp",
 	"tflint",
+	"terragrunt",
 	"terraform-ls",
 	"zls",
 	"hadolint",

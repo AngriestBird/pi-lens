@@ -84,6 +84,8 @@ export interface FormatterInfo {
 	name: string;
 	command: string[]; // Command with $FILE placeholder — used as fallback
 	extensions: string[];
+	/** Basenames (lowercase) this formatter applies to regardless of extension. */
+	filenames?: string[];
 	/** Detect if this formatter should be used for a project */
 	detect(cwd: string): Promise<boolean>;
 	/**
@@ -714,6 +716,16 @@ export const terraformFormatter: FormatterInfo = {
 	},
 };
 
+export const terragruntHclFormatter: FormatterInfo = {
+	name: "terragrunt-hcl",
+	command: ["terragrunt", "hcl", "fmt", "--file", "$FILE"],
+	extensions: [],
+	filenames: ["terragrunt.hcl", "root.hcl"],
+	async detect(_cwd: string) {
+		return (await which("terragrunt")) !== null;
+	},
+};
+
 export const phpCsFixerFormatter: FormatterInfo = {
 	name: "php-cs-fixer",
 	command: ["php-cs-fixer", "fix", "$FILE"],
@@ -911,6 +923,7 @@ const ALL_FORMATTERS: FormatterInfo[] = [
 	ktlintFormatter,
 	ktfmtFormatter,
 	terraformFormatter,
+	terragruntHclFormatter,
 	phpCsFixerFormatter,
 	csharpierFormatter,
 	fantomasFormatter,
@@ -937,7 +950,16 @@ export async function getFormattersForFile(
 	cwd: string,
 ): Promise<FormatterInfo[]> {
 	const ext = path.extname(filePath).toLowerCase();
-	const cacheKey = `${cwd}:${ext}`;
+	const base = path.basename(filePath).toLowerCase();
+	// Filename-keyed formatters (e.g. terragrunt.hcl) can share an extension
+	// with unrelated files in the same dir (.terraform.lock.hcl next to
+	// terragrunt.hcl). Fold the basename into the cache key only when a
+	// filename-based formatter actually applies, so a plain .hcl file cached
+	// first doesn't poison the cache for terragrunt.hcl/root.hcl, or vice versa.
+	const usesFilenameFormatter = ALL_FORMATTERS.some((f) =>
+		f.filenames?.includes(base),
+	);
+	const cacheKey = usesFilenameFormatter ? `${cwd}:${ext}:${base}` : `${cwd}:${ext}`;
 
 	// Check cache
 	let cached = detectionCache.get(cwd);
@@ -953,8 +975,10 @@ export async function getFormattersForFile(
 		return ALL_FORMATTERS.filter((f) => enabledNames.includes(f.name));
 	}
 
-	// Detect formatters for this extension
-	const matching = ALL_FORMATTERS.filter((f) => f.extensions.includes(ext));
+	// Detect formatters for this extension (or exact filename, e.g. terragrunt.hcl)
+	const matching = ALL_FORMATTERS.filter(
+		(f) => f.extensions.includes(ext) || f.filenames?.includes(base),
+	);
 	const formatterPolicy = getFormatterPolicyForFile(filePath);
 	const smartDefaultFormatterName = getSmartDefaultFormatterName(filePath);
 
