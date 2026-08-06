@@ -2,7 +2,13 @@ import fs from "node:fs/promises";
 import type { Stats } from "node:fs";
 import path from "node:path";
 import { URL } from "node:url";
-import { isUnderDir, normalizeMapKey, pathsEqual, uriToPath } from "./path-utils.js";
+import {
+	isUnderDir,
+	normalizeEphemeralMapKey,
+	normalizeMapKey,
+	pathsEqual,
+	uriToPath,
+} from "./path-utils.js";
 import {
 	convertCharacterOffset,
 	lineTextAt,
@@ -441,7 +447,12 @@ type WorkspaceEditOp =
 	| DeleteFileOp;
 
 function pathIndexKey(uri: string): string {
-	return normalizeMapKey(uriToPath(uri));
+	// uriToPath already resolves the path through normalizeFilePath, including
+	// realpath canonicalization for existing files. Re-canonicalizing that
+	// result with normalizeMapKey made every planner lookup perform a second
+	// synchronous filesystem walk; this index is call-scoped, so the cheap fold
+	// is sufficient after the first canonicalization.
+	return normalizeEphemeralMapKey(uriToPath(uri));
 }
 
 function textEditOriginKey(origin: TextEditOrigin): string {
@@ -476,6 +487,14 @@ function planWorkspaceEdit(
 	const descendants = new Map<string, Set<string>>();
 	const indexedAncestors = new Map<string, string[]>();
 	const seenResources = new Set<string>();
+	const pathKeys = new Map<string, string>();
+	const indexKey = (uri: string): string => {
+		const cached = pathKeys.get(uri);
+		if (cached !== undefined) return cached;
+		const key = pathIndexKey(uri);
+		pathKeys.set(uri, key);
+		return key;
+	};
 	const addIndex = (key: string): void => {
 		const ancestors: string[] = [];
 		let current = key;
@@ -500,7 +519,7 @@ function planWorkspaceEdit(
 		version: number | null | undefined,
 		origin?: TextEditOrigin,
 	): void => {
-		const key = pathIndexKey(uri);
+		const key = indexKey(uri);
 		const existing = pending.get(key);
 		if (existing) {
 			if (existing.version !== version && existing.version !== undefined && version !== undefined) {
@@ -519,7 +538,7 @@ function planWorkspaceEdit(
 		addIndex(key);
 	};
 	const flushUri = (uri: string): void => {
-		const key = pathIndexKey(uri);
+		const key = indexKey(uri);
 		const item = pending.get(key);
 		if (!item) return;
 		pending.delete(key);
@@ -537,7 +556,7 @@ function planWorkspaceEdit(
 		}
 	};
 	const flushSubtree = (uri: string): void => {
-		const key = pathIndexKey(uri);
+		const key = indexKey(uri);
 		for (const candidate of [...(descendants.get(key) ?? [])]) {
 			const item = pending.get(candidate);
 			if (item) flushUri(item.uri);
@@ -571,8 +590,8 @@ function planWorkspaceEdit(
 		}
 		const resource = parseResource(change as Record<string, unknown>);
 		const resourceKey = resource.kind === "rename"
-			? `rename:${pathIndexKey(resource.oldUri)}:${pathIndexKey(resource.newUri)}`
-			: `${resource.kind}:${pathIndexKey(resource.uri)}`;
+			? `rename:${indexKey(resource.oldUri)}:${indexKey(resource.newUri)}`
+			: `${resource.kind}:${indexKey(resource.uri)}`;
 		if (seenResources.has(resourceKey)) throw new Error(`duplicate workspace resource operation: ${resourceKey}`);
 		seenResources.add(resourceKey);
 		if (resource.kind === "create") flushUri(resource.uri);
