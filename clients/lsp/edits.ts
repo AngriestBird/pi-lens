@@ -237,33 +237,62 @@ function positionsEqual(a: LSPPosition, b: LSPPosition): boolean {
 	return a.line === b.line && a.character === b.character;
 }
 
-function rangesEqual(a: LSPRange, b: LSPRange): boolean {
-	return positionsEqual(a.start, b.start) && positionsEqual(a.end, b.end);
-}
-
 function isEmptyRange(range: LSPRange): boolean {
 	return positionsEqual(range.start, range.end);
 }
 
-function sortAndValidateTextEdits(edits: LSPTextEdit[]): LSPTextEdit[] {
-	const sorted = edits
+/**
+ * Order edits for reverse-application to a string: latest position first, so an
+ * earlier splice never shifts a not-yet-applied edit's offsets. Ties break to
+ * match LSP insertion semantics:
+ *   - same start, larger END first → a replace anchored at position P applies
+ *     before a zero-width insert at P, so the insert lands at the (post-replace)
+ *     boundary instead of being clobbered — and the result no longer depends on
+ *     listing order (P3-1, insert-at-replace-boundary);
+ *   - same start AND end (e.g. several zero-width inserts at one point) → later
+ *     ARRAY index first, so applying in this reverse order reproduces the edits'
+ *     original array order (the #1066 same-position-insert invariant).
+ *
+ * This ordering is NOT idempotent for the same-range tie (re-sorting flips the
+ * array index), so it MUST be applied exactly once, at the string-write site,
+ * over array-order input. `normalizeTextEditsForContent` deliberately returns
+ * edits in array order (never pre-sorted) so this single sort is the only pass.
+ */
+function sortEditsForApplication(edits: LSPTextEdit[]): LSPTextEdit[] {
+	return edits
 		.map((edit, index) => ({ edit, index }))
 		.sort((a, b) => {
-			const positionDelta = comparePosition(b.edit.range.start, a.edit.range.start);
-			return positionDelta !== 0 ? positionDelta : b.index - a.index;
+			const startDelta = comparePosition(b.edit.range.start, a.edit.range.start);
+			if (startDelta !== 0) return startDelta;
+			const endDelta = comparePosition(b.edit.range.end, a.edit.range.end);
+			if (endDelta !== 0) return endDelta;
+			return b.index - a.index;
 		})
 		.map(({ edit }) => edit);
+}
+
+/**
+ * Deduplicate exact non-empty duplicate edits and reject genuinely overlapping
+ * ranges, returning the survivors in their ORIGINAL ARRAY ORDER. Zero-width
+ * inserts are never deduplicated (their multiplicity is meaningful). Overlap is
+ * checked on a position-sorted copy so the check is order-independent, but the
+ * returned order is preserved for the single downstream application sort.
+ */
+function validateTextEdits(edits: LSPTextEdit[]): LSPTextEdit[] {
 	const unique: LSPTextEdit[] = [];
-	for (const edit of sorted) {
-		const previous = unique[unique.length - 1];
-		if (previous && !isEmptyRange(edit.range) && rangesEqual(previous.range, edit.range) && previous.newText === edit.newText) {
-			continue;
+	const seen = new Set<string>();
+	for (const edit of edits) {
+		if (!isEmptyRange(edit.range)) {
+			const key = textEditKey("", edit);
+			if (seen.has(key)) continue;
+			seen.add(key);
 		}
 		unique.push(edit);
 	}
-	for (let index = 0; index < unique.length - 1; index++) {
-		const later = unique[index]?.range;
-		const earlier = unique[index + 1]?.range;
+	const ordered = sortEditsForApplication(unique);
+	for (let index = 0; index < ordered.length - 1; index++) {
+		const later = ordered[index]?.range;
+		const earlier = ordered[index + 1]?.range;
 		if (later && earlier && comparePosition(earlier.end, later.start) > 0) {
 			throw new Error(`overlapping LSP edits: ${formatRange(earlier)} conflicts with ${formatRange(later)}`);
 		}
@@ -275,7 +304,10 @@ function utf16Position(content: string, position: LSPPosition, encoding: Positio
 	const line = lineTextAt(content, position.line);
 	const wireLength = convertCharacterOffset(encoding, line, line.length);
 	if (position.character > wireLength) {
-		throw new Error(`text edit character ${position.character} is outside line ${position.line + 1}`);
+		// LSP 3.17: a character past the end of the line defaults to the line
+		// length. Clamp to the UTF-16 line length rather than throwing (whole-line
+		// and whole-document sentinel ranges rely on this).
+		return { line: position.line, character: line.length };
 	}
 	if (encoding === "utf-16") return position;
 	// Find the UTF-16 offset whose encoded prefix has exactly this length. This
@@ -296,21 +328,36 @@ function utf16Position(content: string, position: LSPPosition, encoding: Positio
 
 function normalizeTextEditsForContent(content: string, edits: LSPTextEdit[], encoding: PositionEncoding): LSPTextEdit[] {
 	const lines = content.split("\n");
-	const converted = edits.map((edit) => {
-		if (edit.range.start.line >= lines.length || edit.range.end.line >= lines.length) {
-			throw new Error(`text edit line is outside the document`);
+	const lastLine = Math.max(0, lines.length - 1);
+	const clamp = (position: LSPPosition): LSPPosition => {
+		// LSP 3.17: a line past the end of the document defaults to the end of the
+		// document (last line, its length). Clamp rather than throw so a large
+		// sentinel end position — e.g. the (0,0)-(9999,0) whole-document replace
+		// idiom — resolves to a real range instead of failing.
+		if (position.line >= lines.length) {
+			return { line: lastLine, character: (lines[lastLine] ?? "").length };
 		}
-		const start = utf16Position(content, edit.range.start, encoding);
-		const end = utf16Position(content, edit.range.end, encoding);
+		return utf16Position(content, position, encoding);
+	};
+	const converted = edits.map((edit) => {
+		const start = clamp(edit.range.start);
+		const end = clamp(edit.range.end);
 		if (comparePosition(start, end) > 0) throw new Error("text edit range is out of order");
 		return { ...edit, range: { start, end } };
 	});
-	return sortAndValidateTextEdits(converted);
+	// Return array order (validated, deduped); the single application-ordering
+	// sort happens once at the string-write site in applyTextEditsToString.
+	return validateTextEdits(converted);
 }
 
 export function applyTextEditsToString(content: string, edits: LSPTextEdit[], positionEncoding: PositionEncoding = "utf-16"): string {
 	const lines = content.split("\n");
-	for (const edit of normalizeTextEditsForContent(content, edits, positionEncoding)) {
+	// normalizeTextEditsForContent returns array order; sort for reverse
+	// application exactly once, here, at the single string-write site.
+	const normalized = sortEditsForApplication(
+		normalizeTextEditsForContent(content, edits, positionEncoding),
+	);
+	for (const edit of normalized) {
 		const { start, end } = edit.range;
 		if (start.line === end.line) {
 			const line = lines[start.line] ?? "";
