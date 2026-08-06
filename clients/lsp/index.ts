@@ -38,6 +38,15 @@ import {
 	type LspMutationContext,
 } from "../lsp-mutation.js";
 import { createLSPClient } from "./client.js";
+import {
+	bindingStateLabel,
+	composeBoundToCurrentDisk,
+	createDiskBindingCache,
+	type BoundToCurrentDisk,
+	type DiagnosticBinding,
+	type DiskBindingCache,
+	type StoredDiagnosticBinding,
+} from "./diagnostic-binding.js";
 import { getServersForFileWithConfig, getServerInitOverride } from "./config.js";
 import { getLanguageId } from "./language.js";
 import type { LSPServerInfo } from "./server.js";
@@ -483,6 +492,16 @@ export interface LSPWorkspaceDiagnosticResult {
 	 * reads honestly as "skipped after failed warm-up" rather than "ran clean".
 	 */
 	skippedWarmupFailure?: boolean;
+	/**
+	 * #1093: wall-clock time (ms) these diagnostics were actually OBSERVED, set
+	 * ONLY for results served from the workspace-diagnostics cache (a replay of
+	 * an older scan). Absent for freshly-touched results (observed now). Callers
+	 * reconciling this into the footer widget must pass it as the `observedAt`
+	 * stamp so a cache-hit replay doesn't re-arm the mtime-staleness gate
+	 * (`reconcileStaleWidgetFiles`) and keep a resolved finding on screen (the
+	 * #1092 touchedAt-re-arming defect).
+	 */
+	observedAt?: number;
 }
 
 /**
@@ -772,6 +791,13 @@ export class LSPService {
 	 * those falls through to a fresh check rather than serving a stale result.
 	 */
 	private readonly lastKnownContentHash = new Map<string, string>();
+	/**
+	 * #1095: lazily verifies a stored {@link DiagnosticBinding} against current
+	 * disk bytes, memoizing the disk fingerprint per (file, mtime) so repeated
+	 * binding reads across `touchFile`/`getAllDiagnostics` within a session don't
+	 * re-hash unchanged files. Owned by the service so the memo is shared.
+	 */
+	private readonly diskBindingCache: DiskBindingCache = createDiskBindingCache();
 	private readonly lastDiagnosticsHealth = new Map<
 		string,
 		LSPDiagnosticsHealth
@@ -1540,6 +1566,18 @@ export class LSPService {
 				 * bonus field, not a shape change).
 				 */
 				inconclusive?: boolean;
+				/**
+				 * #1095: content binding of the merged result — {version?,
+				 * contentHash?, boundToCurrentDisk} answering "were these
+				 * diagnostics computed against what's on disk now?" composed across
+				 * every contributing client. `boundToCurrentDisk === false` means
+				 * the server's view diverged from disk (a stale-but-fresh-looking
+				 * result); consumers must demote such a result to inconclusive
+				 * rather than trust it. "unknown" (version-less server, or disk
+				 * unreadable) preserves pre-#1095 behavior. Non-enumerable, like
+				 * `inconclusive`.
+				 */
+				binding?: DiagnosticBinding;
 			})
 		| undefined
 	> {
@@ -2230,6 +2268,15 @@ export class LSPService {
 						spawned.flatMap((entry) => entry.client.getDiagnostics(filePath)),
 					)
 			: undefined;
+		// #1095 (P3-b): whether `collected` came from a tsserver sync confirm
+		// (`tsserverSyncRequest`) rather than the publish cache. A sync-confirmed
+		// result is authoritative for the CURRENT buffer but is NOT tied to the
+		// publish-path content binding (`diagnosticBindings`, set on publish), so
+		// composing that binding here could let a STALE publish fingerprint demote a
+		// genuinely-fresh sync answer to `false`. The end-of-wait fallback below can
+		// also set this. When true, the binding is surfaced as "unknown" (honest,
+		// non-demoting) rather than the stale publish binding.
+		let syncConfirmed = tsserverSyncConfirmed !== undefined;
 
 		// #707 end-of-wait fallback: when the racing confirm did NOT decide the
 		// wait (sync unavailable/failed mid-race, or push resolved as a bare
@@ -2261,6 +2308,7 @@ export class LSPService {
 					// Sync answered — confirmed result (clean or with diagnostics).
 					// Clear the timed-out flag so the touch is no longer inconclusive.
 					diagnosticsTimedOut = false;
+					syncConfirmed = true;
 					collected = syncResult.length > 0
 						? mergeLspDiagnostics(syncResult)
 						: [];
@@ -2413,6 +2461,34 @@ export class LSPService {
 			});
 		}
 
+		// #1095: attach the merged content binding (non-enumerable, like
+		// `inconclusive`) so a consumer can ask whether these diagnostics were
+		// computed against current disk. Composed across every spawned client so a
+		// single client whose view diverged from disk marks the whole merged result
+		// mismatched. Disk verify is lazy + memoized per (file, mtime).
+		let binding: DiagnosticBinding | undefined;
+		if (collected !== undefined) {
+			binding = syncConfirmed
+				? // #1095 (P3-b): a tsserver sync-confirmed result is authoritative for
+					// the current buffer but not tied to the publish-path fingerprint —
+					// surface "unknown" so a stale publish binding can't demote it.
+					{ boundToCurrentDisk: "unknown" }
+				: this.mergeBinding(
+						filePath,
+						// Optional-chain so a client without the getter (test doubles, a
+						// partially-mocked client) yields "unknown" rather than throwing —
+						// unknown preserves pre-#1095 behavior for that contributor.
+						spawned.map((entry) =>
+							entry.client.getDiagnosticBinding?.(filePath),
+						),
+					);
+			Object.defineProperty(collected, "binding", {
+				value: binding,
+				enumerable: false,
+				configurable: true,
+			});
+		}
+
 		// Only refresh the recent-touches entry when we actually pushed. Skipping
 		// here keeps the original push timestamp intact so the debounce window
 		// expires naturally instead of being extended by every reuse.
@@ -2432,6 +2508,13 @@ export class LSPService {
 				source,
 				failureKind: "success",
 				collectedDiagnostics: collected?.length,
+				// #1095: observability so an unbinding server is diagnosable —
+				// "bound" (matches disk) / "mismatch" (diverged) / "unknown"
+				// (version-less server or disk unreadable). Absent for non-collecting
+				// touches (no merged result to bind).
+				...(binding !== undefined && {
+					bindingState: bindingStateLabel(binding.boundToCurrentDisk),
+				}),
 				notifySkipped,
 				notifyWriteTimedOut,
 				// #743: per-server detail — which servers' writes actually timed out.
@@ -2713,6 +2796,39 @@ export class LSPService {
 
 	private hashContent(content: string): string {
 		return createHash("sha256").update(content).digest("hex");
+	}
+
+	/**
+	 * #1095: compose the content `binding` for a merged diagnostics result across
+	 * the clients that contributed to it (primary + any auxiliaries). Verifies
+	 * each contributor's stored binding against current disk lazily (memoized per
+	 * file+mtime by {@link diskBindingCache}) and composes per
+	 * {@link composeBoundToCurrentDisk}: ANY contributor mismatches disk → false;
+	 * else all "unknown" (or no contributors) → "unknown"; else true. The
+	 * surfaced version/contentHash come from the first contributor that carries
+	 * them — informational only; the load-bearing field is `boundToCurrentDisk`.
+	 */
+	private mergeBinding(
+		filePath: string,
+		stored: readonly (StoredDiagnosticBinding | undefined)[],
+	): DiagnosticBinding {
+		const verdicts: BoundToCurrentDisk[] = [];
+		let version: number | undefined;
+		let contentHash: string | undefined;
+		for (const entry of stored) {
+			verdicts.push(
+				this.diskBindingCache.boundToCurrentDisk(filePath, entry ?? {}),
+			);
+			if (version === undefined && entry?.version !== undefined) {
+				version = entry.version;
+				contentHash = entry.contentHash;
+			}
+		}
+		return {
+			version,
+			contentHash,
+			boundToCurrentDisk: composeBoundToCurrentDisk(verdicts),
+		};
 	}
 
 	/**
@@ -3650,11 +3766,22 @@ export class LSPService {
 				filePath,
 				workspaceSweepScopeKey,
 			);
-			if (cached) {
+			// #1095 (P2-1 bug-class sweep): both sweeps share cache entries under the
+			// same scopeKey, so this service sweep must apply the SAME content-binding
+			// gate the tools/lsp-diagnostics.ts sibling site does — an entry whose
+			// recorded fingerprint no longer matches disk (bytes changed WITHOUT an
+			// mtime bump the freshness check would catch, exactly what contentHash
+			// exists to detect) must NOT be replayed and reconciled as confirmed via
+			// mode=full. On a mismatch, fall through to a fresh touch.
+			if (cached && cached.binding.boundToCurrentDisk !== false) {
 				cachedResults.push({
 					filePath,
 					diagnostics: cached.diagnostics,
 					count: cached.count,
+					// #1093: a cache hit replays an older observation — carry its
+					// scan time so mode=full's footer reconcile stamps `touchedAt`
+					// with when the truth was seen, not now().
+					observedAt: cached.scannedAt,
 				});
 			} else {
 				filesToTouch.push(filePath);
@@ -4150,11 +4277,28 @@ export class LSPService {
 	 * Get all diagnostics across all tracked files (for cascade checking)
 	 */
 	async getAllDiagnostics(): Promise<
-		Map<string, { diags: import("./client.js").LSPDiagnostic[]; ts: number }>
+		Map<
+			string,
+			{
+				diags: import("./client.js").LSPDiagnostic[];
+				ts: number;
+				binding?: DiagnosticBinding;
+			}
+		>
 	> {
 		const all = new Map<
 			string,
-			{ diags: import("./client.js").LSPDiagnostic[]; ts: number }
+			{
+				diags: import("./client.js").LSPDiagnostic[];
+				ts: number;
+				binding?: DiagnosticBinding;
+			}
+		>();
+		// #1095: per-file stored bindings across every contributing client, merged
+		// into one `boundToCurrentDisk` verdict after the client loop.
+		const bindingsByPath = new Map<
+			string,
+			(StoredDiagnosticBinding | undefined)[]
 		>();
 		const now = Date.now();
 		for (const [_key, client] of this.state.clients) {
@@ -4191,7 +4335,27 @@ export class LSPService {
 				} else {
 					all.set(filePath, { diags: [...entry.diags], ts: entry.ts });
 				}
+				const list = bindingsByPath.get(filePath) ?? [];
+				list.push(entry.binding);
+				bindingsByPath.set(filePath, list);
 			}
+		}
+		// #1095 (P2-2): expose the composed content binding per file LAZILY — the
+		// disk stat+hash verify only runs when a consumer actually reads `.binding`.
+		// The current caller (the cascade, once per edit turn) does NOT read it yet
+		// (binding adoption in cascade/integration.ts is deferred to the second PR),
+		// so this leaves ZERO eager disk cost while still surfacing the field for the
+		// consumer that arrives next. Non-enumerable so incidental spread/serialize
+		// (e.g. logging) can't trigger a stat storm; memoized per entry so repeated
+		// reads verify once.
+		for (const [filePath, entry] of all) {
+			const stored = bindingsByPath.get(filePath) ?? [];
+			let memo: DiagnosticBinding | undefined;
+			Object.defineProperty(entry, "binding", {
+				enumerable: false,
+				configurable: true,
+				get: () => (memo ??= this.mergeBinding(filePath, stored)),
+			});
 		}
 		return all;
 	}

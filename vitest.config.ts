@@ -75,6 +75,11 @@ const grammarHeavyInclude = [
 	"tests/clients/review-graph/tsconfig-paths.test.ts",
 	"tests/clients/review-graph/extract-symbols.test.ts",
 	"tests/clients/project-diagnostics/scanner.test.ts",
+	// #1089: these two co-load most of the grammar set (incl. the heavy
+	// swift/cpp/kotlin/csharp four) for the call-graph fixture matrices —
+	// the exact #255/#902 contention shape this project exists to bound.
+	"tests/clients/tree-sitter-call-graph.test.ts",
+	"tests/clients/module-report-call-graph.test.ts",
 ];
 
 // Tier 2 fix (#902): event-loop *occupancy* guards (measureMaxSyncBlockMs —
