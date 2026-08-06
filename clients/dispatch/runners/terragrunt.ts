@@ -33,6 +33,16 @@ function normalizeSeverity(raw: unknown): "error" | "warning" {
 	return "warning";
 }
 
+function toRawDiagnostics(parsed: unknown): TerragruntDiagnostic[] {
+	if (Array.isArray(parsed)) return parsed as TerragruntDiagnostic[];
+	if (!parsed || typeof parsed !== "object") return [];
+	const invalidFiles = (parsed as { invalid_files?: unknown }).invalid_files;
+	if (!Array.isArray(invalidFiles)) return [];
+	return (invalidFiles as TerragruntInvalidFile[]).flatMap((f) =>
+		Array.isArray(f?.diagnostics) ? f.diagnostics : [],
+	);
+}
+
 /**
  * Parse `terragrunt hcl validate --json` output. Shape is unverified (the CLI
  * isn't installed in this environment) — accept both the nested
@@ -52,22 +62,9 @@ export function parseTerragruntOutput(
 		return [];
 	}
 
-	let rawDiagnostics: TerragruntDiagnostic[];
-	if (Array.isArray(parsed)) {
-		rawDiagnostics = parsed as TerragruntDiagnostic[];
-	} else if (parsed && typeof parsed === "object") {
-		const invalidFiles = (parsed as { invalid_files?: unknown }).invalid_files;
-		if (!Array.isArray(invalidFiles)) return [];
-		rawDiagnostics = (invalidFiles as TerragruntInvalidFile[]).flatMap(
-			(f) => (Array.isArray(f?.diagnostics) ? f.diagnostics : []),
-		);
-	} else {
-		return [];
-	}
-
 	const fileBase = path.basename(filePath);
 	const diagnostics: Diagnostic[] = [];
-	for (const d of rawDiagnostics) {
+	for (const d of toRawDiagnostics(parsed)) {
 		if (!d || typeof d !== "object") continue;
 		const diagFile = d.range?.filename;
 		if (diagFile && path.basename(diagFile) !== fileBase) continue;
@@ -90,6 +87,12 @@ export function parseTerragruntOutput(
 	return diagnostics;
 }
 
+const SKIPPED: RunnerResult = {
+	status: "skipped",
+	diagnostics: [],
+	semantic: "none",
+};
+
 const terragruntRunner: RunnerDefinition = {
 	id: "terragrunt",
 	appliesTo: ["terragrunt"],
@@ -100,9 +103,8 @@ const terragruntRunner: RunnerDefinition = {
 	async run(ctx: DispatchContext): Promise<RunnerResult> {
 		const cwd = ctx.cwd || process.cwd();
 		const policy = getLinterPolicyForCwd(ctx.filePath, cwd);
-		if (policy && !policy.preferredRunners.includes("terragrunt")) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
+		if (policy && !policy.preferredRunners.includes("terragrunt"))
+			return SKIPPED;
 
 		let cmd: string | null = null;
 		if (await terragrunt.isAvailableAsync(cwd)) {
@@ -112,7 +114,7 @@ const terragruntRunner: RunnerDefinition = {
 			if (managed) cmd = managed;
 		}
 
-		if (!cmd) return { status: "skipped", diagnostics: [], semantic: "none" };
+		if (!cmd) return SKIPPED;
 
 		const absPath = path.resolve(cwd, ctx.filePath);
 		const fileDir = path.dirname(absPath);
@@ -128,9 +130,7 @@ const terragruntRunner: RunnerDefinition = {
 			{ cwd: fileDir, timeout: 30000 },
 		);
 
-		if (result.error && !result.stdout) {
-			return { status: "skipped", diagnostics: [], semantic: "none" };
-		}
+		if (result.error && !result.stdout) return SKIPPED;
 
 		const diagnostics = parseTerragruntOutput(result.stdout || "", ctx.filePath);
 		if (diagnostics.length === 0) {

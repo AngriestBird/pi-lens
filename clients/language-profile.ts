@@ -6,6 +6,7 @@ import {
 	DOTNET_CSHARP_ROOT_MARKERS,
 	DOTNET_FSHARP_ROOT_MARKERS,
 	KIND_EXTENSIONS,
+	TERRAGRUNT_FILENAMES,
 	type FileKind,
 } from "./file-kinds.js";
 import { getProjectIgnoreMatcher } from "./file-utils.js";
@@ -50,7 +51,7 @@ const PROJECT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	elixir: ["mix.exs"],
 	gleam: ["gleam.toml"],
 	terraform: [".terraform.lock.hcl"],
-	terragrunt: ["terragrunt.hcl", "root.hcl"],
+	terragrunt: TERRAGRUNT_FILENAMES,
 	nix: ["flake.nix"],
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
 	csharp: DOTNET_CSHARP_ROOT_MARKERS,
@@ -96,7 +97,7 @@ const ROOT_MARKERS_BY_KIND: Partial<Record<FileKind, readonly string[]>> = {
 	elixir: ["mix.exs"],
 	gleam: ["gleam.toml"],
 	terraform: [".terraform.lock.hcl"],
-	terragrunt: ["terragrunt.hcl", "root.hcl"],
+	terragrunt: TERRAGRUNT_FILENAMES,
 	nix: ["flake.nix"],
 	toml: ["pyproject.toml", "Cargo.toml", "taplo.toml"],
 	csharp: DOTNET_CSHARP_ROOT_MARKERS,

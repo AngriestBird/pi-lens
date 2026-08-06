@@ -318,7 +318,9 @@ export interface PlatformPackageSpec {
  * the copy-pasted `if (platform === "linux") return arch === "arm64" ? … : …`
  * ladder that several release entries repeat verbatim. Each platform maps to its
  * `x64` (default) and optional `arm64` asset substring; a missing platform or
- * arch ⇒ unsupported (`undefined`), exactly as the hand-written ladders behaved.
+ * arch ⇒ unsupported (`undefined`). Arches outside x64/arm64 (ia32, ppc64, …)
+ * are unsupported too — no release entry ships a 32-bit or exotic asset, and
+ * handing back the x64 substring there would install an unrunnable binary.
  */
 function archAssetMatch(table: {
 	linux?: { x64?: string; arm64?: string };
@@ -326,9 +328,8 @@ function archAssetMatch(table: {
 	win32?: { x64?: string; arm64?: string };
 }): (platform: string, arch: string) => string | undefined {
 	return (platform, arch) => {
-		const entry = table[platform as "linux" | "darwin" | "win32"];
-		if (!entry) return undefined;
-		return arch === "arm64" ? entry.arm64 : entry.x64;
+		if (arch !== "x64" && arch !== "arm64") return undefined;
+		return table[platform as "linux" | "darwin" | "win32"]?.[arch];
 	};
 }
 
@@ -1077,19 +1078,20 @@ export const TOOLS: ToolDefinition[] = [
 		binaryName: "terragrunt",
 		github: {
 			repo: "gruntwork-io/terragrunt",
-			assetMatch: (platform, arch) => {
-				if (arch !== "x64" && arch !== "arm64") return undefined;
-				if (platform === "linux")
-					return arch === "arm64"
-						? "terragrunt_linux_arm64"
-						: "terragrunt_linux_amd64";
-				if (platform === "darwin")
-					return arch === "arm64"
-						? "terragrunt_darwin_arm64"
-						: "terragrunt_darwin_amd64";
-				if (platform === "win32") return "terragrunt_windows_amd64.exe";
-				return undefined;
-			},
+			assetMatch: archAssetMatch({
+				linux: {
+					x64: "terragrunt_linux_amd64",
+					arm64: "terragrunt_linux_arm64",
+				},
+				darwin: {
+					x64: "terragrunt_darwin_amd64",
+					arm64: "terragrunt_darwin_arm64",
+				},
+				win32: {
+					x64: "terragrunt_windows_amd64.exe",
+					arm64: "terragrunt_windows_amd64.exe",
+				},
+			}),
 			// bare binary — no binaryInArchive
 		},
 	},

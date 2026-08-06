@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
 import { logLatency } from "./latency-logger.js";
 import { findNearestContaining, walkUpDirs } from "./path-utils.js";
 import type { ProjectConventions } from "./project-conventions.js";
@@ -691,26 +692,16 @@ const AUTO_INSTALLABLE_DEFAULT_FORMATTERS = new Map<string, string>([
 	["ktlint", "ktlint"],
 ]);
 
-const FORMATTER_POLICY_BY_FILENAME = new Map<string, FormatterPolicy>([
-	[
-		"terragrunt.hcl",
-		{
-			formatterNames: ["terragrunt-hcl"],
-			defaultFormatter: "terragrunt-hcl",
-			defaultWhenUnconfigured: true,
-			gate: "smart-default",
-		},
-	],
-	[
-		"root.hcl",
-		{
-			formatterNames: ["terragrunt-hcl"],
-			defaultFormatter: "terragrunt-hcl",
-			defaultWhenUnconfigured: true,
-			gate: "smart-default",
-		},
-	],
-]);
+const TERRAGRUNT_FORMATTER_POLICY: FormatterPolicy = {
+	formatterNames: ["terragrunt-hcl"],
+	defaultFormatter: "terragrunt-hcl",
+	defaultWhenUnconfigured: true,
+	gate: "smart-default",
+};
+
+const FORMATTER_POLICY_BY_FILENAME = new Map<string, FormatterPolicy>(
+	TERRAGRUNT_FILENAMES.map((name) => [name, TERRAGRUNT_FORMATTER_POLICY]),
+);
 
 export function getFormatterPolicyForExtension(
 	ext: string,
@@ -1369,7 +1360,7 @@ export function getLinterPolicyForFile(
 		};
 	}
 
-	if (["terragrunt.hcl", "root.hcl"].includes(path.basename(filePath).toLowerCase())) {
+	if (TERRAGRUNT_FILENAMES.includes(path.basename(filePath).toLowerCase())) {
 		return {
 			runnerNames: ["terragrunt"],
 			preferredRunners: ["terragrunt"],

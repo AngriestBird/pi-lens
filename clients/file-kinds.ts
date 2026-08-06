@@ -248,6 +248,20 @@ export const DOTNET_FSHARP_ROOT_MARKERS: readonly string[] = [
 	"*.sln",
 ];
 
+/**
+ * Terragrunt's unit/root entrypoint filenames, lowercase. Single source of truth
+ * for every subsystem that has to agree on what counts as a terragrunt file —
+ * SPECIAL_FILENAMES below, tool-policy.ts's linter and formatter policies,
+ * formatters.ts's terragruntHclFormatter, and language-profile.ts's project/root
+ * markers. Same rule as the .NET markers above: never hand-copy this list at a
+ * call site. tests/clients/terragrunt-filenames.test.ts asserts every consumer
+ * honors every name here, so a drifting call site fails CI.
+ */
+export const TERRAGRUNT_FILENAMES: readonly string[] = [
+	"terragrunt.hcl",
+	"root.hcl",
+];
+
 // Reverse map: extension → file kind (for fast lookup)
 const EXT_TO_KIND = new Map<string, FileKind>();
 for (const [kind, exts] of Object.entries(KIND_EXTENSIONS)) {

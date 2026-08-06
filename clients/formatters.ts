@@ -11,6 +11,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
 import { logLatency } from "./latency-logger.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
@@ -85,7 +86,7 @@ export interface FormatterInfo {
 	command: string[]; // Command with $FILE placeholder — used as fallback
 	extensions: string[];
 	/** Basenames (lowercase) this formatter applies to regardless of extension. */
-	filenames?: string[];
+	filenames?: readonly string[];
 	/** Detect if this formatter should be used for a project */
 	detect(cwd: string): Promise<boolean>;
 	/**
@@ -720,7 +721,7 @@ export const terragruntHclFormatter: FormatterInfo = {
 	name: "terragrunt-hcl",
 	command: ["terragrunt", "hcl", "fmt", "--file", "$FILE"],
 	extensions: [],
-	filenames: ["terragrunt.hcl", "root.hcl"],
+	filenames: TERRAGRUNT_FILENAMES,
 	async detect(_cwd: string) {
 		return (await which("terragrunt")) !== null;
 	},
@@ -940,6 +941,11 @@ const ALL_FORMATTERS: FormatterInfo[] = [
 	psscriptanalyzerFormatFormatter,
 ];
 
+// Basenames claimed by a filename-keyed formatter, e.g. terragrunt.hcl.
+const FILENAME_FORMATTER_BASENAMES = new Set(
+	ALL_FORMATTERS.flatMap((f) => f.filenames ?? []),
+);
+
 // Cache for detection results - stores array of enabled formatter names per cwd+ext
 const detectionCache = new Map<string, Map<string, string[]>>();
 
@@ -956,10 +962,9 @@ export async function getFormattersForFile(
 	// terragrunt.hcl). Fold the basename into the cache key only when a
 	// filename-based formatter actually applies, so a plain .hcl file cached
 	// first doesn't poison the cache for terragrunt.hcl/root.hcl, or vice versa.
-	const usesFilenameFormatter = ALL_FORMATTERS.some((f) =>
-		f.filenames?.includes(base),
-	);
-	const cacheKey = usesFilenameFormatter ? `${cwd}:${ext}:${base}` : `${cwd}:${ext}`;
+	const cacheKey = FILENAME_FORMATTER_BASENAMES.has(base)
+		? `${cwd}:${ext}:${base}`
+		: `${cwd}:${ext}`;
 
 	// Check cache
 	let cached = detectionCache.get(cwd);

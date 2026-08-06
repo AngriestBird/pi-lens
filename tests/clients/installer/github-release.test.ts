@@ -35,6 +35,17 @@ describe("GitHub release asset selection", () => {
 		}
 	});
 
+	// Table-driven entries (archAssetMatch) only carry x64/arm64 assets, so an
+	// exotic arch must resolve to nothing rather than to the x64 substring.
+	it("returns undefined for a non-x64/arm64 arch on table-driven tools", async () => {
+		const { resolveGitHubAsset } = await import("../../../clients/installer/index.ts");
+
+		for (const toolId of ["gitleaks", "terragrunt"] as const) {
+			expect(resolveGitHubAsset(toolId, "linux", "ia32")).toBeUndefined();
+			expect(resolveGitHubAsset(toolId, "win32", "ia32")).toBeUndefined();
+		}
+	});
+
 	it("returns undefined for unknown tool id", async () => {
 		const { resolveGitHubAsset } = await import("../../../clients/installer/index.ts");
 		expect(resolveGitHubAsset("nonexistent-tool" as GitHubToolId, "linux", "x64")).toBeUndefined();
@@ -109,14 +120,6 @@ describe("GitHub release asset selection", () => {
 				"../../../clients/installer/index.ts"
 			);
 			expect(resolveGitHubAsset("terragrunt", platform, arch)).toBe(expected);
-		});
-
-		it("does not select a binary for an incompatible arch", async () => {
-			const { resolveGitHubAsset } = await import(
-				"../../../clients/installer/index.ts"
-			);
-			expect(resolveGitHubAsset("terragrunt", "linux", "ia32")).toBeUndefined();
-			expect(resolveGitHubAsset("terragrunt", "win32", "ia32")).toBeUndefined();
 		});
 	});
 
