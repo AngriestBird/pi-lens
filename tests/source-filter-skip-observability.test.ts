@@ -100,6 +100,7 @@ describe("source walk skip observability (#1107)", () => {
 			buildArtifactSkips: 1,
 			generatedDirSkips: 0,
 			generatedNameOverrides: 0,
+			generatedNameOnlySkips: 0,
 		});
 	});
 
@@ -208,6 +209,7 @@ describe("directory-level generated-artifact skip counting (#1107 phase 2)", () 
 			buildArtifactSkips: 0,
 			generatedDirSkips: 1,
 			generatedNameOverrides: 0,
+			generatedNameOnlySkips: 0,
 		});
 	});
 
@@ -319,6 +321,9 @@ describe("content-probe escape hatch matrix (#1107 phase 2 item 3)", () => {
 		expect(result.files).toEqual([]);
 		expect(result.generatedOrArtifactSkips).toBe(1);
 		expect(result.generatedNameOverrides).toBe(0);
+		// Confirmed by content evidence, not trusted on the name alone — not
+		// part of the "unconfirmed" bucket a tool-facing notice keys off.
+		expect(result.generatedNameOnlySkips).toBe(0);
 	});
 
 	it("lockfile: always skipped regardless of the escape hatch (strong evidence, no probe)", () => {
@@ -336,6 +341,91 @@ describe("content-probe escape hatch matrix (#1107 phase 2 item 3)", () => {
 		expect(result.files).toEqual([path.join(dir, "app.ts")]);
 		expect(result.generatedOrArtifactSkips).toBe(1);
 		expect(result.generatedNameOverrides).toBe(0);
+		// STRONG evidence (a known lockfile basename) — not the unconfirmed
+		// "name-only" bucket either.
+		expect(result.generatedNameOnlySkips).toBe(0);
+	});
+
+	it("a WEAK name-only skip with NO header probe available IS counted as the unconfirmed bucket (the residual at-risk case)", () => {
+		const dir = mkTempDir();
+		fs.writeFileSync(
+			path.join(dir, "gen.ts"),
+			"export function realHandWrittenFn() {\n\treturn 42;\n}\n",
+		);
+
+		// Explicitly opting out of the header probe reproduces the pre-#1107
+		// trust-the-name behavior for this one WEAK match — the one case
+		// where classifyGeneratedOrArtifactDetailed cannot evaluate evidence
+		// (b) at all, so it falls back to skipping (not the escape hatch) and
+		// is counted as "name-only" (unconfirmed).
+		const result = collectSourceFilesWithBudget(dir, {
+			inspectGeneratedHeaders: false,
+		});
+
+		expect(result.files).toEqual([]);
+		expect(result.generatedOrArtifactSkips).toBe(1);
+		expect(result.generatedNameOnlySkips).toBe(1);
+		expect(result.generatedNameOverrides).toBe(0);
+	});
+
+	// #1107 phase 2 review round 2 (P2, maintainer decision: KEEP min/bundle/
+	// chunk in the STRONG tier). The escape hatch's evidence checks are
+	// structurally dead for this class: minifiers strip banners (the header
+	// leg never confirms), and the sibling probe looks for `app.min.ts`
+	// (never `app.js` at a DIFFERENT stem), so the real source twin is
+	// unreachable by that check. Both dead legs would make this class a
+	// PERMANENT override under the WEAK tier — never re-confirmed — so it is
+	// excluded from WEAK eligibility entirely and always skipped, like a
+	// lockfile.
+	it("fail-then-pass: app.min.js next to app.js is skipped unconditionally (STRONG tier), never an override", () => {
+		const dir = mkTempDir();
+		fs.writeFileSync(path.join(dir, "app.ts"), "export const app = 1;\n");
+		fs.writeFileSync(path.join(dir, "app.js"), "exports.app = 1;\n");
+		// The minified bundle: no generated-code header (minifiers strip
+		// banners), and its "sibling" probe target would be `app.min.ts` —
+		// which does not exist — never `app.ts` at the different stem.
+		fs.writeFileSync(
+			path.join(dir, "app.min.js"),
+			"const app=1;module.exports={app:app};",
+		);
+
+		const result = collectSourceFilesWithBudget(dir);
+
+		// PASS (post-review-round-2): app.min.js is skipped, and it is
+		// counted under the STRONG-evidence skip counter, NEVER as a rescued
+		// override — before this fix, with min/bundle/chunk still in the WEAK
+		// tier, this exact fixture was kept and counted under
+		// `generatedNameOverrides` (empirically proven by review: a real
+		// minified bundle got indexed as if it were hand-written source).
+		expect(result.files).not.toContain(path.join(dir, "app.min.js"));
+		expect(result.generatedNameOverrides).toBe(0);
+		expect(result.generatedOrArtifactSkips).toBeGreaterThanOrEqual(1);
+		// Not the "unconfirmed name-only" bucket either — STRONG evidence
+		// needs no probe and is never at-risk.
+		expect(result.generatedNameOnlySkips).toBe(0);
+		// app.js itself is still skipped separately, via the ordinary
+		// sibling-source probe (app.ts shadows it) — unrelated to this case.
+		expect(result.files).not.toContain(path.join(dir, "app.js"));
+		expect(result.files).toContain(path.join(dir, "app.ts"));
+	});
+
+	it("bundle/chunk output is also STRONG tier, never an override", () => {
+		const dir = mkTempDir();
+		fs.writeFileSync(
+			path.join(dir, "vendor.bundle.js"),
+			"/* no banner */ (function(){})();",
+		);
+		fs.writeFileSync(
+			path.join(dir, "runtime.chunk.js"),
+			"/* no banner */ (function(){})();",
+		);
+
+		const result = collectSourceFilesWithBudget(dir);
+
+		expect(result.files).toEqual([]);
+		expect(result.generatedOrArtifactSkips).toBe(2);
+		expect(result.generatedNameOverrides).toBe(0);
+		expect(result.generatedNameOnlySkips).toBe(0);
 	});
 
 	it("async walk agrees with the sync walk on the override verdict", async () => {

@@ -423,6 +423,9 @@ export async function scanProjectDiagnostics(
 		: await collectSourceFilesWithBudgetAsync(cwd, {
 				maxFiles,
 				maxScanEntries: options.maxScanEntries,
+				// #1107 phase 2 review: the actionable opt-out generatedSkipNotice
+				// points a user at.
+				includeGenerated: options.includeGenerated === true,
 			});
 	const files = collected.files;
 	// Check cancellation before and during the file-major pass so a full-mode
@@ -460,6 +463,9 @@ export async function scanProjectDiagnostics(
 	// produces a byte-identical snapshot to before this change.
 	if (collected.generatedOrArtifactSkips) {
 		snapshot.generatedFileSkips = collected.generatedOrArtifactSkips;
+	}
+	if (collected.generatedNameOnlySkips) {
+		snapshot.generatedNameOnlySkips = collected.generatedNameOnlySkips;
 	}
 	if (collected.generatedDirSkips) {
 		snapshot.generatedDirSkips = collected.generatedDirSkips;

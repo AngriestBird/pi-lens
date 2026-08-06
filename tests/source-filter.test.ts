@@ -436,13 +436,14 @@ describe("collectSourceFiles", () => {
 			"src/types.d.ts": "export interface Types {}\n",
 			"src/header.ts":
 				"// This file was automatically generated.\nexport const x = 1;\n",
-			// #1107 phase 2: `bundle.min.js` is a WEAK name-only match (the
-			// `.min.js` rule) with no confirming header — the content-probe
-			// escape hatch now KEEPS it (a real minified bundle rarely carries
-			// a recognized generated-code banner in practice, so trusting the
-			// name alone was exactly the invisible-coverage-hole class #1107
-			// exists to fix). See `source-filter-skip-observability.test.ts`
-			// for the dedicated escape-hatch matrix.
+			// #1107 phase 2 review round 2 (P2, maintainer decision): minified/
+			// bundle/chunk output is STRONG-tier evidence, NOT WEAK — the
+			// escape hatch's evidence checks are structurally dead for this
+			// class (minifiers strip banners; the sibling probe looks for
+			// `bundle.min.ts`, never `bundle.ts` at a different stem), so it is
+			// always skipped unconditionally, like a lockfile, never rescued.
+			// See `source-filter-skip-observability.test.ts`'s dedicated
+			// STRONG-tier regression tests for the fail-then-pass proof.
 			"src/bundle.min.js": "const bundled = true;\n",
 		});
 
@@ -455,7 +456,7 @@ describe("collectSourceFiles", () => {
 		expect(result).not.toContain(path.join(dir, "src", "api.pb.go"));
 		expect(result).not.toContain(path.join(dir, "src", "types.d.ts"));
 		expect(result).not.toContain(path.join(dir, "src", "header.ts"));
-		expect(result).toContain(path.join(dir, "src", "bundle.min.js"));
+		expect(result).not.toContain(path.join(dir, "src", "bundle.min.js"));
 
 		cleanup();
 	});

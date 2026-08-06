@@ -19,39 +19,63 @@ All notable changes to pi-lens will be documented in this file.
 		`SourceCollectionResult` docblock's former "KNOWN GAP" note is now the
 		real field doc.
 	2. **Tool-facing surfacing.** `ProjectDiagnosticsSnapshot` gains
-		`generatedFileSkips`/`generatedDirSkips` (only present, like
-		`scanTruncated`, on a walk that actually ran); `lens-engine.ts`'s new
-		`generatedSkipNotice` renders them into a one-line notice mirroring
-		`scanTruncationNotice`'s (#784) style, wired into both
-		`pilens_project_scan` (`mcp/server.ts`) and `lens_diagnostics`
-		(`tools/lens-diagnostics.ts`). `module_report` has no walk-backed
-		section of its own to thread this through (it reads the cached review
-		graph, built asynchronously elsewhere) — surfaced in the
-		project-diagnostics path only.
+		`generatedFileSkips` (the raw skip total, all evidence tiers),
+		`generatedNameOnlySkips` (the narrower at-risk subset — see below), and
+		`generatedDirSkips` (only present, like `scanTruncated`, on a walk that
+		actually ran); `lens-engine.ts`'s new `generatedSkipNotice` renders a
+		one-line notice mirroring `scanTruncationNotice`'s (#784) style, wired
+		into both `pilens_project_scan` (`mcp/server.ts`) and `lens_diagnostics`
+		(`tools/lens-diagnostics.ts`). **Review fix (P1, empirically proven):**
+		the notice originally keyed off the raw `generatedFileSkips` total,
+		which includes STRONG evidence (lockfiles, declaration files,
+		minified/bundle/chunk output — expected on almost every real repo) —
+		a repo with just `index.ts` + an ambient `.d.ts` + `package-lock.json`
+		showed "2 file(s) excluded" on every single scan, forever. It now keys
+		off `generatedNameOnlySkips`: the narrower bucket of WEAK name matches
+		trusted with NO corroborating evidence check at all (only reachable
+		when a caller opts out of the header probe; the default project-walk
+		path always enables it, so this is rare-to-zero in practice — meaning
+		the notice is meaningful again when it does fire) plus `generatedDirSkips`
+		(directory pruning has no escape hatch, so it stays a genuine
+		unverified-content signal). Both `ProjectDiagnosticsScanOptions` and
+		both tool surfaces also gain `includeGenerated` (default `false`) so
+		the notice's opt-out advice is now actually actionable, not just prose.
+		`module_report` has no walk-backed section of its own to thread this
+		through (it reads the cached review graph, built asynchronously
+		elsewhere) — surfaced in the project-diagnostics path only.
 	3. **Content-probe escape hatch (the actual behavior change).** A file
 		matching a generated-artifact NAME pattern but with no other evidence is
 		now KEPT instead of silently dropped. `generated-artifacts.ts` splits
 		its path check into STRONG evidence (a generated directory segment, a
-		lockfile — always conclusive, never rescued) and WEAK evidence (the
-		filename-regex patterns, e.g. `gen.ts`, `foo_generated.go`,
-		`bar.min.js`); `classifyGeneratedOrArtifact` requires a WEAK match to be
-		corroborated by a generated-code header in the first 4 KB before
-		treating it as an artifact — cheapest-first, with the sibling-source
-		probe (`findSourceSibling`/`isBuildArtifact`) already checked upstream
-		by every walk-driven caller. With NEITHER piece of evidence, the file is
-		KEPT and counted under the new `generatedNameOverrides` counter (also in
-		the rollup log line), so the heuristic's rescues stay observable.
+		lockfile, minified/bundle/chunk output — always conclusive, never
+		rescued) and WEAK evidence (the remaining filename-regex patterns, e.g.
+		`gen.ts`, `foo_generated.go`); `classifyGeneratedOrArtifactDetailed`
+		requires a WEAK match to be corroborated by a generated-code header in
+		the first 4 KB (or the sibling-source probe already checked upstream by
+		every walk-driven caller) before treating it as an artifact —
+		cheapest-first. With NEITHER piece of evidence, the file is KEPT and
+		counted under the new `generatedNameOverrides` counter (also in the
+		rollup log line), so the heuristic's rescues stay observable.
+		**Review fix (P2, maintainer decision):** minified/bundle/chunk output
+		(`bar.min.js`, `vendor.bundle.js`, `runtime.chunk.js`) is STRONG tier,
+		not WEAK — the escape hatch's evidence checks are structurally dead for
+		it (minifiers strip banners, so the header leg never confirms; the
+		sibling probe looks for `app.min.ts`, never `app.js` at a different
+		stem, so that leg is unreachable too), which would have made it a
+		PERMANENT override rather than an occasional rescue. `app.min.js` next
+		to `app.js` is skipped unconditionally, like a lockfile.
 		Shipped **ungated**: the existing `LENS_FLAGS`/`.pi-lens.json` toggle
 		registry is sized for whole-subsystem behavior (lsp/tests/delta/…), not
-		a narrow heuristic refinement, and `SourceCollectionOptions.includeGenerated`
-		already gives callers a full opt-out. Documented tradeoff: a false-KEEP
-		(one extra file an agent must judge) is preferred over the prior
-		silent false-DROP (a real file invisibly never analyzed) — this changes
-		walk output for review-graph/word-index/project-diagnostics/call-graph:
-		a repo with a real `gen.ts` gains coverage (intended), and a repo with a
-		headerless generated file with no source twin also gains coverage
-		(accepted per the issue). Invariant preserved for lockfiles, declaration
-		files, and anything the ignore-matcher/extension filter already
+		a narrow heuristic refinement, and the new `includeGenerated` scan
+		option (item 2) already gives callers a full, actionable opt-out.
+		Documented tradeoff: a false-KEEP (one extra file an agent must judge)
+		is preferred over the prior silent false-DROP (a real file invisibly
+		never analyzed) — this changes walk output for review-graph/word-index/
+		project-diagnostics/call-graph: a repo with a real `gen.ts` gains
+		coverage (intended), and a repo with a headerless generated file with
+		no source twin also gains coverage (accepted per the issue). Invariant
+		preserved for lockfiles, declaration files, minified/bundle/chunk
+		output, and anything the ignore-matcher/extension filter already
 		excluded — none of those are ever rescued.
 
 - **Source-walk skip observability (refs #1107, phase 1 of 2)** — the source

@@ -265,6 +265,12 @@ export function createLensDiagnosticsTool(
 						"mode=full only: cap the number of files routed through the language server for the project-wide LSP sweep. On large projects (e.g. a Next.js app with thousands of source files) the uncapped sweep can take many minutes; set this to bound it. Default is generous (env PI_LENS_LSP_WORKSPACE_MAX_FILES, else 5000).",
 				}),
 			),
+			includeGenerated: Type.Optional(
+				Type.Boolean({
+					description:
+						"mode=full only: scan WITHOUT the generated/artifact NAME-heuristic filter (lockfiles, gen.ts-style names, generated/ dirs, …). Default false. Use when a scan's 'excluded by generated-name heuristics' notice suggests a real file was skipped.",
+				}),
+			),
 			severity: Type.Optional(
 				Type.String({
 					enum: ["error", "warning", "all"],
@@ -313,6 +319,7 @@ export function createLensDiagnosticsTool(
 					: undefined;
 			const maxProjectFiles = parsePositiveInt(params.maxProjectFiles);
 			const maxLspFiles = parsePositiveInt(params.maxLspFiles);
+			const includeGenerated = params.includeGenerated === true;
 			const cwd = ctx.cwd ?? getCwd();
 
 			let pathsScope: PathsScope | undefined;
@@ -367,6 +374,7 @@ export function createLensDiagnosticsTool(
 					refreshRunners,
 					maxProjectFiles,
 					maxLspFiles,
+					includeGenerated,
 					signal: fullSignal,
 					wallClockMs: FULL_SCAN_WALL_CLOCK_MS,
 					onProgress,
@@ -1148,6 +1156,7 @@ async function getProjectDiagnosticsSnapshotForFullMode(
 		maxProjectFiles?: number;
 		signal?: AbortSignal;
 		files?: string[];
+		includeGenerated?: boolean;
 	},
 ): Promise<ProjectDiagnosticsSnapshot | undefined> {
 	if (shouldRefreshProjectDiagnostics(options.refreshRunners)) {
@@ -1157,6 +1166,7 @@ async function getProjectDiagnosticsSnapshotForFullMode(
 			maxFiles: options.maxProjectFiles,
 			signal: options.signal,
 			files: options.files,
+			includeGenerated: options.includeGenerated,
 		});
 	}
 	if (shouldUseCachedProjectDiagnostics(options.refreshRunners)) {
@@ -1186,6 +1196,12 @@ async function formatFullMode(
 		onServerReady?: () => void;
 		pathsScope?: PathsScope;
 		nextWriteIndex?: () => number;
+		/**
+		 * #1107 phase 2 review: scan WITHOUT the generated/artifact NAME-
+		 * heuristic filter — the actionable opt-out `generatedSkipNotice`
+		 * points a user at. Default false.
+		 */
+		includeGenerated?: boolean;
 	} = {},
 ): Promise<{ content: [{ type: "text"; text: string }]; details: object }> {
 	const runWorkspaceDiagnostics = lspService.runWorkspaceDiagnostics;
@@ -1607,6 +1623,12 @@ async function formatFullMode(
 			// generated-name/dir skip counters.
 			...(projectSnapshot?.generatedFileSkips
 				? { projectGeneratedFileSkips: projectSnapshot.generatedFileSkips }
+				: {}),
+			...(projectSnapshot?.generatedNameOnlySkips
+				? {
+						projectGeneratedNameOnlySkips:
+							projectSnapshot.generatedNameOnlySkips,
+					}
 				: {}),
 			...(projectSnapshot?.generatedDirSkips
 				? { projectGeneratedDirSkips: projectSnapshot.generatedDirSkips }

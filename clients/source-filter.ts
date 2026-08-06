@@ -21,8 +21,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectIgnoreMatcher } from "./file-utils.js";
 import {
-	classifyGeneratedOrArtifact,
-	type GeneratedArtifactVerdict,
+	classifyGeneratedOrArtifactDetailed,
+	type GeneratedArtifactClassification,
 	isDeclarationFile,
 } from "./generated-artifacts.js";
 import { isCodeKindFile, KIND_EXTENSIONS } from "./file-kinds.js";
@@ -326,7 +326,7 @@ export interface SourceCollectionResult {
 	 *
 	 * `generatedNameOverrides` (#1107 phase 2): files that MATCHED a
 	 * generated-artifact NAME pattern but were KEPT anyway because the
-	 * content-probe escape hatch (`classifyGeneratedOrArtifact`'s
+	 * content-probe escape hatch (`classifyGeneratedOrArtifactDetailed`'s
 	 * `"override"` verdict) found no corroborating evidence — no source
 	 * sibling (checked upstream via `isBuildArtifact`) and no generated-code
 	 * header in the first 4 KB. Counted so the heuristic's RESCUES are as
@@ -334,11 +334,27 @@ export interface SourceCollectionResult {
 	 * signals its naming conventions collide with the generated-file regexes
 	 * often enough to be worth a closer look, same motivation as the skip
 	 * counters above.
+	 *
+	 * `generatedNameOnlySkips` (#1107 phase 2, review round 2): a SUBSET of
+	 * `generatedOrArtifactSkips` — the files within it whose `"generated"`
+	 * verdict came from `GeneratedArtifactEvidence: "name-only"` (a WEAK name
+	 * match trusted with NO corroborating evidence check at all, because the
+	 * caller opted out of the header probe). This is the residual "at risk"
+	 * bucket the escape hatch could not evaluate. It deliberately EXCLUDES
+	 * lockfiles, declaration files, minified/bundle/chunk output, and
+	 * generated-dir-segment matches (all `"strong"` evidence — expected on
+	 * every real repo, e.g. `package-lock.json`) and header/content-CONFIRMED
+	 * matches (`"content"` evidence — the escape hatch checked and confirmed
+	 * it). A tool-facing "N excluded by generated-name heuristics" notice
+	 * must key off THIS counter, not `generatedOrArtifactSkips` — the raw
+	 * total fires on virtually every repo (any lockfile alone trips it)
+	 * forever, drowning the signal on day one.
 	 */
 	generatedOrArtifactSkips?: number;
 	buildArtifactSkips?: number;
 	generatedDirSkips?: number;
 	generatedNameOverrides?: number;
+	generatedNameOnlySkips?: number;
 }
 
 /**
@@ -353,6 +369,7 @@ interface SourceWalkSkipCounters {
 	buildArtifactSkips: number;
 	generatedDirSkips: number;
 	generatedNameOverrides: number;
+	generatedNameOnlySkips: number;
 }
 
 function createSourceWalkSkipCounters(): SourceWalkSkipCounters {
@@ -361,6 +378,7 @@ function createSourceWalkSkipCounters(): SourceWalkSkipCounters {
 		buildArtifactSkips: 0,
 		generatedDirSkips: 0,
 		generatedNameOverrides: 0,
+		generatedNameOnlySkips: 0,
 	};
 }
 
@@ -402,15 +420,21 @@ function logSourceWalkSkipsIfAny(
 			buildArtifactSkips: counters.buildArtifactSkips,
 			generatedDirSkips: counters.generatedDirSkips,
 			generatedNameOverrides: counters.generatedNameOverrides,
+			generatedNameOnlySkips: counters.generatedNameOnlySkips,
 		},
 	});
 }
 
 /**
- * Full verdict form of {@link shouldSkipGeneratedOrArtifact} (#1107 phase 2)
- * — exposes `classifyGeneratedOrArtifact`'s `"override"` outcome (a WEAK
- * name-only match the content-probe escape hatch rescued) so `classifyEntry`
- * can count it distinctly from both a genuine skip and a never-flagged file.
+ * Full verdict+evidence form of {@link shouldSkipGeneratedOrArtifact} (#1107
+ * phase 2) — exposes `classifyGeneratedOrArtifactDetailed`'s `"override"`
+ * outcome (a WEAK name-only match the content-probe escape hatch rescued)
+ * AND, for a `"generated"` verdict, WHICH evidence tier decided it, so
+ * `classifyEntry` can count a genuine skip, a rescue, and the residual
+ * "unconfirmed name-only skip" bucket all distinctly. See
+ * `GeneratedArtifactEvidence`'s doc for why the tier split matters: a
+ * tool-facing notice keyed on the RAW skip count fires permanently on any
+ * repo with a lockfile, drowning the signal it exists to surface.
  */
 function classifySkipGeneratedOrArtifact(
 	filePath: string,
@@ -418,15 +442,15 @@ function classifySkipGeneratedOrArtifact(
 		SourceCollectionOptions,
 		"includeGenerated" | "includeDeclarationFiles" | "inspectGeneratedHeaders"
 	>,
-): GeneratedArtifactVerdict {
+): GeneratedArtifactClassification {
 	const includeDeclarations = options?.includeDeclarationFiles === true;
 	if (options?.includeGenerated === true) {
 		return !includeDeclarations && isDeclarationFile(filePath)
-			? "generated"
-			: "clean";
+			? { verdict: "generated", evidence: "strong" }
+			: { verdict: "clean" };
 	}
 
-	return classifyGeneratedOrArtifact(filePath, {
+	return classifyGeneratedOrArtifactDetailed(filePath, {
 		readContentHeader: options?.inspectGeneratedHeaders !== false,
 		includeDeclarations: !includeDeclarations,
 	});
@@ -439,7 +463,7 @@ function shouldSkipGeneratedOrArtifact(
 		"includeGenerated" | "includeDeclarationFiles" | "inspectGeneratedHeaders"
 	>,
 ): boolean {
-	return classifySkipGeneratedOrArtifact(filePath, options) === "generated";
+	return classifySkipGeneratedOrArtifact(filePath, options).verdict === "generated";
 }
 
 /**
@@ -650,13 +674,22 @@ function classifyEntry(
 		}
 		// #1107 phase 2: the content-probe escape hatch can rescue a WEAK
 		// name-only match ("override") instead of skipping it — see
-		// `classifyGeneratedOrArtifact`'s doc for the evidence order/tradeoff.
-		const verdict = classifySkipGeneratedOrArtifact(fullPath, options);
-		if (verdict === "generated") {
-			if (skipCounters) skipCounters.generatedOrArtifactSkips += 1;
+		// `classifyGeneratedOrArtifactDetailed`'s doc for the evidence
+		// order/tradeoff. `evidence` additionally distinguishes a STRONG/
+		// content-CONFIRMED skip (expected, not a coverage-hole signal) from
+		// the residual "name-only" skip (unconfirmed — the one bucket a
+		// tool-facing notice should actually key off).
+		const classification = classifySkipGeneratedOrArtifact(fullPath, options);
+		if (classification.verdict === "generated") {
+			if (skipCounters) {
+				skipCounters.generatedOrArtifactSkips += 1;
+				if (classification.evidence === "name-only") {
+					skipCounters.generatedNameOnlySkips += 1;
+				}
+			}
 			return {};
 		}
-		if (verdict === "override" && skipCounters) {
+		if (classification.verdict === "override" && skipCounters) {
 			skipCounters.generatedNameOverrides += 1;
 		}
 		return { keepFile: fullPath };
@@ -744,6 +777,7 @@ export function collectSourceFilesWithBudget(
 		buildArtifactSkips: skipCounters.buildArtifactSkips,
 		generatedDirSkips: skipCounters.generatedDirSkips,
 		generatedNameOverrides: skipCounters.generatedNameOverrides,
+		generatedNameOnlySkips: skipCounters.generatedNameOnlySkips,
 	};
 }
 
@@ -841,6 +875,7 @@ export async function collectSourceFilesWithBudgetAsync(
 		buildArtifactSkips: skipCounters.buildArtifactSkips,
 		generatedDirSkips: skipCounters.generatedDirSkips,
 		generatedNameOverrides: skipCounters.generatedNameOverrides,
+		generatedNameOnlySkips: skipCounters.generatedNameOnlySkips,
 	};
 }
 

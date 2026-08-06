@@ -551,6 +551,14 @@ const ALL_TOOLS = [
 			properties: {
 				cwd: { type: "string" },
 				maxFiles: { type: "number", description: "Cap files scanned." },
+				includeGenerated: {
+					type: "boolean",
+					description:
+						"Scan WITHOUT the generated/artifact NAME-heuristic filter " +
+						"(lockfiles, gen.ts-style names, generated/ dirs, …). Default " +
+						"false. Use when a scan's 'excluded by generated-name " +
+						"heuristics' notice suggests a real file was skipped.",
+				},
 			},
 		},
 	},
@@ -991,7 +999,8 @@ async function callTool(
 			typeof args.maxFiles === "number" && Number.isFinite(args.maxFiles)
 				? Math.max(1, Math.floor(args.maxFiles))
 				: undefined;
-		const snapshot = await projectScan(cwd, maxFiles);
+		const includeGenerated = args.includeGenerated === true;
+		const snapshot = await projectScan(cwd, maxFiles, includeGenerated);
 		// #747: a cwd at/above $HOME refuses to walk — say so instead of letting
 		// "Scanned 0 file(s) → 0 diagnostics" read as a clean project.
 		if (snapshot.unsafeRoot) {
@@ -1038,6 +1047,9 @@ async function callTool(
 				: {}),
 			...(snapshot.generatedFileSkips
 				? { generatedFileSkips: snapshot.generatedFileSkips }
+				: {}),
+			...(snapshot.generatedNameOnlySkips
+				? { generatedNameOnlySkips: snapshot.generatedNameOnlySkips }
 				: {}),
 			...(snapshot.generatedDirSkips
 				? { generatedDirSkips: snapshot.generatedDirSkips }
