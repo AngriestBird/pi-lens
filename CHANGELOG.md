@@ -28,6 +28,22 @@ All notable changes to pi-lens will be documented in this file.
 	is diagnosable. Non-goals (stated for follow-ups): cascade adoption in
 	`clients/dispatch/integration.ts` (#1094 in flight), pull-diagnostics resultIds,
 	widget per-entry timestamps (#1093), aux retag (#1094).
+- **Cascade adopts LSP diagnostics content binding (refs #1095, second PR)** — the
+	cross-file cascade (`clients/dispatch/integration.ts`) now consults the `binding`
+	from the first PR instead of trusting a snapshot purely on TTL. A passive neighbor
+	snapshot whose diagnostics `boundToCurrentDisk === false` (the server's view diverged
+	from disk — e.g. the PRE-fix content) is no longer reconciled into the footer widget;
+	it falls through to an active touch on the existing cold-snapshot budget. This kills
+	the window where the first cascade after a fix-edit replayed a neighbor's stale
+	pre-fix snapshot. `"unknown"` bindings (version-less servers) keep EXACTLY the prior
+	TTL-only behavior; `true` reconciles (TTL stays the outer bound). On the active-touch
+	path, a bound-false result is treated like `inconclusive` — composed with it into one
+	`isConfirmedTouch()` predicate so a future flag can't be missed at just one gate — so
+	it neither reconciles nor seeds the recently-clean neighbor cache. `observedAt` stays
+	the snapshot's publish time (`entry.ts`) for passive reconciles. Binding-rejected
+	snapshots/touches are logged through the cascade channel (`bindingState`). The lazy
+	binding getter is re-read from a fresh `getAllDiagnostics()` every cascade run (the
+	Map is never retained across turns), with a caveat comment guarding future retention.
 - **Project-level rule policy via `.pi-lens.json` `rules.<id>.disable` / `rules.<id>.select`** — a project's own config can now narrow what diagnostics actually surface.
 	Filtering is output-only, so the baseline, widget state, and dedup cache stay
 	authoritative and a policy edit never corrupts or resets delta tracking.
