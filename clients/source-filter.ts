@@ -25,6 +25,7 @@ import {
 	isGeneratedOrArtifact,
 } from "./generated-artifacts.js";
 import { isCodeKindFile, KIND_EXTENSIONS } from "./file-kinds.js";
+import { logLatency } from "./latency-logger.js";
 import { normalizeEphemeralMapKey } from "./path-utils.js";
 import { isSlowFs, SLOW_FS_REDUCED_MAX_FILES } from "./slow-fs.js";
 import {
@@ -288,6 +289,86 @@ function createKeptFilesAccumulator(
 export interface SourceCollectionResult {
 	files: string[];
 	entryBudgetExceeded: boolean;
+	/**
+	 * Observability counters for #1107 (phase 1 — counting only, no behavior
+	 * change; the content-probe escape hatch for name-only matches is phase 2).
+	 * Both are additive/optional so existing manual `SourceCollectionResult`
+	 * literals (e.g. the caller-supplied-`files` branch in
+	 * `project-diagnostics/scanner.ts`, which never walks) keep compiling
+	 * unchanged — `undefined` there correctly means "no walk happened, so
+	 * nothing was counted," not "zero skips."
+	 *
+	 * `generatedOrArtifactSkips`: files a directory entry classified out via
+	 * `shouldSkipGeneratedOrArtifact` — the generated/artifact NAME heuristics
+	 * (`isGeneratedOrArtifact`'s path patterns + lockfile names + declaration
+	 * files) plus, when enabled, the generated-header content probe.
+	 *
+	 * `buildArtifactSkips`: files classified out via `isBuildArtifact` — the
+	 * sibling-source probe (`findSourceSibling`/`ArtifactProbeCache`) deciding a
+	 * compiled output has a higher-precedence hand-written source twin.
+	 *
+	 * These are separate from (and do not include) extension-filter skips
+	 * (`!extensions.has(ext)`) or ignore-matcher skips
+	 * (`ignoreMatcher.isIgnored`) in `classifyEntry` — those are policy/config
+	 * driven, not name/content heuristics, and are not part of the #1107
+	 * invisible-coverage-hole class.
+	 */
+	generatedOrArtifactSkips?: number;
+	buildArtifactSkips?: number;
+}
+
+/**
+ * Mutable per-walk skip counters (#1107). Shared verbatim by the sync and
+ * async collectors, exactly like {@link EntryBudget} — created once at the
+ * start of a walk, threaded through `classifyEntry` by closure, and folded
+ * into the returned {@link SourceCollectionResult} plus a rollup log line
+ * when nonzero.
+ */
+interface SourceWalkSkipCounters {
+	generatedOrArtifactSkips: number;
+	buildArtifactSkips: number;
+}
+
+function createSourceWalkSkipCounters(): SourceWalkSkipCounters {
+	return { generatedOrArtifactSkips: 0, buildArtifactSkips: 0 };
+}
+
+/**
+ * Log a one-line rollup for a walk's skip counters through the existing
+ * latency/scan logging channel (`logLatency`, ndjson `latency.log`) — mirrors
+ * how `getGraphSourceFiles` logs `review_graph_source_walk_entry_budget`.
+ * Silent (no log line) when both counters are zero, so a healthy walk with no
+ * name/artifact-probe skips produces no new log noise.
+ *
+ * Logged once per walk call, at the walk layer itself
+ * (`collectSourceFilesWithBudget`/`collectSourceFilesWithBudgetAsync`) rather
+ * than at each of its several consumers (review-graph builder, project-
+ * diagnostics scanner, word-index, …): every one of those consumers funnels
+ * through these two functions (directly or via the plain `collectSourceFiles`/
+ * `collectSourceFilesAsync` wrappers), so logging here is a single choke point
+ * that covers all of them — the smaller diff versus exporting the counters and
+ * wiring a log call into each consumer separately.
+ */
+function logSourceWalkSkipsIfAny(
+	rootDir: string,
+	counters: SourceWalkSkipCounters,
+): void {
+	if (
+		counters.generatedOrArtifactSkips === 0 &&
+		counters.buildArtifactSkips === 0
+	) {
+		return;
+	}
+	logLatency({
+		type: "phase",
+		phase: "source_walk_skip_summary",
+		filePath: rootDir,
+		durationMs: 0,
+		metadata: {
+			generatedOrArtifactSkips: counters.generatedOrArtifactSkips,
+			buildArtifactSkips: counters.buildArtifactSkips,
+		},
+	});
 }
 
 function shouldSkipGeneratedOrArtifact(
@@ -477,6 +558,7 @@ function classifyEntry(
 	fullPath: string,
 	cfg: ResolvedCollectionConfig,
 	probeCache?: ArtifactProbeCache,
+	skipCounters?: SourceWalkSkipCounters,
 ): { recurseInto?: string; keepFile?: string } {
 	const { ignoreMatcher, extraExcludePatterns, extensions, options } = cfg;
 	if (entry.isDirectory()) {
@@ -494,8 +576,18 @@ function classifyEntry(
 		const ext = path.extname(entry.name).toLowerCase();
 		if (!extensions.has(ext)) return {};
 		// Skip if this is a build artifact or generated/codegen output.
-		if (isBuildArtifact(fullPath, probeCache)) return {};
-		if (shouldSkipGeneratedOrArtifact(fullPath, options)) return {};
+		// #1107: counted separately (both are observability-only — neither
+		// changes what gets skipped) so an invisible coverage hole (a real
+		// `src/gen.ts` silently dropped by the name heuristic) is at least
+		// visible via `SourceCollectionResult` and the walk's rollup log line.
+		if (isBuildArtifact(fullPath, probeCache)) {
+			if (skipCounters) skipCounters.buildArtifactSkips += 1;
+			return {};
+		}
+		if (shouldSkipGeneratedOrArtifact(fullPath, options)) {
+			if (skipCounters) skipCounters.generatedOrArtifactSkips += 1;
+			return {};
+		}
 		return { keepFile: fullPath };
 	}
 	return {};
@@ -551,6 +643,8 @@ export function collectSourceFilesWithBudget(
 	// on return — never persisted across calls.
 	const probeCache = createArtifactProbeCache();
 	const budget = createEntryBudget(cfg.maxScanEntries);
+	// #1107: per-walk skip counters, discarded on return like the probe cache.
+	const skipCounters = createSourceWalkSkipCounters();
 
 	// #761: immediate-descent recursion driver (result-array order preserved),
 	// with both caps kept as this walker's own per-entry policy: the hard
@@ -565,12 +659,19 @@ export function collectSourceFilesWithBudget(
 			fullPath,
 			cfg,
 			probeCache,
+			skipCounters,
 		);
 		if (recurseInto) return "recurse";
 		if (keepFile) kept.push(keepFile);
 		return "skip";
 	});
-	return { files: kept.list(), entryBudgetExceeded: budget.exceeded };
+	logSourceWalkSkipsIfAny(rootDir, skipCounters);
+	return {
+		files: kept.list(),
+		entryBudgetExceeded: budget.exceeded,
+		generatedOrArtifactSkips: skipCounters.generatedOrArtifactSkips,
+		buildArtifactSkips: skipCounters.buildArtifactSkips,
+	};
 }
 
 export function collectSourceFiles(
@@ -620,6 +721,8 @@ export async function collectSourceFilesWithBudgetAsync(
 	// caching across the whole call remains invalidation-free.
 	const probeCache = createArtifactProbeCache();
 	const budget = createEntryBudget(cfg.maxScanEntries);
+	// #1107: per-walk skip counters, discarded on return like the probe cache.
+	const skipCounters = createSourceWalkSkipCounters();
 
 	// #761: shared depth-first stack driver (its reverse-push mirrors the sync
 	// collector's left-to-right recursion). The async collector charges the
@@ -635,6 +738,7 @@ export async function collectSourceFilesWithBudgetAsync(
 				fullPath,
 				cfg,
 				probeCache,
+				skipCounters,
 			);
 			if (recurseInto) return "recurse";
 			if (keepFile) {
@@ -656,7 +760,13 @@ export async function collectSourceFilesWithBudgetAsync(
 		},
 	);
 
-	return { files: kept.list(), entryBudgetExceeded: budget.exceeded };
+	logSourceWalkSkipsIfAny(rootDir, skipCounters);
+	return {
+		files: kept.list(),
+		entryBudgetExceeded: budget.exceeded,
+		generatedOrArtifactSkips: skipCounters.generatedOrArtifactSkips,
+		buildArtifactSkips: skipCounters.buildArtifactSkips,
+	};
 }
 
 /**

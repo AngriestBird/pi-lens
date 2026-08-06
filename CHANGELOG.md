@@ -6,6 +6,32 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **Source-walk skip observability (refs #1107, phase 1 of 2)** — the source
+	walk silently dropped real files whose NAMES match generated-artifact
+	heuristics (a real `src/gen.ts` was invisible to
+	`collectSourceFilesWithBudgetAsync`, with nothing anywhere saying so), an
+	invisible coverage hole for review-graph/word-index/project-diagnostics/
+	call-graph. This phase adds observability only — it does NOT change which
+	files get skipped (a content-probe escape hatch for name-only matches is
+	phase 2, tracked on #1107). `SourceCollectionResult` gains two additive
+	optional counters, `generatedOrArtifactSkips` (files dropped by the
+	generated/artifact NAME heuristic, `isGeneratedOrArtifact`) and
+	`buildArtifactSkips` (files dropped by the sibling-source artifact probe,
+	`isBuildArtifact`) — separate from extension-filter and ignore-matcher
+	skips, which are policy/config driven rather than name/content heuristics.
+	Both `collectSourceFilesWithBudget` and `collectSourceFilesWithBudgetAsync`
+	(and therefore every consumer that funnels through them — the review-graph
+	builder, project-diagnostics scanner, word index, etc.) populate the
+	counters and log a one-line rollup through the existing `logLatency`
+	channel (`phase: "source_walk_skip_summary"`) whenever either is nonzero; a
+	clean walk with no name/artifact-probe skips emits no new log line.
+	`tests/clients/graph-cache.test.ts`'s two remaining `gen.ts` fixtures
+	(unrelated to the drift-path test, which already used `alpha.ts`) were
+	unknowingly exercising empty-walk graph builds — renamed to
+	`buildstamp.ts`/`identitycheck.ts` since their assertions only cover
+	buildGeneration/cache-mode plumbing, never node/symbol content, so the
+	rename is behavior-preserving.
+
 - **LSP diagnostics content binding (refs #1095, first PR)** — diagnostics are now
 	bound to the document content they were computed against, so a consumer can ask
 	"were these diagnostics computed against what's on disk now?" instead of inferring

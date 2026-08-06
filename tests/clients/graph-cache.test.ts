@@ -144,7 +144,13 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 	it("stamps buildGeneration — no-op builds carry it forward, content changes mint a new one (#459)", async () => {
 		const facts = new FactStore();
 		const cwd = tmpDir();
-		const file = path.join(cwd, "gen.ts");
+		// #1107: was "gen.ts" — the source walk's generated-artifact NAME
+		// heuristic silently drops that name, so this test was unknowingly
+		// exercising an empty-walk build. Its assertions only check
+		// buildGeneration/cache-mode plumbing (never node/symbol content), so
+		// renaming to a non-generated-looking name doesn't change behavior —
+		// it just makes the walk real instead of accidentally empty.
+		const file = path.join(cwd, "buildstamp.ts");
 		fs.writeFileSync(file, "export function genA() {\n\treturn 1;\n}\n");
 
 		const g1 = await buildOrUpdateGraph(cwd, [file], facts);
@@ -182,7 +188,11 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 	it("rejects a stale graph instance's identity once the workspace cache has moved on (#1088)", async () => {
 		const facts = new FactStore();
 		const cwd = tmpDir();
-		const file = path.join(cwd, "gen.ts");
+		// #1107: was "gen.ts" — same empty-walk-fixture drift as the
+		// buildGeneration test above; this test only asserts on
+		// buildGeneration/identity plumbing, never node/symbol content, so the
+		// rename to a non-generated-looking name is behavior-preserving.
+		const file = path.join(cwd, "identitycheck.ts");
 		fs.writeFileSync(file, "export function genA() {\n\treturn 1;\n}\n");
 
 		const g1 = await buildOrUpdateGraph(cwd, [file], facts);
