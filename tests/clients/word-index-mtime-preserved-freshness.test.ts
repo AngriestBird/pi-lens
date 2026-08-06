@@ -107,3 +107,72 @@ describe("word-index freshness: mtime preserved, content changed (#1105)", () =>
 		}
 	});
 });
+
+// The PR's headline compat claim — "a pre-#1105 snapshot lacking fileSizes
+// forces one self-healing full re-read" — is enforced by TWO guards in different
+// functions: deserializeWordIndex only populates fileSizes when the array is
+// present AND parallel to files, and the refresh gate reads a missing size as
+// `?? -1` (an impossible real size that always mismatches). These tests pin both
+// guards so an independent refactor (`?? size`, or populating a misaligned
+// array) can't silently downgrade a legacy snapshot to trusting absent sizes.
+describe("word-index legacy snapshot (no fileSizes) self-heals (#1105)", () => {
+	it("full-re-reads every file when the serialized snapshot omits fileSizes", async () => {
+		const env = setupTestEnvironment("pi-lens-word-legacy-nosize-");
+		try {
+			createTempFile(env.tmpDir, "src/a.ts", "export const legacyAlpha = 1;");
+			createTempFile(env.tmpDir, "src/b.ts", "export const legacyBeta = 2;");
+			createTempFile(env.tmpDir, "src/c.ts", "export const legacyGamma = 3;");
+			const built = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+			const fileCount = built.docCount;
+			expect(fileCount).toBe(3);
+
+			// Simulate a pre-#1105 (v2, no fileSizes) persisted snapshot.
+			const serialized = serializeWordIndex(built);
+			serialized.fileSizes = undefined;
+			const index = deserializeWordIndex(serialized);
+			if (!index) throw new Error("deserialize returned null");
+			// Guard 1: a missing array must NOT be populated — an empty size map is
+			// what makes the refresh gate treat every file as size-unknown.
+			expect(index.fileSizes.size).toBe(0);
+
+			// NO file content changes — mtime matches for every file. The ONLY reason
+			// to re-read is the absent size (`?? -1` mismatch). Pre-guard (`?? size`)
+			// this would be 0.
+			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			expect(result.refreshed).toBe(fileCount);
+			expect(result.dropped).toBe(0);
+			// Post-heal the sizes are populated, so an immediate second refresh is a
+			// no-op — the full re-read happens exactly once.
+			const second = await refreshWordIndexIncrementally(index, env.tmpDir);
+			expect(second.refreshed).toBe(0);
+			expect(second.reused).toBe(fileCount);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("ignores a length-mismatched fileSizes array and full-re-reads", async () => {
+		const env = setupTestEnvironment("pi-lens-word-legacy-badsize-");
+		try {
+			createTempFile(env.tmpDir, "src/a.ts", "export const badAlpha = 1;");
+			createTempFile(env.tmpDir, "src/b.ts", "export const badBeta = 2;");
+			const built = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+			const fileCount = built.docCount;
+			expect(fileCount).toBe(2);
+
+			// A corrupt/misaligned fileSizes (wrong length) must be rejected wholesale
+			// rather than positionally trusted (which would pair a file with the wrong
+			// file's size).
+			const serialized = serializeWordIndex(built);
+			serialized.fileSizes = [123]; // length 1 vs files length 2
+			const index = deserializeWordIndex(serialized);
+			if (!index) throw new Error("deserialize returned null");
+			expect(index.fileSizes.size).toBe(0);
+
+			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			expect(result.refreshed).toBe(fileCount);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
