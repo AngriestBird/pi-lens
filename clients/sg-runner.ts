@@ -53,6 +53,11 @@ export interface SgMatch {
 	lines?: string;
 	language?: string;
 	replacement?: string;
+	// Present when the match came from a `scan` against a rule config (not a raw
+	// `run -p` pattern): the matched rule's id and its `severity`. Real fields of
+	// `sg scan --json` output.
+	ruleId?: string;
+	severity?: string;
 	metaVariables?: {
 		single: Record<string, SgMetaVarNode>;
 		multi: Record<string, SgMetaVarNode[]>;
@@ -133,13 +138,17 @@ function formatMetaVarCaptures(
 
 /**
  * Parse ast-grep `--json` stdout into a match array, or return `null` when the
- * text is not parseable JSON. ast-grep emits either a JSON array or (rarely) a
- * single object; both are normalized to an array.
+ * text is not a match payload. ast-grep emits either a JSON array or (rarely) a
+ * single object; both are normalized to an array. A JSON scalar/`null` is
+ * rejected (returns `null`) so a hypothetical error-report scalar on stdout can
+ * never be misread as a phantom match.
  */
 function tryParseSgMatches(stdout: string): SgMatch[] | null {
 	try {
 		const parsed = JSON.parse(stdout);
-		return Array.isArray(parsed) ? parsed : [parsed];
+		if (Array.isArray(parsed)) return parsed;
+		if (parsed !== null && typeof parsed === "object") return [parsed];
+		return null;
 	} catch {
 		return null;
 	}

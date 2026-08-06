@@ -224,6 +224,33 @@ describe("SgRunner", () => {
 			}
 		});
 
+		it("rejects a status-1 JSON scalar/null stdout as a failure (no phantom match)", async () => {
+			// tryParseSgMatches only accepts an array or object — a JSON scalar
+			// (e.g. an error report serialized as `null`) must not become a match.
+			const root = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-sg-scalar-"),
+			);
+			try {
+				safeSpawnAsync.mockResolvedValueOnce({
+					status: 1,
+					error: undefined,
+					stdout: "null",
+					stderr: "Error: scan aborted",
+				});
+				const { SgRunner } = await import("../../clients/sg-runner.js");
+				const result = await new SgRunner().tempScanDetailedAsync(
+					root,
+					"scalar",
+					"id: scalar\nlanguage: TypeScript\nrule: { kind: function_declaration }\n",
+				);
+
+				expect(result.matches).toEqual([]);
+				expect(result.failure).toBe("cli-failure");
+			} finally {
+				removeTempDirSync(root);
+			}
+		});
+
 		it("keeps status-1 with stderr but unparseable stdout as a failure", async () => {
 			// The complement of the case above: a nonzero status whose stdout is
 			// NOT valid JSON is a real CLI diagnostic, not a match set.
