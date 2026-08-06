@@ -1075,12 +1075,19 @@ export async function computeCascadeForFile(
 				const line = Number(node?.metadata?.line ?? 0);
 				const column = Number(node?.metadata?.column ?? 0);
 				if (line <= 0) continue;
+				// #1109: store the timer and clear it once the race settles. Without
+				// this, when `references()` wins (the common case), the losing
+				// `setTimeout` stays a REF'D pending timer for the remaining 750ms —
+				// harmless in a long-lived session, but a keep-alive tail in a
+				// one-shot `pi --print` process (same uncleared-race-timeout class
+				// fixed for the LSP client-wait leak in clients/lsp/index.ts, #1097).
+				let refsTimer: ReturnType<typeof setTimeout> | undefined;
 				try {
 					const refs = await Promise.race([
 						lspService.references(normalizedFile, line - 1, column - 1, false),
-						new Promise<never>((_, reject) =>
-							setTimeout(() => reject(new Error("timeout")), 750),
-						),
+						new Promise<never>((_, reject) => {
+							refsTimer = setTimeout(() => reject(new Error("timeout")), 750);
+						}),
 					]);
 					for (const ref of refs) {
 						let resolved: string;
@@ -1100,6 +1107,8 @@ export async function computeCascadeForFile(
 					}
 				} catch {
 					// Timeout or LSP error — fall back to import-graph neighbors
+				} finally {
+					if (refsTimer) clearTimeout(refsTimer);
 				}
 				if (Date.now() - refsStart > 1200) break; // Hard ceiling
 			}
