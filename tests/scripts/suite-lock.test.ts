@@ -13,7 +13,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { acquireTestLock, isProcessAlive } from "../../scripts/lib/suite-lock.mjs";
 
 let tmpDir: string;
@@ -115,6 +115,63 @@ describe("acquireTestLock — stale-PID takeover", () => {
     const body = JSON.parse(fs.readFileSync(lockPath, "utf8"));
     expect(body.pid).toBe(process.pid);
     await lock.release();
+  });
+});
+
+describe("acquireTestLock — transient EBUSY/EPERM on the create itself", () => {
+  it("retries into the contended path and eventually acquires when open('wx') rejects with EBUSY once", async () => {
+    // #1112 review round 3: reproduces the real Windows race — a lock file
+    // JUST unlinked by another process's release() can still transiently
+    // reject a fresh `open(path, "wx")` with EBUSY/EPERM before the OS
+    // fully drops the deleted file's handle. Injected deterministically via
+    // vi.spyOn on the shared "node:fs/promises" module object: Node's ESM
+    // module registry is process-wide, so this spy is visible to
+    // suite-lock.mjs's own `import fsp from "node:fs/promises"` binding —
+    // no separate fs seam/DI needed. Rejects exactly once for THIS
+    // lockPath's "wx" open, then calls through to the real implementation,
+    // so the underlying lock semantics are exercised for real (no stubbed
+    // success).
+    const realOpen = fsp.open.bind(fsp);
+    let rejectedOnce = false;
+    const openSpy = vi
+      .spyOn(fsp, "open")
+      .mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+        const [target, flags] = args;
+        if (!rejectedOnce && target === lockPath && flags === "wx") {
+          rejectedOnce = true;
+          const err = new Error(
+            "EBUSY: resource busy or locked, open '" + lockPath + "'",
+          ) as NodeJS.ErrnoException;
+          err.code = "EBUSY";
+          throw err;
+        }
+        return realOpen(...args);
+      });
+
+    try {
+      const lock = await acquireTestLock({
+        lockPath,
+        pollIntervalMs: 10,
+        heartbeatIntervalMs: 10_000,
+        timeoutMs: 5_000,
+      });
+
+      // Proves the retry actually happened: the spy was invoked at least
+      // twice for this path (the rejected attempt, then the successful
+      // one) rather than acquireTestLock crashing out on the first EBUSY.
+      expect(rejectedOnce).toBe(true);
+      const callsForThisPath = openSpy.mock.calls.filter(
+        (call) => call[0] === lockPath,
+      );
+      expect(callsForThisPath.length).toBeGreaterThanOrEqual(2);
+
+      const body = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+      expect(body.pid).toBe(process.pid);
+
+      await lock.release();
+    } finally {
+      openSpy.mockRestore();
+    }
   });
 });
 

@@ -274,8 +274,14 @@ export async function acquireTestLock(options = {}) {
 					const stat = await fsp.stat(lockPath);
 					stale = Date.now() - stat.mtimeMs > staleMaxAgeMs;
 				} catch {
-					// Raced a release between open() failing and stat(); loop and
-					// retry acquisition immediately.
+					// Raced a release between open() failing and stat() (both the
+					// owner-read above and this stat found nothing) — loop and
+					// retry acquisition. Still sleep pollIntervalMs first: without
+					// it this path is an unbounded tight retry loop that ignores
+					// timeoutMs (the deadline check below is never reached from
+					// here), which would spin the CPU and could wait past
+					// timeoutMs unbounded if this race kept re-triggering.
+					await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
 					continue;
 				}
 			}
