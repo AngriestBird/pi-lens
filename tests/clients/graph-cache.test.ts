@@ -16,7 +16,10 @@ import {
 	setupTestEnvironment,
 } from "./test-utils.js";
 
-// Mock out the expensive file system scanning — we only care about cache behaviour
+// NOTE: this mock is vestigial for the builder path — buildOrUpdateGraph walks
+// via project-scan-policy/source-filter, not scan-utils, so these tests run a
+// REAL (tiny, per-test tmpdir) walk. Kept only to keep any incidental
+// scan-utils import inert.
 vi.mock("../../clients/scan-utils.js", () => ({
 	getSourceFiles: vi.fn().mockReturnValue([]),
 }));
@@ -144,7 +147,13 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 	it("stamps buildGeneration — no-op builds carry it forward, content changes mint a new one (#459)", async () => {
 		const facts = new FactStore();
 		const cwd = tmpDir();
-		const file = path.join(cwd, "gen.ts");
+		// #1107: was "gen.ts" — the source walk's generated-artifact NAME
+		// heuristic silently drops that name, so this test was unknowingly
+		// exercising an empty-walk build. Its assertions only check
+		// buildGeneration/cache-mode plumbing (never node/symbol content), so
+		// renaming to a non-generated-looking name doesn't change behavior —
+		// it just makes the walk real instead of accidentally empty.
+		const file = path.join(cwd, "buildstamp.ts");
 		fs.writeFileSync(file, "export function genA() {\n\treturn 1;\n}\n");
 
 		const g1 = await buildOrUpdateGraph(cwd, [file], facts);
@@ -159,8 +168,10 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 
 		// A graph-mutating build (here: full rebuild after a workspace-cache clear)
 		// mints a NEW stamp. (The incremental/content-change paths are covered with
-		// real files in review-graph-seq-fastpath.test.ts — this harness mocks the
-		// source walk, so content edits are invisible to the signature here.)
+		// real files in review-graph-seq-fastpath.test.ts; since the #1107 fixture
+		// rename this harness's walk is REAL — the builder walks via
+		// project-scan-policy, not the mocked scan-utils — so we force the rebuild
+		// explicitly by clearing both caches rather than editing content.)
 		clearReviewGraphWorkspaceCache();
 		clearGraphCache();
 		const g3 = await buildOrUpdateGraph(cwd, [file], facts);
@@ -182,7 +193,11 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 	it("rejects a stale graph instance's identity once the workspace cache has moved on (#1088)", async () => {
 		const facts = new FactStore();
 		const cwd = tmpDir();
-		const file = path.join(cwd, "gen.ts");
+		// #1107: was "gen.ts" — same empty-walk-fixture drift as the
+		// buildGeneration test above; this test only asserts on
+		// buildGeneration/identity plumbing, never node/symbol content, so the
+		// rename to a non-generated-looking name is behavior-preserving.
+		const file = path.join(cwd, "identitycheck.ts");
 		fs.writeFileSync(file, "export function genA() {\n\treturn 1;\n}\n");
 
 		const g1 = await buildOrUpdateGraph(cwd, [file], facts);

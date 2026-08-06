@@ -645,7 +645,7 @@ const WORKSPACE_SWEEP_PREOPEN_CHUNK_SIZE = (() => {
 })();
 
 // #584: opengrep has no `workspace/diagnostic` pull support (push-only,
-// docs/servercapabilities.md) and `reopenOnResync: true` (server-strategies.ts)
+// docs/servercapabilities.md) and `reopenOnResync: true` (wait-policy/strategies.ts)
 // means every per-file LSP touch already forces a full re-scan anyway — there's
 // no incremental win from routing it through the sweep's per-file loop. On a
 // full workspace sweep it instead dominates the per-file wait (its own
@@ -1086,14 +1086,34 @@ export class LSPService {
 		}
 
 		const timeoutSentinel = Symbol("lsp-client-wait-timeout");
-		const waitResult = await Promise.race<
-			SpawnedServer | undefined | typeof timeoutSentinel
-		>([
-			withBudget(),
-			new Promise<typeof timeoutSentinel>((resolve) =>
-				setTimeout(() => resolve(timeoutSentinel), effectiveMaxWaitMs),
-			),
-		]);
+		// #1097: store the timer and clear it once the race settles. Without this,
+		// when `withBudget()` wins (the common case: the client is ready well before
+		// the budget), the losing `setTimeout` stays a REF'D pending timer for the
+		// full remaining `effectiveMaxWaitMs`. In a long-lived interactive session
+		// that is invisible (it fires later, resolves an orphan promise, is GC'd).
+		// In a one-shot `pi --print --no-session` process it is fatal: the timer
+		// keeps the event loop alive for up to `effectiveMaxWaitMs` after
+		// `agent_settled`/`session_shutdown`, so the completed process never exits
+		// (issue #1097 — a recurrence of the #22 symptom via a different handle, and
+		// a member of the uncleared-race-timeout class the shared `withDeadline`
+		// helper already guards against elsewhere).
+		let waitTimer: ReturnType<typeof setTimeout> | undefined;
+		let waitResult: SpawnedServer | undefined | typeof timeoutSentinel;
+		try {
+			waitResult = await Promise.race<
+				SpawnedServer | undefined | typeof timeoutSentinel
+			>([
+				withBudget(),
+				new Promise<typeof timeoutSentinel>((resolve) => {
+					waitTimer = setTimeout(
+						() => resolve(timeoutSentinel),
+						effectiveMaxWaitMs,
+					);
+				}),
+			]);
+		} finally {
+			if (waitTimer) clearTimeout(waitTimer);
+		}
 
 		if (waitResult === timeoutSentinel) {
 			// Snapshot known client health — scan by serverId prefix (no root needed)
@@ -1768,7 +1788,7 @@ export class LSPService {
 		if (diagnosticsMode !== "none") {
 			// Resolution: env wins so users can tune the cap without rebuilding.
 			// Otherwise, on the single-server hot path (primary scope), use that
-			// server's own strategy budget (server-strategies.ts) so a fast server
+			// server's own strategy budget (wait-policy/strategies.ts) so a fast server
 			// (TypeScript ~1s) isn't held to a flat multi-second wait while a slow
 			// one (rust-analyzer 3s) gets the time it needs — bounded by any caller
 			// ceiling that exists to protect the per-edit pipeline budget (#203).
