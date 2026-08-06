@@ -21,8 +21,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectIgnoreMatcher } from "./file-utils.js";
 import {
+	classifyGeneratedOrArtifact,
+	type GeneratedArtifactVerdict,
 	isDeclarationFile,
-	isGeneratedOrArtifact,
 } from "./generated-artifacts.js";
 import { isCodeKindFile, KIND_EXTENSIONS } from "./file-kinds.js";
 import { logLatency } from "./latency-logger.js";
@@ -313,13 +314,31 @@ export interface SourceCollectionResult {
 	 * driven, not name/content heuristics, and are not part of the #1107
 	 * invisible-coverage-hole class.
 	 *
-	 * KNOWN GAP (#1107 phase 2): directory-level pruning via
-	 * `isGeneratedArtifactDirectoryName` (`shouldRecurseIntoDir`) is NOT
-	 * counted — an entire skipped `generated/`/`codegen/` directory of real
-	 * files reports zero here. File-level counters only.
+	 * `generatedDirSkips` (#1107 phase 2): whole DIRECTORIES pruned by
+	 * `shouldRecurseIntoDir`'s `isGeneratedArtifactDirectoryName` branch
+	 * (`generated/`, `codegen/`, `__generated__/`, …) — one count per
+	 * directory pruned, NOT per file inside it. The directory's contents are
+	 * never enumerated (that is the entire point of pruning at the directory
+	 * level instead of walking in and skipping each file), so a per-file count
+	 * is not obtainable without defeating the optimization; a caller that
+	 * needs to know "how many real files might be hiding in there" cannot get
+	 * that number from this counter and must inspect the directory directly.
+	 *
+	 * `generatedNameOverrides` (#1107 phase 2): files that MATCHED a
+	 * generated-artifact NAME pattern but were KEPT anyway because the
+	 * content-probe escape hatch (`classifyGeneratedOrArtifact`'s
+	 * `"override"` verdict) found no corroborating evidence — no source
+	 * sibling (checked upstream via `isBuildArtifact`) and no generated-code
+	 * header in the first 4 KB. Counted so the heuristic's RESCUES are as
+	 * observable as its skips: a large `generatedNameOverrides` on one repo
+	 * signals its naming conventions collide with the generated-file regexes
+	 * often enough to be worth a closer look, same motivation as the skip
+	 * counters above.
 	 */
 	generatedOrArtifactSkips?: number;
 	buildArtifactSkips?: number;
+	generatedDirSkips?: number;
+	generatedNameOverrides?: number;
 }
 
 /**
@@ -332,10 +351,17 @@ export interface SourceCollectionResult {
 interface SourceWalkSkipCounters {
 	generatedOrArtifactSkips: number;
 	buildArtifactSkips: number;
+	generatedDirSkips: number;
+	generatedNameOverrides: number;
 }
 
 function createSourceWalkSkipCounters(): SourceWalkSkipCounters {
-	return { generatedOrArtifactSkips: 0, buildArtifactSkips: 0 };
+	return {
+		generatedOrArtifactSkips: 0,
+		buildArtifactSkips: 0,
+		generatedDirSkips: 0,
+		generatedNameOverrides: 0,
+	};
 }
 
 /**
@@ -360,7 +386,9 @@ function logSourceWalkSkipsIfAny(
 ): void {
 	if (
 		counters.generatedOrArtifactSkips === 0 &&
-		counters.buildArtifactSkips === 0
+		counters.buildArtifactSkips === 0 &&
+		counters.generatedDirSkips === 0 &&
+		counters.generatedNameOverrides === 0
 	) {
 		return;
 	}
@@ -372,7 +400,35 @@ function logSourceWalkSkipsIfAny(
 		metadata: {
 			generatedOrArtifactSkips: counters.generatedOrArtifactSkips,
 			buildArtifactSkips: counters.buildArtifactSkips,
+			generatedDirSkips: counters.generatedDirSkips,
+			generatedNameOverrides: counters.generatedNameOverrides,
 		},
+	});
+}
+
+/**
+ * Full verdict form of {@link shouldSkipGeneratedOrArtifact} (#1107 phase 2)
+ * — exposes `classifyGeneratedOrArtifact`'s `"override"` outcome (a WEAK
+ * name-only match the content-probe escape hatch rescued) so `classifyEntry`
+ * can count it distinctly from both a genuine skip and a never-flagged file.
+ */
+function classifySkipGeneratedOrArtifact(
+	filePath: string,
+	options?: Pick<
+		SourceCollectionOptions,
+		"includeGenerated" | "includeDeclarationFiles" | "inspectGeneratedHeaders"
+	>,
+): GeneratedArtifactVerdict {
+	const includeDeclarations = options?.includeDeclarationFiles === true;
+	if (options?.includeGenerated === true) {
+		return !includeDeclarations && isDeclarationFile(filePath)
+			? "generated"
+			: "clean";
+	}
+
+	return classifyGeneratedOrArtifact(filePath, {
+		readContentHeader: options?.inspectGeneratedHeaders !== false,
+		includeDeclarations: !includeDeclarations,
 	});
 }
 
@@ -383,15 +439,7 @@ function shouldSkipGeneratedOrArtifact(
 		"includeGenerated" | "includeDeclarationFiles" | "inspectGeneratedHeaders"
 	>,
 ): boolean {
-	const includeDeclarations = options?.includeDeclarationFiles === true;
-	if (options?.includeGenerated === true) {
-		return !includeDeclarations && isDeclarationFile(filePath);
-	}
-
-	return isGeneratedOrArtifact(filePath, {
-		readContentHeader: options?.inspectGeneratedHeaders !== false,
-		includeDeclarations: !includeDeclarations,
-	});
+	return classifySkipGeneratedOrArtifact(filePath, options) === "generated";
 }
 
 /**
@@ -567,12 +615,23 @@ function classifyEntry(
 ): { recurseInto?: string; keepFile?: string } {
 	const { ignoreMatcher, extraExcludePatterns, extensions, options } = cfg;
 	if (entry.isDirectory()) {
-		const canRecurse = shouldRecurseIntoDir(entry, fullPath, {
-			ignoreMatcher,
-			extraExcludeDirs: extraExcludePatterns,
-			skipGeneratedArtifactDirs: options?.includeGenerated !== true,
-			followSymlinks: options?.followSymlinks === true,
-		});
+		const canRecurse = shouldRecurseIntoDir(
+			entry,
+			fullPath,
+			{
+				ignoreMatcher,
+				extraExcludeDirs: extraExcludePatterns,
+				skipGeneratedArtifactDirs: options?.includeGenerated !== true,
+				followSymlinks: options?.followSymlinks === true,
+			},
+			// #1107 phase 2: counts one event per PRUNED DIRECTORY, not per file
+			// inside it — see `generatedDirSkips`'s doc on `SourceCollectionResult`.
+			skipCounters
+				? () => {
+						skipCounters.generatedDirSkips += 1;
+					}
+				: undefined,
+		);
 		if (!canRecurse) return {};
 		return { recurseInto: fullPath };
 	}
@@ -589,9 +648,16 @@ function classifyEntry(
 			if (skipCounters) skipCounters.buildArtifactSkips += 1;
 			return {};
 		}
-		if (shouldSkipGeneratedOrArtifact(fullPath, options)) {
+		// #1107 phase 2: the content-probe escape hatch can rescue a WEAK
+		// name-only match ("override") instead of skipping it — see
+		// `classifyGeneratedOrArtifact`'s doc for the evidence order/tradeoff.
+		const verdict = classifySkipGeneratedOrArtifact(fullPath, options);
+		if (verdict === "generated") {
 			if (skipCounters) skipCounters.generatedOrArtifactSkips += 1;
 			return {};
+		}
+		if (verdict === "override" && skipCounters) {
+			skipCounters.generatedNameOverrides += 1;
 		}
 		return { keepFile: fullPath };
 	}
@@ -676,6 +742,8 @@ export function collectSourceFilesWithBudget(
 		entryBudgetExceeded: budget.exceeded,
 		generatedOrArtifactSkips: skipCounters.generatedOrArtifactSkips,
 		buildArtifactSkips: skipCounters.buildArtifactSkips,
+		generatedDirSkips: skipCounters.generatedDirSkips,
+		generatedNameOverrides: skipCounters.generatedNameOverrides,
 	};
 }
 
@@ -771,6 +839,8 @@ export async function collectSourceFilesWithBudgetAsync(
 		entryBudgetExceeded: budget.exceeded,
 		generatedOrArtifactSkips: skipCounters.generatedOrArtifactSkips,
 		buildArtifactSkips: skipCounters.buildArtifactSkips,
+		generatedDirSkips: skipCounters.generatedDirSkips,
+		generatedNameOverrides: skipCounters.generatedNameOverrides,
 	};
 }
 

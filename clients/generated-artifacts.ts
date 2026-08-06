@@ -99,7 +99,18 @@ export function isDeclarationFile(filePath: string): boolean {
 	return DECLARATION_FILE_PATTERNS.some((pattern) => pattern.test(base));
 }
 
-function hasGeneratedArtifactPath(filePath: string): boolean {
+/**
+ * STRONG evidence a path is generated/artifact output: it lives under a
+ * directory segment that itself looks generated (`generated/`, `codegen/`,
+ * …) or its basename is a known package-manager lockfile. Both are treated
+ * as conclusive — no content-probe escape hatch (#1107 phase 2) applies to
+ * either. A lockfile is never hand-written; a generated-dir SEGMENT match
+ * here only fires for callers that check a single path without having
+ * walked (directory-level pruning already removes the walk-time case in
+ * `shouldRecurseIntoDir`, so this branch is effectively a belt-and-braces
+ * check for non-walk callers like `file-role.ts` and `project-scan-policy.ts`).
+ */
+function hasStrongGeneratedArtifactPath(filePath: string): boolean {
 	const segments = pathSegments(filePath);
 	const dirSegments = segments.slice(0, -1);
 	if (
@@ -109,7 +120,19 @@ function hasGeneratedArtifactPath(filePath: string): boolean {
 	}
 
 	const base = path.basename(filePath);
-	if (LOCKFILE_NAMES.has(base.toLowerCase())) return true;
+	return LOCKFILE_NAMES.has(base.toLowerCase());
+}
+
+/**
+ * WEAK evidence: the basename alone matches a generated-file NAME pattern
+ * (e.g. `gen.ts`, `foo_generated.go`, `bar.min.js`). Unlike the strong path
+ * check above, a name-only match is not conclusive — a hand-written file can
+ * innocently contain "gen" in its name. #1107 phase 2's content-probe escape
+ * hatch (see `classifyGeneratedOrArtifact`) requires corroborating evidence
+ * (a generated-code header) before treating a WEAK-only match as an artifact.
+ */
+function hasWeakGeneratedFileNamePattern(filePath: string): boolean {
+	const base = path.basename(filePath);
 	return GENERATED_FILE_PATTERNS.some((pattern) => pattern.test(base));
 }
 
@@ -181,23 +204,94 @@ function fileHeaderLooksGenerated(filePath: string, maxBytes: number): boolean {
 	return verdict;
 }
 
+/**
+ * Verdict of {@link classifyGeneratedOrArtifact}:
+ *  - `"generated"`: confirmed generated/artifact output — skip it. Either a
+ *    STRONG path match (generated dir segment, lockfile), an explicit
+ *    declaration-file opt-in, a confirmed generated-code content header, or
+ *    (only when no header probe was possible/enabled) a WEAK name-only
+ *    match falling back to the pre-#1107-phase-2 trust-the-name behavior.
+ *  - `"override"`: #1107 phase 2's content-probe escape hatch fired — a WEAK
+ *    name-only match (e.g. `gen.ts`) that a content-header probe did NOT
+ *    confirm. Kept, not skipped; callers that track observability should
+ *    count this distinctly from a genuine `"clean"` (never-flagged) file so
+ *    the heuristic's rescues stay visible.
+ *  - `"clean"`: no evidence at all — never matched any heuristic.
+ */
+export type GeneratedArtifactVerdict = "generated" | "override" | "clean";
+
+/**
+ * The full verdict behind {@link isGeneratedOrArtifact}'s boolean, exposing
+ * the #1107 phase 2 content-probe escape hatch: a WEAK name-only match (see
+ * {@link hasWeakGeneratedFileNamePattern}) is no longer skipped on the name
+ * alone — it additionally requires a generated-code header in the first few
+ * KB (`hasGeneratedArtifactContent`/`fileHeaderLooksGenerated`) before being
+ * treated as an artifact. Evidence check order is cheapest-first: STRONG
+ * path (dir segment/lockfile, no filesystem probe) → declaration opt-in →
+ * content/header probe, so the (often already-open) file read only happens
+ * for the WEAK-match case that actually needs it.
+ *
+ * Evidence class (a) from the issue — "does a higher-precedence hand-written
+ * source SIBLING exist?" — is deliberately NOT re-implemented here: it is
+ * `source-filter.ts`'s `findSourceSibling`/`isBuildArtifact` (this module has
+ * no filesystem-sibling-probe cache, and `source-filter.ts` already imports
+ * this module, so adding a reverse import would be circular). Both call
+ * sites that matter (`classifyEntry`, `filterSourceFiles` in
+ * `source-filter.ts`) already probe for a sibling BEFORE reaching this
+ * function and short-circuit on a hit, so by the time this function runs for
+ * those callers evidence (a) has already come back negative. Non-walk
+ * callers with no upstream sibling probe (`file-role.ts`'s content-based
+ * check, `project-scan-policy.ts`'s single-path `shouldSkipProjectPath`)
+ * evaluate evidence (b) only — a documented, narrower guarantee than the
+ * walk path's.
+ *
+ * Tradeoff (documented per the issue): when NEITHER piece of evidence
+ * confirms a WEAK name match, the file is KEPT. This can rescue a real
+ * headerless generated file with no source twin into a walk/graph/index that
+ * previously silently dropped it — accepted per #1107: a false-KEEP (an
+ * agent sees one extra file it must itself judge) is strictly less harmful
+ * than a silent false-DROP (a real file invisibly never analyzed at all).
+ */
+export function classifyGeneratedOrArtifact(
+	filePath: string,
+	options: GeneratedArtifactOptions = {},
+): GeneratedArtifactVerdict {
+	if (hasStrongGeneratedArtifactPath(filePath)) return "generated";
+	if (options.includeDeclarations && isDeclarationFile(filePath)) {
+		return "generated";
+	}
+
+	const weakNameMatch = hasWeakGeneratedFileNamePattern(filePath);
+
+	if (options.content !== undefined) {
+		if (hasGeneratedArtifactContent(options.content)) return "generated";
+		return weakNameMatch ? "override" : "clean";
+	}
+
+	if (options.readContentHeader) {
+		if (
+			fileHeaderLooksGenerated(
+				filePath,
+				options.maxHeaderBytes ?? DEFAULT_HEADER_BYTES,
+			)
+		) {
+			return "generated";
+		}
+		return weakNameMatch ? "override" : "clean";
+	}
+
+	// No content/header probe was supplied or enabled: there is no cheap way
+	// to evaluate evidence (b) here, so a WEAK name match falls back to the
+	// pre-#1107-phase-2 behavior (trust the name, skip it) rather than
+	// silently activating the escape hatch for callers that opted out of the
+	// probe for performance. The escape hatch only activates when a header
+	// probe actually ran and did not confirm.
+	return weakNameMatch ? "generated" : "clean";
+}
+
 export function isGeneratedOrArtifact(
 	filePath: string,
 	options: GeneratedArtifactOptions = {},
 ): boolean {
-	if (hasGeneratedArtifactPath(filePath)) return true;
-	if (options.includeDeclarations && isDeclarationFile(filePath)) return true;
-
-	if (options.content !== undefined) {
-		return hasGeneratedArtifactContent(options.content);
-	}
-
-	if (options.readContentHeader) {
-		return fileHeaderLooksGenerated(
-			filePath,
-			options.maxHeaderBytes ?? DEFAULT_HEADER_BYTES,
-		);
-	}
-
-	return false;
+	return classifyGeneratedOrArtifact(filePath, options) === "generated";
 }
