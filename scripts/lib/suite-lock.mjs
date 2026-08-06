@@ -10,12 +10,17 @@
  *
  * Pattern mirrors clients/installer/index.ts's `.install.lock`
  * (acquireInstallLock / isProcessAlive): atomic create via
- * fs.open(path, "wx"), owner JSON body `{ pid, startedIso }`, and "stale only
- * after the recorded PID is confirmed dead" takeover. This is a minimal
- * standalone re-implementation (not an import of clients/installer/index.ts)
- * because scripts/ must run as plain .mjs before `npm run build` compiles
+ * fs.open(path, "wx"), owner JSON body `{ pid, startedIso }`, and "stale once
+ * the recorded PID is confirmed dead" takeover. This is a minimal standalone
+ * re-implementation (not an import of clients/installer/index.ts) because
+ * scripts/ must run as plain .mjs before `npm run build` compiles
  * clients/*.ts to clients/*.js — see that file for the original if the two
- * ever need to be reconciled.
+ * ever need to be reconciled. ONE deliberate divergence from that original:
+ * `.install.lock` ALSO ages out a lock with a still-live, readable PID once
+ * it exceeds the owner's install bound + slack (#946 F1's PID-recycle
+ * defense — an install has a known bounded duration to size that against).
+ * This lock does NOT do that (see point 5 below) — a test-suite run has no
+ * such bound.
  *
  * OS-agnosticism, explicitly:
  *  1. Locking is done ONLY via atomic file create (`fs.open(path, "wx")`),
@@ -39,13 +44,24 @@
  *     still recovers it). A momentarily-unreadable-but-present lock file
  *     during acquire is treated as CONTENDED (wait/retry), never as a crash.
  *  5. The lock body records `{ pid, startedIso }` (an ISO-8601 string, not
- *     just an epoch number) so heartbeat/timeout messages are human-legible.
- *     PID reuse (OS recycles a dead PID for an unrelated live process before
- *     this lock is checked) is a known, accepted risk of PID-liveness
- *     locking in general; its only consequence here is the new waiter
- *     treating the lock as still held and waiting longer than necessary —
- *     never a correctness violation (it never causes an incorrect
- *     takeover).
+ *     just an epoch number) so heartbeat/timeout messages are human-legible
+ *     ("held by PID <pid> since <startedIso>") for exactly this diagnosis:
+ *     unlike `.install.lock`, this lock has NO age-expiry path for a lock
+ *     whose recorded PID still reads as alive — deliberately, since a
+ *     full-suite run has no bounded duration for a timeout to be sized
+ *     against, and the owner never touches the lock file's mtime while
+ *     holding it (so an mtime-based bound would just be a second arbitrary
+ *     guess). The consequence: if the OS recycles a dead PID for an
+ *     unrelated live process before a waiter re-checks, that waiter treats
+ *     the lock as still (wrongly) held and WAITS FOREVER — recoverable only
+ *     by a human reading the heartbeat's pid+startedIso and deleting the
+ *     lock file by hand. This is strictly worse than the installer's
+ *     bounded wait for that one PID-recycle case, traded deliberately for
+ *     never taking over a run that is still genuinely in progress. Possible
+ *     future hardening: have the owner periodically touch the lock file's
+ *     mtime while still running, so a waiter could safely distinguish
+ *     "stale mtime + dead-looking PID" from "recycled PID, still running" —
+ *     not implemented here.
  *  6. Paths go through `os.homedir()` / `path.join()` throughout, never
  *     hand-built strings. Tests pass an explicit `lockPath` under a
  *     `fs.mkdtemp()` directory (or set `PI_LENS_HOME` to one) so they never
@@ -224,7 +240,17 @@ export async function acquireTestLock(options = {}) {
 			};
 		} catch (err) {
 			const error = /** @type {NodeJS.ErrnoException} */ (err);
-			if (error.code !== "EEXIST") throw error;
+			// EBUSY/EPERM on the CREATE itself (not just on unlink — see
+			// removeLockWithRetry) is a real, observed Windows race: a lock file
+			// that was JUST unlinked by another process's release() can still
+			// transiently reject a fresh `open(path, "wx")` with EPERM/EBUSY
+			// before the OS fully drops the deleted file's handle. Treat that
+			// exactly like EEXIST — contended, retry — rather than throwing;
+			// otherwise a real two-waiter release/re-acquire handoff can
+			// randomly crash the second waiter instead of letting it proceed.
+			if (error.code !== "EEXIST" && error.code !== "EBUSY" && error.code !== "EPERM") {
+				throw error;
+			}
 
 			// The file exists but may be momentarily unreadable (a racing
 			// writer, or a transient Windows file hold) — that is CONTENDED,
@@ -255,6 +281,18 @@ export async function acquireTestLock(options = {}) {
 			}
 
 			if (stale) {
+				// KNOWN RACE (inherited as-is from clients/installer/index.ts's
+				// acquireInstallLock, same shape there): between deciding `stale`
+				// above and the unlink below, the dead/aged-out owner could
+				// theoretically have been reaped by a DIFFERENT waiter that has
+				// already re-created the lock as its own fresh, live owner — this
+				// waiter would then unlink that fresh lock out from under it
+				// (ABA). The window is milliseconds and only reachable right after
+				// a crash (a live owner's PID is never "stale"), so it's left
+				// as-is rather than fixed here; a real fix (re-read + compare the
+				// owner body immediately before unlink) would need to land in
+				// both places per the repo's bug-class-sweep discipline, not just
+				// this one. See PR #1112 review discussion (#1101).
 				const removed = await removeLockWithRetry(lockPath);
 				if (!removed) {
 					// Another process may hold a transient handle on it; loop and

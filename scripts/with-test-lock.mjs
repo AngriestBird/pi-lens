@@ -22,10 +22,10 @@
  * `$PI_LENS_HOME/test-suite.lock`).
  *
  * Pattern: atomic create (`fs.open(path, "wx")`) + PID-liveness staleness,
- * mirroring clients/installer/index.ts's `.install.lock` (AGENTS.md: "A
- * lock is stale only after its recorded PID is confirmed dead"). Waiting
- * prints a heartbeat line at least every 15s so a queued run never looks
- * hung.
+ * mirroring clients/installer/index.ts's `.install.lock` — with one
+ * deliberate divergence (no age-expiry for a lock whose PID still reads as
+ * alive; see scripts/lib/suite-lock.mjs's header for why). Waiting prints a
+ * heartbeat line at least every 15s so a queued run never looks hung.
  *
  * Usage:
  *   node scripts/with-test-lock.mjs -- <command> [args...]
@@ -39,8 +39,14 @@
  */
 
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { acquireTestLock, getLockPath } from "./lib/suite-lock.mjs";
+
+const require = createRequire(import.meta.url);
 
 function parseCommandArgs(argv) {
 	const sepIndex = argv.indexOf("--");
@@ -48,24 +54,50 @@ function parseCommandArgs(argv) {
 	return rest;
 }
 
-// Windows CreateProcess cannot exec .cmd/.bat files directly — they need
-// cmd.exe as an interpreter (vitest.cmd/npx.cmd under node_modules/.bin are
-// exactly this shape), which is why win32 needs `shell: true` here at all.
-// But `shell: true` + an args ARRAY does NOT quote/escape for you on
-// Windows (Node just space-joins argv into the command line) — confirmed
-// experimentally: an arg containing a space silently split into two argv
-// entries on the far side. So on win32 we build the command line ourselves
-// with CRT-style quoting (the same quoting rule most Windows executables,
-// including node.exe/npm's own shims, expect) and hand spawn() a single
-// pre-quoted string instead of an args array.
+// Resolve vitest's own JS entry point (its package.json `bin` field) so it
+// can be launched via `node <entry> <args>` — a plain argv array, `shell:
+// false`, no cmd.exe/sh in the loop at all, identical on every OS. This is
+// the ONLY caller-path this wrapper actually needs to support well: every
+// real invocation (npm test / test:unit / test:integration) is
+// `-- vitest run [...]`. Returns null if vitest can't be resolved this way
+// (e.g. some future non-vitest caller), in which case runCommand falls back
+// to the generic (best-effort, NOT injection-safe — see its own comment)
+// shell path below.
+export function resolveVitestEntry() {
+	try {
+		const pkgJsonPath = require.resolve("vitest/package.json");
+		const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
+		const binField = pkg.bin;
+		const binRel = typeof binField === "string" ? binField : binField?.vitest;
+		if (!binRel) return null;
+		return path.join(path.dirname(pkgJsonPath), binRel);
+	} catch {
+		return null;
+	}
+}
+
+// Fallback ONLY: generic passthrough for a command that isn't `vitest`
+// (there is no such caller today — package.json only ever wraps `vitest
+// run [...]`). Windows CreateProcess cannot exec .cmd/.bat files directly,
+// which is why win32 needs `shell: true` for anything that isn't resolved
+// to a plain .js/.exe the way resolveVitestEntry() does above. `shell:
+// true` + an args ARRAY does NOT quote/escape for you on Windows (Node
+// just space-joins argv into the command line — confirmed experimentally:
+// an arg containing a space silently split into two argv entries), so this
+// builds one CRT-quoted command-line string instead of an args array.
 //
-// This is NOT a general shell-injection-safe escaper (no defense against
-// cmd.exe metacharacters like &, |, %VAR% expansion) — that's the much
-// larger surface `clients/safe-spawn.ts` covers for installer subprocess
-// mutations. It doesn't need to be: commandArgs here always comes from this
-// process's own argv (a package.json script definition — `vitest run
-// --ignore ...`), never from untrusted external/user input.
-function quoteForWindowsCmd(arg) {
+// This quoting is NOT shell-injection-safe: it defends against space/quote
+// splitting for CRT-style argv parsing, but cmd.exe's OWN metacharacters
+// (`&`, `|`, `%VAR%` expansion) still apply INSIDE a quoted argument on a
+// cmd.exe command line — a quote-containing argument can flip cmd's quote
+// parity and let a later `&`/`|` execute as a separate command, and
+// `%VAR%` still expands regardless of quoting. `clients/safe-spawn.ts`
+// covers that much larger surface for installer subprocess mutations,
+// which this deliberately does not reach for: this fallback path only runs
+// for a hypothetical non-vitest caller, and even then commandArgs comes
+// from this process's own argv (a package.json script definition), never
+// from untrusted external/user input.
+export function quoteForWindowsCmd(arg) {
 	if (arg === "") return '""';
 	if (!/[\s"^&|<>()%!]/.test(arg)) return arg;
 	let result = "";
@@ -90,15 +122,27 @@ function quoteForWindowsCmd(arg) {
 function runCommand(commandArgs) {
 	return new Promise((resolve, reject) => {
 		const isWin32 = process.platform === "win32";
-		const child = isWin32
-			? spawn(commandArgs.map(quoteForWindowsCmd).join(" "), {
-					stdio: "inherit",
-					shell: true,
-				})
-			: spawn(commandArgs[0], commandArgs.slice(1), {
-					stdio: "inherit",
-					shell: false,
-				});
+		const vitestEntry = commandArgs[0] === "vitest" ? resolveVitestEntry() : null;
+
+		let child;
+		if (vitestEntry) {
+			// Bypasses shell entirely, on every OS: no cmd.exe, no quoting
+			// minefield, identical behavior cross-platform.
+			child = spawn(process.execPath, [vitestEntry, ...commandArgs.slice(1)], {
+				stdio: "inherit",
+				shell: false,
+			});
+		} else if (isWin32) {
+			child = spawn(commandArgs.map(quoteForWindowsCmd).join(" "), {
+				stdio: "inherit",
+				shell: true,
+			});
+		} else {
+			child = spawn(commandArgs[0], commandArgs.slice(1), {
+				stdio: "inherit",
+				shell: false,
+			});
+		}
 
 		const forwardSignal = (signal) => {
 			if (!child.killed) child.kill(signal);
@@ -150,7 +194,12 @@ async function main() {
 	}
 }
 
-main().catch((error) => {
-	console.error(`[with-test-lock] ${error.message}`);
-	process.exitCode = 1;
-});
+// Only run the CLI when this file is the entry point — not when a test
+// imports it to exercise `quoteForWindowsCmd`/`resolveVitestEntry` directly.
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+	main().catch((error) => {
+		console.error(`[with-test-lock] ${error.message}`);
+		process.exitCode = 1;
+	});
+}

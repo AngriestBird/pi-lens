@@ -65,7 +65,14 @@ processes from orphaning package-manager descendants; do not reintroduce raw
 All mutations of the shared managed `tools/` tree are also serialized by its
 atomic `.install.lock`; after waiting, re-run discovery before installing because
 the preceding process may already have satisfied the request. A lock is stale
-only after its recorded PID is confirmed dead.
+once its recorded PID is confirmed dead — OR, independently, once it is older
+than the owner's install bound + slack (`PI_LENS_INSTALL_TIMEOUT_MS` +60s,
+#946 F1: PID liveness alone can't detect a hard-killed owner whose PID
+Windows recycled for an unrelated live process, which would otherwise poison
+every future install with a full-timeout wait). The age-based path is a
+deliberate PID-recycle defense specific to installs, which have a known
+bounded duration; it does NOT generalize to the test-suite lock below, whose
+runs have no such bound.
 Vitest sets `PI_LENS_DISABLE_TOOL_INSTALL=1` before global setup and workers;
 ordinary tests must remain network/install-free. Real installer integration
 tests must explicitly opt in and use an isolated `PI_LENS_HOME`.
@@ -85,10 +92,20 @@ bugs but aren't. The lock is machine-wide, not per-repo/per-worktree, on
 purpose (worktrees of the SAME repo still contend for the SAME physical
 CPU/RAM). A `waiting for test-suite lock held by PID <pid> since <iso>`
 heartbeat line (at least every 15s) means your run is queued, not hung — it
-resumes automatically once the holder finishes. Same stale-lock rule as
-`.install.lock` above: takeover only after the recorded PID is confirmed
-dead, never on a timer. Opt out with `PI_LENS_TEST_NO_LOCK=1` (CI sets this —
-runners are isolated, one job per box, nothing to serialize against).
+resumes automatically once the holder finishes. Takeover rule differs from
+`.install.lock` above ON PURPOSE: a lock whose recorded PID is confirmed
+dead is taken over immediately (same as the installer); an UNREADABLE/corrupt
+lock file (no readable PID at all) is taken over once it ages past a 5-minute
+mtime bound (`scripts/lib/suite-lock.mjs`'s `staleMaxAgeMs`) — but unlike
+`.install.lock`, a lock with a live, readable PID is NEVER aged out, because a
+test-suite run has no bounded duration for a timeout to be sized against (an
+install does). See that file's header for the PID-reuse tradeoff this
+implies. Opt out with `PI_LENS_TEST_NO_LOCK=1` (CI sets this — runners are
+isolated, one job per box, nothing to serialize against). Only `npm test` /
+`test:unit` / `test:integration` acquire the lock; a targeted single-file run
+via `npx vitest run <file>` directly stays unlocked (cheap, and serializing
+it would hurt iteration) — `npm test -- <file>` still goes through the
+wrapper and queues, since it's the same npm script.
 Companion policy for agents running tests concurrently: run touched-file
 tests freely (unlocked, cheap, iterate fast); at most ONE full-suite run per
 agent at the end, with `PI_LENS_TEST_MAX_WORKERS=4` (not the default 50%) to
