@@ -52,6 +52,24 @@ const lspError = (message = "cascade error") => ({
 	source: "test-lsp",
 });
 
+// #1095: attach a content `binding` the way the REAL producers do — a
+// NON-enumerable property (getAllDiagnostics uses a lazy getter, touchFile a
+// value; both non-enumerable). Mirroring non-enumerability also guards against a
+// future regression where the cascade reads `.binding` off a spread/clone (which
+// silently drops it). `undefined` means no binding attached at all — the honest
+// pre-#1095 fall-through, identical to "unknown" at every call site.
+function withBinding<T extends object>(
+	obj: T,
+	boundToCurrentDisk: boolean | "unknown",
+): T {
+	Object.defineProperty(obj, "binding", {
+		value: { boundToCurrentDisk },
+		enumerable: false,
+		configurable: true,
+	});
+	return obj;
+}
+
 function emptyGraph(): ReviewGraph {
 	return {
 		version: "test",
@@ -1405,6 +1423,242 @@ describe("computeCascadeForFile", () => {
 				expect(diags).toHaveLength(1);
 				expect(diags?.[0]?.tool).toBe("opengrep");
 				expect(diags?.[0]?.semantic).not.toBe("blocking");
+			} finally {
+				env.cleanup();
+			}
+		});
+	});
+
+	// #1095 (second PR): the cascade adopts the content `binding` carried by
+	// diagnostics results. A passive snapshot / active touch whose diagnostics were
+	// computed against a DIFFERENT disk state than what's on disk now
+	// (boundToCurrentDisk === false) is no longer trusted — it is not reconciled into
+	// the footer widget, killing the window where the first cascade after a fix-edit
+	// replays the neighbor's PRE-fix snapshot. "unknown" preserves EXACTLY the
+	// pre-#1095 TTL-only behavior; true reconciles (TTL stays the outer bound).
+	describe("content-binding validity (#1095)", () => {
+		it("does NOT reconcile a bound-false passive snapshot (stale pre-fix snapshot) and falls through to an active touch", async () => {
+			const env = setupTestEnvironment("cascade-binding-false-snapshot-");
+			try {
+				const primary = path.join(env.tmpDir, "src", "primary.ts");
+				const neighbor = path.join(env.tmpDir, "src", "neighbor.ts");
+				fs.mkdirSync(path.dirname(primary), { recursive: true });
+				fs.writeFileSync(primary, "export const x = 1;\n");
+				fs.writeFileSync(neighbor, "import { x } from './primary';\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				// TTL-fresh snapshot still carrying the PRE-fix error, but the server's
+				// view has diverged from disk (boundToCurrentDisk: false).
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(
+						new Map([
+							[
+								neighbor.split(path.sep).join("/"),
+								withBinding(
+									{ diags: [lspError("pre-fix error")], ts: Date.now() },
+									false,
+								),
+							],
+						]),
+					),
+					// The neighbor is actually clean now — a confirmed active re-check.
+					touchFile: vi.fn().mockResolvedValue([]),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const { getFileDiagnostics } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+
+				// Pre-fix: the TTL-fresh snapshot was reconciled and its stale error
+				// landed in the footer. With binding: the bound-false snapshot is skipped,
+				// so the pre-fix error never reaches the widget…
+				expect(getFileDiagnostics(neighbor) ?? []).toEqual([]);
+				// …and the neighbor falls through to an active touch (same budget as a
+				// cold/stale snapshot) instead of trusting the diverged snapshot.
+				const lsp = mocks.getLSPService.mock.results[0]?.value;
+				expect(lsp.touchFile).toHaveBeenCalledWith(
+					neighbor,
+					expect.any(String),
+					expect.objectContaining({ source: "cascade", clientScope: "all" }),
+				);
+				// The stale snapshot error must not survive as a cascade neighbor result.
+				expect(
+					result?.result?.neighbors[0]?.diagnostics.some(
+						(d) => d.message === "pre-fix error",
+					) ?? false,
+				).toBe(false);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("characterization: an unknown-binding TTL-fresh snapshot reconciles exactly as pre-#1095 (no touch)", async () => {
+			const env = setupTestEnvironment("cascade-binding-unknown-snapshot-");
+			try {
+				const primary = path.join(env.tmpDir, "src", "primary.ts");
+				const neighbor = path.join(env.tmpDir, "src", "neighbor.ts");
+				fs.mkdirSync(path.dirname(primary), { recursive: true });
+				fs.writeFileSync(primary, "export const x = 1;\n");
+				fs.writeFileSync(neighbor, "import { x } from './primary';\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				const touchFile = vi.fn();
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(
+						new Map([
+							[
+								neighbor.split(path.sep).join("/"),
+								withBinding(
+									{ diags: [lspError("unknown-bound error")], ts: Date.now() },
+									"unknown",
+								),
+							],
+						]),
+					),
+					touchFile,
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const { getFileDiagnostics } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+
+				// Unknown binding → TTL-only behavior: snapshot trusted, no active touch,
+				// error surfaced and reconciled into the footer, identical to pre-#1095.
+				expect(touchFile).not.toHaveBeenCalled();
+				expect(result?.result?.neighbors[0]?.lspTouched).toBe(false);
+				expect(result?.result?.neighbors[0]?.diagnostics[0]?.message).toBe(
+					"unknown-bound error",
+				);
+				expect(getFileDiagnostics(neighbor)).toHaveLength(1);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("reconciles a bound-true passive snapshot (no touch)", async () => {
+			const env = setupTestEnvironment("cascade-binding-true-snapshot-");
+			try {
+				const primary = path.join(env.tmpDir, "src", "primary.ts");
+				const neighbor = path.join(env.tmpDir, "src", "neighbor.ts");
+				fs.mkdirSync(path.dirname(primary), { recursive: true });
+				fs.writeFileSync(primary, "export const x = 1;\n");
+				fs.writeFileSync(neighbor, "import { x } from './primary';\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				const touchFile = vi.fn();
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(
+						new Map([
+							[
+								neighbor.split(path.sep).join("/"),
+								withBinding(
+									{ diags: [lspError("bound-true error")], ts: Date.now() },
+									true,
+								),
+							],
+						]),
+					),
+					touchFile,
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const { getFileDiagnostics } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+
+				expect(touchFile).not.toHaveBeenCalled();
+				expect(result?.result?.neighbors[0]?.diagnostics[0]?.message).toBe(
+					"bound-true error",
+				);
+				expect(getFileDiagnostics(neighbor)).toHaveLength(1);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("a bound-false active touch is not reconciled AND does not seed the recently-clean cache", async () => {
+			const env = setupTestEnvironment("cascade-binding-false-touch-");
+			try {
+				// Python neighbor → active-touch path (no autoPropagate snapshot).
+				const primary = path.join(env.tmpDir, "model.py");
+				const neighbor = path.join(env.tmpDir, "api.py");
+				fs.writeFileSync(primary, "class User: pass\n");
+				fs.writeFileSync(neighbor, "from model import User\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				// The touch resolves `[]` but is bound-false (computed against a diverged
+				// disk state) — NOT a confirmed clean, exactly like `inconclusive`.
+				const touchFile = vi
+					.fn()
+					.mockImplementation(async () => withBinding([], false));
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile,
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const { recordDiagnostics, getFileDiagnostics } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				// A live prior LSP error the bound-false clean touch must NOT wipe.
+				recordDiagnostics(
+					neighbor,
+					[
+						{
+							tool: "lsp",
+							severity: "error",
+							semantic: "blocking",
+							message: "live cross-file error",
+						},
+					],
+					1,
+				);
+
+				// Turn 1: bound-false clean touch — no reconcile.
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+				// Pre-fix: the bound-false `[]` reconciled as confirmed-clean and wiped the
+				// live finding. It must survive an unconfirmed touch.
+				const afterFirst = getFileDiagnostics(neighbor);
+				expect(afterFirst).toHaveLength(1);
+				expect(afterFirst?.[0]?.message).toBe("live cross-file error");
+
+				// Turn 2: because the bound-false clean touch did NOT seed the
+				// recently-clean cache, the neighbor is re-touched (a seeded entry would
+				// short-circuit turn 2). Proves no recently-clean seed occurred.
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 2,
+					writeSeq: 2,
+				});
+				expect(touchFile).toHaveBeenCalledTimes(2);
 			} finally {
 				env.cleanup();
 			}
