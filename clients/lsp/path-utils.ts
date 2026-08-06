@@ -5,6 +5,7 @@
 export {
 	isUnderDir,
 	normalizeFilePath,
+	normalizeEphemeralMapKey,
 	normalizeMapKey,
 	pathsEqual,
 	pathToUri,
