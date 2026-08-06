@@ -294,6 +294,96 @@ describe("computeCascadeForFile", () => {
 		}
 	});
 
+	// #1109: the LSP-references blast-radius upgrade races `references()`
+	// against a 750ms setTimeout. When `references()` wins (the common case —
+	// the mocked LSP resolves synchronously), the losing setTimeout must be
+	// cleared. Pre-fix, the handle was never stored, so the timer stayed a
+	// REF'D pending timer for the remaining budget — a same-shape sibling of
+	// the #1097 LSP client-wait leak (a one-shot `pi --print` process would
+	// stay alive up to 750ms per changed symbol after the run settled).
+	//
+	// Uses fake timers (vi.getTimerCount, matching
+	// tests/clients/lsp/client-wait-timer-cleanup.test.ts's pattern) so a
+	// leaked timer is provable rather than merely "fires after the test ends."
+	it("clears the LSP-references race timer once references() wins (#1109)", async () => {
+		vi.useFakeTimers();
+		const env = setupTestEnvironment("cascade-lsp-refs-timer-");
+		try {
+			const primary = path.join(env.tmpDir, "src", "primary.ts");
+			const reference = path.join(env.tmpDir, "src", "consumer.ts");
+			fs.mkdirSync(path.dirname(primary), { recursive: true });
+			fs.writeFileSync(primary, "export function changed() { return 1; }\n");
+			fs.writeFileSync(
+				reference,
+				"import { changed } from './primary';\nchanged();\n",
+			);
+
+			const graph = emptyGraph();
+			const normalizedPrimary = primary.split(path.sep).join("/");
+			const symbolId = `${normalizedPrimary}:changed`;
+			graph.symbolNodesByFile.set(normalizedPrimary, [symbolId]);
+			graph.nodes.set(symbolId, {
+				id: symbolId,
+				kind: "symbol",
+				language: "jsts",
+				filePath: normalizedPrimary,
+				symbolName: "changed",
+				symbolKind: "function",
+				metadata: { line: 1, column: 17 },
+			});
+			mocks.buildOrUpdateGraph.mockResolvedValue(graph);
+			mocks.computeImpactCascade.mockReturnValue({
+				...impact(primary, []),
+				changedSymbols: ["changed"],
+			});
+			// Resolves via a microtask — fake timers don't block microtask
+			// resolution, only the setTimeout callback queue — so this wins the
+			// Promise.race well before the 750ms timer would ever fire.
+			const references = vi.fn().mockResolvedValue([
+				{
+					uri: pathToFileURL(reference).href,
+					range: {
+						start: { line: 1, character: 0 },
+						end: { line: 1, character: 7 },
+					},
+				},
+			]);
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi
+					.fn()
+					.mockResolvedValue(
+						new Map([
+							[
+								reference.split(path.sep).join("/"),
+								{ diags: [lspError("reference broken")], ts: Date.now() },
+							],
+						]),
+					),
+				touchFile: vi.fn(),
+				getDiagnostics: vi.fn(),
+				references,
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			const result = await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			expect(references).toHaveBeenCalled();
+			expect(result?.result?.formatted).toContain("consumer.ts");
+			// The core assertion: on pre-fix code this is 1 (the orphaned 750ms
+			// reject timer) — the exact handle that would keep a one-shot
+			// process alive after this call resolves.
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			env.cleanup();
+			vi.useRealTimers();
+		}
+	});
+
 	it("active-touches non-jsts neighbors silently", async () => {
 		const env = setupTestEnvironment("cascade-python-");
 		try {
