@@ -6,8 +6,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
-- **Test-role files no longer leak into collateral cascade/impact surfaces
-	(closes #1080)** — the review graph is already tests-free, but several
+- **Test-role files no longer leak into collateral cascade/impact surfaces (closes #1080)**
+	— the review graph is already tests-free, but several
 	collateral surfaces re-derived neighbors from OTHER sources that never saw
 	that filter, so an UNIGNORED `*.test.*` / `tests/` file could still surface
 	as cascade collateral. The existing `getProjectIgnoreMatcher` filtering only
