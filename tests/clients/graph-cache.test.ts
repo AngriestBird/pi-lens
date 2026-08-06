@@ -16,7 +16,10 @@ import {
 	setupTestEnvironment,
 } from "./test-utils.js";
 
-// Mock out the expensive file system scanning — we only care about cache behaviour
+// NOTE: this mock is vestigial for the builder path — buildOrUpdateGraph walks
+// via project-scan-policy/source-filter, not scan-utils, so these tests run a
+// REAL (tiny, per-test tmpdir) walk. Kept only to keep any incidental
+// scan-utils import inert.
 vi.mock("../../clients/scan-utils.js", () => ({
 	getSourceFiles: vi.fn().mockReturnValue([]),
 }));
@@ -165,8 +168,10 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 
 		// A graph-mutating build (here: full rebuild after a workspace-cache clear)
 		// mints a NEW stamp. (The incremental/content-change paths are covered with
-		// real files in review-graph-seq-fastpath.test.ts — this harness mocks the
-		// source walk, so content edits are invisible to the signature here.)
+		// real files in review-graph-seq-fastpath.test.ts; since the #1107 fixture
+		// rename this harness's walk is REAL — the builder walks via
+		// project-scan-policy, not the mocked scan-utils — so we force the rebuild
+		// explicitly by clearing both caches rather than editing content.)
 		clearReviewGraphWorkspaceCache();
 		clearGraphCache();
 		const g3 = await buildOrUpdateGraph(cwd, [file], facts);

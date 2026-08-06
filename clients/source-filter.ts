@@ -312,6 +312,11 @@ export interface SourceCollectionResult {
 	 * (`ignoreMatcher.isIgnored`) in `classifyEntry` — those are policy/config
 	 * driven, not name/content heuristics, and are not part of the #1107
 	 * invisible-coverage-hole class.
+	 *
+	 * KNOWN GAP (#1107 phase 2): directory-level pruning via
+	 * `isGeneratedArtifactDirectoryName` (`shouldRecurseIntoDir`) is NOT
+	 * counted — an entire skipped `generated/`/`codegen/` directory of real
+	 * files reports zero here. File-level counters only.
 	 */
 	generatedOrArtifactSkips?: number;
 	buildArtifactSkips?: number;
