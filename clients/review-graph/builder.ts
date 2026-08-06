@@ -116,7 +116,7 @@ import {
 // v8 (#1070): call/reference evidence now records call-like vs type-only
 // references and tree-sitter query coverage, so call-graph consumers cannot
 // mistake incomplete extraction for a clean zero.
-const REVIEW_GRAPH_VERSION = "v8";
+export const REVIEW_GRAPH_VERSION = "v8";
 const MAIN_KINDS = new Set([
 	"jsts",
 	"python",

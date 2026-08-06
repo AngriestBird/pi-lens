@@ -96,7 +96,7 @@ export interface CallGraphCacheIdentity {
 }
 
 interface PersistedCallGraph {
-	version: 5;
+	version: typeof CACHE_VERSION;
 	builtAt: string;
 	/** The canonical review graph this projection was derived from. */
 	reviewGraphVersion?: string;
@@ -111,7 +111,8 @@ interface PersistedCallGraph {
 	coverage?: CallGraphEvidenceCoverage;
 }
 
-const CACHE_VERSION = 5;
+/** Persisted call-graph cache format version. Bump on breaking format changes. */
+export const CACHE_VERSION = 5;
 
 // ── Section 3: BFS impact analysis ───────────────────────────────────────────
 
