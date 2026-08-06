@@ -333,6 +333,15 @@ function archAssetMatch(table: {
 	};
 }
 
+// Go-style `<os>_<arch>.zip` release assets, shared verbatim by tflint and
+// terraform-ls — both entries carried byte-identical ladders, down to the asset
+// strings themselves.
+const OS_ARCH_ZIP_ASSETS = {
+	linux: { x64: "linux_amd64.zip", arm64: "linux_arm64.zip" },
+	darwin: { x64: "darwin_amd64.zip", arm64: "darwin_arm64.zip" },
+	win32: { x64: "windows_amd64.zip", arm64: "windows_arm64.zip" },
+};
+
 export const TOOLS: ToolDefinition[] = [
 	// Core LSP servers
 	{
@@ -1054,15 +1063,7 @@ export const TOOLS: ToolDefinition[] = [
 		binaryName: "tflint",
 		github: {
 			repo: "terraform-linters/tflint",
-			assetMatch: (platform, arch) => {
-				if (platform === "linux")
-					return arch === "arm64" ? "linux_arm64.zip" : "linux_amd64.zip";
-				if (platform === "darwin")
-					return arch === "arm64" ? "darwin_arm64.zip" : "darwin_amd64.zip";
-				if (platform === "win32")
-					return arch === "arm64" ? "windows_arm64.zip" : "windows_amd64.zip";
-				return undefined;
-			},
+			assetMatch: archAssetMatch(OS_ARCH_ZIP_ASSETS),
 			binaryInArchive: "tflint",
 		},
 	},
@@ -1216,15 +1217,7 @@ export const TOOLS: ToolDefinition[] = [
 		github: {
 			repo: "hashicorp/terraform-ls",
 			hashiCorpReleaseProduct: "terraform-ls",
-			assetMatch: (platform, arch) => {
-				if (platform === "linux")
-					return arch === "arm64" ? "linux_arm64.zip" : "linux_amd64.zip";
-				if (platform === "darwin")
-					return arch === "arm64" ? "darwin_arm64.zip" : "darwin_amd64.zip";
-				if (platform === "win32")
-					return arch === "arm64" ? "windows_arm64.zip" : "windows_amd64.zip";
-				return undefined;
-			},
+			assetMatch: archAssetMatch(OS_ARCH_ZIP_ASSETS),
 			binaryInArchive: "terraform-ls",
 		},
 	},
