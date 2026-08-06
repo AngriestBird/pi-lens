@@ -16,7 +16,8 @@ import { publishFormatQueued } from "./format-events-publish.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
 import type { ReadGuard } from "./read-guard.js";
 import { getFormatService } from "./format-service.js";
-import { isExternalOrVendorFile } from "./path-utils.js";
+import { isExternalOrVendorFile, normalizeEphemeralMapKey } from "./path-utils.js";
+import { PathKeyedMap } from "./path-keyed-map.js";
 import { resolveLanguageRootForFile } from "./language-profile.js";
 import { logLatency } from "./latency-logger.js";
 import {
@@ -129,11 +130,21 @@ interface InFlightPipeline {
 	participantTotal: number;
 }
 
-const inFlightPipelines = new Map<string, InFlightPipeline>();
-const lastAnalyzedStateByFile = new Map<
-	string,
-	{ turnIndex: number; stateHash: string }
->();
+// Keyed by (normalized) filePath, then by the raw stateHash — the path portion
+// needs normalizing (divergent Windows spellings must collapse to one entry),
+// the stateHash suffix must NOT be folded into the path key (a real content
+// change for the same file has to stay a distinct entry). A flat
+// `PathKeyedMap<InFlightPipeline>` keyed by a composite `${filePath}:${hash}`
+// string can't express that split cleanly (the normalizer only sees the whole
+// composite string, so it can't fold the path half without also mangling the
+// hash half); nesting keeps each axis normalized/compared with its own rules.
+const inFlightPipelines = new PathKeyedMap<Map<string, InFlightPipeline>>(
+	normalizeEphemeralMapKey,
+);
+const lastAnalyzedStateByFile = new PathKeyedMap<{
+	turnIndex: number;
+	stateHash: string;
+}>(normalizeEphemeralMapKey);
 
 // Called at turn_start — entries from the previous turn can never match the new
 // turnIndex so they're dead weight. Clearing here keeps the map bounded to the
@@ -159,7 +170,9 @@ interface DebouncedEntry {
 	coalescedCount: number;
 }
 
-const debouncedPipelines = new Map<string, DebouncedEntry>();
+const debouncedPipelines = new PathKeyedMap<DebouncedEntry>(
+	normalizeEphemeralMapKey,
+);
 
 const DEFAULT_DEBOUNCE_MS = 0;
 const MAX_DEBOUNCE_MS = 1000;
@@ -536,12 +549,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	}
 
 	const initialStateHash = getFileStateHash(filePath);
-	const pipelineDedupeKey = `${filePath}:${initialStateHash}`;
 
 	// Deduplicate concurrent calls for the same final file state (pi can fire one
 	// tool_result per edit hunk). Do not dedupe by file alone: a distinct later
 	// same-turn edit to this file must still be analyzed.
-	const inFlight = inFlightPipelines.get(pipelineDedupeKey);
+	const inFlight = inFlightPipelines.get(filePath)?.get(initialStateHash);
 	if (inFlight) {
 		dbg(`tool_result: skipping duplicate concurrent state for ${filePath}`);
 		const duplicateId = readGuardCorrelationId;
@@ -720,7 +732,12 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		participantIds: [...new Set(participantIds)].slice(0, 100),
 		participantTotal,
 	};
-	inFlightPipelines.set(pipelineDedupeKey, pipelineTelemetry);
+	let filePipelines = inFlightPipelines.get(filePath);
+	if (!filePipelines) {
+		filePipelines = new Map<string, InFlightPipeline>();
+		inFlightPipelines.set(filePath, filePipelines);
+	}
+	filePipelines.set(initialStateHash, pipelineTelemetry);
 	try {
 		result = await pipelinePromise;
 	} catch (pipelineErr) {
@@ -781,7 +798,12 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			isError: true,
 		};
 	} finally {
-		inFlightPipelines.delete(pipelineDedupeKey);
+		// Prune the per-file inner map once it's empty so a file touched once
+		// this session doesn't leave a permanent empty entry in the outer map.
+		filePipelines.delete(initialStateHash);
+		if (filePipelines.size === 0) {
+			inFlightPipelines.delete(filePath);
+		}
 	}
 
 	if (!isPartialApplyResult) {
