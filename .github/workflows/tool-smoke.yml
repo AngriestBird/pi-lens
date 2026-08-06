@@ -104,8 +104,8 @@ jobs:
       # Tier 3 (version-less/silent — the budget-wait case, #458). Merges into the
       # same matrix's clean-behavior column (same dev/ci src + merge-guard as
       # characterize). Best-effort: always exits 0, per-server hard timeouts.
-      # #529: also compares each observed clean-behavior against server-strategies
-      # .ts's hand-set `silentOnClean` marker and logs any mismatch to this step's
+      # #529: also compares each observed clean-behavior against wait-policy
+      # /strategies.ts's hand-set `silentOnClean` marker and logs any mismatch to this step's
       # output + a "## silentOnClean drift" footnote in the matrix doc — telemetry
       # only, NEVER a build/CI gate (this step's own continue-on-error covers the
       # probe already; the drift check can't fail the job either way).

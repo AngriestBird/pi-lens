@@ -732,6 +732,24 @@ describe("LSP workspace edits", () => {
 		} finally { removeTempDirSync(tmpDir); removeTempDirSync(outsideDir); }
 	});
 
+	it("coalesces URI spellings after path canonicalization", () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-key-"));
+		const filePath = path.join(tmpDir, "file.ts");
+		fs.writeFileSync(filePath, "old", "utf-8");
+		const uri = pathToFileURL(filePath).href;
+		const encodedUri = uri.replace("file.ts", "%66ile.ts");
+		try {
+			expect(__planWorkspaceEditForTest({
+				changes: {
+					[uri]: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "first" }],
+					[encodedUri]: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "second" }],
+				},
+			})).toBe(1);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
 	it("keeps large text/resource planning occupancy bounded", { timeout: 30_000, retry: 2 }, async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-plan-"));
 		const changes: Record<string, unknown[]> = {};
