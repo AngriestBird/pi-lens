@@ -7,6 +7,7 @@ import {
 	applyTextEditsToString,
 	applyWorkspaceEdit,
 	__planWorkspaceEditForTest,
+	isSameFsIdentity,
 	mergeWorkspaceTextEditsByPriority,
 } from "../../../clients/lsp/edits.js";
 import { measureMaxSyncBlockMs } from "../../support/perf-harness.js";
@@ -915,6 +916,24 @@ describe("LSP workspace edits — path casing preservation (P1-2)", () => {
 			expect(entries).toContain("MixedCase.txt");
 			expect(entries).not.toContain("mixedcase.txt");
 		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	// The FS-identity alias check must FAIL-CLOSED on ino-less filesystems
+	// (FAT32/exFAT, some SMB redirectors, VirtualBox shared folders — libuv
+	// reports ino 0 there). Without the nonzero guard, two DISTINCT files would
+	// compare (dev, 0) === (dev, 0) and a rename would silently clobber.
+	it("treats ino-0 (ino-less FS) entries as DISTINCT, never aliased", () => {
+		// Both sides ino 0 on the same device → must NOT be considered the same entry.
+		expect(isSameFsIdentity({ dev: 5n, ino: 0n }, { dev: 5n, ino: 0n })).toBe(false);
+		// One side ino 0 → distinct.
+		expect(isSameFsIdentity({ dev: 5n, ino: 0n }, { dev: 5n, ino: 42n })).toBe(false);
+		// Genuine same-entry (nonzero, equal ino, same dev) → aliased.
+		expect(isSameFsIdentity({ dev: 5n, ino: 42n }, { dev: 5n, ino: 42n })).toBe(true);
+		// Same nonzero ino but different device → distinct.
+		expect(isSameFsIdentity({ dev: 5n, ino: 42n }, { dev: 6n, ino: 42n })).toBe(false);
+		// Large 64-bit NTFS file IDs (> 2^53) compare exactly as BigInt.
+		expect(isSameFsIdentity({ dev: 1n, ino: 9007199254740993n }, { dev: 1n, ino: 9007199254740993n })).toBe(true);
+		expect(isSameFsIdentity({ dev: 1n, ino: 9007199254740993n }, { dev: 1n, ino: 9007199254740992n })).toBe(false);
 	});
 
 	it("case-only rename succeeds (foo.txt → Foo.txt)", async () => {

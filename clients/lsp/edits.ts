@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import type { Stats } from "node:fs";
+import type { BigIntStats, Stats } from "node:fs";
 import path from "node:path";
 import { URL } from "node:url";
 import {
@@ -692,17 +692,49 @@ async function lstatOrMissing(filePath: string): Promise<Stats | undefined> {
 }
 
 /**
- * True when two paths name the SAME on-disk entry (same device + inode). This is
- * how a case-only rename on a case-insensitive filesystem is distinguished from a
- * genuine destination conflict without branching on `process.platform`: on any
- * case-insensitive FS `foo.txt` and `Foo.txt` share an inode; on a case-sensitive
- * FS two spellings are distinct files (or the destination is missing). `lstat`
- * (not `stat`) so a symlink is compared as itself, consistent with the rest of
- * the preflight's symlink policy.
+ * True when two `lstat` results denote the SAME on-disk entry. Requires a
+ * matching `dev` AND a matching, NONZERO `ino`. The nonzero guard is
+ * load-bearing: ino-less filesystems (FAT32/exFAT, some SMB redirectors,
+ * VirtualBox shared folders) report `ino: 0` for every entry via libuv, so
+ * without it two DISTINCT files would compare `(dev, 0) === (dev, 0)` and a
+ * rename would be misclassified as a case-only alias and silently clobber the
+ * destination. Comparing the BigInt fields (from `lstat({ bigint: true })`)
+ * also avoids the double-precision loss on NTFS 64-bit file IDs >= 2^53 that a
+ * `number` `ino` would suffer (which could false-equal distinct files).
+ * Anything that is not a confident same-entry match returns false → the caller
+ * falls back to the destination-exists check (fail-closed). Exported for direct
+ * unit coverage of the ino-0 guard.
+ */
+export function isSameFsIdentity(
+	a: { dev: bigint; ino: bigint },
+	b: { dev: bigint; ino: bigint },
+): boolean {
+	return a.dev === b.dev && a.ino !== 0n && b.ino !== 0n && a.ino === b.ino;
+}
+
+async function bigintLstatOrMissing(filePath: string): Promise<BigIntStats | undefined> {
+	try {
+		return await fs.lstat(filePath, { bigint: true });
+	} catch (err) {
+		if ((err as { code?: string }).code === "ENOENT") return undefined;
+		throw err;
+	}
+}
+
+/**
+ * True when two paths name the SAME on-disk entry — how a case-only rename on a
+ * case-insensitive FS is told apart from a genuine destination conflict without
+ * branching on `process.platform`. `lstat` (not `stat`) so a symlink is compared
+ * as itself, consistent with the rest of the preflight's symlink policy. See
+ * `isSameFsIdentity` for the dev/ino identity rules (and the ino-0 fail-closed
+ * guard for ino-less filesystems).
  */
 async function isSameFsEntry(a: string, b: string): Promise<boolean> {
-	const [statA, statB] = await Promise.all([lstatOrMissing(a), lstatOrMissing(b)]);
-	return Boolean(statA && statB && statA.dev === statB.dev && statA.ino === statB.ino);
+	const [statA, statB] = await Promise.all([
+		bigintLstatOrMissing(a),
+		bigintLstatOrMissing(b),
+	]);
+	return Boolean(statA && statB && isSameFsIdentity(statA, statB));
 }
 
 async function assertParentIsUsable(
