@@ -712,6 +712,13 @@ describe("LSP workspace edits", () => {
 
 			// Direct string helper clamps the same way under every encoding.
 			expect(applyTextEditsToString("abc", [{ range: { start: { line: 5, character: 0 }, end: { line: 9, character: 0 } }, newText: "!" }])).toBe("abc!");
+
+			// CRLF: clamping a char past the line end must land BEFORE the trailing
+			// `\r`, not between `\r` and `\n` (P2-1). lineTextAt keeps the `\r`, so a
+			// naive clamp to line.length corrupts CRLF files.
+			expect(applyTextEditsToString("abc\r\ndef", [{ range: { start: { line: 0, character: 99 }, end: { line: 0, character: 99 } }, newText: "X" }])).toBe("abcX\r\ndef");
+			// The whole-line sentinel replace on a CRLF line must preserve the `\r\n`.
+			expect(applyTextEditsToString("abc\r\ndef", [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 999 } }, newText: "Y" }])).toBe("Y\r\ndef");
 		} finally { removeTempDirSync(tmpDir); }
 	});
 
@@ -888,7 +895,6 @@ describe("LSP workspace edits — path casing preservation (P1-2)", () => {
 	it("create preserves mixed-case file names on disk", async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-case-"));
 		try {
-			const caseInsensitive = isCaseInsensitiveFs(tmpDir);
 			await applyWorkspaceEdit({ documentChanges: [{ kind: "create", uri: pathToFileURL(path.join(tmpDir, "NewFile.txt")).href }] }, tmpDir);
 			const entries = fs.readdirSync(tmpDir);
 			// On BOTH FS kinds the name written must be the mixed-case one — the bug
@@ -896,7 +902,6 @@ describe("LSP workspace edits — path casing preservation (P1-2)", () => {
 			// run asserts the operation still produced exactly the requested name.
 			expect(entries).toContain("NewFile.txt");
 			expect(entries).not.toContain("newfile.txt");
-			expect(caseInsensitive).toBe(caseInsensitive); // probe exercised, no vacuous skip
 		} finally { removeTempDirSync(tmpDir); }
 	});
 

@@ -306,8 +306,13 @@ function utf16Position(content: string, position: LSPPosition, encoding: Positio
 	if (position.character > wireLength) {
 		// LSP 3.17: a character past the end of the line defaults to the line
 		// length. Clamp to the UTF-16 line length rather than throwing (whole-line
-		// and whole-document sentinel ranges rely on this).
-		return { line: position.line, character: line.length };
+		// and whole-document sentinel ranges rely on this). `lineTextAt` splits on
+		// `\n` only and keeps a trailing `\r`, so clamp to BEFORE that `\r` — landing
+		// the position at the CRLF boundary, not between `\r` and `\n`. Otherwise the
+		// whole-line sentinel replace `(0,0)-(0,999)` would eat the `\r` and a
+		// char-past-EOL insert would land mid-CRLF (P2-1 corruption on Windows repos).
+		const clampedLength = line.endsWith("\r") ? line.length - 1 : line.length;
+		return { line: position.line, character: clampedLength };
 	}
 	if (encoding === "utf-16") return position;
 	// Find the UTF-16 offset whose encoded prefix has exactly this length. This
@@ -686,6 +691,20 @@ async function lstatOrMissing(filePath: string): Promise<Stats | undefined> {
 	}
 }
 
+/**
+ * True when two paths name the SAME on-disk entry (same device + inode). This is
+ * how a case-only rename on a case-insensitive filesystem is distinguished from a
+ * genuine destination conflict without branching on `process.platform`: on any
+ * case-insensitive FS `foo.txt` and `Foo.txt` share an inode; on a case-sensitive
+ * FS two spellings are distinct files (or the destination is missing). `lstat`
+ * (not `stat`) so a symlink is compared as itself, consistent with the rest of
+ * the preflight's symlink policy.
+ */
+async function isSameFsEntry(a: string, b: string): Promise<boolean> {
+	const [statA, statB] = await Promise.all([lstatOrMissing(a), lstatOrMissing(b)]);
+	return Boolean(statA && statB && statA.dev === statB.dev && statA.ino === statB.ino);
+}
+
 async function assertParentIsUsable(
 	filePath: string,
 	stateFor: (filePath: string) => Promise<VirtualFile>,
@@ -877,19 +896,26 @@ async function preflightWorkspaceEdit(
 			// whose decoded paths differ even though they collapse to a single key on a
 			// case-insensitive filesystem — so compare the decoded disk paths here, and
 			// treat a same-key-different-case pair as a real rename below.
-			const oldDisk = path.resolve(uriToDiskPath(op.oldUri)).replace(/\\/g, "/");
-			const newDisk = path.resolve(uriToDiskPath(op.newUri)).replace(/\\/g, "/");
-			if (oldDisk === newDisk) throw new Error("rename source and destination must differ");
-			const caseOnlyRename = pathsEqual(oldPath, newPath);
+			const oldDisk = uriToDiskPath(op.oldUri);
+			const newDisk = uriToDiskPath(op.newUri);
+			if (path.resolve(oldDisk).replace(/\\/g, "/") === path.resolve(newDisk).replace(/\\/g, "/")) {
+				throw new Error("rename source and destination must differ");
+			}
 			const source = await stateFor(oldPath);
 			if (!source.exists) throw new Error(`rename source does not exist: ${oldPath}`);
 			await assertParentIsUsable(newPath, stateFor);
-			if (!caseOnlyRename) {
-				// On a case-insensitive FS the destination of a case-only rename resolves
-				// to the source itself; that is not a real conflict, so only enforce the
-				// exists-precondition when the target is a genuinely different file.
-				const destination = await stateFor(newPath);
-				if (destination.exists) {
+			const destination = await stateFor(newPath);
+			if (destination.exists) {
+				// Decide "already exists" by on-disk IDENTITY, not a platform-keyed path
+				// fold. A case-only (or otherwise-aliased) rename whose destination
+				// resolves to the SAME FS entry as the source is a legitimate refactor,
+				// not a conflict — detected here on ANY case-insensitive FS (win32, macOS
+				// APFS/HFS+), per the #1024 "probe the FS, don't branch on platform"
+				// lesson. Conversely, on a case-SENSITIVE FS where both spellings are
+				// distinct real files, this stays a genuine conflict (closing the inverse
+				// silent-clobber edge that a win32-only fold left open).
+				const aliasesSource = await isSameFsEntry(oldDisk, newDisk);
+				if (!aliasesSource) {
 					if (op.options?.ignoreIfExists) { ignored.add(op); continue; }
 					if (!op.options?.overwrite) throw new Error(`rename destination already exists: ${newPath}`);
 				}
