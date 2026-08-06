@@ -1086,14 +1086,34 @@ export class LSPService {
 		}
 
 		const timeoutSentinel = Symbol("lsp-client-wait-timeout");
-		const waitResult = await Promise.race<
-			SpawnedServer | undefined | typeof timeoutSentinel
-		>([
-			withBudget(),
-			new Promise<typeof timeoutSentinel>((resolve) =>
-				setTimeout(() => resolve(timeoutSentinel), effectiveMaxWaitMs),
-			),
-		]);
+		// #1097: store the timer and clear it once the race settles. Without this,
+		// when `withBudget()` wins (the common case: the client is ready well before
+		// the budget), the losing `setTimeout` stays a REF'D pending timer for the
+		// full remaining `effectiveMaxWaitMs`. In a long-lived interactive session
+		// that is invisible (it fires later, resolves an orphan promise, is GC'd).
+		// In a one-shot `pi --print --no-session` process it is fatal: the timer
+		// keeps the event loop alive for up to `effectiveMaxWaitMs` after
+		// `agent_settled`/`session_shutdown`, so the completed process never exits
+		// (issue #1097 — a recurrence of the #22 symptom via a different handle, and
+		// a member of the uncleared-race-timeout class the shared `withDeadline`
+		// helper already guards against elsewhere).
+		let waitTimer: ReturnType<typeof setTimeout> | undefined;
+		let waitResult: SpawnedServer | undefined | typeof timeoutSentinel;
+		try {
+			waitResult = await Promise.race<
+				SpawnedServer | undefined | typeof timeoutSentinel
+			>([
+				withBudget(),
+				new Promise<typeof timeoutSentinel>((resolve) => {
+					waitTimer = setTimeout(
+						() => resolve(timeoutSentinel),
+						effectiveMaxWaitMs,
+					);
+				}),
+			]);
+		} finally {
+			if (waitTimer) clearTimeout(waitTimer);
+		}
 
 		if (waitResult === timeoutSentinel) {
 			// Snapshot known client health — scan by serverId prefix (no root needed)
