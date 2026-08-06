@@ -7,6 +7,7 @@ import {
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 	pathsEqual,
+	uriToDiskPath,
 	uriToPath,
 } from "./path-utils.js";
 import {
@@ -824,14 +825,27 @@ async function preflightWorkspaceEdit(
 		if (op.kind === "rename") {
 			const oldPath = await confine(op.oldUri);
 			const newPath = await confine(op.newUri);
-			if (pathsEqual(oldPath, newPath)) throw new Error("rename source and destination must differ");
+			// "Must differ" is a property of the on-disk target, not the case-folded
+			// map key. A case-only rename (foo.txt → Foo.txt) is a legitimate refactor
+			// whose decoded paths differ even though they collapse to a single key on a
+			// case-insensitive filesystem — so compare the decoded disk paths here, and
+			// treat a same-key-different-case pair as a real rename below.
+			const oldDisk = path.resolve(uriToDiskPath(op.oldUri)).replace(/\\/g, "/");
+			const newDisk = path.resolve(uriToDiskPath(op.newUri)).replace(/\\/g, "/");
+			if (oldDisk === newDisk) throw new Error("rename source and destination must differ");
+			const caseOnlyRename = pathsEqual(oldPath, newPath);
 			const source = await stateFor(oldPath);
-			const destination = await stateFor(newPath);
 			if (!source.exists) throw new Error(`rename source does not exist: ${oldPath}`);
 			await assertParentIsUsable(newPath, stateFor);
-			if (destination.exists) {
-				if (op.options?.ignoreIfExists) { ignored.add(op); continue; }
-				if (!op.options?.overwrite) throw new Error(`rename destination already exists: ${newPath}`);
+			if (!caseOnlyRename) {
+				// On a case-insensitive FS the destination of a case-only rename resolves
+				// to the source itself; that is not a real conflict, so only enforce the
+				// exists-precondition when the target is a genuinely different file.
+				const destination = await stateFor(newPath);
+				if (destination.exists) {
+					if (op.options?.ignoreIfExists) { ignored.add(op); continue; }
+					if (!op.options?.overwrite) throw new Error(`rename destination already exists: ${newPath}`);
+				}
 			}
 			clearTombstonesUnder(newPath);
 			if (!source.directory) await contentFor(oldPath, source);
@@ -916,15 +930,19 @@ export async function applyWorkspaceEdit(
 				continue;
 			}
 			if (op.kind === "text") {
+				// Report/key on the normalized path (forward-slash, realpath-canonical),
+				// but read/write the decoded on-disk path so the URI's casing is honored
+				// on win32 (see uriToDiskPath).
 				const filePath = uriToPath(op.uri);
+				const diskPath = uriToDiskPath(op.uri);
 				const edits = prepared.text.get(op) ?? [];
 				if (edits.length === 0) {
 					skipOperation(op);
 					continue;
 				}
-				const content = await fs.readFile(filePath, "utf-8");
+				const content = await fs.readFile(diskPath, "utf-8");
 				const updated = applyTextEditsToString(content, edits, "utf-16");
-				await fs.writeFile(filePath, updated, "utf-8");
+				await fs.writeFile(diskPath, updated, "utf-8");
 				const start = Math.min(...edits.map((item) => item.range.start.line + 1));
 				const end = Math.max(...edits.map((item) => item.range.end.line + 1));
 				touchedFiles.add(filePath);
@@ -932,20 +950,27 @@ export async function applyWorkspaceEdit(
 				markApplied(op);
 				descriptions.push(`Applied ${edits.length} edit(s) to ${relativeToCwd(filePath, cwd)}`);
 			} else if (op.kind === "create") {
+				// Create on the decoded path so `NewFile.txt` is not lowercased on win32;
+				// report/key on the normalized path.
 				const filePath = uriToPath(op.uri);
-				await fs.mkdir(path.dirname(filePath), { recursive: true });
-				if (op.options?.overwrite) await fs.writeFile(filePath, "", "utf-8");
-				else await fs.writeFile(filePath, "", { flag: "wx" });
+				const diskPath = uriToDiskPath(op.uri);
+				await fs.mkdir(path.dirname(diskPath), { recursive: true });
+				if (op.options?.overwrite) await fs.writeFile(diskPath, "", "utf-8");
+				else await fs.writeFile(diskPath, "", { flag: "wx" });
 				touchedFiles.add(filePath);
 				fileDetails.push({ filePath, range: { start: 1, end: 1 }, importsChanged: false });
 				markApplied(op);
 				descriptions.push(`Created ${relativeToCwd(filePath, cwd)}`);
 			} else if (op.kind === "rename") {
+				// Rename on the decoded paths so the destination casing is honored (and a
+				// case-only rename actually changes the name); report on normalized paths.
 				const oldPath = uriToPath(op.oldUri);
 				const newPath = uriToPath(op.newUri);
-				await fs.mkdir(path.dirname(newPath), { recursive: true });
-				if (op.options?.overwrite) await fs.rm(newPath, { recursive: true, force: true });
-				await fs.rename(oldPath, newPath);
+				const oldDisk = uriToDiskPath(op.oldUri);
+				const newDisk = uriToDiskPath(op.newUri);
+				await fs.mkdir(path.dirname(newDisk), { recursive: true });
+				if (op.options?.overwrite) await fs.rm(newDisk, { recursive: true, force: true });
+				await fs.rename(oldDisk, newDisk);
 				touchedFiles.add(oldPath);
 				touchedFiles.add(newPath);
 				fileDetails.push(
@@ -956,7 +981,8 @@ export async function applyWorkspaceEdit(
 				descriptions.push(`Renamed ${relativeToCwd(oldPath, cwd)} → ${relativeToCwd(newPath, cwd)}`);
 			} else {
 				const filePath = uriToPath(op.uri);
-				await fs.rm(filePath, { recursive: op.options?.recursive === true, force: false });
+				const diskPath = uriToDiskPath(op.uri);
+				await fs.rm(diskPath, { recursive: op.options?.recursive === true, force: false });
 				touchedFiles.add(filePath);
 				fileDetails.push({ filePath, range: { start: 1, end: 1 }, importsChanged: true });
 				markApplied(op);
