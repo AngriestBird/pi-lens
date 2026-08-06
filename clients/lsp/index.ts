@@ -645,7 +645,7 @@ const WORKSPACE_SWEEP_PREOPEN_CHUNK_SIZE = (() => {
 })();
 
 // #584: opengrep has no `workspace/diagnostic` pull support (push-only,
-// docs/servercapabilities.md) and `reopenOnResync: true` (server-strategies.ts)
+// docs/servercapabilities.md) and `reopenOnResync: true` (wait-policy/strategies.ts)
 // means every per-file LSP touch already forces a full re-scan anyway — there's
 // no incremental win from routing it through the sweep's per-file loop. On a
 // full workspace sweep it instead dominates the per-file wait (its own
@@ -1768,7 +1768,7 @@ export class LSPService {
 		if (diagnosticsMode !== "none") {
 			// Resolution: env wins so users can tune the cap without rebuilding.
 			// Otherwise, on the single-server hot path (primary scope), use that
-			// server's own strategy budget (server-strategies.ts) so a fast server
+			// server's own strategy budget (wait-policy/strategies.ts) so a fast server
 			// (TypeScript ~1s) isn't held to a flat multi-second wait while a slow
 			// one (rust-analyzer 3s) gets the time it needs — bounded by any caller
 			// ceiling that exists to protect the per-edit pipeline budget (#203).
