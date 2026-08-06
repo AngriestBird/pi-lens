@@ -6,6 +6,24 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **Machine-wide test-suite lock (closes #1101)** — `npm test` /
+	`npm run test:unit` / `npm run test:integration` now route through the new
+	`scripts/with-test-lock.mjs` wrapper, which acquires a single machine-wide
+	`~/.pi-lens/test-suite.lock` before running vitest and releases it after.
+	Concurrent full-suite runs (several agents on parallel worktrees, plus an
+	interactive run) previously each spawned a fork pool sized for a dedicated
+	machine and fought over CPU/RAM, producing vitest worker-crash cascades and
+	timing-budget flakes that looked like real bugs but weren't; they now
+	serialize (queue) instead. A waiting run prints a heartbeat line at least
+	every 15s so it never looks hung, and — mirroring the installer's
+	`.install.lock` — a lock is stale only after its recorded PID is confirmed
+	dead, never on a timer alone. `PI_LENS_TEST_NO_LOCK=1` opts out (CI sets it:
+	runners are isolated, nothing to serialize against). Lock core lives in
+	`scripts/lib/suite-lock.mjs`, unit-tested for acquire/release, dead-PID
+	takeover, and real contention (two concurrent acquisitions serialize).
+	AGENTS.md documents the lock plus the companion layer-1 policy for agents
+	running tests concurrently.
+
 - **LSP diagnostics content binding (refs #1095, first PR)** — diagnostics are now
 	bound to the document content they were computed against, so a consumer can ask
 	"were these diagnostics computed against what's on disk now?" instead of inferring

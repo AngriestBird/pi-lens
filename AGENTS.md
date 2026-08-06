@@ -73,6 +73,31 @@ Installer lifecycle integration tests use a fake package manager and isolated
 home; `PI_LENS_INSTALL_TIMEOUT_MS` exists to keep timeout coverage fast and
 must not become a production policy default.
 
+**Full-suite runs are machine-wide-locked (#1101).** `npm test` /
+`npm run test:unit` / `npm run test:integration` all route through
+`scripts/with-test-lock.mjs`, which acquires `~/.pi-lens/test-suite.lock`
+before running vitest and releases it after — automatically, no action
+needed. This exists because concurrent full-suite runs on one dev machine
+(several agents on parallel worktrees, plus an interactive run) each spawn a
+fork pool sized for a dedicated machine and fight over CPU/RAM, producing
+vitest worker-crash cascades and timing-budget flakes that look like real
+bugs but aren't. The lock is machine-wide, not per-repo/per-worktree, on
+purpose (worktrees of the SAME repo still contend for the SAME physical
+CPU/RAM). A `waiting for test-suite lock held by PID <pid> since <iso>`
+heartbeat line (at least every 15s) means your run is queued, not hung — it
+resumes automatically once the holder finishes. Same stale-lock rule as
+`.install.lock` above: takeover only after the recorded PID is confirmed
+dead, never on a timer. Opt out with `PI_LENS_TEST_NO_LOCK=1` (CI sets this —
+runners are isolated, one job per box, nothing to serialize against).
+Companion policy for agents running tests concurrently: run touched-file
+tests freely (unlocked, cheap, iterate fast); at most ONE full-suite run per
+agent at the end, with `PI_LENS_TEST_MAX_WORKERS=4` (not the default 50%) to
+keep that one run's own footprint bounded; GitHub CI is the authoritative
+full-suite green, not a local run under load; and under load, crash-cascade
+failures (the classic pattern: edits.test occupancy dragging down
+unrelated siblings) must be re-run in isolation before being treated as
+real regressions.
+
 Whole-project loops that reuse one `FactStore` must delete `file.content` after
 that file's consumers finish (in a `finally` so abort/error exits release it).
 Keep derived file facts and session facts: later cross-file consumers may still
