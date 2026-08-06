@@ -66,6 +66,7 @@ import { getServersForFileWithConfig } from "../lsp/config.js";
 import { getLSPService } from "../lsp/index.js";
 import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";
 import { getProjectIgnoreMatcher } from "../file-utils.js";
+import { isTestRoleCollateral } from "../collateral-test-role.js";
 import {
 	clearReviewGraphWorkspaceCache,
 	getGraphBuildInfoForGraph,
@@ -1155,6 +1156,29 @@ export async function computeCascadeForFile(
 			}
 		}
 
+		// #1080: exclude KNOWN test-role files from every collateral impact
+		// surface — the formatted header (formatImpactCascade reads `impact`
+		// directly for `Direct importers`/`Direct callers`/`Check next` counts and
+		// names), the active-touch/passive-snapshot neighbor set (sortedNeighbors is
+		// derived from `impact.neighborFiles` below), and the returned `impact`
+		// object. Applied HERE — after graph neighbors, reverse-deps, LSP reference
+		// expansion, and transitive expansion have all been merged in — so it covers
+		// every neighbor source (incl. module-level downstream files that entered via
+		// computeImpactCascade and reference URIs pointing at `*.test.*`). Filtering
+		// upstream of `sortedNeighbors` also means a test URI is never actively
+		// touched solely for cascade diagnostics. Composes the shared `detectFileRole`
+		// seam; a classifier failure RETAINS the candidate (honest — never a false
+		// clean). The project ignore filter below is separate and unchanged (#297).
+		impact.directImporters = impact.directImporters.filter(
+			(f) => !isTestRoleCollateral(f),
+		);
+		impact.directCallers = impact.directCallers.filter(
+			(f) => !isTestRoleCollateral(f),
+		);
+		impact.neighborFiles = impact.neighborFiles.filter(
+			(f) => !isTestRoleCollateral(f),
+		);
+
 		// Sort by relationship strength (B6) then cap to the neighbour budget.
 		// directImporters are most impactful, then callers, then reference edges.
 		importerSet = new Set(impact.directImporters);
@@ -1803,6 +1827,10 @@ function appendFallbackNeighbors(
 		if (primaryFilesThisTurn.has(diagKey)) continue;
 		if (isExternalOrVendorFile(diagPath, cwd)) continue;
 		if (isIgnoredCascadeNeighbor(diagPath, cwd)) continue;
+		// #1080: a KNOWN test-role file must not surface as a collateral fallback
+		// neighbor either (the passive-snapshot path the graph/reference filters
+		// above never reach). Ignore filtering (#297) stays separate and above.
+		if (isTestRoleCollateral(diagPath)) continue;
 		if (!nodeFs.existsSync(diagPath)) continue;
 		if (now - ts > CASCADE_TTL_MS) continue;
 		// #692: `source: "cascade"` dropped — see the doc comment above the
