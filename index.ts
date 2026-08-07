@@ -69,8 +69,15 @@ import {
 } from "./clients/instance-reaper.js";
 import {
 	deregisterInstance,
+	readInstanceRegistry,
 	registerInstance,
 } from "./clients/instance-registry.js";
+import { logVanishedInstances } from "./clients/vanished-instance-marker.js";
+import {
+	buildMemorySample,
+	formatMemoryHealthLine,
+	shouldEmitMemorySample,
+} from "./clients/memory-sampler.js";
 import { configureWarmAttach } from "./clients/warm-attach.js";
 import { checkCrossProcessLspBudget } from "./clients/lsp-budget.js";
 import { handleAgentEnd } from "./clients/runtime-agent-end.js";
@@ -798,6 +805,14 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
+			// Memory attribution (#1123 item 2) — reuses the same O(1) accessors the
+			// periodic latency.log `memory_sample` uses; see clients/memory-sampler.ts.
+			try {
+				lines.push("", formatMemoryHealthLine(buildMemorySample(runtime.wordIndex)));
+			} catch {
+				// best-effort — a health-line render must never break /lens-health
+			}
+
 			if (diagStats.repeatOffenders.length > 0) {
 				lines.push(t("lens.health.repeatOffenders", "Repeat offenders:"));
 				for (const offender of diagStats.repeatOffenders.slice(0, 5)) {
@@ -1240,7 +1255,21 @@ export default function (pi: ExtensionAPI) {
 			void registerInstance(ctx.cwd ?? process.cwd()).catch(() => {
 				// best-effort observability — never fail session_start over this
 			});
-			void sweepOrphans();
+			// #1123 item 2: log a sessionstart.log marker for any registry entry
+			// whose owning pid is confirmed dead — this instance vanished without
+			// reaching deregisterInstance()'s clean-shutdown removal. MUST read the
+			// registry and log BEFORE sweepOrphans (below) prunes exactly these same
+			// dead-pid entries out from under it, or the vanished set would already
+			// be empty by the time this runs — hence the explicit read here rather
+			// than letting sweepOrphans's own internal read race it.
+			void readInstanceRegistry()
+				.then((registry) => logVanishedInstances(registry))
+				.catch(() => {
+					// best-effort observability — never fail session_start over this
+				})
+				.finally(() => {
+					void sweepOrphans();
+				});
 			// #658: registry-INDEPENDENT backstop sweep, running alongside the
 			// registry-driven one above. `sweepOrphans` can only ever see pids
 			// still listed in some instance's `lspChildren[]`; once that trace is
@@ -1696,6 +1725,25 @@ export default function (pi: ExtensionAPI) {
 			// block is attributable to that turn and its CPU budget is measured
 			// over the same span (#1122).
 			resetEventLoopMonitor();
+
+			// #1123 item 2: periodic memory-attribution sample, every
+			// MEMORY_SAMPLE_TURN_INTERVAL turns — cheap (O(1)/O(bounded-cache-size)
+			// reads only, see clients/memory-sampler.ts) so no extra throttling is
+			// needed beyond the turn cadence itself.
+			if (shouldEmitMemorySample(runtime.turnIndex)) {
+				try {
+					const sample = buildMemorySample(runtime.wordIndex);
+					logLatency({
+						type: "phase",
+						filePath: "<pi-lens>",
+						phase: "memory_sample",
+						durationMs: 0,
+						metadata: { turnIndex: runtime.turnIndex, ...sample },
+					});
+				} catch {
+					// best-effort observability — never fail turn_end over this
+				}
+			}
 
 			// Drain any tool_result still in the debounce window so turn_end
 			// reads consistent state (cache, modified ranges, change-log).

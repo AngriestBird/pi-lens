@@ -30,6 +30,7 @@ import {
 	hasNearestPackageJsonField,
 	hasOcamlformatConfig,
 	hasOxfmtConfig,
+	hasOxfmtSvelteConfig,
 	hasPhpCsFixerConfig,
 	hasPrettierConfig,
 	hasRubocopConfig,
@@ -38,6 +39,7 @@ import {
 	hasStandardrbConfig,
 	hasStyluaConfig,
 	hasVitePlusConfig,
+	OXFMT_SUPPORTED_EXTENSIONS,
 } from "./tool-policy.js";
 
 const _lazyInstallAttempts = new Set<string>();
@@ -276,6 +278,7 @@ async function resolveManagedSmartDefaultCommand(
 function hasExplicitFormatterConfig(
 	formatterName: string,
 	cwd: string,
+	ext: string,
 ): boolean {
 	switch (formatterName) {
 		case "biome":
@@ -285,6 +288,16 @@ function hasExplicitFormatterConfig(
 				hasPrettierConfig(cwd) || hasNearestPackageJsonField(cwd, "prettier")
 			);
 		case "oxfmt":
+			// .svelte is conditional beyond "an oxfmt config exists": oxfmt
+			// requires the `svelte` package installed AND the config's `svelte`
+			// flag enabled (verified empirically — see hasOxfmtSvelteConfig).
+			// The generic checks below are NOT sufficient for .svelte — an
+			// oxfmt.toml with no svelte flag, or an oxfmt dependency alone,
+			// both fail at runtime for .svelte specifically (other extensions
+			// are unaffected by this stricter gate).
+			if (ext === ".svelte") {
+				return hasOxfmtSvelteConfig(cwd);
+			}
 			return (
 				hasOxfmtConfig(cwd) ||
 				hasVitePlusConfig(cwd) ||
@@ -447,18 +460,10 @@ export const oxfmtFormatter: FormatterInfo = {
 		if (found) return [found, filePath];
 		return null;
 	},
-	extensions: [
-		".js", ".jsx", ".mjs", ".cjs",
-		".ts", ".tsx", ".mts", ".cts",
-		".vue",
-		".css", ".scss", ".less",
-		".html", ".htm",
-		".json", ".jsonc",
-		".yaml", ".yml",
-		".md", ".mdx",
-		".graphql", ".gql",
-		".toml",
-	],
+	// Single source of truth: OXFMT_SUPPORTED_EXTENSIONS in tool-policy.ts.
+	// Do not hand-maintain a second copy of this list (#1134 — previously two
+	// parallel hand-maintained lists, the #883 single-source-of-truth class).
+	extensions: [...OXFMT_SUPPORTED_EXTENSIONS],
 	async detect(cwd: string) {
 		return (
 			hasOxfmtConfig(cwd) ||
@@ -994,7 +999,7 @@ export async function getFormattersForFile(
 	let selected: FormatterInfo | undefined;
 	if (formatterPolicy) {
 		const explicitlyConfigured = candidateFormatters.filter((formatter) =>
-			hasExplicitFormatterConfig(formatter.name, cwd),
+			hasExplicitFormatterConfig(formatter.name, cwd, ext),
 		);
 		if (explicitlyConfigured.length > 0) {
 			// A formatter with explicit project config was found — use it.
@@ -1043,7 +1048,7 @@ export async function getFormattersForFile(
 		selectionReason = "detect";
 	} else {
 		selectionReason = candidateFormatters.some((f) =>
-			hasExplicitFormatterConfig(f.name, cwd),
+			hasExplicitFormatterConfig(f.name, cwd, ext),
 		)
 			? "explicit-config"
 			: "smart-default";

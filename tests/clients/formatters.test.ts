@@ -1039,3 +1039,115 @@ describe("oxfmt formatter — detection and policy selection", () => {
 		expect(formatters.map((f) => f.name)).toContain("oxfmt");
 	});
 });
+
+// ---------------------------------------------------------------------------
+// oxfmt + .svelte — a stricter conditional gate than the other oxfmt extensions
+// ---------------------------------------------------------------------------
+//
+// Empirically verified against the real `oxfmt` npm package (0.62.0, scratch
+// fixture outside vitest — see PR body for the full four-cell matrix): unlike
+// oxfmt's other supported extensions, `.svelte` requires BOTH the `svelte`
+// package installed AND the config's `svelte` flag enabled. Either alone
+// always fails at runtime (exit 2), so — unlike the cross-product above —
+// "an oxfmt config file exists" is NOT sufficient for `.svelte` to be offered.
+describe("oxfmt formatter — .svelte conditional gate (#1134)", () => {
+	function svelteComponent(dir: string): string {
+		return fileIn(dir, "Component.svelte");
+	}
+
+	function writePackageJson(
+		dir: string,
+		devDependencies: Record<string, string>,
+	): void {
+		createTempFile(
+			dir,
+			"package.json",
+			JSON.stringify({ devDependencies }),
+		);
+	}
+
+	it("offers oxfmt for Component.svelte with the issue's exact fixture shape", async () => {
+		writePackageJson(tmpDir, { oxfmt: "^0.54.0", svelte: "^5.0.0" });
+		createTempFile(tmpDir, ".oxfmtrc.json", JSON.stringify({ svelte: true }));
+
+		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		expect(formatters.map((f) => f.name)).toEqual(["oxfmt"]);
+	});
+
+	it("offers oxfmt for Component.svelte when the svelte flag is set via oxfmt.toml", async () => {
+		writePackageJson(tmpDir, { oxfmt: "^0.54.0", svelte: "^5.0.0" });
+		createTempFile(tmpDir, "oxfmt.toml", "svelte = true\n");
+
+		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		expect(formatters.map((f) => f.name)).toEqual(["oxfmt"]);
+	});
+
+	it("does NOT offer oxfmt for Component.svelte without the svelte package (config flag on)", async () => {
+		writePackageJson(tmpDir, { oxfmt: "^0.54.0" });
+		createTempFile(tmpDir, ".oxfmtrc.json", JSON.stringify({ svelte: true }));
+
+		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		expect(formatters.map((f) => f.name)).not.toContain("oxfmt");
+	});
+
+	it("does NOT offer oxfmt for Component.svelte without the config flag (svelte package installed)", async () => {
+		writePackageJson(tmpDir, { oxfmt: "^0.54.0", svelte: "^5.0.0" });
+		createTempFile(tmpDir, ".oxfmtrc.json", "{}\n");
+
+		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		expect(formatters.map((f) => f.name)).not.toContain("oxfmt");
+	});
+
+	it("does NOT offer oxfmt for Component.svelte when the config flag is explicitly false", async () => {
+		writePackageJson(tmpDir, { oxfmt: "^0.54.0", svelte: "^5.0.0" });
+		createTempFile(tmpDir, ".oxfmtrc.json", JSON.stringify({ svelte: false }));
+
+		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		expect(formatters.map((f) => f.name)).not.toContain("oxfmt");
+	});
+
+	it("does NOT offer oxfmt for Component.svelte from a generic oxfmt.toml with no svelte flag", async () => {
+		writePackageJson(tmpDir, { oxfmt: "^0.54.0", svelte: "^5.0.0" });
+		createTempFile(tmpDir, "oxfmt.toml", "# oxfmt config\n");
+
+		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		expect(formatters.map((f) => f.name)).not.toContain("oxfmt");
+	});
+
+	it("does NOT offer oxfmt for Component.svelte with neither the package nor the config flag", async () => {
+		writePackageJson(tmpDir, { oxfmt: "^0.54.0" });
+
+		const formatters = await getFormattersForFile(svelteComponent(tmpDir), tmpDir);
+		expect(formatters.map((f) => f.name)).not.toContain("oxfmt");
+	});
+
+	it("still offers oxfmt for a non-svelte extension without the svelte package or flag", async () => {
+		writePackageJson(tmpDir, { oxfmt: "^0.54.0" });
+		createTempFile(tmpDir, "oxfmt.toml", "# oxfmt config\n");
+
+		const formatters = await getFormattersForFile(fileIn(tmpDir, "index.ts"), tmpDir);
+		expect(formatters.map((f) => f.name)).toContain("oxfmt");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Single-source-of-truth drift guard (#1134, the #883 pattern) — belt-and-
+// suspenders alongside deriving oxfmtFormatter.extensions directly from
+// OXFMT_SUPPORTED_EXTENSIONS: this catches a future PR that reintroduces a
+// second hand-maintained copy instead of importing the shared constant.
+// ---------------------------------------------------------------------------
+
+describe("oxfmt extension registries stay in sync (#1134)", () => {
+	it("oxfmtFormatter.extensions matches tool-policy's OXFMT_SUPPORTED_EXTENSIONS exactly", async () => {
+		const { OXFMT_SUPPORTED_EXTENSIONS } = await import(
+			"../../clients/tool-policy.ts"
+		);
+		expect(new Set(oxfmtFormatter.extensions)).toEqual(
+			OXFMT_SUPPORTED_EXTENSIONS,
+		);
+	});
+
+	it("oxfmtFormatter.extensions includes .svelte", () => {
+		expect(oxfmtFormatter.extensions).toContain(".svelte");
+	});
+});
