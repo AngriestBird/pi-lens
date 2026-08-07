@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import { ensureTool } from "../../installer/index.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
+import { pathsEqual } from "../../path-utils.js";
 import { getLinterPolicyForCwd } from "../../tool-policy.js";
 import { PRIORITY } from "../priorities.js";
 import type {
@@ -53,6 +54,7 @@ function toRawDiagnostics(parsed: unknown): TerragruntDiagnostic[] {
 export function parseTerragruntOutput(
 	raw: string,
 	filePath: string,
+	absPath: string = path.resolve(filePath),
 ): Diagnostic[] {
 	if (!raw.trim()) return [];
 	let parsed: unknown;
@@ -62,18 +64,27 @@ export function parseTerragruntOutput(
 		return [];
 	}
 
-	const fileBase = path.basename(filePath);
+	// Resolved against the unit dir, not compared by basename: a unit that
+	// includes its parent via find_in_parent_folders() gets diagnostics from a
+	// parent terragrunt.hcl, whose basename matches but whose lines do not.
+	const unitDir = path.dirname(absPath);
 	const diagnostics: Diagnostic[] = [];
 	for (const d of toRawDiagnostics(parsed)) {
 		if (!d || typeof d !== "object") continue;
 		const diagFile = d.range?.filename;
-		if (diagFile && path.basename(diagFile) !== fileBase) continue;
+		if (diagFile && !pathsEqual(path.resolve(unitDir, diagFile), absPath))
+			continue;
 		const line = d.range?.start?.line ?? 1;
 		const column = d.range?.start?.column ?? 1;
 		const severity = normalizeSeverity(d.severity);
 		const message = d.summary ?? d.detail ?? "terragrunt hcl validate error";
+		// No rule code in hcl validate output, so the message carries the identity.
+		const idMessage = message
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, "-")
+			.slice(0, 80);
 		diagnostics.push({
-			id: `terragrunt-hclvalidate-${line}`,
+			id: `terragrunt-hclvalidate-${line}-${column}-${idMessage}`,
 			message,
 			filePath,
 			line,
@@ -132,7 +143,11 @@ const terragruntRunner: RunnerDefinition = {
 
 		if (result.error && !result.stdout) return SKIPPED;
 
-		const diagnostics = parseTerragruntOutput(result.stdout || "", ctx.filePath);
+		const diagnostics = parseTerragruntOutput(
+			result.stdout || "",
+			ctx.filePath,
+			absPath,
+		);
 		if (diagnostics.length === 0) {
 			return { status: "succeeded", diagnostics: [], semantic: "none" };
 		}

@@ -2487,7 +2487,7 @@ async function installGitHubTool(
 	}
 
 	const asset =
-		releaseJson.assets.find((a) => a.name.includes(assetSubstring)) ??
+		pickReleaseAsset(releaseJson.assets, assetSubstring) ??
 		deriveHashiCorpReleaseAsset(tool, releaseJson.tag_name, assetSubstring);
 	if (!asset) {
 		logSessionStart(
@@ -3739,6 +3739,36 @@ export function resolveGitHubArchiveBinaryCandidates(
 }
 
 type DownloadAsset = { name: string; browser_download_url: string };
+
+// Signature/checksum siblings a release publishes next to the real asset. A
+// bare-binary tool's substring IS the whole asset name, so `includes` alone
+// matches `<asset>.asc` too and would install a signature file as the binary.
+const ASSET_SIDECAR_SUFFIXES = [
+	".asc",
+	".sig",
+	".minisig",
+	".pem",
+	".cert",
+	".sbom",
+	".sha256",
+	".sha256sum",
+	".md5",
+];
+
+function isAssetSidecar(name: string): boolean {
+	const lower = name.toLowerCase();
+	return ASSET_SIDECAR_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+}
+
+export function pickReleaseAsset<T extends { name: string }>(
+	assets: T[],
+	assetSubstring: string,
+): T | undefined {
+	return (
+		assets.find((a) => a.name === assetSubstring) ??
+		assets.find((a) => a.name.includes(assetSubstring) && !isAssetSidecar(a.name))
+	);
+}
 
 function deriveHashiCorpReleaseAsset(
 	tool: ToolDefinition,

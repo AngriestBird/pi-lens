@@ -281,7 +281,10 @@ const SPECIAL_FILENAMES: Array<{ pattern: RegExp; kind: FileKind }> = [
 	{ pattern: /^CMakeLists\.txt$/i, kind: "cmake" },
 	{ pattern: /^Makefile$/i, kind: "shell" },
 	{ pattern: /^Dockerfile(\.\w+)?$/i, kind: "docker" },
-	{ pattern: /^(terragrunt|root)\.hcl$/i, kind: "terragrunt" },
+	...TERRAGRUNT_FILENAMES.map((name) => ({
+		pattern: new RegExp(`^${name.replaceAll(".", "\\.")}$`, "i"),
+		kind: "terragrunt" as FileKind,
+	})),
 ];
 
 // --- Detection Functions ---

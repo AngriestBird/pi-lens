@@ -101,7 +101,26 @@ All notable changes to pi-lens will be documented in this file.
 	root markers), consumed by kind detection, both tool policies, the formatter,
 	and the project/root markers; `tests/clients/terragrunt-filenames.test.ts`
 	derives its cases from that list, so a call site that hand-copies it and
-	misses a name fails CI.
+	misses a name fails CI. Diagnostic ids carry line, column, and a normalized
+	message slug (the actionlint shape), because `hcl validate` reports no rule
+	code: a line-only id collapses two findings at one position in the
+	dispatcher's dedupe (keyed `filePath:line:column:defectClass:rule||id`) and
+	hides a changed finding from delta mode, which keys on `id` alone.
+	Diagnostics are attributed by resolving `range.filename` against the unit
+	directory and comparing through `pathsEqual`, not by basename: a unit that
+	pulls in its parent via `find_in_parent_folders()` gets diagnostics from a
+	parent `terragrunt.hcl` whose basename matches the edited file's but whose
+	line numbers belong to another file.
+
+- **Bare-binary GitHub release assets skip signature siblings** — the installer
+	picked a release asset with `assets.find(a => a.name.includes(substring))`.
+	Archive-based tools are unaffected (their substrings end in `.zip`/`.tar.gz`),
+	but the three bare-binary entries (terragrunt, marksman, expert) resolve to
+	the FULL asset name, which is a strict prefix of every `.asc`/`.sig`/`.sha256`
+	sibling, so whichever the release listed first would be downloaded and marked
+	executable as the binary. Selection now lives in an exported
+	`pickReleaseAsset`: exact name first, then a substring match that excludes
+	known sidecar suffixes.
 
 - **Source-walk generated-artifact escape hatch (closes #1107, phase 2 of 2)** — three pieces, building on phase 1's
 	counters (#1111):

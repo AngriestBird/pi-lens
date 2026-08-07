@@ -20,10 +20,15 @@ vi.mock("../../../../clients/tool-policy.js", () => ({
 	getLinterPolicyForCwd,
 }));
 
+// Availability is a mutable flag behind ONE hoisted mock rather than a
+// per-test vi.doMock: doMock registrations are resolved at import time and
+// outlive resetModules, so which registration wins depended on test order.
+const toolState = vi.hoisted(() => ({ available: true }));
+
 vi.mock("../../../../clients/dispatch/runners/utils/runner-helpers.js", () => ({
 	createAvailabilityChecker: (command: string) => ({
-		isAvailableAsync: async () => true,
-		getCommand: () => command,
+		isAvailableAsync: async () => toolState.available,
+		getCommand: () => (toolState.available ? command : null),
 	}),
 }));
 
@@ -44,6 +49,7 @@ function createCtx(filePath: string, cwd: string) {
 describe("terragrunt runner", () => {
 	beforeEach(() => {
 		vi.resetModules();
+		toolState.available = true;
 		safeSpawnAsync.mockReset();
 		ensureTool.mockReset();
 		getLinterPolicyForCwd.mockReset();
@@ -363,24 +369,13 @@ describe("terragrunt runner", () => {
 		}
 	});
 
-	// vi.doMock of runner-helpers leaks past resetModules, so the availability-off
-	// tests (this one and the managed-fallback one) run after every test that
-	// needs the real availability checker.
 	it("skips when the tool is unavailable", async () => {
 		const env = setupTestEnvironment("pi-lens-terragrunt-runner-");
 		try {
 			const filePath = path.join(env.tmpDir, "terragrunt.hcl");
 			fs.writeFileSync(filePath, "locals {}\n");
 
-			vi.doMock(
-				"../../../../clients/dispatch/runners/utils/runner-helpers.js",
-				() => ({
-					createAvailabilityChecker: () => ({
-						isAvailableAsync: async () => false,
-						getCommand: () => null,
-					}),
-				}),
-			);
+			toolState.available = false;
 			ensureTool.mockResolvedValue(null);
 
 			const runner = (
@@ -402,15 +397,7 @@ describe("terragrunt runner", () => {
 			const filePath = path.join(env.tmpDir, "terragrunt.hcl");
 			fs.writeFileSync(filePath, "locals {}\n");
 
-			vi.doMock(
-				"../../../../clients/dispatch/runners/utils/runner-helpers.js",
-				() => ({
-					createAvailabilityChecker: () => ({
-						isAvailableAsync: async () => false,
-						getCommand: () => null,
-					}),
-				}),
-			);
+			toolState.available = false;
 			ensureTool.mockResolvedValue("/managed/bin/terragrunt");
 			safeSpawnAsync.mockResolvedValue({
 				error: null,
@@ -458,6 +445,34 @@ describe("terragrunt runner", () => {
 
 			expect(result.status).toBe("skipped");
 			expect(safeSpawnAsync).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Ordering guard: this runs after the two availability-off tests and would
+	// pass vacuously if their doMock leaked, so it pins the beforeEach restore.
+	it("still sees the tool as available after the availability-off tests", async () => {
+		const env = setupTestEnvironment("pi-lens-terragrunt-runner-");
+		try {
+			const filePath = path.join(env.tmpDir, "terragrunt.hcl");
+			fs.writeFileSync(filePath, "locals {}\n");
+
+			safeSpawnAsync.mockResolvedValue({
+				error: null,
+				status: 0,
+				stdout: JSON.stringify({ invalid_files: [] }),
+				stderr: "",
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/terragrunt.js")
+			).default;
+
+			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
+
+			expect(result.status).toBe("succeeded");
+			expect(ensureTool).not.toHaveBeenCalled();
 		} finally {
 			env.cleanup();
 		}
@@ -518,6 +533,55 @@ describe("parseTerragruntOutput", () => {
 		expect(diagnostics[0]).toMatchObject({ line: 1, column: 1 });
 	});
 
+	// A unit's `include "root" { path = find_in_parent_folders() }` makes the
+	// parent's terragrunt.hcl a real source of diagnostics, and its basename
+	// matches the edited file's while its line numbers belong to another file.
+	it("drops a same-basename diagnostic from the parent unit", async () => {
+		const diagnostics = await parse(
+			JSON.stringify([
+				{
+					severity: 1,
+					summary: "parent problem",
+					range: { filename: "../terragrunt.hcl", start: { line: 9, column: 1 } },
+				},
+			]),
+			"/repo/infra/stack/terragrunt.hcl",
+		);
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("keeps a diagnostic reported by absolute path for the edited file", async () => {
+		const diagnostics = await parse(
+			JSON.stringify([
+				{
+					severity: 1,
+					summary: "here",
+					range: {
+						filename: path.resolve("/repo/infra/stack/terragrunt.hcl"),
+						start: { line: 3, column: 1 },
+					},
+				},
+			]),
+			"/repo/infra/stack/terragrunt.hcl",
+		);
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics[0].message).toBe("here");
+	});
+
+	it("keeps a bare-filename diagnostic for the edited file", async () => {
+		const diagnostics = await parse(
+			JSON.stringify([
+				{
+					severity: 1,
+					summary: "here",
+					range: { filename: "terragrunt.hcl", start: { line: 3, column: 1 } },
+				},
+			]),
+			"/repo/infra/stack/terragrunt.hcl",
+		);
+		expect(diagnostics).toHaveLength(1);
+	});
+
 	it("keeps diagnostics that carry no range.filename", async () => {
 		const diagnostics = await parse(
 			JSON.stringify([
@@ -557,5 +621,36 @@ describe("parseTerragruntOutput", () => {
 			JSON.stringify([{ severity: "info", summary: "i" }]),
 		);
 		expect(diagnostics[0]).toMatchObject({ severity: "warning", semantic: "warning" });
+	});
+
+	// The dispatcher dedupes on filePath:line:column:defectClass:(rule||id) and
+	// runs delta mode off `d.id` alone, so a line-only id drops the second
+	// finding at a position and hides a changed finding from the agent.
+	it("gives two findings at the same position distinct ids", async () => {
+		const diagnostics = await parse(
+			JSON.stringify([
+				{ severity: 1, summary: "unsupported block", range: { start: { line: 4, column: 2 } } },
+				{ severity: 1, summary: "unknown attribute", range: { start: { line: 4, column: 2 } } },
+			]),
+		);
+		expect(diagnostics).toHaveLength(2);
+		expect(diagnostics[0].id).not.toBe(diagnostics[1].id);
+	});
+
+	it("changes the id when the message at a line changes", async () => {
+		const before = await parse(
+			JSON.stringify([{ severity: 1, summary: "was this", range: { start: { line: 4 } } }]),
+		);
+		const after = await parse(
+			JSON.stringify([{ severity: 1, summary: "now that", range: { start: { line: 4 } } }]),
+		);
+		expect(after[0].id).not.toBe(before[0].id);
+	});
+
+	it("keeps the id stable for the same finding across runs", async () => {
+		const payload = JSON.stringify([
+			{ severity: 1, summary: "unsupported block", range: { start: { line: 4, column: 2 } } },
+		]);
+		expect((await parse(payload))[0].id).toBe((await parse(payload))[0].id);
 	});
 });
