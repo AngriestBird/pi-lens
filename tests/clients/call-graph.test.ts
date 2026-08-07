@@ -301,6 +301,7 @@ describe("buildCallGraph", () => {
 			// Counted exactly once, and the coverage sum invariant holds — this
 			// is the exact arithmetic validatePersistedCallGraph enforces on load.
 			const c = graph.coverage;
+			if (!c) throw new Error("expected coverage on a freshly built graph");
 			expect(c.sameFileEvidence).toBe(1);
 			expect(
 				c.resolvedEvidence + c.unresolvedEvidence + c.typeOnlyEvidence +

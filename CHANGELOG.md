@@ -29,8 +29,7 @@ All notable changes to pi-lens will be documented in this file.
 	"resource should be closed" finding. Fixed to `\\b` plus a regex-escaped
 	identifier. No shipped Java fixture used try-with-resources syntax, so no
 	existing expected-findings fixture changes with this fix.
-- **Raw NUL byte in `review-graph/builder.ts` made the file look binary to
-	grep (refs #1088)** — the checkpoint's `ignoredIds` join separator was a
+- **Raw NUL byte in `review-graph/builder.ts` made the file look binary to grep (refs #1088)** — the checkpoint's `ignoredIds` join separator was a
 	literal 0x00 byte embedded in source, which makes `ripgrep`/`grep` treat
 	the whole 4,900+ line file as binary and stop scanning partway through —
 	silently defeating the AGENTS.md-mandated repo-wide grep sweep for every
@@ -38,8 +37,7 @@ All notable changes to pi-lens will be documented in this file.
 	escape sequence, which is the byte-identical runtime string (same
 	`hashIgnoredIds` function computes both the write-time and read-time
 	hash, so no persisted checkpoint compatibility is affected).
-- **`buildCallGraph` same-file evidence accounting hardened + dead code
-	removed (refs #1089)** — added regression coverage for the audited
+- **`buildCallGraph` same-file evidence accounting hardened + dead code removed (refs #1089)** — added regression coverage for the audited
 	same-file evidence class (divergent path forms for the same file must
 	both be recognized as same-file AND counted exactly once per reference,
 	keeping the coverage sum invariant `validatePersistedCallGraph` enforces
@@ -57,8 +55,7 @@ All notable changes to pi-lens will be documented in this file.
 	for a top-level destructured parameter with no wrapper. `function
 	f({a, b})` counted 0 parameters in a `.js` file while the TS-annotated
 	equivalent counted correctly. Added JS-vs-TS parity tests.
-- **`call-graph.ts`'s exported `CACHE_VERSION` renamed to
-	`CALL_GRAPH_CACHE_VERSION`** — collided in name (not value — separate
+- **`call-graph.ts`'s exported `CACHE_VERSION` renamed to `CALL_GRAPH_CACHE_VERSION`** — collided in name (not value — separate
 	modules) with `clients/cache/rule-cache.ts`'s own `CACHE_VERSION` export;
 	renamed to match the `<SUBSYSTEM>_CACHE_VERSION` convention already used
 	by `WORKSPACE_DIAGNOSTICS_CACHE_VERSION` and
