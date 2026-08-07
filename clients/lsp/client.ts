@@ -780,12 +780,34 @@ export async function killProcessTree(
 	};
 
 	try {
+		// #1114: gate the escalation on OBSERVED exit, not `proc.killed`. Node
+		// only sets `proc.killed = true` when `proc.kill()` (the ChildProcess
+		// method) successfully SENDS a signal — never when the process actually
+		// dies, and the primary SIGTERM path above goes through the raw
+		// `process.kill(-pid, …)` process-group call, which never touches
+		// `proc.killed` at all. Checking `!proc.killed` here was therefore
+		// either always-true (unconditional SIGKILL after the window,
+		// regardless of whether the group already died — group-kill path) or
+		// always-false/dead (direct-child fallback path, same shape as the
+		// safe-spawn escalation bug). An `exit` listener set once, up front,
+		// gives a real observed-death signal for both. Seeded from the same
+		// `exitCode`/`signalCode` pre-check the top-of-function early return
+		// uses (:689) — that early return is skipped when
+		// `options.processExiting` is set, so a process that was ALREADY dead
+		// on entry can still reach here; without seeding, `exited` would stay
+		// false (the "exit" event already fired before this listener was
+		// attached) and the fast/non-fast branches below would still fire a
+		// redundant group SIGKILL at the escalation window.
+		let exited = proc.exitCode != null || proc.signalCode != null;
+		proc.once?.("exit", () => {
+			exited = true;
+		});
 		if (!killPosixProcessGroup("SIGTERM")) {
 			killDirectChild("SIGTERM");
 		}
 		if (options.fast) {
 			const timer = setTimeout(() => {
-				if (!(proc as { killed?: boolean }).killed) {
+				if (!exited) {
 					logLatency({
 						type: "phase",
 						phase: "lsp_kill_escalation",
@@ -822,7 +844,7 @@ export async function killProcessTree(
 			}, 1500);
 			proc.once?.("exit", onExit);
 		});
-		if (!exitedInTime && !(proc as { killed?: boolean }).killed) {
+		if (!exitedInTime && !exited) {
 			logLatency({
 				type: "phase",
 				phase: "lsp_kill_escalation",
@@ -2200,7 +2222,24 @@ export async function createLSPClient(options: {
 			});
 		});
 		setTimeout(() => {
-			if (!lspProcess.process.killed && process.platform !== "win32") {
+			// #1114: gate on the process's own observed `exitCode`/`signalCode`,
+			// not `.killed` — `killProcessTree` above signals the POSIX process
+			// GROUP via the raw `process.kill(-pid, …)`, which never touches
+			// this `ChildProcess` instance's `.killed` flag, so `!…killed` here
+			// was always true and this 2s backstop unconditionally re-sent
+			// SIGKILL even when the group had already exited. `exitCode` alone
+			// is insufficient too: a process that died FROM a signal (the
+			// common case here — killProcessTree's own SIGTERM/SIGKILL) has
+			// `exitCode === null` forever and only `signalCode` set, so
+			// checking `exitCode === null` alone still re-SIGKILLs that corpse
+			// on the common path (harmless — `kill()` on an already-exited pid
+			// is a swallowed no-op — but not actually "observed still alive").
+			// Require both null to mean "no exit observed by either signal".
+			if (
+				lspProcess.process.exitCode === null &&
+				lspProcess.process.signalCode === null &&
+				process.platform !== "win32"
+			) {
 				lspProcess.process.kill("SIGKILL");
 			}
 		}, 2000);

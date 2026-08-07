@@ -6,6 +6,76 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Dead SIGTERM→SIGKILL escalation guard on non-Windows kills (closes #1114)**
+	— `clients/safe-spawn.ts`'s non-Windows `killTree` branch armed a 1s
+	escalation timer gated on `if (!child.killed) child.kill("SIGKILL")`, but
+	Node sets `ChildProcess#killed = true` the moment `kill()` successfully
+	SENDS a signal — not when the child actually dies — so immediately after
+	the `child.kill("SIGTERM")` one line above, the guard was always false
+	and the SIGKILL escalation could never fire: a SIGTERM-ignoring child on
+	Linux/macOS was never force-killed. Fixed by tracking OBSERVED death via a
+	`closed` flag set synchronously (before any `await`) in the close/error
+	handlers, gating the escalation on `!closed` instead — composes cleanly
+	with the existing #1109/#1113 `escalationTimer` clear-on-close fix rather
+	than switching to the LSP `killProcessTree` analog's unconditional-SIGKILL
+	design, since `safeSpawnAsync` already has a real per-call close/error
+	observation point to hang the flag off of. Proven with a new "child
+	ignores SIGTERM → SIGKILL sent at the 1s mark" test
+	(`tests/clients/safe-spawn-kill-escalation-timer.test.ts`) that fails
+	against the pre-fix guard and passes post-fix; the existing #1109 timer-leak
+	tests (escalation timer cleared when close/error DOES arrive) remain green.
+	**Class sweep** of every `.killed` consumer under `clients/` and `scripts/`
+	found two siblings of the same shape in `clients/lsp/client.ts`'s
+	`killProcessTree`/`createLSPClient` and fixed both in this PR: (1) the
+	`fast`-shutdown escalation timer checked `!proc.killed`, but the primary
+	SIGTERM send there goes through the raw `process.kill(-pid, …)` process-group
+	call (which never touches `proc.killed`), so the guard was either always-true
+	(unconditional SIGKILL after the window on the common group-kill path) or
+	dead (on the direct-child fallback path) — now tracked via a real `exit`
+	listener set once up front, seeded from the same `exitCode`/`signalCode`
+	pre-check the function's top-of-body early return already uses (a process
+	that was already dead on entry — reachable when `options.processExiting`
+	skips that early return — would otherwise miss its own "exit" event and
+	still draw a redundant group SIGKILL at the escalation window); (2) the
+	`initialize()`-timeout 2s SIGKILL backstop had the identical always-true
+	`!lspProcess.process.killed` guard — switched to `lspProcess.process.exitCode
+	=== null && lspProcess.process.signalCode === null` (both, not `exitCode`
+	alone: a process killed BY a signal — the common case here, since
+	`killProcessTree` above it signals rather than lets the process exit on its
+	own — has `exitCode === null` forever and only `signalCode` set, so
+	`exitCode` alone still re-armed the backstop's kill against an
+	already-dead corpse; harmless in practice since `ChildProcess#kill()` on an
+	exited handle is a swallowed no-op, but not an accurate "still alive"
+	read). Other `.killed` reads audited and left as-is because they're
+	liveness/status checks, not escalation-action gates: `isClientAlive`'s
+	`!state.lspProcess.process.killed` (redundant with `isDestroyed`, already
+	set from real exit/close handlers), `checkProcessAlive`'s informational
+	"was killed" health-check string, `launch.ts`'s post-spawn
+	immediate-failure check (`proc.killed` read before any kill was ever sent),
+	`scripts/with-test-lock.mjs`'s `.once`-registered first-forward guard, and
+	`scripts/smoke-tools.mjs`'s read of Node's own `execFileSync` timeout-kill
+	flag on the caught error object.
+
+	**Adversarial-review follow-up round:** the reviewer ran
+	`kill-process-tree.test.ts` against PRE-fix `client.ts` and it passed 7/7 —
+	the sibling fixes above had ZERO effective test coverage, because the
+	"non-fast shutdown escalates" mock (and the other pre-existing mocks in
+	that file) lacked `once`/never set `killed`, so BOTH the old dead guard and
+	the new fix's guard were vacuously permissive against them (the #1106
+	vacuous-mock class, recurring in mock form: a test's fixture is too weak to
+	distinguish correct from broken behavior, so it passes either way). Fixed
+	by: upgrading that test's mock to be `.once`-capable so it actually
+	exercises the `exited`-flag logic; adding two new `fast`-shutdown tests with
+	a real `.once`-capturing mock proving BOTH directions (exit observed before
+	the 1.5s window → no group SIGKILL; no exit observed → group SIGKILL at the
+	window) — the "no premature SIGKILL" direction fails against the pre-fix
+	`!proc.killed` guard (proven by temporarily reverting the guard and
+	re-running); and adding a real-subprocess POSIX-only test
+	(`tests/clients/lsp/initialize-timeout-backstop.test.ts`, skipped on win32
+	with an explicit reason — killProcessTree's Windows path is
+	`taskkill`-based, not signal-based, and is already covered by the
+	kill-process-tree suite) for the previously fully-untested `initialize()`
+	2s backstop.
 - **Micro-gap sweep: recorded coverage/observability/doc gaps (refs #1106, refs #1104)**
 	- `session-state-store.ts`'s `loadSessionState` STATE_VERSION reject path
 		(a wrong-version persisted snapshot is ignored, not rehydrated) had no
