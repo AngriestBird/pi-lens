@@ -6,6 +6,78 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **Source-walk generated-artifact escape hatch (closes #1107, phase 2 of 2)** — three pieces, building on phase 1's
+	counters (#1111):
+	1. **Directory-level skip counting.** `shouldRecurseIntoDir`'s
+		`isGeneratedArtifactDirectoryName` branch (`clients/source-walker.ts`)
+		pruned whole directories (`generated/`, `codegen/`, `__generated__/`, …)
+		with zero counting — an entire directory of real files reported zero.
+		`SourceCollectionResult` gains `generatedDirSkips`, threaded through the
+		same `SourceWalkSkipCounters` seam and the `source_walk_skip_summary`
+		log line: one count per PRUNED DIRECTORY, never per file inside it
+		(enumerating the contents would defeat the pruning). The
+		`SourceCollectionResult` docblock's former "KNOWN GAP" note is now the
+		real field doc.
+	2. **Tool-facing surfacing.** `ProjectDiagnosticsSnapshot` gains
+		`generatedFileSkips` (the raw skip total, all evidence tiers),
+		`generatedNameOnlySkips` (the narrower at-risk subset — see below), and
+		`generatedDirSkips` (only present, like `scanTruncated`, on a walk that
+		actually ran); `lens-engine.ts`'s new `generatedSkipNotice` renders a
+		one-line notice mirroring `scanTruncationNotice`'s (#784) style, wired
+		into both `pilens_project_scan` (`mcp/server.ts`) and `lens_diagnostics`
+		(`tools/lens-diagnostics.ts`). **Review fix (P1, empirically proven):**
+		the notice originally keyed off the raw `generatedFileSkips` total,
+		which includes STRONG evidence (lockfiles, declaration files,
+		minified/bundle/chunk output — expected on almost every real repo) —
+		a repo with just `index.ts` + an ambient `.d.ts` + `package-lock.json`
+		showed "2 file(s) excluded" on every single scan, forever. It now keys
+		off `generatedNameOnlySkips`: the narrower bucket of WEAK name matches
+		trusted with NO corroborating evidence check at all (only reachable
+		when a caller opts out of the header probe; the default project-walk
+		path always enables it, so this is rare-to-zero in practice — meaning
+		the notice is meaningful again when it does fire) plus `generatedDirSkips`
+		(directory pruning has no escape hatch, so it stays a genuine
+		unverified-content signal). Both `ProjectDiagnosticsScanOptions` and
+		both tool surfaces also gain `includeGenerated` (default `false`) so
+		the notice's opt-out advice is now actually actionable, not just prose.
+		`module_report` has no walk-backed section of its own to thread this
+		through (it reads the cached review graph, built asynchronously
+		elsewhere) — surfaced in the project-diagnostics path only.
+	3. **Content-probe escape hatch (the actual behavior change).** A file
+		matching a generated-artifact NAME pattern but with no other evidence is
+		now KEPT instead of silently dropped. `generated-artifacts.ts` splits
+		its path check into STRONG evidence (a generated directory segment, a
+		lockfile, minified/bundle/chunk output — always conclusive, never
+		rescued) and WEAK evidence (the remaining filename-regex patterns, e.g.
+		`gen.ts`, `foo_generated.go`); `classifyGeneratedOrArtifactDetailed`
+		requires a WEAK match to be corroborated by a generated-code header in
+		the first 4 KB (or the sibling-source probe already checked upstream by
+		every walk-driven caller) before treating it as an artifact —
+		cheapest-first. With NEITHER piece of evidence, the file is KEPT and
+		counted under the new `generatedNameOverrides` counter (also in the
+		rollup log line), so the heuristic's rescues stay observable.
+		**Review fix (P2, maintainer decision):** minified/bundle/chunk output
+		(`bar.min.js`, `vendor.bundle.js`, `runtime.chunk.js`) is STRONG tier,
+		not WEAK — the escape hatch's evidence checks are structurally dead for
+		it (minifiers strip banners, so the header leg never confirms; the
+		sibling probe looks for `app.min.ts`, never `app.js` at a different
+		stem, so that leg is unreachable too), which would have made it a
+		PERMANENT override rather than an occasional rescue. `app.min.js` next
+		to `app.js` is skipped unconditionally, like a lockfile.
+		Shipped **ungated**: the existing `LENS_FLAGS`/`.pi-lens.json` toggle
+		registry is sized for whole-subsystem behavior (lsp/tests/delta/…), not
+		a narrow heuristic refinement, and the new `includeGenerated` scan
+		option (item 2) already gives callers a full, actionable opt-out.
+		Documented tradeoff: a false-KEEP (one extra file an agent must judge)
+		is preferred over the prior silent false-DROP (a real file invisibly
+		never analyzed) — this changes walk output for review-graph/word-index/
+		project-diagnostics/call-graph: a repo with a real `gen.ts` gains
+		coverage (intended), and a repo with a headerless generated file with
+		no source twin also gains coverage (accepted per the issue). Invariant
+		preserved for lockfiles, declaration files, minified/bundle/chunk
+		output, and anything the ignore-matcher/extension filter already
+		excluded — none of those are ever rescued.
+
 - **Machine-wide test-suite lock (closes #1101)** — `npm test` /
 	`npm run test:unit` / `npm run test:integration` now route through the new
 	`scripts/with-test-lock.mjs` wrapper, which acquires a single machine-wide
@@ -151,6 +223,7 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`runtime-tool-result.ts`'s three tool-result-turn maps now key through `PathKeyedMap` (refs #1086, the #210/#1020/#1025 raw-path-key class)** — `inFlightPipelines`, `lastAnalyzedStateByFile`, and `debouncedPipelines` keyed directly on `filePath`, which is only `path.resolve`d from raw agent-supplied tool input (never case-folded, never realpath'd). A divergent Windows spelling of the same file (case, or an unresolved absolute path an agent supplies verbatim) bypassed the concurrent-state dedupe and debounce coalescing, producing duplicate pipeline runs, doubled LSP dispatch, and split telemetry participant counts; `flushDebouncedToolResults(filePath)` silently missed the pending entry it was meant to flush. All three now wrap `PathKeyedMap` with `normalizeEphemeralMapKey` — the cheap slash-fold + win32-lowercase normalizer (no `realpathSync`), matching the state's ephemeral, turn-scoped, single-process lifetime per AGENTS.md's normalizer-choice guidance (`normalizeMapKey`'s realpath cost is for long-lived cross-call-site state, not this). `inFlightPipelines`'s composite `${filePath}:${stateHash}` key is now a `PathKeyedMap<Map<string, InFlightPipeline>>` — normalized path outer, raw stateHash inner — rather than folding both halves through one string normalizer, so a genuine same-path content change still gets a distinct entry while divergent spellings of the same state collapse to one. Every read/write/delete/iteration site in the file was audited; `flushDebouncedToolResults`'s iteration and `scheduleDebounced`'s coalesce path both continue to see the map's preserved display path. No other raw path-keyed map exists in the file. New tests (`tests/clients/runtime-tool-result-debounce.test.ts`) prove, fail-then-pass, that (1) two concurrent `tool_result`s for the same file under a divergent (win32-normalizer-driven) spelling collapse into one pipeline run, and (2) `flushDebouncedToolResults` addressed by a divergent spelling still hits the entry scheduled under the other spelling (asserted by elapsed time, not just call count, so a silent miss falling back to the natural debounce timer can't vacuously pass); a third test proves the composite key's stateHash axis still keeps same-path-different-content calls distinct.
 - **`pi --print --no-session` no longer hangs after `agent_settled` — uncleared race-loser timers (refs #1097, recurrence of #22's symptom via a different handle)** — a completed one-shot print-mode process kept running in the event loop instead of exiting. Root cause: `LSPService.getClientForFile` raced the client-wait against an inline `setTimeout(effectiveMaxWaitMs)` whose handle was never stored, so when the client resolved first (the common case) the losing timer stayed a **ref'd** pending timer for the full remaining wait budget. In a long-lived interactive session that is invisible (it fires later, resolves an orphan promise, is GC'd); in a `--print`/subagent process it keeps the loop alive for up to `effectiveMaxWaitMs` (15s in the report, minutes with a server whose `clientWaitTimeoutMs` is large) after the run settled — the `session_shutdown` handler runs and `resetLSPService` completes, but nothing owned or cancelled this timer. Proven via `process`-handle async-hooks tracing: the sole pi-lens-owned handle surviving into the hang was this timeout. The defect **shape** — *an operation raced/bounded by an independently-armed timer whose loser is never cancelled on the operation's resolution* — was swept repo-wide; two same-shape siblings were fixed in the same pass: the quiet-window heartbeat sample-timeout (`clients/quiet-window.ts`, 2s ref'd, kept a one-shot alive ~2s per settle) and the formatter timeout (`clients/format-service.ts`, 30s ref'd). All three now store the timer and `clearTimeout` it in a `finally`, matching the `withDeadline` helper contract the rest of the codebase already uses. Regression test (`tests/clients/lsp/client-wait-timer-cleanup.test.ts`) asserts no pending timer survives a fast client win — it fails on the pre-fix code (`expected 1 to be 0`). One further same-shape site — the cascade references race in `clients/dispatch/integration.ts` (750ms) — is tracked in #1109 for a follow-up as it is under concurrent modification.
 - **Two more uncleared-race-timeout members closed out (closes #1109, sweep follow-up to #1097/#1110)** — the two class members #1110's adversarial review flagged rather than fixed. (1) `computeCascadeForFile`'s symbol-level blast-radius upgrade (`clients/dispatch/integration.ts`) races `lspService.references()` against an inline `setTimeout(() => reject(...), 750)` per changed symbol (up to 3 per file); when `references()` wins — the common case — the losing timer was never stored, so it stayed a REF'D pending timer for the remaining budget. Same `finally`-clear contract as the #1097 fix: the handle is now stored in a per-call `let` and cleared once the race settles. (2) `safeSpawnAsync`'s non-Windows `killTree` else-branch (`clients/safe-spawn.ts`) arms a REF'D 1s SIGTERM→SIGKILL escalation timer that was neither cleared on child exit nor unref'd (the main per-spawn `timeoutId` alongside it was already correctly cleared on both the `close` and `error` paths). Bounded to 1s and only on kill paths, so it can't reproduce #1097's hang by itself, but it is the same defect shape and now clears alongside `timeoutId` in both handlers. (Review-round finding: the escalation ACTION itself has always been dead code — `!child.killed` is false after a successful SIGTERM *send*, so SIGKILL never fires; this change fixes only the timer-handle leak and preserves the window; the dead guard is tracked in #1114.) Regression tests prove both fail on pre-fix code: `tests/clients/cascade-compute.test.ts` (`vi.getTimerCount()` after a fast `references()` win) and the new `tests/clients/safe-spawn-kill-escalation-timer.test.ts`, which mocks `process.platform` and `node:child_process`'s `spawn` (mirroring `tests/clients/lsp/kill-process-tree.test.ts`'s established technique) so the non-Windows branch is exercised deterministically on any host OS, including Windows dev machines — no vacuous platform-gated pass. A re-run of #1110's repo-wide `setTimeout`/`setInterval`/`Promise.race` grep over every file changed since that sweep (#1103, #1110, #1111) found no new members of the class.
 - **`sg scan` exit-1-with-matches is no longer misclassified as a CLI failure (refs #1087)** — ast-grep's linter-style contract (verified first-hand against the bundled CLI: a `severity: error` rule that MATCHES exits **1** with valid JSON matches on stdout and stderr "Scan succeeded and found error level diagnostics"). `SgRunner.interpretScanResult()` / `exec()` only exempted `status===1` with *empty* output, so every real match under an error-severity rule was dropped as `failure: "cli-failure"` with `matches: []`. Now `status===1` + stdout that parses as valid JSON is treated as SUCCESS (matches parsed); stderr-with-unparseable-stdout stays a failure, and the historical status-1/no-output no-match convention is preserved. Invariant: **an exit code that means "scan succeeded with findings" must never be classified as a CLI failure.** This restores `ast_grep_search`/`pilens_ast_grep_search` raw error-severity rules, the `pilens_ast_grep_replace` preview/preCheck path, and `validateRule` for a matching error-severity rule.
