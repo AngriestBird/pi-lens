@@ -79,6 +79,12 @@ import {
 	shouldEmitMemorySample,
 } from "./clients/memory-sampler.js";
 import { dumpActiveHandles } from "./clients/debug-handles.js";
+import {
+	checkSmellsAndNoteOnce,
+	countRecentSmells,
+	formatSmellsHealthLine,
+	shouldCheckSmellsThisTurn,
+} from "./clients/smells-rollup.js";
 import { configureWarmAttach } from "./clients/warm-attach.js";
 import { checkCrossProcessLspBudget } from "./clients/lsp-budget.js";
 import { handleAgentEnd } from "./clients/runtime-agent-end.js";
@@ -810,6 +816,14 @@ export default function (pi: ExtensionAPI) {
 			// periodic latency.log `memory_sample` uses; see clients/memory-sampler.ts.
 			try {
 				lines.push("", formatMemoryHealthLine(buildMemorySample(runtime.wordIndex)));
+			} catch {
+				// best-effort — a health-line render must never break /lens-health
+			}
+
+			// Smells self-surfacing (#1123 item 3) — same bounded tail-scan the
+			// session_start line and turn_end note use; see clients/smells-rollup.ts.
+			try {
+				lines.push(formatSmellsHealthLine(countRecentSmells()));
 			} catch {
 				// best-effort — a health-line render must never break /lens-health
 			}
@@ -1741,6 +1755,20 @@ export default function (pi: ExtensionAPI) {
 						durationMs: 0,
 						metadata: { turnIndex: runtime.turnIndex, ...sample },
 					});
+				} catch {
+					// best-effort observability — never fail turn_end over this
+				}
+			}
+
+			// #1123 item 3: bounded smells re-check, same cadence style as the memory
+			// sample above — at most once per SMELLS_TURN_CHECK_INTERVAL turns, and
+			// each smell notifies at most once per session (checkSmellsAndNoteOnce's
+			// gate). See clients/smells-rollup.ts for the tail-scan cost bound.
+			if (shouldCheckSmellsThisTurn(runtime.turnIndex)) {
+				try {
+					for (const note of checkSmellsAndNoteOnce(countRecentSmells())) {
+						ctx.ui.notify(note, "warning");
+					}
 				} catch {
 					// best-effort observability — never fail turn_end over this
 				}
