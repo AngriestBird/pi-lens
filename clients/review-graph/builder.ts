@@ -306,6 +306,37 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 	_lastGraphBuildInfo = { reused: false, mode: "full", graphChanged: true };
 }
 
+export interface ReviewGraphWorkspaceCacheSnapshot {
+	/** Resident entries in `_workspaceGraphCache` — one per distinct cwd this
+	 *  process has built a graph for (#1123 item 2 memory attribution). */
+	cacheEntries: number;
+	/** Sum of `graph.nodes.size` across every resident entry. */
+	totalNodes: number;
+	/** Sum of `graph.edges.length` across every resident entry. */
+	totalEdges: number;
+}
+
+/**
+ * O(cache-entries) snapshot of the resident workspace graph cache — NOT
+ * O(nodes)/O(edges): only `.size`/`.length` are read per entry, never the
+ * graph contents themselves (#1123 item 2 memory-attribution sample). Cache
+ * entries are per-cwd and normally number 1 (a session_start clears the
+ * cache), so this is cheap enough for a per-N-turn sample.
+ */
+export function getReviewGraphWorkspaceCacheSnapshot(): ReviewGraphWorkspaceCacheSnapshot {
+	let totalNodes = 0;
+	let totalEdges = 0;
+	for (const entry of _workspaceGraphCache.values()) {
+		totalNodes += entry.graph.nodes.size;
+		totalEdges += entry.graph.edges.length;
+	}
+	return {
+		cacheEntries: _workspaceGraphCache.size,
+		totalNodes,
+		totalEdges,
+	};
+}
+
 export function _getReviewGraphCacheStateForTests(cwd: string):
 	| {
 			signature: string;
