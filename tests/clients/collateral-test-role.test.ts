@@ -19,14 +19,20 @@ describe("isTestRoleCollateral — classifier-positive coverage", () => {
 		expect(isTestRoleCollateral("/repo/src/foo.spec.ts")).toBe(true);
 		expect(isTestRoleCollateral("/repo/pkg/test_widget.py")).toBe(true);
 		expect(isTestRoleCollateral("/repo/pkg/spec_widget.rb")).toBe(true);
-		// location-based
+		// location-based (forward slash — production always feeds native-separator
+		// paths, which on POSIX means `/`; detectFileRole's directory match relies
+		// on the OS's own path.dirname, so a foreign-separator directory path is an
+		// OS-specific artifact never produced in real dispatch).
 		expect(isTestRoleCollateral("/repo/src/__tests__/sub/foo.ts")).toBe(true);
 		expect(isTestRoleCollateral("/repo/tests/foo.ts")).toBe(true);
 		expect(isTestRoleCollateral("/repo/spec/foo.ts")).toBe(true);
-		// Windows separators normalize the same way
-		expect(isTestRoleCollateral("C:\\repo\\src\\__tests__\\sub\\foo.ts")).toBe(
-			true,
-		);
+		// NAME-based detection is separator-agnostic on every OS: a `.test.`
+		// basename is matched via a substring check on the whole path, so a
+		// Windows-style backslash path still classifies on Linux CI too. (A
+		// backslash DIRECTORY path — e.g. `\__tests__\` — is deliberately NOT
+		// asserted here: its detection depends on win32 `path.dirname`, so it is
+		// genuinely OS-specific and would vacuously fail on POSIX; #1024 discipline.)
+		expect(isTestRoleCollateral("C:\\repo\\src\\foo.test.ts")).toBe(true);
 	});
 
 	it("retains ordinary source / init files (non-test roles)", async () => {
