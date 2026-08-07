@@ -911,6 +911,236 @@ describe("computeCascadeForFile", () => {
 		}
 	});
 
+	// ── #1080: test-role neighbors excluded from collateral cascade surfaces ──
+
+	it("excludes an UNIGNORED test-role graph neighbour but keeps a source neighbour (#1080)", async () => {
+		const env = setupTestEnvironment("cascade-test-role-graph-");
+		try {
+			const primary = path.join(env.tmpDir, "src", "reader.ts");
+			const sourceNeighbor = path.join(env.tmpDir, "src", "consumer.ts");
+			const testNeighbor = path.join(env.tmpDir, "src", "consumer.test.ts");
+			fs.mkdirSync(path.dirname(primary), { recursive: true });
+			fs.writeFileSync(primary, "export const countTotal = 1;\n");
+			fs.writeFileSync(
+				sourceNeighbor,
+				"import { countTotal } from './reader';\n",
+			);
+			fs.writeFileSync(
+				testNeighbor,
+				"import { countTotal } from './reader';\n",
+			);
+			// Both the source AND the test file are direct importers with a passive
+			// snapshot error — the test file is NOT ignored (no .pi-lens.json), so
+			// only the #1080 role filter can drop it.
+			mocks.computeImpactCascade.mockReturnValue(
+				impact(primary, [sourceNeighbor, testNeighbor]),
+			);
+			const touchFile = vi.fn();
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(
+					new Map([
+						[
+							sourceNeighbor.split(path.sep).join("/"),
+							{ diags: [lspError("consumer error")], ts: Date.now() },
+						],
+						[
+							testNeighbor.split(path.sep).join("/"),
+							{ diags: [lspError("test error")], ts: Date.now() },
+						],
+					]),
+				),
+				touchFile,
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			const result = await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			// Only the source neighbour surfaces / is read.
+			expect(touchFile).not.toHaveBeenCalled();
+			const neighborFiles = result?.result?.neighbors.map((n) =>
+				n.filePath.split(path.sep).join("/"),
+			);
+			expect(neighborFiles).toEqual([sourceNeighbor.split(path.sep).join("/")]);
+			// The header input (impact) — read verbatim by formatImpactCascade — is
+			// also clean: the test file leaks through neither Direct importers nor
+			// Check next counts/names.
+			const impactNeighbors = result?.result?.impact.neighborFiles ?? [];
+			expect(impactNeighbors).toContain(sourceNeighbor);
+			expect(impactNeighbors).not.toContain(testNeighbor);
+			expect(result?.result?.impact.directImporters).not.toContain(testNeighbor);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not surface or touch an LSP reference that points at a test file (#1080)", async () => {
+		const env = setupTestEnvironment("cascade-test-role-refs-");
+		try {
+			const primary = path.join(env.tmpDir, "src", "primary.ts");
+			const sourceRef = path.join(env.tmpDir, "src", "consumer.ts");
+			const testRef = path.join(env.tmpDir, "src", "consumer.test.ts");
+			fs.mkdirSync(path.dirname(primary), { recursive: true });
+			fs.writeFileSync(primary, "export function changed() { return 1; }\n");
+			fs.writeFileSync(
+				sourceRef,
+				"import { changed } from './primary';\nchanged();\n",
+			);
+			fs.writeFileSync(
+				testRef,
+				"import { changed } from './primary';\nchanged();\n",
+			);
+
+			const graph = emptyGraph();
+			const normalizedPrimary = primary.split(path.sep).join("/");
+			const symbolId = `${normalizedPrimary}:changed`;
+			graph.symbolNodesByFile.set(normalizedPrimary, [symbolId]);
+			graph.nodes.set(symbolId, {
+				id: symbolId,
+				kind: "symbol",
+				language: "jsts",
+				filePath: normalizedPrimary,
+				symbolName: "changed",
+				symbolKind: "function",
+				metadata: { line: 1, column: 17 },
+			});
+			mocks.buildOrUpdateGraph.mockResolvedValue(graph);
+			mocks.computeImpactCascade.mockReturnValue({
+				...impact(primary, []),
+				changedSymbols: ["changed"],
+			});
+			const references = vi.fn().mockResolvedValue([
+				{
+					uri: pathToFileURL(sourceRef).href,
+					range: {
+						start: { line: 1, character: 0 },
+						end: { line: 1, character: 7 },
+					},
+				},
+				{
+					uri: pathToFileURL(testRef).href,
+					range: {
+						start: { line: 1, character: 0 },
+						end: { line: 1, character: 7 },
+					},
+				},
+			]);
+			const touchFile = vi.fn();
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(
+					new Map([
+						[
+							sourceRef.split(path.sep).join("/"),
+							{ diags: [lspError("consumer broke")], ts: Date.now() },
+						],
+						[
+							testRef.split(path.sep).join("/"),
+							{ diags: [lspError("test broke")], ts: Date.now() },
+						],
+					]),
+				),
+				touchFile,
+				getDiagnostics: vi.fn(),
+				references,
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			const result = await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			const neighborKeys = (result?.result?.neighbors ?? []).map((n) =>
+				n.filePath.split(path.sep).join("/"),
+			);
+			expect(neighborKeys).toContain(sourceRef.split(path.sep).join("/"));
+			expect(neighborKeys).not.toContain(testRef.split(path.sep).join("/"));
+			// The test reference is never a surfaced neighbour in the impact object.
+			const impactKeys = (result?.result?.impact.neighborFiles ?? []).map((f) =>
+				f.split(path.sep).join("/"),
+			);
+			expect(impactKeys).not.toContain(testRef.split(path.sep).join("/"));
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("drops an unignored test file from fallback, keeps source, still drops ignored (#1080/#297)", async () => {
+		const env = setupTestEnvironment("cascade-test-role-fallback-");
+		try {
+			fs.mkdirSync(path.join(env.tmpDir, ".git"), { recursive: true });
+			fs.writeFileSync(
+				path.join(env.tmpDir, ".pi-lens.json"),
+				JSON.stringify({ ignore: ["**/vendored.test.ts"] }),
+			);
+			const primary = path.join(env.tmpDir, "main.ts");
+			const noLspNeighbor = path.join(env.tmpDir, "neighbor.foo");
+			const normalSource = path.join(env.tmpDir, "src", "helper.ts");
+			const unignoredTest = path.join(env.tmpDir, "src", "reader.test.ts");
+			const ignoredTest = path.join(env.tmpDir, "src", "vendored.test.ts");
+			fs.mkdirSync(path.join(env.tmpDir, "src"), { recursive: true });
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			fs.writeFileSync(noLspNeighbor, "neighbor\n");
+			fs.writeFileSync(normalSource, "const x = 1;\n");
+			fs.writeFileSync(unignoredTest, "const x = 1;\n");
+			fs.writeFileSync(ignoredTest, "const x = 1;\n");
+			mocks.computeImpactCascade.mockReturnValue(
+				impact(primary, [noLspNeighbor]),
+			);
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(
+					new Map([
+						[
+							normalSource.split(path.sep).join("/"),
+							{ diags: [lspError("normal source error")], ts: Date.now() },
+						],
+						[
+							unignoredTest.split(path.sep).join("/"),
+							{ diags: [lspError("unignored test error")], ts: Date.now() },
+						],
+						[
+							ignoredTest.split(path.sep).join("/"),
+							{ diags: [lspError("ignored test error")], ts: Date.now() },
+						],
+					]),
+				),
+				touchFile: vi.fn(),
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			const result = await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			const formatted = result?.result?.formatted ?? "";
+			// Only the normal source diagnostic is shown.
+			expect(formatted).toContain("normal source error");
+			expect(formatted).not.toContain("unignored test error");
+			expect(formatted).not.toContain("ignored test error");
+			const fallbackFiles = (result?.result?.neighbors ?? [])
+				.filter((n) => n.reason === "fallback")
+				.map((n) => n.filePath.split(path.sep).join("/"));
+			expect(fallbackFiles).toContain(normalSource.split(path.sep).join("/"));
+			expect(fallbackFiles).not.toContain(
+				unignoredTest.split(path.sep).join("/"),
+			);
+			expect(fallbackFiles).not.toContain(ignoredTest.split(path.sep).join("/"));
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// #1023 over-correction guard: a HEALTHY graph (mode "full") with a genuinely
 	// empty dependent set is a real clean leaf — it must stay `no_neighbors`, NOT
 	// `indeterminate`, and emit NO advisory. The `impact()` helper carries no

@@ -120,6 +120,29 @@ export function uriToPath(uri: string): string {
 }
 
 /**
+ * Decode a file:// URI to an on-disk path WITHOUT map-key normalization.
+ *
+ * `uriToPath` runs its result through `normalizeFilePath`, which on win32
+ * lowercases the nonexistent tail of a path (see `resolveNonExisting`) and
+ * canonicalizes an existing path to its real casing. That is correct for Map
+ * keys, but DESTRUCTIVE for a real create/rename target: creating `NewFile.txt`
+ * would write `newfile.txt`, and a legitimate case-only rename would collapse
+ * to a no-op ("source and destination must differ"). Disk mutations must honor
+ * the caller's intended casing, so they resolve their target through this
+ * decode-only path while confinement/validation keep using the normalized
+ * `uriToPath`. Non-win32 is unaffected either way (normalizeFilePath is a
+ * near-identity there).
+ */
+export function uriToDiskPath(uri: string): string {
+	try {
+		return fileURLToPath(uri);
+	} catch {
+		// Not a valid file:// URI — treat as a plain path (matches uriToPath).
+		return uri;
+	}
+}
+
+/**
  * Convert a path to a file:// URI.
  * Does NOT normalize the path - URIs preserve original casing.
  */

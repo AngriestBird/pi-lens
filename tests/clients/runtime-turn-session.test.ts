@@ -728,6 +728,132 @@ describe("turn_end call-graph impact — persists to the delta report", () => {
 		}
 	});
 
+	// #1080: a call-graph caller that resolves to a KNOWN test file must be absent
+	// from BOTH the turn-end advisory text and the persisted call-graph delta, for
+	// call-graph-only AND mixed turns — a normal caller remains.
+	function makeCallGraphWithTestCaller() {
+		return {
+			callees: new Map(),
+			callers: new Map<string, Set<string>>([
+				[
+					"src/foo.ts:doThing",
+					new Set(["src/bar.ts:callerFn", "src/bar.test.ts:testCaller"]),
+				],
+			]),
+			edges: [],
+			inDegree: new Map(),
+			unresolvedRefs: 0,
+			totalRefs: 0,
+			coverage: {
+				totalEvidence: 2,
+				callsEvidence: 2,
+				referencesEvidence: 0,
+				eligibleEvidence: 2,
+				resolvedEvidence: 2,
+				unresolvedEvidence: 0,
+				typeOnlyEvidence: 0,
+				unsupportedEvidence: 0,
+				sameFileEvidence: 0,
+				duplicateEvidence: 0,
+				complete: true,
+				languages: { jsts: "complete" },
+			},
+			builtAt: new Date().toISOString(),
+		} as any;
+	}
+
+	it("excludes a test-file caller from advisory + delta on a call-graph-only turn (#1080)", async () => {
+		const env = setupTestEnvironment("pi-lens-callgraph-testrole-only-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "cg-testrole-only" });
+			runtime.callGraph = makeCallGraphWithTestCaller();
+			const cacheManager = new CacheManager(false);
+			seedEditedFoo(env);
+			cacheManager.addModifiedRange(
+				path.join(env.tmpDir, "src/foo.ts"),
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
+
+			// Persisted delta: the normal caller's file remains; the test caller's does not.
+			const report = loadProjectDiagnosticsDeltaReport(env.tmpDir);
+			expect(report?.sources).toContain("call-graph");
+			const cgFiles = (report?.diagnostics ?? [])
+				.filter((d) => d.runner === "call-graph")
+				.map((d) => d.filePath);
+			expect(cgFiles).toContain(path.join(env.tmpDir, "src/bar.ts"));
+			expect(cgFiles).not.toContain(path.join(env.tmpDir, "src/bar.test.ts"));
+
+			// Advisory text: same exclusion.
+			const advisory =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages?.[0]
+					?.content ?? "";
+			expect(advisory).toContain("Call-graph impact");
+			expect(advisory).toContain("bar.ts");
+			expect(advisory).not.toContain("bar.test.ts");
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
+	it("excludes a test-file caller from the call-graph delta on a mixed turn (#1080)", async () => {
+		const env = setupTestEnvironment("pi-lens-callgraph-testrole-mixed-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "cg-testrole-mixed" });
+			runtime.callGraph = makeCallGraphWithTestCaller();
+			const cacheManager = new CacheManager(false);
+			const filePath = seedEditedFoo(env);
+			cacheManager.addModifiedRange(
+				filePath,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, {
+					ctxCwd: env.tmpDir,
+					knipClient: {
+						ensureAvailable: async () => true,
+						analyze: async () => ({
+							...EMPTY_KNIP_RESULT,
+							issues: [
+								{ type: "unlisted", name: "left-pad", file: filePath, line: 1 },
+							],
+						}),
+					},
+				}),
+			);
+
+			const report = loadProjectDiagnosticsDeltaReport(env.tmpDir);
+			expect(report?.sources).toEqual(
+				expect.arrayContaining(["knip", "call-graph"]),
+			);
+			const cgFiles = (report?.diagnostics ?? [])
+				.filter((d) => d.runner === "call-graph")
+				.map((d) => d.filePath);
+			expect(cgFiles).toContain(path.join(env.tmpDir, "src/bar.ts"));
+			expect(cgFiles).not.toContain(path.join(env.tmpDir, "src/bar.test.ts"));
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
 	it("does not emit impact findings for mixed supported/unsupported coverage", async () => {
 		const env = setupTestEnvironment("pi-lens-callgraph-partial-");
 		const previousDataDir = process.env.PILENS_DATA_DIR;

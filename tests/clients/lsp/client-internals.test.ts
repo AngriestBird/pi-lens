@@ -172,6 +172,52 @@ describe("client workspace edit normalization", () => {
 		},
 	);
 
+	// P1-3: the tool apply paths (rename apply:true, code-action autofix) call
+	// applyWorkspaceEdit WITHOUT a documentVersions map. normalizeClientWorkspaceEdit
+	// must validate the version against the live map and then STRIP it (spec null =
+	// don't check), so the downstream apply succeeds for version-stamping servers
+	// (gopls) instead of failing 100% on "stale text document version".
+	it("strips versions after validating them so tool apply paths succeed", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-client-edit-"));
+		const filePath = path.join(root, "file.ts");
+		fs.writeFileSync(filePath, "old\n", "utf-8");
+		const state = createMockState({ root, positionEncoding: "utf-16" });
+		state.documentVersions.set(normalizeMapKey(filePath), 7);
+		try {
+			const normalized = await normalizeClientWorkspaceEdit(state, {
+				documentChanges: [{
+					textDocument: { uri: pathToFileURL(filePath).href, version: 7 },
+					edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "new" }],
+				}],
+			});
+			const textDocument = (normalized.documentChanges?.[0] as { textDocument: { version: unknown } }).textDocument;
+			expect(textDocument.version).toBeNull();
+			// No documentVersions passed — mirrors the real tool apply sites.
+			await applyWorkspaceEdit(normalized, root);
+			expect(fs.readFileSync(filePath, "utf-8")).toBe("new\n");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("still rejects a stale version at normalize time (validation intact)", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-client-edit-"));
+		const filePath = path.join(root, "file.ts");
+		fs.writeFileSync(filePath, "old\n", "utf-8");
+		const state = createMockState({ root, positionEncoding: "utf-16" });
+		state.documentVersions.set(normalizeMapKey(filePath), 1);
+		try {
+			await expect(normalizeClientWorkspaceEdit(state, {
+				documentChanges: [{
+					textDocument: { uri: pathToFileURL(filePath).href, version: 9 },
+					edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "new" }],
+				}],
+			})).rejects.toThrow(/stale workspace edit document version/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects an invalid UTF-8 range after a virtual rename without mutation", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-client-edit-"));
 		const oldDir = path.join(root, "oldDir");
@@ -183,6 +229,11 @@ describe("client workspace edit normalization", () => {
 		const state = createMockState({ root, positionEncoding: "utf-8" });
 
 		try {
+			// UTF-8 offset 10 falls in the MIDDLE of the two-byte `é` (bytes 9-10 of
+			// "const café ..."), a genuinely invalid boundary that must still reject.
+			// (A position merely PAST the line end now clamps per LSP 3.17 — see the
+			// clamp coverage in edits.test.ts — so this exercises the boundary check,
+			// not the removed past-end throw.)
 			await expect(normalizeClientWorkspaceEdit(state, {
 				documentChanges: [
 					{ kind: "rename", oldUri: pathToFileURL(oldDir).href, newUri: pathToFileURL(newDir).href },
@@ -190,14 +241,14 @@ describe("client workspace edit normalization", () => {
 						textDocument: { uri: pathToFileURL(newFile).href },
 						edits: [{
 							range: {
-								start: { line: 0, character: 99 },
-								end: { line: 0, character: 99 },
+								start: { line: 0, character: 10 },
+								end: { line: 0, character: 10 },
 							},
 							newText: "x",
 						}],
 					},
 				],
-			})).rejects.toThrow(/outside line/);
+			})).rejects.toThrow(/boundary/);
 			expect(fs.existsSync(oldFile)).toBe(true);
 			expect(fs.existsSync(newFile)).toBe(false);
 		} finally {
