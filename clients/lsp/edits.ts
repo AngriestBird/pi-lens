@@ -686,8 +686,19 @@ function relativeToCwd(filePath: string, cwd: string): string {
 }
 
 // Matches an import declaration or a re-export-from declaration — the two
-// statement shapes that actually change a module's dependency edges.
-const IMPORT_RELEVANT_LINE = /^\s*(?:import\b|export\s[^;]*\bfrom\s)/;
+// statement shapes that actually change a module's dependency edges. Also
+// matches a bare `from "..."` continuation line WITHOUT a leading `import`/
+// `export`, so a formatter-wrapped multiline import
+//   import {
+//     foo,
+//   } from "./old";
+// still flags its specifier line as import-relevant even though line 1
+// ("import {") doesn't itself contain the module path. Fail-safe direction:
+// this can over-match a non-import line that happens to contain `from "..."`
+// (e.g. a string literal), but that only risks over-reporting `importsChanged`
+// (the safe direction — master's prior /^import\s/m heuristic over-invalidated
+// too), never under-reporting a real specifier change.
+const IMPORT_RELEVANT_LINE = /^\s*import\b|^\s*export\s[^;]*\bfrom\s|\bfrom\s+['"]/;
 
 /**
  * A stable signature of the import/re-export-from lines in `text`, order-
@@ -696,7 +707,15 @@ const IMPORT_RELEVANT_LINE = /^\s*(?:import\b|export\s[^;]*\bfrom\s)/;
  * `fileDetails[].importsChanged` gates expensive downstream dependency-graph
  * re-checks (see `cache-manager.ts`'s `importsChanged` filter and
  * `lsp-mutation.ts`'s `addModifiedRange`), so over-reporting "changed" on
- * every edit to an already-import-bearing file defeats that gate.
+ * every edit to an already-import-bearing file defeats that gate. This is a
+ * LINE-signature heuristic, not a parse: a multiline import whose specifier
+ * ("from" line) is untouched but whose bound-name list changes on an
+ * interior line (e.g. renaming one of several named imports without
+ * touching the `import {`/`} from "..."` lines) is not detected — narrower
+ * than a full import-statement diff, but still strictly safer than the prior
+ * "file merely contains any import" heuristic. Known pre-existing gaps
+ * (unaddressed here, same as before): dynamic `import(...)` calls and
+ * `require(...)` are not import-relevant lines by this heuristic.
  */
 function importsSignature(text: string): string {
 	return text
@@ -989,6 +1008,12 @@ async function preflightWorkspaceEdit(
 			}
 			const source = await stateFor(oldPath);
 			if (!source.exists) throw new Error(`rename source does not exist: ${oldPath}`);
+			// Captured BEFORE this rename's own `virtualMoves`/override mutations
+			// below, so it reflects how `source` was actually resolved: `true` when
+			// `oldPath` is itself shadowed by an earlier rename in this edit and the
+			// state came from the `virtualOverrides` overlay (P3-3) rather than a
+			// physically-addressable entry.
+			const sourceFromOverride = resolveVirtualPath(oldPath) === undefined;
 			await assertParentIsUsable(newPath, stateFor);
 			const destination = await stateFor(newPath);
 			if (destination.exists) {
@@ -1019,11 +1044,31 @@ async function preflightWorkspaceEdit(
 			}
 			clearTombstonesUnder(newPath);
 			if (!source.directory) await contentFor(oldPath, source);
-			// Keep descendants lazy: a later text edit under a renamed directory
-			// resolves through this virtual move to the original physical path.
-			// This preserves ordered workspace-edit semantics without walking the
-			// entire subtree during preflight.
-			virtualMoves.push({ from: oldPath, to: newPath, directory: source.directory });
+			if (sourceFromOverride) {
+				// P3 (round-2 review): a purely virtual entry (created earlier in this
+				// same edit at a path vacated by an even earlier rename) has no
+				// physical address for a `virtualMoves` shadow to resolve against —
+				// `resolveVirtualPath` walks that list by PHYSICAL path chasing, which
+				// cannot represent "this virtual entry moved again." Pushing a move
+				// here would leave the stale `virtualOverrides[oldPath]` entry
+				// claiming `exists: true` forever (a later `create(oldPath)` would be
+				// falsely rejected, and reads of the new address wouldn't reliably
+				// find it either). Instead, migrate the state object directly: drop
+				// the stale key and re-key it under the destination, placing it back
+				// in `virtual` (physically addressable) or `virtualOverrides` (still
+				// shadowed) depending on whether the destination itself currently
+				// resolves to a physical path.
+				virtualOverrides.delete(normalizeMapKey(oldPath));
+				const destinationPhysicalPath = resolveVirtualPath(newPath);
+				if (destinationPhysicalPath) virtual.set(normalizeMapKey(destinationPhysicalPath), source);
+				else virtualOverrides.set(normalizeMapKey(newPath), source);
+			} else {
+				// Keep descendants lazy: a later text edit under a renamed directory
+				// resolves through this virtual move to the original physical path.
+				// This preserves ordered workspace-edit semantics without walking the
+				// entire subtree during preflight.
+				virtualMoves.push({ from: oldPath, to: newPath, directory: source.directory });
+			}
 			continue;
 		}
 		const filePath = await confine(op.uri);

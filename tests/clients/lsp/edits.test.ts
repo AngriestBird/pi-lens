@@ -1094,6 +1094,50 @@ describe("LSP workspace edits — #1085 P3 bundle", () => {
 		} finally { removeTempDirSync(tmpDir); }
 	});
 
+	// P2 (round-2 review): a formatter-wrapped MULTILINE import's specifier
+	// lives on a continuation line ("} from \"./old\";") that doesn't itself
+	// start with `import`/`export` — the original line-signature regex missed
+	// it entirely, so changing the module specifier there under-reported
+	// importsChanged: false (a real module-edge change, silently skipped by
+	// downstream dependency-graph re-checks). Kept LINE-signature-based (not a
+	// blanket conservative fallback): a body-only edit in a file WITH a
+	// multiline import still correctly reports false, because only the
+	// `from "..."`-matching continuation line is compared, not because the
+	// whole file is treated as changed.
+	it("P3-6 continuation: importsChanged detects a specifier change on a multiline import's continuation line", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-6-multiline-"));
+		try {
+			const filePath = path.join(tmpDir, "mod.ts");
+			fs.writeFileSync(
+				filePath,
+				'import {\n\tfoo,\n\tbar,\n} from "./old";\n\nconsole.log(foo, bar);\n',
+				"utf-8",
+			);
+			const uri = pathToFileURL(filePath).href;
+
+			// Body-only edit: none of the import lines (including the continuation
+			// "} from ..." line) are touched — still false, not a blanket "file has
+			// a multiline import so report changed" fallback.
+			const bodyResult = await applyWorkspaceEdit(
+				{ changes: { [uri]: [{ range: { start: { line: 5, character: 0 }, end: { line: 5, character: 999 } }, newText: "console.log(bar, foo);" }] } },
+				tmpDir,
+			);
+			expect(bodyResult.fileDetails[0]?.importsChanged).toBe(false);
+
+			// Specifier edit on the CONTINUATION line ("./old" → "./new"): a real
+			// module-edge change, and the pre-fix regex (anchored on a leading
+			// `import`/`export`) would miss it since this line starts with `}`.
+			const specifierResult = await applyWorkspaceEdit(
+				{ changes: { [uri]: [{ range: { start: { line: 3, character: 8 }, end: { line: 3, character: 13 } }, newText: "./new" }] } },
+				tmpDir,
+			);
+			expect(specifierResult.fileDetails[0]?.importsChanged).toBe(true);
+			expect(fs.readFileSync(filePath, "utf-8")).toBe(
+				'import {\n\tfoo,\n\tbar,\n} from "./new";\n\nconsole.log(bar, foo);\n',
+			);
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
 	// FS-probe-guarded per the #1024/P1-2 lesson (see `isCaseInsensitiveFs`
 	// above): the virtual-overlay alias hole only manifests on a case-
 	// insensitive FS, where the create's and the rename destination's cache
@@ -1120,5 +1164,70 @@ describe("LSP workspace edits — #1085 P3 bundle", () => {
 			expect(entries).toContain("Foo.txt");
 			expect(entries.filter((e) => e.toLowerCase() === "foo.txt")).toEqual(["Foo.txt"]);
 		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	// P3 (round-2 review): rename(b→c); create(b); rename(b→d) re-vacates the
+	// override-backed `b` a SECOND time. `resolveVirtualPath` cannot represent
+	// "this purely-virtual entry moved again" (it chases PHYSICAL paths through
+	// `virtualMoves`), so without migrating the override entry itself,
+	// `virtualOverrides[b]` goes stale — still claiming `exists: true` after
+	// `b` is genuinely vacated again.
+	it("P3: a re-renamed override-backed entry migrates instead of leaving a stale virtualOverrides entry", async () => {
+		// Cross-product cell 1: the migrated content survives to the FINAL
+		// destination and a trailing text edit there applies correctly (not lost).
+		const tmpDir1 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-restale-1-"));
+		try {
+			const bPath = path.join(tmpDir1, "b.txt");
+			const cPath = path.join(tmpDir1, "c.txt");
+			const dPath = path.join(tmpDir1, "d.txt");
+			fs.writeFileSync(bPath, "original", "utf-8");
+			await applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{ kind: "rename", oldUri: pathToFileURL(bPath).href, newUri: pathToFileURL(cPath).href },
+						{ kind: "create", uri: pathToFileURL(bPath).href },
+						{ kind: "rename", oldUri: pathToFileURL(bPath).href, newUri: pathToFileURL(dPath).href },
+						{
+							textDocument: { uri: pathToFileURL(dPath).href },
+							edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "hello" }],
+						},
+					],
+				},
+				tmpDir1,
+			);
+			// The first rename carried the original content to c.txt, untouched.
+			expect(fs.readFileSync(cPath, "utf-8")).toBe("original");
+			// The re-created-then-re-renamed b.txt's content (migrated to d.txt,
+			// not lost) received the trailing text edit.
+			expect(fs.readFileSync(dPath, "utf-8")).toBe("hello");
+			expect(fs.existsSync(bPath)).toBe(false);
+		} finally { removeTempDirSync(tmpDir1); }
+
+		// Cross-product cell 2: after the second rename re-vacates b, b is
+		// genuinely gone — proven via `delete` (not `create`, which would trip
+		// the UNRELATED duplicate-resource-operation guard on a second `create`
+		// at the same URI within one edit): a stale `virtualOverrides[b]` would
+		// make this `delete` (no `ignoreIfNotExists`) wrongly succeed; the fix
+		// makes it correctly throw "delete target does not exist".
+		const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-restale-2-"));
+		try {
+			const bPath = path.join(tmpDir2, "b.txt");
+			const cPath = path.join(tmpDir2, "c.txt");
+			const dPath = path.join(tmpDir2, "d.txt");
+			fs.writeFileSync(bPath, "original", "utf-8");
+			await expect(
+				applyWorkspaceEdit(
+					{
+						documentChanges: [
+							{ kind: "rename", oldUri: pathToFileURL(bPath).href, newUri: pathToFileURL(cPath).href },
+							{ kind: "create", uri: pathToFileURL(bPath).href },
+							{ kind: "rename", oldUri: pathToFileURL(bPath).href, newUri: pathToFileURL(dPath).href },
+							{ kind: "delete", uri: pathToFileURL(bPath).href },
+						],
+					},
+					tmpDir2,
+				),
+			).rejects.toThrow(/delete target does not exist/);
+		} finally { removeTempDirSync(tmpDir2); }
 	});
 });
