@@ -47,6 +47,7 @@ import {
 	projectReport,
 	projectScan,
 	readEnclosing,
+	generatedSkipNotice,
 	readSymbol,
 	recentLatency,
 	renderCompactModuleReport,
@@ -550,6 +551,14 @@ const ALL_TOOLS = [
 			properties: {
 				cwd: { type: "string" },
 				maxFiles: { type: "number", description: "Cap files scanned." },
+				includeGenerated: {
+					type: "boolean",
+					description:
+						"Scan WITHOUT the generated/artifact NAME-heuristic filter " +
+						"(lockfiles, gen.ts-style names, generated/ dirs, …). Default " +
+						"false. Use when a scan's 'excluded by generated-name " +
+						"heuristics' notice suggests a real file was skipped.",
+				},
 			},
 		},
 	},
@@ -990,7 +999,8 @@ async function callTool(
 			typeof args.maxFiles === "number" && Number.isFinite(args.maxFiles)
 				? Math.max(1, Math.floor(args.maxFiles))
 				: undefined;
-		const snapshot = await projectScan(cwd, maxFiles);
+		const includeGenerated = args.includeGenerated === true;
+		const snapshot = await projectScan(cwd, maxFiles, includeGenerated);
 		// #747: a cwd at/above $HOME refuses to walk — say so instead of letting
 		// "Scanned 0 file(s) → 0 diagnostics" read as a clean project.
 		if (snapshot.unsafeRoot) {
@@ -1019,6 +1029,10 @@ async function callTool(
 		// explicitly — mirrors the #777 warm-skip notify's override-hint wording.
 		const truncationNotice = scanTruncationNotice(snapshot);
 		if (truncationNotice) summaryLines.push(truncationNotice);
+		// #1107 phase 2: same "reached the seam but nothing rendered it" gap as
+		// #784's scanTruncationNotice, for the generated-name skip counters.
+		const skipNotice = generatedSkipNotice(snapshot);
+		if (skipNotice) summaryLines.push(skipNotice);
 		return toolText(summaryLines.join("\n"), {
 			filesScanned: snapshot.filesScanned,
 			runners: snapshot.runners,
@@ -1030,6 +1044,15 @@ async function callTool(
 			...(snapshot.scanTruncated ? { scanTruncated: true } : {}),
 			...(snapshot.treeSitterStatus
 				? { treeSitterStatus: snapshot.treeSitterStatus }
+				: {}),
+			...(snapshot.generatedFileSkips
+				? { generatedFileSkips: snapshot.generatedFileSkips }
+				: {}),
+			...(snapshot.generatedNameOnlySkips
+				? { generatedNameOnlySkips: snapshot.generatedNameOnlySkips }
+				: {}),
+			...(snapshot.generatedDirSkips
+				? { generatedDirSkips: snapshot.generatedDirSkips }
 				: {}),
 		});
 	}
