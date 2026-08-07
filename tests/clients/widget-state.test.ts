@@ -22,6 +22,7 @@ import {
 	renderWidget,
 	setRenderCallback,
 	setSessionLanguages,
+	WIDGET_STATE_VERSION,
 } from "../../clients/widget-state.ts";
 
 const e = String.fromCharCode(27);
@@ -861,7 +862,7 @@ describe("path-key normalization — same file under mixed separators collapses 
 
 	it("importWidgetState folds a persisted forward-slash key so a later backslash reconcile hits the same entry", () => {
 		importWidgetState({
-			version: 1,
+			version: WIDGET_STATE_VERSION,
 			sessionLanguages: [],
 			files: [
 				{

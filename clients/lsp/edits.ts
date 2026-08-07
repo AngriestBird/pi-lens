@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import type { Stats } from "node:fs";
+import type { BigIntStats, Stats } from "node:fs";
 import path from "node:path";
 import { URL } from "node:url";
 import {
@@ -7,6 +7,7 @@ import {
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 	pathsEqual,
+	uriToDiskPath,
 	uriToPath,
 } from "./path-utils.js";
 import {
@@ -236,33 +237,62 @@ function positionsEqual(a: LSPPosition, b: LSPPosition): boolean {
 	return a.line === b.line && a.character === b.character;
 }
 
-function rangesEqual(a: LSPRange, b: LSPRange): boolean {
-	return positionsEqual(a.start, b.start) && positionsEqual(a.end, b.end);
-}
-
 function isEmptyRange(range: LSPRange): boolean {
 	return positionsEqual(range.start, range.end);
 }
 
-function sortAndValidateTextEdits(edits: LSPTextEdit[]): LSPTextEdit[] {
-	const sorted = edits
+/**
+ * Order edits for reverse-application to a string: latest position first, so an
+ * earlier splice never shifts a not-yet-applied edit's offsets. Ties break to
+ * match LSP insertion semantics:
+ *   - same start, larger END first → a replace anchored at position P applies
+ *     before a zero-width insert at P, so the insert lands at the (post-replace)
+ *     boundary instead of being clobbered — and the result no longer depends on
+ *     listing order (P3-1, insert-at-replace-boundary);
+ *   - same start AND end (e.g. several zero-width inserts at one point) → later
+ *     ARRAY index first, so applying in this reverse order reproduces the edits'
+ *     original array order (the #1066 same-position-insert invariant).
+ *
+ * This ordering is NOT idempotent for the same-range tie (re-sorting flips the
+ * array index), so it MUST be applied exactly once, at the string-write site,
+ * over array-order input. `normalizeTextEditsForContent` deliberately returns
+ * edits in array order (never pre-sorted) so this single sort is the only pass.
+ */
+function sortEditsForApplication(edits: LSPTextEdit[]): LSPTextEdit[] {
+	return edits
 		.map((edit, index) => ({ edit, index }))
 		.sort((a, b) => {
-			const positionDelta = comparePosition(b.edit.range.start, a.edit.range.start);
-			return positionDelta !== 0 ? positionDelta : b.index - a.index;
+			const startDelta = comparePosition(b.edit.range.start, a.edit.range.start);
+			if (startDelta !== 0) return startDelta;
+			const endDelta = comparePosition(b.edit.range.end, a.edit.range.end);
+			if (endDelta !== 0) return endDelta;
+			return b.index - a.index;
 		})
 		.map(({ edit }) => edit);
+}
+
+/**
+ * Deduplicate exact non-empty duplicate edits and reject genuinely overlapping
+ * ranges, returning the survivors in their ORIGINAL ARRAY ORDER. Zero-width
+ * inserts are never deduplicated (their multiplicity is meaningful). Overlap is
+ * checked on a position-sorted copy so the check is order-independent, but the
+ * returned order is preserved for the single downstream application sort.
+ */
+function validateTextEdits(edits: LSPTextEdit[]): LSPTextEdit[] {
 	const unique: LSPTextEdit[] = [];
-	for (const edit of sorted) {
-		const previous = unique[unique.length - 1];
-		if (previous && !isEmptyRange(edit.range) && rangesEqual(previous.range, edit.range) && previous.newText === edit.newText) {
-			continue;
+	const seen = new Set<string>();
+	for (const edit of edits) {
+		if (!isEmptyRange(edit.range)) {
+			const key = textEditKey("", edit);
+			if (seen.has(key)) continue;
+			seen.add(key);
 		}
 		unique.push(edit);
 	}
-	for (let index = 0; index < unique.length - 1; index++) {
-		const later = unique[index]?.range;
-		const earlier = unique[index + 1]?.range;
+	const ordered = sortEditsForApplication(unique);
+	for (let index = 0; index < ordered.length - 1; index++) {
+		const later = ordered[index]?.range;
+		const earlier = ordered[index + 1]?.range;
 		if (later && earlier && comparePosition(earlier.end, later.start) > 0) {
 			throw new Error(`overlapping LSP edits: ${formatRange(earlier)} conflicts with ${formatRange(later)}`);
 		}
@@ -274,7 +304,15 @@ function utf16Position(content: string, position: LSPPosition, encoding: Positio
 	const line = lineTextAt(content, position.line);
 	const wireLength = convertCharacterOffset(encoding, line, line.length);
 	if (position.character > wireLength) {
-		throw new Error(`text edit character ${position.character} is outside line ${position.line + 1}`);
+		// LSP 3.17: a character past the end of the line defaults to the line
+		// length. Clamp to the UTF-16 line length rather than throwing (whole-line
+		// and whole-document sentinel ranges rely on this). `lineTextAt` splits on
+		// `\n` only and keeps a trailing `\r`, so clamp to BEFORE that `\r` — landing
+		// the position at the CRLF boundary, not between `\r` and `\n`. Otherwise the
+		// whole-line sentinel replace `(0,0)-(0,999)` would eat the `\r` and a
+		// char-past-EOL insert would land mid-CRLF (P2-1 corruption on Windows repos).
+		const clampedLength = line.endsWith("\r") ? line.length - 1 : line.length;
+		return { line: position.line, character: clampedLength };
 	}
 	if (encoding === "utf-16") return position;
 	// Find the UTF-16 offset whose encoded prefix has exactly this length. This
@@ -295,21 +333,36 @@ function utf16Position(content: string, position: LSPPosition, encoding: Positio
 
 function normalizeTextEditsForContent(content: string, edits: LSPTextEdit[], encoding: PositionEncoding): LSPTextEdit[] {
 	const lines = content.split("\n");
-	const converted = edits.map((edit) => {
-		if (edit.range.start.line >= lines.length || edit.range.end.line >= lines.length) {
-			throw new Error(`text edit line is outside the document`);
+	const lastLine = Math.max(0, lines.length - 1);
+	const clamp = (position: LSPPosition): LSPPosition => {
+		// LSP 3.17: a line past the end of the document defaults to the end of the
+		// document (last line, its length). Clamp rather than throw so a large
+		// sentinel end position — e.g. the (0,0)-(9999,0) whole-document replace
+		// idiom — resolves to a real range instead of failing.
+		if (position.line >= lines.length) {
+			return { line: lastLine, character: (lines[lastLine] ?? "").length };
 		}
-		const start = utf16Position(content, edit.range.start, encoding);
-		const end = utf16Position(content, edit.range.end, encoding);
+		return utf16Position(content, position, encoding);
+	};
+	const converted = edits.map((edit) => {
+		const start = clamp(edit.range.start);
+		const end = clamp(edit.range.end);
 		if (comparePosition(start, end) > 0) throw new Error("text edit range is out of order");
 		return { ...edit, range: { start, end } };
 	});
-	return sortAndValidateTextEdits(converted);
+	// Return array order (validated, deduped); the single application-ordering
+	// sort happens once at the string-write site in applyTextEditsToString.
+	return validateTextEdits(converted);
 }
 
 export function applyTextEditsToString(content: string, edits: LSPTextEdit[], positionEncoding: PositionEncoding = "utf-16"): string {
 	const lines = content.split("\n");
-	for (const edit of normalizeTextEditsForContent(content, edits, positionEncoding)) {
+	// normalizeTextEditsForContent returns array order; sort for reverse
+	// application exactly once, here, at the single string-write site.
+	const normalized = sortEditsForApplication(
+		normalizeTextEditsForContent(content, edits, positionEncoding),
+	);
+	for (const edit of normalized) {
 		const { start, end } = edit.range;
 		if (start.line === end.line) {
 			const line = lines[start.line] ?? "";
@@ -638,6 +691,52 @@ async function lstatOrMissing(filePath: string): Promise<Stats | undefined> {
 	}
 }
 
+/**
+ * True when two `lstat` results denote the SAME on-disk entry. Requires a
+ * matching `dev` AND a matching, NONZERO `ino`. The nonzero guard is
+ * load-bearing: ino-less filesystems (FAT32/exFAT, some SMB redirectors,
+ * VirtualBox shared folders) report `ino: 0` for every entry via libuv, so
+ * without it two DISTINCT files would compare `(dev, 0) === (dev, 0)` and a
+ * rename would be misclassified as a case-only alias and silently clobber the
+ * destination. Comparing the BigInt fields (from `lstat({ bigint: true })`)
+ * also avoids the double-precision loss on NTFS 64-bit file IDs >= 2^53 that a
+ * `number` `ino` would suffer (which could false-equal distinct files).
+ * Anything that is not a confident same-entry match returns false → the caller
+ * falls back to the destination-exists check (fail-closed). Exported for direct
+ * unit coverage of the ino-0 guard.
+ */
+export function isSameFsIdentity(
+	a: { dev: bigint; ino: bigint },
+	b: { dev: bigint; ino: bigint },
+): boolean {
+	return a.dev === b.dev && a.ino !== 0n && b.ino !== 0n && a.ino === b.ino;
+}
+
+async function bigintLstatOrMissing(filePath: string): Promise<BigIntStats | undefined> {
+	try {
+		return await fs.lstat(filePath, { bigint: true });
+	} catch (err) {
+		if ((err as { code?: string }).code === "ENOENT") return undefined;
+		throw err;
+	}
+}
+
+/**
+ * True when two paths name the SAME on-disk entry — how a case-only rename on a
+ * case-insensitive FS is told apart from a genuine destination conflict without
+ * branching on `process.platform`. `lstat` (not `stat`) so a symlink is compared
+ * as itself, consistent with the rest of the preflight's symlink policy. See
+ * `isSameFsIdentity` for the dev/ino identity rules (and the ino-0 fail-closed
+ * guard for ino-less filesystems).
+ */
+async function isSameFsEntry(a: string, b: string): Promise<boolean> {
+	const [statA, statB] = await Promise.all([
+		bigintLstatOrMissing(a),
+		bigintLstatOrMissing(b),
+	]);
+	return Boolean(statA && statB && isSameFsIdentity(statA, statB));
+}
+
 async function assertParentIsUsable(
 	filePath: string,
 	stateFor: (filePath: string) => Promise<VirtualFile>,
@@ -824,14 +923,34 @@ async function preflightWorkspaceEdit(
 		if (op.kind === "rename") {
 			const oldPath = await confine(op.oldUri);
 			const newPath = await confine(op.newUri);
-			if (pathsEqual(oldPath, newPath)) throw new Error("rename source and destination must differ");
+			// "Must differ" is a property of the on-disk target, not the case-folded
+			// map key. A case-only rename (foo.txt → Foo.txt) is a legitimate refactor
+			// whose decoded paths differ even though they collapse to a single key on a
+			// case-insensitive filesystem — so compare the decoded disk paths here, and
+			// treat a same-key-different-case pair as a real rename below.
+			const oldDisk = uriToDiskPath(op.oldUri);
+			const newDisk = uriToDiskPath(op.newUri);
+			if (path.resolve(oldDisk).replace(/\\/g, "/") === path.resolve(newDisk).replace(/\\/g, "/")) {
+				throw new Error("rename source and destination must differ");
+			}
 			const source = await stateFor(oldPath);
-			const destination = await stateFor(newPath);
 			if (!source.exists) throw new Error(`rename source does not exist: ${oldPath}`);
 			await assertParentIsUsable(newPath, stateFor);
+			const destination = await stateFor(newPath);
 			if (destination.exists) {
-				if (op.options?.ignoreIfExists) { ignored.add(op); continue; }
-				if (!op.options?.overwrite) throw new Error(`rename destination already exists: ${newPath}`);
+				// Decide "already exists" by on-disk IDENTITY, not a platform-keyed path
+				// fold. A case-only (or otherwise-aliased) rename whose destination
+				// resolves to the SAME FS entry as the source is a legitimate refactor,
+				// not a conflict — detected here on ANY case-insensitive FS (win32, macOS
+				// APFS/HFS+), per the #1024 "probe the FS, don't branch on platform"
+				// lesson. Conversely, on a case-SENSITIVE FS where both spellings are
+				// distinct real files, this stays a genuine conflict (closing the inverse
+				// silent-clobber edge that a win32-only fold left open).
+				const aliasesSource = await isSameFsEntry(oldDisk, newDisk);
+				if (!aliasesSource) {
+					if (op.options?.ignoreIfExists) { ignored.add(op); continue; }
+					if (!op.options?.overwrite) throw new Error(`rename destination already exists: ${newPath}`);
+				}
 			}
 			clearTombstonesUnder(newPath);
 			if (!source.directory) await contentFor(oldPath, source);
@@ -916,15 +1035,19 @@ export async function applyWorkspaceEdit(
 				continue;
 			}
 			if (op.kind === "text") {
+				// Report/key on the normalized path (forward-slash, realpath-canonical),
+				// but read/write the decoded on-disk path so the URI's casing is honored
+				// on win32 (see uriToDiskPath).
 				const filePath = uriToPath(op.uri);
+				const diskPath = uriToDiskPath(op.uri);
 				const edits = prepared.text.get(op) ?? [];
 				if (edits.length === 0) {
 					skipOperation(op);
 					continue;
 				}
-				const content = await fs.readFile(filePath, "utf-8");
+				const content = await fs.readFile(diskPath, "utf-8");
 				const updated = applyTextEditsToString(content, edits, "utf-16");
-				await fs.writeFile(filePath, updated, "utf-8");
+				await fs.writeFile(diskPath, updated, "utf-8");
 				const start = Math.min(...edits.map((item) => item.range.start.line + 1));
 				const end = Math.max(...edits.map((item) => item.range.end.line + 1));
 				touchedFiles.add(filePath);
@@ -932,20 +1055,27 @@ export async function applyWorkspaceEdit(
 				markApplied(op);
 				descriptions.push(`Applied ${edits.length} edit(s) to ${relativeToCwd(filePath, cwd)}`);
 			} else if (op.kind === "create") {
+				// Create on the decoded path so `NewFile.txt` is not lowercased on win32;
+				// report/key on the normalized path.
 				const filePath = uriToPath(op.uri);
-				await fs.mkdir(path.dirname(filePath), { recursive: true });
-				if (op.options?.overwrite) await fs.writeFile(filePath, "", "utf-8");
-				else await fs.writeFile(filePath, "", { flag: "wx" });
+				const diskPath = uriToDiskPath(op.uri);
+				await fs.mkdir(path.dirname(diskPath), { recursive: true });
+				if (op.options?.overwrite) await fs.writeFile(diskPath, "", "utf-8");
+				else await fs.writeFile(diskPath, "", { flag: "wx" });
 				touchedFiles.add(filePath);
 				fileDetails.push({ filePath, range: { start: 1, end: 1 }, importsChanged: false });
 				markApplied(op);
 				descriptions.push(`Created ${relativeToCwd(filePath, cwd)}`);
 			} else if (op.kind === "rename") {
+				// Rename on the decoded paths so the destination casing is honored (and a
+				// case-only rename actually changes the name); report on normalized paths.
 				const oldPath = uriToPath(op.oldUri);
 				const newPath = uriToPath(op.newUri);
-				await fs.mkdir(path.dirname(newPath), { recursive: true });
-				if (op.options?.overwrite) await fs.rm(newPath, { recursive: true, force: true });
-				await fs.rename(oldPath, newPath);
+				const oldDisk = uriToDiskPath(op.oldUri);
+				const newDisk = uriToDiskPath(op.newUri);
+				await fs.mkdir(path.dirname(newDisk), { recursive: true });
+				if (op.options?.overwrite) await fs.rm(newDisk, { recursive: true, force: true });
+				await fs.rename(oldDisk, newDisk);
 				touchedFiles.add(oldPath);
 				touchedFiles.add(newPath);
 				fileDetails.push(
@@ -956,7 +1086,8 @@ export async function applyWorkspaceEdit(
 				descriptions.push(`Renamed ${relativeToCwd(oldPath, cwd)} → ${relativeToCwd(newPath, cwd)}`);
 			} else {
 				const filePath = uriToPath(op.uri);
-				await fs.rm(filePath, { recursive: op.options?.recursive === true, force: false });
+				const diskPath = uriToDiskPath(op.uri);
+				await fs.rm(diskPath, { recursive: op.options?.recursive === true, force: false });
 				touchedFiles.add(filePath);
 				fileDetails.push({ filePath, range: { start: 1, end: 1 }, importsChanged: true });
 				markApplied(op);
