@@ -23,8 +23,20 @@
  * attach-triggered respawns "minutes to hours apart": a server that died 5s
  * after spawning but wasn't attached-to again for an hour must still read as
  * an early, breaker-worthy exit.
+ *
+ * Test keys are computed via `normalizeMapKey`, not hardcoded, because
+ * `isWindowsPath()` (clients/path-utils.ts) treats a drive-letter-shaped
+ * string like "C:/repo" as Windows-shaped on ANY platform, routing it
+ * through the realpath-fallback branch even on Linux CI. A
+ * platform-dependent `dirname` call inside that fallback then collapses the
+ * non-existent path down to `process.cwd()`, producing a real key that is
+ * NOT the literal "C:/repo" — it only stays byte-identical on Windows,
+ * which is why an earlier version of this file (hardcoding the key) passed
+ * locally but failed on Linux CI: the hardcoded literal silently diverged
+ * from the key the service actually used internally, so map lookups missed.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { normalizeMapKey } from "../../../clients/path-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -126,7 +138,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		});
 
 		const file = "C:/repo/main.fake";
-		const key = "opengrep:C:/repo";
+		// See header comment: key computed via normalizeMapKey, not hardcoded.
+		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
 		const BROKEN_PERMANENT_AFTER = 5;
 
 		// Initial spawn — no existing (dead) client yet, so this goes straight
@@ -199,7 +212,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		createLSPClient.mockResolvedValue(client);
 
 		const file = "C:/repo/main.fake";
-		const key = "opengrep:C:/repo";
+		// See header comment: key computed via normalizeMapKey, not hardcoded.
+		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
 
 		const first = await service.getClientForFile(file);
 		expect(first).toBeDefined();
@@ -243,7 +257,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		});
 
 		const file = "C:/repo/main.fake";
-		const key = "opengrep:C:/repo";
+		// See header comment: key computed via normalizeMapKey, not hardcoded.
+		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
 
 		// Simulate 8 deliberate restarts (well past BROKEN_PERMANENT_AFTER=5) —
 		// e.g. a resync/reopen-style path that calls shutdown() itself before
@@ -285,7 +300,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		createLSPClient.mockResolvedValue(client);
 
 		const file = "C:/repo/main.fake";
-		const key = "opengrep:C:/repo";
+		// See header comment: key computed via normalizeMapKey, not hardcoded.
+		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
 
 		const first = await service.getClientForFile(file);
 		expect(first).toBeDefined();
@@ -334,7 +350,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 			createLSPClient.mockResolvedValue(client);
 
 			const file = "C:/repo/main.fake";
-			const key = "opengrep:C:/repo";
+			// See header comment: key computed via normalizeMapKey, not hardcoded.
+			const key = `opengrep:${normalizeMapKey("C:/repo")}`;
 
 			// NOTIFY_BACKPRESSURE_BROKEN_AFTER = 3 consecutive timeouts evict.
 			for (let i = 0; i < 3; i++) {
