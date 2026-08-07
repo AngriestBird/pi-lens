@@ -7,9 +7,11 @@ import {
 	applyTextEditsToString,
 	applyWorkspaceEdit,
 	__planWorkspaceEditForTest,
+	isSameFsIdentity,
 	mergeWorkspaceTextEditsByPriority,
 } from "../../../clients/lsp/edits.js";
 import { measureMaxSyncBlockMs } from "../../support/perf-harness.js";
+import { normalizeMapKey } from "../../../clients/lsp/path-utils.js";
 import { removeTempDirSync } from "../test-utils.js";
 import {
 	recordLspMutation,
@@ -685,18 +687,72 @@ describe("LSP workspace edits", () => {
 		const uri = pathToFileURL(filePath).href;
 		try {
 			expect(() => applyTextEditsToString("abc", [{ range: { start: { line: 0.5, character: 0 }, end: { line: 0, character: 0 } }, newText: "x" }])).toThrow(/overlapping|outside|range/);
-			await expect(applyWorkspaceEdit({ changes: { [uri]: [{ range: { start: { line: 0, character: 4 }, end: { line: 0, character: 4 } }, newText: "x" }] } }, tmpDir)).rejects.toThrow(/outside line/);
+			// Malformed shapes still throw: a negative character is not a spec-clampable
+			// out-of-range position (which now clamps — see the clamp cases below).
+			await expect(applyWorkspaceEdit({ changes: { [uri]: [{ range: { start: { line: 0, character: -1 }, end: { line: 0, character: -1 } }, newText: "x" }] } }, tmpDir)).rejects.toThrow(/malformed text edit/);
 			await expect(applyWorkspaceEdit({ documentChanges: [{ kind: "watch", uri }] }, tmpDir)).rejects.toThrow(/unsupported workspace resource operation/);
 		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	// P2: LSP 3.17 out-of-range clamping (line past EOF → end of document,
+	// character past line end → line length). Regression reintroduced in 3.8.74.
+	it("clamps out-of-range positions instead of throwing (LSP 3.17)", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-clamp-"));
+		try {
+			// Whole-document replace via the (0,0)-(9999,0) sentinel idiom.
+			const wholeDoc = path.join(tmpDir, "whole.ts");
+			fs.writeFileSync(wholeDoc, "line0\nline1", "utf-8");
+			await applyWorkspaceEdit({ changes: { [pathToFileURL(wholeDoc).href]: [{ range: { start: { line: 0, character: 0 }, end: { line: 9999, character: 0 } }, newText: "WHOLE" }] } }, tmpDir);
+			expect(fs.readFileSync(wholeDoc, "utf-8")).toBe("WHOLE");
+
+			// Character past the line end clamps to the line length (append).
+			const charClamp = path.join(tmpDir, "char.ts");
+			fs.writeFileSync(charClamp, "abc", "utf-8");
+			await applyWorkspaceEdit({ changes: { [pathToFileURL(charClamp).href]: [{ range: { start: { line: 0, character: 99 }, end: { line: 0, character: 99 } }, newText: "X" }] } }, tmpDir);
+			expect(fs.readFileSync(charClamp, "utf-8")).toBe("abcX");
+
+			// Direct string helper clamps the same way under every encoding.
+			expect(applyTextEditsToString("abc", [{ range: { start: { line: 5, character: 0 }, end: { line: 9, character: 0 } }, newText: "!" }])).toBe("abc!");
+
+			// CRLF: clamping a char past the line end must land BEFORE the trailing
+			// `\r`, not between `\r` and `\n` (P2-1). lineTextAt keeps the `\r`, so a
+			// naive clamp to line.length corrupts CRLF files.
+			expect(applyTextEditsToString("abc\r\ndef", [{ range: { start: { line: 0, character: 99 }, end: { line: 0, character: 99 } }, newText: "X" }])).toBe("abcX\r\ndef");
+			// The whole-line sentinel replace on a CRLF line must preserve the `\r\n`.
+			expect(applyTextEditsToString("abc\r\ndef", [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 999 } }, newText: "Y" }])).toBe("Y\r\ndef");
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	// P3-1: an insert listed AFTER a replace that starts at the same position is
+	// LSP-legal (VSCode applies it); result is independent of listing order.
+	it("applies an insert at a replace boundary in either listing order", () => {
+		const replace = { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 2 } }, newText: "X" };
+		const insert = { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "Y" };
+		expect(applyTextEditsToString("abc", [replace, insert])).toBe("YXc");
+		expect(applyTextEditsToString("abc", [insert, replace])).toBe("YXc");
 	});
 
 	it("rejects stale versioned text document edits before mutation", async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
 		const filePath = path.join(tmpDir, "versioned.ts");
 		fs.writeFileSync(filePath, "old", "utf-8");
+		const versioned = (version: number, current: number) =>
+			applyWorkspaceEdit(
+				{ documentChanges: [{ textDocument: { uri: pathToFileURL(filePath).href, version }, edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "new" }] }] },
+				tmpDir,
+				// Preflight looks the version up via normalizeMapKey; the map MUST be
+				// keyed the same way or the rejection passes vacuously (unknown key →
+				// "current unknown") rather than on a genuine version mismatch (#1106).
+				{ documentVersions: new Map([[normalizeMapKey(filePath), current]]) },
+			);
 		try {
-			await expect(applyWorkspaceEdit({ documentChanges: [{ textDocument: { uri: pathToFileURL(filePath).href, version: 2 }, edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: "new" }] }] }, tmpDir, { documentVersions: new Map([[filePath, 1]]) })).rejects.toThrow(/stale text document version/);
+			// Genuine mismatch (expected 2, live 1) → reject, no mutation.
+			await expect(versioned(2, 1)).rejects.toThrow(/stale text document version/);
 			expect(fs.readFileSync(filePath, "utf-8")).toBe("old");
+			// Positive path: a matching version SUCCEEDS (the missing coverage — the
+			// old test only asserted the rejection, and only vacuously at that).
+			await versioned(1, 1);
+			expect(fs.readFileSync(filePath, "utf-8")).toBe("new");
 		} finally { removeTempDirSync(tmpDir); }
 	});
 
@@ -783,6 +839,120 @@ describe("LSP workspace edits", () => {
 			await expect(applyWorkspaceEdit({ documentChanges: [{ kind: "create", uri: pathToFileURL(filePath).href, options: { recursive: true } }] }, tmpDir)).rejects.toThrow(/invalid create.options.recursive/);
 			await applyWorkspaceEdit({ documentChanges: [{ kind: "create", uri: pathToFileURL(filePath).href, options: { overwrite: true } }] }, tmpDir);
 			expect(fs.readFileSync(filePath, "utf-8")).toBe("");
+		} finally { removeTempDirSync(tmpDir); }
+	});
+});
+
+// P1-1: same-position inserts must apply in ARRAY order through EVERY entry path
+// under ALL THREE position encodings. The pipeline previously sorted an even
+// number of times on the UTF-16 path (and differed by encoding), reversing
+// same-position inserts ("aBAbc" instead of "aABbc").
+describe("LSP workspace edits — same-position insert ordering (P1-1)", () => {
+	const insertsAt = (line: number, character: number) => [
+		{ range: { start: { line, character }, end: { line, character } }, newText: "A" },
+		{ range: { start: { line, character }, end: { line, character } }, newText: "B" },
+	];
+
+	it("applyTextEditsToString applies same-position inserts in array order", () => {
+		expect(applyTextEditsToString("abc", insertsAt(0, 1))).toBe("aABbc");
+	});
+
+	for (const encoding of ["utf-8", "utf-16", "utf-32"] as const) {
+		for (const entry of ["changes", "documentChanges"] as const) {
+			it(`applyWorkspaceEdit keeps array order via ${entry} under ${encoding}`, async () => {
+				const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-order-"));
+				const filePath = path.join(tmpDir, "order.ts");
+				fs.writeFileSync(filePath, "abc", "utf-8");
+				const uri = pathToFileURL(filePath).href;
+				const edit =
+					entry === "changes"
+						? { changes: { [uri]: insertsAt(0, 1) } }
+						: { documentChanges: [{ textDocument: { uri }, edits: insertsAt(0, 1) }] };
+				try {
+					await applyWorkspaceEdit(edit, tmpDir, { positionEncoding: encoding });
+					expect(fs.readFileSync(filePath, "utf-8")).toBe("aABbc");
+				} finally { removeTempDirSync(tmpDir); }
+			});
+		}
+	}
+});
+
+// P1-2: Windows create/rename must preserve the URI's intended casing; a
+// case-only rename is a legitimate refactor. FS-probe-guarded per the #1024
+// lesson — assert casing preservation only where the filesystem is actually
+// case-insensitive; on a case-sensitive FS the same operations must still
+// succeed (never a vacuous pass).
+describe("LSP workspace edits — path casing preservation (P1-2)", () => {
+	function isCaseInsensitiveFs(dir: string): boolean {
+		const probe = path.join(dir, "CaseProbe.tmp");
+		fs.writeFileSync(probe, "x", "utf-8");
+		try {
+			return fs.existsSync(path.join(dir, "caseprobe.tmp"));
+		} finally {
+			fs.rmSync(probe, { force: true });
+		}
+	}
+
+	it("create preserves mixed-case file names on disk", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-case-"));
+		try {
+			await applyWorkspaceEdit({ documentChanges: [{ kind: "create", uri: pathToFileURL(path.join(tmpDir, "NewFile.txt")).href }] }, tmpDir);
+			const entries = fs.readdirSync(tmpDir);
+			// On BOTH FS kinds the name written must be the mixed-case one — the bug
+			// lowercased it only on a case-insensitive (win32) FS, so a case-sensitive
+			// run asserts the operation still produced exactly the requested name.
+			expect(entries).toContain("NewFile.txt");
+			expect(entries).not.toContain("newfile.txt");
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	it("rename preserves the destination casing", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-case-"));
+		try {
+			const src = path.join(tmpDir, "lower.txt");
+			fs.writeFileSync(src, "x", "utf-8");
+			await applyWorkspaceEdit({ documentChanges: [{ kind: "rename", oldUri: pathToFileURL(src).href, newUri: pathToFileURL(path.join(tmpDir, "MixedCase.txt")).href }] }, tmpDir);
+			const entries = fs.readdirSync(tmpDir);
+			expect(entries).toContain("MixedCase.txt");
+			expect(entries).not.toContain("mixedcase.txt");
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	// The FS-identity alias check must FAIL-CLOSED on ino-less filesystems
+	// (FAT32/exFAT, some SMB redirectors, VirtualBox shared folders — libuv
+	// reports ino 0 there). Without the nonzero guard, two DISTINCT files would
+	// compare (dev, 0) === (dev, 0) and a rename would silently clobber.
+	it("treats ino-0 (ino-less FS) entries as DISTINCT, never aliased", () => {
+		// Both sides ino 0 on the same device → must NOT be considered the same entry.
+		expect(isSameFsIdentity({ dev: 5n, ino: 0n }, { dev: 5n, ino: 0n })).toBe(false);
+		// One side ino 0 → distinct.
+		expect(isSameFsIdentity({ dev: 5n, ino: 0n }, { dev: 5n, ino: 42n })).toBe(false);
+		// Genuine same-entry (nonzero, equal ino, same dev) → aliased.
+		expect(isSameFsIdentity({ dev: 5n, ino: 42n }, { dev: 5n, ino: 42n })).toBe(true);
+		// Same nonzero ino but different device → distinct.
+		expect(isSameFsIdentity({ dev: 5n, ino: 42n }, { dev: 6n, ino: 42n })).toBe(false);
+		// Large 64-bit NTFS file IDs (> 2^53) compare exactly as BigInt.
+		expect(isSameFsIdentity({ dev: 1n, ino: 9007199254740993n }, { dev: 1n, ino: 9007199254740993n })).toBe(true);
+		expect(isSameFsIdentity({ dev: 1n, ino: 9007199254740993n }, { dev: 1n, ino: 9007199254740992n })).toBe(false);
+	});
+
+	it("case-only rename succeeds (foo.txt → Foo.txt)", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-case-"));
+		try {
+			const caseInsensitive = isCaseInsensitiveFs(tmpDir);
+			const src = path.join(tmpDir, "foo.txt");
+			fs.writeFileSync(src, "content", "utf-8");
+			await applyWorkspaceEdit({ documentChanges: [{ kind: "rename", oldUri: pathToFileURL(src).href, newUri: pathToFileURL(path.join(tmpDir, "Foo.txt")).href }] }, tmpDir);
+			const entries = fs.readdirSync(tmpDir);
+			// Case-insensitive FS: the entry is renamed IN PLACE to Foo.txt (no throw).
+			// Case-sensitive FS: Foo.txt is a distinct new file; foo.txt is gone.
+			expect(entries).toContain("Foo.txt");
+			if (caseInsensitive) {
+				expect(entries.filter((e) => e.toLowerCase() === "foo.txt")).toEqual(["Foo.txt"]);
+			} else {
+				expect(entries).not.toContain("foo.txt");
+			}
+			expect(fs.readFileSync(path.join(tmpDir, "Foo.txt"), "utf-8")).toBe("content");
 		} finally { removeTempDirSync(tmpDir); }
 	});
 });

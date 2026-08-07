@@ -1879,12 +1879,51 @@ function validateWorkspaceEditVersions(
 	}
 }
 
+// Neutralize numeric `textDocument.version` stamps AFTER they have been
+// validated against the live document map. The tool apply paths (rename
+// apply:true in tools/lsp-navigation.ts, code-action autofix in
+// actionable-warnings.ts) call applyWorkspaceEdit without a documentVersions
+// map, so a preserved numeric version would fail preflight 100% of the time for
+// servers that stamp real versions (gopls stamps open documents). Setting the
+// version to null is the spec's "do not check" — the freshness guarantee has
+// already been provided here by validateWorkspaceEditVersions at the correct
+// moment. The server-initiated workspace/applyEdit handler does NOT route
+// through here (it applies params.edit directly with state.documentVersions),
+// so its real preflight version check is left fully intact.
+function stripDocumentVersions(edit: LSPWorkspaceEdit): LSPWorkspaceEdit {
+	if (!Array.isArray(edit.documentChanges)) return edit;
+	const documentChanges = edit.documentChanges.map((change) => {
+		if (
+			typeof change === "object" &&
+			change !== null &&
+			"textDocument" in change &&
+			"edits" in change
+		) {
+			const textDocument = (change as { textDocument?: { version?: unknown } })
+				.textDocument;
+			if (textDocument && typeof textDocument.version === "number") {
+				return {
+					...(change as Record<string, unknown>),
+					textDocument: { ...textDocument, version: null },
+				};
+			}
+		}
+		return change;
+	});
+	return { ...edit, documentChanges } as LSPWorkspaceEdit;
+}
+
 export async function normalizeClientWorkspaceEdit(
 	state: LSPClientState,
 	edit: LSPWorkspaceEdit,
 ): Promise<LSPWorkspaceEdit> {
 	validateWorkspaceEditVersions(state, edit);
-	return (await normalizeWorkspaceEditToUtf16(edit, state.positionEncoding, state.root)) as LSPWorkspaceEdit;
+	const normalized = (await normalizeWorkspaceEditToUtf16(
+		edit,
+		state.positionEncoding,
+		state.root,
+	)) as LSPWorkspaceEdit;
+	return stripDocumentVersions(normalized);
 }
 
 async function resolveCodeActionBestEffort(
