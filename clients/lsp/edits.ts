@@ -584,12 +584,20 @@ function planWorkspaceEdit(
 		const key = indexKey(uri);
 		const existing = pending.get(key);
 		if (existing) {
-			if (existing.version !== version && existing.version !== undefined && version !== undefined) {
+			// Per LSP 3.17, `version: null` means "don't check" — it is not itself a
+			// version to conflict against. Only two DIFFERENT numeric versions for the
+			// same URI are a genuine conflict; a numeric version is authoritative and
+			// adopted over a `null`/`undefined` counterpart from another edit container
+			// for the same document, so the later preflight version check (which only
+			// fires for numeric `op.version`) still validates it.
+			const existingNumeric = typeof existing.version === "number" ? existing.version : undefined;
+			const incomingNumeric = typeof version === "number" ? version : undefined;
+			if (existingNumeric !== undefined && incomingNumeric !== undefined && existingNumeric !== incomingNumeric) {
 				throw new Error(`conflicting text document versions for ${uri}`);
 			}
 			existing.edits.push(...edits);
 			if (origin) (existing.origins ??= []).push(origin);
-			if (existing.version === undefined) existing.version = version;
+			if (existingNumeric === undefined && incomingNumeric !== undefined) existing.version = version;
 			return;
 		}
 		if (origin) {

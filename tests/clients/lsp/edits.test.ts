@@ -1019,4 +1019,54 @@ describe("LSP workspace edits — #1085 P3 bundle", () => {
 			expect(fs.readFileSync(bPath, "utf-8")).toBe("new");
 		} finally { removeTempDirSync(tmpDir); }
 	});
+
+	it("P3-4: version:null + a numeric version for the same URI adopts the numeric one (LSP: null means don't check)", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-4-"));
+		try {
+			const filePath = path.join(tmpDir, "versioned-null.ts");
+			fs.writeFileSync(filePath, "x", "utf-8");
+			const uri = pathToFileURL(filePath).href;
+			const edit = {
+				documentChanges: [
+					{
+						textDocument: { uri, version: null },
+						edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "A" }],
+					},
+					{
+						textDocument: { uri, version: 1 },
+						edits: [{ range: { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } }, newText: "B" }],
+					},
+				],
+			};
+			// Matching numeric version → applies (does NOT throw "conflicting text
+			// document versions", the pre-fix failure mode).
+			await applyWorkspaceEdit(edit, tmpDir, { documentVersions: new Map([[normalizeMapKey(filePath), 1]]) });
+			expect(fs.readFileSync(filePath, "utf-8")).toBe("AxB");
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	it("P3-4: version:null + a STALE numeric version is still rejected, via the numeric", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-4-stale-"));
+		try {
+			const filePath = path.join(tmpDir, "versioned-null-stale.ts");
+			fs.writeFileSync(filePath, "x", "utf-8");
+			const uri = pathToFileURL(filePath).href;
+			const edit = {
+				documentChanges: [
+					{
+						textDocument: { uri, version: null },
+						edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "A" }],
+					},
+					{
+						textDocument: { uri, version: 1 },
+						edits: [{ range: { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } }, newText: "B" }],
+					},
+				],
+			};
+			await expect(
+				applyWorkspaceEdit(edit, tmpDir, { documentVersions: new Map([[normalizeMapKey(filePath), 2]]) }),
+			).rejects.toThrow(/stale text document version/);
+			expect(fs.readFileSync(filePath, "utf-8")).toBe("x");
+		} finally { removeTempDirSync(tmpDir); }
+	});
 });
