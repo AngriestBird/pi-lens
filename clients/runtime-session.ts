@@ -33,6 +33,11 @@ import { logLatency } from "./latency-logger.js";
 import { logWordIndex } from "./word-index-logger.js";
 import { runLogCleanup } from "./log-cleanup.js";
 import { setSessionLanguages } from "./widget-state.js";
+import {
+	countRecentSmells,
+	formatSmellsSessionStartLine,
+	resetSmellsSessionState,
+} from "./smells-rollup.js";
 import { initLSPConfig, loadLSPConfig } from "./lsp/config.js";
 import { getLSPService } from "./lsp/index.js";
 import type { LSPShutdownOptions } from "./lsp/client.js";
@@ -1567,6 +1572,9 @@ export async function handleSessionStart(
 	// drop it each session so a PATH change (e.g. a tool installed mid-session
 	// in a prior session, or a differently-scoped shell) is picked up fresh.
 	resetSafeSpawnWindowsCommandCache();
+	// #1123 item 3: a fresh session can re-report smells that a prior session
+	// already surfaced once (see `checkSmellsAndNoteOnce`'s once-per-session gate).
+	resetSmellsSessionState();
 	runtime.resetForSession(sessionStartMs);
 	logLatency({
 		type: "phase",
@@ -1701,6 +1709,7 @@ export async function handleSessionStart(
 			durationMs: totalDurationMs,
 			metadata: { mode: startupMode, reason: deps.sessionReason },
 		});
+		emitSmellsSessionStartLine(dbg);
 		return;
 	}
 
@@ -2084,4 +2093,20 @@ export async function handleSessionStart(
 		durationMs: totalDurationMs,
 		metadata: { mode: startupMode, reason: deps.sessionReason },
 	});
+	emitSmellsSessionStartLine(dbg);
+}
+
+/**
+ * #1123 item 3: one bounded `session_start` line surfacing smells the manual
+ * `npm run logs:smells` analyzer would otherwise only catch on demand — see
+ * `clients/smells-rollup.ts` for the tail-scan cost bound and threshold
+ * gating. Never throws: a rollup miss must not break session_start.
+ */
+function emitSmellsSessionStartLine(dbg: (msg: string) => void): void {
+	try {
+		const line = formatSmellsSessionStartLine(countRecentSmells());
+		if (line) dbg(line);
+	} catch {
+		// best-effort — smells rollup must never break session_start
+	}
 }
