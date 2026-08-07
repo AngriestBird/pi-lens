@@ -714,6 +714,11 @@ const AUTO_INSTALLABLE_DEFAULT_FORMATTERS = new Map<string, string>([
 	["ktlint", "ktlint"],
 ]);
 
+// `gate: "smart-default"` so a matched file is formatted only when nothing else
+// claims it. Misdetection edge: `root.hcl` is filename-detected as terragrunt, so
+// a non-terragrunt `root.hcl` gets smart-default formatted with `terragrunt hcl
+// fmt`'s generic HCL canonicalization — a soft outcome (canonical HCL, no config
+// semantics assumed), not a hard failure.
 const TERRAGRUNT_FORMATTER_POLICY: FormatterPolicy = {
 	formatterNames: ["terragrunt-hcl"],
 	defaultFormatter: "terragrunt-hcl",

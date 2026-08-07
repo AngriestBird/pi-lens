@@ -6,6 +6,15 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Bare-binary GitHub release assets skip signature siblings** — the installer
+	picked a release asset with `assets.find(a => a.name.includes(substring))`.
+	Archive-based tools are unaffected (their substrings end in `.zip`/`.tar.gz`),
+	but the three bare-binary entries (terragrunt, marksman, expert) resolve to
+	the FULL asset name, which is a strict prefix of every `.asc`/`.sig`/`.sha256`
+	sibling, so whichever the release listed first would be downloaded and marked
+	executable as the binary. Selection now lives in an exported
+	`pickReleaseAsset`: exact name first, then a substring match that excludes
+	known sidecar suffixes.
 - **`parseSymbolKey` mis-parsed LSP-fallback symbol kinds (refs #1088)** —
 	the canonical-id parser whitelisted only the 7 kinds `buildSymbolId` mints
 	directly, but `addLspFallbackSymbols` mints ids using the much larger
@@ -236,15 +245,6 @@ All notable changes to pi-lens will be documented in this file.
 	parent `terragrunt.hcl` whose basename matches the edited file's but whose
 	line numbers belong to another file.
 
-- **Bare-binary GitHub release assets skip signature siblings** — the installer
-	picked a release asset with `assets.find(a => a.name.includes(substring))`.
-	Archive-based tools are unaffected (their substrings end in `.zip`/`.tar.gz`),
-	but the three bare-binary entries (terragrunt, marksman, expert) resolve to
-	the FULL asset name, which is a strict prefix of every `.asc`/`.sig`/`.sha256`
-	sibling, so whichever the release listed first would be downloaded and marked
-	executable as the binary. Selection now lives in an exported
-	`pickReleaseAsset`: exact name first, then a substring match that excludes
-	known sidecar suffixes.
 - **Oxfmt formatting support for Svelte (refs #1134)** — `.svelte` is now a
 	recognized oxfmt extension, gated by a stricter conditional than oxfmt's
 	other extensions. Empirically verified against the real `oxfmt` npm
