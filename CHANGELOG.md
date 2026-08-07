@@ -6,6 +6,63 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`parseSymbolKey` mis-parsed LSP-fallback symbol kinds (refs #1088)** —
+	the canonical-id parser whitelisted only the 7 kinds `buildSymbolId` mints
+	directly, but `addLspFallbackSymbols` mints ids using the much larger
+	`lspSymbolKindName` vocabulary (`enum`, `constant`, `struct`, `namespace`,
+	`field`, `constructor`, `module`, the `lsp-symbol-<n>` catch-all, ...). Any
+	of those ids failed the whitelist and fell through to the legacy
+	last-colon split, shearing the id at the wrong boundary (e.g.
+	`c:\p\a.kt:Color:enum:42` parsed as `filePath: "c:\p\a.kt:Color:enum"`,
+	`symbolName: "42"`). `clients/review-graph/symbol-id.ts`'s
+	`parseSymbolKey` now matches the trailing `:<kind-token>:<digits>` shape
+	STRUCTURALLY (any lowercase, optionally hyphen-segmented token) instead of
+	whitelisting specific kind strings, so it stays correct for the open-ended
+	LSP-fallback vocabulary without needing a matching update per kind.
+- **Java try-with-resources suppression was dead (refs #1089)** —
+	`clients/tree-sitter-client.ts`'s `not_closed_or_try_with_resources`
+	post-filter built its resource-word regex as `` new RegExp(`\b${resource}\b`) ``
+	inside a template literal, where `\b` is the BACKSPACE control character
+	(U+0008), not a regex word-boundary escape. The regex could never match,
+	so the Java 9 short-form `try (resource) { ... }` was never recognized as
+	closing its resource — only an explicit `.close()` call suppressed the
+	"resource should be closed" finding. Fixed to `\\b` plus a regex-escaped
+	identifier. No shipped Java fixture used try-with-resources syntax, so no
+	existing expected-findings fixture changes with this fix.
+- **Raw NUL byte in `review-graph/builder.ts` made the file look binary to
+	grep (refs #1088)** — the checkpoint's `ignoredIds` join separator was a
+	literal 0x00 byte embedded in source, which makes `ripgrep`/`grep` treat
+	the whole 4,900+ line file as binary and stop scanning partway through —
+	silently defeating the AGENTS.md-mandated repo-wide grep sweep for every
+	commit that touched this file. Replaced the raw byte with the `\u0000`
+	escape sequence, which is the byte-identical runtime string (same
+	`hashIgnoredIds` function computes both the write-time and read-time
+	hash, so no persisted checkpoint compatibility is affected).
+- **`buildCallGraph` same-file evidence accounting hardened + dead code
+	removed (refs #1089)** — added regression coverage for the audited
+	same-file evidence class (divergent path forms for the same file must
+	both be recognized as same-file AND counted exactly once per reference,
+	keeping the coverage sum invariant `validatePersistedCallGraph` enforces
+	on every load); the normalized-compare fix for this had already landed
+	upstream, so this closes out the finding with a fail-then-pass regression
+	test rather than a behavior change. Also removed `clients/call-graph.ts`'s
+	dead duplicate `saveCallGraph` overload signature (byte-identical to the
+	implementation signature) and the unreachable `{}`-spread branch on the
+	required `identity` parameter.
+- **JS destructured params dropped from `parameterCount` (refs #1089)** —
+	`clients/dispatch/facts/function-facts.ts`'s `getParameters` recognized
+	`required_parameter`/`optional_parameter` wrapper nodes (how TypeScript's
+	grammar represents every parameter, destructured or not) but not the bare
+	`object_pattern`/`array_pattern` nodes plain JavaScript's grammar uses
+	for a top-level destructured parameter with no wrapper. `function
+	f({a, b})` counted 0 parameters in a `.js` file while the TS-annotated
+	equivalent counted correctly. Added JS-vs-TS parity tests.
+- **`call-graph.ts`'s exported `CACHE_VERSION` renamed to
+	`CALL_GRAPH_CACHE_VERSION`** — collided in name (not value — separate
+	modules) with `clients/cache/rule-cache.ts`'s own `CACHE_VERSION` export;
+	renamed to match the `<SUBSYSTEM>_CACHE_VERSION` convention already used
+	by `WORKSPACE_DIAGNOSTICS_CACHE_VERSION` and
+	`PROJECT_DIAGNOSTICS_CACHE_VERSION`. Updated the two test-file imports.
 - **mtime-only cache freshness sweep (refs #1105)** — the #1092→#1096 arc bound
 	LSP-diagnostics freshness to real content; this sweep audited the OTHER
 	persisted/derived caches for the same "mtime unchanged ≠ content unchanged"

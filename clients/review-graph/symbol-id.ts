@@ -61,9 +61,18 @@ export function buildSymbolId(
 	return `${filePath}:${name}:${kind}:${startLine}`;
 }
 
-const CANONICAL_SYMBOL_KINDS = new Set([
-	"function", "method", "class", "interface", "type", "variable", "property",
-]);
+/**
+ * Structural shape of a kind token in a canonical symbol id: every kind this
+ * repo mints — the fixed `buildSymbolId` vocabulary (`function`, `method`,
+ * `class`, ...) AND the open-ended LSP-fallback vocabulary from
+ * `lspSymbolKindName` (`enum`, `struct`, `type-parameter`, `enum-member`, the
+ * `lsp-symbol-<n>` catch-all for unknown LSP `SymbolKind` numbers, ...) —
+ * is a lowercase word optionally hyphen-segmented, never containing a colon.
+ * Matching this SHAPE (rather than whitelisting specific kind strings) keeps
+ * `parseSymbolKey` in agreement with whatever kind vocabulary either minter
+ * uses, present or future, without needing a matching update here.
+ */
+const KIND_TOKEN_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
 export interface ParsedSymbolKey {
 	filePath: string;
@@ -87,7 +96,7 @@ export function parseSymbolKey(
 		return { filePath: key.slice("file:".length) };
 	}
 	const canonical = /^(.*):([^:]*):([^:]+):(\d+)$/.exec(key);
-	if (canonical && CANONICAL_SYMBOL_KINDS.has(canonical[3])) {
+	if (canonical && KIND_TOKEN_RE.test(canonical[3])) {
 		return {
 			filePath: canonical[1],
 			symbolName: canonical[2] || undefined,
