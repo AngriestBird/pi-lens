@@ -96,7 +96,7 @@ export interface CallGraphCacheIdentity {
 }
 
 interface PersistedCallGraph {
-	version: typeof CACHE_VERSION;
+	version: typeof CALL_GRAPH_CACHE_VERSION;
 	builtAt: string;
 	/** The canonical review graph this projection was derived from. */
 	reviewGraphVersion?: string;
@@ -112,7 +112,7 @@ interface PersistedCallGraph {
 }
 
 /** Persisted call-graph cache format version. Bump on breaking format changes. */
-export const CACHE_VERSION = 5;
+export const CALL_GRAPH_CACHE_VERSION = 5;
 
 // ── Section 3: BFS impact analysis ───────────────────────────────────────────
 
@@ -569,7 +569,7 @@ export function saveCallGraph(
 	try {
 		fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
 		const persisted: PersistedCallGraph = {
-			version: CACHE_VERSION,
+			version: CALL_GRAPH_CACHE_VERSION,
 			builtAt: graph.builtAt,
 			...(identity ? {
 				reviewGraphVersion: identity.reviewGraphVersion,
@@ -658,7 +658,7 @@ function validatePersistedCallGraph(
 		typeof value === "string" && values.includes(value as T);
 	const edgeKinds = ["calls", "references", "mixed"] as const;
 	const resolutions = ["exact", "import", "receiver-type", "name-only", "unresolved"] as const;
-	if (!raw || raw.version !== CACHE_VERSION || !nonEmptyString(raw.builtAt)) return false;
+	if (!raw || raw.version !== CALL_GRAPH_CACHE_VERSION || !nonEmptyString(raw.builtAt)) return false;
 	if (!nonEmptyString(raw.reviewGraphVersion) || !nonEmptyString(raw.reviewGraphSignature)) return false;
 	if (raw.coverage !== undefined &&
 		(!raw.coverage || typeof raw.coverage !== "object" || Array.isArray(raw.coverage))) return false;
@@ -785,7 +785,7 @@ export function loadCallGraph(
 	const cacheFile = cacheFilePath(cwd);
 	try {
 		const raw = JSON.parse(fs.readFileSync(cacheFile, "utf-8")) as PersistedCallGraph;
-		if (raw.version !== CACHE_VERSION) return undefined;
+		if (raw.version !== CALL_GRAPH_CACHE_VERSION) return undefined;
 		if (typeof raw.reviewGraphVersion !== "string" || typeof raw.reviewGraphSignature !== "string") return undefined;
 		const identity: CallGraphCacheIdentity = {
 			reviewGraphVersion: raw.reviewGraphVersion,

@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	buildCallGraph,
-	CACHE_VERSION,
+	CALL_GRAPH_CACHE_VERSION,
 	formatImpact,
 	impact,
 	loadCallGraph,
@@ -31,7 +31,7 @@ function validPersistedCallGraph(): Record<string, unknown> {
 	const callerKey = `${callerFile}:caller`;
 	const calleeKey = `${calleeFile}:callee`;
 	return {
-		version: CACHE_VERSION,
+		version: CALL_GRAPH_CACHE_VERSION,
 		builtAt: "2026-08-04T00:00:00.000Z",
 		reviewGraphVersion: "v9",
 		reviewGraphSignature: "sig-valid",
@@ -509,11 +509,11 @@ describe("saveCallGraph / loadCallGraph", () => {
 		const calleeKey = `${fileB}:callee`;
 		const cacheFile = path.join(getProjectDataDir("/proj"), "cache", "call-graph.json");
 		fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-		// Deliberately pinned to the literal 4, one below CACHE_VERSION, to
-		// exercise the legacy-format rejection path itself. If CACHE_VERSION
+		// Deliberately pinned to the literal 4, one below CALL_GRAPH_CACHE_VERSION, to
+		// exercise the legacy-format rejection path itself. If CALL_GRAPH_CACHE_VERSION
 		// is ever bumped to 4 this assertion fails loudly instead of the test
 		// silently testing nothing (the #1082/#1106 vacuous-fixture class).
-		expect(CACHE_VERSION).not.toBe(4);
+		expect(CALL_GRAPH_CACHE_VERSION).not.toBe(4);
 		fs.writeFileSync(cacheFile, JSON.stringify({
 			version: 4,
 			builtAt: "legacy",
