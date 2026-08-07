@@ -268,7 +268,7 @@ export function createLensDiagnosticsTool(
 			includeGenerated: Type.Optional(
 				Type.Boolean({
 					description:
-						"mode=full only: scan WITHOUT the generated/artifact NAME-heuristic filter (lockfiles, gen.ts-style names, generated/ dirs, …). Default false. Use when a scan's 'excluded by generated-name heuristics' notice suggests a real file was skipped.",
+						"mode=full refreshRunners=cheap/all only (no effect with refreshRunners=cached/none, since no project scan runs to apply it to): scan WITHOUT the generated/artifact NAME-heuristic filter (lockfiles, gen.ts-style names, generated/ dirs, …). Default false. Use when a scan's 'excluded by generated-name heuristics' notice suggests a real file was skipped.",
 				}),
 			),
 			severity: Type.Optional(

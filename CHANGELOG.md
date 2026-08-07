@@ -63,6 +63,96 @@ All notable changes to pi-lens will be documented in this file.
 	renamed to match the `<SUBSYSTEM>_CACHE_VERSION` convention already used
 	by `WORKSPACE_DIAGNOSTICS_CACHE_VERSION` and
 	`PROJECT_DIAGNOSTICS_CACHE_VERSION`. Updated the two test-file imports.
+- **Dead SIGTERM→SIGKILL escalation guard on non-Windows kills (closes #1114)**
+	— `clients/safe-spawn.ts`'s non-Windows `killTree` branch armed a 1s
+	escalation timer gated on `if (!child.killed) child.kill("SIGKILL")`, but
+	Node sets `ChildProcess#killed = true` the moment `kill()` successfully
+	SENDS a signal — not when the child actually dies — so immediately after
+	the `child.kill("SIGTERM")` one line above, the guard was always false
+	and the SIGKILL escalation could never fire: a SIGTERM-ignoring child on
+	Linux/macOS was never force-killed. Fixed by tracking OBSERVED death via a
+	`closed` flag set synchronously (before any `await`) in the close/error
+	handlers, gating the escalation on `!closed` instead — composes cleanly
+	with the existing #1109/#1113 `escalationTimer` clear-on-close fix rather
+	than switching to the LSP `killProcessTree` analog's unconditional-SIGKILL
+	design, since `safeSpawnAsync` already has a real per-call close/error
+	observation point to hang the flag off of. Proven with a new "child
+	ignores SIGTERM → SIGKILL sent at the 1s mark" test
+	(`tests/clients/safe-spawn-kill-escalation-timer.test.ts`) that fails
+	against the pre-fix guard and passes post-fix; the existing #1109 timer-leak
+	tests (escalation timer cleared when close/error DOES arrive) remain green.
+	**Class sweep** of every `.killed` consumer under `clients/` and `scripts/`
+	found two siblings of the same shape in `clients/lsp/client.ts`'s
+	`killProcessTree`/`createLSPClient` and fixed both in this PR: (1) the
+	`fast`-shutdown escalation timer checked `!proc.killed`, but the primary
+	SIGTERM send there goes through the raw `process.kill(-pid, …)` process-group
+	call (which never touches `proc.killed`), so the guard was either always-true
+	(unconditional SIGKILL after the window on the common group-kill path) or
+	dead (on the direct-child fallback path) — now tracked via a real `exit`
+	listener set once up front, seeded from the same `exitCode`/`signalCode`
+	pre-check the function's top-of-body early return already uses (a process
+	that was already dead on entry — reachable when `options.processExiting`
+	skips that early return — would otherwise miss its own "exit" event and
+	still draw a redundant group SIGKILL at the escalation window); (2) the
+	`initialize()`-timeout 2s SIGKILL backstop had the identical always-true
+	`!lspProcess.process.killed` guard — switched to `lspProcess.process.exitCode
+	=== null && lspProcess.process.signalCode === null` (both, not `exitCode`
+	alone: a process killed BY a signal — the common case here, since
+	`killProcessTree` above it signals rather than lets the process exit on its
+	own — has `exitCode === null` forever and only `signalCode` set, so
+	`exitCode` alone still re-armed the backstop's kill against an
+	already-dead corpse; harmless in practice since `ChildProcess#kill()` on an
+	exited handle is a swallowed no-op, but not an accurate "still alive"
+	read). Other `.killed` reads audited and left as-is because they're
+	liveness/status checks, not escalation-action gates: `isClientAlive`'s
+	`!state.lspProcess.process.killed` (redundant with `isDestroyed`, already
+	set from real exit/close handlers), `checkProcessAlive`'s informational
+	"was killed" health-check string, `launch.ts`'s post-spawn
+	immediate-failure check (`proc.killed` read before any kill was ever sent),
+	`scripts/with-test-lock.mjs`'s `.once`-registered first-forward guard, and
+	`scripts/smoke-tools.mjs`'s read of Node's own `execFileSync` timeout-kill
+	flag on the caught error object.
+
+	**Adversarial-review follow-up round:** the reviewer ran
+	`kill-process-tree.test.ts` against PRE-fix `client.ts` and it passed 7/7 —
+	the sibling fixes above had ZERO effective test coverage, because the
+	"non-fast shutdown escalates" mock (and the other pre-existing mocks in
+	that file) lacked `once`/never set `killed`, so BOTH the old dead guard and
+	the new fix's guard were vacuously permissive against them (the #1106
+	vacuous-mock class, recurring in mock form: a test's fixture is too weak to
+	distinguish correct from broken behavior, so it passes either way). Fixed
+	by: upgrading that test's mock to be `.once`-capable so it actually
+	exercises the `exited`-flag logic; adding two new `fast`-shutdown tests with
+	a real `.once`-capturing mock proving BOTH directions (exit observed before
+	the 1.5s window → no group SIGKILL; no exit observed → group SIGKILL at the
+	window) — the "no premature SIGKILL" direction fails against the pre-fix
+	`!proc.killed` guard (proven by temporarily reverting the guard and
+	re-running); and adding a real-subprocess POSIX-only test
+	(`tests/clients/lsp/initialize-timeout-backstop.test.ts`, skipped on win32
+	with an explicit reason — killProcessTree's Windows path is
+	`taskkill`-based, not signal-based, and is already covered by the
+	kill-process-tree suite) for the previously fully-untested `initialize()`
+	2s backstop.
+- **Micro-gap sweep: recorded coverage/observability/doc gaps (refs #1106, refs #1104)**
+	- `session-state-store.ts`'s `loadSessionState` STATE_VERSION reject path
+		(a wrong-version persisted snapshot is ignored, not rehydrated) had no
+		test; `STATE_VERSION` is now exported so the new test can drive the
+		mismatch off the real constant (`STATE_VERSION + 1`) rather than a
+		hardcoded literal (#1116 pattern).
+	- `tests/clients/cache/rule-cache.test.ts`'s deliberate `raw.version = "v2"`
+		schema-mismatch override now pins `expect(CACHE_VERSION).not.toBe("v2")`
+		alongside it (#1082/#1116 pattern), so the assertion can't vacuously pass
+		if `CACHE_VERSION` ever became `"v2"`.
+	- The cascade `neighbor_touch` log entry (`clients/dispatch/integration.ts`)
+		now carries an `inconclusive` boolean in its metadata alongside
+		`bindingState`, so the two independent unconfirmed-touch causes (notify/
+		diagnostics wait lapsed vs. disk-diverged binding, #1093/#1095) are
+		distinguishable from `cascade.log` alone, without cross-referencing
+		`latency.log`.
+	- `tools/lens-diagnostics.ts`'s `includeGenerated` param description now
+		states it only takes effect with `mode=full refreshRunners=cheap/all`
+		(it's silently a no-op under `cached`/`none`, since no project scan runs
+		to apply it to) — a doc-only fix from PR #1115's review.
 - **mtime-only cache freshness sweep (refs #1105)** — the #1092→#1096 arc bound
 	LSP-diagnostics freshness to real content; this sweep audited the OTHER
 	persisted/derived caches for the same "mtime unchanged ≠ content unchanged"
@@ -122,6 +212,13 @@ All notable changes to pi-lens will be documented in this file.
 	the generic project-diagnostics snapshot/delta display are all left as-is.
 
 ### Added
+
+- **Instance health + memory-attribution observability (refs #1123 item 2)** — the #1126 sizing study diagnosed a 1.37 GB pi-lens instance from code + serialized artifacts alone, because nothing recorded a per-subsystem trajectory over time (the same detection-without-attribution gap loop_block had before #1122/#1125). Three pieces:
+	1. **Vanished-instance markers.** `deregisterInstance()` (`clients/instance-registry.ts`) synchronously removes a process's own `instances.json` entry on a clean `session_shutdown`, so an entry whose owning pid is confirmed dead is, by construction, proof that process never reached that shutdown path — no new "clean shutdown" flag is needed, the existing `heartbeatAt`/`rssBytes` fields already ARE the "lastSeen"/"rss" pair this needs (`clients/vanished-instance-marker.ts`). `session_start` now reads the registry and logs one `sessionstart.log` line per such entry — `previous instance pid X last seen <ts> (RSS <y>MB) exited without shutdown` — BEFORE `sweepOrphans()` (`clients/instance-reaper.ts`) prunes those same dead-pid entries; the read is sequenced ahead of the sweep (via `.finally()`) rather than let both fire-and-forget calls race, or the vanished set would already be empty by the time the marker ran.
+	2. **Periodic memory-attribution sample (`clients/memory-sampler.ts`).** Every 10 turns, one `memory_sample` `latency.log` phase line: `process.memoryUsage()` (rss/heapUsed/heapTotal/external/arrayBuffers) plus O(1)/O(bounded-cache-size) per-subsystem counters — review-graph resident workspace-cache entry count + summed node/edge counts (`getReviewGraphWorkspaceCacheSnapshot`, `clients/review-graph/builder.ts`), word-index doc/posting/forward-entry counts (off `runtime.wordIndex`), loaded tree-sitter grammar/parser/query-cache counts + tree-cache size/bytes (`TreeSitterClient.getRuntimeStats`, `clients/tree-sitter-client.ts`), and the dispatch cascade's turn-bounded cache sizes (`getDispatchCascadeCacheStats`, `clients/dispatch/integration.ts`). Every field is a `Map`/array `.size`/`.length` read or a `process.memoryUsage()` call — nothing iterates a large structure's contents, nothing snapshots the heap. **Documented gap vs the #1126 spec:** the WASM linear-memory byte length (`Module.wasmMemory.buffer.byteLength`) is NOT included — inspecting the installed web-tree-sitter 0.25.10 package confirmed that value lives in a private closure (`bindings.ts`'s `Module` singleton) with no public export, and reaching it would require either internal reflection (brittle across versions/bundling) or overriding Emscripten's `wasmMemory` init option with a hand-built `WebAssembly.Memory` (risks a memory-import mismatch breaking ALL structural analysis, for an observability-only feature) — `process.memoryUsage().arrayBuffers` is used as the process-wide proxy instead (WASM linear memory backs an ArrayBuffer, so it's already included there).
+	3. **`/lens-health` memory block**, reusing the same sample: RSS/heap/external plus the tree-sitter cache byte total and review-graph node/edge counts, following #1125's compact single-line health-line style. `instances.json`'s `rssBytes`/`heartbeatAt` refresh cadence needed no new wiring — `runtime-turn.ts`'s existing per-turn `updateHeartbeat()` call (#449 slice 1) already refreshes both every turn, which is what makes marker (1)'s RSS meaningful.
+
+	New tests: `tests/clients/vanished-instance-marker.test.ts` and `tests/index-vanished-instance-wiring.test.ts` (fail-then-pass: a dead-pid entry logs the marker and is still pruned afterward; a live-pid or already-clean entry logs nothing), `tests/clients/memory-sampler.test.ts` and `tests/index-memory-sample-wiring.test.ts` (cadence assertions: nothing before turn 10, exactly one sample at turn 10 and turn 20, never in between), and an `/lens-health` line assertion in `tests/index-wiring.test.ts`.
 
 - **Source-walk generated-artifact escape hatch (closes #1107, phase 2 of 2)** — three pieces, building on phase 1's
 	counters (#1111):

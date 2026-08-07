@@ -357,6 +357,20 @@ describe("index.ts extension wiring", () => {
 		});
 	});
 
+	describe("/lens-health surfaces memory attribution (#1123 item 2)", () => {
+		it("includes the memory line (RSS/heap/external + review-graph counts)", async () => {
+			const pi = createPiMock();
+			extension(pi.asExtensionAPI());
+			const ctx = makeCtx();
+
+			await pi.runCommand("lens-health", "", ctx);
+
+			const out = ctx.notifications.map((n) => n.message).join("\n");
+			expect(out).toContain("Memory: RSS");
+			expect(out).toMatch(/review-graph \d+n\/\d+e/);
+		});
+	});
+
 	describe("/lens-perf surfaces latency-log phase percentiles (#767)", () => {
 		// The command reads getLatencyLogPath() with no seam, so seed that exact
 		// file (inside the per-worker PI_LENS_HOME) or the report is empty and the

@@ -28,6 +28,10 @@ const mocks = vi.hoisted(() => ({
 	),
 	formatImpactCascade: vi.fn(),
 	getLSPService: vi.fn(),
+	// #1104: logCascade no-ops under isTestMode(), so the only way to assert on
+	// its call shape (e.g. the neighbor_touch `inconclusive` metadata flag) is to
+	// spy on it directly rather than reading cascade.log.
+	logCascade: vi.fn(),
 }));
 
 vi.mock("../../clients/review-graph/service.js", () => ({
@@ -39,6 +43,12 @@ vi.mock("../../clients/review-graph/service.js", () => ({
 
 vi.mock("../../clients/lsp/index.js", () => ({
 	getLSPService: mocks.getLSPService,
+}));
+
+vi.mock("../../clients/cascade-logger.js", () => ({
+	logCascade: mocks.logCascade,
+	flushCascadeLog: vi.fn().mockResolvedValue(undefined),
+	getCascadeLogPath: vi.fn().mockReturnValue("/tmp/cascade.log"),
 }));
 
 const lspError = (message = "cascade error") => ({
@@ -113,6 +123,7 @@ describe("computeCascadeForFile", () => {
 		});
 		mocks.formatImpactCascade.mockReset().mockReturnValue("impact header");
 		mocks.getLSPService.mockReset();
+		mocks.logCascade.mockReset();
 		const { resetDispatchBaselines } = await import(
 			"../../clients/dispatch/integration.js"
 		);
@@ -1560,6 +1571,16 @@ describe("computeCascadeForFile", () => {
 				const diags = getFileDiagnostics(neighbor);
 				expect(diags).toHaveLength(1);
 				expect(diags?.[0]?.message).toBe("live cross-file error");
+
+				// #1104: the neighbor_touch log entry must carry `inconclusive` so the
+				// two unconfirmed-touch causes (inconclusive wait vs. bound-false disk
+				// divergence) are distinguishable from cascade.log alone.
+				const neighborTouchEntry = mocks.logCascade.mock.calls
+					.map(([entry]) => entry)
+					.find((entry) => entry.phase === "neighbor_touch");
+				expect(neighborTouchEntry?.metadata).toMatchObject({
+					inconclusive: true,
+				});
 			} finally {
 				env.cleanup();
 			}

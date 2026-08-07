@@ -222,6 +222,37 @@ export class TreeSitterClient {
 		return true;
 	}
 
+	/**
+	 * O(1) runtime footprint counters (#1123 item 2 memory attribution): every
+	 * field is a `Map.size` read, never an iteration over the maps' contents.
+	 * `wasmMemoryBytes` is deliberately NOT included here — web-tree-sitter
+	 * 0.25.10's Emscripten `Module` (which owns the WASM linear memory /
+	 * `HEAPU8.buffer`) is a private closure variable in the package's
+	 * `bindings.ts` and is not exposed through any public export (`Parser`,
+	 * `Language`, `Query`, ...); reaching it would require either reflecting
+	 * into the package's internal module state (brittle across web-tree-sitter
+	 * versions/bundling) or overriding Emscripten's `wasmMemory` module option
+	 * at `Parser.init()` time with a hand-constructed `WebAssembly.Memory`
+	 * matching the library's own default page-count math (risks a memory-import
+	 * mismatch that would break ALL structural analysis, for an
+	 * observability-only feature). `process.memoryUsage().arrayBuffers` is the
+	 * process-wide proxy used instead (WASM linear memory backs an ArrayBuffer,
+	 * so it is included there) — see clients/memory-sampler.ts.
+	 */
+	getRuntimeStats(): {
+		languagesLoaded: number;
+		parsersLoaded: number;
+		queryCacheSize: number;
+		queryBatchCacheSize: number;
+	} {
+		return {
+			languagesLoaded: this.languages.size,
+			parsersLoaded: this.parsers.size,
+			queryCacheSize: this.queryCache.size,
+			queryBatchCacheSize: this.queryBatchCache.size,
+		};
+	}
+
 	getParseCacheStats(): TreeSitterParseCacheStats {
 		return {
 			...this.treeCache.getStats(),

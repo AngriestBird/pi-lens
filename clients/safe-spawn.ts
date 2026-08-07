@@ -459,6 +459,14 @@ export async function safeSpawnAsync(
 		// a ref'd 1s timer that outlives the child it was escalating against
 		// would keep a one-shot `pi --print` process alive for up to 1s.
 		let escalationTimer: ReturnType<typeof setTimeout> | undefined;
+		// #1114: `child.killed` is set by Node the moment `kill()` successfully
+		// SENDS a signal, not when the child actually dies — so gating the
+		// escalation on `!child.killed` right after a successful `SIGTERM` send
+		// is always false and the SIGKILL branch is unreachable. Track observed
+		// death via the close/error handlers instead (set synchronously, before
+		// any `await`, so a timer firing during the close handler's `await
+		// killPromise` still observes the flag correctly).
+		let closed = false;
 		const maxOutputBytes =
 			options?.maxOutputBytes !== undefined &&
 			Number.isFinite(options.maxOutputBytes) &&
@@ -630,7 +638,7 @@ export async function safeSpawnAsync(
 			} else {
 				child.kill("SIGTERM");
 				escalationTimer = setTimeout(() => {
-					if (!child.killed) child.kill("SIGKILL");
+					if (!closed) child.kill("SIGKILL");
 				}, 1000);
 			}
 		};
@@ -702,6 +710,7 @@ export async function safeSpawnAsync(
 
 		// Process completion
 		child.on("close", async (code, signal) => {
+			closed = true;
 			clearTimeout(timeoutId);
 			abortSignal?.removeEventListener("abort", onAbort);
 			if (child.pid) lifetimeState.pids.delete(child.pid);
@@ -751,6 +760,7 @@ export async function safeSpawnAsync(
 		});
 
 		child.on("error", (err) => {
+			closed = true;
 			clearTimeout(timeoutId);
 			abortSignal?.removeEventListener("abort", onAbort);
 			if (escalationTimer) clearTimeout(escalationTimer);
