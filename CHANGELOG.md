@@ -4,6 +4,38 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Test-role files no longer leak into collateral cascade/impact surfaces (closes #1080)**
+	— the review graph is already tests-free, but several
+	collateral surfaces re-derived neighbors from OTHER sources that never saw
+	that filter, so an UNIGNORED `*.test.*` / `tests/` file could still surface
+	as cascade collateral. The existing `getProjectIgnoreMatcher` filtering only
+	closed the ignored-file half of the gap (#297). A new shared predicate
+	`clients/collateral-test-role.ts:isTestRoleCollateral` composes the SINGLE
+	existing structural classifier (`clients/file-role.ts:detectFileRole`) — no
+	second matcher, no private test-filename list — and is applied at every
+	collateral producer boundary: (1) `computeCascadeForFile` filters
+	`impact.directImporters` / `directCallers` / `neighborFiles` AFTER graph
+	neighbors, reverse-deps, LSP reference expansion, and transitive expansion
+	are merged, so a test neighbor is excluded from the active-touch/passive-
+	snapshot set, the returned `impact`, AND the formatted header
+	(`formatImpactCascade` reads `impact` verbatim for `Direct importers` /
+	`Check next` counts and names) — module-level downstream files (added inside
+	`computeImpactCascade`) are caught here at the consumption boundary rather
+	than inside the shared graph query; (2) `appendFallbackNeighbors` drops an
+	unignored test file from the passive-snapshot fallback (ignore filtering
+	stays separate and unchanged); (3) `runtime-turn.ts` filters call-graph
+	`impact()` results so a test caller appears in neither the turn-end advisory
+	text nor the persisted delta; (4) `callGraphImpactToProjectDiagnostics`
+	re-applies the predicate at the persistence producer boundary. Honesty
+	preserved: a KNOWN `"test"` role is filtered, but a role-classification
+	failure RETAINS the candidate (never a false clean), the ignore matcher's
+	fail-open behavior is untouched, and LSP-unavailable/inconclusive cascade
+	semantics are unchanged. Per-runner and auxiliary-profile `skipTestFiles`
+	semantics, primary LSP diagnostics, intentional test-runner findings, and
+	the generic project-diagnostics snapshot/delta display are all left as-is.
+
 ### Added
 
 - **Source-walk generated-artifact escape hatch (closes #1107, phase 2 of 2)** — three pieces, building on phase 1's

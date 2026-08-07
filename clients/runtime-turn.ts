@@ -28,6 +28,7 @@ import {
 	toRunnerDisplayPath,
 } from "./dispatch/runner-context.js";
 import { getKnipIgnorePatterns } from "./file-utils.js";
+import { isTestRoleCollateral } from "./collateral-test-role.js";
 import type { GitleaksResult } from "./gitleaks-client.js";
 import type { GovulncheckResult } from "./govulncheck-client.js";
 import type { TrivyResult } from "./trivy-client.js";
@@ -948,7 +949,20 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					return normalizeMapKey(resolveRunnerPath(cwd, graphFilePath)) === changedFileKey;
 				});
 				for (const calleeKey of fileCallerKeys.slice(0, 3)) {
-					const results = impact(runtime.callGraph, calleeKey);
+					// #1080: drop KNOWN test-role callers BEFORE both the human advisory
+					// (formatImpact below) and the persisted delta (impactFindings →
+					// callGraphImpactToProjectDiagnostics) — the advisory is rendered
+					// first, so the filter must reach the shared `results` set that feeds
+					// both. A test caller supplied by an old/fixture/expanded graph must
+					// appear in neither surface. Fail-open: an unparseable/unclassifiable
+					// key is retained (the adapter re-applies the same predicate).
+					const results = impact(runtime.callGraph, calleeKey).filter((r) => {
+						const callerFile = parseSymbolKey(r.symbolKey).filePath;
+						return (
+							!callerFile ||
+							!isTestRoleCollateral(resolveRunnerPath(cwd, callerFile))
+						);
+					});
 					if (results.length > 0) {
 						impactFindings.push({ calleeKey, results });
 						const summary = formatImpact(results, cwd);
