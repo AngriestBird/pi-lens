@@ -183,4 +183,45 @@ describe("safeSpawnAsync — non-Windows kill escalation timer cleanup (#1109)",
 		expect(result.error).toBeInstanceOf(Error);
 		expect(clearedHandles.has(escalationHandle)).toBe(true);
 	});
+
+	// #1114: the escalation callback itself was dead code — it checked
+	// `!child.killed`, but Node sets `child.killed = true` the moment
+	// `kill()` SENDS a signal (not when the child actually dies), so
+	// immediately after the `child.kill("SIGTERM")` one line above, the
+	// guard is always false and `child.kill("SIGKILL")` can never run. This
+	// is the "escalation fires" case the timer-cleanup tests above don't
+	// cover: they only ever emit "close"/"error" before the 1s mark, so the
+	// callback's *body* never executes in those tests. Here the child
+	// ignores SIGTERM outright (no close/error emitted at all) and we
+	// advance the fake clock past 1000ms — pre-fix this assertion fails
+	// because SIGKILL is never sent; post-fix (`!closed` gating, closed only
+	// flips true from an observed close/error) it fires as designed.
+	it("escalates SIGTERM to SIGKILL at the 1s mark when the child ignores SIGTERM (#1114)", async () => {
+		const child = makeFakeChild();
+		spawnMock.mockReturnValue(child);
+
+		const controller = new AbortController();
+		const resultPromise = safeSpawnAsync("fake-cmd", [], {
+			signal: controller.signal,
+			timeout: 30_000,
+		});
+		controller.abort();
+
+		// killTree's non-Windows branch runs synchronously off the abort
+		// listener: SIGTERM is sent and the 1s escalation timer is armed.
+		expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+		expect(child.kill).not.toHaveBeenCalledWith("SIGKILL");
+
+		// The child never emits "close" or "error" — it ignores SIGTERM.
+		// Advancing past the 1s escalation window must send SIGKILL.
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+
+		// Let the child actually die now so the pending promise settles and
+		// the test can complete cleanly.
+		child.killed = true;
+		child.emit("close", null, "SIGKILL");
+		const result = await resultPromise;
+		expect(result.failure).toBe("aborted");
+	});
 });

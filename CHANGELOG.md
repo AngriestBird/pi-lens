@@ -6,6 +6,44 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Dead SIGTERM→SIGKILL escalation guard on non-Windows kills (closes #1114)**
+	— `clients/safe-spawn.ts`'s non-Windows `killTree` branch armed a 1s
+	escalation timer gated on `if (!child.killed) child.kill("SIGKILL")`, but
+	Node sets `ChildProcess#killed = true` the moment `kill()` successfully
+	SENDS a signal — not when the child actually dies — so immediately after
+	the `child.kill("SIGTERM")` one line above, the guard was always false
+	and the SIGKILL escalation could never fire: a SIGTERM-ignoring child on
+	Linux/macOS was never force-killed. Fixed by tracking OBSERVED death via a
+	`closed` flag set synchronously (before any `await`) in the close/error
+	handlers, gating the escalation on `!closed` instead — composes cleanly
+	with the existing #1109/#1113 `escalationTimer` clear-on-close fix rather
+	than switching to the LSP `killProcessTree` analog's unconditional-SIGKILL
+	design, since `safeSpawnAsync` already has a real per-call close/error
+	observation point to hang the flag off of. Proven with a new "child
+	ignores SIGTERM → SIGKILL sent at the 1s mark" test
+	(`tests/clients/safe-spawn-kill-escalation-timer.test.ts`) that fails
+	against the pre-fix guard and passes post-fix; the existing #1109 timer-leak
+	tests (escalation timer cleared when close/error DOES arrive) remain green.
+	**Class sweep** of every `.killed` consumer under `clients/` and `scripts/`
+	found two siblings of the same shape in `clients/lsp/client.ts`'s
+	`killProcessTree`/`createLSPClient` and fixed both in this PR: (1) the
+	`fast`-shutdown escalation timer checked `!proc.killed`, but the primary
+	SIGTERM send there goes through the raw `process.kill(-pid, …)` process-group
+	call (which never touches `proc.killed`), so the guard was either always-true
+	(unconditional SIGKILL after the window on the common group-kill path) or
+	dead (on the direct-child fallback path) — now tracked via a real `exit`
+	listener set once up front; (2) the `initialize()`-timeout 2s SIGKILL
+	backstop had the identical always-true `!lspProcess.process.killed` guard —
+	switched to `lspProcess.process.exitCode === null`, the process's own
+	observed-exit signal. Other `.killed` reads audited and left as-is because
+	they're liveness/status checks, not escalation-action gates:
+	`isClientAlive`'s `!state.lspProcess.process.killed` (redundant with
+	`isDestroyed`, already set from real exit/close handlers),
+	`checkProcessAlive`'s informational "was killed" health-check string,
+	`launch.ts`'s post-spawn immediate-failure check (`proc.killed` read before
+	any kill was ever sent), `scripts/with-test-lock.mjs`'s `.once`-registered
+	first-forward guard, and `scripts/smoke-tools.mjs`'s read of Node's own
+	`execFileSync` timeout-kill flag on the caught error object.
 - **mtime-only cache freshness sweep (refs #1105)** — the #1092→#1096 arc bound
 	LSP-diagnostics freshness to real content; this sweep audited the OTHER
 	persisted/derived caches for the same "mtime unchanged ≠ content unchanged"
