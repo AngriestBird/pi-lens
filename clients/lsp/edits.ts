@@ -455,6 +455,15 @@ export interface MergeWorkspaceEditsResult {
 
 export function mergeWorkspaceTextEditsByPriority(entries: Array<{ serverId: string; edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] } | null | undefined }>): MergeWorkspaceEditsResult {
 	const merged = new Map<string, LSPTextEdit[]>();
+	// Exact-duplicate dedup is a CROSS-SERVER concern only: two servers proposing
+	// the identical non-empty replace should collapse to one. Zero-width inserts
+	// are never deduplicated here — same as `validateTextEdits` on the normal
+	// apply path — because their multiplicity is meaningful: a single server can
+	// legitimately emit several identical zero-width inserts at one position
+	// (e.g. `willRenameFiles` producing "QQ" twice for an "aQQbc" edit), and
+	// deduping on exact key alone would silently drop the duplicate within that
+	// one server's own edit, contradicting the invariant documented above
+	// `validateTextEdits`.
 	const seenExact = new Set<string>();
 	let droppedConflicts = 0;
 	let inputEditCount = 0;
@@ -466,13 +475,13 @@ export function mergeWorkspaceTextEditsByPriority(entries: Array<{ serverId: str
 			const kept = merged.get(uri) ?? [];
 			for (const edit of edits) {
 				inputEditCount += 1;
-				const exactKey = textEditKey(uri, edit);
-				if (seenExact.has(exactKey)) continue;
+				const exactKey = isEmptyRange(edit.range) ? undefined : textEditKey(uri, edit);
+				if (exactKey !== undefined && seenExact.has(exactKey)) continue;
 				if (kept.some((existing) => rangesOverlap(existing.range, edit.range))) {
 					droppedConflicts += 1;
 					continue;
 				}
-				seenExact.add(exactKey);
+				if (exactKey !== undefined) seenExact.add(exactKey);
 				kept.push(edit);
 			}
 			if (kept.length > 0) merged.set(uri, kept);

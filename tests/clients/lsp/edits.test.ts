@@ -956,3 +956,39 @@ describe("LSP workspace edits — path casing preservation (P1-2)", () => {
 		} finally { removeTempDirSync(tmpDir); }
 	});
 });
+
+// #1085 P3 bundle — deferrals from #1120's review rounds (P3-1, the two P1s,
+// and the P2 clamp shipped in #1120; P3-5 CRLF-boundary and P3-7 plaintext-
+// reopen remain separately deferred, see the PR body).
+describe("LSP workspace edits — #1085 P3 bundle", () => {
+	it("P3-2: keeps duplicate zero-width inserts from one server's own edit on the renameFile merge path", () => {
+		const uri = "file:///tmp/rename-merge.ts";
+		const zeroWidthInsert = {
+			range: { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } },
+			newText: "Q",
+		};
+		const result = mergeWorkspaceTextEditsByPriority([
+			{
+				serverId: "typescript",
+				edit: { changes: { [uri]: [zeroWidthInsert, zeroWidthInsert] } },
+			},
+		]);
+		// Both duplicates from the SAME server's own edit survive (their
+		// multiplicity is meaningful — see the doc above `validateTextEdits`).
+		expect(result.edit.changes[uri]).toHaveLength(2);
+		expect(applyTextEditsToString("abc", result.edit.changes[uri])).toBe("aQQbc");
+
+		// Cross-server exact duplicates are still collapsed to one (unchanged
+		// invariant): two DIFFERENT servers proposing the identical non-empty
+		// replace should not double-apply.
+		const nonEmptyReplace = {
+			range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+			newText: "X",
+		};
+		const crossServer = mergeWorkspaceTextEditsByPriority([
+			{ serverId: "typescript", edit: { changes: { [uri]: [nonEmptyReplace] } } },
+			{ serverId: "eslint", edit: { changes: { [uri]: [nonEmptyReplace] } } },
+		]);
+		expect(crossServer.edit.changes[uri]).toHaveLength(1);
+	});
+});
