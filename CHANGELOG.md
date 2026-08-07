@@ -6,6 +6,36 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Post-init runtime exits now count toward the LSP circuit breaker (closes #1127)**
+	— `LSPService`'s (`clients/lsp/index.ts`) exponential-backoff breaker
+	(`failureCounts` → cooldown → permanent-disable after
+	`BROKEN_PERMANENT_AFTER`) only incremented on spawn/initialize failure.
+	A server whose spawn SUCCEEDS but then exits shortly after (opengrep's
+	post-init "Unhandled message" JSON-RPC crash, per #1122's Phase C
+	corroborating-signal review — 37 respawns in one real session, never
+	converging) hit the "dead client — needs respawn" path instead, which
+	never touched the breaker: `failureCounts` was already cleared by the
+	preceding successful spawn and the runtime exit itself was never counted.
+	Fixed by adding a parallel `runtimeExitCounts` counter fed only by EARLY
+	(uptime < 60s) non-intentional exits, sharing the same cooldown formula
+	and the same `state.broken`/`permanentlyBroken` maps as the existing
+	breaker — tracked separately from `failureCounts` specifically because a
+	successful respawn (which correctly resets the spawn/init failure streak)
+	is not proof of health for a crash-loop server, so reusing that map would
+	erase the streak on every respawn attempt (the #1127 bug). Deliberate
+	teardowns (session reset, `#743` notify-backpressure eviction, generation
+	handoffs) call `shutdown()` themselves before the process exits and set
+	`shutdownRequested`; a new `wasShutdownIntentional()` accessor on
+	`LSPClientInfo` (`clients/lsp/client.ts`) exposes that flag so the breaker
+	distinguishes a genuine crash from a restart it initiated and never counts
+	the latter. New coverage in
+	`tests/clients/lsp/service-runtime-exit-breaker.test.ts`: a crash-loop
+	respawn sequence converges to permanent-disable instead of respawning
+	forever (fails against pre-fix behavior), a deliberate
+	`shutdown()`-driven restart sequence never counts, and a runtime exit past
+	the uptime threshold resets the streak instead of counting. Full existing
+	LSP suite (534 tests) stays green.
+
 - **Dead SIGTERM→SIGKILL escalation guard on non-Windows kills (closes #1114)**
 	— `clients/safe-spawn.ts`'s non-Windows `killTree` branch armed a 1s
 	escalation timer gated on `if (!child.killed) child.kill("SIGKILL")`, but

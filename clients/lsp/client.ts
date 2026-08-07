@@ -236,6 +236,15 @@ export interface LSPClientInfo {
 	isAlive: () => boolean;
 	/** True if the server process has exited or been killed */
 	processExited: () => boolean;
+	/**
+	 * #1127: true only when THIS client's own `shutdown()` was called before
+	 * it went dead (session teardown, `#743` notify-backpressure eviction,
+	 * generation resets, …). False for a genuine crash — process exit/signal
+	 * with no preceding `shutdown()` call — so a caller respawning a dead
+	 * client can tell a deliberate kill apart from an unexpected runtime exit
+	 * and only count the latter toward the failure breaker.
+	 */
+	wasShutdownIntentional: () => boolean;
 	/** Last N lines of server stderr for diagnostics */
 	recentStderr: (lines?: number) => string;
 	/** Pre-request health check — returns error string if process is dead */
@@ -2305,6 +2314,9 @@ export async function createLSPClient(options: {
 		processExited: () =>
 			lspProcess.process.exitCode !== null ||
 			(lspProcess.process as { killed?: boolean }).killed === true,
+
+		/** #1127: mirrors `state.shutdownRequested` — see interface doc. */
+		wasShutdownIntentional: () => state.shutdownRequested,
 
 		/** Last N lines of server stderr for diagnostics. */
 		recentStderr: (lines?: number) => recentStderr(lines),

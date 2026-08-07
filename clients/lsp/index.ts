@@ -209,6 +209,12 @@ export interface LSPState {
 const BROKEN_BASE_COOLDOWN_MS = 15_000;
 const BROKEN_MAX_COOLDOWN_MS = 5 * 60_000; // cap at 5 minutes
 const BROKEN_PERMANENT_AFTER = 5; // disable for session after N consecutive failures
+// #1127: a client that dies THIS soon after a successful spawn/initialize is
+// treated as a crash-loop symptom (opengrep's post-init "Unhandled message"
+// exit), not a legitimate long-running server that happened to restart once.
+// 60s comfortably covers normal serve-a-few-files-then-idle sessions while
+// still catching "spawns fine, dies within seconds every time" servers.
+const RUNTIME_EXIT_UPTIME_THRESHOLD_MS = 60_000;
 // #743: a server whose per-server notify write (didOpen/didChange) times out
 // this many times in a row is a persistently backpressured server; it is demoted
 // into the `broken` cooldown map (evicted + cooled down) so subsequent sweeps
@@ -770,6 +776,21 @@ export class LSPService {
 	private readonly optionalDisabled = new Set<string>();
 	/** Consecutive failure counts for exponential backoff circuit breaker */
 	private readonly failureCounts = new Map<string, number>();
+	/**
+	 * #1127: consecutive EARLY post-init runtime exits — a client that closed
+	 * unexpectedly (not via our own `shutdown()`) with an uptime under
+	 * {@link RUNTIME_EXIT_UPTIME_THRESHOLD_MS}. Tracked separately from
+	 * {@link failureCounts} because a successful spawn/initialize clears that
+	 * map (correct for the spawn/init failure class it was built for — see
+	 * `spawnClient`'s success path) but is exactly the event a crash-loop
+	 * server keeps producing right before it dies again; reusing the same map
+	 * would make every respawn erase the streak the moment it re-spawned,
+	 * which is the #1127 bug. This counter shares the SAME cooldown formula,
+	 * the SAME `state.broken`/`permanentlyBroken` maps, and the SAME
+	 * give-up-after-N-failures threshold as the spawn/init breaker — it is a
+	 * parallel counter feeding one circuit, not a second mechanism.
+	 */
+	private readonly runtimeExitCounts = new Map<string, number>();
 	/** Server/root keys disabled for the rest of this session after repeated failures. */
 	private readonly permanentlyBroken = new Set<string>();
 	/**
@@ -1302,6 +1323,12 @@ export class LSPService {
 			}
 			// Dead client — was previously alive, now needs respawn
 			const spawnedAt = this.state.clientSpawnedAt.get(key);
+			const uptimeMs = spawnedAt != null ? Date.now() - spawnedAt : null;
+			// #1127: capture BEFORE calling existing.shutdown() below — that call
+			// itself sets shutdownRequested=true as a side effect of our own
+			// cleanup, which would make every crash look "intentional" if read
+			// afterward.
+			const wasIntentional = existing.wasShutdownIntentional();
 			logLatency({
 				type: "phase",
 				phase: "lsp_server_respawn",
@@ -1310,7 +1337,8 @@ export class LSPService {
 				metadata: {
 					serverId: server.id,
 					root,
-					uptimeMs: spawnedAt != null ? Date.now() - spawnedAt : null,
+					uptimeMs,
+					intentional: wasIntentional,
 				},
 			});
 			try {
@@ -1321,6 +1349,50 @@ export class LSPService {
 			this.state.clients.delete(key);
 			this.state.clientSpawnedAt.delete(key);
 			this.state.broken.delete(key);
+
+			// #1127: count EARLY, non-intentional runtime exits toward the circuit
+			// breaker. Spawn/initialize itself succeeded here (this client made it
+			// into state.clients), so `failureCounts` — the spawn/init breaker —
+			// never saw this failure and was cleared to 0 on that earlier success.
+			// Without this, a server that spawns fine and then dies shortly after
+			// serving (opengrep's post-init "Unhandled message" crash, #1122/#1127)
+			// respawns forever: cooldown/permanent-disable never engage.
+			//
+			// Deliberate teardowns (session reset, #743 notify-backpressure
+			// eviction, a generation handoff) call `shutdown()` themselves and set
+			// `shutdownRequested` before the process exits — those must never count,
+			// or a legitimate restart would wrongly march the server toward
+			// permanent disablement.
+			if (wasIntentional) {
+				// Not evidence of a bad server — leave any existing runtime-exit
+				// streak alone (a deliberate restart is not a recovery signal
+				// either; only clear the streak once the server proves itself by
+				// staying up past the threshold, handled in the `else` below).
+			} else if (uptimeMs != null && uptimeMs < RUNTIME_EXIT_UPTIME_THRESHOLD_MS) {
+				const rCount = (this.runtimeExitCounts.get(key) ?? 0) + 1;
+				this.runtimeExitCounts.set(key, rCount);
+				const rCooldown = Math.min(
+					BROKEN_BASE_COOLDOWN_MS * 2 ** (rCount - 1),
+					BROKEN_MAX_COOLDOWN_MS,
+				);
+				this.state.broken.set(key, Date.now() + rCooldown);
+				if (!isOptionalServer && rCount >= BROKEN_PERMANENT_AFTER) {
+					this.permanentlyBroken.add(key);
+					logSessionStart(
+						`lsp respawn ${server.id}: permanently disabled after ${rCount} early post-init exits (uptimeMs=${uptimeMs})`,
+					);
+				} else {
+					logSessionStart(
+						`lsp respawn ${server.id}: early post-init exit ${rCount}/${BROKEN_PERMANENT_AFTER} (uptimeMs=${uptimeMs}), cooldown=${rCooldown}ms`,
+					);
+				}
+			} else {
+				// Survived past the threshold (or uptime unknown) before dying —
+				// this was a functioning server, not a crash loop. Reset the streak
+				// so an occasional post-longrun crash doesn't creep it toward
+				// permanent disablement.
+				this.runtimeExitCounts.delete(key);
+			}
 		}
 
 		const brokenUntil = this.state.broken.get(key);
@@ -4495,7 +4567,13 @@ export class LSPService {
 			return {
 				serverId: separator >= 0 ? key.slice(0, separator) : key,
 				root: separator >= 0 ? key.slice(separator + 1) : "",
-				failures: this.failureCounts.get(key) ?? 0,
+				// #1127: spawn/init failures and early post-init runtime exits are
+				// two streams feeding the same breaker (see `runtimeExitCounts`
+				// doc) — sum them so this always reflects the total churn behind
+				// a cooldown/permanent-disable, whichever stream produced it.
+				failures:
+					(this.failureCounts.get(key) ?? 0) +
+					(this.runtimeExitCounts.get(key) ?? 0),
 				permanentlyBroken: this.permanentlyBroken.has(key),
 				cooldownUntil: this.state.broken.get(key) ?? 0,
 			};
