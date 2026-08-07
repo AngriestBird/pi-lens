@@ -6,6 +6,34 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **mtime-only cache freshness sweep (refs #1105)** — the #1092→#1096 arc bound
+	LSP-diagnostics freshness to real content; this sweep audited the OTHER
+	persisted/derived caches for the same "mtime unchanged ≠ content unchanged"
+	class (git checkout timestamp restoration, formatters preserving mtime,
+	same-second writes) and hardened the two CONTAINED members whose fix is free:
+	- **word index** (`clients/word-index.ts`): the incremental session-warmup
+		refresh gated re-read on mtime ALONE (`fileMtimes.get(file) !== mtimeMs`), so
+		a mtime-preserving content change left stale identifiers served to
+		`symbol_search`/`pilens_symbol_search`. It now stores a per-file byte `size`
+		(the SAME `stat` the walk already runs to enforce the byte cap — zero extra
+		I/O) and re-reads when mtime OR size differs, matching the review graph's
+		gold-standard `size:mtimeMs` first filter. `size` is a new optional parallel
+		array in the serialized snapshot (`SerializedWordIndex.fileSizes`); a
+		pre-#1105 snapshot lacking it forces one self-healing full re-read on the
+		next refresh (the safe direction) rather than a version bump.
+	- **dependency checker** (`clients/dependency-checker.ts`):
+		`DependencyChecker.importsChanged`'s mtime fast path (`cached.timestamp >=
+		stat.mtimeMs`) skipped the madge circular-dep re-check on a mtime-preserving
+		import edit; it now also requires `cached.size === stat.size`.
+
+	The residual (same mtime AND same byte length, changed content) is left as the
+	same accepted residual the review graph itself carries — closing it needs an
+	unconditional per-read content hash, which the event-loop/hot-path discipline
+	forbids. The sweep's full verdict table (word-index/dependency-checker fixed;
+	project-snapshot seq, installer probe-cache, sgconfig, reverse-deps, TreeCache,
+	yaml-rule-parser bundled cache all SAFE/already-hardened; rule-cache disk cache
+	filed as a follow-up because a content-confirm there would read 700+ rule files
+	on the per-edit hot path) is recorded in the PR.
 - **Test-role files no longer leak into collateral cascade/impact surfaces (closes #1080)**
 	— the review graph is already tests-free, but several
 	collateral surfaces re-derived neighbors from OTHER sources that never saw
