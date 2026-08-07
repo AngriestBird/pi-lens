@@ -2005,4 +2005,270 @@ describe("computeCascadeForFile", () => {
 			}
 		});
 	});
+
+	// #1104: the cascade's DEGRADED/FALLBACK display paths (the touch-error
+	// fallback and appendFallbackNeighbors) previously re-read TTL-fresh
+	// `getAllDiagnostics()` snapshots WITHOUT consulting content binding — #1100
+	// gated the RECONCILE (footer/widget) path onto binding, but a bound-false
+	// (pre-fix-edit) snapshot could still reach cascade OUTPUT via these two
+	// tier3-silent corners. Tighten both to the same false/unknown/true contract
+	// #1100/#1095 already established for reconcile, and verify filtering a
+	// display candidate never quietly turns a degraded cascade into a
+	// clean-looking one.
+	describe("fallback-display binding gaps (#1104)", () => {
+		it("touch-error fallback excludes a bound-false TTL-fresh snapshot from cascade DISPLAY output", async () => {
+			const env = setupTestEnvironment("cascade-1104-touch-fallback-");
+			try {
+				const primary = path.join(env.tmpDir, "model.py");
+				const rejectedNeighbor = path.join(env.tmpDir, "stale_api.py");
+				const confirmedNeighbor = path.join(env.tmpDir, "live_api.py");
+				fs.writeFileSync(primary, "class User: pass\n");
+				fs.writeFileSync(rejectedNeighbor, "from model import User\n");
+				fs.writeFileSync(confirmedNeighbor, "from model import User\n");
+				mocks.computeImpactCascade.mockReturnValue(
+					impact(primary, [rejectedNeighbor, confirmedNeighbor]),
+				);
+				mocks.getLSPService.mockReturnValue({
+					// TTL-fresh snapshot for the neighbor whose active touch will fail —
+					// but bound-false (the server's view diverged from current disk, a
+					// pre-fix-edit read).
+					getAllDiagnostics: vi.fn().mockResolvedValue(
+						new Map([
+							[
+								rejectedNeighbor.split(path.sep).join("/"),
+								withBinding(
+									{ diags: [lspError("stale pre-fix error")], ts: Date.now() },
+									false,
+								),
+							],
+						]),
+					),
+					touchFile: vi
+						.fn()
+						.mockImplementation(async (filePath: string) => {
+							if (filePath === rejectedNeighbor) {
+								throw new Error("touch failed");
+							}
+							return [lspError("confirmed live error")];
+						}),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				const rejected = result?.result?.neighbors.find(
+					(n) => n.filePath === rejectedNeighbor,
+				);
+				// The stale/bound-false snapshot must not survive into the fallback
+				// entry's displayed diagnostics.
+				expect(rejected?.diagnostics ?? []).toEqual([]);
+				expect(
+					result?.result?.neighbors.some((n) =>
+						n.diagnostics.some((d) => d.message === "stale pre-fix error"),
+					),
+				).toBe(false);
+				// The genuinely confirmed neighbor's error still reaches output —
+				// proves the fix is a targeted skip, not a blanket suppression.
+				expect(result?.result?.formatted).toContain("confirmed live error");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("characterization: touch-error fallback with unknown binding still displays the TTL-fresh snapshot exactly as before", async () => {
+			const env = setupTestEnvironment("cascade-1104-touch-fallback-unknown-");
+			try {
+				const primary = path.join(env.tmpDir, "model.py");
+				const neighbor = path.join(env.tmpDir, "api.py");
+				fs.writeFileSync(primary, "class User: pass\n");
+				fs.writeFileSync(neighbor, "from model import User\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(
+						new Map([
+							[
+								neighbor.split(path.sep).join("/"),
+								withBinding(
+									{ diags: [lspError("unknown-bound stale error")], ts: Date.now() },
+									"unknown",
+								),
+							],
+						]),
+					),
+					touchFile: vi.fn().mockRejectedValue(new Error("touch failed")),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				expect(
+					result?.result?.neighbors[0]?.diagnostics[0]?.message,
+				).toBe("unknown-bound stale error");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("appendFallbackNeighbors excludes a bound-false TTL-fresh snapshot from cascade DISPLAY output", async () => {
+			const env = setupTestEnvironment("cascade-1104-append-fallback-");
+			try {
+				const primary = path.join(env.tmpDir, "main.ts");
+				// Unknown extension neighbor keeps producedLspData false (no LSP
+				// server configured), driving the run into appendFallbackNeighbors
+				// exactly like the pre-existing "falls back to passive snapshot" test.
+				const noLspNeighbor = path.join(env.tmpDir, "neighbor.foo");
+				const staleFile = path.join(env.tmpDir, "stale.ts");
+				const liveFile = path.join(env.tmpDir, "live.ts");
+				fs.writeFileSync(primary, "export const x = 1;\n");
+				fs.writeFileSync(noLspNeighbor, "neighbor\n");
+				fs.writeFileSync(staleFile, "const x = 1;\n");
+				fs.writeFileSync(liveFile, "const y = 2;\n");
+				mocks.computeImpactCascade.mockReturnValue(
+					impact(primary, [noLspNeighbor]),
+				);
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(
+						new Map([
+							[
+								staleFile.split(path.sep).join("/"),
+								withBinding(
+									{ diags: [lspError("stale collateral error")], ts: Date.now() },
+									false,
+								),
+							],
+							[
+								liveFile.split(path.sep).join("/"),
+								{ diags: [lspError("live collateral error")], ts: Date.now() },
+							],
+						]),
+					),
+					touchFile: vi.fn(),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				expect(
+					result?.result?.neighbors.some((n) => n.filePath === staleFile),
+				).toBe(false);
+				expect(result?.result?.formatted).not.toContain(
+					"stale collateral error",
+				);
+				expect(result?.result?.formatted).toContain("live collateral error");
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("characterization: appendFallbackNeighbors with unknown binding still displays the collateral entry exactly as before", async () => {
+			const env = setupTestEnvironment(
+				"cascade-1104-append-fallback-unknown-",
+			);
+			try {
+				const primary = path.join(env.tmpDir, "main.ts");
+				const noLspNeighbor = path.join(env.tmpDir, "neighbor.foo");
+				const fallbackFile = path.join(env.tmpDir, "already-open.ts");
+				fs.writeFileSync(primary, "export const x = 1;\n");
+				fs.writeFileSync(noLspNeighbor, "neighbor\n");
+				fs.writeFileSync(fallbackFile, "const x = 1;\n");
+				mocks.computeImpactCascade.mockReturnValue(
+					impact(primary, [noLspNeighbor]),
+				);
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(
+						new Map([
+							[
+								fallbackFile.split(path.sep).join("/"),
+								withBinding(
+									{ diags: [lspError("unknown-bound fallback error")], ts: Date.now() },
+									"unknown",
+								),
+							],
+						]),
+					),
+					touchFile: vi.fn(),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				expect(result?.result?.formatted).toContain(
+					"unknown-bound fallback error",
+				);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("HONESTY: when every appendFallbackNeighbors candidate is binding-rejected, the cascade still renders degraded/indeterminate — never a silent clean", async () => {
+			const env = setupTestEnvironment("cascade-1104-honesty-");
+			try {
+				const primary = path.join(env.tmpDir, "main.ts");
+				const noLspNeighbor = path.join(env.tmpDir, "neighbor.foo");
+				const staleFile = path.join(env.tmpDir, "stale.ts");
+				fs.writeFileSync(primary, "export const x = 1;\n");
+				fs.writeFileSync(noLspNeighbor, "neighbor\n");
+				fs.writeFileSync(staleFile, "const x = 1;\n");
+				mocks.computeImpactCascade.mockReturnValue(
+					impact(primary, [noLspNeighbor]),
+				);
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(
+						new Map([
+							[
+								staleFile.split(path.sep).join("/"),
+								withBinding(
+									{ diags: [lspError("withheld stale error")], ts: Date.now() },
+									false,
+								),
+							],
+						]),
+					),
+					touchFile: vi.fn(),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const result = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 1,
+				});
+
+				// Not a genuine clean leaf: the withheld candidate must surface an
+				// honest indeterminate advisory (#1023's doctrine, extended by
+				// #1104) instead of silently looking clean/no_neighbors.
+				expect(result?.skipReason).toBe("indeterminate");
+				expect(result?.indeterminate?.reason).toBe("lsp_binding_rejected");
+				expect(result?.result).toBeUndefined();
+			} finally {
+				env.cleanup();
+			}
+		});
+	});
 });
