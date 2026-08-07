@@ -86,6 +86,30 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **Oxfmt formatting support for Svelte (refs #1134)** — `.svelte` is now a
+	recognized oxfmt extension, gated by a stricter conditional than oxfmt's
+	other extensions. Empirically verified against the real `oxfmt` npm
+	package (0.62.0, scratch fixture outside vitest, per this repo's
+	verify-the-CLI-contract-empirically rule): oxfmt requires BOTH the
+	`svelte` package installed AND the config's `svelte: true` flag enabled —
+	either alone exits non-zero ("excluded by ignore rules" or "Cannot find
+	module 'svelte/compiler'"), only both together format the file. The new
+	`hasOxfmtSvelteConfig` (`clients/tool-policy.ts`) encodes this, consulted
+	only for `.svelte` in `formatters.ts`'s `hasExplicitFormatterConfig` — the
+	other oxfmt extensions are unaffected. **Class fix**:
+	`oxfmtFormatter.extensions` (`clients/formatters.ts`) and
+	`OXFMT_SUPPORTED_EXTENSIONS` (`clients/tool-policy.ts`) were two
+	hand-maintained parallel lists (the #883 single-source-of-truth class);
+	`OXFMT_SUPPORTED_EXTENSIONS` is now exported as the sole source of truth
+	and `oxfmtFormatter.extensions` derives from it directly, plus a drift-guard
+	test asserting they stay equal. `docs/language-coverage.md`'s Svelte row now
+	reports the formatter and its gating condition instead of "—". The real
+	format-smoke fixture (`tests/fixtures/format-smoke/`) was NOT extended: no
+	fixture in that harness has a dependency-install step (oxfmt itself is only
+	found via a global `which` lookup, not `ensureTool`), so a svelte fixture
+	would either always skip (oxfmt unavailable) or, worse, hard-fail with a
+	"Cannot find module 'svelte/compiler'" error if oxfmt happened to resolve
+	without svelte actually installed — a strictly worse risk than omitting it.
 - **Source-walk generated-artifact escape hatch (closes #1107, phase 2 of 2)** — three pieces, building on phase 1's
 	counters (#1111):
 	1. **Directory-level skip counting.** `shouldRecurseIntoDir`'s
