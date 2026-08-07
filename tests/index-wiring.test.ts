@@ -351,7 +351,9 @@ describe("index.ts extension wiring", () => {
 
 			const out = ctx.notifications.map((n) => n.message).join("\n");
 			expect(out).toContain("🩺 PI-LENS HEALTH");
-			expect(out).toContain("Event loop (session):");
+			// #1122: the session worst is now the worst *genuine* (non-stall) block,
+			// tracked outside the per-turn histogram window.
+			expect(out).toContain("Event loop: worst genuine block");
 		});
 	});
 
