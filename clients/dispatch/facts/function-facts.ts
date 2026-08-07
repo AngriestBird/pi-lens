@@ -145,7 +145,16 @@ function getParameters(node: TsNode): TsNode[] {
 				c.type === "required_parameter" ||
 				c.type === "optional_parameter" ||
 				c.type === "rest_pattern" ||
-				c.type === "assignment_pattern"),
+				c.type === "assignment_pattern" ||
+				// Plain JavaScript's grammar places a top-level destructured
+				// parameter directly as an object_pattern/array_pattern child
+				// of formal_parameters — no required_parameter wrapper (the TS
+				// grammar always wraps every parameter, destructured or not,
+				// which is why the wrapper types above already covered TS).
+				// Without this, `function f({a, b})` counted 0 params in JS
+				// while the TS-annotated equivalent counted correctly (#1089 P3-4).
+				c.type === "object_pattern" ||
+				c.type === "array_pattern"),
 	);
 }
 

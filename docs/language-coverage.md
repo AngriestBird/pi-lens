@@ -20,7 +20,7 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | HTML                  | ✓   | lsp, htmlhint                                                                                                  | prettier                |
 | YAML                  | ✓   | lsp, yamllint, actionlint (GitHub workflows)                                                                   | prettier                |
 | JSON                  | ✓   | lsp                                                                                                            | biome, prettier         |
-| Svelte                | ✓   | lsp                                                                                                            | —                       |
+| Svelte                | ✓   | lsp                                                                                                            | oxfmt (needs `svelte` pkg installed + config `svelte: true`) |
 | Vue                   | ✓   | lsp                                                                                                            | —                       |
 | SQL                   | —   | sqlfluff                                                                                                       | sqlfluff                |
 | Markdown              | —   | spellcheck, markdownlint, vale                                                                                 | prettier                |

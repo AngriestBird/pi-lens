@@ -655,10 +655,15 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 // oxfmt supports these extensions — registered as a candidate formatter for each.
 // Using a post-processing pass avoids repeating the same modification across
 // many map entries (and keeps SonarCloud's duplication gate happy).
-const OXFMT_SUPPORTED_EXTENSIONS = new Set([
+// This is the SINGLE SOURCE OF TRUTH for oxfmt's supported extensions — do not
+// hand-maintain a second copy; `clients/formatters.ts`'s `oxfmtFormatter.extensions`
+// imports and spreads this same Set (#1134; previously two parallel hand-maintained
+// lists, the #883 single-source-of-truth class).
+export const OXFMT_SUPPORTED_EXTENSIONS = new Set([
 	".js", ".jsx", ".mjs", ".cjs",
 	".ts", ".tsx", ".mts", ".cts",
 	".vue",
+	".svelte",
 	".css", ".scss", ".less",
 	".html", ".htm",
 	".json", ".jsonc",
@@ -672,6 +677,23 @@ const OXFMT_SUPPORTED_EXTENSIONS = new Set([
 FORMATTER_POLICY_BY_EXTENSION.set(".vue", {
 	formatterNames: ["prettier"],
 	defaultFormatter: "prettier",
+	defaultWhenUnconfigured: false,
+	gate: "config-first",
+});
+
+// Add .svelte entry (no prior formatter policy existed for this extension —
+// docs/language-coverage.md previously listed no formatter). oxfmt is the only
+// candidate; the loop below appends it since ".svelte" is in
+// OXFMT_SUPPORTED_EXTENSIONS. Unlike the other oxfmt extensions, oxfmt's
+// .svelte support is conditional on more than "a config file exists" — see
+// `hasOxfmtSvelteConfig` below, gated in `formatters.ts`'s
+// `hasExplicitFormatterConfig` (verified empirically against the real oxfmt
+// npm binary; oxfmt exits non-zero on .svelte without BOTH the `svelte`
+// package installed and the config's `svelte` flag enabled — an unconditional
+// offer would guarantee a formatter failure, not a no-op).
+FORMATTER_POLICY_BY_EXTENSION.set(".svelte", {
+	formatterNames: [],
+	defaultFormatter: "oxfmt",
 	defaultWhenUnconfigured: false,
 	gate: "config-first",
 });
@@ -1866,6 +1888,49 @@ export function hasOxfmtConfig(cwd: string): boolean {
 				};
 				// Published package is `oxfmt`; the scoped name does not exist on npm.
 				if (deps["oxfmt"] || deps["@oxc-project/oxfmt"]) return true;
+			} catch {}
+		}
+	}
+	return false;
+}
+
+// Empirically verified against the real `oxfmt` npm package (0.62.0), a
+// scratch fixture, and a plain `Component.svelte` — see PR body for the full
+// four-cell matrix. Both conditions are required; either alone always fails:
+//   - no `svelte` package, no config flag  -> exit 2 ("excluded by ignore rules")
+//   - no `svelte` package, config flag on  -> exit 2 ("Cannot find module 'svelte/compiler'")
+//   - `svelte` package installed, no flag  -> exit 2 ("excluded by ignore rules")
+//   - `svelte` package installed, flag on  -> exit 0, formats the file
+// Per https://oxc.rs/docs/guide/usage/formatter/language-support.html, oxfmt
+// also requires the npm-distributed binary (not the standalone GitHub-release
+// binary) for `.svelte` — pi-lens already resolves oxfmt via `findInNodeModules`/
+// `which`, which favors the npm-installed binary, so that requirement is not
+// separately re-checked here.
+const OXFMT_SVELTE_TOML_TRUE = /(^|\n)\s*svelte\s*=\s*true\s*(\r?\n|$)/;
+
+export function hasOxfmtSvelteConfig(cwd: string): boolean {
+	if (!hasNearestPackageJsonDependency(cwd, "svelte")) return false;
+	for (const dir of walkUpDirs(cwd)) {
+		const rcPath = path.join(dir, ".oxfmtrc.json");
+		if (fs.existsSync(rcPath)) {
+			try {
+				const cfg = JSON.parse(fs.readFileSync(rcPath, "utf-8")) as Record<
+					string,
+					unknown
+				>;
+				if (cfg.svelte === true) return true;
+			} catch {}
+		}
+		// oxfmt.toml is TOML; pi-lens has no TOML parser dependency, so this is
+		// a targeted line match for the single boolean key rather than a full
+		// parse (same pragmatic style as hasVitePlusConfig's content.includes
+		// check above) — presence of the file alone is NOT sufficient, since a
+		// TOML config can omit `svelte` or set it false.
+		const tomlPath = path.join(dir, "oxfmt.toml");
+		if (fs.existsSync(tomlPath)) {
+			try {
+				const content = fs.readFileSync(tomlPath, "utf-8");
+				if (OXFMT_SVELTE_TOML_TRUE.test(content)) return true;
 			} catch {}
 		}
 	}

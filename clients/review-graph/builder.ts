@@ -2130,7 +2130,7 @@ function reviewGraphCheckpointPath(cwd: string): string {
  * only reuses a checkpoint built under the same ignore state. */
 function hashIgnoredIds(ignoredIds: ReadonlySet<string> | undefined): string {
 	if (ignoredIds === undefined) return "unavailable";
-	const joined = [...ignoredIds].sort((a, b) => a.localeCompare(b)).join(" ");
+	const joined = [...ignoredIds].sort((a, b) => a.localeCompare(b)).join("\u0000");
 	return createHash("sha256").update(joined).digest("hex");
 }
 

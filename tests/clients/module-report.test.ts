@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildCallGraph, CACHE_VERSION, saveCallGraph } from "../../clients/call-graph.js";
+import { buildCallGraph, CALL_GRAPH_CACHE_VERSION, saveCallGraph } from "../../clients/call-graph.js";
 import { FactStore } from "../../clients/dispatch/fact-store.js";
 import {
 	moduleReport,
@@ -1119,7 +1119,7 @@ describe("moduleReport — call-graph reader surface (#1070)", () => {
 
 		const write = (raw: unknown) => fs.writeFileSync(cacheFile, JSON.stringify(raw), "utf-8");
 		const base = {
-			version: CACHE_VERSION,
+			version: CALL_GRAPH_CACHE_VERSION,
 			builtAt: "2026-08-04T00:00:00.000Z",
 			reviewGraphVersion: identity!.version,
 			reviewGraphSignature: "wrong-signature",
@@ -1137,11 +1137,11 @@ describe("moduleReport — call-graph reader surface (#1070)", () => {
 			reason: "stale",
 		});
 
-		// Deliberately pinned to the literal 4, one below CACHE_VERSION, to
-		// exercise the legacy-format rejection path itself. If CACHE_VERSION
+		// Deliberately pinned to the literal 4, one below CALL_GRAPH_CACHE_VERSION, to
+		// exercise the legacy-format rejection path itself. If CALL_GRAPH_CACHE_VERSION
 		// is ever bumped to 4 this assertion fails loudly instead of the test
 		// silently testing nothing (the #1082/#1106 vacuous-fixture class).
-		expect(CACHE_VERSION).not.toBe(4);
+		expect(CALL_GRAPH_CACHE_VERSION).not.toBe(4);
 		write({ ...base, version: 4, reviewGraphSignature: identity!.signature });
 		expect((await moduleReport("a.ts", env.tmpDir, { callGraph: true })).callGraph).toMatchObject({
 			available: false,
