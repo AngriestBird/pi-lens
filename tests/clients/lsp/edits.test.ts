@@ -1069,4 +1069,28 @@ describe("LSP workspace edits — #1085 P3 bundle", () => {
 			expect(fs.readFileSync(filePath, "utf-8")).toBe("x");
 		} finally { removeTempDirSync(tmpDir); }
 	});
+
+	it("P3-6: importsChanged reflects whether the edit actually changed import lines, not merely their presence", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-6-"));
+		try {
+			const filePath = path.join(tmpDir, "mod.ts");
+			fs.writeFileSync(filePath, 'import { a } from "./a";\nconsole.log(a);\n', "utf-8");
+			const uri = pathToFileURL(filePath).href;
+
+			// Body-only edit: the file HAS an import, but this edit never touches it.
+			const bodyResult = await applyWorkspaceEdit(
+				{ changes: { [uri]: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 999 } }, newText: "console.error(a);" }] } },
+				tmpDir,
+			);
+			expect(bodyResult.fileDetails[0]?.importsChanged).toBe(false);
+
+			// Import-line edit: actually changes the imported binding.
+			const importResult = await applyWorkspaceEdit(
+				{ changes: { [uri]: [{ range: { start: { line: 0, character: 9 }, end: { line: 0, character: 10 } }, newText: "b" }] } },
+				tmpDir,
+			);
+			expect(importResult.fileDetails[0]?.importsChanged).toBe(true);
+			expect(fs.readFileSync(filePath, "utf-8")).toBe('import { b } from "./a";\nconsole.error(a);\n');
+		} finally { removeTempDirSync(tmpDir); }
+	});
 });

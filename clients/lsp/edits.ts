@@ -685,6 +685,26 @@ function relativeToCwd(filePath: string, cwd: string): string {
 	return rel.replace(/\\/g, "/");
 }
 
+// Matches an import declaration or a re-export-from declaration — the two
+// statement shapes that actually change a module's dependency edges.
+const IMPORT_RELEVANT_LINE = /^\s*(?:import\b|export\s[^;]*\bfrom\s)/;
+
+/**
+ * A stable signature of the import/re-export-from lines in `text`, order-
+ * preserved. Used to detect whether a text edit actually changed the file's
+ * import graph (P3-6) rather than merely landing in a file that HAS imports —
+ * `fileDetails[].importsChanged` gates expensive downstream dependency-graph
+ * re-checks (see `cache-manager.ts`'s `importsChanged` filter and
+ * `lsp-mutation.ts`'s `addModifiedRange`), so over-reporting "changed" on
+ * every edit to an already-import-bearing file defeats that gate.
+ */
+function importsSignature(text: string): string {
+	return text
+		.split("\n")
+		.filter((line) => IMPORT_RELEVANT_LINE.test(line))
+		.join("\n");
+}
+
 export function summarizeWorkspaceEdit(edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] }, cwd: string): string[] {
 	const lines: string[] = [];
 	for (const [uri, edits] of flattenWorkspaceTextEdits(edit)) lines.push(`Apply ${edits.length} edit(s) to ${relativeToCwd(uriToPath(uri), cwd)}`);
@@ -1085,7 +1105,7 @@ export async function applyWorkspaceEdit(
 				const start = Math.min(...edits.map((item) => item.range.start.line + 1));
 				const end = Math.max(...edits.map((item) => item.range.end.line + 1));
 				touchedFiles.add(filePath);
-				fileDetails.push({ filePath, range: { start, end }, importsChanged: /^import\s/m.test(updated) });
+				fileDetails.push({ filePath, range: { start, end }, importsChanged: importsSignature(content) !== importsSignature(updated) });
 				markApplied(op);
 				descriptions.push(`Applied ${edits.length} edit(s) to ${relativeToCwd(filePath, cwd)}`);
 			} else if (op.kind === "create") {
