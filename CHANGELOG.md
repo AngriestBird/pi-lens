@@ -32,18 +32,50 @@ All notable changes to pi-lens will be documented in this file.
 	call (which never touches `proc.killed`), so the guard was either always-true
 	(unconditional SIGKILL after the window on the common group-kill path) or
 	dead (on the direct-child fallback path) — now tracked via a real `exit`
-	listener set once up front; (2) the `initialize()`-timeout 2s SIGKILL
-	backstop had the identical always-true `!lspProcess.process.killed` guard —
-	switched to `lspProcess.process.exitCode === null`, the process's own
-	observed-exit signal. Other `.killed` reads audited and left as-is because
-	they're liveness/status checks, not escalation-action gates:
-	`isClientAlive`'s `!state.lspProcess.process.killed` (redundant with
-	`isDestroyed`, already set from real exit/close handlers),
-	`checkProcessAlive`'s informational "was killed" health-check string,
-	`launch.ts`'s post-spawn immediate-failure check (`proc.killed` read before
-	any kill was ever sent), `scripts/with-test-lock.mjs`'s `.once`-registered
-	first-forward guard, and `scripts/smoke-tools.mjs`'s read of Node's own
-	`execFileSync` timeout-kill flag on the caught error object.
+	listener set once up front, seeded from the same `exitCode`/`signalCode`
+	pre-check the function's top-of-body early return already uses (a process
+	that was already dead on entry — reachable when `options.processExiting`
+	skips that early return — would otherwise miss its own "exit" event and
+	still draw a redundant group SIGKILL at the escalation window); (2) the
+	`initialize()`-timeout 2s SIGKILL backstop had the identical always-true
+	`!lspProcess.process.killed` guard — switched to `lspProcess.process.exitCode
+	=== null && lspProcess.process.signalCode === null` (both, not `exitCode`
+	alone: a process killed BY a signal — the common case here, since
+	`killProcessTree` above it signals rather than lets the process exit on its
+	own — has `exitCode === null` forever and only `signalCode` set, so
+	`exitCode` alone still re-armed the backstop's kill against an
+	already-dead corpse; harmless in practice since `ChildProcess#kill()` on an
+	exited handle is a swallowed no-op, but not an accurate "still alive"
+	read). Other `.killed` reads audited and left as-is because they're
+	liveness/status checks, not escalation-action gates: `isClientAlive`'s
+	`!state.lspProcess.process.killed` (redundant with `isDestroyed`, already
+	set from real exit/close handlers), `checkProcessAlive`'s informational
+	"was killed" health-check string, `launch.ts`'s post-spawn
+	immediate-failure check (`proc.killed` read before any kill was ever sent),
+	`scripts/with-test-lock.mjs`'s `.once`-registered first-forward guard, and
+	`scripts/smoke-tools.mjs`'s read of Node's own `execFileSync` timeout-kill
+	flag on the caught error object.
+
+	**Adversarial-review follow-up round:** the reviewer ran
+	`kill-process-tree.test.ts` against PRE-fix `client.ts` and it passed 7/7 —
+	the sibling fixes above had ZERO effective test coverage, because the
+	"non-fast shutdown escalates" mock (and the other pre-existing mocks in
+	that file) lacked `once`/never set `killed`, so BOTH the old dead guard and
+	the new fix's guard were vacuously permissive against them (the #1106
+	vacuous-mock class, recurring in mock form: a test's fixture is too weak to
+	distinguish correct from broken behavior, so it passes either way). Fixed
+	by: upgrading that test's mock to be `.once`-capable so it actually
+	exercises the `exited`-flag logic; adding two new `fast`-shutdown tests with
+	a real `.once`-capturing mock proving BOTH directions (exit observed before
+	the 1.5s window → no group SIGKILL; no exit observed → group SIGKILL at the
+	window) — the "no premature SIGKILL" direction fails against the pre-fix
+	`!proc.killed` guard (proven by temporarily reverting the guard and
+	re-running); and adding a real-subprocess POSIX-only test
+	(`tests/clients/lsp/initialize-timeout-backstop.test.ts`, skipped on win32
+	with an explicit reason — killProcessTree's Windows path is
+	`taskkill`-based, not signal-based, and is already covered by the
+	kill-process-tree suite) for the previously fully-untested `initialize()`
+	2s backstop.
 - **mtime-only cache freshness sweep (refs #1105)** — the #1092→#1096 arc bound
 	LSP-diagnostics freshness to real content; this sweep audited the OTHER
 	persisted/derived caches for the same "mtime unchanged ≠ content unchanged"
