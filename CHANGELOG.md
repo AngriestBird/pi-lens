@@ -62,6 +62,28 @@ All notable changes to pi-lens will be documented in this file.
 	close-failure recovery still reopens the old document as `"plaintext"`).
 	Both remain tracked; see the #1085 closing comment for where they were
 	rehomed.
+- **Cascade fallback-display paths re-displayed bound-false LSP snapshots (refs #1104)** —
+	#1100 gated the cascade's RECONCILE path (the footer/widget) onto content
+	binding (`boundToCurrentDisk`), but two DEGRADED-fallback DISPLAY paths in
+	`clients/dispatch/integration.ts` still re-read TTL-fresh `getAllDiagnostics()`
+	snapshots without consulting binding at all: the touch-error fallback (a
+	failed active LSP touch falling back to the passive snapshot) and
+	`appendFallbackNeighbors` (the CR-3/A2 degraded-fallback path when no
+	neighbor produced trustworthy LSP data). A bound-false snapshot — diagnostics
+	computed against a DIFFERENT disk state than what's currently on disk, e.g. a
+	pre-fix-edit read — could still reach cascade OUTPUT even though the widget
+	was protected. Both sites now apply the same false/`"unknown"`/true contract
+	#1095/#1100 already established for reconcile: `false` → skip the stale
+	display (logged via the cascade channel with `bindingState`), `"unknown"` →
+	unchanged (the pre-existing fallback contract), `true` → display. HONESTY
+	fix: filtering a display candidate could otherwise make a genuinely degraded
+	cascade look clean, so when every fallback candidate a run considered was
+	binding-rejected and nothing else produced output, the run now carries the
+	same `indeterminate` marker #1023 built for a degraded graph compute (new
+	`CascadeIndeterminateReason: "lsp_binding_rejected"`), so the turn-end
+	advisory still surfaces an honest note instead of silence. The `resultId`
+	pull-diagnostics plumbing that #1104 also tracks remains open — this covers
+	only the cascade display-binding gap (#1100 review P3-1).
 - **`parseSymbolKey` mis-parsed LSP-fallback symbol kinds (refs #1088)** —
 	the canonical-id parser whitelisted only the 7 kinds `buildSymbolId` mints
 	directly, but `addLspFallbackSymbols` mints ids using the much larger
@@ -265,6 +287,47 @@ All notable changes to pi-lens will be documented in this file.
 	the generic project-diagnostics snapshot/delta display are all left as-is.
 
 ### Added
+
+- **Smells self-surfacing (refs #1123 item 3)** — `scripts/analyze-pi-lens-logs.mjs`
+	(`npm run logs:smells`) already catalogues a wide set of operational smells,
+	but it's MANUAL: the #1123 investigation found 20 stale-ctx `emit_failed`
+	rows and 37 opengrep respawns sitting unread in logs for days until an audit
+	went looking. `clients/smells-rollup.ts` adds a small ALWAYS-ON rollup
+	covering the two smells the issue named, without touching every producer of
+	the underlying logs and without re-scanning the size-rotated (up to ~10MB,
+	`clients/log-cleanup.ts`) `~/.pi-lens/*.log` files on the `session_start`
+	hot path. **Design + cost bound:** a BOUNDED TAIL READ — at most 64KB from
+	the end of `bus-events.log` and `latency.log` each (~128KB total I/O per
+	check, enforced by construction via a single sized `fs.readSync` at a
+	computed offset in `tailReadText`, never a full-file scan) — counts
+	stale-ctx `emit_failed` rows (`outcome === "emit_failed"` with an `error`
+	containing the SDK's `"stale after session replacement"` fragment,
+	`session-lifecycle.ts`'s documented benign-but-worth-watching class) and
+	opengrep respawns (`phase === "lsp_server_respawn"` with
+	`metadata.serverId === "opengrep"`, `clients/lsp/index.ts`'s existing,
+	unmodified respawn log point). Because both source logs are append-only
+	NDJSON, the tail is always the most recently written activity, so the same
+	bounded read serves as both the cross-session glance and a live/this-session
+	proxy — no separate write-time counters were added at the producer call
+	sites (kept the change to one new module + three call sites). Both counts
+	are gated by trivial threshold constants (`SMELLS_THRESHOLDS`, currently 5
+	each) so a single stray event never surfaces. Three surfaces: one
+	`session_start` line (only emitted when a threshold trips, via
+	`runtime-session.ts`'s `emitSmellsSessionStartLine`), an always-on compact
+	`/lens-health` line (current counts regardless of threshold, matching
+	#1123 item 2's `formatMemoryHealthLine` style), and a `turn_end` note —
+	re-checked every 20 turns (`shouldCheckSmellsThisTurn`), `ctx.ui.notify`d
+	at most ONCE per smell per session (`checkSmellsAndNoteOnce`'s gate,
+	re-armed by `resetSmellsSessionState()` at the next `session_start`).
+
+	New tests: `tests/clients/smells-rollup.test.ts` (tail-scan cost bound
+	proven by construction — a file far larger than the byte budget only ever
+	yields tail content; threshold gating for both the session_start line and
+	the always-on health line; the once-per-session notify gate) and
+	`tests/index-smells-rollup-wiring.test.ts` (turn_end wiring: nothing before
+	the check interval, one notify at the trip turn, no repeat notify on the
+	next check turn for an already-notified smell) — fail-then-pass verified
+	against a deliberately broken threshold gate.
 
 - **Oxfmt formatting support for Svelte (refs #1134)** — `.svelte` is now a
 	recognized oxfmt extension, gated by a stricter conditional than oxfmt's
