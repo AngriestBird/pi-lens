@@ -1323,12 +1323,29 @@ export class LSPService {
 			}
 			// Dead client — was previously alive, now needs respawn
 			const spawnedAt = this.state.clientSpawnedAt.get(key);
-			const uptimeMs = spawnedAt != null ? Date.now() - spawnedAt : null;
-			// #1127: capture BEFORE calling existing.shutdown() below — that call
-			// itself sets shutdownRequested=true as a side effect of our own
-			// cleanup, which would make every crash look "intentional" if read
-			// afterward.
+			// #1127: capture BEFORE calling existing.shutdown() below — both
+			// wasShutdownIntentional() and getExitedAt() read state that
+			// existing.shutdown() itself mutates as a side effect of our own
+			// cleanup (shutdownRequested flips true, and the process exit it
+			// triggers would stamp exitedAt at CLEANUP time rather than at the
+			// real death), so both must be read before that call.
 			const wasIntentional = existing.wasShutdownIntentional();
+			const exitedAt = existing.getExitedAt();
+			// #1127: lifetime MUST be measured from the client's own recorded
+			// death (exitedAt), not from "now" (this detection). Detection is
+			// lazy — the next file attach — and #1127's real-world pattern is
+			// attach-triggered respawns minutes to HOURS apart: a server that
+			// died 5s after spawning but wasn't detected until an hour later
+			// must still read as an early, breaker-worthy exit. Fall back to the
+			// detection-time delta only when exitedAt is somehow unset (the
+			// client's own exit handlers always set it before isAlive() can go
+			// false, so this is a defensive fallback, not the expected path).
+			const uptimeMs =
+				exitedAt != null && spawnedAt != null
+					? exitedAt - spawnedAt
+					: spawnedAt != null
+						? Date.now() - spawnedAt
+						: null;
 			logLatency({
 				type: "phase",
 				phase: "lsp_server_respawn",
@@ -4550,6 +4567,13 @@ export class LSPService {
 	/**
 	 * Read-only circuit-breaker status, including server/root pairs that have no
 	 * live client and would therefore be absent from getStatus().
+	 *
+	 * #1127: `failureCounts` (spawn/init failures) and `runtimeExitCounts`
+	 * (early post-init runtime exits) are two INDEPENDENT streams feeding one
+	 * circuit — either can trip its own cooldown/permanent-disable on its own
+	 * threshold, without the other. `failures` below is their SUM, purely for
+	 * display: it is the total churn behind whatever cooldown/permanent state
+	 * is showing, not a claim that both streams are at that count.
 	 */
 	getBrokenStatus(): Array<{
 		serverId: string;

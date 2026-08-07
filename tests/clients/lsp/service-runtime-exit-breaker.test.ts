@@ -10,11 +10,19 @@
  * converging.
  *
  * The fix adds a parallel `runtimeExitCounts` counter, fed only by EARLY
- * (uptime < RUNTIME_EXIT_UPTIME_THRESHOLD_MS) non-intentional exits, sharing
+ * (lifetime < RUNTIME_EXIT_UPTIME_THRESHOLD_MS) non-intentional exits, sharing
  * the same cooldown formula and the same `state.broken`/`permanentlyBroken`
  * maps as the existing breaker. Deliberate teardowns (`shutdown()` called by
  * pi-lens itself — session reset, #743 notify-backpressure eviction) set
  * `shutdownRequested` and must never count.
+ *
+ * Crucially, "lifetime" is measured from the client's own recorded death
+ * (`getExitedAt()`, stamped by `client.ts`'s exit handlers the moment the
+ * process/connection actually dies) — NOT from when a later `getClientForFile`
+ * call happens to detect the client is dead. #1127's real-world pattern is
+ * attach-triggered respawns "minutes to hours apart": a server that died 5s
+ * after spawning but wasn't attached-to again for an hour must still read as
+ * an early, breaker-worthy exit.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -30,17 +38,35 @@ vi.mock("../../../clients/lsp/client.js", () => ({
 	createLSPClient,
 }));
 
-/** A fake client whose `isAlive()`/`wasShutdownIntentional()` the test drives directly. */
+/**
+ * A fake client whose `isAlive()`/`wasShutdownIntentional()`/`getExitedAt()`
+ * the test drives directly. `exitedAt` defaults to `undefined` (not yet died)
+ * and is only set via `die()`, mirroring the real client.ts contract: it's
+ * stamped once, at the moment of death, independent of when anything later
+ * notices via `isAlive()`.
+ */
 function makeFakeClient(serverId: string) {
 	const fake = {
 		alive: true,
 		intentional: false,
+		exitedAt: undefined as number | undefined,
+		diagnosticsVersion: 0,
 		serverId,
 		isAlive: () => fake.alive,
 		wasShutdownIntentional: () => fake.intentional,
+		getExitedAt: () => fake.exitedAt,
 		shutdown: vi.fn().mockImplementation(async () => {
 			fake.intentional = true; // mirrors clientShutdown() setting shutdownRequested
 		}),
+		notify: {
+			open: vi.fn().mockResolvedValue(undefined),
+			change: vi.fn().mockResolvedValue(undefined),
+		},
+		/** Unexpected crash: dies at `at` (defaults to now), never called shutdown(). */
+		die(at: number = Date.now()) {
+			fake.exitedAt = at;
+			fake.alive = false;
+		},
 	};
 	return fake;
 }
@@ -107,7 +133,7 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		// through spawnClient() and never touches the breaker.
 		const initial = await service.getClientForFile(file);
 		expect(initial).toBeDefined();
-		clients.at(-1)!.alive = false; // post-init crash — never called shutdown()
+		clients.at(-1)!.die(); // post-init crash, right now — never called shutdown()
 
 		// A generous bound so an unbounded-respawn regression fails the test
 		// instead of looping forever: on pre-fix master this loop runs past
@@ -137,7 +163,7 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 			internal.state.broken.delete(key);
 			const respawn = await service.getClientForFile(file);
 			expect(respawn).toBeDefined();
-			clients.at(-1)!.alive = false;
+			clients.at(-1)!.die();
 		}
 
 		expect(internal.permanentlyBroken.has(key)).toBe(true);
@@ -152,6 +178,49 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		const after = await service.getClientForFile(file);
 		expect(after).toBeUndefined();
 		expect(server.getSpawnCount()).toBe(spawnCountAtGiveUp);
+	});
+
+	it("counts an early death even when DETECTION is delayed hours (death time, not detection time, decides)", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const internal = service as unknown as {
+			state: {
+				broken: Map<string, number>;
+				clientSpawnedAt: Map<string, number>;
+			};
+			runtimeExitCounts: Map<string, number>;
+			permanentlyBroken: Set<string>;
+		};
+
+		const server = makeSpawnServer("opengrep");
+		getServersForFileWithConfig.mockReturnValue([server]);
+
+		const client = makeFakeClient("opengrep");
+		createLSPClient.mockResolvedValue(client);
+
+		const file = "C:/repo/main.fake";
+		const key = "opengrep:C:/repo";
+
+		const first = await service.getClientForFile(file);
+		expect(first).toBeDefined();
+
+		// Backdate the spawn to 3 hours ago and record death only 5s after that
+		// — an early, breaker-worthy exit — but do NOT touch "now": this call's
+		// getClientForFile happens in real time milliseconds later, modeling
+		// detection arriving hours after the actual death (#1127's documented
+		// attach-triggered respawn pattern). If lifetime were computed from
+		// detection time instead of the recorded exitedAt, this would wrongly
+		// read as a multi-hour healthy run and never count.
+		const spawnedAtHoursAgo = Date.now() - 3 * 60 * 60 * 1000;
+		internal.state.clientSpawnedAt.set(key, spawnedAtHoursAgo);
+		client.die(spawnedAtHoursAgo + 5_000);
+
+		internal.state.broken.delete(key);
+		const second = await service.getClientForFile(file);
+		expect(second).toBeUndefined(); // cooldown was just set by the count below
+
+		expect(internal.runtimeExitCounts.get(key)).toBe(1);
+		expect(internal.permanentlyBroken.has(key)).toBe(false);
 	});
 
 	it("does NOT count a deliberate shutdown()-driven restart toward the breaker", async () => {
@@ -189,7 +258,7 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 			// does the client go dead — matches the real ordering where
 			// clientShutdown() sets shutdownRequested before the process exits.
 			await last.shutdown();
-			last.alive = false;
+			last.die();
 		}
 
 		expect(internal.runtimeExitCounts.get(key) ?? 0).toBe(0);
@@ -197,7 +266,7 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		expect(server.getSpawnCount()).toBe(8);
 	});
 
-	it("does not count a runtime exit past the early-exit uptime threshold", async () => {
+	it("does not count a runtime exit whose lifetime is past the early-exit threshold", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		const internal = service as unknown as {
@@ -221,11 +290,10 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		const first = await service.getClientForFile(file);
 		expect(first).toBeDefined();
 
-		// Backdate clientSpawnedAt so the "crash" reads as a long, healthy
-		// uptime (well past the 60s early-exit threshold) rather than an
-		// immediate post-init death.
-		internal.state.clientSpawnedAt.set(key, Date.now() - 5 * 60_000);
-		client.alive = false;
+		// Died 5 minutes after spawning (well past the 60s early-exit
+		// threshold) — a genuinely long, healthy run, not a crash loop.
+		const spawnedAt = internal.state.clientSpawnedAt.get(key)!;
+		client.die(spawnedAt + 5 * 60_000);
 
 		internal.state.broken.delete(key);
 		const second = await service.getClientForFile(file);
@@ -233,5 +301,62 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 
 		expect(internal.runtimeExitCounts.get(key) ?? 0).toBe(0);
 		expect(internal.permanentlyBroken.has(key)).toBe(false);
+	});
+
+	it("does NOT double-count the REAL #743 notify-backpressure eviction path", async () => {
+		// #743's recordNotifyWriteBackpressure evicts a wedged client directly
+		// (removes it from state.clients + calls its shutdown() + sets its own
+		// cooldown) WITHOUT ever going through the "dead client — needs
+		// respawn" branch this fix touches — by the time anything looks for an
+		// existing client again, there simply isn't one. This drives the REAL
+		// touchFile → notify-write-timeout → eviction path (not a synthetic
+		// stand-in) and confirms it neither trips runtimeExitCounts nor gets
+		// misread as a crash.
+		const originalBudget = process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "5";
+		try {
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			const service = new LSPService();
+			const internal = service as unknown as {
+				state: { broken: Map<string, number>; clients: Map<string, unknown> };
+				runtimeExitCounts: Map<string, number>;
+				permanentlyBroken: Set<string>;
+			};
+
+			const server = makeSpawnServer("opengrep");
+			getServersForFileWithConfig.mockReturnValue([server]);
+
+			const client = makeFakeClient("opengrep");
+			// Every notify.open write hangs forever — withDeadline's 5ms budget
+			// times it out on every touchFile call, driving the backpressure
+			// streak without needing to fake a stalled real process.
+			client.notify.open = vi.fn().mockReturnValue(new Promise(() => {}));
+			createLSPClient.mockResolvedValue(client);
+
+			const file = "C:/repo/main.fake";
+			const key = "opengrep:C:/repo";
+
+			// NOTIFY_BACKPRESSURE_BROKEN_AFTER = 3 consecutive timeouts evict.
+			for (let i = 0; i < 3; i++) {
+				await service.touchFile(file, `content-${i}`, {});
+			}
+
+			// Evicted via the REAL #743 path: removed from state.clients, its own
+			// shutdown() called (marking it intentional), and state.broken set to
+			// the base cooldown directly — none of that is this fix's counter.
+			expect(internal.state.clients.has(key)).toBe(false);
+			expect(client.shutdown).toHaveBeenCalled();
+			expect(client.intentional).toBe(true);
+			expect(internal.state.broken.has(key)).toBe(true);
+
+			expect(internal.runtimeExitCounts.get(key) ?? 0).toBe(0);
+			expect(internal.permanentlyBroken.has(key)).toBe(false);
+		} finally {
+			if (originalBudget === undefined) {
+				delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+			} else {
+				process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = originalBudget;
+			}
+		}
 	});
 });
