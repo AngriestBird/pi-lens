@@ -1000,7 +1000,18 @@ async function preflightWorkspaceEdit(
 				// lesson. Conversely, on a case-SENSITIVE FS where both spellings are
 				// distinct real files, this stays a genuine conflict (closing the inverse
 				// silent-clobber edge that a win32-only fold left open).
-				const aliasesSource = await isSameFsEntry(oldDisk, newDisk);
+				//
+				// P3-8: when the source exists only VIRTUALLY (e.g. created earlier in
+				// this same ordered edit and never yet written to disk), `isSameFsEntry`
+				// lstats disk and finds nothing there, so it can never recognize a
+				// case-only alias for a not-yet-physical file. `stateFor` keys the
+				// `virtual`/override maps on the SAME case-folded identity used for
+				// physical aliasing, so if `destination` and `source` resolved to the
+				// identical cached VirtualFile object, they are — by construction of
+				// that keying — the same virtual entry (a case-insensitive-FS alias);
+				// checked as a fast, disk-free first branch before falling back to the
+				// physical probe (which remains untouched for genuinely-physical paths).
+				const aliasesSource = destination === source || (await isSameFsEntry(oldDisk, newDisk));
 				if (!aliasesSource) {
 					if (op.options?.ignoreIfExists) { ignored.add(op); continue; }
 					if (!op.options?.overwrite) throw new Error(`rename destination already exists: ${newPath}`);

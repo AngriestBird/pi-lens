@@ -18,6 +18,16 @@ import {
 	type LspMutationContext,
 } from "../../../clients/lsp-mutation.js";
 
+function isCaseInsensitiveFs(dir: string): boolean {
+	const probe = path.join(dir, "CaseProbe.tmp");
+	fs.writeFileSync(probe, "x", "utf-8");
+	try {
+		return fs.existsSync(path.join(dir, "caseprobe.tmp"));
+	} finally {
+		fs.rmSync(probe, { force: true });
+	}
+}
+
 describe("LSP workspace edits", () => {
 	it("preserves original array order for inserts at the same position", () => {
 		expect(
@@ -883,16 +893,6 @@ describe("LSP workspace edits — same-position insert ordering (P1-1)", () => {
 // case-insensitive; on a case-sensitive FS the same operations must still
 // succeed (never a vacuous pass).
 describe("LSP workspace edits — path casing preservation (P1-2)", () => {
-	function isCaseInsensitiveFs(dir: string): boolean {
-		const probe = path.join(dir, "CaseProbe.tmp");
-		fs.writeFileSync(probe, "x", "utf-8");
-		try {
-			return fs.existsSync(path.join(dir, "caseprobe.tmp"));
-		} finally {
-			fs.rmSync(probe, { force: true });
-		}
-	}
-
 	it("create preserves mixed-case file names on disk", async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-case-"));
 		try {
@@ -1091,6 +1091,34 @@ describe("LSP workspace edits — #1085 P3 bundle", () => {
 			);
 			expect(importResult.fileDetails[0]?.importsChanged).toBe(true);
 			expect(fs.readFileSync(filePath, "utf-8")).toBe('import { b } from "./a";\nconsole.error(a);\n');
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	// FS-probe-guarded per the #1024/P1-2 lesson (see `isCaseInsensitiveFs`
+	// above): the virtual-overlay alias hole only manifests on a case-
+	// insensitive FS, where the create's and the rename destination's cache
+	// keys collapse to the same entry. On a case-sensitive FS `foo.txt` and
+	// `Foo.txt` are genuinely distinct paths, so this exercises the ordinary
+	// (non-aliased) rename path instead — asserted for real, not skipped.
+	it("P3-8: create-then-case-rename within one ordered edit succeeds (virtual overlay, not disk, decides the alias)", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-8-"));
+		try {
+			const fooPath = path.join(tmpDir, "foo.txt");
+			const FooPath = path.join(tmpDir, "Foo.txt");
+			await applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{ kind: "create", uri: pathToFileURL(fooPath).href },
+						{ kind: "rename", oldUri: pathToFileURL(fooPath).href, newUri: pathToFileURL(FooPath).href },
+					],
+				},
+				tmpDir,
+			);
+			const entries = fs.readdirSync(tmpDir);
+			// The rename always removes the source name, regardless of FS case
+			// sensitivity, so exactly one case-folded spelling survives either way.
+			expect(entries).toContain("Foo.txt");
+			expect(entries.filter((e) => e.toLowerCase() === "foo.txt")).toEqual(["Foo.txt"]);
 		} finally { removeTempDirSync(tmpDir); }
 	});
 });
