@@ -6,6 +6,26 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Micro-gap sweep: recorded coverage/observability/doc gaps (refs #1106, refs #1104)**
+	- `session-state-store.ts`'s `loadSessionState` STATE_VERSION reject path
+		(a wrong-version persisted snapshot is ignored, not rehydrated) had no
+		test; `STATE_VERSION` is now exported so the new test can drive the
+		mismatch off the real constant (`STATE_VERSION + 1`) rather than a
+		hardcoded literal (#1116 pattern).
+	- `tests/clients/cache/rule-cache.test.ts`'s deliberate `raw.version = "v2"`
+		schema-mismatch override now pins `expect(CACHE_VERSION).not.toBe("v2")`
+		alongside it (#1082/#1116 pattern), so the assertion can't vacuously pass
+		if `CACHE_VERSION` ever became `"v2"`.
+	- The cascade `neighbor_touch` log entry (`clients/dispatch/integration.ts`)
+		now carries an `inconclusive` boolean in its metadata alongside
+		`bindingState`, so the two independent unconfirmed-touch causes (notify/
+		diagnostics wait lapsed vs. disk-diverged binding, #1093/#1095) are
+		distinguishable from `cascade.log` alone, without cross-referencing
+		`latency.log`.
+	- `tools/lens-diagnostics.ts`'s `includeGenerated` param description now
+		states it only takes effect with `mode=full refreshRunners=cheap/all`
+		(it's silently a no-op under `cached`/`none`, since no project scan runs
+		to apply it to) — a doc-only fix from PR #1115's review.
 - **mtime-only cache freshness sweep (refs #1105)** — the #1092→#1096 arc bound
 	LSP-diagnostics freshness to real content; this sweep audited the OTHER
 	persisted/derived caches for the same "mtime unchanged ≠ content unchanged"
