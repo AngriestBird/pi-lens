@@ -464,6 +464,18 @@ const recentlyCleanNeighborCache = new Map<
 	string,
 	RecentlyCleanNeighborEntry
 >();
+
+/** O(1) entry counts of this module's turn-bounded caches (#1123 item 2
+ *  memory attribution) — both are `Map.size` reads, never iterated. */
+export function getDispatchCascadeCacheStats(): {
+	neighborTouchCacheSize: number;
+	recentlyCleanNeighborCacheSize: number;
+} {
+	return {
+		neighborTouchCacheSize: neighborTouchCache.size,
+		recentlyCleanNeighborCacheSize: recentlyCleanNeighborCache.size,
+	};
+}
 const RECENTLY_CLEAN_TTL_TURNS = 5;
 
 // B10: tracks files that were the *primary* edited file this turn.
