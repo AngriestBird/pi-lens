@@ -133,7 +133,7 @@ export function clearWidgetState(): void {
 	diagnosticsWriteGuard.clear();
 }
 
-const WIDGET_STATE_VERSION = 1;
+export const WIDGET_STATE_VERSION = 1;
 
 /** Serializable snapshot of the per-file diagnostic state (#190). */
 export interface PersistedWidgetState {
