@@ -78,6 +78,7 @@ import {
 	formatMemoryHealthLine,
 	shouldEmitMemorySample,
 } from "./clients/memory-sampler.js";
+import { dumpActiveHandles } from "./clients/debug-handles.js";
 import {
 	checkSmellsAndNoteOnce,
 	countRecentSmells,
@@ -2014,6 +2015,11 @@ export default function (pi: ExtensionAPI) {
 				}).catch((err) => {
 					dbg(`quiet_window crashed: ${err}`);
 				});
+				// #1123 item 4: dump active handles AFTER the quiet-window work is
+				// scheduled — the #1097-class leak (a stray ref'd timer surviving
+				// past settle) is only visible once whatever settle itself queued is
+				// already in flight. No-op unless PI_LENS_DEBUG_HANDLES=1.
+				dumpActiveHandles("agent_settled");
 			},
 		);
 	} catch (registerErr) {
@@ -2072,6 +2078,11 @@ export default function (pi: ExtensionAPI) {
 			processExiting: true,
 			reason: "session_shutdown",
 		});
+		// #1123 item 4: dump active handles AFTER teardown — whatever is still
+		// alive at this point is exactly what would keep a --print/--no-session
+		// process from exiting (the #1097 lesson: what survives IS the leak).
+		// No-op unless PI_LENS_DEBUG_HANDLES=1.
+		dumpActiveHandles("session_shutdown");
 	});
 
 	// --- Prompt-cache response-side usage observability (#1018) ---
