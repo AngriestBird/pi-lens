@@ -126,6 +126,35 @@ function c(n: number) {
     expect(p.statementCount).toBe(2);
   });
 
+  // refs #1089 P3-4: object_pattern/array_pattern params vanish from
+  // parameterCount in plain JavaScript but are counted in TypeScript. The
+  // JS grammar places a top-level destructured param directly as an
+  // `object_pattern`/`array_pattern` child of `formal_parameters` (no
+  // wrapper node); the TS grammar always wraps every parameter — including
+  // destructured ones — in a `required_parameter`/`optional_parameter` node,
+  // which getParameters() already recognized. So the SAME source construct
+  // counted correctly in .ts and undercounted in .js.
+  it("counts destructured object/array params in TypeScript", async () => {
+    const s = await run(
+      `function f({ a, b }: { a: number; b: number }, [c, d]: number[]) { return a; }`,
+      "ts",
+    );
+    expect(byName(s, "f")!.parameterCount).toBe(2);
+  });
+
+  it("counts destructured object/array params in plain JavaScript (parity with TS)", async () => {
+    const s = await run(
+      `function f({ a, b }, [c, d]) { return a; }`,
+      "js",
+    );
+    expect(byName(s, "f")!.parameterCount).toBe(2);
+  });
+
+  it("counts a mix of plain and destructured params in JavaScript", async () => {
+    const s = await run(`function g(x, { a, b }, y) { return x; }`, "js");
+    expect(byName(s, "g")!.parameterCount).toBe(3);
+  });
+
   it("collects distinct outgoing calls", async () => {
     const s = await run(`function f() { a(); b(); a(); }`);
     const calls = byName(s, "f")!.outgoingCalls;

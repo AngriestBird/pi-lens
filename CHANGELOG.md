@@ -17,7 +17,7 @@ All notable changes to pi-lens will be documented in this file.
 	never touched the breaker: `failureCounts` was already cleared by the
 	preceding successful spawn and the runtime exit itself was never counted.
 	Fixed by adding a parallel `runtimeExitCounts` counter fed only by EARLY
-	(uptime < 60s) non-intentional exits, sharing the same cooldown formula
+	(lifetime < 60s) non-intentional exits, sharing the same cooldown formula
 	and the same `state.broken`/`permanentlyBroken` maps as the existing
 	breaker — tracked separately from `failureCounts` specifically because a
 	successful respawn (which correctly resets the spawn/init failure streak)
@@ -28,14 +28,82 @@ All notable changes to pi-lens will be documented in this file.
 	`shutdownRequested`; a new `wasShutdownIntentional()` accessor on
 	`LSPClientInfo` (`clients/lsp/client.ts`) exposes that flag so the breaker
 	distinguishes a genuine crash from a restart it initiated and never counts
-	the latter. New coverage in
+	the latter. Adversarial review caught that lifetime was originally
+	computed from the moment a dead client is lazily DETECTED (the next
+	`getClientForFile` attach), not from when it actually died — #1127's
+	documented pattern is attach-triggered respawns minutes to hours apart, so
+	an early crash detected an hour later would misread as a long healthy run
+	and never count. Fixed by stamping a real `exitedAt` on `LSPClientState`
+	the moment the client's connection/process actually dies (first of
+	`onError`/`onClose`/process `exit` to fire) and exposing it via a new
+	`getExitedAt()` accessor; the respawn site computes lifetime as
+	`exitedAt - spawnedAt`, falling back to the detection-time delta only when
+	`exitedAt` is unexpectedly unset. New coverage in
 	`tests/clients/lsp/service-runtime-exit-breaker.test.ts`: a crash-loop
 	respawn sequence converges to permanent-disable instead of respawning
-	forever (fails against pre-fix behavior), a deliberate
-	`shutdown()`-driven restart sequence never counts, and a runtime exit past
-	the uptime threshold resets the streak instead of counting. Full existing
-	LSP suite (534 tests) stays green.
+	forever (fails against pre-fix behavior), an early death with detection
+	delayed by hours still counts (death time, not detection time, decides —
+	fails against the pre-fix detection-time computation in both directions),
+	a deliberate `shutdown()`-driven restart sequence never counts, a runtime
+	exit past the lifetime threshold resets the streak instead of counting,
+	and the REAL `#743` notify-write-backpressure eviction path (driven
+	through `touchFile`, not a synthetic stand-in) never double-counts against
+	this breaker. Full existing LSP suite (536 tests) stays green.
 
+- **`parseSymbolKey` mis-parsed LSP-fallback symbol kinds (refs #1088)** —
+	the canonical-id parser whitelisted only the 7 kinds `buildSymbolId` mints
+	directly, but `addLspFallbackSymbols` mints ids using the much larger
+	`lspSymbolKindName` vocabulary (`enum`, `constant`, `struct`, `namespace`,
+	`field`, `constructor`, `module`, the `lsp-symbol-<n>` catch-all, ...). Any
+	of those ids failed the whitelist and fell through to the legacy
+	last-colon split, shearing the id at the wrong boundary (e.g.
+	`c:\p\a.kt:Color:enum:42` parsed as `filePath: "c:\p\a.kt:Color:enum"`,
+	`symbolName: "42"`). `clients/review-graph/symbol-id.ts`'s
+	`parseSymbolKey` now matches the trailing `:<kind-token>:<digits>` shape
+	STRUCTURALLY (any lowercase, optionally hyphen-segmented token) instead of
+	whitelisting specific kind strings, so it stays correct for the open-ended
+	LSP-fallback vocabulary without needing a matching update per kind.
+- **Java try-with-resources suppression was dead (refs #1089)** —
+	`clients/tree-sitter-client.ts`'s `not_closed_or_try_with_resources`
+	post-filter built its resource-word regex as `` new RegExp(`\b${resource}\b`) ``
+	inside a template literal, where `\b` is the BACKSPACE control character
+	(U+0008), not a regex word-boundary escape. The regex could never match,
+	so the Java 9 short-form `try (resource) { ... }` was never recognized as
+	closing its resource — only an explicit `.close()` call suppressed the
+	"resource should be closed" finding. Fixed to `\\b` plus a regex-escaped
+	identifier. No shipped Java fixture used try-with-resources syntax, so no
+	existing expected-findings fixture changes with this fix.
+- **Raw NUL byte in `review-graph/builder.ts` made the file look binary to grep (refs #1088)** — the checkpoint's `ignoredIds` join separator was a
+	literal 0x00 byte embedded in source, which makes `ripgrep`/`grep` treat
+	the whole 4,900+ line file as binary and stop scanning partway through —
+	silently defeating the AGENTS.md-mandated repo-wide grep sweep for every
+	commit that touched this file. Replaced the raw byte with the `\u0000`
+	escape sequence, which is the byte-identical runtime string (same
+	`hashIgnoredIds` function computes both the write-time and read-time
+	hash, so no persisted checkpoint compatibility is affected).
+- **`buildCallGraph` same-file evidence accounting hardened + dead code removed (refs #1089)** — added regression coverage for the audited
+	same-file evidence class (divergent path forms for the same file must
+	both be recognized as same-file AND counted exactly once per reference,
+	keeping the coverage sum invariant `validatePersistedCallGraph` enforces
+	on every load); the normalized-compare fix for this had already landed
+	upstream, so this closes out the finding with a fail-then-pass regression
+	test rather than a behavior change. Also removed `clients/call-graph.ts`'s
+	dead duplicate `saveCallGraph` overload signature (byte-identical to the
+	implementation signature) and the unreachable `{}`-spread branch on the
+	required `identity` parameter.
+- **JS destructured params dropped from `parameterCount` (refs #1089)** —
+	`clients/dispatch/facts/function-facts.ts`'s `getParameters` recognized
+	`required_parameter`/`optional_parameter` wrapper nodes (how TypeScript's
+	grammar represents every parameter, destructured or not) but not the bare
+	`object_pattern`/`array_pattern` nodes plain JavaScript's grammar uses
+	for a top-level destructured parameter with no wrapper. `function
+	f({a, b})` counted 0 parameters in a `.js` file while the TS-annotated
+	equivalent counted correctly. Added JS-vs-TS parity tests.
+- **`call-graph.ts`'s exported `CACHE_VERSION` renamed to `CALL_GRAPH_CACHE_VERSION`** — collided in name (not value — separate
+	modules) with `clients/cache/rule-cache.ts`'s own `CACHE_VERSION` export;
+	renamed to match the `<SUBSYSTEM>_CACHE_VERSION` convention already used
+	by `WORKSPACE_DIAGNOSTICS_CACHE_VERSION` and
+	`PROJECT_DIAGNOSTICS_CACHE_VERSION`. Updated the two test-file imports.
 - **Dead SIGTERM→SIGKILL escalation guard on non-Windows kills (closes #1114)**
 	— `clients/safe-spawn.ts`'s non-Windows `killTree` branch armed a 1s
 	escalation timer gated on `if (!child.killed) child.kill("SIGKILL")`, but
@@ -186,6 +254,30 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **Oxfmt formatting support for Svelte (refs #1134)** — `.svelte` is now a
+	recognized oxfmt extension, gated by a stricter conditional than oxfmt's
+	other extensions. Empirically verified against the real `oxfmt` npm
+	package (0.62.0, scratch fixture outside vitest, per this repo's
+	verify-the-CLI-contract-empirically rule): oxfmt requires BOTH the
+	`svelte` package installed AND the config's `svelte: true` flag enabled —
+	either alone exits non-zero ("excluded by ignore rules" or "Cannot find
+	module 'svelte/compiler'"), only both together format the file. The new
+	`hasOxfmtSvelteConfig` (`clients/tool-policy.ts`) encodes this, consulted
+	only for `.svelte` in `formatters.ts`'s `hasExplicitFormatterConfig` — the
+	other oxfmt extensions are unaffected. **Class fix**:
+	`oxfmtFormatter.extensions` (`clients/formatters.ts`) and
+	`OXFMT_SUPPORTED_EXTENSIONS` (`clients/tool-policy.ts`) were two
+	hand-maintained parallel lists (the #883 single-source-of-truth class);
+	`OXFMT_SUPPORTED_EXTENSIONS` is now exported as the sole source of truth
+	and `oxfmtFormatter.extensions` derives from it directly, plus a drift-guard
+	test asserting they stay equal. `docs/language-coverage.md`'s Svelte row now
+	reports the formatter and its gating condition instead of "—". The real
+	format-smoke fixture (`tests/fixtures/format-smoke/`) was NOT extended: no
+	fixture in that harness has a dependency-install step (oxfmt itself is only
+	found via a global `which` lookup, not `ensureTool`), so a svelte fixture
+	would either always skip (oxfmt unavailable) or, worse, hard-fail with a
+	"Cannot find module 'svelte/compiler'" error if oxfmt happened to resolve
+	without svelte actually installed — a strictly worse risk than omitting it.
 - **Instance health + memory-attribution observability (refs #1123 item 2)** — the #1126 sizing study diagnosed a 1.37 GB pi-lens instance from code + serialized artifacts alone, because nothing recorded a per-subsystem trajectory over time (the same detection-without-attribution gap loop_block had before #1122/#1125). Three pieces:
 	1. **Vanished-instance markers.** `deregisterInstance()` (`clients/instance-registry.ts`) synchronously removes a process's own `instances.json` entry on a clean `session_shutdown`, so an entry whose owning pid is confirmed dead is, by construction, proof that process never reached that shutdown path — no new "clean shutdown" flag is needed, the existing `heartbeatAt`/`rssBytes` fields already ARE the "lastSeen"/"rss" pair this needs (`clients/vanished-instance-marker.ts`). `session_start` now reads the registry and logs one `sessionstart.log` line per such entry — `previous instance pid X last seen <ts> (RSS <y>MB) exited without shutdown` — BEFORE `sweepOrphans()` (`clients/instance-reaper.ts`) prunes those same dead-pid entries; the read is sequenced ahead of the sweep (via `.finally()`) rather than let both fire-and-forget calls race, or the vanished set would already be empty by the time the marker ran.
 	2. **Periodic memory-attribution sample (`clients/memory-sampler.ts`).** Every 10 turns, one `memory_sample` `latency.log` phase line: `process.memoryUsage()` (rss/heapUsed/heapTotal/external/arrayBuffers) plus O(1)/O(bounded-cache-size) per-subsystem counters — review-graph resident workspace-cache entry count + summed node/edge counts (`getReviewGraphWorkspaceCacheSnapshot`, `clients/review-graph/builder.ts`), word-index doc/posting/forward-entry counts (off `runtime.wordIndex`), loaded tree-sitter grammar/parser/query-cache counts + tree-cache size/bytes (`TreeSitterClient.getRuntimeStats`, `clients/tree-sitter-client.ts`), and the dispatch cascade's turn-bounded cache sizes (`getDispatchCascadeCacheStats`, `clients/dispatch/integration.ts`). Every field is a `Map`/array `.size`/`.length` read or a `process.memoryUsage()` call — nothing iterates a large structure's contents, nothing snapshots the heap. **Documented gap vs the #1126 spec:** the WASM linear-memory byte length (`Module.wasmMemory.buffer.byteLength`) is NOT included — inspecting the installed web-tree-sitter 0.25.10 package confirmed that value lives in a private closure (`bindings.ts`'s `Module` singleton) with no public export, and reaching it would require either internal reflection (brittle across versions/bundling) or overriding Emscripten's `wasmMemory` init option with a hand-built `WebAssembly.Memory` (risks a memory-import mismatch breaking ALL structural analysis, for an observability-only feature) — `process.memoryUsage().arrayBuffers` is used as the process-wide proxy instead (WASM linear memory backs an ArrayBuffer, so it's already included there).

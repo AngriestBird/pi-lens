@@ -34,6 +34,7 @@ import {
 	hasNearestPackageJsonField,
 	hasOcamlformatConfig,
 	hasOxfmtConfig,
+	hasOxfmtSvelteConfig,
 	hasOxlintConfig,
 	hasPhpCsFixerConfig,
 	hasPhpstanConfig,
@@ -808,6 +809,110 @@ describe("tool-policy", () => {
 		} finally {
 			env.cleanup();
 		}
+	});
+
+	// oxfmt's .svelte support is conditional beyond the generic hasOxfmtConfig
+	// check — verified empirically against the real oxfmt npm binary (see
+	// PR #1134 body for the full four-cell matrix). Both the `svelte` package
+	// AND the config's `svelte` flag are required; either alone always fails.
+	describe("hasOxfmtSvelteConfig (#1134)", () => {
+		it("is true with the svelte package and {\"svelte\": true} in .oxfmtrc.json", () => {
+			const env = setupTestEnvironment("pi-lens-tool-policy-oxfmt-svelte-json-");
+			try {
+				createTempFile(
+					env.tmpDir,
+					"package.json",
+					JSON.stringify({
+						devDependencies: { oxfmt: "^0.54.0", svelte: "^5.0.0" },
+					}),
+				);
+				createTempFile(
+					env.tmpDir,
+					".oxfmtrc.json",
+					JSON.stringify({ svelte: true }),
+				);
+				expect(hasOxfmtSvelteConfig(env.tmpDir)).toBe(true);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("is true with the svelte package and `svelte = true` in oxfmt.toml", () => {
+			const env = setupTestEnvironment("pi-lens-tool-policy-oxfmt-svelte-toml-");
+			try {
+				createTempFile(
+					env.tmpDir,
+					"package.json",
+					JSON.stringify({ devDependencies: { svelte: "^5.0.0" } }),
+				);
+				createTempFile(env.tmpDir, "oxfmt.toml", "svelte = true\n");
+				expect(hasOxfmtSvelteConfig(env.tmpDir)).toBe(true);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("is false without the svelte package, even with the config flag on", () => {
+			const env = setupTestEnvironment("pi-lens-tool-policy-oxfmt-svelte-nopackage-");
+			try {
+				createTempFile(
+					env.tmpDir,
+					".oxfmtrc.json",
+					JSON.stringify({ svelte: true }),
+				);
+				expect(hasOxfmtSvelteConfig(env.tmpDir)).toBe(false);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("is false with the svelte package but no config flag", () => {
+			const env = setupTestEnvironment("pi-lens-tool-policy-oxfmt-svelte-noflag-");
+			try {
+				createTempFile(
+					env.tmpDir,
+					"package.json",
+					JSON.stringify({ devDependencies: { svelte: "^5.0.0" } }),
+				);
+				expect(hasOxfmtSvelteConfig(env.tmpDir)).toBe(false);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("is false when the config flag is explicitly false", () => {
+			const env = setupTestEnvironment("pi-lens-tool-policy-oxfmt-svelte-false-");
+			try {
+				createTempFile(
+					env.tmpDir,
+					"package.json",
+					JSON.stringify({ devDependencies: { svelte: "^5.0.0" } }),
+				);
+				createTempFile(
+					env.tmpDir,
+					".oxfmtrc.json",
+					JSON.stringify({ svelte: false }),
+				);
+				expect(hasOxfmtSvelteConfig(env.tmpDir)).toBe(false);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("is false for a generic oxfmt.toml that doesn't set the svelte key", () => {
+			const env = setupTestEnvironment("pi-lens-tool-policy-oxfmt-svelte-generic-toml-");
+			try {
+				createTempFile(
+					env.tmpDir,
+					"package.json",
+					JSON.stringify({ devDependencies: { svelte: "^5.0.0" } }),
+				);
+				createTempFile(env.tmpDir, "oxfmt.toml", "# oxfmt config\n");
+				expect(hasOxfmtSvelteConfig(env.tmpDir)).toBe(false);
+			} finally {
+				env.cleanup();
+			}
+		});
 	});
 
 	it("hasMypyConfig detects [tool.mypy] in a parent directory pyproject.toml", () => {
