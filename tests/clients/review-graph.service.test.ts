@@ -21,6 +21,7 @@ import {
 	getGraphSourceFiles,
 	getLastGraphBuildInfo,
 	isReviewGraphMigrationNeeded,
+	REVIEW_GRAPH_VERSION,
 } from "../../clients/review-graph/builder.js";
 import { clearModuleGraphCache } from "../../clients/review-graph/workspace-modules.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
@@ -267,6 +268,11 @@ describe("review graph service", () => {
 		// like the v2→v3 (#260) bump was, not partially reused.
 		const env = setupTestEnvironment("pi-lens-review-graph-v3-migrate-");
 		try {
+			// Deliberately pinned to "v3", below REVIEW_GRAPH_VERSION, to exercise
+			// the legacy-migration rejection path itself (the #1082/#1106
+			// vacuous-fixture class: a future bump to "v3" would silently
+			// un-exercise this).
+			expect(REVIEW_GRAPH_VERSION).not.toBe("v3");
 			const cacheDir = path.join(getProjectDataDir(env.tmpDir), "cache");
 			fs.mkdirSync(cacheDir, { recursive: true });
 			fs.writeFileSync(
@@ -309,7 +315,7 @@ describe("review graph service", () => {
 				"export function alpha() {\n  return 1;\n}\n",
 			);
 			const graph = await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
-			expect(graph.version).toBe("v8");
+			expect(graph.version).toBe(REVIEW_GRAPH_VERSION);
 			const alphaId = [...graph.nodes.keys()].find((id) =>
 				id.includes(":alpha:"),
 			);
@@ -335,6 +341,11 @@ describe("review graph service", () => {
 		// exactly like the earlier version bumps.
 		const env = setupTestEnvironment("pi-lens-review-graph-v4-migrate-");
 		try {
+			// Deliberately pinned to "v4", below REVIEW_GRAPH_VERSION, to exercise
+			// the legacy-migration rejection path itself (the #1082/#1106
+			// vacuous-fixture class: a future bump to "v4" would silently
+			// un-exercise this).
+			expect(REVIEW_GRAPH_VERSION).not.toBe("v4");
 			const cacheDir = path.join(getProjectDataDir(env.tmpDir), "cache");
 			fs.mkdirSync(cacheDir, { recursive: true });
 			fs.writeFileSync(
@@ -370,7 +381,7 @@ describe("review graph service", () => {
 				"export interface Foo {\n  a: number;\n}\n",
 			);
 			const graph = await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
-			expect(graph.version).toBe("v8");
+			expect(graph.version).toBe(REVIEW_GRAPH_VERSION);
 			flushReviewGraphPersistsForTests();
 			for (let i = 0; i < 20 && isReviewGraphMigrationNeeded(env.tmpDir); i++) {
 				await new Promise((r) => setTimeout(r, 25));

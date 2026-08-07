@@ -738,6 +738,9 @@ export interface SerializedWordIndex {
 	forward?: Array<[number, Array<[string, number]>]>;
 }
 
+/** Persisted word-index serialization format version. Bump on breaking format changes. */
+export const WORD_INDEX_FORMAT_VERSION = 2;
+
 export function serializeWordIndex(index: WordIndex): SerializedWordIndex {
 	const files = [...index.docLengths.keys()];
 	const fileIndex = new Map<string, number>();
@@ -763,7 +766,7 @@ export function serializeWordIndex(index: WordIndex): SerializedWordIndex {
 			: undefined;
 
 	return {
-		version: 2,
+		version: WORD_INDEX_FORMAT_VERSION,
 		files,
 		postings,
 		docLengths: files.map((file) => index.docLengths.get(file) ?? 0),
@@ -781,7 +784,7 @@ export function deserializeWordIndex(
 ): WordIndex | null {
 	if (
 		!data ||
-		data.version !== 2 ||
+		data.version !== WORD_INDEX_FORMAT_VERSION ||
 		!Array.isArray(data.files) ||
 		!Array.isArray(data.postings) ||
 		!Array.isArray(data.docLengths) ||
