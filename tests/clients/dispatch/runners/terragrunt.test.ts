@@ -70,10 +70,11 @@ describe("terragrunt runner", () => {
 			const filePath = path.join(nestedDir, "terragrunt.hcl");
 			fs.writeFileSync(filePath, 'include "root" {\n  path = find_in_parent_folders()\n}\n');
 
+			// Clean unit: terragrunt v1.1.2 prints NOTHING (empty stdout, exit 0).
 			safeSpawnAsync.mockResolvedValue({
 				error: null,
 				status: 0,
-				stdout: JSON.stringify({ invalid_files: [] }),
+				stdout: "",
 				stderr: "",
 			});
 
@@ -85,13 +86,7 @@ describe("terragrunt runner", () => {
 
 			expect(safeSpawnAsync).toHaveBeenCalledWith(
 				"terragrunt",
-				expect.arrayContaining([
-					"hcl",
-					"validate",
-					"--json",
-					"--non-interactive",
-					"--filter=terragrunt.hcl",
-				]),
+				["hcl", "validate", "--json", "--non-interactive"],
 				expect.objectContaining({ cwd: nestedDir }),
 			);
 		} finally {
@@ -99,7 +94,42 @@ describe("terragrunt runner", () => {
 		}
 	});
 
-	it("parses the nested invalid_files shape with numeric severity", async () => {
+	// Regression: terragrunt's `--filter` is component filter-syntax, NOT a
+	// filename. A bare basename (`--filter=terragrunt.hcl`) matches zero
+	// components, so terragrunt validates NOTHING — empirically exit 0 with empty
+	// stdout even for a broken unit (verified on v1.1.2). The runner must NOT pass
+	// --filter, or every real finding would be silently suppressed.
+	it("does not pass a --filter argument (it would suppress all findings)", async () => {
+		const env = setupTestEnvironment("pi-lens-terragrunt-runner-");
+		try {
+			const filePath = path.join(env.tmpDir, "terragrunt.hcl");
+			fs.writeFileSync(filePath, "locals {}\n");
+
+			safeSpawnAsync.mockResolvedValue({
+				error: null,
+				status: 0,
+				stdout: "",
+				stderr: "",
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/terragrunt.js")
+			).default;
+
+			await runner.run(createCtx(filePath, env.tmpDir) as never);
+
+			const args = safeSpawnAsync.mock.calls[0][1] as string[];
+			expect(args.some((a) => a.startsWith("--filter"))).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// TOLERANT FALLBACK shape — NOT what terragrunt v1.1.2 emits (it prints a flat
+	// array with string severity, see the test below). Retained so the parser
+	// keeps decoding a nested `invalid_files`/numeric-severity payload should a
+	// different/older terragrunt build produce one.
+	it("parses the nested invalid_files shape with numeric severity (tolerant fallback)", async () => {
 		const env = setupTestEnvironment("pi-lens-terragrunt-runner-");
 		try {
 			const filePath = path.join(env.tmpDir, "terragrunt.hcl");
@@ -148,7 +178,70 @@ describe("terragrunt runner", () => {
 		}
 	});
 
-	it("parses a flat diagnostic array with string severity", async () => {
+	// REAL shape captured from terragrunt v1.1.2 (win-x64): a flat JSON array of
+	// diagnostics with STRING severity, an ABSOLUTE `range.filename`, and
+	// `summary`/`detail`/`snippet` fields. The filename is built from the test's
+	// own tmp path so pathsEqual attribution holds on any OS (Linux CI included).
+	it("parses the real flat array shape captured from terragrunt v1.1.2", async () => {
+		const env = setupTestEnvironment("pi-lens-terragrunt-runner-");
+		try {
+			const filePath = path.join(env.tmpDir, "terragrunt.hcl");
+			fs.writeFileSync(
+				filePath,
+				"locals {\n  region = \"us-east-1\"\n}\n\ninputs = {\n  region = local.does_not_exist\n}\n",
+			);
+
+			safeSpawnAsync.mockResolvedValue({
+				error: new Error("exit status 1"),
+				status: 1,
+				stdout: JSON.stringify([
+					{
+						range: {
+							filename: filePath,
+							start: { line: 6, column: 17, byte: 62 },
+							end: { line: 6, column: 32, byte: 77 },
+						},
+						snippet: {
+							context: "",
+							code: "  region = local.does_not_exist",
+							values: [],
+							start_line: 6,
+							highlight_start_offset: 16,
+							highlight_end_offset: 31,
+						},
+						summary: "Unsupported attribute",
+						detail: 'This object does not have an attribute named "does_not_exist".',
+						severity: "error",
+					},
+				]),
+				// terragrunt logs a summary line to stderr alongside the JSON stdout.
+				stderr: "ERROR  1 HCL validation error(s) found",
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/terragrunt.js")
+			).default;
+
+			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
+
+			expect(result.status).toBe("failed");
+			expect(result.semantic).toBe("blocking");
+			expect(result.diagnostics).toHaveLength(1);
+			expect(result.diagnostics[0]).toMatchObject({
+				line: 6,
+				column: 17,
+				severity: "error",
+				semantic: "blocking",
+				tool: "terragrunt",
+				message: "Unsupported attribute",
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// A clean unit prints NOTHING on v1.1.2 (empty stdout, exit 0) — not `[]`.
+	it("treats empty stdout from a clean unit as success with no findings", async () => {
 		const env = setupTestEnvironment("pi-lens-terragrunt-runner-");
 		try {
 			const filePath = path.join(env.tmpDir, "root.hcl");
@@ -157,16 +250,7 @@ describe("terragrunt runner", () => {
 			safeSpawnAsync.mockResolvedValue({
 				error: null,
 				status: 0,
-				stdout: JSON.stringify([
-					{
-						severity: "warning",
-						summary: "unused local",
-						range: {
-							filename: "root.hcl",
-							start: { line: 5, column: 1 },
-						},
-					},
-				]),
+				stdout: "",
 				stderr: "",
 			});
 
@@ -177,13 +261,8 @@ describe("terragrunt runner", () => {
 			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
 
 			expect(result.status).toBe("succeeded");
-			expect(result.semantic).toBe("warning");
-			expect(result.diagnostics).toHaveLength(1);
-			expect(result.diagnostics[0]).toMatchObject({
-				line: 5,
-				severity: "warning",
-				semantic: "warning",
-			});
+			expect(result.semantic).toBe("none");
+			expect(result.diagnostics).toEqual([]);
 		} finally {
 			env.cleanup();
 		}

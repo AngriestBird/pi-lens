@@ -45,10 +45,20 @@ function toRawDiagnostics(parsed: unknown): TerragruntDiagnostic[] {
 }
 
 /**
- * Parse `terragrunt hcl validate --json` output. Shape is unverified (the CLI
- * isn't installed in this environment) — accept both the nested
- * `{invalid_files:[{diagnostics:[...]}]}` shape and a flat diagnostic array,
- * and accept severity as either numeric (1=error, 2=warning) or a string.
+ * Parse `terragrunt hcl validate --json` output.
+ *
+ * OBSERVED CONTRACT (captured empirically from terragrunt v1.1.2, win-x64):
+ * the payload is a FLAT JSON array of diagnostic objects on stdout, e.g.
+ *
+ *   [{"range":{"filename":"<ABSOLUTE path>","start":{"line":1,"column":8,...},
+ *     "end":{...}},"snippet":{...},"summary":"Unclosed configuration block",
+ *     "detail":"...","severity":"error"}]
+ *
+ * Key facts: `severity` is a STRING ("error"), `range.filename` is an ABSOLUTE
+ * path (host separator), and a CLEAN unit prints NOTHING (empty stdout, exit 0)
+ * — not `[]`. The nested `{invalid_files:[{diagnostics:[...]}]}` wrapper and the
+ * numeric (1=error/2=warning) severity encoding were NOT observed on v1.1.2 and
+ * are retained only as a tolerant fallback for other/older shapes.
  * Malformed/unparseable input returns [].
  */
 export function parseTerragruntOutput(
@@ -104,6 +114,36 @@ const SKIPPED: RunnerResult = {
 	semantic: "none",
 };
 
+/**
+ * Runner for `terragrunt hcl validate --json`, the linter for terragrunt units.
+ *
+ * REQUIRES the redesigned terragrunt CLI: the `terragrunt hcl validate` /
+ * `terragrunt hcl fmt` command group replaced the old `hclvalidate`/`hclfmt`
+ * top-level commands in the CLI redesign (~terragrunt v0.75; the legacy names
+ * were removed in v1.0). Contract verified empirically on terragrunt v1.1.2.
+ *
+ * Observed exit-code / output table (terragrunt v1.1.2, win-x64):
+ *   - clean unit ............ exit 0, EMPTY stdout (no `[]`)
+ *   - validation findings ... exit 1, flat JSON array on stdout (+ a log line
+ *                             "N HCL validation error(s) found" on stderr)
+ *   - unknown command ....... an older binary that predates `hcl validate`
+ *                             exits non-zero with the error on STDERR and EMPTY
+ *                             stdout; the `result.error && !result.stdout` guard
+ *                             below classifies that as SKIPPED (never a false
+ *                             blocker).
+ *
+ * `hcl validate` recursively validates the unit(s) at its working dir; it has no
+ * per-file flag (`--filter` takes component filter-syntax, NOT a filename — a
+ * bare basename silently matches zero components and suppresses ALL findings,
+ * verified on v1.1.2). So we validate the edited file's unit directory and
+ * attribute findings back to the edited file by absolute path in
+ * parseTerragruntOutput.
+ *
+ * Misdetection edge: `root.hcl` is filename-detected as terragrunt, so a
+ * `root.hcl` that is NOT a terragrunt file still gets validated here — `hcl
+ * validate` just checks generic HCL, so a non-terragrunt file fails soft
+ * (either clean or a plain HCL diagnostic, never a spurious hard blocker).
+ */
 const terragruntRunner: RunnerDefinition = {
 	id: "terragrunt",
 	appliesTo: ["terragrunt"],
@@ -131,13 +171,7 @@ const terragruntRunner: RunnerDefinition = {
 		const fileDir = path.dirname(absPath);
 		const result = await safeSpawnAsync(
 			cmd,
-			[
-				"hcl",
-				"validate",
-				"--json",
-				"--non-interactive",
-				`--filter=${path.basename(absPath)}`,
-			],
+			["hcl", "validate", "--json", "--non-interactive"],
 			{ cwd: fileDir, timeout: 30000 },
 		);
 
