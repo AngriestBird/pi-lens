@@ -290,10 +290,12 @@ describe("tool_result path-keyed maps: divergent-spelling collapse (#1086)", () 
 
 	it("flushDebouncedToolResults(filePath) flushes a pending entry scheduled under a divergently-spelled path", async () => {
 		// getDebounceMs() clamps to MAX_DEBOUNCE_MS (1000), so this schedules a
-		// real ~1s timer — long enough that a *correct* flush (near-instant) and
-		// a *missed* flush (falls back to the natural 1s timer) are clearly
-		// distinguishable by elapsed time; asserting on call count alone would
-		// pass either way once the natural timer eventually fires.
+		// real ~1s timer. The load-immune discriminator (review round 1): the
+		// flush AWAITS the entry's promise, so on a HIT `runPipeline` has already
+		// run when `flushDebouncedToolResults` resolves — asserted BEFORE awaiting
+		// `pending`. On a pre-fix MISS the flush is a no-op that resolves with the
+		// call count still 0 (the natural timer hasn't fired yet), so the same
+		// assertion fails deterministically — no wall-clock bound needed.
 		process.env.PI_LENS_TOOL_RESULT_DEBOUNCE_MS = "5000";
 		const env = setupTestEnvironment("pi-lens-flush-spelling-");
 		try {
@@ -318,16 +320,13 @@ describe("tool_result path-keyed maps: divergent-spelling collapse (#1086)", () 
 			// `Map` keyed on the raw path), `debouncedPipelines.has(lowerPath)`
 			// would miss the entry scheduled under `upperPath` and silently no-op,
 			// leaving `pending` to only resolve once the natural ~1s timer fires.
-			const flushStart = Date.now();
 			await flushDebouncedToolResults(lowerPath);
-			await pending;
-			const elapsedMs = Date.now() - flushStart;
-
+			// Event-order assertion, pre-`pending`: a hit has already run the
+			// pipeline; a pre-fix miss has not (its natural timer is still ~1s out).
 			const { runPipeline } = await import("../../clients/pipeline.js");
 			expect(vi.mocked(runPipeline)).toHaveBeenCalledTimes(1);
-			// A hit resolves near-instantly; a miss takes ~1000ms (the natural
-			// timer). 500ms gives ample CI slack while still failing a miss.
-			expect(elapsedMs).toBeLessThan(500);
+			await pending;
+			expect(vi.mocked(runPipeline)).toHaveBeenCalledTimes(1);
 		} finally {
 			env.cleanup();
 		}
