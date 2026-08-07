@@ -558,11 +558,6 @@ export function saveCallGraph(
 	cwd: string,
 	graph: FunctionCallGraph,
 	identity: CallGraphCacheIdentity,
-): void;
-export function saveCallGraph(
-	cwd: string,
-	graph: FunctionCallGraph,
-	identity: CallGraphCacheIdentity,
 ): void {
 	const cacheFile = cacheFilePath(cwd);
 	const metaFile = metaFilePath(cwd);
@@ -571,10 +566,8 @@ export function saveCallGraph(
 		const persisted: PersistedCallGraph = {
 			version: CALL_GRAPH_CACHE_VERSION,
 			builtAt: graph.builtAt,
-			...(identity ? {
-				reviewGraphVersion: identity.reviewGraphVersion,
-				reviewGraphSignature: identity.reviewGraphSignature,
-			} : {}),
+			reviewGraphVersion: identity.reviewGraphVersion,
+			reviewGraphSignature: identity.reviewGraphSignature,
 			edges: graph.edges,
 			callees: [...graph.callees.entries()].map(([k, v]) => [k, [...v]]),
 			callers: [...graph.callers.entries()].map(([k, v]) => [k, [...v]]),

@@ -237,6 +237,90 @@ describe("buildCallGraph", () => {
 		}
 	});
 
+	// refs #1089 P3-1 (audit repro shape): the same-file check must compare
+	// NORMALIZED paths, and — for a ref with exactly one candidate (the
+	// canonical targetId path) — must count sameFileEvidence exactly ONCE per
+	// ref, not once per candidate. A raw (unnormalized) compare would fail to
+	// recognize two divergent spellings of the SAME file as "same file" and
+	// misclassify the evidence as cross-file/resolved instead; a per-candidate
+	// double count would push resolvedEvidence + ... + sameFileEvidence above
+	// totalEvidence. Either bug breaks validatePersistedCallGraph's coverage
+	// sum invariant, so a graph built from divergent path forms would be
+	// silently rejected by loadCallGraph on every subsequent load — a
+	// perpetual cache miss reproduced from a real adapter shape (backslash vs
+	// forward-slash spellings of the same Windows-style path).
+	it("normalizes divergent path forms for the same-file check and counts sameFileEvidence once per ref (#1089 P3-1)", () => {
+		process.env.PILENS_DATA_DIR = tmpDir;
+		try {
+			// Same actual file, two different spellings — exactly the class of
+			// divergence a review-graph adapter and a tree-sitter extractor can
+			// disagree on (backslash vs forward-slash).
+			const callerFileForwardSlash = "C:/proj/a.ts";
+			const callerFileBackslash = "C:\\proj\\a.ts";
+			const targetId = `${callerFileForwardSlash}:target:function:3`;
+			const callerId = `${callerFileForwardSlash}:caller:function:10`;
+
+			const allSymbols = new Map<string, Symbol[]>([
+				[callerFileForwardSlash, [
+					{ ...sym(callerFileForwardSlash, "target", "function", 3), id: targetId },
+					{ ...sym(callerFileForwardSlash, "caller", "function", 10), id: callerId },
+				]],
+			]);
+			// The ref's OWN filePath/callerFile is spelled with backslashes —
+			// divergent from the symbol's forward-slash filePath above, but the
+			// same file on disk.
+			const allRefs = new Map<string, SymbolRef[]>([
+				[callerFileBackslash, [
+					{
+						...ref(callerFileBackslash, "target", 4),
+						targetId,
+						callerSymbolId: callerId,
+						evidenceKind: "calls",
+						referenceKind: "call",
+						resolution: "exact",
+					},
+				]],
+			]);
+
+			const graph = buildCallGraph(allSymbols, allRefs, {
+				totalEvidence: 1,
+				callsEvidence: 1,
+				referencesEvidence: 0,
+				eligibleEvidence: 1,
+				resolvedEvidence: 1,
+				unresolvedEvidence: 0,
+				typeOnlyEvidence: 0,
+				unsupportedEvidence: 0,
+				sameFileEvidence: 0,
+				duplicateEvidence: 0,
+				complete: true,
+			});
+
+			// Recognized as same-file (not left as a phantom cross-file edge).
+			expect(graph.edges).toHaveLength(0);
+			// Counted exactly once, and the coverage sum invariant holds — this
+			// is the exact arithmetic validatePersistedCallGraph enforces on load.
+			const c = graph.coverage;
+			expect(c.sameFileEvidence).toBe(1);
+			expect(
+				c.resolvedEvidence + c.unresolvedEvidence + c.typeOnlyEvidence +
+					c.unsupportedEvidence + c.sameFileEvidence,
+			).toBe(c.totalEvidence);
+
+			// And the round trip through the real persistence path survives the
+			// same validator that rejects a broken-sum graph on every load.
+			saveCallGraph("/proj", graph, {
+				reviewGraphVersion: "v7",
+				reviewGraphSignature: "sig-divergent-path-forms",
+			});
+			const loaded = loadCallGraph("/proj");
+			expect(loaded).toBeDefined();
+			expect(loaded?.graph.coverage?.sameFileEvidence).toBe(1);
+		} finally {
+			delete process.env.PILENS_DATA_DIR;
+		}
+	});
+
 	it("counts duplicate evidence once while keeping centrality on logical edges", () => {
 		const fileA = "/proj/a.ts";
 		const fileB = "/proj/b.ts";
