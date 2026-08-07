@@ -30,9 +30,16 @@
  *
  * Bounded tracker (the one-axis-rule, AGENTS.md "resource bounded along one
  * axis but unbounded along another"): the creation-site map is capped at
- * `TRACKER_MAX_ENTRIES` and drops the oldest tracked entry (insertion-order,
- * `Map` iteration) before adding a new one past the cap — never unbounded
- * growth even in a pathological timer-storm session.
+ * `TRACKER_MAX_ENTRIES` before adding a new entry past the cap — never
+ * unbounded growth even in a pathological timer-storm session. Eviction
+ * protects the first `TRACKER_PROTECTED_COUNT` insertion-order entries and
+ * evicts the oldest entry OUTSIDE that protected zone instead: a #1097-style
+ * leaked handle is typically among the EARLIEST created in a session (it's
+ * the one nothing ever cleaned up), so a naive drop-oldest policy would let a
+ * later burst past the cap evict exactly the evidence this tracer exists to
+ * capture, silently. `evictedCount` (a running total, always present on the
+ * dump entry once the tracker is installed) makes any eviction — protected
+ * or not — an explicit, visible fact instead of a silent gap in attribution.
  */
 
 import * as asyncHooks from "node:async_hooks";
@@ -49,8 +56,13 @@ const DEBUG_HANDLES_LOG_FILE = path.join(
 	"debug-handles.log",
 );
 
-/** Cap on tracked in-flight creation sites — drop-oldest past this (bounded). */
+/** Cap on tracked in-flight creation sites (bounded past this). */
 export const TRACKER_MAX_ENTRIES = 500;
+
+/** The first N insertion-order entries are never evicted — see the module
+ *  docstring's "leaked handles skew early" rationale. Must stay well below
+ *  `TRACKER_MAX_ENTRIES` so there is always an evictable, unprotected tail. */
+export const TRACKER_PROTECTED_COUNT = 100;
 
 /** async_hooks `type` strings worth attributing: timers, sockets, process/
  *  signal handles — the shapes #1097's hand-rolled tracer actually needed
@@ -78,10 +90,22 @@ function trimStack(raw: string | undefined): string {
 	return callerLines.slice(0, 8).join("\n").slice(0, 2000);
 }
 
-/** Record one tracked resource's creation site, dropping the oldest entry
- *  (Map insertion order) once the bounded cap is reached. Shared by the real
- *  async_hooks `init` callback and the test-only simulator so the cap logic
- *  has exactly one implementation. */
+/** Running total of tracker evictions this process (never reset) — surfaced
+ *  on every dump entry once the tracker is installed, per the P2 fix: an
+ *  eviction must always be a visible fact, never a silent attribution gap. */
+let trackedEvictedCount = 0;
+
+/** Test-only accessor for the running eviction total. */
+export function _evictedCountForTest(): number {
+	return trackedEvictedCount;
+}
+
+/** Record one tracked resource's creation site. Once the bounded cap is
+ *  reached, evicts the oldest entry OUTSIDE the first `TRACKER_PROTECTED_COUNT`
+ *  insertion-order entries (Map iteration order == insertion order) — see the
+ *  module docstring for why the earliest entries are protected instead of
+ *  evicted. Shared by the real async_hooks `init` callback and the test-only
+ *  simulator so the eviction policy has exactly one implementation. */
 function recordTrackedInit(
 	map: Map<number, TrackedResource>,
 	asyncId: number,
@@ -89,8 +113,19 @@ function recordTrackedInit(
 ): void {
 	if (!TRACKED_TYPE_RE.test(type)) return;
 	if (map.size >= TRACKER_MAX_ENTRIES) {
-		const oldestKey = map.keys().next().value;
-		if (oldestKey !== undefined) map.delete(oldestKey);
+		let index = 0;
+		let evictKey: number | undefined;
+		for (const key of map.keys()) {
+			if (index >= TRACKER_PROTECTED_COUNT) {
+				evictKey = key;
+				break;
+			}
+			index++;
+		}
+		if (evictKey !== undefined) {
+			map.delete(evictKey);
+			trackedEvictedCount++;
+		}
 	}
 	map.set(asyncId, { type, stack: trimStack(new Error().stack) });
 }
@@ -177,6 +212,13 @@ export interface DebugHandlesLogEntry {
 	counts: Record<string, number>;
 	/** Present only when the async_hooks tracker was installed at startup. */
 	creationSites?: CreationSiteSummary[];
+	/** Running total of tracker-cap evictions since startup (present whenever
+	 *  `creationSites` is) — a nonzero value means attribution for this dump
+	 *  is INCOMPLETE: some in-flight resources' creation sites were evicted
+	 *  past the bounded cap and are no longer traceable. Always present (even
+	 *  at 0) rather than only-on-eviction so "no evictions" is an explicit,
+	 *  verifiable fact rather than an absent-field inference. */
+	evictedCount?: number;
 }
 
 /**
@@ -200,6 +242,7 @@ export function dumpActiveHandles(label: string): void {
 	};
 	if (trackedResources) {
 		entry.creationSites = summarizeCreationSites(trackedResources);
+		entry.evictedCount = trackedEvictedCount;
 	}
 	writer.log(entry);
 }
@@ -207,6 +250,11 @@ export function dumpActiveHandles(label: string): void {
 /** Test-only view of the tracker's current size (bounded-cap assertions). */
 export function _trackedResourceCountForTest(): number {
 	return trackedResources?.size ?? 0;
+}
+
+/** Test-only: is `asyncId` still tracked? (protected-vs-evicted assertions). */
+export function _isTrackedForTest(asyncId: number): boolean {
+	return trackedResources?.has(asyncId) ?? false;
 }
 
 /** Test-only: synthesize an `init` call against the installed tracker without
