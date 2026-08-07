@@ -1916,6 +1916,16 @@ export class TreeSitterClient {
 			return slots;
 		}
 
+		/**
+		 * Escape a string for safe interpolation into a `RegExp` source —
+		 * needed anywhere an identifier's raw text is combined with regex
+		 * metacharacters like `\b` word boundaries (see
+		 * "not_closed_or_try_with_resources" below; #1089 P2).
+		 */
+		function escapeRegExp(s: string): string {
+			return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		}
+
 		switch (postFilter) {
 			case "no_nested_anchor_chain": {
 				// Tree-sitter queries can express the opening-tag shape, but they
@@ -2091,7 +2101,13 @@ export class TreeSitterClient {
 							"block",
 						]) ?? rootNode;
 					if (!scope) return true;
-					const resourceWord = new RegExp(`\b${resource}\b`);
+					// `\b` in a template literal is the BACKSPACE control char
+					// (U+0008), not a regex word-boundary escape — that requires
+					// the literal two-character sequence `\\b`. The identifier
+					// itself must also be regex-escaped (#1089 P2).
+					const resourceWord = new RegExp(
+						`\\b${escapeRegExp(resource)}\\b`,
+					);
 					const stack = [scope];
 					for (let visited = 0; stack.length > 0 && visited < 10_000; visited++) {
 						const node = stack.pop();
