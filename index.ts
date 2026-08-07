@@ -120,7 +120,7 @@ import {
 } from "./tools/module-report.js";
 import { createProjectReportTool } from "./tools/project-report.js";
 import { createSymbolSearchTool } from "./tools/symbol-search.js";
-import { logLatency } from "./clients/latency-logger.js";
+import { getLastLoggedPhase, logLatency } from "./clients/latency-logger.js";
 import {
 	clearCachePrefixSession,
 	logCacheUsage,
@@ -141,6 +141,7 @@ import {
 import { renderTurnSummaryMessage } from "./clients/turn-summary-render.js";
 import {
 	getEventLoopStats,
+	resetEventLoopMonitor,
 	shouldLogWorstBlock,
 	startEventLoopMonitor,
 } from "./clients/event-loop-monitor.js";
@@ -155,8 +156,18 @@ const PI_LENS_EVAL_MS = getPiLensEvalMs() ?? 0;
 // blocks are captured. Native histogram — no per-event overhead. (#192)
 startEventLoopMonitor();
 // Worst event-loop block already persisted to latency.log (so we only log a
-// *new* worst freeze per turn, not the same growing max). (#192)
+// *new* worst freeze per turn, not the same growing max). (#192) A suspected
+// system stall (sleep/paging) never advances this high-water, so a machine
+// freeze can't permanently suppress logging of later genuine blocks. (#1122)
 let lastLoggedLoopWorstMs = 0;
+// Worst *genuine* (non-stall) block this session, for the health readout — the
+// per-turn histogram window (#1122) is reset each turn, so the session-scoped
+// worst is tracked here instead of read from the live histogram.
+let sessionWorstRealBlockMs = 0;
+// How many turns logged a suspected system stall (sleep/paging) this session —
+// surfaced in /lens-health so a machine freeze reads as environment, not a
+// pi-lens block (#1122).
+let sessionSuspectedStalls = 0;
 
 function dbg(msg: string) {
 	logSessionStart(msg);
@@ -766,16 +777,23 @@ export default function (pi: ExtensionAPI) {
 			);
 
 			// Event-loop occupancy — the dimension our duration logs were blind to
-			// (#192). `maxMs` ≈ the worst synchronous block (TUI stall) this session.
+			// (#192). The histogram window is now per-turn (#1122), so the session
+			// worst genuine (non-stall) block is tracked separately; p99/mean here
+			// reflect the current turn window.
 			const elStats = getEventLoopStats();
 			if (elStats) {
 				lines.push(
 					"",
-					`Event loop (session): worst block ${elStats.maxMs}ms · p99 ${elStats.p99Ms}ms · mean ${elStats.meanMs}ms`,
+					`Event loop: worst genuine block ${sessionWorstRealBlockMs}ms (session) · p99 ${elStats.p99Ms}ms · mean ${elStats.meanMs}ms (turn)`,
 				);
-				if (elStats.maxMs > 100) {
+				if (sessionWorstRealBlockMs > 100) {
 					lines.push(
 						"  ⚠ a >100ms synchronous block can stutter the TUI — check latency.log (#192)",
+					);
+				}
+				if (sessionSuspectedStalls > 0) {
+					lines.push(
+						`  ${sessionSuspectedStalls} suspected system stall(s) (sleep/paging) this session — excluded from the block figure above (#1122)`,
 					);
 				}
 			}
@@ -1637,18 +1655,47 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const repaintLspStatus = captureLspStatusRepaint(ctx);
 			// Persist a new worst event-loop block to latency.log, attributed to
-			// this turn, so freezes are queryable across sessions (#192).
-			const loopMaxMs = getEventLoopStats()?.maxMs ?? 0;
+			// this turn, so freezes are queryable across sessions (#192). The
+			// window is per-turn (#1122): the probe cannot itself see machine
+			// sleep or commit-charge paging, both of which freeze the process and
+			// masquerade as huge synchronous blocks, so we tag samples the turn's
+			// CPU budget can't account for as `suspectSystemStall` and keep them
+			// out of the genuine-block high-waters. `lastPhase` is cheap block
+			// attribution (#1123 item 1) — the last phase that ran before the
+			// block was detected.
+			const elStats = getEventLoopStats();
+			const loopMaxMs = elStats?.maxMs ?? 0;
+			const suspectSystemStall = elStats?.suspectSystemStall ?? false;
 			if (shouldLogWorstBlock(loopMaxMs, lastLoggedLoopWorstMs)) {
+				const lastPhase = getLastLoggedPhase();
 				logLatency({
 					type: "phase",
 					filePath: "<pi-lens>",
 					phase: "loop_block",
 					durationMs: Math.round(loopMaxMs),
-					metadata: { worstSoFar: true, turnIndex: runtime.turnIndex },
+					metadata: {
+						worstSoFar: true,
+						turnIndex: runtime.turnIndex,
+						suspectSystemStall,
+						windowCpuMs: elStats?.windowCpuMs,
+						windowWallMs: elStats?.windowWallMs,
+						lastPhase: lastPhase?.phase,
+						lastPhaseAt: lastPhase?.ts,
+					},
 				});
-				lastLoggedLoopWorstMs = loopMaxMs;
+				// A system stall must not raise the "new worst genuine block"
+				// bar, or it would silence every real block that follows it.
+				if (suspectSystemStall) {
+					sessionSuspectedStalls += 1;
+				} else {
+					lastLoggedLoopWorstMs = loopMaxMs;
+					sessionWorstRealBlockMs = Math.max(sessionWorstRealBlockMs, loopMaxMs);
+				}
 			}
+			// Start a fresh per-turn occupancy window so the next turn's worst
+			// block is attributable to that turn and its CPU budget is measured
+			// over the same span (#1122).
+			resetEventLoopMonitor();
 
 			// Drain any tool_result still in the debounce window so turn_end
 			// reads consistent state (cache, modified ranges, change-log).
