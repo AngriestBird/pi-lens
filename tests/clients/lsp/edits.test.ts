@@ -991,4 +991,32 @@ describe("LSP workspace edits — #1085 P3 bundle", () => {
 		]);
 		expect(crossServer.edit.changes[uri]).toHaveLength(1);
 	});
+
+	it("P3-3: a create at a rename-vacated path establishes new state for a later text edit at that path", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-3-"));
+		try {
+			const bPath = path.join(tmpDir, "b.txt");
+			const cPath = path.join(tmpDir, "c.txt");
+			fs.writeFileSync(bPath, "original", "utf-8");
+			await applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{ kind: "rename", oldUri: pathToFileURL(bPath).href, newUri: pathToFileURL(cPath).href },
+						{ kind: "create", uri: pathToFileURL(bPath).href },
+						{
+							textDocument: { uri: pathToFileURL(bPath).href },
+							edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "new" }],
+						},
+					],
+				},
+				tmpDir,
+			);
+			// The rename carried the original content to c.txt...
+			expect(fs.readFileSync(cPath, "utf-8")).toBe("original");
+			// ...and the vacated b.txt path was re-established by `create`, then
+			// received the text edit — not rejected as "text edit target does not
+			// exist" (the pre-fix failure mode).
+			expect(fs.readFileSync(bPath, "utf-8")).toBe("new");
+		} finally { removeTempDirSync(tmpDir); }
+	});
 });

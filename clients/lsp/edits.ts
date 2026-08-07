@@ -821,6 +821,14 @@ async function preflightWorkspaceEdit(
 }> {
 	const confine = await createWorkspaceUriConfiner(cwd);
 	const virtual = new Map<string, VirtualFile>();
+	// State for a path that `resolveVirtualPath` cannot resolve to a physical
+	// address — i.e. a path CURRENTLY vacated by an earlier rename in this same
+	// edit (its "from" address, still shadowed by an active virtual move) — but
+	// which a later `create` op in the same ordered edit re-establishes at that
+	// exact address. Keyed on the raw (unresolved) query path because there is
+	// no physical path to key `virtual` on. Consulted only when `resolveVirtualPath`
+	// returns undefined, so it never shadows a real physical/virtual-move address.
+	const virtualOverrides = new Map<string, VirtualFile>();
 	const virtualMoves: Array<{
 		from: string;
 		to: string;
@@ -864,7 +872,9 @@ async function preflightWorkspaceEdit(
 	const stateFor = async (filePath: string): Promise<VirtualFile> => {
 		if (isTombstoned(filePath)) return { exists: false, directory: false };
 		const physicalPath = resolveVirtualPath(filePath);
-		if (!physicalPath) return { exists: false, directory: false };
+		if (!physicalPath) {
+			return virtualOverrides.get(normalizeMapKey(filePath)) ?? { exists: false, directory: false };
+		}
 		const key = normalizeMapKey(physicalPath);
 		const known = virtual.get(key);
 		if (known) return known;
@@ -926,6 +936,13 @@ async function preflightWorkspaceEdit(
 				state.content = "";
 				const physicalPath = resolveVirtualPath(filePath);
 				if (physicalPath) virtual.set(normalizeMapKey(physicalPath), state);
+				// `resolveVirtualPath` returns undefined for a path currently shadowed
+				// by an earlier rename's vacated "from" address in this same ordered
+				// edit (P3-3): the created state has nowhere physical to live, so it
+				// must be recorded in the override overlay keyed on the raw query path
+				// instead — otherwise a later op addressing this exact path (e.g. a
+				// text edit) would see it as still-vacated/nonexistent.
+				else virtualOverrides.set(normalizeMapKey(filePath), state);
 			}
 			continue;
 		}
