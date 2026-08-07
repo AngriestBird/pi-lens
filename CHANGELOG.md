@@ -50,6 +50,28 @@ All notable changes to pi-lens will be documented in this file.
 	through `touchFile`, not a synthetic stand-in) never double-counts against
 	this breaker. Full existing LSP suite (536 tests) stays green.
 
+- **Cascade fallback-display paths re-displayed bound-false LSP snapshots (refs #1104)** —
+	#1100 gated the cascade's RECONCILE path (the footer/widget) onto content
+	binding (`boundToCurrentDisk`), but two DEGRADED-fallback DISPLAY paths in
+	`clients/dispatch/integration.ts` still re-read TTL-fresh `getAllDiagnostics()`
+	snapshots without consulting binding at all: the touch-error fallback (a
+	failed active LSP touch falling back to the passive snapshot) and
+	`appendFallbackNeighbors` (the CR-3/A2 degraded-fallback path when no
+	neighbor produced trustworthy LSP data). A bound-false snapshot — diagnostics
+	computed against a DIFFERENT disk state than what's currently on disk, e.g. a
+	pre-fix-edit read — could still reach cascade OUTPUT even though the widget
+	was protected. Both sites now apply the same false/`"unknown"`/true contract
+	#1095/#1100 already established for reconcile: `false` → skip the stale
+	display (logged via the cascade channel with `bindingState`), `"unknown"` →
+	unchanged (the pre-existing fallback contract), `true` → display. HONESTY
+	fix: filtering a display candidate could otherwise make a genuinely degraded
+	cascade look clean, so when every fallback candidate a run considered was
+	binding-rejected and nothing else produced output, the run now carries the
+	same `indeterminate` marker #1023 built for a degraded graph compute (new
+	`CascadeIndeterminateReason: "lsp_binding_rejected"`), so the turn-end
+	advisory still surfaces an honest note instead of silence. The `resultId`
+	pull-diagnostics plumbing that #1104 also tracks remains open — this covers
+	only the cascade display-binding gap (#1100 review P3-1).
 - **`parseSymbolKey` mis-parsed LSP-fallback symbol kinds (refs #1088)** —
 	the canonical-id parser whitelisted only the 7 kinds `buildSymbolId` mints
 	directly, but `addLspFallbackSymbols` mints ids using the much larger
