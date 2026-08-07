@@ -575,12 +575,14 @@ function readBoundToCurrentDisk(
  * `rawDiags`, never off a spread/clone (which drops them). See the memo-freeze note
  * at the `getAllDiagnostics` call site.
  */
+function readInconclusive(rawDiags: unknown): boolean {
+	return (rawDiags as { inconclusive?: boolean })?.inconclusive === true;
+}
+
 function isConfirmedTouch(
 	rawDiags: readonly import("../lsp/client.js").LSPDiagnostic[],
 ): boolean {
-	const inconclusive =
-		(rawDiags as { inconclusive?: boolean }).inconclusive === true;
-	return !inconclusive && readBoundToCurrentDisk(rawDiags) !== false;
+	return !readInconclusive(rawDiags) && readBoundToCurrentDisk(rawDiags) !== false;
 }
 
 // #459: the reverse-dependency index is a pure function of the review graph.
@@ -1576,6 +1578,7 @@ export async function computeCascadeForFile(
 				// would make the wipe self-sustain).
 				const confirmed = isConfirmedTouch(rawDiags);
 				const bindingRejected = readBoundToCurrentDisk(rawDiags) === false;
+				const inconclusive = readInconclusive(rawDiags);
 				// #692: `source: "cascade"` no longer overrides `rule` (see the
 				// doc comment on the sibling call above) — dropped rather than
 				// migrated to `scanOrigin` since cascade output never touches
@@ -1617,11 +1620,17 @@ export async function computeCascadeForFile(
 					lspTouched: true,
 					lspServerCount: configuredServerCount,
 					coldSnapshot: isColdSnapshot,
-					// #1095: surface a bound-false (disk-diverged) touch so an unbinding
-					// server is diagnosable through the same channel as inconclusive skips.
-					...(bindingRejected && {
-						metadata: { bindingState: bindingStateLabel(false) },
-					}),
+					// #1104: an unconfirmed touch has two independent, otherwise
+					// indistinguishable causes — `inconclusive` (the notify/diagnostics
+					// wait lapsed its deadline) and bound-false (`bindingState`, #1095 —
+					// diagnostics computed against a diverged disk state). Surface
+					// `inconclusive` unconditionally so cascade.log alone (no
+					// cross-referencing latency.log) tells them apart; `bindingState`
+					// stays conditional since "bound" carries no extra signal.
+					metadata: {
+						inconclusive,
+						...(bindingRejected && { bindingState: bindingStateLabel(false) }),
+					},
 				});
 
 				// #1093/#1095: a completed, CONFIRMED active touch is a confirmed
