@@ -6,6 +6,7 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Persistence workers could keep completed one-shot processes alive ([#1148](https://github.com/apmantza/pi-lens/issues/1148))** — project-snapshot and review-graph workers called `unref()` before registering their `"message"` listeners, and Node re-referenced the public `MessagePort` when each listener was added. Both workers now install all lifecycle listeners before `unref()`, so persistence remains asynchronous without retaining an otherwise-finished `pi --print` or subprocess workflow. Real child-process regression tests require both persistence paths to finish writing and exit naturally.
 - **Cascade fallback-display paths re-displayed bound-false LSP snapshots (refs #1104)** —
 	#1100 gated the cascade's RECONCILE path (the footer/widget) onto content
 	binding (`boundToCurrentDisk`), but two DEGRADED-fallback DISPLAY paths in
