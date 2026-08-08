@@ -1,3 +1,10 @@
+// This fixture imports the COMPILED `clients/*.js` output (see the dynamic
+// `import("../../clients/....js")` calls below), not the `.ts` sources. Run
+// `npm run build` before running this file directly or via a focused
+// `vitest run tests/clients/persistence-worker-exit.test.ts` — otherwise the
+// worker exercises stale compiled code and the test can silently pass/fail
+// against a build that predates your edits. CI is unaffected: it always runs
+// `npm run build` before `npm test`.
 import * as fs from "node:fs";
 import * as path from "node:path";
 

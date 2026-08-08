@@ -15,6 +15,11 @@ type PersistenceKind = "project-snapshot" | "review-graph";
 
 // A real OS child is load-bearing here: fake timers and an in-process test
 // cannot detect that a Worker's referenced MessagePort prevents natural exit.
+//
+// Pre-fix (#1148): the worker's MessagePort was re-ref'd by the "message"
+// listener added AFTER worker.unref(), so the child never exited on its own
+// once persistence completed. Against unmodified code, this test's child
+// hangs past CHILD_EXIT_TIMEOUT_MS below, gets SIGKILLed, and fails.
 async function runPersistenceChild(kind: PersistenceKind): Promise<string> {
 	const tempRoot = fs.mkdtempSync(
 		path.join(os.tmpdir(), `pi-lens-${kind}-exit-`),
