@@ -20,16 +20,23 @@
  * it to) instead of a real wall-clock sleep, per #1024's OS-agnostic
  * discipline — no flaky timing assumptions, and it proves the bound holds
  * even when the underlying read has not yet returned at all. The "healthy
- * path" test proves the fast case is unaffected. All tests FAIL on pre-fix
- * code: pre-fix, `handleSessionStart` awaits the slow read directly (no
- * race), so the "returns within budget" and "cold-start fallback" assertions
- * would time out / never observe a `timedOut: true` metadata flag.
+ * path" test proves the fast case is unaffected. The cold-start/deferred-
+ * reseed tests FAIL on pre-fix code: pre-fix, `handleSessionStart` calls the
+ * SYNC `readLatestProjectSequence` against the real filesystem — it ignores
+ * this test's async mock entirely (so it also returns quickly, just with the
+ * wrong un-bounded-by-design result) and never produces a `timedOut` metadata
+ * flag or a cold-start/deferred-reseed sequence, which is what these tests
+ * actually assert on.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ProjectSequenceIndex } from "../../clients/project-changes.js";
+import {
+	getProjectSnapshotLegacyPath,
+	PROJECT_SNAPSHOT_VERSION,
+} from "../../clients/project-snapshot.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { _resetSubagentModeForTests } from "../../clients/subagent-mode.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
@@ -205,10 +212,15 @@ describe("#1162 — bounded session_start sequence read", () => {
 			const elapsed = Date.now() - startedAt;
 
 			// Bounded: session_start returned even though the injected read has
-			// NOT resolved yet — pre-fix this `await` would hang until `slow`
-			// settles (never, in this test), so this line alone fails pre-fix.
-			// Generous slack above the 30ms budget absorbs CI scheduling jitter
-			// while staying far below any real host-pressure stall.
+			// NOT resolved yet. This line alone does NOT distinguish pre-/post-fix
+			// (pre-fix code calls the SYNC `readLatestProjectSequence` against the
+			// real filesystem, ignores this mock entirely, and also returns fast —
+			// it just returns the wrong, un-bounded-by-design result). The real
+			// pre-fix failures are below: the missing `timedOut` metadata flag and
+			// the absent cold-start/deferred-reseed behavior, which only the
+			// bounded-async path produces. Generous slack above the 30ms budget
+			// absorbs CI scheduling jitter while staying far below any real
+			// host-pressure stall.
 			expect(elapsed).toBeLessThan(2000);
 
 			// Cold-start fallback: seeded with the safe empty sentinel.
@@ -302,6 +314,109 @@ describe("#1162 — bounded session_start sequence read", () => {
 			expect(logLatencySpy).not.toHaveBeenCalledWith(
 				expect.objectContaining({
 					phase: "session_start_sequence_read_deferred_reseed",
+				}),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does NOT clobber an in-window edit's bumped fileSeq — same-session advancement guard (review follow-up P3, closes #1168 finding 1)", async () => {
+		const env = setupTestEnvironment("pi-lens-seq-budget-advance-");
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const cwd = makeProject(env);
+			const slow = deferred<ProjectSequenceIndex>();
+			readLatestProjectSequenceAsyncSpy.mockImplementation(() => slow.promise);
+
+			const runtime = new RuntimeCoordinator();
+			const seedSpy = spyOnSeed(runtime);
+
+			await handleSessionStart(makeDeps(cwd, runtime));
+			// Cold-start fallback, as in the slow-read test above.
+			expect(seedSpy).toHaveBeenCalledWith(0, new Map());
+			expect(runtime.projectSeq).toBe(0);
+
+			// Simulate an agent edit landing IN the stall window: AFTER the cold
+			// seed (session_start already returned) but BEFORE the deferred read
+			// resolves.
+			const editedFile = path.join(cwd, "index.ts");
+			const bump = runtime.bumpFileSeq(editedFile);
+			expect(bump.projectSeq).toBe(1);
+			expect(runtime.getFileSeq(editedFile)).toBe(1);
+
+			seedSpy.mockClear();
+			logLatencySpy.mockClear();
+
+			// The stalled read now resolves with a snapshot of the world from
+			// BEFORE the edit above — reseeding with it would erase the bump.
+			slow.resolve({
+				projectSeq: 42,
+				fileSeqByPath: new Map([["/some/other-file.ts", 7]]),
+			});
+			// Give the deferred continuation a generous window to run (or, per
+			// the fix, to observe the advancement and skip).
+			await new Promise((resolve) => setTimeout(resolve, 150));
+
+			// The guard must have skipped the reseed entirely — no clobber.
+			expect(seedSpy).not.toHaveBeenCalled();
+			expect(logLatencySpy).not.toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "session_start_sequence_read_deferred_reseed",
+				}),
+			);
+			// The in-window bump survives completely untouched.
+			expect(runtime.getFileSeq(editedFile)).toBe(1);
+			expect(runtime.projectSeq).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("treats a seq-0 persisted snapshot as STALE (never fresh) when the read times out — cold-sentinel aliasing guard (review follow-up P3, closes #1168 finding 2)", async () => {
+		const env = setupTestEnvironment("pi-lens-seq-budget-seq0-");
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const cwd = makeProject(env);
+
+			// A project's real first-ever snapshot: legitimately persisted at
+			// seq === 0, before any change was ever logged. The timed-out read's
+			// cold sentinel is ALSO projectSeq 0 — this is exactly the collision
+			// #1168's review caught.
+			const legacyPath = getProjectSnapshotLegacyPath(cwd);
+			fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
+			fs.writeFileSync(
+				legacyPath,
+				JSON.stringify({
+					version: PROJECT_SNAPSHOT_VERSION,
+					projectRoot: cwd,
+					generatedAt: new Date().toISOString(),
+					seq: 0,
+					files: {},
+					symbols: {},
+					reverseDeps: {},
+					cachedExports: [],
+				}),
+			);
+
+			// The on-disk change log has since moved past seq 0 (a non-empty
+			// log), but the read never returns within the budget — this test
+			// only needs the timeout to fire, so the read is left pending.
+			readLatestProjectSequenceAsyncSpy.mockImplementation(
+				() => new Promise<ProjectSequenceIndex>(() => {}),
+			);
+
+			const runtime = new RuntimeCoordinator();
+			await handleSessionStart(makeDeps(cwd, runtime));
+
+			expect(logLatencySpy).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "session_start_snapshot_load",
+					metadata: expect.objectContaining({
+						fresh: false,
+						seq: 0,
+						sequenceUnknown: true,
+					}),
 				}),
 			);
 		} finally {

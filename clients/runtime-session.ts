@@ -255,6 +255,21 @@ function sequenceReadBudgetMs(): number {
 	return Number.isFinite(raw) && raw > 0 ? raw : 250;
 }
 
+// #1162 review follow-up (P3): the sentinel used ONLY for the snapshot
+// freshness check (`isProjectSnapshotFresh`/`isProjectSnapshotMetaStale`,
+// both `=== currentProjectSeq` equality) when a sequence read timed out.
+// Every real `projectSeq`/`snapshot.seq` is >= 0 (both derive from
+// `Math.max(0, ...)`/a monotonic fold starting at 0), so this value can
+// never collide with a legitimate seq — including a project's real
+// first-ever snapshot persisted at `seq === 0`, which the cold-seed's OWN
+// `projectSeq: 0` would otherwise alias. Deliberately kept separate from
+// `runtime.projectSeq` (which a timed-out read still seeds to plain `0`):
+// the reseed-advancement guard on the deferred continuation below needs
+// `runtime.projectSeq` to read exactly 0 immediately after a cold seed so
+// `> 0` reliably means "a bump happened in the stall window", which this
+// sentinel is never fed into.
+const UNKNOWN_PROJECT_SEQ = -1;
+
 /**
  * Bound the sequence read that gates snapshot freshness (#1162). Normally
  * ~2ms, but the underlying read is a blocking `fs.readFileSync` that can
@@ -325,6 +340,28 @@ async function readSequenceWithBudget(args: {
 		readPromise
 			.then((latestSeq) => {
 				if (!runtime.isCurrentSession(sessionGeneration)) return;
+				// #1162 review follow-up (P3): `isCurrentSession` alone catches a
+				// CROSS-session move-on but not a SAME-session advancement in the
+				// stall window. Interleaving: timeout -> cold seed sets
+				// projectSeq=0 -> handler returns -> agent edits file X ->
+				// `bumpFileSeq(X)` advances `_projectSeq`/`_fileSeq[X]` -> this
+				// deferred read completes. Reseeding here would blindly `.clear()`
+				// and repopulate `_fileSeq`/`_fileLastProjectSeq` from the STALE
+				// pre-edit snapshot, erasing the in-window bump for file X (a
+				// transient inconsistency that self-heals into a full sweep per
+				// `seedProjectSequence`'s empty-changed-map invariant — safe, but
+				// worth not doing). The cold seed always sets `projectSeq` to
+				// exactly 0, so `runtime.projectSeq > 0` here can ONLY be true if a
+				// `bumpFileSeq` ran since — i.e. an in-window edit — never a false
+				// positive from a legitimately-empty log (which leaves it at 0, and
+				// the reseed below is then still wanted: it recovers the real,
+				// possibly non-empty, result that arrived too late for the budget).
+				if (runtime.projectSeq > 0) {
+					dbg(
+						"session_start: deferred sequence read completed, but the session already advanced (in-window edit) — skipping reseed to avoid clobbering it",
+					);
+					return;
+				}
 				const reseedStartedAt = Date.now();
 				runtime.seedProjectSequence?.(
 					latestSeq.projectSeq,
@@ -1787,6 +1824,17 @@ export async function handleSessionStart(
 		dbg(
 			`session_start sequence: projectSeq=${effectiveSeq} fileSeqEntries=${latestSeq.fileSeqByPath.size}`,
 		);
+		// #1162 review follow-up (P3): a timed-out read's cold sentinel is
+		// `projectSeq: 0`, which is indistinguishable from a project's real
+		// first-ever snapshot (persisted with `seq === 0` before any change was
+		// logged). Feeding `effectiveSeq` (0) straight into the freshness check
+		// would let that legit seq-0 snapshot match and hydrate as FRESH even
+		// though the on-disk log has since moved past it. Use a value the
+		// freshness check can never match (`snapshot.seq` is always >= 0) ONLY
+		// for this gate when the read timed out — `runtime.projectSeq` itself
+		// stays 0 (untouched), which is what Fix 1's advancement guard above
+		// relies on to detect an in-window bump.
+		const freshnessSeq = timedOut ? UNKNOWN_PROJECT_SEQ : effectiveSeq;
 		const snapshotLoadStartedAt = Date.now();
 		const snapshotPath = getProjectSnapshotPath(snapshotRoot);
 		let snapshotBytes = 0;
@@ -1797,11 +1845,11 @@ export async function handleSessionStart(
 		}
 		const snapshotGate = loadSnapshotBodyUnlessStale({
 			root: snapshotRoot,
-			currentProjectSeq: effectiveSeq,
+			currentProjectSeq: freshnessSeq,
 			dbg,
 		});
 		const snapshot = snapshotGate.snapshot;
-		const snapshotFresh = isProjectSnapshotFresh(snapshot, effectiveSeq);
+		const snapshotFresh = isProjectSnapshotFresh(snapshot, freshnessSeq);
 		logLatency({
 			type: "phase",
 			phase: "session_start_snapshot_load",
@@ -1813,12 +1861,13 @@ export async function handleSessionStart(
 				fresh: snapshotFresh,
 				seq: snapshot?.seq ?? null,
 				...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
+				...(timedOut ? { sequenceUnknown: true } : {}),
 			},
 		});
 		logProjectSnapshotProbe({
 			dbg,
 			root: snapshotRoot,
-			currentProjectSeq: effectiveSeq,
+			currentProjectSeq: freshnessSeq,
 			snapshot,
 		});
 		if (snapshotFresh) {
@@ -1891,6 +1940,13 @@ export async function handleSessionStart(
 	dbg(
 		`session_start sequence: projectSeq=${effectiveSeq} fileSeqEntries=${latestSeq.fileSeqByPath.size}`,
 	);
+	// #1162 review follow-up (P3) — see the matching comment in the quick-mode
+	// path above: a timed-out read's cold sentinel (`projectSeq: 0`) must
+	// never satisfy the freshness check, or a project's real first-ever
+	// snapshot (persisted at `seq === 0`) would hydrate as fresh despite the
+	// on-disk log having moved past it. `runtime.projectSeq` itself is left
+	// at 0, which Fix 1's advancement guard above depends on.
+	const freshnessSeq = timedOut ? UNKNOWN_PROJECT_SEQ : effectiveSeq;
 
 	const snapshotLoadStartedAt = Date.now();
 	const snapshotPath = getProjectSnapshotPath(snapshotRoot);
@@ -1902,11 +1958,11 @@ export async function handleSessionStart(
 	}
 	const snapshotGate = loadSnapshotBodyUnlessStale({
 		root: snapshotRoot,
-		currentProjectSeq: effectiveSeq,
+		currentProjectSeq: freshnessSeq,
 		dbg,
 	});
 	const snapshot = snapshotGate.snapshot;
-	const snapshotFresh = isProjectSnapshotFresh(snapshot, effectiveSeq);
+	const snapshotFresh = isProjectSnapshotFresh(snapshot, freshnessSeq);
 	logLatency({
 		type: "phase",
 		phase: "session_start_snapshot_load",
@@ -1918,12 +1974,13 @@ export async function handleSessionStart(
 			fresh: snapshotFresh,
 			seq: snapshot?.seq ?? null,
 			...(snapshotGate.skippedStale ? { skippedStale: true } : {}),
+			...(timedOut ? { sequenceUnknown: true } : {}),
 		},
 	});
 	logProjectSnapshotProbe({
 		dbg,
 		root: snapshotRoot,
-		currentProjectSeq: effectiveSeq,
+		currentProjectSeq: freshnessSeq,
 		snapshot,
 	});
 	const freshSnapshot = snapshotFresh ? snapshot : null;
