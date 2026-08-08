@@ -18,6 +18,16 @@ import {
 	type LspMutationContext,
 } from "../../../clients/lsp-mutation.js";
 
+function isCaseInsensitiveFs(dir: string): boolean {
+	const probe = path.join(dir, "CaseProbe.tmp");
+	fs.writeFileSync(probe, "x", "utf-8");
+	try {
+		return fs.existsSync(path.join(dir, "caseprobe.tmp"));
+	} finally {
+		fs.rmSync(probe, { force: true });
+	}
+}
+
 describe("LSP workspace edits", () => {
 	it("preserves original array order for inserts at the same position", () => {
 		expect(
@@ -883,16 +893,6 @@ describe("LSP workspace edits — same-position insert ordering (P1-1)", () => {
 // case-insensitive; on a case-sensitive FS the same operations must still
 // succeed (never a vacuous pass).
 describe("LSP workspace edits — path casing preservation (P1-2)", () => {
-	function isCaseInsensitiveFs(dir: string): boolean {
-		const probe = path.join(dir, "CaseProbe.tmp");
-		fs.writeFileSync(probe, "x", "utf-8");
-		try {
-			return fs.existsSync(path.join(dir, "caseprobe.tmp"));
-		} finally {
-			fs.rmSync(probe, { force: true });
-		}
-	}
-
 	it("create preserves mixed-case file names on disk", async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-case-"));
 		try {
@@ -954,5 +954,280 @@ describe("LSP workspace edits — path casing preservation (P1-2)", () => {
 			}
 			expect(fs.readFileSync(path.join(tmpDir, "Foo.txt"), "utf-8")).toBe("content");
 		} finally { removeTempDirSync(tmpDir); }
+	});
+});
+
+// #1085 P3 bundle — deferrals from #1120's review rounds (P3-1, the two P1s,
+// and the P2 clamp shipped in #1120; P3-5 CRLF-boundary and P3-7 plaintext-
+// reopen remain separately deferred, see the PR body).
+describe("LSP workspace edits — #1085 P3 bundle", () => {
+	it("P3-2: keeps duplicate zero-width inserts from one server's own edit on the renameFile merge path", () => {
+		const uri = "file:///tmp/rename-merge.ts";
+		const zeroWidthInsert = {
+			range: { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } },
+			newText: "Q",
+		};
+		const result = mergeWorkspaceTextEditsByPriority([
+			{
+				serverId: "typescript",
+				edit: { changes: { [uri]: [zeroWidthInsert, zeroWidthInsert] } },
+			},
+		]);
+		// Both duplicates from the SAME server's own edit survive (their
+		// multiplicity is meaningful — see the doc above `validateTextEdits`).
+		expect(result.edit.changes[uri]).toHaveLength(2);
+		expect(applyTextEditsToString("abc", result.edit.changes[uri])).toBe("aQQbc");
+
+		// Cross-server exact duplicates are still collapsed to one (unchanged
+		// invariant): two DIFFERENT servers proposing the identical non-empty
+		// replace should not double-apply.
+		const nonEmptyReplace = {
+			range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+			newText: "X",
+		};
+		const crossServer = mergeWorkspaceTextEditsByPriority([
+			{ serverId: "typescript", edit: { changes: { [uri]: [nonEmptyReplace] } } },
+			{ serverId: "eslint", edit: { changes: { [uri]: [nonEmptyReplace] } } },
+		]);
+		expect(crossServer.edit.changes[uri]).toHaveLength(1);
+	});
+
+	it("P3-3: a create at a rename-vacated path establishes new state for a later text edit at that path", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-3-"));
+		try {
+			const bPath = path.join(tmpDir, "b.txt");
+			const cPath = path.join(tmpDir, "c.txt");
+			fs.writeFileSync(bPath, "original", "utf-8");
+			await applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{ kind: "rename", oldUri: pathToFileURL(bPath).href, newUri: pathToFileURL(cPath).href },
+						{ kind: "create", uri: pathToFileURL(bPath).href },
+						{
+							textDocument: { uri: pathToFileURL(bPath).href },
+							edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "new" }],
+						},
+					],
+				},
+				tmpDir,
+			);
+			// The rename carried the original content to c.txt...
+			expect(fs.readFileSync(cPath, "utf-8")).toBe("original");
+			// ...and the vacated b.txt path was re-established by `create`, then
+			// received the text edit — not rejected as "text edit target does not
+			// exist" (the pre-fix failure mode).
+			expect(fs.readFileSync(bPath, "utf-8")).toBe("new");
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	it("P3-4: version:null + a numeric version for the same URI adopts the numeric one (LSP: null means don't check)", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-4-"));
+		try {
+			const filePath = path.join(tmpDir, "versioned-null.ts");
+			fs.writeFileSync(filePath, "x", "utf-8");
+			const uri = pathToFileURL(filePath).href;
+			const edit = {
+				documentChanges: [
+					{
+						textDocument: { uri, version: null },
+						edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "A" }],
+					},
+					{
+						textDocument: { uri, version: 1 },
+						edits: [{ range: { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } }, newText: "B" }],
+					},
+				],
+			};
+			// Matching numeric version → applies (does NOT throw "conflicting text
+			// document versions", the pre-fix failure mode).
+			await applyWorkspaceEdit(edit, tmpDir, { documentVersions: new Map([[normalizeMapKey(filePath), 1]]) });
+			expect(fs.readFileSync(filePath, "utf-8")).toBe("AxB");
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	it("P3-4: version:null + a STALE numeric version is still rejected, via the numeric", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-4-stale-"));
+		try {
+			const filePath = path.join(tmpDir, "versioned-null-stale.ts");
+			fs.writeFileSync(filePath, "x", "utf-8");
+			const uri = pathToFileURL(filePath).href;
+			const edit = {
+				documentChanges: [
+					{
+						textDocument: { uri, version: null },
+						edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "A" }],
+					},
+					{
+						textDocument: { uri, version: 1 },
+						edits: [{ range: { start: { line: 0, character: 1 }, end: { line: 0, character: 1 } }, newText: "B" }],
+					},
+				],
+			};
+			await expect(
+				applyWorkspaceEdit(edit, tmpDir, { documentVersions: new Map([[normalizeMapKey(filePath), 2]]) }),
+			).rejects.toThrow(/stale text document version/);
+			expect(fs.readFileSync(filePath, "utf-8")).toBe("x");
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	it("P3-6: importsChanged reflects whether the edit actually changed import lines, not merely their presence", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-6-"));
+		try {
+			const filePath = path.join(tmpDir, "mod.ts");
+			fs.writeFileSync(filePath, 'import { a } from "./a";\nconsole.log(a);\n', "utf-8");
+			const uri = pathToFileURL(filePath).href;
+
+			// Body-only edit: the file HAS an import, but this edit never touches it.
+			const bodyResult = await applyWorkspaceEdit(
+				{ changes: { [uri]: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 999 } }, newText: "console.error(a);" }] } },
+				tmpDir,
+			);
+			expect(bodyResult.fileDetails[0]?.importsChanged).toBe(false);
+
+			// Import-line edit: actually changes the imported binding.
+			const importResult = await applyWorkspaceEdit(
+				{ changes: { [uri]: [{ range: { start: { line: 0, character: 9 }, end: { line: 0, character: 10 } }, newText: "b" }] } },
+				tmpDir,
+			);
+			expect(importResult.fileDetails[0]?.importsChanged).toBe(true);
+			expect(fs.readFileSync(filePath, "utf-8")).toBe('import { b } from "./a";\nconsole.error(a);\n');
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	// P2 (round-2 review): a formatter-wrapped MULTILINE import's specifier
+	// lives on a continuation line ("} from \"./old\";") that doesn't itself
+	// start with `import`/`export` — the original line-signature regex missed
+	// it entirely, so changing the module specifier there under-reported
+	// importsChanged: false (a real module-edge change, silently skipped by
+	// downstream dependency-graph re-checks). Kept LINE-signature-based (not a
+	// blanket conservative fallback): a body-only edit in a file WITH a
+	// multiline import still correctly reports false, because only the
+	// `from "..."`-matching continuation line is compared, not because the
+	// whole file is treated as changed.
+	it("P3-6 continuation: importsChanged detects a specifier change on a multiline import's continuation line", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-6-multiline-"));
+		try {
+			const filePath = path.join(tmpDir, "mod.ts");
+			fs.writeFileSync(
+				filePath,
+				'import {\n\tfoo,\n\tbar,\n} from "./old";\n\nconsole.log(foo, bar);\n',
+				"utf-8",
+			);
+			const uri = pathToFileURL(filePath).href;
+
+			// Body-only edit: none of the import lines (including the continuation
+			// "} from ..." line) are touched — still false, not a blanket "file has
+			// a multiline import so report changed" fallback.
+			const bodyResult = await applyWorkspaceEdit(
+				{ changes: { [uri]: [{ range: { start: { line: 5, character: 0 }, end: { line: 5, character: 999 } }, newText: "console.log(bar, foo);" }] } },
+				tmpDir,
+			);
+			expect(bodyResult.fileDetails[0]?.importsChanged).toBe(false);
+
+			// Specifier edit on the CONTINUATION line ("./old" → "./new"): a real
+			// module-edge change, and the pre-fix regex (anchored on a leading
+			// `import`/`export`) would miss it since this line starts with `}`.
+			const specifierResult = await applyWorkspaceEdit(
+				{ changes: { [uri]: [{ range: { start: { line: 3, character: 8 }, end: { line: 3, character: 13 } }, newText: "./new" }] } },
+				tmpDir,
+			);
+			expect(specifierResult.fileDetails[0]?.importsChanged).toBe(true);
+			expect(fs.readFileSync(filePath, "utf-8")).toBe(
+				'import {\n\tfoo,\n\tbar,\n} from "./new";\n\nconsole.log(bar, foo);\n',
+			);
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	// FS-probe-guarded per the #1024/P1-2 lesson (see `isCaseInsensitiveFs`
+	// above): the virtual-overlay alias hole only manifests on a case-
+	// insensitive FS, where the create's and the rename destination's cache
+	// keys collapse to the same entry. On a case-sensitive FS `foo.txt` and
+	// `Foo.txt` are genuinely distinct paths, so this exercises the ordinary
+	// (non-aliased) rename path instead — asserted for real, not skipped.
+	it("P3-8: create-then-case-rename within one ordered edit succeeds (virtual overlay, not disk, decides the alias)", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-8-"));
+		try {
+			const fooPath = path.join(tmpDir, "foo.txt");
+			const FooPath = path.join(tmpDir, "Foo.txt");
+			await applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{ kind: "create", uri: pathToFileURL(fooPath).href },
+						{ kind: "rename", oldUri: pathToFileURL(fooPath).href, newUri: pathToFileURL(FooPath).href },
+					],
+				},
+				tmpDir,
+			);
+			const entries = fs.readdirSync(tmpDir);
+			// The rename always removes the source name, regardless of FS case
+			// sensitivity, so exactly one case-folded spelling survives either way.
+			expect(entries).toContain("Foo.txt");
+			expect(entries.filter((e) => e.toLowerCase() === "foo.txt")).toEqual(["Foo.txt"]);
+		} finally { removeTempDirSync(tmpDir); }
+	});
+
+	// P3 (round-2 review): rename(b→c); create(b); rename(b→d) re-vacates the
+	// override-backed `b` a SECOND time. `resolveVirtualPath` cannot represent
+	// "this purely-virtual entry moved again" (it chases PHYSICAL paths through
+	// `virtualMoves`), so without migrating the override entry itself,
+	// `virtualOverrides[b]` goes stale — still claiming `exists: true` after
+	// `b` is genuinely vacated again.
+	it("P3: a re-renamed override-backed entry migrates instead of leaving a stale virtualOverrides entry", async () => {
+		// Cross-product cell 1: the migrated content survives to the FINAL
+		// destination and a trailing text edit there applies correctly (not lost).
+		const tmpDir1 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-restale-1-"));
+		try {
+			const bPath = path.join(tmpDir1, "b.txt");
+			const cPath = path.join(tmpDir1, "c.txt");
+			const dPath = path.join(tmpDir1, "d.txt");
+			fs.writeFileSync(bPath, "original", "utf-8");
+			await applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{ kind: "rename", oldUri: pathToFileURL(bPath).href, newUri: pathToFileURL(cPath).href },
+						{ kind: "create", uri: pathToFileURL(bPath).href },
+						{ kind: "rename", oldUri: pathToFileURL(bPath).href, newUri: pathToFileURL(dPath).href },
+						{
+							textDocument: { uri: pathToFileURL(dPath).href },
+							edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "hello" }],
+						},
+					],
+				},
+				tmpDir1,
+			);
+			// The first rename carried the original content to c.txt, untouched.
+			expect(fs.readFileSync(cPath, "utf-8")).toBe("original");
+			// The re-created-then-re-renamed b.txt's content (migrated to d.txt,
+			// not lost) received the trailing text edit.
+			expect(fs.readFileSync(dPath, "utf-8")).toBe("hello");
+			expect(fs.existsSync(bPath)).toBe(false);
+		} finally { removeTempDirSync(tmpDir1); }
+
+		// Cross-product cell 2: after the second rename re-vacates b, b is
+		// genuinely gone — proven via `delete` (not `create`, which would trip
+		// the UNRELATED duplicate-resource-operation guard on a second `create`
+		// at the same URI within one edit): a stale `virtualOverrides[b]` would
+		// make this `delete` (no `ignoreIfNotExists`) wrongly succeed; the fix
+		// makes it correctly throw "delete target does not exist".
+		const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-p3-restale-2-"));
+		try {
+			const bPath = path.join(tmpDir2, "b.txt");
+			const cPath = path.join(tmpDir2, "c.txt");
+			const dPath = path.join(tmpDir2, "d.txt");
+			fs.writeFileSync(bPath, "original", "utf-8");
+			await expect(
+				applyWorkspaceEdit(
+					{
+						documentChanges: [
+							{ kind: "rename", oldUri: pathToFileURL(bPath).href, newUri: pathToFileURL(cPath).href },
+							{ kind: "create", uri: pathToFileURL(bPath).href },
+							{ kind: "rename", oldUri: pathToFileURL(bPath).href, newUri: pathToFileURL(dPath).href },
+							{ kind: "delete", uri: pathToFileURL(bPath).href },
+						],
+					},
+					tmpDir2,
+				),
+			).rejects.toThrow(/delete target does not exist/);
+		} finally { removeTempDirSync(tmpDir2); }
 	});
 });

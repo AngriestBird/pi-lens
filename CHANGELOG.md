@@ -22,6 +22,106 @@ All notable changes to pi-lens will be documented in this file.
 	regression test (native win32 path on Windows; shape-committed win32 branch on
 	Linux) and an AGENTS.md convention: tests must derive `normalizeMapKey`-keyed
 	structure keys via `normalizeMapKey`, never hardcode a drive-letter literal.
+- **Workspace-edit preflight: five contained P3 deferrals from #1085 (refs #1085)** —
+	`clients/lsp/edits.ts`:
+	- **P3-2** `mergeWorkspaceTextEditsByPriority`'s exact-duplicate dedup
+	  collapsed identical zero-width inserts duplicated within ONE server's
+	  own edit on the `renameFile` merge path, contradicting the documented
+	  multiplicity invariant (several identical zero-width inserts at one
+	  point are meaningful, same as `validateTextEdits` on the normal apply
+	  path). The dedup now only applies to non-empty ranges; a genuine
+	  cross-server exact duplicate (two servers proposing the identical
+	  non-empty replace) still collapses to one.
+	- **P3-3** an ordered edit `rename(b→c); create(b); textEdit(b)` was
+	  falsely rejected in preflight ("text edit target does not exist"): a
+	  `create` at a path vacated by an earlier rename in the same edit had
+	  `resolveVirtualPath` return `undefined` (correct — the path is
+	  virtually gone), so the created state was silently discarded instead
+	  of recorded. Added a `virtualOverrides` overlay, keyed on the raw
+	  query path, consulted only when `resolveVirtualPath` cannot resolve a
+	  physical address, so a later op at that same path (e.g. the trailing
+	  text edit) sees the re-established file.
+	- **P3-4** `version: null` (LSP 3.17: "don't check") combined with a
+	  numeric version for the SAME uri across two edit containers incorrectly
+	  threw "conflicting text document versions". A numeric version is now
+	  authoritative and adopted over a `null`/`undefined` counterpart; two
+	  genuinely different numeric versions still conflict, and a numeric
+	  version adopted from a `null` pairing is still checked against the live
+	  document version (a stale adopted numeric is still rejected).
+	- **P3-6** `fileDetails[].importsChanged` reported "the file contains any
+	  import statement" (`/^import\s/m.test(updated)`) rather than "this edit
+	  changed an import/re-export line", over-invalidating downstream
+	  dependency-graph re-checks (`cache-manager.ts`'s `importsChanged`
+	  filter, `lsp-mutation.ts`'s `addModifiedRange`) on every edit to a file
+	  that merely already had imports. Now compares an import/re-export-from
+	  line signature of the pre- and post-edit content; unchanged unless the
+	  edit actually touched those lines. `create`/`rename`/`delete` keep
+	  their existing conservative flags (a create writes an empty file;
+	  rename/delete are structural, not diffable against pre-edit text).
+	- **P3-8** an ordered edit that CREATEs `foo.txt` then case-renames it to
+	  `Foo.txt` within the SAME edit fail-closed with "destination already
+	  exists" on a case-insensitive FS: the alias check (`isSameFsEntry`)
+	  lstats disk, but the just-created file exists only in the preflight's
+	  virtual overlay, never on disk yet. The rename branch now also treats
+	  a rename as an alias when the destination's cached `VirtualFile`
+	  object is referentially identical to the source's (both `stateFor`
+	  calls resolve through the same case-folded map key), before falling
+	  back to the physical `isSameFsEntry` probe — which is unchanged for
+	  genuinely-physical paths, so the #1024/#1120 ino-guard and
+	  case-sensitivity invariants are untouched.
+
+	**Deferred (not in this change):** P3-5 (the CRLF-boundary class beyond
+	the `\r`-aware clamp #1120 already shipped: `lineTextAt` still keeps the
+	trailing `\r`, inserts can still land between `\r` and `\n` in other
+	code paths, `newText` with a bare `\n` still applies verbatim into CRLF
+	files outside the host-edit-normalize path) and P3-7 (rename
+	close-failure recovery still reopens the old document as `"plaintext"`).
+	Both remain tracked; see the #1085 closing comment for where they were
+	rehomed.
+- **Post-init runtime exits now count toward the LSP circuit breaker (closes #1127)**
+	— `LSPService`'s (`clients/lsp/index.ts`) exponential-backoff breaker
+	(`failureCounts` → cooldown → permanent-disable after
+	`BROKEN_PERMANENT_AFTER`) only incremented on spawn/initialize failure.
+	A server whose spawn SUCCEEDS but then exits shortly after (opengrep's
+	post-init "Unhandled message" JSON-RPC crash, per #1122's Phase C
+	corroborating-signal review — 37 respawns in one real session, never
+	converging) hit the "dead client — needs respawn" path instead, which
+	never touched the breaker: `failureCounts` was already cleared by the
+	preceding successful spawn and the runtime exit itself was never counted.
+	Fixed by adding a parallel `runtimeExitCounts` counter fed only by EARLY
+	(lifetime < 60s) non-intentional exits, sharing the same cooldown formula
+	and the same `state.broken`/`permanentlyBroken` maps as the existing
+	breaker — tracked separately from `failureCounts` specifically because a
+	successful respawn (which correctly resets the spawn/init failure streak)
+	is not proof of health for a crash-loop server, so reusing that map would
+	erase the streak on every respawn attempt (the #1127 bug). Deliberate
+	teardowns (session reset, `#743` notify-backpressure eviction, generation
+	handoffs) call `shutdown()` themselves before the process exits and set
+	`shutdownRequested`; a new `wasShutdownIntentional()` accessor on
+	`LSPClientInfo` (`clients/lsp/client.ts`) exposes that flag so the breaker
+	distinguishes a genuine crash from a restart it initiated and never counts
+	the latter. Adversarial review caught that lifetime was originally
+	computed from the moment a dead client is lazily DETECTED (the next
+	`getClientForFile` attach), not from when it actually died — #1127's
+	documented pattern is attach-triggered respawns minutes to hours apart, so
+	an early crash detected an hour later would misread as a long healthy run
+	and never count. Fixed by stamping a real `exitedAt` on `LSPClientState`
+	the moment the client's connection/process actually dies (first of
+	`onError`/`onClose`/process `exit` to fire) and exposing it via a new
+	`getExitedAt()` accessor; the respawn site computes lifetime as
+	`exitedAt - spawnedAt`, falling back to the detection-time delta only when
+	`exitedAt` is unexpectedly unset. New coverage in
+	`tests/clients/lsp/service-runtime-exit-breaker.test.ts`: a crash-loop
+	respawn sequence converges to permanent-disable instead of respawning
+	forever (fails against pre-fix behavior), an early death with detection
+	delayed by hours still counts (death time, not detection time, decides —
+	fails against the pre-fix detection-time computation in both directions),
+	a deliberate `shutdown()`-driven restart sequence never counts, a runtime
+	exit past the lifetime threshold resets the streak instead of counting,
+	and the REAL `#743` notify-write-backpressure eviction path (driven
+	through `touchFile`, not a synthetic stand-in) never double-counts against
+	this breaker. Full existing LSP suite (536 tests) stays green.
+
 - **`terragrunt hcl fmt` reported success when it never ran (refs #1117)** —
 	`formatFile` decided success from `result.error` alone, and a formatter that
 	fails leaves the file byte-identical, which is indistinguishable from
