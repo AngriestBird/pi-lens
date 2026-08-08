@@ -20,6 +20,7 @@ import { isTestMode } from "../env-utils.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import { findGlobalBinary } from "../package-manager.js";
 import { redactSecrets } from "../redact/secrets.js";
+import { getRubyVersionDirNamesAsync } from "./ruby-drive-dirs.js";
 
 export interface LSPProcess {
 	process: ChildProcess;
@@ -157,7 +158,7 @@ function getLiveWindowsPath(): string {
 	return _liveWindowsPath;
 }
 
-function buildAugmentedPath(basePath?: string): string {
+async function buildAugmentedPath(basePath?: string): Promise<string> {
 	const candidates: string[] = [];
 	const nodeDir = path.dirname(process.execPath);
 	if (nodeDir) {
@@ -174,15 +175,12 @@ function buildAugmentedPath(basePath?: string): string {
 		candidates.push(PI_LENS_TOOLS_BIN_DIR);
 		candidates.push(path.join(driveRoot, "Program Files", "Go", "bin"));
 		candidates.push(path.join(driveRoot, "Go", "bin"));
-		// Ruby installer drops versioned dirs (e.g. Ruby34-x64) on the drive root — scan dynamically
-		try {
-			for (const entry of fs.readdirSync(driveRoot)) {
-				if (/^ruby\d/i.test(entry)) {
-					candidates.push(path.join(driveRoot, entry, "bin"));
-				}
-			}
-		} catch {
-			// drive root not readable — skip
+		// Ruby installer drops versioned dirs (e.g. Ruby34-x64) on the drive root.
+		// Read off the event loop and memoized once per process (#1137): a
+		// synchronous drive-root enumeration on every LSP spawn blocked the loop
+		// for the whole stall on a slow cloud/network-backed drive root.
+		for (const entry of await getRubyVersionDirNamesAsync(driveRoot)) {
+			candidates.push(path.join(driveRoot, entry, "bin"));
 		}
 	}
 
@@ -497,7 +495,7 @@ export async function launchLSP(
 ): Promise<LSPProcess> {
 	const cwd = String(options.cwd ?? process.cwd());
 	const mergedEnv = { ...process.env, ...options.env };
-	const augmentedPath = buildAugmentedPath(resolvePathValue(mergedEnv));
+	const augmentedPath = await buildAugmentedPath(resolvePathValue(mergedEnv));
 	const env: NodeJS.ProcessEnv = {
 		...mergedEnv,
 		PATH: augmentedPath,

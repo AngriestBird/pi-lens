@@ -5,6 +5,16 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
 
+// These launch tests use fake timers and don't exercise Windows Ruby drive-root
+// discovery. Stub the #1137 drive-root readers so `buildAugmentedPath`'s async
+// `fs.promises.readdir("C:\\")` (real threadpool I/O, not fake-timer driven)
+// can't stall the spawn sequence under `vi.useFakeTimers()`. Ruby-dir behavior
+// is covered by tests/clients/lsp/ruby-drive-dirs.test.ts.
+vi.mock("../../../clients/lsp/ruby-drive-dirs.js", () => ({
+	getRubyVersionDirNamesSync: () => [],
+	getRubyVersionDirNamesAsync: async () => [],
+}));
+
 describe("lsp launch", () => {
 	afterEach(() => {
 		vi.useRealTimers();
