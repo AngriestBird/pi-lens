@@ -6,6 +6,23 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`generated-artifacts.ts` used module-default `path.basename` on Windows-shaped paths, under-detecting lockfiles/declarations off native Windows (closes #1161, sibling of #1150/#1152)** —
+	`hasStrongGeneratedArtifactPath` (lockfile match), `hasWeakGeneratedFileNamePattern`
+	(name-pattern match), and `isDeclarationFile` (`.d.ts`/`.d.mts`/`.d.cts` match)
+	all took the module-default `path.basename(filePath)` on shape-committed
+	input. On Linux CI, `path.basename("C:\\proj\\package-lock.json")` finds no
+	POSIX separator and returns the whole string unchanged, so
+	`LOCKFILE_NAMES.has(...)` misses — a Windows-shaped lockfile or declaration
+	path was silently treated as ordinary source. `generated-artifacts.ts` is
+	imported by `file-role.ts`'s `"generated"` branch, so this residual sat
+	within `detectFileRole`'s own call tree even after #1152 fixed the
+	dir-segment/basename split there. Fixed with a shared `basenameForShape`
+	helper that routes through `path.win32.basename` when `isWindowsPath`
+	(exported by #1152) is true, mirroring `file-role.ts`'s fix exactly —
+	shape-conditional, not shape-committed, so native-OS classification is
+	unchanged. The strong directory-segment match (`pathSegments`, which splits
+	on `[\\/]+`) was already shape-safe and untouched. Fail-then-pass regression
+	tests cover a `C:\...`-shaped lockfile and `.d.ts` literal.
 - **Quick-mode background warmup kept a one-shot `pi -p`/`--print` process alive (closes #1154)** —
 	`handleSessionStart` forces **quick mode** for both a real `pi -p`/`--print`
 	one-shot AND an interactive process's first session (to protect keystroke
