@@ -500,6 +500,11 @@ const projectIgnoreMatcherCache = new Map<
 		gitignoreMtimeMs: number;
 		lensConfigPath: string | undefined;
 		lensConfigMtimeMs: number;
+		/** #1105 second axis: an mtime-preserving, length-changing config edit
+		 * (git checkout, same-second rewrite) must invalidate the ignore matcher
+		 * too, not just `loadPiLensProjectConfig`'s own cache. Size is free from the
+		 * stat that already produced `lensConfigMtimeMs`. */
+		lensConfigSize: number;
 		globalConfigMtimeMs: number;
 		matcher: ProjectIgnoreMatcher;
 	}
@@ -536,11 +541,12 @@ function lensConfigInfo(rootDir: string): {
 	info: ReturnType<typeof findPiLensProjectConfig>;
 	path: string | undefined;
 	mtimeMs: number;
+	size: number;
 } {
 	const info = findPiLensProjectConfig(rootDir);
 	return info
-		? { info, path: info.path, mtimeMs: info.mtimeMs }
-		: { info, path: undefined, mtimeMs: -1 };
+		? { info, path: info.path, mtimeMs: info.mtimeMs, size: info.size }
+		: { info, path: undefined, mtimeMs: -1, size: -1 };
 }
 
 export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
@@ -553,6 +559,7 @@ export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
 		cached?.gitignoreMtimeMs === gitignoreMtime &&
 		cached?.lensConfigPath === lensConfig.path &&
 		cached?.lensConfigMtimeMs === lensConfig.mtimeMs &&
+		cached?.lensConfigSize === lensConfig.size &&
 		cached?.globalConfigMtimeMs === globalMtime
 	) {
 		return cached.matcher;
@@ -572,6 +579,7 @@ export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
 		gitignoreMtimeMs: gitignoreMtime,
 		lensConfigPath: lensConfig.path,
 		lensConfigMtimeMs: lensConfig.mtimeMs,
+		lensConfigSize: lensConfig.size,
 		globalConfigMtimeMs: globalMtime,
 		matcher,
 	});

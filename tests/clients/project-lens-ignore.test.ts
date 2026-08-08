@@ -194,3 +194,43 @@ describe("createProjectIgnoreMatcher with project config", () => {
 		expect(rel).not.toContain("fixtures/noise.ts");
 	});
 });
+
+describe("ignore-matcher cache freshness (#1105 mtime+size)", () => {
+	// The project-ignore matcher cache short-circuits on the config file's mtime
+	// alone before #1105 — so an in-place `.pi-lens.json` edit that preserves
+	// mtime (git checkout, same-second rewrite) but changes length replayed a
+	// stale matcher, even though the underlying parsed-config cache was fixed.
+	// Both writes are pinned to the SAME mtime, isolating the size axis. This is
+	// a SEPARATE gate from loadPiLensProjectConfig's: the matcher cache returns
+	// before ever consulting the config parse cache, so it needs its own size
+	// check. FS-agnostic → runs identically on Linux CI (#1024).
+	it("rebuilds the matcher on an mtime-preserving, length-changing edit", () => {
+		const configPath = path.join(tmpDir, ".pi-lens.json");
+		const pinned = new Date("2020-01-01T00:00:00.000Z");
+
+		// Longer config first (two ignore entries).
+		fs.writeFileSync(
+			configPath,
+			JSON.stringify({ ignore: ["**/skip-old/**", "**/also-skip/**"] }),
+		);
+		fs.utimesSync(configPath, pinned, pinned);
+		const first = getProjectIgnoreMatcher(tmpDir);
+		expect(first.isIgnored(path.join(tmpDir, "skip-old/x.ts"), false)).toBe(true);
+
+		// Shorter, different config; restore the SAME mtime.
+		fs.writeFileSync(
+			configPath,
+			JSON.stringify({ ignore: ["**/skip-new/**"] }),
+		);
+		fs.utimesSync(configPath, pinned, pinned);
+
+		const second = getProjectIgnoreMatcher(tmpDir);
+		expect(second.isIgnored(path.join(tmpDir, "skip-new/y.ts"), false)).toBe(
+			true,
+		);
+		// The stale rule no longer applies once the matcher is rebuilt.
+		expect(second.isIgnored(path.join(tmpDir, "skip-old/x.ts"), false)).toBe(
+			false,
+		);
+	});
+});

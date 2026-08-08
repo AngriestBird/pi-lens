@@ -6,6 +6,34 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Config caches gated freshness on mtime alone — the mtime-only cache-freshness class sweep (closes #1105)** —
+	Completed the shape-6 (freshness stamp that doesn't cover the data's real
+	dependency) sweep the #1092→#1119 diagnostics/word-index arc deferred. Audited
+	every persisted/derived cache with an mtime/TTL key: word-index (#1119),
+	`rule-cache.ts` (`mtime:size`), `sgconfig.ts` (content-hashed), the
+	`yaml-rule-parser` project/bundled split (project rules content-hashed via
+	`loadYamlRulesFresh`, bundled dir-mtime is safe by process-lifetime
+	immutability), `reverse-deps` (snapshot-seq/generation-coupled), installer
+	`probe-cache` (existence re-validated every read + ast-grep version-family
+	verify — mtime is a refresh hint, not the correctness gate), `TreeCache`
+	(content-hash authoritative, #890), and the project-snapshot per-file
+	`mtime:size` entries — all already-hardened or safe. The one gap: the
+	`.pi-lens.json` config caches (`loadPiLensProjectConfig`/`loadPiLensConfigInDir`
+	in `clients/project-lens-config.ts`, and the ignore-matcher cache in
+	`clients/file-utils.ts`) gated reuse on the config file's **mtime alone**, so an
+	in-place edit that preserved mtime (git checkout timestamp restoration, a
+	same-second rewrite) but changed the file's byte length replayed a stale parsed
+	config / ignore matcher — a config that drives mutation, ignore, and rule
+	policy. Fixed by adding **`size` as the free second axis** of the review-graph
+	`size:mtimeMs` signature (threaded through `PiLensConfigMarker` in
+	`clients/workspace-topology.ts` — the same stat that yields mtime already reads
+	size, so the cheap hit path stays cheap, no content hashing on the hot path).
+	The residual (identical mtime AND identical size, changed content) matches the
+	review-graph/word-index accepted residual by design. Fail-then-pass regression
+	tests cover both cache gates (each proven to replay stale on the pre-fix
+	mtime-only code); FS-agnostic (mtime pinned via `utimesSync`, size varied by
+	content length) so they exercise the gate identically on Linux CI.
+
 - **Quick-mode background warmup kept a one-shot `pi -p`/`--print` process alive (closes #1154)** —
 	`handleSessionStart` forces **quick mode** for both a real `pi -p`/`--print`
 	one-shot AND an interactive process's first session (to protect keystroke
