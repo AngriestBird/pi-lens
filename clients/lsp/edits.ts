@@ -455,6 +455,15 @@ export interface MergeWorkspaceEditsResult {
 
 export function mergeWorkspaceTextEditsByPriority(entries: Array<{ serverId: string; edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] } | null | undefined }>): MergeWorkspaceEditsResult {
 	const merged = new Map<string, LSPTextEdit[]>();
+	// Exact-duplicate dedup is a CROSS-SERVER concern only: two servers proposing
+	// the identical non-empty replace should collapse to one. Zero-width inserts
+	// are never deduplicated here — same as `validateTextEdits` on the normal
+	// apply path — because their multiplicity is meaningful: a single server can
+	// legitimately emit several identical zero-width inserts at one position
+	// (e.g. `willRenameFiles` producing "QQ" twice for an "aQQbc" edit), and
+	// deduping on exact key alone would silently drop the duplicate within that
+	// one server's own edit, contradicting the invariant documented above
+	// `validateTextEdits`.
 	const seenExact = new Set<string>();
 	let droppedConflicts = 0;
 	let inputEditCount = 0;
@@ -466,13 +475,13 @@ export function mergeWorkspaceTextEditsByPriority(entries: Array<{ serverId: str
 			const kept = merged.get(uri) ?? [];
 			for (const edit of edits) {
 				inputEditCount += 1;
-				const exactKey = textEditKey(uri, edit);
-				if (seenExact.has(exactKey)) continue;
+				const exactKey = isEmptyRange(edit.range) ? undefined : textEditKey(uri, edit);
+				if (exactKey !== undefined && seenExact.has(exactKey)) continue;
 				if (kept.some((existing) => rangesOverlap(existing.range, edit.range))) {
 					droppedConflicts += 1;
 					continue;
 				}
-				seenExact.add(exactKey);
+				if (exactKey !== undefined) seenExact.add(exactKey);
 				kept.push(edit);
 			}
 			if (kept.length > 0) merged.set(uri, kept);
@@ -575,12 +584,20 @@ function planWorkspaceEdit(
 		const key = indexKey(uri);
 		const existing = pending.get(key);
 		if (existing) {
-			if (existing.version !== version && existing.version !== undefined && version !== undefined) {
+			// Per LSP 3.17, `version: null` means "don't check" — it is not itself a
+			// version to conflict against. Only two DIFFERENT numeric versions for the
+			// same URI are a genuine conflict; a numeric version is authoritative and
+			// adopted over a `null`/`undefined` counterpart from another edit container
+			// for the same document, so the later preflight version check (which only
+			// fires for numeric `op.version`) still validates it.
+			const existingNumeric = typeof existing.version === "number" ? existing.version : undefined;
+			const incomingNumeric = typeof version === "number" ? version : undefined;
+			if (existingNumeric !== undefined && incomingNumeric !== undefined && existingNumeric !== incomingNumeric) {
 				throw new Error(`conflicting text document versions for ${uri}`);
 			}
 			existing.edits.push(...edits);
 			if (origin) (existing.origins ??= []).push(origin);
-			if (existing.version === undefined) existing.version = version;
+			if (existingNumeric === undefined && incomingNumeric !== undefined) existing.version = version;
 			return;
 		}
 		if (origin) {
@@ -666,6 +683,45 @@ export function __planWorkspaceEditForTest(edit: { changes?: Record<string, unkn
 function relativeToCwd(filePath: string, cwd: string): string {
 	const rel = path.relative(cwd, filePath) || path.basename(filePath);
 	return rel.replace(/\\/g, "/");
+}
+
+// Matches an import declaration or a re-export-from declaration — the two
+// statement shapes that actually change a module's dependency edges. Also
+// matches a bare `from "..."` continuation line WITHOUT a leading `import`/
+// `export`, so a formatter-wrapped multiline import
+//   import {
+//     foo,
+//   } from "./old";
+// still flags its specifier line as import-relevant even though line 1
+// ("import {") doesn't itself contain the module path. Fail-safe direction:
+// this can over-match a non-import line that happens to contain `from "..."`
+// (e.g. a string literal), but that only risks over-reporting `importsChanged`
+// (the safe direction — master's prior /^import\s/m heuristic over-invalidated
+// too), never under-reporting a real specifier change.
+const IMPORT_RELEVANT_LINE = /^\s*import\b|^\s*export\s[^;]*\bfrom\s|\bfrom\s+['"]/;
+
+/**
+ * A stable signature of the import/re-export-from lines in `text`, order-
+ * preserved. Used to detect whether a text edit actually changed the file's
+ * import graph (P3-6) rather than merely landing in a file that HAS imports —
+ * `fileDetails[].importsChanged` gates expensive downstream dependency-graph
+ * re-checks (see `cache-manager.ts`'s `importsChanged` filter and
+ * `lsp-mutation.ts`'s `addModifiedRange`), so over-reporting "changed" on
+ * every edit to an already-import-bearing file defeats that gate. This is a
+ * LINE-signature heuristic, not a parse: a multiline import whose specifier
+ * ("from" line) is untouched but whose bound-name list changes on an
+ * interior line (e.g. renaming one of several named imports without
+ * touching the `import {`/`} from "..."` lines) is not detected — narrower
+ * than a full import-statement diff, but still strictly safer than the prior
+ * "file merely contains any import" heuristic. Known pre-existing gaps
+ * (unaddressed here, same as before): dynamic `import(...)` calls and
+ * `require(...)` are not import-relevant lines by this heuristic.
+ */
+function importsSignature(text: string): string {
+	return text
+		.split("\n")
+		.filter((line) => IMPORT_RELEVANT_LINE.test(line))
+		.join("\n");
 }
 
 export function summarizeWorkspaceEdit(edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] }, cwd: string): string[] {
@@ -812,6 +868,14 @@ async function preflightWorkspaceEdit(
 }> {
 	const confine = await createWorkspaceUriConfiner(cwd);
 	const virtual = new Map<string, VirtualFile>();
+	// State for a path that `resolveVirtualPath` cannot resolve to a physical
+	// address — i.e. a path CURRENTLY vacated by an earlier rename in this same
+	// edit (its "from" address, still shadowed by an active virtual move) — but
+	// which a later `create` op in the same ordered edit re-establishes at that
+	// exact address. Keyed on the raw (unresolved) query path because there is
+	// no physical path to key `virtual` on. Consulted only when `resolveVirtualPath`
+	// returns undefined, so it never shadows a real physical/virtual-move address.
+	const virtualOverrides = new Map<string, VirtualFile>();
 	const virtualMoves: Array<{
 		from: string;
 		to: string;
@@ -855,7 +919,9 @@ async function preflightWorkspaceEdit(
 	const stateFor = async (filePath: string): Promise<VirtualFile> => {
 		if (isTombstoned(filePath)) return { exists: false, directory: false };
 		const physicalPath = resolveVirtualPath(filePath);
-		if (!physicalPath) return { exists: false, directory: false };
+		if (!physicalPath) {
+			return virtualOverrides.get(normalizeMapKey(filePath)) ?? { exists: false, directory: false };
+		}
 		const key = normalizeMapKey(physicalPath);
 		const known = virtual.get(key);
 		if (known) return known;
@@ -917,6 +983,13 @@ async function preflightWorkspaceEdit(
 				state.content = "";
 				const physicalPath = resolveVirtualPath(filePath);
 				if (physicalPath) virtual.set(normalizeMapKey(physicalPath), state);
+				// `resolveVirtualPath` returns undefined for a path currently shadowed
+				// by an earlier rename's vacated "from" address in this same ordered
+				// edit (P3-3): the created state has nowhere physical to live, so it
+				// must be recorded in the override overlay keyed on the raw query path
+				// instead — otherwise a later op addressing this exact path (e.g. a
+				// text edit) would see it as still-vacated/nonexistent.
+				else virtualOverrides.set(normalizeMapKey(filePath), state);
 			}
 			continue;
 		}
@@ -935,6 +1008,12 @@ async function preflightWorkspaceEdit(
 			}
 			const source = await stateFor(oldPath);
 			if (!source.exists) throw new Error(`rename source does not exist: ${oldPath}`);
+			// Captured BEFORE this rename's own `virtualMoves`/override mutations
+			// below, so it reflects how `source` was actually resolved: `true` when
+			// `oldPath` is itself shadowed by an earlier rename in this edit and the
+			// state came from the `virtualOverrides` overlay (P3-3) rather than a
+			// physically-addressable entry.
+			const sourceFromOverride = resolveVirtualPath(oldPath) === undefined;
 			await assertParentIsUsable(newPath, stateFor);
 			const destination = await stateFor(newPath);
 			if (destination.exists) {
@@ -946,7 +1025,18 @@ async function preflightWorkspaceEdit(
 				// lesson. Conversely, on a case-SENSITIVE FS where both spellings are
 				// distinct real files, this stays a genuine conflict (closing the inverse
 				// silent-clobber edge that a win32-only fold left open).
-				const aliasesSource = await isSameFsEntry(oldDisk, newDisk);
+				//
+				// P3-8: when the source exists only VIRTUALLY (e.g. created earlier in
+				// this same ordered edit and never yet written to disk), `isSameFsEntry`
+				// lstats disk and finds nothing there, so it can never recognize a
+				// case-only alias for a not-yet-physical file. `stateFor` keys the
+				// `virtual`/override maps on the SAME case-folded identity used for
+				// physical aliasing, so if `destination` and `source` resolved to the
+				// identical cached VirtualFile object, they are — by construction of
+				// that keying — the same virtual entry (a case-insensitive-FS alias);
+				// checked as a fast, disk-free first branch before falling back to the
+				// physical probe (which remains untouched for genuinely-physical paths).
+				const aliasesSource = destination === source || (await isSameFsEntry(oldDisk, newDisk));
 				if (!aliasesSource) {
 					if (op.options?.ignoreIfExists) { ignored.add(op); continue; }
 					if (!op.options?.overwrite) throw new Error(`rename destination already exists: ${newPath}`);
@@ -954,11 +1044,31 @@ async function preflightWorkspaceEdit(
 			}
 			clearTombstonesUnder(newPath);
 			if (!source.directory) await contentFor(oldPath, source);
-			// Keep descendants lazy: a later text edit under a renamed directory
-			// resolves through this virtual move to the original physical path.
-			// This preserves ordered workspace-edit semantics without walking the
-			// entire subtree during preflight.
-			virtualMoves.push({ from: oldPath, to: newPath, directory: source.directory });
+			if (sourceFromOverride) {
+				// P3 (round-2 review): a purely virtual entry (created earlier in this
+				// same edit at a path vacated by an even earlier rename) has no
+				// physical address for a `virtualMoves` shadow to resolve against —
+				// `resolveVirtualPath` walks that list by PHYSICAL path chasing, which
+				// cannot represent "this virtual entry moved again." Pushing a move
+				// here would leave the stale `virtualOverrides[oldPath]` entry
+				// claiming `exists: true` forever (a later `create(oldPath)` would be
+				// falsely rejected, and reads of the new address wouldn't reliably
+				// find it either). Instead, migrate the state object directly: drop
+				// the stale key and re-key it under the destination, placing it back
+				// in `virtual` (physically addressable) or `virtualOverrides` (still
+				// shadowed) depending on whether the destination itself currently
+				// resolves to a physical path.
+				virtualOverrides.delete(normalizeMapKey(oldPath));
+				const destinationPhysicalPath = resolveVirtualPath(newPath);
+				if (destinationPhysicalPath) virtual.set(normalizeMapKey(destinationPhysicalPath), source);
+				else virtualOverrides.set(normalizeMapKey(newPath), source);
+			} else {
+				// Keep descendants lazy: a later text edit under a renamed directory
+				// resolves through this virtual move to the original physical path.
+				// This preserves ordered workspace-edit semantics without walking the
+				// entire subtree during preflight.
+				virtualMoves.push({ from: oldPath, to: newPath, directory: source.directory });
+			}
 			continue;
 		}
 		const filePath = await confine(op.uri);
@@ -1051,7 +1161,7 @@ export async function applyWorkspaceEdit(
 				const start = Math.min(...edits.map((item) => item.range.start.line + 1));
 				const end = Math.max(...edits.map((item) => item.range.end.line + 1));
 				touchedFiles.add(filePath);
-				fileDetails.push({ filePath, range: { start, end }, importsChanged: /^import\s/m.test(updated) });
+				fileDetails.push({ filePath, range: { start, end }, importsChanged: importsSignature(content) !== importsSignature(updated) });
 				markApplied(op);
 				descriptions.push(`Applied ${edits.length} edit(s) to ${relativeToCwd(filePath, cwd)}`);
 			} else if (op.kind === "create") {
