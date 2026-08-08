@@ -6,6 +6,16 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **docs/language-coverage.md's Vue row still showed formatter `—` (refs #1134)** —
+	`.vue` has been wired to `prettier` (default) + `oxfmt` (appended via
+	`OXFMT_SUPPORTED_EXTENSIONS`) since #1138 landed, but the doc row was never
+	updated to match. Corrected the Vue row to `prettier, oxfmt`. **Two of the
+	three #1134 P3 tail items are NOT included here**: the TOML inline-comment
+	heuristic relax + docblock (tail 1) and the monorepo-asymmetry docblock ack
+	(tail 2) both live inside `clients/tool-policy.ts`'s `hasOxfmtSvelteConfig`,
+	which a concurrently-running agent is editing on
+	`fix/1135-formatter-drift-guard` — deferred to avoid a collision; issue
+	#1134 stays open for those two.
 - **Quick-mode background warmup kept a one-shot `pi -p`/`--print` process alive (closes #1154)** —
 	`handleSessionStart` forces **quick mode** for both a real `pi -p`/`--print`
 	one-shot AND an interactive process's first session (to protect keystroke
