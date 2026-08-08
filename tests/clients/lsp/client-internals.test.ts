@@ -406,6 +406,7 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 		isConnected: true,
 		isDestroyed: false,
 		shutdownRequested: false,
+		exitedAt: undefined,
 		connectionDisposed: false,
 		lastError: undefined,
 		connection: createMockConnection(),

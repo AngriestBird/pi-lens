@@ -236,6 +236,25 @@ export interface LSPClientInfo {
 	isAlive: () => boolean;
 	/** True if the server process has exited or been killed */
 	processExited: () => boolean;
+	/**
+	 * #1127: true only when THIS client's own `shutdown()` was called before
+	 * it went dead (session teardown, `#743` notify-backpressure eviction,
+	 * generation resets, …). False for a genuine crash — process exit/signal
+	 * with no preceding `shutdown()` call — so a caller respawning a dead
+	 * client can tell a deliberate kill apart from an unexpected runtime exit
+	 * and only count the latter toward the failure breaker.
+	 */
+	wasShutdownIntentional: () => boolean;
+	/**
+	 * #1127: wall-clock time this client FIRST observed its own death
+	 * (connection close/error or process exit, whichever fires first), or
+	 * `undefined` if it hasn't died yet. A caller computing server lifetime
+	 * MUST use this, not the time it happened to notice the client was dead —
+	 * detection is lazy (the next file attach) and can trail the actual death
+	 * by minutes to hours (#1127's documented opengrep pattern), which would
+	 * make every early crash look like a long, healthy run.
+	 */
+	getExitedAt: () => number | undefined;
 	/** Last N lines of server stderr for diagnostics */
 	recentStderr: (lines?: number) => string;
 	/** Pre-request health check — returns error string if process is dead */
@@ -568,6 +587,20 @@ export interface LSPClientState {
 	 *  before the process 'exit' event fires (the ordering that previously
 	 *  made every crash silently look "expected"). */
 	shutdownRequested: boolean;
+	/**
+	 * #1127: wall-clock time the client FIRST observed its own death (whichever
+	 * of connection close/error or the process 'exit' event fires first — see
+	 * `setupConnectionLifecycle`). Detection of a dead client happens lazily,
+	 * on the next `getClientForFile` attach — which, per #1127's real-world
+	 * pattern, can be minutes to hours after the process actually died. A
+	 * caller computing "how long did this server live" MUST use
+	 * `exitedAt - spawnedAt`, never `detectionTime - spawnedAt`: the latter
+	 * conflates "dead quickly" with "attached to rarely" and would wrongly
+	 * exempt an early-crashing server from the runtime-exit breaker just
+	 * because nobody happened to touch it again for a while. `undefined`
+	 * until the client actually dies.
+	 */
+	exitedAt: number | undefined;
 	connectionDisposed: boolean;
 	lastError: Error | undefined;
 	readonly connection: MessageConnection;
@@ -1261,6 +1294,19 @@ export function setupIncomingHandlers(
 	state.connection.onRequest("window/workDoneProgress/create", async () => {});
 }
 
+/**
+ * #1127: record the FIRST moment this client observed its own death. Detection
+ * of a dead client (the next `getClientForFile` attach in index.ts) can happen
+ * long after the process actually died — this timestamp is the only reliable
+ * "when did it die" signal, so it must be set here, at the earliest death
+ * signal, not derived later from detection time.
+ */
+function markExitedIfUnset(state: LSPClientState): void {
+	if (state.exitedAt === undefined) {
+		state.exitedAt = Date.now();
+	}
+}
+
 function setupConnectionLifecycle(
 	state: LSPClientState,
 	recentStderr: (lines?: number) => string,
@@ -1269,12 +1315,14 @@ function setupConnectionLifecycle(
 		state.lastError = error instanceof Error ? error : new Error(String(error));
 		state.isConnected = false;
 		state.isDestroyed = true;
+		markExitedIfUnset(state);
 		disposeClientConnection(state);
 	});
 
 	state.connection.onClose(() => {
 		state.isConnected = false;
 		state.isDestroyed = true;
+		markExitedIfUnset(state);
 		disposeClientConnection(state);
 	});
 
@@ -1290,6 +1338,7 @@ function setupConnectionLifecycle(
 		const wasIntentional = state.shutdownRequested;
 		state.isConnected = false;
 		state.isDestroyed = true;
+		markExitedIfUnset(state);
 		disposeClientConnection(state);
 		if (!wasIntentional) {
 			logLatency({
@@ -2138,6 +2187,7 @@ export async function createLSPClient(options: {
 		isConnected: true,
 		isDestroyed: false,
 		shutdownRequested: false,
+		exitedAt: undefined,
 		connectionDisposed: false,
 		lastError: undefined,
 		connection,
@@ -2305,6 +2355,12 @@ export async function createLSPClient(options: {
 		processExited: () =>
 			lspProcess.process.exitCode !== null ||
 			(lspProcess.process as { killed?: boolean }).killed === true,
+
+		/** #1127: mirrors `state.shutdownRequested` — see interface doc. */
+		wasShutdownIntentional: () => state.shutdownRequested,
+
+		/** #1127: mirrors `state.exitedAt` — see interface doc. */
+		getExitedAt: () => state.exitedAt,
 
 		/** Last N lines of server stderr for diagnostics. */
 		recentStderr: (lines?: number) => recentStderr(lines),
