@@ -4,6 +4,10 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **On-demand heap snapshots for retainer attribution ([#1126](https://github.com/apmantza/pi-lens/issues/1126))** — `PI_LENS_DEBUG_HEAP=1` makes `/lens-health` also write a V8 `.heapsnapshot` to `~/.pi-lens/` (plus a breadcrumb line in `heap-snapshots.log`), so the "which objects retain the bytes" follow-up to #1123's `memory_sample` trajectory is answerable on a live >1 GB instance without a fresh ad-hoc expedition. The flag is read once at startup and the writer mirrors `clients/debug-handles.ts`: zero cost + no file when unset, and the (synchronous, multi-second) snapshot is only ever triggered from the operator-invoked diagnostics command — never a hot path or timer. Snapshot files are pruned to the newest `SNAPSHOT_RETENTION` (3) after each write, bounding the growing on-disk axis (AGENTS.md shape 9). Auto-capture on an RSS threshold is a deliberately-deferred follow-up (it would reintroduce the pause onto an automatic path).
+
 ### Fixed
 
 - **Persistence workers could keep completed one-shot processes alive ([#1148](https://github.com/apmantza/pi-lens/issues/1148))** — project-snapshot and review-graph workers called `unref()` before registering their `"message"` listeners, and Node re-referenced the public `MessagePort` when each listener was added. Both workers now install all lifecycle listeners before `unref()`, so persistence remains asynchronous without retaining an otherwise-finished `pi --print` or subprocess workflow. Real child-process regression tests require both persistence paths to finish writing and exit naturally.

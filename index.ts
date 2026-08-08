@@ -80,6 +80,10 @@ import {
 } from "./clients/memory-sampler.js";
 import { dumpActiveHandles } from "./clients/debug-handles.js";
 import {
+	isDebugHeapEnabled,
+	writeHeapSnapshotNow,
+} from "./clients/debug-heap.js";
+import {
 	checkSmellsAndNoteOnce,
 	countRecentSmells,
 	formatSmellsHealthLine,
@@ -818,6 +822,26 @@ export default function (pi: ExtensionAPI) {
 				lines.push("", formatMemoryHealthLine(buildMemorySample(runtime.wordIndex)));
 			} catch {
 				// best-effort — a health-line render must never break /lens-health
+			}
+
+			// On-demand heap snapshot (#1126) — the retainer-attribution half of the
+			// memory line above: it says how many bytes are resident by subsystem,
+			// this captures WHICH objects retain them. Gated behind PI_LENS_DEBUG_HEAP
+			// (zero cost + no file when unset) and only ever triggered from this
+			// operator-invoked diagnostics command — never a hot path or timer, so the
+			// synchronous multi-second snapshot pause is opt-in and explicit. See
+			// clients/debug-heap.ts.
+			if (isDebugHeapEnabled()) {
+				try {
+					const snap = writeHeapSnapshotNow("lens_health");
+					if (snap) {
+						lines.push(
+							`Heap snapshot written: ${snap.path} (RSS ${Math.round(snap.rssBytes / (1024 * 1024))}MB, ${snap.durationMs}ms) — open in Chrome DevTools › Memory`,
+						);
+					}
+				} catch {
+					// best-effort — a snapshot write must never break /lens-health
+				}
 			}
 
 			// Smells self-surfacing (#1123 item 3) — same bounded tail-scan the
