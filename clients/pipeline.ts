@@ -122,7 +122,10 @@ async function snapshotDirInto(
 ): Promise<void> {
 	let entries: nodeFs.Dirent[];
 	try {
-		entries = nodeFs.readdirSync(dir, { withFileTypes: true });
+		// Async (#1137): a synchronous per-directory read blocks the loop for the
+		// whole stall on a slow cloud-backed (OneDrive) directory; fs.promises
+		// keeps this tool_result-path walk off the event loop.
+		entries = await nodeFs.promises.readdir(dir, { withFileTypes: true });
 	} catch {
 		return;
 	}
@@ -140,7 +143,7 @@ async function snapshotDirInto(
 		if (!entry.isFile()) continue;
 		if (ignoreMatcher.isIgnored(fullPath, false)) continue;
 		try {
-			const stat = nodeFs.statSync(fullPath);
+			const stat = await nodeFs.promises.stat(fullPath);
 			snapshot.set(path.resolve(fullPath), {
 				mtimeMs: stat.mtimeMs,
 				size: stat.size,

@@ -172,11 +172,27 @@ export function normalizeMapKey(filePath: string): string {
 	return normalizeFilePath(filePath);
 }
 
-/** Human-facing path relative to a project root when the file is inside it. */
+/**
+ * Human-facing path relative to a project root when the file is inside it.
+ *
+ * Parses by path SHAPE, not host OS (refs #1150/#1152, shape-2 class #1163):
+ * a Windows-shaped `filePath` (drive-letter/UNC — e.g. a persisted call-graph
+ * symbol-key path `C:\repo\src\x.ts` rehydrated on a Linux CI run) is split
+ * with `win32.*` regardless of `process.platform`. The host-default
+ * `isAbsolute`/`relative` find no drive-letter anchor in a win32 path on POSIX:
+ * `path.isAbsolute("C:\\repo\\x.ts")` returns FALSE on Linux, short-circuiting
+ * to the raw absolute path instead of ever relativizing it — so a file that IS
+ * under the project root renders as a full absolute path on Linux but the
+ * expected `src/x.ts` on Windows (green-locally / wrong-on-CI, the #1024
+ * divergence class). `win32.*` on a native POSIX path (Windows never sees one;
+ * Linux native paths aren't Windows-shaped) is never selected, so same-OS
+ * native paths are unchanged either way.
+ */
 export function toProjectRelativePath(filePath: string, projectRoot: string): string {
-	if (!path.isAbsolute(filePath)) return filePath.replace(/\\/g, "/");
-	const relative = path.relative(path.resolve(projectRoot), filePath);
-	return relative && !relative.startsWith("..") && !path.isAbsolute(relative)
+	const p = isWindowsPath(filePath) ? win32 : path;
+	if (!p.isAbsolute(filePath)) return filePath.replace(/\\/g, "/");
+	const relative = p.relative(p.resolve(projectRoot), filePath);
+	return relative && !relative.startsWith("..") && !p.isAbsolute(relative)
 		? relative.replace(/\\/g, "/")
 		: filePath.replace(/\\/g, "/");
 }
