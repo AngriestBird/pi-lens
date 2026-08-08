@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -258,6 +259,178 @@ describe("RuleCache", () => {
 		raw.version = "v2";
 		fs.writeFileSync(cacheFile, JSON.stringify(raw), "utf-8");
 
+		expect(cache.get([ruleFile])).toBeNull();
+	});
+
+	// #1118: computeRuleHash fingerprinted rule-file METADATA (mtime+size) only
+	// — the review-graph first-filter without the content-hash CONFIRM the gold
+	// standard pairs it with. An edit to a PROJECT-LOCAL (mutable) rule file that
+	// preserves both mtime and byte size (git-checkout timestamp restoration, a
+	// same-length tweak, a formatter that preserves mtime) replayed a stale
+	// compiled set pre-fix. Pin mtime via utimesSync (not a real-clock race) and
+	// keep size identical — #1024-safe on Linux CI.
+	it("content-confirms a project-local rule file: a same-mtime+same-size edit invalidates the cache", () => {
+		const { cwd } = setupProject();
+		const ruleFile = path.join(
+			cwd,
+			"rules",
+			"tree-sitter-queries",
+			"typescript",
+			"mutable.yml",
+		);
+		fs.mkdirSync(path.dirname(ruleFile), { recursive: true });
+		fs.writeFileSync(ruleFile, "id: aaaa\nquery: (identifier) @X\n", "utf-8");
+		// Pin mtime via utimesSync rather than trusting the write's natural
+		// timestamp: some filesystems round mtime to a coarser precision than
+		// Date's, so comparing a later utimesSync round-trip against a naturally
+		// written stat can flake. Setting the SAME fixed Date both times before
+		// and after guarantees identical rounding, hence a genuinely
+		// same-mtime+same-size edit rather than an accidental one.
+		const pinnedMtime = new Date(2024, 0, 1, 0, 0, 0);
+		fs.utimesSync(ruleFile, pinnedMtime, pinnedMtime);
+		const statBefore = fs.statSync(ruleFile);
+
+		const cache = new RuleCache("typescript", cwd);
+		const queries = [
+			{
+				id: "fake",
+				name: "Fake",
+				severity: "warning",
+				language: "typescript",
+				message: "",
+				query: "(x) @x",
+				metavars: ["x"],
+				has_fix: false,
+				filePath: ruleFile,
+			},
+		];
+		cache.set([ruleFile], queries);
+		expect(cache.get([ruleFile])).not.toBeNull();
+
+		// Same byte length ("aaaa" -> "bbbb"), content changed, mtime restored.
+		fs.writeFileSync(ruleFile, "id: bbbb\nquery: (identifier) @X\n", "utf-8");
+		fs.utimesSync(ruleFile, pinnedMtime, pinnedMtime);
+		const statAfter = fs.statSync(ruleFile);
+		expect(statAfter.size).toBe(statBefore.size);
+		expect(statAfter.mtimeMs).toBe(statBefore.mtimeMs);
+
+		expect(cache.get([ruleFile])).toBeNull();
+	});
+
+	// #1118: bundled rule files (~705 across all languages) are immutable within
+	// a process — content-confirming them unconditionally on the per-edit
+	// tree-sitter runner hot path is exactly the discipline AGENTS.md forbids.
+	// Prove the split behaviorally rather than via a readFileSync spy (ESM
+	// namespace exports aren't spy-configurable, and this is closer to the real
+	// contract anyway): mutate a REAL bundled file's content while preserving
+	// mtime+size — if bundled files were content-confirmed too, this would
+	// invalidate; they must not be, so the cache keeps HITTING. The mutation is
+	// always restored, even on assertion failure, since this is a real repo
+	// file.
+	it("does not content-confirm bundled rule files (hot-path cost stays metadata-only, still cache-hits)", () => {
+		const { cwd } = setupProject();
+		// No `rules/tree-sitter-queries/go/` under this tmp cwd, so the effective
+		// set is bundled files only.
+		const files = ruleFilesForLanguage("go", cwd);
+		expect(files.length).toBeGreaterThan(0);
+		const bundledFile = files[0];
+		const originalContent = fs.readFileSync(bundledFile);
+		const originalStat = fs.statSync(bundledFile);
+		const pinnedMtime = new Date(2024, 0, 1, 0, 0, 0);
+
+		const cache = new RuleCache("go", cwd);
+		const queries = [
+			{
+				id: "fake",
+				name: "Fake",
+				severity: "warning",
+				language: "go",
+				message: "",
+				query: "(x) @x",
+				metavars: [],
+				has_fix: false,
+				filePath: bundledFile,
+			},
+		];
+
+		try {
+			fs.utimesSync(bundledFile, pinnedMtime, pinnedMtime);
+			const statBefore = fs.statSync(bundledFile);
+			cache.set(files, queries);
+			expect(cache.get(files)).not.toBeNull();
+
+			// Same byte length, content differs, mtime restored to the pin.
+			const mutated = Buffer.alloc(originalContent.length, 0x23); // "#"
+			fs.writeFileSync(bundledFile, mutated);
+			fs.utimesSync(bundledFile, pinnedMtime, pinnedMtime);
+			const statAfter = fs.statSync(bundledFile);
+			expect(statAfter.size).toBe(statBefore.size);
+			expect(statAfter.mtimeMs).toBe(statBefore.mtimeMs);
+
+			expect(cache.get(files)).not.toBeNull();
+		} finally {
+			fs.writeFileSync(bundledFile, originalContent);
+			fs.utimesSync(bundledFile, originalStat.atime, originalStat.mtime);
+		}
+	});
+
+	// #1118 disk-poisoning half: a persisted entry whose ruleHash was computed
+	// over metadata ONLY (what a pre-fix process would have written for a
+	// same-mtime+size stale edit) must not be trusted post-fix — the
+	// content-confirming fingerprint differs, so the poisoned entry is rejected
+	// rather than replayed under a "fresh-looking" key.
+	it("does not trust a persisted entry fingerprinted without the project-local content hash", () => {
+		const { cwd } = setupProject();
+		const ruleFile = path.join(
+			cwd,
+			"rules",
+			"tree-sitter-queries",
+			"typescript",
+			"mutable.yml",
+		);
+		fs.mkdirSync(path.dirname(ruleFile), { recursive: true });
+		fs.writeFileSync(ruleFile, "id: aaaa\n", "utf-8");
+		const stat = fs.statSync(ruleFile);
+
+		const cacheFile = path.join(
+			cwd,
+			".pi-lens",
+			"cache",
+			`typescript-rules-${CACHE_VERSION}.json`,
+		);
+		fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+
+		// Metadata-only fingerprint (the pre-#1118 formula) for the CURRENT
+		// mtime+size — exactly what a stale-but-matching entry looked like.
+		const metadataOnlyHash = crypto
+			.createHash("sha256")
+			.update(`${ruleFile}:${stat.mtimeMs}:${stat.size}`)
+			.digest("hex")
+			.slice(0, 16);
+		fs.writeFileSync(
+			cacheFile,
+			JSON.stringify({
+				version: CACHE_VERSION,
+				timestamp: Date.now(),
+				ruleHash: metadataOnlyHash,
+				queries: [
+					{
+						id: "stale",
+						name: "Stale",
+						severity: "warning",
+						language: "typescript",
+						message: "",
+						query: "(x) @x",
+						metavars: [],
+						has_fix: false,
+						filePath: ruleFile,
+					},
+				],
+			}),
+			"utf-8",
+		);
+
+		const cache = new RuleCache("typescript", cwd);
 		expect(cache.get([ruleFile])).toBeNull();
 	});
 });

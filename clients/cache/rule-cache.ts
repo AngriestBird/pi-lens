@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "../file-utils.js";
 import { readJsonCache } from "../json-cache-read.js";
+import { resolvePackagePath } from "../package-root.js";
 
 // v4: cache skip_test_files + fix_action — v3 entries silently dropped them,
 // and ruleHash (rule-file mtimes) never invalidates on a code-only fix.
@@ -22,7 +23,45 @@ import { readJsonCache } from "../json-cache-read.js";
 // the language's own. A v5 tsx entry was hashed over tsx files only, so a
 // typescript-rule edit never invalidated it; v5 entries self-miss anyway (the
 // hash input set changed), the bump just makes the semantics break explicit.
-export const CACHE_VERSION = "v6";
+// v7 (#1118): computeRuleHash now CONTENT-hashes project-local rule files
+// instead of trusting mtime+size alone. mtime+size is the review-graph
+// first-filter, not the full gold standard (size:mtimeMs + confirmContentChanged)
+// — a rule-file edit that preserves both (git checkout timestamp restoration, a
+// same-length tweak, a formatter that preserves mtime) replayed a stale
+// compiled set from disk and re-persisted it under the still-matching
+// fingerprint, poisoning every future process. The bump forces every v6 entry
+// (hashed under the old metadata-only formula) to miss once on upgrade, so a
+// silently-poisoned v6 entry can't be trusted by the new code.
+export const CACHE_VERSION = "v7";
+
+/**
+ * Bundled rule files ship with the extension and are immutable within a
+ * process — they can't change mid-session, so the cheap mtime+size
+ * fingerprint (v6's whole-set formula) is sufficient for them, and there are
+ * ~705 of them across all languages, so unconditionally reading+hashing their
+ * bytes on every edit would be the unconditional hot-path hashing the
+ * event-loop discipline forbids (RuleCache.get runs on the per-edit
+ * tree-sitter runner hot path).
+ *
+ * Project-local rule files (under `<project>/rules/tree-sitter-queries/`,
+ * see `ruleFilesForLanguage`) are the opposite: mutable, and a SMALL set (the
+ * handful a developer actually maintains) — cheap to content-hash. Splitting
+ * on this prefix mirrors the split `yaml-rule-parser.ts`/`ast-grep-napi.ts`
+ * already use for the ast-grep side of the same class (#1105): project-origin
+ * trees get a content-hash CONFIRM, bundled trees stay mtime-cheap.
+ */
+const BUNDLED_RULES_ROOT = resolvePackagePath(
+	import.meta.url,
+	"rules",
+	"tree-sitter-queries",
+);
+
+function isBundledRuleFile(resolvedFile: string): boolean {
+	return (
+		resolvedFile === BUNDLED_RULES_ROOT ||
+		resolvedFile.startsWith(BUNDLED_RULES_ROOT + path.sep)
+	);
+}
 
 export interface QueryCacheEntry {
 	version: string;
@@ -71,9 +110,18 @@ export class RuleCache {
 	private computeRuleHash(ruleFiles: string[]): string {
 		const hash = crypto.createHash("sha256");
 		for (const file of ruleFiles.sort((a, b) => a.localeCompare(b))) {
-			if (fs.existsSync(file)) {
-				const stat = fs.statSync(file);
-				hash.update(`${file}:${stat.mtimeMs}:${stat.size}`);
+			const resolved = path.resolve(file);
+			if (!fs.existsSync(resolved)) continue;
+			const stat = fs.statSync(resolved);
+			hash.update(`${file}:${stat.mtimeMs}:${stat.size}`);
+			// Content-CONFIRM only the project-local, mutable subset (a handful of
+			// files) — mtime+size alone is a first filter, not proof of freshness,
+			// and a preserved-mtime+size edit here would otherwise replay (and
+			// re-persist) a stale compiled set. Bundled files (~705, immutable
+			// within a process) skip this: the metadata fingerprint stays their
+			// whole story, keeping the common no-project-rules case as cheap as v6.
+			if (!isBundledRuleFile(resolved)) {
+				hash.update(fs.readFileSync(resolved));
 			}
 		}
 		return hash.digest("hex").slice(0, 16);
