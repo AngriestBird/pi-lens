@@ -6,6 +6,20 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`switch-case-termination` false positives for returning try/catch and
+	exhaustive conditionals (closes #1079)** — the `no_terminating_statement`
+	post-filter only checked whether a case's last statement was a literal
+	terminator, so a case ending in `try { return … } catch { return … }` (or an
+	exhaustive `if/else`) was flagged even though every path returns. It now
+	runs a bounded, fail-safe control-flow analysis: trailing blocks,
+	`try/catch/finally` (a returning try completes after finally; a try body
+	that completes normally only terminates via a finally), and exhaustive
+	`if/else` (no else still falls through). It also honors an intentional
+	`// fallthrough` marker comment (ESLint `no-fallthrough` convention),
+	checked against comment nodes only so a `case "fallthrough":` value can't
+	suppress a finding. Genuine fall-throughs are still reported. TS + JS
+	regression fixtures cover grouped labels, try/finally, and intentional
+	fallthrough.
 - **Micro-gap sweep: recorded coverage/observability/doc gaps (refs #1106, refs #1104)**
 	- `session-state-store.ts`'s `loadSessionState` STATE_VERSION reject path
 		(a wrong-version persisted snapshot is ignored, not rehydrated) had no
