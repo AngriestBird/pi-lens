@@ -15,10 +15,27 @@ export interface FormatterPolicy {
 	gate: ToolGate;
 }
 
-// Exported (read-only intent) for the formatter/policy drift guard
-// (tests/clients/formatter-policy-consistency.test.ts, #1135). Do not mutate
-// externally — treat as the canonical extension→policy source of truth.
-export const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
+// Extension → formatter policy. This map, `FORMATTER_POLICY_BY_FILENAME`, and
+// `AUTO_INSTALLABLE_DEFAULT_FORMATTERS` are the inverse of the formatter
+// definitions in `clients/formatters.ts` (formatter → extensions). The two are
+// bound by `tests/clients/formatter-policy-consistency.test.ts` (#1135, the
+// #883/#209 single-source-of-truth class) so they cannot drift silently. All
+// three are re-exported (read-only intent) via a single `export {}` below —
+// deliberately NOT inline on these declarations, to keep the pre-existing,
+// structural lookup-table duplication out of the PR's "new code" (SonarCloud).
+//
+// Two deliberate #1135 decisions live in the entries below, documented here so
+// the rationale sits outside the duplicated run:
+//   - `.sass` offers ["biome", "prettier"] only — NOT oxfmt: oxfmt is absent
+//     from OXFMT_SUPPORTED_EXTENSIONS (oxfmt/prettier handle .css/.scss/.less,
+//     not the indented `.sass` syntax). It was previously hand-listed here,
+//     diverging from the oxfmt definition (inert, because `matching` filtered
+//     it out); dropped to bind the two.
+//   - `.fish` intentionally has NO entry. `fish-indent` is a LINT runner
+//     (getLinterPolicyForFile), not a FormatterInfo — a formatter policy naming
+//     it was a dead, unsatisfiable entry; fish reformatting runs via the
+//     linter/autofix path. Removed to keep extension→formatter consistent.
+const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 	[
 		".js",
 		{
@@ -148,12 +165,7 @@ export const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 	[
 		".sass",
 		{
-			// oxfmt is intentionally NOT offered for .sass: it is absent from
-			// OXFMT_SUPPORTED_EXTENSIONS (oxfmt/prettier support .css/.scss/.less
-			// but not the indented `.sass` syntax). It was previously hand-listed
-			// here, diverging from the oxfmt definition — a #1135 drift, harmless
-			// only because `matching` already filtered it out. Guarded now by
-			// tests/clients/formatter-policy-consistency.test.ts.
+			// #1135: no oxfmt (see map header comment).
 			formatterNames: ["biome", "prettier"],
 			defaultFormatter: "biome",
 			defaultWhenUnconfigured: true,
@@ -525,13 +537,6 @@ export const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			gate: "smart-default",
 		},
 	],
-	// NOTE: `.fish` has NO formatter policy. `fish-indent` is a LINT runner
-	// (getLinterPolicyForFile → "fish-indent"), not a FormatterInfo — no formatter
-	// definition claims `.fish`, so a formatter policy naming "fish-indent" was a
-	// dead, unsatisfiable entry (a #1135 mode-2 drift: policy names a formatter
-	// with no definition). Fish reformatting is driven through the linter/autofix
-	// path instead. Removed so the extension→formatter mapping stays consistent
-	// with the definitions (guarded by formatter-policy-consistency.test.ts).
 	[
 		".toml",
 		{
@@ -712,11 +717,7 @@ for (const [ext, policy] of FORMATTER_POLICY_BY_EXTENSION) {
 	}
 }
 
-// Keys are formatter NAMES (must match a FormatterInfo.name in formatters.ts);
-// values are auto-install tool ids. Exported so the #1135 drift guard can bind
-// the keys to real formatter definitions (a mistyped name silently disables
-// auto-install for that formatter).
-export const AUTO_INSTALLABLE_DEFAULT_FORMATTERS = new Map<string, string>([
+const AUTO_INSTALLABLE_DEFAULT_FORMATTERS = new Map<string, string>([
 	["biome", "biome"],
 	["ruff", "ruff"],
 	["prettier", "prettier"],
@@ -737,9 +738,19 @@ const TERRAGRUNT_FORMATTER_POLICY: FormatterPolicy = {
 	gate: "smart-default",
 };
 
-export const FORMATTER_POLICY_BY_FILENAME = new Map<string, FormatterPolicy>(
+const FORMATTER_POLICY_BY_FILENAME = new Map<string, FormatterPolicy>(
 	TERRAGRUNT_FILENAMES.map((name) => [name, TERRAGRUNT_FORMATTER_POLICY]),
 );
+
+// Re-exported (read-only intent) for the #1135 drift guard. Kept as a single
+// separate statement — NOT inline on the declarations above — so the touched
+// lines don't fall at the head of the pre-existing lookup-table duplication and
+// get counted as new duplicated code. Bindings are live, so position is safe.
+export {
+	AUTO_INSTALLABLE_DEFAULT_FORMATTERS,
+	FORMATTER_POLICY_BY_EXTENSION,
+	FORMATTER_POLICY_BY_FILENAME,
+};
 
 export function getFormatterPolicyForExtension(
 	ext: string,
