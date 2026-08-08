@@ -6,6 +6,35 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`detectFileRole` misclassified a Windows-shaped path off native Windows (closes #1152, latent sibling of #1150/#1151)** —
+	`clients/file-role.ts:detectFileRole` used the module-default `basename`/
+	`dirname` (POSIX on Linux) even when the input path was Windows-shaped
+	(drive letter or UNC prefix). A backslash-only `C:\...` path has no `/`
+	for POSIX `dirname` to find, so it collapsed to `"."` and the dir-based
+	role branches (`/tests/`, `/spec/`, generated-marker dirs) silently
+	misclassified — the byte-identical forward-slash form already worked,
+	since POSIX `dirname` handles `/` regardless of the leading drive
+	letter. `detectFileRole` is platform-native by design, so the fix is
+	shape-conditional rather than shape-committed (unlike #1151's
+	`resolveNonExisting`, which is already win32-committed): a Windows-shaped
+	path (per the now-exported `isWindowsPath`, `clients/path-utils.ts`) is
+	parsed with `path.win32.basename`/`dirname` regardless of the running
+	OS; a same-OS-native path is unaffected (native win32 already equals the
+	module default there; native POSIX was never win32-shaped). Added
+	regression coverage in `tests/clients/file-role.test.ts` asserting
+	coherent `"test"`/`"init"` classification for `C:\...`, `C:/...`, and
+	UNC-shaped inputs regardless of the running OS.
+	`clients/lsp/server.ts:639`'s `normalizeSlashKey(path.dirname(path.resolve(file)))`
+	(flagged in #1151's review as the same shape) was audited and verified
+	**safe, not fixed**: `path.resolve(file)` runs before `dirname`, so by
+	the time `dirname` sees it the value is already coerced to the running
+	OS's native absolute-path shape — `file` here is always a real on-disk
+	path produced by this process's own directory walking (extension-root
+	resolution backed by real `existsSync`/`stat` probes, confirmed via
+	`tests/clients/lsp/typescript-extension-root.test.ts`), never a
+	persisted or cross-OS-supplied literal. Same "platform-native by
+	design" exemption #1151 already applied to `path-utils.ts`'s
+	`walkUpDirs`/`findNearestContaining` family.
 - **Orphan-reaper fire-and-forget PowerShell/`ps` spawns kept a completed `pi --print` alive past settle (closes #1153)** —
 	the orphan reaper (`clients/instance-reaper.ts`) is fired fire-and-forget from
 	`session_start` (`index.ts` `sweepOrphans`/`sweepUntrackedOrphans`), not
