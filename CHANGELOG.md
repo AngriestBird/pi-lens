@@ -6,6 +6,36 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`terragrunt hcl fmt` reported success when it never ran (refs #1117)** —
+	`formatFile` decided success from `result.error` alone, and a formatter that
+	fails leaves the file byte-identical, which is indistinguishable from
+	"already formatted". A terragrunt binary predating the `hcl` command group
+	exits non-zero without touching the file, and pi-lens reported
+	`success: true, changed: false`. `FormatterInfo` gained an opt-in
+	`strictExitCode`, set on `terragrunt-hcl`, which folds the exit status into
+	the check and surfaces the tool's own first stderr line as the error. It is
+	opt-in rather than global because the lint-autofix formatters (`rubocop -a`,
+	`ktlint -F`, `standardrb --fix`, `sqlfluff fix`) exit non-zero when offenses
+	remain AFTER a successful rewrite; failing those would surface a formatter
+	error on every file with an unfixable offense.
+- **Runners reported a clean file on a non-zero exit with no output (refs #1117)** —
+	seven runners gated their "the tool never ran" skip on
+	`result.error` alone. `safeSpawnAsync` sets `error` only for spawn, timeout,
+	signal and abort failures, and resolves a NORMAL exit with no `error` at any
+	status (see `SpawnResult.failure`: "nonzero exit statuses are not spawn
+	failures"). So an unknown subcommand, a rejected flag, or a config that fails
+	to load — non-zero exit, message on stderr, empty stdout — fell straight
+	through the guard, parsed `""` into zero diagnostics, and reported the file as
+	clean. Terragrunt was the visible case: its docblock claimed a binary
+	predating the `hcl` command group was classified SKIPPED, and it was not. The
+	test now lives in `spawnFailedWithNoOutput`
+	(`clients/dispatch/runners/utils/spawn-outcome.ts`) and folds `status` into
+	the check; terragrunt, tflint, hadolint, taplo, trivy-config, htmlhint and
+	detekt all use it. Runners that exit non-zero BECAUSE they found something are
+	unaffected, since their findings are on the stream the guard tests. ktlint,
+	prisma-validate, gleam-check, zig-check, dart-analyze and elixir-check already
+	covered the case through their own non-zero follow-up branches and are
+	unchanged.
 - **Bare-binary GitHub release assets skip signature siblings** — the installer
 	picked a release asset with `assets.find(a => a.name.includes(substring))`.
 	Archive-based tools are unaffected (their substrings end in `.zip`/`.tar.gz`),
@@ -219,6 +249,31 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **tflint respects the project's linter policy (refs #1117)** — every other
+	dispatch runner gates on `getLinterPolicyForCwd` before spawning; tflint was
+	the one that never consulted it, so a project that elected a different
+	terraform linter got tflint's findings on top of its own. It now skips when
+	policy does not prefer it, matching golangci-lint and terragrunt. A project
+	`.tflint.hcl` is also an explicit opt-in, so `hasTflintConfig` promotes the
+	`.tf`/`.tfvars` policy from `smart-default` to `config-first` the same way
+	`.golangci.yml` does for Go. tflint ships built-in rules and still runs
+	unconfigured, so the no-config default is unchanged. `hasTflintConfig` takes
+	the edited file's directory rather than the project cwd, so it agrees with
+	what the runner hands tflint: keyed off cwd it would miss every `.tflint.hcl`
+	living in a terraform subdirectory, which is the common monorepo layout.
+- **tflint honors a repo-root `.tflint.hcl` (refs #1117)** — tflint resolves
+	`.tflint.hcl` from its own working directory and never walks parents (its only
+	fallback is `~/.tflint.hcl`), and the runner spawns it from the edited file's
+	directory. A config at the repo root therefore governed nothing beneath the
+	root: every module under `modules/` or `envs/` was linted with tflint's
+	built-in defaults, silently. The runner now walks up for the nearest
+	`.tflint.hcl` (via `findNearestDirWithAnyBasename`, so the same home-guarded,
+	depth-capped, mtime-invalidated walk every other marker lookup uses) and
+	passes it as `--config`. Skipped when `TFLINT_CONFIG_FILE` is set, since
+	`--config` outranks the env var in tflint's own precedence and would override
+	a deliberate choice. A `.tflint.hcl` that declares an uninitialized plugin
+	makes tflint exit non-zero with empty stdout, which the guard fix above turns
+	into a SKIPPED rather than a false clean.
 - **Terragrunt linting and formatting** — `terragrunt.hcl` and `root.hcl` now
 	get a dedicated `terragrunt` file kind (filename-detected only; a plain
 	`.hcl` file stays unmapped). New `terragrunt` dispatch runner wraps

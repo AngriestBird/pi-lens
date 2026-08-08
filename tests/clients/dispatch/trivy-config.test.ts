@@ -88,6 +88,29 @@ describe("trivy-config run() — terraform pass-through", () => {
 		);
 		expect(result.status).toBe("succeeded");
 	});
+
+	// trivy exits nonzero with an empty stdout when it never scanned — a bad
+	// policy bundle, an unreadable file, a rejected flag. A nonzero exit is not a
+	// spawn failure, so `result.error` is unset and an error-only guard reports a
+	// clean scan for a file trivy never read.
+	it("skips when trivy exits nonzero without producing output", async () => {
+		safeSpawnAsync.mockResolvedValue({
+			status: 1,
+			stdout: "",
+			stderr: "FATAL failed to load policies",
+		});
+
+		const runner = (
+			await import("../../../clients/dispatch/runners/trivy-config.js")
+		).default;
+
+		const result = await runner.run(
+			createCtx("terraform", "/tmp/main.tf", "/tmp") as never,
+		);
+
+		expect(result.status).toBe("skipped");
+		expect(result.diagnostics).toEqual([]);
+	});
 });
 
 // ── Kubernetes manifest heuristic ─────────────────────────────────────────────

@@ -48,6 +48,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
 
 const trivy = createAvailabilityChecker("trivy", ".exe");
 
@@ -190,7 +191,7 @@ const trivyConfigRunner: RunnerDefinition = {
 			{ cwd, timeout: 60_000 },
 		);
 
-		if (result.error && !result.stdout) {
+		if (spawnFailedWithNoOutput(result)) {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 

@@ -1269,6 +1269,7 @@ export interface LinterPolicyContext {
 	hasMypyConfig?: boolean;
 	hasDetektConfig?: boolean;
 	hasKtfmtConfig?: boolean;
+	hasTflintConfig?: boolean;
 }
 
 export interface AutofixPolicyContext {
@@ -1484,7 +1485,7 @@ export function getLinterPolicyForFile(
 			preferredRunners: ["tflint"],
 			defaultRunner: "tflint",
 			defaultWhenUnconfigured: true,
-			gate: "smart-default",
+			gate: context.hasTflintConfig ? "config-first" : "smart-default",
 		};
 	}
 
@@ -1585,6 +1586,9 @@ export function getLinterPolicyForCwd(
 		hasMypyConfig: hasMypyConfig(cwd),
 		hasDetektConfig: hasDetektConfig(cwd),
 		hasKtfmtConfig: hasKtfmtConfig(cwd),
+		// From the file's directory, not cwd: a `.tflint.hcl` in a terraform
+		// subdirectory is invisible to an upward walk that starts at the repo root.
+		hasTflintConfig: hasTflintConfig(path.dirname(path.resolve(cwd, filePath))),
 	};
 	const policy = getLinterPolicyForFile(filePath, context);
 	if (policy) {
@@ -2161,6 +2165,16 @@ export function hasRuffConfig(cwd: string): boolean {
 
 export function hasGolangciConfig(cwd: string): boolean {
 	return findNearestContaining(cwd, GOLANGCI_CONFIGS) !== undefined;
+}
+
+// tflint ships built-in rules and runs without config, so `.tflint.hcl` is not
+// a prerequisite — it is the project electing tflint as its terraform linter,
+// which promotes the policy from smart-default to config-first. Takes a start
+// directory rather than the project cwd because tflint resolves config
+// per-directory: callers pass the EDITED FILE's directory so this agrees with
+// what the runner will actually hand tflint via `--config`.
+export function hasTflintConfig(startDir: string): boolean {
+	return findNearestContaining(startDir, [".tflint.hcl"]) !== undefined;
 }
 
 export function hasClangFormatConfig(cwd: string): boolean {

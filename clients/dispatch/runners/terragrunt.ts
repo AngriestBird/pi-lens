@@ -11,6 +11,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
 
 const terragrunt = createAvailabilityChecker("terragrunt", ".exe");
 
@@ -128,9 +129,11 @@ const SKIPPED: RunnerResult = {
  *                             "N HCL validation error(s) found" on stderr)
  *   - unknown command ....... an older binary that predates `hcl validate`
  *                             exits non-zero with the error on STDERR and EMPTY
- *                             stdout; the `result.error && !result.stdout` guard
- *                             below classifies that as SKIPPED (never a false
- *                             blocker).
+ *                             stdout; `spawnFailedWithNoOutput` classifies that
+ *                             as SKIPPED (never a false blocker, and never a
+ *                             false CLEAN — a nonzero exit carries no
+ *                             `SpawnResult.error`, so the status has to be part
+ *                             of the test).
  *
  * `hcl validate` recursively validates the unit(s) at its working dir; it has no
  * per-file flag (`--filter` takes component filter-syntax, NOT a filename — a
@@ -175,7 +178,7 @@ const terragruntRunner: RunnerDefinition = {
 			{ cwd: fileDir, timeout: 30000 },
 		);
 
-		if (result.error && !result.stdout) return SKIPPED;
+		if (spawnFailedWithNoOutput(result)) return SKIPPED;
 
 		const diagnostics = parseTerragruntOutput(
 			result.stdout || "",

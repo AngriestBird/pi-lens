@@ -191,8 +191,8 @@ describe("terragrunt runner", () => {
 				"locals {\n  region = \"us-east-1\"\n}\n\ninputs = {\n  region = local.does_not_exist\n}\n",
 			);
 
+			// No `error`: findings are a normal nonzero exit, not a spawn failure.
 			safeSpawnAsync.mockResolvedValue({
-				error: new Error("exit status 1"),
 				status: 1,
 				stdout: JSON.stringify([
 					{
@@ -263,6 +263,63 @@ describe("terragrunt runner", () => {
 			expect(result.status).toBe("succeeded");
 			expect(result.semantic).toBe("none");
 			expect(result.diagnostics).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// The mirror image of the test above, and the one that matters: an empty
+	// stdout only means "clean" when the process also EXITED clean. A binary that
+	// predates the `hcl` command group prints its usage error to stderr and exits
+	// non-zero — safe-spawn reports that as `status: 1` with NO `error` (a nonzero
+	// exit is not a spawn failure), so a guard keyed only on `error` lets it fall
+	// through and report a clean run for a file nothing ever validated.
+	it("skips when an older binary rejects the hcl command group", async () => {
+		const env = setupTestEnvironment("pi-lens-terragrunt-runner-");
+		try {
+			const filePath = path.join(env.tmpDir, "terragrunt.hcl");
+			fs.writeFileSync(filePath, "locals {}\n");
+
+			safeSpawnAsync.mockResolvedValue({
+				status: 1,
+				stdout: "",
+				stderr: 'Error: unknown command "hcl" for "terragrunt"',
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/terragrunt.js")
+			).default;
+
+			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
+
+			expect(result.status).toBe("skipped");
+			expect(result.diagnostics).toEqual([]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("skips when the spawn times out before producing output", async () => {
+		const env = setupTestEnvironment("pi-lens-terragrunt-runner-");
+		try {
+			const filePath = path.join(env.tmpDir, "terragrunt.hcl");
+			fs.writeFileSync(filePath, "locals {}\n");
+
+			safeSpawnAsync.mockResolvedValue({
+				error: new Error("Process timed out after 30000ms"),
+				failure: "timeout",
+				status: null,
+				stdout: "",
+				stderr: "",
+			});
+
+			const runner = (
+				await import("../../../../clients/dispatch/runners/terragrunt.js")
+			).default;
+
+			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
+
+			expect(result.status).toBe("skipped");
 		} finally {
 			env.cleanup();
 		}
@@ -376,9 +433,12 @@ describe("terragrunt runner", () => {
 			const filePath = path.join(env.tmpDir, "terragrunt.hcl");
 			fs.writeFileSync(filePath, "locals {}\n");
 
+			// A real spawn failure: `status` is null and `error` is set. Partial
+			// stdout still gets parsed rather than thrown away.
 			safeSpawnAsync.mockResolvedValue({
-				error: new Error("exit status 1"),
-				status: 1,
+				error: new Error("Process killed by signal: SIGTERM"),
+				failure: "signal",
+				status: null,
 				stdout: JSON.stringify([
 					{
 						severity: 1,

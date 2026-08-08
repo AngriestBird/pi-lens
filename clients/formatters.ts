@@ -97,6 +97,16 @@ export interface FormatterInfo {
 	 * filePath is already resolved to an absolute path.
 	 */
 	resolveCommand?(filePath: string, cwd: string): Promise<string[] | null>;
+	/**
+	 * Treat a nonzero exit as a formatting failure. Off by default: the
+	 * lint-autofix formatters (`rubocop -a`, `ktlint -F`, `standardrb --fix`,
+	 * `sqlfluff fix`) exit nonzero when offenses remain AFTER a successful
+	 * rewrite, and failing those would surface an error on every file with an
+	 * unfixable offense. Set it on pure formatters, where a nonzero exit means
+	 * the tool never ran — and an untouched file is otherwise indistinguishable
+	 * from "already formatted".
+	 */
+	strictExitCode?: boolean;
 }
 
 export interface FormatterResult {
@@ -727,6 +737,10 @@ export const terragruntHclFormatter: FormatterInfo = {
 	command: ["terragrunt", "hcl", "fmt", "--file", "$FILE"],
 	extensions: [],
 	filenames: TERRAGRUNT_FILENAMES,
+	// Pure formatter: verified exit 0 on a successful in-place format against
+	// terragrunt v1.1.2. A binary predating the `hcl` command group exits nonzero
+	// and touches nothing, which without this reads as "already formatted".
+	strictExitCode: true,
 	async detect(_cwd: string) {
 		return (await which("terragrunt")) !== null;
 	},
@@ -1103,11 +1117,14 @@ export async function formatFile(
 			cwd,
 		});
 
-		if (result.error) {
+		if (result.error || (formatter.strictExitCode && result.status !== 0)) {
 			return {
 				success: false,
 				changed: false,
-				error: result.error.message,
+				error:
+					result.error?.message ||
+					result.stderr.trim().split("\n")[0] ||
+					`${formatter.name} exited with status ${result.status}`,
 			};
 		}
 
