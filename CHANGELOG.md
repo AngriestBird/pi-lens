@@ -10,6 +10,41 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`session_start_sequence_read` was an unbounded synchronous blocking read on the session_start hot path (closes #1162)** —
+	`readLatestProjectSequence` called `fs.readFileSync` on the project
+	change-log before `session_start_total` returned; normally ~2ms, but under
+	host I/O pressure it had no escape hatch and was observed to balloon to
+	2125ms in production latency.log. A `setTimeout`/`Promise.race` timeout
+	cannot preempt a synchronous read (the thread only returns to the event
+	loop once the OS call returns), so the fix adds an async twin
+	(`readLatestProjectSequenceAsync`, `fs.promises.readFile`) and races it
+	against a 250ms budget (`PI_LENS_SEQUENCE_READ_BUDGET_MS`-overridable) in
+	both the quick-mode and full-mode session_start paths. On a healthy read
+	(the common case) this adds ~zero overhead; on a stalled read, session_start
+	proceeds immediately with the safe cold-start sequence (only gates
+	snapshot freshness, never correctness) while the real read finishes in the
+	background and re-seeds the runtime — skipped for a one-shot `pi --print`
+	process via `isPrintMode()`, screening the #1154/#1153 one-shot
+	referenced-handle retention class. The fallback is never silent: the
+	`session_start_sequence_read` latency line now carries a `timedOut` flag,
+	and a background reseed logs its own
+	`session_start_sequence_read_deferred_reseed` phase. Fail-then-pass
+	regression tests inject a controllable slow read and assert session_start
+	returns within budget, falls back to cold-start with the flag set, and
+	still seeds normally on the healthy path. Adversarial review (#1168) caught
+	two P3s in this exact stall regime, both fixed in the same PR: (1) the
+	background reseed's `isCurrentSession` guard caught a cross-session move-on
+	but not a SAME-session advancement — an edit landing in the stall window
+	could have its `bumpFileSeq` result clobbered by a late reseed of the
+	pre-edit state; fixed with a `runtime.projectSeq > 0` guard (the cold seed
+	always sets it to exactly 0, so `> 0` at reseed time can only mean an
+	in-window bump happened). (2) The cold sentinel's `projectSeq: 0` was
+	indistinguishable from a project's legitimate first-ever snapshot (also
+	persisted at `seq === 0`), so a timed-out read could hydrate a stale seq-0
+	snapshot as fresh; fixed with a dedicated `UNKNOWN_PROJECT_SEQ` (`-1`)
+	sentinel fed only to the freshness check (never to `runtime.projectSeq`
+	itself, keeping fix (1)'s guard valid). Both have their own fail-then-pass
+	regression tests.
 - **Resource-sampler Windows CIM spawns were not `.unref()`'d, the same one-shot-retention shape as the orphan reaper (refs #1155)** —
 	`clients/resource-sampler.ts`'s two Windows-only `Get-CimInstance Win32_Process`
 	spawns (`findDescendantPidsWindows`'s descendant-tree lookup and
