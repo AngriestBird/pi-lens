@@ -324,7 +324,9 @@ function buildProjectIgnoreMatcher(
 		string,
 		{
 			gitignoreMtimeMs: number;
+			gitignoreSize: number;
 			pilensMtimeMs: number;
+			pilensSize: number;
 			patterns: GitignorePattern[];
 		}
 	>();
@@ -340,12 +342,20 @@ function buildProjectIgnoreMatcher(
 	// caller (or the root-config lookup above) already loaded.
 	const patternsForDir = (dir: string): GitignorePattern[] => {
 		if (dir === resolvedRoot) return patterns;
-		const gitignoreMtime = gitignoreMtimeMs(dir);
-		const pilensMtime = findPiLensConfigInDir(dir)?.mtimeMs ?? -1;
+		const gitignoreSig = gitignoreSignature(dir);
+		// #1105: gate on size too. `findPiLensConfigInDir` returns `size` alongside
+		// `mtimeMs` (both from one stat), and `gitignoreSignature` reads both for
+		// the nested `.gitignore`, so an mtime-preserving, length-changing edit to
+		// EITHER nested source can no longer replay stale patterns for this subtree.
+		const pilensInfo = findPiLensConfigInDir(dir);
+		const pilensMtime = pilensInfo?.mtimeMs ?? -1;
+		const pilensSize = pilensInfo?.size ?? -1;
 		const cached = nestedCache.get(dir);
 		if (
-			cached?.gitignoreMtimeMs === gitignoreMtime &&
-			cached?.pilensMtimeMs === pilensMtime
+			cached?.gitignoreMtimeMs === gitignoreSig.mtimeMs &&
+			cached?.gitignoreSize === gitignoreSig.size &&
+			cached?.pilensMtimeMs === pilensMtime &&
+			cached?.pilensSize === pilensSize
 		) {
 			return cached.patterns;
 		}
@@ -355,8 +365,10 @@ function buildProjectIgnoreMatcher(
 			...parseGitignoreContent(nestedConfig.ignore.join("\n"), "pilens"),
 		];
 		nestedCache.set(dir, {
-			gitignoreMtimeMs: gitignoreMtime,
+			gitignoreMtimeMs: gitignoreSig.mtimeMs,
+			gitignoreSize: gitignoreSig.size,
 			pilensMtimeMs: pilensMtime,
+			pilensSize: pilensSize,
 			patterns: nextPatterns,
 		});
 		return nextPatterns;
@@ -498,6 +510,8 @@ const projectIgnoreMatcherCache = new Map<
 	string,
 	{
 		gitignoreMtimeMs: number;
+		/** #1105 second axis for the root `.gitignore` (see FreshnessSignature). */
+		gitignoreSize: number;
 		lensConfigPath: string | undefined;
 		lensConfigMtimeMs: number;
 		/** #1105 second axis: an mtime-preserving, length-changing config edit
@@ -506,29 +520,41 @@ const projectIgnoreMatcherCache = new Map<
 		 * stat that already produced `lensConfigMtimeMs`. */
 		lensConfigSize: number;
 		globalConfigMtimeMs: number;
+		/** #1105 second axis for the global `~/.pi-lens/config.json`. */
+		globalConfigSize: number;
 		matcher: ProjectIgnoreMatcher;
 	}
 >();
 
 /**
- * mtime of the global `~/.pi-lens/config.json` (or the PI_LENS_CONFIG_PATH
- * override). Part of the ignore-matcher cache key so editing global ignore
- * patterns takes effect without a restart (#252). -1 when absent.
+ * `size:mtimeMs` freshness signature for a single file (#1105). mtime alone
+ * misses an in-place edit that preserves the timestamp (git checkout, a
+ * same-second rewrite) but changes length; size is the free second axis (the
+ * same stat already reads it) that catches it. Every ignore-matcher freshness
+ * gate below (root + nested `.gitignore` and `.pi-lens.json`) compares BOTH
+ * axes so a preserved-mtime, length-changing edit can no longer replay a stale
+ * matcher. `{ mtimeMs: -1, size: -1 }` when the file is absent.
  */
-function globalConfigMtimeMs(): number {
+interface FreshnessSignature {
+	mtimeMs: number;
+	size: number;
+}
+
+function fileFreshnessSignature(filePath: string): FreshnessSignature {
 	try {
-		return fs.statSync(getPiLensGlobalConfigPath()).mtimeMs;
+		const stat = fs.statSync(filePath);
+		return { mtimeMs: stat.mtimeMs, size: stat.size };
 	} catch {
-		return -1;
+		return { mtimeMs: -1, size: -1 };
 	}
 }
 
-function gitignoreMtimeMs(rootDir: string): number {
-	try {
-		return fs.statSync(path.join(rootDir, ".gitignore")).mtimeMs;
-	} catch {
-		return -1;
-	}
+function globalConfigSignature(): FreshnessSignature {
+	return fileFreshnessSignature(getPiLensGlobalConfigPath());
+}
+
+function gitignoreSignature(rootDir: string): FreshnessSignature {
+	return fileFreshnessSignature(path.join(rootDir, ".gitignore"));
 }
 
 /**
@@ -551,24 +577,27 @@ function lensConfigInfo(rootDir: string): {
 
 export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
 	const resolvedRoot = resolveGitIgnoreRoot(rootDir);
-	const gitignoreMtime = gitignoreMtimeMs(resolvedRoot);
+	const gitignoreSig = gitignoreSignature(resolvedRoot);
 	const lensConfig = lensConfigInfo(resolvedRoot);
-	const globalMtime = globalConfigMtimeMs();
+	const globalSig = globalConfigSignature();
 	const cached = projectIgnoreMatcherCache.get(resolvedRoot);
 	if (
-		cached?.gitignoreMtimeMs === gitignoreMtime &&
+		cached?.gitignoreMtimeMs === gitignoreSig.mtimeMs &&
+		cached?.gitignoreSize === gitignoreSig.size &&
 		cached?.lensConfigPath === lensConfig.path &&
 		cached?.lensConfigMtimeMs === lensConfig.mtimeMs &&
 		cached?.lensConfigSize === lensConfig.size &&
-		cached?.globalConfigMtimeMs === globalMtime
+		cached?.globalConfigMtimeMs === globalSig.mtimeMs &&
+		cached?.globalConfigSize === globalSig.size
 	) {
 		return cached.matcher;
 	}
 
 	// Load both configs fresh on cache miss. On a cache HIT (the common case)
-	// none of this runs — the only per-call cost is the mtime stats above. The
-	// project loader is itself mtime-cached; the global loader re-parses, but
-	// only here on miss (when some tracked mtime changed).
+	// none of this runs — the only per-call cost is the size:mtimeMs stats above
+	// (size is free from the same stat). The project loader is itself
+	// size:mtimeMs-cached; the global loader re-parses, but only here on miss
+	// (when some tracked signature changed).
 	const projectConfig = loadPiLensProjectConfig(resolvedRoot, lensConfig.info);
 	const matcher = createProjectIgnoreMatcher(
 		resolvedRoot,
@@ -576,11 +605,13 @@ export function getProjectIgnoreMatcher(rootDir: string): ProjectIgnoreMatcher {
 		getGlobalIgnorePatterns(),
 	);
 	projectIgnoreMatcherCache.set(resolvedRoot, {
-		gitignoreMtimeMs: gitignoreMtime,
+		gitignoreMtimeMs: gitignoreSig.mtimeMs,
+		gitignoreSize: gitignoreSig.size,
 		lensConfigPath: lensConfig.path,
 		lensConfigMtimeMs: lensConfig.mtimeMs,
 		lensConfigSize: lensConfig.size,
-		globalConfigMtimeMs: globalMtime,
+		globalConfigMtimeMs: globalSig.mtimeMs,
+		globalConfigSize: globalSig.size,
 		matcher,
 	});
 	return matcher;

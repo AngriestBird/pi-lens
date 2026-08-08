@@ -22,21 +22,29 @@ All notable changes to pi-lens will be documented in this file.
 	verify — mtime is a refresh hint, not the correctness gate), `TreeCache`
 	(content-hash authoritative, #890), and the project-snapshot per-file
 	`mtime:size` entries — all already-hardened or safe. The one gap: the
-	`.pi-lens.json` config caches (`loadPiLensProjectConfig`/`loadPiLensConfigInDir`
-	in `clients/project-lens-config.ts`, and the ignore-matcher cache in
-	`clients/file-utils.ts`) gated reuse on the config file's **mtime alone**, so an
-	in-place edit that preserved mtime (git checkout timestamp restoration, a
+	`.pi-lens.json` config caches gated reuse on the config file's **mtime alone**,
+	so an in-place edit that preserved mtime (git checkout timestamp restoration, a
 	same-second rewrite) but changed the file's byte length replayed a stale parsed
 	config / ignore matcher — a config that drives mutation, ignore, and rule
-	policy. Fixed by adding **`size` as the free second axis** of the review-graph
-	`size:mtimeMs` signature (threaded through `PiLensConfigMarker` in
-	`clients/workspace-topology.ts` — the same stat that yields mtime already reads
-	size, so the cheap hit path stays cheap, no content hashing on the hot path).
-	The residual (identical mtime AND identical size, changed content) matches the
-	review-graph/word-index accepted residual by design. Fail-then-pass regression
-	tests cover both cache gates (each proven to replay stale on the pre-fix
-	mtime-only code); FS-agnostic (mtime pinned via `utimesSync`, size varied by
-	content length) so they exercise the gate identically on Linux CI.
+	policy. This spanned every freshness gate in the two files: the root parsed-
+	config caches (`loadPiLensProjectConfig`/`loadPiLensConfigInDir` in
+	`clients/project-lens-config.ts`), the root ignore-matcher cache, and — the
+	member found in adversarial review — the **nested `.pi-lens.json`/`.gitignore`
+	layering cache** (`patternsForDir`, #783) in `clients/file-utils.ts`, which
+	short-circuits AHEAD of the root caches so a preserved-mtime, length-changing
+	edit to a NESTED config replayed stale patterns for that subtree. Fixed by
+	adding **`size` as the free second axis** of the review-graph `size:mtimeMs`
+	signature to every gate — the root `.pi-lens.json` (threaded through
+	`PiLensConfigMarker` in `clients/workspace-topology.ts`), the root `.gitignore`
+	and global `~/.pi-lens/config.json` (via a shared `fileFreshnessSignature`
+	helper), and both the nested `.pi-lens.json` and nested `.gitignore` axes. The
+	same stat that yields mtime already reads size, so the cheap hit path stays
+	cheap (no content hashing on the hot path). The residual (identical mtime AND
+	identical size, changed content) matches the review-graph/word-index accepted
+	residual by design. Fail-then-pass regression tests cover the root and nested
+	gates (each proven to replay stale on the pre-fix mtime-only code); FS-agnostic
+	(mtime pinned via `utimesSync`, size varied by content length) so they exercise
+	the gates identically on Linux CI.
 
 - **Windows drive-root & autofix-snapshot `readdirSync` blocked the event loop on slow cloud-backed dirs (refs #1137)** —
 	the genuine synchronous event-loop-block tier from #1122 (the 1.6–10.6 s
