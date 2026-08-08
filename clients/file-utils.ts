@@ -375,8 +375,8 @@ function buildProjectIgnoreMatcher(
 	};
 
 	// Per-matcher path → pattern-verdict memo. The matcher itself is cached by
-	// `getProjectIgnoreMatcher` keyed on `.gitignore` mtime, so this Map's
-	// lifetime is bounded to a single set of ignore rules — when any
+	// `getProjectIgnoreMatcher` keyed on `.gitignore` size+mtime (#1105), so this
+	// Map's lifetime is bounded to a single set of ignore rules — when any
 	// `.gitignore` changes, the matcher is rebuilt and the memo is dropped
 	// with it. Without this memo, every background scan (comment scan, knip,
 	// jscpd, call-graph, source-filter, pipeline) recomputes O(ancestorDirs ×
