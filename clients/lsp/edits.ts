@@ -19,6 +19,11 @@ import {
 	recordLspMutation,
 	type LspMutationContext,
 } from "../lsp-mutation.js";
+import {
+	detectLineEnding,
+	normalizeToLF,
+	restoreLineEndings,
+} from "../host-edit-normalize.js";
 
 export interface LSPPosition {
 	line: number;
@@ -303,15 +308,29 @@ function validateTextEdits(edits: LSPTextEdit[]): LSPTextEdit[] {
 function utf16Position(content: string, position: LSPPosition, encoding: PositionEncoding): LSPPosition {
 	const line = lineTextAt(content, position.line);
 	const wireLength = convertCharacterOffset(encoding, line, line.length);
-	if (position.character > wireLength) {
+	// `lineTextAt` splits on `\n` only and keeps a trailing `\r`, so the "real"
+	// (spec) end of line content is BEFORE that `\r`, not after it. Clamp to
+	// that boundary rather than `line.length`/`wireLength`, which include the
+	// `\r`. `\r` is exactly one code unit in every encoding, so the clamped
+	// wire length is always `wireLength - 1` when a `\r` is present.
+	const hasTrailingCR = line.endsWith("\r");
+	const clampedLength = hasTrailingCR ? line.length - 1 : line.length;
+	const clampedWireLength = hasTrailingCR ? wireLength - 1 : wireLength;
+	if (position.character > clampedWireLength) {
 		// LSP 3.17: a character past the end of the line defaults to the line
 		// length. Clamp to the UTF-16 line length rather than throwing (whole-line
-		// and whole-document sentinel ranges rely on this). `lineTextAt` splits on
-		// `\n` only and keeps a trailing `\r`, so clamp to BEFORE that `\r` — landing
-		// the position at the CRLF boundary, not between `\r` and `\n`. Otherwise the
-		// whole-line sentinel replace `(0,0)-(0,999)` would eat the `\r` and a
-		// char-past-EOL insert would land mid-CRLF (P2-1 corruption on Windows repos).
-		const clampedLength = line.endsWith("\r") ? line.length - 1 : line.length;
+		// and whole-document sentinel ranges rely on this) — landing the position
+		// at the CRLF boundary, not between `\r` and `\n`. Otherwise the whole-line
+		// sentinel replace `(0,0)-(0,999)` would eat the `\r` and a char-past-EOL
+		// insert would land mid-CRLF (P2-1 corruption on Windows repos).
+		//
+		// This also covers a caller-supplied position that is NOT past the line's
+		// full (with-`\r`) length but still lands strictly between `\r` and `\n`
+		// (i.e. `position.character === wireLength` when a `\r` is present): that
+		// position is `> clampedWireLength` too, since `clampedWireLength ===
+		// wireLength - 1`, so it clamps to the same CRLF-safe boundary instead of
+		// slipping through as an "in-bounds" position (#1147 P3-5, general class
+		// beyond #1120's strict past-EOL clamp).
 		return { line: position.line, character: clampedLength };
 	}
 	if (encoding === "utf-16") return position;
@@ -334,6 +353,14 @@ function utf16Position(content: string, position: LSPPosition, encoding: Positio
 function normalizeTextEditsForContent(content: string, edits: LSPTextEdit[], encoding: PositionEncoding): LSPTextEdit[] {
 	const lines = content.split("\n");
 	const lastLine = Math.max(0, lines.length - 1);
+	// The target file's dominant EOL style, detected the same way the host edit
+	// tool does (first-occurrence-wins). Every `newText` is normalized to this
+	// style below so a server-supplied bare `\n` can never be spliced verbatim
+	// into a CRLF file and produce mixed line endings — the LSP workspace-edit
+	// apply path now shares the exact contract the host-edit path already
+	// enforces via `host-edit-normalize.ts` (#1147 P3-5, general class). A no-op
+	// for LF files: `restoreLineEndings` is the identity when `ending === "\n"`.
+	const ending = detectLineEnding(content);
 	const clamp = (position: LSPPosition): LSPPosition => {
 		// LSP 3.17: a line past the end of the document defaults to the end of the
 		// document (last line, its length). Clamp rather than throw so a large
@@ -348,7 +375,11 @@ function normalizeTextEditsForContent(content: string, edits: LSPTextEdit[], enc
 		const start = clamp(edit.range.start);
 		const end = clamp(edit.range.end);
 		if (comparePosition(start, end) > 0) throw new Error("text edit range is out of order");
-		return { ...edit, range: { start, end } };
+		return {
+			...edit,
+			range: { start, end },
+			newText: restoreLineEndings(normalizeToLF(edit.newText), ending),
+		};
 	});
 	// Return array order (validated, deduped); the single application-ordering
 	// sort happens once at the string-write site in applyTextEditsToString.
