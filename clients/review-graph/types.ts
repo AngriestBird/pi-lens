@@ -143,7 +143,8 @@ export interface ReviewGraphPersistCoverage {
 export type CascadeIndeterminateReason =
 	| "graph_degraded" // review graph skipped (too_many_files / unsafe_root)
 	| "missing_node" // changed file has no node in the (otherwise-built) graph
-	| "error"; // the deferred compute threw before producing a result
+	| "error" // the deferred compute threw before producing a result
+	| "lsp_binding_rejected"; // #1104: every degraded-fallback display candidate was binding-rejected (stale/pre-fix-edit snapshot) and withheld
 
 export interface CascadeIndeterminate {
 	reason: CascadeIndeterminateReason;
