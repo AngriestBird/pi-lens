@@ -17,14 +17,23 @@ All notable changes to pi-lens will be documented in this file.
 	trivial `pi --print` prompt (its own `setInterval` was already unref'd, and it
 	only runs bracketed to an awaited analyzer spawn), but was not safe by
 	construction for a file-editing repro that does exercise it. Fixed by
-	extracting the reaper's `unrefReaperChild` helper into a shared,
-	dependency-free `clients/child-unref.ts` (`unrefChildAndPipes`) and calling it
-	at both spawn sites — single source of truth for both modules instead of a
-	second hand-rolled copy. Unref only detaches this child ALONE from keeping a
-	settled one-shot alive; in an interactive/long-lived session (or one bracketed
-	to real analyzer work) the loop stays referenced for other reasons, so
-	sampling is unaffected. Fail-then-pass regression tests assert both spawn
-	sites unref the child and its stdout.
+	extracting the reaper's `unrefReaperChild` AND its `spawnCollectStdout`
+	spawn→pipe-stdout→resolve-on-close plumbing into a shared, dependency-free
+	`clients/child-unref.ts` (`unrefChildAndPipes`, `spawnCollectStdout`) and
+	calling `spawnCollectStdout` at both sampler spawn sites — a single source
+	of truth for both modules instead of a second hand-rolled copy (the
+	promotion also resolved a SonarCloud new-code-duplication gate failure:
+	adding an identical `unrefChildAndPipes(child)` line to both near-identical
+	spawn blocks had pushed duplicated-line density over the 3% threshold;
+	collapsing both blocks to parse-only call sites around the shared helper
+	removed the duplication instead of adding to it). Unref only detaches this
+	child ALONE from keeping a settled one-shot alive; in an interactive/
+	long-lived session (or one bracketed to real analyzer work) the loop stays
+	referenced for other reasons, so sampling is unaffected — the parse logic
+	at both call sites is otherwise unchanged, so a spawn/error failure still
+	resolves to the same empty/partial result as before. Fail-then-pass
+	regression tests assert both spawn sites unref the child and its stdout, in
+	both the sampler and (unchanged) the reaper.
 - **Quick-mode background warmup kept a one-shot `pi -p`/`--print` process alive (closes #1154)** —
 	`handleSessionStart` forces **quick mode** for both a real `pi -p`/`--print`
 	one-shot AND an interactive process's first session (to protect keystroke

@@ -63,10 +63,10 @@
  */
 export const STALE_HEARTBEAT_MS = 6 * 60 * 60 * 1000;
 
-import { spawn as nodeSpawn, type SpawnOptions } from "node:child_process";
+import { spawn as nodeSpawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { unrefChildAndPipes } from "./child-unref.js";
+import { spawnCollectStdout, unrefChildAndPipes } from "./child-unref.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import {
 	type InstanceEntry,
@@ -76,46 +76,6 @@ import {
 import { logLatency } from "./latency-logger.js";
 
 const isWindows = process.platform === "win32";
-
-/**
- * Spawn a best-effort enumeration child, accumulate its full stdout, and
- * resolve with the collected text (empty string on spawn failure or an
- * `error` event). Consolidates the identical spawn → pipe → `close` plumbing
- * shared by every OS-process-table enumeration below
- * (`findPidsByMarkerWindows`, `queryCommandLines`, `enumerateManagedProcesses`)
- * — each caller supplies only its command/args/options and its own output
- * parse. The child + its stdio pipes are `unref`'d here (#1153) so a settled
- * one-shot `pi --print` process can exit without waiting for the sweep, and
- * unref lives in exactly ONE place rather than at five near-identical sites.
- * Never rejects — any failure resolves to `""`, which every caller's parse
- * turns into an empty result (the sweep's best-effort contract).
- */
-function spawnCollectStdout(
-	command: string,
-	args: string[],
-	options: SpawnOptions,
-): Promise<string> {
-	return new Promise((resolve) => {
-		let settled = false;
-		const settle = (value: string) => {
-			if (settled) return;
-			settled = true;
-			resolve(value);
-		};
-		try {
-			const child = nodeSpawn(command, args, options);
-			unrefChildAndPipes(child);
-			let out = "";
-			child.stdout?.on("data", (chunk) => {
-				out += chunk.toString();
-			});
-			child.once("error", () => settle(""));
-			child.once("close", () => settle(out));
-		} catch {
-			settle("");
-		}
-	});
-}
 
 export interface ChildToKill {
 	pid: number;
