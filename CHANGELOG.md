@@ -6,6 +6,22 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`normalizeFilePath` mangled a Windows-shaped path on non-Windows OS (closes #1150)** —
+	`normalizeFilePath` commits to its win32 branch by path *shape*
+	(`isWindowsPath`), so a `C:/…`- or `C:\…`-shaped path enters that branch on
+	ANY OS — but `resolveNonExisting`'s upward walk used the module-default
+	`dirname` (POSIX on Linux) while the rest of the branch already used
+	`win32.resolve`/`win32.normalize`. On Linux the POSIX `dirname` found no
+	separator in the win32-resolved path, collapsed to `.`, stopped the walk at
+	`process.cwd()`, and produced `<cwd>/file.ts` instead of the literal key — so
+	a Windows-shaped path normalized to a DIFFERENT key on Linux than the
+	byte-identical literal it is on Windows (the #1024 OS-divergence class,
+	surfaced by #1139's green-on-Windows/red-on-Linux-CI). Fixed by using
+	`win32.dirname` in the win32-committed branch, making the function internally
+	coherent regardless of the running OS. Guarded by a both-OS-meaningful
+	regression test (native win32 path on Windows; shape-committed win32 branch on
+	Linux) and an AGENTS.md convention: tests must derive `normalizeMapKey`-keyed
+	structure keys via `normalizeMapKey`, never hardcode a drive-letter literal.
 - **Workspace-edit preflight: five contained P3 deferrals from #1085 (refs #1085)** —
 	`clients/lsp/edits.ts`:
 	- **P3-2** `mergeWorkspaceTextEditsByPriority`'s exact-duplicate dedup
