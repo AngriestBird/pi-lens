@@ -266,7 +266,7 @@ describe("LSPService.renameFile", () => {
 		}
 	});
 
-	it("aborts and resynchronizes when document close fails", async () => {
+	it("aborts and resynchronizes when document close fails, reopening with the document's real language ID", async () => {
 		const tmpDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), "pi-lens-lsp-rename-file-"),
 		);
@@ -286,6 +286,39 @@ describe("LSPService.renameFile", () => {
 			expect(fs.existsSync(oldPath)).toBe(true);
 			expect(fs.existsSync(newPath)).toBe(false);
 			expect(client.didRenameFiles).not.toHaveBeenCalled();
+			// Reopen must use the document's ACTUAL language ID (derived the same
+			// way every genuine open does), not a hardcoded "plaintext" fallback
+			// that would degrade this server's diagnostics until the next genuine
+			// open (#1147 P3-7).
+			expect(client.notify.open).toHaveBeenCalledWith(
+				oldPath,
+				expect.any(String),
+				"typescript",
+				true,
+				true,
+			);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
+	it("falls back to plaintext on close-failure reopen only for an unrecognized extension", async () => {
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-lsp-rename-file-"),
+		);
+		const oldPath = path.join(tmpDir, "old.unrecognized-ext");
+		const newPath = path.join(tmpDir, "new.unrecognized-ext");
+		fs.writeFileSync(oldPath, "content\n", "utf-8");
+		const client = makeClient(tmpDir, null);
+		client.isDocumentOpen.mockReturnValue(true);
+		client.closeDocument.mockRejectedValueOnce(new Error("close failed"));
+		const service = new LSPService();
+		addClient(service, "typescript", tmpDir, client);
+
+		try {
+			await expect(
+				service.renameFile(oldPath, newPath, { cwd: tmpDir, apply: true }),
+			).rejects.toThrow(/didClose failed; rename aborted/);
 			expect(client.notify.open).toHaveBeenCalledWith(
 				oldPath,
 				expect.any(String),
