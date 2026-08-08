@@ -9,6 +9,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isWindowsPath } from "./path-utils.js";
 
 const DEFAULT_HEADER_BYTES = 4096;
 
@@ -115,12 +116,30 @@ function pathSegments(filePath: string): string[] {
 		.filter(Boolean);
 }
 
+/**
+ * Shape-aware basename: a WINDOWS-SHAPED path (drive letter or UNC prefix,
+ * per `isWindowsPath`) is parsed with `path.win32.basename` regardless of the
+ * running OS, mirroring the `detectFileRole` fix in `file-role.ts` (refs
+ * #1152, #1150, #1161 — defect shape 2: a host-default `path` fn inside a
+ * shape-committed branch follows the *host* OS, so on Linux CI a `C:\...`
+ * path has no POSIX separator and the module-default `basename` returns the
+ * whole string unchanged, missing exact-name lookups like `LOCKFILE_NAMES`).
+ * Native same-OS paths (POSIX on Linux, win32 on Windows) are unaffected —
+ * on win32 this is a no-op since `win32.basename` already equals the module
+ * default there.
+ */
+function basenameForShape(filePath: string): string {
+	return isWindowsPath(filePath)
+		? path.win32.basename(filePath)
+		: path.basename(filePath);
+}
+
 export function isGeneratedArtifactDirectoryName(dirName: string): boolean {
 	return GENERATED_DIR_NAMES.has(dirName.trim().toLowerCase());
 }
 
 export function isDeclarationFile(filePath: string): boolean {
-	const base = path.basename(filePath).toLowerCase();
+	const base = basenameForShape(filePath).toLowerCase();
 	return DECLARATION_FILE_PATTERNS.some((pattern) => pattern.test(base));
 }
 
@@ -147,7 +166,7 @@ function hasStrongGeneratedArtifactPath(filePath: string): boolean {
 		return true;
 	}
 
-	const base = path.basename(filePath);
+	const base = basenameForShape(filePath);
 	if (LOCKFILE_NAMES.has(base.toLowerCase())) return true;
 	return MINIFIED_BUNDLE_FILE_PATTERNS.some((pattern) => pattern.test(base));
 }
@@ -166,7 +185,7 @@ function hasStrongGeneratedArtifactPath(filePath: string): boolean {
  * instead (the escape hatch's evidence checks are structurally dead for it).
  */
 function hasWeakGeneratedFileNamePattern(filePath: string): boolean {
-	const base = path.basename(filePath);
+	const base = basenameForShape(filePath);
 	return GENERATED_FILE_PATTERNS.some((pattern) => pattern.test(base));
 }
 
