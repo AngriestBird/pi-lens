@@ -6,6 +6,27 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Quick-mode background warmup kept a one-shot `pi -p`/`--print` process alive (closes #1154)** —
+	`handleSessionStart` forces **quick mode** for both a real `pi -p`/`--print`
+	one-shot AND an interactive process's first session (to protect keystroke
+	latency, then warm caches for the next `/new`). Quick mode scheduled a +2s
+	background warmup that (1) armed a `setTimeout` that was **not** `.unref()`'d —
+	violating the repo-wide convention that every background timer is unref'd
+	(`clients/runtime-session.ts` previously had zero `.unref()` calls) — and
+	(2) launched LSP-prewarm children + a language-profile source walk that
+	outlive settle with **no `session_shutdown` abort**. In a one-shot (which
+	exits right after the turn and has no future session to warm) both are pure
+	waste AND referenced-handle keep-alives that hold the settled process open —
+	the located **#1122 hypothesis-A** concern and a member of the
+	one-shot-retained-by-a-referenced-handle class of #1097/#1110/#1148/#1149.
+	Fixed by (a) skipping the warmup entirely in print mode via a new shared
+	`isPrintMode()` helper (`clients/print-mode.ts`) — an interactive first
+	session (quick but not print) still warms — and (b) `.unref()`'ing the warmup
+	timer as defense-in-depth + convention conformity. Also unref'd the adjacent
+	full-mode `scheduleStartupScans` deferred timers (same latent violation, not a
+	one-shot member today). This resolves the #1122 hypothesis-A tail (cross-ref
+	#1122). Fail-then-pass regression tests assert the warmup does not run in print
+	mode and the scheduled warmup timer is unref'd.
 - **`detectFileRole` misclassified a Windows-shaped path off native Windows (closes #1152, latent sibling of #1150/#1151)** —
 	`clients/file-role.ts:detectFileRole` used the module-default `basename`/
 	`dirname` (POSIX on Linux) even when the input path was Windows-shaped
