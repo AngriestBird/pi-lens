@@ -19,9 +19,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { minimatch } from "./deps/minimatch.js";
 
 /**
- * Detect if a path is a Windows path (has drive letter or UNC prefix).
+ * Detect if a path is a Windows path (has drive letter or UNC prefix), by
+ * SHAPE — true for a drive-letter/UNC-looking string regardless of the
+ * running OS. Exported (refs #1152) so shape-aware callers outside this
+ * module (e.g. `file-role.ts`'s `detectFileRole`) can branch to
+ * `path.win32.dirname`/`basename` for a Windows-shaped path even when
+ * `process.platform !== "win32"`, instead of the platform-default
+ * `dirname`/`basename` silently misparsing it (the #1150 class).
  */
-function isWindowsPath(filePath: string): boolean {
+export function isWindowsPath(filePath: string): boolean {
 	return /^[A-Za-z]:/.test(filePath) || filePath.startsWith("\\\\");
 }
 

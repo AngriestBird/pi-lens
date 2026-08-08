@@ -1231,3 +1231,83 @@ describe("LSP workspace edits — #1085 P3 bundle", () => {
 		} finally { removeTempDirSync(tmpDir2); }
 	});
 });
+
+describe("LSP workspace edits — CRLF boundary class, general (#1147 P3-5)", () => {
+	// #1120 fixed the CLAMP-specific member of this class (a char-past-EOL
+	// insert / whole-line sentinel replace). These cover the two GENERAL
+	// members left open by #1085/#1120's review: a bare `\n` in `newText`
+	// applied verbatim into a CRLF file, and a caller-supplied (non-clamped,
+	// in-bounds) position that itself resolves between `\r` and `\n`.
+
+	it("normalizes a bare \\n in newText to \\r\\n when applied into a CRLF file", () => {
+		const content = "line1\r\nline2\r\n";
+		const result = applyTextEditsToString(content, [
+			{
+				range: { start: { line: 0, character: 5 }, end: { line: 0, character: 5 } },
+				newText: "\nEXTRA",
+			},
+		]);
+		expect(result).toBe("line1\r\nEXTRA\r\nline2\r\n");
+		// No bare \n: every \n in the result is immediately preceded by \r.
+		expect(/(?<!\r)\n/.test(result)).toBe(false);
+	});
+
+	it("leaves an LF file's newText untouched (no \\r introduced)", () => {
+		const content = "line1\nline2\n";
+		const result = applyTextEditsToString(content, [
+			{
+				range: { start: { line: 0, character: 5 }, end: { line: 0, character: 5 } },
+				newText: "\nEXTRA",
+			},
+		]);
+		expect(result).toBe("line1\nEXTRA\nline2\n");
+		expect(result.includes("\r")).toBe(false);
+	});
+
+	it("clamps a caller-supplied position that resolves between \\r and \\n in a CRLF file", () => {
+		const content = "line1\r\nline2\r\n";
+		// Line 0 as `lineTextAt` sees it is "line1\r" (length 6, keeps the trailing
+		// \r). character: 6 is IN BOUNDS against that with-\r length (not past it,
+		// so #1120's `> wireLength` clamp alone does not catch it) but lands right
+		// after the \r and before the \n it was split from — squarely between the
+		// CRLF pair.
+		const result = applyTextEditsToString(content, [
+			{
+				range: { start: { line: 0, character: 6 }, end: { line: 0, character: 6 } },
+				newText: "X",
+			},
+		]);
+		// Must clamp to BEFORE the \r (character 5), landing "X" ahead of the
+		// intact \r\n pair — never splitting it.
+		expect(result).toBe("line1X\r\nline2\r\n");
+		expect(/(?<!\r)\n/.test(result)).toBe(false);
+	});
+
+	it("applyWorkspaceEdit preserves CRLF end-to-end for a bare-\\n newText on disk", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-crlf-"));
+		try {
+			const filePath = path.join(tmpDir, "crlf.ts");
+			fs.writeFileSync(filePath, "const a = 1;\r\nconst b = 2;\r\n", "utf-8");
+			await applyWorkspaceEdit(
+				{
+					changes: {
+						[pathToFileURL(filePath).href]: [
+							{
+								range: { start: { line: 0, character: 12 }, end: { line: 0, character: 12 } },
+								newText: "\nconst z = 0;",
+							},
+						],
+					},
+				},
+				tmpDir,
+			);
+			const written = fs.readFileSync(filePath, "utf-8");
+			expect(written).toBe(
+				"const a = 1;\r\nconst z = 0;\r\nconst b = 2;\r\n",
+			);
+			expect(/(?<!\r)\n/.test(written)).toBe(false);
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+});

@@ -27,6 +27,60 @@ All notable changes to pi-lens will be documented in this file.
 	one-shot member today). This resolves the #1122 hypothesis-A tail (cross-ref
 	#1122). Fail-then-pass regression tests assert the warmup does not run in print
 	mode and the scheduled warmup timer is unref'd.
+- **`detectFileRole` misclassified a Windows-shaped path off native Windows (closes #1152, latent sibling of #1150/#1151)** —
+	`clients/file-role.ts:detectFileRole` used the module-default `basename`/
+	`dirname` (POSIX on Linux) even when the input path was Windows-shaped
+	(drive letter or UNC prefix). A backslash-only `C:\...` path has no `/`
+	for POSIX `dirname` to find, so it collapsed to `"."` and the dir-based
+	role branches (`/tests/`, `/spec/`, generated-marker dirs) silently
+	misclassified — the byte-identical forward-slash form already worked,
+	since POSIX `dirname` handles `/` regardless of the leading drive
+	letter. `detectFileRole` is platform-native by design, so the fix is
+	shape-conditional rather than shape-committed (unlike #1151's
+	`resolveNonExisting`, which is already win32-committed): a Windows-shaped
+	path (per the now-exported `isWindowsPath`, `clients/path-utils.ts`) is
+	parsed with `path.win32.basename`/`dirname` regardless of the running
+	OS; a same-OS-native path is unaffected (native win32 already equals the
+	module default there; native POSIX was never win32-shaped). Added
+	regression coverage in `tests/clients/file-role.test.ts` asserting
+	coherent `"test"`/`"init"` classification for `C:\...`, `C:/...`, and
+	UNC-shaped inputs regardless of the running OS.
+	`clients/lsp/server.ts:639`'s `normalizeSlashKey(path.dirname(path.resolve(file)))`
+	(flagged in #1151's review as the same shape) was audited and verified
+	**safe, not fixed**: `path.resolve(file)` runs before `dirname`, so by
+	the time `dirname` sees it the value is already coerced to the running
+	OS's native absolute-path shape — `file` here is always a real on-disk
+	path produced by this process's own directory walking (extension-root
+	resolution backed by real `existsSync`/`stat` probes, confirmed via
+	`tests/clients/lsp/typescript-extension-root.test.ts`), never a
+	persisted or cross-OS-supplied literal. Same "platform-native by
+	design" exemption #1151 already applied to `path-utils.ts`'s
+	`walkUpDirs`/`findNearestContaining` family.
+- **Orphan-reaper fire-and-forget PowerShell/`ps` spawns kept a completed `pi --print` alive past settle (closes #1153)** —
+	the orphan reaper (`clients/instance-reaper.ts`) is fired fire-and-forget from
+	`session_start` (`index.ts` `sweepOrphans`/`sweepUntrackedOrphans`), not
+	awaited and not gated out of one-shot/`--print` mode. Its OS-process-table
+	enumeration spawns (`enumerateManagedProcesses`, `queryCommandLines`,
+	`findPidsByMarkerWindows` — PowerShell on Windows, `ps` on POSIX) used
+	`stdio:["ignore","pipe","ignore"]` with a `data` listener and **no `.unref()`
+	anywhere in the file**. A piped, listener-attached stdout stream keeps the
+	event loop REFERENCED until the child `close`s, and `sweepUntrackedOrphans`
+	guarantees ≥1 such PowerShell on every Windows `session_start` — so a settled
+	one-shot process could not exit until that PowerShell finished cold-starting
+	(routinely 300 ms–2 s). This is the child-process member of the referenced-
+	handle class (#1097/#1110 timers, #1148/#1149 worker ports). Fixed by
+	`unref()`-ing every reaper child AND its stdio pipes (a `child.unref()` alone
+	does not release a piped stdout that re-refs the loop) via a shared
+	`unrefReaperChild` helper applied at all six spawn sites (the five enumeration
+	spawns plus `killPidTree`'s `taskkill`). Unref, not a print-mode skip: the
+	reaper is a machine-wide orphan backstop, not a next-session-only concern, so
+	gating it out of `--print` would blind orphan cleanup on print-only machines
+	(CI/automation/subagents — exactly where one-shots dominate and orphans
+	accumulate); unref preserves the sweep in interactive sessions (the loop stays
+	referenced for other reasons, so every child's `close` still fires and the
+	sweep completes) while letting a genuinely-settled one-shot exit without
+	waiting. Regression test spawns a fake child per spawn site and asserts the
+	child + its stdout are unref'd (fails pre-fix, passes post-fix).
 - **Persistence workers could keep completed one-shot processes alive ([#1148](https://github.com/apmantza/pi-lens/issues/1148))** — project-snapshot and review-graph workers called `unref()` before registering their `"message"` listeners, and Node re-referenced the public `MessagePort` when each listener was added. Both workers now install all lifecycle listeners before `unref()`, so persistence remains asynchronous without retaining an otherwise-finished `pi --print` or subprocess workflow. Real child-process regression tests require both persistence paths to finish writing and exit naturally.
 - **`normalizeFilePath` mangled a Windows-shaped path on non-Windows OS (closes #1150)** —
 	`normalizeFilePath` commits to its win32 branch by path *shape*
@@ -92,14 +146,38 @@ All notable changes to pi-lens will be documented in this file.
 	  genuinely-physical paths, so the #1024/#1120 ino-guard and
 	  case-sensitivity invariants are untouched.
 
-	**Deferred (not in this change):** P3-5 (the CRLF-boundary class beyond
-	the `\r`-aware clamp #1120 already shipped: `lineTextAt` still keeps the
-	trailing `\r`, inserts can still land between `\r` and `\n` in other
-	code paths, `newText` with a bare `\n` still applies verbatim into CRLF
-	files outside the host-edit-normalize path) and P3-7 (rename
-	close-failure recovery still reopens the old document as `"plaintext"`).
-	Both remain tracked; see the #1085 closing comment for where they were
-	rehomed.
+	**Deferred at the time (now fixed, see below):** P3-5 and P3-7 were
+	rehomed to #1147; see the #1085 closing comment for that history.
+- **Workspace-edit CRLF boundary class + rename close-failure plaintext reopen (closes #1147, refs #1085)** —
+	the two P3 deferrals left open after #1146:
+	- **P3-5** (`clients/lsp/edits.ts`) — #1120 fixed only the past-EOL clamp
+	  member of the CRLF-boundary class. Two general members remained: (a) a
+	  `newText` containing a bare `\n` was spliced verbatim into a CRLF
+	  file's content, producing mixed line endings, because the LSP
+	  workspace-edit apply path (unlike the host-edit path) never
+	  EOL-normalized `newText`; (b) `utf16Position`'s past-EOL clamp only
+	  triggered on `character > wireLength`, so an in-bounds,
+	  caller-supplied `character === wireLength` on a line whose `\r` is
+	  folded into `lineTextAt`'s with-`\r` length landed the position
+	  squarely between `\r` and `\n`, splitting the pair on write. Fixed by
+	  (a) normalizing every `newText` through the exact
+	  `detectLineEnding`/`normalizeToLF`/`restoreLineEndings` contract
+	  `clients/host-edit-normalize.ts` already uses for the host-edit path
+	  (LF files are unaffected — `restoreLineEndings` is the identity for
+	  `"\n"`), applied once in `normalizeTextEditsForContent` so it covers
+	  both the preflight virtual-content chain and the final on-disk write;
+	  (b) clamping on `character > clampedWireLength` (the `\r`-stripped
+	  length) instead of the with-`\r` length, which subsumes and simplifies
+	  #1120's original past-EOL clamp into the same branch. All of #1120's
+	  existing invariants (single application-ordering sort, clamp, tie-break)
+	  are unchanged and covered by the full `edits.test.ts` suite.
+	- **P3-7** (`clients/lsp/index.ts`) — the rename close-failure recovery
+	  path reopened the old document as a hardcoded `"plaintext"` languageId,
+	  degrading that server's diagnostics until the next genuine open. Now
+	  reopens with `getLanguageId(oldFilePath) ?? "plaintext"` — the same
+	  resolver every genuine `notify.open` call in this file already uses —
+	  so a recognized extension reopens with its real language ID and only a
+	  genuinely unrecognized extension still falls back to `"plaintext"`.
 - **Post-init runtime exits now count toward the LSP circuit breaker (closes #1127)**
 	— `LSPService`'s (`clients/lsp/index.ts`) exponential-backoff breaker
 	(`failureCounts` → cooldown → permanent-disable after
