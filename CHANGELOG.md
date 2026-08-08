@@ -54,14 +54,38 @@ All notable changes to pi-lens will be documented in this file.
 	  genuinely-physical paths, so the #1024/#1120 ino-guard and
 	  case-sensitivity invariants are untouched.
 
-	**Deferred (not in this change):** P3-5 (the CRLF-boundary class beyond
-	the `\r`-aware clamp #1120 already shipped: `lineTextAt` still keeps the
-	trailing `\r`, inserts can still land between `\r` and `\n` in other
-	code paths, `newText` with a bare `\n` still applies verbatim into CRLF
-	files outside the host-edit-normalize path) and P3-7 (rename
-	close-failure recovery still reopens the old document as `"plaintext"`).
-	Both remain tracked; see the #1085 closing comment for where they were
-	rehomed.
+	**Deferred at the time (now fixed, see below):** P3-5 and P3-7 were
+	rehomed to #1147; see the #1085 closing comment for that history.
+- **Workspace-edit CRLF boundary class + rename close-failure plaintext reopen (closes #1147, refs #1085)** —
+	the two P3 deferrals left open after #1146:
+	- **P3-5** (`clients/lsp/edits.ts`) — #1120 fixed only the past-EOL clamp
+	  member of the CRLF-boundary class. Two general members remained: (a) a
+	  `newText` containing a bare `\n` was spliced verbatim into a CRLF
+	  file's content, producing mixed line endings, because the LSP
+	  workspace-edit apply path (unlike the host-edit path) never
+	  EOL-normalized `newText`; (b) `utf16Position`'s past-EOL clamp only
+	  triggered on `character > wireLength`, so an in-bounds,
+	  caller-supplied `character === wireLength` on a line whose `\r` is
+	  folded into `lineTextAt`'s with-`\r` length landed the position
+	  squarely between `\r` and `\n`, splitting the pair on write. Fixed by
+	  (a) normalizing every `newText` through the exact
+	  `detectLineEnding`/`normalizeToLF`/`restoreLineEndings` contract
+	  `clients/host-edit-normalize.ts` already uses for the host-edit path
+	  (LF files are unaffected — `restoreLineEndings` is the identity for
+	  `"\n"`), applied once in `normalizeTextEditsForContent` so it covers
+	  both the preflight virtual-content chain and the final on-disk write;
+	  (b) clamping on `character > clampedWireLength` (the `\r`-stripped
+	  length) instead of the with-`\r` length, which subsumes and simplifies
+	  #1120's original past-EOL clamp into the same branch. All of #1120's
+	  existing invariants (single application-ordering sort, clamp, tie-break)
+	  are unchanged and covered by the full `edits.test.ts` suite.
+	- **P3-7** (`clients/lsp/index.ts`) — the rename close-failure recovery
+	  path reopened the old document as a hardcoded `"plaintext"` languageId,
+	  degrading that server's diagnostics until the next genuine open. Now
+	  reopens with `getLanguageId(oldFilePath) ?? "plaintext"` — the same
+	  resolver every genuine `notify.open` call in this file already uses —
+	  so a recognized extension reopens with its real language ID and only a
+	  genuinely unrecognized extension still falls back to `"plaintext"`.
 - **Post-init runtime exits now count toward the LSP circuit breaker (closes #1127)**
 	— `LSPService`'s (`clients/lsp/index.ts`) exponential-backoff breaker
 	(`failureCounts` → cooldown → permanent-disable after

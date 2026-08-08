@@ -3351,10 +3351,15 @@ export class LSPService {
 			// Do not rename or send didRenameFiles while any server still has the
 			// old document open. Re-open/resync every affected client so a partial
 			// close cannot leave an in-memory document behind the disk contents.
+			// Reopen with the document's ACTUAL language ID (the same resolver every
+			// genuine open uses) rather than a hardcoded "plaintext" fallback — a
+			// wrong languageId here degrades that server's diagnostics until the
+			// next genuine open (#1147 P3-7).
 			const content = await fs.readFile(oldFilePath, "utf-8");
+			const languageId = getLanguageId(oldFilePath) ?? "plaintext";
 			await Promise.all(
 				openDocuments.map(({ client }) =>
-					client.notify.open(oldFilePath, content, "plaintext", true, true),
+					client.notify.open(oldFilePath, content, languageId, true, true),
 				),
 			);
 			throw new Error(
