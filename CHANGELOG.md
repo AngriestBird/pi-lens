@@ -6,6 +6,28 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`toProjectRelativePath` never relativized a Windows-shaped path off native Windows (closes #1163, refs #1150/#1152/#1161/#1024)** —
+	shape-2 bug-class sweep of the `path.*`-on-cross-shaped-input hot zone.
+	`clients/path-utils.ts:toProjectRelativePath` used the host-default
+	`path.isAbsolute`/`path.relative` even when the input was Windows-shaped
+	(drive letter or UNC). On Linux CI, `path.isAbsolute("C:\\repo\\src\\x.ts")`
+	is `false` (no POSIX leading slash), so the function short-circuited and
+	returned the whole absolute path instead of the project-relative `src/x.ts`
+	it produces on Windows — a persisted call-graph symbol-key path or graph
+	display path (via `module-report`/`lens-map`'s `toDisplayPath` and
+	`call-graph`'s `formatImpact`) rendered as a full absolute path on Linux
+	(green-locally / wrong-on-CI, the #1024 divergence class). Fixed
+	shape-conditionally (`isWindowsPath(p) ? win32 : path`, the #1152 idiom):
+	a Windows-shaped path is parsed with `win32.*` on ANY OS; native same-OS
+	paths are unchanged. Fail-then-pass regression tests feed `C:\...`/UNC
+	literals as INPUT and assert the relative result on any OS (meaningful on
+	Linux CI). The rest of the swept hot zone
+	(`widget-state`/`file-utils`/`call-graph`/`installer`/`elixir-check`, plus
+	`file-role` #1152 and `resolveNonExisting` #1150 already fixed) was audited
+	and cleared as native-by-design — inputs are real on-disk paths the running
+	OS produced (cwd/project-roots/scanned files, `path.resolve`'d first) or
+	already fold through `normalizeEphemeralMapKey`/`PathKeyedMap`/the
+	regex-based `parseSymbolKey`.
 - **Quick-mode background warmup kept a one-shot `pi -p`/`--print` process alive (closes #1154)** —
 	`handleSessionStart` forces **quick mode** for both a real `pi -p`/`--print`
 	one-shot AND an interactive process's first session (to protect keystroke
