@@ -6,6 +6,31 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Orphan-reaper fire-and-forget PowerShell/`ps` spawns kept a completed `pi --print` alive past settle (closes #1153)** —
+	the orphan reaper (`clients/instance-reaper.ts`) is fired fire-and-forget from
+	`session_start` (`index.ts` `sweepOrphans`/`sweepUntrackedOrphans`), not
+	awaited and not gated out of one-shot/`--print` mode. Its OS-process-table
+	enumeration spawns (`enumerateManagedProcesses`, `queryCommandLines`,
+	`findPidsByMarkerWindows` — PowerShell on Windows, `ps` on POSIX) used
+	`stdio:["ignore","pipe","ignore"]` with a `data` listener and **no `.unref()`
+	anywhere in the file**. A piped, listener-attached stdout stream keeps the
+	event loop REFERENCED until the child `close`s, and `sweepUntrackedOrphans`
+	guarantees ≥1 such PowerShell on every Windows `session_start` — so a settled
+	one-shot process could not exit until that PowerShell finished cold-starting
+	(routinely 300 ms–2 s). This is the child-process member of the referenced-
+	handle class (#1097/#1110 timers, #1148/#1149 worker ports). Fixed by
+	`unref()`-ing every reaper child AND its stdio pipes (a `child.unref()` alone
+	does not release a piped stdout that re-refs the loop) via a shared
+	`unrefReaperChild` helper applied at all six spawn sites (the five enumeration
+	spawns plus `killPidTree`'s `taskkill`). Unref, not a print-mode skip: the
+	reaper is a machine-wide orphan backstop, not a next-session-only concern, so
+	gating it out of `--print` would blind orphan cleanup on print-only machines
+	(CI/automation/subagents — exactly where one-shots dominate and orphans
+	accumulate); unref preserves the sweep in interactive sessions (the loop stays
+	referenced for other reasons, so every child's `close` still fires and the
+	sweep completes) while letting a genuinely-settled one-shot exit without
+	waiting. Regression test spawns a fake child per spawn site and asserts the
+	child + its stdout are unref'd (fails pre-fix, passes post-fix).
 - **Persistence workers could keep completed one-shot processes alive ([#1148](https://github.com/apmantza/pi-lens/issues/1148))** — project-snapshot and review-graph workers called `unref()` before registering their `"message"` listeners, and Node re-referenced the public `MessagePort` when each listener was added. Both workers now install all lifecycle listeners before `unref()`, so persistence remains asynchronous without retaining an otherwise-finished `pi --print` or subprocess workflow. Real child-process regression tests require both persistence paths to finish writing and exit naturally.
 - **`normalizeFilePath` mangled a Windows-shaped path on non-Windows OS (closes #1150)** —
 	`normalizeFilePath` commits to its win32 branch by path *shape*
