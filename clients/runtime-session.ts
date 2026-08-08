@@ -11,12 +11,7 @@ import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
 import { getKnipIgnorePatterns } from "./file-utils.js";
-import { clearTsconfigPathsCache } from "./review-graph/tsconfig-paths.js";
-import { resetSafeSpawnWindowsCommandCache } from "./safe-spawn.js";
-import { resetWorkspaceTopology } from "./workspace-topology.js";
 import { GitleaksClient, type GitleaksResult } from "./gitleaks-client.js";
-import { OpengrepClient, type OpengrepResult } from "./opengrep-client.js";
-import { TrivyClient, type TrivyResult } from "./trivy-client.js";
 import type { GoClient } from "./go-client.js";
 import {
 	GovulncheckClient,
@@ -30,18 +25,14 @@ import {
 	getDefaultStartupTools,
 } from "./language-profile.js";
 import { logLatency } from "./latency-logger.js";
-import { logWordIndex } from "./word-index-logger.js";
 import { runLogCleanup } from "./log-cleanup.js";
-import { setSessionLanguages } from "./widget-state.js";
-import {
-	countRecentSmells,
-	formatSmellsSessionStartLine,
-	resetSmellsSessionState,
-} from "./smells-rollup.js";
+import type { LSPShutdownOptions } from "./lsp/client.js";
 import { initLSPConfig, loadLSPConfig } from "./lsp/config.js";
 import { getLSPService } from "./lsp/index.js";
-import type { LSPShutdownOptions } from "./lsp/client.js";
 import type { MetricsClient } from "./metrics-client.js";
+import type { OpengrepClient, OpengrepResult } from "./opengrep-client.js";
+import { isAtOrAboveHomeDir } from "./path-utils.js";
+import { isPrintMode } from "./print-mode.js";
 import {
 	type ProjectSequenceBase,
 	readLatestProjectSequence,
@@ -53,26 +44,26 @@ import {
 	isProjectSnapshotMetaStale,
 	loadProjectSnapshot,
 	PROJECT_SNAPSHOT_VERSION,
+	type ProjectSnapshot,
 	readProjectSnapshotMeta,
 	saveRuntimeProjectSnapshot,
-	type ProjectSnapshot,
 } from "./project-snapshot.js";
+import { clearTsconfigPathsCache } from "./review-graph/tsconfig-paths.js";
 import type { RuffClient } from "./ruff-client.js";
 import { scanProjectRules } from "./rules-scanner.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import type { RustClient } from "./rust-client.js";
-
-import { isAtOrAboveHomeDir } from "./path-utils.js";
+import { resetSafeSpawnWindowsCommandCache } from "./safe-spawn.js";
 import {
 	getSlowFsVerdict,
 	isSlowFs,
 	slowFsDegradationNotice,
 } from "./slow-fs.js";
 import {
-	getSubagentIdentity,
-	isSubagentSession,
-	subagentLightModeNotice,
-} from "./subagent-mode.js";
+	countRecentSmells,
+	formatSmellsSessionStartLine,
+	resetSmellsSessionState,
+} from "./smells-rollup.js";
 import {
 	findNearestProjectRoot,
 	getStartupScanMaxEntries,
@@ -80,9 +71,18 @@ import {
 	resolveStartupScanContext,
 	type StartupScanContext,
 } from "./startup-scan.js";
+import {
+	getSubagentIdentity,
+	isSubagentSession,
+	subagentLightModeNotice,
+} from "./subagent-mode.js";
 import type { TestRunnerClient } from "./test-runner-client.js";
 import type { TodoScanner } from "./todo-scanner.js";
+import { TrivyClient, type TrivyResult } from "./trivy-client.js";
 import { isWarmAttached } from "./warm-attach.js";
+import { setSessionLanguages } from "./widget-state.js";
+import { logWordIndex } from "./word-index-logger.js";
+import { resetWorkspaceTopology } from "./workspace-topology.js";
 
 interface SessionStartDeps {
 	ctxCwd?: string;
@@ -235,8 +235,7 @@ function resolveStartupMode(): StartupMode {
 		return envMode;
 	}
 
-	const argv = process.argv;
-	if (argv.includes("--print") || argv.includes("-p")) {
+	if (isPrintMode()) {
 		return "quick";
 	}
 
@@ -532,9 +531,8 @@ async function buildOrRefreshWordIndex(args: {
 	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
 	const snapshot = loadProjectSnapshot(snapshotRoot);
 	if (snapshot?.wordIndex) {
-		const { deserializeWordIndex, refreshWordIndexIncrementally } = await import(
-			"./word-index.js"
-		);
+		const { deserializeWordIndex, refreshWordIndexIncrementally } =
+			await import("./word-index.js");
 		const index = deserializeWordIndex(snapshot.wordIndex);
 		if (index) {
 			try {
@@ -674,7 +672,9 @@ function scheduleStartupScans(
 		const completion = new Promise<void>((resolve) => {
 			const fire = (): void => {
 				const startedAt = Date.now();
-				dbg(`session_start task ${name}: start queuedMs=${startedAt - queuedAt}`);
+				dbg(
+					`session_start task ${name}: start queuedMs=${startedAt - queuedAt}`,
+				);
 				void task()
 					.then(() => {
 						dbg(
@@ -695,7 +695,12 @@ function scheduleStartupScans(
 			};
 			const delay = taskDeferMsByName[name] ?? 0;
 			if (delay > 0) {
-				setTimeout(fire, delay);
+				// #1154: unref to match the repo-wide convention that every
+				// background timer is `.unref()`'d. Full-mode deferred scans only
+				// run in long-lived/interactive sessions today (never a one-shot),
+				// so this is defensive — but a referenced 5s timer would keep a
+				// process open were a full-mode one-shot ever introduced.
+				setTimeout(fire, delay).unref?.();
 			} else {
 				setImmediate(fire);
 			}
@@ -1099,7 +1104,9 @@ function scheduleStartupScans(
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
 		const identity = getReviewGraphCacheIdentity(analysisRoot, graph);
 		if (!identity) {
-			dbg("session_start call-graph: canonical review-graph identity unavailable");
+			dbg(
+				"session_start call-graph: canonical review-graph identity unavailable",
+			);
 			return;
 		}
 		const cached = loadCallGraph(snapshotRoot, {
@@ -1115,7 +1122,8 @@ function scheduleStartupScans(
 		}
 		// Build from the canonical review graph (reuses already-parsed data, no
 		// duplicate parser or source walk).
-		const { allSymbols, allRefs, coverage } = extractSymbolsAndRefsFromGraph(graph);
+		const { allSymbols, allRefs, coverage } =
+			extractSymbolsAndRefsFromGraph(graph);
 		const callGraph = buildCallGraph(allSymbols, allRefs, coverage);
 		runtime.callGraph = callGraph;
 		saveCallGraph(snapshotRoot, callGraph, {
@@ -1277,8 +1285,7 @@ export async function handleSessionStart(
 			phase: "session_start_prehandler",
 			startedAt: new Date(deps.sessionStartFiredAt).toISOString(),
 			durationMs:
-				(deps.handlerEnteredAt ?? handlerEnteredAt) -
-				deps.sessionStartFiredAt,
+				(deps.handlerEnteredAt ?? handlerEnteredAt) - deps.sessionStartFiredAt,
 			metadata: { reason: deps.sessionReason },
 		});
 	}
@@ -1325,8 +1332,19 @@ export async function handleSessionStart(
 	}
 	processGlobals.__piLensFirstSessionDone = true;
 
+	// #1154: quick mode is entered on BOTH `pi -p`/`--print` (a one-shot that
+	// exits right after this turn) and an interactive process's first
+	// session_start (forced quick to protect keystroke latency, then warms
+	// caches for the NEXT /new). The warmup only benefits a *future* session in
+	// the same process — a one-shot print invocation has none. Worse, in a
+	// one-shot the warmup is a referenced-handle keep-alive: the +2s timer and
+	// the LSP-prewarm children / language-profile source walk it launches
+	// outlive settle with no session_shutdown teardown, holding the process
+	// open (the #1097/#1110/#1122-hyp-A class). So skip warmup entirely in
+	// print mode; interactive first-sessions (not print) still warm.
 	if (
 		startupMode === "quick" &&
+		!isPrintMode() &&
 		process.env.PI_LENS_COLD_START_QUICK !== "0" &&
 		!processGlobals.__piLensWarmupScheduled
 	) {
@@ -1334,7 +1352,13 @@ export async function handleSessionStart(
 		const warmupDelayMs = Number(process.env.PI_LENS_WARMUP_DELAY_MS ?? 2000);
 		const warmupCwd = deps.ctxCwd ?? process.cwd();
 		const warmupDbg = deps.dbg;
-		setTimeout(() => {
+		// #1154: `.unref()` the warmup timer so — even for a warmup that IS
+		// scheduled (an interactive first-session) — the pending timer alone can
+		// never hold the loop open. Interactive processes stay alive for other
+		// reasons, so the warmup still fires; a one-shot never reaches here (the
+		// isPrintMode gate above), and repo convention is that every background
+		// timer is unref'd (this file previously had none).
+		const warmupTimer = setTimeout(() => {
 			const warmupStartedAt = Date.now();
 			void (async () => {
 				try {
@@ -1471,16 +1495,14 @@ export async function handleSessionStart(
 					} else if (isSubagentSession()) {
 						warmupDbg("warmup: skipping LSP pre-warm (subagent session)");
 					} else if (isWarmAttached()) {
-						warmupDbg(
-							"warmup: skipping LSP pre-warm (attached to incumbent)",
-						);
+						warmupDbg("warmup: skipping LSP pre-warm (attached to incumbent)");
 					} else {
 						// #957 review: honor explicit warmFiles (#203) like the full
 						// path does — configured projects warm exactly what they
 						// asked for; dominant-language warm is the fallback.
-						const lspConfig = await loadLSPConfig(warmupCwd).catch(
-							() => ({ warmFiles: [] as string[] }),
-						);
+						const lspConfig = await loadLSPConfig(warmupCwd).catch(() => ({
+							warmFiles: [] as string[],
+						}));
 						const warmFiles = lspConfig.warmFiles ?? [];
 						if (warmFiles.length > 0) {
 							await igniteWarmFiles(
@@ -1525,6 +1547,7 @@ export async function handleSessionStart(
 				}
 			})();
 		}, warmupDelayMs);
+		warmupTimer.unref?.();
 	}
 
 	const allowBootstrapTasks = startupMode === "full";
