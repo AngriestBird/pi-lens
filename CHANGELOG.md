@@ -62,6 +62,50 @@ All notable changes to pi-lens will be documented in this file.
 	close-failure recovery still reopens the old document as `"plaintext"`).
 	Both remain tracked; see the #1085 closing comment for where they were
 	rehomed.
+- **Post-init runtime exits now count toward the LSP circuit breaker (closes #1127)**
+	— `LSPService`'s (`clients/lsp/index.ts`) exponential-backoff breaker
+	(`failureCounts` → cooldown → permanent-disable after
+	`BROKEN_PERMANENT_AFTER`) only incremented on spawn/initialize failure.
+	A server whose spawn SUCCEEDS but then exits shortly after (opengrep's
+	post-init "Unhandled message" JSON-RPC crash, per #1122's Phase C
+	corroborating-signal review — 37 respawns in one real session, never
+	converging) hit the "dead client — needs respawn" path instead, which
+	never touched the breaker: `failureCounts` was already cleared by the
+	preceding successful spawn and the runtime exit itself was never counted.
+	Fixed by adding a parallel `runtimeExitCounts` counter fed only by EARLY
+	(lifetime < 60s) non-intentional exits, sharing the same cooldown formula
+	and the same `state.broken`/`permanentlyBroken` maps as the existing
+	breaker — tracked separately from `failureCounts` specifically because a
+	successful respawn (which correctly resets the spawn/init failure streak)
+	is not proof of health for a crash-loop server, so reusing that map would
+	erase the streak on every respawn attempt (the #1127 bug). Deliberate
+	teardowns (session reset, `#743` notify-backpressure eviction, generation
+	handoffs) call `shutdown()` themselves before the process exits and set
+	`shutdownRequested`; a new `wasShutdownIntentional()` accessor on
+	`LSPClientInfo` (`clients/lsp/client.ts`) exposes that flag so the breaker
+	distinguishes a genuine crash from a restart it initiated and never counts
+	the latter. Adversarial review caught that lifetime was originally
+	computed from the moment a dead client is lazily DETECTED (the next
+	`getClientForFile` attach), not from when it actually died — #1127's
+	documented pattern is attach-triggered respawns minutes to hours apart, so
+	an early crash detected an hour later would misread as a long healthy run
+	and never count. Fixed by stamping a real `exitedAt` on `LSPClientState`
+	the moment the client's connection/process actually dies (first of
+	`onError`/`onClose`/process `exit` to fire) and exposing it via a new
+	`getExitedAt()` accessor; the respawn site computes lifetime as
+	`exitedAt - spawnedAt`, falling back to the detection-time delta only when
+	`exitedAt` is unexpectedly unset. New coverage in
+	`tests/clients/lsp/service-runtime-exit-breaker.test.ts`: a crash-loop
+	respawn sequence converges to permanent-disable instead of respawning
+	forever (fails against pre-fix behavior), an early death with detection
+	delayed by hours still counts (death time, not detection time, decides —
+	fails against the pre-fix detection-time computation in both directions),
+	a deliberate `shutdown()`-driven restart sequence never counts, a runtime
+	exit past the lifetime threshold resets the streak instead of counting,
+	and the REAL `#743` notify-write-backpressure eviction path (driven
+	through `touchFile`, not a synthetic stand-in) never double-counts against
+	this breaker. Full existing LSP suite (536 tests) stays green.
+
 - **`terragrunt hcl fmt` reported success when it never ran (refs #1117)** —
 	`formatFile` decided success from `result.error` alone, and a formatter that
 	fails leaves the file byte-identical, which is indistinguishable from
