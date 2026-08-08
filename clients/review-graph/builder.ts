@@ -1766,7 +1766,6 @@ function getPersistWorker(): Worker | undefined {
 			return undefined;
 		}
 		const worker = new Worker(workerPath);
-		worker.unref();
 		worker.on("message", handleWorkerResult);
 		worker.on("error", (err: Error) => handleWorkerDeath(err.message));
 		worker.on("exit", (code) => {
@@ -1786,6 +1785,9 @@ function getPersistWorker(): Worker | undefined {
 				_persistWorker = undefined;
 			}
 		});
+		// #1148: adding a message listener refs the Worker's public MessagePort.
+		// Unref only after every listener is installed so it stays background-only.
+		worker.unref();
 		_persistWorker = worker;
 		return worker;
 	} catch (err) {

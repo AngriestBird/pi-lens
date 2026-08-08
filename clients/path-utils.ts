@@ -14,7 +14,7 @@
 import { type Dirent, existsSync, realpathSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { dirname, win32 } from "node:path";
+import { win32 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { minimatch } from "./deps/minimatch.js";
 
@@ -93,7 +93,15 @@ function resolveNonExisting(filePath: string): string {
 			return base.endsWith("/") ? base + tail : `${base}/${tail}`;
 		}
 
-		const parent = dirname(current);
+		// Use win32.dirname (not the platform-default dirname) so a
+		// Windows-shaped path is parsed with win32 semantics regardless of the
+		// running OS — consistent with the win32.resolve/win32.normalize this
+		// branch already commits to. The platform-default POSIX dirname would
+		// find no separator in a win32-resolved "C:\repo\..." path (its only
+		// separators are backslashes), collapse to ".", stop the upward walk at
+		// cwd, and mangle the key on Linux CI (refs #1150, the #1024
+		// OS-divergence class).
+		const parent = win32.dirname(current);
 		if (parent === current) {
 			// Reached filesystem root without finding existing dir
 			// Fall back to full lowercase
