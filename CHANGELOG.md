@@ -10,6 +10,34 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Resource-sampler Windows CIM spawns were not `.unref()`'d, the same one-shot-retention shape as the orphan reaper (refs #1155)** —
+	`clients/resource-sampler.ts`'s two Windows-only `Get-CimInstance Win32_Process`
+	spawns (`findDescendantPidsWindows`'s descendant-tree lookup and
+	`sampleProcessesWindows`'s CPU/RSS query) used `stdio:["ignore","pipe","ignore"]`
+	with a piped, `data`-listener-attached stdout and neither the child nor its
+	stdout was ever `.unref()`'d — the same shape #1153/#1160 fixed for the orphan
+	reaper (shape 4 of AGENTS.md's recurring-defect catalog: a referenced handle
+	that outlives a one-shot settle). The sampler was empirically absent under a
+	trivial `pi --print` prompt (its own `setInterval` was already unref'd, and it
+	only runs bracketed to an awaited analyzer spawn), but was not safe by
+	construction for a file-editing repro that does exercise it. Fixed by
+	extracting the reaper's `unrefReaperChild` AND its `spawnCollectStdout`
+	spawn→pipe-stdout→resolve-on-close plumbing into a shared, dependency-free
+	`clients/child-unref.ts` (`unrefChildAndPipes`, `spawnCollectStdout`) and
+	calling `spawnCollectStdout` at both sampler spawn sites — a single source
+	of truth for both modules instead of a second hand-rolled copy (the
+	promotion also resolved a SonarCloud new-code-duplication gate failure:
+	adding an identical `unrefChildAndPipes(child)` line to both near-identical
+	spawn blocks had pushed duplicated-line density over the 3% threshold;
+	collapsing both blocks to parse-only call sites around the shared helper
+	removed the duplication instead of adding to it). Unref only detaches this
+	child ALONE from keeping a settled one-shot alive; in an interactive/
+	long-lived session (or one bracketed to real analyzer work) the loop stays
+	referenced for other reasons, so sampling is unaffected — the parse logic
+	at both call sites is otherwise unchanged, so a spawn/error failure still
+	resolves to the same empty/partial result as before. Fail-then-pass
+	regression tests assert both spawn sites unref the child and its stdout, in
+	both the sampler and (unchanged) the reaper.
 - **`toProjectRelativePath` never relativized a Windows-shaped path off native Windows (closes #1163, refs #1150/#1152/#1161/#1024)** —
 	shape-2 bug-class sweep of the `path.*`-on-cross-shaped-input hot zone.
 	`clients/path-utils.ts:toProjectRelativePath` used the host-default
