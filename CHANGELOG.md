@@ -6,6 +6,25 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Resource-sampler Windows CIM spawns were not `.unref()`'d, the same one-shot-retention shape as the orphan reaper (refs #1155)** —
+	`clients/resource-sampler.ts`'s two Windows-only `Get-CimInstance Win32_Process`
+	spawns (`findDescendantPidsWindows`'s descendant-tree lookup and
+	`sampleProcessesWindows`'s CPU/RSS query) used `stdio:["ignore","pipe","ignore"]`
+	with a piped, `data`-listener-attached stdout and neither the child nor its
+	stdout was ever `.unref()`'d — the same shape #1153/#1160 fixed for the orphan
+	reaper (shape 4 of AGENTS.md's recurring-defect catalog: a referenced handle
+	that outlives a one-shot settle). The sampler was empirically absent under a
+	trivial `pi --print` prompt (its own `setInterval` was already unref'd, and it
+	only runs bracketed to an awaited analyzer spawn), but was not safe by
+	construction for a file-editing repro that does exercise it. Fixed by
+	extracting the reaper's `unrefReaperChild` helper into a shared,
+	dependency-free `clients/child-unref.ts` (`unrefChildAndPipes`) and calling it
+	at both spawn sites — single source of truth for both modules instead of a
+	second hand-rolled copy. Unref only detaches this child ALONE from keeping a
+	settled one-shot alive; in an interactive/long-lived session (or one bracketed
+	to real analyzer work) the loop stays referenced for other reasons, so
+	sampling is unaffected. Fail-then-pass regression tests assert both spawn
+	sites unref the child and its stdout.
 - **Quick-mode background warmup kept a one-shot `pi -p`/`--print` process alive (closes #1154)** —
 	`handleSessionStart` forces **quick mode** for both a real `pi -p`/`--print`
 	one-shot AND an interactive process's first session (to protect keystroke

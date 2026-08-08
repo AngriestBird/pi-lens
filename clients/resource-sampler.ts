@@ -47,6 +47,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import * as path from "node:path";
 import pidusage from "pidusage";
+import { unrefChildAndPipes } from "./child-unref.js";
 
 // Read the platform live (not a module-load const) so both the Windows and the
 // POSIX sampling paths are exercisable in unit tests regardless of the host OS.
@@ -129,6 +130,13 @@ async function findDescendantPidsWindows(rootPid: number): Promise<number[]> {
 				["-NoProfile", "-NonInteractive", "-Command", psScript],
 				{ shell: false, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
 			);
+			// Fire-and-forget, per-poll-tick spawn (#1155): unref the child AND its
+			// piped stdout so this one-shot CIM query can never keep a settled
+			// `pi --print` process alive past its own close — mirrors the reaper's
+			// `unrefChildAndPipes` (#1153/#1160). Sampling still works normally in
+			// an interactive/long-lived session: unref only means "don't hold the
+			// loop open FOR this alone," the `data`/`close` listeners still fire.
+			unrefChildAndPipes(child);
 			let out = "";
 			child.stdout?.on("data", (chunk) => {
 				out += chunk.toString();
@@ -220,6 +228,13 @@ async function sampleProcessesWindows(
 				["-NoProfile", "-NonInteractive", "-Command", psScript],
 				{ shell: false, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
 			);
+			// Fire-and-forget, per-poll-tick spawn (#1155): unref the child AND its
+			// piped stdout so this one-shot CIM query can never keep a settled
+			// `pi --print` process alive past its own close — mirrors the reaper's
+			// `unrefChildAndPipes` (#1153/#1160). Sampling still works normally in
+			// an interactive/long-lived session: unref only means "don't hold the
+			// loop open FOR this alone," the `data`/`close` listeners still fire.
+			unrefChildAndPipes(child);
 			let out = "";
 			child.stdout?.on("data", (chunk) => {
 				out += chunk.toString();
