@@ -11,6 +11,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
 import { logLatency } from "./latency-logger.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
@@ -86,6 +87,8 @@ export interface FormatterInfo {
 	name: string;
 	command: string[]; // Command with $FILE placeholder — used as fallback
 	extensions: string[];
+	/** Basenames (lowercase) this formatter applies to regardless of extension. */
+	filenames?: readonly string[];
 	/** Detect if this formatter should be used for a project */
 	detect(cwd: string): Promise<boolean>;
 	/**
@@ -94,6 +97,16 @@ export interface FormatterInfo {
 	 * filePath is already resolved to an absolute path.
 	 */
 	resolveCommand?(filePath: string, cwd: string): Promise<string[] | null>;
+	/**
+	 * Treat a nonzero exit as a formatting failure. Off by default: the
+	 * lint-autofix formatters (`rubocop -a`, `ktlint -F`, `standardrb --fix`,
+	 * `sqlfluff fix`) exit nonzero when offenses remain AFTER a successful
+	 * rewrite, and failing those would surface an error on every file with an
+	 * unfixable offense. Set it on pure formatters, where a nonzero exit means
+	 * the tool never ran — and an untouched file is otherwise indistinguishable
+	 * from "already formatted".
+	 */
+	strictExitCode?: boolean;
 }
 
 export interface FormatterResult {
@@ -719,6 +732,20 @@ export const terraformFormatter: FormatterInfo = {
 	},
 };
 
+export const terragruntHclFormatter: FormatterInfo = {
+	name: "terragrunt-hcl",
+	command: ["terragrunt", "hcl", "fmt", "--file", "$FILE"],
+	extensions: [],
+	filenames: TERRAGRUNT_FILENAMES,
+	// Pure formatter: verified exit 0 on a successful in-place format against
+	// terragrunt v1.1.2. A binary predating the `hcl` command group exits nonzero
+	// and touches nothing, which without this reads as "already formatted".
+	strictExitCode: true,
+	async detect(_cwd: string) {
+		return (await which("terragrunt")) !== null;
+	},
+};
+
 export const phpCsFixerFormatter: FormatterInfo = {
 	name: "php-cs-fixer",
 	command: ["php-cs-fixer", "fix", "$FILE"],
@@ -916,6 +943,7 @@ const ALL_FORMATTERS: FormatterInfo[] = [
 	ktlintFormatter,
 	ktfmtFormatter,
 	terraformFormatter,
+	terragruntHclFormatter,
 	phpCsFixerFormatter,
 	csharpierFormatter,
 	fantomasFormatter,
@@ -932,6 +960,11 @@ const ALL_FORMATTERS: FormatterInfo[] = [
 	psscriptanalyzerFormatFormatter,
 ];
 
+// Basenames claimed by a filename-keyed formatter, e.g. terragrunt.hcl.
+const FILENAME_FORMATTER_BASENAMES = new Set(
+	ALL_FORMATTERS.flatMap((f) => f.filenames ?? []),
+);
+
 // Cache for detection results - stores array of enabled formatter names per cwd+ext
 const detectionCache = new Map<string, Map<string, string[]>>();
 
@@ -942,7 +975,15 @@ export async function getFormattersForFile(
 	cwd: string,
 ): Promise<FormatterInfo[]> {
 	const ext = path.extname(filePath).toLowerCase();
-	const cacheKey = `${cwd}:${ext}`;
+	const base = path.basename(filePath).toLowerCase();
+	// Filename-keyed formatters (e.g. terragrunt.hcl) can share an extension
+	// with unrelated files in the same dir (.terraform.lock.hcl next to
+	// terragrunt.hcl). Fold the basename into the cache key only when a
+	// filename-based formatter actually applies, so a plain .hcl file cached
+	// first doesn't poison the cache for terragrunt.hcl/root.hcl, or vice versa.
+	const cacheKey = FILENAME_FORMATTER_BASENAMES.has(base)
+		? `${cwd}:${ext}:${base}`
+		: `${cwd}:${ext}`;
 
 	// Check cache
 	let cached = detectionCache.get(cwd);
@@ -958,8 +999,10 @@ export async function getFormattersForFile(
 		return ALL_FORMATTERS.filter((f) => enabledNames.includes(f.name));
 	}
 
-	// Detect formatters for this extension
-	const matching = ALL_FORMATTERS.filter((f) => f.extensions.includes(ext));
+	// Detect formatters for this extension (or exact filename, e.g. terragrunt.hcl)
+	const matching = ALL_FORMATTERS.filter(
+		(f) => f.extensions.includes(ext) || f.filenames?.includes(base),
+	);
 	const formatterPolicy = getFormatterPolicyForFile(filePath);
 	const smartDefaultFormatterName = getSmartDefaultFormatterName(filePath);
 
@@ -1074,11 +1117,14 @@ export async function formatFile(
 			cwd,
 		});
 
-		if (result.error) {
+		if (result.error || (formatter.strictExitCode && result.status !== 0)) {
 			return {
 				success: false,
 				changed: false,
-				error: result.error.message,
+				error:
+					result.error?.message ||
+					result.stderr.trim().split("\n")[0] ||
+					`${formatter.name} exited with status ${result.status}`,
 			};
 		}
 

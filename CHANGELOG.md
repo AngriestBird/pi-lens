@@ -50,6 +50,45 @@ All notable changes to pi-lens will be documented in this file.
 	through `touchFile`, not a synthetic stand-in) never double-counts against
 	this breaker. Full existing LSP suite (536 tests) stays green.
 
+- **`terragrunt hcl fmt` reported success when it never ran (refs #1117)** —
+	`formatFile` decided success from `result.error` alone, and a formatter that
+	fails leaves the file byte-identical, which is indistinguishable from
+	"already formatted". A terragrunt binary predating the `hcl` command group
+	exits non-zero without touching the file, and pi-lens reported
+	`success: true, changed: false`. `FormatterInfo` gained an opt-in
+	`strictExitCode`, set on `terragrunt-hcl`, which folds the exit status into
+	the check and surfaces the tool's own first stderr line as the error. It is
+	opt-in rather than global because the lint-autofix formatters (`rubocop -a`,
+	`ktlint -F`, `standardrb --fix`, `sqlfluff fix`) exit non-zero when offenses
+	remain AFTER a successful rewrite; failing those would surface a formatter
+	error on every file with an unfixable offense.
+- **Runners reported a clean file on a non-zero exit with no output (refs #1117)** —
+	seven runners gated their "the tool never ran" skip on
+	`result.error` alone. `safeSpawnAsync` sets `error` only for spawn, timeout,
+	signal and abort failures, and resolves a NORMAL exit with no `error` at any
+	status (see `SpawnResult.failure`: "nonzero exit statuses are not spawn
+	failures"). So an unknown subcommand, a rejected flag, or a config that fails
+	to load — non-zero exit, message on stderr, empty stdout — fell straight
+	through the guard, parsed `""` into zero diagnostics, and reported the file as
+	clean. Terragrunt was the visible case: its docblock claimed a binary
+	predating the `hcl` command group was classified SKIPPED, and it was not. The
+	test now lives in `spawnFailedWithNoOutput`
+	(`clients/dispatch/runners/utils/spawn-outcome.ts`) and folds `status` into
+	the check; terragrunt, tflint, hadolint, taplo, trivy-config, htmlhint and
+	detekt all use it. Runners that exit non-zero BECAUSE they found something are
+	unaffected, since their findings are on the stream the guard tests. ktlint,
+	prisma-validate, gleam-check, zig-check, dart-analyze and elixir-check already
+	covered the case through their own non-zero follow-up branches and are
+	unchanged.
+- **Bare-binary GitHub release assets skip signature siblings** — the installer
+	picked a release asset with `assets.find(a => a.name.includes(substring))`.
+	Archive-based tools are unaffected (their substrings end in `.zip`/`.tar.gz`),
+	but the three bare-binary entries (terragrunt, marksman, expert) resolve to
+	the FULL asset name, which is a strict prefix of every `.asc`/`.sig`/`.sha256`
+	sibling, so whichever the release listed first would be downloaded and marked
+	executable as the binary. Selection now lives in an exported
+	`pickReleaseAsset`: exact name first, then a substring match that excludes
+	known sidecar suffixes.
 - **Cascade fallback-display paths re-displayed bound-false LSP snapshots (refs #1104)** —
 	#1100 gated the cascade's RECONCILE path (the footer/widget) onto content
 	binding (`boundToCurrentDisk`), but two DEGRADED-fallback DISPLAY paths in
@@ -276,6 +315,56 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Added
 
+- **tflint respects the project's linter policy (refs #1117)** — every other
+	dispatch runner gates on `getLinterPolicyForCwd` before spawning; tflint was
+	the one that never consulted it, so a project that elected a different
+	terraform linter got tflint's findings on top of its own. It now skips when
+	policy does not prefer it, matching golangci-lint and terragrunt. A project
+	`.tflint.hcl` is also an explicit opt-in, so `hasTflintConfig` promotes the
+	`.tf`/`.tfvars` policy from `smart-default` to `config-first` the same way
+	`.golangci.yml` does for Go. tflint ships built-in rules and still runs
+	unconfigured, so the no-config default is unchanged. `hasTflintConfig` takes
+	the edited file's directory rather than the project cwd, so it agrees with
+	what the runner hands tflint: keyed off cwd it would miss every `.tflint.hcl`
+	living in a terraform subdirectory, which is the common monorepo layout.
+- **tflint honors a repo-root `.tflint.hcl` (refs #1117)** — tflint resolves
+	`.tflint.hcl` from its own working directory and never walks parents (its only
+	fallback is `~/.tflint.hcl`), and the runner spawns it from the edited file's
+	directory. A config at the repo root therefore governed nothing beneath the
+	root: every module under `modules/` or `envs/` was linted with tflint's
+	built-in defaults, silently. The runner now walks up for the nearest
+	`.tflint.hcl` (via `findNearestDirWithAnyBasename`, so the same home-guarded,
+	depth-capped, mtime-invalidated walk every other marker lookup uses) and
+	passes it as `--config`. Skipped when `TFLINT_CONFIG_FILE` is set, since
+	`--config` outranks the env var in tflint's own precedence and would override
+	a deliberate choice. A `.tflint.hcl` that declares an uninitialized plugin
+	makes tflint exit non-zero with empty stdout, which the guard fix above turns
+	into a SKIPPED rather than a false clean.
+- **Terragrunt linting and formatting** — `terragrunt.hcl` and `root.hcl` now
+	get a dedicated `terragrunt` file kind (filename-detected only; a plain
+	`.hcl` file stays unmapped). New `terragrunt` dispatch runner wraps
+	`terragrunt hcl validate --json`, and a `terragrunt-hcl` formatter wraps
+	`terragrunt hcl fmt`. Terragrunt has no LSP, so it's runner/formatter only.
+	The `terragrunt` binary installs the same way as tflint (GitHub release,
+	bare per-platform binaries). Also added `.tf` (Terraform) to the
+	`trivy-config` runner's `appliesTo`, gated behind the existing
+	`trivy.enabled` opt-in — terragrunt itself stays excluded from trivy, since
+	trivy evaluates the Terraform language, not terragrunt config. The two
+	entrypoint filenames live in one exported `TERRAGRUNT_FILENAMES` constant
+	(`clients/file-kinds.ts`, same single-source-of-truth pattern as the .NET
+	root markers), consumed by kind detection, both tool policies, the formatter,
+	and the project/root markers; `tests/clients/terragrunt-filenames.test.ts`
+	derives its cases from that list, so a call site that hand-copies it and
+	misses a name fails CI. Diagnostic ids carry line, column, and a normalized
+	message slug (the actionlint shape), because `hcl validate` reports no rule
+	code: a line-only id collapses two findings at one position in the
+	dispatcher's dedupe (keyed `filePath:line:column:defectClass:rule||id`) and
+	hides a changed finding from delta mode, which keys on `id` alone.
+	Diagnostics are attributed by resolving `range.filename` against the unit
+	directory and comparing through `pathsEqual`, not by basename: a unit that
+	pulls in its parent via `find_in_parent_folders()` gets diagnostics from a
+	parent `terragrunt.hcl` whose basename matches the edited file's but whose
+	line numbers belong to another file.
 - **Smells self-surfacing (refs #1123 item 3)** — `scripts/analyze-pi-lens-logs.mjs`
 	(`npm run logs:smells`) already catalogues a wide set of operational smells,
 	but it's MANUAL: the #1123 investigation found 20 stale-ctx `emit_failed`
@@ -567,6 +656,7 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`npm run test:unit` runs again, and actually excludes the integration files** — the script passed `--ignore <file>`, which is not a vitest option, so every invocation died with `CACError: Unknown option --ignore` before a single test loaded (broken since the tier split was written; CI never caught it because CI runs `npm test`). The rename to the real flag, `--exclude`, fixes the crash but not the intent: `vitest.config.ts` defines per-project `exclude` lists, and a project's `exclude` REPLACES the root/CLI value rather than merging with it, so a command-line `--exclude` is silently dropped (verified with `vitest list`: both integration files still resolved). The exclusion now lives in the config, keyed off the script name npm exports (`npm_lifecycle_event`), which survives the `with-test-lock` wrapper identically on every OS — unlike an inline `FOO=1 …` prefix, which cmd.exe cannot parse. `npm run test:unit` is now 456 files, `npm run test:integration` the other 2, and `npm test` all 458.
 - **`loop_block` no longer reports a machine sleep or paging stall as a pi-lens synchronous block (refs #1122, refs #1123 item 1)** — the event-loop occupancy probe (`clients/event-loop-monitor.ts`) wraps Node's native `monitorEventLoopDelay`, whose libuv timer-lag is measured against the monotonic clock (`uv_hrtime`/`QueryPerformanceCounter`). When the whole process is frozen — Windows Modern Standby, or paging thrash under commit-charge exhaustion — the next timer fires late by the entire wall-clock gap, and that gap was logged as a "block". Two distinct machine artifacts were confirmed against the Windows System event log: a 290,179 ms block lined up exactly with a 14:33:05Z→14:37:55Z Modern Standby window (Kernel-Power 506/507), reported byte-identically by two independent pids because the histogram is HDR-bucketed and quantizes ~290 s into one bucket; and a later silent host exit with **zero** sleep events but twelve Resource-Exhaustion-Detector (2004) events at 97% commit charge. `latency.log` also held multi-*hour* "blocks" that can only be overnight sleep. Comparing a wall clock to a monotonic clock does NOT catch this — on Windows both advance across Modern Standby — so the probe now uses **CPU accounting**: a genuine synchronous block of D ms burns ≈ D ms of main-thread CPU, so its window must have consumed ≥ ~D ms of CPU; a frozen/thrashing process consumes ~0 CPU across the gap. The histogram is now windowed **per turn** (its long-intended reset, previously never wired, so each block is attributable to its turn and its CPU budget is bounded), and a worst block above a 20 s floor that the window's CPU cannot account for is tagged `suspectSystemStall` in the `loop_block` metadata (alongside `windowCpuMs`/`windowWallMs` and the `lastPhase` attribution hint) rather than raising the genuine-block high-water — so a machine freeze can no longer permanently suppress logging of later real blocks, and `/lens-health` reports the worst *genuine* block. Sub-floor blocks are never auto-tagged, but the logged CPU-vs-wall ratio still exposes a shorter paging stall for a human. Pure `isSuspendSuspectedBlock` and `getLastLoggedPhase` seams are unit-tested without a real machine sleep.
 - **`runtime-tool-result.ts`'s three tool-result-turn maps now key through `PathKeyedMap` (refs #1086, the #210/#1020/#1025 raw-path-key class)** — `inFlightPipelines`, `lastAnalyzedStateByFile`, and `debouncedPipelines` keyed directly on `filePath`, which is only `path.resolve`d from raw agent-supplied tool input (never case-folded, never realpath'd). A divergent Windows spelling of the same file (case, or an unresolved absolute path an agent supplies verbatim) bypassed the concurrent-state dedupe and debounce coalescing, producing duplicate pipeline runs, doubled LSP dispatch, and split telemetry participant counts; `flushDebouncedToolResults(filePath)` silently missed the pending entry it was meant to flush. All three now wrap `PathKeyedMap` with `normalizeEphemeralMapKey` — the cheap slash-fold + win32-lowercase normalizer (no `realpathSync`), matching the state's ephemeral, turn-scoped, single-process lifetime per AGENTS.md's normalizer-choice guidance (`normalizeMapKey`'s realpath cost is for long-lived cross-call-site state, not this). `inFlightPipelines`'s composite `${filePath}:${stateHash}` key is now a `PathKeyedMap<Map<string, InFlightPipeline>>` — normalized path outer, raw stateHash inner — rather than folding both halves through one string normalizer, so a genuine same-path content change still gets a distinct entry while divergent spellings of the same state collapse to one. Every read/write/delete/iteration site in the file was audited; `flushDebouncedToolResults`'s iteration and `scheduleDebounced`'s coalesce path both continue to see the map's preserved display path. No other raw path-keyed map exists in the file. New tests (`tests/clients/runtime-tool-result-debounce.test.ts`) prove, fail-then-pass, that (1) two concurrent `tool_result`s for the same file under a divergent (win32-normalizer-driven) spelling collapse into one pipeline run, and (2) `flushDebouncedToolResults` addressed by a divergent spelling still hits the entry scheduled under the other spelling (asserted by elapsed time, not just call count, so a silent miss falling back to the natural debounce timer can't vacuously pass); a third test proves the composite key's stateHash axis still keeps same-path-different-content calls distinct.
 - **`pi --print --no-session` no longer hangs after `agent_settled` — uncleared race-loser timers (refs #1097, recurrence of #22's symptom via a different handle)** — a completed one-shot print-mode process kept running in the event loop instead of exiting. Root cause: `LSPService.getClientForFile` raced the client-wait against an inline `setTimeout(effectiveMaxWaitMs)` whose handle was never stored, so when the client resolved first (the common case) the losing timer stayed a **ref'd** pending timer for the full remaining wait budget. In a long-lived interactive session that is invisible (it fires later, resolves an orphan promise, is GC'd); in a `--print`/subagent process it keeps the loop alive for up to `effectiveMaxWaitMs` (15s in the report, minutes with a server whose `clientWaitTimeoutMs` is large) after the run settled — the `session_shutdown` handler runs and `resetLSPService` completes, but nothing owned or cancelled this timer. Proven via `process`-handle async-hooks tracing: the sole pi-lens-owned handle surviving into the hang was this timeout. The defect **shape** — *an operation raced/bounded by an independently-armed timer whose loser is never cancelled on the operation's resolution* — was swept repo-wide; two same-shape siblings were fixed in the same pass: the quiet-window heartbeat sample-timeout (`clients/quiet-window.ts`, 2s ref'd, kept a one-shot alive ~2s per settle) and the formatter timeout (`clients/format-service.ts`, 30s ref'd). All three now store the timer and `clearTimeout` it in a `finally`, matching the `withDeadline` helper contract the rest of the codebase already uses. Regression test (`tests/clients/lsp/client-wait-timer-cleanup.test.ts`) asserts no pending timer survives a fast client win — it fails on the pre-fix code (`expected 1 to be 0`). One further same-shape site — the cascade references race in `clients/dispatch/integration.ts` (750ms) — is tracked in #1109 for a follow-up as it is under concurrent modification.

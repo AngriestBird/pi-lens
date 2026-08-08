@@ -42,7 +42,8 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | Gleam                 | ✓   | lsp, gleam-check                                                                                               | gleam format            |
 | OCaml                 | ✓   | lsp                                                                                                            | ocamlformat             |
 | Clojure               | ✓   | lsp                                                                                                            | cljfmt                  |
-| Terraform             | ✓   | lsp, tflint                                                                                                    | terraform fmt           |
+| Terraform             | ✓   | lsp, tflint, trivy-config (opt-in)                                                                             | terraform fmt           |
+| Terragrunt            | —   | terragrunt                                                                                                     | terragrunt hcl fmt      |
 | Nix                   | ✓   | lsp                                                                                                            | nixfmt                  |
 | TOML                  | ✓   | lsp, taplo                                                                                                     | taplo                   |
 | CMake                 | ✓ (cmake-language-server) | lsp                                                                                           | cmake-format            |

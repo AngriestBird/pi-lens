@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
 import { logLatency } from "./latency-logger.js";
 import { findNearestContaining, walkUpDirs } from "./path-utils.js";
 import type { ProjectConventions } from "./project-conventions.js";
@@ -713,6 +714,22 @@ const AUTO_INSTALLABLE_DEFAULT_FORMATTERS = new Map<string, string>([
 	["ktlint", "ktlint"],
 ]);
 
+// `gate: "smart-default"` so a matched file is formatted only when nothing else
+// claims it. Misdetection edge: `root.hcl` is filename-detected as terragrunt, so
+// a non-terragrunt `root.hcl` gets smart-default formatted with `terragrunt hcl
+// fmt`'s generic HCL canonicalization — a soft outcome (canonical HCL, no config
+// semantics assumed), not a hard failure.
+const TERRAGRUNT_FORMATTER_POLICY: FormatterPolicy = {
+	formatterNames: ["terragrunt-hcl"],
+	defaultFormatter: "terragrunt-hcl",
+	defaultWhenUnconfigured: true,
+	gate: "smart-default",
+};
+
+const FORMATTER_POLICY_BY_FILENAME = new Map<string, FormatterPolicy>(
+	TERRAGRUNT_FILENAMES.map((name) => [name, TERRAGRUNT_FORMATTER_POLICY]),
+);
+
 export function getFormatterPolicyForExtension(
 	ext: string,
 ): FormatterPolicy | undefined {
@@ -722,6 +739,10 @@ export function getFormatterPolicyForExtension(
 export function getFormatterPolicyForFile(
 	filePath: string,
 ): FormatterPolicy | undefined {
+	const byFilename = FORMATTER_POLICY_BY_FILENAME.get(
+		path.basename(filePath).toLowerCase(),
+	);
+	if (byFilename) return byFilename;
 	return getFormatterPolicyForExtension(path.extname(filePath));
 }
 
@@ -811,6 +832,7 @@ export type LintRunnerName =
 	| "shellcheck"
 	| "fish-indent"
 	| "tflint"
+	| "terragrunt"
 	| "credo"
 	| "cpp-check"
 	| "dart-analyze"
@@ -1247,6 +1269,7 @@ export interface LinterPolicyContext {
 	hasMypyConfig?: boolean;
 	hasDetektConfig?: boolean;
 	hasKtfmtConfig?: boolean;
+	hasTflintConfig?: boolean;
 }
 
 export interface AutofixPolicyContext {
@@ -1365,6 +1388,16 @@ export function getLinterPolicyForFile(
 		};
 	}
 
+	if (TERRAGRUNT_FILENAMES.includes(path.basename(filePath).toLowerCase())) {
+		return {
+			runnerNames: ["terragrunt"],
+			preferredRunners: ["terragrunt"],
+			defaultRunner: "terragrunt",
+			defaultWhenUnconfigured: true,
+			gate: "smart-default",
+		};
+	}
+
 	if ([".kt", ".kts"].includes(ext)) {
 		// When the project opts into ktfmt, ktfmt (a pure formatter wired as a safe
 		// autofix) owns Kotlin formatting; ktlint's lint steps aside so its style
@@ -1452,7 +1485,7 @@ export function getLinterPolicyForFile(
 			preferredRunners: ["tflint"],
 			defaultRunner: "tflint",
 			defaultWhenUnconfigured: true,
-			gate: "smart-default",
+			gate: context.hasTflintConfig ? "config-first" : "smart-default",
 		};
 	}
 
@@ -1553,6 +1586,9 @@ export function getLinterPolicyForCwd(
 		hasMypyConfig: hasMypyConfig(cwd),
 		hasDetektConfig: hasDetektConfig(cwd),
 		hasKtfmtConfig: hasKtfmtConfig(cwd),
+		// From the file's directory, not cwd: a `.tflint.hcl` in a terraform
+		// subdirectory is invisible to an upward walk that starts at the repo root.
+		hasTflintConfig: hasTflintConfig(path.dirname(path.resolve(cwd, filePath))),
 	};
 	const policy = getLinterPolicyForFile(filePath, context);
 	if (policy) {
@@ -2129,6 +2165,16 @@ export function hasRuffConfig(cwd: string): boolean {
 
 export function hasGolangciConfig(cwd: string): boolean {
 	return findNearestContaining(cwd, GOLANGCI_CONFIGS) !== undefined;
+}
+
+// tflint ships built-in rules and runs without config, so `.tflint.hcl` is not
+// a prerequisite — it is the project electing tflint as its terraform linter,
+// which promotes the policy from smart-default to config-first. Takes a start
+// directory rather than the project cwd because tflint resolves config
+// per-directory: callers pass the EDITED FILE's directory so this agrees with
+// what the runner will actually hand tflint via `--config`.
+export function hasTflintConfig(startDir: string): boolean {
+	return findNearestContaining(startDir, [".tflint.hcl"]) !== undefined;
 }
 
 export function hasClangFormatConfig(cwd: string): boolean {
