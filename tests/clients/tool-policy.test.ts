@@ -9,6 +9,7 @@ import {
 	getBiomeConfigPath,
 	getFormatterPolicyForFile,
 	getJstsLintPolicy,
+	getLinterPolicyForCwd,
 	getLinterPolicyForFile,
 	getPreferredAutofixTools,
 	getPreferredJstsLintRunners,
@@ -45,6 +46,7 @@ import {
 	hasStandardrbConfig,
 	hasStylelintConfig,
 	hasStyluaConfig,
+	hasTflintConfig,
 	hasVitePlusConfig,
 	hasYamllintConfig,
 	isSafePipelineAutofixTool,
@@ -192,6 +194,19 @@ describe("tool-policy", () => {
 			defaultFormatter: "taplo",
 			defaultWhenUnconfigured: true,
 		});
+		expect(getFormatterPolicyForFile("/tmp/terragrunt.hcl")).toMatchObject({
+			defaultFormatter: "terragrunt-hcl",
+			defaultWhenUnconfigured: true,
+		});
+		expect(getFormatterPolicyForFile("/tmp/root.hcl")).toMatchObject({
+			defaultFormatter: "terragrunt-hcl",
+			defaultWhenUnconfigured: true,
+		});
+		expect(getFormatterPolicyForFile("/tmp/Terragrunt.HCL")).toMatchObject({
+			defaultFormatter: "terragrunt-hcl",
+			defaultWhenUnconfigured: true,
+		});
+		expect(getFormatterPolicyForFile("/tmp/foo.hcl")).toBeUndefined();
 	});
 
 	it("chooses autofix tools from config-aware smart defaults", () => {
@@ -300,6 +315,22 @@ describe("tool-policy", () => {
 			preferredRunners: ["yamllint"],
 			gate: "smart-default",
 		});
+		expect(getLinterPolicyForFile("/tmp/terragrunt.hcl", {})).toMatchObject({
+			preferredRunners: ["terragrunt"],
+			defaultRunner: "terragrunt",
+			gate: "smart-default",
+		});
+		expect(getLinterPolicyForFile("/tmp/root.hcl", {})).toMatchObject({
+			preferredRunners: ["terragrunt"],
+			defaultRunner: "terragrunt",
+			gate: "smart-default",
+		});
+		expect(getLinterPolicyForFile("/tmp/Root.HCL", {})).toMatchObject({
+			preferredRunners: ["terragrunt"],
+			defaultRunner: "terragrunt",
+			gate: "smart-default",
+		});
+		expect(getLinterPolicyForFile("/tmp/foo.hcl", {})).toBeUndefined();
 		expect(getLinterPolicyForFile("/tmp/file.md", {})).toMatchObject({
 			preferredRunners: ["markdownlint"],
 			gate: "smart-default",
@@ -345,6 +376,20 @@ describe("tool-policy", () => {
 			getLinterPolicyForFile("/tmp/file.go", { hasGolangciConfig: true }),
 		).toMatchObject({
 			preferredRunners: ["golangci-lint"],
+			gate: "config-first",
+		});
+		// Terraform: tflint has built-in rules, so it stays a smart default with no
+		// config. A project `.tflint.hcl` is an explicit opt-in, which promotes it
+		// to config-first the same way `.golangci.yml` does for Go.
+		expect(getLinterPolicyForFile("/tmp/file.tf", {})).toMatchObject({
+			preferredRunners: ["tflint"],
+			defaultRunner: "tflint",
+			gate: "smart-default",
+		});
+		expect(
+			getLinterPolicyForFile("/tmp/file.tfvars", { hasTflintConfig: true }),
+		).toMatchObject({
+			preferredRunners: ["tflint"],
 			gate: "config-first",
 		});
 	});
@@ -597,6 +642,12 @@ describe("tool-policy", () => {
 					"# cmake-format config\n",
 					() => hasCmakeFormatConfig(nestedDir),
 				],
+				[
+					"tflint",
+					".tflint.hcl",
+					'plugin "terraform" {\n  enabled = true\n}\n',
+					() => hasTflintConfig(nestedDir),
+				],
 			];
 
 			for (const [name, configFile, content, detector] of cases) {
@@ -604,6 +655,43 @@ describe("tool-policy", () => {
 				expect(detector(), name).toBe(true);
 				fs.rmSync(path.join(env.tmpDir, configFile));
 			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// The tflint runner resolves `.tflint.hcl` by walking up from the EDITED
+	// FILE's directory, so the policy has to ask the same question from the same
+	// place. Keyed off the project cwd it would miss every config that lives in a
+	// terraform subdirectory — the common monorepo layout — and report
+	// smart-default for a project that had explicitly configured tflint.
+	it("detects a .tflint.hcl that lives below the project root", () => {
+		const env = setupTestEnvironment("pi-lens-tflint-policy-root-");
+		try {
+			const stackDir = path.join(env.tmpDir, "infra", "stack");
+			fs.mkdirSync(stackDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(env.tmpDir, "infra", ".tflint.hcl"),
+				'plugin "terraform" {\n  enabled = true\n}\n',
+			);
+
+			expect(
+				getLinterPolicyForCwd(path.join(stackDir, "main.tf"), env.tmpDir),
+			).toMatchObject({ preferredRunners: ["tflint"], gate: "config-first" });
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("leaves the terraform policy at smart-default with no .tflint.hcl anywhere", () => {
+		const env = setupTestEnvironment("pi-lens-tflint-policy-none-");
+		try {
+			const stackDir = path.join(env.tmpDir, "infra", "stack");
+			fs.mkdirSync(stackDir, { recursive: true });
+
+			expect(
+				getLinterPolicyForCwd(path.join(stackDir, "main.tf"), env.tmpDir),
+			).toMatchObject({ preferredRunners: ["tflint"], gate: "smart-default" });
 		} finally {
 			env.cleanup();
 		}
