@@ -31,6 +31,7 @@ All notable changes to pi-lens will be documented in this file.
 	sweep completes) while letting a genuinely-settled one-shot exit without
 	waiting. Regression test spawns a fake child per spawn site and asserts the
 	child + its stdout are unref'd (fails pre-fix, passes post-fix).
+- **Persistence workers could keep completed one-shot processes alive ([#1148](https://github.com/apmantza/pi-lens/issues/1148))** — project-snapshot and review-graph workers called `unref()` before registering their `"message"` listeners, and Node re-referenced the public `MessagePort` when each listener was added. Both workers now install all lifecycle listeners before `unref()`, so persistence remains asynchronous without retaining an otherwise-finished `pi --print` or subprocess workflow. Real child-process regression tests require both persistence paths to finish writing and exit naturally.
 - **`normalizeFilePath` mangled a Windows-shaped path on non-Windows OS (closes #1150)** —
 	`normalizeFilePath` commits to its win32 branch by path *shape*
 	(`isWindowsPath`), so a `C:/…`- or `C:\…`-shaped path enters that branch on
