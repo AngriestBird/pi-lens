@@ -35,7 +35,9 @@ import { isAtOrAboveHomeDir } from "./path-utils.js";
 import { isPrintMode } from "./print-mode.js";
 import {
 	type ProjectSequenceBase,
+	type ProjectSequenceIndex,
 	readLatestProjectSequence,
+	readLatestProjectSequenceAsync,
 } from "./project-changes.js";
 import {
 	getProjectSnapshotPath,
@@ -243,6 +245,113 @@ function resolveStartupMode(): StartupMode {
 }
 
 // --- Session-start helpers ---
+
+// #1162: bound the session_start sequence read to this budget. The default
+// mirrors the issue's ~250ms figure; overridable for tests (mirrors the
+// `PI_LENS_WARMUP_DELAY_MS` precedent above) so a regression can use a tiny
+// budget instead of racing a real 250ms wall-clock wait.
+function sequenceReadBudgetMs(): number {
+	const raw = Number(process.env.PI_LENS_SEQUENCE_READ_BUDGET_MS ?? 250);
+	return Number.isFinite(raw) && raw > 0 ? raw : 250;
+}
+
+/**
+ * Bound the sequence read that gates snapshot freshness (#1162). Normally
+ * ~2ms, but the underlying read is a blocking `fs.readFileSync` that can
+ * balloon under host I/O pressure (2125ms observed) with NO escape hatch —
+ * and a `setTimeout`/`Promise.race` timeout can never preempt a *synchronous*
+ * read (the thread only returns to the event loop once the OS call
+ * returns). The fix is to read asynchronously (`readLatestProjectSequenceAsync`,
+ * which uses `fs.promises.readFile` and genuinely yields) so a timeout CAN
+ * win the race.
+ *
+ * On the healthy path (the overwhelming common case) the async read settles
+ * first and this adds ~zero overhead beyond one microtask hop. On a stalled
+ * read, the timeout wins: the caller proceeds immediately with a cold
+ * sequence (`{ projectSeq: 0, fileSeqByPath: empty }` — byte-identical to
+ * what a full replay of a missing/empty log already produces, so this is
+ * exactly the existing cold-start case, not a new code path) while the real
+ * read keeps running in the background. When it resolves, it re-seeds the
+ * runtime so the warm-start optimization is recovered for the NEXT
+ * session_start/turn instead of lost for the rest of the process — unless
+ * the session has since moved on (`runtime.isCurrentSession`) or this is a
+ * one-shot `pi --print` process (`isPrintMode()`), which has no future
+ * session in-process to benefit and where letting background work outlive
+ * settle is exactly the referenced-handle retention class #1154/#1153 just
+ * closed. The timeout timer itself is `.unref()`'d and always cleared on
+ * both race outcomes, so it never holds the process open either.
+ *
+ * Never silent (shape 10): the caller's `session_start_sequence_read`
+ * latency line always carries `timedOut`, and a successful deferred reseed
+ * logs its own `session_start_sequence_read_deferred_reseed` phase.
+ */
+async function readSequenceWithBudget(args: {
+	snapshotRoot: string;
+	base?: ProjectSequenceBase;
+	cwd: string;
+	runtime: RuntimeCoordinator;
+	sessionGeneration: number;
+	dbg: (msg: string) => void;
+}): Promise<{ latestSeq: ProjectSequenceIndex; timedOut: boolean }> {
+	const { snapshotRoot, base, cwd, runtime, sessionGeneration, dbg } = args;
+	const readPromise = readLatestProjectSequenceAsync(snapshotRoot, base);
+
+	let timeoutHandle: NodeJS.Timeout | undefined;
+	const timeoutPromise = new Promise<{ timedOut: true }>((resolve) => {
+		timeoutHandle = setTimeout(
+			() => resolve({ timedOut: true }),
+			sequenceReadBudgetMs(),
+		);
+		timeoutHandle.unref();
+	});
+
+	const raced = await Promise.race([
+		readPromise.then(
+			(latestSeq) => ({ timedOut: false as const, latestSeq }),
+		),
+		timeoutPromise,
+	]);
+	if (timeoutHandle) clearTimeout(timeoutHandle);
+
+	if (!raced.timedOut) {
+		return { latestSeq: raced.latestSeq, timedOut: false };
+	}
+
+	dbg(
+		`session_start: sequence read exceeded ${sequenceReadBudgetMs()}ms budget — falling back to cold-start sequence`,
+	);
+
+	if (!isPrintMode()) {
+		readPromise
+			.then((latestSeq) => {
+				if (!runtime.isCurrentSession(sessionGeneration)) return;
+				const reseedStartedAt = Date.now();
+				runtime.seedProjectSequence?.(
+					latestSeq.projectSeq,
+					latestSeq.fileSeqByPath,
+				);
+				logLatency({
+					type: "phase",
+					phase: "session_start_sequence_read_deferred_reseed",
+					filePath: cwd,
+					startedAt: new Date(reseedStartedAt).toISOString(),
+					durationMs: Date.now() - reseedStartedAt,
+					metadata: { entries: latestSeq.fileSeqByPath.size, deferred: true },
+				});
+				dbg(
+					`session_start: deferred sequence read completed — reseeded projectSeq=${latestSeq.projectSeq} fileSeqEntries=${latestSeq.fileSeqByPath.size}`,
+				);
+			})
+			.catch((err) => {
+				dbg(`session_start: deferred sequence read failed: ${err}`);
+			});
+	}
+
+	return {
+		latestSeq: { projectSeq: 0, fileSeqByPath: new Map<string, number>() },
+		timedOut: true,
+	};
+}
 
 async function igniteWarmFiles(
 	cwd: string,
@@ -1654,17 +1763,21 @@ export async function handleSessionStart(
 		runtime.projectRoot = cwd;
 		const sequenceReadStartedAt = Date.now();
 		const snapshotRoot = resolveSnapshotRoot(cwd);
-		const latestSeq = readLatestProjectSequence(
+		const { latestSeq, timedOut } = await readSequenceWithBudget({
 			snapshotRoot,
-			snapshotSequenceBase(snapshotRoot),
-		);
+			base: snapshotSequenceBase(snapshotRoot),
+			cwd,
+			runtime,
+			sessionGeneration: runtime.sessionGeneration,
+			dbg,
+		});
 		logLatency({
 			type: "phase",
 			phase: "session_start_sequence_read",
 			filePath: cwd,
 			startedAt: new Date(sequenceReadStartedAt).toISOString(),
 			durationMs: Date.now() - sequenceReadStartedAt,
-			metadata: { entries: latestSeq.fileSeqByPath.size },
+			metadata: { entries: latestSeq.fileSeqByPath.size, timedOut },
 		});
 		runtime.seedProjectSequence?.(
 			latestSeq.projectSeq,
@@ -1750,19 +1863,28 @@ export async function handleSessionStart(
 		}
 	}
 
+	// Captured here (not at first use, below) because #1162's bounded read
+	// needs it to gate the deferred reseed against a stale/moved-on session —
+	// it's stable for the rest of this call (no further `resetForSession`
+	// between here and the later uses of the same generation).
+	const sessionGeneration = runtime.sessionGeneration;
 	const sequenceReadStartedAt = Date.now();
 	const snapshotRoot = resolveSnapshotRoot(cwd);
-	const latestSeq = readLatestProjectSequence(
+	const { latestSeq, timedOut } = await readSequenceWithBudget({
 		snapshotRoot,
-		snapshotSequenceBase(snapshotRoot),
-	);
+		base: snapshotSequenceBase(snapshotRoot),
+		cwd,
+		runtime,
+		sessionGeneration,
+		dbg,
+	});
 	logLatency({
 		type: "phase",
 		phase: "session_start_sequence_read",
 		filePath: cwd,
 		startedAt: new Date(sequenceReadStartedAt).toISOString(),
 		durationMs: Date.now() - sequenceReadStartedAt,
-		metadata: { entries: latestSeq.fileSeqByPath.size },
+		metadata: { entries: latestSeq.fileSeqByPath.size, timedOut },
 	});
 	runtime.seedProjectSequence?.(latestSeq.projectSeq, latestSeq.fileSeqByPath);
 	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
@@ -2007,7 +2129,8 @@ export async function handleSessionStart(
 		analysisRoot,
 	);
 
-	const sessionGeneration = runtime.sessionGeneration;
+	// `sessionGeneration` was captured earlier (#1162's bounded sequence read
+	// needs it before this point) and is stable across this whole call.
 	if (!allowBootstrapTasks) {
 		dbg("session_start: skipping startup background scans (startup mode)");
 	} else if (!startupScan.canWarmCaches) {

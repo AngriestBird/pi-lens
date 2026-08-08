@@ -6,6 +6,28 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`session_start_sequence_read` was an unbounded synchronous blocking read on the session_start hot path (closes #1162)** —
+	`readLatestProjectSequence` called `fs.readFileSync` on the project
+	change-log before `session_start_total` returned; normally ~2ms, but under
+	host I/O pressure it had no escape hatch and was observed to balloon to
+	2125ms in production latency.log. A `setTimeout`/`Promise.race` timeout
+	cannot preempt a synchronous read (the thread only returns to the event
+	loop once the OS call returns), so the fix adds an async twin
+	(`readLatestProjectSequenceAsync`, `fs.promises.readFile`) and races it
+	against a 250ms budget (`PI_LENS_SEQUENCE_READ_BUDGET_MS`-overridable) in
+	both the quick-mode and full-mode session_start paths. On a healthy read
+	(the common case) this adds ~zero overhead; on a stalled read, session_start
+	proceeds immediately with the safe cold-start sequence (only gates
+	snapshot freshness, never correctness) while the real read finishes in the
+	background and re-seeds the runtime — skipped for a one-shot `pi --print`
+	process via `isPrintMode()`, screening the #1154/#1153 one-shot
+	referenced-handle retention class. The fallback is never silent: the
+	`session_start_sequence_read` latency line now carries a `timedOut` flag,
+	and a background reseed logs its own
+	`session_start_sequence_read_deferred_reseed` phase. Fail-then-pass
+	regression tests inject a controllable slow read and assert session_start
+	returns within budget, falls back to cold-start with the flag set, and
+	still seeds normally on the healthy path.
 - **Quick-mode background warmup kept a one-shot `pi -p`/`--print` process alive (closes #1154)** —
 	`handleSessionStart` forces **quick mode** for both a real `pi -p`/`--print`
 	one-shot AND an interactive process's first session (to protect keystroke
