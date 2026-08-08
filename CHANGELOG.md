@@ -10,6 +10,31 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Formatter definitions and `FORMATTER_POLICY_BY_EXTENSION` were unbound hand-maintained inverse lists; added a bidirectional drift guard and fixed two latent mismatches (closes #1135; refs #1086 #1134 #883)** —
+	`clients/formatters.ts` (formatter → `extensions[]`) and `clients/tool-policy.ts`'s
+	`FORMATTER_POLICY_BY_EXTENSION` (extension → `formatterNames[]`) are hand-maintained
+	INVERSE mappings of the same relation with no test binding the two directions — the
+	#883/#209 single-source-of-truth class, and the general shape under #1134's oxfmt/.svelte
+	gap. Added `tests/clients/formatter-policy-consistency.test.ts`, which imports the real
+	`ALL_FORMATTERS` definitions and the policy maps and asserts both directions: every
+	definition extension is policy-included / a documented deliberate exclusion / a documented
+	no-policy fallback (so a definition gaining a policy-gated extension can't be silently
+	never-offered — #1134's exact symptom); and every policy `formatterName`/`defaultFormatter`
+	is a real formatter whose definition claims that extension or filename (so a broken option
+	can't be offered — including the terragrunt-hcl filename-keyed variant). Fixed two real
+	latent drifts surfaced by the guard, both behavior-identical (the mismatched entries were
+	already inert): the `.sass` policy listed `oxfmt` though oxfmt does not support `.sass`
+	(absent from `OXFMT_SUPPORTED_EXTENSIONS`), and the `.fish` formatter policy named
+	`fish-indent`, which has no `FormatterInfo` (it is a lint runner) — a dead, unsatisfiable
+	entry, now removed. A structural derive (tool-policy importing the definitions) was rejected
+	because `formatters.ts` already imports `tool-policy.ts`, so the reverse edge would create a
+	module import cycle; the test-based guard binds both directions while keeping the dependency
+	one-way. Also bound `AUTO_INSTALLABLE_DEFAULT_FORMATTERS` keys to real formatter definitions
+	(same formatter-name-reference class). The guard reads four newly-exported read-only symbols
+	(`ALL_FORMATTERS` plus the three policy maps `FORMATTER_POLICY_BY_EXTENSION`,
+	`FORMATTER_POLICY_BY_FILENAME`, `AUTO_INSTALLABLE_DEFAULT_FORMATTERS`), and its own two
+	allowlists (deliberate exclusions, no-policy fallbacks) each carry a minimality check so
+	they cannot rot into blanket escape hatches.
 - **Pull-diagnostics entries never bound to document content, so they never demoted (closes #1104, refs #1095 #1096 #1100)** —
 	#1096 bound LSP diagnostics to a content fingerprint on the PUSH path
 	(`publishDiagnostics` version echo + send-time hash); the PULL path
