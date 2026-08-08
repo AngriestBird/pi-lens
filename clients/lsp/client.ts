@@ -315,7 +315,16 @@ export interface LSPClientInfo {
 	requestWorkspaceDiagnostics(
 		budgetMs: number,
 	): Promise<
-		Array<{ filePath: string; diagnostics: LSPDiagnostic[] }> | undefined
+		| Array<{
+				filePath: string;
+				diagnostics: LSPDiagnostic[];
+				/** #1104: sha256 of the file bytes active at the moment this pull's
+				 *  answer for `filePath` was resolved — present for a "full" report
+				 *  (fresh read) or inherited from the prior pull for an "unchanged"
+				 *  one; absent only when the file could not be read. */
+				contentHash?: string;
+		  }>
+		| undefined
 	>;
 	/** Capability snapshot for navigation/edit operations */
 	getOperationSupport(): LSPOperationSupport;
@@ -525,6 +534,13 @@ const SHUTDOWN_REQUEST_TIMEOUT_MS = positiveIntFromEnv(
 	"PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS",
 	1000,
 );
+// #1104: bound on `state.workspacePullResultCache` — one entry per distinct
+// file the server has ever returned a `resultId` for across this client's
+// lifetime. A full clear on overflow (rather than an LRU) is fine, same
+// reasoning as `DISK_BINDING_MEMO_MAX` in diagnostic-binding.ts: each entry is
+// cheaply rebuilt by the next full pull, the worst case is just one extra full
+// (non-`unchanged`) report per affected file.
+const WORKSPACE_PULL_RESULT_CACHE_MAX = 4096;
 // Anti-deadlock backstop for workspace/executeCommand. Deliberately generous
 // (30s): the command is mutating and legitimately long-running (a real server
 // refactor / organize-imports), so this must not truncate valid work — it only
@@ -633,6 +649,26 @@ export interface LSPClientState {
 	 *  behavior is unchanged. Kept in lockstep with `pushDiagnostics`: written on
 	 *  publish accept, cleared by `clearDiagnosticsForPath`. */
 	readonly diagnosticBindings: Map<string, StoredDiagnosticBinding>;
+	/** #1104: the server-issued `resultId` from the last `textDocument/diagnostic`
+	 *  pull for a path (primary or a `relatedDocuments` entry), so the NEXT pull
+	 *  can send it as `previousResultId` and receive an `unchanged` report instead
+	 *  of a full recompute. Cleared with the rest of a path's diagnostic state by
+	 *  `clearDiagnosticsForPath` so a resync never inherits a stale basis. */
+	readonly pullResultIds: Map<string, string>;
+	/** #1104: per-path cache of the last `workspace/diagnostic` pull's resultId +
+	 *  diagnostics + content binding, so an `unchanged` report in a LATER pull can
+	 *  inherit the prior basis instead of the record site staying stuck at
+	 *  "unknown" forever. Keyed by normalized path; `uri` retains the server's
+	 *  exact spelling for echoing back in `previousResultIds`. */
+	readonly workspacePullResultCache: Map<
+		string,
+		{
+			uri: string;
+			resultId: string;
+			diagnostics: LSPDiagnostic[];
+			contentHash?: string;
+		}
+	>;
 	readonly openDocuments: Set<string>;
 	/** Original URI spelling for each open document; path keys are normalized. */
 	readonly openDocumentUris?: Map<string, string>;
@@ -976,6 +1012,11 @@ function clearDiagnosticsForPath(
 	// `documentContentHashes` record is intentionally retained: it describes what
 	// we sent, which the NEXT publish for that version still needs to bind to.)
 	state.diagnosticBindings?.delete(normalizedPath);
+	// #1104: a resync invalidates any `unchanged`-report basis too — the next
+	// pull must not inherit a resultId/contentHash computed against the
+	// content this resync just replaced.
+	state.pullResultIds?.delete(normalizedPath);
+	state.workspacePullResultCache?.delete(normalizedPath);
 	legacy.diagnostics?.delete(normalizedPath);
 	legacy.diagnosticTimestamps?.delete(normalizedPath);
 }
@@ -1377,6 +1418,12 @@ async function clientRequestPullDiagnostics(
 ): Promise<PullDiagnosticsOutcome> {
 	if (!isClientAlive(state)) return { status: "unavailable" };
 	const uri = pathToFileURL(filePath).href;
+	const normalizedPath = normalizeMapKey(filePath);
+	// #1104: echo the last resultId we hold for this document so a server that
+	// hasn't changed its view can answer `kind: "unchanged"` instead of
+	// recomputing — see the `kind === "unchanged"` branch below for how that's
+	// honored (inherit, never treat an omitted `items` as clean).
+	const previousResultId = state.pullResultIds.get(normalizedPath);
 	try {
 		// withTimeout is the backstop against a hung pull-mode server: without it
 		// this await never settles unless the stream is destroyed. Bounded by the
@@ -1386,39 +1433,78 @@ async function clientRequestPullDiagnostics(
 		const report = await withTimeout(
 			safeSendRequest<{
 				kind?: string;
+				resultId?: string;
 				items?: LSPDiagnostic[];
-				relatedDocuments?: Record<string, { items?: LSPDiagnostic[] }>;
+				relatedDocuments?: Record<
+					string,
+					{ kind?: string; resultId?: string; items?: LSPDiagnostic[] }
+				>;
 			}>(state.connection, "textDocument/diagnostic", {
 				textDocument: { uri },
+				...(previousResultId !== undefined && { previousResultId }),
 			}),
 			Math.max(1, Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs)),
 		);
 
 		if (!report) return { status: "unavailable" };
 
-		const normalizedPath = normalizeMapKey(filePath);
-		const primaryItems = normalizeLspDiagnostics(report.items ?? []);
 		const now = Date.now();
-		state.documentPullDiagnostics.set(normalizedPath, primaryItems);
-		state.documentPullDiagnosticTimestamps.set(normalizedPath, now);
-		state.diagnosticsVersion += 1;
-		let totalCount = primaryItems.length;
+		// #1104: the fingerprint of the content we last sent for this document —
+		// the SAME `documentContentHashes` entry the push binding path uses
+		// (`recordSentContent` runs unconditionally on every didOpen/didChange,
+		// regardless of push/pull mode), so this costs no extra read. A pull
+		// response describes whatever the server had when it answered, which for
+		// a pi-lens-opened document is exactly that last-sent payload.
+		const sentHash = state.documentContentHashes.get(normalizedPath)?.hash;
+		let totalCount: number;
+		if (report.kind === "unchanged") {
+			// #1104: same resultId basis as last time — an omitted `items` here
+			// means "no change", NOT "clean". Overwriting with `[]` would be the
+			// exact false-clean shape #570/#571 already fixed for the touch path;
+			// keep the previously stored diagnostics and binding as-is.
+			totalCount = state.documentPullDiagnostics.get(normalizedPath)?.length ?? 0;
+			// Still a fresh confirmation as of `now` even though the content is
+			// unchanged — bump the timestamp so `getAllDiagnostics()` doesn't read
+			// this entry as aging purely because the server had nothing new to say.
+			state.documentPullDiagnosticTimestamps.set(normalizedPath, now);
+		} else {
+			const primaryItems = normalizeLspDiagnostics(report.items ?? []);
+			state.documentPullDiagnostics.set(normalizedPath, primaryItems);
+			state.documentPullDiagnosticTimestamps.set(normalizedPath, now);
+			state.diagnosticsVersion += 1;
+			state.diagnosticBindings.set(normalizedPath, { contentHash: sentHash });
+			totalCount = primaryItems.length;
+		}
+		if (report.resultId !== undefined) {
+			state.pullResultIds.set(normalizedPath, report.resultId);
+		} else {
+			state.pullResultIds.delete(normalizedPath);
+		}
 
 		if (report.relatedDocuments) {
 			for (const [relatedUri, related] of Object.entries(
 				report.relatedDocuments,
 			)) {
 				const relatedPath = uriToPath(relatedUri);
-				const relatedItems = normalizeLspDiagnostics(related?.items ?? []);
-				state.documentPullDiagnostics.set(
-					normalizeMapKey(relatedPath),
-					relatedItems,
-				);
-				state.documentPullDiagnosticTimestamps.set(
-					normalizeMapKey(relatedPath),
-					now,
-				);
-				totalCount += relatedItems.length;
+				const relatedNormalized = normalizeMapKey(relatedPath);
+				if (related?.kind === "unchanged") {
+					totalCount +=
+						state.documentPullDiagnostics.get(relatedNormalized)?.length ?? 0;
+					state.documentPullDiagnosticTimestamps.set(relatedNormalized, now);
+				} else {
+					const relatedItems = normalizeLspDiagnostics(related?.items ?? []);
+					state.documentPullDiagnostics.set(relatedNormalized, relatedItems);
+					state.documentPullDiagnosticTimestamps.set(relatedNormalized, now);
+					// #1104: a related document's diagnostics were NOT computed against
+					// content we independently sent/fingerprinted (we never requested
+					// it directly) — its binding stays honestly "unknown" rather than
+					// borrowing the primary document's hash.
+					state.diagnosticBindings.delete(relatedNormalized);
+					totalCount += relatedItems.length;
+				}
+				if (related?.resultId !== undefined) {
+					state.pullResultIds.set(relatedNormalized, related.resultId);
+				}
 			}
 		}
 
@@ -1442,31 +1528,87 @@ export async function clientRequestWorkspaceDiagnostics(
 	state: LSPClientState,
 	budgetMs: number,
 ): Promise<
-	Array<{ filePath: string; diagnostics: LSPDiagnostic[] }> | undefined
+	| Array<{ filePath: string; diagnostics: LSPDiagnostic[]; contentHash?: string }>
+	| undefined
 > {
 	if (!isClientAlive(state)) return undefined;
 	if (!state.workspaceDiagnosticsSupport.workspaceDiagnostics) return undefined;
 	try {
+		// #1104: echo every resultId we hold from a PRIOR pull so the server can
+		// answer `kind: "unchanged"` for files it hasn't recomputed, instead of
+		// resending (and us re-hashing) every file on every sweep.
+		const previousResultIds = Array.from(
+			state.workspacePullResultCache.values(),
+		).map((entry) => ({ uri: entry.uri, value: entry.resultId }));
 		const report = await withTimeout(
 			safeSendRequest<{
 				items?: Array<{
 					uri?: string;
 					kind?: string;
+					resultId?: string;
 					items?: LSPDiagnostic[];
 				}>;
-			}>(state.connection, "workspace/diagnostic", { previousResultIds: [] }),
+			}>(state.connection, "workspace/diagnostic", { previousResultIds }),
 			Math.max(1, budgetMs),
 		);
 		if (!report || !Array.isArray(report.items)) return undefined;
-		const out: Array<{ filePath: string; diagnostics: LSPDiagnostic[] }> = [];
+		const out: Array<{
+			filePath: string;
+			diagnostics: LSPDiagnostic[];
+			contentHash?: string;
+		}> = [];
 		for (const item of report.items) {
-			// Only "full" reports carry items; "unchanged" means "same as last pull"
-			// (none, since previousResultIds is empty on this one-shot request).
-			if (!item?.uri || item.kind !== "full") continue;
-			out.push({
-				filePath: uriToPath(item.uri),
-				diagnostics: normalizeLspDiagnostics(item.items ?? []),
-			});
+			if (!item?.uri) continue;
+			const filePath = uriToPath(item.uri);
+			const normalizedPath = normalizeMapKey(filePath);
+			if (item.kind === "unchanged") {
+				// #1104: inherit the prior pull's diagnostics + content binding for
+				// the SAME resultId basis — an "unchanged" report never carries
+				// `items`, so without this a file the server confirmed unchanged
+				// would silently drop out of the sweep result entirely.
+				const prior = state.workspacePullResultCache.get(normalizedPath);
+				if (!prior) continue; // no earlier basis to inherit — nothing to report
+				if (item.resultId !== undefined) {
+					state.workspacePullResultCache.set(normalizedPath, {
+						...prior,
+						resultId: item.resultId,
+					});
+				}
+				out.push({
+					filePath,
+					diagnostics: prior.diagnostics,
+					contentHash: prior.contentHash,
+				});
+				continue;
+			}
+			// "full" (or a non-conforming server omitting `kind`, per the LSP
+			// default) — recompute and re-fingerprint.
+			const diagnostics = normalizeLspDiagnostics(item.items ?? []);
+			// #1104: fingerprint the file bytes active AT REQUEST TIME. Best-effort —
+			// a read failure (deleted/unreadable mid-sweep) just leaves contentHash
+			// undefined, so the binding reads honestly "unknown", never fabricated.
+			let contentHash: string | undefined;
+			try {
+				contentHash = hashDiagnosticContent(await readFile(filePath, "utf-8"));
+			} catch {
+				contentHash = undefined;
+			}
+			if (item.resultId !== undefined) {
+				if (
+					state.workspacePullResultCache.size >= WORKSPACE_PULL_RESULT_CACHE_MAX
+				) {
+					state.workspacePullResultCache.clear();
+				}
+				state.workspacePullResultCache.set(normalizedPath, {
+					uri: item.uri,
+					resultId: item.resultId,
+					diagnostics,
+					contentHash,
+				});
+			} else {
+				state.workspacePullResultCache.delete(normalizedPath);
+			}
+			out.push({ filePath, diagnostics, contentHash });
 		}
 		return out;
 	} catch {
@@ -2202,6 +2344,8 @@ export async function createLSPClient(options: {
 		diagnosticDocVersions: new Map(),
 		documentContentHashes: new Map(),
 		diagnosticBindings: new Map(),
+		pullResultIds: new Map(),
+		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
 		openDocumentUris: new Map(),
 		pendingOpens: new Set(),

@@ -35,6 +35,77 @@ All notable changes to pi-lens will be documented in this file.
 	`FORMATTER_POLICY_BY_FILENAME`, `AUTO_INSTALLABLE_DEFAULT_FORMATTERS`), and its own two
 	allowlists (deliberate exclusions, no-policy fallbacks) each carry a minimality check so
 	they cannot rot into blanket escape hatches.
+- **Pull-diagnostics entries never bound to document content, so they never demoted (closes #1104, refs #1095 #1096 #1100)** —
+	#1096 bound LSP diagnostics to a content fingerprint on the PUSH path
+	(`publishDiagnostics` version echo + send-time hash); the PULL path
+	(`textDocument/diagnostic`, `workspace/diagnostic`) recorded no fingerprint
+	at all, so pull-served cache entries read binding `"unknown"` forever and
+	the #1096 P2-1 service-sweep binding gate could never protect them. Fixed by
+	threading the server's `resultId` and a request-time content hash through
+	both pull requests: a `"full"` report is fingerprinted (the single-file path
+	reuses the exact sent-content hash `recordSentContent` already captures on
+	every didOpen/didChange — no extra read; the project-wide
+	`workspace/diagnostic` pull hashes disk bytes at request time since files
+	may not yet be open when it fires), and an `"unchanged"` report (now
+	requested via `previousResultId`/`previousResultIds`) inherits the prior
+	pull's diagnostics AND binding instead of being misread as a confirmed-clean
+	`[]` (the #570/#571 false-clean shape). The workspace pull-sweep record site
+	(`clients/lsp/index.ts`) now threads this `contentHash` into
+	`workspaceDiagnosticsCacheCtx.record()`, closing the gap the site's own
+	`#1095` doc comment used to document as intentional. Also closed an
+	AGENTS.md shape-5 gap in the sibling per-file touch path: `processFile` read
+	the `#1095` binding off the RAW `touchFile` diagnostics array before
+	`applyAuxiliarySuppressions`' `.filter()` rebuilds it (a `.filter()` copy
+	does not carry a source array's non-enumerable `.binding`), and
+	`LSPService.mergeBinding` no longer gates a contributor's `contentHash` on
+	that SAME contributor also carrying a `version` — pull bindings
+	legitimately carry a hash with no version, and the old gate silently
+	dropped it. Folded in two #1100-review P3s on the same surface: the
+	cascade's degraded/fallback display paths and the `lsp_binding_rejected`
+	indeterminate-advisory preamble (`clients/runtime-turn.ts`), which
+	previously reused the graph-unavailable wording even when the review graph
+	was fine and only the LSP display was withheld, now use a
+	binding-rejection-specific frame. Fail-then-pass regression tests cover:
+	the pull-sweep record site actually receiving a `contentHash`; a
+	pull-recorded entry whose content changed under a matching mtime being
+	demoted (not replayed) on the next sweep; the per-file touch path's binding
+	surviving the suppression filter; and the `"unchanged"`-report inheritance
+	on both the single-file and workspace pull protocols.
+- **Config caches gated freshness on mtime alone — the mtime-only cache-freshness class sweep (closes #1105)** —
+	Completed the shape-6 (freshness stamp that doesn't cover the data's real
+	dependency) sweep the #1092→#1119 diagnostics/word-index arc deferred. Audited
+	every persisted/derived cache with an mtime/TTL key: word-index (#1119),
+	`rule-cache.ts` (`mtime:size`), `sgconfig.ts` (content-hashed), the
+	`yaml-rule-parser` project/bundled split (project rules content-hashed via
+	`loadYamlRulesFresh`, bundled dir-mtime is safe by process-lifetime
+	immutability), `reverse-deps` (snapshot-seq/generation-coupled), installer
+	`probe-cache` (existence re-validated every read + ast-grep version-family
+	verify — mtime is a refresh hint, not the correctness gate), `TreeCache`
+	(content-hash authoritative, #890), and the project-snapshot per-file
+	`mtime:size` entries — all already-hardened or safe. The one gap: the
+	`.pi-lens.json` config caches gated reuse on the config file's **mtime alone**,
+	so an in-place edit that preserved mtime (git checkout timestamp restoration, a
+	same-second rewrite) but changed the file's byte length replayed a stale parsed
+	config / ignore matcher — a config that drives mutation, ignore, and rule
+	policy. This spanned every freshness gate in the two files: the root parsed-
+	config caches (`loadPiLensProjectConfig`/`loadPiLensConfigInDir` in
+	`clients/project-lens-config.ts`), the root ignore-matcher cache, and — the
+	member found in adversarial review — the **nested `.pi-lens.json`/`.gitignore`
+	layering cache** (`patternsForDir`, #783) in `clients/file-utils.ts`, which
+	short-circuits AHEAD of the root caches so a preserved-mtime, length-changing
+	edit to a NESTED config replayed stale patterns for that subtree. Fixed by
+	adding **`size` as the free second axis** of the review-graph `size:mtimeMs`
+	signature to every gate — the root `.pi-lens.json` (threaded through
+	`PiLensConfigMarker` in `clients/workspace-topology.ts`), the root `.gitignore`
+	and global `~/.pi-lens/config.json` (via a shared `fileFreshnessSignature`
+	helper), and both the nested `.pi-lens.json` and nested `.gitignore` axes. The
+	same stat that yields mtime already reads size, so the cheap hit path stays
+	cheap (no content hashing on the hot path). The residual (identical mtime AND
+	identical size, changed content) matches the review-graph/word-index accepted
+	residual by design. Fail-then-pass regression tests cover the root and nested
+	gates (each proven to replay stale on the pre-fix mtime-only code); FS-agnostic
+	(mtime pinned via `utimesSync`, size varied by content length) so they exercise
+	the gates identically on Linux CI.
 
 - **Windows drive-root & autofix-snapshot `readdirSync` blocked the event loop on slow cloud-backed dirs (refs #1137)** —
 	the genuine synchronous event-loop-block tier from #1122 (the 1.6–10.6 s
