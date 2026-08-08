@@ -10,6 +10,30 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Windows drive-root & autofix-snapshot `readdirSync` blocked the event loop on slow cloud-backed dirs (refs #1137)** —
+	the genuine synchronous event-loop-block tier from #1122 (the 1.6–10.6 s
+	single-process blocks in `latency.log`, distinct from the machine-level
+	Modern-Standby/commit-exhaustion artifacts dispositioned in #1122 and tagged
+	`suspectSystemStall` by #1125). On a OneDrive/network-backed path a stalled
+	synchronous directory read blocks the Node loop — and pi's TUI — for the whole
+	stall. Converted the two clearly-live-path, low-risk offenders: (a) the Windows
+	Ruby drive-root enumeration (`readdirSync(driveRoot)` scanning `C:\` for
+	`ruby<N>` installer dirs), previously re-run **synchronously on every LSP spawn**
+	in `buildAugmentedPath` (PATH build) and on every Ruby candidate build in
+	`rubyBinCandidates` — now a shared `clients/lsp/ruby-drive-dirs.ts` module that
+	**memoizes** the result once per process (O(1) amortized) and reads the drive
+	root **off the loop** via `fs.promises.readdir` on the hot spawn path; and
+	(b) the `tool_result` autofix side-effect snapshot walk (`snapshotDirInto`,
+	`clients/pipeline.ts`), whose per-directory `readdirSync`/`statSync` are now
+	`fs.promises.readdir`/`stat` (the walk was already async + chunk-yielding, but
+	each synchronous per-dir read still blocked on a cloud stall). Same outputs,
+	just non-blocking. `measureMaxSyncBlockMs` occupancy guards assert the converted
+	drive-root path no longer holds the loop and fail against the pre-conversion
+	sync shape. Remaining suspect sites (the shared `walkTreeStackAsync` per-dir
+	read in `clients/source-walker.ts`; `hasProjectMarker`/`expandWorkspacePattern`
+	deep in sync memoized/bounded chains; the `safe-spawn.ts` Windows `spawnSync`
+	teardown/cached paths) are deferred as scoped follow-ups on #1137 — each ripples
+	into a widely-called sync API or subprocess-teardown correctness.
 - **`session_start_sequence_read` was an unbounded synchronous blocking read on the session_start hot path (closes #1162)** —
 	`readLatestProjectSequence` called `fs.readFileSync` on the project
 	change-log before `session_start_total` returned; normally ~2ms, but under
