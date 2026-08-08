@@ -15,7 +15,10 @@ export interface FormatterPolicy {
 	gate: ToolGate;
 }
 
-const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
+// Exported (read-only intent) for the formatter/policy drift guard
+// (tests/clients/formatter-policy-consistency.test.ts, #1135). Do not mutate
+// externally — treat as the canonical extension→policy source of truth.
+export const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 	[
 		".js",
 		{
@@ -145,7 +148,13 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 	[
 		".sass",
 		{
-			formatterNames: ["biome", "prettier", "oxfmt"],
+			// oxfmt is intentionally NOT offered for .sass: it is absent from
+			// OXFMT_SUPPORTED_EXTENSIONS (oxfmt/prettier support .css/.scss/.less
+			// but not the indented `.sass` syntax). It was previously hand-listed
+			// here, diverging from the oxfmt definition — a #1135 drift, harmless
+			// only because `matching` already filtered it out. Guarded now by
+			// tests/clients/formatter-policy-consistency.test.ts.
+			formatterNames: ["biome", "prettier"],
 			defaultFormatter: "biome",
 			defaultWhenUnconfigured: true,
 			gate: "smart-default",
@@ -516,15 +525,13 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			gate: "smart-default",
 		},
 	],
-	[
-		".fish",
-		{
-			formatterNames: ["fish-indent"],
-			defaultFormatter: "fish-indent",
-			defaultWhenUnconfigured: true,
-			gate: "smart-default",
-		},
-	],
+	// NOTE: `.fish` has NO formatter policy. `fish-indent` is a LINT runner
+	// (getLinterPolicyForFile → "fish-indent"), not a FormatterInfo — no formatter
+	// definition claims `.fish`, so a formatter policy naming "fish-indent" was a
+	// dead, unsatisfiable entry (a #1135 mode-2 drift: policy names a formatter
+	// with no definition). Fish reformatting is driven through the linter/autofix
+	// path instead. Removed so the extension→formatter mapping stays consistent
+	// with the definitions (guarded by formatter-policy-consistency.test.ts).
 	[
 		".toml",
 		{
@@ -705,7 +712,11 @@ for (const [ext, policy] of FORMATTER_POLICY_BY_EXTENSION) {
 	}
 }
 
-const AUTO_INSTALLABLE_DEFAULT_FORMATTERS = new Map<string, string>([
+// Keys are formatter NAMES (must match a FormatterInfo.name in formatters.ts);
+// values are auto-install tool ids. Exported so the #1135 drift guard can bind
+// the keys to real formatter definitions (a mistyped name silently disables
+// auto-install for that formatter).
+export const AUTO_INSTALLABLE_DEFAULT_FORMATTERS = new Map<string, string>([
 	["biome", "biome"],
 	["ruff", "ruff"],
 	["prettier", "prettier"],
@@ -726,7 +737,7 @@ const TERRAGRUNT_FORMATTER_POLICY: FormatterPolicy = {
 	gate: "smart-default",
 };
 
-const FORMATTER_POLICY_BY_FILENAME = new Map<string, FormatterPolicy>(
+export const FORMATTER_POLICY_BY_FILENAME = new Map<string, FormatterPolicy>(
 	TERRAGRUNT_FILENAMES.map((name) => [name, TERRAGRUNT_FORMATTER_POLICY]),
 );
 
