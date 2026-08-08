@@ -63,7 +63,11 @@
  */
 export const STALE_HEARTBEAT_MS = 6 * 60 * 60 * 1000;
 
-import { type ChildProcess, spawn as nodeSpawn } from "node:child_process";
+import {
+	type ChildProcess,
+	spawn as nodeSpawn,
+	type SpawnOptions,
+} from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getGlobalPiLensDir } from "./file-utils.js";
@@ -106,6 +110,46 @@ function unrefReaperChild(child: ChildProcess): void {
 	} catch {
 		// best-effort — unref must never throw out of a reaper spawn
 	}
+}
+
+/**
+ * Spawn a best-effort enumeration child, accumulate its full stdout, and
+ * resolve with the collected text (empty string on spawn failure or an
+ * `error` event). Consolidates the identical spawn → pipe → `close` plumbing
+ * shared by every OS-process-table enumeration below
+ * (`findPidsByMarkerWindows`, `queryCommandLines`, `enumerateManagedProcesses`)
+ * — each caller supplies only its command/args/options and its own output
+ * parse. The child + its stdio pipes are `unref`'d here (#1153) so a settled
+ * one-shot `pi --print` process can exit without waiting for the sweep, and
+ * unref lives in exactly ONE place rather than at five near-identical sites.
+ * Never rejects — any failure resolves to `""`, which every caller's parse
+ * turns into an empty result (the sweep's best-effort contract).
+ */
+function spawnCollectStdout(
+	command: string,
+	args: string[],
+	options: SpawnOptions,
+): Promise<string> {
+	return new Promise((resolve) => {
+		let settled = false;
+		const settle = (value: string) => {
+			if (settled) return;
+			settled = true;
+			resolve(value);
+		};
+		try {
+			const child = nodeSpawn(command, args, options);
+			unrefReaperChild(child);
+			let out = "";
+			child.stdout?.on("data", (chunk) => {
+				out += chunk.toString();
+			});
+			child.once("error", () => settle(""));
+			child.once("close", () => settle(out));
+		} catch {
+			settle("");
+		}
+	});
 }
 
 export interface ChildToKill {
@@ -359,35 +403,16 @@ async function findPidsByMarkerWindows(marker: string): Promise<number[]> {
 		`Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%${escaped}%'" ` +
 		`| Where-Object { $_.ProcessId -ne $PID } ` +
 		`| Select-Object -ExpandProperty ProcessId`;
-	return new Promise((resolve) => {
-		try {
-			const powershell = windowsExe("WindowsPowerShell\\v1.0\\powershell.exe");
-			const child = nodeSpawn(
-				powershell,
-				["-NoProfile", "-NonInteractive", "-Command", psScript],
-				{
-					shell: false,
-					windowsHide: true,
-					stdio: ["ignore", "pipe", "ignore"],
-				},
-			);
-			unrefReaperChild(child);
-			let out = "";
-			child.stdout?.on("data", (chunk) => {
-				out += chunk.toString();
-			});
-			child.once("error", () => resolve([]));
-			child.once("close", () => {
-				const pids = out
-					.split(/\r?\n/)
-					.map((line) => Number(line.trim()))
-					.filter((n) => Number.isFinite(n) && n > 0);
-				resolve(pids);
-			});
-		} catch {
-			resolve([]);
-		}
-	});
+	const powershell = windowsExe("WindowsPowerShell\\v1.0\\powershell.exe");
+	const out = await spawnCollectStdout(
+		powershell,
+		["-NoProfile", "-NonInteractive", "-Command", psScript],
+		{ shell: false, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
+	);
+	return out
+		.split(/\r?\n/)
+		.map((line) => Number(line.trim()))
+		.filter((n) => Number.isFinite(n) && n > 0);
 }
 
 /** Fetch command lines for a set of pids in one query (Windows: CIM; POSIX:
@@ -403,81 +428,42 @@ async function queryCommandLines(pids: number[]): Promise<Map<number, string>> {
 		const psScript =
 			`Get-CimInstance Win32_Process -Filter "${filter}" ` +
 			`| ForEach-Object { "$($_.ProcessId)\t$($_.CommandLine)" }`;
-		return new Promise((resolve) => {
-			try {
-				const powershell = windowsExe(
-					"WindowsPowerShell\\v1.0\\powershell.exe",
-				);
-				const child = nodeSpawn(
-					powershell,
-					["-NoProfile", "-NonInteractive", "-Command", psScript],
-					{
-						shell: false,
-						windowsHide: true,
-						stdio: ["ignore", "pipe", "ignore"],
-					},
-				);
-				unrefReaperChild(child);
-				let out = "";
-				child.stdout?.on("data", (chunk) => {
-					out += chunk.toString();
-				});
-				child.once("error", () => resolve(map));
-				child.once("close", () => {
-					for (const line of out.split(/\r?\n/)) {
-						const tab = line.indexOf("\t");
-						if (tab <= 0) continue;
-						const pid = Number(line.slice(0, tab).trim());
-						if (Number.isFinite(pid) && pid > 0)
-							map.set(pid, line.slice(tab + 1));
-					}
-					resolve(map);
-				});
-			} catch {
-				resolve(map);
-			}
-		});
-	}
-	return new Promise((resolve) => {
-		try {
-			const child = nodeSpawn(
-				posixPsPath(),
-				["-p", valid.join(","), "-o", "pid=,args="],
-				{ shell: false, stdio: ["ignore", "pipe", "ignore"] },
-			);
-			unrefReaperChild(child);
-			let out = "";
-			child.stdout?.on("data", (chunk) => {
-				out += chunk.toString();
-			});
-			child.once("error", () => resolve(map));
-			child.once("close", () => {
-				for (const line of out.split(/\r?\n/)) {
-					// Linear parse (S8786/S6594: avoid regex backtracking on
-					// attacker-lengthenable ps output) — trim leading whitespace,
-					// then split on the first whitespace run: "  1234 args here".
-					const trimmed = line.trimStart();
-					if (!trimmed) continue;
-					let i = 0;
-					while (i < trimmed.length && trimmed[i] >= "0" && trimmed[i] <= "9")
-						i++;
-					if (i === 0) continue;
-					const pidStr = trimmed.slice(0, i);
-					let j = i;
-					while (
-						j < trimmed.length &&
-						(trimmed[j] === " " || trimmed[j] === "\t")
-					)
-						j++;
-					const pid = Number(pidStr);
-					if (Number.isFinite(pid) && pid > 0) map.set(pid, trimmed.slice(j));
-				}
-				resolve(map);
-			});
-		} catch {
-			resolve(map);
+		const powershell = windowsExe("WindowsPowerShell\\v1.0\\powershell.exe");
+		const out = await spawnCollectStdout(
+			powershell,
+			["-NoProfile", "-NonInteractive", "-Command", psScript],
+			{ shell: false, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
+		);
+		for (const line of out.split(/\r?\n/)) {
+			const tab = line.indexOf("\t");
+			if (tab <= 0) continue;
+			const pid = Number(line.slice(0, tab).trim());
+			if (Number.isFinite(pid) && pid > 0) map.set(pid, line.slice(tab + 1));
 		}
-	});
+		return map;
+	}
+	const out = await spawnCollectStdout(
+		posixPsPath(),
+		["-p", valid.join(","), "-o", "pid=,args="],
+		{ shell: false, stdio: ["ignore", "pipe", "ignore"] },
+	);
+	for (const line of out.split(/\r?\n/)) {
+		// Linear parse (S8786/S6594: avoid regex backtracking on
+		// attacker-lengthenable ps output) — trim leading whitespace,
+		// then split on the first whitespace run: "  1234 args here".
+		const trimmed = line.trimStart();
+		if (!trimmed) continue;
+		let i = 0;
+		while (i < trimmed.length && trimmed[i] >= "0" && trimmed[i] <= "9") i++;
+		if (i === 0) continue;
+		const pidStr = trimmed.slice(0, i);
+		let j = i;
+		while (j < trimmed.length && (trimmed[j] === " " || trimmed[j] === "\t"))
+			j++;
+		const pid = Number(pidStr);
+		if (Number.isFinite(pid) && pid > 0) map.set(pid, trimmed.slice(j));
+	}
+	return map;
 }
 
 /**
@@ -628,101 +614,65 @@ async function enumerateManagedProcesses(): Promise<OsProcessInfo[]> {
 		const psScript =
 			`Get-CimInstance Win32_Process -Filter "${clauses}" ` +
 			`| ForEach-Object { "$($_.ProcessId)\t$($_.ParentProcessId)\t$($_.CommandLine)" }`;
-		return new Promise((resolve) => {
-			try {
-				const powershell = windowsExe(
-					"WindowsPowerShell\\v1.0\\powershell.exe",
-				);
-				const child = nodeSpawn(
-					powershell,
-					["-NoProfile", "-NonInteractive", "-Command", psScript],
-					{
-						shell: false,
-						windowsHide: true,
-						stdio: ["ignore", "pipe", "ignore"],
-					},
-				);
-				unrefReaperChild(child);
-				let out = "";
-				child.stdout?.on("data", (chunk) => {
-					out += chunk.toString();
-				});
-				child.once("error", () => resolve([]));
-				child.once("close", () => {
-					const results: OsProcessInfo[] = [];
-					for (const line of out.split(/\r?\n/)) {
-						const firstTab = line.indexOf("\t");
-						if (firstTab <= 0) continue;
-						const secondTab = line.indexOf("\t", firstTab + 1);
-						if (secondTab <= 0) continue;
-						const pid = Number(line.slice(0, firstTab).trim());
-						const parentPid = Number(
-							line.slice(firstTab + 1, secondTab).trim(),
-						);
-						const command = line.slice(secondTab + 1);
-						if (Number.isFinite(pid) && pid > 0) {
-							results.push({ pid, parentPid, command });
-						}
-					}
-					resolve(results);
-				});
-			} catch {
-				resolve([]);
+		const powershell = windowsExe("WindowsPowerShell\\v1.0\\powershell.exe");
+		const out = await spawnCollectStdout(
+			powershell,
+			["-NoProfile", "-NonInteractive", "-Command", psScript],
+			{ shell: false, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] },
+		);
+		const results: OsProcessInfo[] = [];
+		for (const line of out.split(/\r?\n/)) {
+			const firstTab = line.indexOf("\t");
+			if (firstTab <= 0) continue;
+			const secondTab = line.indexOf("\t", firstTab + 1);
+			if (secondTab <= 0) continue;
+			const pid = Number(line.slice(0, firstTab).trim());
+			const parentPid = Number(line.slice(firstTab + 1, secondTab).trim());
+			const command = line.slice(secondTab + 1);
+			if (Number.isFinite(pid) && pid > 0) {
+				results.push({ pid, parentPid, command });
 			}
-		});
+		}
+		return results;
 	}
 	// POSIX: enumerate everything, filter in JS by managed-name substring —
 	// there is no single-query WQL-style server-side filter available.
-	return new Promise((resolve) => {
-		try {
-			const child = nodeSpawn(posixPsPath(), ["-eo", "pid=,ppid=,args="], {
-				shell: false,
-				stdio: ["ignore", "pipe", "ignore"],
-			});
-			unrefReaperChild(child);
-			let out = "";
-			child.stdout?.on("data", (chunk) => {
-				out += chunk.toString();
-			});
-			child.once("error", () => resolve([]));
-			child.once("close", () => {
-				const results: OsProcessInfo[] = [];
-				for (const line of out.split(/\r?\n/)) {
-					// Linear parse (S8786/S6594): "  pid ppid args here".
-					const trimmed = line.trimStart();
-					if (!trimmed) continue;
-					let i = 0;
-					while (i < trimmed.length && trimmed[i] >= "0" && trimmed[i] <= "9")
-						i++;
-					if (i === 0) continue;
-					const pid = Number(trimmed.slice(0, i));
-					let rest = trimmed.slice(i);
-					let k = 0;
-					while (k < rest.length && (rest[k] === " " || rest[k] === "\t")) k++;
-					rest = rest.slice(k);
-					let j = 0;
-					while (j < rest.length && rest[j] >= "0" && rest[j] <= "9") j++;
-					if (j === 0) continue;
-					const parentPid = Number(rest.slice(0, j));
-					let m = j;
-					while (m < rest.length && (rest[m] === " " || rest[m] === "\t")) m++;
-					const args = rest.slice(m);
-					if (!Number.isFinite(pid) || pid <= 0) continue;
-					const lowerArgs = args.toLowerCase();
-					if (
-						MANAGED_BINARY_NAMES.some((name) =>
-							lowerArgs.includes(name.toLowerCase()),
-						)
-					) {
-						results.push({ pid, parentPid, command: args });
-					}
-				}
-				resolve(results);
-			});
-		} catch {
-			resolve([]);
+	const out = await spawnCollectStdout(
+		posixPsPath(),
+		["-eo", "pid=,ppid=,args="],
+		{ shell: false, stdio: ["ignore", "pipe", "ignore"] },
+	);
+	const results: OsProcessInfo[] = [];
+	for (const line of out.split(/\r?\n/)) {
+		// Linear parse (S8786/S6594): "  pid ppid args here".
+		const trimmed = line.trimStart();
+		if (!trimmed) continue;
+		let i = 0;
+		while (i < trimmed.length && trimmed[i] >= "0" && trimmed[i] <= "9") i++;
+		if (i === 0) continue;
+		const pid = Number(trimmed.slice(0, i));
+		let rest = trimmed.slice(i);
+		let k = 0;
+		while (k < rest.length && (rest[k] === " " || rest[k] === "\t")) k++;
+		rest = rest.slice(k);
+		let j = 0;
+		while (j < rest.length && rest[j] >= "0" && rest[j] <= "9") j++;
+		if (j === 0) continue;
+		const parentPid = Number(rest.slice(0, j));
+		let m = j;
+		while (m < rest.length && (rest[m] === " " || rest[m] === "\t")) m++;
+		const args = rest.slice(m);
+		if (!Number.isFinite(pid) || pid <= 0) continue;
+		const lowerArgs = args.toLowerCase();
+		if (
+			MANAGED_BINARY_NAMES.some((name) =>
+				lowerArgs.includes(name.toLowerCase()),
+			)
+		) {
+			results.push({ pid, parentPid, command: args });
 		}
-	});
+	}
+	return results;
 }
 
 /**
