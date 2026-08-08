@@ -30,7 +30,11 @@ All notable changes to pi-lens will be documented in this file.
 	because `formatters.ts` already imports `tool-policy.ts`, so the reverse edge would create a
 	module import cycle; the test-based guard binds both directions while keeping the dependency
 	one-way. Also bound `AUTO_INSTALLABLE_DEFAULT_FORMATTERS` keys to real formatter definitions
-	(same formatter-name-reference class).
+	(same formatter-name-reference class). The guard reads four newly-exported read-only symbols
+	(`ALL_FORMATTERS` plus the three policy maps `FORMATTER_POLICY_BY_EXTENSION`,
+	`FORMATTER_POLICY_BY_FILENAME`, `AUTO_INSTALLABLE_DEFAULT_FORMATTERS`), and its own two
+	allowlists (deliberate exclusions, no-policy fallbacks) each carry a minimality check so
+	they cannot rot into blanket escape hatches.
 
 - **`session_start_sequence_read` was an unbounded synchronous blocking read on the session_start hot path (closes #1162)** —
 	`readLatestProjectSequence` called `fs.readFileSync` on the project
