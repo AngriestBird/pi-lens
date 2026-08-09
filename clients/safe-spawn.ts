@@ -326,7 +326,8 @@ function resolveDriveRelativeWindowsPath(
 ): string | undefined {
 	const drive = driveLetter(value);
 	if (drive === undefined) return undefined;
-	const cwdDrive = effectiveCwd === undefined ? undefined : driveLetter(effectiveCwd);
+	const cwdDrive =
+		effectiveCwd === undefined ? undefined : driveLetter(effectiveCwd);
 	const base =
 		cwdDrive?.toUpperCase() === drive
 			? effectiveCwd
@@ -383,7 +384,8 @@ function cacheWindowsCommandResult(
 }
 
 function getPathExts(env: NodeJS.ProcessEnv): string[] {
-	const raw = getWindowsEnvironmentValue(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD";
+	const raw =
+		getWindowsEnvironmentValue(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD";
 	return raw
 		.split(";")
 		.map((ext) => ext.trim().toLowerCase())
@@ -428,13 +430,14 @@ function resolveWindowsCommandUncached(
 	// resolver fails closed rather than guessing `D:\\` or searching PATH.
 	const hasDrivePrefix = driveLetter(command) !== undefined;
 	if (hasPathSep || hasDrivePrefix || path.win32.isAbsolute(command)) {
-		const base = path.win32.isAbsolute(command)
-			? path.win32.normalize(command)
-			: hasDrivePrefix
-				? resolveDriveRelativeWindowsPath(command, effectiveCwd, env)
-				: effectiveCwd === undefined
-					? undefined
-					: path.win32.normalize(path.win32.resolve(effectiveCwd, command));
+		let base: string | undefined;
+		if (path.win32.isAbsolute(command)) {
+			base = path.win32.normalize(command);
+		} else if (hasDrivePrefix) {
+			base = resolveDriveRelativeWindowsPath(command, effectiveCwd, env);
+		} else if (effectiveCwd !== undefined) {
+			base = path.win32.normalize(path.win32.resolve(effectiveCwd, command));
+		}
 		return base === undefined ? null : tryBase(base);
 	}
 
@@ -469,8 +472,11 @@ export function resolveWindowsCommandForEnvironment(
 	const pathValue = getWindowsEnvironmentValue(env, "PATH");
 	const pathExtValue = getWindowsEnvironmentValue(env, "PATHEXT");
 	const perDriveCwds = Object.entries(env)
-		.filter(([key]) => /^=[A-Za-z]:$/.test(key))
-		.map(([key, value]) => [key.toLowerCase(), value] as const)
+		.flatMap(([key, value]) =>
+			/^=[A-Za-z]:$/.test(key)
+				? ([[key.toLowerCase(), value] as const] as const)
+				: [],
+		)
 		.sort(([left], [right]) => left.localeCompare(right));
 	// Keep presence separate from value: absent PATHEXT means the Windows
 	// default extension list, while PATHEXT="" means no implicit extensions.
@@ -480,9 +486,7 @@ export function resolveWindowsCommandForEnvironment(
 		"win32",
 		command,
 		pathValue === undefined ? ["absent"] : ["present", pathValue],
-		pathExtValue === undefined
-			? ["absent"]
-			: ["present", pathExtValue],
+		pathExtValue === undefined ? ["absent"] : ["present", pathExtValue],
 		effectiveCwd === undefined ? ["unresolved"] : ["resolved", effectiveCwd],
 		perDriveCwds,
 	]);
@@ -570,7 +574,7 @@ function ensureUtf8ConsoleCodePageOnce(): void {
 			windowsHide: true,
 		});
 	} catch {
-		// Best-effort: worst case is non-ASCII tool output mis-decoded, not a
+		// Best-effort: worst case is non-ASCII tool output decoded incorrectly, not a
 		// spawn failure — never let this block the real spawn.
 	}
 }

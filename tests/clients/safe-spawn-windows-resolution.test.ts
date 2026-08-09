@@ -15,6 +15,8 @@ import {
 	resolveWindowsCommandForEnvironment,
 } from "../../clients/safe-spawn.js";
 
+// Absolute fixtures keep pure resolver tests independent from process.cwd;
+// relative-cwd/PATH behavior is covered explicitly in the dedicated cases.
 const WINDOWS_TEST_ROOT = "C:\\__pi_lens_safe_spawn_tests__";
 
 function winAbsolute(...segments: string[]): string {
@@ -96,10 +98,14 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 			PATHEXT: ".EXE",
 		});
 		const callsAfterSecond = statSyncMock.mock.calls.length;
-		const secondAgain = resolveWindowsCommandForEnvironment("cache-tool", "cwd", {
-			PATH: exeBin,
-			PATHEXT: ".EXE",
-		});
+		const secondAgain = resolveWindowsCommandForEnvironment(
+			"cache-tool",
+			"cwd",
+			{
+				PATH: exeBin,
+				PATHEXT: ".EXE",
+			},
+		);
 
 		expect(first).toEqual({ resolvedPath: cmdPath, ext: ".cmd" });
 		expect(second).toEqual({ resolvedPath: exePath, ext: ".exe" });
@@ -192,7 +198,12 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 
 	it("uses validated provenance for a drive-relative child cwd", () => {
 		const perDriveCwd = "D:\\users\\tooling";
-		const expected = path.win32.resolve(perDriveCwd, "D:child", "bin", "tool.exe");
+		const expected = path.win32.resolve(
+			perDriveCwd,
+			"D:child",
+			"bin",
+			"tool.exe",
+		);
 		markFilesAsPresent(expected);
 
 		expect(
@@ -254,8 +265,12 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 
 	it("re-resolves a relative child cwd when process.chdir changes", () => {
 		const originalCwd = process.cwd();
-		const firstParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-safe-cwd-a-"));
-		const secondParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-safe-cwd-b-"));
+		const firstParent = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-safe-cwd-a-"),
+		);
+		const secondParent = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-safe-cwd-b-"),
+		);
 		const command = "tools\\tool.exe";
 		const firstResolved = path.win32.resolve(firstParent, "child", command);
 		const secondResolved = path.win32.resolve(secondParent, "child", command);
@@ -362,13 +377,17 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 		const executable = path.win32.join(bin, "tool.exe");
 		const env = { PATH: bin, PATHEXT: ".EXE" };
 		markFilesAsPresent();
-		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toBeNull();
+		expect(
+			resolveWindowsCommandForEnvironment("tool", undefined, env),
+		).toBeNull();
 		markFilesAsPresent(executable);
 		resetSafeSpawnWindowsCommandCache();
-		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toEqual({
-			resolvedPath: executable,
-			ext: ".exe",
-		});
+		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toEqual(
+			{
+				resolvedPath: executable,
+				ext: ".exe",
+			},
+		);
 	});
 
 	it("reset invalidates a cached positive result after deletion", () => {
@@ -376,13 +395,17 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 		const executable = path.win32.join(bin, "tool.exe");
 		const env = { PATH: bin, PATHEXT: ".EXE" };
 		markFilesAsPresent(executable);
-		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toEqual({
-			resolvedPath: executable,
-			ext: ".exe",
-		});
+		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toEqual(
+			{
+				resolvedPath: executable,
+				ext: ".exe",
+			},
+		);
 		markFilesAsPresent();
 		resetSafeSpawnWindowsCommandCache();
-		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toBeNull();
+		expect(
+			resolveWindowsCommandForEnvironment("tool", undefined, env),
+		).toBeNull();
 	});
 
 	it("evicts the oldest session entry at the cache bound", () => {
