@@ -247,19 +247,23 @@ export function mergeWindowsEnvironment(
 	base: NodeJS.ProcessEnv,
 	overrides?: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
-	const merged: NodeJS.ProcessEnv = {};
+	const entries = new Map<string, { key: string; value: string }>();
 	const assign = (source: NodeJS.ProcessEnv | undefined): void => {
 		if (!source) return;
 		for (const [key, value] of Object.entries(source)) {
 			const folded = key.toLowerCase();
-			for (const existing of Object.keys(merged)) {
-				if (existing.toLowerCase() === folded) delete merged[existing];
-			}
-			if (value !== undefined) merged[key] = value;
+			// Delete before setting so the last explicit spelling wins while the
+			// folded map remains O(n) instead of scanning the merged object for
+			// every environment entry.
+			entries.delete(folded);
+			if (value !== undefined) entries.set(folded, { key, value });
 		}
 	};
 	assign(base);
 	assign(overrides);
+
+	const merged: NodeJS.ProcessEnv = {};
+	for (const { key, value } of entries.values()) merged[key] = value;
 	return merged;
 }
 
@@ -280,13 +284,30 @@ function getWindowsEnvironmentValue(
  * bin directory must never poison another caller's resolution. Session-lived
  * (matches this repo's other resolution caches, e.g.
  * `clients/workspace-topology.ts`'s `resetWorkspaceTopology`) — cleared via
- * `resetSafeSpawnWindowsCommandCache()`, wired into `handleSessionStart`.
+ * `resetSafeSpawnWindowsCommandCache()`, wired into `handleSessionStart`. The
+ * cache is also count-bounded with oldest-entry eviction because a long-lived
+ * process can encounter unbounded cwd/environment combinations.
  */
+const WINDOWS_COMMAND_CACHE_MAX_ENTRIES = 256;
 const windowsCommandCache = new Map<string, ResolvedWindowsCommand | null>();
 
 /** Reset hook for session start — see `clients/runtime-session.ts`. */
 export function resetSafeSpawnWindowsCommandCache(): void {
 	windowsCommandCache.clear();
+}
+
+function cacheWindowsCommandResult(
+	key: string,
+	value: ResolvedWindowsCommand | null,
+): void {
+	if (windowsCommandCache.size >= WINDOWS_COMMAND_CACHE_MAX_ENTRIES) {
+		// Resolution entries are session-scoped and cheap to recompute. Evict the
+		// oldest insertion first so a long-lived process cannot retain every cwd /
+		// environment it has ever touched.
+		const oldest = windowsCommandCache.keys().next().value;
+		if (oldest !== undefined) windowsCommandCache.delete(oldest);
+	}
+	windowsCommandCache.set(key, value);
 }
 
 function getPathExts(env: NodeJS.ProcessEnv): string[] {
@@ -329,7 +350,11 @@ function resolveWindowsCommandUncached(
 	};
 
 	const hasPathSep = /[\\/]/.test(command);
-	if (hasPathSep || path.win32.isAbsolute(command)) {
+	// `C:tool.exe` is drive-relative on Windows, not a bare PATH command. It
+	// must resolve against the effective cwd on that drive rather than allowing
+	// an unrelated PATH entry to win.
+	const hasDrivePrefix = /^[A-Za-z]:/.test(command);
+	if (hasPathSep || hasDrivePrefix || path.win32.isAbsolute(command)) {
 		const base = path.win32.isAbsolute(command)
 			? command
 			: path.win32.resolve(cwd ?? process.cwd(), command);
@@ -357,6 +382,7 @@ export function resolveWindowsCommandForEnvironment(
 	cwd: string | undefined,
 	env: NodeJS.ProcessEnv,
 ): ResolvedWindowsCommand | null {
+	const effectiveCwd = cwd ?? process.cwd();
 	const pathValue = getWindowsEnvironmentValue(env, "PATH") ?? "";
 	const pathExtValue = getWindowsEnvironmentValue(env, "PATHEXT") ?? "";
 	const cacheKey = JSON.stringify([
@@ -364,13 +390,13 @@ export function resolveWindowsCommandForEnvironment(
 		command,
 		pathValue,
 		pathExtValue,
-		cwd ?? "",
+		effectiveCwd,
 	]);
 	if (windowsCommandCache.has(cacheKey)) {
 		return windowsCommandCache.get(cacheKey) ?? null;
 	}
-	const resolved = resolveWindowsCommandUncached(command, cwd, env);
-	windowsCommandCache.set(cacheKey, resolved);
+	const resolved = resolveWindowsCommandUncached(command, effectiveCwd, env);
+	cacheWindowsCommandResult(cacheKey, resolved);
 	return resolved;
 }
 
@@ -453,11 +479,6 @@ function ensureUtf8ConsoleCodePageOnce(): void {
 		// Best-effort: worst case is non-ASCII tool output mis-decoded, not a
 		// spawn failure — never let this block the real spawn.
 	}
-}
-
-/** Test-only: allow tests to force the chcp one-shot to run again. */
-export function resetUtf8ConsoleCodePageStateForTests(): void {
-	utf8ConsoleCodePageApplied = false;
 }
 
 // ============================================================================

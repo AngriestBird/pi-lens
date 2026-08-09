@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -109,6 +111,133 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 		expect(
 			resolveWindowsCommandForEnvironment(relativeCommand, cwd, {}),
 		).toEqual({ resolvedPath, ext: ".exe" });
+	});
+
+	it("treats a drive-relative command as an explicit path, never as a PATH name", () => {
+		const cwd = path.win32.join("C:\\workspace", "project");
+		const command = "C:tool.exe";
+		const resolvedPath = path.win32.resolve(cwd, command);
+		const unrelatedPathTool = path.win32.join("C:\\unrelated", "tool.exe");
+		markFilesAsPresent(resolvedPath, unrelatedPathTool);
+
+		expect(
+			resolveWindowsCommandForEnvironment(command, cwd, {
+				PATH: path.win32.dirname(unrelatedPathTool),
+				PATHEXT: ".EXE",
+			}),
+		).toEqual({ resolvedPath, ext: ".exe" });
+	});
+
+	it("uses the effective process cwd in cache identity when cwd is omitted", () => {
+		const originalCwd = process.cwd();
+		const firstCwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-safe-spawn-cache-first-"),
+		);
+		const secondCwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-safe-spawn-cache-second-"),
+		);
+		const command = "tools\\cache-tool.exe";
+		const firstResolvedPath = path.win32.resolve(firstCwd, command);
+		const secondResolvedPath = path.win32.resolve(secondCwd, command);
+		markFilesAsPresent(firstResolvedPath, secondResolvedPath);
+
+		try {
+			process.chdir(firstCwd);
+			expect(
+				resolveWindowsCommandForEnvironment(command, undefined, {
+					PATHEXT: ".EXE",
+				}),
+			).toEqual({ resolvedPath: firstResolvedPath, ext: ".exe" });
+
+			process.chdir(secondCwd);
+			expect(
+				resolveWindowsCommandForEnvironment(command, undefined, {
+					PATHEXT: ".EXE",
+				}),
+			).toEqual({ resolvedPath: secondResolvedPath, ext: ".exe" });
+		} finally {
+			process.chdir(originalCwd);
+			fs.rmSync(firstCwd, { recursive: true, force: true });
+			fs.rmSync(secondCwd, { recursive: true, force: true });
+		}
+	});
+
+	it("honors an explicit extension even when PATHEXT omits it", () => {
+		const bin = path.win32.join("explicit-extension", "bin");
+		const executable = path.win32.join(bin, "tool.cmd");
+		markFilesAsPresent(executable);
+
+		expect(
+			resolveWindowsCommandForEnvironment("tool.cmd", undefined, {
+				PATH: bin,
+				PATHEXT: ".EXE",
+			}),
+		).toEqual({ resolvedPath: executable, ext: ".cmd" });
+	});
+
+	it("follows PATHEXT order for a bare command", () => {
+		const bin = path.win32.join("pathext-order", "bin");
+		const exe = path.win32.join(bin, "tool.exe");
+		const cmd = path.win32.join(bin, "tool.cmd");
+		markFilesAsPresent(exe, cmd);
+
+		expect(
+			resolveWindowsCommandForEnvironment("tool", undefined, {
+				PATH: bin,
+				PATHEXT: ".EXE;.CMD",
+			}),
+		).toEqual({ resolvedPath: exe, ext: ".exe" });
+	});
+
+	it("clears session resolution entries", () => {
+		const bin = path.win32.join("session-reset", "bin");
+		const executable = path.win32.join(bin, "tool.exe");
+		markFilesAsPresent(executable);
+		const env = { PATH: bin, PATHEXT: ".EXE" };
+
+		const first = resolveWindowsCommandForEnvironment("tool", undefined, env);
+		const callsAfterFirst = statSyncMock.mock.calls.length;
+		resetSafeSpawnWindowsCommandCache();
+		const second = resolveWindowsCommandForEnvironment("tool", undefined, env);
+
+		expect(first).toEqual({ resolvedPath: executable, ext: ".exe" });
+		expect(second).toEqual(first);
+		expect(statSyncMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+	});
+
+	it("evicts the oldest session entry at the cache bound", () => {
+		const entries = Array.from({ length: 257 }, (_, index) => {
+			const bin = path.win32.join("bounded-cache", String(index));
+			const command = `tool-${index}.exe`;
+			return {
+				bin,
+				command,
+				resolvedPath: path.win32.join(bin, command),
+			};
+		});
+		markFilesAsPresent(...entries.map((entry) => entry.resolvedPath));
+
+		for (const entry of entries) {
+			expect(
+				resolveWindowsCommandForEnvironment(entry.command, undefined, {
+					PATH: entry.bin,
+					PATHEXT: ".EXE",
+				}),
+			).toEqual({ resolvedPath: entry.resolvedPath, ext: ".exe" });
+		}
+
+		const callsBeforeOldestRetry = statSyncMock.mock.calls.length;
+		const oldest = entries[0];
+		expect(oldest).toBeDefined();
+		const retried = resolveWindowsCommandForEnvironment(
+			oldest.command,
+			undefined,
+			{ PATH: oldest.bin, PATHEXT: ".EXE" },
+		);
+		expect(retried).toEqual({ resolvedPath: oldest.resolvedPath, ext: ".exe" });
+		expect(statSyncMock.mock.calls.length).toBeGreaterThan(
+			callsBeforeOldestRetry,
+		);
 	});
 
 	it("keeps the default PATHEXT behavior when the caller supplies no PATHEXT", () => {

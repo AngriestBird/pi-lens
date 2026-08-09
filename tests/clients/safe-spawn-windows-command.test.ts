@@ -277,6 +277,23 @@ describe.runIf(process.platform === "win32")(
 			expect(JSON.parse(result.stdout)).toEqual(["hello world", "plain"]);
 		});
 
+		it("sync safeSpawn resolves a command from its overridden PATH", () => {
+			// Keep the ambient system directory after the fixture so the pinned
+			// cmd.exe can still find its `chcp` helper; the fixture remains first
+			// and is the only source of the command under test.
+			const overriddenPath = `${fixtureDir};${process.env.Path ?? process.env.PATH ?? ""}`;
+			const result = safeSpawn("echo-args", ["from-overridden-path"], {
+				env: {
+					PATH: overriddenPath,
+					Path: overriddenPath,
+					PATHEXT: ".COM;.CMD",
+				},
+			});
+			expect(result.error).toBeUndefined();
+			expect(result.status).toBe(0);
+			expect(JSON.parse(result.stdout)).toEqual(["from-overridden-path"]);
+		});
+
 		it('a "%"-bearing arg targeting a .cmd shim is rejected loudly, nothing spawned', () => {
 			const result = safeSpawn(echoArgsCmd, ["%APPDATA%.md"]);
 			expect(result.error).toBeDefined();
