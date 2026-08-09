@@ -10,6 +10,31 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Closed out the three #1134 P3 tails left after #1138's Svelte oxfmt support (closes #1134)** —
+	1. **TOML line-match heuristic limits.** `hasOxfmtSvelteConfig`'s
+	   `OXFMT_SVELTE_TOML_TRUE` regex required `svelte = true` to be
+	   immediately followed by end-of-line/end-of-file, so a trailing inline
+	   comment (`svelte = true  # enable`) false-negatived. Relaxed the
+	   trailing match to tolerate an optional `#`-comment, and added a
+	   docblock sentence documenting the heuristic's remaining known limits
+	   (it is a line match, not a TOML parser — a `[table]`-sectioned or
+	   multi-line-string `svelte = true` occurrence could still false-positive;
+	   accepted since that only causes oxfmt to be offered, never a silent
+	   formatter failure). Added a fail-then-pass regression test for the
+	   `svelte = true  # comment` case (`tests/clients/tool-policy.test.ts`).
+	2. **Monorepo asymmetry.** `hasOxfmtSvelteConfig`'s svelte-dependency check
+	   stops at the nearest `package.json` (`hasNearestPackageJsonDependency`)
+	   while its config walk goes all the way to the repo root
+	   (`walkUpDirs`) — a root-level `svelte` dependency with a sub-package
+	   `cwd` under-offers oxfmt for `.svelte` there. Documented via a
+	   docblock sentence (no behavior change: this cell fails safe —
+	   under-offering, never mis-offering a formatter that then errors at
+	   runtime — and stays untested by design, matching the async
+	   `.tflint.hcl` nearest-vs-root-walk note already in this file).
+	3. **docs/language-coverage.md's Vue row** showed formatter `—` though
+	   `.vue` has been wired to `prettier` (default) + `oxfmt` (appended via
+	   `OXFMT_SUPPORTED_EXTENSIONS`) since #1138 landed. Corrected the row to
+	   `prettier, oxfmt`.
 - **Rule-cache disk cache could replay a stale compiled rule set on a same-mtime+same-size rule-file edit (closes #1118, refs #1105 #878)** —
 	`clients/cache/rule-cache.ts`'s `computeRuleHash` fingerprinted every
 	effective rule file over METADATA only (`mtimeMs:size`) — the review-graph

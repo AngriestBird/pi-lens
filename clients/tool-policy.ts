@@ -1964,9 +1964,30 @@ export function hasOxfmtConfig(cwd: string): boolean {
 // binary) for `.svelte` — pi-lens already resolves oxfmt via `findInNodeModules`/
 // `which`, which favors the npm-installed binary, so that requirement is not
 // separately re-checked here.
-const OXFMT_SVELTE_TOML_TRUE = /(^|\n)\s*svelte\s*=\s*true\s*(\r?\n|$)/;
+//
+// Known limits of this line-match heuristic (#1134 P3 tail 1): it tolerates a
+// trailing `#`-comment after the value (`svelte = true  # enable`), but it is
+// NOT a real TOML parser — a `svelte = true` occurrence nested under a
+// `[table]` section, or one embedded inside a multi-line/triple-quoted string
+// value, would still match and false-positive. Both are considered acceptable
+// risk: an oxfmt.toml sectioning `svelte` under a table is not a realistic
+// config shape for this single top-level boolean key, and a false positive
+// here only causes oxfmt to be OFFERED (still gated by oxfmt actually running
+// and the `svelte` package check above), never a silent formatter failure.
+const OXFMT_SVELTE_TOML_TRUE =
+	/(^|\n)\s*svelte\s*=\s*true\s*(\s*#.*)?(\r?\n|$)/;
 
 export function hasOxfmtSvelteConfig(cwd: string): boolean {
+	// Monorepo asymmetry (#1134 P3 tail 2): this dependency check stops at the
+	// NEAREST package.json (`hasNearestPackageJsonDependency`), while the
+	// config walk below (`walkUpDirs`) continues all the way to the repo root.
+	// A root-level `svelte` dependency combined with an oxfmt config at the
+	// root, but invoked with a sub-package `cwd` that has its own
+	// (svelte-less) package.json, under-offers oxfmt for that sub-package —
+	// the same nearest-vs-root-walk asymmetry as the `.tflint.hcl` note in
+	// `getLinterPolicyForCwd` above. This is untested/deliberately unfixed:
+	// failing to offer a valid formatter is safe (never mis-offers one that
+	// then fails at runtime), unlike the inverse.
 	if (!hasNearestPackageJsonDependency(cwd, "svelte")) return false;
 	for (const dir of walkUpDirs(cwd)) {
 		const rcPath = path.join(dir, ".oxfmtrc.json");

@@ -1001,6 +1001,24 @@ describe("tool-policy", () => {
 				env.cleanup();
 			}
 		});
+
+		// #1134 P3 tail 1: an inline trailing comment on the `svelte = true` line
+		// used to false-negative because the line-match regex required the value
+		// to be immediately followed by end-of-line/end-of-file.
+		it("is true with `svelte = true  # comment` in oxfmt.toml (tail 1 — trailing comment)", () => {
+			const env = setupTestEnvironment("pi-lens-tool-policy-oxfmt-svelte-toml-comment-");
+			try {
+				createTempFile(
+					env.tmpDir,
+					"package.json",
+					JSON.stringify({ devDependencies: { svelte: "^5.0.0" } }),
+				);
+				createTempFile(env.tmpDir, "oxfmt.toml", "svelte = true  # enable\n");
+				expect(hasOxfmtSvelteConfig(env.tmpDir)).toBe(true);
+			} finally {
+				env.cleanup();
+			}
+		});
 	});
 
 	it("hasMypyConfig detects [tool.mypy] in a parent directory pyproject.toml", () => {
