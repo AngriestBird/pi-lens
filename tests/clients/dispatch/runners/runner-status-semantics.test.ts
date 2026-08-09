@@ -13,6 +13,13 @@ const openFile = vi.fn();
 const touchFile = vi.fn();
 const getDiagnostics = vi.fn();
 const codeAction = vi.fn();
+
+// #1179: `touchFile` now resolves the `{ diags, inconclusive, binding }` wrapper
+// (shape-5 structural fix) — wrap a mocked diagnostics array in the same shape.
+const diagsResult = (
+	diags: unknown[],
+	extra: { inconclusive?: boolean } = {},
+) => ({ diags, ...extra });
 const readFileContent = vi.fn(() => "const x = 1;\n");
 const warmAttach = vi.hoisted(() => ({
 	diagnostics: vi.fn(),
@@ -227,7 +234,7 @@ describe("runner status/semantic edge cases", () => {
 			fs.writeFileSync(filePath, "const x = 1;\n");
 
 			supportsLSP.mockReturnValue(true);
-			touchFile.mockResolvedValue([]);
+			touchFile.mockResolvedValue(diagsResult([]));
 
 			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
 			expect(result.status).toBe("succeeded");
@@ -288,11 +295,10 @@ describe("runner status/semantic edge cases", () => {
 			fs.writeFileSync(filePath, "const x = 1;\n");
 
 			supportsLSP.mockReturnValue(true);
-			const inconclusiveResult: unknown[] = [];
-			Object.defineProperty(inconclusiveResult, "inconclusive", {
-				value: true,
-			});
-			touchFile.mockResolvedValue(inconclusiveResult);
+			// #1179: empty `.diags` but `inconclusive: true` — an unconfirmed touch
+			// (notify/diagnostics wait lapsed). The flag is now an explicit enumerable
+			// wrapper field, so it survives any copy of `.diags` by construction.
+			touchFile.mockResolvedValue(diagsResult([], { inconclusive: true }));
 
 			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
 			expect(result.status).toBe("skipped");
@@ -334,7 +340,7 @@ describe("runner status/semantic edge cases", () => {
 
 			hasLSP.mockResolvedValue(true);
 			openFile.mockResolvedValue(undefined);
-			touchFile.mockResolvedValue([
+			touchFile.mockResolvedValue(diagsResult([
 				{
 					severity: 1,
 					message: "Type 'number' is not assignable to type 'string'.",
@@ -344,7 +350,7 @@ describe("runner status/semantic edge cases", () => {
 					},
 					code: "2322",
 				},
-			]);
+			])); 
 			codeAction.mockResolvedValue([
 				{ title: "Change type of 'a' to 'number'", kind: "quickfix" },
 				{ title: "Convert number to string", kind: "quickfix" },
@@ -451,7 +457,7 @@ describe("runner status/semantic edge cases", () => {
 			fs.writeFileSync(filePath, "const x = 1;\n");
 
 			supportsLSP.mockReturnValue(true);
-			touchFile.mockResolvedValue([
+			touchFile.mockResolvedValue(diagsResult([
 				{
 					severity: 2,
 					message: "ast-grep finding",
@@ -472,7 +478,7 @@ describe("runner status/semantic edge cases", () => {
 					code: "some-rule",
 					source: "Semgrep",
 				},
-			]);
+			])); 
 
 			const result = await runner.run(
 				ctx(filePath, env.tmpDir, { fileRole: "test" }) as never,
@@ -493,7 +499,7 @@ describe("runner status/semantic edge cases", () => {
 			fs.writeFileSync(filePath, "const x = 1;\n");
 
 			supportsLSP.mockReturnValue(true);
-			touchFile.mockResolvedValue([
+			touchFile.mockResolvedValue(diagsResult([
 				{
 					severity: 2,
 					message: "ast-grep finding",
@@ -504,7 +510,7 @@ describe("runner status/semantic edge cases", () => {
 					code: "no-javascript-url",
 					source: "ast-grep",
 				},
-			]);
+			])); 
 
 			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
 			expect(result.diagnostics).toHaveLength(1);
@@ -524,7 +530,7 @@ describe("runner status/semantic edge cases", () => {
 
 			hasLSP.mockResolvedValue(true);
 			openFile.mockResolvedValue(undefined);
-			touchFile.mockResolvedValue([
+			touchFile.mockResolvedValue(diagsResult([
 				{
 					severity: 1,
 					message: "Type 'number' is not assignable to type 'string'.",
@@ -534,7 +540,7 @@ describe("runner status/semantic edge cases", () => {
 					},
 					code: "2322",
 				},
-			]);
+			])); 
 			codeAction.mockResolvedValue([
 				{ title: "Move to a new file", kind: "refactor.move.newFile" },
 			]);
@@ -563,7 +569,7 @@ describe("runner status/semantic edge cases", () => {
 			hasLSP.mockResolvedValue(true);
 			openFile.mockResolvedValue(undefined);
 			touchFile.mockResolvedValue(
-				[0, 1, 2].map((line) => ({
+				diagsResult([0, 1, 2].map((line) => ({
 					severity: 1,
 					message: "Type 'number' is not assignable to type 'string'.",
 					range: {
@@ -572,7 +578,7 @@ describe("runner status/semantic edge cases", () => {
 					},
 					code: "2322",
 				})),
-			);
+			)); 
 			// Assert concurrency by observed overlap (max in-flight lookups), not
 			// wall-clock — elapsed-time bounds flake under parallel vitest load.
 			// Sequential awaits would never have more than 1 lookup in flight.

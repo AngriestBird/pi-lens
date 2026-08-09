@@ -164,8 +164,8 @@ describe("touchFile silent-clean push-only confirm (#799)", () => {
 		});
 
 		// Confirmed clean: an empty array, and NOT flagged inconclusive.
-		expect(Array.isArray(result)).toBe(true);
-		expect(result).toHaveLength(0);
+		expect(Array.isArray(result?.diags)).toBe(true);
+		expect(result?.diags).toHaveLength(0);
 		expect((result as { inconclusive?: boolean }).inconclusive).toBeUndefined();
 
 		// The env override (set in beforeEach) is what the wait actually pays
@@ -268,7 +268,7 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		});
 
 		expect((result as { inconclusive?: boolean }).inconclusive).toBeUndefined();
-		expect(result).toEqual([finding]);
+		expect(result?.diags).toEqual([finding]);
 	});
 
 	it("(b) scope-all: the silent server's notify write TIMED OUT — falls back to today's timeout/inconclusive behavior", async () => {
@@ -379,8 +379,8 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		});
 		const elapsedMs = Date.now() - startedAt;
 
-		expect(Array.isArray(result)).toBe(true);
-		expect(result).toHaveLength(0);
+		expect(Array.isArray(result?.diags)).toBe(true);
+		expect(result?.diags).toHaveLength(0);
 		expect((result as { inconclusive?: boolean }).inconclusive).toBeUndefined();
 		// marksman (1500ms) and typescript (1000ms) — the touch waits for the
 		// SLOWER of the two (marksman), not a shortened window.

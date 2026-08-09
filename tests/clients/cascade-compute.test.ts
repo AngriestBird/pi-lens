@@ -403,7 +403,7 @@ describe("computeCascadeForFile", () => {
 			fs.writeFileSync(primary, "class User: pass\n");
 			fs.writeFileSync(neighbor, "from model import User\n");
 			mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
-			const touchFile = vi.fn().mockResolvedValue([lspError("python broken")]);
+			const touchFile = vi.fn().mockResolvedValue({ diags: [lspError("python broken")] });
 			mocks.getLSPService.mockReturnValue({
 				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
 				touchFile,
@@ -498,7 +498,7 @@ describe("computeCascadeForFile", () => {
 			mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
 			const touchFile = vi
 				.fn()
-				.mockResolvedValue([lspError("type error in neighbor")]);
+				.mockResolvedValue({ diags: [lspError("type error in neighbor")] });
 			mocks.getLSPService.mockReturnValue({
 				// Empty allDiags — no snapshot for neighbor (cold session)
 				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
@@ -624,7 +624,7 @@ describe("computeCascadeForFile", () => {
 
 			const touchFile = vi
 				.fn()
-				.mockResolvedValue([lspError("type error in neighbor")]);
+				.mockResolvedValue({ diags: [lspError("type error in neighbor")] });
 			const getCapabilitySnapshots = vi.fn();
 			const getClientForFile = vi.fn();
 			mocks.getLSPService.mockReturnValue({
@@ -774,8 +774,8 @@ describe("computeCascadeForFile", () => {
 			// falls into touch pool). First cascade sets cache at writeSeq=1.
 			const touchFile = vi
 				.fn()
-				.mockResolvedValueOnce([lspError("error1")])
-				.mockResolvedValueOnce([lspError("error2")]);
+				.mockResolvedValueOnce({ diags: [lspError("error1")] })
+				.mockResolvedValueOnce({ diags: [lspError("error2")] });
 			mocks.getLSPService.mockReturnValue({
 				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
 				touchFile,
@@ -1382,7 +1382,7 @@ describe("computeCascadeForFile", () => {
 				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
 				mocks.getLSPService.mockReturnValue({
 					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
-					touchFile: vi.fn().mockResolvedValue([lspError("python broken")]),
+					touchFile: vi.fn().mockResolvedValue({ diags: [lspError("python broken")] }),
 					getDiagnostics: vi.fn(),
 				});
 
@@ -1463,7 +1463,7 @@ describe("computeCascadeForFile", () => {
 				// No snapshot → cold-snapshot touch path; touch confirms an error.
 				mocks.getLSPService.mockReturnValue({
 					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
-					touchFile: vi.fn().mockResolvedValue([lspError("cascade result")]),
+					touchFile: vi.fn().mockResolvedValue({ diags: [lspError("cascade result")] }),
 					getDiagnostics: vi.fn(),
 				});
 
@@ -1522,21 +1522,16 @@ describe("computeCascadeForFile", () => {
 				fs.writeFileSync(primary, "class User: pass\n");
 				fs.writeFileSync(neighbor, "from model import User\n");
 				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
-				// The touch resolves `[]` but carries the `inconclusive: true` flag
+				// The touch resolves empty `.diags` but carries `inconclusive: true`
 				// (the diagnostics wait lapsed its budget) — NOT a confirmed clean.
 				// Reconciling it as clean would wipe a live finding (the #533
-				// false-clean trap). Set the flag exactly as the real `touchFile`
-				// does — a NON-enumerable property — so this test also catches a
-				// future regression where the code copies/spreads the array (which
-				// drops a non-enumerable flag) before reading `inconclusive`.
-				const inconclusive: unknown[] = [];
-				Object.defineProperty(inconclusive, "inconclusive", {
-					value: true,
-					enumerable: false,
-				});
+				// false-clean trap). #1179: the real `touchFile` now carries the flag
+				// as an EXPLICIT enumerable field on the `{ diags, inconclusive }`
+				// wrapper, so it survives any copy of `.diags` by construction — set
+				// it the same way here.
 				mocks.getLSPService.mockReturnValue({
 					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
-					touchFile: vi.fn().mockResolvedValue(inconclusive),
+					touchFile: vi.fn().mockResolvedValue({ diags: [], inconclusive: true }),
 					getDiagnostics: vi.fn(),
 				});
 
@@ -1724,7 +1719,7 @@ describe("computeCascadeForFile", () => {
 				};
 				mocks.getLSPService.mockReturnValue({
 					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
-					touchFile: vi.fn().mockResolvedValue([semgrep]),
+					touchFile: vi.fn().mockResolvedValue({ diags: [semgrep] }),
 					getDiagnostics: vi.fn(),
 				});
 
@@ -1802,7 +1797,7 @@ describe("computeCascadeForFile", () => {
 						]),
 					),
 					// The neighbor is actually clean now — a confirmed active re-check.
-					touchFile: vi.fn().mockResolvedValue([]),
+					touchFile: vi.fn().mockResolvedValue({ diags: [] }),
 					getDiagnostics: vi.fn(),
 				});
 
@@ -1949,11 +1944,16 @@ describe("computeCascadeForFile", () => {
 				fs.writeFileSync(primary, "class User: pass\n");
 				fs.writeFileSync(neighbor, "from model import User\n");
 				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
-				// The touch resolves `[]` but is bound-false (computed against a diverged
-				// disk state) — NOT a confirmed clean, exactly like `inconclusive`.
+				// The touch resolves empty `.diags` but is bound-false (computed against
+				// a diverged disk state) — NOT a confirmed clean, exactly like
+				// `inconclusive`. #1179: the real `touchFile` carries `binding` as an
+				// EXPLICIT enumerable field on the wrapper (survives a `.diags` copy).
 				const touchFile = vi
 					.fn()
-					.mockImplementation(async () => withBinding([], false));
+					.mockImplementation(async () => ({
+						diags: [],
+						binding: { boundToCurrentDisk: false },
+					}));
 				mocks.getLSPService.mockReturnValue({
 					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
 					touchFile,
@@ -2049,7 +2049,7 @@ describe("computeCascadeForFile", () => {
 							if (filePath === rejectedNeighbor) {
 								throw new Error("touch failed");
 							}
-							return [lspError("confirmed live error")];
+							return { diags: [lspError("confirmed live error")] };
 						}),
 					getDiagnostics: vi.fn(),
 				});

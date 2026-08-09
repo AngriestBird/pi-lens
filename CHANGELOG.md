@@ -10,6 +10,35 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Structural shape-5 hardening: LSP `touchFile` now returns a `{ diags, inconclusive, binding }` wrapper whose flags survive any copy by construction, plus a fail-closed graph-build-info guard (closes #1179, refs #1108 #1094 #1096)** —
+	the #1108 audit found all five side-channel flags safe as-is (every consumer
+	reads off the original), but the three LSP diagnostics flags stayed
+	fragile-by-construction: a non-enumerable property hung on the returned
+	diagnostics array, silently dropped by any `[...]`/`.map`/`.filter`/
+	`structuredClone`/`JSON` copy between producer and consumer (the class that bit
+	as #1094 `inconclusive` and #1096 `binding`). `touchFile` now resolves an
+	explicit `TouchFileResult` wrapper (`clients/lsp/diagnostic-binding.ts`) with
+	`inconclusive` and `binding` as ENUMERABLE fields alongside `.diags`, so a copy
+	operates on `.diags` and can no longer drop them — the copy-loss is impossible
+	by construction. Every flag-reading consumer was migrated in lockstep (the
+	cascade `readInconclusive`/`readBoundToCurrentDisk`/`isConfirmedTouch` and its
+	`.filter()` site in `clients/dispatch/integration.ts`, the dispatch LSP runner,
+	the `lsp_diagnostics` tool, the workspace-sweep `lens_diagnostics mode=full`
+	path, and the warm-attach IPC producer — which continues to re-surface
+	`inconclusive` as an enumerable DTO field over the socket). Behavior is
+	IDENTICAL — same flags, same values, same decisions; only the carriage
+	changed. `getAllDiagnostics`'s per-entry `binding` is DELIBERATELY left as a
+	lazy non-enumerable getter on the documented read-off-original contract (making
+	it enumerable would fire the per-file disk stat+hash on any incidental spread —
+	the stat storm its laziness exists to prevent). Separately closes a latent P3
+	from the #1108 review: `getGraphBuildInfoForGraph`'s global-slot fallback could
+	serve a SIBLING graph's build-info on a `_graphBuildInfoByGraph` identity miss,
+	feeding the `graph_degraded` marker gate a (possibly healthy) sibling verdict —
+	a new `graphBuildInfoIsTrustworthy` guard fails CLOSED so an unstamped/rehydrated
+	graph surfaces an honest degraded/unknown advisory instead of a #533 false
+	clean. Inert on the live path (every build stamps its returned graph before the
+	cascade reads it). An ast-grep rule remains not viable (AGENTS.md shape 5 is
+	semantic; cross-ref #1158).
 - **Per-entry widget observation timestamps: a cross-file cascade merge no longer over-clears a whole footer record, dropping only the genuinely-stale entries (closes #1186, refs #1093 #1092 #1020)** —
 	`reconcileCascadeNeighborLspErrors` → `commitDiagnostics` used to stamp the
 	ENTIRE merged record's single `touchedAt` with the incoming `observedAt`
