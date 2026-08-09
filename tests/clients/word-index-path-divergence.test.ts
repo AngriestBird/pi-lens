@@ -134,6 +134,8 @@ describe("word-index incremental refresh key convergence (#1025 review)", () => 
 			// with "file-set churn exceeds incremental threshold"; post-fix the
 			// normalized-space diff recognizes it as the same unchanged document.
 			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			expect(result.mode).toBe("incremental");
+			if (result.mode !== "incremental") throw new Error(result.reason);
 
 			expect(result.dropped).toBe(0); // not dropped-then-re-added
 			expect(result.refreshed).toBe(0); // mtime matches → not re-tokenized
