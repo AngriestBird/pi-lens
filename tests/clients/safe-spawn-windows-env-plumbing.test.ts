@@ -33,14 +33,36 @@ vi.mock("node:fs", async (importOriginal) => {
 	return { ...actual, statSync: statSyncMock };
 });
 
-const spawnMock = vi.hoisted(() => vi.fn());
+// Typed with the real call shape (command, args, options) — not a bare
+// `vi.fn()` — so `.mock.calls[n]` carries a proper 3-tuple type instead of
+// TS inferring `[]` from a zero-arg implementation. That inferred-`[]` trap
+// is exactly what broke this file's original spawnSync destructure: casting
+// an actually-empty tuple type to a 3-tuple is a genuinely unsafe `as`, and
+// tsc (correctly) refused it.
+const spawnMock = vi.hoisted(() =>
+	vi.fn(
+		(
+			_command: string,
+			_args: string[],
+			_options: { env?: NodeJS.ProcessEnv } & Record<string, unknown>,
+		): unknown => {
+			throw new Error("spawnMock: no return value configured for this call");
+		},
+	),
+);
 const spawnSyncMock = vi.hoisted(() =>
-	vi.fn(() => ({
-		stdout: Buffer.from(""),
-		stderr: Buffer.from(""),
-		status: 0,
-		error: undefined,
-	})),
+	vi.fn(
+		(
+			_command: string,
+			_args: string[],
+			_options: { env?: NodeJS.ProcessEnv } & Record<string, unknown>,
+		) => ({
+			stdout: Buffer.from(""),
+			stderr: Buffer.from(""),
+			status: 0,
+			error: undefined,
+		}),
+	),
 );
 vi.mock("node:child_process", async (importOriginal) => {
 	const actual =
@@ -129,12 +151,14 @@ describe("Windows resolution honors the CALLER's env, not just ambient process.e
 		const ourCall = spawnMock.mock.calls.find((call) =>
 			String(call[1]).includes("widget-tool"),
 		);
-		expect(ourCall).toBeDefined();
-		const [spawnCmd, spawnArgs, spawnOptions] = ourCall as [
-			string,
-			string[],
-			{ env?: NodeJS.ProcessEnv },
-		];
+		if (!ourCall) {
+			throw new Error(
+				`expected a spawn() call mentioning "widget-tool", got: ${JSON.stringify(
+					spawnMock.mock.calls,
+				)}`,
+			);
+		}
+		const [spawnCmd, spawnArgs, spawnOptions] = ourCall;
 		// .cmd resolves through the pinned cmd.exe wrapper — the resolved
 		// managed path must appear in the wrapper's command line.
 		expect(spawnCmd).toMatch(/cmd\.exe$/i);
@@ -168,8 +192,11 @@ describe("Windows resolution honors the CALLER's env, not just ambient process.e
 		// synthesized ENOENT before reaching it.
 		expect(result.error).toBeUndefined();
 		expect(spawnSyncMock).toHaveBeenCalledTimes(1);
-		const [spawnCmd, spawnArgs, spawnOptions] = spawnSyncMock.mock
-			.calls[0] as [string, string[], { env?: NodeJS.ProcessEnv }];
+		const call = spawnSyncMock.mock.calls[0];
+		if (!call) {
+			throw new Error("expected spawnSync to have been called at least once");
+		}
+		const [spawnCmd, spawnArgs, spawnOptions] = call;
 		expect(spawnCmd).toMatch(/cmd\.exe$/i);
 		expect(spawnArgs.join(" ")).toContain(managedTool);
 		expect(spawnOptions.env?.PATHEXT).toBe(".CMD");

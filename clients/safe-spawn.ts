@@ -390,26 +390,41 @@ function resolveEffectiveWindowsCwd(
 	cwd: string | undefined,
 	env: NodeJS.ProcessEnv,
 ): string | undefined {
-	const requested = cwd ?? process.cwd();
-	const requestedDrive = driveLetter(requested);
-	if (requestedDrive !== undefined && !isDriveAbsoluteAnyDrive(requested)) {
+	if (cwd === undefined) {
+		// No caller-supplied cwd: `process.cwd()` IS the effective cwd already —
+		// the real, canonical filesystem cwd of THIS process, not a string that
+		// needs (re)classifying. On a POSIX CI host it naturally carries no
+		// drive letter; that's fine, it never needs one here. Only a
+		// CALLER-SUPPLIED cwd string goes through the fully-qualified/rooted/
+		// drive-relative classification below — running `process.cwd()`'s own
+		// value through `isRootedWindowsPath` was itself a #1201 regression: a
+		// drive-less POSIX path (e.g. Linux CI's real cwd) satisfies that
+		// predicate too (single leading separator, no drive letter), which then
+		// sent it to `resolveRootedWindowsPath` looking for a drive letter on
+		// `process.cwd()` that — being the very same drive-less string — could
+		// never supply one, resolving to `undefined` (recurring defect shape
+		// 2/7: `path.win32.resolve` falls back to `process.cwd()`, which
+		// supplies a drive on Windows and none on Linux).
+		return path.win32.normalize(process.cwd());
+	}
+	const requestedDrive = driveLetter(cwd);
+	if (requestedDrive !== undefined && !isDriveAbsoluteAnyDrive(cwd)) {
 		// `D:foo` — drive-relative to that drive's own current directory.
 		const base = getValidatedPerDriveCwd(env, requestedDrive);
 		return base === undefined
 			? undefined
-			: path.win32.normalize(path.win32.resolve(base, requested));
+			: path.win32.normalize(path.win32.resolve(base, cwd));
 	}
-	if (isFullyQualifiedWindowsPath(requested))
-		return path.win32.normalize(requested);
-	if (isRootedWindowsPath(requested)) {
+	if (isFullyQualifiedWindowsPath(cwd)) return path.win32.normalize(cwd);
+	if (isRootedWindowsPath(cwd)) {
 		// `\tools` — rooted at the CURRENT drive's root. There is no better
 		// provenance for "current drive" here than the process's own cwd (it
 		// always carries a real drive letter on Windows), matching the
 		// `D:foo` policy of anchoring to the best available drive rather than
 		// guessing.
-		return resolveRootedWindowsPath(requested, process.cwd());
+		return resolveRootedWindowsPath(cwd, process.cwd());
 	}
-	return path.win32.normalize(path.win32.resolve(process.cwd(), requested));
+	return path.win32.normalize(path.win32.resolve(process.cwd(), cwd));
 }
 
 function resolveDriveRelativeWindowsPath(
