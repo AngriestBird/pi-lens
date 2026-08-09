@@ -10,6 +10,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`trivy-config.test.ts` hardcoded a POSIX path literal (`/tmp/main.tf`), so it failed on a Windows dev machine while staying green on Linux CI (closes #1190, refs #1024)** — the terraform pass-through tests built `ctx.filePath`/`ctx.cwd` from the string literals `"/tmp/main.tf"`/`"/tmp"` and asserted the mocked `safeSpawnAsync` call against those same literals. The runner itself (`clients/dispatch/runners/trivy-config.ts`) is OS-agnostic — it resolves the scan path with `path.resolve(cwd, ctx.filePath)` — but on Windows that resolves `/tmp/main.tf` to a drive-relative `C:\tmp\main.tf`, so the hardcoded POSIX-form expectation no longer matched: the inverse of the #1024 class (a test only holding on one OS, this time POSIX-only rather than Windows-only). Test-only fix: the two cases now derive `tfCwd`/`tfFile` via `path.join(os.tmpdir(), ...)` and assert against those same derived values, so the expectation is computed the same way the runner computes its resolved path — real on both POSIX and Windows, with no hardcoded separator on either side.
+
 - **`allowScripts` entries had drifted from what the declared dependency ranges actually resolve to, so npm v12's exact-version script-approval check saw stale pins (closes #1176)** —
 	`package.json`'s `@ast-grep/cli` dependency range is `"^0.45.0"`, but the
 	`allowScripts` map still keyed its approval on `"@ast-grep/cli@0.44.1"` — a
