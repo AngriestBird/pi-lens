@@ -6,8 +6,7 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
-- **`switch-case-termination` false positives for returning try/catch and
-	exhaustive conditionals (closes #1079)** — the `no_terminating_statement`
+- **`switch-case-termination` false positives for returning try/catch and exhaustive conditionals (closes #1079)** — the `no_terminating_statement`
 	post-filter only checked whether a case's last statement was a literal
 	terminator, so a case ending in `try { return … } catch { return … }` (or an
 	exhaustive `if/else`) was flagged even though every path returns. It now

@@ -272,16 +272,8 @@ describe("switch-case-termination (TS)", () => {
 			`if (x) { return "one"; } else { return "two"; }`,
 			0,
 		],
-		[
-			"an if without an else",
-			`if (x) { return "one"; }`,
-			1,
-		],
-		[
-			"an intentional fallthrough comment",
-			`doSomething(); // fallthrough`,
-			0,
-		],
+		["an if without an else", `if (x) { return "one"; }`, 1],
+		["an intentional fallthrough comment", `doSomething(); // fallthrough`, 0],
 	])("%s", async (_name, caseBody, expected) => {
 		expect(
 			await count(
@@ -300,6 +292,39 @@ describe("switch-case-termination (TS)", () => {
 				"ts",
 				"typescript",
 				`switch (x) {\n case "a":\n case "b":\n  handle();\n  break;\n}`,
+			),
+		).toBe(0);
+	});
+
+	it("does not treat a 'falls through' comment in a nested function as a marker", async () => {
+		expect(
+			await count(
+				"switch-case-termination",
+				"ts",
+				"typescript",
+				`switch (x) {\n case 1:\n  const g = () => { /* falls through */ };\n  doSomething();\n case 2:\n  break;\n}`,
+			),
+		).toBeGreaterThan(0);
+	});
+
+	it("does not treat a leading comment as a fallthrough marker", async () => {
+		expect(
+			await count(
+				"switch-case-termination",
+				"ts",
+				"typescript",
+				`switch (x) {\n case 1:\n  // fallthrough\n  doSomething();\n case 2:\n  break;\n}`,
+			),
+		).toBeGreaterThan(0);
+	});
+
+	it("honors a fallthrough comment inside a trailing block", async () => {
+		expect(
+			await count(
+				"switch-case-termination",
+				"ts",
+				"typescript",
+				`switch (x) {\n case 1:\n  { doSomething(); /* fallthrough */ }\n case 2:\n  break;\n}`,
 			),
 		).toBe(0);
 	});
@@ -390,16 +415,8 @@ describe("switch-case-termination-js (JS)", () => {
 			`if (x) { return "one"; } else { return "two"; }`,
 			0,
 		],
-		[
-			"an if without an else",
-			`if (x) { return "one"; }`,
-			1,
-		],
-		[
-			"an intentional fallthrough comment",
-			`doSomething(); // fallthrough`,
-			0,
-		],
+		["an if without an else", `if (x) { return "one"; }`, 1],
+		["an intentional fallthrough comment", `doSomething(); // fallthrough`, 0],
 	])("%s", async (_name, caseBody, expected) => {
 		expect(
 			await count(
@@ -418,6 +435,39 @@ describe("switch-case-termination-js (JS)", () => {
 				"js",
 				"javascript",
 				`switch (x) {\n case "a":\n case "b":\n  handle();\n  break;\n}`,
+			),
+		).toBe(0);
+	});
+
+	it("does not treat a 'falls through' comment in a nested function as a marker", async () => {
+		expect(
+			await count(
+				"switch-case-termination-js",
+				"js",
+				"javascript",
+				`switch (x) {\n case 1:\n  const g = () => { /* falls through */ };\n  doSomething();\n case 2:\n  break;\n}`,
+			),
+		).toBeGreaterThan(0);
+	});
+
+	it("does not treat a leading comment as a fallthrough marker", async () => {
+		expect(
+			await count(
+				"switch-case-termination-js",
+				"js",
+				"javascript",
+				`switch (x) {\n case 1:\n  // fallthrough\n  doSomething();\n case 2:\n  break;\n}`,
+			),
+		).toBeGreaterThan(0);
+	});
+
+	it("honors a fallthrough comment inside a trailing block", async () => {
+		expect(
+			await count(
+				"switch-case-termination-js",
+				"js",
+				"javascript",
+				`switch (x) {\n case 1:\n  { doSomething(); /* fallthrough */ }\n case 2:\n  break;\n}`,
 			),
 		).toBe(0);
 	});

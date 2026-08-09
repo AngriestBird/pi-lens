@@ -1391,20 +1391,27 @@ export class TreeSitterClient {
 
 	/**
 	 * Whether a case body carries an intentional fallthrough marker comment
-	 * (`// fallthrough`, `// falls through`, …). Only comment nodes are checked
-	 * (never the case value or statement text), and the JavaScript grammar
-	 * attaches a trailing `// fallthrough` to the switch body as the case's next
-	 * sibling rather than to the case node itself, so that sibling is included.
+	 * (`// fallthrough`, `// falls through`, …). Only a *trailing* marker is
+	 * honored: a comment attached to the case node after its body statements
+	 * (TypeScript), the case's next sibling in the switch body (JavaScript), or
+	 * one inside the trailing body statement's block. A comment in a nested
+	 * function or an earlier statement is not a marker for this case and must
+	 * not suppress a genuine fall-through. Only comment nodes are checked, never
+	 * the case value or statement text.
 	 */
 	private hasFallthroughMarker(caseNode: TreeSitterNode): boolean {
 		const comments: TreeSitterNode[] = [];
-		const stack: TreeSitterNode[] = [caseNode];
-		for (let visited = 0; stack.length > 0 && visited < 500; visited++) {
-			const node = stack.pop();
-			if (!node) break;
-			if (node.type.includes("comment")) comments.push(node);
-			stack.push(...(node.children ?? []));
+		const body = this.switchCaseBodyStatements(caseNode);
+		const last = body[body.length - 1];
+		const lastEnd = last?.endIndex ?? caseNode.startIndex;
+		// TypeScript attaches a trailing `// fallthrough` as a direct child of the
+		// case node, after the body statements.
+		for (const c of caseNode.children ?? []) {
+			if (c.type.includes("comment") && c.startIndex >= lastEnd) {
+				comments.push(c);
+			}
 		}
+		// JavaScript attaches it to the switch body as the case's next sibling.
 		const siblings = (caseNode.parent?.children ?? []).filter(
 			(c) => c.isNamed,
 		);
@@ -1413,6 +1420,19 @@ export class TreeSitterClient {
 		);
 		const next = index >= 0 ? siblings[index + 1] : undefined;
 		if (next?.type.includes("comment")) comments.push(next);
+		// A marker inside the trailing body statement's block (e.g. `{ work();
+		// /* fallthrough */ }`). Only the trailing statement is walked so a comment
+		// in a nested function or an earlier statement can't suppress a genuine
+		// fall-through.
+		if (last) {
+			const stack: TreeSitterNode[] = [last];
+			for (let visited = 0; stack.length > 0 && visited < 500; visited++) {
+				const node = stack.pop();
+				if (!node) break;
+				if (node.type.includes("comment")) comments.push(node);
+				stack.push(...(node.children ?? []));
+			}
+		}
 		return comments.some((c) => /falls?\s?through/i.test(c.text));
 	}
 
