@@ -122,10 +122,16 @@ const grammarHeavyInclude = [
 const timingSensitiveInclude = [
 	"tests/clients/source-walk-occupancy.test.ts",
 	"tests/clients/source-filter-async.test.ts",
-	// NOTE: tests/clients/lsp/edits.test.ts was phased here too, until #1081
-	// showed its planner is synchronous end to end, so the sampler was only ever
-	// reporting wall clock. That guard now budgets CPU time, which no amount of
-	// sibling-fork noise can inflate, so the file is back in "default".
+	// Workspace-edit planning also uses the independent occupancy sampler; keep
+	// its measurement window out of the default fork storm while the guard still
+	// catches a genuinely non-yielding planner. #1081 additionally showed the
+	// sampler gap alone could not tell a descheduled worker apart from a real
+	// block, so the test now asserts a CPU-time budget as well — but CPU time is
+	// NOT contention-proof here either: on Windows this payload is ~400
+	// realpathSync.native calls (clients/path-utils.ts normalizeFilePath) whose
+	// SYSTEM time is charged to this process and does inflate under load. Both
+	// numbers therefore need this project's quiet measurement window.
+	"tests/clients/lsp/edits.test.ts",
 	// Same measureMaxSyncBlockMs sampler + same contention-starvation flake
 	// (observed 2026-07-31: cold buildOrUpdateGraph blew the 300ms budget at
 	// ~82s under a full-suite fork storm, exhausting its retry:2). Its

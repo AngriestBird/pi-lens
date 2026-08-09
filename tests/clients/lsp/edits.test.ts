@@ -10,6 +10,7 @@ import {
 	isSameFsIdentity,
 	mergeWorkspaceTextEditsByPriority,
 } from "../../../clients/lsp/edits.js";
+import { measureMaxSyncBlockMs } from "../../support/perf-harness.js";
 import { normalizeMapKey } from "../../../clients/lsp/path-utils.js";
 import { removeTempDirSync } from "../test-utils.js";
 import {
@@ -815,14 +816,30 @@ describe("LSP workspace edits", () => {
 		}
 	});
 
-	// Budgeted in CPU time, not in the setImmediate-sampler gap the other occupancy
-	// guards use (tests/support/perf-harness.ts). Those guard walkers that DO yield,
-	// where the gap is the only way to see a non-yielding regression. The planner is
-	// synchronous end to end, so its gap is just the wall clock of one ~3ms call, and
-	// a descheduled worker under suite load reported 358-435ms of "block" that no
-	// O(1k) planning path can produce (#1081). CPU time does not accrue while the OS
-	// has the core elsewhere, so this measures the planner and nothing else.
-	it("keeps large text/resource planning occupancy bounded", { timeout: 30_000, retry: 2 }, () => {
+	// Two budgets, because they catch different regressions and neither subsumes
+	// the other (#1081):
+	//   - CPU time (user+system) is the signal for a compute/syscall blowup in the
+	//     planner. Unlike the sampler gap it does not count time the OS spent
+	//     running someone else, so a merely descheduled worker cannot inflate it —
+	//     that inflation is what produced the 358-435ms "block" readings in #1081.
+	//   - measureMaxSyncBlockMs (tests/support/perf-harness.ts) is the signal for
+	//     "blocks the TUI". A synchronous stretch that does NOT burn CPU — an
+	//     execSync, a cold or networked readFileSync/realpathSync per path — is
+	//     invisible to cpuUsage but shows up as a sampler gap. That shape is live,
+	//     not hypothetical: #1091 removed a *second* per-path canonicalization
+	//     from pathIndexKey (clients/lsp/edits.ts).
+	// Neither number is contention-proof, so vitest.config.ts keeps this file in
+	// the phased `timing-sensitive` project. CPU time is NOT immune on Windows:
+	// planning this payload is ~400 realpathSync.native calls (normalizeFilePath
+	// in clients/path-utils.ts), and that syscall cost is SYSTEM time charged to
+	// this process, which does inflate under load. Measured on Windows, same
+	// payload: 15-47ms CPU / 37-46ms sampler gap in the quiet phased window, but
+	// 47-110ms CPU / 235-259ms gap with 16 CPU+FS loaders running — i.e. phasing
+	// is what makes either budget meaningful, and 100ms would already flake.
+	// Scaling (Windows, standalone): ~47-78ms at 800 ops, ~0.5-1.2s at 8k,
+	// ~1.6-2.0s at 40k — mostly system time — so an O(1k)-scale synchronous
+	// regression still trips the 200ms CPU budget by a wide margin.
+	it("keeps large text/resource planning occupancy bounded", { timeout: 30_000, retry: 2 }, async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-plan-"));
 		const changes: Record<string, unknown[]> = {};
 		const documentChanges: unknown[] = [];
@@ -835,11 +852,17 @@ describe("LSP workspace edits", () => {
 			documentChanges.push({ kind: "create", uri, options: { ignoreIfExists: true } });
 		}
 		try {
-			const start = process.cpuUsage();
-			const planned = __planWorkspaceEditForTest({ changes, documentChanges });
-			const { user, system } = process.cpuUsage(start);
+			let planned = 0;
+			let cpuMs = 0;
+			const maxBlock = await measureMaxSyncBlockMs(async () => {
+				const start = process.cpuUsage();
+				planned = __planWorkspaceEditForTest({ changes, documentChanges });
+				const { user, system } = process.cpuUsage(start);
+				cpuMs = (user + system) / 1000;
+			});
 			expect(planned).toBe(count * 2);
-			expect((user + system) / 1000).toBeLessThan(300);
+			expect(cpuMs).toBeLessThan(200);
+			expect(maxBlock).toBeLessThan(300);
 		} finally { removeTempDirSync(tmpDir); }
 	});
 
