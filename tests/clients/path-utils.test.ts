@@ -11,6 +11,8 @@ import {
 	normalizeFilePath,
 	normalizeMapKey,
 	pathToUri,
+	splitPathSegments,
+	toPosix,
 	toProjectRelativePath,
 	uriToPath,
 	walkUpDirs,
@@ -478,5 +480,46 @@ describe("isExternalOrVendorFile", () => {
 
 	it("returns false for a dir that merely contains 'vendor' as a substring", () => {
 		expect(isExternalOrVendorFile(`${root}/src/vendor_utils/helper.ts`, root)).toBe(false);
+	});
+});
+
+describe("toPosix (refs #1193)", () => {
+	it("folds backslashes to forward slashes", () => {
+		expect(toPosix("C:\\repo\\src\\x.ts")).toBe("C:/repo/src/x.ts");
+		expect(toPosix("\\\\host\\share\\a.ts")).toBe("//host/share/a.ts");
+	});
+
+	it("is a no-op on an already-forward-slashed path", () => {
+		expect(toPosix("/home/u/x.ts")).toBe("/home/u/x.ts");
+		expect(toPosix("src/x.ts")).toBe("src/x.ts");
+	});
+
+	it("is exactly the inline idiom it replaces (does NOT collapse, resolve, or lowercase)", () => {
+		const p = "C:\\Repo\\\\src\\.\\x.ts";
+		// Pure separator fold — same as `p.replace(/\\/g, "/")`, no other change.
+		expect(toPosix(p)).toBe(p.replace(/\\/g, "/"));
+		expect(toPosix(p)).toBe("C:/Repo//src/./x.ts"); // doubled slash + `.` + case preserved
+	});
+
+	it("handles empty string", () => {
+		expect(toPosix("")).toBe("");
+	});
+});
+
+describe("splitPathSegments (refs #1193, #1161/#1163)", () => {
+	it("splits on EITHER separator regardless of host, dropping empties", () => {
+		expect(splitPathSegments("C:\\repo\\src\\x.ts")).toEqual(["C:", "repo", "src", "x.ts"]);
+		expect(splitPathSegments("/home/u/x.ts")).toEqual(["home", "u", "x.ts"]);
+		expect(splitPathSegments("a/b\\c")).toEqual(["a", "b", "c"]); // mixed separators
+	});
+
+	it("collapses doubled separators and drops leading/trailing empties", () => {
+		expect(splitPathSegments("//host\\\\share//a")).toEqual(["host", "share", "a"]);
+		expect(splitPathSegments("src/")).toEqual(["src"]);
+	});
+
+	it("returns [] for empty or separator-only input", () => {
+		expect(splitPathSegments("")).toEqual([]);
+		expect(splitPathSegments("///")).toEqual([]);
 	});
 });
