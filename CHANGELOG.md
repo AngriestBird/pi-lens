@@ -10,8 +10,32 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Per-entry widget observation timestamps: a cross-file cascade merge no longer over-clears a whole footer record, dropping only the genuinely-stale entries (closes #1186, refs #1093 #1092 #1020)** —
+	`reconcileCascadeNeighborLspErrors` → `commitDiagnostics` used to stamp the
+	ENTIRE merged record's single `touchedAt` with the incoming `observedAt`
+	(e.g. a passive snapshot's `entry.ts`, up to ~240s old), including PRESERVED
+	entries observed more recently. If the neighbor's mtime later fell between
+	that stale stamp and a preserved entry's true observation time,
+	`reconcileStaleWidgetFiles` dropped the WHOLE record — losing the newer
+	preserved findings (the residual documented at `clients/dispatch/integration.ts`).
+	`WidgetDiagnostic` now carries a per-ENTRY `observedAt`: `normalizeDiagnostics`
+	stamps each incoming entry at its observation time, the cascade merge keeps
+	each preserved entry's own prior stamp (never re-aging a fresh finding to the
+	incoming stamp), and `reconcileStaleWidgetFiles` gates per ENTRY — dropping
+	only entries observed before the file's current mtime, keeping the record when
+	any survive, and dropping the record only when empty (a clean, finding-less
+	record still gates on `touchedAt`). `PersistedWidgetState` bumps v1→v2:
+	`importWidgetState` accepts a v1 snapshot and migrates each stampless entry to
+	inherit the record's `touchedAt` (a safe, over-conservative default; a
+	missing/non-numeric version or a future version this build can't understand is
+	still rejected — the pre-existing strictness is preserved). The sibling gates
+	`dropStaleFiles`
+	(session-state-store) and `reconcileProjectDiagnosticsSnapshot` are unchanged
+	— both compare against a single save/scan time ≥ every entry's observation, so
+	a whole-record drop there already equals dropping every entry. The
+	`markDependentsUnverified`/seq-stamp half of #1093's sketch is a separate,
+	non-contained follow-up (left open under #1093).
 - **The `runtimeExitWindow` breaker map never dropped a stale/aged-out key, and its cooldown comment described the wrong call order (closes #1183, refs #1142 #1181)** — two P3 hygiene follow-ups from the #1181 review of the #1142 windowed-rate breaker in `clients/lsp/index.ts`. (1) `runtimeExitWindow` was only ever `delete`d on the currently-unreachable optional-trip path, so a key that crashed once then recovered kept a stale timestamp array forever (bounded by servers×roots, not a leak, but untidy). The "survived past the threshold" branch now also drops the key once every entry in its window has aged out, mirroring where `runtimeExitCounts` is already `delete`d there — anchored on the death's own `exitedAt` (not `Date.now()`) so it only ever fires for deaths `recordRuntimeExitWindow` declined to record (over the sleep-gap ceiling, or a missing `exitedAt`), never for a death that was just added to the window. (2) The `Math.max` cooldown comment claimed it "never shortens a longer cooldown the fast path may have just set," which has the ordering backwards — `state.broken` is `delete`d at the top of the method, so the window's `.get(key) ?? 0` always reads 0, and the fast path runs AFTER this block. Reworded to describe the actual ordering; harmless either way since the non-optional branch latches `permanentlyBroken` and the optional branch is currently unreachable. Comment-only for (2); pure map hygiene for (1) — trip logic, thresholds, and the fast path are unchanged.
-
 - **`allowScripts` entries had drifted from what the declared dependency ranges actually resolve to, so npm v12's exact-version script-approval check saw stale pins (closes #1176)** —
 	`package.json`'s `@ast-grep/cli` dependency range is `"^0.45.0"`, but the
 	`allowScripts` map still keyed its approval on `"@ast-grep/cli@0.44.1"` — a
