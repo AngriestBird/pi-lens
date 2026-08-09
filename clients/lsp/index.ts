@@ -215,6 +215,35 @@ const BROKEN_PERMANENT_AFTER = 5; // disable for session after N consecutive fai
 // 60s comfortably covers normal serve-a-few-files-then-idle sessions while
 // still catching "spawns fine, dies within seconds every time" servers.
 const RUNTIME_EXIT_UPTIME_THRESHOLD_MS = 60_000;
+// #1142: the fast path above only trips on CONSECUTIVE exits UNDER the 60s
+// threshold, so a server that reliably dies just PAST it (~65-90s after every
+// spawn) resets that streak on every death and churns forever — a persistent
+// low-frequency crash loop the hard-cutoff design structurally cannot see. The
+// windowed-rate trip COMPOSES with (does not replace) the fast path: N
+// non-intentional deaths within a rolling M-minute window trip the breaker
+// regardless of each death's individual lifetime.
+//   N = BROKEN_PERMANENT_AFTER (5): one uniform "5 strikes" give-up count
+//       across both streams, and high enough that the benign over-threshold
+//       deaths that reach this path (a one-off crash after a long healthy run;
+//       a single sleep/resume connection drop) — at most one per key per event
+//       — cannot approach it.
+//   M = 15 min: wide enough for a genuine slow loop (each life ~65-90s, so 5
+//       death→respawn cycles land in ~6-15 min of active churn) to accumulate
+//       5, yet short enough that sparse benign crashes (e.g. "twice last hour,
+//       now healthy") age out of the rolling window before five ever coincide.
+const RUNTIME_EXIT_WINDOW_MS = 15 * 60_000;
+const RUNTIME_EXIT_WINDOW_TRIP_COUNT = BROKEN_PERMANENT_AFTER;
+// A death whose measured lifetime (`exitedAt - spawnedAt`) exceeds this ceiling
+// is NOT recorded toward the window: it is either a genuinely long healthy run
+// that crashed once, or a lifetime computed ACROSS a machine-sleep / Modern-
+// Standby suspend (the #1122/#1139 death-timestamp lesson — a suspend gap makes
+// a benign exit look like a huge "uptime"), and neither is crash-loop churn.
+// The slow-loop residual this fix targets dies well within the ceiling
+// (~65-90s), so it is unaffected. This is a belt-and-suspenders guard on top of
+// the structural defense that the window is per-KEY: a single suspend kills at
+// most one live client per server, contributing at most one death to any one
+// key's window, so it cannot by itself reach the trip count regardless.
+const RUNTIME_EXIT_WINDOW_UPTIME_CEILING_MS = 10 * 60_000;
 // #743: a server whose per-server notify write (didOpen/didChange) times out
 // this many times in a row is a persistently backpressured server; it is demoted
 // into the `broken` cooldown map (evicted + cooled down) so subsequent sweeps
@@ -508,6 +537,18 @@ export interface LSPWorkspaceDiagnosticResult {
 	 * #1092 touchedAt-re-arming defect).
 	 */
 	observedAt?: number;
+	/**
+	 * #1104: sha256 of the file bytes this result's diagnostics were computed
+	 * against, when known — from the pull path's server-answered `resultId`
+	 * flow (a "full" `workspace/diagnostic`/`textDocument/diagnostic` report is
+	 * fingerprinted at request time; an "unchanged" report inherits the prior
+	 * fingerprint) or, for a per-file touch, the SAME `contentHash` the #1095
+	 * push-path binding records. Absent means "no hash available" (never
+	 * fabricated) — the cache-record site below then honestly stores no
+	 * contentHash and a later `lookup()`'s binding reads "unknown", exactly the
+	 * pre-#1104 behavior for that entry.
+	 */
+	contentHash?: string;
 }
 
 /**
@@ -791,6 +832,26 @@ export class LSPService {
 	 * parallel counter feeding one circuit, not a second mechanism.
 	 */
 	private readonly runtimeExitCounts = new Map<string, number>();
+	/**
+	 * #1142: rolling window of recent non-intentional death timestamps
+	 * (`exitedAt`) per "serverId:root" key (the SAME identity as
+	 * {@link runtimeExitCounts} and {@link LSPState.broken} — defect shape 1) —
+	 * the SECOND, independent breaker trip condition that COMPOSES with the
+	 * {@link runtimeExitCounts} fast path. That counter only sees CONSECUTIVE
+	 * exits under the 60s threshold; a server that dies just PAST it every spawn
+	 * resets that streak forever (#1142). This window trips when
+	 * {@link RUNTIME_EXIT_WINDOW_TRIP_COUNT} deaths fall within
+	 * {@link RUNTIME_EXIT_WINDOW_MS}, regardless of each death's lifetime.
+	 *
+	 * Bounded on BOTH axes (defect shape 9): entries older than the window are
+	 * pruned on every record, AND the array is hard-capped at the trip count
+	 * (drop-oldest) — a rate trip needs only the count within the window, never
+	 * an unbounded history of timestamps. No timer backs it (defect shape 4): it
+	 * ages purely by prune-on-check, so there is nothing to `unref()` or
+	 * print-mode-gate. Like {@link runtimeExitCounts} it is a per-instance field,
+	 * so a fresh `LSPService` (via `resetLSPService`) starts empty.
+	 */
+	private readonly runtimeExitWindow = new Map<string, number[]>();
 	/** Server/root keys disabled for the rest of this session after repeated failures. */
 	private readonly permanentlyBroken = new Set<string>();
 	/**
@@ -1384,31 +1445,89 @@ export class LSPService {
 				// Not evidence of a bad server — leave any existing runtime-exit
 				// streak alone (a deliberate restart is not a recovery signal
 				// either; only clear the streak once the server proves itself by
-				// staying up past the threshold, handled in the `else` below).
-			} else if (uptimeMs != null && uptimeMs < RUNTIME_EXIT_UPTIME_THRESHOLD_MS) {
-				const rCount = (this.runtimeExitCounts.get(key) ?? 0) + 1;
-				this.runtimeExitCounts.set(key, rCount);
-				const rCooldown = Math.min(
-					BROKEN_BASE_COOLDOWN_MS * 2 ** (rCount - 1),
-					BROKEN_MAX_COOLDOWN_MS,
-				);
-				this.state.broken.set(key, Date.now() + rCooldown);
-				if (!isOptionalServer && rCount >= BROKEN_PERMANENT_AFTER) {
-					this.permanentlyBroken.add(key);
-					logSessionStart(
-						`lsp respawn ${server.id}: permanently disabled after ${rCount} early post-init exits (uptimeMs=${uptimeMs})`,
-					);
-				} else {
-					logSessionStart(
-						`lsp respawn ${server.id}: early post-init exit ${rCount}/${BROKEN_PERMANENT_AFTER} (uptimeMs=${uptimeMs}), cooldown=${rCooldown}ms`,
-					);
-				}
+				// staying up past the threshold, handled in the `else` below). The
+				// windowed-rate trip below is likewise gated behind this
+				// `!wasIntentional` guard, so user-initiated restarts, config/
+				// workspace reloads, session changes, #743 eviction and generation
+				// handoffs (all shutdown()-driven) never feed it.
 			} else {
-				// Survived past the threshold (or uptime unknown) before dying —
-				// this was a functioning server, not a crash loop. Reset the streak
-				// so an occasional post-longrun crash doesn't creep it toward
-				// permanent disablement.
-				this.runtimeExitCounts.delete(key);
+				// #1142: windowed-rate trip — the SECOND, independent breaker
+				// condition, composed with the fast path below. Record this
+				// non-intentional death and, if RUNTIME_EXIT_WINDOW_TRIP_COUNT
+				// deaths fell within the rolling window, give up NOW regardless of
+				// each death's individual lifetime. This catches the slow loop
+				// (dies just past the 60s threshold every spawn) that the
+				// consecutive-early-exit fast path structurally cannot see.
+				if (this.recordRuntimeExitWindow(key, exitedAt, uptimeMs)) {
+					const rate = `${RUNTIME_EXIT_WINDOW_TRIP_COUNT} deaths within ${Math.round(RUNTIME_EXIT_WINDOW_MS / 60_000)}m`;
+					// Set a cooldown so THIS detection also stops respawning (the
+					// broken check below at the end of this method re-reads it),
+					// symmetric with the fast path which cools down on every count.
+					// `max` never SHORTENS a longer cooldown the fast path may have
+					// just set for the same death.
+					this.state.broken.set(
+						key,
+						Math.max(
+							this.state.broken.get(key) ?? 0,
+							Date.now() +
+								(isOptionalServer
+									? OPTIONAL_LSP_RETRY_COOLDOWN_MS
+									: BROKEN_MAX_COOLDOWN_MS),
+						),
+					);
+					if (isOptionalServer) {
+						// Optional servers never latch permanently (mirrors the fast
+						// path): cool down + disable for a retry interval, and reset
+						// the window so the trip must be re-earned afterward.
+						this.optionalDisabled.add(key);
+						this.runtimeExitWindow.delete(key);
+						logSessionStart(
+							`lsp respawn ${server.id}: optional server cooled down (windowed-rate trip: ${rate})`,
+						);
+					} else {
+						this.permanentlyBroken.add(key);
+						logSessionStart(
+							`lsp respawn ${server.id}: permanently disabled (windowed-rate trip: ${rate}, uptimeMs=${uptimeMs})`,
+						);
+					}
+				}
+
+				// #1127/#1139 fast path — CONSECUTIVE exits UNDER the 60s
+				// threshold. UNCHANGED: its own counter, its own trip point. A
+				// single death may feed BOTH accumulators (the window above AND
+				// runtimeExitCounts here), but neither alters the other's threshold,
+				// so the fast path's trip point is exactly what it was.
+				if (
+					uptimeMs != null &&
+					uptimeMs < RUNTIME_EXIT_UPTIME_THRESHOLD_MS
+				) {
+					const rCount = (this.runtimeExitCounts.get(key) ?? 0) + 1;
+					this.runtimeExitCounts.set(key, rCount);
+					const rCooldown = Math.min(
+						BROKEN_BASE_COOLDOWN_MS * 2 ** (rCount - 1),
+						BROKEN_MAX_COOLDOWN_MS,
+					);
+					this.state.broken.set(key, Date.now() + rCooldown);
+					if (!isOptionalServer && rCount >= BROKEN_PERMANENT_AFTER) {
+						this.permanentlyBroken.add(key);
+						logSessionStart(
+							`lsp respawn ${server.id}: permanently disabled after ${rCount} early post-init exits (uptimeMs=${uptimeMs})`,
+						);
+					} else {
+						logSessionStart(
+							`lsp respawn ${server.id}: early post-init exit ${rCount}/${BROKEN_PERMANENT_AFTER} (uptimeMs=${uptimeMs}), cooldown=${rCooldown}ms`,
+						);
+					}
+				} else {
+					// Survived past the threshold (or uptime unknown) before dying —
+					// this was a functioning server, not a HOT crash loop. Reset the
+					// consecutive-early streak so an occasional post-longrun crash
+					// doesn't creep it toward permanent disablement. The windowed
+					// counter above is deliberately NOT reset here: a ~65-90s death
+					// lands in this branch yet IS the churn #1142 targets — the
+					// window ages those out by time instead.
+					this.runtimeExitCounts.delete(key);
+				}
 			}
 		}
 
@@ -2916,6 +3035,11 @@ export class LSPService {
 	 * else all "unknown" (or no contributors) → "unknown"; else true. The
 	 * surfaced version/contentHash come from the first contributor that carries
 	 * them — informational only; the load-bearing field is `boundToCurrentDisk`.
+	 * #1104: `version` and `contentHash` are tracked INDEPENDENTLY (not gated on
+	 * the same contributor carrying both) — a pull-sourced binding deliberately
+	 * has no `version` (the pull protocol has no version-echo concept) but does
+	 * carry a real `contentHash`; gating the latter on the former would silently
+	 * drop it here even though `boundToCurrentDisk` above already used it.
 	 */
 	private mergeBinding(
 		filePath: string,
@@ -2930,6 +3054,8 @@ export class LSPService {
 			);
 			if (version === undefined && entry?.version !== undefined) {
 				version = entry.version;
+			}
+			if (contentHash === undefined && entry?.contentHash !== undefined) {
 				contentHash = entry.contentHash;
 			}
 		}
@@ -4119,6 +4245,23 @@ export class LSPService {
 						?.inconclusive === true;
 				const timedOut = diagnostics === undefined || inconclusive;
 				if (timedOut) timedOutFiles += 1;
+				// #1104 (shape 5 — AGENTS.md): read the touch's content binding off
+				// the RAW `diagnostics` array here, before `applyAuxiliarySuppressions`
+				// below rebuilds it via `.filter()` — a `.filter()` result is a NEW
+				// array and does not carry over the source's non-enumerable
+				// `.binding` (see #1095's own `Object.defineProperty` comment: "JSON.
+				// stringify / spread / logging ... unaffected" cuts both ways — a
+				// derived COPY never gets it either). A version-less/pull-less
+				// server's `diagnostics` simply carries no `.binding`, so
+				// `contentHash` stays undefined here (honest "unknown" downstream),
+				// matching pre-#1104 behavior exactly.
+				const rawBinding = (
+					diagnostics as
+						| (typeof diagnostics & {
+								binding?: import("./diagnostic-binding.js").DiagnosticBinding;
+						  })
+						| undefined
+				)?.binding;
 				// #586: honor each auxiliary profile's native inline-suppression
 				// comment (e.g. opengrep's `// nosemgrep`, #441) — computed from the
 				// raw `diagnostics` (before this drops its non-enumerable
@@ -4142,6 +4285,7 @@ export class LSPService {
 					diagnostics: filteredDiagnostics ?? [],
 					count: filteredDiagnostics?.length ?? 0,
 					timedOut,
+					contentHash: rawBinding?.contentHash,
 				});
 			} catch (err) {
 				results.push({
@@ -4335,11 +4479,20 @@ export class LSPService {
 		for (const result of results) {
 			const scannedAt = scannedMtimeByFile.get(result.filePath);
 			if (result.error || result.timedOut || scannedAt === undefined) continue;
+			// #1104: thread the per-result `contentHash` (from either the
+			// `tryWorkspacePull` fast path or a per-file touch's own #1095 binding)
+			// into the cache entry — previously this call never passed one, so
+			// every pull-served entry read binding "unknown" forever and the #1095
+			// P2-1 service-sweep binding gate above (`cached.binding.
+			// boundToCurrentDisk !== false`) could never demote a pull-cached
+			// entry. Absent `contentHash` (no binding was available) behaves
+			// exactly as before.
 			workspaceDiagnosticsCacheCtx.record(
 				result.filePath,
 				workspaceSweepScopeKey,
 				result.diagnostics,
 				scannedAt,
+				result.contentHash,
 			);
 		}
 		workspaceDiagnosticsCacheCtx.persist();
@@ -4371,16 +4524,32 @@ export class LSPService {
 				Math.max(perFileMs, workspacePullBudgetMs()),
 			);
 			if (!report) return undefined;
-			const byPath = new Map<string, import("./client.js").LSPDiagnostic[]>();
+			const byPath = new Map<
+				string,
+				{
+					diagnostics: import("./client.js").LSPDiagnostic[];
+					contentHash?: string;
+				}
+			>();
 			for (const entry of report) {
-				byPath.set(normalizeMapKey(entry.filePath), entry.diagnostics);
+				byPath.set(normalizeMapKey(entry.filePath), entry);
 			}
 			return groupFiles.map((filePath) => {
-				const diagnostics = byPath.get(normalizeMapKey(filePath)) ?? [];
+				const entry = byPath.get(normalizeMapKey(filePath));
+				const diagnostics = entry?.diagnostics ?? [];
 				// A pull that got here returned a real workspace/diagnostic report
 				// (see the `!report` guard above) — always confirmed, unlike a
 				// per-file touchFile default-empty on timeout.
-				return { filePath, diagnostics, count: diagnostics.length, timedOut: false };
+				// #1104: `contentHash` comes straight from the client's pull layer —
+				// a file absent from the report (reported "clean" here) carries none,
+				// same honest "unknown" the record site already applies for it.
+				return {
+					filePath,
+					diagnostics,
+					count: diagnostics.length,
+					timedOut: false,
+					contentHash: entry?.contentHash,
+				};
 			});
 		} catch {
 			return undefined;
@@ -4570,6 +4739,55 @@ export class LSPService {
 	}
 
 	/**
+	 * #1142 windowed-rate breaker (composes with the {@link runtimeExitCounts}
+	 * fast path — see that field and {@link RUNTIME_EXIT_WINDOW_MS}).
+	 *
+	 * Records one non-intentional death and returns true iff this death pushes
+	 * the rolling window to {@link RUNTIME_EXIT_WINDOW_TRIP_COUNT} deaths, i.e.
+	 * the breaker should give up now. The caller has ALREADY excluded intentional
+	 * teardowns (shutdown()-driven restarts, #743 eviction, session resets,
+	 * generation handoffs) — only genuine crash-respawns reach here.
+	 *
+	 * Sleep-gap / long-healthy-run guard: a death whose measured lifetime exceeds
+	 * {@link RUNTIME_EXIT_WINDOW_UPTIME_CEILING_MS} (or is unknown) is NOT
+	 * recorded — a lifetime spanning a Modern-Standby suspend, or a genuinely
+	 * long run that crashed once, is not churn. See that constant for the
+	 * per-KEY structural defense this backs up.
+	 *
+	 * Bounded on both axes (defect shape 9): prune entries outside the window,
+	 * then hard-cap the retained array at the trip count (drop-oldest — a rate
+	 * trip needs only the in-window count, so earliest-evidence order is
+	 * irrelevant here).
+	 */
+	private recordRuntimeExitWindow(
+		key: string,
+		exitedAt: number | undefined,
+		uptimeMs: number | null,
+	): boolean {
+		if (
+			exitedAt == null ||
+			uptimeMs == null ||
+			uptimeMs > RUNTIME_EXIT_WINDOW_UPTIME_CEILING_MS
+		) {
+			return false;
+		}
+		const deaths = this.runtimeExitWindow.get(key) ?? [];
+		deaths.push(exitedAt);
+		// Roll the window around the most recent death. `exitedAt` is the client's
+		// own recorded death time (#1127), which can arrive out of DETECTION order
+		// — a death detected hours later still carries its true, older timestamp —
+		// so anchor on the max, not on push order.
+		const windowRef = Math.max(...deaths);
+		const windowStart = windowRef - RUNTIME_EXIT_WINDOW_MS;
+		let pruned = deaths.filter((t) => t >= windowStart);
+		if (pruned.length > RUNTIME_EXIT_WINDOW_TRIP_COUNT) {
+			pruned = pruned.slice(pruned.length - RUNTIME_EXIT_WINDOW_TRIP_COUNT);
+		}
+		this.runtimeExitWindow.set(key, pruned);
+		return pruned.length >= RUNTIME_EXIT_WINDOW_TRIP_COUNT;
+	}
+
+	/**
 	 * Read-only circuit-breaker status, including server/root pairs that have no
 	 * live client and would therefore be absent from getStatus().
 	 *
@@ -4596,13 +4814,20 @@ export class LSPService {
 			return {
 				serverId: separator >= 0 ? key.slice(0, separator) : key,
 				root: separator >= 0 ? key.slice(separator + 1) : "",
-				// #1127: spawn/init failures and early post-init runtime exits are
-				// two streams feeding the same breaker (see `runtimeExitCounts`
-				// doc) — sum them so this always reflects the total churn behind
-				// a cooldown/permanent-disable, whichever stream produced it.
+				// #1127/#1142: spawn/init failures, consecutive early post-init
+				// exits, and the windowed-rate stream all feed the same breaker
+				// (see `runtimeExitCounts`/`runtimeExitWindow` docs). Sum spawn/init
+				// failures with the LARGER of the two runtime-exit streams — a
+				// single <60s death feeds BOTH runtimeExitCounts and the window, so
+				// `max` avoids double-counting them, while still surfacing a
+				// windowed-only trip (whose runtimeExitCounts may be 0) instead of
+				// misreporting `failures: 0` behind a permanent-disable.
 				failures:
 					(this.failureCounts.get(key) ?? 0) +
-					(this.runtimeExitCounts.get(key) ?? 0),
+					Math.max(
+						this.runtimeExitCounts.get(key) ?? 0,
+						this.runtimeExitWindow.get(key)?.length ?? 0,
+					),
 				permanentlyBroken: this.permanentlyBroken.has(key),
 				cooldownUntil: this.state.broken.get(key) ?? 0,
 			};

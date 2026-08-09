@@ -84,6 +84,45 @@ describe("requestWarmDiagnostics", () => {
 		removeTempDirSync(cwd);
 	});
 
+	// #1108 shape-5 (side-channel copy-loss). `inconclusive` rides the touchFile
+	// result as a NON-enumerable side-channel; it CANNOT survive the IPC socket's
+	// JSON round-trip on the diagnostics array. warm-attach re-surfaces it as an
+	// EXPLICIT enumerable response field precisely so the flag crosses the boundary
+	// intact — this guards that the client consumer still HONORS it (an inconclusive
+	// answer is not a confirmed clean, #571/#1093). Fail-then-pass: drop the
+	// `result.inconclusive` disqualifier in ipc.ts and this passes an inconclusive
+	// answer through as available.
+	it("rejects an inconclusive answer carried as an enumerable IPC field", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-inconc-"));
+		const pid = 99011;
+		activeServer = net.createServer((socket) => {
+			socket.setEncoding("utf8");
+			socket.once("data", (chunk: string) => {
+				const request = JSON.parse(chunk.trim()) as { contentHash: string };
+				socket.end(
+					`${JSON.stringify({
+						result: {
+							route: "diagnostics",
+							version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
+							diagnostics: [],
+							contentHash: request.contentHash,
+							servedAt: Date.now(),
+							fresh: true,
+							inconclusive: true,
+						},
+					})}\n`,
+				);
+			});
+		});
+		await new Promise<void>((resolve) =>
+			activeServer?.listen(diagnosticsIpcPathForCwd(cwd, pid), resolve),
+		);
+		await expect(
+			requestWarmDiagnostics(cwd, pid, "/x/app.ts", "const x = 1;", 1000),
+		).resolves.toEqual({ available: false, reason: "stale-answer" });
+		removeTempDirSync(cwd);
+	});
+
 	it("rejects schema skew and fails open on errors", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-skew-"));
 		const pid = 99002;

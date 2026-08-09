@@ -44,6 +44,27 @@ export interface StoredDiagnosticBinding {
 /**
  * The read-time binding surfaced to consumers: the stored half plus the lazily
  * computed disk verdict.
+ *
+ * SIDE-CHANNEL CARRIAGE CONTRACT (#1108 shape-5 — copy-loss risk). A binding is
+ * hung on a diagnostics result as a NON-enumerable property: `touchFile` attaches
+ * it as a value and `getAllDiagnostics` as a lazy disk-verifying getter (both on
+ * `clients/lsp/index.ts`), so it does NOT appear in the diagnostics array's own
+ * enumeration. Consequences every consumer must honor:
+ *   - READ IT OFF THE ORIGINAL producer object, never off a derived copy. Any
+ *     `{...result}` / `[...result]` / `.map` / `.filter` / `structuredClone` /
+ *     `JSON.parse(JSON.stringify(...))` between the producer and the read SILENTLY
+ *     DROPS the binding — the consumer then reads `undefined` (indistinguishable
+ *     from "unknown") and skips the #1092 staleness demotion. This is the class
+ *     that bit as #1094 (`inconclusive`) and #1096 (`binding`); the cascade reads
+ *     both flags off `rawDiags`/`entry` BEFORE its `.filter()` for exactly this
+ *     reason (`clients/dispatch/integration.ts` `readBoundToCurrentDisk`).
+ *   - IF IT MUST CROSS A SERIALIZATION BOUNDARY (the warm-attach IPC socket, a JSON
+ *     round-trip), re-surface it as an EXPLICIT enumerable field on the transport
+ *     wrapper — a non-enumerable side-channel never survives `JSON.stringify`. See
+ *     `clients/warm-attach.ts`, which carries `inconclusive` as an enumerable
+ *     response field precisely because the array's side-channel does not survive.
+ * The structural fix (a `{ diags, inconclusive, binding }` wrapper that makes the
+ * loss impossible by construction) is tracked as a follow-up to #1108 (#1179).
  */
 export interface DiagnosticBinding extends StoredDiagnosticBinding {
 	boundToCurrentDisk: BoundToCurrentDisk;

@@ -1421,6 +1421,137 @@ export class TreeSitterClient {
 	}
 
 	/**
+	 * Whether a case body carries an intentional fallthrough marker comment
+	 * (`// fallthrough`, `// falls through`, …). Only a *trailing* marker is
+	 * honored: a comment attached to the case node after its body statements
+	 * (TypeScript), the case's next sibling in the switch body (JavaScript), or
+	 * one inside the trailing body statement's block. A comment in a nested
+	 * function or an earlier statement is not a marker for this case and must
+	 * not suppress a genuine fall-through. Only comment nodes are checked, never
+	 * the case value or statement text.
+	 */
+	private hasFallthroughMarker(caseNode: TreeSitterNode): boolean {
+		const comments: TreeSitterNode[] = [];
+		const body = this.switchCaseBodyStatements(caseNode);
+		const last = body[body.length - 1];
+		const lastEnd = last?.endIndex ?? caseNode.startIndex;
+		// TypeScript attaches a trailing `// fallthrough` as a direct child of the
+		// case node, after the body statements.
+		for (const c of caseNode.children ?? []) {
+			if (c.type.includes("comment") && c.startIndex >= lastEnd) {
+				comments.push(c);
+			}
+		}
+		// JavaScript attaches it to the switch body as the case's next sibling.
+		const siblings = (caseNode.parent?.children ?? []).filter(
+			(c) => c.isNamed,
+		);
+		const index = siblings.findIndex(
+			(c) => c.startIndex === caseNode.startIndex,
+		);
+		const next = index >= 0 ? siblings[index + 1] : undefined;
+		if (next?.type.includes("comment")) comments.push(next);
+		// A marker inside the trailing body statement's block (e.g. `{ work();
+		// /* fallthrough */ }`). Only the trailing statement is walked, and nested
+		// functions are not descended into, so a comment in a nested function or
+		// an earlier statement can't suppress a genuine fall-through.
+		if (last) {
+			const NESTED_FN = new Set([
+				"function_declaration",
+				"function_expression",
+				"arrow_function",
+				"method_definition",
+				"generator_function",
+				"generator_function_declaration",
+				"class_declaration",
+			]);
+			const stack: TreeSitterNode[] = [last];
+			for (let visited = 0; stack.length > 0 && visited < 500; visited++) {
+				const node = stack.pop();
+				if (!node) break;
+				if (node.type.includes("comment")) comments.push(node);
+				if (!NESTED_FN.has(node.type)) {
+					stack.push(...(node.children ?? []));
+				}
+			}
+		}
+		return comments.some((c) => /falls?\s?through/i.test(c.text));
+	}
+
+	/**
+	 * Whether a statement terminates control flow (does not fall through to the
+	 * next statement). Handles terminators, trailing blocks, try/catch/finally,
+	 * and exhaustive if/else. Fail-safe: any unrecognized shape returns false
+	 * (falls through), so a blocking rule never under-reports. Depth-bounded so a
+	 * pathological nesting cannot blow the stack.
+	 */
+	private statementTerminates(node: TreeSitterNode, depth = 0): boolean {
+		if (depth > 20) return false;
+		const t = node.type;
+		const TERMINATORS = new Set([
+			"break_statement",
+			"return_statement",
+			"throw_statement",
+			"continue_statement",
+		]);
+		if (TERMINATORS.has(t)) return true;
+		// Wrapper nodes whose trailing statement decides termination: a block, an
+		// `else` clause, a `catch` clause, or a `finally` clause.
+		if (
+			t === "statement_block" ||
+			t === "else_clause" ||
+			t === "catch_clause" ||
+			t === "finally_clause"
+		) {
+			const inner = (node.children ?? []).filter(
+				(c) => c.isNamed && !c.type.includes("comment"),
+			);
+			const last = inner[inner.length - 1];
+			if (!last) return false; // empty wrapper falls through
+			return this.statementTerminates(last, depth + 1);
+		}
+		if (t === "try_statement") {
+			// The try body is the first statement_block child. A returning/throwing
+			// try completes after finally, so only a catch that handles a thrown try
+			// and falls through can still reach the end. A try body that completes
+			// normally reaches the end unless a finally terminates it.
+			const tryBody = (node.children ?? []).find(
+				(c) => c.type === "statement_block",
+			);
+			const tryTerminates = tryBody
+				? this.statementTerminates(tryBody, depth + 1)
+				: false;
+			const catches = (node.children ?? []).filter(
+				(c) => c.type === "catch_clause",
+			);
+			const fin = (node.children ?? []).find(
+				(c) => c.type === "finally_clause",
+			);
+			if (tryTerminates) {
+				return catches.every((c) =>
+					this.statementTerminates(c, depth + 1),
+				);
+			}
+			return !!fin && this.statementTerminates(fin, depth + 1);
+		}
+		if (t === "if_statement") {
+			// An if only terminates when it has an else and both branches do.
+			const named = (node.children ?? []).filter(
+				(c) => c.isNamed && !c.type.includes("comment"),
+			);
+			// named = [condition, consequence, (else_clause)]
+			const consequence = named[1];
+			const alternative = named[2];
+			if (!consequence || !alternative) return false;
+			return (
+				this.statementTerminates(consequence, depth + 1) &&
+				this.statementTerminates(alternative, depth + 1)
+			);
+		}
+		return false;
+	}
+
+	/**
 	 * Whether a `switch_case`'s next sibling is another label — `case "a": case
 	 * "b": handle()` groups two labels onto one body, which is idiomatic, not a
 	 * dead case.
@@ -2353,32 +2484,16 @@ export class TreeSitterClient {
 			}
 			case "no_terminating_statement": {
 				// switch-case-termination: keep a non-empty case (already known to be
-				// followed by another case via the query) whose last body statement is
-				// not a terminator, i.e. it falls through. Empty cases are handled by
-				// empty-switch-case, so require at least one body statement here.
+				// followed by another case via the query) whose last body statement
+				// does not terminate, i.e. it falls through. Empty cases are handled
+				// by empty-switch-case, so require at least one body statement here.
+				// An intentional `// fallthrough` marker suppresses the finding.
 				const caseNode = captures.CASE;
 				if (!caseNode) return false;
+				if (this.hasFallthroughMarker(caseNode)) return false;
 				const body = this.switchCaseBodyStatements(caseNode);
 				if (body.length === 0) return false;
-				let last = body[body.length - 1];
-				while (last.type === "statement_block") {
-					// A block-scoped case body terminates when its trailing statement
-					// terminates. Keep an empty block as the last node so it still
-					// reports fall-through.
-					const inner = (last.children ?? []).filter(
-						(c) => c.isNamed && !c.type.includes("comment"),
-					);
-					const next = inner[inner.length - 1];
-					if (!next) break;
-					last = next;
-				}
-				const TERMINATORS = new Set([
-					"break_statement",
-					"return_statement",
-					"throw_statement",
-					"continue_statement",
-				]);
-				return !TERMINATORS.has(last.type);
+				return !this.statementTerminates(body[body.length - 1]);
 			}
 			case "no_break_or_return": {
 				// infinite-loop-java: keep a `while(true)`/`for(;;)` whose body has no

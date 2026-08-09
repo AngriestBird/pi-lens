@@ -63,13 +63,10 @@
  */
 export const STALE_HEARTBEAT_MS = 6 * 60 * 60 * 1000;
 
-import {
-	type ChildProcess,
-	spawn as nodeSpawn,
-	type SpawnOptions,
-} from "node:child_process";
+import { spawn as nodeSpawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { spawnCollectStdout, unrefChildAndPipes } from "./child-unref.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import {
 	type InstanceEntry,
@@ -79,78 +76,6 @@ import {
 import { logLatency } from "./latency-logger.js";
 
 const isWindows = process.platform === "win32";
-
-/**
- * Detach a best-effort reaper child from the event loop (#1153, the
- * "completed one-shot process retained alive by a REFERENCED libuv handle at
- * settle" class of #1097/#1110, #1148/#1149). Every enumeration/kill spawn in
- * this file is FIRE-AND-FORGET from `session_start` and NOT gated out of
- * one-shot/`pi --print` mode, so a settling one-shot process cannot exit until
- * the child `close`s — and a piped, `data`-listener-attached stdout stream
- * keeps the loop REFERENCED even after `child.unref()`, so the stream (and any
- * other live stdio) must be unref'd too, not just the child handle.
- *
- * Unref only means "do not keep the process alive FOR this best-effort sweep":
- * in an interactive/long-lived session the loop stays referenced for other
- * reasons, so every child's `close` still fires and the sweep completes
- * normally; only a genuinely-settled one-shot (which has no successor session
- * to protect anyway) is allowed to exit without waiting. The buffered stdout
- * is still delivered whenever the `close` fires. Never throws.
- */
-function unrefReaperChild(child: ChildProcess): void {
-	try {
-		child.unref();
-		// Child stdio pipes are `net.Socket`s at runtime (which expose `unref`),
-		// but are typed as `Readable`/`Writable` (which do not) — cast to the
-		// optional-`unref` shape and guard, so an un-piped ("ignore") stream is a
-		// no-op rather than a crash.
-		for (const stream of [child.stdout, child.stderr, child.stdin]) {
-			(stream as { unref?: () => void } | null)?.unref?.();
-		}
-	} catch {
-		// best-effort — unref must never throw out of a reaper spawn
-	}
-}
-
-/**
- * Spawn a best-effort enumeration child, accumulate its full stdout, and
- * resolve with the collected text (empty string on spawn failure or an
- * `error` event). Consolidates the identical spawn → pipe → `close` plumbing
- * shared by every OS-process-table enumeration below
- * (`findPidsByMarkerWindows`, `queryCommandLines`, `enumerateManagedProcesses`)
- * — each caller supplies only its command/args/options and its own output
- * parse. The child + its stdio pipes are `unref`'d here (#1153) so a settled
- * one-shot `pi --print` process can exit without waiting for the sweep, and
- * unref lives in exactly ONE place rather than at five near-identical sites.
- * Never rejects — any failure resolves to `""`, which every caller's parse
- * turns into an empty result (the sweep's best-effort contract).
- */
-function spawnCollectStdout(
-	command: string,
-	args: string[],
-	options: SpawnOptions,
-): Promise<string> {
-	return new Promise((resolve) => {
-		let settled = false;
-		const settle = (value: string) => {
-			if (settled) return;
-			settled = true;
-			resolve(value);
-		};
-		try {
-			const child = nodeSpawn(command, args, options);
-			unrefReaperChild(child);
-			let out = "";
-			child.stdout?.on("data", (chunk) => {
-				out += chunk.toString();
-			});
-			child.once("error", () => settle(""));
-			child.once("close", () => settle(out));
-		} catch {
-			settle("");
-		}
-	});
-}
 
 export interface ChildToKill {
 	pid: number;
@@ -505,7 +430,7 @@ async function killPidTree(pid: number): Promise<void> {
 				windowsHide: true,
 				stdio: "ignore",
 			});
-			unrefReaperChild(killer);
+			unrefChildAndPipes(killer);
 			await new Promise<void>((resolve) => {
 				killer.once("close", () => resolve());
 				killer.once("error", () => resolve());
