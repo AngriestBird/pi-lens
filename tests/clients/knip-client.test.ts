@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { getProjectDataDir } from "../../clients/file-utils.js";
+import { getToolEnvironment } from "../../clients/installer/index.js";
 import {
 	KnipClient,
 	readOverridePinnedPackageNames,
@@ -34,8 +35,29 @@ describe("knip-client", () => {
 			await client.runAnalyze(tmpDir);
 
 			expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalled();
-			const [, args] = vi.mocked(safeSpawnMod.safeSpawnAsync).mock.calls[0] ?? [];
+			const [command, args, spawnOptions] =
+				vi.mocked(safeSpawnMod.safeSpawnAsync).mock.calls[0] ?? [];
+			expect(command).toBe("knip");
 			expect(args).toContain("--cache");
+			expect(spawnOptions?.cwd).toBe(tmpDir);
+
+			// Control-flow coverage for #1199: runAnalyze() must construct the
+			// exact child environment before calling safeSpawnAsync. The project
+			// .bin is first, while the installer-provided managed entries remain
+			// present behind it for Windows PATH/PATHEXT resolution.
+			const separator = process.platform === "win32" ? ";" : ":";
+			const projectBin = path.join(tmpDir, "node_modules", ".bin");
+			const childPath = spawnOptions?.env?.PATH ?? spawnOptions?.env?.Path ?? "";
+			const childPathEntries = childPath.split(separator);
+			const managedPath = (await getToolEnvironment()).PATH ?? "";
+			const managedEntries = managedPath.split(separator);
+			expect(childPathEntries[0]).toBe(projectBin);
+			for (const managedEntry of managedEntries.slice(0, 2)) {
+				expect(childPathEntries).toContain(managedEntry);
+			}
+			if (process.platform === "win32") {
+				expect(spawnOptions?.env?.Path).toBe(spawnOptions?.env?.PATH);
+			}
 
 			const cacheLocationIndex = (args as string[]).indexOf("--cache-location");
 			expect(cacheLocationIndex).toBeGreaterThan(-1);
