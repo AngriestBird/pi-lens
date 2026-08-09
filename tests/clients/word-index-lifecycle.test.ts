@@ -328,7 +328,9 @@ describe("word-index lifecycle — full mode (#348)", () => {
 				() =>
 					expect(
 						fallbackDbg.mock.calls.some(([m]) =>
-							String(m).includes("falling back to full rebuild"),
+							String(m).includes(
+								"incremental preflight selected full rebuild (file-set-churn)",
+							),
 						),
 					).toBe(true),
 				{ timeout: 5000 },

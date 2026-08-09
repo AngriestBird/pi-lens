@@ -7,6 +7,8 @@ import {
 	refreshWordIndexIncrementally,
 	searchWordIndex,
 	serializeWordIndex,
+	type WordIndexRefreshOutcome,
+	type WordIndexRefreshResult,
 } from "../../clients/word-index.js";
 import { _resetProjectScaleBaseForTests } from "../../clients/project-scale.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
@@ -14,6 +16,14 @@ import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 afterEach(() => {
 	_resetProjectScaleBaseForTests();
 });
+
+function expectIncremental(
+	outcome: WordIndexRefreshOutcome,
+): WordIndexRefreshResult {
+	expect(outcome.mode).toBe("incremental");
+	if (outcome.mode !== "incremental") throw new Error(outcome.reason);
+	return outcome;
+}
 
 // #1105: the incremental refresh gate was mtime-ONLY, so a content change that
 // PRESERVES mtime (git checkout timestamp restoration, a formatter preserving
@@ -58,7 +68,9 @@ describe("word-index freshness: mtime preserved, content changed (#1105)", () =>
 			expect(after.mtimeMs).toBe(recorded.mtimeMs);
 			expect(after.size).not.toBe(recorded.size);
 
-			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			const result = expectIncremental(
+				await refreshWordIndexIncrementally(index, env.tmpDir),
+			);
 
 			// Post-fix: the size delta forces the re-read of exactly this one file.
 			// Pre-fix (mtime-only gate) this file was skipped: `refreshed` was 0 and
@@ -98,7 +110,9 @@ describe("word-index freshness: mtime preserved, content changed (#1105)", () =>
 			expect(after.mtimeMs).toBe(recorded.mtimeMs);
 			expect(after.size).not.toBe(recorded.size);
 
-			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			const result = expectIncremental(
+				await refreshWordIndexIncrementally(index, env.tmpDir),
+			);
 			expect(result.refreshed).toBe(1);
 			expect(searchWordIndex(index, "quokka")[0]?.file).toBe(a);
 			expect(searchWordIndex(index, "roundTripAlpha")).toEqual([]);
@@ -138,12 +152,16 @@ describe("word-index legacy snapshot (no fileSizes) self-heals (#1105)", () => {
 			// NO file content changes — mtime matches for every file. The ONLY reason
 			// to re-read is the absent size (`?? -1` mismatch). Pre-guard (`?? size`)
 			// this would be 0.
-			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			const result = expectIncremental(
+				await refreshWordIndexIncrementally(index, env.tmpDir),
+			);
 			expect(result.refreshed).toBe(fileCount);
 			expect(result.dropped).toBe(0);
 			// Post-heal the sizes are populated, so an immediate second refresh is a
 			// no-op — the full re-read happens exactly once.
-			const second = await refreshWordIndexIncrementally(index, env.tmpDir);
+			const second = expectIncremental(
+				await refreshWordIndexIncrementally(index, env.tmpDir),
+			);
 			expect(second.refreshed).toBe(0);
 			expect(second.reused).toBe(fileCount);
 		} finally {
@@ -169,7 +187,9 @@ describe("word-index legacy snapshot (no fileSizes) self-heals (#1105)", () => {
 			if (!index) throw new Error("deserialize returned null");
 			expect(index.fileSizes.size).toBe(0);
 
-			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			const result = expectIncremental(
+				await refreshWordIndexIncrementally(index, env.tmpDir),
+			);
 			expect(result.refreshed).toBe(fileCount);
 		} finally {
 			env.cleanup();
