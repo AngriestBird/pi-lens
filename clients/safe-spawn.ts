@@ -278,10 +278,82 @@ function getWindowsEnvironmentValue(
 	return value;
 }
 
+function driveLetter(value: string): string | undefined {
+	const match = /^([A-Za-z]):/.exec(value);
+	return match?.[1]?.toUpperCase();
+}
+
+function isDriveAbsolute(value: string, drive: string): boolean {
+	return new RegExp(`^${drive}:[\\\\/]`, "i").test(value);
+}
+
+/**
+ * Return a validated Windows per-drive current directory. Windows exposes
+ * these as environment entries such as `=D:`; unlike ordinary environment
+ * variables they are not safe to synthesize from a drive letter. A malformed
+ * or wrong-drive value is deliberately ignored so drive-relative resolution
+ * fails closed instead of guessing a root.
+ */
+function getValidatedPerDriveCwd(
+	env: NodeJS.ProcessEnv,
+	drive: string,
+): string | undefined {
+	const value = getWindowsEnvironmentValue(env, `=${drive}:`);
+	if (value === undefined || !isDriveAbsolute(value, drive)) return undefined;
+	return path.win32.normalize(value);
+}
+
+function resolveEffectiveWindowsCwd(
+	cwd: string | undefined,
+	env: NodeJS.ProcessEnv,
+): string | undefined {
+	const requested = cwd ?? process.cwd();
+	const requestedDrive = driveLetter(requested);
+	if (requestedDrive !== undefined && !path.win32.isAbsolute(requested)) {
+		const base = getValidatedPerDriveCwd(env, requestedDrive);
+		return base === undefined
+			? undefined
+			: path.win32.normalize(path.win32.resolve(base, requested));
+	}
+	if (path.win32.isAbsolute(requested)) return path.win32.normalize(requested);
+	return path.win32.normalize(path.win32.resolve(process.cwd(), requested));
+}
+
+function resolveDriveRelativeWindowsPath(
+	value: string,
+	effectiveCwd: string | undefined,
+	env: NodeJS.ProcessEnv,
+): string | undefined {
+	const drive = driveLetter(value);
+	if (drive === undefined) return undefined;
+	const cwdDrive = effectiveCwd === undefined ? undefined : driveLetter(effectiveCwd);
+	const base =
+		cwdDrive?.toUpperCase() === drive
+			? effectiveCwd
+			: getValidatedPerDriveCwd(env, drive);
+	if (base === undefined) return undefined;
+	return path.win32.normalize(path.win32.resolve(base, value));
+}
+
+function resolveWindowsPathEntry(
+	entry: string,
+	effectiveCwd: string | undefined,
+	env: NodeJS.ProcessEnv,
+): string | undefined {
+	if (driveLetter(entry) !== undefined && !path.win32.isAbsolute(entry)) {
+		return resolveDriveRelativeWindowsPath(entry, effectiveCwd, env);
+	}
+	if (path.win32.isAbsolute(entry)) return path.win32.normalize(entry);
+	if (effectiveCwd === undefined) return undefined;
+	return path.win32.normalize(path.win32.resolve(effectiveCwd, entry));
+}
+
 /**
  * Cached PATH + PATHEXT resolution results. The effective child environment is
  * part of the key, not the ambient process environment: one caller's managed
- * bin directory must never poison another caller's resolution. Session-lived
+ * bin directory must never poison another caller's resolution. The key also
+ * carries the canonical child cwd and Windows `=X:` per-drive cwd entries,
+ * because both affect relative PATH and drive-relative lookup. Session-lived
  * (matches this repo's other resolution caches, e.g.
  * `clients/workspace-topology.ts`'s `resetWorkspaceTopology`) — cleared via
  * `resetSafeSpawnWindowsCommandCache()`, wired into `handleSessionStart`. The
@@ -328,7 +400,7 @@ function statIsFile(candidate: string): boolean {
 
 function resolveWindowsCommandUncached(
 	command: string,
-	cwd: string | undefined,
+	effectiveCwd: string | undefined,
 	env: NodeJS.ProcessEnv,
 ): ResolvedWindowsCommand | null {
 	const pathExts = getPathExts(env);
@@ -350,22 +422,30 @@ function resolveWindowsCommandUncached(
 	};
 
 	const hasPathSep = /[\\/]/.test(command);
-	// `C:tool.exe` is drive-relative on Windows, not a bare PATH command. It
-	// must resolve against the effective cwd on that drive rather than allowing
-	// an unrelated PATH entry to win.
-	const hasDrivePrefix = /^[A-Za-z]:/.test(command);
+	// `D:tool.exe` is drive-relative on Windows, not a bare PATH command. It
+	// uses the effective cwd only when that cwd is on D:. For another drive we
+	// require an explicit, validated `=D:` provenance entry; otherwise this
+	// resolver fails closed rather than guessing `D:\\` or searching PATH.
+	const hasDrivePrefix = driveLetter(command) !== undefined;
 	if (hasPathSep || hasDrivePrefix || path.win32.isAbsolute(command)) {
 		const base = path.win32.isAbsolute(command)
-			? command
-			: path.win32.resolve(cwd ?? process.cwd(), command);
-		return tryBase(base);
+			? path.win32.normalize(command)
+			: hasDrivePrefix
+				? resolveDriveRelativeWindowsPath(command, effectiveCwd, env)
+				: effectiveCwd === undefined
+					? undefined
+					: path.win32.normalize(path.win32.resolve(effectiveCwd, command));
+		return base === undefined ? null : tryBase(base);
 	}
 
+	if (effectiveCwd === undefined) return null;
 	const pathValue = getWindowsEnvironmentValue(env, "PATH") ?? "";
 	const pathDirs = pathValue.split(path.win32.delimiter);
 	for (const dir of pathDirs) {
 		if (!dir) continue;
-		const found = tryBase(path.win32.join(dir, command));
+		const resolvedDir = resolveWindowsPathEntry(dir, effectiveCwd, env);
+		if (resolvedDir === undefined) continue;
+		const found = tryBase(path.win32.join(resolvedDir, command));
 		if (found) return found;
 	}
 	return null;
@@ -375,22 +455,36 @@ function resolveWindowsCommandUncached(
  * Resolve a Windows command using the exact environment that will be passed to
  * the child. Exported as a small platform-independent test/diagnostic seam;
  * callers should pass a Windows-shaped environment and do not need to mutate
- * `process.env` to exercise resolution.
+ * `process.env` to exercise resolution. Drive-relative commands (`D:tool.exe`)
+ * use a same-drive effective cwd, or a validated absolute `=D:` entry for a
+ * different drive; without that provenance they fail closed and never search
+ * PATH. Relative PATH entries use the canonical effective child cwd.
  */
 export function resolveWindowsCommandForEnvironment(
 	command: string,
 	cwd: string | undefined,
 	env: NodeJS.ProcessEnv,
 ): ResolvedWindowsCommand | null {
-	const effectiveCwd = cwd ?? process.cwd();
-	const pathValue = getWindowsEnvironmentValue(env, "PATH") ?? "";
-	const pathExtValue = getWindowsEnvironmentValue(env, "PATHEXT") ?? "";
+	const effectiveCwd = resolveEffectiveWindowsCwd(cwd, env);
+	const pathValue = getWindowsEnvironmentValue(env, "PATH");
+	const pathExtValue = getWindowsEnvironmentValue(env, "PATHEXT");
+	const perDriveCwds = Object.entries(env)
+		.filter(([key]) => /^=[A-Za-z]:$/.test(key))
+		.map(([key, value]) => [key.toLowerCase(), value] as const)
+		.sort(([left], [right]) => left.localeCompare(right));
+	// Keep presence separate from value: absent PATHEXT means the Windows
+	// default extension list, while PATHEXT="" means no implicit extensions.
+	// The per-drive snapshot is equally important: it is provenance for
+	// drive-relative commands and PATH entries, not ambient decoration.
 	const cacheKey = JSON.stringify([
 		"win32",
 		command,
-		pathValue,
-		pathExtValue,
-		effectiveCwd,
+		pathValue === undefined ? ["absent"] : ["present", pathValue],
+		pathExtValue === undefined
+			? ["absent"]
+			: ["present", pathExtValue],
+		effectiveCwd === undefined ? ["unresolved"] : ["resolved", effectiveCwd],
+		perDriveCwds,
 	]);
 	if (windowsCommandCache.has(cacheKey)) {
 		return windowsCommandCache.get(cacheKey) ?? null;

@@ -128,6 +128,152 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 		).toEqual({ resolvedPath, ext: ".exe" });
 	});
 
+	it("fails closed for a different-drive command without per-drive provenance", () => {
+		const cwd = "C:\\workspace\\project";
+		const unrelatedPathTool = "C:\\unrelated\\tool.exe";
+		markFilesAsPresent(unrelatedPathTool);
+
+		expect(
+			resolveWindowsCommandForEnvironment("D:tool.exe", cwd, {
+				PATH: "C:\\unrelated",
+				PATHEXT: ".EXE",
+			}),
+		).toBeNull();
+	});
+
+	it("uses validated per-drive provenance for a different-drive command", () => {
+		const cwd = "C:\\workspace\\project";
+		const perDriveCwd = "D:\\users\\tooling";
+		const resolvedPath = path.win32.resolve(perDriveCwd, "D:tool.exe");
+		markFilesAsPresent(resolvedPath);
+
+		expect(
+			resolveWindowsCommandForEnvironment("D:tool.exe", cwd, {
+				PATH: "C:\\unrelated",
+				"=D:": perDriveCwd,
+				PATHEXT: ".EXE",
+			}),
+		).toEqual({ resolvedPath, ext: ".exe" });
+	});
+
+	it("rejects malformed or wrong-drive per-drive provenance", () => {
+		const cwd = "C:\\workspace\\project";
+		const command = "D:tool.exe";
+		const unrelatedPathTool = "C:\\unrelated\\tool.exe";
+		markFilesAsPresent(unrelatedPathTool);
+
+		for (const provenance of ["D:relative", "C:\\wrong-drive"]) {
+			expect(
+				resolveWindowsCommandForEnvironment(command, cwd, {
+					PATH: "C:\\unrelated",
+					"=D:": provenance,
+					PATHEXT: ".EXE",
+				}),
+			).toBeNull();
+		}
+	});
+
+	it("fails closed for a drive-relative child cwd without provenance", () => {
+		markFilesAsPresent("D:\\users\\tooling\\bin\\tool.exe");
+
+		expect(
+			resolveWindowsCommandForEnvironment("tool", "D:child", {
+				PATH: "bin",
+				PATHEXT: ".EXE",
+			}),
+		).toBeNull();
+	});
+
+	it("uses validated provenance for a drive-relative child cwd", () => {
+		const perDriveCwd = "D:\\users\\tooling";
+		const expected = path.win32.resolve(perDriveCwd, "D:child", "bin", "tool.exe");
+		markFilesAsPresent(expected);
+
+		expect(
+			resolveWindowsCommandForEnvironment("tool", "D:child", {
+				PATH: "bin",
+				"=D:": perDriveCwd,
+				PATHEXT: ".EXE",
+			}),
+		).toEqual({ resolvedPath: expected, ext: ".exe" });
+	});
+
+	it("fails closed for a drive-relative PATH entry without provenance", () => {
+		const expected = "D:\\untrusted\\bin\\tool.exe";
+		markFilesAsPresent(expected);
+
+		expect(
+			resolveWindowsCommandForEnvironment("tool", "C:\\workspace", {
+				PATH: "D:bin",
+				PATHEXT: ".EXE",
+			}),
+		).toBeNull();
+	});
+
+	it("resolves a drive-relative PATH entry only with validated provenance", () => {
+		const perDriveCwd = "D:\\users\\tooling";
+		const expected = path.win32.resolve(perDriveCwd, "D:bin", "tool.exe");
+		markFilesAsPresent(expected);
+
+		expect(
+			resolveWindowsCommandForEnvironment("tool", "C:\\workspace", {
+				PATH: "D:bin",
+				"=D:": perDriveCwd,
+				PATHEXT: ".EXE",
+			}),
+		).toEqual({ resolvedPath: expected, ext: ".exe" });
+	});
+
+	it("resolves relative PATH entries against the effective child cwd", () => {
+		const originalCwd = process.cwd();
+		const parent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-safe-cwd-"));
+		const child = path.join(parent, "child");
+		fs.mkdirSync(child);
+		const expectedCwd = path.win32.resolve(parent, "child");
+		const expected = path.win32.join(expectedCwd, "bin", "tool.exe");
+		markFilesAsPresent(expected);
+		try {
+			process.chdir(parent);
+			expect(
+				resolveWindowsCommandForEnvironment("tool", "child", {
+					PATH: "bin",
+					PATHEXT: ".EXE",
+				}),
+			).toEqual({ resolvedPath: expected, ext: ".exe" });
+		} finally {
+			process.chdir(originalCwd);
+			fs.rmSync(parent, { recursive: true, force: true });
+		}
+	});
+
+	it("re-resolves a relative child cwd when process.chdir changes", () => {
+		const originalCwd = process.cwd();
+		const firstParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-safe-cwd-a-"));
+		const secondParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-safe-cwd-b-"));
+		const command = "tools\\tool.exe";
+		const firstResolved = path.win32.resolve(firstParent, "child", command);
+		const secondResolved = path.win32.resolve(secondParent, "child", command);
+		markFilesAsPresent(firstResolved, secondResolved);
+		try {
+			process.chdir(firstParent);
+			expect(
+				resolveWindowsCommandForEnvironment(command, "child", {
+					PATHEXT: ".EXE",
+				}),
+			).toEqual({ resolvedPath: firstResolved, ext: ".exe" });
+			process.chdir(secondParent);
+			expect(
+				resolveWindowsCommandForEnvironment(command, "child", {
+					PATHEXT: ".EXE",
+				}),
+			).toEqual({ resolvedPath: secondResolved, ext: ".exe" });
+		} finally {
+			process.chdir(originalCwd);
+			fs.rmSync(firstParent, { recursive: true, force: true });
+			fs.rmSync(secondParent, { recursive: true, force: true });
+		}
+	});
+
 	it("uses the effective process cwd in cache identity when cwd is omitted", () => {
 		const originalCwd = process.cwd();
 		const firstCwd = fs.mkdtempSync(
@@ -205,6 +351,34 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 		expect(statSyncMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
 	});
 
+	it("reset invalidates a cached negative result after an install", () => {
+		const bin = path.win32.join("stale-negative", "bin");
+		const executable = path.win32.join(bin, "tool.exe");
+		const env = { PATH: bin, PATHEXT: ".EXE" };
+		markFilesAsPresent();
+		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toBeNull();
+		markFilesAsPresent(executable);
+		resetSafeSpawnWindowsCommandCache();
+		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toEqual({
+			resolvedPath: executable,
+			ext: ".exe",
+		});
+	});
+
+	it("reset invalidates a cached positive result after deletion", () => {
+		const bin = path.win32.join("stale-positive", "bin");
+		const executable = path.win32.join(bin, "tool.exe");
+		const env = { PATH: bin, PATHEXT: ".EXE" };
+		markFilesAsPresent(executable);
+		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toEqual({
+			resolvedPath: executable,
+			ext: ".exe",
+		});
+		markFilesAsPresent();
+		resetSafeSpawnWindowsCommandCache();
+		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toBeNull();
+	});
+
 	it("evicts the oldest session entry at the cache bound", () => {
 		const entries = Array.from({ length: 257 }, (_, index) => {
 			const bin = path.win32.join("bounded-cache", String(index));
@@ -238,6 +412,38 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 		expect(statSyncMock.mock.calls.length).toBeGreaterThan(
 			callsBeforeOldestRetry,
 		);
+	});
+
+	it("distinguishes absent PATHEXT from an explicitly empty PATHEXT", () => {
+		const bin = path.win32.join("empty-pathext", "bin");
+		const executable = path.win32.join(bin, "tool.exe");
+		markFilesAsPresent(executable);
+
+		expect(
+			resolveWindowsCommandForEnvironment("tool", undefined, {
+				PATH: bin,
+				PATHEXT: "",
+			}),
+		).toBeNull();
+		expect(
+			resolveWindowsCommandForEnvironment("tool", undefined, { PATH: bin }),
+		).toEqual({ resolvedPath: executable, ext: ".exe" });
+	});
+
+	it("distinguishes absent PATHEXT after an explicit empty lookup", () => {
+		const bin = path.win32.join("empty-pathext-reverse", "bin");
+		const executable = path.win32.join(bin, "tool.exe");
+		markFilesAsPresent(executable);
+
+		expect(
+			resolveWindowsCommandForEnvironment("tool", undefined, { PATH: bin }),
+		).toEqual({ resolvedPath: executable, ext: ".exe" });
+		expect(
+			resolveWindowsCommandForEnvironment("tool", undefined, {
+				PATH: bin,
+				PATHEXT: "",
+			}),
+		).toBeNull();
 	});
 
 	it("keeps the default PATHEXT behavior when the caller supplies no PATHEXT", () => {

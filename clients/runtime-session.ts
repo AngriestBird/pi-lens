@@ -1737,8 +1737,9 @@ export async function handleSessionStart(
 	// previously session-lived with no reset hook at all).
 	resetWorkspaceTopology();
 	clearTsconfigPathsCache();
-	// #817/#1199: Windows command resolution is cached per (command, effective
-	// child PATH/PATHEXT, cwd); drop it each session so environment changes (e.g.
+	// #817/#1199: Windows command resolution is cached per (command, canonical
+	// effective child PATH/PATHEXT/cwd/per-drive provenance); drop it each
+	// session so environment changes (e.g.
 	// a tool installed mid-session or a differently-scoped managed bin) are
 	// picked up fresh.
 	resetSafeSpawnWindowsCommandCache();
