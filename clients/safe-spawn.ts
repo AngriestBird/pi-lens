@@ -363,16 +363,23 @@ function isRootedWindowsPath(value: string): boolean {
 /**
  * Resolve a rooted path (`\tools`) against the ROOT of `driveSource`'s drive
  * — not `driveSource` itself — matching Windows' own rooted-path semantics.
- * Returns `undefined` when `driveSource` carries no drive letter (only
- * reachable via a test-injected `process.cwd()` stub; real Windows cwds
- * always have one).
+ *
+ * When `driveSource` carries NO drive letter, this returns the normalized
+ * value rather than `undefined` (#1201, recurring defect shape 2). A
+ * drive-less "current drive" provenance means we are not on a drive-lettered
+ * filesystem at all — a POSIX host, or a UNC `process.cwd()` such as
+ * `\\server\share\...`, which Node permits on real Windows. In that namespace
+ * a rooted path is already as qualified as any path can be, so there is
+ * nothing to anchor and normalizing is the correct (and pre-#1201) answer.
+ * Returning `undefined` instead used to collapse the whole resolution to
+ * `null` without a single `statSync`, i.e. a false ENOENT — the exact failure
+ * signature #1199 exists to remove. This function must therefore never fail
+ * closed on the *shape* of a value that may not be a Windows path at all;
+ * the filesystem probe downstream is what decides whether it exists.
  */
-function resolveRootedWindowsPath(
-	value: string,
-	driveSource: string,
-): string | undefined {
+function resolveRootedWindowsPath(value: string, driveSource: string): string {
 	const drive = driveLetter(driveSource);
-	if (drive === undefined) return undefined;
+	if (drive === undefined) return path.win32.normalize(value);
 	return path.win32.normalize(path.win32.resolve(`${drive}:\\`, value));
 }
 
@@ -431,11 +438,20 @@ function resolveEffectiveWindowsCwd(
 	}
 	if (isFullyQualifiedWindowsPath(cwd)) return path.win32.normalize(cwd);
 	if (isRootedWindowsPath(cwd)) {
-		// `\tools` — rooted at the CURRENT drive's root. There is no better
-		// provenance for "current drive" here than the process's own cwd (it
-		// always carries a real drive letter on Windows), matching the
-		// `D:foo` policy of anchoring to the best available drive rather than
-		// guessing.
+		// `\tools` — rooted at the CURRENT drive's root.
+		//
+		// Note the deliberate asymmetry with `resolveWindowsPathEntry`, which
+		// anchors rooted PATH entries to `effectiveCwd`'s drive instead. Both
+		// use the SAME rule — "anchor to the best available "current drive"
+		// provenance at this point in the pipeline" — they just sit at
+		// different points. Here we are *computing* `effectiveCwd`, so it does
+		// not exist yet and the process's own cwd is the only provenance
+		// available (on real Windows it always carries a drive letter). By the
+		// time a PATH entry is resolved, `effectiveCwd` is known and is the
+		// strictly better answer, because it is the drive the child will
+		// actually run from — anchoring PATH entries to the host drive there
+		// would validate one file and execute another. Neither call can fail
+		// closed on a drive-less provenance; see `resolveRootedWindowsPath`.
 		return resolveRootedWindowsPath(cwd, process.cwd());
 	}
 	return path.win32.normalize(path.win32.resolve(process.cwd(), cwd));
@@ -471,7 +487,11 @@ function resolveWindowsPathEntry(
 		// `\tools` — rooted at the effective child cwd's drive root, not the
 		// host process's drive (#1201: a rooted PATH entry must resolve on
 		// the SAME drive the child will actually run cmd.exe/the resolved
-		// binary from).
+		// binary from). See `resolveEffectiveWindowsCwd`'s rooted branch for
+		// why that function anchors to `process.cwd()` instead — same rule,
+		// different point in the pipeline. `undefined` here means the cwd
+		// itself was unprovable, which is a genuinely different condition
+		// from "the provenance carries no drive letter".
 		return effectiveCwd === undefined
 			? undefined
 			: resolveRootedWindowsPath(entry, effectiveCwd);
