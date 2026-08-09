@@ -243,9 +243,20 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 		).toEqual({ resolvedPath: expected, ext: ".exe" });
 	});
 
+	// #1201: `process.chdir` is safe here only because this repo's vitest
+	// config pins the `forks` pool everywhere (each test file gets its own
+	// process, so mutating the process-wide cwd can't race a sibling test) —
+	// it would throw under the `threads` pool. And `os.tmpdir()` itself can
+	// diverge from what `process.cwd()` reports after a `chdir` into it
+	// (macOS symlinks `/var` -> `/private/var`), so the expected path is
+	// built from `fs.realpathSync` of the directory actually chdir'd into,
+	// not the raw `mkdtempSync` result — otherwise this suite could
+	// spuriously fail on macOS CI while passing on Linux/Windows.
 	it("resolves relative PATH entries against the effective child cwd", () => {
 		const originalCwd = process.cwd();
-		const parent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-safe-cwd-"));
+		const parent = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-safe-cwd-")),
+		);
 		const child = path.join(parent, "child");
 		fs.mkdirSync(child);
 		const expectedCwd = path.win32.resolve(parent, "child");
@@ -267,11 +278,11 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 
 	it("re-resolves a relative child cwd when process.chdir changes", () => {
 		const originalCwd = process.cwd();
-		const firstParent = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-safe-cwd-a-"),
+		const firstParent = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-safe-cwd-a-")),
 		);
-		const secondParent = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-safe-cwd-b-"),
+		const secondParent = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-safe-cwd-b-")),
 		);
 		const command = "tools\\tool.exe";
 		const firstResolved = path.win32.resolve(firstParent, "child", command);
@@ -299,11 +310,11 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 
 	it("uses the effective process cwd in cache identity when cwd is omitted", () => {
 		const originalCwd = process.cwd();
-		const firstCwd = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-safe-spawn-cache-first-"),
+		const firstCwd = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-safe-spawn-cache-first-")),
 		);
-		const secondCwd = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-safe-spawn-cache-second-"),
+		const secondCwd = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-safe-spawn-cache-second-")),
 		);
 		const command = "tools\\cache-tool.exe";
 		const firstResolvedPath = path.win32.resolve(firstCwd, command);
@@ -379,10 +390,12 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 		const executable = path.win32.join(bin, "tool.exe");
 		const env = { PATH: bin, PATHEXT: ".EXE" };
 		markFilesAsPresent(executable);
-		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toEqual({
-			resolvedPath: executable,
-			ext: ".exe",
-		});
+		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toEqual(
+			{
+				resolvedPath: executable,
+				ext: ".exe",
+			},
+		);
 		markFilesAsPresent();
 		expect(
 			resolveWindowsCommandForEnvironment("tool", undefined, env),
