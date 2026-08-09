@@ -666,4 +666,69 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 		expect(internal.permanentlyBroken.has(key)).toBe(false);
 		expect(server.getSpawnCount()).toBe(8);
 	});
+
+	it("outer-map hygiene (#1183): a fully-aged-out runtimeExitWindow key gets deleted, not left stale forever", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const internal = service as unknown as {
+			state: { broken: Map<string, number>; clientSpawnedAt: Map<string, number> };
+			runtimeExitWindow: Map<string, number[]>;
+			runtimeExitCounts: Map<string, number>;
+			permanentlyBroken: Set<string>;
+		};
+
+		const server = makeSpawnServer("opengrep");
+		getServersForFileWithConfig.mockReturnValue([server]);
+
+		const clients: Array<ReturnType<typeof makeFakeClient>> = [];
+		createLSPClient.mockImplementation(async () => {
+			const c = makeFakeClient("opengrep");
+			clients.push(c);
+			return c;
+		});
+
+		const file = "C:/repo/main.fake";
+		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+
+		const initial = await service.getClientForFile(file);
+		expect(initial).toBeDefined();
+
+		// First death: a genuine early crash, 40min in the past, so it is
+		// already outside the 15min rolling window by the time "now" is
+		// evaluated below. This records into runtimeExitWindow (fast path).
+		const firstSpawn = Date.now() - 40 * 60_000;
+		internal.state.clientSpawnedAt.set(key, firstSpawn);
+		clients.at(-1)!.die(firstSpawn + 5_000); // uptime 5s — early/fast-path
+
+		internal.state.broken.delete(key);
+		const detect1 = await service.getClientForFile(file);
+		expect(detect1).toBeUndefined(); // cooldown just set by the fast path
+		expect(internal.runtimeExitWindow.get(key)).toHaveLength(1);
+		expect(internal.permanentlyBroken.has(key)).toBe(false);
+
+		// Respawn.
+		internal.state.broken.delete(key);
+		const respawn = await service.getClientForFile(file);
+		expect(respawn).toBeDefined();
+
+		// Second death: lifetime OVER the 10min sleep-gap ceiling, so
+		// recordRuntimeExitWindow declines to record it at all (bails before
+		// touching the map) — this exercises the "survived past threshold"
+		// branch without any new entry landing in runtimeExitWindow. The
+		// stale first-death entry (40min old) is the only thing left in the
+		// map, and it is now fully outside the 15min window.
+		const secondSpawn = Date.now() - 20 * 60_000;
+		internal.state.clientSpawnedAt.set(key, secondSpawn);
+		clients.at(-1)!.die(secondSpawn + 15 * 60_000); // uptime 15min > ceiling
+
+		internal.state.broken.delete(key);
+		const detect2 = await service.getClientForFile(file);
+		expect(detect2).toBeDefined(); // respawned — this was not a hot crash
+
+		// The now-fully-aged-out key was dropped entirely, not left behind as
+		// a stale empty/near-empty array.
+		expect(internal.runtimeExitWindow.has(key)).toBe(false);
+		expect(internal.runtimeExitCounts.has(key)).toBe(false);
+		expect(internal.permanentlyBroken.has(key)).toBe(false);
+	});
 });

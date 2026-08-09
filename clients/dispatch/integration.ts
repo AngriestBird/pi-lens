@@ -1379,14 +1379,13 @@ export async function computeCascadeForFile(
 			// snapshot never re-arms the mtime-staleness gate (the same #1092
 			// re-arming defect this PR fixes for cache hits).
 			//
-			// #1093 known edge (P3, follow-up): this stamps the WHOLE merged record's
-			// single `touchedAt` with `entry.ts`, including PRESERVED entries that may
-			// have been observed more recently. If the neighbor's mtime later falls
-			// between `entry.ts` and a preserved entry's real observation time,
-			// `reconcileStaleWidgetFiles` drops the whole record — including those
-			// newer findings. The real fix is per-entry observation timestamps, which
-			// is out of scope here and folded into the structural redesign under
-			// #1093.
+			// #1186: `observedAt` here stamps only the INCOMING LSP-error entries.
+			// PRESERVED entries keep their own (possibly fresher) per-entry
+			// `observedAt`, and `reconcileStaleWidgetFiles` now gates per ENTRY — so
+			// if the neighbor's mtime later falls between this `entry.ts` and a
+			// preserved entry's real observation time, only the stale incoming entry
+			// drops and the fresher preserved finding survives (previously the whole
+			// record was over-cleared; that residual is now fixed).
 			reconcileCascadeNeighborLspErrors(
 				neighborPath,
 				cascadeReconcilableLspErrors(entry.diags, neighborPath),
