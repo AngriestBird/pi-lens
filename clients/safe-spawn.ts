@@ -236,13 +236,27 @@ export interface ResolvedWindowsCommand {
 }
 
 /**
- * The only extensions the rest of this module actually knows how to spawn:
- * `.exe`/`.com` directly, `.cmd`/`.bat` through the cmd.exe wrapper (see the
- * dispatch in `safeSpawnAsync`/`safeSpawn` below). An explicit suffix outside
- * this set is not treated as a "known executable extension" unless the
- * caller's own PATHEXT says otherwise (#1201).
+ * The extensions this resolver treats as executable suffixes on their own,
+ * independent of PATHEXT: `.exe`/`.com` and `.cmd`/`.bat`. An explicit suffix
+ * outside this set is not treated as a "known executable extension" unless
+ * the caller's own PATHEXT says so (#1201).
+ *
+ * This is a RESOLUTION set, not a dispatch whitelist — do not read it as "the
+ * only extensions this module can spawn". Dispatch in
+ * `safeSpawnAsync`/`safeSpawn` below routes `.cmd`/`.bat` through the cmd.exe
+ * wrapper and EVERYTHING ELSE to direct spawn, so a resolved path with any
+ * other suffix (reachable only when the caller's own PATHEXT lists it) is
+ * direct-spawned. That is deliberate and not a widening: CreateProcess does no
+ * ShellExecute file-association lookup, the default Windows PATHEXT already
+ * contains `.VBS`/`.JS`/`.WSF`/`.MSC`, and the set here is strictly narrower
+ * than the pre-#1201 behavior. Only the doc claim was ever wrong.
  */
-const WINDOWS_DIRECT_RESOLVABLE_EXTS = new Set([".exe", ".com", ".cmd", ".bat"]);
+const WINDOWS_DIRECT_RESOLVABLE_EXTS = new Set([
+	".exe",
+	".com",
+	".cmd",
+	".bat",
+]);
 
 /**
  * Merge a parent and child environment using Windows' case-insensitive variable
@@ -551,7 +565,11 @@ function resolveWindowsCommandUncached(
 		// exact-match short-circuit: that would let an arbitrary
 		// non-executable file resolve as "spawnable" and reach the
 		// direct-spawn branch downstream.
-		if (hasExplicitExt && isKnownExecutableExt(existingExt) && statIsFile(base)) {
+		if (
+			hasExplicitExt &&
+			isKnownExecutableExt(existingExt) &&
+			statIsFile(base)
+		) {
 			return { resolvedPath: base, ext: existingExt };
 		}
 		if (!hasExplicitExt || !pathExts.includes(existingExt)) {
@@ -742,9 +760,18 @@ function ensureUtf8ConsoleCodePageOnce(): void {
 	}
 }
 
-/** Test-only: clear the one-shot `chcp` memoization so a test can observe it
- * running again in isolation. Restored (was dropped as unrelated scope creep
- * in an earlier #1199 revision); harmless, module-private state otherwise. */
+/**
+ * Test-only seam: clear the one-shot `chcp` memoization.
+ *
+ * No test observes it today — the memoized work only runs inside a real
+ * Windows direct spawn, so exercising it would mean a Windows-only test, and
+ * the state it guards is a console code page, not behavior any assertion
+ * depends on. This is kept purely so a future Windows-only test (or a second
+ * caller of `ensureUtf8ConsoleCodePageOnce`) can reset process-lifetime state
+ * without reaching into the module; it was dropped once as unrelated scope
+ * creep in an earlier #1199 revision and restored on review. Do not read the
+ * export as evidence of existing coverage (#1201).
+ */
 export function resetUtf8ConsoleCodePageStateForTests(): void {
 	utf8ConsoleCodePageApplied = false;
 }
@@ -881,10 +908,13 @@ export async function safeSpawnAsync(
 		// value instead of failing the whole spawn before ever attempting it
 		// (#1201) — command resolution just below still fails closed for any
 		// relative PATH entry that would need this cwd to be canonical.
+		// No `?? process.cwd()` third arm: `resolveEffectiveWindowsCwd(undefined,
+		// env)` always returns a string, so the only way to reach `undefined`
+		// here is a DEFINED-but-unprovable `options.cwd`, which `?? options?.cwd`
+		// already covers. A `process.cwd()` arm would be unreachable, and it
+		// would read like a live silent-wrong-directory hazard (#1201).
 		const spawnCwd = isWindows
-			? (resolveEffectiveWindowsCwd(options?.cwd, spawnEnv) ??
-				options?.cwd ??
-				process.cwd())
+			? (resolveEffectiveWindowsCwd(options?.cwd, spawnEnv) ?? options?.cwd)
 			: options?.cwd;
 		let spawnCmd = command;
 		let spawnArgs = args;
@@ -1267,10 +1297,9 @@ export function safeSpawn(
 		// whole spawn before ever attempting it (#1201). Command resolution
 		// below intentionally still uses the ORIGINAL raw cwd and fails closed
 		// for PATH entries that would need it to be canonical.
+		// See safeSpawnAsync for why there is no `?? process.cwd()` third arm.
 		const spawnCwd =
-			resolveEffectiveWindowsCwd(options?.cwd, spawnEnv) ??
-			options?.cwd ??
-			process.cwd();
+			resolveEffectiveWindowsCwd(options?.cwd, spawnEnv) ?? options?.cwd;
 		const resolved = resolveWindowsCommand(command, options?.cwd, spawnEnv);
 		if (!resolved) {
 			return {
