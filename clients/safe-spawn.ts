@@ -236,6 +236,15 @@ export interface ResolvedWindowsCommand {
 }
 
 /**
+ * The only extensions the rest of this module actually knows how to spawn:
+ * `.exe`/`.com` directly, `.cmd`/`.bat` through the cmd.exe wrapper (see the
+ * dispatch in `safeSpawnAsync`/`safeSpawn` below). An explicit suffix outside
+ * this set is not treated as a "known executable extension" unless the
+ * caller's own PATHEXT says otherwise (#1201).
+ */
+const WINDOWS_DIRECT_RESOLVABLE_EXTS = new Set([".exe", ".com", ".cmd", ".bat"]);
+
+/**
  * Merge a parent and child environment using Windows' case-insensitive variable
  * names. Node's JavaScript environment object can contain both `PATH` and
  * `Path`, even though Windows treats them as one variable. Removing an older
@@ -292,12 +301,81 @@ function isDriveAbsolute(value: string, drive: string): boolean {
 	);
 }
 
+/** `X:\...` or `X:/...` — a drive-absolute path, for any drive letter. */
+function isDriveAbsoluteAnyDrive(value: string): boolean {
+	const drive = driveLetter(value);
+	return drive !== undefined && isDriveAbsolute(value, drive);
+}
+
+/** `\\server\share\...` — a UNC path. Two leading separators, not more. */
+function isUncWindowsPath(value: string): boolean {
+	return (
+		(value[0] === "\\" || value[0] === "/") &&
+		(value[1] === "\\" || value[1] === "/") &&
+		value[2] !== "\\" &&
+		value[2] !== "/"
+	);
+}
+
+/**
+ * A path is "fully qualified" (self-contained, no ambient current-directory
+ * lookup required) only when it is drive-absolute (`X:\...`) or UNC
+ * (`\\server\share`). `path.win32.isAbsolute("\tools")` also returns `true`
+ * for a *rooted* path — one relative to the current drive's root rather than
+ * a specific drive — and treating that as fully qualified was the #1201
+ * bug: it got statSync'd against the *host* drive while a different
+ * `effectiveCwd`/`resolvedDrive` supplied the drive cmd.exe actually used to
+ * execute it, so a different file could be validated than executed.
+ */
+function isFullyQualifiedWindowsPath(value: string): boolean {
+	return isDriveAbsoluteAnyDrive(value) || isUncWindowsPath(value);
+}
+
+/**
+ * `\tools` or `/tools` — rooted at the current drive's root, but naming no
+ * drive of its own (distinct from both `X:\tools` fully-qualified and
+ * `X:tools` drive-relative-to-current-directory). Windows resolves this
+ * against the root of whichever drive is "current", not the current
+ * directory on that drive.
+ */
+function isRootedWindowsPath(value: string): boolean {
+	return (
+		(value[0] === "\\" || value[0] === "/") &&
+		driveLetter(value) === undefined &&
+		!isUncWindowsPath(value)
+	);
+}
+
+/**
+ * Resolve a rooted path (`\tools`) against the ROOT of `driveSource`'s drive
+ * — not `driveSource` itself — matching Windows' own rooted-path semantics.
+ * Returns `undefined` when `driveSource` carries no drive letter (only
+ * reachable via a test-injected `process.cwd()` stub; real Windows cwds
+ * always have one).
+ */
+function resolveRootedWindowsPath(
+	value: string,
+	driveSource: string,
+): string | undefined {
+	const drive = driveLetter(driveSource);
+	if (drive === undefined) return undefined;
+	return path.win32.normalize(path.win32.resolve(`${drive}:\\`, value));
+}
+
 /**
  * Return a validated Windows per-drive current directory. Windows exposes
  * these as environment entries such as `=D:`; unlike ordinary environment
  * variables they are not safe to synthesize from a drive letter. A malformed
  * or wrong-drive value is deliberately ignored so drive-relative resolution
  * fails closed instead of guessing a root.
+ *
+ * Node never surfaces `=X:` keys from the ambient `process.env` (verified:
+ * `Object.keys(process.env).filter(k => k.startsWith("="))` is empty), so
+ * this provenance is only ever available when a caller supplies it
+ * explicitly in an `env` override — e.g. a test, or a future integration
+ * that reads it from a lower-level Windows API. That's a real, if narrow,
+ * use: keep this path rather than deleting it, but never synthesize a value
+ * Node itself can't hand us.
  */
 function getValidatedPerDriveCwd(
 	env: NodeJS.ProcessEnv,
@@ -314,13 +392,23 @@ function resolveEffectiveWindowsCwd(
 ): string | undefined {
 	const requested = cwd ?? process.cwd();
 	const requestedDrive = driveLetter(requested);
-	if (requestedDrive !== undefined && !path.win32.isAbsolute(requested)) {
+	if (requestedDrive !== undefined && !isDriveAbsoluteAnyDrive(requested)) {
+		// `D:foo` — drive-relative to that drive's own current directory.
 		const base = getValidatedPerDriveCwd(env, requestedDrive);
 		return base === undefined
 			? undefined
 			: path.win32.normalize(path.win32.resolve(base, requested));
 	}
-	if (path.win32.isAbsolute(requested)) return path.win32.normalize(requested);
+	if (isFullyQualifiedWindowsPath(requested))
+		return path.win32.normalize(requested);
+	if (isRootedWindowsPath(requested)) {
+		// `\tools` — rooted at the CURRENT drive's root. There is no better
+		// provenance for "current drive" here than the process's own cwd (it
+		// always carries a real drive letter on Windows), matching the
+		// `D:foo` policy of anchoring to the best available drive rather than
+		// guessing.
+		return resolveRootedWindowsPath(requested, process.cwd());
+	}
 	return path.win32.normalize(path.win32.resolve(process.cwd(), requested));
 }
 
@@ -346,10 +434,19 @@ function resolveWindowsPathEntry(
 	effectiveCwd: string | undefined,
 	env: NodeJS.ProcessEnv,
 ): string | undefined {
-	if (driveLetter(entry) !== undefined && !path.win32.isAbsolute(entry)) {
+	if (driveLetter(entry) !== undefined && !isDriveAbsoluteAnyDrive(entry)) {
 		return resolveDriveRelativeWindowsPath(entry, effectiveCwd, env);
 	}
-	if (path.win32.isAbsolute(entry)) return path.win32.normalize(entry);
+	if (isFullyQualifiedWindowsPath(entry)) return path.win32.normalize(entry);
+	if (isRootedWindowsPath(entry)) {
+		// `\tools` — rooted at the effective child cwd's drive root, not the
+		// host process's drive (#1201: a rooted PATH entry must resolve on
+		// the SAME drive the child will actually run cmd.exe/the resolved
+		// binary from).
+		return effectiveCwd === undefined
+			? undefined
+			: resolveRootedWindowsPath(entry, effectiveCwd);
+	}
 	if (effectiveCwd === undefined) return undefined;
 	return path.win32.normalize(path.win32.resolve(effectiveCwd, entry));
 }
@@ -418,17 +515,35 @@ function resolveWindowsCommandUncached(
 	const pathExts = getPathExts(env);
 	const existingExt = path.win32.extname(command).toLowerCase();
 	const hasExplicitExt = existingExt.length > 0;
+	// A suffix is "known executable" when it's one of the four extensions this
+	// resolver actually knows how to run (direct .exe/.com, or the
+	// cmd.exe-wrapped .cmd/.bat) OR it's explicitly listed in the caller's own
+	// PATHEXT. Anything else with a dot is NOT necessarily "an extension" — a
+	// versioned interpreter (`python3.11`, `node-v20.1`) has an `extname()` of
+	// `.11`/`.1` that is part of the basename, not a suffix to match exactly
+	// (#1201).
+	const isKnownExecutableExt = (ext: string): boolean =>
+		WINDOWS_DIRECT_RESOLVABLE_EXTS.has(ext) || pathExts.includes(ext);
 
 	const tryBase = (base: string): ResolvedWindowsCommand | null => {
-		// An explicitly-suffixed command is an exact candidate even when its
-		// suffix is absent from PATHEXT (e.g. a caller explicitly asks for foo.cmd
-		// while PATHEXT only lists .EXE). Bare commands use PATHEXT order.
-		if (hasExplicitExt) {
-			return statIsFile(base) ? { resolvedPath: base, ext: existingExt } : null;
+		// Additive, not exclusive: an explicit, known-executable suffix is
+		// tried as an exact candidate FIRST (this also lets a caller ask for
+		// `foo.cmd` even when the current PATHEXT doesn't happen to list
+		// `.CMD`). Whenever the suffix ISN'T a PATHEXT entry — no extension at
+		// all, or a versioned/unknown one like `.11` — the PATHEXT-append loop
+		// ALSO runs against the full base, so `python3.11` still finds
+		// `python3.11.exe`. An unknown suffix (e.g. `foo.txt`) never gets an
+		// exact-match short-circuit: that would let an arbitrary
+		// non-executable file resolve as "spawnable" and reach the
+		// direct-spawn branch downstream.
+		if (hasExplicitExt && isKnownExecutableExt(existingExt) && statIsFile(base)) {
+			return { resolvedPath: base, ext: existingExt };
 		}
-		for (const ext of pathExts) {
-			const candidate = base + ext;
-			if (statIsFile(candidate)) return { resolvedPath: candidate, ext };
+		if (!hasExplicitExt || !pathExts.includes(existingExt)) {
+			for (const ext of pathExts) {
+				const candidate = base + ext;
+				if (statIsFile(candidate)) return { resolvedPath: candidate, ext };
+			}
 		}
 		return null;
 	};
@@ -439,19 +554,28 @@ function resolveWindowsCommandUncached(
 	// require an explicit, validated `=D:` provenance entry; otherwise this
 	// resolver fails closed rather than guessing `D:\\` or searching PATH.
 	const hasDrivePrefix = driveLetter(command) !== undefined;
-	if (hasPathSep || hasDrivePrefix || path.win32.isAbsolute(command)) {
+	if (hasPathSep || hasDrivePrefix || isFullyQualifiedWindowsPath(command)) {
 		let base: string | undefined;
-		if (path.win32.isAbsolute(command)) {
+		if (isFullyQualifiedWindowsPath(command)) {
 			base = path.win32.normalize(command);
 		} else if (hasDrivePrefix) {
 			base = resolveDriveRelativeWindowsPath(command, effectiveCwd, env);
+		} else if (isRootedWindowsPath(command)) {
+			base =
+				effectiveCwd === undefined
+					? undefined
+					: resolveRootedWindowsPath(command, effectiveCwd);
 		} else if (effectiveCwd !== undefined) {
 			base = path.win32.normalize(path.win32.resolve(effectiveCwd, command));
 		}
 		return base === undefined ? null : tryBase(base);
 	}
 
-	if (effectiveCwd === undefined) return null;
+	// A bare command (no path separator) is a plain PATH search. Absolute PATH
+	// entries don't need `effectiveCwd` at all, so an unresolvable cwd must
+	// only skip the relative entries (handled per-entry in
+	// resolveWindowsPathEntry below), not abort the whole search (#1201: a bad
+	// cwd shouldn't make an otherwise-resolvable command look "not installed").
 	const pathValue = getWindowsEnvironmentValue(env, "PATH") ?? "";
 	const pathDirs = pathValue.split(path.win32.delimiter);
 	for (const dir of pathDirs) {
@@ -603,6 +727,13 @@ function ensureUtf8ConsoleCodePageOnce(): void {
 	}
 }
 
+/** Test-only: clear the one-shot `chcp` memoization so a test can observe it
+ * running again in isolation. Restored (was dropped as unrelated scope creep
+ * in an earlier #1199 revision); harmless, module-private state otherwise. */
+export function resetUtf8ConsoleCodePageStateForTests(): void {
+	utf8ConsoleCodePageApplied = false;
+}
+
 // ============================================================================
 // ASYNC VERSION (Recommended - Non-blocking)
 // ============================================================================
@@ -725,8 +856,20 @@ export async function safeSpawnAsync(
 		//     letting cmd.exe report "not recognized" from inside a shell.
 		const isWindows = process.platform === "win32";
 		const spawnEnv = getSpawnEnvironment(options?.env);
+		// The cwd handed to the CHILD process doesn't need OUR validation —
+		// Windows resolves it natively, exactly as it did before #817 ever
+		// touched this file. A drive-relative cwd (`D:work`) without a
+		// validated `=D:` env entry can't be canonicalized by us (Node never
+		// surfaces `=X:` keys from the ambient environment — see
+		// `getValidatedPerDriveCwd`'s doc comment), but that is a gap in OUR
+		// provenance, not evidence the cwd itself is bad. Fall back to the raw
+		// value instead of failing the whole spawn before ever attempting it
+		// (#1201) — command resolution just below still fails closed for any
+		// relative PATH entry that would need this cwd to be canonical.
 		const spawnCwd = isWindows
-			? resolveEffectiveWindowsCwd(options?.cwd, spawnEnv)
+			? (resolveEffectiveWindowsCwd(options?.cwd, spawnEnv) ??
+				options?.cwd ??
+				process.cwd())
 			: options?.cwd;
 		let spawnCmd = command;
 		let spawnArgs = args;
@@ -734,12 +877,12 @@ export async function safeSpawnAsync(
 		let resolutionError: Error | undefined;
 
 		if (isWindows) {
-			if (spawnCwd === undefined) {
-				resolutionError = synthesizeEnoentError(options?.cwd ?? process.cwd());
-			}
-			const resolved = resolutionError
-				? null
-				: resolveWindowsCommand(command, spawnCwd, spawnEnv);
+			// Pass the ORIGINAL (unresolved) cwd here, not `spawnCwd` above — this
+			// seam intentionally fails closed on unprovable drive-relative
+			// provenance (matches `resolveWindowsCommandForEnvironment`'s
+			// documented contract and its dedicated test coverage), independent
+			// of the passthrough fallback the actual child cwd gets above.
+			const resolved = resolveWindowsCommand(command, options?.cwd, spawnEnv);
 			if (!resolved) {
 				resolutionError = synthesizeEnoentError(command);
 			} else if (resolved.ext === ".cmd" || resolved.ext === ".bat") {
@@ -1103,16 +1246,17 @@ export function safeSpawn(
 ): SpawnResult {
 	const spawnEnv = getSpawnEnvironment(options?.env);
 	if (process.platform === "win32") {
-		const spawnCwd = resolveEffectiveWindowsCwd(options?.cwd, spawnEnv);
-		if (spawnCwd === undefined) {
-			return {
-				stdout: "",
-				stderr: "",
-				status: null,
-				error: synthesizeEnoentError(options?.cwd ?? process.cwd()),
-			};
-		}
-		const resolved = resolveWindowsCommand(command, spawnCwd, spawnEnv);
+		// See the matching comment in safeSpawnAsync: the child's cwd doesn't
+		// need OUR validation (Windows resolves it natively), so an unprovable
+		// drive-relative cwd falls back to the raw value instead of failing the
+		// whole spawn before ever attempting it (#1201). Command resolution
+		// below intentionally still uses the ORIGINAL raw cwd and fails closed
+		// for PATH entries that would need it to be canonical.
+		const spawnCwd =
+			resolveEffectiveWindowsCwd(options?.cwd, spawnEnv) ??
+			options?.cwd ??
+			process.cwd();
+		const resolved = resolveWindowsCommand(command, options?.cwd, spawnEnv);
 		if (!resolved) {
 			return {
 				stdout: "",
@@ -1179,6 +1323,13 @@ export function safeSpawn(
 
 	const result = spawnSync(command, args, {
 		...(options as SpawnOptions),
+		// Explicit override, not just the spread above: `options.env` alone
+		// would otherwise reach the child as a full replacement (no
+		// process.env merge, no PATH) instead of the merged environment the
+		// resolver/Windows branch above both use (#1201) — the module's
+		// "resolver and child receive the same merged environment" invariant
+		// must hold on every platform, not just Windows.
+		env: spawnEnv,
 		encoding: "utf-8",
 		shell: false,
 		windowsHide: true,
