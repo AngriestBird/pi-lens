@@ -1,7 +1,9 @@
+import { posix as posixPath } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FactStore } from "../../clients/dispatch/fact-store.js";
 import {
 	_resetProjectReportBuildGuardForTests,
+	_toDisplayPathForTests,
 	projectReport,
 	renderCompactProjectReport,
 } from "../../clients/project-report.js";
@@ -387,5 +389,90 @@ describe("projectReport — focus re-ranking", () => {
 
 		const focused = await projectReport(env.tmpDir, { focus: "payments charge" });
 		expect(focused.hubs![0].file).toContain("payments");
+	});
+});
+
+// Refs #1194 (shape-2 sibling of #1163): `toDisplayPath` must delegate to the
+// shape-aware `toProjectRelativePath` (clients/path-utils.ts) instead of
+// hand-rolling relativization with the host-default `path.isAbsolute`/
+// `path.relative`. Pre-fix, those bare functions follow `process.platform`,
+// not the input's shape: `path.isAbsolute("C:\\repo\\src\\x.ts")` is FALSE
+// under POSIX semantics (no leading "/"), so the pre-fix implementation
+// short-circuited to the whole absolute path instead of relativizing a file
+// that IS under the project root — green on native Windows (where bare
+// `path` already resolves to win32 semantics) but wrong on Linux CI, the
+// #1024 divergence class. Verified directly: emulating the pre-fix body
+// under `require("path").posix` on
+// `toDisplayPath("C:\\repo\\src\\x.ts", "C:\\repo")` returns
+// `"C:/repo/src/x.ts"`, not `"src/x.ts"` — this test protects the delegated,
+// shape-aware behavior that fixes that. Inputs are fed as Windows-shaped
+// literals (never a hardcoded normalized key) per the #1139/#1150 anti-
+// vacuous-fixture discipline, so this is meaningful on ANY OS: on native
+// Windows it exercises the (already-correct) win32 path, and on Linux CI it
+// exercises the shape-committed `win32.*` branch this delegation restores.
+describe("toDisplayPath delegates to the shape-aware toProjectRelativePath (#1194)", () => {
+	it("relativizes a backslash Windows-shaped path under a backslash root", () => {
+		expect(_toDisplayPathForTests("C:\\repo\\src\\x.ts", "C:\\repo")).toBe(
+			"src/x.ts",
+		);
+	});
+
+	it("relativizes a forward-slash win32-shaped path under a win32-shaped root", () => {
+		expect(
+			_toDisplayPathForTests("C:/repo/src/nested/y.ts", "C:/repo"),
+		).toBe("src/nested/y.ts");
+	});
+
+	it("relativizes a UNC-shaped path under a UNC-shaped root", () => {
+		expect(
+			_toDisplayPathForTests(
+				"\\\\host\\share\\proj\\src\\z.ts",
+				"\\\\host\\share\\proj",
+			),
+		).toBe("src/z.ts");
+	});
+
+	it("keeps a win32-shaped path OUTSIDE a win32-shaped root as the slash-folded absolute path", () => {
+		expect(_toDisplayPathForTests("C:\\other\\a.ts", "C:\\repo")).toBe(
+			"C:/other/a.ts",
+		);
+	});
+
+	it("does not regress the native same-OS common case", () => {
+		expect(
+			_toDisplayPathForTests("/home/dev/project/src/x.ts", "/home/dev/project"),
+		).toBe("src/x.ts");
+		// Non-absolute input passes through slash-normalized, unchanged.
+		expect(_toDisplayPathForTests("src\\already\\relative.ts", "/anything")).toBe(
+			"src/already/relative.ts",
+		);
+	});
+
+	// Direct fail-then-pass proof, OS-independent (AGENTS.md #1024 discipline:
+	// on a Windows dev box, bare `path` already resolves to win32 semantics, so
+	// re-running the OLD hand-rolled body locally would vacuously pass — it only
+	// fails under POSIX `path` semantics, i.e. on Linux CI). This test pins the
+	// PRE-FIX body explicitly against `path.posix` (never the host-default
+	// `path`) to reproduce exactly what Linux CI executed before this fix, and
+	// asserts the delegated implementation under test does NOT share that bug.
+	it("the pre-fix hand-rolled body was broken under POSIX path semantics — the fix is not equivalent to it", () => {
+		function preFixToDisplayPath(p: string, projectRoot: string): string {
+			if (!posixPath.isAbsolute(p)) return p.replace(/\\/g, "/");
+			const rel = posixPath.relative(projectRoot, p);
+			return rel && !rel.startsWith("..")
+				? rel.replace(/\\/g, "/")
+				: p.replace(/\\/g, "/");
+		}
+
+		const input = "C:\\repo\\src\\x.ts";
+		const root = "C:\\repo";
+
+		// Pre-fix, under POSIX semantics (Linux CI): path.isAbsolute sees no
+		// leading "/", short-circuits, and returns the whole absolute path.
+		expect(preFixToDisplayPath(input, root)).toBe("C:/repo/src/x.ts");
+
+		// The delegated, shape-aware implementation under test correctly
+		// relativizes the SAME input regardless of host OS.
+		expect(_toDisplayPathForTests(input, root)).toBe("src/x.ts");
 	});
 });
