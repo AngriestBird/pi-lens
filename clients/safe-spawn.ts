@@ -284,7 +284,12 @@ function driveLetter(value: string): string | undefined {
 }
 
 function isDriveAbsolute(value: string, drive: string): boolean {
-	return new RegExp(`^${drive}:[\\\\/]`, "i").test(value);
+	return (
+		value.length >= 3 &&
+		value[0]?.toUpperCase() === drive.toUpperCase() &&
+		value[1] === ":" &&
+		(value[2] === "\\" || value[2] === "/")
+	);
 }
 
 /**
