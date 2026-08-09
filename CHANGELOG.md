@@ -11,6 +11,63 @@ All notable changes to pi-lens will be documented in this file.
 ### Fixed
 
 - **`project_report`'s `toDisplayPath` hand-rolled relativization without the shape-aware `isWindowsPath` branch, mis-rendering a Windows-shaped path as the full absolute path on Linux CI (closes #1194, refs #1163 #1152 #1024)** — `clients/project-report.ts`'s `toDisplayPath` used host-default `path.isAbsolute`/`path.relative` directly, the exact defect `toProjectRelativePath` (`clients/path-utils.ts`) was fixed for in #1163 — its sibling `module-report.ts`'s `toDisplayPath` already delegates to that shape-aware helper, but this file reimplemented the same convention natively instead, so `path.isAbsolute("C:\\repo\\src\\x.ts")` returned `false` on Linux and short-circuited to the whole absolute path instead of `src/x.ts`. The #1163 sweep missed it because it grepped the `isWindowsPath` hot zone and this file never branched on it at all. Fixed by delegating to `toProjectRelativePath`, matching `module-report.ts`. Second-axis sweep of every other hand-rolled `path.relative`/`path.isAbsolute` relativizer in `clients/`/`tools/` found no further offenders: `call-graph.ts`'s `formatImpact` and `lens-map.ts`'s `toDisplayPath` already delegate to `toProjectRelativePath`; every other `path.relative`/`path.isAbsolute` hit resolves a live, same-process, same-OS path (dispatch context, LSP results, subprocess/runner output, filesystem walks) rather than a persisted/cross-OS review-graph path, so none share this class. Fail-then-pass verified directly against the pre-fix body under explicit `path.posix` semantics (not host-default, since a Windows dev box's bare `path` is already win32 and would pass vacuously) — it returned `"C:/repo/src/x.ts"` instead of `"src/x.ts"`, which the delegated implementation now corrects on any OS.
+- **`trivy-config.test.ts` hardcoded a POSIX path literal (`/tmp/main.tf`), so it failed on a Windows dev machine while staying green on Linux CI (closes #1190, refs #1024)** — the terraform pass-through tests built `ctx.filePath`/`ctx.cwd` from the string literals `"/tmp/main.tf"`/`"/tmp"` and asserted the mocked `safeSpawnAsync` call against those same literals. The runner itself (`clients/dispatch/runners/trivy-config.ts`) is OS-agnostic — it resolves the scan path with `path.resolve(cwd, ctx.filePath)` — but on Windows that resolves `/tmp/main.tf` to a drive-relative `C:\tmp\main.tf`, so the hardcoded POSIX-form expectation no longer matched: the inverse of the #1024 class (a test only holding on one OS, this time POSIX-only rather than Windows-only). Test-only fix: the two cases now derive `tfCwd`/`tfFile` via `path.join(os.tmpdir(), ...)` and assert against those same derived values, so the expectation is computed the same way the runner computes its resolved path — real on both POSIX and Windows, with no hardcoded separator on either side.
+
+- **Structural shape-5 hardening: LSP `touchFile` now returns a `{ diags, inconclusive, binding }` wrapper whose flags survive any copy by construction, plus a fail-closed graph-build-info guard (closes #1179, refs #1108 #1094 #1096)** —
+	the #1108 audit found all five side-channel flags safe as-is (every consumer
+	reads off the original), but the three LSP diagnostics flags stayed
+	fragile-by-construction: a non-enumerable property hung on the returned
+	diagnostics array, silently dropped by any `[...]`/`.map`/`.filter`/
+	`structuredClone`/`JSON` copy between producer and consumer (the class that bit
+	as #1094 `inconclusive` and #1096 `binding`). `touchFile` now resolves an
+	explicit `TouchFileResult` wrapper (`clients/lsp/diagnostic-binding.ts`) with
+	`inconclusive` and `binding` as ENUMERABLE fields alongside `.diags`, so a copy
+	operates on `.diags` and can no longer drop them — the copy-loss is impossible
+	by construction. Every flag-reading consumer was migrated in lockstep (the
+	cascade `readInconclusive`/`readBoundToCurrentDisk`/`isConfirmedTouch` and its
+	`.filter()` site in `clients/dispatch/integration.ts`, the dispatch LSP runner,
+	the `lsp_diagnostics` tool, the workspace-sweep `lens_diagnostics mode=full`
+	path, and the warm-attach IPC producer — which continues to re-surface
+	`inconclusive` as an enumerable DTO field over the socket). Behavior is
+	IDENTICAL — same flags, same values, same decisions; only the carriage
+	changed. `getAllDiagnostics`'s per-entry `binding` is DELIBERATELY left as a
+	lazy non-enumerable getter on the documented read-off-original contract (making
+	it enumerable would fire the per-file disk stat+hash on any incidental spread —
+	the stat storm its laziness exists to prevent). Separately closes a latent P3
+	from the #1108 review: `getGraphBuildInfoForGraph`'s global-slot fallback could
+	serve a SIBLING graph's build-info on a `_graphBuildInfoByGraph` identity miss,
+	feeding the `graph_degraded` marker gate a (possibly healthy) sibling verdict —
+	a new `graphBuildInfoIsTrustworthy` guard fails CLOSED so an unstamped/rehydrated
+	graph surfaces an honest degraded/unknown advisory instead of a #533 false
+	clean. Inert on the live path (every build stamps its returned graph before the
+	cascade reads it). An ast-grep rule remains not viable (AGENTS.md shape 5 is
+	semantic; cross-ref #1158).
+- **Per-entry widget observation timestamps: a cross-file cascade merge no longer over-clears a whole footer record, dropping only the genuinely-stale entries (closes #1186, refs #1093 #1092 #1020)** —
+	`reconcileCascadeNeighborLspErrors` → `commitDiagnostics` used to stamp the
+	ENTIRE merged record's single `touchedAt` with the incoming `observedAt`
+	(e.g. a passive snapshot's `entry.ts`, up to ~240s old), including PRESERVED
+	entries observed more recently. If the neighbor's mtime later fell between
+	that stale stamp and a preserved entry's true observation time,
+	`reconcileStaleWidgetFiles` dropped the WHOLE record — losing the newer
+	preserved findings (the residual documented at `clients/dispatch/integration.ts`).
+	`WidgetDiagnostic` now carries a per-ENTRY `observedAt`: `normalizeDiagnostics`
+	stamps each incoming entry at its observation time, the cascade merge keeps
+	each preserved entry's own prior stamp (never re-aging a fresh finding to the
+	incoming stamp), and `reconcileStaleWidgetFiles` gates per ENTRY — dropping
+	only entries observed before the file's current mtime, keeping the record when
+	any survive, and dropping the record only when empty (a clean, finding-less
+	record still gates on `touchedAt`). `PersistedWidgetState` bumps v1→v2:
+	`importWidgetState` accepts a v1 snapshot and migrates each stampless entry to
+	inherit the record's `touchedAt` (a safe, over-conservative default; a
+	missing/non-numeric version or a future version this build can't understand is
+	still rejected — the pre-existing strictness is preserved). The sibling gates
+	`dropStaleFiles`
+	(session-state-store) and `reconcileProjectDiagnosticsSnapshot` are unchanged
+	— both compare against a single save/scan time ≥ every entry's observation, so
+	a whole-record drop there already equals dropping every entry. The
+	`markDependentsUnverified`/seq-stamp half of #1093's sketch is a separate,
+	non-contained follow-up (left open under #1093).
+- **The `runtimeExitWindow` breaker map never dropped a stale/aged-out key, and its cooldown comment described the wrong call order (closes #1183, refs #1142 #1181)** — two P3 hygiene follow-ups from the #1181 review of the #1142 windowed-rate breaker in `clients/lsp/index.ts`. (1) `runtimeExitWindow` was only ever `delete`d on the currently-unreachable optional-trip path, so a key that crashed once then recovered kept a stale timestamp array forever (bounded by servers×roots, not a leak, but untidy). The "survived past the threshold" branch now also drops the key once every entry in its window has aged out, mirroring where `runtimeExitCounts` is already `delete`d there — anchored on the death's own `exitedAt` (not `Date.now()`) so it only ever fires for deaths `recordRuntimeExitWindow` declined to record (over the sleep-gap ceiling, or a missing `exitedAt`), never for a death that was just added to the window. (2) The `Math.max` cooldown comment claimed it "never shortens a longer cooldown the fast path may have just set," which has the ordering backwards — `state.broken` is `delete`d at the top of the method, so the window's `.get(key) ?? 0` always reads 0, and the fast path runs AFTER this block. Reworded to describe the actual ordering; harmless either way since the non-optional branch latches `permanentlyBroken` and the optional branch is currently unreachable. Comment-only for (2); pure map hygiene for (1) — trip logic, thresholds, and the fast path are unchanged.
 - **`allowScripts` entries had drifted from what the declared dependency ranges actually resolve to, so npm v12's exact-version script-approval check saw stale pins (closes #1176)** —
 	`package.json`'s `@ast-grep/cli` dependency range is `"^0.45.0"`, but the
 	`allowScripts` map still keyed its approval on `"@ast-grep/cli@0.44.1"` — a

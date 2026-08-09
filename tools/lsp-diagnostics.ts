@@ -33,6 +33,7 @@ import type { LSPDiagnostic } from "../clients/lsp/client.js";
 import {
 	hashDiagnosticContent,
 	type DiagnosticBinding,
+	type TouchFileResult,
 } from "../clients/lsp/diagnostic-binding.js";
 import { classifyCascadeWaitTier } from "../clients/lsp/wait-policy/index.js";
 import {
@@ -682,12 +683,8 @@ async function collectDiagnosticsForFile(
 	// `touched` is only undefined when touchFile itself couldn't produce a
 	// result (service destroyed, no clients resolved) — that's the one case
 	// that still needs the getDiagnostics() fallback below.
-	let touched:
-		| (LSPDiagnostic[] & {
-				inconclusive?: boolean;
-				binding?: DiagnosticBinding;
-		  })
-		| undefined;
+	// #1179: `touchFile` resolves the `{ diags, inconclusive, binding }` wrapper.
+	let touched: TouchFileResult | undefined;
 	let usedTouch = false;
 	try {
 		content = fs.readFileSync(absPath, "utf-8");
@@ -730,13 +727,7 @@ async function collectDiagnosticsForFile(
 					source: string;
 					clientScope: "all" | "primary";
 				},
-			) => Promise<
-				| (LSPDiagnostic[] & {
-						inconclusive?: boolean;
-						binding?: DiagnosticBinding;
-				  })
-				| undefined
-			>;
+			) => Promise<TouchFileResult | undefined>;
 		};
 		if (
 			(waitMs !== undefined || serverScope === "primary") &&
@@ -769,7 +760,7 @@ async function collectDiagnosticsForFile(
 	// common case back to a single LSP round trip instead of two.
 	const diagnostics =
 		usedTouch && touched !== undefined
-			? touched
+			? touched.diags
 			: await lspService.getDiagnostics(
 					absPath,
 					waitMs !== undefined ? "document" : "full",

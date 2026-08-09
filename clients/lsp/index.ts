@@ -46,6 +46,7 @@ import {
 	type DiagnosticBinding,
 	type DiskBindingCache,
 	type StoredDiagnosticBinding,
+	type TouchFileResult,
 } from "./diagnostic-binding.js";
 import { getServersForFileWithConfig, getServerInitOverride } from "./config.js";
 import { getLanguageId } from "./language.js";
@@ -1463,8 +1464,15 @@ export class LSPService {
 					// Set a cooldown so THIS detection also stops respawning (the
 					// broken check below at the end of this method re-reads it),
 					// symmetric with the fast path which cools down on every count.
-					// `max` never SHORTENS a longer cooldown the fast path may have
-					// just set for the same death.
+					// `max` is defensive, not load-bearing under the actual call
+					// order: `state.broken` for this key is `delete`d at the top of
+					// this method (see the "detect dead client" branch above), so
+					// this `.get(key) ?? 0` always reads 0 here — it's the fast
+					// path below that runs AFTER this block and can raise the
+					// cooldown for the same death. Harmless either way: the
+					// non-optional branch latches `permanentlyBroken` (making the
+					// cooldown moot), and the optional branch here is currently
+					// unreachable (`OPTIONAL_LSP_SERVER_IDS` is empty).
 					this.state.broken.set(
 						key,
 						Math.max(
@@ -1527,6 +1535,34 @@ export class LSPService {
 					// lands in this branch yet IS the churn #1142 targets — the
 					// window ages those out by time instead.
 					this.runtimeExitCounts.delete(key);
+					// Outer-map hygiene (#1183): runtimeExitWindow itself is only
+					// ever `delete`d on the optional-trip branch above (currently
+					// unreachable — OPTIONAL_LSP_SERVER_IDS is empty), so a key
+					// that crashed once then recovered would otherwise retain a
+					// stale timestamp array forever, even once every entry in it
+					// has aged out of the window. Drop it here once nothing in it
+					// is still in-window — purely map hygiene: a later death
+					// rebuilds the array from scratch via recordRuntimeExitWindow,
+					// so this cannot change trip behavior. Anchor "now" on this
+					// death's own `exitedAt` (falling back to real time only if
+					// unset), NOT `Date.now()` directly — this death's timestamp
+					// is what `recordRuntimeExitWindow` itself anchors pruning on
+					// (see its `windowRef` comment), so a death that WAS just
+					// recorded is guaranteed to still be in-window here and this
+					// can only ever fire for the "declined to record" cases
+					// (over the sleep-gap ceiling, or a missing `exitedAt`) where
+					// nothing new was added and the array is genuinely stale.
+					const windowDeaths = this.runtimeExitWindow.get(key);
+					if (windowDeaths) {
+						const windowNow = exitedAt ?? Date.now();
+						if (
+							!windowDeaths.some(
+								(t) => t >= windowNow - RUNTIME_EXIT_WINDOW_MS,
+							)
+						) {
+							this.runtimeExitWindow.delete(key);
+						}
+					}
 				}
 			}
 		}
@@ -1778,36 +1814,13 @@ export class LSPService {
 		content: string,
 		options: LSPTouchFileOptions = {},
 	): Promise<
-		| (import("./client.js").LSPDiagnostic[] & {
-				/**
-				 * True when this touch could NOT confirm its result — the notify
-				 * write and/or the diagnostics wait hit their deadline before the
-				 * server(s) confirmed completion. An `inconclusive` result must
-				 * never be read as "confirmed clean": the returned array may be
-				 * `[]` simply because nothing arrived in time, not because the
-				 * server actually reported zero diagnostics. Callers that care
-				 * about trustworthiness (dispatch runners, the `lsp_diagnostics`
-				 * tool) must check this before treating an empty result as clean.
-				 * Absent/`false` on a genuinely confirmed (fast or debounced-skip)
-				 * result — existing callers that only read the array are
-				 * unaffected (arrays are plain objects; this is a non-enumerable
-				 * bonus field, not a shape change).
-				 */
-				inconclusive?: boolean;
-				/**
-				 * #1095: content binding of the merged result — {version?,
-				 * contentHash?, boundToCurrentDisk} answering "were these
-				 * diagnostics computed against what's on disk now?" composed across
-				 * every contributing client. `boundToCurrentDisk === false` means
-				 * the server's view diverged from disk (a stale-but-fresh-looking
-				 * result); consumers must demote such a result to inconclusive
-				 * rather than trust it. "unknown" (version-less server, or disk
-				 * unreadable) preserves pre-#1095 behavior. Non-enumerable, like
-				 * `inconclusive`.
-				 */
-				binding?: DiagnosticBinding;
-			})
-		| undefined
+		// #1179 (shape-5 structural fix): a WRAPPER, not the bare array. `.diags`
+		// carries the diagnostics; `.inconclusive` (#570/#1093) and `.binding`
+		// (#1095) are EXPLICIT ENUMERABLE fields, so a `[...]`/`.map`/`.filter`/
+		// `JSON` copy of `.diags` cannot silently drop them (was the #1094/#1096
+		// copy-loss class — the flags used to ride the array as non-enumerable
+		// side-channels). See `TouchFileResult` for the field-presence contract.
+		TouchFileResult | undefined
 	> {
 		if (this.checkDestroyed()) return;
 		const startedAt = Date.now();
@@ -1895,7 +1908,9 @@ export class LSPService {
 					reason: "debounced_unchanged_content",
 				},
 			});
-			return [];
+			// #1179: a debounced skip collected nothing — resolve the wrapper's
+			// `.diags` as empty with neither flag (exactly the pre-wrapper `[]`).
+			return { diags: [] };
 		}
 
 		const languageId = getLanguageId(filePath) ?? "plaintext";
@@ -2677,23 +2692,26 @@ export class LSPService {
 			}
 		}
 
+		// #1179 (shape-5 structural fix): build the result WRAPPER. The two flags
+		// that used to ride the returned array as NON-enumerable side-channels
+		// (`Object.defineProperty(collected, ...)`, dropped by any `[...]`/`.filter`/
+		// `JSON` copy — the #1094/#1096 loss class) are now EXPLICIT ENUMERABLE
+		// fields on this wrapper. `.diags` holds the array a copy operates on, so the
+		// flags survive by construction. Field presence mirrors the old attachment
+		// conditions EXACTLY: `inconclusive` only for a confirmed-inconclusive
+		// collect, `binding` only for a collecting touch — a non-collecting touch
+		// keeps resolving `{ diags: [] }`, no flags.
+		const result: TouchFileResult = { diags: collected ?? [] };
+
 		if (collected !== undefined && inconclusive) {
-			// Non-enumerable so JSON.stringify / spread / logging of the
-			// diagnostics array is unaffected — this is a query-only bonus
-			// field, not a shape change existing array consumers need to know
-			// about.
-			Object.defineProperty(collected, "inconclusive", {
-				value: true,
-				enumerable: false,
-				configurable: true,
-			});
+			result.inconclusive = true;
 		}
 
-		// #1095: attach the merged content binding (non-enumerable, like
-		// `inconclusive`) so a consumer can ask whether these diagnostics were
-		// computed against current disk. Composed across every spawned client so a
-		// single client whose view diverged from disk marks the whole merged result
-		// mismatched. Disk verify is lazy + memoized per (file, mtime).
+		// #1095: attach the merged content binding so a consumer can ask whether
+		// these diagnostics were computed against current disk. Composed across every
+		// spawned client so a single client whose view diverged from disk marks the
+		// whole merged result mismatched. Disk verify is lazy + memoized per
+		// (file, mtime).
 		let binding: DiagnosticBinding | undefined;
 		if (collected !== undefined) {
 			binding = syncConfirmed
@@ -2710,11 +2728,7 @@ export class LSPService {
 							entry.client.getDiagnosticBinding?.(filePath),
 						),
 					);
-			Object.defineProperty(collected, "binding", {
-				value: binding,
-				enumerable: false,
-				configurable: true,
-			});
+			result.binding = binding;
 		}
 
 		// Only refresh the recent-touches entry when we actually pushed. Skipping
@@ -2760,7 +2774,7 @@ export class LSPService {
 				...(auxCutOffServerIds !== undefined && { auxCutOffServerIds }),
 			},
 		});
-		return collected ?? [];
+		return result;
 	}
 
 	/**
@@ -4215,8 +4229,16 @@ export class LSPService {
 				if (attached && !attached.available) {
 					await this.ensureWarmForSweep(filePath, { signal });
 				}
-				const diagnostics = attached?.available
-					? attached.response.diagnostics
+				// #1179 (shape-5 structural fix): normalize both sources into the
+				// `TouchFileResult` wrapper shape so the flag reads below come off
+				// EXPLICIT fields, not a non-enumerable side-channel a copy would drop.
+				// The warm-attach IPC branch resolves a plain diagnostics array with
+				// `inconclusive` re-surfaced as an enumerable DTO field (the socket can
+				// carry no binding, and the IPC client already rejects an inconclusive
+				// answer, so `available` implies confirmed) — wrap it as `{ diags }`;
+				// the incumbent branch already returns the wrapper.
+				const touchResult = attached?.available
+					? { diags: attached.response.diagnostics }
 					: await withDeadline(
 							this.touchFile(filePath, content, {
 								diagnostics: "document",
@@ -4234,34 +4256,22 @@ export class LSPService {
 							}),
 							{ ms: perFileMs, onTimeout: "undefined" },
 						);
+				const diagnostics = touchResult?.diags;
 				// #571: prefer #570's real per-touch inconclusive signal
-				// (`touchFile`'s non-enumerable `.inconclusive` flag — set when the
-				// notify write or the diagnostics wait itself timed out) over this
-				// sweep's own OUTER `perFileMs` deadline, which only catches a touch
-				// that never returned at all within budget. Either one means the
-				// result wasn't confirmed.
-				const inconclusive =
-					(diagnostics as (typeof diagnostics & { inconclusive?: boolean }))
-						?.inconclusive === true;
-				const timedOut = diagnostics === undefined || inconclusive;
+				// (`touchFile`'s `.inconclusive` flag — set when the notify write or the
+				// diagnostics wait itself timed out) over this sweep's own OUTER
+				// `perFileMs` deadline, which only catches a touch that never returned at
+				// all within budget. Either one means the result wasn't confirmed.
+				const inconclusive = touchResult?.inconclusive === true;
+				const timedOut = touchResult === undefined || inconclusive;
 				if (timedOut) timedOutFiles += 1;
-				// #1104 (shape 5 — AGENTS.md): read the touch's content binding off
-				// the RAW `diagnostics` array here, before `applyAuxiliarySuppressions`
-				// below rebuilds it via `.filter()` — a `.filter()` result is a NEW
-				// array and does not carry over the source's non-enumerable
-				// `.binding` (see #1095's own `Object.defineProperty` comment: "JSON.
-				// stringify / spread / logging ... unaffected" cuts both ways — a
-				// derived COPY never gets it either). A version-less/pull-less
-				// server's `diagnostics` simply carries no `.binding`, so
-				// `contentHash` stays undefined here (honest "unknown" downstream),
-				// matching pre-#1104 behavior exactly.
-				const rawBinding = (
-					diagnostics as
-						| (typeof diagnostics & {
-								binding?: import("./diagnostic-binding.js").DiagnosticBinding;
-						  })
-						| undefined
-				)?.binding;
+				// #1104 (shape 5 — AGENTS.md): the touch's content binding is an
+				// EXPLICIT enumerable field on the wrapper now (#1179), so it survives
+				// `applyAuxiliarySuppressions` below rebuilding `.diags` via `.filter()`
+				// — read it off `touchResult`, not off the derived array. A version-
+				// less/pull-less server composed no binding, so `contentHash` stays
+				// undefined here (honest "unknown" downstream), matching prior behavior.
+				const rawBinding = touchResult?.binding;
 				// #586: honor each auxiliary profile's native inline-suppression
 				// comment (e.g. opengrep's `// nosemgrep`, #441) — computed from the
 				// raw `diagnostics` (before this drops its non-enumerable
@@ -4631,6 +4641,13 @@ export class LSPService {
 		// consumer that arrives next. Non-enumerable so incidental spread/serialize
 		// (e.g. logging) can't trigger a stat storm; memoized per entry so repeated
 		// reads verify once.
+		// #1179: DELIBERATELY NOT migrated to an enumerable wrapper field (unlike the
+		// `touchFile` flags). Enumerable would make an incidental `{...entry}`/serialize
+		// eagerly fire this getter and stat every file — the exact stat storm the
+		// laziness above exists to prevent. It therefore stays on the read-off-original
+		// carriage contract (see `DiagnosticBinding`): every consumer reads `.binding`
+		// off the ORIGINAL Map entry (`clients/dispatch/integration.ts` reads it off
+		// `entry`, never a copy), and the cascade's TTL gate reads it only when fresh.
 		for (const [filePath, entry] of all) {
 			const stored = bindingsByPath.get(filePath) ?? [];
 			let memo: DiagnosticBinding | undefined;

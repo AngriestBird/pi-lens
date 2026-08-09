@@ -60,6 +60,7 @@ import {
 import { classifyCascadeWaitTier } from "../lsp/wait-policy/index.js";
 import {
 	type BoundToCurrentDisk,
+	type TouchFileResult,
 	bindingStateLabel,
 } from "../lsp/diagnostic-binding.js";
 import { getServersForFileWithConfig } from "../lsp/config.js";
@@ -71,6 +72,7 @@ import {
 	clearReviewGraphWorkspaceCache,
 	getGraphBuildInfoForGraph,
 	getGraphImportChanges,
+	graphBuildInfoIsTrustworthy,
 } from "../review-graph/builder.js";
 import {
 	buildReverseDependencyIndexFromGraph,
@@ -539,15 +541,17 @@ function cascadeReconcilableLspErrors(
 }
 
 /**
- * Read the content `binding` verdict off a raw diagnostics result (#1095).
+ * Read the content `binding` verdict off a diagnostics result (#1095).
  *
- * Both `touchFile` and `getAllDiagnostics` attach `binding` as a NON-enumerable
- * property (the latter as a lazy, disk-verifying getter). Reading it directly off
- * the producer's own object — never a spread/clone, which drops non-enumerables —
- * triggers the disk verify exactly once (memoized per result object). Returns
- * `undefined` when no binding was attached at all (a partially-mocked client, a
- * non-collecting touch) — indistinguishable from "unknown" at every call site,
- * which is the intended pre-#1095 fall-through.
+ * `touchFile` carries `binding` as an EXPLICIT enumerable field on its
+ * `TouchFileResult` wrapper (#1179), so it survives any copy of `.diags`.
+ * `getAllDiagnostics` still attaches `binding` as a lazy, disk-verifying
+ * NON-enumerable getter on each Map entry — reading it directly off the
+ * producer's own entry (never a spread/clone, which drops non-enumerables)
+ * triggers the disk verify exactly once (memoized per entry). Accepts either
+ * shape; returns `undefined` when no binding was attached at all (a partially-
+ * mocked client, a non-collecting touch) — indistinguishable from "unknown" at
+ * every call site, which is the intended pre-#1095 fall-through.
  */
 function readBoundToCurrentDisk(
 	rawDiags: unknown,
@@ -571,17 +575,15 @@ function readBoundToCurrentDisk(
  *    `"unknown"` both pass; `"unknown"` preserves pre-#1095 behavior for a
  *    version-less server exactly.
  *
- * Both flags are non-enumerable on the `touchFile` result — read them directly off
- * `rawDiags`, never off a spread/clone (which drops them). See the memo-freeze note
- * at the `getAllDiagnostics` call site.
+ * #1179: both flags are EXPLICIT enumerable fields on the `touchFile`
+ * `TouchFileResult` wrapper — read them off the wrapper (`rawDiags`), whose
+ * `.diags` a downstream `.filter()`/copy operates on without touching the flags.
  */
 function readInconclusive(rawDiags: unknown): boolean {
 	return (rawDiags as { inconclusive?: boolean })?.inconclusive === true;
 }
 
-function isConfirmedTouch(
-	rawDiags: readonly import("../lsp/client.js").LSPDiagnostic[],
-): boolean {
+function isConfirmedTouch(rawDiags: TouchFileResult): boolean {
 	return !readInconclusive(rawDiags) && readBoundToCurrentDisk(rawDiags) !== false;
 }
 
@@ -873,6 +875,15 @@ export async function computeCascadeForFile(
 		// a false positive: a graph-mutating build always mints a new generation.
 		// An unstamped graph (mode "skipped") always rebuilds.
 		const graphBuildInfo = getGraphBuildInfoForGraph(graph);
+		// #1179 fail-closed: `getGraphBuildInfoForGraph` falls back to the global
+		// last-build slot on a WeakMap identity miss, which — once some real build
+		// has stamped — could carry a SIBLING graph's healthy `mode: "cached"`. The
+		// degraded-marker gate below must not read a sibling's state, so it checks
+		// trustworthiness and, when the slot cannot be trusted for THIS graph, treats
+		// coverage as unknown (degraded) rather than clean. Always trustworthy on the
+		// live path — every `_doBuildGraph` return stamps the graph before the cascade
+		// reads it — so this is inert today and only hardens a future unstamped graph.
+		const graphBuildInfoTrustworthy = graphBuildInfoIsTrustworthy(graph);
 		const workspaceKey = normalizeMapKey(cwd);
 		const cachedReverseDeps = reverseDepsIndexCache.get(workspaceKey);
 		const importDelta = getGraphImportChanges(graph);
@@ -1018,14 +1029,20 @@ export async function computeCascadeForFile(
 		// degraded marker, NOT off `neighborFiles.length === 0`.
 		if (
 			(graphBuildInfo.mode === "skipped" ||
-				graph.persistCoverage?.partial === true) &&
+				graph.persistCoverage?.partial === true ||
+				!graphBuildInfoTrustworthy) &&
 			!impact.indeterminate
 		) {
 			const coverage = graph.persistCoverage;
 			impact.indeterminate = {
 				reason: "graph_degraded",
-				detail:
-					graphBuildInfo.mode === "skipped"
+				detail: !graphBuildInfoTrustworthy
+					? // #1179 fail-closed: the graph's own build-info was not found under
+						// its identity and the global slot may be a sibling build's — don't
+						// trust its mode. Surface an honest "unknown" advisory rather than a
+						// (possibly sibling-derived) all-clear.
+						"review graph coverage unknown — build state unavailable for this graph"
+					: graphBuildInfo.mode === "skipped"
 						? graphBuildInfo.skipReason === "too_many_files"
 							? `review graph disabled — ${graphBuildInfo.sourceFileCount ?? "?"} files over the ${graphBuildInfo.maxFileCount ?? "?"} cap`
 							: graphBuildInfo.skipReason === "unsafe_root"
@@ -1379,14 +1396,13 @@ export async function computeCascadeForFile(
 			// snapshot never re-arms the mtime-staleness gate (the same #1092
 			// re-arming defect this PR fixes for cache hits).
 			//
-			// #1093 known edge (P3, follow-up): this stamps the WHOLE merged record's
-			// single `touchedAt` with `entry.ts`, including PRESERVED entries that may
-			// have been observed more recently. If the neighbor's mtime later falls
-			// between `entry.ts` and a preserved entry's real observation time,
-			// `reconcileStaleWidgetFiles` drops the whole record — including those
-			// newer findings. The real fix is per-entry observation timestamps, which
-			// is out of scope here and folded into the structural redesign under
-			// #1093.
+			// #1186: `observedAt` here stamps only the INCOMING LSP-error entries.
+			// PRESERVED entries keep their own (possibly fresher) per-entry
+			// `observedAt`, and `reconcileStaleWidgetFiles` now gates per ENTRY — so
+			// if the neighbor's mtime later falls between this `entry.ts` and a
+			// preserved entry's real observation time, only the stale incoming entry
+			// drops and the fresher preserved finding survives (previously the whole
+			// record was over-cleared; that residual is now fixed).
 			reconcileCascadeNeighborLspErrors(
 				neighborPath,
 				cascadeReconcilableLspErrors(entry.diags, neighborPath),
@@ -1592,8 +1608,11 @@ export async function computeCascadeForFile(
 				// doc comment on the sibling call above) — dropped rather than
 				// migrated to `scanOrigin` since cascade output never touches
 				// persisted widget/dedup state.
+				// #1179: `.filter()` here operates on `rawDiags.diags`; the
+				// `inconclusive`/`binding` flags read above stay on the `rawDiags`
+				// wrapper and are unaffected by this copy (the shape-5 fix).
 				const diags = convertLspDiagnostics(
-					rawDiags.filter((d) => d.severity === 1).slice(0, MAX_PER_FILE),
+					rawDiags.diags.filter((d) => d.severity === 1).slice(0, MAX_PER_FILE),
 					neighborPath,
 				);
 				const durationMs = Date.now() - neighborStart;
@@ -1660,7 +1679,7 @@ export async function computeCascadeForFile(
 				if (confirmed) {
 					reconcileCascadeNeighborLspErrors(
 						neighborPath,
-						cascadeReconcilableLspErrors(rawDiags, neighborPath),
+						cascadeReconcilableLspErrors(rawDiags.diags, neighborPath),
 						writeSeq,
 					);
 				}

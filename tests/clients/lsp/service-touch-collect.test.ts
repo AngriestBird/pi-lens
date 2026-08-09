@@ -170,7 +170,7 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 			true,
 		);
 		expect(client.waitForDiagnostics).toHaveBeenCalledWith(FILE, 25);
-		expect(result).toEqual([diagnostic]);
+		expect(result?.diags).toEqual([diagnostic]);
 	});
 
 	it("skips notify.open on the second touch with identical content but still waits for diagnostics (#116)", async () => {
@@ -225,7 +225,7 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 
 		expect(client.notify.open).toHaveBeenCalledTimes(1);
 		expect(client.waitForDiagnostics).toHaveBeenCalledWith(FILE, 25);
-		expect(result).toEqual([diagnostic]);
+		expect(result?.diags).toEqual([diagnostic]);
 	});
 
 	it("sends notify.open again when the second touch has different content", async () => {
@@ -591,7 +591,7 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 
 			expect(client.notify.open).toHaveBeenCalled();
 			expect(elapsed).toBeLessThan(2000); // returned, did not hang on the write
-			expect(result).toEqual([]); // no fresh diagnostics, but no hang
+			expect(result?.diags).toEqual([]); // no fresh diagnostics, but no hang
 		} finally {
 			if (prev === undefined) delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
 			else process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = prev;
@@ -678,7 +678,7 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 				maxDiagnosticsWaitMs: 8000,
 				source: "dispatch-lsp-runner",
 			});
-			expect(firstResult).toEqual([diagnostic]);
+			expect(firstResult?.diags).toEqual([diagnostic]);
 			expect((firstResult as any).inconclusive).not.toBe(true);
 			expect(service.getLastKnownDiagnostics(FILE)).toEqual([diagnostic]);
 
@@ -700,6 +700,17 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 			});
 
 			expect((secondResult as any).inconclusive).toBe(true);
+			// #1179 shape-5: on the REAL producer result, `inconclusive` is an
+			// enumerable OWN wrapper field, so it survives a copy of the result — it
+			// would be dropped here if it were still the pre-#1179 non-enumerable
+			// array side-channel with a spread intervening (#1094).
+			expect(
+				Object.prototype.propertyIsEnumerable.call(
+					secondResult,
+					"inconclusive",
+				),
+			).toBe(true);
+			expect({ ...secondResult }.inconclusive).toBe(true);
 			// The prior confirmed non-empty record must survive untouched.
 			expect(service.getLastKnownDiagnostics(FILE)).toEqual([diagnostic]);
 		});
@@ -748,7 +759,7 @@ describe("LSPService.touchFile collectDiagnostics", () => {
 				source: "dispatch-lsp-runner",
 			});
 
-			expect(secondResult).toEqual([]);
+			expect(secondResult?.diags).toEqual([]);
 			expect((secondResult as any).inconclusive).not.toBe(true);
 			expect(service.getLastKnownDiagnostics(FILE)).toBeUndefined();
 		});
