@@ -1923,12 +1923,17 @@ function ensurePersistExitHook(): void {
 // update. The sweep is therefore scoped to artifacts the review graph itself
 // produces, all of which are `<review-graph.*>.stage-<pid>-<gen>`:
 //   review-graph.json.gz.stage-<pid>-<gen>              (persistGraph, L1861)
-//   review-graph.json.stage-<pid>-<gen>                 (legacy cache name)
 //   review-graph.checkpoint.json.gz.stage-<pid>-<gen>   (checkpoint, L2259)
 //   ...plus either's worker tmp `<stage>.tmp-<pid>`, which still carries both
 //   the `review-graph.` prefix and the `.stage-` marker.
+// (LEGACY_GRAPH_CACHE_FILENAME, `review-graph.json`, is never staged — it is
+// only ever `rmSync`'d as a one-time migration cleanup — so it is not a
+// producer here despite matching the prefix.)
 // The bare `.tmp-<pid>` shape is never matched, which also makes this sweep
-// independent of any change to atomic-write's staging name (#1205).
+// independent of any change to atomic-write's staging name (#1205). Dropping
+// that shape means the review-graph sweep is no longer the incidental GC for
+// other stores' orphaned atomic-write temps; that gap is now tracked by
+// #1228, not assumed to be owned elsewhere.
 //
 // Liveness: an entry whose embedded stage pid is still alive belongs to a
 // concurrent healthy owner (or to us) and is skipped, reusing the reaper's

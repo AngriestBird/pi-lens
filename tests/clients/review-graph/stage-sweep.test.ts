@@ -105,6 +105,20 @@ describe("review-graph stale stage sweep scoping (#1206)", () => {
 		);
 		fs.writeFileSync(liveOwned, "live");
 
+		// #1207 review F1: `pid === process.pid` short-circuits the liveness
+		// check for our own stage file, so `liveOwned` above never exercises
+		// `realIsPidAlive`. Seed a review-graph stage file owned by a LIVE
+		// FOREIGN pid — this is the cross-process case the liveness probe
+		// actually exists for (process B mid-persist, process A's sweep must
+		// not destroy B's not-yet-promoted stage file). `process.ppid` is
+		// alive, non-zero, and never equal to `process.pid`, with no
+		// platform branch needed.
+		const liveForeign = path.join(
+			cacheDir,
+			`review-graph.json.gz.stage-${process.ppid}-4242`,
+		);
+		fs.writeFileSync(liveForeign, "live-foreign");
+
 		createTempFile(env.tmpDir, "a.ts", "export const a = 1;\n");
 		await buildOrUpdateGraph(
 			env.tmpDir,
@@ -128,5 +142,9 @@ describe("review-graph stale stage sweep scoping (#1206)", () => {
 			).toBe(true);
 		}
 		expect(fs.existsSync(liveOwned)).toBe(true);
+		expect(
+			fs.existsSync(liveForeign),
+			"#1206: review-graph sweep destroyed a live foreign owner's stage file",
+		).toBe(true);
 	});
 });
