@@ -65,8 +65,7 @@ const spawnSyncMock = vi.hoisted(() =>
 	),
 );
 vi.mock("node:child_process", async (importOriginal) => {
-	const actual =
-		await importOriginal<typeof import("node:child_process")>();
+	const actual = await importOriginal<typeof import("node:child_process")>();
 	return { ...actual, spawn: spawnMock, spawnSync: spawnSyncMock };
 });
 
@@ -200,5 +199,47 @@ describe("Windows resolution honors the CALLER's env, not just ambient process.e
 		expect(spawnCmd).toMatch(/cmd\.exe$/i);
 		expect(spawnArgs.join(" ")).toContain(managedTool);
 		expect(spawnOptions.env?.PATHEXT).toBe(".CMD");
+	});
+
+	// #1201: a cwd this module cannot CANONICALIZE is not the same thing as a
+	// bad cwd. `D:work` is drive-relative, and Node never surfaces the `=D:`
+	// per-drive entry that would let us resolve it (see
+	// `getValidatedPerDriveCwd`), so our provenance is missing — but Windows
+	// resolves it natively. Failing the spawn before ever attempting it turned
+	// a working call into a synthesized ENOENT, which downstream call sites
+	// (sg-runner, lsp/launch) read as "tool not installed" and answer with a
+	// reinstall — the #1199 loop. The command itself still resolves only from
+	// a fully-qualified PATH entry, so nothing is validated against a
+	// directory the child won't run in.
+	it("passes an uncanonicalizable drive-relative cwd through instead of failing closed", () => {
+		const bin = "C:\\__pi_lens_cwd_passthrough__\\bin";
+		const tool = path.win32.join(bin, "widget-tool.exe");
+		markFilesAsPresent(tool);
+		spawnSyncMock.mockClear();
+
+		const result = safeSpawn("widget-tool", ["--version"], {
+			cwd: "D:work",
+			env: { PATH: bin, PATHEXT: ".EXE" },
+		});
+
+		expect(result.error).toBeUndefined();
+		// A direct .exe spawn also triggers the one-shot `chcp 65001` helper
+		// through the same mocked spawnSync, so find OUR call rather than
+		// asserting an exact count.
+		const call = spawnSyncMock.mock.calls.find(
+			(candidate) => candidate[0] === tool,
+		);
+		if (!call) {
+			throw new Error(
+				`expected a spawnSync call for ${tool}, got: ${JSON.stringify(
+					spawnSyncMock.mock.calls.map((c) => c[0]),
+				)}`,
+			);
+		}
+		const [spawnCmd, , spawnOptions] = call;
+		expect(spawnCmd).toBe(tool);
+		// The raw caller value reaches the child verbatim — not silently
+		// rewritten to the host process's cwd.
+		expect(spawnOptions.cwd).toBe("D:work");
 	});
 });
