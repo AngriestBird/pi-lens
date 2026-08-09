@@ -924,7 +924,11 @@ export const psscriptanalyzerFormatFormatter: FormatterInfo = {
 
 // --- Registry ---
 
-const ALL_FORMATTERS: FormatterInfo[] = [
+// Exported for the formatter/policy drift guard (tests/clients/
+// formatter-policy-consistency.test.ts, #1135): the test cross-checks these
+// definitions against tool-policy.ts's FORMATTER_POLICY_BY_EXTENSION so the two
+// hand-maintained inverse mappings can never silently diverge.
+export const ALL_FORMATTERS: FormatterInfo[] = [
 	biomeFormatter,
 	prettierFormatter,
 	oxfmtFormatter,

@@ -11,6 +11,7 @@ import {
 	normalizeFilePath,
 	normalizeMapKey,
 	pathToUri,
+	toProjectRelativePath,
 	uriToPath,
 	walkUpDirs,
 } from "../../clients/path-utils.js";
@@ -82,6 +83,45 @@ describe("normalizeFilePath: Windows-shaped path is OS-coherent (refs #1150, cla
 	it("normalizeMapKey (the map-key entry point) yields the same stable key", () => {
 		expect(normalizeMapKey(nonExistent)).toBe(normalizeFilePath(nonExistent));
 		expect(normalizeMapKey(nonExistentBack)).toBe(normalizeMapKey(nonExistent));
+	});
+});
+
+describe("toProjectRelativePath: Windows-shaped path relativizes on ANY OS (refs #1163, class #1150/#1024)", () => {
+	// A drive-letter-shaped filePath UNDER a drive-letter-shaped projectRoot must
+	// relativize by win32 semantics on any OS — the shape decides the parser, not
+	// `process.platform`. PRE-FIX on Linux, the host-default `path.isAbsolute`
+	// returns false for a "C:\..." path (no POSIX leading slash), so the function
+	// short-circuited and returned the whole absolute path instead of the
+	// project-relative one. On Windows the same input relativized correctly, so a
+	// Linux CI run diverged from a green Windows run (the #1024 class). Inputs are
+	// fed as literals; the expectation is derived structurally, not hardcoded to a
+	// normalized key (the #1139/#1150 vacuous-fixture trap).
+	it("backslash form under a backslash root → forward-slashed project-relative path", () => {
+		expect(
+			toProjectRelativePath("C:\\repo\\src\\x.ts", "C:\\repo"),
+		).toBe("src/x.ts");
+	});
+
+	it("forward-slash win32 form under a win32 root → project-relative path", () => {
+		expect(
+			toProjectRelativePath("C:/repo/src/nested/y.ts", "C:/repo"),
+		).toBe("src/nested/y.ts");
+	});
+
+	it("UNC-shaped path under a UNC root relativizes rather than returning the whole path", () => {
+		const rel = toProjectRelativePath(
+			"\\\\host\\share\\proj\\src\\z.ts",
+			"\\\\host\\share\\proj",
+		);
+		expect(rel).toBe("src/z.ts");
+	});
+
+	it("a win32 file OUTSIDE the win32 root keeps the (slash-folded) absolute path", () => {
+		// Not under the root → not relativized; must stay the full path, never a
+		// "../"-prefixed escape.
+		expect(
+			toProjectRelativePath("C:\\other\\a.ts", "C:\\repo"),
+		).toBe("C:/other/a.ts");
 	});
 });
 

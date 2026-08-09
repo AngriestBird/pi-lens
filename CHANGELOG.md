@@ -4,6 +4,10 @@ All notable changes to pi-lens will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **On-demand heap snapshots for retainer attribution ([#1126](https://github.com/apmantza/pi-lens/issues/1126))** — `PI_LENS_DEBUG_HEAP=1` makes `/lens-health` also write a V8 `.heapsnapshot` to `~/.pi-lens/` (plus a breadcrumb line in `heap-snapshots.log`), so the "which objects retain the bytes" follow-up to #1123's `memory_sample` trajectory is answerable on a live >1 GB instance without a fresh ad-hoc expedition. The flag is read once at startup and the writer mirrors `clients/debug-handles.ts`: zero cost + no file when unset, and the (synchronous, multi-second) snapshot is only ever triggered from the operator-invoked diagnostics command — never a hot path or timer. Snapshot files are pruned to the newest `SNAPSHOT_RETENTION` (3) after each write, bounding the growing on-disk axis (AGENTS.md shape 9). Auto-capture on an RSS threshold is a deliberately-deferred follow-up (it would reintroduce the pause onto an automatic path).
+
 ### Fixed
 
 - **Rule-cache disk cache could replay a stale compiled rule set on a same-mtime+same-size rule-file edit (closes #1118, refs #1105 #878)** —
@@ -30,6 +34,229 @@ All notable changes to pi-lens will be documented in this file.
 	and assert the cache invalidates for project-local files but still hits
 	for bundled-only rule sets; a third test confirms a persisted
 	metadata-only-fingerprinted entry is rejected post-fix.
+- **Formatter definitions and `FORMATTER_POLICY_BY_EXTENSION` were unbound hand-maintained inverse lists; added a bidirectional drift guard and fixed two latent mismatches (closes #1135; refs #1086 #1134 #883)** —
+	`clients/formatters.ts` (formatter → `extensions[]`) and `clients/tool-policy.ts`'s
+	`FORMATTER_POLICY_BY_EXTENSION` (extension → `formatterNames[]`) are hand-maintained
+	INVERSE mappings of the same relation with no test binding the two directions — the
+	#883/#209 single-source-of-truth class, and the general shape under #1134's oxfmt/.svelte
+	gap. Added `tests/clients/formatter-policy-consistency.test.ts`, which imports the real
+	`ALL_FORMATTERS` definitions and the policy maps and asserts both directions: every
+	definition extension is policy-included / a documented deliberate exclusion / a documented
+	no-policy fallback (so a definition gaining a policy-gated extension can't be silently
+	never-offered — #1134's exact symptom); and every policy `formatterName`/`defaultFormatter`
+	is a real formatter whose definition claims that extension or filename (so a broken option
+	can't be offered — including the terragrunt-hcl filename-keyed variant). Fixed two real
+	latent drifts surfaced by the guard, both behavior-identical (the mismatched entries were
+	already inert): the `.sass` policy listed `oxfmt` though oxfmt does not support `.sass`
+	(absent from `OXFMT_SUPPORTED_EXTENSIONS`), and the `.fish` formatter policy named
+	`fish-indent`, which has no `FormatterInfo` (it is a lint runner) — a dead, unsatisfiable
+	entry, now removed. A structural derive (tool-policy importing the definitions) was rejected
+	because `formatters.ts` already imports `tool-policy.ts`, so the reverse edge would create a
+	module import cycle; the test-based guard binds both directions while keeping the dependency
+	one-way. Also bound `AUTO_INSTALLABLE_DEFAULT_FORMATTERS` keys to real formatter definitions
+	(same formatter-name-reference class). The guard reads four newly-exported read-only symbols
+	(`ALL_FORMATTERS` plus the three policy maps `FORMATTER_POLICY_BY_EXTENSION`,
+	`FORMATTER_POLICY_BY_FILENAME`, `AUTO_INSTALLABLE_DEFAULT_FORMATTERS`), and its own two
+	allowlists (deliberate exclusions, no-policy fallbacks) each carry a minimality check so
+	they cannot rot into blanket escape hatches.
+- **Pull-diagnostics entries never bound to document content, so they never demoted (closes #1104, refs #1095 #1096 #1100)** —
+	#1096 bound LSP diagnostics to a content fingerprint on the PUSH path
+	(`publishDiagnostics` version echo + send-time hash); the PULL path
+	(`textDocument/diagnostic`, `workspace/diagnostic`) recorded no fingerprint
+	at all, so pull-served cache entries read binding `"unknown"` forever and
+	the #1096 P2-1 service-sweep binding gate could never protect them. Fixed by
+	threading the server's `resultId` and a request-time content hash through
+	both pull requests: a `"full"` report is fingerprinted (the single-file path
+	reuses the exact sent-content hash `recordSentContent` already captures on
+	every didOpen/didChange — no extra read; the project-wide
+	`workspace/diagnostic` pull hashes disk bytes at request time since files
+	may not yet be open when it fires), and an `"unchanged"` report (now
+	requested via `previousResultId`/`previousResultIds`) inherits the prior
+	pull's diagnostics AND binding instead of being misread as a confirmed-clean
+	`[]` (the #570/#571 false-clean shape). The workspace pull-sweep record site
+	(`clients/lsp/index.ts`) now threads this `contentHash` into
+	`workspaceDiagnosticsCacheCtx.record()`, closing the gap the site's own
+	`#1095` doc comment used to document as intentional. Also closed an
+	AGENTS.md shape-5 gap in the sibling per-file touch path: `processFile` read
+	the `#1095` binding off the RAW `touchFile` diagnostics array before
+	`applyAuxiliarySuppressions`' `.filter()` rebuilds it (a `.filter()` copy
+	does not carry a source array's non-enumerable `.binding`), and
+	`LSPService.mergeBinding` no longer gates a contributor's `contentHash` on
+	that SAME contributor also carrying a `version` — pull bindings
+	legitimately carry a hash with no version, and the old gate silently
+	dropped it. Folded in two #1100-review P3s on the same surface: the
+	cascade's degraded/fallback display paths and the `lsp_binding_rejected`
+	indeterminate-advisory preamble (`clients/runtime-turn.ts`), which
+	previously reused the graph-unavailable wording even when the review graph
+	was fine and only the LSP display was withheld, now use a
+	binding-rejection-specific frame. Fail-then-pass regression tests cover:
+	the pull-sweep record site actually receiving a `contentHash`; a
+	pull-recorded entry whose content changed under a matching mtime being
+	demoted (not replayed) on the next sweep; the per-file touch path's binding
+	surviving the suppression filter; and the `"unchanged"`-report inheritance
+	on both the single-file and workspace pull protocols.
+- **Config caches gated freshness on mtime alone — the mtime-only cache-freshness class sweep (closes #1105)** —
+	Completed the shape-6 (freshness stamp that doesn't cover the data's real
+	dependency) sweep the #1092→#1119 diagnostics/word-index arc deferred. Audited
+	every persisted/derived cache with an mtime/TTL key: word-index (#1119),
+	`rule-cache.ts` (`mtime:size`), `sgconfig.ts` (content-hashed), the
+	`yaml-rule-parser` project/bundled split (project rules content-hashed via
+	`loadYamlRulesFresh`, bundled dir-mtime is safe by process-lifetime
+	immutability), `reverse-deps` (snapshot-seq/generation-coupled), installer
+	`probe-cache` (existence re-validated every read + ast-grep version-family
+	verify — mtime is a refresh hint, not the correctness gate), `TreeCache`
+	(content-hash authoritative, #890), and the project-snapshot per-file
+	`mtime:size` entries — all already-hardened or safe. The one gap: the
+	`.pi-lens.json` config caches gated reuse on the config file's **mtime alone**,
+	so an in-place edit that preserved mtime (git checkout timestamp restoration, a
+	same-second rewrite) but changed the file's byte length replayed a stale parsed
+	config / ignore matcher — a config that drives mutation, ignore, and rule
+	policy. This spanned every freshness gate in the two files: the root parsed-
+	config caches (`loadPiLensProjectConfig`/`loadPiLensConfigInDir` in
+	`clients/project-lens-config.ts`), the root ignore-matcher cache, and — the
+	member found in adversarial review — the **nested `.pi-lens.json`/`.gitignore`
+	layering cache** (`patternsForDir`, #783) in `clients/file-utils.ts`, which
+	short-circuits AHEAD of the root caches so a preserved-mtime, length-changing
+	edit to a NESTED config replayed stale patterns for that subtree. Fixed by
+	adding **`size` as the free second axis** of the review-graph `size:mtimeMs`
+	signature to every gate — the root `.pi-lens.json` (threaded through
+	`PiLensConfigMarker` in `clients/workspace-topology.ts`), the root `.gitignore`
+	and global `~/.pi-lens/config.json` (via a shared `fileFreshnessSignature`
+	helper), and both the nested `.pi-lens.json` and nested `.gitignore` axes. The
+	same stat that yields mtime already reads size, so the cheap hit path stays
+	cheap (no content hashing on the hot path). The residual (identical mtime AND
+	identical size, changed content) matches the review-graph/word-index accepted
+	residual by design. Fail-then-pass regression tests cover the root and nested
+	gates (each proven to replay stale on the pre-fix mtime-only code); FS-agnostic
+	(mtime pinned via `utimesSync`, size varied by content length) so they exercise
+	the gates identically on Linux CI.
+
+- **Windows drive-root & autofix-snapshot `readdirSync` blocked the event loop on slow cloud-backed dirs (refs #1137)** —
+	the genuine synchronous event-loop-block tier from #1122 (the 1.6–10.6 s
+	single-process blocks in `latency.log`, distinct from the machine-level
+	Modern-Standby/commit-exhaustion artifacts dispositioned in #1122 and tagged
+	`suspectSystemStall` by #1125). On a OneDrive/network-backed path a stalled
+	synchronous directory read blocks the Node loop — and pi's TUI — for the whole
+	stall. Converted the two clearly-live-path, low-risk offenders: (a) the Windows
+	Ruby drive-root enumeration (`readdirSync(driveRoot)` scanning `C:\` for
+	`ruby<N>` installer dirs), previously re-run **synchronously on every LSP spawn**
+	in `buildAugmentedPath` (PATH build) and on every Ruby candidate build in
+	`rubyBinCandidates` — now a shared `clients/lsp/ruby-drive-dirs.ts` module that
+	**memoizes** the result once per process (O(1) amortized) and reads the drive
+	root **off the loop** via `fs.promises.readdir` on the hot spawn path; and
+	(b) the `tool_result` autofix side-effect snapshot walk (`snapshotDirInto`,
+	`clients/pipeline.ts`), whose per-directory `readdirSync`/`statSync` are now
+	`fs.promises.readdir`/`stat` (the walk was already async + chunk-yielding, but
+	each synchronous per-dir read still blocked on a cloud stall). Same outputs,
+	just non-blocking. `measureMaxSyncBlockMs` occupancy guards assert the converted
+	drive-root path no longer holds the loop and fail against the pre-conversion
+	sync shape. Remaining suspect sites (the shared `walkTreeStackAsync` per-dir
+	read in `clients/source-walker.ts`; `hasProjectMarker`/`expandWorkspacePattern`
+	deep in sync memoized/bounded chains; the `safe-spawn.ts` Windows `spawnSync`
+	teardown/cached paths) are deferred as scoped follow-ups on #1137 — each ripples
+	into a widely-called sync API or subprocess-teardown correctness.
+- **`session_start_sequence_read` was an unbounded synchronous blocking read on the session_start hot path (closes #1162)** —
+	`readLatestProjectSequence` called `fs.readFileSync` on the project
+	change-log before `session_start_total` returned; normally ~2ms, but under
+	host I/O pressure it had no escape hatch and was observed to balloon to
+	2125ms in production latency.log. A `setTimeout`/`Promise.race` timeout
+	cannot preempt a synchronous read (the thread only returns to the event
+	loop once the OS call returns), so the fix adds an async twin
+	(`readLatestProjectSequenceAsync`, `fs.promises.readFile`) and races it
+	against a 250ms budget (`PI_LENS_SEQUENCE_READ_BUDGET_MS`-overridable) in
+	both the quick-mode and full-mode session_start paths. On a healthy read
+	(the common case) this adds ~zero overhead; on a stalled read, session_start
+	proceeds immediately with the safe cold-start sequence (only gates
+	snapshot freshness, never correctness) while the real read finishes in the
+	background and re-seeds the runtime — skipped for a one-shot `pi --print`
+	process via `isPrintMode()`, screening the #1154/#1153 one-shot
+	referenced-handle retention class. The fallback is never silent: the
+	`session_start_sequence_read` latency line now carries a `timedOut` flag,
+	and a background reseed logs its own
+	`session_start_sequence_read_deferred_reseed` phase. Fail-then-pass
+	regression tests inject a controllable slow read and assert session_start
+	returns within budget, falls back to cold-start with the flag set, and
+	still seeds normally on the healthy path. Adversarial review (#1168) caught
+	two P3s in this exact stall regime, both fixed in the same PR: (1) the
+	background reseed's `isCurrentSession` guard caught a cross-session move-on
+	but not a SAME-session advancement — an edit landing in the stall window
+	could have its `bumpFileSeq` result clobbered by a late reseed of the
+	pre-edit state; fixed with a `runtime.projectSeq > 0` guard (the cold seed
+	always sets it to exactly 0, so `> 0` at reseed time can only mean an
+	in-window bump happened). (2) The cold sentinel's `projectSeq: 0` was
+	indistinguishable from a project's legitimate first-ever snapshot (also
+	persisted at `seq === 0`), so a timed-out read could hydrate a stale seq-0
+	snapshot as fresh; fixed with a dedicated `UNKNOWN_PROJECT_SEQ` (`-1`)
+	sentinel fed only to the freshness check (never to `runtime.projectSeq`
+	itself, keeping fix (1)'s guard valid). Both have their own fail-then-pass
+	regression tests.
+- **Resource-sampler Windows CIM spawns were not `.unref()`'d, the same one-shot-retention shape as the orphan reaper (refs #1155)** —
+	`clients/resource-sampler.ts`'s two Windows-only `Get-CimInstance Win32_Process`
+	spawns (`findDescendantPidsWindows`'s descendant-tree lookup and
+	`sampleProcessesWindows`'s CPU/RSS query) used `stdio:["ignore","pipe","ignore"]`
+	with a piped, `data`-listener-attached stdout and neither the child nor its
+	stdout was ever `.unref()`'d — the same shape #1153/#1160 fixed for the orphan
+	reaper (shape 4 of AGENTS.md's recurring-defect catalog: a referenced handle
+	that outlives a one-shot settle). The sampler was empirically absent under a
+	trivial `pi --print` prompt (its own `setInterval` was already unref'd, and it
+	only runs bracketed to an awaited analyzer spawn), but was not safe by
+	construction for a file-editing repro that does exercise it. Fixed by
+	extracting the reaper's `unrefReaperChild` AND its `spawnCollectStdout`
+	spawn→pipe-stdout→resolve-on-close plumbing into a shared, dependency-free
+	`clients/child-unref.ts` (`unrefChildAndPipes`, `spawnCollectStdout`) and
+	calling `spawnCollectStdout` at both sampler spawn sites — a single source
+	of truth for both modules instead of a second hand-rolled copy (the
+	promotion also resolved a SonarCloud new-code-duplication gate failure:
+	adding an identical `unrefChildAndPipes(child)` line to both near-identical
+	spawn blocks had pushed duplicated-line density over the 3% threshold;
+	collapsing both blocks to parse-only call sites around the shared helper
+	removed the duplication instead of adding to it). Unref only detaches this
+	child ALONE from keeping a settled one-shot alive; in an interactive/
+	long-lived session (or one bracketed to real analyzer work) the loop stays
+	referenced for other reasons, so sampling is unaffected — the parse logic
+	at both call sites is otherwise unchanged, so a spawn/error failure still
+	resolves to the same empty/partial result as before. Fail-then-pass
+	regression tests assert both spawn sites unref the child and its stdout, in
+	both the sampler and (unchanged) the reaper.
+- **`toProjectRelativePath` never relativized a Windows-shaped path off native Windows (closes #1163, refs #1150/#1152/#1161/#1024)** —
+	shape-2 bug-class sweep of the `path.*`-on-cross-shaped-input hot zone.
+	`clients/path-utils.ts:toProjectRelativePath` used the host-default
+	`path.isAbsolute`/`path.relative` even when the input was Windows-shaped
+	(drive letter or UNC). On Linux CI, `path.isAbsolute("C:\\repo\\src\\x.ts")`
+	is `false` (no POSIX leading slash), so the function short-circuited and
+	returned the whole absolute path instead of the project-relative `src/x.ts`
+	it produces on Windows — a persisted call-graph symbol-key path or graph
+	display path (via `module-report`/`lens-map`'s `toDisplayPath` and
+	`call-graph`'s `formatImpact`) rendered as a full absolute path on Linux
+	(green-locally / wrong-on-CI, the #1024 divergence class). Fixed
+	shape-conditionally (`isWindowsPath(p) ? win32 : path`, the #1152 idiom):
+	a Windows-shaped path is parsed with `win32.*` on ANY OS; native same-OS
+	paths are unchanged. Fail-then-pass regression tests feed `C:\...`/UNC
+	literals as INPUT and assert the relative result on any OS (meaningful on
+	Linux CI). The rest of the swept hot zone
+	(`widget-state`/`file-utils`/`call-graph`/`installer`/`elixir-check`, plus
+	`file-role` #1152 and `resolveNonExisting` #1150 already fixed) was audited
+	and cleared as native-by-design — inputs are real on-disk paths the running
+	OS produced (cwd/project-roots/scanned files, `path.resolve`'d first) or
+	already fold through `normalizeEphemeralMapKey`/`PathKeyedMap`/the
+	regex-based `parseSymbolKey`.
+- **`generated-artifacts.ts` used module-default `path.basename` on Windows-shaped paths, under-detecting lockfiles/declarations off native Windows (closes #1161, sibling of #1150/#1152)** —
+	`hasStrongGeneratedArtifactPath` (lockfile match), `hasWeakGeneratedFileNamePattern`
+	(name-pattern match), and `isDeclarationFile` (`.d.ts`/`.d.mts`/`.d.cts` match)
+	all took the module-default `path.basename(filePath)` on shape-committed
+	input. On Linux CI, `path.basename("C:\\proj\\package-lock.json")` finds no
+	POSIX separator and returns the whole string unchanged, so
+	`LOCKFILE_NAMES.has(...)` misses — a Windows-shaped lockfile or declaration
+	path was silently treated as ordinary source. `generated-artifacts.ts` is
+	imported by `file-role.ts`'s `"generated"` branch, so this residual sat
+	within `detectFileRole`'s own call tree even after #1152 fixed the
+	dir-segment/basename split there. Fixed with a shared `basenameForShape`
+	helper that routes through `path.win32.basename` when `isWindowsPath`
+	(exported by #1152) is true, mirroring `file-role.ts`'s fix exactly —
+	shape-conditional, not shape-committed, so native-OS classification is
+	unchanged. The strong directory-segment match (`pathSegments`, which splits
+	on `[\\/]+`) was already shape-safe and untouched. Fail-then-pass regression
+	tests cover a `C:\...`-shaped lockfile and `.d.ts` literal.
 - **Quick-mode background warmup kept a one-shot `pi -p`/`--print` process alive (closes #1154)** —
 	`handleSessionStart` forces **quick mode** for both a real `pi -p`/`--print`
 	one-shot AND an interactive process's first session (to protect keystroke

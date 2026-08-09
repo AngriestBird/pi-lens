@@ -399,37 +399,82 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// (over-correction guard).
 	const indeterminateRuns = cascadeRuns.filter((r) => r.indeterminate);
 	if (indeterminateRuns.length > 0) {
-		const byDetail = new Map<string, string[]>();
-		for (const r of indeterminateRuns) {
-			const detail =
-				r.indeterminate?.detail ??
-				(r.indeterminate?.reason === "missing_node"
-					? "changed file not in the review graph"
-					: "review graph unavailable");
-			const files = byDetail.get(detail) ?? [];
-			files.push(toRunnerDisplayPath(cwd, r.filePath));
-			byDetail.set(detail, files);
-		}
-		const lines: string[] = [];
-		for (const [detail, filesRaw] of byDetail) {
-			const files = [...new Set(filesRaw)];
-			const shown = files.slice(0, 5).join(", ");
-			const more = files.length > 5 ? ` (+${files.length - 5} more)` : "";
-			lines.push(`  • ${detail}: ${shown}${more}`);
-		}
-		const fileCount = new Set(
-			indeterminateRuns.map((r) => normalizeMapKey(r.filePath)),
-		).size;
-		const reasons = [...byDetail.keys()].join("; ");
+		// #1104 (review P3 on PR #1143, rides with the resultId main body): this
+		// preamble used to hardcode a graph-unavailability frame for EVERY
+		// indeterminate reason. That's accurate for `graph_degraded`/
+		// `missing_node`/`error` (the graph really couldn't produce a dependent
+		// set), but `lsp_binding_rejected` is a DIFFERENT failure shape — the
+		// graph WAS available and dependents WERE derived; only their LSP
+		// diagnostics display was withheld because a fallback snapshot's content
+		// binding didn't match current disk. Saying "the review graph was
+		// unavailable" for that case mis-attributes the cause. Bucket by reason
+		// family so each gets its own accurate frame.
+		const buildAdvisory = (
+			runs: typeof indeterminateRuns,
+			frame: {
+				lead: (fileCount: number, reasons: string) => string;
+				fallbackDetail: (
+					r: (typeof indeterminateRuns)[number],
+				) => string;
+			},
+		): string | undefined => {
+			if (runs.length === 0) return undefined;
+			const byDetail = new Map<string, string[]>();
+			for (const r of runs) {
+				const detail = r.indeterminate?.detail ?? frame.fallbackDetail(r);
+				const files = byDetail.get(detail) ?? [];
+				files.push(toRunnerDisplayPath(cwd, r.filePath));
+				byDetail.set(detail, files);
+			}
+			const lines: string[] = [];
+			for (const [detail, filesRaw] of byDetail) {
+				const files = [...new Set(filesRaw)];
+				const shown = files.slice(0, 5).join(", ");
+				const more = files.length > 5 ? ` (+${files.length - 5} more)` : "";
+				lines.push(`  • ${detail}: ${shown}${more}`);
+			}
+			const fileCount = new Set(
+				runs.map((r) => normalizeMapKey(r.filePath)),
+			).size;
+			const reasons = [...byDetail.keys()].join("; ");
+			return `${frame.lead(fileCount, reasons)}\n${lines.join("\n")}`;
+		};
+
+		const graphRuns = indeterminateRuns.filter(
+			(r) => r.indeterminate?.reason !== "lsp_binding_rejected",
+		);
+		const bindingRuns = indeterminateRuns.filter(
+			(r) => r.indeterminate?.reason === "lsp_binding_rejected",
+		);
+
 		// Factual/informational phrasing — the advisory tier wraps this with an
 		// "ℹ️ Advisory — no action required this turn:" label, so an imperative
 		// ("review dependents manually") would contradict it. The #533 substance
 		// stays: a clean cascade result does NOT cover these files' dependents.
-		advisoryParts.push(
-			`Cascade could not compute downstream impact for ${fileCount} edited file(s) this turn — ` +
+		const graphAdvisory = buildAdvisory(graphRuns, {
+			lead: (fileCount, reasons) =>
+				`Cascade could not compute downstream impact for ${fileCount} edited file(s) this turn — ` +
 				`the review graph was unavailable (${reasons}), so their dependents were not ` +
-				`cascade-checked and a clean cascade result does not cover them.\n${lines.join("\n")}`,
-		);
+				`cascade-checked and a clean cascade result does not cover them.`,
+			fallbackDetail: (r) =>
+				r.indeterminate?.reason === "missing_node"
+					? "changed file not in the review graph"
+					: "review graph unavailable",
+		});
+		if (graphAdvisory) advisoryParts.push(graphAdvisory);
+
+		const bindingAdvisory = buildAdvisory(bindingRuns, {
+			lead: (fileCount, reasons) =>
+				`Cascade identified dependents for ${fileCount} edited file(s) this turn, but their ` +
+				`diagnostics could not be freshly confirmed (${reasons}) and were withheld — a clean ` +
+				`cascade result does not cover them.`,
+			fallbackDetail: () => "cascade diagnostics withheld (binding rejected)",
+		});
+		if (bindingAdvisory) advisoryParts.push(bindingAdvisory);
+
+		const fileCount = new Set(
+			indeterminateRuns.map((r) => normalizeMapKey(r.filePath)),
+		).size;
 		logCascade({
 			phase: "cascade_indeterminate",
 			filePath: files[0] ?? cwd,
