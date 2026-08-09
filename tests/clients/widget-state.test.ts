@@ -1142,6 +1142,35 @@ describe("PersistedWidgetState v1→v2 migration — per-entry stamps inherit th
 		expect(rejected).toBe(false);
 	});
 
+	it("REJECTS a snapshot with a missing / non-numeric version (preserves pre-#1186 strictness — a malformed or foreign snapshot must not fall through into the migrate path)", () => {
+		const filePath = "C:/proj/no-version.ts";
+		// A malformed on-disk snapshot whose `version` is absent. The pre-#1186
+		// guard (`version !== WIDGET_STATE_VERSION`) rejected this; the naive
+		// range guard (`version < 1 || > MAX`) let `undefined` slip through
+		// (both comparisons are false) and silently migrated it. It must be
+		// rejected: return false and populate nothing.
+		const malformed = {
+			sessionLanguages: [],
+			files: [
+				{
+					filePath,
+					runners: [],
+					formatters: [],
+					diagnostics: [{ severity: "error", message: "orphan", rule: "X" }],
+					allDiagnostics: [
+						{ severity: "error", message: "orphan", rule: "X" },
+					],
+					diagnosticCounts: { blocking: 0, errors: 1, warnings: 0 },
+					hasFinalDiagnosticsSnapshot: true,
+					touchedAt: Date.now(),
+				},
+			],
+		} as unknown as Parameters<typeof importWidgetState>[0];
+
+		expect(importWidgetState(malformed)).toBe(false);
+		expect(getFileDiagnostics(filePath)).toBeUndefined();
+	});
+
 	it("a migrated v1 entry gates correctly: stale once the file's mtime passes the inherited stamp", async () => {
 		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "v1-migrate-gate-"));
 		const filePath = path.join(tmpDir, `legacy-${Date.now()}.ts`);
@@ -1168,6 +1197,12 @@ describe("PersistedWidgetState v1→v2 migration — per-entry stamps inherit th
 					},
 				],
 			});
+			// The v1 snapshot must be ACCEPTED and its entry present before we test
+			// gating — this intermediate assertion makes the test discriminate
+			// against pre-fix code (which rejected v1 outright, leaving nothing to
+			// gate and passing the final `toBeUndefined` for the wrong reason).
+			expect(getFileDiagnostics(filePath)).toHaveLength(1);
+
 			// File changed after the inherited observation → the migrated entry is
 			// stale and drops (proves the inherited stamp actually gates — not stored
 			// but ignored).

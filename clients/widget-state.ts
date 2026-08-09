@@ -212,10 +212,19 @@ function migrateEntryStamps(
 }
 
 export function importWidgetState(state: PersistedWidgetState | undefined): boolean {
-	// Accept any known-or-older version and migrate (#1186): reject only a
-	// missing snapshot or a FUTURE version this build can't understand. Rejecting
-	// a v1 (pre-per-entry-stamp) file would silently drop all resume diagnostics.
-	if (!state || state.version < 1 || state.version > WIDGET_STATE_VERSION) {
+	// Accept any known-or-older version and migrate (#1186): reject a missing
+	// snapshot, a missing/non-numeric `version` (NaN/undefined/null — the
+	// pre-#1186 guard `version !== WIDGET_STATE_VERSION` rejected these, and
+	// loosening that would silently admit a malformed/foreign snapshot), or a
+	// FUTURE version this build can't understand. Rejecting a v1
+	// (pre-per-entry-stamp) file, by contrast, would silently drop all resume
+	// diagnostics — so v1..current are accepted and migrated.
+	if (
+		!state ||
+		typeof state.version !== "number" ||
+		state.version < 1 ||
+		state.version > WIDGET_STATE_VERSION
+	) {
 		return false;
 	}
 	files.clear();
