@@ -15,6 +15,12 @@ import {
 	resolveWindowsCommandForEnvironment,
 } from "../../clients/safe-spawn.js";
 
+const WINDOWS_TEST_ROOT = "C:\\__pi_lens_safe_spawn_tests__";
+
+function winAbsolute(...segments: string[]): string {
+	return path.win32.join(WINDOWS_TEST_ROOT, ...segments);
+}
+
 function markFilesAsPresent(...files: string[]): void {
 	const present = new Set(files);
 	statSyncMock.mockImplementation((candidate: unknown) => {
@@ -30,8 +36,8 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 	});
 
 	it("resolves the Knip managed-bin call shape from caller PATH, not ambient PATH", () => {
-		const ambientBin = path.win32.join("ambient", "node_modules", ".bin");
-		const managedBin = path.win32.join("managed", "node_modules", ".bin");
+		const ambientBin = winAbsolute("ambient", "node_modules", ".bin");
+		const managedBin = winAbsolute("managed", "node_modules", ".bin");
 		const managedKnip = path.win32.join(managedBin, "knip.cmd");
 		markFilesAsPresent(managedKnip);
 
@@ -43,7 +49,7 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 		);
 		const resolved = resolveWindowsCommandForEnvironment(
 			"knip",
-			path.win32.join("workspace", "project"),
+			winAbsolute("workspace", "project"),
 			knipEnv,
 		);
 
@@ -61,7 +67,7 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 	});
 
 	it("reads PATH and PATHEXT case-insensitively", () => {
-		const bin = path.win32.join("case-variant", "bin");
+		const bin = winAbsolute("case-variant", "bin");
 		const executable = path.win32.join(bin, "tool.cmd");
 		markFilesAsPresent(executable);
 
@@ -74,8 +80,8 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 	});
 
 	it("does not reuse a cached result across PATH or PATHEXT changes", () => {
-		const cmdBin = path.win32.join("first", "bin");
-		const exeBin = path.win32.join("second", "bin");
+		const cmdBin = winAbsolute("first", "bin");
+		const exeBin = winAbsolute("second", "bin");
 		const cmdPath = path.win32.join(cmdBin, "cache-tool.cmd");
 		const exePath = path.win32.join(exeBin, "cache-tool.exe");
 		markFilesAsPresent(cmdPath, exePath);
@@ -103,7 +109,7 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 	});
 
 	it("uses win32 parsing for explicit relative paths on every host OS", () => {
-		const cwd = path.win32.join("workspace", "project");
+		const cwd = winAbsolute("workspace", "project");
 		const relativeCommand = path.win32.join("tools", "tool.exe");
 		const resolvedPath = path.win32.resolve(cwd, relativeCommand);
 		markFilesAsPresent(resolvedPath);
@@ -309,7 +315,7 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 	});
 
 	it("honors an explicit extension even when PATHEXT omits it", () => {
-		const bin = path.win32.join("explicit-extension", "bin");
+		const bin = winAbsolute("explicit-extension", "bin");
 		const executable = path.win32.join(bin, "tool.cmd");
 		markFilesAsPresent(executable);
 
@@ -322,7 +328,7 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 	});
 
 	it("follows PATHEXT order for a bare command", () => {
-		const bin = path.win32.join("pathext-order", "bin");
+		const bin = winAbsolute("pathext-order", "bin");
 		const exe = path.win32.join(bin, "tool.exe");
 		const cmd = path.win32.join(bin, "tool.cmd");
 		markFilesAsPresent(exe, cmd);
@@ -336,7 +342,7 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 	});
 
 	it("clears session resolution entries", () => {
-		const bin = path.win32.join("session-reset", "bin");
+		const bin = winAbsolute("session-reset", "bin");
 		const executable = path.win32.join(bin, "tool.exe");
 		markFilesAsPresent(executable);
 		const env = { PATH: bin, PATHEXT: ".EXE" };
@@ -352,7 +358,7 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 	});
 
 	it("reset invalidates a cached negative result after an install", () => {
-		const bin = path.win32.join("stale-negative", "bin");
+		const bin = winAbsolute("stale-negative", "bin");
 		const executable = path.win32.join(bin, "tool.exe");
 		const env = { PATH: bin, PATHEXT: ".EXE" };
 		markFilesAsPresent();
@@ -366,7 +372,7 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 	});
 
 	it("reset invalidates a cached positive result after deletion", () => {
-		const bin = path.win32.join("stale-positive", "bin");
+		const bin = winAbsolute("stale-positive", "bin");
 		const executable = path.win32.join(bin, "tool.exe");
 		const env = { PATH: bin, PATHEXT: ".EXE" };
 		markFilesAsPresent(executable);
@@ -381,7 +387,7 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 
 	it("evicts the oldest session entry at the cache bound", () => {
 		const entries = Array.from({ length: 257 }, (_, index) => {
-			const bin = path.win32.join("bounded-cache", String(index));
+			const bin = winAbsolute("bounded-cache", String(index));
 			const command = `tool-${index}.exe`;
 			return {
 				bin,
@@ -415,7 +421,7 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 	});
 
 	it("distinguishes absent PATHEXT from an explicitly empty PATHEXT", () => {
-		const bin = path.win32.join("empty-pathext", "bin");
+		const bin = winAbsolute("empty-pathext", "bin");
 		const executable = path.win32.join(bin, "tool.exe");
 		markFilesAsPresent(executable);
 
@@ -431,7 +437,7 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 	});
 
 	it("distinguishes absent PATHEXT after an explicit empty lookup", () => {
-		const bin = path.win32.join("empty-pathext-reverse", "bin");
+		const bin = winAbsolute("empty-pathext-reverse", "bin");
 		const executable = path.win32.join(bin, "tool.exe");
 		markFilesAsPresent(executable);
 
@@ -447,7 +453,7 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 	});
 
 	it("keeps the default PATHEXT behavior when the caller supplies no PATHEXT", () => {
-		const bin = path.win32.join("default", "bin");
+		const bin = winAbsolute("default", "bin");
 		const executable = path.win32.join(bin, "tool.exe");
 		markFilesAsPresent(executable);
 
