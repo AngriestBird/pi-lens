@@ -143,7 +143,12 @@ async function serveRequest(
 		result: {
 			route: "diagnostics",
 			version: WARM_DIAGNOSTICS_SCHEMA_VERSION,
-			diagnostics: touched ?? [],
+			// #1179: `touchFile` now returns the `{ diags, inconclusive, binding }`
+			// wrapper — take the array off `.diags`. This is the canonical shape-5
+			// serialization boundary: the diagnostics array crosses the IPC socket
+			// and `inconclusive` is re-surfaced below as an EXPLICIT enumerable DTO
+			// field (no side-channel survives `JSON.stringify`).
+			diagnostics: touched?.diags ?? [],
 			contentHash: req.contentHash,
 			servedAt,
 			fresh: servedAt <= req.deadlineAt && touched !== undefined,

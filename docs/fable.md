@@ -138,3 +138,30 @@ inventory earning nothing. Feeding transitive impact into cascade neighbor
 selection is probably the highest-leverage *feature* work available — ideally
 paired with the #202 structural-hash short-circuit so the expansion prunes
 when a changed file's exported interface is unchanged.
+
+## OS-agnostic paths: classification is centralized, transformation isn't (#1193)
+
+The path-*shape* layer is genuinely unified — `isWindowsPath`, the
+`win32`-vs-`posix` shape-conditional idiom (confined to 4 files), `realpathSync`
+(confined to `path-utils.ts`), `PathKeyedMap`, the `walkUpDirs` family, and the
+`uriToPath`/`uriToDiskPath` LSP ingest boundary are all single-source and
+defensively documented. The path-*transformation* layer is not: slash-folding
+(`.replace(/\\/g, "/")`) is hand-rolled **138× across 83 files** with no shared
+helper, `\r\n`-folding re-implements `normalizeToLF` in five files, and ephemeral
+case/slash key-normalizers are copy-pasted in four (one of which case-folds but
+forgets to slash-fold). That gap is why the *same* shape-2 defect keeps re-filing
+under new numbers — #1150 → #1152 → #1161 → #1163 → #1194. Per-site
+`isWindowsPath ? win32 : posix` conditionals treat symptoms; every new interior
+`dirname`/`relative`/`isAbsolute` on a potentially-cross-shaped value is a fresh
+latent instance. The tell: LSP URIs are the one axis with a real *ingest*
+primitive, and the one axis not generating monthly bugs.
+
+Highest-leverage move (**P1**, tracked in #1193): ship a `toPosix()` slash-fold
+primitive and make it the only sanctioned form — it funnels the 138 sites *and*
+makes a shape-2 ast-grep rule **possible** for the first time (today the idiom and
+the bug are byte-identical, so #1158 can't distinguish them; an *un-migrated*
+`.replace` after the primitive exists is detectable). Then push normalization to
+the four ingest boundaries — **persisted-key rehydrate** (snapshot / word-index /
+call-graph / review-graph symbol keys written on Windows, read on Linux CI) is the
+hot one — so interior code can once again trust host-default `path` fns. Full P1–P5
+plan + enforcement in #1193; the latest missed member fixed in #1194.

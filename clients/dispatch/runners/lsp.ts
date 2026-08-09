@@ -168,8 +168,13 @@ const lspRunner: RunnerDefinition = {
 				Math.max(LSP_SPAWN_BUDGET_MS, LSP_DIAGNOSTICS_WAIT_MS),
 			);
 			usedWarmAttach = attached?.available === true;
+			// #1179 (shape-5 structural fix): both branches normalize to the
+			// `touchFile` wrapper shape. The warm-attach IPC branch resolves a plain
+			// diagnostics array (the socket cannot carry a side-channel; the IPC client
+			// already rejected any inconclusive answer, so `available` ⟹ confirmed) —
+			// wrap it as `{ diags }`; the incumbent branch already returns the wrapper.
 			const touched = attached?.available
-				? attached.response.diagnostics
+				? { diags: attached.response.diagnostics }
 				: await lspService.touchFile(ctx.filePath, content, {
 				diagnostics: "document",
 				collectDiagnostics: true,
@@ -182,10 +187,8 @@ const lspRunner: RunnerDefinition = {
 			if (touched === undefined) {
 				lspClientReady = false;
 			} else {
-				lspDiags = touched;
-				diagnosticsInconclusive =
-					(touched as typeof touched & { inconclusive?: boolean })
-						.inconclusive === true;
+				lspDiags = touched.diags;
+				diagnosticsInconclusive = touched.inconclusive === true;
 			}
 		} catch (err) {
 			serverFailed = true;

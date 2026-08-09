@@ -131,7 +131,7 @@ describe("#743 — per-server notify-write deadlines", () => {
 		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS + 20);
 		const result = await touchPromise;
 
-		expect(Array.isArray(result)).toBe(true);
+		expect(Array.isArray(result?.diags)).toBe(true);
 
 		// Both writes were attempted.
 		expect(stalledClient.notify.open).toHaveBeenCalledTimes(1);

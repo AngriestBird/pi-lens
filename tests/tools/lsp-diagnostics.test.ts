@@ -857,9 +857,7 @@ describe("lsp_diagnostics tool", () => {
 	describe("#570 timed-out check is not confirmed-clean", () => {
 		it("single file: renders 'timed out' instead of a bare clean when touchFile is inconclusive", async () => {
 			const touchFile = vi.fn().mockImplementation(async () => {
-				const result: any[] = [];
-				Object.defineProperty(result, "inconclusive", { value: true });
-				return result;
+				return { diags: [], inconclusive: true };
 			});
 			(mocked.service as any).touchFile = touchFile;
 			const tool = createLspDiagnosticsTool();
@@ -893,7 +891,7 @@ describe("lsp_diagnostics tool", () => {
 		});
 
 		it("single file: a confirmed (non-inconclusive) touchFile result still renders plain clean", async () => {
-			const touchFile = vi.fn().mockResolvedValue([]);
+			const touchFile = vi.fn().mockResolvedValue({ diags: [] });
 			(mocked.service as any).touchFile = touchFile;
 			const tool = createLspDiagnosticsTool();
 			const tmpDir = fs.mkdtempSync(
@@ -926,13 +924,10 @@ describe("lsp_diagnostics tool", () => {
 			let call = 0;
 			const touchFile = vi.fn().mockImplementation(async () => {
 				call += 1;
-				const result: any[] = [];
 				// First file's touch times out; second file's touch is confirmed but
 				// its server is a #533 silent-on-clean tier (mocked.cascadeTier below).
-				if (call === 1) {
-					Object.defineProperty(result, "inconclusive", { value: true });
-				}
-				return result;
+				// #1179: `inconclusive` is an explicit enumerable wrapper field now.
+				return call === 1 ? { diags: [], inconclusive: true } : { diags: [] };
 			});
 			(mocked.service as any).touchFile = touchFile;
 			mocked.cascadeTier = "tier3-silent";
@@ -1034,9 +1029,7 @@ describe("lsp_diagnostics tool", () => {
 
 		it("does NOT reconcile a timed-out (#570 inconclusive) result into the footer", async () => {
 			const touchFile = vi.fn().mockImplementation(async () => {
-				const result: any[] = [];
-				Object.defineProperty(result, "inconclusive", { value: true });
-				return result;
+				return { diags: [], inconclusive: true };
 			});
 			(mocked.service as any).touchFile = touchFile;
 			const tmpDir = fs.mkdtempSync(
@@ -1067,20 +1060,20 @@ describe("lsp_diagnostics tool", () => {
 		// regression: the "non-empty = definitionally confirmed" doctrine is now
 		// gated on binding.
 		function staleTouchResult(messages: string[], bound: boolean | "unknown") {
-			const result: any[] = messages.map((message) => ({
-				severity: 1,
-				message,
-				range: {
-					start: { line: 0, character: 0 },
-					end: { line: 0, character: 1 },
-				},
-				source: "ts",
-			}));
-			Object.defineProperty(result, "binding", {
-				value: { boundToCurrentDisk: bound },
-				enumerable: false,
-			});
-			return result;
+			// #1179: the `touchFile` wrapper — `binding` is an EXPLICIT enumerable
+			// field (survives any copy of `.diags`), not a non-enumerable side-channel.
+			return {
+				diags: messages.map((message) => ({
+					severity: 1,
+					message,
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 1 },
+					},
+					source: "ts",
+				})),
+				binding: { boundToCurrentDisk: bound },
+			};
 		}
 
 		it("does NOT reconcile a NON-EMPTY result whose binding mismatches disk (T2 headline #1092)", async () => {
@@ -1373,7 +1366,7 @@ describe("lsp_diagnostics tool", () => {
 		});
 
 		it("serverScope: 'primary' passes clientScope: 'primary' to touchFile, skipping auxiliary scanners", async () => {
-			const touchFile = vi.fn().mockResolvedValue([]);
+			const touchFile = vi.fn().mockResolvedValue({ diags: [] });
 			(mocked.service as any).touchFile = touchFile;
 			const tool = createLspDiagnosticsTool();
 			const tmpDir = fs.mkdtempSync(
@@ -1420,7 +1413,7 @@ describe("lsp_diagnostics tool", () => {
 				},
 				source: "typescript",
 			};
-			const touchFile = vi.fn().mockResolvedValue([primaryOnlyDiagnostic]);
+			const touchFile = vi.fn().mockResolvedValue({ diags: [primaryOnlyDiagnostic] });
 			(mocked.service as any).touchFile = touchFile;
 			// If the bug regresses (a second, unscoped getDiagnostics() call feeds
 			// the actual content) this mock would return an aux-scanner finding
@@ -1501,7 +1494,7 @@ describe("lsp_diagnostics tool", () => {
 		});
 
 		it("default (no serverScope param) still passes clientScope: 'all' to touchFile", async () => {
-			const touchFile = vi.fn().mockResolvedValue([]);
+			const touchFile = vi.fn().mockResolvedValue({ diags: [] });
 			(mocked.service as any).touchFile = touchFile;
 			const tool = createLspDiagnosticsTool();
 			const tmpDir = fs.mkdtempSync(
@@ -1534,7 +1527,7 @@ describe("lsp_diagnostics tool", () => {
 		});
 
 		it("#629: neither waitMs nor serverScope:'primary' set (openFile-only path) is unchanged — getDiagnostics('full') still called, touchFile is not", async () => {
-			const touchFile = vi.fn().mockResolvedValue([]);
+			const touchFile = vi.fn().mockResolvedValue({ diags: [] });
 			(mocked.service as any).touchFile = touchFile;
 			const getDiagnostics = vi.fn().mockResolvedValue([]);
 			(mocked.service as any).getDiagnostics = getDiagnostics;

@@ -45,29 +45,59 @@ export interface StoredDiagnosticBinding {
  * The read-time binding surfaced to consumers: the stored half plus the lazily
  * computed disk verdict.
  *
- * SIDE-CHANNEL CARRIAGE CONTRACT (#1108 shape-5 — copy-loss risk). A binding is
- * hung on a diagnostics result as a NON-enumerable property: `touchFile` attaches
- * it as a value and `getAllDiagnostics` as a lazy disk-verifying getter (both on
- * `clients/lsp/index.ts`), so it does NOT appear in the diagnostics array's own
- * enumeration. Consequences every consumer must honor:
- *   - READ IT OFF THE ORIGINAL producer object, never off a derived copy. Any
- *     `{...result}` / `[...result]` / `.map` / `.filter` / `structuredClone` /
- *     `JSON.parse(JSON.stringify(...))` between the producer and the read SILENTLY
- *     DROPS the binding — the consumer then reads `undefined` (indistinguishable
- *     from "unknown") and skips the #1092 staleness demotion. This is the class
- *     that bit as #1094 (`inconclusive`) and #1096 (`binding`); the cascade reads
- *     both flags off `rawDiags`/`entry` BEFORE its `.filter()` for exactly this
- *     reason (`clients/dispatch/integration.ts` `readBoundToCurrentDisk`).
- *   - IF IT MUST CROSS A SERIALIZATION BOUNDARY (the warm-attach IPC socket, a JSON
- *     round-trip), re-surface it as an EXPLICIT enumerable field on the transport
- *     wrapper — a non-enumerable side-channel never survives `JSON.stringify`. See
- *     `clients/warm-attach.ts`, which carries `inconclusive` as an enumerable
- *     response field precisely because the array's side-channel does not survive.
- * The structural fix (a `{ diags, inconclusive, binding }` wrapper that makes the
- * loss impossible by construction) is tracked as a follow-up to #1108 (#1179).
+ * SIDE-CHANNEL CARRIAGE CONTRACT (#1108 shape-5 — copy-loss risk). Two producers
+ * on `clients/lsp/index.ts` surface a binding:
+ *   - `touchFile` returns a `TouchFileResult` WRAPPER (`{ diags, inconclusive,
+ *     binding }`, below) — the #1179 structural fix. `inconclusive`/`binding` are
+ *     EXPLICIT ENUMERABLE fields on that wrapper, so a `[...]`/`.map`/`.filter`/
+ *     `structuredClone`/`JSON` copy of the DIAGNOSTICS (`.diags`) can no longer
+ *     drop them: the copy operates on `.diags`, the flags stay on the wrapper.
+ *   - `getAllDiagnostics` still attaches `binding` as a lazy, disk-verifying
+ *     NON-enumerable getter on each Map entry — deliberately NOT migrated to an
+ *     enumerable field, because enumerable would make an incidental spread/serialize
+ *     eagerly trigger the per-entry disk stat+hash (a stat storm the cascade's
+ *     TTL-gated read exists to avoid). That getter therefore KEEPS the read-off-
+ *     original contract:
+ *       - READ IT OFF THE ORIGINAL producer entry, never off a derived copy. Any
+ *         `{...entry}` / `structuredClone` / `JSON.parse(JSON.stringify(...))`
+ *         between the producer and the read SILENTLY DROPS the getter — the consumer
+ *         then reads `undefined` (indistinguishable from "unknown") and skips the
+ *         #1092 staleness demotion. This is the class that bit as #1094
+ *         (`inconclusive`) and #1096 (`binding`); the cascade reads the binding off
+ *         the original `entry` BEFORE any copy for exactly this reason
+ *         (`clients/dispatch/integration.ts` `readBoundToCurrentDisk`).
+ *   - IF A FLAG MUST CROSS A SERIALIZATION BOUNDARY (the warm-attach IPC socket, a
+ *     JSON round-trip), re-surface it as an EXPLICIT enumerable field on the
+ *     transport DTO — no side-channel (enumerable or not) survives `JSON.stringify`
+ *     of a `.diags` array. See `clients/warm-attach.ts`/`clients/mcp/ipc.ts`, which
+ *     carry `inconclusive` as an enumerable response field for exactly this reason.
  */
 export interface DiagnosticBinding extends StoredDiagnosticBinding {
 	boundToCurrentDisk: BoundToCurrentDisk;
+}
+
+/**
+ * #1179 (shape-5 structural fix): the confirmed shape a diagnostics-collecting
+ * `touchFile` resolves to. The diagnostics array plus the two former
+ * NON-enumerable side-channel flags (`inconclusive` #570/#1093, `binding` #1095)
+ * promoted to EXPLICIT ENUMERABLE fields on a wrapper, so the copy-loss class of
+ * #1094/#1096 is impossible BY CONSTRUCTION: a copy of the diagnostics operates on
+ * `.diags` and never touches the flags on the wrapper.
+ *
+ * `diags` is always present (empty array when nothing was collected). `inconclusive`
+ * is present-and-true only for a genuinely unconfirmed collect (the notify write
+ * and/or diagnostics wait lapsed its deadline) — absent/false means confirmed;
+ * consumers that care about trustworthiness (dispatch runners, the `lsp_diagnostics`
+ * tool, the cascade) MUST check it before treating an empty `.diags` as clean.
+ * `binding` is present only for a collecting touch that composed one (absent →
+ * "unknown", the honest #533 fall-through). A non-collecting touch
+ * (`collectDiagnostics: false` / `diagnostics: "none"`) resolves to `{ diags: [] }`
+ * with neither flag, exactly as before.
+ */
+export interface TouchFileResult {
+	diags: import("./client.js").LSPDiagnostic[];
+	inconclusive?: boolean;
+	binding?: DiagnosticBinding;
 }
 
 /**

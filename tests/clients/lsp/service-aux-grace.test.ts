@@ -190,11 +190,13 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		const result = await touchPromise;
 		// Touch resolved before aux deadline (3000ms) — we only waited ~610ms.
 		// Primary diagnostics included.
-		expect(Array.isArray(result)).toBe(true);
+		expect(Array.isArray(result?.diags)).toBe(true);
 		// Aux was cut off — its diagnostics may or may not be present depending
 		// on whether it resolved before the grace expired. Since aux takes 3000ms
 		// and grace is 500ms, aux is NOT included.
-		const messages = (result ?? []).map((d: { message: string }) => d.message);
+		const messages = (result?.diags ?? []).map(
+			(d: { message: string }) => d.message,
+		);
 		// Primary must be included (it answered before grace).
 		expect(messages).toContain("primary error");
 		// Aux must NOT be included (it didn't answer within grace).
@@ -233,7 +235,9 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		await vi.advanceTimersByTimeAsync(10);
 
 		const result = await touchPromise;
-		const messages = (result ?? []).map((d: { message: string }) => d.message);
+		const messages = (result?.diags ?? []).map(
+			(d: { message: string }) => d.message,
+		);
 		// Both must be present — aux answered within grace.
 		expect(messages).toContain("primary error");
 		expect(messages).toContain("aux finding");
@@ -281,7 +285,9 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		await vi.advanceTimersByTimeAsync(10);
 
 		const result = await touchPromise;
-		const messages = (result ?? []).map((d: { message: string }) => d.message);
+		const messages = (result?.diags ?? []).map(
+			(d: { message: string }) => d.message,
+		);
 		expect(messages).toContain("primary error");
 	});
 });
