@@ -111,7 +111,9 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 		expect(second).toEqual({ resolvedPath: exePath, ext: ".exe" });
 		expect(callsAfterSecond).toBeGreaterThan(callsAfterFirst);
 		expect(secondAgain).toEqual(second);
-		expect(statSyncMock.mock.calls.length).toBe(callsAfterSecond);
+		// A positive cache hit re-stats exactly once so deletion/replacement is
+		// visible immediately; it must not repeat the PATH/PATHEXT candidate walk.
+		expect(statSyncMock.mock.calls.length).toBe(callsAfterSecond + 1);
 	});
 
 	it("uses win32 parsing for explicit relative paths on every host OS", () => {
@@ -370,6 +372,42 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 		expect(first).toEqual({ resolvedPath: executable, ext: ".exe" });
 		expect(second).toEqual(first);
 		expect(statSyncMock.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+	});
+
+	it("revalidates a cached positive result after deletion without a reset", () => {
+		const bin = winAbsolute("positive-revalidate", "bin");
+		const executable = path.win32.join(bin, "tool.exe");
+		const env = { PATH: bin, PATHEXT: ".EXE" };
+		markFilesAsPresent(executable);
+		expect(resolveWindowsCommandForEnvironment("tool", undefined, env)).toEqual({
+			resolvedPath: executable,
+			ext: ".exe",
+		});
+		markFilesAsPresent();
+		expect(
+			resolveWindowsCommandForEnvironment("tool", undefined, env),
+		).toBeNull();
+	});
+
+	it("expires a cached negative result after the bounded TTL", () => {
+		const bin = winAbsolute("negative-ttl", "bin");
+		const executable = path.win32.join(bin, "tool.exe");
+		const env = { PATH: bin, PATHEXT: ".EXE" };
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-08-09T00:00:00Z"));
+		try {
+			markFilesAsPresent();
+			expect(
+				resolveWindowsCommandForEnvironment("tool", undefined, env),
+			).toBeNull();
+			markFilesAsPresent(executable);
+			vi.advanceTimersByTime(1001);
+			expect(
+				resolveWindowsCommandForEnvironment("tool", undefined, env),
+			).toEqual({ resolvedPath: executable, ext: ".exe" });
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("reset invalidates a cached negative result after an install", () => {

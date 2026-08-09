@@ -367,16 +367,21 @@ function resolveWindowsPathEntry(
  * process can encounter unbounded cwd/environment combinations.
  */
 const WINDOWS_COMMAND_CACHE_MAX_ENTRIES = 256;
-const windowsCommandCache = new Map<string, ResolvedWindowsCommand | null>();
+const WINDOWS_COMMAND_NEGATIVE_CACHE_TTL_MS = 1000;
+interface WindowsCommandCacheEntry {
+	resolved: ResolvedWindowsCommand | null;
+	checkedAt: number;
+}
+const windowsCommandCache = new Map<string, WindowsCommandCacheEntry>();
 
-/** Reset hook for session start — see `clients/runtime-session.ts`. */
+/** Reset after session replacement or a successful managed install. */
 export function resetSafeSpawnWindowsCommandCache(): void {
 	windowsCommandCache.clear();
 }
 
 function cacheWindowsCommandResult(
 	key: string,
-	value: ResolvedWindowsCommand | null,
+	resolved: ResolvedWindowsCommand | null,
 ): void {
 	if (windowsCommandCache.size >= WINDOWS_COMMAND_CACHE_MAX_ENTRIES) {
 		// Resolution entries are session-scoped and cheap to recompute. Evict the
@@ -385,7 +390,7 @@ function cacheWindowsCommandResult(
 		const oldest = windowsCommandCache.keys().next().value;
 		if (oldest !== undefined) windowsCommandCache.delete(oldest);
 	}
-	windowsCommandCache.set(key, value);
+	windowsCommandCache.set(key, { resolved, checkedAt: Date.now() });
 }
 
 function getPathExts(env: NodeJS.ProcessEnv): string[] {
@@ -495,8 +500,22 @@ export function resolveWindowsCommandForEnvironment(
 		effectiveCwd === undefined ? ["unresolved"] : ["resolved", effectiveCwd],
 		perDriveCwds,
 	]);
-	if (windowsCommandCache.has(cacheKey)) {
-		return windowsCommandCache.get(cacheKey) ?? null;
+	const cached = windowsCommandCache.get(cacheKey);
+	if (cached) {
+		// Positive entries are revalidated on every hit so an executable deleted
+		// or replaced mid-session cannot remain spawnable through stale cache
+		// state. Negative entries are short-lived to discover external installs;
+		// pi-lens-managed installs also reset the cache immediately on success.
+		if (cached.resolved && statIsFile(cached.resolved.resolvedPath)) {
+			return cached.resolved;
+		}
+		if (
+			!cached.resolved &&
+			Date.now() - cached.checkedAt <= WINDOWS_COMMAND_NEGATIVE_CACHE_TTL_MS
+		) {
+			return null;
+		}
+		windowsCommandCache.delete(cacheKey);
 	}
 	const resolved = resolveWindowsCommandUncached(command, effectiveCwd, env);
 	cacheWindowsCommandResult(cacheKey, resolved);
@@ -706,13 +725,21 @@ export async function safeSpawnAsync(
 		//     letting cmd.exe report "not recognized" from inside a shell.
 		const isWindows = process.platform === "win32";
 		const spawnEnv = getSpawnEnvironment(options?.env);
+		const spawnCwd = isWindows
+			? resolveEffectiveWindowsCwd(options?.cwd, spawnEnv)
+			: options?.cwd;
 		let spawnCmd = command;
 		let spawnArgs = args;
 		let windowsVerbatimArguments = false;
 		let resolutionError: Error | undefined;
 
 		if (isWindows) {
-			const resolved = resolveWindowsCommand(command, options?.cwd, spawnEnv);
+			if (spawnCwd === undefined) {
+				resolutionError = synthesizeEnoentError(options?.cwd ?? process.cwd());
+			}
+			const resolved = resolutionError
+				? null
+				: resolveWindowsCommand(command, spawnCwd, spawnEnv);
 			if (!resolved) {
 				resolutionError = synthesizeEnoentError(command);
 			} else if (resolved.ext === ".cmd" || resolved.ext === ".bat") {
@@ -766,7 +793,7 @@ export async function safeSpawnAsync(
 		let child: ChildProcess;
 		try {
 			child = spawn(spawnCmd, spawnArgs, {
-				cwd: options?.cwd,
+				cwd: spawnCwd,
 				env: spawnEnv,
 				windowsHide: true,
 				shell: false,
@@ -1076,7 +1103,16 @@ export function safeSpawn(
 ): SpawnResult {
 	const spawnEnv = getSpawnEnvironment(options?.env);
 	if (process.platform === "win32") {
-		const resolved = resolveWindowsCommand(command, options?.cwd, spawnEnv);
+		const spawnCwd = resolveEffectiveWindowsCwd(options?.cwd, spawnEnv);
+		if (spawnCwd === undefined) {
+			return {
+				stdout: "",
+				stderr: "",
+				status: null,
+				error: synthesizeEnoentError(options?.cwd ?? process.cwd()),
+			};
+		}
+		const resolved = resolveWindowsCommand(command, spawnCwd, spawnEnv);
 		if (!resolved) {
 			return {
 				stdout: "",
@@ -1125,6 +1161,7 @@ export function safeSpawn(
 
 		const result = spawnSync(spawnCmd, spawnArgs, {
 			...(options as SpawnOptions),
+			cwd: spawnCwd,
 			env: spawnEnv,
 			encoding: "utf-8",
 			shell: false,

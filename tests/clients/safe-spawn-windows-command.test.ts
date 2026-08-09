@@ -146,6 +146,22 @@ describe.runIf(process.platform === "win32")(
 			expect(result.stdout).toContain('"--reporter"');
 		});
 
+		it("(a3) passes the canonical absolute cwd used for drive-relative resolution to the child", async () => {
+			const drive = path.parse(fixtureDir).root.slice(0, 1).toUpperCase();
+			const perDriveCwd = path.dirname(fixtureDir);
+			const driveRelativeCwd = `${drive}:${path.basename(fixtureDir)}`;
+			const env: NodeJS.ProcessEnv = { [`=${drive}:`]: perDriveCwd };
+			const result = await safeSpawnAsync(
+				process.execPath,
+				["-e", "process.stdout.write(process.cwd())"],
+				{ cwd: driveRelativeCwd, env },
+			);
+
+			expect(result.error).toBeUndefined();
+			expect(result.status).toBe(0);
+			expect(path.normalize(result.stdout)).toBe(path.normalize(fixtureDir));
+		});
+
 		it("(b) a .cmd shim still executes through the pinned cmd.exe wrapper, args with spaces round-trip", async () => {
 			const result = await safeSpawnAsync(echoArgsCmd, [
 				"hello world",
