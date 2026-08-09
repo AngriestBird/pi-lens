@@ -11,6 +11,145 @@ All notable changes to pi-lens will be documented in this file.
 ### Fixed
 
 - **Non-enumerable side-channel flags — the shape-5 copy-loss sweep (refs [#1108](https://github.com/apmantza/pi-lens/issues/1108))** — Audited every non-enumerable / identity-scoped side-channel flag hung on a returned diagnostics or graph value for the copy-loss class that bit as #1094 (`inconclusive`) and #1096 (`binding`): the `inconclusive` and `binding` flags on `touchFile` results, the lazy `binding` getter on `getAllDiagnostics` entries, and the `_graphBuildInfoByGraph` / `_graphImportChanges` WeakMaps keyed by `ReviewGraph` identity. All five are safe — every consumer reads the flag off the ORIGINAL producer object before any `.filter()`/`.map()`/spread, the one genuine JSON boundary (the warm-attach IPC socket) already re-surfaces `inconclusive` as an explicit enumerable response field, and both WeakMaps fail safe on a copy/rehydrate miss (a global-slot fallback for build-info; a full-rebuild + generation-gate for the import delta). Hardened the contract durably where it is not owned by an in-flight PR: documented the "read off the original, never a derived copy; re-surface as an enumerable field to cross a serialization boundary" carriage contract on the `DiagnosticBinding` type, and added an IPC-boundary guard test asserting the consumer still honors an inconclusive answer carried as an enumerable field across the JSON round-trip. The producer-side type annotations and the structural `{ diags, inconclusive, binding }` wrapper migration live in the LSP index (owned by the #1142 breaker work) and are deferred to a tracked follow-up ([#1179](https://github.com/apmantza/pi-lens/issues/1179)); an ast-grep rule is not viable (AGENTS.md shape 5 is semantic — good and bad uses are syntactically identical).
+- **LSP runtime-exit breaker missed persistent low-frequency crash loops (closes #1142, refs #1127 #1139)** —
+	#1139's `runtimeExitCounts` counts a client death toward the circuit breaker
+	only when its lifetime (`exitedAt - spawnedAt`) is under
+	`RUNTIME_EXIT_UPTIME_THRESHOLD_MS` (60s) — the hot crash loop (opengrep dies in
+	seconds). A death OVER the threshold falls into the "survived → reset the
+	streak" branch, so a server that reliably dies at ~65-90s after every spawn
+	NEVER tripped: every death reset the streak and it churned forever, a slow loop
+	the hard-cutoff design structurally can't detect. Added a SECOND, independent
+	windowed-rate trip that COMPOSES with (does not replace) the fast path:
+	`RUNTIME_EXIT_WINDOW_TRIP_COUNT` (5, = `BROKEN_PERMANENT_AFTER`) non-intentional
+	deaths within a rolling `RUNTIME_EXIT_WINDOW_MS` (15 min) window trip the
+	breaker regardless of each death's individual lifetime. N/M err against
+	false-tripping: five clustered non-intentional deaths is definitionally a loop,
+	and sparse benign crashes age out of the rolling window before five coincide.
+	The fast path is byte-for-byte unchanged — a hot loop still trips at exactly 5
+	consecutive early exits, never delayed by the window. Benign over-threshold
+	"deaths" are excluded: intentional teardowns (user restart, config/workspace
+	reload, session change, #743 eviction, generation handoffs) are gated out by the
+	existing `!wasShutdownIntentional()` guard the windowed trip shares, and a
+	death whose lifetime exceeds a 10-min ceiling — a genuinely long healthy run, or
+	an `exitedAt - spawnedAt` inflated across a machine-sleep/Modern-Standby suspend
+	(the #1122/#1139 death-timestamp lesson) — is not recorded, backed structurally
+	by per-server-key windowing (one suspend kills at most one live client per key).
+	The death-timestamp window is bounded on BOTH axes (prune aged-out entries +
+	hard-cap the array at the trip count, drop-oldest) and needs no timer (ages by
+	prune-on-check). Fail-then-pass regression tests cover all three cases: the slow
+	~65-90s loop now converges (verified failing on pre-fix — the whole bug), the
+	hot loop still trips fast (no regression), and a sleep-gap/long-run death,
+	sparse aged-out crashes, and deliberate restarts do NOT trip.
+- **Closed out the three #1134 P3 tails left after #1138's Svelte oxfmt support (closes #1134)** —
+	1. **TOML line-match heuristic limits.** `hasOxfmtSvelteConfig`'s
+	   `OXFMT_SVELTE_TOML_TRUE` regex required `svelte = true` to be
+	   immediately followed by end-of-line/end-of-file, so a trailing inline
+	   comment (`svelte = true  # enable`) false-negatived. Relaxed the
+	   trailing match to tolerate an optional `#`-comment, and added a
+	   docblock sentence documenting the heuristic's remaining known limits
+	   (it is a line match, not a TOML parser — a `[table]`-sectioned or
+	   multi-line-string `svelte = true` occurrence could still false-positive;
+	   accepted since that only causes oxfmt to be offered, never a silent
+	   formatter failure). Added a fail-then-pass regression test for the
+	   `svelte = true  # comment` case (`tests/clients/tool-policy.test.ts`).
+	2. **Monorepo asymmetry.** `hasOxfmtSvelteConfig`'s svelte-dependency check
+	   stops at the nearest `package.json` (`hasNearestPackageJsonDependency`)
+	   while its config walk goes all the way to the repo root
+	   (`walkUpDirs`) — a root-level `svelte` dependency with a sub-package
+	   `cwd` under-offers oxfmt for `.svelte` there. Documented via a
+	   docblock sentence (no behavior change: this cell fails safe —
+	   under-offering, never mis-offering a formatter that then errors at
+	   runtime — and stays untested by design, matching the async
+	   `.tflint.hcl` nearest-vs-root-walk note already in this file).
+	3. **docs/language-coverage.md's Vue row** showed formatter `—` though
+	   `.vue` has been wired to `prettier` (default) + `oxfmt` (appended via
+	   `OXFMT_SUPPORTED_EXTENSIONS`) since #1138 landed. Corrected the row to
+	   `prettier, oxfmt`.
+- **Rule-cache disk cache could replay a stale compiled rule set on a same-mtime+same-size rule-file edit (closes #1118, refs #1105 #878)** —
+	`clients/cache/rule-cache.ts`'s `computeRuleHash` fingerprinted every
+	effective rule file over METADATA only (`mtimeMs:size`) — the review-graph
+	first-filter without its content-hash CONFIRM step. A rule-file edit
+	preserving both mtime and byte size (git-checkout timestamp restoration, a
+	same-length tweak, a formatter that preserves mtime) replayed a stale
+	compiled rule set from `<language>-rules-v6.json`, and because this is a
+	PERSISTED disk cache, the stale set was re-persisted under the
+	fresh-looking fingerprint, poisoning every future process (the #878
+	`force`-reload failure mode, one axis over). Fixed by splitting the
+	fingerprint on rule-file origin, mirroring the project/bundled split
+	`yaml-rule-parser.ts`/`ast-grep-napi.ts` already use for ast-grep rules
+	(#1105): the small, mutable PROJECT-LOCAL subset (under
+	`<project>/rules/tree-sitter-queries/`) now gets a content-hash CONFIRM on
+	top of the metadata fingerprint; the ~705 BUNDLED files (immutable within a
+	process) stay metadata-only, so `RuleCache.get`'s per-edit tree-sitter
+	runner hot-path cost is unchanged when a project has no rule overrides.
+	`CACHE_VERSION` bumped v6→v7 so a v6 entry persisted under the old
+	metadata-only formula (a potentially poisoned one) misses once on upgrade
+	instead of being trusted. Fail-then-pass regression tests pin a rule
+	file's mtime via `utimesSync`, edit its content while preserving byte size,
+	and assert the cache invalidates for project-local files but still hits
+	for bundled-only rule sets; a third test confirms a persisted
+	metadata-only-fingerprinted entry is rejected post-fix.
+- **Formatter definitions and `FORMATTER_POLICY_BY_EXTENSION` were unbound hand-maintained inverse lists; added a bidirectional drift guard and fixed two latent mismatches (closes #1135; refs #1086 #1134 #883)** —
+	`clients/formatters.ts` (formatter → `extensions[]`) and `clients/tool-policy.ts`'s
+	`FORMATTER_POLICY_BY_EXTENSION` (extension → `formatterNames[]`) are hand-maintained
+	INVERSE mappings of the same relation with no test binding the two directions — the
+	#883/#209 single-source-of-truth class, and the general shape under #1134's oxfmt/.svelte
+	gap. Added `tests/clients/formatter-policy-consistency.test.ts`, which imports the real
+	`ALL_FORMATTERS` definitions and the policy maps and asserts both directions: every
+	definition extension is policy-included / a documented deliberate exclusion / a documented
+	no-policy fallback (so a definition gaining a policy-gated extension can't be silently
+	never-offered — #1134's exact symptom); and every policy `formatterName`/`defaultFormatter`
+	is a real formatter whose definition claims that extension or filename (so a broken option
+	can't be offered — including the terragrunt-hcl filename-keyed variant). Fixed two real
+	latent drifts surfaced by the guard, both behavior-identical (the mismatched entries were
+	already inert): the `.sass` policy listed `oxfmt` though oxfmt does not support `.sass`
+	(absent from `OXFMT_SUPPORTED_EXTENSIONS`), and the `.fish` formatter policy named
+	`fish-indent`, which has no `FormatterInfo` (it is a lint runner) — a dead, unsatisfiable
+	entry, now removed. A structural derive (tool-policy importing the definitions) was rejected
+	because `formatters.ts` already imports `tool-policy.ts`, so the reverse edge would create a
+	module import cycle; the test-based guard binds both directions while keeping the dependency
+	one-way. Also bound `AUTO_INSTALLABLE_DEFAULT_FORMATTERS` keys to real formatter definitions
+	(same formatter-name-reference class). The guard reads four newly-exported read-only symbols
+	(`ALL_FORMATTERS` plus the three policy maps `FORMATTER_POLICY_BY_EXTENSION`,
+	`FORMATTER_POLICY_BY_FILENAME`, `AUTO_INSTALLABLE_DEFAULT_FORMATTERS`), and its own two
+	allowlists (deliberate exclusions, no-policy fallbacks) each carry a minimality check so
+	they cannot rot into blanket escape hatches.
+- **Pull-diagnostics entries never bound to document content, so they never demoted (closes #1104, refs #1095 #1096 #1100)** —
+	#1096 bound LSP diagnostics to a content fingerprint on the PUSH path
+	(`publishDiagnostics` version echo + send-time hash); the PULL path
+	(`textDocument/diagnostic`, `workspace/diagnostic`) recorded no fingerprint
+	at all, so pull-served cache entries read binding `"unknown"` forever and
+	the #1096 P2-1 service-sweep binding gate could never protect them. Fixed by
+	threading the server's `resultId` and a request-time content hash through
+	both pull requests: a `"full"` report is fingerprinted (the single-file path
+	reuses the exact sent-content hash `recordSentContent` already captures on
+	every didOpen/didChange — no extra read; the project-wide
+	`workspace/diagnostic` pull hashes disk bytes at request time since files
+	may not yet be open when it fires), and an `"unchanged"` report (now
+	requested via `previousResultId`/`previousResultIds`) inherits the prior
+	pull's diagnostics AND binding instead of being misread as a confirmed-clean
+	`[]` (the #570/#571 false-clean shape). The workspace pull-sweep record site
+	(`clients/lsp/index.ts`) now threads this `contentHash` into
+	`workspaceDiagnosticsCacheCtx.record()`, closing the gap the site's own
+	`#1095` doc comment used to document as intentional. Also closed an
+	AGENTS.md shape-5 gap in the sibling per-file touch path: `processFile` read
+	the `#1095` binding off the RAW `touchFile` diagnostics array before
+	`applyAuxiliarySuppressions`' `.filter()` rebuilds it (a `.filter()` copy
+	does not carry a source array's non-enumerable `.binding`), and
+	`LSPService.mergeBinding` no longer gates a contributor's `contentHash` on
+	that SAME contributor also carrying a `version` — pull bindings
+	legitimately carry a hash with no version, and the old gate silently
+	dropped it. Folded in two #1100-review P3s on the same surface: the
+	cascade's degraded/fallback display paths and the `lsp_binding_rejected`
+	indeterminate-advisory preamble (`clients/runtime-turn.ts`), which
+	previously reused the graph-unavailable wording even when the review graph
+	was fine and only the LSP display was withheld, now use a
+	binding-rejection-specific frame. Fail-then-pass regression tests cover:
+	the pull-sweep record site actually receiving a `contentHash`; a
+	pull-recorded entry whose content changed under a matching mtime being
+	demoted (not replayed) on the next sweep; the per-file touch path's binding
+	surviving the suppression filter; and the `"unchanged"`-report inheritance
+	on both the single-file and workspace pull protocols.
 - **Config caches gated freshness on mtime alone — the mtime-only cache-freshness class sweep (closes #1105)** —
 	Completed the shape-6 (freshness stamp that doesn't cover the data's real
 	dependency) sweep the #1092→#1119 diagnostics/word-index arc deferred. Audited

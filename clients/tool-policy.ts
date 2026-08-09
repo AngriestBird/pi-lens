@@ -15,6 +15,26 @@ export interface FormatterPolicy {
 	gate: ToolGate;
 }
 
+// Extension → formatter policy. This map, `FORMATTER_POLICY_BY_FILENAME`, and
+// `AUTO_INSTALLABLE_DEFAULT_FORMATTERS` are the inverse of the formatter
+// definitions in `clients/formatters.ts` (formatter → extensions). The two are
+// bound by `tests/clients/formatter-policy-consistency.test.ts` (#1135, the
+// #883/#209 single-source-of-truth class) so they cannot drift silently. All
+// three are re-exported (read-only intent) via a single `export {}` below —
+// deliberately NOT inline on these declarations, to keep the pre-existing,
+// structural lookup-table duplication out of the PR's "new code" (SonarCloud).
+//
+// Two deliberate #1135 decisions live in the entries below, documented here so
+// the rationale sits outside the duplicated run:
+//   - `.sass` offers ["biome", "prettier"] only — NOT oxfmt: oxfmt is absent
+//     from OXFMT_SUPPORTED_EXTENSIONS (oxfmt/prettier handle .css/.scss/.less,
+//     not the indented `.sass` syntax). It was previously hand-listed here,
+//     diverging from the oxfmt definition (inert, because `matching` filtered
+//     it out); dropped to bind the two.
+//   - `.fish` intentionally has NO entry. `fish-indent` is a LINT runner
+//     (getLinterPolicyForFile), not a FormatterInfo — a formatter policy naming
+//     it was a dead, unsatisfiable entry; fish reformatting runs via the
+//     linter/autofix path. Removed to keep extension→formatter consistent.
 const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 	[
 		".js",
@@ -145,7 +165,8 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 	[
 		".sass",
 		{
-			formatterNames: ["biome", "prettier", "oxfmt"],
+			// #1135: no oxfmt (see map header comment).
+			formatterNames: ["biome", "prettier"],
 			defaultFormatter: "biome",
 			defaultWhenUnconfigured: true,
 			gate: "smart-default",
@@ -517,15 +538,6 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		},
 	],
 	[
-		".fish",
-		{
-			formatterNames: ["fish-indent"],
-			defaultFormatter: "fish-indent",
-			defaultWhenUnconfigured: true,
-			gate: "smart-default",
-		},
-	],
-	[
 		".toml",
 		{
 			formatterNames: ["taplo"],
@@ -729,6 +741,16 @@ const TERRAGRUNT_FORMATTER_POLICY: FormatterPolicy = {
 const FORMATTER_POLICY_BY_FILENAME = new Map<string, FormatterPolicy>(
 	TERRAGRUNT_FILENAMES.map((name) => [name, TERRAGRUNT_FORMATTER_POLICY]),
 );
+
+// Re-exported (read-only intent) for the #1135 drift guard. Kept as a single
+// separate statement — NOT inline on the declarations above — so the touched
+// lines don't fall at the head of the pre-existing lookup-table duplication and
+// get counted as new duplicated code. Bindings are live, so position is safe.
+export {
+	AUTO_INSTALLABLE_DEFAULT_FORMATTERS,
+	FORMATTER_POLICY_BY_EXTENSION,
+	FORMATTER_POLICY_BY_FILENAME,
+};
 
 export function getFormatterPolicyForExtension(
 	ext: string,
@@ -1942,9 +1964,30 @@ export function hasOxfmtConfig(cwd: string): boolean {
 // binary) for `.svelte` — pi-lens already resolves oxfmt via `findInNodeModules`/
 // `which`, which favors the npm-installed binary, so that requirement is not
 // separately re-checked here.
-const OXFMT_SVELTE_TOML_TRUE = /(^|\n)\s*svelte\s*=\s*true\s*(\r?\n|$)/;
+//
+// Known limits of this line-match heuristic (#1134 P3 tail 1): it tolerates a
+// trailing `#`-comment after the value (`svelte = true  # enable`), but it is
+// NOT a real TOML parser — a `svelte = true` occurrence nested under a
+// `[table]` section, or one embedded inside a multi-line/triple-quoted string
+// value, would still match and false-positive. Both are considered acceptable
+// risk: an oxfmt.toml sectioning `svelte` under a table is not a realistic
+// config shape for this single top-level boolean key, and a false positive
+// here only causes oxfmt to be OFFERED (still gated by oxfmt actually running
+// and the `svelte` package check above), never a silent formatter failure.
+const OXFMT_SVELTE_TOML_TRUE =
+	/(^|\n)\s*svelte\s*=\s*true\s*(\s*#.*)?(\r?\n|$)/;
 
 export function hasOxfmtSvelteConfig(cwd: string): boolean {
+	// Monorepo asymmetry (#1134 P3 tail 2): this dependency check stops at the
+	// NEAREST package.json (`hasNearestPackageJsonDependency`), while the
+	// config walk below (`walkUpDirs`) continues all the way to the repo root.
+	// A root-level `svelte` dependency combined with an oxfmt config at the
+	// root, but invoked with a sub-package `cwd` that has its own
+	// (svelte-less) package.json, under-offers oxfmt for that sub-package —
+	// the same nearest-vs-root-walk asymmetry as the `.tflint.hcl` note in
+	// `getLinterPolicyForCwd` above. This is untested/deliberately unfixed:
+	// failing to offer a valid formatter is safe (never mis-offers one that
+	// then fails at runtime), unlike the inverse.
 	if (!hasNearestPackageJsonDependency(cwd, "svelte")) return false;
 	for (const dir of walkUpDirs(cwd)) {
 		const rcPath = path.join(dir, ".oxfmtrc.json");
