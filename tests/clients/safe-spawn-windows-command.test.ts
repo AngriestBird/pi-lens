@@ -80,6 +80,7 @@ describe.runIf(process.platform === "win32")(
 		let fixtureDir: string;
 		let echoArgsScript: string;
 		let echoArgsCmd: string;
+		let knipCmd: string;
 
 		beforeAll(() => {
 			fixtureDir = fs.mkdtempSync(
@@ -92,14 +93,17 @@ describe.runIf(process.platform === "win32")(
 				"utf-8",
 			);
 			echoArgsCmd = path.join(fixtureDir, "echo-args.cmd");
+			knipCmd = path.join(fixtureDir, "knip.cmd");
 			// Forwards every argument the .cmd shim receives, verbatim, to the
 			// node fixture script via %* — used to assert args-with-spaces
 			// round-trip through the cmd.exe wrapper unmangled.
-			fs.writeFileSync(
-				echoArgsCmd,
-				`@echo off\r\n"${process.execPath}" "${echoArgsScript}" %*\r\n`,
-				"utf-8",
-			);
+			for (const shim of [echoArgsCmd, knipCmd]) {
+				fs.writeFileSync(
+					shim,
+					`@echo off\r\n"${process.execPath}" "${echoArgsScript}" %*\r\n`,
+					"utf-8",
+				);
+			}
 		});
 
 		afterAll(() => {
@@ -116,6 +120,46 @@ describe.runIf(process.platform === "win32")(
 			expect(result.error).toBeUndefined();
 			expect(result.status).toBe(0);
 			expect(result.stdout).toContain("direct-exe-ok");
+		});
+
+		it("(a2) resolves Knip's managed .cmd from the caller environment (PATH/Path)", async () => {
+			const managedPath = `${fixtureDir};${process.env.Path ?? process.env.PATH ?? ""}`;
+			const result = await safeSpawnAsync(
+				"knip",
+				[
+					"--reporter",
+					"json",
+					"--include",
+					"files,exports,types,dependencies,unlisted,enumMembers",
+					"--cache",
+					"--cache-location",
+					path.join(fixtureDir, "cache"),
+				],
+				{
+					timeout: 5000,
+					cwd: fixtureDir,
+					env: { PATH: managedPath, Path: managedPath, PATHEXT: ".COM;.CMD;.EXE" },
+				},
+			);
+			expect(result.error).toBeUndefined();
+			expect(result.status).toBe(0);
+			expect(result.stdout).toContain('"--reporter"');
+		});
+
+		it("(a3) passes the canonical absolute cwd used for drive-relative resolution to the child", async () => {
+			const drive = path.parse(fixtureDir).root.slice(0, 1).toUpperCase();
+			const perDriveCwd = path.dirname(fixtureDir);
+			const driveRelativeCwd = `${drive}:${path.basename(fixtureDir)}`;
+			const env: NodeJS.ProcessEnv = { [`=${drive}:`]: perDriveCwd };
+			const result = await safeSpawnAsync(
+				process.execPath,
+				["-e", "process.stdout.write(process.cwd())"],
+				{ cwd: driveRelativeCwd, env },
+			);
+
+			expect(result.error).toBeUndefined();
+			expect(result.status).toBe(0);
+			expect(path.normalize(result.stdout)).toBe(path.normalize(fixtureDir));
 		});
 
 		it("(b) a .cmd shim still executes through the pinned cmd.exe wrapper, args with spaces round-trip", async () => {
@@ -247,6 +291,23 @@ describe.runIf(process.platform === "win32")(
 			expect(result.error).toBeUndefined();
 			expect(result.status).toBe(0);
 			expect(JSON.parse(result.stdout)).toEqual(["hello world", "plain"]);
+		});
+
+		it("sync safeSpawn resolves a command from its overridden PATH", () => {
+			// Keep the ambient system directory after the fixture so the pinned
+			// cmd.exe can still find its `chcp` helper; the fixture remains first
+			// and is the only source of the command under test.
+			const overriddenPath = `${fixtureDir};${process.env.Path ?? process.env.PATH ?? ""}`;
+			const result = safeSpawn("echo-args", ["from-overridden-path"], {
+				env: {
+					PATH: overriddenPath,
+					Path: overriddenPath,
+					PATHEXT: ".COM;.CMD",
+				},
+			});
+			expect(result.error).toBeUndefined();
+			expect(result.status).toBe(0);
+			expect(JSON.parse(result.stdout)).toEqual(["from-overridden-path"]);
 		});
 
 		it('a "%"-bearing arg targeting a .cmd shim is rejected loudly, nothing spawned', () => {

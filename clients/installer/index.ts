@@ -64,7 +64,10 @@ import {
 	pmBinary,
 	resolveNodePackageManager,
 } from "../package-manager.js";
-import { safeSpawnAsync } from "../safe-spawn.js";
+import {
+	resetSafeSpawnWindowsCommandCache,
+	safeSpawnAsync,
+} from "../safe-spawn.js";
 
 // Global installation directory for pi-lens tools
 const TOOLS_DIR = path.join(getGlobalPiLensDir(), "tools");
@@ -3283,6 +3286,23 @@ async function installGemTool(
 	}
 }
 
+function finishInstallAttempt(
+	toolId: string,
+	ok: boolean,
+	startedAt: number,
+): boolean {
+	logSessionStart(
+		`auto-install ${toolId}: ${ok ? "success" : "failed"} (${Date.now() - startedAt}ms)`,
+	);
+	if (ok) {
+		// A prior availability probe may have cached ENOENT for this exact child
+		// PATH. Make a successful mutation visible immediately rather than waiting
+		// for the bounded negative-cache TTL or the next session reset (#1199).
+		resetSafeSpawnWindowsCommandCache();
+	}
+	return ok;
+}
+
 /**
  * Install a tool by ID
  */
@@ -3313,61 +3333,37 @@ export async function installTool(toolId: string): Promise<boolean> {
 			case "npm": {
 				if (!tool.packageName || !tool.binaryName) return false;
 				const npmPath = await installNpmTool(tool.packageName, tool.binaryName);
-				const ok = npmPath !== undefined;
-				logSessionStart(
-					`auto-install ${tool.id}: ${ok ? "success" : "failed"} (${Date.now() - startedAt}ms)`,
-				);
-				return ok;
+				return finishInstallAttempt(tool.id, npmPath !== undefined, startedAt);
 			}
 
 			case "pip": {
 				if (!tool.packageName) return false;
 				const pipPath = await installPipTool(tool.packageName);
-				const ok = pipPath !== undefined;
-				logSessionStart(
-					`auto-install ${tool.id}: ${ok ? "success" : "failed"} (${Date.now() - startedAt}ms)`,
-				);
-				return ok;
+				return finishInstallAttempt(tool.id, pipPath !== undefined, startedAt);
 			}
 
 			case "gem": {
 				if (!tool.packageName) return false;
 				const gemPath = await installGemTool(tool.packageName);
-				const ok = gemPath !== undefined;
-				logSessionStart(
-					`auto-install ${tool.id}: ${ok ? "success" : "failed"} (${Date.now() - startedAt}ms)`,
-				);
-				return ok;
+				return finishInstallAttempt(tool.id, gemPath !== undefined, startedAt);
 			}
 
 			case "github": {
 				if (!tool.github) return false;
 				const ghPath = await installGitHubTool(tool);
-				const ok = ghPath !== undefined;
-				logSessionStart(
-					`auto-install ${tool.id}: ${ok ? "success" : "failed"} (${Date.now() - startedAt}ms)`,
-				);
-				return ok;
+				return finishInstallAttempt(tool.id, ghPath !== undefined, startedAt);
 			}
 
 			case "maven": {
 				if (!tool.maven) return false;
 				const mavenPath = await installMavenTool(tool);
-				const ok = mavenPath !== undefined;
-				logSessionStart(
-					`auto-install ${tool.id}: ${ok ? "success" : "failed"} (${Date.now() - startedAt}ms)`,
-				);
-				return ok;
+				return finishInstallAttempt(tool.id, mavenPath !== undefined, startedAt);
 			}
 
 			case "archive": {
 				if (!tool.archive) return false;
 				const archivePath = await installArchiveTool(tool);
-				const ok = archivePath !== undefined;
-				logSessionStart(
-					`auto-install ${tool.id}: ${ok ? "success" : "failed"} (${Date.now() - startedAt}ms)`,
-				);
-				return ok;
+				return finishInstallAttempt(tool.id, archivePath !== undefined, startedAt);
 			}
 
 			default:
