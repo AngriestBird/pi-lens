@@ -377,3 +377,293 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		}
 	});
 });
+
+/**
+ * Regression coverage for #1142 (residual of #1127/#1139).
+ *
+ * #1139's counter only trips on CONSECUTIVE exits UNDER the 60s threshold. A
+ * server that reliably dies just PAST it (~65-90s after every spawn) falls into
+ * the "survived past the threshold" branch on every death — which RESETS the
+ * consecutive streak — so it churns indefinitely and never trips: the exact gap
+ * #1142 describes. The fix adds a SECOND, independent windowed-rate condition:
+ * N (=BROKEN_PERMANENT_AFTER) non-intentional deaths within a rolling M-minute
+ * window trip the breaker regardless of each death's individual lifetime.
+ *
+ * These tests inject controllable `clientSpawnedAt`/`exitedAt` timestamps (same
+ * approach as the #1127 suite above) — never wall-clock sleeps — so the "just
+ * past the threshold" lifetime and the death spacing within the window are
+ * exact and non-flaky. Keys are computed via `normalizeMapKey`, never hardcoded
+ * (see this file's header for the Linux-CI drive-letter-shape reason).
+ */
+describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
+	const TRIP_COUNT = 5; // RUNTIME_EXIT_WINDOW_TRIP_COUNT (= BROKEN_PERMANENT_AFTER)
+
+	beforeEach(() => {
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("SLOW loop: a server dying just PAST the 60s threshold every spawn converges (fails on pre-fix — never trips)", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const internal = service as unknown as {
+			state: {
+				broken: Map<string, number>;
+				clients: Map<string, unknown>;
+				clientSpawnedAt: Map<string, number>;
+			};
+			runtimeExitCounts: Map<string, number>;
+			runtimeExitWindow: Map<string, number[]>;
+			permanentlyBroken: Set<string>;
+		};
+
+		const server = makeSpawnServer("opengrep");
+		getServersForFileWithConfig.mockReturnValue([server]);
+
+		const clients: Array<ReturnType<typeof makeFakeClient>> = [];
+		createLSPClient.mockImplementation(async () => {
+			const c = makeFakeClient("opengrep");
+			clients.push(c);
+			return c;
+		});
+
+		const file = "C:/repo/main.fake";
+		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		// 75s: OVER the 60s fast-path threshold (so #1139's consecutive-early
+		// counter never counts a single one), UNDER the 10min sleep-gap ceiling.
+		const LIFETIME_MS = 75_000;
+		// ~90s between deaths → all five land inside the 15min rolling window.
+		const CYCLE_SPACING_MS = 90_000;
+
+		// A spawn clock we control; start well in the past so every death still
+		// lands within one 15min window measured from the most recent death.
+		let spawnAt = Date.now() - 30 * 60_000;
+
+		// Initial spawn — no prior client, straight through spawnClient().
+		const initial = await service.getClientForFile(file);
+		expect(initial).toBeDefined();
+		internal.state.clientSpawnedAt.set(key, spawnAt);
+		clients.at(-1)!.die(spawnAt + LIFETIME_MS); // dies at 75s, never called shutdown()
+
+		// Each over-threshold death sets NO cooldown UNTIL the window trips, so a
+		// single call both detects the dead client AND respawns — that IS the
+		// churn. On pre-fix code this never changes: the loop runs the full budget
+		// without ever latching permanentlyBroken (the bug). The generous bound
+		// turns that unbounded churn into a failing assertion rather than a hang.
+		const MAX_CYCLES = TRIP_COUNT + 5;
+		for (let cycle = 0; cycle < MAX_CYCLES; cycle++) {
+			if (internal.permanentlyBroken.has(key)) break;
+			const result = await service.getClientForFile(file);
+			if (internal.permanentlyBroken.has(key)) {
+				// The tripping detection cooled down, so it returned undefined and
+				// did NOT respawn.
+				expect(result).toBeUndefined();
+				break;
+			}
+			expect(result).toBeDefined(); // still churning: respawned
+			spawnAt += CYCLE_SPACING_MS;
+			internal.state.clientSpawnedAt.set(key, spawnAt);
+			clients.at(-1)!.die(spawnAt + LIFETIME_MS);
+		}
+
+		expect(internal.permanentlyBroken.has(key)).toBe(true);
+		// Every death was OVER the 60s threshold, so the consecutive-early counter
+		// (#1139) never counted a single one — the windowed-rate stream alone
+		// tripped. This is the assertion that FAILS on pre-fix code.
+		expect(internal.runtimeExitCounts.get(key) ?? 0).toBe(0);
+		// Exactly TRIP_COUNT spawns happened before give-up.
+		expect(server.getSpawnCount()).toBe(TRIP_COUNT);
+
+		// Stays given up: no new spawn even if a cooldown "elapses".
+		const spawnAtGiveUp = server.getSpawnCount();
+		internal.state.broken.delete(key);
+		const after = await service.getClientForFile(file);
+		expect(after).toBeUndefined();
+		expect(server.getSpawnCount()).toBe(spawnAtGiveUp);
+	});
+
+	it("FAST loop still trips fast: a hot (<60s) crash loop converges at exactly BROKEN_PERMANENT_AFTER — the window does not delay it", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const internal = service as unknown as {
+			state: { broken: Map<string, number> };
+			runtimeExitCounts: Map<string, number>;
+			permanentlyBroken: Set<string>;
+		};
+
+		const server = makeSpawnServer("opengrep");
+		getServersForFileWithConfig.mockReturnValue([server]);
+
+		const clients: Array<ReturnType<typeof makeFakeClient>> = [];
+		createLSPClient.mockImplementation(async () => {
+			const c = makeFakeClient("opengrep");
+			clients.push(c);
+			return c;
+		});
+
+		const file = "C:/repo/main.fake";
+		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+
+		const initial = await service.getClientForFile(file);
+		expect(initial).toBeDefined();
+		clients.at(-1)!.die(); // uptime ~0 — hot loop
+
+		const MAX_CYCLES = TRIP_COUNT + 5;
+		for (let cycle = 0; cycle < MAX_CYCLES; cycle++) {
+			internal.state.broken.delete(key);
+			const detect = await service.getClientForFile(file);
+			expect(detect).toBeUndefined(); // cooldown just set by the fast-path count
+			if (internal.permanentlyBroken.has(key)) break;
+			internal.state.broken.delete(key);
+			const respawn = await service.getClientForFile(file);
+			expect(respawn).toBeDefined();
+			clients.at(-1)!.die();
+		}
+
+		expect(internal.permanentlyBroken.has(key)).toBe(true);
+		// #1139's fast-path trip point is unchanged: 5 consecutive early exits,
+		// 5 spawns — the window did not shorten it (no early trip) nor make it wait.
+		expect(internal.runtimeExitCounts.get(key)).toBe(TRIP_COUNT);
+		expect(server.getSpawnCount()).toBe(TRIP_COUNT);
+	});
+
+	it("NO false trip: over-ceiling lifetimes (long healthy runs / a sleep-gap-spanning exit) never feed the window", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const internal = service as unknown as {
+			state: { broken: Map<string, number>; clientSpawnedAt: Map<string, number> };
+			runtimeExitWindow: Map<string, number[]>;
+			permanentlyBroken: Set<string>;
+		};
+
+		const server = makeSpawnServer("opengrep");
+		getServersForFileWithConfig.mockReturnValue([server]);
+
+		const clients: Array<ReturnType<typeof makeFakeClient>> = [];
+		createLSPClient.mockImplementation(async () => {
+			const c = makeFakeClient("opengrep");
+			clients.push(c);
+			return c;
+		});
+
+		const file = "C:/repo/main.fake";
+		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		// 20min lifetime — OVER the 10min ceiling. Models either a genuinely long
+		// healthy run that crashed once, or an `exitedAt - spawnedAt` inflated by a
+		// Modern-Standby suspend. Neither is crash-loop churn; neither is recorded.
+		const LIFETIME_MS = 20 * 60_000;
+
+		const initial = await service.getClientForFile(file);
+		expect(initial).toBeDefined();
+
+		// Well past TRIP_COUNT — an over-ceiling exit must NEVER accumulate.
+		for (let cycle = 0; cycle < TRIP_COUNT + 3; cycle++) {
+			const spawnAt = Date.now() - LIFETIME_MS;
+			internal.state.clientSpawnedAt.set(key, spawnAt);
+			clients.at(-1)!.die(spawnAt + LIFETIME_MS); // uptime = 20min, > ceiling
+			internal.state.broken.delete(key);
+			const result = await service.getClientForFile(file);
+			expect(result).toBeDefined(); // survived-long servers keep respawning
+		}
+
+		expect(internal.runtimeExitWindow.get(key) ?? []).toHaveLength(0);
+		expect(internal.permanentlyBroken.has(key)).toBe(false);
+	});
+
+	it("NO false trip: sparse crashes age out of the rolling window (crashed twice, spaced past M, now healthy)", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const internal = service as unknown as {
+			state: { broken: Map<string, number>; clientSpawnedAt: Map<string, number> };
+			runtimeExitWindow: Map<string, number[]>;
+			permanentlyBroken: Set<string>;
+		};
+
+		const server = makeSpawnServer("opengrep");
+		getServersForFileWithConfig.mockReturnValue([server]);
+
+		const clients: Array<ReturnType<typeof makeFakeClient>> = [];
+		createLSPClient.mockImplementation(async () => {
+			const c = makeFakeClient("opengrep");
+			clients.push(c);
+			return c;
+		});
+
+		const file = "C:/repo/main.fake";
+		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		const LIFETIME_MS = 75_000; // under the ceiling — these DO get recorded
+
+		// Two genuine short-lived crashes, spaced 20min apart (past the 15min
+		// window). Anchored in the past so both deaths are real timestamps.
+		const firstSpawn = Date.now() - 40 * 60_000;
+
+		const initial = await service.getClientForFile(file);
+		expect(initial).toBeDefined();
+		internal.state.clientSpawnedAt.set(key, firstSpawn);
+		clients.at(-1)!.die(firstSpawn + LIFETIME_MS);
+
+		internal.state.broken.delete(key);
+		const afterFirst = await service.getClientForFile(file);
+		expect(afterFirst).toBeDefined();
+		expect(internal.runtimeExitWindow.get(key)).toHaveLength(1);
+
+		// Second crash 20min after the first — outside the window from the first.
+		const secondSpawn = firstSpawn + 20 * 60_000;
+		internal.state.clientSpawnedAt.set(key, secondSpawn);
+		clients.at(-1)!.die(secondSpawn + LIFETIME_MS);
+
+		internal.state.broken.delete(key);
+		const afterSecond = await service.getClientForFile(file);
+		expect(afterSecond).toBeDefined();
+
+		// The first death aged out: only the second remains — a rolling window, not
+		// a cumulative-forever count. Nowhere near TRIP_COUNT; never trips.
+		expect(internal.runtimeExitWindow.get(key)).toHaveLength(1);
+		expect(internal.permanentlyBroken.has(key)).toBe(false);
+	});
+
+	it("NO false trip: deliberate shutdown()-driven restarts never feed the window (past TRIP_COUNT)", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const internal = service as unknown as {
+			state: { broken: Map<string, number> };
+			runtimeExitWindow: Map<string, number[]>;
+			permanentlyBroken: Set<string>;
+		};
+
+		const server = makeSpawnServer("opengrep");
+		getServersForFileWithConfig.mockReturnValue([server]);
+
+		const clients: Array<ReturnType<typeof makeFakeClient>> = [];
+		createLSPClient.mockImplementation(async () => {
+			const c = makeFakeClient("opengrep");
+			clients.push(c);
+			return c;
+		});
+
+		const file = "C:/repo/main.fake";
+		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+
+		// 8 intentional restarts (well past TRIP_COUNT=5) — user restart / config
+		// reload / session change / #743 eviction all call shutdown() first. The
+		// windowed trip is gated behind the same `!wasIntentional` guard as the
+		// fast path, so none of these are recorded.
+		for (let i = 0; i < 8; i++) {
+			internal.state.broken.delete(key);
+			const result = await service.getClientForFile(file);
+			expect(result).toBeDefined();
+			const last = clients.at(-1)!;
+			await last.shutdown(); // marks intentional before death (real ordering)
+			last.die();
+		}
+
+		expect(internal.runtimeExitWindow.get(key) ?? []).toHaveLength(0);
+		expect(internal.permanentlyBroken.has(key)).toBe(false);
+		expect(server.getSpawnCount()).toBe(8);
+	});
+});
