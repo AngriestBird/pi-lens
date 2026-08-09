@@ -1421,16 +1421,27 @@ export class TreeSitterClient {
 		const next = index >= 0 ? siblings[index + 1] : undefined;
 		if (next?.type.includes("comment")) comments.push(next);
 		// A marker inside the trailing body statement's block (e.g. `{ work();
-		// /* fallthrough */ }`). Only the trailing statement is walked so a comment
-		// in a nested function or an earlier statement can't suppress a genuine
-		// fall-through.
+		// /* fallthrough */ }`). Only the trailing statement is walked, and nested
+		// functions are not descended into, so a comment in a nested function or
+		// an earlier statement can't suppress a genuine fall-through.
 		if (last) {
+			const NESTED_FN = new Set([
+				"function_declaration",
+				"function_expression",
+				"arrow_function",
+				"method_definition",
+				"generator_function",
+				"generator_function_declaration",
+				"class_declaration",
+			]);
 			const stack: TreeSitterNode[] = [last];
 			for (let visited = 0; stack.length > 0 && visited < 500; visited++) {
 				const node = stack.pop();
 				if (!node) break;
 				if (node.type.includes("comment")) comments.push(node);
-				stack.push(...(node.children ?? []));
+				if (!NESTED_FN.has(node.type)) {
+					stack.push(...(node.children ?? []));
+				}
 			}
 		}
 		return comments.some((c) => /falls?\s?through/i.test(c.text));

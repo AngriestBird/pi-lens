@@ -307,6 +307,17 @@ describe("switch-case-termination (TS)", () => {
 		).toBeGreaterThan(0);
 	});
 
+	it("does not treat a 'falls through' comment in a nested function inside a trailing try/catch as a marker", async () => {
+		expect(
+			await count(
+				"switch-case-termination",
+				"ts",
+				"typescript",
+				`switch (x) {\n case 1:\n  try { const g = () => { /* falls through */ }; work(); } catch (e) { handle(e); }\n case 2:\n  break;\n}`,
+			),
+		).toBeGreaterThan(0);
+	});
+
 	it("does not treat a leading comment as a fallthrough marker", async () => {
 		expect(
 			await count(
@@ -446,6 +457,17 @@ describe("switch-case-termination-js (JS)", () => {
 				"js",
 				"javascript",
 				`switch (x) {\n case 1:\n  const g = () => { /* falls through */ };\n  doSomething();\n case 2:\n  break;\n}`,
+			),
+		).toBeGreaterThan(0);
+	});
+
+	it("does not treat a 'falls through' comment in a nested function inside a trailing try/catch as a marker", async () => {
+		expect(
+			await count(
+				"switch-case-termination-js",
+				"js",
+				"javascript",
+				`switch (x) {\n case 1:\n  try { const g = () => { /* falls through */ }; work(); } catch (e) { handle(e); }\n case 2:\n  break;\n}`,
 			),
 		).toBeGreaterThan(0);
 	});
