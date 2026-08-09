@@ -703,3 +703,40 @@ describe("loadPiLensProjectConfig", () => {
 		});
 	});
 });
+
+describe("config cache freshness (#1105 mtime+size)", () => {
+	// The config cache gates reuse on mtime alone before #1105; an in-place edit
+	// that PRESERVES mtime (git checkout timestamp restoration, a same-second
+	// rewrite) but changes the file's byte length replayed a stale parsed config.
+	// The fix adds `size` as the free second axis (the stat that yields mtime
+	// already read it). Both writes below are pinned to the SAME fixed mtime, so
+	// mtime is identical across the two loads and ONLY size differs — isolating
+	// exactly the residual the second axis closes. FS-agnostic (no case/separator
+	// assumptions), so it exercises the gate identically on Linux CI (#1024).
+	it("re-parses an mtime-preserving, length-changing config edit", () => {
+		const configPath = path.join(tmpDir, ".pi-lens.json");
+		const pinned = new Date("2020-01-01T00:00:00.000Z");
+
+		// First config — a longer ignore list (larger byte length).
+		fs.writeFileSync(
+			configPath,
+			JSON.stringify({ ignore: ["alpha/**", "beta/**", "gamma/**"] }),
+		);
+		fs.utimesSync(configPath, pinned, pinned);
+		const mtimeBefore = fs.statSync(configPath).mtimeMs;
+		const first = loadPiLensProjectConfig(tmpDir);
+		expect(first.ignore).toEqual(["alpha/**", "beta/**", "gamma/**"]);
+
+		// Rewrite in place with a SHORTER config, then restore the SAME mtime so
+		// the mtime-only gate would (wrongly) treat the cached entry as fresh.
+		fs.writeFileSync(configPath, JSON.stringify({ ignore: ["alpha/**"] }));
+		fs.utimesSync(configPath, pinned, pinned);
+		// The gate is now isolated to the size axis: mtime is provably identical.
+		expect(fs.statSync(configPath).mtimeMs).toBe(mtimeBefore);
+
+		// Cache is intentionally NOT reset — this asserts the in-process gate, not
+		// a cold read. Pre-#1105 (mtime-only) this returned the stale 3-entry list.
+		const second = loadPiLensProjectConfig(tmpDir);
+		expect(second.ignore).toEqual(["alpha/**"]);
+	});
+});
