@@ -95,7 +95,8 @@ export async function saveSessionState(
 		// bestEffort (default): a failed write/rename just means this snapshot is
 		// lost, matching this store's documented "start clean" fallback — never
 		// throw for the caller. (Tmp naming is now the shared
-		// `${target}.tmp-${pid}` shape rather than this site's former
+		// `${target}.tmp-${pid}-${seq}` shape (unique per call, not just per process,
+		// since #1205) rather than this site's former
 		// `${file}.${pid}.tmp` — no behavioral difference: nothing reads the
 		// intermediate tmp filename.)
 		await writeFileAtomicAsync(file, JSON.stringify(payload));
