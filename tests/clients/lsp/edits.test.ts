@@ -10,7 +10,6 @@ import {
 	isSameFsIdentity,
 	mergeWorkspaceTextEditsByPriority,
 } from "../../../clients/lsp/edits.js";
-import { measureMaxSyncBlockMs } from "../../support/perf-harness.js";
 import { normalizeMapKey } from "../../../clients/lsp/path-utils.js";
 import { removeTempDirSync } from "../test-utils.js";
 import {
@@ -816,7 +815,14 @@ describe("LSP workspace edits", () => {
 		}
 	});
 
-	it("keeps large text/resource planning occupancy bounded", { timeout: 30_000, retry: 2 }, async () => {
+	// Budgeted in CPU time, not in the setImmediate-sampler gap the other occupancy
+	// guards use (tests/support/perf-harness.ts). Those guard walkers that DO yield,
+	// where the gap is the only way to see a non-yielding regression. The planner is
+	// synchronous end to end, so its gap is just the wall clock of one ~3ms call, and
+	// a descheduled worker under suite load reported 358-435ms of "block" that no
+	// O(1k) planning path can produce (#1081). CPU time does not accrue while the OS
+	// has the core elsewhere, so this measures the planner and nothing else.
+	it("keeps large text/resource planning occupancy bounded", { timeout: 30_000, retry: 2 }, () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-plan-"));
 		const changes: Record<string, unknown[]> = {};
 		const documentChanges: unknown[] = [];
@@ -829,12 +835,11 @@ describe("LSP workspace edits", () => {
 			documentChanges.push({ kind: "create", uri, options: { ignoreIfExists: true } });
 		}
 		try {
-			let planned = 0;
-			const maxBlock = await measureMaxSyncBlockMs(async () => {
-				planned = __planWorkspaceEditForTest({ changes, documentChanges });
-			});
+			const start = process.cpuUsage();
+			const planned = __planWorkspaceEditForTest({ changes, documentChanges });
+			const { user, system } = process.cpuUsage(start);
 			expect(planned).toBe(count * 2);
-			expect(maxBlock).toBeLessThan(300);
+			expect((user + system) / 1000).toBeLessThan(300);
 		} finally { removeTempDirSync(tmpDir); }
 	});
 
