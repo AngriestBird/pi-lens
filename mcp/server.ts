@@ -64,6 +64,7 @@ import {
 	type WarmAnalyzeRequest,
 	WARM_TURN_END_SCHEMA_VERSION,
 	type WarmTurnEndRequest,
+	type WarmTurnEndResponse,
 } from "../clients/lens-engine.js";
 import { createAstGrepReplaceTool } from "../tools/ast-grep-replace.js";
 import { createAstGrepSearchTool } from "../tools/ast-grep-search.js";
@@ -315,16 +316,14 @@ function startIpcServer(): void {
 						// Stamping them here would give handleTurnEnd's stale-session
 						// eviction a reason to drop them.
 						const outcome = await runTurnEnd(turnCwd);
-						socket.end(
-							`${JSON.stringify({
-								result: {
-									route: "turn-end",
-									version: WARM_TURN_END_SCHEMA_VERSION,
-									turnEnd: outcome.turnEnd,
-									tests: outcome.tests,
-								},
-							})}\n`,
-						);
+						// Typed so reply-shape drift is a compile error, not a silent skip.
+						const result: WarmTurnEndResponse = {
+							route: "turn-end",
+							version: WARM_TURN_END_SCHEMA_VERSION,
+							turnEnd: outcome.turnEnd,
+							tests: outcome.tests,
+						};
+						socket.end(`${JSON.stringify({ result })}\n`);
 						return;
 					}
 					// Untagged = the legacy analyze request; unchanged for old clients.

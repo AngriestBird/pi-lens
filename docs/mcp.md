@@ -440,7 +440,8 @@ be exercised + debugged directly through Claude Code without running pi.
   context — blockers still gate commits through the retained lens-guard record,
   and a `decision:"block"` render is a follow-up. Tests run fire-and-forget
   inside turn-end, so the `Tests:` section you see is the *previous* turn's
-  failures. 11 tests (4 IPC route, 1 server-side serialization, 6 bin modes).
+  failures. 19 tests (4 IPC route, 2 serialization, 8 bin modes, 5 live-route
+  smokes against a real spawned server).
 
 ## Transport decision — RESOLVED: hand-roll (zero new deps)
 

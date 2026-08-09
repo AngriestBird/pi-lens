@@ -212,3 +212,8 @@ export function runTurnEnd(
 	turnEndChain = next.catch(() => undefined);
 	return next;
 }
+
+/** Test hook — drop a pending chain so one stuck test can't wedge the rest. */
+export function _resetTurnEndChain(): void {
+	turnEndChain = Promise.resolve();
+}

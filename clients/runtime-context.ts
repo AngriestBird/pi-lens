@@ -1,6 +1,10 @@
 import type { CacheManager } from "./cache-manager.js";
 import type { TurnEndFindingsCache } from "./git-guard.js";
 
+// Exported so the Stop-hook bin strips exactly what these bridges prepend.
+export const AUTOMATION_FRAMING =
+	"[pi-lens automated check — not a user request] ";
+
 export function consumeTurnEndFindings(
 	cacheManager: CacheManager,
 	cwd: string,
@@ -31,7 +35,7 @@ export function consumeTurnEndFindings(
 		messages: [
 			{
 				role: "user",
-				content: `[pi-lens automated check — not a user request] Address 🔴 blockers before continuing; ℹ️ advisories are informational only.\n\n${findings.data.content}`,
+				content: `${AUTOMATION_FRAMING}Address 🔴 blockers before continuing; ℹ️ advisories are informational only.\n\n${findings.data.content}`,
 			},
 		],
 	};
@@ -57,7 +61,7 @@ export function consumeTestFindings(
 		messages: [
 			{
 				role: "user",
-				content: `[pi-lens automated check — not a user request] Test failures detected last turn — fix before continuing:\n\n${findings.data.content}`,
+				content: `${AUTOMATION_FRAMING}Test failures detected last turn — fix before continuing:\n\n${findings.data.content}`,
 			},
 		],
 	};

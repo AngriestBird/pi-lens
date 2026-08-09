@@ -65,6 +65,7 @@ vi.mock("../../../clients/runtime-context.js", () => ({
 
 import {
 	_resetMcpSessionContext,
+	_resetTurnEndChain,
 	runSessionStart,
 	runTurnEnd,
 } from "../../../clients/mcp/session.js";
@@ -75,6 +76,7 @@ beforeEach(() => {
 	handleSessionStart.mockClear();
 	handleTurnEnd.mockClear();
 	_resetMcpSessionContext();
+	_resetTurnEndChain();
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-mcp-session-"));
 });
 
@@ -156,5 +158,20 @@ describe("runTurnEnd", () => {
 		release?.();
 		await Promise.all([first, second]);
 		expect(handleTurnEnd).toHaveBeenCalledTimes(2);
+	});
+
+	// The chain is a module-level promise every caller links onto, so a thrown
+	// pass must be absorbed before it becomes the next caller's link. Without the
+	// reset, one failed turn_end rejects every later Stop hook with the PREVIOUS
+	// turn's error and never runs the pass at all — a warm server that quietly
+	// stops checking for the rest of the session.
+	it("keeps serving callers after a pass rejects", async () => {
+		handleTurnEnd.mockRejectedValueOnce(new Error("pass blew up"));
+
+		await expect(runTurnEnd(tmpDir)).rejects.toThrow("pass blew up");
+		const outcome = await runTurnEnd(tmpDir);
+
+		expect(handleTurnEnd).toHaveBeenCalledTimes(2);
+		expect(outcome.turnEnd).toBe("TURN ADVISORY");
 	});
 });

@@ -24,6 +24,7 @@ import {
 	ipcPathForCwd,
 	WARM_TURN_END_SCHEMA_VERSION,
 } from "../../clients/mcp/ipc.js";
+import { AUTOMATION_FRAMING } from "../../clients/runtime-context.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -171,11 +172,13 @@ function startTurnEndStub(
 	);
 }
 
-const FRAMED_ADVISORY = `[pi-lens automated check — not a user request] Address 🔴 blockers before continuing; ℹ️ advisories are informational only.
+// Built from the producer's real constant so a wording change in
+// runtime-context.ts cannot silently diverge from what the bin strips.
+const FRAMED_ADVISORY = `${AUTOMATION_FRAMING}Address 🔴 blockers before continuing; ℹ️ advisories are informational only.
 
 🔴 knip: 2 unused exports in clients/thing.ts`;
 
-describe("pi-lens-analyze turn-end mode", () => {
+describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 	let turnDir: string;
 	let stub: TurnEndStub | undefined;
 
@@ -218,6 +221,8 @@ describe("pi-lens-analyze turn-end mode", () => {
 
 		expect(code).toBe(0);
 		expect(stdout.trim()).toBe("");
+		// Silence must mean "clean turn", not "never dialed" or "reply rejected".
+		expect(stub.requests).toHaveLength(1);
 	}, 20_000);
 
 	// No cold fallback: a cold pass has empty cascade runs and accumulators, so a
@@ -237,7 +242,7 @@ describe("pi-lens-analyze turn-end mode", () => {
 		stub = await startTurnEndStub(turnDir, {
 			route: "turn-end",
 			version: WARM_TURN_END_SCHEMA_VERSION,
-			tests: "[pi-lens automated check — not a user request] Test failures detected last turn — fix before continuing:\n\nsuite/thing.test.ts > it works",
+			tests: `${AUTOMATION_FRAMING}Test failures detected last turn — fix before continuing:\n\nsuite/thing.test.ts > it works`,
 		});
 		const { stdout, code } = await runBin(
 			[],
@@ -247,6 +252,54 @@ describe("pi-lens-analyze turn-end mode", () => {
 		expect(code).toBe(0);
 		expect(stdout).toContain("🔎 pi-lens turn-end");
 		expect(stdout).toContain("suite/thing.test.ts > it works");
+		expect(stdout).not.toContain("not a user request");
+	}, 20_000);
+
+	// `turnEnd` arrives server-capped at 20 lines, but `tests` does not — a vitest
+	// failure dump (runtime-turn.ts) is unbounded, and this render lands straight
+	// in the Claude Code transcript. Two independent guards, so two inputs: this
+	// one trips ONLY the line cap (81 lines, well under 2000 chars), which a
+	// combined over-long payload would hide behind the character cap.
+	it("caps a long report at 40 lines", async () => {
+		const manyLines = `Test failures detected last turn:\n${Array.from(
+			{ length: 80 },
+			(_, i) => `  FAIL suite/case-${i}`,
+		).join("\n")}`;
+		stub = await startTurnEndStub(turnDir, {
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			tests: manyLines,
+		});
+		const { stdout, code } = await runBin(["--turn-end", `--cwd=${turnDir}`]);
+
+		expect(code).toBe(0);
+		const lines = stdout.trimEnd().split("\n");
+		expect(lines).toHaveLength(41); // 40 kept + the truncation marker
+		expect(lines.at(-1)).toContain("… (truncated)");
+		expect(stdout).toContain("  FAIL suite/case-0");
+		expect(stdout).not.toContain("  FAIL suite/case-79");
+	}, 20_000);
+
+	// The companion guard: 11 lines, so the line cap never fires, and only the
+	// 2000-character ceiling stands between a wide dump and the transcript.
+	it("caps a long report at 2000 characters", async () => {
+		const wideLines = `Test failures detected last turn:\n${Array.from(
+			{ length: 10 },
+			(_, i) => `  FAIL suite/case-${i}: ${"detail ".repeat(45)}`,
+		).join("\n")}`;
+		stub = await startTurnEndStub(turnDir, {
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			tests: wideLines,
+		});
+		const { stdout, code } = await runBin(["--turn-end", `--cwd=${turnDir}`]);
+
+		const out = stdout.trimEnd();
+		expect(code).toBe(0);
+		expect(out.split("\n").length).toBeLessThanOrEqual(40);
+		expect(out).toContain("… (truncated)");
+		// 2000 kept + the "\n  … (truncated)" marker.
+		expect(out).toHaveLength(2016);
 	}, 20_000);
 
 	it("never dials the server on SubagentStop", async () => {
@@ -255,13 +308,14 @@ describe("pi-lens-analyze turn-end mode", () => {
 			version: WARM_TURN_END_SCHEMA_VERSION,
 			turnEnd: FRAMED_ADVISORY,
 		});
-		const { stdout, code } = await runBin(
+		const { stdout, stderr, code } = await runBin(
 			[],
 			JSON.stringify({ cwd: turnDir, hook_event_name: "SubagentStop" }),
 		);
 
 		expect(code).toBe(0);
 		expect(stdout.trim()).toBe("");
+		expect(stderr).toContain("SubagentStop");
 		expect(stub.sockets).toHaveLength(0);
 	}, 20_000);
 

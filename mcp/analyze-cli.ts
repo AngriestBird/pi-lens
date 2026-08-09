@@ -33,6 +33,8 @@ import {
 	requestWarmTurnEnd,
 	type WarmTurnEndResponse,
 } from "../clients/mcp/ipc.js";
+// Type-only deps at runtime — safe for the bin's light no-edit path.
+import { AUTOMATION_FRAMING } from "../clients/runtime-context.js";
 
 console.log = (...args: unknown[]) => console.error(...args);
 
@@ -86,9 +88,8 @@ async function readHookPayload(): Promise<HookPayload | undefined> {
 	}
 }
 
-// Framing for pi's user-role injection; the rest of the first line reads fine
-// in a transcript, so only the token goes.
-const AUTOMATION_FRAMING = "[pi-lens automated check — not a user request] ";
+// The framing token is for pi's user-role injection; the rest of the first
+// line reads fine in a transcript, so only the token goes.
 const TURN_END_MAX_LINES = 40;
 const TURN_END_MAX_CHARS = 2000;
 
