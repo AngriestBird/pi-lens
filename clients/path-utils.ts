@@ -32,6 +32,34 @@ export function isWindowsPath(filePath: string): boolean {
 }
 
 /**
+ * Canonical backslash→forward-slash fold — the single sanctioned form of the
+ * `p.replace(/\\/g, "/")` idiom otherwise hand-rolled across the codebase
+ * (~138 sites, #1193). PURE separator normalization: it does NOT resolve,
+ * canonicalize, lowercase, or collapse repeated slashes — reach for
+ * `normalizeFilePath`/`normalizeMapKey`/`normalizeEphemeralMapKey` when a
+ * canonical map *key* (case-fold / realpath) is what you need. Consolidating on
+ * this funnels the scattered transform and makes a shape-2 lint/ast-grep rule
+ * possible for the first time: today a bare inline `.replace(/\\/g, "/")` is
+ * byte-identical to the sanctioned use so it can't be ruled (#1158); once
+ * everything routes through `toPosix`, an *un-migrated* inline `.replace`
+ * becomes detectable.
+ */
+export function toPosix(filePath: string): string {
+	return filePath.replace(/\\/g, "/");
+}
+
+/**
+ * Split a path into its non-empty segments on EITHER separator (`\` or `/`),
+ * regardless of the running OS — the shape-safe form of `p.split(path.sep)` /
+ * an inline `p.split(/[\\/]+/)`, which #1161/#1163 showed must not assume the
+ * host separator for a possibly-cross-shaped path. Drops empty segments
+ * (leading slash, drive-root, doubled separators).
+ */
+export function splitPathSegments(filePath: string): string[] {
+	return filePath.split(/[\\/]+/).filter(Boolean);
+}
+
+/**
  * Normalize a file path for consistent Map key usage.
  *
  * On Windows:
