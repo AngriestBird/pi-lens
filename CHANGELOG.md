@@ -10,6 +10,46 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`allowScripts` entries had drifted from what the declared dependency ranges actually resolve to, so npm v12's exact-version script-approval check saw stale pins (closes #1176)** —
+	`package.json`'s `@ast-grep/cli` dependency range is `"^0.45.0"`, but the
+	`allowScripts` map still keyed its approval on `"@ast-grep/cli@0.44.1"` — a
+	version the range can no longer even resolve to. pi-lens has no
+	`allowScripts`-enforcing tool of its own (no `@lavamoat/allow-scripts`, no
+	`.npmrc` script policy), so the field does nothing for pi-lens's own
+	`npm ci`; its only audience is an external consumer or vetting tool reading
+	the *published* package. The published package ships **no lockfile**
+	(`package-lock.json` is not in the `files` array and there's no
+	`npm-shrinkwrap.json`), so that consumer fresh-resolves `"^0.45.0"` against
+	the registry — which lands on `0.45.1` (registry `latest`; only `0.45.0`
+	and `0.45.1` exist in the `0.45.x` line), exactly what the original report
+	observed. The correct target is therefore the **freshest in-range /
+	fresh-resolve version**, not the locally-committed lockfile's resolution —
+	so the entry is `"@ast-grep/cli@0.45.1": true`, and the committed
+	`package-lock.json` was also bumped (`npm install @ast-grep/cli@0.45.1`,
+	an in-range patch bump — the `^0.45.0` dependency range is unchanged) so
+	pi-lens's own dev tree and a fresh consumer resolve both land on the same
+	version. `0.45.1` ships the same `postinstall` script `0.44.1` needed
+	approval for. Swept every other `allowScripts` member for the same drift
+	class (a pinned exact version no longer matching the freshest version its
+	governing range resolves to): `@google/genai@1.52.0` (transitive via the
+	`@earendil-works/pi-coding-agent` devDependency) already matched, unchanged;
+	`protobufjs@7.6.4` (also transitive via `@earendil-works/pi-coding-agent`)
+	had drifted the same way and moved to `"protobufjs@7.6.5": true` — the
+	freshest in-range version, which here happens to match both the lockfile
+	and a fresh resolve. `@ast-grep/napi` (also range `^0.45.0`) was re-checked
+	for an install-time script at both `0.45.0` and `0.45.1` (`npm view
+	@ast-grep/napi scripts`) and has none in either, so it correctly has no
+	`allowScripts` entry. `fsevents@2.3.3` also has an install script
+	(`hasInstallScript: true`) but is intentionally NOT listed: it's
+	`dev:true, optional:true, os:["darwin"]`, so it's never part of a
+	consumer's production install and out of scope for this allowlist — noting
+	it here rather than leaving the omission silent. No other version-pinned
+	metadata (`overrides`/`resolutions`/`pnpm.overrides`/`packageManager`)
+	exists in `package.json` to drift, and a repo-wide grep for hardcoded
+	`0.44.`/`0.45.` ast-grep version literals outside `package.json`/the
+	lockfile turned up only historical comments in test files and one rule
+	doc-comment describing ast-grep's behavior as of a past version — not pins
+	that need to track the current range.
 - **`switch-case-termination` false positives for returning try/catch and exhaustive conditionals (closes #1079)** — the `no_terminating_statement`
 	post-filter only checked whether a case's last statement was a literal
 	terminator, so a case ending in `try { return … } catch { return … }` (or an
