@@ -1463,8 +1463,15 @@ export class LSPService {
 					// Set a cooldown so THIS detection also stops respawning (the
 					// broken check below at the end of this method re-reads it),
 					// symmetric with the fast path which cools down on every count.
-					// `max` never SHORTENS a longer cooldown the fast path may have
-					// just set for the same death.
+					// `max` is defensive, not load-bearing under the actual call
+					// order: `state.broken` for this key is `delete`d at the top of
+					// this method (see the "detect dead client" branch above), so
+					// this `.get(key) ?? 0` always reads 0 here — it's the fast
+					// path below that runs AFTER this block and can raise the
+					// cooldown for the same death. Harmless either way: the
+					// non-optional branch latches `permanentlyBroken` (making the
+					// cooldown moot), and the optional branch here is currently
+					// unreachable (`OPTIONAL_LSP_SERVER_IDS` is empty).
 					this.state.broken.set(
 						key,
 						Math.max(
@@ -1527,6 +1534,34 @@ export class LSPService {
 					// lands in this branch yet IS the churn #1142 targets — the
 					// window ages those out by time instead.
 					this.runtimeExitCounts.delete(key);
+					// Outer-map hygiene (#1183): runtimeExitWindow itself is only
+					// ever `delete`d on the optional-trip branch above (currently
+					// unreachable — OPTIONAL_LSP_SERVER_IDS is empty), so a key
+					// that crashed once then recovered would otherwise retain a
+					// stale timestamp array forever, even once every entry in it
+					// has aged out of the window. Drop it here once nothing in it
+					// is still in-window — purely map hygiene: a later death
+					// rebuilds the array from scratch via recordRuntimeExitWindow,
+					// so this cannot change trip behavior. Anchor "now" on this
+					// death's own `exitedAt` (falling back to real time only if
+					// unset), NOT `Date.now()` directly — this death's timestamp
+					// is what `recordRuntimeExitWindow` itself anchors pruning on
+					// (see its `windowRef` comment), so a death that WAS just
+					// recorded is guaranteed to still be in-window here and this
+					// can only ever fire for the "declined to record" cases
+					// (over the sleep-gap ceiling, or a missing `exitedAt`) where
+					// nothing new was added and the array is genuinely stale.
+					const windowDeaths = this.runtimeExitWindow.get(key);
+					if (windowDeaths) {
+						const windowNow = exitedAt ?? Date.now();
+						if (
+							!windowDeaths.some(
+								(t) => t >= windowNow - RUNTIME_EXIT_WINDOW_MS,
+							)
+						) {
+							this.runtimeExitWindow.delete(key);
+						}
+					}
 				}
 			}
 		}
