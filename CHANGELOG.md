@@ -6,6 +6,35 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **LSP runtime-exit breaker missed persistent low-frequency crash loops (closes #1142, refs #1127 #1139)** —
+	#1139's `runtimeExitCounts` counts a client death toward the circuit breaker
+	only when its lifetime (`exitedAt - spawnedAt`) is under
+	`RUNTIME_EXIT_UPTIME_THRESHOLD_MS` (60s) — the hot crash loop (opengrep dies in
+	seconds). A death OVER the threshold falls into the "survived → reset the
+	streak" branch, so a server that reliably dies at ~65-90s after every spawn
+	NEVER tripped: every death reset the streak and it churned forever, a slow loop
+	the hard-cutoff design structurally can't detect. Added a SECOND, independent
+	windowed-rate trip that COMPOSES with (does not replace) the fast path:
+	`RUNTIME_EXIT_WINDOW_TRIP_COUNT` (5, = `BROKEN_PERMANENT_AFTER`) non-intentional
+	deaths within a rolling `RUNTIME_EXIT_WINDOW_MS` (15 min) window trip the
+	breaker regardless of each death's individual lifetime. N/M err against
+	false-tripping: five clustered non-intentional deaths is definitionally a loop,
+	and sparse benign crashes age out of the rolling window before five coincide.
+	The fast path is byte-for-byte unchanged — a hot loop still trips at exactly 5
+	consecutive early exits, never delayed by the window. Benign over-threshold
+	"deaths" are excluded: intentional teardowns (user restart, config/workspace
+	reload, session change, #743 eviction, generation handoffs) are gated out by the
+	existing `!wasShutdownIntentional()` guard the windowed trip shares, and a
+	death whose lifetime exceeds a 10-min ceiling — a genuinely long healthy run, or
+	an `exitedAt - spawnedAt` inflated across a machine-sleep/Modern-Standby suspend
+	(the #1122/#1139 death-timestamp lesson) — is not recorded, backed structurally
+	by per-server-key windowing (one suspend kills at most one live client per key).
+	The death-timestamp window is bounded on BOTH axes (prune aged-out entries +
+	hard-cap the array at the trip count, drop-oldest) and needs no timer (ages by
+	prune-on-check). Fail-then-pass regression tests cover all three cases: the slow
+	~65-90s loop now converges (verified failing on pre-fix — the whole bug), the
+	hot loop still trips fast (no regression), and a sleep-gap/long-run death,
+	sparse aged-out crashes, and deliberate restarts do NOT trip.
 - **Quick-mode background warmup kept a one-shot `pi -p`/`--print` process alive (closes #1154)** —
 	`handleSessionStart` forces **quick mode** for both a real `pi -p`/`--print`
 	one-shot AND an interactive process's first session (to protect keystroke
