@@ -15,7 +15,12 @@ import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 // the walk, and every write helper delegate to the real fs), so a path in
 // `failReads` looks present-and-stat-able but throws on read — the transient
 // exclusive-lock scenario, portably and without ESM namespace-spy limits.
-const { failReads } = vi.hoisted(() => ({ failReads: new Set<string>() }));
+const { failReads, readCounter } = vi.hoisted(() => ({
+	failReads: new Set<string>(),
+	// Counts reads of files under a watched root, so a test can assert that a
+	// refresh aborted BEFORE it read (and therefore before it mutated) anything.
+	readCounter: { root: "", calls: 0 },
+}));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	return {
@@ -26,6 +31,13 @@ vi.mock("node:fs", async (importOriginal) => {
 				throw Object.assign(new Error("EBUSY: resource busy or locked"), {
 					code: "EBUSY",
 				});
+			}
+			if (
+				readCounter.root &&
+				typeof path === "string" &&
+				path.startsWith(readCounter.root)
+			) {
+				readCounter.calls += 1;
 			}
 			return (actual.readFileSync as (...a: unknown[]) => unknown)(
 				path,
@@ -39,6 +51,8 @@ afterEach(() => {
 	delete process.env.PI_LENS_MAX_PROJECT_FILES;
 	_resetProjectScaleBaseForTests();
 	failReads.clear();
+	readCounter.root = "";
+	readCounter.calls = 0;
 	vi.restoreAllMocks();
 });
 
@@ -206,29 +220,59 @@ describe("session-start incremental word-index refresh (#958)", () => {
 		}
 	});
 
+	// 200 documents so the 32-document floor is NOT the deciding branch and the
+	// 0.30 ratio genuinely is: 60/200 is exactly 0.30 (not "> 0.30") and 61/200 is
+	// 0.305. The previous 100/30 fixture sat below the floor, so the test named
+	// after the ratio boundary never reached the ratio comparison at all. Content
+	// is one short line per file, so the work model (which decides independently)
+	// stays far from its own crossover and cannot mask either direction.
+	function makeRatioBoundaryFixture(tmpDir: string): string[] {
+		return Array.from({ length: 200 }, (_, i) =>
+			createTempFile(tmpDir, `src/f${i}.ts`, `export const original${i} = ${i};`),
+		);
+	}
+
+	async function staleAndRefresh(
+		tmpDir: string,
+		files: string[],
+		staleCount: number,
+	) {
+		const index = buildWordIndex(await collectWordIndexDocs(tmpDir));
+		const future = new Date(Date.now() + 2_000);
+		for (const [i, file] of files.slice(0, staleCount).entries()) {
+			fs.writeFileSync(file, `export const refreshed${i} = ${i};\n`, "utf8");
+			fs.utimesSync(file, future, future);
+		}
+		return refreshWordIndexIncrementally(index, tmpDir);
+	}
+
 	it("keeps exactly-threshold stale density incremental", async () => {
 		const env = setupTestEnvironment("pi-lens-word-refresh-threshold-");
 		try {
-			const files = Array.from({ length: 100 }, (_, i) =>
-				createTempFile(
-					env.tmpDir,
-					`src/f${i}.ts`,
-					`export const original${i} = ${i};`,
-				),
-			);
-			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
-			const future = new Date(Date.now() + 2_000);
-			for (const [i, file] of files.slice(0, 30).entries()) {
-				fs.writeFileSync(file, `export const refreshed${i} = ${i};\n`, "utf8");
-				fs.utimesSync(file, future, future);
-			}
+			const files = makeRatioBoundaryFixture(env.tmpDir);
 
-			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			const result = await staleAndRefresh(env.tmpDir, files, 60);
 
 			expect(result).toMatchObject({
 				mode: "incremental",
-				refreshed: 30,
-				reused: 70,
+				refreshed: 60,
+				reused: 140,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("crosses to a full rebuild one document above the threshold", async () => {
+		const env = setupTestEnvironment("pi-lens-word-refresh-threshold-over-");
+		try {
+			const files = makeRatioBoundaryFixture(env.tmpDir);
+
+			const result = await staleAndRefresh(env.tmpDir, files, 61);
+
+			expect(result).toEqual({
+				mode: "full-required",
+				reason: "stale-document-churn",
 			});
 		} finally {
 			env.cleanup();
@@ -271,15 +315,27 @@ describe("session-start incremental word-index refresh (#958)", () => {
 	it("aborts during stat preflight without mutating the old index", async () => {
 		const env = setupTestEnvironment("pi-lens-word-refresh-superseded-");
 		try {
-			for (let i = 0; i < 200; i++) {
+			// Every document is made stale, so the refresh loop WOULD read and
+			// replace documents if the abort were allowed to reach it. Without the
+			// preflight's own abort check the loop's pre-existing every-100 check
+			// throws the same message — but only after mutating the first hundred
+			// documents, which is what this test now distinguishes.
+			const files = Array.from({ length: 200 }, (_, i) =>
 				createTempFile(
 					env.tmpDir,
 					`src/f${i}.ts`,
 					`export const value${i} = ${i};`,
-				);
-			}
+				),
+			);
 			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
 			const before = serializeWordIndex(index);
+			const future = new Date(Date.now() + 2_000);
+			for (const [i, file] of files.entries()) {
+				fs.writeFileSync(file, `export const rotated${i} = ${i};\n`, "utf8");
+				fs.utimesSync(file, future, future);
+			}
+			readCounter.root = env.tmpDir;
+			readCounter.calls = 0;
 			let continuationChecks = 0;
 
 			await expect(
@@ -290,8 +346,103 @@ describe("session-start incremental word-index refresh (#958)", () => {
 				),
 			).rejects.toThrow("word index refresh superseded");
 			expect(serializeWordIndex(index)).toEqual(before);
+			// The decisive assertion: the abort landed in the stat preflight, before
+			// the churn computation and before a single document was re-read.
+			expect(readCounter.calls).toBe(0);
 		} finally {
 			env.cleanup();
 		}
 	});
+
+	it("chooses a full rebuild for a 600-document dense-stale refresh below the density ratio (#1197)", async () => {
+		const env = setupTestEnvironment("pi-lens-word-refresh-scaled-dense-");
+		try {
+			// #1197's acceptance criterion: a guard at the 500+ document dense-stale
+			// shape. 150/600 is 25% — UNDER the 0.30 ratio and therefore incremental
+			// under a density-only gate, while the per-document posting-array filter
+			// over a corpus this size costs far more than one linear rebuild.
+			const body = (i: number, tag: string) =>
+				Array.from(
+					{ length: 6 },
+					(_, l) =>
+						`export function render${tag}${i}_${l}(requestContext: RequestContext) { return projectSnapshotStore.resolveDocumentEntry(requestContext, ${l}); }`,
+				).join("\n");
+			const files = Array.from({ length: 600 }, (_, i) =>
+				createTempFile(env.tmpDir, `src/f${i}.ts`, body(i, "Original")),
+			);
+			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+			const before = serializeWordIndex(index);
+			const future = new Date(Date.now() + 2_000);
+			for (const [i, file] of files.slice(0, 150).entries()) {
+				fs.writeFileSync(file, body(i, "Refreshed"), "utf8");
+				fs.utimesSync(file, future, future);
+			}
+
+			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+
+			expect(result).toEqual({
+				mode: "full-required",
+				reason: "stale-document-churn",
+			});
+			expect(serializeWordIndex(index)).toEqual(before);
+		} finally {
+			env.cleanup();
+		}
+	}, 60_000);
+
+	it("yields the refresh loop on a time budget, not only every 100 documents (#1197)", async () => {
+		const env = setupTestEnvironment("pi-lens-word-refresh-budget-");
+		try {
+			// Fewer than 100 documents, so the every-100 checkpoint NEVER fires and a
+			// count-only refresh loop runs the whole stale set as one synchronous
+			// burst. The vocabulary is unique per (file, line, token) so posting
+			// arrays stay short and the work model keeps this on the incremental
+			// path — the point under test is the loop's cooperativeness, not the
+			// dense-refresh gate.
+			const enc = (n: number) => {
+				let out = "";
+				let v = n + 1;
+				while (v > 0) {
+					out += String.fromCharCode(97 + (v % 26));
+					v = Math.floor(v / 26);
+				}
+				return out;
+			};
+			const body = (i: number, tag: string) =>
+				Array.from({ length: 200 }, (_, l) =>
+					Array.from(
+						{ length: 20 },
+						(_, k) => `qq${enc(i)}${tag}${enc(l)}${enc(k)}zz`,
+					).join(" "),
+				).join("\n");
+			const files = Array.from({ length: 40 }, (_, i) =>
+				createTempFile(env.tmpDir, `src/f${i}.ts`, body(i, "aa")),
+			);
+			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+			const future = new Date(Date.now() + 2_000);
+			for (const [i, file] of files.slice(0, 25).entries()) {
+				fs.writeFileSync(file, body(i, "bb"), "utf8");
+				fs.utimesSync(file, future, future);
+			}
+
+			// `shouldContinue` is re-checked after every yield, so its call count is
+			// a direct, timing-free read of how often the pass yielded. A count-only
+			// loop over 40 documents yields zero times and calls it exactly once (the
+			// post-walk check).
+			let continuationChecks = 0;
+			const result = await refreshWordIndexIncrementally(
+				index,
+				env.tmpDir,
+				() => {
+					continuationChecks += 1;
+					return true;
+				},
+			);
+
+			expect(result).toMatchObject({ mode: "incremental", refreshed: 25 });
+			expect(continuationChecks).toBeGreaterThan(4);
+		} finally {
+			env.cleanup();
+		}
+	}, 60_000);
 });
