@@ -464,6 +464,18 @@ const recentlyCleanNeighborCache = new Map<
 	string,
 	RecentlyCleanNeighborEntry
 >();
+
+/** O(1) entry counts of this module's turn-bounded caches (#1123 item 2
+ *  memory attribution) — both are `Map.size` reads, never iterated. */
+export function getDispatchCascadeCacheStats(): {
+	neighborTouchCacheSize: number;
+	recentlyCleanNeighborCacheSize: number;
+} {
+	return {
+		neighborTouchCacheSize: neighborTouchCache.size,
+		recentlyCleanNeighborCacheSize: recentlyCleanNeighborCache.size,
+	};
+}
 const RECENTLY_CLEAN_TTL_TURNS = 5;
 
 // B10: tracks files that were the *primary* edited file this turn.
@@ -1259,6 +1271,15 @@ export async function computeCascadeForFile(
 	const neighbors: CascadeResult["neighbors"] = [];
 	let producedLspData = false;
 	let coldSnapshotPaths: string[] = [];
+	// #1104: did any DEGRADED-fallback display path (touch-error fallback,
+	// appendFallbackNeighbors) withhold a TTL-fresh entry solely because its
+	// content binding was rejected (`boundToCurrentDisk === false` — computed
+	// against a diverged/pre-fix-edit disk state)? Tracked separately from
+	// `producedLspData` so the HONESTY check below can tell "genuinely nothing to
+	// show" apart from "something existed but was untrustworthy and was hidden" —
+	// the latter must not collapse into a clean-looking result (#1104 honesty
+	// rule, same doctrine as #1023's graph-degraded indeterminate marker).
+	let fallbackBindingRejected = false;
 
 	if (sortedNeighbors.length > 0) {
 		const snapshotPaths = sortedNeighbors.filter(shouldReadCascadeFromSnapshot);
@@ -1665,19 +1686,41 @@ export async function computeCascadeForFile(
 				dbg?.(
 					`cascade neighbor touch error for ${neighborPath}: ${result.reason}`,
 				);
+				const entry = allDiags.get(normalizeMapKey(neighborPath));
+				const ttlFresh =
+					entry != null && Date.now() - entry.ts < CASCADE_TTL_MS;
+				// #1104: consult binding before trusting a TTL-fresh fallback snapshot —
+				// MATCH #1100/#1095 semantics (false → skip, "unknown" → keep the
+				// pre-#1104 TTL-only behavior, true → use). Without this, a failed
+				// active touch could still re-display a bound-false (pre-fix-edit)
+				// snapshot even though the reconcile path (#1100) already refuses to
+				// trust it for the widget — the widget is protected but the display
+				// wasn't. Reading `.binding` triggers the lazy disk verify — done ONLY
+				// when TTL-fresh, same discipline as the snapshot-tier gate above.
+				const boundToDisk: BoundToCurrentDisk | undefined = ttlFresh
+					? readBoundToCurrentDisk(entry)
+					: undefined;
+				const bindingRejected = boundToDisk === false;
+				if (bindingRejected) fallbackBindingRejected = true;
 				logCascade({
 					phase: "neighbor_fallback",
 					filePath,
 					neighborFile: neighborPath,
 					fallbackUsed: true,
 					error: String(result.reason),
+					// #1104: distinguish a binding-rejected fallback (TTL-fresh but the
+					// server's view diverged from disk) from a plain TTL-stale/missing
+					// one — same conditional pattern as the neighbor_touch/neighbor_snapshot
+					// phases above.
+					...(bindingRejected && {
+						metadata: { bindingState: bindingStateLabel(boundToDisk) },
+					}),
 				});
-				const entry = allDiags.get(normalizeMapKey(neighborPath));
 				// #692: `source: "cascade"` dropped (see the doc comment above the
 				// first cascade call site in this file) — no longer affects `rule`
 				// and cascade output never touches persisted widget/dedup state.
 				const diags =
-					entry && Date.now() - entry.ts < CASCADE_TTL_MS
+					ttlFresh && !bindingRejected
 						? convertLspDiagnostics(
 								entry.diags
 									.filter((d) => d.severity === 1)
@@ -1698,7 +1741,14 @@ export async function computeCascadeForFile(
 	// CR-3/A2: degraded fallback when no neighbor produced trustworthy LSP data —
 	// not merely when the graph returned zero neighbors.
 	if (!producedLspData) {
-		appendFallbackNeighbors(neighbors, allDiags, normalizedFileKey, cwd);
+		const bindingRejected = appendFallbackNeighbors(
+			neighbors,
+			allDiags,
+			normalizedFileKey,
+			cwd,
+			filePath,
+		);
+		if (bindingRejected) fallbackBindingRejected = true;
 		if (neighbors.some((n) => n.reason === "fallback")) {
 			logCascade({
 				phase: "neighbor_fallback",
@@ -1717,6 +1767,23 @@ export async function computeCascadeForFile(
 		visibleNeighbors,
 		impact.neighborFiles.length,
 	);
+
+	// #1104 HONESTY: filtering a bound-false display candidate must not turn a
+	// degraded/indeterminate cascade into a clean-looking one (same doctrine as
+	// #1023's graph-degraded marker). If every candidate the degraded-fallback
+	// paths considered this run was binding-rejected and nothing else produced
+	// output, thread the SAME indeterminate marker #1023 built so the turn-end
+	// advisory (clients/runtime-turn.ts) surfaces an honest note instead of
+	// silence — never let a withheld-stale-snapshot run look like a genuine
+	// clean leaf. `!impact.indeterminate` preserves a graph-degraded marker that
+	// already exists (never overwritten).
+	if (!formatted && fallbackBindingRejected && !impact.indeterminate) {
+		impact.indeterminate = {
+			reason: "lsp_binding_rejected",
+			detail:
+				"cascade fallback diagnostics were withheld — stale snapshot content did not match current disk (binding rejected)",
+		};
+	}
 
 	const filesWithErrors = visibleNeighbors.filter(
 		(n) => n.diagnostics.length > 0,
@@ -1828,6 +1895,11 @@ function applyCascadeDeltaBaselines(
 	});
 }
 
+/**
+ * Returns `true` when at least one otherwise-eligible candidate was withheld
+ * because its content binding was rejected (#1104) — the caller folds this
+ * into the run-level `fallbackBindingRejected` flag for the honesty check.
+ */
 function appendFallbackNeighbors(
 	neighbors: CascadeResult["neighbors"],
 	allDiags: Map<
@@ -1836,10 +1908,13 @@ function appendFallbackNeighbors(
 	>,
 	normalizedFileKey: string,
 	cwd: string,
-): void {
+	filePath: string,
+): boolean {
 	const now = Date.now();
 	const seen = new Set(neighbors.map((n) => normalizeMapKey(n.filePath)));
-	for (const [diagPath, { diags, ts }] of allDiags) {
+	let bindingRejected = false;
+	for (const [diagPath, entry] of allDiags) {
+		const { diags, ts } = entry;
 		const diagKey = normalizeMapKey(diagPath);
 		if (diagKey === normalizedFileKey || seen.has(diagKey)) continue;
 		if (primaryFilesThisTurn.has(diagKey)) continue;
@@ -1851,6 +1926,24 @@ function appendFallbackNeighbors(
 		if (isTestRoleCollateral(diagPath)) continue;
 		if (!nodeFs.existsSync(diagPath)) continue;
 		if (now - ts > CASCADE_TTL_MS) continue;
+		// #1104: a TTL-fresh entry is not automatically trustworthy — consult
+		// binding the same way the reconcile path (#1100) and the touch-error
+		// fallback above do. `false` → skip (a stale/pre-fix-edit snapshot whose
+		// server view diverged from current disk); "unknown"/`true` → unchanged
+		// (the pre-#1104 fallback contract). Reading `.binding` triggers the lazy
+		// disk verify — done ONLY when TTL-fresh, per the established discipline.
+		const boundToDisk = readBoundToCurrentDisk(entry);
+		if (boundToDisk === false) {
+			bindingRejected = true;
+			logCascade({
+				phase: "neighbor_fallback",
+				filePath,
+				neighborFile: diagPath,
+				fallbackUsed: false,
+				metadata: { bindingState: bindingStateLabel(false) },
+			});
+			continue;
+		}
 		// #692: `source: "cascade"` dropped — see the doc comment above the
 		// first cascade `convertLspDiagnostics` call site in this file.
 		const errors = convertLspDiagnostics(
@@ -1867,6 +1960,7 @@ function appendFallbackNeighbors(
 		seen.add(diagKey);
 		if (neighbors.length >= MAX_FILES) break;
 	}
+	return bindingRejected;
 }
 
 function shouldReadCascadeFromSnapshot(filePath: string): boolean {

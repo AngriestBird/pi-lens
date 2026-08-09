@@ -15,6 +15,22 @@ const sharedExclude = [
 	"**/.claude/**",
 ];
 
+// The two slow real-process files `npm run test:integration` runs on their own.
+// `npm run test:unit` is the complement, and the switch has to live here: every
+// project below sets its own `exclude`, which REPLACES the root/CLI value
+// outright, so a `vitest run --exclude <file>` on the command line is silently
+// ignored (it was, from #1101 until 2026-08-06). npm exports the script name it
+// is running, and that survives the with-test-lock wrapper identically on every
+// OS — unlike an inline `FOO=1 …` prefix, which cmd.exe cannot parse.
+// `test:integration` names these same two files positionally in package.json
+// (a positional filter DOES survive) — keep the two lists in step.
+const integrationInclude = [
+	"tests/index-integration.test.ts",
+	"tests/clients/lsp/integration.test.ts",
+];
+const unitOnlyExclude =
+	process.env.npm_lifecycle_event === "test:unit" ? integrationInclude : [];
+
 const sharedGlobalSetup = [
 	"./tests/support/check-build-freshness.ts",
 	"./tests/support/prewarm-grammars.ts",
@@ -156,6 +172,7 @@ export default defineConfig({
 					name: "default",
 					exclude: [
 						...sharedExclude,
+						...unitOnlyExclude,
 						...grammarHeavyInclude,
 						...timingSensitiveInclude,
 						...lspSpawnHeavyInclude,

@@ -7,7 +7,7 @@
  * - Platform-specific handling
  */
 
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import {
 	access,
 	readFile,
@@ -44,6 +44,7 @@ import { type LSPProcess, launchLSP } from "./launch.js";
 import { createLombokJdtlsArgs } from "./lombok.js";
 import { resolveJavaRuntimeEnv } from "./jvm-runtime.js";
 import { normalizeMapKey } from "./path-utils.js";
+import { getRubyVersionDirNamesSync } from "./ruby-drive-dirs.js";
 
 // --- Types ---
 
@@ -683,20 +684,13 @@ function rubyBinCandidates(baseName: string): string[] {
 
 	if (isWin) {
 		// Ruby installer drops versioned dirs on C: by convention, but the drive
-		// and version suffix vary — scan what's actually present instead of hardcoding
+		// and version suffix vary — scan what's actually present instead of
+		// hardcoding. Memoized once per process (#1137): a synchronous drive-root
+		// enumeration per LSP spawn was an event-loop offender.
 		const driveRoot = path.parse(home).root; // e.g. "C:\"
-		try {
-			const entries = readdirSync(driveRoot);
-			for (const entry of entries) {
-				if (/^ruby\d/i.test(entry)) {
-					candidates.push(
-						path.join(driveRoot, entry, "bin", `${baseName}.bat`),
-					);
-					candidates.push(path.join(driveRoot, entry, "bin", baseName));
-				}
-			}
-		} catch {
-			// drive root not readable — skip
+		for (const entry of getRubyVersionDirNamesSync(driveRoot)) {
+			candidates.push(path.join(driveRoot, entry, "bin", `${baseName}.bat`));
+			candidates.push(path.join(driveRoot, entry, "bin", baseName));
 		}
 	}
 

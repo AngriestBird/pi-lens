@@ -406,6 +406,7 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 		isConnected: true,
 		isDestroyed: false,
 		shutdownRequested: false,
+		exitedAt: undefined,
 		connectionDisposed: false,
 		lastError: undefined,
 		connection: createMockConnection(),
@@ -420,6 +421,8 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 		diagnosticDocVersions: new Map(),
 		documentContentHashes: new Map(),
 		diagnosticBindings: new Map(),
+		pullResultIds: new Map(),
+		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
 		pendingOpens: new Set(),
 		workspaceDiagnosticsSupport: {
@@ -1257,6 +1260,201 @@ describe("clientWaitForDiagnostics — pull mode (#240)", () => {
 		expect(elapsed).toBeGreaterThanOrEqual(100);
 		// ...and did NOT hang on the never-resolving request.
 		expect(elapsed).toBeLessThan(2000);
+	});
+});
+
+// #1104: thread resultId + the request-time content fingerprint through the
+// PULL protocol (textDocument/diagnostic + workspace/diagnostic) so pull-
+// served diagnostics get the SAME content binding push-served ones have had
+// since #1095, instead of reading "unknown" forever. Mirrors #1095's own
+// client-internals binding tests in shape.
+describe("pull-diagnostics content binding (#1104)", () => {
+	const pullState = (): LSPClientState =>
+		createMockState({
+			serverId: "typescript",
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: false,
+				diagnosticProviderKind: "object",
+			},
+		});
+
+	it("binds a 'full' textDocument/diagnostic report to the sent-content fingerprint and records its resultId", async () => {
+		const state = pullState();
+		const content = "const x = 1;\n";
+		// Mirror production: the document was opened/changed before the pull, so
+		// `documentContentHashes` already holds the exact fingerprint the pull's
+		// answer is presumed to describe — no extra disk read needed.
+		state.openDocuments.add(TEST_KEY);
+		state.documentContentHashes.set(TEST_KEY, {
+			version: 1,
+			hash: hashDiagnosticContent(content),
+		});
+		state.connection.sendRequest = vi.fn().mockResolvedValue({
+			kind: "full",
+			resultId: "r1",
+			items: [
+				{
+					severity: 1,
+					message: "boom",
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 0 },
+					},
+				},
+			],
+		});
+
+		await clientWaitForDiagnostics(state, TEST_FILE, 1000, { pullOnly: true });
+
+		expect(state.diagnosticBindings.get(TEST_KEY)).toEqual({
+			contentHash: hashDiagnosticContent(content),
+		});
+		expect(state.pullResultIds.get(TEST_KEY)).toBe("r1");
+	});
+
+	it("an 'unchanged' report (same resultId) inherits the prior diagnostics AND binding instead of reading as clean", async () => {
+		const state = pullState();
+		const content = "const x = 1;\n";
+		state.openDocuments.add(TEST_KEY);
+		state.documentContentHashes.set(TEST_KEY, {
+			version: 1,
+			hash: hashDiagnosticContent(content),
+		});
+		const sendRequest = vi.fn().mockResolvedValueOnce({
+			kind: "full",
+			resultId: "r1",
+			items: [
+				{
+					severity: 1,
+					message: "boom",
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 0 },
+					},
+				},
+			],
+		});
+		state.connection.sendRequest = sendRequest;
+		await clientWaitForDiagnostics(state, TEST_FILE, 1000, { pullOnly: true });
+		const bindingAfterFull = state.diagnosticBindings.get(TEST_KEY);
+		expect(bindingAfterFull?.contentHash).toBe(hashDiagnosticContent(content));
+
+		// Second pull: server confirms nothing changed (no `items`). Pre-#1104 this
+		// codepath always overwrote with `report.items ?? []` — an empty array —
+		// which would WRONGLY read as a confirmed-clean touch and silently wipe
+		// the still-live "boom" diagnostic (the #570/#571 false-clean shape).
+		sendRequest.mockResolvedValueOnce({ kind: "unchanged", resultId: "r1" });
+		await clientWaitForDiagnostics(state, TEST_FILE, 1000, { pullOnly: true });
+
+		// The prior finding AND its binding both survived the unchanged report.
+		expect(state.documentPullDiagnostics.get(TEST_KEY)?.length).toBe(1);
+		expect(state.diagnosticBindings.get(TEST_KEY)).toEqual(bindingAfterFull);
+		// The second request echoed the resultId from the first.
+		expect(sendRequest.mock.calls[1]?.[1]).toMatchObject({
+			previousResultId: "r1",
+		});
+	});
+
+	it("clearDiagnosticsForPath (a resync) drops the pull resultId basis so a later pull cannot inherit stale content", async () => {
+		const state = pullState();
+		state.openDocuments.add(TEST_KEY);
+		state.documentContentHashes.set(TEST_KEY, {
+			version: 1,
+			hash: hashDiagnosticContent("const x = 1;\n"),
+		});
+		state.connection.sendRequest = vi.fn().mockResolvedValue({
+			kind: "full",
+			resultId: "r1",
+			items: [],
+		});
+		await clientWaitForDiagnostics(state, TEST_FILE, 1000, { pullOnly: true });
+		expect(state.pullResultIds.get(TEST_KEY)).toBe("r1");
+
+		// A resync (didChange) clears diagnostic state for the path.
+		await handleNotifyChange(state, TEST_FILE, "const x = 2;\n");
+
+		expect(state.pullResultIds.has(TEST_KEY)).toBe(false);
+		expect(state.diagnosticBindings.has(TEST_KEY)).toBe(false);
+	});
+});
+
+describe("clientRequestWorkspaceDiagnostics content binding (#1104)", () => {
+	function pullSupportState(): LSPClientState {
+		return createMockState({
+			serverId: "typescript",
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: true,
+				diagnosticProviderKind: "object",
+			},
+		});
+	}
+
+	it("fingerprints disk bytes at request time for a 'full' item and returns the hash", async () => {
+		const state = pullSupportState();
+		const filePath = path.join(os.tmpdir(), `pi-lens-1104-${Date.now()}.ts`);
+		const content = "const y = 2;\n";
+		fs.writeFileSync(filePath, content);
+		try {
+			const uri = pathToFileURL(filePath).href;
+			state.connection.sendRequest = vi.fn().mockResolvedValue({
+				items: [{ uri, kind: "full", resultId: "wr1", items: [] }],
+			});
+
+			const report = await clientRequestWorkspaceDiagnostics(state, 1000);
+
+			expect(report?.[0]?.contentHash).toBe(hashDiagnosticContent(content));
+		} finally {
+			fs.rmSync(filePath, { force: true });
+		}
+	});
+
+	it("an 'unchanged' item inherits the prior pull's diagnostics + contentHash and echoes previousResultIds on the next request", async () => {
+		const state = pullSupportState();
+		const filePath = path.join(os.tmpdir(), `pi-lens-1104b-${Date.now()}.ts`);
+		fs.writeFileSync(filePath, "const y = 2;\n");
+		try {
+			const uri = pathToFileURL(filePath).href;
+			const sendRequest = vi.fn().mockResolvedValueOnce({
+				items: [
+					{
+						uri,
+						kind: "full",
+						resultId: "wr1",
+						items: [
+							{
+								severity: 1,
+								message: "boom",
+								range: {
+									start: { line: 0, character: 0 },
+									end: { line: 0, character: 0 },
+								},
+							},
+						],
+					},
+				],
+			});
+			state.connection.sendRequest = sendRequest;
+			const first = await clientRequestWorkspaceDiagnostics(state, 1000);
+			const firstHash = first?.[0]?.contentHash;
+			expect(first?.[0]?.diagnostics.length).toBe(1);
+
+			sendRequest.mockResolvedValueOnce({
+				items: [{ uri, kind: "unchanged", resultId: "wr1" }],
+			});
+			const second = await clientRequestWorkspaceDiagnostics(state, 1000);
+
+			expect(second?.[0]?.diagnostics.length).toBe(1);
+			expect(second?.[0]?.contentHash).toBe(firstHash);
+			expect(sendRequest.mock.calls[1]?.[1]).toMatchObject({
+				previousResultIds: [{ uri, value: "wr1" }],
+			});
+		} finally {
+			fs.rmSync(filePath, { force: true });
+		}
 	});
 });
 

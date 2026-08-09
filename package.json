@@ -21,7 +21,7 @@
     "lint": "tsc --project tsconfig.json",
     "watch": "tsc --watch",
     "test": "node scripts/with-test-lock.mjs -- vitest run",
-    "test:unit": "node scripts/with-test-lock.mjs -- vitest run --ignore tests/index-integration.test.ts --ignore tests/clients/lsp/integration.test.ts",
+    "test:unit": "node scripts/with-test-lock.mjs -- vitest run",
     "test:integration": "node scripts/with-test-lock.mjs -- vitest run tests/index-integration.test.ts tests/clients/lsp/integration.test.ts",
     "test:watch": "vitest",
     "check": "node scripts/check-extensions.mjs",

@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
 import { logLatency } from "./latency-logger.js";
 import { findNearestContaining, walkUpDirs } from "./path-utils.js";
 import type { ProjectConventions } from "./project-conventions.js";
@@ -14,6 +15,26 @@ export interface FormatterPolicy {
 	gate: ToolGate;
 }
 
+// Extension → formatter policy. This map, `FORMATTER_POLICY_BY_FILENAME`, and
+// `AUTO_INSTALLABLE_DEFAULT_FORMATTERS` are the inverse of the formatter
+// definitions in `clients/formatters.ts` (formatter → extensions). The two are
+// bound by `tests/clients/formatter-policy-consistency.test.ts` (#1135, the
+// #883/#209 single-source-of-truth class) so they cannot drift silently. All
+// three are re-exported (read-only intent) via a single `export {}` below —
+// deliberately NOT inline on these declarations, to keep the pre-existing,
+// structural lookup-table duplication out of the PR's "new code" (SonarCloud).
+//
+// Two deliberate #1135 decisions live in the entries below, documented here so
+// the rationale sits outside the duplicated run:
+//   - `.sass` offers ["biome", "prettier"] only — NOT oxfmt: oxfmt is absent
+//     from OXFMT_SUPPORTED_EXTENSIONS (oxfmt/prettier handle .css/.scss/.less,
+//     not the indented `.sass` syntax). It was previously hand-listed here,
+//     diverging from the oxfmt definition (inert, because `matching` filtered
+//     it out); dropped to bind the two.
+//   - `.fish` intentionally has NO entry. `fish-indent` is a LINT runner
+//     (getLinterPolicyForFile), not a FormatterInfo — a formatter policy naming
+//     it was a dead, unsatisfiable entry; fish reformatting runs via the
+//     linter/autofix path. Removed to keep extension→formatter consistent.
 const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 	[
 		".js",
@@ -144,7 +165,8 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 	[
 		".sass",
 		{
-			formatterNames: ["biome", "prettier", "oxfmt"],
+			// #1135: no oxfmt (see map header comment).
+			formatterNames: ["biome", "prettier"],
 			defaultFormatter: "biome",
 			defaultWhenUnconfigured: true,
 			gate: "smart-default",
@@ -516,15 +538,6 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		},
 	],
 	[
-		".fish",
-		{
-			formatterNames: ["fish-indent"],
-			defaultFormatter: "fish-indent",
-			defaultWhenUnconfigured: true,
-			gate: "smart-default",
-		},
-	],
-	[
 		".toml",
 		{
 			formatterNames: ["taplo"],
@@ -655,10 +668,15 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 // oxfmt supports these extensions — registered as a candidate formatter for each.
 // Using a post-processing pass avoids repeating the same modification across
 // many map entries (and keeps SonarCloud's duplication gate happy).
-const OXFMT_SUPPORTED_EXTENSIONS = new Set([
+// This is the SINGLE SOURCE OF TRUTH for oxfmt's supported extensions — do not
+// hand-maintain a second copy; `clients/formatters.ts`'s `oxfmtFormatter.extensions`
+// imports and spreads this same Set (#1134; previously two parallel hand-maintained
+// lists, the #883 single-source-of-truth class).
+export const OXFMT_SUPPORTED_EXTENSIONS = new Set([
 	".js", ".jsx", ".mjs", ".cjs",
 	".ts", ".tsx", ".mts", ".cts",
 	".vue",
+	".svelte",
 	".css", ".scss", ".less",
 	".html", ".htm",
 	".json", ".jsonc",
@@ -672,6 +690,23 @@ const OXFMT_SUPPORTED_EXTENSIONS = new Set([
 FORMATTER_POLICY_BY_EXTENSION.set(".vue", {
 	formatterNames: ["prettier"],
 	defaultFormatter: "prettier",
+	defaultWhenUnconfigured: false,
+	gate: "config-first",
+});
+
+// Add .svelte entry (no prior formatter policy existed for this extension —
+// docs/language-coverage.md previously listed no formatter). oxfmt is the only
+// candidate; the loop below appends it since ".svelte" is in
+// OXFMT_SUPPORTED_EXTENSIONS. Unlike the other oxfmt extensions, oxfmt's
+// .svelte support is conditional on more than "a config file exists" — see
+// `hasOxfmtSvelteConfig` below, gated in `formatters.ts`'s
+// `hasExplicitFormatterConfig` (verified empirically against the real oxfmt
+// npm binary; oxfmt exits non-zero on .svelte without BOTH the `svelte`
+// package installed and the config's `svelte` flag enabled — an unconditional
+// offer would guarantee a formatter failure, not a no-op).
+FORMATTER_POLICY_BY_EXTENSION.set(".svelte", {
+	formatterNames: [],
+	defaultFormatter: "oxfmt",
 	defaultWhenUnconfigured: false,
 	gate: "config-first",
 });
@@ -691,6 +726,32 @@ const AUTO_INSTALLABLE_DEFAULT_FORMATTERS = new Map<string, string>([
 	["ktlint", "ktlint"],
 ]);
 
+// `gate: "smart-default"` so a matched file is formatted only when nothing else
+// claims it. Misdetection edge: `root.hcl` is filename-detected as terragrunt, so
+// a non-terragrunt `root.hcl` gets smart-default formatted with `terragrunt hcl
+// fmt`'s generic HCL canonicalization — a soft outcome (canonical HCL, no config
+// semantics assumed), not a hard failure.
+const TERRAGRUNT_FORMATTER_POLICY: FormatterPolicy = {
+	formatterNames: ["terragrunt-hcl"],
+	defaultFormatter: "terragrunt-hcl",
+	defaultWhenUnconfigured: true,
+	gate: "smart-default",
+};
+
+const FORMATTER_POLICY_BY_FILENAME = new Map<string, FormatterPolicy>(
+	TERRAGRUNT_FILENAMES.map((name) => [name, TERRAGRUNT_FORMATTER_POLICY]),
+);
+
+// Re-exported (read-only intent) for the #1135 drift guard. Kept as a single
+// separate statement — NOT inline on the declarations above — so the touched
+// lines don't fall at the head of the pre-existing lookup-table duplication and
+// get counted as new duplicated code. Bindings are live, so position is safe.
+export {
+	AUTO_INSTALLABLE_DEFAULT_FORMATTERS,
+	FORMATTER_POLICY_BY_EXTENSION,
+	FORMATTER_POLICY_BY_FILENAME,
+};
+
 export function getFormatterPolicyForExtension(
 	ext: string,
 ): FormatterPolicy | undefined {
@@ -700,6 +761,10 @@ export function getFormatterPolicyForExtension(
 export function getFormatterPolicyForFile(
 	filePath: string,
 ): FormatterPolicy | undefined {
+	const byFilename = FORMATTER_POLICY_BY_FILENAME.get(
+		path.basename(filePath).toLowerCase(),
+	);
+	if (byFilename) return byFilename;
 	return getFormatterPolicyForExtension(path.extname(filePath));
 }
 
@@ -789,6 +854,7 @@ export type LintRunnerName =
 	| "shellcheck"
 	| "fish-indent"
 	| "tflint"
+	| "terragrunt"
 	| "credo"
 	| "cpp-check"
 	| "dart-analyze"
@@ -1225,6 +1291,7 @@ export interface LinterPolicyContext {
 	hasMypyConfig?: boolean;
 	hasDetektConfig?: boolean;
 	hasKtfmtConfig?: boolean;
+	hasTflintConfig?: boolean;
 }
 
 export interface AutofixPolicyContext {
@@ -1343,6 +1410,16 @@ export function getLinterPolicyForFile(
 		};
 	}
 
+	if (TERRAGRUNT_FILENAMES.includes(path.basename(filePath).toLowerCase())) {
+		return {
+			runnerNames: ["terragrunt"],
+			preferredRunners: ["terragrunt"],
+			defaultRunner: "terragrunt",
+			defaultWhenUnconfigured: true,
+			gate: "smart-default",
+		};
+	}
+
 	if ([".kt", ".kts"].includes(ext)) {
 		// When the project opts into ktfmt, ktfmt (a pure formatter wired as a safe
 		// autofix) owns Kotlin formatting; ktlint's lint steps aside so its style
@@ -1430,7 +1507,7 @@ export function getLinterPolicyForFile(
 			preferredRunners: ["tflint"],
 			defaultRunner: "tflint",
 			defaultWhenUnconfigured: true,
-			gate: "smart-default",
+			gate: context.hasTflintConfig ? "config-first" : "smart-default",
 		};
 	}
 
@@ -1531,6 +1608,9 @@ export function getLinterPolicyForCwd(
 		hasMypyConfig: hasMypyConfig(cwd),
 		hasDetektConfig: hasDetektConfig(cwd),
 		hasKtfmtConfig: hasKtfmtConfig(cwd),
+		// From the file's directory, not cwd: a `.tflint.hcl` in a terraform
+		// subdirectory is invisible to an upward walk that starts at the repo root.
+		hasTflintConfig: hasTflintConfig(path.dirname(path.resolve(cwd, filePath))),
 	};
 	const policy = getLinterPolicyForFile(filePath, context);
 	if (policy) {
@@ -1872,6 +1952,49 @@ export function hasOxfmtConfig(cwd: string): boolean {
 	return false;
 }
 
+// Empirically verified against the real `oxfmt` npm package (0.62.0), a
+// scratch fixture, and a plain `Component.svelte` — see PR body for the full
+// four-cell matrix. Both conditions are required; either alone always fails:
+//   - no `svelte` package, no config flag  -> exit 2 ("excluded by ignore rules")
+//   - no `svelte` package, config flag on  -> exit 2 ("Cannot find module 'svelte/compiler'")
+//   - `svelte` package installed, no flag  -> exit 2 ("excluded by ignore rules")
+//   - `svelte` package installed, flag on  -> exit 0, formats the file
+// Per https://oxc.rs/docs/guide/usage/formatter/language-support.html, oxfmt
+// also requires the npm-distributed binary (not the standalone GitHub-release
+// binary) for `.svelte` — pi-lens already resolves oxfmt via `findInNodeModules`/
+// `which`, which favors the npm-installed binary, so that requirement is not
+// separately re-checked here.
+const OXFMT_SVELTE_TOML_TRUE = /(^|\n)\s*svelte\s*=\s*true\s*(\r?\n|$)/;
+
+export function hasOxfmtSvelteConfig(cwd: string): boolean {
+	if (!hasNearestPackageJsonDependency(cwd, "svelte")) return false;
+	for (const dir of walkUpDirs(cwd)) {
+		const rcPath = path.join(dir, ".oxfmtrc.json");
+		if (fs.existsSync(rcPath)) {
+			try {
+				const cfg = JSON.parse(fs.readFileSync(rcPath, "utf-8")) as Record<
+					string,
+					unknown
+				>;
+				if (cfg.svelte === true) return true;
+			} catch {}
+		}
+		// oxfmt.toml is TOML; pi-lens has no TOML parser dependency, so this is
+		// a targeted line match for the single boolean key rather than a full
+		// parse (same pragmatic style as hasVitePlusConfig's content.includes
+		// check above) — presence of the file alone is NOT sufficient, since a
+		// TOML config can omit `svelte` or set it false.
+		const tomlPath = path.join(dir, "oxfmt.toml");
+		if (fs.existsSync(tomlPath)) {
+			try {
+				const content = fs.readFileSync(tomlPath, "utf-8");
+				if (OXFMT_SVELTE_TOML_TRUE.test(content)) return true;
+			} catch {}
+		}
+	}
+	return false;
+}
+
 export function hasStylelintConfig(cwd: string): boolean {
 	for (const dir of walkUpDirs(cwd)) {
 		if (STYLELINT_CONFIGS.some((cfg) => fs.existsSync(path.join(dir, cfg)))) {
@@ -2064,6 +2187,16 @@ export function hasRuffConfig(cwd: string): boolean {
 
 export function hasGolangciConfig(cwd: string): boolean {
 	return findNearestContaining(cwd, GOLANGCI_CONFIGS) !== undefined;
+}
+
+// tflint ships built-in rules and runs without config, so `.tflint.hcl` is not
+// a prerequisite — it is the project electing tflint as its terraform linter,
+// which promotes the policy from smart-default to config-first. Takes a start
+// directory rather than the project cwd because tflint resolves config
+// per-directory: callers pass the EDITED FILE's directory so this agrees with
+// what the runner will actually hand tflint via `--config`.
+export function hasTflintConfig(startDir: string): boolean {
+	return findNearestContaining(startDir, [".tflint.hcl"]) !== undefined;
 }
 
 export function hasClangFormatConfig(cwd: string): boolean {

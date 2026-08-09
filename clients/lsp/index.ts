@@ -209,6 +209,12 @@ export interface LSPState {
 const BROKEN_BASE_COOLDOWN_MS = 15_000;
 const BROKEN_MAX_COOLDOWN_MS = 5 * 60_000; // cap at 5 minutes
 const BROKEN_PERMANENT_AFTER = 5; // disable for session after N consecutive failures
+// #1127: a client that dies THIS soon after a successful spawn/initialize is
+// treated as a crash-loop symptom (opengrep's post-init "Unhandled message"
+// exit), not a legitimate long-running server that happened to restart once.
+// 60s comfortably covers normal serve-a-few-files-then-idle sessions while
+// still catching "spawns fine, dies within seconds every time" servers.
+const RUNTIME_EXIT_UPTIME_THRESHOLD_MS = 60_000;
 // #743: a server whose per-server notify write (didOpen/didChange) times out
 // this many times in a row is a persistently backpressured server; it is demoted
 // into the `broken` cooldown map (evicted + cooled down) so subsequent sweeps
@@ -502,6 +508,18 @@ export interface LSPWorkspaceDiagnosticResult {
 	 * #1092 touchedAt-re-arming defect).
 	 */
 	observedAt?: number;
+	/**
+	 * #1104: sha256 of the file bytes this result's diagnostics were computed
+	 * against, when known — from the pull path's server-answered `resultId`
+	 * flow (a "full" `workspace/diagnostic`/`textDocument/diagnostic` report is
+	 * fingerprinted at request time; an "unchanged" report inherits the prior
+	 * fingerprint) or, for a per-file touch, the SAME `contentHash` the #1095
+	 * push-path binding records. Absent means "no hash available" (never
+	 * fabricated) — the cache-record site below then honestly stores no
+	 * contentHash and a later `lookup()`'s binding reads "unknown", exactly the
+	 * pre-#1104 behavior for that entry.
+	 */
+	contentHash?: string;
 }
 
 /**
@@ -770,6 +788,21 @@ export class LSPService {
 	private readonly optionalDisabled = new Set<string>();
 	/** Consecutive failure counts for exponential backoff circuit breaker */
 	private readonly failureCounts = new Map<string, number>();
+	/**
+	 * #1127: consecutive EARLY post-init runtime exits — a client that closed
+	 * unexpectedly (not via our own `shutdown()`) with an uptime under
+	 * {@link RUNTIME_EXIT_UPTIME_THRESHOLD_MS}. Tracked separately from
+	 * {@link failureCounts} because a successful spawn/initialize clears that
+	 * map (correct for the spawn/init failure class it was built for — see
+	 * `spawnClient`'s success path) but is exactly the event a crash-loop
+	 * server keeps producing right before it dies again; reusing the same map
+	 * would make every respawn erase the streak the moment it re-spawned,
+	 * which is the #1127 bug. This counter shares the SAME cooldown formula,
+	 * the SAME `state.broken`/`permanentlyBroken` maps, and the SAME
+	 * give-up-after-N-failures threshold as the spawn/init breaker — it is a
+	 * parallel counter feeding one circuit, not a second mechanism.
+	 */
+	private readonly runtimeExitCounts = new Map<string, number>();
 	/** Server/root keys disabled for the rest of this session after repeated failures. */
 	private readonly permanentlyBroken = new Set<string>();
 	/**
@@ -1302,6 +1335,29 @@ export class LSPService {
 			}
 			// Dead client — was previously alive, now needs respawn
 			const spawnedAt = this.state.clientSpawnedAt.get(key);
+			// #1127: capture BEFORE calling existing.shutdown() below — both
+			// wasShutdownIntentional() and getExitedAt() read state that
+			// existing.shutdown() itself mutates as a side effect of our own
+			// cleanup (shutdownRequested flips true, and the process exit it
+			// triggers would stamp exitedAt at CLEANUP time rather than at the
+			// real death), so both must be read before that call.
+			const wasIntentional = existing.wasShutdownIntentional();
+			const exitedAt = existing.getExitedAt();
+			// #1127: lifetime MUST be measured from the client's own recorded
+			// death (exitedAt), not from "now" (this detection). Detection is
+			// lazy — the next file attach — and #1127's real-world pattern is
+			// attach-triggered respawns minutes to HOURS apart: a server that
+			// died 5s after spawning but wasn't detected until an hour later
+			// must still read as an early, breaker-worthy exit. Fall back to the
+			// detection-time delta only when exitedAt is somehow unset (the
+			// client's own exit handlers always set it before isAlive() can go
+			// false, so this is a defensive fallback, not the expected path).
+			const uptimeMs =
+				exitedAt != null && spawnedAt != null
+					? exitedAt - spawnedAt
+					: spawnedAt != null
+						? Date.now() - spawnedAt
+						: null;
 			logLatency({
 				type: "phase",
 				phase: "lsp_server_respawn",
@@ -1310,7 +1366,8 @@ export class LSPService {
 				metadata: {
 					serverId: server.id,
 					root,
-					uptimeMs: spawnedAt != null ? Date.now() - spawnedAt : null,
+					uptimeMs,
+					intentional: wasIntentional,
 				},
 			});
 			try {
@@ -1321,6 +1378,50 @@ export class LSPService {
 			this.state.clients.delete(key);
 			this.state.clientSpawnedAt.delete(key);
 			this.state.broken.delete(key);
+
+			// #1127: count EARLY, non-intentional runtime exits toward the circuit
+			// breaker. Spawn/initialize itself succeeded here (this client made it
+			// into state.clients), so `failureCounts` — the spawn/init breaker —
+			// never saw this failure and was cleared to 0 on that earlier success.
+			// Without this, a server that spawns fine and then dies shortly after
+			// serving (opengrep's post-init "Unhandled message" crash, #1122/#1127)
+			// respawns forever: cooldown/permanent-disable never engage.
+			//
+			// Deliberate teardowns (session reset, #743 notify-backpressure
+			// eviction, a generation handoff) call `shutdown()` themselves and set
+			// `shutdownRequested` before the process exits — those must never count,
+			// or a legitimate restart would wrongly march the server toward
+			// permanent disablement.
+			if (wasIntentional) {
+				// Not evidence of a bad server — leave any existing runtime-exit
+				// streak alone (a deliberate restart is not a recovery signal
+				// either; only clear the streak once the server proves itself by
+				// staying up past the threshold, handled in the `else` below).
+			} else if (uptimeMs != null && uptimeMs < RUNTIME_EXIT_UPTIME_THRESHOLD_MS) {
+				const rCount = (this.runtimeExitCounts.get(key) ?? 0) + 1;
+				this.runtimeExitCounts.set(key, rCount);
+				const rCooldown = Math.min(
+					BROKEN_BASE_COOLDOWN_MS * 2 ** (rCount - 1),
+					BROKEN_MAX_COOLDOWN_MS,
+				);
+				this.state.broken.set(key, Date.now() + rCooldown);
+				if (!isOptionalServer && rCount >= BROKEN_PERMANENT_AFTER) {
+					this.permanentlyBroken.add(key);
+					logSessionStart(
+						`lsp respawn ${server.id}: permanently disabled after ${rCount} early post-init exits (uptimeMs=${uptimeMs})`,
+					);
+				} else {
+					logSessionStart(
+						`lsp respawn ${server.id}: early post-init exit ${rCount}/${BROKEN_PERMANENT_AFTER} (uptimeMs=${uptimeMs}), cooldown=${rCooldown}ms`,
+					);
+				}
+			} else {
+				// Survived past the threshold (or uptime unknown) before dying —
+				// this was a functioning server, not a crash loop. Reset the streak
+				// so an occasional post-longrun crash doesn't creep it toward
+				// permanent disablement.
+				this.runtimeExitCounts.delete(key);
+			}
 		}
 
 		const brokenUntil = this.state.broken.get(key);
@@ -2827,6 +2928,11 @@ export class LSPService {
 	 * else all "unknown" (or no contributors) → "unknown"; else true. The
 	 * surfaced version/contentHash come from the first contributor that carries
 	 * them — informational only; the load-bearing field is `boundToCurrentDisk`.
+	 * #1104: `version` and `contentHash` are tracked INDEPENDENTLY (not gated on
+	 * the same contributor carrying both) — a pull-sourced binding deliberately
+	 * has no `version` (the pull protocol has no version-echo concept) but does
+	 * carry a real `contentHash`; gating the latter on the former would silently
+	 * drop it here even though `boundToCurrentDisk` above already used it.
 	 */
 	private mergeBinding(
 		filePath: string,
@@ -2841,6 +2947,8 @@ export class LSPService {
 			);
 			if (version === undefined && entry?.version !== undefined) {
 				version = entry.version;
+			}
+			if (contentHash === undefined && entry?.contentHash !== undefined) {
 				contentHash = entry.contentHash;
 			}
 		}
@@ -3262,10 +3370,15 @@ export class LSPService {
 			// Do not rename or send didRenameFiles while any server still has the
 			// old document open. Re-open/resync every affected client so a partial
 			// close cannot leave an in-memory document behind the disk contents.
+			// Reopen with the document's ACTUAL language ID (the same resolver every
+			// genuine open uses) rather than a hardcoded "plaintext" fallback — a
+			// wrong languageId here degrades that server's diagnostics until the
+			// next genuine open (#1147 P3-7).
 			const content = await fs.readFile(oldFilePath, "utf-8");
+			const languageId = getLanguageId(oldFilePath) ?? "plaintext";
 			await Promise.all(
 				openDocuments.map(({ client }) =>
-					client.notify.open(oldFilePath, content, "plaintext", true, true),
+					client.notify.open(oldFilePath, content, languageId, true, true),
 				),
 			);
 			throw new Error(
@@ -4025,6 +4138,23 @@ export class LSPService {
 						?.inconclusive === true;
 				const timedOut = diagnostics === undefined || inconclusive;
 				if (timedOut) timedOutFiles += 1;
+				// #1104 (shape 5 — AGENTS.md): read the touch's content binding off
+				// the RAW `diagnostics` array here, before `applyAuxiliarySuppressions`
+				// below rebuilds it via `.filter()` — a `.filter()` result is a NEW
+				// array and does not carry over the source's non-enumerable
+				// `.binding` (see #1095's own `Object.defineProperty` comment: "JSON.
+				// stringify / spread / logging ... unaffected" cuts both ways — a
+				// derived COPY never gets it either). A version-less/pull-less
+				// server's `diagnostics` simply carries no `.binding`, so
+				// `contentHash` stays undefined here (honest "unknown" downstream),
+				// matching pre-#1104 behavior exactly.
+				const rawBinding = (
+					diagnostics as
+						| (typeof diagnostics & {
+								binding?: import("./diagnostic-binding.js").DiagnosticBinding;
+						  })
+						| undefined
+				)?.binding;
 				// #586: honor each auxiliary profile's native inline-suppression
 				// comment (e.g. opengrep's `// nosemgrep`, #441) — computed from the
 				// raw `diagnostics` (before this drops its non-enumerable
@@ -4048,6 +4178,7 @@ export class LSPService {
 					diagnostics: filteredDiagnostics ?? [],
 					count: filteredDiagnostics?.length ?? 0,
 					timedOut,
+					contentHash: rawBinding?.contentHash,
 				});
 			} catch (err) {
 				results.push({
@@ -4241,11 +4372,20 @@ export class LSPService {
 		for (const result of results) {
 			const scannedAt = scannedMtimeByFile.get(result.filePath);
 			if (result.error || result.timedOut || scannedAt === undefined) continue;
+			// #1104: thread the per-result `contentHash` (from either the
+			// `tryWorkspacePull` fast path or a per-file touch's own #1095 binding)
+			// into the cache entry — previously this call never passed one, so
+			// every pull-served entry read binding "unknown" forever and the #1095
+			// P2-1 service-sweep binding gate above (`cached.binding.
+			// boundToCurrentDisk !== false`) could never demote a pull-cached
+			// entry. Absent `contentHash` (no binding was available) behaves
+			// exactly as before.
 			workspaceDiagnosticsCacheCtx.record(
 				result.filePath,
 				workspaceSweepScopeKey,
 				result.diagnostics,
 				scannedAt,
+				result.contentHash,
 			);
 		}
 		workspaceDiagnosticsCacheCtx.persist();
@@ -4277,16 +4417,32 @@ export class LSPService {
 				Math.max(perFileMs, workspacePullBudgetMs()),
 			);
 			if (!report) return undefined;
-			const byPath = new Map<string, import("./client.js").LSPDiagnostic[]>();
+			const byPath = new Map<
+				string,
+				{
+					diagnostics: import("./client.js").LSPDiagnostic[];
+					contentHash?: string;
+				}
+			>();
 			for (const entry of report) {
-				byPath.set(normalizeMapKey(entry.filePath), entry.diagnostics);
+				byPath.set(normalizeMapKey(entry.filePath), entry);
 			}
 			return groupFiles.map((filePath) => {
-				const diagnostics = byPath.get(normalizeMapKey(filePath)) ?? [];
+				const entry = byPath.get(normalizeMapKey(filePath));
+				const diagnostics = entry?.diagnostics ?? [];
 				// A pull that got here returned a real workspace/diagnostic report
 				// (see the `!report` guard above) — always confirmed, unlike a
 				// per-file touchFile default-empty on timeout.
-				return { filePath, diagnostics, count: diagnostics.length, timedOut: false };
+				// #1104: `contentHash` comes straight from the client's pull layer —
+				// a file absent from the report (reported "clean" here) carries none,
+				// same honest "unknown" the record site already applies for it.
+				return {
+					filePath,
+					diagnostics,
+					count: diagnostics.length,
+					timedOut: false,
+					contentHash: entry?.contentHash,
+				};
 			});
 		} catch {
 			return undefined;
@@ -4478,6 +4634,13 @@ export class LSPService {
 	/**
 	 * Read-only circuit-breaker status, including server/root pairs that have no
 	 * live client and would therefore be absent from getStatus().
+	 *
+	 * #1127: `failureCounts` (spawn/init failures) and `runtimeExitCounts`
+	 * (early post-init runtime exits) are two INDEPENDENT streams feeding one
+	 * circuit — either can trip its own cooldown/permanent-disable on its own
+	 * threshold, without the other. `failures` below is their SUM, purely for
+	 * display: it is the total churn behind whatever cooldown/permanent state
+	 * is showing, not a claim that both streams are at that count.
 	 */
 	getBrokenStatus(): Array<{
 		serverId: string;
@@ -4495,7 +4658,13 @@ export class LSPService {
 			return {
 				serverId: separator >= 0 ? key.slice(0, separator) : key,
 				root: separator >= 0 ? key.slice(separator + 1) : "",
-				failures: this.failureCounts.get(key) ?? 0,
+				// #1127: spawn/init failures and early post-init runtime exits are
+				// two streams feeding the same breaker (see `runtimeExitCounts`
+				// doc) — sum them so this always reflects the total churn behind
+				// a cooldown/permanent-disable, whichever stream produced it.
+				failures:
+					(this.failureCounts.get(key) ?? 0) +
+					(this.runtimeExitCounts.get(key) ?? 0),
 				permanentlyBroken: this.permanentlyBroken.has(key),
 				cooldownUntil: this.state.broken.get(key) ?? 0,
 			};
