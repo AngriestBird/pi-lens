@@ -35,7 +35,7 @@
  */
 
 import * as path from "node:path";
-import { normalizeMapKey } from "./path-utils.js";
+import { normalizeMapKey, toProjectRelativePath } from "./path-utils.js";
 import { loadProjectSnapshot } from "./project-snapshot.js";
 import type { ReviewGraph } from "./review-graph/types.js";
 
@@ -193,13 +193,20 @@ function clampLimit(limit: number | undefined): number {
 
 // Same display-path convention as module-report.ts's toDisplayPath: cwd-relative
 // + forward-slashed under the project root, else the absolute (slash-normalized)
-// path.
+// path. Delegates to the shape-aware toProjectRelativePath (#1163/#1194) instead
+// of hand-rolling with host-default path.isAbsolute/path.relative, which
+// mis-parses a Windows-shaped path (e.g. a persisted graph symbol-key path) on
+// Linux CI: path.isAbsolute("C:\\repo\\x.ts") is false there, short-circuiting
+// to the raw absolute path instead of relativizing (#1024 divergence class).
 function toDisplayPath(p: string, projectRoot: string): string {
-	if (!path.isAbsolute(p)) return p.replace(/\\/g, "/");
-	const rel = path.relative(projectRoot, p);
-	return rel && !rel.startsWith("..")
-		? rel.replace(/\\/g, "/")
-		: p.replace(/\\/g, "/");
+	return toProjectRelativePath(p, projectRoot);
+}
+
+/** Test-only export (refs #1194) so the shape-aware delegation can be verified
+ * directly without standing up a full review graph — mirrors the
+ * `_reset*ForTests` underscore convention used elsewhere in this file. */
+export function _toDisplayPathForTests(p: string, projectRoot: string): string {
+	return toDisplayPath(p, projectRoot);
 }
 
 function suggestedNext(displayPath: string): {
