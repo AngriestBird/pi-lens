@@ -189,57 +189,138 @@ export function tokenizeLine(line: string): string[] {
  * "lines mentioning the token", a stable signal that doesn't over-weight a line
  * that repeats an identifier. Document length is the total indexed token count.
  */
-export function buildWordIndex(
-	files: Array<{
-		path: string;
-		content: string;
-		mtimeMs?: number;
-		size?: number;
-	}> & {
-		truncated?: boolean;
-	},
-): WordIndex {
-	const postings = new Map<string, WordHit[]>();
-	const docLengths = new PathKeyedMap<number>(wordIndexKey);
-	const forward = new PathKeyedMap<Map<string, number>>(wordIndexKey);
-	const fileMtimes = new PathKeyedMap<number>(wordIndexKey);
-	const fileSizes = new PathKeyedMap<number>(wordIndexKey);
-	let totalTokens = 0;
+type WordIndexInputDocument = {
+	path: string;
+	content: string;
+	mtimeMs?: number;
+	size?: number;
+};
 
-	for (const { path: filePath, content, mtimeMs, size } of files) {
-		const lines = content.split(/\r?\n/);
-		let docLength = 0;
+type WordIndexInputDocuments = WordIndexInputDocument[] & {
+	truncated?: boolean;
+};
+
+const WORD_INDEX_BUILD_YIELD_BUDGET_MS = 8;
+const WORD_INDEX_BUILD_YIELD_CHECK_LINES = 50;
+
+function createEmptyWordIndex(truncated: boolean): WordIndex {
+	return {
+		postings: new Map<string, WordHit[]>(),
+		docLengths: new PathKeyedMap<number>(wordIndexKey),
+		totalTokens: 0,
+		docCount: 0,
+		truncated,
+		forward: new PathKeyedMap<Map<string, number>>(wordIndexKey),
+		fileMtimes: new PathKeyedMap<number>(wordIndexKey),
+		fileSizes: new PathKeyedMap<number>(wordIndexKey),
+	};
+}
+
+function indexWordLine(
+	index: WordIndex,
+	filePath: string,
+	line: string,
+	lineNumber: number,
+	tokenLineCounts: Map<string, number>,
+): number {
+	const lineTokens = tokenizeLine(line);
+	const seenOnLine = new Set<string>();
+	for (const token of lineTokens) {
+		if (seenOnLine.has(token)) continue;
+		seenOnLine.add(token);
+		const arr = index.postings.get(token);
+		if (arr) arr.push({ file: filePath, line: lineNumber });
+		else index.postings.set(token, [{ file: filePath, line: lineNumber }]);
+		tokenLineCounts.set(token, (tokenLineCounts.get(token) ?? 0) + 1);
+	}
+	return lineTokens.length;
+}
+
+function finishWordIndexDocument(
+	index: WordIndex,
+	doc: WordIndexInputDocument,
+	docLength: number,
+	tokenLineCounts: Map<string, number>,
+): void {
+	index.docLengths.set(doc.path, docLength);
+	index.forward?.set(doc.path, tokenLineCounts);
+	index.fileMtimes.set(doc.path, doc.mtimeMs ?? 0);
+	index.fileSizes.set(
+		doc.path,
+		doc.size ?? Buffer.byteLength(doc.content, "utf-8"),
+	);
+	index.totalTokens += docLength;
+	index.docCount += 1;
+}
+
+function indexWordDocument(
+	index: WordIndex,
+	doc: WordIndexInputDocument,
+): void {
+	const lines = doc.content.split(/\r?\n/);
+	const tokenLineCounts = new Map<string, number>();
+	let docLength = 0;
+	for (let i = 0; i < lines.length; i += 1) {
+		docLength += indexWordLine(
+			index,
+			doc.path,
+			lines[i],
+			i + 1,
+			tokenLineCounts,
+		);
+	}
+	finishWordIndexDocument(index, doc, docLength, tokenLineCounts);
+}
+
+export function buildWordIndex(files: WordIndexInputDocuments): WordIndex {
+	const index = createEmptyWordIndex(files.truncated ?? false);
+	for (const doc of files) indexWordDocument(index, doc);
+	return index;
+}
+
+/**
+ * Cooperative production builder for bulk/cold paths. It produces the exact
+ * same index as {@link buildWordIndex}, but time-slices both between documents
+ * and within a large document so startup warmup cannot monopolize pi's TUI
+ * event loop (#1197). The index is private until this resolves, so a superseded
+ * build never publishes a partial replacement.
+ */
+export async function buildWordIndexAsync(
+	files: WordIndexInputDocuments,
+	shouldContinue: () => boolean = () => true,
+): Promise<WordIndex> {
+	const index = createEmptyWordIndex(files.truncated ?? false);
+	let lastYieldAt = performance.now();
+	for (const doc of files) {
+		if (!shouldContinue()) throw new Error("word index build superseded");
+		const lines = doc.content.split(/\r?\n/);
 		const tokenLineCounts = new Map<string, number>();
+		let docLength = 0;
 		for (let i = 0; i < lines.length; i += 1) {
-			const lineTokens = tokenizeLine(lines[i]);
-			docLength += lineTokens.length;
-			const seenOnLine = new Set<string>();
-			for (const token of lineTokens) {
-				if (seenOnLine.has(token)) continue;
-				seenOnLine.add(token);
-				const arr = postings.get(token);
-				if (arr) arr.push({ file: filePath, line: i + 1 });
-				else postings.set(token, [{ file: filePath, line: i + 1 }]);
-				tokenLineCounts.set(token, (tokenLineCounts.get(token) ?? 0) + 1);
+			docLength += indexWordLine(
+				index,
+				doc.path,
+				lines[i],
+				i + 1,
+				tokenLineCounts,
+			);
+			if (
+				(i + 1) % WORD_INDEX_BUILD_YIELD_CHECK_LINES === 0 &&
+				performance.now() - lastYieldAt >= WORD_INDEX_BUILD_YIELD_BUDGET_MS
+			) {
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				if (!shouldContinue()) throw new Error("word index build superseded");
+				lastYieldAt = performance.now();
 			}
 		}
-		docLengths.set(filePath, docLength);
-		forward.set(filePath, tokenLineCounts);
-		fileMtimes.set(filePath, mtimeMs ?? 0);
-		fileSizes.set(filePath, size ?? Buffer.byteLength(content, "utf-8"));
-		totalTokens += docLength;
+		finishWordIndexDocument(index, doc, docLength, tokenLineCounts);
+		if (performance.now() - lastYieldAt >= WORD_INDEX_BUILD_YIELD_BUDGET_MS) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			if (!shouldContinue()) throw new Error("word index build superseded");
+			lastYieldAt = performance.now();
+		}
 	}
-
-	return {
-		postings,
-		docLengths,
-		totalTokens,
-		docCount: files.length,
-		truncated: files.truncated ?? false,
-		forward,
-		fileMtimes,
-		fileSizes,
-	};
+	return index;
 }
 
 /**
@@ -458,20 +539,40 @@ export interface WordIndexRefreshResult {
 	reused: number;
 }
 
+export interface WordIndexRebuildRequired {
+	mode: "full-required";
+	reason:
+		| "missing-incremental-metadata"
+		| "file-set-churn"
+		| "stale-document-churn";
+}
+
+export type WordIndexRefreshOutcome =
+	| WordIndexRefreshResult
+	| WordIndexRebuildRequired;
+
 const WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD = 0.3;
+// A ratio alone misclassifies one stale file in a three-file project as dense.
+// Below this absolute floor, per-document replacement is bounded and cheaper
+// than a second full walk/read even when the percentage is high (#1197).
+const WORD_INDEX_DENSE_REFRESH_MIN_DOCUMENTS = 32;
 
 /**
  * Refresh a serializer-v2 index from the current bounded source-file set.
- * The walk/stat pass is cheap; only stale/new documents are read and tokenized.
- * Throws when the index cannot be updated safely so callers can full-rebuild.
+ * The walk/stat pass is cheap; only sparse stale/new documents are read and
+ * tokenized. Expected dense/legacy states return `full-required` BEFORE any
+ * mutation; unexpected corruption or supersession still throws.
  */
 export async function refreshWordIndexIncrementally(
 	index: WordIndex,
 	root: string,
 	shouldContinue: () => boolean = () => true,
-): Promise<WordIndexRefreshResult> {
+): Promise<WordIndexRefreshOutcome> {
 	if (!index.forward || !index.fileMtimes || !index.fileSizes) {
-		throw new Error("word index lacks incremental metadata");
+		return {
+			mode: "full-required",
+			reason: "missing-incremental-metadata",
+		};
 	}
 	const { collectSourceFilesAsync } = await import("./source-filter.js");
 	const maxFiles = getWordIndexMaxFilesDerived(root);
@@ -497,6 +598,7 @@ export async function refreshWordIndexIncrementally(
 		string,
 		{ path: string; mtimeMs: number; size: number }
 	>();
+	let statted = 0;
 	for (const file of walked) {
 		try {
 			const stat = fs.statSync(file);
@@ -510,6 +612,10 @@ export async function refreshWordIndexIncrementally(
 		} catch {
 			// A file vanishing between walk and stat is simply absent.
 		}
+		if (++statted % 100 === 0) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			if (!shouldContinue()) throw new Error("word index refresh superseded");
+		}
 	}
 
 	const oldSet = new Set([...index.docLengths.keys()].map(wordIndexKey));
@@ -518,7 +624,29 @@ export async function refreshWordIndexIncrementally(
 	for (const key of current.keys()) if (!oldSet.has(key)) changedSet++;
 	const denominator = Math.max(oldSet.size, current.size, 1);
 	if (changedSet / denominator > WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD) {
-		throw new Error("word index file-set churn exceeds incremental threshold");
+		return { mode: "full-required", reason: "file-set-churn" };
+	}
+
+	// Replacing one document filters every shared posting array for that
+	// document's tokens. That is excellent for a sparse edit, but repeating it
+	// for most of the corpus becomes effectively quadratic. Decide the dense
+	// transition BEFORE dropping or editing anything so the old index remains a
+	// valid fallback until a separately-built full replacement is ready (#1197).
+	let staleDocuments = 0;
+	for (const { path: file, mtimeMs, size } of current.values()) {
+		if (
+			index.fileMtimes.get(file) !== mtimeMs ||
+			(index.fileSizes.get(file) ?? -1) !== size
+		) {
+			staleDocuments += 1;
+		}
+	}
+	if (
+		staleDocuments >= WORD_INDEX_DENSE_REFRESH_MIN_DOCUMENTS &&
+		staleDocuments / Math.max(current.size, 1) >
+			WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD
+	) {
+		return { mode: "full-required", reason: "stale-document-churn" };
 	}
 
 	let dropped = 0;
@@ -930,7 +1058,7 @@ export function triggerBackgroundWordIndexBuild(
 			const { loadProjectSnapshot, saveProjectSnapshot, PROJECT_SNAPSHOT_VERSION } =
 				await import("./project-snapshot.js");
 			const docs = await collectWordIndexDocs(key);
-			const index = buildWordIndex(docs);
+			const index = await buildWordIndexAsync(docs);
 			const existing = loadProjectSnapshot(key);
 			const snapshot = existing ?? {
 				version: PROJECT_SNAPSHOT_VERSION,

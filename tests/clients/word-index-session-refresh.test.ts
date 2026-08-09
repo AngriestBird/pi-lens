@@ -5,6 +5,7 @@ import {
 	collectWordIndexDocs,
 	refreshWordIndexIncrementally,
 	searchWordIndex,
+	serializeWordIndex,
 	updateWordIndexDocument,
 } from "../../clients/word-index.js";
 import { _resetProjectScaleBaseForTests } from "../../clients/project-scale.js";
@@ -100,6 +101,8 @@ describe("session-start incremental word-index refresh (#958)", () => {
 			failReads.add(locked);
 
 			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			expect(result.mode).toBe("incremental");
+			if (result.mode !== "incremental") throw new Error(result.reason);
 
 			// The whole pass survived: the readable stale file refreshed, the
 			// unreadable one was skipped (its old posting kept), not a rebuild.
@@ -168,6 +171,8 @@ describe("session-start incremental word-index refresh (#958)", () => {
 			fs.utimesSync(edited, epoch, epoch);
 
 			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			expect(result.mode).toBe("incremental");
+			if (result.mode !== "incremental") throw new Error(result.reason);
 
 			expect(result.refreshed).toBe(1);
 			expect(searchWordIndex(index, "cinnamon")[0]?.file).toBe(edited);
@@ -191,9 +196,100 @@ describe("session-start incremental word-index refresh (#958)", () => {
 
 			createTempFile(env.tmpDir, "src/f5.ts", "export const value5 = 5;");
 			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			expect(result.mode).toBe("incremental");
+			if (result.mode !== "incremental") throw new Error(result.reason);
 			expect(result.refreshed).toBe(1);
 			expect(index.docCount).toBe(6);
 			expect(index.truncated).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("keeps exactly-threshold stale density incremental", async () => {
+		const env = setupTestEnvironment("pi-lens-word-refresh-threshold-");
+		try {
+			const files = Array.from({ length: 100 }, (_, i) =>
+				createTempFile(
+					env.tmpDir,
+					`src/f${i}.ts`,
+					`export const original${i} = ${i};`,
+				),
+			);
+			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+			const future = new Date(Date.now() + 2_000);
+			for (const [i, file] of files.slice(0, 30).entries()) {
+				fs.writeFileSync(file, `export const refreshed${i} = ${i};\n`, "utf8");
+				fs.utimesSync(file, future, future);
+			}
+
+			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+
+			expect(result).toMatchObject({
+				mode: "incremental",
+				refreshed: 30,
+				reused: 70,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("selects an atomic full rebuild before dense stale mutation (#1197)", async () => {
+		const env = setupTestEnvironment("pi-lens-word-refresh-dense-");
+		try {
+			const files = Array.from({ length: 100 }, (_, i) =>
+				createTempFile(
+					env.tmpDir,
+					`src/f${i}.ts`,
+					`export const original${i} = ${i};`,
+				),
+			);
+			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+			const before = serializeWordIndex(index);
+			const future = new Date(Date.now() + 2_000);
+			for (const [i, file] of files.slice(0, 32).entries()) {
+				fs.writeFileSync(file, `export const refreshed${i} = ${i};\n`, "utf8");
+				fs.utimesSync(file, future, future);
+			}
+
+			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+
+			expect(result).toEqual({
+				mode: "full-required",
+				reason: "stale-document-churn",
+			});
+			// The preflight decision precedes every drop/posting mutation. The
+			// caller can continue serving this index until a full replacement is
+			// built and published atomically.
+			expect(serializeWordIndex(index)).toEqual(before);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("aborts during stat preflight without mutating the old index", async () => {
+		const env = setupTestEnvironment("pi-lens-word-refresh-superseded-");
+		try {
+			for (let i = 0; i < 200; i++) {
+				createTempFile(
+					env.tmpDir,
+					`src/f${i}.ts`,
+					`export const value${i} = ${i};`,
+				);
+			}
+			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+			const before = serializeWordIndex(index);
+			let continuationChecks = 0;
+
+			await expect(
+				refreshWordIndexIncrementally(
+					index,
+					env.tmpDir,
+					() => ++continuationChecks < 2,
+				),
+			).rejects.toThrow("word index refresh superseded");
+			expect(serializeWordIndex(index)).toEqual(before);
 		} finally {
 			env.cleanup();
 		}

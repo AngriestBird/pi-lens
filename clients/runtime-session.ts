@@ -688,37 +688,49 @@ async function buildOrRefreshWordIndex(args: {
 					() => runtime.isCurrentSession(sessionGeneration),
 				);
 				if (!runtime.isCurrentSession(sessionGeneration)) return;
-				runtime.wordIndex = index;
-				// A stale project seq must be advanced even when mtimes prove every
-				// indexed document reusable. Fresh snapshots with no changes avoid
-				// an unnecessary rewrite of the large shared snapshot.
-				if (
-					!isProjectSnapshotFresh(snapshot, effectiveSeq) ||
-					result.refreshed > 0 ||
-					result.dropped > 0 ||
-					snapshot.wordIndex.truncated !== index.truncated
-				) {
-					saveRuntimeProjectSnapshot({ cwd: snapshotRoot, runtime, dbg });
+				if (result.mode === "full-required") {
+					dbg(
+						`session_start word-index: incremental preflight selected full rebuild (${result.reason})`,
+					);
+					logWordIndex({
+						phase: "incremental_fallback",
+						cwd: snapshotRoot,
+						trigger: "session_start",
+						reason: result.reason,
+					});
+				} else {
+					runtime.wordIndex = index;
+					// A stale project seq must be advanced even when mtimes prove every
+					// indexed document reusable. Fresh snapshots with no changes avoid
+					// an unnecessary rewrite of the large shared snapshot.
+					if (
+						!isProjectSnapshotFresh(snapshot, effectiveSeq) ||
+						result.refreshed > 0 ||
+						result.dropped > 0 ||
+						snapshot.wordIndex.truncated !== index.truncated
+					) {
+						saveRuntimeProjectSnapshot({ cwd: snapshotRoot, runtime, dbg });
+					}
+					dbg(
+						`session_start word-index: incremental (seq=${effectiveSeq}, refreshed=${result.refreshed}, dropped=${result.dropped}, skipped=${result.skipped}, reused=${result.reused}, ${Date.now() - startMs}ms)`,
+					);
+					// M2, #958: the incremental-vs-full decision + honest coverage
+					// (indexedFileCount/truncated/skipped), independent of host `dbg`.
+					logWordIndex({
+						phase: "incremental_refresh",
+						cwd: snapshotRoot,
+						trigger: "session_start",
+						durationMs: Date.now() - startMs,
+						indexedFileCount: index.docCount,
+						tokens: index.postings.size,
+						truncated: index.truncated,
+						refreshed: result.refreshed,
+						dropped: result.dropped,
+						skipped: result.skipped,
+						reused: result.reused,
+					});
+					return result;
 				}
-				dbg(
-					`session_start word-index: incremental (seq=${effectiveSeq}, refreshed=${result.refreshed}, dropped=${result.dropped}, skipped=${result.skipped}, reused=${result.reused}, ${Date.now() - startMs}ms)`,
-				);
-				// M2, #958: the incremental-vs-full decision + honest coverage
-				// (indexedFileCount/truncated/skipped), independent of host `dbg`.
-				logWordIndex({
-					phase: "incremental_refresh",
-					cwd: snapshotRoot,
-					trigger: "session_start",
-					durationMs: Date.now() - startMs,
-					indexedFileCount: index.docCount,
-					tokens: index.postings.size,
-					truncated: index.truncated,
-					refreshed: result.refreshed,
-					dropped: result.dropped,
-					skipped: result.skipped,
-					reused: result.reused,
-				});
-				return result;
 			} catch (err) {
 				dbg(
 					`session_start word-index: incremental refresh failed; falling back to full rebuild (${err})`,
@@ -737,14 +749,18 @@ async function buildOrRefreshWordIndex(args: {
 	// implementation backs this task, the quick-mode warmup call below, AND the
 	// stateless cold-query background trigger in word-index.ts — a bound/skip
 	// -rule change lands once, not in three copies.
-	const { buildWordIndex, collectWordIndexDocs } = await import(
+	const { buildWordIndexAsync, collectWordIndexDocs } = await import(
 		"./word-index.js"
 	);
 	const docs = await collectWordIndexDocs(analysisRoot, () =>
 		runtime.isCurrentSession(sessionGeneration),
 	);
 	if (!runtime.isCurrentSession(sessionGeneration)) return;
-	runtime.wordIndex = buildWordIndex(docs);
+	const rebuiltIndex = await buildWordIndexAsync(docs, () =>
+		runtime.isCurrentSession(sessionGeneration),
+	);
+	if (!runtime.isCurrentSession(sessionGeneration)) return;
+	runtime.wordIndex = rebuiltIndex;
 	saveRuntimeProjectSnapshot({ cwd: snapshotRoot, runtime, dbg });
 	dbg(
 		`session_start word-index: rebuilt (absent/stale, seq=${effectiveSeq}) ` +
