@@ -66,6 +66,7 @@ export const STALE_HEARTBEAT_MS = 6 * 60 * 60 * 1000;
 import { spawn as nodeSpawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { writeFileAtomicAsync } from "./atomic-write.js";
 import { spawnCollectStdout, unrefChildAndPipes } from "./child-unref.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import {
@@ -763,8 +764,23 @@ export async function sweepOrphans(): Promise<void> {
  *  instances from the registry. Re-reads immediately before
  *  writing (rather than reusing the earlier `readInstanceRegistry()` snapshot)
  *  to narrow — not eliminate — the last-writer-wins race already accepted for
- *  slice 1's read-modify-write model. */
-async function pruneDeadInstances(deadPids: Set<number>): Promise<void> {
+ *  slice 1's read-modify-write model.
+ *
+ *  Exported for the #1217 concurrency regression test; `sweepOrphans` is the
+ *  only production caller.
+ *
+ *  #1217: this used to hand-roll `${target}.tmp-${process.pid}` + rename
+ *  instead of going through `atomic-write.ts`, so it never inherited the
+ *  #1205 fix — two concurrent prunes in one process staged into one shared
+ *  inode and the first rename published it while the second was still
+ *  writing. That is reachable here rather than theoretical: this store is
+ *  machine-global and written fire-and-forget from `instance-registry.ts`'s
+ *  `prunePids` as well, and `readInstanceRegistry` degrades a parse failure
+ *  to empty, so a tear dropped EVERY registered instance rather than one
+ *  entry. `writeFileAtomicAsync` also cleans up its staging file on a failed
+ *  rename, which the hand-rolled copy did not, and puts this writer back on
+ *  the same scheme as the other writer of this same file. */
+export async function pruneDeadInstances(deadPids: Set<number>): Promise<void> {
 	const target = path.join(getGlobalPiLensDir(), "instances.json");
 	try {
 		const raw = await fs.promises.readFile(target, "utf-8");
@@ -774,14 +790,8 @@ async function pruneDeadInstances(deadPids: Set<number>): Promise<void> {
 			(entry: InstanceEntry) => !deadPids.has(entry.pid),
 		);
 		if (remaining.length === parsed.instances.length) return;
-		const tmpPath = `${target}.tmp-${process.pid}`;
 		await fs.promises.mkdir(getGlobalPiLensDir(), { recursive: true });
-		await fs.promises.writeFile(
-			tmpPath,
-			JSON.stringify({ instances: remaining }),
-			"utf-8",
-		);
-		await fs.promises.rename(tmpPath, target);
+		await writeFileAtomicAsync(target, JSON.stringify({ instances: remaining }));
 	} catch {
 		// best-effort
 	}

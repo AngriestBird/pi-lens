@@ -4,6 +4,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { parentPort } from "node:worker_threads";
 import { createGzip } from "node:zlib";
+import { stagePathFor } from "./atomic-write.js";
 
 export interface GzipStageWriteMetrics {
 	/** Uncompressed byte length of the serialized JSON. */
@@ -39,8 +40,9 @@ export interface GzipStageWorkerResult {
 
 /**
  * Shared worker-thread body-persist core (#958, single source of truth #883):
- * `JSON.stringify` → chunked `createGzip` pipeline → `<stagePath>.tmp-<pid>` →
- * atomic rename to `stagePath`, returning byte/timing metrics. Both
+ * `JSON.stringify` → chunked `createGzip` pipeline → a per-call staging file
+ * from `atomic-write.ts`'s {@link stagePathFor} → atomic rename to
+ * `stagePath`, returning byte/timing metrics. Both
  * `clients/review-graph/persist-worker.ts` and
  * `clients/project-snapshot-persist-worker.ts` call this so the streamed-gzip
  * write lives in exactly one place; each worker's `parentPort` wiring owns its
@@ -52,13 +54,25 @@ export interface GzipStageWorkerResult {
  * On failure the partial `.tmp` is removed and the error is rethrown for the
  * caller to record; the `stagePath` itself is only ever created by the atomic
  * rename, so a crash mid-write can never leave a torn stage file behind.
+ *
+ * That crash-safety is NOT the same as concurrency isolation, and this
+ * docstring used to conflate the two (#1217). The staging name is what keeps
+ * two concurrent calls on one `stagePath` from writing into a shared inode,
+ * and it has to come from `stagePathFor` rather than a local
+ * `${stagePath}.tmp-${process.pid}`: this module runs on worker threads, which
+ * share `process.pid` with the main thread and with each other, so pid alone
+ * isolates nothing here (#1205's per-pid tear, verbatim). Callers normally
+ * pass a per-generation `stagePath`, which makes the overlap rare — a retry, a
+ * re-queued persist, a repeated generation, or a future non-generational
+ * caller makes it exact. Beyond tear-freedom this offers nothing: two calls on
+ * one `stagePath` are still unordered and last-rename-wins.
  */
 export async function writeGzipStageFile(
 	data: unknown,
 	stagePath: string,
 	testDelayMs?: number,
 ): Promise<GzipStageWriteMetrics> {
-	const tmpPath = `${stagePath}.tmp-${process.pid}`;
+	const tmpPath = stagePathFor(stagePath);
 	try {
 		if (testDelayMs) {
 			await new Promise((resolve) => setTimeout(resolve, testDelayMs));
