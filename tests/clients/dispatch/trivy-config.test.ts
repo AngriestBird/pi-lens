@@ -1,3 +1,5 @@
+import * as os from "node:os";
+import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { suppressTrivyConfigDockerOverlap } from "../../../clients/dispatch/dispatcher.js";
 import {
@@ -55,6 +57,13 @@ function createCtx(kind: "terraform" | "yaml", filePath: string, cwd: string) {
 	};
 }
 
+// Derived (not hardcoded) so the assertions hold on both POSIX and Windows:
+// `path.join(os.tmpdir(), ...)` yields a real, OS-native absolute path, and
+// the runner's `path.resolve(cwd, ctx.filePath)` is a no-op when filePath is
+// already absolute — so the resolved spawn arg equals `tfFile` on either OS.
+const tfCwd = path.join(os.tmpdir(), "pi-lens-trivy-config-test");
+const tfFile = path.join(tfCwd, "main.tf");
+
 describe("trivy-config run() — terraform pass-through", () => {
 	beforeEach(() => {
 		vi.resetModules();
@@ -78,13 +87,13 @@ describe("trivy-config run() — terraform pass-through", () => {
 		).default;
 
 		const result = await runner.run(
-			createCtx("terraform", "/tmp/main.tf", "/tmp") as never,
+			createCtx("terraform", tfFile, tfCwd) as never,
 		);
 
 		expect(safeSpawnAsync).toHaveBeenCalledWith(
 			"trivy",
-			expect.arrayContaining(["config", "/tmp/main.tf"]),
-			expect.objectContaining({ cwd: "/tmp" }),
+			expect.arrayContaining(["config", tfFile]),
+			expect.objectContaining({ cwd: tfCwd }),
 		);
 		expect(result.status).toBe("succeeded");
 	});
@@ -105,7 +114,7 @@ describe("trivy-config run() — terraform pass-through", () => {
 		).default;
 
 		const result = await runner.run(
-			createCtx("terraform", "/tmp/main.tf", "/tmp") as never,
+			createCtx("terraform", tfFile, tfCwd) as never,
 		);
 
 		expect(result.status).toBe("skipped");
