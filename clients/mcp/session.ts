@@ -5,7 +5,7 @@
  * doesn't — session-start warms the dominant-language LSP (so warm `analyze` is
  * LSP-complete), establishes the error-debt baseline + complexity baselines, and
  * kicks off knip/jscpd/type-coverage/dep/secrets scans; turn-end runs
- * knip/jscpd incrementally, dep-circular, tests, cascade, and the
+ * knip incrementally, dep-circular, tests, cascade, and the
  * actionable/code-quality aggregation.
  *
  * The handlers don't return findings — they emit them through the same
@@ -148,7 +148,7 @@ export interface TurnEndOutcome {
  * reads edited files from turn-state, so we register the caller-supplied files
  * first (a full-file range, importsChanged=true so dep/knip re-check broadly).
  */
-export async function runTurnEnd(
+async function runTurnEndNow(
 	cwd: string,
 	files: string[] = [],
 ): Promise<TurnEndOutcome> {
@@ -193,4 +193,22 @@ export async function runTurnEnd(
 		tests: joinMessages(consumeTestFindings(ctx.cacheManager, cwd)),
 		filesRegistered: registered,
 	};
+}
+
+let turnEndChain: Promise<unknown> = Promise.resolve();
+
+/**
+ * Serialized entry point for every turn-end caller (the MCP tool and the Stop
+ * hook's IPC route). Chained, not coalesced — each caller's `files` list still
+ * gets registered. A Stop hook killed at Claude Code's timeout leaves the pass
+ * running here, and two concurrent `handleTurnEnd`s share one
+ * RuntimeCoordinator/CacheManager and race the turn-state clear.
+ */
+export function runTurnEnd(
+	cwd: string,
+	files: string[] = [],
+): Promise<TurnEndOutcome> {
+	const next = turnEndChain.then(() => runTurnEndNow(cwd, files));
+	turnEndChain = next.catch(() => undefined);
+	return next;
 }

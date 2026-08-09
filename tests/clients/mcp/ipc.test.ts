@@ -18,7 +18,9 @@ import {
 	requestWarmCodeActions,
 	requestWarmDiagnostics,
 	requestWarmAnalyze,
+	requestWarmTurnEnd,
 	WARM_DIAGNOSTICS_SCHEMA_VERSION,
+	WARM_TURN_END_SCHEMA_VERSION,
 } from "../../../clients/mcp/ipc.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -313,6 +315,104 @@ describe("requestWarmAnalyze", () => {
 
 		const result = await requestWarmAnalyze(cwd, "/x/app.ts");
 		expect(result).toBeUndefined();
+		removeTempDirSync(cwd);
+	});
+});
+
+function listenOnWorkspaceEndpoint(
+	cwd: string,
+	handler: (socket: net.Socket) => void,
+): Promise<string> {
+	const endpoint = ipcPathForCwd(cwd);
+	if (process.platform !== "win32") {
+		try {
+			fs.unlinkSync(endpoint);
+		} catch {
+			/* none */
+		}
+	}
+	activeServer = net.createServer(handler);
+	return new Promise<string>((resolve) =>
+		activeServer?.listen(endpoint, () => resolve(endpoint)),
+	);
+}
+
+describe("requestWarmTurnEnd", () => {
+	it("round-trips a versioned turn-end response over the workspace endpoint", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-turn-"));
+		let received: unknown;
+		await listenOnWorkspaceEndpoint(cwd, (socket) => {
+			socket.setEncoding("utf8");
+			socket.once("data", (chunk: string) => {
+				received = JSON.parse(chunk.trim());
+				socket.end(
+					`${JSON.stringify({
+						result: {
+							route: "turn-end",
+							version: WARM_TURN_END_SCHEMA_VERSION,
+							turnEnd: "TURN ADVISORY",
+							tests: "TESTS FAILED",
+						},
+					})}\n`,
+				);
+			});
+		});
+
+		const result = await requestWarmTurnEnd(cwd, 2000);
+		expect(result.available).toBe(true);
+		expect(result.available && result.response.turnEnd).toBe("TURN ADVISORY");
+		expect(received).toEqual({
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			cwd,
+		});
+		removeTempDirSync(cwd);
+	});
+
+	it("reports ipc-error when no warm server is listening", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-turn-none-"));
+		await expect(requestWarmTurnEnd(cwd, 2000)).resolves.toEqual({
+			available: false,
+			reason: "ipc-error",
+		});
+		removeTempDirSync(cwd);
+	});
+
+	// Old server + new client: the tagged request is blind-cast to an analyze
+	// request, `analyzeFile(undefined, …)` throws, and the reply is `{error}`.
+	// The bin must read that as "no usable warm server", not as a clean turn.
+	it("degrades to ipc-error against a server that predates the route", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-turn-old-"));
+		await listenOnWorkspaceEndpoint(cwd, (socket) => {
+			socket.on("data", () =>
+				socket.end(`${JSON.stringify({ error: "boom" })}\n`),
+			);
+		});
+		await expect(requestWarmTurnEnd(cwd, 2000)).resolves.toEqual({
+			available: false,
+			reason: "ipc-error",
+		});
+		removeTempDirSync(cwd);
+	});
+
+	it("rejects turn-end schema skew", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-turn-skew-"));
+		await listenOnWorkspaceEndpoint(cwd, (socket) => {
+			socket.once("data", () =>
+				socket.end(
+					`${JSON.stringify({
+						result: {
+							route: "turn-end",
+							version: WARM_TURN_END_SCHEMA_VERSION + 1,
+						},
+					})}\n`,
+				),
+			);
+		});
+		await expect(requestWarmTurnEnd(cwd, 2000)).resolves.toEqual({
+			available: false,
+			reason: "schema-mismatch",
+		});
 		removeTempDirSync(cwd);
 	});
 });

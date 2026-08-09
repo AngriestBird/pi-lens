@@ -1,26 +1,38 @@
 #!/usr/bin/env node
 /**
- * pi-lens-analyze — standalone per-file analysis for the *push* half of the
- * mirror: a Claude Code PostToolUse hook (matched to Edit|Write) that fires
- * pi-lens automatically after every edit, the way pi's per-edit pipeline does.
- * Also usable as a plain CLI for testing/debugging.
+ * pi-lens-analyze — the *push* half of the mirror, in two modes.
  *
- * Reuses the Tier 1 `analyzeFile` facade. Defaults to `no-lsp` so inline
- * feedback is FAST (cold LSP would cost ~5s per edit and under-report anyway —
- * pull `pilens_analyze` against the warm MCP server for the type-check). The
- * fast runners (tree-sitter structural, ast-grep security, biome/ruff/oxlint
- * lint, complexity) are complete even in a cold process.
+ * Per-edit (default): a Claude Code PostToolUse hook (matched to Edit|Write)
+ * that fires pi-lens automatically after every edit, the way pi's per-edit
+ * pipeline does. Also usable as a plain CLI for testing/debugging. Reuses the
+ * Tier 1 `analyzeFile` facade and defaults to `no-lsp` so inline feedback is
+ * FAST (cold LSP would cost ~5s per edit and under-report anyway — pull
+ * `pilens_analyze` against the warm MCP server for the type-check). The fast
+ * runners (tree-sitter structural, ast-grep security, biome/ruff/oxlint lint,
+ * complexity) are complete even in a cold process.
  *
- * Input: `--file=<path>` (+ optional `--cwd=`), or — when no `--file` and stdin
- * is piped — a Claude Code PostToolUse JSON payload on stdin (`tool_input.path`/
- * `file_path` + `cwd`). Output: a concise report on stdout; with `--hook`, a
- * PostToolUse JSON envelope that injects the report as context. Exit 0 always
- * (advisory — never blocks the edit).
+ * Per-turn (`--turn-end`, or a Claude Code `Stop` payload on stdin): the
+ * analogue of pi's agent_end — incremental knip/madge, cascade-to-dependents,
+ * tests, actionable-warnings aggregation. WARM-ONLY: it drives the real
+ * `handleTurnEnd` inside the running MCP server over the workspace IPC socket
+ * and never falls back to a cold pass, because a cold process has empty
+ * cascade runs and accumulators and would report a false clean. No warm server
+ * → one stderr line and silent stdout.
+ *
+ * Input: `--file=<path>` (+ optional `--cwd=`), or a Claude Code hook JSON
+ * payload on stdin (`tool_input.path`/`file_path`, `cwd`, `hook_event_name`).
+ * Output: a concise report on stdout; with `--hook`, a PostToolUse JSON
+ * envelope that injects the report as context. Exit 0 always (advisory — never
+ * blocks the edit, never blocks the stop).
  */
 
 import * as path from "node:path";
 import type { McpAnalyzeResult } from "../clients/mcp/analyze.js";
-import { requestWarmAnalyze } from "../clients/mcp/ipc.js";
+import {
+	requestWarmAnalyze,
+	requestWarmTurnEnd,
+	type WarmTurnEndResponse,
+} from "../clients/mcp/ipc.js";
 
 console.log = (...args: unknown[]) => console.error(...args);
 
@@ -57,28 +69,101 @@ function formatReport(result: McpAnalyzeResult, cwd: string): string {
 	return lines.join("\n");
 }
 
-async function resolveTarget(): Promise<{ file?: string; cwd: string }> {
-	let file = argVal("file");
-	let cwd = argVal("cwd") ?? process.cwd();
-	if (!file && !process.stdin.isTTY) {
-		try {
-			const data = JSON.parse(await readStdin()) as {
-				cwd?: string;
-				tool_input?: { file_path?: string; path?: string };
-			};
-			file = data.tool_input?.file_path ?? data.tool_input?.path;
-			cwd = data.cwd ?? cwd;
-		} catch {
-			// not a JSON payload — nothing to analyze
-		}
+interface HookPayload {
+	cwd?: string;
+	hook_event_name?: string;
+	stop_hook_active?: boolean;
+	tool_input?: { file_path?: string; path?: string };
+}
+
+async function readHookPayload(): Promise<HookPayload | undefined> {
+	if (process.stdin.isTTY) return undefined;
+	try {
+		return (JSON.parse(await readStdin()) as HookPayload | null) ?? undefined;
+	} catch {
+		// not a JSON payload — plain CLI invocation
+		return undefined;
 	}
-	return { file, cwd };
+}
+
+// Framing for pi's user-role injection; the rest of the first line reads fine
+// in a transcript, so only the token goes.
+const AUTOMATION_FRAMING = "[pi-lens automated check — not a user request] ";
+const TURN_END_MAX_LINES = 40;
+const TURN_END_MAX_CHARS = 2000;
+
+function formatTurnEnd(response: WarmTurnEndResponse): string | undefined {
+	const sections = [response.turnEnd, response.tests]
+		.filter((section): section is string => Boolean(section))
+		.map((section) =>
+			section.startsWith(AUTOMATION_FRAMING)
+				? section.slice(AUTOMATION_FRAMING.length)
+				: section,
+		);
+	if (sections.length === 0) return undefined;
+
+	// `turnEnd` is server-capped, `tests` is not (a vitest failure dump can run long).
+	let out = `🔎 pi-lens turn-end\n${sections.join("\n\n")}`;
+	const lines = out.split("\n");
+	if (lines.length > TURN_END_MAX_LINES) {
+		out = `${lines.slice(0, TURN_END_MAX_LINES).join("\n")}\n  … (truncated)`;
+	}
+	if (out.length > TURN_END_MAX_CHARS) {
+		out = `${out.slice(0, TURN_END_MAX_CHARS)}\n  … (truncated)`;
+	}
+	return out;
+}
+
+async function runTurnEndMode(
+	cwd: string,
+	payload: HookPayload | undefined,
+): Promise<never> {
+	// Subagent edits already fire PostToolUse into the shared workspace turn
+	// state, and the consume bridges are one-shot — a subagent pass would eat the
+	// main agent's findings into a transcript nobody reads, and multiply the
+	// heavy pass by the fan-out. Only the main agent's Stop runs it.
+	if (payload?.hook_event_name === "SubagentStop") {
+		process.stderr.write(
+			"pi-lens turn-end skipped: SubagentStop (the main agent's Stop runs the pass)\n",
+		);
+		process.exit(0);
+	}
+	// Another hook blocked the stop, so our pass already ran this turn.
+	if (payload?.stop_hook_active === true) process.exit(0);
+
+	// Warm-only by design: a cold process has empty cascade runs, inline blockers
+	// and accumulators, so it would report a false clean (#533/#1023).
+	const outcome = await requestWarmTurnEnd(cwd);
+	if (!outcome.available) {
+		process.stderr.write(
+			`pi-lens turn-end skipped (${outcome.reason}) — no warm pi-lens MCP server for ${cwd}\n`,
+		);
+		process.exit(0);
+	}
+
+	const report = formatTurnEnd(outcome.response);
+	if (report) process.stdout.write(`${report}\n`); // nothing to say → no noise
+	process.exit(0);
 }
 
 async function main(): Promise<void> {
 	const hookMode = process.argv.includes("--hook");
 	const withLsp = process.argv.includes("--lsp");
-	const { file, cwd } = await resolveTarget();
+	const fileArg = argVal("file");
+	const payload = await readHookPayload();
+	const cwd = argVal("cwd") ?? payload?.cwd ?? process.cwd();
+
+	const event = payload?.hook_event_name;
+	if (
+		process.argv.includes("--turn-end") ||
+		event === "Stop" ||
+		event === "SubagentStop"
+	) {
+		return runTurnEndMode(cwd, payload);
+	}
+
+	const file =
+		fileArg ?? payload?.tool_input?.file_path ?? payload?.tool_input?.path;
 	if (!file) process.exit(0); // nothing to analyze — stay silent
 
 	// Warm path first: if the MCP server is up for this workspace, it analyzes in

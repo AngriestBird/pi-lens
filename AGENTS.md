@@ -66,7 +66,7 @@ index.ts                  Extension entry point (async factory) — the pi host 
 mcp/                      Second host adapter: MCP server + hook bin (see "MCP mirror")
   server.ts               Hand-rolled stdio JSON-RPC MCP server (16 tools) + warm IPC listener
   worker.ts               fresh-mode child (loads freshly-built code from disk)
-  analyze-cli.ts          pi-lens-analyze bin — PostToolUse hook + CLI (warm channel → cold fallback)
+  analyze-cli.ts          pi-lens-analyze bin — PostToolUse hook + CLI (warm channel → cold fallback), plus the Stop-hook turn-end mode (warm-only)
 clients/
   lens-engine.ts          THE internal seam — host adapters import only this for pi-lens functionality
   mcp/                     host-neutral facades: analyze, session, review, ipc, host-shim
@@ -411,6 +411,20 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   (LSP-complete) and the bin never loads the dispatch graph; falls back to cold
   no-LSP local analysis. `pilens_analyze` (warm) + the hook auto-register edited
   files into turn-state (`addModifiedRange`) so `pilens_turn_end` needs no file list.
+- **Per-turn half = the same bin on a `Stop` hook** (`--turn-end`, or a `Stop`
+  payload on stdin; #538). Tagged `{route:"turn-end"}` request on the WORKSPACE
+  IPC endpoint (a Stop hook knows its cwd, never the server pid), which also
+  inherits the #535 staleness gate. It passes NO files and never stamps a
+  `sessionId`, so turn-end's stale-session eviction leaves the PostToolUse
+  worklist alone; `runTurnEnd` chains server-side so a hook killed at Claude
+  Code's 60s timeout can't leave two passes racing. **Warm-only, no cold
+  fallback** — a cold process has empty cascade runs, inline blockers and
+  accumulators, so a local pass reports a false clean (#533/#1023); unavailable
+  ⇒ one stderr line, silent stdout, exit 0. `SubagentStop` is deliberately NOT
+  registered (subagent edits already reach turn-state via PostToolUse; the
+  consume bridges are one-shot). Stop-hook stdout is user-visible in transcript
+  mode, not model context — blockers still gate commits via the retained
+  lens-guard record.
 - **Same-workspace warm attach (#822, opt-in soak).** `PI_LENS_WARM_ATTACH=1`
   selects a PID-confirmed, heartbeat-fresh same-root incumbent from
   `instances.json`. The LSP runner sends versioned, content-hash-bound,

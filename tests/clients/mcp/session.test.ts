@@ -135,4 +135,26 @@ describe("runTurnEnd", () => {
 		expect(outcome.filesRegistered).toBe(0);
 		expect(handleTurnEnd).toHaveBeenCalledTimes(1);
 	});
+
+	// Two concurrent handleTurnEnds share one RuntimeCoordinator/CacheManager and
+	// race the turn-state clear. The MCP tool and the Stop hook's IPC route both
+	// land here, and a hook killed at Claude Code's timeout leaves the pass running.
+	it("serializes overlapping passes instead of running them concurrently", async () => {
+		let release: (() => void) | undefined;
+		handleTurnEnd.mockImplementationOnce(
+			() =>
+				new Promise<undefined>((resolve) => {
+					release = () => resolve(undefined);
+				}),
+		);
+
+		const first = runTurnEnd(tmpDir);
+		const second = runTurnEnd(tmpDir);
+		await vi.waitFor(() => expect(release).toBeDefined());
+		expect(handleTurnEnd).toHaveBeenCalledTimes(1);
+
+		release?.();
+		await Promise.all([first, second]);
+		expect(handleTurnEnd).toHaveBeenCalledTimes(2);
+	});
 });

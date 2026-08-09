@@ -62,6 +62,8 @@ import {
 	symbolSearch,
 	treeSitterRuntimeStatus,
 	type WarmAnalyzeRequest,
+	WARM_TURN_END_SCHEMA_VERSION,
+	type WarmTurnEndRequest,
 } from "../clients/lens-engine.js";
 import { createAstGrepReplaceTool } from "../tools/ast-grep-replace.js";
 import { createAstGrepSearchTool } from "../tools/ast-grep-search.js";
@@ -295,7 +297,38 @@ function startIpcServer(): void {
 						);
 						return;
 					}
-					const req = JSON.parse(line) as WarmAnalyzeRequest;
+					const parsed = JSON.parse(line) as Partial<
+						WarmTurnEndRequest & WarmAnalyzeRequest
+					>;
+					if (parsed.route === "turn-end") {
+						if (parsed.version !== WARM_TURN_END_SCHEMA_VERSION) {
+							socket.end(
+								`${JSON.stringify({ error: `turn-end schema ${parsed.version} != ${WARM_TURN_END_SCHEMA_VERSION}` })}\n`,
+							);
+							return;
+						}
+						const turnCwd = parsed.cwd ?? DEFAULT_CWD;
+						console.error(`[pi-lens-mcp] warm turn-end: ${turnCwd}`);
+						await ensureReady(turnCwd);
+						// No files: the Stop hook passes none, because PostToolUse already
+						// registered this turn's edits into turn-state WITHOUT a sessionId.
+						// Stamping them here would give handleTurnEnd's stale-session
+						// eviction a reason to drop them.
+						const outcome = await runTurnEnd(turnCwd);
+						socket.end(
+							`${JSON.stringify({
+								result: {
+									route: "turn-end",
+									version: WARM_TURN_END_SCHEMA_VERSION,
+									turnEnd: outcome.turnEnd,
+									tests: outcome.tests,
+								},
+							})}\n`,
+						);
+						return;
+					}
+					// Untagged = the legacy analyze request; unchanged for old clients.
+					const req = parsed as WarmAnalyzeRequest;
 					console.error(`[pi-lens-mcp] warm analyze: ${req.file}`);
 					// Warm = full LSP + an edit-detection path (register turn-state) +
 					// review-graph maintenance (#536 — this is an in-process, long-lived

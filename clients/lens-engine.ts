@@ -58,6 +58,9 @@ export {
 	ipcPathForCwd,
 	requestWarmAnalyze,
 	type WarmAnalyzeRequest,
+	WARM_TURN_END_SCHEMA_VERSION,
+	type WarmTurnEndRequest,
+	type WarmTurnEndResponse,
 } from "./mcp/ipc.js";
 export {
 	analyzeFileFresh,

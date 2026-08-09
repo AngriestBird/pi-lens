@@ -118,17 +118,17 @@ type WarmIpcOutcome<TResponse> =
 	| { available: false; reason: WarmDiagnosticsFailureReason };
 
 /**
- * Shared one-shot request/response transport for the warm-attach IPC routes
- * (#822): connect to the incumbent's PID-scoped endpoint, write one JSON
- * line, read one JSON line back, classify. The per-route `validate` callback
- * returns a failure reason for an on-time but unusable reply (schema skew,
- * staleness) or `undefined` to accept it; transport failures map uniformly to
- * timeout/ipc-error. One transport, N routes — the diagnostics and
- * code-action clients cannot drift apart.
+ * Shared one-shot request/response transport for the tagged IPC routes (#822):
+ * connect to `endpoint`, write one JSON line, read one JSON line back,
+ * classify. The endpoint is PID-scoped for the warm-attach routes and
+ * workspace-scoped for the hook bin's turn-end route. The per-route `validate`
+ * callback returns a failure reason for an on-time but unusable reply (schema
+ * skew, staleness) or `undefined` to accept it; transport failures map
+ * uniformly to timeout/ipc-error. One transport, N routes — the clients cannot
+ * drift apart.
  */
 function requestOverWarmIpc<TResponse>(
-	cwd: string,
-	incumbentPid: number,
+	endpoint: string,
 	timeoutMs: number,
 	buildRequest: (deadlineAt: number) => unknown,
 	validate: (
@@ -146,9 +146,7 @@ function requestOverWarmIpc<TResponse>(
 			resolve(value);
 		};
 		const deadlineAt = Date.now() + timeoutMs;
-		const socket = net.createConnection(
-			diagnosticsIpcPathForCwd(cwd, incumbentPid),
-		);
+		const socket = net.createConnection(endpoint);
 		socket.setEncoding("utf8");
 		let buffer = "";
 		const timer = setTimeout(
@@ -201,8 +199,7 @@ export function requestWarmDiagnostics(
 ): Promise<WarmDiagnosticsResult> {
 	const expectedHash = contentHash(content);
 	return requestOverWarmIpc<WarmDiagnosticsResponse>(
-		cwd,
-		incumbentPid,
+		diagnosticsIpcPathForCwd(cwd, incumbentPid),
 		timeoutMs,
 		(deadlineAt): WarmDiagnosticsRequest => ({
 			route: "diagnostics",
@@ -242,8 +239,7 @@ export function requestWarmCodeActions(
 	timeoutMs: number,
 ): Promise<WarmCodeActionsResult> {
 	return requestOverWarmIpc<WarmCodeActionsResponse>(
-		cwd,
-		incumbentPid,
+		diagnosticsIpcPathForCwd(cwd, incumbentPid),
 		timeoutMs,
 		(deadlineAt): WarmCodeActionsRequest => ({
 			route: "code-actions",
@@ -279,6 +275,55 @@ export function requestWarmCodeActions(
 export interface WarmAnalyzeRequest {
 	file: string;
 	cwd: string;
+}
+
+export const WARM_TURN_END_SCHEMA_VERSION = 1;
+
+/**
+ * Turn-end over the WORKSPACE endpoint, not the PID-scoped one: a Claude Code
+ * Stop hook knows its cwd, never the server's pid. Tagged so the untagged
+ * analyze request on the same socket keeps working unchanged.
+ */
+export interface WarmTurnEndRequest {
+	route: "turn-end";
+	version: number;
+	cwd: string;
+}
+
+export interface WarmTurnEndResponse {
+	route: "turn-end";
+	version: number;
+	turnEnd?: string;
+	tests?: string;
+}
+
+export type WarmTurnEndResult =
+	| { available: true; response: WarmTurnEndResponse }
+	| { available: false; reason: WarmDiagnosticsFailureReason };
+
+/**
+ * Ask the warm server to run pi-lens's real turn-end pass. No `deadlineAt` in
+ * the request — the server cannot abandon a half-run pass, so a client timeout
+ * only stops us waiting. 55 s expires inside Claude Code's 60 s hook timeout.
+ */
+export function requestWarmTurnEnd(
+	cwd: string,
+	timeoutMs = 55_000,
+): Promise<WarmTurnEndResult> {
+	return requestOverWarmIpc<WarmTurnEndResponse>(
+		ipcPathForCwd(cwd),
+		timeoutMs,
+		(): WarmTurnEndRequest => ({
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			cwd,
+		}),
+		(result) =>
+			result.route === "turn-end" &&
+			result.version === WARM_TURN_END_SCHEMA_VERSION
+				? undefined
+				: "schema-mismatch",
+	);
 }
 
 /**
