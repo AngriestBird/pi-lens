@@ -1737,9 +1737,10 @@ export async function handleSessionStart(
 	// previously session-lived with no reset hook at all).
 	resetWorkspaceTopology();
 	clearTsconfigPathsCache();
-	// #817: PATH/PATHEXT command resolution is cached per (command, PATH, cwd);
-	// drop it each session so a PATH change (e.g. a tool installed mid-session
-	// in a prior session, or a differently-scoped shell) is picked up fresh.
+	// #817/#1199: Windows command resolution is cached per (command, effective
+	// child PATH/PATHEXT, cwd); drop it each session so environment changes (e.g.
+	// a tool installed mid-session or a differently-scoped managed bin) are
+	// picked up fresh.
 	resetSafeSpawnWindowsCommandCache();
 	// #1123 item 3: a fresh session can re-report smells that a prior session
 	// already surfaced once (see `checkSmellsAndNoteOnce`'s once-per-session gate).

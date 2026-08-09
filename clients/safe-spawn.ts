@@ -228,7 +228,7 @@ export function buildWindowsShellCommand(
 // there is nothing for cmd.exe to reinterpret.
 // ============================================================================
 
-interface ResolvedWindowsCommand {
+export interface ResolvedWindowsCommand {
 	/** Absolute path to the resolved executable. */
 	resolvedPath: string;
 	/** Lowercased extension including the leading dot, e.g. ".exe", ".cmd". */
@@ -236,9 +236,49 @@ interface ResolvedWindowsCommand {
 }
 
 /**
- * Cached PATH + PATHEXT resolution results, keyed by
- * `${command}\0${PATH}\0${cwd}` so a changed PATH or cwd never hits a stale
- * entry. Session-lived (matches this repo's other resolution caches, e.g.
+ * Merge a parent and child environment using Windows' case-insensitive variable
+ * names. Node's JavaScript environment object can contain both `PATH` and
+ * `Path`, even though Windows treats them as one variable. Removing an older
+ * spelling before each assignment gives explicit child overrides precedence
+ * over every ambient spelling and ensures the environment passed to spawn has
+ * one unambiguous value.
+ */
+export function mergeWindowsEnvironment(
+	base: NodeJS.ProcessEnv,
+	overrides?: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+	const merged: NodeJS.ProcessEnv = {};
+	const assign = (source: NodeJS.ProcessEnv | undefined): void => {
+		if (!source) return;
+		for (const [key, value] of Object.entries(source)) {
+			const folded = key.toLowerCase();
+			for (const existing of Object.keys(merged)) {
+				if (existing.toLowerCase() === folded) delete merged[existing];
+			}
+			if (value !== undefined) merged[key] = value;
+		}
+	};
+	assign(base);
+	assign(overrides);
+	return merged;
+}
+
+function getWindowsEnvironmentValue(
+	env: NodeJS.ProcessEnv,
+	name: string,
+): string | undefined {
+	let value: string | undefined;
+	for (const [key, entry] of Object.entries(env)) {
+		if (key.toLowerCase() === name.toLowerCase()) value = entry;
+	}
+	return value;
+}
+
+/**
+ * Cached PATH + PATHEXT resolution results. The effective child environment is
+ * part of the key, not the ambient process environment: one caller's managed
+ * bin directory must never poison another caller's resolution. Session-lived
+ * (matches this repo's other resolution caches, e.g.
  * `clients/workspace-topology.ts`'s `resetWorkspaceTopology`) — cleared via
  * `resetSafeSpawnWindowsCommandCache()`, wired into `handleSessionStart`.
  */
@@ -249,8 +289,8 @@ export function resetSafeSpawnWindowsCommandCache(): void {
 	windowsCommandCache.clear();
 }
 
-function getPathExts(): string[] {
-	const raw = process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD";
+function getPathExts(env: NodeJS.ProcessEnv): string[] {
+	const raw = getWindowsEnvironmentValue(env, "PATHEXT") ?? ".COM;.EXE;.BAT;.CMD";
 	return raw
 		.split(";")
 		.map((ext) => ext.trim().toLowerCase())
@@ -268,13 +308,17 @@ function statIsFile(candidate: string): boolean {
 function resolveWindowsCommandUncached(
 	command: string,
 	cwd: string | undefined,
+	env: NodeJS.ProcessEnv,
 ): ResolvedWindowsCommand | null {
-	const pathExts = getPathExts();
-	const existingExt = path.extname(command).toLowerCase();
-	const hasKnownExt = pathExts.includes(existingExt);
+	const pathExts = getPathExts(env);
+	const existingExt = path.win32.extname(command).toLowerCase();
+	const hasExplicitExt = existingExt.length > 0;
 
 	const tryBase = (base: string): ResolvedWindowsCommand | null => {
-		if (hasKnownExt) {
+		// An explicitly-suffixed command is an exact candidate even when its
+		// suffix is absent from PATHEXT (e.g. a caller explicitly asks for foo.cmd
+		// while PATHEXT only lists .EXE). Bare commands use PATHEXT order.
+		if (hasExplicitExt) {
 			return statIsFile(base) ? { resolvedPath: base, ext: existingExt } : null;
 		}
 		for (const ext of pathExts) {
@@ -285,34 +329,66 @@ function resolveWindowsCommandUncached(
 	};
 
 	const hasPathSep = /[\\/]/.test(command);
-	if (hasPathSep || path.isAbsolute(command)) {
-		const base = path.isAbsolute(command)
+	if (hasPathSep || path.win32.isAbsolute(command)) {
+		const base = path.win32.isAbsolute(command)
 			? command
-			: path.resolve(cwd ?? process.cwd(), command);
+			: path.win32.resolve(cwd ?? process.cwd(), command);
 		return tryBase(base);
 	}
 
-	const pathDirs = (process.env.PATH ?? process.env.Path ?? "").split(";");
+	const pathValue = getWindowsEnvironmentValue(env, "PATH") ?? "";
+	const pathDirs = pathValue.split(path.win32.delimiter);
 	for (const dir of pathDirs) {
 		if (!dir) continue;
-		const found = tryBase(path.join(dir, command));
+		const found = tryBase(path.win32.join(dir, command));
 		if (found) return found;
 	}
 	return null;
 }
 
-/** Cached `where`-equivalent: resolve `command` to a real file via PATH + PATHEXT. */
-function resolveWindowsCommand(
+/**
+ * Resolve a Windows command using the exact environment that will be passed to
+ * the child. Exported as a small platform-independent test/diagnostic seam;
+ * callers should pass a Windows-shaped environment and do not need to mutate
+ * `process.env` to exercise resolution.
+ */
+export function resolveWindowsCommandForEnvironment(
 	command: string,
 	cwd: string | undefined,
+	env: NodeJS.ProcessEnv,
 ): ResolvedWindowsCommand | null {
-	const cacheKey = `${command}\0${process.env.PATH ?? process.env.Path ?? ""}\0${cwd ?? ""}`;
+	const pathValue = getWindowsEnvironmentValue(env, "PATH") ?? "";
+	const pathExtValue = getWindowsEnvironmentValue(env, "PATHEXT") ?? "";
+	const cacheKey = JSON.stringify([
+		"win32",
+		command,
+		pathValue,
+		pathExtValue,
+		cwd ?? "",
+	]);
 	if (windowsCommandCache.has(cacheKey)) {
 		return windowsCommandCache.get(cacheKey) ?? null;
 	}
-	const resolved = resolveWindowsCommandUncached(command, cwd);
+	const resolved = resolveWindowsCommandUncached(command, cwd, env);
 	windowsCommandCache.set(cacheKey, resolved);
 	return resolved;
+}
+
+/** Cached `where`-equivalent for the effective child environment. */
+function resolveWindowsCommand(
+	command: string,
+	cwd: string | undefined,
+	env: NodeJS.ProcessEnv,
+): ResolvedWindowsCommand | null {
+	return resolveWindowsCommandForEnvironment(command, cwd, env);
+}
+
+function getSpawnEnvironment(
+	overrides: NodeJS.ProcessEnv | undefined,
+): NodeJS.ProcessEnv {
+	return process.platform === "win32"
+		? mergeWindowsEnvironment(process.env, overrides)
+		: { ...process.env, ...overrides };
 }
 
 /**
@@ -505,13 +581,14 @@ export async function safeSpawnAsync(
 		//   - unresolvable → synthesize an ENOENT-shaped error instead of
 		//     letting cmd.exe report "not recognized" from inside a shell.
 		const isWindows = process.platform === "win32";
+		const spawnEnv = getSpawnEnvironment(options?.env);
 		let spawnCmd = command;
 		let spawnArgs = args;
 		let windowsVerbatimArguments = false;
 		let resolutionError: Error | undefined;
 
 		if (isWindows) {
-			const resolved = resolveWindowsCommand(command, options?.cwd);
+			const resolved = resolveWindowsCommand(command, options?.cwd, spawnEnv);
 			if (!resolved) {
 				resolutionError = synthesizeEnoentError(command);
 			} else if (resolved.ext === ".cmd" || resolved.ext === ".bat") {
@@ -566,7 +643,7 @@ export async function safeSpawnAsync(
 		try {
 			child = spawn(spawnCmd, spawnArgs, {
 				cwd: options?.cwd,
-				env: { ...process.env, ...options?.env },
+				env: spawnEnv,
 				windowsHide: true,
 				shell: false,
 				windowsVerbatimArguments,
@@ -873,8 +950,9 @@ export function safeSpawn(
 	args: string[],
 	options?: SafeSpawnOptions,
 ): SpawnResult {
+	const spawnEnv = getSpawnEnvironment(options?.env);
 	if (process.platform === "win32") {
-		const resolved = resolveWindowsCommand(command, options?.cwd);
+		const resolved = resolveWindowsCommand(command, options?.cwd, spawnEnv);
 		if (!resolved) {
 			return {
 				stdout: "",
@@ -923,6 +1001,7 @@ export function safeSpawn(
 
 		const result = spawnSync(spawnCmd, spawnArgs, {
 			...(options as SpawnOptions),
+			env: spawnEnv,
 			encoding: "utf-8",
 			shell: false,
 			windowsHide: true,
