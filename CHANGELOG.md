@@ -6,6 +6,33 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **`allowScripts` entries had drifted from what the declared dependency ranges actually resolve to, so npm v12's exact-version script-approval check saw stale pins (closes #1176)** —
+	`package.json`'s `@ast-grep/cli` dependency range is `"^0.45.0"`, but the
+	`allowScripts` map still keyed its approval on `"@ast-grep/cli@0.44.1"` — a
+	version the range can no longer even resolve to. The committed
+	`package-lock.json` resolves the range to `0.45.0` (not `0.45.1`, npm's
+	current `latest` dist-tag, since the lockfile pins the exact resolution
+	`npm ci` installs regardless of what's newest on the registry), and `0.45.0`
+	still ships the same `postinstall` script `0.44.1` needed approval for — so
+	the entry is now `"@ast-grep/cli@0.45.0": true`, matching what a clean
+	install of the declared range actually installs. Swept every other
+	`allowScripts` member for the same drift class (a pinned exact version no
+	longer matching its governing range/lockfile resolution): `@google/genai@1.52.0`
+	(transitive via the `@earendil-works/pi-coding-agent` devDependency) already
+	matched the lockfile, unchanged; `protobufjs@7.6.4` (also transitive via
+	`@earendil-works/pi-coding-agent`) had drifted the same way — the lockfile
+	resolves it to `7.6.5` — so that entry moved to `"protobufjs@7.6.5": true`
+	too. `@ast-grep/napi` (also range `^0.45.0`) was re-checked for an
+	install-time script at both `0.45.0` and `0.45.1` (`npm view @ast-grep/napi
+	scripts`) and has none in either, so it correctly has no `allowScripts`
+	entry. No other version-pinned metadata (`overrides`/`resolutions`/
+	`pnpm.overrides`/`packageManager`) exists in `package.json` to drift, and a
+	repo-wide grep for hardcoded `0.44.`/`0.45.` ast-grep version literals
+	outside `package.json`/the lockfile turned up only historical comments in
+	test files and one rule doc-comment describing ast-grep's behavior as of a
+	past version — not pins that need to track the current range. The
+	dependency range itself is unchanged (`^0.45.0`); this only re-aligns the
+	`allowScripts` pins to what that range currently resolves to.
 - **Quick-mode background warmup kept a one-shot `pi -p`/`--print` process alive (closes #1154)** —
 	`handleSessionStart` forces **quick mode** for both a real `pi -p`/`--print`
 	one-shot AND an interactive process's first session (to protect keystroke
