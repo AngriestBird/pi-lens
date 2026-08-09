@@ -35,6 +35,30 @@ All notable changes to pi-lens will be documented in this file.
 	   `.vue` has been wired to `prettier` (default) + `oxfmt` (appended via
 	   `OXFMT_SUPPORTED_EXTENSIONS`) since #1138 landed. Corrected the row to
 	   `prettier, oxfmt`.
+- **Rule-cache disk cache could replay a stale compiled rule set on a same-mtime+same-size rule-file edit (closes #1118, refs #1105 #878)** —
+	`clients/cache/rule-cache.ts`'s `computeRuleHash` fingerprinted every
+	effective rule file over METADATA only (`mtimeMs:size`) — the review-graph
+	first-filter without its content-hash CONFIRM step. A rule-file edit
+	preserving both mtime and byte size (git-checkout timestamp restoration, a
+	same-length tweak, a formatter that preserves mtime) replayed a stale
+	compiled rule set from `<language>-rules-v6.json`, and because this is a
+	PERSISTED disk cache, the stale set was re-persisted under the
+	fresh-looking fingerprint, poisoning every future process (the #878
+	`force`-reload failure mode, one axis over). Fixed by splitting the
+	fingerprint on rule-file origin, mirroring the project/bundled split
+	`yaml-rule-parser.ts`/`ast-grep-napi.ts` already use for ast-grep rules
+	(#1105): the small, mutable PROJECT-LOCAL subset (under
+	`<project>/rules/tree-sitter-queries/`) now gets a content-hash CONFIRM on
+	top of the metadata fingerprint; the ~705 BUNDLED files (immutable within a
+	process) stay metadata-only, so `RuleCache.get`'s per-edit tree-sitter
+	runner hot-path cost is unchanged when a project has no rule overrides.
+	`CACHE_VERSION` bumped v6→v7 so a v6 entry persisted under the old
+	metadata-only formula (a potentially poisoned one) misses once on upgrade
+	instead of being trusted. Fail-then-pass regression tests pin a rule
+	file's mtime via `utimesSync`, edit its content while preserving byte size,
+	and assert the cache invalidates for project-local files but still hits
+	for bundled-only rule sets; a third test confirms a persisted
+	metadata-only-fingerprinted entry is rejected post-fix.
 - **Formatter definitions and `FORMATTER_POLICY_BY_EXTENSION` were unbound hand-maintained inverse lists; added a bidirectional drift guard and fixed two latent mismatches (closes #1135; refs #1086 #1134 #883)** —
 	`clients/formatters.ts` (formatter → `extensions[]`) and `clients/tool-policy.ts`'s
 	`FORMATTER_POLICY_BY_EXTENSION` (extension → `formatterNames[]`) are hand-maintained
