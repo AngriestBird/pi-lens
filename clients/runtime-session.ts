@@ -732,6 +732,14 @@ async function buildOrRefreshWordIndex(args: {
 					return result;
 				}
 			} catch (err) {
+				// Supersession is an expected transition, not a failure: a newer
+				// session_start bumped the generation mid-refresh. Return undefined the
+				// way master's synchronous path did instead of reporting a fallback and
+				// re-walking for a rebuild whose result this generation may not publish.
+				if (!runtime.isCurrentSession(sessionGeneration)) {
+					dbg("session_start word-index: incremental refresh superseded");
+					return;
+				}
 				dbg(
 					`session_start word-index: incremental refresh failed; falling back to full rebuild (${err})`,
 				);
@@ -756,9 +764,24 @@ async function buildOrRefreshWordIndex(args: {
 		runtime.isCurrentSession(sessionGeneration),
 	);
 	if (!runtime.isCurrentSession(sessionGeneration)) return;
-	const rebuiltIndex = await buildWordIndexAsync(docs, () =>
-		runtime.isCurrentSession(sessionGeneration),
-	);
+	// #1197 review finding 2: `buildWordIndexAsync` THROWS on supersession, and
+	// the quick-mode warmup caller (below) awaits this function OUTSIDE any
+	// per-step try/catch — an escaping throw there skips the rest of warmup,
+	// including the #947 LSP pre-warm, and resets `__piLensWarmupScheduled`.
+	// Supersession is an expected transition (master's synchronous path just
+	// returned), so absorb it here and let the caller continue.
+	let rebuiltIndex: Awaited<ReturnType<typeof buildWordIndexAsync>>;
+	try {
+		rebuiltIndex = await buildWordIndexAsync(docs, () =>
+			runtime.isCurrentSession(sessionGeneration),
+		);
+	} catch (err) {
+		if (!runtime.isCurrentSession(sessionGeneration)) {
+			dbg("session_start word-index: rebuild superseded");
+			return;
+		}
+		throw err;
+	}
 	if (!runtime.isCurrentSession(sessionGeneration)) return;
 	runtime.wordIndex = rebuiltIndex;
 	saveRuntimeProjectSnapshot({ cwd: snapshotRoot, runtime, dbg });
