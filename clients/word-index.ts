@@ -202,6 +202,42 @@ type WordIndexInputDocuments = WordIndexInputDocument[] & {
 
 const WORD_INDEX_BUILD_YIELD_BUDGET_MS = 8;
 const WORD_INDEX_BUILD_YIELD_CHECK_LINES = 50;
+/**
+ * A line at or above this length is treated as a yield checkpoint on its own.
+ * The per-50-lines cadence is a proxy for work that only holds on hand-written
+ * source: a minified/bundled single-line file up to {@link WORD_INDEX_MAX_BYTES}
+ * that the source filter did not exclude would otherwise get ZERO in-document
+ * yields — one unbroken tokenize+push burst far above the budget (#1197 review
+ * finding 4). Checking the clock after any long line makes the cooperativeness
+ * claim true per BYTE, not just per line count.
+ */
+const WORD_INDEX_LONG_LINE_YIELD_CHARS = 4096;
+
+/**
+ * Shared cooperative time-slicer for every bulk word-index path (#1197).
+ *
+ * Time-based, not count-based: "yield every N items" is only a bound when the
+ * per-item cost is bounded too, and the incremental refresh's per-document cost
+ * grows with the corpus (each replacement filters shared posting arrays). The
+ * #1197 outage was exactly that shape — 239 stale documents held pi's event loop
+ * for seconds between two "every 100 files" checkpoints. Callers combine this
+ * with their existing count checkpoint (`||`, never `&&`) so abort latency stays
+ * bounded in item count AND occupancy stays bounded in milliseconds.
+ */
+function createYieldBudget(): {
+	overBudget: () => boolean;
+	yieldNow: () => Promise<void>;
+} {
+	let lastYieldAt = performance.now();
+	return {
+		overBudget: () =>
+			performance.now() - lastYieldAt >= WORD_INDEX_BUILD_YIELD_BUDGET_MS,
+		yieldNow: async () => {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			lastYieldAt = performance.now();
+		},
+	};
+}
 
 function createEmptyWordIndex(truncated: boolean): WordIndex {
 	return {
@@ -290,34 +326,28 @@ export async function buildWordIndexAsync(
 	shouldContinue: () => boolean = () => true,
 ): Promise<WordIndex> {
 	const index = createEmptyWordIndex(files.truncated ?? false);
-	let lastYieldAt = performance.now();
+	const budget = createYieldBudget();
 	for (const doc of files) {
 		if (!shouldContinue()) throw new Error("word index build superseded");
 		const lines = doc.content.split(/\r?\n/);
 		const tokenLineCounts = new Map<string, number>();
 		let docLength = 0;
 		for (let i = 0; i < lines.length; i += 1) {
-			docLength += indexWordLine(
-				index,
-				doc.path,
-				lines[i],
-				i + 1,
-				tokenLineCounts,
-			);
+			const line = lines[i];
+			docLength += indexWordLine(index, doc.path, line, i + 1, tokenLineCounts);
 			if (
-				(i + 1) % WORD_INDEX_BUILD_YIELD_CHECK_LINES === 0 &&
-				performance.now() - lastYieldAt >= WORD_INDEX_BUILD_YIELD_BUDGET_MS
+				((i + 1) % WORD_INDEX_BUILD_YIELD_CHECK_LINES === 0 ||
+					line.length >= WORD_INDEX_LONG_LINE_YIELD_CHARS) &&
+				budget.overBudget()
 			) {
-				await new Promise<void>((resolve) => setImmediate(resolve));
+				await budget.yieldNow();
 				if (!shouldContinue()) throw new Error("word index build superseded");
-				lastYieldAt = performance.now();
 			}
 		}
 		finishWordIndexDocument(index, doc, docLength, tokenLineCounts);
-		if (performance.now() - lastYieldAt >= WORD_INDEX_BUILD_YIELD_BUDGET_MS) {
-			await new Promise<void>((resolve) => setImmediate(resolve));
+		if (budget.overBudget()) {
+			await budget.yieldNow();
 			if (!shouldContinue()) throw new Error("word index build superseded");
-			lastYieldAt = performance.now();
 		}
 	}
 	return index;
@@ -556,6 +586,28 @@ const WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD = 0.3;
 // Below this absolute floor, per-document replacement is bounded and cheaper
 // than a second full walk/read even when the percentage is high (#1197).
 const WORD_INDEX_DENSE_REFRESH_MIN_DOCUMENTS = 32;
+/**
+ * Cost of one file's stat+read+decode expressed in tokenizer-token units, so
+ * the work model below can compare a path that re-reads EVERY file (full
+ * rebuild) against one that re-reads only the stale files (incremental) in a
+ * single currency. One read ≈ 300 tokens at the ~1 µs/token measured below.
+ * Order-of-magnitude by design — it only has to keep a tiny-vocabulary corpus
+ * (where posting scans are nearly free) from being sent to a full rebuild that
+ * re-reads everything to save a handful of array filters.
+ */
+const WORD_INDEX_FILE_READ_TOKEN_COST = 300;
+/**
+ * Cost of scanning ONE posting-array element (the `wordIndexKey` compare in
+ * {@link removeWordIndexDocument}'s filter) relative to tokenizing one token,
+ * so both sides of the model below are denominated in tokens. Measured on this
+ * repository's own 2,062-document corpus: 213 ns per element scan against 979 ns
+ * per token — and the resulting predicted crossover (23 stale documents) lands
+ * on the directly measured one (~21, from 97.8 ms per document replacement
+ * against a 1,436 ms rebuild + re-read). The synthetic high-df corpus in the
+ * #1197 probe gives 0.09, so this is the conservative (incremental-favouring)
+ * end of the observed range.
+ */
+const WORD_INDEX_POSTING_SCAN_TOKEN_COST = 0.2;
 
 /**
  * Refresh a serializer-v2 index from the current bounded source-file set.
@@ -598,6 +650,11 @@ export async function refreshWordIndexIncrementally(
 		string,
 		{ path: string; mtimeMs: number; size: number }
 	>();
+	// Count checkpoint OR time budget (#1197): the count keeps abort latency
+	// bounded in files even on a corpus so cheap it never exceeds the budget; the
+	// budget keeps event-loop occupancy bounded even when a single checkpoint
+	// interval is expensive.
+	const budget = createYieldBudget();
 	let statted = 0;
 	for (const file of walked) {
 		try {
@@ -612,8 +669,8 @@ export async function refreshWordIndexIncrementally(
 		} catch {
 			// A file vanishing between walk and stat is simply absent.
 		}
-		if (++statted % 100 === 0) {
-			await new Promise<void>((resolve) => setImmediate(resolve));
+		if (++statted % 100 === 0 || budget.overBudget()) {
+			await budget.yieldNow();
 			if (!shouldContinue()) throw new Error("word index refresh superseded");
 		}
 	}
@@ -641,10 +698,64 @@ export async function refreshWordIndexIncrementally(
 			staleDocuments += 1;
 		}
 	}
+	// Density alone is NOT a bound (#1197 review finding 1): the per-document cost
+	// GROWS with the corpus, so a stale set comfortably under any fixed ratio (or
+	// any fixed absolute ceiling) still costs orders of magnitude more than a
+	// rebuild on a big enough repository. 800 documents with 239 stale — 29.875%,
+	// just under the ratio — measured 90.6 s with a 39.6 s synchronous block
+	// against 1.3 s / 10.6 ms for a full build, and at the 6,000-file cap up to
+	// 1,799 stale documents would have stayed on that path.
+	//
+	// So compare estimated WORK, both sides denominated in tokenizer tokens:
+	//   incremental ≈ stale x (docTokens x postingLength x scanCost + readCost)
+	//   full        ≈ totalTokens + corpusSize x readCost
+	// This is self-bounding in a way no constant is: the incremental path is taken
+	// only while its total estimated cost stays under ONE full rebuild, so the
+	// worst case is "about as expensive as rebuilding", whatever the corpus size.
+	//
+	// Both statistics come from cheap metadata passes — one over `postings`
+	// (distinct tokens, reading only `.length`) and one over `forward` (documents,
+	// reading only `.size`). Neither touches a posting ELEMENT, which is the work
+	// this decision exists to avoid.
+	let postingEntries = 0;
+	let weightedPostingEntries = 0;
+	for (const hits of index.postings.values()) {
+		postingEntries += hits.length;
+		weightedPostingEntries += hits.length * hits.length;
+	}
+	// The mean posting-array length weighted by OCCURRENCES, not the plain mean:
+	// a document's tokens are drawn from the frequency distribution, so the arrays
+	// a removal actually filters skew hard toward the high-document-frequency
+	// tokens. The unweighted mean (dominated by the long tail of df=1 tokens)
+	// underestimates the real cost by an order of magnitude.
+	const expectedPostingLength =
+		postingEntries > 0 ? weightedPostingEntries / postingEntries : 0;
+	let distinctTokenEntries = 0;
+	for (const tokenLineCounts of index.forward.values()) {
+		distinctTokenEntries += tokenLineCounts.size;
+	}
+	const expectedDocumentTokens =
+		index.docCount > 0 ? distinctTokenEntries / index.docCount : 0;
+	const estimatedIncrementalWork =
+		staleDocuments *
+		(expectedDocumentTokens *
+			expectedPostingLength *
+			WORD_INDEX_POSTING_SCAN_TOKEN_COST +
+			WORD_INDEX_FILE_READ_TOKEN_COST);
+	const estimatedFullRebuildWork =
+		index.totalTokens + current.size * WORD_INDEX_FILE_READ_TOKEN_COST;
+	// The document-count floor guards the RATIO test only — its documented job is
+	// that "one stale file in a three-file project" is 33% but not dense. It must
+	// NOT gate the work test: a floor is another constant, and letting one
+	// suppress the work comparison would reintroduce exactly the unbounded-on-the
+	// -other-axis shape (31 documents at 98 ms each on this repository's own
+	// corpus, and worse as the corpus grows). The work test needs no floor — on a
+	// small project a full rebuild is cheap, so it never fires there.
 	if (
-		staleDocuments >= WORD_INDEX_DENSE_REFRESH_MIN_DOCUMENTS &&
-		staleDocuments / Math.max(current.size, 1) >
-			WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD
+		(staleDocuments >= WORD_INDEX_DENSE_REFRESH_MIN_DOCUMENTS &&
+			staleDocuments / Math.max(current.size, 1) >
+				WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD) ||
+		estimatedIncrementalWork > estimatedFullRebuildWork
 	) {
 		return { mode: "full-required", reason: "stale-document-churn" };
 	}
@@ -699,8 +810,13 @@ export async function refreshWordIndexIncrementally(
 			index.fileSizes.set(file, size);
 			refreshed++;
 		}
-		if (++processed % 100 === 0) {
-			await new Promise<void>((resolve) => setImmediate(resolve));
+		// Same OR as the stat loop. This is the loop the #1197 outage actually
+		// blocked in: replacing one document costs more the larger the corpus is,
+		// so a count-only checkpoint let 100 replacements run back to back for
+		// seconds. The gate above keeps the stale set sparse; this keeps even a
+		// sparse-but-expensive set off the event loop.
+		if (++processed % 100 === 0 || budget.overBudget()) {
+			await budget.yieldNow();
 			if (!shouldContinue()) throw new Error("word index refresh superseded");
 		}
 	}
