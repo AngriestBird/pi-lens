@@ -68,7 +68,7 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 			return id === "none" ? [] : [{ id }];
 		});
 
-		touchFile = vi.fn().mockResolvedValue([]);
+		touchFile = vi.fn().mockResolvedValue({ diags: [] });
 		mocked.service = {
 			touchFile,
 			getDiagnostics: vi.fn().mockResolvedValue([]),
@@ -135,14 +135,14 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 
 	it("never caches an inconclusive (timed-out) touch — the next call still touches it", async () => {
 		const files = writeFiles(["a.ts"]);
-		// `.inconclusive` flag set — collectDiagnosticsForFile's `timedOut` reads
-		// straight off this, same non-enumerable-flag contract touchFile uses.
-		const inconclusive = Object.assign([], { inconclusive: true });
+		// #1179: `inconclusive` is an explicit enumerable field on the touchFile
+		// wrapper now; `collectDiagnosticsForFile` reads `timedOut` straight off it.
+		const inconclusive = { diags: [], inconclusive: true };
 		touchFile.mockResolvedValueOnce(inconclusive);
 
 		await runBatch(files);
 		touchFile.mockClear();
-		touchFile.mockResolvedValue([]);
+		touchFile.mockResolvedValue({ diags: [] });
 
 		await runBatch(files);
 		// Not served from cache — an inconclusive result must never be cached.
@@ -173,7 +173,7 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 			range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
 			source: "typescript",
 		};
-		touchFile.mockResolvedValueOnce([diag]);
+		touchFile.mockResolvedValueOnce({ diags: [diag] });
 
 		const first = await runBatch(files);
 		expect(first.details?.totalDiagnostics).toBe(1);
@@ -192,7 +192,7 @@ describe("lsp_diagnostics batch — workspace-diagnostics cache (#671)", () => {
 			range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
 			source: "typescript",
 		};
-		touchFile.mockResolvedValueOnce([diag]);
+		touchFile.mockResolvedValueOnce({ diags: [diag] });
 
 		await runBatch(files);
 		// The fresh touch was OBSERVED now → no observation-time override.

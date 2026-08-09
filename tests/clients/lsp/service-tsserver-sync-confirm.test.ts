@@ -191,9 +191,9 @@ describe("#707 per-edit tsserver sync clean-confirm in touchFile", () => {
 		});
 
 		expect(result).toBeDefined();
-		expect(result).toEqual([]);
+		expect(result?.diags).toEqual([]);
 		// The sync confirm should have cleared the inconclusive flag
-		expect((result as any)?.inconclusive).toBeFalsy();
+		expect(result?.inconclusive).toBeFalsy();
 	});
 
 	it("dirty TS file: sync returns diagnostics → confirmed with findings, inconclusive=false", async () => {
@@ -222,9 +222,17 @@ describe("#707 per-edit tsserver sync clean-confirm in touchFile", () => {
 		});
 
 		expect(result).toBeDefined();
-		expect(result!.length).toBe(1);
-		expect(result![0]?.message).toContain("not assignable to type 'string'");
-		expect((result as any)?.inconclusive).toBeFalsy();
+		expect(result!.diags.length).toBe(1);
+		expect(result!.diags[0]?.message).toContain("not assignable to type 'string'");
+		expect(result?.inconclusive).toBeFalsy();
+		// #1179 shape-5: on the REAL producer result, `binding` is an enumerable OWN
+		// wrapper field (a sync-confirmed touch composes {boundToCurrentDisk}), so it
+		// survives a copy of the result — it would be dropped if it were still the
+		// pre-#1179 non-enumerable array side-channel with a spread intervening (#1096).
+		expect(
+			Object.prototype.propertyIsEnumerable.call(result, "binding"),
+		).toBe(true);
+		expect({ ...result! }.binding?.boundToCurrentDisk).toBeDefined();
 	});
 
 	it("non-typescript server (gopls): sync is never attempted", async () => {
@@ -292,7 +300,7 @@ describe("#707 per-edit tsserver sync clean-confirm in touchFile", () => {
 		// The wait resolves before the budget — no timeout, so no sync call
 		expect(executeCommand).not.toHaveBeenCalled();
 		expect(result).toBeDefined();
-		expect(result!.length).toBeGreaterThan(0);
+		expect(result!.diags.length).toBeGreaterThan(0);
 	});
 
 	it("sync executeCommand throws: falls through to inconclusive behavior", async () => {
@@ -316,7 +324,7 @@ describe("#707 per-edit tsserver sync clean-confirm in touchFile", () => {
 		// Sync failed — should be inconclusive (undefined or has inconclusive flag)
 		// Either undefined (no client ready) or an array with inconclusive=true
 		if (result !== undefined) {
-			expect((result as any)?.inconclusive).toBe(true);
+			expect(result?.inconclusive).toBe(true);
 		}
 	});
 
@@ -342,7 +350,7 @@ describe("#707 per-edit tsserver sync clean-confirm in touchFile", () => {
 
 		expect(executeCommand).not.toHaveBeenCalled();
 		if (result !== undefined) {
-			expect((result as any)?.inconclusive).toBe(true);
+			expect(result?.inconclusive).toBe(true);
 		}
 	});
 
@@ -378,8 +386,8 @@ describe("#707 per-edit tsserver sync clean-confirm in touchFile", () => {
 			// budget the pinned push wait would otherwise burn in full.
 			expect(elapsed).toBeLessThan(800);
 			expect(result).toBeDefined();
-			expect(result).toEqual([]);
-			expect((result as any)?.inconclusive).toBeFalsy();
+			expect(result?.diags).toEqual([]);
+			expect(result?.inconclusive).toBeFalsy();
 		});
 
 		it("dirty file: racing sync winner surfaces the diagnostics, not discarded", async () => {
@@ -415,11 +423,11 @@ describe("#707 per-edit tsserver sync clean-confirm in touchFile", () => {
 
 			expect(elapsed).toBeLessThan(800);
 			expect(result).toBeDefined();
-			expect(result!.length).toBe(1);
-			expect(result![0]?.message).toContain("Cannot find name");
+			expect(result!.diags.length).toBe(1);
+			expect(result!.diags[0]?.message).toContain("Cannot find name");
 			// tsserver 1-based line 3/offset 1 → LSP 0-based line 2/character 0
-			expect(result![0]?.range.start).toEqual({ line: 2, character: 0 });
-			expect((result as any)?.inconclusive).toBeFalsy();
+			expect(result!.diags[0]?.range.start).toEqual({ line: 2, character: 0 });
+			expect(result?.inconclusive).toBeFalsy();
 		});
 
 		it("push arriving before the grace: no sync request ever goes out", async () => {
@@ -461,8 +469,8 @@ describe("#707 per-edit tsserver sync clean-confirm in touchFile", () => {
 
 			expect(executeCommand).not.toHaveBeenCalled();
 			expect(result).toBeDefined();
-			expect(result!.length).toBe(1);
-			expect((result as any)?.inconclusive).toBeFalsy();
+			expect(result!.diags.length).toBe(1);
+			expect(result?.inconclusive).toBeFalsy();
 		});
 
 		it("sync failing mid-race: wait runs to its budget, end-of-wait fallback fires and inconclusive is preserved", async () => {
@@ -503,7 +511,7 @@ describe("#707 per-edit tsserver sync clean-confirm in touchFile", () => {
 			// inconclusive behavior is preserved.
 			expect(executeCommand).toHaveBeenCalled();
 			expect(result).toBeDefined();
-			expect((result as any)?.inconclusive).toBe(true);
+			expect(result?.inconclusive).toBe(true);
 		});
 	});
 });

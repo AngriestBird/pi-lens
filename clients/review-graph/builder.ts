@@ -265,14 +265,52 @@ let _lastGraphBuildInfo: GraphBuildInfo = {
 // The global slot above is retained for legacy status surfaces, but overlapping
 // deferred builds need a per-result identity for lifecycle telemetry.
 const _graphBuildInfoByGraph = new WeakMap<ReviewGraph, GraphBuildInfo>();
+// #1179: true once ANY graph has been stamped since the last cache clear — i.e.
+// `_lastGraphBuildInfo` may now hold a REAL build's info (a potential sibling)
+// rather than the pristine `mode: "full"` default. Used only by the fail-closed
+// safety read below to decide whether the global slot is safe to serve on a
+// WeakMap identity miss.
+let _anyGraphStamped = false;
 
 function setGraphBuildInfo(graph: ReviewGraph, info: GraphBuildInfo): void {
 	_lastGraphBuildInfo = info;
 	_graphBuildInfoByGraph.set(graph, info);
+	_anyGraphStamped = true;
 }
 
 export function getGraphBuildInfoForGraph(graph: ReviewGraph): GraphBuildInfo {
 	return _graphBuildInfoByGraph.get(graph) ?? _lastGraphBuildInfo;
+}
+
+/**
+ * #1179 (fail-closed guard, latent P3 from the #1108/#1180 side-channel audit).
+ * Whether `getGraphBuildInfoForGraph(graph)` can be TRUSTED to describe `graph`
+ * itself — for a SAFETY gate that must never read a sibling graph's state.
+ *
+ * `getGraphBuildInfoForGraph` deliberately falls back to the global
+ * `_lastGraphBuildInfo` slot on a WeakMap identity miss — fine for the telemetry
+ * and `updateGraphBuildInfo` base-read callers, where a sibling build's `mode` is
+ * only informational (and the first stamp of a graph legitimately bases off the
+ * prior slot). But a gate that decides degraded-vs-clean must not read a DIFFERENT
+ * graph's `mode: "cached"` (healthy) off that fallback, or it would mistake an
+ * unstamped/rehydrated graph for a clean leaf and serve a silent all-clear (the
+ * #533 false-clean trap). Such a caller reads THIS first and, when it returns
+ * false, fails CLOSED (treats coverage as unknown/degraded) instead of trusting
+ * the slot.
+ *
+ * Trustworthy iff EITHER the graph's own identity is present in the WeakMap (the
+ * fallback is not even taken), OR nothing has been stamped since the last cache
+ * clear (`_lastGraphBuildInfo` is still the pristine `mode: "full"` default, which
+ * cannot be a sibling's real state). Only a miss AFTER some real build has stamped
+ * — where the global slot could be a sibling's info — is untrustworthy.
+ *
+ * Live path: always trustworthy. Every `_doBuildGraph` return stamps the graph via
+ * `setGraphBuildInfo` before returning it, so the cascade reads the freshly-stamped
+ * same-identity instance (`has(graph)` true) and the miss branch is unreachable
+ * today. This only hardens a future path that ever surfaces an unstamped graph.
+ */
+export function graphBuildInfoIsTrustworthy(graph: ReviewGraph): boolean {
+	return _graphBuildInfoByGraph.has(graph) || !_anyGraphStamped;
 }
 
 function updateGraphBuildInfo(
@@ -304,6 +342,9 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 		_sizeSkipVerdicts.delete(normalized);
 	}
 	_lastGraphBuildInfo = { reused: false, mode: "full", graphChanged: true };
+	// #1179: the global slot is back to the pristine default, so a subsequent
+	// identity miss can safely serve it again (it cannot be a sibling's state).
+	_anyGraphStamped = false;
 }
 
 export interface ReviewGraphWorkspaceCacheSnapshot {
