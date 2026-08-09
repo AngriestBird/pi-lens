@@ -537,6 +537,18 @@ export interface LSPWorkspaceDiagnosticResult {
 	 * #1092 touchedAt-re-arming defect).
 	 */
 	observedAt?: number;
+	/**
+	 * #1104: sha256 of the file bytes this result's diagnostics were computed
+	 * against, when known — from the pull path's server-answered `resultId`
+	 * flow (a "full" `workspace/diagnostic`/`textDocument/diagnostic` report is
+	 * fingerprinted at request time; an "unchanged" report inherits the prior
+	 * fingerprint) or, for a per-file touch, the SAME `contentHash` the #1095
+	 * push-path binding records. Absent means "no hash available" (never
+	 * fabricated) — the cache-record site below then honestly stores no
+	 * contentHash and a later `lookup()`'s binding reads "unknown", exactly the
+	 * pre-#1104 behavior for that entry.
+	 */
+	contentHash?: string;
 }
 
 /**
@@ -3023,6 +3035,11 @@ export class LSPService {
 	 * else all "unknown" (or no contributors) → "unknown"; else true. The
 	 * surfaced version/contentHash come from the first contributor that carries
 	 * them — informational only; the load-bearing field is `boundToCurrentDisk`.
+	 * #1104: `version` and `contentHash` are tracked INDEPENDENTLY (not gated on
+	 * the same contributor carrying both) — a pull-sourced binding deliberately
+	 * has no `version` (the pull protocol has no version-echo concept) but does
+	 * carry a real `contentHash`; gating the latter on the former would silently
+	 * drop it here even though `boundToCurrentDisk` above already used it.
 	 */
 	private mergeBinding(
 		filePath: string,
@@ -3037,6 +3054,8 @@ export class LSPService {
 			);
 			if (version === undefined && entry?.version !== undefined) {
 				version = entry.version;
+			}
+			if (contentHash === undefined && entry?.contentHash !== undefined) {
 				contentHash = entry.contentHash;
 			}
 		}
@@ -4226,6 +4245,23 @@ export class LSPService {
 						?.inconclusive === true;
 				const timedOut = diagnostics === undefined || inconclusive;
 				if (timedOut) timedOutFiles += 1;
+				// #1104 (shape 5 — AGENTS.md): read the touch's content binding off
+				// the RAW `diagnostics` array here, before `applyAuxiliarySuppressions`
+				// below rebuilds it via `.filter()` — a `.filter()` result is a NEW
+				// array and does not carry over the source's non-enumerable
+				// `.binding` (see #1095's own `Object.defineProperty` comment: "JSON.
+				// stringify / spread / logging ... unaffected" cuts both ways — a
+				// derived COPY never gets it either). A version-less/pull-less
+				// server's `diagnostics` simply carries no `.binding`, so
+				// `contentHash` stays undefined here (honest "unknown" downstream),
+				// matching pre-#1104 behavior exactly.
+				const rawBinding = (
+					diagnostics as
+						| (typeof diagnostics & {
+								binding?: import("./diagnostic-binding.js").DiagnosticBinding;
+						  })
+						| undefined
+				)?.binding;
 				// #586: honor each auxiliary profile's native inline-suppression
 				// comment (e.g. opengrep's `// nosemgrep`, #441) — computed from the
 				// raw `diagnostics` (before this drops its non-enumerable
@@ -4249,6 +4285,7 @@ export class LSPService {
 					diagnostics: filteredDiagnostics ?? [],
 					count: filteredDiagnostics?.length ?? 0,
 					timedOut,
+					contentHash: rawBinding?.contentHash,
 				});
 			} catch (err) {
 				results.push({
@@ -4442,11 +4479,20 @@ export class LSPService {
 		for (const result of results) {
 			const scannedAt = scannedMtimeByFile.get(result.filePath);
 			if (result.error || result.timedOut || scannedAt === undefined) continue;
+			// #1104: thread the per-result `contentHash` (from either the
+			// `tryWorkspacePull` fast path or a per-file touch's own #1095 binding)
+			// into the cache entry — previously this call never passed one, so
+			// every pull-served entry read binding "unknown" forever and the #1095
+			// P2-1 service-sweep binding gate above (`cached.binding.
+			// boundToCurrentDisk !== false`) could never demote a pull-cached
+			// entry. Absent `contentHash` (no binding was available) behaves
+			// exactly as before.
 			workspaceDiagnosticsCacheCtx.record(
 				result.filePath,
 				workspaceSweepScopeKey,
 				result.diagnostics,
 				scannedAt,
+				result.contentHash,
 			);
 		}
 		workspaceDiagnosticsCacheCtx.persist();
@@ -4478,16 +4524,32 @@ export class LSPService {
 				Math.max(perFileMs, workspacePullBudgetMs()),
 			);
 			if (!report) return undefined;
-			const byPath = new Map<string, import("./client.js").LSPDiagnostic[]>();
+			const byPath = new Map<
+				string,
+				{
+					diagnostics: import("./client.js").LSPDiagnostic[];
+					contentHash?: string;
+				}
+			>();
 			for (const entry of report) {
-				byPath.set(normalizeMapKey(entry.filePath), entry.diagnostics);
+				byPath.set(normalizeMapKey(entry.filePath), entry);
 			}
 			return groupFiles.map((filePath) => {
-				const diagnostics = byPath.get(normalizeMapKey(filePath)) ?? [];
+				const entry = byPath.get(normalizeMapKey(filePath));
+				const diagnostics = entry?.diagnostics ?? [];
 				// A pull that got here returned a real workspace/diagnostic report
 				// (see the `!report` guard above) — always confirmed, unlike a
 				// per-file touchFile default-empty on timeout.
-				return { filePath, diagnostics, count: diagnostics.length, timedOut: false };
+				// #1104: `contentHash` comes straight from the client's pull layer —
+				// a file absent from the report (reported "clean" here) carries none,
+				// same honest "unknown" the record site already applies for it.
+				return {
+					filePath,
+					diagnostics,
+					count: diagnostics.length,
+					timedOut: false,
+					contentHash: entry?.contentHash,
+				};
 			});
 		} catch {
 			return undefined;

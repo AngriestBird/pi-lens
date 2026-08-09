@@ -181,6 +181,16 @@ export const EMPTY_PROJECT_CONFIG: PiLensProjectConfig = {
 
 interface CacheEntry {
 	mtimeMs: number;
+	/**
+	 * Byte size at parse time (#1105). Reuse requires BOTH mtime and size to
+	 * match — size is the free second axis (the same stat already read it) that
+	 * catches an mtime-preserving, length-changing in-place edit (git checkout,
+	 * same-second rewrite) that mtime alone would replay stale. Residual (same
+	 * mtime AND same size) matches the review-graph `size:mtimeMs` accepted
+	 * residual; closing it would need a content hash on every gate check — the
+	 * hot-path cost the word-index #1105 fix deliberately declined.
+	 */
+	size: number;
 	config: PiLensProjectConfig;
 }
 
@@ -206,12 +216,20 @@ export function loadPiLensProjectConfig(
 	if (!configInfo) return EMPTY_PROJECT_CONFIG;
 
 	const cached = configCache.get(configInfo.path);
-	if (cached && cached.mtimeMs === configInfo.mtimeMs) {
+	if (
+		cached &&
+		cached.mtimeMs === configInfo.mtimeMs &&
+		cached.size === configInfo.size
+	) {
 		return cached.config;
 	}
 
 	const config = parseConfigFile(configInfo.path);
-	configCache.set(configInfo.path, { mtimeMs: configInfo.mtimeMs, config });
+	configCache.set(configInfo.path, {
+		mtimeMs: configInfo.mtimeMs,
+		size: configInfo.size,
+		config,
+	});
 	return config;
 }
 
@@ -226,6 +244,8 @@ export interface PiLensProjectConfigFileInfo {
 	path: string;
 	dir: string;
 	mtimeMs: number;
+	/** Byte size at stat time — the #1105 second freshness axis (see CacheEntry). */
+	size: number;
 }
 
 /**
@@ -246,7 +266,12 @@ export function findPiLensConfigInDir(
 ): PiLensProjectConfigFileInfo | undefined {
 	const marker = findPiLensConfigMarkerInDir(dir);
 	if (!marker) return undefined;
-	return { path: marker.path, dir: marker.dir, mtimeMs: marker.mtimeMs };
+	return {
+		path: marker.path,
+		dir: marker.dir,
+		mtimeMs: marker.mtimeMs,
+		size: marker.size,
+	};
 }
 
 export interface NestedProjectMutationValue {
@@ -291,12 +316,12 @@ export function loadPiLensConfigInDir(dir: string): PiLensProjectConfig {
 	if (!info) return EMPTY_PROJECT_CONFIG;
 
 	const cached = configCache.get(info.path);
-	if (cached && cached.mtimeMs === info.mtimeMs) {
+	if (cached && cached.mtimeMs === info.mtimeMs && cached.size === info.size) {
 		return cached.config;
 	}
 
 	const config = parseConfigFile(info.path);
-	configCache.set(info.path, { mtimeMs: info.mtimeMs, config });
+	configCache.set(info.path, { mtimeMs: info.mtimeMs, size: info.size, config });
 	return config;
 }
 
@@ -308,7 +333,8 @@ export function findPiLensProjectConfig(
 	if (cached && discoveryCacheStillFresh(cached)) {
 		if (!cached.info) return undefined;
 		const stat = safeFileStat(cached.info.path);
-		if (stat?.isFile()) return { ...cached.info, mtimeMs: stat.mtimeMs };
+		if (stat?.isFile())
+			return { ...cached.info, mtimeMs: stat.mtimeMs, size: stat.size };
 	}
 
 	const discovered = discoverPiLensProjectConfig(cacheKey);
@@ -347,7 +373,7 @@ function discoverPiLensProjectConfig(startDir: string): DiscoveryCacheEntry {
 			const stat = safeFileStat(candidate);
 			if (stat?.isFile()) {
 				return {
-					info: { path: candidate, dir, mtimeMs: stat.mtimeMs },
+					info: { path: candidate, dir, mtimeMs: stat.mtimeMs, size: stat.size },
 					dirMtimes,
 				};
 			}

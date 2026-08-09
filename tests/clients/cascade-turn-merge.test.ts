@@ -190,6 +190,68 @@ describe("cascade turn-end merge", () => {
 		}
 	});
 
+	// #1104 (review P3 on PR #1143): the advisory preamble used to hardcode "the
+	// review graph was unavailable" for EVERY indeterminate reason. For
+	// `lsp_binding_rejected` that's a mis-attribution — the graph WAS available
+	// and dependents WERE derived; only the LSP diagnostics display was
+	// withheld because a fallback snapshot's content binding didn't match
+	// current disk. The advisory must use a reason-appropriate frame instead.
+	it("uses a binding-specific frame (not 'review graph was unavailable') for an lsp_binding_rejected run", async () => {
+		const env = setupTestEnvironment("cascade-binding-rejected-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const primary = path.join(env.tmpDir, "edited.ts");
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			cacheManager.addModifiedRange(
+				primary,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+
+			runtime.appendCascadeRun({
+				filePath: primary,
+				result: undefined,
+				neighborCount: 0,
+				diagnosticCount: 0,
+				skipReason: "indeterminate",
+				indeterminate: {
+					reason: "lsp_binding_rejected",
+					detail:
+						"cascade fallback diagnostics were withheld — stale snapshot content did not match current disk (binding rejected)",
+				},
+			});
+
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			const findings = consumeTurnEndFindings(cacheManager, env.tmpDir);
+			const content = findings?.messages[0]?.content ?? "";
+			// HEADLINE (fails pre-#1104): the old hardcoded frame mis-attributed
+			// the cause to the review graph for every reason, including this one.
+			expect(content).not.toContain("the review graph was unavailable");
+			expect(content).toContain("edited.ts");
+			expect(content).toContain("binding rejected");
+			expect(content).toContain("Advisory — no action required this turn");
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// #1023 over-correction guard: a HEALTHY run that genuinely found no
 	// dependents (skipReason "no_neighbors", no indeterminate marker) must NOT
 	// emit the advisory — a real clean leaf edit stays silent (no crying wolf).

@@ -320,6 +320,15 @@ export interface PiLensConfigMarker {
 	path: string;
 	dir: string;
 	mtimeMs: number;
+	/**
+	 * Byte size of the config file at stat time (#1105). The config caches gate
+	 * reuse on this alongside `mtimeMs` — the free second axis of the review-graph
+	 * `size:mtimeMs` signature — so an in-place edit that PRESERVES mtime (git
+	 * checkout timestamp restoration, a same-second rewrite) but changes length no
+	 * longer replays a stale parsed config. The stat that yields `mtimeMs` already
+	 * reads `size`, so carrying it costs nothing.
+	 */
+	size: number;
 }
 
 /**
@@ -338,7 +347,12 @@ export function findPiLensConfigMarkerInDir(dir: string): PiLensConfigMarker | u
 		}
 	})();
 	if (!stat?.isFile()) return undefined;
-	return { path: markers.piLensConfigPath, dir: markers.dir, mtimeMs: stat.mtimeMs };
+	return {
+		path: markers.piLensConfigPath,
+		dir: markers.dir,
+		mtimeMs: stat.mtimeMs,
+		size: stat.size,
+	};
 }
 
 /**
