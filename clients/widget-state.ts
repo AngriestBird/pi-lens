@@ -56,6 +56,17 @@ export interface WidgetDiagnostic {
 	 * (mode=full's suppression pass), never computed for mode=all/delta to
 	 * keep those cache-only and instant. */
 	flagged?: boolean;
+	/**
+	 * Wall-clock time this specific diagnostic was OBSERVED (#1186). Per-ENTRY,
+	 * not per-record: a merged record (see `reconcileCascadeNeighborLspErrors`)
+	 * can hold a freshly-observed preserved entry alongside an incoming entry
+	 * replayed from an aging passive snapshot, each with its OWN stamp. The
+	 * per-entry stale gate (`reconcileStaleWidgetFiles`) compares THIS stamp to
+	 * the file's current mtime, so it drops only the genuinely-stale entries
+	 * instead of the whole record. A missing stamp (a pre-#1186 persisted record)
+	 * inherits the record's `touchedAt` — a safe, over-conservative default.
+	 */
+	observedAt?: number;
 }
 
 /**
@@ -133,7 +144,12 @@ export function clearWidgetState(): void {
 	diagnosticsWriteGuard.clear();
 }
 
-export const WIDGET_STATE_VERSION = 1;
+// v1 → v2 (#1186): per-entry `WidgetDiagnostic.observedAt`. v2 is a SUPERSET of
+// v1 (the field is additive/optional), so `importWidgetState` accepts either and
+// migrates a v1 record by inheriting each entry's `observedAt` from the record's
+// `touchedAt`. A v1 file must never be rejected (that would silently drop resume
+// diagnostics) nor crash.
+export const WIDGET_STATE_VERSION = 2;
 
 /** Serializable snapshot of the per-file diagnostic state (#190). */
 export interface PersistedWidgetState {
@@ -180,8 +196,28 @@ export function exportWidgetState(): PersistedWidgetState {
  * Replaces the in-memory `files` map; ignores snapshots from a different
  * version. Triggers a re-render if a callback is registered.
  */
+/**
+ * #1186 v1→v2 migration: stamp each entry that lacks a per-entry `observedAt`
+ * with the record's `touchedAt` (the single stamp the whole record shared under
+ * v1). Non-mutating; entries that already carry a stamp (a v2 record) pass
+ * through untouched.
+ */
+function migrateEntryStamps(
+	entries: WidgetDiagnostic[] | undefined,
+	recordTouchedAt: number,
+): WidgetDiagnostic[] {
+	return (entries ?? []).map((d) =>
+		d.observedAt == null ? { ...d, observedAt: recordTouchedAt } : d,
+	);
+}
+
 export function importWidgetState(state: PersistedWidgetState | undefined): boolean {
-	if (!state || state.version !== WIDGET_STATE_VERSION) return false;
+	// Accept any known-or-older version and migrate (#1186): reject only a
+	// missing snapshot or a FUTURE version this build can't understand. Rejecting
+	// a v1 (pre-per-entry-stamp) file would silently drop all resume diagnostics.
+	if (!state || state.version < 1 || state.version > WIDGET_STATE_VERSION) {
+		return false;
+	}
 	files.clear();
 	// A resumed session's writeIndex counter starts fresh (#190 rehydration is
 	// process-bound like lspServers, see the export above) — any ordering
@@ -194,19 +230,25 @@ export function importWidgetState(state: PersistedWidgetState | undefined): bool
 		// or a persisted forward-slash key stays split from a fresh backslash key
 		// across a resumed session — a primary repro condition. Keep a readable
 		// display path on the record.
+		// #1186 migration: a v1 record's entries have no per-entry `observedAt`.
+		// Inherit the record's `touchedAt` (a safe, over-conservative default —
+		// the whole record shared that one stamp before), so the per-entry stale
+		// gate has a concrete observation time and never treats `undefined` as
+		// epoch-0 (which would drop every migrated entry on the first sweep).
+		const recordTouchedAt = f.touchedAt ?? Date.now();
 		files.set(fileMapKey(f.filePath), {
 			filePath: f.filePath,
 			runners: new Map(f.runners ?? []),
 			formatters: new Map(f.formatters ?? []),
-			diagnostics: f.diagnostics ?? [],
-			allDiagnostics: f.allDiagnostics ?? [],
+			diagnostics: migrateEntryStamps(f.diagnostics, recordTouchedAt),
+			allDiagnostics: migrateEntryStamps(f.allDiagnostics, recordTouchedAt),
 			diagnosticCounts: f.diagnosticCounts ?? {
 				blocking: 0,
 				errors: 0,
 				warnings: 0,
 			},
 			hasFinalDiagnosticsSnapshot: f.hasFinalDiagnosticsSnapshot ?? false,
-			touchedAt: f.touchedAt ?? Date.now(),
+			touchedAt: recordTouchedAt,
 		});
 	}
 	sessionLanguages = state.sessionLanguages ?? [];
@@ -311,11 +353,23 @@ export function recordDiagnostics(
 	// #555 guard.
 	if (!diagnosticsWriteGuard.shouldWrite(fileMapKey(filePath), writeIndex)) return;
 
+	// Resolve the observation time ONCE (#1186): every incoming entry is stamped
+	// with it, and it also seeds the record's `touchedAt`. A fresh write (no
+	// `observedAt`) is observed now.
+	const observedTs = observedAt ?? Date.now();
 	const rec = getOrCreate(filePath);
-	commitDiagnostics(rec, filePath, normalizeDiagnostics(filePath, diagnostics), observedAt);
+	commitDiagnostics(
+		rec,
+		filePath,
+		normalizeDiagnostics(filePath, diagnostics, observedTs),
+		observedTs,
+	);
 }
 
-/** Map the raw diagnostic shape callers pass into stored {@link WidgetDiagnostic}s. */
+/** Map the raw diagnostic shape callers pass into stored {@link WidgetDiagnostic}s.
+ * Every produced entry is stamped with `observedTs` (#1186) — the time THIS batch
+ * of diagnostics was observed — so the per-entry stale gate can later drop just
+ * the entries older than the file's mtime rather than the whole record. */
 function normalizeDiagnostics(
 	filePath: string,
 	diagnostics: Array<{
@@ -328,6 +382,7 @@ function normalizeDiagnostics(
 		severity?: string;
 		semantic?: string;
 	}>,
+	observedTs: number,
 ): WidgetDiagnostic[] {
 	const base = pathToFileURL(filePath).href;
 	return diagnostics.map((d) => {
@@ -345,6 +400,7 @@ function normalizeDiagnostics(
 			rule,
 			tool: d.tool,
 			uri,
+			observedAt: observedTs,
 		} satisfies WidgetDiagnostic;
 	});
 }
@@ -359,22 +415,51 @@ function commitDiagnostics(
 	normalized: WidgetDiagnostic[],
 	observedAt: number | undefined,
 ): void {
+	rec.diagnosticCounts = countDiagnostics(normalized);
+	rec.diagnostics = capStoredDiagnostics(normalized);
+	rec.allDiagnostics = normalized;
+	rec.hasFinalDiagnosticsSnapshot = true;
+	// Record-level `touchedAt` is the FRESHEST per-entry observation in the merged
+	// set (#1186) — drives render recency and the empty-record stale gate. On a
+	// merge (`reconcileCascadeNeighborLspErrors`) this is the newest of the
+	// preserved + incoming entries, not the (possibly aging) incoming stamp, so a
+	// record holding a fresh preserved entry doesn't sort/gate as stale. Empty set
+	// falls back to the passed `observedAt` (or now).
+	rec.touchedAt = freshestObservation(normalized, observedAt ?? Date.now());
+	files.set(fileMapKey(filePath), rec);
+	requestRender();
+}
+
+/** Recompute the {blocking, errors, warnings} tally for a diagnostic set. */
+function countDiagnostics(diags: WidgetDiagnostic[]): {
+	blocking: number;
+	errors: number;
+	warnings: number;
+} {
 	let blocking = 0;
 	let errors = 0;
 	let warnings = 0;
-	for (const diagnostic of normalized) {
+	for (const diagnostic of diags) {
 		if (isBlocking(diagnostic)) blocking++;
 		if (diagnostic.severity === "error") errors++;
 		else if (diagnostic.severity === "warning") warnings++;
 	}
+	return { blocking, errors, warnings };
+}
 
-	rec.diagnosticCounts = { blocking, errors, warnings };
-	rec.diagnostics = capStoredDiagnostics(normalized);
-	rec.allDiagnostics = normalized;
-	rec.hasFinalDiagnosticsSnapshot = true;
-	rec.touchedAt = observedAt ?? Date.now();
-	files.set(fileMapKey(filePath), rec);
-	requestRender();
+/** The newest per-entry `observedAt` in `diags`, or `fallback` when empty (or no
+ * entry carries a stamp). Used as the record-level `touchedAt` (#1186). */
+function freshestObservation(
+	diags: WidgetDiagnostic[],
+	fallback: number,
+): number {
+	let newest: number | undefined;
+	for (const d of diags) {
+		if (d.observedAt != null && (newest === undefined || d.observedAt > newest)) {
+			newest = d.observedAt;
+		}
+	}
+	return newest ?? fallback;
 }
 
 /**
@@ -427,10 +512,18 @@ export function reconcileCascadeNeighborLspErrors(
 	observedAt?: number,
 ): void {
 	if (!diagnosticsWriteGuard.shouldWrite(fileMapKey(filePath), writeIndex)) return;
+	// #1186: the INCOMING LSP errors are stamped at THIS observation time
+	// (`observedAt`, e.g. an aging passive snapshot's `entry.ts`, or now for a
+	// fresh active touch). The PRESERVED entries keep their OWN prior per-entry
+	// `observedAt` — a fresh per-edit finding preserved through this errors-only
+	// merge is NOT re-aged to the incoming stamp. That per-entry split is exactly
+	// what lets `reconcileStaleWidgetFiles` drop the stale incoming entry while
+	// keeping the newer preserved one, instead of dropping the whole record.
+	const observedTs = observedAt ?? Date.now();
 	const rec = getOrCreate(filePath);
-	const incoming = normalizeDiagnostics(filePath, lspErrorDiagnostics);
+	const incoming = normalizeDiagnostics(filePath, lspErrorDiagnostics, observedTs);
 	const preserved = rec.allDiagnostics.filter((d) => !isLspErrorEntry(d));
-	commitDiagnostics(rec, filePath, [...incoming, ...preserved], observedAt);
+	commitDiagnostics(rec, filePath, [...incoming, ...preserved], observedTs);
 }
 
 /**
@@ -500,25 +593,61 @@ export function reconcileScanDiagnostics(
  */
 export async function reconcileStaleWidgetFiles(): Promise<number> {
 	const entries = [...files.entries()];
-	const staleKeys = await Promise.all(
+	const verdicts = await Promise.all(
 		// `mapKey` is the normalized `files` key (used for deletion); stat the
 		// record's real display path, not the lowercased key (#1020).
 		entries.map(async ([mapKey, rec]) => {
+			let mtimeMs: number;
 			try {
-				const st = await stat(rec.filePath);
-				// +1ms tolerance: a freshly-recorded file has touchedAt >= mtime.
-				return st.mtimeMs > rec.touchedAt + 1 ? mapKey : undefined;
+				mtimeMs = (await stat(rec.filePath)).mtimeMs;
 			} catch {
-				return mapKey; // deleted / unreadable → drop
+				return { mapKey, action: "drop" as const }; // deleted / unreadable → drop
 			}
+			// A clean record (no findings) has no per-entry stamps to consult —
+			// gate it on the record's own `touchedAt` exactly as before, so a ✓
+			// entry for a file that changed on disk still drops.
+			if (rec.allDiagnostics.length === 0) {
+				return mtimeMs > rec.touchedAt + 1
+					? { mapKey, action: "drop" as const }
+					: { mapKey, action: "keep" as const };
+			}
+			// #1186 per-ENTRY gate: drop only the entries observed BEFORE the file's
+			// current mtime; keep the rest. A merged record can hold a fresh
+			// preserved entry beside an entry replayed from an aging snapshot, so a
+			// per-RECORD gate over-cleared the whole record (the residual documented
+			// at dispatch/integration.ts). A missing per-entry stamp (a migrated
+			// pre-#1186 record) inherits the record's `touchedAt`. +1ms tolerance:
+			// a freshly-recorded file has observedAt >= mtime.
+			const survivors = rec.allDiagnostics.filter(
+				(d) => !(mtimeMs > (d.observedAt ?? rec.touchedAt) + 1),
+			);
+			if (survivors.length === rec.allDiagnostics.length) {
+				return { mapKey, action: "keep" as const }; // nothing stale
+			}
+			if (survivors.length === 0) {
+				return { mapKey, action: "drop" as const }; // every entry stale → drop record
+			}
+			return { mapKey, action: "prune" as const, survivors };
 		}),
 	);
 	let dropped = 0;
-	for (const key of staleKeys) {
-		if (key !== undefined) {
-			files.delete(key);
+	for (const v of verdicts) {
+		if (v.action === "keep") continue;
+		if (v.action === "drop") {
+			files.delete(v.mapKey);
 			dropped += 1;
+			continue;
 		}
+		// prune: the file changed and shed its stale entries but retains fresher
+		// ones — keep the record, recompute counts/cap from the survivors, and
+		// still count it as a changed file so the agent is told to rescan.
+		const rec = files.get(v.mapKey);
+		if (rec) {
+			rec.allDiagnostics = v.survivors;
+			rec.diagnostics = capStoredDiagnostics(v.survivors);
+			rec.diagnosticCounts = countDiagnostics(v.survivors);
+		}
+		dropped += 1;
 	}
 	if (dropped > 0) requestRenderFn?.();
 	return dropped;

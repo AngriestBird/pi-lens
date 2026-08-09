@@ -11,6 +11,7 @@ import {
 	getFileDiagnosticSummaries,
 	getSessionLanguages,
 	importWidgetState,
+	reconcileCascadeNeighborLspErrors,
 	reconcileScanDiagnostics,
 	reconcileStaleWidgetFiles,
 	recordDiagnostics,
@@ -991,6 +992,190 @@ describe("scheduleStaleReconcile — widget self-corrects fixed files (#298 foll
 			expect(getFileDiagnostics(filePath)).toHaveLength(1);
 		} finally {
 			await vi.useRealTimers();
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
+});
+
+describe("per-entry observation timestamps — the stale gate drops entries, not whole records (#1186)", () => {
+	it("HEADLINE: a merged record keeps a fresher PRESERVED entry when only the older incoming entry is stale", async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "per-entry-"));
+		const filePath = path.join(tmpDir, `neighbor-${Date.now()}.ts`);
+		try {
+			await fs.writeFile(filePath, "import { x } from './primary';\n");
+
+			// A live per-edit biome finding, observed NOW (the fresh, preserved
+			// entry). It is NOT an LSP-error entry, so the errors-only cascade merge
+			// below preserves it verbatim.
+			const freshTs = Date.now();
+			recordDiagnostics(
+				filePath,
+				[
+					{
+						severity: "warning",
+						tool: "biome",
+						message: "live biome finding",
+						rule: "lint/style",
+					},
+				],
+				1,
+				freshTs,
+			);
+
+			// A cascade passive-snapshot re-check replays an aging cross-file LSP
+			// error (observed ~200s ago — the snapshot's own publish time). The merge
+			// stamps ONLY this incoming entry with the old observation time; the
+			// preserved biome entry keeps its fresh stamp.
+			const staleTs = freshTs - 200_000;
+			reconcileCascadeNeighborLspErrors(
+				filePath,
+				[
+					{
+						severity: "error",
+						tool: "lsp",
+						message: "stale cross-file error",
+						rule: "TS2304",
+					},
+				],
+				2,
+				staleTs,
+			);
+
+			// Both entries are present, each with its own observation stamp.
+			const merged = getFileDiagnostics(filePath);
+			expect(merged).toHaveLength(2);
+			expect(merged?.find((d) => d.tool === "biome")?.observedAt).toBe(freshTs);
+			expect(merged?.find((d) => d.tool === "lsp")?.observedAt).toBe(staleTs);
+
+			// The neighbor's mtime advances to BETWEEN the two observations: newer
+			// than the stale LSP error (staleTs), older than the fresh biome finding
+			// (freshTs). Pinned via utimes so it's deterministic on Linux CI (#1024).
+			const between = new Date(freshTs - 100_000);
+			await fs.utimes(filePath, between, between);
+
+			// Per-ENTRY gate: the stale LSP error drops, the fresher biome finding
+			// SURVIVES, and the record is kept. Pre-fix (per-RECORD gate, whole record
+			// stamped at staleTs) the ENTIRE record was dropped, losing the biome
+			// finding — the #1186 over-clearing defect.
+			expect(await reconcileStaleWidgetFiles()).toBe(1);
+			const survivors = getFileDiagnostics(filePath);
+			expect(survivors).toHaveLength(1);
+			expect(survivors?.[0]?.tool).toBe("biome");
+			expect(survivors?.[0]?.message).toBe("live biome finding");
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
+
+	it("no-regression: a fully-stale record (every entry older than mtime) still drops entirely", async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "per-entry-allstale-"));
+		const filePath = path.join(tmpDir, `all-stale-${Date.now()}.ts`);
+		try {
+			await fs.writeFile(filePath, "const z = 3;\n");
+			const oldTs = Date.now() - 200_000;
+			// Two entries, both observed at the same old time.
+			recordDiagnostics(
+				filePath,
+				[
+					{ severity: "error", tool: "lsp", message: "err A", rule: "A" },
+					{ severity: "warning", tool: "biome", message: "warn B", rule: "B" },
+				],
+				1,
+				oldTs,
+			);
+			expect(getFileDiagnostics(filePath)).toHaveLength(2);
+
+			// The file changed AFTER both observations → every entry is stale.
+			const newer = new Date(oldTs + 100_000);
+			await fs.utimes(filePath, newer, newer);
+
+			// Every entry stale → the whole record drops (survivors empty).
+			expect(await reconcileStaleWidgetFiles()).toBe(1);
+			expect(getFileDiagnostics(filePath)).toBeUndefined();
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
+});
+
+describe("PersistedWidgetState v1→v2 migration — per-entry stamps inherit the record touchedAt (#1186)", () => {
+	it("accepts a v1 (pre-per-entry-stamp) snapshot and inherits observedAt from the record touchedAt", () => {
+		const filePath = "C:/proj/legacy.ts";
+		const touchedAt = Date.now() - 50_000;
+		// A v1 on-disk record: version 1, entries carry NO per-entry `observedAt`.
+		const accepted = importWidgetState({
+			version: 1,
+			sessionLanguages: [],
+			files: [
+				{
+					filePath,
+					runners: [],
+					formatters: [],
+					diagnostics: [
+						{ severity: "error", message: "legacy error", rule: "X" },
+					],
+					allDiagnostics: [
+						{ severity: "error", message: "legacy error", rule: "X" },
+					],
+					diagnosticCounts: { blocking: 0, errors: 1, warnings: 0 },
+					hasFinalDiagnosticsSnapshot: true,
+					touchedAt,
+				},
+			],
+		});
+
+		// A v1 file must be ACCEPTED (not rejected — that would silently drop all
+		// resume diagnostics) and must not crash.
+		expect(accepted).toBe(true);
+		const result = getFileDiagnostics(filePath);
+		expect(result).toHaveLength(1);
+		// The migrated entry inherits the record's touchedAt as its observedAt.
+		expect(result?.[0]?.observedAt).toBe(touchedAt);
+	});
+
+	it("rejects a FUTURE version this build can't understand (guard, no crash)", () => {
+		const rejected = importWidgetState({
+			version: WIDGET_STATE_VERSION + 1,
+			sessionLanguages: [],
+			files: [],
+		});
+		expect(rejected).toBe(false);
+	});
+
+	it("a migrated v1 entry gates correctly: stale once the file's mtime passes the inherited stamp", async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "v1-migrate-gate-"));
+		const filePath = path.join(tmpDir, `legacy-${Date.now()}.ts`);
+		try {
+			await fs.writeFile(filePath, "const q = 4;\n");
+			const touchedAt = Date.now() - 30_000;
+			importWidgetState({
+				version: 1,
+				sessionLanguages: [],
+				files: [
+					{
+						filePath,
+						runners: [],
+						formatters: [],
+						diagnostics: [
+							{ severity: "error", message: "legacy stale", rule: "X" },
+						],
+						allDiagnostics: [
+							{ severity: "error", message: "legacy stale", rule: "X" },
+						],
+						diagnosticCounts: { blocking: 0, errors: 1, warnings: 0 },
+						hasFinalDiagnosticsSnapshot: true,
+						touchedAt,
+					},
+				],
+			});
+			// File changed after the inherited observation → the migrated entry is
+			// stale and drops (proves the inherited stamp actually gates — not stored
+			// but ignored).
+			const newer = new Date(touchedAt + 10_000);
+			await fs.utimes(filePath, newer, newer);
+			expect(await reconcileStaleWidgetFiles()).toBe(1);
+			expect(getFileDiagnostics(filePath)).toBeUndefined();
+		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
 		}
 	});

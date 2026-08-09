@@ -10,6 +10,29 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Per-entry widget observation timestamps: a cross-file cascade merge no longer over-clears a whole footer record, dropping only the genuinely-stale entries (closes #1186, refs #1093 #1092 #1020)** —
+	`reconcileCascadeNeighborLspErrors` → `commitDiagnostics` used to stamp the
+	ENTIRE merged record's single `touchedAt` with the incoming `observedAt`
+	(e.g. a passive snapshot's `entry.ts`, up to ~240s old), including PRESERVED
+	entries observed more recently. If the neighbor's mtime later fell between
+	that stale stamp and a preserved entry's true observation time,
+	`reconcileStaleWidgetFiles` dropped the WHOLE record — losing the newer
+	preserved findings (the residual documented at `clients/dispatch/integration.ts`).
+	`WidgetDiagnostic` now carries a per-ENTRY `observedAt`: `normalizeDiagnostics`
+	stamps each incoming entry at its observation time, the cascade merge keeps
+	each preserved entry's own prior stamp (never re-aging a fresh finding to the
+	incoming stamp), and `reconcileStaleWidgetFiles` gates per ENTRY — dropping
+	only entries observed before the file's current mtime, keeping the record when
+	any survive, and dropping the record only when empty (a clean, finding-less
+	record still gates on `touchedAt`). `PersistedWidgetState` bumps v1→v2:
+	`importWidgetState` accepts a v1 snapshot and migrates each stampless entry to
+	inherit the record's `touchedAt` (a safe, over-conservative default; a future
+	version is still rejected). The sibling gates `dropStaleFiles`
+	(session-state-store) and `reconcileProjectDiagnosticsSnapshot` are unchanged
+	— both compare against a single save/scan time ≥ every entry's observation, so
+	a whole-record drop there already equals dropping every entry. The
+	`markDependentsUnverified`/seq-stamp half of #1093's sketch is a separate,
+	non-contained follow-up (left open under #1093).
 - **`allowScripts` entries had drifted from what the declared dependency ranges actually resolve to, so npm v12's exact-version script-approval check saw stale pins (closes #1176)** —
 	`package.json`'s `@ast-grep/cli` dependency range is `"^0.45.0"`, but the
 	`allowScripts` map still keyed its approval on `"@ast-grep/cli@0.44.1"` — a
