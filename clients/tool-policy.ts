@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
 import { logLatency } from "./latency-logger.js";
+import { resolvePackagePath } from "./package-root.js";
 import { findNearestContaining, walkUpDirs } from "./path-utils.js";
 import type { ProjectConventions } from "./project-conventions.js";
 import { loadProjectSnapshot } from "./project-snapshot.js";
@@ -2204,6 +2205,65 @@ export function hasRuffConfig(cwd: string): boolean {
 		}
 	}
 	return false;
+}
+
+/**
+ * Shared config-args seam for the markdownlint lint AND autofix surfaces
+ * (#1247). The lint runner (`markdownlint.ts`) and the autofix path
+ * (`pipeline.ts` `tryMarkdownlintFix`) MUST both consume this builder so the
+ * package-owned sensible-defaults config (`config/markdownlint/core.json`) can
+ * never drift apart from the bare `--fix` invocation again.
+ */
+/**
+ * Shared fallback shape for the config-args builders (#1247): when the
+ * project has its own config the lint/autofix surfaces pass NO args (the
+ * tool discovers it); otherwise both surfaces point at the package-owned
+ * fallback so the tool never silently runs its default ruleset. One shape
+ * here means the per-tool builders cannot drift from each other.
+ */
+function configArgsWithFallback(
+	hasConfig: boolean,
+	toolArgs: string[],
+	packageConfigPath: string,
+): string[] {
+	return hasConfig
+		? []
+		: [...toolArgs, resolvePackagePath(import.meta.url, packageConfigPath)];
+}
+
+export function markdownlintConfigArgs(cwd: string): string[] {
+	return configArgsWithFallback(
+		hasMarkdownlintConfig(cwd),
+		["--config"],
+		"config/markdownlint/core.json",
+	);
+}
+
+/**
+ * Shared config-args seam for the ruff lint AND autofix surfaces (#1247).
+ * The lint runner (`ruff.ts`) and `ruffClient.fixFileAsync` MUST both consume
+ * this builder so `config/ruff/core.toml` applies on `--fix` too.
+ */
+export function ruffConfigArgs(cwd: string): string[] {
+	return configArgsWithFallback(
+		hasRuffConfig(cwd),
+		["--config"],
+		"config/ruff/core.toml",
+	);
+}
+
+/**
+ * Shared config-args seam for the biome lint AND autofix surfaces (#1247).
+ * The lint runner (`biome-check.ts`) and `biomeClient.fixFileAsync` MUST both
+ * consume this builder so the user's `biome.json(c)` — or the package-owned
+ * `config/biome/core.jsonc` fallback — applies on `lint --write` too.
+ */
+export function biomeConfigArgs(cwd: string): string[] {
+	return [
+		"--config-path=" +
+			(getBiomeConfigPath(cwd) ??
+				resolvePackagePath(import.meta.url, "config/biome/core.jsonc")),
+	];
 }
 
 export function hasGolangciConfig(cwd: string): boolean {

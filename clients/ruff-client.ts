@@ -12,6 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { isFileKind } from "./file-kinds.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { ruffConfigArgs } from "./tool-policy.js";
 
 // --- Types ---
 
@@ -106,8 +107,13 @@ export class RuffClient {
 
 	/**
 	 * Async auto-fix variant for pipeline use (non-blocking spawn).
+	 * `cwd` is the dispatch language root (used for config discovery); when
+	 * omitted it defaults to the file's directory.
 	 */
-	async fixFileAsync(filePath: string): Promise<{
+	async fixFileAsync(
+		filePath: string,
+		cwd?: string,
+	): Promise<{
 		success: boolean;
 		changed: boolean;
 		fixed: number;
@@ -135,6 +141,13 @@ export class RuffClient {
 		try {
 			const before = await fs.promises.readFile(absolutePath, "utf-8");
 
+			// Shared config-args seam (#1247): the lint runner consumes the same
+			// builder, so `check --fix` can never drift to ruff's default rule
+			// set when the project lacks its own config and the package-owned
+			// core.toml fallback applies.
+			const configArgs = ruffConfigArgs(cwd ?? path.dirname(absolutePath));
+			const spawnOpts = { timeout: 10000, cwd: cwd ?? path.dirname(absolutePath) };
+
 			const pre = await safeSpawnAsync(
 				"ruff",
 				[
@@ -143,9 +156,10 @@ export class RuffClient {
 					"json",
 					"--target-version",
 					"py310",
+					...configArgs,
 					absolutePath,
 				],
-				{ timeout: 10000 },
+				spawnOpts,
 			);
 			const beforeDiags = pre.stdout?.trim()
 				? this.parseOutput(pre.stdout, absolutePath)
@@ -154,8 +168,8 @@ export class RuffClient {
 
 			const fix = await safeSpawnAsync(
 				"ruff",
-				["check", "--fix", absolutePath],
-				{ timeout: 15000 },
+				["check", "--fix", ...configArgs, absolutePath],
+				{ timeout: 15000, cwd: cwd ?? path.dirname(absolutePath) },
 			);
 
 			if (fix.error) {

@@ -333,6 +333,89 @@ describe("runtime-agent-end deferred formatting", () => {
 		}
 	});
 
+	it("skips actionable warning autofix for files excluded by project ignore (#1247)", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-ignore-");
+		try {
+			const filePath = createTempFile(env.tmpDir, "CHANGELOG.md", "# Title\n");
+			fs.writeFileSync(
+				path.join(env.tmpDir, ".pi-lens.json"),
+				JSON.stringify({ ignore: ["CHANGELOG.md"] }),
+			);
+			loadPiLensProjectConfig(env.tmpDir);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.seedProjectSequence(1);
+			const report: ActionableWarningsReport = {
+				generatedAt: new Date().toISOString(),
+				scope: "turn_delta",
+				sessionId: "s1",
+				turnIndex: 1,
+				projectSeqEnd: 1,
+				deltaOnly: true,
+				includeLspCodeActions: true,
+				files: [
+					{
+						filePath,
+						displayPath: "CHANGELOG.md",
+						warnings: [
+							{
+								id: "aw:1",
+								filePath,
+								displayPath: "CHANGELOG.md",
+								severity: "warning",
+								tool: "markdownlint",
+								message: "list indent",
+								suppressed: false,
+								origin: "dispatch",
+								actions: [
+									{
+										title: "Fix list indent",
+										hasEdit: true,
+										hasCommand: false,
+										autoFixEligible: true,
+									},
+								],
+							},
+						],
+					},
+				],
+				summary: {
+					warnings: 1,
+					unsuppressed: 1,
+					suppressed: 0,
+					files: 1,
+					actions: 1,
+					autoFixEligible: 1,
+				},
+			};
+			const dbg = vi.fn();
+			applyConservativeActionableWarningFixesMock.mockClear();
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) =>
+					name === "lens-actionable-warning-autofix" || name === "no-lsp",
+				notify: vi.fn(),
+				dbg,
+				runtime,
+				cacheManager: {
+					readCache: () => ({ data: report }),
+					addModifiedRange: vi.fn(),
+				} as any,
+				getFormatService: () =>
+					({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+			});
+
+			expect(applyConservativeActionableWarningFixesMock).not.toHaveBeenCalled();
+			expect(dbg).toHaveBeenCalledWith(
+				expect.stringContaining("ignored by project"),
+			);
+		} finally {
+			applyConservativeActionableWarningFixesMock.mockReset();
+			env.cleanup();
+		}
+	});
+
 	it("skips queued files when autoformat is disabled", async () => {
 		const env = setupTestEnvironment("pi-lens-agent-end-format-");
 		try {
@@ -575,14 +658,39 @@ describe("runtime-agent-end deferred formatting", () => {
 				projectSeqEnd: 1,
 				deltaOnly: true,
 				includeLspCodeActions: true,
-				files: [],
+				files: [
+					{
+						filePath,
+						displayPath: "src/app.ts",
+						warnings: [
+							{
+								id: "aw:502",
+								filePath,
+								displayPath: "src/app.ts",
+								severity: "warning",
+								tool: "typescript",
+								message: "unused var",
+								suppressed: false,
+								origin: "dispatch",
+								actions: [
+									{
+										title: "Remove unused var",
+										hasEdit: true,
+										hasCommand: false,
+										autoFixEligible: true,
+									},
+								],
+							},
+						],
+					},
+				],
 				summary: {
-					warnings: 0,
-					unsuppressed: 0,
+					warnings: 1,
+					unsuppressed: 1,
 					suppressed: 0,
-					files: 0,
-					actions: 0,
-					autoFixEligible: 0,
+					files: 1,
+					actions: 1,
+					autoFixEligible: 1,
 				},
 			};
 			applyConservativeActionableWarningFixesMock.mockResolvedValueOnce({
@@ -833,6 +941,7 @@ describe("runtime-agent-end deferred formatting", () => {
 					skipped: [],
 				});
 
+				const dbg = vi.fn();
 				const emit = vi.fn();
 				wireFormatEventsBusEmitter(emit);
 
@@ -841,7 +950,7 @@ describe("runtime-agent-end deferred formatting", () => {
 					getFlag: (name) =>
 						name === "lens-actionable-warning-autofix" || name === "no-lsp",
 					notify: vi.fn(),
-					dbg: vi.fn(),
+					dbg,
 					runtime,
 					cacheManager: {
 						readCache: () => ({ data: report }),
@@ -854,6 +963,11 @@ describe("runtime-agent-end deferred formatting", () => {
 				expect(emit).not.toHaveBeenCalledWith(
 					"pilens:autofix:start",
 					expect.anything(),
+				);
+				// P2-A: the zero-eligible skip is explicit in the debug log — a
+				// regression that collapses eligibleCount to 0 is not silent.
+				expect(dbg).toHaveBeenCalledWith(
+					expect.stringContaining("0 autofix-eligible warnings, skipping"),
 				);
 			} finally {
 				resetFormatEventsPublish();
