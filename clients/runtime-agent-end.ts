@@ -459,60 +459,60 @@ export async function handleAgentEnd({
 						eligibleCount: eligibleReport.summary.autoFixEligible,
 						dbg,
 					});
-				}
-				const fixStart = Date.now();
-				const fixCwd = ctxCwd ?? runtime.projectRoot;
-				const mutationContext: LspMutationContext = {
-					cwd: fixCwd,
-					correlationId: newLspMutationCorrelationId(),
-					tool: "lsp-quickfix",
-					source: "autofix",
-					runtime,
-					cacheManager,
-					readGuard: getFlag("no-read-guard") ? undefined : runtime.readGuard,
-					recordAutofix: getFlag("lens-turn-summary")
-						? (filePath) => runtime.turnSummary.recordAutofix(filePath, { tool: "lsp-quickfix" })
-						: undefined,
-					dbg,
-				};
-				const fixSummary = await applyConservativeActionableWarningFixes({
-					cwd: fixCwd,
-					report: eligibleReport,
-					maxFixes: getGlobalActionableWarningMaxFixes(),
-					dbg,
-					mutationContext,
-				});
-				if (fixSummary.changedFiles.length > 0) {
-					publishFilesTouched({
-						reason: "autofix",
-						paths: fixSummary.changedFiles,
-						cwd: ctxCwd ?? runtime.projectRoot,
+					const fixStart = Date.now();
+					const fixCwd = ctxCwd ?? runtime.projectRoot;
+					const mutationContext: LspMutationContext = {
+						cwd: fixCwd,
+						correlationId: newLspMutationCorrelationId(),
+						tool: "lsp-quickfix",
+						source: "autofix",
+						runtime,
+						cacheManager,
+						readGuard: getFlag("no-read-guard") ? undefined : runtime.readGuard,
+						recordAutofix: getFlag("lens-turn-summary")
+							? (filePath) => runtime.turnSummary.recordAutofix(filePath, { tool: "lsp-quickfix" })
+							: undefined,
 						dbg,
-						fixes: fixSummary.changedFiles.map((changedFile) => ({
-							path: changedFile,
-							tool: "lsp-quickfix",
-							kind: "autofix" as const,
-						})),
+					};
+					const fixSummary = await applyConservativeActionableWarningFixes({
+						cwd: fixCwd,
+						report: eligibleReport,
+						maxFixes: getGlobalActionableWarningMaxFixes(),
+						dbg,
+						mutationContext,
 					});
-				}
-				logLatency({
-					type: "phase",
-					toolName: "agent_end",
-					filePath: ctxCwd ?? runtime.projectRoot,
-					phase: "actionable_warnings_autofix",
-					durationMs: Date.now() - fixStart,
-					metadata: {
-						considered: fixSummary.considered,
-						applied: fixSummary.applied,
-						changedFiles: fixSummary.changedFiles.length,
-						skipped: fixSummary.skipped.length,
-					},
-				});
-				if (fixSummary.applied > 0) {
-					notify(
-						`pi-lens applied ${fixSummary.applied} conservative LSP warning quickfix(es)`,
-						"info",
-					);
+					if (fixSummary.changedFiles.length > 0) {
+						publishFilesTouched({
+							reason: "autofix",
+							paths: fixSummary.changedFiles,
+							cwd: ctxCwd ?? runtime.projectRoot,
+							dbg,
+							fixes: fixSummary.changedFiles.map((changedFile) => ({
+								path: changedFile,
+								tool: "lsp-quickfix",
+								kind: "autofix" as const,
+							})),
+						});
+					}
+					logLatency({
+						type: "phase",
+						toolName: "agent_end",
+						filePath: ctxCwd ?? runtime.projectRoot,
+						phase: "actionable_warnings_autofix",
+						durationMs: Date.now() - fixStart,
+						metadata: {
+							considered: fixSummary.considered,
+							applied: fixSummary.applied,
+							changedFiles: fixSummary.changedFiles.length,
+							skipped: fixSummary.skipped.length,
+						},
+					});
+					if (fixSummary.applied > 0) {
+						notify(
+							`pi-lens applied ${fixSummary.applied} conservative LSP warning quickfix(es)`,
+							"info",
+						);
+					}
 				}
 			}
 		}

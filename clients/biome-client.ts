@@ -119,7 +119,7 @@ export class BiomeClient {
 		cwd?: string,
 	) {
 		const { cmd, args: prefix } = await this.getBiomeBinary(cwd);
-		return safeSpawnAsync(cmd, [...prefix, ...args], { timeout });
+		return safeSpawnAsync(cmd, [...prefix, ...args], { timeout, cwd });
 	}
 
 	/**
@@ -217,7 +217,7 @@ export class BiomeClient {
 			// builder, so `lint --write` can never drift to biome's default
 			// config when a user config or the package fallback exists.
 			const result = await this.spawnBiomeAsync(
-				[...biomeConfigArgs(configCwd), "lint", "--write", absolutePath],
+				["lint", "--write", ...biomeConfigArgs(configCwd), absolutePath],
 				15000,
 				configCwd,
 			);

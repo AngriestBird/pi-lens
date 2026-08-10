@@ -365,6 +365,8 @@ describe("runtime-agent-end deferred formatting", () => {
 								severity: "warning",
 								tool: "markdownlint",
 								message: "list indent",
+								suppressed: false,
+								origin: "dispatch",
 								actions: [
 									{
 										title: "Fix list indent",
@@ -656,14 +658,39 @@ describe("runtime-agent-end deferred formatting", () => {
 				projectSeqEnd: 1,
 				deltaOnly: true,
 				includeLspCodeActions: true,
-				files: [],
+				files: [
+					{
+						filePath,
+						displayPath: "src/app.ts",
+						warnings: [
+							{
+								id: "aw:502",
+								filePath,
+								displayPath: "src/app.ts",
+								severity: "warning",
+								tool: "typescript",
+								message: "unused var",
+								suppressed: false,
+								origin: "dispatch",
+								actions: [
+									{
+										title: "Remove unused var",
+										hasEdit: true,
+										hasCommand: false,
+										autoFixEligible: true,
+									},
+								],
+							},
+						],
+					},
+				],
 				summary: {
-					warnings: 0,
-					unsuppressed: 0,
+					warnings: 1,
+					unsuppressed: 1,
 					suppressed: 0,
-					files: 0,
-					actions: 0,
-					autoFixEligible: 0,
+					files: 1,
+					actions: 1,
+					autoFixEligible: 1,
 				},
 			};
 			applyConservativeActionableWarningFixesMock.mockResolvedValueOnce({
