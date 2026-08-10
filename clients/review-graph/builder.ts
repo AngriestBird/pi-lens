@@ -20,6 +20,7 @@ import { detectFileKind, KIND_EXTENSIONS } from "../file-kinds.js";
 import { detectFileRole } from "../file-role.js";
 import { getProjectDataDir } from "../file-utils.js";
 import { collectUntrackedIgnoredIds } from "../git-tracked-ignore.js";
+import { realIsPidAlive } from "../instance-reaper.js";
 import { logLatency } from "../latency-logger.js";
 import {
 	containerNameChain,
@@ -1909,22 +1910,66 @@ function ensurePersistExitHook(): void {
 
 // #950 review F3: a process that dies between a worker's staged write and its
 // promotion leaves review-graph.json.gz.stage-<pid>-<gen> (and the worker's
-// .tmp-<pid>) behind forever — the exit hook can't run handleWorkerResult's rm.
-// Sweep leftovers from PRIOR processes once per cache dir; our own live stage
-// files carry this pid and are skipped.
+// <stage>.tmp-<pid>) behind forever — the exit hook can't run
+// handleWorkerResult's rm. Sweep leftovers from PRIOR processes once per cache
+// dir.
+//
+// #1206: `cacheDir` is the SHARED project cache dir (getProjectDataDir/cache)
+// that every durable store stages into via writeFileAtomic's generic
+// `<target>.tmp-<pid>`. The old predicate also matched that shape, so this
+// sweep deleted OTHER modules' in-flight staging files in the window between
+// their write and their rename — turning their rename into ENOENT (propagated
+// out of markDisposition for bestEffort:false stores) or silently dropping the
+// update. The sweep is therefore scoped to artifacts the review graph itself
+// produces, all of which are `<review-graph.*>.stage-<pid>-<gen>`:
+//   review-graph.json.gz.stage-<pid>-<gen>              (persistGraph, L1861)
+//   review-graph.checkpoint.json.gz.stage-<pid>-<gen>   (checkpoint, L2259)
+//   ...plus either's worker tmp `<stage>.tmp-<pid>`, which still carries both
+//   the `review-graph.` prefix and the `.stage-` marker.
+// (LEGACY_GRAPH_CACHE_FILENAME, `review-graph.json`, is never staged — it is
+// only ever `rmSync`'d as a one-time migration cleanup — so it is not a
+// producer here despite matching the prefix.)
+// The bare `.tmp-<pid>` shape is never matched, which also makes this sweep
+// independent of any change to atomic-write's staging name (#1205). Dropping
+// that shape means the review-graph sweep is no longer the incidental GC for
+// other stores' orphaned atomic-write temps; that gap is now tracked by
+// #1228, not assumed to be owned elsewhere.
+//
+// Liveness: an entry whose embedded stage pid is still alive belongs to a
+// concurrent healthy owner (or to us) and is skipped, reusing the reaper's
+// conservative `realIsPidAlive` (ESRCH-only-means-dead) rather than inventing
+// a second liveness probe. A recycled pid can therefore leave one stale stage
+// file behind instead of destroying a live one — deliberately the safe
+// direction; a later process whose pid table has moved on sweeps it.
 const _sweptStageDirs = new Set<string>();
+const REVIEW_GRAPH_ARTIFACT_PREFIX = "review-graph.";
+const STAGE_PID_PATTERN = /\.stage-(\d+)-/;
+
+/** True only for a review-graph stage artifact left behind by a dead process. */
+function isStaleReviewGraphStageFile(entry: string): boolean {
+	if (!entry.startsWith(REVIEW_GRAPH_ARTIFACT_PREFIX)) return false;
+	const match = STAGE_PID_PATTERN.exec(entry);
+	if (!match) return false;
+	const pid = Number(match[1]);
+	if (pid === process.pid) return false; // our own live stage file
+	return !realIsPidAlive(pid);
+}
+
 function sweepStaleStageFiles(cacheDir: string): void {
 	if (_sweptStageDirs.has(cacheDir)) return;
 	_sweptStageDirs.add(cacheDir);
 	fs.readdir(cacheDir, (err, entries) => {
 		if (err) return;
-		const ownMarker = `.stage-${process.pid}-`;
 		for (const entry of entries) {
-			const isStage = entry.includes(".stage-") || /\.tmp-\d+$/.test(entry);
-			if (!isStage || entry.includes(ownMarker)) continue;
+			if (!isStaleReviewGraphStageFile(entry)) continue;
 			fs.rm(path.join(cacheDir, entry), { force: true }, () => {});
 		}
 	});
+}
+
+/** Test seam: the sweep runs at most once per cache dir per process. */
+export function _resetReviewGraphStageSweepForTests(): void {
+	_sweptStageDirs.clear();
 }
 
 function persistGraph(
