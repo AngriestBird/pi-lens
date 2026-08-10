@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
 import { logLatency } from "./latency-logger.js";
+import { resolvePackagePath } from "./package-root.js";
 import { findNearestContaining, walkUpDirs } from "./path-utils.js";
 import type { ProjectConventions } from "./project-conventions.js";
 import { loadProjectSnapshot } from "./project-snapshot.js";
@@ -2204,6 +2205,47 @@ export function hasRuffConfig(cwd: string): boolean {
 		}
 	}
 	return false;
+}
+
+/**
+ * Shared config-args seam for the markdownlint lint AND autofix surfaces
+ * (#1247). The lint runner (`markdownlint.ts`) and the autofix path
+ * (`pipeline.ts` `tryMarkdownlintFix`) MUST both consume this builder so the
+ * package-owned sensible-defaults config (`config/markdownlint/core.json`) can
+ * never drift apart from the bare `--fix` invocation again.
+ */
+export function markdownlintConfigArgs(cwd: string): string[] {
+	return hasMarkdownlintConfig(cwd)
+		? []
+		: [
+				"--config",
+				resolvePackagePath(import.meta.url, "config/markdownlint/core.json"),
+			];
+}
+
+/**
+ * Shared config-args seam for the ruff lint AND autofix surfaces (#1247).
+ * The lint runner (`ruff.ts`) and `ruffClient.fixFileAsync` MUST both consume
+ * this builder so `config/ruff/core.toml` applies on `--fix` too.
+ */
+export function ruffConfigArgs(cwd: string): string[] {
+	return hasRuffConfig(cwd)
+		? []
+		: ["--config", resolvePackagePath(import.meta.url, "config/ruff/core.toml")];
+}
+
+/**
+ * Shared config-args seam for the biome lint AND autofix surfaces (#1247).
+ * The lint runner (`biome-check.ts`) and `biomeClient.fixFileAsync` MUST both
+ * consume this builder so the user's `biome.json(c)` — or the package-owned
+ * `config/biome/core.jsonc` fallback — applies on `lint --write` too.
+ */
+export function biomeConfigArgs(cwd: string): string[] {
+	return [
+		"--config-path=" +
+			(getBiomeConfigPath(cwd) ??
+				resolvePackagePath(import.meta.url, "config/biome/core.jsonc")),
+	];
 }
 
 export function hasGolangciConfig(cwd: string): boolean {

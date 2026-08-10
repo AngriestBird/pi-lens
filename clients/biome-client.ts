@@ -14,6 +14,7 @@ import { isFileKind } from "./file-kinds.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { biomeConfigArgs } from "./tool-policy.js";
 
 // --- Types ---
 
@@ -178,8 +179,13 @@ export class BiomeClient {
 
 	/**
 	 * Async auto-fix variant for pipeline use (non-blocking spawn).
+	 * `cwd` is the dispatch language root (used for config discovery); when
+	 * omitted it defaults to the file's directory.
 	 */
-	async fixFileAsync(filePath: string): Promise<{
+	async fixFileAsync(
+		filePath: string,
+		cwd?: string,
+	): Promise<{
 		success: boolean;
 		changed: boolean;
 		fixed: number;
@@ -206,10 +212,14 @@ export class BiomeClient {
 
 		try {
 			const before = await fs.promises.readFile(absolutePath, "utf-8");
+			const configCwd = cwd ?? path.dirname(absolutePath);
+			// Shared config-args seam (#1247): the lint runner consumes the same
+			// builder, so `lint --write` can never drift to biome's default
+			// config when a user config or the package fallback exists.
 			const result = await this.spawnBiomeAsync(
-				["lint", "--write", absolutePath],
+				[...biomeConfigArgs(configCwd), "lint", "--write", absolutePath],
 				15000,
-				path.dirname(absolutePath),
+				configCwd,
 			);
 
 			if (result.error) {

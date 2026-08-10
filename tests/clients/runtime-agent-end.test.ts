@@ -333,6 +333,87 @@ describe("runtime-agent-end deferred formatting", () => {
 		}
 	});
 
+	it("skips actionable warning autofix for files excluded by project ignore (#1247)", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-ignore-");
+		try {
+			const filePath = createTempFile(env.tmpDir, "CHANGELOG.md", "# Title\n");
+			fs.writeFileSync(
+				path.join(env.tmpDir, ".pi-lens.json"),
+				JSON.stringify({ ignore: ["CHANGELOG.md"] }),
+			);
+			loadPiLensProjectConfig(env.tmpDir);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.seedProjectSequence(1);
+			const report: ActionableWarningsReport = {
+				generatedAt: new Date().toISOString(),
+				scope: "turn_delta",
+				sessionId: "s1",
+				turnIndex: 1,
+				projectSeqEnd: 1,
+				deltaOnly: true,
+				includeLspCodeActions: true,
+				files: [
+					{
+						filePath,
+						displayPath: "CHANGELOG.md",
+						warnings: [
+							{
+								id: "aw:1",
+								filePath,
+								displayPath: "CHANGELOG.md",
+								severity: "warning",
+								tool: "markdownlint",
+								message: "list indent",
+								actions: [
+									{
+										title: "Fix list indent",
+										hasEdit: true,
+										hasCommand: false,
+										autoFixEligible: true,
+									},
+								],
+							},
+						],
+					},
+				],
+				summary: {
+					warnings: 1,
+					unsuppressed: 1,
+					suppressed: 0,
+					files: 1,
+					actions: 1,
+					autoFixEligible: 1,
+				},
+			};
+			const dbg = vi.fn();
+			applyConservativeActionableWarningFixesMock.mockClear();
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) =>
+					name === "lens-actionable-warning-autofix" || name === "no-lsp",
+				notify: vi.fn(),
+				dbg,
+				runtime,
+				cacheManager: {
+					readCache: () => ({ data: report }),
+					addModifiedRange: vi.fn(),
+				} as any,
+				getFormatService: () =>
+					({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+			});
+
+			expect(applyConservativeActionableWarningFixesMock).not.toHaveBeenCalled();
+			expect(dbg).toHaveBeenCalledWith(
+				expect.stringContaining("ignored by project"),
+			);
+		} finally {
+			applyConservativeActionableWarningFixesMock.mockReset();
+			env.cleanup();
+		}
+	});
+
 	it("skips queued files when autoformat is disabled", async () => {
 		const env = setupTestEnvironment("pi-lens-agent-end-format-");
 		try {
