@@ -92,8 +92,19 @@ export interface DiagnosticBinding extends StoredDiagnosticBinding {
  * not a substitute for a consumer's stricter scope-specific fallback — notably, an
  * all-scope classic TypeScript touch still needs the tool's synchronous tsserver check.
  * `binding` is present only for a collecting touch that composed one (absent →
- * "unknown", the honest #533 fall-through). A non-collecting or debounced touch
- * resolves to `{ diags: [] }` without confirmation metadata.
+ * "unknown", the honest #533 fall-through).
+ *
+ * A touch that SHORT-CIRCUITS resolves to `{ diags: [] }` with no confirmation
+ * metadata — that is `shouldSkipTouch`, which requires `waitForDiagnostics ===
+ * false`, i.e. a non-collecting (`diagnostics: "none"`) touch whose content every
+ * spawned server already has. A debounced COLLECTING touch is a different thing
+ * and does NOT short-circuit: the notify is skipped for the servers that already
+ * hold the content, but the diagnostics wait still runs and the touch can resolve
+ * `confirmation: "confirmed"` on its own evidence. That is sound because the
+ * debounce entry is per-server and recorded only when that server's write
+ * actually landed (#1253/#743) — a skipped notify therefore means "this server
+ * demonstrably has this content", which is exactly the premise the silent-clean
+ * gates need.
  */
 export interface TouchFileResult {
 	diags: import("./client.js").LSPDiagnostic[];

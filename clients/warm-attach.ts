@@ -307,3 +307,12 @@ export function _setWarmAttachForTests(cwd: string, incumbentPid: number): void 
 	state.incumbentPid = incumbentPid;
 	state.local = false;
 }
+
+/**
+ * The incumbent-side request handler, exposed for tests. The socket wiring
+ * around it (`startServer`) can only be exercised by a test that actually
+ * binds a unix socket, which is not available in every sandbox — this seam
+ * lets the DTO-composition half (notably the #1253 `confirmation` field, whose
+ * absence is what a consumer reads as unconfirmed) be pinned directly.
+ */
+export const _serveWarmRequestForTests = serveRequest;

@@ -1276,6 +1276,66 @@ describe("lsp_diagnostics tool", () => {
 				removeTempDirSync(tmpDir);
 			}
 		});
+
+		/**
+		 * #1253: the severity-filtered-to-empty branch.
+		 *
+		 * `canTrustTouchConfirmation` gates on the touch's own provenance, so a
+		 * confirmed touch that DID return diagnostics — which the requested
+		 * severity floor then filters away — now yields "clean". The pre-#1253
+		 * arrangement fell through to `classifyEmptyResult`, which for a
+		 * tier3-silent server answers "unconfirmed": the server's silence was
+		 * treated as unexplained even though it had demonstrably answered.
+		 *
+		 * "clean at the requested severity" is the honest verdict here — the
+		 * unconfirmed doctrine (#799/#814) exists for a server that said NOTHING,
+		 * not one whose findings were filtered by the caller's own floor. This
+		 * pins that distinction, which is otherwise only exercised with `diags: []`
+		 * and would flip back silently.
+		 */
+		it("a confirmed touch whose findings are all below the severity floor is clean, not unconfirmed", async () => {
+			mocked.cascadeTier = "tier3-silent";
+			const hint = {
+				severity: 4 as const,
+				message: "Consider a reference link",
+				range: {
+					start: { line: 2, character: 0 },
+					end: { line: 2, character: 8 },
+				},
+				source: "marksman",
+			};
+			(mocked.service as any).touchFile = vi.fn().mockResolvedValue({
+				diags: [hint],
+				confirmation: "confirmed",
+			});
+			// The tier-3 sync escape hatch is for a GENUINELY empty result; a
+			// severity-filtered one must not reach for it.
+			const executeCommand = vi.fn();
+			(mocked.service as any).executeCommand = executeCommand;
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-marksman-severity-"),
+			);
+			const file = path.join(tmpDir, "README.md");
+			fs.writeFileSync(file, "# Example\n\n[missing](missing.md)\n");
+
+			try {
+				const result = await runMarkdown(
+					{ paths: [file], severity: "error", serverScope: "primary" },
+					[file],
+				);
+
+				expect(result.details?.outcomeCounts).toMatchObject({
+					clean: 1,
+					inconclusive: 0,
+				});
+				// The hint is below the floor, so it is not reported as a finding...
+				expect(result.details?.totalDiagnostics).toBe(0);
+				// ...but the server answered, so nothing consults the sync fallback.
+				expect(executeCommand).not.toHaveBeenCalled();
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
 	});
 
 	// #571: a standalone lsp_diagnostics check that gets a CONFIRMED fresh
