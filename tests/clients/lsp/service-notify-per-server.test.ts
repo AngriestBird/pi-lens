@@ -252,4 +252,60 @@ describe("#743 — per-server notify-write deadlines", () => {
 
 		expect([...brokenMap.keys()].some((k) => k.startsWith("flaky:"))).toBe(false);
 	});
+
+	/**
+	 * #743 + #1253: the touch debounce is keyed PER SERVER.
+	 *
+	 * #1253 stopped a failed notify write from being recorded as delivered — a
+	 * server that never received the file must be re-pushed rather than debounced
+	 * into a later touch that looks fully delivered (which the silent-clean gates
+	 * would read as a confirmed clean). But the recent-touches key was
+	 * "file:clientScope" with no server component, so withholding the entry
+	 * withheld it from every co-touched server: one wedged auxiliary disabled the
+	 * debounce for its HEALTHY siblings too, re-pushing them on the next touch and
+	 * clearing diagnostics they had already computed — the exact per-file collapse
+	 * #743 removed from the write deadline.
+	 *
+	 * Per-server keying satisfies both: the stalled server has no entry and is
+	 * re-pushed; the healthy server keeps its own and is skipped.
+	 */
+	it("a stalled sibling does not cost the healthy server its touch debounce", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const stalledClient = makeClient(true);
+		const healthyClient = makeClient(false);
+
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("stalled"),
+			makeServer("healthy"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(stalledClient)
+			.mockResolvedValueOnce(healthyClient);
+
+		const runTouch = async () => {
+			const p = service.touchFile(FILE, "same-content", {
+				clientScope: "all",
+				diagnostics: "document",
+				collectDiagnostics: true,
+				source: "test",
+			});
+			await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS + 20);
+			await p;
+		};
+
+		await runTouch();
+		expect(stalledClient.notify.open).toHaveBeenCalledTimes(1);
+		expect(healthyClient.notify.open).toHaveBeenCalledTimes(1);
+
+		// Second touch, same content, well inside the 1500ms debounce window.
+		await runTouch();
+
+		// The stalled server never got the content — re-push it (#1253).
+		expect(stalledClient.notify.open).toHaveBeenCalledTimes(2);
+		// The healthy server already has it — its debounce must survive its
+		// sibling's failure (#743). A file-level key would re-push it here.
+		expect(healthyClient.notify.open).toHaveBeenCalledTimes(1);
+	});
 });
