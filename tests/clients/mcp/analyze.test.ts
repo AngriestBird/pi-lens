@@ -54,7 +54,10 @@ vi.mock("../../../clients/review-graph/service.js", () => ({
 	buildOrUpdateGraph: mockBuildOrUpdateGraph,
 }));
 
-import { dispatchForFile, getLatencyReports } from "../../../clients/dispatch/dispatcher.js";
+import {
+	dispatchForFile,
+	getLatencyReports,
+} from "../../../clients/dispatch/dispatcher.js";
 import { CacheManager } from "../../../clients/cache-manager.js";
 import { resetDispatchBaselines } from "../../../clients/dispatch/integration.js";
 import { getDiagnosticTracker } from "../../../clients/diagnostic-tracker.js";

@@ -287,9 +287,16 @@ export async function analyzeFile(
 
 	const reportsBefore = getLatencyReports().length;
 	const start = Date.now();
-	const result = await dispatchLintWithResult(absPath, cwd, host, undefined, undefined, {
-		blockingOnly: options.blockingOnly ?? false,
-	});
+	const result = await dispatchLintWithResult(
+		absPath,
+		cwd,
+		host,
+		undefined,
+		undefined,
+		{
+			blockingOnly: options.blockingOnly ?? false,
+		},
+	);
 	const durationMs = Date.now() - start;
 
 	if (options.record !== false) {
@@ -389,8 +396,7 @@ export async function analyzeFile(
 	const lsp = lspRunner
 		? {
 				ran:
-					lspRunner.status !== "skipped" &&
-					lspRunner.status !== "when_skipped",
+					lspRunner.status !== "skipped" && lspRunner.status !== "when_skipped",
 				status: lspRunner.status,
 				diagnosticCount: lspRunner.diagnosticCount,
 				durationMs: lspRunner.durationMs,

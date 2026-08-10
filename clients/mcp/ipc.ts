@@ -182,12 +182,8 @@ function requestOverWarmIpc<TResponse>(
 				finish({ available: false, reason: "schema-mismatch" });
 			}
 		});
-		socket.on("error", () =>
-			finish({ available: false, reason: "ipc-error" }),
-		);
-		socket.on("close", () =>
-			finish({ available: false, reason: "ipc-error" }),
-		);
+		socket.on("error", () => finish({ available: false, reason: "ipc-error" }));
+		socket.on("close", () => finish({ available: false, reason: "ipc-error" }));
 	});
 }
 

@@ -195,7 +195,11 @@ export class CacheManager {
 	}
 
 	/** Inspect a cache without changing the behavior of readCache consumers. */
-	inspectCache(scanner: string, cwd: string, maxAgeMs = DEFAULT_MAX_AGE_MS): CacheInspection {
+	inspectCache(
+		scanner: string,
+		cwd: string,
+		maxAgeMs = DEFAULT_MAX_AGE_MS,
+	): CacheInspection {
 		const cachePath = path.join(getCacheDir(cwd), `${scanner}.json`);
 		const metaPath = path.join(getCacheDir(cwd), `${scanner}.meta.json`);
 		for (const cachePathname of [cachePath, metaPath]) {
@@ -207,7 +211,10 @@ export class CacheManager {
 			}
 		}
 		try {
-			const meta = readJsonCache<CacheMeta>(metaPath, (parsed) => parsed as CacheMeta);
+			const meta = readJsonCache<CacheMeta>(
+				metaPath,
+				(parsed) => parsed as CacheMeta,
+			);
 			if (!meta || typeof meta.timestamp !== "string") return "malformed";
 			const timestamp = new Date(meta.timestamp).getTime();
 			if (!Number.isFinite(timestamp)) return "malformed";
@@ -376,7 +383,9 @@ export class CacheManager {
 	getFilesForJscpd(cwd: string): string[] {
 		const state = this.readTurnState(cwd);
 		return Object.keys(state.files).filter((f) =>
-			/\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|rb|java|cs|php|cpp|c|h|hpp|swift|kt)$/.test(f),
+			/\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|rb|java|cs|php|cpp|c|h|hpp|swift|kt)$/.test(
+				f,
+			),
 		);
 	}
 

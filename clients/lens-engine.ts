@@ -129,7 +129,12 @@ export function projectScan(
 	maxFiles?: number,
 	includeGenerated?: boolean,
 ): Promise<ProjectDiagnosticsSnapshot> {
-	return scanProjectDiagnostics({ cwd, tier: "cheap", maxFiles, includeGenerated });
+	return scanProjectDiagnostics({
+		cwd,
+		tier: "cheap",
+		maxFiles,
+		includeGenerated,
+	});
 }
 
 /**
@@ -219,7 +224,9 @@ export function treeSitterRuntimeStatus(): TreeSitterRuntimeStatus {
 export interface LspStatus {
 	aliveClients: number;
 	servers: Array<{ serverId: string; root: string; connected: boolean }>;
-	brokenServers: ReturnType<ReturnType<typeof getLSPService>["getBrokenStatus"]>;
+	brokenServers: ReturnType<
+		ReturnType<typeof getLSPService>["getBrokenStatus"]
+	>;
 }
 
 /** Alive LSP client count + per-server status. */
@@ -321,7 +328,9 @@ export interface SymbolSearchOptions {
 // AGENTS.md's MCP-mirror layering note) — so this is symbol_search's own small
 // copy, scoped to what its `lang` filter needs (extension matching only, no
 // AST/LSP concerns).
-const SYMBOL_SEARCH_LANG_EXTENSIONS: Readonly<Record<string, readonly string[]>> = {
+const SYMBOL_SEARCH_LANG_EXTENSIONS: Readonly<
+	Record<string, readonly string[]>
+> = {
 	bash: [".sh", ".bash"],
 	c: [".c", ".h"],
 	cpp: [".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx"],
@@ -497,7 +506,8 @@ export async function symbolSearch(
 	options: SymbolSearchOptions = {},
 ): Promise<SymbolSearchResult> {
 	const snapshot = loadProjectSnapshot(cwd);
-	const index = getOrLoadWarmWordIndex(cwd) ?? deserializeWordIndex(snapshot?.wordIndex);
+	const index =
+		getOrLoadWarmWordIndex(cwd) ?? deserializeWordIndex(snapshot?.wordIndex);
 	if (!index) {
 		const priorStatus = getWordIndexBuildStatus(cwd);
 		const status =
@@ -532,7 +542,11 @@ export async function symbolSearch(
 		(file) => normalizeMapKey(path.resolve(file)),
 	);
 	const fileFilter = buildSymbolSearchFileFilter(cwd, options);
-	const results = searchWordIndex(index, query, { limit, centrality, fileFilter });
+	const results = searchWordIndex(index, query, {
+		limit,
+		centrality,
+		fileFilter,
+	});
 	const hits = results.map(toSymbolSearchHit);
 
 	const { getCachedReviewGraph } = await import("./review-graph/builder.js");

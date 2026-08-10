@@ -184,9 +184,11 @@ async function ensureReady(cwd: string): Promise<void> {
 	if (lspReadyCwds.has(normalized)) return;
 	try {
 		await ensureLspConfig(normalized);
-	// pi-lens-ignore: missing-error-propagation
+		// pi-lens-ignore: missing-error-propagation
 	} catch (err) {
-		console.error(`[pi-lens-mcp] initLSPConfig failed for ${normalized}: ${err}`);
+		console.error(
+			`[pi-lens-mcp] initLSPConfig failed for ${normalized}: ${err}`,
+		);
 	}
 	lspReadyCwds.add(normalized);
 }
@@ -291,9 +293,7 @@ function startIpcServer(): void {
 							console.error(
 								"[pi-lens-mcp] warm request: build stale, replying with an error",
 							);
-							socket.end(
-								`${JSON.stringify({ error: "warm build stale" })}\n`,
-							);
+							socket.end(`${JSON.stringify({ error: "warm build stale" })}\n`);
 							return;
 						}
 						const parsed = JSON.parse(line) as Partial<
@@ -510,7 +510,8 @@ const ALL_TOOLS = [
 			properties: {
 				file: {
 					type: "string",
-					description: "Path to the file to analyze (absolute, or relative to cwd).",
+					description:
+						"Path to the file to analyze (absolute, or relative to cwd).",
 				},
 				cwd: {
 					type: "string",
@@ -525,7 +526,7 @@ const ALL_TOOLS = [
 				flags: {
 					type: "object",
 					description:
-						"Optional pi-lens flag overrides for this run, e.g. {\"no-lsp\": true} to bench the non-LSP path.",
+						'Optional pi-lens flag overrides for this run, e.g. {"no-lsp": true} to bench the non-LSP path.',
 				},
 			},
 			required: ["file"],
@@ -547,8 +548,14 @@ const ALL_TOOLS = [
 		inputSchema: {
 			type: "object",
 			properties: {
-				limit: { type: "number", description: "Max reports to return (default 5)." },
-				file: { type: "string", description: "Only reports whose path ends with this." },
+				limit: {
+					type: "number",
+					description: "Max reports to return (default 5).",
+				},
+				file: {
+					type: "string",
+					description: "Only reports whose path ends with this.",
+				},
 			},
 		},
 	},
@@ -685,7 +692,8 @@ const ALL_TOOLS = [
 				},
 				maxCallGraphEntries: {
 					type: "number",
-					description: "Per-direction cap for call-graph relations (default 20).",
+					description:
+						"Per-direction cap for call-graph relations (default 20).",
 				},
 			},
 			required: ["file"],
@@ -780,11 +788,13 @@ const ALL_TOOLS = [
 			properties: {
 				file: {
 					type: "string",
-					description: "Absolute or workspace-relative path to the source file.",
+					description:
+						"Absolute or workspace-relative path to the source file.",
 				},
 				line: {
 					type: "number",
-					description: "1-based line number inside the desired symbol/callback.",
+					description:
+						"1-based line number inside the desired symbol/callback.",
 				},
 				cwd: { type: "string" },
 				kinds: {
@@ -934,7 +944,10 @@ async function callTool(
 	if (name === "pilens_analyze") {
 		const file = args.file;
 		if (typeof file !== "string" || file.length === 0) {
-			return { ...toolText("pilens_analyze requires a 'file' string."), isError: true };
+			return {
+				...toolText("pilens_analyze requires a 'file' string."),
+				isError: true,
+			};
 		}
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
 		const requestedMode = args.mode === "fresh" ? "fresh" : "warm";
@@ -1098,20 +1111,19 @@ async function callTool(
 			unavailableReason,
 			coverage,
 			snapshotGeneratedAt,
-		} = await symbolSearch(
-			query,
-			cwd,
-			limit,
-			{ paths, lang },
-		);
+		} = await symbolSearch(query, cwd, limit, { paths, lang });
 		if (!available) {
 			return toolText(
-				hint ?? "No word index for this workspace yet — run pilens_session_start first.",
+				hint ??
+					"No word index for this workspace yet — run pilens_session_start first.",
 				{ available: false, query, hint, unavailableReason },
 				true,
 			);
 		}
-		const stalenessNote = graphStalenessNote(snapshotGeneratedAt, "Project snapshot");
+		const stalenessNote = graphStalenessNote(
+			snapshotGeneratedAt,
+			"Project snapshot",
+		);
 		if (results.length === 0) {
 			return toolText(
 				`No files matched "${query}".` +
@@ -1173,10 +1185,10 @@ async function callTool(
 		);
 	}
 
-
 	if (name === "pilens_module_report") {
 		const file = typeof args.file === "string" ? args.file : "";
-		if (!file.trim()) return { ...toolText("Provide a `file`."), isError: true };
+		if (!file.trim())
+			return { ...toolText("Provide a `file`."), isError: true };
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
 		const maxRefsPerSymbol =
 			typeof args.maxRefsPerSymbol === "number" &&
@@ -1196,7 +1208,9 @@ async function callTool(
 				? Math.max(1, Math.floor(args.maxCallGraphEntries))
 				: undefined;
 		const view =
-			args.view === "summary" || args.view === "compact" ? args.view : undefined;
+			args.view === "summary" || args.view === "compact"
+				? args.view
+				: undefined;
 		const focus = typeof args.focus === "string" ? args.focus : undefined;
 		const report = await moduleReport(file, cwd, {
 			maxRefsPerSymbol,
@@ -1217,7 +1231,10 @@ async function callTool(
 				isError: true,
 			};
 		}
-		const graphStaleness = graphStalenessNote(report.graphBuiltAt, "Review graph");
+		const graphStaleness = graphStalenessNote(
+			report.graphBuiltAt,
+			"Review graph",
+		);
 		const summary =
 			`${path.relative(cwd, report.path) || report.path} [${report.staleness}] — ` +
 			`${report.summary.symbols} symbol(s), ${report.summary.exports} exported, ` +
@@ -1229,7 +1246,9 @@ async function callTool(
 				content: [
 					{
 						type: "text" as const,
-						text: graphStaleness ? `${compactText}\n\n${graphStaleness}` : compactText,
+						text: graphStaleness
+							? `${compactText}\n\n${graphStaleness}`
+							: compactText,
 					},
 				],
 			};
@@ -1238,7 +1257,9 @@ async function callTool(
 		// agent parses this payload, it doesn't read it formatted.
 		return toolText(
 			summary,
-			graphStaleness ? { ...report, graphStalenessNote: graphStaleness } : report,
+			graphStaleness
+				? { ...report, graphStalenessNote: graphStaleness }
+				: report,
 			true,
 		);
 	}
@@ -1270,7 +1291,9 @@ async function callTool(
 				content: [
 					{
 						type: "text" as const,
-						text: graphStaleness ? `${compactText}\n\n${graphStaleness}` : compactText,
+						text: graphStaleness
+							? `${compactText}\n\n${graphStaleness}`
+							: compactText,
 					},
 				],
 			};
@@ -1282,7 +1305,9 @@ async function callTool(
 			(graphStaleness ? `\n\n${graphStaleness}` : "");
 		return toolText(
 			summary,
-			graphStaleness ? { ...report, graphStalenessNote: graphStaleness } : report,
+			graphStaleness
+				? { ...report, graphStalenessNote: graphStaleness }
+				: report,
 			true,
 		);
 	}
@@ -1319,14 +1344,21 @@ async function callTool(
 			? ` (${result.ambiguous.count} matches — returned the ${result.kind}; pass \`kind\` to disambiguate: ${result.ambiguous.kinds.join(", ")})`
 			: "";
 		const header = `${result.kind} ${result.name}${ambiguityNote}${sigSuffix}  ${path.relative(cwd, result.path)}:${result.startLine}-${result.endLine}`;
-		return { content: [{ type: "text" as const, text: `${header}\n\n${result.source ?? ""}` }] };
+		return {
+			content: [
+				{ type: "text" as const, text: `${header}\n\n${result.source ?? ""}` },
+			],
+		};
 	}
 
 	if (name === "pilens_read_enclosing") {
 		const file = typeof args.file === "string" ? args.file : "";
 		const line = typeof args.line === "number" ? args.line : Number.NaN;
 		if (!file.trim() || !Number.isFinite(line)) {
-			return { ...toolText("Provide `file` and a numeric `line`."), isError: true };
+			return {
+				...toolText("Provide `file` and a numeric `line`."),
+				isError: true,
+			};
 		}
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
 		const kinds = Array.isArray(args.kinds)
@@ -1373,7 +1405,11 @@ async function callTool(
 			? `${result.startLine}-${result.endLine} (partial of ${result.enclosingStartLine}-${result.enclosingEndLine})`
 			: `${result.startLine}-${result.endLine}`;
 		const header = `${result.kind} ${result.name}  ${path.relative(cwd, result.path)}:${range}`;
-		return { content: [{ type: "text" as const, text: `${header}\n\n${result.source ?? ""}` }] };
+		return {
+			content: [
+				{ type: "text" as const, text: `${header}\n\n${result.source ?? ""}` },
+			],
+		};
 	}
 
 	if (name === "pilens_health") {
@@ -1498,7 +1534,9 @@ async function callTool(
 	if (name === "pilens_ast_grep_search" || name === "pilens_ast_grep_replace") {
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
 		const tool =
-			name === "pilens_ast_grep_search" ? astGrepSearchTool : astGrepReplaceTool;
+			name === "pilens_ast_grep_search"
+				? astGrepSearchTool
+				: astGrepReplaceTool;
 		const out = (await tool.execute(
 			"mcp",
 			args,
@@ -1591,16 +1629,19 @@ const WARN_ONLY_STALE_TOOLS = new Set([
  * (see module_report/symbol_search callers), so appending plain text after it
  * is safe.
  */
-function withStaleWarning<T extends { content: { type: "text"; text: string }[] }>(
-	result: T,
-): T {
+function withStaleWarning<
+	T extends { content: { type: "text"; text: string }[] },
+>(result: T): T {
 	if (result.content.length === 0) return result;
 	const last = result.content[result.content.length - 1];
 	return {
 		...result,
 		content: [
 			...result.content.slice(0, -1),
-			{ ...last, text: `${last.text}\n\nwarmCodeStale: true\n${STALE_WARN_ONLY}` },
+			{
+				...last,
+				text: `${last.text}\n\nwarmCodeStale: true\n${STALE_WARN_ONLY}`,
+			},
 		],
 	};
 }
@@ -1667,14 +1708,17 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
 				// Surface as a tool error (isError), not a transport error, so the
 				// agent sees the message instead of a dead request.
 				sendResult(id ?? null, {
-					...toolText(`pi-lens tool '${name}' failed: ${(err as Error).message}`),
+					...toolText(
+						`pi-lens tool '${name}' failed: ${(err as Error).message}`,
+					),
 					isError: true,
 				});
 			}
 			return;
 		}
 		default:
-			if (!isNotification) sendError(id ?? null, -32601, `Method not found: ${method}`);
+			if (!isNotification)
+				sendError(id ?? null, -32601, `Method not found: ${method}`);
 			return;
 	}
 }

@@ -27,7 +27,10 @@ import {
 import { AUTOMATION_FRAMING } from "../../clients/runtime-context.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const repoRoot = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	"../..",
+);
 const binJs = path.join(repoRoot, "mcp", "analyze-cli.js");
 
 const SMELLY = `export function f(x) {
@@ -101,7 +104,10 @@ describe("pi-lens-analyze bin", { retry: 2 }, () => {
 			"--hook",
 		]);
 		const parsed = JSON.parse(stdout) as {
-			hookSpecificOutput?: { hookEventName?: string; additionalContext?: string };
+			hookSpecificOutput?: {
+				hookEventName?: string;
+				additionalContext?: string;
+			};
 		};
 		expect(parsed.hookSpecificOutput?.hookEventName).toBe("PostToolUse");
 		expect(parsed.hookSpecificOutput?.additionalContext).toContain("pi-lens:");

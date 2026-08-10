@@ -219,7 +219,9 @@ describe("requestWarmCodeActions", () => {
 	});
 
 	it("rejects code-action schema skew", async () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-actions-skew-"));
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ipc-actions-skew-"),
+		);
 		const pid = 99005;
 		activeServer = net.createServer((socket) => {
 			socket.once("data", () =>
@@ -284,7 +286,9 @@ describe("requestWarmAnalyze", () => {
 				socket.end(`${JSON.stringify({ result: SENTINEL })}\n`);
 			});
 		});
-		await new Promise<void>((resolve) => activeServer?.listen(endpoint, resolve));
+		await new Promise<void>((resolve) =>
+			activeServer?.listen(endpoint, resolve),
+		);
 
 		const result = await requestWarmAnalyze(cwd, "/x/app.ts");
 		expect(result).toEqual(SENTINEL);
@@ -311,9 +315,13 @@ describe("requestWarmAnalyze", () => {
 			}
 		}
 		activeServer = net.createServer((socket) => {
-			socket.on("data", () => socket.end(`${JSON.stringify({ error: "boom" })}\n`));
+			socket.on("data", () =>
+				socket.end(`${JSON.stringify({ error: "boom" })}\n`),
+			);
 		});
-		await new Promise<void>((resolve) => activeServer?.listen(endpoint, resolve));
+		await new Promise<void>((resolve) =>
+			activeServer?.listen(endpoint, resolve),
+		);
 
 		const result = await requestWarmAnalyze(cwd, "/x/app.ts");
 		expect(result).toBeUndefined();
@@ -372,7 +380,9 @@ describe("requestWarmTurnEnd", () => {
 	});
 
 	it("reports ipc-error when no warm server is listening", async () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-turn-none-"));
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ipc-turn-none-"),
+		);
 		await expect(requestWarmTurnEnd(cwd, 2000)).resolves.toEqual({
 			available: false,
 			reason: "ipc-error",
@@ -398,7 +408,9 @@ describe("requestWarmTurnEnd", () => {
 	});
 
 	it("rejects turn-end schema skew", async () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-turn-skew-"));
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ipc-turn-skew-"),
+		);
 		await listenOnWorkspaceEndpoint(cwd, (socket) => {
 			socket.once("data", () =>
 				socket.end(
