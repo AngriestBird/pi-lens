@@ -102,12 +102,19 @@ describe("git-guard", () => {
 	});
 
 	it("aggregates per-file blockers instead of latest-file-wins", () => {
-		const runtime = new RuntimeCoordinator();
-		runtime.recordInlineBlockers("/workspace/a.ts", "blocker A");
-		runtime.updateGitGuardStatus(true, "blocker A");
-		runtime.clearInlineBlockers("/workspace/b.ts");
-		runtime.updateGitGuardStatus(false, "clean B");
-		expect(runtime.gitGuardHasBlockers).toBe(true);
+		const env = setupTestEnvironment("pi-lens-git-guard-aggregate-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const file = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(file, "const x = 1;\n");
+			runtime.recordInlineBlockers(file, "blocker A");
+			runtime.updateGitGuardStatus(true, "blocker A");
+			runtime.clearInlineBlockers(path.join(env.tmpDir, "b.ts"));
+			runtime.updateGitGuardStatus(false, "clean B");
+			expect(runtime.gitGuardHasBlockers).toBe(true);
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("does not block when the only affected file was deleted", () => {
