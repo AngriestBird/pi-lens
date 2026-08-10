@@ -1457,6 +1457,7 @@ async function runLspHandshake({ langs, install, verbose }) {
 			}
 			const content = fs.readFileSync(absFile, "utf8");
 			let touched;
+			let touchedDiags;
 			let threw;
 			// Auxiliary fixtures get up to AUX_TOUCH_ATTEMPTS touches: the first warms
 			// the cold rule-load, later ones re-scan and pick up a finding that the
@@ -1491,8 +1492,15 @@ async function runLspHandshake({ langs, install, verbose }) {
 					threw = err?.message ?? String(err);
 					break;
 				}
+				// #1179 (shape-5): touchFile now returns a `{ diags, inconclusive?,
+				// binding? }` wrapper instead of the bare diagnostics array (the
+				// copy-loss structural fix — the flags became explicit enumerable
+				// fields). Normalize both shapes here so every consumer below
+				// survives either build; `undefined` still means "no client became
+				// ready" (skip semantics unchanged).
+				touchedDiags = Array.isArray(touched) ? touched : touched?.diags;
 				if (!auxRe) break;
-				const hit = (Array.isArray(touched) ? touched : []).some((d) =>
+				const hit = (touchedDiags ?? []).some((d) =>
 					auxRe.test(d.source || ""),
 				);
 				if (hit || attempt === maxAttempts) break;
@@ -1508,7 +1516,7 @@ async function runLspHandshake({ langs, install, verbose }) {
 			// Auxiliary fixtures assert the cross-cutting server actually produced a
 			// finding (proves install→spawn→scan→publish), matched by LSP `source`.
 			if (auxRe && !threw) {
-				const list = Array.isArray(touched) ? touched : [];
+				const list = touchedDiags ?? [];
 				const auxDiags = list.filter((d) => auxRe.test(d.source || ""));
 				if (verbose) {
 					console.error(
@@ -1542,17 +1550,17 @@ async function runLspHandshake({ langs, install, verbose }) {
 			// + initialize handshake completed), or undefined if none became ready
 			// in the budget. (getDiagnosticsHealth is populated by getDiagnostics,
 			// not touchFile, so it's only an extra hint when present.)
-			const diags = Array.isArray(touched) ? touched.length : 0;
+			const diags = touchedDiags?.length ?? 0;
 			if (verbose) {
 				console.error(
-					`[${fx.lang}] touched=${Array.isArray(touched) ? touched.length : touched} health=${JSON.stringify(lsp.getDiagnosticsHealth(absFile))}`,
+					`[${fx.lang}] touched=${touchedDiags?.length ?? touched} health=${JSON.stringify(lsp.getDiagnosticsHealth(absFile))}`,
 				);
 			}
 			// Alternate fixtures disable the default server in the workspace. Verify the
 			// actual warm client first, then optionally fingerprint its diagnostics when
 			// a server reliably reports a distinctive source.
 			if (fx.expectServerId && !threw) {
-				if (!Array.isArray(touched)) {
+				if (!touchedDiags) {
 					// No client became ready — the alternate isn't installed (and
 					// --install wasn't passed or its install failed). Skip, don't fail.
 					push(
@@ -1566,36 +1574,40 @@ async function runLspHandshake({ langs, install, verbose }) {
 					push(
 						"fail",
 						`expected alternate ${fx.expectServerId}, got ${active?.info.id ?? "no warm client"}`,
-						touched.length,
+						touchedDiags.length,
 					);
 					continue;
 				}
 				if (!fx.expectSourceMatch) {
-					push("pass", `alternate ${fx.expectServerId} handshook`, touched.length);
+					push(
+						"pass",
+						`alternate ${fx.expectServerId} handshook`,
+						touchedDiags.length,
+					);
 					continue;
 				}
-				const sources = [...new Set(touched.map((d) => d.source || "?"))];
+				const sources = [...new Set(touchedDiags.map((d) => d.source || "?"))];
 				const re = new RegExp(fx.expectSourceMatch, "i");
-				const matched = touched.filter((d) => re.test(d.source || ""));
+				const matched = touchedDiags.filter((d) => re.test(d.source || ""));
 				if (verbose) {
 					console.error(
-						`[${fx.lang}] alternate sources=${JSON.stringify(sources)} matched=${matched.length}/${touched.length}`,
+						`[${fx.lang}] alternate sources=${JSON.stringify(sources)} matched=${matched.length}/${touchedDiags.length}`,
 					);
 				}
 				push(
 					matched.length > 0 ? "pass" : "fail",
 					matched.length > 0
 						? `alternate ${fx.expectServerId} served ${matched.length} diagnostic${matched.length === 1 ? "" : "s"} (source /${fx.expectSourceMatch}/; default [${fx.disableServers.join(",")}] disabled)`
-						: touched.length
-							? `${fx.expectServerId}: ${touched.length} diagnostic(s) but none matched source /${fx.expectSourceMatch}/ (got: ${sources.join(",")})`
+						: touchedDiags.length
+							? `${fx.expectServerId}: ${touchedDiags.length} diagnostic(s) but none matched source /${fx.expectSourceMatch}/ (got: ${sources.join(",")})`
 							: `expected ${fx.expectServerId} to serve a diagnostic, got none (server missing/slow?)`,
-					touched.length,
+					touchedDiags.length,
 				);
 				continue;
 			}
 			if (threw) {
 				push("fail", `handshake/server error: ${threw}`, diags);
-			} else if (Array.isArray(touched)) {
+			} else if (touchedDiags) {
 				// #530: assert the server that actually answered is the expected launch
 				// variant (e.g. "native-ts7") via the live capability snapshot. A silent
 				// fallback to classic must FAIL even though diagnostics arrived — the
@@ -1625,7 +1637,7 @@ async function runLspHandshake({ langs, install, verbose }) {
 				}
 				if (fx.expectNoMessageMatch) {
 					const re = new RegExp(fx.expectNoMessageMatch, "i");
-					const matched = touched.filter((d) => re.test(d.message || ""));
+					const matched = touchedDiags.filter((d) => re.test(d.message || ""));
 					push(
 						matched.length === 0 ? "pass" : "fail",
 						matched.length === 0
