@@ -341,6 +341,16 @@ describe("createWarmIpcLineReader", () => {
 		expect(JSON.parse(lines[0]).file).toBe("/x/a.ts");
 	});
 
+	it("dispatches only the first request when two arrive in one chunk (#1219)", () => {
+		const lines: string[] = [];
+		const handler = createWarmIpcLineReader((line) => lines.push(line));
+		handler(
+			`${JSON.stringify({ file: "/x/a.ts" })}\n${JSON.stringify({ file: "/x/b.ts" })}\n`,
+		);
+		expect(lines).toHaveLength(1);
+		expect(JSON.parse(lines[0]).file).toBe("/x/a.ts");
+	});
+
 	it("assembles a request split across chunks before dispatching", () => {
 		const lines: string[] = [];
 		const handler = createWarmIpcLineReader((line) => lines.push(line));
