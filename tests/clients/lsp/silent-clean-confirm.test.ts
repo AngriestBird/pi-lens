@@ -167,6 +167,7 @@ describe("touchFile silent-clean push-only confirm (#799)", () => {
 		expect(Array.isArray(result?.diags)).toBe(true);
 		expect(result?.diags).toHaveLength(0);
 		expect((result as { inconclusive?: boolean }).inconclusive).toBeUndefined();
+		expect(result?.confirmation).toBe("confirmed");
 
 		// The env override (set in beforeEach) is what the wait actually pays
 		// here — marksman's real 1500ms strategy budget is covered separately by
@@ -268,6 +269,7 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		});
 
 		expect((result as { inconclusive?: boolean }).inconclusive).toBeUndefined();
+		expect(result?.confirmation).toBe("confirmed");
 		expect(result?.diags).toEqual([finding]);
 	});
 
@@ -316,6 +318,7 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 			});
 
 			expect((result as { inconclusive?: boolean }).inconclusive).toBe(true);
+			expect(result?.confirmation).toBeUndefined();
 		} finally {
 			if (prev === undefined) delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
 			else process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = prev;
@@ -382,6 +385,7 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		expect(Array.isArray(result?.diags)).toBe(true);
 		expect(result?.diags).toHaveLength(0);
 		expect((result as { inconclusive?: boolean }).inconclusive).toBeUndefined();
+		expect(result?.confirmation).toBe("confirmed");
 		// marksman (1500ms) and typescript (1000ms) — the touch waits for the
 		// SLOWER of the two (marksman), not a shortened window.
 		expect(elapsedMs).toBeGreaterThanOrEqual(1490);

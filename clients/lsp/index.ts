@@ -2705,6 +2705,12 @@ export class LSPService {
 
 		if (collected !== undefined && inconclusive) {
 			result.inconclusive = true;
+		} else if (collected !== undefined) {
+			// Preserve the lower-level affirmative result across consumers. In
+			// particular, the silent-clean gates above clear diagnosticsTimedOut only
+			// after a successful notify and capability-confirmed wait; reclassifying
+			// that empty array later would discard the evidence that made it clean.
+			result.confirmation = "confirmed";
 		}
 
 		// #1095: attach the merged content binding so a consumer can ask whether

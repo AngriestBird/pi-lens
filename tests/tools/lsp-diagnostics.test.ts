@@ -721,6 +721,63 @@ describe("lsp_diagnostics tool", () => {
 			}
 		});
 
+		it("all-scope touch confirmation still surfaces TypeScript sync diagnostics", async () => {
+			mocked.cascadeTier = "tier3-silent";
+			(mocked.service as any).getAdvertisedCommands = vi
+				.fn()
+				.mockResolvedValue(["typescript.tsserverRequest"]);
+			const executeCommand = mockExecuteCommand({
+				semanticDiagnosticsSync: [
+					{
+						message: "Type 'number' is not assignable to type 'string'.",
+						category: "error",
+						code: 2322,
+						startLocation: { line: 1, offset: 7 },
+						endLocation: { line: 1, offset: 12 },
+					},
+				],
+			});
+			(mocked.service as any).executeCommand = executeCommand;
+			(mocked.service as any).touchFile = vi.fn().mockResolvedValue({
+				diags: [],
+				confirmation: "confirmed",
+			});
+			const tool = createLspDiagnosticsTool();
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-lsp-diag-611-all-confirmed-"),
+			);
+			const file = path.join(tmpDir, "clean.ts");
+			fs.writeFileSync(file, "const value = 1;\n");
+
+			try {
+				const result = (await tool.execute(
+					"diag-611-all-confirmed",
+					{
+						paths: [file],
+						severity: "all",
+						serverScope: "all",
+						waitMs: 500,
+					},
+					new AbortController().signal,
+					null,
+					{ cwd: tmpDir },
+				)) as any;
+
+				expect(executeCommand).toHaveBeenCalled();
+				expect(result.details?.totalDiagnostics).toBe(1);
+				expect(result.details?.outcomeCounts).toMatchObject({
+					findings: 1,
+					clean: 0,
+					inconclusive: 0,
+				});
+				expect(String(result.content[0]?.text)).toContain(
+					"not assignable to type 'string'",
+				);
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
+
 		it("falls back to unconfirmed when executeCommand throws (e.g. tsserver 'No Project.')", async () => {
 			mocked.cascadeTier = "tier3-silent";
 			(mocked.service as any).getAdvertisedCommands = vi
@@ -953,6 +1010,206 @@ describe("lsp_diagnostics tool", () => {
 				expect(result.details?.unconfirmedFiles).toBe(2);
 				expect(result.details?.timedOutFiles).toBe(1);
 				expect(String(result.content[0]?.text)).toContain("timed out");
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
+	});
+
+	describe("silent-clean confirmation provenance", () => {
+		async function runMarkdown(
+			args: Record<string, unknown>,
+			files: string[],
+		) {
+			const tool = createLspDiagnosticsTool();
+			return (await tool.execute(
+				"diag-marksman-confirmation",
+				args,
+				new AbortController().signal,
+				null,
+				{ cwd: path.dirname(files[0]!) },
+			)) as any;
+		}
+
+		it.each(["primary", "all"] as const)(
+			"single clean Markdown file preserves touch confirmation for %s scope",
+			async (serverScope) => {
+				mocked.cascadeTier = "tier3-silent";
+				const getAdvertisedCommands = vi.fn().mockResolvedValue([]);
+				const executeCommand = vi.fn();
+				(mocked.service as any).getAdvertisedCommands = getAdvertisedCommands;
+				(mocked.service as any).executeCommand = executeCommand;
+				(mocked.service as any).touchFile = vi.fn().mockResolvedValue({
+					diags: [],
+					confirmation: "confirmed",
+				});
+				const tmpDir = fs.mkdtempSync(
+					path.join(os.tmpdir(), "pi-lens-marksman-confirmed-"),
+				);
+				const file = path.join(tmpDir, "README.md");
+				fs.writeFileSync(file, "# Example\n");
+
+				try {
+					const result = await runMarkdown(
+						{ path: file, severity: "all", serverScope, waitMs: 500 },
+						[file],
+					);
+					expect(result.details?.unconfirmed).toBe(false);
+					expect(String(result.content[0]?.text)).toContain(
+						"Primary LSP (marksman): confirmed clean.",
+					);
+					expect(getAdvertisedCommands).not.toHaveBeenCalled();
+					expect(executeCommand).not.toHaveBeenCalled();
+				} finally {
+					removeTempDirSync(tmpDir);
+				}
+			},
+		);
+
+		it("batch clean Markdown files count as clean, not inconclusive", async () => {
+			mocked.cascadeTier = "tier3-silent";
+			(mocked.service as any).touchFile = vi.fn().mockResolvedValue({
+				diags: [],
+				confirmation: "confirmed",
+			});
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-marksman-batch-"),
+			);
+			const files = ["a.md", "b.md", "c.md", "d.md"].map((name) =>
+				path.join(tmpDir, name),
+			);
+			for (const file of files) fs.writeFileSync(file, `# ${path.basename(file)}\n`);
+
+			try {
+				const result = await runMarkdown(
+					{ paths: files, severity: "all", serverScope: "primary", waitMs: 500 },
+					files,
+				);
+				expect(result.details?.cleanFiles).toBe(4);
+				expect(result.details?.unconfirmedFiles).toBe(0);
+				expect(result.details?.outcomeCounts).toMatchObject({
+					clean: 4,
+					inconclusive: 0,
+				});
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
+
+		it("default all-scope Markdown batch preserves touch confirmation", async () => {
+			mocked.cascadeTier = "tier3-silent";
+			const touchFile = vi.fn().mockResolvedValue({
+				diags: [],
+				confirmation: "confirmed",
+			});
+			(mocked.service as any).touchFile = touchFile;
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-marksman-default-batch-"),
+			);
+			const file = path.join(tmpDir, "README.md");
+			fs.writeFileSync(file, "# Example\n");
+
+			try {
+				const result = await runMarkdown(
+					{ paths: [file], severity: "all" },
+					[file],
+				);
+				expect(touchFile).toHaveBeenCalledWith(
+					file,
+					"# Example\n",
+					expect.objectContaining({ clientScope: "all" }),
+				);
+				expect(result.details?.cleanFiles).toBe(1);
+				expect(result.details?.unconfirmedFiles).toBe(0);
+				expect(result.details?.outcomeCounts).toMatchObject({
+					clean: 1,
+					inconclusive: 0,
+				});
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
+
+		it("missing confirmation metadata stays unconfirmed and does not try a TypeScript command", async () => {
+			mocked.cascadeTier = "tier3-silent";
+			const getAdvertisedCommands = vi.fn().mockResolvedValue([]);
+			const executeCommand = vi.fn();
+			(mocked.service as any).getAdvertisedCommands = getAdvertisedCommands;
+			(mocked.service as any).executeCommand = executeCommand;
+			(mocked.service as any).touchFile = vi.fn().mockResolvedValue({ diags: [] });
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-marksman-unconfirmed-"),
+			);
+			const file = path.join(tmpDir, "README.md");
+			fs.writeFileSync(file, "# Example\n");
+
+			try {
+				const result = await runMarkdown(
+					{ path: file, severity: "all", serverScope: "primary", waitMs: 500 },
+					[file],
+				);
+				expect(result.details?.unconfirmed).toBe(true);
+				expect(executeCommand).not.toHaveBeenCalled();
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
+
+		it("an inconclusive touch remains unconfirmed even if confirmation metadata is present", async () => {
+			mocked.cascadeTier = "tier3-silent";
+			(mocked.service as any).touchFile = vi.fn().mockResolvedValue({
+				diags: [],
+				inconclusive: true,
+				confirmation: "confirmed",
+			});
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-marksman-timeout-"),
+			);
+			const file = path.join(tmpDir, "README.md");
+			fs.writeFileSync(file, "# Example\n");
+
+			try {
+				const result = await runMarkdown(
+					{ path: file, severity: "all", serverScope: "primary", waitMs: 500 },
+					[file],
+				);
+				expect(result.details?.unconfirmed).toBe(true);
+				expect(result.details?.timedOut).toBe(true);
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
+
+		it("a real Marksman diagnostic remains a finding", async () => {
+			mocked.cascadeTier = "tier3-silent";
+			(mocked.service as any).touchFile = vi.fn().mockResolvedValue({
+				diags: [
+					{
+						severity: 1,
+						message: "Broken link",
+						range: {
+							start: { line: 2, character: 0 },
+							end: { line: 2, character: 8 },
+						},
+						source: "marksman",
+					},
+				],
+				confirmation: "confirmed",
+			});
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-marksman-finding-"),
+			);
+			const file = path.join(tmpDir, "README.md");
+			fs.writeFileSync(file, "# Example\n\n[missing](missing.md)\n");
+
+			try {
+				const result = await runMarkdown(
+					{ path: file, severity: "all", serverScope: "primary", waitMs: 500 },
+					[file],
+				);
+				expect(result.details?.totalDiagnostics).toBe(1);
+				expect(result.details?.unconfirmed).toBe(false);
+				expect(String(result.content[0]?.text)).toContain("Broken link");
 			} finally {
 				removeTempDirSync(tmpDir);
 			}
@@ -1526,21 +1783,21 @@ describe("lsp_diagnostics tool", () => {
 			}
 		});
 
-		it("#629: neither waitMs nor serverScope:'primary' set (openFile-only path) is unchanged — getDiagnostics('full') still called, touchFile is not", async () => {
+		it("#629: default all-scope path uses touchFile and avoids a second getDiagnostics call", async () => {
 			const touchFile = vi.fn().mockResolvedValue({ diags: [] });
 			(mocked.service as any).touchFile = touchFile;
 			const getDiagnostics = vi.fn().mockResolvedValue([]);
 			(mocked.service as any).getDiagnostics = getDiagnostics;
 			const tool = createLspDiagnosticsTool();
 			const tmpDir = fs.mkdtempSync(
-				path.join(os.tmpdir(), "pi-lens-lsp-diag-scope-unchanged-"),
+				path.join(os.tmpdir(), "pi-lens-lsp-diag-scope-default-touch-"),
 			);
 			const clean = path.join(tmpDir, "clean.ts");
 			fs.writeFileSync(clean, "const value = 1;\n");
 
 			try {
 				const result = (await tool.execute(
-					"diag-scope-unchanged",
+					"diag-scope-default-touch",
 					{ path: clean, severity: "all" },
 					new AbortController().signal,
 					null,
@@ -1548,8 +1805,12 @@ describe("lsp_diagnostics tool", () => {
 				)) as any;
 
 				expect(result.isError).toBeUndefined();
-				expect(touchFile).not.toHaveBeenCalled();
-				expect(getDiagnostics).toHaveBeenCalledWith(clean, "full");
+				expect(touchFile).toHaveBeenCalledWith(
+					clean,
+					"const value = 1;\n",
+					expect.objectContaining({ clientScope: "all" }),
+				);
+				expect(getDiagnostics).not.toHaveBeenCalled();
 			} finally {
 				removeTempDirSync(tmpDir);
 			}
