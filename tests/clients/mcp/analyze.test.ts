@@ -325,6 +325,22 @@ describe("analyzeFile", () => {
 		expect(Object.keys(turnState.files).length).toBe(1);
 	});
 
+	it("clears a stale pi session ID when registering MCP turn-state", async () => {
+		const cache = new CacheManager();
+		cache.addModifiedRange(
+			tsFile,
+			{ start: 1, end: 1 },
+			false,
+			tmpDir,
+			"stale-pi-session",
+		);
+		vi.mocked(dispatchForFile).mockResolvedValue(emptyResult);
+
+		await analyzeFile(tsFile, tmpDir, { registerTurnState: true });
+
+		expect(cache.readTurnState(tmpDir).sessionId).toBeUndefined();
+	});
+
 	it("leaves turn-state untouched by default (#A)", async () => {
 		vi.mocked(dispatchForFile).mockResolvedValue(emptyResult);
 		await analyzeFile(tsFile, tmpDir);

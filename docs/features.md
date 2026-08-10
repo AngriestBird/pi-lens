@@ -354,6 +354,6 @@ claude mcp add --scope user pi-lens \
 } }
 ```
 
-The per-edit hook falls back to a cold local analysis when no server is up; the `Stop` hook is **warm-server-only** (a cold turn-end has no cascade runs or accumulators to read, so it would report a false clean) and skips with a single stderr line instead. `SubagentStop` is deliberately not registered — subagent edits already reach turn-state through PostToolUse.
+The per-edit hook falls back to a cold local analysis when no server is up; the `Stop` hook is **warm-server-only** because only the server process owns the session state and pending turn work. It skips with a single stderr line when unavailable. Workspace IPC requests are ordered, so a timed-out PostToolUse client cannot let `Stop` overtake analysis still running in the server. `SubagentStop` is deliberately not registered because subagent edits already reach turn-state through PostToolUse.
 
 The full design + tier-by-tier progress (and known limits) lives in [`docs/mcp.md`](docs/mcp.md). Status: **experimental** — the foundation is solid (transport, warm LSP, lifecycle handlers wired), but the surface is still maturing. Use the pi extension for production agent work; reach for the MCP server for debugging, dogfooding, and direct Claude Code access.

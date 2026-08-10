@@ -1106,21 +1106,37 @@ describe("unresolved inline blocker re-surfacing", () => {
 	});
 
 	it("consumeInlineBlockers empties the map", () => {
-		const runtime = new RuntimeCoordinator();
-		runtime.recordInlineBlockers("/a/b.ts", "🔴 STOP");
-		runtime.recordInlineBlockers("/a/c.ts", "🔴 STOP 2");
-		const first = runtime.consumeInlineBlockers();
-		expect(first).toHaveLength(2);
-		const second = runtime.consumeInlineBlockers();
-		expect(second).toHaveLength(0);
+		const env = setupTestEnvironment("pi-lens-consume-blockers-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const a = path.join(env.tmpDir, "b.ts");
+			const c = path.join(env.tmpDir, "c.ts");
+			fs.writeFileSync(a, "x\n");
+			fs.writeFileSync(c, "x\n");
+			runtime.recordInlineBlockers(a, "🔴 STOP");
+			runtime.recordInlineBlockers(c, "🔴 STOP 2");
+			const first = runtime.consumeInlineBlockers();
+			expect(first).toHaveLength(2);
+			const second = runtime.consumeInlineBlockers();
+			expect(second).toHaveLength(0);
+		} finally {
+			env.cleanup();
+		}
 	});
 
 	it("beginTurn preserves unresolved inline blockers from previous turns", () => {
-		const runtime = new RuntimeCoordinator();
-		runtime.recordInlineBlockers("/a/x.ts", "🔴 STOP");
-		runtime.beginTurn();
-		const entries = runtime.getInlineBlockersSnapshot();
-		expect(entries).toHaveLength(1);
+		const env = setupTestEnvironment("pi-lens-beginturn-blockers-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const file = path.join(env.tmpDir, "x.ts");
+			fs.writeFileSync(file, "x\n");
+			runtime.recordInlineBlockers(file, "🔴 STOP");
+			runtime.beginTurn();
+			const entries = runtime.getInlineBlockersSnapshot();
+			expect(entries).toHaveLength(1);
+		} finally {
+			env.cleanup();
+		}
 	});
 });
 

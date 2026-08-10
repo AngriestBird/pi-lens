@@ -420,17 +420,18 @@ be exercised + debugged directly through Claude Code without running pi.
   analogue of pi's `agent_end`: incremental knip/madge, dep-circular,
   cascade-to-dependents, tests, actionable-warnings aggregation. PostToolUse has
   already accumulated the edited files into turn-state by the time `Stop` fires,
-  so the hook passes no files and never stamps a `sessionId` — turn-end's
-  stale-session eviction leaves the registered worklist alone. The request is a
+  so the hook passes no files and clears any inherited pi `sessionId` — turn-
+  end's stale-session eviction leaves the registered worklist alone. The request is a
   tagged route (`{route:"turn-end"}`, own schema version) on the **workspace**
   socket, not the PID-scoped one: a Stop hook knows its cwd, never the server's
   pid. It rides in ahead of the parse, so it inherits the #535 build-staleness
   gate for free, and an untagged analyze request on the same socket is byte-for-
-  byte unchanged. Server-side the pass is chained, so a hook Claude Code killed
-  at its timeout can't leave two `handleTurnEnd`s racing the turn-state clear.
-  **Warm-only, no cold fallback**: a cold process has empty cascade runs, inline
-  blockers and accumulators, so a local pass would report a false clean
-  (#533/#1023) — no warm server means one stderr line, silent stdout, exit 0.
+  byte unchanged. All workspace IPC requests share one server-side queue, so a
+  timed-out PostToolUse client cannot let `Stop` overtake analysis still running
+  in the server, and concurrent turn-ends cannot race the turn-state clear.
+  **Warm-only, no cold fallback**: only the server process owns the session state
+  and pending turn work, so a local pass would report a false clean — no warm
+  server means one stderr line, silent stdout, exit 0.
   The client waits 55s so it gives up inside Claude Code's 60s hook timeout.
   `SubagentStop` is deliberately NOT registered: subagent edits already fire
   PostToolUse into the shared turn-state, the consume bridges are one-shot (a
@@ -440,8 +441,8 @@ be exercised + debugged directly through Claude Code without running pi.
   context — blockers still gate commits through the retained lens-guard record,
   and a `decision:"block"` render is a follow-up. Tests run fire-and-forget
   inside turn-end, so the `Tests:` section you see is the *previous* turn's
-  failures. 19 tests (4 IPC route, 2 serialization, 8 bin modes, 5 live-route
-  smokes against a real spawned server).
+  failures. Unit, bin, and live-route smoke tests cover transport, ordering,
+  rendering, and spawned-server behavior.
 
 ## Transport decision — RESOLVED: hand-roll (zero new deps)
 

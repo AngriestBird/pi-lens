@@ -13,6 +13,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { McpAnalyzeResult } from "../../../clients/mcp/analyze.js";
 import {
 	contentHash,
+	createWarmIpcLineReader,
+	createWarmIpcRequestQueue,
 	diagnosticsIpcPathForCwd,
 	ipcPathForCwd,
 	requestWarmCodeActions,
@@ -414,5 +416,89 @@ describe("requestWarmTurnEnd", () => {
 			reason: "schema-mismatch",
 		});
 		removeTempDirSync(cwd);
+	});
+});
+
+describe("createWarmIpcLineReader", () => {
+	it("dispatches exactly one line for one request followed by stray bytes (#1219)", () => {
+		const lines: string[] = [];
+		const handler = createWarmIpcLineReader((line) => lines.push(line));
+		handler(`${JSON.stringify({ file: "/x/a.ts" })}\n`);
+		// Pre-fix, the socket handler kept the consumed line in its buffer and
+		// re-dispatched it on any further data event — stray bytes after the
+		// request re-ran the whole warm analyze pass.
+		handler("stray");
+		handler("more");
+		expect(lines).toHaveLength(1);
+		expect(JSON.parse(lines[0])).toEqual({ file: "/x/a.ts" });
+	});
+
+	it("ignores a second newline-terminated request (one-shot per connection)", () => {
+		const lines: string[] = [];
+		const handler = createWarmIpcLineReader((line) => lines.push(line));
+		handler(`${JSON.stringify({ file: "/x/a.ts" })}\n`);
+		handler(`${JSON.stringify({ file: "/x/b.ts" })}\n`);
+		expect(lines).toHaveLength(1);
+		expect(JSON.parse(lines[0]).file).toBe("/x/a.ts");
+	});
+
+	it("dispatches only the first request when two arrive in one chunk (#1219)", () => {
+		const lines: string[] = [];
+		const handler = createWarmIpcLineReader((line) => lines.push(line));
+		handler(
+			`${JSON.stringify({ file: "/x/a.ts" })}\n${JSON.stringify({ file: "/x/b.ts" })}\n`,
+		);
+		expect(lines).toHaveLength(1);
+		expect(JSON.parse(lines[0]).file).toBe("/x/a.ts");
+	});
+
+	it("assembles a request split across chunks before dispatching", () => {
+		const lines: string[] = [];
+		const handler = createWarmIpcLineReader((line) => lines.push(line));
+		handler('{"file":');
+		handler('"/x/a.ts"}\n');
+		expect(lines).toHaveLength(1);
+		expect(JSON.parse(lines[0]).file).toBe("/x/a.ts");
+	});
+
+	it("does not dispatch when no newline ever arrives", () => {
+		const lines: string[] = [];
+		const handler = createWarmIpcLineReader((line) => lines.push(line));
+		handler("partial");
+		expect(lines).toHaveLength(0);
+	});
+});
+
+describe("createWarmIpcRequestQueue", () => {
+	it("orders analyze and turn-end work even when the client disconnects", async () => {
+		const queue = createWarmIpcRequestQueue();
+		let releaseAnalyze: (() => void) | undefined;
+		const events: string[] = [];
+		const analyze = queue.enqueue(
+			() =>
+				new Promise<void>((resolve) => {
+					events.push("analyze-start");
+					releaseAnalyze = resolve;
+				}),
+		);
+		const turnEnd = queue.enqueue(async () => {
+			events.push("turn-end");
+		});
+
+		await Promise.resolve();
+		expect(events).toEqual(["analyze-start"]);
+		releaseAnalyze?.();
+		await Promise.all([analyze, turnEnd]);
+		expect(events).toEqual(["analyze-start", "turn-end"]);
+	});
+
+	it("keeps serving requests after a queued operation rejects", async () => {
+		const queue = createWarmIpcRequestQueue();
+		await expect(
+			queue.enqueue(async () => {
+				throw new Error("boom");
+			}),
+		).rejects.toThrow("boom");
+		await expect(queue.enqueue(async () => "next")).resolves.toBe("next");
 	});
 });

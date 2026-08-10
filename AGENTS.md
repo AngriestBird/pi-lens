@@ -95,7 +95,7 @@ atomic `.install.lock`; after waiting, re-run discovery before installing becaus
 the preceding process may already have satisfied the request. A lock is stale
 once its recorded PID is confirmed dead — OR, independently, once it is older
 than the owner's install bound + slack (`PI_LENS_INSTALL_TIMEOUT_MS` +60s,
-#946 F1: PID liveness alone can't detect a hard-killed owner whose PID
+# 946 F1: PID liveness alone can't detect a hard-killed owner whose PID
 Windows recycled for an unrelated live process, which would otherwise poison
 every future install with a full-timeout wait). The age-based path is a
 deliberate PID-recycle defense specific to installs, which have a known
@@ -411,15 +411,20 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   (LSP-complete) and the bin never loads the dispatch graph; falls back to cold
   no-LSP local analysis. `pilens_analyze` (warm) + the hook auto-register edited
   files into turn-state (`addModifiedRange`) so `pilens_turn_end` needs no file list.
+  The channel is strictly **one-shot** — clients write exactly one request and
+  read one reply, so the server handler consumes the line and dispatches at most
+  once per connection (a non-consuming handler re-dispatched on stray bytes,
+  #1219); keep any new channel handler one-shot too.
 - **Per-turn half = the same bin on a `Stop` hook** (`--turn-end`, or a `Stop`
   payload on stdin; #538). Tagged `{route:"turn-end"}` request on the WORKSPACE
   IPC endpoint (a Stop hook knows its cwd, never the server pid), which also
   inherits the #535 staleness gate. It passes NO files and never stamps a
-  `sessionId`, so turn-end's stale-session eviction leaves the PostToolUse
-  worklist alone; `runTurnEnd` chains server-side so a hook killed at Claude
-  Code's 60s timeout can't leave two passes racing. **Warm-only, no cold
-  fallback** — a cold process has empty cascade runs, inline blockers and
-  accumulators, so a local pass reports a false clean (#533/#1023); unavailable
+  `sessionId` (and clears any inherited pi-session stamp), so turn-end's
+  stale-session eviction leaves the PostToolUse worklist alone. All workspace
+  IPC requests share one server-side queue, so a still-running analyze always
+  finishes before the following Stop pass and concurrent turn-ends cannot race.
+  **Warm-only, no cold fallback** — only the server process owns the session
+  state and pending turn work, so a local pass reports a false clean; unavailable
   ⇒ one stderr line, silent stdout, exit 0. `SubagentStop` is deliberately NOT
   registered (subagent edits already reach turn-state via PostToolUse; the
   consume bridges are one-shot). Stop-hook stdout is user-visible in transcript

@@ -15,9 +15,9 @@
  * analogue of pi's agent_end — incremental knip/madge, cascade-to-dependents,
  * tests, actionable-warnings aggregation. WARM-ONLY: it drives the real
  * `handleTurnEnd` inside the running MCP server over the workspace IPC socket
- * and never falls back to a cold pass, because a cold process has empty
- * cascade runs and accumulators and would report a false clean. No warm server
- * → one stderr line and silent stdout.
+ * and never falls back to a cold pass, because only the warm process owns the
+ * session state and pending turn work. No warm server → one stderr line and
+ * silent stdout.
  *
  * Input: `--file=<path>` (+ optional `--cwd=`), or a Claude Code hook JSON
  * payload on stdin (`tool_input.path`/`file_path`, `cwd`, `hook_event_name`).
@@ -74,7 +74,6 @@ function formatReport(result: McpAnalyzeResult, cwd: string): string {
 interface HookPayload {
 	cwd?: string;
 	hook_event_name?: string;
-	stop_hook_active?: boolean;
 	tool_input?: { file_path?: string; path?: string };
 }
 
@@ -118,7 +117,7 @@ function formatTurnEnd(response: WarmTurnEndResponse): string | undefined {
 async function runTurnEndMode(
 	cwd: string,
 	payload: HookPayload | undefined,
-): Promise<never> {
+): Promise<void> {
 	// Subagent edits already fire PostToolUse into the shared workspace turn
 	// state, and the consume bridges are one-shot — a subagent pass would eat the
 	// main agent's findings into a transcript nobody reads, and multiply the
@@ -127,24 +126,28 @@ async function runTurnEndMode(
 		process.stderr.write(
 			"pi-lens turn-end skipped: SubagentStop (the main agent's Stop runs the pass)\n",
 		);
-		process.exit(0);
+		process.exitCode = 0;
+		return;
 	}
-	// Another hook blocked the stop, so our pass already ran this turn.
-	if (payload?.stop_hook_active === true) process.exit(0);
 
-	// Warm-only by design: a cold process has empty cascade runs, inline blockers
-	// and accumulators, so it would report a false clean (#533/#1023).
+	// Warm-only by design: only the server process owns the session state and
+	// pending turn work, so a cold pass would report a false clean (#533/#1023).
 	const outcome = await requestWarmTurnEnd(cwd);
 	if (!outcome.available) {
 		process.stderr.write(
 			`pi-lens turn-end skipped (${outcome.reason}) — no warm pi-lens MCP server for ${cwd}\n`,
 		);
-		process.exit(0);
+		process.exitCode = 0;
+		return;
 	}
 
 	const report = formatTurnEnd(outcome.response);
-	if (report) process.stdout.write(`${report}\n`); // nothing to say → no noise
-	process.exit(0);
+	if (report) {
+		await new Promise<void>((done) => {
+			process.stdout.write(`${report}\n`, () => done());
+		});
+	}
+	process.exitCode = 0;
 }
 
 async function main(): Promise<void> {

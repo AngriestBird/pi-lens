@@ -319,7 +319,7 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 		expect(stub.sockets).toHaveLength(0);
 	}, 20_000);
 
-	it("never dials the server when another hook already blocked the stop", async () => {
+	it("still runs when another hook kept the agent active and more edits may exist", async () => {
 		stub = await startTurnEndStub(turnDir, {
 			route: "turn-end",
 			version: WARM_TURN_END_SCHEMA_VERSION,
@@ -335,7 +335,7 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 		);
 
 		expect(code).toBe(0);
-		expect(stdout.trim()).toBe("");
-		expect(stub.sockets).toHaveLength(0);
+		expect(stdout).toContain("🔎 pi-lens turn-end");
+		expect(stub.requests).toHaveLength(1);
 	}, 20_000);
 });

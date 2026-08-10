@@ -37,6 +37,8 @@ import {
 	analyzeFileFresh,
 	canRebuildPiLens,
 	createMcpHost,
+	createWarmIpcLineReader,
+	createWarmIpcRequestQueue,
 	diagnosticStats,
 	ensureLspConfig,
 	ipcPathForCwd,
@@ -273,75 +275,63 @@ function startIpcServer(): void {
 		}
 	}
 
+	const requestQueue = createWarmIpcRequestQueue();
 	const ipc = net.createServer((socket) => {
 		socket.setEncoding("utf8");
-		let buffer = "";
-		socket.on("data", (chunk: string) => {
-			buffer += chunk;
-			const newline = buffer.indexOf("\n");
-			if (newline === -1) return;
-			const line = buffer.slice(0, newline);
-			void (async () => {
-				try {
-					// #535: the PostToolUse hook bin (mcp/analyze-cli.ts) already treats
-					// ANY error response as "no usable warm server" and falls back to
-					// its own cold, load-fresh-from-disk analysis path — so on a stale
-					// warm build, replying with an error IS the fresh-fork behavior for
-					// this channel, for free. No separate fresh-fork plumbing needed
-					// here: the client-side fallback already loads current code.
-					if (isWarmBuildStale()) {
-						console.error(
-							"[pi-lens-mcp] warm analyze: build stale, replying error so the hook falls back cold",
-						);
-						socket.end(
-							`${JSON.stringify({ error: "warm build stale — falling back to cold analysis" })}\n`,
-						);
-						return;
-					}
-					const parsed = JSON.parse(line) as Partial<
-						WarmTurnEndRequest & WarmAnalyzeRequest
-					>;
-					if (parsed.route === "turn-end") {
-						if (parsed.version !== WARM_TURN_END_SCHEMA_VERSION) {
+		// One-shot per connection (#1219): clients write exactly one request and
+		// read one reply, so a handler that kept re-reading the same buffered
+		// line re-dispatched the request on stray bytes. The reader consumes the
+		// line and ignores anything after it.
+		socket.on(
+			"data",
+			createWarmIpcLineReader((line) => {
+				void requestQueue.enqueue(async () => {
+					try {
+						if (isWarmBuildStale()) {
+							console.error(
+								"[pi-lens-mcp] warm request: build stale, replying with an error",
+							);
 							socket.end(
-								`${JSON.stringify({ error: `turn-end schema ${parsed.version} != ${WARM_TURN_END_SCHEMA_VERSION}` })}\n`,
+								`${JSON.stringify({ error: "warm build stale" })}\n`,
 							);
 							return;
 						}
-						const turnCwd = parsed.cwd ?? DEFAULT_CWD;
-						console.error(`[pi-lens-mcp] warm turn-end: ${turnCwd}`);
-						await ensureReady(turnCwd);
-						// No files: the Stop hook passes none, because PostToolUse already
-						// registered this turn's edits into turn-state WITHOUT a sessionId.
-						// Stamping them here would give handleTurnEnd's stale-session
-						// eviction a reason to drop them.
-						const outcome = await runTurnEnd(turnCwd);
-						// Typed so reply-shape drift is a compile error, not a silent skip.
-						const result: WarmTurnEndResponse = {
-							route: "turn-end",
-							version: WARM_TURN_END_SCHEMA_VERSION,
-							turnEnd: outcome.turnEnd,
-							tests: outcome.tests,
-						};
+						const parsed = JSON.parse(line) as Partial<
+							WarmTurnEndRequest & WarmAnalyzeRequest
+						>;
+						if (parsed.route === "turn-end") {
+							if (parsed.version !== WARM_TURN_END_SCHEMA_VERSION) {
+								socket.end(
+									`${JSON.stringify({ error: `turn-end schema ${parsed.version} != ${WARM_TURN_END_SCHEMA_VERSION}` })}\n`,
+								);
+								return;
+							}
+							const turnCwd = parsed.cwd ?? DEFAULT_CWD;
+							console.error(`[pi-lens-mcp] warm turn-end: ${turnCwd}`);
+							await ensureReady(turnCwd);
+							const outcome = await runTurnEnd(turnCwd);
+							const result: WarmTurnEndResponse = {
+								route: "turn-end",
+								version: WARM_TURN_END_SCHEMA_VERSION,
+								turnEnd: outcome.turnEnd,
+								tests: outcome.tests,
+							};
+							socket.end(`${JSON.stringify({ result })}\n`);
+							return;
+						}
+						const req = parsed as WarmAnalyzeRequest;
+						console.error(`[pi-lens-mcp] warm analyze: ${req.file}`);
+						const result = await analyzeFile(req.file, req.cwd, {
+							registerTurnState: true,
+							updateGraph: true,
+						});
 						socket.end(`${JSON.stringify({ result })}\n`);
-						return;
+					} catch (err) {
+						socket.end(`${JSON.stringify({ error: String(err) })}\n`);
 					}
-					// Untagged = the legacy analyze request; unchanged for old clients.
-					const req = parsed as WarmAnalyzeRequest;
-					console.error(`[pi-lens-mcp] warm analyze: ${req.file}`);
-					// Warm = full LSP + an edit-detection path (register turn-state) +
-					// review-graph maintenance (#536 — this is an in-process, long-lived
-					// path, unlike the ephemeral `fresh` worker).
-					const result = await analyzeFile(req.file, req.cwd, {
-						registerTurnState: true,
-						updateGraph: true,
-					});
-					socket.end(`${JSON.stringify({ result })}\n`);
-				} catch (err) {
-					socket.end(`${JSON.stringify({ error: String(err) })}\n`);
-				}
-			})();
-		});
+				});
+			}),
+		);
 		socket.on("error", () => socket.destroy());
 	});
 

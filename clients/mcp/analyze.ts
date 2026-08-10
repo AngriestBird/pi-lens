@@ -303,8 +303,8 @@ export async function analyzeFile(
 
 	if (options.registerTurnState) {
 		// Full-file range, importsChanged=true (conservative → dep/knip re-check
-		// broadly). No sessionId — leaving it unset avoids turn_end's stale-session
-		// eviction. Best-effort.
+		// broadly). Clear any stale pi session ID because the MCP Stop route owns
+		// this workspace-scoped worklist independently. Best-effort.
 		try {
 			const lineCount = fs.readFileSync(absPath, "utf8").split("\n").length;
 			new CacheManager().addModifiedRange(
@@ -312,6 +312,7 @@ export async function analyzeFile(
 				{ start: 1, end: lineCount },
 				true,
 				cwd,
+				null,
 			);
 		} catch {
 			// unreadable — skip turn-state registration

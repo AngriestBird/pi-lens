@@ -154,9 +154,9 @@ extension has. PostToolUse runs the per-edit pass, `Stop` runs the per-turn one:
 } }
 ```
 
-The `Stop` hook only works against a running MCP server, because a cold turn-end
-pass has no cascade runs or accumulated findings to report. With no warm server
-the turn-end is skipped, not faked: one line on stderr and nothing on stdout.
+The `Stop` hook only works against a running MCP server because only that
+process owns the session state and pending turn work. With no warm server the
+turn-end is skipped, not faked: one line on stderr and nothing on stdout.
 
 ## Troubleshooting
 

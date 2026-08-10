@@ -311,10 +311,11 @@ export class CacheManager {
 		range: ModifiedRange,
 		importsChanged: boolean,
 		cwd: string,
-		sessionId?: string,
+		sessionId?: string | null,
 	): TurnState {
 		const state = this.readTurnState(cwd);
-		if (sessionId) state.sessionId = sessionId;
+		if (sessionId === null) state.sessionId = undefined;
+		else if (sessionId) state.sessionId = sessionId;
 		const normalizedPath = this.toTurnStateKey(filePath, cwd);
 
 		const existing = state.files[normalizedPath];
