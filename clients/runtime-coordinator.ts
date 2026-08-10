@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ActionableWarningRecord } from "./actionable-warnings.js";
 import type { FunctionCallGraph } from "./call-graph.js";
@@ -192,7 +193,8 @@ export class RuntimeCoordinator {
 		// The status is an aggregate over the current per-file map. A clean B
 		// result must not erase an unresolved A result; the pipeline records/clears
 		// the edited file immediately before this method runs.
-		this._gitGuardHasBlockers = hasBlockers || this._pendingInlineBlockers.size > 0;
+		this._gitGuardHasBlockers =
+			hasBlockers || this.getInlineBlockersSnapshot().length > 0;
 		if (!this._gitGuardHasBlockers) {
 			this._gitGuardSummary = "";
 			return;
@@ -525,7 +527,42 @@ export class RuntimeCoordinator {
 		this._pendingInlineBlockers.delete(path.resolve(filePath));
 	}
 
+	reconcileInlineBlockers(): void {
+		// Rebuild, never delete-in-place: `PathKeyedMap.delete()` re-normalizes
+		// the key, and `normalizeMapKey` realpaths a live file but lowercases
+		// the tail of a deleted one — so on Windows a mixed-case filename gets
+		// a DIFFERENT delete-time key than its set-time key and the delete
+		// misses (#1245, verified live: `MyCase.ts` survived reconcile).
+		// Existence-checking the display path and rebuilding survivors avoids
+		// the key-mismatch entirely; live survivors re-set to identical keys
+		// (both realpath), so only the stale entries are dropped.
+		const survivors: Array<[string, { filePath: string; summary: string }]> =
+			[];
+		for (const [displayPath, value] of this._pendingInlineBlockers.entries()) {
+			if (fs.existsSync(displayPath)) survivors.push([displayPath, value]);
+		}
+		if (survivors.length !== this._pendingInlineBlockers.size) {
+			this._pendingInlineBlockers.clear();
+			for (const [displayPath, value] of survivors) {
+				this._pendingInlineBlockers.set(displayPath, value);
+			}
+		}
+	}
+
+	/**
+	 * Stale-entry reconcile (#1245): a blocker recorded for a file that has
+	 * since been deleted can never be cleared — `clearInlineBlockers` fires
+	 * only on a LATER dispatch of the same path, which a deleted file never
+	 * gets. Every read of the blocker map (turn_end injection, git-guard
+	 * size/summary, `syncGitGuardRecord`) therefore drops entries whose file no
+	 * longer exists on disk: a blocker for a deleted file is stale by
+	 * definition (the agent cannot fix it), so it must not re-surface every
+	 * turn or gate a commit. The map is tiny (per-turn blockers) and reads are
+	 * bounded (once per turn_end / tool_result), so the probe cost is
+	 * negligible.
+	 */
 	getInlineBlockersSnapshot(): Array<{ filePath: string; summary: string }> {
+		this.reconcileInlineBlockers();
 		return [...this._pendingInlineBlockers.values()];
 	}
 

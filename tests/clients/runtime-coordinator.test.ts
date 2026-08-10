@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.ts";
 
@@ -87,6 +90,76 @@ describe("RuntimeCoordinator", () => {
 			runtime.seedProjectSequence(5, new Map([["/proj/a.ts", 3]]));
 			// Seeded per-file counters carry no seq provenance ⇒ empty changed map.
 			expect(runtime.getFilesChangedSince(0)).toHaveLength(0);
+		});
+	});
+
+	describe("inline blockers reconcile against disk (#1245)", () => {
+		it("drops a blocker whose file no longer exists from the snapshot", () => {
+			const runtime = new RuntimeCoordinator();
+			const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-blocker-reconcile-"));
+			const file = path.join(dir, "stale.ts");
+			writeFileSync(file, "export const x = 1;\n");
+			try {
+				runtime.recordInlineBlockers(file, "blocker A");
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+
+				rmSync(file);
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it("drops a stale blocker for a mixed-case filename too (#1245 Windows key trap)", () => {
+			// `normalizeMapKey` realpaths a live file (canonical case) but
+			// lowercases the tail of a deleted one, so a delete-in-place
+			// reconcile missed `MyCase.ts` on Windows — the reconcile must not
+			// depend on delete-time key normalization matching set-time.
+			const runtime = new RuntimeCoordinator();
+			const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-blocker-case-"));
+			const file = path.join(dir, "MyCase.ts");
+			writeFileSync(file, "export const x = 1;\n");
+			try {
+				runtime.recordInlineBlockers(file, "blocker A");
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+
+				rmSync(file);
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it("keeps a blocker whose file still exists", () => {
+			const runtime = new RuntimeCoordinator();
+			const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-blocker-keep-"));
+			const file = path.join(dir, "stays.ts");
+			writeFileSync(file, "export const x = 1;\n");
+			try {
+				runtime.recordInlineBlockers(file, "blocker A");
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+				expect(runtime.getInlineBlockersSnapshot()[0].summary).toBe("blocker A");
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it("no longer counts a deleted file's blocker toward the git guard", () => {
+			const runtime = new RuntimeCoordinator();
+			const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-blocker-guard-"));
+			const file = path.join(dir, "stale.ts");
+			writeFileSync(file, "export const x = 1;\n");
+			try {
+				runtime.recordInlineBlockers(file, "blocker A");
+				runtime.updateGitGuardStatus(false, "");
+				expect(runtime.gitGuardHasBlockers).toBe(true);
+
+				rmSync(file);
+				runtime.updateGitGuardStatus(false, "");
+				expect(runtime.gitGuardHasBlockers).toBe(false);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
 		});
 	});
 });
