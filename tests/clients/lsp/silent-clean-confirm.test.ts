@@ -423,3 +423,107 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		expect((result as { inconclusive?: boolean }).inconclusive).toBe(true);
 	});
 });
+
+/**
+ * #1253: the touch debounce must not launder a FAILED notify write into a
+ * later touch that looks fully delivered.
+ *
+ * `markTouched` records "these servers already have this content", and
+ * `shouldSkipNotify` reads that record to skip the next touch's notify
+ * entirely — which also leaves that next touch's `notifyWriteTimedOut` false.
+ * Both silent-clean gates (#799 single-server, #814 aggregate) treat
+ * `!notifyWriteTimedOut` as proof the server SAW the content, so recording a
+ * write that never landed turned a silent server's ignorance into a confirmed
+ * clean one debounce window later. Since #1253 that confirmation is carried
+ * all the way out to `lsp_diagnostics` (`TouchFileResult.confirmation`), so
+ * the laundering surfaces as a false "clean" file rather than being absorbed
+ * by the tool's own unconfirmed fallback.
+ */
+describe("touch debounce after a failed notify write (#1253)", () => {
+	let tmp: string;
+	let prevNotifyBudget: string | undefined;
+	beforeEach(() => {
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-silent-clean-debounce-"));
+		process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS = "50";
+		prevNotifyBudget = process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "50";
+	});
+	afterEach(() => {
+		delete process.env.PI_LENS_LSP_DIAGNOSTICS_MAX_WAIT_MS;
+		if (prevNotifyBudget === undefined) {
+			delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+		} else {
+			process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = prevNotifyBudget;
+		}
+		removeTempDirSync(tmp);
+	});
+
+	it("re-pushes (and stays inconclusive) instead of debouncing into a silent-clean confirm", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const marksman = makeServer("marksman", ".md", tmp);
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".md") ? [marksman] : [],
+		);
+		const { client } = makeSilentPushOnlyClient("marksman", tmp);
+		// Every write stalls past the notify budget — the server never receives
+		// the file, so its silence is never evidence of "clean".
+		const open = vi.fn(() => new Promise(() => {}));
+		client.notify.open = open as never;
+		createLSPClient.mockResolvedValue(client);
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const options = {
+			diagnostics: "document" as const,
+			collectDiagnostics: true as const,
+			clientScope: "primary" as const,
+			source: "test",
+		};
+		const first = await service.touchFile(filePath, "# hi\n", options);
+		// Same content, well inside the 1500ms debounce window.
+		const second = await service.touchFile(filePath, "# hi\n", options);
+
+		expect((first as { inconclusive?: boolean }).inconclusive).toBe(true);
+		expect(first?.confirmation).toBeUndefined();
+		// The second touch must attempt the write again rather than assume the
+		// first one landed.
+		expect(open).toHaveBeenCalledTimes(2);
+		expect((second as { inconclusive?: boolean }).inconclusive).toBe(true);
+		expect(second?.confirmation).toBeUndefined();
+	});
+
+	it("still debounces the notify after a write that DID land", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const marksman = makeServer("marksman", ".md", tmp);
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".md") ? [marksman] : [],
+		);
+		const { client } = makeSilentPushOnlyClient("marksman", tmp);
+		const open = vi.fn(async () => {});
+		client.notify.open = open as never;
+		createLSPClient.mockResolvedValue(client);
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const options = {
+			diagnostics: "document" as const,
+			collectDiagnostics: true as const,
+			clientScope: "primary" as const,
+			source: "test",
+		};
+		const first = await service.touchFile(filePath, "# hi\n", options);
+		const second = await service.touchFile(filePath, "# hi\n", options);
+
+		// One delivered push is enough for the debounce window — unchanged.
+		expect(open).toHaveBeenCalledTimes(1);
+		expect(first?.confirmation).toBe("confirmed");
+		expect(second?.confirmation).toBe("confirmed");
+	});
+});

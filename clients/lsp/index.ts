@@ -2740,7 +2740,19 @@ export class LSPService {
 		// Only refresh the recent-touches entry when we actually pushed. Skipping
 		// here keeps the original push timestamp intact so the debounce window
 		// expires naturally instead of being extended by every reuse.
-		if (!notifySkipped) {
+		//
+		// #1253: and only when EVERY spawned server's write actually landed. The
+		// recent-touches entry is the debounce's record of "these servers already
+		// have this content", and `shouldSkipNotify` reads it to skip the next
+		// notify entirely — which also clears `notifyWriteTimedOut` for that next
+		// touch. Recording a write that timed out (or rejected) therefore laundered
+		// a failed push into a later touch that looks like a clean, fully-delivered
+		// one: the silent-clean gates above (#799/#814) only require
+		// `!notifyWriteTimedOut`, so a `silentOnClean` server that never received
+		// the file would be confirmed clean purely because it stayed quiet. Leave
+		// the entry stale instead — the next touch re-pushes, which is exactly the
+		// right outcome for a server whose write never landed.
+		if (!notifySkipped && notifyWriteTimedOutServerIds.length === 0) {
 			this.markTouched(filePath, content, clientScope);
 		}
 

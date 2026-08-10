@@ -1180,6 +1180,68 @@ describe("lsp_diagnostics tool", () => {
 			}
 		});
 
+		// #1253: the warm-attach branch returns BEFORE the local touch, so the
+		// incumbent's own confirmation is the only provenance available there —
+		// without it a warm-attached session reports every clean Markdown file
+		// unconfirmed, exactly the bug this issue is about, just on the other
+		// collection route.
+		it("a warm-attached incumbent's confirmed empty result renders clean", async () => {
+			mocked.cascadeTier = "tier3-silent";
+			mocked.warmAttached = true;
+			mocked.attachedDiagnostics.mockResolvedValue({
+				available: true,
+				response: { diagnostics: [], confirmation: "confirmed" },
+			});
+			const executeCommand = vi.fn();
+			(mocked.service as any).executeCommand = executeCommand;
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-marksman-warm-"),
+			);
+			const file = path.join(tmpDir, "README.md");
+			fs.writeFileSync(file, "# Example\n");
+
+			try {
+				const result = await runMarkdown(
+					{ paths: [file], severity: "all", serverScope: "primary" },
+					[file],
+				);
+				expect(result.details?.outcomeCounts).toMatchObject({
+					clean: 1,
+					inconclusive: 0,
+				});
+				expect(executeCommand).not.toHaveBeenCalled();
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
+
+		it("a warm-attached result WITHOUT confirmation stays unconfirmed", async () => {
+			mocked.cascadeTier = "tier3-silent";
+			mocked.warmAttached = true;
+			mocked.attachedDiagnostics.mockResolvedValue({
+				available: true,
+				response: { diagnostics: [] },
+			});
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-marksman-warm-unconfirmed-"),
+			);
+			const file = path.join(tmpDir, "README.md");
+			fs.writeFileSync(file, "# Example\n");
+
+			try {
+				const result = await runMarkdown(
+					{ paths: [file], severity: "all", serverScope: "primary" },
+					[file],
+				);
+				expect(result.details?.outcomeCounts).toMatchObject({
+					clean: 0,
+					inconclusive: 1,
+				});
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
+
 		it("a real Marksman diagnostic remains a finding", async () => {
 			mocked.cascadeTier = "tier3-silent";
 			(mocked.service as any).touchFile = vi.fn().mockResolvedValue({

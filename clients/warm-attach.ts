@@ -154,6 +154,13 @@ async function serveRequest(
 			servedAt,
 			fresh: servedAt <= req.deadlineAt && touched !== undefined,
 			inconclusive: touched?.inconclusive === true,
+			// #1253: carry the touch's own confirmation verdict across the socket
+			// as an explicit enumerable field (same doctrine as `inconclusive`) —
+			// without it, an incumbent-served empty result from a silent-on-clean
+			// server is indistinguishable from "never answered" on the far side.
+			...(touched?.confirmation === "confirmed"
+				? { confirmation: "confirmed" as const }
+				: {}),
 		},
 	};
 }

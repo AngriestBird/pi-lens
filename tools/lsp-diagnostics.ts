@@ -715,7 +715,18 @@ async function collectDiagnosticsForFile(
 				return {
 					diagnostics: filtered,
 					timedOut: false,
-					confirmedByTouch: false,
+					// #1253: the incumbent's touch carries the same confirmation
+					// provenance a local touch does (an `available: true` answer is
+					// already gated on `fresh && !inconclusive`, but that is NOT
+					// evidence a silent-on-clean server was confirmed — only the
+					// explicit flag is). The incumbent always touches with
+					// `clientScope: "with-auxiliary"`, so this is an AGGREGATE
+					// confirmation: it carries the same caveat all-scope local
+					// touches do, and classic TypeScript still needs the primary-only
+					// tsserver sync check below rather than this verdict.
+					confirmedByTouch:
+						attached.response.confirmation === "confirmed" &&
+						primaryServerId(absPath) !== "typescript",
 					content,
 				};
 			}
