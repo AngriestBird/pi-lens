@@ -2214,13 +2214,29 @@ export function hasRuffConfig(cwd: string): boolean {
  * package-owned sensible-defaults config (`config/markdownlint/core.json`) can
  * never drift apart from the bare `--fix` invocation again.
  */
-export function markdownlintConfigArgs(cwd: string): string[] {
-	return hasMarkdownlintConfig(cwd)
+/**
+ * Shared fallback shape for the config-args builders (#1247): when the
+ * project has its own config the lint/autofix surfaces pass NO args (the
+ * tool discovers it); otherwise both surfaces point at the package-owned
+ * fallback so the tool never silently runs its default ruleset. One shape
+ * here means the per-tool builders cannot drift from each other.
+ */
+function configArgsWithFallback(
+	hasConfig: boolean,
+	toolArgs: string[],
+	packageConfigPath: string,
+): string[] {
+	return hasConfig
 		? []
-		: [
-				"--config",
-				resolvePackagePath(import.meta.url, "config/markdownlint/core.json"),
-			];
+		: [...toolArgs, resolvePackagePath(import.meta.url, packageConfigPath)];
+}
+
+export function markdownlintConfigArgs(cwd: string): string[] {
+	return configArgsWithFallback(
+		hasMarkdownlintConfig(cwd),
+		["--config"],
+		"config/markdownlint/core.json",
+	);
 }
 
 /**
@@ -2229,9 +2245,11 @@ export function markdownlintConfigArgs(cwd: string): string[] {
  * this builder so `config/ruff/core.toml` applies on `--fix` too.
  */
 export function ruffConfigArgs(cwd: string): string[] {
-	return hasRuffConfig(cwd)
-		? []
-		: ["--config", resolvePackagePath(import.meta.url, "config/ruff/core.toml")];
+	return configArgsWithFallback(
+		hasRuffConfig(cwd),
+		["--config"],
+		"config/ruff/core.toml",
+	);
 }
 
 /**
