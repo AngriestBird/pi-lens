@@ -37,6 +37,7 @@ import {
 	analyzeFileFresh,
 	canRebuildPiLens,
 	createMcpHost,
+	createWarmIpcLineReader,
 	diagnosticStats,
 	ensureLspConfig,
 	ipcPathForCwd,
@@ -272,44 +273,46 @@ function startIpcServer(): void {
 
 	const ipc = net.createServer((socket) => {
 		socket.setEncoding("utf8");
-		let buffer = "";
-		socket.on("data", (chunk: string) => {
-			buffer += chunk;
-			const newline = buffer.indexOf("\n");
-			if (newline === -1) return;
-			const line = buffer.slice(0, newline);
-			void (async () => {
-				try {
-					// #535: the PostToolUse hook bin (mcp/analyze-cli.ts) already treats
-					// ANY error response as "no usable warm server" and falls back to
-					// its own cold, load-fresh-from-disk analysis path — so on a stale
-					// warm build, replying with an error IS the fresh-fork behavior for
-					// this channel, for free. No separate fresh-fork plumbing needed
-					// here: the client-side fallback already loads current code.
-					if (isWarmBuildStale()) {
-						console.error(
-							"[pi-lens-mcp] warm analyze: build stale, replying error so the hook falls back cold",
-						);
-						socket.end(
-							`${JSON.stringify({ error: "warm build stale — falling back to cold analysis" })}\n`,
-						);
-						return;
+		// One-shot per connection (#1219): clients write exactly one request and
+		// read one reply, so a handler that kept re-reading the same buffered
+		// line re-dispatched the request on stray bytes. The reader consumes the
+		// line and ignores anything after it.
+		socket.on(
+			"data",
+			createWarmIpcLineReader((line) => {
+				void (async () => {
+					try {
+						// #535: the PostToolUse hook bin (mcp/analyze-cli.ts) already treats
+						// ANY error response as "no usable warm server" and falls back to
+						// its own cold, load-fresh-from-disk analysis path — so on a stale
+						// warm build, replying with an error IS the fresh-fork behavior for
+						// this channel, for free. No separate fresh-fork plumbing needed
+						// here: the client-side fallback already loads current code.
+						if (isWarmBuildStale()) {
+							console.error(
+								"[pi-lens-mcp] warm analyze: build stale, replying error so the hook falls back cold",
+							);
+							socket.end(
+								`${JSON.stringify({ error: "warm build stale — falling back to cold analysis" })}\n`,
+							);
+							return;
+						}
+						const req = JSON.parse(line) as WarmAnalyzeRequest;
+						console.error(`[pi-lens-mcp] warm analyze: ${req.file}`);
+						// Warm = full LSP + an edit-detection path (register turn-state) +
+						// review-graph maintenance (#536 — this is an in-process, long-lived
+						// path, unlike the ephemeral `fresh` worker).
+						const result = await analyzeFile(req.file, req.cwd, {
+							registerTurnState: true,
+							updateGraph: true,
+						});
+						socket.end(`${JSON.stringify({ result })}\n`);
+					} catch (err) {
+						socket.end(`${JSON.stringify({ error: String(err) })}\n`);
 					}
-					const req = JSON.parse(line) as WarmAnalyzeRequest;
-					console.error(`[pi-lens-mcp] warm analyze: ${req.file}`);
-					// Warm = full LSP + an edit-detection path (register turn-state) +
-					// review-graph maintenance (#536 — this is an in-process, long-lived
-					// path, unlike the ephemeral `fresh` worker).
-					const result = await analyzeFile(req.file, req.cwd, {
-						registerTurnState: true,
-						updateGraph: true,
-					});
-					socket.end(`${JSON.stringify({ result })}\n`);
-				} catch (err) {
-					socket.end(`${JSON.stringify({ error: String(err) })}\n`);
-				}
-			})();
-		});
+				})();
+			}),
+		);
 		socket.on("error", () => socket.destroy());
 	});
 

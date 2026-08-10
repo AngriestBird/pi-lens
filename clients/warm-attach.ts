@@ -13,6 +13,7 @@ import { logLatency } from "./latency-logger.js";
 import { getLSPService } from "./lsp/index.js";
 import {
 	contentHash,
+	createWarmIpcLineReader,
 	diagnosticsIpcPathForCwd,
 	requestWarmCodeActions,
 	requestWarmDiagnostics,
@@ -169,22 +170,26 @@ function startServer(cwd: string): void {
 	}
 	const server = net.createServer((socket) => {
 		socket.setEncoding("utf8");
-		let buffer = "";
-		socket.on("data", (chunk: string) => {
-			buffer += chunk;
-			const newline = buffer.indexOf("\n");
-			if (newline === -1) return;
-			void (async () => {
-				try {
-					const req = JSON.parse(buffer.slice(0, newline)) as
-						| WarmDiagnosticsRequest
-						| WarmCodeActionsRequest;
-					socket.end(`${JSON.stringify(await serveRequest(req))}\n`);
-				} catch (error) {
-					socket.end(`${JSON.stringify({ error: String(error) })}\n`);
-				}
-			})();
-		});
+		// One-shot per connection (#1219 family): the same defect shape as the
+		// MCP warm socket — clients write exactly one request and read one
+		// reply, so a handler that kept re-reading the same buffered line
+		// re-dispatched the request on stray bytes. The shared reader consumes
+		// the line and ignores anything after it.
+		socket.on(
+			"data",
+			createWarmIpcLineReader((line) => {
+				void (async () => {
+					try {
+						const req = JSON.parse(line) as
+							| WarmDiagnosticsRequest
+							| WarmCodeActionsRequest;
+						socket.end(`${JSON.stringify(await serveRequest(req))}\n`);
+					} catch (error) {
+						socket.end(`${JSON.stringify({ error: String(error) })}\n`);
+					}
+				})();
+			}),
+		);
 	});
 	server.on("error", (error) => {
 		record("listener-error", cwd, String(error));

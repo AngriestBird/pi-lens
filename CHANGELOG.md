@@ -914,6 +914,8 @@ All notable changes to pi-lens will be documented in this file.
 	semantics, primary LSP diagnostics, intentional test-runner findings, and
 	the generic project-diagnostics snapshot/delta display are all left as-is.
 
+- **The warm IPC side-channel re-dispatched the same request on stray bytes (closes [#1219](https://github.com/apmantza/pi-lens/issues/1219))** — the server's socket `data` handler (`mcp/server.ts` `startIpcServer`) buffered chunks but never consumed the request line, so any further `data` event on the connection — stray bytes without a newline still re-found the original line — re-ran the whole warm `analyzeFile` pass (three dispatches per connection in the pre-fix repro). The channel's clients write exactly one newline-delimited request and read one reply (`requestWarmAnalyze` ends the socket), so the handler is now strictly one-shot: `createWarmIpcLineReader` (`clients/mcp/ipc.ts`, re-exported through the lens-engine seam) accumulates chunks, dispatches the first complete line exactly once, and ignores everything after it. The stdio JSON-RPC loop already consumed its lines and is untouched. Regression tests drive the real reader: one request + stray bytes → exactly one dispatch (pre-fix: three), a second newline-terminated request is ignored, and a request split across chunks still assembles.
+
 ### Added
 
 - **tflint respects the project's linter policy (refs #1117)** — every other
