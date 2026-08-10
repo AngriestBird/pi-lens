@@ -411,6 +411,10 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   (LSP-complete) and the bin never loads the dispatch graph; falls back to cold
   no-LSP local analysis. `pilens_analyze` (warm) + the hook auto-register edited
   files into turn-state (`addModifiedRange`) so `pilens_turn_end` needs no file list.
+  The channel is strictly **one-shot** — clients write exactly one request and
+  read one reply, so the server handler consumes the line and dispatches at most
+  once per connection (a non-consuming handler re-dispatched on stray bytes,
+  #1219); keep any new channel handler one-shot too.
 - **Same-workspace warm attach (#822, opt-in soak).** `PI_LENS_WARM_ATTACH=1`
   selects a PID-confirmed, heartbeat-fresh same-root incumbent from
   `instances.json`. The LSP runner sends versioned, content-hash-bound,

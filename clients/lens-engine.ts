@@ -55,6 +55,7 @@ export {
 } from "./mcp/analyze.js";
 export { createMcpHost } from "./mcp/host-shim.js";
 export {
+	createWarmIpcLineReader,
 	ipcPathForCwd,
 	requestWarmAnalyze,
 	type WarmAnalyzeRequest,
