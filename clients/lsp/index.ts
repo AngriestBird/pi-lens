@@ -1995,7 +1995,7 @@ export class LSPService {
 					// that landed. Pushing again would clear its diagnostic cache for
 					// nothing — leave its debounce entry (and its original timestamp)
 					// alone so the window still expires naturally.
-					if (notifySkippedServerIds.has(entry.info.id)) return true;
+					if (notifySkippedServerIds.has(entry.info.id)) return;
 					// Same identity as the broken/demonstratedReady maps.
 					const clientKey = await this.demonstratedReadyKeyFor(
 						entry.info,
@@ -2033,7 +2033,6 @@ export class LSPService {
 							this.recordNotifyWriteBackpressure(clientKey, entry, filePath);
 						}
 					}
-					return true;
 				}),
 			);
 			if (notifyWriteTimedOutServerIds.length > 0) {
