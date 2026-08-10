@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { McpAnalyzeResult } from "../../../clients/mcp/analyze.js";
 import {
 	contentHash,
+	createWarmIpcLineReader,
 	diagnosticsIpcPathForCwd,
 	ipcPathForCwd,
 	requestWarmCodeActions,
@@ -314,5 +315,45 @@ describe("requestWarmAnalyze", () => {
 		const result = await requestWarmAnalyze(cwd, "/x/app.ts");
 		expect(result).toBeUndefined();
 		removeTempDirSync(cwd);
+	});
+});
+
+describe("createWarmIpcLineReader", () => {
+	it("dispatches exactly one line for one request followed by stray bytes (#1219)", () => {
+		const lines: string[] = [];
+		const handler = createWarmIpcLineReader((line) => lines.push(line));
+		handler(`${JSON.stringify({ file: "/x/a.ts" })}\n`);
+		// Pre-fix, the socket handler kept the consumed line in its buffer and
+		// re-dispatched it on any further data event — stray bytes after the
+		// request re-ran the whole warm analyze pass.
+		handler("stray");
+		handler("more");
+		expect(lines).toHaveLength(1);
+		expect(JSON.parse(lines[0])).toEqual({ file: "/x/a.ts" });
+	});
+
+	it("ignores a second newline-terminated request (one-shot per connection)", () => {
+		const lines: string[] = [];
+		const handler = createWarmIpcLineReader((line) => lines.push(line));
+		handler(`${JSON.stringify({ file: "/x/a.ts" })}\n`);
+		handler(`${JSON.stringify({ file: "/x/b.ts" })}\n`);
+		expect(lines).toHaveLength(1);
+		expect(JSON.parse(lines[0]).file).toBe("/x/a.ts");
+	});
+
+	it("assembles a request split across chunks before dispatching", () => {
+		const lines: string[] = [];
+		const handler = createWarmIpcLineReader((line) => lines.push(line));
+		handler('{"file":');
+		handler('"/x/a.ts"}\n');
+		expect(lines).toHaveLength(1);
+		expect(JSON.parse(lines[0]).file).toBe("/x/a.ts");
+	});
+
+	it("does not dispatch when no newline ever arrives", () => {
+		const lines: string[] = [];
+		const handler = createWarmIpcLineReader((line) => lines.push(line));
+		handler("partial");
+		expect(lines).toHaveLength(0);
 	});
 });

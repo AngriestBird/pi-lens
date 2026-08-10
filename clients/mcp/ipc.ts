@@ -6,11 +6,12 @@
  * connects to it to get LSP-complete diagnostics from the warm process instead
  * of running its own cold analysis.
  *
- * This module is the CLIENT + the shared path derivation only — deliberately
- * light (node:net + type-only result), so the bin can try the warm path WITHOUT
- * loading the dispatch graph. The server side lives in mcp/server.ts (which
- * already holds the analysis engine). If the warm path is unavailable, the
- * client resolves `undefined` and the caller falls back to cold local analysis.
+ * This module is the CLIENT + the shared path derivation + the one-shot line
+ * reader the server wires into its socket (deliberately light: node:net +
+ * type-only result, so the bin can try the warm path WITHOUT loading the
+ * dispatch graph). The analysis engine lives in mcp/server.ts. If the warm
+ * path is unavailable, the client resolves `undefined` and the caller falls
+ * back to cold local analysis.
  */
 
 import * as crypto from "node:crypto";
@@ -333,4 +334,27 @@ export function requestWarmAnalyze(
 		socket.on("error", () => finish(undefined));
 		socket.on("close", () => finish(undefined));
 	});
+}
+
+/**
+ * One-shot line reader for the warm IPC socket (#1219). The clients write
+ * exactly one newline-terminated request per connection and read one reply, so
+ * the server must dispatch at most one line and ignore anything after it — a
+ * `data` handler that keeps re-reading the same buffered line re-dispatches
+ * the request on stray bytes. Returns the handler to attach to the socket's
+ * `data` event.
+ */
+export function createWarmIpcLineReader(
+	onLine: (line: string) => void,
+): (chunk: string) => void {
+	let buffer = "";
+	let dispatched = false;
+	return (chunk: string) => {
+		if (dispatched) return;
+		buffer += chunk;
+		const newline = buffer.indexOf("\n");
+		if (newline === -1) return;
+		dispatched = true;
+		onLine(buffer.slice(0, newline));
+	};
 }
