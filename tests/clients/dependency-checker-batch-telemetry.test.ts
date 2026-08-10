@@ -159,7 +159,6 @@ describe("DependencyChecker.checkFilesBatch telemetry (#766)", () => {
 		expect(stats.spawned).toBe(2);
 		expect(stats.failed).toBe(1);
 		expect(stats.commandKind).toBe("npx");
-		expect(stats.resolveMs).toBeGreaterThanOrEqual(0);
 		// Project-relative, in array order, carrying each spawn's own outcome.
 		expect(stats.targets.map((t) => [t.file, t.ok])).toEqual([
 			["ok.ts", true],
@@ -170,7 +169,63 @@ describe("DependencyChecker.checkFilesBatch telemetry (#766)", () => {
 		expect(results.get(gone)?.checked).toBe(false);
 	});
 
-	it("caps per-target timings and says so", async () => {
+	it("counts the whole miss set as failed when madge is unavailable", async () => {
+		const { DependencyChecker } = await import(
+			"../../clients/dependency-checker.js"
+		);
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+			if (args[0] === "--version") {
+				return {
+					status: 1,
+					error: new Error("madge: not found"),
+					stdout: "",
+					stderr: "",
+				};
+			}
+			throw new Error("must not spawn madge while it is unavailable");
+		});
+
+		const hit = writeSource("hit.ts", ["./h.js"]);
+		const missA = writeSource("a.ts", ["./a-dep.js"]);
+		const missB = writeSource("b.ts", ["./b-dep.js"]);
+		const gone = path.join(tmp, "gone.ts");
+
+		const checker = new DependencyChecker();
+		expect(checker.importsChanged(hit)).toBe(true);
+
+		const { results, stats } = await checker.checkFilesBatch(
+			[hit, missA, missB, gone],
+			tmp,
+		);
+
+		expect(stats.requested).toBe(4);
+		expect(stats.missing).toBe(1);
+		expect(stats.cacheHits).toBe(1);
+		expect(stats.spawned).toBe(0);
+		// The miss set is not silently dropped: 0/0 would read as a clean turn
+		// with nothing to do.
+		expect(stats.failed).toBe(2);
+		expect(stats.commandKind).toBeUndefined();
+		expect(results.get(missA)?.checked).toBe(false);
+		expect(results.get(hit)?.cacheHit).toBe(true);
+	});
+
+	it("keeps every target at exactly the cap", async () => {
+		const { DependencyChecker } = await import(
+			"../../clients/dependency-checker.js"
+		);
+		const files = Array.from({ length: 12 }, (_, i) =>
+			writeSource(`f${i}.ts`, [`./dep${i}.js`]),
+		);
+
+		const { stats } = await new DependencyChecker().checkFilesBatch(files, tmp);
+
+		expect(stats.spawned).toBe(12);
+		expect(stats.targets).toHaveLength(12);
+		expect(stats.targetsTruncated).toBe(false);
+	});
+
+	it("caps per-target timings past it and says so", async () => {
 		const { DependencyChecker } = await import(
 			"../../clients/dependency-checker.js"
 		);

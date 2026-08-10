@@ -121,6 +121,46 @@ describe("DependencyChecker shared-state generation guard (#766)", () => {
 		expect(checker.getCircularForFile(x)).toEqual([]);
 	});
 
+	it("lets an older publish land when the newer batch learned nothing", async () => {
+		const { DependencyChecker } = await import(
+			"../../clients/dependency-checker.js"
+		);
+		const x = writeSource("x.ts", ["./b.js"]);
+		const unchanged = writeSource("h.ts", ["./k.js"]);
+		const gate = makeGate();
+		let spawns = 0;
+
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+			if (args[0] === "--version") return VERSION_OK;
+			spawns++;
+			await gate.wait;
+			return {
+				status: 0,
+				error: null,
+				stdout: JSON.stringify([[x, path.join(tmp, "b.ts")]]),
+				stderr: "",
+			};
+		});
+
+		const checker = new DependencyChecker();
+		// Seed h.ts's import cache so the later batch is pure cache hits.
+		expect(checker.importsChanged(unchanged)).toBe(true);
+
+		const slow = checker.checkFilesBatch([x], tmp);
+		await vi.waitFor(() => expect(spawns).toBe(1));
+
+		const idle = await checker.checkFilesBatch([unchanged], tmp);
+		expect(idle.stats.spawned).toBe(0);
+		expect(idle.stats.cacheHits).toBe(1);
+
+		gate.open();
+		await slow;
+
+		// The newer batch folded nothing, so it published nothing and must not
+		// have advanced the generation past an older op's legitimate write.
+		expect(checker.isInCircular(x)).toBe(true);
+	});
+
 	it("makes a slow project scan lose to a newer batch too", async () => {
 		const { DependencyChecker } = await import(
 			"../../clients/dependency-checker.js"

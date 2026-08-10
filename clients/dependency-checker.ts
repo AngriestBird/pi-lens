@@ -157,16 +157,35 @@ const MADGE_BATCH_CONCURRENCY = 6;
  */
 const MADGE_STATS_TARGET_CAP = 12;
 
-/** Classify a resolved madge command path for `MadgeCommandKind`. */
+/** Is `target` inside `dir`? */
+function isWithin(dir: string, target: string): boolean {
+	const rel = path.relative(dir, target);
+	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+/**
+ * Classify a resolved madge command for `MadgeCommandKind`. Both resolution
+ * steps feed this: `findNodeToolBinary` walks up to the project's
+ * `node_modules/.bin` but ALSO probes the npm/pnpm/yarn/bun global bins, so
+ * "which step answered" says nothing about where the binary actually lives.
+ */
 function classifyMadgeKind(
 	resolved: string,
 	managedToolsDir: string,
+	projectRoot: string,
 ): MadgeCommandKind {
 	if (!path.isAbsolute(resolved)) return "path";
-	const rel = path.relative(managedToolsDir, resolved);
-	return rel && !rel.startsWith("..") && !path.isAbsolute(rel)
-		? "managed"
-		: "global";
+	if (isWithin(managedToolsDir, resolved)) return "managed";
+	if (isWithin(projectRoot, resolved)) return "local";
+	return "global";
+}
+
+/**
+ * An absolute command path that has since vanished (madge uninstalled, the
+ * managed tree wiped). Bare names can't be checked this way and are left alone.
+ */
+function resolvedCommandIsStale(resolved: ResolvedMadge): boolean {
+	return path.isAbsolute(resolved.cmd) && !fs.existsSync(resolved.cmd);
 }
 
 /** Run `mapper` over `items` with at most `concurrency` in flight at once. */
@@ -232,14 +251,37 @@ export class DependencyChecker {
 	 * Memoized per project root: `findNodeToolBinary` falls through to
 	 * `npm config get prefix` / `pnpm bin -g` / `yarn global bin` spawns that
 	 * nothing caches, and this used to run once per file inside the batch
-	 * mapper (#766).
+	 * mapper (#766). The memo must not become one-way, though: resolution used
+	 * to re-probe on every spawn and so healed itself, and both escapes below
+	 * buy that back.
 	 */
 	private async resolveMadge(projectRoot: string): Promise<ResolvedMadge> {
 		const cached = this.madgeCommand.get(projectRoot);
-		if (cached) return cached;
-		const resolving = this.doResolveMadge(projectRoot);
+		if (cached) {
+			// One stat per resolution: a binary that has since been uninstalled or
+			// moved must re-resolve, not fail every spawn for the rest of the
+			// session.
+			const resolved = await cached;
+			if (!resolvedCommandIsStale(resolved)) return resolved;
+			this.madgeCommand.delete(projectRoot);
+		}
+
+		const resolving = this.resolveUnlessNpx(projectRoot);
 		this.madgeCommand.set(projectRoot, resolving);
 		return resolving;
+	}
+
+	/**
+	 * Resolve, and drop the memo entry again if all we found was `npx` — pinning
+	 * it would pin precisely the slow path #766 removes, and a transient
+	 * installer failure would disable managed resolution for the whole session.
+	 * Callers already in flight still coalesce on this promise; only the next
+	 * one re-probes.
+	 */
+	private async resolveUnlessNpx(projectRoot: string): Promise<ResolvedMadge> {
+		const resolved = await this.doResolveMadge(projectRoot);
+		if (resolved.kind === "npx") this.madgeCommand.delete(projectRoot);
+		return resolved;
 	}
 
 	/**
@@ -250,20 +292,20 @@ export class DependencyChecker {
 	 */
 	private async doResolveMadge(projectRoot: string): Promise<ResolvedMadge> {
 		try {
-			const bin = await findNodeToolBinary("madge", projectRoot);
-			if (bin) return { cmd: bin, prefix: [], kind: "local" };
-
 			const { ensureTool, getManagedToolsDir } = await import(
 				"./installer/index.js"
 			);
+			const classify = (cmd: string): ResolvedMadge => ({
+				cmd,
+				prefix: [],
+				kind: classifyMadgeKind(cmd, getManagedToolsDir(), projectRoot),
+			});
+
+			const bin = await findNodeToolBinary("madge", projectRoot);
+			if (bin) return classify(bin);
+
 			const discovered = await ensureTool("madge", { allowInstall: false });
-			if (discovered) {
-				return {
-					cmd: discovered,
-					prefix: [],
-					kind: classifyMadgeKind(discovered, getManagedToolsDir()),
-				};
-			}
+			if (discovered) return classify(discovered);
 		} catch (err) {
 			this.log(`Madge resolution failed, falling back to npx: ${String(err)}`);
 		}
@@ -708,6 +750,9 @@ export class DependencyChecker {
 		if (missEntries.length > 0 && !(await this.ensureAvailable())) {
 			// madge unavailable: mirrors checkFile()'s "not available" branch for
 			// every miss; hits still read whatever shared state already exists.
+			// The miss set counts as failed — reporting it as zero-of-everything
+			// would read as a clean turn that simply had nothing to do.
+			stats.failed = missEntries.length;
 			for (const entry of entries) {
 				if (entry.kind === "hit") {
 					results.set(
@@ -737,11 +782,11 @@ export class DependencyChecker {
 			const resolved = await this.resolveMadge(projectRoot);
 			stats.resolveMs = Date.now() - resolveStart;
 			stats.commandKind = resolved.kind;
-			stats.spawned = missEntries.length;
 			await mapWithConcurrency(
 				missEntries,
 				MADGE_BATCH_CONCURRENCY,
 				async (entry) => {
+					stats.spawned++;
 					const startedAt = Date.now();
 					spawnResults.set(
 						entry.normalized,
