@@ -25,12 +25,12 @@
  *     leaves the target half-written.
  *   - **Tear-free publication.** Any reader — same process or not — observes
  *     either the fully-old or the fully-new file at the target path. Because
- *     the staging name is unique *per call* (pid + a monotonic per-process
- *     counter), this now holds for concurrent writes from the same process
- *     too. Before #1205 the staging name was only `.tmp-${pid}`, so two
- *     in-flight same-process writes to one target shared a staging inode; the
- *     first `rename` published it while the second writer was still writing
- *     into it, publishing a torn hybrid file.
+ *     the staging name is unique *per call* (pid + thread id + a monotonic
+ *     per-thread counter), this now holds for concurrent writes from the same
+ *     process too, on any thread. Before #1205 the staging name was only
+ *     `.tmp-${pid}`, so two in-flight same-process writes to one target
+ *     shared a staging inode; the first `rename` published it while the
+ *     second writer was still writing into it, publishing a torn hybrid file.
  *
  * ## What this explicitly does NOT provide
  *
@@ -75,6 +75,7 @@
  */
 
 import * as fs from "node:fs";
+import { threadId } from "node:worker_threads";
 
 export interface WriteFileAtomicOptions {
 	/**
@@ -86,38 +87,37 @@ export interface WriteFileAtomicOptions {
 }
 
 /**
- * Monotonic per-process counter that makes each staging path unique per CALL,
- * not merely per process (#1205).
+ * Monotonic counter that makes each staging path unique per CALL, not merely
+ * per process (#1205).
  *
  * A counter is used rather than `randomBytes`: it is allocation-free and
  * synchronous on what are hot per-turn/per-touch write paths, and it is
  * *exactly* as unique as needed — collisions only matter between two writes
- * live at the same instant in the same process, and a monotonic counter makes
- * those impossible by construction rather than merely improbable. `process.pid`
- * continues to supply cross-process distinctness.
+ * live at the same instant, and a monotonic counter makes those impossible by
+ * construction rather than merely improbable.
  *
- * Main-thread-only. Worker threads get a fresh module instance (so a fresh
- * `_stageSeq` starting at 0) but share `process.pid` with the main thread and
- * each other, so two threads writing the same target could each mint
- * `${target}.tmp-<samepid>-0` — reintroducing the same-name collision this
- * counter exists to prevent. Not reachable today: neither `Worker` site
- * (`clients/review-graph/persist-worker.ts`,
- * `clients/project-snapshot-persist-worker.ts`) imports this module, both use
- * `gzip-stage-write.ts`'s own hand-rolled staging name instead. Any future
- * worker-side caller of `writeFileAtomic` must add `threadId` to the staging
- * name (and extend {@link STAGE_TMP_PATTERN} with a third optional group, in
- * lockstep with its tests) before it is safe.
+ * The counter alone is per-THREAD, not per-process: a worker gets its own
+ * module instance and so its own `_stageSeq` starting at 0, while sharing
+ * `process.pid` with the main thread and every sibling worker. Two threads
+ * would therefore each mint `${target}.tmp-<samepid>-0` — the exact collision
+ * the counter exists to prevent. `threadId` (0 on the main thread, distinct
+ * per worker) closes that axis, so the three parts cover the three ways two
+ * writes can be concurrent: `process.pid` across processes, `threadId` across
+ * threads, `_stageSeq` within one thread (#1217).
  */
 let _stageSeq = 0;
 
 /**
- * Staging path for one write call: `${targetPath}.tmp-<pid>-<seq>`.
+ * Staging path for one write call: `${targetPath}.tmp-<pid>-<threadId>-<seq>`.
  *
- * Exported so that sweepers of orphaned staging files stay in lockstep with
- * the naming scheme instead of re-deriving it (see {@link STAGE_TMP_PATTERN}).
+ * Exported so that callers which cannot use {@link writeFileAtomic} wholesale
+ * — `gzip-stage-write.ts` needs its own streaming pipeline — still source the
+ * *name* here rather than re-deriving the scheme, and so that sweepers of
+ * orphaned staging files stay in lockstep with it (see
+ * {@link STAGE_TMP_PATTERN}).
  */
 export function stagePathFor(targetPath: string): string {
-	return `${targetPath}.tmp-${process.pid}-${_stageSeq++}`;
+	return `${targetPath}.tmp-${process.pid}-${threadId}-${_stageSeq++}`;
 }
 
 /**
@@ -126,29 +126,31 @@ export function stagePathFor(targetPath: string): string {
  * process (tracked as a lifecycle gap in #1228 — this module does not reap
  * its own orphans).
  *
- * The `<seq>` group is optional so that staging files written by a *pre-#1205*
- * build still on disk (`.tmp-<pid>`) are also swept.
+ * The trailing groups are optional so that staging files written by an older
+ * build and still on disk are also swept — all three generations of the shape:
+ * `.tmp-<pid>` (pre-#1205), `.tmp-<pid>-<seq>` (#1205), and the current
+ * `.tmp-<pid>-<threadId>-<seq>` (#1217).
  *
  * CAUTION for any sweeper adopting this pattern: it matches staging files by
  * *shape*, not by writer identity, so it will also match this process's own
  * still-being-written staging files unless the sweeper separately excludes
  * them by `process.pid`. `review-graph/builder.ts`'s `sweepStaleStageFiles`
  * cannot be pointed at this pattern as-is — its own-file guard is
- * `.stage-${process.pid}-`, which never appears in a `.tmp-<pid>-<seq>` name,
- * so widening its match to `STAGE_TMP_PATTERN` without also adding a
+ * `.stage-${process.pid}-`, which never appears in a `.tmp-<pid>-…` name, so
+ * widening its match to `STAGE_TMP_PATTERN` without also adding a
  * `.tmp-${process.pid}-` (or equivalent pid) exclusion would delete its own
  * in-flight `writeFileAtomic` staging files mid-write.
  *
- * The optional `<seq>` group also widens what matches versus the pre-#1205
- * pattern: e.g. `backup.tmp-2023-11` and `x.tmp-1-2` now match, while
- * `x.tmp-1-2-3`, `data.tmp-`, `x.tmp--1`, and `foo.TMP-42` still do not.
- * Anchoring is correct for both consumer styles in this repo today (matching
- * against a full path or a bare basename), but this is confined to pi-lens's
- * own cache directories — a consumer sweeping a directory it does not fully
- * control should not assume every match is one of this module's staging
- * files.
+ * The optional groups also widen what matches versus a strict single-pid
+ * pattern: e.g. `backup.tmp-2023-11` and `backup.tmp-2023-11-05` now match,
+ * while `x.tmp-1-2-3-4`, `data.tmp-`, `x.tmp--1`, and `foo.TMP-42` still do
+ * not. Anchoring is correct for both consumer styles in this repo today
+ * (matching against a full path or a bare basename), but this is confined to
+ * pi-lens's own cache directories — a consumer sweeping a directory it does
+ * not fully control should not assume every match is one of this module's
+ * staging files.
  */
-export const STAGE_TMP_PATTERN = /\.tmp-\d+(?:-\d+)?$/;
+export const STAGE_TMP_PATTERN = /\.tmp-\d+(?:-\d+){0,2}$/;
 
 /**
  * Synchronous atomic write of text or binary data to a per-call staging file,

@@ -22,6 +22,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { threadId, Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	STAGE_TMP_PATTERN,
@@ -253,10 +254,12 @@ describe("stagePathFor (#1205)", () => {
 		expect(new Set(paths).size).toBe(paths.length);
 	});
 
-	it("keeps the target as a prefix and carries this process's pid", () => {
+	it("keeps the target as a prefix and carries this process's pid and thread id", () => {
 		const target = path.join(dir, "state.json");
 		const staged = stagePathFor(target);
-		expect(staged.startsWith(`${target}.tmp-${process.pid}-`)).toBe(true);
+		expect(staged.startsWith(`${target}.tmp-${process.pid}-${threadId}-`)).toBe(
+			true,
+		);
 	});
 
 	it("STAGE_TMP_PATTERN matches the names stagePathFor produces", () => {
@@ -264,10 +267,15 @@ describe("stagePathFor (#1205)", () => {
 		expect(STAGE_TMP_PATTERN.test(staged)).toBe(true);
 	});
 
-	it("STAGE_TMP_PATTERN still matches pre-#1205 `.tmp-<pid>` leftovers", () => {
+	it("STAGE_TMP_PATTERN still matches leftovers from every older shape", () => {
 		// Sweepers must keep collecting staging files written by an older build
-		// that is still on disk.
+		// that is still on disk: pre-#1205 `.tmp-<pid>` and #1205's
+		// `.tmp-<pid>-<seq>` alongside the current `.tmp-<pid>-<tid>-<seq>`.
 		expect(STAGE_TMP_PATTERN.test("review-graph.json.gz.tmp-4242")).toBe(true);
+		expect(STAGE_TMP_PATTERN.test("review-graph.json.gz.tmp-4242-7")).toBe(true);
+		expect(STAGE_TMP_PATTERN.test("review-graph.json.gz.tmp-4242-3-7")).toBe(
+			true,
+		);
 	});
 
 	it("STAGE_TMP_PATTERN does not match ordinary store files", () => {
@@ -275,8 +283,102 @@ describe("stagePathFor (#1205)", () => {
 			"review-graph.json.gz",
 			"state.json",
 			"project-snapshot.json.gz.stage-4242-7",
+			// One group past the widest staging shape — still not ours.
+			"x.tmp-1-2-3-4",
+			"data.tmp-",
+			"x.tmp--1",
+			"foo.TMP-42",
 		]) {
 			expect(STAGE_TMP_PATTERN.test(name)).toBe(false);
 		}
+	});
+});
+
+/**
+ * #1217: `stagePathFor`'s counter is per-THREAD (a worker gets its own module
+ * instance, so its own `_stageSeq` starting at 0) while `process.pid` is shared
+ * across every thread of the process. Pid + counter alone therefore let two
+ * threads mint the identical `${target}.tmp-<pid>-0` — #1205's shared-inode
+ * tear, reintroduced one axis over. `threadId` is the part that closes it, and
+ * `gzip-stage-write.ts` (which runs on the review-graph and project-snapshot
+ * persist workers) is a real worker-side caller, not a hypothetical one.
+ *
+ * Real `Worker`s rather than a simulated thread id: the property under test is
+ * that a *fresh module instance* on another thread cannot collide, which a
+ * same-thread test cannot exercise at all. The workers import the compiled
+ * sibling `.js` — the same file vitest itself loads for this suite (see
+ * tests/support/check-build-freshness.ts), so it is never a stale build.
+ */
+describe("stagePathFor across worker threads (#1217)", () => {
+	const atomicWriteUrl = new URL(
+		"../../clients/atomic-write.js",
+		import.meta.url,
+	).href;
+
+	// CommonJS body (Node's `eval: true` workers are CJS) that dynamic-imports
+	// the ESM module and reports the first staging name it mints.
+	const WORKER_SRC = `
+		const { parentPort, workerData, threadId } = require("node:worker_threads");
+		import(workerData.url)
+			.then((m) => parentPort.postMessage({ threadId, staged: m.stagePathFor(workerData.target) }))
+			.catch((err) => parentPort.postMessage({ error: String(err && err.stack || err) }));
+	`;
+
+	interface StageReport {
+		threadId: number;
+		staged?: string;
+		error?: string;
+	}
+
+	function stageOnWorker(target: string): Promise<StageReport> {
+		return new Promise((resolve, reject) => {
+			const worker = new Worker(WORKER_SRC, {
+				eval: true,
+				workerData: { url: atomicWriteUrl, target },
+			});
+			worker.once("message", (msg: StageReport) => {
+				resolve(msg);
+				void worker.terminate();
+			});
+			worker.once("error", reject);
+		});
+	}
+
+	it("two workers minting for one target produce distinct staging paths", async () => {
+		const target = path.join(dir, "state.json");
+		const results = await Promise.all([
+			stageOnWorker(target),
+			stageOnWorker(target),
+		]);
+		for (const r of results) expect(r.error).toBeUndefined();
+
+		const staged = results.map((r) => r.staged as string);
+		// Both are each thread's FIRST mint, so both carry seq 0 — pre-fix that
+		// made them byte-identical.
+		expect(staged.every((s) => s.endsWith("-0"))).toBe(true);
+		expect(new Set(staged).size).toBe(2);
+		expect(new Set(results.map((r) => r.threadId)).size).toBe(2);
+		for (const s of staged) {
+			expect(s.startsWith(`${target}.tmp-${process.pid}-`)).toBe(true);
+			expect(STAGE_TMP_PATTERN.test(s)).toBe(true);
+		}
+	});
+
+	it("a worker's staging path does not collide with the main thread's", async () => {
+		const target = path.join(dir, "state.json");
+		// Reset nothing: the main thread's counter has already advanced, so this
+		// asserts the thread-id segment rather than counter luck.
+		const mine = stagePathFor(target);
+		const theirs = await stageOnWorker(target);
+		expect(theirs.error).toBeUndefined();
+		expect(theirs.staged).not.toBe(mine);
+		expect(mine.startsWith(`${target}.tmp-${process.pid}-${threadId}-`)).toBe(
+			true,
+		);
+		expect(
+			(theirs.staged as string).startsWith(
+				`${target}.tmp-${process.pid}-${threadId}-`,
+			),
+		).toBe(false);
 	});
 });
