@@ -20,9 +20,10 @@ note: |
   `parenthesized_expression` forms — a dotted name or a tuple like
   `(ValueError, KeyError)` has no direct `identifier` child (the
   identifiers are inside the attribute/tuple), and `except Exception as e`
-  has `e` as an identifier child even though the type is specified
-  (dotted/qualified names are the #1031 sibling of the #1026 tree-sitter
-  fix; `parenthesized_expression` mirrors that filter's spec set).
+  has no direct `identifier` child either (`e` lives inside the
+  `as_pattern`, which the suppression list covers) — dotted/qualified
+  names are the #1031 sibling of the #1026 tree-sitter fix;
+  `parenthesized_expression` mirrors that filter's spec set).
 rule:
   kind: except_clause
   not:
