@@ -93,16 +93,51 @@ describe("concurrent writes to one stagePath (#1217)", () => {
 	const BIG = { kind: "big", pad: "A".repeat(2 * 1024 * 1024) };
 	const SMALL = { kind: "small", pad: "B".repeat(50 * 1024) };
 
+	/**
+	 * Tolerate a concurrent replace-rename rejection on Windows only, and only
+	 * when it is exactly EPERM.
+	 *
+	 * On Windows, `fs.rename` onto a destination another rename is concurrently
+	 * replacing can fail with EPERM (MoveFileEx's REPLACE_EXISTING does not
+	 * serialize concurrent replaces of the same target). That is a post-fix
+	 * failure mode of the rename itself — the writer staged at its own distinct
+	 * path and still removed its own staging file — not a violation of the
+	 * staging-name-uniqueness property under test. Any other rejection, and in
+	 * particular the ENOENT a pre-#1217 shared staging inode produced on every
+	 * platform, must still fail the test.
+	 */
+	function expectOnlyWindowsConcurrentRenameEpemr(
+		settled: PromiseSettledResult<unknown>[],
+	): void {
+		const rejected = settled.filter(
+			(s) => s.status === "rejected",
+		) as PromiseRejectedResult[];
+		if (process.platform === "win32") {
+			for (const r of rejected) {
+				expect((r.reason as NodeJS.ErrnoException | undefined)?.code).toBe(
+					"EPERM",
+				);
+			}
+		} else {
+			expect(rejected).toEqual([]);
+		}
+	}
+
 	it("publishes exactly one payload, never a torn stage file", async () => {
 		const outcomes: string[] = [];
 		for (let i = 0; i < ITERATIONS; i++) {
 			const stagePath = path.join(dir, `race-${i}.json.gz.stage-1-0`);
 			// Alternate launch order so neither writer is systematically first.
 			const [first, second] = i % 2 === 0 ? [BIG, SMALL] : [SMALL, BIG];
-			await Promise.all([
-				writeGzipStageFile(first, stagePath),
-				writeGzipStageFile(second, stagePath),
-			]);
+			// Same Windows tolerance as the 8-writer test below: with only two
+			// writers the concurrent-replace EPERM is much rarer, but the
+			// mechanism is identical, so scope it the same way.
+			expectOnlyWindowsConcurrentRenameEpemr(
+				await Promise.allSettled([
+					writeGzipStageFile(first, stagePath),
+					writeGzipStageFile(second, stagePath),
+				]),
+			);
 			const published = readStage(stagePath) as typeof BIG;
 			expect(published).toEqual(published.kind === "big" ? BIG : SMALL);
 			outcomes.push(published.kind);
@@ -116,7 +151,7 @@ describe("concurrent writes to one stagePath (#1217)", () => {
 		const stagePath = path.join(dir, "review-graph.json.gz.stage-1-0");
 		const seen = new Set<string>();
 		// Sample the staging files that exist while eight writes are in flight.
-		const inFlight = Promise.all(
+		const inFlight = Promise.allSettled(
 			Array.from({ length: 8 }, (_, i) =>
 				writeGzipStageFile(i % 2 === 0 ? BIG : SMALL, stagePath),
 			),
@@ -125,9 +160,10 @@ describe("concurrent writes to one stagePath (#1217)", () => {
 			for (const name of tmpLeftovers()) seen.add(name);
 			await new Promise((resolve) => setImmediate(resolve));
 		}
-		await inFlight;
+		const settled = await inFlight;
 
 		expect(seen.size).toBeGreaterThan(1);
 		expect(tmpLeftovers()).toEqual([]);
+		expectOnlyWindowsConcurrentRenameEpemr(settled);
 	});
 });

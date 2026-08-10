@@ -65,7 +65,11 @@ export interface GzipStageWorkerResult {
  * pass a per-generation `stagePath`, which makes the overlap rare — a retry, a
  * re-queued persist, a repeated generation, or a future non-generational
  * caller makes it exact. Beyond tear-freedom this offers nothing: two calls on
- * one `stagePath` are still unordered and last-rename-wins.
+ * one `stagePath` are still unordered and last-rename-wins on POSIX — on
+ * Windows, MoveFileEx's REPLACE_EXISTING does not serialize concurrent replaces
+ * of the same destination, so one rename can fail with EPERM instead, which
+ * the caller must treat as a persist failure (both persist workers fall back
+ * to a main-thread rewrite on an error result).
  */
 export async function writeGzipStageFile(
 	data: unknown,
