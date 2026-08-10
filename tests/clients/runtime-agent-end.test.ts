@@ -941,6 +941,7 @@ describe("runtime-agent-end deferred formatting", () => {
 					skipped: [],
 				});
 
+				const dbg = vi.fn();
 				const emit = vi.fn();
 				wireFormatEventsBusEmitter(emit);
 
@@ -949,7 +950,7 @@ describe("runtime-agent-end deferred formatting", () => {
 					getFlag: (name) =>
 						name === "lens-actionable-warning-autofix" || name === "no-lsp",
 					notify: vi.fn(),
-					dbg: vi.fn(),
+					dbg,
 					runtime,
 					cacheManager: {
 						readCache: () => ({ data: report }),
@@ -962,6 +963,11 @@ describe("runtime-agent-end deferred formatting", () => {
 				expect(emit).not.toHaveBeenCalledWith(
 					"pilens:autofix:start",
 					expect.anything(),
+				);
+				// P2-A: the zero-eligible skip is explicit in the debug log — a
+				// regression that collapses eligibleCount to 0 is not silent.
+				expect(dbg).toHaveBeenCalledWith(
+					expect.stringContaining("0 autofix-eligible warnings, skipping"),
 				);
 			} finally {
 				resetFormatEventsPublish();
