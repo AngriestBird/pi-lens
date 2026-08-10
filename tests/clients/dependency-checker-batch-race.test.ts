@@ -32,6 +32,14 @@ vi.mock("../../clients/safe-spawn.js", () => ({ safeSpawnAsync, safeSpawn }));
 vi.mock("../../clients/package-manager.js", () => ({
 	findNodeToolBinary: vi.fn(async () => "/fake/bin/madge"),
 }));
+// Guard: without this, a `findNodeToolBinary → undefined` fallthrough would load
+// the REAL installer, whose named imports from the partially-mocked
+// package-manager/safe-spawn modules throw — silently degrading every result to
+// `{ok: false}` instead of failing loudly.
+vi.mock("../../clients/installer/index.js", () => ({
+	ensureTool: vi.fn(async () => undefined),
+	getManagedToolsDir: () => path.join("/fake", "pi-lens", "tools"),
+}));
 
 describe("DependencyChecker.checkFilesBatch — concurrency race guard (#766)", () => {
 	let tmp: string;
@@ -86,7 +94,7 @@ describe("DependencyChecker.checkFilesBatch — concurrency race guard (#766)", 
 
 		const checker = new DependencyChecker();
 		// Array order: a (slow, circular) first, then c (fast, clean) last.
-		const results = await checker.checkFilesBatch([aPath, cPath], tmp);
+		const { results } = await checker.checkFilesBatch([aPath, cPath], tmp);
 
 		// Per-file local results must still be correct and not clobbered by
 		// the sibling call: a's own result reports its cycle...
@@ -123,7 +131,10 @@ describe("DependencyChecker.checkFilesBatch — concurrency race guard (#766)", 
 		vi.resetAllMocks();
 		mockSpawnDeps();
 		const batch = new DependencyChecker();
-		const batchResults = await batch.checkFilesBatch([aPath, cPath], tmp);
+		const { results: batchResults } = await batch.checkFilesBatch(
+			[aPath, cPath],
+			tmp,
+		);
 
 		expect(batchResults.get(aPath)?.hasCircular).toBe(seqResults.get(aPath));
 		expect(batchResults.get(cPath)?.hasCircular).toBe(seqResults.get(cPath));

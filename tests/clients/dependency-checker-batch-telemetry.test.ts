@@ -1,0 +1,187 @@
+/**
+ * #766: `checkFilesBatch` telemetry and spawn bounds.
+ *
+ * Turn-end logged one whole-phase `phase: "madge"` duration, which cannot
+ * distinguish "many files" from "one slow file" from "command resolution" —
+ * exactly the attribution the p99 tail needed. The batch now returns
+ * `MadgeBatchStats` alongside its results, and turn-end attaches it as the
+ * latency entry's metadata (logLatency no-ops under test, so these assert on the
+ * returned stats).
+ */
+
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { removeTempDirSync } from "./test-utils.js";
+
+const safeSpawnAsync = vi.fn();
+const safeSpawn = vi.fn();
+const findNodeToolBinary = vi.fn();
+const ensureTool = vi.fn();
+
+vi.mock("../../clients/safe-spawn.js", () => ({ safeSpawnAsync, safeSpawn }));
+vi.mock("../../clients/package-manager.js", () => ({ findNodeToolBinary }));
+vi.mock("../../clients/installer/index.js", () => ({
+	ensureTool,
+	getManagedToolsDir: () => path.join(os.tmpdir(), "pilens-fake-home", "tools"),
+}));
+
+const VERSION_OK = {
+	status: 0,
+	error: null,
+	stdout: "madge 8.0.0",
+	stderr: "",
+};
+
+describe("DependencyChecker.checkFilesBatch telemetry (#766)", () => {
+	let tmp: string;
+
+	beforeEach(() => {
+		vi.resetAllMocks();
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pilens-madge-stats-"));
+		findNodeToolBinary.mockResolvedValue(undefined);
+		ensureTool.mockResolvedValue(undefined);
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+			if (args[0] === "--version") return VERSION_OK;
+			return { status: 0, error: null, stdout: "[]", stderr: "" };
+		});
+	});
+
+	afterEach(() => {
+		removeTempDirSync(tmp);
+	});
+
+	function writeSource(name: string, imports: string[]): string {
+		const file = path.join(tmp, name);
+		fs.writeFileSync(
+			file,
+			`${imports.map((i) => `import { x } from "${i}";`).join("\n")}\nexport const v = 1;\n`,
+		);
+		return file;
+	}
+
+	function madgeCalls(): unknown[][] {
+		return safeSpawnAsync.mock.calls.filter(
+			(c) => (c[1] as string[])[0] !== "--version",
+		);
+	}
+
+	it("spawns nothing for a body-only edit", async () => {
+		const { DependencyChecker } = await import(
+			"../../clients/dependency-checker.js"
+		);
+		const f = writeSource("a.ts", ["./b.js"]);
+		const checker = new DependencyChecker();
+
+		const first = await checker.checkFilesBatch([f], tmp);
+		expect(first.stats.spawned).toBe(1);
+		expect(madgeCalls()).toHaveLength(1);
+
+		// Same import set, different body — both mtime and size move, so the
+		// #1105 freshness fast path does not decide this; the extracted import
+		// set does.
+		fs.writeFileSync(
+			f,
+			'import { x } from "./b.js";\nexport const v = 1;\nexport const w = 2;\n',
+		);
+		const second = await checker.checkFilesBatch([f], tmp);
+
+		expect(second.stats.spawned).toBe(0);
+		expect(second.stats.cacheHits).toBe(1);
+		expect(second.results.get(f)?.cacheHit).toBe(true);
+		// Nothing to spawn means nothing to resolve, either.
+		expect(second.stats.commandKind).toBeUndefined();
+		expect(madgeCalls()).toHaveLength(1);
+	});
+
+	it("bounds concurrent spawns for a pathological turn", async () => {
+		const { DependencyChecker } = await import(
+			"../../clients/dependency-checker.js"
+		);
+		const files = Array.from({ length: 8 }, (_, i) =>
+			writeSource(`f${i}.ts`, [`./dep${i}.js`]),
+		);
+		let inFlight = 0;
+		let peak = 0;
+
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+			if (args[0] === "--version") return VERSION_OK;
+			inFlight++;
+			peak = Math.max(peak, inFlight);
+			await new Promise((resolve) => setTimeout(resolve, 15));
+			inFlight--;
+			return { status: 0, error: null, stdout: "[]", stderr: "" };
+		});
+
+		const { stats } = await new DependencyChecker().checkFilesBatch(files, tmp);
+
+		expect(stats.spawned).toBe(8);
+		// Exactly the cap, not merely under it — a peak below 6 would mean the
+		// mock never saturated the pool and the bound went untested.
+		expect(peak).toBe(6);
+	});
+
+	it("counts hits, misses, missing files and failures separately", async () => {
+		const { DependencyChecker } = await import(
+			"../../clients/dependency-checker.js"
+		);
+		const hit = writeSource("hit.ts", ["./h.js"]);
+		const ok = writeSource("ok.ts", ["./o.js"]);
+		const bad = writeSource("bad.ts", ["./x.js"]);
+		const gone = path.join(tmp, "gone.ts");
+
+		const checker = new DependencyChecker();
+		// Seed hit.ts's import cache so the batch classifies it as unchanged.
+		expect(checker.importsChanged(hit)).toBe(true);
+
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+			if (args[0] === "--version") return VERSION_OK;
+			if (args[args.length - 1] === bad) {
+				return {
+					status: 1,
+					error: new Error("madge exploded"),
+					stdout: "",
+					stderr: "",
+				};
+			}
+			return { status: 0, error: null, stdout: "[]", stderr: "" };
+		});
+
+		const { results, stats } = await checker.checkFilesBatch(
+			[hit, ok, bad, gone],
+			tmp,
+		);
+
+		expect(stats.requested).toBe(4);
+		expect(stats.missing).toBe(1);
+		expect(stats.cacheHits).toBe(1);
+		expect(stats.spawned).toBe(2);
+		expect(stats.failed).toBe(1);
+		expect(stats.commandKind).toBe("npx");
+		expect(stats.resolveMs).toBeGreaterThanOrEqual(0);
+		// Project-relative, in array order, carrying each spawn's own outcome.
+		expect(stats.targets.map((t) => [t.file, t.ok])).toEqual([
+			["ok.ts", true],
+			["bad.ts", false],
+		]);
+		expect(stats.targetsTruncated).toBe(false);
+		expect(results.get(hit)?.cacheHit).toBe(true);
+		expect(results.get(gone)?.checked).toBe(false);
+	});
+
+	it("caps per-target timings and says so", async () => {
+		const { DependencyChecker } = await import(
+			"../../clients/dependency-checker.js"
+		);
+		const files = Array.from({ length: 14 }, (_, i) =>
+			writeSource(`f${i}.ts`, [`./dep${i}.js`]),
+		);
+
+		const { stats } = await new DependencyChecker().checkFilesBatch(files, tmp);
+
+		expect(stats.spawned).toBe(14);
+		expect(stats.targets).toHaveLength(12);
+		expect(stats.targetsTruncated).toBe(true);
+	});
+});
