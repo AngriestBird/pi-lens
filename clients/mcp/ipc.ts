@@ -129,17 +129,17 @@ type WarmIpcOutcome<TResponse> =
 	| { available: false; reason: WarmDiagnosticsFailureReason };
 
 /**
- * Shared one-shot request/response transport for the warm-attach IPC routes
- * (#822): connect to the incumbent's PID-scoped endpoint, write one JSON
- * line, read one JSON line back, classify. The per-route `validate` callback
- * returns a failure reason for an on-time but unusable reply (schema skew,
- * staleness) or `undefined` to accept it; transport failures map uniformly to
- * timeout/ipc-error. One transport, N routes — the diagnostics and
- * code-action clients cannot drift apart.
+ * Shared one-shot request/response transport for the tagged IPC routes (#822):
+ * connect to `endpoint`, write one JSON line, read one JSON line back,
+ * classify. The endpoint is PID-scoped for the warm-attach routes and
+ * workspace-scoped for the hook bin's turn-end route. The per-route `validate`
+ * callback returns a failure reason for an on-time but unusable reply (schema
+ * skew, staleness) or `undefined` to accept it; transport failures map
+ * uniformly to timeout/ipc-error. One transport, N routes — the clients cannot
+ * drift apart.
  */
 function requestOverWarmIpc<TResponse>(
-	cwd: string,
-	incumbentPid: number,
+	endpoint: string,
 	timeoutMs: number,
 	buildRequest: (deadlineAt: number) => unknown,
 	validate: (
@@ -157,9 +157,7 @@ function requestOverWarmIpc<TResponse>(
 			resolve(value);
 		};
 		const deadlineAt = Date.now() + timeoutMs;
-		const socket = net.createConnection(
-			diagnosticsIpcPathForCwd(cwd, incumbentPid),
-		);
+		const socket = net.createConnection(endpoint);
 		socket.setEncoding("utf8");
 		let buffer = "";
 		const timer = setTimeout(
@@ -194,12 +192,8 @@ function requestOverWarmIpc<TResponse>(
 				finish({ available: false, reason: "schema-mismatch" });
 			}
 		});
-		socket.on("error", () =>
-			finish({ available: false, reason: "ipc-error" }),
-		);
-		socket.on("close", () =>
-			finish({ available: false, reason: "ipc-error" }),
-		);
+		socket.on("error", () => finish({ available: false, reason: "ipc-error" }));
+		socket.on("close", () => finish({ available: false, reason: "ipc-error" }));
 	});
 }
 
@@ -212,8 +206,7 @@ export function requestWarmDiagnostics(
 ): Promise<WarmDiagnosticsResult> {
 	const expectedHash = contentHash(content);
 	return requestOverWarmIpc<WarmDiagnosticsResponse>(
-		cwd,
-		incumbentPid,
+		diagnosticsIpcPathForCwd(cwd, incumbentPid),
 		timeoutMs,
 		(deadlineAt): WarmDiagnosticsRequest => ({
 			route: "diagnostics",
@@ -253,8 +246,7 @@ export function requestWarmCodeActions(
 	timeoutMs: number,
 ): Promise<WarmCodeActionsResult> {
 	return requestOverWarmIpc<WarmCodeActionsResponse>(
-		cwd,
-		incumbentPid,
+		diagnosticsIpcPathForCwd(cwd, incumbentPid),
 		timeoutMs,
 		(deadlineAt): WarmCodeActionsRequest => ({
 			route: "code-actions",
@@ -290,6 +282,98 @@ export function requestWarmCodeActions(
 export interface WarmAnalyzeRequest {
 	file: string;
 	cwd: string;
+}
+
+// v2 adds an explicit receipt acknowledgement. A v1 server must reject rather
+// than consume a pass without the new delivery contract.
+export const WARM_TURN_END_SCHEMA_VERSION = 2;
+
+/**
+ * Turn-end over the WORKSPACE endpoint, not the PID-scoped one: a Claude Code
+ * Stop hook knows its cwd, never the server's pid. Tagged so the untagged
+ * analyze request on the same socket keeps working unchanged.
+ */
+export interface WarmTurnEndRequest {
+	route: "turn-end";
+	version: number;
+	cwd: string;
+}
+
+export interface WarmTurnEndResponse {
+	route: "turn-end";
+	version: number;
+	turnEnd?: string;
+	tests?: string;
+	/** Present when the server admitted a durable findings delivery. */
+	deliveryId?: string;
+}
+
+export interface WarmTurnEndAckRequest {
+	route: "turn-end-ack";
+	version: number;
+	cwd: string;
+	deliveryId: string;
+}
+
+export interface WarmTurnEndAckResponse {
+	route: "turn-end-ack";
+	version: number;
+	acknowledged: boolean;
+}
+
+export type WarmTurnEndResult =
+	| { available: true; response: WarmTurnEndResponse }
+	| { available: false; reason: WarmDiagnosticsFailureReason };
+
+/**
+ * Ask the warm server to run pi-lens's real turn-end pass. Execution and
+ * delivery are separate: the first one-shot connection returns a capability,
+ * then a second one-shot connection acknowledges receipt. If the client
+ * deadline or either connection loses, the server leaves the durable finding
+ * cache untouched for a later Stop. 55 s expires inside Claude Code's 60 s hook
+ * timeout.
+ */
+export async function requestWarmTurnEnd(
+	cwd: string,
+	timeoutMs = 55_000,
+): Promise<WarmTurnEndResult> {
+	const startedAt = Date.now();
+	const first = await requestOverWarmIpc<WarmTurnEndResponse>(
+		ipcPathForCwd(cwd),
+		timeoutMs,
+		(): WarmTurnEndRequest => ({
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			cwd,
+		}),
+		(result) =>
+			result.route === "turn-end" &&
+			result.version === WARM_TURN_END_SCHEMA_VERSION
+				? undefined
+				: "schema-mismatch",
+	);
+	if (!first.available || !first.response.deliveryId) return first;
+
+	const remainingMs = timeoutMs - (Date.now() - startedAt);
+	if (remainingMs <= 0) return { available: false, reason: "timeout" };
+	const ack = await requestOverWarmIpc<WarmTurnEndAckResponse>(
+		ipcPathForCwd(cwd),
+		remainingMs,
+		(): WarmTurnEndAckRequest => ({
+			route: "turn-end-ack",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			cwd,
+			deliveryId: first.response.deliveryId!,
+		}),
+		(result) =>
+			result.route === "turn-end-ack" &&
+			result.acknowledged === true
+				? undefined
+				: "ipc-error",
+	);
+	return ack.available
+		? { available: true, response: first.response }
+		: { available: false, reason: ack.reason };
 }
 
 /**
@@ -366,5 +450,18 @@ export function createWarmIpcLineReader(
 		if (newline === -1) return;
 		dispatched = true;
 		onLine(buffer.slice(0, newline));
+	};
+}
+
+export function createWarmIpcRequestQueue(): {
+	enqueue<T>(work: () => Promise<T>): Promise<T>;
+} {
+	let chain: Promise<unknown> = Promise.resolve();
+	return {
+		enqueue<T>(work: () => Promise<T>): Promise<T> {
+			const next = chain.then(work);
+			chain = next.catch(() => undefined);
+			return next;
+		},
 	};
 }

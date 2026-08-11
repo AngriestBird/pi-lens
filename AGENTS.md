@@ -68,7 +68,7 @@ index.ts                  Extension entry point (async factory) — the pi host 
 mcp/                      Second host adapter: MCP server + hook bin (see "MCP mirror")
   server.ts               Hand-rolled stdio JSON-RPC MCP server (16 tools) + warm IPC listener
   worker.ts               fresh-mode child (loads freshly-built code from disk)
-  analyze-cli.ts          pi-lens-analyze bin — PostToolUse hook + CLI (warm channel → cold fallback)
+  analyze-cli.ts          pi-lens-analyze bin — PostToolUse hook + CLI (warm channel → cold fallback), plus the Stop-hook turn-end mode (warm-only)
 clients/
   lens-engine.ts          THE internal seam — host adapters import only this for pi-lens functionality
   mcp/                     host-neutral facades: analyze, session, review, ipc, host-shim
@@ -97,7 +97,7 @@ atomic `.install.lock`; after waiting, re-run discovery before installing becaus
 the preceding process may already have satisfied the request. A lock is stale
 once its recorded PID is confirmed dead — OR, independently, once it is older
 than the owner's install bound + slack (`PI_LENS_INSTALL_TIMEOUT_MS` +60s,
-#946 F1: PID liveness alone can't detect a hard-killed owner whose PID
+# 946 F1: PID liveness alone can't detect a hard-killed owner whose PID
 Windows recycled for an unrelated live process, which would otherwise poison
 every future install with a full-timeout wait). The age-based path is a
 deliberate PID-recycle defense specific to installs, which have a known
@@ -422,6 +422,36 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   read one reply, so the server handler consumes the line and dispatches at most
   once per connection (a non-consuming handler re-dispatched on stray bytes,
   #1219); keep any new channel handler one-shot too.
+- **Per-turn half = the same bin on a `Stop` hook** (`--turn-end`, or a `Stop`
+  payload on stdin; #538). Tagged `{route:"turn-end"}` request on the WORKSPACE
+  IPC endpoint (a Stop hook knows its cwd, never the server pid), which also
+  inherits the #535 staleness gate. It passes NO files. Each Stop pass has an
+  execution/delivery boundary: findings are only consumed after the client has
+  received the reply and sends a delivery capability acknowledgement over a
+  second one-shot IPC connection. A timeout or close leaves the finding cache
+  durable and a later authorized Stop re-delivers it. All workspace IPC requests
+  share one server-side queue, so a still-running analyze always finishes before
+  the following Stop pass and concurrent turn-ends cannot race. The queue admits
+  at most one waiting item; excess callers fail explicitly with `turn_end queue is
+  busy` rather than growing an unbounded head-of-line tail. **Warm-only, no cold
+  fallback** — only the server process owns the session state and pending turn
+  work, so a local pass reports a false clean; unavailable ⇒ one stderr line,
+  silent stdout, exit 0. `SubagentStop` is deliberately NOT registered (subagent
+  edits already reach turn-state via PostToolUse; the consume bridges are
+  one-shot). Stop-hook stdout is user-visible in transcript mode, not model
+  context — blockers still gate commits via the retained lens-guard record.
+
+  Turn-state ownership is explicit: pi writers use `{kind:"pi", id: telemetry
+  session}` and MCP writers use `{kind:"mcp", id: process-scoped server owner}`.
+  `sessionId:null` is a non-claiming update and never clears an existing owner;
+  a live foreign owner is retained, while an owner whose process is dead or
+  whose bounded heartbeat is stale may be replaced. A different pi owner ID in
+  the current process is treated by pi turn_end as an intentional same-process
+  session handoff and is evicted, preserving the legacy pi session-mismatch
+  contract; generic cache writes still retain live foreign owners, and
+  cross-process liveness is PID/heartbeat guarded. Repeated writes from
+  the same owner extend its worklist. This covers pi/MCP handoff without letting
+  one MCP session consume another's files.
 - **Same-workspace warm attach (#822, opt-in soak).** `PI_LENS_WARM_ATTACH=1`
   selects a PID-confirmed, heartbeat-fresh same-root incumbent from
   `instances.json`. The LSP runner sends versioned, content-hash-bound,
@@ -490,7 +520,9 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   Before mirroring a pi capability, check it's actually live.
 - Tests: `tests/clients/mcp/*` (units) + `tests/mcp/*` (spawn smokes — real server
   - bin end-to-end). Live behaviors (warm IPC, real session/turn) are unit-covered;
-  the spawn smokes don't exercise them.
+  the spawn smokes don't exercise them. Spawn helpers must use temp workspaces,
+  `PILENS_DATA_DIR`, and `PI_LENS_HOME`; never bind the real workspace socket or
+  write the developer's project/global state.
 
 ## Package scope
 
