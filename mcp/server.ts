@@ -26,13 +26,7 @@ import { fileURLToPath } from "node:url";
 import { AstGrepClient } from "../clients/ast-grep-client.js";
 import { CacheManager } from "../clients/cache-manager.js";
 import {
-	computeBuildStamp,
-	STALE_SERVED_BY_FRESH,
-	STALE_WARN_ONLY,
-	StalenessGate,
-	stalenessCheckEnabled,
-} from "./build-staleness.js";
-import {
+	acknowledgeTurnEnd,
 	analyzeFile,
 	analyzeFileFresh,
 	canRebuildPiLens,
@@ -41,32 +35,32 @@ import {
 	createWarmIpcRequestQueue,
 	diagnosticStats,
 	ensureLspConfig,
+	generatedSkipNotice,
 	ipcPathForCwd,
 	lspStatus,
-	renderLspBrokenStatusLines,
 	type McpAnalyzeResult,
 	moduleReport,
 	projectReport,
 	projectScan,
 	readEnclosing,
-	generatedSkipNotice,
 	readSymbol,
+	readTurnEndStatus,
 	recentLatency,
 	renderCompactModuleReport,
 	renderCompactProjectReport,
+	renderLspBrokenStatusLines,
 	resolveRebuildScript,
 	resourceFootprint,
 	runRebuild,
 	runSessionStart,
 	runTurnEnd,
 	runTurnEndForIpc,
-	acknowledgeTurnEnd,
 	scanTruncationNotice,
 	summarizeScan,
 	symbolSearch,
 	treeSitterRuntimeStatus,
-	type WarmAnalyzeRequest,
 	WARM_TURN_END_SCHEMA_VERSION,
+	type WarmAnalyzeRequest,
 	type WarmTurnEndRequest,
 	type WarmTurnEndResponse,
 } from "../clients/lens-engine.js";
@@ -75,6 +69,13 @@ import { createAstGrepSearchTool } from "../tools/ast-grep-search.js";
 import { createLensDiagnosticsTool } from "../tools/lens-diagnostics.js";
 import { createLspDiagnosticsTool } from "../tools/lsp-diagnostics.js";
 import { createLspNavigationTool } from "../tools/lsp-navigation.js";
+import {
+	computeBuildStamp,
+	STALE_SERVED_BY_FRESH,
+	STALE_WARN_ONLY,
+	StalenessGate,
+	stalenessCheckEnabled,
+} from "./build-staleness.js";
 
 // Any stray stdout write corrupts the JSON-RPC stream; force it onto stderr.
 console.log = (...args: unknown[]) => {
@@ -268,6 +269,32 @@ function getAutoSessionStatus(): AutoSessionState | null {
 
 const IPC_PATH = ipcPathForCwd(DEFAULT_CWD);
 
+/**
+ * #1273: the turn-end route runs the TARGET directory's configured test runner
+ * and spins up an LSP for it, from a client-supplied `cwd`. Every legitimate
+ * client derived the socket path from that same cwd, so a workspace check costs
+ * nothing legitimate — but without it, anything that can reach this endpoint
+ * (same-uid processes, a permissive-umask shared host, a Windows named pipe's
+ * more generous default DACL) can make the server execute an arbitrary
+ * directory's test suite. "Lint one file" and "run this directory's test suite"
+ * are different blast radii, so the guard is on turn-end and its ack.
+ */
+function rejectForeignTurnCwd(route: string, cwd: string): string {
+	const message = `${route} cwd outside this server's workspace: ${path.resolve(cwd)} not within ${DEFAULT_CWD}`;
+	console.error(`[pi-lens-mcp] rejected ${message}`);
+	return message;
+}
+
+function isWithinServerWorkspace(cwd: string): boolean {
+	const target = path.resolve(cwd);
+	if (target === DEFAULT_CWD) return true;
+	// `path.relative` applies the platform's own path semantics (including
+	// win32 case-insensitivity), which is what "inside the workspace" means
+	// here — do NOT hand-roll a case fold.
+	const rel = path.relative(DEFAULT_CWD, target);
+	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
 function startIpcServer(): void {
 	// POSIX: a stale socket file blocks listen; remove it first. (Named pipes on
 	// Windows don't need this.)
@@ -313,6 +340,12 @@ function startIpcServer(): void {
 								return;
 							}
 							const turnCwd = parsed.cwd ?? DEFAULT_CWD;
+							if (!isWithinServerWorkspace(turnCwd)) {
+								socket.end(
+									`${JSON.stringify({ error: rejectForeignTurnCwd("turn-end-ack", turnCwd) })}\n`,
+								);
+								return;
+							}
 							const acknowledged = acknowledgeTurnEnd(
 								turnCwd,
 								(parsed as { deliveryId: string }).deliveryId,
@@ -336,6 +369,22 @@ function startIpcServer(): void {
 								return;
 							}
 							const turnCwd = parsed.cwd ?? DEFAULT_CWD;
+							if (!isWithinServerWorkspace(turnCwd)) {
+								socket.end(
+									`${JSON.stringify({ error: rejectForeignTurnCwd("turn-end", turnCwd) })}\n`,
+								);
+								return;
+							}
+							// #1274: a client that already gave up (hook timeout, killed
+							// Claude Code) leaves a destroyed socket. Starting a heavy
+							// pass whose reply nobody can read is pure waste; the findings
+							// stay in the cache for the next Stop either way.
+							if (socket.destroyed) {
+								console.error(
+									`[pi-lens-mcp] warm turn-end: client gone before the pass started (${turnCwd})`,
+								);
+								return;
+							}
 							console.error(`[pi-lens-mcp] warm turn-end: ${turnCwd}`);
 							await ensureReady(turnCwd);
 							const delivery = await runTurnEndForIpc(turnCwd);
@@ -1448,6 +1497,12 @@ async function callTool(
 		const stats = diagnosticStats();
 		const autoSession = getAutoSessionStatus();
 		const treeSitter = treeSitterRuntimeStatus();
+		// #1272, following the #544 precedent: the Stop hook is a separate,
+		// short-lived process, so a turn-end it skipped left no trace here at all
+		// — a dead integration looked exactly like a clean turn, forever. The
+		// hook records its outcome per workspace; this is where it becomes
+		// visible without `claude --debug` log spelunking.
+		const turnEnd = readTurnEndStatus(DEFAULT_CWD) ?? null;
 		// #620: best-effort — a footprint read failure must never break the rest
 		// of pilens_health's (much older, more load-bearing) reporting.
 		const footprint = await resourceFootprint().catch(() => null);
@@ -1468,6 +1523,11 @@ async function callTool(
 			autoSession
 				? `Auto session_start: ${autoSession.succeeded ? "succeeded" : autoSession.error ? "FAILED" : autoSession.attempted ? "in progress" : "not yet attempted"}${autoSession.firedAt ? ` (fired ${autoSession.firedAt})` : ""}${autoSession.error ? ` — ${autoSession.error}` : ""}`
 				: "Auto session_start: disabled (PI_LENS_MCP_AUTO_SESSION not set)",
+			turnEnd
+				? `Stop-hook turn-end: ${turnEnd.ran} ran · ${turnEnd.skipped} skipped` +
+					`${turnEnd.lastRunAt ? ` (last ran ${turnEnd.lastRunAt})` : ""}` +
+					`${turnEnd.lastSkipReason ? ` — last skip: ${turnEnd.lastSkipReason}${turnEnd.lastSkipAt ? ` at ${turnEnd.lastSkipAt}` : ""}` : ""}`
+				: "Stop-hook turn-end: no activity recorded (hook not installed, or no Stop yet)",
 			footprint
 				? `Resource footprint: ${footprint.instanceCount} pi-lens instance(s) · ` +
 					`${(footprint.totalRssBytes / 1024 / 1024).toFixed(0)}MB RSS · ` +
@@ -1493,6 +1553,7 @@ async function callTool(
 			},
 			autoSession,
 			treeSitter,
+			turnEnd,
 			resourceFootprint: footprint,
 		});
 	}

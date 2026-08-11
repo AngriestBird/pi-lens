@@ -52,7 +52,9 @@ vi.mock("../../../clients/lsp/index.js", () => ({
 	getLSPService: () => ({ getAliveClientCount: () => 2 }),
 	resetLSPService: vi.fn(),
 }));
-vi.mock("../../../clients/runtime-context.js", () => ({
+// Hoisted (not inlined in the factory) so the delivery tests can make a consume
+// THROW — the #1274 error path the two-phase protocol exists to survive.
+const runtimeContext = vi.hoisted(() => ({
 	consumeSessionStartGuidance: vi.fn(() => ({
 		messages: [{ role: "user", content: "PROJECT GUIDANCE" }],
 	})),
@@ -69,6 +71,7 @@ vi.mock("../../../clients/runtime-context.js", () => ({
 		messages: [{ role: "user", content: "TESTS FAILED" }],
 	})),
 }));
+vi.mock("../../../clients/runtime-context.js", () => runtimeContext);
 
 import {
 	_resetMcpSessionContext,
@@ -93,6 +96,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	vi.useRealTimers();
 	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 	else process.env.PILENS_DATA_DIR = previousDataDir;
 	removeTempDirSync(tmpDir);
@@ -174,6 +178,81 @@ describe("runTurnEnd", () => {
 		expect(retry.deliveryId).toBe(delivery.deliveryId);
 		expect(retry.outcome).toEqual(delivery.outcome);
 		expect(acknowledgeTurnEnd(tmpDir, delivery.deliveryId!)).toBe(true);
+	});
+
+	// #1274: `acknowledgeTurnEnd` deleted the pending delivery BEFORE calling
+	// commit, so a throwing consume destroyed the only handle to the findings —
+	// exactly the loss the two-phase protocol exists to prevent, reintroduced on
+	// the error path. Pre-fix the retry below mints a NEW deliveryId because the
+	// entry is already gone.
+	it("keeps the delivery re-fetchable when the commit throws (#1274)", async () => {
+		const delivery = await runTurnEndForIpc(tmpDir);
+		expect(delivery.deliveryId).toBeTypeOf("string");
+
+		runtimeContext.consumeTurnEndFindings.mockImplementationOnce(() => {
+			throw new Error("cache write failed");
+		});
+		expect(() =>
+			acknowledgeTurnEnd(tmpDir, delivery.deliveryId as string),
+		).toThrow("cache write failed");
+
+		const retry = await runTurnEndForIpc(tmpDir);
+		expect(retry.deliveryId).toBe(delivery.deliveryId);
+		expect(retry.outcome.turnEnd).toBe("TURN ADVISORY");
+		expect(acknowledgeTurnEnd(tmpDir, delivery.deliveryId as string)).toBe(
+			true,
+		);
+	});
+
+	// #1274: every timed-out client and every distinct raw-cwd alias used to
+	// leave an entry in the map for the life of the process. Expiry drops the
+	// capability WITHOUT committing, which re-arms the findings — the safe
+	// direction, since an unconsumed finding is re-reported while a wrongly
+	// consumed one is gone for good.
+	it("expires a stale delivery instead of holding it forever (#1274)", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		const delivery = await runTurnEndForIpc(tmpDir);
+		vi.setSystemTime(Date.now() + 11 * 60_000);
+
+		expect(acknowledgeTurnEnd(tmpDir, delivery.deliveryId as string)).toBe(
+			false,
+		);
+		const fresh = await runTurnEndForIpc(tmpDir);
+		expect(fresh.deliveryId).not.toBe(delivery.deliveryId);
+		expect(fresh.outcome.turnEnd).toBe("TURN ADVISORY");
+	});
+
+	it("bounds the delivery map instead of growing it without limit (#1274)", async () => {
+		const dirs = Array.from({ length: 9 }, (_, i) =>
+			path.join(tmpDir, `workspace-${i}`),
+		);
+		const deliveries = [];
+		for (const dir of dirs) deliveries.push(await runTurnEndForIpc(dir));
+
+		// Oldest-first eviction, uncommitted: the capability is refused, the
+		// findings stay in the cache for a later Stop.
+		expect(
+			acknowledgeTurnEnd(dirs[0], deliveries[0].deliveryId as string),
+		).toBe(false);
+		expect(
+			acknowledgeTurnEnd(dirs[8], deliveries[8].deliveryId as string),
+		).toBe(true);
+	});
+
+	// #1274: a Stop-hook turn-end request carries no files and no sessionId, so
+	// overlapping ones are byte-identical. The queue admits ONE waiter, so
+	// pre-fix the third concurrent Stop was rejected outright with "queue is
+	// busy" — a hook failure caused purely by arrival timing.
+	it("coalesces byte-identical Stop-hook requests onto one pass (#1274)", async () => {
+		const results = await Promise.all([
+			runTurnEndForIpc(tmpDir),
+			runTurnEndForIpc(tmpDir),
+			runTurnEndForIpc(tmpDir),
+		]);
+
+		const ids = new Set(results.map((result) => result.deliveryId));
+		expect(ids.size).toBe(1);
+		expect(results[0].deliveryId).toBeTypeOf("string");
 	});
 
 	it("commits finding delivery only after the Stop reply is acknowledged", async () => {

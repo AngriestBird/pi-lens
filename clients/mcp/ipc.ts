@@ -15,11 +15,12 @@
  */
 
 import * as crypto from "node:crypto";
+import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { McpAnalyzeResult } from "./analyze.js";
 import type { LSPCodeAction, LSPDiagnostic } from "../lsp/client.js";
+import type { McpAnalyzeResult } from "./analyze.js";
 
 export const WARM_DIAGNOSTICS_SCHEMA_VERSION = 1;
 export const WARM_CODE_ACTION_LOOKUP_LIMIT = 6;
@@ -31,18 +32,23 @@ export const WARM_CODE_ACTION_LOOKUP_LIMIT = 6;
  * the same project they meet. Mismatch → the client just falls back to cold.
  */
 export function ipcPathForCwd(cwd: string): string {
-	const root = path.resolve(cwd).toLowerCase();
-	// sha256 (not for security — just a stable short id for the IPC socket/pipe
-	// name keyed by cwd; sha256 over sha1 keeps SonarCloud's weak-hash check quiet)
-	const hash = crypto
-		.createHash("sha256")
-		.update(root)
-		.digest("hex")
-		.slice(0, 16);
+	const hash = workspaceHash(cwd);
 	if (process.platform === "win32") {
 		return `\\\\.\\pipe\\pi-lens-mcp-${hash}`;
 	}
 	return path.join(os.tmpdir(), `pi-lens-mcp-${hash}.sock`);
+}
+
+/**
+ * The single stable per-workspace id both endpoint derivations key on. Every
+ * per-workspace side-channel name (socket/pipe, turn-end status file) must come
+ * from HERE, so the hook process and the server process cannot drift apart.
+ */
+function workspaceHash(cwd: string): string {
+	const root = path.resolve(cwd).toLowerCase();
+	// sha256 (not for security — just a stable short id for the IPC socket/pipe
+	// name keyed by cwd; sha256 over sha1 keeps SonarCloud's weak-hash check quiet)
+	return crypto.createHash("sha256").update(root).digest("hex").slice(0, 16);
 }
 
 /** PID-scoped endpoint used by pi sessions. The legacy MCP analyze endpoint
@@ -366,14 +372,78 @@ export async function requestWarmTurnEnd(
 			deliveryId: first.response.deliveryId!,
 		}),
 		(result) =>
-			result.route === "turn-end-ack" &&
-			result.acknowledged === true
+			result.route === "turn-end-ack" && result.acknowledged === true
 				? undefined
 				: "ipc-error",
 	);
 	return ack.available
 		? { available: true, response: first.response }
 		: { available: false, reason: ack.reason };
+}
+
+// --- Turn-end status surface (#1272) ----------------------------------------
+// The Stop hook runs in a SEPARATE, short-lived process, so a skip it decides
+// (no warm server, timeout, schema skew) leaves no trace the long-lived MCP
+// server could report. Before this, that skip was one stderr line the agent
+// never sees — the exact invisible-state shape #544 fixed for auto-session.
+// The hook records its outcome to a small per-workspace file; `pilens_health`
+// reads it. Best-effort throughout: telemetry must never break a hook.
+
+export interface TurnEndStatus {
+	ran: number;
+	skipped: number;
+	lastSkipReason?: string;
+	lastRunAt?: string;
+	lastSkipAt?: string;
+}
+
+/** Per-workspace status file, keyed by the same hash as the IPC endpoint. */
+export function turnEndStatusPathForCwd(cwd: string): string {
+	return path.join(os.tmpdir(), `pi-lens-turn-end-${workspaceHash(cwd)}.json`);
+}
+
+export function readTurnEndStatus(cwd: string): TurnEndStatus | undefined {
+	try {
+		const raw = fs.readFileSync(turnEndStatusPathForCwd(cwd), "utf8");
+		const parsed = JSON.parse(raw) as Partial<TurnEndStatus> | null;
+		if (!parsed || typeof parsed !== "object") return undefined;
+		return {
+			ran: typeof parsed.ran === "number" ? parsed.ran : 0,
+			skipped: typeof parsed.skipped === "number" ? parsed.skipped : 0,
+			lastSkipReason: parsed.lastSkipReason,
+			lastRunAt: parsed.lastRunAt,
+			lastSkipAt: parsed.lastSkipAt,
+		};
+	} catch {
+		// never written, unreadable, or corrupt — "no turn-end activity recorded"
+		return undefined;
+	}
+}
+
+/** Append one turn-end outcome from the hook process. Never throws. */
+export function recordTurnEndOutcome(
+	cwd: string,
+	outcome: { ran: true } | { ran: false; reason: string },
+): void {
+	try {
+		const now = new Date().toISOString();
+		const previous = readTurnEndStatus(cwd) ?? { ran: 0, skipped: 0 };
+		const next: TurnEndStatus = outcome.ran
+			? { ...previous, ran: previous.ran + 1, lastRunAt: now }
+			: {
+					...previous,
+					skipped: previous.skipped + 1,
+					lastSkipReason: outcome.reason,
+					lastSkipAt: now,
+				};
+		fs.writeFileSync(
+			turnEndStatusPathForCwd(cwd),
+			`${JSON.stringify(next)}\n`,
+			"utf8",
+		);
+	} catch {
+		// telemetry only — a read-only tmpdir must not break the Stop hook
+	}
 }
 
 /**

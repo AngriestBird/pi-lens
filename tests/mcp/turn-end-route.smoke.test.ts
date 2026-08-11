@@ -195,6 +195,63 @@ describe("warm turn-end IPC route (real spawn)", { retry: 2 }, () => {
 		expect(second.result).toMatchObject({ route: "turn-end" });
 	}, 40_000);
 
+	// #1273: the route took `parsed.cwd` on trust, called ensureReady on it, and
+	// ran THAT directory's configured test runner — arbitrary code execution for
+	// anything that could reach the endpoint (same-uid processes, a
+	// permissive-umask host, a Windows named pipe's more generous default DACL).
+	// Every legitimate client derived the socket path from the same cwd, so the
+	// guard costs nothing legitimate. Asserted on the wire, not on a unit-level
+	// predicate, because the reply is the only thing an attacker sees.
+	it("rejects a turn-end request for a cwd outside the server's workspace", async () => {
+		const foreign = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-foreign-"));
+		try {
+			const reply = await ask(endpoint, {
+				route: "turn-end",
+				version: WARM_TURN_END_SCHEMA_VERSION,
+				cwd: foreign,
+			});
+
+			expect(reply.result).toBeUndefined();
+			expect(reply.error).toContain("outside this server's workspace");
+		} finally {
+			removeTempDirSync(foreign);
+		}
+	}, 25_000);
+
+	// The ack shares the map keyed by that same untrusted cwd, so it needs the
+	// same guard or the hole simply moves one route over.
+	it("rejects a turn-end ack for a cwd outside the server's workspace", async () => {
+		const foreign = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-foreign-"));
+		try {
+			const reply = await ask(endpoint, {
+				route: "turn-end-ack",
+				version: WARM_TURN_END_SCHEMA_VERSION,
+				cwd: foreign,
+				deliveryId: "00000000-0000-0000-0000-000000000000",
+			});
+
+			expect(reply.result).toBeUndefined();
+			expect(reply.error).toContain("outside this server's workspace");
+		} finally {
+			removeTempDirSync(foreign);
+		}
+	}, 25_000);
+
+	// A subdirectory of the server's own workspace is legitimate — the guard must
+	// not break a hook whose cwd is a package inside the repo.
+	it("accepts a turn-end request for a subdirectory of its workspace", async () => {
+		const nested = path.join(projectDir, "packages", "inner");
+		fs.mkdirSync(nested, { recursive: true });
+		const reply = await ask(endpoint, {
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			cwd: nested,
+		});
+
+		expect(reply.error).toBeUndefined();
+		expect(reply.result).toMatchObject({ route: "turn-end" });
+	}, 40_000);
+
 	it("survives a malformed line and answers the next request", async () => {
 		// Raw, unparseable bytes — not `JSON.stringify("…")`, which would be a
 		// perfectly valid JSON string and never reach the parse failure.

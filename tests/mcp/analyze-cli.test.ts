@@ -22,6 +22,8 @@ import {
 } from "vitest";
 import {
 	ipcPathForCwd,
+	readTurnEndStatus,
+	turnEndStatusPathForCwd,
 	WARM_TURN_END_SCHEMA_VERSION,
 } from "../../clients/mcp/ipc.js";
 import { AUTOMATION_FRAMING } from "../../clients/runtime-context.js";
@@ -70,6 +72,49 @@ function runBin(
 		timer.unref();
 		if (stdin !== undefined) child.stdin.end(stdin);
 		else child.stdin.end();
+	});
+}
+
+/**
+ * #1271 harness: the same spawn WITHOUT `child.stdin.end()`. Every other test
+ * here closes stdin, which is exactly why none of them could catch a bin that
+ * blocks on an open pipe — the real spawners (CI wrappers, `sh -c`, pre-commit
+ * runners, Claude Code itself with `stdio: 'pipe'`) do not necessarily close
+ * it. Resolves the elapsed ms so the assertion is "it exited", not "the outer
+ * harness gave up".
+ */
+function runBinWithOpenStdin(
+	args: string[],
+	timeoutMs: number,
+): Promise<{ stdout: string; elapsedMs: number; code: number }> {
+	return new Promise((resolve, reject) => {
+		const startedAt = Date.now();
+		const child = spawn(process.execPath, [binJs, ...args], {
+			stdio: ["pipe", "pipe", "pipe"],
+			env: {
+				...process.env,
+				PILENS_DATA_DIR: path.join(testIsolationDir, "data"),
+				PI_LENS_HOME: path.join(testIsolationDir, "home"),
+			},
+		});
+		let stdout = "";
+		child.stdout.setEncoding("utf8");
+		child.stdout.on("data", (c: string) => (stdout += c));
+		child.stderr.resume();
+		child.on("error", reject);
+		child.on("close", (code) => {
+			clearTimeout(timer);
+			resolve({ stdout, elapsedMs: Date.now() - startedAt, code: code ?? 0 });
+		});
+		const timer = setTimeout(() => {
+			child.kill("SIGKILL");
+			reject(
+				new Error(
+					`bin did not exit within ${timeoutMs}ms with stdin left open (#1271)`,
+				),
+			);
+		}, timeoutMs);
+		// Deliberately NO child.stdin.end() — the pipe stays open and idle.
 	});
 }
 
@@ -129,6 +174,40 @@ describe("pi-lens-analyze bin", { retry: 2 }, () => {
 		]);
 		expect(code).toBe(0);
 		expect(stdout.trim()).toBe("");
+	}, 45_000);
+
+	// #1271: `main()` used to await the stdin read BEFORE looking at `--file`,
+	// with no timeout and only an `isTTY` guard — so any spawner holding the pipe
+	// open hung the bin forever. As a Stop hook that is a 60 s stall every turn.
+	it("exits with --file even when stdin is a pipe that is never closed", async () => {
+		const { code, elapsedMs } = await runBinWithOpenStdin(
+			[`--file=${cleanFile}`, `--cwd=${tmpDir}`],
+			30_000,
+		);
+		expect(code).toBe(0);
+		expect(elapsedMs).toBeLessThan(30_000);
+	}, 45_000);
+
+	// The companion: `--turn-end` must not read stdin either. No warm server, so
+	// the pass skips immediately — the only thing that could delay this exit is
+	// the stdin read the flag is supposed to short-circuit.
+	it("exits with --turn-end even when stdin is a pipe that is never closed", async () => {
+		const turnDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-cli-open-"));
+		try {
+			const { code, elapsedMs } = await runBinWithOpenStdin(
+				["--turn-end", `--cwd=${turnDir}`],
+				30_000,
+			);
+			expect(code).toBe(0);
+			expect(elapsedMs).toBeLessThan(30_000);
+		} finally {
+			try {
+				fs.rmSync(turnEndStatusPathForCwd(turnDir), { force: true });
+			} catch {
+				/* best effort */
+			}
+			removeTempDirSync(turnDir);
+		}
 	}, 45_000);
 
 	it("analyzes the file from a Claude Code PostToolUse stdin payload", async () => {
@@ -211,6 +290,11 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 	afterEach(async () => {
 		await stub?.close();
 		stub = undefined;
+		try {
+			fs.rmSync(turnEndStatusPathForCwd(turnDir), { force: true });
+		} catch {
+			/* best effort */
+		}
 		removeTempDirSync(turnDir);
 	});
 
@@ -248,17 +332,66 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 	}, 20_000);
 
 	// No cold fallback: a cold pass has empty cascade runs and accumulators, so a
-	// silent skip is honest where a local run would report a false clean.
-	it("skips (stderr only) when no warm server is listening", async () => {
+	// skip is honest where a local run would report a false clean. But #1272: the
+	// skip used to be stderr-ONLY, and Claude Code never surfaces stderr from a
+	// hook that exits 0 — so a permanently dead integration was byte-for-byte
+	// identical to a clean turn. The skip must reach stdout, the hook's only
+	// transcript-visible channel.
+	it("announces a skip on stdout when no warm server is listening", async () => {
 		const { stdout, stderr, code } = await runBin([
 			"--turn-end",
 			`--cwd=${turnDir}`,
 		]);
 
 		expect(code).toBe(0);
-		expect(stdout.trim()).toBe("");
+		expect(stdout).toContain("pi-lens turn-end skipped");
 		expect(stderr).toContain("turn-end skipped");
+		// One line — an absent server is a footnote, not a wall of text.
+		expect(stdout.trimEnd().split("\n")).toHaveLength(1);
 	}, 20_000);
+
+	// #1272: the message used to say "no warm pi-lens MCP server" for EVERY
+	// failure mode, including the ones where the server was warm and answering.
+	// Absent server / slow pass / schema skew have different remedies, so the
+	// wire reason must reach the transcript.
+	it("names the reason a skip happened", async () => {
+		const noServer = await runBin(["--turn-end", `--cwd=${turnDir}`]);
+		expect(noServer.stdout).toContain("(ipc-error)");
+		expect(noServer.stdout).toMatch(/start the MCP server|build is stale/);
+
+		// A server that answers with the WRONG schema version: warm, reachable,
+		// and still unusable — the pre-fix message called this an absent server.
+		stub = await startTurnEndStub(turnDir, {
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION + 1,
+		});
+		const skewed = await runBin(["--turn-end", `--cwd=${turnDir}`]);
+		expect(skewed.stdout).toContain("(schema-mismatch)");
+		expect(skewed.stdout).toContain("different turn-end schema");
+		expect(skewed.stdout).not.toContain("no warm pi-lens MCP server answered");
+	}, 25_000);
+
+	// #1272, the #544 precedent: the hook is a separate short-lived process, so
+	// without a recorded surface `pilens_health` had no way to report that
+	// turn-end had been dead all session.
+	it("records the skip and the run for pilens_health to report", async () => {
+		await runBin(["--turn-end", `--cwd=${turnDir}`]);
+		const afterSkip = readTurnEndStatus(turnDir);
+		expect(afterSkip?.skipped).toBe(1);
+		expect(afterSkip?.ran).toBe(0);
+		expect(afterSkip?.lastSkipReason).toBe("ipc-error");
+		expect(afterSkip?.lastSkipAt).toBeTypeOf("string");
+
+		stub = await startTurnEndStub(turnDir, {
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+		});
+		await runBin(["--turn-end", `--cwd=${turnDir}`]);
+		const afterRun = readTurnEndStatus(turnDir);
+		expect(afterRun?.ran).toBe(1);
+		expect(afterRun?.skipped).toBe(1);
+		expect(afterRun?.lastRunAt).toBeTypeOf("string");
+	}, 25_000);
 
 	it("detects a Stop payload on stdin without the flag", async () => {
 		stub = await startTurnEndStub(turnDir, {
@@ -322,6 +455,61 @@ describe("pi-lens-analyze turn-end mode", { retry: 2 }, () => {
 		expect(out).toContain("… (truncated)");
 		// 2000 kept + the "\n  … (truncated)" marker.
 		expect(out).toHaveLength(2016);
+	}, 20_000);
+
+	// #1275: `slice` counts UTF-16 code units. Findings are dense with emoji, and
+	// a cut that lands between the halves of a surrogate pair is written to the
+	// pipe as U+FFFD — a replacement character in the transcript where a marker
+	// should be. The payload below is sized so the 2000-char cut falls exactly
+	// inside the 🔴.
+	it("never splits a surrogate pair at the character cap", async () => {
+		const header = "🔎 pi-lens turn-end\n";
+		const pad = "x".repeat(2000 - header.length - 1);
+		stub = await startTurnEndStub(turnDir, {
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			tests: `${pad}🔴 knip: unused export`,
+		});
+		const { stdout, code } = await runBin(["--turn-end", `--cwd=${turnDir}`]);
+
+		expect(code).toBe(0);
+		expect(stdout).not.toContain("�");
+		// Backed off by one unit rather than cutting the pair.
+		expect(stdout.trimEnd()).toHaveLength(1999 + "\n  … (truncated)".length);
+	}, 20_000);
+
+	// #1275: the `tests` section is the RAW vitest dump, which carries SGR colour
+	// codes; nothing stripped them, and the character cap could slice an escape
+	// sequence in half and leak its tail as literal text.
+	it("strips ANSI escapes and control characters from the report", async () => {
+		const esc = String.fromCharCode(0x1b);
+		stub = await startTurnEndStub(turnDir, {
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			tests: `${esc}[31mFAIL${esc}[0m suite/thing.test.ts${esc}[2K  done`,
+		});
+		const { stdout, code } = await runBin(["--turn-end", `--cwd=${turnDir}`]);
+
+		expect(code).toBe(0);
+		expect(stdout).not.toContain(esc);
+		expect(stdout).not.toContain("[31m");
+		expect(stdout).not.toContain("[2K");
+		expect(stdout).toContain("FAIL suite/thing.test.ts");
+	}, 20_000);
+
+	// #1275: the framing strip was `startsWith`-only, so a token carried into the
+	// middle of a joined section survived into the transcript.
+	it("strips injection framing that is not at the start of a section", async () => {
+		stub = await startTurnEndStub(turnDir, {
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			turnEnd: `🔴 knip: 2 unused exports\n\n${AUTOMATION_FRAMING}🔴 madge: a cycle`,
+		});
+		const { stdout, code } = await runBin(["--turn-end", `--cwd=${turnDir}`]);
+
+		expect(code).toBe(0);
+		expect(stdout).toContain("🔴 madge: a cycle");
+		expect(stdout).not.toContain("not a user request");
 	}, 20_000);
 
 	it("never dials the server on SubagentStop", async () => {
