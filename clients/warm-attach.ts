@@ -154,6 +154,13 @@ async function serveRequest(
 			servedAt,
 			fresh: servedAt <= req.deadlineAt && touched !== undefined,
 			inconclusive: touched?.inconclusive === true,
+			// #1253: carry the touch's own confirmation verdict across the socket
+			// as an explicit enumerable field (same doctrine as `inconclusive`) —
+			// without it, an incumbent-served empty result from a silent-on-clean
+			// server is indistinguishable from "never answered" on the far side.
+			...(touched?.confirmation === "confirmed"
+				? { confirmation: "confirmed" as const }
+				: {}),
 		},
 	};
 }
@@ -300,3 +307,12 @@ export function _setWarmAttachForTests(cwd: string, incumbentPid: number): void 
 	state.incumbentPid = incumbentPid;
 	state.local = false;
 }
+
+/**
+ * The incumbent-side request handler, exposed for tests. The socket wiring
+ * around it (`startServer`) can only be exercised by a test that actually
+ * binds a unix socket, which is not available in every sandbox — this seam
+ * lets the DTO-composition half (notably the #1253 `confirmation` field, whose
+ * absence is what a consumer reads as unconfirmed) be pinned directly.
+ */
+export const _serveWarmRequestForTests = serveRequest;

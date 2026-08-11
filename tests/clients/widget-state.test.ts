@@ -642,6 +642,35 @@ describe("recordDiagnostics — superseded write guard (same race class as #555)
 		expect(result?.[0]?.message).toBe("untokened write");
 	});
 
+	it("keeps a newer confirmed clean snapshot final when an older pipeline settles late (#1198)", () => {
+		const filePath = `${process.cwd()}/late-typescript.ts`;
+		const old = [
+			{
+				severity: "error",
+				semantic: "blocking",
+				tool: "lsp",
+				message: "old TypeScript blocker",
+				rule: "TS2322",
+			},
+		];
+
+		// The old pipeline admitted first (token 1), while the newer primary
+		// check admitted second (token 2) and confirmed clean before token 1
+		// settled. Both widget write verbs share the admission order.
+		recordRunner(filePath, "typescript", "failed", 1, undefined, 1);
+		recordDiagnostics(filePath, old, 1);
+		reconcileScanDiagnostics(filePath, [], true, 2);
+		recordRunner(filePath, "typescript", "failed", 1, undefined, 1);
+		recordDiagnostics(filePath, old, 1);
+
+		const summary = getFileDiagnosticSummaries().find(
+			(entry) => entry.filePath === filePath,
+		);
+		expect(summary?.diagnostics).toEqual([]);
+		expect(summary?.blocking).toBe(0);
+		expect(summary?.hasFinalSnapshot).toBe(true);
+	});
+
 	it("clearWidgetState resets tracked writeIndex ordering so a later low index is not treated as stale", () => {
 		const filePath = `${process.cwd()}/reset.ts`;
 

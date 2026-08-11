@@ -13,17 +13,20 @@ note: |
   (where there are no function-call identifiers).
 
   The fixed rule checks the except_clause's direct children for ANY of
-  the five exception-spec shapes: bare identifier `except E`, dotted
+  the six exception-spec shapes: bare identifier `except E`, dotted
   attribute `except asyncio.TimeoutError`, tuple `except (E, F)`,
-  parenthesized single name `except (E)`, or `as` pattern `except E as e`.
-  The original missed the attribute, tuple, `as_pattern`, and
-  `parenthesized_expression` forms — a dotted name or a tuple like
-  `(ValueError, KeyError)` has no direct `identifier` child (the
-  identifiers are inside the attribute/tuple), and `except Exception as e`
+  parenthesized single name `except (E)`, `as` pattern `except E as e`,
+  or subscript `except dict[str, int]`.
+  The original missed the attribute, tuple, `as_pattern`,
+  `parenthesized_expression`, and `subscript` forms — a dotted name, a
+  tuple like `(ValueError, KeyError)`, or a subscripted generic like
+  `dict[str, int]` has no direct `identifier` child (the identifiers are
+  inside the attribute/tuple/subscript), and `except Exception as e`
   has no direct `identifier` child either (`e` lives inside the
   `as_pattern`, which the suppression list covers) — dotted/qualified
   names are the #1031 sibling of the #1026 tree-sitter fix;
-  `parenthesized_expression` mirrors that filter's spec set).
+  `parenthesized_expression` mirrors that filter's spec set, and
+  `subscript` closes the #1244 gap on BOTH surfaces).
 rule:
   kind: except_clause
   not:
@@ -38,3 +41,5 @@ rule:
           kind: parenthesized_expression
       - has:
           kind: as_pattern
+      - has:
+          kind: subscript

@@ -180,6 +180,8 @@ export interface DispatchContext {
 	/** Only run blocking rules (severity: error) - used for fast feedback on file write */
 	readonly blockingOnly?: boolean;
 	readonly modifiedRanges?: ModifiedRange[];
+	/** Ordered per-file pipeline token used by widget reconciliation (#1198). */
+	readonly writeIndex?: number;
 
 	hasTool(command: string): Promise<boolean>;
 	log(message: string): void;

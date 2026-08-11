@@ -13,6 +13,7 @@ import {
 } from "./format-events-publish.js";
 import type { FormatService } from "./format-service.js";
 import { logLatency } from "./latency-logger.js";
+import { isPathIgnoredByProject } from "./file-utils.js";
 import { newLspMutationCorrelationId, type LspMutationContext } from "./lsp-mutation.js";
 import {
 	getGlobalActionableWarningMaxFixes,
@@ -376,6 +377,21 @@ export async function handleAgentEnd({
 			);
 		} else {
 			const enabledFiles = actionReport.data.files.filter((file) => {
+				// #1247: the per-edit dispatch surface gates ignored files before
+				// running; the turn-end autofix must apply the same filter or a
+				// `.pi-lens.json` `ignore` entry cannot protect a prose file
+				// (CHANGELOG.md / AGENTS.md) from being rewritten here.
+				if (
+					isPathIgnoredByProject(
+						file.filePath,
+						ctxCwd ?? runtime.projectRoot,
+					)
+				) {
+					dbg(
+						`agent_end actionable_warnings_autofix: skipped ${file.filePath} (ignored by project)`,
+					);
+					return false;
+				}
 				const enabled = !!getFlag(
 					"lens-actionable-warning-autofix",
 					file.filePath,
@@ -423,27 +439,25 @@ export async function handleAgentEnd({
 				dbg(
 					`agent_end actionable_warnings_autofix: stale report (${freshness.reason}; reportProjectSeqEnd=${freshness.reportProjectSeqEnd ?? "missing"}; currentProjectSeq=${freshness.currentProjectSeq}${freshness.filePath ? `; file=${freshness.filePath}; reportFileSeq=${freshness.reportFileSeq}; currentFileSeq=${freshness.currentFileSeq}` : ""}), skipping fixes`,
 				);
-			} else {
+			} else if (eligibleReport.summary.autoFixEligible > 0) {
 				// #684: same "genuine work about to happen" gate as
 				// publishFormatStart — only fires when the report is fresh AND
 				// has at least one autofix-eligible warning, right before
 				// applyConservativeActionableWarningFixes actually starts.
-				if (eligibleReport.summary.autoFixEligible > 0) {
-					publishAutofixStart({
-						cwd: ctxCwd ?? runtime.projectRoot,
-						paths: eligibleReport.files
-							.filter((file) =>
-								file.warnings.some(
-									(warning) =>
-										!warning.suppressed &&
-										warning.actions.some((action) => action.autoFixEligible),
-								),
-							)
-							.map((file) => file.filePath),
-						eligibleCount: eligibleReport.summary.autoFixEligible,
-						dbg,
-					});
-				}
+				publishAutofixStart({
+					cwd: ctxCwd ?? runtime.projectRoot,
+					paths: eligibleReport.files
+						.filter((file) =>
+							file.warnings.some(
+								(warning) =>
+									!warning.suppressed &&
+									warning.actions.some((action) => action.autoFixEligible),
+							),
+						)
+						.map((file) => file.filePath),
+					eligibleCount: eligibleReport.summary.autoFixEligible,
+					dbg,
+				});
 				const fixStart = Date.now();
 				const fixCwd = ctxCwd ?? runtime.projectRoot;
 				const mutationContext: LspMutationContext = {
@@ -498,6 +512,8 @@ export async function handleAgentEnd({
 						"info",
 					);
 				}
+			} else {
+				dbg("agent_end actionable_warnings_autofix: fresh report, 0 autofix-eligible warnings, skipping")
 			}
 		}
 	}

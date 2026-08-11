@@ -550,6 +550,14 @@ export interface LSPWorkspaceDiagnosticResult {
 	 * pre-#1104 behavior for that entry.
 	 */
 	contentHash?: string;
+	/**
+	 * Monotonic token reserved when this file entered the scan, rather than when
+	 * its asynchronous LSP work settled. Consumers use it to reject late old
+	 * results (#1198).
+	 */
+	writeIndex?: number;
+	/** #1198: explicit content-binding verdict from a per-file touch. */
+	boundToCurrentDisk?: BoundToCurrentDisk;
 }
 
 /**
@@ -885,6 +893,18 @@ export class LSPService {
 		string,
 		LSPDiagnosticsHealth
 	>();
+	/**
+	 * Touch-debounce record of "this server already has this content", keyed
+	 * "normalizedFilePath:clientScope:serverId".
+	 *
+	 * #743/#1253: the serverId component is load-bearing. #1253 requires that a
+	 * server whose notify write never landed does NOT get an entry (otherwise the
+	 * next touch debounces the re-push and the silent-clean gates read its silence
+	 * as a confirmed clean). #743 requires that one wedged server must not degrade
+	 * its healthy siblings. A file-level key can only satisfy one of those at a
+	 * time — per-server, both hold: the stalled server simply has no entry and is
+	 * re-pushed, while every sibling whose write landed keeps its own debounce.
+	 */
 	private readonly recentTouches = new Map<
 		string,
 		{ fingerprint: string; touchedAt: number; clientScope: LSPTouchClientScope }
@@ -944,9 +964,16 @@ export class LSPService {
 		content: string,
 		clientScope: LSPTouchClientScope,
 		waitForDiagnostics: boolean,
+		serverIds: readonly string[],
 	): boolean {
 		if (waitForDiagnostics) return false;
-		return this.shouldSkipNotify(filePath, content, clientScope);
+		// #743: only short-circuit the whole call when EVERY spawned server already
+		// has this content. If even one still needs the push, fall through — the
+		// write loop skips the servers that are covered and pushes only the rest.
+		if (serverIds.length === 0) return false;
+		return serverIds.every((serverId) =>
+			this.shouldSkipNotify(filePath, content, clientScope, serverId),
+		);
 	}
 
 	/**
@@ -961,27 +988,41 @@ export class LSPService {
 	 * with diagnosticsMode="document" moments later. Without this check the
 	 * second call's notify clears in-progress diagnostics and the LSP has to
 	 * start over — observed as multi-second waits on slow TS projects.
+	 *
+	 * Decided PER SERVER (#743): a sibling's stalled write must not cost this
+	 * server its debounce. See {@link recentTouches}.
 	 */
 	private shouldSkipNotify(
 		filePath: string,
 		content: string,
 		clientScope: LSPTouchClientScope,
+		serverId: string,
 	): boolean {
 		if (TOUCH_DEBOUNCE_MS <= 0) return false;
-		const key = `${normalizeMapKey(filePath)}:${clientScope}`;
-		const previous = this.recentTouches.get(key);
+		const previous = this.recentTouches.get(
+			this.recentTouchKey(filePath, clientScope, serverId),
+		);
 		if (!previous) return false;
 		const now = Date.now();
 		if (now - previous.touchedAt > TOUCH_DEBOUNCE_MS) return false;
 		return previous.fingerprint === this.fingerprintContent(content);
 	}
 
+	private recentTouchKey(
+		filePath: string,
+		clientScope: LSPTouchClientScope,
+		serverId: string,
+	): string {
+		return `${normalizeMapKey(filePath)}:${clientScope}:${serverId}`;
+	}
+
 	private markTouched(
 		filePath: string,
 		content: string,
 		clientScope: LSPTouchClientScope,
+		serverId: string,
 	): void {
-		const key = `${normalizeMapKey(filePath)}:${clientScope}`;
+		const key = this.recentTouchKey(filePath, clientScope, serverId);
 		const now = Date.now();
 		this.recentTouches.set(key, {
 			fingerprint: this.fingerprintContent(content),
@@ -990,8 +1031,10 @@ export class LSPService {
 		});
 		// Trim entries that are already past the debounce window — shouldSkipTouch
 		// ignores them anyway, so they serve no purpose. Only sweep when the map
-		// exceeds the threshold to avoid iterating on every call.
-		if (this.recentTouches.size > 200) {
+		// exceeds the threshold to avoid iterating on every call. The threshold is
+		// per-ENTRY and entries are now per-server, so it is scaled up to keep the
+		// same effective file capacity a file-level key gave a multi-server scope.
+		if (this.recentTouches.size > 800) {
 			for (const [k, v] of this.recentTouches) {
 				if (now - v.touchedAt > TOUCH_DEBOUNCE_MS) {
 					this.recentTouches.delete(k);
@@ -1885,12 +1928,14 @@ export class LSPService {
 			return;
 		}
 
+		const spawnedServerIds = spawned.map((entry) => entry.info.id);
 		if (
 			this.shouldSkipTouch(
 				filePath,
 				content,
 				clientScope,
 				diagnosticsMode !== "none",
+				spawnedServerIds,
 			)
 		) {
 			logLatency({
@@ -1920,7 +1965,19 @@ export class LSPService {
 		// diagnostic cache (via notify.open) and forces it to restart work it
 		// already did. This is what makes the post-write touch + dispatch-lsp-
 		// runner touch sequence expensive on slow TS projects.
-		const notifySkipped = this.shouldSkipNotify(filePath, content, clientScope);
+		//
+		// #743: resolved PER SERVER. A server whose sibling's write stalled last
+		// touch still holds its own debounce entry, so it is skipped here while the
+		// stalled server (which has no entry) gets re-pushed. `notifySkipped` stays
+		// as the file-level "every server was skipped" summary for the logs and the
+		// no-new-version baseline below.
+		const notifySkippedServerIds = new Set(
+			spawnedServerIds.filter((serverId) =>
+				this.shouldSkipNotify(filePath, content, clientScope, serverId),
+			),
+		);
+		const notifySkipped =
+			spawned.length > 0 && notifySkippedServerIds.size === spawned.length;
 		const diagnosticBaselines = new Map(
 			spawned.map((entry) => [entry.client, entry.client.diagnosticsVersion]),
 		);
@@ -1942,6 +1999,11 @@ export class LSPService {
 			const budget = notifyWriteBudgetMs();
 			await Promise.all(
 				spawned.map(async (entry) => {
+					// #743: this server already has this content from a recent touch
+					// that landed. Pushing again would clear its diagnostic cache for
+					// nothing — leave its debounce entry (and its original timestamp)
+					// alone so the window still expires naturally.
+					if (notifySkippedServerIds.has(entry.info.id)) return;
 					// Same identity as the broken/demonstratedReady maps.
 					const clientKey = await this.demonstratedReadyKeyFor(
 						entry.info,
@@ -1966,13 +2028,19 @@ export class LSPService {
 					if (wrote === true) {
 						// A clean write clears any accrued backpressure streak (#743).
 						if (clientKey) this.notifyWriteBackpressureStreak.delete(clientKey);
+						// #1253: record the debounce entry for THIS server only, and only
+						// because its own write landed. A server whose write timed out or
+						// rejected falls through without an entry, so the next touch
+						// re-pushes it instead of laundering the failure into a later
+						// touch that looks fully delivered (which the silent-clean gates
+						// would then read as a confirmed clean).
+						this.markTouched(filePath, content, clientScope, entry.info.id);
 					} else {
 						notifyWriteTimedOutServerIds.push(entry.info.id);
 						if (!rejected) {
 							this.recordNotifyWriteBackpressure(clientKey, entry, filePath);
 						}
 					}
-					return true;
 				}),
 			);
 			if (notifyWriteTimedOutServerIds.length > 0) {
@@ -2240,8 +2308,10 @@ export class LSPService {
 							(snapshot) => snapshot.serverId === entry.client.serverId,
 						),
 					) === "pull-capable";
+				// #743: per-server — a server we DID push to still gets the
+				// version-baseline wait even when a sibling was debounced away.
 				const wait =
-					!notifySkipped && Number.isFinite(baseline)
+					!notifySkippedServerIds.has(entry.info.id) && Number.isFinite(baseline)
 						? entry.client.waitForDiagnostics(filePath, serverTimeout, {
 								minVersion: baseline,
 								...(pullOnly && { pullOnly: true }),
@@ -2705,6 +2775,12 @@ export class LSPService {
 
 		if (collected !== undefined && inconclusive) {
 			result.inconclusive = true;
+		} else if (collected !== undefined) {
+			// Preserve the lower-level affirmative result across consumers. In
+			// particular, the silent-clean gates above clear diagnosticsTimedOut only
+			// after a successful notify and capability-confirmed wait; reclassifying
+			// that empty array later would discard the evidence that made it clean.
+			result.confirmation = "confirmed";
 		}
 
 		// #1095: attach the merged content binding so a consumer can ask whether
@@ -2731,12 +2807,13 @@ export class LSPService {
 			result.binding = binding;
 		}
 
-		// Only refresh the recent-touches entry when we actually pushed. Skipping
-		// here keeps the original push timestamp intact so the debounce window
-		// expires naturally instead of being extended by every reuse.
-		if (!notifySkipped) {
-			this.markTouched(filePath, content, clientScope);
-		}
+		// The recent-touches entries are recorded per server inside the notify-write
+		// loop above, at the moment each server's own write lands (#1253) — a server
+		// whose write timed out or rejected deliberately gets none, so the next touch
+		// re-pushes it rather than debouncing a failure into a later touch that looks
+		// fully delivered. Nothing to record here: a skipped server keeps its original
+		// entry (and timestamp) so its window still expires naturally instead of being
+		// extended by every reuse.
 
 		logLatency({
 			type: "phase",
@@ -3958,6 +4035,11 @@ export class LSPService {
 			 * online. The caller may use this to refresh host observability UI. */
 			onServerReady?: () => void;
 			/**
+			 * Reserve per-file reconciliation order at scan admission time. The
+			 * callback is never called at result-settlement time (#1198).
+			 */
+			nextWriteIndex?: () => number;
+			/**
 			 * Explicit file list (#461): skip the project walk entirely and route
 			 * exactly these files through the sweep. Used by lens_diagnostics'
 			 * `paths` scope restrictor so a wrapper (e.g. "git-staged files only")
@@ -4015,7 +4097,14 @@ export class LSPService {
 		]);
 		const cachedResults: LSPWorkspaceDiagnosticResult[] = [];
 		const filesToTouch: string[] = [];
+		const writeIndexByPath = new Map<string, number | undefined>();
 		for (const filePath of files) {
+			// Reserve order before cache lookup/touch admission. A result that settles
+			// later is still ordered by when this scan began observing the file (#1198).
+			writeIndexByPath.set(
+				normalizeMapKey(filePath),
+				options.nextWriteIndex?.(),
+			);
 			const cached = workspaceDiagnosticsCacheCtx.lookup(
 				filePath,
 				workspaceSweepScopeKey,
@@ -4036,6 +4125,9 @@ export class LSPService {
 					// scan time so mode=full's footer reconcile stamps `touchedAt`
 					// with when the truth was seen, not now().
 					observedAt: cached.scannedAt,
+					contentHash: cached.binding.contentHash,
+					boundToCurrentDisk: cached.binding.boundToCurrentDisk,
+					writeIndex: writeIndexByPath.get(normalizeMapKey(filePath)),
 				});
 			} else {
 				filesToTouch.push(filePath);
@@ -4296,6 +4388,8 @@ export class LSPService {
 					count: filteredDiagnostics?.length ?? 0,
 					timedOut,
 					contentHash: rawBinding?.contentHash,
+					boundToCurrentDisk: rawBinding?.boundToCurrentDisk,
+					writeIndex: writeIndexByPath.get(normalizeMapKey(filePath)),
 				});
 			} catch (err) {
 				results.push({
@@ -4307,6 +4401,7 @@ export class LSPService {
 					// no confirmed result was obtained, so reconciliation (#571) must
 					// skip it the same way.
 					timedOut: true,
+					writeIndex: writeIndexByPath.get(normalizeMapKey(filePath)),
 				});
 			}
 			completed += 1;
@@ -4354,7 +4449,12 @@ export class LSPService {
 					const pulled = await this.tryWorkspacePull(group.files, perFileMs);
 					if (pulled) {
 						for (const result of pulled) {
-							results.push(result);
+							results.push({
+								...result,
+								writeIndex: writeIndexByPath.get(
+									normalizeMapKey(result.filePath),
+								),
+							});
 							// #671: a pull result is always confirmed (see
 							// `tryWorkspacePull`'s doc comment), so it's cache-eligible
 							// too — best-effort stat since the pull already resolved the

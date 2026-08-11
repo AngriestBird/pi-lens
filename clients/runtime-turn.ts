@@ -22,7 +22,10 @@ import {
 } from "./git-guard.js";
 import { logCascade } from "./cascade-logger.js";
 import { normalizeMapKey } from "./path-utils.js";
-import type { DependencyChecker } from "./dependency-checker.js";
+import type {
+	DependencyChecker,
+	MadgeBatchStats,
+} from "./dependency-checker.js";
 import {
 	resolveRunnerPath,
 	toRunnerDisplayPath,
@@ -757,6 +760,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	}
 
 	const t3 = Date.now();
+	let madgeStats: MadgeBatchStats | undefined;
 	if (await depChecker.ensureAvailable()) {
 		const madgeFiles = cacheManager.getFilesForMadge(cwd);
 		if (madgeFiles.length > 0) {
@@ -767,7 +771,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// the shared circular-dep state update is deferred/folded inside
 			// checkFilesBatch so concurrent spawns can't clobber each other (#766).
 			const absFiles = madgeFiles.map((file) => path.resolve(cwd, file));
-			const depResults = await depChecker.checkFilesBatch(absFiles, cwd);
+			const batch = await depChecker.checkFilesBatch(absFiles, cwd);
+			const depResults = batch.results;
+			madgeStats = batch.stats;
 			for (const file of madgeFiles) {
 				const absPath = path.resolve(cwd, file);
 				const depResult = depResults.get(absPath);
@@ -797,6 +803,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		filePath: cwd,
 		phase: "madge",
 		durationMs: Date.now() - t3,
+		...(madgeStats && { metadata: madgeStats }),
 	});
 
 	// --- Test runner: fire once per turn after all edits are done ---

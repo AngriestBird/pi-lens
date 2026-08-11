@@ -47,8 +47,8 @@ export interface StoredDiagnosticBinding {
  *
  * SIDE-CHANNEL CARRIAGE CONTRACT (#1108 shape-5 — copy-loss risk). Two producers
  * on `clients/lsp/index.ts` surface a binding:
- *   - `touchFile` returns a `TouchFileResult` WRAPPER (`{ diags, inconclusive,
- *     binding }`, below) — the #1179 structural fix. `inconclusive`/`binding` are
+ *   - `touchFile` returns a `TouchFileResult` WRAPPER (`{ diags, confirmation,
+ *     inconclusive, binding }`, below) — the #1179 structural fix. These flags are
  *     EXPLICIT ENUMERABLE fields on that wrapper, so a `[...]`/`.map`/`.filter`/
  *     `structuredClone`/`JSON` copy of the DIAGNOSTICS (`.diags`) can no longer
  *     drop them: the copy operates on `.diags`, the flags stay on the wrapper.
@@ -86,16 +86,29 @@ export interface DiagnosticBinding extends StoredDiagnosticBinding {
  *
  * `diags` is always present (empty array when nothing was collected). `inconclusive`
  * is present-and-true only for a genuinely unconfirmed collect (the notify write
- * and/or diagnostics wait lapsed its deadline) — absent/false means confirmed;
- * consumers that care about trustworthiness (dispatch runners, the `lsp_diagnostics`
- * tool, the cascade) MUST check it before treating an empty `.diags` as clean.
+ * and/or diagnostics wait lapsed its deadline). `confirmation` is present only when
+ * this touch completed its configured diagnostics/confirmation policy. It is required
+ * before treating an empty result from a known silent-on-clean server as clean, but is
+ * not a substitute for a consumer's stricter scope-specific fallback — notably, an
+ * all-scope classic TypeScript touch still needs the tool's synchronous tsserver check.
  * `binding` is present only for a collecting touch that composed one (absent →
- * "unknown", the honest #533 fall-through). A non-collecting touch
- * (`collectDiagnostics: false` / `diagnostics: "none"`) resolves to `{ diags: [] }`
- * with neither flag, exactly as before.
+ * "unknown", the honest #533 fall-through).
+ *
+ * A touch that SHORT-CIRCUITS resolves to `{ diags: [] }` with no confirmation
+ * metadata — that is `shouldSkipTouch`, which requires `waitForDiagnostics ===
+ * false`, i.e. a non-collecting (`diagnostics: "none"`) touch whose content every
+ * spawned server already has. A debounced COLLECTING touch is a different thing
+ * and does NOT short-circuit: the notify is skipped for the servers that already
+ * hold the content, but the diagnostics wait still runs and the touch can resolve
+ * `confirmation: "confirmed"` on its own evidence. That is sound because the
+ * debounce entry is per-server and recorded only when that server's write
+ * actually landed (#1253/#743) — a skipped notify therefore means "this server
+ * demonstrably has this content", which is exactly the premise the silent-clean
+ * gates need.
  */
 export interface TouchFileResult {
 	diags: import("./client.js").LSPDiagnostic[];
+	confirmation?: "confirmed";
 	inconclusive?: boolean;
 	binding?: DiagnosticBinding;
 }
