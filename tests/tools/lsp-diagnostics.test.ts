@@ -1382,6 +1382,74 @@ describe("lsp_diagnostics tool", () => {
 			}
 		});
 
+		it("orders concurrent same-file results by admission, not settlement (#1198)", async () => {
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-lsp-diag-race-"),
+			);
+			const file = path.join(tmpDir, "race.ts");
+			fs.writeFileSync(file, "const value = 1;\n");
+			const pending: Array<(value: { diags: any[] }) => void> = [];
+			(mocked.service as any).touchFile = vi.fn(
+				() => new Promise((resolve) => pending.push(resolve)),
+			);
+			const oldDiagnostics = [
+				{
+					severity: 1,
+					message: "old TypeScript blocker",
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 1 },
+					},
+					source: "ts",
+				},
+			];
+			let nextWriteIndex = 0;
+			const tool = createLspDiagnosticsTool(() => {
+				// This is the same monotonic source used by the live runtime. The
+				// important assertion is that the old operation reserves 1 before
+				// the newer clean operation reserves 2.
+				return ++nextWriteIndex;
+			});
+			try {
+				const old = tool.execute(
+					"diag-old",
+					{ path: file, severity: "all", waitMs: 1000, serverScope: "primary" },
+					new AbortController().signal,
+					null,
+					{ cwd: tmpDir },
+				);
+				const newer = tool.execute(
+					"diag-new",
+					{ path: file, severity: "all", waitMs: 1000, serverScope: "primary" },
+					new AbortController().signal,
+					null,
+					{ cwd: tmpDir },
+				);
+				await vi.waitFor(() => expect(pending).toHaveLength(2));
+
+				// The newer clean result settles first. It is affirmative here (the
+				// test server is not the silent tier), so it may reconcile. The old
+				// blocker then settles late and must be dropped by its earlier token.
+				pending[1]?.({ diags: [] });
+				await newer;
+				pending[0]?.({ diags: oldDiagnostics });
+				await old;
+
+				expect(reconcileScanDiagnosticsMock).toHaveBeenCalledTimes(2);
+				// The mock bypasses widget-state's guard, so assert the admission
+				// tokens directly: clean settled first with token 2, while the old
+				// blocker settled second with token 1 and is dropped by the real
+				// reconcile guard.
+				expect(reconcileScanDiagnosticsMock.mock.calls.map((call) => call[3])).toEqual([
+					2,
+					1,
+				]);
+				expect(reconcileScanDiagnosticsMock.mock.calls[0]?.[1]).toEqual([]);
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
+
 		it("does NOT reconcile an unconfirmed (tier3-silent, inconclusive) empty result into the footer", async () => {
 			mocked.cascadeTier = "tier3-silent";
 			const tmpDir = fs.mkdtempSync(

@@ -110,9 +110,8 @@ type BatchOptions = {
 	waitMs?: number;
 	signal?: AbortSignal;
 	onProgress?: (completed: number, total: number) => void;
-	// #571: threaded down to `collectFileDiagnosticResult` so each confirmed
-	// per-file result reconciled into the footer draws its own fresh
-	// write-ordering token.
+	// #571/#1198: threaded down to `collectFileDiagnosticResult`, which reserves
+	// one per-file token before awaiting the LSP result.
 	nextWriteIndex?: () => number;
 	// "primary" skips every cross-cutting auxiliary scanner (ast-grep,
 	// opengrep, zizmor, typos, marksman) and only touches the file's actual
@@ -356,11 +355,11 @@ function collectFiles(
 }
 
 export function createLspDiagnosticsTool(
-	// #571: same shared write-ordering token source `lens_diagnostics` mode=full
-	// uses (index.ts injects `() => runtime.nextWriteIndex()`) — a confirmed
-	// fresh result this tool reconciles into the footer draws a fresh token so
-	// `WriteOrderingGuard` can tell it apart from a concurrent, genuinely newer
-	// per-edit write for the same file. Optional/undefined in tests.
+	// #571/#1198: same shared write-ordering token source `lens_diagnostics`
+	// mode=full uses (index.ts injects `() => runtime.nextWriteIndex()`). A
+	// confirmed result reconciled into the footer reserves its token when the
+	// per-file check starts, so settlement order cannot make an older result look
+	// newer. Optional/undefined in tests.
 	nextWriteIndex?: () => number,
 ) {
 	return {
@@ -917,6 +916,11 @@ function canTrustTouchConfirmation(
  * `reconcileScanDiagnostics`). A manual `lsp_diagnostics` check that proves a
  * stale footer error is actually gone (the real-world case that surfaced
  * #571) is exactly the kind of confirmed result that should correct it.
+ * Direct `lsp_diagnostics` deliberately does not perform a second disk read at
+ * this reconciliation seam: its collecting touch already read the content and
+ * supplies the binding verdict. `false` is unconfirmed and is never written;
+ * `true` is trusted, while an absent/`unknown` verdict preserves the legacy
+ * fail-open policy for servers that cannot bind their diagnostics to content.
  *
  * `rawDiags` (pre-severity-filter) is what gets written — the footer records
  * the true known state, independent of this call's display-only severity
@@ -939,7 +943,7 @@ function reconcileWidgetFromLspResult(
 	file: string,
 	rawDiags: LSPDiagnostic[],
 	confirmation: "clean" | "unconfirmed" | undefined,
-	nextWriteIndex: (() => number) | undefined,
+	writeIndex: number | undefined,
 	cwd: string,
 	content: string | undefined,
 	// #1095: true when the result's content binding demonstrably mismatches disk
@@ -972,7 +976,7 @@ function reconcileWidgetFromLspResult(
 			content ?? "",
 			{ cwd, fileRole: detectFileRole(file, content) },
 		);
-		reconcileScanDiagnostics(file, retagged, true, nextWriteIndex?.(), observedAt);
+		reconcileScanDiagnostics(file, retagged, true, writeIndex, observedAt);
 	} catch {
 		// Never let a footer-reconciliation hiccup fail the diagnostics check.
 	}
@@ -998,6 +1002,10 @@ async function collectFileDiagnosticResult(
 	// today besides the two below, both of which now pass it explicitly).
 	cwd: string = process.cwd(),
 ): Promise<FileDiagnosticResult> {
+	// Reserve the ordering token when this diagnostic operation starts, not when
+	// its LSP promise settles. A slower old result must not receive a newer token
+	// merely because it completed later (#1198).
+	const writeIndex = nextWriteIndex?.();
 	let stat: ReturnType<typeof fs.statSync>;
 	try {
 		stat = fs.statSync(file);
@@ -1031,7 +1039,7 @@ async function collectFileDiagnosticResult(
 				file,
 				cached.diagnostics,
 				confirmation,
-				nextWriteIndex,
+				writeIndex,
 				cwd,
 				undefined,
 				// This branch only runs when the cache binding is not a mismatch
@@ -1098,7 +1106,7 @@ async function collectFileDiagnosticResult(
 		file,
 		effectiveRawDiags,
 		confirmation,
-		nextWriteIndex,
+		writeIndex,
 		cwd,
 		collectedContent,
 		boundMismatch,
@@ -1140,6 +1148,9 @@ async function runFileDiagnostics(
 	serverScope: "primary" | "all" = "all",
 	cwd: string = process.cwd(),
 ) {
+	// Reserve the token before awaiting this file's LSP result. The direct-file
+	// path performs its own confirmation/reconciliation below (#1198).
+	const writeIndex = nextWriteIndex?.();
 	const {
 		diagnostics: rawDiags,
 		timedOut,
@@ -1197,7 +1208,7 @@ async function runFileDiagnostics(
 		absPath,
 		effectiveRawDiags,
 		confirmation,
-		nextWriteIndex,
+		writeIndex,
 		cwd,
 		collectedContent,
 		boundMismatch,

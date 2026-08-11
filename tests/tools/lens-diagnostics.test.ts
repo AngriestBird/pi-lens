@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLensDiagnosticsTool } from "../../tools/lens-diagnostics.js";
 import { createLensDiagnosticMarkTool } from "../../tools/lens-diagnostic-mark.js";
+import { hashDiagnosticContent } from "../../clients/lsp/diagnostic-binding.js";
 import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
@@ -600,6 +601,51 @@ describe("lens_diagnostics mode=full", () => {
 		expect(diags).toEqual([
 			expect.objectContaining({ message: "project-wide type error" }),
 		]);
+	});
+
+	it("does NOT reconcile a full-scan result whose fallback content binding mismatches disk (#1198)", async () => {
+		const tmpDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-full-binding-mismatch-"),
+		);
+		const file = path.join(tmpDir, "stale.ts");
+		const oldContent = "const value = 1;\n";
+		try {
+			fs.writeFileSync(file, "const value = 2;\n");
+			const lspService = {
+				runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+					{
+						filePath: file,
+						diagnostics: [
+							{
+								severity: 1,
+								message: "stale diagnostic",
+								range: {
+									start: { line: 0, character: 0 },
+									end: { line: 0, character: 5 },
+								},
+								source: "ts",
+							},
+						],
+						contentHash: hashDiagnosticContent(oldContent),
+					},
+				]),
+			};
+
+			const result = await run(
+				makeTool({}, lspService),
+				{ mode: "full" },
+				tmpDir,
+			);
+
+			expect(reconcileScanDiagnosticsMock).not.toHaveBeenCalled();
+			expect(result.details).toMatchObject({
+				lspFilesConfirmed: 0,
+				lspFilesUnconfirmed: 1,
+			});
+			expect(String(result.content[0].text)).toContain("unconfirmed");
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
 	});
 
 	it("does NOT reconcile a timed-out per-file result into the footer (#571 / #570 dependency)", async () => {
