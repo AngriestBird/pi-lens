@@ -550,6 +550,14 @@ export interface LSPWorkspaceDiagnosticResult {
 	 * pre-#1104 behavior for that entry.
 	 */
 	contentHash?: string;
+	/**
+	 * Monotonic token reserved when this file entered the scan, rather than when
+	 * its asynchronous LSP work settled. Consumers use it to reject late old
+	 * results (#1198).
+	 */
+	writeIndex?: number;
+	/** #1198: explicit content-binding verdict from a per-file touch. */
+	boundToCurrentDisk?: BoundToCurrentDisk;
 }
 
 /**
@@ -4027,6 +4035,11 @@ export class LSPService {
 			 * online. The caller may use this to refresh host observability UI. */
 			onServerReady?: () => void;
 			/**
+			 * Reserve per-file reconciliation order at scan admission time. The
+			 * callback is never called at result-settlement time (#1198).
+			 */
+			nextWriteIndex?: () => number;
+			/**
 			 * Explicit file list (#461): skip the project walk entirely and route
 			 * exactly these files through the sweep. Used by lens_diagnostics'
 			 * `paths` scope restrictor so a wrapper (e.g. "git-staged files only")
@@ -4084,7 +4097,14 @@ export class LSPService {
 		]);
 		const cachedResults: LSPWorkspaceDiagnosticResult[] = [];
 		const filesToTouch: string[] = [];
+		const writeIndexByPath = new Map<string, number | undefined>();
 		for (const filePath of files) {
+			// Reserve order before cache lookup/touch admission. A result that settles
+			// later is still ordered by when this scan began observing the file (#1198).
+			writeIndexByPath.set(
+				normalizeMapKey(filePath),
+				options.nextWriteIndex?.(),
+			);
 			const cached = workspaceDiagnosticsCacheCtx.lookup(
 				filePath,
 				workspaceSweepScopeKey,
@@ -4105,6 +4125,9 @@ export class LSPService {
 					// scan time so mode=full's footer reconcile stamps `touchedAt`
 					// with when the truth was seen, not now().
 					observedAt: cached.scannedAt,
+					contentHash: cached.binding.contentHash,
+					boundToCurrentDisk: cached.binding.boundToCurrentDisk,
+					writeIndex: writeIndexByPath.get(normalizeMapKey(filePath)),
 				});
 			} else {
 				filesToTouch.push(filePath);
@@ -4365,6 +4388,8 @@ export class LSPService {
 					count: filteredDiagnostics?.length ?? 0,
 					timedOut,
 					contentHash: rawBinding?.contentHash,
+					boundToCurrentDisk: rawBinding?.boundToCurrentDisk,
+					writeIndex: writeIndexByPath.get(normalizeMapKey(filePath)),
 				});
 			} catch (err) {
 				results.push({
@@ -4376,6 +4401,7 @@ export class LSPService {
 					// no confirmed result was obtained, so reconciliation (#571) must
 					// skip it the same way.
 					timedOut: true,
+					writeIndex: writeIndexByPath.get(normalizeMapKey(filePath)),
 				});
 			}
 			completed += 1;
@@ -4423,7 +4449,12 @@ export class LSPService {
 					const pulled = await this.tryWorkspacePull(group.files, perFileMs);
 					if (pulled) {
 						for (const result of pulled) {
-							results.push(result);
+							results.push({
+								...result,
+								writeIndex: writeIndexByPath.get(
+									normalizeMapKey(result.filePath),
+								),
+							});
 							// #671: a pull result is always confirmed (see
 							// `tryWorkspacePull`'s doc comment), so it's cache-eligible
 							// too — best-effort stat since the pull already resolved the

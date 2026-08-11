@@ -34,6 +34,10 @@ import {
 import { getLSPService } from "../clients/lsp/index.js";
 import { primaryServerId } from "../clients/lsp/config.js";
 import type { LSPDiagnostic } from "../clients/lsp/client.js";
+import {
+	hashDiagnosticContent,
+	type BoundToCurrentDisk,
+} from "../clients/lsp/diagnostic-binding.js";
 import type { CacheManager } from "../clients/cache-manager.js";
 import {
 	loadProjectDiagnosticsDeltaReport,
@@ -89,6 +93,7 @@ type LSPServiceLike = ReturnType<typeof getLSPService> & {
 			signal?: AbortSignal;
 			onProgress?: (completed: number, total: number) => void;
 			onServerReady?: () => void;
+			nextWriteIndex?: () => number;
 			files?: string[];
 		},
 	) => Promise<WorkspaceLspDiagnosticResult[]>;
@@ -109,6 +114,9 @@ type WorkspaceLspDiagnosticResult = {
 	// footer reconcile so a cache-served mode=full doesn't re-arm the widget's
 	// mtime-staleness gate. See LSPWorkspaceDiagnosticResult.observedAt.
 	observedAt?: number;
+	contentHash?: string;
+	boundToCurrentDisk?: BoundToCurrentDisk;
+	writeIndex?: number;
 };
 
 // Wall-clock ceiling for the whole mode=full scan. Even with per-file budgets
@@ -1261,6 +1269,7 @@ async function formatFullMode(
 			signal,
 			onProgress: options.onProgress,
 			onServerReady: options.onServerReady,
+			nextWriteIndex: options.nextWriteIndex,
 			files: explicitFiles,
 		}),
 		getProjectDiagnosticsSnapshotForFullMode(cwd, {
@@ -1273,6 +1282,22 @@ async function formatFullMode(
 	const lspResults = rawLspResults.filter((result) =>
 		includeFile(result.filePath),
 	);
+	// A result bound to a different document must not replace the current
+	// widget state, even when it contains real diagnostics. Pull results carry a
+	// content hash rather than the push binding verdict, so verify that hash
+	// against disk here; unreadable files remain unknown and are not rejected.
+	const bindingMismatch = (result: WorkspaceLspDiagnosticResult): boolean => {
+		if (result.boundToCurrentDisk === false) return true;
+		if (result.contentHash === undefined) return false;
+		try {
+			return (
+				hashDiagnosticContent(fsSync.readFileSync(result.filePath, "utf-8")) !==
+				result.contentHash
+			);
+		} catch {
+			return false;
+		}
+	};
 	// #630: `timedOut`/`error` means the per-file check never actually
 	// completed or was inconclusive (#570's `touchFile().inconclusive`, or
 	// this sweep's own outer per-file deadline/throw — see
@@ -1284,11 +1309,21 @@ async function formatFullMode(
 	// the unfiltered `lspResults` in, so a timed-out file's placeholder `[]`
 	// read as "0 diagnostics" — false-clean — in the rendered/`details`
 	// output (#630).
+	const mismatchedLspResults = new WeakSet<WorkspaceLspDiagnosticResult>();
+	for (const result of lspResults) {
+		if (bindingMismatch(result)) mismatchedLspResults.add(result);
+	}
 	const confirmedLspResults = lspResults.filter(
-		(result) => !result.timedOut && !result.error,
+		(result) =>
+			!result.timedOut &&
+			!result.error &&
+			!mismatchedLspResults.has(result),
 	);
 	const unconfirmedLspResults = lspResults.filter(
-		(result) => result.timedOut || result.error,
+		(result) =>
+			result.timedOut ||
+			result.error ||
+			mismatchedLspResults.has(result),
 	);
 	// #571: reconcile this scan's fresh, CONFIRMED per-file results into the
 	// footer cache. A footer write is never allowed to fail the tool call, so
@@ -1323,7 +1358,9 @@ async function formatFullMode(
 				result.filePath,
 				retagged,
 				true,
-				nextWriteIndex?.(),
+				// The service reserves this token when the file enters the scan. The
+				// fallback preserves compatibility with older test doubles/services.
+				result.writeIndex ?? nextWriteIndex?.(),
 				// #1093: `observedAt` is set only when this result was served from
 				// the workspace-diagnostics cache (a replay of an older scan) —
 				// stamp `touchedAt` with when it was scanned, not now(), so a

@@ -1248,7 +1248,10 @@ export async function runPipeline(
 			turnIndex: ctx.telemetry?.turnIndex ?? 0,
 			writeIndex: ctx.telemetry?.writeIndex ?? 0,
 		},
-		{ projectRoot: ctx.projectRoot },
+		{
+			projectRoot: ctx.projectRoot,
+			writeIndex: ctx.telemetry?.writeIndex,
+		},
 	);
 	recordDiagnostics(
 		filePath,
