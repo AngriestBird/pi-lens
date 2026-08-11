@@ -2546,20 +2546,39 @@ export class LSPService {
 								) === "tier3-silent",
 						);
 						if (allSilent) {
-							diagnosticsTimedOut = false;
-							logLatency({
-								type: "phase",
-								phase: "lsp_silent_clean_confirm",
-								filePath: normalizedPath,
-								durationMs: Date.now() - startedAt,
-								metadata: {
-									source,
-									clientScope,
-									diagnosticsMode,
-									aggregate: true,
-									serverIds: outstanding.map((entry) => entry.client.serverId),
-								},
-							});
+							// #1277: the static tier3-silent classification alone can't
+							// tell a genuinely clean server from one that accepted the
+							// notify write and then wedged — both look identical to
+							// `classifyServerWaitTier`, which only reads the capability
+							// snapshot, never the server's actual current responsiveness.
+							// Require every still-outstanding server to answer a cheap
+							// bounded round-trip before trusting the silence as clean;
+							// any server that doesn't respond in time keeps the touch
+							// inconclusive rather than confirming a possibly-dead server
+							// clean.
+							const liveness = await Promise.all(
+								outstanding.map((entry) =>
+									(entry.client.pingLiveness?.() ?? Promise.resolve(true)).catch(
+										() => false,
+									),
+								),
+							);
+							if (liveness.every(Boolean)) {
+								diagnosticsTimedOut = false;
+								logLatency({
+									type: "phase",
+									phase: "lsp_silent_clean_confirm",
+									filePath: normalizedPath,
+									durationMs: Date.now() - startedAt,
+									metadata: {
+										source,
+										clientScope,
+										diagnosticsMode,
+										aggregate: true,
+										serverIds: outstanding.map((entry) => entry.client.serverId),
+									},
+								});
+							}
 						}
 					}
 				} catch {
@@ -2691,20 +2710,31 @@ export class LSPService {
 				if (
 					classifyCascadeWaitTier(this, filePath, snapshots) === "tier3-silent"
 				) {
-					diagnosticsTimedOut = false;
-					if (collected !== undefined) collected = mergeLspDiagnostics([]);
-					logLatency({
-						type: "phase",
-						phase: "lsp_silent_clean_confirm",
-						filePath: normalizedPath,
-						durationMs: Date.now() - startedAt,
-						metadata: {
-							source,
-							clientScope,
-							diagnosticsMode,
-							serverId: spawned[0].client.serverId,
-						},
-					});
+					// #1277: same liveness precondition as the aggregate gate above —
+					// `tier3-silent` is a static capability classification and can't
+					// distinguish "silent because clean" from "silent because wedged".
+					// A cheap bounded round-trip proves the server is still actually
+					// responding before its silence is trusted as a clean confirm; a
+					// server that doesn't answer in time leaves the touch inconclusive.
+					const alive = await (
+						spawned[0].client.pingLiveness?.() ?? Promise.resolve(true)
+					).catch(() => false);
+					if (alive) {
+						diagnosticsTimedOut = false;
+						if (collected !== undefined) collected = mergeLspDiagnostics([]);
+						logLatency({
+							type: "phase",
+							phase: "lsp_silent_clean_confirm",
+							filePath: normalizedPath,
+							durationMs: Date.now() - startedAt,
+							metadata: {
+								source,
+								clientScope,
+								diagnosticsMode,
+								serverId: spawned[0].client.serverId,
+							},
+						});
+					}
 				}
 			} catch {
 				// Fail-safe: leave `diagnosticsTimedOut` as-is — today's inconclusive
