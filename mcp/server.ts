@@ -60,6 +60,7 @@ import {
 	runSessionStart,
 	runTurnEnd,
 	runTurnEndForIpc,
+	acknowledgeTurnEnd,
 	scanTruncationNotice,
 	summarizeScan,
 	symbolSearch,
@@ -266,44 +267,6 @@ function getAutoSessionStatus(): AutoSessionState | null {
 // Responses go over the socket — never stdout — so the MCP stream is untouched.
 
 const IPC_PATH = ipcPathForCwd(DEFAULT_CWD);
-const TURN_END_ACK_WAIT_MS = 5_000;
-
-/** Wait for the Stop hook to acknowledge receipt before committing its pass. */
-function waitForTurnEndAck(socket: net.Socket): Promise<boolean> {
-	return new Promise((resolve) => {
-		let settled = false;
-		let buffer = "";
-		const finish = (accepted: boolean): void => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			socket.removeListener("data", onData);
-			socket.removeListener("close", onClose);
-			resolve(accepted);
-		};
-		const onData = (chunk: string): void => {
-			buffer += chunk;
-			let newline = buffer.indexOf("\n");
-			while (newline !== -1) {
-				const line = buffer.slice(0, newline);
-				buffer = buffer.slice(newline + 1);
-				try {
-					const message = JSON.parse(line) as { ack?: boolean };
-					if (message.ack === true) finish(true);
-				} catch {
-					finish(false);
-				}
-				if (settled) return;
-				newline = buffer.indexOf("\n");
-			}
-		};
-		const onClose = (): void => finish(false);
-		const timer = setTimeout(() => finish(false), TURN_END_ACK_WAIT_MS);
-		timer.unref();
-		socket.on("data", onData);
-		socket.once("close", onClose);
-	});
-}
 
 function startIpcServer(): void {
 	// POSIX: a stale socket file blocks listen; remove it first. (Named pipes on
@@ -338,6 +301,33 @@ function startIpcServer(): void {
 						const parsed = JSON.parse(line) as Partial<
 							WarmTurnEndRequest & WarmAnalyzeRequest
 						>;
+						if ((parsed as { route?: string }).route === "turn-end-ack") {
+							if (
+								parsed.version !== WARM_TURN_END_SCHEMA_VERSION ||
+								typeof (parsed as { deliveryId?: unknown }).deliveryId !==
+									"string"
+							) {
+								socket.end(
+									`${JSON.stringify({ error: `turn-end ack schema ${parsed.version} != ${WARM_TURN_END_SCHEMA_VERSION}` })}\n`,
+								);
+								return;
+							}
+							const turnCwd = parsed.cwd ?? DEFAULT_CWD;
+							const acknowledged = acknowledgeTurnEnd(
+								turnCwd,
+								(parsed as { deliveryId: string }).deliveryId,
+							);
+							socket.end(
+								`${JSON.stringify({
+									result: {
+										route: "turn-end-ack",
+										version: WARM_TURN_END_SCHEMA_VERSION,
+										acknowledged,
+									},
+								})}\n`,
+							);
+							return;
+						}
 						if (parsed.route === "turn-end") {
 							if (parsed.version !== WARM_TURN_END_SCHEMA_VERSION) {
 								socket.end(
@@ -348,24 +338,15 @@ function startIpcServer(): void {
 							const turnCwd = parsed.cwd ?? DEFAULT_CWD;
 							console.error(`[pi-lens-mcp] warm turn-end: ${turnCwd}`);
 							await ensureReady(turnCwd);
-							await runTurnEndForIpc(turnCwd, async (outcome) => {
-								const result: WarmTurnEndResponse = {
-									route: "turn-end",
-									version: WARM_TURN_END_SCHEMA_VERSION,
-									turnEnd: outcome.turnEnd,
-									tests: outcome.tests,
-								};
-								if (socket.destroyed) return false;
-								socket.write(`${JSON.stringify({ result })}\n`);
-								return parsed.ack === true
-									? waitForTurnEndAck(socket)
-									: false;
-							});
-							if (!socket.destroyed && parsed.ack === true) {
-								socket.end('{"ack":true}\n');
-							} else if (!socket.destroyed) {
-								socket.end();
-							}
+							const delivery = await runTurnEndForIpc(turnCwd);
+							const result: WarmTurnEndResponse = {
+								route: "turn-end",
+								version: WARM_TURN_END_SCHEMA_VERSION,
+								turnEnd: delivery.outcome.turnEnd,
+								tests: delivery.outcome.tests,
+								deliveryId: delivery.deliveryId,
+							};
+							socket.end(`${JSON.stringify({ result })}\n`);
 							return;
 						}
 						const req = parsed as WarmAnalyzeRequest;

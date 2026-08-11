@@ -17,6 +17,7 @@
  * across calls, like a real session), and the bootstrap client bundle.
  */
 
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { AstGrepClient } from "../ast-grep-client.js";
@@ -149,12 +150,20 @@ export interface TurnEndOutcome {
 	filesRegistered: number;
 }
 
-export type TurnEndAck = (outcome: TurnEndOutcome) => Promise<boolean>;
+export interface TurnEndDelivery {
+	outcome: TurnEndOutcome;
+	/** Capability required by a separate one-shot ack request. */
+	deliveryId?: string;
+}
 
 interface TurnEndTransaction {
 	outcome: TurnEndOutcome;
 	commit: () => void;
-	rollback: () => void;
+}
+
+interface PendingTurnEndDelivery {
+	cwd: string;
+	transaction: TurnEndTransaction;
 }
 
 const TURN_END_QUEUE_WAIT_MS = 5_000;
@@ -222,6 +231,7 @@ class TurnEndQueue {
 }
 
 const turnEndQueue = new TurnEndQueue();
+const pendingTurnEndDeliveries = new Map<string, PendingTurnEndDelivery>();
 
 /**
  * Run pi-lens's real turn_end over the files edited this "turn". The handler
@@ -256,10 +266,6 @@ async function runTurnEndNow(
 		registered++;
 	}
 
-	// Capture the complete worklist AFTER explicit files have been registered.
-	// handleTurnEnd clears it before the IPC reply is acknowledged; rollback
-	// restores this snapshot if the Stop client times out or disconnects.
-	const priorTurnState = ctx.cacheManager.readTurnState(cwd);
 	const owner: TurnStateOwner = {
 		kind: "mcp",
 		id: MCP_TURN_STATE_OWNER_ID,
@@ -301,10 +307,6 @@ async function runTurnEndNow(
 			consumeTurnEndFindings(ctx.cacheManager, cwd);
 			consumeTestFindings(ctx.cacheManager, cwd);
 		},
-		rollback: () => {
-			if (!deferredDelivery) return;
-			ctx.cacheManager.restoreTurnStateFiles(cwd, priorTurnState);
-		},
 	};
 }
 
@@ -321,25 +323,71 @@ export function runTurnEnd(
 	);
 }
 
+/** A result with no findings needs no durable delivery transaction. */
+function hasTurnEndFindings(outcome: TurnEndOutcome): boolean {
+	return Boolean(outcome.turnEnd || outcome.tests);
+}
+
+function pendingForCwd(cwd: string): [string, PendingTurnEndDelivery] | undefined {
+	for (const [deliveryId, delivery] of pendingTurnEndDeliveries) {
+		if (delivery.cwd === cwd) return [deliveryId, delivery];
+	}
+	return undefined;
+}
+
 /**
- * Run the Stop-hook pass as a delivery transaction. The callback must write the
- * reply and wait for an acknowledgement. A timeout/connection close rolls the
- * worklist back and leaves finding caches unconsumed for a later Stop.
+ * Run the Stop-hook pass as a durable delivery transaction. The result is
+ * acknowledged through a separate one-shot IPC request. Until that request
+ * arrives, the findings cache is deliberately left unconsumed; a client
+ * timeout, socket close, or server restart therefore leaves the result for a
+ * later Stop request instead of losing it between execution and reply.
  */
 export function runTurnEndForIpc(
 	cwd: string,
-	waitForAck: TurnEndAck,
-): Promise<TurnEndOutcome> {
+): Promise<TurnEndDelivery> {
 	return turnEndQueue.enqueue(async () => {
-		const transaction = await runTurnEndNow(cwd, [], true);
-		const acknowledged = await waitForAck(transaction.outcome);
-		if (acknowledged) transaction.commit();
-		else transaction.rollback();
-		return transaction.outcome;
+		const pending = pendingForCwd(cwd);
+		if (pending) {
+			return { outcome: pending[1].transaction.outcome, deliveryId: pending[0] };
+		}
+
+		const ctx = await getMcpSessionContext();
+		const cachedOutcome: TurnEndOutcome = {
+			turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd)),
+			tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd)),
+			filesRegistered: 0,
+		};
+		const transaction = hasTurnEndFindings(cachedOutcome)
+			? {
+					outcome: cachedOutcome,
+					commit: () => {
+						consumeTurnEndFindings(ctx.cacheManager, cwd);
+						consumeTestFindings(ctx.cacheManager, cwd);
+					},
+				}
+			: await runTurnEndNow(cwd, [], true);
+
+		if (!hasTurnEndFindings(transaction.outcome)) {
+			return { outcome: transaction.outcome };
+		}
+
+		const deliveryId = crypto.randomUUID();
+		pendingTurnEndDeliveries.set(deliveryId, { cwd, transaction });
+		return { outcome: transaction.outcome, deliveryId };
 	});
+}
+
+/** Commit exactly one admitted delivery capability. */
+export function acknowledgeTurnEnd(cwd: string, deliveryId: string): boolean {
+	const delivery = pendingTurnEndDeliveries.get(deliveryId);
+	if (!delivery || delivery.cwd !== cwd) return false;
+	pendingTurnEndDeliveries.delete(deliveryId);
+	delivery.transaction.commit();
+	return true;
 }
 
 /** Test hook — drop pending requests so one failed test cannot wedge the rest. */
 export function _resetTurnEndChain(): void {
 	turnEndQueue.reset();
+	pendingTurnEndDeliveries.clear();
 }

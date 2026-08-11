@@ -77,7 +77,9 @@ export {
 	runSessionStart,
 	runTurnEnd,
 	runTurnEndForIpc,
+	acknowledgeTurnEnd,
 	type SessionStartOutcome,
+	type TurnEndDelivery,
 	type TurnEndOutcome,
 } from "./mcp/session.js";
 export {

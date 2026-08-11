@@ -73,22 +73,28 @@ vi.mock("../../../clients/runtime-context.js", () => ({
 import {
 	_resetMcpSessionContext,
 	_resetTurnEndChain,
+	acknowledgeTurnEnd,
 	runSessionStart,
 	runTurnEnd,
 	runTurnEndForIpc,
 } from "../../../clients/mcp/session.js";
 
 let tmpDir: string;
+let previousDataDir: string | undefined;
 
 beforeEach(() => {
+	previousDataDir = process.env.PILENS_DATA_DIR;
 	handleSessionStart.mockClear();
 	handleTurnEnd.mockClear();
 	_resetMcpSessionContext();
 	_resetTurnEndChain();
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-mcp-session-"));
+	process.env.PILENS_DATA_DIR = path.join(tmpDir, "data");
 });
 
 afterEach(() => {
+	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+	else process.env.PILENS_DATA_DIR = previousDataDir;
 	removeTempDirSync(tmpDir);
 });
 
@@ -146,7 +152,7 @@ describe("runTurnEnd", () => {
 		expect(handleTurnEnd).toHaveBeenCalledTimes(1);
 	});
 
-	it("rolls the worklist back when the Stop reply is not acknowledged (#1218)", async () => {
+	it("keeps findings available when the Stop client times out (#1218)", async () => {
 		const file = path.join(tmpDir, "timeout.ts");
 		fs.writeFileSync(file, "export const timeout = true;\n");
 		new CacheManager().addModifiedRange(
@@ -158,21 +164,23 @@ describe("runTurnEnd", () => {
 			"mcp",
 		);
 
-		const outcome = await runTurnEndForIpc(tmpDir, async () => false);
-		expect(outcome.turnEnd).toBe("TURN ADVISORY");
-		expect(outcome.tests).toBe("TESTS FAILED");
-		expect(new CacheManager().readTurnState(tmpDir).files).toHaveProperty(
-			"timeout.ts",
-		);
-		// The transaction itself was allowed to finish, but delivery state remains
-		// owned by the next authorized Stop rather than being consumed here.
-		expect(outcome.filesRegistered).toBe(0);
+		const delivery = await runTurnEndForIpc(tmpDir);
+		expect(delivery.outcome.turnEnd).toBe("TURN ADVISORY");
+		expect(delivery.outcome.tests).toBe("TESTS FAILED");
+		expect(delivery.deliveryId).toBeTypeOf("string");
+		// A later Stop receives the same durable delivery rather than running a
+		// second pass or losing findings while the first client was gone.
+		const retry = await runTurnEndForIpc(tmpDir);
+		expect(retry.deliveryId).toBe(delivery.deliveryId);
+		expect(retry.outcome).toEqual(delivery.outcome);
+		expect(acknowledgeTurnEnd(tmpDir, delivery.deliveryId!)).toBe(true);
 	});
 
 	it("commits finding delivery only after the Stop reply is acknowledged", async () => {
-		const outcome = await runTurnEndForIpc(tmpDir, async () => true);
-		expect(outcome.turnEnd).toBe("TURN ADVISORY");
-		expect(outcome.tests).toBe("TESTS FAILED");
+		const delivery = await runTurnEndForIpc(tmpDir);
+		expect(delivery.outcome.turnEnd).toBe("TURN ADVISORY");
+		expect(acknowledgeTurnEnd(tmpDir, delivery.deliveryId!)).toBe(true);
+		expect(acknowledgeTurnEnd(tmpDir, delivery.deliveryId!)).toBe(false);
 	});
 
 	// Two concurrent handleTurnEnds share one RuntimeCoordinator/CacheManager and

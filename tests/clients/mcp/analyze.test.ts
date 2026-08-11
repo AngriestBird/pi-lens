@@ -105,8 +105,10 @@ const emptyResult = {
 
 let tmpDir: string;
 let tsFile: string;
+let previousDataDir: string | undefined;
 
 beforeEach(() => {
+	previousDataDir = process.env.PILENS_DATA_DIR;
 	resetDispatchBaselines();
 	clearWidgetState();
 	vi.mocked(dispatchForFile).mockReset();
@@ -117,11 +119,14 @@ beforeEach(() => {
 	mockSupportsLSP.mockReturnValue(false);
 	mockBuildOrUpdateGraph.mockClear();
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-mcp-analyze-"));
+	process.env.PILENS_DATA_DIR = path.join(tmpDir, "data");
 	tsFile = path.join(tmpDir, "app.ts");
 	fs.writeFileSync(tsFile, "export const a = 1;\n");
 });
 
 afterEach(() => {
+	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+	else process.env.PILENS_DATA_DIR = previousDataDir;
 	removeTempDirSync(tmpDir);
 });
 
@@ -360,6 +365,36 @@ describe("analyzeFile", () => {
 		const state = cache.readTurnState(tmpDir);
 		expect(Object.keys(state.files)).toEqual(["first.ts"]);
 		expect(cache.getTurnStateAccess(tmpDir, { kind: "mcp", id: "mcp-live-b" })).toBe("foreign-live");
+	});
+
+	it("preserves explicit writer ownership across pi/MCP handoffs (#1262)", () => {
+		const cache = new CacheManager();
+		const piFile = path.join(tmpDir, "pi.ts");
+		const mcpFile = path.join(tmpDir, "mcp.ts");
+		const sameSessionFile = path.join(tmpDir, "same-session.ts");
+		for (const file of [piFile, mcpFile, sameSessionFile]) {
+			fs.writeFileSync(file, "export const value = 1;\n");
+		}
+
+		cache.addModifiedRange(piFile, { start: 1, end: 1 }, false, tmpDir, "pi-a", "pi");
+		// A live MCP writer cannot consume or claim the pi worklist.
+		cache.addModifiedRange(mcpFile, { start: 1, end: 1 }, false, tmpDir, "mcp-a", "mcp");
+		expect(cache.readTurnState(tmpDir).files).not.toHaveProperty("mcp.ts");
+
+		// A repeated PostToolUse from the same MCP session extends its own worklist.
+		cache.addModifiedRange(sameSessionFile, { start: 1, end: 1 }, false, tmpDir, "pi-a", "pi");
+		expect(cache.readTurnState(tmpDir).files).toHaveProperty("same-session.ts");
+
+		// sessionId:null is non-claiming: it may append a file but never erases owner.
+		cache.addModifiedRange(mcpFile, { start: 1, end: 1 }, false, tmpDir, null, "mcp");
+		expect(cache.readTurnState(tmpDir).owner).toMatchObject({ kind: "pi", id: "pi-a" });
+
+		// A different pi session can replace the owner only after its heartbeat is stale.
+		const stale = cache.readTurnState(tmpDir);
+		stale.owner!.lastSeen = new Date(Date.now() - 31 * 60_000).toISOString();
+		cache.writeTurnState(stale, tmpDir);
+		cache.addModifiedRange(mcpFile, { start: 1, end: 1 }, false, tmpDir, "mcp-b", "mcp");
+		expect(cache.readTurnState(tmpDir).owner).toMatchObject({ kind: "mcp", id: "mcp-b" });
 	});
 
 	it("leaves turn-state untouched by default (#A)", async () => {

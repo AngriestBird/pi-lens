@@ -420,18 +420,29 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
 - **Per-turn half = the same bin on a `Stop` hook** (`--turn-end`, or a `Stop`
   payload on stdin; #538). Tagged `{route:"turn-end"}` request on the WORKSPACE
   IPC endpoint (a Stop hook knows its cwd, never the server pid), which also
-  inherits the #535 staleness gate. It passes NO files and never stamps a
-  `sessionId` (and clears any inherited pi-session stamp), so turn-end's
-  stale-session eviction leaves the PostToolUse worklist alone. All workspace
-  IPC requests share one server-side queue, so a still-running analyze always
-  finishes before the following Stop pass and concurrent turn-ends cannot race.
-  **Warm-only, no cold fallback** — only the server process owns the session
-  state and pending turn work, so a local pass reports a false clean; unavailable
-  ⇒ one stderr line, silent stdout, exit 0. `SubagentStop` is deliberately NOT
-  registered (subagent edits already reach turn-state via PostToolUse; the
-  consume bridges are one-shot). Stop-hook stdout is user-visible in transcript
-  mode, not model context — blockers still gate commits via the retained
-  lens-guard record.
+  inherits the #535 staleness gate. It passes NO files. Each Stop pass has an
+  execution/delivery boundary: findings are only consumed after the client has
+  received the reply and sends a delivery capability acknowledgement over a
+  second one-shot IPC connection. A timeout or close leaves the finding cache
+  durable and a later authorized Stop re-delivers it. All workspace IPC requests
+  share one server-side queue, so a still-running analyze always finishes before
+  the following Stop pass and concurrent turn-ends cannot race. The queue admits
+  at most one waiting item; excess callers fail explicitly with `turn_end queue is
+  busy` rather than growing an unbounded head-of-line tail. **Warm-only, no cold
+  fallback** — only the server process owns the session state and pending turn
+  work, so a local pass reports a false clean; unavailable ⇒ one stderr line,
+  silent stdout, exit 0. `SubagentStop` is deliberately NOT registered (subagent
+  edits already reach turn-state via PostToolUse; the consume bridges are
+  one-shot). Stop-hook stdout is user-visible in transcript mode, not model
+  context — blockers still gate commits via the retained lens-guard record.
+
+  Turn-state ownership is explicit: pi writers use `{kind:"pi", id: telemetry
+  session}` and MCP writers use `{kind:"mcp", id: process-scoped server owner}`.
+  `sessionId:null` is a non-claiming update and never clears an existing owner;
+  a live foreign owner is retained, while an owner whose process is dead or
+  whose bounded heartbeat is stale may be replaced. Repeated writes from the
+  same owner extend its worklist. This covers pi/MCP handoff without letting one
+  MCP session consume another's files.
 - **Same-workspace warm attach (#822, opt-in soak).** `PI_LENS_WARM_ATTACH=1`
   selects a PID-confirmed, heartbeat-fresh same-root incumbent from
   `instances.json`. The LSP runner sends versioned, content-hash-bound,
@@ -500,7 +511,9 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   Before mirroring a pi capability, check it's actually live.
 - Tests: `tests/clients/mcp/*` (units) + `tests/mcp/*` (spawn smokes — real server
   - bin end-to-end). Live behaviors (warm IPC, real session/turn) are unit-covered;
-  the spawn smokes don't exercise them.
+  the spawn smokes don't exercise them. Spawn helpers must use temp workspaces,
+  `PILENS_DATA_DIR`, and `PI_LENS_HOME`; never bind the real workspace socket or
+  write the developer's project/global state.
 
 ## Package scope
 

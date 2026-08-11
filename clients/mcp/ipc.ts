@@ -297,8 +297,6 @@ export interface WarmTurnEndRequest {
 	route: "turn-end";
 	version: number;
 	cwd: string;
-	/** The server commits the worklist only after this connection acknowledges. */
-	ack?: boolean;
 }
 
 export interface WarmTurnEndResponse {
@@ -306,6 +304,21 @@ export interface WarmTurnEndResponse {
 	version: number;
 	turnEnd?: string;
 	tests?: string;
+	/** Present when the server admitted a durable findings delivery. */
+	deliveryId?: string;
+}
+
+export interface WarmTurnEndAckRequest {
+	route: "turn-end-ack";
+	version: number;
+	cwd: string;
+	deliveryId: string;
+}
+
+export interface WarmTurnEndAckResponse {
+	route: "turn-end-ack";
+	version: number;
+	acknowledged: boolean;
 }
 
 export type WarmTurnEndResult =
@@ -313,86 +326,54 @@ export type WarmTurnEndResult =
 	| { available: false; reason: WarmDiagnosticsFailureReason };
 
 /**
- * Ask the warm server to run pi-lens's real turn-end pass. The reply is a
- * two-phase delivery: the client acknowledges the report and the server only
- * then consumes finding caches/clears the worklist. If this deadline wins, the
- * server keeps the pass durable for a later authorized Stop. 55 s expires inside
- * Claude Code's 60 s hook timeout.
+ * Ask the warm server to run pi-lens's real turn-end pass. Execution and
+ * delivery are separate: the first one-shot connection returns a capability,
+ * then a second one-shot connection acknowledges receipt. If the client
+ * deadline or either connection loses, the server leaves the durable finding
+ * cache untouched for a later Stop. 55 s expires inside Claude Code's 60 s hook
+ * timeout.
  */
-export function requestWarmTurnEnd(
+export async function requestWarmTurnEnd(
 	cwd: string,
 	timeoutMs = 55_000,
 ): Promise<WarmTurnEndResult> {
-	return new Promise((resolve) => {
-		let settled = false;
-		let response: WarmTurnEndResponse | undefined;
-		let buffer = "";
-		const socket = net.createConnection(ipcPathForCwd(cwd));
-		socket.setEncoding("utf8");
-		const finish = (value: WarmTurnEndResult): void => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			socket.destroy();
-			resolve(value);
-		};
-		const timer = setTimeout(
-			() => finish({ available: false, reason: "timeout" }),
-			timeoutMs,
-		);
-		timer.unref();
-		socket.on("connect", () =>
-			socket.write(
-				`${JSON.stringify({
-					route: "turn-end",
-					version: WARM_TURN_END_SCHEMA_VERSION,
-					cwd,
-					ack: true,
-				} satisfies WarmTurnEndRequest)}\n`,
-			),
-		);
-		socket.on("data", (chunk: string) => {
-			buffer += chunk;
-			let newline = buffer.indexOf("\n");
-			while (newline !== -1) {
-				const line = buffer.slice(0, newline);
-				buffer = buffer.slice(newline + 1);
-				try {
-					const message = JSON.parse(line) as {
-						result?: WarmTurnEndResponse;
-						error?: string;
-						ack?: boolean;
-					};
-					if (message.error) {
-						finish({ available: false, reason: "ipc-error" });
-						return;
-					}
-					if (message.result) {
-						if (
-							message.result.route !== "turn-end" ||
-							message.result.version !== WARM_TURN_END_SCHEMA_VERSION
-						) {
-							finish({ available: false, reason: "schema-mismatch" });
-							return;
-						}
-						response = message.result;
-						socket.write('{"ack":true}\n');
-					} else if (message.ack === true && response) {
-						finish({ available: true, response });
-						return;
-					}
-				} catch {
-					finish({ available: false, reason: "schema-mismatch" });
-					return;
-				}
-				newline = buffer.indexOf("\n");
-			}
-		});
-		socket.on("error", () => finish({ available: false, reason: "ipc-error" }));
-		socket.on("close", () => {
-			if (!settled) finish({ available: false, reason: "ipc-error" });
-		});
-	});
+	const startedAt = Date.now();
+	const first = await requestOverWarmIpc<WarmTurnEndResponse>(
+		ipcPathForCwd(cwd),
+		timeoutMs,
+		(): WarmTurnEndRequest => ({
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			cwd,
+		}),
+		(result) =>
+			result.route === "turn-end" &&
+			result.version === WARM_TURN_END_SCHEMA_VERSION
+				? undefined
+				: "schema-mismatch",
+	);
+	if (!first.available || !first.response.deliveryId) return first;
+
+	const remainingMs = timeoutMs - (Date.now() - startedAt);
+	if (remainingMs <= 0) return { available: false, reason: "timeout" };
+	const ack = await requestOverWarmIpc<WarmTurnEndAckResponse>(
+		ipcPathForCwd(cwd),
+		remainingMs,
+		(): WarmTurnEndAckRequest => ({
+			route: "turn-end-ack",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			cwd,
+			deliveryId: first.response.deliveryId!,
+		}),
+		(result) =>
+			result.route === "turn-end-ack" &&
+			result.acknowledged === true
+				? undefined
+				: "ipc-error",
+	);
+	return ack.available
+		? { available: true, response: first.response }
+		: { available: false, reason: ack.reason };
 }
 
 /**

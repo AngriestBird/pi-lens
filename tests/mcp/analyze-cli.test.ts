@@ -32,6 +32,9 @@ const repoRoot = path.resolve(
 	"../..",
 );
 const binJs = path.join(repoRoot, "mcp", "analyze-cli.js");
+const testIsolationDir = fs.mkdtempSync(
+	path.join(os.tmpdir(), "pi-lens-cli-isolation-"),
+);
 
 const SMELLY = `export function f(x) {
 \tif (x) { if (x.a) { if (x.b) { if (x.c) { return 1; } } } }
@@ -46,6 +49,11 @@ function runBin(
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [binJs, ...args], {
 			stdio: ["pipe", "pipe", "pipe"],
+			env: {
+				...process.env,
+				PILENS_DATA_DIR: path.join(testIsolationDir, "data"),
+				PI_LENS_HOME: path.join(testIsolationDir, "home"),
+			},
 		});
 		let stdout = "";
 		let stderr = "";
@@ -79,6 +87,7 @@ beforeAll(() => {
 
 afterAll(() => {
 	removeTempDirSync(tmpDir);
+	removeTempDirSync(testIsolationDir);
 });
 
 // Spawns a real node subprocess that loads the engine (tree-sitter/native) and

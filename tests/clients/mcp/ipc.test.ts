@@ -351,24 +351,40 @@ describe("requestWarmTurnEnd", () => {
 	it("round-trips a versioned turn-end response over the workspace endpoint", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-turn-"));
 		let received: unknown;
+		let connections = 0;
 		await listenOnWorkspaceEndpoint(cwd, (socket) => {
+			connections++;
 			socket.setEncoding("utf8");
 			socket.once("data", (chunk: string) => {
-				received = JSON.parse(chunk.trim());
-				socket.write(
-					`${JSON.stringify({
-						result: {
-							route: "turn-end",
-							version: WARM_TURN_END_SCHEMA_VERSION,
-							turnEnd: "TURN ADVISORY",
-							tests: "TESTS FAILED",
-						},
-					})}\n`,
-				);
-				socket.once("data", (ack: string) => {
-					expect(JSON.parse(ack.trim())).toEqual({ ack: true });
-					socket.end('{"ack":true}\n');
-				});
+				const request = JSON.parse(chunk.trim()) as { route?: string };
+				if (connections === 1) {
+					received = request;
+					socket.end(
+						`${JSON.stringify({
+							result: {
+								route: "turn-end",
+								version: WARM_TURN_END_SCHEMA_VERSION,
+								turnEnd: "TURN ADVISORY",
+								tests: "TESTS FAILED",
+								deliveryId: "delivery-1",
+							},
+						})}\n`,
+					);
+				} else {
+					expect(request).toMatchObject({
+						route: "turn-end-ack",
+						deliveryId: "delivery-1",
+					});
+					socket.end(
+						`${JSON.stringify({
+							result: {
+								route: "turn-end-ack",
+								version: WARM_TURN_END_SCHEMA_VERSION,
+								acknowledged: true,
+							},
+						})}\n`,
+					);
+				}
 			});
 		});
 
@@ -385,19 +401,25 @@ describe("requestWarmTurnEnd", () => {
 
 	it("does not report delivery success when the receipt acknowledgement times out (#1218)", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-turn-ack-timeout-"));
+		let connections = 0;
 		await listenOnWorkspaceEndpoint(cwd, (socket) => {
+			connections++;
 			socket.setEncoding("utf8");
 			socket.once("data", () => {
-				socket.write(
-					`${JSON.stringify({
-						result: {
-							route: "turn-end",
-							version: WARM_TURN_END_SCHEMA_VERSION,
-							turnEnd: "DURABLE FINDING",
-						},
-					})}\n`,
-				);
-				// Never acknowledge: the server-side transaction must roll back.
+				connections === 1
+					? socket.end(
+							`${JSON.stringify({
+								result: {
+									route: "turn-end",
+									version: WARM_TURN_END_SCHEMA_VERSION,
+									turnEnd: "DURABLE FINDING",
+									deliveryId: "delivery-timeout",
+								},
+							})}\n`,
+						)
+						: undefined;
+				// Never answer the acknowledgement connection: the client deadline
+				// must report timeout while the server retains its delivery.
 			});
 		});
 		await expect(requestWarmTurnEnd(cwd, 20)).resolves.toEqual({
