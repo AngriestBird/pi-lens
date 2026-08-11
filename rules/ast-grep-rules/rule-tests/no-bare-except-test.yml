@@ -27,6 +27,18 @@ valid:
         doThing()
     except (ValueError):
         handle()
+  - |
+    # subscripted generic (#1244)
+    try:
+        doThing()
+    except dict[str, int]:
+        handle()
+  - |
+    # subscripted PEP 654 exception group (#1244)
+    try:
+        doThing()
+    except BaseExceptionGroup[TypeError, ValueError]:
+        handle()
 invalid:
   - |
     try:
