@@ -75,6 +75,15 @@ const INSTALL_LOCK_PATH = path.join(TOOLS_DIR, ".install.lock");
 const activeInstallLocks = new Set<string>();
 let installLockExitCleanupRegistered = false;
 
+/**
+ * The managed tools tree, for callers that need to tell a path `getToolPath()`
+ * returned from the managed install apart from a global/PATH hit (the tool
+ * registry is this module's business — don't re-derive `<pi-lens home>/tools`).
+ */
+export function getManagedToolsDir(): string {
+	return TOOLS_DIR;
+}
+
 interface InstallLockOwner {
 	pid: number;
 	createdAt: number;
