@@ -132,12 +132,18 @@ const timingSensitiveInclude = [
 	// SYSTEM time is charged to this process and does inflate under load. Both
 	// numbers therefore need this project's quiet measurement window.
 	"tests/clients/lsp/edits.test.ts",
+	"tests/tools/lens-diagnostics-occupancy.test.ts",
 	// Same measureMaxSyncBlockMs sampler + same contention-starvation flake
 	// (observed 2026-07-31: cold buildOrUpdateGraph blew the 300ms budget at
 	// ~82s under a full-suite fork storm, exhausting its retry:2). Its
 	// existing retry isn't enough on its own; phasing it here removes the
 	// sibling-fork noise the sampler was actually measuring.
 	"tests/clients/cascade-graph-occupancy.test.ts",
+	"tests/clients/lsp/workspace-diagnostics-occupancy.test.ts",
+	"tests/clients/lsp/ruby-drive-dirs.test.ts",
+	"tests/clients/performance-report-occupancy.test.ts",
+	"tests/clients/pipeline-snapshot-occupancy.test.ts",
+	"tests/clients/word-index-async-build.test.ts",
 ];
 
 // #1022 fix: the "workspace LSP winner" case in this file spawns a REAL
