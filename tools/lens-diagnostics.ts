@@ -129,6 +129,51 @@ const FULL_SCAN_WALL_CLOCK_MS = (() => {
 	return Number.isFinite(raw) && raw > 0 ? raw : 300_000; // 5 min default
 })();
 
+// Binding verification is a fallback for result producers that supplied a
+// content hash without an already-computed disk verdict. Keep it one-file-at-a-
+// time and yield periodically: a full scan can contain thousands of results,
+// and a synchronous read loop here would freeze the host even though the LSP
+// work itself was asynchronous (#1198 follow-up).
+const FULL_SCAN_BINDING_YIELD_EVERY = 16;
+
+async function findFullScanBindingMismatches(
+	results: readonly WorkspaceLspDiagnosticResult[],
+): Promise<WeakSet<WorkspaceLspDiagnosticResult>> {
+	const mismatched = new WeakSet<WorkspaceLspDiagnosticResult>();
+	let sinceYield = 0;
+	for (const result of results) {
+		if (result.boundToCurrentDisk === false) {
+			mismatched.add(result);
+		} else if (
+			// A `true` verdict came from the LSP/cache binding seam and has already
+			// compared its fingerprint with disk. Only legacy/partial producers need
+			// this fallback read; `unknown` remains unknown when no hash exists.
+			result.boundToCurrentDisk !== true &&
+			result.contentHash !== undefined
+		) {
+			try {
+				// Promise-based, sequential reads bound both event-loop occupancy and
+				// outstanding file handles. A read failure deliberately leaves the
+				// verdict unknown (the historical fail-open behavior).
+				const content = await fs.readFile(result.filePath, "utf-8");
+				if (hashDiagnosticContent(content) !== result.contentHash) {
+					mismatched.add(result);
+				}
+			} catch {
+				// Unreadable/deleted files cannot disprove the binding. Leave them
+				// unknown for the existing caller policy, rather than manufacturing a
+				// mismatch or a clean verdict here.
+			}
+		}
+		sinceYield += 1;
+		if (sinceYield >= FULL_SCAN_BINDING_YIELD_EVERY) {
+			sinceYield = 0;
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+	}
+	return mismatched;
+}
+
 export function createLensDiagnosticsTool(
 	cacheManager: CacheManager,
 	getCwd: () => string,
@@ -1283,21 +1328,11 @@ async function formatFullMode(
 		includeFile(result.filePath),
 	);
 	// A result bound to a different document must not replace the current
-	// widget state, even when it contains real diagnostics. Pull results carry a
-	// content hash rather than the push binding verdict, so verify that hash
-	// against disk here; unreadable files remain unknown and are not rejected.
-	const bindingMismatch = (result: WorkspaceLspDiagnosticResult): boolean => {
-		if (result.boundToCurrentDisk === false) return true;
-		if (result.contentHash === undefined) return false;
-		try {
-			return (
-				hashDiagnosticContent(fsSync.readFileSync(result.filePath, "utf-8")) !==
-				result.contentHash
-			);
-		} catch {
-			return false;
-		}
-	};
+	// widget state, even when it contains real diagnostics. Pull results may carry
+	// a content hash without the push binding verdict, so verify that hash against
+	// disk through the bounded async fallback above; unreadable files remain
+	// unknown and retain the existing fail-open policy.
+	const mismatchedLspResults = await findFullScanBindingMismatches(lspResults);
 	// #630: `timedOut`/`error` means the per-file check never actually
 	// completed or was inconclusive (#570's `touchFile().inconclusive`, or
 	// this sweep's own outer per-file deadline/throw — see
@@ -1309,10 +1344,6 @@ async function formatFullMode(
 	// the unfiltered `lspResults` in, so a timed-out file's placeholder `[]`
 	// read as "0 diagnostics" — false-clean — in the rendered/`details`
 	// output (#630).
-	const mismatchedLspResults = new WeakSet<WorkspaceLspDiagnosticResult>();
-	for (const result of lspResults) {
-		if (bindingMismatch(result)) mismatchedLspResults.add(result);
-	}
 	const confirmedLspResults = lspResults.filter(
 		(result) =>
 			!result.timedOut &&

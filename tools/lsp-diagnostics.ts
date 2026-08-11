@@ -916,6 +916,11 @@ function canTrustTouchConfirmation(
  * `reconcileScanDiagnostics`). A manual `lsp_diagnostics` check that proves a
  * stale footer error is actually gone (the real-world case that surfaced
  * #571) is exactly the kind of confirmed result that should correct it.
+ * Direct `lsp_diagnostics` deliberately does not perform a second disk read at
+ * this reconciliation seam: its collecting touch already read the content and
+ * supplies the binding verdict. `false` is unconfirmed and is never written;
+ * `true` is trusted, while an absent/`unknown` verdict preserves the legacy
+ * fail-open policy for servers that cannot bind their diagnostics to content.
  *
  * `rawDiags` (pre-severity-filter) is what gets written — the footer records
  * the true known state, independent of this call's display-only severity
