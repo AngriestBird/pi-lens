@@ -398,6 +398,40 @@ describe("stale turn state eviction", () => {
 		env.cleanup();
 	});
 
+	it("retains a live foreign pi/MCP owner instead of consuming its worklist", async () => {
+		const env = setupTestEnvironment("pi-lens-foreign-live-");
+		const runtime = new RuntimeCoordinator();
+		runtime.setTelemetryIdentity({ sessionId: "session-current" });
+		const cacheManager = new CacheManager(false);
+		const filePath = path.join(env.tmpDir, "src/foreign.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "export const x = 1;\n");
+
+		cacheManager.addModifiedRange(
+			filePath,
+			{ start: 1, end: 1 },
+			false,
+			env.tmpDir,
+			"mcp-foreign",
+			"mcp",
+		);
+		const foreignState = cacheManager.readTurnState(env.tmpDir);
+		foreignState.owner!.pid = process.pid + 1;
+		cacheManager.writeTurnState(foreignState, env.tmpDir);
+		const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true as never);
+		try {
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
+			expect(Object.keys(cacheManager.readTurnState(env.tmpDir).files)).toEqual([
+				"src/foreign.ts",
+			]);
+		} finally {
+			killSpy.mockRestore();
+			env.cleanup();
+		}
+	});
+
 	it("keeps turn state written by the current session", async () => {
 		const env = setupTestEnvironment("pi-lens-same-session-");
 		const runtime = new RuntimeCoordinator();

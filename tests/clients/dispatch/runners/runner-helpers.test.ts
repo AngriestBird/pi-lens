@@ -10,6 +10,7 @@ import {
 	resolveNodeToolCommand,
 	resolveToolCommand,
 	resolveToolCommandWithInstallFallback,
+	resetDispatchAvailabilityState,
 	resolveVendorToolCommand,
 } from "../../../../clients/dispatch/runners/utils/runner-helpers.ts";
 import type { DispatchContext } from "../../../../clients/dispatch/types.ts";
@@ -96,11 +97,8 @@ describe("runner-helpers availability checker", () => {
 	});
 
 	it("resolves installed command after version check fallback", async () => {
-		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		const installerMod = await import("../../../../clients/installer/index.js");
-		vi.mocked(safeSpawnMod.safeSpawnAsync)
-			.mockResolvedValueOnce({ stdout: "", stderr: "not found", status: 1 })
-			.mockResolvedValueOnce({ stdout: "1.0.0", stderr: "", status: 0 });
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValueOnce(false);
 		vi.mocked(installerMod.ensureTool).mockResolvedValue("stylelint");
 
 		const resolved = await resolveCommandWithInstallFallback(
@@ -172,6 +170,42 @@ describe("runner-helpers availability checker", () => {
 		const checker = createAvailabilityChecker("zig", ".exe", ["version"]);
 		expect(await checker.isAvailableAsync(process.cwd())).toBe(true);
 		expect(probedArgs).toEqual(["version"]);
+	});
+
+	it("does not let an old in-flight probe delete a newer generation", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		let releaseOld!: (value: unknown) => void;
+		let releaseNew!: (value: unknown) => void;
+		const oldProbe = new Promise((resolve) => {
+			releaseOld = resolve;
+		});
+		const newProbe = new Promise((resolve) => {
+			releaseNew = resolve;
+		});
+		vi.mocked(safeSpawnMod.safeSpawnAsync)
+			.mockReturnValueOnce(oldProbe as never)
+			.mockReturnValueOnce(newProbe as never);
+
+		const checker = createAvailabilityChecker("generation-tool");
+		const oldResult = checker.isAvailableAsync(process.cwd());
+		await vi.waitFor(() =>
+			expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalledTimes(1),
+		);
+
+		resetDispatchAvailabilityState();
+		const newResult = checker.isAvailableAsync(process.cwd());
+		await vi.waitFor(() =>
+			expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalledTimes(2),
+		);
+		releaseOld({ stdout: "", stderr: "", status: 1 });
+		await oldResult;
+
+		// If the old finally deleted the new entry, this call would start a third
+		// probe instead of sharing the replacement-generation promise.
+		void checker.isAvailableAsync(process.cwd());
+		expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalledTimes(2);
+		releaseNew({ stdout: "1.0.0", stderr: "", status: 0 });
+		await newResult;
 	});
 
 	it("defaults versionArgs to --version when not overridden", async () => {

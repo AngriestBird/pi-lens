@@ -26,49 +26,56 @@ import { fileURLToPath } from "node:url";
 import { AstGrepClient } from "../clients/ast-grep-client.js";
 import { CacheManager } from "../clients/cache-manager.js";
 import {
-	computeBuildStamp,
-	STALE_SERVED_BY_FRESH,
-	STALE_WARN_ONLY,
-	StalenessGate,
-	stalenessCheckEnabled,
-} from "./build-staleness.js";
-import {
+	acknowledgeTurnEnd,
 	analyzeFile,
 	analyzeFileFresh,
 	canRebuildPiLens,
 	createMcpHost,
 	createWarmIpcLineReader,
+	createWarmIpcRequestQueue,
 	diagnosticStats,
 	ensureLspConfig,
+	generatedSkipNotice,
 	ipcPathForCwd,
 	lspStatus,
-	renderLspBrokenStatusLines,
 	type McpAnalyzeResult,
 	moduleReport,
 	projectReport,
 	projectScan,
 	readEnclosing,
-	generatedSkipNotice,
 	readSymbol,
+	readTurnEndStatus,
 	recentLatency,
 	renderCompactModuleReport,
 	renderCompactProjectReport,
+	renderLspBrokenStatusLines,
 	resolveRebuildScript,
 	resourceFootprint,
 	runRebuild,
 	runSessionStart,
 	runTurnEnd,
+	runTurnEndForIpc,
 	scanTruncationNotice,
 	summarizeScan,
 	symbolSearch,
 	treeSitterRuntimeStatus,
+	WARM_TURN_END_SCHEMA_VERSION,
 	type WarmAnalyzeRequest,
+	type WarmTurnEndRequest,
+	type WarmTurnEndResponse,
 } from "../clients/lens-engine.js";
 import { createAstGrepReplaceTool } from "../tools/ast-grep-replace.js";
 import { createAstGrepSearchTool } from "../tools/ast-grep-search.js";
 import { createLensDiagnosticsTool } from "../tools/lens-diagnostics.js";
 import { createLspDiagnosticsTool } from "../tools/lsp-diagnostics.js";
 import { createLspNavigationTool } from "../tools/lsp-navigation.js";
+import {
+	computeBuildStamp,
+	STALE_SERVED_BY_FRESH,
+	STALE_WARN_ONLY,
+	StalenessGate,
+	stalenessCheckEnabled,
+} from "./build-staleness.js";
 
 // Any stray stdout write corrupts the JSON-RPC stream; force it onto stderr.
 console.log = (...args: unknown[]) => {
@@ -180,9 +187,11 @@ async function ensureReady(cwd: string): Promise<void> {
 	if (lspReadyCwds.has(normalized)) return;
 	try {
 		await ensureLspConfig(normalized);
-	// pi-lens-ignore: missing-error-propagation
+		// pi-lens-ignore: missing-error-propagation
 	} catch (err) {
-		console.error(`[pi-lens-mcp] initLSPConfig failed for ${normalized}: ${err}`);
+		console.error(
+			`[pi-lens-mcp] initLSPConfig failed for ${normalized}: ${err}`,
+		);
 	}
 	lspReadyCwds.add(normalized);
 }
@@ -260,6 +269,34 @@ function getAutoSessionStatus(): AutoSessionState | null {
 
 const IPC_PATH = ipcPathForCwd(DEFAULT_CWD);
 
+/**
+ * #1273: the turn-end route runs the TARGET directory's configured test runner
+ * and spins up an LSP for it, from a client-supplied `cwd`. Every legitimate
+ * client derived the socket path from that same cwd, so a workspace check costs
+ * nothing legitimate — but without it, anything that can reach this endpoint
+ * (same-uid processes, a permissive-umask shared host, a Windows named pipe's
+ * more generous default DACL) can make the server execute an arbitrary
+ * directory's test suite. "Lint one file" and "run this directory's test suite"
+ * are different blast radii, so the guard is on turn-end and its ack.
+ */
+function rejectForeignTurnCwd(route: string, cwd: string): string {
+	const message = `${route} cwd outside this server's workspace: ${path.resolve(cwd)} not within ${DEFAULT_CWD}`;
+	console.error(`[pi-lens-mcp] rejected ${message}`);
+	return message;
+}
+
+function isWithinServerWorkspace(cwd: string): boolean {
+	const target = path.resolve(cwd);
+	// `path.relative` applies the platform's own path semantics (including
+	// win32 case-insensitivity), which is what "inside the workspace" means
+	// here — do NOT hand-roll a case fold. An empty result means `target`
+	// IS `DEFAULT_CWD` (win32 can reach that via a pure case/drive-letter
+	// difference, since path.relative there is case-insensitive) and must
+	// be accepted, not rejected — do NOT reintroduce a `rel !== ""` guard.
+	const rel = path.relative(DEFAULT_CWD, target);
+	return !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
 function startIpcServer(): void {
 	// POSIX: a stale socket file blocks listen; remove it first. (Named pipes on
 	// Windows don't need this.)
@@ -271,6 +308,7 @@ function startIpcServer(): void {
 		}
 	}
 
+	const requestQueue = createWarmIpcRequestQueue();
 	const ipc = net.createServer((socket) => {
 		socket.setEncoding("utf8");
 		// One-shot per connection (#1219): clients write exactly one request and
@@ -280,28 +318,90 @@ function startIpcServer(): void {
 		socket.on(
 			"data",
 			createWarmIpcLineReader((line) => {
-				void (async () => {
+				void requestQueue.enqueue(async () => {
 					try {
-						// #535: the PostToolUse hook bin (mcp/analyze-cli.ts) already treats
-						// ANY error response as "no usable warm server" and falls back to
-						// its own cold, load-fresh-from-disk analysis path — so on a stale
-						// warm build, replying with an error IS the fresh-fork behavior for
-						// this channel, for free. No separate fresh-fork plumbing needed
-						// here: the client-side fallback already loads current code.
 						if (isWarmBuildStale()) {
 							console.error(
-								"[pi-lens-mcp] warm analyze: build stale, replying error so the hook falls back cold",
+								"[pi-lens-mcp] warm request: build stale, replying with an error",
+							);
+							socket.end(`${JSON.stringify({ error: "warm build stale" })}\n`);
+							return;
+						}
+						const parsed = JSON.parse(line) as Partial<
+							WarmTurnEndRequest & WarmAnalyzeRequest
+						>;
+						if ((parsed as { route?: string }).route === "turn-end-ack") {
+							if (
+								parsed.version !== WARM_TURN_END_SCHEMA_VERSION ||
+								typeof (parsed as { deliveryId?: unknown }).deliveryId !==
+									"string"
+							) {
+								socket.end(
+									`${JSON.stringify({ error: `turn-end ack schema ${parsed.version} != ${WARM_TURN_END_SCHEMA_VERSION}` })}\n`,
+								);
+								return;
+							}
+							const turnCwd = parsed.cwd ?? DEFAULT_CWD;
+							if (!isWithinServerWorkspace(turnCwd)) {
+								socket.end(
+									`${JSON.stringify({ error: rejectForeignTurnCwd("turn-end-ack", turnCwd) })}\n`,
+								);
+								return;
+							}
+							const acknowledged = acknowledgeTurnEnd(
+								turnCwd,
+								(parsed as { deliveryId: string }).deliveryId,
 							);
 							socket.end(
-								`${JSON.stringify({ error: "warm build stale — falling back to cold analysis" })}\n`,
+								`${JSON.stringify({
+									result: {
+										route: "turn-end-ack",
+										version: WARM_TURN_END_SCHEMA_VERSION,
+										acknowledged,
+									},
+								})}\n`,
 							);
 							return;
 						}
-						const req = JSON.parse(line) as WarmAnalyzeRequest;
+						if (parsed.route === "turn-end") {
+							if (parsed.version !== WARM_TURN_END_SCHEMA_VERSION) {
+								socket.end(
+									`${JSON.stringify({ error: `turn-end schema ${parsed.version} != ${WARM_TURN_END_SCHEMA_VERSION}` })}\n`,
+								);
+								return;
+							}
+							const turnCwd = parsed.cwd ?? DEFAULT_CWD;
+							if (!isWithinServerWorkspace(turnCwd)) {
+								socket.end(
+									`${JSON.stringify({ error: rejectForeignTurnCwd("turn-end", turnCwd) })}\n`,
+								);
+								return;
+							}
+							// #1274: a client that already gave up (hook timeout, killed
+							// Claude Code) leaves a destroyed socket. Starting a heavy
+							// pass whose reply nobody can read is pure waste; the findings
+							// stay in the cache for the next Stop either way.
+							if (socket.destroyed) {
+								console.error(
+									`[pi-lens-mcp] warm turn-end: client gone before the pass started (${turnCwd})`,
+								);
+								return;
+							}
+							console.error(`[pi-lens-mcp] warm turn-end: ${turnCwd}`);
+							await ensureReady(turnCwd);
+							const delivery = await runTurnEndForIpc(turnCwd);
+							const result: WarmTurnEndResponse = {
+								route: "turn-end",
+								version: WARM_TURN_END_SCHEMA_VERSION,
+								turnEnd: delivery.outcome.turnEnd,
+								tests: delivery.outcome.tests,
+								deliveryId: delivery.deliveryId,
+							};
+							socket.end(`${JSON.stringify({ result })}\n`);
+							return;
+						}
+						const req = parsed as WarmAnalyzeRequest;
 						console.error(`[pi-lens-mcp] warm analyze: ${req.file}`);
-						// Warm = full LSP + an edit-detection path (register turn-state) +
-						// review-graph maintenance (#536 — this is an in-process, long-lived
-						// path, unlike the ephemeral `fresh` worker).
 						const result = await analyzeFile(req.file, req.cwd, {
 							registerTurnState: true,
 							updateGraph: true,
@@ -310,7 +410,7 @@ function startIpcServer(): void {
 					} catch (err) {
 						socket.end(`${JSON.stringify({ error: String(err) })}\n`);
 					}
-				})();
+				});
 			}),
 		);
 		socket.on("error", () => socket.destroy());
@@ -491,7 +591,8 @@ const ALL_TOOLS = [
 			properties: {
 				file: {
 					type: "string",
-					description: "Path to the file to analyze (absolute, or relative to cwd).",
+					description:
+						"Path to the file to analyze (absolute, or relative to cwd).",
 				},
 				cwd: {
 					type: "string",
@@ -506,7 +607,7 @@ const ALL_TOOLS = [
 				flags: {
 					type: "object",
 					description:
-						"Optional pi-lens flag overrides for this run, e.g. {\"no-lsp\": true} to bench the non-LSP path.",
+						'Optional pi-lens flag overrides for this run, e.g. {"no-lsp": true} to bench the non-LSP path.',
 				},
 			},
 			required: ["file"],
@@ -528,8 +629,14 @@ const ALL_TOOLS = [
 		inputSchema: {
 			type: "object",
 			properties: {
-				limit: { type: "number", description: "Max reports to return (default 5)." },
-				file: { type: "string", description: "Only reports whose path ends with this." },
+				limit: {
+					type: "number",
+					description: "Max reports to return (default 5).",
+				},
+				file: {
+					type: "string",
+					description: "Only reports whose path ends with this.",
+				},
 			},
 		},
 	},
@@ -666,7 +773,8 @@ const ALL_TOOLS = [
 				},
 				maxCallGraphEntries: {
 					type: "number",
-					description: "Per-direction cap for call-graph relations (default 20).",
+					description:
+						"Per-direction cap for call-graph relations (default 20).",
 				},
 			},
 			required: ["file"],
@@ -761,11 +869,13 @@ const ALL_TOOLS = [
 			properties: {
 				file: {
 					type: "string",
-					description: "Absolute or workspace-relative path to the source file.",
+					description:
+						"Absolute or workspace-relative path to the source file.",
 				},
 				line: {
 					type: "number",
-					description: "1-based line number inside the desired symbol/callback.",
+					description:
+						"1-based line number inside the desired symbol/callback.",
 				},
 				cwd: { type: "string" },
 				kinds: {
@@ -915,7 +1025,10 @@ async function callTool(
 	if (name === "pilens_analyze") {
 		const file = args.file;
 		if (typeof file !== "string" || file.length === 0) {
-			return { ...toolText("pilens_analyze requires a 'file' string."), isError: true };
+			return {
+				...toolText("pilens_analyze requires a 'file' string."),
+				isError: true,
+			};
 		}
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
 		const requestedMode = args.mode === "fresh" ? "fresh" : "warm";
@@ -1079,20 +1192,19 @@ async function callTool(
 			unavailableReason,
 			coverage,
 			snapshotGeneratedAt,
-		} = await symbolSearch(
-			query,
-			cwd,
-			limit,
-			{ paths, lang },
-		);
+		} = await symbolSearch(query, cwd, limit, { paths, lang });
 		if (!available) {
 			return toolText(
-				hint ?? "No word index for this workspace yet — run pilens_session_start first.",
+				hint ??
+					"No word index for this workspace yet — run pilens_session_start first.",
 				{ available: false, query, hint, unavailableReason },
 				true,
 			);
 		}
-		const stalenessNote = graphStalenessNote(snapshotGeneratedAt, "Project snapshot");
+		const stalenessNote = graphStalenessNote(
+			snapshotGeneratedAt,
+			"Project snapshot",
+		);
 		if (results.length === 0) {
 			return toolText(
 				`No files matched "${query}".` +
@@ -1154,10 +1266,10 @@ async function callTool(
 		);
 	}
 
-
 	if (name === "pilens_module_report") {
 		const file = typeof args.file === "string" ? args.file : "";
-		if (!file.trim()) return { ...toolText("Provide a `file`."), isError: true };
+		if (!file.trim())
+			return { ...toolText("Provide a `file`."), isError: true };
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
 		const maxRefsPerSymbol =
 			typeof args.maxRefsPerSymbol === "number" &&
@@ -1177,7 +1289,9 @@ async function callTool(
 				? Math.max(1, Math.floor(args.maxCallGraphEntries))
 				: undefined;
 		const view =
-			args.view === "summary" || args.view === "compact" ? args.view : undefined;
+			args.view === "summary" || args.view === "compact"
+				? args.view
+				: undefined;
 		const focus = typeof args.focus === "string" ? args.focus : undefined;
 		const report = await moduleReport(file, cwd, {
 			maxRefsPerSymbol,
@@ -1198,7 +1312,10 @@ async function callTool(
 				isError: true,
 			};
 		}
-		const graphStaleness = graphStalenessNote(report.graphBuiltAt, "Review graph");
+		const graphStaleness = graphStalenessNote(
+			report.graphBuiltAt,
+			"Review graph",
+		);
 		const summary =
 			`${path.relative(cwd, report.path) || report.path} [${report.staleness}] — ` +
 			`${report.summary.symbols} symbol(s), ${report.summary.exports} exported, ` +
@@ -1210,7 +1327,9 @@ async function callTool(
 				content: [
 					{
 						type: "text" as const,
-						text: graphStaleness ? `${compactText}\n\n${graphStaleness}` : compactText,
+						text: graphStaleness
+							? `${compactText}\n\n${graphStaleness}`
+							: compactText,
 					},
 				],
 			};
@@ -1219,7 +1338,9 @@ async function callTool(
 		// agent parses this payload, it doesn't read it formatted.
 		return toolText(
 			summary,
-			graphStaleness ? { ...report, graphStalenessNote: graphStaleness } : report,
+			graphStaleness
+				? { ...report, graphStalenessNote: graphStaleness }
+				: report,
 			true,
 		);
 	}
@@ -1251,7 +1372,9 @@ async function callTool(
 				content: [
 					{
 						type: "text" as const,
-						text: graphStaleness ? `${compactText}\n\n${graphStaleness}` : compactText,
+						text: graphStaleness
+							? `${compactText}\n\n${graphStaleness}`
+							: compactText,
 					},
 				],
 			};
@@ -1263,7 +1386,9 @@ async function callTool(
 			(graphStaleness ? `\n\n${graphStaleness}` : "");
 		return toolText(
 			summary,
-			graphStaleness ? { ...report, graphStalenessNote: graphStaleness } : report,
+			graphStaleness
+				? { ...report, graphStalenessNote: graphStaleness }
+				: report,
 			true,
 		);
 	}
@@ -1300,14 +1425,21 @@ async function callTool(
 			? ` (${result.ambiguous.count} matches — returned the ${result.kind}; pass \`kind\` to disambiguate: ${result.ambiguous.kinds.join(", ")})`
 			: "";
 		const header = `${result.kind} ${result.name}${ambiguityNote}${sigSuffix}  ${path.relative(cwd, result.path)}:${result.startLine}-${result.endLine}`;
-		return { content: [{ type: "text" as const, text: `${header}\n\n${result.source ?? ""}` }] };
+		return {
+			content: [
+				{ type: "text" as const, text: `${header}\n\n${result.source ?? ""}` },
+			],
+		};
 	}
 
 	if (name === "pilens_read_enclosing") {
 		const file = typeof args.file === "string" ? args.file : "";
 		const line = typeof args.line === "number" ? args.line : Number.NaN;
 		if (!file.trim() || !Number.isFinite(line)) {
-			return { ...toolText("Provide `file` and a numeric `line`."), isError: true };
+			return {
+				...toolText("Provide `file` and a numeric `line`."),
+				isError: true,
+			};
 		}
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
 		const kinds = Array.isArray(args.kinds)
@@ -1354,7 +1486,11 @@ async function callTool(
 			? `${result.startLine}-${result.endLine} (partial of ${result.enclosingStartLine}-${result.enclosingEndLine})`
 			: `${result.startLine}-${result.endLine}`;
 		const header = `${result.kind} ${result.name}  ${path.relative(cwd, result.path)}:${range}`;
-		return { content: [{ type: "text" as const, text: `${header}\n\n${result.source ?? ""}` }] };
+		return {
+			content: [
+				{ type: "text" as const, text: `${header}\n\n${result.source ?? ""}` },
+			],
+		};
 	}
 
 	if (name === "pilens_health") {
@@ -1363,6 +1499,12 @@ async function callTool(
 		const stats = diagnosticStats();
 		const autoSession = getAutoSessionStatus();
 		const treeSitter = treeSitterRuntimeStatus();
+		// #1272, following the #544 precedent: the Stop hook is a separate,
+		// short-lived process, so a turn-end it skipped left no trace here at all
+		// — a dead integration looked exactly like a clean turn, forever. The
+		// hook records its outcome per workspace; this is where it becomes
+		// visible without `claude --debug` log spelunking.
+		const turnEnd = readTurnEndStatus(DEFAULT_CWD) ?? null;
 		// #620: best-effort — a footprint read failure must never break the rest
 		// of pilens_health's (much older, more load-bearing) reporting.
 		const footprint = await resourceFootprint().catch(() => null);
@@ -1383,6 +1525,11 @@ async function callTool(
 			autoSession
 				? `Auto session_start: ${autoSession.succeeded ? "succeeded" : autoSession.error ? "FAILED" : autoSession.attempted ? "in progress" : "not yet attempted"}${autoSession.firedAt ? ` (fired ${autoSession.firedAt})` : ""}${autoSession.error ? ` — ${autoSession.error}` : ""}`
 				: "Auto session_start: disabled (PI_LENS_MCP_AUTO_SESSION not set)",
+			turnEnd
+				? `Stop-hook turn-end: ${turnEnd.ran} ran · ${turnEnd.skipped} skipped` +
+					`${turnEnd.lastRunAt ? ` (last ran ${turnEnd.lastRunAt})` : ""}` +
+					`${turnEnd.lastSkipReason ? ` — last skip: ${turnEnd.lastSkipReason}${turnEnd.lastSkipAt ? ` at ${turnEnd.lastSkipAt}` : ""}` : ""}`
+				: "Stop-hook turn-end: no activity recorded (hook not installed, or no Stop yet)",
 			footprint
 				? `Resource footprint: ${footprint.instanceCount} pi-lens instance(s) · ` +
 					`${(footprint.totalRssBytes / 1024 / 1024).toFixed(0)}MB RSS · ` +
@@ -1408,6 +1555,7 @@ async function callTool(
 			},
 			autoSession,
 			treeSitter,
+			turnEnd,
 			resourceFootprint: footprint,
 		});
 	}
@@ -1479,7 +1627,9 @@ async function callTool(
 	if (name === "pilens_ast_grep_search" || name === "pilens_ast_grep_replace") {
 		const cwd = typeof args.cwd === "string" ? args.cwd : DEFAULT_CWD;
 		const tool =
-			name === "pilens_ast_grep_search" ? astGrepSearchTool : astGrepReplaceTool;
+			name === "pilens_ast_grep_search"
+				? astGrepSearchTool
+				: astGrepReplaceTool;
 		const out = (await tool.execute(
 			"mcp",
 			args,
@@ -1572,16 +1722,19 @@ const WARN_ONLY_STALE_TOOLS = new Set([
  * (see module_report/symbol_search callers), so appending plain text after it
  * is safe.
  */
-function withStaleWarning<T extends { content: { type: "text"; text: string }[] }>(
-	result: T,
-): T {
+function withStaleWarning<
+	T extends { content: { type: "text"; text: string }[] },
+>(result: T): T {
 	if (result.content.length === 0) return result;
 	const last = result.content[result.content.length - 1];
 	return {
 		...result,
 		content: [
 			...result.content.slice(0, -1),
-			{ ...last, text: `${last.text}\n\nwarmCodeStale: true\n${STALE_WARN_ONLY}` },
+			{
+				...last,
+				text: `${last.text}\n\nwarmCodeStale: true\n${STALE_WARN_ONLY}`,
+			},
 		],
 	};
 }
@@ -1648,14 +1801,17 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
 				// Surface as a tool error (isError), not a transport error, so the
 				// agent sees the message instead of a dead request.
 				sendResult(id ?? null, {
-					...toolText(`pi-lens tool '${name}' failed: ${(err as Error).message}`),
+					...toolText(
+						`pi-lens tool '${name}' failed: ${(err as Error).message}`,
+					),
 					isError: true,
 				});
 			}
 			return;
 		}
 		default:
-			if (!isNotification) sendError(id ?? null, -32601, `Method not found: ${method}`);
+			if (!isNotification)
+				sendError(id ?? null, -32601, `Method not found: ${method}`);
 			return;
 	}
 }

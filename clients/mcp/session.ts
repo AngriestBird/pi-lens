@@ -5,7 +5,7 @@
  * doesn't — session-start warms the dominant-language LSP (so warm `analyze` is
  * LSP-complete), establishes the error-debt baseline + complexity baselines, and
  * kicks off knip/jscpd/type-coverage/dep/secrets scans; turn-end runs
- * knip/jscpd incrementally, dep-circular, tests, cascade, and the
+ * knip incrementally, dep-circular, tests, cascade, and the
  * actionable/code-quality aggregation.
  *
  * The handlers don't return findings — they emit them through the same
@@ -17,11 +17,16 @@
  * across calls, like a real session), and the bootstrap client bundle.
  */
 
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { AstGrepClient } from "../ast-grep-client.js";
 import { type BootstrapClients, loadBootstrapClients } from "../bootstrap.js";
-import { CacheManager } from "../cache-manager.js";
+import {
+	CacheManager,
+	MCP_TURN_STATE_OWNER_ID,
+	type TurnStateOwner,
+} from "../cache-manager.js";
 import { resetDispatchBaselines } from "../dispatch/integration.js";
 import { resetFormatService } from "../format-service.js";
 import { getLSPService, resetLSPService } from "../lsp/index.js";
@@ -29,6 +34,8 @@ import {
 	consumeSessionStartGuidance,
 	consumeTestFindings,
 	consumeTurnEndFindings,
+	peekTestFindings,
+	peekTurnEndFindings,
 } from "../runtime-context.js";
 import { RuntimeCoordinator } from "../runtime-coordinator.js";
 import { handleSessionStart } from "../runtime-session.js";
@@ -143,15 +150,117 @@ export interface TurnEndOutcome {
 	filesRegistered: number;
 }
 
+export interface TurnEndDelivery {
+	outcome: TurnEndOutcome;
+	/** Capability required by a separate one-shot ack request. */
+	deliveryId?: string;
+}
+
+interface TurnEndTransaction {
+	outcome: TurnEndOutcome;
+	commit: () => void;
+}
+
+interface PendingTurnEndDelivery {
+	cwd: string;
+	transaction: TurnEndTransaction;
+	createdAt: number;
+}
+
+/**
+ * #1274: the delivery map used to be unbounded — every timed-out client and
+ * every distinct raw-cwd alias left an entry for the life of the process.
+ * Both bounds drop entries WITHOUT committing, which re-arms the findings in
+ * the cache: the safe direction, since an un-consumed finding is re-reported on
+ * a later Stop while a wrongly-consumed one is gone for good. The TTL is
+ * generous next to Claude Code's 60 s hook budget — it exists to bound the map,
+ * not to police clients.
+ */
+const TURN_END_DELIVERY_TTL_MS = 10 * 60_000;
+const TURN_END_DELIVERY_MAX = 8;
+
+const TURN_END_QUEUE_WAIT_MS = 5_000;
+
+interface QueueItem<T> {
+	work: () => Promise<T>;
+	resolve: (value: T) => void;
+	reject: (error: unknown) => void;
+	timer: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * A bounded, cancellable serial queue. A turn_end mutates shared runtime and
+ * cache state, so concurrent passes are unsafe; a disconnected/hung pass must
+ * nevertheless not accumulate an unbounded tail of Stop requests.
+ */
+class TurnEndQueue {
+	private running = false;
+	private pending: QueueItem<unknown>[] = [];
+
+	enqueue<T>(
+		work: () => Promise<T>,
+		waitMs = TURN_END_QUEUE_WAIT_MS,
+	): Promise<T> {
+		if (this.pending.length >= 1) {
+			return Promise.reject(new Error("turn_end queue is busy"));
+		}
+		return new Promise<T>((resolve, reject) => {
+			const item: QueueItem<T> = {
+				work,
+				resolve,
+				reject,
+				timer: setTimeout(() => {
+					const index = this.pending.indexOf(item as QueueItem<unknown>);
+					if (index === -1) return;
+					this.pending.splice(index, 1);
+					reject(new Error("turn_end queue wait timed out"));
+				}, waitMs),
+			};
+			item.timer.unref();
+			this.pending.push(item as QueueItem<unknown>);
+			this.drain();
+		});
+	}
+
+	private drain(): void {
+		if (this.running) return;
+		const item = this.pending.shift();
+		if (!item) return;
+		clearTimeout(item.timer);
+		this.running = true;
+		void item
+			.work()
+			.then(item.resolve, item.reject)
+			.finally(() => {
+				this.running = false;
+				this.drain();
+			});
+	}
+
+	reset(): void {
+		for (const item of this.pending.splice(0)) {
+			clearTimeout(item.timer);
+			item.reject(new Error("turn_end queue reset"));
+		}
+		this.running = false;
+	}
+}
+
+const turnEndQueue = new TurnEndQueue();
+const pendingTurnEndDeliveries = new Map<string, PendingTurnEndDelivery>();
+/** In-flight Stop-hook passes, keyed by cwd — see `runTurnEndForIpc` (#1274). */
+const inFlightIpcTurnEnds = new Map<string, Promise<TurnEndDelivery>>();
+
 /**
  * Run pi-lens's real turn_end over the files edited this "turn". The handler
  * reads edited files from turn-state, so we register the caller-supplied files
  * first (a full-file range, importsChanged=true so dep/knip re-check broadly).
  */
-export async function runTurnEnd(
+async function runTurnEndNow(
 	cwd: string,
 	files: string[] = [],
-): Promise<TurnEndOutcome> {
+	deferredDelivery = false,
+): Promise<TurnEndTransaction> {
 	const ctx = await getMcpSessionContext();
 	const host = createMcpHost(undefined, cwd);
 
@@ -169,10 +278,18 @@ export async function runTurnEnd(
 			{ start: 1, end: lineCount },
 			true,
 			cwd,
-			ctx.runtime.telemetrySessionId,
+			MCP_TURN_STATE_OWNER_ID,
+			"mcp",
 		);
 		registered++;
 	}
+
+	const owner: TurnStateOwner = {
+		kind: "mcp",
+		id: MCP_TURN_STATE_OWNER_ID,
+		pid: process.pid,
+		lastSeen: new Date().toISOString(),
+	};
 
 	await handleTurnEnd({
 		ctxCwd: cwd,
@@ -184,13 +301,158 @@ export async function runTurnEnd(
 		deadCodeClients: ctx.clients.deadCodeClients,
 		depChecker: ctx.clients.depChecker,
 		testRunnerClient: ctx.clients.testRunnerClient,
+		owner,
 		resetLSPService,
 		resetFormatService,
 	});
 
+	const outcome: TurnEndOutcome = deferredDelivery
+		? {
+				turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd)),
+				tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd)),
+				filesRegistered: registered,
+			}
+		: {
+				turnEnd: joinMessages(consumeTurnEndFindings(ctx.cacheManager, cwd)),
+				tests: joinMessages(consumeTestFindings(ctx.cacheManager, cwd)),
+				filesRegistered: registered,
+			};
+
 	return {
-		turnEnd: joinMessages(consumeTurnEndFindings(ctx.cacheManager, cwd)),
-		tests: joinMessages(consumeTestFindings(ctx.cacheManager, cwd)),
-		filesRegistered: registered,
+		outcome,
+		commit: () => {
+			if (!deferredDelivery) return;
+			consumeTurnEndFindings(ctx.cacheManager, cwd);
+			consumeTestFindings(ctx.cacheManager, cwd);
+		},
 	};
+}
+
+/**
+ * Run a normal MCP turn_end. Its caller owns the tool response, so the
+ * historical consume-on-return behavior remains unchanged.
+ */
+export function runTurnEnd(
+	cwd: string,
+	files: string[] = [],
+): Promise<TurnEndOutcome> {
+	return turnEndQueue.enqueue(
+		async () => (await runTurnEndNow(cwd, files)).outcome,
+	);
+}
+
+/** A result with no findings needs no durable delivery transaction. */
+function hasTurnEndFindings(outcome: TurnEndOutcome): boolean {
+	return Boolean(outcome.turnEnd || outcome.tests);
+}
+
+/** Drop expired deliveries, then the oldest ones over the cap. Never commits. */
+function prunePendingTurnEndDeliveries(now = Date.now()): void {
+	for (const [deliveryId, delivery] of pendingTurnEndDeliveries) {
+		if (now - delivery.createdAt >= TURN_END_DELIVERY_TTL_MS) {
+			pendingTurnEndDeliveries.delete(deliveryId);
+		}
+	}
+	// Map iteration is insertion-ordered, so the head is the oldest entry.
+	while (pendingTurnEndDeliveries.size > TURN_END_DELIVERY_MAX) {
+		const oldest = pendingTurnEndDeliveries.keys().next();
+		if (oldest.done) break;
+		pendingTurnEndDeliveries.delete(oldest.value);
+	}
+}
+
+function pendingForCwd(
+	cwd: string,
+): [string, PendingTurnEndDelivery] | undefined {
+	for (const [deliveryId, delivery] of pendingTurnEndDeliveries) {
+		if (delivery.cwd === cwd) return [deliveryId, delivery];
+	}
+	return undefined;
+}
+
+/**
+ * Run the Stop-hook pass as a durable delivery transaction. The result is
+ * acknowledged through a separate one-shot IPC request. Until that request
+ * arrives, the findings cache is deliberately left unconsumed; a client
+ * timeout, socket close, or server restart therefore leaves the result for a
+ * later Stop request instead of losing it between execution and reply.
+ */
+export function runTurnEndForIpc(cwd: string): Promise<TurnEndDelivery> {
+	// #1274: the Stop-hook request carries no files and no sessionId, so two
+	// overlapping ones are byte-identical and a second pass would be pure waste
+	// — worse, the queue only holds ONE waiter, so a third Stop is rejected
+	// outright. Identical in-flight requests share the one pass and one
+	// deliveryId; the ack is idempotent-by-capability, so the loser of the race
+	// simply finds the delivery already committed.
+	const inFlight = inFlightIpcTurnEnds.get(cwd);
+	if (inFlight) return inFlight;
+	const run = runTurnEndForIpcNow(cwd).finally(() => {
+		inFlightIpcTurnEnds.delete(cwd);
+	});
+	inFlightIpcTurnEnds.set(cwd, run);
+	return run;
+}
+
+function runTurnEndForIpcNow(cwd: string): Promise<TurnEndDelivery> {
+	return turnEndQueue.enqueue(async () => {
+		prunePendingTurnEndDeliveries();
+		const pending = pendingForCwd(cwd);
+		if (pending) {
+			return {
+				outcome: pending[1].transaction.outcome,
+				deliveryId: pending[0],
+			};
+		}
+
+		const ctx = await getMcpSessionContext();
+		const cachedOutcome: TurnEndOutcome = {
+			turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd)),
+			tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd)),
+			filesRegistered: 0,
+		};
+		const transaction = hasTurnEndFindings(cachedOutcome)
+			? {
+					outcome: cachedOutcome,
+					commit: () => {
+						consumeTurnEndFindings(ctx.cacheManager, cwd);
+						consumeTestFindings(ctx.cacheManager, cwd);
+					},
+				}
+			: await runTurnEndNow(cwd, [], true);
+
+		if (!hasTurnEndFindings(transaction.outcome)) {
+			return { outcome: transaction.outcome };
+		}
+
+		const deliveryId = crypto.randomUUID();
+		pendingTurnEndDeliveries.set(deliveryId, {
+			cwd,
+			transaction,
+			createdAt: Date.now(),
+		});
+		prunePendingTurnEndDeliveries();
+		return { outcome: transaction.outcome, deliveryId };
+	});
+}
+
+/** Commit exactly one admitted delivery capability. */
+export function acknowledgeTurnEnd(cwd: string, deliveryId: string): boolean {
+	prunePendingTurnEndDeliveries();
+	const delivery = pendingTurnEndDeliveries.get(deliveryId);
+	if (!delivery || delivery.cwd !== cwd) return false;
+	// #1274: commit BEFORE dropping the capability. Deleting first meant a
+	// throwing consume destroyed the only handle to the findings — precisely the
+	// loss this two-phase protocol exists to prevent, reintroduced on the error
+	// path. Leaving the entry in place on a throw keeps the delivery re-fetchable
+	// by a later Stop.
+	delivery.transaction.commit();
+	pendingTurnEndDeliveries.delete(deliveryId);
+	return true;
+}
+
+/** Test hook — drop pending requests so one failed test cannot wedge the rest. */
+export function _resetTurnEndChain(): void {
+	turnEndQueue.reset();
+	pendingTurnEndDeliveries.clear();
+	inFlightIpcTurnEnds.clear();
 }

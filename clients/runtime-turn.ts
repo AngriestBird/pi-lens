@@ -62,6 +62,7 @@ import { emitLensTurnFindings } from "./lens-events.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { isSubagentSession } from "./subagent-mode.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
+import type { TurnStateOwner } from "./cache-manager.js";
 import type { TestResult, TestRunnerClient } from "./test-runner-client.js";
 
 interface TurnEndDeps {
@@ -74,6 +75,8 @@ interface TurnEndDeps {
 	deadCodeClients: DeadCodeClient[];
 	depChecker: DependencyChecker;
 	testRunnerClient: TestRunnerClient;
+	/** Explicit owner for MCP Stop-hook calls; pi calls use runtime identity. */
+	owner?: TurnStateOwner;
 	resetLSPService: () => void;
 	resetFormatService: () => void;
 }
@@ -177,6 +180,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		deadCodeClients,
 		depChecker,
 		testRunnerClient,
+		owner,
 		resetLSPService,
 		resetFormatService,
 	} = deps;
@@ -202,15 +206,29 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const cwd = ctxCwd ?? process.cwd();
 	let turnState = cacheManager.readTurnState(cwd);
 
-	// Evict turn state written by a previous session — it carries stale file
-	// ranges that no longer reflect the current editing context.
-	if (
-		turnState.sessionId &&
-		turnState.sessionId !== runtime.telemetrySessionId
-	) {
+	// A live foreign writer owns this worklist. Do not clear or consume another
+	// pi/MCP session's files; a dead/aged owner is safely evicted instead.
+	const currentOwner: TurnStateOwner = owner ?? {
+		kind: "pi",
+		id: runtime.telemetrySessionId,
+		pid: process.pid,
+		lastSeen: new Date().toISOString(),
+	};
+	const access = cacheManager.getTurnStateAccess(cwd, currentOwner);
+	const sameProcessPiSessionHandoff =
+		access === "foreign-live" &&
+		currentOwner.kind === "pi" &&
+		turnState.owner?.kind === "pi" &&
+		turnState.owner.pid === process.pid &&
+		turnState.owner.id !== currentOwner.id;
+	if (access === "foreign-live" && !sameProcessPiSessionHandoff) {
 		dbg(
-			`turn_end: evicting stale turn state (session ${turnState.sessionId} ≠ current ${runtime.telemetrySessionId})`,
+			`turn_end: foreign live owner retained (${turnState.owner?.kind ?? "legacy"}:${turnState.owner?.id ?? turnState.sessionId})`,
 		);
+		return;
+	}
+	if (access === "available" && (turnState.files || turnState.owner || turnState.sessionId)) {
+		dbg("turn_end: evicting stale turn-state owner");
 		cacheManager.clearTurnState(cwd);
 		turnState = cacheManager.readTurnState(cwd);
 	}

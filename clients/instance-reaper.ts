@@ -66,7 +66,10 @@ export const STALE_HEARTBEAT_MS = 6 * 60 * 60 * 1000;
 import { spawn as nodeSpawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { writeFileAtomicAsync } from "./atomic-write.js";
+import {
+	stageOwnerPidFromName,
+	writeFileAtomicAsync,
+} from "./atomic-write.js";
 import { spawnCollectStdout, unrefChildAndPipes } from "./child-unref.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import {
@@ -291,6 +294,98 @@ export function realIsPidAlive(pid: number): boolean {
 		// never treat as dead.
 		return true;
 	}
+}
+
+/** Maximum number of directory entries inspected by one staging sweep. */
+export const ATOMIC_STAGE_SWEEP_MAX_ENTRIES = 512;
+
+export interface AtomicStageSweepResult {
+	directories: number;
+	scanned: number;
+	removed: number;
+	liveSkipped: number;
+	truncated: boolean;
+}
+
+export interface AtomicStageSweepOptions {
+	/** Test-only cap override; production callers use the default cap. */
+	maxEntries?: number;
+	/** Injectable only for deterministic tests; defaults to the shared probe. */
+	isPidAlive?: (pid: number) => boolean;
+}
+
+/**
+ * Remove orphaned generic atomic-write staging files from pi-lens-owned
+ * directories. This is deliberately a directory-entry sweep, not a watcher:
+ * it runs from session_start, reads at most `maxEntries` entries per directory,
+ * and never creates a process-lifetime handle.
+ *
+ * Safety invariants:
+ * - only the three atomic-write `.tmp-<pid>[-<thread>[-<seq>]]` shapes match;
+ * - directories and symlinks are never removed;
+ * - this process's pid is always protected, and every foreign pid is checked
+ *   through the reaper's conservative ESRCH-only liveness seam;
+ * - every I/O failure is best-effort and cannot fail session_start.
+ */
+export async function sweepAtomicWriteStages(
+	directories: readonly string[],
+	options: AtomicStageSweepOptions = {},
+): Promise<AtomicStageSweepResult> {
+	const requestedMax = options.maxEntries ?? ATOMIC_STAGE_SWEEP_MAX_ENTRIES;
+	const maxEntries = Number.isFinite(requestedMax)
+		? Math.max(1, Math.floor(requestedMax))
+		: ATOMIC_STAGE_SWEEP_MAX_ENTRIES;
+	const isPidAlive = options.isPidAlive ?? realIsPidAlive;
+	const uniqueDirectories = [...new Set(directories)].filter(Boolean);
+	const result: AtomicStageSweepResult = {
+		directories: uniqueDirectories.length,
+		scanned: 0,
+		removed: 0,
+		liveSkipped: 0,
+		truncated: false,
+	};
+
+	for (const directory of uniqueDirectories) {
+		let handle: fs.Dir;
+		try {
+			handle = await fs.promises.opendir(directory);
+		} catch {
+			continue;
+		}
+		try {
+			let reachedEntryCap = true;
+			for (let i = 0; i < maxEntries; i++) {
+				const entry = await handle.read();
+				if (entry === null) {
+					reachedEntryCap = false;
+					break;
+				}
+				result.scanned++;
+				if (!entry.isFile()) continue;
+				const pid = stageOwnerPidFromName(entry.name);
+				if (pid === undefined) continue;
+				if (pid === process.pid || isPidAlive(pid)) {
+					result.liveSkipped++;
+					continue;
+				}
+				try {
+					await fs.promises.rm(path.join(directory, entry.name), {
+						force: true,
+					});
+					result.removed++;
+				} catch {
+					// A locked file or a concurrent rename is safe to leave for the
+					// next session-start sweep.
+				}
+			}
+			result.truncated ||= reachedEntryCap;
+		} catch {
+			// Directory reads are best-effort; preserve any completed removals.
+		} finally {
+			await handle.close().catch(() => {});
+		}
+	}
+	return result;
 }
 
 function windowsExe(name: string): string {

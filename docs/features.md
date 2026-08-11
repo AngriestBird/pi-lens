@@ -317,7 +317,7 @@ pi-lens ships an MCP (Model Context Protocol) server so Claude Code — or any M
 | Layer | MCP tools | What they expose |
 |---|---|---|
 | **Per-edit** | `pilens_analyze`, `pilens_lsp_diagnostics`, `pilens_lsp_navigation`, `pilens_ast_grep_search`, `pilens_ast_grep_replace`, `pilens_module_report`, `pilens_read_symbol` | The fast pipeline (format → autofix → LSP diagnostics → parallel runners) plus the structured read-substitute pair. `analyze` accepts `mode: warm \| fresh` — `warm` reuses the server's in-process LSP, `fresh` forks a worker that loads freshly-built code from disk so the result reflects the latest commit. |
-| **Per-turn** | `pilens_turn_end` | Drives the **real** `handleTurnEnd` (knip incremental, jscpd delta, dep-circular, cascade, tests, actionable+code-quality warnings) — not a re-implementation. Caller-supplied edited files are auto-registered into turn-state via `addModifiedRange`. |
+| **Per-turn** | `pilens_turn_end` | Drives the **real** `handleTurnEnd` (knip incremental, dep-circular, cascade, tests, actionable+code-quality warnings) — not a re-implementation. Caller-supplied edited files are auto-registered into turn-state via `addModifiedRange`. |
 | **Per-session** | `pilens_session_start` | Drives the **real** `handleSessionStart` — full jscpd/knip/madge/govulncheck/gitleaks/trivy scans + complexity baselines + LSP warm. The error-debt baseline is not currently populated by the production session-start path. |
 | **Project / observability** | `pilens_project_scan`, `pilens_diagnostics`, `pilens_health`, `pilens_latency`, `pilens_symbol_search` | Cheap project-wide scans, cached diagnostic state, latency telemetry, ranked identifier search (BM25 over the persisted word index — see [docs/word-index.md](word-index.md)). Cross-file blast radius now lives in `pilens_module_report`'s `blastRadius` option. |
 | **Lifecycle / loop** | `pilens_rebuild` | Runs `npm run build:dist` so `pilens_analyze mode=fresh` reflects the latest commit. Makes the review loop self-contained: commit → `pilens_rebuild` → `pilens_analyze mode=fresh` → `pilens_latency`. |
@@ -341,5 +341,19 @@ claude mcp add --scope user pi-lens \
   -e PI_LENS_MCP_AUTO_SESSION=1 \
   -- node <repo>/dist/mcp/server.js
 ```
+
+**Hooks** (`settings.json`) close the loop: PostToolUse = per-edit, Stop = per-turn.
+
+```json
+{ "hooks": {
+  "PostToolUse": [
+    { "matcher": "Edit|Write",
+      "hooks": [ { "type": "command", "command": "pi-lens-analyze --hook" } ] } ],
+  "Stop": [
+    { "hooks": [ { "type": "command", "command": "pi-lens-analyze --turn-end", "timeout": 60 } ] } ]
+} }
+```
+
+The per-edit hook falls back to a cold local analysis when no server is up; the `Stop` hook is **warm-server-only** because only the server process owns the session state and pending turn work. It skips with a single stderr line when unavailable. Workspace IPC requests are ordered, so a timed-out PostToolUse client cannot let `Stop` overtake analysis still running in the server. `SubagentStop` is deliberately not registered because subagent edits already reach turn-state through PostToolUse.
 
 The full design + tier-by-tier progress (and known limits) lives in [`docs/mcp.md`](docs/mcp.md). Status: **experimental** — the foundation is solid (transport, warm LSP, lifecycle handlers wired), but the surface is still maturing. Use the pi extension for production agent work; reach for the MCP server for debugging, dogfooding, and direct Claude Code access.

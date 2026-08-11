@@ -7,7 +7,6 @@
  * Requires: pyright (pip install pyright or npm install -g pyright)
  */
 
-import { ensureTool } from "../../installer/index.js";
 import { getLSPService } from "../../lsp/index.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { PRIORITY } from "../priorities.js";
@@ -17,7 +16,10 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import {
+	createAvailabilityChecker,
+	resolveAvailableOrInstall,
+} from "./utils/runner-helpers.js";
 
 const pyright = createAvailabilityChecker("pyright", ".exe");
 
@@ -48,9 +50,13 @@ const pyrightRunner: RunnerDefinition = {
 			cmd = pyright.getCommand(cwd);
 		}
 
-		// Strategy 2: Try to find pyright via ensureTool (installs if needed)
+		// Strategy 2: use the shared availability taxonomy and install suppression.
 		if (!cmd) {
-			const installedPath = await ensureTool("pyright");
+			const installedPath = await resolveAvailableOrInstall(
+				pyright,
+				"pyright",
+				cwd,
+			);
 			if (installedPath) cmd = installedPath;
 		}
 

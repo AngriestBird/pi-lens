@@ -10,7 +10,11 @@ import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
-import { getKnipIgnorePatterns } from "./file-utils.js";
+import {
+	getGlobalPiLensDir,
+	getKnipIgnorePatterns,
+	getProjectDataDir,
+} from "./file-utils.js";
 import { GitleaksClient, type GitleaksResult } from "./gitleaks-client.js";
 import type { GoClient } from "./go-client.js";
 import {
@@ -78,6 +82,7 @@ import {
 	isSubagentSession,
 	subagentLightModeNotice,
 } from "./subagent-mode.js";
+import { sweepAtomicWriteStages } from "./instance-reaper.js";
 import type { TestRunnerClient } from "./test-runner-client.js";
 import type { TodoScanner } from "./todo-scanner.js";
 import { TrivyClient, type TrivyResult } from "./trivy-client.js";
@@ -1837,6 +1842,19 @@ export async function handleSessionStart(
 
 	const hasWorkspaceCwd = typeof ctxCwd === "string" && ctxCwd.length > 0;
 	const cwd = ctxCwd ?? process.cwd();
+	// #1228: generic atomic-write stages are shared by several project stores,
+	// so the review-graph-specific sweep cannot own this namespace. Sweep the
+	// project data roots and machine-global registry root once per session start;
+	// this is fire-and-forget and bounded so it never delays startup.
+	const projectDataDir = getProjectDataDir(cwd);
+	void sweepAtomicWriteStages([
+		projectDataDir,
+		path.join(projectDataDir, "cache"),
+		path.join(projectDataDir, "sessions"),
+		getGlobalPiLensDir(),
+	]).catch(() => {
+		// best-effort lifecycle cleanup — never fail session_start
+	});
 	if (quickMode) {
 		runtime.projectRoot = cwd;
 		const sequenceReadStartedAt = Date.now();

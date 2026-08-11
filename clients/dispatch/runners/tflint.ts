@@ -1,9 +1,11 @@
 import * as path from "node:path";
-import { ensureTool } from "../../installer/index.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { getLinterPolicyForCwd } from "../../tool-policy.js";
 import { findNearestDirWithAnyBasename } from "../../workspace-topology.js";
-import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import {
+	createAvailabilityChecker,
+	resolveAvailableOrInstall,
+} from "./utils/runner-helpers.js";
 import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
 import type {
 	Diagnostic,
@@ -88,7 +90,7 @@ const tflintRunner: RunnerDefinition = {
 		if (await (tflint.isAvailableAsync(cwd))) {
 			cmd = tflint.getCommand(cwd);
 		} else {
-			const managed = await ensureTool("tflint");
+			const managed = await resolveAvailableOrInstall(tflint, "tflint", cwd);
 			if (managed) cmd = managed;
 		}
 
