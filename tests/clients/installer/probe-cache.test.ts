@@ -10,9 +10,14 @@ const mockFsMkdir = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const mockFsAppendFile = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const mockFsRm = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const mockFsRename = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+const mockRandomUUID = vi.hoisted(() => vi.fn(() => "secure-probe-lock-token"));
 const mockWriteFileAtomicAsync = vi.hoisted(() =>
 	vi.fn().mockResolvedValue(undefined),
 );
+
+vi.mock("node:crypto", () => ({
+	randomUUID: mockRandomUUID,
+}));
 
 vi.mock("node:fs/promises", () => ({
 	default: {
@@ -65,6 +70,7 @@ beforeEach(() => {
 	mockFsMkdir.mockResolvedValue(undefined);
 	mockFsRm.mockResolvedValue(undefined);
 	mockFsRename.mockResolvedValue(undefined);
+	mockRandomUUID.mockReturnValue("secure-probe-lock-token");
 	mockWriteFileAtomicAsync.mockResolvedValue(undefined);
 	resetProbeCacheStateForTesting();
 });
@@ -177,6 +183,23 @@ describe("updateProbeCache", () => {
 		const [, content] = mockWriteFileAtomicAsync.mock.calls[0] as [string, string];
 		const written = JSON.parse(content) as Record<string, unknown>;
 		expect(written[TOOL_ID]).toMatchObject({ path: TOOL_PATH, mtimeMs: MTIME_MS });
+	});
+
+	it("uses a cryptographically secure UUID in the lock owner token", async () => {
+		mockFsReadFile.mockResolvedValue(JSON.stringify({}));
+		mockFsStat.mockResolvedValue({ mtimeMs: MTIME_MS });
+
+		await updateProbeCache(TOOL_ID, TOOL_PATH);
+		await flushProbeCache();
+
+		const ownerWrite = mockFsWriteFile.mock.calls.find(([file]) =>
+			String(file).endsWith("owner.json"),
+		) as [string, string] | undefined;
+		expect(ownerWrite).toBeDefined();
+		expect(JSON.parse(ownerWrite?.[1] ?? "{}").token).toContain(
+			"secure-probe-lock-token",
+		);
+		expect(mockRandomUUID).toHaveBeenCalled();
 	});
 
 	it("merges a sibling process's newer entry instead of losing it", async () => {
