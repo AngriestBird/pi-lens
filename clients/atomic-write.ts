@@ -126,10 +126,11 @@ export function stagePathFor(targetPath: string): string {
  * for the session-start sweeper that garbage-collects staging files orphaned
  * by a crashed process (#1228). The writer itself does not reap or watch files.
  *
- * The trailing groups are optional so that staging files written by an older
- * build and still on disk are also swept — all three generations of the shape:
- * `.tmp-<pid>` (pre-#1205), `.tmp-<pid>-<seq>` (#1205), and the current
- * `.tmp-<pid>-<threadId>-<seq>` (#1217).
+ * Only the current four-component shape is matched:
+ * `.tmp-<pid>-<threadId>-<seq>` (#1217). Older one- and two-number suffixes
+ * are deliberately left alone: their shape is indistinguishable from
+ * legitimate user filenames, so deletion safety outweighs reclaiming the
+ * handful of pre-#1208 leftovers.
  *
  * CAUTION for any sweeper adopting this pattern: it matches staging files by
  * shape, not by writer identity, so it also matches this process's own
@@ -138,17 +139,16 @@ export function stagePathFor(targetPath: string): string {
  * pids. The review-graph builder's narrower stage sweep intentionally remains
  * separate because it owns a different `.stage-<pid>-<generation>` namespace.
  *
- * The optional groups also widen what matches versus a strict single-pid
- * pattern: e.g. `backup.tmp-2023-11` and `backup.tmp-2023-11-05` now match,
- * while `x.tmp-1-2-3-4`, `data.tmp-`, `x.tmp--1`, and `foo.TMP-42` still do
- * not. Anchoring is correct for both consumer styles in this repo today
+ * Anchoring is correct for both consumer styles in this repo today
  * (matching against a full path or a bare basename), but this is confined to
  * pi-lens's own cache directories — a consumer sweeping a directory it does
  * not fully control should not assume every match is one of this module's
  * staging files.
  */
-export const STAGE_TMP_PATTERN = /\.tmp-\d+(?:-\d+){0,2}$/;
-const STAGE_TMP_PID_PATTERN = /\.tmp-(\d+)(?:-\d+){0,2}$/;
+export const STAGE_TMP_PATTERN =
+	/\.tmp-(0|[1-9]\d*)-(0|[1-9]\d*)-(0|[1-9]\d*)$/;
+const STAGE_TMP_PID_PATTERN =
+	/\.tmp-(0|[1-9]\d*)-(?:0|[1-9]\d*)-(?:0|[1-9]\d*)$/;
 
 /** Extract a valid positive owner pid from an atomic-write staging basename. */
 export function stageOwnerPidFromName(name: string): number | undefined {
