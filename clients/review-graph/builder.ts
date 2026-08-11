@@ -1932,8 +1932,9 @@ function ensurePersistExitHook(): void {
 // The bare `.tmp-<pid>` shape is never matched, which also makes this sweep
 // independent of any change to atomic-write's staging name (#1205). Dropping
 // that shape means the review-graph sweep is no longer the incidental GC for
-// other stores' orphaned atomic-write temps; that gap is now tracked by
-// #1228, not assumed to be owned elsewhere.
+// other stores' orphaned atomic-write temps; the generic `.tmp-*` namespace is
+// now swept at session_start by instance-reaper (#1228), not by this graph
+// artifact-specific pass.
 //
 // Liveness: an entry whose embedded stage pid is still alive belongs to a
 // concurrent healthy owner (or to us) and is skipped, reusing the reaper's

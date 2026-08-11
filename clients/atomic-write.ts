@@ -47,9 +47,10 @@
  *   - **No fsync/durability guarantee.** Neither the staging file nor the
  *     parent directory is fsync'd, so a power loss (as opposed to a process
  *     crash) may lose the rename.
- *   - **No orphan reaping.** A process killed between the staging write and
- *     the rename leaves an orphan staging file that nothing in this module
- *     collects; that lifecycle gap is tracked in #1228, not solved here.
+ *   - **No self-reaping.** A process killed between the staging write and the
+ *     rename leaves an orphan staging file. The next session_start performs a
+ *     bounded, liveness-checked sweep through the instance-reaper lifecycle
+ *     seam (#1228); this writer never watches or reaps its own files.
  *   - **Windows-specific loss under `bestEffort: true`.** `MoveFileEx` with
  *     `MOVEFILE_REPLACE_EXISTING` fails if a reader holds the destination
  *     open without `FILE_SHARE_DELETE`. On Windows this silently drops the
@@ -122,9 +123,8 @@ export function stagePathFor(targetPath: string): string {
 
 /**
  * Matches the trailing staging-file marker produced by {@link stagePathFor},
- * for sweepers that garbage-collect staging files orphaned by a crashed
- * process (tracked as a lifecycle gap in #1228 — this module does not reap
- * its own orphans).
+ * for the session-start sweeper that garbage-collects staging files orphaned
+ * by a crashed process (#1228). The writer itself does not reap or watch files.
  *
  * The trailing groups are optional so that staging files written by an older
  * build and still on disk are also swept — all three generations of the shape:
@@ -132,14 +132,11 @@ export function stagePathFor(targetPath: string): string {
  * `.tmp-<pid>-<threadId>-<seq>` (#1217).
  *
  * CAUTION for any sweeper adopting this pattern: it matches staging files by
- * *shape*, not by writer identity, so it will also match this process's own
- * still-being-written staging files unless the sweeper separately excludes
- * them by `process.pid`. `review-graph/builder.ts`'s `sweepStaleStageFiles`
- * cannot be pointed at this pattern as-is — its own-file guard is
- * `.stage-${process.pid}-`, which never appears in a `.tmp-<pid>-…` name, so
- * widening its match to `STAGE_TMP_PATTERN` without also adding a
- * `.tmp-${process.pid}-` (or equivalent pid) exclusion would delete its own
- * in-flight `writeFileAtomic` staging files mid-write.
+ * shape, not by writer identity, so it also matches this process's own
+ * still-being-written staging files. A safe sweeper must separately protect
+ * `process.pid` and use the shared conservative liveness check for foreign
+ * pids. The review-graph builder's narrower stage sweep intentionally remains
+ * separate because it owns a different `.stage-<pid>-<generation>` namespace.
  *
  * The optional groups also widen what matches versus a strict single-pid
  * pattern: e.g. `backup.tmp-2023-11` and `backup.tmp-2023-11-05` now match,
@@ -151,6 +148,16 @@ export function stagePathFor(targetPath: string): string {
  * staging files.
  */
 export const STAGE_TMP_PATTERN = /\.tmp-\d+(?:-\d+){0,2}$/;
+const STAGE_TMP_PID_PATTERN = /\.tmp-(\d+)(?:-\d+){0,2}$/;
+
+/** Extract a valid positive owner pid from an atomic-write staging basename. */
+export function stageOwnerPidFromName(name: string): number | undefined {
+	if (!STAGE_TMP_PATTERN.test(name)) return undefined;
+	const match = STAGE_TMP_PID_PATTERN.exec(name);
+	if (!match) return undefined;
+	const pid = Number(match[1]);
+	return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+}
 
 /**
  * Synchronous atomic write of text or binary data to a per-call staging file,
