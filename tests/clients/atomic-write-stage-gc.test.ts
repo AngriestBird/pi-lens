@@ -21,6 +21,17 @@ function stage(dir: string, name: string): string {
 	return file;
 }
 
+function findDeadPid(): number {
+	for (let candidate = 999_983; candidate > 1_000; candidate -= 7_919) {
+		try {
+			process.kill(candidate, 0);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ESRCH") return candidate;
+		}
+	}
+	throw new Error("could not find a definitively dead pid");
+}
+
 afterEach(() => {
 	while (cleanup.length > 0) {
 		fs.rmSync(cleanup.pop() as string, { recursive: true, force: true });
@@ -28,25 +39,27 @@ afterEach(() => {
 });
 
 describe("sweepAtomicWriteStages (#1228)", () => {
-	it("removes dead-owner files in all supported old and current naming shapes", async () => {
+	it("reaps a genuine dead-pid orphan in the current shape", async () => {
 		const dir = makeDir();
-		const dead = [
-			stage(dir, "state.json.tmp-41001"),
-			stage(dir, "state.json.tmp-41002-7"),
-			stage(dir, "state.json.tmp-41003-2-7"),
-		];
+		const orphan = stage(dir, `state.json.tmp-${findDeadPid()}-2-7`);
 
-		const result = await sweepAtomicWriteStages([dir], {
-			isPidAlive: () => false,
-		});
+		const result = await sweepAtomicWriteStages([dir]);
 
-		expect(result.removed).toBe(3);
-		expect(dead.every((file) => !fs.existsSync(file))).toBe(true);
+		expect(result.removed).toBe(1);
+		expect(fs.existsSync(orphan)).toBe(false);
 	});
 
-	it("preserves live foreign owners and every current-process staging file", async () => {
+	it("preserves legacy suffixes and live foreign owners", async () => {
 		const dir = makeDir();
-		const liveForeign = stage(dir, "state.json.tmp-42001-3-9");
+		const liveForeignPid = process.ppid;
+		expect(liveForeignPid).toBeGreaterThan(0);
+		expect(liveForeignPid).not.toBe(process.pid);
+		const liveForeign = stage(dir, `state.json.tmp-${liveForeignPid}-3-9`);
+		const legacy = [
+			stage(dir, "backup.tmp-2023-11"),
+			stage(dir, "state.json.tmp-41002"),
+			stage(dir, "state.json.tmp-41002-7"),
+		];
 		const currentProcess = stage(
 			dir,
 			`state.json.tmp-${process.pid}-0-99`,
@@ -54,11 +67,11 @@ describe("sweepAtomicWriteStages (#1228)", () => {
 		const unrelated = stage(dir, "state.json.tmp-42001-3-9-extra");
 		const ordinary = stage(dir, "state.json");
 
-		await sweepAtomicWriteStages([dir], {
-			isPidAlive: (pid) => pid === 42001,
-		});
+		// No liveness override: this exercises the real ESRCH-only probe.
+		await sweepAtomicWriteStages([dir]);
 
 		expect(fs.existsSync(liveForeign)).toBe(true);
+		expect(legacy.every((file) => fs.existsSync(file))).toBe(true);
 		expect(fs.existsSync(currentProcess)).toBe(true);
 		expect(fs.existsSync(unrelated)).toBe(true);
 		expect(fs.existsSync(ordinary)).toBe(true);
@@ -83,7 +96,7 @@ describe("sweepAtomicWriteStages (#1228)", () => {
 	it("stops after the configured bounded number of directory entries", async () => {
 		const dir = makeDir();
 		const files = Array.from({ length: 3 }, (_, i) =>
-			stage(dir, `state-${i}.tmp-4400${i}`),
+			stage(dir, `state-${i}.tmp-4400${i}-0-${i}`),
 		);
 
 		const result = await sweepAtomicWriteStages([dir], {
