@@ -25,6 +25,11 @@ vi.mock("../../clients/package-manager.js", () => ({ findNodeToolBinary }));
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
 	getManagedToolsDir: () => path.join(os.tmpdir(), "pilens-fake-home", "tools"),
+	// #1276: the madge staleness check revalidates bare resolved commands via
+	// isSpawnableCommand. Not exercised in this file (every resolution here
+	// falls through to the unmemoized `npx` fallback), but stubbed so a future
+	// bare-command case here doesn't throw on a missing mock export.
+	isSpawnableCommand: vi.fn(async () => true),
 }));
 
 const VERSION_OK = {

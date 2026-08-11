@@ -3647,11 +3647,11 @@ async function installGemTool(
 	}
 }
 
-function finishInstallAttempt(
+async function finishInstallAttempt(
 	toolId: string,
 	ok: boolean,
 	startedAt: number,
-): boolean {
+): Promise<boolean> {
 	logSessionStart(
 		`auto-install ${toolId}: ${ok ? "success" : "failed"} (${Date.now() - startedAt}ms)`,
 	);
@@ -3660,6 +3660,26 @@ function finishInstallAttempt(
 		// PATH. Make a successful mutation visible immediately rather than waiting
 		// for the bounded negative-cache TTL or the next session reset (#1199).
 		resetSafeSpawnWindowsCommandCache();
+		// #1276: the madge managed-path memo is keyed only by projectRoot, but
+		// reads PATH/discovery/install state that a completed install can just
+		// have changed — drop it here too, right alongside the safe-spawn reset.
+		// AWAITED (not fire-and-forget): a caller that starts the next madge
+		// resolution the instant `installTool`/`ensureTool` resolves must observe
+		// the reset memo, not a stale pre-install one, and a rejected dynamic
+		// import must not become a silent unhandled rejection. Dynamic import
+		// avoids a static dependency-checker.js <-> installer/index.js cycle
+		// (dependency-checker.js already imports this module dynamically for the
+		// same reason).
+		try {
+			const { resetMadgeManagedPathMemo } = await import(
+				"../dependency-checker.js"
+			);
+			resetMadgeManagedPathMemo();
+		} catch (err) {
+			logSessionStart(
+				`auto-install ${toolId}: madge memo reset failed: ${(err as Error).message}`,
+			);
+		}
 	}
 	return ok;
 }

@@ -8,6 +8,7 @@ import { deadCodeIssueCount } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
 import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
+import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
 import {
@@ -1787,6 +1788,13 @@ export async function handleSessionStart(
 	// a tool installed mid-session or a differently-scoped managed bin) are
 	// picked up fresh.
 	resetSafeSpawnWindowsCommandCache();
+	// #1266: install-failure suppression in dispatch runner availability
+	// checkers (`noteInstallFailure`) is meant to last only until "the next
+	// session", per #1222 — but nothing called the reset helper, so a
+	// transient install failure (npm registry blip, locked file) suppressed
+	// the tool for the rest of the process lifetime. Clear it here, same
+	// boundary as the other per-session caches on this line.
+	resetDispatchAvailabilityState();
 	// #1123 item 3: a fresh session can re-report smells that a prior session
 	// already surfaced once (see `checkSmellsAndNoteOnce`'s once-per-session gate).
 	resetSmellsSessionState();

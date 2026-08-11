@@ -181,11 +181,36 @@ function classifyMadgeKind(
 }
 
 /**
- * An absolute command path that has since vanished (madge uninstalled, the
- * managed tree wiped). Bare names can't be checked this way and are left alone.
+ * Has the memoized resolution stopped being reachable? An absolute path is
+ * checked with a plain `existsSync` (madge uninstalled, the managed tree
+ * wiped). `"npx"` is the deliberate no-memo fallback (already dropped from
+ * the cache the moment it's produced — see `resolveUnlessNpx`) and is never
+ * itself stale. Everything else is a bare PATH name (`"madge"`, a shell
+ * alias resolved via `findNodeToolBinary`'s global-bin probes, …) — #1276:
+ * `existsSync` can't check those, so without this they were never
+ * revalidated and a PATH change or removed global install kept serving the
+ * old answer for the rest of the process.
+ *
+ * `spawnableCache` memoizes the bare-command branch per checker instance
+ * (P2 fix, #1276 review): `isSpawnableCommand` does a synchronous PATH walk,
+ * and without this it re-ran on every single cached `madgeCommand` hit —
+ * once per file when callers resolve per-file instead of via
+ * `checkFilesBatch`'s single per-batch resolution. The cache is cleared by
+ * `resetMadgeMemo()` alongside `madgeCommand`, so it stays exactly as fresh
+ * as the memo it's revalidating.
  */
-function resolvedCommandIsStale(resolved: ResolvedMadge): boolean {
-	return path.isAbsolute(resolved.cmd) && !fs.existsSync(resolved.cmd);
+async function resolvedCommandIsStale(
+	resolved: ResolvedMadge,
+	spawnableCache: Map<string, boolean>,
+): Promise<boolean> {
+	if (resolved.kind === "npx") return false;
+	if (path.isAbsolute(resolved.cmd)) return !fs.existsSync(resolved.cmd);
+	const cached = spawnableCache.get(resolved.cmd);
+	if (cached !== undefined) return !cached;
+	const { isSpawnableCommand } = await import("./installer/index.js");
+	const spawnable = await isSpawnableCommand(resolved.cmd);
+	spawnableCache.set(resolved.cmd, spawnable);
+	return !spawnable;
 }
 
 /** Run `mapper` over `items` with at most `concurrency` in flight at once. */
@@ -237,10 +262,59 @@ export class DependencyChecker {
 	// projectRoot -> resolved madge command
 	private madgeCommand = new Map<string, Promise<ResolvedMadge>>();
 
+	// Bare command -> last-known spawnability (#1276 revalidation, P2 fix). A
+	// cache hit on `madgeCommand` used to re-run `isSpawnableCommand`'s
+	// synchronous PATH walk on EVERY resolution — unbounded FS work on a path
+	// that can run once per file in a batch. Memoized here instead, and
+	// invalidated by the exact same `resetMadgeMemo()` call the madge-command
+	// memo uses, so a madge removed/reinstalled mid-session is still detected
+	// on the next resolution after an install completes.
+	private spawnableCache = new Map<string, boolean>();
+
+	// #1276: every live checker registers itself so `resetMadgeManagedPathMemo`
+	// (called from installer's `finishInstallAttempt`, mirroring
+	// `resetSafeSpawnWindowsCommandCache`) can drop every instance's memo, not
+	// just whichever one happened to run the install. Held via `WeakRef` (not a
+	// strong `Set<DependencyChecker>`) so a checker that's no longer referenced
+	// anywhere else (test/reinit instances; production only ever constructs one
+	// in `bootstrap.ts`) can still be garbage-collected instead of being
+	// retained for the rest of the process — dead refs are pruned lazily the
+	// next time the registry is walked.
+	private static readonly instances = new Set<WeakRef<DependencyChecker>>();
+
 	constructor(verbose = false) {
 		this.log = verbose
 			? (msg: string) => console.error(`[deps] ${msg}`)
 			: () => {};
+		DependencyChecker.instances.add(new WeakRef(this));
+	}
+
+	/** Drop this instance's memoized madge resolution for every project root. */
+	private resetMadgeMemo(): void {
+		this.madgeCommand.clear();
+		this.spawnableCache.clear();
+	}
+
+	/**
+	 * Reset hook for #1276: the madge managed-path memo is keyed only by
+	 * `projectRoot`, but the memoized resolution reads PATH/PATHEXT, local/
+	 * global tool discovery, and managed-install state — all of which a
+	 * completed install can change. Call this from `finishInstallAttempt()`
+	 * right alongside `resetSafeSpawnWindowsCommandCache()` so a mid-session
+	 * install is picked up instead of serving the pre-install answer for the
+	 * rest of the process.
+	 */
+	static resetMadgeManagedPathMemo(): void {
+		for (const ref of DependencyChecker.instances) {
+			const checker = ref.deref();
+			if (!checker) {
+				// Garbage-collected since registration — prune the dead ref instead
+				// of leaving it around forever.
+				DependencyChecker.instances.delete(ref);
+				continue;
+			}
+			checker.resetMadgeMemo();
+		}
 	}
 
 	/**
@@ -263,7 +337,8 @@ export class DependencyChecker {
 			// moved must re-resolve, not fail every spawn for the rest of the
 			// session.
 			const resolved = await cached;
-			if (!resolvedCommandIsStale(resolved)) return resolved;
+			if (!(await resolvedCommandIsStale(resolved, this.spawnableCache)))
+				return resolved;
 			// Several callers may have observed the same stale promise before any
 			// continuation ran. Only remove the entry if it is still the promise
 			// this caller observed; otherwise join the newer resolution already in
@@ -996,4 +1071,14 @@ export class DependencyChecker {
 
 		return output;
 	}
+}
+
+/**
+ * Reset the madge managed-path memo on every live `DependencyChecker`.
+ * Free-function wrapper (matching `resetSafeSpawnWindowsCommandCache`'s
+ * shape) so callers reset without needing a checker instance in hand — see
+ * `DependencyChecker.resetMadgeManagedPathMemo` for why this exists (#1276).
+ */
+export function resetMadgeManagedPathMemo(): void {
+	DependencyChecker.resetMadgeManagedPathMemo();
 }

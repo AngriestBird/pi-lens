@@ -23,6 +23,11 @@ const safeSpawnAsync = vi.fn();
 const safeSpawn = vi.fn();
 const findNodeToolBinary = vi.fn();
 const ensureTool = vi.fn();
+// #1276: the madge staleness check now revalidates bare (non-absolute)
+// resolved commands via isSpawnableCommand. Defaulted to "still spawnable" in
+// beforeEach so existing cache-hit assertions in this file aren't disturbed;
+// tests that care about staleness override it explicitly.
+const isSpawnableCommand = vi.fn();
 const MANAGED_TOOLS_DIR = path.join(os.tmpdir(), "pilens-fake-home", "tools");
 
 vi.mock("../../clients/safe-spawn.js", () => ({ safeSpawnAsync, safeSpawn }));
@@ -30,6 +35,7 @@ vi.mock("../../clients/package-manager.js", () => ({ findNodeToolBinary }));
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
 	getManagedToolsDir: () => MANAGED_TOOLS_DIR,
+	isSpawnableCommand,
 }));
 
 describe("DependencyChecker madge resolution (#766)", () => {
@@ -42,6 +48,7 @@ describe("DependencyChecker madge resolution (#766)", () => {
 		otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pilens-madge-other-"));
 		findNodeToolBinary.mockResolvedValue(undefined);
 		ensureTool.mockResolvedValue(undefined);
+		isSpawnableCommand.mockResolvedValue(true);
 		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
 			if (args[0] === "--version") {
 				return { status: 0, error: null, stdout: "madge 8.0.0", stderr: "" };
@@ -324,5 +331,61 @@ describe("DependencyChecker madge resolution (#766)", () => {
 
 		expect(ensureTool).toHaveBeenCalledTimes(2);
 		expect(second.stats.commandKind).toBe("managed");
+	});
+
+	it("revalidates a cached bare-command resolution's spawnability once, not per checkFile call (#1276 P2)", async () => {
+		const { DependencyChecker, resetMadgeManagedPathMemo } = await import(
+			"../../clients/dependency-checker.js"
+		);
+		// Nothing local/global; installer discovery hands back a bare `madge` on
+		// PATH (kind "path" — not absolute, so classifyMadgeKind's existsSync
+		// shortcut never applies and every cache hit goes through
+		// resolvedCommandIsStale's isSpawnableCommand branch).
+		findNodeToolBinary.mockResolvedValue(undefined);
+		ensureTool.mockResolvedValue("madge");
+		isSpawnableCommand.mockResolvedValue(true);
+
+		const checker = new DependencyChecker();
+		const files = [
+			writeSource("a.ts", ["./x.js"]),
+			writeSource("b.ts", ["./y.js"]),
+			writeSource("c.ts", ["./z.js"]),
+		];
+
+		// First call resolves cold — no memo entry exists yet, so there is
+		// nothing to revalidate and `isSpawnableCommand` is not consulted.
+		await checker.checkFile(files[0], tmp);
+		expect(isSpawnableCommand).toHaveBeenCalledTimes(0);
+
+		// Two more cached-resolution hits (different files force
+		// `importsChanged`, so each one reaches `resolveMadge` again). Pre-fix,
+		// `resolvedCommandIsStale` re-ran `isSpawnableCommand`'s synchronous PATH
+		// walk on every one of these; post-fix the answer is memoized alongside
+		// the madge-command memo after the first revalidation and is not
+		// re-probed again.
+		await checker.checkFile(files[1], tmp);
+		await checker.checkFile(files[2], tmp);
+		expect(isSpawnableCommand).toHaveBeenCalledTimes(1);
+		expect(ensureTool).toHaveBeenCalledTimes(1);
+
+		// A completed install still invalidates the cached spawnability answer,
+		// exactly like it invalidates the madge-command memo itself. The next
+		// resolution is cold again (no isSpawnableCommand call, same as the very
+		// first call above); the one after THAT hits the freshly-repopulated
+		// cache and revalidates once more.
+		resetMadgeManagedPathMemo();
+		fs.writeFileSync(
+			files[0],
+			'import { q } from "./q.js";\nexport const v = 1;\n',
+		);
+		await checker.checkFile(files[0], tmp);
+		expect(isSpawnableCommand).toHaveBeenCalledTimes(1);
+
+		fs.writeFileSync(
+			files[1],
+			'import { r } from "./r.js";\nexport const v = 1;\n',
+		);
+		await checker.checkFile(files[1], tmp);
+		expect(isSpawnableCommand).toHaveBeenCalledTimes(2);
 	});
 });

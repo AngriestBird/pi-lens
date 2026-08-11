@@ -39,6 +39,9 @@ vi.mock("../../clients/package-manager.js", () => ({
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool: vi.fn(async () => undefined),
 	getManagedToolsDir: () => path.join("/fake", "pi-lens", "tools"),
+	// #1276: stubbed for the same reason as the sibling madge test files — see
+	// dependency-checker-madge-resolution.test.ts.
+	isSpawnableCommand: vi.fn(async () => true),
 }));
 
 describe("DependencyChecker.checkFilesBatch — concurrency race guard (#766)", () => {

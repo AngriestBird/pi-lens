@@ -31,6 +31,9 @@ vi.mock("../../clients/package-manager.js", () => ({ findNodeToolBinary }));
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
 	getManagedToolsDir: () => path.join(os.tmpdir(), "pilens-fake-home", "tools"),
+	// #1276: stubbed for the same reason as the sibling madge test files — see
+	// dependency-checker-madge-resolution.test.ts.
+	isSpawnableCommand: vi.fn(async () => true),
 }));
 
 const VERSION_OK = {
