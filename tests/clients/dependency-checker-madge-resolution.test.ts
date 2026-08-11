@@ -265,6 +265,41 @@ describe("DependencyChecker madge resolution (#766)", () => {
 		expect(second.stats.commandKind).toBe("npx");
 	});
 
+	it("coalesces concurrent stale-entry recovery into one probe", async () => {
+		const { DependencyChecker } = await import(
+			"../../clients/dependency-checker.js"
+		);
+		const bin = installFakeBinary(tmp);
+		findNodeToolBinary.mockResolvedValue(bin);
+		const firstFile = writeSource("first.ts", ["./b.js"]);
+		const secondFile = writeSource("second.ts", ["./c.js"]);
+
+		const checker = new DependencyChecker();
+		await checker.checkFilesBatch([firstFile], tmp);
+		expect(findNodeToolBinary).toHaveBeenCalledTimes(1);
+
+		// Both operations observe the same stale, already-resolved memo. Keep the
+		// replacement probe pending so the old implementation's second continuation
+		// can delete its replacement and start a duplicate probe.
+		fs.rmSync(bin);
+		fs.writeFileSync(
+			firstFile,
+			'import { b } from "./changed.js";\nexport const v = 1;\n',
+		);
+		findNodeToolBinary.mockImplementation(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			return undefined;
+		});
+		ensureTool.mockResolvedValue(undefined);
+		const [, second] = await Promise.all([
+			checker.checkFilesBatch([firstFile], tmp),
+			checker.checkFilesBatch([secondFile], tmp),
+		]);
+
+		expect(findNodeToolBinary).toHaveBeenCalledTimes(2);
+		expect(second.stats.commandKind).toBe("npx");
+	});
+
 	it("survives a throwing installer probe and re-attempts on the next batch", async () => {
 		const { DependencyChecker } = await import(
 			"../../clients/dependency-checker.js"

@@ -197,13 +197,14 @@ async function mapWithConcurrency<T>(
 	if (items.length === 0) return;
 	let nextIndex = 0;
 	const workerCount = Math.max(1, Math.min(concurrency, items.length));
-	const workers = Array.from({ length: workerCount }, async () => {
+	const worker = async (): Promise<void> => {
 		while (true) {
 			const index = nextIndex++;
 			if (index >= items.length) return;
 			await mapper(items[index]);
 		}
-	});
+	};
+	const workers = Array.from({ length: workerCount }, () => worker());
 	await Promise.all(workers);
 }
 
@@ -263,7 +264,18 @@ export class DependencyChecker {
 			// session.
 			const resolved = await cached;
 			if (!resolvedCommandIsStale(resolved)) return resolved;
-			this.madgeCommand.delete(projectRoot);
+			// Several callers may have observed the same stale promise before any
+			// continuation ran. Only remove the entry if it is still the promise
+			// this caller observed; otherwise join the newer resolution already in
+			// flight instead of deleting it and starting a duplicate probe.
+			const current = this.madgeCommand.get(projectRoot);
+			if (current === cached) {
+				this.madgeCommand.delete(projectRoot);
+			} else {
+				// An npx result may have resolved and removed itself already. In that
+				// case falling through starts the intended fresh probe.
+				if (current) return current;
+			}
 		}
 
 		const resolving = this.resolveUnlessNpx(projectRoot);
