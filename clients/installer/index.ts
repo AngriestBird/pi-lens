@@ -57,6 +57,7 @@ import path from "node:path";
 const _installerRequire = createRequire(import.meta.url);
 import { createGunzip } from "node:zlib";
 import { logSessionStart } from "../sessionstart-logger.js";
+import { writeFileAtomicAsync } from "../atomic-write.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import {
 	allAvailableGlobalBinDirs,
@@ -201,6 +202,15 @@ const GITHUB_BIN_DIR = path.join(getGlobalPiLensDir(), "bin");
 // Debug flag - set via PI_LENS_DEBUG=1 or --debug
 const DEBUG =
 	process.env.PI_LENS_DEBUG === "1" || process.argv.includes("--debug");
+
+/** Test-only platform seam for Windows resource-layout coverage on Linux CI. */
+function installerPlatform(): NodeJS.Platform {
+	const override = process.env.PI_LENS_TEST_PLATFORM;
+	if (override === "win32" || override === "linux") {
+		return override;
+	}
+	return process.platform;
+}
 
 /**
  * Log debug messages only when DEBUG is enabled
@@ -1398,35 +1408,249 @@ interface ProbeCacheEntry {
 type ProbeCache = Record<string, ProbeCacheEntry>;
 
 const PROBE_CACHE_PATH = path.join(getGlobalPiLensDir(), "probe-cache.json");
+const PROBE_CACHE_LOCK_PATH = `${PROBE_CACHE_PATH}.lock`;
+const PROBE_CACHE_LOCK_OWNER_PATH = path.join(PROBE_CACHE_LOCK_PATH, "owner.json");
+const PROBE_CACHE_LOCK_STALE_MS = 180_000;
 const PROBE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const PROBE_CACHE_FLUSH_LOCK_WAIT_MS = 250;
+const PROBE_CACHE_FLUSH_RETRY_DELAY_MS = 300;
+const PROBE_CACHE_FLUSH_RETRY_MAX_DELAY_MS = 30_000;
+
+type ProbeCacheLockOwner = {
+	pid: number;
+	createdAt: number;
+	token: string;
+};
 
 let _probeCache: ProbeCache | null = null;
 let _probeCacheDirty = false;
 let _probeCacheFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let _probeCacheWriteInFlight: Promise<void> | null = null;
+let _probeCacheRetryAttempt = 0;
+let _probeCacheChangeGeneration = 0;
+// Read-modify-write deltas let a long-lived process merge with entries another
+// process discovered after this process's initial read. `null` is a deliberate
+// deletion (TTL/stale-path eviction), not an absent map value.
+const _probeCacheChanges = new Map<string, ProbeCacheEntry | null>();
+const _probeCacheChangeVersions = new Map<string, number>();
 
 async function readProbeCache(): Promise<ProbeCache> {
 	if (_probeCache !== null) return _probeCache;
 	try {
 		const raw = await fs.readFile(PROBE_CACHE_PATH, "utf-8");
-		_probeCache = JSON.parse(raw) as ProbeCache;
-	} catch {
+		const parsed: unknown = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			throw new Error("probe-cache root is not an object");
+		}
+		_probeCache = parsed as ProbeCache;
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (code !== "ENOENT") {
+			logSessionStart(
+				`auto-install probe-cache: read failed (${code ?? "invalid"}); treating cache as unavailable`,
+			);
+		}
 		_probeCache = {};
 	}
 	return _probeCache;
 }
 
-function scheduleProbeFlush(): void {
+function markProbeCacheChange(toolId: string, entry: ProbeCacheEntry | null): void {
+	_probeCacheChanges.set(toolId, entry);
+	_probeCacheChangeVersions.set(toolId, ++_probeCacheChangeGeneration);
+	_probeCacheDirty = true;
+	scheduleProbeFlush();
+}
+
+function isProbeCacheLockStale(owner: ProbeCacheLockOwner): boolean {
+	if (!Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+	if (!Number.isFinite(owner.createdAt)) return false;
+	return (
+		!isProcessAlive(owner.pid) ||
+		Date.now() - owner.createdAt > PROBE_CACHE_LOCK_STALE_MS
+	);
+}
+
+function probeCacheLockQuarantinePath(token: string): string {
+	return `${PROBE_CACHE_LOCK_PATH}.quarantine-${process.pid}-${token}`;
+}
+
+async function restoreProbeCacheLock(
+	quarantinePath: string,
+): Promise<void> {
+	try {
+		await fs.rename(quarantinePath, PROBE_CACHE_LOCK_PATH);
+	} catch {
+		// Another owner may have acquired the canonical path. Never remove or
+		// overwrite that owner; the quarantine is harmless and can be cleaned by a
+		// later stale-lock sweep.
+	}
+}
+
+async function releaseProbeCacheLock(token: string): Promise<void> {
+	const quarantinePath = probeCacheLockQuarantinePath(`release-${token}`);
+	try {
+		// Rename is the atomic ownership handoff. A late release cannot recursively
+		// remove a replacement owner that acquired the canonical path after stale
+		// reclamation.
+		await fs.rename(PROBE_CACHE_LOCK_PATH, quarantinePath);
+	} catch {
+		return;
+	}
+	try {
+		const raw = await fs.readFile(
+			path.join(quarantinePath, "owner.json"),
+			"utf8",
+		);
+		const owner = JSON.parse(raw) as Partial<ProbeCacheLockOwner>;
+		if (owner.token === token) {
+			await fs.rm(quarantinePath, { recursive: true, force: true });
+		} else {
+			await restoreProbeCacheLock(quarantinePath);
+		}
+	} catch {
+		// If the owner record cannot be read, keep the lock rather than deleting a
+		// potentially newer owner's directory.
+		await restoreProbeCacheLock(quarantinePath);
+	}
+}
+
+async function tryReclaimProbeCacheLock(): Promise<boolean> {
+	const quarantinePath = probeCacheLockQuarantinePath(
+		`reclaim-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+	);
+	try {
+		// Moving the directory out of the canonical name is atomic. A new owner can
+		// only mkdir the canonical path after this move, so its directory is never
+		// recursively removed by stale-owner cleanup.
+		await fs.rename(PROBE_CACHE_LOCK_PATH, quarantinePath);
+	} catch {
+		return false;
+	}
+
+	let stale = false;
+	try {
+		const raw = await fs.readFile(
+			path.join(quarantinePath, "owner.json"),
+			"utf8",
+		);
+		stale = isProbeCacheLockStale(
+			JSON.parse(raw) as ProbeCacheLockOwner,
+		);
+	} catch {
+		try {
+			const stat = await fs.stat(quarantinePath);
+			stale = Date.now() - stat.mtimeMs > PROBE_CACHE_LOCK_STALE_MS;
+		} catch {
+			stale = false;
+		}
+	}
+
+	if (stale) {
+		await fs.rm(quarantinePath, { recursive: true, force: true });
+		return true;
+	}
+	await restoreProbeCacheLock(quarantinePath);
+	return false;
+}
+
+async function tryAcquireProbeCacheLock(): Promise<(() => Promise<void>) | null> {
+	const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+	const owner: ProbeCacheLockOwner = {
+		pid: process.pid,
+		createdAt: Date.now(),
+		token,
+	};
+
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		try {
+			// A directory lock closes the unlink/check/recreate race: another owner
+			// cannot create the directory until this owner's recursive removal has
+			// completed, so release cannot remove a newer owner's lock.
+			await fs.mkdir(PROBE_CACHE_LOCK_PATH);
+			try {
+				await fs.writeFile(
+					PROBE_CACHE_LOCK_OWNER_PATH,
+					JSON.stringify(owner),
+					"utf8",
+				);
+			} catch (error) {
+				await fs.rm(PROBE_CACHE_LOCK_PATH, { recursive: true, force: true }).catch(
+					() => {},
+				);
+				throw error;
+			}
+			return () => releaseProbeCacheLock(token);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException | undefined)?.code !== "EEXIST") {
+				throw err;
+			}
+
+			let stale = false;
+			try {
+				const raw = await fs.readFile(PROBE_CACHE_LOCK_OWNER_PATH, "utf8");
+				const existing = JSON.parse(raw) as ProbeCacheLockOwner;
+				stale = isProbeCacheLockStale(existing);
+			} catch {
+				try {
+					const stat = await fs.stat(PROBE_CACHE_LOCK_PATH);
+					stale = Date.now() - stat.mtimeMs > PROBE_CACHE_LOCK_STALE_MS;
+				} catch {
+					// The owner released between EEXIST and inspection; retry once.
+					stale = true;
+				}
+			}
+			if (stale) {
+				if (await tryReclaimProbeCacheLock()) continue;
+			}
+			return null;
+		}
+	}
+	return null;
+}
+
+function scheduleProbeFlush(delayMs = PROBE_CACHE_FLUSH_RETRY_DELAY_MS): void {
 	if (_probeCacheFlushTimer !== null) return;
 	_probeCacheFlushTimer = setTimeout(() => {
 		void flushProbeCache();
-	}, 300);
+	}, delayMs);
 	_probeCacheFlushTimer.unref?.();
 }
 
-let _probeCacheWriteInFlight: Promise<void> | null = null;
+function scheduleProbeFlushRetry(): void {
+	const delay = Math.min(
+		PROBE_CACHE_FLUSH_RETRY_MAX_DELAY_MS,
+		PROBE_CACHE_FLUSH_RETRY_DELAY_MS * 2 ** Math.min(_probeCacheRetryAttempt, 6),
+	);
+	_probeCacheRetryAttempt += 1;
+	scheduleProbeFlush(delay);
+}
+
+async function acquireProbeCacheLockForFlush(): Promise<
+	(() => Promise<void>) | null
+> {
+	const deadline = Date.now() + PROBE_CACHE_FLUSH_LOCK_WAIT_MS;
+	while (true) {
+		const release = await tryAcquireProbeCacheLock();
+		if (release) return release;
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) return null;
+		await new Promise((resolve) =>
+			setTimeout(resolve, Math.min(25, remaining)),
+		);
+	}
+}
+
+export type ProbeCacheFlushResult =
+	| "idle"
+	| "written"
+	| "written-with-pending"
+	| "deferred"
+	| "failed";
 
 /** Await pending probe-cache persistence before a one-shot process exits. */
-export async function flushProbeCache(): Promise<void> {
+export async function flushProbeCache(): Promise<ProbeCacheFlushResult> {
+	let result: ProbeCacheFlushResult = "idle";
 	if (_probeCacheFlushTimer !== null) {
 		clearTimeout(_probeCacheFlushTimer);
 		_probeCacheFlushTimer = null;
@@ -1434,19 +1658,89 @@ export async function flushProbeCache(): Promise<void> {
 	// #946 review F4: if the 300ms timer's write already started, the dirty
 	// flag is false but the write may still be in flight — an immediate
 	// process.exit would truncate it. Always await the in-flight write.
-	if (!_probeCacheDirty || _probeCache === null) {
+	if (_probeCacheWriteInFlight) {
 		await _probeCacheWriteInFlight;
-		return;
+		if (!_probeCacheDirty) return "written";
 	}
-	_probeCacheDirty = false;
+	if (!_probeCacheDirty || _probeCache === null) return result;
+
 	const write = (async () => {
-		try {
-			await fs.writeFile(
-				PROBE_CACHE_PATH,
-				JSON.stringify(_probeCache, null, 2),
+		const release = await acquireProbeCacheLockForFlush();
+		if (!release) {
+			// A one-shot caller gets a bounded asynchronous wait rather than an
+			// unbounded exit-path block. The explicit result tells it that persistence
+			// remains pending, and long-lived sessions get a backoff retry.
+			result = "deferred";
+			logSessionStart(
+				"auto-install probe-cache: flush deferred because another process owns the lock",
 			);
-		} catch {
-			// Cache persistence is best effort; discovery remains authoritative.
+			scheduleProbeFlushRetry();
+			return;
+		}
+
+		try {
+			// Snapshot versions before the awaited disk read/write. A new update for
+			// the same tool may arrive while the atomic write is in flight; its newer
+			// version must remain pending for the next flush.
+			const snapshotChanges = new Map(_probeCacheChanges);
+			const snapshotVersions = new Map(_probeCacheChangeVersions);
+			// Re-read under the non-blocking lock, then apply only this process's
+			// changes. This is the read-modify-write isolation missing from a plain
+			// atomic rename: entries discovered by a sibling process survive.
+			let disk: ProbeCache = {};
+			try {
+				const raw = await fs.readFile(PROBE_CACHE_PATH, "utf-8");
+				const parsed: unknown = JSON.parse(raw);
+				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+					throw new Error("probe-cache root is not an object");
+				}
+				disk = parsed as ProbeCache;
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") {
+					result = "failed";
+					logSessionStart(
+						`auto-install probe-cache: merge read failed (${(err as NodeJS.ErrnoException | undefined)?.code ?? "invalid"}); preserving pending update`,
+					);
+					return;
+				}
+			}
+
+			for (const [toolId, entry] of snapshotChanges) {
+				if (entry === null) delete disk[toolId];
+				else disk[toolId] = entry;
+			}
+			await writeFileAtomicAsync(PROBE_CACHE_PATH, JSON.stringify(disk, null, 2), {
+				bestEffort: false,
+			});
+
+			// Publish the sibling-process merge plus any updates that arrived during
+			// the write. Only an unchanged snapshot entry is retired.
+			const pendingAfterWrite = new Map(_probeCacheChanges);
+			_probeCache = disk;
+			for (const [toolId, entry] of pendingAfterWrite) {
+				if (entry === null) delete _probeCache[toolId];
+				else _probeCache[toolId] = entry;
+			}
+			for (const [toolId, version] of snapshotVersions) {
+				if (_probeCacheChangeVersions.get(toolId) === version) {
+					_probeCacheChanges.delete(toolId);
+					_probeCacheChangeVersions.delete(toolId);
+				}
+			}
+			_probeCacheDirty = _probeCacheChanges.size > 0;
+			_probeCacheRetryAttempt = 0;
+			result = _probeCacheDirty ? "written-with-pending" : "written";
+		} catch (err) {
+			result = "failed";
+			// Keep dirty state so a later timer/explicit flush can retry. The error
+			// is logged without paths, source, or command text; an unavailable cache
+			// must never look like a clean empty cache to operators.
+			logSessionStart(
+				`auto-install probe-cache: flush failed (${(err as NodeJS.ErrnoException | undefined)?.code ?? "write error"}); pending update retained`,
+			);
+			scheduleProbeFlushRetry();
+		} finally {
+			await release();
 		}
 	})();
 	_probeCacheWriteInFlight = write;
@@ -1455,6 +1749,7 @@ export async function flushProbeCache(): Promise<void> {
 	} finally {
 		if (_probeCacheWriteInFlight === write) _probeCacheWriteInFlight = null;
 	}
+	return result;
 }
 
 function isAstGrepVersionOutput(output: string): boolean {
@@ -1497,8 +1792,7 @@ export async function checkProbeCache(
 	if (Date.now() - entry.cachedAt > PROBE_CACHE_TTL_MS) {
 		logSessionStart(`auto-install probe-cache ${toolId}: miss (ttl expired)`);
 		delete cache[toolId];
-		_probeCacheDirty = true;
-		scheduleProbeFlush();
+		markProbeCacheChange(toolId, null);
 		return undefined;
 	}
 
@@ -1510,8 +1804,7 @@ export async function checkProbeCache(
 				`auto-install probe-cache ${toolId}: miss (mtime changed)`,
 			);
 			delete cache[toolId];
-			_probeCacheDirty = true;
-			scheduleProbeFlush();
+			markProbeCacheChange(toolId, null);
 			return undefined;
 		}
 		if (toolId === "ast-grep" && !(await verifyAstGrepProbePath(entry.path))) {
@@ -1519,8 +1812,7 @@ export async function checkProbeCache(
 				`auto-install probe-cache ${toolId}: miss (not ast-grep: ${entry.path})`,
 			);
 			delete cache[toolId];
-			_probeCacheDirty = true;
-			scheduleProbeFlush();
+			markProbeCacheChange(toolId, null);
 			return undefined;
 		}
 		return entry.path;
@@ -1529,8 +1821,7 @@ export async function checkProbeCache(
 			`auto-install probe-cache ${toolId}: miss (gone: ${entry.path})`,
 		);
 		delete cache[toolId];
-		_probeCacheDirty = true;
-		scheduleProbeFlush();
+		markProbeCacheChange(toolId, null);
 		return undefined;
 	}
 }
@@ -1543,13 +1834,13 @@ export async function updateProbeCache(
 	try {
 		const stat = await fs.stat(resolvedPath);
 		const cache = await readProbeCache();
-		cache[toolId] = {
+		const entry = {
 			path: resolvedPath,
 			mtimeMs: stat.mtimeMs,
 			cachedAt: Date.now(),
 		};
-		_probeCacheDirty = true;
-		scheduleProbeFlush();
+		cache[toolId] = entry;
+		markProbeCacheChange(toolId, entry);
 	} catch {
 		// best-effort
 	}
@@ -1559,6 +1850,10 @@ export async function updateProbeCache(
 export function resetProbeCacheStateForTesting(): void {
 	_probeCache = null;
 	_probeCacheDirty = false;
+	_probeCacheChanges.clear();
+	_probeCacheChangeVersions.clear();
+	_probeCacheChangeGeneration = 0;
+	_probeCacheRetryAttempt = 0;
 	resolvedPathCache.clear();
 	ensureInFlight.clear();
 	installFailureReasons.clear();
@@ -1581,7 +1876,7 @@ export async function isCommandAvailable(
 	command: string,
 	_args?: string[],
 ): Promise<boolean> {
-	const isWindows = process.platform === "win32";
+	const isWindows = installerPlatform() === "win32";
 	const pathEnv =
 		process.env.PATH || process.env.Path || process.env.path || "";
 	const dirs = pathEnv.split(path.delimiter);
@@ -1691,7 +1986,7 @@ async function verifyToolBinary(
 	onVersionOutput?: (output: string) => void,
 ): Promise<boolean> {
 	return new Promise((resolve) => {
-		const isWindows = process.platform === "win32";
+		const isWindows = installerPlatform() === "win32";
 		const hasKnownWindowsExt = /\.(cmd|exe|ps1)$/i.test(binPath);
 
 		// On Windows, resolve the best executable path:
@@ -1972,7 +2267,7 @@ export function resolvePlatformPackageBinary(
 ): string | undefined {
 	const spec = tool.platformPackage;
 	if (!spec || !tool.packageName) return undefined;
-	const suffix = spec.suffixes[`${process.platform}-${process.arch}`];
+	const suffix = spec.suffixes[`${installerPlatform()}-${process.arch}`];
 	if (!suffix) return undefined;
 	const platformPkg = `${spec.base ?? tool.packageName}-${suffix}`;
 	try {
@@ -1990,7 +2285,7 @@ export function resolvePlatformPackageBinary(
 				_installerRequire.resolve(`${platformPkg}/package.json`),
 			);
 		}
-		const isWin = process.platform === "win32";
+		const isWin = installerPlatform() === "win32";
 		for (const bin of spec.binaries) {
 			for (const name of isWin ? [`${bin}.exe`, bin] : [bin]) {
 				const candidate = path.join(pkgDir, name);
@@ -2041,7 +2336,7 @@ export async function getToolPath(toolId: string): Promise<string | undefined> {
 		".bin",
 		tool.binaryName || tool.id,
 	);
-	if (process.platform === "win32") {
+	if (installerPlatform() === "win32") {
 		// Prefer .cmd over extensionless — Node.js can't execute POSIX shell scripts on Windows
 		const cmdPath = `${localBase}.cmd`;
 		try {
@@ -2070,16 +2365,18 @@ export async function getToolPath(toolId: string): Promise<string | undefined> {
 			// fall through to extensionless
 		}
 	}
-	try {
-		await fs.access(localBase);
-		if (await verifyToolBinary(localBase, recordVersion)) {
-			return localBase;
+	if (installerPlatform() !== "win32") {
+		try {
+			await fs.access(localBase);
+			if (await verifyToolBinary(localBase, recordVersion)) {
+				return localBase;
+			}
+			logSessionStart(
+				`auto-install verify: ${localBase} exists but is broken, will reinstall`,
+			);
+		} catch {
+			// fall through to global checks
 		}
-		logSessionStart(
-			`auto-install verify: ${localBase} exists but is broken, will reinstall`,
-		);
-	} catch {
-		// fall through to global checks
 	}
 
 	// npm/pnpm/bun: prefer the native per-platform binary directly. The main
@@ -2203,7 +2500,6 @@ async function findNpmGlobalToolPath(
 			? [
 					path.join(dir, `${binaryName}.cmd`),
 					path.join(dir, `${binaryName}.exe`),
-					path.join(dir, binaryName),
 				]
 			: [path.join(dir, binaryName)];
 
@@ -3060,10 +3356,14 @@ async function installNpmTool(
 			throw new Error(`Failed to install ${packageName}: ${outcome.stderr}`);
 		}
 
-		const binPath = path.join(TOOLS_DIR, "node_modules", ".bin", binaryName);
+		// npm creates a command shim on Windows; retain that actual executable path
+		// rather than probing/storing the extensionless POSIX sibling.
+		const binBase = path.join(TOOLS_DIR, "node_modules", ".bin", binaryName);
+		const binPath =
+			installerPlatform() === "win32" ? `${binBase}.cmd` : binBase;
 
 		// Make executable on Unix
-		if (process.platform !== "win32") {
+		if (installerPlatform() !== "win32") {
 			try {
 				await fs.chmod(binPath, 0o750);
 			} catch {
@@ -3097,10 +3397,10 @@ async function installNpmTool(
 			try {
 				const packagePath = path.join(TOOLS_DIR, "node_modules", packageName);
 				await fs.rm(packagePath, { recursive: true, force: true });
-				await fs.rm(binPath, { force: true });
+				await fs.rm(binBase, { force: true });
 				if (isWindows) {
-					await fs.rm(`${binPath}.cmd`, { force: true });
-					await fs.rm(`${binPath}.ps1`, { force: true });
+					await fs.rm(`${binBase}.cmd`, { force: true });
+					await fs.rm(`${binBase}.ps1`, { force: true });
 				}
 			} catch {
 				/* ignore cleanup errors */
@@ -3420,8 +3720,7 @@ export async function ensureTool(
 		try {
 			const probeCache = await readProbeCache();
 			delete probeCache[toolId];
-			_probeCacheDirty = true;
-			scheduleProbeFlush();
+			markProbeCacheChange(toolId, null);
 		} catch {
 			// best-effort
 		}
