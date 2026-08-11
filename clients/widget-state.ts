@@ -127,6 +127,13 @@ let requestRenderFn: (() => void) | null = null;
  * `clients/runtime-tool-result.ts:nextWriteIndex`).
  */
 const diagnosticsWriteGuard = new WriteOrderingGuard<string, number>();
+/**
+ * Runner completions also mutate the shared file record: they mark the
+ * diagnostics snapshot pending. Keep that mutation in the same per-file order
+ * as the final diagnostic replacement, or an older pipeline can set a newer
+ * confirmed-clean record back to `(pending)` (#1198).
+ */
+const runnerWriteGuard = new WriteOrderingGuard<string, number>();
 
 const MAX_STORED_DIAGNOSTICS_PER_FILE = 12;
 
@@ -142,6 +149,7 @@ export function clearWidgetState(): void {
 	sessionLanguages = [];
 	requestRenderFn = null;
 	diagnosticsWriteGuard.clear();
+	runnerWriteGuard.clear();
 }
 
 // v1 → v2 (#1186): per-entry `WidgetDiagnostic.observedAt`. v2 is a SUPERSET of
@@ -234,6 +242,7 @@ export function importWidgetState(state: PersistedWidgetState | undefined): bool
 	// drop them rather than risk a legitimate post-resume write being read as
 	// "superseded" against a stale token.
 	diagnosticsWriteGuard.clear();
+	runnerWriteGuard.clear();
 	for (const f of state.files ?? []) {
 		// Fold persisted keys through the same normalizer as live writes (#1020),
 		// or a persisted forward-slash key stays split from a fresh backslash key
@@ -310,7 +319,15 @@ export function recordRunner(
 	status: string,
 	diagnosticCount: number,
 	durationMs?: number,
+	writeIndex?: number,
 ): void {
+	const key = fileMapKey(filePath);
+	if (!runnerWriteGuard.shouldWrite(key, writeIndex)) return;
+	// Advance the final-diagnostics guard too. A runner completion is part of
+	// this pipeline's ordered write, even though its immediate effect is only to
+	// mark the record pending. This prevents an older final replacement from
+	// landing after a newer runner state (and vice versa).
+	diagnosticsWriteGuard.shouldWrite(key, writeIndex);
 	const rec = getOrCreate(filePath);
 	rec.runners.set(runnerId, { status, count: diagnosticCount, durationMs });
 	rec.hasFinalDiagnosticsSnapshot = false;
@@ -360,7 +377,12 @@ export function recordDiagnostics(
 	// the `clients/mcp/analyze.ts` on-demand call site, which has no per-edit
 	// ordering token) always proceeds, same as version-less LSP servers in the
 	// #555 guard.
-	if (!diagnosticsWriteGuard.shouldWrite(fileMapKey(filePath), writeIndex)) return;
+	const key = fileMapKey(filePath);
+	if (!diagnosticsWriteGuard.shouldWrite(key, writeIndex)) return;
+	// Keep runner state ordered with the final diagnostic replacement. The
+	// guards are deliberately advanced in both directions because either verb
+	// may be the first completion from a pipeline.
+	runnerWriteGuard.shouldWrite(key, writeIndex);
 
 	// Resolve the observation time ONCE (#1186): every incoming entry is stamped
 	// with it, and it also seeds the record's `touchedAt`. A fresh write (no
@@ -520,7 +542,9 @@ export function reconcileCascadeNeighborLspErrors(
 	writeIndex?: number,
 	observedAt?: number,
 ): void {
-	if (!diagnosticsWriteGuard.shouldWrite(fileMapKey(filePath), writeIndex)) return;
+	const key = fileMapKey(filePath);
+	if (!diagnosticsWriteGuard.shouldWrite(key, writeIndex)) return;
+	runnerWriteGuard.shouldWrite(key, writeIndex);
 	// #1186: the INCOMING LSP errors are stamped at THIS observation time
 	// (`observedAt`, e.g. an aging passive snapshot's `entry.ts`, or now for a
 	// fresh active touch). The PRESERVED entries keep their OWN prior per-entry

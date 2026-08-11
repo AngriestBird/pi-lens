@@ -231,6 +231,9 @@ beforeEach(() => {
 
 afterEach(() => {
 	process.env.PI_LENS_DISABLE_TOOL_INSTALL = "1";
+	delete process.env.PI_LENS_TEST_PLATFORM;
+	delete process.env.PI_LENS_TEST_MODE;
+	delete process.env.PI_LENS_TEST_NPM_SCRIPT;
 	if (savedPiLensHome === undefined) delete process.env.PI_LENS_HOME;
 	else process.env.PI_LENS_HOME = savedPiLensHome;
 	vi.useRealTimers();
@@ -280,6 +283,30 @@ describe("getToolPath ordering", () => {
 // ═════════════════════════════════════════════════════════════════════════
 // ensureTool force-reinstall
 // ═════════════════════════════════════════════════════════════════════════
+
+describe("managed npm executable paths", () => {
+	it("returns the stored Windows .cmd shim from the real npm install path", async () => {
+		process.env.PI_LENS_TEST_PLATFORM = "win32";
+		process.env.PI_LENS_TEST_MODE = "1";
+		process.env.PI_LENS_TEST_NPM_SCRIPT = "install";
+		await withEmptyPath(async () => {
+			const expected = path.join(
+				path.join(TEST_HOME, ".pi-lens", "tools"),
+				"node_modules",
+				".bin",
+				"stylelint.cmd",
+			);
+			fakeAccess(expected);
+			const result = await ensureTool("stylelint", { forceReinstall: true });
+			expect(result).toBe(expected);
+			// The verifier is reached with the actual stored shim path, rather than
+			// an extensionless POSIX sibling that Windows cannot execute.
+			expect(spawnCalls.some(({ cmd }) => cmd.includes("stylelint.cmd"))).toBe(
+				true,
+			);
+		});
+	});
+});
 
 describe("ensureTool allowInstall policy", () => {
 	it("returns a discovered binary without attempting install when allowInstall is false", async () => {

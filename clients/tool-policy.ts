@@ -971,6 +971,15 @@ const AUTOFIX_CAPABILITIES = new Map<string, AutofixCapability>([
 ]);
 
 const TOOL_EXECUTION_POLICY = new Map<string, ToolExecutionPolicy>([
+	// Dispatch/LSP runners use the shared availability/install seam. These
+	// managed tools are missing-command repair candidates; probe failures still
+	// fail closed before this policy is consulted.
+	["pyright", { gate: "smart-default", autoInstall: true }],
+	["shellcheck", { gate: "smart-default", autoInstall: true }],
+	["shfmt", { gate: "smart-default", autoInstall: true }],
+	["tflint", { gate: "smart-default", autoInstall: true }],
+	["terragrunt", { gate: "smart-default", autoInstall: true }],
+	["trivy", { gate: "config-first", autoInstall: true }],
 	["biome", { gate: "smart-default", autoInstall: true }],
 	["ruff", { gate: "smart-default", autoInstall: true }],
 	["oxlint", { gate: "smart-default", autoInstall: true }],

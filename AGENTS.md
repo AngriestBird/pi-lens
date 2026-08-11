@@ -68,7 +68,7 @@ index.ts                  Extension entry point (async factory) — the pi host 
 mcp/                      Second host adapter: MCP server + hook bin (see "MCP mirror")
   server.ts               Hand-rolled stdio JSON-RPC MCP server (16 tools) + warm IPC listener
   worker.ts               fresh-mode child (loads freshly-built code from disk)
-  analyze-cli.ts          pi-lens-analyze bin — PostToolUse hook + CLI (warm channel → cold fallback)
+  analyze-cli.ts          pi-lens-analyze bin — PostToolUse hook + CLI (warm channel → cold fallback), plus the Stop-hook turn-end mode (warm-only)
 clients/
   lens-engine.ts          THE internal seam — host adapters import only this for pi-lens functionality
   mcp/                     host-neutral facades: analyze, session, review, ipc, host-shim
@@ -97,12 +97,17 @@ atomic `.install.lock`; after waiting, re-run discovery before installing becaus
 the preceding process may already have satisfied the request. A lock is stale
 once its recorded PID is confirmed dead — OR, independently, once it is older
 than the owner's install bound + slack (`PI_LENS_INSTALL_TIMEOUT_MS` +60s,
-#946 F1: PID liveness alone can't detect a hard-killed owner whose PID
+# 946 F1: PID liveness alone can't detect a hard-killed owner whose PID
 Windows recycled for an unrelated live process, which would otherwise poison
 every future install with a full-timeout wait). The age-based path is a
 deliberate PID-recycle defense specific to installs, which have a known
 bounded duration; it does NOT generalize to the test-suite lock below, whose
 runs have no such bound.
+Probe-cache persistence uses a separate directory lock and read-modify-write
+merge. Stale-lock recovery first renames the lock aside, and release does the
+same token check before deletion, so a late release can never recursively remove
+a replacement owner's lock. Managed npm installs retain the Windows `.cmd`
+shim path; tests use `PI_LENS_TEST_PLATFORM` to exercise that layout on Linux.
 Vitest sets `PI_LENS_DISABLE_TOOL_INSTALL=1` before global setup and workers;
 ordinary tests must remain network/install-free. Real installer integration
 tests must explicitly opt in and use an isolated `PI_LENS_HOME`.
@@ -417,6 +422,36 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   read one reply, so the server handler consumes the line and dispatches at most
   once per connection (a non-consuming handler re-dispatched on stray bytes,
   #1219); keep any new channel handler one-shot too.
+- **Per-turn half = the same bin on a `Stop` hook** (`--turn-end`, or a `Stop`
+  payload on stdin; #538). Tagged `{route:"turn-end"}` request on the WORKSPACE
+  IPC endpoint (a Stop hook knows its cwd, never the server pid), which also
+  inherits the #535 staleness gate. It passes NO files. Each Stop pass has an
+  execution/delivery boundary: findings are only consumed after the client has
+  received the reply and sends a delivery capability acknowledgement over a
+  second one-shot IPC connection. A timeout or close leaves the finding cache
+  durable and a later authorized Stop re-delivers it. All workspace IPC requests
+  share one server-side queue, so a still-running analyze always finishes before
+  the following Stop pass and concurrent turn-ends cannot race. The queue admits
+  at most one waiting item; excess callers fail explicitly with `turn_end queue is
+  busy` rather than growing an unbounded head-of-line tail. **Warm-only, no cold
+  fallback** — only the server process owns the session state and pending turn
+  work, so a local pass reports a false clean; unavailable ⇒ one stderr line,
+  silent stdout, exit 0. `SubagentStop` is deliberately NOT registered (subagent
+  edits already reach turn-state via PostToolUse; the consume bridges are
+  one-shot). Stop-hook stdout is user-visible in transcript mode, not model
+  context — blockers still gate commits via the retained lens-guard record.
+
+  Turn-state ownership is explicit: pi writers use `{kind:"pi", id: telemetry
+  session}` and MCP writers use `{kind:"mcp", id: process-scoped server owner}`.
+  `sessionId:null` is a non-claiming update and never clears an existing owner;
+  a live foreign owner is retained, while an owner whose process is dead or
+  whose bounded heartbeat is stale may be replaced. A different pi owner ID in
+  the current process is treated by pi turn_end as an intentional same-process
+  session handoff and is evicted, preserving the legacy pi session-mismatch
+  contract; generic cache writes still retain live foreign owners, and
+  cross-process liveness is PID/heartbeat guarded. Repeated writes from
+  the same owner extend its worklist. This covers pi/MCP handoff without letting
+  one MCP session consume another's files.
 - **Same-workspace warm attach (#822, opt-in soak).** `PI_LENS_WARM_ATTACH=1`
   selects a PID-confirmed, heartbeat-fresh same-root incumbent from
   `instances.json`. The LSP runner sends versioned, content-hash-bound,
@@ -485,7 +520,9 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   Before mirroring a pi capability, check it's actually live.
 - Tests: `tests/clients/mcp/*` (units) + `tests/mcp/*` (spawn smokes — real server
   - bin end-to-end). Live behaviors (warm IPC, real session/turn) are unit-covered;
-  the spawn smokes don't exercise them.
+  the spawn smokes don't exercise them. Spawn helpers must use temp workspaces,
+  `PILENS_DATA_DIR`, and `PI_LENS_HOME`; never bind the real workspace socket or
+  write the developer's project/global state.
 
 ## Package scope
 
@@ -640,6 +677,7 @@ Holds: `filePath`, language-root `cwd`, `kind` (`FileKind` — `jsts`, `python`,
 - **Warm call-graph cache source identity (#1070).** `runtime-session` derives the persisted call-graph cache key from the canonical review-graph version/signature; it does not run an independent call-graph source walk or mtime policy. `module_report` is read-only and rejects missing/mismatched/legacy/partial review-graph identity as unavailable or stale, never a clean zero. Warm call facts use the shared Tree-Sitter/function-facts provider for all supported JavaScript-family extensions (`.js`, `.jsx`, `.mjs`, `.cjs`, plus TS/TSX variants); unsupported or partial extraction must remain explicit in coverage rather than becoming a clean empty graph. Same-file resolved calls are intentionally omitted from this cross-file projection but counted as `sameFileEvidence`, so they do not make otherwise-complete coverage partial or suppress valid cross-file impact. Legacy ambiguous name-only evidence may fan out to weighted edges, but coverage counts raw evidence once and persisted validation weights those edges back to raw records.
 - `actionable-warnings.json`, `code-quality-warnings.json`, code-quality history, and turn-end findings include project/file sequence metadata. Agent-end actionable-warning autofix must reject stale reports before applying cached LSP quickfixes.
 - **LSP last-known cache is content-hash guarded (anti-staleness).** `LensLSPService.touchFile` primes `lastKnownDiagnostics` together with a sha256 of the synced content; `getLastKnownDiagnostics(path, expectedContentHash)` returns the entry *only* if that hash matches the current bytes. The actionable-warnings turn_end read passes the hash of the on-disk file, so a previous turn's diagnostics are never reused as current — on mismatch (or an entry written without content, e.g. the service-level merge, which clears the hash) it falls through to a fresh open+wait. Any NEW hot-path consumer that reuses last-known diagnostics as authoritative MUST pass the content hash; omit it only for display (the widget). `lspSource:"cache"` in `actionable-warnings.log` now means *verified-current reuse*, not "maybe stale".
+- **Same-file diagnostic reconciliation is admission-ordered (#1198).** The shared widget write guard orders per-edit dispatch, `lsp_diagnostics`, and `lens_diagnostics mode=full` by a token reserved when each per-file operation is admitted, never when its async LSP promise settles. `recordRunner` and final diagnostic replacement advance the same per-file order so a late older runner cannot restore `(pending)` after a newer confirmed-clean result. Confirmed results with a demonstrable content-binding mismatch are excluded; unavailable/inconclusive/error results never count as clean. The full-scan fallback verifies legacy hash-only results with sequential `fs.promises.readFile` plus periodic event-loop yields, while trusting the LSP/cache seam's existing `true`/`false` verdicts; unreadable files remain unknown. Direct `lsp_diagnostics` intentionally remains a shared-state reconciliation path for affirmative results, using the content read and binding verdict from its collecting touch without a second reconciliation read; mode=all stays cache-only/display-only.
 - **LSP-owned mutation observability (#1066 × #1062).** `clients/lsp-mutation.ts` is the single bookkeeping/terminal-summary seam for solicited `workspace/applyEdit`, `lsp_navigation apply:true`, and actionable-warning LSP quickfixes. It reuses `read-guard.log` correlation IDs and bounded `editBatchSummary` samples, records only actually-applied files into read-guard/project sequence/change-log/turn-state, and leaves agent-owned navigation edits off the autonomous bus. `applyWorkspaceEdit` supplies already-computed ranges/content facts; do not add synchronous whole-file re-reads or a second mutation pipeline. Concurrent solicited commands intentionally avoid cross-correlating when the parent request cannot be identified.
 - **Diagnostic-wait model — affirmative-clean, never silence (#240, closed).** `clientWaitForDiagnostics` branches on `workspaceDiagnosticsSupport.mode` (cached at initialize). **Pull** (json/css/html/rust/svelte/ruby/csharp): `clientRequestPullDiagnostics` returns a discriminated `PullDiagnosticsOutcome` (`found|clean|unavailable`) and early-returns ONLY on found/clean — an `unavailable` pull (dead/null/threw) is never read as clean (closed the `minVersion===undefined` hole). **Push**: the `publishDiagnostics` handler bumps version + emits even for EMPTY publishes — versioned or NOT — so ANY publish on a clean scan early-returns the wait: a Tier-2 server (versioned empty re-publish: ast-grep) early-returns affirmatively + currency-proven, a Tier-2\* server (version-less re-publish: opengrep — accepted as fresh because it can't be proven stale, currency only temporally correlated) early-returns too; only a Tier-3 SILENT server (classic typescript-language-server or Marksman) is budget-bound by necessity. Per-edit caps: `maxDiagnosticsWaitMs=2500` (`LSP_DIAGNOSTICS_WAIT_MS`), spawn `5000` — NOT the 10s/15s figures (those are nav-request / fallback / handshake ceilings). **with-auxiliary gotcha:** the collection deadline is `max(callerCap, maxStrategyWait)` (a FLOOR over a single Promise.all), unlike primary scope's `min` (a ceiling) — so a silent primary holds the whole touch, and a slow aux's `aggregateWaitMs` can override the per-edit cap (opengrep was 6000 → capped to 3500; ast-grep's true latency is ~915ms, the bench's 20s was this confound). Per-server deadlines shipped (**#242**); remaining silent-server cost tracked in **#458** (target set = tier-3 rows only). **Confirmation-carriage invariant:** when `touchFile` turns a completed tier-3 wait into affirmative clean (Marksman's successful-notify `silentOnClean` gate, or TypeScript's sync fallback), it sets `TouchFileResult.confirmation: "confirmed"`; `lsp_diagnostics` must actively use `touchFile` for every local scope so that field is not bypassed by the legacy `openFile`/`getDiagnostics` path. A primary-scope confirmation is authoritative because `touchFile` ran that primary's own fallback; non-TypeScript all-scope confirmation is likewise consumable, but all-scope classic TypeScript MUST still run `resolveEmptyResult`'s synchronous tsserver fallback before declaring clean because the aggregate silent gate does not run the primary-only sync request. Absence stays unconfirmed for tier-3 servers, and `inconclusive`/binding mismatch always wins. Never infer confirmation from `diags.length === 0` alone. **Two carriage rules the gates depend on (#1253):** the recent-touches debounce entry (`markTouched`) is recorded ONLY when every spawned server's notify write landed — recording a timed-out/rejected write lets the next touch skip the notify, clear `notifyWriteTimedOut`, and hand a `silentOnClean` server that never saw the file a confirmed-clean verdict; and the warm-attach IPC response carries `confirmation` as an explicit enumerable DTO field, since `fresh && !inconclusive` is not the same evidence and an incumbent-served empty result would otherwise be indistinguishable from "never answered". The incumbent always touches `with-auxiliary`, so its confirmation is AGGREGATE — classic TypeScript still needs the primary-only sync check.
 - **`runWorkspaceDiagnostics`/`lsp_diagnostics` result caching (#671/#672).** Both the `lens_diagnostics mode=full` engine (`LSPService.runWorkspaceDiagnostics`) and `tools/lsp-diagnostics.ts`'s batch/directory sweep used to re-touch EVERY file on EVERY call, even with zero edits since the prior identical sweep — measured at 128s wall-clock on a real 156-file project. `clients/lsp/workspace-diagnostics-cache.ts` now persists per-file results shared across both call sites (`scopeKey`-gated so the two tools' different server coverage — e.g. the workspace sweep excludes opengrep, `lsp_diagnostics` doesn't — never cross-serves a wrong result). Invalidation is TWO-layer, not just mtime: (1) the file's own mtime, and (2) when a persisted reverse-dependency index exists (`clients/reverse-deps.ts`, reused from the review graph, never rebuilt for this purpose), every import's mtime too — closing the cross-file blind spot where a dependency's signature change alters a file's diagnostics with zero edits to that file itself (a blind spot the OLDER `project-diagnostics/cache.ts` cheap-tier cache still has, judged tolerable there since those runners are single-file-syntactic, not cross-file). Falls back to mtime-only when no reverse-deps index is available. Never persists an `inconclusive`/timed-out touch as cacheable — same false-clean discipline as #240.

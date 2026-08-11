@@ -158,6 +158,8 @@ export function createDispatchContext(
 	modifiedRanges?: import("./types.js").ModifiedRange[],
 	/** Authoritative workspace root; `cwd` may be a nested language root. */
 	projectRoot?: string,
+	/** Ordered per-file pipeline token, when this is a post-write dispatch. */
+	writeIndex?: number,
 ): DispatchContext {
 	const absoluteFilePath = resolveRunnerPath(cwd, filePath);
 	const normalizedProjectRoot = normalizeMapKey(
@@ -187,6 +189,7 @@ export function createDispatchContext(
 		projectConfig,
 		blockingOnly,
 		modifiedRanges,
+		writeIndex,
 
 		async hasTool(command: string): Promise<boolean> {
 			return checkToolAvailability(command, facts);
@@ -666,6 +669,7 @@ async function runGroup(
 			result.status,
 			result.diagnostics.length,
 			duration,
+			ctx.writeIndex,
 		);
 
 		diagnostics.push(...result.diagnostics);

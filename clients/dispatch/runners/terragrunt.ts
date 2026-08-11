@@ -1,8 +1,6 @@
 import * as path from "node:path";
-import { ensureTool } from "../../installer/index.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
-import { pathsEqual } from "../../path-utils.js";
-import { getLinterPolicyForCwd } from "../../tool-policy.js";
+import { pathsEqual } from "../../path-utils.js";import { getLinterPolicyForCwd } from "../../tool-policy.js";
 import { PRIORITY } from "../priorities.js";
 import type {
 	Diagnostic,
@@ -10,7 +8,10 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import {
+	createAvailabilityChecker,
+	resolveAvailableOrInstall,
+} from "./utils/runner-helpers.js";
 import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
 
 const terragrunt = createAvailabilityChecker("terragrunt", ".exe");
@@ -164,7 +165,11 @@ const terragruntRunner: RunnerDefinition = {
 		if (await terragrunt.isAvailableAsync(cwd)) {
 			cmd = terragrunt.getCommand(cwd);
 		} else {
-			const managed = await ensureTool("terragrunt");
+			const managed = await resolveAvailableOrInstall(
+				terragrunt,
+				"terragrunt",
+				cwd,
+			);
 			if (managed) cmd = managed;
 		}
 

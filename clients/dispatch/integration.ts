@@ -2088,7 +2088,12 @@ export async function dispatchLintWithResult(
 	pi: PiAgentAPI,
 	modifiedRanges?: ModifiedRange[],
 	logContext?: LogContext,
-	options?: { blockingOnly?: boolean; projectRoot?: string },
+	options?: {
+		blockingOnly?: boolean;
+		projectRoot?: string;
+		/** Ordered per-file pipeline token, when called from tool_result. */
+		writeIndex?: number;
+	},
 ): Promise<DispatchResult> {
 	// Default true preserves the per-edit fast path (errors only). Callers that
 	// want the full picture (warnings + structural smells), e.g. the MCP review
@@ -2101,6 +2106,7 @@ export async function dispatchLintWithResult(
 		options?.blockingOnly ?? true,
 		modifiedRanges,
 		options?.projectRoot,
+		options?.writeIndex,
 	);
 	sessionFacts.clearFileFactsFor(ctx.filePath);
 
