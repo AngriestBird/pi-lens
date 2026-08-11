@@ -681,7 +681,13 @@ POSIX; a real dogfooded fixture entry survived 13h stale because of exactly
 this), and the parent pid has no identity to verify against —
 `InstanceEntry` never recorded the parent's own command line. Marker
 protection (`collectLiveMarkers`) is keyed on pid-liveness alone —
-conservative on the destructive side, matching the kill predicate.
+conservative on the destructive side, matching the kill predicate. The same
+`clients/instance-reaper.ts` seam owns `sweepAtomicWriteStages()` (#1228),
+invoked fire-and-forget from `session_start` for project-data and global state
+roots. It inspects a bounded number of regular files whose names match only
+atomic-write `.tmp-<pid>`, `.tmp-<pid>-<seq>`, or
+`.tmp-<pid>-<thread>-<seq>` shapes; `process.pid` and every liveness-positive
+foreign pid are preserved. It uses no watcher or keep-alive handle.
 `isSubagentSession()` (`clients/subagent-mode.ts`) detects TWO env
 vocabularies: nicobailon/pi-subagents' `PI_SUBAGENT_CHILD=1`, and
 avtc-pi-subagent's `PI_SUBAGENT_CHILD_AGENT` + `PI_SUBAGENT_PARENT_PID` pair
