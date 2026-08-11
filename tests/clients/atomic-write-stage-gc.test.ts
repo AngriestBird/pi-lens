@@ -77,6 +77,17 @@ describe("sweepAtomicWriteStages (#1228)", () => {
 		expect(fs.existsSync(ordinary)).toBe(true);
 	});
 
+	it("preserves leading-zero names that are not writer-emitted staging files", async () => {
+		const dir = makeDir();
+		const leadingZeroPid = stage(dir, "x.tmp-000123-02-03");
+		const leadingZeroComponents = stage(dir, "backup.tmp-01-02-03");
+
+		await sweepAtomicWriteStages([dir], { isPidAlive: () => false });
+
+		expect(fs.existsSync(leadingZeroPid)).toBe(true);
+		expect(fs.existsSync(leadingZeroComponents)).toBe(true);
+	});
+
 	it("does not remove directories or malformed/non-atomic names", async () => {
 		const dir = makeDir();
 		const namedDirectory = path.join(dir, "nested.tmp-43001");

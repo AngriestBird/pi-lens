@@ -145,8 +145,10 @@ export function stagePathFor(targetPath: string): string {
  * not fully control should not assume every match is one of this module's
  * staging files.
  */
-export const STAGE_TMP_PATTERN = /\.tmp-\d+-\d+-\d+$/;
-const STAGE_TMP_PID_PATTERN = /\.tmp-(\d+)-\d+-\d+$/;
+export const STAGE_TMP_PATTERN =
+	/\.tmp-(0|[1-9]\d*)-(0|[1-9]\d*)-(0|[1-9]\d*)$/;
+const STAGE_TMP_PID_PATTERN =
+	/\.tmp-(0|[1-9]\d*)-(?:0|[1-9]\d*)-(?:0|[1-9]\d*)$/;
 
 /** Extract a valid positive owner pid from an atomic-write staging basename. */
 export function stageOwnerPidFromName(name: string): number | undefined {

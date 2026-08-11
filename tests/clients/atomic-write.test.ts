@@ -26,6 +26,7 @@ import { threadId, Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	STAGE_TMP_PATTERN,
+	stageOwnerPidFromName,
 	stagePathFor,
 	writeFileAtomic,
 	writeFileAtomicAsync,
@@ -275,6 +276,8 @@ describe("stagePathFor (#1205)", () => {
 		expect(STAGE_TMP_PATTERN.test("review-graph.json.gz.tmp-4242-7")).toBe(
 			false,
 		);
+		expect(STAGE_TMP_PATTERN.test("x.tmp-000123-02-03")).toBe(false);
+		expect(stageOwnerPidFromName("backup.tmp-01-02-03")).toBeUndefined();
 	});
 
 	it("STAGE_TMP_PATTERN does not match ordinary store files", () => {
