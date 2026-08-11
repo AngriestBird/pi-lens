@@ -154,6 +154,15 @@ function tryParseSgMatches(stdout: string): SgMatch[] | null {
 	}
 }
 
+function tryParseNonZeroSgMatches(
+	result: Pick<SpawnResult, "stdout" | "outputTruncated">,
+): SgMatch[] | null {
+	if (result.outputTruncated || !result.stdout.trim()) return null;
+	// Trimmed on purpose: a leading BOM survives JSON.parse's whitespace
+	// tolerance but String.trim() strips it (matches the pre-refactor guard).
+	return tryParseSgMatches(result.stdout.trim());
+}
+
 export class SgRunner {
 	private log: (msg: string) => void;
 	private sgPath: string | null = null;
@@ -492,8 +501,8 @@ export class SgRunner {
 			// exit code that means "scan succeeded with findings" must never be
 			// classified as a CLI failure — parse the matches. Only fall through
 			// to failure when the JSON isn't parseable (a real diagnostic).
-			if (result.status === 1 && stdout && !result.outputTruncated) {
-				const matches = tryParseSgMatches(stdout);
+			if (result.status === 1 && stdout) {
+				const matches = tryParseNonZeroSgMatches(result);
 				if (matches) {
 					return {
 						matches,
@@ -585,8 +594,8 @@ export class SgRunner {
 			// exit code that means "scan succeeded with findings" must never be
 			// classified as a CLI failure — parse the matches. Only fall through
 			// to failure when the JSON isn't parseable (a real diagnostic).
-			if (result.status === 1 && stdout && !result.outputTruncated) {
-				const matches = tryParseSgMatches(stdout);
+			if (result.status === 1 && stdout) {
+				const matches = tryParseNonZeroSgMatches(result);
 				if (matches) {
 					return { matches, status: result.status };
 				}
