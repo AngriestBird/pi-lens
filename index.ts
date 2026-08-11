@@ -19,6 +19,9 @@ import {
 } from "./clients/widget-state.js";
 import { selectLspStatus } from "./clients/lsp-status.js";
 import type { PersistedReadGuardState } from "./clients/read-guard.js";
+import { registerReadBridge } from "./clients/read-bridge.js";
+import { isExternalOrVendorFile } from "./clients/path-utils.js";
+import { isPathIgnoredByProject } from "./clients/file-utils.js";
 import {
 	dropStaleFiles,
 	loadSessionState,
@@ -270,6 +273,8 @@ const runtime = new RuntimeCoordinator();
 // ONCE (flag below, same pattern as registerCascadeTierReconcileTask) and
 // have it read the CURRENT activation's pi/flag closures through this
 // holder, refreshed on every activation — never a stale captured `pi`.
+let _readBridgeRegistered = false;
+let _readBridgeGetFlag: ((name: string) => boolean | string | undefined) | undefined;
 let _turnSummaryEmitRegistered = false;
 let _turnSummaryEmitCtx:
 	| {
@@ -485,6 +490,25 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	let lensEnabled = !getLensFlag("no-lens");
+
+	// Read-bridge: refresh the flag getter on every factory activation so the
+	// live getLensFlag closure is always used (same pattern as _turnSummaryEmitCtx).
+	// Register the singleton once — subsequent activations only refresh the getter.
+	_readBridgeGetFlag = getLensFlag;
+	if (!_readBridgeRegistered) {
+		_readBridgeRegistered = true;
+		registerReadBridge({
+			getReadGuard: () => runtime.readGuard,
+			getTurnIndex: () => runtime.turnIndex,
+			peekWriteIndex: () => runtime.peekWriteIndex(),
+			isRecordable(filePath: string): boolean {
+				if (_readBridgeGetFlag?.("no-read-guard")) return false;
+				if (isPathIgnoredByProject(filePath, runtime.projectRoot, false)) return false;
+				if (isExternalOrVendorFile(filePath, runtime.projectRoot)) return false;
+				return true;
+			},
+		});
+	}
 	// Automatic context injection (the `context` hook). Independent of lensEnabled
 	// so tools/LSP/read-guard/formatting keep running when it is off. Precedence:
 	// env override → CLI flag → global config, all resolved inside getLensFlag
