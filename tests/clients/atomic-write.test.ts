@@ -26,6 +26,7 @@ import { threadId, Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	STAGE_TMP_PATTERN,
+	stageOwnerPidFromName,
 	stagePathFor,
 	writeFileAtomic,
 	writeFileAtomicAsync,
@@ -267,15 +268,16 @@ describe("stagePathFor (#1205)", () => {
 		expect(STAGE_TMP_PATTERN.test(staged)).toBe(true);
 	});
 
-	it("STAGE_TMP_PATTERN still matches leftovers from every older shape", () => {
-		// Sweepers must keep collecting staging files written by an older build
-		// that is still on disk: pre-#1205 `.tmp-<pid>` and #1205's
-		// `.tmp-<pid>-<seq>` alongside the current `.tmp-<pid>-<tid>-<seq>`.
-		expect(STAGE_TMP_PATTERN.test("review-graph.json.gz.tmp-4242")).toBe(true);
-		expect(STAGE_TMP_PATTERN.test("review-graph.json.gz.tmp-4242-7")).toBe(true);
+	it("STAGE_TMP_PATTERN matches only the current staging shape", () => {
 		expect(STAGE_TMP_PATTERN.test("review-graph.json.gz.tmp-4242-3-7")).toBe(
 			true,
 		);
+		expect(STAGE_TMP_PATTERN.test("review-graph.json.gz.tmp-4242")).toBe(false);
+		expect(STAGE_TMP_PATTERN.test("review-graph.json.gz.tmp-4242-7")).toBe(
+			false,
+		);
+		expect(STAGE_TMP_PATTERN.test("x.tmp-000123-02-03")).toBe(false);
+		expect(stageOwnerPidFromName("backup.tmp-01-02-03")).toBeUndefined();
 	});
 
 	it("STAGE_TMP_PATTERN does not match ordinary store files", () => {
