@@ -215,7 +215,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		lastSeen: new Date().toISOString(),
 	};
 	const access = cacheManager.getTurnStateAccess(cwd, currentOwner);
-	if (access === "foreign-live") {
+	const sameProcessPiSessionHandoff =
+		access === "foreign-live" &&
+		currentOwner.kind === "pi" &&
+		turnState.owner?.kind === "pi" &&
+		turnState.owner.pid === process.pid &&
+		turnState.owner.id !== currentOwner.id;
+	if (access === "foreign-live" && !sameProcessPiSessionHandoff) {
 		dbg(
 			`turn_end: foreign live owner retained (${turnState.owner?.kind ?? "legacy"}:${turnState.owner?.id ?? turnState.sessionId})`,
 		);

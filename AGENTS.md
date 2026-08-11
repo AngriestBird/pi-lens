@@ -440,9 +440,13 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   session}` and MCP writers use `{kind:"mcp", id: process-scoped server owner}`.
   `sessionId:null` is a non-claiming update and never clears an existing owner;
   a live foreign owner is retained, while an owner whose process is dead or
-  whose bounded heartbeat is stale may be replaced. Repeated writes from the
-  same owner extend its worklist. This covers pi/MCP handoff without letting one
-  MCP session consume another's files.
+  whose bounded heartbeat is stale may be replaced. A different pi owner ID in
+  the current process is treated by pi turn_end as an intentional same-process
+  session handoff and is evicted, preserving the legacy pi session-mismatch
+  contract; generic cache writes still retain live foreign owners, and
+  cross-process liveness is PID/heartbeat guarded. Repeated writes from
+  the same owner extend its worklist. This covers pi/MCP handoff without letting
+  one MCP session consume another's files.
 - **Same-workspace warm attach (#822, opt-in soak).** `PI_LENS_WARM_ATTACH=1`
   selects a PID-confirmed, heartbeat-fresh same-root incumbent from
   `instances.json`. The LSP runner sends versioned, content-hash-bound,
