@@ -39,6 +39,31 @@ valid:
         doThing()
     except BaseExceptionGroup[TypeError, ValueError]:
         handle()
+  - |
+    try:
+        doThing()
+    except ValueError | TypeError:
+        handle()
+  - |
+    try:
+        doThing()
+    except cache[key]:
+        handle()
+  - |
+    try:
+        doThing()
+    except (ValueError,):
+        handle()
+  - |
+    try:
+        doThing()
+    except (mod.E1, E2) as error:
+        handle(error)
+  - |
+    try:
+        doThing()
+    except* ValueError:
+        handle()
 invalid:
   - |
     try:

@@ -1376,6 +1376,49 @@ export class TreeSitterClient {
 		);
 	}
 
+	/**
+	 * Collect names introduced by a parameter binding pattern.
+	 *
+	 * Binding-aware: only identifiers in a *binding* position are counted.
+	 * Two node shapes hold reference expressions rather than bindings and
+	 * must not be descended into:
+	 *  - `assignment_pattern` / `object_assignment_pattern` (`pattern = default`,
+	 *    e.g. `[a = b]` or `{a = b}`) — the `value`/`right` side is a default
+	 *    *expression*, not a new name (`b` in `{a = b}` is a reference).
+	 *  - `computed_property_name` (`[expr]:` in a destructuring pattern,
+	 *    e.g. `{[key]: a}`) — `expr` is a reference, not a binding.
+	 * Nested binding positions (destructured sub-patterns) are still walked
+	 * so renamed/duplicate collisions inside them are found.
+	 */
+	private bindingNames(node: TreeSitterNode | undefined): Set<string> {
+		const names = new Set<string>();
+		if (!node) return names;
+		const stack: TreeSitterNode[] = [node];
+		while (stack.length > 0) {
+			const current = stack.pop()!;
+			if (current.type === "identifier") names.add(current.text);
+			else if (current.type === "shorthand_property_identifier_pattern") {
+				names.add(current.text);
+			}
+			if (
+				current.type === "property_identifier" ||
+				current.type === "type_identifier" ||
+				current.type === "computed_property_name"
+			)
+				continue;
+			if (
+				current.type === "assignment_pattern" ||
+				current.type === "object_assignment_pattern"
+			) {
+				const left = current.childForFieldName?.("left");
+				if (left) stack.push(left);
+				continue;
+			}
+			stack.push(...(current.children ?? []));
+		}
+		return names;
+	}
+
 	private containsYieldInFunctionBody(
 		node: TreeSitterNode,
 		root: TreeSitterNode = node,
@@ -2476,11 +2519,11 @@ export class TreeSitterClient {
 				return !this.bodyHasLoopExit(bodyNode, false);
 			}
 			case "same_param_name": {
-				// duplicate-function-arg: keep the pair only when the two captured
-				// parameter identifiers share the same name.
-				const first = captures.PARAM1?.text;
-				const second = captures.NAME?.text;
-				return !!first && first === second;
+				// duplicate-function-arg: keep the pair when the captured binding
+				// patterns share any name.
+				const first = this.bindingNames(captures.PARAM1);
+				const second = this.bindingNames(captures.NAME);
+				return [...first].some((name) => second.has(name));
 			}
 			case "no_terminating_statement": {
 				// switch-case-termination: keep a non-empty case (already known to be
@@ -2598,12 +2641,7 @@ export class TreeSitterClient {
 				const hasExceptionSpec = clauseNode.children.some((c: any) => {
 					if (!c.isNamed) return false;
 					return (
-						c.type === "identifier" ||
-						c.type === "attribute" ||
-						c.type === "tuple" ||
-						c.type === "as_pattern" ||
-						c.type === "parenthesized_expression" ||
-						c.type === "subscript"
+						c.type !== "block"
 					);
 				});
 				// Fire ONLY when bare (no exception spec)

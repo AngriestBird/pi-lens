@@ -164,7 +164,20 @@ interface TurnEndTransaction {
 interface PendingTurnEndDelivery {
 	cwd: string;
 	transaction: TurnEndTransaction;
+	createdAt: number;
 }
+
+/**
+ * #1274: the delivery map used to be unbounded — every timed-out client and
+ * every distinct raw-cwd alias left an entry for the life of the process.
+ * Both bounds drop entries WITHOUT committing, which re-arms the findings in
+ * the cache: the safe direction, since an un-consumed finding is re-reported on
+ * a later Stop while a wrongly-consumed one is gone for good. The TTL is
+ * generous next to Claude Code's 60 s hook budget — it exists to bound the map,
+ * not to police clients.
+ */
+const TURN_END_DELIVERY_TTL_MS = 10 * 60_000;
+const TURN_END_DELIVERY_MAX = 8;
 
 const TURN_END_QUEUE_WAIT_MS = 5_000;
 
@@ -184,7 +197,10 @@ class TurnEndQueue {
 	private running = false;
 	private pending: QueueItem<unknown>[] = [];
 
-	enqueue<T>(work: () => Promise<T>, waitMs = TURN_END_QUEUE_WAIT_MS): Promise<T> {
+	enqueue<T>(
+		work: () => Promise<T>,
+		waitMs = TURN_END_QUEUE_WAIT_MS,
+	): Promise<T> {
 		if (this.pending.length >= 1) {
 			return Promise.reject(new Error("turn_end queue is busy"));
 		}
@@ -232,6 +248,8 @@ class TurnEndQueue {
 
 const turnEndQueue = new TurnEndQueue();
 const pendingTurnEndDeliveries = new Map<string, PendingTurnEndDelivery>();
+/** In-flight Stop-hook passes, keyed by cwd — see `runTurnEndForIpc` (#1274). */
+const inFlightIpcTurnEnds = new Map<string, Promise<TurnEndDelivery>>();
 
 /**
  * Run pi-lens's real turn_end over the files edited this "turn". The handler
@@ -290,15 +308,15 @@ async function runTurnEndNow(
 
 	const outcome: TurnEndOutcome = deferredDelivery
 		? {
-			turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd)),
-			tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd)),
-			filesRegistered: registered,
-		}
+				turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd)),
+				tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd)),
+				filesRegistered: registered,
+			}
 		: {
-			turnEnd: joinMessages(consumeTurnEndFindings(ctx.cacheManager, cwd)),
-			tests: joinMessages(consumeTestFindings(ctx.cacheManager, cwd)),
-			filesRegistered: registered,
-		};
+				turnEnd: joinMessages(consumeTurnEndFindings(ctx.cacheManager, cwd)),
+				tests: joinMessages(consumeTestFindings(ctx.cacheManager, cwd)),
+				filesRegistered: registered,
+			};
 
 	return {
 		outcome,
@@ -318,8 +336,8 @@ export function runTurnEnd(
 	cwd: string,
 	files: string[] = [],
 ): Promise<TurnEndOutcome> {
-	return turnEndQueue.enqueue(async () =>
-		(await runTurnEndNow(cwd, files)).outcome,
+	return turnEndQueue.enqueue(
+		async () => (await runTurnEndNow(cwd, files)).outcome,
 	);
 }
 
@@ -328,7 +346,24 @@ function hasTurnEndFindings(outcome: TurnEndOutcome): boolean {
 	return Boolean(outcome.turnEnd || outcome.tests);
 }
 
-function pendingForCwd(cwd: string): [string, PendingTurnEndDelivery] | undefined {
+/** Drop expired deliveries, then the oldest ones over the cap. Never commits. */
+function prunePendingTurnEndDeliveries(now = Date.now()): void {
+	for (const [deliveryId, delivery] of pendingTurnEndDeliveries) {
+		if (now - delivery.createdAt >= TURN_END_DELIVERY_TTL_MS) {
+			pendingTurnEndDeliveries.delete(deliveryId);
+		}
+	}
+	// Map iteration is insertion-ordered, so the head is the oldest entry.
+	while (pendingTurnEndDeliveries.size > TURN_END_DELIVERY_MAX) {
+		const oldest = pendingTurnEndDeliveries.keys().next();
+		if (oldest.done) break;
+		pendingTurnEndDeliveries.delete(oldest.value);
+	}
+}
+
+function pendingForCwd(
+	cwd: string,
+): [string, PendingTurnEndDelivery] | undefined {
 	for (const [deliveryId, delivery] of pendingTurnEndDeliveries) {
 		if (delivery.cwd === cwd) return [deliveryId, delivery];
 	}
@@ -342,13 +377,31 @@ function pendingForCwd(cwd: string): [string, PendingTurnEndDelivery] | undefine
  * timeout, socket close, or server restart therefore leaves the result for a
  * later Stop request instead of losing it between execution and reply.
  */
-export function runTurnEndForIpc(
-	cwd: string,
-): Promise<TurnEndDelivery> {
+export function runTurnEndForIpc(cwd: string): Promise<TurnEndDelivery> {
+	// #1274: the Stop-hook request carries no files and no sessionId, so two
+	// overlapping ones are byte-identical and a second pass would be pure waste
+	// — worse, the queue only holds ONE waiter, so a third Stop is rejected
+	// outright. Identical in-flight requests share the one pass and one
+	// deliveryId; the ack is idempotent-by-capability, so the loser of the race
+	// simply finds the delivery already committed.
+	const inFlight = inFlightIpcTurnEnds.get(cwd);
+	if (inFlight) return inFlight;
+	const run = runTurnEndForIpcNow(cwd).finally(() => {
+		inFlightIpcTurnEnds.delete(cwd);
+	});
+	inFlightIpcTurnEnds.set(cwd, run);
+	return run;
+}
+
+function runTurnEndForIpcNow(cwd: string): Promise<TurnEndDelivery> {
 	return turnEndQueue.enqueue(async () => {
+		prunePendingTurnEndDeliveries();
 		const pending = pendingForCwd(cwd);
 		if (pending) {
-			return { outcome: pending[1].transaction.outcome, deliveryId: pending[0] };
+			return {
+				outcome: pending[1].transaction.outcome,
+				deliveryId: pending[0],
+			};
 		}
 
 		const ctx = await getMcpSessionContext();
@@ -372,17 +425,28 @@ export function runTurnEndForIpc(
 		}
 
 		const deliveryId = crypto.randomUUID();
-		pendingTurnEndDeliveries.set(deliveryId, { cwd, transaction });
+		pendingTurnEndDeliveries.set(deliveryId, {
+			cwd,
+			transaction,
+			createdAt: Date.now(),
+		});
+		prunePendingTurnEndDeliveries();
 		return { outcome: transaction.outcome, deliveryId };
 	});
 }
 
 /** Commit exactly one admitted delivery capability. */
 export function acknowledgeTurnEnd(cwd: string, deliveryId: string): boolean {
+	prunePendingTurnEndDeliveries();
 	const delivery = pendingTurnEndDeliveries.get(deliveryId);
 	if (!delivery || delivery.cwd !== cwd) return false;
-	pendingTurnEndDeliveries.delete(deliveryId);
+	// #1274: commit BEFORE dropping the capability. Deleting first meant a
+	// throwing consume destroyed the only handle to the findings — precisely the
+	// loss this two-phase protocol exists to prevent, reintroduced on the error
+	// path. Leaving the entry in place on a throw keeps the delivery re-fetchable
+	// by a later Stop.
 	delivery.transaction.commit();
+	pendingTurnEndDeliveries.delete(deliveryId);
 	return true;
 }
 
@@ -390,4 +454,5 @@ export function acknowledgeTurnEnd(cwd: string, deliveryId: string): boolean {
 export function _resetTurnEndChain(): void {
 	turnEndQueue.reset();
 	pendingTurnEndDeliveries.clear();
+	inFlightIpcTurnEnds.clear();
 }

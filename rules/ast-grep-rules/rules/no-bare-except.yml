@@ -12,34 +12,8 @@ note: |
   identifier, making it fire only for empty bodies or `pass`/`raise`
   (where there are no function-call identifiers).
 
-  The fixed rule checks the except_clause's direct children for ANY of
-  the six exception-spec shapes: bare identifier `except E`, dotted
-  attribute `except asyncio.TimeoutError`, tuple `except (E, F)`,
-  parenthesized single name `except (E)`, `as` pattern `except E as e`,
-  or subscript `except dict[str, int]`.
-  The original missed the attribute, tuple, `as_pattern`,
-  `parenthesized_expression`, and `subscript` forms — a dotted name, a
-  tuple like `(ValueError, KeyError)`, or a subscripted generic like
-  `dict[str, int]` has no direct `identifier` child (the identifiers are
-  inside the attribute/tuple/subscript), and `except Exception as e`
-  has no direct `identifier` child either (`e` lives inside the
-  `as_pattern`, which the suppression list covers) — dotted/qualified
-  names are the #1031 sibling of the #1026 tree-sitter fix;
-  `parenthesized_expression` mirrors that filter's spec set, and
-  `subscript` closes the #1244 gap on BOTH surfaces).
+  The rule now matches the grammar's bare `except:` syntax directly, so
+  newly introduced exception-spec node kinds cannot become false positives.
 rule:
   kind: except_clause
-  not:
-    any:
-      - has:
-          kind: identifier
-      - has:
-          kind: attribute
-      - has:
-          kind: tuple
-      - has:
-          kind: parenthesized_expression
-      - has:
-          kind: as_pattern
-      - has:
-          kind: subscript
+  pattern: "except:"

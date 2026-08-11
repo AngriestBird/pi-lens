@@ -259,6 +259,18 @@ export interface LSPClientInfo {
 	recentStderr: (lines?: number) => string;
 	/** Pre-request health check — returns error string if process is dead */
 	checkAlive: () => string | undefined;
+	/**
+	 * #1277: cheap request round-trip proving the server is actually
+	 * responding, not merely that the process/connection hasn't died.
+	 * `isAlive()`/`checkAlive()` can't tell a wedged server (accepted the
+	 * notify write, then stopped answering) from a healthy one — this sends a
+	 * bounded real request and reports whether anything came back in time.
+	 * Optional so existing test/mock clients (pre-#1277) that don't implement
+	 * it don't need updating; callers treat a missing implementation as alive
+	 * (`pingLiveness?.() ?? true`), matching the codebase's existing optional-
+	 * capability-accessor pattern (`getRawCapabilityKeys`, `getLaunchVariant`).
+	 */
+	pingLiveness?: (timeoutMs?: number) => Promise<boolean>;
 	notify: {
 		open(
 			filePath: string,
@@ -534,6 +546,21 @@ const SHUTDOWN_REQUEST_TIMEOUT_MS = positiveIntFromEnv(
 	"PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS",
 	1000,
 );
+// #1277: cheap liveness round-trip for the silent-clean gates (`index.ts`).
+// Those gates convert a diagnostics-wait timeout into a confirmed-clean
+// result from a STATIC capability classification (`silentOnClean`) alone —
+// but a wedged server (accepted the notify write, then hung) satisfies that
+// classification identically to a genuinely clean one. This is deliberately
+// short relative to NAV_REQUEST_TIMEOUT_MS: it only needs to prove the
+// connection round-trips SOMETHING before the touch reports clean, not
+// complete a real navigation request.
+const LIVENESS_PING_TIMEOUT_MS = positiveIntFromEnv(
+	"PI_LENS_LSP_LIVENESS_PING_TIMEOUT_MS",
+	300,
+);
+// Distinctive, unlikely-to-collide query string — the response content is
+// never inspected, only whether one arrived before the timeout.
+const LIVENESS_PING_QUERY = "__pi_lens_liveness_ping__";
 // #1104: bound on `state.workspacePullResultCache` — one entry per distinct
 // file the server has ever returned a `resultId` for across this client's
 // lifetime. A full clear on overflow (rather than an LRU) is fine, same
@@ -2020,6 +2047,42 @@ export async function navRequest<T>(
 	return result;
 }
 
+// #1277: cheap liveness round-trip used by the silent-clean gates in
+// `index.ts`. `isAlive()`/`checkAlive()` only look at process/connection
+// state — a server that accepted the notify write and then wedged (still
+// running, connection still open, just never replying) reads as "alive" by
+// those checks even though it will never answer anything again. This sends a
+// real request (`workspace/symbol`, chosen because it needs no open document)
+// and reports whether the connection round-tripped it — success, a genuine
+// protocol-level error (e.g. MethodNotFound), and a stream-destroyed/
+// cancelled response (safeSendRequest swallows those to `undefined`, so the
+// final `isClientAlive` re-check is what catches "died mid-flight") ALL count
+// as "alive"; only a real timeout, or the connection having gone down by the
+// time this resolves, reports dead. The response content itself is never
+// inspected — only whether one arrived in time.
+async function clientPingLiveness(
+	state: LSPClientState,
+	timeoutMs: number = LIVENESS_PING_TIMEOUT_MS,
+): Promise<boolean> {
+	if (!isClientAlive(state)) return false;
+	try {
+		await withTimeout(
+			safeSendRequest(state.connection, "workspace/symbol", {
+				query: LIVENESS_PING_QUERY,
+			}),
+			timeoutMs,
+		);
+	} catch (err) {
+		if (err instanceof Error && err.message.startsWith("Timeout after")) {
+			return false;
+		}
+		// A real protocol-level error reply still proves the server round-
+		// tripped the request — fall through to the alive re-check below
+		// rather than treating an error response as "dead".
+	}
+	return isClientAlive(state);
+}
+
 // Run an advertised server command via workspace/executeCommand, with the
 // generous EXECUTE_COMMAND_TIMEOUT_MS anti-deadlock backstop. Preserves the
 // hardening invariants: allowlist-by-advertisement (only commands the server
@@ -2511,6 +2574,9 @@ export async function createLSPClient(options: {
 
 		/** Pre-request health check — returns error string if dead. */
 		checkAlive: () => checkProcessAlive(),
+
+		/** #1277: cheap request round-trip proving the server still responds. */
+		pingLiveness: (timeoutMs?: number) => clientPingLiveness(state, timeoutMs),
 
 		notify: {
 			async open(filePath, content, languageId, preserveDiagnostics, silent) {
