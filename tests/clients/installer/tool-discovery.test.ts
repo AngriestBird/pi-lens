@@ -346,13 +346,39 @@ describe("managed npm executable paths", () => {
 			const result = await ensureTool("madge", { forceReinstall: true });
 			expect(result).toBe(expected);
 
-			// finishInstallAttempt's reset call is fire-and-forget (a dynamic
-			// import + `.then()`, mirroring how ensureTool itself persists the
-			// probe cache) — give it a tick to run.
-			await new Promise((resolve) => setImmediate(resolve));
-			// Pre-fix, finishInstallAttempt never called this hook at all — the
-			// madge memo (dependency-checker.ts) stayed keyed only by projectRoot
-			// with no invalidation from a completed install.
+			// finishInstallAttempt AWAITS the reset before installTool()/ensureTool()
+			// resolve (P1 fix): a caller that starts the next madge resolution the
+			// instant `await ensureTool(...)` returns must observe the reset memo,
+			// never a stale pre-install one. No tick-wait needed — if the reset were
+			// still fire-and-forget (pre-fix), this assertion would be racy and
+			// fail intermittently since nothing here yields to the microtask queue.
+			expect(mockResetMadgeManagedPathMemo).toHaveBeenCalledTimes(1);
+		});
+	});
+
+	it("does not let a rejected madge memo reset crash or silently swallow the install (#1276)", async () => {
+		process.env.PI_LENS_TEST_PLATFORM = "win32";
+		process.env.PI_LENS_TEST_MODE = "1";
+		process.env.PI_LENS_TEST_NPM_SCRIPT = "install";
+		mockResetMadgeManagedPathMemo.mockImplementationOnce(() => {
+			throw new Error("boom");
+		});
+		await withEmptyPath(async () => {
+			const expected = path.join(
+				path.join(TEST_HOME, ".pi-lens", "tools"),
+				"node_modules",
+				".bin",
+				"madge.cmd",
+			);
+			fakeAccess(expected);
+			mockFsStat.mockResolvedValue({ mtimeMs: 1 });
+
+			// A throwing reset must not turn into an unhandled rejection or make
+			// the (otherwise successful) install look like it failed — it's a
+			// best-effort cache invalidation, not the install outcome itself.
+			await expect(ensureTool("madge", { forceReinstall: true })).resolves.toBe(
+				expected,
+			);
 			expect(mockResetMadgeManagedPathMemo).toHaveBeenCalledTimes(1);
 		});
 	});
