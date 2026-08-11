@@ -22,8 +22,8 @@ description: |
 
 query: |
   (formal_parameters
-    (required_parameter (identifier) @PARAM1)
-    (required_parameter (identifier) @NAME))
+    (required_parameter pattern: (identifier) @PARAM1)
+    (required_parameter pattern: (identifier) @NAME))
 
 metavars:
   - PARAM1
