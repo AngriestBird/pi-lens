@@ -23,6 +23,11 @@ const safeSpawnAsync = vi.fn();
 const safeSpawn = vi.fn();
 const findNodeToolBinary = vi.fn();
 const ensureTool = vi.fn();
+// #1276: the madge staleness check now revalidates bare (non-absolute)
+// resolved commands via isSpawnableCommand. Defaulted to "still spawnable" in
+// beforeEach so existing cache-hit assertions in this file aren't disturbed;
+// tests that care about staleness override it explicitly.
+const isSpawnableCommand = vi.fn();
 const MANAGED_TOOLS_DIR = path.join(os.tmpdir(), "pilens-fake-home", "tools");
 
 vi.mock("../../clients/safe-spawn.js", () => ({ safeSpawnAsync, safeSpawn }));
@@ -30,6 +35,7 @@ vi.mock("../../clients/package-manager.js", () => ({ findNodeToolBinary }));
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
 	getManagedToolsDir: () => MANAGED_TOOLS_DIR,
+	isSpawnableCommand,
 }));
 
 describe("DependencyChecker madge resolution (#766)", () => {
@@ -42,6 +48,7 @@ describe("DependencyChecker madge resolution (#766)", () => {
 		otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pilens-madge-other-"));
 		findNodeToolBinary.mockResolvedValue(undefined);
 		ensureTool.mockResolvedValue(undefined);
+		isSpawnableCommand.mockResolvedValue(true);
 		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
 			if (args[0] === "--version") {
 				return { status: 0, error: null, stdout: "madge 8.0.0", stderr: "" };

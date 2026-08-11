@@ -166,8 +166,19 @@ const mockHttpsGet = vi.hoisted(() => (url: unknown) => {
 });
 vi.mock("node:https", () => ({ default: { get: mockHttpsGet }, get: mockHttpsGet }));
 
+// #1276: `finishInstallAttempt` calls this on a successful install, mirroring
+// `resetSafeSpawnWindowsCommandCache` right above it. Mocked so the wiring
+// test below can assert the call without pulling in DependencyChecker's own
+// dependencies (safe-spawn, package-manager) — that side is covered by
+// tests/clients/dependency-checker-madge-memo-reset.test.ts.
+const mockResetMadgeManagedPathMemo = vi.hoisted(() => vi.fn());
+vi.mock("../../../clients/dependency-checker.js", () => ({
+	resetMadgeManagedPathMemo: mockResetMadgeManagedPathMemo,
+}));
+
 import * as path from "node:path";
 import {
+	checkProbeCache,
 	ensureTool,
 	getToolPath,
 	resetProbeCacheStateForTesting,
@@ -297,6 +308,11 @@ describe("managed npm executable paths", () => {
 				"stylelint.cmd",
 			);
 			fakeAccess(expected);
+			// updateProbeCache stats the resolved path before persisting it; without
+			// this the fire-and-forget `void updateProbeCache(...)` call in ensureTool
+			// silently no-ops (stat throws on the unconfigured mock, caught as
+			// best-effort) and the gap below would pass vacuously.
+			mockFsStat.mockResolvedValue({ mtimeMs: 1 });
 			const result = await ensureTool("stylelint", { forceReinstall: true });
 			expect(result).toBe(expected);
 			// The verifier is reached with the actual stored shim path, rather than
@@ -304,6 +320,40 @@ describe("managed npm executable paths", () => {
 			expect(spawnCalls.some(({ cmd }) => cmd.includes("stylelint.cmd"))).toBe(
 				true,
 			);
+			// #1266/#1223: assert the value actually PERSISTED by updateProbeCache,
+			// not just the value ensureTool happened to return this call. Give the
+			// fire-and-forget `void updateProbeCache(...)` a tick to complete.
+			await new Promise((resolve) => setImmediate(resolve));
+			await expect(checkProbeCache("stylelint")).resolves.toBe(expected);
+		});
+	});
+
+	it("clears the madge managed-path memo when a managed install succeeds (#1276)", async () => {
+		process.env.PI_LENS_TEST_PLATFORM = "win32";
+		process.env.PI_LENS_TEST_MODE = "1";
+		process.env.PI_LENS_TEST_NPM_SCRIPT = "install";
+		await withEmptyPath(async () => {
+			const expected = path.join(
+				path.join(TEST_HOME, ".pi-lens", "tools"),
+				"node_modules",
+				".bin",
+				"madge.cmd",
+			);
+			fakeAccess(expected);
+			mockFsStat.mockResolvedValue({ mtimeMs: 1 });
+
+			expect(mockResetMadgeManagedPathMemo).not.toHaveBeenCalled();
+			const result = await ensureTool("madge", { forceReinstall: true });
+			expect(result).toBe(expected);
+
+			// finishInstallAttempt's reset call is fire-and-forget (a dynamic
+			// import + `.then()`, mirroring how ensureTool itself persists the
+			// probe cache) — give it a tick to run.
+			await new Promise((resolve) => setImmediate(resolve));
+			// Pre-fix, finishInstallAttempt never called this hook at all — the
+			// madge memo (dependency-checker.ts) stayed keyed only by projectRoot
+			// with no invalidation from a completed install.
+			expect(mockResetMadgeManagedPathMemo).toHaveBeenCalledTimes(1);
 		});
 	});
 });
