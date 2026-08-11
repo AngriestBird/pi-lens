@@ -1376,7 +1376,20 @@ export class TreeSitterClient {
 		);
 	}
 
-	/** Collect names introduced by a parameter binding pattern. */
+	/**
+	 * Collect names introduced by a parameter binding pattern.
+	 *
+	 * Binding-aware: only identifiers in a *binding* position are counted.
+	 * Two node shapes hold reference expressions rather than bindings and
+	 * must not be descended into:
+	 *  - `assignment_pattern` / `object_assignment_pattern` (`pattern = default`,
+	 *    e.g. `[a = b]` or `{a = b}`) — the `value`/`right` side is a default
+	 *    *expression*, not a new name (`b` in `{a = b}` is a reference).
+	 *  - `computed_property_name` (`[expr]:` in a destructuring pattern,
+	 *    e.g. `{[key]: a}`) — `expr` is a reference, not a binding.
+	 * Nested binding positions (destructured sub-patterns) are still walked
+	 * so renamed/duplicate collisions inside them are found.
+	 */
 	private bindingNames(node: TreeSitterNode | undefined): Set<string> {
 		const names = new Set<string>();
 		if (!node) return names;
@@ -1389,9 +1402,18 @@ export class TreeSitterClient {
 			}
 			if (
 				current.type === "property_identifier" ||
-				current.type === "type_identifier"
+				current.type === "type_identifier" ||
+				current.type === "computed_property_name"
 			)
 				continue;
+			if (
+				current.type === "assignment_pattern" ||
+				current.type === "object_assignment_pattern"
+			) {
+				const left = current.childForFieldName?.("left");
+				if (left) stack.push(left);
+				continue;
+			}
 			stack.push(...(current.children ?? []));
 		}
 		return names;

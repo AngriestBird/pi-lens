@@ -263,6 +263,75 @@ describe("duplicate-function-arg (TS)", () => {
 			),
 		).toBe(0);
 	});
+
+	// #1270 follow-up: `bindingNames` walked every descendant `identifier`,
+	// so a reference inside a destructuring default or a computed property
+	// key was wrongly counted as a bound parameter name. These pin the
+	// binding-aware traversal — only `left`/binding positions count, never
+	// the default-value expression or a computed key's expression.
+	it("does not treat a destructured default's reference as a binding", () => {
+		return Promise.all([
+			expect(
+				count(
+					"duplicate-function-arg",
+					"ts",
+					"typescript",
+					`function f({a = b}, b) {}`,
+				),
+			).resolves.toBe(0),
+			expect(
+				count(
+					"duplicate-function-arg",
+					"ts",
+					"typescript",
+					`function f([a = b], b) {}`,
+				),
+			).resolves.toBe(0),
+			expect(
+				count(
+					"duplicate-function-arg",
+					"ts",
+					"typescript",
+					`function f({x: a = b}, b) {}`,
+				),
+			).resolves.toBe(0),
+			expect(
+				count(
+					"duplicate-function-arg",
+					"ts",
+					"typescript",
+					`function f({a = (() => b)}, b) {}`,
+				),
+			).resolves.toBe(0),
+		]);
+	});
+
+	it("does not treat a computed property key's reference as a binding", async () => {
+		expect(
+			await count(
+				"duplicate-function-arg",
+				"ts",
+				"typescript",
+				`function f({[key]: a}, key) {}`,
+			),
+		).toBe(0);
+	});
+
+	it("still flags a genuine duplicate when one param self-references its own default", async () => {
+		// `{a = a}` binds `a` on the left (the right-hand `a` is only a
+		// reference, per the cases above); the second param is also named
+		// `a`, so this really is `function f(a, a) {}` in disguise — Node
+		// itself rejects it with "Duplicate parameter name not allowed in
+		// this context". A binding-aware traversal must still flag it.
+		expect(
+			await count(
+				"duplicate-function-arg",
+				"ts",
+				"typescript",
+				`function f({a = a}, a) {}`,
+			),
+		).toBeGreaterThan(0);
+	});
 });
 
 describe("mixed-async-styles (TS)", () => {
