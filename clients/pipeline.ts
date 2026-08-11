@@ -78,6 +78,7 @@ import {
 	hasRubocopConfig,
 	hasSqlfluffConfig,
 	hasStylelintConfig,
+	markdownlintConfigArgs,
 } from "./tool-policy.js";
 
 const LSP_MAX_FILE_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
@@ -515,8 +516,18 @@ async function tryDetektFix(filePath: string, cwd: string): Promise<number> {
 async function tryMarkdownlintFix(filePath: string, cwd: string): Promise<number> {
 	const cmd = await resolveToolCommandWithInstallFallback(cwd, "markdownlint");
 	if (!cmd) return 0;
+	// Shared config-args seam (#1247): the lint runner consumes the same
+	// builder, so the bare --fix here can never fall back to markdownlint's
+	// default all-rules-on config again (the whole-file CHANGELOG/AGENTS
+	// reformat + `#946` → `# 946` corruption).
 	// markdownlint-cli2 --fix exits non-zero when unfixable violations remain.
-	return detectFileChangedAfterCommand(filePath, cmd, ["--fix", filePath], cwd, [1]);
+	return detectFileChangedAfterCommand(
+		filePath,
+		cmd,
+		[...markdownlintConfigArgs(cwd), "--fix", filePath],
+		cwd,
+		[1],
+	);
 }
 
 async function tryOxlintFix(filePath: string, cwd: string): Promise<number> {
@@ -671,7 +682,7 @@ export async function runAutofix(
 				dbg(`autofix: ruff unavailable for ${filePath}`);
 				continue;
 			}
-			const result = await ruffClient.fixFileAsync(filePath);
+			const result = await ruffClient.fixFileAsync(filePath, cwd);
 			if (result.success && result.fixed > 0) {
 				fixedCount += result.fixed;
 				autofixTools.push(`ruff:${result.fixed}`);
@@ -691,7 +702,7 @@ export async function runAutofix(
 				dbg(`autofix: biome unavailable or unsupported for ${filePath}`);
 				continue;
 			}
-			const result = await biomeClient.fixFileAsync(filePath);
+			const result = await biomeClient.fixFileAsync(filePath, cwd);
 			if (result.success && result.fixed > 0) {
 				fixedCount += result.fixed;
 				autofixTools.push(`biome:${result.fixed}`);

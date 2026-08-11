@@ -28,6 +28,13 @@ vi.mock("../../../../clients/tool-policy.js", async (importOriginal) => {
 		...actual,
 		getLinterPolicyForCwd: () => null,
 		hasMarkdownlintConfig: hasMarkdownlintConfigMock,
+		// The runner now consumes the shared config-args builder, which calls
+		// the predicate module-internally — route the builder through the mock
+		// so "config present → no --config" still holds (#1247 review P1b).
+		markdownlintConfigArgs: (cwd: string) =>
+			hasMarkdownlintConfigMock()
+				? []
+				: actual.markdownlintConfigArgs(cwd),
 	};
 });
 

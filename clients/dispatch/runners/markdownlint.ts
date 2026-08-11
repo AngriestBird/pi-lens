@@ -1,8 +1,7 @@
-import { resolvePackagePath } from "../../package-root.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import {
 	getLinterPolicyForCwd,
-	hasMarkdownlintConfig,
+	markdownlintConfigArgs,
 } from "../../tool-policy.js";
 import { PRIORITY } from "../priorities.js";
 import type {
@@ -110,8 +109,6 @@ const markdownlintRunner: RunnerDefinition = {
 		if (policy && !policy.preferredRunners.includes("markdownlint")) {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
-		const hasConfig = hasMarkdownlintConfig(cwd);
-
 		let cmd: string | null = null;
 		if (await (markdownlint.isAvailableAsync(cwd))) {
 			cmd = markdownlint.getCommand(cwd);
@@ -121,12 +118,9 @@ const markdownlintRunner: RunnerDefinition = {
 
 		if (!cmd) return { status: "skipped", diagnostics: [], semantic: "none" };
 
-		const configArgs = hasConfig
-			? []
-			: [
-					"--config",
-					resolvePackagePath(import.meta.url, "config/markdownlint/core.json"),
-				];
+		// Shared config-args seam (#1247): the autofix path consumes the same
+		// builder, so the package-owned fallback config can never drift.
+		const configArgs = markdownlintConfigArgs(cwd);
 		const result = await safeSpawnAsync(cmd, [...configArgs, ctx.filePath], {
 			timeout: 15000,
 			cwd,

@@ -185,6 +185,32 @@ describe("duplicate-function-arg (TS)", () => {
 			),
 		).toBe(0);
 	});
+
+	it("does not match a default value referencing another param's name", async () => {
+		// `root = node` is a default value, not a second parameter named `node`.
+		// The query must bind only the `pattern` field (the param name), never an
+		// identifier nested inside a type annotation or default-value expression.
+		expect(
+			await count(
+				"duplicate-function-arg",
+				"ts",
+				"typescript",
+				`function f(node: TreeSitterNode, root: TreeSitterNode = node) { return root; }`,
+			),
+		).toBe(0);
+	});
+
+	it("still matches duplicates when a param has a default value", async () => {
+		// The `pattern:`-field fix must not silence genuine duplicates elsewhere.
+		expect(
+			await count(
+				"duplicate-function-arg",
+				"ts",
+				"typescript",
+				`function g(a, b = a, a) { return a + b; }`,
+			),
+		).toBeGreaterThan(0);
+	});
 });
 
 describe("mixed-async-styles (TS)", () => {

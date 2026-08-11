@@ -120,13 +120,14 @@ async function mapWithConcurrency<T>(
 	if (items.length === 0) return;
 	let nextIndex = 0;
 	const workerCount = Math.max(1, Math.min(concurrency, items.length));
-	const workers = Array.from({ length: workerCount }, async () => {
+	const worker = async (): Promise<void> => {
 		while (true) {
 			const index = nextIndex++;
 			if (index >= items.length) return;
 			await mapper(items[index]);
 		}
-	});
+	};
+	const workers = Array.from({ length: workerCount }, () => worker());
 	await Promise.all(workers);
 }
 

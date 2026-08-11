@@ -52,6 +52,56 @@ describe("python tree-sitter rules", () => {
 		});
 	});
 
+	describe("bare-except (refs #1031/#1244)", () => {
+		it("flags a bare except", async () => {
+			const client = getSharedTreeSitterClient()!;
+			const query = await getQuery("bare-except");
+			const filePath = writeTempFile(
+				`try:\n    risky()\nexcept:\n    pass\n`,
+			);
+
+			const matches = await client.runQueryOnFile(query, filePath, "python");
+
+			expect(matches).toHaveLength(1);
+		});
+
+		it("does not flag a named exception", async () => {
+			const client = getSharedTreeSitterClient()!;
+			const query = await getQuery("bare-except");
+			const filePath = writeTempFile(
+				`try:\n    risky()\nexcept ValueError:\n    pass\n`,
+			);
+
+			const matches = await client.runQueryOnFile(query, filePath, "python");
+
+			expect(matches).toHaveLength(0);
+		});
+
+		it("does not flag a subscripted generic exception spec (#1244)", async () => {
+			const client = getSharedTreeSitterClient()!;
+			const query = await getQuery("bare-except");
+			const filePath = writeTempFile(
+				`try:\n    risky()\nexcept dict[str, int]:\n    pass\n`,
+			);
+
+			const matches = await client.runQueryOnFile(query, filePath, "python");
+
+			expect(matches).toHaveLength(0);
+		});
+
+		it("does not flag a subscripted PEP 654 exception group (#1244)", async () => {
+			const client = getSharedTreeSitterClient()!;
+			const query = await getQuery("bare-except");
+			const filePath = writeTempFile(
+				`try:\n    risky()\nexcept BaseExceptionGroup[TypeError, ValueError]:\n    pass\n`,
+			);
+
+			const matches = await client.runQueryOnFile(query, filePath, "python");
+
+			expect(matches).toHaveLength(0);
+		});
+	});
+
 	describe("in-operator-unsupported (refs #884)", () => {
 		it("flags 'in' used against None", async () => {
 			const client = getSharedTreeSitterClient()!;

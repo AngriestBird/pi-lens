@@ -2588,7 +2588,10 @@ export class TreeSitterClient {
 				// A typed `except` clause has a named child for the exception
 				// spec — one of: identifier (e.g. `except ValueError`),
 				// attribute (e.g. `except asyncio.TimeoutError` — dotted name),
-				// tuple (e.g. `except (E, F)`), or as_pattern (e.g. `except E as e`).
+				// tuple (e.g. `except (E, F)`), as_pattern (e.g. `except E as e`),
+				// parenthesized_expression (e.g. `except (E)`), or subscript
+				// (e.g. `except dict[str, int]` — #1244, mirrors the ast-grep
+				// rule's shape space).
 				// Bare `except:` has NO named children (just the `except` keyword,
 				// the `:` colon, and the body block).
 				// biome-ignore lint/suspicious/noExplicitAny: AST iteration
@@ -2599,7 +2602,8 @@ export class TreeSitterClient {
 						c.type === "attribute" ||
 						c.type === "tuple" ||
 						c.type === "as_pattern" ||
-						c.type === "parenthesized_expression"
+						c.type === "parenthesized_expression" ||
+						c.type === "subscript"
 					);
 				});
 				// Fire ONLY when bare (no exception spec)
