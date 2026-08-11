@@ -79,6 +79,11 @@ function makeSilentPushOnlyClient(serverId: string, root: string) {
 			// (`getAllDiagnostics().has(normalizedPath)`), same as the real
 			// client's `clearDiagnosticsForPath`-then-nothing-arrived state.
 			getAllDiagnostics: vi.fn(() => new Map()),
+			// #1277: defaults to alive (matches the real client's "healthy
+			// server" case, and `pingLiveness?.() ?? true`'s fallback for older
+			// mocks that omit it entirely) — individual wedged-server tests
+			// override this to `vi.fn().mockResolvedValue(false)`.
+			pingLiveness: vi.fn().mockResolvedValue(true),
 		},
 		waitCalls,
 	};
@@ -183,6 +188,38 @@ describe("touchFile silent-clean push-only confirm (#799)", () => {
 		expect(warmup.failedServerIds).toEqual([]);
 	});
 
+	it("#1277: a WEDGED marksman (accepts the notify write, then never answers anything) stays INCONCLUSIVE, not confirmed clean", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const marksman = makeServer("marksman", ".md", tmp);
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".md") ? [marksman] : [],
+		);
+		const { client } = makeSilentPushOnlyClient("marksman", tmp);
+		// The notify write is accepted (resolves normally) and the capability
+		// snapshot still classifies this touch as tier3-silent — identical to
+		// the genuinely-clean case in test (a) above. The only difference is
+		// the server is wedged: it never answers ANY request, including the
+		// #1277 liveness ping added by this gate. Pre-#1277 there was nothing
+		// checking this and the touch would confirm clean anyway.
+		client.pingLiveness = vi.fn().mockResolvedValue(false);
+		createLSPClient.mockResolvedValue(client);
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const result = await service.touchFile(filePath, "# hi\n", {
+			diagnostics: "document",
+			collectDiagnostics: true,
+			clientScope: "primary",
+			source: "test",
+		});
+
+		expect((result as { inconclusive?: boolean }).inconclusive).toBe(true);
+		expect(result?.confirmation).toBeUndefined();
+		expect(client.pingLiveness).toHaveBeenCalled();
+	});
+
 	it("a non-primary/multi-server touch does NOT take the SINGLE-SERVER silent-clean shortcut (stays inconclusive, matching pre-#799 behavior)", async () => {
 		const filePath = path.join(tmp, "a.md");
 		fs.writeFileSync(filePath, "# hi\n");
@@ -271,6 +308,50 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		expect((result as { inconclusive?: boolean }).inconclusive).toBeUndefined();
 		expect(result?.confirmation).toBe("confirmed");
 		expect(result?.diags).toEqual([finding]);
+	});
+
+	it("#1277: scope-all — the still-outstanding silent server is WEDGED (fails the liveness ping), so the touch stays INCONCLUSIVE even though the publishing sibling answered", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const marksman = makeServer("marksman", ".md", tmp);
+		const typos = makeServer("typos", ".md", tmp);
+		getServersForFileWithConfig.mockImplementation((fp: string) =>
+			fp.endsWith(".md") ? [marksman, typos] : [],
+		);
+		const finding = {
+			severity: 2 as const,
+			message: "possible typo",
+			range: {
+				start: { line: 0, character: 2 },
+				end: { line: 0, character: 4 },
+			},
+			source: "typos",
+		};
+		createLSPClient.mockImplementation(async (opts: { serverId: string }) => {
+			if (opts.serverId === "typos") {
+				return makePublishingClient("typos", tmp, filePath, [finding]);
+			}
+			// marksman: notify write accepted, wait times out with nothing
+			// published (identical to the genuinely-clean case in test (a)
+			// above) — but it is wedged, so the #1277 liveness ping never
+			// answers either.
+			const { client } = makeSilentPushOnlyClient("marksman", tmp);
+			client.pingLiveness = vi.fn().mockResolvedValue(false);
+			return client;
+		});
+
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const result = await service.touchFile(filePath, "# hi\n", {
+			diagnostics: "document",
+			collectDiagnostics: true,
+			clientScope: "all",
+			source: "lens_diagnostics_full",
+		});
+
+		expect((result as { inconclusive?: boolean }).inconclusive).toBe(true);
+		expect(result?.confirmation).toBeUndefined();
 	});
 
 	it("(b) scope-all: the silent server's notify write TIMED OUT — falls back to today's timeout/inconclusive behavior", async () => {
