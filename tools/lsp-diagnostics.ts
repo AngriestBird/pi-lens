@@ -645,6 +645,13 @@ type DiagnosticsCollectionResult = {
 	 */
 	timedOut: boolean;
 	/**
+	 * True only when `touchFile` explicitly preserved completion of its configured
+	 * diagnostics policy. This is distinct from merely receiving an empty array;
+	 * scope-specific consumers may still require a stricter fallback (see
+	 * `canTrustTouchConfirmation`).
+	 */
+	confirmedByTouch: boolean;
+	/**
 	 * #692: the file content read while collecting (undefined only when the
 	 * read itself failed) — reused by the widget-reconcile caller so it can
 	 * derive `fileRole` for `retagAuxiliaryDiagnostics`'s `skipTestFiles` gate
@@ -670,20 +677,14 @@ async function collectDiagnosticsForFile(
 ): Promise<DiagnosticsCollectionResult> {
 	let timedOut = false;
 	let content: string | undefined;
-	// #629: `touched` (when defined) is ALREADY the correctly-scoped,
-	// already-collected diagnostics array for this touch — `touchFile` below
-	// is called with `collectDiagnostics: true` and `clientScope: serverScope`,
-	// so its return value only contains diagnostics from the servers
-	// `serverScope` asked for. Previously this function discarded `touched`
-	// (reading only `.inconclusive` off it) and made a SECOND, unconditionally
-	// -unscoped `getDiagnostics()` call for the actual content — meaning every
-	// touchFile-branch call paid for two LSP round trips instead of one, and
-	// `serverScope: "primary"` never actually skipped the auxiliary scanners
-	// (getDiagnostics always queries every registered server for the file).
-	// `touched` is only undefined when touchFile itself couldn't produce a
-	// result (service destroyed, no clients resolved) — that's the one case
-	// that still needs the getDiagnostics() fallback below.
-	// #1179: `touchFile` resolves the `{ diags, inconclusive, binding }` wrapper.
+	// `touchFile` is the authoritative collection boundary for every scope: it
+	// preserves per-touch timeout, content-binding, and silent-clean confirmation
+	// metadata while returning diagnostics from only the requested clients. The
+	// legacy openFile/getDiagnostics path remains only for an older/mock service
+	// without touchFile, or when touchFile cannot resolve any clients.
+	// #1179: the result is an explicit wrapper so side-channel fields survive
+	// array copies; confirmation was added when Marksman's lower-level clean verdict
+	// proved that a successful empty collection also needs explicit provenance.
 	let touched: TouchFileResult | undefined;
 	let usedTouch = false;
 	try {
@@ -711,7 +712,23 @@ async function collectDiagnosticsForFile(
 					content,
 					{ fileRole: detectFileRole(absPath, content) },
 				);
-				return { diagnostics: filtered, timedOut: false, content };
+				return {
+					diagnostics: filtered,
+					timedOut: false,
+					// #1253: the incumbent's touch carries the same confirmation
+					// provenance a local touch does (an `available: true` answer is
+					// already gated on `fresh && !inconclusive`, but that is NOT
+					// evidence a silent-on-clean server was confirmed — only the
+					// explicit flag is). The incumbent always touches with
+					// `clientScope: "with-auxiliary"`, so this is an AGGREGATE
+					// confirmation: it carries the same caveat all-scope local
+					// touches do, and classic TypeScript still needs the primary-only
+					// tsserver sync check below rather than this verdict.
+					confirmedByTouch:
+						attached.response.confirmation === "confirmed" &&
+						primaryServerId(absPath) !== "typescript",
+					content,
+				};
 			}
 		}
 		const serviceWithTouch = lspService as NonNullable<
@@ -729,10 +746,7 @@ async function collectDiagnosticsForFile(
 				},
 			) => Promise<TouchFileResult | undefined>;
 		};
-		if (
-			(waitMs !== undefined || serverScope === "primary") &&
-			typeof serviceWithTouch.touchFile === "function"
-		) {
+		if (typeof serviceWithTouch.touchFile === "function") {
 			usedTouch = true;
 			touched = await serviceWithTouch.touchFile(absPath, content, {
 				diagnostics: "document",
@@ -784,7 +798,15 @@ async function collectDiagnosticsForFile(
 	// one; the openFile-only / getDiagnostics fallback leaves it undefined →
 	// "unknown", no demotion).
 	const binding = usedTouch ? touched?.binding : undefined;
-	return { diagnostics: filtered, timedOut, content, binding };
+	const confirmedByTouch =
+		usedTouch && touched?.confirmation === "confirmed";
+	return {
+		diagnostics: filtered,
+		timedOut,
+		confirmedByTouch,
+		content,
+		binding,
+	};
 }
 
 function diagnosticsToFileDiags(
@@ -868,6 +890,24 @@ async function resolveEmptyResult(
 	} catch {
 		return { confirmed: true, diagnostics: [] };
 	}
+}
+
+/**
+ * A primary-scope touch is authoritative because `touchFile` runs that
+ * primary's own confirmation path (including TypeScript's sync fallback). For
+ * all-scope TypeScript touches, the aggregate silent-clean gate can settle
+ * without that primary-only sync request, so preserve `resolveEmptyResult`'s
+ * existing tsserver fallback instead of accepting the aggregate verdict.
+ */
+function canTrustTouchConfirmation(
+	file: string,
+	serverScope: "primary" | "all",
+	confirmedByTouch: boolean,
+): boolean {
+	return (
+		confirmedByTouch &&
+		(serverScope === "primary" || primaryServerId(file) !== "typescript")
+	);
 }
 
 /**
@@ -1012,6 +1052,7 @@ async function collectFileDiagnosticResult(
 	const {
 		diagnostics: rawDiags,
 		timedOut,
+		confirmedByTouch,
 		content: collectedContent,
 		binding,
 	} = await collectDiagnosticsForFile(file, lspService, waitMs, serverScope);
@@ -1030,6 +1071,10 @@ async function collectFileDiagnosticResult(
 	if (timedOut) {
 		if (applySeverityFilter(rawDiags, severity).length === 0) {
 			confirmation = "unconfirmed";
+		}
+	} else if (canTrustTouchConfirmation(file, serverScope, confirmedByTouch)) {
+		if (applySeverityFilter(rawDiags, severity).length === 0) {
+			confirmation = "clean";
 		}
 	} else if (rawDiags.length === 0) {
 		const resolved = await resolveEmptyResult(file, lspService);
@@ -1098,6 +1143,7 @@ async function runFileDiagnostics(
 	const {
 		diagnostics: rawDiags,
 		timedOut,
+		confirmedByTouch,
 		content: collectedContent,
 		binding,
 	} = await collectDiagnosticsForFile(absPath, lspService, waitMs, serverScope);
@@ -1119,6 +1165,12 @@ async function runFileDiagnostics(
 	if (timedOut) {
 		if (applySeverityFilter(rawDiags, severity).length === 0) {
 			confirmation = "unconfirmed";
+		}
+	} else if (
+		canTrustTouchConfirmation(absPath, serverScope, confirmedByTouch)
+	) {
+		if (applySeverityFilter(rawDiags, severity).length === 0) {
+			confirmation = "clean";
 		}
 	} else if (rawDiags.length === 0) {
 		const resolved = await resolveEmptyResult(absPath, lspService);

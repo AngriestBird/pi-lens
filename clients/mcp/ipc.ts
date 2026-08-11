@@ -71,6 +71,16 @@ export interface WarmDiagnosticsResponse {
 	servedAt: number;
 	fresh: boolean;
 	inconclusive: boolean;
+	/**
+	 * #1253: the incumbent's `TouchFileResult.confirmation` — present only when
+	 * that touch completed its configured diagnostics/confirmation policy (which
+	 * includes the silent-clean gates a `silentOnClean` server like marksman
+	 * depends on). `inconclusive: false` alone is NOT the same evidence, so the
+	 * flag is carried explicitly rather than inferred. Optional: an incumbent
+	 * built before this field simply omits it, and the consumer then falls back
+	 * to today's unconfirmed handling.
+	 */
+	confirmation?: "confirmed";
 }
 
 export interface WarmCodeActionRange {
