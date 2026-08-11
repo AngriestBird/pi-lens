@@ -14,12 +14,15 @@ import type { McpAnalyzeResult } from "../../../clients/mcp/analyze.js";
 import {
 	contentHash,
 	createWarmIpcLineReader,
+	createWarmIpcRequestQueue,
 	diagnosticsIpcPathForCwd,
 	ipcPathForCwd,
 	requestWarmCodeActions,
 	requestWarmDiagnostics,
 	requestWarmAnalyze,
+	requestWarmTurnEnd,
 	WARM_DIAGNOSTICS_SCHEMA_VERSION,
+	WARM_TURN_END_SCHEMA_VERSION,
 } from "../../../clients/mcp/ipc.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -216,7 +219,9 @@ describe("requestWarmCodeActions", () => {
 	});
 
 	it("rejects code-action schema skew", async () => {
-		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-actions-skew-"));
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ipc-actions-skew-"),
+		);
 		const pid = 99005;
 		activeServer = net.createServer((socket) => {
 			socket.once("data", () =>
@@ -281,7 +286,9 @@ describe("requestWarmAnalyze", () => {
 				socket.end(`${JSON.stringify({ result: SENTINEL })}\n`);
 			});
 		});
-		await new Promise<void>((resolve) => activeServer?.listen(endpoint, resolve));
+		await new Promise<void>((resolve) =>
+			activeServer?.listen(endpoint, resolve),
+		);
 
 		const result = await requestWarmAnalyze(cwd, "/x/app.ts");
 		expect(result).toEqual(SENTINEL);
@@ -308,12 +315,168 @@ describe("requestWarmAnalyze", () => {
 			}
 		}
 		activeServer = net.createServer((socket) => {
-			socket.on("data", () => socket.end(`${JSON.stringify({ error: "boom" })}\n`));
+			socket.on("data", () =>
+				socket.end(`${JSON.stringify({ error: "boom" })}\n`),
+			);
 		});
-		await new Promise<void>((resolve) => activeServer?.listen(endpoint, resolve));
+		await new Promise<void>((resolve) =>
+			activeServer?.listen(endpoint, resolve),
+		);
 
 		const result = await requestWarmAnalyze(cwd, "/x/app.ts");
 		expect(result).toBeUndefined();
+		removeTempDirSync(cwd);
+	});
+});
+
+function listenOnWorkspaceEndpoint(
+	cwd: string,
+	handler: (socket: net.Socket) => void,
+): Promise<string> {
+	const endpoint = ipcPathForCwd(cwd);
+	if (process.platform !== "win32") {
+		try {
+			fs.unlinkSync(endpoint);
+		} catch {
+			/* none */
+		}
+	}
+	activeServer = net.createServer(handler);
+	return new Promise<string>((resolve) =>
+		activeServer?.listen(endpoint, () => resolve(endpoint)),
+	);
+}
+
+describe("requestWarmTurnEnd", () => {
+	it("round-trips a versioned turn-end response over the workspace endpoint", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-turn-"));
+		let received: unknown;
+		let connections = 0;
+		await listenOnWorkspaceEndpoint(cwd, (socket) => {
+			connections++;
+			socket.setEncoding("utf8");
+			socket.once("data", (chunk: string) => {
+				const request = JSON.parse(chunk.trim()) as { route?: string };
+				if (connections === 1) {
+					received = request;
+					socket.end(
+						`${JSON.stringify({
+							result: {
+								route: "turn-end",
+								version: WARM_TURN_END_SCHEMA_VERSION,
+								turnEnd: "TURN ADVISORY",
+								tests: "TESTS FAILED",
+								deliveryId: "delivery-1",
+							},
+						})}\n`,
+					);
+				} else {
+					expect(request).toMatchObject({
+						route: "turn-end-ack",
+						deliveryId: "delivery-1",
+					});
+					socket.end(
+						`${JSON.stringify({
+							result: {
+								route: "turn-end-ack",
+								version: WARM_TURN_END_SCHEMA_VERSION,
+								acknowledged: true,
+							},
+						})}\n`,
+					);
+				}
+			});
+		});
+
+		const result = await requestWarmTurnEnd(cwd, 2000);
+		expect(result.available).toBe(true);
+		expect(result.available && result.response.turnEnd).toBe("TURN ADVISORY");
+		expect(received).toEqual({
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			cwd,
+		});
+		removeTempDirSync(cwd);
+	});
+
+	it("does not report delivery success when the receipt acknowledgement times out (#1218)", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-turn-ack-timeout-"));
+		let connections = 0;
+		await listenOnWorkspaceEndpoint(cwd, (socket) => {
+			connections++;
+			socket.setEncoding("utf8");
+			socket.once("data", () => {
+				connections === 1
+					? socket.end(
+							`${JSON.stringify({
+								result: {
+									route: "turn-end",
+									version: WARM_TURN_END_SCHEMA_VERSION,
+									turnEnd: "DURABLE FINDING",
+									deliveryId: "delivery-timeout",
+								},
+							})}\n`,
+						)
+						: undefined;
+				// Never answer the acknowledgement connection: the client deadline
+				// must report timeout while the server retains its delivery.
+			});
+		});
+		await expect(requestWarmTurnEnd(cwd, 20)).resolves.toEqual({
+			available: false,
+			reason: "timeout",
+		});
+		removeTempDirSync(cwd);
+	});
+
+	it("reports ipc-error when no warm server is listening", async () => {
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ipc-turn-none-"),
+		);
+		await expect(requestWarmTurnEnd(cwd, 2000)).resolves.toEqual({
+			available: false,
+			reason: "ipc-error",
+		});
+		removeTempDirSync(cwd);
+	});
+
+	// Old server + new client: the tagged request is blind-cast to an analyze
+	// request, `analyzeFile(undefined, …)` throws, and the reply is `{error}`.
+	// The bin must read that as "no usable warm server", not as a clean turn.
+	it("degrades to ipc-error against a server that predates the route", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-turn-old-"));
+		await listenOnWorkspaceEndpoint(cwd, (socket) => {
+			socket.on("data", () =>
+				socket.end(`${JSON.stringify({ error: "boom" })}\n`),
+			);
+		});
+		await expect(requestWarmTurnEnd(cwd, 2000)).resolves.toEqual({
+			available: false,
+			reason: "ipc-error",
+		});
+		removeTempDirSync(cwd);
+	});
+
+	it("rejects turn-end schema skew", async () => {
+		const cwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ipc-turn-skew-"),
+		);
+		await listenOnWorkspaceEndpoint(cwd, (socket) => {
+			socket.once("data", () =>
+				socket.end(
+					`${JSON.stringify({
+						result: {
+							route: "turn-end",
+							version: WARM_TURN_END_SCHEMA_VERSION + 1,
+						},
+					})}\n`,
+				),
+			);
+		});
+		await expect(requestWarmTurnEnd(cwd, 2000)).resolves.toEqual({
+			available: false,
+			reason: "schema-mismatch",
+		});
 		removeTempDirSync(cwd);
 	});
 });
@@ -365,5 +528,39 @@ describe("createWarmIpcLineReader", () => {
 		const handler = createWarmIpcLineReader((line) => lines.push(line));
 		handler("partial");
 		expect(lines).toHaveLength(0);
+	});
+});
+
+describe("createWarmIpcRequestQueue", () => {
+	it("orders analyze and turn-end work even when the client disconnects", async () => {
+		const queue = createWarmIpcRequestQueue();
+		let releaseAnalyze: (() => void) | undefined;
+		const events: string[] = [];
+		const analyze = queue.enqueue(
+			() =>
+				new Promise<void>((resolve) => {
+					events.push("analyze-start");
+					releaseAnalyze = resolve;
+				}),
+		);
+		const turnEnd = queue.enqueue(async () => {
+			events.push("turn-end");
+		});
+
+		await Promise.resolve();
+		expect(events).toEqual(["analyze-start"]);
+		releaseAnalyze?.();
+		await Promise.all([analyze, turnEnd]);
+		expect(events).toEqual(["analyze-start", "turn-end"]);
+	});
+
+	it("keeps serving requests after a queued operation rejects", async () => {
+		const queue = createWarmIpcRequestQueue();
+		await expect(
+			queue.enqueue(async () => {
+				throw new Error("boom");
+			}),
+		).rejects.toThrow("boom");
+		await expect(queue.enqueue(async () => "next")).resolves.toBe("next");
 	});
 });

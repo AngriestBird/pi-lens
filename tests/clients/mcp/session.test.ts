@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CacheManager } from "../../../clients/cache-manager.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 const handleSessionStart = vi.hoisted(() =>
@@ -58,27 +59,42 @@ vi.mock("../../../clients/runtime-context.js", () => ({
 	consumeTurnEndFindings: vi.fn(() => ({
 		messages: [{ role: "user", content: "TURN ADVISORY" }],
 	})),
+	peekTurnEndFindings: vi.fn(() => ({
+		messages: [{ role: "user", content: "TURN ADVISORY" }],
+	})),
 	consumeTestFindings: vi.fn(() => ({
+		messages: [{ role: "user", content: "TESTS FAILED" }],
+	})),
+	peekTestFindings: vi.fn(() => ({
 		messages: [{ role: "user", content: "TESTS FAILED" }],
 	})),
 }));
 
 import {
 	_resetMcpSessionContext,
+	_resetTurnEndChain,
+	acknowledgeTurnEnd,
 	runSessionStart,
 	runTurnEnd,
+	runTurnEndForIpc,
 } from "../../../clients/mcp/session.js";
 
 let tmpDir: string;
+let previousDataDir: string | undefined;
 
 beforeEach(() => {
+	previousDataDir = process.env.PILENS_DATA_DIR;
 	handleSessionStart.mockClear();
 	handleTurnEnd.mockClear();
 	_resetMcpSessionContext();
+	_resetTurnEndChain();
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-mcp-session-"));
+	process.env.PILENS_DATA_DIR = path.join(tmpDir, "data");
 });
 
 afterEach(() => {
+	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+	else process.env.PILENS_DATA_DIR = previousDataDir;
 	removeTempDirSync(tmpDir);
 });
 
@@ -134,5 +150,73 @@ describe("runTurnEnd", () => {
 		]);
 		expect(outcome.filesRegistered).toBe(0);
 		expect(handleTurnEnd).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps findings available when the Stop client times out (#1218)", async () => {
+		const file = path.join(tmpDir, "timeout.ts");
+		fs.writeFileSync(file, "export const timeout = true;\n");
+		new CacheManager().addModifiedRange(
+			file,
+			{ start: 1, end: 1 },
+			true,
+			tmpDir,
+			"mcp-test",
+			"mcp",
+		);
+
+		const delivery = await runTurnEndForIpc(tmpDir);
+		expect(delivery.outcome.turnEnd).toBe("TURN ADVISORY");
+		expect(delivery.outcome.tests).toBe("TESTS FAILED");
+		expect(delivery.deliveryId).toBeTypeOf("string");
+		// A later Stop receives the same durable delivery rather than running a
+		// second pass or losing findings while the first client was gone.
+		const retry = await runTurnEndForIpc(tmpDir);
+		expect(retry.deliveryId).toBe(delivery.deliveryId);
+		expect(retry.outcome).toEqual(delivery.outcome);
+		expect(acknowledgeTurnEnd(tmpDir, delivery.deliveryId!)).toBe(true);
+	});
+
+	it("commits finding delivery only after the Stop reply is acknowledged", async () => {
+		const delivery = await runTurnEndForIpc(tmpDir);
+		expect(delivery.outcome.turnEnd).toBe("TURN ADVISORY");
+		expect(acknowledgeTurnEnd(tmpDir, delivery.deliveryId!)).toBe(true);
+		expect(acknowledgeTurnEnd(tmpDir, delivery.deliveryId!)).toBe(false);
+	});
+
+	// Two concurrent handleTurnEnds share one RuntimeCoordinator/CacheManager and
+	// race the turn-state clear. The MCP tool and the Stop hook's IPC route both
+	// land here, and a hook killed at Claude Code's timeout leaves the pass running.
+	it("serializes overlapping passes instead of running them concurrently", async () => {
+		let release: (() => void) | undefined;
+		handleTurnEnd.mockImplementationOnce(
+			() =>
+				new Promise<undefined>((resolve) => {
+					release = () => resolve(undefined);
+				}),
+		);
+
+		const first = runTurnEnd(tmpDir);
+		const second = runTurnEnd(tmpDir);
+		await vi.waitFor(() => expect(release).toBeDefined());
+		expect(handleTurnEnd).toHaveBeenCalledTimes(1);
+
+		release?.();
+		await Promise.all([first, second]);
+		expect(handleTurnEnd).toHaveBeenCalledTimes(2);
+	});
+
+	// The chain is a module-level promise every caller links onto, so a thrown
+	// pass must be absorbed before it becomes the next caller's link. Without the
+	// reset, one failed turn_end rejects every later Stop hook with the PREVIOUS
+	// turn's error and never runs the pass at all — a warm server that quietly
+	// stops checking for the rest of the session.
+	it("keeps serving callers after a pass rejects", async () => {
+		handleTurnEnd.mockRejectedValueOnce(new Error("pass blew up"));
+
+		await expect(runTurnEnd(tmpDir)).rejects.toThrow("pass blew up");
+		const outcome = await runTurnEnd(tmpDir);
+
+		expect(handleTurnEnd).toHaveBeenCalledTimes(2);
+		expect(outcome.turnEnd).toBe("TURN ADVISORY");
 	});
 });

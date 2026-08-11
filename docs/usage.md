@@ -141,6 +141,23 @@ second host adapter that calls the same `clients/lens-engine.ts` seam as the pi
 extension. Use `npm run build:dist` after MCP/engine changes so the user-scoped
 server loads fresh compiled code.
 
+Two Claude Code hooks give the MCP mirror the same automatic cadence the pi
+extension has. PostToolUse runs the per-edit pass, `Stop` runs the per-turn one:
+
+```json
+{ "hooks": {
+  "PostToolUse": [
+    { "matcher": "Edit|Write",
+      "hooks": [ { "type": "command", "command": "pi-lens-analyze --hook" } ] } ],
+  "Stop": [
+    { "hooks": [ { "type": "command", "command": "pi-lens-analyze --turn-end", "timeout": 60 } ] } ]
+} }
+```
+
+The `Stop` hook only works against a running MCP server because only that
+process owns the session state and pending turn work. With no warm server the
+turn-end is skipped, not faked: one line on stderr and nothing on stdout.
+
 ## Troubleshooting
 
 - Run `npm run build` before tests after editing TypeScript; tests import

@@ -14,7 +14,10 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { CacheManager } from "../cache-manager.js";
+import {
+	CacheManager,
+	MCP_TURN_STATE_OWNER_ID,
+} from "../cache-manager.js";
 import {
 	CASCADE_GRAPH_KINDS,
 	dispatchLintWithResult,
@@ -204,6 +207,8 @@ export interface AnalyzeFileOptions {
 	 * stays read-only.
 	 */
 	updateGraph?: boolean;
+	/** Explicit MCP writer identity; null must never erase a pi owner. */
+	ownerId?: string;
 }
 
 function toMcpDiagnostic(diagnostic: Diagnostic): McpAnalyzeDiagnostic {
@@ -287,9 +292,16 @@ export async function analyzeFile(
 
 	const reportsBefore = getLatencyReports().length;
 	const start = Date.now();
-	const result = await dispatchLintWithResult(absPath, cwd, host, undefined, undefined, {
-		blockingOnly: options.blockingOnly ?? false,
-	});
+	const result = await dispatchLintWithResult(
+		absPath,
+		cwd,
+		host,
+		undefined,
+		undefined,
+		{
+			blockingOnly: options.blockingOnly ?? false,
+		},
+	);
 	const durationMs = Date.now() - start;
 
 	if (options.record !== false) {
@@ -303,8 +315,8 @@ export async function analyzeFile(
 
 	if (options.registerTurnState) {
 		// Full-file range, importsChanged=true (conservative → dep/knip re-check
-		// broadly). No sessionId — leaving it unset avoids turn_end's stale-session
-		// eviction. Best-effort.
+		// broadly). Clear any stale pi session ID because the MCP Stop route owns
+		// this workspace-scoped worklist independently. Best-effort.
 		try {
 			const lineCount = fs.readFileSync(absPath, "utf8").split("\n").length;
 			new CacheManager().addModifiedRange(
@@ -312,6 +324,8 @@ export async function analyzeFile(
 				{ start: 1, end: lineCount },
 				true,
 				cwd,
+				options.ownerId ?? MCP_TURN_STATE_OWNER_ID,
+				"mcp",
 			);
 		} catch {
 			// unreadable — skip turn-state registration
@@ -388,8 +402,7 @@ export async function analyzeFile(
 	const lsp = lspRunner
 		? {
 				ran:
-					lspRunner.status !== "skipped" &&
-					lspRunner.status !== "when_skipped",
+					lspRunner.status !== "skipped" && lspRunner.status !== "when_skipped",
 				status: lspRunner.status,
 				diagnosticCount: lspRunner.diagnosticCount,
 				durationMs: lspRunner.durationMs,
