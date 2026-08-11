@@ -1489,14 +1489,29 @@ async function restoreProbeCacheLock(
 
 async function releaseProbeCacheLock(token: string): Promise<void> {
 	const quarantinePath = probeCacheLockQuarantinePath(`release-${token}`);
-	try {
-		// Rename is the atomic ownership handoff. A late release cannot recursively
-		// remove a replacement owner that acquired the canonical path after stale
-		// reclamation.
-		await fs.rename(PROBE_CACHE_LOCK_PATH, quarantinePath);
-	} catch {
-		return;
+	let renamed = false;
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try {
+			// Rename is the atomic ownership handoff. A late release cannot recursively
+			// remove a replacement owner that acquired the canonical path after stale
+			// reclamation.
+			await fs.rename(PROBE_CACHE_LOCK_PATH, quarantinePath);
+			renamed = true;
+			break;
+		} catch (error) {
+			// Another releaser or a stale-lock reclaimer may briefly own the canonical
+			// name's quarantine. Retry only that transient absence; never guess that a
+			// different error means this token owns the lock.
+			if (
+				(error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT" ||
+				attempt === 2
+			) {
+				return;
+			}
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
 	}
+	if (!renamed) return;
 	try {
 		const raw = await fs.readFile(
 			path.join(quarantinePath, "owner.json"),
@@ -2195,7 +2210,7 @@ export async function getAllToolStatuses(): Promise<ToolStatus[]> {
 			tool.binaryName || tool.id,
 		);
 		const localPath =
-			process.platform === "win32" ? `${localBase}.cmd` : localBase;
+			installerPlatform() === "win32" ? `${localBase}.cmd` : localBase;
 		try {
 			await fs.access(localPath);
 			if (await verifyToolBinary(localPath)) {
@@ -3295,7 +3310,7 @@ async function installNpmTool(
 		}
 
 		// Resolve the package manager for the tools dir and build install args.
-		const isWindows = process.platform === "win32";
+		const isWindows = installerPlatform() === "win32";
 		const pm = await resolveNodePackageManager(TOOLS_DIR);
 		const testNpmScript =
 			process.env.PI_LENS_TEST_MODE === "1"

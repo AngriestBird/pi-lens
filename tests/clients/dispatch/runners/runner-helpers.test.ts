@@ -10,6 +10,7 @@ import {
 	resolveNodeToolCommand,
 	resolveToolCommand,
 	resolveToolCommandWithInstallFallback,
+	resetDispatchAvailabilityState,
 	resolveVendorToolCommand,
 } from "../../../../clients/dispatch/runners/utils/runner-helpers.ts";
 import type { DispatchContext } from "../../../../clients/dispatch/types.ts";
@@ -96,11 +97,8 @@ describe("runner-helpers availability checker", () => {
 	});
 
 	it("resolves installed command after version check fallback", async () => {
-		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		const installerMod = await import("../../../../clients/installer/index.js");
-		vi.mocked(safeSpawnMod.safeSpawnAsync)
-			.mockResolvedValueOnce({ stdout: "", stderr: "not found", status: 1 })
-			.mockResolvedValueOnce({ stdout: "1.0.0", stderr: "", status: 0 });
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValueOnce(false);
 		vi.mocked(installerMod.ensureTool).mockResolvedValue("stylelint");
 
 		const resolved = await resolveCommandWithInstallFallback(

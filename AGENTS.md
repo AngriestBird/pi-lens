@@ -103,6 +103,11 @@ every future install with a full-timeout wait). The age-based path is a
 deliberate PID-recycle defense specific to installs, which have a known
 bounded duration; it does NOT generalize to the test-suite lock below, whose
 runs have no such bound.
+Probe-cache persistence uses a separate directory lock and read-modify-write
+merge. Stale-lock recovery first renames the lock aside, and release does the
+same token check before deletion, so a late release can never recursively remove
+a replacement owner's lock. Managed npm installs retain the Windows `.cmd`
+shim path; tests use `PI_LENS_TEST_PLATFORM` to exercise that layout on Linux.
 Vitest sets `PI_LENS_DISABLE_TOOL_INSTALL=1` before global setup and workers;
 ordinary tests must remain network/install-free. Real installer integration
 tests must explicitly opt in and use an isolated `PI_LENS_HOME`.

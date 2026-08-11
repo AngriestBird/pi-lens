@@ -23,6 +23,7 @@ vi.mock("node:fs/promises", () => ({
 		mkdir: mockFsMkdir,
 		appendFile: mockFsAppendFile,
 		rm: mockFsRm,
+		rename: mockFsRename,
 	},
 	readFile: mockFsReadFile,
 	access: mockFsAccess,
@@ -228,12 +229,36 @@ describe("updateProbeCache", () => {
 		await updateProbeCache(TOOL_ID, TOOL_PATH);
 		await flushProbeCache();
 		expect(mockWriteFileAtomicAsync).toHaveBeenCalledOnce();
-		console.log("lock mocks", mockFsMkdir.mock.calls, mockFsReadFile.mock.calls, mockFsRename.mock.calls, mockFsRm.mock.calls);
 		expect(mockFsRename).toHaveBeenCalled();
 		expect(mockFsRm).toHaveBeenCalledWith(
 			expect.stringContaining("probe-cache.json.lock.quarantine"),
 			expect.objectContaining({ recursive: true, force: true }),
 		);
+	});
+
+	it("does not remove a replacement owner during a late release", async () => {
+		mockFsReadFile
+			.mockResolvedValueOnce(JSON.stringify({}))
+			.mockResolvedValueOnce(JSON.stringify({}))
+			.mockResolvedValueOnce(
+				JSON.stringify({
+					pid: process.pid,
+					createdAt: Date.now(),
+					token: "replacement-owner",
+				}),
+			);
+		mockFsStat.mockResolvedValue({ mtimeMs: MTIME_MS });
+
+		await updateProbeCache(TOOL_ID, TOOL_PATH);
+		expect(await flushProbeCache()).toBe("written");
+
+		// The release moved the canonical path aside, observed another owner's
+		// token, and restored it. It must not recursively remove that owner.
+		expect(mockFsRm).not.toHaveBeenCalledWith(
+			expect.stringContaining("probe-cache.json.lock.quarantine"),
+			expect.objectContaining({ recursive: true, force: true }),
+		);
+		expect(mockFsRename).toHaveBeenCalledTimes(2);
 	});
 
 	it("does not wait on a busy lock and retries later while the process remains live", async () => {
