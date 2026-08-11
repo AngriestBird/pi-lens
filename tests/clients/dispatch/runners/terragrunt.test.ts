@@ -30,6 +30,8 @@ vi.mock("../../../../clients/dispatch/runners/utils/runner-helpers.js", () => ({
 		isAvailableAsync: async () => toolState.available,
 		getCommand: () => (toolState.available ? command : null),
 	}),
+	resolveAvailableOrInstall: async (_checker: unknown, toolId: string) =>
+		toolState.available ? "terragrunt" : ensureTool(toolId),
 }));
 
 function createCtx(filePath: string, cwd: string) {

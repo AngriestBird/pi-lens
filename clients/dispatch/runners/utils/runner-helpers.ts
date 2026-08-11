@@ -10,7 +10,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { logSessionStart } from "../../../sessionstart-logger.js";
 import { getGlobalPiLensDir } from "../../../file-utils.js";
+import { PathKeyedMap } from "../../../path-keyed-map.js";
+import {
+	normalizeEphemeralMapKey,
+	normalizeMapKey,
+} from "../../../path-utils.js";
 import { ensureTool, isSpawnableCommand } from "../../../installer/index.js";
 import {
 	getServersForFileWithConfig,
@@ -119,10 +125,68 @@ export function createVenvFinder(
 // AVAILABILITY CHECKER FACTORY
 // =============================================================================
 
+type AvailabilityOutcome =
+	| "success"
+	| "missing"
+	| "transient"
+	| "non-installable";
+
 type AvailabilityCache = {
 	available: boolean | null;
 	command: string | null;
+	outcome: AvailabilityOutcome | null;
 };
+
+type InstallAttemptState = {
+	attempts: number;
+	suppressed: boolean;
+};
+
+// This is session-scoped state, not a process-global tool/path cache. The cwd
+// key is normalized by PathKeyedMap and is cleared at session_start. A failed
+// install must not become an install attempt on every eligible file/turn.
+const installAttemptsByCwd = new PathKeyedMap<Map<string, InstallAttemptState>>(
+	normalizeMapKey,
+);
+// Checkers are created by runner modules and may also be created dynamically.
+// Keep the session reset as a generation rather than retaining every checker
+// reset closure forever.
+let availabilityStateGeneration = 0;
+
+function installStateFor(cwd: string, toolId: string): InstallAttemptState {
+	let states = installAttemptsByCwd.get(cwd);
+	if (!states) {
+		states = new Map();
+		installAttemptsByCwd.set(cwd, states);
+	}
+	let state = states.get(toolId);
+	if (!state) {
+		state = { attempts: 0, suppressed: false };
+		states.set(toolId, state);
+	}
+	return state;
+}
+
+function noteInstallFailure(toolId: string, cwd: string): void {
+	const state = installStateFor(cwd, toolId);
+	state.attempts += 1;
+	state.suppressed = true;
+	logSessionStart(
+		`dispatch availability ${toolId}: install attempt ${state.attempts} failed; suppressing retries until the next session or a successful install`,
+	);
+}
+
+function noteInstallSuccess(toolId: string, cwd: string): void {
+	const states = installAttemptsByCwd.get(cwd);
+	states?.delete(toolId);
+	if (states?.size === 0) installAttemptsByCwd.delete(cwd);
+}
+
+/** Reset availability/install suppression at the session boundary. */
+export function resetDispatchAvailabilityState(): void {
+	installAttemptsByCwd.clear();
+	availabilityStateGeneration += 1;
+}
 
 /**
  * Create a cached availability checker for a command.
@@ -141,22 +205,48 @@ export function createAvailabilityChecker(
 ): {
 	isAvailableAsync: (cwd?: string) => Promise<boolean>;
 	getCommand: (cwd?: string) => string | null;
+	getOutcome: (cwd?: string) => AvailabilityOutcome | null;
+	reset: () => void;
 } {
-	const cacheByCwd = new Map<string, AvailabilityCache>();
-	const inFlightByCwd = new Map<string, Promise<boolean>>();
+	const cacheByCwd = new PathKeyedMap<AvailabilityCache>(
+		normalizeEphemeralMapKey,
+	);
+	const inFlightByCwd = new PathKeyedMap<Promise<boolean>>(
+		normalizeEphemeralMapKey,
+	);
+	let checkerGeneration = availabilityStateGeneration;
 
 	const findCommand = createVenvFinder(command, windowsExt, true);
 
+	function ensureCurrentGeneration(): void {
+		if (checkerGeneration === availabilityStateGeneration) return;
+		cacheByCwd.clear();
+		inFlightByCwd.clear();
+		checkerGeneration = availabilityStateGeneration;
+	}
+
+	const reset = (): void => {
+		cacheByCwd.clear();
+		inFlightByCwd.clear();
+		checkerGeneration = availabilityStateGeneration;
+	};
+
 	function getCache(cwd: string): AvailabilityCache {
+		ensureCurrentGeneration();
 		const key = path.resolve(cwd || process.cwd());
 		const existing = cacheByCwd.get(key);
 		if (existing) return existing;
-		const created: AvailabilityCache = { available: null, command: null };
+		const created: AvailabilityCache = {
+			available: null,
+			command: null,
+			outcome: null,
+		};
 		cacheByCwd.set(key, created);
 		return created;
 	}
 
 	async function isAvailableAsync(cwd?: string): Promise<boolean> {
+		ensureCurrentGeneration();
 		const resolvedCwd = cwd || process.cwd();
 		const cache = getCache(resolvedCwd);
 		if (cache.available !== null) return cache.available;
@@ -165,30 +255,82 @@ export function createAvailabilityChecker(
 		const existing = inFlightByCwd.get(key);
 		if (existing) return existing;
 
-		const promise = (async () => {
+		const promiseGeneration = checkerGeneration;
+		let promise: Promise<boolean>;
+		promise = (async () => {
+			// A bad/removed workspace must not be mistaken for a missing tool and
+			// trigger an install. This async probe stays off the synchronous dispatch
+			// burst and makes the failure taxonomy explicit at the seam.
+			try {
+				const cwdStat = await fs.promises.stat(resolvedCwd);
+				if (!cwdStat.isDirectory()) {
+					cache.available = false;
+					cache.outcome = "non-installable";
+					return false;
+				}
+			} catch {
+				cache.available = false;
+				cache.outcome = "non-installable";
+				return false;
+			}
+
 			const cmd = findCommand(resolvedCwd);
 			const result = await safeSpawnAsync(cmd, versionArgs, {
 				timeout: 5000,
 			});
 
-			cache.available = !result.error && result.status === 0;
-			if (cache.available) {
+			if (!result.error && result.status === 0) {
+				cache.available = true;
+				cache.outcome = "success";
 				cache.command = cmd;
+				return true;
 			}
-			return cache.available;
+
+			cache.available = false;
+			const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
+			if (result.failure === "spawn" && errorCode === "ENOENT") {
+				cache.outcome = "missing";
+			} else if (
+				result.failure === "timeout" ||
+				result.failure === "aborted" ||
+				result.failure === "signal" ||
+				errorCode === "EAGAIN" ||
+				errorCode === "EBUSY"
+			) {
+				cache.outcome = "transient";
+			} else {
+				// A present command that rejects its version probe (or an EACCES/
+				// EINVAL/UNKNOWN failure) is not repaired by reinstalling it.
+				cache.outcome = "non-installable";
+			}
+			return false;
 		})().finally(() => {
-			inFlightByCwd.delete(key);
+			// A session reset clears this map and a caller may immediately start a
+			// replacement probe for the same cwd. The old promise must not delete
+			// that newer-generation entry when it settles.
+			if (
+				checkerGeneration === promiseGeneration &&
+				inFlightByCwd.get(key) === promise
+			) {
+				inFlightByCwd.delete(key);
+			}
 		});
 		inFlightByCwd.set(key, promise);
 		return promise;
 	}
 
 	function getCommand(cwd?: string): string | null {
+		ensureCurrentGeneration();
 		const cache = getCache(cwd || process.cwd());
 		return cache.command;
 	}
 
-	return { isAvailableAsync, getCommand };
+	function getOutcome(cwd?: string): AvailabilityOutcome | null {
+		ensureCurrentGeneration();
+		return getCache(cwd || process.cwd()).outcome;
+	}
+
+	return { isAvailableAsync, getCommand, getOutcome, reset };
 }
 
 /**
@@ -287,7 +429,8 @@ async function verifyOrInstallCommand(
 ): Promise<string | null> {
 	// Skip the --version spawn when the command isn't even on disk — the ~μs
 	// stat/PATH walk beats a guaranteed-to-fail spawn round-trip.
-	if (await isSpawnableCommand(command)) {
+	const spawnable = await isSpawnableCommand(command);
+	if (spawnable) {
 		const versionCheck = await safeSpawnAsync(command, versionArgs, {
 			timeout,
 			cwd,
@@ -295,16 +438,21 @@ async function verifyOrInstallCommand(
 		if (!versionCheck.error && versionCheck.status === 0) {
 			return command;
 		}
-	}
-	if (!shouldAutoInstallTool(toolId)) {
+		// A command that was found but rejected its probe is not fixed by a
+		// reinstall. This also covers permissions and malformed shims.
 		return null;
 	}
-	// ensureTool's result is already trusted: a probe-cache hit validated
-	// path+mtime, and a fresh install verified the binary. Re-probing
-	// --version here booted the tool's node shim once per invocation for
-	// zero new information; a broken install now surfaces as the runner's
-	// own spawn error instead of a silent null.
-	return (await ensureTool(toolId)) ?? null;
+	if (!shouldAutoInstallTool(toolId)) return null;
+
+	const state = installStateFor(cwd, toolId);
+	if (state.suppressed) return null;
+	const installed = await ensureTool(toolId);
+	if (installed) {
+		noteInstallSuccess(toolId, cwd);
+		return installed;
+	}
+	noteInstallFailure(toolId, cwd);
+	return null;
 }
 
 export async function resolveCommandArgsWithInstallFallback(
@@ -352,6 +500,8 @@ export async function resolveAvailableOrInstall(
 	checker: {
 		isAvailableAsync: (cwd?: string) => Promise<boolean>;
 		getCommand: (cwd?: string) => string | null;
+		getOutcome?: (cwd?: string) => AvailabilityOutcome | null;
+		reset?: () => void;
 	},
 	toolId: string,
 	cwd: string,
@@ -360,11 +510,24 @@ export async function resolveAvailableOrInstall(
 	if (available) {
 		return checker.getCommand(cwd);
 	}
-	if (!shouldAutoInstallTool(toolId)) {
+	// Only a typed ENOENT/missing-command result is repairable by installing.
+	// Probe failures caused by bad cwd, permissions, rejected flags, aborts, and
+	// timeouts are unavailable/non-installable and must not enter an install loop.
+	if (checker.getOutcome?.(cwd) !== "missing") return null;
+	if (!shouldAutoInstallTool(toolId)) return null;
+
+	const state = installStateFor(cwd, toolId);
+	if (state.suppressed) {
 		return null;
 	}
 	const installed = await ensureTool(toolId);
-	return installed ?? null;
+	if (installed) {
+		noteInstallSuccess(toolId, cwd);
+		checker.reset?.();
+		return installed;
+	}
+	noteInstallFailure(toolId, cwd);
+	return null;
 }
 
 // =============================================================================

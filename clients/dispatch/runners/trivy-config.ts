@@ -47,7 +47,10 @@ import type {
 	RunnerDefinition,
 	RunnerResult,
 } from "../types.js";
-import { createAvailabilityChecker } from "./utils/runner-helpers.js";
+import {
+	createAvailabilityChecker,
+	resolveAvailableOrInstall,
+} from "./utils/runner-helpers.js";
 import { spawnFailedWithNoOutput } from "./utils/spawn-outcome.js";
 
 const trivy = createAvailabilityChecker("trivy", ".exe");
@@ -169,8 +172,7 @@ const trivyConfigRunner: RunnerDefinition = {
 		if (await trivy.isAvailableAsync(cwd)) {
 			cmd = trivy.getCommand(cwd);
 		} else {
-			const { ensureTool } = await import("../../installer/index.js");
-			const managed = await ensureTool("trivy");
+			const managed = await resolveAvailableOrInstall(trivy, "trivy", cwd);
 			if (managed) cmd = managed;
 		}
 		if (!cmd) return { status: "skipped", diagnostics: [], semantic: "none" };
