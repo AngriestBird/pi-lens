@@ -19,6 +19,7 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { writeFileAtomic } from "../atomic-write.js";
 import type { LSPCodeAction, LSPDiagnostic } from "../lsp/client.js";
 import type { McpAnalyzeResult } from "./analyze.js";
 
@@ -420,7 +421,20 @@ export function readTurnEndStatus(cwd: string): TurnEndStatus | undefined {
 	}
 }
 
-/** Append one turn-end outcome from the hook process. Never throws. */
+/**
+ * Append one turn-end outcome from the hook process. Never throws.
+ *
+ * Read-modify-write against a shared per-workspace tmpdir file: two Stop
+ * hooks for the same workspace can race this concurrently (separate
+ * processes, no lock). `writeFileAtomic` only closes the *publication* half
+ * of that — it guarantees this write's own staging+rename can't torn-read
+ * (parse-fail and reset counters) or hit a Windows sharing violation against
+ * a concurrent writer's rename. It does NOT fix the read-modify-write race
+ * itself: two overlapping calls can still both read the same `previous` and
+ * publish from it, silently dropping one increment. That's accepted here —
+ * this is bounded best-effort telemetry (self-heals, errors already
+ * swallowed below), and a lock on this path isn't worth it.
+ */
 export function recordTurnEndOutcome(
 	cwd: string,
 	outcome: { ran: true } | { ran: false; reason: string },
@@ -436,11 +450,7 @@ export function recordTurnEndOutcome(
 					lastSkipReason: outcome.reason,
 					lastSkipAt: now,
 				};
-		fs.writeFileSync(
-			turnEndStatusPathForCwd(cwd),
-			`${JSON.stringify(next)}\n`,
-			"utf8",
-		);
+		writeFileAtomic(turnEndStatusPathForCwd(cwd), `${JSON.stringify(next)}\n`);
 	} catch {
 		// telemetry only — a read-only tmpdir must not break the Stop hook
 	}

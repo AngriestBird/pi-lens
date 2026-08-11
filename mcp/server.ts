@@ -287,12 +287,14 @@ function rejectForeignTurnCwd(route: string, cwd: string): string {
 
 function isWithinServerWorkspace(cwd: string): boolean {
 	const target = path.resolve(cwd);
-	if (target === DEFAULT_CWD) return true;
 	// `path.relative` applies the platform's own path semantics (including
 	// win32 case-insensitivity), which is what "inside the workspace" means
-	// here — do NOT hand-roll a case fold.
+	// here — do NOT hand-roll a case fold. An empty result means `target`
+	// IS `DEFAULT_CWD` (win32 can reach that via a pure case/drive-letter
+	// difference, since path.relative there is case-insensitive) and must
+	// be accepted, not rejected — do NOT reintroduce a `rel !== ""` guard.
 	const rel = path.relative(DEFAULT_CWD, target);
-	return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+	return !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
 function startIpcServer(): void {

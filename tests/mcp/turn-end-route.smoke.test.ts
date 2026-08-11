@@ -80,6 +80,20 @@ function ask(
 	return askLine(endpoint, JSON.stringify(request), timeoutMs);
 }
 
+/**
+ * Flips the case of every letter in a path. On win32 the result names the
+ * exact same directory (`path.relative`/`path.resolve` are case-insensitive
+ * there) while being byte-different from the input — exactly the shape a
+ * Claude Code Stop-hook cwd can take relative to how the server derived
+ * `DEFAULT_CWD`. On POSIX this produces a genuinely different (and normally
+ * nonexistent) path, which is why the assertion built on it is gated to win32.
+ */
+function invertPathCase(p: string): string {
+	return p.replace(/[a-zA-Z]/g, (c) =>
+		c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase(),
+	);
+}
+
 function connects(endpoint: string): Promise<boolean> {
 	return new Promise((resolve) => {
 		const probe = net.createConnection(endpoint);
@@ -251,6 +265,52 @@ describe("warm turn-end IPC route (real spawn)", { retry: 2 }, () => {
 		expect(reply.error).toBeUndefined();
 		expect(reply.result).toMatchObject({ route: "turn-end" });
 	}, 40_000);
+
+	// Re-confirms the exact-same-string root is accepted now that the guard no
+	// longer special-cases it with a `target === DEFAULT_CWD` fast path — every
+	// acceptance (including this one) now flows through the `rel === ""` branch,
+	// on every OS. Runs on Linux CI as a meaningful check of that shared path,
+	// not just a skipped placeholder.
+	it("accepts a turn-end request for the literal workspace-root string", async () => {
+		const reply = await ask(endpoint, {
+			route: "turn-end",
+			version: WARM_TURN_END_SCHEMA_VERSION,
+			cwd: projectDir,
+		});
+
+		expect(reply.error).toBeUndefined();
+		expect(reply.result).toMatchObject({ route: "turn-end" });
+	}, 40_000);
+
+	// #1273 follow-up: on win32, `path.relative` is case-insensitive, so a cwd
+	// that differs from the server's DEFAULT_CWD only in case (drive letter or a
+	// path segment) still resolves to the exact same directory via
+	// `path.relative`, returning "". Claude Code's Stop-hook cwd can legitimately
+	// differ in case from how the server derived DEFAULT_CWD (see
+	// `ipcPathForCwd`/`workspaceHash` in clients/mcp/ipc.ts, which deliberately
+	// lowercases for exactly this reason). The pre-fix guard's `rel !== ""` term
+	// wrongly rejected this case as "outside this server's workspace" even
+	// though it names the literal workspace root — every turn-end at the root
+	// would silently no-op. Gated to win32: POSIX is case-sensitive, so a
+	// case-swapped string names a genuinely different (nonexistent) path there,
+	// and asserting acceptance would be meaningless / actively wrong.
+	it.skipIf(process.platform !== "win32")(
+		"accepts a turn-end request whose cwd differs from the workspace root only in case",
+		async () => {
+			const caseVariantCwd = invertPathCase(projectDir);
+			expect(caseVariantCwd).not.toBe(projectDir);
+
+			const reply = await ask(endpoint, {
+				route: "turn-end",
+				version: WARM_TURN_END_SCHEMA_VERSION,
+				cwd: caseVariantCwd,
+			});
+
+			expect(reply.error).toBeUndefined();
+			expect(reply.result).toMatchObject({ route: "turn-end" });
+		},
+		40_000,
+	);
 
 	it("survives a malformed line and answers the next request", async () => {
 		// Raw, unparseable bytes — not `JSON.stringify("…")`, which would be a
