@@ -156,9 +156,16 @@ function startTurnEndStub(
 	const server = net.createServer((socket) => {
 		sockets.push(socket);
 		socket.setEncoding("utf8");
-		socket.once("data", (chunk: string) => {
-			requests.push(JSON.parse(chunk.trim()));
-			socket.end(`${JSON.stringify({ result: response })}\n`);
+		let replied = false;
+		socket.on("data", (chunk: string) => {
+			const message = JSON.parse(chunk.trim()) as { ack?: boolean };
+			if (!replied) {
+				replied = true;
+				requests.push(message);
+				socket.write(`${JSON.stringify({ result: response })}\n`);
+				return;
+			}
+			if (message.ack === true) socket.end('{"ack":true}\n');
 		});
 	});
 	return new Promise((resolve) =>

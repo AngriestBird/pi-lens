@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CacheManager } from "../../../clients/cache-manager.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 const handleSessionStart = vi.hoisted(() =>
@@ -58,7 +59,13 @@ vi.mock("../../../clients/runtime-context.js", () => ({
 	consumeTurnEndFindings: vi.fn(() => ({
 		messages: [{ role: "user", content: "TURN ADVISORY" }],
 	})),
+	peekTurnEndFindings: vi.fn(() => ({
+		messages: [{ role: "user", content: "TURN ADVISORY" }],
+	})),
 	consumeTestFindings: vi.fn(() => ({
+		messages: [{ role: "user", content: "TESTS FAILED" }],
+	})),
+	peekTestFindings: vi.fn(() => ({
 		messages: [{ role: "user", content: "TESTS FAILED" }],
 	})),
 }));
@@ -68,6 +75,7 @@ import {
 	_resetTurnEndChain,
 	runSessionStart,
 	runTurnEnd,
+	runTurnEndForIpc,
 } from "../../../clients/mcp/session.js";
 
 let tmpDir: string;
@@ -136,6 +144,34 @@ describe("runTurnEnd", () => {
 		]);
 		expect(outcome.filesRegistered).toBe(0);
 		expect(handleTurnEnd).toHaveBeenCalledTimes(1);
+	});
+
+	it("rolls the worklist back when the Stop reply is not acknowledged (#1218)", async () => {
+		const file = path.join(tmpDir, "timeout.ts");
+		fs.writeFileSync(file, "export const timeout = true;\n");
+		new CacheManager().addModifiedRange(
+			file,
+			{ start: 1, end: 1 },
+			true,
+			tmpDir,
+			"mcp-test",
+		);
+
+		const outcome = await runTurnEndForIpc(tmpDir, async () => false);
+		expect(outcome.turnEnd).toBe("TURN ADVISORY");
+		expect(outcome.tests).toBe("TESTS FAILED");
+		expect(new CacheManager().readTurnState(tmpDir).files).toHaveProperty(
+			"timeout.ts",
+		);
+		// The transaction itself was allowed to finish, but delivery state remains
+		// owned by the next authorized Stop rather than being consumed here.
+		expect(outcome.filesRegistered).toBe(0);
+	});
+
+	it("commits finding delivery only after the Stop reply is acknowledged", async () => {
+		const outcome = await runTurnEndForIpc(tmpDir, async () => true);
+		expect(outcome.turnEnd).toBe("TURN ADVISORY");
+		expect(outcome.tests).toBe("TESTS FAILED");
 	});
 
 	// Two concurrent handleTurnEnds share one RuntimeCoordinator/CacheManager and

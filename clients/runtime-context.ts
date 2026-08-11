@@ -5,6 +5,28 @@ import type { TurnEndFindingsCache } from "./git-guard.js";
 export const AUTOMATION_FRAMING =
 	"[pi-lens automated check — not a user request] ";
 
+function turnEndMessage(
+	content: string,
+): { role: "user"; content: string } {
+	return {
+		role: "user",
+		content: `${AUTOMATION_FRAMING}Address 🔴 blockers before continuing; ℹ️ advisories are informational only.\n\n${content}`,
+	};
+}
+
+/** Read a turn-end finding without changing its durable delivery state. */
+export function peekTurnEndFindings(
+	cacheManager: CacheManager,
+	cwd: string,
+): { messages: Array<{ role: "user"; content: string }> } | undefined {
+	const findings = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
+		"turn-end-findings",
+		cwd,
+	);
+	if (!findings?.data?.content || findings.data.consumed === true) return;
+	return { messages: [turnEndMessage(findings.data.content)] };
+}
+
 export function consumeTurnEndFindings(
 	cacheManager: CacheManager,
 	cwd: string,
@@ -31,11 +53,24 @@ export function consumeTurnEndFindings(
 		cacheManager.clearCache("turn-end-findings", cwd);
 	}
 
+	return { messages: [turnEndMessage(findings.data.content)] };
+}
+
+/** Read test findings without consuming them; used by acknowledged IPC delivery. */
+export function peekTestFindings(
+	cacheManager: CacheManager,
+	cwd: string,
+): { messages: Array<{ role: "user"; content: string }> } | undefined {
+	const findings = cacheManager.readCache<{ content: string }>(
+		"test-runner-findings",
+		cwd,
+	);
+	if (!findings?.data?.content) return;
 	return {
 		messages: [
 			{
 				role: "user",
-				content: `${AUTOMATION_FRAMING}Address 🔴 blockers before continuing; ℹ️ advisories are informational only.\n\n${findings.data.content}`,
+				content: `${AUTOMATION_FRAMING}Test failures detected last turn — fix before continuing:\n\n${findings.data.content}`,
 			},
 		],
 	};
@@ -45,26 +80,14 @@ export function consumeTestFindings(
 	cacheManager: CacheManager,
 	cwd: string,
 ): { messages: Array<{ role: "user"; content: string }> } | undefined {
-	const findings = cacheManager.readCache<{ content: string }>(
-		"test-runner-findings",
-		cwd,
-	);
-	if (!findings?.data?.content) return;
-
+	const findings = peekTestFindings(cacheManager, cwd);
+	if (!findings) return;
 	cacheManager.writeCache(
 		"test-runner-findings",
 		null as unknown as { content: string },
 		cwd,
 	);
-
-	return {
-		messages: [
-			{
-				role: "user",
-				content: `${AUTOMATION_FRAMING}Test failures detected last turn — fix before continuing:\n\n${findings.data.content}`,
-			},
-		],
-	};
+	return findings;
 }
 
 export function consumeSessionStartGuidance(

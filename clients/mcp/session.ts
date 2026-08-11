@@ -29,6 +29,8 @@ import {
 	consumeSessionStartGuidance,
 	consumeTestFindings,
 	consumeTurnEndFindings,
+	peekTestFindings,
+	peekTurnEndFindings,
 } from "../runtime-context.js";
 import { RuntimeCoordinator } from "../runtime-coordinator.js";
 import { handleSessionStart } from "../runtime-session.js";
@@ -143,6 +145,80 @@ export interface TurnEndOutcome {
 	filesRegistered: number;
 }
 
+export type TurnEndAck = (outcome: TurnEndOutcome) => Promise<boolean>;
+
+interface TurnEndTransaction {
+	outcome: TurnEndOutcome;
+	commit: () => void;
+	rollback: () => void;
+}
+
+const TURN_END_QUEUE_WAIT_MS = 5_000;
+
+interface QueueItem<T> {
+	work: () => Promise<T>;
+	resolve: (value: T) => void;
+	reject: (error: unknown) => void;
+	timer: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * A bounded, cancellable serial queue. A turn_end mutates shared runtime and
+ * cache state, so concurrent passes are unsafe; a disconnected/hung pass must
+ * nevertheless not accumulate an unbounded tail of Stop requests.
+ */
+class TurnEndQueue {
+	private running = false;
+	private pending: QueueItem<unknown>[] = [];
+
+	enqueue<T>(work: () => Promise<T>, waitMs = TURN_END_QUEUE_WAIT_MS): Promise<T> {
+		if (this.pending.length >= 1) {
+			return Promise.reject(new Error("turn_end queue is busy"));
+		}
+		return new Promise<T>((resolve, reject) => {
+			const item: QueueItem<T> = {
+				work,
+				resolve,
+				reject,
+				timer: setTimeout(() => {
+					const index = this.pending.indexOf(item as QueueItem<unknown>);
+					if (index === -1) return;
+					this.pending.splice(index, 1);
+					reject(new Error("turn_end queue wait timed out"));
+				}, waitMs),
+			};
+			item.timer.unref();
+			this.pending.push(item as QueueItem<unknown>);
+			this.drain();
+		});
+	}
+
+	private drain(): void {
+		if (this.running) return;
+		const item = this.pending.shift();
+		if (!item) return;
+		clearTimeout(item.timer);
+		this.running = true;
+		void item
+			.work()
+			.then(item.resolve, item.reject)
+			.finally(() => {
+				this.running = false;
+				this.drain();
+			});
+	}
+
+	reset(): void {
+		for (const item of this.pending.splice(0)) {
+			clearTimeout(item.timer);
+			item.reject(new Error("turn_end queue reset"));
+		}
+		this.running = false;
+	}
+}
+
+const turnEndQueue = new TurnEndQueue();
+
 /**
  * Run pi-lens's real turn_end over the files edited this "turn". The handler
  * reads edited files from turn-state, so we register the caller-supplied files
@@ -151,7 +227,8 @@ export interface TurnEndOutcome {
 async function runTurnEndNow(
 	cwd: string,
 	files: string[] = [],
-): Promise<TurnEndOutcome> {
+	deferredDelivery = false,
+): Promise<TurnEndTransaction> {
 	const ctx = await getMcpSessionContext();
 	const host = createMcpHost(undefined, cwd);
 
@@ -174,6 +251,11 @@ async function runTurnEndNow(
 		registered++;
 	}
 
+	// Capture the complete worklist AFTER explicit files have been registered.
+	// handleTurnEnd clears it before the IPC reply is acknowledged; rollback
+	// restores this snapshot if the Stop client times out or disconnects.
+	const priorTurnState = ctx.cacheManager.readTurnState(cwd);
+
 	await handleTurnEnd({
 		ctxCwd: cwd,
 		getFlag: host.getFlag,
@@ -188,32 +270,64 @@ async function runTurnEndNow(
 		resetFormatService,
 	});
 
+	const outcome: TurnEndOutcome = deferredDelivery
+		? {
+			turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd)),
+			tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd)),
+			filesRegistered: registered,
+		}
+		: {
+			turnEnd: joinMessages(consumeTurnEndFindings(ctx.cacheManager, cwd)),
+			tests: joinMessages(consumeTestFindings(ctx.cacheManager, cwd)),
+			filesRegistered: registered,
+		};
+
 	return {
-		turnEnd: joinMessages(consumeTurnEndFindings(ctx.cacheManager, cwd)),
-		tests: joinMessages(consumeTestFindings(ctx.cacheManager, cwd)),
-		filesRegistered: registered,
+		outcome,
+		commit: () => {
+			if (!deferredDelivery) return;
+			consumeTurnEndFindings(ctx.cacheManager, cwd);
+			consumeTestFindings(ctx.cacheManager, cwd);
+		},
+		rollback: () => {
+			if (!deferredDelivery) return;
+			ctx.cacheManager.restoreTurnStateFiles(cwd, priorTurnState);
+		},
 	};
 }
 
-let turnEndChain: Promise<unknown> = Promise.resolve();
-
 /**
- * Serialized entry point for every turn-end caller (the MCP tool and the Stop
- * hook's IPC route). Chained, not coalesced — each caller's `files` list still
- * gets registered. A Stop hook killed at Claude Code's timeout leaves the pass
- * running here, and two concurrent `handleTurnEnd`s share one
- * RuntimeCoordinator/CacheManager and race the turn-state clear.
+ * Run a normal MCP turn_end. Its caller owns the tool response, so the
+ * historical consume-on-return behavior remains unchanged.
  */
 export function runTurnEnd(
 	cwd: string,
 	files: string[] = [],
 ): Promise<TurnEndOutcome> {
-	const next = turnEndChain.then(() => runTurnEndNow(cwd, files));
-	turnEndChain = next.catch(() => undefined);
-	return next;
+	return turnEndQueue.enqueue(async () =>
+		(await runTurnEndNow(cwd, files)).outcome,
+	);
 }
 
-/** Test hook — drop a pending chain so one stuck test can't wedge the rest. */
+/**
+ * Run the Stop-hook pass as a delivery transaction. The callback must write the
+ * reply and wait for an acknowledgement. A timeout/connection close rolls the
+ * worklist back and leaves finding caches unconsumed for a later Stop.
+ */
+export function runTurnEndForIpc(
+	cwd: string,
+	waitForAck: TurnEndAck,
+): Promise<TurnEndOutcome> {
+	return turnEndQueue.enqueue(async () => {
+		const transaction = await runTurnEndNow(cwd, [], true);
+		const acknowledged = await waitForAck(transaction.outcome);
+		if (acknowledged) transaction.commit();
+		else transaction.rollback();
+		return transaction.outcome;
+	});
+}
+
+/** Test hook — drop pending requests so one failed test cannot wedge the rest. */
 export function _resetTurnEndChain(): void {
-	turnEndChain = Promise.resolve();
+	turnEndQueue.reset();
 }

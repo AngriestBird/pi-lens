@@ -347,6 +347,44 @@ export class CacheManager {
 	}
 
 	/**
+	 * Restore the worklist that a turn-end pass was not able to deliver.
+	 *
+	 * The pass may have cleared the state before an IPC client disconnected. Merge
+	 * rather than replace so an edit observed while the pass was running is not
+	 * lost. Findings remain in their durable caches and can be delivered later.
+	 */
+	restoreTurnStateFiles(cwd: string, prior: TurnState): void {
+		const current = this.readTurnState(cwd);
+		const files = { ...current.files };
+		for (const [filePath, previous] of Object.entries(prior.files)) {
+			const existing = files[filePath];
+			if (!existing) {
+				files[filePath] = {
+					modifiedRanges: previous.modifiedRanges.map((range) => ({ ...range })),
+					importsChanged: previous.importsChanged,
+					lastEdit: previous.lastEdit,
+				};
+				continue;
+			}
+			existing.modifiedRanges = this.mergeRanges([
+				...existing.modifiedRanges,
+				...previous.modifiedRanges,
+			]);
+			existing.importsChanged ||= previous.importsChanged;
+		}
+		this.writeTurnState(
+			{
+				...current,
+				files,
+				turnCycles: prior.turnCycles,
+				maxCycles: prior.maxCycles,
+				sessionId: prior.sessionId,
+			},
+			cwd,
+		);
+	}
+
+	/**
 	 * Clear turn state (after turn_end processes it).
 	 */
 	clearTurnState(cwd: string): void {

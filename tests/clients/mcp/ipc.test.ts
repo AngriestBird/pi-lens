@@ -355,7 +355,7 @@ describe("requestWarmTurnEnd", () => {
 			socket.setEncoding("utf8");
 			socket.once("data", (chunk: string) => {
 				received = JSON.parse(chunk.trim());
-				socket.end(
+				socket.write(
 					`${JSON.stringify({
 						result: {
 							route: "turn-end",
@@ -365,6 +365,10 @@ describe("requestWarmTurnEnd", () => {
 						},
 					})}\n`,
 				);
+				socket.once("data", (ack: string) => {
+					expect(JSON.parse(ack.trim())).toEqual({ ack: true });
+					socket.end('{"ack":true}\n');
+				});
 			});
 		});
 
@@ -375,6 +379,30 @@ describe("requestWarmTurnEnd", () => {
 			route: "turn-end",
 			version: WARM_TURN_END_SCHEMA_VERSION,
 			cwd,
+		});
+		removeTempDirSync(cwd);
+	});
+
+	it("does not report delivery success when the receipt acknowledgement times out (#1218)", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ipc-turn-ack-timeout-"));
+		await listenOnWorkspaceEndpoint(cwd, (socket) => {
+			socket.setEncoding("utf8");
+			socket.once("data", () => {
+				socket.write(
+					`${JSON.stringify({
+						result: {
+							route: "turn-end",
+							version: WARM_TURN_END_SCHEMA_VERSION,
+							turnEnd: "DURABLE FINDING",
+						},
+					})}\n`,
+				);
+				// Never acknowledge: the server-side transaction must roll back.
+			});
+		});
+		await expect(requestWarmTurnEnd(cwd, 20)).resolves.toEqual({
+			available: false,
+			reason: "timeout",
 		});
 		removeTempDirSync(cwd);
 	});
