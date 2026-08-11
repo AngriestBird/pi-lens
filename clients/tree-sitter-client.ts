@@ -1376,6 +1376,27 @@ export class TreeSitterClient {
 		);
 	}
 
+	/** Collect names introduced by a parameter binding pattern. */
+	private bindingNames(node: TreeSitterNode | undefined): Set<string> {
+		const names = new Set<string>();
+		if (!node) return names;
+		const stack: TreeSitterNode[] = [node];
+		while (stack.length > 0) {
+			const current = stack.pop()!;
+			if (current.type === "identifier") names.add(current.text);
+			else if (current.type === "shorthand_property_identifier_pattern") {
+				names.add(current.text);
+			}
+			if (
+				current.type === "property_identifier" ||
+				current.type === "type_identifier"
+			)
+				continue;
+			stack.push(...(current.children ?? []));
+		}
+		return names;
+	}
+
 	private containsYieldInFunctionBody(
 		node: TreeSitterNode,
 		root: TreeSitterNode = node,
@@ -2476,11 +2497,11 @@ export class TreeSitterClient {
 				return !this.bodyHasLoopExit(bodyNode, false);
 			}
 			case "same_param_name": {
-				// duplicate-function-arg: keep the pair only when the two captured
-				// parameter identifiers share the same name.
-				const first = captures.PARAM1?.text;
-				const second = captures.NAME?.text;
-				return !!first && first === second;
+				// duplicate-function-arg: keep the pair when the captured binding
+				// patterns share any name.
+				const first = this.bindingNames(captures.PARAM1);
+				const second = this.bindingNames(captures.NAME);
+				return [...first].some((name) => second.has(name));
 			}
 			case "no_terminating_statement": {
 				// switch-case-termination: keep a non-empty case (already known to be
@@ -2598,12 +2619,7 @@ export class TreeSitterClient {
 				const hasExceptionSpec = clauseNode.children.some((c: any) => {
 					if (!c.isNamed) return false;
 					return (
-						c.type === "identifier" ||
-						c.type === "attribute" ||
-						c.type === "tuple" ||
-						c.type === "as_pattern" ||
-						c.type === "parenthesized_expression" ||
-						c.type === "subscript"
+						c.type !== "block"
 					);
 				});
 				// Fire ONLY when bare (no exception spec)

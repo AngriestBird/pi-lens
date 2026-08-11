@@ -211,6 +211,58 @@ describe("duplicate-function-arg (TS)", () => {
 			),
 		).toBeGreaterThan(0);
 	});
+
+	it("matches a duplicate rest parameter", async () => {
+		expect(
+			await count(
+				"duplicate-function-arg",
+				"ts",
+				"typescript",
+				`function f(a, ...a) { return a; }`,
+			),
+		).toBeGreaterThan(0);
+	});
+
+	it("matches duplicate names in destructured patterns", async () => {
+		expect(
+			await count(
+				"duplicate-function-arg",
+				"ts",
+				"typescript",
+				`function f({ a }, [b, a]) { return a + b; }`,
+			),
+		).toBeGreaterThan(0);
+	});
+
+	it("does not treat an annotation reference as a duplicate binding", async () => {
+		expect(
+			await count(
+				"duplicate-function-arg",
+				"ts",
+				"typescript",
+				`function f(a: T, b: typeof a) { return b; }`,
+			),
+		).toBe(0);
+	});
+
+	it("covers arrow parameters without treating defaults as bindings", async () => {
+		expect(
+			await count(
+				"duplicate-function-arg",
+				"ts",
+				"typescript",
+				`const f = (a, ...a) => a;`,
+			),
+		).toBeGreaterThan(0);
+		expect(
+			await count(
+				"duplicate-function-arg",
+				"ts",
+				"typescript",
+				`function outer(a, b = (() => a)) { return b; }`,
+			),
+		).toBe(0);
+	});
 });
 
 describe("mixed-async-styles (TS)", () => {

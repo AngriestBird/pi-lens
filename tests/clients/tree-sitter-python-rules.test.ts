@@ -100,6 +100,24 @@ describe("python tree-sitter rules", () => {
 
 			expect(matches).toHaveLength(0);
 		});
+
+		it.each([
+			["tuple", "except (ValueError, KeyError):"],
+			["qualified", "except pkg.mod.Error:"],
+			["alias", "except ValueError as error:"],
+			["union", "except ValueError | TypeError:"],
+			["subscript", "except cache[key]:"],
+			["trailing comma", "except (ValueError,):"],
+			["exception group", "except* ValueError:"],
+		])("does not flag %s exception specs", async (_label, clause) => {
+			const client = getSharedTreeSitterClient()!;
+			const query = await getQuery("bare-except");
+			const filePath = writeTempFile(`try:\n    risky()\n${clause}\n    pass\n`);
+
+			const matches = await client.runQueryOnFile(query, filePath, "python");
+
+			expect(matches).toHaveLength(0);
+		});
 	});
 
 	describe("in-operator-unsupported (refs #884)", () => {
