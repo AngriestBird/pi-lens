@@ -47,12 +47,26 @@ export interface TurnFileState {
 	lastEdit: string; // ISO timestamp
 }
 
+export type TurnStateOwnerKind = "pi" | "mcp";
+
+export interface TurnStateOwner {
+	kind: TurnStateOwnerKind;
+	id: string;
+	pid: number;
+	lastSeen: string;
+}
+
+export type TurnStateAccess = "owned" | "available" | "foreign-live";
+
 export interface TurnState {
 	files: Record<string, TurnFileState>;
 	turnCycles: number;
 	maxCycles: number;
 	lastUpdated: string;
+	/** Legacy session id retained for old consumers and persisted snapshots. */
 	sessionId?: string;
+	/** Explicit writer identity; unlike sessionId this distinguishes pi/MCP. */
+	owner?: TurnStateOwner;
 }
 
 // --- Defaults ---
@@ -64,6 +78,9 @@ const DEFAULT_TURN_STATE: TurnState = {
 	maxCycles: 3,
 	lastUpdated: "",
 };
+
+export const MCP_TURN_STATE_OWNER_ID = `mcp-${process.pid}`;
+const TURN_OWNER_STALE_MS = 30 * 60 * 1000;
 
 // --- Helpers ---
 
@@ -309,9 +326,45 @@ export class CacheManager {
 		fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
 	}
 
+	/** Return whether a writer may read/write this workspace worklist. */
+	getTurnStateAccess(
+		cwd: string,
+		owner: Pick<TurnStateOwner, "kind" | "id">,
+	): TurnStateAccess {
+		const state = this.readTurnState(cwd);
+		if (!state.owner) {
+			if (!state.sessionId || state.sessionId === owner.id) return "owned";
+			// Pre-owner files have no liveness information. Preserve the existing
+			// stale-session eviction behavior for this legacy shape.
+			return "available";
+		}
+		if (
+			state.owner.kind === owner.kind &&
+			state.owner.id === owner.id
+		) {
+			return "owned";
+		}
+		return this.isTurnStateOwnerStale(state.owner) ? "available" : "foreign-live";
+	}
+
+	private isTurnStateOwnerStale(owner: TurnStateOwner): boolean {
+		if (owner.pid > 0 && owner.pid !== process.pid) {
+			try {
+				process.kill(owner.pid, 0);
+				return false;
+			} catch {
+				return true;
+			}
+		}
+		const lastSeen = Date.parse(owner.lastSeen);
+		return !Number.isFinite(lastSeen) || Date.now() - lastSeen > TURN_OWNER_STALE_MS;
+	}
+
 	/**
 	 * Add or update a file's modified ranges in turn state.
-	 * Merges overlapping ranges.
+	 * Merges overlapping ranges. `sessionId:null` deliberately preserves the
+	 * current owner; callers must provide an explicit owner id to claim a stale
+	 * worklist.
 	 */
 	addModifiedRange(
 		filePath: string,
@@ -319,10 +372,20 @@ export class CacheManager {
 		importsChanged: boolean,
 		cwd: string,
 		sessionId?: string | null,
+		ownerKind: TurnStateOwnerKind = "pi",
 	): TurnState {
 		const state = this.readTurnState(cwd);
-		if (sessionId === null) state.sessionId = undefined;
-		else if (sessionId) state.sessionId = sessionId;
+		if (sessionId) {
+			const owner: TurnStateOwner = {
+				kind: ownerKind,
+				id: sessionId,
+				pid: process.pid,
+				lastSeen: new Date().toISOString(),
+			};
+			if (this.getTurnStateAccess(cwd, owner) === "foreign-live") return state;
+			state.sessionId = sessionId;
+			state.owner = owner;
+		}
 		const normalizedPath = this.toTurnStateKey(filePath, cwd);
 
 		const existing = state.files[normalizedPath];

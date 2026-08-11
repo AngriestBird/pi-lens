@@ -155,6 +155,7 @@ describe("runTurnEnd", () => {
 			true,
 			tmpDir,
 			"mcp-test",
+			"mcp",
 		);
 
 		const outcome = await runTurnEndForIpc(tmpDir, async () => false);

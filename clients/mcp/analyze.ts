@@ -14,7 +14,10 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { CacheManager } from "../cache-manager.js";
+import {
+	CacheManager,
+	MCP_TURN_STATE_OWNER_ID,
+} from "../cache-manager.js";
 import {
 	CASCADE_GRAPH_KINDS,
 	dispatchLintWithResult,
@@ -204,6 +207,8 @@ export interface AnalyzeFileOptions {
 	 * stays read-only.
 	 */
 	updateGraph?: boolean;
+	/** Explicit MCP writer identity; null must never erase a pi owner. */
+	ownerId?: string;
 }
 
 function toMcpDiagnostic(diagnostic: Diagnostic): McpAnalyzeDiagnostic {
@@ -319,7 +324,8 @@ export async function analyzeFile(
 				{ start: 1, end: lineCount },
 				true,
 				cwd,
-				null,
+				options.ownerId ?? MCP_TURN_STATE_OWNER_ID,
+				"mcp",
 			);
 		} catch {
 			// unreadable — skip turn-state registration

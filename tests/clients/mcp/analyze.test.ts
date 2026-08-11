@@ -328,7 +328,7 @@ describe("analyzeFile", () => {
 		expect(Object.keys(turnState.files).length).toBe(1);
 	});
 
-	it("clears a stale pi session ID when registering MCP turn-state", async () => {
+	it("claims a stale pi worklist with an explicit MCP owner without null-erasing it", async () => {
 		const cache = new CacheManager();
 		cache.addModifiedRange(
 			tsFile,
@@ -337,11 +337,29 @@ describe("analyzeFile", () => {
 			tmpDir,
 			"stale-pi-session",
 		);
+		const stale = cache.readTurnState(tmpDir);
+		stale.owner!.lastSeen = new Date(Date.now() - 31 * 60_000).toISOString();
+		cache.writeTurnState(stale, tmpDir);
 		vi.mocked(dispatchForFile).mockResolvedValue(emptyResult);
 
 		await analyzeFile(tsFile, tmpDir, { registerTurnState: true });
 
-		expect(cache.readTurnState(tmpDir).sessionId).toBeUndefined();
+		const state = cache.readTurnState(tmpDir);
+		expect(state.sessionId).toMatch(/^mcp-/);
+		expect(state.owner).toMatchObject({ kind: "mcp" });
+	});
+
+	it("does not let a live foreign MCP owner consume or extend the worklist (#1262)", () => {
+		const cache = new CacheManager();
+		const first = path.join(tmpDir, "first.ts");
+		const second = path.join(tmpDir, "second.ts");
+		fs.writeFileSync(first, "export const first = 1;\n");
+		fs.writeFileSync(second, "export const second = 2;\n");
+		cache.addModifiedRange(first, { start: 1, end: 1 }, false, tmpDir, "mcp-live-a", "mcp");
+		cache.addModifiedRange(second, { start: 1, end: 1 }, false, tmpDir, "mcp-live-b", "mcp");
+		const state = cache.readTurnState(tmpDir);
+		expect(Object.keys(state.files)).toEqual(["first.ts"]);
+		expect(cache.getTurnStateAccess(tmpDir, { kind: "mcp", id: "mcp-live-b" })).toBe("foreign-live");
 	});
 
 	it("leaves turn-state untouched by default (#A)", async () => {

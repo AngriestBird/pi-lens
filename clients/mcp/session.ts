@@ -21,7 +21,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { AstGrepClient } from "../ast-grep-client.js";
 import { type BootstrapClients, loadBootstrapClients } from "../bootstrap.js";
-import { CacheManager } from "../cache-manager.js";
+import {
+	CacheManager,
+	MCP_TURN_STATE_OWNER_ID,
+	type TurnStateOwner,
+} from "../cache-manager.js";
 import { resetDispatchBaselines } from "../dispatch/integration.js";
 import { resetFormatService } from "../format-service.js";
 import { getLSPService, resetLSPService } from "../lsp/index.js";
@@ -246,7 +250,8 @@ async function runTurnEndNow(
 			{ start: 1, end: lineCount },
 			true,
 			cwd,
-			ctx.runtime.telemetrySessionId,
+			MCP_TURN_STATE_OWNER_ID,
+			"mcp",
 		);
 		registered++;
 	}
@@ -255,6 +260,12 @@ async function runTurnEndNow(
 	// handleTurnEnd clears it before the IPC reply is acknowledged; rollback
 	// restores this snapshot if the Stop client times out or disconnects.
 	const priorTurnState = ctx.cacheManager.readTurnState(cwd);
+	const owner: TurnStateOwner = {
+		kind: "mcp",
+		id: MCP_TURN_STATE_OWNER_ID,
+		pid: process.pid,
+		lastSeen: new Date().toISOString(),
+	};
 
 	await handleTurnEnd({
 		ctxCwd: cwd,
@@ -266,6 +277,7 @@ async function runTurnEndNow(
 		deadCodeClients: ctx.clients.deadCodeClients,
 		depChecker: ctx.clients.depChecker,
 		testRunnerClient: ctx.clients.testRunnerClient,
+		owner,
 		resetLSPService,
 		resetFormatService,
 	});
