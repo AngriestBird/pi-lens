@@ -17,7 +17,12 @@ import {
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 } from "../../../path-utils.js";
-import { ensureTool, isSpawnableCommand } from "../../../installer/index.js";
+import {
+	ensureTool,
+	evictBareCommandAvailabilityMemo,
+	isSpawnableCommand,
+	resetBareCommandAvailabilityMemo,
+} from "../../../installer/index.js";
 import {
 	getServersForFileWithConfig,
 	isServerDisabled,
@@ -194,6 +199,7 @@ function noteInstallSuccess(toolId: string, cwd: string): void {
 export function resetDispatchAvailabilityState(): void {
 	installAttemptsByCwd.clear();
 	resolveInstallInFlightByCwd.clear();
+	resetBareCommandAvailabilityMemo();
 	availabilityStateGeneration += 1;
 }
 
@@ -315,6 +321,7 @@ export function createAvailabilityChecker(
 			cache.available = false;
 			const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
 			if (result.failure === "spawn" && errorCode === "ENOENT") {
+				evictBareCommandAvailabilityMemo(cmd);
 				cache.outcome = "missing";
 			} else if (
 				result.failure === "timeout" ||

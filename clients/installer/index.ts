@@ -1910,6 +1910,7 @@ export function resetProbeCacheStateForTesting(): void {
 	ensureInFlight.clear();
 	installFailureReasons.clear();
 	lastManagedInstallVersion.clear();
+	bareCommandAvailabilityMemo.clear();
 	if (_probeCacheFlushTimer !== null) {
 		clearTimeout(_probeCacheFlushTimer);
 		_probeCacheFlushTimer = null;
@@ -1917,6 +1918,36 @@ export function resetProbeCacheStateForTesting(): void {
 }
 
 // --- Check Functions ---
+
+const bareCommandAvailabilityMemo = new Map<string, boolean>();
+
+function hashPathEnv(pathEnv: string): string {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < pathEnv.length; i += 1) {
+		hash ^= pathEnv.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return (hash >>> 0).toString(16);
+}
+
+function bareCommandAvailabilityKey(command: string, pathEnv: string): string {
+	return `${command}\0${hashPathEnv(pathEnv)}`;
+}
+
+/** Clear bare-command PATH verdicts at the session-generation boundary. */
+export function resetBareCommandAvailabilityMemo(): void {
+	bareCommandAvailabilityMemo.clear();
+}
+
+/** Evict a command after an actual spawn reports ENOENT. */
+export function evictBareCommandAvailabilityMemo(command: string): void {
+	if (/[\\/]/.test(command)) return;
+	const pathEnv =
+		process.env.PATH || process.env.Path || process.env.path || "";
+	bareCommandAvailabilityMemo.delete(
+		bareCommandAvailabilityKey(command, pathEnv),
+	);
+}
 
 /**
  * Check if a command is available in PATH by walking PATH entries and
@@ -1931,6 +1962,9 @@ export async function isCommandAvailable(
 	const isWindows = installerPlatform() === "win32";
 	const pathEnv =
 		process.env.PATH || process.env.Path || process.env.path || "";
+	const memoKey = bareCommandAvailabilityKey(command, pathEnv);
+	const memoized = bareCommandAvailabilityMemo.get(memoKey);
+	if (memoized !== undefined) return memoized;
 	const dirs = pathEnv.split(path.delimiter);
 
 	// On Windows, probe .exe, .cmd, and .bat extensions in addition to bare name.
@@ -1947,6 +1981,7 @@ export async function isCommandAvailable(
 				const stat = statSync(candidate);
 				// isFile() returns false for broken symlinks (target missing)
 				if (stat.isFile() && stat.size > 0) {
+					bareCommandAvailabilityMemo.set(memoKey, true);
 					return true;
 				}
 			} catch {
@@ -1955,6 +1990,7 @@ export async function isCommandAvailable(
 		}
 	}
 
+	bareCommandAvailabilityMemo.set(memoKey, false);
 	return false;
 }
 
