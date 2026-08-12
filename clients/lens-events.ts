@@ -89,12 +89,25 @@ function normalizeDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
 	return diagnostics.map(normalizeDiagnostic);
 }
 
+// Dropped-emit observability (#1128 review): drops are legitimate (no bus
+// during startup/replacement windows) but must not be invisible. One line per
+// process — enough to notice a permanently-missing bus without spamming.
+let _droppedEmitLogged = false;
+
 function emitLensEvent(eventName: LensEventName, payload: unknown): void {
 	setImmediate(() => {
 		try {
 			const bus = lensEventBusGetter?.() ?? lensEventBus;
 			const emit = bus?.emit;
-			if (!emit) return;
+			if (!emit) {
+				if (!_droppedEmitLogged) {
+					_droppedEmitLogged = true;
+					console.error(
+						`[pi-lens] lens event dropped (no live bus): ${eventName} — further drops logged once per process`,
+					);
+				}
+				return;
+			}
 			emit.call(bus, eventName, payload);
 		} catch {
 			// Inter-extension events are observational. A listener must never break
