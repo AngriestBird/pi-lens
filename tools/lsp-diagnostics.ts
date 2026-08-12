@@ -323,18 +323,34 @@ function projectIgnorePredicate(
 	}
 }
 
-function collectFiles(
+/**
+ * #1137: async so a directory read never blocks the event loop (and pi's TUI).
+ *
+ * This walk was fully synchronous with NO yielding of any kind, bounded only by
+ * `maxFiles` *kept* — an ignored-heavy or cloud-backed (OneDrive/network) tree
+ * could traverse unboundedly many entries, and a single stalled `readdirSync`
+ * held the loop for the whole stall. It is also called once PER LANGUAGE in
+ * `runDirectoryDiagnostics`'s `LANG_EXTENSIONS` loop, so a directory-mode
+ * `lsp_diagnostics` could pay that cost several times over.
+ *
+ * The traversal is deliberately still **depth-first with immediate descent**
+ * (not the shared stack-based `walkTreeStackAsync`): the `maxFiles` cap makes
+ * traversal ORDER observable — a stack walk would keep a different subset of
+ * files on an over-large tree. Only scheduling changes here; the returned list
+ * is identical. Awaiting each directory read is itself the yield point.
+ */
+async function collectFiles(
 	dir: string,
 	extensions: string[],
 	maxFiles: number,
 	isIgnored: (fullPath: string, isDir: boolean) => boolean = () => false,
-): string[] {
+): Promise<string[]> {
 	const files: string[] = [];
-	function walk(current: string): void {
+	async function walk(current: string): Promise<void> {
 		if (files.length >= maxFiles) return;
 		let entries: fs.Dirent[];
 		try {
-			entries = fs.readdirSync(current, { withFileTypes: true });
+			entries = await fs.promises.readdir(current, { withFileTypes: true });
 		} catch {
 			return;
 		}
@@ -343,14 +359,15 @@ function collectFiles(
 			if (entry.isSymbolicLink()) continue;
 			const full = path.join(current, entry.name);
 			if (entry.isDirectory()) {
-				if (!isExcludedDirName(entry.name) && !isIgnored(full, true)) walk(full);
+				if (!isExcludedDirName(entry.name) && !isIgnored(full, true))
+					await walk(full);
 			} else if (entry.isFile() && extensions.includes(path.extname(full))) {
 				if (isIgnored(full, false)) continue;
 				files.push(full);
 			}
 		}
 	}
-	walk(dir);
+	await walk(dir);
 	return files;
 }
 
@@ -1670,7 +1687,7 @@ async function runDirectoryDiagnostics(
 
 	const isIgnored = projectIgnorePredicate(absPath);
 	for (const [ext, exts] of Object.entries(LANG_EXTENSIONS)) {
-		collectedFiles = collectFiles(absPath, exts, MAX_FILES + 1, isIgnored);
+		collectedFiles = await collectFiles(absPath, exts, MAX_FILES + 1, isIgnored);
 		if (collectedFiles.length > 0) {
 			extension = ext;
 			break;
