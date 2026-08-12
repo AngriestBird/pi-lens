@@ -62,19 +62,19 @@ describe("tool-policy", () => {
 		expect(getSmartDefaultFormatterName("/tmp/file.less")).toBe("prettier");
 		expect(getSmartDefaultFormatterName("/tmp/file.html")).toBe("prettier");
 		expect(getSmartDefaultFormatterName("/tmp/file.yaml")).toBe("prettier");
-		expect(getSmartDefaultFormatterName("/tmp/file.kt")).toBe("ktlint");
-		expect(getSmartDefaultFormatterName("/tmp/file.swift")).toBe("swiftformat");
-		expect(getSmartDefaultFormatterName("/tmp/file.fs")).toBe("fantomas");
-		expect(getSmartDefaultFormatterName("/tmp/file.nix")).toBe("nixfmt");
-		expect(getSmartDefaultFormatterName("/tmp/file.ex")).toBe("mix");
 		expect(getSmartDefaultFormatterName("/tmp/file.gleam")).toBe("gleam");
-		expect(getSmartDefaultFormatterName("/tmp/file.cs")).toBe("csharpier");
-		expect(getSmartDefaultFormatterName("/tmp/file.hs")).toBe("ormolu");
 		expect(getSmartDefaultFormatterName("/tmp/file.go")).toBe("gofmt");
 		expect(getSmartDefaultFormatterName("/tmp/file.rs")).toBe("rustfmt");
 		expect(getSmartDefaultFormatterName("/tmp/file.sh")).toBe("shfmt");
-		expect(getSmartDefaultFormatterName("/tmp/file.toml")).toBe("taplo");
-		expect(getSmartDefaultFormatterName("/tmp/file.tf")).toBe("terraform");
+		expect(getSmartDefaultFormatterName("/tmp/file.kt")).toBeUndefined();
+		expect(getSmartDefaultFormatterName("/tmp/file.swift")).toBeUndefined();
+		expect(getSmartDefaultFormatterName("/tmp/file.fs")).toBeUndefined();
+		expect(getSmartDefaultFormatterName("/tmp/file.nix")).toBeUndefined();
+		expect(getSmartDefaultFormatterName("/tmp/file.ex")).toBeUndefined();
+		expect(getSmartDefaultFormatterName("/tmp/file.cs")).toBeUndefined();
+		expect(getSmartDefaultFormatterName("/tmp/file.hs")).toBeUndefined();
+		expect(getSmartDefaultFormatterName("/tmp/file.toml")).toBeUndefined();
+		expect(getSmartDefaultFormatterName("/tmp/file.tf")).toBeUndefined();
 		expect(getSmartDefaultFormatterName("/tmp/file.dart")).toBe("dart");
 		expect(getSmartDefaultFormatterName("/tmp/file.zig")).toBe("zig");
 	});
@@ -144,23 +144,23 @@ describe("tool-policy", () => {
 		});
 		expect(getFormatterPolicyForFile("/tmp/file.kt")).toMatchObject({
 			defaultFormatter: "ktlint",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 		});
 		expect(getFormatterPolicyForFile("/tmp/file.swift")).toMatchObject({
 			defaultFormatter: "swiftformat",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 		});
 		expect(getFormatterPolicyForFile("/tmp/file.fs")).toMatchObject({
 			defaultFormatter: "fantomas",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 		});
 		expect(getFormatterPolicyForFile("/tmp/file.nix")).toMatchObject({
 			defaultFormatter: "nixfmt",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 		});
 		expect(getFormatterPolicyForFile("/tmp/file.ex")).toMatchObject({
 			defaultFormatter: "mix",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 		});
 		expect(getFormatterPolicyForFile("/tmp/file.gleam")).toMatchObject({
 			defaultFormatter: "gleam",
@@ -168,11 +168,11 @@ describe("tool-policy", () => {
 		});
 		expect(getFormatterPolicyForFile("/tmp/file.cs")).toMatchObject({
 			defaultFormatter: "csharpier",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 		});
 		expect(getFormatterPolicyForFile("/tmp/file.hs")).toMatchObject({
 			defaultFormatter: "ormolu",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 		});
 		expect(getFormatterPolicyForFile("/tmp/file.cpp")).toMatchObject({
 			defaultFormatter: "clang-format",
@@ -192,7 +192,7 @@ describe("tool-policy", () => {
 		});
 		expect(getFormatterPolicyForFile("/tmp/file.toml")).toMatchObject({
 			defaultFormatter: "taplo",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 		});
 		expect(getFormatterPolicyForFile("/tmp/terragrunt.hcl")).toMatchObject({
 			defaultFormatter: "terragrunt-hcl",
@@ -237,6 +237,8 @@ describe("tool-policy", () => {
 		});
 		expect(getAutofixPolicyForFile("/tmp/file.sql", {})).toMatchObject({
 			preferredTools: ["sqlfluff"],
+			defaultWhenUnconfigured: false,
+			gate: "config-first",
 			safe: true,
 		});
 		expect(getAutofixPolicyForFile("/tmp/file.kt", {})).toMatchObject({
@@ -310,6 +312,11 @@ describe("tool-policy", () => {
 		expect(getLinterPolicyForFile("/tmp/file.css", {})).toMatchObject({
 			preferredRunners: ["stylelint"],
 			gate: "smart-default",
+		});
+		expect(getLinterPolicyForFile("/tmp/file.sql", {})).toMatchObject({
+			preferredRunners: ["sqlfluff"],
+			defaultWhenUnconfigured: false,
+			gate: "config-first",
 		});
 		expect(getLinterPolicyForFile("/tmp/file.yaml", {})).toMatchObject({
 			preferredRunners: ["yamllint"],

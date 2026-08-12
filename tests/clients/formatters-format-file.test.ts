@@ -137,3 +137,33 @@ describe("formatFile", () => {
 		}
 	});
 });
+
+// #1144 review follow-up: SKIP_FORMATTING must be honored at the formatFile
+// seam. The resolvers return the sentinel when the repo has no config and the
+// file's indentation is undetectable — pre-fix, formatFile treated any
+// non-array as "fall back to the static command", so the stock-style spawn
+// happened anyway and the resolver-level skip was dead code.
+describe("formatFile honors SKIP_FORMATTING (#1144)", () => {
+	beforeEach(() => {
+		vi.resetModules();
+		safeSpawnAsync.mockReset();
+	});
+
+	it("does not spawn any command when the resolver refuses to format", async () => {
+		const env = setupTestEnvironment("pi-lens-format-skip-");
+		try {
+			// Minified single line: no detectable indentation, and no prettier
+			// config anywhere under the temp dir.
+			const filePath = path.join(env.tmpDir, "bundle.js");
+			fs.writeFileSync(filePath, "const a=1;const b=2;const c=a+b;\n");
+
+			const mod = await import("../../clients/formatters.ts");
+			const result = await mod.formatFile(filePath, mod.prettierFormatter);
+
+			expect(result).toEqual({ success: true, changed: false });
+			expect(safeSpawnAsync).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+});
