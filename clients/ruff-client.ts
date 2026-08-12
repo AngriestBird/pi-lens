@@ -56,10 +56,9 @@ export class RuffClient {
 	/**
 	 * Check if ruff CLI is available, auto-install if not.
 	 *
-	 * Re-entrancy safe: concurrent first-time callers share a single
-	 * `ensureInFlight` promise so probing/auto-install isn't duplicated.
-	 * Mirrors the dedupe pattern in `SgRunner` / `KnipClient` /
-	 * `DependencyChecker`.
+	 * Re-entrancy safe: the shared availability seam deduplicates the complete
+	 * probe/auto-install transaction per cwd and tool, so concurrent callers do
+	 * not duplicate installation attempts.
 	 */
 	async ensureAvailable(): Promise<boolean> {
 		const resolved = await resolveAvailableOrInstall(

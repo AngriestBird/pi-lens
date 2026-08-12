@@ -153,6 +153,9 @@ type InstallAttemptState = {
 const installAttemptsByCwd = new PathKeyedMap<Map<string, InstallAttemptState>>(
 	normalizeMapKey,
 );
+const resolveInstallInFlightByCwd = new PathKeyedMap<
+	Map<string, Promise<string | null>>
+>(normalizeEphemeralMapKey);
 // Checkers are created by runner modules and may also be created dynamically.
 // Keep the session reset as a generation rather than retaining every checker
 // reset closure forever.
@@ -190,6 +193,7 @@ function noteInstallSuccess(toolId: string, cwd: string): void {
 /** Reset availability/install suppression at the session boundary. */
 export function resetDispatchAvailabilityState(): void {
 	installAttemptsByCwd.clear();
+	resolveInstallInFlightByCwd.clear();
 	availabilityStateGeneration += 1;
 }
 
@@ -510,7 +514,7 @@ export async function resolveCommandWithInstallFallback(
 	return verifyOrInstallCommand(command, toolId, cwd, versionArgs, timeout);
 }
 
-export async function resolveAvailableOrInstall(
+async function resolveAvailableOrInstallUnshared(
 	checker: {
 		isAvailableAsync: (cwd?: string) => Promise<boolean>;
 		getCommand: (cwd?: string) => string | null;
@@ -542,6 +546,41 @@ export async function resolveAvailableOrInstall(
 	}
 	noteInstallFailure(toolId, cwd);
 	return null;
+}
+
+/** Share the complete probe/install transaction for each cwd/tool pair. */
+export function resolveAvailableOrInstall(
+	checker: {
+		isAvailableAsync: (cwd?: string) => Promise<boolean>;
+		getCommand: (cwd?: string) => string | null;
+		getOutcome?: (cwd?: string) => AvailabilityOutcome | null;
+		reset?: () => void;
+	},
+	toolId: string,
+	cwd: string,
+): Promise<string | null> {
+	const key = normalizeEphemeralMapKey(cwd);
+	let byTool = resolveInstallInFlightByCwd.get(key);
+	if (!byTool) {
+		byTool = new Map();
+		resolveInstallInFlightByCwd.set(key, byTool);
+	}
+	const existing = byTool.get(toolId);
+	if (existing) return existing;
+
+	const generation = availabilityStateGeneration;
+	const promise = resolveAvailableOrInstallUnshared(checker, toolId, cwd).finally(
+		() => {
+			if (generation !== availabilityStateGeneration) return;
+			const current = resolveInstallInFlightByCwd.get(key);
+			if (current?.get(toolId) === promise) {
+				current.delete(toolId);
+				if (current.size === 0) resolveInstallInFlightByCwd.delete(key);
+			}
+		},
+	);
+	byTool.set(toolId, promise);
+	return promise;
 }
 
 // =============================================================================
