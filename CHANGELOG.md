@@ -20,6 +20,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Kotlin formatter selection follows Spotless configuration deterministically (closes #1306)** — a Spotless `kotlin { ktlint() }` block pins ktlint and `kotlin { ktfmt() }` pins ktfmt, so both selection branches cannot claim the same Kotlin file and unconfigured projects retain the style-preserving no-format policy.
+
 - **Turn-end madge telemetry stays compact and its batch metadata is runtime-tested (closes [#1250](https://github.com/apmantza/pi-lens/issues/1250), [#1251](https://github.com/apmantza/pi-lens/issues/1251))** — aggregate batch counters remain exact, while per-target timing breadcrumbs are retained only for spawns taking at least 100 ms and capped at 12 slow targets, preserving the smells-rollup lookback; the real turn-end path now verifies madge batch execution and metadata propagation.
 
 - **Rule-policy normalization and source-filter matrices no longer drift (closes #1087)** — P3.2 derives CodeRabbit's language suffixes from the vendored rules tree so disable/select and inline suppression cover every shipped language; P3.3 aligns source-twin precedence ordering with sibling resolution and adds a behavioral agreement guard while preserving the broad `.jsx` build-artifact fallback.

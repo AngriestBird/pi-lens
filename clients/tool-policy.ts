@@ -1302,6 +1302,7 @@ export interface LinterPolicyContext {
 	hasMypyConfig?: boolean;
 	hasDetektConfig?: boolean;
 	hasKtfmtConfig?: boolean;
+	hasKtlintConfig?: boolean;
 	hasTflintConfig?: boolean;
 }
 
@@ -1315,6 +1316,7 @@ export interface AutofixPolicyContext {
 	hasDetektConfig?: boolean;
 	hasOxlintConfig?: boolean;
 	hasKtfmtConfig?: boolean;
+	hasKtlintConfig?: boolean;
 }
 
 export function getLinterPolicyForFile(
@@ -1747,6 +1749,16 @@ export function getAutofixPolicyForFile(
 	}
 
 	if ([".kt", ".kts"].includes(ext)) {
+		if (context.hasKtlintConfig) {
+			return {
+				toolNames: ["ktlint", "ktfmt", "detekt"],
+				preferredTools: ["ktlint"],
+				defaultTool: "ktlint",
+				defaultWhenUnconfigured: false,
+				gate: "config-first",
+				safe: true,
+			};
+		}
 		// ktfmt is config-first and the project's explicit formatting choice, so it
 		// wins over both detekt and the ktlint smart-default when opted in (#129).
 		if (context.hasKtfmtConfig) {
@@ -2375,7 +2387,61 @@ const KTFMT_GRADLE_FILES = [
 	"settings.gradle",
 ];
 
+const KOTLIN_BUILD_FILES = ["build.gradle.kts", "build.gradle"];
+
+function namedGradleBlockBodies(source: string, name: string): string[] {
+	const bodies: string[] = [];
+	const startPattern = new RegExp(`\\b${name}\\s*\\{`, "g");
+	for (const match of source.matchAll(startPattern)) {
+		const open = source.indexOf("{", match.index);
+		let depth = 1;
+		for (let index = open + 1; index < source.length; index += 1) {
+			if (source[index] === "{") depth += 1;
+			if (source[index] === "}") depth -= 1;
+			if (depth === 0) {
+				bodies.push(source.slice(open + 1, index));
+				break;
+			}
+		}
+	}
+	return bodies;
+}
+
+export type SpotlessKotlinFormatter = "ktlint" | "ktfmt";
+
+/**
+ * Resolve the formatter elected by a Spotless `kotlin { ... }` block.
+ * ktlint is the deterministic tie-break if a malformed project names both.
+ */
+export function getSpotlessKotlinFormatter(
+	cwd: string,
+): SpotlessKotlinFormatter | undefined {
+	for (const dir of walkUpDirs(cwd)) {
+		for (const gradle of KOTLIN_BUILD_FILES) {
+			const filePath = path.join(dir, gradle);
+			if (!fs.existsSync(filePath)) continue;
+			try {
+				const source = fs.readFileSync(filePath, "utf-8");
+				const kotlinBodies = namedGradleBlockBodies(source, "spotless").flatMap(
+					(spotless) => namedGradleBlockBodies(spotless, "kotlin"),
+				);
+				if (kotlinBodies.some((body) => /\bktlint\s*\(/.test(body)))
+					return "ktlint";
+				if (kotlinBodies.some((body) => /\bktfmt\s*\(/.test(body)))
+					return "ktfmt";
+			} catch {}
+		}
+	}
+	return undefined;
+}
+
+export function hasKtlintConfig(cwd: string): boolean {
+	return getSpotlessKotlinFormatter(cwd) === "ktlint";
+}
+
 export function hasKtfmtConfig(cwd: string): boolean {
+	const spotlessFormatter = getSpotlessKotlinFormatter(cwd);
+	if (spotlessFormatter) return spotlessFormatter === "ktfmt";
 	for (const dir of walkUpDirs(cwd)) {
 		if (KTFMT_CONFIG_FILES.some((cfg) => fs.existsSync(path.join(dir, cfg))))
 			return true;

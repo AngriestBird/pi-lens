@@ -26,6 +26,8 @@ import {
 	hasDetektConfig,
 	hasJavaBuildDescriptor,
 	hasKtfmtConfig,
+	hasKtlintConfig,
+	getSpotlessKotlinFormatter,
 	hasEslintConfig,
 	hasGolangciConfig,
 	hasGoogleJavaFormatConfig,
@@ -254,6 +256,12 @@ describe("tool-policy", () => {
 		expect(
 			getAutofixPolicyForFile("/tmp/file.kt", { hasKtfmtConfig: true }),
 		).toMatchObject({ preferredTools: ["ktfmt"], gate: "config-first" });
+		expect(
+			getAutofixPolicyForFile("/tmp/file.kt", {
+				hasKtlintConfig: true,
+				hasKtfmtConfig: true,
+			}),
+		).toMatchObject({ preferredTools: ["ktlint"], gate: "config-first" });
 		expect(
 			getAutofixPolicyForFile("/tmp/file.kt", {
 				hasKtfmtConfig: true,
@@ -1076,6 +1084,30 @@ describe("tool-policy", () => {
 				"build.gradle.kts",
 				'plugins {\n  id("com.ncorti.ktfmt.gradle") version "0.21.0"\n}\n',
 			);
+			expect(hasKtfmtConfig(env.tmpDir)).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("pins Spotless kotlin ktlint and excludes ktfmt (#1306)", () => {
+		const env = setupTestEnvironment("pi-lens-tool-policy-spotless-ktlint-");
+		try {
+			createTempFile(env.tmpDir, "build.gradle", "spotless {\n  kotlin {\n    ktlint()\n  }\n}\n");
+			expect(getSpotlessKotlinFormatter(env.tmpDir)).toBe("ktlint");
+			expect(hasKtlintConfig(env.tmpDir)).toBe(true);
+			expect(hasKtfmtConfig(env.tmpDir)).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("pins Spotless kotlin ktfmt and excludes ktlint (#1306)", () => {
+		const env = setupTestEnvironment("pi-lens-tool-policy-spotless-ktfmt-");
+		try {
+			createTempFile(env.tmpDir, "build.gradle.kts", "spotless {\n  kotlin {\n    ktfmt()\n  }\n}\n");
+			expect(getSpotlessKotlinFormatter(env.tmpDir)).toBe("ktfmt");
+			expect(hasKtlintConfig(env.tmpDir)).toBe(false);
 			expect(hasKtfmtConfig(env.tmpDir)).toBe(true);
 		} finally {
 			env.cleanup();

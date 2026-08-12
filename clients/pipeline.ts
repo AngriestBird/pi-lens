@@ -74,6 +74,7 @@ import {
 	hasEslintConfig,
 	hasGolangciConfig,
 	hasKtfmtConfig,
+	hasKtlintConfig,
 	hasOxlintConfig,
 	hasRubocopConfig,
 	hasSqlfluffConfig,
@@ -636,6 +637,7 @@ export async function runAutofix(
 		hasGolangciConfig: hasGolangciConfig(cwd),
 		hasDetektConfig: hasDetektConfig(cwd),
 		hasKtfmtConfig: hasKtfmtConfig(cwd),
+		hasKtlintConfig: hasKtlintConfig(cwd),
 		hasOxlintConfig: hasOxlintConfig(cwd),
 	};
 	const autofixPolicy = getAutofixPolicyForFile(filePath, autofixContext);

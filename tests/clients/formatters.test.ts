@@ -487,6 +487,28 @@ describe("getFormattersForFile — policy selection", () => {
 		});
 	});
 
+	it("selects Spotless ktlint on every invocation and never ktfmt (#1306)", async () => {
+		const fixtureRoot = path.resolve(
+			"tests/fixtures/formatter-policy/kotlin-ktlint",
+		);
+		const filePath = path.join(fixtureRoot, "src", "App.kt");
+		for (let invocation = 0; invocation < 5; invocation += 1) {
+			const formatters = await getFormattersForFile(filePath, fixtureRoot);
+			expect(formatters.map((formatter) => formatter.name)).toEqual(["ktlint"]);
+			expect(formatters.some((formatter) => formatter.name === "ktfmt")).toBe(false);
+		}
+	});
+
+	it("selects Spotless ktfmt and never ktlint (#1306)", async () => {
+		createTempFile(
+			tmpDir,
+			"build.gradle.kts",
+			"spotless {\n  kotlin {\n    ktfmt()\n  }\n}\n",
+		);
+		const formatters = await getFormattersForFile(fileIn(tmpDir, "App.kt"), tmpDir);
+		expect(formatters.map((formatter) => formatter.name)).toEqual(["ktfmt"]);
+	});
+
 	it("does not force swiftformat on unconfigured Swift files", async () => {
 		await withPathShim("swiftformat", async () => {
 			const filePath = fileIn(tmpDir, "App.swift");

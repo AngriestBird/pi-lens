@@ -30,6 +30,7 @@ import {
 	hasCmakeFormatConfig,
 	hasGoogleJavaFormatConfig,
 	hasKtfmtConfig,
+	hasKtlintConfig,
 	hasNearestPackageJsonDependency,
 	hasNearestPackageJsonField,
 	hasOcamlformatConfig,
@@ -358,6 +359,8 @@ function hasExplicitFormatterConfig(
 			return hasGoogleJavaFormatConfig(cwd);
 		case "ktfmt":
 			return hasKtfmtConfig(cwd);
+		case "ktlint":
+			return hasKtlintConfig(cwd);
 		case "cljfmt":
 			return hasCljfmtConfig(cwd);
 		case "cmake-format":
