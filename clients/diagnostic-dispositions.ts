@@ -223,6 +223,7 @@ const DISPOSITION_LOCK_WAIT_MS = 2_000;
 const DISPOSITION_LOCK_RETRY_MS = 10;
 
 let beforeDispositionCommitForTests: (() => void) | null = null;
+let beforeDispositionCacheRefreshForTests: (() => void) | null = null;
 let dispositionStatSync: typeof fs.statSync = fs.statSync;
 
 /** Test seam after the caller's cached read and before commit lock acquisition. */
@@ -230,6 +231,13 @@ export function _setBeforeDispositionCommitForTests(
 	hook: (() => void) | null,
 ): void {
 	beforeDispositionCommitForTests = hook;
+}
+
+/** Test seam immediately before the committed state refreshes the cache. */
+export function _setBeforeDispositionCacheRefreshForTests(
+	hook: (() => void) | null,
+): void {
+	beforeDispositionCacheRefreshForTests = hook;
 }
 
 export function _setDispositionStatForTests(
@@ -286,9 +294,9 @@ function readState(cwd: string): DispositionStateFile {
 	return state;
 }
 
-function readStateFromDisk(cwd: string): DispositionStateFile {
+function deserializeState(contents: string | undefined): DispositionStateFile {
 	try {
-		const parsed = JSON.parse(fs.readFileSync(statePath(cwd), "utf8")) as unknown;
+		const parsed = JSON.parse(contents ?? "") as unknown;
 		return parsed && typeof parsed === "object"
 			? (parsed as DispositionStateFile)
 			: {};
@@ -334,7 +342,7 @@ function commitDisposition(
 	hook?.();
 	commitDurableStore({
 		path: p,
-		read: () => readStateFromDisk(cwd),
+		deserialize: deserializeState,
 		merge: (state) => {
 			state.dispositions ??= {};
 			state.dispositions[anchor] = entry;
@@ -345,7 +353,12 @@ function commitDisposition(
 		retryMs: DISPOSITION_LOCK_RETRY_MS,
 		timeoutMessage: "timed out acquiring diagnostic disposition store lock",
 		onContention: "throw",
-		afterCommit: (state) => refreshStateCache(p, state),
+		afterWriteLocked: (state) => {
+			const cacheHook = beforeDispositionCacheRefreshForTests;
+			beforeDispositionCacheRefreshForTests = null;
+			cacheHook?.();
+			refreshStateCache(p, state);
+		},
 	});
 }
 

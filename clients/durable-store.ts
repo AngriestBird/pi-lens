@@ -12,18 +12,27 @@
  * substitution for these short synchronous commits.
  */
 
+import * as fs from "node:fs";
 import { writeFileAtomic } from "./atomic-write.js";
 import { acquireBoundedPidFileLock } from "./bounded-pid-file-lock.js";
 
 interface DurableStoreCommitBase<T> {
 	path: string;
-	read: () => T;
+	deserialize: (contents: string | undefined) => T;
 	merge: (current: T) => T;
 	serialize: (value: T) => string | Uint8Array;
 	waitMs: number;
 	retryMs: number;
 	timeoutMessage: string;
-	afterCommit?: (value: T) => void;
+	afterWriteLocked?: (value: T) => void;
+}
+
+function readLocked(path: string): string | undefined {
+	try {
+		return fs.readFileSync(path, "utf8");
+	} catch {
+		return undefined;
+	}
 }
 
 export function commitDurableStore<T>(
@@ -59,13 +68,14 @@ export function commitDurableStore<T>(
 	if (!release) return undefined;
 	let committed: T;
 	try {
-		committed = options.merge(options.read());
+		const current = options.deserialize(readLocked(options.path));
+		committed = options.merge(current);
 		writeFileAtomic(options.path, options.serialize(committed), {
 			bestEffort: false,
 		});
+		options.afterWriteLocked?.(committed);
 	} finally {
 		release();
 	}
-	options.afterCommit?.(committed);
 	return committed;
 }

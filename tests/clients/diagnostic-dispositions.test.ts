@@ -23,6 +23,7 @@ import {
 import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
+	_setBeforeDispositionCacheRefreshForTests,
 	_setBeforeDispositionCommitForTests,
 	_setDispositionStatForTests,
 	anchorsForDiagnostic,
@@ -47,6 +48,7 @@ beforeEach(() => {
 	_resetDeferredForTests();
 	_resetStateCacheForTests();
 	_setBeforeDispositionCommitForTests(null);
+	_setBeforeDispositionCacheRefreshForTests(null);
 	_setDispositionStatForTests(null);
 	_resetDispositionPublishForTests();
 	_resetBusPublishForTests();
@@ -55,6 +57,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	_setBeforeDispositionCommitForTests(null);
+	_setBeforeDispositionCacheRefreshForTests(null);
 	_setDispositionStatForTests(null);
 	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 	else process.env.PILENS_DATA_DIR = previousDataDir;
@@ -125,6 +128,57 @@ describe("cross-process disposition commits (#1202)", () => {
 		expect(persisted.dispositions[secondAnchor]).toMatchObject({
 			disposition: "flagged",
 			reason: "writer B",
+		});
+	});
+
+	it("refreshes writer A's cache before writer B can commit after lock release (#1212)", async () => {
+		const writerATarget = {
+			cwd: cwd(),
+			filePath: filePath(),
+			tool: "eslint",
+			rule: "writer-a-rule",
+			message: "writer A finding",
+			line: 1,
+			content: "const writerA = bad();\n",
+		};
+		const writerBTarget = {
+			...writerATarget,
+			rule: "writer-b-rule",
+			message: "writer B finding",
+			content: "const writerB = bad();\n",
+		};
+		vi.resetModules();
+		const writerB = await import("../../clients/diagnostic-dispositions.js");
+		let writerBAnchor: string | undefined;
+		let committedBetweenReleaseAndRefresh = false;
+		_setBeforeDispositionCacheRefreshForTests(() => {
+			// With the fix, A still owns the lock here and B cannot interleave.
+			// The mutation moves this callback after release, making this branch
+			// commit B before A refreshes its stale committed state into the cache.
+			if (fs.existsSync(`${statePath()}.lock`)) return;
+			writerBAnchor = writerB.markDisposition(
+				cwd(),
+				writerBTarget,
+				"flagged",
+				"writer B committed a deliberately longer state",
+			);
+			committedBetweenReleaseAndRefresh = true;
+		});
+
+		markDisposition(cwd(), writerATarget, "flagged", "writer A");
+		if (!committedBetweenReleaseAndRefresh) {
+			writerBAnchor = writerB.markDisposition(
+				cwd(),
+				writerBTarget,
+				"flagged",
+				"writer B committed a deliberately longer state",
+			);
+		}
+
+		expect(writerBAnchor).toBeDefined();
+		expect(getDisposition(cwd(), writerBAnchor!)).toMatchObject({
+			disposition: "flagged",
+			reason: "writer B committed a deliberately longer state",
 		});
 	});
 });

@@ -155,6 +155,19 @@ function serializeAction(action: LSPCodeAction): ActionableWarningAction {
 	};
 }
 
+function deserializeSuppressionState(
+	contents: string | undefined,
+): WarningStateFile {
+	try {
+		const parsed = JSON.parse(contents ?? "") as unknown;
+		return parsed && typeof parsed === "object"
+			? (parsed as WarningStateFile)
+			: {};
+	} catch {
+		return {};
+	}
+}
+
 function readSuppressionState(cwd: string): WarningStateFile {
 	const statePath = path.join(
 		getProjectDataDir(cwd),
@@ -162,10 +175,7 @@ function readSuppressionState(cwd: string): WarningStateFile {
 		"actionable-warning-state.json",
 	);
 	try {
-		const parsed = JSON.parse(fs.readFileSync(statePath, "utf-8")) as unknown;
-		return parsed && typeof parsed === "object"
-			? (parsed as WarningStateFile)
-			: {};
+		return deserializeSuppressionState(fs.readFileSync(statePath, "utf8"));
 	} catch {
 		return {};
 	}
@@ -186,7 +196,7 @@ function updateWarningState(
 	hook?.();
 	commitDurableStore({
 		path: statePath,
-		read: () => readSuppressionState(cwd),
+		deserialize: deserializeSuppressionState,
 		merge: (state) => {
 			const now = new Date().toISOString();
 			state.warnings ??= {};
