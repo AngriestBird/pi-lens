@@ -8,6 +8,18 @@ AGENTS.md is the durable context handed to every agent that works on pi-lens. **
 - **Capture decisions & patterns.** When a commit establishes a non-obvious decision, gotcha, convention, or architectural pattern the next agent would otherwise relearn the hard way, add it here with the *why* and *how-to-apply* (recent examples: the dist/packaging + `pi.skills` resolution gotcha, the event-loop/hot-path discipline, the build-vs-lint gate).
 - **Keep it high-signal.** Prune what's no longer true; prefer concise, load-bearing notes over exhaustive prose.
 
+**Behavior-gating durable stores serialize read-modify-write.** Atomic rename
+prevents torn JSON but not lost sibling-process deltas. Use
+`clients/bounded-pid-file-lock.ts` for short synchronous commits, acquire before
+the authoritative disk re-read, merge only the caller's delta, publish
+telemetry only after the atomic write succeeds, and release in `finally`. The
+PID liveness check has a documented bounded PID-reuse exposure; its unique
+token prevents a late owner from deleting a replacement lock. Callers must
+choose contention policy explicitly: correctness-critical stores use
+`onContention: "throw"`; dispatch-adjacent best-effort stores use `"skip-log"`
+with a drop telemetry callback and skip the whole commit when acquisition
+returns `null`. (#1202)
+
 ## Issue and PR design contract
 
 - **Design the state space before coding.** For stateful, ordered, resource-mutating, or security-sensitive work, write the invariants, supported transitions, explicit deferrals, and a cross-product test matrix before implementation. Examples are not enough: cover operation order, preview/apply, validation/normalization/execution seams, failure atomicity, observability bounds, and OS/path/encoding axes. If adversarial review finds repeated cross-product defects, stop patching one symptom at a time and return to the model.
@@ -609,6 +621,14 @@ Do not hand-edit generated `.js`; regenerate it from the corresponding `.ts`. Th
 ## Data directory conventions
 
 **All project-scoped persistent data must go through `getProjectDataDir(cwd)`** (`clients/file-utils.ts`).
+
+**Shared durable-store atomicity (#1202).** Atomic tmp+rename is crash/torn-read
+safety, not cross-process serialization. The full store classification lives in
+`docs/durable-store-audit-1202.md`. Behavior-gating read/modify/write state must
+lock, re-read under the lock, and merge only its delta; diagnostic dispositions
+are the reference synchronous implementation. Replaceable derived caches may
+remain explicitly best-effort only when freshness validation or the next scan
+self-heals the loss.
 
 ```typescript
 import { getProjectDataDir } from "./file-utils.js";

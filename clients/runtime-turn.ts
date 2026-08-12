@@ -229,7 +229,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	}
 	if (access === "available" && (turnState.files || turnState.owner || turnState.sessionId)) {
 		dbg("turn_end: evicting stale turn-state owner");
-		cacheManager.clearTurnState(cwd);
+		cacheManager.clearTurnState(cwd, currentOwner);
 		turnState = cacheManager.readTurnState(cwd);
 	}
 
@@ -285,7 +285,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 
 	if (cacheManager.isMaxCyclesExceeded(cwd)) {
 		dbg("turn_end: max cycles exceeded, clearing state and forcing through");
-		cacheManager.clearTurnState(cwd);
+		cacheManager.clearTurnState(cwd, currentOwner);
 		runtime.fixedThisTurn.clear();
 		resetFormatService();
 		return;
@@ -1219,7 +1219,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		dbg(`turn_end: dead-code advisory failed: ${err}`);
 	}
 
-	cacheManager.incrementTurnCycle(cwd);
+	cacheManager.incrementTurnCycle(cwd, currentOwner);
 
 	const labeledAdvisoryParts = advisoryParts.map(
 		(p) => `ℹ️ Advisory — no action required this turn:\n${p}`,
@@ -1269,7 +1269,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					});
 				}
 			}
-			cacheManager.clearTurnState(cwd);
+			cacheManager.clearTurnState(cwd, currentOwner);
 			runtime.fixedThisTurn.clear();
 			resetFormatService();
 			return;
@@ -1337,7 +1337,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		});
 	}
 	if (blockerParts.length === 0) {
-		cacheManager.clearTurnState(cwd);
+		cacheManager.clearTurnState(cwd, currentOwner);
 		if (getFlag("lens-guard") && advisoryParts.length === 0 && !runtime.gitGuardHasBlockers) {
 			const guardRecord = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
 				"turn-end-findings",
