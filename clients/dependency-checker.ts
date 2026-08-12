@@ -119,7 +119,7 @@ export type MadgeBatchStats = {
 	commandKind?: MadgeCommandKind;
 	/** Command-resolution cost; ~0 once memoized for this project root. */
 	resolveMs: number;
-	/** Per-spawn timings in array order, capped at `MADGE_STATS_TARGET_CAP`. */
+	/** Slow per-spawn timings in array order, capped at `MADGE_STATS_TARGET_CAP`. */
 	targets: Array<{ file: string; durationMs: number; ok: boolean }>;
 	/** Set when the cap dropped entries, so capping is never silent. */
 	targetsTruncated: boolean;
@@ -156,6 +156,14 @@ const MADGE_BATCH_CONCURRENCY = 6;
  * a transcript, and the aggregate counts stay exact either way.
  */
 const MADGE_STATS_TARGET_CAP = 12;
+
+/**
+ * Fast madge targets are not useful enough to justify widening the shared
+ * latency.log records. Aggregate counts remain unconditional; retain a
+ * target breadcrumb only when the spawn itself was slow enough to explain a
+ * turn-end tail.
+ */
+const MADGE_STATS_TARGET_MIN_DURATION_MS = 100;
 
 /** Is `target` inside `dir`? */
 function isWithin(dir: string, target: string): boolean {
@@ -908,13 +916,15 @@ export class DependencyChecker {
 				continue;
 			}
 			const spawnResult = spawnResults.get(entry.normalized);
-			if (stats.targets.length < MADGE_STATS_TARGET_CAP) {
+			const durationMs = spawnDurations.get(entry.normalized) ?? 0;
+			if (durationMs >= MADGE_STATS_TARGET_MIN_DURATION_MS &&
+				stats.targets.length < MADGE_STATS_TARGET_CAP) {
 				stats.targets.push({
 					file: path.relative(projectRoot, entry.normalized),
-					durationMs: spawnDurations.get(entry.normalized) ?? 0,
+					durationMs,
 					ok: spawnResult?.ok === true,
 				});
-			} else {
+			} else if (durationMs >= MADGE_STATS_TARGET_MIN_DURATION_MS) {
 				stats.targetsTruncated = true;
 			}
 			if (!spawnResult || !spawnResult.ok) {

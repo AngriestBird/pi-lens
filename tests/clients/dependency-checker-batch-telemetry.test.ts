@@ -164,11 +164,9 @@ describe("DependencyChecker.checkFilesBatch telemetry (#766)", () => {
 		expect(stats.spawned).toBe(2);
 		expect(stats.failed).toBe(1);
 		expect(stats.commandKind).toBe("npx");
-		// Project-relative, in array order, carrying each spawn's own outcome.
-		expect(stats.targets.map((t) => [t.file, t.ok])).toEqual([
-			["ok.ts", true],
-			["bad.ts", false],
-		]);
+		// Fast targets do not widen the shared latency record; aggregate counts
+		// above remain exact and slow targets are covered below.
+		expect(stats.targets).toEqual([]);
 		expect(stats.targetsTruncated).toBe(false);
 		expect(results.get(hit)?.cacheHit).toBe(true);
 		expect(results.get(gone)?.checked).toBe(false);
@@ -215,7 +213,7 @@ describe("DependencyChecker.checkFilesBatch telemetry (#766)", () => {
 		expect(results.get(hit)?.cacheHit).toBe(true);
 	});
 
-	it("keeps every target at exactly the cap", async () => {
+	it("does not retain fast per-target timings", async () => {
 		const { DependencyChecker } = await import(
 			"../../clients/dependency-checker.js"
 		);
@@ -226,22 +224,55 @@ describe("DependencyChecker.checkFilesBatch telemetry (#766)", () => {
 		const { stats } = await new DependencyChecker().checkFilesBatch(files, tmp);
 
 		expect(stats.spawned).toBe(12);
-		expect(stats.targets).toHaveLength(12);
+		expect(stats.targets).toHaveLength(0);
 		expect(stats.targetsTruncated).toBe(false);
 	});
 
-	it("caps per-target timings past it and says so", async () => {
+	it("retains only slow target timings and caps them", async () => {
 		const { DependencyChecker } = await import(
 			"../../clients/dependency-checker.js"
 		);
 		const files = Array.from({ length: 14 }, (_, i) =>
 			writeSource(`f${i}.ts`, [`./dep${i}.js`]),
 		);
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+			if (args[0] === "--version") return VERSION_OK;
+			await new Promise((resolve) => setTimeout(resolve, 120));
+			return { status: 0, error: null, stdout: "[]", stderr: "" };
+		});
 
 		const { stats } = await new DependencyChecker().checkFilesBatch(files, tmp);
 
 		expect(stats.spawned).toBe(14);
 		expect(stats.targets).toHaveLength(12);
 		expect(stats.targetsTruncated).toBe(true);
+	});
+
+	it("keeps repeated batch metadata bounded", async () => {
+		const { DependencyChecker } = await import(
+			"../../clients/dependency-checker.js"
+		);
+		const files = Array.from({ length: 14 }, (_, i) =>
+			writeSource(`repeat${i}.ts`, [`./dep${i}.js`]),
+		);
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+			if (args[0] === "--version") return VERSION_OK;
+			await new Promise((resolve) => setTimeout(resolve, 120));
+			return { status: 0, error: null, stdout: "[]", stderr: "" };
+		});
+
+		const checker = new DependencyChecker();
+		const serializedSizes: number[] = [];
+		for (let turn = 0; turn < 3; turn++) {
+			for (const [i, file] of files.entries()) {
+				fs.writeFileSync(file, `import { x } from "./dep${i}-${turn}.js";\n`);
+			}
+			const { stats } = await checker.checkFilesBatch(files, tmp);
+			expect(stats.targets.length).toBeLessThanOrEqual(12);
+			serializedSizes.push(JSON.stringify(stats).length);
+		}
+		expect(Math.max(...serializedSizes)).toBeLessThanOrEqual(
+			Math.max(...serializedSizes.slice(0, 1)),
+		);
 	});
 });
