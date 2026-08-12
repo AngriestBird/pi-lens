@@ -3844,7 +3844,23 @@ export async function ensureTool(
 
 	// Fast path 1: in-memory session cache — no I/O.
 	const cached = resolvedPathCache.get(toolId);
-	if (cached) return cached;
+	if (cached) {
+		if (!path.isAbsolute(cached)) return cached;
+		try {
+			await fs.access(cached);
+			return cached;
+		} catch {
+			// The executor would report ENOENT for this cached positive. Evict it
+			// before discovery so the failure heals on this call, not after restart.
+		}
+		resolvedPathCache.delete(toolId);
+		const probeCache = await readProbeCache();
+		delete probeCache[toolId];
+		markProbeCacheChange(toolId, null);
+		logSessionStart(
+			`auto-install ensure ${toolId}: cached path disappeared; re-probing`,
+		);
+	}
 
 	// Fast path 2: persistent probe cache — fs.access + stat, no process spawn.
 	const diskCached = await checkProbeCache(toolId);

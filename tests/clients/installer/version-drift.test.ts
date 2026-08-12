@@ -282,6 +282,17 @@ describe("version-pin drift detection (#589)", () => {
 		expect(spawnCalls).toHaveLength(0);
 	});
 
+	it("evicts a cached positive when the resolved binary is deleted", async () => {
+		fakeAccess(JSCPD_BIN);
+		versionOutput.value = `${JSCPD_PINNED_VERSION}\n`;
+		expect(await ensureTool("jscpd")).toBe(JSCPD_BIN);
+
+		fakeAccess();
+		process.env.PI_LENS_DISABLE_TOOL_INSTALL = "1";
+		expect(await ensureTool("jscpd")).toBeUndefined();
+		expect(mockFsAccess).toHaveBeenCalledWith(JSCPD_BIN);
+	});
+
 	it("skips drift detection entirely for an unpinned npm tool (madge)", async () => {
 		fakeAccess(MADGE_BIN);
 		versionOutput.value = "9.9.9\n"; // any output — madge has no version pin
