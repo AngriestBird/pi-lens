@@ -19,7 +19,12 @@ import {
 	acquireQuarantinePidFileLock,
 } from "./bounded-pid-file-lock.js";
 
-interface DurableStoreCommitBase<T> {
+// Shared fields WITHOUT the post-write callback: the sync and async commit
+// variants declare their own callback signatures (void vs void|Promise<void>)
+// so neither widens the other's contract (sonar S6544 — a Promise-returning
+// callback behind a void-typed field is an unawaited-work hazard at the type
+// level; the async variant awaits its callback inside the lock).
+interface DurableStoreCommitCore<T> {
 	path: string;
 	deserialize: (contents: string | undefined) => T;
 	merge: (current: T) => T;
@@ -27,10 +32,13 @@ interface DurableStoreCommitBase<T> {
 	waitMs: number;
 	retryMs: number;
 	timeoutMessage: string;
+}
+
+interface DurableStoreCommitBase<T> extends DurableStoreCommitCore<T> {
 	afterWriteLocked?: (value: T) => void;
 }
 
-interface AsyncDurableStoreCommitBase<T> extends DurableStoreCommitBase<T> {
+interface AsyncDurableStoreCommitBase<T> extends DurableStoreCommitCore<T> {
 	staleMs: number;
 	afterWriteLocked?: (value: T) => void | Promise<void>;
 }
