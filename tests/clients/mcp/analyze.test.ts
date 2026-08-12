@@ -365,6 +365,10 @@ describe("analyzeFile", () => {
 		const state = cache.readTurnState(tmpDir);
 		expect(Object.keys(state.files)).toEqual(["first.ts"]);
 		expect(cache.getTurnStateAccess(tmpDir, { kind: "mcp", id: "mcp-live-b" })).toBe("foreign-live");
+		const beforeCycle = state.turnCycles;
+		expect(cache.clearTurnState(tmpDir, { kind: "mcp", id: "mcp-live-b" })).toBe(false);
+		expect(cache.incrementTurnCycle(tmpDir, { kind: "mcp", id: "mcp-live-b" }).turnCycles).toBe(beforeCycle);
+		expect(cache.readTurnState(tmpDir).files).toHaveProperty("first.ts");
 	});
 
 	it("preserves explicit writer ownership across pi/MCP handoffs (#1262)", () => {

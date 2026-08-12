@@ -412,20 +412,29 @@ export class CacheManager {
 	/**
 	 * Clear turn state (after turn_end processes it).
 	 */
-	clearTurnState(cwd: string): void {
+	clearTurnState(
+		cwd: string,
+		owner: Pick<TurnStateOwner, "kind" | "id">,
+	): boolean {
+		if (this.getTurnStateAccess(cwd, owner) === "foreign-live") return false;
 		const state: TurnState = {
 			...DEFAULT_TURN_STATE,
 			files: {}, // fresh object — DEFAULT_TURN_STATE.files can be polluted by addModifiedRange
 			lastUpdated: new Date().toISOString(),
 		};
 		this.writeTurnState(state, cwd);
+		return true;
 	}
 
 	/**
 	 * Increment turn cycle counter.
 	 */
-	incrementTurnCycle(cwd: string): TurnState {
+	incrementTurnCycle(
+		cwd: string,
+		owner: Pick<TurnStateOwner, "kind" | "id">,
+	): TurnState {
 		const state = this.readTurnState(cwd);
+		if (this.getTurnStateAccess(cwd, owner) === "foreign-live") return state;
 		state.turnCycles++;
 		this.writeTurnState(state, cwd);
 		return state;

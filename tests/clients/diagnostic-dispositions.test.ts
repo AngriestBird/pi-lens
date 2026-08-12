@@ -24,6 +24,7 @@ import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
 	_setBeforeDispositionCommitForTests,
+	_setDispositionStatForTests,
 	anchorsForDiagnostic,
 	applyDispositions,
 	applyWeakDispositions,
@@ -46,6 +47,7 @@ beforeEach(() => {
 	_resetDeferredForTests();
 	_resetStateCacheForTests();
 	_setBeforeDispositionCommitForTests(null);
+	_setDispositionStatForTests(null);
 	_resetDispositionPublishForTests();
 	_resetBusPublishForTests();
 	logDispositionEvent.mockClear();
@@ -53,6 +55,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	_setBeforeDispositionCommitForTests(null);
+	_setDispositionStatForTests(null);
 	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 	else process.env.PILENS_DATA_DIR = previousDataDir;
 	if (originalBusEnv === undefined) delete process.env.PI_LENS_BUS_PUBLISH;
@@ -63,7 +66,7 @@ afterEach(() => {
 });
 
 describe("cross-process disposition commits (#1202)", () => {
-	it("refuses stale promotion and preserves an interleaved writer's delta", () => {
+	it("re-reads disk after a fresh module writer commits", async () => {
 		const first = {
 			cwd: cwd(),
 			filePath: filePath(),
@@ -80,22 +83,48 @@ describe("cross-process disposition commits (#1202)", () => {
 			content: "const second = bad();\n",
 		};
 
-		// The outer writer has already read its pre-commit view when this hook
-		// admits a sibling writer. Its eventual commit must re-read under lock,
-		// merge the sibling delta, and never promote the stale whole-file view.
-		let secondAnchor = "";
+		// Seed writer A's cache with a same-size predecessor. Writer B is loaded
+		// through a fresh Vitest module registry and replaces only the reason with
+		// an equal-length value. Restoring the old mtime deliberately defeats A's
+		// mtime+size memoization, modeling filesystems whose coarse timestamp does
+		// not reveal a sibling's atomic replacement.
+		const secondAnchor = markDisposition(
+			cwd(),
+			interleaved,
+			"flagged",
+			"before!!",
+		);
+		const cachedStat = fs.statSync(statePath());
+		const realStatSync = fs.statSync;
+		let maskSiblingReplacement = false;
+		_setDispositionStatForTests(((p, options) =>
+			maskSiblingReplacement && p === statePath()
+				? cachedStat
+				: realStatSync(p, options as never)) as typeof fs.statSync);
+		vi.resetModules();
+		const writerB = await import("../../clients/diagnostic-dispositions.js");
 		_setBeforeDispositionCommitForTests(() => {
-			secondAnchor = markDisposition(cwd(), interleaved, "flagged", "second");
+			writerB.markDisposition(
+				cwd(),
+				interleaved,
+				"flagged",
+				"writer B",
+			);
+			maskSiblingReplacement = true;
 		});
 		const firstAnchor = markDisposition(cwd(), first, "false-positive", "first");
+		_setDispositionStatForTests(null);
+		const persisted = JSON.parse(fs.readFileSync(statePath(), "utf8")) as {
+			dispositions: Record<string, { disposition: string; reason?: string }>;
+		};
 
-		expect(getDisposition(cwd(), firstAnchor)).toMatchObject({
+		expect(persisted.dispositions[firstAnchor]).toMatchObject({
 			disposition: "false-positive",
 			reason: "first",
 		});
-		expect(getDisposition(cwd(), secondAnchor)).toMatchObject({
+		expect(persisted.dispositions[secondAnchor]).toMatchObject({
 			disposition: "flagged",
-			reason: "second",
+			reason: "writer B",
 		});
 	});
 });

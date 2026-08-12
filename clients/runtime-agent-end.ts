@@ -308,6 +308,8 @@ export async function handleAgentEnd({
 						{ start: 1, end: lineCount },
 						hasImports,
 						bookkeepingCwd,
+						currentSessionId ?? runtime.telemetrySessionId,
+						"pi",
 					);
 				} catch (err) {
 					dbg(

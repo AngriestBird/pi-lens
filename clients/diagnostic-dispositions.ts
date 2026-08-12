@@ -58,6 +58,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { writeFileAtomic } from "./atomic-write.js";
+import { acquireBoundedPidFileLock } from "./bounded-pid-file-lock.js";
 import { logDispositionEvent } from "./disposition-logger.js";
 import { publishDisposition } from "./disposition-publish.js";
 import { getProjectDataDir } from "./file-utils.js";
@@ -221,66 +222,35 @@ let stateCache: StateCache | null = null;
 
 const DISPOSITION_LOCK_WAIT_MS = 2_000;
 const DISPOSITION_LOCK_RETRY_MS = 10;
-const lockWaitArray = new Int32Array(new SharedArrayBuffer(4));
 
 let beforeDispositionCommitForTests: (() => void) | null = null;
+let dispositionStatSync: typeof fs.statSync = fs.statSync;
 
-/** Test seam for deterministically interleaving two read-modify-write commits. */
+/** Test seam after the caller's cached read and before commit lock acquisition. */
 export function _setBeforeDispositionCommitForTests(
 	hook: (() => void) | null,
 ): void {
 	beforeDispositionCommitForTests = hook;
 }
 
-function ownerPidIsLive(pid: number): boolean {
-	if (!Number.isSafeInteger(pid) || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch {
-		return false;
-	}
+export function _setDispositionStatForTests(
+	statSync: typeof fs.statSync | null,
+): void {
+	dispositionStatSync = statSync ?? fs.statSync;
 }
-
 function acquireDispositionLock(p: string): () => void {
-	const lockPath = `${p}.lock`;
-	const deadline = Date.now() + DISPOSITION_LOCK_WAIT_MS;
-	for (;;) {
-		try {
-			const fd = fs.openSync(lockPath, "wx");
-			fs.writeFileSync(fd, String(process.pid), "utf8");
-			fs.closeSync(fd);
-			return () => {
-				try {
-					fs.unlinkSync(lockPath);
-				} catch {
-					// The protected write has already completed; cleanup is best-effort.
-				}
-			};
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-			try {
-				const ownerPid = Number.parseInt(fs.readFileSync(lockPath, "utf8"), 10);
-				if (!ownerPidIsLive(ownerPid)) {
-					fs.unlinkSync(lockPath);
-					continue;
-				}
-			} catch (lockError) {
-				if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
-			}
-			if (Date.now() >= deadline) {
-				throw new Error("timed out acquiring diagnostic disposition store lock");
-			}
-			Atomics.wait(lockWaitArray, 0, 0, DISPOSITION_LOCK_RETRY_MS);
-		}
-	}
+	return acquireBoundedPidFileLock(`${p}.lock`, {
+		waitMs: DISPOSITION_LOCK_WAIT_MS,
+		retryMs: DISPOSITION_LOCK_RETRY_MS,
+		timeoutMessage: "timed out acquiring diagnostic disposition store lock",
+	});
 }
 
 function readState(cwd: string): DispositionStateFile {
 	const p = statePath(cwd);
 	let stat: fs.Stats;
 	try {
-		stat = fs.statSync(p);
+		stat = dispositionStatSync(p);
 	} catch {
 		if (stateCache && stateCache.path === p && stateCache.missing) {
 			return stateCache.state;
@@ -467,10 +437,9 @@ export function markDisposition(
 	// entry can already exist at the same weak anchor (a prior flagged/suppress
 	// mark) — the log should record what this mark shadowed either way.
 	const existing = readState(cwd).dispositions?.[anchor];
-	emitMarkTelemetry(cwd, target, disposition, anchor, reason, existing);
-
 	if (disposition === "defer") {
 		deferredThisSession.add(anchor);
+		emitMarkTelemetry(cwd, target, disposition, anchor, reason, existing);
 		return anchor;
 	}
 
@@ -490,6 +459,7 @@ export function markDisposition(
 		lineText,
 	};
 	commitDisposition(cwd, anchor, entry);
+	emitMarkTelemetry(cwd, target, disposition, anchor, reason, existing);
 	return anchor;
 }
 
