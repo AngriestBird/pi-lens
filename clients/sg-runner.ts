@@ -8,7 +8,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getSgCommand } from "./dispatch/runners/utils/runner-helpers.js";
+import {
+	getSgCommand,
+	resolveManagedToolClient,
+} from "./dispatch/runners/utils/runner-helpers.js";
 import { getProjectIgnoreGlobs } from "./file-utils.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync, type SpawnResult } from "./safe-spawn.js";
@@ -252,16 +255,21 @@ export class SgRunner {
 			}
 		}
 
-		// Step 4: auto-install via pi-lens installer.
-		this.log("ast-grep not found, attempting auto-install...");
-		const { ensureTool } = await import("./installer/index.js");
-		const installedPath = await ensureTool("ast-grep");
+		// Step 4: install via the typed shared seam, then validate the returned
+		// absolute binary before publishing it.
+		const installed = await resolveManagedToolClient({
+			toolId: "ast-grep",
+			cwd: process.cwd(),
+			probe: async () => ({ outcome: "missing" as const }),
+			acceptInstalled: async (installedPath) =>
+				(await this.probeCommand(installedPath, [])) ? installedPath : null,
+		});
 
-		if (installedPath && (await this.probeCommand(installedPath, []))) {
-			this.sgPath = installedPath;
+		if (installed.outcome === "success") {
+			this.sgPath = installed.value;
 			this.sgArgsPrefix = [];
 			this.available = true;
-			this.log(`ast-grep auto-installed: ${installedPath}`);
+			this.log(`ast-grep auto-installed: ${installed.value}`);
 			return true;
 		}
 

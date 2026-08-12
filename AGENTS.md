@@ -130,6 +130,14 @@ tools/                    ast-grep-search, lsp-navigation tool handlers
 tests/                    Vitest test suite (mirrors clients/ structure)
 ```
 
+Managed-installable standalone clients resolve availability through
+`clients/dispatch/runners/utils/runner-helpers.ts`: use
+`createAvailabilityChecker` + `resolveAvailableOrInstall` for a single command,
+or `resolveManagedToolClient` when an ordered candidate chain must be preserved.
+Thread `getManagedToolEnvironment(tool, cwd)` into probes/spawns. Direct
+`ensureTool()` calls and bare managed-tool spawns outside the sanctioned wrapper
+surfaces are guarded by `tests/clients/managed-tool-seam-coverage.test.ts`.
+
 Installer package-manager and archive-extraction subprocesses must use
 `safeSpawnAsync` with `lifetimeCoupled: true` and `ignoreAmbientSignal: true`.
 This gives timeouts an awaited Windows tree-kill and prevents interrupted parent

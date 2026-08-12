@@ -14,6 +14,11 @@ import * as path from "node:path";
 import { getProjectDataDir } from "./file-utils.js";
 import { findNearestMarkerRoot } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import {
+	createAvailabilityChecker,
+	getManagedToolEnvironment,
+	resolveAvailableOrInstall,
+} from "./dispatch/runners/utils/runner-helpers.js";
 
 // --- Types ---
 
@@ -92,7 +97,17 @@ export function readOverridePinnedPackageNames(targetDir: string): Set<string> {
 // --- Client ---
 
 export class KnipClient {
+	private readonly knipAvailability = createAvailabilityChecker(
+		"knip",
+		".cmd",
+		["--version"],
+		{
+			environment: (cwd) => getManagedToolEnvironment("knip", cwd),
+			unclassifiedFailureOutcome: "missing",
+		},
+	);
 	private knipAvailable: boolean | null = null;
+	private knipCommand = "knip";
 	private ensureInFlight: Promise<boolean> | null = null;
 	private log: (msg: string) => void;
 
@@ -160,29 +175,14 @@ export class KnipClient {
 	}
 
 	private async doEnsureAvailable(): Promise<boolean> {
-		// Check if available in PATH (fast)
-		const pathResult = await safeSpawnAsync("knip", ["--version"], {
-			timeout: 5000,
-		});
-		if (!pathResult.error && pathResult.status === 0) {
-			this.knipAvailable = true;
-			this.log("Knip found in PATH");
-			return true;
-		}
-
-		// Auto-install via pi-lens installer
-		this.log("Knip not found, attempting auto-install...");
-		const { ensureTool } = await import("./installer/index.js");
-		const installedPath = await ensureTool("knip");
-
-		if (installedPath) {
-			this.knipAvailable = true;
-			this.log(`Knip auto-installed: ${installedPath}`);
-			return true;
-		}
-
-		this.knipAvailable = false;
-		return false;
+		const resolved = await resolveAvailableOrInstall(
+			this.knipAvailability,
+			"knip",
+			process.cwd(),
+		);
+		this.knipAvailable = resolved !== null;
+		if (resolved) this.knipCommand = resolved;
+		return this.knipAvailable;
 	}
 
 	/**
@@ -271,10 +271,10 @@ export class KnipClient {
 			cacheLocation,
 		];
 
-		const result = await safeSpawnAsync("knip", args, {
+		const result = await safeSpawnAsync(this.knipCommand, args, {
 			timeout: ANALYSIS_TIMEOUT_MS,
 			cwd: targetDir,
-			env: await this.getKnipEnvironment(targetDir),
+			env: await getManagedToolEnvironment("knip", targetDir),
 		});
 
 		if (result.error) {
@@ -338,21 +338,6 @@ export class KnipClient {
 		return unusedDeps.length === result.unusedDeps.length
 			? result
 			: { ...result, issues, unusedDeps };
-	}
-
-	private async getKnipEnvironment(targetDir: string): Promise<NodeJS.ProcessEnv> {
-		const { getToolEnvironment } = await import("./installer/index.js");
-		const env = await getToolEnvironment();
-		const separator = process.platform === "win32" ? ";" : ":";
-		const currentPath = env.PATH || env.Path || process.env.PATH || "";
-		const localBin = path.join(targetDir, "node_modules", ".bin");
-		const augmentedPath = `${localBin}${separator}${currentPath}`;
-
-		return {
-			...env,
-			PATH: augmentedPath,
-			...(process.platform === "win32" ? { Path: augmentedPath } : {}),
-		};
 	}
 
 	/**
