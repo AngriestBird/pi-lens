@@ -982,6 +982,7 @@ const TOOL_EXECUTION_POLICY = new Map<string, ToolExecutionPolicy>([
 	["trivy", { gate: "config-first", autoInstall: true }],
 	["biome", { gate: "smart-default", autoInstall: true }],
 	["ruff", { gate: "smart-default", autoInstall: true }],
+	["jscpd", { gate: "smart-default", autoInstall: true }],
 	["oxlint", { gate: "smart-default", autoInstall: true }],
 	["stylelint", { gate: "smart-default", autoInstall: true }],
 	["sqlfluff", { gate: "smart-default", autoInstall: true }],

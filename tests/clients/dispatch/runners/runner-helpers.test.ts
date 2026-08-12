@@ -165,6 +165,32 @@ describe("runner-helpers availability checker", () => {
 		expect(resolvedByToolId).toBeNull();
 	});
 
+	it("dedupes concurrent missing-tool probe and install transactions", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
+			stdout: "",
+			stderr: "not found",
+			status: 1,
+			error: Object.assign(new Error("missing"), { code: "ENOENT" }),
+			failure: "spawn",
+		});
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("ruff");
+		const checker = createAvailabilityChecker("ruff");
+
+		const results = await Promise.all(
+			Array.from({ length: 8 }, () =>
+				resolveAvailableOrInstall(checker, "ruff", process.cwd()),
+			),
+		);
+
+		expect(results).toEqual(Array(8).fill("ruff"));
+		expect(installerMod.ensureTool).toHaveBeenCalledTimes(1);
+		// Mutation verification: removing the shared resolve/install in-flight map
+		// makes this same test observe 8 ensureTool calls; the dedupe extension was
+		// temporarily reverted and the test was rerun before restoring the fix.
+	});
+
 	it("probes with custom versionArgs (e.g. `zig version`, not `--version`)", async () => {
 		// Regression guard for #209: zig rejects `--version` (its version
 		// subcommand is `zig version`), so the default probe made zig-check skip on

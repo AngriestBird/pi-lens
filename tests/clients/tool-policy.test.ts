@@ -1203,6 +1203,7 @@ describe("tool-policy", () => {
 		expect(shouldAutoInstallTool("golangci-lint")).toBe(true);
 		expect(shouldAutoInstallTool("phpstan")).toBe(false);
 		expect(shouldAutoInstallTool("ruff")).toBe(true);
+		expect(shouldAutoInstallTool("jscpd")).toBe(true);
 		expect(shouldAutoInstallTool("biome")).toBe(true);
 		expect(shouldAutoInstallTool("eslint")).toBe(false);
 		expect(shouldAutoInstallTool("unknown-tool")).toBe(false);

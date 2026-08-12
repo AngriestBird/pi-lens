@@ -14,6 +14,10 @@ All notable changes to pi-lens will be documented in this file.
 
 - **On-demand heap snapshots for retainer attribution ([#1126](https://github.com/apmantza/pi-lens/issues/1126))** — `PI_LENS_DEBUG_HEAP=1` makes `/lens-health` also write a V8 `.heapsnapshot` to `~/.pi-lens/` (plus a breadcrumb line in `heap-snapshots.log`), so the "which objects retain the bytes" follow-up to #1123's `memory_sample` trajectory is answerable on a live >1 GB instance without a fresh ad-hoc expedition. The flag is read once at startup and the writer mirrors `clients/debug-handles.ts`: zero cost + no file when unset, and the (synchronous, multi-second) snapshot is only ever triggered from the operator-invoked diagnostics command — never a hot path or timer. Snapshot files are pruned to the newest `SNAPSHOT_RETENTION` (3) after each write, bounding the growing on-disk axis (AGENTS.md shape 9). Auto-capture on an RSS threshold is a deliberately-deferred follow-up (it would reintroduce the pause onto an automatic path).
 
+### Changed
+
+- Ruff and jscpd availability now use the shared dispatch checker, including typed missing-command installation, in-flight dedupe, install-failure suppression, and session reset (refs [#1290](https://github.com/apmantza/pi-lens/issues/1290), phase 1; not closing the issue). The seam adds configurable probe timeout and a managed-command fast path to preserve jscpd's 1500ms PATH probe and managed-tools lookup.
+
 ### Fixed
 
 - **Managed ruff, jscpd, and madge installs are now actually used after auto-install (refs [#1289](https://github.com/apmantza/pi-lens/issues/1289))** — retain the absolute path returned by `ensureTool` so off-PATH managed shims are spawned directly instead of falling back to the bare command name.
