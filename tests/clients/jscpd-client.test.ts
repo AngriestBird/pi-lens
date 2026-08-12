@@ -11,7 +11,7 @@ vi.mock("../../clients/package-manager.js", () => ({ findNodeToolBinary }));
 
 vi.mock("../../clients/safe-spawn.js", () => ({
 	safeSpawnAsync: vi.fn(async () => ({
-		error: null,
+		error: undefined,
 		status: 0,
 		stdout: "",
 		stderr: "",
@@ -42,10 +42,12 @@ describe("jscpd-client", () => {
 					stdout: "",
 					stderr: "",
 				})
-				.mockResolvedValue({ error: null, status: 0, stdout: "", stderr: "" });
+				.mockResolvedValue({ error: undefined, status: 0, stdout: "", stderr: "" });
 			const result = await new JscpdClient().scan(tmpDir);
 			expect(result.success).toBe(true);
-			expect(safeSpawnMod.safeSpawnAsync.mock.calls[1]?.[0]).toBe(managed);
+			expect(vi.mocked(safeSpawnMod.safeSpawnAsync).mock.calls[1]?.[0]).toBe(
+				managed,
+			);
 		} finally {
 			cleanup();
 		}

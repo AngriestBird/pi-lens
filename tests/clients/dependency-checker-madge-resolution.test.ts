@@ -51,9 +51,9 @@ describe("DependencyChecker madge resolution (#766)", () => {
 		isSpawnableCommand.mockResolvedValue(true);
 		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
 			if (args[0] === "--version") {
-				return { status: 0, error: null, stdout: "madge 8.0.0", stderr: "" };
+				return { status: 0, error: undefined, stdout: "madge 8.0.0", stderr: "" };
 			}
-			return { status: 0, error: null, stdout: "[]", stderr: "" };
+			return { status: 0, error: undefined, stdout: "[]", stderr: "" };
 		});
 	});
 
@@ -138,7 +138,7 @@ describe("DependencyChecker madge resolution (#766)", () => {
 			async (_cmd: string, args: string[]) =>
 				args[0] === "--version"
 					? { status: 1, error: new Error("not found"), stdout: "", stderr: "" }
-					: { status: 0, error: null, stdout: "[]", stderr: "" },
+					: { status: 0, error: undefined, stdout: "[]", stderr: "" },
 		);
 
 		const { stats } = await new DependencyChecker().checkFilesBatch(

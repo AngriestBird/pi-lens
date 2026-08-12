@@ -29,7 +29,7 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
 		resolveProbe?.({
 			status: 0,
-			error: null,
+			error: undefined,
 			stdout: "ruff 0.6.0",
 			stderr: "",
 		});
@@ -67,7 +67,7 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 				stdout: "",
 				stderr: "",
 			})
-			.mockResolvedValue({ status: 0, error: null, stdout: "[]", stderr: "" });
+			.mockResolvedValue({ status: 0, error: undefined, stdout: "[]", stderr: "" });
 		ensureTool.mockResolvedValue(managed);
 		const { RuffClient } = await import("../../clients/ruff-client.js");
 		const client = new RuffClient();
