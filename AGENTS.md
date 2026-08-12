@@ -605,6 +605,14 @@ Do not hand-edit generated `.js`; regenerate it from the corresponding `.ts`. Th
 
 **All project-scoped persistent data must go through `getProjectDataDir(cwd)`** (`clients/file-utils.ts`).
 
+**Shared durable-store atomicity (#1202).** Atomic tmp+rename is crash/torn-read
+safety, not cross-process serialization. The full store classification lives in
+`docs/durable-store-audit-1202.md`. Behavior-gating read/modify/write state must
+lock, re-read under the lock, and merge only its delta; diagnostic dispositions
+are the reference synchronous implementation. Replaceable derived caches may
+remain explicitly best-effort only when freshness validation or the next scan
+self-heals the loss.
+
 ```typescript
 import { getProjectDataDir } from "./file-utils.js";
 const cacheFile = path.join(getProjectDataDir(cwd), "cache", "my-file.json");

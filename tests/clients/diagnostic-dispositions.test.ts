@@ -23,6 +23,7 @@ import {
 import {
 	_resetDeferredForTests,
 	_resetStateCacheForTests,
+	_setBeforeDispositionCommitForTests,
 	anchorsForDiagnostic,
 	applyDispositions,
 	applyWeakDispositions,
@@ -44,12 +45,14 @@ beforeEach(() => {
 	process.env.PILENS_DATA_DIR = path.join(tmpDir, "data");
 	_resetDeferredForTests();
 	_resetStateCacheForTests();
+	_setBeforeDispositionCommitForTests(null);
 	_resetDispositionPublishForTests();
 	_resetBusPublishForTests();
 	logDispositionEvent.mockClear();
 });
 
 afterEach(() => {
+	_setBeforeDispositionCommitForTests(null);
 	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 	else process.env.PILENS_DATA_DIR = previousDataDir;
 	if (originalBusEnv === undefined) delete process.env.PI_LENS_BUS_PUBLISH;
@@ -57,6 +60,44 @@ afterEach(() => {
 	_resetDispositionPublishForTests();
 	_resetBusPublishForTests();
 	removeTempDirSync(tmpDir);
+});
+
+describe("cross-process disposition commits (#1202)", () => {
+	it("refuses stale promotion and preserves an interleaved writer's delta", () => {
+		const first = {
+			cwd: cwd(),
+			filePath: filePath(),
+			tool: "eslint",
+			rule: "first-rule",
+			message: "first finding",
+			line: 1,
+			content: "const first = bad();\n",
+		};
+		const interleaved = {
+			...first,
+			rule: "second-rule",
+			message: "second finding",
+			content: "const second = bad();\n",
+		};
+
+		// The outer writer has already read its pre-commit view when this hook
+		// admits a sibling writer. Its eventual commit must re-read under lock,
+		// merge the sibling delta, and never promote the stale whole-file view.
+		let secondAnchor = "";
+		_setBeforeDispositionCommitForTests(() => {
+			secondAnchor = markDisposition(cwd(), interleaved, "flagged", "second");
+		});
+		const firstAnchor = markDisposition(cwd(), first, "false-positive", "first");
+
+		expect(getDisposition(cwd(), firstAnchor)).toMatchObject({
+			disposition: "false-positive",
+			reason: "first",
+		});
+		expect(getDisposition(cwd(), secondAnchor)).toMatchObject({
+			disposition: "flagged",
+			reason: "second",
+		});
+	});
 });
 
 function cwd(): string {

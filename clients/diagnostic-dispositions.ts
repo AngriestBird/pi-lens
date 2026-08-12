@@ -219,6 +219,63 @@ interface StateCache {
 }
 let stateCache: StateCache | null = null;
 
+const DISPOSITION_LOCK_WAIT_MS = 2_000;
+const DISPOSITION_LOCK_RETRY_MS = 10;
+const lockWaitArray = new Int32Array(new SharedArrayBuffer(4));
+
+let beforeDispositionCommitForTests: (() => void) | null = null;
+
+/** Test seam for deterministically interleaving two read-modify-write commits. */
+export function _setBeforeDispositionCommitForTests(
+	hook: (() => void) | null,
+): void {
+	beforeDispositionCommitForTests = hook;
+}
+
+function ownerPidIsLive(pid: number): boolean {
+	if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function acquireDispositionLock(p: string): () => void {
+	const lockPath = `${p}.lock`;
+	const deadline = Date.now() + DISPOSITION_LOCK_WAIT_MS;
+	for (;;) {
+		try {
+			const fd = fs.openSync(lockPath, "wx");
+			fs.writeFileSync(fd, String(process.pid), "utf8");
+			fs.closeSync(fd);
+			return () => {
+				try {
+					fs.unlinkSync(lockPath);
+				} catch {
+					// The protected write has already completed; cleanup is best-effort.
+				}
+			};
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			try {
+				const ownerPid = Number.parseInt(fs.readFileSync(lockPath, "utf8"), 10);
+				if (!ownerPidIsLive(ownerPid)) {
+					fs.unlinkSync(lockPath);
+					continue;
+				}
+			} catch (lockError) {
+				if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
+			}
+			if (Date.now() >= deadline) {
+				throw new Error("timed out acquiring diagnostic disposition store lock");
+			}
+			Atomics.wait(lockWaitArray, 0, 0, DISPOSITION_LOCK_RETRY_MS);
+		}
+	}
+}
+
 function readState(cwd: string): DispositionStateFile {
 	const p = statePath(cwd);
 	let stat: fs.Stats;
@@ -268,6 +325,17 @@ function readState(cwd: string): DispositionStateFile {
 	return state;
 }
 
+function readStateFromDisk(cwd: string): DispositionStateFile {
+	try {
+		const parsed = JSON.parse(fs.readFileSync(statePath(cwd), "utf8")) as unknown;
+		return parsed && typeof parsed === "object"
+			? (parsed as DispositionStateFile)
+			: {};
+	} catch {
+		return {};
+	}
+}
+
 // Atomic tmp+rename via clients/atomic-write.ts (#762; shared with
 // instance-registry.ts / recent-touches.ts / review-graph/builder.ts): a
 // cross-process reader must never observe a partially-written file —
@@ -294,6 +362,30 @@ function writeState(cwd: string, state: DispositionStateFile): void {
 		size: stat.size,
 		state,
 	};
+}
+
+function commitDisposition(
+	cwd: string,
+	anchor: string,
+	entry: DispositionEntry,
+): void {
+	const p = statePath(cwd);
+	fs.mkdirSync(path.dirname(p), { recursive: true });
+	const hook = beforeDispositionCommitForTests;
+	beforeDispositionCommitForTests = null;
+	hook?.();
+	const release = acquireDispositionLock(p);
+	try {
+		// Re-read while holding the cross-process lock. Atomic rename alone only
+		// prevents torn JSON; this merge prevents a stale writer from promoting
+		// its old snapshot over dispositions committed by a sibling process.
+		const state = readStateFromDisk(cwd);
+		state.dispositions ??= {};
+		state.dispositions[anchor] = entry;
+		writeState(cwd, state);
+	} finally {
+		release();
+	}
 }
 
 /** Test-only escape hatch — the state cache is module-level, so tests that
@@ -382,8 +474,6 @@ export function markDisposition(
 		return anchor;
 	}
 
-	const state = readState(cwd);
-	state.dispositions ??= {};
 	const now = new Date().toISOString();
 	const capturesFixContext = disposition === "flagged";
 	const lineText = capturesFixContext
@@ -391,7 +481,7 @@ export function markDisposition(
 				target.line !== undefined ? target.line - 1 : -1
 			] ?? existing?.lineText)?.trim()
 		: existing?.lineText;
-	state.dispositions[anchor] = {
+	const entry: DispositionEntry = {
 		disposition,
 		reason: reason ?? existing?.reason,
 		createdAt: existing?.createdAt ?? now,
@@ -399,7 +489,7 @@ export function markDisposition(
 		line: capturesFixContext ? (target.line ?? existing?.line) : existing?.line,
 		lineText,
 	};
-	writeState(cwd, state);
+	commitDisposition(cwd, anchor, entry);
 	return anchor;
 }
 
