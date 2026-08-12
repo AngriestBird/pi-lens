@@ -14,6 +14,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "./file-utils.js";
+import { writeFileAtomic } from "./atomic-write.js";
 import { parseSymbolKey } from "./call-graph.js";
 import type { FunctionCallGraph, SymbolKey } from "./call-graph.js";
 
@@ -175,11 +176,10 @@ export function saveCodebaseModel(cwd: string, model: CodebaseModel): void {
 	const cacheFile = cacheFilePath(cwd);
 	try {
 		fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
-		fs.writeFileSync(cacheFile, JSON.stringify(model), "utf-8");
-		fs.writeFileSync(
+		writeFileAtomic(cacheFile, JSON.stringify(model));
+		writeFileAtomic(
 			metaFilePath(cwd),
 			JSON.stringify({ savedAt: new Date().toISOString(), entryCount: model.entries.length, totalTokens: model.totalTokens }),
-			"utf-8",
 		);
 	} catch {
 		// Non-fatal — next session rebuilds.

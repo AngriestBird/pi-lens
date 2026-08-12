@@ -11,6 +11,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "./file-utils.js";
+import { writeFileAtomic } from "./atomic-write.js";
 import { parseSymbolKey as parseCanonicalSymbolKey } from "./review-graph/symbol-id.js";
 import { normalizeMapKey, toProjectRelativePath } from "./path-utils.js";
 import type {
@@ -576,11 +577,10 @@ export function saveCallGraph(
 			unresolvedRefs: graph.unresolvedRefs,
 			coverage: graph.coverage,
 		};
-		fs.writeFileSync(cacheFile, JSON.stringify(persisted), "utf-8");
-		fs.writeFileSync(
+		writeFileAtomic(cacheFile, JSON.stringify(persisted));
+		writeFileAtomic(
 			metaFile,
 			JSON.stringify({ savedAt: new Date().toISOString(), edgeCount: graph.edges.length }),
-			"utf-8",
 		);
 	} catch {
 		// Non-fatal — next session rebuilds from scratch.
@@ -806,4 +806,3 @@ export function loadCallGraph(
 		return undefined;
 	}
 }
-

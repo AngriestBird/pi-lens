@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "../file-utils.js";
+import { writeFileAtomic } from "../atomic-write.js";
 import { readJsonCache } from "../json-cache-read.js";
 import type {
 	ProjectDiagnosticsDeltaReport,
@@ -39,7 +40,7 @@ export function saveProjectDiagnosticsSnapshot(
 ): void {
 	const filePath = cachePath(cwd, SNAPSHOT_CACHE_FILE);
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-	fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2));
+	writeFileAtomic(filePath, JSON.stringify(snapshot, null, 2));
 }
 
 export function loadProjectDiagnosticsDeltaReport(
@@ -64,7 +65,7 @@ export function writeProjectDiagnosticsDeltaReport(
 ): void {
 	const filePath = cachePath(cwd, DELTA_CACHE_FILE);
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-	fs.writeFileSync(filePath, JSON.stringify(report, null, 2));
+	writeFileAtomic(filePath, JSON.stringify(report, null, 2));
 }
 
 /**

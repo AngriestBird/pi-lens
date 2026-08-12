@@ -495,6 +495,56 @@ describe("SgRunner", () => {
 			expect(result.matches).toEqual([]);
 			expect(result.error).toContain("bad rule");
 		});
+
+		it("reports a failure for exit 2 even when stdout parses as match JSON", async () => {
+			// Only exit 1 carries the "scan succeeded with findings" linter
+			// contract — any other nonzero exit is a real CLI failure and must
+			// NOT be laundered into matches, however plausible stdout looks.
+			safeSpawnAsync.mockResolvedValueOnce({
+				status: 2,
+				error: undefined,
+				stdout: JSON.stringify([
+					{
+						file: "src/a.js",
+						range: {
+							start: { line: 0, column: 0 },
+							end: { line: 0, column: 7 },
+						},
+						text: "eval(x)",
+					},
+				]),
+				stderr: "Error: invalid scan configuration",
+			});
+			const { SgRunner } = await import("../../clients/sg-runner.js");
+			const result = await new SgRunner().exec(["scan", "--json", "."]);
+			expect(result.matches).toEqual([]);
+			expect(result.error).toContain("invalid scan configuration");
+		});
+
+		it("treats truncated status-1 stdout as a failure, not as matches", async () => {
+			// A truncated JSON payload may still happen to parse (e.g. cut
+			// exactly at a match boundary) — the truncation flag must veto it.
+			safeSpawnAsync.mockResolvedValueOnce({
+				status: 1,
+				error: undefined,
+				stdout: JSON.stringify([
+					{
+						file: "src/a.js",
+						range: {
+							start: { line: 0, column: 0 },
+							end: { line: 0, column: 7 },
+						},
+						text: "eval(x)",
+					},
+				]),
+				stderr: "Scan succeeded and found error level diagnostics",
+				outputTruncated: true,
+			});
+			const { SgRunner } = await import("../../clients/sg-runner.js");
+			const result = await new SgRunner().exec(["scan", "--json", "."]);
+			expect(result.matches).toEqual([]);
+			expect(result.error).toBeDefined();
+		});
 	});
 
 	describe("buildBashRunArgs (Git Bash exec path — injection safety, code-scanning #12)", () => {

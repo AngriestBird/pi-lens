@@ -58,6 +58,70 @@ describe("Windows command resolution against a child environment (#1199)", () =>
 		expect(resolved).toEqual({ resolvedPath: managedKnip, ext: ".cmd" });
 	});
 
+	/**
+	 * #1221 / #1289: RESOLVER-LEVEL locks only. #1199's acceptance criteria
+	 * asked for managed-npm-path coverage of Knip, Madge, jscpd, and Biome —
+	 * but today only Knip's client actually constructs a managed environment
+	 * and threads it into its spawn (`getKnipEnvironment`); the madge/jscpd
+	 * availability probes pass no `env` at all, and Biome resolves through
+	 * `npx`, never a bare `biome` (#1289 tracks that plumbing gap). Until
+	 * #1289 lands, client-level tests asserting managed-env spawn options are
+	 * unwritable, so these cases lock the RESOLVER seam those clients will be
+	 * routed through: caller-supplied PATH is consulted, ambient
+	 * `process.env.PATH` is not. The first block has regression teeth (a
+	 * resolver reverted to ambient `process.env.PATH`, the pre-#1199 defect in
+	 * `f7387277~1`, finds no file and returns `null`); the second block is an
+	 * INVARIANT LOCK — it also passes on the pre-#1199 resolver (which finds
+	 * nothing under the mocked fs either) and exists to pin caller-PATH
+	 * authority against future additive-merge regressions.
+	 */
+	it.each(["madge", "jscpd", "biome"])(
+		"resolver-level: resolves the %s managed-bin shape from caller PATH, not ambient PATH",
+		(tool) => {
+			const ambientBin = winAbsolute("ambient", "node_modules", ".bin");
+			const managedBin = winAbsolute("managed", "node_modules", ".bin");
+			const managedShim = path.win32.join(managedBin, `${tool}.cmd`);
+			markFilesAsPresent(managedShim);
+
+			const toolEnv = mergeWindowsEnvironment(
+				{ PATH: ambientBin, Path: ambientBin, PATHEXT: ".EXE" },
+				{ PATH: managedBin, Path: managedBin, PATHEXT: ".CMD;.EXE" },
+			);
+			const resolved = resolveWindowsCommandForEnvironment(
+				tool,
+				winAbsolute("workspace", "project"),
+				toolEnv,
+			);
+
+			expect(resolved).toEqual({ resolvedPath: managedShim, ext: ".cmd" });
+		},
+	);
+
+	it.each(["madge", "jscpd", "biome"])(
+		"invariant lock: never falls back to an ambient %s shim once a caller PATH is supplied",
+		(tool) => {
+			// The inverse of the case above: an ambient-only shim (nothing in the
+			// caller-supplied managed PATH) must NOT resolve, proving the caller
+			// PATH is authoritative rather than merely additive/ignored.
+			const ambientBin = winAbsolute("ambient", "node_modules", ".bin");
+			const managedBin = winAbsolute("managed", "node_modules", ".bin");
+			markFilesAsPresent(path.win32.join(ambientBin, `${tool}.cmd`));
+
+			const toolEnv = mergeWindowsEnvironment(
+				{ PATH: ambientBin, Path: ambientBin, PATHEXT: ".EXE" },
+				{ PATH: managedBin, Path: managedBin, PATHEXT: ".CMD;.EXE" },
+			);
+
+			expect(
+				resolveWindowsCommandForEnvironment(
+					tool,
+					winAbsolute("workspace", "project"),
+					toolEnv,
+				),
+			).toBeNull();
+		},
+	);
+
 	it("lets a caller PATH override every ambient PATH/Path casing and emits one key", () => {
 		const ambient = { PATH: "ambient-path", Path: "ambient-duplicate" };
 		const merged = mergeWindowsEnvironment(ambient, { pAtH: "caller-path" });
