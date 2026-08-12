@@ -54,19 +54,25 @@ describe("review-graph worker supersession (#1318)", () => {
 		vi.stubEnv("PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS", "0");
 		vi.stubEnv("PI_LENS_TEST_PERSIST_WORKER_DELAY_MS", "400");
 
-		const realSetImmediate = globalThis.setImmediate;
 		const first = await buildOrUpdateGraph(cwd, oldFiles, facts);
 		expect(getReviewGraphWorkerFallbackReasonForTests()).toBeUndefined();
-		// Generation 1 is now suspended in the delayed worker write. Give the
-		// main thread one real cooperative turn, then start generation 2 without
-		// any timing assumption or sampling loop.
-		await new Promise<void>((resolve) => realSetImmediate(resolve));
-		fs.writeFileSync(newerFile, "export const newerGenerationObservable = true;\n");
-		// Let generation 2 finish first; generation 1 remains the delayed loser.
-		vi.stubEnv("PI_LENS_TEST_PERSIST_WORKER_DELAY_MS", "0");
-		clearReviewGraphWorkspaceCache();
-		clearGraphCache();
-		const second = await buildOrUpdateGraph(cwd, [newerFile], facts);
+		// Generation 1 is now suspended in the delayed worker write. Start
+		// generation 2 from the next setImmediate callback, deterministically,
+		// while generation 1 remains in flight.
+		const realSetImmediate = globalThis.setImmediate;
+		let secondBuild: ReturnType<typeof buildOrUpdateGraph> | undefined;
+		vi.spyOn(globalThis, "setImmediate").mockImplementation((callback, ...args) => {
+			if (!secondBuild) {
+				fs.writeFileSync(newerFile, "export const newerGenerationObservable = true;\n");
+				vi.stubEnv("PI_LENS_TEST_PERSIST_WORKER_DELAY_MS", "0");
+				clearReviewGraphWorkspaceCache();
+				clearGraphCache();
+				secondBuild = buildOrUpdateGraph(cwd, [newerFile], facts);
+			}
+			return realSetImmediate(callback, ...args);
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		const second = await secondBuild!;
 		expect(first.nodes.size).toBeGreaterThan(0);
 		expect(second.buildGeneration).not.toBe(first.buildGeneration);
 		expect([...second.fileNodes.keys()]).toContain(newerFile.replaceAll("\\", "/"));
