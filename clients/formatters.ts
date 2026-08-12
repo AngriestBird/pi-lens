@@ -87,6 +87,19 @@ export async function tryLazyInstallFormatterTool(
 
 // --- Types ---
 
+/**
+ * Sentinel a `resolveCommand` returns to mean "do not format this file at
+ * all" — distinct from `null`, which means "fall back to the static
+ * `command`". #1144's style-preserving resolvers return this when the repo
+ * has no config AND the file's indentation is undetectable: running the
+ * stock command there is exactly the stock-style imposition the fix bans.
+ */
+export const SKIP_FORMATTING = "skip-formatting" as const;
+export type ResolvedFormatterCommand =
+	| string[]
+	| null
+	| typeof SKIP_FORMATTING;
+
 export interface FormatterInfo {
 	name: string;
 	command: string[]; // Command with $FILE placeholder — used as fallback
@@ -100,7 +113,10 @@ export interface FormatterInfo {
 	 * Return null to fall back to the static `command` field.
 	 * filePath is already resolved to an absolute path.
 	 */
-	resolveCommand?(filePath: string, cwd: string): Promise<string[] | null>;
+	resolveCommand?(
+		filePath: string,
+		cwd: string,
+	): Promise<ResolvedFormatterCommand>;
 	/**
 	 * Treat a nonzero exit as a formatting failure. Off by default: the
 	 * lint-autofix formatters (`rubocop -a`, `ktlint -F`, `standardrb --fix`,
@@ -394,7 +410,7 @@ export const biomeFormatter: FormatterInfo = {
 			? ["--use-editorconfig=true"]
 			: [];
 		const styleArgs = await indentationArgs(filePath, "biome", cwd);
-		if (styleArgs === null) return null;
+		if (styleArgs === null) return SKIP_FORMATTING;
 		const local = await findInNodeModules("biome", cwd);
 		if (local)
 			return [local, "format", "--write", ...editorConfigFlag, ...styleArgs, filePath];
@@ -443,7 +459,7 @@ export const prettierFormatter: FormatterInfo = {
 	command: ["npx", "prettier", "--write", "$FILE"],
 	async resolveCommand(filePath, cwd) {
 		const styleArgs = await indentationArgs(filePath, "prettier", cwd);
-		if (styleArgs === null) return null;
+		if (styleArgs === null) return SKIP_FORMATTING;
 		const args = ["--write", ...styleArgs];
 		const local = await findInNodeModules("prettier", cwd);
 		if (local) return [local, ...args, filePath];
@@ -524,7 +540,7 @@ export const ruffFormatter: FormatterInfo = {
 	extensions: [".py", ".pyi"],
 	async resolveCommand(filePath, cwd) {
 		const styleArgs = await indentationArgs(filePath, "ruff", cwd);
-		if (styleArgs === null) return null;
+		if (styleArgs === null) return SKIP_FORMATTING;
 		const args = ["format", ...styleArgs];
 		const venv = await findInVenv("ruff", cwd);
 		if (venv) return [venv, ...args, filePath];
@@ -626,7 +642,7 @@ export const shfmtFormatter: FormatterInfo = {
 	extensions: [".sh", ".bash"],
 	async resolveCommand(filePath, cwd) {
 		const styleArgs = await indentationArgs(filePath, "shfmt", cwd);
-		if (styleArgs === null) return null;
+		if (styleArgs === null) return SKIP_FORMATTING;
 		const inPath = await which("shfmt");
 		if (inPath) return [inPath, "-w", ...styleArgs, filePath];
 		return resolveManagedSmartDefaultCommand("shfmt", filePath, ["-w", ...styleArgs]);
@@ -1149,6 +1165,11 @@ export async function formatFile(
 		const resolved = formatter.resolveCommand
 			? await formatter.resolveCommand(absolutePath, cwd)
 			: null;
+		if (resolved === SKIP_FORMATTING) {
+			// Style-preserving refusal (#1144): no repo config and no detectable
+			// indentation to pin — formatting would impose the tool's stock style.
+			return { success: true, changed: false };
+		}
 		const cmd =
 			resolved ??
 			formatter.command.map((c) => c.replace("$FILE", absolutePath));

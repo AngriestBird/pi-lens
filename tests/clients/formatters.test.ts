@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	SKIP_FORMATTING,
 	biomeFormatter,
 	blackFormatter,
 	clearFormatterRuntimeState,
@@ -156,7 +157,9 @@ describe("resolveCommand — node_modules/.bin", () => {
 		const filePath = fileIn(tmpDir, "app.tsx");
 		fs.writeFileSync(filePath, "const value = 1;\n");
 
-		expect(await prettierFormatter.resolveCommand!(filePath, tmpDir)).toBeNull();
+		expect(await prettierFormatter.resolveCommand!(filePath, tmpDir)).toBe(
+			SKIP_FORMATTING,
+		);
 	});
 });
 
@@ -198,7 +201,9 @@ describe("resolveCommand — .venv", () => {
 		const filePath = fileIn(tmpDir, "main.py");
 		fs.writeFileSync(filePath, "value = 1\n");
 
-		expect(await ruffFormatter.resolveCommand!(filePath, tmpDir)).toBeNull();
+		expect(await ruffFormatter.resolveCommand!(filePath, tmpDir)).toBe(
+			SKIP_FORMATTING,
+		);
 	});
 
 	it("ruff: falls back to discovered global install when no venv binary", async () => {
