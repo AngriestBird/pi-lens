@@ -14,6 +14,7 @@ import {
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import { logActionableWarningsEvent } from "./actionable-warnings-logger.js";
 import { getProjectDataDir } from "./file-utils.js";
+import { writeFileAtomic } from "./atomic-write.js";
 
 export interface ActionableWarningAction {
 	title: string;
@@ -184,7 +185,7 @@ function updateWarningState(
 		};
 	}
 	fs.mkdirSync(path.dirname(statePath), { recursive: true });
-	fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+	writeFileAtomic(statePath, JSON.stringify(state, null, 2));
 }
 
 function suppressionFor(

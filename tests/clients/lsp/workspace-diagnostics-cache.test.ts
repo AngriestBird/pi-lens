@@ -464,3 +464,44 @@ describe("runWorkspaceDiagnostics cache integration (#671)", () => {
 		expect(waitCalls.length).toBeGreaterThan(0);
 	});
 });
+
+// #1239: the save path routes through writeFileAtomic. Its bestEffort default
+// swallows write failures, which would silently break persist()'s contract
+// that a failed write leaves `dirty` set so the NEXT sweep retries — the
+// save must pass bestEffort: false so the failure reaches persist()'s catch.
+describe("persist() write-failure retry (#1239)", () => {
+	it("a failed atomic write keeps the entry dirty and the next persist() retries it", () => {
+		const filePath = path.join(tmp, "a.ts");
+		fs.writeFileSync(filePath, "const a = 1;\n");
+		const mtimeMs = fs.statSync(filePath).mtimeMs;
+
+		// Occupy the cache file's target path with a DIRECTORY: the atomic
+		// tmp-write-then-rename cannot replace a directory on any OS, so the
+		// save deterministically fails without mocks.
+		const target = path.join(
+			tmp,
+			".pi-lens",
+			"cache",
+			"lsp-workspace-diagnostics.json",
+		);
+		fs.mkdirSync(target, { recursive: true });
+
+		const ctx = createWorkspaceDiagnosticsCacheContext(tmp);
+		ctx.record(filePath, "all|", [], mtimeMs);
+		// The failure is contained (sweeps never fail on cache writes)...
+		expect(() => ctx.persist()).not.toThrow();
+		expect(loadWorkspaceDiagnosticsCache(tmp)).toBeUndefined();
+
+		// ...but it must NOT count as success: clear the obstruction and the
+		// SAME context's next persist() must still write the entry. Pre-fix,
+		// bestEffort swallowed the failure, `dirty` was cleared, and this
+		// second persist() was a silent no-op.
+		fs.rmdirSync(target);
+		ctx.persist();
+		const persisted = loadWorkspaceDiagnosticsCache(tmp);
+		expect(persisted?.entries[cacheKeyFor(filePath)]).toMatchObject({
+			mtimeMs,
+			scopeKey: "all|",
+		});
+	});
+});
