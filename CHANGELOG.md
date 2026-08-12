@@ -20,6 +20,8 @@ All notable changes to pi-lens will be documented in this file.
 
 - **Shared durable-store and atomic-stage protocols (refs #1212, closes #1209)** — diagnostic dispositions and actionable-warning suppression now use one locked in-lock-reread/merge/throwing-atomic-write commit seam, while one staging namespace module owns `.tmp-<pid>-<threadId>-<seq>` minting, classification, and bounded own-stage sweeping. The installer probe cache retains its older quarantine-aware install lock; folding that richer protocol remains deferred under #1212.
 
+- **Standalone managed-tool clients share one typed availability/install seam (closes [#1290](https://github.com/apmantza/pi-lens/issues/1290), refs [#1214](https://github.com/apmantza/pi-lens/issues/1214))** — madge, Knip, Biome, and ast-grep now join Ruff/jscpd behind runner helpers. Single-command clients use the cached typed checker; ordered-candidate clients retain their local/global/npx/platform search through a typed custom-probe wrapper. The seam also owns managed child environments and read-only discovery, while a source coverage test rejects direct `ensureTool()` calls or bare managed-tool spawns outside sanctioned wrappers. Raw ENOENT consumers in `lsp/launch.ts` remain for #1214's safe-spawn-wide taxonomy.
+
 - **Cooperative word-index startup work (closes #1224, closes #1225, closes #1226, refs #1215)** — centralizes monotonic event-loop work budgets, time-budgets shared source walking and word-index reads, yields within high-document-frequency posting filters while publishing each replacement atomically, and reuses the bounded refresh preflight file/stat set for full rebuilds instead of walking and stating it twice.
 
 - Ruff and jscpd availability now use the shared dispatch checker, including typed missing-command installation, in-flight dedupe, install-failure suppression, and session reset (refs [#1290](https://github.com/apmantza/pi-lens/issues/1290), phase 1; not closing the issue). The seam adds configurable probe timeout and a managed-command fast path to preserve jscpd's 1500ms PATH probe and managed-tools lookup.
@@ -27,6 +29,8 @@ All notable changes to pi-lens will be documented in this file.
 ### Fixed
 
 - **Kotlin formatter selection follows Spotless configuration deterministically (closes #1306)** — a Spotless `kotlin { ktlint() }` block pins ktlint and `kotlin { ktfmt() }` pins ktfmt, so both selection branches cannot claim the same Kotlin file and unconfigured projects retain the style-preserving no-format policy.
+
+- **Managed npm clients see and execute off-PATH installs (closes [#1289](https://github.com/apmantza/pi-lens/issues/1289))** — madge and Knip availability probes receive the managed environment, Knip threads the same environment into analysis, Biome checks the managed absolute candidate before its npx fallback, and every install result is retained as the command used by the client.
 
 - **Turn-end madge telemetry stays compact and its batch metadata is runtime-tested (closes [#1250](https://github.com/apmantza/pi-lens/issues/1250), [#1251](https://github.com/apmantza/pi-lens/issues/1251))** — aggregate batch counters remain exact, while per-target timing breadcrumbs are retained only for spawns taking at least 100 ms and capped at 12 slow targets, preserving the smells-rollup lookback; the real turn-end path now verifies madge batch execution and metadata propagation.
 
