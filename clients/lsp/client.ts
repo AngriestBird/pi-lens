@@ -96,6 +96,13 @@ export interface LSPDiagnostic {
 	source?: string;
 }
 
+export interface LSPPullFailure {
+	timestamp: number;
+	method: "textDocument/diagnostic" | "workspace/diagnostic";
+	code?: number | string;
+	message: string;
+}
+
 export interface LSPLocation {
 	uri: string;
 	range: {
@@ -257,6 +264,8 @@ export interface LSPClientInfo {
 	getExitedAt: () => number | undefined;
 	/** Last N lines of server stderr for diagnostics */
 	recentStderr: (lines?: number) => string;
+	/** Bounded operational pull failures; unsupported-method errors are omitted. */
+	getPullFailureHistory?: () => LSPPullFailure[];
 	/** Pre-request health check — returns error string if process is dead */
 	checkAlive: () => string | undefined;
 	/**
@@ -651,6 +660,8 @@ export interface LSPClientState {
 	readonly pushDiagnosticTimestamps: Map<string, number>;
 	readonly documentPullDiagnostics: Map<string, LSPDiagnostic[]>;
 	readonly documentPullDiagnosticTimestamps: Map<string, number>;
+	/** Most recent operational pull failures, capped to avoid unbounded telemetry. */
+	readonly pullFailureHistory: LSPPullFailure[];
 	readonly pendingDiagnostics: Map<string, ReturnType<typeof setTimeout>>;
 	readonly diagnosticEmitter: EventEmitter;
 	diagnosticsVersion: number;
@@ -697,6 +708,8 @@ export interface LSPClientState {
 		}
 	>;
 	readonly openDocuments: Set<string>;
+	/** Paths explicitly closed during this client lifetime; late publishes are dropped. */
+	readonly closedDocuments?: Set<string>;
 	/** Original URI spelling for each open document; path keys are normalized. */
 	readonly openDocumentUris?: Map<string, string>;
 	readonly pendingOpens: Set<string>;
@@ -1164,6 +1177,10 @@ export function setupIncomingHandlers(
 		}) => {
 			const filePath = uriToPath(params.uri);
 			const normalizedPath = normalizeMapKey(filePath);
+			// A server can flush a queued publish after didClose during teardown.
+			// Do not resurrect diagnostics or their content binding for a document
+			// that is no longer open on this client.
+			if (state.closedDocuments?.has(normalizedPath)) return;
 			const newDiags = normalizeLspDiagnostics(params.diagnostics || []);
 			const docVersion = params.version;
 			if (PUB_DEBUG) {
@@ -1473,7 +1490,10 @@ async function clientRequestPullDiagnostics(
 			Math.max(1, Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs)),
 		);
 
-		if (!report) return { status: "unavailable" };
+		if (!report) {
+			recordPullFailure(state, "textDocument/diagnostic", new Error("empty response"));
+			return { status: "unavailable" };
+		}
 
 		const now = Date.now();
 		// #1104: the fingerprint of the content we last sent for this document —
@@ -1539,8 +1559,37 @@ async function clientRequestPullDiagnostics(
 		return totalCount > 0
 			? { status: "found", count: totalCount }
 			: { status: "clean" };
-	} catch {
+	} catch (err) {
+		recordPullFailure(state, "textDocument/diagnostic", err);
 		return { status: "unavailable" };
+	}
+}
+
+const PULL_FAILURE_HISTORY_LIMIT = 10;
+
+function recordPullFailure(
+	state: LSPClientState,
+	method: LSPPullFailure["method"],
+	error: unknown,
+): void {
+	const candidate = error as { code?: unknown; message?: unknown };
+	if (candidate.code === -32601 || candidate.code === "-32601") return;
+	state.pullFailureHistory.push({
+		timestamp: Date.now(),
+		method,
+		...(typeof candidate.code === "number" || typeof candidate.code === "string"
+			? { code: candidate.code }
+			: {}),
+		message:
+			typeof candidate.message === "string"
+				? candidate.message
+				: String(error),
+	});
+	if (state.pullFailureHistory.length > PULL_FAILURE_HISTORY_LIMIT) {
+		state.pullFailureHistory.splice(
+			0,
+			state.pullFailureHistory.length - PULL_FAILURE_HISTORY_LIMIT,
+		);
 	}
 }
 
@@ -1638,7 +1687,8 @@ export async function clientRequestWorkspaceDiagnostics(
 			out.push({ filePath, diagnostics, contentHash });
 		}
 		return out;
-	} catch {
+	} catch (err) {
+		recordPullFailure(state, "workspace/diagnostic", err);
 		return undefined;
 	}
 }
@@ -1854,6 +1904,7 @@ export async function handleNotifyOpen(
 	recordSentContent(state, normalizedPath, 0, content);
 	state.pendingOpens.delete(normalizedPath);
 	state.openDocuments.add(normalizedPath);
+	state.closedDocuments?.delete(normalizedPath);
 	state.openDocumentUris?.set(normalizedPath, uri);
 }
 
@@ -2400,6 +2451,7 @@ export async function createLSPClient(options: {
 		pushDiagnosticTimestamps: new Map(),
 		documentPullDiagnostics: new Map(),
 		documentPullDiagnosticTimestamps: new Map(),
+		pullFailureHistory: [],
 		pendingDiagnostics: new Map(),
 		diagnosticEmitter,
 		diagnosticsVersion: 0,
@@ -2410,6 +2462,7 @@ export async function createLSPClient(options: {
 		pullResultIds: new Map(),
 		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
+		closedDocuments: new Set(),
 		openDocumentUris: new Map(),
 		pendingOpens: new Set(),
 		// these are filled in after initialize — cast to avoid two-phase init
@@ -2571,6 +2624,7 @@ export async function createLSPClient(options: {
 
 		/** Last N lines of server stderr for diagnostics. */
 		recentStderr: (lines?: number) => recentStderr(lines),
+		getPullFailureHistory: () => [...state.pullFailureHistory],
 
 		/** Pre-request health check — returns error string if dead. */
 		checkAlive: () => checkProcessAlive(),
@@ -2867,6 +2921,7 @@ export async function createLSPClient(options: {
 				},
 			});
 			state.openDocuments.delete(normalizedPath);
+			state.closedDocuments?.add(normalizedPath);
 			state.openDocumentUris?.delete(normalizedPath);
 			state.documentVersions.delete(normalizedPath);
 			clearDiagnosticsForPath(state, normalizedPath);

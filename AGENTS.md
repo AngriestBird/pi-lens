@@ -96,6 +96,10 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 ## What it is
 
+The LSP status surface includes a bounded per-client history of operational
+diagnostic-pull failures; unsupported `-32601` responses are intentionally
+excluded. Strategy-gated `didSave` remains separate and out of scope here.
+
 Rule-id normalization derives its language suffixes from the bundled CodeRabbit rule tree at startup; tests must keep that derived set covered so new vendored language rules cannot silently evade project policy matching.
 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.

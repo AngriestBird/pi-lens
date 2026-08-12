@@ -414,6 +414,7 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 		pushDiagnosticTimestamps: new Map(),
 		documentPullDiagnostics: new Map(),
 		documentPullDiagnosticTimestamps: new Map(),
+		pullFailureHistory: [],
 		pendingDiagnostics: new Map(),
 		diagnosticEmitter,
 		diagnosticsVersion: 0,
@@ -424,6 +425,7 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 		pullResultIds: new Map(),
 		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
+		closedDocuments: new Set(),
 		pendingOpens: new Set(),
 		workspaceDiagnosticsSupport: {
 			advertised: false,
@@ -1455,6 +1457,110 @@ describe("clientRequestWorkspaceDiagnostics content binding (#1104)", () => {
 		} finally {
 			fs.rmSync(filePath, { force: true });
 		}
+	});
+});
+
+describe("pull fallback honesty + failure telemetry (#1292)", () => {
+	it("keeps push diagnostics visible after an operational pull failure", async () => {
+		const state = createMockState({
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: false,
+				diagnosticProviderKind: "boolean",
+			},
+		});
+		state.pushDiagnostics.set(TEST_KEY, [
+			{
+				severity: 1,
+				message: "push result",
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 1 },
+				},
+			},
+		]);
+		state.connection.sendRequest = vi
+			.fn()
+			.mockRejectedValue(Object.assign(new Error("server unavailable"), { code: 500 }));
+
+		await clientWaitForDiagnostics(state, TEST_FILE, 50);
+
+		expect(state.pushDiagnostics.get(TEST_KEY)?.[0]?.message).toBe("push result");
+		expect(state.pullFailureHistory.length).toBeGreaterThanOrEqual(1);
+		expect(state.pullFailureHistory[0]).toMatchObject({
+			method: "textDocument/diagnostic",
+			code: 500,
+			message: "server unavailable",
+		});
+	});
+
+	it("does not record an unsupported-method response as an operational failure", async () => {
+		const state = createMockState({
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: false,
+				diagnosticProviderKind: "boolean",
+			},
+		});
+		state.connection.sendRequest = vi.fn().mockRejectedValue(
+			Object.assign(new Error("Method not found"), { code: -32601 }),
+		);
+
+		await clientWaitForDiagnostics(state, TEST_FILE, 20);
+
+		expect(state.pullFailureHistory).toHaveLength(0);
+	});
+});
+
+describe("shutdown protocol race fixture (#1292)", () => {
+	it("handles dynamic registration and ignores a late publish after didClose", async () => {
+		const state = createMockState();
+		state.openDocuments.add(TEST_KEY);
+		state.documentVersions.set(TEST_KEY, 1);
+		setupIncomingHandlers(state, {});
+		const notifications = vi.mocked(state.connection.onNotification).mock.calls as unknown as Array<
+			[string, (...args: unknown[]) => unknown]
+		>;
+		const publish = notifications.find(
+			([method]) => method === "textDocument/publishDiagnostics",
+		)?.[1] as ((params: unknown) => void) | undefined;
+		const requests = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
+			[string, (...args: unknown[]) => unknown]
+		>;
+		const register = requests.find(
+			([method]) => method === "client/registerCapability",
+		)?.[1] as ((params: unknown) => Promise<void>) | undefined;
+		await register?.({
+			registrations: [{ id: "pull", method: "textDocument/diagnostic" }],
+		});
+		expect(state.workspaceDiagnosticsSupport.mode).toBe("pull");
+		const folders = requests.find(
+			([method]) => method === "workspace/workspaceFolders",
+		)?.[1] as (() => unknown) | undefined;
+		state.isDestroyed = true;
+		expect(() => folders?.()).not.toThrow();
+
+		state.openDocuments.delete(TEST_KEY);
+		state.closedDocuments?.add(TEST_KEY);
+		publish?.({
+			uri: pathToFileURL(TEST_FILE).href,
+			version: 1,
+			diagnostics: [
+				{
+					severity: 1,
+					message: "late",
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 1 },
+					},
+				},
+			],
+		});
+		await Promise.resolve();
+		expect(state.pushDiagnostics.has(TEST_KEY)).toBe(false);
+		expect(state.diagnosticBindings.has(TEST_KEY)).toBe(false);
 	});
 });
 

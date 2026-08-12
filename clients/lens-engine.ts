@@ -228,7 +228,17 @@ export function treeSitterRuntimeStatus(): TreeSitterRuntimeStatus {
 
 export interface LspStatus {
 	aliveClients: number;
-	servers: Array<{ serverId: string; root: string; connected: boolean }>;
+	servers: Array<{
+		serverId: string;
+		root: string;
+		connected: boolean;
+		pullFailureHistory: Array<{
+			timestamp: number;
+			method: string;
+			code?: number | string;
+			message: string;
+		}>;
+	}>;
 	brokenServers: ReturnType<
 		ReturnType<typeof getLSPService>["getBrokenStatus"]
 	>;
