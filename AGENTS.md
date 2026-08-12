@@ -35,6 +35,13 @@ For human contributors and issue/PR authors, see `CONTRIBUTING.md` at the repo r
 
 ### Recurring defect shapes — screen against these BEFORE you write code
 
+The captured-at-subscribe / used-after-replace shape also applies to pi's
+`events` API: `pi.events.emit` is a session-bound wrapper whose runtime is
+invalidated on replacement. Long-lived publishers must retain a getter and
+resolve the emitter at delivery time; deferred callbacks must resolve inside
+the callback, never before scheduling. This is the pattern established by
+#1128 for the bus and lens-event publishers.
+
 This is the payoff of the two disciplines above: a bounded checklist of defect *shapes* that each recurred ≥2× across the arc. Read it at task start; when your change matches a shape, treat the screen as an acceptance criterion (and the regression test the shape implies). Each entry is **SHAPE → SCREEN (when you touch X, verify Y) → canonical example → detection**. Where a shape has a fuller treatment above, this cross-references rather than restates it.
 
 1. **Path-keyed map whose write and read forms can diverge** (case / separator / resolved-vs-raw). *Screen:* any in-memory map keyed by a file path uses `PathKeyedMap<V>` with the lifetime-appropriate normalizer, never a bare `Map<string, V>` + hand-normalized call sites — fold every key on BOTH write and read. See the `PathKeyedMap` paragraph above (#210→#1020→#1025→#1086). *Detect:* grep `new Map<string,` near path/file keys; review question "is every key normalized on write AND read AND rehydrate?". Not cleanly ast-grep-able (can't tell a string key is a path) — #1158.

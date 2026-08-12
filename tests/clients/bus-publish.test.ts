@@ -17,6 +17,7 @@ import {
 	isBusPublishEnabled,
 	publishFilesTouched,
 	wireBusEmitter,
+	wireBusEmitterGetter,
 } from "../../clients/bus-publish.js";
 
 describe("bus-publish — pilens:files:touched (#482)", () => {
@@ -46,6 +47,28 @@ describe("bus-publish — pilens:files:touched (#482)", () => {
 				cwd: "/repo",
 			}),
 		).not.toThrow();
+	});
+
+	it("resolves the live emitter after session replacement", () => {
+		const oldEmit = vi.fn(() => {
+			throw new Error("This extension ctx is stale after session replacement");
+		});
+		const newEmit = vi.fn();
+		let currentEmit: (channel: string, data: unknown) => void = oldEmit;
+		wireBusEmitterGetter(() => currentEmit);
+		currentEmit = newEmit;
+
+		publishFilesTouched({
+			reason: "autofix",
+			paths: ["/repo/src/a.ts"],
+			cwd: "/repo",
+		});
+
+		expect(oldEmit).not.toHaveBeenCalled();
+		expect(newEmit).toHaveBeenCalledTimes(1);
+		expect(logBusEvent.mock.calls.some(([entry]) =>
+			(entry as { outcome?: string }).outcome === "emit_failed",
+		)).toBe(false);
 	});
 
 	it("emits the exact payload shape from the issue: v, source, reason, paths, cwd", () => {

@@ -24,6 +24,7 @@
 import { logBusEvent } from "./bus-events-logger.js";
 import { isBusPublishEnabled } from "./bus-publish.js";
 import { normalizeFilePath } from "./path-utils.js";
+import { createLiveBusEmitter, type BusEmitFn, type BusEmitGetter } from "./live-bus-emitter.js";
 
 export const BUS_DISPOSITION_EVENT = "pilens:diagnostic:disposition";
 export const BUS_DISPOSITION_VERSION = 1;
@@ -42,9 +43,7 @@ export interface PilensDispositionPayload {
 	reason?: string;
 }
 
-type BusEmitFn = (channel: string, data: unknown) => void;
-
-let busEmit: BusEmitFn | undefined;
+const liveEmitter = createLiveBusEmitter();
 let hasLoggedFailure = false;
 let hasLoggedUnwired = false;
 let hasLoggedDisabled = false;
@@ -57,12 +56,16 @@ let hasLoggedDisabled = false;
  * the MCP server path run in (no pi host, no `pi.events`).
  */
 export function wireDispositionBusEmitter(emitFn: BusEmitFn | undefined): void {
-	busEmit = emitFn;
+	liveEmitter.wire(emitFn);
+}
+
+export function wireDispositionBusEmitterGetter(getter: BusEmitGetter | undefined): void {
+	liveEmitter.wireGetter(getter);
 }
 
 /** Test-only: reset module state between test files. */
 export function _resetDispositionPublishForTests(): void {
-	busEmit = undefined;
+	liveEmitter.reset();
 	hasLoggedFailure = false;
 	hasLoggedUnwired = false;
 	hasLoggedDisabled = false;
@@ -97,6 +100,7 @@ export function publishDisposition(args: PublishDispositionArgs): void {
 		}
 		return;
 	}
+	const busEmit = liveEmitter.get();
 	if (!busEmit) {
 		if (!hasLoggedUnwired) {
 			hasLoggedUnwired = true;

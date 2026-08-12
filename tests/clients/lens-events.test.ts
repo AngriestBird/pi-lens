@@ -4,6 +4,7 @@ import {
 	emitLensAnalysisComplete,
 	emitLensTurnFindings,
 	initLensEvents,
+	initLensEventsGetter,
 	LENS_EVENT_NAMES,
 } from "../../clients/lens-events.js";
 
@@ -34,6 +35,32 @@ function baseAnalysisPayload(
 }
 
 describe("lens inter-extension events", () => {
+	it("resolves the live bus when a deferred emit crosses session replacement", async () => {
+		const oldEmit = vi.fn((_event: string, _payload: unknown): void => {
+			throw new Error("This extension ctx is stale after session replacement");
+		});
+		const newEmit = vi.fn((_event: string, _payload: unknown): void => {});
+		let currentBus: { emit: (event: string, payload: unknown) => void } = {
+			emit: oldEmit,
+		};
+		initLensEventsGetter(() => currentBus);
+
+		emitLensTurnFindings({
+			cwd: "/repo",
+			filePaths: [],
+			sessionId: "session-1",
+			turnIndex: 1,
+			blockerSections: 0,
+			advisorySections: 0,
+			content: "after replacement",
+		});
+		currentBus = { emit: newEmit };
+		await waitImmediate();
+
+		expect(oldEmit).not.toHaveBeenCalled();
+		expect(newEmit).toHaveBeenCalledTimes(1);
+	});
+
 	it("emits analysis-complete for every analysis and findings only when diagnostics exist", async () => {
 		const emit = vi.fn();
 		initLensEvents({ events: { emit } });

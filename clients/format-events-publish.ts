@@ -70,6 +70,7 @@
 import { logBusEvent } from "./bus-events-logger.js";
 import { isBusPublishEnabled } from "./bus-publish.js";
 import { normalizeFilePath } from "./path-utils.js";
+import { createLiveBusEmitter, type BusEmitFn, type BusEmitGetter } from "./live-bus-emitter.js";
 
 export const BUS_FORMAT_QUEUED_EVENT = "pilens:format:queued";
 export const BUS_FORMAT_QUEUED_VERSION = 1;
@@ -105,9 +106,7 @@ export interface AutofixStartPayload {
 	eligibleCount: number;
 }
 
-type BusEmitFn = (channel: string, data: unknown) => void;
-
-let busEmit: BusEmitFn | undefined;
+const liveEmitter = createLiveBusEmitter();
 let hasLoggedQueuedFailure = false;
 let hasLoggedQueuedUnwired = false;
 let hasLoggedQueuedDisabled = false;
@@ -125,12 +124,16 @@ let hasLoggedAutofixStartDisabled = false;
  * identical `pi.events.emit` binding, wired separately per producer.
  */
 export function wireFormatEventsBusEmitter(emitFn: BusEmitFn | undefined): void {
-	busEmit = emitFn;
+	liveEmitter.wire(emitFn);
+}
+
+export function wireFormatEventsBusEmitterGetter(getter: BusEmitGetter | undefined): void {
+	liveEmitter.wireGetter(getter);
 }
 
 /** Test-only: reset module state between test files. */
 export function _resetFormatEventsPublishForTests(): void {
-	busEmit = undefined;
+	liveEmitter.reset();
 	hasLoggedQueuedFailure = false;
 	hasLoggedQueuedUnwired = false;
 	hasLoggedQueuedDisabled = false;
@@ -168,6 +171,7 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 		}
 		return;
 	}
+	const busEmit = liveEmitter.get();
 	if (!busEmit) {
 		if (!hasLoggedQueuedUnwired) {
 			hasLoggedQueuedUnwired = true;
@@ -238,6 +242,7 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 		}
 		return;
 	}
+	const busEmit = liveEmitter.get();
 	if (!busEmit) {
 		if (!hasLoggedStartUnwired) {
 			hasLoggedStartUnwired = true;
@@ -313,6 +318,7 @@ export function publishAutofixStart(args: PublishAutofixStartArgs): void {
 		}
 		return;
 	}
+	const busEmit = liveEmitter.get();
 	if (!busEmit) {
 		if (!hasLoggedAutofixStartUnwired) {
 			hasLoggedAutofixStartUnwired = true;
