@@ -138,6 +138,28 @@ const timingSensitiveInclude = [
 	// existing retry isn't enough on its own; phasing it here removes the
 	// sibling-fork noise the sampler was actually measuring.
 	"tests/clients/cascade-graph-occupancy.test.ts",
+	// 2026-08-12 (#1230): the remaining measureMaxSyncBlockMs users. The list
+	// above had drifted — these files run the SAME independent setImmediate
+	// sampler under the SAME default-project fork storm, so they carry the same
+	// scheduling-jitter false-positive risk and belong in the same quiet phase;
+	// they were simply never added. tests/config/timing-sensitive-coverage.test.ts
+	// now derives the expected membership from the sampler import itself and
+	// fails if a new sampler test lands outside this list (or an entry here goes
+	// stale), so the drift cannot silently recur. Each entry below was verified
+	// to import measureMaxSyncBlockMs from tests/support/perf-harness.ts:
+	//   - lens-diagnostics-occupancy: diagnostics-run loop occupancy.
+	//   - workspace-diagnostics-occupancy: workspace-wide diagnostics fan-out.
+	//   - performance-report-occupancy / pipeline-snapshot-occupancy: report and
+	//     snapshot assembly walks.
+	//   - word-index-async-build: the async word-index build's yield behaviour.
+	//   - ruby-drive-dirs: not named "-occupancy", but runs two sampler-based
+	//     fail-then-pass screens over the Ruby drive-dir walk (#902 pattern).
+	"tests/tools/lens-diagnostics-occupancy.test.ts",
+	"tests/clients/lsp/workspace-diagnostics-occupancy.test.ts",
+	"tests/clients/lsp/ruby-drive-dirs.test.ts",
+	"tests/clients/performance-report-occupancy.test.ts",
+	"tests/clients/pipeline-snapshot-occupancy.test.ts",
+	"tests/clients/word-index-async-build.test.ts",
 ];
 
 // #1022 fix: the "workspace LSP winner" case in this file spawns a REAL
@@ -237,7 +259,7 @@ export default defineConfig({
 					globalSetup: sharedGlobalSetup,
 					setupFiles: sharedSetupFiles,
 					execArgv: sharedExecArgv,
-					// Small cap (not full serialization — these two files can still
+					// Small cap (not full serialization — these files can still
 					// share the phase) so the event-loop-occupancy sampler in each
 					// (measureMaxSyncBlockMs, see perf-harness.ts) isn't competing
 					// with a large fork pool for CPU turns while it's mid-measurement.
