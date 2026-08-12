@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "../file-utils.js";
+import { writeFileAtomic } from "../atomic-write.js";
 import { readJsonCache } from "../json-cache-read.js";
 import { normalizeMapKey } from "../path-utils.js";
 import { loadReverseDependencyIndexFromSnapshot } from "../reverse-deps.js";
@@ -112,7 +113,11 @@ export function saveWorkspaceDiagnosticsCache(
 ): void {
 	const filePath = cachePath(cwd);
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-	fs.writeFileSync(filePath, JSON.stringify(cache, null, 2));
+	// bestEffort: false — persist()'s catch is the error policy here, and it
+	// must observe the failure so `dirty` stays set and the next sweep retries.
+	writeFileAtomic(filePath, JSON.stringify(cache, null, 2), {
+		bestEffort: false,
+	});
 }
 
 /**

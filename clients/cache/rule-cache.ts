@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { getProjectDataDir } from "../file-utils.js";
 import { readJsonCache } from "../json-cache-read.js";
 import { resolvePackagePath } from "../package-root.js";
+import { writeFileAtomic } from "../atomic-write.js";
 
 // v4: cache skip_test_files + fix_action — v3 entries silently dropped them,
 // and ruleHash (rule-file mtimes) never invalidates on a code-only fix.
@@ -161,7 +162,7 @@ export class RuleCache {
 				ruleHash: this.computeRuleHash(ruleFiles),
 				queries,
 			};
-			fs.writeFileSync(this.cacheFile, JSON.stringify(entry, null, 2));
+			writeFileAtomic(this.cacheFile, JSON.stringify(entry, null, 2));
 			this.pruneStaleVersions();
 		} catch {
 			// Cache write failure is non-fatal

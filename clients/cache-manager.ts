@@ -323,7 +323,7 @@ export class CacheManager {
 
 		const statePath = getTurnStatePath(cwd);
 		state.lastUpdated = new Date().toISOString();
-		fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+		writeFileAtomic(statePath, JSON.stringify(state, null, 2));
 	}
 
 	/** Return whether a writer may read/write this workspace worklist. */
