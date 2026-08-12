@@ -96,6 +96,13 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 ## What it is
 
+The LSP status surface includes a bounded per-client history of operational
+diagnostic-pull failures; unsupported `-32601` responses are intentionally
+excluded. Strategy-gated `didSave` remains separate and out of scope here.
+Unsupported pull responses are also recognized by the standard message-only
+variants (`method not found`, `unknown method`, and `unsupported method`).
+Status consumers receive detached, 200-character-bounded failure entries.
+
 Rule-id normalization derives its language suffixes from the bundled CodeRabbit rule tree at startup; tests must keep that derived set covered so new vendored language rules cannot silently evade project policy matching.
 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
@@ -129,6 +136,14 @@ clients/
 tools/                    ast-grep-search, lsp-navigation tool handlers
 tests/                    Vitest test suite (mirrors clients/ structure)
 ```
+
+Managed-installable standalone clients resolve availability through
+`clients/dispatch/runners/utils/runner-helpers.ts`: use
+`createAvailabilityChecker` + `resolveAvailableOrInstall` for a single command,
+or `resolveManagedToolClient` when an ordered candidate chain must be preserved.
+Thread `getManagedToolEnvironment(tool, cwd)` into probes/spawns. Direct
+`ensureTool()` calls and bare managed-tool spawns outside the sanctioned wrapper
+surfaces are guarded by `tests/clients/managed-tool-seam-coverage.test.ts`.
 
 Installer package-manager and archive-extraction subprocesses must use
 `safeSpawnAsync` with `lifetimeCoupled: true` and `ignoreAmbientSignal: true`.
