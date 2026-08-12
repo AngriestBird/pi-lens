@@ -30,7 +30,12 @@
  *     filePath,          // absolute path
  *     requestedOffset,   // 1-indexed first line (default 1)
  *     requestedLimit,    // line count, or undefined for the whole file
+ *     consumer,          // optional identifier, e.g. "my-extension" (appears in read-guard.log)
  *   });
+ *
+ * Check `bridge.version` before calling to guard against future incompatible
+ * changes — a bridge whose version you don't recognise should be treated as
+ * unsupported.
  *
  * The timestamp is stamped by the bridge itself (Date.now()) to match
  * exactly how the internal read path works.
@@ -66,10 +71,21 @@ export interface ReadBridgeEntry {
 	 * pi-lens will treat the effective limit as the full file length.
 	 */
 	requestedLimit: number | undefined;
+	/**
+	 * Optional caller identity. Surfaced as `source: "bridge:<consumer>"`
+	 * in `read-guard.log` so the worklog shows which extension satisfied
+	 * the read-before-edit guard. Defaults to `"unknown"` when omitted.
+	 */
+	consumer?: string;
 }
 
 /** The object mounted at `globalThis[READ_BRIDGE_KEY]`. */
 export interface ReadBridge {
+	/**
+	 * Bridge API version. Check this before calling `recordRead` — if the
+	 * version is not one you recognise, treat the bridge as unsupported.
+	 */
+	readonly version: 1;
 	recordRead(entry: ReadBridgeEntry): void;
 }
 
@@ -85,6 +101,7 @@ interface BridgeDeps {
 			turnIndex: number;
 			writeIndex: number;
 			timestamp: number;
+			source?: string;
 		}): void;
 	};
 	getTurnIndex(): number;
@@ -145,9 +162,12 @@ function isValidEntry(entry: unknown): entry is ReadBridgeEntry {
  * Subsequent calls are no-ops.
  */
 export function registerReadBridge(deps: BridgeDeps): void {
-	if ((globalThis as any)[READ_BRIDGE_KEY]) return; // already registered
+	// Use `in` check so the frozen non-configurable property doesn't throw
+	// on a redundant defineProperty attempt.
+	if (READ_BRIDGE_KEY in (globalThis as object)) return;
 
-	const bridge: ReadBridge = {
+	const bridge: ReadBridge = Object.freeze({
+		version: 1 as const,
 		recordRead(entry: ReadBridgeEntry): void {
 			// Validate the payload before doing anything else — this catches
 			// integration bugs in callers (malformed fields, bad numbers).
@@ -172,9 +192,18 @@ export function registerReadBridge(deps: BridgeDeps): void {
 				// Stamp the timestamp here, matching exactly how the internal read
 				// path works (runtime-tool-call.ts always uses Date.now()).
 				timestamp: Date.now(),
+				// Provenance: identifies this record as bridge-sourced in read-guard.log.
+				source: `bridge:${entry.consumer ?? "unknown"}`,
 			});
 		},
-	};
+	});
 
-	(globalThis as any)[READ_BRIDGE_KEY] = bridge;
+	// Register as non-writable, non-configurable so no subsequent code can
+	// silently overwrite the bridge (first-wins is the contract).
+	Object.defineProperty(globalThis, READ_BRIDGE_KEY, {
+		value: bridge,
+		writable: false,
+		configurable: false,
+		enumerable: false,
+	});
 }

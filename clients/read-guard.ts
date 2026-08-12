@@ -37,6 +37,12 @@ export interface ReadRecord {
 	turnIndex: number;
 	writeIndex: number;
 	timestamp: number;
+	/**
+	 * Provenance tag. Absent (undefined) = recorded by the normal internal
+	 * tool-call path. `"bridge:<consumer>"` = recorded via the cross-extension
+	 * read-recording bridge with the given consumer identifier.
+	 */
+	source?: string;
 }
 
 export interface EditRecord {
@@ -352,6 +358,7 @@ export class ReadGuard {
 				writeIndex: storedRecord.writeIndex,
 				readCountForFile: arr.length,
 				hashLineCount: Object.keys(storedRecord.lineHashes ?? {}).length,
+				...(storedRecord.source !== undefined && { source: storedRecord.source }),
 			},
 		});
 
