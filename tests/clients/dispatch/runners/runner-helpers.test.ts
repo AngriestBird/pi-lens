@@ -276,6 +276,9 @@ describe("runner-helpers availability checker", () => {
 				failure: "spawn",
 			});
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValueOnce(false);
+		// Scoped count: earlier tests in this file legitimately trigger the
+		// session-reset path, which also calls resetPathWalkMemo.
+		vi.mocked(installerMod.resetPathWalkMemo).mockClear();
 		const checker = createAvailabilityChecker("deleted-tool");
 		expect(await checker.isAvailableAsync(process.cwd())).toBe(true);
 		expect(await checker.isAvailableAsync(process.cwd())).toBe(false);
