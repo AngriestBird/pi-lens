@@ -24,6 +24,11 @@ import {
 } from "./persist-debounce.js";
 import { getWordIndexMaxFilesDerived } from "./project-scale.js";
 import { logWordIndex } from "./word-index-logger.js";
+import {
+	createDeadline,
+	forEachCooperatively,
+	yieldIfOverBudget,
+} from "./cooperative-budget.js";
 
 export interface WordHit {
 	file: string;
@@ -201,7 +206,6 @@ type WordIndexInputDocuments = WordIndexInputDocument[] & {
 };
 
 const WORD_INDEX_BUILD_YIELD_BUDGET_MS = 8;
-const WORD_INDEX_BUILD_YIELD_CHECK_LINES = 50;
 /**
  * A line at or above this length is treated as a yield checkpoint on its own.
  * The per-50-lines cadence is a proxy for work that only holds on hand-written
@@ -221,24 +225,9 @@ const WORD_INDEX_LONG_LINE_YIELD_CHARS = 4096;
  * grows with the corpus (each replacement filters shared posting arrays). The
  * #1197 outage was exactly that shape — 239 stale documents held pi's event loop
  * for seconds between two "every 100 files" checkpoints. Callers combine this
- * with their existing count checkpoint (`||`, never `&&`) so abort latency stays
- * bounded in item count AND occupancy stays bounded in milliseconds.
+ * The shared deadline is checked at every bounded work unit so abort latency
+ * and occupancy are governed by the same monotonic budget.
  */
-function createYieldBudget(): {
-	overBudget: () => boolean;
-	yieldNow: () => Promise<void>;
-} {
-	let lastYieldAt = performance.now();
-	return {
-		overBudget: () =>
-			performance.now() - lastYieldAt >= WORD_INDEX_BUILD_YIELD_BUDGET_MS,
-		yieldNow: async () => {
-			await new Promise<void>((resolve) => setImmediate(resolve));
-			lastYieldAt = performance.now();
-		},
-	};
-}
-
 function createEmptyWordIndex(truncated: boolean): WordIndex {
 	return {
 		postings: new Map<string, WordHit[]>(),
@@ -326,7 +315,7 @@ export async function buildWordIndexAsync(
 	shouldContinue: () => boolean = () => true,
 ): Promise<WordIndex> {
 	const index = createEmptyWordIndex(files.truncated ?? false);
-	const budget = createYieldBudget();
+	const deadline = createDeadline(WORD_INDEX_BUILD_YIELD_BUDGET_MS);
 	for (const doc of files) {
 		if (!shouldContinue()) throw new Error("word index build superseded");
 		const lines = doc.content.split(/\r?\n/);
@@ -336,17 +325,15 @@ export async function buildWordIndexAsync(
 			const line = lines[i];
 			docLength += indexWordLine(index, doc.path, line, i + 1, tokenLineCounts);
 			if (
-				((i + 1) % WORD_INDEX_BUILD_YIELD_CHECK_LINES === 0 ||
-					line.length >= WORD_INDEX_LONG_LINE_YIELD_CHARS) &&
-				budget.overBudget()
+				line.length >= WORD_INDEX_LONG_LINE_YIELD_CHARS ||
+				deadline.expired()
 			) {
-				await budget.yieldNow();
+				await yieldIfOverBudget(deadline);
 				if (!shouldContinue()) throw new Error("word index build superseded");
 			}
 		}
 		finishWordIndexDocument(index, doc, docLength, tokenLineCounts);
-		if (budget.overBudget()) {
-			await budget.yieldNow();
+		if (deadline.expired() && (await yieldIfOverBudget(deadline))) {
 			if (!shouldContinue()) throw new Error("word index build superseded");
 		}
 	}
@@ -464,6 +451,125 @@ export function updateWordIndexDocument(
 	return true;
 }
 
+type StagedWordIndexRemoval = {
+	postings: Map<string, WordHit[] | undefined>;
+	docLength: number;
+};
+
+async function stageWordIndexDocumentRemoval(
+	index: WordIndex,
+	filePath: string,
+	shouldContinue: () => boolean,
+): Promise<StagedWordIndexRemoval | undefined> {
+	if (!index.forward) return undefined;
+	const tokenLineCounts = index.forward.get(filePath);
+	if (!tokenLineCounts) return undefined;
+	const removedKey = wordIndexKey(filePath);
+	const postings = new Map<string, WordHit[] | undefined>();
+	const deadline = createDeadline(WORD_INDEX_BUILD_YIELD_BUDGET_MS);
+	for (const token of tokenLineCounts.keys()) {
+		if (!shouldContinue()) throw new Error("word index refresh superseded");
+		const arr = index.postings.get(token);
+		if (!arr) continue;
+		const next: WordHit[] = [];
+		for (const hit of arr) {
+			if (wordIndexKey(hit.file) !== removedKey) next.push(hit);
+			if (deadline.expired() && (await yieldIfOverBudget(deadline))) {
+				if (!shouldContinue()) throw new Error("word index refresh superseded");
+			}
+		}
+		postings.set(token, next.length > 0 ? next : undefined);
+	}
+	return { postings, docLength: index.docLengths.get(filePath) ?? 0 };
+}
+
+function commitWordIndexDocumentRemoval(
+	index: WordIndex,
+	filePath: string,
+	staged: StagedWordIndexRemoval,
+): void {
+	for (const [token, hits] of staged.postings) {
+		if (hits) index.postings.set(token, hits);
+		else index.postings.delete(token);
+	}
+	index.docLengths.delete(filePath);
+	index.forward?.delete(filePath);
+	index.fileMtimes.delete(filePath);
+	index.fileSizes.delete(filePath);
+	index.totalTokens -= staged.docLength;
+	index.docCount = Math.max(0, index.docCount - 1);
+}
+
+/** Cooperative, atomically-published removal used only by bulk refresh. */
+export async function removeWordIndexDocumentAsync(
+	index: WordIndex,
+	filePath: string,
+	shouldContinue: () => boolean = () => true,
+): Promise<boolean> {
+	const staged = await stageWordIndexDocumentRemoval(
+		index,
+		filePath,
+		shouldContinue,
+	);
+	if (!staged) return false;
+	if (!shouldContinue()) throw new Error("word index refresh superseded");
+	commitWordIndexDocumentRemoval(index, filePath, staged);
+	return true;
+}
+
+/** Cooperative replacement whose old/new state is committed without an await. */
+export async function updateWordIndexDocumentAsync(
+	index: WordIndex,
+	doc: { path: string; content: string },
+	shouldContinue: () => boolean = () => true,
+): Promise<boolean> {
+	if (!index.forward) return false;
+	const removal = index.forward.has(doc.path)
+		? await stageWordIndexDocumentRemoval(index, doc.path, shouldContinue)
+		: undefined;
+	if (index.forward.has(doc.path) && !removal) return false;
+	const perTokenHits = new Map<string, number[]>();
+	let docLength = 0;
+	const lines = doc.content.split(/\r?\n/);
+	await forEachCooperatively(
+		lines,
+		(line, i) => {
+			const lineTokens = tokenizeLine(line);
+			docLength += lineTokens.length;
+			const seenOnLine = new Set<string>();
+			for (const token of lineTokens) {
+				if (seenOnLine.has(token)) continue;
+				seenOnLine.add(token);
+				const arr = perTokenHits.get(token);
+				if (arr) arr.push(i + 1);
+				else perTokenHits.set(token, [i + 1]);
+			}
+		},
+		{
+			budgetMs: WORD_INDEX_BUILD_YIELD_BUDGET_MS,
+			shouldContinue,
+			abortMessage: "word index refresh superseded",
+		},
+	);
+	if (!shouldContinue()) throw new Error("word index refresh superseded");
+	if (removal) commitWordIndexDocumentRemoval(index, doc.path, removal);
+	const tokenLineCounts = new Map<string, number>();
+	for (const [token, lineNumbers] of perTokenHits) {
+		tokenLineCounts.set(token, lineNumbers.length);
+		const hits = lineNumbers.map((line) => ({ file: doc.path, line }));
+		const arr = index.postings.get(token);
+		if (arr) arr.push(...hits);
+		else index.postings.set(token, hits);
+	}
+	index.docLengths.set(doc.path, docLength);
+	index.forward.set(doc.path, tokenLineCounts);
+	index.fileMtimes.set(doc.path, -1);
+	index.fileSizes.set(doc.path, Buffer.byteLength(doc.content, "utf-8"));
+	index.totalTokens += docLength;
+	index.docCount += 1;
+	return true;
+}
+
 /** Bounds shared by every word-index build path — keep the walk off the
  * critical path on large repos: cap the file count, and skip files too large
  * to be hand-written source (generated/bundled output the source filter
@@ -477,6 +583,12 @@ export function updateWordIndexDocument(
 export const WORD_INDEX_MAX_FILES = 6000;
 export const WORD_INDEX_MAX_BYTES = 512 * 1024;
 
+export type WordIndexPreflightFiles = Array<{
+	path: string;
+	mtimeMs: number;
+	size: number;
+}> & { truncated: boolean };
+
 /**
  * Collect the bounded `{path, content}` doc set `buildWordIndex` consumes —
  * the ONE file-walk-and-read implementation shared by every build path
@@ -488,6 +600,7 @@ export const WORD_INDEX_MAX_BYTES = 512 * 1024;
 export async function collectWordIndexDocs(
 	root: string,
 	shouldContinue: () => boolean = () => true,
+	preflightFiles?: WordIndexPreflightFiles,
 ): Promise<
 	Array<{ path: string; content: string; mtimeMs: number; size: number }> & {
 		truncated: boolean;
@@ -510,17 +623,23 @@ export async function collectWordIndexDocs(
 	// visited-entry budget (DEFAULT_MAX_SCAN_ENTRIES), so a mixed tree with few
 	// source files among a huge pile of non-source files can't force a
 	// full-tree walk either; an index over the truncated list is acceptable.
-	const maxFiles = getWordIndexMaxFilesDerived(root);
+	const maxFiles =
+		preflightFiles?.length ?? getWordIndexMaxFilesDerived(root);
 	// #894 review: prioritize code kinds within the cap — with broadened
 	// enumeration, thousands of data/doc files (locale JSON, fixtures, …)
 	// ahead of the code dirs in walk order could exhaust `maxFiles` and evict
 	// real source files from the index entirely (DOC_FILE_PENALTY can't
 	// rescue a file that never made the slice).
-	const files = await collectSourceFilesAsync(root, {
-		maxFiles,
-		prioritizeCodeKinds: true,
-	});
-	const truncated = files.length === maxFiles;
+	const files = preflightFiles
+		? preflightFiles.map((file) => file.path)
+		: await collectSourceFilesAsync(root, {
+				maxFiles,
+				prioritizeCodeKinds: true,
+			});
+	const truncated = preflightFiles?.truncated ?? files.length === maxFiles;
+	const preflightByPath = preflightFiles
+		? new Map(preflightFiles.map((entry) => [entry.path, entry]))
+		: undefined;
 	const docs = Object.assign(
 		[] as Array<{
 			path: string;
@@ -531,10 +650,12 @@ export async function collectWordIndexDocs(
 		{ truncated, skipped: 0 },
 	);
 	if (!shouldContinue()) return docs;
-	let processed = 0;
+	const deadline = createDeadline(WORD_INDEX_BUILD_YIELD_BUDGET_MS);
 	for (const file of files.slice(0, maxFiles)) {
+		if (!shouldContinue()) return docs;
 		try {
-			const stat = fs.statSync(file);
+			const known = preflightByPath?.get(file);
+			const stat = known ?? fs.statSync(file);
 			if (stat.size <= WORD_INDEX_MAX_BYTES) {
 				docs.push({
 					path: file,
@@ -552,8 +673,7 @@ export async function collectWordIndexDocs(
 			// unreadable / vanished file — skip, but count it (see above).
 			docs.skipped += 1;
 		}
-		if (++processed % 100 === 0) {
-			await new Promise<void>((resolve) => setImmediate(resolve));
+		if (deadline.expired() && (await yieldIfOverBudget(deadline))) {
 			if (!shouldContinue()) return docs;
 		}
 	}
@@ -575,6 +695,8 @@ export interface WordIndexRebuildRequired {
 		| "missing-incremental-metadata"
 		| "file-set-churn"
 		| "stale-document-churn";
+	/** Bounded walk+stat result for a rebuild without repeating either syscall. */
+	preflightFiles?: WordIndexPreflightFiles;
 }
 
 export type WordIndexRefreshOutcome =
@@ -650,13 +772,11 @@ export async function refreshWordIndexIncrementally(
 		string,
 		{ path: string; mtimeMs: number; size: number }
 	>();
-	// Count checkpoint OR time budget (#1197): the count keeps abort latency
-	// bounded in files even on a corpus so cheap it never exceeds the budget; the
-	// budget keeps event-loop occupancy bounded even when a single checkpoint
-	// interval is expensive.
-	const budget = createYieldBudget();
-	let statted = 0;
+	// Check both supersession and the monotonic budget at every stat unit. Unlike
+	// the former modulus cadence, this remains bounded as per-file work changes.
+	const deadline = createDeadline(WORD_INDEX_BUILD_YIELD_BUDGET_MS);
 	for (const file of walked) {
+		if (!shouldContinue()) throw new Error("word index refresh superseded");
 		try {
 			const stat = fs.statSync(file);
 			if (stat.size <= WORD_INDEX_MAX_BYTES) {
@@ -669,11 +789,13 @@ export async function refreshWordIndexIncrementally(
 		} catch {
 			// A file vanishing between walk and stat is simply absent.
 		}
-		if (++statted % 100 === 0 || budget.overBudget()) {
-			await budget.yieldNow();
+		if (deadline.expired() && (await yieldIfOverBudget(deadline))) {
 			if (!shouldContinue()) throw new Error("word index refresh superseded");
 		}
 	}
+	const preflightFiles = Object.assign([...current.values()], {
+		truncated: walked.length === maxFiles,
+	});
 
 	const oldSet = new Set([...index.docLengths.keys()].map(wordIndexKey));
 	let changedSet = 0;
@@ -681,7 +803,7 @@ export async function refreshWordIndexIncrementally(
 	for (const key of current.keys()) if (!oldSet.has(key)) changedSet++;
 	const denominator = Math.max(oldSet.size, current.size, 1);
 	if (changedSet / denominator > WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD) {
-		return { mode: "full-required", reason: "file-set-churn" };
+		return { mode: "full-required", reason: "file-set-churn", preflightFiles };
 	}
 
 	// Replacing one document filters every shared posting array for that
@@ -757,7 +879,11 @@ export async function refreshWordIndexIncrementally(
 				WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD) ||
 		estimatedIncrementalWork > estimatedFullRebuildWork
 	) {
-		return { mode: "full-required", reason: "stale-document-churn" };
+		return {
+			mode: "full-required",
+			reason: "stale-document-churn",
+			preflightFiles,
+		};
 	}
 
 	let dropped = 0;
@@ -765,7 +891,7 @@ export async function refreshWordIndexIncrementally(
 		if (!current.has(key)) {
 			// `key` is already folded; removeWordIndexDocument re-folds it
 			// idempotently via the PathKeyedMap, so the drop hits the right entry.
-			if (!removeWordIndexDocument(index, key)) {
+			if (!(await removeWordIndexDocumentAsync(index, key, shouldContinue))) {
 				throw new Error(`failed to drop word-index document: ${key}`);
 			}
 			dropped++;
@@ -774,7 +900,6 @@ export async function refreshWordIndexIncrementally(
 
 	let refreshed = 0;
 	let skipped = 0;
-	let processed = 0;
 	for (const { path: file, mtimeMs, size } of current.values()) {
 		// #1105: mtime-first, size-second freshness — mtime alone is a stale
 		// signal (mtime-preserving content changes serve stale identifiers to
@@ -800,7 +925,13 @@ export async function refreshWordIndexIncrementally(
 				skipped++;
 				continue;
 			}
-			if (!updateWordIndexDocument(index, { path: file, content })) {
+			if (
+				!(await updateWordIndexDocumentAsync(
+					index,
+					{ path: file, content },
+					shouldContinue,
+				))
+			) {
 				throw new Error(`failed to refresh word-index document: ${file}`);
 			}
 			// updateWordIndexDocument stamps mtime=-1 (per-edit convention); the
@@ -815,8 +946,7 @@ export async function refreshWordIndexIncrementally(
 		// so a count-only checkpoint let 100 replacements run back to back for
 		// seconds. The gate above keeps the stale set sparse; this keeps even a
 		// sparse-but-expensive set off the event loop.
-		if (++processed % 100 === 0 || budget.overBudget()) {
-			await budget.yieldNow();
+		if (deadline.expired() && (await yieldIfOverBudget(deadline))) {
 			if (!shouldContinue()) throw new Error("word index refresh superseded");
 		}
 	}

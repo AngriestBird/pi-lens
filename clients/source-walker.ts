@@ -33,6 +33,10 @@ import * as path from "node:path";
 import type { ProjectIgnoreMatcher } from "./file-utils.js";
 import { isExcludedDirName } from "./file-utils.js";
 import { isGeneratedArtifactDirectoryName } from "./generated-artifacts.js";
+import {
+	createDeadline,
+	yieldIfOverBudget,
+} from "./cooperative-budget.js";
 
 /**
  * Read a directory's entries, returning `[]` for a permission-denied or
@@ -187,14 +191,14 @@ export interface StackWalkOptions {
 
 export interface AsyncStackWalkOptions extends StackWalkOptions {
 	/**
-	 * Yield to the macrotask queue (via `setImmediate`) after every N entries
-	 * the visitor processes without stopping. `setImmediate` — not
+	 * Yield to the macrotask queue (via `setImmediate`) when the monotonic work
+	 * budget expires. `setImmediate` — not
 	 * `Promise.resolve` — is required so stdin "data" events (also macrotasks)
 	 * can interleave and keystrokes stay responsive during `session_start`
-	 * (#703). Each caller passes its own historical cadence (startup: 100,
-	 * source-filter: 50).
+	 * (#703).
 	 */
-	yieldEvery: number;
+	/** Maximum synchronous CPU occupancy between macrotask yields. */
+	budgetMs?: number;
 	/**
 	 * Optional async hook awaited once before the walk begins — used to prime
 	 * the ignore-matcher's tracked-file index (`ensureTrackedIndex`, #703) so a
@@ -268,7 +272,7 @@ export function walkTreeStackSync(
 /**
  * Async, chunked-yield twin of {@link walkTreeStackSync} — the identical
  * {@link walkTreeStackSteps} traversal, plus a `setImmediate` yield every
- * `yieldEvery` processed entries so a large tree never holds the event loop in
+ * its monotonic budget so a large tree never holds the event loop in
  * one synchronous burst. Returns true iff the visitor stopped the walk via
  * `"stop"`.
  *
@@ -285,21 +289,16 @@ export async function walkTreeStackAsync(
 ): Promise<boolean> {
 	await opts.beforeWalk?.();
 	const steps = walkTreeStackSteps(rootDir, visit, opts.shouldStop);
-	let processedSinceYield = 0;
+	const deadline = createDeadline(opts.budgetMs ?? 8);
 	let step = steps.next();
 	while (!step.done) {
 		if (step.value !== undefined) {
 			// Directory-read request — satisfy it off the loop. No
-			// `processedSinceYield` reset: awaiting the read already turns the
-			// loop, so leaving the counter alone can only yield MORE often than
-			// before, never less (the cadence contract is a floor, not a quota).
 			step = steps.next(await readDirEntriesSafeAsync(step.value));
+			deadline.reset();
 			continue;
 		}
-		if (++processedSinceYield >= opts.yieldEvery) {
-			processedSinceYield = 0;
-			await new Promise<void>((resolve) => setImmediate(resolve));
-		}
+		if (deadline.expired()) await yieldIfOverBudget(deadline);
 		step = steps.next();
 	}
 	return step.value;

@@ -675,6 +675,9 @@ async function buildOrRefreshWordIndex(args: {
 	const { runtime, sessionGeneration, analysisRoot, snapshotRoot, dbg } = args;
 	if (!runtime.isCurrentSession(sessionGeneration)) return;
 	const startMs = Date.now();
+	let rebuildPreflightFiles:
+		| import("./word-index.js").WordIndexPreflightFiles
+		| undefined;
 
 	const latestSeq = readLatestProjectSequence(
 		snapshotRoot,
@@ -695,6 +698,7 @@ async function buildOrRefreshWordIndex(args: {
 				);
 				if (!runtime.isCurrentSession(sessionGeneration)) return;
 				if (result.mode === "full-required") {
+					rebuildPreflightFiles = result.preflightFiles;
 					dbg(
 						`session_start word-index: incremental preflight selected full rebuild (${result.reason})`,
 					);
@@ -766,8 +770,10 @@ async function buildOrRefreshWordIndex(args: {
 	const { buildWordIndexAsync, collectWordIndexDocs } = await import(
 		"./word-index.js"
 	);
-	const docs = await collectWordIndexDocs(analysisRoot, () =>
-		runtime.isCurrentSession(sessionGeneration),
+	const docs = await collectWordIndexDocs(
+		analysisRoot,
+		() => runtime.isCurrentSession(sessionGeneration),
+		rebuildPreflightFiles,
 	);
 	if (!runtime.isCurrentSession(sessionGeneration)) return;
 	// #1197 review finding 2: `buildWordIndexAsync` THROWS on supersession, and
