@@ -2387,7 +2387,98 @@ const KTFMT_GRADLE_FILES = [
 	"settings.gradle",
 ];
 
-const KOTLIN_BUILD_FILES = ["build.gradle.kts", "build.gradle"];
+const KOTLIN_GRADLE_FILES = [
+	"build.gradle.kts",
+	"build.gradle",
+	"settings.gradle.kts",
+	"settings.gradle",
+];
+
+interface SpotlessKotlinConfigCacheEntry {
+	mtime: number;
+	ktlintConfig: boolean;
+	ktfmtConfig: boolean;
+}
+
+const spotlessKotlinConfigCache = new Map<
+	string,
+	SpotlessKotlinConfigCacheEntry
+>();
+let spotlessGradleReadCount = 0;
+
+/** Test-only observability for asserting the hot-path I/O bound. */
+export function _getSpotlessGradleReadCountForTests(): number {
+	return spotlessGradleReadCount;
+}
+
+/**
+ * Blank comments and quoted strings while preserving braces and newlines in
+ * executable Gradle source. This is deliberately a small lexical pre-pass,
+ * not a Groovy/Kotlin parser. In particular, statically disabled constructs
+ * such as `if (false) { ktlint() }` remain a documented false-positive.
+ */
+function stripGradleCommentsAndStrings(source: string): string {
+	let result = "";
+	let state: "code" | "line-comment" | "block-comment" | "string" = "code";
+	let quote = "";
+	for (let index = 0; index < source.length; index += 1) {
+		const char = source[index];
+		const next = source[index + 1];
+		if (state === "code") {
+			if (char === "/" && next === "/") {
+				result += "  ";
+				index += 1;
+				state = "line-comment";
+			} else if (char === "/" && next === "*") {
+				result += "  ";
+				index += 1;
+				state = "block-comment";
+			} else if (char === '"' || char === "'") {
+				result += " ";
+				quote = char;
+				state = "string";
+			} else {
+				result += char;
+			}
+			continue;
+		}
+
+		if (state === "line-comment") {
+			if (char === "\n" || char === "\r") {
+				result += char;
+				state = "code";
+			} else {
+				result += " ";
+			}
+			continue;
+		}
+
+		if (state === "block-comment") {
+			if (char === "*" && next === "/") {
+				result += "  ";
+				index += 1;
+				state = "code";
+			} else {
+				result += char === "\n" || char === "\r" ? char : " ";
+			}
+			continue;
+		}
+
+		if (char === "\\") {
+			result += " ";
+			if (index + 1 < source.length) {
+				result += source[index + 1] === "\n" ? "\n" : " ";
+				index += 1;
+			}
+		} else if (char === quote) {
+			result += " ";
+			state = "code";
+		} else {
+			result += char === "\n" || char === "\r" ? char : " ";
+		}
+	}
+	return result;
+}
 
 function namedGradleBlockBodies(source: string, name: string): string[] {
 	const bodies: string[] = [];
@@ -2417,18 +2508,29 @@ export function getSpotlessKotlinFormatter(
 	cwd: string,
 ): SpotlessKotlinFormatter | undefined {
 	for (const dir of walkUpDirs(cwd)) {
-		for (const gradle of KOTLIN_BUILD_FILES) {
+		for (const gradle of KOTLIN_GRADLE_FILES) {
 			const filePath = path.join(dir, gradle);
 			if (!fs.existsSync(filePath)) continue;
 			try {
-				const source = fs.readFileSync(filePath, "utf-8");
-				const kotlinBodies = namedGradleBlockBodies(source, "spotless").flatMap(
-					(spotless) => namedGradleBlockBodies(spotless, "kotlin"),
-				);
-				if (kotlinBodies.some((body) => /\bktlint\s*\(/.test(body)))
-					return "ktlint";
-				if (kotlinBodies.some((body) => /\bktfmt\s*\(/.test(body)))
-					return "ktfmt";
+				const mtime = fs.statSync(filePath).mtimeMs;
+				let config = spotlessKotlinConfigCache.get(filePath);
+				if (!config || config.mtime !== mtime) {
+					const source = stripGradleCommentsAndStrings(
+						fs.readFileSync(filePath, "utf-8"),
+					);
+					spotlessGradleReadCount += 1;
+					const kotlinBodies = namedGradleBlockBodies(source, "spotless").flatMap(
+						(spotless) => namedGradleBlockBodies(spotless, "kotlin"),
+					);
+					config = {
+						mtime,
+						ktlintConfig: kotlinBodies.some((body) => /\bktlint\s*\(/.test(body)),
+						ktfmtConfig: kotlinBodies.some((body) => /\bktfmt\s*\(/.test(body)),
+					};
+					spotlessKotlinConfigCache.set(filePath, config);
+				}
+				if (config.ktlintConfig) return "ktlint";
+				if (config.ktfmtConfig) return "ktfmt";
 			} catch {}
 		}
 	}

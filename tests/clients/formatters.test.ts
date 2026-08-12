@@ -31,6 +31,7 @@ import {
 	shfmtFormatter,
 } from "../../clients/formatters.ts";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
+import { _getSpotlessGradleReadCountForTests } from "../../clients/tool-policy.js";
 
 // ---------------------------------------------------------------------------
 // Platform helpers
@@ -497,6 +498,32 @@ describe("getFormattersForFile — policy selection", () => {
 			expect(formatters.map((formatter) => formatter.name)).toEqual(["ktlint"]);
 			expect(formatters.some((formatter) => formatter.name === "ktfmt")).toBe(false);
 		}
+	});
+
+	it("selects ktlint for a 76-file multi-directory session with one Gradle read (#1306)", async () => {
+		createTempFile(
+			tmpDir,
+			"settings.gradle.kts",
+			"spotless {\n  kotlin {\n    ktlint()\n  }\n}\n",
+		);
+		const files = Array.from({ length: 76 }, (_, index) => {
+			const filePath = path.join(
+				tmpDir,
+				"modules",
+				`module-${index % 13}`,
+				"src",
+				`File${index}.kt`,
+			);
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, `class File${index}\n`);
+			return filePath;
+		});
+		const readsBefore = _getSpotlessGradleReadCountForTests();
+		for (const filePath of files) {
+			const formatters = await getFormattersForFile(filePath, tmpDir);
+			expect(formatters.map((formatter) => formatter.name)).toEqual(["ktlint"]);
+		}
+		expect(_getSpotlessGradleReadCountForTests() - readsBefore).toBe(1);
 	});
 
 	it("selects Spotless ktfmt and never ktlint (#1306)", async () => {
