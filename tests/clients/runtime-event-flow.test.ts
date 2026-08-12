@@ -181,6 +181,91 @@ describe("runtime event flow", () => {
 		}
 	});
 
+	it("skips the turn-end madge batch when enabled but madge is unavailable (#766)", async () => {
+		const env = setupTestEnvironment("pi-lens-madge-unavailable-");
+		const runtime = new RuntimeCoordinator();
+		const cacheManager = new CacheManager(false);
+		const filePath = path.join(env.tmpDir, "src", "cycle.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "export const value = 1;\n");
+		const dbg = vi.fn();
+		try {
+			cacheManager.addModifiedRange(
+				filePath,
+				{ start: 1, end: 1 },
+				true,
+				env.tmpDir,
+			);
+			const checkFilesBatch = vi.fn();
+			const ensureAvailable = vi.fn(async () => false);
+
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name: string) => name === "lens-turn-end-madge",
+				dbg,
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				depChecker: { ensureAvailable, checkFilesBatch } as any,
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			// Availability probe still runs (flag is on); the short-circuit must stop
+			// before spawning madge when it reports unavailable.
+			expect(ensureAvailable).toHaveBeenCalled();
+			expect(checkFilesBatch).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not spawn madge when enabled but no import-changed files exist (#766)", async () => {
+		const env = setupTestEnvironment("pi-lens-madge-no-import-changes-");
+		const runtime = new RuntimeCoordinator();
+		const cacheManager = new CacheManager(false);
+		const filePath = path.join(env.tmpDir, "src", "cycle.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "export const value = 1;\n");
+		const dbg = vi.fn();
+		try {
+			// importsChanged=false → the file is not eligible for the turn-end pass.
+			cacheManager.addModifiedRange(
+				filePath,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+			const checkFilesBatch = vi.fn();
+			const ensureAvailable = vi.fn(async () => true);
+
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name: string) => name === "lens-turn-end-madge",
+				dbg,
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				depChecker: { ensureAvailable, checkFilesBatch } as any,
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			expect(ensureAvailable).toHaveBeenCalled();
+			expect(checkFilesBatch).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("flows session_start -> tool_result -> turn_end -> context", async () => {
 		const env = setupTestEnvironment("pi-lens-event-flow-");
 		const runtime = new RuntimeCoordinator();
