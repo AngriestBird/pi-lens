@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
+import { resolvePiLensFlag } from "../../clients/lens-config.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleSessionStart } from "../../clients/runtime-session.js";
@@ -11,8 +12,12 @@ import { setupTestEnvironment } from "./test-utils.js";
 
 const latencyEntries: Array<Record<string, unknown>> = [];
 vi.mock("../../clients/latency-logger.js", async (importActual) => {
-	const actual = await importActual<typeof import("../../clients/latency-logger.js")>();
-	return { ...actual, logLatency: (entry: Record<string, unknown>) => latencyEntries.push(entry) };
+	const actual =
+		await importActual<typeof import("../../clients/latency-logger.js")>();
+	return {
+		...actual,
+		logLatency: (entry: Record<string, unknown>) => latencyEntries.push(entry),
+	};
 });
 
 const EMPTY_KNIP_RESULT = {
@@ -46,33 +51,66 @@ describe("runtime event flow", () => {
 		const dbg = vi.fn();
 		latencyEntries.length = 0;
 		try {
-			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, true, env.tmpDir);
+			cacheManager.addModifiedRange(
+				filePath,
+				{ start: 1, end: 1 },
+				true,
+				env.tmpDir,
+			);
 			const stats = {
-				requested: 1, missing: 0, cacheHits: 0, spawned: 1, failed: 0,
-				commandKind: "npx", resolveMs: 3,
+				requested: 1,
+				missing: 0,
+				cacheHits: 0,
+				spawned: 1,
+				failed: 0,
+				commandKind: "npx",
+				resolveMs: 3,
 				targets: [{ file: "src/cycle.ts", durationMs: 125, ok: true }],
 				targetsTruncated: false,
 			};
 			const checkFilesBatch = vi.fn(async () => ({
-				results: new Map([[path.resolve(filePath), {
-					hasCircular: true, circular: [{ file: path.resolve(filePath), path: path.resolve(filePath) }],
-					checked: true, cacheHit: false,
-				}]]),
+				results: new Map([
+					[
+						path.resolve(filePath),
+						{
+							hasCircular: true,
+							circular: [
+								{ file: path.resolve(filePath), path: path.resolve(filePath) },
+							],
+							checked: true,
+							cacheHit: false,
+						},
+					],
+				]),
 				stats,
 			}));
 
 			await handleTurnEnd({
 				ctxCwd: env.tmpDir,
 				getFlag: (name: string) => name === "lens-turn-end-madge",
-				dbg, runtime, cacheManager,
-				knipClient: { ensureAvailable: async () => false, analyze: async () => EMPTY_KNIP_RESULT },
-				depChecker: { ensureAvailable: async () => true, checkFilesBatch } as any,
+				dbg,
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				depChecker: {
+					ensureAvailable: async () => true,
+					checkFilesBatch,
+				} as any,
 				testRunnerClient: { getTestRunTarget: () => null },
-				resetLSPService: () => {}, resetFormatService: () => {},
+				resetLSPService: () => {},
+				resetFormatService: () => {},
 			} as any);
 
-			expect(checkFilesBatch).toHaveBeenCalledWith([path.resolve(filePath)], env.tmpDir);
-			expect(dbg).toHaveBeenCalledWith(expect.stringContaining("circular dependency note"));
+			expect(checkFilesBatch).toHaveBeenCalledWith(
+				[path.resolve(filePath)],
+				env.tmpDir,
+			);
+			expect(dbg).toHaveBeenCalledWith(
+				expect.stringContaining("circular dependency note"),
+			);
 			const madge = latencyEntries.find((entry) => entry.phase === "madge");
 			expect(madge?.metadata).toEqual(stats);
 		} finally {
@@ -90,19 +128,48 @@ describe("runtime event flow", () => {
 		const dbg = vi.fn();
 		latencyEntries.length = 0;
 		try {
-			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, true, env.tmpDir);
+			cacheManager.addModifiedRange(
+				filePath,
+				{ start: 1, end: 1 },
+				true,
+				env.tmpDir,
+			);
 			const checkFilesBatch = vi.fn(async () => ({
 				results: new Map(),
-				stats: { requested: 0, missing: 0, cacheHits: 0, spawned: 0, failed: 0 },
+				stats: {
+					requested: 0,
+					missing: 0,
+					cacheHits: 0,
+					spawned: 0,
+					failed: 0,
+				},
 			}));
 			const ensureAvailable = vi.fn(async () => true);
 
+			// The whole point of #766 is the pass is off unless explicitly enabled.
+			// A registry-default flip to true would silently re-introduce the tail;
+			// the mocked-getFlag variant below can't see it (it hardcodes false), and
+			// lens-config's it.each only asserts value===spec.default, so pin the
+			// default here AND drive the gate through the REAL resolver.
+			expect(resolvePiLensFlag("lens-turn-end-madge", false, {})).toBe(false);
+
 			await handleTurnEnd({
-				ctxCwd: env.tmpDir, getFlag: () => false, dbg, runtime, cacheManager,
-				knipClient: { ensureAvailable: async () => false, analyze: async () => EMPTY_KNIP_RESULT },
+				ctxCwd: env.tmpDir,
+				getFlag: (name: string) =>
+					name === "lens-turn-end-madge"
+						? resolvePiLensFlag(name, false, {})
+						: false,
+				dbg,
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
 				depChecker: { ensureAvailable, checkFilesBatch } as any,
 				testRunnerClient: { getTestRunTarget: () => null },
-				resetLSPService: () => {}, resetFormatService: () => {},
+				resetLSPService: () => {},
+				resetFormatService: () => {},
 			} as any);
 
 			expect(checkFilesBatch).not.toHaveBeenCalled();
