@@ -1186,6 +1186,8 @@ v3.8.74. Release history lives in `CHANGELOG.md` (dated, versioned, kept current
 
 ## Test requirements
 
+A new always-absent dependency stub (a `vi.mock`/fixture that makes a dependency permanently unavailable) must ship with at least one present-path **behavior** test: the dependency's result must reach the caller, never just a bare no-throw assertion. #1251 is the failure case; #1310 is the pattern to follow.
+
 Every commit that adds or changes logic **must** include relevant tests before pushing. No exceptions:
 
 - New functions → unit tests covering the happy path, edge cases, and error paths.
