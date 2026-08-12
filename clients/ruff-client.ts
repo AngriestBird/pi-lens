@@ -42,6 +42,7 @@ interface RuffJsonDiagnostic {
 
 export class RuffClient {
 	private ruffAvailable: boolean | null = null;
+	private ruffCommand = "ruff";
 	private ensureInFlight: Promise<boolean> | null = null;
 	private log: (msg: string) => void;
 
@@ -79,6 +80,7 @@ export class RuffClient {
 		this.ruffAvailable = !result.error && result.status === 0;
 
 		if (this.ruffAvailable) {
+			this.ruffCommand = "ruff";
 			this.log(`Ruff found: ${result.stdout.trim()}`);
 			return true;
 		}
@@ -89,6 +91,7 @@ export class RuffClient {
 		const installedPath = await ensureTool("ruff");
 
 		if (installedPath) {
+			this.ruffCommand = installedPath;
 			this.log(`Ruff auto-installed: ${installedPath}`);
 			this.ruffAvailable = true;
 			return true;
@@ -149,7 +152,7 @@ export class RuffClient {
 			const spawnOpts = { timeout: 10000, cwd: cwd ?? path.dirname(absolutePath) };
 
 			const pre = await safeSpawnAsync(
-				"ruff",
+				this.ruffCommand,
 				[
 					"check",
 					"--output-format",
@@ -167,7 +170,7 @@ export class RuffClient {
 			const fixableCount = beforeDiags.filter((d) => d.fixable).length;
 
 			const fix = await safeSpawnAsync(
-				"ruff",
+				this.ruffCommand,
 				["check", "--fix", ...configArgs, absolutePath],
 				{ timeout: 15000, cwd: cwd ?? path.dirname(absolutePath) },
 			);

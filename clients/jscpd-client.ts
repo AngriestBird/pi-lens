@@ -57,6 +57,7 @@ const SCAN_TIMEOUT_MS = 30_000;
 
 export class JscpdClient {
 	private available: boolean | null = null;
+	private jscpdCommand = "jscpd";
 	private ensureInFlight: Promise<boolean> | null = null;
 	private inFlight = new Map<string, Promise<JscpdResult>>();
 	private log: (msg: string) => void;
@@ -156,6 +157,7 @@ export class JscpdClient {
 		for (const candidate of localCandidates) {
 			try {
 				if (fs.existsSync(candidate)) {
+					this.jscpdCommand = candidate;
 					this.available = true;
 					return true;
 				}
@@ -170,6 +172,7 @@ export class JscpdClient {
 		});
 		this.available = !result.error && result.status === 0;
 		if (this.available) {
+			this.jscpdCommand = "jscpd";
 			return true;
 		}
 
@@ -178,6 +181,7 @@ export class JscpdClient {
 		const installedPath = await ensureTool("jscpd");
 
 		if (installedPath) {
+			this.jscpdCommand = installedPath;
 			this.available = true;
 			return true;
 		}
@@ -281,7 +285,9 @@ export class JscpdClient {
 			const bin = await findNodeToolBinary("jscpd", cwd);
 			const { cmd, prefix } = bin
 				? { cmd: bin, prefix: [] as string[] }
-				: { cmd: "npx", prefix: ["jscpd"] };
+				: this.jscpdCommand !== "jscpd"
+					? { cmd: this.jscpdCommand, prefix: [] as string[] }
+					: { cmd: "npx", prefix: ["jscpd"] };
 			const result = await safeSpawnAsync(
 				cmd,
 				[

@@ -3,6 +3,12 @@ import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setupTestEnvironment } from "./test-utils.js";
 
+const ensureTool = vi.fn();
+const findNodeToolBinary = vi.fn();
+
+vi.mock("../../clients/installer/index.js", () => ({ ensureTool }));
+vi.mock("../../clients/package-manager.js", () => ({ findNodeToolBinary }));
+
 vi.mock("../../clients/safe-spawn.js", () => ({
 	safeSpawnAsync: vi.fn(async () => ({
 		error: null,
@@ -16,6 +22,33 @@ describe("jscpd-client", () => {
 	beforeEach(async () => {
 		const safeSpawnMod = await import("../../clients/safe-spawn.js");
 		vi.mocked(safeSpawnMod.safeSpawnAsync).mockClear();
+		ensureTool.mockReset();
+		findNodeToolBinary.mockReset();
+		findNodeToolBinary.mockResolvedValue(null);
+	});
+
+	it("uses the managed executable after PATH installation", async () => {
+		const { JscpdClient } = await import("../../clients/jscpd-client.js");
+		const safeSpawnMod = await import("../../clients/safe-spawn.js");
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-jscpd-managed-");
+		const managed = "/fake/managed/jscpd";
+		try {
+			fs.writeFileSync(path.join(tmpDir, "src.ts"), "const x = 1;\n");
+			ensureTool.mockResolvedValue(managed);
+			vi.mocked(safeSpawnMod.safeSpawnAsync)
+				.mockResolvedValueOnce({
+					error: new Error("not found"),
+					status: 1,
+					stdout: "",
+					stderr: "",
+				})
+				.mockResolvedValue({ error: null, status: 0, stdout: "", stderr: "" });
+			const result = await new JscpdClient().scan(tmpDir);
+			expect(result.success).toBe(true);
+			expect(safeSpawnMod.safeSpawnAsync.mock.calls[1]?.[0]).toBe(managed);
+		} finally {
+			cleanup();
+		}
 	});
 
 	it("scans when source exists in nested directories", async () => {

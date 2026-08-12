@@ -57,4 +57,31 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 		await client.ensureAvailable();
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
 	});
+
+	it("uses the managed executable after PATH installation", async () => {
+		const managed = "/fake/managed/ruff";
+		safeSpawnAsync
+			.mockResolvedValueOnce({
+				status: 1,
+				error: new Error("not found"),
+				stdout: "",
+				stderr: "",
+			})
+			.mockResolvedValue({ status: 0, error: null, stdout: "[]", stderr: "" });
+		ensureTool.mockResolvedValue(managed);
+		const { RuffClient } = await import("../../clients/ruff-client.js");
+		const client = new RuffClient();
+		const file = `${process.cwd()}\\ruff-managed-test.py`;
+		const fs = await import("node:fs");
+		fs.writeFileSync(file, "x = 1\n");
+		try {
+			await client.fixFileAsync(file);
+			expect(safeSpawnAsync.mock.calls.slice(1).map((call) => call[0])).toEqual([
+				managed,
+				managed,
+			]);
+		} finally {
+			fs.rmSync(file, { force: true });
+		}
+	});
 });
