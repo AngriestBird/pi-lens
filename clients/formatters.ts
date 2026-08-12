@@ -12,6 +12,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
+import {
+	detectIndentation,
+	hasDetectableIndentation,
+} from "./dispatch/indent-detect.js";
 import { logLatency } from "./latency-logger.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
@@ -358,6 +362,30 @@ async function hasEditorConfig(cwd: string): Promise<boolean> {
 	}
 }
 
+async function indentationArgs(
+	filePath: string,
+	tool: "biome" | "prettier" | "ruff" | "shfmt",
+	cwd: string,
+): Promise<string[] | null> {
+	if (await hasEditorConfig(cwd) || hasExplicitFormatterConfig(tool, cwd, path.extname(filePath))) {
+		return [];
+	}
+	let content: string;
+	try {
+		content = await fs.readFile(filePath, "utf8");
+	} catch {
+		// Resolution tests and callers may probe a path before it exists.
+		return [];
+	}
+	if (!hasDetectableIndentation(content)) return null;
+	const indentation = detectIndentation(content);
+	if (tool === "shfmt") return indentation.style === "tab" ? ["-i", "0"] : ["-i", String(indentation.width)];
+	if (tool === "prettier") {
+		return [indentation.style === "tab" ? "--use-tabs" : "--no-use-tabs", "--tab-width", String(indentation.width)];
+	}
+	return ["--indent-style", indentation.style, "--indent-width", String(indentation.width)];
+}
+
 export const biomeFormatter: FormatterInfo = {
 	name: "biome",
 	command: ["npx", "@biomejs/biome", "format", "--write", "$FILE"],
@@ -365,20 +393,22 @@ export const biomeFormatter: FormatterInfo = {
 		const editorConfigFlag = (await hasEditorConfig(cwd))
 			? ["--use-editorconfig=true"]
 			: [];
+		const styleArgs = await indentationArgs(filePath, "biome", cwd);
+		if (styleArgs === null) return null;
 		const local = await findInNodeModules("biome", cwd);
 		if (local)
-			return [local, "format", "--write", ...editorConfigFlag, filePath];
+			return [local, "format", "--write", ...editorConfigFlag, ...styleArgs, filePath];
 		// Any package manager's global bin dir (npm/pnpm/yarn/bun) before we
 		// auto-install — catches a `pnpm add -g @biomejs/biome` PATH misses (#375).
 		const global = await findGlobalBinary("biome");
 		if (global)
-			return [global, "format", "--write", ...editorConfigFlag, filePath];
+			return [global, "format", "--write", ...editorConfigFlag, ...styleArgs, filePath];
 		const toolId = getAutoInstallToolIdForFormatter("biome");
 		if (!toolId) return null;
 		const { ensureTool } = await import("./installer/index.js");
 		const installed = await ensureTool(toolId);
 		if (installed)
-			return [installed, "format", "--write", ...editorConfigFlag, filePath];
+			return [installed, "format", "--write", ...editorConfigFlag, ...styleArgs, filePath];
 		return null;
 	},
 	extensions: [
@@ -412,12 +442,15 @@ export const prettierFormatter: FormatterInfo = {
 	name: "prettier",
 	command: ["npx", "prettier", "--write", "$FILE"],
 	async resolveCommand(filePath, cwd) {
+		const styleArgs = await indentationArgs(filePath, "prettier", cwd);
+		if (styleArgs === null) return null;
+		const args = ["--write", ...styleArgs];
 		const local = await findInNodeModules("prettier", cwd);
-		if (local) return [local, "--write", filePath];
+		if (local) return [local, ...args, filePath];
 		// Global bin of any manager (npm/pnpm/yarn/bun) before auto-install (#375).
 		const global = await findGlobalBinary("prettier");
-		if (global) return [global, "--write", filePath];
-		return resolveManagedSmartDefaultCommand("prettier", filePath, ["--write"]);
+		if (global) return [global, ...args, filePath];
+		return resolveManagedSmartDefaultCommand("prettier", filePath, args);
 	},
 	extensions: [
 		".js",
@@ -490,13 +523,16 @@ export const ruffFormatter: FormatterInfo = {
 	command: ["ruff", "format", "$FILE"],
 	extensions: [".py", ".pyi"],
 	async resolveCommand(filePath, cwd) {
+		const styleArgs = await indentationArgs(filePath, "ruff", cwd);
+		if (styleArgs === null) return null;
+		const args = ["format", ...styleArgs];
 		const venv = await findInVenv("ruff", cwd);
-		if (venv) return [venv, "format", filePath];
+		if (venv) return [venv, ...args, filePath];
 		const toolId = getAutoInstallToolIdForFormatter("ruff");
 		if (!toolId) return null;
 		const { ensureTool } = await import("./installer/index.js");
 		const installed = await ensureTool(toolId);
-		if (installed) return [installed, "format", filePath];
+		if (installed) return [installed, ...args, filePath];
 		return null;
 	},
 	async detect(cwd: string) {
@@ -588,10 +624,12 @@ export const shfmtFormatter: FormatterInfo = {
 	name: "shfmt",
 	command: ["shfmt", "-w", "$FILE"],
 	extensions: [".sh", ".bash"],
-	async resolveCommand(filePath, _cwd) {
+	async resolveCommand(filePath, cwd) {
+		const styleArgs = await indentationArgs(filePath, "shfmt", cwd);
+		if (styleArgs === null) return null;
 		const inPath = await which("shfmt");
-		if (inPath) return [inPath, "-w", filePath];
-		return resolveManagedSmartDefaultCommand("shfmt", filePath, ["-w"]);
+		if (inPath) return [inPath, "-w", ...styleArgs, filePath];
+		return resolveManagedSmartDefaultCommand("shfmt", filePath, ["-w", ...styleArgs]);
 	},
 	async detect(_cwd: string) {
 		if ((await which("shfmt")) !== null) return true;

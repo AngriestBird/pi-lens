@@ -16,6 +16,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Smart-default formatters preserve existing indentation when a repository has no style configuration (closes [#1144](https://github.com/apmantza/pi-lens/issues/1144))** — Biome and shfmt now infer and pin a file's indentation for unconfigured formatting, skipping when their style cannot be inferred; Prettier and Ruff receive the same fallback indentation flags. Explicit formatter configuration and `.editorconfig` remain authoritative.
+
 - **Managed ruff, jscpd, and madge installs are now actually used after auto-install (refs [#1289](https://github.com/apmantza/pi-lens/issues/1289))** — retain the absolute path returned by `ensureTool` so off-PATH managed shims are spawned directly instead of falling back to the bare command name.
 
 - **Direct-write cache stores now publish JSON atomically (refs [#1239](https://github.com/apmantza/pi-lens/issues/1239) [#1205](https://github.com/apmantza/pi-lens/issues/1205))** — turn state, rule, diagnostics, call-graph, codebase-model, actionable-warning, and metrics-history stores stage JSON through the shared tmp-plus-rename writer, so a process killed during a write leaves the previous complete cache value rather than a truncated file.

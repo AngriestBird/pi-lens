@@ -264,7 +264,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["ktfmt", "ktlint"],
 			defaultFormatter: "ktlint",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -273,7 +273,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["ktfmt", "ktlint"],
 			defaultFormatter: "ktlint",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -282,7 +282,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["swiftformat"],
 			defaultFormatter: "swiftformat",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -291,7 +291,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["fantomas"],
 			defaultFormatter: "fantomas",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -300,7 +300,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["fantomas"],
 			defaultFormatter: "fantomas",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -309,7 +309,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["fantomas"],
 			defaultFormatter: "fantomas",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -318,7 +318,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["nixfmt"],
 			defaultFormatter: "nixfmt",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -327,7 +327,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["mix"],
 			defaultFormatter: "mix",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -336,7 +336,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["mix"],
 			defaultFormatter: "mix",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -345,7 +345,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["mix"],
 			defaultFormatter: "mix",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -354,7 +354,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["mix"],
 			defaultFormatter: "mix",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -363,7 +363,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["mix"],
 			defaultFormatter: "mix",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -453,7 +453,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["csharpier"],
 			defaultFormatter: "csharpier",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -471,7 +471,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["ormolu"],
 			defaultFormatter: "ormolu",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -480,7 +480,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["ormolu"],
 			defaultFormatter: "ormolu",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -543,7 +543,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["taplo"],
 			defaultFormatter: "taplo",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -552,7 +552,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["terraform"],
 			defaultFormatter: "terraform",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -561,7 +561,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["terraform"],
 			defaultFormatter: "terraform",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -642,7 +642,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["psscriptanalyzer-format"],
 			defaultFormatter: "psscriptanalyzer-format",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -651,7 +651,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["psscriptanalyzer-format"],
 			defaultFormatter: "psscriptanalyzer-format",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -660,7 +660,7 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 		{
 			formatterNames: ["psscriptanalyzer-format"],
 			defaultFormatter: "psscriptanalyzer-format",
-			defaultWhenUnconfigured: true,
+			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
 	],
@@ -1365,8 +1365,8 @@ export function getLinterPolicyForFile(
 			runnerNames: ["sqlfluff"],
 			preferredRunners: ["sqlfluff"],
 			defaultRunner: "sqlfluff",
-			defaultWhenUnconfigured: true,
-			gate: "smart-default",
+			defaultWhenUnconfigured: false,
+			gate: "config-first",
 		};
 	}
 
@@ -1728,8 +1728,8 @@ export function getAutofixPolicyForFile(
 			toolNames: ["sqlfluff"],
 			preferredTools: ["sqlfluff"],
 			defaultTool: "sqlfluff",
-			defaultWhenUnconfigured: true,
-			gate: "smart-default",
+			defaultWhenUnconfigured: false,
+			gate: "config-first",
 			safe: true,
 		};
 	}
