@@ -14,8 +14,7 @@ import {
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import { logActionableWarningsEvent } from "./actionable-warnings-logger.js";
 import { getProjectDataDir } from "./file-utils.js";
-import { writeFileAtomic } from "./atomic-write.js";
-import { acquireBoundedPidFileLock } from "./bounded-pid-file-lock.js";
+import { commitDurableStore } from "./durable-store.js";
 
 export interface ActionableWarningAction {
 	title: string;
@@ -156,6 +155,19 @@ function serializeAction(action: LSPCodeAction): ActionableWarningAction {
 	};
 }
 
+function deserializeSuppressionState(
+	contents: string | undefined,
+): WarningStateFile {
+	try {
+		const parsed = JSON.parse(contents ?? "") as unknown;
+		return parsed && typeof parsed === "object"
+			? (parsed as WarningStateFile)
+			: {};
+	} catch {
+		return {};
+	}
+}
+
 function readSuppressionState(cwd: string): WarningStateFile {
 	const statePath = path.join(
 		getProjectDataDir(cwd),
@@ -163,10 +175,7 @@ function readSuppressionState(cwd: string): WarningStateFile {
 		"actionable-warning-state.json",
 	);
 	try {
-		const parsed = JSON.parse(fs.readFileSync(statePath, "utf-8")) as unknown;
-		return parsed && typeof parsed === "object"
-			? (parsed as WarningStateFile)
-			: {};
+		return deserializeSuppressionState(fs.readFileSync(statePath, "utf8"));
 	} catch {
 		return {};
 	}
@@ -185,7 +194,25 @@ function updateWarningState(
 	const hook = beforeWarningStateLockForTests;
 	beforeWarningStateLockForTests = null;
 	hook?.();
-	const release = acquireBoundedPidFileLock(`${statePath}.lock`, {
+	commitDurableStore({
+		path: statePath,
+		deserialize: deserializeSuppressionState,
+		merge: (state) => {
+			const now = new Date().toISOString();
+			state.warnings ??= {};
+			for (const warning of warnings) {
+				const existing = state.warnings[warning.id] ?? {};
+				state.warnings[warning.id] = {
+					...existing,
+					status: existing.status ?? "active",
+					firstSeenAt: existing.firstSeenAt ?? now,
+					lastSeenAt: now,
+					seenCount: (existing.seenCount ?? 0) + 1,
+				};
+			}
+			return state;
+		},
+		serialize: (state) => JSON.stringify(state, null, 2),
 		waitMs: 2_000,
 		retryMs: 10,
 		timeoutMessage: "timed out acquiring actionable warning store lock",
@@ -196,27 +223,6 @@ function updateWarningState(
 				metadata: { reason: "lock_contention" },
 			}),
 	});
-	if (!release) return;
-	try {
-		const now = new Date().toISOString();
-		// Re-read only after lock acquisition so a suppression committed by a
-		// sibling process cannot be replaced by this writer's stale snapshot.
-		const state = readSuppressionState(cwd);
-		state.warnings ??= {};
-		for (const warning of warnings) {
-			const existing = state.warnings[warning.id] ?? {};
-			state.warnings[warning.id] = {
-				...existing,
-				status: existing.status ?? "active",
-				firstSeenAt: existing.firstSeenAt ?? now,
-				lastSeenAt: now,
-				seenCount: (existing.seenCount ?? 0) + 1,
-			};
-		}
-		writeFileAtomic(statePath, JSON.stringify(state, null, 2));
-	} finally {
-		release();
-	}
 }
 
 function suppressionFor(

@@ -76,7 +76,12 @@
  */
 
 import * as fs from "node:fs";
-import { threadId } from "node:worker_threads";
+export {
+	STAGE_TMP_PATTERN,
+	stageOwnerPidFromName,
+	stagePathFor,
+} from "./atomic-write-staging.js";
+import { stagePathFor } from "./atomic-write-staging.js";
 
 export interface WriteFileAtomicOptions {
 	/**
@@ -106,8 +111,6 @@ export interface WriteFileAtomicOptions {
  * writes can be concurrent: `process.pid` across processes, `threadId` across
  * threads, `_stageSeq` within one thread (#1217).
  */
-let _stageSeq = 0;
-
 /**
  * Staging path for one write call: `${targetPath}.tmp-<pid>-<threadId>-<seq>`.
  *
@@ -117,10 +120,6 @@ let _stageSeq = 0;
  * orphaned staging files stay in lockstep with it (see
  * {@link STAGE_TMP_PATTERN}).
  */
-export function stagePathFor(targetPath: string): string {
-	return `${targetPath}.tmp-${process.pid}-${threadId}-${_stageSeq++}`;
-}
-
 /**
  * Matches the trailing staging-file marker produced by {@link stagePathFor},
  * for the session-start sweeper that garbage-collects staging files orphaned
@@ -145,19 +144,6 @@ export function stagePathFor(targetPath: string): string {
  * not fully control should not assume every match is one of this module's
  * staging files.
  */
-export const STAGE_TMP_PATTERN =
-	/\.tmp-(0|[1-9]\d*)-(0|[1-9]\d*)-(0|[1-9]\d*)$/;
-const STAGE_TMP_PID_PATTERN =
-	/\.tmp-(0|[1-9]\d*)-(?:0|[1-9]\d*)-(?:0|[1-9]\d*)$/;
-
-/** Extract a valid positive owner pid from an atomic-write staging basename. */
-export function stageOwnerPidFromName(name: string): number | undefined {
-	if (!STAGE_TMP_PATTERN.test(name)) return undefined;
-	const match = STAGE_TMP_PID_PATTERN.exec(name);
-	if (!match) return undefined;
-	const pid = Number(match[1]);
-	return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
-}
 
 /**
  * Synchronous atomic write of text or binary data to a per-call staging file,
