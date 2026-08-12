@@ -6,15 +6,18 @@
  * caller merges only its delta, publication is a throwing atomic replacement,
  * and success telemetry runs only after publication succeeds.
  *
- * The installer probe cache deliberately retains its richer, older lock. Its
- * quarantine recovery and install-lifetime ageing semantics predate this seam;
- * folding that protocol is follow-up work under #1212, not a safe mechanical
- * substitution for these short synchronous commits.
+ * Short synchronous commits use a file lock. Awaited commits use the shared
+ * quarantine directory lock, preserving bounded contention and stale-owner
+ * recovery without allowing a late release to delete a replacement owner.
  */
 
 import * as fs from "node:fs";
-import { writeFileAtomic } from "./atomic-write.js";
-import { acquireBoundedPidFileLock } from "./bounded-pid-file-lock.js";
+import fsp from "node:fs/promises";
+import { writeFileAtomic, writeFileAtomicAsync } from "./atomic-write.js";
+import {
+	acquireBoundedPidFileLock,
+	acquireQuarantinePidFileLock,
+} from "./bounded-pid-file-lock.js";
 
 interface DurableStoreCommitBase<T> {
 	path: string;
@@ -25,6 +28,11 @@ interface DurableStoreCommitBase<T> {
 	retryMs: number;
 	timeoutMessage: string;
 	afterWriteLocked?: (value: T) => void;
+}
+
+interface AsyncDurableStoreCommitBase<T> extends DurableStoreCommitBase<T> {
+	staleMs: number;
+	afterWriteLocked?: (value: T) => void | Promise<void>;
 }
 
 function readLocked(path: string): string | undefined {
@@ -78,4 +86,59 @@ export function commitDurableStore<T>(
 		release();
 	}
 	return committed;
+}
+
+async function readLockedAsync(path: string): Promise<string | undefined> {
+	try {
+		return await fsp.readFile(path, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+export async function commitDurableStoreAsync<T>(
+	options: AsyncDurableStoreCommitBase<T> & { onContention?: "throw" },
+): Promise<T>;
+export async function commitDurableStoreAsync<T>(
+	options: AsyncDurableStoreCommitBase<T> & {
+		onContention: "skip-log";
+		logContention: () => void;
+	},
+): Promise<T | undefined>;
+export async function commitDurableStoreAsync<T>(
+	options: AsyncDurableStoreCommitBase<T> & (
+		| { onContention?: "throw" }
+		| { onContention: "skip-log"; logContention: () => void }
+	),
+): Promise<T | undefined> {
+	const release =
+		options.onContention === "skip-log"
+			? await acquireQuarantinePidFileLock(`${options.path}.lock`, {
+					waitMs: options.waitMs,
+					retryMs: options.retryMs,
+					staleMs: options.staleMs,
+					timeoutMessage: options.timeoutMessage,
+					onContention: "skip-log",
+					logContention: options.logContention,
+				})
+			: await acquireQuarantinePidFileLock(`${options.path}.lock`, {
+					waitMs: options.waitMs,
+					retryMs: options.retryMs,
+					staleMs: options.staleMs,
+					timeoutMessage: options.timeoutMessage,
+					onContention: "throw",
+				});
+	if (!release) return undefined;
+	try {
+		const current = options.deserialize(await readLockedAsync(options.path));
+		const committed = options.merge(current);
+		await writeFileAtomicAsync(options.path, options.serialize(committed), {
+			bestEffort: false,
+		});
+		await options.afterWriteLocked?.(committed);
+		return committed;
+	} finally {
+		await release();
+	}
 }

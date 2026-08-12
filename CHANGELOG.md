@@ -18,7 +18,9 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
-- **Shared durable-store and atomic-stage protocols (refs #1212, closes #1209)** — diagnostic dispositions and actionable-warning suppression now use one locked in-lock-reread/merge/throwing-atomic-write commit seam, while one staging namespace module owns `.tmp-<pid>-<threadId>-<seq>` minting, classification, and bounded own-stage sweeping. The installer probe cache retains its older quarantine-aware install lock; folding that richer protocol remains deferred under #1212.
+- **Installer probe-cache persistence now uses the shared durable-store protocol (closes #1212)** — awaited commits use the shared quarantine-recovering bounded PID lock, authoritative in-lock reread/delta merge, throwing atomic publication, and in-lock mirror refresh while retaining deferred/failed retry outcomes; TTL, existence, and mtime validation remain read-side policy. Turn-state folding remains a future decision, not part of this change.
+
+- **Shared durable-store and atomic-stage protocols (refs #1212, closes #1209)** — diagnostic dispositions and actionable-warning suppression now use one locked in-lock-reread/merge/throwing-atomic-write commit seam, while one staging namespace module owns `.tmp-<pid>-<threadId>-<seq>` minting, classification, and bounded own-stage sweeping.
 
 - **Standalone managed-tool clients share one typed availability/install seam (closes [#1290](https://github.com/apmantza/pi-lens/issues/1290), refs [#1214](https://github.com/apmantza/pi-lens/issues/1214))** — madge, Knip, Biome, and ast-grep now join Ruff/jscpd behind runner helpers. Single-command clients use the cached typed checker; ordered-candidate clients retain their local/global/npx/platform search through a typed custom-probe wrapper. The seam also owns managed child environments and read-only discovery, while a source coverage test rejects direct `ensureTool()` calls or bare managed-tool spawns outside sanctioned wrappers. Raw ENOENT consumers in `lsp/launch.ts` remain for #1214's safe-spawn-wide taxonomy.
 

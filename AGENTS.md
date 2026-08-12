@@ -10,16 +10,19 @@ AGENTS.md is the durable context handed to every agent that works on pi-lens. **
 
 **Behavior-gating durable stores serialize read-modify-write.** Atomic rename
 prevents torn JSON but not lost sibling-process deltas. Use
-`clients/durable-store.ts` for short synchronous commits; it acquires the
-bounded PID lock, performs the authoritative disk re-read internally (callers
+`clients/durable-store.ts`; short synchronous commits acquire the bounded PID
+file lock, while awaited commits acquire its shared quarantine-directory
+variant. Both perform the authoritative disk re-read internally (callers
 receive only its serialized contents through `deserialize`, never supply a
 read callback), merges only the caller's delta, and publishes through a
 throwing atomic write. `afterWriteLocked` cache refreshes run after publication
 but before lock release so another writer cannot pair its stat with stale
 committed state; telemetry or other post-success work must preserve that
 ordering when it is state-coupled. The
-PID liveness check has a documented bounded PID-reuse exposure; its unique
-token prevents a late owner from deleting a replacement lock. Callers must
+PID liveness check has a documented bounded PID-reuse exposure. Both lock
+forms use unique ownership tokens; the awaited form renames stale locks and
+releases aside before token inspection, so a late owner cannot delete a
+replacement lock. Callers must
 choose contention policy explicitly: correctness-critical stores use
 `onContention: "throw"`; dispatch-adjacent best-effort stores use `"skip-log"`
 with a drop telemetry callback and skip the whole commit when acquisition
@@ -29,8 +32,11 @@ Generic atomic-write staging names are owned only by
 `clients/atomic-write-staging.ts`: mint, strict classification, owner-pid
 extraction, and the bounded session-start sweep must stay on that seam so a
 format change cannot drift from garbage collection. The installer probe cache
-keeps its older richer lock because quarantine recovery and install-lifetime
-aging predate the short-commit durable-store seam. (#1209, #1212)
+uses the awaited durable-store seam: its delta/version snapshot maps to
+`merge`, pending-update retirement and mirror refresh run in
+`afterWriteLocked`, and TTL/existence/mtime validation remains read-side
+policy. Turn-state remains separate pending a future ownership decision.
+(#1209, #1212)
 
 ## Issue and PR design contract
 
