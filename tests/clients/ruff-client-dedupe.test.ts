@@ -8,6 +8,8 @@ vi.mock("../../clients/safe-spawn.js", () => ({ safeSpawnAsync, safeSpawn }));
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
 	resetPathWalkMemo: vi.fn(),
+	// Seam probes route through this on cached hits (#1203); default spawnable.
+	isSpawnableCommand: vi.fn(async () => true),
 }));
 
 describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {

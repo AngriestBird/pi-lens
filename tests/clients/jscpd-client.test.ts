@@ -9,6 +9,8 @@ const findNodeToolBinary = vi.fn();
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
 	resetPathWalkMemo: vi.fn(),
+	// Seam probes route through this on cached hits (#1203); default spawnable.
+	isSpawnableCommand: vi.fn(async () => true),
 }));
 vi.mock("../../clients/package-manager.js", () => ({ findNodeToolBinary }));
 
