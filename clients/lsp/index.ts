@@ -31,6 +31,7 @@ import {
 } from "../path-utils.js";
 import type {
 	LSPClientInfo,
+	LSPPullFailure,
 	LSPShutdownOptions,
 } from "./client.js";
 import {
@@ -4878,10 +4879,23 @@ export class LSPService {
 	/**
 	 * Get status of all active clients
 	 */
-	getStatus(): Array<{ serverId: string; root: string; connected: boolean }> {
+	getStatus(): Array<{
+		serverId: string;
+		root: string;
+		connected: boolean;
+		pullFailureHistory: LSPPullFailure[];
+	}> {
 		return Array.from(this.state.clients.entries()).map(([key, client]) => {
 			const [serverId, root] = key.split(":");
-			return { serverId, root, connected: client.isAlive() };
+			return {
+				serverId,
+				root,
+				connected: client.isAlive(),
+				pullFailureHistory: (client.getPullFailureHistory?.() ?? []).map((entry) => ({
+					...entry,
+					message: entry.message.slice(0, 200),
+				})),
+			};
 		});
 	}
 

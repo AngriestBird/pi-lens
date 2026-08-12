@@ -69,6 +69,51 @@ describe("LSPService race hardening", () => {
 		expect(c?.client).toBeTruthy();
 	});
 
+	it("does not orphan the in-flight client when a waiter times out", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		let releaseSpawn!: () => void;
+		const spawnGate = new Promise<void>((resolve) => {
+			releaseSpawn = resolve;
+		});
+		const spawn = vi.fn(async () => {
+			await spawnGate;
+			return {
+				process: {
+					process: { killed: false },
+					stdin: {} as any,
+					stdout: {} as any,
+					stderr: {} as any,
+					pid: 321,
+				},
+			};
+		});
+		createLSPClient.mockResolvedValue({
+			isAlive: () => true,
+			shutdown: async () => {},
+		});
+		getServersForFileWithConfig.mockReturnValue([
+			{
+				id: "python",
+				name: "Python",
+				extensions: [".py"],
+				root: async () => "C:/repo",
+				spawn,
+			},
+		]);
+
+		const file = "C:/repo/main.py";
+		const timedOut = service.getClientForFile(file, 1);
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		expect(await timedOut).toBeUndefined();
+		releaseSpawn();
+		await service.getClientForFile(file);
+
+		expect(spawn).toHaveBeenCalledTimes(1);
+		expect(createLSPClient).toHaveBeenCalledTimes(1);
+		expect(service.getAliveClientCount()).toBe(1);
+	});
+
 	it("retries broken server after cooldown window", async () => {
 		const now = vi.spyOn(Date, "now");
 		now.mockReturnValue(0);

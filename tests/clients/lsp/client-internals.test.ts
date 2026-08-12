@@ -18,6 +18,7 @@ import {
 	clientRequestWorkspaceDiagnostics,
 	clientShutdown,
 	clientWaitForDiagnostics,
+	closeDocument,
 	normalizeClientWorkspaceEdit,
 	handleNotifyChange,
 	navRequest,
@@ -414,6 +415,7 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 		pushDiagnosticTimestamps: new Map(),
 		documentPullDiagnostics: new Map(),
 		documentPullDiagnosticTimestamps: new Map(),
+		pullFailureHistory: [],
 		pendingDiagnostics: new Map(),
 		diagnosticEmitter,
 		diagnosticsVersion: 0,
@@ -424,6 +426,7 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 		pullResultIds: new Map(),
 		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
+		closedDocuments: new Set(),
 		pendingOpens: new Set(),
 		workspaceDiagnosticsSupport: {
 			advertised: false,
@@ -1455,6 +1458,134 @@ describe("clientRequestWorkspaceDiagnostics content binding (#1104)", () => {
 		} finally {
 			fs.rmSync(filePath, { force: true });
 		}
+	});
+});
+
+describe("pull fallback honesty + failure telemetry (#1292)", () => {
+	it("keeps push diagnostics visible after an operational pull failure", async () => {
+		const state = createMockState({
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: false,
+				diagnosticProviderKind: "boolean",
+			},
+		});
+		state.pushDiagnostics.set(TEST_KEY, [
+			{
+				severity: 1,
+				message: "push result",
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 1 },
+				},
+			},
+		]);
+		state.connection.sendRequest = vi
+			.fn()
+			.mockRejectedValue(Object.assign(new Error("server unavailable"), { code: 500 }));
+
+		await clientWaitForDiagnostics(state, TEST_FILE, 50);
+
+		expect(state.pushDiagnostics.get(TEST_KEY)?.[0]?.message).toBe("push result");
+		expect(state.pullFailureHistory.length).toBeGreaterThanOrEqual(1);
+		expect(state.pullFailureHistory[0]).toMatchObject({
+			method: "textDocument/diagnostic",
+			code: 500,
+			message: "server unavailable",
+		});
+	});
+
+	it.each([
+		[-32601, "server-specific text"],
+		[undefined, "Method not found: textDocument/diagnostic"],
+	])("does not record an unsupported-method response as an operational failure (%s)", async (code, message) => {
+		const state = createMockState({
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: false,
+				diagnosticProviderKind: "boolean",
+			},
+		});
+		const error = new Error(message);
+		if (code !== undefined) Object.assign(error, { code });
+		state.connection.sendRequest = vi.fn().mockRejectedValue(error);
+
+		await clientWaitForDiagnostics(state, TEST_FILE, 20);
+
+		expect(state.pullFailureHistory).toHaveLength(0);
+	});
+
+	it.each([
+		[new Error("Timeout after 20ms")],
+		[Object.assign(new Error("Internal error"), { code: -32603 })],
+	])("records genuine operational pull failures", async (error) => {
+		const state = createMockState({
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: false,
+				diagnosticProviderKind: "boolean",
+			},
+		});
+		state.connection.sendRequest = vi.fn().mockRejectedValue(error);
+
+		await clientWaitForDiagnostics(state, TEST_FILE, 20);
+
+		expect(state.pullFailureHistory.length).toBeGreaterThan(0);
+	});
+});
+
+describe("shutdown protocol race fixture (#1292)", () => {
+	it("handles dynamic registration and ignores a late publish after didClose", async () => {
+		const state = createMockState();
+		state.openDocuments.add(TEST_KEY);
+		state.documentVersions.set(TEST_KEY, 1);
+		state.diagnosticBindings.set(TEST_KEY, { version: 1, contentHash: "existing" });
+		setupIncomingHandlers(state, {});
+		const notifications = vi.mocked(state.connection.onNotification).mock.calls as unknown as Array<
+			[string, (...args: unknown[]) => unknown]
+		>;
+		const publish = notifications.find(
+			([method]) => method === "textDocument/publishDiagnostics",
+		)?.[1] as ((params: unknown) => void) | undefined;
+		const requests = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
+			[string, (...args: unknown[]) => unknown]
+		>;
+		const register = requests.find(
+			([method]) => method === "client/registerCapability",
+		)?.[1] as ((params: unknown) => Promise<void>) | undefined;
+		await register?.({
+			registrations: [{ id: "pull", method: "textDocument/diagnostic" }],
+		});
+		expect(state.workspaceDiagnosticsSupport.mode).toBe("pull");
+		const folders = requests.find(
+			([method]) => method === "workspace/workspaceFolders",
+		)?.[1] as (() => unknown) | undefined;
+		await closeDocument(state, TEST_FILE);
+		expect(state.openDocuments.has(TEST_KEY)).toBe(false);
+		expect(state.diagnosticBindings.has(TEST_KEY)).toBe(false);
+		state.isDestroyed = true;
+		expect(() => folders?.()).not.toThrow();
+
+		publish?.({
+			uri: pathToFileURL(TEST_FILE).href,
+			version: 1,
+			diagnostics: [
+				{
+					severity: 1,
+					message: "late",
+					range: {
+						start: { line: 0, character: 0 },
+						end: { line: 0, character: 1 },
+					},
+				},
+			],
+		});
+		await Promise.resolve();
+		expect(state.pushDiagnostics.has(TEST_KEY)).toBe(false);
+		expect(state.diagnosticBindings.has(TEST_KEY)).toBe(false);
 	});
 });
 

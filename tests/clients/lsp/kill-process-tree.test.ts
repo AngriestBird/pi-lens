@@ -57,7 +57,7 @@ describe("killProcessTree", () => {
 			expect(proc.unref).toHaveBeenCalled();
 		});
 
-		it("non-exiting fast shutdown still spawns the taskkill /T tree-kill", async () => {
+		it("non-exiting fast shutdown kills wrapper descendants via taskkill /T", async () => {
 			const proc = { kill: vi.fn(() => true), unref: vi.fn() };
 			await killProcessTree(proc, 4242, { fast: true });
 			expect(spawnMock).toHaveBeenCalledTimes(1);
