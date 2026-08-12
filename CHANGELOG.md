@@ -20,6 +20,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Turn-end madge telemetry stays compact and its batch metadata is runtime-tested (closes [#1250](https://github.com/apmantza/pi-lens/issues/1250), [#1251](https://github.com/apmantza/pi-lens/issues/1251))** — aggregate batch counters remain exact, while per-target timing breadcrumbs are retained only for spawns taking at least 100 ms and capped at 12 slow targets, preserving the smells-rollup lookback; the real turn-end path now verifies madge batch execution and metadata propagation.
+
 - **Smart-default formatters preserve existing indentation when a repository has no style configuration (closes [#1144](https://github.com/apmantza/pi-lens/issues/1144))** — Biome and shfmt now infer and pin a file's indentation for unconfigured formatting, skipping when their style cannot be inferred; Prettier and Ruff receive the same fallback indentation flags. Explicit formatter configuration and `.editorconfig` remain authoritative.
 
 - **Bus emitters no longer retain a stale session context after replacement (closes #1128)** — all pi-lens event publishers resolve the live `pi.events` emitter at delivery time through a shared getter seam; deferred lens events also resolve inside their `setImmediate` callback. The sweep found no other outliving session-context emitter closures: the quiet-window summary already uses its current-context holder and its stale-session guard; LSP repaint callbacks capture UI primitives intentionally rather than `ctx`; remaining lifecycle callbacks use the event-time context or runtime generation gates.
