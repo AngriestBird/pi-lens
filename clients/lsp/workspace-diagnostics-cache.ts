@@ -113,7 +113,11 @@ export function saveWorkspaceDiagnosticsCache(
 ): void {
 	const filePath = cachePath(cwd);
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-	writeFileAtomic(filePath, JSON.stringify(cache, null, 2));
+	// bestEffort: false — persist()'s catch is the error policy here, and it
+	// must observe the failure so `dirty` stays set and the next sweep retries.
+	writeFileAtomic(filePath, JSON.stringify(cache, null, 2), {
+		bestEffort: false,
+	});
 }
 
 /**
