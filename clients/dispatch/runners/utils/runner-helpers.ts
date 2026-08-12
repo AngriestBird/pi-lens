@@ -137,6 +137,11 @@ type AvailabilityCache = {
 	outcome: AvailabilityOutcome | null;
 };
 
+export interface AvailabilityCheckerOptions {
+	probeTimeout?: number;
+	fastPath?: () => string | null;
+}
+
 type InstallAttemptState = {
 	attempts: number;
 	suppressed: boolean;
@@ -202,6 +207,7 @@ export function createAvailabilityChecker(
 	command: string,
 	windowsExt = "",
 	versionArgs: string[] = ["--version"],
+	options: AvailabilityCheckerOptions = {},
 ): {
 	isAvailableAsync: (cwd?: string) => Promise<boolean>;
 	getCommand: (cwd?: string) => string | null;
@@ -258,6 +264,14 @@ export function createAvailabilityChecker(
 		const promiseGeneration = checkerGeneration;
 		let promise: Promise<boolean>;
 		promise = (async () => {
+			const fastPath = options.fastPath?.();
+			if (fastPath) {
+				cache.available = true;
+				cache.outcome = "success";
+				cache.command = fastPath;
+				return true;
+			}
+
 			// A bad/removed workspace must not be mistaken for a missing tool and
 			// trigger an install. This async probe stays off the synchronous dispatch
 			// burst and makes the failure taxonomy explicit at the seam.
@@ -276,7 +290,7 @@ export function createAvailabilityChecker(
 
 			const cmd = findCommand(resolvedCwd);
 			const result = await safeSpawnAsync(cmd, versionArgs, {
-				timeout: 5000,
+				timeout: options.probeTimeout ?? 5000,
 			});
 
 			if (!result.error && result.status === 0) {
