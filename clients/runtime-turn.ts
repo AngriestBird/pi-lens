@@ -779,7 +779,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 
 	const t3 = Date.now();
 	let madgeStats: MadgeBatchStats | undefined;
-	if (await depChecker.ensureAvailable()) {
+	// Off by default (#766): this pass only writes debug output, and user-facing
+	// madge diagnostics come from the session-start `madge` cache + the
+	// `lens_diagnostics` extractor. Enabled with `--lens-turn-end-madge` /
+	// `turnEnd.madge.enabled=true` for those who want the per-edit circular note.
+	if (getFlag("lens-turn-end-madge") && (await depChecker.ensureAvailable())) {
 		const madgeFiles = cacheManager.getFilesForMadge(cwd);
 		if (madgeFiles.length > 0) {
 			dbg(

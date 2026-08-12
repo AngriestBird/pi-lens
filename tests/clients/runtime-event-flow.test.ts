@@ -62,7 +62,9 @@ describe("runtime event flow", () => {
 			}));
 
 			await handleTurnEnd({
-				ctxCwd: env.tmpDir, getFlag: () => false, dbg, runtime, cacheManager,
+				ctxCwd: env.tmpDir,
+				getFlag: (name: string) => name === "lens-turn-end-madge",
+				dbg, runtime, cacheManager,
 				knipClient: { ensureAvailable: async () => false, analyze: async () => EMPTY_KNIP_RESULT },
 				depChecker: { ensureAvailable: async () => true, checkFilesBatch } as any,
 				testRunnerClient: { getTestRunTarget: () => null },
@@ -73,6 +75,40 @@ describe("runtime event flow", () => {
 			expect(dbg).toHaveBeenCalledWith(expect.stringContaining("circular dependency note"));
 			const madge = latencyEntries.find((entry) => entry.phase === "madge");
 			expect(madge?.metadata).toEqual(stats);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("skips the turn-end madge batch entirely when the flag is off (default, #766)", async () => {
+		const env = setupTestEnvironment("pi-lens-madge-flag-off-");
+		const runtime = new RuntimeCoordinator();
+		const cacheManager = new CacheManager(false);
+		const filePath = path.join(env.tmpDir, "src", "cycle.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "export const value = 1;\n");
+		const dbg = vi.fn();
+		latencyEntries.length = 0;
+		try {
+			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, true, env.tmpDir);
+			const checkFilesBatch = vi.fn(async () => ({
+				results: new Map(),
+				stats: { requested: 0, missing: 0, cacheHits: 0, spawned: 0, failed: 0 },
+			}));
+			const ensureAvailable = vi.fn(async () => true);
+
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir, getFlag: () => false, dbg, runtime, cacheManager,
+				knipClient: { ensureAvailable: async () => false, analyze: async () => EMPTY_KNIP_RESULT },
+				depChecker: { ensureAvailable, checkFilesBatch } as any,
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {}, resetFormatService: () => {},
+			} as any);
+
+			expect(checkFilesBatch).not.toHaveBeenCalled();
+			expect(ensureAvailable).not.toHaveBeenCalled();
+			const madge = latencyEntries.find((entry) => entry.phase === "madge");
+			expect(madge?.metadata).toBeUndefined();
 		} finally {
 			env.cleanup();
 		}
