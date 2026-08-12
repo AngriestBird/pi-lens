@@ -18,6 +18,14 @@ import type { DispatchContext } from "../../../../clients/dispatch/types.ts";
 import { findGlobalBinary } from "../../../../clients/package-manager.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 
+const { logSessionStartSpy } = vi.hoisted(() => ({
+	logSessionStartSpy: vi.fn(),
+}));
+
+vi.mock("../../../../clients/sessionstart-logger.js", () => ({
+	logSessionStart: logSessionStartSpy,
+}));
+
 vi.mock("../../../../clients/safe-spawn.js", () => ({
 	safeSpawn: vi.fn(() => ({ stdout: "", stderr: "", status: 1 })),
 	safeSpawnAsync: vi.fn(async () => ({ stdout: "", stderr: "", status: 1 })),
@@ -46,6 +54,8 @@ describe("runner-helpers availability checker", () => {
 		vi.mocked(installerMod.ensureTool).mockReset();
 		vi.mocked(findGlobalBinary).mockReset();
 		vi.mocked(findGlobalBinary).mockResolvedValue(undefined);
+		logSessionStartSpy.mockReset();
+		resetDispatchAvailabilityState();
 	});
 
 	it("resolves local node_modules/.bin commands before global fallback", () => {
@@ -248,6 +258,79 @@ describe("runner-helpers availability checker", () => {
 		const checker = createAvailabilityChecker("sometool");
 		expect(await checker.isAvailableAsync(process.cwd())).toBe(true);
 		expect(probedArgs).toEqual(["--version"]);
+	});
+
+	it("bounds missing-tool installs to one attempt and records the failure", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
+			stdout: "",
+			stderr: "",
+			status: null,
+			error: Object.assign(new Error("spawn missing ENOENT"), { code: "ENOENT" }),
+			failure: "spawn",
+		});
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(undefined);
+
+		const checker = createAvailabilityChecker("missing-tool");
+		for (let attempt = 0; attempt < 4; attempt += 1) {
+			await expect(
+				resolveAvailableOrInstall(checker, "ruff", process.cwd()),
+			).resolves.toBeNull();
+		}
+
+		// The first failed install suppresses same-session re-entry, so the
+		// effective retry cap is one attempt per tool and cwd.
+		expect(installerMod.ensureTool).toHaveBeenCalledTimes(1);
+		expect(logSessionStartSpy).toHaveBeenCalledTimes(1);
+		expect(logSessionStartSpy).toHaveBeenCalledWith(
+			"dispatch availability ruff: install attempt 1 failed; suppressing retries until the next session or a successful install",
+		);
+
+		resetDispatchAvailabilityState();
+		await expect(
+			resolveAvailableOrInstall(checker, "ruff", process.cwd()),
+		).resolves.toBeNull();
+		expect(installerMod.ensureTool).toHaveBeenCalledTimes(2);
+		expect(logSessionStartSpy).toHaveBeenCalledTimes(2);
+		expect(logSessionStartSpy).toHaveBeenLastCalledWith(
+			"dispatch availability ruff: install attempt 1 failed; suppressing retries until the next session or a successful install",
+		);
+	});
+
+	it("allows a later retry after a successful install clears the failure state", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
+			stdout: "",
+			stderr: "",
+			status: null,
+			error: Object.assign(new Error("spawn missing ENOENT"), { code: "ENOENT" }),
+			failure: "spawn",
+		});
+		const checker = createAvailabilityChecker("missing-tool-success");
+
+		vi.mocked(installerMod.ensureTool).mockResolvedValueOnce(undefined);
+		await expect(
+			resolveAvailableOrInstall(checker, "ruff", process.cwd()),
+		).resolves.toBeNull();
+
+		// The session reset permits the successful install attempt; the assertion
+		// below verifies that noteInstallSuccess removes the prior tool state.
+		resetDispatchAvailabilityState();
+		vi.mocked(installerMod.ensureTool).mockResolvedValueOnce("/managed/ruff");
+		await expect(
+			resolveAvailableOrInstall(checker, "ruff", process.cwd()),
+		).resolves.toBe("/managed/ruff");
+
+		vi.mocked(installerMod.ensureTool).mockResolvedValueOnce(undefined);
+		await expect(
+			resolveAvailableOrInstall(checker, "ruff", process.cwd()),
+		).resolves.toBeNull();
+		expect(installerMod.ensureTool).toHaveBeenCalledTimes(3);
+		expect(logSessionStartSpy).toHaveBeenLastCalledWith(
+			"dispatch availability ruff: install attempt 1 failed; suppressing retries until the next session or a successful install",
+		);
 	});
 
 	it("lspPrimaryCoversFile: true when the named server is the file's primary (#233)", () => {

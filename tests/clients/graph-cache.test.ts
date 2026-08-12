@@ -32,6 +32,7 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 	});
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		for (const dir of dirs.splice(0)) {
 			removeTempDirSync(dir);
 		}
@@ -145,6 +146,19 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 	});
 
 	it("stamps buildGeneration — no-op builds carry it forward, content changes mint a new one (#459)", async () => {
+		// #1137: this test forces a full rebuild by clearing the caches, but
+		// `clearReviewGraphWorkspaceCache`/`clearGraphCache` only drop the two
+		// IN-MEMORY tiers. `buildOrUpdateGraph` also has an on-disk tier
+		// (`loadPersistedGraph`, "Tier 2") fed by a DEBOUNCED, unref'd persist
+		// timer (1500ms by default) — so whether the disk snapshot exists by the
+		// time the third build runs was never deterministic, it just happened to
+		// still be pending. The moment anything added event-loop turns ahead of
+		// it the persist flushed mid-build and the third build legitimately
+		// served `mode: "cached"` off disk. (Deleting the cache dir before the
+		// build does NOT fix it — the pending timer simply recreates the file
+		// during the build.) Suppressing the persist for this test keeps the
+		// disk tier genuinely empty, which is the state the assertions assume.
+		vi.stubEnv("PI_LENS_GRAPH_PERSIST_DEBOUNCE_MS", String(10 * 60_000));
 		const facts = new FactStore();
 		const cwd = tmpDir();
 		// #1107: was "gen.ts" — the source walk's generated-artifact NAME
@@ -171,7 +185,7 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 		// real files in review-graph-seq-fastpath.test.ts; since the #1107 fixture
 		// rename this harness's walk is REAL — the builder walks via
 		// project-scan-policy, not the mocked scan-utils — so we force the rebuild
-		// explicitly by clearing both caches rather than editing content.)
+		// explicitly by clearing the caches rather than editing content.)
 		clearReviewGraphWorkspaceCache();
 		clearGraphCache();
 		const g3 = await buildOrUpdateGraph(cwd, [file], facts);

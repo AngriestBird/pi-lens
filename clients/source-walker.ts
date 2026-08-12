@@ -49,6 +49,31 @@ export function readDirEntriesSafe(dirPath: string): fs.Dirent[] {
 	}
 }
 
+/**
+ * Async twin of {@link readDirEntriesSafe} (refs #1137) — the identical
+ * "unreadable directory yields no entries" contract, but the read itself
+ * happens off the event loop via `fs.promises.readdir`.
+ *
+ * Why this exists: chunked yielding is NOT sufficient to keep the loop free.
+ * `walkTreeStackAsync` already `setImmediate`-yielded every N entries, yet each
+ * per-directory read was still `readdirSync` — so on a cloud-backed tree
+ * (OneDrive, network drive) one stalled directory read blocked the Node loop,
+ * and pi's TUI, for the *entire* stall regardless of yield cadence. That is the
+ * exact shape #1170 already fixed in `pipeline.ts`'s autofix snapshot walk
+ * ("the walk was already async + chunk-yielding, but each synchronous per-dir
+ * read still blocked on a cloud stall"); #1170 deferred the SHARED engine, and
+ * this is that same fix applied here — so every async walker gets it at once.
+ */
+export async function readDirEntriesSafeAsync(
+	dirPath: string,
+): Promise<fs.Dirent[]> {
+	try {
+		return await fs.promises.readdir(dirPath, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+}
+
 export interface DirWalkPolicy {
 	/** Project ignore rules (.gitignore + .pi-lens.json), from `getProjectIgnoreMatcher`. */
 	ignoreMatcher: ProjectIgnoreMatcher;
@@ -192,19 +217,28 @@ function* walkTreeStackSteps(
 	rootDir: string,
 	visit: WalkVisitor,
 	shouldStop?: () => boolean,
-): Generator<void, boolean> {
+): Generator<string | undefined, boolean, fs.Dirent[] | undefined> {
 	const stack: string[] = [rootDir];
 	while (stack.length > 0) {
 		if (shouldStop?.()) return false;
 		const dir = stack.pop();
 		if (dir === undefined) continue;
+		// Directory-read REQUEST (#1137): the generator never reads the
+		// filesystem itself — it yields the directory path and the driver
+		// supplies the entries. That is what lets the sync driver stay
+		// `readdirSync` while the async driver reads via `fs.promises.readdir`
+		// WITHOUT forking the traversal into two implementations that can
+		// drift (the invariant this generator exists to protect).
+		const entries = (yield dir) ?? [];
 		const subDirs: string[] = [];
-		for (const entry of readDirEntriesSafe(dir)) {
+		for (const entry of entries) {
 			const fullPath = path.join(dir, entry.name);
 			const disposition = visit(entry, fullPath);
 			if (disposition === "stop") return true;
 			if (disposition === "recurse") subDirs.push(fullPath);
-			yield;
+			// Per-entry yield point: `undefined` distinguishes it from a
+			// directory-read request above.
+			yield undefined;
 		}
 		for (let i = subDirs.length - 1; i >= 0; i--) stack.push(subDirs[i]);
 	}
@@ -223,7 +257,11 @@ export function walkTreeStackSync(
 ): boolean {
 	const steps = walkTreeStackSteps(rootDir, visit, opts.shouldStop);
 	let step = steps.next();
-	while (!step.done) step = steps.next();
+	while (!step.done) {
+		step = steps.next(
+			step.value === undefined ? undefined : readDirEntriesSafe(step.value),
+		);
+	}
 	return step.value;
 }
 
@@ -233,6 +271,12 @@ export function walkTreeStackSync(
  * `yieldEvery` processed entries so a large tree never holds the event loop in
  * one synchronous burst. Returns true iff the visitor stopped the walk via
  * `"stop"`.
+ *
+ * #1137: every per-directory read goes through {@link readDirEntriesSafeAsync},
+ * so the walk is non-blocking on BOTH axes — CPU (the `setImmediate` cadence)
+ * and I/O (the directory read itself). The yield cadence alone never covered
+ * the I/O axis: a stalled cloud-backed `readdirSync` held the loop for the full
+ * stall no matter how often the walk yielded around it.
  */
 export async function walkTreeStackAsync(
 	rootDir: string,
@@ -244,6 +288,14 @@ export async function walkTreeStackAsync(
 	let processedSinceYield = 0;
 	let step = steps.next();
 	while (!step.done) {
+		if (step.value !== undefined) {
+			// Directory-read request — satisfy it off the loop. No
+			// `processedSinceYield` reset: awaiting the read already turns the
+			// loop, so leaving the counter alone can only yield MORE often than
+			// before, never less (the cadence contract is a floor, not a quota).
+			step = steps.next(await readDirEntriesSafeAsync(step.value));
+			continue;
+		}
 		if (++processedSinceYield >= opts.yieldEvery) {
 			processedSinceYield = 0;
 			await new Promise<void>((resolve) => setImmediate(resolve));
