@@ -95,9 +95,9 @@ function probeExists(filePath: string, cache?: ArtifactProbeCache): boolean {
  */
 export const SOURCE_PRECEDENCE: Record<string, string[]> = {
 	".ts": [".js", ".jsx", ".mjs", ".cjs"],
-	".tsx": [".js", ".jsx", ".mjs", ".cjs"],
-	".mts": [".js", ".jsx", ".mjs", ".cjs"],
-	".cts": [".js", ".jsx", ".mjs", ".cjs"],
+	".tsx": [".jsx", ".js", ".mjs", ".cjs"],
+	".mts": [".mjs", ".js", ".jsx", ".cjs"],
+	".cts": [".cjs", ".js", ".jsx", ".mjs"],
 	".vue": [".js", ".mjs"],
 	".svelte": [".js", ".mjs"],
 	".coffee": [".js"],
@@ -118,6 +118,8 @@ export function sourceTwinCandidates(filePath: string): string[] {
 			: ext === ".cjs"
 				? [".cts", ".ts", ".tsx", ".mts"]
 				: ext === ".jsx"
+					// Deliberately retain the broad fallback: a .jsx next to a .ts
+					// is treated as a build artifact even without a .tsx sibling.
 					? [".tsx", ".ts", ".mts", ".cts"]
 					: ext === ".js"
 						? [".ts", ".tsx", ".mts", ".cts"]
