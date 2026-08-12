@@ -18,6 +18,7 @@ import {
 	clientRequestWorkspaceDiagnostics,
 	clientShutdown,
 	clientWaitForDiagnostics,
+	closeDocument,
 	normalizeClientWorkspaceEdit,
 	handleNotifyChange,
 	navRequest,
@@ -1495,7 +1496,10 @@ describe("pull fallback honesty + failure telemetry (#1292)", () => {
 		});
 	});
 
-	it("does not record an unsupported-method response as an operational failure", async () => {
+	it.each([
+		[-32601, "server-specific text"],
+		[undefined, "Method not found: textDocument/diagnostic"],
+	])("does not record an unsupported-method response as an operational failure (%s)", async (code, message) => {
 		const state = createMockState({
 			workspaceDiagnosticsSupport: {
 				advertised: true,
@@ -1504,13 +1508,32 @@ describe("pull fallback honesty + failure telemetry (#1292)", () => {
 				diagnosticProviderKind: "boolean",
 			},
 		});
-		state.connection.sendRequest = vi.fn().mockRejectedValue(
-			Object.assign(new Error("Method not found"), { code: -32601 }),
-		);
+		const error = new Error(message);
+		if (code !== undefined) Object.assign(error, { code });
+		state.connection.sendRequest = vi.fn().mockRejectedValue(error);
 
 		await clientWaitForDiagnostics(state, TEST_FILE, 20);
 
 		expect(state.pullFailureHistory).toHaveLength(0);
+	});
+
+	it.each([
+		[new Error("Timeout after 20ms")],
+		[Object.assign(new Error("Internal error"), { code: -32603 })],
+	])("records genuine operational pull failures", async (error) => {
+		const state = createMockState({
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: false,
+				diagnosticProviderKind: "boolean",
+			},
+		});
+		state.connection.sendRequest = vi.fn().mockRejectedValue(error);
+
+		await clientWaitForDiagnostics(state, TEST_FILE, 20);
+
+		expect(state.pullFailureHistory).toHaveLength(1);
 	});
 });
 
@@ -1519,6 +1542,7 @@ describe("shutdown protocol race fixture (#1292)", () => {
 		const state = createMockState();
 		state.openDocuments.add(TEST_KEY);
 		state.documentVersions.set(TEST_KEY, 1);
+		state.diagnosticBindings.set(TEST_KEY, { version: 1, contentHash: "existing" });
 		setupIncomingHandlers(state, {});
 		const notifications = vi.mocked(state.connection.onNotification).mock.calls as unknown as Array<
 			[string, (...args: unknown[]) => unknown]
@@ -1539,11 +1563,12 @@ describe("shutdown protocol race fixture (#1292)", () => {
 		const folders = requests.find(
 			([method]) => method === "workspace/workspaceFolders",
 		)?.[1] as (() => unknown) | undefined;
+		await closeDocument(state, TEST_FILE);
+		expect(state.openDocuments.has(TEST_KEY)).toBe(false);
+		expect(state.diagnosticBindings.has(TEST_KEY)).toBe(false);
 		state.isDestroyed = true;
 		expect(() => folders?.()).not.toThrow();
 
-		state.openDocuments.delete(TEST_KEY);
-		state.closedDocuments?.add(TEST_KEY);
 		publish?.({
 			uri: pathToFileURL(TEST_FILE).href,
 			version: 1,

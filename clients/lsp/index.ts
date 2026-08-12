@@ -4891,7 +4891,10 @@ export class LSPService {
 				serverId,
 				root,
 				connected: client.isAlive(),
-				pullFailureHistory: client.getPullFailureHistory?.() ?? [],
+				pullFailureHistory: (client.getPullFailureHistory?.() ?? []).map((entry) => ({
+					...entry,
+					message: entry.message.slice(0, 200),
+				})),
 			};
 		});
 	}

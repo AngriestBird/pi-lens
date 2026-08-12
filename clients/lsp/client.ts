@@ -1573,7 +1573,14 @@ function recordPullFailure(
 	error: unknown,
 ): void {
 	const candidate = error as { code?: unknown; message?: unknown };
-	if (candidate.code === -32601 || candidate.code === "-32601") return;
+	const message = typeof candidate.message === "string" ? candidate.message : "";
+	const unsupportedMessage = /^(?:method not found|unknown method|unsupported method)(?::|$)/i;
+	if (
+		candidate.code === -32601 ||
+		candidate.code === "-32601" ||
+		unsupportedMessage.test(message.trim())
+	)
+		return;
 	state.pullFailureHistory.push({
 		timestamp: Date.now(),
 		method,
@@ -1940,6 +1947,26 @@ export async function handleNotifyChange(
 		contentChanges: [{ text: content }],
 	});
 	recordSentContent(state, normalizedPath, version, content);
+}
+
+/** Close a document through the same lifecycle path exposed by the client. */
+export async function closeDocument(
+	state: LSPClientState,
+	filePath: string,
+): Promise<void> {
+	if (!isClientAlive(state)) return;
+	const normalizedPath = normalizeMapKey(filePath);
+	if (!state.openDocuments.has(normalizedPath)) return;
+	await safeSendNotification(state.connection, "textDocument/didClose", {
+		textDocument: {
+			uri: state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href,
+		},
+	});
+	state.openDocuments.delete(normalizedPath);
+	state.closedDocuments?.add(normalizedPath);
+	state.openDocumentUris?.delete(normalizedPath);
+	state.documentVersions.delete(normalizedPath);
+	clearDiagnosticsForPath(state, normalizedPath);
 }
 
 export async function clientShutdown(
@@ -2624,7 +2651,11 @@ export async function createLSPClient(options: {
 
 		/** Last N lines of server stderr for diagnostics. */
 		recentStderr: (lines?: number) => recentStderr(lines),
-		getPullFailureHistory: () => [...state.pullFailureHistory],
+		getPullFailureHistory: () =>
+			state.pullFailureHistory.map((entry) => ({
+				...entry,
+				message: entry.message.slice(0, 200),
+			})),
 
 		/** Pre-request health check — returns error string if dead. */
 		checkAlive: () => checkProcessAlive(),
@@ -2911,21 +2942,7 @@ export async function createLSPClient(options: {
 			return result ? await normalizeClientWorkspaceEdit(state, result) : null;
 		},
 
-		async closeDocument(filePath) {
-			if (!isClientAlive(state)) return;
-			const normalizedPath = normalizeMapKey(filePath);
-			if (!state.openDocuments.has(normalizedPath)) return;
-			await safeSendNotification(state.connection, "textDocument/didClose", {
-				textDocument: {
-					uri: state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href,
-				},
-			});
-			state.openDocuments.delete(normalizedPath);
-			state.closedDocuments?.add(normalizedPath);
-			state.openDocumentUris?.delete(normalizedPath);
-			state.documentVersions.delete(normalizedPath);
-			clearDiagnosticsForPath(state, normalizedPath);
-		},
+		closeDocument: (filePath) => closeDocument(state, filePath),
 
 		async willRenameFiles(oldFilePath, newFilePath) {
 			const result = await navRequest<LSPWorkspaceEdit>(
