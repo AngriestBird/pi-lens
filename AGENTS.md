@@ -10,15 +10,23 @@ AGENTS.md is the durable context handed to every agent that works on pi-lens. **
 
 **Behavior-gating durable stores serialize read-modify-write.** Atomic rename
 prevents torn JSON but not lost sibling-process deltas. Use
-`clients/bounded-pid-file-lock.ts` for short synchronous commits, acquire before
-the authoritative disk re-read, merge only the caller's delta, publish
-telemetry only after the atomic write succeeds, and release in `finally`. The
+`clients/durable-store.ts` for short synchronous commits; it acquires the
+bounded PID lock, performs the authoritative disk re-read, merges only the
+caller's delta, publishes through a throwing atomic write, and runs telemetry
+or cache refresh only after the write succeeds. The
 PID liveness check has a documented bounded PID-reuse exposure; its unique
 token prevents a late owner from deleting a replacement lock. Callers must
 choose contention policy explicitly: correctness-critical stores use
 `onContention: "throw"`; dispatch-adjacent best-effort stores use `"skip-log"`
 with a drop telemetry callback and skip the whole commit when acquisition
 returns `null`. (#1202)
+
+Generic atomic-write staging names are owned only by
+`clients/atomic-write-staging.ts`: mint, strict classification, owner-pid
+extraction, and the bounded session-start sweep must stay on that seam so a
+format change cannot drift from garbage collection. The installer probe cache
+keeps its older richer lock because quarantine recovery and install-lifetime
+aging predate the short-commit durable-store seam. (#1209, #1212)
 
 ## Issue and PR design contract
 

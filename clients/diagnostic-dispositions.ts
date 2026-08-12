@@ -57,8 +57,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { writeFileAtomic } from "./atomic-write.js";
-import { acquireBoundedPidFileLock } from "./bounded-pid-file-lock.js";
+import { commitDurableStore } from "./durable-store.js";
 import { logDispositionEvent } from "./disposition-logger.js";
 import { publishDisposition } from "./disposition-publish.js";
 import { getProjectDataDir } from "./file-utils.js";
@@ -238,15 +237,6 @@ export function _setDispositionStatForTests(
 ): void {
 	dispositionStatSync = statSync ?? fs.statSync;
 }
-function acquireDispositionLock(p: string): () => void {
-	return acquireBoundedPidFileLock(`${p}.lock`, {
-		waitMs: DISPOSITION_LOCK_WAIT_MS,
-		retryMs: DISPOSITION_LOCK_RETRY_MS,
-		timeoutMessage: "timed out acquiring diagnostic disposition store lock",
-		onContention: "throw",
-	});
-}
-
 function readState(cwd: string): DispositionStateFile {
 	const p = statePath(cwd);
 	let stat: fs.Stats;
@@ -317,10 +307,7 @@ function readStateFromDisk(cwd: string): DispositionStateFile {
 // failure still propagates (matches the pre-atomic writeFileSync's behavior,
 // which never swallowed errors either) — a disposition mark silently vanishing
 // is a correctness bug for this store, not just a lost observability sample.
-function writeState(cwd: string, state: DispositionStateFile): void {
-	const p = statePath(cwd);
-	fs.mkdirSync(path.dirname(p), { recursive: true });
-	writeFileAtomic(p, JSON.stringify(state, null, 2), { bestEffort: false });
+function refreshStateCache(p: string, state: DispositionStateFile): void {
 	// Refresh the cache from the write we just did instead of invalidating it —
 	// avoids an immediate re-stat+re-parse of the file we already have in hand,
 	// and guards against coarse filesystem mtime granularity making a
@@ -345,18 +332,21 @@ function commitDisposition(
 	const hook = beforeDispositionCommitForTests;
 	beforeDispositionCommitForTests = null;
 	hook?.();
-	const release = acquireDispositionLock(p);
-	try {
-		// Re-read while holding the cross-process lock. Atomic rename alone only
-		// prevents torn JSON; this merge prevents a stale writer from promoting
-		// its old snapshot over dispositions committed by a sibling process.
-		const state = readStateFromDisk(cwd);
-		state.dispositions ??= {};
-		state.dispositions[anchor] = entry;
-		writeState(cwd, state);
-	} finally {
-		release();
-	}
+	commitDurableStore({
+		path: p,
+		read: () => readStateFromDisk(cwd),
+		merge: (state) => {
+			state.dispositions ??= {};
+			state.dispositions[anchor] = entry;
+			return state;
+		},
+		serialize: (state) => JSON.stringify(state, null, 2),
+		waitMs: DISPOSITION_LOCK_WAIT_MS,
+		retryMs: DISPOSITION_LOCK_RETRY_MS,
+		timeoutMessage: "timed out acquiring diagnostic disposition store lock",
+		onContention: "throw",
+		afterCommit: (state) => refreshStateCache(p, state),
+	});
 }
 
 /** Test-only escape hatch — the state cache is module-level, so tests that

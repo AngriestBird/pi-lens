@@ -4,7 +4,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { parentPort } from "node:worker_threads";
 import { createGzip } from "node:zlib";
-import { stagePathFor } from "./atomic-write.js";
+import { stagePathFor } from "./atomic-write-staging.js";
 
 export interface GzipStageWriteMetrics {
 	/** Uncompressed byte length of the serialized JSON. */
