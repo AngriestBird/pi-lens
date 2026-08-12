@@ -13,6 +13,7 @@ type LensEventName = (typeof LENS_EVENT_NAMES)[keyof typeof LENS_EVENT_NAMES];
 type LensEventBus = {
 	emit?: (event: string, payload: unknown) => void;
 };
+type LensEventBusGetter = () => LensEventBus | undefined;
 
 export interface LensTelemetryPayload {
 	model: string;
@@ -53,9 +54,17 @@ export interface LensTurnFindingsPayload {
 }
 
 let lensEventBus: LensEventBus | undefined;
+let lensEventBusGetter: LensEventBusGetter | undefined;
 
 export function initLensEvents(pi: { events?: LensEventBus }): void {
 	lensEventBus = pi.events;
+	lensEventBusGetter = undefined;
+}
+
+/** Keep deferred deliveries on the live extension activation. */
+export function initLensEventsGetter(getter: LensEventBusGetter | undefined): void {
+	lensEventBusGetter = getter;
+	lensEventBus = undefined;
 }
 
 function truncateText(
@@ -80,13 +89,26 @@ function normalizeDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
 	return diagnostics.map(normalizeDiagnostic);
 }
 
-function emitLensEvent(eventName: LensEventName, payload: unknown): void {
-	const emit = lensEventBus?.emit;
-	if (!emit) return;
+// Dropped-emit observability (#1128 review): drops are legitimate (no bus
+// during startup/replacement windows) but must not be invisible. One line per
+// process — enough to notice a permanently-missing bus without spamming.
+let _droppedEmitLogged = false;
 
+function emitLensEvent(eventName: LensEventName, payload: unknown): void {
 	setImmediate(() => {
 		try {
-			emit.call(lensEventBus, eventName, payload);
+			const bus = lensEventBusGetter?.() ?? lensEventBus;
+			const emit = bus?.emit;
+			if (!emit) {
+				if (!_droppedEmitLogged) {
+					_droppedEmitLogged = true;
+					console.error(
+						`[pi-lens] lens event dropped (no live bus): ${eventName} — further drops logged once per process`,
+					);
+				}
+				return;
+			}
+			emit.call(bus, eventName, payload);
 		} catch {
 			// Inter-extension events are observational. A listener must never break
 			// the pi-lens hook path or delay agent progress with error handling noise.

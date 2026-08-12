@@ -45,6 +45,10 @@ function setStartupMode(mode: "full" | "quick"): () => void {
 async function runSessionStart(
 	mode: "full" | "quick",
 	setup?: (tmpDir: string) => void,
+	overrides: {
+		astGrepEnsure?: () => Promise<boolean>;
+		scanExports?: () => Promise<Map<string, string>>;
+	} = {},
 ) {
 	const env = setupTestEnvironment("pi-lens-runtime-session-");
 	setup?.(env.tmpDir);
@@ -73,7 +77,10 @@ async function runSessionStart(
 	const scanDirectory = vi.fn(() => ({ items: [] }));
 	const scanFile = vi.fn((): unknown[] => []);
 	const ensureTool = vi.fn(async () => null);
-	const astGrepEnsure = vi.fn(async () => false);
+	const astGrepEnsure = vi.fn(overrides.astGrepEnsure ?? (async () => false));
+	const scanExports = vi.fn(
+		overrides.scanExports ?? (async () => new Map<string, string>()),
+	);
 	const biomeEnsure = vi.fn(async () => false);
 	const ruffEnsure = vi.fn(async () => false);
 	const knipEnsure = vi.fn(async () => false);
@@ -128,7 +135,7 @@ async function runSessionStart(
 			astGrepClient: {
 				isAvailable: () => false,
 				ensureAvailable: astGrepEnsure,
-				scanExports: async () => new Map(),
+				scanExports,
 			},
 			biomeClient: {
 				isAvailable: () => false,
@@ -206,6 +213,30 @@ async function runSessionStart(
 
 afterEach(() => {
 	delete process.env.PI_LENS_STARTUP_MODE;
+});
+
+it("executes the ast-grep export path and reports the returned exports", async () => {
+	const exports = new Map([
+		["readConfig", "src/config.ts"],
+		["writeConfig", "src/config.ts"],
+	]);
+	const scanExports = vi.fn(async () => exports);
+	const { env, astGrepEnsure, dbg } = await runSessionStart(
+		"full",
+		(tmpDir) => createTempFile(tmpDir, "package.json", JSON.stringify({ type: "module" })),
+		{ astGrepEnsure: async () => true, scanExports },
+	);
+	try {
+		await vi.waitFor(() => expect(astGrepEnsure).toHaveBeenCalled());
+		await vi.waitFor(() => expect(scanExports).toHaveBeenCalled());
+		await vi.waitFor(() =>
+			expect(dbg).toHaveBeenCalledWith(
+				expect.stringContaining("exports scan: 2 functions found"),
+			),
+		);
+	} finally {
+		await env.cleanup();
+	}
 });
 
 describe("runtime-session notifications", () => {

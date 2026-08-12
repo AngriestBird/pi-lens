@@ -13,6 +13,7 @@ import {
 	getFilterStats,
 	isBuildArtifact,
 	SOURCE_PRECEDENCE,
+	sourceTwinCandidates,
 } from "../clients/source-filter.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
@@ -619,6 +620,45 @@ describe("SOURCE_PRECEDENCE completeness", () => {
 
 			// A source should not shadow itself
 			expect(shadowedExts).not.toContain(sourceExt);
+		}
+	});
+
+	it("keeps sourceTwinCandidates, SOURCE_PRECEDENCE, and findSourceSibling in agreement", () => {
+		const expectedByCompiledExtension: Record<string, string[]> = {
+			".js": [".ts", ".tsx", ".mts", ".cts"],
+			".jsx": [".tsx", ".ts", ".mts", ".cts"],
+			".mjs": [".mts", ".ts", ".tsx", ".cts"],
+			".cjs": [".cts", ".ts", ".tsx", ".mts"],
+		};
+		const expectedPrecedence: Record<string, string[]> = {
+			".ts": [".js", ".jsx", ".mjs", ".cjs"],
+			".tsx": [".jsx", ".js", ".mjs", ".cjs"],
+			".mts": [".mjs", ".js", ".jsx", ".cjs"],
+			".cts": [".cjs", ".js", ".jsx", ".mjs"],
+		};
+		expect(
+			Object.fromEntries(
+				Object.entries(expectedPrecedence).map(([sourceExt]) => [
+					sourceExt,
+					SOURCE_PRECEDENCE[sourceExt],
+				]),
+			),
+		).toEqual(expectedPrecedence);
+		for (const [compiledExt, sourceExts] of Object.entries(expectedByCompiledExtension)) {
+			expect(
+				sourceTwinCandidates(`fixture${compiledExt}`).map((candidate) =>
+					path.extname(candidate),
+				),
+			).toEqual(sourceExts);
+
+			const { dir, cleanup } = createTempDir({
+			[`fixture${compiledExt}`]: "// compiled",
+			[`fixture${sourceExts[0]}`]: "// source",
+			});
+			expect(findSourceSibling(path.join(dir, `fixture${compiledExt}`))).toBe(
+				path.join(dir, `fixture${sourceExts[0]}`),
+			);
+			cleanup();
 		}
 	});
 });

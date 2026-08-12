@@ -10,6 +10,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createAvailabilityChecker, resolveAvailableOrInstall } from "./dispatch/runners/utils/runner-helpers.js";
 import { isFileKind } from "./file-kinds.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { ruffConfigArgs } from "./tool-policy.js";
@@ -40,10 +41,10 @@ interface RuffJsonDiagnostic {
 
 // --- Client ---
 
+const ruffAvailability = createAvailabilityChecker("ruff", ".exe");
+
 export class RuffClient {
-	private ruffAvailable: boolean | null = null;
 	private ruffCommand = "ruff";
-	private ensureInFlight: Promise<boolean> | null = null;
 	private log: (msg: string) => void;
 
 	constructor(verbose = false) {
@@ -55,54 +56,19 @@ export class RuffClient {
 	/**
 	 * Check if ruff CLI is available, auto-install if not.
 	 *
-	 * Re-entrancy safe: concurrent first-time callers share a single
-	 * `ensureInFlight` promise so probing/auto-install isn't duplicated.
-	 * Mirrors the dedupe pattern in `SgRunner` / `KnipClient` /
-	 * `DependencyChecker`.
+	 * Re-entrancy safe: the shared availability seam deduplicates the complete
+	 * probe/auto-install transaction per cwd and tool, so concurrent callers do
+	 * not duplicate installation attempts.
 	 */
 	async ensureAvailable(): Promise<boolean> {
-		if (this.ruffAvailable !== null) return this.ruffAvailable;
-		if (this.ensureInFlight) return this.ensureInFlight;
-
-		this.ensureInFlight = this.doEnsureAvailable();
-		try {
-			return await this.ensureInFlight;
-		} finally {
-			this.ensureInFlight = null;
-		}
-	}
-
-	private async doEnsureAvailable(): Promise<boolean> {
-		// Check if available in PATH
-		const result = await safeSpawnAsync("ruff", ["--version"], {
-			timeout: 5000,
-		});
-		this.ruffAvailable = !result.error && result.status === 0;
-
-		if (this.ruffAvailable) {
-			this.ruffCommand = "ruff";
-			this.log(`Ruff found: ${result.stdout.trim()}`);
-			return true;
-		}
-
-		// Auto-install via pi-lens installer
-		this.log("Ruff not found, attempting auto-install...");
-		const { ensureTool } = await import("./installer/index.js");
-		const installedPath = await ensureTool("ruff");
-
-		if (installedPath) {
-			// Only an absolute path improves on the bare name; ensureTool may
-			// return a bare command for an already-spawnable tool (#1289 review).
-			if (path.isAbsolute(installedPath)) {
-				this.ruffCommand = installedPath;
-			}
-			this.log(`Ruff auto-installed: ${installedPath}`);
-			this.ruffAvailable = true;
-			return true;
-		}
-
-		this.log("Ruff auto-install failed");
-		return false;
+		const resolved = await resolveAvailableOrInstall(
+			ruffAvailability,
+			"ruff",
+			process.cwd(),
+		);
+		if (!resolved) return false;
+		this.ruffCommand = resolved;
+		return true;
 	}
 
 	/**

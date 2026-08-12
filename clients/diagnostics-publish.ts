@@ -61,6 +61,7 @@
  */
 import { logBusEvent } from "./bus-events-logger.js";
 import { normalizeFilePath } from "./path-utils.js";
+import { createLiveBusEmitter, type BusEmitFn, type BusEmitGetter } from "./live-bus-emitter.js";
 import { isBusPublishEnabled } from "./bus-publish.js";
 
 export const BUS_DIAGNOSTICS_EVENT = "pilens:diagnostics";
@@ -108,9 +109,7 @@ export interface PilensDiagnosticsPayload {
 	files: PilensDiagnosticsFileEntry[];
 }
 
-type BusEmitFn = (channel: string, data: unknown) => void;
-
-let busEmit: BusEmitFn | undefined;
+const liveEmitter = createLiveBusEmitter();
 let hasLoggedFailure = false;
 let hasLoggedUnwired = false;
 let hasLoggedDisabled = false;
@@ -125,12 +124,16 @@ const reportedDirtyPaths = new Set<string>();
  * producers share the identical `pi.events.emit` binding.
  */
 export function wireDiagnosticsBusEmitter(emitFn: BusEmitFn | undefined): void {
-	busEmit = emitFn;
+	liveEmitter.wire(emitFn);
+}
+
+export function wireDiagnosticsBusEmitterGetter(getter: BusEmitGetter | undefined): void {
+	liveEmitter.wireGetter(getter);
 }
 
 /** Test-only: reset module state between test files. */
 export function _resetDiagnosticsPublishForTests(): void {
-	busEmit = undefined;
+	liveEmitter.reset();
 	hasLoggedFailure = false;
 	hasLoggedUnwired = false;
 	hasLoggedDisabled = false;
@@ -210,6 +213,7 @@ export function publishDiagnostics(args: PublishDiagnosticsArgs): void {
 		}
 		return;
 	}
+	const busEmit = liveEmitter.get();
 	if (!busEmit) {
 		if (!hasLoggedUnwired) {
 			hasLoggedUnwired = true;

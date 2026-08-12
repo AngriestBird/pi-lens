@@ -115,7 +115,7 @@ describe("collectSourceFilesAsync — event-loop budget", () => {
 		// stops yielding entirely (the catastrophic case) — that would surface
 		// as one large block, not a missed measurement.
 		const maxBlock = await measureMaxSyncBlockMs(async () => {
-			const files = await collectSourceFilesAsync(tmpDir, { yieldEvery: 50 });
+			const files = await collectSourceFilesAsync(tmpDir, { budgetMs: 8 });
 			expect(files.length).toBeGreaterThan(0);
 		});
 

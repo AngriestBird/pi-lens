@@ -5,11 +5,18 @@ const safeSpawn = vi.fn();
 const ensureTool = vi.fn();
 
 vi.mock("../../clients/safe-spawn.js", () => ({ safeSpawnAsync, safeSpawn }));
-vi.mock("../../clients/installer/index.js", () => ({ ensureTool }));
+vi.mock("../../clients/installer/index.js", () => ({
+	ensureTool,
+	resetPathWalkMemo: vi.fn(),
+	// Seam probes route through this on cached hits (#1203); default spawnable.
+	isSpawnableCommand: vi.fn(async () => true),
+}));
 
 describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		vi.resetAllMocks();
+		const helpers = await import("../../clients/dispatch/runners/utils/runner-helpers.js");
+		helpers.resetDispatchAvailabilityState();
 		ensureTool.mockResolvedValue(null);
 	});
 
@@ -26,7 +33,7 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 		const a = client.ensureAvailable();
 		const b = client.ensureAvailable();
 		const c = client.ensureAvailable();
-		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+		await vi.waitFor(() => expect(safeSpawnAsync).toHaveBeenCalledTimes(1));
 		resolveProbe?.({
 			status: 0,
 			error: undefined,
@@ -63,7 +70,8 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 		safeSpawnAsync
 			.mockResolvedValueOnce({
 				status: 1,
-				error: new Error("not found"),
+				error: Object.assign(new Error("not found"), { code: "ENOENT" }),
+				failure: "spawn",
 				stdout: "",
 				stderr: "",
 			})
@@ -83,5 +91,26 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 		} finally {
 			fs.rmSync(file, { force: true });
 		}
+	});
+
+	it("suppresses failed installs until the session resets", async () => {
+		safeSpawnAsync.mockResolvedValue({
+			status: 1,
+			error: Object.assign(new Error("not found"), { code: "ENOENT" }),
+			failure: "spawn",
+			stdout: "",
+			stderr: "",
+		});
+		const { RuffClient } = await import("../../clients/ruff-client.js");
+		const client = new RuffClient();
+		expect(await client.ensureAvailable()).toBe(false);
+		expect(ensureTool).toHaveBeenCalledTimes(1);
+		await client.ensureAvailable();
+		expect(ensureTool).toHaveBeenCalledTimes(1);
+		const helpers = await import("../../clients/dispatch/runners/utils/runner-helpers.js");
+		helpers.resetDispatchAvailabilityState();
+		ensureTool.mockResolvedValue("ruff");
+		expect(await client.ensureAvailable()).toBe(true);
+		expect(ensureTool).toHaveBeenCalledTimes(2);
 	});
 });

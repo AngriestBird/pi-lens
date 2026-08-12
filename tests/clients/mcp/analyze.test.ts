@@ -361,10 +361,35 @@ describe("analyzeFile", () => {
 		fs.writeFileSync(first, "export const first = 1;\n");
 		fs.writeFileSync(second, "export const second = 2;\n");
 		cache.addModifiedRange(first, { start: 1, end: 1 }, false, tmpDir, "mcp-live-a", "mcp");
-		cache.addModifiedRange(second, { start: 1, end: 1 }, false, tmpDir, "mcp-live-b", "mcp");
-		const state = cache.readTurnState(tmpDir);
-		expect(Object.keys(state.files)).toEqual(["first.ts"]);
-		expect(cache.getTurnStateAccess(tmpDir, { kind: "mcp", id: "mcp-live-b" })).toBe("foreign-live");
+		const foreignState = cache.readTurnState(tmpDir);
+		foreignState.owner!.pid = process.pid + 1;
+		cache.writeTurnState(foreignState, tmpDir);
+		const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true as never);
+		try {
+			cache.addModifiedRange(second, { start: 1, end: 1 }, false, tmpDir, "mcp-live-b", "mcp");
+			const state = cache.readTurnState(tmpDir);
+			expect(Object.keys(state.files)).toEqual(["first.ts"]);
+			expect(cache.getTurnStateAccess(tmpDir, { kind: "mcp", id: "mcp-live-b" })).toBe("foreign-live");
+			const beforeCycle = state.turnCycles;
+			expect(cache.clearTurnState(tmpDir, { kind: "mcp", id: "mcp-live-b" })).toBe(false);
+			expect(cache.incrementTurnCycle(tmpDir, { kind: "mcp", id: "mcp-live-b" }).turnCycles).toBe(beforeCycle);
+			expect(cache.readTurnState(tmpDir).files).toHaveProperty("first.ts");
+		} finally {
+			killSpy.mockRestore();
+		}
+	});
+
+	it("allows a same-process session handoff to advance and clear turn state", () => {
+		const cache = new CacheManager();
+		const file = path.join(tmpDir, "same-process.ts");
+		fs.writeFileSync(file, "export const value = 1;\n");
+		cache.addModifiedRange(file, { start: 1, end: 1 }, false, tmpDir, "pi-old", "pi");
+
+		expect(
+			cache.incrementTurnCycle(tmpDir, { kind: "pi", id: "pi-new" }).turnCycles,
+		).toBe(1);
+		expect(cache.clearTurnState(tmpDir, { kind: "pi", id: "pi-new" })).toBe(true);
+		expect(cache.readTurnState(tmpDir).files).toEqual({});
 	});
 
 	it("preserves explicit writer ownership across pi/MCP handoffs (#1262)", () => {

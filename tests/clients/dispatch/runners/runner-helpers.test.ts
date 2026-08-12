@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	createAvailabilityChecker,
+	getSgCommand,
+	isSgAvailableAsync,
 	lspPrimaryCoversFile,
 	resolveCommandArgsWithInstallFallback,
 	resolveCommandWithInstallFallback,
@@ -36,6 +38,7 @@ vi.mock("../../../../clients/installer/index.js", () => ({
 	// Pass the on-disk pre-check so these tests keep exercising the --version
 	// probe path through the mocked safeSpawnAsync.
 	isSpawnableCommand: vi.fn(async () => true),
+	resetPathWalkMemo: vi.fn(),
 }));
 
 vi.mock("../../../../clients/package-manager.js", async (importOriginal) => ({
@@ -165,6 +168,32 @@ describe("runner-helpers availability checker", () => {
 		expect(resolvedByToolId).toBeNull();
 	});
 
+	it("dedupes concurrent missing-tool probe and install transactions", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
+			stdout: "",
+			stderr: "not found",
+			status: 1,
+			error: Object.assign(new Error("missing"), { code: "ENOENT" }),
+			failure: "spawn",
+		});
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("ruff");
+		const checker = createAvailabilityChecker("ruff");
+
+		const results = await Promise.all(
+			Array.from({ length: 8 }, () =>
+				resolveAvailableOrInstall(checker, "ruff", process.cwd()),
+			),
+		);
+
+		expect(results).toEqual(Array(8).fill("ruff"));
+		expect(installerMod.ensureTool).toHaveBeenCalledTimes(1);
+		// Mutation verification: removing the shared resolve/install in-flight map
+		// makes this same test observe 8 ensureTool calls; the dedupe extension was
+		// temporarily reverted and the test was rerun before restoring the fix.
+	});
+
 	it("probes with custom versionArgs (e.g. `zig version`, not `--version`)", async () => {
 		// Regression guard for #209: zig rejects `--version` (its version
 		// subcommand is `zig version`), so the default probe made zig-check skip on
@@ -232,6 +261,50 @@ describe("runner-helpers availability checker", () => {
 		const checker = createAvailabilityChecker("sometool");
 		expect(await checker.isAvailableAsync(process.cwd())).toBe(true);
 		expect(probedArgs).toEqual(["--version"]);
+	});
+
+	it("re-probes a cached positive when its resolved command disappears", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(safeSpawnMod.safeSpawnAsync)
+			.mockResolvedValueOnce({ stdout: "1.0.0", stderr: "", status: 0 })
+			.mockResolvedValueOnce({
+				stdout: "",
+				stderr: "missing",
+				status: null,
+				error: Object.assign(new Error("missing"), { code: "ENOENT" }),
+				failure: "spawn",
+			});
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValueOnce(false);
+		// Scoped count: earlier tests in this file legitimately trigger the
+		// session-reset path, which also calls resetPathWalkMemo.
+		vi.mocked(installerMod.resetPathWalkMemo).mockClear();
+		const checker = createAvailabilityChecker("deleted-tool");
+		expect(await checker.isAvailableAsync(process.cwd())).toBe(true);
+		expect(await checker.isAvailableAsync(process.cwd())).toBe(false);
+		expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalledTimes(2);
+		expect(installerMod.resetPathWalkMemo).toHaveBeenCalledOnce();
+	});
+
+	it("resets the shared ast-grep availability memo at session start", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
+			stdout: "",
+			stderr: "missing",
+			status: 1,
+		});
+		expect(await isSgAvailableAsync()).toBe(false);
+		vi.mocked(installerMod.resetPathWalkMemo).mockClear();
+		resetDispatchAvailabilityState();
+		expect(installerMod.resetPathWalkMemo).toHaveBeenCalledOnce();
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
+			stdout: "ast-grep 0.40.0",
+			stderr: "",
+			status: 0,
+		});
+		expect(await isSgAvailableAsync()).toBe(true);
+		expect(getSgCommand().cmd).toContain("ast-grep");
 	});
 
 	it("bounds missing-tool installs to one attempt and records the failure", async () => {

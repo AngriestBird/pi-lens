@@ -108,6 +108,18 @@ const NO_POLICY_FALLBACK_EXTS = new Set<string>([
 ]);
 
 describe("formatter ↔ policy consistency (#1135)", () => {
+	it("every multi-formatter extension has one unique deterministic default (#1306)", () => {
+		expectClean(FORMATTER_POLICY_BY_EXTENSION, ([ext, policy]) => {
+			if (policy.formatterNames.length < 2) return null;
+			const uniqueNames = new Set(policy.formatterNames);
+			if (uniqueNames.size !== policy.formatterNames.length) {
+				return `${ext} contains duplicate formatter claims`;
+			}
+			return policy.defaultFormatter && uniqueNames.has(policy.defaultFormatter)
+				? null
+				: `${ext} has multiple formatter candidates but no defaultFormatter among them`;
+		});
+	});
 	it("every formatter definition extension is policy-included, a documented exclusion, or a documented no-policy fallback (direction 1: no silent drop)", () => {
 		expectClean(definitionExtensionPairs, ({ name, ext }) => {
 			const policy = FORMATTER_POLICY_BY_EXTENSION.get(ext);
