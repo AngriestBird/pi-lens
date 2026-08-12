@@ -10,11 +10,10 @@
  * - undefined requestedLimit maps to MAX_SAFE_INTEGER (whole-file coverage)
  *
  * Adversarial / hardening cases:
- * - Wrong or missing protocol version is silently dropped
- * - Malformed payloads (null, non-object, empty filePath, non-finite numbers,
- *   non-integer offsets/limits) are silently dropped
- * - Future-stamped timestamps beyond the 60 s skew window are dropped
- * - Stale (past) timestamps are accepted — the guard owns recency logic
+ * - Malformed payloads (null, non-object, empty/non-string filePath,
+ *   non-number/non-finite/non-integer/out-of-range offsets and limits) are
+ *   silently dropped
+ * - timestamp is always stamped by the bridge (Date.now()), never caller-supplied
  * - Full read-then-edit authorization path: bridge-registered read unblocks
  *   a subsequent edit that would otherwise be blocked
  */
@@ -22,7 +21,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	READ_BRIDGE_KEY,
-	READ_BRIDGE_VERSION,
 	registerReadBridge,
 	type ReadBridgeEntry,
 } from "../../clients/read-bridge.js";
@@ -69,11 +67,9 @@ function makeDeps(
 /** A well-formed entry that always passes validation. */
 function validEntry(overrides: Partial<ReadBridgeEntry> = {}): ReadBridgeEntry {
 	return {
-		version: 1,
 		filePath: "/project/src/main.go",
 		requestedOffset: 10,
 		requestedLimit: 50,
-		timestamp: Date.now() - 100,
 		...overrides,
 	};
 }
@@ -88,10 +84,6 @@ describe("read-bridge", () => {
 
 	// ── Baseline ────────────────────────────────────────────────────────────
 
-	it("exports READ_BRIDGE_VERSION = 1", () => {
-		expect(READ_BRIDGE_VERSION).toBe(1);
-	});
-
 	it("bridge is absent before registerReadBridge is called", () => {
 		expect((globalThis as any)[READ_BRIDGE_KEY]).toBeUndefined();
 	});
@@ -105,14 +97,12 @@ describe("read-bridge", () => {
 		const deps = makeDeps({ turnIndex: 3, writeIndex: 7 });
 		registerReadBridge(deps);
 
-		const ts = Date.now() - 200;
 		const entry: ReadBridgeEntry = {
-			version: 1,
 			filePath: "/project/src/main.go",
 			requestedOffset: 10,
 			requestedLimit: 50,
-			timestamp: ts,
 		};
+		const before = Date.now();
 		(globalThis as any)[READ_BRIDGE_KEY].recordRead(entry);
 
 		expect(deps.fakeGuard.recordRead).toHaveBeenCalledOnce();
@@ -125,7 +115,8 @@ describe("read-bridge", () => {
 		expect(call.expandedByLsp).toBe(false);
 		expect(call.turnIndex).toBe(3);
 		expect(call.writeIndex).toBe(7);
-		expect(call.timestamp).toBe(ts);
+		expect(call.timestamp).toBeGreaterThanOrEqual(before);
+		expect(call.timestamp).toBeLessThanOrEqual(Date.now());
 	});
 
 	it("undefined requestedLimit maps to MAX_SAFE_INTEGER (whole-file coverage)", () => {
@@ -205,47 +196,6 @@ describe("read-bridge", () => {
 		bridge.recordRead(validEntry({ filePath: "/b.ts" }));
 		expect(fakeGuard.recordRead.mock.calls[1][0].turnIndex).toBe(9);
 		expect(fakeGuard.recordRead.mock.calls[1][0].writeIndex).toBe(4);
-	});
-
-	// ── Protocol version validation ──────────────────────────────────────────
-
-	describe("protocol version", () => {
-		it("version: 1 is accepted", () => {
-			const deps = makeDeps();
-			registerReadBridge(deps);
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ version: 1 }));
-			expect(deps.fakeGuard.recordRead).toHaveBeenCalledOnce();
-		});
-
-		it("missing version field is silently dropped", () => {
-			const deps = makeDeps();
-			registerReadBridge(deps);
-			const entry = validEntry();
-			delete (entry as any)["version"];
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(entry);
-			expect(deps.fakeGuard.recordRead).not.toHaveBeenCalled();
-		});
-
-		it("version: 0 is silently dropped", () => {
-			const deps = makeDeps();
-			registerReadBridge(deps);
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead({ ...validEntry(), version: 0 as any });
-			expect(deps.fakeGuard.recordRead).not.toHaveBeenCalled();
-		});
-
-		it("version: 2 (future) is silently dropped", () => {
-			const deps = makeDeps();
-			registerReadBridge(deps);
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead({ ...validEntry(), version: 2 as any });
-			expect(deps.fakeGuard.recordRead).not.toHaveBeenCalled();
-		});
-
-		it("version: string '1' is silently dropped", () => {
-			const deps = makeDeps();
-			registerReadBridge(deps);
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead({ ...validEntry(), version: "1" as any });
-			expect(deps.fakeGuard.recordRead).not.toHaveBeenCalled();
-		});
 	});
 
 	// ── Malformed payload validation ─────────────────────────────────────────
@@ -330,71 +280,27 @@ describe("read-bridge", () => {
 			expect(deps.fakeGuard.recordRead).not.toHaveBeenCalled();
 		});
 
-		it("timestamp = NaN is silently dropped", () => {
+		it("string requestedOffset is silently dropped", () => {
 			const deps = makeDeps();
 			registerReadBridge(deps);
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ timestamp: NaN }));
+			(globalThis as any)[READ_BRIDGE_KEY].recordRead({ ...validEntry(), requestedOffset: "10" as any });
 			expect(deps.fakeGuard.recordRead).not.toHaveBeenCalled();
 		});
 
-		it("timestamp = Infinity is silently dropped", () => {
+		it("requestedLimit = Infinity is silently dropped", () => {
 			const deps = makeDeps();
 			registerReadBridge(deps);
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ timestamp: Infinity }));
+			(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ requestedLimit: Infinity }));
 			expect(deps.fakeGuard.recordRead).not.toHaveBeenCalled();
 		});
 
-		it("string timestamp is silently dropped", () => {
+		it("string requestedLimit is silently dropped", () => {
 			const deps = makeDeps();
 			registerReadBridge(deps);
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead({
-				...validEntry(),
-				timestamp: "2024-01-01" as any,
-			});
+			(globalThis as any)[READ_BRIDGE_KEY].recordRead({ ...validEntry(), requestedLimit: "50" as any });
 			expect(deps.fakeGuard.recordRead).not.toHaveBeenCalled();
 		});
 	});
-
-	// ── Timestamp window validation ──────────────────────────────────────────
-
-	describe("timestamp validation", () => {
-		it("timestamp 61 s in the future is silently dropped", () => {
-			const deps = makeDeps();
-			registerReadBridge(deps);
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
-				validEntry({ timestamp: Date.now() + 61_000 }),
-			);
-			expect(deps.fakeGuard.recordRead).not.toHaveBeenCalled();
-		});
-
-		it("timestamp 59 s in the future is accepted (within the 60 s skew window)", () => {
-			const deps = makeDeps();
-			registerReadBridge(deps);
-			// Use 59 s to be reliably inside the window regardless of execution speed.
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
-				validEntry({ timestamp: Date.now() + 59_000 }),
-			);
-			expect(deps.fakeGuard.recordRead).toHaveBeenCalledOnce();
-		});
-
-		it("stale (past) timestamp is accepted — guard owns recency logic", () => {
-			const deps = makeDeps();
-			registerReadBridge(deps);
-			// 30 minutes ago — well past any grace window.
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
-				validEntry({ timestamp: Date.now() - 30 * 60_000 }),
-			);
-			expect(deps.fakeGuard.recordRead).toHaveBeenCalledOnce();
-		});
-
-		it("timestamp = 0 (epoch) is accepted as a stale-but-valid record", () => {
-			const deps = makeDeps();
-			registerReadBridge(deps);
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ timestamp: 0 }));
-			expect(deps.fakeGuard.recordRead).toHaveBeenCalledOnce();
-		});
-	});
-
 	// ── Full read-then-edit authorization path ───────────────────────────────
 
 	describe("read-then-edit authorization path", () => {
@@ -413,11 +319,11 @@ describe("read-bridge", () => {
 			registerReadBridge(deps);
 
 			const filePath = "/project/src/handler.ts";
-			const ts = Date.now() - 50;
 
 			// Simulate a co-process extension recording a read.
+			const beforeCall = Date.now();
 			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
-				validEntry({ filePath, requestedOffset: 1, requestedLimit: 100, timestamp: ts }),
+				validEntry({ filePath, requestedOffset: 1, requestedLimit: 100 }),
 			);
 
 			// The read-guard must have received exactly one record.
@@ -434,7 +340,8 @@ describe("read-bridge", () => {
 			expect(read.expandedByLsp).toBe(false);
 			expect(read.turnIndex).toBe(1);
 			expect(read.writeIndex).toBe(0);
-			expect(read.timestamp).toBe(ts);
+			expect(read.timestamp).toBeGreaterThanOrEqual(beforeCall);
+			expect(read.timestamp).toBeLessThanOrEqual(Date.now());
 		});
 
 		it("a read for file A does not authorize edits on file B", () => {
