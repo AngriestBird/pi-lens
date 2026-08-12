@@ -57,6 +57,14 @@ const SCAN_TIMEOUT_MS = 30_000;
 
 export class JscpdClient {
 	private available: boolean | null = null;
+	// Absolute path of a MANAGED jscpd (the global ~/.pi-lens tools shim
+	// discovered by the availability fast path, or the ensureTool install
+	// result), else null. Nullable on purpose: a bare-name sentinel can't
+	// distinguish "resolved" from "on PATH" — ensureTool may legitimately
+	// return a bare command for an already-spawnable tool (#1289 review).
+	// Project-local binaries are NOT stored; each scan resolves those against
+	// its own cwd via findNodeToolBinary.
+	private jscpdManagedPath: string | null = null;
 	private ensureInFlight: Promise<boolean> | null = null;
 	private inFlight = new Map<string, Promise<JscpdResult>>();
 	private log: (msg: string) => void;
@@ -156,6 +164,7 @@ export class JscpdClient {
 		for (const candidate of localCandidates) {
 			try {
 				if (fs.existsSync(candidate)) {
+					this.jscpdManagedPath = candidate;
 					this.available = true;
 					return true;
 				}
@@ -178,6 +187,9 @@ export class JscpdClient {
 		const installedPath = await ensureTool("jscpd");
 
 		if (installedPath) {
+			if (path.isAbsolute(installedPath)) {
+				this.jscpdManagedPath = installedPath;
+			}
 			this.available = true;
 			return true;
 		}
@@ -281,7 +293,9 @@ export class JscpdClient {
 			const bin = await findNodeToolBinary("jscpd", cwd);
 			const { cmd, prefix } = bin
 				? { cmd: bin, prefix: [] as string[] }
-				: { cmd: "npx", prefix: ["jscpd"] };
+				: this.jscpdManagedPath
+					? { cmd: this.jscpdManagedPath, prefix: [] as string[] }
+					: { cmd: "npx", prefix: ["jscpd"] };
 			const result = await safeSpawnAsync(
 				cmd,
 				[

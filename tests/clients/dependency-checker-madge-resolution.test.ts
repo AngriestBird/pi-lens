@@ -51,9 +51,9 @@ describe("DependencyChecker madge resolution (#766)", () => {
 		isSpawnableCommand.mockResolvedValue(true);
 		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
 			if (args[0] === "--version") {
-				return { status: 0, error: null, stdout: "madge 8.0.0", stderr: "" };
+				return { status: 0, error: undefined, stdout: "madge 8.0.0", stderr: "" };
 			}
-			return { status: 0, error: null, stdout: "[]", stderr: "" };
+			return { status: 0, error: undefined, stdout: "[]", stderr: "" };
 		});
 	});
 
@@ -132,6 +132,14 @@ describe("DependencyChecker madge resolution (#766)", () => {
 			"madge",
 		);
 		ensureTool.mockResolvedValue(managed);
+		// Exercise the off-PATH auto-install path: ensureAvailable's bare-name
+		// probe fails, then resolution must reuse the installed absolute path.
+		safeSpawnAsync.mockImplementation(
+			async (_cmd: string, args: string[]) =>
+				args[0] === "--version"
+					? { status: 1, error: new Error("not found"), stdout: "", stderr: "" }
+					: { status: 0, error: undefined, stdout: "[]", stderr: "" },
+		);
 
 		const { stats } = await new DependencyChecker().checkFilesBatch(
 			[writeSource("a.ts", ["./b.js"])],
@@ -376,14 +384,14 @@ describe("DependencyChecker madge resolution (#766)", () => {
 		resetMadgeManagedPathMemo();
 		fs.writeFileSync(
 			files[0],
-			'import { q } from "./q.js";\nexport const v = 1;\n',
+			'import { query } from "./q.js";\nexport const v = 1;\n',
 		);
 		await checker.checkFile(files[0], tmp);
 		expect(isSpawnableCommand).toHaveBeenCalledTimes(1);
 
 		fs.writeFileSync(
 			files[1],
-			'import { r } from "./r.js";\nexport const v = 1;\n',
+			'import { result } from "./r.js";\nexport const v = 1;\n',
 		);
 		await checker.checkFile(files[1], tmp);
 		expect(isSpawnableCommand).toHaveBeenCalledTimes(2);

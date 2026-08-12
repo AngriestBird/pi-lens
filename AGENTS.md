@@ -108,6 +108,11 @@ merge. Stale-lock recovery first renames the lock aside, and release does the
 same token check before deletion, so a late release can never recursively remove
 a replacement owner's lock. Managed npm installs retain the Windows `.cmd`
 shim path; tests use `PI_LENS_TEST_PLATFORM` to exercise that layout on Linux.
+Clients that auto-install command-line tools must retain and spawn the absolute
+path returned by `ensureTool`; a managed install is intentionally not assumed to
+be on PATH. Madge is the exception in shape only: its `resolveMadge` discovery
+already consults the managed tree after local/global node binaries and before
+npx, while `ensureAvailable` owns installation.
 Vitest sets `PI_LENS_DISABLE_TOOL_INSTALL=1` before global setup and workers;
 ordinary tests must remain network/install-free. Real installer integration
 tests must explicitly opt in and use an isolated `PI_LENS_HOME`.
