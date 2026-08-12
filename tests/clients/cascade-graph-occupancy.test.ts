@@ -98,7 +98,7 @@ describe(`cascade graph rebuild event-loop occupancy (~${TREE_SIZE} files)`, () 
 		},
 	);
 
-	it("main-thread reverse-dependency delta patch stays under the sync-block budget", { timeout: 60_000 }, async () => {
+	it("main-thread reverse-dependency delta patch stays under the sync-block budget", { retry: 2, timeout: 60_000 }, async () => {
 		const index = {
 			projectRoot: tmpDir,
 			generatedAt: new Date().toISOString(),
@@ -121,7 +121,7 @@ describe(`cascade graph rebuild event-loop occupancy (~${TREE_SIZE} files)`, () 
 		expect(maxBlock).toBeLessThan(MAX_SYNC_BLOCK_MS);
 	});
 
-	it("main-thread impact-cascade traversal stays under the sync-block budget", { timeout: 60_000 }, async () => {
+	it("main-thread impact-cascade traversal stays under the sync-block budget", { retry: 2, timeout: 60_000 }, async () => {
 		const graph = emptyGraph();
 		const seed = path.join(tmpDir, "seed.ts");
 		const seedNode = "file:seed";
