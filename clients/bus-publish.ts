@@ -20,6 +20,7 @@
 import { logBusEvent } from "./bus-events-logger.js";
 import { normalizeFilePath } from "./path-utils.js";
 import { appendRecentTouches } from "./recent-touches.js";
+import { createLiveBusEmitter, type BusEmitFn, type BusEmitGetter } from "./live-bus-emitter.js";
 
 export const BUS_FILES_TOUCHED_EVENT = "pilens:files:touched";
 export const BUS_FILES_TOUCHED_VERSION = 1;
@@ -59,9 +60,7 @@ export interface FilesTouchedPayload {
 	fixes?: FixProvenanceEntry[];
 }
 
-type BusEmitFn = (channel: string, data: unknown) => void;
-
-let busEmit: BusEmitFn | undefined;
+const liveEmitter = createLiveBusEmitter();
 let hasLoggedFailure = false;
 // Log-once-per-process guards for the two structural-no-op outcomes below
 // (see bus-events-logger.ts's module doc for why these aren't logged on
@@ -78,12 +77,16 @@ let hasLoggedDisabled = false;
  * no `pi.events`).
  */
 export function wireBusEmitter(emitFn: BusEmitFn | undefined): void {
-	busEmit = emitFn;
+	liveEmitter.wire(emitFn);
+}
+
+export function wireBusEmitterGetter(getter: BusEmitGetter | undefined): void {
+	liveEmitter.wireGetter(getter);
 }
 
 /** Test-only: reset module state between test files. */
 export function _resetForTests(): void {
-	busEmit = undefined;
+	liveEmitter.reset();
 	hasLoggedFailure = false;
 	hasLoggedUnwired = false;
 	hasLoggedDisabled = false;
@@ -166,6 +169,7 @@ export function publishFilesTouched(args: PublishFilesTouchedArgs): void {
 		args.dbg?.(`bus-publish: recent-touches append failed: ${err}`);
 	});
 
+	const busEmit = liveEmitter.get();
 	if (!busEmit) {
 		if (!hasLoggedUnwired) {
 			hasLoggedUnwired = true;
