@@ -23,6 +23,11 @@
  * `projectSnapshotStore.resolveDocumentEntry` identifier, which is what makes
  * posting-array filtering costly) plus 100 MORE files beyond the cap to prove
  * truncation is respected.
+ *
+ * The work-based-gate teeth here duplicate
+ * `word-index-session-refresh.test.ts`'s 600-document dense-stale case; what
+ * is NEW in this file is the pair of truncation assertions (capped corpus
+ * count and `truncated` flag survival through build + refresh).
  */
 import * as fs from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
@@ -95,6 +100,6 @@ describe("word-index incremental refresh at the file-count cap (#1227)", () => {
 				env.cleanup();
 			}
 		},
-		120_000,
+		30_000,
 	);
 });

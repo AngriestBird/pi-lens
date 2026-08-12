@@ -12,6 +12,10 @@
  * second pass. The interception below unlinks the real file the instant
  * `readFileSync` is called for it, so the resulting ENOENT is the real
  * filesystem's, not a synthetic stand-in for a lock.
+ *
+ * Invariant lock (#1227 acceptance 2): the skip contract this asserts already
+ * holds on current code via the same try/catch as #958 F1's unreadable-file
+ * case — this pins the vanish-between-walk-and-read cause specifically.
  */
 import * as fs from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
