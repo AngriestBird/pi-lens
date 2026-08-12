@@ -14,7 +14,11 @@ prevents torn JSON but not lost sibling-process deltas. Use
 the authoritative disk re-read, merge only the caller's delta, publish
 telemetry only after the atomic write succeeds, and release in `finally`. The
 PID liveness check has a documented bounded PID-reuse exposure; its unique
-token prevents a late owner from deleting a replacement lock. (#1202)
+token prevents a late owner from deleting a replacement lock. Callers must
+choose contention policy explicitly: correctness-critical stores use
+`onContention: "throw"`; dispatch-adjacent best-effort stores use `"skip-log"`
+with a drop telemetry callback and skip the whole commit when acquisition
+returns `null`. (#1202)
 
 ## Issue and PR design contract
 

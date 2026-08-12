@@ -189,7 +189,14 @@ function updateWarningState(
 		waitMs: 2_000,
 		retryMs: 10,
 		timeoutMessage: "timed out acquiring actionable warning store lock",
+		onContention: "skip-log",
+		logContention: () =>
+			logActionableWarningsEvent({
+				event: "warning_state_write_dropped",
+				metadata: { reason: "lock_contention" },
+			}),
 	});
+	if (!release) return;
 	try {
 		const now = new Date().toISOString();
 		// Re-read only after lock acquisition so a suppression committed by a

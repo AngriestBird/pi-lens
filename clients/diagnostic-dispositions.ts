@@ -243,6 +243,7 @@ function acquireDispositionLock(p: string): () => void {
 		waitMs: DISPOSITION_LOCK_WAIT_MS,
 		retryMs: DISPOSITION_LOCK_RETRY_MS,
 		timeoutMessage: "timed out acquiring diagnostic disposition store lock",
+		onContention: "throw",
 	});
 }
 

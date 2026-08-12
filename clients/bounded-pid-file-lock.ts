@@ -22,10 +22,30 @@ function ownerPidIsLive(pid: number): boolean {
  * specific subprocess on this synchronous behavior-gating path; the unique
  * token instead prevents a late release from deleting a replacement lock.
  */
+interface BoundedPidFileLockOptions {
+	waitMs: number;
+	retryMs: number;
+	timeoutMessage: string;
+}
+
 export function acquireBoundedPidFileLock(
 	lockPath: string,
-	options: { waitMs: number; retryMs: number; timeoutMessage: string },
-): () => void {
+	options: BoundedPidFileLockOptions & { onContention: "throw" },
+): () => void;
+export function acquireBoundedPidFileLock(
+	lockPath: string,
+	options: BoundedPidFileLockOptions & {
+		onContention: "skip-log";
+		logContention: () => void;
+	},
+): (() => void) | null;
+export function acquireBoundedPidFileLock(
+	lockPath: string,
+	options: BoundedPidFileLockOptions & (
+		| { onContention: "throw" }
+		| { onContention: "skip-log"; logContention: () => void }
+	),
+): (() => void) | null {
 	const token = `${process.pid}:${Date.now()}:${randomUUID()}`;
 	const deadline = Date.now() + options.waitMs;
 	for (;;) {
@@ -53,7 +73,13 @@ export function acquireBoundedPidFileLock(
 			} catch (lockError) {
 				if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
 			}
-			if (Date.now() >= deadline) throw new Error(options.timeoutMessage);
+			if (Date.now() >= deadline) {
+				if (options.onContention === "throw") {
+					throw new Error(options.timeoutMessage);
+				}
+				options.logContention();
+				return null;
+			}
 			Atomics.wait(waitArray, 0, 0, options.retryMs);
 		}
 	}
