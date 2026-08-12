@@ -15,12 +15,13 @@ import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 // the walk, and every write helper delegate to the real fs), so a path in
 // `failReads` looks present-and-stat-able but throws on read — the transient
 // exclusive-lock scenario, portably and without ESM namespace-spy limits.
-const { failReads, readCounter, statCounter } = vi.hoisted(() => ({
+const { failReads, readCounter, statCounter, walkCounter } = vi.hoisted(() => ({
 	failReads: new Set<string>(),
 	// Counts reads of files under a watched root, so a test can assert that a
 	// refresh aborted BEFORE it read (and therefore before it mutated) anything.
 	readCounter: { root: "", calls: 0 },
 	statCounter: { root: "", calls: 0 },
+	walkCounter: { calls: 0 },
 }));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
@@ -57,6 +58,16 @@ vi.mock("node:fs", async (importOriginal) => {
 		}) as typeof fs.readFileSync,
 	};
 });
+vi.mock("../../clients/source-filter.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../../clients/source-filter.js")>();
+	return {
+		...actual,
+		collectSourceFilesAsync: async (...args: Parameters<typeof actual.collectSourceFilesAsync>) => {
+			walkCounter.calls += 1;
+			return actual.collectSourceFilesAsync(...args);
+		},
+	};
+});
 
 afterEach(() => {
 	delete process.env.PI_LENS_MAX_PROJECT_FILES;
@@ -66,6 +77,7 @@ afterEach(() => {
 	readCounter.calls = 0;
 	statCounter.root = "";
 	statCounter.calls = 0;
+	walkCounter.calls = 0;
 	vi.restoreAllMocks();
 });
 
@@ -403,7 +415,7 @@ describe("session-start incremental word-index refresh (#958)", () => {
 		}
 	}, 60_000);
 
-	it("reuses full-required preflight stats when collecting rebuild documents (#1226)", async () => {
+	it("reuses the full-required preflight walk when collecting rebuild documents (#1226)", async () => {
 		const env = setupTestEnvironment("pi-lens-word-refresh-reuse-preflight-");
 		try {
 			const files = Array.from({ length: 100 }, (_, i) =>
@@ -415,14 +427,51 @@ describe("session-start incremental word-index refresh (#958)", () => {
 				fs.writeFileSync(file, `export const refreshed${i} = ${i};\n`, "utf8");
 				fs.utimesSync(file, future, future);
 			}
-			statCounter.root = env.tmpDir;
 			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
 			expect(result.mode).toBe("full-required");
 			if (result.mode !== "full-required") throw new Error("expected rebuild");
-			const afterPreflight = statCounter.calls;
+			const afterPreflightWalks = walkCounter.calls;
 			const docs = await collectWordIndexDocs(env.tmpDir, () => true, result.preflightFiles);
 			expect(docs).toHaveLength(100);
-			expect(statCounter.calls).toBe(afterPreflight);
+			expect(walkCounter.calls).toBe(afterPreflightWalks);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("re-stats rebuild documents changed after the preflight walk (#1302)", async () => {
+		const env = setupTestEnvironment("pi-lens-word-refresh-stale-window-");
+		try {
+			const files = Array.from({ length: 100 }, (_, i) =>
+				createTempFile(env.tmpDir, `src/f${i}.ts`, `export const original${i} = ${i};`),
+			);
+			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
+			const preflightMtime = new Date(Date.now() + 2_000);
+			for (const [i, file] of files.slice(0, 32).entries()) {
+				fs.writeFileSync(file, `export const refreshed${i} = ${i};\n`, "utf8");
+				fs.utimesSync(file, preflightMtime, preflightMtime);
+			}
+
+			const result = await refreshWordIndexIncrementally(index, env.tmpDir);
+			expect(result.mode).toBe("full-required");
+			if (result.mode !== "full-required") throw new Error("expected rebuild");
+
+			const target = files[0];
+			const readMtime = new Date(preflightMtime.getTime() + 2_000);
+			fs.writeFileSync(target, "export const changedAfterWalk = 1;\n", "utf8");
+			fs.utimesSync(target, readMtime, readMtime);
+			const rebuilt = buildWordIndex(
+				await collectWordIndexDocs(env.tmpDir, () => true, result.preflightFiles),
+			);
+			expect(rebuilt.fileMtimes?.get(target)).toBe(fs.statSync(target).mtimeMs);
+
+			const nextMtime = new Date(readMtime.getTime() + 2_000);
+			fs.writeFileSync(target, "export const changedAgain = 2;\n", "utf8");
+			fs.utimesSync(target, nextMtime, nextMtime);
+			await expect(refreshWordIndexIncrementally(rebuilt, env.tmpDir)).resolves.toMatchObject({
+				mode: "incremental",
+				refreshed: 1,
+			});
 		} finally {
 			env.cleanup();
 		}

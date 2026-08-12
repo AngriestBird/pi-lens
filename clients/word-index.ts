@@ -637,9 +637,6 @@ export async function collectWordIndexDocs(
 				prioritizeCodeKinds: true,
 			});
 	const truncated = preflightFiles?.truncated ?? files.length === maxFiles;
-	const preflightByPath = preflightFiles
-		? new Map(preflightFiles.map((entry) => [entry.path, entry]))
-		: undefined;
 	const docs = Object.assign(
 		[] as Array<{
 			path: string;
@@ -654,8 +651,12 @@ export async function collectWordIndexDocs(
 	for (const file of files.slice(0, maxFiles)) {
 		if (!shouldContinue()) return docs;
 		try {
-			const known = preflightByPath?.get(file);
-			const stat = known ?? fs.statSync(file);
+			// A preflight list saves the second full WALK, but its metadata may be
+			// stale by the time this rebuild reads the file. Re-stat each document at
+			// content-read time so the stored freshness stamp describes the bytes we
+			// actually index and the next incremental refresh cannot miss a change in
+			// the walk-to-read window (#1302).
+			const stat = fs.statSync(file);
 			if (stat.size <= WORD_INDEX_MAX_BYTES) {
 				docs.push({
 					path: file,
@@ -695,7 +696,7 @@ export interface WordIndexRebuildRequired {
 		| "missing-incremental-metadata"
 		| "file-set-churn"
 		| "stale-document-churn";
-	/** Bounded walk+stat result for a rebuild without repeating either syscall. */
+	/** Bounded walk+stat result for a rebuild without repeating the full walk. */
 	preflightFiles?: WordIndexPreflightFiles;
 }
 
