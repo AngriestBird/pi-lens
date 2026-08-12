@@ -16,6 +16,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **Cooperative word-index startup work (closes #1224, closes #1225, closes #1226, refs #1215)** — centralizes monotonic event-loop work budgets, time-budgets shared source walking and word-index reads, yields within high-document-frequency posting filters while publishing each replacement atomically, and reuses the bounded refresh preflight file/stat set for full rebuilds instead of walking and stating it twice.
+
 - Ruff and jscpd availability now use the shared dispatch checker, including typed missing-command installation, in-flight dedupe, install-failure suppression, and session reset (refs [#1290](https://github.com/apmantza/pi-lens/issues/1290), phase 1; not closing the issue). The seam adds configurable probe timeout and a managed-command fast path to preserve jscpd's 1500ms PATH probe and managed-tools lookup.
 
 ### Fixed

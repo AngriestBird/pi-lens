@@ -433,7 +433,7 @@ async function walkSourceCountAsync(
 	dir: string,
 	limit: number,
 	maxEntries: number,
-	opts: { yieldEvery?: number } = {},
+	opts: { budgetMs?: number } = {},
 ): Promise<SourceCountResult> {
 	const state: SourceCountState = {
 		count: 0,
@@ -450,7 +450,7 @@ async function walkSourceCountAsync(
 			// ~0.1ms of overhead and a 2k-file project produces ~20 yields, so the
 			// total async overhead is well under 5ms while keeping per-burst sync
 			// work under 50ms (the perceptual threshold for "instant" keystrokes).
-			yieldEvery: opts.yieldEvery ?? 100,
+			budgetMs: opts.budgetMs ?? 8,
 			// #703: prime the tracked-files set ONCE before the walk (not per file)
 			// so a tracked file matching a `.gitignore`/global pattern isn't dropped
 			// from the startup source-file count. Fail-open: resolves even when git
@@ -465,7 +465,7 @@ async function walkSourceCountAsync(
 export async function countSourceFilesWithinLimitAsync(
 	dir: string,
 	limit: number,
-	opts: { yieldEvery?: number } = {},
+	opts: { budgetMs?: number } = {},
 ): Promise<number> {
 	// Public wrapper keeps its pre-#758 contract: only the source-file limit
 	// bounds it (no entry ceiling).
