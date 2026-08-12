@@ -417,16 +417,8 @@ export class CacheManager {
 		owner: Pick<TurnStateOwner, "kind" | "id">,
 	): boolean {
 		const currentState = this.readTurnState(cwd);
-		const sameProcessPiHandoff =
-			owner.kind === "pi" &&
-			currentState.owner?.kind === "pi" &&
-			currentState.owner.pid === process.pid;
-		if (
-			this.getTurnStateAccess(cwd, owner) === "foreign-live" &&
-			!sameProcessPiHandoff
-		) {
-			return false;
-		}
+		const isCurrentOwner = this.getTurnStateAccess(cwd, owner) !== "foreign-live";
+		if (!isCurrentOwner && process.pid !== currentState.owner?.pid) return false;
 		const state: TurnState = {
 			...DEFAULT_TURN_STATE,
 			files: {}, // fresh object — DEFAULT_TURN_STATE.files can be polluted by addModifiedRange
@@ -444,7 +436,8 @@ export class CacheManager {
 		owner: Pick<TurnStateOwner, "kind" | "id">,
 	): TurnState {
 		const state = this.readTurnState(cwd);
-		if (this.getTurnStateAccess(cwd, owner) === "foreign-live") return state;
+		const isCurrentOwner = this.getTurnStateAccess(cwd, owner) !== "foreign-live";
+		if (!isCurrentOwner && process.pid !== state.owner?.pid) return state;
 		state.turnCycles++;
 		this.writeTurnState(state, cwd);
 		return state;

@@ -30,7 +30,7 @@ interface BoundedPidFileLockOptions {
 
 export function acquireBoundedPidFileLock(
 	lockPath: string,
-	options: BoundedPidFileLockOptions & { onContention: "throw" },
+	options: BoundedPidFileLockOptions & { onContention?: "throw" },
 ): () => void;
 export function acquireBoundedPidFileLock(
 	lockPath: string,
@@ -42,7 +42,7 @@ export function acquireBoundedPidFileLock(
 export function acquireBoundedPidFileLock(
 	lockPath: string,
 	options: BoundedPidFileLockOptions & (
-		| { onContention: "throw" }
+		| { onContention?: "throw" }
 		| { onContention: "skip-log"; logContention: () => void }
 	),
 ): (() => void) | null {
@@ -74,11 +74,11 @@ export function acquireBoundedPidFileLock(
 				if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
 			}
 			if (Date.now() >= deadline) {
-				if (options.onContention === "throw") {
-					throw new Error(options.timeoutMessage);
+				if (options.onContention === "skip-log") {
+					options.logContention();
+					return null;
 				}
-				options.logContention();
-				return null;
+				throw new Error(options.timeoutMessage);
 			}
 			Atomics.wait(waitArray, 0, 0, options.retryMs);
 		}
