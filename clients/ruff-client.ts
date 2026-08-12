@@ -91,7 +91,11 @@ export class RuffClient {
 		const installedPath = await ensureTool("ruff");
 
 		if (installedPath) {
-			this.ruffCommand = installedPath;
+			// Only an absolute path improves on the bare name; ensureTool may
+			// return a bare command for an already-spawnable tool (#1289 review).
+			if (path.isAbsolute(installedPath)) {
+				this.ruffCommand = installedPath;
+			}
 			this.log(`Ruff auto-installed: ${installedPath}`);
 			this.ruffAvailable = true;
 			return true;
