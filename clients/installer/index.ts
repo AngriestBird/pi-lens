@@ -1910,6 +1910,7 @@ export function resetProbeCacheStateForTesting(): void {
 	ensureInFlight.clear();
 	installFailureReasons.clear();
 	lastManagedInstallVersion.clear();
+	resetPathWalkMemo();
 	if (_probeCacheFlushTimer !== null) {
 		clearTimeout(_probeCacheFlushTimer);
 		_probeCacheFlushTimer = null;
@@ -1917,6 +1918,21 @@ export function resetProbeCacheStateForTesting(): void {
 }
 
 // --- Check Functions ---
+
+const pathWalkMemo = new Map<string, boolean>();
+
+function hashSync(value: string): string {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < value.length; i += 1) {
+		hash ^= value.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return (hash >>> 0).toString(16);
+}
+
+export function resetPathWalkMemo(): void {
+	pathWalkMemo.clear();
+}
 
 /**
  * Check if a command is available in PATH by walking PATH entries and
@@ -1972,7 +1988,11 @@ export async function isSpawnableCommand(command: string): Promise<boolean> {
 			return false;
 		}
 	}
-	return isCommandAvailable(command);
+	const memoKey = `${command}:${hashSync(process.env.PATH || "")}`;
+	if (pathWalkMemo.has(memoKey)) return pathWalkMemo.get(memoKey) ?? false;
+	const isSpawnable = await isCommandAvailable(command);
+	pathWalkMemo.set(memoKey, isSpawnable);
+	return isSpawnable;
 }
 
 // --- Verification Functions
@@ -3844,7 +3864,23 @@ export async function ensureTool(
 
 	// Fast path 1: in-memory session cache — no I/O.
 	const cached = resolvedPathCache.get(toolId);
-	if (cached) return cached;
+	if (cached) {
+		if (!path.isAbsolute(cached)) return cached;
+		try {
+			await fs.access(cached);
+			return cached;
+		} catch {
+			// The executor would report ENOENT for this cached positive. Evict it
+			// before discovery so the failure heals on this call, not after restart.
+		}
+		resolvedPathCache.delete(toolId);
+		const probeCache = await readProbeCache();
+		delete probeCache[toolId];
+		markProbeCacheChange(toolId, null);
+		logSessionStart(
+			`auto-install ensure ${toolId}: cached path disappeared; re-probing`,
+		);
+	}
 
 	// Fast path 2: persistent probe cache — fs.access + stat, no process spawn.
 	const diskCached = await checkProbeCache(toolId);
