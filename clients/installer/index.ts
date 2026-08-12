@@ -1910,7 +1910,7 @@ export function resetProbeCacheStateForTesting(): void {
 	ensureInFlight.clear();
 	installFailureReasons.clear();
 	lastManagedInstallVersion.clear();
-	bareCommandAvailabilityMemo.clear();
+	resetPathWalkMemo();
 	if (_probeCacheFlushTimer !== null) {
 		clearTimeout(_probeCacheFlushTimer);
 		_probeCacheFlushTimer = null;
@@ -1919,34 +1919,19 @@ export function resetProbeCacheStateForTesting(): void {
 
 // --- Check Functions ---
 
-const bareCommandAvailabilityMemo = new Map<string, boolean>();
+const pathWalkMemo = new Map<string, boolean>();
 
-function hashPathEnv(pathEnv: string): string {
+function hashSync(value: string): string {
 	let hash = 0x811c9dc5;
-	for (let i = 0; i < pathEnv.length; i += 1) {
-		hash ^= pathEnv.charCodeAt(i);
+	for (let i = 0; i < value.length; i += 1) {
+		hash ^= value.charCodeAt(i);
 		hash = Math.imul(hash, 0x01000193);
 	}
 	return (hash >>> 0).toString(16);
 }
 
-function bareCommandAvailabilityKey(command: string, pathEnv: string): string {
-	return `${command}\0${hashPathEnv(pathEnv)}`;
-}
-
-/** Clear bare-command PATH verdicts at the session-generation boundary. */
-export function resetBareCommandAvailabilityMemo(): void {
-	bareCommandAvailabilityMemo.clear();
-}
-
-/** Evict a command after an actual spawn reports ENOENT. */
-export function evictBareCommandAvailabilityMemo(command: string): void {
-	if (/[\\/]/.test(command)) return;
-	const pathEnv =
-		process.env.PATH || process.env.Path || process.env.path || "";
-	bareCommandAvailabilityMemo.delete(
-		bareCommandAvailabilityKey(command, pathEnv),
-	);
+export function resetPathWalkMemo(): void {
+	pathWalkMemo.clear();
 }
 
 /**
@@ -1962,9 +1947,6 @@ export async function isCommandAvailable(
 	const isWindows = installerPlatform() === "win32";
 	const pathEnv =
 		process.env.PATH || process.env.Path || process.env.path || "";
-	const memoKey = bareCommandAvailabilityKey(command, pathEnv);
-	const memoized = bareCommandAvailabilityMemo.get(memoKey);
-	if (memoized !== undefined) return memoized;
 	const dirs = pathEnv.split(path.delimiter);
 
 	// On Windows, probe .exe, .cmd, and .bat extensions in addition to bare name.
@@ -1981,7 +1963,6 @@ export async function isCommandAvailable(
 				const stat = statSync(candidate);
 				// isFile() returns false for broken symlinks (target missing)
 				if (stat.isFile() && stat.size > 0) {
-					bareCommandAvailabilityMemo.set(memoKey, true);
 					return true;
 				}
 			} catch {
@@ -1990,7 +1971,6 @@ export async function isCommandAvailable(
 		}
 	}
 
-	bareCommandAvailabilityMemo.set(memoKey, false);
 	return false;
 }
 
@@ -2008,7 +1988,11 @@ export async function isSpawnableCommand(command: string): Promise<boolean> {
 			return false;
 		}
 	}
-	return isCommandAvailable(command);
+	const memoKey = `${command}:${hashSync(process.env.PATH || "")}`;
+	if (pathWalkMemo.has(memoKey)) return pathWalkMemo.get(memoKey) ?? false;
+	const isSpawnable = await isCommandAvailable(command);
+	pathWalkMemo.set(memoKey, isSpawnable);
+	return isSpawnable;
 }
 
 // --- Verification Functions

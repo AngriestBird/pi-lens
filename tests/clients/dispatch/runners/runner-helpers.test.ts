@@ -35,11 +35,10 @@ vi.mock("../../../../clients/safe-spawn.js", () => ({
 
 vi.mock("../../../../clients/installer/index.js", () => ({
 	ensureTool: vi.fn(async () => null),
-	evictBareCommandAvailabilityMemo: vi.fn(),
 	// Pass the on-disk pre-check so these tests keep exercising the --version
 	// probe path through the mocked safeSpawnAsync.
 	isSpawnableCommand: vi.fn(async () => true),
-	resetBareCommandAvailabilityMemo: vi.fn(),
+	resetPathWalkMemo: vi.fn(),
 }));
 
 vi.mock("../../../../clients/package-manager.js", async (importOriginal) => ({
@@ -281,9 +280,7 @@ describe("runner-helpers availability checker", () => {
 		expect(await checker.isAvailableAsync(process.cwd())).toBe(true);
 		expect(await checker.isAvailableAsync(process.cwd())).toBe(false);
 		expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalledTimes(2);
-		expect(installerMod.evictBareCommandAvailabilityMemo).toHaveBeenCalledWith(
-			"deleted-tool",
-		);
+		expect(installerMod.resetPathWalkMemo).toHaveBeenCalledOnce();
 	});
 
 	it("resets the shared ast-grep availability memo at session start", async () => {
@@ -295,9 +292,9 @@ describe("runner-helpers availability checker", () => {
 			status: 1,
 		});
 		expect(await isSgAvailableAsync()).toBe(false);
-		vi.mocked(installerMod.resetBareCommandAvailabilityMemo).mockClear();
+		vi.mocked(installerMod.resetPathWalkMemo).mockClear();
 		resetDispatchAvailabilityState();
-		expect(installerMod.resetBareCommandAvailabilityMemo).toHaveBeenCalledOnce();
+		expect(installerMod.resetPathWalkMemo).toHaveBeenCalledOnce();
 		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
 			stdout: "ast-grep 0.40.0",
 			stderr: "",

@@ -19,9 +19,8 @@ import {
 } from "../../../path-utils.js";
 import {
 	ensureTool,
-	evictBareCommandAvailabilityMemo,
 	isSpawnableCommand,
-	resetBareCommandAvailabilityMemo,
+	resetPathWalkMemo,
 } from "../../../installer/index.js";
 import {
 	getServersForFileWithConfig,
@@ -199,7 +198,7 @@ function noteInstallSuccess(toolId: string, cwd: string): void {
 export function resetDispatchAvailabilityState(): void {
 	installAttemptsByCwd.clear();
 	resolveInstallInFlightByCwd.clear();
-	resetBareCommandAvailabilityMemo();
+	resetPathWalkMemo();
 	availabilityStateGeneration += 1;
 }
 
@@ -321,7 +320,7 @@ export function createAvailabilityChecker(
 			cache.available = false;
 			const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
 			if (result.failure === "spawn" && errorCode === "ENOENT") {
-				evictBareCommandAvailabilityMemo(cmd);
+				resetPathWalkMemo();
 				cache.outcome = "missing";
 			} else if (
 				result.failure === "timeout" ||
