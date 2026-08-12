@@ -20,3 +20,14 @@ describe("detectFileKind — terragrunt", () => {
 		expect(detectFileKind("/repo/infra/.terraform.lock.hcl")).toBeUndefined();
 	});
 });
+
+describe("detectFileKind — Helm templates", () => {
+	it("routes .tpl helpers through an explicit file kind", () => {
+		expect(detectFileKind("/repo/chart/templates/_helpers.tpl")).toBe(
+			"helm-template",
+		);
+		expect(detectFileKind("C:\\repo\\chart\\templates\\notes.TPL")).toBe(
+			"helm-template",
+		);
+	});
+});

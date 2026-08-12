@@ -75,6 +75,14 @@ const FIXTURES = [
 		expectDiagnostic: true,
 	},
 	{
+		lang: "helm",
+		dir: "tests/fixtures/tool-smoke/helm",
+		file: "templates/bad.yaml",
+		targets: ["helm-lint"],
+		tools: ["helm"],
+		expectDiagnostic: true,
+	},
+	{
 		lang: "javascript",
 		dir: "tests/fixtures/tool-smoke/javascript",
 		file: "bad.js",

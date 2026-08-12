@@ -604,6 +604,25 @@ export const TOOLS: ToolDefinition[] = [
 		},
 	},
 	{
+		id: "helm",
+		name: "Helm",
+		checkCommand: "helm",
+		checkArgs: ["version", "--short"],
+		installStrategy: "github",
+		binaryName: "helm",
+		github: {
+			repo: "helm/helm",
+			assetMatch: archAssetMatch({
+				linux: { x64: "linux-amd64.tar.gz", arm64: "linux-arm64.tar.gz" },
+				darwin: { x64: "darwin-amd64.tar.gz", arm64: "darwin-arm64.tar.gz" },
+				win32: { x64: "windows-amd64.zip", arm64: "windows-arm64.zip" },
+			}),
+			// Release archives nest the executable under an OS/arch directory;
+			// the installer searches recursively and adds the Windows suffix.
+			binaryInArchive: "helm",
+		},
+	},
+	{
 		// Opengrep: a single standalone binary per platform on GitHub releases —
 		// no login, no telemetry (the reason for switching off Semgrep, #111).
 		id: "opengrep",
@@ -3906,6 +3925,7 @@ export const GITHUB_TOOLS = [
 	"terraform-ls",
 	"zls",
 	"hadolint",
+	"helm",
 	"gitleaks",
 	"taplo",
 	"vale",
