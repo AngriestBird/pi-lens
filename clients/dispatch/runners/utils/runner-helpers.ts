@@ -17,7 +17,11 @@ import {
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 } from "../../../path-utils.js";
-import { ensureTool, isSpawnableCommand } from "../../../installer/index.js";
+import {
+	ensureTool,
+	isSpawnableCommand,
+	resetPathWalkMemo,
+} from "../../../installer/index.js";
 import {
 	getServersForFileWithConfig,
 	isServerDisabled,
@@ -194,6 +198,7 @@ function noteInstallSuccess(toolId: string, cwd: string): void {
 export function resetDispatchAvailabilityState(): void {
 	installAttemptsByCwd.clear();
 	resolveInstallInFlightByCwd.clear();
+	resetPathWalkMemo();
 	availabilityStateGeneration += 1;
 }
 
@@ -259,7 +264,15 @@ export function createAvailabilityChecker(
 		ensureCurrentGeneration();
 		const resolvedCwd = cwd || process.cwd();
 		const cache = getCache(resolvedCwd);
-		if (cache.available !== null) return cache.available;
+		if (cache.available === false) return false;
+		if (cache.available === true && cache.command) {
+			if (await isSpawnableCommand(cache.command)) return true;
+			// Cached-positive spawn feedback: a removed absolute path or vanished
+			// PATH command must fall through to a fresh probe immediately.
+			cache.available = null;
+			cache.command = null;
+			cache.outcome = null;
+		}
 
 		const key = path.resolve(resolvedCwd);
 		const existing = inFlightByCwd.get(key);
@@ -307,6 +320,7 @@ export function createAvailabilityChecker(
 			cache.available = false;
 			const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
 			if (result.failure === "spawn" && errorCode === "ENOENT") {
+				resetPathWalkMemo();
 				cache.outcome = "missing";
 			} else if (
 				result.failure === "timeout" ||
@@ -366,8 +380,15 @@ export function createAvailabilityChecker(
 export function createCwdCachedProbe(
 	probe: (cwd: string) => Promise<boolean>,
 ): (cwd: string) => Promise<boolean> {
-	const cacheByCwd = new Map<string, Promise<boolean>>();
+	const cacheByCwd = new PathKeyedMap<Promise<boolean>>(
+		normalizeEphemeralMapKey,
+	);
+	let probeGeneration = availabilityStateGeneration;
 	return (cwd: string) => {
+		if (probeGeneration !== availabilityStateGeneration) {
+			cacheByCwd.clear();
+			probeGeneration = availabilityStateGeneration;
+		}
 		const key = path.resolve(cwd || process.cwd());
 		const existing = cacheByCwd.get(key);
 		if (existing) return existing;
@@ -642,8 +663,19 @@ function buildSgLocalBins(): string[] {
 }
 
 let sgAvailableInFlight: Promise<boolean> | null = null;
+let sgAvailabilityGeneration = availabilityStateGeneration;
+
+function ensureCurrentSgGeneration(): void {
+	if (sgAvailabilityGeneration === availabilityStateGeneration) return;
+	sgAvailable = null;
+	sgCmd = null;
+	sgCmdArgs = [];
+	sgAvailableInFlight = null;
+	sgAvailabilityGeneration = availabilityStateGeneration;
+}
 
 export async function isSgAvailableAsync(): Promise<boolean> {
+	ensureCurrentSgGeneration();
 	if (sgAvailable !== null) return sgAvailable;
 	if (sgAvailableInFlight) return sgAvailableInFlight;
 
@@ -690,6 +722,7 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 }
 
 export function getSgCommand(): { cmd: string; args: string[] } {
+	ensureCurrentSgGeneration();
 	return {
 		cmd: sgCmd ?? "npx",
 		args: sgCmdArgs.length ? sgCmdArgs : ["--no", "--", "ast-grep"],

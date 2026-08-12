@@ -27,6 +27,7 @@ vi.mock("../../clients/installer/index.js", () => ({
 	// install-fallback path (rather than the --version probe path) where
 	// noteInstallFailure/suppression lives.
 	isSpawnableCommand: vi.fn(async () => false),
+	resetPathWalkMemo: vi.fn(),
 }));
 
 vi.mock("../../clients/lsp/config.js", () => ({

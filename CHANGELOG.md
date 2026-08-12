@@ -24,6 +24,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Kotlin formatter selection follows Spotless configuration deterministically (closes #1306)** — a Spotless `kotlin { ktlint() }` block pins ktlint and `kotlin { ktfmt() }` pins ktfmt, so both selection branches cannot claim the same Kotlin file and unconfigured projects retain the style-preserving no-format policy.
+
 - **Turn-end madge telemetry stays compact and its batch metadata is runtime-tested (closes [#1250](https://github.com/apmantza/pi-lens/issues/1250), [#1251](https://github.com/apmantza/pi-lens/issues/1251))** — aggregate batch counters remain exact, while per-target timing breadcrumbs are retained only for spawns taking at least 100 ms and capped at 12 slow targets, preserving the smells-rollup lookback; the real turn-end path now verifies madge batch execution and metadata propagation.
 
 - **Rule-policy normalization and source-filter matrices no longer drift (closes #1087)** — P3.2 derives CodeRabbit's language suffixes from the vendored rules tree so disable/select and inline suppression cover every shipped language; P3.3 aligns source-twin precedence ordering with sibling resolution and adds a behavioral agreement guard while preserving the broad `.jsx` build-artifact fallback.
@@ -35,6 +37,8 @@ All notable changes to pi-lens will be documented in this file.
 - **Durable disposition marks no longer lose sibling-process updates (closes [#1202](https://github.com/apmantza/pi-lens/issues/1202))** — the repo-wide shared-store audit classifies every durable writer and records accepted best-effort caches explicitly. The sole unguarded behavior-gating read/modify/write store, `diagnostic-dispositions.json`, now takes a bounded pid-owned cross-process lock, re-reads under that lock, and merges only its anchor delta, so an older writer cannot promote a stale whole-file snapshot over a concurrent mark.
 
 - **Behavior-gating durable stores no longer lose sibling-process updates (closes [#1202](https://github.com/apmantza/pi-lens/issues/1202))** — the repo-wide shared-store audit classifies every durable writer and records accepted-loss telemetry explicitly. Diagnostic dispositions and actionable-warning suppression state now share a bounded pid-owned cross-process lock, re-read under that lock, and merge only the caller's delta before atomic replacement. Disposition telemetry fires only after persistence succeeds, and turn-state clear/cycle/deferred-format paths now enforce the same live-owner boundary as edit registration.
+
+- **Tool discovery caches now recover from session changes and deleted binaries (closes [#1203](https://github.com/apmantza/pi-lens/issues/1203))** — cwd-scoped runner probes and the shared ast-grep memo follow the existing dispatch session generation, while installer in-memory positives revalidate absolute paths and evict the matching persisted entry before re-probing when the binary disappears.
 
 - **Managed ruff, jscpd, and madge installs are now actually used after auto-install (refs [#1289](https://github.com/apmantza/pi-lens/issues/1289))** — retain the absolute path returned by `ensureTool` so off-PATH managed shims are spawned directly instead of falling back to the bare command name.
 

@@ -6,7 +6,12 @@ import { setupTestEnvironment } from "./test-utils.js";
 const ensureTool = vi.fn();
 const findNodeToolBinary = vi.fn();
 
-vi.mock("../../clients/installer/index.js", () => ({ ensureTool }));
+vi.mock("../../clients/installer/index.js", () => ({
+	ensureTool,
+	resetPathWalkMemo: vi.fn(),
+	// Seam probes route through this on cached hits (#1203); default spawnable.
+	isSpawnableCommand: vi.fn(async () => true),
+}));
 vi.mock("../../clients/package-manager.js", () => ({ findNodeToolBinary }));
 
 vi.mock("../../clients/safe-spawn.js", () => ({
