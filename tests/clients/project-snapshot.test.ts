@@ -641,6 +641,10 @@ describe("project snapshot worker persist (#958)", () => {
 	// no PI_LENS_SNAPSHOT_PERSIST_SYNC, so the body is stringified+gzipped on a
 	// worker thread and promoted under a generation gate.
 	afterEach(async () => {
+		// Unconditional seam/gate hygiene: the lock tests restore these on the
+		// happy path, but a mid-body throw must not poison later tests.
+		setProjectSnapshotPromotionSeamForTests(undefined);
+		setProjectSnapshotGenerationGateForTests(true);
 		flushProjectSnapshotPersistsForTests();
 		await waitForProjectSnapshotPersistsForTests();
 		resetProjectSnapshotPersistWorkerForTests();
@@ -648,10 +652,14 @@ describe("project snapshot worker persist (#958)", () => {
 		delete process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS;
 	});
 
-	async function waitForFile(p: string, attempts = 5_000): Promise<boolean> {
-		for (let i = 0; i < attempts; i++) {
+	async function waitForFile(p: string, deadlineMs = 10_000): Promise<boolean> {
+		// Wall-time bound, not tick-count: the write happens on a WORKER thread,
+		// and on a saturated CI runner thousands of main-loop ticks can elapse
+		// in ~150ms without the worker ever being scheduled (the pre-fix flake).
+		const deadline = Date.now() + deadlineMs;
+		while (Date.now() < deadline) {
 			if (fs.existsSync(p)) return true;
-			await new Promise((resolve) => setImmediate(resolve));
+			await new Promise((resolve) => setTimeout(resolve, 10));
 		}
 		return fs.existsSync(p);
 	}
