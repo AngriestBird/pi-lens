@@ -37,9 +37,11 @@ describe("isWindowsPath (#1213 review pins)", () => {
 
 describe("isFullyQualified matrix additions (#1213 review pins)", () => {
 	it("classifies long-path and embedded-backslash forms", async () => {
-		const { isFullyQualified } = await import("../../clients/path-utils.js");
-		expect(isFullyQualified("\\?\C:\very\long\path")).toBe(true);
-		expect(isFullyQualified("/ordinary\name")).toBe(true);
+		const { isFullyQualifiedWin32, isFullyQualifiedPosix } = await import(
+			"../../clients/path-utils.js"
+		);
+		expect(isFullyQualifiedWin32("\\\\?\\C:\\very\\long\\path")).toBe(true);
+		expect(isFullyQualifiedPosix("/ordinary\\name")).toBe(true);
 	});
 });
 
