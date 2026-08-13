@@ -1544,6 +1544,21 @@ function applyProbeCacheChanges(
 	}
 }
 
+/**
+ * Install-lifetime ageing belongs to the authoritative merge, not only to the
+ * lookup path: a sibling process may have left expired entries on disk since
+ * this process loaded its in-memory snapshot. The async durable-store lock
+ * supplies the probe cache's former quarantine/stale-owner recovery.
+ */
+function ageProbeCache(disk: ProbeCache): void {
+	const cutoff = Date.now() - PROBE_CACHE_TTL_MS;
+	for (const [toolId, entry] of Object.entries(disk)) {
+		if (!Number.isFinite(entry.cachedAt) || entry.cachedAt < cutoff) {
+			delete disk[toolId];
+		}
+	}
+}
+
 function publishProbeCacheWrite(
 	disk: ProbeCache,
 	snapshotVersions: Map<string, number>,
@@ -1578,6 +1593,7 @@ async function writeProbeCache(): Promise<ProbeCacheFlushResult> {
 			path: PROBE_CACHE_PATH,
 			deserialize: deserializeProbeCache,
 			merge: (disk) => {
+				ageProbeCache(disk);
 				applyProbeCacheChanges(disk, changes);
 				return disk;
 			},

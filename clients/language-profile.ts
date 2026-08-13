@@ -369,6 +369,9 @@ export async function collectSourceFilesForWarmup(
 					break walk;
 				}
 			}
+			// Each iteration performs only bounded dirent/ext/ignore checks. Keep the
+			// count cadence: the cost does not scale with the corpus item size, and
+			// this walk's existing matched-file ceiling bounds the total work.
 			if (++processedSinceYield % yieldEvery === 0) {
 				// See countSourceFilesWithinLimitAsync for why setImmediate.
 				await new Promise<void>((resolve) => setImmediate(resolve));

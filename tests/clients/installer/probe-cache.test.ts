@@ -226,6 +226,41 @@ describe("updateProbeCache", () => {
 		expect(written[TOOL_ID]).toMatchObject({ path: TOOL_PATH });
 	});
 
+	it("ages expired sibling entries during the authoritative merge", async () => {
+		const staleTool = "old-tool";
+		const freshTool = "fresh-tool";
+		const freshEntry = {
+			path: "/other/process/fresh-tool",
+			mtimeMs: MTIME_MS + 2,
+			cachedAt: Date.now(),
+		};
+		mockFsReadFile
+			.mockResolvedValueOnce(JSON.stringify({}))
+			.mockResolvedValueOnce(
+				JSON.stringify({
+					[staleTool]: {
+						path: "/other/process/old-tool",
+						mtimeMs: MTIME_MS,
+						cachedAt: Date.now() - 25 * 60 * 60 * 1000,
+					},
+					[freshTool]: freshEntry,
+				}),
+			);
+		mockFsStat.mockResolvedValue({ mtimeMs: MTIME_MS });
+
+		await updateProbeCache(TOOL_ID, TOOL_PATH);
+		await flushProbeCache();
+
+		const [, content] = mockWriteFileAtomicAsync.mock.calls[0] as [
+			string,
+			string,
+		];
+		const written = JSON.parse(content) as Record<string, unknown>;
+		expect(written[staleTool]).toBeUndefined();
+		expect(written[freshTool]).toEqual(freshEntry);
+		expect(written[TOOL_ID]).toMatchObject({ path: TOOL_PATH });
+	});
+
 	it("recovers a stale lock using its owner age", async () => {
 		mockFsMkdir
 			.mockRejectedValueOnce(Object.assign(new Error("busy"), { code: "EEXIST" }))
