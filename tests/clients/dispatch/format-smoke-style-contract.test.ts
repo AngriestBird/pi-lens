@@ -18,6 +18,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { hasDetectableIndentation } from "../../../clients/dispatch/indent-detect.js";
+import { ALL_FORMATTERS } from "../../../clients/formatters.js";
 // Typed via scripts/smoke-tools.d.mts (the harness itself is plain ESM JS).
 import { FORMAT_FIXTURES } from "../../../scripts/smoke-tools.mjs";
 
@@ -70,6 +71,50 @@ describe("format-smoke fixtures honor the style-preserving contract (#1144)", ()
 			).toBe(true);
 		},
 	);
+
+	// #1337: the smoke matrix is the only place a formatter's REAL exit status
+	// meets a real file. A `reformat` row driven by a strict formatter can no
+	// longer report a green "ran clean but left the file unchanged" — a nonzero
+	// exit now surfaces as a failure. Pin that each smoke row's formatter is a
+	// registered one and that the strict/lenient split the smoke driver relies on
+	// matches the registry, so a posture flip cannot silently change what the
+	// nightly is asserting. (Full posture audit:
+	// tests/clients/dispatch/formatter-exit-code-posture.test.ts.)
+	it("every smoke fixture names a registered formatter", () => {
+		const registered = new Set(ALL_FORMATTERS.map((f) => f.name));
+		const unknown = FORMAT_FIXTURES.map((fx) => fx.formatter).filter(
+			(name) => !registered.has(name),
+		);
+		// A fixture naming a formatter the registry does not have can never be
+		// selected, so its row asserts nothing — the vacuous-fixture shape.
+		expect(unknown).toEqual([]);
+	});
+
+	it("drives the strict majority of the matrix through the real spawn path", () => {
+		const byName = new Map(ALL_FORMATTERS.map((f) => [f.name, f]));
+		const strictRows = FORMAT_FIXTURES.filter(
+			(fx) => fx.expect !== "preserve" && !byName.get(fx.formatter)?.lenientExitCode,
+		);
+		// These are the rows where #1337's strict default actually bites: a
+		// nonzero exit is now a red row instead of a green "ran clean but left the
+		// file unchanged". If this ever drops to zero, the nightly has stopped
+		// exercising the seam this issue hardened.
+		expect(strictRows.length).toBeGreaterThan(0);
+	});
+
+	it("keeps the lint-autofix smoke rows on the lenient side of the split", () => {
+		const byName = new Map(ALL_FORMATTERS.map((f) => [f.name, f]));
+		// rubocop/sqlfluff smoke rows exit 1 with remaining offenses AFTER a
+		// successful rewrite. If either ever loses its opt-out, its nightly row
+		// flips red for a reason that has nothing to do with formatting.
+		for (const name of ["rubocop", "sqlfluff"]) {
+			if (!FORMAT_FIXTURES.some((fx) => fx.formatter === name)) continue;
+			expect(
+				byName.get(name)?.lenientExitCode,
+				`${name} drives a smoke row and exits nonzero on remaining offenses`,
+			).toBeTruthy();
+		}
+	});
 
 	it("keeps a fixture that pins the refusal itself", () => {
 		const preserve = FORMAT_FIXTURES.filter((fx) => fx.expect === "preserve");

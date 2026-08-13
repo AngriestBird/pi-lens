@@ -124,15 +124,23 @@ export interface FormatterInfo {
 		cwd: string,
 	): Promise<ResolvedFormatterCommand>;
 	/**
-	 * Treat a nonzero exit as a formatting failure. Off by default: the
-	 * lint-autofix formatters (`rubocop -a`, `ktlint -F`, `standardrb --fix`,
-	 * `sqlfluff fix`) exit nonzero when offenses remain AFTER a successful
-	 * rewrite, and failing those would surface an error on every file with an
-	 * unfixable offense. Set it on pure formatters, where a nonzero exit means
-	 * the tool never ran — and an untouched file is otherwise indistinguishable
-	 * from "already formatted".
+	 * Opt OUT of exit-code strictness, with the justification as the value.
+	 *
+	 * `formatFile` is strict BY DEFAULT (#1337): a nonzero exit is a formatting
+	 * failure, because a formatter that never ran leaves the file byte-identical
+	 * and that is indistinguishable from "already formatted". The old default was
+	 * the reverse — opt-IN strictness — and it let `ruff format` reject invented
+	 * flags with exit 2 and report a clean no-op for a full release cycle (#1336).
+	 *
+	 * Set this ONLY for lint-autofix formatters, which exit nonzero when offenses
+	 * remain AFTER a successful rewrite (`rubocop -a`, `ktlint -F`,
+	 * `standardrb --fix`, `sqlfluff fix`); failing those would surface an error on
+	 * every file with an unfixable offense. The type is a string rather than a
+	 * boolean so the evidence is structurally required at the opt-out site — an
+	 * opt-out with no documented benign-nonzero mode cannot be written silently.
+	 * `tests/clients/dispatch/formatter-exit-code-posture.test.ts` pins the set.
 	 */
-	strictExitCode?: boolean;
+	lenientExitCode?: string;
 }
 
 export interface FormatterResult {
@@ -409,9 +417,9 @@ async function indentationArgs(
 	}
 	if (tool === "ruff") {
 		// `ruff format` has NO --indent-style/--indent-width flags (it errors with
-		// "unexpected argument" and exits 2, which formatFile reports as a silent
-		// clean no-op because ruff is not strictExitCode). Style is pinned through
-		// inline TOML overrides instead (#1144 follow-up).
+		// "unexpected argument" and exits 2, which formatFile reported as a silent
+		// clean no-op back when exit-code strictness was opt-in). Style is pinned
+		// through inline TOML overrides instead (#1144 follow-up).
 		return [
 			"--config",
 			`indent-width=${indentation.width}`,
@@ -526,6 +534,11 @@ export const prettierFormatter: FormatterInfo = {
 export const oxfmtFormatter: FormatterInfo = {
 	name: "oxfmt",
 	command: ["oxfmt", "$FILE"],
+	// #1337 audit: oxfmt (and the `vp fmt --write` path) publish no exit-code
+	// table. `--write` is the default and `--check` is the separate verification
+	// mode, so there is no documented nonzero-on-reformat. Absent a documented
+	// benign-nonzero mode, it stays strict — the safe direction, since the failure
+	// mode of guessing wrong the other way is a silent no-op (#1336).
 	async resolveCommand(filePath, cwd) {
 		if (hasVitePlusConfig(cwd)) {
 			const localVp = await findInNodeModules("vp", cwd);
@@ -558,11 +571,10 @@ export const ruffFormatter: FormatterInfo = {
 	name: "ruff",
 	command: ["ruff", "format", "$FILE"],
 	extensions: [".py", ".pyi"],
-	// Pure formatter: `ruff format` exits 0 on a successful in-place rewrite.
-	// Without this, an argument-rejection exit (2) touches nothing and reads as
-	// "already formatted" — the silent no-op that hid the bad --indent-style
-	// flags for a full release cycle.
-	strictExitCode: true,
+	// Strict (the #1337 default): `ruff format` exits 0 on a successful in-place
+	// rewrite and 2 on argument rejection / syntax error (verified, ruff 0.x:
+	// well-formed → 0, reformatted → 0, unparseable → 2). The exit-2 no-op is
+	// exactly what hid the bad --indent-style flags for a full release cycle.
 	async resolveCommand(filePath, cwd) {
 		const styleArgs = await indentationArgs(filePath, "ruff", cwd);
 		if (styleArgs === null) return SKIP_FORMATTING;
@@ -604,6 +616,11 @@ export const sqlfluffFormatter: FormatterInfo = {
 	name: "sqlfluff",
 	command: ["sqlfluff", "fix", "--force", "$FILE"],
 	extensions: [".sql"],
+	lenientExitCode:
+		"lint-autofix: `sqlfluff fix` writes the corrected file and then exits 1 " +
+		"when unfixable violations remain (its documented exit codes are 0 = all " +
+		"clean, 1 = violations remain, 2 = command/config failure), so a nonzero " +
+		"exit routinely accompanies a successful rewrite.",
 	async resolveCommand(filePath, cwd) {
 		const venv = await findInVenv("sqlfluff", cwd);
 		if (venv) return [venv, "fix", "--force", filePath];
@@ -682,6 +699,9 @@ export const shfmtFormatter: FormatterInfo = {
 export const nixfmtFormatter: FormatterInfo = {
 	name: "nixfmt",
 	command: ["nixfmt", "$FILE"],
+	// #1337 audit: nixfmt's README documents in-place formatting but has no
+	// exit-code section and no change-detection mode, so nothing documents a
+	// benign nonzero. Strict by default (see oxfmt above for the rationale).
 	extensions: [".nix"],
 	async detect(_cwd: string) {
 		return (await which("nixfmt")) !== null;
@@ -727,6 +747,11 @@ export const ktlintFormatter: FormatterInfo = {
 	name: "ktlint",
 	command: ["ktlint", "-F", "$FILE"],
 	extensions: [".kt", ".kts"],
+	lenientExitCode:
+		"lint-autofix: `ktlint -F` autocorrects what it can and then exits 1 if " +
+		"any lint error remains unfixed — the documented CLI contract (ktlint " +
+		"exits nonzero whenever violations are reported, and -F does not suppress " +
+		"the ones it cannot correct).",
 	async resolveCommand(filePath, _cwd) {
 		const inPath = await which("ktlint");
 		if (inPath) return [inPath, "-F", filePath];
@@ -762,6 +787,12 @@ export const rubocopFormatter: FormatterInfo = {
 	name: "rubocop",
 	command: ["rubocop", "-a", "--no-color", "$FILE"],
 	extensions: [".rb", ".rake", ".gemspec", ".ru"],
+	lenientExitCode:
+		"lint-autofix: `rubocop -a` exits 1 whenever ANY offense remains after it " +
+		"has already rewritten the file. Verified locally (rubocop on Ruby 3.4): a " +
+		"file with an unfixable Lint/UselessAssignment exits 1, and even a " +
+		"tidy file exits 1 on an unfixable Style/Documentation offense — nonzero " +
+		"is the normal outcome, not a failure.",
 	async resolveCommand(filePath, cwd) {
 		if (await canUseBundleExec(cwd))
 			return ["bundle", "exec", "rubocop", "-a", "--no-color", filePath];
@@ -779,6 +810,9 @@ export const standardrbFormatter: FormatterInfo = {
 	name: "standardrb",
 	command: ["standardrb", "--fix", "$FILE"],
 	extensions: [".rb", ".rake"],
+	lenientExitCode:
+		"lint-autofix: standardrb is a RuboCop wrapper and inherits its exit " +
+		"contract — `--fix` exits 1 when offenses remain after the rewrite.",
 	async resolveCommand(filePath, cwd) {
 		if (await canUseBundleExec(cwd))
 			return ["bundle", "exec", "standardrb", "--fix", filePath];
@@ -816,10 +850,9 @@ export const terragruntHclFormatter: FormatterInfo = {
 	command: ["terragrunt", "hcl", "fmt", "--file", "$FILE"],
 	extensions: [],
 	filenames: TERRAGRUNT_FILENAMES,
-	// Pure formatter: verified exit 0 on a successful in-place format against
-	// terragrunt v1.1.2. A binary predating the `hcl` command group exits nonzero
-	// and touches nothing, which without this reads as "already formatted".
-	strictExitCode: true,
+	// Strict (the #1337 default): verified exit 0 on a successful in-place format
+	// against terragrunt v1.1.2. A binary predating the `hcl` command group exits
+	// nonzero and touches nothing, which unguarded reads as "already formatted".
 	async detect(_cwd: string) {
 		return (await which("terragrunt")) !== null;
 	},
@@ -1211,7 +1244,12 @@ export async function formatFile(
 			cwd,
 		});
 
-		if (result.error || (formatter.strictExitCode && result.status !== 0)) {
+		// Strict by default (#1337): only a formatter with a documented
+		// benign-nonzero mode (`lenientExitCode`) may exit nonzero and still be
+		// read as a successful run. Everything else that exits nonzero never
+		// rewrote the file, and reporting {success: true, changed: false} there is
+		// indistinguishable from "already formatted" — the #1336 silent no-op.
+		if (result.error || (!formatter.lenientExitCode && result.status !== 0)) {
 			return {
 				success: false,
 				changed: false,

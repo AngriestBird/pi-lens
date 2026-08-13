@@ -93,7 +93,7 @@ describe("formatFile", () => {
 		}
 	});
 
-	// The reason the exit-status check is opt-in: `rubocop -a` exits 1 when
+	// The reason the strict default is opt-OUT-able: `rubocop -a` exits 1 when
 	// offenses remain after it has already rewritten the file. Failing that would
 	// surface a formatter error on every file with an unfixable offense.
 	it("keeps a nonzero exit non-fatal for lint-autofix formatters", async () => {
