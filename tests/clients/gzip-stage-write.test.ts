@@ -23,6 +23,7 @@ import { gunzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { STAGE_TMP_PATTERN } from "../../clients/atomic-write.js";
 import { writeGzipStageFile } from "../../clients/gzip-stage-write.js";
+import { suspendAt, waitFor } from "./interleaving-kit.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 let dir: string;
@@ -156,17 +157,9 @@ describe("concurrent writes to one stagePath (#1217)", () => {
 		// Deterministic form: gate every writer's publish rename behind a
 		// barrier, so all staging files MUST coexist before any rename runs —
 		// no scheduler luck in either direction.
-		let releaseRenames!: () => void;
-		const barrier = new Promise<void>((resolve) => {
-			releaseRenames = resolve;
-		});
 		const realRename = fs.promises.rename.bind(fs.promises);
-		const renameSpy = vi
-			.spyOn(fs.promises, "rename")
-			.mockImplementation(async (from, to) => {
-				await barrier;
-				return realRename(from, to);
-			});
+		const renameSpy = vi.spyOn(fs.promises, "rename");
+		const suspension = suspendAt(renameSpy, realRename);
 		try {
 			const inFlight = Promise.allSettled(
 				Array.from({ length: WRITERS }, (_, i) =>
@@ -176,21 +169,20 @@ describe("concurrent writes to one stagePath (#1217)", () => {
 			// Bounded wait until every writer has finished streaming and is
 			// parked at the rename barrier, each with its own staging file on
 			// disk. Converges deterministically — the files must appear.
-			let staged: string[] = [];
-			for (let i = 0; i < 5_000 && staged.length < WRITERS; i++) {
-				staged = tmpLeftovers();
-				await new Promise((resolve) => setImmediate(resolve));
-			}
+			const staged = await waitFor(
+				() => tmpLeftovers(),
+				(value) => value.length >= WRITERS,
+			);
 			expect(staged.length).toBe(WRITERS);
 			expect(new Set(staged).size).toBe(WRITERS);
 
-			releaseRenames();
+			suspension.release();
 			const settled = await inFlight;
 			expect(tmpLeftovers()).toEqual([]);
 			expectOnlyWindowsConcurrentRenameEpemr(settled);
 		} finally {
-			releaseRenames();
-			renameSpy.mockRestore();
+			suspension.release();
+			suspension.restore();
 		}
 	});
 });

@@ -463,6 +463,8 @@ const _snapshotWorkerRequests = new Map<number, PendingSnapshotBody>();
 let _snapshotPersistWorker: Worker | undefined;
 let _snapshotWorkerRequestId = 0;
 let _snapshotWorkerDisabled = false;
+let _snapshotGenerationGateEnabledForTests = true;
+let _snapshotPromotionSeamForTests: (() => Promise<void>) | undefined;
 let _lastSnapshotPersistErrorForTests: string | undefined;
 
 function snapshotWorkerEnabled(): boolean {
@@ -595,6 +597,25 @@ function writeSnapshotBodyOnMainThread(
 	}
 }
 
+/**
+ * The ForTests promotion seam covers worker-message and every main-thread
+ * fallback promotion. It stays sync and seam-free in production, identical to
+ * calling the writer directly. The process-exit hook is deliberately the sole
+ * direct write because an exit handler cannot await this asynchronous seam.
+ */
+function dispatchMainThreadWriteThroughSeam(
+	pending: PendingSnapshotBody,
+	reason: string | undefined,
+): void {
+	if (_snapshotPromotionSeamForTests) {
+		void _snapshotPromotionSeamForTests().then(() =>
+			writeSnapshotBodyOnMainThread(pending, reason),
+		);
+		return;
+	}
+	writeSnapshotBodyOnMainThread(pending, reason);
+}
+
 function handleSnapshotWorkerResult(
 	result: ProjectSnapshotPersistWorkerResult,
 ): void {
@@ -612,12 +633,20 @@ function handleSnapshotWorkerResult(
 		result.writeMs === undefined
 	) {
 		fs.rm(result.stagePath, { force: true }, () => {});
-		writeSnapshotBodyOnMainThread(pending, result.error ?? "invalid worker result");
+		dispatchMainThreadWriteThroughSeam(
+			pending,
+			result.error ?? "invalid worker result",
+		);
 		return;
 	}
 	// Generation gate: a newer save already superseded this one — discard the
 	// stale stage file rather than promote it over the fresher body.
-	if (_snapshotGenerations.get(pending.key) !== result.generation) {
+	if (
+		_snapshotGenerationGateEnabledForTests &&
+		_snapshotGenerations.get(pending.key) !== result.generation
+	) {
+		// The stale stage is part of the promotion transaction: remove it before
+		// returning so a superseded save cannot leave an orphan behind.
 		fs.rm(result.stagePath, { force: true }, () => {});
 		return;
 	}
@@ -634,7 +663,7 @@ function handleSnapshotWorkerResult(
 		});
 	} catch (err) {
 		fs.rm(result.stagePath, { force: true }, () => {});
-		writeSnapshotBodyOnMainThread(
+		dispatchMainThreadWriteThroughSeam(
 			pending,
 			err instanceof Error ? err.message : String(err),
 		);
@@ -646,7 +675,7 @@ function handleSnapshotWorkerDeath(reason: string): void {
 	_snapshotWorkerDisabled = true;
 	const requests = [..._snapshotWorkerRequests.values()];
 	_snapshotWorkerRequests.clear();
-	for (const pending of requests) writeSnapshotBodyOnMainThread(pending, reason);
+	for (const pending of requests) dispatchMainThreadWriteThroughSeam(pending, reason);
 }
 
 function resolveSnapshotPersistWorkerPath(): string | undefined {
@@ -684,7 +713,19 @@ function getSnapshotPersistWorker(): Worker | undefined {
 			return undefined;
 		}
 		const worker = new Worker(workerPath);
-		worker.on("message", handleSnapshotWorkerResult);
+		// The ForTests promotion seam wraps ONLY when set — the production path
+		// binds the sync handler directly, so scheduling is byte-identical when
+		// no test seam is installed (the async-handler variant of this shifted
+		// promotion timing under full-suite load and flaked the round-trip test).
+		worker.on("message", (result: ProjectSnapshotPersistWorkerResult) => {
+			if (_snapshotPromotionSeamForTests) {
+				void _snapshotPromotionSeamForTests().then(() =>
+					handleSnapshotWorkerResult(result),
+				);
+				return;
+			}
+			handleSnapshotWorkerResult(result);
+		});
 		worker.on("error", (err: Error) => handleSnapshotWorkerDeath(err.message));
 		worker.on("exit", (code) => {
 			if (_snapshotPersistWorker === worker) _snapshotPersistWorker = undefined;
@@ -697,7 +738,7 @@ function getSnapshotPersistWorker(): Worker | undefined {
 			if (stranded.length > 0) {
 				_snapshotWorkerRequests.clear();
 				for (const pending of stranded) {
-					writeSnapshotBodyOnMainThread(
+					dispatchMainThreadWriteThroughSeam(
 						pending,
 						`persist worker exited with code ${code}`,
 					);
@@ -838,12 +879,12 @@ export function saveProjectSnapshot(
 	ensureSnapshotPersistExitHook();
 
 	if (!snapshotWorkerEnabled()) {
-		writeSnapshotBodyOnMainThread(pending);
+		dispatchMainThreadWriteThroughSeam(pending, undefined);
 		return;
 	}
 	const worker = getSnapshotPersistWorker();
 	if (!worker) {
-		writeSnapshotBodyOnMainThread(pending, "persist worker unavailable");
+		dispatchMainThreadWriteThroughSeam(pending, "persist worker unavailable");
 		return;
 	}
 	const id = ++_snapshotWorkerRequestId;
@@ -881,7 +922,7 @@ export function flushProjectSnapshotPersistsForTests(): void {
 	_snapshotWorkerRequests.clear();
 	for (const pending of requests) {
 		if (_snapshotGenerations.get(pending.key) !== pending.generation) continue;
-		writeSnapshotBodyOnMainThread(pending);
+		dispatchMainThreadWriteThroughSeam(pending, undefined);
 	}
 }
 
@@ -894,10 +935,24 @@ export async function terminateProjectSnapshotPersistWorkerForTests(): Promise<v
 /** Test-only: restore worker creation + clear generation state after a deliberate death. */
 export function resetProjectSnapshotPersistWorkerForTests(): void {
 	_snapshotWorkerDisabled = false;
+	_snapshotGenerationGateEnabledForTests = true;
+	_snapshotPromotionSeamForTests = undefined;
 	_snapshotPersistWorker = undefined;
 	_snapshotWorkerRequests.clear();
 	_snapshotGenerations.clear();
 	_lastSnapshotPersistErrorForTests = undefined;
+}
+
+/** Test-only mutation switch for proving the supersession invariant. */
+export function setProjectSnapshotGenerationGateForTests(enabled: boolean): void {
+	_snapshotGenerationGateEnabledForTests = enabled;
+}
+
+/** Test-only seam immediately before generation-gated promotion. */
+export function setProjectSnapshotPromotionSeamForTests(
+	seam: (() => Promise<void>) | undefined,
+): void {
+	_snapshotPromotionSeamForTests = seam;
 }
 
 export function getProjectSnapshotPersistErrorForTests(): string | undefined {
