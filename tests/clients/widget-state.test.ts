@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	__testing,
 	clearWidgetState,
+	exportWidgetState,
 	getFailedLspServerIds,
 	getFileDiagnostics,
 	getFileDiagnosticSummaries,
@@ -407,6 +408,82 @@ describe("widget-state renderWidget", () => {
 		expect(allLines).toContain("✎");
 		expect(allLines).toContain("app.ts");
 		expect(allLines).not.toContain("fmt:biome");
+	});
+
+	it("renders formatter failures with an error indication", () => {
+		const filePath = `${process.cwd()}/broken.ts`;
+		recordFormatter(filePath, "prettier", false, false);
+
+		const allLines = renderWidget(60, theme).join("");
+		expect(allLines).toContain("broken.ts");
+		expect(allLines).toContain("prettier");
+		expect(allLines).toContain("fmt-failed:");
+		expect(allLines).toContain("x");
+	});
+
+	// #1348 review P1: diagnostic severity outranks formatter failure in BOTH
+	// renderers -- a file with blocking diagnostics AND a failed format shows
+	// the blocking dot, not the formatter x.
+	it("blocking diagnostics outrank a formatter failure (horizontal renderer)", () => {
+		const filePath = `${process.cwd()}/both-failed.ts`;
+		recordDiagnostics(filePath, [
+			{ severity: "error", semantic: "blocking", message: "bad", tool: "tsserver" },
+		]);
+		recordFormatter(filePath, "prettier", false, false);
+		// Pin the FILE ROW's leading glyph, not the whole render (the #1348
+		// delta review proved whole-output contains-assertions stay green under
+		// a broken precedence branch).
+		const row = renderWidget(120, theme).find((l) => l.includes("both-failed"));
+		expect(row).toBeDefined();
+		const plain = row!.replace(/\[[0-9;]*m/g, "").trimStart();
+		expect(plain.startsWith("●")).toBe(true);
+		expect(plain.startsWith("x")).toBe(false);
+	});
+
+	it("blocking diagnostics outrank a formatter failure (vertical renderer)", () => {
+		const filePath = `${process.cwd()}/both-failed-v.ts`;
+		recordDiagnostics(filePath, [
+			{ severity: "error", semantic: "blocking", message: "bad", tool: "tsserver" },
+		]);
+		recordFormatter(filePath, "prettier", false, false);
+		const row = renderWidget(40, theme).find((l) => l.includes("both-failed-v"));
+		expect(row).toBeDefined();
+		const plain = row!.replace(/\[[0-9;]*m/g, "").trimStart();
+		expect(plain.startsWith("●")).toBe(true);
+		expect(plain.startsWith("x")).toBe(false);
+	});
+
+	// #1348 review P2: failure entries are session-scoped advice -- they do
+	// NOT survive export/import; successes rehydrate as before.
+	it("formatter failures do not survive a session restore", () => {
+		const failPath = `${process.cwd()}/stale-fail.ts`;
+		const okPath = `${process.cwd()}/ok-changed.ts`;
+		recordFormatter(failPath, "prettier", false, false);
+		recordFormatter(okPath, "biome", true, true);
+		const snapshot = exportWidgetState();
+		clearWidgetState();
+		expect(importWidgetState(snapshot)).toBe(true);
+		const line = renderWidget(120, theme).join("");
+		expect(line).not.toContain("fmt-failed:");
+		expect(line).not.toContain("stale-fail.ts");
+	});
+
+	it("clears a formatter failure after a subsequent success", () => {
+		const filePath = `${process.cwd()}/recovered.ts`;
+		recordFormatter(filePath, "prettier", false, false);
+		expect(renderWidget(60, theme).join("")).toContain("fmt-failed:");
+
+		recordFormatter(filePath, "prettier", false, true);
+		const allLines = renderWidget(60, theme).join("");
+		expect(allLines).not.toContain("recovered.ts");
+		expect(allLines).not.toContain("fmt-failed:");
+	});
+
+	it("does not render an unchanged successful formatter", () => {
+		const filePath = `${process.cwd()}/unchanged.ts`;
+		recordFormatter(filePath, "prettier", false, true);
+
+		expect(renderWidget(60, theme).join("")).not.toContain("unchanged.ts");
 	});
 
 	it("packs multiple files into a single row at horizontal widths", () => {

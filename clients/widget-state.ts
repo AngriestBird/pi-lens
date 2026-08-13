@@ -257,7 +257,14 @@ export function importWidgetState(state: PersistedWidgetState | undefined): bool
 		files.set(fileMapKey(f.filePath), {
 			filePath: f.filePath,
 			runners: new Map(f.runners ?? []),
-			formatters: new Map(f.formatters ?? []),
+			// Failure entries do NOT survive a session restore (#1348 review):
+			// a fmt-failed marker is live advice about THIS session's last
+			// attempt; rehydrating one from a snapshot shows a stale failure the
+			// current session never observed (and same-mtime fixes would never
+			// clear it). Successes rehydrate as before.
+			formatters: new Map(
+				(f.formatters ?? []).filter(([, outcome]) => outcome?.success !== false),
+			),
 			diagnostics: migrateEntryStamps(f.diagnostics, recordTouchedAt),
 			allDiagnostics: migrateEntryStamps(f.allDiagnostics, recordTouchedAt),
 			diagnosticCounts: f.diagnosticCounts ?? {
@@ -940,12 +947,18 @@ function formatFileRowVertical(
 	const blocking = rec.diagnosticCounts.blocking;
 	const errors = rec.diagnosticCounts.errors;
 	const warnings = rec.diagnosticCounts.warnings;
+	const formatterFailed = hasFailedFormatter(rec);
+	// Diagnostic severity outranks formatter failure (#1348 review): a file
+	// with blocking diagnostics shows the blocking dot even if a format also
+	// failed -- same precedence as the horizontal renderer.
 	const dot =
 		blocking > 0
 			? red("●")
-			: warnings > 0 || errors > 0
-				? yellow("!")
-				: green("✓");
+			: formatterFailed
+				? red("x")
+				: warnings > 0 || errors > 0
+					? yellow("!")
+					: green("✓");
 	const runnerNames = [...rec.runners.entries()]
 		.filter(([, r]) => r.status !== "skipped")
 		.map(([id]) => id)
@@ -959,12 +972,16 @@ function formatFileRowVertical(
 				? " " + yellow(`${warnings}W`)
 				: " " + dim("clean");
 	const changedFormatters = [...rec.formatters.entries()]
-		.filter(([, f]) => f.changed)
+		.filter(([, f]) => f.changed && f.success)
+		.map(([name]) => name);
+	const failedFormatters = [...rec.formatters.entries()]
+		.filter(([, f]) => !f.success)
 		.map(([name]) => name);
 	const formatMark =
-		changedFormatters.length > 0
-			? dim(` fmt:${changedFormatters.join(",")}`)
-			: "";
+		(failedFormatters.length > 0
+			? red(` fmt-failed:${failedFormatters.join(",")}`)
+			: "") +
+		(changedFormatters.length > 0 ? dim(` fmt:${changedFormatters.join(",")}`) : "");
 	return ` ${dot} ${base}  ${dim(runnerNames)}${formatMark}${counts}`;
 }
 
@@ -1043,12 +1060,17 @@ function formatFileTokenHorizontal(
 	const errors = rec.diagnosticCounts.errors;
 	const warnings = rec.diagnosticCounts.warnings;
 	const formatterChanged = hasChangedFormatter(rec);
+	const formatterFailed = hasFailedFormatter(rec);
 
 	let dotChar: string;
 	if (blocking > 0) dotChar = red("●");
 	else if (errors > 0 || warnings > 0) dotChar = yellow("!");
 	else if (formatterChanged) dotChar = dim("✎");
 	else dotChar = dim("·");
+
+	if (formatterFailed && blocking === 0 && errors === 0 && warnings === 0) {
+		dotChar = red("x");
+	}
 
 	let countsStyled = "";
 	if (errors > 0 && warnings > 0) {
@@ -1103,11 +1125,15 @@ function getOrCreate(filePath: string): FileRecord {
 }
 
 function hasChangedFormatter(rec: FileRecord): boolean {
-	return [...rec.formatters.values()].some((f) => f.changed);
+	return [...rec.formatters.values()].some((f) => f.changed && f.success);
+}
+
+function hasFailedFormatter(rec: FileRecord): boolean {
+	return [...rec.formatters.values()].some((f) => !f.success);
 }
 
 function shouldRenderFile(rec: FileRecord): boolean {
-	return rec.hasFinalDiagnosticsSnapshot || hasChangedFormatter(rec);
+	return rec.hasFinalDiagnosticsSnapshot || hasChangedFormatter(rec) || hasFailedFormatter(rec);
 }
 
 function isPendingAnalysis(rec: FileRecord): boolean {
