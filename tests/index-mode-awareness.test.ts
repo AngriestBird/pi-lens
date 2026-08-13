@@ -5,6 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import extension from "../index.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../clients/degradation-ledger.js";
 
 // Same two heavy seams tests/index-wiring.test.ts stubs, so firing
 // session_start stays a fast deterministic wiring check.
@@ -50,6 +54,7 @@ function tmpProject(): string {
 }
 
 afterEach(() => {
+	resetDegradationLedger();
 	for (const dir of tmpDirs.splice(0)) removeTempDirSync(dir);
 });
 
@@ -127,6 +132,9 @@ describe("notify chatter is mode-derived (#1334 S2)", () => {
 			await pi.runCommand("lens-toggle", "", ctx);
 
 			expect(ctx.notifications).toHaveLength(0);
+			expect(getDegradationSummary()).toEqual([
+				expect.objectContaining({ kind: "mode-suppression", count: 1 }),
+			]);
 		});
 	}
 

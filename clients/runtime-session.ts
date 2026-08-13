@@ -8,6 +8,7 @@ import { deadCodeIssueCount } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
 import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
+import { resetDegradationLedger } from "./degradation-ledger.js";
 import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
@@ -1457,6 +1458,7 @@ export const SESSION_START_GUIDANCE: string[] = [
 export async function handleSessionStart(
 	deps: SessionStartDeps,
 ): Promise<void> {
+	resetDegradationLedger();
 	const handlerEnteredAt = Date.now();
 	const sessionStartMs = deps.sessionStartFiredAt ?? handlerEnteredAt;
 	const cwdForTelemetry = deps.ctxCwd ?? process.cwd();

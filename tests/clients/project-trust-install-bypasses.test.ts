@@ -3,6 +3,10 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setProjectTrustState, resetProjectTrust } from "../../clients/project-trust.js";
 import { setupTestEnvironment } from "./test-utils.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 
 const { safeSpawnAsync } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(async () => ({ status: 0, stdout: "", stderr: "" })),
@@ -15,6 +19,7 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 vi.mock("../../clients/user-notify.js", () => ({ notifyUserDegradation }));
 
 beforeEach(() => {
+	resetDegradationLedger();
 	safeSpawnAsync.mockClear();
 	notifyUserDegradation.mockClear();
 });
@@ -40,6 +45,11 @@ describe("central project-trust install gate (#1334 review)", () => {
 			const formatter = { name: "npx-test", command: ["npx", "pkg", "$FILE"], extensions: [".ts"], async detect() { return true; } };
 			setProjectTrustState("untrusted");
 			expect(await formatFile(file, formatter)).toEqual({ success: true, changed: false });
+			expect(getDegradationSummary()).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ kind: "formatter-skip", count: 1 }),
+				]),
+			);
 			expect(safeSpawnAsync).not.toHaveBeenCalled();
 			setProjectTrustState("trusted");
 			await formatFile(file, formatter);
@@ -96,6 +106,11 @@ describe("central project-trust install gate (#1334 review)", () => {
 		expect(await client.ensureGrammar("tree-sitter-trust-missing.wasm")).toBe(false);
 		expect(await client.ensureGrammar("tree-sitter-trust-missing.wasm")).toBe(false);
 		expect(notifyUserDegradation).toHaveBeenCalledTimes(1);
+		expect(getDegradationSummary()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ kind: "grammar-blocked", count: 2 }),
+			]),
+		);
 		expect(fetchSpy).not.toHaveBeenCalled();
 		// #1363 delta: dedupe is generation-lazy, not permanent -- a trust
 		// TRANSITION re-arms the notification for the same grammar.

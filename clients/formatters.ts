@@ -10,6 +10,7 @@
  */
 
 import { logExtension } from "./extension-log.js";
+import { recordDegradation } from "./degradation-ledger.js";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
@@ -1338,6 +1339,11 @@ async function resolveFormatterCommand(
 		fallback[0] === "npx" &&
 		!assertInstallAllowed(`formatter npx fallback: ${formatter.name}`)
 	) {
+		recordDegradation({
+			kind: "formatter-skip",
+			subject: formatter.name,
+			reason: "npx fallback disabled because project is untrusted",
+		});
 		return SKIP_FORMATTING;
 	}
 	return fallback;

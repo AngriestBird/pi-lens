@@ -1,14 +1,26 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+const logExtension = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/extension-log.js", () => ({ logExtension }));
 import {
 	classifySpawnFailure,
+	resetSafeSpawnWindowsCommandCache,
 	safeSpawnAsync,
 } from "../../clients/safe-spawn.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 describe("safe-spawn typed failure taxonomy", () => {
+	beforeEach(() => {
+		logExtension.mockClear();
+		resetDegradationLedger();
+		resetSafeSpawnWindowsCommandCache();
+	});
 	it("distinguishes an unresolvable cwd from a missing present tool", async () => {
 		const parent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-spawn-cwd-"));
 		const missingCwd = path.join(parent, "gone");
@@ -62,6 +74,24 @@ describe("safe-spawn typed failure taxonomy", () => {
 		expect(deniedFailure.cause).toBe(denied);
 		expect(otherFailure.kind).toBe("spawn-failed");
 		expect((otherFailure.cause as NodeJS.ErrnoException).code).toBe("EBUSY");
+		expect(logExtension).toHaveBeenCalledTimes(3);
+		expect(logExtension).toHaveBeenCalledWith(
+			expect.objectContaining({
+				level: "debug",
+				metadata: { kind: "permission-denied", command: "denied", cwd: undefined },
+			}),
+		);
+		expect(getDegradationSummary()).toEqual([
+			expect.objectContaining({ kind: "spawn-failure", count: 2 }),
+		]);
+	});
+
+	it("logs only once per command and bucket while tallying each failure", async () => {
+		const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+		await classifySpawnFailure(denied, { command: "same", cwd: "/work" });
+		await classifySpawnFailure(denied, { command: "same", cwd: "/else" });
+		expect(logExtension).toHaveBeenCalledTimes(1);
+		expect(getDegradationSummary()[0].count).toBe(2);
 	});
 
 	it("exposes timeout and killed as typed process-control failures", async () => {

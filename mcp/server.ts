@@ -26,6 +26,10 @@ import { fileURLToPath } from "node:url";
 import { AstGrepClient } from "../clients/ast-grep-client.js";
 import { CacheManager } from "../clients/cache-manager.js";
 import {
+	getDegradationSummary,
+	renderDegradationLines,
+} from "../clients/degradation-ledger.js";
+import {
 	acknowledgeTurnEnd,
 	analyzeFile,
 	analyzeFileFresh,
@@ -1499,6 +1503,7 @@ async function callTool(
 		const stats = diagnosticStats();
 		const autoSession = getAutoSessionStatus();
 		const treeSitter = treeSitterRuntimeStatus();
+		const degradations = getDegradationSummary();
 		// #1272, following the #544 precedent: the Stop hook is a separate,
 		// short-lived process, so a turn-end it skipped left no trace here at all
 		// — a dead integration looked exactly like a clean turn, forever. The
@@ -1513,11 +1518,15 @@ async function callTool(
 				? `Tree-sitter: DEGRADED — WASM runtime aborted${treeSitter.abortedAt ? ` at ${treeSitter.abortedAt}` : ""}; restart this server to recover`
 				: "Tree-sitter: available",
 			`LSP: ${aliveClients} alive client(s)`,
-			...servers.map(
-				(server) =>
-					`  ${server.connected ? "✓" : "✗"} ${server.serverId} (${server.root})`,
-			),
+			...servers.flatMap((server) => [
+				`  ${server.connected ? "✓" : "✗"} ${server.serverId} (${server.root})`,
+				...server.pullFailureHistory.slice(-1).map(
+					(failure) =>
+						`    ⚠ diagnostics pull failed: ${failure.method}${failure.code !== undefined ? ` (${failure.code})` : ""} — ${failure.message}`,
+				),
+			]),
 			...renderLspBrokenStatusLines(brokenServers),
+			...renderDegradationLines(degradations),
 			last
 				? `Last dispatch: ${path.basename(last.filePath)} — ${last.totalDurationMs}ms, ${last.totalDiagnostics} diagnostic(s)`
 				: "Last dispatch: none yet",
@@ -1557,6 +1566,7 @@ async function callTool(
 			treeSitter,
 			turnEnd,
 			resourceFootprint: footprint,
+			degradations,
 		});
 	}
 

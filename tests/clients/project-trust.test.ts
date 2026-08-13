@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 
 const { logExtension } = vi.hoisted(() => ({ logExtension: vi.fn() }));
 import {
@@ -17,6 +21,7 @@ vi.mock("../../clients/extension-log.js", () => ({ logExtension }));
 
 afterEach(() => {
 	resetProjectTrust();
+	resetDegradationLedger();
 	logExtension.mockClear();
 });
 
@@ -59,6 +64,9 @@ describe("project-trust policy gates", () => {
 		setProjectTrustState("untrusted");
 		expect(assertInstallAllowed("test install")).toBe(false);
 		expect(assertInstallAllowed("test install")).toBe(false);
+		expect(getDegradationSummary()).toEqual([
+			expect.objectContaining({ kind: "trust-refusal", count: 2 }),
+		]);
 		expect(
 			logExtension.mock.calls.filter(([entry]) => entry.level === "warn"),
 		).toHaveLength(1);
