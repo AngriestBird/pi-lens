@@ -42,6 +42,25 @@ interface CatalogRule {
 
 const CATALOG_RULES: CatalogRule[] = [
 	{
+		id: "no-bare-host-path-in-win32-branch",
+		file: "no-bare-host-path-in-win32-branch.yml",
+		language: "typescript",
+		ext: "ts",
+		positive: `import * as path from "node:path";
+import { isWindowsPath } from "./path-utils.js";
+function f(filePath: string) {
+  if (isWindowsPath(filePath)) return path.dirname(filePath);
+}
+`,
+		negative: `import * as path from "node:path";
+import { isWindowsPath } from "./path-utils.js";
+function f(filePath: string) {
+  if (isWindowsPath(filePath)) return path.win32.dirname(filePath);
+  return path.dirname(filePath);
+}
+`,
+	},
+	{
 		id: "unmarshal-tag-is-dash",
 		file: "unmarshal-tag-is-dash.yml",
 		language: "go",

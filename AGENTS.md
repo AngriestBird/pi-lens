@@ -125,6 +125,11 @@ empty result, while the project ignore matcher remains authoritative.
 
 A pi coding-agent extension that runs automated checks on every file write/edit. Dispatches async parallel runners (LSP, biome, ruff, ast-grep, tree-sitter, jscpd, knip, Madge, and language-specific linters/build checks) and injects findings as context injections at turn-end and session-start.
 
+The shipped ast-grep catalog includes `no-bare-host-path-in-win32-branch`
+(#1158 shape 2). It deliberately matches only the consequence of an `if`
+guarded by `isWindowsPath` or `isFullyQualifiedWin32`; host-default path calls
+elsewhere, including the valid fallback arm of a ternary, remain allowed.
+
 ## Key source layout
 
 ```

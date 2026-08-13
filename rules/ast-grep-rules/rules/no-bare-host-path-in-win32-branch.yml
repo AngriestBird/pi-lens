@@ -1,0 +1,17 @@
+id: no-bare-host-path-in-win32-branch
+language: TypeScript
+severity: warning
+message: "Use win32 path operations inside a branch committed to Windows path semantics"
+note: |
+  A branch guarded by isWindowsPath/isFullyQualifiedWin32 has committed to
+  Windows path parsing. Host-default dirname/basename/join/relative/sep
+  follows the process OS and is wrong for a Windows-shaped path on POSIX.
+rule:
+  all:
+    - kind: if_statement
+    - has:
+        field: condition
+        regex: "\\b(isWindowsPath|isFullyQualifiedWin32)\\s*\\("
+    - has:
+        field: consequence
+        regex: "(?s)\\bpath\\.(dirname|basename|join|relative)\\s*\\(|\\bpath\\.sep\\b|(^|[^.])\\b(dirname|basename|join|relative)\\s*\\("

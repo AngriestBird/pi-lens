@@ -1,0 +1,43 @@
+id: no-bare-host-path-in-win32-branch
+valid:
+  - |
+    import * as path from "node:path";
+    import { isWindowsPath } from "./path-utils.js";
+    function f(filePath: string) {
+      if (isWindowsPath(filePath)) {
+        return path.win32.dirname(filePath);
+      }
+      return path.dirname(filePath);
+    }
+  - |
+    import * as path from "node:path";
+    import { isWindowsPath } from "./path-utils.js";
+    function f(filePath: string) {
+      return isWindowsPath(filePath)
+        ? path.win32.basename(filePath)
+        : path.basename(filePath);
+    }
+  - |
+    import { dirname } from "node:path";
+    function f(filePath: string) {
+      if (someOtherPredicate(filePath)) {
+        return dirname(filePath);
+      }
+    }
+invalid:
+  - |
+    import * as path from "node:path";
+    import { isWindowsPath } from "./path-utils.js";
+    function f(filePath: string) {
+      if (isWindowsPath(filePath)) {
+        return path.dirname(filePath);
+      }
+    }
+  - |
+    import { join, sep } from "node:path";
+    import { isFullyQualifiedWin32 } from "./path-utils.js";
+    function f(filePath: string) {
+      if (isFullyQualifiedWin32(filePath)) {
+        return join(filePath, sep);
+      }
+    }
