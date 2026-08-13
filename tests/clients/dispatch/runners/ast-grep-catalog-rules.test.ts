@@ -42,6 +42,30 @@ interface CatalogRule {
 
 const CATALOG_RULES: CatalogRule[] = [
 	{
+		id: "no-win32-isabsolute-for-qualification",
+		file: "no-win32-isabsolute-for-qualification.yml",
+		language: "typescript",
+		ext: "ts",
+		positive: `import * as path from "node:path";
+function f(filePath: string) { return path.win32.isAbsolute(filePath); }
+`,
+		negative: `import { isFullyQualified } from "./path-utils.js";
+function f(filePath: string) { return isFullyQualified(filePath); }
+`,
+	},
+	{
+		id: "no-raw-json-store-write",
+		file: "no-raw-json-store-write.yml",
+		language: "typescript",
+		ext: "ts",
+		positive: `import { writeFileSync } from "node:fs";
+function f(file: string, data: unknown) { writeFileSync(file, JSON.stringify(data)); }
+`,
+		negative: `import { writeFileAtomic } from "./atomic-write.js";
+function f(file: string, data: unknown) { writeFileAtomic(file, JSON.stringify(data)); }
+`,
+	},
+	{
 		id: "no-bare-host-path-in-win32-branch",
 		file: "no-bare-host-path-in-win32-branch.yml",
 		language: "typescript",
