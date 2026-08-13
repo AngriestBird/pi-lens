@@ -597,9 +597,9 @@ function writeSnapshotBodyOnMainThread(
 	}
 }
 
-async function handleSnapshotWorkerResult(
+function handleSnapshotWorkerResult(
 	result: ProjectSnapshotPersistWorkerResult,
-): Promise<void> {
+): void {
 	const pending = _snapshotWorkerRequests.get(result.id);
 	if (!pending) {
 		fs.rm(result.stagePath, { force: true }, () => {});
@@ -617,7 +617,6 @@ async function handleSnapshotWorkerResult(
 		writeSnapshotBodyOnMainThread(pending, result.error ?? "invalid worker result");
 		return;
 	}
-	if (_snapshotPromotionSeamForTests) await _snapshotPromotionSeamForTests();
 	// Generation gate: a newer save already superseded this one — discard the
 	// stale stage file rather than promote it over the fresher body.
 	if (
@@ -692,7 +691,19 @@ function getSnapshotPersistWorker(): Worker | undefined {
 			return undefined;
 		}
 		const worker = new Worker(workerPath);
-		worker.on("message", handleSnapshotWorkerResult);
+		// The ForTests promotion seam wraps ONLY when set — the production path
+		// binds the sync handler directly, so scheduling is byte-identical when
+		// no test seam is installed (the async-handler variant of this shifted
+		// promotion timing under full-suite load and flaked the round-trip test).
+		worker.on("message", (result: ProjectSnapshotPersistWorkerResult) => {
+			if (_snapshotPromotionSeamForTests) {
+				void _snapshotPromotionSeamForTests().then(() =>
+					handleSnapshotWorkerResult(result),
+				);
+				return;
+			}
+			handleSnapshotWorkerResult(result);
+		});
 		worker.on("error", (err: Error) => handleSnapshotWorkerDeath(err.message));
 		worker.on("exit", (code) => {
 			if (_snapshotPersistWorker === worker) _snapshotPersistWorker = undefined;
