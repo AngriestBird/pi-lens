@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { compactRenderResult } from "../../tools/render-compact.js";
 import {
 	buildCompactToolLine,
@@ -142,15 +142,16 @@ describe("wrapToolForCompactLine — representative tools", () => {
 		],
 	] as const) {
 		it(`${label}: collapsed result becomes a single combined line reusing its own summary`, () => {
-			const wrapped = wrapToolForCompactLine(tool as never);
+			const wrapped = wrapToolForCompactLine(tool as unknown as ToolDefinition<any, any, any>);
 			const theme = makeFakeTheme();
 			const ctx = fakeContext();
 
 			// Call row is blanked once a settled result exists.
-			const callComponent = wrapped.renderCall?.({}, theme, {
-				...ctx,
-				isPartial: false,
-			} as never);
+			const callComponent = wrapped.renderCall?.(
+				{},
+				theme,
+				Object.assign({}, ctx as object, { isPartial: false }) as never,
+			);
 			expect(callComponent?.render(80)).toEqual([]);
 
 			const resultComponent = wrapped.renderResult?.(
@@ -168,7 +169,7 @@ describe("wrapToolForCompactLine — representative tools", () => {
 	}
 
 	it("expanded view falls through to the tool's own renderResult (full output preserved)", () => {
-		const wrapped = wrapToolForCompactLine(diagnosticsTool as never);
+		const wrapped = wrapToolForCompactLine(diagnosticsTool as unknown as ToolDefinition<any, any, any>);
 		const theme = makeFakeTheme();
 		const ctx = fakeContext({ expanded: true });
 		const result = {
@@ -187,7 +188,7 @@ describe("wrapToolForCompactLine — representative tools", () => {
 	});
 
 	it("expanded call row shows the tool name (call row is only blanked when collapsed)", () => {
-		const wrapped = wrapToolForCompactLine(diagnosticsTool as never);
+		const wrapped = wrapToolForCompactLine(diagnosticsTool as unknown as ToolDefinition<any, any, any>);
 		const theme = makeFakeTheme();
 		const component = wrapped.renderCall?.(
 			{},
@@ -199,7 +200,7 @@ describe("wrapToolForCompactLine — representative tools", () => {
 	});
 
 	it("call row stays visible (not blanked) while the tool is still running (isPartial)", () => {
-		const wrapped = wrapToolForCompactLine(diagnosticsTool as never);
+		const wrapped = wrapToolForCompactLine(diagnosticsTool as unknown as ToolDefinition<any, any, any>);
 		const theme = makeFakeTheme();
 		const component = wrapped.renderCall?.(
 			{},
@@ -211,7 +212,7 @@ describe("wrapToolForCompactLine — representative tools", () => {
 	});
 
 	it("errors flow through with the error glyph and error token", () => {
-		const wrapped = wrapToolForCompactLine(diagnosticsTool as never);
+		const wrapped = wrapToolForCompactLine(diagnosticsTool as unknown as ToolDefinition<any, any, any>);
 		const theme = makeFakeTheme();
 		const result = { content: [{ type: "text", text: "boom" }], isError: true, details: {} };
 		const component = wrapped.renderResult?.(
@@ -234,7 +235,7 @@ describe("wrapToolForCompactLine — representative tools", () => {
 				return { content: [] };
 			},
 		};
-		const wrapped = wrapToolForCompactLine(bare as never);
+		const wrapped = wrapToolForCompactLine(bare as unknown as ToolDefinition<any, any, any>);
 		expect(wrapped).toBe(bare);
 		expect(wrapped.renderCall).toBeUndefined();
 		expect(wrapped.renderResult).toBeUndefined();
@@ -268,7 +269,7 @@ describe("wrapToolForCompactLine — representative tools", () => {
 				throw new Error("boom");
 			},
 		};
-		const wrapped = wrapToolForCompactLine(throwing as never);
+		const wrapped = wrapToolForCompactLine(throwing as unknown as ToolDefinition<any, any, any>);
 		const theme = makeFakeTheme();
 		const result = { content: [{ type: "text", text: "raw first line\nsecond" }] };
 		const component = wrapped.renderResult?.(
