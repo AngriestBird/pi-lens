@@ -19,16 +19,14 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { minimatch } from "./deps/minimatch.js";
 
 /**
- * Detect if a path is a Windows path (has drive letter or UNC prefix), by
- * SHAPE — true for a drive-letter/UNC-looking string regardless of the
- * running OS. Exported (refs #1152) so shape-aware callers outside this
- * module (e.g. `file-role.ts`'s `detectFileRole`) can branch to
- * `path.win32.dirname`/`basename` for a Windows-shaped path even when
- * `process.platform !== "win32"`, instead of the platform-default
- * `dirname`/`basename` silently misparsing it (the #1150 class).
+ * Detect a positively Windows-shaped path, regardless of the host OS.
+ *
+ * A backslash anywhere in a path is not enough: it is a legal character in a
+ * POSIX filename. Only a drive-letter prefix (`X:`), a UNC root (`\\`), or a
+ * rooted backslash at position zero (`\`) selects Windows parsing.
  */
 export function isWindowsPath(filePath: string): boolean {
-	return /^[A-Za-z]:/.test(filePath) || filePath.startsWith("\\\\");
+	return /^[A-Za-z]:/.test(filePath) || filePath.startsWith("\\");
 }
 
 /**
@@ -48,14 +46,7 @@ export function toPosix(filePath: string): string {
 	return filePath.replace(/\\/g, "/");
 }
 
-/**
- * Return whether `filePath` is fully qualified under Windows semantics.
- *
- * A drive-relative path (`C:foo`) and a rooted-relative path (`\\foo`) are
- * not self-contained: each still depends on Windows ambient drive state.
- * Drive-absolute paths (`C:\\foo`) and UNC paths (`\\\\server\\share`) are
- * fully qualified.
- */
+/** Return whether `filePath` is fully qualified under Windows semantics. */
 export function isFullyQualifiedWin32(filePath: string): boolean {
 	return win32.isAbsolute(filePath) && win32.parse(filePath).root.length > 1;
 }
