@@ -10,15 +10,36 @@ export const INVALID_CLOSE_KEYWORD_MESSAGE =
 	'Invalid close-keyword syntax: GitHub only applies the first issue in a comma-separated close list. Use one close keyword per issue, for example "Closes #123. Closes #456." (not "Closes #123, #456").';
 
 /**
+ * Remove markdown regions where a close keyword is quotation, not intent
+ * (#1355 review): fenced code blocks, inline code spans, and blockquote
+ * lines. A PR body QUOTING the bad form as documentation must not fail its
+ * own check -- GitHub itself still parses keywords in these regions, so this
+ * is deliberately stricter than the platform: quoted forms are exempt from
+ * OUR lint while remaining the author's responsibility platform-side.
+ */
+export function stripNonSemanticMarkdown(body = "") {
+	return body
+		.replace(/```[\s\S]*?```/g, "")
+		.replace(/`[^`\n]*`/g, "")
+		.split("\n")
+		.filter((line) => !/^\s*>/.test(line))
+		.join("\n");
+}
+
+/**
  * Parse same-repository issues named by GitHub close keywords.
  * Cross-repository references (owner/repo#123) intentionally do not match.
+ * The body is scanned AFTER stripNonSemanticMarkdown so quoted examples in
+ * code fences/blockquotes are not linted as real syntax.
  */
 export function parseCloseKeywords(body = "") {
+	const scanned = stripNonSemanticMarkdown(body);
 	const issues = [];
 	const commaLists = [];
+	const offendingLines = [];
 
-	for (const match of body.matchAll(CLOSE_KEYWORD)) {
-		const rest = body.slice(match.index + match[0].length);
+	for (const match of scanned.matchAll(CLOSE_KEYWORD)) {
+		const rest = scanned.slice(match.index + match[0].length);
 		CLOSE_ISSUE.lastIndex = 0;
 		const issue = CLOSE_ISSUE.exec(rest);
 		if (!issue) continue;
@@ -29,10 +50,15 @@ export function parseCloseKeywords(body = "") {
 		COMMA_ISSUE.lastIndex = 0;
 		if (COMMA_ISSUE.exec(rest.slice(issue[0].length))) {
 			commaLists.push(number);
+			const lineStart = scanned.lastIndexOf("\n", match.index) + 1;
+			const lineEnd = scanned.indexOf("\n", match.index);
+			offendingLines.push(
+				scanned.slice(lineStart, lineEnd === -1 ? undefined : lineEnd).trim(),
+			);
 		}
 	}
 
-	return { issues, commaLists };
+	return { issues, commaLists, offendingLines };
 }
 
 export function lintCloseKeywords(body = "") {
@@ -53,6 +79,9 @@ function lintPullRequest() {
 	const result = lintCloseKeywords(eventPayload().pull_request?.body ?? "");
 	if (!result.valid) {
 		console.error(INVALID_CLOSE_KEYWORD_MESSAGE);
+		for (const line of result.offendingLines) {
+			console.error(`  offending line: ${line}`);
+		}
 		process.exitCode = 1;
 		return;
 	}
@@ -86,11 +115,27 @@ function verifyMergedPullRequest() {
 	}
 
 	const details = unresolved.map(({ number, state }) => `#${number} (${state})`).join(", ");
-	const message = `Post-merge close verification found issue(s) that were not closed: ${details}. GitHub only applies the first issue in a comma-separated close list; use one close keyword per issue (for example, "Closes #123. Closes #456.").`;
+	const marker = "<!-- close-keyword-verifier -->";
+	const message = `${marker}
+Post-merge close verification found issue(s) that were not closed: ${details}. GitHub only applies the first issue in a comma-separated close list; use one close keyword per issue (for example, "Closes #123. Closes #456.").`;
 	console.error(message);
-	execFileSync("gh", ["pr", "comment", String(pullRequest.number), "--repo", repository, "--body", message], {
-		stdio: "inherit",
-	});
+	// Idempotence (#1355 review): a rerun must not stack duplicate comments.
+	let alreadyCommented = false;
+	try {
+		const existing = execFileSync(
+			"gh",
+			["pr", "view", String(pullRequest.number), "--repo", repository, "--json", "comments", "--jq", ".comments[].body"],
+			{ encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+		);
+		alreadyCommented = existing.includes(marker);
+	} catch {
+		// listing failed -- fall through and comment rather than stay silent
+	}
+	if (!alreadyCommented) {
+		execFileSync("gh", ["pr", "comment", String(pullRequest.number), "--repo", repository, "--body", message], {
+			stdio: "inherit",
+		});
+	}
 	process.exitCode = 1;
 }
 
