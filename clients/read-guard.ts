@@ -153,14 +153,23 @@ const READ_HASH_MAX_LINES = Math.max(
 	) || 3000,
 );
 
+/**
+ * Content bindings are defense in depth on a read-adjacent hot path. Cap the
+ * synchronous disk read so bridge registration never hashes an unbounded file.
+ */
+const READ_BINDING_MAX_BYTES = 4 * 1024 * 1024;
+
 export function captureReadContentBinding(
 	filePath: string,
 	offset: number,
 	limit: number,
 ): ReadContentBinding | undefined {
 	try {
+		if (fs.statSync(filePath).size > READ_BINDING_MAX_BYTES) return undefined;
 		const content = fs.readFileSync(filePath, "utf-8");
-		const lines = splitLines(content);
+		// Allocate at most the classification prefix first. For range bindings,
+		// splitting then stops at the requested range end rather than the EOF.
+		const lines = splitLinesThrough(content, READ_HASH_MAX_LINES + 1);
 		if (lines.length <= READ_HASH_MAX_LINES) {
 			return {
 				hash: hashDiagnosticContent(content),
@@ -172,7 +181,11 @@ export function captureReadContentBinding(
 		const scopedOffset = Math.max(1, offset);
 		const scopedLimit = Math.min(Math.max(0, limit), READ_HASH_MAX_LINES);
 		if (scopedLimit === 0) return undefined;
-		const scopedContent = lines
+		const rangeLines = splitLinesThrough(
+			content,
+			scopedOffset - 1 + scopedLimit,
+		);
+		const scopedContent = rangeLines
 			.slice(scopedOffset - 1, scopedOffset - 1 + scopedLimit)
 			.join("\n");
 		return {
@@ -186,7 +199,7 @@ export function captureReadContentBinding(
 	}
 }
 
-function currentContentMatchesBinding(
+export function _currentContentMatchesBindingForTests(
 	filePath: string,
 	binding: ReadContentBinding,
 ): boolean {
@@ -202,6 +215,8 @@ function currentContentMatchesBinding(
 		return false;
 	}
 }
+
+const currentContentMatchesBinding = _currentContentMatchesBindingForTests;
 
 // Adaptive relocation window (findRelocation). A globally-unique hash-sequence
 // match always wins; when the content is duplicated elsewhere, we fall back to
@@ -233,6 +248,29 @@ const RELOCATION_WINDOW_MAX = Math.max(
 
 function splitLines(text: string): string[] {
 	return text.split(/\r?\n/);
+}
+
+/** `splitLines` semantics, but without scanning/allocating beyond `maxLines`. */
+function splitLinesThrough(text: string, maxLines: number): string[] {
+	if (maxLines <= 0) return [];
+	const lines: string[] = [];
+	let start = 0;
+	while (lines.length < maxLines) {
+		const newline = text.indexOf("\n", start);
+		if (newline === -1) {
+			lines.push(text.slice(start));
+			break;
+		}
+		const end =
+			newline > start && text[newline - 1] === "\r" ? newline - 1 : newline;
+		lines.push(text.slice(start, end));
+		start = newline + 1;
+		if (start === text.length && lines.length < maxLines) {
+			lines.push("");
+			break;
+		}
+	}
+	return lines;
 }
 
 export function lineContentHash(line: string): string {

@@ -35,18 +35,22 @@
  * - `beforeEach` resets that mutable state — it never touches the global.
  */
 
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ReadGuard } from "../../clients/read-guard.js";
-import type { ReadContentBinding } from "../../clients/read-guard.js";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	READ_BRIDGE_KEY,
-	registerReadBridge,
 	type ReadBridge,
 	type ReadBridgeEntry,
+	registerReadBridge,
 } from "../../clients/read-bridge.js";
+import type { ReadContentBinding } from "../../clients/read-guard.js";
+import {
+	_currentContentMatchesBindingForTests,
+	captureReadContentBinding,
+	ReadGuard,
+} from "../../clients/read-guard.js";
 
 vi.mock("../../clients/read-guard-logger.js", () => ({
 	logReadGuardEvent: vi.fn(),
@@ -368,6 +372,86 @@ describe("read-bridge", () => {
 	// ── Full read-then-edit authorization path ───────────────────────────────
 
 	describe("read-then-edit authorization path", () => {
+		it("rejects a same-length mutation through the content-binding verifier itself", () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-lens-read-binding-"));
+			try {
+				const filePath = join(dir, "binding.ts");
+				writeFileSync(filePath, "const value = 1;\n", "utf-8");
+				const binding = captureReadContentBinding(filePath, 1, 1);
+				expect(binding).toBeDefined();
+				writeFileSync(filePath, "const value = 2;\n", "utf-8");
+				expect(_currentContentMatchesBindingForTests(filePath, binding!)).toBe(
+					false,
+				);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it("range bindings cap at 3,000 lines with inclusive boundaries", () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-lens-read-binding-range-"));
+			try {
+				const filePath = join(dir, "large.ts");
+				const original = Array.from(
+					{ length: 3_101 },
+					(_, i) => `line ${i + 1}`,
+				);
+				writeFileSync(filePath, original.join("\n"), "utf-8");
+				const binding = captureReadContentBinding(filePath, 1, 3_101);
+				expect(binding).toMatchObject({
+					fullFile: false,
+					offset: 1,
+					limit: 3_000,
+				});
+
+				for (const lineNumber of [1, 3_000]) {
+					const mutated = [...original];
+					mutated[lineNumber - 1] = `MUTATED ${lineNumber}`;
+					writeFileSync(filePath, mutated.join("\n"), "utf-8");
+					expect(
+						_currentContentMatchesBindingForTests(filePath, binding!),
+					).toBe(false);
+				}
+
+				const outside = [...original];
+				outside[3_000] = "MUTATED 3001";
+				writeFileSync(filePath, outside.join("\n"), "utf-8");
+				expect(_currentContentMatchesBindingForTests(filePath, binding!)).toBe(
+					true,
+				);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it("range binding hashes are coherent across LF and CRLF", () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-lens-read-binding-eol-"));
+			try {
+				const filePath = join(dir, "large.ts");
+				const lines = Array.from({ length: 3_001 }, (_, i) => `line ${i + 1}`);
+				writeFileSync(filePath, lines.join("\r\n"), "utf-8");
+				const binding = captureReadContentBinding(filePath, 2, 10);
+				expect(binding?.fullFile).toBe(false);
+				writeFileSync(filePath, lines.join("\n"), "utf-8");
+				expect(_currentContentMatchesBindingForTests(filePath, binding!)).toBe(
+					true,
+				);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it("skips binding capture above the 4 MiB hot-path ceiling", () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-lens-read-binding-size-"));
+			try {
+				const filePath = join(dir, "oversized.ts");
+				writeFileSync(filePath, "x".repeat(4 * 1024 * 1024 + 1), "utf-8");
+				expect(captureReadContentBinding(filePath, 1, 1)).toBeUndefined();
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
 		it("allows verification when bridge-bound disk content is unchanged", () => {
 			const dir = mkdtempSync(join(tmpdir(), "pi-lens-read-bridge-"));
 			try {
@@ -402,6 +486,12 @@ describe("read-bridge", () => {
 						requestedLimit: undefined,
 					}),
 				);
+				// Isolate the binding path: FileTime must report unchanged so it cannot
+				// mask a broken hash comparison with its own stale-file rejection.
+				const fileTime = (
+					guard as unknown as { fileTime: { hasChanged: () => boolean } }
+				).fileTime;
+				fileTime.hasChanged = vi.fn(() => false);
 				writeFileSync(filePath, "const value = 2;\n", "utf-8");
 				const verdict = guard.checkEdit(filePath, [1, 1]);
 				expect(verdict.action).toBe("block");
