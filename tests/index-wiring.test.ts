@@ -235,6 +235,84 @@ describe("index.ts extension wiring", () => {
 			}
 		});
 
+		// #1327: opt-in compact one-line tool rendering, gated by
+		// `lens-compact-tool-line` / `ui.compactToolLine`. Off by default — the
+		// off path must register the ORIGINAL tool definitions untouched (no
+		// renderCall added to tools that never had one; renderResult is the
+		// pre-existing #345 per-tool summarizer, not the #1327 wrapper).
+		describe("compact tool line (#1327)", () => {
+			it("flag off (default): no renderCall is added; renderResult is the tool's own, unwrapped", () => {
+				const pi = createPiMock();
+				extension(pi.asExtensionAPI());
+
+				for (const t of ["lens_diagnostics", "lsp_diagnostics", "module_report"]) {
+					const tool = pi.getTool(t) as
+						| { renderCall?: unknown; renderResult?: unknown }
+						| undefined;
+					expect(tool, `tool: ${t}`).toBeDefined();
+					expect(tool?.renderCall, `${t}.renderCall should be absent when off`).toBeUndefined();
+					expect(tool?.renderResult, `${t}.renderResult should still exist`).toBeTypeOf(
+						"function",
+					);
+				}
+			});
+
+			it("flag on: wraps tools that have renderResult with a compact renderCall + one-line renderResult", async () => {
+				const pi = createPiMock({ "lens-compact-tool-line": true });
+				extension(pi.asExtensionAPI());
+
+				const tool = pi.getTool("lens_diagnostics") as {
+					renderCall?: (...a: unknown[]) => { render: (w: number) => string[] };
+					renderResult?: (...a: unknown[]) => { render: (w: number) => string[] };
+				};
+				expect(tool.renderCall).toBeTypeOf("function");
+				expect(tool.renderResult).toBeTypeOf("function");
+
+				const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+				const ctx = {
+					args: { mode: "all" },
+					toolCallId: "x",
+					invalidate: () => {},
+					lastComponent: undefined,
+					state: {},
+					cwd: "/repo",
+					executionStarted: true,
+					argsComplete: true,
+					isPartial: false,
+					expanded: false,
+					showImages: false,
+					isError: false,
+				};
+
+				// Call row blanks out once a settled result exists (collapsed).
+				const callComponent = tool.renderCall?.({ mode: "all" }, theme, ctx);
+				expect(callComponent?.render(80)).toEqual([]);
+
+				const resultComponent = tool.renderResult?.(
+					{ content: [], details: { mode: "all", totalBlocking: 0, filesWithIssues: 0 } },
+					{ expanded: false, isPartial: false },
+					theme,
+					ctx,
+				);
+				const lines = resultComponent?.render(200) ?? [];
+				expect(lines).toHaveLength(1);
+				expect(lines[0]).toContain("lens_diagnostics");
+			});
+
+			it("registers the lens-compact-tool-line flag from the registry (name + description + default false)", () => {
+				const pi = createPiMock();
+				extension(pi.asExtensionAPI());
+
+				const spec = LENS_FLAGS.find((s) => s.name === "lens-compact-tool-line");
+				expect(spec).toBeDefined();
+				expect(pi.flags.get("lens-compact-tool-line")).toEqual({
+					description: spec?.description,
+					type: "boolean",
+					default: false,
+				});
+			});
+		});
+
 		// #205: resources_discover must point at the real skills/ dir, which lives
 		// at the package root in BOTH the source and the compiled dist/ layouts.
 		// The previous module-relative join landed on dist/skills/ (nonexistent) so
