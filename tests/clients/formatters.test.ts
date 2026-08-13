@@ -196,6 +196,36 @@ describe("resolveCommand — .venv", () => {
 		expect(cmd).toContain(filePath);
 	});
 
+	// `ruff format` rejects --indent-style/--indent-width ("unexpected argument",
+	// exit 2). Because ruff is not strictExitCode, formatFile reported that as a
+	// clean unchanged file — every unconfigured Python file silently went
+	// unformatted. Style must be pinned via inline TOML overrides instead.
+	it("ruff: pins detected indentation via --config, never bare --indent-* flags", async () => {
+		const binPath = venvBin(tmpDir, "ruff");
+		makeFakeExe(binPath);
+		const filePath = fileIn(tmpDir, "main.py");
+		fs.writeFileSync(filePath, "def f():\n    return 1\n");
+
+		const cmd = await ruffFormatter.resolveCommand!(filePath, tmpDir);
+
+		expect(cmd).not.toBeNull();
+		expect(cmd).not.toContain("--indent-style");
+		expect(cmd).not.toContain("--indent-width");
+		expect(cmd).toContain("indent-width=4");
+		expect(cmd).toContain("format.indent-style='space'");
+	});
+
+	it("ruff: pins detected tab indentation via --config", async () => {
+		const binPath = venvBin(tmpDir, "ruff");
+		makeFakeExe(binPath);
+		const filePath = fileIn(tmpDir, "main.py");
+		fs.writeFileSync(filePath, "def f():\n\treturn 1\n");
+
+		const cmd = await ruffFormatter.resolveCommand!(filePath, tmpDir);
+
+		expect(cmd).toContain("format.indent-style='tab'");
+	});
+
 	it("ruff: skips when indentation is undetectable and no config exists", async () => {
 		const binPath = venvBin(tmpDir, "ruff");
 		makeFakeExe(binPath);
