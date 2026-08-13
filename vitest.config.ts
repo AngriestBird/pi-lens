@@ -161,6 +161,9 @@ const timingSensitiveInclude = [
 	"tests/clients/pipeline-snapshot-occupancy.test.ts",
 	"tests/clients/word-index-async-build.test.ts",
 	"tests/clients/word-index-cooperative-occupancy.test.ts",
+	//   - cooperative-budget: #1215 acceptance screens — sampler-based
+	//     occupancy at 800-item scale plus the abort-latency bound.
+	"tests/clients/cooperative-budget.test.ts",
 	// #1137: the shared walk engine's directory-read occupancy screen. Same
 	// sampler, and its fail-then-pass pair injects a busy-wait stall, so it
 	// must not compete with a fork storm for CPU turns.
