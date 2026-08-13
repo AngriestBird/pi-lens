@@ -46,14 +46,7 @@ export function toPosix(filePath: string): string {
 	return filePath.replace(/\\/g, "/");
 }
 
-/**
- * Return whether `filePath` is fully qualified under Windows semantics.
- *
- * A drive-relative path (`C:foo`) and a rooted-relative path (`\\foo`) are
- * not self-contained: each still depends on Windows ambient drive state.
- * Drive-absolute paths (`C:\\foo`) and UNC paths (`\\\\server\\share`) are
- * fully qualified.
- */
+/** Return whether `filePath` is fully qualified under Windows semantics. */
 export function isFullyQualifiedWin32(filePath: string): boolean {
 	return win32.isAbsolute(filePath) && win32.parse(filePath).root.length > 1;
 }
