@@ -5,6 +5,12 @@ export interface CooperativeDeadline {
 	reset(): void;
 }
 
+export interface CooperativeWorkOptions {
+	budgetMs: number;
+	shouldContinue?: () => boolean;
+	abortMessage?: string;
+}
+
 export function createDeadline(budgetMs: number): CooperativeDeadline {
 	const boundedBudget = Math.max(0, budgetMs);
 	let startedAt = performance.now();
@@ -28,18 +34,19 @@ export async function yieldIfOverBudget(
 export async function forEachCooperatively<T>(
 	items: Iterable<T>,
 	fn: (item: T, index: number) => void | Promise<void>,
-	options: {
-		budgetMs: number;
-		shouldContinue?: () => boolean;
-		abortMessage?: string;
-	},
+	options: CooperativeWorkOptions,
 ): Promise<void> {
 	const deadline = createDeadline(options.budgetMs);
-	let index = 0;
-	for (const item of items) {
+	const assertContinuing = (): void => {
 		if (options.shouldContinue?.() === false) {
 			throw new Error(options.abortMessage ?? "cooperative work superseded");
 		}
+	};
+	let index = 0;
+	for (const item of items) {
+		// Check before each unit so already-superseded work does not start another
+		// unit; the post-yield check below makes the *latency* bound time-based.
+		assertContinuing();
 		const result = fn(item, index++);
 		if (
 			result !== undefined &&
@@ -48,9 +55,7 @@ export async function forEachCooperatively<T>(
 			await result;
 		}
 		if (deadline.expired() && (await yieldIfOverBudget(deadline))) {
-			if (options.shouldContinue?.() === false) {
-				throw new Error(options.abortMessage ?? "cooperative work superseded");
-			}
+			assertContinuing();
 		}
 	}
 }
