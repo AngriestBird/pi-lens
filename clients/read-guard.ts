@@ -12,6 +12,7 @@
 
 import * as fs from "node:fs";
 import { createFileTime, type FileTime } from "./file-time.js";
+import { hashDiagnosticContent } from "./lsp/diagnostic-binding.js";
 import { normalizeFilePath } from "./path-utils.js";
 import { logReadGuardEvent } from "./read-guard-logger.js";
 
@@ -34,9 +35,23 @@ export interface ReadRecord {
 	};
 	/** 1-indexed line → content hash captured at read time, used to ignore no-op mtime staleness. */
 	lineHashes?: Record<number, string>;
+	contentBinding?: ReadContentBinding;
 	turnIndex: number;
 	writeIndex: number;
 	timestamp: number;
+	/**
+	 * Provenance tag. Absent (undefined) = recorded by the normal internal
+	 * tool-call path. `"bridge:<consumer>"` = recorded via the cross-extension
+	 * read-recording bridge with the given consumer identifier.
+	 */
+	source?: string;
+}
+
+export interface ReadContentBinding {
+	hash: string;
+	fullFile: boolean;
+	offset: number;
+	limit: number;
 }
 
 export interface EditRecord {
@@ -138,6 +153,71 @@ const READ_HASH_MAX_LINES = Math.max(
 	) || 3000,
 );
 
+/**
+ * Content bindings are defense in depth on a read-adjacent hot path. Cap the
+ * synchronous disk read so bridge registration never hashes an unbounded file.
+ */
+const READ_BINDING_MAX_BYTES = 4 * 1024 * 1024;
+
+export function captureReadContentBinding(
+	filePath: string,
+	offset: number,
+	limit: number,
+): ReadContentBinding | undefined {
+	try {
+		if (fs.statSync(filePath).size > READ_BINDING_MAX_BYTES) return undefined;
+		const content = fs.readFileSync(filePath, "utf-8");
+		// Allocate at most the classification prefix first. For range bindings,
+		// splitting then stops at the requested range end rather than the EOF.
+		const lines = splitLinesThrough(content, READ_HASH_MAX_LINES + 1);
+		if (lines.length <= READ_HASH_MAX_LINES) {
+			return {
+				hash: hashDiagnosticContent(content),
+				fullFile: true,
+				offset: 1,
+				limit: lines.length,
+			};
+		}
+		const scopedOffset = Math.max(1, offset);
+		const scopedLimit = Math.min(Math.max(0, limit), READ_HASH_MAX_LINES);
+		if (scopedLimit === 0) return undefined;
+		const rangeLines = splitLinesThrough(
+			content,
+			scopedOffset - 1 + scopedLimit,
+		);
+		const scopedContent = rangeLines
+			.slice(scopedOffset - 1, scopedOffset - 1 + scopedLimit)
+			.join("\n");
+		return {
+			hash: hashDiagnosticContent(scopedContent),
+			fullFile: false,
+			offset: scopedOffset,
+			limit: scopedLimit,
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+export function _currentContentMatchesBindingForTests(
+	filePath: string,
+	binding: ReadContentBinding,
+): boolean {
+	try {
+		const content = fs.readFileSync(filePath, "utf-8");
+		const boundContent = binding.fullFile
+			? content
+			: splitLines(content)
+					.slice(binding.offset - 1, binding.offset - 1 + binding.limit)
+					.join("\n");
+		return hashDiagnosticContent(boundContent) === binding.hash;
+	} catch {
+		return false;
+	}
+}
+
+const currentContentMatchesBinding = _currentContentMatchesBindingForTests;
+
 // Adaptive relocation window (findRelocation). A globally-unique hash-sequence
 // match always wins; when the content is duplicated elsewhere, we fall back to
 // a match that is unique WITHIN this window of the original position. The window
@@ -168,6 +248,29 @@ const RELOCATION_WINDOW_MAX = Math.max(
 
 function splitLines(text: string): string[] {
 	return text.split(/\r?\n/);
+}
+
+/** `splitLines` semantics, but without scanning/allocating beyond `maxLines`. */
+function splitLinesThrough(text: string, maxLines: number): string[] {
+	if (maxLines <= 0) return [];
+	const lines: string[] = [];
+	let start = 0;
+	while (lines.length < maxLines) {
+		const newline = text.indexOf("\n", start);
+		if (newline === -1) {
+			lines.push(text.slice(start));
+			break;
+		}
+		const end =
+			newline > start && text[newline - 1] === "\r" ? newline - 1 : newline;
+		lines.push(text.slice(start, end));
+		start = newline + 1;
+		if (start === text.length && lines.length < maxLines) {
+			lines.push("");
+			break;
+		}
+	}
+	return lines;
 }
 
 export function lineContentHash(line: string): string {
@@ -352,6 +455,9 @@ export class ReadGuard {
 				writeIndex: storedRecord.writeIndex,
 				readCountForFile: arr.length,
 				hashLineCount: Object.keys(storedRecord.lineHashes ?? {}).length,
+				...(storedRecord.source !== undefined && {
+					source: storedRecord.source,
+				}),
 			},
 		});
 
@@ -466,6 +572,27 @@ export class ReadGuard {
 			return verdict;
 		}
 
+		const lastBoundRead = [...fileReads]
+			.reverse()
+			.find((read) => read.contentBinding !== undefined);
+		if (
+			lastBoundRead?.contentBinding &&
+			!currentContentMatchesBinding(filePath, lastBoundRead.contentBinding)
+		) {
+			const verdict = this.blockOrWarn(
+				"file-modified",
+				`🔄 RETRYABLE — File modified since read\n\nYou last read \`${filePath}\` at ${new Date(lastBoundRead.timestamp).toISOString()}.\nThe file content no longer matches the bridge-recorded read.\n\nYour mental model is out of sync with the actual file content.\nTo proceed:\n  1. Re-read the file: \`read path="${filePath}"\``,
+				undefined,
+				effectiveMode,
+			);
+			this.recordVerdict(filePath, "edit", touchedLines, verdict, {
+				reasonKind: "file_modified",
+				lastReadTimestamp: lastBoundRead.timestamp,
+				contentBindingMismatch: true,
+			});
+			return verdict;
+		}
+
 		// 2. FileTime check (actual staleness)
 		let ignoredOwnEditStaleness = false;
 		let ignoredHashStaleness = false;
@@ -525,7 +652,9 @@ export class ReadGuard {
 				// If oldText was resolved (content-verified), the model demonstrably
 				// knew the content it's replacing — line drift from prior edits in
 				// the session is the likely cause. Downgrade to warn rather than block.
-				const outOfRangeMode = options?.oldTextResolved ? "warn" : effectiveMode;
+				const outOfRangeMode = options?.oldTextResolved
+					? "warn"
+					: effectiveMode;
 				const verdict = this.blockOrWarn(
 					"out-of-range",
 					`🔄 RETRYABLE — Edit outside read range\n\nYou read \`${filePath}\` lines ${lastRead.effectiveOffset}-${lastReadEnd}${lastRead.enclosingSymbol ? ` (${lastRead.enclosingSymbol.kind} \`${lastRead.enclosingSymbol.name}\`)` : ""}, but your edit touches lines ${editStart}-${editEnd}.\n\nRead the relevant section first, then retry the edit:\n  \`read path="${filePath}" offset=${Math.max(1, editStart - 5)} limit=${Math.min(30, editEnd - editStart + 10)}\``,
@@ -665,7 +794,11 @@ export class ReadGuard {
 		const creation = this.pendingCreations.get(filePath);
 		if (creation) {
 			this.pendingCreations.delete(filePath);
-			this.injectCreationRead(filePath, creation.turnIndex, creation.writeIndex);
+			this.injectCreationRead(
+				filePath,
+				creation.turnIndex,
+				creation.writeIndex,
+			);
 		}
 	}
 
