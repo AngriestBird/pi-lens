@@ -15,8 +15,6 @@
  *   "function $NAME($$$PARAMS) { $BODY }" matches function declarations
  */
 
-import { logTreeSitterDiagnostic } from "./tree-sitter-logger.js";
-import { notifyUserDegradation } from "./user-notify.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -30,7 +28,12 @@ import {
 	LANGUAGE_TO_GRAMMAR,
 } from "./grammar-source.js";
 import { resolvePackagePath } from "./package-root.js";
-import { assertInstallAllowed } from "./project-trust.js";
+import {
+	assertInstallAllowed,
+	onProjectTrustTransition,
+} from "./project-trust.js";
+import { logTreeSitterDiagnostic } from "./tree-sitter-logger.js";
+import { notifyUserDegradation } from "./user-notify.js";
 
 const _require = createRequire(import.meta.url);
 
@@ -172,6 +175,7 @@ export class TreeSitterClient {
 	private grammarsDir: string;
 	/** In-flight/settled lazy grammar fetches, keyed by wasm filename. */
 	private grammarEnsurePromises = new Map<string, Promise<boolean>>();
+	private trustBlockedGrammarNotifications = new Set<string>();
 	// biome-ignore lint/suspicious/noExplicitAny: Optional dependency loaded dynamically
 	private ParserClass: any = null;
 	// biome-ignore lint/suspicious/noExplicitAny: Language loader from module
@@ -192,6 +196,7 @@ export class TreeSitterClient {
 	private wasmAborted = false;
 
 	constructor(verbose = false, onWasmAbort?: () => void) {
+		onProjectTrustTransition(() => this.trustBlockedGrammarNotifications.clear());
 		this.grammarsDir = this.findGrammarsDir();
 		this.verbose = verbose;
 		this.onWasmAbort = onWasmAbort;
@@ -476,7 +481,10 @@ export class TreeSitterClient {
 				message: unavailable,
 				metadata: { grammarFile, outcome: "trust-gated" },
 			});
-			notifyUserDegradation(`pi-lens: ${unavailable}`);
+			if (!this.trustBlockedGrammarNotifications.has(grammarFile)) {
+				this.trustBlockedGrammarNotifications.add(grammarFile);
+				notifyUserDegradation(`pi-lens: ${unavailable}`);
+			}
 			return false;
 		}
 		const inflight = this.grammarEnsurePromises.get(grammarFile);

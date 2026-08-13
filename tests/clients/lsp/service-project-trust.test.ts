@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
+const logExtension = vi.fn();
+
+vi.mock("../../../clients/extension-log.js", () => ({ logExtension }));
 
 vi.mock("../../../clients/lsp/config.js", () => ({
 	getServersForFileWithConfig,
@@ -22,6 +25,7 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
+		logExtension.mockReset();
 		createLSPClient.mockResolvedValue({
 			isAlive: () => true,
 			shutdown: async () => {},
@@ -68,6 +72,13 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		expect(spawn).not.toHaveBeenCalled();
 		expect(createLSPClient).not.toHaveBeenCalled();
 		expect(client).toBeUndefined();
+		expect(logExtension).toHaveBeenCalledWith(
+			expect.objectContaining({
+				level: "warn",
+				message: "install/materialization blocked: lsp install: python",
+				metadata: expect.objectContaining({ context: "lsp install: python" }),
+			}),
+		);
 		trust.resetProjectTrust();
 	});
 

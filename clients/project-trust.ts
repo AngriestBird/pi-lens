@@ -39,6 +39,20 @@ import { logExtension } from "./extension-log.js";
 export type ProjectTrustState = "trusted" | "untrusted" | "unknown";
 
 let trustState: ProjectTrustState = "unknown";
+const installRefusalWarnings = new Set<string>();
+const trustTransitionListeners = new Set<() => void>();
+
+export function onProjectTrustTransition(listener: () => void): () => void {
+	trustTransitionListeners.add(listener);
+	return () => trustTransitionListeners.delete(listener);
+}
+
+function latchProjectTrustState(next: ProjectTrustState): void {
+	if (next === trustState) return;
+	trustState = next;
+	installRefusalWarnings.clear();
+	for (const listener of trustTransitionListeners) listener();
+}
 
 /**
  * Feature-detected read of the host trust decision off an event ctx.
@@ -74,7 +88,16 @@ export function readProjectTrustFromContext(ctx: unknown): ProjectTrustState {
 
 /** Latch a trust state directly (tests, and the ctx adoption path below). */
 export function setProjectTrustState(next: ProjectTrustState): void {
-	trustState = next;
+	const previous = trustState;
+	latchProjectTrustState(next);
+	if (previous !== next) {
+		logExtension({
+			subsystem: "project-trust",
+			level: "debug",
+			message: `project trust state transitioned: ${previous} -> ${next}`,
+			metadata: { previous, next },
+		});
+	}
 }
 
 /**
@@ -84,7 +107,16 @@ export function setProjectTrustState(next: ProjectTrustState): void {
  */
 export function adoptProjectTrustFromContext(ctx: unknown): ProjectTrustState {
 	const next = readProjectTrustFromContext(ctx);
-	trustState = next;
+	const previous = trustState;
+	latchProjectTrustState(next);
+	if (previous !== next) {
+		logExtension({
+			subsystem: "project-trust",
+			level: "debug",
+			message: `project trust state transitioned: ${previous} -> ${next}`,
+			metadata: { previous, next },
+		});
+	}
 	return next;
 }
 
@@ -94,7 +126,7 @@ export function getProjectTrustState(): ProjectTrustState {
 
 /** Test/teardown-only: back to the fail-open default. */
 export function resetProjectTrust(): void {
-	trustState = "unknown";
+	latchProjectTrustState("unknown");
 }
 
 /**
@@ -108,12 +140,15 @@ export function isToolInstallAllowedByTrust(): boolean {
 /** Central gate for operations that may download or install executable content. */
 export function assertInstallAllowed(context: string): boolean {
 	if (isToolInstallAllowedByTrust()) return true;
-	logExtension({
-		subsystem: "project-trust",
-		level: "warn",
-		message: `install/materialization blocked: ${context}`,
-		metadata: { context, trustState },
-	});
+	if (!installRefusalWarnings.has(context)) {
+		installRefusalWarnings.add(context);
+		logExtension({
+			subsystem: "project-trust",
+			level: "warn",
+			message: `install/materialization blocked: ${context}`,
+			metadata: { context, trustState },
+		});
+	}
 	return false;
 }
 

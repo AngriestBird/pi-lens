@@ -24,7 +24,7 @@ import { logLatency } from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import {
 	isLspSpawnAllowedByTrust,
-	isToolInstallAllowedByTrust,
+	assertInstallAllowed,
 	projectTrustDenialReason,
 } from "../project-trust.js";
 import { shouldPreferPullOnlyDiagnostics } from "../lsp-budget.js";
@@ -1604,7 +1604,7 @@ export class LSPService {
 
 		const root = await server.root(filePath);
 		if (!root || this.checkDestroyed()) return undefined;
-		const allowInstall = this.shouldAllowInstall(filePath, root);
+		const allowInstall = this.shouldAllowInstall(server.id);
 
 		const normalizedRoot = normalizeMapKey(root);
 		const key = `${server.id}:${normalizedRoot}`;
@@ -1894,8 +1894,8 @@ export class LSPService {
 		}
 	}
 
-	private shouldAllowInstall(_filePath: string, _root: string): boolean {
-		if (!isToolInstallAllowedByTrust()) return false;
+	private shouldAllowInstall(serverId: string): boolean {
+		if (!assertInstallAllowed(`lsp install: ${serverId}`)) return false;
 		return process.env.PI_LENS_DISABLE_LSP_INSTALL !== "1";
 	}
 

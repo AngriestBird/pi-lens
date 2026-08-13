@@ -8,6 +8,7 @@
  *   ~/.pi-lens/cascade*.log          JSONL impact-cascade logs
  *   ~/.pi-lens/read-guard*.log       JSONL read-guard friction logs
  *   ~/.pi-lens/tree-sitter*.log      JSONL structural runner logs
+ *   ~/.pi-lens/extension*.log        JSONL extension diagnostics and console-guard telemetry
  *   ~/.pi-lens/actionable-warnings*.log  JSONL advisory pipeline (inject/suppress)
  *   ~/.pi-lens/ast-grep-tools*.log   JSONL MCP ast-grep search/replace telemetry
  *   ~/.pi-lens/logs/*.jsonl          JSONL diagnostic findings

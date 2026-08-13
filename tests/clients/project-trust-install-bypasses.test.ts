@@ -7,12 +7,17 @@ import { setupTestEnvironment } from "./test-utils.js";
 const { safeSpawnAsync } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(async () => ({ status: 0, stdout: "", stderr: "" })),
 }));
+const notifyUserDegradation = vi.hoisted(() => vi.fn());
 vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../clients/safe-spawn.js")>()),
 	safeSpawnAsync,
 }));
+vi.mock("../../clients/user-notify.js", () => ({ notifyUserDegradation }));
 
-beforeEach(() => safeSpawnAsync.mockClear());
+beforeEach(() => {
+	safeSpawnAsync.mockClear();
+	notifyUserDegradation.mockClear();
+});
 afterEach(() => resetProjectTrust());
 
 describe("central project-trust install gate (#1334 review)", () => {
@@ -89,6 +94,8 @@ describe("central project-trust install gate (#1334 review)", () => {
 		const client = new TreeSitterClient() as any;
 		setProjectTrustState("untrusted");
 		expect(await client.ensureGrammar("tree-sitter-trust-missing.wasm")).toBe(false);
+		expect(await client.ensureGrammar("tree-sitter-trust-missing.wasm")).toBe(false);
+		expect(notifyUserDegradation).toHaveBeenCalledTimes(1);
 		expect(fetchSpy).not.toHaveBeenCalled();
 		setProjectTrustState("trusted");
 		await client.ensureGrammar("tree-sitter-trust-allowed.wasm");
