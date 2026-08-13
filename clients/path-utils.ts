@@ -49,17 +49,32 @@ export function toPosix(filePath: string): string {
 }
 
 /**
- * Return whether `filePath` is fully qualified for its path shape.
+ * Return whether `filePath` is fully qualified under Windows semantics.
  *
  * A drive-relative path (`C:foo`) and a rooted-relative path (`\\foo`) are
  * not self-contained: each still depends on Windows ambient drive state.
  * Drive-absolute paths (`C:\\foo`) and UNC paths (`\\\\server\\share`) are
- * fully qualified, as are POSIX absolute paths (`/foo`).
+ * fully qualified.
+ */
+export function isFullyQualifiedWin32(filePath: string): boolean {
+	return win32.isAbsolute(filePath) && win32.parse(filePath).root.length > 1;
+}
+
+/** Return whether `filePath` is fully qualified under POSIX semantics. */
+export function isFullyQualifiedPosix(filePath: string): boolean {
+	return path.posix.isAbsolute(filePath) && !isWindowsPath(filePath);
+}
+
+/**
+ * Return whether `filePath` is fully qualified under the host's semantics.
+ *
+ * In particular, `/foo` is rooted-relative under Win32 (ambient-drive
+ * dependent) but fully qualified under POSIX.
  */
 export function isFullyQualified(filePath: string): boolean {
-	if (path.posix.isAbsolute(filePath)) return true;
-	if (!win32.isAbsolute(filePath)) return false;
-	return win32.parse(filePath).root.length > 1;
+	return process.platform === "win32"
+		? isFullyQualifiedWin32(filePath)
+		: isFullyQualifiedPosix(filePath);
 }
 
 /**

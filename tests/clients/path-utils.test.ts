@@ -6,6 +6,8 @@ import {
 	findNearestContaining,
 	findNearestMarkerRoot,
 	isFullyQualified,
+	isFullyQualifiedPosix,
+	isFullyQualifiedWin32,
 	isAtOrAboveHomeDir,
 	isExternalOrVendorFile,
 	normalizeEphemeralMapKey,
@@ -21,17 +23,31 @@ import {
 import { setupTestEnvironment } from "./test-utils.js";
 
 describe("path-utils", () => {
-	it.each([
-		["Windows drive-relative", "C:foo", false],
-		["Windows rooted-relative", "\\foo", false],
-		["Windows drive-absolute", "C:\\foo", true],
-		["Windows UNC", "\\\\server\\share", true],
-		["POSIX root", "/", true],
-		["POSIX absolute", "/abs/path", true],
-		["relative", "rel/path", false],
-		["dot-relative", "./rel", false],
-	])("isFullyQualified: %s", (_label, value, expected) => {
-		expect(isFullyQualified(value)).toBe(expected);
+	const fullyQualifiedMatrix = [
+		["Windows drive-relative", "C:foo", false, false],
+		["Windows rooted-relative", "\\foo", false, false],
+		["Windows drive-absolute", "C:\\foo", false, true],
+		["Windows UNC", "\\\\server\\share", false, true],
+		["POSIX root", "/", true, false],
+		["POSIX absolute", "/abs/path", true, false],
+		["relative", "rel/path", false, false],
+		["dot-relative", "./rel", false, false],
+	] as const;
+	it.each(fullyQualifiedMatrix)("isFullyQualifiedPosix: %s", (_label, value, expected) => {
+		expect(isFullyQualifiedPosix(value)).toBe(expected);
+	});
+	it.each(fullyQualifiedMatrix)("isFullyQualifiedWin32: %s", (_label, value, _posix, expected) => {
+		expect(isFullyQualifiedWin32(value)).toBe(expected);
+	});
+	it("classifies /foo according to explicit platform semantics", () => {
+		expect(isFullyQualifiedWin32("/foo")).toBe(false);
+		expect(isFullyQualifiedPosix("/foo")).toBe(true);
+	});
+	it("classifies ordinary host-native paths through the ambient helper", () => {
+		expect(isFullyQualified("relative/path")).toBe(false);
+		expect(isFullyQualified("C:\\foo")).toBe(
+			isFullyQualifiedWin32("C:\\foo") || isFullyQualifiedPosix("C:\\foo"),
+		);
 	});
 	it("uriToPath decodes URL-encoded file URIs", () => {
 		const uri = "file:///C:/Users/Test%20User/project/file.ts";

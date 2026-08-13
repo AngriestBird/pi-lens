@@ -23,7 +23,7 @@ import {
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { logLatency } from "./latency-logger.js";
-import { isFullyQualified } from "./path-utils.js";
+import { isFullyQualifiedWin32 } from "./path-utils.js";
 import { startSpawnUsageSampler } from "./resource-sampler.js";
 
 export interface SpawnResourceUsage {
@@ -343,7 +343,7 @@ function isUncWindowsPath(value: string): boolean {
  * execute it, so a different file could be validated than executed.
  */
 function isFullyQualifiedWindowsPath(value: string): boolean {
-	return isFullyQualified(value) && !isRootedWindowsPath(value);
+	return isFullyQualifiedWin32(value) && !isRootedWindowsPath(value);
 }
 
 /**
