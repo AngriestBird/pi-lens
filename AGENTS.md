@@ -129,6 +129,12 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 `isFullyQualified` follows host path semantics. Use `isFullyQualifiedWin32` or `isFullyQualifiedPosix` when the consuming path grammar is fixed independently of the host (for example, safe-spawn's Windows resolver).
 
+The weekly stale-open-issue detector is detection-only: `.github/workflows/stale-open-issues.yml`
+calls `scripts/detect-stale-open-issues.mjs`, which uses the bounded GitHub REST
+fetcher seam in `scripts/lib/stale-open-issues.mjs` to inspect open issues and
+bounded `master` commit details. It comments one candidate summary on #1323 and
+writes the workflow summary; it must never close or edit detected issues.
+
 The LSP status surface includes a bounded per-client history of operational
 diagnostic-pull failures; unsupported `-32601` responses are intentionally
 excluded. Strategy-gated `didSave` remains separate and out of scope here.
