@@ -27,6 +27,7 @@ import {
 	logReadGuardEvent,
 } from "./read-guard-logger.js";
 import type { PiLensFlagSource } from "./lens-config.js";
+import type { EditToolDetails } from "@earendil-works/pi-coding-agent";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import type { MetricsClient } from "./metrics-client.js";
 import { runPipeline, type PipelineResult } from "./pipeline.js";
@@ -614,7 +615,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	const writeIndex = runtime.nextWriteIndex();
 	let modifiedRanges: Array<{ start: number; end: number }> | undefined;
 	try {
-		const details = event.details as { diff?: string } | undefined;
+		// #1334 S6: the host DECLARES this payload (`EditToolDetails`, a
+		// type-only export), so use it instead of re-declaring `{ diff?: string }`
+		// here — the ad-hoc shape hid the sibling `patch`/`firstChangedLine`
+		// fields. `Partial<>` keeps the defensive posture: the host types mark
+		// `diff` required, but this runs against whatever a live host actually
+		// sent, and the `details?.diff` truthiness check below is what the code
+		// has always relied on.
+		const details = event.details as Partial<EditToolDetails> | undefined;
 		dbg(
 			`tool_result: details.diff=${details?.diff ? "present" : "missing"}, details keys: ${Object.keys(event.details || {}).join(", ")}`,
 		);
