@@ -407,6 +407,18 @@ async function indentationArgs(
 	if (tool === "prettier") {
 		return [indentation.style === "tab" ? "--use-tabs" : "--no-use-tabs", "--tab-width", String(indentation.width)];
 	}
+	if (tool === "ruff") {
+		// `ruff format` has NO --indent-style/--indent-width flags (it errors with
+		// "unexpected argument" and exits 2, which formatFile reports as a silent
+		// clean no-op because ruff is not strictExitCode). Style is pinned through
+		// inline TOML overrides instead (#1144 follow-up).
+		return [
+			"--config",
+			`indent-width=${indentation.width}`,
+			"--config",
+			`format.indent-style='${indentation.style}'`,
+		];
+	}
 	return ["--indent-style", indentation.style, "--indent-width", String(indentation.width)];
 }
 
@@ -546,6 +558,11 @@ export const ruffFormatter: FormatterInfo = {
 	name: "ruff",
 	command: ["ruff", "format", "$FILE"],
 	extensions: [".py", ".pyi"],
+	// Pure formatter: `ruff format` exits 0 on a successful in-place rewrite.
+	// Without this, an argument-rejection exit (2) touches nothing and reads as
+	// "already formatted" — the silent no-op that hid the bad --indent-style
+	// flags for a full release cycle.
+	strictExitCode: true,
 	async resolveCommand(filePath, cwd) {
 		const styleArgs = await indentationArgs(filePath, "ruff", cwd);
 		if (styleArgs === null) return SKIP_FORMATTING;
