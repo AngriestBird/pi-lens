@@ -249,7 +249,16 @@ export function createPiMock(
  * `ui.notify(...)` for assertions.
  */
 export function makeCtx(
-	overrides: Partial<{ cwd: string; sessionId: string }> = {},
+	overrides: Partial<{
+		cwd: string;
+		sessionId: string;
+		/**
+		 * #1334 S2: the host run mode (`ExtensionContext.mode`). Defaults to
+		 * "tui". Pass `null` to simulate an older host with NO `mode` field —
+		 * pi-lens must then behave exactly as it did before mode awareness.
+		 */
+		mode: "tui" | "rpc" | "json" | "print" | null;
+	}> = {},
 ): MockCtx {
 	const notifications: CapturedNotification[] = [];
 	const statusCalls: CapturedStatus[] = [];
@@ -297,6 +306,14 @@ export function makeCtx(
 		getSystemPrompt: () => "",
 		waitForIdle: async () => {},
 	};
+
+	// `mode: null` means "older host, no mode field at all" — delete it rather
+	// than leaving a null the feature detection would have to special-case.
+	if (overrides.mode === null) {
+		delete (ctx as Record<string, unknown>).mode;
+	} else if (overrides.mode !== undefined) {
+		(ctx as Record<string, unknown>).mode = overrides.mode;
+	}
 
 	return ctx as unknown as MockCtx;
 }
