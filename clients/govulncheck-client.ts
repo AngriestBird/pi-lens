@@ -21,6 +21,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { assertInstallAllowed } from "./project-trust.js";
 import { SecurityScanClient } from "./security-scan-client.js";
 
 // --- Types ---
@@ -119,6 +120,13 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 		if (await this.probeVersion(["-version"])) {
 			this.available = true;
 			return true;
+		}
+		if (!assertInstallAllowed("govulncheck go install")) {
+			// Deliberately NOT latching `available = false` (#1350 delta review):
+			// trust denial is policy, not tool absence -- a later trust grant
+			// (re-adopted at turn_start) must be able to retry the install, and
+			// the cached false in ensureAvailable() would make denial permanent.
+			return false;
 		}
 
 		// Not on PATH — auto-install via `go install`. This is safe to assume

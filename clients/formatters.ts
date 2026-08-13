@@ -20,6 +20,7 @@ import {
 import { logLatency } from "./latency-logger.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { assertInstallAllowed } from "./project-trust.js";
 import {
 	getAutoInstallToolIdForFormatter,
 	getFormatterPolicyForFile,
@@ -54,6 +55,7 @@ export async function tryLazyInstallFormatterTool(
 	tool: "rubocop" | "rustfmt",
 	cwd: string,
 ): Promise<boolean> {
+	if (!assertInstallAllowed(`formatter lazy install: ${tool}`)) return false;
 	const attemptKey = `${tool}:${cwd}`;
 	if (_lazyInstallAttempts.has(attemptKey)) return false;
 	_lazyInstallAttempts.add(attemptKey);
@@ -1327,7 +1329,18 @@ async function resolveFormatterCommand(
 		? await formatter.resolveCommand(absolutePath, cwd)
 		: null;
 	if (resolved === SKIP_FORMATTING) return SKIP_FORMATTING;
-	return resolved ?? formatter.command.map((c) => c.replace("$FILE", absolutePath));
+	if (resolved !== null) return resolved;
+	const fallback = formatter.command.map((c) => c.replace("$FILE", absolutePath));
+	// Trust gate on the install-capable static fallback (#1334 S5): npx can
+	// DOWNLOAD packages, so an untrusted project treats the fallback as
+	// unavailable -- a skip, not a formatter failure; may converge next turn.
+	if (
+		fallback[0] === "npx" &&
+		!assertInstallAllowed(`formatter npx fallback: ${formatter.name}`)
+	) {
+		return SKIP_FORMATTING;
+	}
+	return fallback;
 }
 
 export async function formatFile(

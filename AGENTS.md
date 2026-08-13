@@ -129,6 +129,12 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 `isFullyQualified` follows host path semantics. Use `isFullyQualifiedWin32` or `isFullyQualifiedPosix` when the consuming path grammar is fixed independently of the host (for example, safe-spawn's Windows resolver).
 
+The weekly stale-open-issue detector is detection-only: `.github/workflows/stale-open-issues.yml`
+calls `scripts/detect-stale-open-issues.mjs`, which uses the bounded GitHub REST
+fetcher seam in `scripts/lib/stale-open-issues.mjs` to inspect open issues and
+bounded `master` commit details. It comments one candidate summary on #1323 and
+writes the workflow summary; it must never close or edit detected issues.
+
 The LSP status surface includes a bounded per-client history of operational
 diagnostic-pull failures; unsupported `-32601` responses are intentionally
 excluded. Strategy-gated `didSave` remains separate and out of scope here.
@@ -154,6 +160,13 @@ empty result, while the project ignore matcher remains authoritative.
 
 
 A pi coding-agent extension that runs automated checks on every file write/edit. Dispatches async parallel runners (LSP, biome, ruff, ast-grep, tree-sitter, jscpd, knip, Madge, and language-specific linters/build checks) and injects findings as context injections at turn-end and session-start.
+
+CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
+PR bodies may not use a comma-separated close list because GitHub applies only
+the first issue per keyword; use one keyword per issue (`Closes #A. Closes #B.`).
+The merged-PR workflow rechecks each same-repository close target and comments on
+the PR when a referenced issue is missing or remains open. Keep the parser pure
+and unit-tested; workflow YAML should only pass the event to the script.
 
 The shipped ast-grep catalog includes `no-bare-host-path-in-win32-branch`
 (#1158 shape 2). It deliberately matches only the consequence of an `if`
@@ -814,6 +827,48 @@ Holds: `filePath`, language-root `cwd`, `kind` (`FileKind` — `jsts`, `python`,
 ## Session-start critical path
 
 `lsp-config` is deferred via `setImmediate` (not awaited). Startup background task bodies are deferred via `setImmediate` so sync scans cannot inflate the interactive path; logs report both queued and run time. The first-session quick-mode warmup uses the **async** startup-scan path, which must enforce the same home-ceiling guard as the sync path (`isAtOrAboveHomeDir` for cwd/projectRoot) before language-profile warming — otherwise an empty folder under a home/ancestor marker can kick off a background home-tree walk and cause typing lag (#296). The LSP dominant-language auto-warm has the same invariant: only run it when `startupScan.canWarmCaches` is true and use the guarded `analysisRoot`, not raw `cwd`. Tool availability probes use the probe cache before spawning binaries. Interactive path target: ~150ms on warm runs.
+
+### Project trust is CONSUMED, never answered (#1334 S5)
+
+pi's trust surface is two-sided and the sides are not interchangeable. An
+extension may *answer* the question by registering `pi.on("project_trust", …)`
+(returning `{ trusted: "yes" | "no" | "undecided" }`); every other extension
+*consumes* the outcome via `ExtensionContext.isProjectTrusted(): boolean`.
+**pi-lens is a consumer — never register the handler.** Answering on the user's
+behalf would defeat the host's own prompt.
+
+`clients/project-trust.ts` is the single latched process-wide state
+(`trusted` / `untrusted` / `unknown`), refreshed from `ctx` on every
+`session_start` and `turn_start` (fork/reload/resume can change cwd, and a
+mid-session grant/deny converges by the next turn). Note the asymmetry: the
+*event* decision is three-valued but the
+*ctx* accessor is a boolean, so the only distinctions available are "host said
+yes", "host said no", and "host has no trust surface at all".
+
+The centralized `assertInstallAllowed(context)` gate covers every operation
+that can install or materialize executable content: managed installs,
+formatter gem/rustup installs and npx fallbacks, runner lazy installers,
+govulncheck's `go install`, and tree-sitter's pinned-CDN lazy grammar fetch.
+Grammar WASM is executed content, so under denial an absent grammar follows the
+existing unavailable + user-notification path instead of being fetched. The
+separate LSP predicate gates child execution.
+
+`ensureTool()` (`clients/installer/index.ts` — degrades to the existing
+`allowInstall:false` discovery-only path, so an already-present binary keeps
+working while nothing is downloaded or executed) and `LSPService.spawnClient`
+(`clients/lsp/index.ts` — refuses the child spawn, without marking the key
+broken: trust is policy, not server failure). Everything in-process
+(tree-sitter, caches, diagnostics replay) is untouched. **Fail-open is
+deliberate for `unknown` only** — a host that never exposed the accessor never
+had a decision to honor, and gating it would break every older pi. When adding
+a new outbound capability (a new spawn seam, a new downloader), gate it on
+`isLspSpawnAllowedByTrust()` / `isToolInstallAllowedByTrust()` too.
+
+Accessor failure is deliberately fail-closed: if `isProjectTrusted` exists but
+throws, the host attempted to provide a decision and pi-lens cannot prove the
+project trusted. Only an absent API is the older-host `unknown`/fail-open case.
+New installation/materialization sites call `assertInstallAllowed(context)`;
+do not add more direct consumers of the raw install predicate.
 
 ## Subagent-extension compatibility (#476)
 
