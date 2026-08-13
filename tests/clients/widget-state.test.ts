@@ -409,6 +409,35 @@ describe("widget-state renderWidget", () => {
 		expect(allLines).not.toContain("fmt:biome");
 	});
 
+	it("renders formatter failures with an error indication", () => {
+		const filePath = `${process.cwd()}/broken.ts`;
+		recordFormatter(filePath, "prettier", false, false);
+
+		const allLines = renderWidget(60, theme).join("");
+		expect(allLines).toContain("broken.ts");
+		expect(allLines).toContain("prettier");
+		expect(allLines).toContain("fmt-failed:");
+		expect(allLines).toContain("x");
+	});
+
+	it("clears a formatter failure after a subsequent success", () => {
+		const filePath = `${process.cwd()}/recovered.ts`;
+		recordFormatter(filePath, "prettier", false, false);
+		expect(renderWidget(60, theme).join("")).toContain("fmt-failed:");
+
+		recordFormatter(filePath, "prettier", false, true);
+		const allLines = renderWidget(60, theme).join("");
+		expect(allLines).not.toContain("recovered.ts");
+		expect(allLines).not.toContain("fmt-failed:");
+	});
+
+	it("does not render an unchanged successful formatter", () => {
+		const filePath = `${process.cwd()}/unchanged.ts`;
+		recordFormatter(filePath, "prettier", false, true);
+
+		expect(renderWidget(60, theme).join("")).not.toContain("unchanged.ts");
+	});
+
 	it("packs multiple files into a single row at horizontal widths", () => {
 		const a = `${process.cwd()}/alpha.ts`;
 		const b = `${process.cwd()}/beta.ts`;
