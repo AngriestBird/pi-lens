@@ -97,6 +97,12 @@ describe("central project-trust install gate (#1334 review)", () => {
 		expect(await client.ensureGrammar("tree-sitter-trust-missing.wasm")).toBe(false);
 		expect(notifyUserDegradation).toHaveBeenCalledTimes(1);
 		expect(fetchSpy).not.toHaveBeenCalled();
+		// #1363 delta: dedupe is generation-lazy, not permanent -- a trust
+		// TRANSITION re-arms the notification for the same grammar.
+		setProjectTrustState("trusted");
+		setProjectTrustState("untrusted");
+		expect(await client.ensureGrammar("tree-sitter-trust-missing.wasm")).toBe(false);
+		expect(notifyUserDegradation).toHaveBeenCalledTimes(2);
 		setProjectTrustState("trusted");
 		await client.ensureGrammar("tree-sitter-trust-allowed.wasm");
 		expect(fetchSpy).toHaveBeenCalled();

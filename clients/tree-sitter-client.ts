@@ -30,7 +30,7 @@ import {
 import { resolvePackagePath } from "./package-root.js";
 import {
 	assertInstallAllowed,
-	onProjectTrustTransition,
+	getProjectTrustGeneration,
 } from "./project-trust.js";
 import { logTreeSitterDiagnostic } from "./tree-sitter-logger.js";
 import { notifyUserDegradation } from "./user-notify.js";
@@ -176,6 +176,7 @@ export class TreeSitterClient {
 	/** In-flight/settled lazy grammar fetches, keyed by wasm filename. */
 	private grammarEnsurePromises = new Map<string, Promise<boolean>>();
 	private trustBlockedGrammarNotifications = new Set<string>();
+	private trustNotificationsGeneration = getProjectTrustGeneration();
 	// biome-ignore lint/suspicious/noExplicitAny: Optional dependency loaded dynamically
 	private ParserClass: any = null;
 	// biome-ignore lint/suspicious/noExplicitAny: Language loader from module
@@ -196,7 +197,6 @@ export class TreeSitterClient {
 	private wasmAborted = false;
 
 	constructor(verbose = false, onWasmAbort?: () => void) {
-		onProjectTrustTransition(() => this.trustBlockedGrammarNotifications.clear());
 		this.grammarsDir = this.findGrammarsDir();
 		this.verbose = verbose;
 		this.onWasmAbort = onWasmAbort;
@@ -481,6 +481,13 @@ export class TreeSitterClient {
 				message: unavailable,
 				metadata: { grammarFile, outcome: "trust-gated" },
 			});
+			// Lazy clear-on-transition (#1363 review): compare the trust
+			// generation at use time -- no listener registration, no retention.
+			const generation = getProjectTrustGeneration();
+			if (generation !== this.trustNotificationsGeneration) {
+				this.trustNotificationsGeneration = generation;
+				this.trustBlockedGrammarNotifications.clear();
+			}
 			if (!this.trustBlockedGrammarNotifications.has(grammarFile)) {
 				this.trustBlockedGrammarNotifications.add(grammarFile);
 				notifyUserDegradation(`pi-lens: ${unavailable}`);

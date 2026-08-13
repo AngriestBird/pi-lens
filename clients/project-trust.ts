@@ -40,18 +40,25 @@ export type ProjectTrustState = "trusted" | "untrusted" | "unknown";
 
 let trustState: ProjectTrustState = "unknown";
 const installRefusalWarnings = new Set<string>();
-const trustTransitionListeners = new Set<() => void>();
+// Bounded (#1363 review): dynamic contexts (per-formatter/per-server strings)
+// must not grow without limit across a long untrusted session. Clearing on
+// overflow trades an occasional repeat warning for bounded memory.
+const INSTALL_REFUSAL_WARNING_CAP = 200;
+// Monotonic transition counter (#1363 review): consumers needing
+// clear-on-transition semantics compare this lazily at use time instead of
+// registering callbacks -- a per-instance listener with no teardown path
+// strongly retains every instance ever constructed.
+let trustGeneration = 0;
 
-export function onProjectTrustTransition(listener: () => void): () => void {
-	trustTransitionListeners.add(listener);
-	return () => trustTransitionListeners.delete(listener);
+export function getProjectTrustGeneration(): number {
+	return trustGeneration;
 }
 
 function latchProjectTrustState(next: ProjectTrustState): void {
 	if (next === trustState) return;
 	trustState = next;
 	installRefusalWarnings.clear();
-	for (const listener of trustTransitionListeners) listener();
+	trustGeneration += 1;
 }
 
 /**
@@ -127,6 +134,7 @@ export function getProjectTrustState(): ProjectTrustState {
 /** Test/teardown-only: back to the fail-open default. */
 export function resetProjectTrust(): void {
 	latchProjectTrustState("unknown");
+	installRefusalWarnings.clear();
 }
 
 /**
@@ -141,6 +149,9 @@ export function isToolInstallAllowedByTrust(): boolean {
 export function assertInstallAllowed(context: string): boolean {
 	if (isToolInstallAllowedByTrust()) return true;
 	if (!installRefusalWarnings.has(context)) {
+		if (installRefusalWarnings.size >= INSTALL_REFUSAL_WARNING_CAP) {
+			installRefusalWarnings.clear();
+		}
 		installRefusalWarnings.add(context);
 		logExtension({
 			subsystem: "project-trust",
