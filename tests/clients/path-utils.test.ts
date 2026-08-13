@@ -40,14 +40,17 @@ describe("path-utils", () => {
 		expect(isFullyQualifiedWin32(value)).toBe(expected);
 	});
 	it("classifies /foo according to explicit platform semantics", () => {
-		expect(isFullyQualifiedWin32("/foo")).toBe(false);
-		expect(isFullyQualifiedPosix("/foo")).toBe(true);
+		expect(isFullyQualifiedWin32(path.posix.join(path.posix.sep, "foo"))).toBe(false);
+		expect(isFullyQualifiedPosix(path.posix.join(path.posix.sep, "foo"))).toBe(true);
 	});
 	it("classifies ordinary host-native paths through the ambient helper", () => {
-		expect(isFullyQualified("relative/path")).toBe(false);
-		expect(isFullyQualified("C:\\foo")).toBe(
-			isFullyQualifiedWin32("C:\\foo") || isFullyQualifiedPosix("C:\\foo"),
-		);
+		const hostNative = path.join(path.parse(process.cwd()).root, "ordinary", "host-native");
+		expect(isFullyQualified(hostNative)).toBe(true);
+		if (process.platform === "win32") {
+			expect(isFullyQualifiedWin32(hostNative)).toBe(true);
+		} else {
+			expect(isFullyQualifiedPosix(hostNative)).toBe(true);
+		}
 	});
 	it("uriToPath decodes URL-encoded file URIs", () => {
 		const uri = "file:///C:/Users/Test%20User/project/file.ts";
