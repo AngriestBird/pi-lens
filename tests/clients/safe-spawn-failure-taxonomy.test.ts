@@ -28,6 +28,25 @@ describe("safe-spawn typed failure taxonomy", () => {
 		}
 	});
 
+	it("a genuinely missing tool classifies tool-not-found even under a broken cwd (#1340 review)", async () => {
+		const parent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-spawn-cwd-"));
+		const missingCwd = path.join(parent, "gone");
+		try {
+			const result = await safeSpawnAsync(
+				"pi-lens-definitely-not-a-real-tool-1340",
+				["--version"],
+				{ cwd: missingCwd, timeout: 5_000 },
+			);
+
+			expect(result.failure).toBe("spawn");
+			// The cwd probe must NOT shadow the missing executable: reinstall is
+			// the correct repair here, and it keys on tool-not-found only.
+			expect(result.spawnFailure?.kind).toBe("tool-not-found");
+		} finally {
+			removeTempDirSync(parent);
+		}
+	});
+
 	it("classifies errno intent while preserving the original Error as cause", async () => {
 		const missing = Object.assign(new Error("spawn missing ENOENT"), { code: "ENOENT" });
 		const denied = Object.assign(new Error("spawn denied EACCES"), { code: "EACCES" });

@@ -112,6 +112,39 @@ function cwdIsUnresolvableSync(cwd: string | undefined): boolean {
 	}
 }
 
+
+/**
+ * Best-effort presence probe used ONLY to disambiguate ENOENT when the cwd is
+ * ALSO unresolvable (#1340 review): a genuinely missing tool must classify as
+ * tool-not-found even under a broken cwd, or auto-install can never repair it.
+ * Absolute commands are probed directly (with PATHEXT variants on Windows);
+ * bare names scan PATH. A relative-with-separator command under a broken cwd
+ * is genuinely ambiguous -- we err toward cwd-unresolvable there, because
+ * repairing the cwd is actionable while a reinstall loop (#1199) is not.
+ */
+function commandProbablyPresent(command: string): boolean | "ambiguous" {
+	const exts =
+		process.platform === "win32"
+			? ["", ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)]
+			: [""];
+	const existsWithExt = (base: string): boolean => {
+		for (const ext of exts) {
+			try {
+				if (fs.existsSync(base + ext)) return true;
+			} catch {
+				// unreadable candidate -- keep probing
+			}
+		}
+		return false;
+	};
+	if (path.isAbsolute(command)) return existsWithExt(command);
+	if (command.includes("/") || command.includes("\\")) return "ambiguous";
+	for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+		if (dir && existsWithExt(path.join(dir, command))) return true;
+	}
+	return false;
+}
+
 /** Classify a raw Node spawn error without discarding its errno-bearing Error. */
 export async function classifySpawnFailure(
 	error: unknown,
@@ -119,7 +152,11 @@ export async function classifySpawnFailure(
 ): Promise<SpawnFailureError> {
 	const cause = toError(error);
 	const code = errorCode(cause);
-	if (code === "ENOENT" && (await cwdIsUnresolvable(options.cwd))) {
+	if (
+		code === "ENOENT" &&
+		(await cwdIsUnresolvable(options.cwd)) &&
+		commandProbablyPresent(options.command) !== false
+	) {
 		return new SpawnFailureError(
 			"cwd-unresolvable",
 			`Cannot spawn ${options.command}: working directory is unresolvable (${options.cwd})`,
@@ -153,7 +190,11 @@ function classifySpawnFailureSync(
 ): SpawnFailureError {
 	const cause = toError(error);
 	const code = errorCode(cause);
-	if (code === "ENOENT" && cwdIsUnresolvableSync(options.cwd)) {
+	if (
+		code === "ENOENT" &&
+		cwdIsUnresolvableSync(options.cwd) &&
+		commandProbablyPresent(options.command) !== false
+	) {
 		return new SpawnFailureError(
 			"cwd-unresolvable",
 			`Cannot spawn ${options.command}: working directory is unresolvable (${options.cwd})`,

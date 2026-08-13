@@ -42,6 +42,29 @@ describe("SgRunner", () => {
 		ensureTool.mockResolvedValue(null);
 	});
 
+	describe("spawn-failure taxonomy consumption (#1214/#1199)", () => {
+		it("cwd-unresolvable with an ENOENT cause is NOT unavailable and does NOT reinstall", async () => {
+			const enoent = Object.assign(new Error("spawn ast-grep ENOENT"), {
+				code: "ENOENT",
+			});
+			safeSpawnAsync.mockResolvedValue({
+				status: null,
+				error: enoent,
+				failure: "spawn",
+				spawnFailure: { kind: "cwd-unresolvable", cause: enoent },
+				stdout: "",
+				stderr: "",
+			});
+			const { SgRunner } = await import("../../clients/sg-runner.js");
+			const runner = new SgRunner();
+			const result = await runner.execRaw(["run", "--pattern", "x"]);
+			// A raw `error.code === "ENOENT"` consumer regression maps this to
+			// unavailable and drives the #1199 reinstall loop — both must stay off.
+			expect(result.failure).not.toBe("unavailable");
+			expect(ensureTool).not.toHaveBeenCalled();
+		});
+	});
+
 	describe("ensureAvailable()", () => {
 		it("returns true when ast-grep is in PATH", async () => {
 			safeSpawnAsync.mockResolvedValueOnce({
