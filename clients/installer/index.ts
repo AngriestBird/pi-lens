@@ -612,11 +612,14 @@ export const TOOLS: ToolDefinition[] = [
 		binaryName: "helm",
 		github: {
 			repo: "helm/helm",
-			assetMatch: archAssetMatch({
-				linux: { x64: "linux-amd64.tar.gz", arm64: "linux-arm64.tar.gz" },
-				darwin: { x64: "darwin-amd64.tar.gz", arm64: "darwin-arm64.tar.gz" },
-				win32: { x64: "windows-amd64.zip", arm64: "windows-arm64.zip" },
-			}),
+			assetMatch: (platform, arch) => {
+				// helm publishes per-OS archives: tar.gz for POSIX, zip for Windows.
+				const cpu = arch === "arm64" ? "arm64" : "amd64";
+				if (platform === "linux") return `linux-${cpu}.tar.gz`;
+				if (platform === "darwin") return `darwin-${cpu}.tar.gz`;
+				if (platform === "win32") return `windows-${cpu}.zip`;
+				return undefined;
+			},
 			// Release archives nest the executable under an OS/arch directory;
 			// the installer searches recursively and adds the Windows suffix.
 			binaryInArchive: "helm",
