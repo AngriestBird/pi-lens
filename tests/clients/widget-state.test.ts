@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	__testing,
 	clearWidgetState,
+	exportWidgetState,
 	getFailedLspServerIds,
 	getFileDiagnostics,
 	getFileDiagnosticSummaries,
@@ -418,6 +419,46 @@ describe("widget-state renderWidget", () => {
 		expect(allLines).toContain("prettier");
 		expect(allLines).toContain("fmt-failed:");
 		expect(allLines).toContain("x");
+	});
+
+	// #1348 review P1: diagnostic severity outranks formatter failure in BOTH
+	// renderers -- a file with blocking diagnostics AND a failed format shows
+	// the blocking dot, not the formatter x.
+	it("blocking diagnostics outrank a formatter failure (horizontal renderer)", () => {
+		const filePath = `${process.cwd()}/both-failed.ts`;
+		recordDiagnostics(filePath, [
+			{ severity: "error", semantic: "blocking", message: "bad", tool: "tsserver" },
+		]);
+		recordFormatter(filePath, "prettier", false, false);
+		const line = renderWidget(120, theme).join("");
+		expect(line).toContain("●");
+		expect(line).not.toMatch(/x .*both-failed/);
+	});
+
+	it("blocking diagnostics outrank a formatter failure (vertical renderer)", () => {
+		const filePath = `${process.cwd()}/both-failed-v.ts`;
+		recordDiagnostics(filePath, [
+			{ severity: "error", semantic: "blocking", message: "bad", tool: "tsserver" },
+		]);
+		recordFormatter(filePath, "prettier", false, false);
+		const line = renderWidget(40, theme).join("");
+		expect(line).toContain("●");
+		expect(line).not.toMatch(/x both-failed-v/);
+	});
+
+	// #1348 review P2: failure entries are session-scoped advice -- they do
+	// NOT survive export/import; successes rehydrate as before.
+	it("formatter failures do not survive a session restore", () => {
+		const failPath = `${process.cwd()}/stale-fail.ts`;
+		const okPath = `${process.cwd()}/ok-changed.ts`;
+		recordFormatter(failPath, "prettier", false, false);
+		recordFormatter(okPath, "biome", true, true);
+		const snapshot = exportWidgetState();
+		clearWidgetState();
+		expect(importWidgetState(snapshot)).toBe(true);
+		const line = renderWidget(120, theme).join("");
+		expect(line).not.toContain("fmt-failed:");
+		expect(line).not.toContain("stale-fail.ts");
 	});
 
 	it("clears a formatter failure after a subsequent success", () => {

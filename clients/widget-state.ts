@@ -257,7 +257,14 @@ export function importWidgetState(state: PersistedWidgetState | undefined): bool
 		files.set(fileMapKey(f.filePath), {
 			filePath: f.filePath,
 			runners: new Map(f.runners ?? []),
-			formatters: new Map(f.formatters ?? []),
+			// Failure entries do NOT survive a session restore (#1348 review):
+			// a fmt-failed marker is live advice about THIS session's last
+			// attempt; rehydrating one from a snapshot shows a stale failure the
+			// current session never observed (and same-mtime fixes would never
+			// clear it). Successes rehydrate as before.
+			formatters: new Map(
+				(f.formatters ?? []).filter(([, outcome]) => outcome?.success !== false),
+			),
 			diagnostics: migrateEntryStamps(f.diagnostics, recordTouchedAt),
 			allDiagnostics: migrateEntryStamps(f.allDiagnostics, recordTouchedAt),
 			diagnosticCounts: f.diagnosticCounts ?? {
@@ -941,14 +948,17 @@ function formatFileRowVertical(
 	const errors = rec.diagnosticCounts.errors;
 	const warnings = rec.diagnosticCounts.warnings;
 	const formatterFailed = hasFailedFormatter(rec);
-	const dot = formatterFailed
-		? red("x")
-		:
+	// Diagnostic severity outranks formatter failure (#1348 review): a file
+	// with blocking diagnostics shows the blocking dot even if a format also
+	// failed -- same precedence as the horizontal renderer.
+	const dot =
 		blocking > 0
 			? red("●")
-			: warnings > 0 || errors > 0
-				? yellow("!")
-				: green("✓");
+			: formatterFailed
+				? red("x")
+				: warnings > 0 || errors > 0
+					? yellow("!")
+					: green("✓");
 	const runnerNames = [...rec.runners.entries()]
 		.filter(([, r]) => r.status !== "skipped")
 		.map(([id]) => id)
