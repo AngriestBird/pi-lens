@@ -103,6 +103,12 @@ export {
 	projectReport,
 	renderCompactProjectReport,
 } from "./project-report.js";
+export {
+	createDefaultHostPorts,
+	type HostLogSink,
+	type HostPorts,
+	type HostPortsOverrides,
+} from "./host-ports.js";
 
 // --- Query wrappers (own the remaining internal reach-ins) -------------------
 

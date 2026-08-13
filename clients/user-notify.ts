@@ -27,8 +27,15 @@ export type UserNotifier = (message: string, level?: UserNotifyLevel) => void;
 let notifierGetter: (() => UserNotifier | undefined) | undefined;
 
 /** Called once from the extension entry with a getter over the live `ctx.ui.notify`. */
-export function wireUserNotifier(getter: () => UserNotifier | undefined): void {
-	notifierGetter = getter;
+export function wireUserNotifier(
+	portsOrGetter:
+		| import("./host-ports.js").HostPorts
+		| (() => UserNotifier | undefined),
+): void {
+	notifierGetter =
+		typeof portsOrGetter === "function"
+			? portsOrGetter
+			: () => portsOrGetter.notify.user;
 }
 
 /** Test/teardown-only: drop the wired host. */

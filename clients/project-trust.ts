@@ -127,6 +127,15 @@ export function adoptProjectTrustFromContext(ctx: unknown): ProjectTrustState {
 	return next;
 }
 
+/** Adopt through the canonical host capability boundary. */
+export function adoptProjectTrustFromPorts(
+	ports: import("./host-ports.js").HostPorts,
+): ProjectTrustState {
+	const next = ports.trust.isProjectTrusted();
+	setProjectTrustState(next);
+	return next;
+}
+
 export function getProjectTrustState(): ProjectTrustState {
 	return trustState;
 }

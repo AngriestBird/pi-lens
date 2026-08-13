@@ -1,8 +1,12 @@
 import "./clients/console-guard-install.js";
 import "./clients/startup-marker.js";
-import { installConsoleGuard } from "./clients/extension-log.js";
+import { installConsoleGuard, logExtension } from "./clients/extension-log.js";
 import { wireUserNotifier } from "./clients/user-notify.js";
-import { adoptProjectTrustFromContext } from "./clients/project-trust.js";
+import {
+	adoptProjectTrustFromPorts,
+	assertInstallAllowed,
+	readProjectTrustFromContext,
+} from "./clients/project-trust.js";
 import {
 	type ExtensionRunMode,
 	modeSuppressionNote,
@@ -13,6 +17,7 @@ import {
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createDefaultHostPorts, type HostPorts } from "./clients/host-ports.js";
 import { AstGrepClient } from "./clients/ast-grep-client.js";
 import { loadBootstrapClients } from "./clients/bootstrap.js";
 import { CacheManager } from "./clients/cache-manager.js";
@@ -218,7 +223,7 @@ let latestEventCtx: any;
 /** Refresh the notify target from whichever event ctx just arrived. */
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
 function rememberEventCtx(ctx: any): void {
-	if (ctx?.ui) latestEventCtx = ctx;
+	if (ctx) latestEventCtx = ctx;
 }
 
 /**
@@ -261,6 +266,62 @@ function getStableSessionId(ctx: unknown): string | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+export interface CreateHostPortsOptions {
+	getContext: () => unknown;
+	getProjectRoot?: () => string | undefined;
+	getRenderInvalidator?: () => (() => void) | undefined;
+}
+
+/** Assemble pi's live ExtensionAPI/context projections behind HostPorts. */
+export function createHostPorts(
+	pi: ExtensionAPI,
+	options: CreateHostPortsOptions,
+): HostPorts {
+	const context = () => options.getContext() as any;
+	const currentMode = () => readExtensionMode(context());
+	const emit = (channel: string, payload: unknown): void => {
+		const bus = pi.events;
+		bus?.emit?.call(bus, channel, payload);
+	};
+	const activeTools = pi as unknown as {
+		getActiveTools?: () => string[];
+		setActiveTools?: (names: string[]) => void;
+	};
+	return createDefaultHostPorts({
+		notify: {
+			user(message, level) {
+				if (currentMode() === "print" || currentMode() === "json") return;
+				context()?.ui?.notify?.(message, level ?? "warning");
+			},
+		},
+		trust: { isProjectTrusted: () => readProjectTrustFromContext(context()) },
+		mode: {
+			current: currentMode,
+			supportsTuiWidget: () => supportsTuiWidget(currentMode()),
+			suppressesUserNotify: () => suppressesUserNotify(currentMode()),
+		},
+		log: {
+			extension: logExtension,
+			debug: (message, metadata) =>
+				logExtension({ subsystem: "host", level: "debug", message, metadata }),
+			sink: (subsystem) => (entry) =>
+				logExtension({ subsystem, level: "debug", message: "host sink entry", metadata: { entry } }),
+		},
+		emit: { bus: emit, lens: emit },
+		status: { set: (name, value) => context()?.ui?.setStatus?.(name, value) },
+		spawn: { abortSignal: () => context()?.signal, isAllowed: assertInstallAllowed },
+		render: { invalidate: () => options.getRenderInvalidator?.()?.() },
+		session: { id: () => getStableSessionId(context()) },
+		workspace: { cwd: () => context()?.cwd, projectRoot: () => options.getProjectRoot?.() },
+		flags: { get: (name) => pi.getFlag(name) },
+		tools: {
+			has: async (name) => typeof (pi as unknown as { getTool?: (tool: string) => unknown }).getTool?.(name) !== "undefined",
+			getActive: () => activeTools.getActiveTools?.() ?? [],
+			setActive: (names) => activeTools.setActiveTools?.(names),
+		},
+	});
 }
 
 // Log how long pi took to load pi-lens — the jiti transpile of every module is
@@ -400,6 +461,12 @@ function cleanStaleTsBuildInfo(cwd: string): string[] {
 // --- Extension ---
 
 export default function (pi: ExtensionAPI) {
+	let renderInvalidator: (() => void) | undefined;
+	const hostPorts = createHostPorts(pi, {
+		getContext: () => latestEventCtx,
+		getProjectRoot: () => runtime.projectRoot,
+		getRenderInvalidator: () => renderInvalidator,
+	});
 	// #1333 — defense in depth, the pi-side mirror of `mcp/server.ts`'s
 	// `console.log = console.error` guard. pi owns the terminal (raw mode +
 	// cursor-addressed diff repaints), so a raw byte from ANY transitively
@@ -430,9 +497,10 @@ export default function (pi: ExtensionAPI) {
 		return (message: string, level?: "info" | "warning" | "error") =>
 			ui.notify(message, level ?? "warning");
 	});
-	const getLiveEvents = () => pi.events;
-	initLensEventsGetter(getLiveEvents);
-	const getLiveEmit = () => pi.events?.emit?.bind(pi.events);
+	// S2 canonical wiring supersedes the compatibility getter immediately above.
+	wireUserNotifier(hostPorts);
+	initLensEventsGetter(() => ({ emit: hostPorts.emit.lens }));
+	const getLiveEmit = () => hostPorts.emit.bus;
 	wireBusEmitterGetter(getLiveEmit);
 	wireDiagnosticsBusEmitterGetter(getLiveEmit);
 	wireDispositionBusEmitterGetter(getLiveEmit);
@@ -640,16 +708,20 @@ export default function (pi: ExtensionAPI) {
 		setWidget(
 			"pi-lens",
 			(tui: LensWidgetTui, theme: LensWidgetTheme) => {
+				renderInvalidator = () => tui.requestRender();
 				setRenderCallback(() => {
 					scheduleStaleReconcile();
-					tui.requestRender();
+					hostPorts.render.invalidate();
 				});
 				return {
 					render: (width: number) => {
 						scheduleStaleReconcile();
 						return renderWidget(width, theme);
 					},
-					invalidate: () => setRenderCallback(() => {}),
+					invalidate: () => {
+						renderInvalidator = undefined;
+						setRenderCallback(() => {});
+					},
 				};
 			},
 			{ placement: "belowEditor" },
@@ -658,6 +730,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function unmountLensWidget(ui: LensWidgetUi | undefined): boolean {
+		renderInvalidator = undefined;
 		setRenderCallback(() => {});
 		if (typeof ui?.setWidget !== "function") return false;
 		const setWidget = ui.setWidget as LensWidgetSetWidget;
@@ -1380,7 +1453,7 @@ export default function (pi: ExtensionAPI) {
 			// fork/reload/resume can change cwd and trust can change mid-session.
 			// Feature-detected:
 			// a host without the accessor yields "unknown" and nothing is gated.
-			const trustState = adoptProjectTrustFromContext(ctx);
+			const trustState = adoptProjectTrustFromPorts(hostPorts);
 			if (trustState !== "unknown") {
 				dbg(`session_start: project trust = ${trustState}`);
 			}
@@ -1795,9 +1868,10 @@ export default function (pi: ExtensionAPI) {
 	// --- Turn end: batch jscpd/madge on collected files, then clear state ---
 	// Clear cascade snapshot at start of each new turn so stale data never leaks
 	pi.on("turn_start", (_event: any, ctx) => {
+		rememberEventCtx(ctx);
 		// Trust can change without a new session. Re-adopt before this turn can
 		// reach any install-capable or LSP-spawn path.
-		adoptProjectTrustFromContext(ctx);
+		adoptProjectTrustFromPorts(hostPorts);
 		runtime.beginTurn();
 		clearLastAnalyzedStateCache();
 
