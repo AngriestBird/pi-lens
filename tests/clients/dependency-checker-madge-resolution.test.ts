@@ -110,7 +110,7 @@ describe("DependencyChecker madge resolution (#766)", () => {
 		// findNodeToolBinary probes npm/pnpm/yarn/bun GLOBAL bins too, so the step
 		// that answered says nothing about where the binary lives.
 		findNodeToolBinary.mockResolvedValue(
-			path.join(path.sep, "usr", "local", "bin", "madge"),
+			path.posix.join("/", "usr", "local", "bin", "madge"),
 		);
 
 		const { stats } = await new DependencyChecker().checkFilesBatch(
@@ -167,7 +167,7 @@ describe("DependencyChecker madge resolution (#766)", () => {
 		expect(bare.stats.commandKind).toBe("path");
 
 		// ...or an absolute path outside the managed tree.
-		ensureTool.mockResolvedValue(path.join(path.sep, "usr", "bin", "madge"));
+		ensureTool.mockResolvedValue(path.posix.join("/", "usr", "bin", "madge"));
 		const global = await new DependencyChecker().checkFilesBatch(
 			[writeSource("b.ts", ["./c.js"])],
 			tmp,

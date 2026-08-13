@@ -5,6 +5,9 @@ import {
 	findLocalToolConfig,
 	findNearestContaining,
 	findNearestMarkerRoot,
+	isFullyQualified,
+	isFullyQualifiedPosix,
+	isFullyQualifiedWin32,
 	isAtOrAboveHomeDir,
 	isExternalOrVendorFile,
 	normalizeEphemeralMapKey,
@@ -19,7 +22,59 @@ import {
 } from "../../clients/path-utils.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
+describe("isWindowsPath (#1213 review pins)", () => {
+	it("matches drive-prefixed and UNC shapes only", async () => {
+		const { isWindowsPath } = await import("../../clients/path-utils.js");
+		expect(isWindowsPath("C:\foo")).toBe(true);
+		expect(isWindowsPath("D:relative")).toBe(true);
+		expect(isWindowsPath("\\server\share")).toBe(true);
+		expect(isWindowsPath("/path/to/file")).toBe(false);
+		// Backslashes are legal in POSIX filenames — embedded ones must not
+		// classify a path as Windows-shaped (the Linux CI regression).
+		expect(isWindowsPath("/ordinary\name")).toBe(false);
+	});
+});
+
+describe("isFullyQualified matrix additions (#1213 review pins)", () => {
+	it("classifies long-path and embedded-backslash forms", async () => {
+		const { isFullyQualifiedWin32, isFullyQualifiedPosix } = await import(
+			"../../clients/path-utils.js"
+		);
+		expect(isFullyQualifiedWin32("\\\\?\\C:\\very\\long\\path")).toBe(true);
+		expect(isFullyQualifiedPosix("/ordinary\\name")).toBe(true);
+	});
+});
+
 describe("path-utils", () => {
+	const fullyQualifiedMatrix = [
+		["Windows drive-relative", "C:foo", false, false],
+		["Windows rooted-relative", "\\foo", false, false],
+		["Windows drive-absolute", "C:\\foo", false, true],
+		["Windows UNC", "\\\\server\\share", false, true],
+		["POSIX root", "/", true, false],
+		["POSIX absolute", "/abs/path", true, false],
+		["relative", "rel/path", false, false],
+		["dot-relative", "./rel", false, false],
+	] as const;
+	it.each(fullyQualifiedMatrix)("isFullyQualifiedPosix: %s", (_label, value, expected) => {
+		expect(isFullyQualifiedPosix(value)).toBe(expected);
+	});
+	it.each(fullyQualifiedMatrix)("isFullyQualifiedWin32: %s", (_label, value, _posix, expected) => {
+		expect(isFullyQualifiedWin32(value)).toBe(expected);
+	});
+	it("classifies /foo according to explicit platform semantics", () => {
+		expect(isFullyQualifiedWin32(path.posix.join(path.posix.sep, "foo"))).toBe(false);
+		expect(isFullyQualifiedPosix(path.posix.join(path.posix.sep, "foo"))).toBe(true);
+	});
+	it("classifies ordinary host-native paths through the ambient helper", () => {
+		const hostNative = path.join(path.parse(process.cwd()).root, "ordinary", "host-native");
+		expect(isFullyQualified(hostNative)).toBe(true);
+		if (process.platform === "win32") {
+			expect(isFullyQualifiedWin32(hostNative)).toBe(true);
+		} else {
+			expect(isFullyQualifiedPosix(hostNative)).toBe(true);
+		}
+	});
 	it("uriToPath decodes URL-encoded file URIs", () => {
 		const uri = "file:///C:/Users/Test%20User/project/file.ts";
 		const resolved = uriToPath(uri);

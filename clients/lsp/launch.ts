@@ -18,6 +18,7 @@ import os from "node:os";
 import path from "node:path";
 import { isTestMode } from "../env-utils.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
+import { isFullyQualified } from "../path-utils.js";
 import { findGlobalBinary } from "../package-manager.js";
 import { redactSecrets } from "../redact/secrets.js";
 import { getRubyVersionDirNamesAsync } from "./ruby-drive-dirs.js";
@@ -507,11 +508,11 @@ export async function launchLSP(
 	// - If it's a simple command (no path separators), let system find it via PATH
 	// - Otherwise, resolve relative to cwd
 	const isRelativePath =
-		!path.isAbsolute(command) &&
+		!isFullyQualified(command) &&
 		(command.includes(path.sep) || command.includes("/"));
 	const explicitCommand = isRelativePath ? path.resolve(cwd, command) : command;
 	const resolvedCommand =
-		!path.isAbsolute(command) &&
+		!isFullyQualified(command) &&
 		!command.includes(path.sep) &&
 		!command.includes("/")
 			? (findBinaryOnPath(command, env) ?? explicitCommand)
@@ -528,7 +529,7 @@ export async function launchLSP(
 
 	// First, try to find in npm global if it's a simple command name
 	if (
-		!path.isAbsolute(command) &&
+		!isFullyQualified(command) &&
 		!command.includes(path.sep) &&
 		!command.includes("/")
 	) {
@@ -580,7 +581,7 @@ export async function launchLSP(
 	} catch (err) {
 		// If spawn failed with simple command, try npm global
 		if (
-			!path.isAbsolute(command) &&
+		!isFullyQualified(command) &&
 			!command.includes(path.sep) &&
 			!command.includes("/")
 		) {

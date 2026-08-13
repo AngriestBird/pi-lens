@@ -25,7 +25,7 @@ import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 const findNodeToolBinary = vi.fn();
 const ensureTool = vi.fn();
 const isSpawnableCommand = vi.fn();
-const MANAGED_TOOLS_DIR = path.join("/fake", "pi-lens", "tools");
+const MANAGED_TOOLS_DIR = path.posix.join("/fake", "pi-lens", "tools");
 
 vi.mock("../../clients/package-manager.js", () => ({ findNodeToolBinary }));
 vi.mock("../../clients/installer/index.js", () => ({
@@ -82,7 +82,7 @@ describe("madge managed-path memo reset hook (#1276)", () => {
 		// directly (this is what `finishInstallAttempt` now calls on success).
 		resetMadgeManagedPathMemo();
 
-		const managed = path.join(
+		const managed = path.posix.join(
 			MANAGED_TOOLS_DIR,
 			"node_modules",
 			".bin",

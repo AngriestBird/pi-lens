@@ -53,6 +53,7 @@ import https from "node:https";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { isFullyQualified } from "../path-utils.js";
 
 const _installerRequire = createRequire(import.meta.url);
 import { createGunzip } from "node:zlib";
@@ -3663,7 +3664,7 @@ export async function ensureTool(
 	// Fast path 1: in-memory session cache — no I/O.
 	const cached = resolvedPathCache.get(toolId);
 	if (cached) {
-		if (!path.isAbsolute(cached)) return cached;
+		if (!isFullyQualified(cached)) return cached;
 		try {
 			await fs.access(cached);
 			return cached;
