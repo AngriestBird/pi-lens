@@ -22,6 +22,27 @@ import {
 } from "../../clients/path-utils.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
+describe("isWindowsPath (#1213 review pins)", () => {
+	it("matches drive-prefixed and UNC shapes only", async () => {
+		const { isWindowsPath } = await import("../../clients/path-utils.js");
+		expect(isWindowsPath("C:\foo")).toBe(true);
+		expect(isWindowsPath("D:relative")).toBe(true);
+		expect(isWindowsPath("\\server\share")).toBe(true);
+		expect(isWindowsPath("/path/to/file")).toBe(false);
+		// Backslashes are legal in POSIX filenames — embedded ones must not
+		// classify a path as Windows-shaped (the Linux CI regression).
+		expect(isWindowsPath("/ordinary\name")).toBe(false);
+	});
+});
+
+describe("isFullyQualified matrix additions (#1213 review pins)", () => {
+	it("classifies long-path and embedded-backslash forms", async () => {
+		const { isFullyQualified } = await import("../../clients/path-utils.js");
+		expect(isFullyQualified("\\?\C:\very\long\path")).toBe(true);
+		expect(isFullyQualified("/ordinary\name")).toBe(true);
+	});
+});
+
 describe("path-utils", () => {
 	const fullyQualifiedMatrix = [
 		["Windows drive-relative", "C:foo", false, false],
