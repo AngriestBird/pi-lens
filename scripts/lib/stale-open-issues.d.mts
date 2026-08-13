@@ -10,6 +10,6 @@ export function detectStaleOpenIssues(options: {
 	fetcher: (url: string, init?: RequestInit) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 	repository: string;
 	branch?: string;
-}): Promise<StaleIssueCandidate[]>;
-export function formatSummary(candidates: StaleIssueCandidate[], options?: { runUrl?: string }): string;
+}): Promise<{ candidates: StaleIssueCandidate[]; truncatedCommits: number }>;
+export function formatSummary(candidates: StaleIssueCandidate[], options?: { runUrl?: string; truncatedCommits?: number }): string;
 export function defaultFetcher(token: string): (url: string, init?: RequestInit) => Promise<Response>;

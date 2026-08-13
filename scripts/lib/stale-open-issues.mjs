@@ -10,7 +10,13 @@ const ISSUE_NUMBER = /(?:^|[^\d])#?(\d+)(?!\d)/g;
 
 function numbersFromClosingText(text) {
 	const numbers = new Set();
-	for (const match of String(text ?? "").matchAll(CLOSING_REFERENCE)) numbers.add(Number(match[1]));
+	let scanned = String(text ?? "");
+	// #1356 review: quoted keyword text and reverts are not closing intent.
+	// A revert un-does the closing commit, and prose quoting the form (docs,
+	// changelog snippets) merely mentions it.
+	if (/^\s*Revert\b/i.test(scanned)) return numbers;
+	scanned = scanned.replace(/"[^"\n]*"/g, "").replace(/`[^`\n]*`/g, "");
+	for (const match of scanned.matchAll(CLOSING_REFERENCE)) numbers.add(Number(match[1]));
 	return numbers;
 }
 
@@ -64,13 +70,16 @@ export async function detectStaleOpenIssues({ fetcher, repository, branch = "mas
 			}
 		}
 	}
-	return openIssues.filter((issue) => byIssue.has(issue.number)).map((issue) => ({ issue, evidence: byIssue.get(issue.number) })).sort((a, b) => a.issue.number - b.issue.number);
+	const candidates = openIssues.filter((issue) => byIssue.has(issue.number)).map((issue) => ({ issue, evidence: byIssue.get(issue.number) })).sort((a, b) => a.issue.number - b.issue.number);
+	// No silent caps (#1356 review): say how many commits went unexamined.
+	return { candidates, truncatedCommits: Math.max(0, commits.length - MAX_COMMIT_DETAILS) };
 }
 
-export function formatSummary(candidates, { runUrl } = {}) {
+export function formatSummary(candidates, { runUrl, truncatedCommits = 0 } = {}) {
 	const lines = ["<!-- pi-lens-stale-open-issue-detector -->", "## Stale open-issue candidates", "", "Detection only: a human must verify the evidence and close or update an issue. This job never closes issues.", ""];
 	if (candidates.length === 0) lines.push("No candidates found.");
 	else for (const { issue, evidence } of candidates) lines.push(`- [#${issue.number}](${issue.html_url}) **${issue.title}** — ${evidence.join("; ")}`);
+	if (truncatedCommits > 0) lines.push("", `Note: ${truncatedCommits} commit(s) beyond the ${MAX_COMMIT_DETAILS}-detail cap were NOT examined this run.`);
 	if (runUrl) lines.push("", `Workflow run: ${runUrl}`);
 	return lines.join("\n");
 }

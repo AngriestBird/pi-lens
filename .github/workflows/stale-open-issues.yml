@@ -5,14 +5,15 @@ on:
     - cron: "0 7 * * 1" # Monday 07:00 UTC
   workflow_dispatch: {}
 
-permissions:
-  contents: read
-  issues: write
+permissions: {}
 
 jobs:
   detect:
     name: Detect stale open issues
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout
+      issues: write # single detector summary comment
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_REPOSITORY: ${{ github.repository }}
