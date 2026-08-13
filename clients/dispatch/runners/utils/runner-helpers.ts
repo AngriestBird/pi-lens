@@ -391,13 +391,14 @@ export function createAvailabilityChecker(
 
 			cache.available = false;
 			const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
-			if (result.failure === "spawn" && errorCode === "ENOENT") {
+			if (result.spawnFailure?.kind === "tool-not-found") {
 				resetPathWalkMemo();
 				cache.outcome = "missing";
 			} else if (
 				result.failure === "timeout" ||
 				result.failure === "aborted" ||
 				result.failure === "signal" ||
+				result.spawnFailure?.kind === "killed" ||
 				errorCode === "EAGAIN" ||
 				errorCode === "EBUSY"
 			) {

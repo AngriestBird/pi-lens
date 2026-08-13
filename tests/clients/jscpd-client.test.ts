@@ -47,6 +47,7 @@ describe("jscpd-client", () => {
 				.mockResolvedValueOnce({
 					error: Object.assign(new Error("not found"), { code: "ENOENT" }),
 					failure: "spawn",
+					spawnFailure: { kind: "tool-not-found" } as never,
 					status: 1,
 					stdout: "",
 					stderr: "",
@@ -68,6 +69,7 @@ describe("jscpd-client", () => {
 		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
 			error: Object.assign(new Error("not found"), { code: "ENOENT" }),
 			failure: "spawn",
+			spawnFailure: { kind: "tool-not-found" } as never,
 			status: 1,
 			stdout: "",
 			stderr: "",

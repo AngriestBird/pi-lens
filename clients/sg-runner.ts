@@ -397,16 +397,22 @@ export class SgRunner {
 	private failureForSpawnResult(result: {
 		error?: Error;
 		failure?: string;
+		spawnFailure?: SpawnResult["spawnFailure"];
 	}): SgFailureKind | undefined {
 		if (result.failure === "aborted") return "aborted";
-		if (result.failure === "timeout") return "timeout";
-		if (
-			result.error &&
-			/ENOENT|not found|not installed/i.test(result.error.message)
-		) {
-			return "unavailable";
+		switch (result.spawnFailure?.kind) {
+			case "tool-not-found":
+				return "unavailable";
+			case "timeout":
+				return "timeout";
+			case "killed":
+				return result.failure === "aborted" ? "aborted" : "cli-failure";
+			case "cwd-unresolvable":
+			case "permission-denied":
+			case "spawn-failed":
+			case undefined:
+				return result.error ? "cli-failure" : undefined;
 		}
-		return result.error ? "cli-failure" : undefined;
 	}
 
 	private formatPatternError(stderr: string, args: string[]): string {

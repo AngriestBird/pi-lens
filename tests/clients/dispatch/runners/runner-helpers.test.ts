@@ -24,6 +24,11 @@ const { logSessionStartSpy } = vi.hoisted(() => ({
 	logSessionStartSpy: vi.fn(),
 }));
 
+const missingSpawnFailure = () => ({
+	kind: "tool-not-found" as const,
+	cause: Object.assign(new Error("missing"), { code: "ENOENT" }),
+}) as never;
+
 vi.mock("../../../../clients/sessionstart-logger.js", () => ({
 	logSessionStart: logSessionStartSpy,
 }));
@@ -177,6 +182,7 @@ describe("runner-helpers availability checker", () => {
 			status: 1,
 			error: Object.assign(new Error("missing"), { code: "ENOENT" }),
 			failure: "spawn",
+			spawnFailure: missingSpawnFailure(),
 		});
 		vi.mocked(installerMod.ensureTool).mockResolvedValue("ruff");
 		const checker = createAvailabilityChecker("ruff");
@@ -274,6 +280,7 @@ describe("runner-helpers availability checker", () => {
 				status: null,
 				error: Object.assign(new Error("missing"), { code: "ENOENT" }),
 				failure: "spawn",
+				spawnFailure: missingSpawnFailure(),
 			});
 		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValueOnce(false);
 		// Scoped count: earlier tests in this file legitimately trigger the
@@ -316,6 +323,7 @@ describe("runner-helpers availability checker", () => {
 			status: null,
 			error: Object.assign(new Error("spawn missing ENOENT"), { code: "ENOENT" }),
 			failure: "spawn",
+			spawnFailure: missingSpawnFailure(),
 		});
 		vi.mocked(installerMod.ensureTool).mockResolvedValue(undefined);
 
@@ -354,6 +362,7 @@ describe("runner-helpers availability checker", () => {
 			status: null,
 			error: Object.assign(new Error("spawn missing ENOENT"), { code: "ENOENT" }),
 			failure: "spawn",
+			spawnFailure: missingSpawnFailure(),
 		});
 		const checker = createAvailabilityChecker("missing-tool-success");
 

@@ -38,6 +38,14 @@ uses the awaited durable-store seam: its delta/version snapshot maps to
 policy. Turn-state remains separate pending a future ownership decision.
 (#1209, #1212)
 
+**Spawn repair decisions use the typed safe-spawn taxonomy.** A raw OS
+`ENOENT` can mean either a missing executable or an invalid child cwd. Consume
+`SpawnResult.spawnFailure.kind` / `SpawnFailureError.kind`, never errno or
+message text, and trigger install/reinstall only for `tool-not-found`.
+`cwd-unresolvable`, `permission-denied`, `spawn-failed`, `timeout`, and `killed`
+must remain non-repairable at that seam; the original errno-bearing Error is
+preserved as `cause`. (#1214)
+
 ## Issue and PR design contract
 
 - **Design the state space before coding.** For stateful, ordered, resource-mutating, or security-sensitive work, write the invariants, supported transitions, explicit deferrals, and a cross-product test matrix before implementation. Examples are not enough: cover operation order, preview/apply, validation/normalization/execution seams, failure atomicity, observability bounds, and OS/path/encoding axes. If adversarial review finds repeated cross-product defects, stop patching one symptom at a time and return to the model.
