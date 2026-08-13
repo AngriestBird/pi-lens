@@ -12,6 +12,9 @@
  * the first expectation below fails because the superseded build completes.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { suspendAt } from "./interleaving-kit.js";
+
+const yieldPoint = vi.hoisted(() => vi.fn());
 
 vi.mock("../../clients/cooperative-budget.js", async (importOriginal) => {
 	const actual =
@@ -20,10 +23,7 @@ vi.mock("../../clients/cooperative-budget.js", async (importOriginal) => {
 		...actual,
 		// Keep the test deterministic: every long-line checkpoint yields, without
 		// depending on how much CPU time happened to elapse before it.
-		yieldIfOverBudget: async () => {
-			await new Promise<void>((resolve) => setImmediate(resolve));
-			return true;
-		},
+		yieldIfOverBudget: yieldPoint,
 	};
 });
 
@@ -66,21 +66,15 @@ describe("word-index rebuild supersession (#1227)", () => {
 
 		let generation = 0;
 		let secondBuild: Promise<WordIndex> | undefined;
-		let yieldCount = 0;
-		const realSetImmediate = globalThis.setImmediate;
-		vi.spyOn(globalThis, "setImmediate").mockImplementation(
-			(callback, ...args) => {
-				if (yieldCount++ === 0) {
-					// This is the deterministic interleaving: generation 2 starts
-					// while generation 1 is suspended at its cooperative yield.
-					generation = 1;
-					secondBuild = buildWordIndexAsync(newDocs, () => generation === 1);
-				}
-				return realSetImmediate(callback, ...args);
-			},
-		);
+		const suspension = suspendAt(yieldPoint, async () => true);
 
 		const firstBuild = buildWordIndexAsync(oldDocs, () => generation === 0);
+		await suspension.admitted;
+		// This is the deterministic interleaving: generation 2 starts while
+		// generation 1 is suspended at its cooperative yield.
+		generation = 1;
+		secondBuild = buildWordIndexAsync(newDocs, () => generation === 1);
+		suspension.release();
 		await expect(firstBuild).rejects.toThrow("word index build superseded");
 		expect(secondBuild).toBeDefined();
 
@@ -94,6 +88,6 @@ describe("word-index rebuild supersession (#1227)", () => {
 		expect(replacement.postings.get("oldgenerationalpha")).toBeUndefined();
 		// No staged/partial object is handed to the caller on the superseded path:
 		// the only result is the fully-built generation-2 replacement.
-		expect(yieldCount).toBeGreaterThan(1);
+		expect(yieldPoint).toHaveBeenCalled();
 	});
 });

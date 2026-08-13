@@ -463,6 +463,8 @@ const _snapshotWorkerRequests = new Map<number, PendingSnapshotBody>();
 let _snapshotPersistWorker: Worker | undefined;
 let _snapshotWorkerRequestId = 0;
 let _snapshotWorkerDisabled = false;
+let _snapshotGenerationGateEnabledForTests = true;
+let _snapshotPromotionSeamForTests: (() => Promise<void>) | undefined;
 let _lastSnapshotPersistErrorForTests: string | undefined;
 
 function snapshotWorkerEnabled(): boolean {
@@ -595,9 +597,9 @@ function writeSnapshotBodyOnMainThread(
 	}
 }
 
-function handleSnapshotWorkerResult(
+async function handleSnapshotWorkerResult(
 	result: ProjectSnapshotPersistWorkerResult,
-): void {
+): Promise<void> {
 	const pending = _snapshotWorkerRequests.get(result.id);
 	if (!pending) {
 		fs.rm(result.stagePath, { force: true }, () => {});
@@ -615,10 +617,16 @@ function handleSnapshotWorkerResult(
 		writeSnapshotBodyOnMainThread(pending, result.error ?? "invalid worker result");
 		return;
 	}
+	if (_snapshotPromotionSeamForTests) await _snapshotPromotionSeamForTests();
 	// Generation gate: a newer save already superseded this one — discard the
 	// stale stage file rather than promote it over the fresher body.
-	if (_snapshotGenerations.get(pending.key) !== result.generation) {
-		fs.rm(result.stagePath, { force: true }, () => {});
+	if (
+		_snapshotGenerationGateEnabledForTests &&
+		_snapshotGenerations.get(pending.key) !== result.generation
+	) {
+		// The stale stage is part of the promotion transaction: remove it before
+		// returning so a superseded save cannot leave an orphan behind.
+		fs.rmSync(result.stagePath, { force: true });
 		return;
 	}
 	try {
@@ -894,10 +902,24 @@ export async function terminateProjectSnapshotPersistWorkerForTests(): Promise<v
 /** Test-only: restore worker creation + clear generation state after a deliberate death. */
 export function resetProjectSnapshotPersistWorkerForTests(): void {
 	_snapshotWorkerDisabled = false;
+	_snapshotGenerationGateEnabledForTests = true;
+	_snapshotPromotionSeamForTests = undefined;
 	_snapshotPersistWorker = undefined;
 	_snapshotWorkerRequests.clear();
 	_snapshotGenerations.clear();
 	_lastSnapshotPersistErrorForTests = undefined;
+}
+
+/** Test-only mutation switch for proving the supersession invariant. */
+export function setProjectSnapshotGenerationGateForTests(enabled: boolean): void {
+	_snapshotGenerationGateEnabledForTests = enabled;
+}
+
+/** Test-only seam immediately before generation-gated promotion. */
+export function setProjectSnapshotPromotionSeamForTests(
+	seam: (() => Promise<void>) | undefined,
+): void {
+	_snapshotPromotionSeamForTests = seam;
 }
 
 export function getProjectSnapshotPersistErrorForTests(): string | undefined {
