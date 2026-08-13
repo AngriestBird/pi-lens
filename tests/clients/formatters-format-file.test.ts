@@ -166,4 +166,45 @@ describe("formatFile honors SKIP_FORMATTING (#1144)", () => {
 			env.cleanup();
 		}
 	});
+
+	// #1343 review P1: lenience covers ONLY the documented statuses. rubocop's
+	// benign mode is status 1 (offenses remain after a successful rewrite);
+	// status 2 is a command/config failure and must NOT read as success.
+	it("lenient formatter: documented benign status (1) still succeeds", async () => {
+		const env = setupTestEnvironment("pi-lens-format-file-");
+		try {
+			const filePath = path.join(env.tmpDir, "a.rb");
+			fs.writeFileSync(filePath, "x = 1\n");
+			safeSpawnAsync.mockResolvedValue({ status: 1, stdout: "", stderr: "" });
+
+			const { formatFile, rubocop } = await loadFormatFile();
+			const result = await formatFile(filePath, rubocop);
+
+			expect(result.success).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("lenient formatter: undocumented status (2, bad flag/crash) fails", async () => {
+		const env = setupTestEnvironment("pi-lens-format-file-");
+		try {
+			const filePath = path.join(env.tmpDir, "a.rb");
+			fs.writeFileSync(filePath, "x = 1\n");
+			safeSpawnAsync.mockResolvedValue({
+				status: 2,
+				stdout: "",
+				stderr: "Error: invalid option: --busted",
+			});
+
+			const { formatFile, rubocop } = await loadFormatFile();
+			const result = await formatFile(filePath, rubocop);
+
+			expect(result.success).toBe(false);
+			expect(result.changed).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
 });
+

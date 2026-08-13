@@ -269,3 +269,29 @@ describe("formatFile is strict by default at the seam (#1337)", () => {
 		}
 	});
 });
+
+// #1343 review P1: lenience covers ONLY the documented offense-remains
+// statuses. A bad flag / config failure / crashed child (status 2+) must
+// surface as failure even for lenient tools -- otherwise the #1336 silent
+// no-op survives behind the lenient label.
+describe("lenient statuses are exact, not blanket", () => {
+	it("every lenient formatter declares its exact benign statuses", async () => {
+		const { ALL_FORMATTERS } = await loadFormatters();
+		for (const formatter of ALL_FORMATTERS) {
+			if (formatter.lenientExitCode !== undefined) {
+				expect(
+					formatter.lenientStatuses,
+					`${formatter.name} is lenient but declares no lenientStatuses`,
+				).toBeDefined();
+				expect(formatter.lenientStatuses!.length).toBeGreaterThan(0);
+				expect(formatter.lenientStatuses).not.toContain(0);
+			} else {
+				expect(
+					formatter.lenientStatuses,
+					`${formatter.name} declares lenientStatuses without lenientExitCode`,
+				).toBeUndefined();
+			}
+		}
+	});
+});
+

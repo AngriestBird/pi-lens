@@ -141,6 +141,15 @@ export interface FormatterInfo {
 	 * `tests/clients/dispatch/formatter-exit-code-posture.test.ts` pins the set.
 	 */
 	lenientExitCode?: string;
+	/**
+	 * The EXACT nonzero statuses the documented benign mode covers (#1343
+	 * review): lenient tools distinguish "offenses remain after a successful
+	 * rewrite" (typically 1) from command/config/crash failure (typically 2+).
+	 * Required whenever `lenientExitCode` is set -- a lenient formatter
+	 * accepting ALL nonzero statuses would let a bad flag or crashed child
+	 * read as success (the #1336 bug surviving behind the lenient label).
+	 */
+	lenientStatuses?: number[];
 }
 
 export interface FormatterResult {
@@ -648,6 +657,7 @@ export const sqlfluffFormatter: FormatterInfo = {
 		"when unfixable violations remain (its documented exit codes are 0 = all " +
 		"clean, 1 = violations remain, 2 = command/config failure), so a nonzero " +
 		"exit routinely accompanies a successful rewrite.",
+	lenientStatuses: [1],
 	async resolveCommand(filePath, cwd) {
 		const venv = await findInVenv("sqlfluff", cwd);
 		if (venv) return [venv, "fix", "--force", filePath];
@@ -779,6 +789,7 @@ export const ktlintFormatter: FormatterInfo = {
 		"any lint error remains unfixed — the documented CLI contract (ktlint " +
 		"exits nonzero whenever violations are reported, and -F does not suppress " +
 		"the ones it cannot correct).",
+	lenientStatuses: [1],
 	async resolveCommand(filePath, _cwd) {
 		const inPath = await which("ktlint");
 		if (inPath) return [inPath, "-F", filePath];
@@ -820,6 +831,7 @@ export const rubocopFormatter: FormatterInfo = {
 		"file with an unfixable Lint/UselessAssignment exits 1, and even a " +
 		"tidy file exits 1 on an unfixable Style/Documentation offense — nonzero " +
 		"is the normal outcome, not a failure.",
+	lenientStatuses: [1],
 	async resolveCommand(filePath, cwd) {
 		if (await canUseBundleExec(cwd))
 			return ["bundle", "exec", "rubocop", "-a", "--no-color", filePath];
@@ -840,6 +852,7 @@ export const standardrbFormatter: FormatterInfo = {
 	lenientExitCode:
 		"lint-autofix: standardrb is a RuboCop wrapper and inherits its exit " +
 		"contract — `--fix` exits 1 when offenses remain after the rewrite.",
+	lenientStatuses: [1],
 	async resolveCommand(filePath, cwd) {
 		if (await canUseBundleExec(cwd))
 			return ["bundle", "exec", "standardrb", "--fix", filePath];
@@ -1331,7 +1344,11 @@ export async function formatFile(
 		// read as a successful run. Everything else that exits nonzero never
 		// rewrote the file, and reporting {success: true, changed: false} there is
 		// indistinguishable from "already formatted" — the #1336 silent no-op.
-		if (result.error || (!formatter.lenientExitCode && result.status !== 0)) {
+		const lenientOk =
+			formatter.lenientExitCode !== undefined &&
+			result.status !== null &&
+			(formatter.lenientStatuses ?? []).includes(result.status);
+		if (result.error || (result.status !== 0 && !lenientOk)) {
 			return {
 				success: false,
 				changed: false,
