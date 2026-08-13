@@ -4,6 +4,9 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
 
+const toolNotFound = (message = "ENOENT: command not found") =>
+	Object.assign(new Error(message), { kind: "tool-not-found" as const });
+
 const observedReadFileSync = vi.hoisted(() => vi.fn());
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
@@ -285,7 +288,7 @@ describe("lsp server policy", () => {
 		);
 		dirs.push(tmp);
 
-		launchLSP.mockRejectedValue(new Error("ENOENT: command not found"));
+		launchLSP.mockRejectedValue(toolNotFound());
 
 		const spawned = await CSharpServer.spawn(tmp, { allowInstall: false });
 		expect(spawned).toBeUndefined();
@@ -633,7 +636,7 @@ describe("lsp server policy", () => {
 		);
 		dirs.push(tmp);
 
-		launchLSP.mockRejectedValue(new Error("ENOENT: command not found"));
+		launchLSP.mockRejectedValue(toolNotFound());
 
 		const spawned = await BashServer.spawn(tmp, { allowInstall: false });
 		expect(spawned).toBeUndefined();
@@ -669,7 +672,7 @@ describe("lsp server policy", () => {
 		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
 
 		process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
-		launchLSP.mockRejectedValue(new Error("ENOENT: command not found"));
+		launchLSP.mockRejectedValue(toolNotFound());
 
 		const spawned = await SvelteServer.spawn(tmp);
 		expect(spawned?.process).toBeUndefined();
@@ -683,7 +686,7 @@ describe("lsp server policy", () => {
 		dirs.push(tmp);
 		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
 
-		launchLSP.mockRejectedValue(new Error("ENOENT: command not found"));
+		launchLSP.mockRejectedValue(toolNotFound());
 
 		const spawned = await SvelteServer.spawn(tmp, { allowInstall: false });
 		expect(spawned?.process).toBeUndefined();
@@ -776,7 +779,7 @@ describe("lsp server policy", () => {
 					pid: 1234,
 				};
 			}
-			throw new Error(`unexpected command: ${command}`);
+			throw toolNotFound(`unexpected command: ${command}`);
 		});
 
 		const spawned = await PythonServer.spawn(tmp, { allowInstall: true });
@@ -813,7 +816,7 @@ describe("lsp server policy", () => {
 					pid: 5678,
 				};
 			}
-			throw new Error(`unexpected command: ${command}`);
+			throw toolNotFound(`unexpected command: ${command}`);
 		});
 
 		const spawned = await PythonServer.spawn(tmp, { allowInstall: true });
@@ -850,7 +853,7 @@ describe("lsp server policy", () => {
 					pid: 4321,
 				};
 			}
-			throw new Error(`unexpected command: ${command}`);
+			throw toolNotFound(`unexpected command: ${command}`);
 		});
 
 		const spawned = await PythonServer.spawn(tmp, { allowInstall: true });
@@ -892,7 +895,7 @@ describe("lsp server policy", () => {
 					pid: 4321,
 				};
 			}
-			throw new Error(`unexpected command: ${command}`);
+			throw toolNotFound(`unexpected command: ${command}`);
 		});
 
 		const spawned = await TomlServer.spawn(tmp, { allowInstall: true });
@@ -921,7 +924,7 @@ describe("lsp server policy", () => {
 					pid: 2468,
 				};
 			}
-			throw new Error(`unexpected command: ${command}`);
+			throw toolNotFound(`unexpected command: ${command}`);
 		});
 
 		const spawned = await KotlinServer.spawn(tmp, { allowInstall: true });
@@ -937,7 +940,7 @@ describe("lsp server policy", () => {
 		ensureTool.mockResolvedValue(path.join(tmp, "bin", "zls.exe"));
 		launchLSP.mockImplementation(async (command: string) => {
 			if (command === "zls") {
-				throw new Error("ENOENT: command not found");
+				throw toolNotFound();
 			}
 			if (command.endsWith(path.join("bin", "zls.exe"))) {
 				return {
@@ -948,7 +951,7 @@ describe("lsp server policy", () => {
 					pid: 9753,
 				};
 			}
-			throw new Error(`unexpected command: ${command}`);
+			throw toolNotFound(`unexpected command: ${command}`);
 		});
 
 		const spawned = await ZigServer.spawn(tmp, { allowInstall: true });
@@ -1183,7 +1186,14 @@ describe("lsp server policy", () => {
 			launchLSP.mockImplementation(async (command: string) => {
 				calls.push(`launch(${command})`);
 				if (calls.length <= 2) {
-					throw new Error("BROKEN");
+					throw Object.assign(new Error("tool not found"), {
+						kind: "tool-not-found",
+					});
+				}
+				if (command === "rust-analyzer") {
+					throw Object.assign(new Error("tool not found"), {
+						kind: "tool-not-found",
+					});
 				}
 				if (command === MANAGED) {
 					return {
@@ -1194,7 +1204,7 @@ describe("lsp server policy", () => {
 						pid: 9999,
 					};
 				}
-				throw new Error(`unexpected: ${command} (call #${calls.length})`);
+				throw toolNotFound(`unexpected: ${command} (call #${calls.length})`);
 			});
 
 			ensureTool.mockImplementation(

@@ -21,6 +21,10 @@ import { getGlobalPiLensDir } from "../file-utils.js";
 import { isFullyQualified } from "../path-utils.js";
 import { findGlobalBinary } from "../package-manager.js";
 import { redactSecrets } from "../redact/secrets.js";
+import {
+	classifySpawnFailure,
+	SpawnFailureError,
+} from "../safe-spawn.js";
 import { getRubyVersionDirNamesAsync } from "./ruby-drive-dirs.js";
 
 export interface LSPProcess {
@@ -421,12 +425,12 @@ function _attachErrorHandler(
 			);
 		}
 
-		// If we have a reject function and this is an immediate spawn error, reject
-		if (
-			rejectOnImmediateError &&
-			(err as NodeJS.ErrnoException).code === "ENOENT"
-		) {
-			rejectOnImmediateError(err);
+		// Preserve intent at the boundary instead of leaking a raw errno check.
+		if (rejectOnImmediateError && logContext) {
+			void classifySpawnFailure(err, {
+				command: logContext.command,
+				cwd: logContext.cwd,
+			}).then(rejectOnImmediateError);
 		}
 	});
 
@@ -551,9 +555,11 @@ export async function launchLSP(
 		logSessionStart(
 			`lsp cmd-shim-invalid: ${spawnCommand} target missing — skipping candidate`,
 		);
-		throw new Error(
-			`LSP .cmd shim target not found: ${spawnCommand}. The npm package may not be installed.`,
+		const cause = Object.assign(
+			new Error(`LSP .cmd shim target not found: ${spawnCommand}`),
+			{ code: "ENOENT" },
 		);
+		throw await classifySpawnFailure(cause, { command, cwd });
 	}
 
 	// P0 FIX: Never spawn .ps1 wrappers on Windows — they hang when PowerShell
@@ -591,10 +597,10 @@ export async function launchLSP(
 				const needsShellGlobal = computeNeedsShell(globalBinPath);
 				proc = trySpawn(globalBinPath, args, cwd, env, needsShellGlobal);
 			} else {
-				throw err;
+				throw await classifySpawnFailure(err, { command, cwd });
 			}
 		} else {
-			throw err;
+			throw await classifySpawnFailure(err, { command, cwd });
 		}
 	}
 
@@ -634,15 +640,21 @@ export async function launchLSP(
 			let settled = false;
 
 			// Attach error handler that can reject for immediate errors
-			proc.on("error", (err: Error & { code?: string }) => {
-				if (!settled && (err.code === "ENOENT" || err.code === "EINVAL")) {
+			proc.on("error", (err: Error) => {
+				if (!settled) {
 					settled = true;
-					reject(
-						new Error(
-							`LSP server binary not found: ${command}. ` +
-								`Install it or check your PATH.${formatStartupStderr(startupStderr)}`,
-						),
-					);
+					void classifySpawnFailure(err, { command, cwd }).then((failure) => {
+						const detail = formatStartupStderr(startupStderr);
+						reject(
+							detail
+								? new SpawnFailureError(
+									failure.kind,
+									`${failure.message}${detail}`,
+									failure.cause,
+								)
+								: failure,
+						);
+					});
 				}
 			});
 

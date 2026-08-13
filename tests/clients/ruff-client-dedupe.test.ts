@@ -72,6 +72,7 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 				status: 1,
 				error: Object.assign(new Error("not found"), { code: "ENOENT" }),
 				failure: "spawn",
+				spawnFailure: { kind: "tool-not-found" } as never,
 				stdout: "",
 				stderr: "",
 			})
@@ -98,6 +99,7 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 			status: 1,
 			error: Object.assign(new Error("not found"), { code: "ENOENT" }),
 			failure: "spawn",
+			spawnFailure: { kind: "tool-not-found" } as never,
 			stdout: "",
 			stderr: "",
 		});
