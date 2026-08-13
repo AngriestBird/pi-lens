@@ -14,7 +14,6 @@ export function summarizeSection(
 export function normalizeVersion(version: string): string;
 export function extractSection(text: string, version: string): string | null;
 export function hasSection(text: string, version: string): boolean;
-export function unreleasedHasEntries(text: string): boolean;
 
 export interface ChangelogLintProblem {
   kind: "orphan" | "wrapped-title";
@@ -24,8 +23,4 @@ export interface ChangelogLintProblem {
 
 export function lintSectionBody(body: string | null): ChangelogLintProblem[];
 export function lintUnreleased(text: string): ChangelogLintProblem[];
-export function promoteUnreleased(
-  text: string,
-  version: string,
-  date: string,
-): string;
+export const EMPTY_UNRELEASED: string;

@@ -18,8 +18,6 @@ import {
   normalizeVersion,
   extractSection,
   hasSection,
-  unreleasedHasEntries,
-  promoteUnreleased,
   summarizeSection,
   lintSectionBody,
   lintUnreleased,
@@ -93,35 +91,6 @@ describe("changelog lib — parsing", () => {
     expect(extractSection(SAMPLE, "9.9.9")).toBeNull();
     expect(hasSection(SAMPLE, "9.9.9")).toBe(false);
     expect(hasSection(SAMPLE, "3.8.60")).toBe(true);
-  });
-});
-
-describe("changelog lib — promoteUnreleased", () => {
-  it("moves Unreleased to a dated section and opens a fresh empty one", () => {
-    const next = promoteUnreleased(SAMPLE, "3.8.61", "2026-06-25");
-    // New empty Unreleased on top, with no bullets yet.
-    expect(unreleasedHasEntries(next)).toBe(false);
-    // The old entries now live under the dated version.
-    expect(extractSection(next, "3.8.61")).toContain("- **New thing**");
-    expect(next).toContain("## [3.8.61] - 2026-06-25");
-    // Older sections are untouched.
-    expect(extractSection(next, "3.8.60")).toContain("- **A fix**");
-  });
-
-  it("refuses when Unreleased has no entries", () => {
-    const emptyUnreleased = SAMPLE.replace(
-      "- **New thing** — does a thing.",
-      "",
-    );
-    expect(() =>
-      promoteUnreleased(emptyUnreleased, "3.8.61", "2026-06-25"),
-    ).toThrow(/no entries/i);
-  });
-
-  it("refuses to overwrite an existing version section", () => {
-    expect(() => promoteUnreleased(SAMPLE, "3.8.60", "2026-06-25")).toThrow(
-      /already has a section/i,
-    );
   });
 });
 
@@ -282,10 +251,9 @@ describe("changelog lib — lintSectionBody / lintUnreleased", () => {
 
 describe("repo CHANGELOG.md contract", () => {
   it("has an Unreleased section (may be empty right after a release bump)", () => {
-    // Existence, not entries: `changelog:release` promotes [Unreleased] to a
-    // dated section and opens a fresh EMPTY one, so requiring entries here would
-    // fail on every release commit. `npm run changelog:check` guards the
-    // has-entries precondition at the point it actually matters (pre-bump).
+    // Existence, not entries: `changelog:release` opens a fresh EMPTY section.
+    // `npm run changelog:check` validates PR-authored `.changelog/` entries
+    // instead of requiring legacy bullets under [Unreleased].
     expect(extractSection(CHANGELOG, "Unreleased")).not.toBeNull();
   });
 

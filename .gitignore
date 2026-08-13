@@ -51,6 +51,8 @@ migrate-*.js
 
 # Documentation files - only keep specific docs in public repo
 *.md
+!tests/fixtures/changelog-entries/*.md
+!.changelog/*.md
 !AGENTS.md
 !README.md
 !CHANGELOG.md
