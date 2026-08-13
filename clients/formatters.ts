@@ -9,6 +9,7 @@
  * Inspired by OpenCode's formatter.ts pattern
  */
 
+import { logExtension } from "./extension-log.js";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
@@ -65,9 +66,11 @@ export async function tryLazyInstallFormatterTool(
 		});
 		const ok = !res.error && res.status === 0;
 		if (!ok) {
-			console.error(
-				`[format] lazy-install rubocop failed: ${res.error?.message ?? res.stderr ?? "exit " + res.status}`,
-			);
+			logExtension({
+				subsystem: "format",
+				message: `lazy-install rubocop failed: ${res.error?.message ?? res.stderr ?? "exit " + res.status}`,
+				metadata: { tool: "rubocop", cwd },
+			});
 		}
 		return ok;
 	}
@@ -79,9 +82,11 @@ export async function tryLazyInstallFormatterTool(
 	});
 	const ok = !res.error && res.status === 0;
 	if (!ok) {
-		console.error(
-			`[format] lazy-install rustfmt failed: ${res.error?.message ?? res.stderr ?? "exit " + res.status}`,
-		);
+		logExtension({
+			subsystem: "format",
+			message: `lazy-install rustfmt failed: ${res.error?.message ?? res.stderr ?? "exit " + res.status}`,
+			metadata: { tool: "rustfmt", cwd },
+		});
 	}
 	return ok;
 }
@@ -1126,7 +1131,13 @@ export async function getFormattersForFile(
 				}
 			} catch (err) {
 				// pi-lens-ignore: missing-error-propagation — optional formatter detection, skip on failure
-				console.error(`[format] Detection failed for ${formatter.name}:`, err);
+				logExtension({
+					subsystem: "format",
+					message: `Detection failed for ${formatter.name}: ${
+						err instanceof Error ? err.message : String(err)
+					}`,
+					metadata: { formatter: formatter.name, cwd },
+				});
 			}
 		}
 	}

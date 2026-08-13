@@ -1,3 +1,5 @@
+import { logExtension } from "./extension-log.js";
+import { notifyUserDegradation } from "./user-notify.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -125,9 +127,16 @@ function warnInvalidGlobalConfigOnce(configPath: string, reason: string): void {
 	const key = `${configPath}:${reason}`;
 	if (warnedInvalidGlobalConfigs.has(key)) return;
 	warnedInvalidGlobalConfigs.add(key);
-	console.error(
-		`[pi-lens] ignoring invalid global config ${configPath}: ${reason}`,
-	);
+	const message = `ignoring invalid global config ${configPath}: ${reason}`;
+	logExtension({
+		subsystem: "lens-config",
+		level: "warn",
+		message,
+		metadata: { configPath, reason },
+	});
+	// HUMAN-audience too: a config the user wrote is being ignored. Routed
+	// through the host's own render path (#1333), never a raw write.
+	notifyUserDegradation(`pi-lens: ${message}`);
 }
 
 /** For tests that need to force the warn-once cache to reset between cases. */

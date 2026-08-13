@@ -8,6 +8,7 @@
  * Docs: https://github.com/kucherenko/jscpd
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import { mkdtempSync } from "node:fs";
 import * as os from "node:os";
@@ -80,7 +81,7 @@ export class JscpdClient {
 	private log: (msg: string) => void;
 
 	constructor(verbose = false) {
-		this.log = verbose ? (msg) => console.error(`[jscpd] ${msg}`) : () => {};
+		this.log = verbose ? createSubsystemLogger("jscpd") : () => {};
 	}
 
 	/**

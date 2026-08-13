@@ -40,6 +40,7 @@
  * letting them poison the "worst real block" high-water.
  */
 
+import { logExtension } from "./extension-log.js";
 import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 
 const NS_PER_MS = 1e6;
@@ -79,11 +80,12 @@ export function startEventLoopMonitor(resolutionMs = 20): void {
 		windowStartCpuMs = cpuTotalMs();
 	} catch (err) {
 		monitorUnavailable = true;
-		console.error(
-			`[pi-lens] event-loop occupancy telemetry disabled (runtime lacks monitorEventLoopDelay): ${
+		logExtension({
+			subsystem: "event-loop-monitor",
+			message: `event-loop occupancy telemetry disabled (runtime lacks monitorEventLoopDelay): ${
 				(err as Error)?.message ?? String(err)
 			}`,
-		);
+		});
 	}
 }
 

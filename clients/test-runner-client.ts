@@ -11,6 +11,7 @@
  * specific file being edited, not the entire suite.
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { minimatch } from "./deps/minimatch.js";
@@ -256,7 +257,7 @@ export class TestRunnerClient {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[test-runner] ${msg}`)
+			? createSubsystemLogger("test-runner")
 			: () => {};
 	}
 

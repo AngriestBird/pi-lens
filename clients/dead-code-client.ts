@@ -12,6 +12,7 @@
  * implementing DeadCodeClient and adding to getDeadCodeClients().
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as path from "node:path";
 import { findNearestMarkerRoot } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
@@ -144,7 +145,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[dead-code:python] ${msg}`)
+			? createSubsystemLogger("dead-code:python")
 			: () => {};
 	}
 

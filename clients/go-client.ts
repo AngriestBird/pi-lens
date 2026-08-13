@@ -7,6 +7,7 @@
  * Docs: https://pkg.go.dev/golang.org/x/tools/gopls
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { safeSpawnAsync } from "./safe-spawn.js";
@@ -47,7 +48,7 @@ export class GoClient {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[go] ${msg}`)
+			? createSubsystemLogger("go")
 			: () => {};
 	}
 

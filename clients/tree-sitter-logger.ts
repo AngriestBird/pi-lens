@@ -24,7 +24,11 @@ export interface TreeSitterLogEntry {
 		| "runner_complete"
 		| "entity_diff"
 		| "blast_radius"
-		| "cache_stats";
+		| "cache_stats"
+		// #1333: free-form operational text that used to be a raw console.error
+		// (or a verbose-gated one) from the tree-sitter stack. `reason` carries
+		// the message, `metadata.subsystem` the emitting module.
+		| "diagnostic";
 	filePath: string;
 	languageId?: string;
 	queryId?: string;
@@ -92,6 +96,37 @@ export function logTreeSitterCacheStats(options: {
 				totalLines: options.stats.totalLines,
 			},
 		},
+	});
+}
+
+/**
+ * The tree-sitter stack's terminal-safe diagnostic sink (#1333).
+ *
+ * pi owns the terminal, so nothing under `clients/` may `console.error`. The
+ * tree-sitter subsystem already owns `tree-sitter.log`, so its diagnostics stay
+ * there rather than moving to the generic `extension.log` — one log per
+ * subsystem, per the AGENTS.md logger invariant.
+ *
+ * `filePath` is optional because several of these fire process-wide (WASM
+ * abort, grammar fetch, rule compile) with no file in hand.
+ */
+export function logTreeSitterDiagnostic(entry: {
+	/** Emitting module, e.g. `tree-sitter-client`, `symbol-extractor`. */
+	subsystem: string;
+	message: string;
+	/** `debug` is what the previously verbose-gated loggers write at. */
+	level?: "error" | "warn" | "debug";
+	filePath?: string;
+	languageId?: string;
+	metadata?: Record<string, unknown>;
+}): void {
+	logTreeSitter({
+		phase: "diagnostic",
+		filePath: entry.filePath ?? "<tree-sitter>",
+		...(entry.languageId ? { languageId: entry.languageId } : {}),
+		status: entry.level ?? "error",
+		reason: entry.message,
+		metadata: { subsystem: entry.subsystem, ...(entry.metadata ?? {}) },
 	});
 }
 

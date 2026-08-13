@@ -9,6 +9,7 @@
  * All paths are relative to project root (process.cwd()).
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "./file-utils.js";
@@ -103,7 +104,7 @@ export class CacheManager {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[cache] ${msg}`)
+			? createSubsystemLogger("cache")
 			: () => {};
 	}
 

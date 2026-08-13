@@ -1,3 +1,4 @@
+import { logExtension } from "./extension-log.js";
 import type { Diagnostic } from "./dispatch/types.js";
 
 export const LENS_EVENT_VERSION = 1;
@@ -102,9 +103,12 @@ function emitLensEvent(eventName: LensEventName, payload: unknown): void {
 			if (!emit) {
 				if (!_droppedEmitLogged) {
 					_droppedEmitLogged = true;
-					console.error(
-						`[pi-lens] lens event dropped (no live bus): ${eventName} — further drops logged once per process`,
-					);
+					logExtension({
+						subsystem: "lens-events",
+						level: "warn",
+						message: `lens event dropped (no live bus): ${eventName} — further drops logged once per process`,
+						metadata: { eventName },
+					});
 				}
 				return;
 			}

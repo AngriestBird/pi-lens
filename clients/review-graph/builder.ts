@@ -1595,7 +1595,9 @@ function writePendingOnMainThread(
 			pending,
 			workerState,
 		);
-		console.error("[review-graph] cache persist failed:", message);
+		// #1333: recordPersistFailure already emits `phase: "persist_failed"` to
+		// review-graph.log with this same message — the console.error was a
+		// duplicate RAW write into pi's frame, not a second destination.
 	}
 }
 
@@ -2922,11 +2924,12 @@ async function ensureReviewGraphFacts(
 		await functionFactProvider.run(ctx, facts);
 		// pi-lens-ignore: missing-error-propagation
 	} catch (err) {
-		console.error(
-			`[pi-lens] review-graph structural facts disabled (degraded mode): ${
-				(err as Error)?.message ?? String(err)
-			}`,
-		);
+		logReviewGraph({
+			cwd,
+			phase: "build_skipped",
+			reason: "structural_facts_disabled",
+			error: (err as Error)?.message ?? String(err),
+		});
 	}
 }
 

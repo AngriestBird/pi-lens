@@ -12,6 +12,7 @@
  * unified runner that delegates to the LSP service.
  */
 
+import { logExtension } from "../../extension-log.js";
 import { getLSPService } from "../../lsp/index.js";
 import { RUNTIME_CONFIG } from "../../runtime-config.js";
 import { PRIORITY } from "../priorities.js";
@@ -199,9 +200,11 @@ const lspRunner: RunnerDefinition = {
 				failureReason.includes("connection") ||
 				failureReason.includes("JSON RPC")
 			) {
-				console.error(
-					`[lsp-runner] LSP server failed for ${diagnosticPath}: ${failureReason}`,
-				);
+				logExtension({
+					subsystem: "lsp-runner",
+					message: `LSP server failed for ${diagnosticPath}: ${failureReason}`,
+					metadata: { filePath: diagnosticPath },
+				});
 			}
 		}
 

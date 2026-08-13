@@ -47,6 +47,8 @@
  * clients/lsp/server.ts (e.g. "rust", "nix", "bash", "python", "go", "ts").
  */
 
+import { logExtension } from "../extension-log.js";
+import { notifyUserDegradation } from "../user-notify.js";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { getGlobalPiLensDir } from "../file-utils.js";
@@ -106,7 +108,15 @@ const CONFIG_PATHS = [".pi-lens/lsp.json", ".pi-lens.json", "pi-lsp.json"];
 
 function warnInvalidLSPConfig(configPath: string, error: unknown): void {
 	const reason = error instanceof Error ? error.message : String(error);
-	console.error(`[pi-lens] ignoring invalid LSP config ${configPath}: ${reason}`);
+	const message = `ignoring invalid LSP config ${configPath}: ${reason}`;
+	logExtension({
+		subsystem: "lsp-config",
+		level: "warn",
+		message,
+		metadata: { configPath, reason },
+	});
+	// HUMAN-audience too: the user's own lsp.json is being ignored (#1333).
+	notifyUserDegradation(`pi-lens: ${message}`);
 }
 
 async function readLSPConfig(configPath: string): Promise<LSPConfig | undefined> {

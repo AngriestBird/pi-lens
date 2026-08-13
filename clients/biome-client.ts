@@ -8,6 +8,7 @@
  * Docs: https://biomejs.dev/
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isFileKind } from "./file-kinds.js";
@@ -49,7 +50,7 @@ export class BiomeClient {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[biome] ${msg}`)
+			? createSubsystemLogger("biome")
 			: () => {};
 	}
 

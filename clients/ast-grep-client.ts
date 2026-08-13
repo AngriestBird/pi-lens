@@ -8,6 +8,7 @@
  * Rules: ./rules/ directory
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -174,7 +175,7 @@ export class AstGrepClient {
 				? projectRuleDir
 				: resolvePackagePath(import.meta.url, "rules"));
 		this.log = verbose
-			? (msg: string) => console.error(`[ast-grep] ${msg}`)
+			? createSubsystemLogger("ast-grep")
 			: () => {};
 		this.ruleManager = new AstGrepRuleManager(this.ruleDir, this.log);
 		this.runner = new SgRunner(verbose);
