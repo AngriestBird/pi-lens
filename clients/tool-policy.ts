@@ -847,6 +847,7 @@ export type LintRunnerName =
 	| "markdownlint"
 	| "htmlhint"
 	| "hadolint"
+	| "helm-lint"
 	| "golangci-lint"
 	| "phpstan"
 	| "ktlint"
@@ -996,6 +997,7 @@ const TOOL_EXECUTION_POLICY = new Map<string, ToolExecutionPolicy>([
 	["mypy", { gate: "config-first", autoInstall: true }],
 	["taplo", { gate: "smart-default", autoInstall: true }],
 	["hadolint", { gate: "smart-default", autoInstall: true }],
+	["helm", { gate: "smart-default", autoInstall: true }],
 	["htmlhint", { gate: "smart-default", autoInstall: true }],
 	["ktlint", { gate: "smart-default", autoInstall: true }],
 	// ktfmt is opt-in (a project's explicit formatting choice), so it only runs

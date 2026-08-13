@@ -1,5 +1,11 @@
 # pi-lens — agent context
 
+Helm chart linting uses the shared workspace-topology `Chart.yaml` marker. YAML
+and `.tpl` edits inside a chart dispatch one canonical-root-deduplicated,
+bounded `helm lint` pass through the ordinary typed availability/install seam.
+It is smart-default and read-only; rendered-manifest validation remains deferred
+to #1283 slice B.
+
 ## Maintaining this file (do this on every commit)
 
 AGENTS.md is the durable context handed to every agent that works on pi-lens. **Update it as part of the same commit that changes the world it describes** — never as a follow-up:
