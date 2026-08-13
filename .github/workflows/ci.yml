@@ -7,6 +7,20 @@ on:
     branches: [master]
 
 jobs:
+  close-keyword-lint:
+    name: Close-keyword syntax
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate per-issue close keywords
+        run: node scripts/check-close-keywords.mjs --lint-pr
+
   lint-and-typecheck:
     name: Lint & type-check
     runs-on: ubuntu-latest
