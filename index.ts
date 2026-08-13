@@ -306,6 +306,11 @@ export function createHostPorts(
 			extension: logExtension,
 			debug: (message, metadata) =>
 				logExtension({ subsystem: "host", level: "debug", message, metadata }),
+			// DECLARATION-ONLY in S2 (#1367 review): no production code consumes
+			// ports.log.sink yet -- the 13 subsystem loggers still own their
+			// NDJSON files directly. Migrating them onto this port (routing to
+			// their per-subsystem files, NOT extension.log) is S4 scope; this
+			// placeholder exists so the interface is complete for contract tests.
 			sink: (subsystem) => (entry) =>
 				logExtension({ subsystem, level: "debug", message: "host sink entry", metadata: { entry } }),
 		},
@@ -483,21 +488,8 @@ export default function (pi: ExtensionAPI) {
 	// through the host's own render path. Per the #338/#798 detached-callback
 	// rule the notifier is resolved from the LATEST event ctx at delivery time,
 	// never captured once — a session replacement invalidates the old ctx.ui.
-	wireUserNotifier(() => {
-		const ui = latestEventCtx?.ui;
-		if (!ui || typeof ui.notify !== "function") return undefined;
-		// #1334 S2: in "print"/"json" the process is a one-shot producing
-		// machine- or pipe-consumed output — there is no interactive surface for
-		// a degradation notice, and the ndjson sink already holds it. Returning
-		// undefined is exactly the "no host wired" path user-notify.ts already
-		// documents as fail-soft, so nothing is lost, only un-rendered.
-		if (suppressesUserNotify(readExtensionMode(latestEventCtx))) {
-			return undefined;
-		}
-		return (message: string, level?: "info" | "warning" | "error") =>
-			ui.notify(message, level ?? "warning");
-	});
-	// S2 canonical wiring supersedes the compatibility getter immediately above.
+	// #1334 S2: the ports notifier owns mode suppression + live-ctx resolution
+	// (per-call, never captured -- the #338/#798 detached-callback rule).
 	wireUserNotifier(hostPorts);
 	initLensEventsGetter(() => ({ emit: hostPorts.emit.lens }));
 	const getLiveEmit = () => hostPorts.emit.bus;
