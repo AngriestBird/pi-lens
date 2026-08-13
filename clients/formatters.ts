@@ -10,7 +10,6 @@
  */
 
 import { logExtension } from "./extension-log.js";
-import { recordDegradation } from "./degradation-ledger.js";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
