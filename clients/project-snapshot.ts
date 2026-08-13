@@ -597,6 +597,25 @@ function writeSnapshotBodyOnMainThread(
 	}
 }
 
+/**
+ * The ForTests promotion seam must cover BOTH promotion paths — worker-message
+ * and main-thread fallback — or a suspension test hangs whenever the fallback
+ * fires (worker disabled/dead after a sibling test's reset). Sync and
+ * seam-free in production, identical to calling the writer directly.
+ */
+function dispatchMainThreadWriteThroughSeam(
+	pending: PendingSnapshotBody,
+	reason: string | undefined,
+): void {
+	if (_snapshotPromotionSeamForTests) {
+		void _snapshotPromotionSeamForTests().then(() =>
+			writeSnapshotBodyOnMainThread(pending, reason),
+		);
+		return;
+	}
+	writeSnapshotBodyOnMainThread(pending, reason);
+}
+
 function handleSnapshotWorkerResult(
 	result: ProjectSnapshotPersistWorkerResult,
 ): void {
@@ -625,7 +644,7 @@ function handleSnapshotWorkerResult(
 	) {
 		// The stale stage is part of the promotion transaction: remove it before
 		// returning so a superseded save cannot leave an orphan behind.
-		fs.rmSync(result.stagePath, { force: true });
+		fs.rm(result.stagePath, { force: true }, () => {});
 		return;
 	}
 	try {
@@ -653,7 +672,7 @@ function handleSnapshotWorkerDeath(reason: string): void {
 	_snapshotWorkerDisabled = true;
 	const requests = [..._snapshotWorkerRequests.values()];
 	_snapshotWorkerRequests.clear();
-	for (const pending of requests) writeSnapshotBodyOnMainThread(pending, reason);
+	for (const pending of requests) dispatchMainThreadWriteThroughSeam(pending, reason);
 }
 
 function resolveSnapshotPersistWorkerPath(): string | undefined {
@@ -857,12 +876,12 @@ export function saveProjectSnapshot(
 	ensureSnapshotPersistExitHook();
 
 	if (!snapshotWorkerEnabled()) {
-		writeSnapshotBodyOnMainThread(pending);
+		dispatchMainThreadWriteThroughSeam(pending, undefined);
 		return;
 	}
 	const worker = getSnapshotPersistWorker();
 	if (!worker) {
-		writeSnapshotBodyOnMainThread(pending, "persist worker unavailable");
+		dispatchMainThreadWriteThroughSeam(pending, "persist worker unavailable");
 		return;
 	}
 	const id = ++_snapshotWorkerRequestId;
