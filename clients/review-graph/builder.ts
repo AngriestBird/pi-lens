@@ -1619,7 +1619,10 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 	const { key, pending } = request;
 	const currentGeneration = _persistGenerations.get(key);
 	if (currentGeneration !== result.generation) {
-		fs.rm(result.stagePath, { force: true }, () => {});
+		// Removing the request makes completion observable to test/CLI waiters.
+		// Reap our completed loser synchronously first so "no requests in flight"
+		// also means its stage namespace is clean (#1318).
+		fs.rmSync(result.stagePath, { force: true });
 		logReviewGraph({
 			cwd: key,
 			phase: "persist_skipped",
