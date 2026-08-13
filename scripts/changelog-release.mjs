@@ -11,14 +11,11 @@
 // The release workflow's "Verify changelog entry exists" step already fails CI
 // if `## [VERSION]` is missing, so forgetting to run this is caught before tag.
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import {
-  promoteUnreleased,
-  unreleasedHasEntries,
-  lintUnreleased,
-} from "./lib/changelog.mjs";
+import { unreleasedHasEntries, lintUnreleased } from "./lib/changelog.mjs";
+import { rollupChangelog } from "./rollup-changelog.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CHANGELOG_PATH = join(__dirname, "..", "CHANGELOG.md");
@@ -69,15 +66,18 @@ function main() {
     args.version ?? JSON.parse(readFileSync(PKG_PATH, "utf8")).version;
   const date = args.date ?? new Date().toISOString().slice(0, 10);
 
-  let next;
   try {
-    next = promoteUnreleased(text, version, date);
+    const result = rollupChangelog(version, {
+      rootDir: join(__dirname, ".."),
+      date,
+    });
+    console.log(
+      `Rolled [Unreleased] and ${result.files.length} per-entry changelog file${result.files.length === 1 ? "" : "s"} into [${version}] - ${date}.`,
+    );
   } catch (err) {
     console.error(String(err.message || err));
     process.exit(1);
   }
-  writeFileSync(CHANGELOG_PATH, next, "utf8");
-  console.log(`Promoted [Unreleased] -> [${version}] - ${date}.`);
 }
 
 main();
