@@ -264,6 +264,14 @@ const TOUCH_DEBOUNCE_MS = Math.max(
 	Number.parseInt(process.env.PI_LENS_LSP_TOUCH_DEBOUNCE_MS ?? "1500", 10) ||
 		1500,
 );
+const DEFAULT_LSP_CLIENT_CEILING = 24;
+
+export function getLspClientCeiling(): number {
+	const parsed = Number.parseInt(process.env.PI_LENS_LSP_CLIENT_CEILING ?? "", 10);
+	return Number.isSafeInteger(parsed) && parsed > 0
+		? parsed
+		: DEFAULT_LSP_CLIENT_CEILING;
+}
 // #667: the sweep warm-up round trip's OWN generous, one-time budget —
 // deliberately larger than any single per-file sweep budget (`perFileMs` in
 // `runWorkspaceDiagnostics`, or the batch tool's per-file wait) because this
@@ -919,6 +927,10 @@ export class LSPService {
 	 * successful write clears its entry.
 	 */
 	private readonly notifyWriteBackpressureStreak = new Map<string, number>();
+	/** LRU clock for capacity eviction, keyed by the canonical server/root key. */
+	private readonly clientLastUsedAt = new Map<string, number>();
+	/** Serializes capacity decisions with publication into `state.inFlight`. */
+	private clientSpawnGate: Promise<void> = Promise.resolve();
 	/** True after shutdown() has been called; blocks new operations */
 	private isDestroyed = false;
 	/**
@@ -946,6 +958,61 @@ export class LSPService {
 	/** Guard: return true if service is shutting down or shut down */
 	private checkDestroyed(): boolean {
 		return this.isDestroyed;
+	}
+
+	private async withClientSpawnGate<T>(operation: () => Promise<T>): Promise<T> {
+		const previous = this.clientSpawnGate;
+		let release!: () => void;
+		this.clientSpawnGate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		await previous;
+		try {
+			return await operation();
+		} finally {
+			release();
+		}
+	}
+
+	private async makeCapacityForClient(key: string): Promise<boolean> {
+		const occupiedKeys = new Set(this.state.inFlight.keys());
+		for (const [clientKey, client] of this.state.clients) {
+			if (client.isAlive()) occupiedKeys.add(clientKey);
+		}
+		const occupied = occupiedKeys.size;
+		if (occupied < getLspClientCeiling()) return true;
+
+		const idle = [...this.state.clients.entries()]
+			.filter(
+				([candidateKey, client]) =>
+					candidateKey !== key &&
+					client.isAlive() &&
+					client.isBusy?.() !== true,
+			)
+			.sort(
+				([a], [b]) =>
+					(this.clientLastUsedAt.get(a) ?? this.state.clientSpawnedAt.get(a) ?? 0) -
+					(this.clientLastUsedAt.get(b) ?? this.state.clientSpawnedAt.get(b) ?? 0),
+			);
+		const victim = idle[0];
+		if (!victim) {
+			logSessionStart(
+				`lsp client ceiling ${getLspClientCeiling()}: spawn declined; all clients are in use`,
+			);
+			return false;
+		}
+
+		const [victimKey, victimClient] = victim;
+		await victimClient.shutdown({ reason: "client_ceiling_lru" });
+		this.state.clients.delete(victimKey);
+		this.state.clientSpawnedAt.delete(victimKey);
+		this.state.demonstratedReady.delete(victimKey);
+		this.state.demonstratedCold.delete(victimKey);
+		this.clientLastUsedAt.delete(victimKey);
+		logSessionStart(
+			`lsp client ceiling ${getLspClientCeiling()}: evicted idle LRU ${victimKey}`,
+		);
+		return true;
 	}
 
 	private fingerprintContent(content: string): string {
@@ -1419,6 +1486,7 @@ export class LSPService {
 		const existing = this.state.clients.get(key);
 		if (existing) {
 			if (existing.isAlive()) {
+				this.clientLastUsedAt.set(key, Date.now());
 				if (!this.warmStartLogged.has(key)) {
 					logSessionStart(
 						`lsp warm-start ${server.id}: reused root=${root} file=${filePath}`,
@@ -1471,6 +1539,7 @@ export class LSPService {
 			}
 			this.state.clients.delete(key);
 			this.state.clientSpawnedAt.delete(key);
+			this.clientLastUsedAt.delete(key);
 			this.state.broken.delete(key);
 
 			// #1127: count EARLY, non-intentional runtime exits toward the circuit
@@ -1630,29 +1699,35 @@ export class LSPService {
 			if (isOptionalServer) this.optionalDisabled.delete(key);
 		}
 
-		const inFlight = this.state.inFlight.get(key);
-		if (inFlight) {
-			return inFlight;
+		let spawnPromise = this.state.inFlight.get(key);
+		if (!spawnPromise) {
+			const started = await this.withClientSpawnGate(async () => {
+				const raced = this.state.inFlight.get(key);
+				if (raced) return { promise: raced };
+				// `server.root()` and dead-client cleanup above are async. A reset during
+				// either gap must not let this retired generation start a late spawn.
+				if (this.checkDestroyed()) return undefined;
+				if (!(await this.makeCapacityForClient(key))) return undefined;
+				const promise = this.spawnClient(
+					server,
+					root,
+					key,
+					filePath,
+					allowInstall,
+				);
+				this.state.inFlight.set(key, promise);
+				return { promise };
+			});
+			if (!started) return undefined;
+			spawnPromise = started.promise;
 		}
-
-		// `server.root()` and a dead client's shutdown above are both async. A
-		// reset during either gap may have completed without seeing this request in
-		// state.inFlight; never let that retired generation start a late spawn.
-		if (this.checkDestroyed()) return undefined;
-
-		const spawnPromise = this.spawnClient(
-			server,
-			root,
-			key,
-			filePath,
-			allowInstall,
-		);
-		this.state.inFlight.set(key, spawnPromise);
 
 		try {
 			return await spawnPromise;
 		} finally {
-			this.state.inFlight.delete(key);
+			if (this.state.inFlight.get(key) === spawnPromise) {
+				this.state.inFlight.delete(key);
+			}
 		}
 	}
 
@@ -1765,6 +1840,7 @@ export class LSPService {
 
 			this.state.clients.set(key, client);
 			this.state.clientSpawnedAt.set(key, Date.now());
+			this.clientLastUsedAt.set(key, Date.now());
 			this.failureCounts.delete(key);
 			if (isOptionalServer) {
 				this.optionalDisabled.delete(key);

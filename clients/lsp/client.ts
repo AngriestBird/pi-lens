@@ -411,6 +411,8 @@ export interface LSPClientInfo {
 	documentSymbol(filePath: string): Promise<LSPSymbol[]>;
 	/** Whether this exact document has already been opened on the server. */
 	isDocumentOpen(filePath: string): boolean;
+	/** Whether this client currently has an LSP request in flight. */
+	isBusy?(): boolean;
 	/** URI spelling used when this document was opened. */
 	getDocumentUri(filePath: string): string | undefined;
 	/** Close an open document, if present, without opening or spawning anything. */
@@ -2879,6 +2881,10 @@ export async function createLSPClient(options: {
 			return state.openDocuments.has(normalizeMapKey(filePath));
 		},
 
+		isBusy() {
+			return (activeRequestsByConnection.get(connection) ?? 0) > 0;
+		},
+
 		getDocumentUri(filePath) {
 			return state.openDocumentUris?.get(normalizeMapKey(filePath));
 		},
@@ -3043,6 +3049,8 @@ async function safeSendNotification(
 	}
 }
 
+const activeRequestsByConnection = new WeakMap<MessageConnection, number>();
+
 // Helper to safely send requests - catches stream destruction
 async function safeSendRequest<T>(
 	connection: MessageConnection,
@@ -3076,6 +3084,10 @@ async function safeSendRequest<T>(
 				)
 			: connection.sendRequest(method as never, params as never);
 
+	activeRequestsByConnection.set(
+		connection,
+		(activeRequestsByConnection.get(connection) ?? 0) + 1,
+	);
 	try {
 		// One safe retry on ContentModified (-32801): the document changed under
 		// us, so the server discarded the request. A single retry beats returning
@@ -3102,6 +3114,9 @@ async function safeSendRequest<T>(
 			}
 		}
 	} finally {
+		const remaining = (activeRequestsByConnection.get(connection) ?? 1) - 1;
+		if (remaining > 0) activeRequestsByConnection.set(connection, remaining);
+		else activeRequestsByConnection.delete(connection);
 		if (signal && onAbort) signal.removeEventListener("abort", onAbort);
 		tokenSource?.dispose();
 	}

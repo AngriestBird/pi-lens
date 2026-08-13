@@ -30,6 +30,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **LSP roots and per-session clients are conservatively bounded (closes #1325, refs #1126, refs #1129)** — manifest-bearing fixture conventions (`tests/fixtures`, `__fixtures__`, and `testdata`), gitignored directories, and atomic-write staging namespaces no longer become standalone LSP roots; their files attach to the nearest eligible ancestor project. Client reuse remains keyed by server and normalized resolved root, while a configurable `PI_LENS_LSP_CLIENT_CEILING` (24 by default) evicts the least-recently-used idle client through graceful shutdown before spawning another and never evicts a client with an active LSP request.
+
 - **Kotlin formatter selection follows Spotless configuration deterministically (closes #1306)** — a Spotless `kotlin { ktlint() }` block pins ktlint and `kotlin { ktfmt() }` pins ktfmt, so both selection branches cannot claim the same Kotlin file and unconfigured projects retain the style-preserving no-format policy.
 
 - **Managed npm clients see and execute off-PATH installs (closes [#1289](https://github.com/apmantza/pi-lens/issues/1289))** — madge and Knip availability probes receive the managed environment, Knip threads the same environment into analysis, Biome checks the managed absolute candidate before its npx fallback, and every install result is retained as the command used by the client.

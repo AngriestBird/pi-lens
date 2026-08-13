@@ -113,6 +113,12 @@ Rule-id normalization derives its language suffixes from the bundled CodeRabbit 
 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
 
+LSP root exclusion recognizes fixture conventions by exact path segment; Go's
+`testdata` convention applies ancestor-wide, but names such as `testdata-tools`
+remain ordinary project directories. The positive `.gitignore` glob precheck is
+cached per resolved project root and `size:mtimeMs`, including the absent-file
+empty result, while the project ignore matcher remains authoritative.
+
 
 A pi coding-agent extension that runs automated checks on every file write/edit. Dispatches async parallel runners (LSP, biome, ruff, ast-grep, tree-sitter, jscpd, knip, Madge, and language-specific linters/build checks) and injects findings as context injections at turn-end and session-start.
 
@@ -1257,6 +1263,7 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
 - **Project-wide extension enumeration derives from `KIND_EXTENSIONS`** (#894). `ALL_SCANNABLE_EXTENSIONS`, `WARMUP_SOURCE_EXTS`, and `SUPPORTED_FILE_KINDS` must never regain hand-maintained per-language lists; adding a file kind in `clients/file-kinds.ts` automatically makes source scans and language-profile warmup see it. Preserve consumer-specific narrowing with an explicit `extensions` override at that call site, not by narrowing the shared defaults.
 - Numeric inputs from env vars or JSON config that flow into `Math.max` / `Math.min` must be coerced through a `Number.isFinite(n) && n > 0` guard. `Number(undefined) === NaN`, and a single NaN argument makes `Math.max` return NaN, which `setTimeout` silently treats as 0.
 - **Cross-process LSP pressure is one session-boundary snapshot** (`clients/lsp-budget.ts`, #821): count pressure and the optional complete/fresh aggregate-RSS ceiling (`PI_LENS_LSP_BUDGET_RSS_MB`) feed one cached decision used for auxiliary shedding, the current session's short idle reset, and pull-only diagnostics. Missing/stale RSS samples fail open to count-only; capability decisions reuse `classifyServerWaitTier` (`"pull-capable"`), and the `PI_LENS_CROSS_PROCESS_BUDGET=0` kill switch disables every policy.
+- **Per-session LSP clients have one conservative root/cap policy** (#1325): root candidates under `tests/fixtures`, `__fixtures__`, `testdata`, project ignore rules, or the shared atomic-write staging namespace are declined and resolution continues to an eligible ancestor. Client identity remains `serverId:normalizeMapKey(root)` with in-flight same-key dedupe. `PI_LENS_LSP_CLIENT_CEILING` defaults to 24; the serialized spawn gate counts live/in-flight keys once, gracefully evicts the LRU client with no active LSP request, and declines a new spawn when every capacity candidate is busy.
 - **Detached LSP footer repaints use event-captured UI methods** (#338/#798).
   `lens_diagnostics mode=full` passes an `onServerReady` callback into the
   workspace sweep so each successful cold group warm-up refreshes the footer.
