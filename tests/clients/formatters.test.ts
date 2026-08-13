@@ -209,10 +209,18 @@ describe("resolveCommand — .venv", () => {
 		const cmd = await ruffFormatter.resolveCommand!(filePath, tmpDir);
 
 		expect(cmd).not.toBeNull();
-		expect(cmd).not.toContain("--indent-style");
-		expect(cmd).not.toContain("--indent-width");
-		expect(cmd).toContain("indent-width=4");
-		expect(cmd).toContain("format.indent-style='space'");
+		// Exact argv, not containment: containment stayed green when a review
+		// probe appended an invented flag — only strict equality screens CLI
+		// drift against the real ruff interface (#1336 review finding).
+		expect(cmd).toEqual([
+			binPath,
+			"format",
+			"--config",
+			"indent-width=4",
+			"--config",
+			"format.indent-style='space'",
+			filePath,
+		]);
 	});
 
 	it("ruff: pins detected tab indentation via --config", async () => {
@@ -223,7 +231,15 @@ describe("resolveCommand — .venv", () => {
 
 		const cmd = await ruffFormatter.resolveCommand!(filePath, tmpDir);
 
-		expect(cmd).toContain("format.indent-style='tab'");
+		expect(cmd).toEqual([
+			binPath,
+			"format",
+			"--config",
+			"indent-width=1",
+			"--config",
+			"format.indent-style='tab'",
+			filePath,
+		]);
 	});
 
 	it("ruff: skips when indentation is undetectable and no config exists", async () => {
