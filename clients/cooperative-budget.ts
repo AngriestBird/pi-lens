@@ -44,8 +44,10 @@ export async function forEachCooperatively<T>(
 	};
 	let index = 0;
 	for (const item of items) {
-		// Check before each unit so already-superseded work does not start another
-		// unit; the post-yield check below makes the *latency* bound time-based.
+		// Check before each unit: this per-unit check is what bounds abort
+		// latency (one work unit, not an iteration checkpoint). The post-yield
+		// check below only matters after the final unit's yield, so superseded
+		// work is reported aborted rather than completed.
 		assertContinuing();
 		const result = fn(item, index++);
 		if (
