@@ -165,7 +165,12 @@ export function wrapToolForCompactLine<T extends ToolDefinition<any, any, any>>(
 		if (!summaryText) {
 			summaryText = stripAnsi(fullTextOf(resultLike).split("\n")[0] ?? "").trim();
 		}
-		const line = buildCompactToolLine(summaryText, resultLike.isError === true, theme);
+		// pi invokes tool renderers with `{ content, details }` -- the failure
+		// bit lives on `context.isError`, not the result (#1341 review). Keep
+		// `result.isError` as a fallback for direct/legacy callers.
+		const contextIsError = (context as { isError?: boolean } | undefined)?.isError;
+		const isError = contextIsError ?? resultLike.isError === true;
+		const line = buildCompactToolLine(summaryText, isError === true, theme);
 		return {
 			render: (width: number) => fitLines([line], width),
 			invalidate: () => {},

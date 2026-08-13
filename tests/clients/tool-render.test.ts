@@ -219,10 +219,26 @@ describe("wrapToolForCompactLine — representative tools", () => {
 			result as never,
 			{ expanded: false, isPartial: false },
 			theme,
-			fakeContext(),
+			fakeContext({ isError: true }),
 		);
 		const lines = component?.render(200) ?? [];
 		expect(lines[0]).toContain("[error:✗]");
+	});
+
+	// #1341 review: pi passes results as {content, details} -- failure arrives
+	// on context.isError. A failed tool must not render a success glyph.
+	it("error status comes from context.isError when the result omits isError", () => {
+		const wrapped = wrapToolForCompactLine(diagnosticsTool as unknown as ToolDefinition<any, any, any>);
+		const theme = makeFakeTheme();
+		const component = wrapped.renderResult?.(
+			{ content: [{ type: "text", text: "boom" }], details: {} } as never,
+			{ expanded: false, isPartial: false },
+			theme,
+			fakeContext({ isError: true }),
+		);
+		const line = (component?.render(120) ?? []).join("");
+		expect(line).toContain("[error:✗]");
+		expect(line).not.toContain("[success:");
 	});
 
 	it("tools without a renderResult pass through unchanged (nothing to compact)", () => {
