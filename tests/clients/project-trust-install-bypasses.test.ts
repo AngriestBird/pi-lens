@@ -52,6 +52,23 @@ describe("central project-trust install gate (#1334 review)", () => {
 		expect(safeSpawnAsync).toHaveBeenCalledWith("rustup", expect.any(Array), expect.any(Object));
 	});
 
+	// #1350 delta review: trust denial must NOT latch available=false -- a
+	// later grant (turn_start re-adoption) retries the install.
+	it("govulncheck retries after a trust grant (denial is not sticky)", async () => {
+		const { GovulncheckClient } = await import("../../clients/govulncheck-client.js");
+		const { setProjectTrustState } = await import("../../clients/project-trust.js");
+		const client = new GovulncheckClient() as any;
+		vi.spyOn(client, "probeVersion").mockResolvedValue(false);
+		setProjectTrustState("untrusted");
+		expect(await client.doEnsureAvailable()).toBe(false);
+		expect(safeSpawnAsync).not.toHaveBeenCalled();
+		// SAME instance: the denial must not have latched available=false, so a
+		// later trust grant (turn_start re-adoption) re-attempts the install.
+		setProjectTrustState("trusted");
+		await client.ensureAvailable();
+		expect(safeSpawnAsync).toHaveBeenCalledWith("go", ["version"], expect.any(Object));
+	});
+
 	it("gates govulncheck go install and permits it when trusted", async () => {
 		const { GovulncheckClient } = await import("../../clients/govulncheck-client.js");
 		const blocked = new GovulncheckClient() as any;

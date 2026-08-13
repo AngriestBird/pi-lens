@@ -56,9 +56,18 @@ export function readProjectTrustFromContext(ctx: unknown): ProjectTrustState {
 		const trusted = (accessor as () => unknown).call(ctx);
 		if (typeof trusted !== "boolean") return "unknown";
 		return trusted ? "trusted" : "untrusted";
-	} catch {
+	} catch (accessorErr) {
 		// The accessor exists, so this is not the absent older-host signal. If it
 		// fails, executable content must remain gated until a later adoption works.
+		// Log it (#1350 delta review): a host whose accessor throws on every call
+		// permanently gates installs/LSP, and without this line the only trace is
+		// indirect refusal logs.
+		logExtension({
+			subsystem: "project-trust",
+			level: "warn",
+			message: "isProjectTrusted() threw -- latching untrusted (fail-closed)",
+			metadata: { error: String(accessorErr) },
+		});
 		return "untrusted";
 	}
 }

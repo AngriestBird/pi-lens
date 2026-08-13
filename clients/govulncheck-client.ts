@@ -122,7 +122,10 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 			return true;
 		}
 		if (!assertInstallAllowed("govulncheck go install")) {
-			this.available = false;
+			// Deliberately NOT latching `available = false` (#1350 delta review):
+			// trust denial is policy, not tool absence -- a later trust grant
+			// (re-adopted at turn_start) must be able to retry the install, and
+			// the cached false in ensureAvailable() would make denial permanent.
 			return false;
 		}
 
