@@ -133,7 +133,7 @@ export function rollupChangelog(version, {
   const unreleasedEnd = afterUnreleased < 0 ? changelog.length : unreleasedStart + afterUnreleased + 1;
   let remainder = changelog.slice(unreleasedEnd);
   if (existingBody !== null) {
-    const versionHeading = new RegExp(`^## \\[${version.replace(/\./g, "\\.")}\\][^\\n]*$`, "m");
+    const versionHeading = new RegExp(`^## \\[${version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\][^\\n]*$`, "m");
     const versionStart = remainder.search(versionHeading);
     if (versionStart >= 0) {
       const afterVersion = remainder.slice(versionStart).search(/\n## \[/);
