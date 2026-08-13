@@ -33,6 +33,14 @@ const STATIC_IMPORT = new RegExp(
 	String.raw`import\s+([^;"']*?)\s+from\s*["']${HOST_SDK}["']`,
 	"g",
 );
+/**
+ * `import "<pkg>"` — a bare side-effect import executes the module: a runtime
+ * value import with no clause (#1353 review; the STATIC_IMPORT regex requires
+ * a clause + `from`, so this form needs its own pattern).
+ */
+const SIDE_EFFECT_IMPORT = new RegExp(
+	String.raw`import\s*["']${HOST_SDK}["']`,
+);
 /** `import("<pkg>")` / `require("<pkg>")` — always a runtime value import. */
 const DYNAMIC_IMPORT = new RegExp(
 	String.raw`(?:\bimport|\brequire)\s*\(\s*["']${HOST_SDK}["']`,
@@ -89,6 +97,9 @@ describe("host SDK is imported type-only, never at runtime (#1334 S6)", () => {
 			if (DYNAMIC_IMPORT.test(src)) {
 				offenders.push(`${rel} (dynamic import/require)`);
 			}
+			if (SIDE_EFFECT_IMPORT.test(src)) {
+				offenders.push(`${rel} (side-effect import)`);
+			}
 			for (const match of src.matchAll(STATIC_IMPORT)) {
 				if (!isTypeOnlyClause(match[1])) {
 					offenders.push(`${rel} (value import: ${match[1].trim()})`);
@@ -113,6 +124,8 @@ describe("host SDK is imported type-only, never at runtime (#1334 S6)", () => {
 		expect(isTypeOnlyClause("* as pi")).toBe(false);
 		expect(DYNAMIC_IMPORT.test(`await import("${HOST_SDK}")`)).toBe(true);
 		expect(DYNAMIC_IMPORT.test(`require("${HOST_SDK}")`)).toBe(true);
+		expect(SIDE_EFFECT_IMPORT.test(`import "${HOST_SDK}";`)).toBe(true);
+		expect(SIDE_EFFECT_IMPORT.test(`import type { X } from "${HOST_SDK}";`)).toBe(false);
 	});
 
 	it("keeps the host SDK out of runtime dependencies", () => {
