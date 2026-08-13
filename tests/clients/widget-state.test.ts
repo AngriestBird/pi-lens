@@ -430,9 +430,14 @@ describe("widget-state renderWidget", () => {
 			{ severity: "error", semantic: "blocking", message: "bad", tool: "tsserver" },
 		]);
 		recordFormatter(filePath, "prettier", false, false);
-		const line = renderWidget(120, theme).join("");
-		expect(line).toContain("●");
-		expect(line).not.toMatch(/x .*both-failed/);
+		// Pin the FILE ROW's leading glyph, not the whole render (the #1348
+		// delta review proved whole-output contains-assertions stay green under
+		// a broken precedence branch).
+		const row = renderWidget(120, theme).find((l) => l.includes("both-failed"));
+		expect(row).toBeDefined();
+		const plain = row!.replace(/\[[0-9;]*m/g, "").trimStart();
+		expect(plain.startsWith("●")).toBe(true);
+		expect(plain.startsWith("x")).toBe(false);
 	});
 
 	it("blocking diagnostics outrank a formatter failure (vertical renderer)", () => {
@@ -441,9 +446,11 @@ describe("widget-state renderWidget", () => {
 			{ severity: "error", semantic: "blocking", message: "bad", tool: "tsserver" },
 		]);
 		recordFormatter(filePath, "prettier", false, false);
-		const line = renderWidget(40, theme).join("");
-		expect(line).toContain("●");
-		expect(line).not.toMatch(/x both-failed-v/);
+		const row = renderWidget(40, theme).find((l) => l.includes("both-failed-v"));
+		expect(row).toBeDefined();
+		const plain = row!.replace(/\[[0-9;]*m/g, "").trimStart();
+		expect(plain.startsWith("●")).toBe(true);
+		expect(plain.startsWith("x")).toBe(false);
 	});
 
 	// #1348 review P2: failure entries are session-scoped advice -- they do
