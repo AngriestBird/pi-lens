@@ -44,6 +44,16 @@ uses the awaited durable-store seam: its delta/version snapshot maps to
 policy. Turn-state remains separate pending a future ownership decision.
 (#1209, #1212)
 
+**LSP idle eviction is lease-guarded across acquisition/use.** `isBusy()` only
+becomes true after a client request enters the transport, so it cannot protect
+the yield between manager selection and the first notify/request. Operations
+must acquire the manager-owned client lease under the spawn gate, validate that
+the selected client is still the published instance, and release in `finally`;
+idle and ceiling eviction skip leased keys. Deterministic race tests suspend the
+first client operation with `tests/clients/interleaving-kit.ts`, never sleeps.
+The TypeScript idle default is 20 minutes to preserve warm LSPs across subagent
+bursts; every non-idle removal path must also clear timer ownership. (#1332)
+
 **Spawn repair decisions use the typed safe-spawn taxonomy.** A raw OS
 `ENOENT` can mean either a missing executable or an invalid child cwd. Consume
 `SpawnResult.spawnFailure.kind` / `SpawnFailureError.kind`, never errno or
@@ -125,6 +135,12 @@ excluded. Strategy-gated `didSave` remains separate and out of scope here.
 Unsupported pull responses are also recognized by the standard message-only
 variants (`method not found`, `unknown method`, and `unsupported method`).
 Status consumers receive detached, 200-character-bounded failure entries.
+
+TypeScript LSP clients are evicted after `PI_LENS_TS_IDLE_EVICT_MS` of inactivity
+(default five minutes). Eviction removes the client from service state before
+graceful shutdown, releasing the server-owned language-service programs and
+document registry; the next request rebuilds transparently. The per-root timers
+must stay unref'd, reset on reuse, busy-client guarded, and cleared on shutdown.
 
 Rule-id normalization derives its language suffixes from the bundled CodeRabbit rule tree at startup; tests must keep that derived set covered so new vendored language rules cannot silently evade project policy matching.
 
