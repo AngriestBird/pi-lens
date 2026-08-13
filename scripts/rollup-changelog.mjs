@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { extractSection } from "./lib/changelog.mjs";
+import { EMPTY_UNRELEASED, extractSection, lintSectionBody } from "./lib/changelog.mjs";
 
 export const CHANGELOG_SECTIONS = [
   "Added",
@@ -34,10 +34,20 @@ export function parseEntry(text, file = "entry") {
   const body = lines.slice(end + 1).join("\n").trim();
   const topLevelEntries = body.split(/\r?\n/).filter(isEntryBullet);
   if (topLevelEntries.length !== 1) {
-    fail(file, `expected exactly one top-level entry, found ${topLevelEntries.length}`);
+    fail(file, `expected exactly one top-level entry, found ${topLevelEntries.length}; column-0 Markdown bullets inside fenced examples also count, so indent example content`);
   }
   if ((body.match(/```/g) ?? []).length % 2 !== 0) {
     fail(file, "unclosed Markdown code fence");
+  }
+  const hasExplicitHeading = /^#{2,4}\s/m.test(body);
+  const problems = lintSectionBody(body).filter(
+    (problem) => hasExplicitHeading || problem.kind !== "orphan",
+  );
+  for (const problem of problems) {
+    const hint = problem.kind === "orphan"
+      ? "move the entry below its first Markdown heading"
+      : "keep the complete bold entry title on one physical line";
+    fail(file, `${problem.kind} at body line ${problem.line}: ${hint}`);
   }
   return { section, entry: body };
 }
@@ -51,6 +61,12 @@ function readEntries(entriesDir) {
       const file = path.join(entriesDir, name);
       return { file, ...parseEntry(fs.readFileSync(file, "utf8"), name) };
     });
+}
+
+export function validateChangelogEntries({
+  rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
+} = {}) {
+  return readEntries(path.join(rootDir, ".changelog"));
 }
 
 function bucketSectionBody(body) {
@@ -87,8 +103,6 @@ function renderBody(...bodies) {
     return content.length ? `### ${section}\n\n${content.join("\n\n")}` : "";
   }).filter(Boolean).join("\n\n");
 }
-
-const EMPTY_UNRELEASED = `## [Unreleased]\n\n${CHANGELOG_SECTIONS.map((section) => `### ${section}\n`).join("\n")}`;
 
 export function rollupChangelog(version, {
   rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
@@ -136,8 +150,16 @@ export function rollupChangelog(version, {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const version = process.argv[2];
-  if (!version) {
-    console.error("Usage: node scripts/rollup-changelog.mjs <version>");
+  if (version === "--check") {
+    try {
+      const entries = validateChangelogEntries();
+      console.log(`Validated ${entries.length} changelog entr${entries.length === 1 ? "y" : "ies"}.`);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      process.exitCode = 1;
+    }
+  } else if (!version) {
+    console.error("Usage: node scripts/rollup-changelog.mjs <version>|--check");
     process.exitCode = 1;
   } else {
     try {

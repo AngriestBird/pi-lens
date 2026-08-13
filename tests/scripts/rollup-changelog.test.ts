@@ -21,6 +21,7 @@ describe("per-entry changelog rollup", () => {
     rollupChangelog("2.0.0", { rootDir: root, date: "2026-08-13" });
     const output = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
     expect(output.indexOf("## [Unreleased]")).toBeLessThan(output.indexOf("## [2.0.0] - 2026-08-13"));
+    expect(output).not.toContain("### Security\n\n\n## [2.0.0]");
   });
 
   it("promotes existing Unreleased content into the new version", () => {
@@ -61,6 +62,14 @@ describe("per-entry changelog rollup", () => {
     fs.writeFileSync(path.join(root, ".changelog", "bad.md"), "---\nsection: Nope\n---\n\n- bad\n");
     expect(() => rollupChangelog("2.0.0", { rootDir: root })).toThrow(/bad\.md: section must be/);
     expect(fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8")).not.toContain("2.0.0");
+  });
+
+  it.each([
+    ["wrapped-title.md", /wrapped-title/],
+    ["orphan-bullet.md", /orphan/],
+  ])("rejects the real-bug guard fixture %s", (file, problem) => {
+    const fixture = path.resolve("tests/fixtures/changelog-entries", file);
+    expect(() => parseEntry(fs.readFileSync(fixture, "utf8"), file)).toThrow(problem);
   });
 
   it.each([

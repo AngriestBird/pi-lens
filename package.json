@@ -34,7 +34,7 @@
     "audit:astgrep-rule-pairs": "node scripts/audit-astgrep-rule-pairs.mjs",
     "audit:playground": "node scripts/playground-verify-rule.mjs",
     "logs:smells": "node scripts/analyze-pi-lens-logs.mjs",
-    "changelog:check": "node scripts/changelog-release.mjs --check",
+    "changelog:check": "node scripts/rollup-changelog.mjs --check",
     "changelog:release": "node scripts/changelog-release.mjs",
     "changelog:extract": "node scripts/changelog-extract.mjs",
     "release:backfill-notes": "node scripts/backfill-github-releases.mjs",

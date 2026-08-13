@@ -170,12 +170,6 @@ export function hasSection(text, version) {
   return typeof body === "string" && body.trim().length > 0;
 }
 
-/** True if the `## [Unreleased]` body has at least one bullet entry. */
-export function unreleasedHasEntries(text) {
-  const body = extractSection(text, "Unreleased");
-  return body !== null && /^\s*[-*]\s/m.test(body);
-}
-
 /**
  * Lint a section body for entries the release-notes summarizer
  * (`summarizeSection`) would silently mangle. Returns a list of problems; an
@@ -234,41 +228,18 @@ export function lintUnreleased(text) {
   return lintSectionBody(extractSection(text, "Unreleased"));
 }
 
-const EMPTY_UNRELEASED = [
+export const EMPTY_UNRELEASED = [
   "## [Unreleased]",
   "",
   "### Added",
   "",
   "### Changed",
   "",
+  "### Deprecated",
+  "",
+  "### Removed",
+  "",
   "### Fixed",
   "",
+  "### Security",
 ].join("\n");
-
-/**
- * Promote `## [Unreleased]` to a dated `## [version] - date` heading and open a
- * fresh empty `## [Unreleased]` above it. Pure: returns the new CHANGELOG text.
- * Throws on the precondition failures (no Unreleased, no entries, version
- * already present) so callers surface a clear message and exit non-zero.
- *
- * @param {string} text full CHANGELOG.md contents
- * @param {string} version bare semver, e.g. "3.8.61"
- * @param {string} date ISO date, e.g. "2026-06-25"
- * @returns {string}
- */
-export function promoteUnreleased(text, version, date) {
-  if (extractSection(text, "Unreleased") === null)
-    throw new Error("No `## [Unreleased]` section found.");
-  if (!unreleasedHasEntries(text))
-    throw new Error("`## [Unreleased]` has no entries to release.");
-  if (extractSection(text, version) !== null)
-    throw new Error(`CHANGELOG already has a section for ${version}.`);
-
-  const replaced = text.replace(
-    /^## \[Unreleased\][^\n]*$/m,
-    `${EMPTY_UNRELEASED}\n## [${version}] - ${date}`,
-  );
-  if (replaced === text)
-    throw new Error("Failed to locate the `## [Unreleased]` heading.");
-  return replaced;
-}
