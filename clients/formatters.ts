@@ -430,29 +430,56 @@ async function indentationArgs(
 	return ["--indent-style", indentation.style, "--indent-width", String(indentation.width)];
 }
 
+/**
+ * Every biome invocation must carry this. Biome exits 1 with "No files were
+ * processed in the specified paths" when the path is ignored by the repo's own
+ * biome.json or carries an extension biome does not handle — a benign outcome
+ * that, under #1337's strict default, would otherwise report a formatting
+ * failure on every edit under an ignored directory. Verified against biome
+ * 2.4.12: ignored path → exit 1, +flag → exit 0; unsupported extension → exit
+ * 1, +flag → exit 0; and a real syntax error still exits 1 WITH the flag, so
+ * strictness is preserved for actual failures.
+ *
+ * `clients/dispatch/runners/biome-check.ts:108` already passes this on the lint
+ * path; the formatter path did not, which is what made biome the one
+ * misclassified formatter in the #1337 audit.
+ */
+const BIOME_UNMATCHED_FLAG = "--no-errors-on-unmatched";
+
 export const biomeFormatter: FormatterInfo = {
 	name: "biome",
-	command: ["npx", "@biomejs/biome", "format", "--write", "$FILE"],
+	command: [
+		"npx",
+		"@biomejs/biome",
+		"format",
+		"--write",
+		BIOME_UNMATCHED_FLAG,
+		"$FILE",
+	],
 	async resolveCommand(filePath, cwd) {
 		const editorConfigFlag = (await hasEditorConfig(cwd))
 			? ["--use-editorconfig=true"]
 			: [];
 		const styleArgs = await indentationArgs(filePath, "biome", cwd);
 		if (styleArgs === null) return SKIP_FORMATTING;
+		const args = [
+			"format",
+			"--write",
+			BIOME_UNMATCHED_FLAG,
+			...editorConfigFlag,
+			...styleArgs,
+		];
 		const local = await findInNodeModules("biome", cwd);
-		if (local)
-			return [local, "format", "--write", ...editorConfigFlag, ...styleArgs, filePath];
+		if (local) return [local, ...args, filePath];
 		// Any package manager's global bin dir (npm/pnpm/yarn/bun) before we
 		// auto-install — catches a `pnpm add -g @biomejs/biome` PATH misses (#375).
 		const global = await findGlobalBinary("biome");
-		if (global)
-			return [global, "format", "--write", ...editorConfigFlag, ...styleArgs, filePath];
+		if (global) return [global, ...args, filePath];
 		const toolId = getAutoInstallToolIdForFormatter("biome");
 		if (!toolId) return null;
 		const { ensureTool } = await import("./installer/index.js");
 		const installed = await ensureTool(toolId);
-		if (installed)
-			return [installed, "format", "--write", ...editorConfigFlag, ...styleArgs, filePath];
+		if (installed) return [installed, ...args, filePath];
 		return null;
 	},
 	extensions: [
@@ -999,23 +1026,44 @@ export const cmakeFormatFormatter: FormatterInfo = {
 	},
 };
 
+/**
+ * The PowerShell one-liner behind `psscriptanalyzer-format`.
+ *
+ * #1337 audit finding: without `$ErrorActionPreference = 'Stop'`, a failing
+ * `Invoke-Formatter` is a NON-TERMINATING error — pwsh still exits 0, so this
+ * formatter could never report a failure through the strict seam and the #1336
+ * silent-no-op class survived intact for `.ps1/.psm1/.psd1`. Verified: an
+ * `Invoke-Formatter` argument-validation failure exits 0 under the old script.
+ *
+ * Two more defects fixed here rather than left as landmines:
+ *  - the old script ran `Set-Content -Value $formatted` even when `$formatted`
+ *    was `$null`, which TRUNCATES the file it was asked to format;
+ *  - single-quoted interpolation broke on any path containing an apostrophe.
+ * An empty/whitespace-only file exits 0 without touching anything, so "nothing
+ * to format" stays a clean no-op rather than a reported failure.
+ */
+function psScriptAnalyzerCommand(filePath: string): string {
+	// PowerShell single-quoted strings escape an apostrophe by doubling it.
+	const quoted = filePath.replace(/'/g, "''");
+	return [
+		"$ErrorActionPreference = 'Stop'",
+		`$p = '${quoted}'`,
+		"$content = Get-Content -Raw -LiteralPath $p",
+		"if ([string]::IsNullOrWhiteSpace($content)) { exit 0 }",
+		"$formatted = Invoke-Formatter -ScriptDefinition $content",
+		"if ($null -eq $formatted) { throw 'Invoke-Formatter returned no output' }",
+		"Set-Content -LiteralPath $p -Value $formatted",
+	].join("; ");
+}
+
 export const psscriptanalyzerFormatFormatter: FormatterInfo = {
 	name: "psscriptanalyzer-format",
-	command: [
-		"pwsh",
-		"-Command",
-		"Invoke-Formatter -ScriptDefinition (Get-Content -Raw '$FILE') | Set-Content '$FILE'",
-	],
+	command: ["pwsh", "-NoProfile", "-Command", psScriptAnalyzerCommand("$FILE")],
 	extensions: [".ps1", ".psm1", ".psd1"],
 	async resolveCommand(filePath, _cwd) {
 		const pwsh = (await which("pwsh")) ?? (await which("powershell"));
 		if (!pwsh) return null;
-		return [
-			pwsh,
-			"-NoProfile",
-			"-Command",
-			`$content = Get-Content -Raw '${filePath}'; $formatted = Invoke-Formatter -ScriptDefinition $content; Set-Content -Path '${filePath}' -Value $formatted`,
-		];
+		return [pwsh, "-NoProfile", "-Command", psScriptAnalyzerCommand(filePath)];
 	},
 	async detect(_cwd: string) {
 		const pwsh = (await which("pwsh")) ?? (await which("powershell"));
@@ -1216,6 +1264,40 @@ export function clearFormatterRuntimeState(): void {
 	_lazyInstallAttempts.clear();
 }
 
+// ESC is built via fromCharCode so no raw control byte sits in the source.
+const ANSI_ESCAPE = new RegExp(
+	`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`,
+	"g",
+);
+const BOX_DRAWING_GLOBAL = /[\u2500-\u257F]/g;
+const HAS_BOX_DRAWING = /[\u2500-\u257F]/;
+
+/**
+ * First line of `text` that actually carries a diagnostic.
+ *
+ * #1337 made nonzero exits user-visible, which put whatever this returns in
+ * front of the agent (`clients/pipeline.ts`) and in the end-of-turn summary
+ * (`clients/runtime-agent-end.ts`) — so "first line of stderr" is no longer
+ * good enough. Biome opens stderr with a decorated section rule
+ * (`format ━━━━━━━━━━━`), which as an error message is pure noise.
+ *
+ * Skips blank lines, pure box-drawing rules, and short banner headings; strips
+ * ANSI colour so the message stays readable in a plain-text surface.
+ */
+export function firstDiagnosticLine(text: string | undefined): string | undefined {
+	for (const raw of (text ?? "").split("\n")) {
+		const line = raw.replace(ANSI_ESCAPE, "").trimEnd();
+		const stripped = line.replace(BOX_DRAWING_GLOBAL, "").trim();
+		if (!stripped) continue;
+		// "format ━━━━━━━━" is a section banner, not a diagnostic. Require a rule
+		// AND a short remainder so a real one-line error containing a box
+		// character is not discarded.
+		if (HAS_BOX_DRAWING.test(line) && stripped.length <= 24) continue;
+		return stripped.slice(0, 300);
+	}
+	return undefined;
+}
+
 export async function formatFile(
 	filePath: string,
 	formatter: FormatterInfo,
@@ -1255,7 +1337,11 @@ export async function formatFile(
 				changed: false,
 				error:
 					result.error?.message ||
-					result.stderr.trim().split("\n")[0] ||
+					firstDiagnosticLine(result.stderr) ||
+					// biome, ktlint and `mix format` report on STDOUT; without this
+					// their diagnostic is discarded and the user is told only that
+					// the tool "exited with status 1".
+					firstDiagnosticLine(result.stdout) ||
 					`${formatter.name} exited with status ${result.status}`,
 			};
 		}

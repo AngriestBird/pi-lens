@@ -31,8 +31,10 @@ vi.mock("../../../clients/safe-spawn.js", () => ({
 	which: vi.fn(async () => null),
 }));
 
+// The compiled .js is what ships and what production loads — the build
+// freshness guard (tests/support/check-build-freshness.ts) keeps it in step.
 async function loadFormatters() {
-	return await import("../../../clients/formatters.ts");
+	return await import("../../../clients/formatters.js");
 }
 
 /**
@@ -72,18 +74,47 @@ describe("formatter exit-code posture (#1337)", () => {
 		}
 	});
 
-	it("keeps every other formatter strict", async () => {
-		const { ALL_FORMATTERS } = await loadFormatters();
-		const strict = ALL_FORMATTERS.filter((f) => !f.lenientExitCode).map(
-			(f) => f.name,
-		);
-		// The audit covered the whole registry — no formatter is unclassified.
-		expect(strict.length + EXPECTED_LENIENT.size).toBe(ALL_FORMATTERS.length);
-		// ruff kept its #1336 strictness; gofmt/prettier/biome GAINED it here.
-		expect(strict).toContain("ruff");
-		expect(strict).toContain("gofmt");
-		expect(strict).toContain("prettier");
-		expect(strict).toContain("biome");
+	// biome is the formatter the first pass of this audit got WRONG: it exits 1
+	// with "No files were processed in the specified paths" whenever the path is
+	// ignored by the repo's own biome.json or has an extension biome does not
+	// handle. In a biome-configured repo, biome is selected for every matching
+	// file INCLUDING ignored ones, so without --no-errors-on-unmatched the strict
+	// default reports a formatting failure on every edit under gen/, dist/, or
+	// any vendored dir. Verified against biome 2.4.12; the lint runner
+	// (clients/dispatch/runners/biome-check.ts) already passed this flag.
+	it("passes --no-errors-on-unmatched on every biome command path", async () => {
+		const { biomeFormatter } = await loadFormatters();
+		expect(biomeFormatter.command).toContain("--no-errors-on-unmatched");
+
+		const env = setupTestEnvironment("pi-lens-biome-unmatched-");
+		try {
+			// An indented file so indentationArgs resolves rather than SKIP_FORMATTING.
+			const filePath = path.join(env.tmpDir, "app.js");
+			fs.writeFileSync(filePath, "function f() {\n  return 1;\n}\n");
+			// Plant a node_modules/.bin/biome so the local branch resolves
+			// deterministically — no `if (resolved)` guard that could skip the
+			// assertion. All three resolveCommand branches spread the same `args`.
+			const binDir = path.join(env.tmpDir, "node_modules", ".bin");
+			fs.mkdirSync(binDir, { recursive: true });
+			for (const name of ["biome", "biome.cmd"]) {
+				fs.writeFileSync(path.join(binDir, name), "");
+			}
+
+			const resolved = await biomeFormatter.resolveCommand?.(
+				filePath,
+				env.tmpDir,
+			);
+
+			expect(Array.isArray(resolved)).toBe(true);
+			expect(resolved as string[]).toContain("--no-errors-on-unmatched");
+			// The flag must precede the file path, not trail it as a stray arg.
+			const args = resolved as string[];
+			expect(args.indexOf("--no-errors-on-unmatched")).toBeLessThan(
+				args.indexOf(filePath),
+			);
+		} finally {
+			env.cleanup();
+		}
 	});
 });
 
@@ -160,6 +191,66 @@ describe("formatFile is strict by default at the seam (#1337)", () => {
 		} finally {
 			env.cleanup();
 		}
+	});
+
+	// Making nonzero exits user-visible put this string in front of the agent
+	// (clients/pipeline.ts) and in the end-of-turn summary. "First line of
+	// stderr" is not good enough: biome opens stderr with a decorated section
+	// rule, so the message a user saw was a row of box-drawing characters.
+	it("surfaces a real diagnostic, not biome's stderr banner", async () => {
+		const env = setupTestEnvironment("pi-lens-exit-msg-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.go");
+			fs.writeFileSync(filePath, "package main\n");
+			safeSpawnAsync.mockResolvedValue({
+				status: 1,
+				stdout: "",
+				stderr: `format ${"━".repeat(90)}\n\n./a.js internalError/io INTERNAL\n`,
+			});
+
+			const { formatFile, gofmtFormatter } = await loadFormatters();
+			const result = await formatFile(filePath, gofmtFormatter);
+
+			expect(result.success).toBe(false);
+			expect(result.error).toBe("./a.js internalError/io INTERNAL");
+			expect(result.error).not.toMatch(/[─-╿]/);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// biome, ktlint and `mix format` report on stdout. Reading stderr only threw
+	// the diagnostic away and told the user just "exited with status 1".
+	it("falls back to stdout when stderr carries nothing useful", async () => {
+		const env = setupTestEnvironment("pi-lens-exit-msg-stdout-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.go");
+			fs.writeFileSync(filePath, "package main\n");
+			safeSpawnAsync.mockResolvedValue({
+				status: 1,
+				stdout: "Formatted 0 files. No fixes applied.\n",
+				stderr: "   \n",
+			});
+
+			const { formatFile, gofmtFormatter } = await loadFormatters();
+			const result = await formatFile(filePath, gofmtFormatter);
+
+			expect(result.error).toBe("Formatted 0 files. No fixes applied.");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("strips ANSI colour from the surfaced diagnostic", async () => {
+		const esc = String.fromCharCode(27);
+		const { firstDiagnosticLine } = await loadFormatters();
+		expect(firstDiagnosticLine(`${esc}[31merror: bad flag${esc}[0m`)).toBe(
+			"error: bad flag",
+		);
+		// Last resort only: with nothing usable anywhere, the caller's exit-code
+		// string must still win rather than an empty message.
+		expect(firstDiagnosticLine("")).toBeUndefined();
+		expect(firstDiagnosticLine(undefined)).toBeUndefined();
 	});
 
 	it("still reports a clean unchanged file when the exit is zero", async () => {

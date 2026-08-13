@@ -92,26 +92,35 @@ describe("format-smoke fixtures honor the style-preserving contract (#1144)", ()
 
 	it("drives the strict majority of the matrix through the real spawn path", () => {
 		const byName = new Map(ALL_FORMATTERS.map((f) => [f.name, f]));
-		const strictRows = FORMAT_FIXTURES.filter(
-			(fx) => fx.expect !== "preserve" && !byName.get(fx.formatter)?.lenientExitCode,
+		const rows = FORMAT_FIXTURES.filter((fx) => fx.expect !== "preserve");
+		const strictRows = rows.filter(
+			(fx) => !byName.get(fx.formatter)?.lenientExitCode,
 		);
 		// These are the rows where #1337's strict default actually bites: a
 		// nonzero exit is now a red row instead of a green "ran clean but left the
-		// file unchanged". If this ever drops to zero, the nightly has stopped
-		// exercising the seam this issue hardened.
-		expect(strictRows.length).toBeGreaterThan(0);
+		// file unchanged". A bare `> 0` would still pass with 32 of 33 formatters
+		// flipped lenient, so assert the actual majority the title claims.
+		expect(strictRows.length).toBeGreaterThan(rows.length / 2);
 	});
 
-	it("keeps the lint-autofix smoke rows on the lenient side of the split", () => {
-		const byName = new Map(ALL_FORMATTERS.map((f) => [f.name, f]));
-		// rubocop/sqlfluff smoke rows exit 1 with remaining offenses AFTER a
-		// successful rewrite. If either ever loses its opt-out, its nightly row
-		// flips red for a reason that has nothing to do with formatting.
-		for (const name of ["rubocop", "sqlfluff"]) {
-			if (!FORMAT_FIXTURES.some((fx) => fx.formatter === name)) continue;
+	it("keeps every lint-autofix smoke row on the lenient side of the split", () => {
+		// Derive from the registry rather than hand-listing names (#883): a
+		// hardcoded ["rubocop","sqlfluff"] silently omitted ktlint and standardrb,
+		// which are ALSO fixture rows and also lenient. A `continue` when a name is
+		// absent would make this self-skipping — instead, assert the intersection
+		// is non-empty so a fixture-set change cannot empty the guard unnoticed.
+		const fixtureFormatters = new Set(FORMAT_FIXTURES.map((fx) => fx.formatter));
+		const lenientRows = ALL_FORMATTERS.filter(
+			(f) => f.lenientExitCode && fixtureFormatters.has(f.name),
+		);
+		expect(
+			lenientRows.length,
+			"no lint-autofix formatter drives a smoke row — the lenient half of the split is unexercised",
+		).toBeGreaterThan(0);
+		for (const formatter of lenientRows) {
 			expect(
-				byName.get(name)?.lenientExitCode,
-				`${name} drives a smoke row and exits nonzero on remaining offenses`,
+				formatter.lenientExitCode,
+				`${formatter.name} drives a smoke row and exits nonzero on remaining offenses`,
 			).toBeTruthy();
 		}
 	});
