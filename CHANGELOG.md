@@ -30,6 +30,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **LSP roots and per-session clients are conservatively bounded (closes #1325, refs #1126, refs #1129)** — manifest-bearing fixture conventions (`tests/fixtures`, `__fixtures__`, and `testdata`), gitignored directories, and atomic-write staging namespaces no longer become standalone LSP roots; their files attach to the nearest eligible ancestor project. Client reuse remains keyed by server and normalized resolved root, while a configurable `PI_LENS_LSP_CLIENT_CEILING` (24 by default) evicts the least-recently-used idle client through graceful shutdown before spawning another and never evicts a client with an active LSP request.
+
 - **Fully qualified Windows paths use one shared classifier (closes [#1213](https://github.com/apmantza/pi-lens/issues/1213))** — drive-relative (`C:foo`) and rooted-relative (`\\foo`) paths are no longer mistaken for self-contained absolute paths; UNC and drive-absolute paths remain fully qualified across command validation, installer caching, and managed-tool retention.
 
 - **Kotlin formatter selection follows Spotless configuration deterministically (closes #1306)** — a Spotless `kotlin { ktlint() }` block pins ktlint and `kotlin { ktfmt() }` pins ktfmt, so both selection branches cannot claim the same Kotlin file and unconfigured projects retain the style-preserving no-format policy.

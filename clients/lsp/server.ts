@@ -16,7 +16,12 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { getGlobalPiLensDir } from "../file-utils.js";
+import {
+	getGlobalPiLensDir,
+	getProjectIgnoreGlobs,
+	isPathIgnoredByProject,
+} from "../file-utils.js";
+import { STAGE_TMP_PATTERN } from "../atomic-write-staging.js";
 import {
 	DOTNET_CSHARP_ROOT_MARKERS,
 	DOTNET_FSHARP_ROOT_MARKERS,
@@ -50,6 +55,87 @@ import { getRubyVersionDirNamesSync } from "./ruby-drive-dirs.js";
 // --- Types ---
 
 export type RootFunction = (file: string) => Promise<string | undefined>;
+
+const FIXTURE_ROOT_SEGMENTS = new Set(["__fixtures__", "testdata"]);
+const FALLBACK_PROJECT_MARKERS = [
+	".git",
+	"package.json",
+	"go.work",
+	"go.mod",
+	"Cargo.toml",
+	"pyproject.toml",
+	"pom.xml",
+	"build.gradle",
+	"build.gradle.kts",
+	"mix.exs",
+	"pubspec.yaml",
+	"Package.swift",
+] as const;
+
+function pathSegments(dir: string): string[] {
+	const parsed = path.parse(path.resolve(dir));
+	return path
+		.relative(parsed.root, path.resolve(dir))
+		.split(path.sep)
+		.filter(Boolean)
+		.map((segment) => segment.toLowerCase());
+}
+
+function hasFixtureConvention(dir: string): boolean {
+	const segments = pathSegments(dir);
+	// Go treats any directory named testdata as fixture data by convention. The
+	// exclusion is intentionally ancestor-wide so nested fixture projects cannot
+	// become independent LSP roots, but the segment match itself stays exact.
+	if (segments.some((segment) => FIXTURE_ROOT_SEGMENTS.has(segment))) return true;
+	return segments.some(
+		(segment, index) => segment === "tests" && segments[index + 1] === "fixtures",
+	);
+}
+
+function hasAtomicStageSegment(dir: string): boolean {
+	return pathSegments(dir).some((segment) => STAGE_TMP_PATTERN.test(segment));
+}
+
+async function findGitBoundary(dir: string): Promise<string | undefined> {
+	let current = path.resolve(dir);
+	const fsRoot = path.parse(current).root;
+	while (true) {
+		if (await markerExists(current, ".git")) return current;
+		if (current === fsRoot) return undefined;
+		current = path.dirname(current);
+	}
+}
+
+async function isExcludedLspRoot(dir: string): Promise<boolean> {
+	const candidate = path.resolve(dir);
+	if (hasFixtureConvention(candidate) || hasAtomicStageSegment(candidate)) return true;
+	const gitRoot = await findGitBoundary(candidate);
+	if (!gitRoot || gitRoot === candidate) return false;
+	// Avoid constructing the matcher when the project has no positive ignore rules.
+	// The matcher remains authoritative (including anchored rules and directory form).
+	if (getProjectIgnoreGlobs(gitRoot).length === 0) return false;
+	return isPathIgnoredByProject(candidate, gitRoot, true);
+}
+
+async function nearestNonExcludedFallbackRoot(candidate: string): Promise<string> {
+	if (!(await isExcludedLspRoot(candidate))) return path.resolve(candidate);
+	let current = path.dirname(path.resolve(candidate));
+	const fsRoot = path.parse(current).root;
+	let nearestAllowed: string | undefined;
+	while (true) {
+		if (!(await isExcludedLspRoot(current))) {
+			nearestAllowed ??= current;
+			for (const marker of FALLBACK_PROJECT_MARKERS) {
+				if (await markerExists(current, marker)) return current;
+			}
+		}
+		if (current === fsRoot) break;
+		current = path.dirname(current);
+	}
+	// No project marker was available. Keep the file attached to a stable,
+	// non-excluded ancestor rather than minting a client inside the fixture/stage.
+	return nearestAllowed ?? fsRoot;
+}
 
 export interface LSPSpawnOptions {
 	allowInstall?: boolean;
@@ -785,8 +871,10 @@ export function PriorityRoot(
 	};
 }
 
-export const FileDirRoot: RootFunction = async (file: string) =>
-	path.resolve(path.dirname(file));
+export const FileDirRoot: RootFunction = async (file: string) => {
+	const candidate = path.resolve(path.dirname(file));
+	return nearestNonExcludedFallbackRoot(candidate);
+};
 
 export function RootWithFallback(
 	primary: RootFunction,
@@ -925,7 +1013,12 @@ export function NearestRoot(
 				// Check include patterns. Exact marker names stay cheap (`stat`), while
 				// glob markers like `*.csproj` match real project filenames (#201).
 				for (const pattern of includePatterns) {
-					if (await markerExists(currentDir, pattern)) return currentDir;
+					if (
+						(await markerExists(currentDir, pattern)) &&
+						!(await isExcludedLspRoot(currentDir))
+					) {
+						return currentDir;
+					}
 				}
 
 				if (currentDir === stop || currentDir === fsRoot) {
