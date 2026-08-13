@@ -249,7 +249,16 @@ export function createPiMock(
  * `ui.notify(...)` for assertions.
  */
 export function makeCtx(
-	overrides: Partial<{ cwd: string; sessionId: string }> = {},
+	overrides: Partial<{
+		cwd: string;
+		sessionId: string;
+		/**
+		 * #1334 S5: host project-trust decision. Omit entirely to simulate an
+		 * older host with no `isProjectTrusted` on the ctx — pi-lens must then
+		 * behave exactly as it did before the trust gate existed.
+		 */
+		isProjectTrusted: boolean;
+	}> = {},
 ): MockCtx {
 	const notifications: CapturedNotification[] = [];
 	const statusCalls: CapturedStatus[] = [];
@@ -297,6 +306,13 @@ export function makeCtx(
 		getSystemPrompt: () => "",
 		waitForIdle: async () => {},
 	};
+
+	// Only present when the test asked for it — an absent accessor is the
+	// "older host, no trust surface" case pi-lens must fail open on (#1334 S5).
+	if (overrides.isProjectTrusted !== undefined) {
+		(ctx as Record<string, unknown>).isProjectTrusted = () =>
+			overrides.isProjectTrusted;
+	}
 
 	return ctx as unknown as MockCtx;
 }

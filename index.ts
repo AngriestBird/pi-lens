@@ -2,6 +2,7 @@ import "./clients/console-guard-install.js";
 import "./clients/startup-marker.js";
 import { installConsoleGuard } from "./clients/extension-log.js";
 import { wireUserNotifier } from "./clients/user-notify.js";
+import { adoptProjectTrustFromContext } from "./clients/project-trust.js";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -1292,6 +1293,23 @@ export default function (pi: ExtensionAPI) {
 		const sessionStartFiredAt = Date.now();
 		try {
 			dbg("session_start fired");
+
+			// #1334 S5: adopt the HOST's project-trust decision before anything
+			// below can auto-install a tool or spawn an LSP server. pi-lens is a
+			// CONSUMER of trust (`ctx.isProjectTrusted()`), never a handler of the
+			// `project_trust` event — answering that question on the user's behalf
+			// is the host's/user's job. Re-read on every session_start because
+			// fork/reload/resume can land on a different cwd. Feature-detected:
+			// a host without the accessor yields "unknown" and nothing is gated.
+			const trustState = adoptProjectTrustFromContext(ctx);
+			if (trustState !== "unknown") {
+				dbg(`session_start: project trust = ${trustState}`);
+			}
+			if (trustState === "untrusted") {
+				dbg(
+					"session_start: untrusted project — tool auto-install and LSP spawns are disabled for this session",
+				);
+			}
 
 			// Dynamic tooling (#pi 0.80.x+): deactivate the 5 situational tools
 			// (LAZY_TOOL_CATALOG) now that the extension has actually finished
