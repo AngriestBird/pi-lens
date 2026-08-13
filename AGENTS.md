@@ -155,6 +155,13 @@ empty result, while the project ignore matcher remains authoritative.
 
 A pi coding-agent extension that runs automated checks on every file write/edit. Dispatches async parallel runners (LSP, biome, ruff, ast-grep, tree-sitter, jscpd, knip, Madge, and language-specific linters/build checks) and injects findings as context injections at turn-end and session-start.
 
+CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
+PR bodies may not use a comma-separated close list because GitHub applies only
+the first issue per keyword; use one keyword per issue (`Closes #A. Closes #B.`).
+The merged-PR workflow rechecks each same-repository close target and comments on
+the PR when a referenced issue is missing or remains open. Keep the parser pure
+and unit-tested; workflow YAML should only pass the event to the script.
+
 The shipped ast-grep catalog includes `no-bare-host-path-in-win32-branch`
 (#1158 shape 2). It deliberately matches only the consequence of an `if`
 guarded by `isWindowsPath` or `isFullyQualifiedWin32`; host-default path calls
