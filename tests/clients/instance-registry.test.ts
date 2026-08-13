@@ -79,8 +79,10 @@ describe("instance-registry", () => {
 
 	it("round-trips mixed old and new registry entries through read, register, and reap", async () => {
 		const now = new Date().toISOString();
+		const oldPid = process.pid + 100_001;
+		const newPid = process.pid + 100_002;
 		const oldEntry = {
-			pid: 424241,
+			pid: oldPid,
 			startedAt: now,
 			projectRoot: "/old",
 			lspChildren: [],
@@ -90,7 +92,7 @@ describe("instance-registry", () => {
 		};
 		const newEntry = {
 			...oldEntry,
-			pid: 424242,
+			pid: newPid,
 			projectRoot: "/new",
 			subagent: {
 				marker: "avtc-pi-subagent",
@@ -416,6 +418,7 @@ describe("instance-registry", () => {
 			const { computeResourceFootprint } = await import(
 				"../../clients/instance-registry.js"
 			);
+			const deadPid = process.pid + 100_003;
 			const registry = [
 				{
 					pid: 1,
@@ -428,7 +431,7 @@ describe("instance-registry", () => {
 					lspChildren: [],
 				},
 				{
-					pid: 22624, // hard-killed pi process (#735 repro pid)
+					pid: deadPid, // classified by the injected predicate below
 					startedAt: "t",
 					projectRoot: "/dead",
 					rssBytes: 233 * 1024 * 1024,
@@ -438,7 +441,7 @@ describe("instance-registry", () => {
 					lspChildren: [],
 				},
 			];
-			const isPidAlive = (pid: number) => pid === 1;
+			const isPidAlive = (pid: number) => pid !== deadPid;
 
 			const footprint = computeResourceFootprint(registry, isPidAlive);
 
@@ -474,6 +477,7 @@ describe("instance-registry", () => {
 		it("getResourceFootprint excludes a dead-pid instance and opportunistically prunes it from the registry file", async () => {
 			const { registerInstance, recordLspChild, getResourceFootprint, readInstanceRegistry } =
 				await import("../../clients/instance-registry.js");
+			const deadPid = process.pid + 100_000;
 			await registerInstance("/proj");
 			await recordLspChild({ pid: 7002, serverId: "typescript", command: "tsserver" });
 
@@ -482,7 +486,7 @@ describe("instance-registry", () => {
 			// which always stamps the CURRENT process's own live pid).
 			const raw = JSON.parse(fs.readFileSync(registryFilePath(), "utf-8"));
 			raw.instances.push({
-				pid: 424242, // guaranteed-dead fake pid for this test
+				pid: deadPid, // classified by the injected predicate below
 				startedAt: "t",
 				projectRoot: "/dead-project",
 				rssBytes: 233 * 1024 * 1024,
@@ -493,16 +497,16 @@ describe("instance-registry", () => {
 			});
 			fs.writeFileSync(registryFilePath(), JSON.stringify(raw), "utf-8");
 
-			const isPidAlive = (pid: number) => pid !== 424242;
+			const isPidAlive = (pid: number) => pid !== deadPid;
 			const footprint = await getResourceFootprint(isPidAlive);
 
 			expect(footprint.instanceCount).toBe(1);
-			expect(footprint.perInstance.map((i) => i.pid)).not.toContain(424242);
+			expect(footprint.perInstance.map((i) => i.pid)).not.toContain(deadPid);
 
 			// Prune is fire-and-forget — wait a tick for the background write.
 			await new Promise((r) => setTimeout(r, 20));
 			const remaining = await readInstanceRegistry();
-			expect(remaining.map((i) => i.pid)).not.toContain(424242);
+			expect(remaining.map((i) => i.pid)).not.toContain(deadPid);
 			expect(remaining).toHaveLength(1);
 		});
 

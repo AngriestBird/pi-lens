@@ -18,8 +18,8 @@ import { removeTempDirSync } from "./clients/test-utils.js";
  * `isTestMode()` — see clients/sessionstart-logger.ts) so the exact line is
  * observable without depending on real sessionstart.log I/O.
  *
- * pid 424242 is the repo's established "guaranteed-dead fake pid" convention
- * for registry tests (see tests/clients/instance-registry.test.ts).
+ * The synthetic pid below is made dead deterministically by the test's
+ * process.kill(pid, 0) seam; it never relies on the runner's process table.
  */
 
 vi.mock("../clients/bootstrap.js", () => ({
@@ -79,17 +79,26 @@ describe("index session_start vanished-instance wiring (#1123 item 2)", () => {
 		if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
 		else process.env.PILENS_DATA_DIR = prevDataDir;
 		removeTempDirSync(tmp);
+		vi.restoreAllMocks();
 		vi.clearAllMocks();
 	});
 
 	it("logs the marker for a dead-pid registry entry, then the reaper still prunes it", async () => {
+		const deadPid = process.pid + 100_000;
+		const realProcessKill = process.kill.bind(process);
+		vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+			if (pid === deadPid && signal === 0) {
+				throw Object.assign(new Error("synthetic dead pid"), { code: "ESRCH" });
+			}
+			return realProcessKill(pid, signal);
+		});
 		fs.mkdirSync(process.env.PI_LENS_HOME as string, { recursive: true });
 		fs.writeFileSync(
 			registryFilePath(),
 			JSON.stringify({
 				instances: [
 					{
-						pid: 424242,
+						pid: deadPid,
 						startedAt: "2026-08-06T20:00:00.000Z",
 						projectRoot: "/dead-project",
 						rssBytes: 512 * 1024 * 1024,
@@ -117,7 +126,7 @@ describe("index session_start vanished-instance wiring (#1123 item 2)", () => {
 			.filter((line) => line.includes("previous instance pid"));
 		expect(markerLines).toHaveLength(1);
 		const line = markerLines[0];
-		expect(line).toContain("previous instance pid 424242");
+		expect(line).toContain(`previous instance pid ${deadPid}`);
 		expect(line).toContain("2026-08-06T22:30:00.000Z");
 		expect(line).toContain("512MB");
 		expect(line).toContain("exited without shutdown");
@@ -125,7 +134,7 @@ describe("index session_start vanished-instance wiring (#1123 item 2)", () => {
 		// The reaper's own dead-pid prune still ran afterward — the marker read
 		// must not have swallowed or blocked it.
 		const raw = JSON.parse(fs.readFileSync(registryFilePath(), "utf-8"));
-		expect(raw.instances.map((i: { pid: number }) => i.pid)).not.toContain(424242);
+		expect(raw.instances.map((i: { pid: number }) => i.pid)).not.toContain(deadPid);
 	});
 
 	it("logs nothing when the registry has no dead entries", async () => {
