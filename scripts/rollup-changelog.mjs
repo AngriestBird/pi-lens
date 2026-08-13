@@ -32,7 +32,7 @@ export function parseEntry(text, file = "entry") {
 function readEntries(entriesDir) {
   if (!fs.existsSync(entriesDir)) return [];
   return fs.readdirSync(entriesDir, { withFileTypes: true })
-    .filter(({ isFile, name }) => isFile() && name.endsWith(".md") && name !== "README.md")
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".md") && entry.name !== "README.md")
     .sort((a, b) => a.name.localeCompare(b.name))
     .map(({ name }) => {
       const file = path.join(entriesDir, name);

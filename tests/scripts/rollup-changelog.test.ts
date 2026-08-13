@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { parseEntry, rollupChangelog } from "../../scripts/rollup-changelog.mjs";
 
 const tempDirs: string[] = [];
-afterEach(() => tempDirs.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true }));
+afterEach(() => tempDirs.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
 
 function fixtureRoot() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-changelog-"));
