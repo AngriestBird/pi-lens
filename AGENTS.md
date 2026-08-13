@@ -815,6 +815,48 @@ Holds: `filePath`, language-root `cwd`, `kind` (`FileKind` — `jsts`, `python`,
 
 `lsp-config` is deferred via `setImmediate` (not awaited). Startup background task bodies are deferred via `setImmediate` so sync scans cannot inflate the interactive path; logs report both queued and run time. The first-session quick-mode warmup uses the **async** startup-scan path, which must enforce the same home-ceiling guard as the sync path (`isAtOrAboveHomeDir` for cwd/projectRoot) before language-profile warming — otherwise an empty folder under a home/ancestor marker can kick off a background home-tree walk and cause typing lag (#296). The LSP dominant-language auto-warm has the same invariant: only run it when `startupScan.canWarmCaches` is true and use the guarded `analysisRoot`, not raw `cwd`. Tool availability probes use the probe cache before spawning binaries. Interactive path target: ~150ms on warm runs.
 
+### Project trust is CONSUMED, never answered (#1334 S5)
+
+pi's trust surface is two-sided and the sides are not interchangeable. An
+extension may *answer* the question by registering `pi.on("project_trust", …)`
+(returning `{ trusted: "yes" | "no" | "undecided" }`); every other extension
+*consumes* the outcome via `ExtensionContext.isProjectTrusted(): boolean`.
+**pi-lens is a consumer — never register the handler.** Answering on the user's
+behalf would defeat the host's own prompt.
+
+`clients/project-trust.ts` is the single latched process-wide state
+(`trusted` / `untrusted` / `unknown`), refreshed from `ctx` on every
+`session_start` and `turn_start` (fork/reload/resume can change cwd, and a
+mid-session grant/deny converges by the next turn). Note the asymmetry: the
+*event* decision is three-valued but the
+*ctx* accessor is a boolean, so the only distinctions available are "host said
+yes", "host said no", and "host has no trust surface at all".
+
+The centralized `assertInstallAllowed(context)` gate covers every operation
+that can install or materialize executable content: managed installs,
+formatter gem/rustup installs and npx fallbacks, runner lazy installers,
+govulncheck's `go install`, and tree-sitter's pinned-CDN lazy grammar fetch.
+Grammar WASM is executed content, so under denial an absent grammar follows the
+existing unavailable + user-notification path instead of being fetched. The
+separate LSP predicate gates child execution.
+
+`ensureTool()` (`clients/installer/index.ts` — degrades to the existing
+`allowInstall:false` discovery-only path, so an already-present binary keeps
+working while nothing is downloaded or executed) and `LSPService.spawnClient`
+(`clients/lsp/index.ts` — refuses the child spawn, without marking the key
+broken: trust is policy, not server failure). Everything in-process
+(tree-sitter, caches, diagnostics replay) is untouched. **Fail-open is
+deliberate for `unknown` only** — a host that never exposed the accessor never
+had a decision to honor, and gating it would break every older pi. When adding
+a new outbound capability (a new spawn seam, a new downloader), gate it on
+`isLspSpawnAllowedByTrust()` / `isToolInstallAllowedByTrust()` too.
+
+Accessor failure is deliberately fail-closed: if `isProjectTrusted` exists but
+throws, the host attempted to provide a decision and pi-lens cannot prove the
+project trusted. Only an absent API is the older-host `unknown`/fail-open case.
+New installation/materialization sites call `assertInstallAllowed(context)`;
+do not add more direct consumers of the raw install predicate.
+
 ## Subagent-extension compatibility (#476)
 
 pi-lens degrades gracefully — by construction — when it runs alongside

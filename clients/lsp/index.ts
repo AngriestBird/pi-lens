@@ -22,6 +22,11 @@ import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { logLatency } from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
+import {
+	isLspSpawnAllowedByTrust,
+	isToolInstallAllowedByTrust,
+	projectTrustDenialReason,
+} from "../project-trust.js";
 import { shouldPreferPullOnlyDiagnostics } from "../lsp-budget.js";
 import { withDeadline } from "../deadline-utils.js";
 import {
@@ -1890,6 +1895,7 @@ export class LSPService {
 	}
 
 	private shouldAllowInstall(_filePath: string, _root: string): boolean {
+		if (!isToolInstallAllowedByTrust()) return false;
 		return process.env.PI_LENS_DISABLE_LSP_INSTALL !== "1";
 	}
 
@@ -1903,6 +1909,17 @@ export class LSPService {
 		filePath: string,
 		allowInstall: boolean,
 	): Promise<SpawnedServer | undefined> {
+		// #1334 S5: honor the host project-trust decision before executing any
+		// project-resolved binary. Only an explicit host "not trusted" blocks —
+		// a host with no trust surface (`"unknown"`) spawns exactly as before.
+		// Deliberately NOT marked broken: trust is a policy outcome, not a server
+		// failure, and the user may grant trust later in the same session.
+		if (!isLspSpawnAllowedByTrust()) {
+			logSessionStart(
+				`lsp spawn ${server.id}: refused — ${projectTrustDenialReason()}`,
+			);
+			return undefined;
+		}
 		const isOptionalServer = OPTIONAL_LSP_SERVER_IDS.has(server.id); // NOSONAR: set intentionally empty — no optional servers configured yet
 		const startedAt = Date.now();
 		logSessionStart(

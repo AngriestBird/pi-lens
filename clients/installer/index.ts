@@ -55,6 +55,10 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { isFullyQualified } from "../path-utils.js";
+import {
+	assertInstallAllowed,
+	projectTrustDenialReason,
+} from "../project-trust.js";
 
 const _installerRequire = createRequire(import.meta.url);
 import { createGunzip } from "node:zlib";
@@ -3609,9 +3613,32 @@ export async function installTool(toolId: string): Promise<boolean> {
 }
 
 /**
- * Ensure a tool is installed (check first, install if missing)
+ * Ensure a tool is installed (check first, install if missing).
+ *
+ * #1334 S5: when the pi host has actively denied project trust, the INSTALL
+ * half is switched off here — the request degrades to the existing
+ * `allowInstall:false` discovery-only path rather than failing outright, so an
+ * already-present binary keeps working while nothing is downloaded or executed
+ * on behalf of an untrusted project. A host with no trust surface at all
+ * (`"unknown"`) is unaffected.
  */
 export async function ensureTool(
+	toolId: string,
+	opts?: { forceReinstall?: boolean; allowInstall?: boolean },
+): Promise<string | undefined> {
+	if (
+		opts?.allowInstall !== false &&
+		!assertInstallAllowed(`managed tool ensure: ${toolId}`)
+	) {
+		logSessionStart(
+			`auto-install ensure ${toolId}: install gated — ${projectTrustDenialReason()}; discovery only`,
+		);
+		return ensureToolResolved(toolId, { ...opts, allowInstall: false });
+	}
+	return ensureToolResolved(toolId, opts);
+}
+
+async function ensureToolResolved(
 	toolId: string,
 	opts?: { forceReinstall?: boolean; allowInstall?: boolean },
 ): Promise<string | undefined> {
