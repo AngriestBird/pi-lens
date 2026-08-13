@@ -4,6 +4,13 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
 
+const observedReadFileSync = vi.hoisted(() => vi.fn());
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	observedReadFileSync.mockImplementation(actual.readFileSync);
+	return { ...actual, readFileSync: observedReadFileSync };
+});
+
 // Set test mode to isolate logging from production logs
 process.env.PI_LENS_TEST_MODE = "1";
 
@@ -35,6 +42,7 @@ afterEach(() => {
 	delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
 	ensureTool.mockReset();
 	launchLSP.mockReset();
+	observedReadFileSync.mockClear();
 	vi.resetModules();
 });
 
@@ -381,6 +389,79 @@ describe("lsp server policy", () => {
 		fs.writeFileSync(file, "export const value = 1;\n");
 
 		await expect(NearestRoot(["package.json"])(file)).resolves.toBe(tmp);
+	});
+
+	it("does not classify a testdata substring as a fixture segment (#1328)", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-testdata-segment-"));
+		dirs.push(tmp);
+
+		const project = path.join(tmp, "testdata-tools");
+		const file = path.join(project, "src", "index.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.mkdirSync(path.join(tmp, ".git"));
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
+		fs.writeFileSync(path.join(project, "package.json"), "{}\n");
+		fs.writeFileSync(file, "export const value = 1;\n");
+
+		await expect(NearestRoot(["package.json"])(file)).resolves.toBe(project);
+	});
+
+	it("memoizes project ignore globs until .gitignore changes (#1328)", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const { isPathIgnoredByProject } = await import("../../../clients/file-utils.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ignore-cache-"));
+		dirs.push(tmp);
+
+		fs.mkdirSync(path.join(tmp, ".git"));
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
+		const gitignore = path.join(tmp, ".gitignore");
+		fs.writeFileSync(gitignore, "generated/\n");
+		// Warm the independent authoritative matcher, then count only the cheap
+		// positive-glob precheck used by root resolution.
+		isPathIgnoredByProject(path.join(tmp, "warmup"), tmp, true);
+		observedReadFileSync.mockClear();
+		for (const name of ["one", "two", "three"]) {
+			const project = path.join(tmp, name);
+			const file = path.join(project, "index.ts");
+			fs.mkdirSync(project);
+			fs.writeFileSync(path.join(project, "package.json"), "{}\n");
+			fs.writeFileSync(file, "");
+			await NearestRoot(["package.json"])(file);
+		}
+		const gitignoreReads = () =>
+			observedReadFileSync.mock.calls.filter(
+				([file]) => path.resolve(String(file)) === gitignore,
+			).length;
+		expect(gitignoreReads()).toBe(1);
+
+		const touchedAt = new Date(Date.now() + 2_000);
+		fs.utimesSync(gitignore, touchedAt, touchedAt);
+		const changedProject = path.join(tmp, "four");
+		const changedFile = path.join(changedProject, "index.ts");
+		fs.mkdirSync(changedProject);
+		fs.writeFileSync(path.join(changedProject, "package.json"), "{}\n");
+		fs.writeFileSync(changedFile, "");
+		await NearestRoot(["package.json"])(changedFile);
+		// Both the precheck and the authoritative matcher invalidate. The first
+		// post-touch resolution therefore performs one fresh read for each cache.
+		expect(gitignoreReads()).toBe(3);
+	});
+
+	it("caches empty project ignore globs when .gitignore is absent (#1328)", async () => {
+		const { getProjectIgnoreGlobs } = await import("../../../clients/file-utils.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-no-gitignore-cache-"));
+		dirs.push(tmp);
+		const gitignore = path.join(tmp, ".gitignore");
+
+		expect(getProjectIgnoreGlobs(tmp)).toEqual([]);
+		expect(getProjectIgnoreGlobs(tmp)).toEqual([]);
+		expect(getProjectIgnoreGlobs(tmp)).toEqual([]);
+		expect(
+			observedReadFileSync.mock.calls.filter(
+				([file]) => path.resolve(String(file)) === gitignore,
+			),
+		).toHaveLength(1);
 	});
 
 	it("does not make a gitignored manifest directory an LSP root (#1325)", async () => {

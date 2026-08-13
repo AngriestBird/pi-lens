@@ -82,6 +82,9 @@ function pathSegments(dir: string): string[] {
 
 function hasFixtureConvention(dir: string): boolean {
 	const segments = pathSegments(dir);
+	// Go treats any directory named testdata as fixture data by convention. The
+	// exclusion is intentionally ancestor-wide so nested fixture projects cannot
+	// become independent LSP roots, but the segment match itself stays exact.
 	if (segments.some((segment) => FIXTURE_ROOT_SEGMENTS.has(segment))) return true;
 	return segments.some(
 		(segment, index) => segment === "tests" && segments[index + 1] === "fixtures",
