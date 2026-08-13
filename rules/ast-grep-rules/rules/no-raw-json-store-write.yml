@@ -9,13 +9,15 @@ note: |
   writeFileSync(path, JSON.stringify(data)) shape. Build scripts and the
   installer's wx lock writes are intentionally outside this rule's scope.
 ignores:
-  - "clients/atomic-write.ts"
-  - "clients/installer/index.ts"
-  - "scripts/**"
+  - "**/clients/atomic-write.ts"
+  - "**/clients/installer/index.ts"
+  - "**/scripts/**"
 rule:
   any:
-    - pattern: writeFileSync($PATH, JSON.stringify($DATA))
-    - pattern: $FS.writeFileSync($PATH, JSON.stringify($DATA))
+    - pattern: writeFileSync($PATH, JSON.stringify($$$ARGS))
+    - pattern: $FS.writeFileSync($PATH, JSON.stringify($$$ARGS))
+    - pattern: writeFileSync($PATH, JSON.stringify($$$ARGS), $OPTS)
+    - pattern: $FS.writeFileSync($PATH, JSON.stringify($$$ARGS), $OPTS)
     - kind: expression_statement
       has:
         pattern: writeFileSync($PATH, $PAYLOAD)

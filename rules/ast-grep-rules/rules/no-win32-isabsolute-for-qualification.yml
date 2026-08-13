@@ -8,8 +8,15 @@ note: |
   POSIX-absolute, and relative paths across host operating systems. The
   implementation of isFullyQualified itself is excluded because it is the
   compatibility seam that owns the win32 parser call.
+
+  SCOPE (review-verified, #1349): direct call forms only --
+  path.win32.isAbsolute(...) and a destructured win32.isAbsolute(...). An
+  ALIASED parser (const w = path.win32; w.isAbsolute(p) -- the shape the
+  actual pre-#1330 defect used) is beyond the engine's reach and stays
+  review-enforced; the fixture file encodes that miss as a documented
+  negative, matching the #1339 precedent.
 ignores:
-  - "clients/path-utils.ts"
+  - "**/clients/path-utils.ts"
 rule:
   any:
     - pattern: path.win32.isAbsolute($P)
