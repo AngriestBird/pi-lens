@@ -1313,6 +1313,36 @@ export function firstDiagnosticLine(text: string | undefined): string | undefine
 	return undefined;
 }
 
+/**
+ * Resolve a formatter command without allowing the static command fallback to
+ * bypass a resolver's style-preservation refusal (#1345). `null` means the
+ * primary command is unavailable; the explicit sentinel means formatting is
+ * forbidden for this file and must be returned before the static command is
+ * materialized.
+ */
+async function resolveFormatterCommand(
+	formatter: FormatterInfo,
+	absolutePath: string,
+	cwd: string,
+): Promise<string[] | typeof SKIP_FORMATTING> {
+	const resolved = formatter.resolveCommand
+		? await formatter.resolveCommand(absolutePath, cwd)
+		: null;
+	if (resolved === SKIP_FORMATTING) return SKIP_FORMATTING;
+	if (resolved !== null) return resolved;
+	const fallback = formatter.command.map((c) => c.replace("$FILE", absolutePath));
+	// Trust gate on the install-capable static fallback (#1334 S5): npx can
+	// DOWNLOAD packages, so an untrusted project treats the fallback as
+	// unavailable -- a skip, not a formatter failure; may converge next turn.
+	if (
+		fallback[0] === "npx" &&
+		!assertInstallAllowed(`formatter npx fallback: ${formatter.name}`)
+	) {
+		return SKIP_FORMATTING;
+	}
+	return fallback;
+}
+
 export async function formatFile(
 	filePath: string,
 	formatter: FormatterInfo,
@@ -1322,28 +1352,15 @@ export async function formatFile(
 		const cwd = path.dirname(absolutePath);
 		const contentBefore = await fs.readFile(absolutePath, "utf-8");
 
-		// Resolve command: prefer local (venv/vendor/node_modules) over global
-		const resolved = formatter.resolveCommand
-			? await formatter.resolveCommand(absolutePath, cwd)
-			: null;
-		if (resolved === SKIP_FORMATTING) {
+		// Resolve command: prefer local (venv/vendor/node_modules) over global.
+		// The shared seam must honor SKIP_FORMATTING before selecting the static
+		// command, including its npx fallback (#1345).
+		const cmd = await resolveFormatterCommand(formatter, absolutePath, cwd);
+		if (cmd === SKIP_FORMATTING) {
 			// Style-preserving refusal (#1144): no repo config and no detectable
 			// indentation to pin — formatting would impose the tool's stock style.
 			return { success: true, changed: false };
 		}
-		const cmd =
-			resolved ??
-			formatter.command.map((c) => c.replace("$FILE", absolutePath));
-		if (
-			resolved === null &&
-			cmd[0] === "npx" &&
-			!assertInstallAllowed(`formatter npx fallback: ${formatter.name}`)
-		) {
-			// Trust policy makes an install-capable fallback unavailable; skipping is
-			// not a formatter execution failure and may converge next turn.
-			return { success: true, changed: false };
-		}
-
 		// Run formatter without blocking the event loop.
 		const result = await safeSpawnAsync(cmd[0], cmd.slice(1), {
 			timeout: 15000,

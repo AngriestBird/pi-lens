@@ -3,6 +3,13 @@ import "./clients/startup-marker.js";
 import { installConsoleGuard } from "./clients/extension-log.js";
 import { wireUserNotifier } from "./clients/user-notify.js";
 import { adoptProjectTrustFromContext } from "./clients/project-trust.js";
+import {
+	type ExtensionRunMode,
+	modeSuppressionNote,
+	readExtensionMode,
+	suppressesUserNotify,
+	supportsTuiWidget,
+} from "./clients/extension-mode.js";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -215,6 +222,28 @@ function rememberEventCtx(ctx: any): void {
 }
 
 /**
+ * Mode-aware `ctx.ui.notify` (#1334 S2). Every user-facing notify in this file
+ * goes through here so terminal ownership is derived from the HOST's
+ * `ctx.mode`, not from pi-lens guessing. In "print"/"json" the message is
+ * logged instead of rendered — those modes are one-shot pipelines whose stdout
+ * belongs to the run's actual output, not to extension chatter. "tui", "rpc"
+ * and an older host with no `mode` field all notify exactly as before.
+ */
+function notifyUi(
+	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
+	ctx: any,
+	message: string,
+	level: "info" | "warning" | "error" = "info",
+): void {
+	const mode = readExtensionMode(ctx);
+	if (suppressesUserNotify(mode)) {
+		dbg(`notify ${modeSuppressionNote(mode)}: ${message.split("\n")[0]}`);
+		return;
+	}
+	ctx?.ui?.notify?.(message, level);
+}
+
+/**
  * Best-effort read of the STABLE pi session id off an event ctx
  * (`ctx.sessionManager.getSessionId()`), the same accessor #473's
  * session_start handling and #791's deferred-format ownership tagging both
@@ -390,6 +419,14 @@ export default function (pi: ExtensionAPI) {
 	wireUserNotifier(() => {
 		const ui = latestEventCtx?.ui;
 		if (!ui || typeof ui.notify !== "function") return undefined;
+		// #1334 S2: in "print"/"json" the process is a one-shot producing
+		// machine- or pipe-consumed output — there is no interactive surface for
+		// a degradation notice, and the ndjson sink already holds it. Returning
+		// undefined is exactly the "no host wired" path user-notify.ts already
+		// documents as fail-soft, so nothing is lost, only un-rendered.
+		if (suppressesUserNotify(readExtensionMode(latestEventCtx))) {
+			return undefined;
+		}
 		return (message: string, level?: "info" | "warning" | "error") =>
 			ui.notify(message, level ?? "warning");
 	});
@@ -582,7 +619,22 @@ export default function (pi: ExtensionAPI) {
 		options?: { placement: "belowEditor" },
 	) => void;
 
-	function mountLensWidget(ui: LensWidgetUi | undefined): boolean {
+	/**
+	 * #1334 S2: the widget is a terminal-only custom component. The host's own
+	 * types say so — *"Use `"tui"` to guard terminal-only UI such as custom
+	 * components"* — so mounting is gated on the mode pi reports, not attempted
+	 * blindly. `rpc` is excluded despite `hasUI: true`: dialogs travel over the
+	 * protocol there, a belowEditor component does not. An older host with no
+	 * `mode` field reads "unknown" and mounts exactly as before.
+	 */
+	function mountLensWidget(
+		ui: LensWidgetUi | undefined,
+		mode: ExtensionRunMode,
+	): boolean {
+		if (!supportsTuiWidget(mode)) {
+			dbg(`widget mount ${modeSuppressionNote(mode)}`);
+			return false;
+		}
 		if (typeof ui?.setWidget !== "function") return false;
 		const setWidget = ui.setWidget as LensWidgetSetWidget;
 		setWidget(
@@ -638,7 +690,8 @@ export default function (pi: ExtensionAPI) {
 			"Toggle pi-lens on/off for the current session. Usage: /lens-toggle",
 		handler: async (_args, ctx) => {
 			lensEnabled = !lensEnabled;
-			ctx.ui.notify(
+			notifyUi(
+				ctx,
 				lensEnabled
 					? "pi-lens enabled for this session."
 					: "pi-lens disabled for this session. Run /lens-toggle again to resume.",
@@ -652,7 +705,8 @@ export default function (pi: ExtensionAPI) {
 			"Toggle automatic context injection on/off for the current session (tools/LSP/read-guard/formatting stay active). Usage: /lens-context-toggle",
 		handler: async (_args, ctx) => {
 			contextInjectionEnabled = !contextInjectionEnabled;
-			ctx.ui.notify(
+			notifyUi(
+				ctx,
 				contextInjectionEnabled
 					? "pi-lens context injection enabled — findings will be added to the next turn."
 					: "pi-lens context injection disabled — findings are still cached (lens_diagnostics, /lens-health) but not added to model context.",
@@ -666,11 +720,24 @@ export default function (pi: ExtensionAPI) {
 			"Show or hide the pi-lens diagnostics widget below the editor. Usage: /lens-widget-toggle",
 		handler: async (_args, ctx) => {
 			const nextVisible = !lensWidgetVisible;
+			const mode = readExtensionMode(ctx);
+			// #1334 S2: distinguish "this pi is too old" from "this run mode has
+			// no terminal to draw into" — the old single message blamed the pi
+			// version for what is really a mode constraint.
+			if (nextVisible && !supportsTuiWidget(mode)) {
+				notifyUi(
+					ctx,
+					`pi-lens widget needs an interactive TUI — unavailable in "${mode}" mode.`,
+					"warning",
+				);
+				return;
+			}
 			const changed = nextVisible
-				? mountLensWidget(ctx.ui)
+				? mountLensWidget(ctx.ui, mode)
 				: unmountLensWidget(ctx.ui);
 			if (!changed) {
-				ctx.ui.notify(
+				notifyUi(
+					ctx,
 					"pi-lens widget is not supported by this pi version.",
 					"warning",
 				);
@@ -678,7 +745,8 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			lensWidgetVisible = nextVisible;
-			ctx.ui.notify(
+			notifyUi(
+				ctx,
 				lensWidgetVisible
 					? "pi-lens widget shown. Run /lens-widget-toggle to hide it."
 					: "pi-lens widget hidden. Run /lens-widget-toggle to show it.",
@@ -721,7 +789,7 @@ export default function (pi: ExtensionAPI) {
 				summary,
 			];
 
-			ctx.ui.notify(lines.join("\n"), "info");
+			notifyUi(ctx, lines.join("\n"), "info");
 		},
 	});
 
@@ -761,9 +829,10 @@ export default function (pi: ExtensionAPI) {
 						"Graph exceeded the map's node cap — showing the highest-degree files only (see the in-page note).",
 					);
 				}
-				ctx.ui.notify(lines.join("\n"), "info");
+				notifyUi(ctx, lines.join("\n"), "info");
 			} catch (err) {
-				ctx.ui.notify(
+				notifyUi(
+					ctx,
 					`Failed to generate the project map: ${err instanceof Error ? err.message : String(err)}`,
 					"error",
 				);
@@ -886,7 +955,10 @@ export default function (pi: ExtensionAPI) {
 			// Memory attribution (#1123 item 2) — reuses the same O(1) accessors the
 			// periodic latency.log `memory_sample` uses; see clients/memory-sampler.ts.
 			try {
-				lines.push("", formatMemoryHealthLine(buildMemorySample(runtime.wordIndex)));
+				lines.push(
+					"",
+					formatMemoryHealthLine(buildMemorySample(runtime.wordIndex)),
+				);
 			} catch {
 				// best-effort — a health-line render must never break /lens-health
 			}
@@ -974,7 +1046,7 @@ export default function (pi: ExtensionAPI) {
 				lines.push("", slopScoreLine);
 			}
 
-			ctx.ui.notify(lines.join("\n"), "info");
+			notifyUi(ctx, lines.join("\n"), "info");
 		},
 	});
 
@@ -988,9 +1060,10 @@ export default function (pi: ExtensionAPI) {
 				const report = await collectLatencyPerformance({
 					sessionStartedAt: runtime.sessionStartedAt,
 				});
-				ctx.ui.notify(renderLatencyPerformanceReport(report), "info");
+				notifyUi(ctx, renderLatencyPerformanceReport(report), "info");
 			} catch (err) {
-				ctx.ui.notify(
+				notifyUi(
+					ctx,
 					`Failed to read performance telemetry: ${err instanceof Error ? err.message : String(err)}`,
 					"error",
 				);
@@ -1093,7 +1166,7 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 
-			ctx.ui.notify(lines.join("\n"), "info");
+			notifyUi(ctx, lines.join("\n"), "info");
 		},
 	});
 
@@ -1103,7 +1176,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const [rawTarget] = normalizeCommandArgs(args);
 			if (!rawTarget) {
-				ctx.ui.notify("Usage: /lens-allow-edit <path>", "warning");
+				notifyUi(ctx, "Usage: /lens-allow-edit <path>", "warning");
 				return;
 			}
 
@@ -1111,7 +1184,8 @@ export default function (pi: ExtensionAPI) {
 				? rawTarget
 				: path.resolve(ctx.cwd ?? runtime.projectRoot, rawTarget);
 			runtime.readGuard.addExemption(targetPath);
-			ctx.ui.notify(
+			notifyUi(
+				ctx,
 				`Read guard override armed for next edit: ${targetPath}`,
 				"info",
 			);
@@ -1240,7 +1314,11 @@ export default function (pi: ExtensionAPI) {
 	// substantive pi-lens tool — see tools/render-compact.ts) are wrapped;
 	// the rest pass through wrapToolsForCompactLine unchanged.
 	const compactToolLineEnabled = getLensFlag("lens-compact-tool-line") === true;
-	const toolsToRegister = [...alwaysActiveTools, activateToolsTool, ...lazyTools];
+	const toolsToRegister = [
+		...alwaysActiveTools,
+		activateToolsTool,
+		...lazyTools,
+	];
 	for (const tool of compactToolLineEnabled
 		? wrapToolsForCompactLine(toolsToRegister as any)
 		: toolsToRegister) {
@@ -1486,7 +1564,7 @@ export default function (pi: ExtensionAPI) {
 				bootstrapClientsStartedAt,
 				bootstrapClientsDurationMs,
 				getFlag: (name: string) => getLensFlag(name),
-				notify: (msg, level) => ctx.ui.notify(msg, level),
+				notify: (msg, level) => notifyUi(ctx, msg, level),
 				dbg,
 				log,
 				runtime,
@@ -1614,7 +1692,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (lensWidgetVisible) {
-				mountLensWidget(ctx.ui);
+				mountLensWidget(ctx.ui, readExtensionMode(ctx));
 			}
 		} catch (sessionErr) {
 			dbg(`session_start crashed: ${sessionErr}`);
@@ -1799,7 +1877,7 @@ export default function (pi: ExtensionAPI) {
 					getLensFlag(name, filePath),
 				getFlagSource: (name: string, filePath?: string) =>
 					getLensFlagSource(name, filePath),
-				notify: (msg, level) => ctx.ui.notify(msg, level),
+				notify: (msg, level) => notifyUi(ctx, msg, level),
 				dbg,
 				runtime,
 				cacheManager,
@@ -1858,7 +1936,10 @@ export default function (pi: ExtensionAPI) {
 					sessionSuspectedStalls += 1;
 				} else {
 					lastLoggedLoopWorstMs = loopMaxMs;
-					sessionWorstRealBlockMs = Math.max(sessionWorstRealBlockMs, loopMaxMs);
+					sessionWorstRealBlockMs = Math.max(
+						sessionWorstRealBlockMs,
+						loopMaxMs,
+					);
 				}
 			}
 			// Start a fresh per-turn occupancy window so the next turn's worst
@@ -1892,7 +1973,7 @@ export default function (pi: ExtensionAPI) {
 			if (shouldCheckSmellsThisTurn(runtime.turnIndex)) {
 				try {
 					for (const note of checkSmellsAndNoteOnce(countRecentSmells())) {
-						ctx.ui.notify(note, "warning");
+						notifyUi(ctx, note, "warning");
 					}
 				} catch {
 					// best-effort observability — never fail turn_end over this
