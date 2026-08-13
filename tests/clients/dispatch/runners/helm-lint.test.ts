@@ -216,3 +216,24 @@ describe("parseHelmLintOutput", () => {
 		expect(diagnostic.filePath).toBe(path.join(chartRoot, "Chart.yaml"));
 	});
 });
+
+// #1342 review: helm indents multi-line detail under its [LEVEL] header —
+// continuations must fold into the diagnostic message, not vanish.
+describe("parseHelmLintOutput continuations", () => {
+	it("appends indented continuation lines to the preceding diagnostic", () => {
+		const raw = [
+			"[ERROR] templates/deploy.yaml: unable to parse YAML",
+			"	error converting YAML to JSON: yaml: line 12:",
+			"	  mapping values are not allowed in this context",
+			"[WARNING] templates/svc.yaml: icon is recommended",
+		].join("\n");
+		const diagnostics = parseHelmLintOutput(raw, "/repo/chart");
+		expect(diagnostics).toHaveLength(2);
+		expect(diagnostics[0].message).toContain("unable to parse YAML");
+		expect(diagnostics[0].message).toContain("error converting YAML to JSON");
+		expect(diagnostics[0].message).toContain("mapping values are not allowed");
+		expect(diagnostics[1].message).toContain("icon is recommended");
+		expect(diagnostics[1].message).not.toContain("mapping values");
+	});
+});
+
