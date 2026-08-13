@@ -25,6 +25,7 @@ import {
 import {
 	direntsHaveMarkerGlobMatch,
 	isAtOrAboveHomeDir,
+	isFullyQualified,
 } from "../path-utils.js";
 import {
 	ensureTool,
@@ -151,7 +152,7 @@ const directLspCommandSkipLoggedUntil = new Map<string, number>();
 
 function isSimpleCommand(command: string): boolean {
 	return (
-		!path.isAbsolute(command) &&
+		!isFullyQualified(command) &&
 		!command.includes("/") &&
 		!command.includes("\\")
 	);

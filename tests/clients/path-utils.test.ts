@@ -5,6 +5,7 @@ import {
 	findLocalToolConfig,
 	findNearestContaining,
 	findNearestMarkerRoot,
+	isFullyQualified,
 	isAtOrAboveHomeDir,
 	isExternalOrVendorFile,
 	normalizeEphemeralMapKey,
@@ -20,6 +21,18 @@ import {
 import { setupTestEnvironment } from "./test-utils.js";
 
 describe("path-utils", () => {
+	it.each([
+		["Windows drive-relative", "C:foo", false],
+		["Windows rooted-relative", "\\foo", false],
+		["Windows drive-absolute", "C:\\foo", true],
+		["Windows UNC", "\\\\server\\share", true],
+		["POSIX root", "/", true],
+		["POSIX absolute", "/abs/path", true],
+		["relative", "rel/path", false],
+		["dot-relative", "./rel", false],
+	])("isFullyQualified: %s", (_label, value, expected) => {
+		expect(isFullyQualified(value)).toBe(expected);
+	});
 	it("uriToPath decodes URL-encoded file URIs", () => {
 		const uri = "file:///C:/Users/Test%20User/project/file.ts";
 		const resolved = uriToPath(uri);

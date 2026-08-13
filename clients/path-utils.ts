@@ -49,6 +49,20 @@ export function toPosix(filePath: string): string {
 }
 
 /**
+ * Return whether `filePath` is fully qualified for its path shape.
+ *
+ * A drive-relative path (`C:foo`) and a rooted-relative path (`\\foo`) are
+ * not self-contained: each still depends on Windows ambient drive state.
+ * Drive-absolute paths (`C:\\foo`) and UNC paths (`\\\\server\\share`) are
+ * fully qualified, as are POSIX absolute paths (`/foo`).
+ */
+export function isFullyQualified(filePath: string): boolean {
+	if (path.posix.isAbsolute(filePath)) return true;
+	if (!win32.isAbsolute(filePath)) return false;
+	return win32.parse(filePath).root.length > 1;
+}
+
+/**
  * Split a path into its non-empty segments on EITHER separator (`\` or `/`),
  * regardless of the running OS — the shape-safe form of `p.split(path.sep)` /
  * an inline `p.split(/[\\/]+/)`, which #1161/#1163 showed must not assume the

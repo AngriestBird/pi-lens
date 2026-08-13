@@ -12,6 +12,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { findNodeToolBinary } from "./package-manager.js";
+import { isFullyQualified } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import {
 	createAvailabilityChecker,
@@ -188,7 +189,7 @@ function classifyMadgeKind(
 	managedToolsDir: string,
 	projectRoot: string,
 ): MadgeCommandKind {
-	if (!path.isAbsolute(resolved)) return "path";
+	if (!isFullyQualified(resolved)) return "path";
 	if (isWithin(managedToolsDir, resolved)) return "managed";
 	if (isWithin(projectRoot, resolved)) return "local";
 	return "global";
@@ -218,7 +219,7 @@ async function resolvedCommandIsStale(
 	spawnableCache: Map<string, boolean>,
 ): Promise<boolean> {
 	if (resolved.kind === "npx") return false;
-	if (path.isAbsolute(resolved.cmd)) return !fs.existsSync(resolved.cmd);
+	if (isFullyQualified(resolved.cmd)) return !fs.existsSync(resolved.cmd);
 	const cached = spawnableCache.get(resolved.cmd);
 	if (cached !== undefined) return !cached;
 	const { isSpawnableCommand } = await import("./installer/index.js");
