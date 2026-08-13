@@ -1109,6 +1109,36 @@ pi-tui **hard-crashes the whole host process** (`uncaughtException: Rendered lin
 - Surfaces the HOST wraps for us are safe without fitting: `ctx.ui.notify` and the tool-summary compact renderers (`tools/render-compact.ts`) build on pi-tui's own `Text`/`Markdown` components, which word-wrap internally. A 2026-07-11 audit bucketed every render surface; only raw `render(width)` implementations carry the hazard.
 - Tests for renderers must measure with the REAL `visibleWidth` (ANSI/OSC8-aware) against a narrow width — mock-based render tests are exactly what let #513 ship.
 
+## Host run mode owns terminal behavior (#1334 S2)
+
+`ExtensionContext.mode` is `"tui" | "rpc" | "json" | "print"` (pinned host
+types, line 208). **Never guess terminal ownership — read it.**
+`clients/extension-mode.ts` is deliberately STATELESS: `mode` rides on the ctx
+handed to every event and command handler, so each call site reads the ctx it
+already has rather than consulting a latched global that a session replacement
+would leave stale.
+
+Two predicates, deliberately NOT the same one:
+
+- `supportsTuiWidget(mode)` — terminal-only custom components (the diagnostics
+  widget). `tui` only. **`rpc` is excluded despite `hasUI: true`** — dialogs
+  travel over the protocol there, a `belowEditor` component does not.
+- `suppressesUserNotify(mode)` — proactive chatter. Suppressed (logged, not
+  rendered) in `print`/`json`, which are one-shot runs whose stdout belongs to
+  the run's actual output.
+
+All user-facing notifies in `index.ts` go through the local `notifyUi(ctx, …)`
+helper — add new ones there, never a bare `ctx.ui.notify`. The
+`wireUserNotifier` getter applies the same predicate, so `clients/`-level
+degradation notices (#1333) become log-only in those modes too, via
+user-notify.ts's existing fail-soft "no host wired" path.
+
+`"unknown"` (older host with no `mode`, or a mode a future pi adds) keeps
+current behavior in BOTH predicates — never guess a suppression that could hide
+output. This is complementary to and independent of the #1338/#1333 console
+guard, which enforces "never write raw to the terminal"; mode decides whether
+the host's own render path should be used at all.
+
 ## ast-grep rules
 
 Rules live in `rules/ast-grep-rules/rules/*.yml` (plus the multi-rule `rules/ast-grep-rules/slop-patterns.yml`); disabled rules sit in `rules/ast-grep-rules/rules-disabled/` (sibling dir — not loaded). Run by `clients/dispatch/runners/ast-grep-napi.ts`. Discovery is RECURSIVE (#516) — language subdirectories load too; this is what activates the vendored CodeRabbit CWE catalog (`rules/ast-grep-rules/coderabbit/rules/**`, ~184 rules, ~13 of them TS/JS-live), pinned by a regression test asserting a nested CodeRabbit rule fires via NAPI.
