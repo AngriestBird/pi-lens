@@ -1339,11 +1339,9 @@ async function resolveFormatterCommand(
 		fallback[0] === "npx" &&
 		!assertInstallAllowed(`formatter npx fallback: ${formatter.name}`)
 	) {
-		recordDegradation({
-			kind: "formatter-skip",
-			subject: formatter.name,
-			reason: "npx fallback disabled because project is untrusted",
-		});
+		// No second ledger entry here (#1366 review): assertInstallAllowed just
+		// recorded the trust-refusal with this formatter's context — recording
+		// formatter-skip too would count one user-visible degradation twice.
 		return SKIP_FORMATTING;
 	}
 	return fallback;

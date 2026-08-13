@@ -1522,7 +1522,7 @@ async function callTool(
 				`  ${server.connected ? "✓" : "✗"} ${server.serverId} (${server.root})`,
 				...server.pullFailureHistory.slice(-1).map(
 					(failure) =>
-						`    ⚠ diagnostics pull failed: ${failure.method}${failure.code !== undefined ? ` (${failure.code})` : ""} — ${failure.message}`,
+						`    ⚠ diagnostics pull failed: ${failure.method}${failure.code !== undefined ? ` (${failure.code})` : ""} — ${failure.message.length > 200 ? `${failure.message.slice(0, 200)}…` : failure.message}`,
 				),
 			]),
 			...renderLspBrokenStatusLines(brokenServers),

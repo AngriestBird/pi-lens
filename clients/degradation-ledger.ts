@@ -36,11 +36,25 @@ export function recordDegradation(record: DegradationRecord): void {
 		groups.set(record.kind, group);
 	}
 	group.count += 1;
-	group.entries.push({ subject: record.subject, reason: record.reason });
+	// Bounded at RECORD time (#1366 review): reasons carry arbitrary error
+	// text; a 10KB message must never become a 10KB health line or a 10KB
+	// retained string.
+	group.entries.push({
+		subject: truncateForLedger(record.subject),
+		reason: truncateForLedger(record.reason),
+	});
 	if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
 }
 
 /** Detached snapshot, grouped in first-seen kind order. */
+const LEDGER_FIELD_MAX = 200;
+
+function truncateForLedger(text: string): string {
+	return text.length > LEDGER_FIELD_MAX
+		? `${text.slice(0, LEDGER_FIELD_MAX)}…`
+		: text;
+}
+
 export function getDegradationSummary(): DegradationGroup[] {
 	return [...groups.entries()].map(([kind, group]) => ({
 		kind,

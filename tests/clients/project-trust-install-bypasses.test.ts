@@ -45,11 +45,16 @@ describe("central project-trust install gate (#1334 review)", () => {
 			const formatter = { name: "npx-test", command: ["npx", "pkg", "$FILE"], extensions: [".ts"], async detect() { return true; } };
 			setProjectTrustState("untrusted");
 			expect(await formatFile(file, formatter)).toEqual({ success: true, changed: false });
-			expect(getDegradationSummary()).toEqual(
+			// #1366 review: ONE ledger entry per user-visible degradation — the
+			// trust seam records it (with the formatter context); the formatter
+			// site must not add a second kind for the same event.
+			const summary = getDegradationSummary();
+			expect(summary).toEqual(
 				expect.arrayContaining([
-					expect.objectContaining({ kind: "formatter-skip", count: 1 }),
+					expect.objectContaining({ kind: "trust-refusal", count: 1 }),
 				]),
 			);
+			expect(summary.find((g) => g.kind === "formatter-skip")).toBeUndefined();
 			expect(safeSpawnAsync).not.toHaveBeenCalled();
 			setProjectTrustState("trusted");
 			await formatFile(file, formatter);
