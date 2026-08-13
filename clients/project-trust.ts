@@ -35,6 +35,7 @@
  */
 
 import { logExtension } from "./extension-log.js";
+import { recordDegradation } from "./degradation-ledger.js";
 
 export type ProjectTrustState = "trusted" | "untrusted" | "unknown";
 
@@ -148,6 +149,11 @@ export function isToolInstallAllowedByTrust(): boolean {
 /** Central gate for operations that may download or install executable content. */
 export function assertInstallAllowed(context: string): boolean {
 	if (isToolInstallAllowedByTrust()) return true;
+	recordDegradation({
+		kind: "trust-refusal",
+		subject: context,
+		reason: projectTrustDenialReason() ?? "project trust denied",
+	});
 	if (!installRefusalWarnings.has(context)) {
 		if (installRefusalWarnings.size >= INSTALL_REFUSAL_WARNING_CAP) {
 			installRefusalWarnings.clear();

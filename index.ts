@@ -2,6 +2,10 @@ import "./clients/console-guard-install.js";
 import "./clients/startup-marker.js";
 import { installConsoleGuard } from "./clients/extension-log.js";
 import { wireUserNotifier } from "./clients/user-notify.js";
+import {
+	getDegradationSummary,
+	recordDegradation,
+} from "./clients/degradation-ledger.js";
 import { adoptProjectTrustFromContext } from "./clients/project-trust.js";
 import {
 	type ExtensionRunMode,
@@ -237,6 +241,11 @@ function notifyUi(
 ): void {
 	const mode = readExtensionMode(ctx);
 	if (suppressesUserNotify(mode)) {
+		recordDegradation({
+			kind: "mode-suppression",
+			subject: "ctx.ui.notify",
+			reason: modeSuppressionNote(mode),
+		});
 		dbg(`notify ${modeSuppressionNote(mode)}: ${message.split("\n")[0]}`);
 		return;
 	}
@@ -425,6 +434,12 @@ export default function (pi: ExtensionAPI) {
 		// undefined is exactly the "no host wired" path user-notify.ts already
 		// documents as fail-soft, so nothing is lost, only un-rendered.
 		if (suppressesUserNotify(readExtensionMode(latestEventCtx))) {
+			const mode = readExtensionMode(latestEventCtx);
+			recordDegradation({
+				kind: "mode-suppression",
+				subject: "user degradation notice",
+				reason: modeSuppressionNote(mode),
+			});
 			return undefined;
 		}
 		return (message: string, level?: "info" | "warning" | "error") =>
@@ -1060,7 +1075,15 @@ export default function (pi: ExtensionAPI) {
 				const report = await collectLatencyPerformance({
 					sessionStartedAt: runtime.sessionStartedAt,
 				});
-				notifyUi(ctx, renderLatencyPerformanceReport(report), "info");
+				const degradations = getDegradationSummary();
+				const degradationText = degradations.length
+					? `\n\nDegradations:\n${degradations.map((group) => `  ${group.kind}: ${group.count} (${group.latestReasons.at(-1)?.subject}: ${group.latestReasons.at(-1)?.reason})`).join("\n")}`
+					: "";
+				notifyUi(
+					ctx,
+					`${renderLatencyPerformanceReport(report)}${degradationText}`,
+					"info",
+				);
 			} catch (err) {
 				notifyUi(
 					ctx,

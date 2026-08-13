@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { suspendAt } from "../interleaving-kit.js";
+const recordDegradation = vi.hoisted(() => vi.fn());
+vi.mock("../../../clients/degradation-ledger.js", () => ({ recordDegradation }));
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -55,6 +57,7 @@ function configureTypeScriptServer() {
 
 describe("TypeScript language-service idle eviction (#1332 b2)", () => {
 	beforeEach(() => {
+		recordDegradation.mockClear();
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
@@ -84,6 +87,11 @@ describe("TypeScript language-service idle eviction (#1332 b2)", () => {
 		expect(service.getAliveClientCount()).toBe(0);
 		expect(first.shutdown).toHaveBeenCalledWith({
 			reason: "typescript_idle_eviction",
+		});
+		expect(recordDegradation).toHaveBeenCalledWith({
+			kind: "ts-idle-eviction",
+		subject: expect.stringMatching(/^typescript:.*repo$/),
+			reason: "idle TypeScript client released to bound memory",
 		});
 
 		expect((await service.getClientForFile("/repo/main.ts"))?.client).toBe(rebuilt);

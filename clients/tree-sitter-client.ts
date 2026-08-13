@@ -28,6 +28,7 @@ import {
 	LANGUAGE_TO_GRAMMAR,
 } from "./grammar-source.js";
 import { resolvePackagePath } from "./package-root.js";
+import { recordDegradation } from "./degradation-ledger.js";
 import {
 	assertInstallAllowed,
 	getProjectTrustGeneration,
@@ -481,6 +482,11 @@ export class TreeSitterClient {
 				message: unavailable,
 				metadata: { grammarFile, outcome: "trust-gated" },
 			});
+			recordDegradation({
+				kind: "grammar-blocked",
+				subject: grammarFile,
+				reason: "runtime grammar download blocked because project is untrusted",
+			});
 			// Lazy clear-on-transition (#1363 review): compare the trust
 			// generation at use time -- no listener registration, no retention.
 			const generation = getProjectTrustGeneration();
@@ -528,6 +534,11 @@ export class TreeSitterClient {
 					subsystem: "tree-sitter-client",
 					message: unavailable,
 					metadata: { grammarFile, outcome: "unavailable" },
+				});
+				recordDegradation({
+					kind: "grammar-blocked",
+					subject: grammarFile,
+					reason: "runtime grammar download failed",
 				});
 				// HUMAN-audience: an offline grammar fetch silently degrades this
 				// language's features, so it reaches the user through the HOST's
@@ -626,6 +637,11 @@ export class TreeSitterClient {
 			this.dbg(
 				`Grammar ${grammarFile} blocked on this runtime — ${blockReason}`,
 			);
+			recordDegradation({
+				kind: "grammar-blocked",
+				subject: grammarFile,
+				reason: blockReason,
+			});
 			return null;
 		}
 
