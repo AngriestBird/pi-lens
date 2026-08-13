@@ -1,6 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { logExtension } = vi.hoisted(() => ({ logExtension: vi.fn() }));
 import {
 	adoptProjectTrustFromContext,
+	assertInstallAllowed,
 	getProjectTrustState,
 	isLspSpawnAllowedByTrust,
 	isToolInstallAllowedByTrust,
@@ -10,8 +13,11 @@ import {
 	setProjectTrustState,
 } from "../../clients/project-trust.ts";
 
+vi.mock("../../clients/extension-log.js", () => ({ logExtension }));
+
 afterEach(() => {
 	resetProjectTrust();
+	logExtension.mockClear();
 });
 
 describe("readProjectTrustFromContext (#1334 S5)", () => {
@@ -49,6 +55,22 @@ describe("readProjectTrustFromContext (#1334 S5)", () => {
 });
 
 describe("project-trust policy gates", () => {
+	it("warns once per refusal context and resets the warning set on trust changes", () => {
+		setProjectTrustState("untrusted");
+		expect(assertInstallAllowed("test install")).toBe(false);
+		expect(assertInstallAllowed("test install")).toBe(false);
+		expect(
+			logExtension.mock.calls.filter(([entry]) => entry.level === "warn"),
+		).toHaveLength(1);
+
+		setProjectTrustState("trusted");
+		setProjectTrustState("untrusted");
+		expect(assertInstallAllowed("test install")).toBe(false);
+		expect(
+			logExtension.mock.calls.filter(([entry]) => entry.level === "warn"),
+		).toHaveLength(2);
+	});
+
 	it("defaults to fail-open when nothing has been adopted", () => {
 		expect(getProjectTrustState()).toBe("unknown");
 		expect(isToolInstallAllowedByTrust()).toBe(true);

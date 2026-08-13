@@ -39,6 +39,27 @@ import { logExtension } from "./extension-log.js";
 export type ProjectTrustState = "trusted" | "untrusted" | "unknown";
 
 let trustState: ProjectTrustState = "unknown";
+const installRefusalWarnings = new Set<string>();
+// Bounded (#1363 review): dynamic contexts (per-formatter/per-server strings)
+// must not grow without limit across a long untrusted session. Clearing on
+// overflow trades an occasional repeat warning for bounded memory.
+const INSTALL_REFUSAL_WARNING_CAP = 200;
+// Monotonic transition counter (#1363 review): consumers needing
+// clear-on-transition semantics compare this lazily at use time instead of
+// registering callbacks -- a per-instance listener with no teardown path
+// strongly retains every instance ever constructed.
+let trustGeneration = 0;
+
+export function getProjectTrustGeneration(): number {
+	return trustGeneration;
+}
+
+function latchProjectTrustState(next: ProjectTrustState): void {
+	if (next === trustState) return;
+	trustState = next;
+	installRefusalWarnings.clear();
+	trustGeneration += 1;
+}
 
 /**
  * Feature-detected read of the host trust decision off an event ctx.
@@ -74,7 +95,16 @@ export function readProjectTrustFromContext(ctx: unknown): ProjectTrustState {
 
 /** Latch a trust state directly (tests, and the ctx adoption path below). */
 export function setProjectTrustState(next: ProjectTrustState): void {
-	trustState = next;
+	const previous = trustState;
+	latchProjectTrustState(next);
+	if (previous !== next) {
+		logExtension({
+			subsystem: "project-trust",
+			level: "debug",
+			message: `project trust state transitioned: ${previous} -> ${next}`,
+			metadata: { previous, next },
+		});
+	}
 }
 
 /**
@@ -84,7 +114,16 @@ export function setProjectTrustState(next: ProjectTrustState): void {
  */
 export function adoptProjectTrustFromContext(ctx: unknown): ProjectTrustState {
 	const next = readProjectTrustFromContext(ctx);
-	trustState = next;
+	const previous = trustState;
+	latchProjectTrustState(next);
+	if (previous !== next) {
+		logExtension({
+			subsystem: "project-trust",
+			level: "debug",
+			message: `project trust state transitioned: ${previous} -> ${next}`,
+			metadata: { previous, next },
+		});
+	}
 	return next;
 }
 
@@ -94,7 +133,8 @@ export function getProjectTrustState(): ProjectTrustState {
 
 /** Test/teardown-only: back to the fail-open default. */
 export function resetProjectTrust(): void {
-	trustState = "unknown";
+	latchProjectTrustState("unknown");
+	installRefusalWarnings.clear();
 }
 
 /**
@@ -108,12 +148,18 @@ export function isToolInstallAllowedByTrust(): boolean {
 /** Central gate for operations that may download or install executable content. */
 export function assertInstallAllowed(context: string): boolean {
 	if (isToolInstallAllowedByTrust()) return true;
-	logExtension({
-		subsystem: "project-trust",
-		level: "warn",
-		message: `install/materialization blocked: ${context}`,
-		metadata: { context, trustState },
-	});
+	if (!installRefusalWarnings.has(context)) {
+		if (installRefusalWarnings.size >= INSTALL_REFUSAL_WARNING_CAP) {
+			installRefusalWarnings.clear();
+		}
+		installRefusalWarnings.add(context);
+		logExtension({
+			subsystem: "project-trust",
+			level: "warn",
+			message: `install/materialization blocked: ${context}`,
+			metadata: { context, trustState },
+		});
+	}
 	return false;
 }
 
