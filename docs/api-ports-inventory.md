@@ -14,7 +14,7 @@ The sweep used the requested `ctx.`, `pi.`, `ExtensionContext`, and `ExtensionAP
 | `tools/lens-diagnostic-mark.ts:253` | workspace cwd | direct `ctx.cwd` read | `workspace.cwd` |
 | `tools/lens-diagnostics.ts:376,398` | workspace cwd + abort | direct `ctx.cwd`/`ctx.signal` reads | `workspace.cwd`, `lifecycle.abortSignal` |
 | `tools/lsp-diagnostics.ts:521,534` | abort + workspace cwd | direct `ctx.signal`/`ctx.cwd` reads | `lifecycle.abortSignal`, `workspace.cwd` |
-| `tools/lsp-navigation.ts:992,1084,1128,1490,1496,1516,1521` | flags, workspace cwd, edit cwd | direct `ctx.cwd`; flag closure receives cwd | `flags.get`, `workspace.cwd`, `workspace.resolvePath` |
+| `tools/lsp-navigation.ts:992,1084,1128,1490,1496,1516,1521` | flags, workspace cwd, edit cwd | direct `ctx.cwd`; flag closure receives cwd | `flags.get`, `workspace.cwd` (path RESOLUTION is engine logic over `workspace.cwd` — review reclassification, #1360) |
 | `tools/module-report.ts:130,131,282,283,438,439` | workspace cwd | direct `ctx.cwd` read | `workspace.cwd` |
 | `tools/project-report.ts:76` | workspace cwd | direct `ctx.cwd` read | `workspace.cwd` |
 | `tools/symbol-search.ts:73` | workspace cwd | direct `ctx.cwd` read | `workspace.cwd` |
@@ -45,7 +45,7 @@ The sweep used the requested `ctx.`, `pi.`, `ExtensionContext`, and `ExtensionAP
 | `clients/dispatch/runners/htmlhint.ts:69` | runner cwd | direct dispatch-context `ctx.cwd` | `workspace.cwd` |
 | `clients/dispatch/runners/javac.ts:55` | runner cwd | direct dispatch-context `ctx.cwd` | `workspace.cwd` |
 | `clients/dispatch/runners/ktlint.ts:93` | runner cwd | direct dispatch-context `ctx.cwd` | `workspace.cwd` |
-| `clients/dispatch/runners/lsp.ts:119,121,163,336` | cwd, flags, file role | direct `ctx.cwd`, `ctx.pi.getFlag` | `workspace.cwd`, `flags.get`, `workspace.fileRole` |
+| `clients/dispatch/runners/lsp.ts:119,121,163` | cwd, flags | direct `ctx.cwd`, `ctx.pi.getFlag` | `workspace.cwd`, `flags.get` |
 | `clients/dispatch/runners/markdownlint.ts:107` | runner cwd | direct dispatch-context `ctx.cwd` | `workspace.cwd` |
 | `clients/dispatch/runners/mypy.ts:69` | runner cwd | direct dispatch-context `ctx.cwd` | `workspace.cwd` |
 | `clients/dispatch/runners/oxlint.ts:64,82` | runner cwd, tool availability | direct `ctx.cwd`, `ctx.hasTool` | `workspace.cwd`, `tools.has` |
@@ -113,6 +113,9 @@ export interface HostPorts {
 	readonly log: {
 		extension(entry: { subsystem: string; message: string; level?: string; metadata?: Record<string, unknown> }): void;
 		debug(message: string, metadata?: Record<string, unknown>): void;
+		/** Subsystem NDJSON sink factory (the 13 subsystem-logger rows + debug
+		 * sinks) — host owns the directory/retention policy. */
+		sink(subsystem: string): (entry: object) => void;
 	};
 	readonly emit: {
 		bus(channel: string, payload: unknown): void;
@@ -123,7 +126,8 @@ export interface HostPorts {
 	};
 	readonly spawn: {
 		abortSignal(): AbortSignal | undefined;
-		isAllowed(command: string): boolean;
+		/** Trust-gated install/materialization policy (clients/project-trust.ts assertInstallAllowed; adapter-surface today -- callers in index.ts). */
+		isAllowed(context: string): boolean;
 	};
 	readonly render: {
 		invalidate(): void;
@@ -146,13 +150,15 @@ export interface HostPorts {
 }
 ```
 
-## Three hardest migrations
+## Four hardest migrations
 
 1. **Dispatch runner context fan-out (`clients/dispatch/runners/*`, especially `tree-sitter.ts`, `lsp.ts`, and `ast-grep-napi.ts`).** Dozens of runners read `cwd`, availability, flags, and logging through `DispatchContext`; replacing these safely requires separating engine context from host projections without changing runner scheduling or fallback semantics. The existing `PiAgentAPI` is only a flag fragment, so this is the largest mechanical and typing migration.
 
 2. **Turn-scoped abort propagation (`index.ts` → `setAmbientAbortSignal` → `clients/safe-spawn.ts`).** The ambient signal is intentionally available deep inside arbitrary child-spawn paths, and its correctness depends on lifecycle ordering and clearing every settle path. A port must preserve cancellation, session replacement, and print-mode handle behavior without reintroducing captured-context races.
 
 3. **Session-bound UI/status and event delivery (`clients/runtime-tool-call.ts`, `clients/widget-state.ts`, and the bus/event publishers).** UI getters, status setters, render invalidation, and event emitters can all outlive the context that supplied them. The existing getter seams solve some cases, but consolidating them requires preserving delivery-time resolution, dropped-event observability, and no-throw behavior across TUI/RPC/MCP hosts.
+
+4. **Read-guard tool-event seam** (`index.ts:1722-1734` → `clients/runtime-tool-call.ts`; `index.ts:1739-1745` → `clients/runtime-tool-result.ts`): the tool-call/tool-result coupling and strict ordering make this at least as hard as the UI/event migration — the port must preserve event order and the paired-call identity across session replacement (#1360 review addition).
 
 ## S2 recommendation
 
