@@ -206,5 +206,53 @@ describe("formatFile honors SKIP_FORMATTING (#1144)", () => {
 			env.cleanup();
 		}
 	});
-});
 
+	it("does not let an unavailable primary reach the npx fallback when gated", async () => {
+		const env = setupTestEnvironment("pi-lens-format-npx-gated-");
+		try {
+			const filePath = path.join(env.tmpDir, "bundle.js");
+			fs.writeFileSync(filePath, "const a=1;const b=2;const c=a+b;\n");
+			const mod = await import("../../clients/formatters.ts");
+			const formatter = {
+				...mod.prettierFormatter,
+				resolveCommand: async () => mod.SKIP_FORMATTING,
+			};
+
+			const result = await mod.formatFile(filePath, formatter);
+
+			expect(result).toEqual({ success: true, changed: false });
+			expect(safeSpawnAsync).not.toHaveBeenCalledWith(
+				"npx",
+				expect.anything(),
+				expect.anything(),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("uses the npx fallback when the primary is unavailable and the file is not gated", async () => {
+		const env = setupTestEnvironment("pi-lens-format-npx-available-");
+		try {
+			const filePath = path.join(env.tmpDir, "formatted.js");
+			fs.writeFileSync(filePath, "const value = 1;\n");
+			const mod = await import("../../clients/formatters.ts");
+			const formatter = {
+				...mod.prettierFormatter,
+				resolveCommand: async () => null,
+			};
+			safeSpawnAsync.mockResolvedValue({ status: 0, stdout: "", stderr: "" });
+
+			const result = await mod.formatFile(filePath, formatter);
+
+			expect(result).toEqual({ success: true, changed: false });
+			expect(safeSpawnAsync).toHaveBeenCalledWith(
+				"npx",
+				["prettier", "--write", filePath],
+				expect.objectContaining({ cwd: env.tmpDir }),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
