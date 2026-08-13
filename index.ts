@@ -1,3 +1,4 @@
+import "./clients/console-guard-install.js";
 import "./clients/startup-marker.js";
 import { installConsoleGuard } from "./clients/extension-log.js";
 import { wireUserNotifier } from "./clients/user-notify.js";
@@ -367,9 +368,11 @@ export default function (pi: ExtensionAPI) {
 	// `console.log = console.error` guard. pi owns the terminal (raw mode +
 	// cursor-addressed diff repaints), so a raw byte from ANY transitively
 	// loaded module desyncs its screen model. pi-lens's own sites are migrated
-	// to real ndjson sinks; this net catches everything else. Installed FIRST,
-	// before any client module can log during construction. No-op under test
-	// mode and under `PI_LENS_CONSOLE_GUARD=0`.
+	// to real ndjson sinks; this net catches everything else. The REAL install
+	// happens at import time via `clients/console-guard-install.js` (index.ts's
+	// first import) so module-init writes are covered too; this call is an
+	// idempotent re-install for tests that invoke the factory directly. No-op
+	// under test mode and under `PI_LENS_CONSOLE_GUARD=0`.
 	installConsoleGuard();
 	initI18n(pi);
 	// #1333 HUMAN channel: user-facing degradations found deep in clients/

@@ -251,3 +251,13 @@ describe("extension path terminal silence (#1333)", () => {
 		}
 	});
 });
+
+// #1338 review: the guard must install as index.ts's FIRST import — a
+// factory-time install runs after all static imports have evaluated, leaving
+// import-time console writes unguarded.
+it("console guard is index.ts's first import (import-time install)", () => {
+	const src = fs.readFileSync(path.join(REPO_ROOT, "index.ts"), "utf8");
+	const firstImport = src.match(/^import .*$/m)?.[0] ?? "";
+	expect(firstImport).toContain("./clients/console-guard-install.js");
+});
+
