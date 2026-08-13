@@ -197,8 +197,9 @@ describe("resolveCommand — .venv", () => {
 	});
 
 	// `ruff format` rejects --indent-style/--indent-width ("unexpected argument",
-	// exit 2). Because ruff is not strictExitCode, formatFile reported that as a
-	// clean unchanged file — every unconfigured Python file silently went
+	// exit 2). Back when exit-code strictness was opt-in and ruff had not opted
+	// in, formatFile reported that as a clean unchanged file — every unconfigured
+	// Python file silently went
 	// unformatted. Style must be pinned via inline TOML overrides instead.
 	it("ruff: pins detected indentation via --config, never bare --indent-* flags", async () => {
 		const binPath = venvBin(tmpDir, "ruff");
