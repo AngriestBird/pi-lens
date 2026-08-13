@@ -40,8 +40,9 @@ extraction, and the bounded session-start sweep must stay on that seam so a
 format change cannot drift from garbage collection. The installer probe cache
 uses the awaited durable-store seam: its delta/version snapshot maps to
 `merge`, pending-update retirement and mirror refresh run in
-`afterWriteLocked`, and TTL/existence/mtime validation remains read-side
-policy. Turn-state remains separate pending a future ownership decision.
+`afterWriteLocked`; TTL ageing is also applied inside the authoritative merge,
+while existence/mtime validation remains read-side policy. Turn-state remains
+separate pending a future ownership decision.
 (#1209, #1212)
 
 **LSP idle eviction is lease-guarded across acquisition/use.** `isBusy()` only

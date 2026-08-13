@@ -226,6 +226,41 @@ describe("updateProbeCache", () => {
 		expect(written[TOOL_ID]).toMatchObject({ path: TOOL_PATH });
 	});
 
+	it("ages expired sibling entries during the authoritative merge", async () => {
+		const staleTool = "old-tool";
+		const freshTool = "fresh-tool";
+		const freshEntry = {
+			path: "/other/process/fresh-tool",
+			mtimeMs: MTIME_MS + 2,
+			cachedAt: Date.now(),
+		};
+		mockFsReadFile
+			.mockResolvedValueOnce(JSON.stringify({}))
+			.mockResolvedValueOnce(
+				JSON.stringify({
+					[staleTool]: {
+						path: "/other/process/old-tool",
+						mtimeMs: MTIME_MS,
+						cachedAt: Date.now() - 25 * 60 * 60 * 1000,
+					},
+					[freshTool]: freshEntry,
+				}),
+			);
+		mockFsStat.mockResolvedValue({ mtimeMs: MTIME_MS });
+
+		await updateProbeCache(TOOL_ID, TOOL_PATH);
+		await flushProbeCache();
+
+		const [, content] = mockWriteFileAtomicAsync.mock.calls[0] as [
+			string,
+			string,
+		];
+		const written = JSON.parse(content) as Record<string, unknown>;
+		expect(written[staleTool]).toBeUndefined();
+		expect(written[freshTool]).toEqual(freshEntry);
+		expect(written[TOOL_ID]).toMatchObject({ path: TOOL_PATH });
+	});
+
 	it("recovers a stale lock using its owner age", async () => {
 		mockFsMkdir
 			.mockRejectedValueOnce(Object.assign(new Error("busy"), { code: "EEXIST" }))
@@ -327,5 +362,29 @@ describe("updateProbeCache", () => {
 			(mockWriteFileAtomicAsync.mock.calls[1] as [string, string])[1],
 		) as Record<string, unknown>;
 		expect(second["late-tool"]).toMatchObject({ path: "/managed/late-tool" });
+	});
+
+	// #1359 review: lost-update proof — a commit whose authoritative read sees
+	// ANOTHER writer's entry must fold both results, never clobber. The
+	// durable-store contract does this via the locked authoritative read; this
+	// pins the probe-cache merge callback's side of the bargain.
+	it("folds another writer's entry seen at authoritative read (no lost update)", async () => {
+		mockFsStat.mockResolvedValue({ mtimeMs: MTIME_MS });
+		// The other process committed "other-tool" between our update and our
+		// flush: the locked authoritative read returns their payload.
+		mockFsReadFile.mockResolvedValue(
+			JSON.stringify({
+				"other-tool": { path: "/managed/other-tool", mtimeMs: MTIME_MS, cachedAt: Date.now() },
+			}),
+		);
+
+		await updateProbeCache(TOOL_ID, TOOL_PATH);
+		expect(await flushProbeCache()).toBe("written");
+
+		const written = JSON.parse(
+			(mockWriteFileAtomicAsync.mock.calls[0] as [string, string])[1],
+		) as Record<string, unknown>;
+		expect(written[TOOL_ID]).toBeDefined();
+		expect(written["other-tool"]).toMatchObject({ path: "/managed/other-tool" });
 	});
 });

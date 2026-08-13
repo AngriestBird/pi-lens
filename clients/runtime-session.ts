@@ -11,6 +11,7 @@ import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
+import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
 import {
 	getGlobalPiLensDir,
 	getKnipIgnorePatterns,
@@ -635,13 +636,13 @@ async function collectTodoBaselineItems(
 		// blocks the event loop before the per-file scan loop below even starts.
 		const files = await getSourceFilesAsync(analysisRoot, true);
 		if (!stillCurrent()) return items;
-		let processedSinceYield = 0;
+		const deadline = createDeadline(8);
 		for (const file of files) {
 			if (!stillCurrent()) return items;
 			scanOneTodoFile(scanner, file, items);
-			if (++processedSinceYield % 30 === 0) {
-				await new Promise<void>((resolve) => setImmediate(resolve));
-			}
+			// scanFile cost scales with the file contents, so a count cadence cannot
+			// bound the event-loop block across differently-sized corpora.
+			await yieldIfOverBudget(deadline);
 		}
 	} catch {
 		const todoResult = scanner.scanDirectory(analysisRoot);
