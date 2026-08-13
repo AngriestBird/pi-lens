@@ -47,7 +47,9 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          if ! grep -q "^## \[$VERSION\]" CHANGELOG.md; then
+          if ! grep -q "^## \[$VERSION\]" CHANGELOG.md \
+            && ! find .changelog -maxdepth 1 -type f -name '*.md' ! -name README.md \
+                 -print -quit | grep -q .; then
             echo "Missing CHANGELOG entry for version $VERSION"
             exit 1
           fi
@@ -102,6 +104,20 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Roll up per-entry changelog files before tag creation
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/rollup-changelog.mjs "$VERSION"
+          if ! git diff --quiet -- CHANGELOG.md .changelog; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add CHANGELOG.md .changelog
+            git commit -m "chore: roll up changelog for v$VERSION (refs #1321)"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:master
+          fi
 
       # The release body is the curated CHANGELOG section for this version, not
       # the auto-generated PR-title list — so the release reads as a meaningful
