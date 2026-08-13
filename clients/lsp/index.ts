@@ -265,6 +265,14 @@ const TOUCH_DEBOUNCE_MS = Math.max(
 		1500,
 );
 const DEFAULT_LSP_CLIENT_CEILING = 24;
+const DEFAULT_TS_IDLE_EVICT_MS = 5 * 60_000;
+
+export function getTypeScriptIdleEvictMs(): number {
+	const parsed = Number.parseInt(process.env.PI_LENS_TS_IDLE_EVICT_MS ?? "", 10);
+	return Number.isSafeInteger(parsed) && parsed > 0
+		? parsed
+		: DEFAULT_TS_IDLE_EVICT_MS;
+}
 
 export function getLspClientCeiling(): number {
 	const parsed = Number.parseInt(process.env.PI_LENS_LSP_CLIENT_CEILING ?? "", 10);
@@ -929,6 +937,16 @@ export class LSPService {
 	private readonly notifyWriteBackpressureStreak = new Map<string, number>();
 	/** LRU clock for capacity eviction, keyed by the canonical server/root key. */
 	private readonly clientLastUsedAt = new Map<string, number>();
+	/**
+	 * Per-root idle eviction for TypeScript's large, rebuildable program graph.
+	 * Timers are unref'd so an idle language service cannot keep a one-shot host
+	 * alive, and are removed before shutdown so a concurrent request rebuilds
+	 * instead of receiving the retiring client.
+	 */
+	private readonly typeScriptIdleTimers = new Map<
+		string,
+		ReturnType<typeof setTimeout>
+	>();
 	/** Serializes capacity decisions with publication into `state.inFlight`. */
 	private clientSpawnGate: Promise<void> = Promise.resolve();
 	/** True after shutdown() has been called; blocks new operations */
@@ -1009,10 +1027,56 @@ export class LSPService {
 		this.state.demonstratedReady.delete(victimKey);
 		this.state.demonstratedCold.delete(victimKey);
 		this.clientLastUsedAt.delete(victimKey);
+		this.clearTypeScriptIdleTimer(victimKey);
 		logSessionStart(
 			`lsp client ceiling ${getLspClientCeiling()}: evicted idle LRU ${victimKey}`,
 		);
 		return true;
+	}
+
+	private clearTypeScriptIdleTimer(key: string): void {
+		const timer = this.typeScriptIdleTimers.get(key);
+		if (timer) clearTimeout(timer);
+		this.typeScriptIdleTimers.delete(key);
+	}
+
+	private scheduleTypeScriptIdleEviction(key: string): void {
+		if (!key.startsWith("typescript:")) return;
+		this.clearTypeScriptIdleTimer(key);
+		const lastUsedAt = this.clientLastUsedAt.get(key) ?? Date.now();
+		const timer = setTimeout(() => {
+			this.typeScriptIdleTimers.delete(key);
+			void this.withClientSpawnGate(async () => {
+				if (this.isDestroyed) return;
+				const client = this.state.clients.get(key);
+				if (!client?.isAlive()) return;
+				if (
+					client.isBusy?.() === true ||
+					(this.clientLastUsedAt.get(key) ?? 0) !== lastUsedAt
+				) {
+					this.scheduleTypeScriptIdleEviction(key);
+					return;
+				}
+
+				// Publish the cold state synchronously before awaiting teardown. A request
+				// arriving while shutdown is in progress therefore waits on the spawn gate
+				// and creates a fresh client; it can never receive this retiring one.
+				this.state.clients.delete(key);
+				this.state.clientSpawnedAt.delete(key);
+				this.state.demonstratedReady.delete(key);
+				this.state.demonstratedCold.delete(key);
+				this.clientLastUsedAt.delete(key);
+				try {
+					await client.shutdown({ reason: "typescript_idle_eviction" });
+				} catch {
+					// The strong manager reference is already gone; shutdown is best-effort
+					// like the other eviction paths and must not reject from a timer callback.
+				}
+				logSessionStart(`lsp typescript idle eviction: released ${key}`);
+			}).catch(() => {});
+		}, getTypeScriptIdleEvictMs());
+		timer.unref?.();
+		this.typeScriptIdleTimers.set(key, timer);
 	}
 
 	private fingerprintContent(content: string): string {
@@ -1166,6 +1230,8 @@ export class LSPService {
 		this.state.clients.delete(key);
 		this.state.clientSpawnedAt.delete(key);
 		this.state.demonstratedReady.delete(key);
+		this.clientLastUsedAt.delete(key);
+		this.clearTypeScriptIdleTimer(key);
 		logLatency({
 			type: "phase",
 			phase: "lsp_notify_backpressure_broken",
@@ -1487,6 +1553,7 @@ export class LSPService {
 		if (existing) {
 			if (existing.isAlive()) {
 				this.clientLastUsedAt.set(key, Date.now());
+				this.scheduleTypeScriptIdleEviction(key);
 				if (!this.warmStartLogged.has(key)) {
 					logSessionStart(
 						`lsp warm-start ${server.id}: reused root=${root} file=${filePath}`,
@@ -1540,6 +1607,7 @@ export class LSPService {
 			this.state.clients.delete(key);
 			this.state.clientSpawnedAt.delete(key);
 			this.clientLastUsedAt.delete(key);
+			this.clearTypeScriptIdleTimer(key);
 			this.state.broken.delete(key);
 
 			// #1127: count EARLY, non-intentional runtime exits toward the circuit
@@ -1841,6 +1909,7 @@ export class LSPService {
 			this.state.clients.set(key, client);
 			this.state.clientSpawnedAt.set(key, Date.now());
 			this.clientLastUsedAt.set(key, Date.now());
+			this.scheduleTypeScriptIdleEviction(key);
 			this.failureCounts.delete(key);
 			if (isOptionalServer) {
 				this.optionalDisabled.delete(key);
@@ -4901,6 +4970,9 @@ export class LSPService {
 		const resetStartedAt = Date.now();
 		if (this.checkDestroyed()) return;
 		this.isDestroyed = true;
+		for (const key of this.typeScriptIdleTimers.keys()) {
+			this.clearTypeScriptIdleTimer(key);
+		}
 
 		// Belt-and-braces: wait for any in-flight spawns so that Guard 1/2 in
 		// spawnClient can observe isDestroyed and clean up. Skip on the
