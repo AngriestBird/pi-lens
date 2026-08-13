@@ -9,6 +9,7 @@
  * Docs: https://github.com/pahen/madge
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { findNodeToolBinary } from "./package-manager.js";
@@ -308,7 +309,7 @@ export class DependencyChecker {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[deps] ${msg}`)
+			? createSubsystemLogger("deps")
 			: () => {};
 		DependencyChecker.instances.add(new WeakRef(this));
 	}

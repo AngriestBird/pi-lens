@@ -13,6 +13,7 @@
  * Refs: #130, #131, #132
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 
 export abstract class SecurityScanClient<TResult> {
@@ -31,7 +32,7 @@ export abstract class SecurityScanClient<TResult> {
 		verbose = false,
 	) {
 		this.log = verbose
-			? (msg: string) => console.error(`[${toolName}] ${msg}`)
+			? createSubsystemLogger(toolName)
 			: () => {};
 	}
 

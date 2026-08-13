@@ -1,4 +1,6 @@
 import "./clients/startup-marker.js";
+import { installConsoleGuard } from "./clients/extension-log.js";
+import { wireUserNotifier } from "./clients/user-notify.js";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -192,6 +194,21 @@ function dbg(msg: string) {
 }
 
 /**
+ * The most recent event ctx, kept ONLY so `clients/user-notify.ts` can resolve
+ * a live `ctx.ui.notify` at delivery time (#1333). Never dereferenced eagerly
+ * and never captured by a long-lived closure — a session replacement swaps the
+ * ctx, and `notifyUserDegradation` swallows the stale-ctx throw.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
+let latestEventCtx: any;
+
+/** Refresh the notify target from whichever event ctx just arrived. */
+// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
+function rememberEventCtx(ctx: any): void {
+	if (ctx?.ui) latestEventCtx = ctx;
+}
+
+/**
  * Best-effort read of the STABLE pi session id off an event ctx
  * (`ctx.sessionManager.getSessionId()`), the same accessor #473's
  * session_start handling and #791's deferred-format ownership tagging both
@@ -346,7 +363,26 @@ function cleanStaleTsBuildInfo(cwd: string): string[] {
 // --- Extension ---
 
 export default function (pi: ExtensionAPI) {
+	// #1333 — defense in depth, the pi-side mirror of `mcp/server.ts`'s
+	// `console.log = console.error` guard. pi owns the terminal (raw mode +
+	// cursor-addressed diff repaints), so a raw byte from ANY transitively
+	// loaded module desyncs its screen model. pi-lens's own sites are migrated
+	// to real ndjson sinks; this net catches everything else. Installed FIRST,
+	// before any client module can log during construction. No-op under test
+	// mode and under `PI_LENS_CONSOLE_GUARD=0`.
+	installConsoleGuard();
 	initI18n(pi);
+	// #1333 HUMAN channel: user-facing degradations found deep in clients/
+	// (invalid config, offline grammar fetch, WASM abort) reach the user
+	// through the host's own render path. Per the #338/#798 detached-callback
+	// rule the notifier is resolved from the LATEST event ctx at delivery time,
+	// never captured once — a session replacement invalidates the old ctx.ui.
+	wireUserNotifier(() => {
+		const ui = latestEventCtx?.ui;
+		if (!ui || typeof ui.notify !== "function") return undefined;
+		return (message: string, level?: "info" | "warning" | "error") =>
+			ui.notify(message, level ?? "warning");
+	});
 	const getLiveEvents = () => pi.events;
 	initLensEventsGetter(getLiveEvents);
 	const getLiveEmit = () => pi.events?.emit?.bind(pi.events);
@@ -1213,6 +1249,7 @@ export default function (pi: ExtensionAPI) {
 	// --- Events ---
 
 	pi.on("session_start", async (event, ctx) => {
+		rememberEventCtx(ctx);
 		const sessionStartFiredAt = Date.now();
 		try {
 			dbg("session_start fired");
@@ -1564,6 +1601,7 @@ export default function (pi: ExtensionAPI) {
 	// Real-time feedback on file writes/edits
 	// biome-ignore lint/suspicious/noExplicitAny: pi.on overload mismatch for tool_result event type
 	(pi as any).on("tool_result", async (event: any, ctx: any) => {
+		rememberEventCtx(ctx);
 		if (!lensEnabled) return;
 		updateRuntimeIdentityFromEvent(event);
 		// Publish this turn's abort signal so the dispatch's linter/type-check

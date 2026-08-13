@@ -490,7 +490,8 @@ function recordSnapshotPersistFailure(cwd: string, error: string): void {
 		durationMs: 0,
 		metadata: { error },
 	});
-	console.error("[project-snapshot] body persist failed:", error);
+	// #1333: the logLatency call above already carries this failure to
+	// latency.log — the console.error was a duplicate RAW write into pi's frame.
 }
 
 function logSnapshotPersistSuccess(

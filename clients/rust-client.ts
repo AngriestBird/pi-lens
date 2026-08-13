@@ -7,6 +7,7 @@
  * Docs: https://doc.rust-lang.org/cargo/
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { safeSpawnAsync } from "./safe-spawn.js";
@@ -48,7 +49,7 @@ export class RustClient {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[rust] ${msg}`)
+			? createSubsystemLogger("rust")
 			: () => {};
 	}
 

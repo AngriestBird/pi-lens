@@ -5,6 +5,7 @@
  * Handles: spawn, spawnSync, temp dir management, JSON parsing.
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -175,7 +176,7 @@ export class SgRunner {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[sg-runner] ${msg}`)
+			? createSubsystemLogger("sg-runner")
 			: () => {};
 	}
 

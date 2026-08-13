@@ -15,6 +15,8 @@
  *   "function $NAME($$$PARAMS) { $BODY }" matches function declarations
  */
 
+import { logTreeSitterDiagnostic } from "./tree-sitter-logger.js";
+import { notifyUserDegradation } from "./user-notify.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -297,7 +299,13 @@ export class TreeSitterClient {
 	/** Debug logging helper */
 	private dbg(msg: string): void {
 		if (this.verbose) {
-			console.error(`[tree-sitter] ${msg}`); // pi-lens-ignore: console-statement — intentional verbose logger
+			// #1333: verbose gating is preserved, but the SINK is tree-sitter.log —
+			// a raw write would corrupt pi's frame the moment verbose is enabled.
+			logTreeSitterDiagnostic({
+				subsystem: "tree-sitter-client",
+				level: "debug",
+				message: msg,
+			});
 		}
 	}
 
@@ -472,20 +480,31 @@ export class TreeSitterClient {
 			const ok = await downloadGrammar(dir, grammarFile);
 			if (ok) {
 				if (!this.grammarsDir) this.grammarsDir = dir;
-				console.error(
-					`[pi-lens] fetched missing tree-sitter grammar ${grammarFile} at runtime (install scripts were skipped by the package manager)`,
-				);
+				logTreeSitterDiagnostic({
+					subsystem: "tree-sitter-client",
+					level: "warn",
+					message: `fetched missing tree-sitter grammar ${grammarFile} at runtime (install scripts were skipped by the package manager)`,
+					metadata: { grammarFile, outcome: "fetched" },
+				});
 			} else {
 				// Surface the degradation once per grammar (the promise cache dedupes)
 				// instead of failing silently — otherwise pnpm/bun users offline get
 				// no signal that a language's tree-sitter features are unavailable.
-				console.error(
-					`[pi-lens] tree-sitter grammar '${grammarFile}' is unavailable — ` +
-						`symbol search, module reports and structural rules for this language will be degraded. ` +
-						`The package manager skipped install scripts and the runtime download failed (offline or CDN unreachable). ` +
-						`Fix: reinstall with a manager that runs postinstall, allow its build scripts ` +
-						`(pnpm approve-builds / bun trustedDependencies), or restore network access.`,
-				);
+				const unavailable =
+					`tree-sitter grammar '${grammarFile}' is unavailable — ` +
+					`symbol search, module reports and structural rules for this language will be degraded. ` +
+					`The package manager skipped install scripts and the runtime download failed (offline or CDN unreachable). ` +
+					`Fix: reinstall with a manager that runs postinstall, allow its build scripts ` +
+					`(pnpm approve-builds / bun trustedDependencies), or restore network access.`;
+				logTreeSitterDiagnostic({
+					subsystem: "tree-sitter-client",
+					message: unavailable,
+					metadata: { grammarFile, outcome: "unavailable" },
+				});
+				// HUMAN-audience: an offline grammar fetch silently degrades this
+				// language's features, so it reaches the user through the HOST's
+				// render path (#1333) rather than a raw terminal write.
+				notifyUserDegradation(`pi-lens: ${unavailable}`);
 			}
 			return ok;
 		})();
@@ -1363,11 +1382,15 @@ export class TreeSitterClient {
 		const key = `${ruleId}:${languageId}`;
 		if (this.reportedCompileFailures.has(key)) return;
 		this.reportedCompileFailures.add(key);
-		console.error(
-			`[pi-lens] tree-sitter rule '${ruleId}' failed to compile against '${languageId}' — ` +
+		logTreeSitterDiagnostic({
+			subsystem: "tree-sitter-client",
+			languageId,
+			message:
+				`tree-sitter rule '${ruleId}' failed to compile against '${languageId}' — ` +
 				`matches for this rule are silently dropped rather than reported. ` +
 				`Fix the query in the rule definition to re-enable it. (${err})`,
-		);
+			metadata: { ruleId },
+		});
 	}
 
 	private hasChildToken(node: TreeSitterNode, token: string): boolean {
@@ -3457,21 +3480,27 @@ export class TreeSitterClient {
 	private reportPostFilterFailure(postFilter: string, reason: string): void {
 		if (this.reportedPostFilterFailures.has(postFilter)) return;
 		this.reportedPostFilterFailures.add(postFilter);
-		console.error(
-			`[pi-lens] tree-sitter rule post_filter '${postFilter}' failed — ` +
+		logTreeSitterDiagnostic({
+			subsystem: "tree-sitter-client",
+			message:
+				`tree-sitter rule post_filter '${postFilter}' failed — ` +
 				`keeping the diagnostic (fail-open): ${reason}.`,
-		);
+			metadata: { postFilter },
+		});
 	}
 
 	/** Warn once per unimplemented post_filter — a silent rule needs a trail. */
 	private reportMissingPostFilter(postFilter: string): void {
 		if (this.reportedMissingPostFilters.has(postFilter)) return;
 		this.reportedMissingPostFilters.add(postFilter);
-		console.error(
-			`[pi-lens] tree-sitter rule post_filter '${postFilter}' is not implemented — ` +
+		logTreeSitterDiagnostic({
+			subsystem: "tree-sitter-client",
+			message:
+				`tree-sitter rule post_filter '${postFilter}' is not implemented — ` +
 				`matches for the rules using it are suppressed rather than reported unfiltered. ` +
 				`Implement it in applyPostFilter (clients/tree-sitter-client.ts) to re-enable them.`,
-		);
+			metadata: { postFilter },
+		});
 	}
 
 	/**

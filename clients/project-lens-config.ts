@@ -57,6 +57,8 @@
  * patterns apply to files inside that package, in addition to (and with
  * higher precedence than) the root config's `ignore` patterns.
  */
+import { logExtension } from "./extension-log.js";
+import { notifyUserDegradation } from "./user-notify.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -386,9 +388,15 @@ function warnInvalidConfigOnce(configPath: string, reason: string): void {
 	const key = `${configPath}:${reason}`;
 	if (warnedInvalidConfigs.has(key)) return;
 	warnedInvalidConfigs.add(key);
-	console.error(
-		`[pi-lens] ignoring invalid project config ${configPath}: ${reason}`,
-	);
+	const message = `ignoring invalid project config ${configPath}: ${reason}`;
+	logExtension({
+		subsystem: "project-lens-config",
+		level: "warn",
+		message,
+		metadata: { configPath, reason },
+	});
+	// HUMAN-audience too: the user's own `.pi-lens.json` is being ignored.
+	notifyUserDegradation(`pi-lens: ${message}`);
 }
 
 function parseRulePolicyList(

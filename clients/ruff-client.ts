@@ -8,6 +8,7 @@
  * Docs: https://docs.astral.sh/ruff/
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createAvailabilityChecker, resolveAvailableOrInstall } from "./dispatch/runners/utils/runner-helpers.js";
@@ -49,7 +50,7 @@ export class RuffClient {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[ruff] ${msg}`)
+			? createSubsystemLogger("ruff")
 			: () => {};
 	}
 

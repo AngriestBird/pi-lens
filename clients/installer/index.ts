@@ -46,6 +46,7 @@
  * - GitHub releases (platform-specific binaries → ~/.pi-lens/bin/)
  */
 
+import { logExtension } from "../extension-log.js";
 import { spawn } from "node:child_process";
 import { existsSync, statSync, unlinkSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -218,7 +219,14 @@ function installerPlatform(): NodeJS.Platform {
  */
 function debugLog(...args: unknown[]): void {
 	if (DEBUG) {
-		console.error("[auto-install:debug]", ...args);
+		// #1333: DEBUG gate preserved; sink is extension.log, never the TUI.
+		logExtension({
+			subsystem: "auto-install",
+			level: "debug",
+			message: args
+				.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg)))
+				.join(" "),
+		});
 	}
 }
 

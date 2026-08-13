@@ -11,6 +11,7 @@
  * indicators. These are silent metrics surfaced in the session summary.
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
@@ -471,7 +472,7 @@ export class ComplexityClient {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[complexity] ${msg}`)
+			? createSubsystemLogger("complexity")
 			: () => {};
 	}
 

@@ -11,6 +11,7 @@
  * - Explicit config wins; otherwise smart defaults apply
  */
 
+import { logExtension } from "./extension-log.js";
 import * as path from "node:path";
 import { recordFormatter } from "./widget-state.js";
 import { FileTime } from "./file-time.js";
@@ -81,9 +82,12 @@ export class FormatService {
 
 		// Check if file was modified externally (safety check)
 		if (this.fileTime.hasChanged(absolutePath)) {
-			console.warn(
-				`[format] File ${absolutePath} modified externally, skipping format`,
-			);
+			logExtension({
+				subsystem: "format",
+				level: "warn",
+				message: `File ${absolutePath} modified externally, skipping format`,
+				metadata: { filePath: absolutePath },
+			});
 			return {
 				filePath: absolutePath,
 				formatters: [],

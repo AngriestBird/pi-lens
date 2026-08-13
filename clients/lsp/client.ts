@@ -8,6 +8,7 @@
  * - Request/response handling
  */
 
+import { logExtension } from "../extension-log.js";
 import { spawn as nodeSpawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { access, readFile } from "node:fs/promises";
@@ -1186,9 +1187,12 @@ export function setupIncomingHandlers(
 			const newDiags = normalizeLspDiagnostics(params.diagnostics || []);
 			const docVersion = params.version;
 			if (PUB_DEBUG) {
-				console.error(
-					`[lsp-pub] server=${state.serverId} pubVersion=${docVersion} docVersion=${state.documentVersions?.get(normalizedPath)} diags=${newDiags.length}`,
-				);
+				// #1333: PUB_DEBUG gate preserved; sink is extension.log.
+				logExtension({
+					subsystem: "lsp-pub",
+					level: "debug",
+					message: `server=${state.serverId} pubVersion=${docVersion} docVersion=${state.documentVersions?.get(normalizedPath)} diags=${newDiags.length}`,
+				});
 			}
 			const strategy = getStrategy(state.serverId);
 			// Record the document version these diagnostics were computed against
