@@ -145,16 +145,20 @@ function commandProbablyPresent(command: string): boolean | "ambiguous" {
 	return false;
 }
 
-/** Classify a raw Node spawn error without discarding its errno-bearing Error. */
-export async function classifySpawnFailure(
-	error: unknown,
+/**
+ * Shared errno->bucket mapping. `cwdUnresolvable` is the only async-vs-sync
+ * difference between the two public classifiers, so it arrives as a resolved
+ * flag and everything else lives once (Sonar duplication finding, #1340).
+ */
+function classifyWithCwdFlag(
+	cause: Error,
 	options: { command: string; cwd?: string },
-): Promise<SpawnFailureError> {
-	const cause = toError(error);
+	cwdUnresolvable: boolean,
+): SpawnFailureError {
 	const code = errorCode(cause);
 	if (
 		code === "ENOENT" &&
-		(await cwdIsUnresolvable(options.cwd)) &&
+		cwdUnresolvable &&
 		commandProbablyPresent(options.command) !== false
 	) {
 		return new SpawnFailureError(
@@ -184,42 +188,25 @@ export async function classifySpawnFailure(
 	);
 }
 
+/** Classify a raw Node spawn error without discarding its errno-bearing Error. */
+export async function classifySpawnFailure(
+	error: unknown,
+	options: { command: string; cwd?: string },
+): Promise<SpawnFailureError> {
+	const cause = toError(error);
+	const needsCwdProbe = errorCode(cause) === "ENOENT";
+	const cwdUnresolvable = needsCwdProbe && (await cwdIsUnresolvable(options.cwd));
+	return classifyWithCwdFlag(cause, options, cwdUnresolvable);
+}
+
 function classifySpawnFailureSync(
 	error: unknown,
 	options: { command: string; cwd?: string },
 ): SpawnFailureError {
 	const cause = toError(error);
-	const code = errorCode(cause);
-	if (
-		code === "ENOENT" &&
-		cwdIsUnresolvableSync(options.cwd) &&
-		commandProbablyPresent(options.command) !== false
-	) {
-		return new SpawnFailureError(
-			"cwd-unresolvable",
-			`Cannot spawn ${options.command}: working directory is unresolvable (${options.cwd})`,
-			cause,
-		);
-	}
-	if (code === "ENOENT") {
-		return new SpawnFailureError(
-			"tool-not-found",
-			`Cannot spawn ${options.command}: tool not found (${cause.message})`,
-			cause,
-		);
-	}
-	if (code === "EACCES" || code === "EPERM") {
-		return new SpawnFailureError(
-			"permission-denied",
-			`Cannot spawn ${options.command}: permission denied`,
-			cause,
-		);
-	}
-	return new SpawnFailureError(
-		"spawn-failed",
-		`Cannot spawn ${options.command}: ${cause.message}`,
-		cause,
-	);
+	const needsCwdProbe = errorCode(cause) === "ENOENT";
+	const cwdUnresolvable = needsCwdProbe && cwdIsUnresolvableSync(options.cwd);
+	return classifyWithCwdFlag(cause, options, cwdUnresolvable);
 }
 
 export interface SafeSpawnOptions {
