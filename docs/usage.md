@@ -91,6 +91,7 @@ pi --lens-guard          # Block git commit/push when unresolved blockers exist 
 pi --no-opengrep         # Disable the Opengrep security scanner (default-on auxiliary LSP)
 pi --no-read-guard       # Disable the read-before-edit behavior monitor
 pi --lens-turn-summary   # Persist a per-turn summary of diagnostics, autofixes, and autoformats
+pi --lens-compact-tool-line   # Render tool results as one compact, theme-aware line (closes #1327)
 
 # Actionable warnings (all default off)
 pi --lens-actionable-warnings          # Report fixable warnings at turn end

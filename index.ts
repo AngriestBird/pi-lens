@@ -43,6 +43,7 @@ import {
 	resolvePiLensFlagWithSource,
 } from "./clients/lens-config.js";
 import { LENS_FLAGS } from "./clients/lens-flag-registry.js";
+import { wrapToolsForCompactLine } from "./clients/tool-render.js";
 import { loadPiLensProjectConfig } from "./clients/project-lens-config.js";
 import { initLensEventsGetter } from "./clients/lens-events.js";
 import { wireBusEmitterGetter } from "./clients/bus-publish.js";
@@ -1167,7 +1168,18 @@ export default function (pi: ExtensionAPI) {
 		LAZY_TOOL_CATALOG,
 	);
 
-	for (const tool of [...alwaysActiveTools, activateToolsTool, ...lazyTools]) {
+	// #1327: opt-in compact one-line tool rendering. Read once at load (like
+	// the other session-scoped flags above) rather than per-render, so the
+	// flag-off path registers the ORIGINAL tool definitions untouched —
+	// byte-identical to pre-#1327 behavior (no renderCall/renderResult added
+	// or altered). Only tools that already define `renderResult` (every
+	// substantive pi-lens tool — see tools/render-compact.ts) are wrapped;
+	// the rest pass through wrapToolsForCompactLine unchanged.
+	const compactToolLineEnabled = getLensFlag("lens-compact-tool-line") === true;
+	const toolsToRegister = [...alwaysActiveTools, activateToolsTool, ...lazyTools];
+	for (const tool of compactToolLineEnabled
+		? wrapToolsForCompactLine(toolsToRegister as any)
+		: toolsToRegister) {
 		try {
 			pi.registerTool(tool as any);
 		} catch {
