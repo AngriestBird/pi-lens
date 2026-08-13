@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { suspendAt } from "../interleaving-kit.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -13,9 +14,15 @@ vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
 function fakeClient(label: string, busy = false) {
 	return {
 		label,
+		root: "/repo",
 		isAlive: vi.fn(() => true),
 		isBusy: vi.fn(() => busy),
 		shutdown: vi.fn(async () => undefined),
+		notify: {
+			open: vi.fn(async () => undefined),
+			change: vi.fn(async () => undefined),
+		},
+		diagnosticsVersion: 0,
 		getWorkspaceDiagnosticsSupport: vi.fn(() => ({
 			advertised: false,
 			mode: "push-only",
@@ -106,23 +113,82 @@ describe("TypeScript language-service idle eviction (#1332 b2)", () => {
 		expect(service.getAliveClientCount()).toBe(0);
 	});
 
+	it("lease-guards the acquire/use gap while didOpen is suspended", async () => {
+		vi.useFakeTimers();
+		const client = fakeClient("leased");
+		createLSPClient.mockResolvedValue(client);
+		configureTypeScriptServer();
+		const notification = suspendAt(client.notify.open);
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const opened = service.openFile("/repo/main.ts", "const value = 1;");
+		await notification.admitted;
+		await vi.advanceTimersByTimeAsync(20);
+
+		expect(client.shutdown).not.toHaveBeenCalled();
+		expect(service.getAliveClientCount()).toBe(1);
+		notification.release();
+		await opened;
+		expect(client.notify.open).toHaveBeenCalledTimes(1);
+		expect(client.shutdown).not.toHaveBeenCalled();
+		await service.shutdown();
+		notification.restore();
+	});
+
+	it("clears TypeScript timer ownership on notify-backpressure eviction", async () => {
+		vi.useFakeTimers();
+		const client = fakeClient("backpressured");
+		createLSPClient.mockResolvedValue(client);
+		configureTypeScriptServer();
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const harness = service as unknown as {
+			state: { clients: Map<string, typeof client> };
+			typeScriptIdleTimers: Map<string, ReturnType<typeof setTimeout>>;
+			recordNotifyWriteBackpressure(
+				key: string,
+				entry: unknown,
+				filePath: string,
+			): void;
+		};
+		const entry = await service.getClientForFile("/repo/main.ts");
+		expect(entry).toBeDefined();
+		expect(harness.typeScriptIdleTimers.size).toBe(1);
+		const key = [...harness.state.clients.keys()][0];
+		expect(key).toBeDefined();
+
+		for (let attempt = 0; attempt < 3; attempt++) {
+			harness.recordNotifyWriteBackpressure(
+				key as string,
+				entry as NonNullable<typeof entry>,
+				"/repo/main.ts",
+			);
+		}
+
+		expect(harness.typeScriptIdleTimers.size).toBe(0);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(client.shutdown).toHaveBeenCalledTimes(1);
+	});
+
 	it("unrefs the timer and clears it on service disposal", async () => {
 		const client = fakeClient("lifecycle");
 		createLSPClient.mockResolvedValue(client);
 		configureTypeScriptServer();
 		const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
 		const { LSPService } = await import("../../../clients/lsp/index.js");
-		const service = new LSPService() as LSPService & {
+		const service = new LSPService();
+		const harness = service as unknown as {
 			typeScriptIdleTimers: Map<string, ReturnType<typeof setTimeout>>;
 		};
 		await service.getClientForFile("/repo/main.ts");
 
-		const timer = [...service.typeScriptIdleTimers.values()][0];
+		const timer = [...harness.typeScriptIdleTimers.values()][0];
 		expect(timer).toBeDefined();
 		expect(timer.hasRef?.()).toBe(false);
 		await service.shutdown();
 
 		expect(clearTimeoutSpy).toHaveBeenCalledWith(timer);
-		expect(service.typeScriptIdleTimers.size).toBe(0);
+		expect(harness.typeScriptIdleTimers.size).toBe(0);
 	});
 });

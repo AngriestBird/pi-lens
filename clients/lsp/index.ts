@@ -265,7 +265,7 @@ const TOUCH_DEBOUNCE_MS = Math.max(
 		1500,
 );
 const DEFAULT_LSP_CLIENT_CEILING = 24;
-const DEFAULT_TS_IDLE_EVICT_MS = 5 * 60_000;
+const DEFAULT_TS_IDLE_EVICT_MS = 20 * 60_000;
 
 export function getTypeScriptIdleEvictMs(): number {
 	const parsed = Number.parseInt(process.env.PI_LENS_TS_IDLE_EVICT_MS ?? "", 10);
@@ -938,6 +938,12 @@ export class LSPService {
 	/** LRU clock for capacity eviction, keyed by the canonical server/root key. */
 	private readonly clientLastUsedAt = new Map<string, number>();
 	/**
+	 * Manager-owned use leases close the acquisition/use gap that `isBusy()`
+	 * cannot see: a caller may hold a selected client before its first request has
+	 * entered the client. Eviction skips any key with an outstanding lease.
+	 */
+	private readonly clientLeases = new Map<string, number>();
+	/**
 	 * Per-root idle eviction for TypeScript's large, rebuildable program graph.
 	 * Timers are unref'd so an idle language service cannot keep a one-shot host
 	 * alive, and are removed before shutdown so a concurrent request rebuilds
@@ -992,6 +998,85 @@ export class LSPService {
 		}
 	}
 
+	private async clientKeyFor(
+		entry: SpawnedServer,
+		filePath: string,
+	): Promise<string | undefined> {
+		const root = await entry.info.root(filePath);
+		return root ? `${entry.info.id}:${normalizeMapKey(root)}` : undefined;
+	}
+
+	private async acquireClientLease(
+		entry: SpawnedServer,
+		filePath: string,
+	): Promise<string | undefined> {
+		const key = await this.clientKeyFor(entry, filePath);
+		if (!key) return undefined;
+		return this.withClientSpawnGate(async () => {
+			if (this.isDestroyed || this.state.clients.get(key) !== entry.client) {
+				return undefined;
+			}
+			this.clientLeases.set(key, (this.clientLeases.get(key) ?? 0) + 1);
+			return key;
+		});
+	}
+
+	private async acquireClientLeases(
+		entries: readonly SpawnedServer[],
+		filePath: string,
+	): Promise<string[] | undefined> {
+		const keys = await Promise.all(
+			entries.map((entry) => this.clientKeyFor(entry, filePath)),
+		);
+		if (keys.some((key) => key === undefined)) return undefined;
+		const keyed = entries.map((entry, index) => [keys[index] as string, entry] as const);
+		return this.withClientSpawnGate(async () => {
+			if (
+				this.isDestroyed ||
+				keyed.some(([key, entry]) => this.state.clients.get(key) !== entry.client)
+			) {
+				return undefined;
+			}
+			for (const [key] of keyed) {
+				this.clientLeases.set(key, (this.clientLeases.get(key) ?? 0) + 1);
+			}
+			return keyed.map(([key]) => key);
+		});
+	}
+
+	private releaseClientLease(key: string): void {
+		const remaining = (this.clientLeases.get(key) ?? 1) - 1;
+		if (remaining > 0) {
+			this.clientLeases.set(key, remaining);
+			return;
+		}
+		this.clientLeases.delete(key);
+		if (this.state.clients.has(key)) {
+			this.clientLastUsedAt.set(key, Date.now());
+			this.scheduleTypeScriptIdleEviction(key);
+		}
+	}
+
+	private async withClientForFileUse<T>(
+		filePath: string,
+		maxWaitMs: number | undefined,
+		hardCapMs: number | undefined,
+		use: (entry: SpawnedServer) => Promise<T> | T,
+	): Promise<T | undefined> {
+		while (!this.isDestroyed) {
+			const entry = await this.getClientForFile(filePath, maxWaitMs, hardCapMs);
+			if (!entry) return undefined;
+			const leaseKey = await this.acquireClientLease(entry, filePath);
+			if (!leaseKey) continue;
+			try {
+				return await use(entry);
+			} finally {
+				this.releaseClientLease(leaseKey);
+			}
+		}
+		return undefined;
+	}
+
 	private async makeCapacityForClient(key: string): Promise<boolean> {
 		const occupiedKeys = new Set(this.state.inFlight.keys());
 		for (const [clientKey, client] of this.state.clients) {
@@ -1005,7 +1090,8 @@ export class LSPService {
 				([candidateKey, client]) =>
 					candidateKey !== key &&
 					client.isAlive() &&
-					client.isBusy?.() !== true,
+					client.isBusy?.() !== true &&
+					(this.clientLeases.get(candidateKey) ?? 0) === 0,
 			)
 			.sort(
 				([a], [b]) =>
@@ -1042,6 +1128,9 @@ export class LSPService {
 
 	private scheduleTypeScriptIdleEviction(key: string): void {
 		if (!key.startsWith("typescript:")) return;
+		// Pressure-gating these timers would require a separate reconciliation pass
+		// when the manager crosses the threshold; keep ownership simple and use the
+		// warm-LSP-friendly 20-minute default instead.
 		this.clearTypeScriptIdleTimer(key);
 		const lastUsedAt = this.clientLastUsedAt.get(key) ?? Date.now();
 		const timer = setTimeout(() => {
@@ -1052,6 +1141,7 @@ export class LSPService {
 				if (!client?.isAlive()) return;
 				if (
 					client.isBusy?.() === true ||
+					(this.clientLeases.get(key) ?? 0) > 0 ||
 					(this.clientLastUsedAt.get(key) ?? 0) !== lastUsedAt
 				) {
 					this.scheduleTypeScriptIdleEviction(key);
@@ -1967,19 +2057,19 @@ export class LSPService {
 		options?: { preserveDiagnostics?: boolean; spawnBudgetMs?: number },
 	): Promise<void> {
 		if (this.checkDestroyed()) return;
-		const spawned = await this.getClientForFile(
+		await this.withClientForFileUse(
 			filePath,
 			undefined,
 			options?.spawnBudgetMs,
-		);
-		if (!spawned) return;
-
-		const languageId = getLanguageId(filePath) ?? "plaintext";
-		await spawned.client.notify.open(
-			filePath,
-			content,
-			languageId,
-			options?.preserveDiagnostics,
+			async (spawned) => {
+				const languageId = getLanguageId(filePath) ?? "plaintext";
+				await spawned.client.notify.open(
+					filePath,
+					content,
+					languageId,
+					options?.preserveDiagnostics,
+				);
+			},
 		);
 	}
 
@@ -1988,10 +2078,9 @@ export class LSPService {
 	 */
 	async updateFile(filePath: string, content: string): Promise<void> {
 		if (this.checkDestroyed()) return;
-		const spawned = await this.getClientForFile(filePath);
-		if (!spawned) return;
-
-		await spawned.client.notify.change(filePath, content);
+		await this.withClientForFileUse(filePath, undefined, undefined, (spawned) =>
+			spawned.client.notify.change(filePath, content),
+		);
 	}
 
 	/**
@@ -2073,6 +2162,13 @@ export class LSPService {
 			});
 			return;
 		}
+		const leaseKeys = await this.acquireClientLeases(spawned, filePath);
+		if (!leaseKeys) {
+			// An idle eviction won between selection and lease admission. Resolve the
+			// now-current client set and replay; no notification targets the retiree.
+			return this.touchFile(filePath, content, options);
+		}
+		try {
 
 		const spawnedServerIds = spawned.map((entry) => entry.info.id);
 		if (
@@ -3028,6 +3124,9 @@ export class LSPService {
 			},
 		});
 		return result;
+		} finally {
+			for (const key of leaseKeys) this.releaseClientLease(key);
+		}
 	}
 
 	/**

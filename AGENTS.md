@@ -38,6 +38,16 @@ uses the awaited durable-store seam: its delta/version snapshot maps to
 policy. Turn-state remains separate pending a future ownership decision.
 (#1209, #1212)
 
+**LSP idle eviction is lease-guarded across acquisition/use.** `isBusy()` only
+becomes true after a client request enters the transport, so it cannot protect
+the yield between manager selection and the first notify/request. Operations
+must acquire the manager-owned client lease under the spawn gate, validate that
+the selected client is still the published instance, and release in `finally`;
+idle and ceiling eviction skip leased keys. Deterministic race tests suspend the
+first client operation with `tests/clients/interleaving-kit.ts`, never sleeps.
+The TypeScript idle default is 20 minutes to preserve warm LSPs across subagent
+bursts; every non-idle removal path must also clear timer ownership. (#1332)
+
 **Spawn repair decisions use the typed safe-spawn taxonomy.** A raw OS
 `ENOENT` can mean either a missing executable or an invalid child cwd. Consume
 `SpawnResult.spawnFailure.kind` / `SpawnFailureError.kind`, never errno or
