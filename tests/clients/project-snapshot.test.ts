@@ -54,7 +54,7 @@ import {
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { buildWordIndex, searchWordIndex } from "../../clients/word-index.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
-import { suspendAt } from "./interleaving-kit.js";
+import { suspendAt, waitFor } from "./interleaving-kit.js";
 
 function withProjectDataDir<T>(fn: (cwd: string) => T): T {
 	const env = setupTestEnvironment("project-snapshot-");
@@ -647,6 +647,7 @@ describe("project snapshot worker persist (#958)", () => {
 		setProjectSnapshotGenerationGateForTests(true);
 		flushProjectSnapshotPersistsForTests();
 		await waitForProjectSnapshotPersistsForTests();
+		await terminateProjectSnapshotPersistWorkerForTests();
 		resetProjectSnapshotPersistWorkerForTests();
 		_resetProjectSnapshotParseCacheForTests();
 		delete process.env.PI_LENS_TEST_SNAPSHOT_PERSIST_WORKER_DELAY_MS;
@@ -709,13 +710,13 @@ describe("project snapshot worker persist (#958)", () => {
 			// Let BOTH delayed worker writes complete. The generation gate must
 			// discard the stale gen-N (seq 3) result and keep only gen-N+1 (seq 4).
 			await waitForProjectSnapshotPersistsForTests();
-			for (let i = 0; i < 400; i++) {
-				const stageFiles = fs
+			await waitFor(
+				() =>
+					fs
 					.readdirSync(path.dirname(getProjectSnapshotPath(cwd)))
-					.filter((f) => f.includes(".stage-"));
-				if (stageFiles.length === 0) break;
-				await new Promise((resolve) => setImmediate(resolve));
-			}
+					.filter((f) => f.includes(".stage-")),
+				(stageFiles) => stageFiles.length === 0,
+			);
 
 			_resetProjectSnapshotParseCacheForTests();
 			expect(loadProjectSnapshot(cwd)?.seq).toBe(4);
@@ -726,59 +727,88 @@ describe("project snapshot worker persist (#958)", () => {
 			).toEqual([]);
 		}));
 
-	it("mutation proof: the generation gate prevents stale promotion", async () =>
+	it("mutation proof: disabling the generation gate permits stale promotion", async () =>
 		withProjectDataDirAsync(async (cwd) => {
 			const promotionSpy = vi.fn();
 			const suspension = suspendAt(promotionSpy, async () => {}, { calls: 1 });
-			setProjectSnapshotPromotionSeamForTests(() => promotionSpy());
-			const old = new RuntimeCoordinator();
-			old.seedProjectSequence(3);
-			const fresh = new RuntimeCoordinator();
-			fresh.seedProjectSequence(4);
+			try {
+				setProjectSnapshotPromotionSeamForTests(() => promotionSpy());
+				const old = new RuntimeCoordinator();
+				old.seedProjectSequence(3);
+				const fresh = new RuntimeCoordinator();
+				fresh.seedProjectSequence(4);
 
-			setProjectSnapshotGenerationGateForTests(false);
-			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime: old }));
-			await suspension.admitted;
-			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime: fresh }));
-			// Let only later promotions pass while the old result remains held.
-			setProjectSnapshotPromotionSeamForTests(undefined);
-			await waitForProjectSnapshotPersistsForTests();
-			for (let i = 0; i < 5_000 && loadProjectSnapshot(cwd)?.seq !== 4; i++) {
-				await new Promise((resolve) => setImmediate(resolve));
+				setProjectSnapshotGenerationGateForTests(false);
+				saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime: old }));
+				await suspension.admitted;
+				saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime: fresh }));
+				// Let only later promotions pass while the old request remains held.
+				setProjectSnapshotPromotionSeamForTests(undefined);
+				await waitFor(
+					() => {
+						_resetProjectSnapshotParseCacheForTests();
+						return loadProjectSnapshot(cwd)?.seq;
+					},
+					(seq) => seq === 4,
+				);
+				suspension.release();
+				await suspension.completed;
+				await waitFor(
+					() => {
+						_resetProjectSnapshotParseCacheForTests();
+						return loadProjectSnapshot(cwd)?.seq;
+					},
+					(seq) => seq === 3,
+				);
+				// Mutation RED: disabling the gate permits the superseded generation to
+				// win the final promotion.
+				_resetProjectSnapshotParseCacheForTests();
+				expect(loadProjectSnapshot(cwd)?.seq).toBe(3);
+			} finally {
+				setProjectSnapshotPromotionSeamForTests(undefined);
+				suspension.release();
+				suspension.restore();
+				await terminateProjectSnapshotPersistWorkerForTests();
+				setProjectSnapshotGenerationGateForTests(true);
 			}
-			suspension.release();
-			await waitForProjectSnapshotPersistsForTests();
-			for (let i = 0; i < 5_000 && loadProjectSnapshot(cwd)?.seq !== 3; i++) {
-				await new Promise((resolve) => setImmediate(resolve));
-			}
-			_resetProjectSnapshotParseCacheForTests();
-			// Mutation RED: disabling the gate permits the superseded generation to
-			// win the final promotion.
-			expect(loadProjectSnapshot(cwd)?.seq).toBe(3);
+		}));
 
-			resetProjectSnapshotPersistWorkerForTests();
-			setProjectSnapshotGenerationGateForTests(true);
+	it("the generation gate prevents stale promotion", async () =>
+		withProjectDataDirAsync(async (cwd) => {
 			const gatedPromotionSpy = vi.fn();
 			const gatedSuspension = suspendAt(
 				gatedPromotionSpy,
 				async () => {},
 				{ calls: 1 },
 			);
-			setProjectSnapshotPromotionSeamForTests(() => gatedPromotionSpy());
-			_resetProjectSnapshotParseCacheForTests();
-			const gatedOld = new RuntimeCoordinator();
-			gatedOld.seedProjectSequence(5);
-			const gatedFresh = new RuntimeCoordinator();
-			gatedFresh.seedProjectSequence(6);
-			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime: gatedOld }));
-			await gatedSuspension.admitted;
-			saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime: gatedFresh }));
-			setProjectSnapshotPromotionSeamForTests(undefined);
-			gatedSuspension.release();
-			await waitForProjectSnapshotPersistsForTests();
-			_resetProjectSnapshotParseCacheForTests();
-			// GREEN: with the gate restored, only the newest generation promotes.
-			expect(loadProjectSnapshot(cwd)?.seq).toBe(6);
+			try {
+				setProjectSnapshotPromotionSeamForTests(() => gatedPromotionSpy());
+				const gatedOld = new RuntimeCoordinator();
+				gatedOld.seedProjectSequence(5);
+				const gatedFresh = new RuntimeCoordinator();
+				gatedFresh.seedProjectSequence(6);
+				saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime: gatedOld }));
+				await gatedSuspension.admitted;
+				saveProjectSnapshot(cwd, buildProjectSnapshotFromRuntime({ cwd, runtime: gatedFresh }));
+				setProjectSnapshotPromotionSeamForTests(undefined);
+				gatedSuspension.release();
+				await gatedSuspension.completed;
+				await waitForProjectSnapshotPersistsForTests();
+				await waitFor(
+					() => {
+						_resetProjectSnapshotParseCacheForTests();
+						return loadProjectSnapshot(cwd)?.seq;
+					},
+					(seq) => seq === 6,
+				);
+				_resetProjectSnapshotParseCacheForTests();
+				expect(loadProjectSnapshot(cwd)?.seq).toBe(6);
+			} finally {
+				setProjectSnapshotPromotionSeamForTests(undefined);
+				gatedSuspension.release();
+				gatedSuspension.restore();
+				setProjectSnapshotGenerationGateForTests(true);
+			}
 		}));
 
 	it("read-your-writes across the legacy-upgrade window: an in-flight write shadows a stale legacy .json (#958)", async () =>

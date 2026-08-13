@@ -598,10 +598,10 @@ function writeSnapshotBodyOnMainThread(
 }
 
 /**
- * The ForTests promotion seam must cover BOTH promotion paths — worker-message
- * and main-thread fallback — or a suspension test hangs whenever the fallback
- * fires (worker disabled/dead after a sibling test's reset). Sync and
- * seam-free in production, identical to calling the writer directly.
+ * The ForTests promotion seam covers worker-message and every main-thread
+ * fallback promotion. It stays sync and seam-free in production, identical to
+ * calling the writer directly. The process-exit hook is deliberately the sole
+ * direct write because an exit handler cannot await this asynchronous seam.
  */
 function dispatchMainThreadWriteThroughSeam(
 	pending: PendingSnapshotBody,
@@ -633,7 +633,10 @@ function handleSnapshotWorkerResult(
 		result.writeMs === undefined
 	) {
 		fs.rm(result.stagePath, { force: true }, () => {});
-		writeSnapshotBodyOnMainThread(pending, result.error ?? "invalid worker result");
+		dispatchMainThreadWriteThroughSeam(
+			pending,
+			result.error ?? "invalid worker result",
+		);
 		return;
 	}
 	// Generation gate: a newer save already superseded this one — discard the
@@ -660,7 +663,7 @@ function handleSnapshotWorkerResult(
 		});
 	} catch (err) {
 		fs.rm(result.stagePath, { force: true }, () => {});
-		writeSnapshotBodyOnMainThread(
+		dispatchMainThreadWriteThroughSeam(
 			pending,
 			err instanceof Error ? err.message : String(err),
 		);
@@ -735,7 +738,7 @@ function getSnapshotPersistWorker(): Worker | undefined {
 			if (stranded.length > 0) {
 				_snapshotWorkerRequests.clear();
 				for (const pending of stranded) {
-					writeSnapshotBodyOnMainThread(
+					dispatchMainThreadWriteThroughSeam(
 						pending,
 						`persist worker exited with code ${code}`,
 					);
@@ -919,7 +922,7 @@ export function flushProjectSnapshotPersistsForTests(): void {
 	_snapshotWorkerRequests.clear();
 	for (const pending of requests) {
 		if (_snapshotGenerations.get(pending.key) !== pending.generation) continue;
-		writeSnapshotBodyOnMainThread(pending);
+		dispatchMainThreadWriteThroughSeam(pending, undefined);
 	}
 }
 

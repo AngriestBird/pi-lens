@@ -66,28 +66,36 @@ describe("word-index rebuild supersession (#1227)", () => {
 
 		let generation = 0;
 		let secondBuild: Promise<WordIndex> | undefined;
-		const suspension = suspendAt(yieldPoint, async () => true);
+		const suspension = suspendAt(yieldPoint, async () => {
+			// Preserve the production checkpoint's macrotask yield. A microtask-only
+			// mock would stop exercising continuation ordering after release.
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			return true;
+		});
+		try {
+			const firstBuild = buildWordIndexAsync(oldDocs, () => generation === 0);
+			await suspension.admitted;
+			// This is the deterministic interleaving: generation 2 starts while
+			// generation 1 is suspended at its cooperative yield.
+			generation = 1;
+			secondBuild = buildWordIndexAsync(newDocs, () => generation === 1);
+			suspension.release();
+			await expect(firstBuild).rejects.toThrow("word index build superseded");
+			expect(secondBuild).toBeDefined();
 
-		const firstBuild = buildWordIndexAsync(oldDocs, () => generation === 0);
-		await suspension.admitted;
-		// This is the deterministic interleaving: generation 2 starts while
-		// generation 1 is suspended at its cooperative yield.
-		generation = 1;
-		secondBuild = buildWordIndexAsync(newDocs, () => generation === 1);
-		suspension.release();
-		await expect(firstBuild).rejects.toThrow("word index build superseded");
-		expect(secondBuild).toBeDefined();
-
-		const replacement = await secondBuild!;
-		// Atomic publish: the replacement is complete, and none of generation 1's
-		// postings escaped from its private staged index.
-		expect(replacement.docCount).toBe(newDocs.length);
-		expect(replacement.postings.get("newgenerationalpha")).toEqual([
-			{ file: "src/new-a.ts", line: 1 },
-		]);
-		expect(replacement.postings.get("oldgenerationalpha")).toBeUndefined();
-		// No staged/partial object is handed to the caller on the superseded path:
-		// the only result is the fully-built generation-2 replacement.
-		expect(yieldPoint).toHaveBeenCalled();
+			const replacement = await secondBuild!;
+			// Atomic publish: the replacement is complete, and none of generation 1's
+			// postings escaped from its private staged index.
+			expect(replacement.docCount).toBe(newDocs.length);
+			expect(replacement.postings.get("newgenerationalpha")).toEqual([
+				{ file: "src/new-a.ts", line: 1 },
+			]);
+			expect(replacement.postings.get("oldgenerationalpha")).toBeUndefined();
+			// Multiple real checkpoints ran, including after the held one resumed.
+			expect(yieldPoint.mock.calls.length).toBeGreaterThan(1);
+		} finally {
+			suspension.release();
+			suspension.restore();
+		}
 	});
 });

@@ -182,7 +182,7 @@ describe("concurrent writes to one stagePath (#1217)", () => {
 			expectOnlyWindowsConcurrentRenameEpemr(settled);
 		} finally {
 			suspension.release();
-			renameSpy.mockRestore();
+			suspension.restore();
 		}
 	});
 });
