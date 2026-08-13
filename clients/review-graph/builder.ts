@@ -1619,7 +1619,22 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 	const { key, pending } = request;
 	const currentGeneration = _persistGenerations.get(key);
 	if (currentGeneration !== result.generation) {
-		fs.rm(result.stagePath, { force: true }, () => {});
+		// Removing the request makes completion observable to test/CLI waiters.
+		// Reap our completed loser synchronously first so "no requests in flight"
+		// also means its stage namespace is clean (#1318). Caught (#1361 review):
+		// force suppresses ENOENT but not EBUSY/EPERM (Windows AV/backup can
+		// briefly hold the handle) -- a failed reap must never abort this
+		// callback, or the WINNING generation's completion is lost with it. The
+		// startup sweep reclaims anything a failed unlink leaves behind.
+		try {
+			fs.rmSync(result.stagePath, { force: true });
+		} catch (reapErr) {
+			logReviewGraph({
+				cwd: key,
+				phase: "persist_failed",
+				reason: `superseded-stage reap failed: ${String(reapErr)}`,
+			});
+		}
 		logReviewGraph({
 			cwd: key,
 			phase: "persist_skipped",
