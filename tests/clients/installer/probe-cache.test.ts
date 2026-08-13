@@ -363,4 +363,28 @@ describe("updateProbeCache", () => {
 		) as Record<string, unknown>;
 		expect(second["late-tool"]).toMatchObject({ path: "/managed/late-tool" });
 	});
+
+	// #1359 review: lost-update proof — a commit whose authoritative read sees
+	// ANOTHER writer's entry must fold both results, never clobber. The
+	// durable-store contract does this via the locked authoritative read; this
+	// pins the probe-cache merge callback's side of the bargain.
+	it("folds another writer's entry seen at authoritative read (no lost update)", async () => {
+		mockFsStat.mockResolvedValue({ mtimeMs: MTIME_MS });
+		// The other process committed "other-tool" between our update and our
+		// flush: the locked authoritative read returns their payload.
+		mockFsReadFile.mockResolvedValue(
+			JSON.stringify({
+				"other-tool": { path: "/managed/other-tool", mtimeMs: MTIME_MS, cachedAt: Date.now() },
+			}),
+		);
+
+		await updateProbeCache(TOOL_ID, TOOL_PATH);
+		expect(await flushProbeCache()).toBe("written");
+
+		const written = JSON.parse(
+			(mockWriteFileAtomicAsync.mock.calls[0] as [string, string])[1],
+		) as Record<string, unknown>;
+		expect(written[TOOL_ID]).toBeDefined();
+		expect(written["other-tool"]).toMatchObject({ path: "/managed/other-tool" });
+	});
 });
