@@ -36,6 +36,11 @@
  */
 
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { ReadGuard } from "../../clients/read-guard.js";
+import type { ReadContentBinding } from "../../clients/read-guard.js";
 import {
 	READ_BRIDGE_KEY,
 	registerReadBridge,
@@ -59,6 +64,7 @@ type RecordReadArgs = {
 	writeIndex: number;
 	timestamp: number;
 	source?: string;
+	contentBinding?: ReadContentBinding;
 };
 
 // ── Shared mutable per-test bridge state ─────────────────────────────────────
@@ -163,7 +169,9 @@ describe("read-bridge", () => {
 			isRecordable: () => true,
 		});
 
-		(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ filePath: "/a.ts" }));
+		(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+			validEntry({ filePath: "/a.ts" }),
+		);
 
 		// Original bridge captured the call
 		expect(_guardFn).toHaveBeenCalledOnce();
@@ -225,13 +233,17 @@ describe("read-bridge", () => {
 	it("turnIndex and writeIndex are sampled at call-time, not registration-time", () => {
 		_turnIndex = 5;
 		_writeIndex = 2;
-		(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ filePath: "/a.ts" }));
+		(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+			validEntry({ filePath: "/a.ts" }),
+		);
 		expect(_calls[0].turnIndex).toBe(5);
 		expect(_calls[0].writeIndex).toBe(2);
 
 		_turnIndex = 9;
 		_writeIndex = 4;
-		(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ filePath: "/b.ts" }));
+		(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+			validEntry({ filePath: "/b.ts" }),
+		);
 		expect(_calls[1].turnIndex).toBe(9);
 		expect(_calls[1].writeIndex).toBe(4);
 	});
@@ -250,7 +262,9 @@ describe("read-bridge", () => {
 		});
 
 		it("empty filePath is silently dropped", () => {
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ filePath: "" }));
+			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+				validEntry({ filePath: "" }),
+			);
 			expect(_guardFn).not.toHaveBeenCalled();
 		});
 
@@ -263,12 +277,16 @@ describe("read-bridge", () => {
 		});
 
 		it("requestedOffset = 0 (below minimum) is silently dropped", () => {
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ requestedOffset: 0 }));
+			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+				validEntry({ requestedOffset: 0 }),
+			);
 			expect(_guardFn).not.toHaveBeenCalled();
 		});
 
 		it("requestedOffset = NaN is silently dropped", () => {
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ requestedOffset: NaN }));
+			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+				validEntry({ requestedOffset: NaN }),
+			);
 			expect(_guardFn).not.toHaveBeenCalled();
 		});
 
@@ -280,7 +298,9 @@ describe("read-bridge", () => {
 		});
 
 		it("non-integer requestedOffset (1.5) is silently dropped", () => {
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ requestedOffset: 1.5 }));
+			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+				validEntry({ requestedOffset: 1.5 }),
+			);
 			expect(_guardFn).not.toHaveBeenCalled();
 		});
 
@@ -293,12 +313,16 @@ describe("read-bridge", () => {
 		});
 
 		it("requestedLimit = 0 (below minimum) is silently dropped", () => {
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ requestedLimit: 0 }));
+			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+				validEntry({ requestedLimit: 0 }),
+			);
 			expect(_guardFn).not.toHaveBeenCalled();
 		});
 
 		it("requestedLimit = NaN is silently dropped", () => {
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ requestedLimit: NaN }));
+			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+				validEntry({ requestedLimit: NaN }),
+			);
 			expect(_guardFn).not.toHaveBeenCalled();
 		});
 
@@ -318,7 +342,9 @@ describe("read-bridge", () => {
 		});
 
 		it("non-integer requestedLimit (3.7) is silently dropped", () => {
-			(globalThis as any)[READ_BRIDGE_KEY].recordRead(validEntry({ requestedLimit: 3.7 }));
+			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+				validEntry({ requestedLimit: 3.7 }),
+			);
 			expect(_guardFn).not.toHaveBeenCalled();
 		});
 	});
@@ -342,6 +368,49 @@ describe("read-bridge", () => {
 	// ── Full read-then-edit authorization path ───────────────────────────────
 
 	describe("read-then-edit authorization path", () => {
+		it("allows verification when bridge-bound disk content is unchanged", () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-lens-read-bridge-"));
+			try {
+				const filePath = join(dir, "green.ts");
+				writeFileSync(filePath, "const value = 1;\n", "utf-8");
+				const guard = new ReadGuard("bridge-green", { mode: "block" });
+				_guardFn = (record) => guard.recordRead(record);
+				(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+					validEntry({
+						filePath,
+						requestedOffset: 1,
+						requestedLimit: undefined,
+					}),
+				);
+				expect(guard.checkEdit(filePath, [1, 1]).action).toBe("allow");
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it("blocks verification when bridge-bound disk content has mutated", () => {
+			const dir = mkdtempSync(join(tmpdir(), "pi-lens-read-bridge-"));
+			try {
+				const filePath = join(dir, "mutated.ts");
+				writeFileSync(filePath, "const value = 1;\n", "utf-8");
+				const guard = new ReadGuard("bridge-mismatch", { mode: "block" });
+				_guardFn = (record) => guard.recordRead(record);
+				(globalThis as any)[READ_BRIDGE_KEY].recordRead(
+					validEntry({
+						filePath,
+						requestedOffset: 1,
+						requestedLimit: undefined,
+					}),
+				);
+				writeFileSync(filePath, "const value = 2;\n", "utf-8");
+				const verdict = guard.checkEdit(filePath, [1, 1]);
+				expect(verdict.action).toBe("block");
+				expect(verdict.reason).toContain("content no longer matches");
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
 		it("bridge-registered read forwards all fields the guard needs to authorize a subsequent edit", () => {
 			_turnIndex = 1;
 			_writeIndex = 0;
@@ -349,7 +418,12 @@ describe("read-bridge", () => {
 			const beforeCall = Date.now();
 
 			(globalThis as any)[READ_BRIDGE_KEY].recordRead(
-				validEntry({ filePath, requestedOffset: 1, requestedLimit: 100, consumer: "test-ext" }),
+				validEntry({
+					filePath,
+					requestedOffset: 1,
+					requestedLimit: 100,
+					consumer: "test-ext",
+				}),
 			);
 
 			expect(_guardFn).toHaveBeenCalledOnce();
@@ -380,9 +454,19 @@ describe("read-bridge", () => {
 		it("multiple reads on the same file are all forwarded", () => {
 			const bridge = (globalThis as any)[READ_BRIDGE_KEY];
 			const filePath = "/project/big.ts";
-			bridge.recordRead(validEntry({ filePath, requestedOffset: 1, requestedLimit: 50 }));
-			bridge.recordRead(validEntry({ filePath, requestedOffset: 51, requestedLimit: 50 }));
-			bridge.recordRead(validEntry({ filePath, requestedOffset: 101, requestedLimit: undefined }));
+			bridge.recordRead(
+				validEntry({ filePath, requestedOffset: 1, requestedLimit: 50 }),
+			);
+			bridge.recordRead(
+				validEntry({ filePath, requestedOffset: 51, requestedLimit: 50 }),
+			);
+			bridge.recordRead(
+				validEntry({
+					filePath,
+					requestedOffset: 101,
+					requestedLimit: undefined,
+				}),
+			);
 			expect(_guardFn).toHaveBeenCalledTimes(3);
 			expect(_calls[0].requestedOffset).toBe(1);
 			expect(_calls[1].requestedOffset).toBe(51);

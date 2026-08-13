@@ -58,6 +58,11 @@
  */
 
 /** Stable Symbol key — identical across module reloads in the same process. */
+import {
+	captureReadContentBinding,
+	type ReadContentBinding,
+} from "./read-guard.js";
+
 export const READ_BRIDGE_KEY: unique symbol = Symbol.for("pi-lens:read-bridge");
 
 /** Payload a producer passes when recording a read. */
@@ -102,6 +107,7 @@ interface BridgeDeps {
 			writeIndex: number;
 			timestamp: number;
 			source?: string;
+			contentBinding?: ReadContentBinding;
 		}): void;
 	};
 	getTurnIndex(): number;
@@ -179,6 +185,11 @@ export function registerReadBridge(deps: BridgeDeps): void {
 			// When no limit is given treat the whole file as covered — the guard
 			// clips to the actual line count via its own file-length probe.
 			const limit = entry.requestedLimit ?? Number.MAX_SAFE_INTEGER;
+			const contentBinding = captureReadContentBinding(
+				entry.filePath,
+				offset,
+				limit,
+			);
 
 			deps.getReadGuard().recordRead({
 				filePath: entry.filePath,
@@ -194,6 +205,7 @@ export function registerReadBridge(deps: BridgeDeps): void {
 				timestamp: Date.now(),
 				// Provenance: identifies this record as bridge-sourced in read-guard.log.
 				source: `bridge:${entry.consumer ?? "unknown"}`,
+				...(contentBinding !== undefined && { contentBinding }),
 			});
 		},
 	});
