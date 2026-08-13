@@ -122,8 +122,8 @@ jobs:
       # The release body is the curated CHANGELOG section for this version, not
       # the auto-generated PR-title list — so the release reads as a meaningful
       # summary of what changed (especially new features). `prepare` already
-      # verified the `## [VERSION]` heading exists, so extraction cannot be
-      # empty.
+      # verified a version heading or pending per-entry files exists, and the
+      # rollup above materializes the latter before extraction.
       - name: Extract release notes from CHANGELOG
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
