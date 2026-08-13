@@ -367,6 +367,39 @@ describe("lsp server policy", () => {
 		expect(r2).toBe(tmp);
 	});
 
+	it("attaches fixture files to the outer project instead of fixture manifests (#1325)", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-fixture-root-"));
+		dirs.push(tmp);
+
+		const fixture = path.join(tmp, "tests", "fixtures", "nested-project");
+		const file = path.join(fixture, "src", "index.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.mkdirSync(path.join(tmp, ".git"));
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
+		fs.writeFileSync(path.join(fixture, "package.json"), "{}\n");
+		fs.writeFileSync(file, "export const value = 1;\n");
+
+		await expect(NearestRoot(["package.json"])(file)).resolves.toBe(tmp);
+	});
+
+	it("does not make a gitignored manifest directory an LSP root (#1325)", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ignored-root-"));
+		dirs.push(tmp);
+
+		const generated = path.join(tmp, "generated");
+		const file = path.join(generated, "index.ts");
+		fs.mkdirSync(path.join(tmp, ".git"));
+		fs.mkdirSync(generated);
+		fs.writeFileSync(path.join(tmp, ".gitignore"), "generated/\n");
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
+		fs.writeFileSync(path.join(generated, "package.json"), "{}\n");
+		fs.writeFileSync(file, "export const generated = true;\n");
+
+		await expect(NearestRoot(["package.json"])(file)).resolves.toBe(tmp);
+	});
+
 	it("deduplicates concurrent in-flight walks for the same directory", async () => {
 		const { NearestRoot } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(
