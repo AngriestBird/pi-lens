@@ -34,14 +34,14 @@ describe("readProjectTrustFromContext (#1334 S5)", () => {
 		);
 	});
 
-	it("never guesses 'untrusted' from a throwing or non-boolean accessor", () => {
+	it("fails closed on a throwing accessor but keeps non-boolean unknown", () => {
 		expect(
 			readProjectTrustFromContext({
 				isProjectTrusted: () => {
 					throw new Error("host blew up");
 				},
 			}),
-		).toBe("unknown");
+		).toBe("untrusted");
 		expect(
 			readProjectTrustFromContext({ isProjectTrusted: () => undefined }),
 		).toBe("unknown");

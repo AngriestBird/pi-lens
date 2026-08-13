@@ -19,12 +19,10 @@
  * all" (older hosts with no `isProjectTrusted` on the ctx).
  *
  * Policy:
- *   - `untrusted` — the host actively said no. Block the two things pi-lens
- *     does unprompted at session start that touch the outside world: tool
- *     auto-INSTALL (downloads + executes third-party binaries) and LSP child
- *     process SPAWN (executes project-resolved binaries, often from the
- *     project's own `node_modules`). Discovery, cached analysis, tree-sitter
- *     and every in-process code path continue — they spawn nothing.
+ *   - `untrusted` — the host said no or its accessor failed. Block every
+ *     install/materialization path (including npx and grammar WASM downloads)
+ *     and LSP child process spawn. Discovery and cached/in-process analysis
+ *     continue; a missing grammar follows its unavailable path.
  *   - `trusted` / `unknown` — current behavior, unchanged. Fail-open is
  *     deliberate ONLY for `unknown`: a host that never exposed the accessor
  *     never had a trust decision to honor, and degrading it would break every
@@ -33,8 +31,10 @@
  * Process-wide singleton on purpose: `ensureTool()` and the LSP service sit
  * many layers below any `ctx`, and threading trust through every call site
  * would be a far larger and more fragile change than a single latched state
- * refreshed on each `session_start`.
+ * refreshed on each `session_start` and `turn_start`.
  */
+
+import { logExtension } from "./extension-log.js";
 
 export type ProjectTrustState = "trusted" | "untrusted" | "unknown";
 
@@ -57,7 +57,9 @@ export function readProjectTrustFromContext(ctx: unknown): ProjectTrustState {
 		if (typeof trusted !== "boolean") return "unknown";
 		return trusted ? "trusted" : "untrusted";
 	} catch {
-		return "unknown";
+		// The accessor exists, so this is not the absent older-host signal. If it
+		// fails, executable content must remain gated until a later adoption works.
+		return "untrusted";
 	}
 }
 
@@ -92,6 +94,18 @@ export function resetProjectTrust(): void {
  */
 export function isToolInstallAllowedByTrust(): boolean {
 	return trustState !== "untrusted";
+}
+
+/** Central gate for operations that may download or install executable content. */
+export function assertInstallAllowed(context: string): boolean {
+	if (isToolInstallAllowedByTrust()) return true;
+	logExtension({
+		subsystem: "project-trust",
+		level: "warn",
+		message: `install/materialization blocked: ${context}`,
+		metadata: { context, trustState },
+	});
+	return false;
 }
 
 /**

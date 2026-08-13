@@ -826,12 +826,20 @@ behalf would defeat the host's own prompt.
 
 `clients/project-trust.ts` is the single latched process-wide state
 (`trusted` / `untrusted` / `unknown`), refreshed from `ctx` on every
-`session_start` (fork/reload/resume can land on a different cwd, so a denial is
-never sticky). Note the asymmetry: the *event* decision is three-valued but the
+`session_start` and `turn_start` (fork/reload/resume can change cwd, and a
+mid-session grant/deny converges by the next turn). Note the asymmetry: the
+*event* decision is three-valued but the
 *ctx* accessor is a boolean, so the only distinctions available are "host said
 yes", "host said no", and "host has no trust surface at all".
 
-Two gates consume it, and only an explicit `untrusted` closes them:
+The centralized `assertInstallAllowed(context)` gate covers every operation
+that can install or materialize executable content: managed installs,
+formatter gem/rustup installs and npx fallbacks, runner lazy installers,
+govulncheck's `go install`, and tree-sitter's pinned-CDN lazy grammar fetch.
+Grammar WASM is executed content, so under denial an absent grammar follows the
+existing unavailable + user-notification path instead of being fetched. The
+separate LSP predicate gates child execution.
+
 `ensureTool()` (`clients/installer/index.ts` — degrades to the existing
 `allowInstall:false` discovery-only path, so an already-present binary keeps
 working while nothing is downloaded or executed) and `LSPService.spawnClient`
@@ -842,6 +850,12 @@ deliberate for `unknown` only** — a host that never exposed the accessor never
 had a decision to honor, and gating it would break every older pi. When adding
 a new outbound capability (a new spawn seam, a new downloader), gate it on
 `isLspSpawnAllowedByTrust()` / `isToolInstallAllowedByTrust()` too.
+
+Accessor failure is deliberately fail-closed: if `isProjectTrusted` exists but
+throws, the host attempted to provide a decision and pi-lens cannot prove the
+project trusted. Only an absent API is the older-host `unknown`/fail-open case.
+New installation/materialization sites call `assertInstallAllowed(context)`;
+do not add more direct consumers of the raw install predicate.
 
 ## Subagent-extension compatibility (#476)
 

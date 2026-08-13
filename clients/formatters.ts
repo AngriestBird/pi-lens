@@ -20,6 +20,7 @@ import {
 import { logLatency } from "./latency-logger.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { assertInstallAllowed } from "./project-trust.js";
 import {
 	getAutoInstallToolIdForFormatter,
 	getFormatterPolicyForFile,
@@ -54,6 +55,7 @@ export async function tryLazyInstallFormatterTool(
 	tool: "rubocop" | "rustfmt",
 	cwd: string,
 ): Promise<boolean> {
+	if (!assertInstallAllowed(`formatter lazy install: ${tool}`)) return false;
 	const attemptKey = `${tool}:${cwd}`;
 	if (_lazyInstallAttempts.has(attemptKey)) return false;
 	_lazyInstallAttempts.add(attemptKey);
@@ -1332,6 +1334,15 @@ export async function formatFile(
 		const cmd =
 			resolved ??
 			formatter.command.map((c) => c.replace("$FILE", absolutePath));
+		if (
+			resolved === null &&
+			cmd[0] === "npx" &&
+			!assertInstallAllowed(`formatter npx fallback: ${formatter.name}`)
+		) {
+			// Trust policy makes an install-capable fallback unavailable; skipping is
+			// not a formatter execution failure and may converge next turn.
+			return { success: true, changed: false };
+		}
 
 		// Run formatter without blocking the event loop.
 		const result = await safeSpawnAsync(cmd[0], cmd.slice(1), {

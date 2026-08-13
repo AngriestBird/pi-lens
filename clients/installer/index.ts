@@ -56,7 +56,7 @@ import os from "node:os";
 import path from "node:path";
 import { isFullyQualified } from "../path-utils.js";
 import {
-	isToolInstallAllowedByTrust,
+	assertInstallAllowed,
 	projectTrustDenialReason,
 } from "../project-trust.js";
 
@@ -3626,7 +3626,10 @@ export async function ensureTool(
 	toolId: string,
 	opts?: { forceReinstall?: boolean; allowInstall?: boolean },
 ): Promise<string | undefined> {
-	if (opts?.allowInstall !== false && !isToolInstallAllowedByTrust()) {
+	if (
+		opts?.allowInstall !== false &&
+		!assertInstallAllowed(`managed tool ensure: ${toolId}`)
+	) {
 		logSessionStart(
 			`auto-install ensure ${toolId}: install gated — ${projectTrustDenialReason()}; discovery only`,
 		);

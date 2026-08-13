@@ -129,4 +129,22 @@ describe("session_start project-trust adoption (#1334 S5)", () => {
 		);
 		expect(getProjectTrustState()).toBe("trusted");
 	});
+
+	it("re-adopts on turn_start so mid-session trust changes converge", async () => {
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		await pi.emit(
+			"session_start",
+			{},
+			makeCtx({ cwd: tmpProject(), isProjectTrusted: false }),
+		);
+		expect(getProjectTrustState()).toBe("untrusted");
+
+		await pi.emit(
+			"turn_start",
+			{},
+			makeCtx({ cwd: tmpProject(), isProjectTrusted: true }),
+		);
+		expect(getProjectTrustState()).toBe("trusted");
+	});
 });

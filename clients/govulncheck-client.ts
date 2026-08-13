@@ -21,6 +21,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { assertInstallAllowed } from "./project-trust.js";
 import { SecurityScanClient } from "./security-scan-client.js";
 
 // --- Types ---
@@ -119,6 +120,10 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 		if (await this.probeVersion(["-version"])) {
 			this.available = true;
 			return true;
+		}
+		if (!assertInstallAllowed("govulncheck go install")) {
+			this.available = false;
+			return false;
 		}
 
 		// Not on PATH — auto-install via `go install`. This is safe to assume

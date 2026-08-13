@@ -1298,8 +1298,9 @@ export default function (pi: ExtensionAPI) {
 			// below can auto-install a tool or spawn an LSP server. pi-lens is a
 			// CONSUMER of trust (`ctx.isProjectTrusted()`), never a handler of the
 			// `project_trust` event — answering that question on the user's behalf
-			// is the host's/user's job. Re-read on every session_start because
-			// fork/reload/resume can land on a different cwd. Feature-detected:
+			// is the host's/user's job. Re-read here and on every turn_start because
+			// fork/reload/resume can change cwd and trust can change mid-session.
+			// Feature-detected:
 			// a host without the accessor yields "unknown" and nothing is gated.
 			const trustState = adoptProjectTrustFromContext(ctx);
 			if (trustState !== "unknown") {
@@ -1716,6 +1717,9 @@ export default function (pi: ExtensionAPI) {
 	// --- Turn end: batch jscpd/madge on collected files, then clear state ---
 	// Clear cascade snapshot at start of each new turn so stale data never leaks
 	pi.on("turn_start", (_event: any, ctx) => {
+		// Trust can change without a new session. Re-adopt before this turn can
+		// reach any install-capable or LSP-spawn path.
+		adoptProjectTrustFromContext(ctx);
 		runtime.beginTurn();
 		clearLastAnalyzedStateCache();
 

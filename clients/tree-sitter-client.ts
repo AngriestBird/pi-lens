@@ -30,6 +30,7 @@ import {
 	LANGUAGE_TO_GRAMMAR,
 } from "./grammar-source.js";
 import { resolvePackagePath } from "./package-root.js";
+import { assertInstallAllowed } from "./project-trust.js";
 
 const _require = createRequire(import.meta.url);
 
@@ -465,6 +466,18 @@ export class TreeSitterClient {
 	private async ensureGrammar(grammarFile: string): Promise<boolean> {
 		if (this.resolveGrammarFile(grammarFile)) {
 			return true;
+		}
+		if (!assertInstallAllowed(`tree-sitter grammar fetch: ${grammarFile}`)) {
+			const unavailable =
+				`tree-sitter grammar '${grammarFile}' is unavailable because the project is not trusted; ` +
+				`runtime grammar downloads are disabled until trust is granted.`;
+			logTreeSitterDiagnostic({
+				subsystem: "tree-sitter-client",
+				message: unavailable,
+				metadata: { grammarFile, outcome: "trust-gated" },
+			});
+			notifyUserDegradation(`pi-lens: ${unavailable}`);
+			return false;
 		}
 		const inflight = this.grammarEnsurePromises.get(grammarFile);
 		if (inflight) return inflight;
