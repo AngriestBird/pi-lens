@@ -130,6 +130,30 @@ describe("git-guard", () => {
 		expect(isGitCommitOrPushAttempt("bash", { command: 'git commit -m "prep for git push"' })).toBe(true);
 	});
 
+	it("blocks guarded verbs executed by shell substitutions, including text consumers", () => {
+		for (const command of [
+			"echo $(git push)",
+			'printf "%s" "$(git push)"',
+			"grep -f <(git push) x",
+			"echo `git push`",
+			"cat >(git push)",
+			"echo $(git$IFS$9push)",
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
+		}
+	});
+
+	it("allows plain text that only mentions guarded verbs", () => {
+		for (const command of [
+			'echo "remember to git push later"',
+			'grep "git push" file.txt',
+			"echo git push",
+			'docker run -c "echo hi"',
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(false);
+		}
+	});
+
 	it("detects launcher prefixes, shell keywords, combined flags, and continuations", () => {
 		const continued = "git \\" + "\ncommit -m x";
 		expect(tokenizeShellCommand(continued)[0]?.tokens).toEqual(["git", "commit", "-m", "x"]);

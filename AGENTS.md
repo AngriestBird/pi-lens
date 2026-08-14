@@ -216,6 +216,10 @@ Rule-id normalization derives its language suffixes from the bundled CodeRabbit 
 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
 
+Git guard text-consumer allowances apply only to literal arguments: command,
+backtick, and process substitutions are execution contexts and must recurse
+through the canonicalizer before `echo`/`printf`/`grep` can allow text.
+
 LSP root exclusion recognizes fixture conventions by exact path segment; Go's
 `testdata` convention applies ancestor-wide, but names such as `testdata-tools`
 remain ordinary project directories. The positive `.gitignore` glob precheck is

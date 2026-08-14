@@ -198,6 +198,98 @@ function expandGuardVerbToken(value: string): string[] {
 	return normalizeGuardVerbToken(value).trim().split(/\s+/).filter(Boolean);
 }
 
+function delimitedSubstitutionBody(
+	command: string,
+	start: number,
+	opener: string,
+	closer: string,
+): { body: string; end: number } | undefined {
+	let depth = 1;
+	let quote: "single" | "double" | undefined;
+	let escaped = false;
+	for (let i = start + opener.length; i < command.length; i++) {
+		const ch = command[i];
+		if (quote === "single") {
+			if (ch === "'") quote = undefined;
+			continue;
+		}
+		if (quote === "double" && ch === '"') {
+			quote = undefined;
+			continue;
+		}
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch === "'" ? "single" : "double";
+			continue;
+		}
+		if (command.startsWith(opener, i)) {
+			depth += 1;
+			i += opener.length - 1;
+			continue;
+		}
+		if (command.startsWith(closer, i) && --depth === 0) {
+			return { body: command.slice(start + opener.length, i), end: i };
+		}
+	}
+	return undefined;
+}
+
+function containsGuardedSubstitution(command: string, depth: number): boolean {
+	if (depth > 3) return false;
+	let quote: "single" | "double" | undefined;
+	let escaped = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote === "single") {
+			if (ch === "'") quote = undefined;
+			continue;
+		}
+		if (quote === "double" && ch === '"') {
+			quote = undefined;
+			continue;
+		}
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch === "'" ? "single" : "double";
+			continue;
+		}
+		const substitution = command.startsWith("$(", i)
+			? delimitedSubstitutionBody(command, i, "$(", ")")
+			: command.startsWith("<(", i)
+				? delimitedSubstitutionBody(command, i, "<(", ")")
+				: command.startsWith(">(", i)
+					? delimitedSubstitutionBody(command, i, ">(", ")")
+					: ch === "`"
+						? { body: command.slice(i + 1, command.indexOf("`", i + 1)), end: command.indexOf("`", i + 1) }
+						: undefined;
+		if (substitution && substitution.end >= 0) {
+			const nested = canonicalizeGuardCommand(substitution.body);
+			if (
+				containsGuardedSubstitution(nested, depth + 1) ||
+				tokenizeShellCommand(nested).some((segment) => containsCommitOrPush(segment.tokens, depth + 1))
+			) {
+				return true;
+			}
+			i = substitution.end;
+		}
+	}
+	return false;
+}
+
 function containsCommitOrPush(tokens: string[], depth: number): boolean {
 	if (depth > 3 || tokens.length === 0) return false;
 	let commandTokens = tokens;
@@ -221,6 +313,8 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 	}
 	// These commands consume their following words as text/patterns; a bare
 	// git token in their arguments is not an indirect executable invocation.
+	// `$(git push)` is execution and must block; `"git push"` as literal text
+	// is allowed. Substitutions are screened before this text-consumer escape.
 	if (["echo", "printf", "grep"].includes(executableName(commandTokens[0] ?? ""))) {
 		return false;
 	}
@@ -309,6 +403,7 @@ export function isGitCommitOrPushAttempt(toolName: string, input: unknown): bool
 	const command = getShellCommand(input);
 	if (!command) return false;
 	const canonical = canonicalizeGuardCommand(command);
+	if (containsGuardedSubstitution(canonical, 0)) return true;
 	return tokenizeShellCommand(canonical).some((segment) =>
 		containsCommitOrPush(segment.tokens, 0),
 	);
