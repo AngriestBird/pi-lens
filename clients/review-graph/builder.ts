@@ -4514,7 +4514,10 @@ async function _doBuildGraph(
 ): Promise<ReviewGraph> {
 	const normalizedCwd = normalizeMapKey(cwd);
 	const cacheEpoch = workspaceCacheEpoch(normalizedCwd);
-	await _reviewGraphBuildGateForTests?.();
+	// `await undefined` still yields a microtask, which reorders overlapping
+	// builds in production where no test gate is installed — only await a gate
+	// that exists.
+	if (_reviewGraphBuildGateForTests) await _reviewGraphBuildGateForTests();
 	const normalizedChanged = changedFiles.map((file) => normalizeMapKey(file));
 	const normalizedChangedSet = new Set(normalizedChanged);
 	logCwdWorktreeMismatchOnce(cwd);
