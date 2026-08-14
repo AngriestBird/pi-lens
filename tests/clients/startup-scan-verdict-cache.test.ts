@@ -18,6 +18,7 @@ import {
 	type StartupScanContext,
 	resolveStartupScanContext,
 	resolveStartupScanContextAsync,
+	__testing,
 } from "../../clients/startup-scan.js";
 import { setupTestEnvironment } from "./test-utils.js";
 import * as fs from "node:fs";
@@ -44,6 +45,12 @@ function makeVerdict(
 }
 
 describe("getStartupScanVerdictTtlMs", () => {
+	it("uses one cache identity for equivalent Windows root spellings", () => {
+		const options = { maxSourceFiles: 10, maxScanEntries: 20 };
+		expect(__testing.startupScanCacheKey("C:\\Repo\\app", options)).toBe(
+			__testing.startupScanCacheKey("C:/Repo/app", options),
+		);
+	});
 	it("defaults to 24h", () => {
 		expect(getStartupScanVerdictTtlMs()).toBe(24 * 60 * 60 * 1000);
 	});

@@ -51,6 +51,7 @@ import { logExtension } from "../extension-log.js";
 import { notifyUserDegradation } from "../user-notify.js";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { BoundedLruCache } from "../bounded-cache.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import { launchLSP } from "./launch.js";
 import {
@@ -236,7 +237,7 @@ const EMPTY_CONFIG: RegisteredLSPConfig = {
 	serverOverrides: new Map(),
 };
 
-const workspaceConfigs = new Map<string, RegisteredLSPConfig>();
+const workspaceConfigs = new BoundedLruCache<string, RegisteredLSPConfig>(32);
 /** In-flight config initialization promises to prevent duplicate concurrent loads */
 const configInFlight = new Map<string, Promise<void>>();
 
