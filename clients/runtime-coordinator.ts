@@ -25,7 +25,9 @@ export interface CascadeSessionStats {
 	coldSnapshotTouches: number;
 }
 
-export interface DeferredFormatRecord {
+export type DeferredMutationKind = "autofix" | "format";
+
+export interface DeferredMutationRecord {
 	filePath: string;
 	/** Formatter/language cwd captured when the edit was analyzed. */
 	cwd: string;
@@ -39,6 +41,7 @@ export interface DeferredFormatRecord {
 	firstTouchedAt: number;
 	lastTouchedAt: number;
 	toolNames: Set<"write" | "edit">;
+	kinds: Set<DeferredMutationKind>;
 	/**
 	 * The runtime's turn counter at the moment this file was (most recently)
 	 * queued/re-touched. Carried purely for provenance/instrumentation (#791)
@@ -62,6 +65,9 @@ export interface DeferredFormatRecord {
 	ownerSessionId: string | undefined;
 }
 
+/** @deprecated Use DeferredMutationRecord. */
+export type DeferredFormatRecord = DeferredMutationRecord;
+
 export class RuntimeCoordinator {
 	private _projectRoot = normalizeMapKey(process.cwd());
 	private _sessionGeneration = 0;
@@ -82,6 +88,8 @@ export class RuntimeCoordinator {
 	};
 	private _complexityBaselines = new Map<string, FileComplexity>();
 	private _fixedThisTurn = new Set<string>();
+	private readonly _writtenThisTurn = new PathKeyedMap<true>(normalizeMapKey);
+	private readonly _autofixDemotedThisTurn = new PathKeyedMap<true>(normalizeMapKey);
 	private readonly _reportedThisTurn = new Set<string>();
 	private _projectRulesScan: RuleScanResult = {
 		rules: [],
@@ -107,10 +115,9 @@ export class RuntimeCoordinator {
 	callGraph: FunctionCallGraph | null = null;
 	wordIndex: WordIndex | null = null;
 	private _readGuard: ReadGuard | null = null;
-	private readonly _pendingDeferredFormatFiles = new Map<
-		string,
-		DeferredFormatRecord
-	>();
+	private readonly _pendingDeferredMutations = new PathKeyedMap<DeferredMutationRecord>(
+		normalizeMapKey,
+	);
 	private readonly _lspReadWarmState = new Map<
 		string,
 		{ status: "warming" | "ready"; ts: number }
@@ -150,6 +157,8 @@ export class RuntimeCoordinator {
 			coldSnapshotTouches: 0,
 		};
 		this._fixedThisTurn.clear();
+		this._writtenThisTurn.clear();
+		this._autofixDemotedThisTurn.clear();
 		this._reportedThisTurn.clear();
 		this._telemetrySessionId = `lens-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 		this._hasStableSessionId = false;
@@ -164,7 +173,7 @@ export class RuntimeCoordinator {
 		this._gitGuardSummary = "";
 		this._gitGuardCacheUnknownReason = undefined;
 		this._readGuard = null;
-		this._pendingDeferredFormatFiles.clear();
+		this._pendingDeferredMutations.clear();
 		this._lspReadWarmState.clear();
 		this._pendingInlineBlockers.clear();
 		this._actionableWarningsThisTurn.clear();
@@ -254,6 +263,29 @@ export class RuntimeCoordinator {
 		this._turnIndex += 1;
 		this._writeIndex = 0;
 		this._reportedThisTurn.clear();
+		this._writtenThisTurn.clear();
+		this._autofixDemotedThisTurn.clear();
+	}
+
+	/** Atomically records write/edit ordering before debounce can coalesce it. */
+	recordMutationToolReceipt(
+		filePath: string,
+		toolName: "write" | "edit",
+	): { autofixMode: "immediate" | "deferred" } {
+		if (toolName === "write") {
+			this._writtenThisTurn.set(filePath, true);
+		} else if (this._writtenThisTurn.has(filePath)) {
+			this._autofixDemotedThisTurn.set(filePath, true);
+			// A later edit establishes a new final state that must be eligible for
+			// the deferred pass even if the preceding write was fixed immediately.
+			this._fixedThisTurn.delete(filePath);
+		}
+		return {
+			autofixMode:
+				toolName === "edit" || this._autofixDemotedThisTurn.has(filePath)
+					? "deferred"
+					: "immediate",
+		};
 	}
 
 	get reportedThisTurn(): Set<string> {
@@ -636,6 +668,41 @@ export class RuntimeCoordinator {
 	 * `pilens:format:queued` only on first queue entry, so repeated edits to
 	 * the same already-queued file before `agent_end` don't spam the bus.
 	 */
+	deferMutation(
+		filePath: string,
+		cwd: string,
+		toolName: "write" | "edit",
+		turnStateCwd: string,
+		kind: DeferredMutationKind,
+		ownerSessionId?: string,
+	): boolean {
+		const key = path.resolve(filePath);
+		const now = Date.now();
+		const existing = this._pendingDeferredMutations.get(key);
+		if (existing) {
+			existing.lastTouchedAt = now;
+			existing.cwd = cwd;
+			existing.turnStateCwd = turnStateCwd;
+			existing.toolNames.add(toolName);
+			existing.kinds.add(kind);
+			existing.queuedTurnIndex = this._turnIndex;
+			existing.ownerSessionId = ownerSessionId;
+			return false;
+		}
+		this._pendingDeferredMutations.set(key, {
+			filePath: key,
+			cwd,
+			turnStateCwd,
+			firstTouchedAt: now,
+			lastTouchedAt: now,
+			toolNames: new Set([toolName]),
+			kinds: new Set([kind]),
+			queuedTurnIndex: this._turnIndex,
+			ownerSessionId,
+		});
+		return true;
+	}
+
 	deferFormat(
 		filePath: string,
 		cwd: string,
@@ -643,33 +710,15 @@ export class RuntimeCoordinator {
 		turnStateCwd: string,
 		ownerSessionId?: string,
 	): boolean {
-		const key = path.resolve(filePath);
-		const now = Date.now();
-		const existing = this._pendingDeferredFormatFiles.get(key);
-		if (existing) {
-			existing.lastTouchedAt = now;
-			existing.cwd = cwd;
-			existing.turnStateCwd = turnStateCwd;
-			existing.toolNames.add(toolName);
-			existing.queuedTurnIndex = this._turnIndex;
-			existing.ownerSessionId = ownerSessionId;
-			return false;
-		}
-		this._pendingDeferredFormatFiles.set(key, {
-			filePath: key,
-			cwd,
-			turnStateCwd,
-			firstTouchedAt: now,
-			lastTouchedAt: now,
-			toolNames: new Set([toolName]),
-			queuedTurnIndex: this._turnIndex,
-			ownerSessionId,
-		});
-		return true;
+		return this.deferMutation(filePath, cwd, toolName, turnStateCwd, "format", ownerSessionId);
 	}
 
 	get pendingDeferredFormatCount(): number {
-		return this._pendingDeferredFormatFiles.size;
+		return this._pendingDeferredMutations.size;
+	}
+
+	get pendingDeferredMutationCount(): number {
+		return this._pendingDeferredMutations.size;
 	}
 
 	/**
@@ -678,8 +727,8 @@ export class RuntimeCoordinator {
 	 * flush call sites should prefer {@link claimDeferredFormatFiles}.
 	 */
 	consumeDeferredFormatFiles(): DeferredFormatRecord[] {
-		const records = [...this._pendingDeferredFormatFiles.values()];
-		this._pendingDeferredFormatFiles.clear();
+		const records = [...this._pendingDeferredMutations.values()];
+		this._pendingDeferredMutations.clear();
 		return records;
 	}
 
@@ -712,20 +761,20 @@ export class RuntimeCoordinator {
 		const claimed: DeferredFormatRecord[] = [];
 		const staleClaimed: DeferredFormatRecord[] = [];
 		const deferredToOwner: DeferredFormatRecord[] = [];
-		for (const [key, record] of this._pendingDeferredFormatFiles) {
+		for (const [key, record] of this._pendingDeferredMutations) {
 			const sameSession =
 				record.ownerSessionId === undefined ||
 				currentSessionId === undefined ||
 				record.ownerSessionId === currentSessionId;
 			if (sameSession) {
 				claimed.push(record);
-				this._pendingDeferredFormatFiles.delete(key);
+				this._pendingDeferredMutations.delete(key);
 				continue;
 			}
 			const age = now - record.lastTouchedAt;
 			if (age > staleAfterMs) {
 				staleClaimed.push(record);
-				this._pendingDeferredFormatFiles.delete(key);
+				this._pendingDeferredMutations.delete(key);
 				continue;
 			}
 			deferredToOwner.push(record);
@@ -737,10 +786,18 @@ export class RuntimeCoordinator {
 	requeueDeferredFormatFiles(records: DeferredFormatRecord[]): void {
 		for (const record of records) {
 			const key = path.resolve(record.filePath);
-			if (!this._pendingDeferredFormatFiles.has(key)) {
-				this._pendingDeferredFormatFiles.set(key, record);
+			if (!this._pendingDeferredMutations.has(key)) {
+				this._pendingDeferredMutations.set(key, record);
 			}
 		}
+	}
+
+	claimDeferredMutations(currentSessionId: string | undefined, now: number, staleAfterMs: number) {
+		return this.claimDeferredFormatFiles(currentSessionId, now, staleAfterMs);
+	}
+
+	requeueDeferredMutations(records: DeferredMutationRecord[]): void {
+		this.requeueDeferredFormatFiles(records);
 	}
 
 	shouldWarmLspOnRead(filePath: string, maxAgeMs = 120_000): boolean {

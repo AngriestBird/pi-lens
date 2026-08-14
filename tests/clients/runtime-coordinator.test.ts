@@ -5,6 +5,28 @@ import { describe, expect, it } from "vitest";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.ts";
 
 describe("RuntimeCoordinator", () => {
+	it("makes edit autofix deferral sticky after a write until beginTurn", () => {
+		const runtime = new RuntimeCoordinator();
+		const filePath = path.resolve("src/sticky.ts");
+
+		expect(runtime.recordMutationToolReceipt(filePath, "write").autofixMode).toBe("immediate");
+		expect(runtime.recordMutationToolReceipt(filePath, "edit").autofixMode).toBe("deferred");
+		expect(runtime.recordMutationToolReceipt(filePath, "write").autofixMode).toBe("deferred");
+
+		runtime.beginTurn();
+		expect(runtime.recordMutationToolReceipt(filePath, "write").autofixMode).toBe("immediate");
+	});
+
+	it("coalesces autofix and format kinds on one owner-scoped path record", () => {
+		const runtime = new RuntimeCoordinator();
+		const filePath = path.resolve("src/coalesced.ts");
+		expect(runtime.deferMutation(filePath, process.cwd(), "edit", process.cwd(), "autofix", "owner")).toBe(true);
+		expect(runtime.deferMutation(filePath, process.cwd(), "edit", process.cwd(), "format", "owner")).toBe(false);
+
+		const [record] = runtime.consumeDeferredFormatFiles();
+		expect(record.kinds).toEqual(new Set(["autofix", "format"]));
+		expect(record.ownerSessionId).toBe("owner");
+	});
 	it("resetForSession clears any existing read guard state", () => {
 		const runtime = new RuntimeCoordinator();
 		const runtimeState = runtime as any;

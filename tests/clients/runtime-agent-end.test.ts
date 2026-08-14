@@ -38,6 +38,43 @@ vi.mock("../../clients/actionable-warnings.js", async (importOriginal) => {
 });
 
 describe("runtime-agent-end deferred formatting", () => {
+	it("runs deferred autofix before format on the final edit state", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-mutation-order-");
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "let value=1\n");
+			fs.writeFileSync(path.join(env.tmpDir, "biome.json"), "{}\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.deferMutation(filePath, env.tmpDir, "edit", env.tmpDir, "autofix");
+			runtime.deferMutation(filePath, env.tmpDir, "edit", env.tmpDir, "format");
+			const order: string[] = [];
+			const biomeClient = {
+				isSupportedFile: () => true,
+				ensureAvailable: async () => true,
+				fixFileAsync: async (fp: string) => {
+					order.push("autofix");
+					fs.writeFileSync(fp, "const value=1\n");
+					return { success: true, changed: true, fixed: 1 };
+				},
+			};
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(), dbg: () => {}, runtime,
+				cacheManager: { addModifiedRange: vi.fn() } as any,
+				biomeClient: biomeClient as any,
+				ruffClient: {} as any,
+				getFormatService: () => ({ recordRead: () => {}, formatFile: async (fp: string) => {
+					order.push("format");
+					fs.writeFileSync(fp, "const value = 1;\n");
+					return { filePath: fp, formatters: [{ name: "biome", success: true, changed: true }], anyChanged: true, allSucceeded: true };
+				} }) as any,
+			});
+			expect(order).toEqual(["autofix", "format"]);
+			expect(fs.readFileSync(filePath, "utf-8")).toBe("const value = 1;\n");
+		} finally { env.cleanup(); }
+	});
+
 	it("formats each queued file once, clears the queue, and records a format change", async () => {
 		const env = setupTestEnvironment("pi-lens-agent-end-format-");
 		const previousDataDir = process.env.PILENS_DATA_DIR;

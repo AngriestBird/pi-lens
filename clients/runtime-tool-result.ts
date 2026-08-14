@@ -90,6 +90,8 @@ interface ToolResultDeps {
 	/** Internal bounded provenance carried through debounce/coalescing. */
 	_telemetryParticipantIds?: string[];
 	_telemetryParticipantTotal?: number;
+	/** Receipt-time decision preserved across debounce replacement. */
+	_autofixMode?: "immediate" | "deferred";
 }
 
 function parseDiffRanges(diff: string): { start: number; end: number }[] {
@@ -527,6 +529,17 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return { content: event.content, isError: true };
 	}
 
+	// Must happen before debounce admission: latestDeps intentionally retains only
+	// the latest event, but write -> edit is a sticky turn transition.
+	const receipt = (runtime as Partial<RuntimeCoordinator>).recordMutationToolReceipt;
+	const autofixMode = deps._bypassDebounce
+		? (deps._autofixMode ?? "deferred")
+		: receipt
+			? receipt.call(runtime, filePath, event.toolName).autofixMode
+			: event.toolName === "edit"
+				? "deferred"
+				: "immediate";
+
 	// Coalesce sequential edits to the same file into one pipeline run against
 	// the final state. Only the debounce-fired call (with _bypassDebounce=true)
 	// proceeds to the pipeline body; in-window callers share its promise.
@@ -535,6 +548,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		if (debounceMs > 0) {
 			return scheduleDebounced(filePath, debounceMs, {
 				...deps,
+				_autofixMode: autofixMode,
 				_telemetryParticipantIds: [readGuardCorrelationId],
 				_telemetryParticipantTotal: 1,
 			});
@@ -715,6 +729,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			cwd: dispatchCwd,
 			projectRoot: turnStateCwd,
 			toolName: event.toolName,
+			autofixMode,
 			modifiedRanges,
 			telemetry: {
 				model: runtime.telemetryModel,
@@ -893,6 +908,17 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		}
 	}
 
+	let autofixNewlyQueued = false;
+	if (!result.isError && autofixMode === "deferred" && nodeFs.existsSync(filePath)) {
+		autofixNewlyQueued =
+			(runtime as Partial<RuntimeCoordinator>).deferMutation?.call(
+				runtime, filePath, dispatchCwd, event.toolName, turnStateCwd,
+				"autofix", deps.sessionId,
+			) ?? false;
+		dbg(`tool_result: queued deferred autofix for ${filePath}`);
+	}
+	let formatQueued = false;
+
 	if (
 		!result.isError &&
 		!getFlag("no-autoformat", filePath) &&
@@ -906,6 +932,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			turnStateCwd,
 			deps.sessionId,
 		);
+		formatQueued = true;
 		dbg(`tool_result: queued deferred format for ${filePath}`);
 		logLatency({
 			type: "phase",
@@ -919,14 +946,18 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		// queued file (a second edit before agent_end) is a structural no-op
 		// for a listener that just wants to know "has this file entered the
 		// queue", so re-emitting would be spam with zero new information.
-		if (isNewlyQueued) {
+		if (isNewlyQueued || autofixNewlyQueued) {
 			publishFormatQueued({
 				filePath,
 				cwd: dispatchCwd,
 				tool: event.toolName,
 				dbg,
+				kinds: autofixMode === "deferred" ? ["autofix", "format"] : ["format"],
 			});
 		}
+	}
+	if (autofixNewlyQueued && !formatQueued) {
+		publishFormatQueued({ filePath, cwd: dispatchCwd, tool: event.toolName, kinds: ["autofix"], dbg });
 	}
 
 	for (const changedFile of result.changedFiles ?? []) {
@@ -1044,9 +1075,21 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 
 	runtime.reportedThisTurn.add(filePath);
 
-	if (!output) return;
+	const returnedContent = result.postMutation
+		? [
+				...event.content,
+				{
+					type: "text",
+					text: `pi-lens applied autofix to ${result.postMutation.filePath}. The following full content is authoritative for subsequent edits:\n\n${result.postMutation.content}`,
+				},
+			]
+		: event.content;
+
+	if (!output && !result.postMutation) return;
 
 	return {
-		content: [...event.content, { type: "text", text: output }],
+		content: output
+			? [...returnedContent, { type: "text", text: output }]
+			: returnedContent,
 	};
 }

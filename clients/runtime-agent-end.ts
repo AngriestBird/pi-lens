@@ -7,6 +7,8 @@ import {
 } from "./actionable-warnings.js";
 import { publishFilesTouched } from "./bus-publish.js";
 import type { CacheManager } from "./cache-manager.js";
+import type { BiomeClient } from "./biome-client.js";
+import type { RuffClient } from "./ruff-client.js";
 import {
 	publishAutofixStart,
 	publishFormatStart,
@@ -19,13 +21,14 @@ import {
 	getGlobalActionableWarningMaxFixes,
 	type PiLensFlagSource,
 } from "./lens-config.js";
-import { resyncLspFile, runFormatPhase } from "./pipeline.js";
+import { resyncLspFile, runAutofix, runFormatPhase } from "./pipeline.js";
 import { getAmbientAbortSignal } from "./safe-spawn.js";
 import {
 	appendProjectChange,
 	type ProjectChangeSource,
 } from "./project-changes.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
+import { getAutofixPolicyForFile } from "./tool-policy.js";
 
 /**
  * A queued file is claimed by any flush once it has sat unclaimed by its own
@@ -48,6 +51,8 @@ interface AgentEndDeps {
 	runtime: RuntimeCoordinator;
 	cacheManager: CacheManager;
 	getFormatService: () => FormatService;
+	biomeClient?: BiomeClient;
+	ruffClient?: RuffClient;
 	/**
 	 * The STABLE pi session id for the ctx this `agent_end` fired on. Used to
 	 * scope the deferred-format drain to records this session actually
@@ -101,6 +106,8 @@ export async function handleAgentEnd({
 	runtime,
 	cacheManager,
 	getFormatService,
+	biomeClient,
+	ruffClient,
 	currentSessionId,
 	staleAfterMs = DEFERRED_FORMAT_STALE_AFTER_MS,
 }: AgentEndDeps): Promise<AgentEndFormatSummary | undefined> {
@@ -109,7 +116,7 @@ export async function handleAgentEnd({
 	// for their owner's own agent_end, unless they've been stale long enough
 	// to fall back to "claim as orphaned" (see claimDeferredFormatFiles).
 	const { claimed, staleClaimed, deferredToOwner } =
-		runtime.claimDeferredFormatFiles(
+		runtime.claimDeferredMutations(
 			currentSessionId,
 			Date.now(),
 			staleAfterMs,
@@ -175,6 +182,87 @@ export async function handleAgentEnd({
 		tool: string;
 		kind: "format";
 	}> = [];
+	const deferredAutofixFixes: Array<{
+		path: string;
+		tool: string;
+		kind: "autofix";
+	}> = [];
+	const deferredAutofixChanged = new Set<string>();
+
+	// Mutation ordering is intentional: lint --write may disturb wrapping, so
+	// autofix reaches the final edited state first and formatting stabilizes it.
+	const ambientSignal = getAmbientAbortSignal();
+	const executedAutofixScopes = new Set<string>();
+	const autofixRecords = records.filter((candidate) => candidate.kinds.has("autofix"));
+	for (let autofixIndex = 0; autofixIndex < autofixRecords.length; autofixIndex++) {
+		const record = autofixRecords[autofixIndex];
+		if (ambientSignal?.aborted) {
+			runtime.requeueDeferredMutations(
+				autofixRecords.slice(autofixIndex).map((pending) => ({
+					...pending,
+					kinds: new Set(["autofix" as const]),
+				})),
+			);
+			break;
+		}
+		const filePath = path.resolve(record.filePath);
+		if (!nodeFs.existsSync(filePath)) {
+			summary.skipped.push({ filePath, reason: "missing" });
+			continue;
+		}
+		if (!biomeClient || !ruffClient) {
+			dbg(`agent_end deferred_autofix: clients unavailable for ${filePath}`);
+			runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["autofix"]) }]);
+			continue;
+		}
+		const policy = getAutofixPolicyForFile(filePath);
+		const scopeKey = policy?.scope && policy.scope !== "file"
+			? `${policy.defaultTool ?? "unknown"}:${path.resolve(record.cwd)}`
+			: `${policy?.defaultTool ?? "unknown"}:${filePath}`;
+		if (executedAutofixScopes.has(scopeKey)) continue;
+		executedAutofixScopes.add(scopeKey);
+		try {
+			const result = await runAutofix(
+				filePath,
+				record.cwd,
+				getFlag,
+				dbg,
+				{ biomeClient, ruffClient, fixedThisTurn: runtime.fixedThisTurn },
+				getFlagSource,
+			);
+			const tools = result.autofixTools.map((label) => label.split(":")[0]);
+			for (const changed of result.changedFiles) {
+				const changedPath = path.resolve(changed);
+				deferredAutofixChanged.add(changedPath);
+				for (const tool of tools) deferredAutofixFixes.push({ path: changedPath, tool, kind: "autofix" });
+				if (!nodeFs.existsSync(changedPath)) continue;
+				recordProjectChange({ runtime, cwd: record.turnStateCwd, filePath: changedPath, source: "autofix", dbg });
+				if (!getFlag("no-read-guard")) runtime.readGuard.recordWritten(changedPath);
+				const content = nodeFs.readFileSync(changedPath, "utf-8");
+				cacheManager.addModifiedRange(
+					changedPath,
+					{ start: 1, end: content.split("\n").length },
+					/^import\s/m.test(content),
+					record.turnStateCwd,
+					currentSessionId ?? runtime.telemetrySessionId,
+					"pi",
+				);
+			}
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			summary.failed.push({ filePath, errors: [message] });
+			runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["autofix"]) }]);
+		}
+	}
+	if (deferredAutofixFixes.length > 0) {
+		publishFilesTouched({
+			reason: "autofix",
+			paths: [...new Set(deferredAutofixFixes.map((fix) => fix.path))],
+			cwd: ctxCwd ?? runtime.projectRoot,
+			dbg,
+			fixes: deferredAutofixFixes,
+		});
+	}
 
 	dbg(`agent_end deferred_format: ${records.length} file(s)`);
 	logLatency({
@@ -206,10 +294,11 @@ export async function handleAgentEnd({
 			cwd: ctxCwd ?? runtime.projectRoot,
 			paths: records.map((r) => r.filePath),
 			dbg,
+			kinds: [...new Set(records.flatMap((record) => [...record.kinds]))],
 		});
 	}
 
-	const formatRecords = records.filter((record) => {
+	const formatRecords = records.filter((record) => record.kinds.has("format")).filter((record) => {
 		const disabled = !!getFlag("no-autoformat", record.filePath);
 		if (disabled) {
 			const source = getFlagSource?.("no-autoformat", record.filePath);
@@ -239,7 +328,6 @@ export async function handleAgentEnd({
 		const work = new Array<FormatWork | undefined>(formatRecords.length);
 		const started = new Set<number>();
 		let nextIndex = 0;
-		const ambientSignal = getAmbientAbortSignal();
 		const worker = async (): Promise<void> => {
 			while (nextIndex < formatRecords.length) {
 				const index = nextIndex++;
@@ -276,8 +364,11 @@ export async function handleAgentEnd({
 			),
 		);
 		if (ambientSignal?.aborted) {
-			runtime.requeueDeferredFormatFiles(
-				formatRecords.filter((_, index) => !started.has(index)),
+			runtime.requeueDeferredMutations(
+				formatRecords.filter((_, index) => !started.has(index)).map((record) => ({
+					...record,
+					kinds: new Set(["format" as const]),
+				})),
 			);
 		}
 
@@ -293,6 +384,7 @@ export async function handleAgentEnd({
 			if (entry.error) {
 				dbg(`agent_end deferred_format failed for ${filePath}: ${entry.error}`);
 				summary.failed.push({ filePath, errors: [entry.error] });
+				runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["format"]) }]);
 				continue;
 			}
 			const result = entry.result;
@@ -302,6 +394,7 @@ export async function handleAgentEnd({
 
 			if (result.formatFailures.length > 0) {
 				summary.failed.push({ filePath, errors: result.formatFailures });
+				runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["format"]) }]);
 			}
 
 			if (result.formatChanged) {
@@ -389,6 +482,14 @@ export async function handleAgentEnd({
 				fixes: deferredFormatFixes,
 			});
 		}
+	}
+
+	// LSP sees only authoritative content after both mutation phases. In
+	// particular, never publish the autofix intermediate state before format.
+	for (const changedPath of deferredAutofixChanged) {
+		if (!nodeFs.existsSync(changedPath)) continue;
+		const content = nodeFs.readFileSync(changedPath, "utf-8");
+		await resyncLspFile(changedPath, content, true, false, getFlag, dbg);
 	}
 
 	if (inspectActionableReport) {

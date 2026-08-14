@@ -5,7 +5,7 @@ import { CacheManager } from "../../clients/cache-manager.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
-import { setupTestEnvironment } from "./test-utils.js";
+import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 vi.mock("../../clients/pipeline.js", () => ({
 	runPipeline: vi.fn(),
@@ -379,6 +379,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
 			fs.writeFileSync(filePath, "export const x = 1;\n");
 			const deferFormat = vi.fn();
+			const deferMutation = vi.fn();
 
 			await handleToolResult({
 				event: {
@@ -406,6 +407,7 @@ describe("runtime-tool-result inline behavior warnings", () => {
 					lastCascadeOutput: "",
 					cachedExports: new Map(),
 					deferFormat,
+					deferMutation,
 				},
 				cacheManager: {
 					addModifiedRange: () => {},
@@ -427,9 +429,45 @@ describe("runtime-tool-result inline behavior warnings", () => {
 				env.tmpDir,
 				undefined,
 			);
+			expect(deferMutation).toHaveBeenCalledWith(
+				filePath,
+				expect.any(String),
+				"edit",
+				env.tmpDir,
+				"autofix",
+				undefined,
+			);
 		} finally {
 			env.cleanup();
 		}
+	});
+
+	it("returns authoritative full content after immediate write autofix", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-runtime-tool-post-mutation-");
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "const value = 1;\n");
+			vi.mocked(runPipeline).mockResolvedValue({
+				output: "",
+				hasBlockers: false,
+				isError: false,
+				fileModified: true,
+				changedFiles: [filePath],
+				postMutation: { filePath, content: fs.readFileSync(filePath, "utf-8"), source: "autofix" },
+			});
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const returned = await handleToolResult({
+				event: { toolName: "write", input: { path: filePath }, content: [{ type: "text", text: "base" }] },
+				getFlag: () => false,
+				dbg: () => {}, runtime,
+				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
+				biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {},
+				agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
+			} as any);
+			expect(returned?.content.at(-1)?.text).toContain(fs.readFileSync(filePath, "utf-8"));
+			expect(returned?.content.at(-1)?.text).toContain("authoritative");
+		} finally { env.cleanup(); }
 	});
 
 	it("publishes pilens:format:queued only when deferFormat reports a NEW queue entry (#673)", async () => {
