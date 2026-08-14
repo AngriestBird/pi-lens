@@ -85,6 +85,26 @@ describe("LSP per-server nested-root coalescing (#1373)", () => {
 		cwdSpy.mockRestore();
 	});
 
+	it("preserves a nested Git project without a manifest", async () => {
+		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-git-boundary-"));
+		dirs.push(project);
+		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(project);
+		const nested = path.join(project, "vendor", "child-repo");
+		fs.mkdirSync(path.join(nested, ".git"), { recursive: true });
+
+		const service = new LSPService() as unknown as RootPolicyHarness;
+		const server = markerServer("marksman");
+		service.state.clients.set(
+			`marksman:${normalizeMapKey(project)}`,
+			fakeClient(project),
+		);
+
+		await expect(
+			service.resolveServerRoot(server, path.join(nested, "README.md")),
+		).resolves.toBe(nested);
+		cwdSpy.mockRestore();
+	});
+
 	it("collapses the observed nested-marker fixture below ceiling pressure", async () => {
 		const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-pressure-"));
 		dirs.push(project);

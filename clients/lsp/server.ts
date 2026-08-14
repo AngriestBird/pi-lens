@@ -106,6 +106,9 @@ const PROJECT_BOUNDARY_MARKERS = [
 	"Package.swift",
 ] as const;
 
+// This is process-global state, so each candidate pair is logged once per
+// process (not once per session). Keep the root-boundary marker below aligned
+// with FALLBACK_PROJECT_MARKERS, the shared fallback root-policy marker set.
 const loggedRootCeilingClamps = new Set<string>();
 
 function isSameOrWithin(ancestor: string, candidate: string): boolean {
@@ -140,6 +143,10 @@ export function enforceLspRootCeiling(
 }
 
 export async function hasProjectBoundaryMarker(dir: string): Promise<boolean> {
+	// A nested Git checkout is an independently hosted project even when it has
+	// no language manifest. Keep this directory boundary aligned with the shared
+	// FALLBACK_PROJECT_MARKERS policy used by nearestNonExcludedFallbackRoot.
+	if (await markerExists(dir, ".git")) return true;
 	for (const marker of PROJECT_BOUNDARY_MARKERS) {
 		if (await markerExists(dir, marker)) return true;
 	}
