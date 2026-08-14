@@ -64,6 +64,8 @@ import { getLanguageId } from "./language.js";
 import type { LSPServerInfo } from "./server.js";
 import {
 	LSP_SERVERS,
+	enforceLspRootCeiling,
+	hasProjectBoundaryMarker,
 	isDirectLspCommandTemporarilyUnavailable,
 } from "./server.js";
 import {
@@ -848,6 +850,8 @@ async function collectWorkspaceDiagnosticFiles(
 export class LSPService {
 	private state: LSPState;
 	private readonly workspaceProbeLogged = new Set<string>();
+	/** Per-service immutable root-boundary verdicts; root detectors cache hits too. */
+	private readonly projectBoundaryCache = new Map<string, Promise<boolean>>();
 	private readonly warmStartLogged = new Set<string>();
 	private readonly optionalFailureLogged = new Set<string>();
 	/** Server/root pairs that already emitted unavailable for the current occurrence. */
@@ -991,6 +995,54 @@ export class LSPService {
 		};
 	}
 
+	/**
+	 * Resolve one server's client identity root. Root selection is hard-bounded
+	 * by the session cwd, then config-only nested roots reuse an already-hosted
+	 * same-server ancestor. Real nested projects retain independent clients.
+	 */
+	private async resolveServerRoot(
+		server: LSPServerInfo,
+		filePath: string,
+	): Promise<string | undefined> {
+		const candidate = await server.root(filePath);
+		if (!candidate) return undefined;
+		const root = enforceLspRootCeiling(candidate, process.cwd(), filePath);
+		if (normalizeMapKey(root) === normalizeMapKey(process.cwd())) return root;
+
+		const rootKey = normalizeMapKey(root);
+		const prefix = `${server.id}:`;
+		let nearestAncestor: string | undefined;
+		for (const key of new Set([
+			...this.state.clients.keys(),
+			...this.state.inFlight.keys(),
+		])) {
+			if (!key.startsWith(prefix)) continue;
+			const ancestorKey = key.slice(prefix.length);
+			const relative = path.relative(ancestorKey, rootKey);
+			if (
+				relative === "" ||
+				relative.startsWith("..") ||
+				path.isAbsolute(relative)
+			) {
+				continue;
+			}
+			if (!nearestAncestor || ancestorKey.length > nearestAncestor.length) {
+				nearestAncestor = ancestorKey;
+			}
+		}
+		if (!nearestAncestor) return root;
+		let boundary = this.projectBoundaryCache.get(rootKey);
+		if (!boundary) {
+			boundary = hasProjectBoundaryMarker(root);
+			this.projectBoundaryCache.set(rootKey, boundary);
+		}
+		if (await boundary) return root;
+		return (
+			this.state.clients.get(`${server.id}:${nearestAncestor}`)?.root ??
+			nearestAncestor
+		);
+	}
+
 	/** Guard: return true if service is shutting down or shut down */
 	private checkDestroyed(): boolean {
 		return this.isDestroyed;
@@ -1014,7 +1066,7 @@ export class LSPService {
 		entry: SpawnedServer,
 		filePath: string,
 	): Promise<string | undefined> {
-		const root = await entry.info.root(filePath);
+		const root = await this.resolveServerRoot(entry.info, filePath);
 		return root ? `${entry.info.id}:${normalizeMapKey(root)}` : undefined;
 	}
 
@@ -1297,7 +1349,7 @@ export class LSPService {
 		server: LSPServerInfo,
 		filePath: string,
 	): Promise<string | undefined> {
-		const root = await server.root(filePath);
+		const root = await this.resolveServerRoot(server, filePath);
 		if (!root) return undefined;
 		return `${server.id}:${normalizeMapKey(root)}`;
 	}
@@ -1543,7 +1595,9 @@ export class LSPService {
 
 		// Count servers with a valid root as "attempted" — extension-only matches
 		// that fail the root check are not real spawn attempts.
-		const roots = await Promise.all(servers.map((s) => s.root(filePath)));
+		const roots = await Promise.all(
+			servers.map((s) => this.resolveServerRoot(s, filePath)),
+		);
 		const serverCountAttempted = roots.filter(Boolean).length;
 
 		const spawned = await Promise.all(
@@ -1587,7 +1641,7 @@ export class LSPService {
 		if (this.checkDestroyed()) return undefined;
 		const servers = getServersForFileWithConfig(filePath);
 		for (const server of servers) {
-			const root = await server.root(filePath);
+			const root = await this.resolveServerRoot(server, filePath);
 			if (!root) continue;
 			const key = `${server.id}:${normalizeMapKey(root)}`;
 			const existing = this.state.clients.get(key);
@@ -1610,7 +1664,7 @@ export class LSPService {
 		if (this.checkDestroyed()) return false;
 		for (const server of getServersForFileWithConfig(filePath)) {
 			if (server.id !== serverId) continue;
-			const root = await server.root(filePath);
+			const root = await this.resolveServerRoot(server, filePath);
 			if (!root) continue;
 			const key = `${server.id}:${normalizeMapKey(root)}`;
 			if (this.state.clients.get(key)?.isAlive()) return true;
@@ -1631,7 +1685,7 @@ export class LSPService {
 			if (this.checkDestroyed()) return undefined;
 		}
 
-		const root = await server.root(filePath);
+		const root = await this.resolveServerRoot(server, filePath);
 		if (!root || this.checkDestroyed()) return undefined;
 		const allowInstall = this.shouldAllowInstall(server.id);
 
@@ -3697,7 +3751,7 @@ export class LSPService {
 		if (filePath) {
 			const servers = getServersForFileWithConfig(filePath);
 			for (const server of servers) {
-				const root = await server.root(filePath);
+				const root = await this.resolveServerRoot(server, filePath);
 				if (!root) continue;
 				const client = this.state.clients.get(
 					`${server.id}:${normalizeMapKey(root)}`,

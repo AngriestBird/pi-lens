@@ -508,13 +508,21 @@ export default function (pi: ExtensionAPI) {
 	// never captured once — a session replacement invalidates the old ctx.ui.
 	// #1334 S2: the ports notifier owns mode suppression + live-ctx resolution
 	// (per-call, never captured -- the #338/#798 detached-callback rule).
-	wireUserNotifier(hostPorts);
-	initLensEventsGetter(() => ({ emit: hostPorts.emit.lens }));
-	const getLiveEmit = () => hostPorts.emit.bus;
-	wireBusEmitterGetter(getLiveEmit);
-	wireDiagnosticsBusEmitterGetter(getLiveEmit);
-	wireDispositionBusEmitterGetter(getLiveEmit);
-	wireFormatEventsBusEmitterGetter(getLiveEmit);
+	const refreshCtxDerivedPlumbing = (): void => {
+		// These targets are module singletons, while hostPorts is scoped to this
+		// extension activation. A sibling activation can overwrite them and then
+		// become stale; every session_start must reclaim them before #473 can
+		// return early for a concurrent in-process subagent. (#1383)
+		wireUserNotifier(hostPorts);
+		initLensEventsGetter(() => ({ emit: hostPorts.emit.lens }));
+		const getLiveEmit = () => hostPorts.emit.bus;
+		wireBusEmitterGetter(getLiveEmit);
+		wireDiagnosticsBusEmitterGetter(getLiveEmit);
+		wireDispositionBusEmitterGetter(getLiveEmit);
+		wireFormatEventsBusEmitterGetter(getLiveEmit);
+		setRenderCallback(() => hostPorts.render.invalidate());
+	};
+	refreshCtxDerivedPlumbing();
 	// #485: read-only bus subscriber — never publishes, so the #482 loop guard
 	// (ingest -> write -> publish) has no write side to trip here.
 	wireAgentNudgeSubscriber({
@@ -671,6 +679,8 @@ export default function (pi: ExtensionAPI) {
 	// from the registry's PI_LENS_NO_CONTEXT_INJECTION env binding (#166).
 	let contextInjectionEnabled = !getLensFlag("no-lens-context");
 	let lensWidgetVisible = globalConfig?.widget?.visible !== false;
+	let mountedLensWidgetUi: LensWidgetUi | undefined;
+	let widgetMountFailureLogged = false;
 	// #190 Phase 2: snapshot of the source session's diagnostics, captured at
 	// `session_before_fork` and adopted by the forked session at the subsequent
 	// `session_start` (reason="fork"). In-memory hand-off (same process) — avoids
@@ -713,7 +723,17 @@ export default function (pi: ExtensionAPI) {
 			dbg(`widget mount ${modeSuppressionNote(mode)}`);
 			return false;
 		}
-		if (typeof ui?.setWidget !== "function") return false;
+		if (typeof ui?.setWidget !== "function") {
+			if (!widgetMountFailureLogged) {
+				widgetMountFailureLogged = true;
+				logExtension({
+					subsystem: "widget",
+					level: "debug",
+					message: "widget mount unavailable: host ui.setWidget is missing",
+				});
+			}
+			return false;
+		}
 		const setWidget = ui.setWidget as LensWidgetSetWidget;
 		setWidget(
 			"pi-lens",
@@ -736,6 +756,7 @@ export default function (pi: ExtensionAPI) {
 			},
 			{ placement: "belowEditor" },
 		);
+		mountedLensWidgetUi = ui;
 		return true;
 	}
 
@@ -745,6 +766,7 @@ export default function (pi: ExtensionAPI) {
 		if (typeof ui?.setWidget !== "function") return false;
 		const setWidget = ui.setWidget as LensWidgetSetWidget;
 		setWidget("pi-lens", undefined);
+		mountedLensWidgetUi = undefined;
 		return true;
 	}
 
@@ -1459,6 +1481,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		rememberEventCtx(ctx);
+		refreshCtxDerivedPlumbing();
 		const sessionStartFiredAt = Date.now();
 		try {
 			dbg("session_start fired");
@@ -1890,6 +1913,13 @@ export default function (pi: ExtensionAPI) {
 		// Trust can change without a new session. Re-adopt before this turn can
 		// reach any install-capable or LSP-spawn path.
 		adoptProjectTrustFromPorts(hostPorts);
+		if (
+			lensWidgetVisible &&
+			ctx?.ui &&
+			(mountedLensWidgetUi === undefined || mountedLensWidgetUi !== ctx.ui)
+		) {
+			mountLensWidget(ctx.ui, readExtensionMode(ctx));
+		}
 		runtime.beginTurn();
 		clearLastAnalyzedStateCache();
 

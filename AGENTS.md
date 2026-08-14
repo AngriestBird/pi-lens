@@ -1,5 +1,13 @@
 # pi-lens — agent context
 
+LSP client root selection has a hard session-cwd ceiling: marker/config lookup
+may consult parents, but the root used for client identity and spawn never may.
+`NearestRoot` clamps an above-cwd marker to cwd and logs that clamp once. After
+fixture/gitignore filtering, `LSPService` coalesces a config-only nested root to
+an already-hosted same-server ancestor; a nested manifest/lockfile boundary
+keeps its independent client. Keep both policies deterministic and free of
+wall-clock expiry. (#1328, #1373)
+
 MCP warm word indexes are bounded per root in `clients/mcp/analyze.ts`: callers
 must acquire/release a lease around every use, because idle and LRU eviction
 must never retire an index mid-query. Idle timers are generation-owned,
@@ -116,8 +124,12 @@ The captured-at-subscribe / used-after-replace shape also applies to pi's
 `events` API: `pi.events.emit` is a session-bound wrapper whose runtime is
 invalidated on replacement. Long-lived publishers must retain a getter and
 resolve the emitter at delivery time; deferred callbacks must resolve inside
-the callback, never before scheduling. This is the pattern established by
-#1128 for the bus and lens-event publishers.
+the callback, never before scheduling. The getter itself is activation-scoped:
+module-singleton bus/notifier/widget-render plumbing must be re-wired from the
+current factory on every `session_start`, BEFORE the #473 concurrent-secondary
+guard can return, because a sibling activation can overwrite the singleton and
+later go stale. Emit-failure suppression is occurrence-scoped (success re-arms
+it), and a stale occurrence records one `bus-stale` degradation. (#1128, #1383)
 
 This is the payoff of the two disciplines above: a bounded checklist of defect *shapes* that each recurred ≥2× across the arc. Read it at task start; when your change matches a shape, treat the screen as an acceptance criterion (and the regression test the shape implies). Each entry is **SHAPE → SCREEN (when you touch X, verify Y) → canonical example → detection**. Where a shape has a fuller treatment above, this cross-references rather than restates it.
 
@@ -225,6 +237,13 @@ clients/
   mcp/                     host-neutral facades: analyze, session, review, ipc, host-shim
   runtime-session.ts      session_start handler — snapshot hydrate, tool preinstall, background scans, LSP warm
   project-snapshot.ts     Versioned seq-stamped project snapshot cache
+
+The diagnostics widget records the exact `ctx.ui` identity only after a
+successful `setWidget` mount. A visible widget re-asserts that mount on
+`turn_start` when the host replaces its UI object; this remains gated by the
+live run mode and `lensWidgetVisible`, so a user toggle-off or headless mode is
+never undone. Missing `ui.setWidget` is a log-once-per-extension-session
+diagnostic rather than a silent mount failure. (#1381)
   project-changes.ts      Append-only project/file sequence change log
   reverse-deps.ts         Snapshot-backed reverse dependency index/query helpers
   word-index.ts           Identifier inverted index + BM25 ranking (#162) — built in the session scan, persisted with per-file mtimes in the snapshot; consumed by BOTH the pi symbol_search tool and the MCP pilens_symbol_search mirror (#348 phase 1); session warmup preflights the bounded current file set and incrementally refreshes only sparse stale/new/deleted documents. A stale set whose ESTIMATED WORK exceeds one full rebuild (posting-scan + re-read cost vs totalTokens + corpus re-read cost), a dense stale set (≥32 documents AND >30% of the corpus), >30% file-set churn, or legacy metadata selects a separately-built full replacement BEFORE mutating the old index (#1197): repeated per-document posting-array filters become effectively quadratic (2,061 all-stale docs took 216.8s vs a 7.5s full build), and because per-document cost GROWS with the corpus no density ratio or absolute count is a bound — 800 docs / 239 stale at 29.875% measured 90.6s with a 39.6s loop block. Every bulk path (async build + both refresh loops) yields on an ~8ms monotonic budget OR'd with its item checkpoint — never count-only, which bounds nothing when per-item cost is unbounded — including within large documents and after any line ≥4,096 chars. Synchronous `buildWordIndex` is the small/test/reference primitive only. Superseded builds never publish a partial index and never escape as an exception into a caller's warmup pass.
@@ -1078,7 +1097,7 @@ pi-lens's lifecycle hooks (`session_start`, `tool_call`, `tool_result`, `context
 - **No hook's synchronous burst should block > ~50ms.** Heavy work is async + time-budgeted through `clients/cooperative-budget.ts` (`createDeadline` / `yieldIfOverBudget` / `forEachCooperatively`) or **deferred past the typing window** (a few-second `setTimeout`, not `setImmediate`). Count/modulus yielding does not bound occupancy when per-item cost grows; call the cheap monotonic deadline check at every work unit.
 - **Bounding a promise by a timer? Use `clients/deadline-utils.ts`** (`withTimeout` reject-on-timeout · `withBudget` resolve-`undefined`-on-timeout · `withinRemaining` deadline-based swallow · `withDeadline` core). Do **not** hand-roll another `Promise.race` + `setTimeout` — it drifted into three near-identical copies (#366), two with latent bugs (a missing late-rejection guard → unhandled rejection when the timer wins; an uncleared timer). The core suppresses the loser promise's late rejection and clears its timer in one place.
 - **Every new async step added to a bulk/sweep/per-file loop needs BOTH bounds, not just one (#615).** `runWorkspaceDiagnostics`'s per-file `processFile` was already `withDeadline`-wrapped, but the #608 fix (`preOpenGroupFiles`, a batch pre-open pass inserted ahead of it) shipped with **no bound at all** — a hung `getClientsForFile`/`notify.open` call (stuck server spawn, stuck notification write) froze the entire sweep with no heartbeat and, worse, pressing Escape didn't help either: the loop's `signal?.aborted` check only runs *between* files, never while one is mid-await. A real dogfooding incident hit this (`lsp_workspace_diagnostics_start` logged, then total silence, un-abortable). The fix needed two independent bounds: a `withDeadline` timer (catches a hang even with no user action) **and** a `Promise.race` against the abort signal (so an explicit Escape/turn-abort unblocks immediately instead of waiting out the rest of the per-item budget) — see `tests/clients/lsp/workspace-diagnostics-sweep-batch-open.test.ts`'s `#615` block for the pattern, including the "confirm the regression test actually hangs against the unbounded code" verification step. When adding a new async unit of work to an existing bounded loop, ask both questions: *what stops this if it hangs on its own?* and *what stops this if the user aborts?* — a "yes" to only one is not done.
-- **Per-file / per-event work must be O(1) amortized** — memoize expensive derivations keyed by an invalidation signal (`.gitignore` mtime, `fileSeq`, content hash); never recompute-from-scratch on repeat (e.g. `ignoreMatcher.isIgnored` was recomputed per file per scan — now memoized). Project config discovery uses `walkUpDirs` with a start-dir cache validated by ancestor directory mtimes plus the actual inherited `.pi-lens.json`/`pi-lens.json` path + mtime (not just a file directly under the git root), so editing project `ignore` patterns drops the cached matcher without a session restart while hot dispatch paths avoid repeated candidate probes. The matcher cache key also includes the **global** `~/.pi-lens/config.json` mtime: `ignore` patterns there apply across all projects at **lowest precedence** (global → project `.gitignore` → project `.pi-lens.json`, so a project `!negation` re-includes a globally-ignored path — #252).
+- **Per-file / per-event work must be O(1) amortized** — memoize expensive derivations keyed by an invalidation signal (`.gitignore` mtime, `fileSeq`, content hash); never recompute-from-scratch on repeat (e.g. `ignoreMatcher.isIgnored` was recomputed per file per scan — now memoized). Project config discovery uses `walkUpDirs` with a start-dir cache validated by ancestor directory mtimes plus the actual inherited `.pi-lens.json`/`pi-lens.json` path + mtime (not just a file directly under the git root), so editing project `ignore` patterns drops the cached matcher without a session restart while hot dispatch paths avoid repeated candidate probes. The matcher cache key also includes the **global** `~/.pi-lens/config.json` mtime: `ignore` patterns there apply across all projects at **lowest precedence** (global → project `.gitignore` → project `.pi-lens.json`, so a project `!negation` re-includes a globally-ignored path — #252). Directory-mtime memos such as `getModuleSourceFiles` also re-walk stamps younger than the filesystem's coarse-granularity guard window, because an equal mtime cannot prove that a same-tick write was absent.
 - **Expensive scans run once, cache (process memo + disk), reuse across sessions/turns.** Cold start does the minimum (forced "quick" mode), then a deferred background warmup fills caches.
 - **Register every `Worker` listener before calling `worker.unref()` (#1148).** Adding the first `"message"` listener references the Worker's public `MessagePort` again, so `unref()`-then-listen leaves an idle persistence worker able to keep a completed one-shot process alive. Real child-process exit tests guard this lifecycle behavior; fake timers and in-process assertions cannot see referenced worker handles.
 - **Detached timers must not capture pi `ctx` getters.** After `ctx.newSession()` / `ctx.fork()` / `ctx.switchSession()` / `ctx.reload()`, pi invalidates the old extension context; a later timer that reads `ctx.ui`/`ctx.cwd` crashes with a stale-context error (#338). Capture any needed primitive/function while the event is active, guard delayed work with `RuntimeCoordinator.sessionGeneration`, cancel on `session_shutdown`, and make timer callbacks best-effort/no-throw.

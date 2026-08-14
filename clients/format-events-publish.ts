@@ -70,7 +70,12 @@
 import { logBusEvent } from "./bus-events-logger.js";
 import { isBusPublishEnabled } from "./bus-publish.js";
 import { normalizeFilePath } from "./path-utils.js";
-import { createLiveBusEmitter, type BusEmitFn, type BusEmitGetter } from "./live-bus-emitter.js";
+import {
+	createLiveBusEmitter,
+	recordStaleBusFailure,
+	type BusEmitFn,
+	type BusEmitGetter,
+} from "./live-bus-emitter.js";
 
 export const BUS_FORMAT_QUEUED_EVENT = "pilens:format:queued";
 export const BUS_FORMAT_QUEUED_VERSION = 1;
@@ -193,6 +198,7 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 			tool: args.tool,
 		};
 		busEmit(BUS_FORMAT_QUEUED_EVENT, payload);
+		hasLoggedQueuedFailure = false;
 		logBusEvent({
 			event: BUS_FORMAT_QUEUED_EVENT,
 			outcome: "emitted",
@@ -208,6 +214,7 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 		});
 		if (!hasLoggedQueuedFailure) {
 			hasLoggedQueuedFailure = true;
+			recordStaleBusFailure(BUS_FORMAT_QUEUED_EVENT, err);
 			args.dbg?.(
 				`format-events-publish: pilens:format:queued emit failed (further failures suppressed): ${err}`,
 			);
@@ -265,6 +272,7 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 			fileCount: paths.length,
 		};
 		busEmit(BUS_FORMAT_START_EVENT, payload);
+		hasLoggedStartFailure = false;
 		logBusEvent({
 			event: BUS_FORMAT_START_EVENT,
 			outcome: "emitted",
@@ -280,6 +288,7 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 		});
 		if (!hasLoggedStartFailure) {
 			hasLoggedStartFailure = true;
+			recordStaleBusFailure(BUS_FORMAT_START_EVENT, err);
 			args.dbg?.(
 				`format-events-publish: pilens:format:start emit failed (further failures suppressed): ${err}`,
 			);
@@ -342,6 +351,7 @@ export function publishAutofixStart(args: PublishAutofixStartArgs): void {
 			eligibleCount: args.eligibleCount,
 		};
 		busEmit(BUS_AUTOFIX_START_EVENT, payload);
+		hasLoggedAutofixStartFailure = false;
 		logBusEvent({
 			event: BUS_AUTOFIX_START_EVENT,
 			outcome: "emitted",
@@ -357,6 +367,7 @@ export function publishAutofixStart(args: PublishAutofixStartArgs): void {
 		});
 		if (!hasLoggedAutofixStartFailure) {
 			hasLoggedAutofixStartFailure = true;
+			recordStaleBusFailure(BUS_AUTOFIX_START_EVENT, err);
 			args.dbg?.(
 				`format-events-publish: pilens:autofix:start emit failed (further failures suppressed): ${err}`,
 			);

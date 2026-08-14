@@ -61,7 +61,12 @@
  */
 import { logBusEvent } from "./bus-events-logger.js";
 import { normalizeFilePath } from "./path-utils.js";
-import { createLiveBusEmitter, type BusEmitFn, type BusEmitGetter } from "./live-bus-emitter.js";
+import {
+	createLiveBusEmitter,
+	recordStaleBusFailure,
+	type BusEmitFn,
+	type BusEmitGetter,
+} from "./live-bus-emitter.js";
 import { isBusPublishEnabled } from "./bus-publish.js";
 
 export const BUS_DIAGNOSTICS_EVENT = "pilens:diagnostics";
@@ -253,6 +258,7 @@ export function publishDiagnostics(args: PublishDiagnosticsArgs): void {
 			files: fileEntries,
 		};
 		busEmit(BUS_DIAGNOSTICS_EVENT, payload);
+		hasLoggedFailure = false;
 		logBusEvent({
 			event: BUS_DIAGNOSTICS_EVENT,
 			outcome: "emitted",
@@ -269,6 +275,7 @@ export function publishDiagnostics(args: PublishDiagnosticsArgs): void {
 		});
 		if (!hasLoggedFailure) {
 			hasLoggedFailure = true;
+			recordStaleBusFailure(BUS_DIAGNOSTICS_EVENT, err);
 			args.dbg?.(
 				`diagnostics-publish: pilens:diagnostics emit failed (further failures suppressed): ${err}`,
 			);
