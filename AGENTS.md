@@ -265,6 +265,8 @@ Malformed or incomplete provenance remains unknown/blocking; otherwise a clean
 per-file result can remove `affectedFiles` while leaving stale content that
 blocks every later commit lookup (#1084).
 
+Tier-2 cache bounds (#1389) use the Tier-1 idle-timer/LRU shape where entries are rebuildable: reverse-dependency and topology entries clear their timers through one deletion helper, tree-sitter query caches use insertion-order LRU with query disposal. ReadGuard is the exception: its reads are behavior-gating state, so unconsumed reads are retained until edit or session end, subject to a high sanity cap that evicts oldest→needs-re-read; reads are never silently allowed post-eviction. Only consumed reads may be evicted at the compact file cap. Widget-state and Tier-3 cache bounds remain deferred.
+
 Extension policy tests bind JS/TS fact applicability and bash source-like file
 access to `KIND_EXTENSIONS`; the only intentional exceptions are the documented
 Vue/Svelte fact exclusion and the small legacy text/config allowlist in
@@ -291,6 +293,19 @@ empty result, while the project ignore matcher remains authoritative.
 
 
 A pi coding-agent extension that runs automated checks on every file write/edit. Dispatches async parallel runners (LSP, biome, ruff, ast-grep, tree-sitter, jscpd, knip, Madge, and language-specific linters/build checks) and injects findings as context injections at turn-end and session-start.
+
+Startup lazy-loading (#1394 Phase 2): the dispatch runner graph is loaded through
+`clients/dispatch/lazy.ts`. Session-start callers may warm its shared promise
+without awaiting it; the per-edit pipeline must await that same promise before
+dispatch or cascade work. Keep host registrations eager and never create a
+second warm promise for concurrent/subagent session starts.
+The formatter catalog follows the same rule through `clients/formatters-lazy.ts`;
+`format-service.ts` must await that shared promise before catalog lookup or
+formatter execution.
+The LSP service follows it through `clients/lsp-lazy.ts` for async pipeline,
+session, and warm-attach consumers. The `index.ts` status/reset adapter remains
+eager because its synchronous shutdown/status contracts are host-visible; do
+not make those callbacks async without updating their ordering contract/tests.
 
 The git guard's command-position classifier expands `$IFS`, `${IFS}`, and
 `$IFS$<positional>` forms before re-tokenizing guarded verbs. Known command-string
@@ -324,6 +339,11 @@ clients/
   mcp/                     host-neutral facades: analyze, session, review, ipc, host-shim
   runtime-session.ts      session_start handler — snapshot hydrate, tool preinstall, background scans, LSP warm
   project-snapshot.ts     Versioned seq-stamped project snapshot cache
+
+One-shot cascades release workspace-topology cache eviction timers through
+`releaseWorkspaceTopologyIdleTimers()` while retaining reusable entries; cache
+access re-arms eviction. Keep cascade-discovered tier-2 cache timers on this
+release path so print-mode operations do not leave a liveness tail.
 
 The diagnostics widget records the exact `ctx.ui` identity only after a
 successful `setWidget` mount. A visible widget re-asserts that mount on

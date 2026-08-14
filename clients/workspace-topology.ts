@@ -86,17 +86,76 @@ export interface DirectoryMarkers {
 interface DirCacheEntry {
 	dirMtimeMs: number;
 	markers: DirectoryMarkers;
+	lastUsedAt: number;
+	idleTimer?: ReturnType<typeof setTimeout>;
 }
 
 /** Per-directory marker cache — the shared seam every consumer reads through. */
 const dirMarkerCache = new Map<string, DirCacheEntry>();
 
 /** Cache for upward marker-walk results, keyed by `${startDir}\0${markerKey}`. */
-const walkCache = new Map<string, { dir: string | undefined; dirMtimes: Array<{ dir: string; mtimeMs: number }> }>();
+type WalkCacheEntry = { dir: string | undefined; dirMtimes: Array<{ dir: string; mtimeMs: number }>; lastUsedAt: number; idleTimer?: ReturnType<typeof setTimeout> };
+const walkCache = new Map<string, WalkCacheEntry>();
+const TOPOLOGY_MAX_DIR_ENTRIES = 256;
+const TOPOLOGY_MAX_WALK_ENTRIES = 512;
+const TOPOLOGY_IDLE_EVICT_MS_DEFAULT = 20 * 60_000;
+
+function topologyIdleEvictMs(): number {
+	const value = Number.parseInt(process.env.PI_LENS_WORKSPACE_TOPOLOGY_IDLE_EVICT_MS ?? "", 10);
+	return Number.isSafeInteger(value) && value > 0 ? value : TOPOLOGY_IDLE_EVICT_MS_DEFAULT;
+}
+
+function deleteDirMarker(key: string): void {
+	const entry = dirMarkerCache.get(key);
+	if (entry?.idleTimer) clearTimeout(entry.idleTimer);
+	dirMarkerCache.delete(key);
+}
+
+function deleteWalk(key: string): void {
+	const entry = walkCache.get(key);
+	if (entry?.idleTimer) clearTimeout(entry.idleTimer);
+	walkCache.delete(key);
+}
+
+function touchDirMarker(key: string, entry: DirCacheEntry): void {
+	entry.lastUsedAt = Date.now();
+	if (entry.idleTimer) clearTimeout(entry.idleTimer);
+	const stamp = entry.lastUsedAt;
+	entry.idleTimer = setTimeout(() => {
+		if (dirMarkerCache.get(key) === entry && entry.lastUsedAt === stamp) deleteDirMarker(key);
+	}, topologyIdleEvictMs());
+	entry.idleTimer.unref?.();
+}
+
+function touchWalk(key: string, entry: WalkCacheEntry): void {
+	entry.lastUsedAt = Date.now();
+	if (entry.idleTimer) clearTimeout(entry.idleTimer);
+	const stamp = entry.lastUsedAt;
+	entry.idleTimer = setTimeout(() => {
+		if (walkCache.get(key) === entry && entry.lastUsedAt === stamp) deleteWalk(key);
+	}, topologyIdleEvictMs());
+	entry.idleTimer.unref?.();
+}
 
 export function resetWorkspaceTopology(): void {
-	dirMarkerCache.clear();
-	walkCache.clear();
+	for (const key of dirMarkerCache.keys()) deleteDirMarker(key);
+	for (const key of walkCache.keys()) deleteWalk(key);
+}
+
+/**
+ * Release cache eviction handles without discarding reusable entries.
+ * One-shot cascades call this after marker discovery so cache residency does
+ * not leave a process-liveness tail; the next cache use re-arms its timer.
+ */
+export function releaseWorkspaceTopologyIdleTimers(): void {
+	for (const entry of dirMarkerCache.values()) {
+		if (entry.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+		entry.idleTimer = undefined;
+	}
+	for (const entry of walkCache.values()) {
+		if (entry.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+		entry.idleTimer = undefined;
+	}
 }
 
 function safeDirMtimeMs(dir: string): number {
@@ -127,6 +186,7 @@ export function getDirectoryMarkers(dir: string): DirectoryMarkers {
 	const dirMtimeMs = safeDirMtimeMs(resolvedDir);
 	const cached = dirMarkerCache.get(resolvedDir);
 	if (cached && cached.dirMtimeMs === dirMtimeMs) {
+		touchDirMarker(resolvedDir, cached);
 		return cached.markers;
 	}
 
@@ -171,7 +231,14 @@ export function getDirectoryMarkers(dir: string): DirectoryMarkers {
 		goWorkPath: resolveMarker("go.work"),
 		chartYamlPath: resolveMarker("Chart.yaml"),
 	};
-	dirMarkerCache.set(resolvedDir, { dirMtimeMs, markers });
+	const entry: DirCacheEntry = { dirMtimeMs, markers, lastUsedAt: Date.now() };
+	dirMarkerCache.set(resolvedDir, entry);
+	touchDirMarker(resolvedDir, entry);
+	while (dirMarkerCache.size > TOPOLOGY_MAX_DIR_ENTRIES) {
+		const victim = [...dirMarkerCache.entries()].sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
+		if (!victim) break;
+		deleteDirMarker(victim[0]);
+	}
 	return markers;
 }
 
@@ -202,6 +269,7 @@ function walkToNearestMatch(
 	const key = walkCacheKey(startDir, cacheSuffix);
 	const cached = walkCache.get(key);
 	if (cached && walkStillFresh(cached.dirMtimes)) {
+		touchWalk(key, cached);
 		return cached.dir;
 	}
 
@@ -229,7 +297,14 @@ function walkToNearestMatch(
 		depth += 1;
 	}
 
-	walkCache.set(key, { dir: found, dirMtimes });
+	const entry: WalkCacheEntry = { dir: found, dirMtimes, lastUsedAt: Date.now() };
+	walkCache.set(key, entry);
+	touchWalk(key, entry);
+	while (walkCache.size > TOPOLOGY_MAX_WALK_ENTRIES) {
+		const victim = [...walkCache.entries()].sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
+		if (!victim) break;
+		deleteWalk(victim[0]);
+	}
 	return found;
 }
 

@@ -10,7 +10,7 @@ import {
 	STALE_HEARTBEAT_MS,
 } from "./instance-reaper.js";
 import { logLatency } from "./latency-logger.js";
-import { getLSPService } from "./lsp/index.js";
+import { loadLspService } from "./lsp-lazy.js";
 import {
 	contentHash,
 	createWarmIpcLineReader,
@@ -92,7 +92,7 @@ async function serveRequest(
 					if (Date.now() > req.deadlineAt) {
 						throw new Error("deadline exceeded");
 					}
-					return getLSPService().codeAction(
+					return (await loadLspService()).getLSPService().codeAction(
 						req.file,
 						range.start.line,
 						range.start.character,
@@ -125,7 +125,7 @@ async function serveRequest(
 	if (Date.now() > req.deadlineAt || contentHash(req.content) !== req.contentHash) {
 		return { error: "stale request" };
 	}
-	const touched = await getLSPService().touchFile(req.file, req.content, {
+	const touched = await (await loadLspService()).getLSPService().touchFile(req.file, req.content, {
 		diagnostics: "document",
 		collectDiagnostics: true,
 		clientScope: "with-auxiliary",
