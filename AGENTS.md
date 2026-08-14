@@ -282,6 +282,8 @@ Malformed or incomplete provenance remains unknown/blocking; otherwise a clean
 per-file result can remove `affectedFiles` while leaving stale content that
 blocks every later commit lookup (#1084).
 
+Tier-2 cache bounds (#1389) use the Tier-1 idle-timer/LRU shape where entries are rebuildable: reverse-dependency and topology entries clear their timers through one deletion helper, tree-sitter query caches use insertion-order LRU with query disposal. ReadGuard is the exception: its reads are behavior-gating state, so unconsumed reads are retained until edit or session end, subject to a high sanity cap that evicts oldest→needs-re-read; reads are never silently allowed post-eviction. Only consumed reads may be evicted at the compact file cap. Widget-state and Tier-3 cache bounds remain deferred.
+
 Extension policy tests bind JS/TS fact applicability and bash source-like file
 access to `KIND_EXTENSIONS`; the only intentional exceptions are the documented
 Vue/Svelte fact exclusion and the small legacy text/config allowlist in
@@ -354,6 +356,11 @@ clients/
   mcp/                     host-neutral facades: analyze, session, review, ipc, host-shim
   runtime-session.ts      session_start handler — snapshot hydrate, tool preinstall, background scans, LSP warm
   project-snapshot.ts     Versioned seq-stamped project snapshot cache
+
+One-shot cascades release workspace-topology cache eviction timers through
+`releaseWorkspaceTopologyIdleTimers()` while retaining reusable entries; cache
+access re-arms eviction. Keep cascade-discovered tier-2 cache timers on this
+release path so print-mode operations do not leave a liveness tail.
 
 The diagnostics widget records the exact `ctx.ui` identity only after a
 successful `setWidget` mount. A visible widget re-asserts that mount on
@@ -1544,6 +1551,32 @@ Mock the **environment** (tool presence, network, abort/error injection) — nev
 - Always include the GitHub issue number in the commit subject line: `(closes #NNN)` or `(refs #NNN)`.
 - Use `closes` only when the commit fully resolves the entire issue; use `refs` for any partial work.
 - GitHub auto-closes an issue on any commit containing `closes #NNN` regardless of trailing text — "closes #125 Phase 1" still closes #125.
+
+### Commit message style
+
+**Commit messages follow the seven-rules discipline, on top of the repo's conventional-commit prefix.** See [A Note About Git Commit Messages](https://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html) and [How to Write a Git Commit Message](https://cbea.ms/git-commit/). Keep the `type(scope): subject` prefix and the `(closes #NNN)`/`(refs #NNN)` issue reference (see above). Then:
+
+1. Use the imperative mood for the subject: `add X`, `fix Y`, never `added`, `adds`, or `fixing`. Test it with: “If applied, this commit will `<subject>`.”
+2. Keep the subject concise. Aim for 50 characters or fewer, with a hard cap of about 72 characters including the prefix. Do not add a trailing period. Use lowercase after the colon, matching repo style.
+3. Put a blank line between the subject and body.
+4. Wrap the body at about 72 columns.
+5. Explain what changed and why, not how. The diff shows how. Include motivation, the problem fixed, side effects, and rejected alternatives when relevant.
+6. Keep the `Co-Authored-By:` trailer.
+
+Short, obvious changes may use a subject only. Non-trivial changes get a body.
+
+### Documentation and prose style
+
+**Prose in docs, changelog, and PR descriptions follows the [Google developer documentation style guide](https://developers.google.com/style) and [Simplified Technical English (ASD-STE100) principles](https://asd-ste100.org/).** This is a principles-only adoption of ASD-STE100, a proprietary aerospace controlled-language specification; it does not adopt its licensed word list. Apply this standard to `README`, `docs/`, `AGENTS.md`, changelog entries, and PR bodies:
+
+- Use active voice and present tense.
+- Use second person (`you`) for instructions. Use the imperative for procedure steps.
+- Use short sentences. Keep one idea or instruction per sentence. Aim for about 20–25 words or fewer.
+- Use consistent terminology. Use the same word for the same thing every time. Do not swap synonyms.
+- Use sentence case for headings.
+- Define an acronym on first use. Prefer a plain word over jargon when one exists.
+- Avoid gerund or noun pile-ups and ambiguous constructions. Avoid `please`. Use the Oxford comma.
+- These rules are machine-checkable. Pi-lens ships a config-gated Vale runner (`clients/dispatch/runners/vale.js`). A `.vale.ini` with the Google style package would enforce this section automatically; track that separately.
 
 ## Issue triage & labels
 

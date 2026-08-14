@@ -98,6 +98,31 @@ describe("runQueriesOnFile", () => {
 		expect(byRule.size).toBeGreaterThan(1);
 	});
 
+	it("rebuilds a batch query after cache eviction and still matches (#1397)", async () => {
+		const previous = process.env.PI_LENS_TREE_SITTER_QUERY_BATCH_CACHE_CAP;
+		process.env.PI_LENS_TREE_SITTER_QUERY_BATCH_CACHE_CAP = "1";
+		try {
+			const env = setupTestEnvironment("pi-lens-batch-eviction-");
+			cleanups.push(env.cleanup);
+			const file = createTempFile(env.tmpDir, "evicted.ts", SOURCE);
+			const client = getSharedTreeSitterClient()!;
+			expect(await client.init()).toBe(true);
+			const alternate = [rule("only-functions", "(function_declaration) @FN")];
+
+			const first = await client.runQueriesOnFile(RULES, file, "typescript");
+			expect(first.some(({ queryDef }) => queryDef.id === "calls")).toBe(true);
+			await client.runQueriesOnFile(alternate, file, "typescript");
+			// RULES was evicted and its Query was disposed; this call must compile a
+			// fresh batch rather than use the deleted Query object.
+			const rebuilt = await client.runQueriesOnFile(RULES, file, "typescript");
+			expect(rebuilt.some(({ queryDef }) => queryDef.id === "calls")).toBe(true);
+			expect(rebuilt.length).toBe(first.length);
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_TREE_SITTER_QUERY_BATCH_CACHE_CAP;
+			else process.env.PI_LENS_TREE_SITTER_QUERY_BATCH_CACHE_CAP = previous;
+		}
+	});
+
 	it("drops a rule whose post_filter has no implementation", async () => {
 		const env = setupTestEnvironment("pi-lens-batch-filter-");
 		cleanups.push(env.cleanup);

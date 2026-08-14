@@ -89,6 +89,7 @@ import {
 	formatImpactCascade,
 } from "../review-graph/service.js";
 import { clearModuleGraphCache } from "../review-graph/workspace-modules.js";
+import { releaseWorkspaceTopologyIdleTimers } from "../workspace-topology.js";
 import { RUNTIME_CONFIG } from "../runtime-config.js";
 import {
 	findCompiledClassesDir,
@@ -601,8 +602,56 @@ type ReverseDepsCacheEntry = {
 	savedToSnapshot: boolean;
 	/** buildGeneration of the graph this index was derived from. */
 	generation: number | undefined;
+	lastUsedAt: number;
+	idleTimer?: ReturnType<typeof setTimeout>;
 };
 const reverseDepsIndexCache = new Map<string, ReverseDepsCacheEntry>();
+const REVERSE_DEPS_MAX_WARM_ROOTS = 8;
+const REVERSE_DEPS_IDLE_EVICT_MS_DEFAULT = 20 * 60_000;
+
+function reverseDepsIdleEvictMs(): number {
+	const value = Number.parseInt(process.env.PI_LENS_REVERSE_DEPS_IDLE_EVICT_MS ?? "", 10);
+	return Number.isSafeInteger(value) && value > 0 ? value : REVERSE_DEPS_IDLE_EVICT_MS_DEFAULT;
+}
+
+function deleteReverseDepsEntry(key: string): void {
+	const entry = reverseDepsIndexCache.get(key);
+	if (entry?.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+	if (entry) entry.idleTimer = undefined;
+	reverseDepsIndexCache.delete(key);
+}
+
+function touchReverseDepsEntry(
+	key: string,
+	entry: ReverseDepsCacheEntry,
+	armIdleTimer = true,
+): void {
+	entry.lastUsedAt = Date.now();
+	if (entry.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+	entry.idleTimer = undefined;
+	if (!armIdleTimer) return;
+	const stamp = entry.lastUsedAt;
+	entry.idleTimer = setTimeout(() => {
+		if (reverseDepsIndexCache.get(key) !== entry || entry.lastUsedAt !== stamp) return;
+		deleteReverseDepsEntry(key);
+	}, reverseDepsIdleEvictMs());
+	entry.idleTimer.unref?.();
+}
+
+function setReverseDepsEntry(
+	key: string,
+	entry: Omit<ReverseDepsCacheEntry, "lastUsedAt" | "idleTimer">,
+	armIdleTimer = true,
+): void {
+	const resident: ReverseDepsCacheEntry = { ...entry, lastUsedAt: Date.now() };
+	reverseDepsIndexCache.set(key, resident);
+	touchReverseDepsEntry(key, resident, armIdleTimer);
+	while (reverseDepsIndexCache.size > REVERSE_DEPS_MAX_WARM_ROOTS) {
+		const victim = [...reverseDepsIndexCache.entries()].sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
+		if (!victim) break;
+		deleteReverseDepsEntry(victim[0]);
+	}
+}
 
 function reverseDepsReuseEnabled(): boolean {
 	const raw = process.env.PI_LENS_REVERSE_DEPS_REUSE;
@@ -611,7 +660,23 @@ function reverseDepsReuseEnabled(): boolean {
 
 /** Test-reset hook — mirrors clearReviewGraphWorkspaceCache's scope. */
 export function clearReverseDepsIndexCache(): void {
-	reverseDepsIndexCache.clear();
+	for (const key of reverseDepsIndexCache.keys()) deleteReverseDepsEntry(key);
+}
+
+/** Test-only visibility for Tier-2 eviction/recovery tests. */
+export function _getReverseDepsIndexCacheKeysForTests(): string[] {
+	return [...reverseDepsIndexCache.entries()]
+		.sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)
+		.map(([key]) => key);
+}
+
+/** Test-only seed that still exercises the production timer/cap seam. */
+export function _seedReverseDepsIndexCacheForTests(
+	key: string,
+	index: ReverseDependencyIndex,
+	generation?: number,
+): void {
+	setReverseDepsEntry(key, { index, savedToSnapshot: false, generation });
 }
 
 // Bounded transitive cascade (#162): expand neighbour derivation beyond the
@@ -775,6 +840,9 @@ export async function computeCascadeForFile(
 		onWordIndexUpdated?: (index: WordIndex) => void;
 	} = {},
 ): Promise<CascadeRun> {
+	const reverseDepsTimersToRelease = new Set<string>();
+	const reverseDepsEntriesAtStart = new Set(reverseDepsIndexCache.values());
+	try {
 	const {
 		hasBlockers = false,
 		dbg,
@@ -888,6 +956,10 @@ export async function computeCascadeForFile(
 		const graphBuildInfoTrustworthy = graphBuildInfoIsTrustworthy(graph);
 		const workspaceKey = normalizeMapKey(cwd);
 		const cachedReverseDeps = reverseDepsIndexCache.get(workspaceKey);
+		if (cachedReverseDeps) {
+			touchReverseDepsEntry(workspaceKey, cachedReverseDeps, false);
+			reverseDepsTimersToRelease.add(workspaceKey);
+		}
 		const importDelta = getGraphImportChanges(graph);
 		// A one-step delta is only usable against an index cached at exactly the
 		// delta's predecessor generation. Builds minted elsewhere (mcp analyze,
@@ -943,11 +1015,12 @@ export async function computeCascadeForFile(
 				index: reverseDepsIndex,
 				dbg,
 			});
-			reverseDepsIndexCache.set(workspaceKey, {
+			setReverseDepsEntry(workspaceKey, {
 				index: reverseDepsIndex,
 				savedToSnapshot: reverseDepsSaved,
 				generation: graph.buildGeneration,
-			});
+			}, false);
+			reverseDepsTimersToRelease.add(workspaceKey);
 			logCascade({
 				phase: "reverse_deps_cache",
 				filePath,
@@ -968,11 +1041,12 @@ export async function computeCascadeForFile(
 				index: reverseDepsIndex,
 				dbg,
 			});
-			reverseDepsIndexCache.set(workspaceKey, {
+			setReverseDepsEntry(workspaceKey, {
 				index: reverseDepsIndex,
 				savedToSnapshot: reverseDepsSaved,
 				generation: graph.buildGeneration,
-			});
+			}, false);
+			reverseDepsTimersToRelease.add(workspaceKey);
 			logCascade({
 				phase: "reverse_deps_cache",
 				filePath,
@@ -1144,7 +1218,7 @@ export async function computeCascadeForFile(
 				} catch {
 					// Timeout or LSP error — fall back to import-graph neighbors
 				} finally {
-					if (refsTimer) clearTimeout(refsTimer);
+					if (refsTimer !== undefined) clearTimeout(refsTimer);
 				}
 				if (Date.now() - refsStart > 1200) break; // Hard ceiling
 			}
@@ -1881,6 +1955,25 @@ export async function computeCascadeForFile(
 		// still notes downstream impact was under-computed this turn.
 		...(impact.indeterminate && { indeterminate: impact.indeterminate }),
 	};
+	} finally {
+		// Keep the cache entry warm, but do not let a one-shot cascade leave an
+		// idle handle behind. The next consumer re-arms it through touch.
+		for (const key of reverseDepsTimersToRelease) {
+			const entry = reverseDepsIndexCache.get(key);
+			if (entry?.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+			if (entry) entry.idleTimer = undefined;
+		}
+		for (const [key, entry] of reverseDepsIndexCache) {
+			if (entry.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+			entry.idleTimer = undefined;
+			if (!reverseDepsTimersToRelease.has(key) && reverseDepsEntriesAtStart.has(entry)) {
+				reverseDepsTimersToRelease.add(key);
+			}
+		}
+		for (const timer of astGrepWarnDebounceTimers.values()) clearTimeout(timer);
+		astGrepWarnDebounceTimers.clear();
+		releaseWorkspaceTopologyIdleTimers();
+	}
 }
 
 function diagnosticDeltaKey(

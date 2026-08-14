@@ -81,6 +81,20 @@ describe("ReadGuard", () => {
 			expect(guard.getReadHistory("/src/unknown.ts")).toHaveLength(0);
 		});
 
+		it("retains an outstanding read past the former file cap (#1397)", () => {
+			const guard = createReadGuard("test-session");
+			guard.recordRead(createReadRecord("/src/read-first.ts"));
+
+			// Fill beyond the old 256-file bound. None of these reads has been
+			// consumed by a published edit, so eviction must not turn the first file
+			// into a false zero-read block.
+			for (let i = 0; i < 256; i++) {
+				guard.recordRead(createReadRecord(`/src/activity-${i}.ts`));
+			}
+
+			expect(guard.checkEdit("/src/read-first.ts").action).toBe("allow");
+		});
+
 		it("respects one-time user exemptions", () => {
 			const guard = createReadGuard("test-session");
 			guard.addExemption("/src/api.ts");
@@ -1012,6 +1026,72 @@ describe("ReadGuard", () => {
 			expect(summary.byFile[normalizeFilePath("/src/api.ts")].blocks).toBe(0);
 			expect(summary.byFile[normalizeFilePath("/src/other.ts")].blocks).toBe(1);
 		});
+	});
+});
+
+describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
+	it("evicts the oldest consumed read at the file cap and requires a re-read", () => {
+		const guard = createReadGuard("tier2-consumed-cap");
+		const consumedPath = "/tmp/consumed-tier2.ts";
+		guard.recordRead(createReadRecord(consumedPath));
+		expect(guard.checkEdit(consumedPath).action).toBe("allow");
+		guard.recordWritten(consumedPath);
+
+		for (let i = 0; i < 256; i += 1) {
+			const filePath = `/tmp/consumed-tier2-${i}.ts`;
+			guard.recordRead(createReadRecord(filePath));
+			expect(guard.checkEdit(filePath).action).toBe("allow");
+			guard.recordWritten(filePath);
+		}
+
+		expect(guard.getReadHistory(consumedPath)).toHaveLength(0);
+		expect(guard.checkEdit(consumedPath).action).toBe("block");
+		guard.recordRead(createReadRecord(consumedPath));
+		expect(guard.checkEdit(consumedPath).action).toBe("allow");
+	});
+
+	it("bounds unconsumed reads with oldest-to-re-read eviction", () => {
+		const guard = createReadGuard("tier2-unconsumed-cap");
+		const oldestPath = "/tmp/unconsumed-tier2-oldest.ts";
+		guard.recordRead(createReadRecord(oldestPath));
+
+		for (let i = 0; i < 4096; i += 1) {
+			guard.recordRead(createReadRecord(`/tmp/unconsumed-tier2-${i}.ts`));
+		}
+
+		expect(guard.getReadHistory(oldestPath)).toHaveLength(0);
+		expect(guard.checkEdit(oldestPath).action).toBe("block");
+		guard.recordRead(createReadRecord(oldestPath));
+		expect(guard.checkEdit(oldestPath).action).toBe("allow");
+	});
+
+	it("does not idle-evict an outstanding read", () => {
+		vi.useFakeTimers();
+		try {
+			const guard = createReadGuard("tier2-read-guard");
+			const oldPath = "/tmp/old-tier2.ts";
+			const recentPath = "/tmp/recent-tier2.ts";
+			guard.recordRead(createReadRecord(oldPath, { timestamp: Date.now() - 31 * 60_000 }));
+			guard.recordRead(createReadRecord(recentPath));
+			vi.advanceTimersByTime(35 * 60_000 + 1);
+			expect(guard.getReadHistory(oldPath)).toHaveLength(1);
+			expect(guard.checkEdit(recentPath).action).toBe("allow");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("retains an old read until an edit consumes it", () => {
+		vi.useFakeTimers();
+		try {
+			const guard = createReadGuard("tier2-read-recovery");
+			const filePath = "/tmp/recover-tier2.ts";
+			guard.recordRead(createReadRecord(filePath));
+			vi.advanceTimersByTime(61 * 60_000 + 1);
+			expect(guard.checkEdit(filePath).action).toBe("allow");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 

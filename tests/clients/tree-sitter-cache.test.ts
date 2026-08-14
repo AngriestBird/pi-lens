@@ -139,6 +139,31 @@ describe("TreeCache frees WASM trees on removal (#417)", () => {
 	});
 });
 
+describe("TreeSitterClient query-cache Tier-2 bounds (#1389)", () => {
+	it("evicts the LRU on the ninth insert and rebuilds after a miss", async () => {
+		const previous = process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP;
+		process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP = "8";
+		try {
+			const { TreeSitterClient } = await import("../../clients/tree-sitter-client.js");
+			const client = new TreeSitterClient() as any;
+			const values = Array.from({ length: 9 }, (_, i) => ({ query: { delete: vi.fn() }, i }));
+			for (let i = 0; i < 8; i++) client.cacheQuery(`q${i}`, values[i]);
+			client.queryCache.get("q0");
+			client.queryCache.delete("q0");
+			client.queryCache.set("q0", values[0]);
+			client.cacheQuery("q8", values[8]);
+			expect(client.queryCache.has("q0")).toBe(true);
+			expect(client.queryCache.has("q1")).toBe(false);
+			client.cacheQuery("q1", values[1]);
+			expect(client.queryCache.has("q1")).toBe(true);
+			expect(values[1].query.delete).toHaveBeenCalledTimes(1);
+		} finally {
+			if (previous === undefined) delete process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP;
+			else process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP = previous;
+		}
+	});
+});
+
 describe("TreeCache hash-authoritative hits and true LRU (#890)", () => {
 	it("treats a save-without-change (same hash, newer mtime) as a hit with no reparse", () => {
 		const env = setupTestEnvironment("pi-lens-tccache-save-");
