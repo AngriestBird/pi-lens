@@ -17,7 +17,6 @@ import { pathToFileURL } from "node:url";
 import { withTimeout } from "../deadline-utils.js";
 import type { MessageConnection } from "../deps/vscode-jsonrpc.js";
 import { logLatency } from "../latency-logger.js";
-import { PathKeyedMap } from "../path-keyed-map.js";
 // vscode-jsonrpc v9 ships an `exports` map exposing the Node entry as the
 // `./node` subpath (no `.js`); the old `/node.js` file path no longer resolves.
 import {

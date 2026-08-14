@@ -32,7 +32,6 @@ import {
 	type LSPDiagnostic,
 } from "../../../clients/lsp/client.js";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
-import { PathKeyedMap } from "../../../clients/path-keyed-map.js";
 import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
 import { WatchedFilesQueue } from "../../../clients/lsp/watch-queue.js";
 import { applyWorkspaceEdit } from "../../../clients/lsp/edits.js";
