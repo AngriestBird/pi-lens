@@ -256,6 +256,8 @@ Rule-id normalization derives its language suffixes from the bundled CodeRabbit 
 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
 
+The session-start smells rollup still uses bounded tail reads, but its session-start path must pass the current `sessionStartMs` into `countRecentSmells`; scoped scans admit only rows with a parseable `ts` at or after that boundary, dropping un-timestamped rows rather than surfacing ambiguous history. Unscoped calls remain available for non-session diagnostic/test consumers.
+
 Extension policy tests bind JS/TS fact applicability and bash source-like file
 access to `KIND_EXTENSIONS`; the only intentional exceptions are the documented
 Vue/Svelte fact exclusion and the small legacy text/config allowlist in
