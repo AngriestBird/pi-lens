@@ -256,6 +256,8 @@ Rule-id normalization derives its language suffixes from the bundled CodeRabbit 
 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
 
+The session-start smells rollup still uses bounded tail reads, but its session-start path must pass the current `sessionStartMs` into `countRecentSmells`; scoped scans admit only rows with a parseable `ts` at or after that boundary, dropping un-timestamped rows rather than surfacing ambiguous history. Unscoped calls remain available for non-session diagnostic/test consumers.
+
 Git-guard reconciliation must clear persisted `blockerContent` only when an
 explicit `blockingFiles` record exactly matches the parsed blocker-content
 paths and the current per-file dispatch reconciles the last blocker clean.
