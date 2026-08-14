@@ -86,6 +86,38 @@ function capAffectedFiles(files: string[], cwd: string): {
 	};
 }
 
+/** Recovery is safe only when blocker content and its file provenance agree. */
+function hasCompleteBlockingProvenance(
+	blockerContent: unknown,
+	blockingFiles: unknown,
+	cwd: string,
+): blockingFiles is string[] {
+	if (typeof blockerContent !== "string" || blockerContent.length === 0) return false;
+	if (!Array.isArray(blockingFiles) || blockingFiles.length === 0) return false;
+	if (
+		blockingFiles.some(
+			(file) => typeof file !== "string" || file.trim().length === 0,
+		)
+	) {
+		return false;
+	}
+	const provenanceKeys = blockingFiles.map((file) => guardPathKey(file, cwd));
+	if (new Set(provenanceKeys).size !== provenanceKeys.length) return false;
+	const blockerKeys = blockerContent.split("\n").map((line) => {
+		const separator = line.indexOf(": ");
+		if (separator <= 0) return undefined;
+		const file = line.slice(0, separator).trim();
+		return file.length > 0 ? guardPathKey(file, cwd) : undefined;
+	});
+	if (blockerKeys.some((key) => key === undefined)) return false;
+	const uniqueBlockerKeys = new Set(blockerKeys as string[]);
+	return (
+		uniqueBlockerKeys.size === blockerKeys.length &&
+		uniqueBlockerKeys.size === provenanceKeys.length &&
+		[...uniqueBlockerKeys].every((key) => provenanceKeys.includes(key))
+	);
+}
+
 function getShellCommand(input: unknown): string {
 	if (!input || typeof input !== "object") return "";
 	const raw = input as { command?: unknown; cmd?: unknown };
@@ -543,8 +575,21 @@ export function syncGitGuardRecord(
 	}
 	const inlineFiles = entries.map((entry) => resolveGuardPath(entry.filePath, cwd));
 	const existingBlockingFiles = existing?.blockingFiles ?? [];
+	const provenanceComplete = existing?.blockerContent
+		? hasCompleteBlockingProvenance(existing.blockerContent, existingBlockingFiles, cwd)
+		: true;
+	if (existing?.blockerContent && !provenanceComplete) {
+		markCacheUnknown(runtime, "blocking_provenance_untrusted");
+		return;
+	}
 	const editedKey = editedFilePath ? guardPathKey(editedFilePath, cwd) : undefined;
 	const testFiles = existing?.testFailureFiles ?? [];
+	const remainingBlockingFiles =
+		editedKey && existingBlockingFiles.length > 0
+			? existingBlockingFiles.filter(
+					(file) => guardPathKey(file, cwd) !== editedKey,
+				)
+			: existingBlockingFiles;
 	let affectedFiles = [...(existing?.affectedFiles ?? []), ...inlineFiles];
 	if (!entries.length && editedKey && existing) {
 		const isStillTestFailure = testFiles.some(
@@ -558,10 +603,23 @@ export function syncGitGuardRecord(
 			);
 		}
 	}
+	// A clean per-file dispatch is authoritative for that file. When the
+	// persisted record has explicit blocking-file provenance and the last such
+	// file just reconciled clean, retaining blockerContent would resurrect a
+	// stale blocker on every later git-guard lookup. Records without that
+	// provenance remain fail-closed: they cannot be safely cleared here.
+	const clearedLastKnownBlocker =
+		!entries.length &&
+		!!editedKey &&
+		provenanceComplete &&
+		existingBlockingFiles.length > 0 &&
+		remainingBlockingFiles.length === 0;
 	const blockerContent =
 		entries.length > 0
 			? entries.map((entry) => `${entry.filePath}: ${entry.summary}`).join("\n")
-			: existing?.blockerContent;
+			: clearedLastKnownBlocker
+				? undefined
+				: existing?.blockerContent;
 	const hasTestFailures = existing?.testFailures === true;
 	const hasBlockers = !!blockerContent || hasTestFailures;
 	const content = [blockerContent, hasTestFailures ? existing?.testFailureContent : undefined]
@@ -574,7 +632,7 @@ export function syncGitGuardRecord(
 	writeGitGuardRecord(cacheManager, runtime, cwd, {
 		content: content || existing?.content || "",
 		blockerContent,
-		blockingFiles: entries.length > 0 ? inlineFiles : existingBlockingFiles,
+		blockingFiles: entries.length > 0 ? inlineFiles : remainingBlockingFiles,
 		hasBlockers,
 		affectedFiles,
 		sessionId: runtime.telemetrySessionId,
