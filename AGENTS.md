@@ -129,6 +129,13 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 ## What it is
 
+The review-graph size gate uses the shared cooperative source walker with a
+`maxFileCount + 1` sentinel: it stops at the first over-cap source entry, so
+skip telemetry and user-facing messages must describe the count as “more than
+N files,” not as an exact total. Counts within 5% above the cap also emit the
+separate `review_graph_size_near_miss` phase for boundary-flap observability;
+this is telemetry only and does not add hysteresis. (#1372)
+
 Behavioral degradation is recorded through `clients/degradation-ledger.ts`, a
 per-session in-memory store retaining the latest 20 entries per kind while
 counting overflow. New quiet refusal/degradation paths must call
