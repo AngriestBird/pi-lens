@@ -126,6 +126,8 @@ describe("getModuleSourceFiles memo (#1137)", () => {
 			clearModuleGraphCache();
 			const first = getModuleSourceFiles(libRoot);
 			expect(first.length).toBeGreaterThan(0);
+			const afterWalk = Date.now();
+			vi.spyOn(Date, "now").mockReturnValue(afterWalk + 3_000);
 
 			fsProbe.counting = true;
 			fsProbe.readdirSync = 0;
@@ -135,7 +137,37 @@ describe("getModuleSourceFiles memo (#1137)", () => {
 			expect(second).toEqual(first);
 			expect(fsProbe.readdirSync).toBe(0);
 		} finally {
+			vi.restoreAllMocks();
 			fsProbe.counting = false;
+			clearModuleGraphCache();
+			env.cleanup();
+		}
+	});
+
+	it("re-walks a same-tick write whose mtime aliases the stored stamp", () => {
+		const env = setupTestEnvironment("pi-lens-module-src-memo-same-tick-");
+		try {
+			const libRoot = makeWorkspace(env);
+			const srcDir = path.join(libRoot, "src");
+			const coarseStamp = Math.floor(Date.now() / 2_000) * 2_000;
+			fs.utimesSync(srcDir, coarseStamp / 1_000, coarseStamp / 1_000);
+			clearModuleGraphCache();
+			const first = getModuleSourceFiles(libRoot);
+			const storedStamp = fs.statSync(srcDir).mtimeMs;
+			const added = path.join(srcDir, "same-tick.ts");
+
+			write(added, "export const sameTick = 1;\n");
+			fs.utimesSync(added, storedStamp / 1_000, storedStamp / 1_000);
+			fs.utimesSync(srcDir, storedStamp / 1_000, storedStamp / 1_000);
+			expect(fs.statSync(srcDir).mtimeMs).toBe(storedStamp);
+			expect(fs.statSync(added).mtimeMs).toBe(storedStamp);
+
+			const second = getModuleSourceFiles(libRoot);
+			expect(second.some((file) => file.endsWith("/src/same-tick.ts"))).toBe(
+				true,
+			);
+			expect(second.length).toBe(first.length + 1);
+		} finally {
 			clearModuleGraphCache();
 			env.cleanup();
 		}

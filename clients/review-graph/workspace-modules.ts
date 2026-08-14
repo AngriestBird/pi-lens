@@ -489,7 +489,9 @@ export function getDownstreamModules(
  * - every directory the walk VISITED is re-stat'd by mtimeMs (the repo's
  *   cheap freshness tier, same class as the ancestor-directory-mtime
  *   validation in project-config discovery) — a file add/remove/rename in any
- *   directory that contributed to the result changes that dir's mtime;
+ *   directory that contributed to the result changes that dir's mtime. Recent
+ *   stamps are treated as unverifiable because filesystem mtime granularity
+ *   can alias a write with the preceding walk;
  * - the ignore matcher is compared by object identity —
  *   `getProjectIgnoreMatcher` returns a fresh object whenever a
  *   `.gitignore`/`.pi-lens.json`/global-config input's size:mtimeMs changes,
@@ -499,13 +501,16 @@ export function getDownstreamModules(
 interface ModuleSourceFilesMemoEntry {
 	files: string[];
 	maxFiles: number;
-	dirs: Array<{ dir: string; mtimeMs: number }>;
+	dirs: Array<{ dir: string; mtimeMs: number; stampedAt: number }>;
 	matcher: ProjectIgnoreMatcher;
 }
 const _moduleSourceFilesMemo = new Map<string, ModuleSourceFilesMemoEntry>();
+const MTIME_GRANULARITY_GUARD_MS = 2_000;
 
 function isMemoEntryFresh(entry: ModuleSourceFilesMemoEntry): boolean {
-	for (const { dir, mtimeMs } of entry.dirs) {
+	const validatedAt = Date.now();
+	for (const { dir, mtimeMs, stampedAt } of entry.dirs) {
+		if (validatedAt - stampedAt < MTIME_GRANULARITY_GUARD_MS) return false;
 		try {
 			if (fs.statSync(dir).mtimeMs !== mtimeMs) return false;
 		} catch {
@@ -536,7 +541,7 @@ export function getModuleSourceFiles(
 	}
 
 	const files: string[] = [];
-	const dirs: Array<{ dir: string; mtimeMs: number }> = [];
+	const dirs: Array<{ dir: string; mtimeMs: number; stampedAt: number }> = [];
 	let allDirsStamped = true;
 	const visit = (dir: string, depth: number): void => {
 		if (files.length >= maxFiles || depth > 4) return;
@@ -549,7 +554,11 @@ export function getModuleSourceFiles(
 		// Stamp AFTER the readdir: a change landing between readdir and stat
 		// records the newer mtime, so validation re-walks (fail-safe direction).
 		try {
-			dirs.push({ dir, mtimeMs: fs.statSync(dir).mtimeMs });
+			dirs.push({
+				dir,
+				mtimeMs: fs.statSync(dir).mtimeMs,
+				stampedAt: Date.now(),
+			});
 		} catch {
 			allDirsStamped = false;
 		}
