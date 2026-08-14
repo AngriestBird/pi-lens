@@ -20,6 +20,7 @@ const GENERATED_DIR_NAMES = new Set([
 	"__codegen__",
 	"generated-sources",
 	"generated_sources",
+	"dist",
 	"openapi-generated",
 	".openapi-generator",
 ]);
