@@ -296,6 +296,11 @@ clients/
   runtime-session.ts      session_start handler — snapshot hydrate, tool preinstall, background scans, LSP warm
   project-snapshot.ts     Versioned seq-stamped project snapshot cache
 
+One-shot cascades release workspace-topology cache eviction timers through
+`releaseWorkspaceTopologyIdleTimers()` while retaining reusable entries; cache
+access re-arms eviction. Keep cascade-discovered tier-2 cache timers on this
+release path so print-mode operations do not leave a liveness tail.
+
 The diagnostics widget records the exact `ctx.ui` identity only after a
 successful `setWidget` mount. A visible widget re-asserts that mount on
 `turn_start` when the host replaces its UI object; this remains gated by the

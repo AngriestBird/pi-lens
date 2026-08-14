@@ -89,6 +89,7 @@ import {
 	formatImpactCascade,
 } from "../review-graph/service.js";
 import { clearModuleGraphCache } from "../review-graph/workspace-modules.js";
+import { releaseWorkspaceTopologyIdleTimers } from "../workspace-topology.js";
 import { RUNTIME_CONFIG } from "../runtime-config.js";
 import {
 	findCompiledClassesDir,
@@ -1971,6 +1972,7 @@ export async function computeCascadeForFile(
 		}
 		for (const timer of astGrepWarnDebounceTimers.values()) clearTimeout(timer);
 		astGrepWarnDebounceTimers.clear();
+		releaseWorkspaceTopologyIdleTimers();
 	}
 }
 

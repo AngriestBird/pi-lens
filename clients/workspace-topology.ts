@@ -142,6 +142,22 @@ export function resetWorkspaceTopology(): void {
 	for (const key of walkCache.keys()) deleteWalk(key);
 }
 
+/**
+ * Release cache eviction handles without discarding reusable entries.
+ * One-shot cascades call this after marker discovery so cache residency does
+ * not leave a process-liveness tail; the next cache use re-arms its timer.
+ */
+export function releaseWorkspaceTopologyIdleTimers(): void {
+	for (const entry of dirMarkerCache.values()) {
+		if (entry.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+		entry.idleTimer = undefined;
+	}
+	for (const entry of walkCache.values()) {
+		if (entry.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+		entry.idleTimer = undefined;
+	}
+}
+
 function safeDirMtimeMs(dir: string): number {
 	try {
 		return fs.statSync(dir).mtimeMs;
