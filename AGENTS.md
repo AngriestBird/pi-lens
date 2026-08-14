@@ -108,8 +108,12 @@ The captured-at-subscribe / used-after-replace shape also applies to pi's
 `events` API: `pi.events.emit` is a session-bound wrapper whose runtime is
 invalidated on replacement. Long-lived publishers must retain a getter and
 resolve the emitter at delivery time; deferred callbacks must resolve inside
-the callback, never before scheduling. This is the pattern established by
-#1128 for the bus and lens-event publishers.
+the callback, never before scheduling. The getter itself is activation-scoped:
+module-singleton bus/notifier/widget-render plumbing must be re-wired from the
+current factory on every `session_start`, BEFORE the #473 concurrent-secondary
+guard can return, because a sibling activation can overwrite the singleton and
+later go stale. Emit-failure suppression is occurrence-scoped (success re-arms
+it), and a stale occurrence records one `bus-stale` degradation. (#1128, #1383)
 
 This is the payoff of the two disciplines above: a bounded checklist of defect *shapes* that each recurred ≥2× across the arc. Read it at task start; when your change matches a shape, treat the screen as an acceptance criterion (and the regression test the shape implies). Each entry is **SHAPE → SCREEN (when you touch X, verify Y) → canonical example → detection**. Where a shape has a fuller treatment above, this cross-references rather than restates it.
 
