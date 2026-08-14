@@ -1170,7 +1170,7 @@ const FORMATTER_CONFIG_FILES = [
 async function formatterConfigSignature(cwd: string): Promise<string> {
 	const paths = await findUp(FORMATTER_CONFIG_FILES, cwd);
 	const parts = await Promise.all(
-		paths.sort().map(async (filePath) => {
+		paths.sort((a, b) => a.localeCompare(b)).map(async (filePath) => {
 			try {
 				const stat = await fs.stat(filePath);
 				return `${filePath}:${stat.mtimeMs}:${stat.size}`;

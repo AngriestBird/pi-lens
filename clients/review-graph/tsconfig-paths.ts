@@ -104,7 +104,7 @@ function configDependencyPaths(configPath: string): string[] {
 		}
 	};
 	visit(configPath);
-	return [...paths].sort();
+	return [...paths].sort((a, b) => a.localeCompare(b));
 }
 
 function dependencySignature(configPath: string): string {
