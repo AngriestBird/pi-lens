@@ -457,24 +457,25 @@ export async function normalizeWorkspaceEditToUtf16(
 
 export function flattenWorkspaceTextEdits(edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] }): Map<string, LSPTextEdit[]> {
 	parseWorkspaceEdit(edit);
-	const out = new Map<string, LSPTextEdit[]>();
+	const buckets = new Map<string, { uri: string; edits: LSPTextEdit[] }>();
 	const push = (uri: string, edits: unknown[]) => {
 		const textEdits = parseTextEdits(edits, uri);
 		if (textEdits.length === 0) return;
-		const existing = out.get(uri);
-		if (existing) existing.push(...textEdits);
-		else out.set(uri, [...textEdits]);
+		const key = pathIndexKey(uri);
+		const existing = buckets.get(key);
+		if (existing) existing.edits.push(...textEdits);
+		else buckets.set(key, { uri, edits: [...textEdits] });
 	};
 	for (const [uri, edits] of Object.entries(edit.changes ?? {})) push(uri, edits);
 	for (const change of edit.documentChanges ?? []) {
 		const text = parseTextDocumentEdit(change, "documentChanges");
 		if (text) push(text.textDocument.uri, text.edits);
 	}
-	return out;
+	return new Map([...buckets.values()].map(({ uri, edits }) => [uri, edits]));
 }
 
 function textEditKey(uri: string, edit: LSPTextEdit): string {
-	return [uri, edit.range.start.line, edit.range.start.character, edit.range.end.line, edit.range.end.character, edit.newText].join(":");
+	return [pathIndexKey(uri), edit.range.start.line, edit.range.start.character, edit.range.end.line, edit.range.end.character, edit.newText].join(":");
 }
 
 export interface MergeWorkspaceEditsResult {
@@ -485,7 +486,7 @@ export interface MergeWorkspaceEditsResult {
 }
 
 export function mergeWorkspaceTextEditsByPriority(entries: Array<{ serverId: string; edit: { changes?: Record<string, unknown[]>; documentChanges?: unknown[] } | null | undefined }>): MergeWorkspaceEditsResult {
-	const merged = new Map<string, LSPTextEdit[]>();
+	const merged = new Map<string, { uri: string; edits: LSPTextEdit[] }>();
 	// Exact-duplicate dedup is a CROSS-SERVER concern only: two servers proposing
 	// the identical non-empty replace should collapse to one. Zero-width inserts
 	// are never deduplicated here — same as `validateTextEdits` on the normal
@@ -503,7 +504,9 @@ export function mergeWorkspaceTextEditsByPriority(entries: Array<{ serverId: str
 		serverIds.push(entry.serverId);
 		if (!entry.edit) continue;
 		for (const [uri, edits] of flattenWorkspaceTextEdits(entry.edit)) {
-			const kept = merged.get(uri) ?? [];
+			const key = pathIndexKey(uri);
+			const bucket = merged.get(key) ?? { uri, edits: [] };
+			const kept = bucket.edits;
 			for (const edit of edits) {
 				inputEditCount += 1;
 				const exactKey = isEmptyRange(edit.range) ? undefined : textEditKey(uri, edit);
@@ -515,11 +518,11 @@ export function mergeWorkspaceTextEditsByPriority(entries: Array<{ serverId: str
 				if (exactKey !== undefined) seenExact.add(exactKey);
 				kept.push(edit);
 			}
-			if (kept.length > 0) merged.set(uri, kept);
+			if (kept.length > 0) merged.set(key, bucket);
 		}
 	}
 	const changes: Record<string, LSPTextEdit[]> = {};
-	for (const [uri, edits] of merged) changes[uri] = edits;
+	for (const { uri, edits } of merged.values()) changes[uri] = edits;
 	return { edit: { changes }, droppedConflicts, inputEditCount, serverIds };
 }
 
