@@ -931,6 +931,18 @@ function clearReviewGraphSizeSkip(cwd: string): void {
 	_sizeSkipVerdicts.delete(normalizeMapKey(cwd));
 }
 
+const REVIEW_GRAPH_SIZE_NEAR_MISS_RATIO = 0.05;
+
+function isReviewGraphSizeNearMiss(
+	sourceFileCount: number,
+	maxFileCount: number,
+): boolean {
+	return (
+		sourceFileCount > maxFileCount &&
+		sourceFileCount <= maxFileCount * (1 + REVIEW_GRAPH_SIZE_NEAR_MISS_RATIO)
+	);
+}
+
 /**
  * The most recent size-skip verdict for `cwd`, if one was recorded and it's
  * still within its TTL — undefined once expired (a shrink or a raised cap
@@ -971,6 +983,13 @@ export function _setReviewGraphEntryBudgetForTests(
 	_reviewGraphEntryBudgetForTests = maxScanEntries;
 }
 
+let _reviewGraphEntryCounterForTests: (() => void) | undefined;
+export function _setReviewGraphEntryCounterForTests(
+	counter?: () => void,
+): void {
+	_reviewGraphEntryCounterForTests = counter;
+}
+
 export async function getGraphSourceFiles(
 	cwd: string,
 ): Promise<GraphSourceFilesResult> {
@@ -996,6 +1015,9 @@ export async function getGraphSourceFiles(
 			...(_reviewGraphEntryBudgetForTests === undefined
 				? {}
 				: { maxScanEntries: _reviewGraphEntryBudgetForTests }),
+			...(_reviewGraphEntryCounterForTests === undefined
+				? {}
+				: { onEntryVisited: _reviewGraphEntryCounterForTests }),
 		});
 	if (entryBudgetExceeded) {
 		logLatency({
@@ -4507,8 +4529,25 @@ async function _doBuildGraph(
 				cwd,
 				sourceFileCount,
 				maxFileCount: maxGraphFiles,
+				sourceFileCountLabel: `more than ${maxGraphFiles} files`,
+				sourceFileCountTruncated: true,
 			},
 		});
+		if (isReviewGraphSizeNearMiss(sourceFileCount, maxGraphFiles)) {
+			logLatency({
+				type: "phase",
+				phase: "review_graph_size_near_miss",
+				filePath: cwd,
+				durationMs: 0,
+				metadata: {
+					cwd,
+					maxFileCount: maxGraphFiles,
+					sourceFileCount,
+					sourceFileCountLabel: `more than ${maxGraphFiles} files`,
+					sourceFileCountTruncated: true,
+				},
+			});
+		}
 		setGraphBuildInfo(graph, {
 			reused: false,
 			mode: "skipped",

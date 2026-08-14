@@ -1044,7 +1044,9 @@ export async function computeCascadeForFile(
 						"review graph coverage unknown — build state unavailable for this graph"
 					: graphBuildInfo.mode === "skipped"
 						? graphBuildInfo.skipReason === "too_many_files"
-							? `review graph disabled — ${graphBuildInfo.sourceFileCount ?? "?"} files over the ${graphBuildInfo.maxFileCount ?? "?"} cap`
+							? graphBuildInfo.sourceFileCountTruncated
+								? `review graph disabled — more than ${graphBuildInfo.maxFileCount ?? "?"} files (cap ${graphBuildInfo.maxFileCount ?? "?"})`
+								: `review graph disabled — ${graphBuildInfo.sourceFileCount ?? "?"} files over the ${graphBuildInfo.maxFileCount ?? "?"} cap`
 							: graphBuildInfo.skipReason === "unsafe_root"
 								? "review graph skipped — workspace root is at/above home dir"
 								: `review graph unavailable (${graphBuildInfo.skipReason ?? "skipped"})`

@@ -20,6 +20,7 @@ import {
 	getCachedReviewGraph,
 	getGraphSourceFiles,
 	getLastGraphBuildInfo,
+	_setReviewGraphEntryCounterForTests,
 	isReviewGraphMigrationNeeded,
 	REVIEW_GRAPH_VERSION,
 } from "../../clients/review-graph/builder.js";
@@ -660,6 +661,109 @@ describe("review graph service", () => {
 				}),
 			});
 			expect(skipCall?.[0]?.metadata?.sourceFileCount).toBeGreaterThan(2);
+			expect(skipCall?.[0]?.metadata?.sourceFileCountLabel).toBe(
+				"more than 2 files",
+			);
+		} finally {
+			if (previous === undefined)
+				delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+			else process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = previous;
+			env.cleanup();
+		}
+	});
+
+	it("stops the size-gate walk at cap+1 visited entries", async () => {
+		const env = setupTestEnvironment("pi-lens-review-graph-cap-bound-");
+		const previous = process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+		process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = "3";
+		let visited = 0;
+		_setReviewGraphEntryCounterForTests(() => {
+			visited += 1;
+		});
+		try {
+			for (let i = 0; i < 12; i += 1) {
+				createTempFile(
+					env.tmpDir,
+					`source-${i}.ts`,
+					`export const source${i} = ${i};\n`,
+				);
+			}
+			await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+			expect(getLastGraphBuildInfo()).toMatchObject({
+				mode: "skipped",
+				skipReason: "too_many_files",
+				maxFileCount: 3,
+			});
+			expect(visited).toBeLessThanOrEqual(4);
+		} finally {
+			_setReviewGraphEntryCounterForTests();
+			if (previous === undefined)
+				delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+			else process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = previous;
+			env.cleanup();
+		}
+	});
+
+	it("keeps the complete under-cap walk and does not report a near miss", async () => {
+		const env = setupTestEnvironment("pi-lens-review-graph-cap-under-");
+		const previous = process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+		process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = "3";
+		let visited = 0;
+		_setReviewGraphEntryCounterForTests(() => {
+			visited += 1;
+		});
+		(logLatency as ReturnType<typeof vi.fn>).mockClear();
+		try {
+			for (let i = 0; i < 2; i += 1) {
+				createTempFile(
+					env.tmpDir,
+					`source-${i}.ts`,
+					`export const source${i} = ${i};\n`,
+				);
+			}
+			const graph = await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+			expect(getLastGraphBuildInfo()?.skipReason).not.toBe("too_many_files");
+			expect(graph.fileNodes.size).toBe(2);
+			expect(visited).toBe(2);
+			expect(
+				(logLatency as ReturnType<typeof vi.fn>).mock.calls.some(
+					(args) => args[0]?.phase === "review_graph_size_near_miss",
+				),
+			).toBe(false);
+		} finally {
+			_setReviewGraphEntryCounterForTests();
+			if (previous === undefined)
+				delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+			else process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = previous;
+			env.cleanup();
+		}
+	});
+
+	it("logs a distinct near-miss event within 5% of the cap", async () => {
+		const env = setupTestEnvironment("pi-lens-review-graph-near-miss-");
+		const previous = process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;
+		process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES = "20";
+		(logLatency as ReturnType<typeof vi.fn>).mockClear();
+		try {
+			for (let i = 0; i < 21; i += 1) {
+				createTempFile(
+					env.tmpDir,
+					`source-${i}.ts`,
+					`export const source${i} = ${i};\n`,
+				);
+			}
+			await buildOrUpdateGraph(env.tmpDir, [], new FactStore());
+			const nearMissCall = (logLatency as ReturnType<typeof vi.fn>).mock.calls.find(
+				(args) => args[0]?.phase === "review_graph_size_near_miss",
+			);
+			expect(nearMissCall?.[0]).toMatchObject({
+				phase: "review_graph_size_near_miss",
+				metadata: expect.objectContaining({
+					maxFileCount: 20,
+					sourceFileCount: 21,
+					sourceFileCountLabel: "more than 20 files",
+				}),
+			});
 		} finally {
 			if (previous === undefined)
 				delete process.env.PI_LENS_REVIEW_GRAPH_MAX_FILES;

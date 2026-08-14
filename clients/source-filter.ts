@@ -238,6 +238,8 @@ export interface SourceCollectionOptions {
 	 * consistently with startup-scan's entry budget. Refs #760.
 	 */
 	maxScanEntries?: number;
+	/** Test-only traversal counter; called once for each directory entry visited. */
+	onEntryVisited?: () => void;
 	/**
 	 * Give CODE_KINDS files priority within the `maxFiles` cap (#894 review).
 	 * With broadened enumeration, a walk-order pile of data/doc files
@@ -841,6 +843,7 @@ export async function collectSourceFilesWithBudgetAsync(
 	await walkTreeStackAsync(
 		rootDir,
 		(entry, fullPath) => {
+			options?.onEntryVisited?.();
 			if (!chargeEntryBudget(budget)) return "stop"; // entry budget (#760)
 			const { recurseInto, keepFile } = classifyEntry(
 				entry,
