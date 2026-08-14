@@ -1969,6 +1969,8 @@ export async function computeCascadeForFile(
 				reverseDepsTimersToRelease.add(key);
 			}
 		}
+		for (const timer of astGrepWarnDebounceTimers.values()) clearTimeout(timer);
+		astGrepWarnDebounceTimers.clear();
 	}
 }
 

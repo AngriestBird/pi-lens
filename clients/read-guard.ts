@@ -159,6 +159,9 @@ const READ_HASH_MAX_LINES = Math.max(
  */
 const READ_BINDING_MAX_BYTES = 4 * 1024 * 1024;
 const READ_GUARD_MAX_FILES = 256;
+// Unconsumed reads remain valid until edit or session end, but this high
+// sanity cap prevents a read-only session from growing without bound.
+const READ_GUARD_MAX_UNCONSUMED_FILES = 4096;
 const READ_GUARD_IDLE_EVICT_MS_DEFAULT = 30 * 60_000;
 
 export function captureReadContentBinding(
@@ -437,6 +440,7 @@ export class ReadGuard {
 		this.edits.delete(filePath);
 		this.fileLastUsed.delete(filePath);
 		this.consumedReadFiles.delete(filePath);
+		this.writtenThisSession.delete(filePath);
 	}
 
 	private touchFile(filePath: string): void {
@@ -464,6 +468,19 @@ export class ReadGuard {
 				.filter((filePath) => this.consumedReadFiles.has(filePath))
 				.sort((a, b) => (this.fileLastUsed.get(a) ?? 0) - (this.fileLastUsed.get(b) ?? 0))[0];
 			if (!victim) break;
+			this.evictFile(victim);
+		}
+		while (this.reads.size > READ_GUARD_MAX_UNCONSUMED_FILES) {
+			const victim = [...this.reads.keys()]
+				.filter((filePath) => !this.consumedReadFiles.has(filePath))
+				.sort(
+					(a, b) =>
+						(this.fileLastUsed.get(a) ?? 0) -
+						(this.fileLastUsed.get(b) ?? 0),
+				)[0];
+			if (!victim) break;
+			// This is a normal read miss: a later edit must require a fresh read,
+			// never silently allow and never become a permanent hard-block.
 			this.evictFile(victim);
 		}
 	}
