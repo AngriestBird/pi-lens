@@ -22,7 +22,11 @@ import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { logLatency } from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
-import { recordDegradation } from "../degradation-ledger.js";
+import {
+	incrementDegradationCount,
+	recordDegradation,
+	recordDegradationOnce,
+} from "../degradation-ledger.js";
 import {
 	isLspSpawnAllowedByTrust,
 	assertInstallAllowed,
@@ -1306,6 +1310,10 @@ export class LSPService {
 		this.state.demonstratedCold.delete(key);
 	}
 
+	private recordBreaker(key: string, reason: string): void {
+		recordDegradationOnce({ kind: "lsp-breaker", subject: key, reason });
+	}
+
 	/**
 	 * #743: record one notify-write timeout for a server and, once it has stalled
 	 * {@link NOTIFY_BACKPRESSURE_BROKEN_AFTER} times in a row, demote it through
@@ -1792,6 +1800,7 @@ export class LSPService {
 						);
 					} else {
 						this.permanentlyBroken.add(key);
+						this.recordBreaker(key, `windowed runtime-exit trip: ${rate}`);
 						logSessionStart(
 							`lsp respawn ${server.id}: permanently disabled (windowed-rate trip: ${rate}, uptimeMs=${uptimeMs})`,
 						);
@@ -1816,6 +1825,10 @@ export class LSPService {
 					this.state.broken.set(key, Date.now() + rCooldown);
 					if (!isOptionalServer && rCount >= BROKEN_PERMANENT_AFTER) {
 						this.permanentlyBroken.add(key);
+						this.recordBreaker(
+							key,
+							`permanently disabled after ${rCount} early post-init exits`,
+						);
 						logSessionStart(
 							`lsp respawn ${server.id}: permanently disabled after ${rCount} early post-init exits (uptimeMs=${uptimeMs})`,
 						);
@@ -1994,6 +2007,10 @@ export class LSPService {
 				this.state.broken.set(key, Date.now() + uCooldown);
 				if (uCount >= BROKEN_PERMANENT_AFTER) {
 					this.permanentlyBroken.add(key);
+					this.recordBreaker(
+						key,
+						`permanently disabled after ${uCount} unavailable spawns`,
+					);
 					logSessionStart(
 						`lsp spawn ${server.id}: permanently disabled after ${uCount} failures`,
 					);
@@ -2077,6 +2094,10 @@ export class LSPService {
 			this.state.broken.set(key, Date.now() + eCooldown);
 			if (!isOptionalServer && eCount >= BROKEN_PERMANENT_AFTER) {
 				this.permanentlyBroken.add(key);
+				this.recordBreaker(
+					key,
+					`permanently disabled after ${eCount} spawn/initialize failures`,
+				);
 				logSessionStart(
 					`lsp spawn ${server.id}: permanently disabled after ${eCount} failures`,
 				);
@@ -2765,6 +2786,13 @@ export class LSPService {
 				// the LSP didn't beat the cap. Diagnostics that arrive late still
 				// land in the client's cache and surface on the next edit.
 				diagnosticsTimedOut = true;
+				for (const entry of spawned) {
+					incrementDegradationCount({
+						kind: "lsp-diagnostics-timeout",
+						subject: entry.client.serverId,
+						reason: "diagnostics wait timed out",
+					});
+				}
 				logLatency({
 					type: "phase",
 					phase: "lsp_diagnostics_timeout",

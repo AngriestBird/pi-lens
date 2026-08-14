@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
 	DEGRADATION_ENTRIES_PER_KIND,
 	getDegradationSummary,
+	incrementDegradationCount,
 	recordDegradation,
+	recordDegradationOnce,
 	renderDegradationLines,
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
@@ -35,6 +37,21 @@ describe("session degradation ledger", () => {
 		expect(group.latestReasons[0].subject).toBe("f7");
 	});
 
+	it("dedupes once-records and tallies repeated events into one subject entry", () => {
+		const formatter = { kind: "formatter-failure" as const, subject: "prettier:a.ts", reason: "timed out" };
+		recordDegradationOnce(formatter);
+		recordDegradationOnce(formatter);
+		for (let i = 0; i < 3; i++) incrementDegradationCount({
+			kind: "lsp-diagnostics-timeout",
+			subject: "typescript",
+			reason: "diagnostics wait timed out",
+		});
+		const [failure, timeouts] = getDegradationSummary();
+		expect(failure.count).toBe(1);
+		expect(timeouts.count).toBe(3);
+		expect(timeouts.latestReasons).toEqual([{ subject: "typescript", reason: "diagnostics wait timed out (count: 3)" }]);
+	});
+
 	it("renders a health section only when degraded", () => {
 		expect(renderDegradationLines()).toEqual([]);
 		recordDegradation({ kind: "grammar-blocked", subject: "swift.wasm", reason: "runtime unsafe" });
@@ -42,6 +59,11 @@ describe("session degradation ledger", () => {
 			"Degradations:",
 			"  ⚠ grammar-blocked: 1 — swift.wasm: runtime unsafe",
 		]);
+	});
+
+	it("renders newly wired degradation kinds", () => {
+		recordDegradation({ kind: "formatter-failure", subject: "prettier:a.ts", reason: "timed out" });
+		expect(renderDegradationLines().at(-1)).toContain("formatter-failure: 1");
 	});
 
 	// #1366 review: reasons carry arbitrary error text -- bounded at record
@@ -61,4 +83,3 @@ describe("session degradation ledger", () => {
 		expect(Math.max(...lines.map((l) => l.length))).toBeLessThan(500);
 	});
 });
-

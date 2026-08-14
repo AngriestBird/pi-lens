@@ -6,7 +6,11 @@ export type DegradationKind =
 	| "ts-idle-eviction"
 	| "spawn-failure"
 	| "formatter-skip"
-	| "grammar-blocked";
+	| "grammar-blocked"
+	| "lsp-breaker"
+	| "formatter-failure"
+	| "wasm-abort"
+	| "lsp-diagnostics-timeout";
 
 export interface DegradationRecord {
 	kind: DegradationKind;
@@ -28,6 +32,8 @@ const groups = new Map<
 	DegradationKind,
 	{ count: number; entries: Array<{ subject: string; reason: string }> }
 >();
+const onceKeys = new Set<string>();
+const tallies = new Map<string, number>();
 
 export function recordDegradation(record: DegradationRecord): void {
 	let group = groups.get(record.kind);
@@ -43,6 +49,39 @@ export function recordDegradation(record: DegradationRecord): void {
 		subject: truncateForLedger(record.subject),
 		reason: truncateForLedger(record.reason),
 	});
+	if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
+}
+
+/** Record at most once per kind/subject during the current session. */
+export function recordDegradationOnce(record: DegradationRecord): void {
+	const key = `${record.kind}\0${record.subject}`;
+	if (onceKeys.has(key)) return;
+	onceKeys.add(key);
+	recordDegradation(record);
+}
+
+/**
+ * Count a repeated degradation while retaining one latest-reason entry per
+ * kind/subject. The group count remains the exact event total.
+ */
+export function incrementDegradationCount(record: DegradationRecord): void {
+	const subject = truncateForLedger(record.subject);
+	const key = `${record.kind}\0${subject}`;
+	const count = (tallies.get(key) ?? 0) + 1;
+	tallies.set(key, count);
+	let group = groups.get(record.kind);
+	if (!group) {
+		group = { count: 0, entries: [] };
+		groups.set(record.kind, group);
+	}
+	group.count += 1;
+	const entry = {
+		subject,
+		reason: truncateForLedger(`${record.reason} (count: ${count})`),
+	};
+	const existing = group.entries.findIndex((candidate) => candidate.subject === subject);
+	if (existing >= 0) group.entries.splice(existing, 1);
+	group.entries.push(entry);
 	if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
 }
 
@@ -78,6 +117,8 @@ export function renderDegradationLines(summary = getDegradationSummary()): strin
 /** Session-boundary/test reset. */
 export function resetDegradationLedger(): void {
 	groups.clear();
+	onceKeys.clear();
+	tallies.clear();
 }
 
 export const DEGRADATION_ENTRIES_PER_KIND = ENTRIES_PER_KIND;

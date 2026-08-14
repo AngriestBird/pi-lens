@@ -478,6 +478,14 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 		expect(internal.runtimeExitCounts.get(key) ?? 0).toBe(0);
 		// Exactly TRIP_COUNT spawns happened before give-up.
 		expect(server.getSpawnCount()).toBe(TRIP_COUNT);
+		const { getDegradationSummary } = await import("../../../clients/degradation-ledger.js");
+		expect(getDegradationSummary()).toEqual([
+			expect.objectContaining({
+				kind: "lsp-breaker",
+				count: 1,
+				latestReasons: [expect.objectContaining({ subject: key })],
+			}),
+		]);
 
 		// Stays given up: no new spawn even if a cooldown "elapses".
 		const spawnAtGiveUp = server.getSpawnCount();
