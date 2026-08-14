@@ -266,6 +266,9 @@ Startup lazy-loading (#1394 Phase 2): the dispatch runner graph is loaded throug
 without awaiting it; the per-edit pipeline must await that same promise before
 dispatch or cascade work. Keep host registrations eager and never create a
 second warm promise for concurrent/subagent session starts.
+The formatter catalog follows the same rule through `clients/formatters-lazy.ts`;
+`format-service.ts` must await that shared promise before catalog lookup or
+formatter execution.
 
 The git guard's command-position classifier expands `$IFS`, `${IFS}`, and
 `$IFS$<positional>` forms before re-tokenizing guarded verbs. Known command-string

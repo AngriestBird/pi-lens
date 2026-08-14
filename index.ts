@@ -183,6 +183,7 @@ import {
 } from "./clients/event-loop-monitor.js";
 import { logSessionStart } from "./clients/sessionstart-logger.js";
 import { logConcurrentSessionBind } from "./clients/session-start-observability.js";
+import { warmFormatters } from "./clients/formatters-lazy.js";
 
 type DispatchIntegration = Awaited<ReturnType<typeof loadDispatchIntegration>>;
 let loadedDispatchIntegration: DispatchIntegration | undefined;
@@ -1497,6 +1498,9 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		warmDispatchAtSessionStart();
+		void warmFormatters().catch((err) =>
+			logExtension({ subsystem: "format", level: "warn", message: `formatter warm failed: ${err}` }),
+		);
 		rememberEventCtx(ctx);
 		refreshCtxDerivedPlumbing();
 		const sessionStartFiredAt = Date.now();
