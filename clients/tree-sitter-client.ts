@@ -186,6 +186,40 @@ export class TreeSitterClient {
 	private queryCache = new Map<string, any>();
 	/** Combined multi-rule queries by language + rule-set identity (null = don't retry). */
 	private queryBatchCache = new Map<string, QueryBatch | null>();
+	private static readonly QUERY_CACHE_MAX_ENTRIES = 256;
+	private static readonly QUERY_BATCH_CACHE_MAX_ENTRIES = 256;
+
+	private queryCacheCap(): number {
+		const value = Number.parseInt(process.env.PI_LENS_TREE_SITTER_QUERY_CACHE_CAP ?? "", 10);
+		return Number.isSafeInteger(value) && value > 0 ? value : TreeSitterClient.QUERY_CACHE_MAX_ENTRIES;
+	}
+
+	private queryBatchCacheCap(): number {
+		const value = Number.parseInt(process.env.PI_LENS_TREE_SITTER_QUERY_BATCH_CACHE_CAP ?? "", 10);
+		return Number.isSafeInteger(value) && value > 0 ? value : TreeSitterClient.QUERY_BATCH_CACHE_MAX_ENTRIES;
+	}
+
+	private cacheQuery(key: string, value: any): void {
+		this.queryCache.delete(key);
+		this.queryCache.set(key, value);
+		while (this.queryCache.size > this.queryCacheCap()) {
+			const oldest = this.queryCache.entries().next().value as [string, any] | undefined;
+			if (!oldest) break;
+			this.queryCache.delete(oldest[0]);
+			oldest[1]?.query?.delete?.();
+		}
+	}
+
+	private cacheQueryBatch(key: string, value: QueryBatch | null): void {
+		this.queryBatchCache.delete(key);
+		this.queryBatchCache.set(key, value);
+		while (this.queryBatchCache.size > this.queryBatchCacheCap()) {
+			const oldest = this.queryBatchCache.entries().next().value as [string, QueryBatch | null] | undefined;
+			if (!oldest) break;
+			this.queryBatchCache.delete(oldest[0]);
+			oldest[1]?.query?.delete?.();
+		}
+	}
 	/** Consecutive grammar-load failures per batch key — bounds load retries (#889). */
 	private queryBatchLoadFailures = new Map<string, number>();
 	private queryLoader = new TreeSitterQueryLoader();
@@ -1119,7 +1153,11 @@ export class TreeSitterClient {
 			.digest("hex");
 		const cacheKey = this.getQueryCacheKey(`batch:${identity}`, languageId);
 		const cached = this.queryBatchCache.get(cacheKey);
-		if (cached !== undefined) return cached;
+		if (cached !== undefined) {
+			this.queryBatchCache.delete(cacheKey);
+			this.queryBatchCache.set(cacheKey, cached);
+			return cached;
+		}
 
 		// A loadLanguage() failure is transient (offline lazy grammar fetch,
 		// transient mid-scan load error) — do NOT cache null for it, or every
@@ -1134,7 +1172,7 @@ export class TreeSitterClient {
 					`Batch: grammar for ${languageId} failed to load ${failures} times — caching miss`,
 				);
 				this.queryBatchLoadFailures.delete(cacheKey);
-				this.queryBatchCache.set(cacheKey, null);
+				this.cacheQueryBatch(cacheKey, null);
 			} else {
 				this.queryBatchLoadFailures.set(cacheKey, failures);
 			}
@@ -1193,7 +1231,7 @@ export class TreeSitterClient {
 		};
 
 		const batch = await build();
-		this.queryBatchCache.set(cacheKey, batch);
+		this.cacheQueryBatch(cacheKey, batch);
 		return batch;
 	}
 
@@ -1340,7 +1378,10 @@ export class TreeSitterClient {
 		// Check cache first
 		if (this.queryCache.has(cacheKey)) {
 			this.dbg(`Query cache hit: ${cacheKey}`);
-			return this.queryCache.get(cacheKey);
+			const cached = this.queryCache.get(cacheKey);
+			this.queryCache.delete(cacheKey);
+			this.queryCache.set(cacheKey, cached);
+			return cached;
 		}
 
 		const language = await this.loadLanguage(languageId);
@@ -1366,7 +1407,7 @@ export class TreeSitterClient {
 
 			const result = { query, metavars, postFilter, postFilterParams };
 			// Cache the compiled query
-			this.queryCache.set(cacheKey, result);
+			this.cacheQuery(cacheKey, result);
 			return result;
 		} catch (err) {
 			this.reportWasmAbort(err);
@@ -1395,7 +1436,10 @@ export class TreeSitterClient {
 		);
 
 		if (this.queryCache.has(cacheKey)) {
-			return this.queryCache.get(cacheKey);
+			const cached = this.queryCache.get(cacheKey);
+			this.queryCache.delete(cacheKey);
+			this.queryCache.set(cacheKey, cached);
+			return cached;
 		}
 
 		const language = await this.loadLanguage(languageId);
@@ -1407,7 +1451,7 @@ export class TreeSitterClient {
 			// biome-ignore lint/suspicious/noExplicitAny: Language type compatibility
 			const query = new Query(language as any, queryStr);
 			const result = { query, metavars, postFilter, postFilterParams };
-			this.queryCache.set(cacheKey, result);
+			this.cacheQuery(cacheKey, result);
 			return result;
 		} catch (err) {
 			this.reportWasmAbort(err);
