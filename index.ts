@@ -2035,6 +2035,10 @@ export default function (pi: ExtensionAPI) {
 				cacheManager,
 				getFormatService: () =>
 					getFormatService(runtime.telemetrySessionId, true),
+				getAutofixClients: async () => {
+					const { biomeClient, ruffClient } = await loadBootstrapClients();
+					return { biomeClient, ruffClient };
+				},
 				currentSessionId,
 			});
 			ctx.ui && updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);

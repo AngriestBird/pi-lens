@@ -38,6 +38,109 @@ vi.mock("../../clients/actionable-warnings.js", async (importOriginal) => {
 });
 
 describe("runtime-agent-end deferred formatting", () => {
+	it("does not resolve autofix clients for format-only records", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-format-only-clients-");
+		try {
+			const filePath = createTempFile(env.tmpDir, "format-only.ts", "const x=1\n");
+			const runtime = new RuntimeCoordinator(); runtime.projectRoot = env.tmpDir;
+			runtime.deferFormat(filePath, env.tmpDir, "write", env.tmpDir);
+			const getAutofixClients = vi.fn();
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir, getFlag: (name) => name === "no-lsp", notify: vi.fn(), dbg: () => {}, runtime,
+				cacheManager: { addModifiedRange: vi.fn() } as any,
+				getFormatService: () => ({ recordRead: () => {}, formatFile: async (fp: string) => ({ filePath: fp, formatters: [], anyChanged: false, allSucceeded: true }) }) as any,
+				getAutofixClients,
+			});
+			expect(getAutofixClients).not.toHaveBeenCalled();
+		} finally { env.cleanup(); }
+	});
+
+	it("merges both phases when an aborted drain requeues one path twice", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-both-abort-");
+		const controller = new AbortController();
+		controller.abort();
+		setAmbientAbortSignal(controller.signal);
+		try {
+			const filePath = createTempFile(env.tmpDir, "both.ts", "const x=1\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.deferMutation(filePath, env.tmpDir, "edit", env.tmpDir, "autofix");
+			runtime.deferMutation(filePath, env.tmpDir, "edit", env.tmpDir, "format");
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir, getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(), dbg: () => {}, runtime,
+				cacheManager: { addModifiedRange: vi.fn() } as any,
+				getFormatService: () => ({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+			});
+
+			expect(runtime.consumeDeferredFormatFiles()[0].kinds).toEqual(new Set(["autofix", "format"]));
+		} finally {
+			setAmbientAbortSignal(undefined);
+			env.cleanup();
+		}
+	});
+
+	it("preserves both kinds when autofix clients and formatting fail", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-both-fail-");
+		try {
+			const filePath = createTempFile(env.tmpDir, "both.ts", "const x=1\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.deferMutation(filePath, env.tmpDir, "edit", env.tmpDir, "autofix");
+			runtime.deferMutation(filePath, env.tmpDir, "edit", env.tmpDir, "format");
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir, getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(), dbg: () => {}, runtime,
+				cacheManager: { addModifiedRange: vi.fn() } as any,
+				getFormatService: () => ({
+					recordRead: () => {},
+					formatFile: async () => { throw new Error("format failed"); },
+				}) as any,
+			});
+
+			expect(runtime.consumeDeferredFormatFiles()[0].kinds).toEqual(new Set(["autofix", "format"]));
+		} finally { env.cleanup(); }
+	});
+
+	it("runs deferred autofix before format on the final edit state", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-mutation-order-");
+		try {
+			const filePath = createTempFile(env.tmpDir, "src/app.ts", "let value=1\n");
+			fs.writeFileSync(path.join(env.tmpDir, "biome.json"), "{}\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.deferMutation(filePath, env.tmpDir, "edit", env.tmpDir, "autofix");
+			runtime.deferMutation(filePath, env.tmpDir, "edit", env.tmpDir, "format");
+			const order: string[] = [];
+			const biomeClient = {
+				isSupportedFile: () => true,
+				ensureAvailable: async () => true,
+				fixFileAsync: async (fp: string) => {
+					order.push("autofix");
+					fs.writeFileSync(fp, "const value=1\n");
+					return { success: true, changed: true, fixed: 1 };
+				},
+			};
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(), dbg: () => {}, runtime,
+				cacheManager: { addModifiedRange: vi.fn() } as any,
+				biomeClient: biomeClient as any,
+				ruffClient: {} as any,
+				getFormatService: () => ({ recordRead: () => {}, formatFile: async (fp: string) => {
+					order.push("format");
+					fs.writeFileSync(fp, "const value = 1;\n");
+					return { filePath: fp, formatters: [{ name: "biome", success: true, changed: true }], anyChanged: true, allSucceeded: true };
+				} }) as any,
+			});
+			expect(order).toEqual(["autofix", "format"]);
+			expect(fs.readFileSync(filePath, "utf-8")).toBe("const value = 1;\n");
+		} finally { env.cleanup(); }
+	});
+
 	it("formats each queued file once, clears the queue, and records a format change", async () => {
 		const env = setupTestEnvironment("pi-lens-agent-end-format-");
 		const previousDataDir = process.env.PILENS_DATA_DIR;
