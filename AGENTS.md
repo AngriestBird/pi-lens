@@ -1,5 +1,13 @@
 # pi-lens — agent context
 
+LSP client root selection has a hard session-cwd ceiling: marker/config lookup
+may consult parents, but the root used for client identity and spawn never may.
+`NearestRoot` clamps an above-cwd marker to cwd and logs that clamp once. After
+fixture/gitignore filtering, `LSPService` coalesces a config-only nested root to
+an already-hosted same-server ancestor; a nested manifest/lockfile boundary
+keeps its independent client. Keep both policies deterministic and free of
+wall-clock expiry. (#1328, #1373)
+
 MCP warm word indexes are bounded per root in `clients/mcp/analyze.ts`: callers
 must acquire/release a lease around every use, because idle and LRU eviction
 must never retire an index mid-query. Idle timers are generation-owned,
