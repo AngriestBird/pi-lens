@@ -139,6 +139,10 @@ const MAX_STORED_DIAGNOSTICS_PER_FILE = 12;
 const MAX_INACTIVE_FILE_RECORDS = 1024;
 const ACTIVE_FILE_IDLE_MS = 30 * 60_000;
 const MAX_LSP_SERVER_RECORDS = 128;
+// Pruning is a cold-size-boundary operation. Do not walk the whole file map
+// for every record in a large diagnostics reconciliation; the full-scan path
+// can legitimately create thousands of records in one synchronous batch.
+let nextInactivePruneSize = MAX_INACTIVE_FILE_RECORDS + 1;
 
 function pruneInactiveFileRecords(now = Date.now()): void {
 	if (files.size <= MAX_INACTIVE_FILE_RECORDS) return;
@@ -155,6 +159,14 @@ function pruneInactiveFileRecords(now = Date.now()): void {
 	}
 }
 
+function maybePruneInactiveFileRecords(): void {
+	if (files.size < nextInactivePruneSize) return;
+	pruneInactiveFileRecords();
+	// A live-heavy map may remain above the soft bound. Do not rescan it for
+	// every subsequent file; the next lifecycle starts with a fresh state map.
+	nextInactivePruneSize = Number.POSITIVE_INFINITY;
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export function setRenderCallback(fn: () => void): void {
@@ -168,6 +180,7 @@ export function clearWidgetState(): void {
 	requestRenderFn = null;
 	diagnosticsWriteGuard.clear();
 	runnerWriteGuard.clear();
+	nextInactivePruneSize = MAX_INACTIVE_FILE_RECORDS + 1;
 }
 
 // v1 → v2 (#1186): per-entry `WidgetDiagnostic.observedAt`. v2 is a SUPERSET of
@@ -414,12 +427,13 @@ export function recordDiagnostics(
 	// with it, and it also seeds the record's `touchedAt`. A fresh write (no
 	// `observedAt`) is observed now.
 	const observedTs = observedAt ?? Date.now();
-	const rec = getOrCreate(filePath);
+	const rec = getOrCreate(filePath, key);
 	commitDiagnostics(
 		rec,
 		filePath,
 		normalizeDiagnostics(filePath, diagnostics, observedTs),
 		observedTs,
+		key,
 	);
 }
 
@@ -471,6 +485,7 @@ function commitDiagnostics(
 	filePath: string,
 	normalized: WidgetDiagnostic[],
 	observedAt: number | undefined,
+	key = fileMapKey(filePath),
 ): void {
 	rec.diagnosticCounts = countDiagnostics(normalized);
 	rec.diagnostics = capStoredDiagnostics(normalized);
@@ -483,7 +498,7 @@ function commitDiagnostics(
 	// record holding a fresh preserved entry doesn't sort/gate as stale. Empty set
 	// falls back to the passed `observedAt` (or now).
 	rec.touchedAt = freshestObservation(normalized, observedAt ?? Date.now());
-	files.set(fileMapKey(filePath), rec);
+	files.set(key, rec);
 	requestRender();
 }
 
@@ -1132,12 +1147,12 @@ function truncateBasename(name: string, maxWidth: number): string {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function getOrCreate(filePath: string): FileRecord {
-	pruneInactiveFileRecords();
+function getOrCreate(filePath: string, key = fileMapKey(filePath)): FileRecord {
+	maybePruneInactiveFileRecords();
 	// Look up by the normalized key so mixed path forms of the same file share
 	// ONE record (#1020); keep the caller's verbatim path as the display path.
 	return (
-		files.get(fileMapKey(filePath)) ?? {
+		files.get(key) ?? {
 			filePath,
 			runners: new Map(),
 			formatters: new Map(),
