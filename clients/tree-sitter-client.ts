@@ -226,6 +226,11 @@ export class TreeSitterClient {
 		if (!isTreeSitterWasmAbortError(error)) return false;
 		if (!this.wasmAborted) {
 			this.wasmAborted = true;
+			recordDegradation({
+				kind: "wasm-abort",
+				subject: "web-tree-sitter",
+				reason: error instanceof Error ? error.message : String(error),
+			});
 			this.onWasmAbort?.();
 		}
 		return true;

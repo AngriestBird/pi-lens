@@ -25,6 +25,14 @@ bounded `helm lint` pass through the ordinary typed availability/install seam.
 It is smart-default and read-only; rendered-manifest validation remains deferred
 to #1283 slice B.
 
+Session degradation telemetry owns its dedupe and tally state in
+`clients/degradation-ledger.ts`: use `recordDegradationOnce` for a repeated
+site/subject that represents one user-visible degradation, and
+`incrementDegradationCount` when every event contributes to the exact group
+count but health should retain only one updated entry per subject. Both reset
+with the ledger at the session boundary; do not add caller-local duplicate
+sets or count one blocked action at both policy gates. (#1366, #1292)
+
 ## Maintaining this file (do this on every commit)
 
 AGENTS.md is the durable context handed to every agent that works on pi-lens. **Update it as part of the same commit that changes the world it describes** — never as a follow-up:
@@ -185,6 +193,11 @@ excluded. Strategy-gated `didSave` remains separate and out of scope here.
 Unsupported pull responses are also recognized by the standard message-only
 variants (`method not found`, `unknown method`, and `unsupported method`).
 Status consumers receive detached, 200-character-bounded failure entries.
+
+Degradation-ledger recording is best-effort observability: its public record,
+once-record, and increment entry points normalize unknown values to bounded
+strings and swallow internal failures so telemetry never throws into a host
+path.
 
 TypeScript LSP clients are evicted after `PI_LENS_TS_IDLE_EVICT_MS` of inactivity
 (default five minutes). Eviction removes the client from service state before
