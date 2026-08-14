@@ -67,6 +67,7 @@ import { getServersForFileWithConfig } from "../lsp/config.js";
 import { getLSPService } from "../lsp/index.js";
 import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";
 import { getProjectIgnoreMatcher } from "../file-utils.js";
+import { resetAstGrepUnsupportedLanguageLog } from "./runners/ast-grep-napi.js";
 import { isTestRoleCollateral } from "../collateral-test-role.js";
 import {
 	clearReviewGraphWorkspaceCache,
@@ -415,6 +416,7 @@ export function getDispatchGroupsForKind(
  */
 export function resetDispatchBaselines(cwd?: string): void {
 	if (cwd) applyProjectLensConfig(cwd);
+	resetAstGrepUnsupportedLanguageLog();
 	sessionFacts.clearAll();
 	resetSessionSlopScore();
 	clearCoverageNoticeState();
