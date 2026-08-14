@@ -65,6 +65,7 @@ import { RUNTIME_CONFIG } from "./runtime-config.js";
 import type { WordIndex } from "./word-index.js";
 import { getAmbientAbortSignal, safeSpawnAsync } from "./safe-spawn.js";
 import { combineAbortSignals } from "./deadline-utils.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import {
 	getAutofixPolicyForFile,
 	getPreferredAutofixTools,
@@ -1042,6 +1043,13 @@ export async function runFormatPhase(
 		}
 		if (!result.allSucceeded) {
 			const failures = result.formatters.filter((f) => !f.success);
+			for (const failure of failures) {
+				recordDegradationOnce({
+					kind: "formatter-failure",
+					subject: `${failure.name}:${path.basename(filePath)}`,
+					reason: failure.error ?? "unknown error",
+				});
+			}
 			formatFailures.push(
 				...failures.map((f) => `${f.name}: ${f.error ?? "unknown error"}`),
 			);
@@ -1054,6 +1062,11 @@ export async function runFormatPhase(
 		}
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
+		recordDegradationOnce({
+			kind: "formatter-failure",
+			subject: `format-service:${path.basename(filePath)}`,
+			reason: message,
+		});
 		formatFailures.push(message);
 		dbg(`autoformat error: ${err}`);
 	}
