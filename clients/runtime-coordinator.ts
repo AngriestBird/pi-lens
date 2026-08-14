@@ -652,15 +652,19 @@ export class RuntimeCoordinator {
 	}
 
 	get fixedThisTurn(): PathSetLike {
-		return {
+		// Self-referencing local so chained add() returns the same facade
+		// instead of re-entering this getter and allocating a new one per call
+		// (sonar S7725).
+		const facade: PathSetLike = {
 			add: (filePath) => {
 				this._fixedThisTurn.set(filePath, true);
-				return this.fixedThisTurn;
+				return facade;
 			},
 			has: (filePath) => this._fixedThisTurn.has(filePath),
 			delete: (filePath) => this._fixedThisTurn.delete(filePath),
 			clear: () => this._fixedThisTurn.clear(),
 		};
+		return facade;
 	}
 
 	get projectRulesScan(): RuleScanResult {
