@@ -3,16 +3,16 @@ import * as path from "node:path";
 import type { AstGrepClient } from "./ast-grep-client.js";
 import type { BiomeClient } from "./biome-client.js";
 import type { CacheManager } from "./cache-manager.js";
+import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
 import type { DeadCodeClient, DeadCodeResult } from "./dead-code-client.js";
 import { deadCodeIssueCount } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
+import { resetDegradationLedger } from "./degradation-ledger.js";
 import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
-import { resetDegradationLedger } from "./degradation-ledger.js";
 import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
-import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
 import {
 	getGlobalPiLensDir,
 	getKnipIgnorePatterns,
@@ -24,6 +24,7 @@ import {
 	GovulncheckClient,
 	type GovulncheckResult,
 } from "./govulncheck-client.js";
+import { sweepAtomicWriteStages } from "./instance-reaper.js";
 import type { JscpdClient } from "./jscpd-client.js";
 import type { KnipClient, KnipResult } from "./knip-client.js";
 import { canRunStartupHeavyScans } from "./language-policy.js";
@@ -85,7 +86,6 @@ import {
 	isSubagentSession,
 	subagentLightModeNotice,
 } from "./subagent-mode.js";
-import { sweepAtomicWriteStages } from "./instance-reaper.js";
 import type { TestRunnerClient } from "./test-runner-client.js";
 import type { TodoScanner } from "./todo-scanner.js";
 import { TrivyClient, type TrivyResult } from "./trivy-client.js";
@@ -329,9 +329,7 @@ async function readSequenceWithBudget(args: {
 	});
 
 	const raced = await Promise.race([
-		readPromise.then(
-			(latestSeq) => ({ timedOut: false as const, latestSeq }),
-		),
+		readPromise.then((latestSeq) => ({ timedOut: false as const, latestSeq })),
 		timeoutPromise,
 	]);
 	if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -721,7 +719,7 @@ async function buildOrRefreshWordIndex(args: {
 					});
 				} else {
 					runtime.wordIndex = index;
-					let serializeSaveEnqueueMs = 0;
+					let snapshotSaveSyncMs = 0;
 					// A stale project seq must be advanced even when mtimes prove every
 					// indexed document reusable. Fresh snapshots with no changes avoid
 					// an unnecessary rewrite of the large shared snapshot.
@@ -733,14 +731,13 @@ async function buildOrRefreshWordIndex(args: {
 					) {
 						const serializeSaveEnqueueStartMs = Date.now();
 						saveRuntimeProjectSnapshot({ cwd: snapshotRoot, runtime, dbg });
-						serializeSaveEnqueueMs =
-							Date.now() - serializeSaveEnqueueStartMs;
+						snapshotSaveSyncMs = Date.now() - serializeSaveEnqueueStartMs;
 					}
 					const phases =
 						`snapshot-load=${snapshotLoadMs}ms, deserialize=${deserializeMs}ms, ` +
 						`source-walk=${result.timings.sourceWalkMs}ms, stat-walk=${result.timings.statWalkMs}ms, ` +
 						`refresh-reads=${result.timings.refreshReadsMs}ms, ` +
-						`serialize-save-enqueue=${serializeSaveEnqueueMs}ms`;
+						`snapshot-save-sync=${snapshotSaveSyncMs}ms`;
 					dbg(
 						`session_start word-index: incremental (seq=${effectiveSeq}, refreshed=${result.refreshed}, dropped=${result.dropped}, skipped=${result.skipped}, reused=${result.reused}, ${Date.now() - startMs}ms, phases: ${phases})`,
 					);
@@ -758,7 +755,7 @@ async function buildOrRefreshWordIndex(args: {
 							snapshotLoadMs,
 							deserializeMs,
 							...result.timings,
-							serializeSaveEnqueueMs,
+							snapshotSaveSyncMs,
 						},
 						refreshed: result.refreshed,
 						dropped: result.dropped,
@@ -1308,7 +1305,9 @@ function scheduleStartupScans(
 	});
 
 	// call-graph — build function-level call graph from review graph data
-	let callGraphIdentity: { reviewGraphVersion: string; reviewGraphSignature: string } | undefined;
+	let callGraphIdentity:
+		| { reviewGraphVersion: string; reviewGraphSignature: string }
+		| undefined;
 	const callGraphTask = runTask("call-graph", async () => {
 		const { FactStore } = await import("./dispatch/fact-store.js");
 		const {
@@ -1373,11 +1372,18 @@ function scheduleStartupScans(
 		await callGraphTask;
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
 		if (!runtime.callGraph) return;
-		const { buildCodebaseModel, saveCodebaseModel, DEFAULT_CODEBASE_MODEL_TOKEN_BUDGET } = await import(
-			"./codebase-model.js"
-		);
+		const {
+			buildCodebaseModel,
+			saveCodebaseModel,
+			DEFAULT_CODEBASE_MODEL_TOKEN_BUDGET,
+		} = await import("./codebase-model.js");
 		if (!callGraphIdentity) return;
-		const model = buildCodebaseModel(runtime.callGraph, analysisRoot, DEFAULT_CODEBASE_MODEL_TOKEN_BUDGET, callGraphIdentity);
+		const model = buildCodebaseModel(
+			runtime.callGraph,
+			analysisRoot,
+			DEFAULT_CODEBASE_MODEL_TOKEN_BUDGET,
+			callGraphIdentity,
+		);
 		saveCodebaseModel(snapshotRoot, model);
 		const top3 = model.entries
 			.slice(0, 3)

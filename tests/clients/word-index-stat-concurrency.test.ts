@@ -24,28 +24,41 @@ describe("word-index parallel stat walk (#1409)", () => {
 		const gate = deferred();
 		try {
 			const files = Array.from({ length: 8 }, (_, i) =>
-				createTempFile(env.tmpDir, `src/f${i}.ts`, `export const value${i} = ${i};`),
+				createTempFile(
+					env.tmpDir,
+					`src/f${i}.ts`,
+					`export const value${i} = ${i};`,
+				),
 			);
 			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
 			const calls = new Map<string, number>();
 			let inFlight = 0;
 			let maxInFlight = 0;
-			const refresh = refreshWordIndexIncrementally(index, env.tmpDir, undefined, {
-				statConcurrency: 3,
-				statFile: async (file) => {
-					calls.set(file, (calls.get(file) ?? 0) + 1);
-					inFlight++;
-					maxInFlight = Math.max(maxInFlight, inFlight);
-					await gate.promise;
-					inFlight--;
-					return fs.promises.stat(file);
+			const refresh = refreshWordIndexIncrementally(
+				index,
+				env.tmpDir,
+				undefined,
+				{
+					statConcurrency: 3,
+					statFile: async (file) => {
+						calls.set(file, (calls.get(file) ?? 0) + 1);
+						inFlight++;
+						maxInFlight = Math.max(maxInFlight, inFlight);
+						await gate.promise;
+						inFlight--;
+						return fs.promises.stat(file);
+					},
 				},
-			});
+			);
 			try {
-				await waitFor(() => maxInFlight, (value) => value > 1, {
-					timeoutMs: 100,
-					yieldControl: yieldTick,
-				});
+				await waitFor(
+					() => maxInFlight,
+					(value) => value > 1,
+					{
+						timeoutMs: 100,
+						yieldControl: yieldTick,
+					},
+				);
 			} finally {
 				gate.resolve();
 			}
@@ -71,7 +84,11 @@ describe("word-index parallel stat walk (#1409)", () => {
 		const barriers = new Map<string, ReturnType<typeof deferred>>();
 		try {
 			const original = Array.from({ length: 8 }, (_, i) =>
-				createTempFile(env.tmpDir, `src/f${i}.ts`, `export const old${i} = ${i};`),
+				createTempFile(
+					env.tmpDir,
+					`src/f${i}.ts`,
+					`export const old${i} = ${i};`,
+				),
 			);
 			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
 			fs.unlinkSync(original[0]);
@@ -80,23 +97,33 @@ describe("word-index parallel stat walk (#1409)", () => {
 			createTempFile(env.tmpDir, "src/new-b.ts", "export const newB = 2;");
 
 			const claims: string[] = [];
-			const refresh = refreshWordIndexIncrementally(index, env.tmpDir, undefined, {
-				statConcurrency: 8,
-				statFile: async (file) => {
-					claims.push(file);
-					const barrier = deferred();
-					barriers.set(file, barrier);
-					await barrier.promise;
-					return fs.promises.stat(file);
+			const refresh = refreshWordIndexIncrementally(
+				index,
+				env.tmpDir,
+				undefined,
+				{
+					statConcurrency: 8,
+					statFile: async (file) => {
+						claims.push(file);
+						const barrier = deferred();
+						barriers.set(file, barrier);
+						await barrier.promise;
+						return fs.promises.stat(file);
+					},
 				},
-			});
-			await waitFor(() => claims.length, (count) => count === 8, {
-				yieldControl: yieldTick,
-			});
+			);
+			await waitFor(
+				() => claims.length,
+				(count) => count === 8,
+				{
+					yieldControl: yieldTick,
+				},
+			);
 			for (const file of [...claims].reverse()) barriers.get(file)?.resolve();
 			const result = await refresh;
 			expect(result.mode).toBe("full-required");
-			if (result.mode !== "full-required") throw new Error("expected churn fallback");
+			if (result.mode !== "full-required")
+				throw new Error("expected churn fallback");
 			expect(result.reason).toBe("file-set-churn");
 			expect(result.preflightFiles?.map((file) => file.path)).toEqual(claims);
 		} finally {
@@ -109,16 +136,25 @@ describe("word-index parallel stat walk (#1409)", () => {
 		const env = setupTestEnvironment("pi-lens-word-stat-reject-");
 		try {
 			const files = Array.from({ length: 4 }, (_, i) =>
-				createTempFile(env.tmpDir, `src/f${i}.ts`, `export const value${i} = ${i};`),
+				createTempFile(
+					env.tmpDir,
+					`src/f${i}.ts`,
+					`export const value${i} = ${i};`,
+				),
 			);
 			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
 			const rejected = files[0];
-			const result = await refreshWordIndexIncrementally(index, env.tmpDir, undefined, {
-				statFile: async (file) => {
-					if (file === rejected) throw new Error("injected stat rejection");
-					return fs.promises.stat(file);
+			const result = await refreshWordIndexIncrementally(
+				index,
+				env.tmpDir,
+				undefined,
+				{
+					statFile: async (file) => {
+						if (file === rejected) throw new Error("injected stat rejection");
+						return fs.promises.stat(file);
+					},
 				},
-			});
+			);
 			expect(result).toMatchObject({
 				mode: "incremental",
 				refreshed: 0,
@@ -137,22 +173,35 @@ describe("word-index parallel stat walk (#1409)", () => {
 		const gate = deferred();
 		try {
 			Array.from({ length: 8 }, (_, i) =>
-				createTempFile(env.tmpDir, `src/f${i}.ts`, `export const value${i} = ${i};`),
+				createTempFile(
+					env.tmpDir,
+					`src/f${i}.ts`,
+					`export const value${i} = ${i};`,
+				),
 			);
 			const index = buildWordIndex(await collectWordIndexDocs(env.tmpDir));
 			let current = true;
 			const claims: string[] = [];
-			const refresh = refreshWordIndexIncrementally(index, env.tmpDir, () => current, {
-				statConcurrency: 2,
-				statFile: async (file) => {
-					claims.push(file);
-					await gate.promise;
-					return fs.promises.stat(file);
+			const refresh = refreshWordIndexIncrementally(
+				index,
+				env.tmpDir,
+				() => current,
+				{
+					statConcurrency: 2,
+					statFile: async (file) => {
+						claims.push(file);
+						await gate.promise;
+						return fs.promises.stat(file);
+					},
 				},
-			});
-			await waitFor(() => claims.length, (count) => count === 2, {
-				yieldControl: yieldTick,
-			});
+			);
+			await waitFor(
+				() => claims.length,
+				(count) => count === 2,
+				{
+					yieldControl: yieldTick,
+				},
+			);
 			current = false;
 			gate.resolve();
 			await expect(refresh).rejects.toThrow("word index refresh superseded");

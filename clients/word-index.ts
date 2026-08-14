@@ -16,6 +16,11 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+	createDeadline,
+	forEachCooperatively,
+	yieldIfOverBudget,
+} from "./cooperative-budget.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
 import { isAtOrAboveHomeDir, normalizeEphemeralMapKey } from "./path-utils.js";
 import {
@@ -24,11 +29,6 @@ import {
 } from "./persist-debounce.js";
 import { getWordIndexMaxFilesDerived } from "./project-scale.js";
 import { logWordIndex } from "./word-index-logger.js";
-import {
-	createDeadline,
-	forEachCooperatively,
-	yieldIfOverBudget,
-} from "./cooperative-budget.js";
 
 export interface WordHit {
 	file: string;
@@ -127,17 +127,57 @@ export interface RankOptions {
 // postings without improving relevance. Kept deliberately small and
 // language-agnostic.
 const STOPWORDS = new Set([
-	"the", "and", "for", "let", "var", "const", "function", "return", "if",
-	"else", "import", "export", "from", "class", "interface", "type", "enum",
-	"new", "this", "self", "void", "null", "true", "false", "async", "await",
-	"public", "private", "protected", "static", "def", "fn", "func", "struct",
-	"impl", "pub", "use", "mod", "in", "of", "as", "is", "not", "with",
+	"the",
+	"and",
+	"for",
+	"let",
+	"var",
+	"const",
+	"function",
+	"return",
+	"if",
+	"else",
+	"import",
+	"export",
+	"from",
+	"class",
+	"interface",
+	"type",
+	"enum",
+	"new",
+	"this",
+	"self",
+	"void",
+	"null",
+	"true",
+	"false",
+	"async",
+	"await",
+	"public",
+	"private",
+	"protected",
+	"static",
+	"def",
+	"fn",
+	"func",
+	"struct",
+	"impl",
+	"pub",
+	"use",
+	"mod",
+	"in",
+	"of",
+	"as",
+	"is",
+	"not",
+	"with",
 ]);
 
 const TEST_VENDOR_RE =
 	/(?:(^|[\\/])(?:tests?|__tests__|spec|specs|__mocks__|vendor|node_modules|examples?|fixtures?|\.git|dist|build|coverage)([\\/]|$))|(?:\.(?:test|spec)\.[a-z]+$)/i;
 
-const DOC_FILE_RE = /\.(?:md|mdx|markdown|json|json5|jsonc|txt|rst|lock|ya?ml|toml|csv)$/i;
+const DOC_FILE_RE =
+	/\.(?:md|mdx|markdown|json|json5|jsonc|txt|rst|lock|ya?ml|toml|csv)$/i;
 
 const TEST_VENDOR_PENALTY = 0.3;
 const DOC_FILE_PENALTY = 0.5;
@@ -623,8 +663,7 @@ export async function collectWordIndexDocs(
 	// visited-entry budget (DEFAULT_MAX_SCAN_ENTRIES), so a mixed tree with few
 	// source files among a huge pile of non-source files can't force a
 	// full-tree walk either; an index over the truncated list is acceptable.
-	const maxFiles =
-		preflightFiles?.length ?? getWordIndexMaxFilesDerived(root);
+	const maxFiles = preflightFiles?.length ?? getWordIndexMaxFilesDerived(root);
 	// #894 review: prioritize code kinds within the cap — with broadened
 	// enumeration, thousands of data/doc files (locale JSON, fixtures, …)
 	// ahead of the code dirs in walk order could exhaust `maxFiles` and evict
@@ -713,13 +752,14 @@ export type WordIndexRefreshOutcome =
 	| WordIndexRebuildRequired;
 
 export interface WordIndexRefreshOptions {
-	statFile?: (
-		file: string,
-	) => Promise<Pick<fs.Stats, "mtimeMs" | "size">>;
+	statFile?: (file: string) => Promise<Pick<fs.Stats, "mtimeMs" | "size">>;
 	statConcurrency?: number;
 }
 
-export const WORD_INDEX_STAT_CONCURRENCY = 24;
+// Node's fs.promises.stat runs on libuv's threadpool (default 4 slots), so
+// real parallelism tops out there; the surplus workers are queue depth that
+// keeps the pool saturated without starving other threadpool consumers.
+export const WORD_INDEX_STAT_CONCURRENCY = 8;
 
 const WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD = 0.3;
 // A ratio alone misclassifies one stale file in a three-file project as dense.
@@ -795,8 +835,10 @@ export async function refreshWordIndexIncrementally(
 		{ path: string; mtimeMs: number; size: number }
 	>();
 	const statWalkStartMs = Date.now();
-	const statFile = options.statFile ?? ((file: string) => fs.promises.stat(file));
-	const requestedConcurrency = options.statConcurrency ?? WORD_INDEX_STAT_CONCURRENCY;
+	const statFile =
+		options.statFile ?? ((file: string) => fs.promises.stat(file));
+	const requestedConcurrency =
+		options.statConcurrency ?? WORD_INDEX_STAT_CONCURRENCY;
 	const statConcurrency =
 		Number.isFinite(requestedConcurrency) && requestedConcurrency > 0
 			? Math.max(1, Math.floor(requestedConcurrency))
@@ -812,13 +854,13 @@ export async function refreshWordIndexIncrementally(
 				superseded = true;
 				return;
 			}
-			const index = cursor++;
-			if (index >= walked.length) return;
-			const file = walked[index];
+			const slot = cursor++;
+			if (slot >= walked.length) return;
+			const file = walked[slot];
 			try {
 				const stat = await statFile(file);
 				if (stat.size <= WORD_INDEX_MAX_BYTES) {
-					statResults[index] = {
+					statResults[slot] = {
 						path: file,
 						mtimeMs: stat.mtimeMs,
 						size: stat.size,
@@ -830,9 +872,8 @@ export async function refreshWordIndexIncrementally(
 		}
 	};
 	await Promise.all(
-		Array.from(
-			{ length: Math.min(statConcurrency, walked.length) },
-			() => worker(),
+		Array.from({ length: Math.min(statConcurrency, walked.length) }, () =>
+			worker(),
 		),
 	);
 	if (superseded || !shouldContinue()) {
@@ -1072,8 +1113,7 @@ export function searchWordIndex(
 			const denominator =
 				termFrequency +
 				BM25_K1 * (1 - BM25_B + BM25_B * (docLength / avgDocLength));
-			const termScore =
-				idf * ((termFrequency * (BM25_K1 + 1)) / denominator);
+			const termScore = idf * ((termFrequency * (BM25_K1 + 1)) / denominator);
 
 			const entry = scores.get(file) ?? {
 				score: 0,
@@ -1230,8 +1270,12 @@ export function deserializeWordIndex(
 	const docLengths = new PathKeyedMap<number>(wordIndexKey);
 	const fileMtimes = new PathKeyedMap<number>(wordIndexKey);
 	const fileSizes = new PathKeyedMap<number>(wordIndexKey);
-	data.files.forEach((file, i) => docLengths.set(file, data.docLengths[i] ?? 0));
-	data.files.forEach((file, i) => fileMtimes.set(file, data.fileMtimes[i] ?? 0));
+	data.files.forEach((file, i) =>
+		docLengths.set(file, data.docLengths[i] ?? 0),
+	);
+	data.files.forEach((file, i) =>
+		fileMtimes.set(file, data.fileMtimes[i] ?? 0),
+	);
 	// #1105: `fileSizes` is optional on the wire (pre-#1105 snapshots omit it).
 	// Only populate when the array is present AND parallel to `files`; otherwise
 	// leave it empty so the refresh gate re-reads every file once to repopulate,
@@ -1282,8 +1326,7 @@ export function deserializeWordIndex(
 	return {
 		postings,
 		docLengths,
-		totalTokens:
-			typeof data.totalTokens === "number" ? data.totalTokens : 0,
+		totalTokens: typeof data.totalTokens === "number" ? data.totalTokens : 0,
 		docCount: data.files.length,
 		truncated: data.truncated === true,
 		forward,
@@ -1361,8 +1404,11 @@ export function triggerBackgroundWordIndexBuild(
 	void (async () => {
 		const startMs = Date.now();
 		try {
-			const { loadProjectSnapshot, saveProjectSnapshot, PROJECT_SNAPSHOT_VERSION } =
-				await import("./project-snapshot.js");
+			const {
+				loadProjectSnapshot,
+				saveProjectSnapshot,
+				PROJECT_SNAPSHOT_VERSION,
+			} = await import("./project-snapshot.js");
 			const docs = await collectWordIndexDocs(key);
 			const index = await buildWordIndexAsync(docs);
 			const existing = loadProjectSnapshot(key);
@@ -1462,8 +1508,11 @@ async function writeWordIndexSnapshot(
 	dbg?: (msg: string) => void,
 ): Promise<void> {
 	try {
-		const { loadProjectSnapshot, saveProjectSnapshot, PROJECT_SNAPSHOT_VERSION } =
-			await import("./project-snapshot.js");
+		const {
+			loadProjectSnapshot,
+			saveProjectSnapshot,
+			PROJECT_SNAPSHOT_VERSION,
+		} = await import("./project-snapshot.js");
 		const existing = loadProjectSnapshot(cwd);
 		const snapshot = existing ?? {
 			version: PROJECT_SNAPSHOT_VERSION,

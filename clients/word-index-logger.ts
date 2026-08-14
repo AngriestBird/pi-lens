@@ -66,7 +66,7 @@ export interface WordIndexLogEntry {
 		sourceWalkMs?: number;
 		statWalkMs?: number;
 		refreshReadsMs?: number;
-		serializeSaveEnqueueMs?: number;
+		snapshotSaveSyncMs?: number;
 	};
 	/** Docs actually represented in the index (mirrors indexedFileCount, #928). */
 	indexedFileCount?: number;
