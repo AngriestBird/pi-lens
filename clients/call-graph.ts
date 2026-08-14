@@ -338,7 +338,9 @@ export function buildCallGraph(
 ): FunctionCallGraph {
 	// Keep the lookup index canonical even for legacy direct callers that still
 	// construct these maps from display paths; persisted/review-graph callers
-	// already satisfy the canonical-key contract documented above.
+	// already satisfy the canonical-key contract documented above. A caller that
+	// supplies TWO raw spellings of the same file gets last-writer-wins here —
+	// raw compatibility is best-effort tolerance, not a merge contract.
 	const canonicalSymbols = new Map<string, Symbol[]>();
 	for (const [filePath, symbols] of allSymbols) canonicalSymbols.set(normalizeMapKey(filePath), symbols);
 	const defIndex = buildDefIndex(canonicalSymbols);
