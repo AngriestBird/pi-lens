@@ -5,7 +5,10 @@ pi-lens registers the following slash commands with the pi host:
 - `/lens-toggle` — toggle pi-lens on/off for the current session without restarting
 - `/lens-context-toggle` — toggle automatic context injection on/off for the session (tools/LSP/read-guard/formatting stay active)
 - `/lens-widget-toggle` — show/hide the pi-lens diagnostics widget below the editor
-- `/lens-health` — runtime health, latency, and diagnostic telemetry
+- `/lens-health` — runtime health, latency, and diagnostic telemetry, including
+  bounded per-session degradation counts (trust refusals, LSP breakers,
+  formatter skips/failures, idle evictions, WASM aborts, timeout tallies, and
+  more)
 - `/lens-perf` — independent top-five p50 and p99 rankings for the current process session and machine-wide active latency-log window
 - `/lens-allow-edit <path>` — override the read-before-edit guard for a single edit
 - `/lens-tools` — tool installation status: globally installed, auto-installed, or npx fallback

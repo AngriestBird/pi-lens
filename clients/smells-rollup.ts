@@ -23,12 +23,11 @@
  * turns — negligible next to the multi-second full startup walk it rides
  * alongside.
  *
- * Why a tail scan covers "this session" too, without separate write-time
- * counters: `bus-events.log` / `latency.log` are append-only NDJSON, and the
- * current session is always the most recently written tail. A bounded tail
- * scan is therefore BOTH the cross-session glance AND a good proxy for
- * live/this-session activity — the same read serves both surfaces, so this
- * module does not additionally instrument the write call sites
+ * The tail scan is bounded, but the tail can contain prior-session rows. The
+ * session-start caller supplies the session boundary, and rows are admitted
+ * only when their own UTC timestamp is at or after that boundary. This keeps
+ * the same bounded read without reporting historical failures as current, so
+ * this module does not additionally instrument the write call sites
  * (`bus-publish.ts`, `clients/lsp/index.ts`'s respawn path) with parallel
  * live counters. That keeps the change contained to one new module + three
  * small call sites (session_start, `/lens-health`, `turn_end`) instead of
@@ -121,6 +120,7 @@ export function tailReadText(filePath: string, maxBytes: number): string {
 function countMatchingLines(
 	text: string,
 	predicate: (entry: Record<string, unknown>) => boolean,
+	sessionStartMs?: number,
 ): number {
 	let count = 0;
 	for (const line of text.split("\n")) {
@@ -134,12 +134,25 @@ function countMatchingLines(
 		if (
 			entry &&
 			typeof entry === "object" &&
+			(sessionStartMs === undefined ||
+				isAtOrAfterSessionStart(
+					entry as Record<string, unknown>,
+					sessionStartMs,
+				)) &&
 			predicate(entry as Record<string, unknown>)
 		) {
 			count++;
 		}
 	}
 	return count;
+}
+
+function isAtOrAfterSessionStart(
+	entry: Record<string, unknown>,
+	sessionStartMs: number,
+): boolean {
+	const timestamp = typeof entry.ts === "string" ? Date.parse(entry.ts) : NaN;
+	return Number.isFinite(timestamp) && timestamp >= sessionStartMs;
 }
 
 function isStaleCtxEmitFailed(entry: Record<string, unknown>): boolean {
@@ -163,6 +176,7 @@ function isOpengrepRespawn(entry: Record<string, unknown>): boolean {
  */
 export function countRecentSmells(
 	root: string = getGlobalPiLensDir(),
+	sessionStartMs?: number,
 ): SmellsRollupCounts {
 	const busTail = tailReadText(
 		path.join(root, "bus-events.log"),
@@ -173,8 +187,16 @@ export function countRecentSmells(
 		SMELLS_TAIL_BYTES_PER_FILE,
 	);
 	return {
-		staleCtxEmitFailed: countMatchingLines(busTail, isStaleCtxEmitFailed),
-		opengrepRespawn: countMatchingLines(latencyTail, isOpengrepRespawn),
+		staleCtxEmitFailed: countMatchingLines(
+			busTail,
+			isStaleCtxEmitFailed,
+			sessionStartMs,
+		),
+		opengrepRespawn: countMatchingLines(
+			latencyTail,
+			isOpengrepRespawn,
+			sessionStartMs,
+		),
 	};
 }
 

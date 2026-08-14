@@ -207,7 +207,7 @@ Verified in `index.ts`:
 | `/lens-toggle` | Turn pi-lens on/off for the session. |
 | `/lens-context-toggle` | Toggle context injection (tools/LSP/read-guard/formatting stay active). |
 | `/lens-widget-toggle` | Show/hide the diagnostics footer widget. |
-| `/lens-health` | Runtime health: pipeline crashes, slow runners, last dispatch latency. |
+| `/lens-health` | Runtime health: pipeline crashes, slow runners, last dispatch latency, and a bounded degradation-ledger summary (trust refusals, LSP breakers, formatter skips/failures, idle evictions, WASM aborts, timeout tallies). |
 | `/lens-perf` | Slowest latency-log phases (p50/p99). |
 | `/lens-tools` | Tool installation status (global / auto-installed / npx fallback). |
 | `/lens-tdi` | Technical Debt Index and project health trend. |

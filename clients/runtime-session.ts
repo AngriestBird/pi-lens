@@ -1976,7 +1976,7 @@ export async function handleSessionStart(
 			durationMs: totalDurationMs,
 			metadata: { mode: startupMode, reason: deps.sessionReason },
 		});
-		emitSmellsSessionStartLine(dbg);
+		emitSmellsSessionStartLine(dbg, sessionStartMs);
 		return;
 	}
 
@@ -2378,7 +2378,7 @@ export async function handleSessionStart(
 		durationMs: totalDurationMs,
 		metadata: { mode: startupMode, reason: deps.sessionReason },
 	});
-	emitSmellsSessionStartLine(dbg);
+	emitSmellsSessionStartLine(dbg, sessionStartMs);
 }
 
 /**
@@ -2387,9 +2387,14 @@ export async function handleSessionStart(
  * `clients/smells-rollup.ts` for the tail-scan cost bound and threshold
  * gating. Never throws: a rollup miss must not break session_start.
  */
-function emitSmellsSessionStartLine(dbg: (msg: string) => void): void {
+function emitSmellsSessionStartLine(
+	dbg: (msg: string) => void,
+	sessionStartMs: number,
+): void {
 	try {
-		const line = formatSmellsSessionStartLine(countRecentSmells());
+		const line = formatSmellsSessionStartLine(
+			countRecentSmells(undefined, sessionStartMs),
+		);
 		if (line) dbg(line);
 	} catch {
 		// best-effort — smells rollup must never break session_start

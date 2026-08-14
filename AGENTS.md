@@ -118,6 +118,10 @@ For human contributors and issue/PR authors, see `CONTRIBUTING.md` at the repo r
 
 **Shape 12 — a durable commit followed by an out-of-guard mirror refresh** (found #1309 review, 2026-08-12; swept same day: dispositions was the sole member, probe-cache is the reference-correct pattern). When a writer atomically replaces shared state and THEN refreshes an in-memory mirror, stat/metadata, or validity cache, the refresh must occur before releasing the lock/guard — or be revalidated against the committed generation/object identity. Otherwise a sibling writer commits between publication and refresh, pairing one writer's mirror metadata with another's durable state. When you touch any lock consumer, atomic-write-plus-mirror seam, or worker promotion: verify the mirror update executes INSIDE the guard (`durable-store.ts`'s `afterWriteLocked` is the sanctioned seam), and classify advisory/rebuildable mirrors separately from behavior-gating state. Detection: grep the release call, then look downward for cache/memo/flag assignments.
 
+**Every bug fix ships a regression test that FAILS on the pre-fix code (red-first), and the fix makes it pass (green).** A fix without a test that reproduces the bug is not done. Prove the red-first: run the new test against the unmodified pre-fix code and confirm it fails for the RIGHT reason (the bug), not a setup error; a test that passes on pre-fix code is vacuous (defect-shape 7) and does not protect against regression. Reviews mutation-verify this: revert the fix, the test must go red. When a bug reveals a class (see the bug-class sweep discipline), the regression test should cover the class shape, not just the single reported input.
+
+**Clean up after merged PRs: the worktree AND the branch (local + remote).** Merged branches and their worktrees accumulate fast (a single burn-down session left 130+ worktrees). Note that `gh pr merge --delete-branch` SILENTLY fails to delete a branch a worktree still holds (`cannot delete branch … used by worktree`), so merging does not auto-clean when a worktree checks the branch out. Periodically and at session end: `git worktree remove` your own temp worktrees when done; `git worktree prune` dead entries; `git push origin --delete <branch>` for merged remote branches (works regardless of local worktrees); `git branch -d <merged-branch>` locally. For plegma `~/.plegma/work/sub-*` worktrees, the daemon auto-cleans unchanged ones — force-remove committed-branch ones only once their PR merged and the agent is no longer live.
+
 ### Recurring defect shapes — screen against these BEFORE you write code
 
 The captured-at-subscribe / used-after-replace shape also applies to pi's
@@ -157,6 +161,24 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 11. **Skipped-CI-on-conflict, counted as green.** A DIRTY (merge-conflicted) PR can't build its merge-ref, so the real gates are *skipped, not failed* — absent, so a naive check reads them as passing. *Screen:* before merge, verify `Unit tests`/`Lint` actually RAN and passed on the current head SHA — an absent required check is not a passing one. Full treatment in the adversarial-review note above (skipped-CI-on-conflict trap).
 
 **ast-grep candidates:** shapes 4, 2, 1, and 6 are *syntactically* detectable and could become dogfooded rules (assessed for false-positive load in **#1158**); shapes 3, 5, 7, 8, 10 are semantic — good and bad uses are syntactically identical — and stay review-enforced. Do not author rules here; #1158 tracks the viable set.
+
+## Standing maintenance routines (invoke on request)
+
+These are named, well-scoped sweeps a maintainer can ask for by name; each is dispatched deliberately (often to a worker), never run autonomously, and the DELETION routines require proof + adversarial verification before anything is removed. Several overlap existing disciplines: bug-class sweeps, single-source-of-truth/consolidation, and red-first regression tests.
+
+- **Crash fuzzer** — find real crashes and hangs, then open root-cause fix issues. **Trigger/scope:** explicit request to exercise a named surface or bounded scenario. **SAFETY RAIL:** reproduce first; distinguish a real defect from a build, cache, or environment artifact per the dogfooding rule.
+- **Internal-only shipper** — ship or delete forgotten internal-only features based on ACTUAL usage. **Trigger/scope:** explicit request covering a named internal-only feature or bounded feature set. **SAFETY RAIL:** usage-based deletion needs real usage evidence (telemetry or grep of call sites), never inference; deletion requires sign-off.
+- **Logic simplifier** — simplify convoluted logic. **Trigger/scope:** explicit request for named logic or a bounded module. **SAFETY RAIL:** behavior-preserving only; the full test suite must be green; no semantic change.
+- **Logic bugfixer** — model tricky logic to find and fix bugs. **Trigger/scope:** explicit request for a named stateful, ordered, or otherwise tricky logic seam. **SAFETY RAIL:** add a red-first regression test for every fix.
+- **Dup unifier** — merge duplicated implementations into one (this IS our single-source-of-truth discipline). **Trigger/scope:** explicit request for a named duplicate family or bounded code area. **SAFETY RAIL:** prove the duplicates are semantically identical; a coverage test must bind the merged form.
+- **Dead-code removal** — delete provably unreachable code. **Trigger/scope:** explicit request for named code or a bounded reachability sweep. **SAFETY RAIL:** “provably” means traced (with no dynamic, reflective, or config-driven reachability), not guessed; perform adversarial verification before deletion.
+- **Useless-test pruner** — delete tests that cannot fail (defect-shape 7 vacuous tests). **Trigger/scope:** explicit request for named tests or a bounded test family. **SAFETY RAIL:** prove vacuity via mutation (the test passes on deliberately broken code) before deleting; unfamiliar ≠ useless.
+- **Shipped-feature inliner** — remove flags for fully shipped features. **Trigger/scope:** explicit request for a named shipped feature and its flag. **SAFETY RAIL:** confirm the flag is default-on everywhere and no consumer sets it off; remove both branches cleanly.
+- **Flaky-test fixer** — root-cause flaky CI tests (never mute). **Trigger/scope:** explicit request for named flaky tests or a bounded CI failure pattern. **SAFETY RAIL:** identify the actual nondeterminism (timing, order, or environment); fix the cause; the fix must be deterministic.
+- **Abstraction improver** — flatten over-engineered abstractions. **Trigger/scope:** explicit request for a named abstraction or bounded call chain. **SAFETY RAIL:** behavior-preserving; keep one caller-visible surface unchanged.
+- **Abstraction police** — fix layering violations. **Trigger/scope:** explicit request for a named boundary or bounded dependency direction. **SAFETY RAIL:** define the intended layering; restore it without breaking the public contract.
+
+Each routine's output is a PR (or a tracked issue for discovery routines), reviewed under the same two-tier adversarial-review + red-first discipline as any change. Deletions are irreversible-adjacent — treat them with the confirm-before-destructive-action rule.
 
 ## What it is
 
@@ -233,6 +255,8 @@ must stay unref'd, reset on reuse, busy-client guarded, and cleared on shutdown.
 Rule-id normalization derives its language suffixes from the bundled CodeRabbit rule tree at startup; tests must keep that derived set covered so new vendored language rules cannot silently evade project policy matching.
 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
+
+The session-start smells rollup still uses bounded tail reads, but its session-start path must pass the current `sessionStartMs` into `countRecentSmells`; scoped scans admit only rows with a parseable `ts` at or after that boundary, dropping un-timestamped rows rather than surfacing ambiguous history. Unscoped calls remain available for non-session diagnostic/test consumers.
 
 Extension policy tests bind JS/TS fact applicability and bash source-like file
 access to `KIND_EXTENSIONS`; the only intentional exceptions are the documented
