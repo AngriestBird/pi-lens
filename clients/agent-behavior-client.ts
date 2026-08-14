@@ -50,7 +50,8 @@ export class AgentBehaviorClient {
 	private lastToolTimestamp = 0;
 
 	// Per-file tracking
-	private fileEditCount = new Map<string, number>();
+	private fileEditCount = new Map<string, { count: number; lastUsedAt: number }>();
+	private static readonly FILE_EDIT_IDLE_MS = 30 * 60_000;
 
 	/**
 	 * Record a tool call and return any warnings triggered.
@@ -130,10 +131,15 @@ export class AgentBehaviorClient {
 			// Track edits per file
 			if (filePath) {
 				const key = normalizeMapKey(filePath);
-				this.fileEditCount.set(
-					key,
-					(this.fileEditCount.get(key) ?? 0) + 1,
-				);
+				this.fileEditCount.set(key, {
+					count: (this.fileEditCount.get(key)?.count ?? 0) + 1,
+					lastUsedAt: now,
+				});
+				for (const [pathKey, entry] of this.fileEditCount) {
+					if (now - entry.lastUsedAt > AgentBehaviorClient.FILE_EDIT_IDLE_MS) {
+						this.fileEditCount.delete(pathKey);
+					}
+				}
 			}
 		}
 
@@ -159,7 +165,7 @@ export class AgentBehaviorClient {
 	 * Get edit count for a file in this session.
 	 */
 	getEditCount(filePath: string): number {
-		return this.fileEditCount.get(normalizeMapKey(filePath)) ?? 0;
+		return this.fileEditCount.get(normalizeMapKey(filePath))?.count ?? 0;
 	}
 
 	/**

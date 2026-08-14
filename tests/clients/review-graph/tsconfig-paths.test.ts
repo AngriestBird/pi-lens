@@ -80,6 +80,20 @@ describe("tsconfig paths import resolution (#775 R2)", () => {
 		expect(resolve("@shared/value")).toEqual(["lib/value.ts"]);
 	});
 
+	it("invalidates when an extended config changes", () => {
+		write("config/tsconfig.base.json", JSON.stringify({
+			compilerOptions: { baseUrl: "..", paths: { "@shared/*": ["lib/*"] } },
+		}));
+		write("tsconfig.json", JSON.stringify({ extends: "./config/tsconfig.base" }));
+		write("lib/old.ts");
+		expect(resolve("@shared/old")).toEqual(["lib/old.ts"]);
+		write("config/tsconfig.base.json", JSON.stringify({
+			compilerOptions: { baseUrl: "..", paths: { "@shared/*": ["new-lib/*"] } },
+		}));
+		write("new-lib/new.ts");
+		expect(resolve("@shared/new")).toEqual(["new-lib/new.ts"]);
+	});
+
 	it("leaves an unmatched alias unresolved for the existing external fallback", () => {
 		write(
 			"tsconfig.json",
