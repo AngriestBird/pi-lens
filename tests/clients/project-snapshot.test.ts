@@ -32,6 +32,7 @@ vi.mock("../../clients/atomic-write.js", async (importOriginal) => {
 import {
 	PROJECT_SNAPSHOT_VERSION,
 	_resetProjectSnapshotParseCacheForTests,
+	_getAuthoritativeSnapshotCacheKeysForTests,
 	buildProjectSnapshotFromRuntime,
 	flushProjectSnapshotPersistsForTests,
 	getProjectSnapshotLegacyPath,
@@ -51,6 +52,7 @@ import {
 	terminateProjectSnapshotPersistWorkerForTests,
 	waitForProjectSnapshotPersistsForTests,
 } from "../../clients/project-snapshot.js";
+import type { ProjectSnapshot } from "../../clients/project-snapshot.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { buildWordIndex, searchWordIndex } from "../../clients/word-index.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
@@ -137,6 +139,56 @@ describe("project snapshot", () => {
 				cachedExports: [["makeThing", path.join(cwd, "src", "a.ts")]],
 			});
 			expect(isProjectSnapshotFresh(loaded, 7)).toBe(true);
+		}));
+
+	it("bounds and idles authoritative snapshots", () =>
+		withProjectDataDir((cwd) => {
+			vi.useFakeTimers();
+			vi.stubEnv("PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS", "1000");
+			const makeSnapshot = (root: string): ProjectSnapshot => ({
+				version: PROJECT_SNAPSHOT_VERSION,
+				projectRoot: root,
+				generatedAt: new Date().toISOString(),
+				seq: 0,
+				files: {},
+				symbols: {},
+				reverseDeps: {},
+				cachedExports: [],
+			});
+			for (let i = 0; i < 9; i++) saveProjectSnapshot(path.join(cwd, `root-${i}`), makeSnapshot(path.join(cwd, `root-${i}`)));
+			const keys = _getAuthoritativeSnapshotCacheKeysForTests();
+			expect(keys).toHaveLength(8);
+			expect(keys[0]).toContain("root-1");
+			vi.advanceTimersByTime(1001);
+			expect(_getAuthoritativeSnapshotCacheKeysForTests()).toHaveLength(0);
+			vi.useRealTimers();
+		}));
+
+	it("clears the idle timer when an authoritative entry is deleted", () =>
+		withProjectDataDir((cwd) => {
+			vi.useFakeTimers();
+			vi.stubEnv("PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS", "1000");
+			const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+			const snapshot: ProjectSnapshot = {
+				version: PROJECT_SNAPSHOT_VERSION,
+				projectRoot: cwd,
+				generatedAt: new Date().toISOString(),
+				seq: 0,
+				files: {},
+				symbols: {},
+				reverseDeps: {},
+				cachedExports: [],
+			};
+			saveProjectSnapshot(cwd, snapshot);
+			const bodyPath = getProjectSnapshotPath(cwd);
+			const future = new Date(Date.now() + 10_000);
+			fs.utimesSync(bodyPath, future, future);
+			expect(loadProjectSnapshot(cwd)).not.toBeNull();
+			expect(clearTimeoutSpy).toHaveBeenCalled();
+
+			vi.advanceTimersByTime(1001);
+			expect(_getAuthoritativeSnapshotCacheKeysForTests()).toEqual([]);
+			vi.useRealTimers();
 		}));
 
 	it("embeds the derived sequence index in BOTH the body and the meta sidecar (#1019)", () =>

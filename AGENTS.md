@@ -166,6 +166,12 @@ concurrently, then processes claimed results in admission order with a
 per-file bookkeeping isolated so multi-file batches cannot recreate one
 CPU-bound event-loop burst. (#1387)
 
+Review-graph workspace cache invalidation uses a process-wide epoch component
+that survives all-workspace clears; per-workspace eviction/reset increments the
+workspace component. Any new in-flight cache publication must capture and pass
+the combined epoch. Authoritative project-snapshot deletion goes through the
+single timer-clearing helper so idle timers cannot retain deleted generations.
+
 The review-graph size gate uses the shared cooperative source walker with a
 `maxFileCount + 1` sentinel: it stops at the first over-cap source entry, so
 skip telemetry and user-facing messages must describe the count as “more than
@@ -220,6 +226,14 @@ access to `KIND_EXTENSIONS`; the only intentional exceptions are the documented
 Vue/Svelte fact exclusion and the small legacy text/config allowlist in
 `clients/file-kinds.ts`. Keep new language extensions there rather than adding
 provider-local regexes or sets.
+
+Review-graph workspace caches and authoritative project snapshots are bounded to
+8 roots and use 20-minute per-root idle eviction by default. Their windows are
+env-tunable with `PI_LENS_REVIEW_GRAPH_IDLE_EVICT_MS` and
+`PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS`; graph eviction also drops completed
+build-dedup promises so the next access is a true cold rebuild. Async graph
+writes carry a per-workspace epoch, preventing an in-flight build from
+resurrecting an evicted entry. (#1389)
 
 LSP root exclusion recognizes fixture conventions by exact path segment; Go's
 `testdata` convention applies ancestor-wide, but names such as `testdata-tools`
