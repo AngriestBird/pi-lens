@@ -79,6 +79,7 @@ import {
 	hasStylelintConfig,
 	markdownlintConfigArgs,
 } from "./tool-policy.js";
+import type { PathSetLike } from "./runtime-coordinator.js";
 
 const LSP_MAX_FILE_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
 const LSP_MAX_FILE_LINES = RUNTIME_CONFIG.pipeline.lspMaxFileLines;
@@ -278,7 +279,7 @@ export interface PipelineDeps {
 	ruffClient: RuffClient;
 	metricsClient: MetricsClient;
 	getFormatService: () => FormatService;
-	fixedThisTurn: Set<string>;
+	fixedThisTurn: PathSetLike;
 }
 
 export interface PipelineResult {

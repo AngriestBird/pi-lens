@@ -28,7 +28,19 @@ import {
 	type ProjectChangeSource,
 } from "./project-changes.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
-import { getAutofixPolicyForFile } from "./tool-policy.js";
+import {
+	getAutofixPolicyForFile,
+	hasBiomeConfig,
+	hasDetektConfig,
+	hasEslintConfig,
+	hasGolangciConfig,
+	hasKtfmtConfig,
+	hasKtlintConfig,
+	hasOxlintConfig,
+	hasRubocopConfig,
+	hasSqlfluffConfig,
+	hasStylelintConfig,
+} from "./tool-policy.js";
 
 /**
  * A queued file is claimed by any flush once it has sat unclaimed by its own
@@ -53,6 +65,7 @@ interface AgentEndDeps {
 	getFormatService: () => FormatService;
 	biomeClient?: BiomeClient;
 	ruffClient?: RuffClient;
+	getAutofixClients?: () => Promise<{ biomeClient: BiomeClient; ruffClient: RuffClient }>;
 	/**
 	 * The STABLE pi session id for the ctx this `agent_end` fired on. Used to
 	 * scope the deferred-format drain to records this session actually
@@ -108,6 +121,7 @@ export async function handleAgentEnd({
 	getFormatService,
 	biomeClient,
 	ruffClient,
+	getAutofixClients,
 	currentSessionId,
 	staleAfterMs = DEFERRED_FORMAT_STALE_AFTER_MS,
 }: AgentEndDeps): Promise<AgentEndFormatSummary | undefined> {
@@ -194,6 +208,9 @@ export async function handleAgentEnd({
 	const ambientSignal = getAmbientAbortSignal();
 	const executedAutofixScopes = new Set<string>();
 	const autofixRecords = records.filter((candidate) => candidate.kinds.has("autofix"));
+	if (autofixRecords.length > 0 && (!biomeClient || !ruffClient) && getAutofixClients) {
+		({ biomeClient, ruffClient } = await getAutofixClients());
+	}
 	for (let autofixIndex = 0; autofixIndex < autofixRecords.length; autofixIndex++) {
 		const record = autofixRecords[autofixIndex];
 		if (ambientSignal?.aborted) {
@@ -201,6 +218,7 @@ export async function handleAgentEnd({
 				autofixRecords.slice(autofixIndex).map((pending) => ({
 					...pending,
 					kinds: new Set(["autofix" as const]),
+					toolNames: new Set(pending.toolNames),
 				})),
 			);
 			break;
@@ -212,10 +230,21 @@ export async function handleAgentEnd({
 		}
 		if (!biomeClient || !ruffClient) {
 			dbg(`agent_end deferred_autofix: clients unavailable for ${filePath}`);
-			runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["autofix"]) }]);
+			runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["autofix"]), toolNames: new Set(record.toolNames) }]);
 			continue;
 		}
-		const policy = getAutofixPolicyForFile(filePath);
+		const policy = getAutofixPolicyForFile(filePath, {
+			hasEslintConfig: hasEslintConfig(record.cwd),
+			hasStylelintConfig: hasStylelintConfig(record.cwd),
+			hasSqlfluffConfig: hasSqlfluffConfig(record.cwd),
+			hasRubocopConfig: hasRubocopConfig(record.cwd),
+			hasBiomeConfig: hasBiomeConfig(record.cwd),
+			hasGolangciConfig: hasGolangciConfig(record.cwd),
+			hasDetektConfig: hasDetektConfig(record.cwd),
+			hasOxlintConfig: hasOxlintConfig(record.cwd),
+			hasKtfmtConfig: hasKtfmtConfig(record.cwd),
+			hasKtlintConfig: hasKtlintConfig(record.cwd),
+		});
 		const scopeKey = policy?.scope && policy.scope !== "file"
 			? `${policy.defaultTool ?? "unknown"}:${path.resolve(record.cwd)}`
 			: `${policy?.defaultTool ?? "unknown"}:${filePath}`;
@@ -251,7 +280,7 @@ export async function handleAgentEnd({
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			summary.failed.push({ filePath, errors: [message] });
-			runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["autofix"]) }]);
+			runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["autofix"]), toolNames: new Set(record.toolNames) }]);
 		}
 	}
 	if (deferredAutofixFixes.length > 0) {
@@ -368,6 +397,7 @@ export async function handleAgentEnd({
 				formatRecords.filter((_, index) => !started.has(index)).map((record) => ({
 					...record,
 					kinds: new Set(["format" as const]),
+					toolNames: new Set(record.toolNames),
 				})),
 			);
 		}
@@ -378,13 +408,15 @@ export async function handleAgentEnd({
 			const { record, filePath, fileStart } = entry;
 			if (entry.missing) {
 				dbg(`agent_end deferred_format skipped missing file: ${filePath}`);
-				summary.skipped.push({ filePath, reason: "missing" });
+				if (!summary.skipped.some((item) => item.filePath === filePath && item.reason === "missing")) {
+					summary.skipped.push({ filePath, reason: "missing" });
+				}
 				continue;
 			}
 			if (entry.error) {
 				dbg(`agent_end deferred_format failed for ${filePath}: ${entry.error}`);
 				summary.failed.push({ filePath, errors: [entry.error] });
-				runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["format"]) }]);
+				runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["format"]), toolNames: new Set(record.toolNames) }]);
 				continue;
 			}
 			const result = entry.result;
@@ -394,7 +426,7 @@ export async function handleAgentEnd({
 
 			if (result.formatFailures.length > 0) {
 				summary.failed.push({ filePath, errors: result.formatFailures });
-				runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["format"]) }]);
+				runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["format"]), toolNames: new Set(record.toolNames) }]);
 			}
 
 			if (result.formatChanged) {

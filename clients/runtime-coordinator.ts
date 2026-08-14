@@ -27,6 +27,13 @@ export interface CascadeSessionStats {
 
 export type DeferredMutationKind = "autofix" | "format";
 
+export interface PathSetLike {
+	add(value: string): PathSetLike;
+	has(value: string): boolean;
+	delete(value: string): boolean;
+	clear(): void;
+}
+
 export interface DeferredMutationRecord {
 	filePath: string;
 	/** Formatter/language cwd captured when the edit was analyzed. */
@@ -87,7 +94,7 @@ export class RuntimeCoordinator {
 		coldSnapshotTouches: 0,
 	};
 	private _complexityBaselines = new Map<string, FileComplexity>();
-	private _fixedThisTurn = new Set<string>();
+	private readonly _fixedThisTurn = new PathKeyedMap<true>(normalizeMapKey);
 	private readonly _writtenThisTurn = new PathKeyedMap<true>(normalizeMapKey);
 	private readonly _autofixDemotedThisTurn = new PathKeyedMap<true>(normalizeMapKey);
 	private readonly _reportedThisTurn = new Set<string>();
@@ -644,8 +651,16 @@ export class RuntimeCoordinator {
 		return this._complexityBaselines;
 	}
 
-	get fixedThisTurn(): Set<string> {
-		return this._fixedThisTurn;
+	get fixedThisTurn(): PathSetLike {
+		return {
+			add: (filePath) => {
+				this._fixedThisTurn.set(filePath, true);
+				return this.fixedThisTurn;
+			},
+			has: (filePath) => this._fixedThisTurn.has(filePath),
+			delete: (filePath) => this._fixedThisTurn.delete(filePath),
+			clear: () => this._fixedThisTurn.clear(),
+		};
 	}
 
 	get projectRulesScan(): RuleScanResult {
@@ -662,11 +677,10 @@ export class RuntimeCoordinator {
 	}
 
 	/**
-	 * Queue `filePath` for deferred formatting at `agent_end`. Returns `true`
-	 * when this call created a NEW pending entry, `false` when it re-touched
-	 * an already-queued file. #673: the caller uses this to publish
-	 * `pilens:format:queued` only on first queue entry, so repeated edits to
-	 * the same already-queued file before `agent_end` don't spam the bus.
+	 * Queue one mutation kind for `filePath` at `agent_end`. Returns `true`
+	 * when this call created a pending entry or added a new kind, and `false`
+	 * for a same-kind re-touch. Callers publish each kind's first transition
+	 * without spamming repeated edits before `agent_end`.
 	 */
 	deferMutation(
 		filePath: string,
@@ -680,6 +694,7 @@ export class RuntimeCoordinator {
 		const now = Date.now();
 		const existing = this._pendingDeferredMutations.get(key);
 		if (existing) {
+			const addedKind = !existing.kinds.has(kind);
 			existing.lastTouchedAt = now;
 			existing.cwd = cwd;
 			existing.turnStateCwd = turnStateCwd;
@@ -687,7 +702,7 @@ export class RuntimeCoordinator {
 			existing.kinds.add(kind);
 			existing.queuedTurnIndex = this._turnIndex;
 			existing.ownerSessionId = ownerSessionId;
-			return false;
+			return addedKind;
 		}
 		this._pendingDeferredMutations.set(key, {
 			filePath: key,
@@ -786,9 +801,17 @@ export class RuntimeCoordinator {
 	requeueDeferredFormatFiles(records: DeferredFormatRecord[]): void {
 		for (const record of records) {
 			const key = path.resolve(record.filePath);
-			if (!this._pendingDeferredMutations.has(key)) {
-				this._pendingDeferredMutations.set(key, record);
+			const existing = this._pendingDeferredMutations.get(key);
+			if (existing) {
+				for (const kind of record.kinds) existing.kinds.add(kind);
+				for (const toolName of record.toolNames) existing.toolNames.add(toolName);
+				continue;
 			}
+			this._pendingDeferredMutations.set(key, {
+				...record,
+				kinds: new Set(record.kinds),
+				toolNames: new Set(record.toolNames),
+			});
 		}
 	}
 

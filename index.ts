@@ -2017,7 +2017,6 @@ export default function (pi: ExtensionAPI) {
 			// before agent_end runs — otherwise project change-log entries and
 			// modified ranges this turn produced may not be reflected yet.
 			await flushDebouncedToolResults();
-			const { biomeClient, ruffClient } = await loadBootstrapClients();
 			await handleAgentEnd({
 				ctxCwd: ctx.cwd,
 				getFlag: (name: string, filePath?: string) =>
@@ -2030,8 +2029,10 @@ export default function (pi: ExtensionAPI) {
 				cacheManager,
 				getFormatService: () =>
 					getFormatService(runtime.telemetrySessionId, true),
-				biomeClient,
-				ruffClient,
+				getAutofixClients: async () => {
+					const { biomeClient, ruffClient } = await loadBootstrapClients();
+					return { biomeClient, ruffClient };
+				},
 				currentSessionId,
 			});
 			ctx.ui && updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);

@@ -21,11 +21,39 @@ describe("RuntimeCoordinator", () => {
 		const runtime = new RuntimeCoordinator();
 		const filePath = path.resolve("src/coalesced.ts");
 		expect(runtime.deferMutation(filePath, process.cwd(), "edit", process.cwd(), "autofix", "owner")).toBe(true);
-		expect(runtime.deferMutation(filePath, process.cwd(), "edit", process.cwd(), "format", "owner")).toBe(false);
+		expect(runtime.deferMutation(filePath, process.cwd(), "edit", process.cwd(), "format", "owner")).toBe(true);
 
 		const [record] = runtime.consumeDeferredFormatFiles();
 		expect(record.kinds).toEqual(new Set(["autofix", "format"]));
 		expect(record.ownerSessionId).toBe("owner");
+	});
+
+	it("merges independently requeued kinds and tool names for one path", () => {
+		const runtime = new RuntimeCoordinator();
+		const filePath = path.resolve("src/requeued.ts");
+		runtime.deferMutation(filePath, process.cwd(), "write", process.cwd(), "autofix");
+		const [claimed] = runtime.consumeDeferredFormatFiles();
+		runtime.requeueDeferredMutations([{ ...claimed, kinds: new Set(["autofix"]), toolNames: new Set(["write"]) }]);
+		runtime.requeueDeferredMutations([{ ...claimed, kinds: new Set(["format"]), toolNames: new Set(["edit"]) }]);
+
+		const [requeued] = runtime.consumeDeferredFormatFiles();
+		expect(requeued.kinds).toEqual(new Set(["autofix", "format"]));
+		expect(requeued.toolNames).toEqual(new Set(["write", "edit"]));
+	});
+
+	it("merges a requeued phase into a newer record queued during the drain", () => {
+		const runtime = new RuntimeCoordinator();
+		const filePath = path.resolve("src/newer.ts");
+		runtime.deferMutation(filePath, "old-cwd", "write", "old-root", "autofix", "old-owner");
+		const [claimed] = runtime.consumeDeferredFormatFiles();
+		runtime.deferMutation(filePath, "new-cwd", "edit", "new-root", "format", "new-owner");
+		runtime.requeueDeferredMutations([claimed]);
+
+		const [record] = runtime.consumeDeferredFormatFiles();
+		expect(record.kinds).toEqual(new Set(["format", "autofix"]));
+		expect(record.toolNames).toEqual(new Set(["edit", "write"]));
+		expect(record.cwd).toBe("new-cwd");
+		expect(record.ownerSessionId).toBe("new-owner");
 	});
 	it("resetForSession clears any existing read guard state", () => {
 		const runtime = new RuntimeCoordinator();

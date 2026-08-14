@@ -36,8 +36,6 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
-- **Per-edit autofix no longer mutates files mid-turn (closes #1414)** — `edit` queues pipeline autofix for the owning `agent_end`, where autofix runs before the stable formatting pass; `write` keeps immediate autofix and returns authoritative post-fix file content, while write-then-edit paths stay demoted for the rest of the turn. Deferred mutation records coalesce both phases, preserve session ownership, deduplicate project-wide Rust/Dart fixers, and requeue failures per phase.
-
 - **Git guard closes shell-expansion and command-wrapper bypasses (refs #1084, PR #1395)** — command-position normalization now handles all supported IFS and positional-parameter forms, and guarded verbs nested in known or unknown command-string launchers fail closed while literal text remains non-blocking.
 
 - **LSP roots and per-session clients are conservatively bounded (closes #1325, refs #1126, refs #1129)** — manifest-bearing fixture conventions (`tests/fixtures`, `__fixtures__`, and `testdata`), gitignored directories, and atomic-write staging namespaces no longer become standalone LSP roots; their files attach to the nearest eligible ancestor project. Client reuse remains keyed by server and normalized resolved root, while a configurable `PI_LENS_LSP_CLIENT_CEILING` (24 by default) evicts the least-recently-used idle client through graceful shutdown before spawning another and never evicts a client with an active LSP request.
