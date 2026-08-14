@@ -158,6 +158,9 @@ const READ_HASH_MAX_LINES = Math.max(
  * synchronous disk read so bridge registration never hashes an unbounded file.
  */
 const READ_BINDING_MAX_BYTES = 4 * 1024 * 1024;
+const READ_GUARD_MAX_FILES = 256;
+const READ_GUARD_IDLE_EVICT_MS_DEFAULT = 30 * 60_000;
+const READ_GUARD_DEPENDENCY_WINDOW_MS = 5 * 60_000;
 
 export function captureReadContentBinding(
 	filePath: string,
@@ -379,6 +382,8 @@ export class ReadGuard {
 	private readonly config: ReadGuardConfig;
 	private readonly reads = new Map<string, ReadRecord[]>();
 	private readonly edits = new Map<string, EditRecord[]>();
+	private readonly fileLastUsed = new Map<string, number>();
+	private readonly fileIdleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	private readonly fileTime: FileTime;
 	private readonly exemptions = new Set<string>(); // One-time exemptions via /lens-allow-edit
 	private readonly pendingCreations = new Map<
@@ -414,6 +419,54 @@ export class ReadGuard {
 		return normalizeFilePath(filePath);
 	}
 
+	private idleEvictMs(): number {
+		const value = Number.parseInt(process.env.PI_LENS_READ_GUARD_IDLE_EVICT_MS ?? "", 10);
+		return Number.isSafeInteger(value) && value > 0 ? value : READ_GUARD_IDLE_EVICT_MS_DEFAULT;
+	}
+
+	private clearFileTimer(filePath: string): void {
+		const timer = this.fileIdleTimers.get(filePath);
+		if (timer) clearTimeout(timer);
+		this.fileIdleTimers.delete(filePath);
+	}
+
+	private evictFile(filePath: string): void {
+		this.clearFileTimer(filePath);
+		this.reads.delete(filePath);
+		this.edits.delete(filePath);
+		this.fileLastUsed.delete(filePath);
+	}
+
+	private touchFile(filePath: string): void {
+		const now = Date.now();
+		this.fileLastUsed.set(filePath, now);
+		this.clearFileTimer(filePath);
+		const stamp = now;
+		const timer = setTimeout(() => {
+			if (this.fileLastUsed.get(filePath) !== stamp) return;
+			const hasRecentDependency = [...(this.reads.get(filePath) ?? [])].some(
+				(read) => now - read.timestamp < READ_GUARD_DEPENDENCY_WINDOW_MS,
+			);
+			if (hasRecentDependency) this.touchFile(filePath);
+			else this.evictFile(filePath);
+		}, this.idleEvictMs());
+		timer.unref?.();
+		this.fileIdleTimers.set(filePath, timer);
+	}
+
+	private enforceFileCap(): void {
+		while (this.reads.size > READ_GUARD_MAX_FILES) {
+			const victim = [...this.reads.keys()]
+				.filter((filePath) => {
+					const last = this.fileLastUsed.get(filePath) ?? 0;
+					return Date.now() - last >= READ_GUARD_DEPENDENCY_WINDOW_MS;
+				})
+				.sort((a, b) => (this.fileLastUsed.get(a) ?? 0) - (this.fileLastUsed.get(b) ?? 0))[0];
+			if (!victim) break;
+			this.evictFile(victim);
+		}
+	}
+
 	// --- Public API ---
 
 	/**
@@ -436,6 +489,8 @@ export class ReadGuard {
 		const arr = this.reads.get(storedRecord.filePath) ?? [];
 		arr.push(storedRecord);
 		this.reads.set(storedRecord.filePath, arr);
+		this.touchFile(storedRecord.filePath);
+		this.enforceFileCap();
 
 		logReadGuardEvent({
 			event: "read_recorded",
@@ -518,6 +573,7 @@ export class ReadGuard {
 		// Canonicalize once: every map lookup below (and every private helper this
 		// passes filePath to) must agree with how recordRead keyed the read.
 		filePath = this.key(filePath);
+		if (this.reads.has(filePath) || this.edits.has(filePath)) this.touchFile(filePath);
 
 		// Check exemptions
 		if (this.exemptions.has(filePath)) {
@@ -872,7 +928,9 @@ export class ReadGuard {
 	 * Get all read records for a file (for debugging).
 	 */
 	getReadHistory(filePath: string): ReadRecord[] {
-		return this.reads.get(this.key(filePath)) ?? [];
+		const key = this.key(filePath);
+		if (this.reads.has(key)) this.touchFile(key);
+		return this.reads.get(key) ?? [];
 	}
 
 	/**
@@ -954,7 +1012,9 @@ export class ReadGuard {
 	 * Get all edit records for a file (for debugging).
 	 */
 	getEditHistory(filePath: string): EditRecord[] {
-		return this.edits.get(this.key(filePath)) ?? [];
+		const key = this.key(filePath);
+		if (this.edits.has(key)) this.touchFile(key);
+		return this.edits.get(key) ?? [];
 	}
 
 	// --- Private helpers ---
@@ -1410,6 +1470,7 @@ export class ReadGuard {
 		touchedLines: [number, number],
 		verdict: ReadGuardVerdict,
 	): void {
+		this.touchFile(filePath);
 		const arr = this.edits.get(filePath) ?? [];
 		arr.push({
 			filePath,

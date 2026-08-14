@@ -1015,6 +1015,39 @@ describe("ReadGuard", () => {
 	});
 });
 
+describe("ReadGuard Tier-2 idle decay and bounds (#1389)", () => {
+	it("evicts inactive files but preserves a recent read needed by an edit", () => {
+		vi.useFakeTimers();
+		try {
+			const guard = createReadGuard("tier2-read-guard");
+			const oldPath = "/tmp/old-tier2.ts";
+			const recentPath = "/tmp/recent-tier2.ts";
+			guard.recordRead(createReadRecord(oldPath, { timestamp: Date.now() - 31 * 60_000 }));
+			guard.recordRead(createReadRecord(recentPath));
+			vi.advanceTimersByTime(35 * 60_000 + 1);
+			expect(guard.getReadHistory(oldPath)).toHaveLength(0);
+			expect(guard.checkEdit(recentPath).action).toBe("allow");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("recovers equivalent safety after an evicted file is read again", () => {
+		vi.useFakeTimers();
+		try {
+			const guard = createReadGuard("tier2-read-recovery");
+			const filePath = "/tmp/recover-tier2.ts";
+			guard.recordRead(createReadRecord(filePath));
+			vi.advanceTimersByTime(61 * 60_000 + 1);
+			expect(guard.checkEdit(filePath).action).toBe("block");
+			guard.recordRead(createReadRecord(filePath));
+			expect(guard.checkEdit(filePath).action).toBe("allow");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
 // #1041: export/import of the read-set across a session resume.
 describe("ReadGuard export/import across resume (#1041)", () => {
 	// Write, then backdate mtime to BEFORE any guard's session start so the file

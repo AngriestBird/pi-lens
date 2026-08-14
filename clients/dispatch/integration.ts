@@ -601,8 +601,45 @@ type ReverseDepsCacheEntry = {
 	savedToSnapshot: boolean;
 	/** buildGeneration of the graph this index was derived from. */
 	generation: number | undefined;
+	lastUsedAt: number;
+	idleTimer?: ReturnType<typeof setTimeout>;
 };
 const reverseDepsIndexCache = new Map<string, ReverseDepsCacheEntry>();
+const REVERSE_DEPS_MAX_WARM_ROOTS = 8;
+const REVERSE_DEPS_IDLE_EVICT_MS_DEFAULT = 20 * 60_000;
+
+function reverseDepsIdleEvictMs(): number {
+	const value = Number.parseInt(process.env.PI_LENS_REVERSE_DEPS_IDLE_EVICT_MS ?? "", 10);
+	return Number.isSafeInteger(value) && value > 0 ? value : REVERSE_DEPS_IDLE_EVICT_MS_DEFAULT;
+}
+
+function deleteReverseDepsEntry(key: string): void {
+	const entry = reverseDepsIndexCache.get(key);
+	if (entry?.idleTimer) clearTimeout(entry.idleTimer);
+	reverseDepsIndexCache.delete(key);
+}
+
+function touchReverseDepsEntry(key: string, entry: ReverseDepsCacheEntry): void {
+	entry.lastUsedAt = Date.now();
+	if (entry.idleTimer) clearTimeout(entry.idleTimer);
+	const stamp = entry.lastUsedAt;
+	entry.idleTimer = setTimeout(() => {
+		if (reverseDepsIndexCache.get(key) !== entry || entry.lastUsedAt !== stamp) return;
+		deleteReverseDepsEntry(key);
+	}, reverseDepsIdleEvictMs());
+	entry.idleTimer.unref?.();
+}
+
+function setReverseDepsEntry(key: string, entry: Omit<ReverseDepsCacheEntry, "lastUsedAt" | "idleTimer">): void {
+	const resident: ReverseDepsCacheEntry = { ...entry, lastUsedAt: Date.now() };
+	reverseDepsIndexCache.set(key, resident);
+	touchReverseDepsEntry(key, resident);
+	while (reverseDepsIndexCache.size > REVERSE_DEPS_MAX_WARM_ROOTS) {
+		const victim = [...reverseDepsIndexCache.entries()].sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
+		if (!victim) break;
+		deleteReverseDepsEntry(victim[0]);
+	}
+}
 
 function reverseDepsReuseEnabled(): boolean {
 	const raw = process.env.PI_LENS_REVERSE_DEPS_REUSE;
@@ -611,7 +648,23 @@ function reverseDepsReuseEnabled(): boolean {
 
 /** Test-reset hook — mirrors clearReviewGraphWorkspaceCache's scope. */
 export function clearReverseDepsIndexCache(): void {
-	reverseDepsIndexCache.clear();
+	for (const key of reverseDepsIndexCache.keys()) deleteReverseDepsEntry(key);
+}
+
+/** Test-only visibility for Tier-2 eviction/recovery tests. */
+export function _getReverseDepsIndexCacheKeysForTests(): string[] {
+	return [...reverseDepsIndexCache.entries()]
+		.sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)
+		.map(([key]) => key);
+}
+
+/** Test-only seed that still exercises the production timer/cap seam. */
+export function _seedReverseDepsIndexCacheForTests(
+	key: string,
+	index: ReverseDependencyIndex,
+	generation?: number,
+): void {
+	setReverseDepsEntry(key, { index, savedToSnapshot: false, generation });
 }
 
 // Bounded transitive cascade (#162): expand neighbour derivation beyond the
@@ -888,6 +941,7 @@ export async function computeCascadeForFile(
 		const graphBuildInfoTrustworthy = graphBuildInfoIsTrustworthy(graph);
 		const workspaceKey = normalizeMapKey(cwd);
 		const cachedReverseDeps = reverseDepsIndexCache.get(workspaceKey);
+		if (cachedReverseDeps) touchReverseDepsEntry(workspaceKey, cachedReverseDeps);
 		const importDelta = getGraphImportChanges(graph);
 		// A one-step delta is only usable against an index cached at exactly the
 		// delta's predecessor generation. Builds minted elsewhere (mcp analyze,
@@ -943,7 +997,7 @@ export async function computeCascadeForFile(
 				index: reverseDepsIndex,
 				dbg,
 			});
-			reverseDepsIndexCache.set(workspaceKey, {
+			setReverseDepsEntry(workspaceKey, {
 				index: reverseDepsIndex,
 				savedToSnapshot: reverseDepsSaved,
 				generation: graph.buildGeneration,
@@ -968,7 +1022,7 @@ export async function computeCascadeForFile(
 				index: reverseDepsIndex,
 				dbg,
 			});
-			reverseDepsIndexCache.set(workspaceKey, {
+			setReverseDepsEntry(workspaceKey, {
 				index: reverseDepsIndex,
 				savedToSnapshot: reverseDepsSaved,
 				generation: graph.buildGeneration,
