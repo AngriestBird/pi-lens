@@ -104,11 +104,7 @@ function parseSequenceIndex(value: unknown): SnapshotSequenceIndex | undefined {
 // fallback. gzip measured 5-10x on top of the #957 compaction win (the
 // review-graph's own measurement was 60MB → 1.4MB).
 export function getProjectSnapshotPath(cwd: string): string {
-	return path.join(
-		getProjectDataDir(cwd),
-		"cache",
-		"project-snapshot.json.gz",
-	);
+	return path.join(getProjectDataDir(cwd), "cache", "project-snapshot.json.gz");
 }
 
 /**
@@ -202,7 +198,9 @@ function parseSnapshotMeta(value: unknown): ProjectSnapshotMeta | null {
  * legacy installs — callers must treat a `null` return as "no opinion" and
  * fall through to parsing the body. #947.
  */
-export function readProjectSnapshotMeta(cwd: string): ProjectSnapshotMeta | null {
+export function readProjectSnapshotMeta(
+	cwd: string,
+): ProjectSnapshotMeta | null {
 	const meta = readJsonCache<ProjectSnapshotMeta>(
 		getProjectSnapshotMetaPath(cwd),
 		(parsed) => parseSnapshotMeta(parsed) ?? undefined,
@@ -357,7 +355,10 @@ export function resetSnapshotBodyReadCountForTests(): void {
 	_snapshotBodyReadCountForTests = 0;
 }
 
-function readSnapshotBody(bodyPath: string, gz: boolean): {
+function readSnapshotBody(
+	bodyPath: string,
+	gz: boolean,
+): {
 	snapshot: ProjectSnapshot | null;
 	rawBytes: number;
 } {
@@ -426,7 +427,14 @@ export function loadProjectSnapshot(cwd: string): ProjectSnapshot | null {
 		return cached.snapshot;
 	}
 	const { snapshot, rawBytes } = readSnapshotBody(body.path, body.gz);
-	if (rawBytes > 0 && rawBytes <= SNAPSHOT_PARSE_CACHE_MAX_BYTES) {
+	// Serialized postings expand into a much larger object graph. Keeping that
+	// graph here duplicates the live warm WordIndex, so word-index snapshots are
+	// deliberately one-shot disk reads rather than parse-cache residents (#1370).
+	if (
+		rawBytes > 0 &&
+		rawBytes <= SNAPSHOT_PARSE_CACHE_MAX_BYTES &&
+		!snapshot?.wordIndex
+	) {
 		cacheParsedSnapshot(cacheKey, {
 			mtimeMs: body.mtimeMs,
 			size: body.size,
@@ -527,6 +535,22 @@ function reconcileAuthoritativeAfterWrite(
 	// Only reconcile the entry that still belongs to THIS (latest) generation —
 	// a superseding save already replaced it with a newer object.
 	if (!entry || entry.snapshot !== pending.snapshot) return;
+	// The worker needs the serialized snapshot until promotion completes, but
+	// retaining it afterward duplicates the mutable warm index's postings. A
+	// shared reference is unsafe: ProjectSnapshot stores serialized arrays while
+	// WordIndex owns mutable Map/PathKeyedMap state. Drop the authoritative copy
+	// after publication; later merge-writers rehydrate the canonical disk body.
+	if (pending.snapshot.wordIndex) {
+		authoritativeSnapshots.delete(pending.key);
+		logLatency({
+			type: "phase",
+			phase: "project_snapshot_word_index_released",
+			filePath: pending.gzPath,
+			durationMs: 0,
+			metadata: { rawBytes },
+		});
+		return;
+	}
 	if (rawBytes > SNAPSHOT_PARSE_CACHE_MAX_BYTES) {
 		// Benign but invisible otherwise: the next load will re-parse this body
 		// from disk instead of serving the in-process object.
@@ -676,7 +700,8 @@ function handleSnapshotWorkerDeath(reason: string): void {
 	_snapshotWorkerDisabled = true;
 	const requests = [..._snapshotWorkerRequests.values()];
 	_snapshotWorkerRequests.clear();
-	for (const pending of requests) dispatchMainThreadWriteThroughSeam(pending, reason);
+	for (const pending of requests)
+		dispatchMainThreadWriteThroughSeam(pending, reason);
 }
 
 function resolveSnapshotPersistWorkerPath(): string | undefined {
@@ -688,10 +713,7 @@ function resolveSnapshotPersistWorkerPath(): string | undefined {
 	// resolvePersistWorkerPath (#950 review F1).
 	const candidates = [
 		new URL("./project-snapshot-persist-worker.js", import.meta.url),
-		new URL(
-			"./clients/project-snapshot-persist-worker.js",
-			import.meta.url,
-		),
+		new URL("./clients/project-snapshot-persist-worker.js", import.meta.url),
 	];
 	for (const url of candidates) {
 		try {
@@ -710,7 +732,9 @@ function getSnapshotPersistWorker(): Worker | undefined {
 	try {
 		const workerPath = resolveSnapshotPersistWorkerPath();
 		if (workerPath === undefined) {
-			handleSnapshotWorkerDeath("persist worker script not found in any layout");
+			handleSnapshotWorkerDeath(
+				"persist worker script not found in any layout",
+			);
 			return undefined;
 		}
 		const worker = new Worker(workerPath);
@@ -792,7 +816,8 @@ function ensureSnapshotPersistExitHook(): void {
 		for (const pending of requests) {
 			// Only the newest generation per key still matters; older ones are
 			// superseded and their stage files are swept on next launch.
-			if (_snapshotGenerations.get(pending.key) !== pending.generation) continue;
+			if (_snapshotGenerations.get(pending.key) !== pending.generation)
+				continue;
 			writeSnapshotBodyOnMainThread(pending, "exit_hook");
 		}
 		void _snapshotPersistWorker?.terminate();
@@ -945,7 +970,9 @@ export function resetProjectSnapshotPersistWorkerForTests(): void {
 }
 
 /** Test-only mutation switch for proving the supersession invariant. */
-export function setProjectSnapshotGenerationGateForTests(enabled: boolean): void {
+export function setProjectSnapshotGenerationGateForTests(
+	enabled: boolean,
+): void {
 	_snapshotGenerationGateEnabledForTests = enabled;
 }
 
@@ -1048,7 +1075,11 @@ export function saveRuntimeProjectSnapshot(args: {
 			// isProjectSnapshotFresh on load, seq mismatch) would get silently
 			// re-stamped with the CURRENT seq by this save, "laundering" a stale
 			// index into looking fresh before the word-index task even runs.
-			if (!snapshot.wordIndex && existing.wordIndex && existing.seq === snapshot.seq) {
+			if (
+				!snapshot.wordIndex &&
+				existing.wordIndex &&
+				existing.seq === snapshot.seq
+			) {
 				snapshot.wordIndex = existing.wordIndex;
 			}
 		}
