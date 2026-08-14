@@ -234,7 +234,7 @@ Rule-id normalization derives its language suffixes from the bundled CodeRabbit 
 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
 
-Tier-2 cache bounds (#1389) use the Tier-1 idle-timer/LRU shape: reverse-dependency and topology entries clear their timers through one deletion helper, tree-sitter query caches use insertion-order LRU with query disposal, and ReadGuard protects a recent read/edit dependency window before file-cap eviction. Widget-state and Tier-3 cache bounds remain deferred.
+Tier-2 cache bounds (#1389) use the Tier-1 idle-timer/LRU shape where entries are rebuildable: reverse-dependency and topology entries clear their timers through one deletion helper, tree-sitter query caches use insertion-order LRU with query disposal. ReadGuard is the exception: its reads are behavior-gating state, so unconsumed reads survive idle time and file-cap pressure until the corresponding edit is published; only consumed reads may be evicted. Widget-state and Tier-3 cache bounds remain deferred.
 
 Extension policy tests bind JS/TS fact applicability and bash source-like file
 access to `KIND_EXTENSIONS`; the only intentional exceptions are the documented

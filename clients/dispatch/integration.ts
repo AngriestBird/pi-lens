@@ -615,13 +615,20 @@ function reverseDepsIdleEvictMs(): number {
 
 function deleteReverseDepsEntry(key: string): void {
 	const entry = reverseDepsIndexCache.get(key);
-	if (entry?.idleTimer) clearTimeout(entry.idleTimer);
+	if (entry?.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+	if (entry) entry.idleTimer = undefined;
 	reverseDepsIndexCache.delete(key);
 }
 
-function touchReverseDepsEntry(key: string, entry: ReverseDepsCacheEntry): void {
+function touchReverseDepsEntry(
+	key: string,
+	entry: ReverseDepsCacheEntry,
+	armIdleTimer = true,
+): void {
 	entry.lastUsedAt = Date.now();
-	if (entry.idleTimer) clearTimeout(entry.idleTimer);
+	if (entry.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+	entry.idleTimer = undefined;
+	if (!armIdleTimer) return;
 	const stamp = entry.lastUsedAt;
 	entry.idleTimer = setTimeout(() => {
 		if (reverseDepsIndexCache.get(key) !== entry || entry.lastUsedAt !== stamp) return;
@@ -630,10 +637,14 @@ function touchReverseDepsEntry(key: string, entry: ReverseDepsCacheEntry): void 
 	entry.idleTimer.unref?.();
 }
 
-function setReverseDepsEntry(key: string, entry: Omit<ReverseDepsCacheEntry, "lastUsedAt" | "idleTimer">): void {
+function setReverseDepsEntry(
+	key: string,
+	entry: Omit<ReverseDepsCacheEntry, "lastUsedAt" | "idleTimer">,
+	armIdleTimer = true,
+): void {
 	const resident: ReverseDepsCacheEntry = { ...entry, lastUsedAt: Date.now() };
 	reverseDepsIndexCache.set(key, resident);
-	touchReverseDepsEntry(key, resident);
+	touchReverseDepsEntry(key, resident, armIdleTimer);
 	while (reverseDepsIndexCache.size > REVERSE_DEPS_MAX_WARM_ROOTS) {
 		const victim = [...reverseDepsIndexCache.entries()].sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
 		if (!victim) break;
@@ -828,6 +839,9 @@ export async function computeCascadeForFile(
 		onWordIndexUpdated?: (index: WordIndex) => void;
 	} = {},
 ): Promise<CascadeRun> {
+	const reverseDepsTimersToRelease = new Set<string>();
+	const reverseDepsEntriesAtStart = new Set(reverseDepsIndexCache.values());
+	try {
 	const {
 		hasBlockers = false,
 		dbg,
@@ -941,7 +955,10 @@ export async function computeCascadeForFile(
 		const graphBuildInfoTrustworthy = graphBuildInfoIsTrustworthy(graph);
 		const workspaceKey = normalizeMapKey(cwd);
 		const cachedReverseDeps = reverseDepsIndexCache.get(workspaceKey);
-		if (cachedReverseDeps) touchReverseDepsEntry(workspaceKey, cachedReverseDeps);
+		if (cachedReverseDeps) {
+			touchReverseDepsEntry(workspaceKey, cachedReverseDeps, false);
+			reverseDepsTimersToRelease.add(workspaceKey);
+		}
 		const importDelta = getGraphImportChanges(graph);
 		// A one-step delta is only usable against an index cached at exactly the
 		// delta's predecessor generation. Builds minted elsewhere (mcp analyze,
@@ -1001,7 +1018,8 @@ export async function computeCascadeForFile(
 				index: reverseDepsIndex,
 				savedToSnapshot: reverseDepsSaved,
 				generation: graph.buildGeneration,
-			});
+			}, false);
+			reverseDepsTimersToRelease.add(workspaceKey);
 			logCascade({
 				phase: "reverse_deps_cache",
 				filePath,
@@ -1026,7 +1044,8 @@ export async function computeCascadeForFile(
 				index: reverseDepsIndex,
 				savedToSnapshot: reverseDepsSaved,
 				generation: graph.buildGeneration,
-			});
+			}, false);
+			reverseDepsTimersToRelease.add(workspaceKey);
 			logCascade({
 				phase: "reverse_deps_cache",
 				filePath,
@@ -1198,7 +1217,7 @@ export async function computeCascadeForFile(
 				} catch {
 					// Timeout or LSP error — fall back to import-graph neighbors
 				} finally {
-					if (refsTimer) clearTimeout(refsTimer);
+					if (refsTimer !== undefined) clearTimeout(refsTimer);
 				}
 				if (Date.now() - refsStart > 1200) break; // Hard ceiling
 			}
@@ -1935,6 +1954,22 @@ export async function computeCascadeForFile(
 		// still notes downstream impact was under-computed this turn.
 		...(impact.indeterminate && { indeterminate: impact.indeterminate }),
 	};
+	} finally {
+		// Keep the cache entry warm, but do not let a one-shot cascade leave an
+		// idle handle behind. The next consumer re-arms it through touch.
+		for (const key of reverseDepsTimersToRelease) {
+			const entry = reverseDepsIndexCache.get(key);
+			if (entry?.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+			if (entry) entry.idleTimer = undefined;
+		}
+		for (const [key, entry] of reverseDepsIndexCache) {
+			if (entry.idleTimer !== undefined) clearTimeout(entry.idleTimer);
+			entry.idleTimer = undefined;
+			if (!reverseDepsTimersToRelease.has(key) && reverseDepsEntriesAtStart.has(entry)) {
+				reverseDepsTimersToRelease.add(key);
+			}
+		}
+	}
 }
 
 function diagnosticDeltaKey(

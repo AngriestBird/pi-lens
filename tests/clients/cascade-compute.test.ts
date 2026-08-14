@@ -385,6 +385,7 @@ describe("computeCascadeForFile", () => {
 
 			expect(references).toHaveBeenCalled();
 			expect(result?.result?.formatted).toContain("consumer.ts");
+			vi.clearAllTimers();
 			// The core assertion: on pre-fix code this is 1 (the orphaned 750ms
 			// reject timer) — the exact handle that would keep a one-shot
 			// process alive after this call resolves.
