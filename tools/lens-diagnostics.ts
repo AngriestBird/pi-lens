@@ -200,7 +200,9 @@ export function createLensDiagnosticsTool(
 	// The returned closure is safe for the later async sweep to invoke because it
 	// never dereferences the session-guarded ctx.ui getter.
 	captureLspStatusRepaint?: (ctx: unknown) => (() => void) | undefined,
-	getRuntime?: () => import("../clients/runtime-coordinator.js").RuntimeCoordinator,
+	getRuntime?: () =>
+		| import("../clients/runtime-coordinator.js").RuntimeCoordinator
+		| undefined,
 ) {
 	return {
 		name: "lens_diagnostics" as const,

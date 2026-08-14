@@ -129,9 +129,18 @@ export function consumeTestFindings(
 ): ContextResult | undefined {
 	const findings = peekTestFindings(cacheManager, cwd, runtime);
 	if (!findings) return;
+	// Retire the content but PRESERVE the generation high-water mark: nulling
+	// the whole slot would let a still-in-flight OLDER batch see `undefined`,
+	// pass the strictly-greater suppression check, and resurrect a consumed
+	// one-shot advisory with stale results. An empty-content record peeks as
+	// undelivered while keeping late-generation ordering intact.
+	const priorGeneration = cacheManager.readCache<TestRunnerFindingsCache>(
+		"test-runner-findings",
+		cwd,
+	)?.data?.testRunGeneration;
 	cacheManager.writeCache(
 		"test-runner-findings",
-		null as unknown as TestRunnerFindingsCache,
+		{ content: "", testRunGeneration: priorGeneration } as TestRunnerFindingsCache,
 		cwd,
 	);
 	return findings;
@@ -151,7 +160,15 @@ export function acknowledgeTurnEndFindings(cacheManager: CacheManager, cwd: stri
 export function acknowledgeTestFindings(cacheManager: CacheManager, cwd: string): void {
 	const findings = cacheManager.readCache<TestRunnerFindingsCache>("test-runner-findings", cwd);
 	if (!findings?.data?.content) return;
-	cacheManager.writeCache("test-runner-findings", null as unknown as TestRunnerFindingsCache, cwd);
+	// Same high-water-mark preservation as consumeTestFindings.
+	cacheManager.writeCache(
+		"test-runner-findings",
+		{
+			content: "",
+			testRunGeneration: findings.data.testRunGeneration,
+		} as TestRunnerFindingsCache,
+		cwd,
+	);
 }
 
 export function consumeSessionStartGuidance(

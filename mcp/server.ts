@@ -71,6 +71,7 @@ import {
 import { createAstGrepReplaceTool } from "../tools/ast-grep-replace.js";
 import { createAstGrepSearchTool } from "../tools/ast-grep-search.js";
 import { createLensDiagnosticsTool } from "../tools/lens-diagnostics.js";
+import { peekMcpSessionRuntime } from "../clients/mcp/session.js";
 import { createLspDiagnosticsTool } from "../tools/lsp-diagnostics.js";
 import { createLspNavigationTool } from "../tools/lsp-navigation.js";
 import {
@@ -545,6 +546,15 @@ const cacheManager = new CacheManager();
 const lensDiagnosticsTool = createLensDiagnosticsTool(
 	cacheManager,
 	() => DEFAULT_CWD,
+	undefined,
+	undefined,
+	undefined,
+	undefined,
+	// #1413 surface parity: validate cached test-runner findings against the
+	// same session identity the in-process path uses. Resolved lazily — until
+	// an MCP session context exists there is no session to compare against and
+	// validation skips the check, which is the honest classification.
+	() => peekMcpSessionRuntime(),
 );
 const astGrepClient = new AstGrepClient();
 const astGrepSearchTool = createAstGrepSearchTool(astGrepClient);

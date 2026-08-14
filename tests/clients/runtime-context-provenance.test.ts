@@ -8,6 +8,7 @@ import {
 } from "../../clients/advisory-provenance.js";
 import { CacheManager } from "../../clients/cache-manager.js";
 import {
+	consumeTestFindings,
 	peekTestFindings,
 	consumeTurnEndFindings,
 	peekTurnEndFindings,
@@ -124,6 +125,24 @@ describe("advisory provenance at context delivery (#1413)", () => {
 		const content = peekTestFindings(cache, env.tmpDir, runtime)?.messages[0]?.content ?? "";
 		expect(content).toContain("[from a prior turn");
 		expect(content).not.toContain("Historical finding");
+	});
+
+	it("preserves the test-run generation high-water mark across consumption", () => {
+		const { env, runtime, cache, provenance } = setup();
+		cache.writeCache("test-runner-findings", {
+			content: "failure from batch B",
+			testRunGeneration: 2,
+			provenance,
+		}, env.tmpDir);
+		const delivered = consumeTestFindings(cache, env.tmpDir, runtime);
+		expect(delivered).toBeDefined();
+		// One-shot: nothing left to deliver...
+		expect(peekTestFindings(cache, env.tmpDir, runtime)).toBeUndefined();
+		// ...but the generation survives, so a still-in-flight OLDER batch (gen 1)
+		// comparing against the persisted slot is suppressed instead of seeing
+		// undefined and resurrecting a consumed advisory with stale results.
+		const persisted = cache.readCache<Record<string, unknown>>("test-runner-findings", env.tmpDir)?.data;
+		expect(persisted).toMatchObject({ content: "", testRunGeneration: 2 });
 	});
 
 	it("preserves structured commit-gate state when consumed", () => {
