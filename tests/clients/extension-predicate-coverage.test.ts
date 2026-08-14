@@ -21,8 +21,14 @@ describe("extension predicate coverage", () => {
 			);
 		}
 
+		// The pre-#1388 regex `\.(?:c|m)?(?:js|jsx|ts|tsx)$` also matched these
+		// four compound suffixes. None exists in any toolchain (TypeScript ships
+		// .mts/.cts but no JSX variants of them), so their removal is deliberate,
+		// not a regression — this pins that decision.
 		expect(isJstsFactFile("fixture.cjsx")).toBe(false);
 		expect(isJstsFactFile("fixture.mjsx")).toBe(false);
+		expect(isJstsFactFile("fixture.ctsx")).toBe(false);
+		expect(isJstsFactFile("fixture.mtsx")).toBe(false);
 	});
 
 	it("accepts every canonical kind extension for bash file access", () => {
