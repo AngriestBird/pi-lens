@@ -231,6 +231,47 @@ export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
 	],
 };
 
+/** Return whether a path has an extension registered for the given file kind. */
+export function hasKindExtension(filePath: string, kind: FileKind): boolean {
+	const extension = extname(filePath).toLowerCase();
+	return KIND_EXTENSIONS[kind].some((candidate) => candidate === extension);
+}
+
+// Fact providers intentionally stay on the ordinary JS/TS source extensions.
+// Vue/Svelte files are classified as jsts for project-wide discovery, but their
+// embedded-language contents are not valid inputs for these tree-sitter facts.
+// Keep that one policy decision here so the function and import providers agree.
+const JSTS_FACT_EXTENSIONS = new Set(
+	KIND_EXTENSIONS.jsts.filter((extension) => ![".vue", ".svelte"].includes(extension)),
+);
+
+/** Whether the JS/TS fact providers should parse this path. */
+export function isJstsFactFile(filePath: string): boolean {
+	return JSTS_FACT_EXTENSIONS.has(extname(filePath).toLowerCase());
+}
+
+// Bash access tracking also accepts common text/config files which do not have
+// a semantic FileKind. Every source extension is derived from KIND_EXTENSIONS;
+// only this explicit legacy text/config allowlist lives outside that registry.
+const NON_KIND_READABLE_EXTENSIONS = new Set([
+	".txt",
+	".env",
+	".cfg",
+	".conf",
+	".ini",
+	".xml",
+]);
+
+/** Whether bash file-access parsing should treat a path as source-like. */
+export function isReadableSourceFile(filePath: string): boolean {
+	const extension = extname(filePath).toLowerCase();
+	return (
+		Object.keys(KIND_EXTENSIONS).some((kind) =>
+			hasKindExtension(filePath, kind as FileKind),
+		) || NON_KIND_READABLE_EXTENSIONS.has(extension)
+	);
+}
+
 // --- Shared Project Root Markers ---
 
 /**

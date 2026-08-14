@@ -156,9 +156,7 @@ const extractorCache = new Map<string, TreeSitterSymbolExtractor | null>();
 // invocation. A separate workspace cache below preserves the expensive parsed
 // graph across invocations when source file mtimes/sizes have not changed.
 const _buildCache = new Map<string, Promise<ReviewGraph>>();
-const _workspaceGraphCache = new Map<
-	string,
-	{
+interface WorkspaceGraphCacheEntry {
 		signature: string;
 		fileSignatures: Map<string, string>;
 		fileHashes?: Map<string, string>;
@@ -176,8 +174,75 @@ const _workspaceGraphCache = new Map<
 		fastPathSinceVerify?: number;
 		/** #459: generation of this entry's graph content — see ReviewGraph.buildGeneration. */
 		buildGeneration?: number;
+		lastUsedAt: number;
+		idleTimer?: ReturnType<typeof setTimeout>;
+}
+const _workspaceGraphCache = new Map<string, WorkspaceGraphCacheEntry>();
+const REVIEW_GRAPH_MAX_WARM_WORKSPACES = 8;
+const REVIEW_GRAPH_IDLE_EVICT_MS_DEFAULT = 20 * 60_000;
+// A workspace-wide clear must invalidate builds for workspaces that are not
+// resident yet, too. This process-wide component therefore survives cache
+// deletion; per-workspace eviction/reset increments the map component below.
+let _workspaceCacheEpoch = 0;
+const _workspaceCacheEpochs = new Map<string, number>();
+
+function workspaceCacheEpoch(key: string): number {
+	return _workspaceCacheEpoch + (_workspaceCacheEpochs.get(key) ?? 0);
+}
+
+function reviewGraphIdleEvictMs(): number {
+	const value = Number.parseInt(process.env.PI_LENS_REVIEW_GRAPH_IDLE_EVICT_MS ?? "", 10);
+	return Number.isSafeInteger(value) && value > 0 ? value : REVIEW_GRAPH_IDLE_EVICT_MS_DEFAULT;
+}
+
+function clearWorkspaceGraphTimer(entry: { idleTimer?: ReturnType<typeof setTimeout> }): void {
+	if (entry.idleTimer) clearTimeout(entry.idleTimer);
+	entry.idleTimer = undefined;
+}
+
+function evictWorkspaceGraph(key: string, entry: WorkspaceGraphCacheEntry): void {
+	if (_workspaceGraphCache.get(key) !== entry) return;
+	clearWorkspaceGraphTimer(entry);
+	for (const buildKey of _buildCache.keys()) {
+		const separator = buildKey.indexOf("|");
+		if (separator >= 0 && normalizeMapKey(buildKey.slice(0, separator)) === key) {
+			_buildCache.delete(buildKey);
+		}
 	}
->();
+	_workspaceCacheEpochs.set(key, (_workspaceCacheEpochs.get(key) ?? 0) + 1);
+	_workspaceGraphCache.delete(key);
+}
+
+function scheduleWorkspaceGraphEviction(key: string, entry: WorkspaceGraphCacheEntry): void {
+	clearWorkspaceGraphTimer(entry);
+	const epoch = workspaceCacheEpoch(key);
+	entry.idleTimer = setTimeout(() => {
+		entry.idleTimer = undefined;
+		if (_workspaceGraphCache.get(key) !== entry || workspaceCacheEpoch(key) !== epoch) return;
+		evictWorkspaceGraph(key, entry);
+	}, reviewGraphIdleEvictMs());
+	entry.idleTimer.unref?.();
+}
+
+function touchWorkspaceGraph(key: string): void {
+	const entry = _workspaceGraphCache.get(key);
+	if (!entry) return;
+	entry.lastUsedAt = Date.now();
+	scheduleWorkspaceGraphEviction(key, entry);
+}
+
+function setWorkspaceGraph(key: string, entry: Omit<WorkspaceGraphCacheEntry, "lastUsedAt" | "idleTimer">, epoch?: number): boolean {
+	if (epoch !== undefined && workspaceCacheEpoch(key) !== epoch) return false;
+	const resident: WorkspaceGraphCacheEntry = { ...entry, lastUsedAt: Date.now() };
+	_workspaceGraphCache.set(key, resident);
+	scheduleWorkspaceGraphEviction(key, resident);
+	while (_workspaceGraphCache.size > REVIEW_GRAPH_MAX_WARM_WORKSPACES) {
+		const victim = [..._workspaceGraphCache.entries()].sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
+		if (!victim) break;
+		evictWorkspaceGraph(victim[0], victim[1]);
+	}
+	return true;
+}
 
 // #459: process-wide monotonic source for ReviewGraph.buildGeneration stamps.
 // Never reset (uniqueness is the invariant — a workspace-cache clear must not
@@ -330,7 +395,9 @@ export function clearGraphCache(): void {
 export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 	if (cwd === undefined) {
 		_buildCache.clear();
+		for (const entry of _workspaceGraphCache.values()) clearWorkspaceGraphTimer(entry);
 		_workspaceGraphCache.clear();
+		_workspaceCacheEpoch++;
 		_sizeSkipVerdicts.clear();
 	} else {
 		const normalized = normalizeMapKey(cwd);
@@ -339,6 +406,9 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 				_buildCache.delete(key);
 			}
 		}
+		const entry = _workspaceGraphCache.get(normalized);
+		if (entry) clearWorkspaceGraphTimer(entry);
+		_workspaceCacheEpochs.set(normalized, (_workspaceCacheEpochs.get(normalized) ?? 0) + 1);
 		_workspaceGraphCache.delete(normalized);
 		_sizeSkipVerdicts.delete(normalized);
 	}
@@ -346,6 +416,15 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 	// #1179: the global slot is back to the pristine default, so a subsequent
 	// identity miss can safely serve it again (it cannot be a sibling's state).
 	_anyGraphStamped = false;
+}
+
+let _reviewGraphBuildGateForTests: (() => Promise<void>) | undefined;
+
+/** Test seam for deterministically interleaving a build with cache eviction. */
+export function _setReviewGraphBuildGateForTests(
+	gate: (() => Promise<void>) | undefined,
+): void {
+	_reviewGraphBuildGateForTests = gate;
 }
 
 export interface ReviewGraphWorkspaceCacheSnapshot {
@@ -379,6 +458,13 @@ export function getReviewGraphWorkspaceCacheSnapshot(): ReviewGraphWorkspaceCach
 	};
 }
 
+/** Test-only cache keys, including the LRU order from oldest to newest. */
+export function _getReviewGraphWorkspaceCacheKeysForTests(): string[] {
+	return [..._workspaceGraphCache.entries()]
+		.sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)
+		.map(([key]) => key);
+}
+
 export function _getReviewGraphCacheStateForTests(cwd: string):
 	| {
 			signature: string;
@@ -388,6 +474,7 @@ export function _getReviewGraphCacheStateForTests(cwd: string):
 	| undefined {
 	const cached = _workspaceGraphCache.get(normalizeMapKey(cwd));
 	if (!cached) return undefined;
+	touchWorkspaceGraph(normalizeMapKey(cwd));
 	return {
 		signature: cached.signature,
 		fileSignatures: new Map(cached.fileSignatures),
@@ -415,6 +502,7 @@ export function getReviewGraphCacheIdentity(
 ): ReviewGraphCacheIdentity | undefined {
 	const cached = _workspaceGraphCache.get(normalizeMapKey(cwd));
 	if (!cached) return undefined;
+	touchWorkspaceGraph(normalizeMapKey(cwd));
 	// #1088: `version` is the constant schema tag ("v8" today) — identical for
 	// every live graph, so comparing it can never detect that `graph` is a
 	// stale instance the workspace cache has since replaced (e.g. a concurrent
@@ -526,6 +614,7 @@ export function getCachedReviewGraph(cwd: string): ReviewGraph | undefined {
 	if (getReviewGraphSizeSkipVerdict(cwd)) return undefined;
 	const cached = _workspaceGraphCache.get(key);
 	if (cached) {
+		touchWorkspaceGraph(key);
 		ensureIndexed(cached.graph);
 		return cached.graph;
 	}
@@ -542,7 +631,7 @@ export function getCachedReviewGraph(cwd: string): ReviewGraph | undefined {
 		allowPartial: true,
 	});
 	if (!disk) return undefined;
-	_workspaceGraphCache.set(key, {
+	setWorkspaceGraph(key, {
 		signature: disk.signature,
 		fileSignatures: disk.fileSignatures,
 		fileHashes: disk.fileHashes,
@@ -4059,6 +4148,7 @@ interface IncrementalCtx {
 	seqAtBuildStart?: number;
 	/** #694: untracked-AND-ignored ids, fetched once per build — see `_doBuildGraph`. */
 	ignoredIds?: ReadonlySet<string>;
+	cacheEpoch?: number;
 }
 
 /**
@@ -4132,14 +4222,14 @@ async function tryIncrementalFromCache(
 		for (const file of ctx.normalizedChanged) {
 			upsertChangedSymbols(graph, ctx.facts, file);
 		}
-		_workspaceGraphCache.set(ctx.normalizedCwd, {
+		setWorkspaceGraph(ctx.normalizedCwd, {
 			signature: ctx.signature,
 			fileSignatures: new Map(ctx.fileSignatures),
 			fileHashes: hashes,
 			graph: cloneGraph(cached.graph),
 			buildGeneration: generation,
 			...verifiedCacheFields(ctx.seqAtBuildStart),
-		});
+		}, ctx.cacheEpoch);
 		// #260: pure drift leaves the graph unchanged — don't rewrite the disk blob.
 		setGraphBuildInfo(graph, {
 			reused: true,
@@ -4171,14 +4261,14 @@ async function tryIncrementalFromCache(
 	// #459: real re-extract ⇒ new generation.
 	const generation = ++_graphGenerationCounter;
 	graph.buildGeneration = generation;
-	_workspaceGraphCache.set(ctx.normalizedCwd, {
+	setWorkspaceGraph(ctx.normalizedCwd, {
 		signature: ctx.signature,
 		fileSignatures: new Map(ctx.fileSignatures),
 		fileHashes: hashes,
 		graph,
 		buildGeneration: generation,
 		...verifiedCacheFields(ctx.seqAtBuildStart),
-	});
+	}, ctx.cacheEpoch);
 	const persistReason = persistGraph(
 		ctx.cwd,
 		ctx.signature,
@@ -4232,6 +4322,7 @@ async function trySeqFastpath(
 	seqHint: GraphSeqHint,
 	seqAtBuildStart: number,
 	ignoredIds?: ReadonlySet<string>,
+	cacheEpoch?: number,
 ): Promise<SeqFastpathResult> {
 	const cached = _workspaceGraphCache.get(normalizedCwd);
 	// Condition 2: need an in-process complete entry that recorded a build seq.
@@ -4373,7 +4464,7 @@ async function trySeqFastpath(
 	// #459: real re-extract ⇒ new generation.
 	const generation = ++_graphGenerationCounter;
 	graph.buildGeneration = generation;
-	_workspaceGraphCache.set(normalizedCwd, {
+	setWorkspaceGraph(normalizedCwd, {
 		signature: nextSignature,
 		fileSignatures: nextSignatures,
 		fileHashes: hashes,
@@ -4384,7 +4475,7 @@ async function trySeqFastpath(
 		builtAtProjectSeq: seqAtBuildStart,
 		lastFullVerifyMs: cached.lastFullVerifyMs,
 		fastPathSinceVerify: sinceVerify + 1,
-	});
+	}, cacheEpoch);
 	const persistReason = persistGraph(
 		cwd,
 		nextSignature,
@@ -4422,6 +4513,11 @@ async function _doBuildGraph(
 	buildId?: number,
 ): Promise<ReviewGraph> {
 	const normalizedCwd = normalizeMapKey(cwd);
+	const cacheEpoch = workspaceCacheEpoch(normalizedCwd);
+	// `await undefined` still yields a microtask, which reorders overlapping
+	// builds in production where no test gate is installed — only await a gate
+	// that exists.
+	if (_reviewGraphBuildGateForTests) await _reviewGraphBuildGateForTests();
 	const normalizedChanged = changedFiles.map((file) => normalizeMapKey(file));
 	const normalizedChangedSet = new Set(normalizedChanged);
 	logCwdWorktreeMismatchOnce(cwd);
@@ -4490,6 +4586,7 @@ async function _doBuildGraph(
 			seqHint,
 			seqAtBuildStart,
 			await ignoredIdsPromise,
+			cacheEpoch,
 		);
 		if ("graph" in fast) return fast.graph;
 		seqFastpathFallback = fast.fallback;
@@ -4586,6 +4683,7 @@ async function _doBuildGraph(
 	// base too, so the build falls through to a full rebuild.
 	if (memCached?.graph.persistCoverage?.partial) memCached = undefined;
 	if (memCached?.signature === signature) {
+		touchWorkspaceGraph(normalizedCwd);
 		const graph = cloneGraph(memCached.graph);
 		rebuildIndexes(graph);
 		graph.changedSymbolsByFile.clear();
@@ -4622,6 +4720,7 @@ async function _doBuildGraph(
 			facts,
 			seqAtBuildStart,
 			ignoredIds,
+			cacheEpoch,
 		});
 		if (incremental) {
 			updateGraphBuildInfo(incremental, { seqFastpathFallback });
@@ -4646,14 +4745,14 @@ async function _doBuildGraph(
 		// process's derived caches don't exist here; in-process derived caches from
 		// before a workspace-cache clear must not match it).
 		const generation = ++_graphGenerationCounter;
-		_workspaceGraphCache.set(normalizedCwd, {
+		setWorkspaceGraph(normalizedCwd, {
 			signature,
 			fileSignatures: new Map(fileSignatures),
 			fileHashes: diskCached.fileHashes,
 			graph: cloneGraph(diskCached.graph),
 			buildGeneration: generation,
 			...verifiedCacheFields(seqAtBuildStart),
-		});
+		}, cacheEpoch);
 		setGraphBuildInfo(graph, {
 			reused: true,
 			mode: "cached",
@@ -4846,14 +4945,14 @@ async function _doBuildGraph(
 	// Keep the content generation on the persisted snapshot instance too, so
 	// scheduled persistence logs join the same graph identity as build success.
 	graphSnapshot.buildGeneration = generation;
-	_workspaceGraphCache.set(normalizedCwd, {
+	setWorkspaceGraph(normalizedCwd, {
 		signature,
 		fileSignatures: new Map(fileSignatures),
 		fileHashes,
 		graph: graphSnapshot,
 		buildGeneration: generation,
 		...verifiedCacheFields(seqAtBuildStart),
-	});
+	}, cacheEpoch);
 	const persistReason = persistGraph(
 		cwd,
 		signature,

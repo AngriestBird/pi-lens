@@ -160,6 +160,18 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 ## What it is
 
+The `agent_end` deferred-format drain runs at most three formatter subprocesses
+concurrently, then processes claimed results in admission order with a
+`setImmediate` yield between bookkeeping steps. Keep formatter invocation and
+per-file bookkeeping isolated so multi-file batches cannot recreate one
+CPU-bound event-loop burst. (#1387)
+
+Review-graph workspace cache invalidation uses a process-wide epoch component
+that survives all-workspace clears; per-workspace eviction/reset increments the
+workspace component. Any new in-flight cache publication must capture and pass
+the combined epoch. Authoritative project-snapshot deletion goes through the
+single timer-clearing helper so idle timers cannot retain deleted generations.
+
 The review-graph size gate uses the shared cooperative source walker with a
 `maxFileCount + 1` sentinel: it stops at the first over-cap source entry, so
 skip telemetry and user-facing messages must describe the count as “more than
@@ -206,6 +218,12 @@ once-record, and increment entry points normalize unknown values to bounded
 strings and swallow internal failures so telemetry never throws into a host
 path.
 
+LSP workspace-edit merge buckets are keyed by `pathIndexKey`, not raw URI
+spelling; each canonical bucket retains its first URI as the display key.
+Call-graph `allSymbols`/`allRefs` file keys are `normalizeMapKey`-canonical,
+and lookup, cross-file filtering, and same-file classification must use that
+same canonical form.
+
 TypeScript LSP clients are evicted after `PI_LENS_TS_IDLE_EVICT_MS` of inactivity
 (default five minutes). Eviction removes the client from service state before
 graceful shutdown, releasing the server-owned language-service programs and
@@ -215,6 +233,20 @@ must stay unref'd, reset on reuse, busy-client guarded, and cleared on shutdown.
 Rule-id normalization derives its language suffixes from the bundled CodeRabbit rule tree at startup; tests must keep that derived set covered so new vendored language rules cannot silently evade project policy matching.
 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
+
+Extension policy tests bind JS/TS fact applicability and bash source-like file
+access to `KIND_EXTENSIONS`; the only intentional exceptions are the documented
+Vue/Svelte fact exclusion and the small legacy text/config allowlist in
+`clients/file-kinds.ts`. Keep new language extensions there rather than adding
+provider-local regexes or sets.
+
+Review-graph workspace caches and authoritative project snapshots are bounded to
+8 roots and use 20-minute per-root idle eviction by default. Their windows are
+env-tunable with `PI_LENS_REVIEW_GRAPH_IDLE_EVICT_MS` and
+`PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS`; graph eviction also drops completed
+build-dedup promises so the next access is a true cold rebuild. Async graph
+writes carry a per-workspace epoch, preventing an in-flight build from
+resurrecting an evicted entry. (#1389)
 
 Git guard text-consumer allowances apply only to literal arguments: command,
 backtick, and process substitutions are execution contexts and must recurse

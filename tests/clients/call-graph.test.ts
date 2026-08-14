@@ -124,6 +124,24 @@ describe("buildCallGraph", () => {
 		expect(graph.callers.size).toBe(0);
 	});
 
+	it("normalizes divergent caller path casing for same-file classification", () => {
+		// Windows-shaped paths exercise normalizeMapKey's case/separator fold on
+		// both Windows and Linux CI without assuming the host filesystem casing.
+		const canonical = "C:\\Proj\\Caller.ts";
+		const divergent = "c:/proj/caller.ts";
+		const allSymbols = new Map([
+			[divergent, [sym(canonical, "caller"), sym(canonical, "helper")]],
+		]);
+		const graph = buildCallGraph(allSymbols, new Map([[divergent, [{
+			...ref(divergent, "helper"),
+			targetId: `${canonical}:helper`,
+			resolution: "exact",
+		}]]]));
+		expect(graph.callees.size).toBe(0);
+		expect(graph.callers.size).toBe(0);
+		expect(graph.coverage?.sameFileEvidence).toBe(1);
+	});
+
 	it("uses the file-level fallback after a completed function", () => {
 		const fileA = "/proj/a.ts";
 		const fileB = "/proj/b.ts";
@@ -828,4 +846,3 @@ describe("saveCallGraph / loadCallGraph", () => {
 		});
 	});
 });
-

@@ -6,7 +6,10 @@ import { buildCallGraph } from "../../clients/call-graph.js";
 import { grammarBlockReason, LANGUAGE_TO_GRAMMAR } from "../../clients/grammar-source.js";
 import { getSharedTreeSitterClient } from "../../clients/tree-sitter-shared.js";
 import type { TreeSitterClient } from "../../clients/tree-sitter-client.js";
-import { TreeSitterSymbolExtractor } from "../../clients/tree-sitter-symbol-extractor.js";
+import {
+	getSymbolQueryLanguages,
+	TreeSitterSymbolExtractor,
+} from "../../clients/tree-sitter-symbol-extractor.js";
 import type { Symbol, SymbolRef } from "../../clients/symbol-types.js";
 
 const FIXTURE_ROOT = path.resolve(
@@ -98,6 +101,20 @@ async function buildFixtureGraph(fixture: CallFixture) {
 }
 
 describe("Tree-sitter call-graph fixtures", () => {
+	it("covers every language with a symbol query", () => {
+		const fixtureLanguages = new Set([
+			...CALL_FIXTURES.map((fixture) => fixture.language),
+			...TYPE_REFERENCE_FIXTURES.map((fixture) => fixture.language),
+		]);
+		const missing = getSymbolQueryLanguages().filter(
+			(language) => !fixtureLanguages.has(language),
+		);
+		expect(
+			missing,
+			"every SYMBOL_QUERIES language needs a call-graph or type-reference fixture",
+		).toEqual([]);
+	});
+
 	for (const fixture of CALL_FIXTURES) {
 		const blocked = Boolean(
 			grammarBlockReason(LANGUAGE_TO_GRAMMAR[fixture.language]),

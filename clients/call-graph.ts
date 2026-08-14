@@ -261,15 +261,15 @@ const STDLIB_NAMES = new Set([
 	"open", "isinstance", "issubclass", "type", "super", "hasattr", "getattr",
 	"setattr", "enumerate", "zip", "map", "filter", "sorted", "reversed",
 	// Go
-	"fmt", "log", "os", "io", "err", "make", "append", "len", "cap", "copy",
+	"fmt", "log", "os", "io", "err", "make", "append", "cap", "copy",
 	"close", "delete", "panic", "recover", "new",
 	// Rust
-	"println", "eprintln", "print", "eprint", "vec", "Some", "None", "Ok", "Err",
-	"Box", "Rc", "Arc", "String", "Vec", "HashMap", "HashSet", "format",
+	"eprintln", "eprint", "vec", "Some", "None", "Ok", "Err",
+	"Box", "Rc", "Arc", "Vec", "HashMap", "HashSet", "format",
 	// Java/Kotlin
-	"System", "println", "toString", "equals", "hashCode", "Objects",
+	"System", "toString", "equals", "hashCode", "Objects",
 	// Generic
-	"new", "this", "self", "super", "nil", "null", "undefined", "true", "false",
+	"this", "self", "nil", "null", "undefined", "true", "false",
 ]);
 
 // ── Core resolution ────────────────────────────────────────────────────────────
@@ -330,11 +330,20 @@ function findEnclosingSymbol(
  * it is deliberately not used by the review-graph adapter (#1070).
  */
 export function buildCallGraph(
+	/** Keys are normalizeMapKey-canonical file paths; Symbol.filePath values retain their display spelling. */
 	allSymbols: Map<string, Symbol[]>,
+	/** Keys are normalizeMapKey-canonical caller file paths; SymbolRef.filePath retains its display spelling. */
 	allRefs: Map<string, SymbolRef[]>,
 	inputCoverage?: CallGraphEvidenceCoverage,
 ): FunctionCallGraph {
-	const defIndex = buildDefIndex(allSymbols);
+	// Keep the lookup index canonical even for legacy direct callers that still
+	// construct these maps from display paths; persisted/review-graph callers
+	// already satisfy the canonical-key contract documented above. A caller that
+	// supplies TWO raw spellings of the same file gets last-writer-wins here —
+	// raw compatibility is best-effort tolerance, not a merge contract.
+	const canonicalSymbols = new Map<string, Symbol[]>();
+	for (const [filePath, symbols] of allSymbols) canonicalSymbols.set(normalizeMapKey(filePath), symbols);
+	const defIndex = buildDefIndex(canonicalSymbols);
 	const callees = new Map<SymbolKey, Set<SymbolKey>>();
 	const callers = new Map<SymbolKey, Set<SymbolKey>>();
 	const inDegree = new Map<SymbolKey, number>();
@@ -359,7 +368,8 @@ export function buildCallGraph(
 			 };
 
 	for (const [callerFile, refs] of allRefs) {
-		const callerSymbols = allSymbols.get(callerFile) ?? [];
+		const callerFileKey = normalizeMapKey(callerFile);
+		const callerSymbols = canonicalSymbols.get(callerFileKey) ?? [];
 		for (const ref of refs) {
 			totalRefs++;
 			if (!hasInputCoverage) {
@@ -420,7 +430,7 @@ export function buildCallGraph(
 				const crossFileDefs = defs
 					.map((id) => defIndex.byId.get(id))
 					.filter((candidate): candidate is Symbol =>
-						candidate !== undefined && candidate.filePath !== callerFile,
+						candidate !== undefined && normalizeMapKey(candidate.filePath) !== callerFileKey,
 					);
 				if (crossFileDefs.length === 0) {
 					if (!hasInputCoverage) coverage.unsupportedEvidence++;
@@ -447,7 +457,7 @@ export function buildCallGraph(
 			let producedEdge = false;
 			let duplicateRef = false;
 			for (const { callee, resolution, candidateCount } of candidates) {
-				if (normalizeMapKey(callee.filePath) === normalizeMapKey(callerFile)) {
+				if (normalizeMapKey(callee.filePath) === callerFileKey) {
 					// This projection is intentionally cross-file-only. A canonical
 					// same-file target is resolved by the source graph, but is represented
 					// by an explicit coverage category rather than as unsupported evidence.

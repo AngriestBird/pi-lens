@@ -120,6 +120,28 @@ describe("LSP workspace edits", () => {
 		]);
 	});
 
+	it("merges divergent URI spellings into one conflict bucket", () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-uri-bucket-"));
+		try {
+			const filePath = path.join(tmpDir, "shared.ts");
+			fs.writeFileSync(filePath, "abcdef", "utf-8");
+			const uri = pathToFileURL(filePath).href;
+			const divergentUri = uri.replace(/\/([^/]+)$/, (_, name: string) =>
+				`/%${name.charCodeAt(0).toString(16).padStart(2, "0")}${name.slice(1)}`,
+			);
+			const edit = (newText: string) => ({ range: { start: { line: 0, character: 1 }, end: { line: 0, character: 4 } }, newText });
+			const result = mergeWorkspaceTextEditsByPriority([
+				{ serverId: "primary", edit: { changes: { [uri]: [edit("first")] } } },
+				{ serverId: "secondary", edit: { changes: { [divergentUri]: [edit("second")] } } },
+			]);
+			expect(divergentUri).not.toBe(uri);
+			expect(result.droppedConflicts).toBe(1);
+			expect(result.edit.changes).toEqual({ [uri]: [edit("first")] });
+		} finally {
+			removeTempDirSync(tmpDir);
+		}
+	});
+
 	it("collapses byte-identical non-empty duplicate edits", async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-edits-"));
 		const filePath = path.join(tmpDir, "duplicate.ts");

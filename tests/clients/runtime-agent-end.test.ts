@@ -9,6 +9,7 @@ import { loadPiLensProjectConfig } from "../../clients/project-lens-config.js";
 import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
 import { getLastLoggedPhase } from "../../clients/latency-logger.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { setAmbientAbortSignal } from "../../clients/safe-spawn.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import {
 	_resetForTests as resetBusPublish,
@@ -158,6 +159,107 @@ describe("runtime-agent-end deferred formatting", () => {
 			} else {
 				process.env.PILENS_DATA_DIR = previousDataDir;
 			}
+			env.cleanup();
+		}
+	});
+
+	it("bounds formatter concurrency and yields between ordered bookkeeping (#1387)", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-yield-");
+		const setImmediateSpy = vi.spyOn(globalThis, "setImmediate");
+		try {
+			const files = Array.from({ length: 10 }, (_, index) =>
+				createTempFile(env.tmpDir, `${index}.ts`, `const x${index}=1`),
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			for (const file of files) {
+				runtime.deferFormat(file, env.tmpDir, "edit", env.tmpDir);
+			}
+			let inFlight = 0;
+			let maxInFlight = 0;
+			const immediateCallsAtBookkeeping: number[] = [];
+			const formatFile = vi.fn(async (filePath: string) => {
+				inFlight++;
+				maxInFlight = Math.max(maxInFlight, inFlight);
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				inFlight--;
+				return {
+					filePath,
+					formatters: [{ name: "fake", success: true, changed: true }],
+					anyChanged: true,
+					allSucceeded: true,
+				};
+			});
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(),
+				dbg: () => {},
+				runtime,
+				cacheManager: {
+					addModifiedRange: vi.fn(() => {
+						immediateCallsAtBookkeeping.push(setImmediateSpy.mock.calls.length);
+					}),
+				} as any,
+				getFormatService: () => ({ recordRead: () => {}, formatFile }) as any,
+			});
+
+			expect(formatFile).toHaveBeenCalledTimes(files.length);
+			expect(maxInFlight).toBeLessThanOrEqual(3);
+			expect(maxInFlight).toBe(3);
+			expect(immediateCallsAtBookkeeping).toHaveLength(files.length);
+			for (let index = 1; index < immediateCallsAtBookkeeping.length; index++) {
+				expect(immediateCallsAtBookkeeping[index]).toBeGreaterThan(
+					immediateCallsAtBookkeeping[index - 1],
+				);
+			}
+		} finally {
+			setImmediateSpy.mockRestore();
+			env.cleanup();
+		}
+	});
+
+	it("requeues claimed files that were not started when the ambient turn aborts", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-abort-");
+		const controller = new AbortController();
+		setAmbientAbortSignal(controller.signal);
+		try {
+			const files = ["a.ts", "b.ts", "c.ts"].map((name) =>
+				createTempFile(env.tmpDir, name, `const ${name[0]}=1`),
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			for (const file of files) runtime.deferFormat(file, env.tmpDir, "edit", env.tmpDir);
+			const started: string[] = [];
+			const formatFile = vi.fn(async (filePath: string) => {
+				started.push(filePath);
+				controller.abort();
+				return {
+					filePath,
+					formatters: [{ name: "fake", success: true, changed: false }],
+					anyChanged: false,
+					allSucceeded: true,
+				};
+			});
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(),
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: vi.fn() } as any,
+				getFormatService: () => ({ recordRead: () => {}, formatFile }) as any,
+			});
+
+			expect(started).toHaveLength(1);
+			expect(runtime.pendingDeferredFormatCount).toBe(2);
+			expect(runtime.consumeDeferredFormatFiles().map((record) => record.filePath)).toEqual(
+				files.slice(1),
+			);
+		} finally {
+			setAmbientAbortSignal(undefined);
 			env.cleanup();
 		}
 	});
