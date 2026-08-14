@@ -20,6 +20,7 @@ import {
 	type PiLensFlagSource,
 } from "./lens-config.js";
 import { resyncLspFile, runFormatPhase } from "./pipeline.js";
+import { getAmbientAbortSignal } from "./safe-spawn.js";
 import {
 	appendProjectChange,
 	type ProjectChangeSource,
@@ -35,6 +36,7 @@ import type { RuntimeCoordinator } from "./runtime-coordinator.js";
  * extra staleness for guaranteed eventual formatting. (#791)
  */
 export const DEFERRED_FORMAT_STALE_AFTER_MS = 10 * 60_000;
+const DEFERRED_FORMAT_CONCURRENCY = 3;
 
 interface AgentEndDeps {
 	ctxCwd?: string;
@@ -223,31 +225,78 @@ export async function handleAgentEnd({
 	});
 
 	if (formatRecords.length > 0) {
-		// A deferred batch can contain many large files. Keep each file's
-		// formatter and bookkeeping together so the next file cannot start in
-		// the same event-loop turn. This retains queue order and isolates errors,
-		// while preventing Promise.all from launching an unbounded CPU burst.
-		for (const [index, record] of formatRecords.entries()) {
-			if (index > 0) {
-				await new Promise<void>((resolve) => setImmediate(resolve));
+		// Formatter subprocesses are independent across files, so retain bounded
+		// overlap here. Result application stays admission-ordered below because
+		// its synchronous file reads/bookkeeping are observable shared state.
+		type FormatWork = {
+			record: (typeof formatRecords)[number];
+			filePath: string;
+			fileStart: number;
+			result?: Awaited<ReturnType<typeof runFormatPhase>>;
+			error?: string;
+			missing?: boolean;
+		};
+		const work = new Array<FormatWork | undefined>(formatRecords.length);
+		const started = new Set<number>();
+		let nextIndex = 0;
+		const ambientSignal = getAmbientAbortSignal();
+		const worker = async (): Promise<void> => {
+			while (nextIndex < formatRecords.length) {
+				const index = nextIndex++;
+				if (ambientSignal?.aborted) return;
+				const record = formatRecords[index];
+				const fileStart = Date.now();
+				const filePath = path.resolve(record.filePath);
+				started.add(index);
+				if (!nodeFs.existsSync(filePath)) {
+					work[index] = { record, filePath, fileStart, missing: true };
+					continue;
+				}
+				try {
+					work[index] = {
+						record,
+						filePath,
+						fileStart,
+						result: await runFormatPhase(filePath, getFormatService, dbg),
+					};
+				} catch (err) {
+					work[index] = {
+						record,
+						filePath,
+						fileStart,
+						error: err instanceof Error ? err.message : String(err),
+					};
+				}
 			}
-			const fileStart = Date.now();
-			const filePath = path.resolve(record.filePath);
-			if (!nodeFs.existsSync(filePath)) {
+		};
+		await Promise.all(
+			Array.from(
+				{ length: Math.min(DEFERRED_FORMAT_CONCURRENCY, formatRecords.length) },
+				() => worker(),
+			),
+		);
+		if (ambientSignal?.aborted) {
+			runtime.requeueDeferredFormatFiles(
+				formatRecords.filter((_, index) => !started.has(index)),
+			);
+		}
+
+		for (const entry of work) {
+			if (!entry) continue;
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			const { record, filePath, fileStart } = entry;
+			if (entry.missing) {
 				dbg(`agent_end deferred_format skipped missing file: ${filePath}`);
 				summary.skipped.push({ filePath, reason: "missing" });
 				continue;
 			}
-
-			let result: Awaited<ReturnType<typeof runFormatPhase>>;
-			try {
-				result = await runFormatPhase(filePath, getFormatService, dbg);
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				dbg(`agent_end deferred_format failed for ${filePath}: ${message}`);
-				summary.failed.push({ filePath, errors: [message] });
+			if (entry.error) {
+				dbg(`agent_end deferred_format failed for ${filePath}: ${entry.error}`);
+				summary.failed.push({ filePath, errors: [entry.error] });
 				continue;
 			}
+			const result = entry.result;
+			if (!result) continue;
 
 			summary.formatted++;
 
