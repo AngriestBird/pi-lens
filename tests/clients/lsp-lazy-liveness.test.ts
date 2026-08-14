@@ -11,7 +11,7 @@ describe("LSP session warm/first-use liveness (#1394)", () => {
 		);
 		const warm = warmLspService();
 		const firstUse = await loadLspService();
-		await firstUse.getLSPService().request("file.ts");
+		await (firstUse.getLSPService() as unknown as { request: (file: string) => Promise<unknown> }).request("file.ts");
 
 		expect(await warm).toBe(firstUse);
 		expect(request).toHaveBeenCalledTimes(1);

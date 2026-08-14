@@ -269,9 +269,10 @@ second warm promise for concurrent/subagent session starts.
 The formatter catalog follows the same rule through `clients/formatters-lazy.ts`;
 `format-service.ts` must await that shared promise before catalog lookup or
 formatter execution.
-The LSP service follows it through `clients/lsp-lazy.ts`; service consumers in
-the entry graph await that promise at request/use sites while registration and
-the session-start warm kickoff remain eager/synchronous at the host boundary.
+The LSP service follows it through `clients/lsp-lazy.ts` for async pipeline,
+session, and warm-attach consumers. The `index.ts` status/reset adapter remains
+eager because its synchronous shutdown/status contracts are host-visible; do
+not make those callbacks async without updating their ordering contract/tests.
 
 The git guard's command-position classifier expands `$IFS`, `${IFS}`, and
 `$IFS$<positional>` forms before re-tokenizing guarded verbs. Known command-string
