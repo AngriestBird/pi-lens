@@ -591,6 +591,9 @@ function planWorkspaceEdit(
 	const addIndex = (key: string): void => {
 		const ancestors: string[] = [];
 		let current = key;
+		// `key` is a normalized URI index key, not an on-disk directory. The
+		// index intentionally uses the key's own separator/root semantics, so
+		// walkUpDirs (which resolves through the host filesystem) is not suitable.
 		while (true) {
 			const set = descendants.get(current) ?? new Set<string>();
 			set.add(key);

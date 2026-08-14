@@ -203,6 +203,12 @@ Rule-id normalization derives its language suffixes from the bundled CodeRabbit 
 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
 
+Extension policy tests bind JS/TS fact applicability and bash source-like file
+access to `KIND_EXTENSIONS`; the only intentional exceptions are the documented
+Vue/Svelte fact exclusion and the small legacy text/config allowlist in
+`clients/file-kinds.ts`. Keep new language extensions there rather than adding
+provider-local regexes or sets.
+
 LSP root exclusion recognizes fixture conventions by exact path segment; Go's
 `testdata` convention applies ancestor-wide, but names such as `testdata-tools`
 remain ordinary project directories. The positive `.gitignore` glob precheck is

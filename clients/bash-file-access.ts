@@ -15,6 +15,7 @@
  */
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
+import { isReadableSourceFile } from "./file-kinds.js";
 import { countFileLines } from "./read-guard-tool-lines.js";
 import type { SearchReadLocation } from "./search-read-registration.js";
 
@@ -26,11 +27,6 @@ export interface ReadSpan {
 	/** Number of lines read. */
 	limit: number;
 }
-
-// Source-ish extensions worth registering. Anchored end-check → linear (no
-// catastrophic backtracking).
-const READABLE_EXT_RE =
-	/\.(?:ts|tsx|js|jsx|mjs|cjs|py|sh|rs|go|cs|java|kt|rb|php|c|cpp|cc|h|hpp|json|jsonc|yaml|yml|toml|md|txt|env|cfg|conf|ini|html|css|scss|less|xml|sql|vue|svelte)$/i;
 
 function stripQuotes(token: string): string {
 	if (token.length >= 2) {
@@ -148,7 +144,7 @@ function tokenizeSegment(segment: string): string[] {
 /** Resolve a token to an absolute path if it looks like a source file. */
 function resolveCandidate(token: string, cwd: string): string | null {
 	const cleaned = stripQuotes(token);
-	if (!cleaned || cleaned.startsWith("-") || !READABLE_EXT_RE.test(cleaned)) {
+	if (!cleaned || cleaned.startsWith("-") || !isReadableSourceFile(cleaned)) {
 		return null;
 	}
 	return path.isAbsolute(cleaned) ? cleaned : path.resolve(cwd, cleaned);
