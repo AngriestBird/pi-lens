@@ -123,13 +123,22 @@ function isGitExecutable(value: string): boolean {
 	);
 }
 
+const COMMAND_STRING_WRAPPERS = new Set(["busybox", "toybox", "nix-shell"]);
+
+function isCommandStringWrapper(value: string): boolean {
+	return COMMAND_STRING_WRAPPERS.has(executableName(value));
+}
+
 /** Normalize only a command-position token; never apply this to path args. */
 function normalizeGuardVerbToken(value: string): string {
 	return value
 		.replace(/\\(?=[A-Za-z0-9_])/g, "")
 		.replace(/`(?=.)/g, "")
 		.replace(/\^(?=.)/g, "")
-		.replace(/\$\{IFS\}|\$IFS/g, " ");
+		// Positional parameters are commonly appended to IFS to consume the
+		// next shell character (for example `$IFS$9push`). They are still one
+		// word separator for command-position classification.
+		.replace(/(?:\$\{IFS\}|\$IFS)(?:\$[0-9]+)?/g, " ");
 }
 
 function expandGuardVerbToken(value: string): string[] {
@@ -146,6 +155,16 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 	const expandedHead = expandGuardVerbToken(commandTokens[0] ?? "");
 	if (expandedHead.length > 1) {
 		commandTokens = [...expandedHead, ...commandTokens.slice(1)];
+	}
+	if (isCommandStringWrapper(commandTokens[0] ?? "")) {
+		const lower = commandTokens.slice(1).map((token) => token.toLowerCase());
+		const runIndex = lower.findIndex((token) => token === "--run");
+		if (runIndex >= 0 && runIndex + 1 < commandTokens.length) {
+			const nestedCommand = commandTokens.slice(runIndex + 2).join(" ");
+			return tokenizeShellCommand(nestedCommand).some(
+				(segment) => containsCommitOrPush(segment.tokens, depth + 1),
+			);
+		}
 	}
 	const gitIndex = commandTokens.findIndex((token) => isGitExecutable(token));
 	if (gitIndex >= 0) {
@@ -198,14 +217,40 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 			}
 			i += takesValue.has(option) ? 2 : 1;
 		}
-		const verb = normalizeGuardVerbToken(gitTokens[i] ?? "");
-		return verb === "commit" || verb === "push";
+		const verbs = expandGuardVerbToken(gitTokens[i] ?? "");
+		return verbs.length === 1 && (verbs[0] === "commit" || verbs[0] === "push");
 	}
-	if (!isShellWrapper(commandTokens[0])) return false;
+	const leadingExecutable = commandTokens[0] ?? "";
+	const knownCommandStringWrapper =
+		isShellWrapper(leadingExecutable) || isCommandStringWrapper(leadingExecutable);
+	if (!knownCommandStringWrapper) {
+		// Unknown launchers are a fail-closed boundary only when they explicitly
+		// accept a command string. Re-tokenizing the value keeps literal mentions
+		// such as `myprog -c "echo git push"` out of the guarded-command path.
+		const unknownSwitchIndex = commandTokens.slice(1).findIndex((token) => {
+			const lower = token.toLowerCase();
+			return (
+				lower === "-c" ||
+				lower === "--run" ||
+				lower === "/c" ||
+				lower === "-command" ||
+				lower === "-command:" ||
+				(/^-[^-]*c$/.test(lower) && !lower.startsWith("--"))
+			);
+		});
+		if (unknownSwitchIndex < 0) return false;
+		const commandIndex = unknownSwitchIndex + 2;
+		if (commandIndex >= commandTokens.length) return false;
+		const nestedCommand = commandTokens.slice(commandIndex).join(" ");
+		return tokenizeShellCommand(nestedCommand).some(
+			(segment) => containsCommitOrPush(segment.tokens, depth + 1),
+		);
+	}
 	const lower = commandTokens.slice(1).map((token) => token.toLowerCase());
 	const switchIndex = lower.findIndex(
 		(token) =>
 			token === "-c" ||
+			token === "--run" ||
 			token === "-lc" ||
 			(/^-[^-]*c$/.test(token) && !token.startsWith("--")) ||
 			token === "/c" ||

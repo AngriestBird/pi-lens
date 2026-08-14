@@ -217,6 +217,13 @@ empty result, while the project ignore matcher remains authoritative.
 
 A pi coding-agent extension that runs automated checks on every file write/edit. Dispatches async parallel runners (LSP, biome, ruff, ast-grep, tree-sitter, jscpd, knip, Madge, and language-specific linters/build checks) and injects findings as context injections at turn-end and session-start.
 
+The git guard's command-position classifier expands `$IFS`, `${IFS}`, and
+`$IFS$<positional>` forms before re-tokenizing guarded verbs. Known command-string
+launchers include shell families plus busybox, toybox, and nix-shell; an
+unrecognized leading launcher with `-c`/`--run`/`/c`/`-Command` is inspected
+recursively and fails closed only when its command string contains an actual
+guarded git verb (literal mentions such as `echo git push` remain allowed).
+
 CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
 PR bodies may not use a comma-separated close list because GitHub applies only
 the first issue per keyword; use one keyword per issue (`Closes #A. Closes #B.`).

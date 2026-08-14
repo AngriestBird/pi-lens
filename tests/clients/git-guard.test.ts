@@ -76,10 +76,33 @@ describe("git-guard", () => {
 			"git pu`sh",
 			"git pu^sh",
 			"git${IFS}push",
+			"git$IFS$9push",
+			"git ${IFS}pu^sh",
+			"git$IFS$1push",
 		]) {
 			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
 		}
+		expect(
+			isGitCommitOrPushAttempt("bash", { command: 'git commit -m "$IFS is a var"' }),
+		).toBe(true);
+		expect(
+			isGitCommitOrPushAttempt("bash", { command: 'git add -m "$IFS is a var"' }),
+		).toBe(false);
 		expect(isGitCommitOrPushAttempt("bash", { command: "git add C:\\proj\\a.ts" })).toBe(false);
+	});
+
+	it("fails closed for recognized and unknown command-string wrappers", () => {
+		for (const command of [
+			"busybox sh -c 'git push'",
+			"toybox sh -c 'git commit'",
+			"nix-shell -p git --run 'git push'",
+			'someunknownwrapper -c "git push"',
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
+		}
+		expect(isGitCommitOrPushAttempt("bash", { command: 'myprog -c "echo hi"' })).toBe(false);
+		expect(isGitCommitOrPushAttempt("bash", { command: 'myprog git push' })).toBe(false);
+		expect(isGitCommitOrPushAttempt("bash", { command: 'myprog -c "echo git push"' })).toBe(false);
 	});
 
 	it("detects launcher prefixes, shell keywords, combined flags, and continuations", () => {
