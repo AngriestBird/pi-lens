@@ -26,6 +26,16 @@ index's expanded postings graph. The parse cache instead keeps a shallow
 postings-stripped snapshot for metadata/report consumers; a cold analyze reloads
 the full body once and immediately rewarms the leased per-root index. (#1370)
 
+Bounded async metadata walks must separate admission order from completion
+order: use a fixed-size indexed cursor pool, store each result at its original
+walk index, and publish only by iterating that array from index zero. Check
+supersession before every claim and after all in-flight work settles; per-item
+metadata failures retain the prior synchronous skip semantics. Never let
+parallel filesystem completion order drive a behavior-gating Map or preflight
+list. The word-index resume stat walk defaults to 8 workers (libuv's threadpool
+caps real fs parallelism at 4; the surplus is queue depth) and follows this
+pattern. (#1409)
+
 Helm chart linting uses the shared workspace-topology `Chart.yaml` marker. YAML
 and `.tpl` edits inside a chart dispatch one canonical-root-deduplicated,
 bounded `helm lint` pass through the ordinary typed availability/install seam.
@@ -88,6 +98,14 @@ idle and ceiling eviction skip leased keys. Deterministic race tests suspend the
 first client operation with `tests/clients/interleaving-kit.ts`, never sleeps.
 The TypeScript idle default is 20 minutes to preserve warm LSPs across subagent
 bursts; every non-idle removal path must also clear timer ownership. (#1332)
+
+**Path-keyed Tier-3 caches normalize at both boundaries.** Widget LSP server
+roots, startup-scan context keys, and Ruby drive-root memo keys use
+`normalizeMapKey`; equivalent separator/case spellings must share one entry.
+Widget file-record cardinality eviction is render-aware: only idle records with
+no live diagnostic may be evicted. Formatter detection signatures include
+formatter config metadata, and tsconfig-path signatures include recursive
+`extends`/project-reference configs. (#1389)
 
 **Spawn repair decisions use the typed safe-spawn taxonomy.** A raw OS
 `ENOENT` can mean either a missing executable or an invalid child cwd. Consume
@@ -260,6 +278,15 @@ document registry; the next request rebuilds transparently. The per-root timers
 must stay unref'd, reset on reuse, busy-client guarded, and cleared on shutdown.
 
 Rule-id normalization derives its language suffixes from the bundled CodeRabbit rule tree at startup; tests must keep that derived set covered so new vendored language rules cannot silently evade project policy matching.
+
+Small process-lifetime memo tables use `clients/bounded-cache.ts` when an
+insertion-ordered LRU cap is sufficient; path-root caches still normalize keys
+at the seam. Widget-state's file map remains a plain map because active
+diagnostic records must not be evicted; it opportunistically removes only
+records idle beyond the active window at one lifecycle size boundary (never
+from every `getOrCreate` call on a full scan) and can therefore temporarily
+exceed its cap when all records are active. #1389's bounded-by-nature tables (finite
+package-manager/profile/package-root/session domains) require no cache layer.
 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
 
@@ -831,7 +858,7 @@ LSP server definitions resolve in `clients/lsp/config.ts` as project
 `serverOverrides` merge by ID; project `disabledServers` and `warmFiles` replace
 the global arrays when present.
 
-All pi packages are `@earendil-works/*` (migrated from `@mariozechner/*` in 0.74.0). Peer dep: `@earendil-works/pi-coding-agent`. Runtime dep: `@earendil-works/pi-tui`.
+All pi packages are `@earendil-works/*` (migrated from `@mariozechner/*` in 0.74.0). Peer dep: `@earendil-works/pi-coding-agent`. Runtime dep: `@earendil-works/pi-tui`. The v4-safe dependency baseline resolves both host packages at `0.84.2`; the peer remains broad at runtime and the devDependency pins the SDK for type/compatibility checks. Re-audit host declarations before taking a future major/minor bump.
 
 ## Git & PR workflow
 
@@ -1541,6 +1568,32 @@ Mock the **environment** (tool presence, network, abort/error injection) — nev
 - Always include the GitHub issue number in the commit subject line: `(closes #NNN)` or `(refs #NNN)`.
 - Use `closes` only when the commit fully resolves the entire issue; use `refs` for any partial work.
 - GitHub auto-closes an issue on any commit containing `closes #NNN` regardless of trailing text — "closes #125 Phase 1" still closes #125.
+
+### Commit message style
+
+**Commit messages follow the seven-rules discipline, on top of the repo's conventional-commit prefix.** See [A Note About Git Commit Messages](https://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html) and [How to Write a Git Commit Message](https://cbea.ms/git-commit/). Keep the `type(scope): subject` prefix and the `(closes #NNN)`/`(refs #NNN)` issue reference (see above). Then:
+
+1. Use the imperative mood for the subject: `add X`, `fix Y`, never `added`, `adds`, or `fixing`. Test it with: “If applied, this commit will `<subject>`.”
+2. Keep the subject concise. Aim for 50 characters or fewer, with a hard cap of about 72 characters including the prefix. Do not add a trailing period. Use lowercase after the colon, matching repo style.
+3. Put a blank line between the subject and body.
+4. Wrap the body at about 72 columns.
+5. Explain what changed and why, not how. The diff shows how. Include motivation, the problem fixed, side effects, and rejected alternatives when relevant.
+6. Keep the `Co-Authored-By:` trailer.
+
+Short, obvious changes may use a subject only. Non-trivial changes get a body.
+
+### Documentation and prose style
+
+**Prose in docs, changelog, and PR descriptions follows the [Google developer documentation style guide](https://developers.google.com/style) and [Simplified Technical English (ASD-STE100) principles](https://asd-ste100.org/).** This is a principles-only adoption of ASD-STE100, a proprietary aerospace controlled-language specification; it does not adopt its licensed word list. Apply this standard to `README`, `docs/`, `AGENTS.md`, changelog entries, and PR bodies:
+
+- Use active voice and present tense.
+- Use second person (`you`) for instructions. Use the imperative for procedure steps.
+- Use short sentences. Keep one idea or instruction per sentence. Aim for about 20–25 words or fewer.
+- Use consistent terminology. Use the same word for the same thing every time. Do not swap synonyms.
+- Use sentence case for headings.
+- Define an acronym on first use. Prefer a plain word over jargon when one exists.
+- Avoid gerund or noun pile-ups and ambiguous constructions. Avoid `please`. Use the Oxford comma.
+- These rules are machine-checkable. Pi-lens ships a config-gated Vale runner (`clients/dispatch/runners/vale.js`). A `.vale.ini` with the Google style package would enforce this section automatically; track that separately.
 
 ## Issue triage & labels
 
