@@ -176,6 +176,11 @@ Unsupported pull responses are also recognized by the standard message-only
 variants (`method not found`, `unknown method`, and `unsupported method`).
 Status consumers receive detached, 200-character-bounded failure entries.
 
+Degradation-ledger recording is best-effort observability: its public record,
+once-record, and increment entry points normalize unknown values to bounded
+strings and swallow internal failures so telemetry never throws into a host
+path.
+
 TypeScript LSP clients are evicted after `PI_LENS_TS_IDLE_EVICT_MS` of inactivity
 (default five minutes). Eviction removes the client from service state before
 graceful shutdown, releasing the server-owned language-service programs and

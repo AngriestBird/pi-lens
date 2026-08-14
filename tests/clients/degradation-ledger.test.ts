@@ -82,4 +82,29 @@ describe("session degradation ledger", () => {
 		const lines = renderDegradationLines();
 		expect(Math.max(...lines.map((l) => l.length))).toBeLessThan(500);
 	});
+
+	it("normalizes undefined subjects without breaking either recording path", () => {
+		expect(() => recordDegradation({ kind: "spawn-failure", subject: undefined, reason: undefined })).not.toThrow();
+		expect(() => incrementDegradationCount({ kind: "lsp-diagnostics-timeout", subject: undefined, reason: undefined })).not.toThrow();
+		expect(getDegradationSummary()).toEqual([
+			{
+				kind: "spawn-failure",
+				count: 1,
+				droppedCount: 0,
+				latestReasons: [{ subject: "unknown", reason: "unknown" }],
+			},
+			{
+				kind: "lsp-diagnostics-timeout",
+				count: 1,
+				droppedCount: 0,
+				latestReasons: [{ subject: "unknown", reason: "unknown (count: 1)" }],
+			},
+		]);
+	});
+
+	it("swallows failures caused by corrupted telemetry input", () => {
+		const corrupted = { toString: () => { throw new Error("corrupted ledger value"); } };
+		expect(() => recordDegradation({ kind: "spawn-failure", subject: corrupted, reason: "ignored" })).not.toThrow();
+		expect(() => incrementDegradationCount({ kind: "spawn-failure", subject: "ok", reason: corrupted })).not.toThrow();
+	});
 });

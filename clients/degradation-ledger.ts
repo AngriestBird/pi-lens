@@ -13,13 +13,13 @@ export type DegradationKind =
 	| "lsp-diagnostics-timeout";
 
 export interface DegradationRecord {
-	kind: DegradationKind;
-	subject: string;
-	reason: string;
+	kind: unknown;
+	subject: unknown;
+	reason: unknown;
 }
 
 export interface DegradationGroup {
-	kind: DegradationKind;
+	kind: string;
 	/** Exact number recorded, including events no longer retained. */
 	count: number;
 	/** Number omitted from latestReasons by the per-kind bound. */
@@ -29,35 +29,45 @@ export interface DegradationGroup {
 
 const ENTRIES_PER_KIND = 20;
 const groups = new Map<
-	DegradationKind,
+	string,
 	{ count: number; entries: Array<{ subject: string; reason: string }> }
 >();
 const onceKeys = new Set<string>();
 const tallies = new Map<string, number>();
 
 export function recordDegradation(record: DegradationRecord): void {
-	let group = groups.get(record.kind);
-	if (!group) {
-		group = { count: 0, entries: [] };
-		groups.set(record.kind, group);
+	try {
+		const kind = normalizeForLedger(record.kind);
+		const subject = truncateForLedger(record.subject);
+		const reason = truncateForLedger(record.reason);
+		let group = groups.get(kind);
+		if (!group) {
+			group = { count: 0, entries: [] };
+			groups.set(kind, group);
+		}
+		group.count += 1;
+		// Bounded at RECORD time (#1366 review): reasons carry arbitrary error
+		// text; a 10KB message must never become a 10KB health line or a 10KB
+		// retained string.
+		group.entries.push({ subject, reason });
+		if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
+	} catch {
+		// Telemetry must never break the observed path.
 	}
-	group.count += 1;
-	// Bounded at RECORD time (#1366 review): reasons carry arbitrary error
-	// text; a 10KB message must never become a 10KB health line or a 10KB
-	// retained string.
-	group.entries.push({
-		subject: truncateForLedger(record.subject),
-		reason: truncateForLedger(record.reason),
-	});
-	if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
 }
 
 /** Record at most once per kind/subject during the current session. */
 export function recordDegradationOnce(record: DegradationRecord): void {
-	const key = `${record.kind}\0${record.subject}`;
-	if (onceKeys.has(key)) return;
-	onceKeys.add(key);
-	recordDegradation(record);
+	try {
+		const kind = normalizeForLedger(record.kind);
+		const subject = truncateForLedger(record.subject);
+		const key = `${kind}\0${subject}`;
+		if (onceKeys.has(key)) return;
+		onceKeys.add(key);
+		recordDegradation({ kind, subject, reason: record.reason });
+	} catch {
+		// Telemetry must never break the observed path.
+	}
 }
 
 /**
@@ -65,30 +75,38 @@ export function recordDegradationOnce(record: DegradationRecord): void {
  * kind/subject. The group count remains the exact event total.
  */
 export function incrementDegradationCount(record: DegradationRecord): void {
-	const subject = truncateForLedger(record.subject);
-	const key = `${record.kind}\0${subject}`;
-	const count = (tallies.get(key) ?? 0) + 1;
-	tallies.set(key, count);
-	let group = groups.get(record.kind);
-	if (!group) {
-		group = { count: 0, entries: [] };
-		groups.set(record.kind, group);
+	try {
+		const kind = normalizeForLedger(record.kind);
+		const subject = truncateForLedger(record.subject);
+		const reason = truncateForLedger(record.reason);
+		const key = `${kind}\0${subject}`;
+		const count = (tallies.get(key) ?? 0) + 1;
+		tallies.set(key, count);
+		let group = groups.get(kind);
+		if (!group) {
+			group = { count: 0, entries: [] };
+			groups.set(kind, group);
+		}
+		group.count += 1;
+		const entry = { subject, reason: truncateForLedger(`${reason} (count: ${count})`) };
+		const existing = group.entries.findIndex((candidate) => candidate.subject === subject);
+		if (existing >= 0) group.entries.splice(existing, 1);
+		group.entries.push(entry);
+		if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
+	} catch {
+		// Telemetry must never break the observed path.
 	}
-	group.count += 1;
-	const entry = {
-		subject,
-		reason: truncateForLedger(`${record.reason} (count: ${count})`),
-	};
-	const existing = group.entries.findIndex((candidate) => candidate.subject === subject);
-	if (existing >= 0) group.entries.splice(existing, 1);
-	group.entries.push(entry);
-	if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
 }
 
 /** Detached snapshot, grouped in first-seen kind order. */
 const LEDGER_FIELD_MAX = 200;
 
-function truncateForLedger(text: string): string {
+function normalizeForLedger(value: unknown): string {
+	return String(value ?? "unknown");
+}
+
+function truncateForLedger(value: unknown): string {
+	const text = normalizeForLedger(value);
 	return text.length > LEDGER_FIELD_MAX
 		? `${text.slice(0, LEDGER_FIELD_MAX)}…`
 		: text;
