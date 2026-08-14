@@ -2789,7 +2789,12 @@ export class LSPService {
 				for (const entry of spawned) {
 					incrementDegradationCount({
 						kind: "lsp-diagnostics-timeout",
-						subject: entry.client.serverId,
+						// `info.id` is the authoritative server identity carried by
+						// every spawned entry. The client test doubles (and some
+						// lightweight clients) need not expose a serverId property;
+						// ledger recording must never abort the touch or alter #570's
+						// timeout-preserves-last-known-diagnostics semantics.
+						subject: entry.info.id,
 						reason: "diagnostics wait timed out",
 					});
 				}
