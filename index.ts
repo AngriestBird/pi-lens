@@ -671,6 +671,8 @@ export default function (pi: ExtensionAPI) {
 	// from the registry's PI_LENS_NO_CONTEXT_INJECTION env binding (#166).
 	let contextInjectionEnabled = !getLensFlag("no-lens-context");
 	let lensWidgetVisible = globalConfig?.widget?.visible !== false;
+	let mountedLensWidgetUi: LensWidgetUi | undefined;
+	let widgetMountFailureLogged = false;
 	// #190 Phase 2: snapshot of the source session's diagnostics, captured at
 	// `session_before_fork` and adopted by the forked session at the subsequent
 	// `session_start` (reason="fork"). In-memory hand-off (same process) — avoids
@@ -713,7 +715,17 @@ export default function (pi: ExtensionAPI) {
 			dbg(`widget mount ${modeSuppressionNote(mode)}`);
 			return false;
 		}
-		if (typeof ui?.setWidget !== "function") return false;
+		if (typeof ui?.setWidget !== "function") {
+			if (!widgetMountFailureLogged) {
+				widgetMountFailureLogged = true;
+				logExtension({
+					subsystem: "widget",
+					level: "debug",
+					message: "widget mount unavailable: host ui.setWidget is missing",
+				});
+			}
+			return false;
+		}
 		const setWidget = ui.setWidget as LensWidgetSetWidget;
 		setWidget(
 			"pi-lens",
@@ -736,6 +748,7 @@ export default function (pi: ExtensionAPI) {
 			},
 			{ placement: "belowEditor" },
 		);
+		mountedLensWidgetUi = ui;
 		return true;
 	}
 
@@ -745,6 +758,7 @@ export default function (pi: ExtensionAPI) {
 		if (typeof ui?.setWidget !== "function") return false;
 		const setWidget = ui.setWidget as LensWidgetSetWidget;
 		setWidget("pi-lens", undefined);
+		mountedLensWidgetUi = undefined;
 		return true;
 	}
 
@@ -1890,6 +1904,13 @@ export default function (pi: ExtensionAPI) {
 		// Trust can change without a new session. Re-adopt before this turn can
 		// reach any install-capable or LSP-spawn path.
 		adoptProjectTrustFromPorts(hostPorts);
+		if (
+			lensWidgetVisible &&
+			ctx?.ui &&
+			(mountedLensWidgetUi === undefined || mountedLensWidgetUi !== ctx.ui)
+		) {
+			mountLensWidget(ctx.ui, readExtensionMode(ctx));
+		}
 		runtime.beginTurn();
 		clearLastAnalyzedStateCache();
 

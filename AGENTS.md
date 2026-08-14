@@ -212,6 +212,13 @@ clients/
   mcp/                     host-neutral facades: analyze, session, review, ipc, host-shim
   runtime-session.ts      session_start handler — snapshot hydrate, tool preinstall, background scans, LSP warm
   project-snapshot.ts     Versioned seq-stamped project snapshot cache
+
+The diagnostics widget records the exact `ctx.ui` identity only after a
+successful `setWidget` mount. A visible widget re-asserts that mount on
+`turn_start` when the host replaces its UI object; this remains gated by the
+live run mode and `lensWidgetVisible`, so a user toggle-off or headless mode is
+never undone. Missing `ui.setWidget` is a log-once-per-extension-session
+diagnostic rather than a silent mount failure. (#1381)
   project-changes.ts      Append-only project/file sequence change log
   reverse-deps.ts         Snapshot-backed reverse dependency index/query helpers
   word-index.ts           Identifier inverted index + BM25 ranking (#162) — built in the session scan, persisted with per-file mtimes in the snapshot; consumed by BOTH the pi symbol_search tool and the MCP pilens_symbol_search mirror (#348 phase 1); session warmup preflights the bounded current file set and incrementally refreshes only sparse stale/new/deleted documents. A stale set whose ESTIMATED WORK exceeds one full rebuild (posting-scan + re-read cost vs totalTokens + corpus re-read cost), a dense stale set (≥32 documents AND >30% of the corpus), >30% file-set churn, or legacy metadata selects a separately-built full replacement BEFORE mutating the old index (#1197): repeated per-document posting-array filters become effectively quadratic (2,061 all-stale docs took 216.8s vs a 7.5s full build), and because per-document cost GROWS with the corpus no density ratio or absolute count is a bound — 800 docs / 239 stale at 29.875% measured 90.6s with a 39.6s loop block. Every bulk path (async build + both refresh loops) yields on an ~8ms monotonic budget OR'd with its item checkpoint — never count-only, which bounds nothing when per-item cost is unbounded — including within large documents and after any line ≥4,096 chars. Synchronous `buildWordIndex` is the small/test/reference primitive only. Superseded builds never publish a partial index and never escape as an exception into a caller's warmup pass.
