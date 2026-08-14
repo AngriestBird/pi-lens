@@ -1535,6 +1535,32 @@ Mock the **environment** (tool presence, network, abort/error injection) — nev
 - Use `closes` only when the commit fully resolves the entire issue; use `refs` for any partial work.
 - GitHub auto-closes an issue on any commit containing `closes #NNN` regardless of trailing text — "closes #125 Phase 1" still closes #125.
 
+### Commit message style
+
+**Commit messages follow the seven-rules discipline, on top of the repo's conventional-commit prefix.** See [A Note About Git Commit Messages](https://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html) and [How to Write a Git Commit Message](https://cbea.ms/git-commit/). Keep the `type(scope): subject` prefix and the `(closes #NNN)`/`(refs #NNN)` issue reference (see above). Then:
+
+1. Use the imperative mood for the subject: `add X`, `fix Y`, never `added`, `adds`, or `fixing`. Test it with: “If applied, this commit will `<subject>`.”
+2. Keep the subject concise. Aim for 50 characters or fewer, with a hard cap of about 72 characters including the prefix. Do not add a trailing period. Use lowercase after the colon, matching repo style.
+3. Put a blank line between the subject and body.
+4. Wrap the body at about 72 columns.
+5. Explain what changed and why, not how. The diff shows how. Include motivation, the problem fixed, side effects, and rejected alternatives when relevant.
+6. Keep the `Co-Authored-By:` trailer.
+
+Short, obvious changes may use a subject only. Non-trivial changes get a body.
+
+### Documentation and prose style
+
+**Prose in docs, changelog, and PR descriptions follows the [Google developer documentation style guide](https://developers.google.com/style) and [Simplified Technical English (ASD-STE100) principles](https://asd-ste100.org/).** This is a principles-only adoption of ASD-STE100, a proprietary aerospace controlled-language specification; it does not adopt its licensed word list. Apply this standard to `README`, `docs/`, `AGENTS.md`, changelog entries, and PR bodies:
+
+- Use active voice and present tense.
+- Use second person (`you`) for instructions. Use the imperative for procedure steps.
+- Use short sentences. Keep one idea or instruction per sentence. Aim for about 20–25 words or fewer.
+- Use consistent terminology. Use the same word for the same thing every time. Do not swap synonyms.
+- Use sentence case for headings.
+- Define an acronym on first use. Prefer a plain word over jargon when one exists.
+- Avoid gerund or noun pile-ups and ambiguous constructions. Avoid `please`. Use the Oxford comma.
+- These rules are machine-checkable. Pi-lens ships a config-gated Vale runner (`clients/dispatch/runners/vale.js`). A `.vale.ini` with the Google style package would enforce this section automatically; track that separately.
+
 ## Issue triage & labels
 
 Every issue should carry **one TYPE label + at least one `area:` label**.
