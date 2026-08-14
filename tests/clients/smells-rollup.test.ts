@@ -44,9 +44,9 @@ function writeLines(filePath: string, lines: string[]): void {
 	fs.writeFileSync(filePath, lines.map((l) => `${l}\n`).join(""));
 }
 
-function staleCtxLine(): string {
+function staleCtxLine(ts = new Date().toISOString()): string {
 	return JSON.stringify({
-		ts: new Date().toISOString(),
+		ts,
 		event: "pilens:files:touched",
 		outcome: "emit_failed",
 		cwd: "/repo",
@@ -54,8 +54,9 @@ function staleCtxLine(): string {
 	});
 }
 
-function opengrepRespawnLine(): string {
+function opengrepRespawnLine(ts = new Date().toISOString()): string {
 	return JSON.stringify({
+		ts,
 		type: "phase",
 		phase: "lsp_server_respawn",
 		filePath: "/repo",
@@ -151,6 +152,52 @@ describe("countRecentSmells", () => {
 		writeLines(path.join(tmpDir, "bus-events.log"), lines);
 		const counts = countRecentSmells(tmpDir);
 		expect(counts.staleCtxEmitFailed).toBe(1);
+	});
+
+	it("scopes both smell types to rows at or after the session boundary", () => {
+		const sessionStartMs = Date.parse("2026-08-14T10:00:00.000Z");
+		const before = "2026-08-14T09:59:59.999Z";
+		const after = "2026-08-14T10:00:00.001Z";
+		writeLines(path.join(tmpDir, "bus-events.log"), [
+			staleCtxLine(before),
+			staleCtxLine(after),
+		]);
+		writeLines(path.join(tmpDir, "latency.log"), [
+			opengrepRespawnLine(before),
+			opengrepRespawnLine(after),
+		]);
+
+		expect(countRecentSmells(tmpDir, sessionStartMs)).toEqual({
+			staleCtxEmitFailed: 1,
+			opengrepRespawn: 1,
+		});
+	});
+
+	it("reports no pre-session failures and retains post-session failures", () => {
+		const sessionStartMs = Date.parse("2026-08-14T10:00:00.000Z");
+		const before = "2026-08-14T09:59:59.999Z";
+		const after = "2026-08-14T10:00:00.001Z";
+
+		writeLines(path.join(tmpDir, "bus-events.log"), [staleCtxLine(before)]);
+		expect(countRecentSmells(tmpDir, sessionStartMs).staleCtxEmitFailed).toBe(0);
+
+		writeLines(path.join(tmpDir, "bus-events.log"), [staleCtxLine(after)]);
+		expect(countRecentSmells(tmpDir, sessionStartMs).staleCtxEmitFailed).toBe(1);
+	});
+
+	it("does not report matching rows without a parseable timestamp when scoped", () => {
+		writeLines(path.join(tmpDir, "bus-events.log"), [staleCtxLine()]);
+		writeLines(path.join(tmpDir, "latency.log"), [
+			JSON.stringify({
+				phase: "lsp_server_respawn",
+				metadata: { serverId: "opengrep" },
+			}),
+		]);
+
+		expect(countRecentSmells(tmpDir, Date.now())).toEqual({
+			staleCtxEmitFailed: 0,
+			opengrepRespawn: 0,
+		});
 	});
 });
 
