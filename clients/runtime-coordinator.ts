@@ -733,6 +733,16 @@ export class RuntimeCoordinator {
 		return { claimed, staleClaimed, deferredToOwner };
 	}
 
+	/** Return claimed records that were never started by an aborted drain. */
+	requeueDeferredFormatFiles(records: DeferredFormatRecord[]): void {
+		for (const record of records) {
+			const key = path.resolve(record.filePath);
+			if (!this._pendingDeferredFormatFiles.has(key)) {
+				this._pendingDeferredFormatFiles.set(key, record);
+			}
+		}
+	}
+
 	shouldWarmLspOnRead(filePath: string, maxAgeMs = 120_000): boolean {
 		const state = this._lspReadWarmState.get(path.resolve(filePath));
 		if (!state) return true;
