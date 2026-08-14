@@ -20,7 +20,12 @@
 import { logBusEvent } from "./bus-events-logger.js";
 import { normalizeFilePath } from "./path-utils.js";
 import { appendRecentTouches } from "./recent-touches.js";
-import { createLiveBusEmitter, type BusEmitFn, type BusEmitGetter } from "./live-bus-emitter.js";
+import {
+	createLiveBusEmitter,
+	recordStaleBusFailure,
+	type BusEmitFn,
+	type BusEmitGetter,
+} from "./live-bus-emitter.js";
 
 export const BUS_FILES_TOUCHED_EVENT = "pilens:files:touched";
 export const BUS_FILES_TOUCHED_VERSION = 1;
@@ -198,6 +203,7 @@ export function publishFilesTouched(args: PublishFilesTouchedArgs): void {
 			}));
 		}
 		busEmit(BUS_FILES_TOUCHED_EVENT, payload);
+		hasLoggedFailure = false;
 		logBusEvent({
 			event: BUS_FILES_TOUCHED_EVENT,
 			outcome: "emitted",
@@ -215,6 +221,7 @@ export function publishFilesTouched(args: PublishFilesTouchedArgs): void {
 		});
 		if (!hasLoggedFailure) {
 			hasLoggedFailure = true;
+			recordStaleBusFailure(BUS_FILES_TOUCHED_EVENT, err);
 			args.dbg?.(
 				`bus-publish: pilens:files:touched emit failed (further failures suppressed): ${err}`,
 			);

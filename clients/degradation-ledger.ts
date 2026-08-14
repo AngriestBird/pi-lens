@@ -6,7 +6,8 @@ export type DegradationKind =
 	| "ts-idle-eviction"
 	| "spawn-failure"
 	| "formatter-skip"
-	| "grammar-blocked";
+	| "grammar-blocked"
+	| "bus-stale";
 
 export interface DegradationRecord {
 	kind: DegradationKind;
