@@ -186,7 +186,12 @@ describe("countRecentSmells", () => {
 	});
 
 	it("does not report matching rows without a parseable timestamp when scoped", () => {
-		writeLines(path.join(tmpDir, "bus-events.log"), [staleCtxLine()]);
+		// An explicitly unparseable ts, NOT the helper default (which is
+		// `new Date().toISOString()` — a valid current timestamp that on a fast
+		// machine equals the Date.now() boundary below to the millisecond and is
+		// wrongly admitted, making this a timing flake instead of the
+		// missing-timestamp case it names).
+		writeLines(path.join(tmpDir, "bus-events.log"), [staleCtxLine("not-a-timestamp")]);
 		writeLines(path.join(tmpDir, "latency.log"), [
 			JSON.stringify({
 				phase: "lsp_server_respawn",
