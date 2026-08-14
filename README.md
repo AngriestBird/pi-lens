@@ -28,6 +28,11 @@ pi-lens gives AI coding agents fast, language-aware feedback while they write/ed
 - `/lens-map` — interactive HTML dependency map of the project
 - Read-guard and edit-autopatch support to reduce bad edits
 - Background security/dependency scans for opted-in projects
+- Runtime health telemetry (`/lens-health`) including a bounded degradation
+  ledger for silently-degraded behavior (LSP breakers, formatter
+  skips/failures, idle evictions, timeouts)
+- MCP server (experimental) so Claude Code or any MCP client can drive the
+  same diagnostics/read-substitute tools pi-lens exposes to pi
 
 ## Install
 
@@ -70,6 +75,8 @@ pi install git:github.com/apmantza/pi-lens
   and formatters
 - [Dependencies](docs/dependencies.md) — auto-install policy and external tools
 - [Custom rules](docs/custom-rules.md) — project ast-grep and tree-sitter rules
+- [MCP server](docs/mcp.md) — experimental MCP server for Claude Code and
+  other MCP clients
 
 ## Contributing
 
@@ -206,6 +213,12 @@ Thanks goes to these wonderful people:
     </tr>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/pppobear"><img src="https://avatars.githubusercontent.com/u/21952175?v=4" width="100px;" alt=""/><br /><sub><b>pppobear</b></sub></a><br /><a href="#bug-pppobear" title="Bug reports">🐛</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/3choBoomer"><img src="https://avatars.githubusercontent.com/u/521828?v=4" width="100px;" alt=""/><br /><sub><b>Nathan Cooke</b></sub></a><br /><a href="#code-3choBoomer" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/white-hat"><img src="https://avatars.githubusercontent.com/u/922988?v=4" width="100px;" alt=""/><br /><sub><b>Eli Stark</b></sub></a><br /><a href="#code-white-hat" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/marvtub"><img src="https://avatars.githubusercontent.com/u/33159023?v=4" width="100px;" alt=""/><br /><sub><b>Marvin Aziz</b></sub></a><br /><a href="#code-marvtub" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/mjfaga"><img src="https://avatars.githubusercontent.com/u/7584015?v=4" width="100px;" alt=""/><br /><sub><b>Mark Faga</b></sub></a><br /><a href="#code-mjfaga" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/aeturnal"><img src="https://avatars.githubusercontent.com/u/219271200?v=4" width="100px;" alt=""/><br /><sub><b>aeturnal</b></sub></a><br /><a href="#code-aeturnal" title="Code">💻</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/floatGray"><img src="https://avatars.githubusercontent.com/u/44295302?v=4" width="100px;" alt=""/><br /><sub><b>floatGray</b></sub></a><br /><a href="#code-floatGray" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>
