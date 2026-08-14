@@ -82,6 +82,14 @@ first client operation with `tests/clients/interleaving-kit.ts`, never sleeps.
 The TypeScript idle default is 20 minutes to preserve warm LSPs across subagent
 bursts; every non-idle removal path must also clear timer ownership. (#1332)
 
+**Path-keyed Tier-3 caches normalize at both boundaries.** Widget LSP server
+roots, startup-scan context keys, and Ruby drive-root memo keys use
+`normalizeMapKey`; equivalent separator/case spellings must share one entry.
+Widget file-record cardinality eviction is render-aware: only idle records with
+no live diagnostic may be evicted. Formatter detection signatures include
+formatter config metadata, and tsconfig-path signatures include recursive
+`extends`/project-reference configs. (#1389)
+
 **Spawn repair decisions use the typed safe-spawn taxonomy.** A raw OS
 `ENOENT` can mean either a missing executable or an invalid child cwd. Consume
 `SpawnResult.spawnFailure.kind` / `SpawnFailureError.kind`, never errno or

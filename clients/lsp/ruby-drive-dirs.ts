@@ -23,6 +23,7 @@
  * `ruby<N>` names are cached.
  */
 import { BoundedLruCache } from "../bounded-cache.js";
+import { normalizeMapKey } from "../path-utils.js";
 
 import * as fs from "node:fs";
 
@@ -31,6 +32,10 @@ const RUBY_VERSION_DIR = /^ruby\d/i;
 
 /** Process-lifetime memo of matching dir names, keyed by drive root (e.g. `C:\`). */
 const rubyDirNamesCache = new BoundedLruCache<string, string[]>(16);
+
+function rubyDriveKey(driveRoot: string): string {
+	return normalizeMapKey(driveRoot);
+}
 
 function filterRubyDirNames(entries: string[]): string[] {
 	return entries.filter((name) => RUBY_VERSION_DIR.test(name));
@@ -43,7 +48,8 @@ function filterRubyDirNames(entries: string[]): string[] {
  * cache first, this returns that result with no drive-root read at all.
  */
 export function getRubyVersionDirNamesSync(driveRoot: string): string[] {
-	const cached = rubyDirNamesCache.get(driveRoot);
+	const key = rubyDriveKey(driveRoot);
+	const cached = rubyDirNamesCache.get(key);
 	if (cached !== undefined) return cached;
 	let names: string[];
 	try {
@@ -51,7 +57,7 @@ export function getRubyVersionDirNamesSync(driveRoot: string): string[] {
 	} catch {
 		names = [];
 	}
-	rubyDirNamesCache.set(driveRoot, names);
+	rubyDirNamesCache.set(key, names);
 	return names;
 }
 
@@ -64,7 +70,8 @@ export function getRubyVersionDirNamesSync(driveRoot: string): string[] {
 export async function getRubyVersionDirNamesAsync(
 	driveRoot: string,
 ): Promise<string[]> {
-	const cached = rubyDirNamesCache.get(driveRoot);
+	const key = rubyDriveKey(driveRoot);
+	const cached = rubyDirNamesCache.get(key);
 	if (cached !== undefined) return cached;
 	let names: string[];
 	try {
@@ -72,7 +79,7 @@ export async function getRubyVersionDirNamesAsync(
 	} catch {
 		names = [];
 	}
-	rubyDirNamesCache.set(driveRoot, names);
+	rubyDirNamesCache.set(key, names);
 	return names;
 }
 

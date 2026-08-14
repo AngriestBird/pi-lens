@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { visibleWidth } from "./deps/pi-tui.js";
-import { normalizeEphemeralMapKey } from "./path-utils.js";
+import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { fitLine } from "./tui-fit.js";
 import { WriteOrderingGuard } from "./write-ordering-guard.js";
 
@@ -143,7 +143,11 @@ const MAX_LSP_SERVER_RECORDS = 128;
 function pruneInactiveFileRecords(now = Date.now()): void {
 	if (files.size <= MAX_INACTIVE_FILE_RECORDS) return;
 	const victims = [...files.entries()]
-		.filter(([, rec]) => now - rec.touchedAt > ACTIVE_FILE_IDLE_MS)
+		.filter(
+			([, rec]) =>
+				now - rec.touchedAt > ACTIVE_FILE_IDLE_MS &&
+				!hasLiveDiagnostic(rec),
+		)
 		.sort(([, a], [, b]) => a.touchedAt - b.touchedAt);
 	for (const [key] of victims) {
 		if (files.size <= MAX_INACTIVE_FILE_RECORDS) break;
@@ -816,7 +820,8 @@ export function recordLsp(
 	status: "spawn_start" | "spawn_success" | "spawn_failed" | "unavailable",
 	durationMs?: number,
 ): void {
-	const key = `${serverId}@${root}`;
+	const normalizedRoot = normalizeMapKey(root);
+	const key = `${serverId}@${normalizedRoot}`;
 	const mapped =
 		status === "spawn_start"
 			? "spawning"
@@ -1155,6 +1160,10 @@ function hasFailedFormatter(rec: FileRecord): boolean {
 
 function shouldRenderFile(rec: FileRecord): boolean {
 	return rec.hasFinalDiagnosticsSnapshot || hasChangedFormatter(rec) || hasFailedFormatter(rec);
+}
+
+function hasLiveDiagnostic(rec: FileRecord): boolean {
+	return rec.hasFinalDiagnosticsSnapshot && rec.diagnostics.length > 0;
 }
 
 function isPendingAnalysis(rec: FileRecord): boolean {

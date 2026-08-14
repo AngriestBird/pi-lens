@@ -486,6 +486,13 @@ describe("getFormattersForFile — policy selection", () => {
 		expect(formatters.map((f) => f.name)).toEqual(["prettier"]);
 	});
 
+	it("re-detects after a formatter config is added", async () => {
+		const filePath = fileIn(tmpDir, "README.md");
+		expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
+		createTempFile(tmpDir, ".prettierrc", "{}\n");
+		expect((await getFormattersForFile(filePath, tmpDir)).map((f) => f.name)).toEqual(["prettier"]);
+	});
+
 	it("does not force a formatter for unconfigured SQL files", async () => {
 		const filePath = fileIn(tmpDir, "query.sql");
 		const formatters = await getFormattersForFile(filePath, tmpDir);

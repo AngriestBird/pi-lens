@@ -10,6 +10,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { BoundedLruCache } from "./bounded-cache.js";
+import { normalizeMapKey } from "./path-utils.js";
 import { lazyEnvNumber } from "./env-utils.js";
 import {
 	getProjectIgnoreMatcher,
@@ -324,18 +325,22 @@ export function countSourceFilesWithinLimit(
 // in-process memoisation is safe for the duration of a single pi process.
 const startupScanContextCache = new BoundedLruCache<string, StartupScanContext>(32);
 
+function startupScanCacheKey(cwd: string, options: StartupScanOptions): string {
+	return [
+		normalizeMapKey(path.resolve(cwd)),
+		options.homeDir ? normalizeMapKey(path.resolve(options.homeDir)) : "",
+		options.maxSourceFiles ?? "",
+		options.maxScanEntries ?? "",
+	].join("|");
+}
+
+export const __testing = { startupScanCacheKey };
+
 export function resolveStartupScanContext(
 	cwd: string,
 	options: StartupScanOptions = {},
 ): StartupScanContext {
-	const cacheKey =
-		path.resolve(cwd) +
-		"|" +
-		(options.homeDir ?? "") +
-		"|" +
-		(options.maxSourceFiles ?? "") +
-		"|" +
-		(options.maxScanEntries ?? "");
+	const cacheKey = startupScanCacheKey(cwd, options);
 	const cached = startupScanContextCache.get(cacheKey);
 	if (cached) return cached;
 	const result = { ...computeStartupScanContext(cwd, options), computedAt: Date.now() };
@@ -479,14 +484,7 @@ export async function resolveStartupScanContextAsync(
 	cwd: string,
 	options: StartupScanOptions = {},
 ): Promise<StartupScanContext> {
-	const cacheKey =
-		path.resolve(cwd) +
-		"|" +
-		(options.homeDir ?? "") +
-		"|" +
-		(options.maxSourceFiles ?? "") +
-		"|" +
-		(options.maxScanEntries ?? "");
+	const cacheKey = startupScanCacheKey(cwd, options);
 	const cached = startupScanContextCache.get(cacheKey);
 	if (cached) return cached;
 

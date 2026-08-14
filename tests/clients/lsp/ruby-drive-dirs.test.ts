@@ -82,6 +82,14 @@ describe("ruby drive-root enumeration (#1137)", () => {
 		expect(readdirSyncMock).not.toHaveBeenCalled();
 	});
 
+	it("shares entries across slash spellings of a Windows-shaped root", async () => {
+		readdirAsyncMock.mockResolvedValue(ENTRIES);
+		await getRubyVersionDirNamesAsync("C:\\Ruby");
+		expect(getRubyVersionDirNamesSync("C:/Ruby")).toEqual(EXPECTED);
+		expect(readdirAsyncMock).toHaveBeenCalledTimes(1);
+		expect(readdirSyncMock).not.toHaveBeenCalled();
+	});
+
 	it("fails open to [] on an unreadable drive root (both readers)", async () => {
 		readdirSyncMock.mockImplementation(() => {
 			throw new Error("EPERM");

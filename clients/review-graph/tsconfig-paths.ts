@@ -81,6 +81,38 @@ function configSignature(configPath: string): string {
 	}
 }
 
+function configDependencyPaths(configPath: string): string[] {
+	const paths = new Set<string>();
+	const visit = (currentPath: string): void => {
+		const normalized = path.resolve(currentPath);
+		if (paths.has(normalized)) return;
+		paths.add(normalized);
+		let json: TsconfigJson;
+		try {
+			json = parseJsonc(fs.readFileSync(normalized, "utf8")) as TsconfigJson;
+		} catch {
+			return;
+		}
+		if (typeof json.extends === "string") {
+			const parent = resolveExtends(normalized, json.extends);
+			if (parent) visit(parent);
+		}
+		for (const reference of json.references ?? []) {
+			if (typeof reference?.path !== "string") continue;
+			const referenced = resolveReferenceConfig(normalized, reference.path);
+			if (referenced) visit(referenced);
+		}
+	};
+	visit(configPath);
+	return [...paths].sort();
+}
+
+function dependencySignature(configPath: string): string {
+	return configDependencyPaths(configPath)
+		.map((dependency) => `${dependency}:${configSignature(dependency)}`)
+		.join("|");
+}
+
 function resolveExtends(configPath: string, value: string): string | undefined {
 	if (!value.startsWith(".")) return undefined;
 	const resolved = path.resolve(path.dirname(configPath), value);
@@ -235,7 +267,7 @@ export function parseTsconfigPaths(
 	const normalizedCwd = path.resolve(cwd);
 	const configDir = findGoverningTsconfigDir(normalizedCwd, homeDir);
 	const configPath = configDir ? path.join(configDir, "tsconfig.json") : "";
-	const signature = configPath ? configSignature(configPath) : "missing";
+	const signature = configPath ? dependencySignature(configPath) : "missing";
 	const key = `${normalizedCwd}|${configPath}|${signature}`;
 	const cached = cache.get(key);
 	if (cached) return cached;
@@ -296,7 +328,7 @@ export function referencedProjectImportTarget(
 	const normalizedImporterDir = path.resolve(importerDir);
 	const governingDir = findGoverningTsconfigDir(normalizedImporterDir);
 	const governingPath = governingDir ? path.join(governingDir, "tsconfig.json") : "";
-	const key = `${normalizedImporterDir}|${governingPath}|${governingPath ? configSignature(governingPath) : "missing"}`;
+	const key = `${normalizedImporterDir}|${governingPath}|${governingPath ? dependencySignature(governingPath) : "missing"}`;
 	let projects = referencesCache.get(key);
 	if (!projects) {
 		projects = new Map();
