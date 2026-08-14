@@ -308,6 +308,18 @@ const DIRECT_LSP_NEGATIVE_TTL_MS = Math.max(
 const directLspCommandUnavailableUntil = new Map<string, number>();
 const directLspCommandSkipLoggedUntil = new Map<string, number>();
 
+function pruneExpiredDirectLspNegativeEntries(now = Date.now()): void {
+	for (const [command, until] of directLspCommandUnavailableUntil) {
+		if (until <= now) {
+			directLspCommandUnavailableUntil.delete(command);
+			directLspCommandSkipLoggedUntil.delete(command);
+		}
+	}
+	for (const [command, until] of directLspCommandSkipLoggedUntil) {
+		if (until <= now) directLspCommandSkipLoggedUntil.delete(command);
+	}
+}
+
 function isSimpleCommand(command: string): boolean {
 	return (
 		!isFullyQualified(command) &&
@@ -319,15 +331,17 @@ function isSimpleCommand(command: string): boolean {
 export function isDirectLspCommandTemporarilyUnavailable(
 	command: string,
 ): boolean {
+	const now = Date.now();
+	pruneExpiredDirectLspNegativeEntries(now);
 	const until = directLspCommandUnavailableUntil.get(command);
-	if (!until || until <= Date.now()) {
+	if (!until || until <= now) {
 		directLspCommandUnavailableUntil.delete(command);
 		return false;
 	}
 	const loggedUntil = directLspCommandSkipLoggedUntil.get(command) ?? 0;
-	if (loggedUntil <= Date.now()) {
+	if (loggedUntil <= now) {
 		logSessionStart(
-			`lsp direct command ${command}: skipped by negative availability cache (${Math.max(0, until - Date.now())}ms remaining)`,
+			`lsp direct command ${command}: skipped by negative availability cache (${Math.max(0, until - now)}ms remaining)`,
 		);
 		directLspCommandSkipLoggedUntil.set(command, until);
 	}

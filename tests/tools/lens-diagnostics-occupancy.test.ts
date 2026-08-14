@@ -19,7 +19,11 @@ import { measureMaxSyncBlockMs } from "../support/perf-harness.js";
 import { removeTempDirSync } from "../clients/test-utils.js";
 
 const FILE_COUNT = 5_000;
-const MAX_SYNC_BLOCK_MS = 300;
+// This is a regression guard for the quadratic re-read/rebind class, not a
+// tight performance budget. The fixed path is normally ~300-450 ms on CI and
+// Windows, while the quadratic regression measured >1,500 ms; leave room for
+// host variance without allowing that regression to pass.
+const MAX_SYNC_BLOCK_MS = 1_000;
 const CONTENT = "const value = 1;\n";
 
 let cwd: string;

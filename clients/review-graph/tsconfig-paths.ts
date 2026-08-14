@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
+import { BoundedLruCache } from "../bounded-cache.js";
 import * as path from "node:path";
 import {
 	findGoverningTsconfigDir,
@@ -32,8 +33,8 @@ interface ParsedConfig {
 	references: string[];
 }
 
-const cache = new Map<string, TsconfigPathMatcher[]>();
-const referencesCache = new Map<string, Map<string, string>>();
+const cache = new BoundedLruCache<string, TsconfigPathMatcher[]>(64);
+const referencesCache = new BoundedLruCache<string, Map<string, string>>(64);
 
 /** Strip JSONC comments and trailing commas without touching string contents. */
 function parseJsonc(content: string): unknown {
@@ -69,6 +70,47 @@ function parseJsonc(content: string): unknown {
 		}
 	}
 	return JSON.parse(output.replace(/,\s*([}\]])/g, "$1"));
+}
+
+function configSignature(configPath: string): string {
+	try {
+		const stat = fs.statSync(configPath);
+		return `${stat.mtimeMs}:${stat.size}`;
+	} catch {
+		return "missing";
+	}
+}
+
+function configDependencyPaths(configPath: string): string[] {
+	const paths = new Set<string>();
+	const visit = (currentPath: string): void => {
+		const normalized = path.resolve(currentPath);
+		if (paths.has(normalized)) return;
+		paths.add(normalized);
+		let json: TsconfigJson;
+		try {
+			json = parseJsonc(fs.readFileSync(normalized, "utf8")) as TsconfigJson;
+		} catch {
+			return;
+		}
+		if (typeof json.extends === "string") {
+			const parent = resolveExtends(normalized, json.extends);
+			if (parent) visit(parent);
+		}
+		for (const reference of json.references ?? []) {
+			if (typeof reference?.path !== "string") continue;
+			const referenced = resolveReferenceConfig(normalized, reference.path);
+			if (referenced) visit(referenced);
+		}
+	};
+	visit(configPath);
+	return [...paths].sort((a, b) => a.localeCompare(b));
+}
+
+function dependencySignature(configPath: string): string {
+	return configDependencyPaths(configPath)
+		.map((dependency) => `${dependency}:${configSignature(dependency)}`)
+		.join("|");
 }
 
 function resolveExtends(configPath: string, value: string): string | undefined {
@@ -222,13 +264,16 @@ export function parseTsconfigPaths(
 	cwd: string,
 	homeDir = os.homedir(),
 ): TsconfigPathMatcher[] {
-	const key = path.resolve(cwd);
+	const normalizedCwd = path.resolve(cwd);
+	const configDir = findGoverningTsconfigDir(normalizedCwd, homeDir);
+	const configPath = configDir ? path.join(configDir, "tsconfig.json") : "";
+	const signature = configPath ? dependencySignature(configPath) : "missing";
+	const key = `${normalizedCwd}|${configPath}|${signature}`;
 	const cached = cache.get(key);
 	if (cached) return cached;
 	// Home-guarding is enforced inside findGoverningTsconfigDir's walk itself
 	// (via workspace-topology's shared isAtOrAboveHomeDir ceiling), so a hit
 	// here is never at/above homeDir.
-	const configDir = findGoverningTsconfigDir(key, homeDir);
 	if (!configDir) {
 		cache.set(key, []);
 		return [];
@@ -280,11 +325,14 @@ export function referencedProjectImportTarget(
 	specifier: string,
 	importerDir: string,
 ): string | undefined {
-	const key = path.resolve(importerDir);
+	const normalizedImporterDir = path.resolve(importerDir);
+	const governingDir = findGoverningTsconfigDir(normalizedImporterDir);
+	const governingPath = governingDir ? path.join(governingDir, "tsconfig.json") : "";
+	const key = `${normalizedImporterDir}|${governingPath}|${governingPath ? dependencySignature(governingPath) : "missing"}`;
 	let projects = referencesCache.get(key);
 	if (!projects) {
 		projects = new Map();
-		const configDir = findGoverningTsconfigDir(key);
+		const configDir = governingDir;
 		if (configDir) {
 			collectReferencedProjects(
 				path.join(configDir, "tsconfig.json"),

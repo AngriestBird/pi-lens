@@ -34,7 +34,7 @@ export function classifyServerWaitTier(
 	if (mode === "pull") return "pull-capable";
 	if (mode !== "push-only") return "waits";
 
-	const strategy = getStrategy(serverId);
+	const strategy = getStrategy(serverId, snapshot.launchVariant);
 	if (strategy.silentOnClean !== true) return "waits"; // 2*/unknown push-only
 
 	// #524/#529/#541/#558: `silentOnClean` on a server-id-keyed strategy is

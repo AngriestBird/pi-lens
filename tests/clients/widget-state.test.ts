@@ -37,6 +37,11 @@ afterEach(() => {
 });
 
 describe("LSP failure accessors (#170)", () => {
+	it("folds equivalent root spellings into one server record", () => {
+		recordLsp("ruby", "C:\\Repo\\app", "spawn_failed");
+		recordLsp("ruby", "C:/Repo/app", "spawn_success");
+		expect(getFailedLspServerIds()).toEqual([]);
+	});
 	it("getFailedLspServerIds returns only failed records, deduped by serverId", () => {
 		recordLsp("ruby", "/a", "spawn_failed");
 		recordLsp("ruby", "/b", "spawn_failed"); // same server, two roots → one id
@@ -56,6 +61,35 @@ describe("LSP failure accessors (#170)", () => {
 		expect(getSessionLanguages()).toEqual([]);
 		setSessionLanguages(["python", "ruby"]);
 		expect(getSessionLanguages()).toEqual(["python", "ruby"]);
+	});
+});
+
+describe("inactive file-record eviction", () => {
+	it("keeps the oldest displayed diagnostic while evicting an inactive record", () => {
+		const old = Date.now() - 31 * 60_000;
+		const files = [
+			{
+				filePath: "displayed.ts",
+				runners: [], formatters: [],
+				diagnostics: [{ severity: "error", message: "live", observedAt: old }],
+				allDiagnostics: [{ severity: "error", message: "live", observedAt: old }],
+				diagnosticCounts: { blocking: 1, errors: 1, warnings: 0 },
+				hasFinalDiagnosticsSnapshot: true, touchedAt: old,
+			},
+			...Array.from({ length: 1024 }, (_, i) => ({
+				filePath: `inactive-${i}.ts`, runners: [], formatters: [],
+				diagnostics: [], allDiagnostics: [],
+				diagnosticCounts: { blocking: 0, errors: 0, warnings: 0 },
+				hasFinalDiagnosticsSnapshot: false, touchedAt: old + i,
+			})),
+		];
+		expect(importWidgetState({
+			version: WIDGET_STATE_VERSION, sessionLanguages: [], files,
+		} as Parameters<typeof importWidgetState>[0])).toBe(true);
+		const snapshot = __testing.getWidgetStateSnapshot();
+		expect(snapshot.files).toHaveLength(1024);
+		expect(snapshot.files.some((file) => file.filePath === "displayed.ts")).toBe(true);
+		expect(snapshot.files.some((file) => file.filePath === "inactive-0.ts")).toBe(false);
 	});
 });
 

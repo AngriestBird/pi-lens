@@ -16,6 +16,7 @@ import {
 	applyDynamicCapabilities,
 	CLIENT_CAPABILITIES,
 	clientRequestWorkspaceDiagnostics,
+	clearDiagnosticsForPath,
 	clientShutdown,
 	clientWaitForDiagnostics,
 	closeDocument,
@@ -417,6 +418,8 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 		documentPullDiagnosticTimestamps: new Map(),
 		pullFailureHistory: [],
 		pendingDiagnostics: new Map(),
+		diagnosticPublicationCounts: new Map(),
+		documentOpenedAt: new Map(),
 		diagnosticEmitter,
 		diagnosticsVersion: 0,
 		documentVersions: new Map(),
@@ -919,6 +922,115 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 	// DEFAULT_STRATEGY (seedFirstPush: false, debounceMs: 150) — the debounced
 	// cache-write path exercised here is the common one across real servers.
 	const DEBOUNCE_WAIT_MS = 220;
+
+	function diagnostic(message: string, code?: string): LSPDiagnostic {
+		return {
+			severity: 1,
+			message,
+			code,
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 1 },
+			},
+		};
+	}
+
+	it("waits for native TS7's versionless push burst to stabilize", async () => {
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		Object.defineProperty(state, "serverId", { value: "typescript" });
+		Object.defineProperty(state, "launchVariant", { value: "native-ts7" });
+		const wait = clientWaitForDiagnostics(state, TEST_FILE, 500);
+
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			diagnostics: [diagnostic("bogus partial-program error", "2345")],
+		});
+		setTimeout(() => {
+			emitPublishDiagnostics({
+				uri: pathToFileURL(TEST_FILE).href,
+				diagnostics: [],
+			});
+		}, 20);
+
+		await wait;
+		expect(state.pushDiagnostics.get(TEST_KEY)).toEqual([]);
+	});
+
+	it("keeps classic TypeScript's first publication authoritative", () => {
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		Object.defineProperty(state, "serverId", { value: "typescript" });
+		Object.defineProperty(state, "launchVariant", { value: "classic" });
+
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			diagnostics: [diagnostic("classic result", "2322")],
+		});
+
+		expect(state.pushDiagnostics.get(TEST_KEY)?.[0]?.message).toBe(
+			"classic result",
+		);
+	});
+
+	it("surfaces an intentional native TS7 error present across the burst", async () => {
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		Object.defineProperty(state, "serverId", { value: "typescript" });
+		Object.defineProperty(state, "launchVariant", { value: "native-ts7" });
+		const wait = clientWaitForDiagnostics(state, TEST_FILE, 500);
+
+		for (const delay of [0, 20]) {
+			setTimeout(() => {
+				emitPublishDiagnostics({
+					uri: pathToFileURL(TEST_FILE).href,
+					diagnostics: [diagnostic("real error", "2322")],
+				});
+			}, delay);
+		}
+
+		await wait;
+		expect(state.pushDiagnostics.get(TEST_KEY)?.[0]?.message).toBe("real error");
+	});
+
+	it("settles a single native TS7 publication within the bounded quiet window", async () => {
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		Object.defineProperty(state, "serverId", { value: "typescript" });
+		Object.defineProperty(state, "launchVariant", { value: "native-ts7" });
+		const startedAt = Date.now();
+		const wait = clientWaitForDiagnostics(state, TEST_FILE, 500);
+
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			diagnostics: [diagnostic("single result", "2322")],
+		});
+		await wait;
+
+		expect(Date.now() - startedAt).toBeLessThan(300);
+		expect(state.pushDiagnostics.get(TEST_KEY)?.[0]?.message).toBe("single result");
+	});
+
+	it("cancels a pending native TS7 quiet-window timer on clear/resync", async () => {
+		// The headline #1412 safety property: a versionless publication armed
+		// BEFORE a resync must never land its (stale) diagnostics AFTER the
+		// document content changed. clearDiagnosticsForPath is what every
+		// didChange/resync/initial-open path calls — deleting its clearTimeout
+		// must turn this test red.
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		Object.defineProperty(state, "serverId", { value: "typescript" });
+		Object.defineProperty(state, "launchVariant", { value: "native-ts7" });
+
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			diagnostics: [diagnostic("stale pre-resync error", "2345")],
+		});
+		expect(state.pendingDiagnostics.has(TEST_KEY)).toBe(true);
+
+		clearDiagnosticsForPath(state, TEST_KEY);
+		expect(state.pendingDiagnostics.has(TEST_KEY)).toBe(false);
+
+		// Wait past the quiet window: the canceled timer must not fire and
+		// resurrect the pre-resync diagnostics.
+		await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+		expect(state.pushDiagnostics.has(TEST_KEY)).toBe(false);
+	});
 
 	it("drops a late push whose version lags the current document version, without poisoning the cache", async () => {
 		const { state, emitPublishDiagnostics } = createCapturingState();
