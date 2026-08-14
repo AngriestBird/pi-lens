@@ -24,6 +24,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **Safe dependency refresh for v4** — updated the pi host SDK and TUI to `0.84.2`, ast-grep NAPI to `0.45.1`, and Biome to `2.5.8`; refreshed the transitive dependency graph to remove the audited high-severity `nanoid` finding. Major or otherwise non-essential updates remain deferred for follow-up validation.
+
 - **Installer probe-cache persistence now uses the shared durable-store protocol (closes #1212)** — awaited commits use the shared quarantine-recovering bounded PID lock, authoritative in-lock reread/delta merge, throwing atomic publication, and in-lock mirror refresh while retaining deferred/failed retry outcomes; TTL, existence, and mtime validation remain read-side policy. Turn-state folding remains a future decision, not part of this change.
 
 - **Shared durable-store and atomic-stage protocols (refs #1212, closes #1209)** — diagnostic dispositions and actionable-warning suppression now use one locked in-lock-reread/merge/throwing-atomic-write commit seam, while one staging namespace module owns `.tmp-<pid>-<threadId>-<seq>` minting, classification, and bounded own-stage sweeping.
