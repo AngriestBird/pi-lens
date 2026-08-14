@@ -343,6 +343,9 @@ export function evaluateAstGrepRules(
 		const firstSeenLanguages = Array.from(newlyUnsupported.entries()).filter(
 			([language]) => !unsupportedLanguageLog.has(language),
 		);
+		for (const [language] of firstSeenLanguages) {
+			unsupportedLanguageLog.add(language);
+		}
 		if (firstSeenLanguages.length === 0) {
 			newlyUnsupported.clear();
 			return;
@@ -437,8 +440,7 @@ export function evaluateAstGrepRules(
 				lang !== "tsx" &&
 				lang !== "javascript"
 			) {
-				if (!unsupportedLanguageLog.has(rule.id)) {
-					unsupportedLanguageLog.add(rule.id);
+				if (!unsupportedLanguageLog.has(lang)) {
 					const ids = newlyUnsupported.get(lang) ?? [];
 					ids.push(rule.id);
 					newlyUnsupported.set(lang, ids);

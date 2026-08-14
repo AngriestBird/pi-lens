@@ -24,7 +24,7 @@ import { minimatch } from "minimatch";
 const DEFAULT_ROOT = path.join(os.homedir(), ".pi-lens");
 const DEFAULT_SINCE = "2d";
 const DEFAULT_LIMIT = 12;
-const DEFAULT_EXCLUDE_GLOBS = ["**/temp/**", "**/scratchpad/**", "**/heap-corpus/**"];
+const DEFAULT_EXCLUDE_GLOBS = ["**/AppData/Local/Temp/claude/**", "**/heap-corpus*/**", "**/.plegma/work/**"];
 
 const args = parseArgs(process.argv.slice(2));
 const root = path.resolve(expandHome(args.root ?? DEFAULT_ROOT));
