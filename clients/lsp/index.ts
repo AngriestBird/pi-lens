@@ -2473,7 +2473,10 @@ export class LSPService {
 			const sweepFirstTouch = new Map<string, boolean>();
 			if (options.sweepIndexGate) {
 				for (const entry of spawned) {
-					const strategy = getStrategy(entry.client.serverId);
+					const strategy = getStrategy(
+						entry.client.serverId,
+						entry.client.getLaunchVariant?.(),
+					);
 					if (strategy.workspaceIndexing) {
 						sweepFirstTouch.set(
 							entry.client.serverId,
@@ -2497,7 +2500,10 @@ export class LSPService {
 			const silentCleanWarmupServers = new Set<string>();
 			if (options.warmupOverride && (options.warmupAttempt ?? 1) <= 1) {
 				for (const entry of spawned) {
-					const strategy = getStrategy(entry.client.serverId);
+					const strategy = getStrategy(
+						entry.client.serverId,
+						entry.client.getLaunchVariant?.(),
+					);
 					if (strategy.workspaceIndexing !== true) continue;
 					try {
 						const snapshot: LSPCapabilitySnapshot = {
@@ -2527,7 +2533,10 @@ export class LSPService {
 			// slow aux (opengrep) can't override the per-edit cap. Resolves as soon
 			// as a server publishes; this is just its individual deadline. (#242)
 			const perServerTimeout = (serverId: string): number => {
-				const strategy = getStrategy(serverId);
+				const launchVariant = spawned.find(
+					(entry) => entry.client.serverId === serverId,
+				)?.client.getLaunchVariant?.();
+				const strategy = getStrategy(serverId, launchVariant);
 				let strategyWait = strategy.aggregateWaitMs;
 				// #645: a `workspaceIndexing` server (marksman) only needs the
 				// full budget for the FIRST same-sweep touch to it — every
@@ -2612,7 +2621,10 @@ export class LSPService {
 				clientScope === "primary" &&
 				spawned.length === 1 &&
 				spawned[0].client.serverId === "typescript" &&
-				getStrategy(spawned[0].client.serverId).silentOnClean === true
+				getStrategy(
+					spawned[0].client.serverId,
+					spawned[0].client.getLaunchVariant?.(),
+				).silentOnClean === true
 			) {
 				try {
 					const snapshots = await this.getCapabilitySnapshots(filePath);
@@ -3073,7 +3085,10 @@ export class LSPService {
 			!tsserverSyncEligible &&
 			clientScope === "primary" &&
 			spawned.length === 1 &&
-			getStrategy(spawned[0].client.serverId).silentOnClean === true
+			getStrategy(
+				spawned[0].client.serverId,
+				spawned[0].client.getLaunchVariant?.(),
+			).silentOnClean === true
 		) {
 			try {
 				const snapshots = await this.getCapabilitySnapshots(filePath);
@@ -3356,6 +3371,7 @@ export class LSPService {
 		// with a PerServerEntry; raceToCompletion collects them as they finish.
 		type PerServerEntry = {
 			serverId: string;
+			launchVariant?: "classic" | "native-ts7";
 			waitMs: number;
 			diagnosticCount: number;
 			diagnostics: import("./client.js").LSPDiagnostic[];
@@ -3364,7 +3380,8 @@ export class LSPService {
 		const clientWaits: Promise<PerServerEntry>[] = spawned.map(
 			async (entry) => {
 				const waitStart = Date.now();
-				const strategy = getStrategy(entry.info.id);
+				const launchVariant = entry.client.getLaunchVariant?.();
+				const strategy = getStrategy(entry.info.id, launchVariant);
 				await entry.client.waitForDiagnostics(
 					filePath,
 					strategy.aggregateWaitMs,
@@ -3384,6 +3401,7 @@ export class LSPService {
 				}
 				return {
 					serverId: entry.info.id,
+					launchVariant,
 					waitMs: Date.now() - waitStart,
 					diagnosticCount: diagnostics.length,
 					diagnostics,
@@ -3414,11 +3432,17 @@ export class LSPService {
 			clientWaits,
 			(results) =>
 				results.some(
-					(r) => r.diagnosticCount > 0 || getStrategy(r.serverId).seedFirstPush,
+					(r) =>
+						r.diagnosticCount > 0 ||
+						getStrategy(r.serverId, r.launchVariant).seedFirstPush,
 				),
 			{
 				timeoutMs: Math.max(
-					...spawned.map((entry) => getStrategy(entry.info.id).aggregateWaitMs),
+					...spawned.map(
+						(entry) =>
+							getStrategy(entry.info.id, entry.client.getLaunchVariant?.())
+								.aggregateWaitMs,
+					),
 				),
 				graceMs,
 				descriptors: diagDescriptors,
@@ -3433,7 +3457,11 @@ export class LSPService {
 			return (
 				found ?? {
 					serverId: entry.info.id,
-					waitMs: getStrategy(entry.info.id).aggregateWaitMs,
+					launchVariant: entry.client.getLaunchVariant?.(),
+					waitMs: getStrategy(
+						entry.info.id,
+						entry.client.getLaunchVariant?.(),
+					).aggregateWaitMs,
 					diagnosticCount: 0,
 					diagnostics: [],
 				}

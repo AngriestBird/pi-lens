@@ -17,6 +17,7 @@ import { pathToFileURL } from "node:url";
 import { withTimeout } from "../deadline-utils.js";
 import type { MessageConnection } from "../deps/vscode-jsonrpc.js";
 import { logLatency } from "../latency-logger.js";
+import { PathKeyedMap } from "../path-keyed-map.js";
 // vscode-jsonrpc v9 ships an `exports` map exposing the Node entry as the
 // `./node` subpath (no `.js`); the old `/node.js` file path no longer resolves.
 import {
@@ -666,6 +667,10 @@ export interface LSPClientState {
 	/** Most recent operational pull failures, capped to avoid unbounded telemetry. */
 	readonly pullFailureHistory: LSPPullFailure[];
 	readonly pendingDiagnostics: Map<string, ReturnType<typeof setTimeout>>;
+	/** Receive sequence and didOpen epoch used only for bounded TypeScript
+	 * diagnostic-publication telemetry. */
+	readonly diagnosticPublicationCounts: PathKeyedMap<number>;
+	readonly documentOpenedAt: PathKeyedMap<number>;
 	readonly diagnosticEmitter: EventEmitter;
 	diagnosticsVersion: number;
 	readonly documentVersions: Map<string, number>;
@@ -1046,6 +1051,9 @@ function clearDiagnosticsForPath(
 		diagnosticTimestamps?: Map<string, number>;
 	};
 	state.pushDiagnostics?.delete(normalizedPath);
+	const pending = state.pendingDiagnostics?.get(normalizedPath);
+	if (pending) clearTimeout(pending);
+	state.pendingDiagnostics?.delete(normalizedPath);
 	state.pushDiagnosticTimestamps?.delete(normalizedPath);
 	state.documentPullDiagnostics?.delete(normalizedPath);
 	state.documentPullDiagnosticTimestamps?.delete(normalizedPath);
@@ -1062,6 +1070,39 @@ function clearDiagnosticsForPath(
 	state.workspacePullResultCache?.delete(normalizedPath);
 	legacy.diagnostics?.delete(normalizedPath);
 	legacy.diagnosticTimestamps?.delete(normalizedPath);
+}
+
+function logTypeScriptPullSettle(
+	state: LSPClientState,
+	normalizedPath: string,
+): void {
+	if (state.serverId !== "typescript") return;
+	const diagnostics = state.documentPullDiagnostics.get(normalizedPath) ?? [];
+	const elapsedSinceDidOpenMs = Math.max(
+		0,
+		Date.now() - (state.documentOpenedAt.get(normalizedPath) ?? Date.now()),
+	);
+	const diagnosticCodes = [...new Set(diagnostics
+		.map((diagnostic) => diagnostic.code)
+		.filter((code): code is string | number => code !== undefined)
+		.map(String))].slice(0, 8);
+	logLatency({
+		type: "phase",
+		phase: "lsp_typescript_diagnostic_sequence",
+		filePath: normalizedPath,
+		durationMs: elapsedSinceDidOpenMs,
+		metadata: {
+			launchVariant: state.launchVariant ?? "unknown",
+			publicationIndex:
+				state.diagnosticPublicationCounts.get(normalizedPath) ?? 0,
+			version: null,
+			diagnosticCount: diagnostics.length,
+			diagnosticCodes,
+			elapsedSinceDidOpenMs,
+			settledReturn: true,
+			settleSource: "pull",
+		},
+	});
 }
 
 /**
@@ -1194,7 +1235,41 @@ export function setupIncomingHandlers(
 					message: `server=${state.serverId} pubVersion=${docVersion} docVersion=${state.documentVersions?.get(normalizedPath)} diags=${newDiags.length}`,
 				});
 			}
-			const strategy = getStrategy(state.serverId);
+			const strategy = getStrategy(state.serverId, state.launchVariant);
+			const publicationIndex =
+				(state.diagnosticPublicationCounts.get(normalizedPath) ?? 0) + 1;
+			state.diagnosticPublicationCounts.set(normalizedPath, publicationIndex);
+			const diagnosticCodes = [...new Set(newDiags
+				.map((diagnostic) => diagnostic.code)
+				.filter((code): code is string | number => code !== undefined)
+				.map(String))].slice(0, 8);
+			const logSequence = (
+				settledReturn: boolean,
+				settleSource?: "first-push" | "quiet-window",
+			): void => {
+				if (state.serverId !== "typescript") return;
+				const elapsedSinceDidOpenMs = Math.max(
+					0,
+					Date.now() -
+						(state.documentOpenedAt.get(normalizedPath) ?? Date.now()),
+				);
+				logLatency({
+					type: "phase",
+					phase: "lsp_typescript_diagnostic_sequence",
+					filePath: normalizedPath,
+					durationMs: elapsedSinceDidOpenMs,
+					metadata: {
+						launchVariant: state.launchVariant ?? "unknown",
+						publicationIndex,
+						version: docVersion ?? null,
+						diagnosticCount: newDiags.length,
+						diagnosticCodes,
+						elapsedSinceDidOpenMs,
+						settledReturn,
+						...(settleSource && { settleSource }),
+					},
+				});
+			};
 			// Record the document version these diagnostics were computed against
 			// (when the server reports it) so waitForDiagnostics can reject results
 			// that lag behind the latest didChange instead of serving them as fresh.
@@ -1263,8 +1338,10 @@ export function setupIncomingHandlers(
 				recordDocVersion();
 				state.diagnosticsVersion += 1;
 				state.diagnosticEmitter.emit("diagnostics", normalizedPath);
+				logSequence(true, "first-push");
 				return;
 			}
+			logSequence(false);
 
 			const existingTimer = state.pendingDiagnostics.get(normalizedPath);
 			if (existingTimer) clearTimeout(existingTimer);
@@ -1277,6 +1354,7 @@ export function setupIncomingHandlers(
 				recordDocVersion();
 				state.diagnosticsVersion += 1;
 				state.diagnosticEmitter.emit("diagnostics", normalizedPath);
+				logSequence(true, "quiet-window");
 			}, strategy.debounceMs);
 
 			state.pendingDiagnostics.set(normalizedPath, timer);
@@ -1745,10 +1823,13 @@ export async function clientWaitForDiagnostics(
 			filePath,
 			timeoutMs,
 		);
-		if (outcome.status === "found") return;
+		if (outcome.status === "found") {
+			logTypeScriptPullSettle(state, normalizedPath);
+			return;
+		}
 		let sawClean = outcome.status === "clean";
 
-		const strategy = getStrategy(state.serverId);
+		const strategy = getStrategy(state.serverId, state.launchVariant);
 		const retryBudgetMs =
 			strategy.pullRetryBudgetMs > 0
 				? Math.min(timeoutMs, strategy.pullRetryBudgetMs)
@@ -1772,8 +1853,16 @@ export async function clientWaitForDiagnostics(
 			);
 			if (outcome.status === "clean") sawClean = true;
 		}
-		if (options.pullOnly) return;
-		if (outcome.status === "found" || sawClean) return;
+		if (options.pullOnly) {
+			if (outcome.status === "found" || sawClean) {
+				logTypeScriptPullSettle(state, normalizedPath);
+			}
+			return;
+		}
+		if (outcome.status === "found" || sawClean) {
+			logTypeScriptPullSettle(state, normalizedPath);
+			return;
+		}
 	}
 
 	if (
@@ -1794,7 +1883,7 @@ export async function clientWaitForDiagnostics(
 
 			// Adaptive debounce: use time since last push to compute remaining
 			// wait instead of always waiting the full debounce window.
-			const strategy = getStrategy(state.serverId);
+			const strategy = getStrategy(state.serverId, state.launchVariant);
 			const hit = state.pushDiagnosticTimestamps.get(normalizedPath);
 			const timeSincePush = hit ? Date.now() - hit : Infinity;
 			const remaining = Math.max(0, strategy.debounceMs - timeSincePush);
@@ -1849,7 +1938,7 @@ export async function handleNotifyOpen(
 		// Scanners that only re-scan on a fresh open (opengrep ignores didChange):
 		// close + reopen so the re-edit actually triggers a re-scan instead of
 		// silently publishing nothing.
-		if (getStrategy(state.serverId).reopenOnResync) {
+		if (getStrategy(state.serverId, state.launchVariant).reopenOnResync) {
 			await safeSendNotification(state.connection, "textDocument/didClose", {
 				textDocument: { uri },
 			});
@@ -1865,6 +1954,8 @@ export async function handleNotifyOpen(
 			// for a stale view (worse than "unknown"). Monotonic versions make that
 			// late echo strictly older → dropped by isSupersededPush → never bound.
 			state.documentVersions.set(normalizedPath, version);
+			state.documentOpenedAt.set(normalizedPath, Date.now());
+			state.diagnosticPublicationCounts.set(normalizedPath, 0);
 			if (!isClientAlive(state)) return;
 			await safeSendNotification(state.connection, "textDocument/didOpen", {
 				textDocument: { uri, languageId, version, text: content },
@@ -1884,6 +1975,8 @@ export async function handleNotifyOpen(
 
 	state.pendingOpens.add(normalizedPath);
 	state.documentVersions.set(normalizedPath, 0);
+	state.documentOpenedAt.set(normalizedPath, Date.now());
+	state.diagnosticPublicationCounts.set(normalizedPath, 0);
 	clearDiagnosticsForPath(state, normalizedPath); // always clear for initial open
 
 	// Send workspace notification first (like opencode does).
@@ -1937,6 +2030,8 @@ export async function handleNotifyChange(
 			textDocument: { uri, languageId: "plaintext", version: 0, text: content },
 		});
 		state.documentVersions.set(normalizedPath, 0);
+		state.documentOpenedAt.set(normalizedPath, Date.now());
+		state.diagnosticPublicationCounts.set(normalizedPath, 0);
 		recordSentContent(state, normalizedPath, 0, content);
 		state.openDocuments.add(normalizedPath);
 		state.openDocumentUris?.set(normalizedPath, uri);
@@ -1972,6 +2067,8 @@ export async function closeDocument(
 	state.closedDocuments?.add(normalizedPath);
 	state.openDocumentUris?.delete(normalizedPath);
 	state.documentVersions.delete(normalizedPath);
+	state.documentOpenedAt.delete(normalizedPath);
+	state.diagnosticPublicationCounts.delete(normalizedPath);
 	clearDiagnosticsForPath(state, normalizedPath);
 }
 
@@ -2486,6 +2583,8 @@ export async function createLSPClient(options: {
 		documentPullDiagnosticTimestamps: new Map(),
 		pullFailureHistory: [],
 		pendingDiagnostics: new Map(),
+		diagnosticPublicationCounts: new PathKeyedMap<number>(normalizeMapKey),
+		documentOpenedAt: new PathKeyedMap<number>(normalizeMapKey),
 		diagnosticEmitter,
 		diagnosticsVersion: 0,
 		documentVersions: new Map(),
