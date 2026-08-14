@@ -686,11 +686,15 @@ async function buildOrRefreshWordIndex(args: {
 		snapshotSequenceBase(snapshotRoot),
 	);
 	const effectiveSeq = runtime.projectSeq ?? latestSeq.projectSeq;
+	const snapshotLoadStartMs = Date.now();
 	const snapshot = loadProjectSnapshot(snapshotRoot);
+	const snapshotLoadMs = Date.now() - snapshotLoadStartMs;
 	if (snapshot?.wordIndex) {
 		const { deserializeWordIndex, refreshWordIndexIncrementally } =
 			await import("./word-index.js");
+		const deserializeStartMs = Date.now();
 		const index = deserializeWordIndex(snapshot.wordIndex);
+		const deserializeMs = Date.now() - deserializeStartMs;
 		if (index) {
 			try {
 				const result = await refreshWordIndexIncrementally(
@@ -709,9 +713,15 @@ async function buildOrRefreshWordIndex(args: {
 						cwd: snapshotRoot,
 						trigger: "session_start",
 						reason: result.reason,
+						phaseDurationsMs: {
+							snapshotLoadMs,
+							deserializeMs,
+							...result.timings,
+						},
 					});
 				} else {
 					runtime.wordIndex = index;
+					let serializeSaveEnqueueMs = 0;
 					// A stale project seq must be advanced even when mtimes prove every
 					// indexed document reusable. Fresh snapshots with no changes avoid
 					// an unnecessary rewrite of the large shared snapshot.
@@ -721,10 +731,18 @@ async function buildOrRefreshWordIndex(args: {
 						result.dropped > 0 ||
 						snapshot.wordIndex.truncated !== index.truncated
 					) {
+						const serializeSaveEnqueueStartMs = Date.now();
 						saveRuntimeProjectSnapshot({ cwd: snapshotRoot, runtime, dbg });
+						serializeSaveEnqueueMs =
+							Date.now() - serializeSaveEnqueueStartMs;
 					}
+					const phases =
+						`snapshot-load=${snapshotLoadMs}ms, deserialize=${deserializeMs}ms, ` +
+						`source-walk=${result.timings.sourceWalkMs}ms, stat-walk=${result.timings.statWalkMs}ms, ` +
+						`refresh-reads=${result.timings.refreshReadsMs}ms, ` +
+						`serialize-save-enqueue=${serializeSaveEnqueueMs}ms`;
 					dbg(
-						`session_start word-index: incremental (seq=${effectiveSeq}, refreshed=${result.refreshed}, dropped=${result.dropped}, skipped=${result.skipped}, reused=${result.reused}, ${Date.now() - startMs}ms)`,
+						`session_start word-index: incremental (seq=${effectiveSeq}, refreshed=${result.refreshed}, dropped=${result.dropped}, skipped=${result.skipped}, reused=${result.reused}, ${Date.now() - startMs}ms, phases: ${phases})`,
 					);
 					// M2, #958: the incremental-vs-full decision + honest coverage
 					// (indexedFileCount/truncated/skipped), independent of host `dbg`.
@@ -736,6 +754,12 @@ async function buildOrRefreshWordIndex(args: {
 						indexedFileCount: index.docCount,
 						tokens: index.postings.size,
 						truncated: index.truncated,
+						phaseDurationsMs: {
+							snapshotLoadMs,
+							deserializeMs,
+							...result.timings,
+							serializeSaveEnqueueMs,
+						},
 						refreshed: result.refreshed,
 						dropped: result.dropped,
 						skipped: result.skipped,
@@ -760,6 +784,7 @@ async function buildOrRefreshWordIndex(args: {
 					cwd: snapshotRoot,
 					trigger: "session_start",
 					reason: err instanceof Error ? err.message : String(err),
+					phaseDurationsMs: { snapshotLoadMs, deserializeMs },
 				});
 			}
 		}

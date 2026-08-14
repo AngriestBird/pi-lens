@@ -19,6 +19,15 @@ index's expanded postings graph. The parse cache instead keeps a shallow
 postings-stripped snapshot for metadata/report consumers; a cold analyze reloads
 the full body once and immediately rewarms the leased per-root index. (#1370)
 
+Bounded async metadata walks must separate admission order from completion
+order: use a fixed-size indexed cursor pool, store each result at its original
+walk index, and publish only by iterating that array from index zero. Check
+supersession before every claim and after all in-flight work settles; per-item
+metadata failures retain the prior synchronous skip semantics. Never let
+parallel filesystem completion order drive a behavior-gating Map or preflight
+list. The word-index resume stat walk defaults to 24 workers and follows this
+pattern. (#1409)
+
 Helm chart linting uses the shared workspace-topology `Chart.yaml` marker. YAML
 and `.tpl` edits inside a chart dispatch one canonical-root-deduplicated,
 bounded `helm lint` pass through the ordinary typed availability/install seam.

@@ -24,6 +24,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **Word-index resume stats run through a bounded parallel walk (refs [#1409](https://github.com/apmantza/pi-lens/issues/1409))** — session-start incremental refresh now stats source files with a 24-worker indexed cursor pool instead of serial synchronous calls, while publishing metadata in original walk order so churn classification and rebuild preflight remain deterministic. Per-file stat failures retain the previous absent-file semantics, supersession stops new claims and settles in-flight work, and phase telemetry separates snapshot load, deserialize, source walk, stat walk, refresh reads, and serialize-save enqueue time.
+
 - **Installer probe-cache persistence now uses the shared durable-store protocol (closes #1212)** — awaited commits use the shared quarantine-recovering bounded PID lock, authoritative in-lock reread/delta merge, throwing atomic publication, and in-lock mirror refresh while retaining deferred/failed retry outcomes; TTL, existence, and mtime validation remain read-side policy. Turn-state folding remains a future decision, not part of this change.
 
 - **Shared durable-store and atomic-stage protocols (refs #1212, closes #1209)** — diagnostic dispositions and actionable-warning suppression now use one locked in-lock-reread/merge/throwing-atomic-write commit seam, while one staging namespace module owns `.tmp-<pid>-<threadId>-<seq>` minting, classification, and bounded own-stage sweeping.

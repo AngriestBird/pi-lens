@@ -688,6 +688,13 @@ export interface WordIndexRefreshResult {
 	/** Files that were stale but unreadable this pass; posting left intact. */
 	skipped: number;
 	reused: number;
+	timings: WordIndexRefreshTimings;
+}
+
+export interface WordIndexRefreshTimings {
+	sourceWalkMs: number;
+	statWalkMs: number;
+	refreshReadsMs: number;
 }
 
 export interface WordIndexRebuildRequired {
@@ -698,11 +705,21 @@ export interface WordIndexRebuildRequired {
 		| "stale-document-churn";
 	/** Bounded walk+stat result for a rebuild without repeating the full walk. */
 	preflightFiles?: WordIndexPreflightFiles;
+	timings: WordIndexRefreshTimings;
 }
 
 export type WordIndexRefreshOutcome =
 	| WordIndexRefreshResult
 	| WordIndexRebuildRequired;
+
+export interface WordIndexRefreshOptions {
+	statFile?: (
+		file: string,
+	) => Promise<Pick<fs.Stats, "mtimeMs" | "size">>;
+	statConcurrency?: number;
+}
+
+export const WORD_INDEX_STAT_CONCURRENCY = 24;
 
 const WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD = 0.3;
 // A ratio alone misclassifies one stale file in a three-file project as dense.
@@ -742,19 +759,23 @@ export async function refreshWordIndexIncrementally(
 	index: WordIndex,
 	root: string,
 	shouldContinue: () => boolean = () => true,
+	options: WordIndexRefreshOptions = {},
 ): Promise<WordIndexRefreshOutcome> {
 	if (!index.forward || !index.fileMtimes || !index.fileSizes) {
 		return {
 			mode: "full-required",
 			reason: "missing-incremental-metadata",
+			timings: { sourceWalkMs: 0, statWalkMs: 0, refreshReadsMs: 0 },
 		};
 	}
 	const { collectSourceFilesAsync } = await import("./source-filter.js");
 	const maxFiles = getWordIndexMaxFilesDerived(root);
+	const sourceWalkStartMs = Date.now();
 	const walked = await collectSourceFilesAsync(root, {
 		maxFiles,
 		prioritizeCodeKinds: true,
 	});
+	const sourceWalkMs = Date.now() - sourceWalkStartMs;
 	if (!shouldContinue()) throw new Error("word index refresh superseded");
 
 	// This set-difference must run in the SAME normalized key space the path
@@ -773,27 +794,55 @@ export async function refreshWordIndexIncrementally(
 		string,
 		{ path: string; mtimeMs: number; size: number }
 	>();
-	// Check both supersession and the monotonic budget at every stat unit. Unlike
-	// the former modulus cadence, this remains bounded as per-file work changes.
-	const deadline = createDeadline(WORD_INDEX_BUILD_YIELD_BUDGET_MS);
-	for (const file of walked) {
-		if (!shouldContinue()) throw new Error("word index refresh superseded");
-		try {
-			const stat = fs.statSync(file);
-			if (stat.size <= WORD_INDEX_MAX_BYTES) {
-				current.set(wordIndexKey(file), {
-					path: file,
-					mtimeMs: stat.mtimeMs,
-					size: stat.size,
-				});
+	const statWalkStartMs = Date.now();
+	const statFile = options.statFile ?? ((file: string) => fs.promises.stat(file));
+	const requestedConcurrency = options.statConcurrency ?? WORD_INDEX_STAT_CONCURRENCY;
+	const statConcurrency =
+		Number.isFinite(requestedConcurrency) && requestedConcurrency > 0
+			? Math.max(1, Math.floor(requestedConcurrency))
+			: WORD_INDEX_STAT_CONCURRENCY;
+	const statResults = new Array<
+		{ path: string; mtimeMs: number; size: number } | undefined
+	>(walked.length);
+	let cursor = 0;
+	let superseded = false;
+	const worker = async (): Promise<void> => {
+		while (true) {
+			if (!shouldContinue()) {
+				superseded = true;
+				return;
 			}
-		} catch {
-			// A file vanishing between walk and stat is simply absent.
+			const index = cursor++;
+			if (index >= walked.length) return;
+			const file = walked[index];
+			try {
+				const stat = await statFile(file);
+				if (stat.size <= WORD_INDEX_MAX_BYTES) {
+					statResults[index] = {
+						path: file,
+						mtimeMs: stat.mtimeMs,
+						size: stat.size,
+					};
+				}
+			} catch {
+				// A rejection has statSync parity: the file is simply absent.
+			}
 		}
-		if (deadline.expired() && (await yieldIfOverBudget(deadline))) {
-			if (!shouldContinue()) throw new Error("word index refresh superseded");
-		}
+	};
+	await Promise.all(
+		Array.from(
+			{ length: Math.min(statConcurrency, walked.length) },
+			() => worker(),
+		),
+	);
+	if (superseded || !shouldContinue()) {
+		throw new Error("word index refresh superseded");
 	}
+	const statWalkMs = Date.now() - statWalkStartMs;
+	for (const result of statResults) {
+		if (result) current.set(wordIndexKey(result.path), result);
+	}
+	const timings = { sourceWalkMs, statWalkMs, refreshReadsMs: 0 };
 	const preflightFiles = Object.assign([...current.values()], {
 		truncated: walked.length === maxFiles,
 	});
@@ -804,7 +853,12 @@ export async function refreshWordIndexIncrementally(
 	for (const key of current.keys()) if (!oldSet.has(key)) changedSet++;
 	const denominator = Math.max(oldSet.size, current.size, 1);
 	if (changedSet / denominator > WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD) {
-		return { mode: "full-required", reason: "file-set-churn", preflightFiles };
+		return {
+			mode: "full-required",
+			reason: "file-set-churn",
+			preflightFiles,
+			timings,
+		};
 	}
 
 	// Replacing one document filters every shared posting array for that
@@ -884,9 +938,11 @@ export async function refreshWordIndexIncrementally(
 			mode: "full-required",
 			reason: "stale-document-churn",
 			preflightFiles,
+			timings,
 		};
 	}
 
+	const deadline = createDeadline(WORD_INDEX_BUILD_YIELD_BUDGET_MS);
 	let dropped = 0;
 	for (const key of oldSet) {
 		if (!current.has(key)) {
@@ -901,6 +957,7 @@ export async function refreshWordIndexIncrementally(
 
 	let refreshed = 0;
 	let skipped = 0;
+	const refreshReadsStartMs = Date.now();
 	for (const { path: file, mtimeMs, size } of current.values()) {
 		// #1105: mtime-first, size-second freshness — mtime alone is a stale
 		// signal (mtime-preserving content changes serve stale identifiers to
@@ -951,6 +1008,7 @@ export async function refreshWordIndexIncrementally(
 			if (!shouldContinue()) throw new Error("word index refresh superseded");
 		}
 	}
+	timings.refreshReadsMs = Date.now() - refreshReadsStartMs;
 	index.truncated = walked.length === maxFiles;
 	return {
 		mode: "incremental",
@@ -958,6 +1016,7 @@ export async function refreshWordIndexIncrementally(
 		dropped,
 		skipped,
 		reused: current.size - refreshed - skipped,
+		timings,
 	};
 }
 
