@@ -136,6 +136,20 @@ const diagnosticsWriteGuard = new WriteOrderingGuard<string, number>();
 const runnerWriteGuard = new WriteOrderingGuard<string, number>();
 
 const MAX_STORED_DIAGNOSTICS_PER_FILE = 12;
+const MAX_INACTIVE_FILE_RECORDS = 1024;
+const ACTIVE_FILE_IDLE_MS = 30 * 60_000;
+const MAX_LSP_SERVER_RECORDS = 128;
+
+function pruneInactiveFileRecords(now = Date.now()): void {
+	if (files.size <= MAX_INACTIVE_FILE_RECORDS) return;
+	const victims = [...files.entries()]
+		.filter(([, rec]) => now - rec.touchedAt > ACTIVE_FILE_IDLE_MS)
+		.sort(([, a], [, b]) => a.touchedAt - b.touchedAt);
+	for (const [key] of victims) {
+		if (files.size <= MAX_INACTIVE_FILE_RECORDS) break;
+		files.delete(key);
+	}
+}
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -276,6 +290,7 @@ export function importWidgetState(state: PersistedWidgetState | undefined): bool
 			touchedAt: recordTouchedAt,
 		});
 	}
+	pruneInactiveFileRecords();
 	sessionLanguages = state.sessionLanguages ?? [];
 	requestRenderFn?.();
 	return true;
@@ -809,6 +824,11 @@ export function recordLsp(
 				? "ready"
 				: "failed";
 	lspServers.set(key, { serverId, root, status: mapped, durationMs });
+	while (lspServers.size > MAX_LSP_SERVER_RECORDS) {
+		const oldest = lspServers.keys().next().value;
+		if (oldest === undefined) break;
+		lspServers.delete(oldest);
+	}
 	requestRender();
 }
 
@@ -1108,6 +1128,7 @@ function truncateBasename(name: string, maxWidth: number): string {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function getOrCreate(filePath: string): FileRecord {
+	pruneInactiveFileRecords();
 	// Look up by the normalized key so mixed path forms of the same file share
 	// ONE record (#1020); keep the caller's verbatim path as the display path.
 	return (

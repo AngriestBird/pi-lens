@@ -9,6 +9,7 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
+import { BoundedLruCache } from "./bounded-cache.js";
 import { lazyEnvNumber } from "./env-utils.js";
 import {
 	getProjectIgnoreMatcher,
@@ -321,7 +322,7 @@ export function countSourceFilesWithinLimit(
 // depends only on the file tree shape and ignore rules — both of which
 // are also captured by the project snapshot freshness check upstream —
 // in-process memoisation is safe for the duration of a single pi process.
-const startupScanContextCache = new Map<string, StartupScanContext>();
+const startupScanContextCache = new BoundedLruCache<string, StartupScanContext>(32);
 
 export function resolveStartupScanContext(
 	cwd: string,

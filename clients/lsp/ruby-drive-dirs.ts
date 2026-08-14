@@ -22,6 +22,7 @@
  * readers build different suffixes: `bin/<tool>` vs `bin`), so only the raw
  * `ruby<N>` names are cached.
  */
+import { BoundedLruCache } from "../bounded-cache.js";
 
 import * as fs from "node:fs";
 
@@ -29,7 +30,7 @@ import * as fs from "node:fs";
 const RUBY_VERSION_DIR = /^ruby\d/i;
 
 /** Process-lifetime memo of matching dir names, keyed by drive root (e.g. `C:\`). */
-const rubyDirNamesCache = new Map<string, string[]>();
+const rubyDirNamesCache = new BoundedLruCache<string, string[]>(16);
 
 function filterRubyDirNames(entries: string[]): string[] {
 	return entries.filter((name) => RUBY_VERSION_DIR.test(name));

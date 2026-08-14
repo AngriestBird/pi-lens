@@ -12,6 +12,8 @@
 import { logExtension } from "./extension-log.js";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { BoundedLruCache } from "./bounded-cache.js";
+import { normalizeMapKey } from "./path-utils.js";
 import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
 import {
 	detectIndentation,
@@ -1145,7 +1147,7 @@ const FILENAME_FORMATTER_BASENAMES = new Set(
 );
 
 // Cache for detection results - stores array of enabled formatter names per cwd+ext
-const detectionCache = new Map<string, Map<string, string[]>>();
+const detectionCache = new BoundedLruCache<string, Map<string, string[]>>(32);
 
 // --- Public API ---
 
@@ -1160,15 +1162,16 @@ export async function getFormattersForFile(
 	// terragrunt.hcl). Fold the basename into the cache key only when a
 	// filename-based formatter actually applies, so a plain .hcl file cached
 	// first doesn't poison the cache for terragrunt.hcl/root.hcl, or vice versa.
+	const normalizedCwd = normalizeMapKey(cwd);
 	const cacheKey = FILENAME_FORMATTER_BASENAMES.has(base)
-		? `${cwd}:${ext}:${base}`
-		: `${cwd}:${ext}`;
+		? `${normalizedCwd}:${ext}:${base}`
+		: `${normalizedCwd}:${ext}`;
 
 	// Check cache
-	let cached = detectionCache.get(cwd);
+	let cached = detectionCache.get(normalizedCwd);
 	if (!cached) {
 		cached = new Map();
-		detectionCache.set(cwd, cached);
+		detectionCache.set(normalizedCwd, cached);
 	}
 
 	if (cached.has(cacheKey)) {

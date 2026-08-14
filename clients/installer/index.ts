@@ -54,6 +54,7 @@ import https from "node:https";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { BoundedLruCache } from "../bounded-cache.js";
 import { isFullyQualified } from "../path-utils.js";
 import {
 	assertInstallAllowed,
@@ -1430,7 +1431,7 @@ export function getInstallFailureReason(toolId: string): string | undefined {
 }
 
 // Session-lifetime cache: once a tool path is resolved, skip the process-spawn check on subsequent calls.
-const resolvedPathCache = new Map<string, string>();
+const resolvedPathCache = new BoundedLruCache<string, string>(256);
 
 // --- Persistent probe cache ---
 

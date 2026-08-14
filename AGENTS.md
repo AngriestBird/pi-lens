@@ -254,6 +254,14 @@ must stay unref'd, reset on reuse, busy-client guarded, and cleared on shutdown.
 
 Rule-id normalization derives its language suffixes from the bundled CodeRabbit rule tree at startup; tests must keep that derived set covered so new vendored language rules cannot silently evade project policy matching.
 
+Small process-lifetime memo tables use `clients/bounded-cache.ts` when an
+insertion-ordered LRU cap is sufficient; path-root caches still normalize keys
+at the seam. Widget-state's file map remains a plain map because active
+diagnostic records must not be evicted; it opportunistically removes only
+records idle beyond the active window and can therefore temporarily exceed its
+cap when all records are active. #1389's bounded-by-nature tables (finite
+package-manager/profile/package-root/session domains) require no cache layer.
+
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
 
 The session-start smells rollup still uses bounded tail reads, but its session-start path must pass the current `sessionStartMs` into `countRecentSmells`; scoped scans admit only rows with a parseable `ts` at or after that boundary, dropping un-timestamped rows rather than surfacing ambiguous history. Unscoped calls remain available for non-session diagnostic/test consumers.
