@@ -35,7 +35,7 @@ import { logLatency } from "./latency-logger.js";
 import { runLogCleanup } from "./log-cleanup.js";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import { initLSPConfig, loadLSPConfig } from "./lsp/config.js";
-import { getLSPService } from "./lsp/index.js";
+import { loadLspService } from "./lsp-lazy.js";
 import type { MetricsClient } from "./metrics-client.js";
 import type { OpengrepClient, OpengrepResult } from "./opengrep-client.js";
 import { isAtOrAboveHomeDir } from "./path-utils.js";
@@ -411,7 +411,7 @@ async function igniteWarmFiles(
 		await initLSPConfig(cwd);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
 
-		const lspService = getLSPService();
+		const lspService = (await loadLspService()).getLSPService();
 		const total = warmFiles.length;
 		let loaded = 0;
 		let errors = 0;
@@ -467,7 +467,7 @@ async function igniteDominantLanguageWarm(
 		await initLSPConfig(cwd);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
 
-		const lspService = getLSPService();
+		const lspService = (await loadLspService()).getLSPService();
 		const { collectSourceFilesAsync } = await import("./source-filter.js");
 		const { CODE_KINDS, detectFileKind } = await import("./file-kinds.js");
 		// Async, event-loop-yielding walk (deferred off the interactive path).

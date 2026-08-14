@@ -54,7 +54,7 @@ import {
 	wasPreviouslyReportedDirty,
 	type PilensDiagnosticEntry,
 } from "./diagnostics-publish.js";
-import { getLSPService } from "./lsp/index.js";
+import { loadLspService } from "./lsp-lazy.js";
 import type { MetricsClient } from "./metrics-client.js";
 import { clearGraphCache } from "./review-graph/builder.js";
 import type { RuffClient } from "./ruff-client.js";
@@ -908,7 +908,7 @@ export async function resyncLspFile(
 	if (limitCheck.tooLarge) return;
 
 	try {
-		const lspService = getLSPService();
+		const lspService = (await loadLspService()).getLSPService();
 		if (lspService.supportsLSP(filePath)) {
 			// Push the final post-format/post-fix content through touchFile (not the
 			// bare openFile) so it registers in the touch-debounce map via

@@ -80,7 +80,7 @@ import { registerCascadeTierReconcileTask } from "./clients/lsp/cascade-tier.js"
 import { formatCascadeNeighborDiagnostics } from "./clients/cascade-format.js";
 import { convertLspDiagnostics } from "./clients/dispatch/utils/lsp-diagnostics.js";
 import { initLSPConfig } from "./clients/lsp/config.js";
-import { getLSPService, resetLSPService } from "./clients/lsp/index.js";
+import { warmLspService, loadLspService } from "./clients/lsp-lazy.js";
 import {
 	sweepOrphans,
 	sweepUntrackedOrphans,
@@ -186,7 +186,19 @@ import { logConcurrentSessionBind } from "./clients/session-start-observability.
 import { warmFormatters } from "./clients/formatters-lazy.js";
 
 type DispatchIntegration = Awaited<ReturnType<typeof loadDispatchIntegration>>;
+type LspModule = Awaited<ReturnType<typeof loadLspService>>;
 let loadedDispatchIntegration: DispatchIntegration | undefined;
+let loadedLspModule: LspModule | undefined;
+
+function warmLspAtSessionStart(): void {
+	void warmLspService().then((module) => { loadedLspModule = module; }).catch((err) => {
+		logExtension({ subsystem: "lsp", level: "warn", message: `LSP warm failed: ${err}` });
+	});
+}
+
+function resetLspService(options?: Parameters<LspModule["resetLSPService"]>[0]): void {
+	void loadLspService().then(({ resetLSPService }) => resetLSPService(options));
+}
 
 function warmDispatchAtSessionStart(): void {
 	void warmDispatchIntegration().then((integration) => {
@@ -563,7 +575,7 @@ export default function (pi: ExtensionAPI) {
 			// failed server is suppressed when a live sibling covers its language
 			// (alt-LSP fallback) or its kind is no longer in use this session.
 			const { activeIds, failedIds } = selectLspStatus(
-				getLSPService().getAliveServerIds(),
+				loadedLspModule?.getLSPService().getAliveServerIds() ?? [],
 				getFailedLspServerIds(),
 				getSessionLanguages(),
 			);
@@ -1133,7 +1145,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// LSP status
-			const lspClients = getLSPService().getStatus();
+			const lspClients = loadedLspModule?.getLSPService().getStatus() ?? [];
 			if (lspClients.length > 0) {
 				lines.push("", "LSP servers:");
 				for (const { serverId, root, connected } of lspClients) {
@@ -1498,6 +1510,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (event, ctx) => {
 		warmDispatchAtSessionStart();
+		warmLspAtSessionStart();
 		void warmFormatters().catch((err) =>
 			logExtension({ subsystem: "format", level: "warn", message: `formatter warm failed: ${err}` }),
 		);
@@ -1724,7 +1737,7 @@ export default function (pi: ExtensionAPI) {
 					(await import("./clients/installer/index.js")).ensureTool(name),
 				cleanStaleTsBuildInfo,
 				resetDispatchBaselines,
-				resetLSPService,
+				resetLSPService: resetLspService,
 			});
 			ctx.ui && updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
 
@@ -1865,7 +1878,7 @@ export default function (pi: ExtensionAPI) {
 			cacheManager,
 			ensureLSPConfigInitialized,
 			updateLspStatus,
-			resetLSPService,
+			resetLSPService: resetLspService,
 		});
 	});
 
@@ -1910,7 +1923,7 @@ export default function (pi: ExtensionAPI) {
 				biomeClient,
 				ruffClient,
 				metricsClient,
-				resetLSPService,
+				resetLSPService: resetLspService,
 				readGuard: runtime.readGuard,
 				agentBehaviorRecord: (toolName, filePath) =>
 					agentBehaviorClient.recordToolCall(toolName, filePath),
@@ -2148,7 +2161,7 @@ export default function (pi: ExtensionAPI) {
 				// must not touch ctx.ui after session replacement/reload (#338).
 				resetLSPService: () => {
 					try {
-						resetLSPService({ reason: "idle" });
+						resetLspService({ reason: "idle" });
 					} finally {
 						repaintLspStatus?.();
 					}
@@ -2211,7 +2224,7 @@ export default function (pi: ExtensionAPI) {
 	// turn ended through the SAME turn-end cascade seam (append a CascadeRun the
 	// next turn_end merges), reusing the existing neighbor→turn-end formatting —
 	// previously this outcome was logs-only, a silent under-report (#533).
-	registerCascadeTierReconcileTask(() => getLSPService(), {
+	registerCascadeTierReconcileTask(() => loadedLspModule?.getLSPService()!, {
 		onResolvedFound: ({ filePath, diagnostics }) => {
 			const cwd = runtime.projectRoot;
 			const diags = convertLspDiagnostics(
@@ -2422,7 +2435,7 @@ export default function (pi: ExtensionAPI) {
 		// children when a parent dies) — they rely on stdin EOF, LSP
 		// `initialize.processId` self-watchdog compliance, and the #449/#472
 		// cross-process instance registry's orphan reaper as the backstop (#472).
-		resetLSPService({
+		resetLspService({
 			fast: true,
 			processExiting: true,
 			reason: "session_shutdown",
