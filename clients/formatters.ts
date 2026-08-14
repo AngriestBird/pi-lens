@@ -12,6 +12,8 @@
 import { logExtension } from "./extension-log.js";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { BoundedLruCache } from "./bounded-cache.js";
+import { normalizeMapKey } from "./path-utils.js";
 import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
 import {
 	detectIndentation,
@@ -1145,7 +1147,40 @@ const FILENAME_FORMATTER_BASENAMES = new Set(
 );
 
 // Cache for detection results - stores array of enabled formatter names per cwd+ext
-const detectionCache = new Map<string, Map<string, string[]>>();
+const detectionCache = new BoundedLruCache<
+	string,
+	{ signature: string; entries: Map<string, string[]> }
+>(32);
+
+// These are the formatter configuration files consulted by the policy helpers
+// above. Their metadata is part of detection cache identity: changing a file
+// must re-run detection even when PATH and installed tools are unchanged.
+const FORMATTER_CONFIG_FILES = [
+	"package.json", "biome.json", "biome.jsonc", ".prettierrc", ".prettierrc.json",
+	".prettierrc.yml", ".prettierrc.yaml", ".prettierrc.js", ".prettierrc.cjs",
+	".prettierrc.mjs", "prettier.config.js", "prettier.config.cjs", "prettier.config.mjs",
+	"prettier.config.ts", "pyproject.toml", "ruff.toml", ".ruff.toml", "black.toml",
+	".black", "tox.ini", "requirements.txt", "Pipfile", ".sqlfluff", ".rubocop.yml", ".rubocop.yaml", "Gemfile", ".clang-format",
+	"_clang-format", ".php-cs-fixer.php", ".php-cs-fixer.dist.php", "stylua.toml",
+	".stylua.toml", ".ocamlformat", ".editorconfig", ".ktfmt", ".ktfmt.kts",
+	".cljfmt.edn", "cmake-format.py", ".cmake-format.yaml", ".cmake-format.json",
+	"oxfmt.toml", ".oxfmtrc.json", "vite.config.ts", "vite.config.js", "vite.config.mjs",
+];
+
+async function formatterConfigSignature(cwd: string): Promise<string> {
+	const paths = await findUp(FORMATTER_CONFIG_FILES, cwd);
+	const parts = await Promise.all(
+		paths.sort((a, b) => a.localeCompare(b)).map(async (filePath) => {
+			try {
+				const stat = await fs.stat(filePath);
+				return `${filePath}:${stat.mtimeMs}:${stat.size}`;
+			} catch {
+				return `${filePath}:missing`;
+			}
+		}),
+	);
+	return parts.join("|");
+}
 
 // --- Public API ---
 
@@ -1160,19 +1195,25 @@ export async function getFormattersForFile(
 	// terragrunt.hcl). Fold the basename into the cache key only when a
 	// filename-based formatter actually applies, so a plain .hcl file cached
 	// first doesn't poison the cache for terragrunt.hcl/root.hcl, or vice versa.
+	const normalizedCwd = normalizeMapKey(cwd);
 	const cacheKey = FILENAME_FORMATTER_BASENAMES.has(base)
-		? `${cwd}:${ext}:${base}`
-		: `${cwd}:${ext}`;
+		? `${normalizedCwd}:${ext}:${base}`
+		: `${normalizedCwd}:${ext}`;
 
+	const configSignature = await formatterConfigSignature(cwd);
 	// Check cache
-	let cached = detectionCache.get(cwd);
+	let cached = detectionCache.get(normalizedCwd);
+	if (cached?.signature !== configSignature) {
+		cached = undefined;
+		detectionCache.delete(normalizedCwd);
+	}
 	if (!cached) {
-		cached = new Map();
-		detectionCache.set(cwd, cached);
+		cached = { signature: configSignature, entries: new Map() };
+		detectionCache.set(normalizedCwd, cached);
 	}
 
-	if (cached.has(cacheKey)) {
-		const enabledNames = cached.get(cacheKey);
+	if (cached.entries.has(cacheKey)) {
+		const enabledNames = cached.entries.get(cacheKey);
 		if (!enabledNames || enabledNames.length === 0) return [];
 		// Return cached formatters by name (preserves priority order)
 		return ALL_FORMATTERS.filter((f) => enabledNames.includes(f.name));
@@ -1266,7 +1307,7 @@ export async function getFormattersForFile(
 
 	// Store the list of enabled formatter names in cache
 	const enabledNames = enabled.map((f) => f.name);
-	cached.set(cacheKey, enabledNames);
+	cached.entries.set(cacheKey, enabledNames);
 	return enabled;
 }
 

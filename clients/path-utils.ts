@@ -267,6 +267,10 @@ export function toProjectRelativePath(filePath: string, projectRoot: string): st
  * real-casing resolution actually matters.
  */
 export function normalizeEphemeralMapKey(filePath: string): string {
+	// Most hot-path keys on POSIX are already canonical slash-separated strings.
+	// Preserve that identity instead of allocating a replacement string for each
+	// file in a large diagnostics reconciliation.
+	if (process.platform !== "win32" && !filePath.includes("\\")) return filePath;
 	const slashed = filePath.replace(/\\/g, "/");
 	return process.platform === "win32" ? slashed.toLowerCase() : slashed;
 }

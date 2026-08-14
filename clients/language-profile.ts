@@ -10,7 +10,7 @@ import {
 	type FileKind,
 } from "./file-kinds.js";
 import { getProjectIgnoreMatcher } from "./file-utils.js";
-import { direntsHaveMarkerGlobMatch } from "./path-utils.js";
+import { direntsHaveMarkerGlobMatch, normalizeMapKey } from "./path-utils.js";
 import {
 	LANGUAGE_POLICY,
 	type ProjectLanguageProfile,
@@ -18,6 +18,7 @@ import {
 import { getSourceFiles } from "./scan-utils.js";
 import { readDirEntriesSafe, shouldRecurseIntoDir } from "./source-walker.js";
 import { findNearestDirWithAnyBasename } from "./workspace-topology.js";
+import { BoundedLruCache } from "./bounded-cache.js";
 
 /** Every registered kind participates in project-language detection (#894). */
 export const SUPPORTED_FILE_KINDS: readonly FileKind[] = Object.keys(
@@ -122,19 +123,19 @@ function hasProjectMarker(projectRoot: string, marker: string): boolean {
 // must not pollute the no-arg cache. The synchronous getSourceFiles() call
 // inside this function does the same expensive ignoreMatcher-driven walk
 // as resolveStartupScanContext, so the same memo strategy applies.
-const languageProfileCache = new Map<string, ProjectLanguageProfile>();
+const languageProfileCache = new BoundedLruCache<string, ProjectLanguageProfile>(32);
 
 export function detectProjectLanguageProfile(
 	projectRoot: string,
 	sourceFiles?: string[],
 ): ProjectLanguageProfile {
 	if (sourceFiles === undefined) {
-		const cached = languageProfileCache.get(projectRoot);
+		const cached = languageProfileCache.get(normalizeMapKey(projectRoot));
 		if (cached) return cached;
 	}
 	const result = computeProjectLanguageProfile(projectRoot, sourceFiles);
 	if (sourceFiles === undefined) {
-		languageProfileCache.set(projectRoot, result);
+		languageProfileCache.set(normalizeMapKey(projectRoot), result);
 	}
 	return result;
 }
@@ -384,7 +385,7 @@ export async function collectSourceFilesForWarmup(
 export async function detectProjectLanguageProfileAsync(
 	projectRoot: string,
 ): Promise<ProjectLanguageProfile> {
-	const cached = languageProfileCache.get(projectRoot);
+	const cached = languageProfileCache.get(normalizeMapKey(projectRoot));
 	if (cached) return cached;
 	const files = await collectSourceFilesForWarmup(projectRoot);
 	// Hand the pre-collected file list to the sync detector so it skips its
@@ -392,6 +393,6 @@ export async function detectProjectLanguageProfileAsync(
 	// probe (`existsSync` for package.json / pyproject.toml / etc.) which
 	// is constant-time and cheap.
 	const result = detectProjectLanguageProfile(projectRoot, files);
-	languageProfileCache.set(projectRoot, result);
+	languageProfileCache.set(normalizeMapKey(projectRoot), result);
 	return result;
 }

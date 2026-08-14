@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import yaml from "../../deps/js-yaml.js";
+import { BoundedLruCache } from "../../bounded-cache.js";
 
 // --- Types ---
 
@@ -109,10 +110,10 @@ export const MAX_BLOCKING_RULE_COMPLEXITY = 8;
 
 // --- Caches ---
 
-const rulesCache = new Map<string, CachedRules>();
-const blockingRulesCache = new Map<string, CachedRules>();
-const contentRulesCache = new Map<string, ContentCachedRules>();
-const contentBlockingRulesCache = new Map<string, ContentCachedRules>();
+const rulesCache = new BoundedLruCache<string, CachedRules>(64);
+const blockingRulesCache = new BoundedLruCache<string, CachedRules>(64);
+const contentRulesCache = new BoundedLruCache<string, ContentCachedRules>(64);
+const contentBlockingRulesCache = new BoundedLruCache<string, ContentCachedRules>(64);
 
 // --- Public API ---
 

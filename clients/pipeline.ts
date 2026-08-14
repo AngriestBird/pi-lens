@@ -57,6 +57,7 @@ import {
 import { loadLspService } from "./lsp-lazy.js";
 import type { MetricsClient } from "./metrics-client.js";
 import { clearGraphCache } from "./review-graph/builder.js";
+import { BoundedLruCache } from "./bounded-cache.js";
 import type { RuffClient } from "./ruff-client.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import type { WordIndex } from "./word-index.js";
@@ -362,10 +363,7 @@ export {
 	hasStylelintConfig,
 };
 
-const _eslintCache = new Map<
-	string,
-	{ available: boolean; bin: string | null }
->();
+const _eslintCache = new BoundedLruCache<string, { available: boolean; bin: string | null }>(32);
 
 /**
  * Run eslint --fix on a file. Runs a single spawn and diffs the file before/after,
@@ -378,7 +376,9 @@ const _eslintCache = new Map<
 async function tryEslintFix(filePath: string, cwd: string): Promise<number> {
 	const userHasConfig = hasEslintConfig(cwd);
 	if (!userHasConfig) return 0;
-	const cacheKey = path.resolve(cwd);
+	// PATH is part of command resolution; include it so an install or PATH
+	// refresh cannot leave a negative eslint result live for the session.
+	const cacheKey = `${path.resolve(cwd)}|${process.env.PATH ?? ""}`;
 	let cached = _eslintCache.get(cacheKey);
 	if (!cached) {
 		const candidate = resolveToolCommand(cwd, "eslint") ?? "eslint";

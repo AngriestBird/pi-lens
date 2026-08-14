@@ -431,12 +431,18 @@ let _turnSummaryEmitCtx:
 	  }
 	| undefined;
 const _lspConfigInitializedCwds = new Set<string>();
+const LSP_CONFIG_CWD_CAP = 128;
 
 async function ensureLSPConfigInitialized(cwd: string): Promise<void> {
 	const normalizedCwd = path.resolve(cwd);
 	if (_lspConfigInitializedCwds.has(normalizedCwd)) return;
 	await initLSPConfig(normalizedCwd);
 	_lspConfigInitializedCwds.add(normalizedCwd);
+	while (_lspConfigInitializedCwds.size > LSP_CONFIG_CWD_CAP) {
+		const oldest = _lspConfigInitializedCwds.values().next().value;
+		if (oldest === undefined) break;
+		_lspConfigInitializedCwds.delete(oldest);
+	}
 }
 
 function updateRuntimeIdentityFromEvent(event: unknown): void {
