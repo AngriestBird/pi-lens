@@ -393,6 +393,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		: rawFilePath;
 	const behaviorWarnings = agentBehaviorRecord(event.toolName, filePath);
 	const syntheticWriteContent: Array<{ type: string; text?: string }> = [];
+	let syntheticAttachmentBytes = 0;
 
 	// Bash writes (redirects, tee, sed -i, cp/mv, touch, git checkout/restore) —
 	// these change file content but never go through the edit tool, so bash
@@ -429,7 +430,37 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				_autofixMode: autofixMode,
 			});
 			if (syntheticResult) {
-				syntheticWriteContent.push(...syntheticResult.content.slice(event.content.length));
+				// The per-attachment cap bounds each file, but a multi-file bash
+				// write (`sed -i` over globs, `;`-chained rewrites) appends one
+				// attachment per path — share ONE authoritative-content budget
+				// across the whole command so the aggregate tool result stays
+				// bounded too. Past the budget, degrade to the re-read warning.
+				for (const block of syntheticResult.content.slice(
+					event.content.length,
+				)) {
+					const blockBytes =
+						typeof block.text === "string"
+							? Buffer.byteLength(block.text, "utf-8")
+							: 0;
+					const isAuthoritativeAttachment =
+						typeof block.text === "string" &&
+						block.text.startsWith("pi-lens applied autofix to ");
+					if (
+						isAuthoritativeAttachment &&
+						syntheticAttachmentBytes + blockBytes >
+							AUTHORITATIVE_CONTENT_MAX_BYTES
+					) {
+						syntheticWriteContent.push({
+							type: "text",
+							text: `⚠️ **File was modified by auto-format/fix. You MUST re-read ${wp} before making any further edits — the aggregate authoritative content for this command is too large to attach.**`,
+						});
+						continue;
+					}
+					if (isAuthoritativeAttachment) {
+						syntheticAttachmentBytes += blockBytes;
+					}
+					syntheticWriteContent.push(block);
+				}
 			}
 		}
 		if (event.isError !== true && !getFlag("no-read-guard")) {

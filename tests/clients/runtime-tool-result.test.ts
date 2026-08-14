@@ -496,6 +496,42 @@ describe("runtime-tool-result inline behavior warnings", () => {
 		} finally { env.cleanup(); }
 	});
 
+	it("shares one authoritative-content budget across a multi-file bash write", async () => {
+		const { runPipeline } = await import("../../clients/pipeline.js");
+		const env = setupTestEnvironment("pi-lens-runtime-tool-bash-budget-");
+		try {
+			// Each file's post-fix content fits the per-attachment cap (2 MiB) on
+			// its own, but the pair exceeds it — the second attachment must
+			// degrade to the re-read warning instead of inflating the aggregate
+			// tool result without bound.
+			const bigContent = "x".repeat(1.5 * 1024 * 1024);
+			const fileA = createTempFile(env.tmpDir, "budget-a.ts", bigContent);
+			const fileB = createTempFile(env.tmpDir, "budget-b.ts", bigContent);
+			vi.mocked(runPipeline).mockImplementation(async (ctx) => ({
+				output: "", hasBlockers: false, isError: false, fileModified: true,
+				changedFiles: [ctx.filePath],
+				postMutation: { filePath: ctx.filePath, content: bigContent, source: "autofix" },
+			}));
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const returned = await handleToolResult({
+				event: { toolName: "bash", input: { command: `echo x > "${fileA}"; echo x > "${fileB}"` }, content: [] },
+				getFlag: () => false, dbg: () => {}, runtime,
+				cacheManager: { addModifiedRange: () => {}, readTurnState: () => ({}) },
+				biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {},
+				agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
+			} as any);
+			const authoritative = returned?.content.filter((part) =>
+				part.text?.startsWith("pi-lens applied autofix to"),
+			);
+			const warnings = returned?.content.filter((part) =>
+				part.text?.includes("aggregate authoritative content"),
+			);
+			expect(authoritative).toHaveLength(1);
+			expect(warnings).toHaveLength(1);
+		} finally { env.cleanup(); }
+	});
+
 	it("demotes a bash write followed by an edit through the handler", async () => {
 		const { runPipeline } = await import("../../clients/pipeline.js");
 		const formatEventsPublish = await import("../../clients/format-events-publish.js");
