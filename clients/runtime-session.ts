@@ -8,9 +8,11 @@ import { deadCodeIssueCount } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
 import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
+import { resetDegradationLedger } from "./degradation-ledger.js";
 import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
+import { createDeadline, yieldIfOverBudget } from "./cooperative-budget.js";
 import {
 	getGlobalPiLensDir,
 	getKnipIgnorePatterns,
@@ -635,13 +637,13 @@ async function collectTodoBaselineItems(
 		// blocks the event loop before the per-file scan loop below even starts.
 		const files = await getSourceFilesAsync(analysisRoot, true);
 		if (!stillCurrent()) return items;
-		let processedSinceYield = 0;
+		const deadline = createDeadline(8);
 		for (const file of files) {
 			if (!stillCurrent()) return items;
 			scanOneTodoFile(scanner, file, items);
-			if (++processedSinceYield % 30 === 0) {
-				await new Promise<void>((resolve) => setImmediate(resolve));
-			}
+			// scanFile cost scales with the file contents, so a count cadence cannot
+			// bound the event-loop block across differently-sized corpora.
+			await yieldIfOverBudget(deadline);
 		}
 	} catch {
 		const todoResult = scanner.scanDirectory(analysisRoot);
@@ -675,6 +677,9 @@ async function buildOrRefreshWordIndex(args: {
 	const { runtime, sessionGeneration, analysisRoot, snapshotRoot, dbg } = args;
 	if (!runtime.isCurrentSession(sessionGeneration)) return;
 	const startMs = Date.now();
+	let rebuildPreflightFiles:
+		| import("./word-index.js").WordIndexPreflightFiles
+		| undefined;
 
 	const latestSeq = readLatestProjectSequence(
 		snapshotRoot,
@@ -695,6 +700,7 @@ async function buildOrRefreshWordIndex(args: {
 				);
 				if (!runtime.isCurrentSession(sessionGeneration)) return;
 				if (result.mode === "full-required") {
+					rebuildPreflightFiles = result.preflightFiles;
 					dbg(
 						`session_start word-index: incremental preflight selected full rebuild (${result.reason})`,
 					);
@@ -766,8 +772,10 @@ async function buildOrRefreshWordIndex(args: {
 	const { buildWordIndexAsync, collectWordIndexDocs } = await import(
 		"./word-index.js"
 	);
-	const docs = await collectWordIndexDocs(analysisRoot, () =>
-		runtime.isCurrentSession(sessionGeneration),
+	const docs = await collectWordIndexDocs(
+		analysisRoot,
+		() => runtime.isCurrentSession(sessionGeneration),
+		rebuildPreflightFiles,
 	);
 	if (!runtime.isCurrentSession(sessionGeneration)) return;
 	// #1197 review finding 2: `buildWordIndexAsync` THROWS on supersession, and
@@ -1450,6 +1458,7 @@ export const SESSION_START_GUIDANCE: string[] = [
 export async function handleSessionStart(
 	deps: SessionStartDeps,
 ): Promise<void> {
+	resetDegradationLedger();
 	const handlerEnteredAt = Date.now();
 	const sessionStartMs = deps.sessionStartFiredAt ?? handlerEnteredAt;
 	const cwdForTelemetry = deps.ctxCwd ?? process.cwd();

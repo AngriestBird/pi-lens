@@ -5,7 +5,12 @@ const safeSpawn = vi.fn();
 const ensureTool = vi.fn();
 
 vi.mock("../../clients/safe-spawn.js", () => ({ safeSpawnAsync, safeSpawn }));
-vi.mock("../../clients/installer/index.js", () => ({ ensureTool }));
+vi.mock("../../clients/installer/index.js", () => ({
+	ensureTool,
+	resetPathWalkMemo: vi.fn(),
+	// Seam probes route through this on cached hits (#1203); default spawnable.
+	isSpawnableCommand: vi.fn(async () => true),
+}));
 
 describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 	beforeEach(async () => {
@@ -67,6 +72,7 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 				status: 1,
 				error: Object.assign(new Error("not found"), { code: "ENOENT" }),
 				failure: "spawn",
+				spawnFailure: { kind: "tool-not-found" } as never,
 				stdout: "",
 				stderr: "",
 			})
@@ -93,6 +99,7 @@ describe("RuffClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 			status: 1,
 			error: Object.assign(new Error("not found"), { code: "ENOENT" }),
 			failure: "spawn",
+			spawnFailure: { kind: "tool-not-found" } as never,
 			stdout: "",
 			stderr: "",
 		});

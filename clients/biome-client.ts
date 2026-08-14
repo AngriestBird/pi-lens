@@ -8,6 +8,7 @@
  * Docs: https://biomejs.dev/
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isFileKind } from "./file-kinds.js";
@@ -15,6 +16,7 @@ import { getGlobalPiLensDir } from "./file-utils.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { biomeConfigArgs } from "./tool-policy.js";
+import { resolveManagedToolClient } from "./dispatch/runners/utils/runner-helpers.js";
 
 // --- Types ---
 
@@ -48,7 +50,7 @@ export class BiomeClient {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[biome] ${msg}`)
+			? createSubsystemLogger("biome")
 			: () => {};
 	}
 
@@ -144,30 +146,22 @@ export class BiomeClient {
 	}
 
 	private async doEnsureAvailable(): Promise<boolean> {
-		// Check if already available
-		const result = await this.spawnBiomeAsync(["--version"], 10000);
-		if (!result.error && result.status === 0) {
-			this.biomeAvailable = true;
-			return true;
-		}
-
-		// Auto-install via pi-lens installer
-		this.log("Biome not found, attempting auto-install...");
-		const { ensureTool } = await import("./installer/index.js");
-		const installedPath = await ensureTool("biome");
-
-		if (installedPath) {
-			this.log(`Biome auto-installed: ${installedPath}`);
-			// Set the installed path as the global fallback so every cwd
-			// reaches it after its own per-package lookup misses.
-			this.autoInstalledBinaryPath = installedPath;
-			this.biomeAvailable = true;
-			return true;
-		}
-
-		this.log("Biome auto-install failed");
-		this.biomeAvailable = false;
-		return false;
+		const outcome = await resolveManagedToolClient({
+			toolId: "biome",
+			cwd: process.cwd(),
+			probe: async () => {
+				const result = await this.spawnBiomeAsync(["--version"], 10000);
+				return !result.error && result.status === 0
+					? { outcome: "success" as const, value: true }
+					: { outcome: "missing" as const };
+			},
+			acceptInstalled: (installedPath) => {
+				this.autoInstalledBinaryPath = installedPath;
+				return true;
+			},
+		});
+		this.biomeAvailable = outcome.outcome === "success";
+		return this.biomeAvailable;
 	}
 
 	/**

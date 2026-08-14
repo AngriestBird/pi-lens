@@ -7,6 +7,7 @@
  * Requires: pyright (pip install pyright or npm install -g pyright)
  */
 
+import { logExtension } from "../../extension-log.js";
 import { getLSPService } from "../../lsp/index.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { PRIORITY } from "../priorities.js";
@@ -111,9 +112,11 @@ const pyrightRunner: RunnerDefinition = {
 			};
 		// pi-lens-ignore: missing-error-propagation
 		} catch {
-			console.error(
-				`[runner:pyright] JSON parse failed for ${ctx.filePath} — raw output: ${output.slice(0, 200)}`,
-			);
+			logExtension({
+				subsystem: "runner:pyright",
+				message: `JSON parse failed for ${ctx.filePath} — raw output: ${output.slice(0, 200)}`,
+				metadata: { filePath: ctx.filePath },
+			});
 			return {
 				status: "failed",
 				diagnostics: [],

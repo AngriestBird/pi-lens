@@ -625,10 +625,27 @@ export function isPathIgnoredByProject(
 	return getProjectIgnoreMatcher(rootDir).isIgnored(filePath, isDirectory);
 }
 
+const projectIgnoreGlobsCache = new Map<
+	string,
+	{ mtimeMs: number; size: number; globs: string[] }
+>();
+
 export function getProjectIgnoreGlobs(rootDir: string): string[] {
-	return readGitignorePatterns(rootDir)
+	const resolvedRoot = path.resolve(rootDir);
+	const signature = gitignoreSignature(resolvedRoot);
+	const cached = projectIgnoreGlobsCache.get(resolvedRoot);
+	if (
+		cached &&
+		cached.mtimeMs === signature.mtimeMs &&
+		cached.size === signature.size
+	) {
+		return cached.globs;
+	}
+	const globs = readGitignorePatterns(resolvedRoot)
 		.filter((pattern) => !pattern.negated)
 		.flatMap((pattern) => expandGitignorePattern(pattern));
+	projectIgnoreGlobsCache.set(resolvedRoot, { ...signature, globs });
+	return globs;
 }
 
 /**

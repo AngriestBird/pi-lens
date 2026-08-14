@@ -73,6 +73,7 @@ describe("getDirectoryMarkers — marker index correctness", () => {
 		write("pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n");
 		write("Cargo.toml", "[workspace]\n");
 		write("go.work", "go 1.21\n");
+		write("Chart.yaml", "apiVersion: v2\n");
 		const markers = getDirectoryMarkers(root);
 		expect(markers.piLensConfigPath).toBe(path.join(root, ".pi-lens.json"));
 		expect(markers.tsconfigPath).toBe(path.join(root, "tsconfig.json"));
@@ -82,6 +83,7 @@ describe("getDirectoryMarkers — marker index correctness", () => {
 		);
 		expect(markers.cargoTomlPath).toBe(path.join(root, "Cargo.toml"));
 		expect(markers.goWorkPath).toBe(path.join(root, "go.work"));
+		expect(markers.chartYamlPath).toBe(path.join(root, "Chart.yaml"));
 	});
 
 	it("returns undefined markers for an empty directory", () => {

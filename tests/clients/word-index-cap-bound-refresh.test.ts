@@ -90,7 +90,7 @@ describe("word-index incremental refresh at the file-count cap (#1227)", () => {
 
 				const result = await refreshWordIndexIncrementally(index, env.tmpDir);
 
-				expect(result).toEqual({
+				expect(result).toMatchObject({
 					mode: "full-required",
 					reason: "stale-document-churn",
 				});

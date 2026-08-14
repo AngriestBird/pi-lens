@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	createAvailabilityChecker,
+	getSgCommand,
+	isSgAvailableAsync,
 	lspPrimaryCoversFile,
 	resolveCommandArgsWithInstallFallback,
 	resolveCommandWithInstallFallback,
@@ -22,6 +24,11 @@ const { logSessionStartSpy } = vi.hoisted(() => ({
 	logSessionStartSpy: vi.fn(),
 }));
 
+const missingSpawnFailure = () => ({
+	kind: "tool-not-found" as const,
+	cause: Object.assign(new Error("missing"), { code: "ENOENT" }),
+}) as never;
+
 vi.mock("../../../../clients/sessionstart-logger.js", () => ({
 	logSessionStart: logSessionStartSpy,
 }));
@@ -36,6 +43,7 @@ vi.mock("../../../../clients/installer/index.js", () => ({
 	// Pass the on-disk pre-check so these tests keep exercising the --version
 	// probe path through the mocked safeSpawnAsync.
 	isSpawnableCommand: vi.fn(async () => true),
+	resetPathWalkMemo: vi.fn(),
 }));
 
 vi.mock("../../../../clients/package-manager.js", async (importOriginal) => ({
@@ -174,6 +182,7 @@ describe("runner-helpers availability checker", () => {
 			status: 1,
 			error: Object.assign(new Error("missing"), { code: "ENOENT" }),
 			failure: "spawn",
+			spawnFailure: missingSpawnFailure(),
 		});
 		vi.mocked(installerMod.ensureTool).mockResolvedValue("ruff");
 		const checker = createAvailabilityChecker("ruff");
@@ -260,6 +269,51 @@ describe("runner-helpers availability checker", () => {
 		expect(probedArgs).toEqual(["--version"]);
 	});
 
+	it("re-probes a cached positive when its resolved command disappears", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(safeSpawnMod.safeSpawnAsync)
+			.mockResolvedValueOnce({ stdout: "1.0.0", stderr: "", status: 0 })
+			.mockResolvedValueOnce({
+				stdout: "",
+				stderr: "missing",
+				status: null,
+				error: Object.assign(new Error("missing"), { code: "ENOENT" }),
+				failure: "spawn",
+				spawnFailure: missingSpawnFailure(),
+			});
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValueOnce(false);
+		// Scoped count: earlier tests in this file legitimately trigger the
+		// session-reset path, which also calls resetPathWalkMemo.
+		vi.mocked(installerMod.resetPathWalkMemo).mockClear();
+		const checker = createAvailabilityChecker("deleted-tool");
+		expect(await checker.isAvailableAsync(process.cwd())).toBe(true);
+		expect(await checker.isAvailableAsync(process.cwd())).toBe(false);
+		expect(safeSpawnMod.safeSpawnAsync).toHaveBeenCalledTimes(2);
+		expect(installerMod.resetPathWalkMemo).toHaveBeenCalledOnce();
+	});
+
+	it("resets the shared ast-grep availability memo at session start", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
+			stdout: "",
+			stderr: "missing",
+			status: 1,
+		});
+		expect(await isSgAvailableAsync()).toBe(false);
+		vi.mocked(installerMod.resetPathWalkMemo).mockClear();
+		resetDispatchAvailabilityState();
+		expect(installerMod.resetPathWalkMemo).toHaveBeenCalledOnce();
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
+			stdout: "ast-grep 0.40.0",
+			stderr: "",
+			status: 0,
+		});
+		expect(await isSgAvailableAsync()).toBe(true);
+		expect(getSgCommand().cmd).toContain("ast-grep");
+	});
+
 	it("bounds missing-tool installs to one attempt and records the failure", async () => {
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		const installerMod = await import("../../../../clients/installer/index.js");
@@ -269,6 +323,7 @@ describe("runner-helpers availability checker", () => {
 			status: null,
 			error: Object.assign(new Error("spawn missing ENOENT"), { code: "ENOENT" }),
 			failure: "spawn",
+			spawnFailure: missingSpawnFailure(),
 		});
 		vi.mocked(installerMod.ensureTool).mockResolvedValue(undefined);
 
@@ -307,6 +362,7 @@ describe("runner-helpers availability checker", () => {
 			status: null,
 			error: Object.assign(new Error("spawn missing ENOENT"), { code: "ENOENT" }),
 			failure: "spawn",
+			spawnFailure: missingSpawnFailure(),
 		});
 		const checker = createAvailabilityChecker("missing-tool-success");
 

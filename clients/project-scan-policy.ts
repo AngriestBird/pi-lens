@@ -90,7 +90,7 @@ export function collectProjectSourceFiles(
  */
 export function collectProjectSourceFilesAsync(
 	rootDir: string,
-	options?: ProjectSourceCollectionOptions & { yieldEvery?: number },
+	options?: ProjectSourceCollectionOptions & { budgetMs?: number },
 ): Promise<string[]> {
 	return collectSourceFilesAsync(rootDir, options);
 }
@@ -104,7 +104,7 @@ export function collectProjectSourceFilesAsync(
  */
 export function collectProjectSourceFilesWithBudgetAsync(
 	rootDir: string,
-	options?: ProjectSourceCollectionOptions & { yieldEvery?: number },
+	options?: ProjectSourceCollectionOptions & { budgetMs?: number },
 ): Promise<SourceCollectionResult> {
 	return collectSourceFilesWithBudgetAsync(rootDir, options);
 }

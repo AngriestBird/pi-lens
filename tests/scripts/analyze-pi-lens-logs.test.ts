@@ -25,10 +25,10 @@ const SCRIPT = path.resolve(
 
 const NOW = new Date().toISOString();
 
-function runReport(root: string): any {
+function runReport(root: string, extraArgs: string[] = []): any {
 	const out = execFileSync(
 		process.execPath,
-		[SCRIPT, "--root", root, "--json", "--since", "all"],
+		[SCRIPT, "--root", root, "--json", "--since", "all", ...extraArgs],
 		{ encoding: "utf8" },
 	);
 	return JSON.parse(out);
@@ -44,6 +44,14 @@ describe("analyze-pi-lens-logs.mjs", () => {
 		// latency.log — three failed runners + one success. One failure carries an
 		// explicit failureKind (infra), one only diagnostics (heuristic → found-errors).
 		const latency = [
+			// Synthetic benchmark corpus — excluded by the default denylist.
+			{
+				type: "phase",
+				ts: NOW,
+				phase: "lsp_diagnostics_timeout",
+				filePath: "/tmp/pi-lens/heap-corpus/generated.ts",
+				durationMs: 9000,
+			},
 			// found-errors via explicit tag
 			{
 				type: "runner",
@@ -207,6 +215,13 @@ describe("analyze-pi-lens-logs.mjs", () => {
 		expect(report.rowsSeen["actionable-warnings"]).toBe(4);
 		expect(report.rowsSeen["ast-grep-tools"]).toBe(3);
 		expect(report.parseErrors).toEqual({});
+		expect(report.rowsExcluded).toBe(1);
+	});
+
+	it("supports explicit repeatable exclusion globs", () => {
+		const excluded = runReport(root, ["--exclude", "**/proj/**"]);
+		expect(excluded.rowsExcluded).toBeGreaterThan(report.rowsExcluded);
+		expect(excluded.rowsSeen.latency).toBeLessThan(report.rowsSeen.latency);
 	});
 
 	it("separates infra runner failures from found-errors", () => {

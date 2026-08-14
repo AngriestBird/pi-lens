@@ -8,6 +8,7 @@
  * Docs: https://github.com/kucherenko/jscpd
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import { mkdtempSync } from "node:fs";
 import * as os from "node:os";
@@ -19,7 +20,7 @@ import {
 	getProjectIgnoreMatcher,
 } from "./file-utils.js";
 import { findNodeToolBinary } from "./package-manager.js";
-import { isAtOrAboveHomeDir } from "./path-utils.js";
+import { isAtOrAboveHomeDir, isFullyQualified } from "./path-utils.js";
 import { getJscpdMaxEntriesDerived } from "./project-scale.js";
 import { createAvailabilityChecker, resolveAvailableOrInstall } from "./dispatch/runners/utils/runner-helpers.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
@@ -80,7 +81,7 @@ export class JscpdClient {
 	private log: (msg: string) => void;
 
 	constructor(verbose = false) {
-		this.log = verbose ? (msg) => console.error(`[jscpd] ${msg}`) : () => {};
+		this.log = verbose ? createSubsystemLogger("jscpd") : () => {};
 	}
 
 	/**
@@ -150,7 +151,7 @@ export class JscpdClient {
 			process.cwd(),
 		);
 		if (!resolved) return false;
-		if (path.isAbsolute(resolved)) this.jscpdManagedPath = resolved;
+		if (isFullyQualified(resolved)) this.jscpdManagedPath = resolved;
 		return true;
 	}
 

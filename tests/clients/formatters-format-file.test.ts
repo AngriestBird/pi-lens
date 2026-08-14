@@ -93,7 +93,7 @@ describe("formatFile", () => {
 		}
 	});
 
-	// The reason the exit-status check is opt-in: `rubocop -a` exits 1 when
+	// The reason the strict default is opt-OUT-able: `rubocop -a` exits 1 when
 	// offenses remain after it has already rewritten the file. Failing that would
 	// surface a formatter error on every file with an unfixable offense.
 	it("keeps a nonzero exit non-fatal for lint-autofix formatters", async () => {
@@ -162,6 +162,95 @@ describe("formatFile honors SKIP_FORMATTING (#1144)", () => {
 
 			expect(result).toEqual({ success: true, changed: false });
 			expect(safeSpawnAsync).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #1343 review P1: lenience covers ONLY the documented statuses. rubocop's
+	// benign mode is status 1 (offenses remain after a successful rewrite);
+	// status 2 is a command/config failure and must NOT read as success.
+	it("lenient formatter: documented benign status (1) still succeeds", async () => {
+		const env = setupTestEnvironment("pi-lens-format-file-");
+		try {
+			const filePath = path.join(env.tmpDir, "a.rb");
+			fs.writeFileSync(filePath, "x = 1\n");
+			safeSpawnAsync.mockResolvedValue({ status: 1, stdout: "", stderr: "" });
+
+			const { formatFile, rubocop } = await loadFormatFile();
+			const result = await formatFile(filePath, rubocop);
+
+			expect(result.success).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("lenient formatter: undocumented status (2, bad flag/crash) fails", async () => {
+		const env = setupTestEnvironment("pi-lens-format-file-");
+		try {
+			const filePath = path.join(env.tmpDir, "a.rb");
+			fs.writeFileSync(filePath, "x = 1\n");
+			safeSpawnAsync.mockResolvedValue({
+				status: 2,
+				stdout: "",
+				stderr: "Error: invalid option: --busted",
+			});
+
+			const { formatFile, rubocop } = await loadFormatFile();
+			const result = await formatFile(filePath, rubocop);
+
+			expect(result.success).toBe(false);
+			expect(result.changed).toBe(false);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not let an unavailable primary reach the npx fallback when gated", async () => {
+		const env = setupTestEnvironment("pi-lens-format-npx-gated-");
+		try {
+			const filePath = path.join(env.tmpDir, "bundle.js");
+			fs.writeFileSync(filePath, "const a=1;const b=2;const c=a+b;\n");
+			const mod = await import("../../clients/formatters.ts");
+			const formatter = {
+				...mod.prettierFormatter,
+				resolveCommand: async () => mod.SKIP_FORMATTING,
+			};
+
+			const result = await mod.formatFile(filePath, formatter);
+
+			expect(result).toEqual({ success: true, changed: false });
+			expect(safeSpawnAsync).not.toHaveBeenCalledWith(
+				"npx",
+				expect.anything(),
+				expect.anything(),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("uses the npx fallback when the primary is unavailable and the file is not gated", async () => {
+		const env = setupTestEnvironment("pi-lens-format-npx-available-");
+		try {
+			const filePath = path.join(env.tmpDir, "formatted.js");
+			fs.writeFileSync(filePath, "const value = 1;\n");
+			const mod = await import("../../clients/formatters.ts");
+			const formatter = {
+				...mod.prettierFormatter,
+				resolveCommand: async () => null,
+			};
+			safeSpawnAsync.mockResolvedValue({ status: 0, stdout: "", stderr: "" });
+
+			const result = await mod.formatFile(filePath, formatter);
+
+			expect(result).toEqual({ success: true, changed: false });
+			expect(safeSpawnAsync).toHaveBeenCalledWith(
+				"npx",
+				["prettier", "--write", filePath],
+				expect.objectContaining({ cwd: env.tmpDir }),
+			);
 		} finally {
 			env.cleanup();
 		}

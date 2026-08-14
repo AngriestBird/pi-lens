@@ -13,6 +13,14 @@ vi.mock("../../clients/safe-spawn.js", () => ({ safeSpawnAsync, safeSpawn }));
 vi.mock("../../clients/installer/index.js", () => ({ ensureTool }));
 vi.mock("../../clients/dispatch/runners/utils/runner-helpers.js", () => ({
 	getSgCommand,
+	resolveManagedToolClient: vi.fn(async ({ acceptInstalled }) => {
+		const installed = await ensureTool("ast-grep");
+		if (!installed) return { outcome: "missing" };
+		const value = await acceptInstalled(installed);
+		return value === null
+			? { outcome: "non-installable" }
+			: { outcome: "success", value };
+	}),
 }));
 
 describe("SgRunner", () => {
@@ -32,6 +40,29 @@ describe("SgRunner", () => {
 		});
 		getSgCommand.mockReturnValue({ cmd: "ast-grep", args: [] });
 		ensureTool.mockResolvedValue(null);
+	});
+
+	describe("spawn-failure taxonomy consumption (#1214/#1199)", () => {
+		it("cwd-unresolvable with an ENOENT cause is NOT unavailable and does NOT reinstall", async () => {
+			const enoent = Object.assign(new Error("spawn ast-grep ENOENT"), {
+				code: "ENOENT",
+			});
+			safeSpawnAsync.mockResolvedValue({
+				status: null,
+				error: enoent,
+				failure: "spawn",
+				spawnFailure: { kind: "cwd-unresolvable", cause: enoent },
+				stdout: "",
+				stderr: "",
+			});
+			const { SgRunner } = await import("../../clients/sg-runner.js");
+			const runner = new SgRunner();
+			const result = await runner.execRaw(["run", "--pattern", "x"]);
+			// A raw `error.code === "ENOENT"` consumer regression maps this to
+			// unavailable and drives the #1199 reinstall loop — both must stay off.
+			expect(result.failure).not.toBe("unavailable");
+			expect(ensureTool).not.toHaveBeenCalled();
+		});
 	});
 
 	describe("ensureAvailable()", () => {

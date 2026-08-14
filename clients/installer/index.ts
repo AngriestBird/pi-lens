@@ -46,19 +46,24 @@
  * - GitHub releases (platform-specific binaries → ~/.pi-lens/bin/)
  */
 
+import { logExtension } from "../extension-log.js";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { existsSync, statSync, unlinkSync } from "node:fs";
 import fs from "node:fs/promises";
 import https from "node:https";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { isFullyQualified } from "../path-utils.js";
+import {
+	assertInstallAllowed,
+	projectTrustDenialReason,
+} from "../project-trust.js";
 
 const _installerRequire = createRequire(import.meta.url);
 import { createGunzip } from "node:zlib";
 import { logSessionStart } from "../sessionstart-logger.js";
-import { writeFileAtomicAsync } from "../atomic-write.js";
+import { commitDurableStoreAsync } from "../durable-store.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
 import {
 	allAvailableGlobalBinDirs,
@@ -218,7 +223,14 @@ function installerPlatform(): NodeJS.Platform {
  */
 function debugLog(...args: unknown[]): void {
 	if (DEBUG) {
-		console.error("[auto-install:debug]", ...args);
+		// #1333: DEBUG gate preserved; sink is extension.log, never the TUI.
+		logExtension({
+			subsystem: "auto-install",
+			level: "debug",
+			message: args
+				.map((arg) => (typeof arg === "string" ? arg : JSON.stringify(arg)))
+				.join(" "),
+		});
 	}
 }
 
@@ -593,6 +605,28 @@ export const TOOLS: ToolDefinition[] = [
 				if (platform === "win32") return "windows-x86_64.exe";
 				return undefined;
 			},
+		},
+	},
+	{
+		id: "helm",
+		name: "Helm",
+		checkCommand: "helm",
+		checkArgs: ["version", "--short"],
+		installStrategy: "github",
+		binaryName: "helm",
+		github: {
+			repo: "helm/helm",
+			assetMatch: (platform, arch) => {
+				// helm publishes per-OS archives: tar.gz for POSIX, zip for Windows.
+				const cpu = arch === "arm64" ? "arm64" : "amd64";
+				if (platform === "linux") return `linux-${cpu}.tar.gz`;
+				if (platform === "darwin") return `darwin-${cpu}.tar.gz`;
+				if (platform === "win32") return `windows-${cpu}.zip`;
+				return undefined;
+			},
+			// Release archives nest the executable under an OS/arch directory;
+			// the installer searches recursively and adds the Windows suffix.
+			binaryInArchive: "helm",
 		},
 	},
 	{
@@ -1409,19 +1443,11 @@ interface ProbeCacheEntry {
 type ProbeCache = Record<string, ProbeCacheEntry>;
 
 const PROBE_CACHE_PATH = path.join(getGlobalPiLensDir(), "probe-cache.json");
-const PROBE_CACHE_LOCK_PATH = `${PROBE_CACHE_PATH}.lock`;
-const PROBE_CACHE_LOCK_OWNER_PATH = path.join(PROBE_CACHE_LOCK_PATH, "owner.json");
 const PROBE_CACHE_LOCK_STALE_MS = 180_000;
 const PROBE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const PROBE_CACHE_FLUSH_LOCK_WAIT_MS = 250;
 const PROBE_CACHE_FLUSH_RETRY_DELAY_MS = 300;
 const PROBE_CACHE_FLUSH_RETRY_MAX_DELAY_MS = 30_000;
-
-type ProbeCacheLockOwner = {
-	pid: number;
-	createdAt: number;
-	token: string;
-};
 
 let _probeCache: ProbeCache | null = null;
 let _probeCacheDirty = false;
@@ -1463,178 +1489,6 @@ function markProbeCacheChange(toolId: string, entry: ProbeCacheEntry | null): vo
 	scheduleProbeFlush();
 }
 
-function isProbeCacheLockStale(owner: ProbeCacheLockOwner): boolean {
-	if (!Number.isInteger(owner.pid) || owner.pid <= 0) return false;
-	if (!Number.isFinite(owner.createdAt)) return false;
-	return (
-		!isProcessAlive(owner.pid) ||
-		Date.now() - owner.createdAt > PROBE_CACHE_LOCK_STALE_MS
-	);
-}
-
-function probeCacheLockQuarantinePath(token: string): string {
-	return `${PROBE_CACHE_LOCK_PATH}.quarantine-${process.pid}-${token}`;
-}
-
-function createProbeCacheLockToken(): string {
-	return `${process.pid}-${Date.now()}-${randomUUID()}`;
-}
-
-async function restoreProbeCacheLock(
-	quarantinePath: string,
-): Promise<void> {
-	try {
-		await fs.rename(quarantinePath, PROBE_CACHE_LOCK_PATH);
-	} catch {
-		// Another owner may have acquired the canonical path. Never remove or
-		// overwrite that owner; the quarantine is harmless and can be cleaned by a
-		// later stale-lock sweep.
-	}
-}
-
-async function releaseProbeCacheLock(token: string): Promise<void> {
-	const quarantinePath = probeCacheLockQuarantinePath(`release-${token}`);
-	let renamed = false;
-	for (let attempt = 0; attempt < 3; attempt += 1) {
-		try {
-			// Rename is the atomic ownership handoff. A late release cannot recursively
-			// remove a replacement owner that acquired the canonical path after stale
-			// reclamation.
-			await fs.rename(PROBE_CACHE_LOCK_PATH, quarantinePath);
-			renamed = true;
-			break;
-		} catch (error) {
-			// Another releaser or a stale-lock reclaimer may briefly own the canonical
-			// name's quarantine. Retry only that transient absence; never guess that a
-			// different error means this token owns the lock.
-			if (
-				(error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT" ||
-				attempt === 2
-			) {
-				return;
-			}
-			await new Promise<void>((resolve) => setImmediate(resolve));
-		}
-	}
-	if (!renamed) return;
-	try {
-		const raw = await fs.readFile(
-			path.join(quarantinePath, "owner.json"),
-			"utf8",
-		);
-		const owner = JSON.parse(raw) as Partial<ProbeCacheLockOwner>;
-		if (owner.token === token) {
-			await fs.rm(quarantinePath, { recursive: true, force: true });
-		} else {
-			await restoreProbeCacheLock(quarantinePath);
-		}
-	} catch {
-		// If the owner record cannot be read, keep the lock rather than deleting a
-		// potentially newer owner's directory.
-		await restoreProbeCacheLock(quarantinePath);
-	}
-}
-
-async function tryReclaimProbeCacheLock(): Promise<boolean> {
-	const quarantinePath = probeCacheLockQuarantinePath(
-		`reclaim-${Date.now()}-${randomUUID()}`,
-	);
-	try {
-		// Moving the directory out of the canonical name is atomic. A new owner can
-		// only mkdir the canonical path after this move, so its directory is never
-		// recursively removed by stale-owner cleanup.
-		await fs.rename(PROBE_CACHE_LOCK_PATH, quarantinePath);
-	} catch {
-		return false;
-	}
-
-	let stale = false;
-	try {
-		const raw = await fs.readFile(
-			path.join(quarantinePath, "owner.json"),
-			"utf8",
-		);
-		stale = isProbeCacheLockStale(
-			JSON.parse(raw) as ProbeCacheLockOwner,
-		);
-	} catch {
-		try {
-			const stat = await fs.stat(quarantinePath);
-			stale = Date.now() - stat.mtimeMs > PROBE_CACHE_LOCK_STALE_MS;
-		} catch {
-			stale = false;
-		}
-	}
-
-	if (stale) {
-		await fs.rm(quarantinePath, { recursive: true, force: true });
-		return true;
-	}
-	await restoreProbeCacheLock(quarantinePath);
-	return false;
-}
-
-async function tryCreateProbeCacheLock(
-	owner: ProbeCacheLockOwner,
-): Promise<(() => Promise<void>) | null> {
-	try {
-		// A directory lock closes the unlink/check/recreate race: another owner
-		// cannot create the directory until this owner's recursive removal has
-		// completed, so release cannot remove a newer owner's lock.
-		await fs.mkdir(PROBE_CACHE_LOCK_PATH);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException | undefined)?.code === "EEXIST") {
-			return null;
-		}
-		throw error;
-	}
-
-	try {
-		await fs.writeFile(
-			PROBE_CACHE_LOCK_OWNER_PATH,
-			JSON.stringify(owner),
-			"utf8",
-		);
-	} catch (error) {
-		await fs.rm(PROBE_CACHE_LOCK_PATH, { recursive: true, force: true }).catch(
-			() => {},
-		);
-		throw error;
-	}
-	return () => releaseProbeCacheLock(owner.token);
-}
-
-async function isExistingProbeCacheLockStale(): Promise<boolean> {
-	try {
-		const raw = await fs.readFile(PROBE_CACHE_LOCK_OWNER_PATH, "utf8");
-		return isProbeCacheLockStale(JSON.parse(raw) as ProbeCacheLockOwner);
-	} catch {
-		try {
-			const stat = await fs.stat(PROBE_CACHE_LOCK_PATH);
-			return Date.now() - stat.mtimeMs > PROBE_CACHE_LOCK_STALE_MS;
-		} catch {
-			// The owner released between EEXIST and inspection; retry once.
-			return true;
-		}
-	}
-}
-
-async function tryAcquireProbeCacheLock(): Promise<(() => Promise<void>) | null> {
-	const owner: ProbeCacheLockOwner = {
-		pid: process.pid,
-		createdAt: Date.now(),
-		token: createProbeCacheLockToken(),
-	};
-
-	for (let attempt = 0; attempt < 2; attempt += 1) {
-		const release = await tryCreateProbeCacheLock(owner);
-		if (release) return release;
-		if (!(await isExistingProbeCacheLockStale())) return null;
-		if (!(await tryReclaimProbeCacheLock())) return null;
-	}
-	return null;
-}
-
 function scheduleProbeFlush(delayMs = PROBE_CACHE_FLUSH_RETRY_DELAY_MS): void {
 	if (_probeCacheFlushTimer !== null) return;
 	_probeCacheFlushTimer = setTimeout(() => {
@@ -1650,21 +1504,6 @@ function scheduleProbeFlushRetry(): void {
 	);
 	_probeCacheRetryAttempt += 1;
 	scheduleProbeFlush(delay);
-}
-
-async function acquireProbeCacheLockForFlush(): Promise<
-	(() => Promise<void>) | null
-> {
-	const deadline = Date.now() + PROBE_CACHE_FLUSH_LOCK_WAIT_MS;
-	while (true) {
-		const release = await tryAcquireProbeCacheLock();
-		if (release) return release;
-		const remaining = deadline - Date.now();
-		if (remaining <= 0) return null;
-		await new Promise((resolve) =>
-			setTimeout(resolve, Math.min(25, remaining)),
-		);
-	}
 }
 
 export type ProbeCacheFlushResult =
@@ -1686,23 +1525,13 @@ function snapshotProbeCacheChanges(): ProbeCacheFlushSnapshot {
 	};
 }
 
-async function readProbeCacheForFlush(): Promise<ProbeCache | undefined> {
-	try {
-		const raw = await fs.readFile(PROBE_CACHE_PATH, "utf-8");
-		const parsed: unknown = JSON.parse(raw);
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-			throw new Error("probe-cache root is not an object");
-		}
-		return parsed as ProbeCache;
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT") {
-			return {};
-		}
-		logSessionStart(
-			`auto-install probe-cache: merge read failed (${(err as NodeJS.ErrnoException | undefined)?.code ?? "invalid"}); preserving pending update`,
-		);
-		return undefined;
+function deserializeProbeCache(contents: string | undefined): ProbeCache {
+	if (contents === undefined) return {};
+	const parsed: unknown = JSON.parse(contents);
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error("probe-cache root is not an object");
 	}
+	return parsed as ProbeCache;
 }
 
 function applyProbeCacheChanges(
@@ -1712,6 +1541,21 @@ function applyProbeCacheChanges(
 	for (const [toolId, entry] of changes) {
 		if (entry === null) delete disk[toolId];
 		else disk[toolId] = entry;
+	}
+}
+
+/**
+ * Install-lifetime ageing belongs to the authoritative merge, not only to the
+ * lookup path: a sibling process may have left expired entries on disk since
+ * this process loaded its in-memory snapshot. The async durable-store lock
+ * supplies the probe cache's former quarantine/stale-owner recovery.
+ */
+function ageProbeCache(disk: ProbeCache): void {
+	const cutoff = Date.now() - PROBE_CACHE_TTL_MS;
+	for (const [toolId, entry] of Object.entries(disk)) {
+		if (!Number.isFinite(entry.cachedAt) || entry.cachedAt < cutoff) {
+			delete disk[toolId];
+		}
 	}
 }
 
@@ -1739,33 +1583,40 @@ function publishProbeCacheWrite(
 }
 
 async function writeProbeCache(): Promise<ProbeCacheFlushResult> {
-	const release = await acquireProbeCacheLockForFlush();
-	if (!release) {
-		// A one-shot caller gets a bounded asynchronous wait rather than an
-		// unbounded exit-path block. The explicit result tells it that persistence
-		// remains pending, and long-lived sessions get a backoff retry.
-		logSessionStart(
-			"auto-install probe-cache: flush deferred because another process owns the lock",
-		);
-		scheduleProbeFlushRetry();
-		return "deferred";
-	}
-
 	try {
 		// Snapshot versions before the awaited disk read/write. A new update for
 		// the same tool may arrive while the atomic write is in flight; its newer
 		// version must remain pending for the next flush.
 		const { changes, versions } = snapshotProbeCacheChanges();
-		// Re-read under the non-blocking lock, then apply only this process's
-		// changes. This is the read-modify-write isolation missing from a plain
-		// atomic rename: entries discovered by a sibling process survive.
-		const disk = await readProbeCacheForFlush();
-		if (!disk) return "failed";
-		applyProbeCacheChanges(disk, changes);
-		await writeFileAtomicAsync(PROBE_CACHE_PATH, JSON.stringify(disk, null, 2), {
-			bestEffort: false,
+		let result: ProbeCacheFlushResult = "written";
+		const committed = await commitDurableStoreAsync({
+			path: PROBE_CACHE_PATH,
+			deserialize: deserializeProbeCache,
+			merge: (disk) => {
+				ageProbeCache(disk);
+				applyProbeCacheChanges(disk, changes);
+				return disk;
+			},
+			serialize: (disk) => JSON.stringify(disk, null, 2),
+			waitMs: PROBE_CACHE_FLUSH_LOCK_WAIT_MS,
+			retryMs: 25,
+			staleMs: PROBE_CACHE_LOCK_STALE_MS,
+			timeoutMessage: "Timed out waiting for probe-cache lock",
+			onContention: "skip-log",
+			logContention: () => {
+				logSessionStart(
+					"auto-install probe-cache: flush deferred because another process owns the lock",
+				);
+			},
+			afterWriteLocked: (disk) => {
+				result = publishProbeCacheWrite(disk, versions);
+			},
 		});
-		return publishProbeCacheWrite(disk, versions);
+		if (committed === undefined) {
+			scheduleProbeFlushRetry();
+			return "deferred";
+		}
+		return result;
 	} catch (err) {
 		// Keep dirty state so a later timer/explicit flush can retry. The error
 		// is logged without paths, source, or command text; an unavailable cache
@@ -1775,8 +1626,6 @@ async function writeProbeCache(): Promise<ProbeCacheFlushResult> {
 		);
 		scheduleProbeFlushRetry();
 		return "failed";
-	} finally {
-		await release();
 	}
 }
 
@@ -1910,6 +1759,7 @@ export function resetProbeCacheStateForTesting(): void {
 	ensureInFlight.clear();
 	installFailureReasons.clear();
 	lastManagedInstallVersion.clear();
+	resetPathWalkMemo();
 	if (_probeCacheFlushTimer !== null) {
 		clearTimeout(_probeCacheFlushTimer);
 		_probeCacheFlushTimer = null;
@@ -1917,6 +1767,21 @@ export function resetProbeCacheStateForTesting(): void {
 }
 
 // --- Check Functions ---
+
+const pathWalkMemo = new Map<string, boolean>();
+
+function hashSync(value: string): string {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < value.length; i += 1) {
+		hash ^= value.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return (hash >>> 0).toString(16);
+}
+
+export function resetPathWalkMemo(): void {
+	pathWalkMemo.clear();
+}
 
 /**
  * Check if a command is available in PATH by walking PATH entries and
@@ -1972,7 +1837,11 @@ export async function isSpawnableCommand(command: string): Promise<boolean> {
 			return false;
 		}
 	}
-	return isCommandAvailable(command);
+	const memoKey = `${command}:${hashSync(process.env.PATH || "")}`;
+	if (pathWalkMemo.has(memoKey)) return pathWalkMemo.get(memoKey) ?? false;
+	const isSpawnable = await isCommandAvailable(command);
+	pathWalkMemo.set(memoKey, isSpawnable);
+	return isSpawnable;
 }
 
 // --- Verification Functions
@@ -3760,9 +3629,32 @@ export async function installTool(toolId: string): Promise<boolean> {
 }
 
 /**
- * Ensure a tool is installed (check first, install if missing)
+ * Ensure a tool is installed (check first, install if missing).
+ *
+ * #1334 S5: when the pi host has actively denied project trust, the INSTALL
+ * half is switched off here — the request degrades to the existing
+ * `allowInstall:false` discovery-only path rather than failing outright, so an
+ * already-present binary keeps working while nothing is downloaded or executed
+ * on behalf of an untrusted project. A host with no trust surface at all
+ * (`"unknown"`) is unaffected.
  */
 export async function ensureTool(
+	toolId: string,
+	opts?: { forceReinstall?: boolean; allowInstall?: boolean },
+): Promise<string | undefined> {
+	if (
+		opts?.allowInstall !== false &&
+		!assertInstallAllowed(`managed tool ensure: ${toolId}`)
+	) {
+		logSessionStart(
+			`auto-install ensure ${toolId}: install gated — ${projectTrustDenialReason()}; discovery only`,
+		);
+		return ensureToolResolved(toolId, { ...opts, allowInstall: false });
+	}
+	return ensureToolResolved(toolId, opts);
+}
+
+async function ensureToolResolved(
 	toolId: string,
 	opts?: { forceReinstall?: boolean; allowInstall?: boolean },
 ): Promise<string | undefined> {
@@ -3844,7 +3736,23 @@ export async function ensureTool(
 
 	// Fast path 1: in-memory session cache — no I/O.
 	const cached = resolvedPathCache.get(toolId);
-	if (cached) return cached;
+	if (cached) {
+		if (!isFullyQualified(cached)) return cached;
+		try {
+			await fs.access(cached);
+			return cached;
+		} catch {
+			// The executor would report ENOENT for this cached positive. Evict it
+			// before discovery so the failure heals on this call, not after restart.
+		}
+		resolvedPathCache.delete(toolId);
+		const probeCache = await readProbeCache();
+		delete probeCache[toolId];
+		markProbeCacheChange(toolId, null);
+		logSessionStart(
+			`auto-install ensure ${toolId}: cached path disappeared; re-probing`,
+		);
+	}
 
 	// Fast path 2: persistent probe cache — fs.access + stat, no process spawn.
 	const diskCached = await checkProbeCache(toolId);
@@ -4063,6 +3971,7 @@ export const GITHUB_TOOLS = [
 	"terraform-ls",
 	"zls",
 	"hadolint",
+	"helm",
 	"gitleaks",
 	"taplo",
 	"vale",

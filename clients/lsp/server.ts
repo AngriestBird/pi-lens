@@ -16,7 +16,12 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { getGlobalPiLensDir } from "../file-utils.js";
+import {
+	getGlobalPiLensDir,
+	getProjectIgnoreGlobs,
+	isPathIgnoredByProject,
+} from "../file-utils.js";
+import { STAGE_TMP_PATTERN } from "../atomic-write-staging.js";
 import {
 	DOTNET_CSHARP_ROOT_MARKERS,
 	DOTNET_FSHARP_ROOT_MARKERS,
@@ -25,6 +30,7 @@ import {
 import {
 	direntsHaveMarkerGlobMatch,
 	isAtOrAboveHomeDir,
+	isFullyQualified,
 } from "../path-utils.js";
 import {
 	ensureTool,
@@ -39,7 +45,11 @@ import { findLocalSgconfig, resolveBaselineSgconfig } from "../sgconfig.js";
 import { findLocalTyposConfig } from "../typos-config.js";
 import { resolvePackagePath } from "../package-root.js";
 import { resolveAstGrepNativeExe } from "./wait-policy/index.js";
-import { isCommandAvailableAsync, safeSpawnAsync } from "../safe-spawn.js";
+import {
+	hasSpawnFailureKind,
+	isCommandAvailableAsync,
+	safeSpawnAsync,
+} from "../safe-spawn.js";
 import { type LSPProcess, launchLSP } from "./launch.js";
 import { createLombokJdtlsArgs } from "./lombok.js";
 import { resolveJavaRuntimeEnv } from "./jvm-runtime.js";
@@ -49,6 +59,87 @@ import { getRubyVersionDirNamesSync } from "./ruby-drive-dirs.js";
 // --- Types ---
 
 export type RootFunction = (file: string) => Promise<string | undefined>;
+
+const FIXTURE_ROOT_SEGMENTS = new Set(["__fixtures__", "testdata"]);
+const FALLBACK_PROJECT_MARKERS = [
+	".git",
+	"package.json",
+	"go.work",
+	"go.mod",
+	"Cargo.toml",
+	"pyproject.toml",
+	"pom.xml",
+	"build.gradle",
+	"build.gradle.kts",
+	"mix.exs",
+	"pubspec.yaml",
+	"Package.swift",
+] as const;
+
+function pathSegments(dir: string): string[] {
+	const parsed = path.parse(path.resolve(dir));
+	return path
+		.relative(parsed.root, path.resolve(dir))
+		.split(path.sep)
+		.filter(Boolean)
+		.map((segment) => segment.toLowerCase());
+}
+
+function hasFixtureConvention(dir: string): boolean {
+	const segments = pathSegments(dir);
+	// Go treats any directory named testdata as fixture data by convention. The
+	// exclusion is intentionally ancestor-wide so nested fixture projects cannot
+	// become independent LSP roots, but the segment match itself stays exact.
+	if (segments.some((segment) => FIXTURE_ROOT_SEGMENTS.has(segment))) return true;
+	return segments.some(
+		(segment, index) => segment === "tests" && segments[index + 1] === "fixtures",
+	);
+}
+
+function hasAtomicStageSegment(dir: string): boolean {
+	return pathSegments(dir).some((segment) => STAGE_TMP_PATTERN.test(segment));
+}
+
+async function findGitBoundary(dir: string): Promise<string | undefined> {
+	let current = path.resolve(dir);
+	const fsRoot = path.parse(current).root;
+	while (true) {
+		if (await markerExists(current, ".git")) return current;
+		if (current === fsRoot) return undefined;
+		current = path.dirname(current);
+	}
+}
+
+async function isExcludedLspRoot(dir: string): Promise<boolean> {
+	const candidate = path.resolve(dir);
+	if (hasFixtureConvention(candidate) || hasAtomicStageSegment(candidate)) return true;
+	const gitRoot = await findGitBoundary(candidate);
+	if (!gitRoot || gitRoot === candidate) return false;
+	// Avoid constructing the matcher when the project has no positive ignore rules.
+	// The matcher remains authoritative (including anchored rules and directory form).
+	if (getProjectIgnoreGlobs(gitRoot).length === 0) return false;
+	return isPathIgnoredByProject(candidate, gitRoot, true);
+}
+
+async function nearestNonExcludedFallbackRoot(candidate: string): Promise<string> {
+	if (!(await isExcludedLspRoot(candidate))) return path.resolve(candidate);
+	let current = path.dirname(path.resolve(candidate));
+	const fsRoot = path.parse(current).root;
+	let nearestAllowed: string | undefined;
+	while (true) {
+		if (!(await isExcludedLspRoot(current))) {
+			nearestAllowed ??= current;
+			for (const marker of FALLBACK_PROJECT_MARKERS) {
+				if (await markerExists(current, marker)) return current;
+			}
+		}
+		if (current === fsRoot) break;
+		current = path.dirname(current);
+	}
+	// No project marker was available. Keep the file attached to a stable,
+	// non-excluded ancestor rather than minting a client inside the fixture/stage.
+	return nearestAllowed ?? fsRoot;
+}
 
 export interface LSPSpawnOptions {
 	allowInstall?: boolean;
@@ -130,15 +221,6 @@ function canInstall(allowInstall?: boolean): boolean {
 	return allowInstall !== false && !isLspInstallDisabled();
 }
 
-function isCommandNotFoundError(error: unknown): boolean {
-	const msg = String(error);
-	return (
-		msg.includes("not found") ||
-		msg.includes("ENOENT") ||
-		msg.includes("not recognized")
-	);
-}
-
 const DIRECT_LSP_NEGATIVE_TTL_MS = Math.max(
 	30_000,
 	Number.parseInt(
@@ -151,7 +233,7 @@ const directLspCommandSkipLoggedUntil = new Map<string, number>();
 
 function isSimpleCommand(command: string): boolean {
 	return (
-		!path.isAbsolute(command) &&
+		!isFullyQualified(command) &&
 		!command.includes("/") &&
 		!command.includes("\\")
 	);
@@ -237,7 +319,7 @@ export async function resolveAndLaunch(
 	let lastRuntimeFailure: Error | undefined;
 	const trackRuntimeFailure = (err: unknown): void => {
 		const message = err instanceof Error ? err.message : String(err);
-		if (!isCommandNotFoundError(message)) {
+		if (!hasSpawnFailureKind(err, "tool-not-found")) {
 			lastRuntimeFailure = err instanceof Error ? err : new Error(message);
 		}
 	};
@@ -321,6 +403,13 @@ export async function resolveAndLaunch(
 		);
 		trackRuntimeFailure(failure.err);
 	}
+	const hasOnlyRepairableCandidateFailures = candidateFailures.every((failure) =>
+		hasSpawnFailureKind(failure.err, "tool-not-found"),
+	);
+	if (!hasOnlyRepairableCandidateFailures) {
+		if (lastRuntimeFailure) throw lastRuntimeFailure;
+		return undefined;
+	}
 
 	if (!canInstall(allowInstall)) {
 		logSessionStart(
@@ -403,7 +492,7 @@ export async function resolveAndLaunch(
 				// caches and download a managed copy from the registry.
 				const looksPathResolved =
 					!installed.includes("/") && !installed.includes("\\");
-				if (looksPathResolved) {
+				if (looksPathResolved && hasSpawnFailureKind(err, "tool-not-found")) {
 					logSessionStart(
 						`lsp launch managed retry force-reinstall tool=${spec.managedToolId}`,
 					);
@@ -758,7 +847,7 @@ function createInteractiveServer(spec: InteractiveServerSpec): LSPServerInfo {
 						: spec.initialization;
 				return { process: proc, source: "direct", initialization };
 			} catch (err) {
-				if (isCommandNotFoundError(err)) {
+				if (hasSpawnFailureKind(err, "tool-not-found")) {
 					markDirectLspCommandUnavailable(command);
 				}
 				return undefined;
@@ -784,8 +873,10 @@ export function PriorityRoot(
 	};
 }
 
-export const FileDirRoot: RootFunction = async (file: string) =>
-	path.resolve(path.dirname(file));
+export const FileDirRoot: RootFunction = async (file: string) => {
+	const candidate = path.resolve(path.dirname(file));
+	return nearestNonExcludedFallbackRoot(candidate);
+};
 
 export function RootWithFallback(
 	primary: RootFunction,
@@ -924,7 +1015,12 @@ export function NearestRoot(
 				// Check include patterns. Exact marker names stay cheap (`stat`), while
 				// glob markers like `*.csproj` match real project filenames (#201).
 				for (const pattern of includePatterns) {
-					if (await markerExists(currentDir, pattern)) return currentDir;
+					if (
+						(await markerExists(currentDir, pattern)) &&
+						!(await isExcludedLspRoot(currentDir))
+					) {
+						return currentDir;
+					}
 				}
 
 				if (currentDir === stop || currentDir === fsRoot) {

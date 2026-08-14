@@ -205,6 +205,15 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 		scope: "global",
 	},
 	{
+		name: "lens-compact-tool-line",
+		description:
+			"Opt-in (#1327): collapse a pi-lens tool's call+result rows into ONE theme-aware line (status glyph + name + summary) instead of two. Preserves expand-to-view-full-output. Default off. Also via ui.compactToolLine=true in ~/.pi-lens/config.json.",
+		configKey: "ui.compactToolLine",
+		negated: false,
+		default: false,
+		scope: "global",
+	},
+	{
 		name: "lens-turn-end-madge",
 		description:
 			"Run the per-turn-end madge circular-dependency check on import-changed files. Off by default: the pass only writes debug output, and user-facing madge diagnostics come from the session-start scan cache + lens_diagnostics. Also via turnEnd.madge.enabled=true in ~/.pi-lens/config.json.",

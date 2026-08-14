@@ -293,6 +293,32 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			expect.anything(),
 		);
 		expect(result.runners).toContain("jscpd");
+		expect(cacheManager.writeCache).toHaveBeenCalledWith(
+			"jscpd-ts",
+			expect.objectContaining({ duplicatedLines: 4, percentage: 40 }),
+			path.resolve(tmp),
+			expect.anything(),
+		);
+	});
+
+	it("persists the present madge result for downstream diagnostics", async () => {
+		const cacheManager = makeCacheManager();
+		const madgeResult = {
+			circular: [[path.join(tmp, "src", "a.ts"), path.join(tmp, "src", "b.ts")]],
+			count: 1,
+		};
+		const clients = makeClients({ madgeAvailable: true, madgeResult });
+
+		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+
+		expect(clients.depChecker.scanProject).toHaveBeenCalledWith(path.resolve(tmp));
+		expect(cacheManager.writeCache).toHaveBeenCalledWith(
+			"madge",
+			madgeResult,
+			path.resolve(tmp),
+			expect.anything(),
+		);
+		expect(result.cold).not.toContain("madge");
 	});
 
 	it("gates govulncheck/trivy on their own static signals, without cache reads", async () => {

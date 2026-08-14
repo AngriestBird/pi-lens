@@ -13,6 +13,7 @@
  * consumer skips further tree-sitter work (previously only the runner tracked this,
  * while the other subsystems kept calling the dead runtime).
  */
+import { notifyUserDegradation } from "./user-notify.js";
 import * as path from "node:path";
 import {
 	type ParsedTreeOutcome,
@@ -61,9 +62,14 @@ export function markTreeSitterWasmAborted(): void {
 	_wasmAborted = true;
 	_wasmAbortedAt = new Date().toISOString();
 	_shared = null;
-	console.error(
-		"[pi-lens] tree-sitter WASM runtime aborted; structural analysis is disabled " +
+	// HUMAN-audience: structural analysis is dead for the rest of the process
+	// and only a restart recovers it. Reaches the user through the HOST's
+	// render path (#1333); the machine-readable record is the logTreeSitter
+	// `runtime_abort` entry below.
+	notifyUserDegradation(
+		"pi-lens: tree-sitter WASM runtime aborted; structural analysis is disabled " +
 			"for this process. Restart the pi-lens extension/MCP server to recover.",
+		"error",
 	);
 	logTreeSitter({
 		phase: "runtime_abort",

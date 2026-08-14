@@ -22,6 +22,12 @@ import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { logLatency } from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
+import { recordDegradation } from "../degradation-ledger.js";
+import {
+	isLspSpawnAllowedByTrust,
+	assertInstallAllowed,
+	projectTrustDenialReason,
+} from "../project-trust.js";
 import { shouldPreferPullOnlyDiagnostics } from "../lsp-budget.js";
 import { withDeadline } from "../deadline-utils.js";
 import {
@@ -31,6 +37,7 @@ import {
 } from "../path-utils.js";
 import type {
 	LSPClientInfo,
+	LSPPullFailure,
 	LSPShutdownOptions,
 } from "./client.js";
 import {
@@ -263,6 +270,22 @@ const TOUCH_DEBOUNCE_MS = Math.max(
 	Number.parseInt(process.env.PI_LENS_LSP_TOUCH_DEBOUNCE_MS ?? "1500", 10) ||
 		1500,
 );
+const DEFAULT_LSP_CLIENT_CEILING = 24;
+const DEFAULT_TS_IDLE_EVICT_MS = 20 * 60_000;
+
+export function getTypeScriptIdleEvictMs(): number {
+	const parsed = Number.parseInt(process.env.PI_LENS_TS_IDLE_EVICT_MS ?? "", 10);
+	return Number.isSafeInteger(parsed) && parsed > 0
+		? parsed
+		: DEFAULT_TS_IDLE_EVICT_MS;
+}
+
+export function getLspClientCeiling(): number {
+	const parsed = Number.parseInt(process.env.PI_LENS_LSP_CLIENT_CEILING ?? "", 10);
+	return Number.isSafeInteger(parsed) && parsed > 0
+		? parsed
+		: DEFAULT_LSP_CLIENT_CEILING;
+}
 // #667: the sweep warm-up round trip's OWN generous, one-time budget —
 // deliberately larger than any single per-file sweep budget (`perFileMs` in
 // `runWorkspaceDiagnostics`, or the batch tool's per-file wait) because this
@@ -823,6 +846,8 @@ export class LSPService {
 	private readonly workspaceProbeLogged = new Set<string>();
 	private readonly warmStartLogged = new Set<string>();
 	private readonly optionalFailureLogged = new Set<string>();
+	/** Server/root pairs that already emitted unavailable for the current occurrence. */
+	private readonly unavailableLogged = new Set<string>();
 	private readonly optionalDisabled = new Set<string>();
 	/** Consecutive failure counts for exponential backoff circuit breaker */
 	private readonly failureCounts = new Map<string, number>();
@@ -918,6 +943,26 @@ export class LSPService {
 	 * successful write clears its entry.
 	 */
 	private readonly notifyWriteBackpressureStreak = new Map<string, number>();
+	/** LRU clock for capacity eviction, keyed by the canonical server/root key. */
+	private readonly clientLastUsedAt = new Map<string, number>();
+	/**
+	 * Manager-owned use leases close the acquisition/use gap that `isBusy()`
+	 * cannot see: a caller may hold a selected client before its first request has
+	 * entered the client. Eviction skips any key with an outstanding lease.
+	 */
+	private readonly clientLeases = new Map<string, number>();
+	/**
+	 * Per-root idle eviction for TypeScript's large, rebuildable program graph.
+	 * Timers are unref'd so an idle language service cannot keep a one-shot host
+	 * alive, and are removed before shutdown so a concurrent request rebuilds
+	 * instead of receiving the retiring client.
+	 */
+	private readonly typeScriptIdleTimers = new Map<
+		string,
+		ReturnType<typeof setTimeout>
+	>();
+	/** Serializes capacity decisions with publication into `state.inFlight`. */
+	private clientSpawnGate: Promise<void> = Promise.resolve();
 	/** True after shutdown() has been called; blocks new operations */
 	private isDestroyed = false;
 	/**
@@ -945,6 +990,196 @@ export class LSPService {
 	/** Guard: return true if service is shutting down or shut down */
 	private checkDestroyed(): boolean {
 		return this.isDestroyed;
+	}
+
+	private async withClientSpawnGate<T>(operation: () => Promise<T>): Promise<T> {
+		const previous = this.clientSpawnGate;
+		let release!: () => void;
+		this.clientSpawnGate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		await previous;
+		try {
+			return await operation();
+		} finally {
+			release();
+		}
+	}
+
+	private async clientKeyFor(
+		entry: SpawnedServer,
+		filePath: string,
+	): Promise<string | undefined> {
+		const root = await entry.info.root(filePath);
+		return root ? `${entry.info.id}:${normalizeMapKey(root)}` : undefined;
+	}
+
+	private async acquireClientLease(
+		entry: SpawnedServer,
+		filePath: string,
+	): Promise<string | undefined> {
+		const key = await this.clientKeyFor(entry, filePath);
+		if (!key) return undefined;
+		return this.withClientSpawnGate(async () => {
+			if (this.isDestroyed || this.state.clients.get(key) !== entry.client) {
+				return undefined;
+			}
+			this.clientLeases.set(key, (this.clientLeases.get(key) ?? 0) + 1);
+			return key;
+		});
+	}
+
+	private async acquireClientLeases(
+		entries: readonly SpawnedServer[],
+		filePath: string,
+	): Promise<string[] | undefined> {
+		const keys = await Promise.all(
+			entries.map((entry) => this.clientKeyFor(entry, filePath)),
+		);
+		if (keys.some((key) => key === undefined)) return undefined;
+		const keyed = entries.map((entry, index) => [keys[index] as string, entry] as const);
+		return this.withClientSpawnGate(async () => {
+			if (
+				this.isDestroyed ||
+				keyed.some(([key, entry]) => this.state.clients.get(key) !== entry.client)
+			) {
+				return undefined;
+			}
+			for (const [key] of keyed) {
+				this.clientLeases.set(key, (this.clientLeases.get(key) ?? 0) + 1);
+			}
+			return keyed.map(([key]) => key);
+		});
+	}
+
+	private releaseClientLease(key: string): void {
+		const remaining = (this.clientLeases.get(key) ?? 1) - 1;
+		if (remaining > 0) {
+			this.clientLeases.set(key, remaining);
+			return;
+		}
+		this.clientLeases.delete(key);
+		if (this.state.clients.has(key)) {
+			this.clientLastUsedAt.set(key, Date.now());
+			this.scheduleTypeScriptIdleEviction(key);
+		}
+	}
+
+	private async withClientForFileUse<T>(
+		filePath: string,
+		maxWaitMs: number | undefined,
+		hardCapMs: number | undefined,
+		use: (entry: SpawnedServer) => Promise<T> | T,
+	): Promise<T | undefined> {
+		while (!this.isDestroyed) {
+			const entry = await this.getClientForFile(filePath, maxWaitMs, hardCapMs);
+			if (!entry) return undefined;
+			const leaseKey = await this.acquireClientLease(entry, filePath);
+			if (!leaseKey) continue;
+			try {
+				return await use(entry);
+			} finally {
+				this.releaseClientLease(leaseKey);
+			}
+		}
+		return undefined;
+	}
+
+	private async makeCapacityForClient(key: string): Promise<boolean> {
+		const occupiedKeys = new Set(this.state.inFlight.keys());
+		for (const [clientKey, client] of this.state.clients) {
+			if (client.isAlive()) occupiedKeys.add(clientKey);
+		}
+		const occupied = occupiedKeys.size;
+		if (occupied < getLspClientCeiling()) return true;
+
+		const idle = [...this.state.clients.entries()]
+			.filter(
+				([candidateKey, client]) =>
+					candidateKey !== key &&
+					client.isAlive() &&
+					client.isBusy?.() !== true &&
+					(this.clientLeases.get(candidateKey) ?? 0) === 0,
+			)
+			.sort(
+				([a], [b]) =>
+					(this.clientLastUsedAt.get(a) ?? this.state.clientSpawnedAt.get(a) ?? 0) -
+					(this.clientLastUsedAt.get(b) ?? this.state.clientSpawnedAt.get(b) ?? 0),
+			);
+		const victim = idle[0];
+		if (!victim) {
+			logSessionStart(
+				`lsp client ceiling ${getLspClientCeiling()}: spawn declined; all clients are in use`,
+			);
+			return false;
+		}
+
+		const [victimKey, victimClient] = victim;
+		await victimClient.shutdown({ reason: "client_ceiling_lru" });
+		this.state.clients.delete(victimKey);
+		this.state.clientSpawnedAt.delete(victimKey);
+		this.state.demonstratedReady.delete(victimKey);
+		this.state.demonstratedCold.delete(victimKey);
+		this.clientLastUsedAt.delete(victimKey);
+		this.clearTypeScriptIdleTimer(victimKey);
+		logSessionStart(
+			`lsp client ceiling ${getLspClientCeiling()}: evicted idle LRU ${victimKey}`,
+		);
+		return true;
+	}
+
+	private clearTypeScriptIdleTimer(key: string): void {
+		const timer = this.typeScriptIdleTimers.get(key);
+		if (timer) clearTimeout(timer);
+		this.typeScriptIdleTimers.delete(key);
+	}
+
+	private scheduleTypeScriptIdleEviction(key: string): void {
+		if (!key.startsWith("typescript:")) return;
+		// Pressure-gating these timers would require a separate reconciliation pass
+		// when the manager crosses the threshold; keep ownership simple and use the
+		// warm-LSP-friendly 20-minute default instead.
+		this.clearTypeScriptIdleTimer(key);
+		const lastUsedAt = this.clientLastUsedAt.get(key) ?? Date.now();
+		const timer = setTimeout(() => {
+			this.typeScriptIdleTimers.delete(key);
+			void this.withClientSpawnGate(async () => {
+				if (this.isDestroyed) return;
+				const client = this.state.clients.get(key);
+				if (!client?.isAlive()) return;
+				if (
+					client.isBusy?.() === true ||
+					(this.clientLeases.get(key) ?? 0) > 0 ||
+					(this.clientLastUsedAt.get(key) ?? 0) !== lastUsedAt
+				) {
+					this.scheduleTypeScriptIdleEviction(key);
+					return;
+				}
+
+				// Publish the cold state synchronously before awaiting teardown. A request
+				// arriving while shutdown is in progress therefore waits on the spawn gate
+				// and creates a fresh client; it can never receive this retiring one.
+				this.state.clients.delete(key);
+				this.state.clientSpawnedAt.delete(key);
+				this.state.demonstratedReady.delete(key);
+				this.state.demonstratedCold.delete(key);
+				this.clientLastUsedAt.delete(key);
+				try {
+					await client.shutdown({ reason: "typescript_idle_eviction" });
+				} catch {
+					// The strong manager reference is already gone; shutdown is best-effort
+					// like the other eviction paths and must not reject from a timer callback.
+				}
+				logSessionStart(`lsp typescript idle eviction: released ${key}`);
+				recordDegradation({
+					kind: "ts-idle-eviction",
+					subject: key,
+					reason: "idle TypeScript client released to bound memory",
+				});
+			}).catch(() => {});
+		}, getTypeScriptIdleEvictMs());
+		timer.unref?.();
+		this.typeScriptIdleTimers.set(key, timer);
 	}
 
 	private fingerprintContent(content: string): string {
@@ -1098,6 +1333,8 @@ export class LSPService {
 		this.state.clients.delete(key);
 		this.state.clientSpawnedAt.delete(key);
 		this.state.demonstratedReady.delete(key);
+		this.clientLastUsedAt.delete(key);
+		this.clearTypeScriptIdleTimer(key);
 		logLatency({
 			type: "phase",
 			phase: "lsp_notify_backpressure_broken",
@@ -1193,14 +1430,27 @@ export class LSPService {
 				}
 			}
 
+			const unavailable = (
+				await Promise.all(
+					servers.map(async (server) => {
+						const root = await server.root(filePath);
+						return {
+							server,
+							key: `${server.id}:${root ? normalizeMapKey(root) : "<unresolved>"}`,
+						};
+					}),
+				)
+			).filter(({ key }) => !this.unavailableLogged.has(key));
+			for (const { key } of unavailable) this.unavailableLogged.add(key);
+			if (unavailable.length === 0) return undefined;
 			logLatency({
 				type: "phase",
 				phase: "lsp_client_unavailable",
 				filePath,
 				durationMs: 0,
 				metadata: {
-					candidateCount: servers.length,
-					servers: servers.map((server) => server.id),
+					candidateCount: unavailable.length,
+					servers: unavailable.map(({ server }) => server.id),
 				},
 			});
 
@@ -1375,7 +1625,7 @@ export class LSPService {
 
 		const root = await server.root(filePath);
 		if (!root || this.checkDestroyed()) return undefined;
-		const allowInstall = this.shouldAllowInstall(filePath, root);
+		const allowInstall = this.shouldAllowInstall(server.id);
 
 		const normalizedRoot = normalizeMapKey(root);
 		const key = `${server.id}:${normalizedRoot}`;
@@ -1418,6 +1668,9 @@ export class LSPService {
 		const existing = this.state.clients.get(key);
 		if (existing) {
 			if (existing.isAlive()) {
+				this.unavailableLogged.delete(key);
+				this.clientLastUsedAt.set(key, Date.now());
+				this.scheduleTypeScriptIdleEviction(key);
 				if (!this.warmStartLogged.has(key)) {
 					logSessionStart(
 						`lsp warm-start ${server.id}: reused root=${root} file=${filePath}`,
@@ -1470,6 +1723,8 @@ export class LSPService {
 			}
 			this.state.clients.delete(key);
 			this.state.clientSpawnedAt.delete(key);
+			this.clientLastUsedAt.delete(key);
+			this.clearTypeScriptIdleTimer(key);
 			this.state.broken.delete(key);
 
 			// #1127: count EARLY, non-intentional runtime exits toward the circuit
@@ -1629,33 +1884,40 @@ export class LSPService {
 			if (isOptionalServer) this.optionalDisabled.delete(key);
 		}
 
-		const inFlight = this.state.inFlight.get(key);
-		if (inFlight) {
-			return inFlight;
+		let spawnPromise = this.state.inFlight.get(key);
+		if (!spawnPromise) {
+			const started = await this.withClientSpawnGate(async () => {
+				const raced = this.state.inFlight.get(key);
+				if (raced) return { promise: raced };
+				// `server.root()` and dead-client cleanup above are async. A reset during
+				// either gap must not let this retired generation start a late spawn.
+				if (this.checkDestroyed()) return undefined;
+				if (!(await this.makeCapacityForClient(key))) return undefined;
+				const promise = this.spawnClient(
+					server,
+					root,
+					key,
+					filePath,
+					allowInstall,
+				);
+				this.state.inFlight.set(key, promise);
+				return { promise };
+			});
+			if (!started) return undefined;
+			spawnPromise = started.promise;
 		}
-
-		// `server.root()` and a dead client's shutdown above are both async. A
-		// reset during either gap may have completed without seeing this request in
-		// state.inFlight; never let that retired generation start a late spawn.
-		if (this.checkDestroyed()) return undefined;
-
-		const spawnPromise = this.spawnClient(
-			server,
-			root,
-			key,
-			filePath,
-			allowInstall,
-		);
-		this.state.inFlight.set(key, spawnPromise);
 
 		try {
 			return await spawnPromise;
 		} finally {
-			this.state.inFlight.delete(key);
+			if (this.state.inFlight.get(key) === spawnPromise) {
+				this.state.inFlight.delete(key);
+			}
 		}
 	}
 
-	private shouldAllowInstall(_filePath: string, _root: string): boolean {
+	private shouldAllowInstall(serverId: string): boolean {
+		if (!assertInstallAllowed(`lsp install: ${serverId}`)) return false;
 		return process.env.PI_LENS_DISABLE_LSP_INSTALL !== "1";
 	}
 
@@ -1669,6 +1931,17 @@ export class LSPService {
 		filePath: string,
 		allowInstall: boolean,
 	): Promise<SpawnedServer | undefined> {
+		// #1334 S5: honor the host project-trust decision before executing any
+		// project-resolved binary. Only an explicit host "not trusted" blocks —
+		// a host with no trust surface (`"unknown"`) spawns exactly as before.
+		// Deliberately NOT marked broken: trust is a policy outcome, not a server
+		// failure, and the user may grant trust later in the same session.
+		if (!isLspSpawnAllowedByTrust()) {
+			logSessionStart(
+				`lsp spawn ${server.id}: refused — ${projectTrustDenialReason()}`,
+			);
+			return undefined;
+		}
 		const isOptionalServer = OPTIONAL_LSP_SERVER_IDS.has(server.id); // NOSONAR: set intentionally empty — no optional servers configured yet
 		const startedAt = Date.now();
 		logSessionStart(
@@ -1763,7 +2036,10 @@ export class LSPService {
 						};
 
 			this.state.clients.set(key, client);
+			this.unavailableLogged.delete(key);
 			this.state.clientSpawnedAt.set(key, Date.now());
+			this.clientLastUsedAt.set(key, Date.now());
+			this.scheduleTypeScriptIdleEviction(key);
 			this.failureCounts.delete(key);
 			if (isOptionalServer) {
 				this.optionalDisabled.delete(key);
@@ -1821,19 +2097,19 @@ export class LSPService {
 		options?: { preserveDiagnostics?: boolean; spawnBudgetMs?: number },
 	): Promise<void> {
 		if (this.checkDestroyed()) return;
-		const spawned = await this.getClientForFile(
+		await this.withClientForFileUse(
 			filePath,
 			undefined,
 			options?.spawnBudgetMs,
-		);
-		if (!spawned) return;
-
-		const languageId = getLanguageId(filePath) ?? "plaintext";
-		await spawned.client.notify.open(
-			filePath,
-			content,
-			languageId,
-			options?.preserveDiagnostics,
+			async (spawned) => {
+				const languageId = getLanguageId(filePath) ?? "plaintext";
+				await spawned.client.notify.open(
+					filePath,
+					content,
+					languageId,
+					options?.preserveDiagnostics,
+				);
+			},
 		);
 	}
 
@@ -1842,10 +2118,9 @@ export class LSPService {
 	 */
 	async updateFile(filePath: string, content: string): Promise<void> {
 		if (this.checkDestroyed()) return;
-		const spawned = await this.getClientForFile(filePath);
-		if (!spawned) return;
-
-		await spawned.client.notify.change(filePath, content);
+		await this.withClientForFileUse(filePath, undefined, undefined, (spawned) =>
+			spawned.client.notify.change(filePath, content),
+		);
 	}
 
 	/**
@@ -1927,6 +2202,13 @@ export class LSPService {
 			});
 			return;
 		}
+		const leaseKeys = await this.acquireClientLeases(spawned, filePath);
+		if (!leaseKeys) {
+			// An idle eviction won between selection and lease admission. Resolve the
+			// now-current client set and replay; no notification targets the retiree.
+			return this.touchFile(filePath, content, options);
+		}
+		try {
 
 		const spawnedServerIds = spawned.map((entry) => entry.info.id);
 		if (
@@ -2469,6 +2751,7 @@ export class LSPService {
 					durationMs: waitedMs,
 					metadata: {
 						source,
+						serverId: spawned[0]?.client.serverId,
 						clientScope,
 						diagnosticsMode,
 						mode: "race",
@@ -2882,6 +3165,9 @@ export class LSPService {
 			},
 		});
 		return result;
+		} finally {
+			for (const key of leaseKeys) this.releaseClientLease(key);
+		}
 	}
 
 	/**
@@ -3992,16 +4278,21 @@ export class LSPService {
 						ms: timeoutMs,
 						onTimeout: "undefined",
 					}));
+			const coldServerIds = stillColdServerIds();
 			logLatency({
 				type: "phase",
-				phase: "lsp_sweep_warmup_done",
+				phase: options.signal?.aborted
+					? "lsp_sweep_warmup_aborted"
+					: coldServerIds.length > 0
+						? "lsp_sweep_warmup_failed"
+						: "lsp_sweep_warmup_done",
 				filePath: representativeFile,
 				durationMs: Date.now() - startedAt,
 				metadata: {
 					serverIds: servers.map((s) => s.id),
 					timeoutMs,
 					attempt,
-					coldServerIds: stillColdServerIds(),
+					coldServerIds,
 				},
 			});
 		};
@@ -4030,13 +4321,6 @@ export class LSPService {
 		}
 
 		if (failedServerIds.length > 0) {
-			logLatency({
-				type: "phase",
-				phase: "lsp_sweep_warmup_failed",
-				filePath: representativeFile,
-				durationMs: 0,
-				metadata: { failedServerIds, timeoutMs },
-			});
 			// #799: record the negative cache so a LATER sweep this session
 			// skips straight past re-paying this warm-up (initial + retry).
 			// Cleared automatically the moment the server demonstrates
@@ -4824,6 +5108,9 @@ export class LSPService {
 		const resetStartedAt = Date.now();
 		if (this.checkDestroyed()) return;
 		this.isDestroyed = true;
+		for (const key of this.typeScriptIdleTimers.keys()) {
+			this.clearTypeScriptIdleTimer(key);
+		}
 
 		// Belt-and-braces: wait for any in-flight spawns so that Guard 1/2 in
 		// spawnClient can observe isDestroyed and clean up. Skip on the
@@ -4878,10 +5165,23 @@ export class LSPService {
 	/**
 	 * Get status of all active clients
 	 */
-	getStatus(): Array<{ serverId: string; root: string; connected: boolean }> {
+	getStatus(): Array<{
+		serverId: string;
+		root: string;
+		connected: boolean;
+		pullFailureHistory: LSPPullFailure[];
+	}> {
 		return Array.from(this.state.clients.entries()).map(([key, client]) => {
 			const [serverId, root] = key.split(":");
-			return { serverId, root, connected: client.isAlive() };
+			return {
+				serverId,
+				root,
+				connected: client.isAlive(),
+				pullFailureHistory: (client.getPullFailureHistory?.() ?? []).map((entry) => ({
+					...entry,
+					message: entry.message.slice(0, 200),
+				})),
+			};
 		});
 	}
 

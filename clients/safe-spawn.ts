@@ -23,6 +23,9 @@ import {
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { logLatency } from "./latency-logger.js";
+import { recordDegradation } from "./degradation-ledger.js";
+import { logExtension } from "./extension-log.js";
+import { isFullyQualifiedWin32 } from "./path-utils.js";
 import { startSpawnUsageSampler } from "./resource-sampler.js";
 
 export interface SpawnResourceUsage {
@@ -35,11 +38,45 @@ export interface SpawnResourceUsage {
 
 export type SpawnFailureKind = "aborted" | "timeout" | "spawn" | "signal";
 
+export type SpawnFailureType =
+	| "tool-not-found"
+	| "cwd-unresolvable"
+	| "permission-denied"
+	| "spawn-failed"
+	| "timeout"
+	| "killed";
+
+/** Intent-level spawn failure. `cause` retains the original OS Error/errno. */
+export class SpawnFailureError extends Error {
+	readonly name = "SpawnFailureError";
+
+	constructor(
+		readonly kind: SpawnFailureType,
+		message: string,
+		readonly cause: Error,
+	) {
+		super(message, { cause });
+	}
+}
+
+export function hasSpawnFailureKind(
+	error: unknown,
+	kind: SpawnFailureType,
+): boolean {
+	return (
+		error instanceof Error &&
+		"kind" in error &&
+		(error as { kind?: unknown }).kind === kind
+	);
+}
+
 export interface SpawnResult {
 	stdout: string;
 	stderr: string;
 	status: number | null;
 	error?: Error;
+	/** Typed spawn-boundary failure; nonzero tool exits do not populate it. */
+	spawnFailure?: SpawnFailureError;
 	/** Structured failure reason; nonzero exit statuses are not spawn failures. */
 	failure?: SpawnFailureKind;
 	/** True when stdout or stderr was capped before process completion. */
@@ -49,6 +86,164 @@ export interface SpawnResult {
 	 *  first poll tick, or sampling failed for the whole invocation) — never
 	 *  read that as "zero resource usage". */
 	resourceUsage?: SpawnResourceUsage;
+}
+
+function toError(error: unknown): Error {
+	return error instanceof Error ? error : new Error(String(error));
+}
+
+function errorCode(error: Error): string | undefined {
+	return (error as NodeJS.ErrnoException).code;
+}
+
+async function cwdIsUnresolvable(cwd: string | undefined): Promise<boolean> {
+	if (cwd === undefined) return false;
+	try {
+		return !(await fs.promises.stat(cwd)).isDirectory();
+	} catch {
+		return true;
+	}
+}
+
+function cwdIsUnresolvableSync(cwd: string | undefined): boolean {
+	if (cwd === undefined) return false;
+	try {
+		return !fs.statSync(cwd).isDirectory();
+	} catch {
+		return true;
+	}
+}
+
+
+/**
+ * Best-effort presence probe used ONLY to disambiguate ENOENT when the cwd is
+ * ALSO unresolvable (#1340 review): a genuinely missing tool must classify as
+ * tool-not-found even under a broken cwd, or auto-install can never repair it.
+ * Absolute commands are probed directly (with PATHEXT variants on Windows);
+ * bare names scan PATH. A relative-with-separator command under a broken cwd
+ * is genuinely ambiguous -- we err toward cwd-unresolvable there, because
+ * repairing the cwd is actionable while a reinstall loop (#1199) is not.
+ */
+function commandProbablyPresent(command: string): boolean | "ambiguous" {
+	const exts =
+		process.platform === "win32"
+			? ["", ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)]
+			: [""];
+	const existsWithExt = (base: string): boolean => {
+		for (const ext of exts) {
+			try {
+				if (fs.existsSync(base + ext)) return true;
+			} catch {
+				// unreadable candidate -- keep probing
+			}
+		}
+		return false;
+	};
+	if (path.isAbsolute(command)) return existsWithExt(command);
+	if (command.includes("/") || command.includes("\\")) return "ambiguous";
+	for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
+		if (dir && existsWithExt(path.join(dir, command))) return true;
+	}
+	return false;
+}
+
+/**
+ * Shared errno->bucket mapping. `cwdUnresolvable` is the only async-vs-sync
+ * difference between the two public classifiers, so it arrives as a resolved
+ * flag and everything else lives once (Sonar duplication finding, #1340).
+ */
+function classifyWithCwdFlag(
+	cause: Error,
+	options: { command: string; cwd?: string },
+	cwdUnresolvable: boolean,
+): SpawnFailureError {
+	const code = errorCode(cause);
+	let failure: SpawnFailureError;
+	if (
+		code === "ENOENT" &&
+		cwdUnresolvable &&
+		commandProbablyPresent(options.command) !== false
+	) {
+		failure = new SpawnFailureError(
+			"cwd-unresolvable",
+			`Cannot spawn ${options.command}: working directory is unresolvable (${options.cwd})`,
+			cause,
+		);
+	} else if (code === "ENOENT") {
+		failure = new SpawnFailureError(
+			"tool-not-found",
+			`Cannot spawn ${options.command}: tool not found (${cause.message})`,
+			cause,
+		);
+	} else if (code === "EACCES" || code === "EPERM") {
+		failure = new SpawnFailureError(
+			"permission-denied",
+			`Cannot spawn ${options.command}: permission denied`,
+			cause,
+		);
+	} else {
+		failure = new SpawnFailureError(
+			"spawn-failed",
+			`Cannot spawn ${options.command}: ${cause.message}`,
+			cause,
+		);
+	}
+	recordSpawnClassification(failure, options);
+	return failure;
+}
+
+const loggedSpawnClassifications = new Set<string>();
+const SPAWN_CLASSIFICATION_LOG_CAP = 200;
+
+function recordSpawnClassification(
+	failure: SpawnFailureError,
+	options: { command: string; cwd?: string },
+): void {
+	const pair = `${failure.kind}\0${options.command}`;
+	if (!loggedSpawnClassifications.has(pair)) {
+		if (loggedSpawnClassifications.size >= SPAWN_CLASSIFICATION_LOG_CAP) {
+			loggedSpawnClassifications.clear();
+		}
+		loggedSpawnClassifications.add(pair);
+		logExtension({
+			subsystem: "safe-spawn",
+			level: "debug",
+			message: "spawn failure classified",
+			metadata: {
+				kind: failure.kind,
+				command: options.command,
+				cwd: options.cwd,
+			},
+		});
+	}
+	if (failure.kind !== "tool-not-found") {
+		recordDegradation({
+			kind: "spawn-failure",
+			subject: options.command,
+			reason: `${failure.kind}${options.cwd ? ` in ${options.cwd}` : ""}`,
+		});
+	}
+}
+
+/** Classify a raw Node spawn error without discarding its errno-bearing Error. */
+export async function classifySpawnFailure(
+	error: unknown,
+	options: { command: string; cwd?: string },
+): Promise<SpawnFailureError> {
+	const cause = toError(error);
+	const needsCwdProbe = errorCode(cause) === "ENOENT";
+	const cwdUnresolvable = needsCwdProbe && (await cwdIsUnresolvable(options.cwd));
+	return classifyWithCwdFlag(cause, options, cwdUnresolvable);
+}
+
+function classifySpawnFailureSync(
+	error: unknown,
+	options: { command: string; cwd?: string },
+): SpawnFailureError {
+	const cause = toError(error);
+	const needsCwdProbe = errorCode(cause) === "ENOENT";
+	const cwdUnresolvable = needsCwdProbe && cwdIsUnresolvableSync(options.cwd);
+	return classifyWithCwdFlag(cause, options, cwdUnresolvable);
 }
 
 export interface SafeSpawnOptions {
@@ -342,7 +537,7 @@ function isUncWindowsPath(value: string): boolean {
  * execute it, so a different file could be validated than executed.
  */
 function isFullyQualifiedWindowsPath(value: string): boolean {
-	return isDriveAbsoluteAnyDrive(value) || isUncWindowsPath(value);
+	return isFullyQualifiedWin32(value) && !isRootedWindowsPath(value);
 }
 
 /**
@@ -523,6 +718,7 @@ const windowsCommandCache = new Map<string, WindowsCommandCacheEntry>();
 /** Reset after session replacement or a successful managed install. */
 export function resetSafeSpawnWindowsCommandCache(): void {
 	windowsCommandCache.clear();
+	loggedSpawnClassifications.clear();
 }
 
 function cacheWindowsCommandResult(
@@ -739,10 +935,8 @@ function findCmdUnsafeValue(
 
 function synthesizeEnoentError(command: string): NodeJS.ErrnoException {
 	// Shaped like Node's native `spawn <cmd> ENOENT` error (message/code/
-	// syscall/path) so existing `err.message.includes("ENOENT")` /
-	// `err.code === "ENOENT"` call sites (e.g. sg-runner.ts, lsp/launch.ts)
-	// keep working now that Windows resolution happens before spawn instead
-	// of inside cmd.exe.
+	// syscall/path) so the typed classifier retains the same diagnostic cause
+	// now that Windows resolution happens before spawn instead of inside cmd.exe.
 	const err = new Error(`spawn ${command} ENOENT`) as NodeJS.ErrnoException;
 	err.code = "ENOENT";
 	err.syscall = "spawn";
@@ -838,22 +1032,26 @@ export async function safeSpawnAsync(
 	return new Promise((resolve) => {
 		// Check for early abort
 		if (abortSignal?.aborted) {
+			const cause = new Error("Spawn aborted before start");
 			resolve({
 				stdout: "",
 				stderr: "",
 				status: null,
-				error: new Error("Spawn aborted before start"),
+				error: cause,
 				failure: "aborted",
+				spawnFailure: new SpawnFailureError("killed", cause.message, cause),
 			});
 			return;
 		}
 		if (timeout <= 0) {
+			const cause = new Error(`Process timed out after ${timeout}ms`);
 			resolve({
 				stdout: "",
 				stderr: "",
 				status: null,
-				error: new Error(`Process timed out after ${timeout}ms`),
+				error: cause,
 				failure: "timeout",
+				spawnFailure: new SpawnFailureError("timeout", cause.message, cause),
 			});
 			return;
 		}
@@ -864,6 +1062,7 @@ export async function safeSpawnAsync(
 		let aborted = false;
 		let killed = false;
 		let outputTruncated = false;
+		let spawnErrored = false;
 		// #1109: the non-Windows SIGTERM→SIGKILL escalation timer (armed in
 		// killTree below). Stored per-call (never shared) so the close/error
 		// handlers can clear it if the child exits before it fires — same
@@ -988,13 +1187,19 @@ export async function safeSpawnAsync(
 		}
 
 		if (resolutionError) {
-			resolve({
-				stdout: "",
-				stderr: "",
-				status: null,
-				error: resolutionError,
-				failure: "spawn",
-			});
+			void classifySpawnFailure(resolutionError, {
+				command,
+				cwd: options?.cwd,
+			}).then((spawnFailure) =>
+				resolve({
+					stdout: "",
+					stderr: "",
+					status: null,
+					error: resolutionError,
+					failure: "spawn",
+					spawnFailure,
+				}),
+			);
 			return;
 		}
 
@@ -1015,13 +1220,18 @@ export async function safeSpawnAsync(
 			// a rejection here could surface as an unhandledRejection that crashes
 			// the host. Resolve the failure gracefully instead — same contract as an
 			// asynchronously-emitted `'error'` event (handled below).
-			resolve({
+			const cause = toError(err);
+			void classifySpawnFailure(cause, { command, cwd: options?.cwd }).then(
+				(spawnFailure) =>
+					resolve({
 				stdout: "",
 				stderr: "",
 				status: null,
-				error: err instanceof Error ? err : new Error(String(err)),
+				error: cause,
 				failure: "spawn",
-			});
+				spawnFailure,
+					}),
+			);
 			return;
 		}
 		if (options?.lifetimeCoupled && child.pid) {
@@ -1146,6 +1356,7 @@ export async function safeSpawnAsync(
 
 		// Process completion
 		child.on("close", async (code, signal) => {
+			if (spawnErrored) return;
 			closed = true;
 			clearTimeout(timeoutId);
 			abortSignal?.removeEventListener("abort", onAbort);
@@ -1159,34 +1370,40 @@ export async function safeSpawnAsync(
 
 			const outputInfo = outputTruncated ? { outputTruncated: true } : {};
 			if (timedOut) {
+				const cause = new Error(
+					`Process timed out after ${timeout}ms (killed with ${signal || "SIGTERM"})`,
+				);
 				resolve({
 					stdout,
 					stderr,
 					status: null,
-					error: new Error(
-						`Process timed out after ${timeout}ms (killed with ${signal || "SIGTERM"})`,
-					),
+					error: cause,
 					failure: "timeout",
+					spawnFailure: new SpawnFailureError("timeout", cause.message, cause),
 					...outputInfo,
 					resourceUsage,
 				});
 			} else if (aborted) {
+				const cause = new Error("Spawn aborted");
 				resolve({
 					stdout,
 					stderr,
 					status: null,
-					error: new Error("Spawn aborted"),
+					error: cause,
 					failure: "aborted",
+					spawnFailure: new SpawnFailureError("killed", cause.message, cause),
 					...outputInfo,
 					resourceUsage,
 				});
 			} else if (signal) {
+				const cause = new Error(`Process killed by signal: ${signal}`);
 				resolve({
 					stdout,
 					stderr,
 					status: null,
-					error: new Error(`Process killed by signal: ${signal}`),
+					error: cause,
 					failure: "signal",
+					spawnFailure: new SpawnFailureError("killed", cause.message, cause),
 					...outputInfo,
 					resourceUsage,
 				});
@@ -1196,6 +1413,7 @@ export async function safeSpawnAsync(
 		});
 
 		child.on("error", (err) => {
+			spawnErrored = true;
 			closed = true;
 			clearTimeout(timeoutId);
 			abortSignal?.removeEventListener("abort", onAbort);
@@ -1205,15 +1423,26 @@ export async function safeSpawnAsync(
 			let failure: SpawnFailureKind = "spawn";
 			if (aborted) failure = "aborted";
 			else if (timedOut) failure = "timeout";
-			resolve({
-				stdout,
-				stderr,
-				status: null,
-				error: err,
-				failure,
-				...(outputTruncated ? { outputTruncated: true } : {}),
-				resourceUsage,
-			});
+			const controlFailure = aborted
+				? new SpawnFailureError("killed", err.message, err)
+				: timedOut
+					? new SpawnFailureError("timeout", err.message, err)
+					: undefined;
+			const finish = (spawnFailure: SpawnFailureError): void =>
+				resolve({
+					stdout,
+					stderr,
+					status: null,
+					error: err,
+					failure,
+					spawnFailure,
+					...(outputTruncated ? { outputTruncated: true } : {}),
+					resourceUsage,
+				});
+			if (controlFailure) finish(controlFailure);
+			else {
+				void classifySpawnFailure(err, { command, cwd: options?.cwd }).then(finish);
+			}
 		});
 	});
 }
@@ -1322,11 +1551,17 @@ export function safeSpawn(
 			resolveEffectiveWindowsCwd(options?.cwd, spawnEnv) ?? options?.cwd;
 		const resolved = resolveWindowsCommand(command, options?.cwd, spawnEnv);
 		if (!resolved) {
+			const error = synthesizeEnoentError(command);
 			return {
 				stdout: "",
 				stderr: "",
 				status: null,
-				error: synthesizeEnoentError(command),
+				error,
+				failure: "spawn",
+				spawnFailure: classifySpawnFailureSync(error, {
+					command,
+					cwd: options?.cwd,
+				}),
 			};
 		}
 
@@ -1340,17 +1575,23 @@ export function safeSpawn(
 			// extensionless) `command` string — plus every arg.
 			const unsafeValue = findCmdUnsafeValue(resolved.resolvedPath, args);
 			if (unsafeValue !== undefined) {
+				const error = new Error(
+					`Refusing to spawn "${resolved.resolvedPath}" via cmd.exe: ` +
+						`${JSON.stringify(unsafeValue)} contains a character ("` +
+						`, %, !, or CR/LF) that cannot be safely escaped on a ` +
+						`cmd.exe /c command line (CWE-78, #817). Rename/quote the ` +
+						"value or invoke the tool without going through cmd.exe.",
+				);
 				return {
 					stdout: "",
 					stderr: "",
 					status: null,
-					error: new Error(
-						`Refusing to spawn "${resolved.resolvedPath}" via cmd.exe: ` +
-							`${JSON.stringify(unsafeValue)} contains a character ("` +
-							`, %, !, or CR/LF) that cannot be safely escaped on a ` +
-							`cmd.exe /c command line (CWE-78, #817). Rename/quote the ` +
-							"value or invoke the tool without going through cmd.exe.",
-					),
+					error,
+					failure: "spawn",
+					spawnFailure: classifySpawnFailureSync(error, {
+						command,
+						cwd: options?.cwd,
+					}),
 				};
 			}
 			spawnCmd = `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\cmd.exe`;
@@ -1377,11 +1618,15 @@ export function safeSpawn(
 			windowsVerbatimArguments,
 		});
 
+		const spawnFailure = result.error
+			? classifySpawnFailureSync(result.error, { command, cwd: options?.cwd })
+			: undefined;
 		return {
 			stdout: result.stdout?.toString() || "",
 			stderr: result.stderr?.toString() || "",
 			status: result.status,
 			error: result.error,
+			...(spawnFailure ? { failure: "spawn" as const, spawnFailure } : {}),
 		};
 	}
 
@@ -1399,11 +1644,15 @@ export function safeSpawn(
 		windowsHide: true,
 	});
 
+	const spawnFailure = result.error
+		? classifySpawnFailureSync(result.error, { command, cwd: options?.cwd })
+		: undefined;
 	return {
 		stdout: result.stdout?.toString() || "",
 		stderr: result.stderr?.toString() || "",
 		status: result.status,
 		error: result.error,
+		...(spawnFailure ? { failure: "spawn" as const, spawnFailure } : {}),
 	};
 }
 

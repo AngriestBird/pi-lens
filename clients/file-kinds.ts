@@ -23,6 +23,7 @@ export type FileKind =
 	| "gleam" // Gleam
 	| "go" // Go
 	| "haskell" // Haskell
+	| "helm-template" // Helm Go-template helper
 	| "html" // HTML
 	| "java" // Java
 	| "json" // JSON
@@ -131,6 +132,9 @@ export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
 	haskell: [
 		".hs",
 		".lhs",
+	],
+	"helm-template": [
+		".tpl",
 	],
 	html: [
 		".htm",
@@ -373,6 +377,7 @@ export const CODE_KINDS: ReadonlySet<FileKind> = new Set<FileKind>([
 	"gleam",
 	"go",
 	"haskell",
+	"helm-template",
 	"java",
 	"jsts",
 	"kotlin",
@@ -461,6 +466,7 @@ export function getFileKindLabel(kind: FileKind): string {
 		lua: "Lua",
 		zig: "Zig",
 		haskell: "Haskell",
+		"helm-template": "Helm template",
 		elixir: "Elixir",
 		gleam: "Gleam",
 		ocaml: "OCaml",
@@ -536,6 +542,7 @@ export function getLanguageId(kind: FileKind): string {
 		lua: "lua",
 		zig: "zig",
 		haskell: "haskell",
+		"helm-template": "helm",
 		elixir: "elixir",
 		gleam: "gleam",
 		ocaml: "ocaml",

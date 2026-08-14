@@ -249,7 +249,22 @@ export function createPiMock(
  * `ui.notify(...)` for assertions.
  */
 export function makeCtx(
-	overrides: Partial<{ cwd: string; sessionId: string }> = {},
+	overrides: Partial<{
+		cwd: string;
+		sessionId: string;
+		/**
+		 * #1334 S5: host project-trust decision. Omit entirely to simulate an
+		 * older host with no `isProjectTrusted` on the ctx — pi-lens must then
+		 * behave exactly as it did before the trust gate existed.
+		 */
+		isProjectTrusted: boolean;
+		/**
+		 * #1334 S2: the host run mode (`ExtensionContext.mode`). Defaults to
+		 * "tui". Pass `null` to simulate an older host with NO `mode` field —
+		 * pi-lens must then behave exactly as it did before mode awareness.
+		 */
+		mode: "tui" | "rpc" | "json" | "print" | null;
+	}> = {},
 ): MockCtx {
 	const notifications: CapturedNotification[] = [];
 	const statusCalls: CapturedStatus[] = [];
@@ -297,6 +312,21 @@ export function makeCtx(
 		getSystemPrompt: () => "",
 		waitForIdle: async () => {},
 	};
+
+	// Only present when the test asked for it — an absent accessor is the
+	// "older host, no trust surface" case pi-lens must fail open on (#1334 S5).
+	if (overrides.isProjectTrusted !== undefined) {
+		(ctx as Record<string, unknown>).isProjectTrusted = () =>
+			overrides.isProjectTrusted;
+	}
+
+	// `mode: null` means "older host, no mode field at all" — delete it rather
+	// than leaving a null the feature detection would have to special-case.
+	if (overrides.mode === null) {
+		delete (ctx as Record<string, unknown>).mode;
+	} else if (overrides.mode !== undefined) {
+		(ctx as Record<string, unknown>).mode = overrides.mode;
+	}
 
 	return ctx as unknown as MockCtx;
 }

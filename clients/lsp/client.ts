@@ -8,6 +8,7 @@
  * - Request/response handling
  */
 
+import { logExtension } from "../extension-log.js";
 import { spawn as nodeSpawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { access, readFile } from "node:fs/promises";
@@ -94,6 +95,13 @@ export interface LSPDiagnostic {
 	};
 	code?: string | number;
 	source?: string;
+}
+
+export interface LSPPullFailure {
+	timestamp: number;
+	method: "textDocument/diagnostic" | "workspace/diagnostic";
+	code?: number | string;
+	message: string;
 }
 
 export interface LSPLocation {
@@ -257,6 +265,8 @@ export interface LSPClientInfo {
 	getExitedAt: () => number | undefined;
 	/** Last N lines of server stderr for diagnostics */
 	recentStderr: (lines?: number) => string;
+	/** Bounded operational pull failures; unsupported-method errors are omitted. */
+	getPullFailureHistory?: () => LSPPullFailure[];
 	/** Pre-request health check — returns error string if process is dead */
 	checkAlive: () => string | undefined;
 	/**
@@ -402,6 +412,8 @@ export interface LSPClientInfo {
 	documentSymbol(filePath: string): Promise<LSPSymbol[]>;
 	/** Whether this exact document has already been opened on the server. */
 	isDocumentOpen(filePath: string): boolean;
+	/** Whether this client currently has an LSP request in flight. */
+	isBusy?(): boolean;
 	/** URI spelling used when this document was opened. */
 	getDocumentUri(filePath: string): string | undefined;
 	/** Close an open document, if present, without opening or spawning anything. */
@@ -651,6 +663,8 @@ export interface LSPClientState {
 	readonly pushDiagnosticTimestamps: Map<string, number>;
 	readonly documentPullDiagnostics: Map<string, LSPDiagnostic[]>;
 	readonly documentPullDiagnosticTimestamps: Map<string, number>;
+	/** Most recent operational pull failures, capped to avoid unbounded telemetry. */
+	readonly pullFailureHistory: LSPPullFailure[];
 	readonly pendingDiagnostics: Map<string, ReturnType<typeof setTimeout>>;
 	readonly diagnosticEmitter: EventEmitter;
 	diagnosticsVersion: number;
@@ -697,6 +711,8 @@ export interface LSPClientState {
 		}
 	>;
 	readonly openDocuments: Set<string>;
+	/** Paths explicitly closed during this client lifetime; late publishes are dropped. */
+	readonly closedDocuments?: Set<string>;
 	/** Original URI spelling for each open document; path keys are normalized. */
 	readonly openDocumentUris?: Map<string, string>;
 	readonly pendingOpens: Set<string>;
@@ -1164,12 +1180,19 @@ export function setupIncomingHandlers(
 		}) => {
 			const filePath = uriToPath(params.uri);
 			const normalizedPath = normalizeMapKey(filePath);
+			// A server can flush a queued publish after didClose during teardown.
+			// Do not resurrect diagnostics or their content binding for a document
+			// that is no longer open on this client.
+			if (state.closedDocuments?.has(normalizedPath)) return;
 			const newDiags = normalizeLspDiagnostics(params.diagnostics || []);
 			const docVersion = params.version;
 			if (PUB_DEBUG) {
-				console.error(
-					`[lsp-pub] server=${state.serverId} pubVersion=${docVersion} docVersion=${state.documentVersions?.get(normalizedPath)} diags=${newDiags.length}`,
-				);
+				// #1333: PUB_DEBUG gate preserved; sink is extension.log.
+				logExtension({
+					subsystem: "lsp-pub",
+					level: "debug",
+					message: `server=${state.serverId} pubVersion=${docVersion} docVersion=${state.documentVersions?.get(normalizedPath)} diags=${newDiags.length}`,
+				});
 			}
 			const strategy = getStrategy(state.serverId);
 			// Record the document version these diagnostics were computed against
@@ -1473,7 +1496,10 @@ async function clientRequestPullDiagnostics(
 			Math.max(1, Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs)),
 		);
 
-		if (!report) return { status: "unavailable" };
+		if (!report) {
+			recordPullFailure(state, "textDocument/diagnostic", new Error("empty response"));
+			return { status: "unavailable" };
+		}
 
 		const now = Date.now();
 		// #1104: the fingerprint of the content we last sent for this document —
@@ -1539,8 +1565,44 @@ async function clientRequestPullDiagnostics(
 		return totalCount > 0
 			? { status: "found", count: totalCount }
 			: { status: "clean" };
-	} catch {
+	} catch (err) {
+		recordPullFailure(state, "textDocument/diagnostic", err);
 		return { status: "unavailable" };
+	}
+}
+
+const PULL_FAILURE_HISTORY_LIMIT = 10;
+
+function recordPullFailure(
+	state: LSPClientState,
+	method: LSPPullFailure["method"],
+	error: unknown,
+): void {
+	const candidate = error as { code?: unknown; message?: unknown };
+	const message = typeof candidate.message === "string" ? candidate.message : "";
+	const unsupportedMessage = /^(?:method not found|unknown method|unsupported method)(?::|$)/i;
+	if (
+		candidate.code === -32601 ||
+		candidate.code === "-32601" ||
+		unsupportedMessage.test(message.trim())
+	)
+		return;
+	state.pullFailureHistory.push({
+		timestamp: Date.now(),
+		method,
+		...(typeof candidate.code === "number" || typeof candidate.code === "string"
+			? { code: candidate.code }
+			: {}),
+		message:
+			typeof candidate.message === "string"
+				? candidate.message
+				: String(error),
+	});
+	if (state.pullFailureHistory.length > PULL_FAILURE_HISTORY_LIMIT) {
+		state.pullFailureHistory.splice(
+			0,
+			state.pullFailureHistory.length - PULL_FAILURE_HISTORY_LIMIT,
+		);
 	}
 }
 
@@ -1638,7 +1700,8 @@ export async function clientRequestWorkspaceDiagnostics(
 			out.push({ filePath, diagnostics, contentHash });
 		}
 		return out;
-	} catch {
+	} catch (err) {
+		recordPullFailure(state, "workspace/diagnostic", err);
 		return undefined;
 	}
 }
@@ -1854,6 +1917,7 @@ export async function handleNotifyOpen(
 	recordSentContent(state, normalizedPath, 0, content);
 	state.pendingOpens.delete(normalizedPath);
 	state.openDocuments.add(normalizedPath);
+	state.closedDocuments?.delete(normalizedPath);
 	state.openDocumentUris?.set(normalizedPath, uri);
 }
 
@@ -1889,6 +1953,26 @@ export async function handleNotifyChange(
 		contentChanges: [{ text: content }],
 	});
 	recordSentContent(state, normalizedPath, version, content);
+}
+
+/** Close a document through the same lifecycle path exposed by the client. */
+export async function closeDocument(
+	state: LSPClientState,
+	filePath: string,
+): Promise<void> {
+	if (!isClientAlive(state)) return;
+	const normalizedPath = normalizeMapKey(filePath);
+	if (!state.openDocuments.has(normalizedPath)) return;
+	await safeSendNotification(state.connection, "textDocument/didClose", {
+		textDocument: {
+			uri: state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href,
+		},
+	});
+	state.openDocuments.delete(normalizedPath);
+	state.closedDocuments?.add(normalizedPath);
+	state.openDocumentUris?.delete(normalizedPath);
+	state.documentVersions.delete(normalizedPath);
+	clearDiagnosticsForPath(state, normalizedPath);
 }
 
 export async function clientShutdown(
@@ -2400,6 +2484,7 @@ export async function createLSPClient(options: {
 		pushDiagnosticTimestamps: new Map(),
 		documentPullDiagnostics: new Map(),
 		documentPullDiagnosticTimestamps: new Map(),
+		pullFailureHistory: [],
 		pendingDiagnostics: new Map(),
 		diagnosticEmitter,
 		diagnosticsVersion: 0,
@@ -2410,6 +2495,7 @@ export async function createLSPClient(options: {
 		pullResultIds: new Map(),
 		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
+		closedDocuments: new Set(),
 		openDocumentUris: new Map(),
 		pendingOpens: new Set(),
 		// these are filled in after initialize — cast to avoid two-phase init
@@ -2571,6 +2657,11 @@ export async function createLSPClient(options: {
 
 		/** Last N lines of server stderr for diagnostics. */
 		recentStderr: (lines?: number) => recentStderr(lines),
+		getPullFailureHistory: () =>
+			state.pullFailureHistory.map((entry) => ({
+				...entry,
+				message: entry.message.slice(0, 200),
+			})),
 
 		/** Pre-request health check — returns error string if dead. */
 		checkAlive: () => checkProcessAlive(),
@@ -2794,6 +2885,10 @@ export async function createLSPClient(options: {
 			return state.openDocuments.has(normalizeMapKey(filePath));
 		},
 
+		isBusy() {
+			return (activeRequestsByConnection.get(connection) ?? 0) > 0;
+		},
+
 		getDocumentUri(filePath) {
 			return state.openDocumentUris?.get(normalizeMapKey(filePath));
 		},
@@ -2857,20 +2952,7 @@ export async function createLSPClient(options: {
 			return result ? await normalizeClientWorkspaceEdit(state, result) : null;
 		},
 
-		async closeDocument(filePath) {
-			if (!isClientAlive(state)) return;
-			const normalizedPath = normalizeMapKey(filePath);
-			if (!state.openDocuments.has(normalizedPath)) return;
-			await safeSendNotification(state.connection, "textDocument/didClose", {
-				textDocument: {
-					uri: state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href,
-				},
-			});
-			state.openDocuments.delete(normalizedPath);
-			state.openDocumentUris?.delete(normalizedPath);
-			state.documentVersions.delete(normalizedPath);
-			clearDiagnosticsForPath(state, normalizedPath);
-		},
+		closeDocument: (filePath) => closeDocument(state, filePath),
 
 		async willRenameFiles(oldFilePath, newFilePath) {
 			const result = await navRequest<LSPWorkspaceEdit>(
@@ -2971,6 +3053,8 @@ async function safeSendNotification(
 	}
 }
 
+const activeRequestsByConnection = new WeakMap<MessageConnection, number>();
+
 // Helper to safely send requests - catches stream destruction
 async function safeSendRequest<T>(
 	connection: MessageConnection,
@@ -3004,6 +3088,10 @@ async function safeSendRequest<T>(
 				)
 			: connection.sendRequest(method as never, params as never);
 
+	activeRequestsByConnection.set(
+		connection,
+		(activeRequestsByConnection.get(connection) ?? 0) + 1,
+	);
 	try {
 		// One safe retry on ContentModified (-32801): the document changed under
 		// us, so the server discarded the request. A single retry beats returning
@@ -3030,6 +3118,9 @@ async function safeSendRequest<T>(
 			}
 		}
 	} finally {
+		const remaining = (activeRequestsByConnection.get(connection) ?? 1) - 1;
+		if (remaining > 0) activeRequestsByConnection.set(connection, remaining);
+		else activeRequestsByConnection.delete(connection);
 		if (signal && onAbort) signal.removeEventListener("abort", onAbort);
 		tokenSource?.dispose();
 	}

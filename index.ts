@@ -1,7 +1,26 @@
-import "./clients/startup-marker.js";
+import "./clients/console-guard-install.js";
+import { installConsoleGuard, logExtension } from "./clients/extension-log.js";
+import { wireUserNotifier } from "./clients/user-notify.js";
+import {
+	getDegradationSummary,
+	recordDegradation,
+} from "./clients/degradation-ledger.js";
+import {
+	adoptProjectTrustFromPorts,
+	assertInstallAllowed,
+	readProjectTrustFromContext,
+} from "./clients/project-trust.js";
+import {
+	type ExtensionRunMode,
+	modeSuppressionNote,
+	readExtensionMode,
+	suppressesUserNotify,
+	supportsTuiWidget,
+} from "./clients/extension-mode.js";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createDefaultHostPorts, type HostPorts } from "./clients/host-ports.js";
 import { AstGrepClient } from "./clients/ast-grep-client.js";
 import { loadBootstrapClients } from "./clients/bootstrap.js";
 import { CacheManager } from "./clients/cache-manager.js";
@@ -19,6 +38,9 @@ import {
 } from "./clients/widget-state.js";
 import { selectLspStatus } from "./clients/lsp-status.js";
 import type { PersistedReadGuardState } from "./clients/read-guard.js";
+import { registerReadBridge } from "./clients/read-bridge.js";
+import { isExternalOrVendorFile } from "./clients/path-utils.js";
+import { isPathIgnoredByProject } from "./clients/file-utils.js";
 import {
 	dropStaleFiles,
 	loadSessionState,
@@ -43,6 +65,7 @@ import {
 	resolvePiLensFlagWithSource,
 } from "./clients/lens-config.js";
 import { LENS_FLAGS } from "./clients/lens-flag-registry.js";
+import { wrapToolsForCompactLine } from "./clients/tool-render.js";
 import { loadPiLensProjectConfig } from "./clients/project-lens-config.js";
 import { initLensEventsGetter } from "./clients/lens-events.js";
 import { wireBusEmitterGetter } from "./clients/bus-publish.js";
@@ -192,6 +215,48 @@ function dbg(msg: string) {
 }
 
 /**
+ * The most recent event ctx, kept ONLY so `clients/user-notify.ts` can resolve
+ * a live `ctx.ui.notify` at delivery time (#1333). Never dereferenced eagerly
+ * and never captured by a long-lived closure — a session replacement swaps the
+ * ctx, and `notifyUserDegradation` swallows the stale-ctx throw.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
+let latestEventCtx: any;
+
+/** Refresh the notify target from whichever event ctx just arrived. */
+// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
+function rememberEventCtx(ctx: any): void {
+	if (ctx) latestEventCtx = ctx;
+}
+
+/**
+ * Mode-aware `ctx.ui.notify` (#1334 S2). Every user-facing notify in this file
+ * goes through here so terminal ownership is derived from the HOST's
+ * `ctx.mode`, not from pi-lens guessing. In "print"/"json" the message is
+ * logged instead of rendered — those modes are one-shot pipelines whose stdout
+ * belongs to the run's actual output, not to extension chatter. "tui", "rpc"
+ * and an older host with no `mode` field all notify exactly as before.
+ */
+function notifyUi(
+	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
+	ctx: any,
+	message: string,
+	level: "info" | "warning" | "error" = "info",
+): void {
+	const mode = readExtensionMode(ctx);
+	if (suppressesUserNotify(mode)) {
+		recordDegradation({
+			kind: "mode-suppression",
+			subject: "ctx.ui.notify",
+			reason: modeSuppressionNote(mode),
+		});
+		dbg(`notify ${modeSuppressionNote(mode)}: ${message.split("\n")[0]}`);
+		return;
+	}
+	ctx?.ui?.notify?.(message, level);
+}
+
+/**
  * Best-effort read of the STABLE pi session id off an event ctx
  * (`ctx.sessionManager.getSessionId()`), the same accessor #473's
  * session_start handling and #791's deferred-format ownership tagging both
@@ -209,6 +274,77 @@ function getStableSessionId(ctx: unknown): string | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+export interface CreateHostPortsOptions {
+	getContext: () => unknown;
+	getProjectRoot?: () => string | undefined;
+	getRenderInvalidator?: () => (() => void) | undefined;
+}
+
+/** Assemble pi's live ExtensionAPI/context projections behind HostPorts. */
+export function createHostPorts(
+	pi: ExtensionAPI,
+	options: CreateHostPortsOptions,
+): HostPorts {
+	const context = () => options.getContext() as any;
+	const currentMode = () => readExtensionMode(context());
+	const emit = (channel: string, payload: unknown): void => {
+		const bus = pi.events;
+		bus?.emit?.call(bus, channel, payload);
+	};
+	const activeTools = pi as unknown as {
+		getActiveTools?: () => string[];
+		setActiveTools?: (names: string[]) => void;
+	};
+	return createDefaultHostPorts({
+		notify: {
+			user(message, level) {
+				const mode = currentMode();
+				if (mode === "print" || mode === "json") {
+					// #1366: suppressed notices are still LEDGERED so headless
+					// operators can see them in pilens_health.
+					recordDegradation({
+						kind: "mode-suppression",
+						subject: "user degradation notice",
+						reason: modeSuppressionNote(mode),
+					});
+					return;
+				}
+				context()?.ui?.notify?.(message, level ?? "warning");
+			},
+		},
+		trust: { isProjectTrusted: () => readProjectTrustFromContext(context()) },
+		mode: {
+			current: currentMode,
+			supportsTuiWidget: () => supportsTuiWidget(currentMode()),
+			suppressesUserNotify: () => suppressesUserNotify(currentMode()),
+		},
+		log: {
+			extension: logExtension,
+			debug: (message, metadata) =>
+				logExtension({ subsystem: "host", level: "debug", message, metadata }),
+			// DECLARATION-ONLY in S2 (#1367 review): no production code consumes
+			// ports.log.sink yet -- the 13 subsystem loggers still own their
+			// NDJSON files directly. Migrating them onto this port (routing to
+			// their per-subsystem files, NOT extension.log) is S4 scope; this
+			// placeholder exists so the interface is complete for contract tests.
+			sink: (subsystem) => (entry) =>
+				logExtension({ subsystem, level: "debug", message: "host sink entry", metadata: { entry } }),
+		},
+		emit: { bus: emit, lens: emit },
+		status: { set: (name, value) => context()?.ui?.setStatus?.(name, value) },
+		spawn: { abortSignal: () => context()?.signal, isAllowed: assertInstallAllowed },
+		render: { invalidate: () => options.getRenderInvalidator?.()?.() },
+		session: { id: () => getStableSessionId(context()) },
+		workspace: { cwd: () => context()?.cwd, projectRoot: () => options.getProjectRoot?.() },
+		flags: { get: (name) => pi.getFlag(name) },
+		tools: {
+			has: async (name) => typeof (pi as unknown as { getTool?: (tool: string) => unknown }).getTool?.(name) !== "undefined",
+			getActive: () => activeTools.getActiveTools?.() ?? [],
+			setActive: (names) => activeTools.setActiveTools?.(names),
+		},
+	});
 }
 
 // Log how long pi took to load pi-lens — the jiti transpile of every module is
@@ -270,6 +406,8 @@ const runtime = new RuntimeCoordinator();
 // ONCE (flag below, same pattern as registerCascadeTierReconcileTask) and
 // have it read the CURRENT activation's pi/flag closures through this
 // holder, refreshed on every activation — never a stale captured `pi`.
+let _readBridgeRegistered = false;
+let _readBridgeGetFlag: ((name: string) => boolean | string | undefined) | undefined;
 let _turnSummaryEmitRegistered = false;
 let _turnSummaryEmitCtx:
 	| {
@@ -346,10 +484,33 @@ function cleanStaleTsBuildInfo(cwd: string): string[] {
 // --- Extension ---
 
 export default function (pi: ExtensionAPI) {
+	let renderInvalidator: (() => void) | undefined;
+	const hostPorts = createHostPorts(pi, {
+		getContext: () => latestEventCtx,
+		getProjectRoot: () => runtime.projectRoot,
+		getRenderInvalidator: () => renderInvalidator,
+	});
+	// #1333 — defense in depth, the pi-side mirror of `mcp/server.ts`'s
+	// `console.log = console.error` guard. pi owns the terminal (raw mode +
+	// cursor-addressed diff repaints), so a raw byte from ANY transitively
+	// loaded module desyncs its screen model. pi-lens's own sites are migrated
+	// to real ndjson sinks; this net catches everything else. The REAL install
+	// happens at import time via `clients/console-guard-install.js` (index.ts's
+	// first import) so module-init writes are covered too; this call is an
+	// idempotent re-install for tests that invoke the factory directly. No-op
+	// under test mode and under `PI_LENS_CONSOLE_GUARD=0`.
+	installConsoleGuard();
 	initI18n(pi);
-	const getLiveEvents = () => pi.events;
-	initLensEventsGetter(getLiveEvents);
-	const getLiveEmit = () => pi.events?.emit?.bind(pi.events);
+	// #1333 HUMAN channel: user-facing degradations found deep in clients/
+	// (invalid config, offline grammar fetch, WASM abort) reach the user
+	// through the host's own render path. Per the #338/#798 detached-callback
+	// rule the notifier is resolved from the LATEST event ctx at delivery time,
+	// never captured once — a session replacement invalidates the old ctx.ui.
+	// #1334 S2: the ports notifier owns mode suppression + live-ctx resolution
+	// (per-call, never captured -- the #338/#798 detached-callback rule).
+	wireUserNotifier(hostPorts);
+	initLensEventsGetter(() => ({ emit: hostPorts.emit.lens }));
+	const getLiveEmit = () => hostPorts.emit.bus;
 	wireBusEmitterGetter(getLiveEmit);
 	wireDiagnosticsBusEmitterGetter(getLiveEmit);
 	wireDispositionBusEmitterGetter(getLiveEmit);
@@ -485,6 +646,25 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	let lensEnabled = !getLensFlag("no-lens");
+
+	// Read-bridge: refresh the flag getter on every factory activation so the
+	// live getLensFlag closure is always used (same pattern as _turnSummaryEmitCtx).
+	// Register the singleton once — subsequent activations only refresh the getter.
+	_readBridgeGetFlag = getLensFlag;
+	if (!_readBridgeRegistered) {
+		_readBridgeRegistered = true;
+		registerReadBridge({
+			getReadGuard: () => runtime.readGuard,
+			getTurnIndex: () => runtime.turnIndex,
+			peekWriteIndex: () => runtime.peekWriteIndex(),
+			isRecordable(filePath: string): boolean {
+				if (_readBridgeGetFlag?.("no-read-guard")) return false;
+				if (isPathIgnoredByProject(filePath, runtime.projectRoot, false)) return false;
+				if (isExternalOrVendorFile(filePath, runtime.projectRoot)) return false;
+				return true;
+			},
+		});
+	}
 	// Automatic context injection (the `context` hook). Independent of lensEnabled
 	// so tools/LSP/read-guard/formatting keep running when it is off. Precedence:
 	// env override → CLI flag → global config, all resolved inside getLensFlag
@@ -517,22 +697,41 @@ export default function (pi: ExtensionAPI) {
 		options?: { placement: "belowEditor" },
 	) => void;
 
-	function mountLensWidget(ui: LensWidgetUi | undefined): boolean {
+	/**
+	 * #1334 S2: the widget is a terminal-only custom component. The host's own
+	 * types say so — *"Use `"tui"` to guard terminal-only UI such as custom
+	 * components"* — so mounting is gated on the mode pi reports, not attempted
+	 * blindly. `rpc` is excluded despite `hasUI: true`: dialogs travel over the
+	 * protocol there, a belowEditor component does not. An older host with no
+	 * `mode` field reads "unknown" and mounts exactly as before.
+	 */
+	function mountLensWidget(
+		ui: LensWidgetUi | undefined,
+		mode: ExtensionRunMode,
+	): boolean {
+		if (!supportsTuiWidget(mode)) {
+			dbg(`widget mount ${modeSuppressionNote(mode)}`);
+			return false;
+		}
 		if (typeof ui?.setWidget !== "function") return false;
 		const setWidget = ui.setWidget as LensWidgetSetWidget;
 		setWidget(
 			"pi-lens",
 			(tui: LensWidgetTui, theme: LensWidgetTheme) => {
+				renderInvalidator = () => tui.requestRender();
 				setRenderCallback(() => {
 					scheduleStaleReconcile();
-					tui.requestRender();
+					hostPorts.render.invalidate();
 				});
 				return {
 					render: (width: number) => {
 						scheduleStaleReconcile();
 						return renderWidget(width, theme);
 					},
-					invalidate: () => setRenderCallback(() => {}),
+					invalidate: () => {
+						renderInvalidator = undefined;
+						setRenderCallback(() => {});
+					},
 				};
 			},
 			{ placement: "belowEditor" },
@@ -541,6 +740,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function unmountLensWidget(ui: LensWidgetUi | undefined): boolean {
+		renderInvalidator = undefined;
 		setRenderCallback(() => {});
 		if (typeof ui?.setWidget !== "function") return false;
 		const setWidget = ui.setWidget as LensWidgetSetWidget;
@@ -573,7 +773,8 @@ export default function (pi: ExtensionAPI) {
 			"Toggle pi-lens on/off for the current session. Usage: /lens-toggle",
 		handler: async (_args, ctx) => {
 			lensEnabled = !lensEnabled;
-			ctx.ui.notify(
+			notifyUi(
+				ctx,
 				lensEnabled
 					? "pi-lens enabled for this session."
 					: "pi-lens disabled for this session. Run /lens-toggle again to resume.",
@@ -587,7 +788,8 @@ export default function (pi: ExtensionAPI) {
 			"Toggle automatic context injection on/off for the current session (tools/LSP/read-guard/formatting stay active). Usage: /lens-context-toggle",
 		handler: async (_args, ctx) => {
 			contextInjectionEnabled = !contextInjectionEnabled;
-			ctx.ui.notify(
+			notifyUi(
+				ctx,
 				contextInjectionEnabled
 					? "pi-lens context injection enabled — findings will be added to the next turn."
 					: "pi-lens context injection disabled — findings are still cached (lens_diagnostics, /lens-health) but not added to model context.",
@@ -601,11 +803,24 @@ export default function (pi: ExtensionAPI) {
 			"Show or hide the pi-lens diagnostics widget below the editor. Usage: /lens-widget-toggle",
 		handler: async (_args, ctx) => {
 			const nextVisible = !lensWidgetVisible;
+			const mode = readExtensionMode(ctx);
+			// #1334 S2: distinguish "this pi is too old" from "this run mode has
+			// no terminal to draw into" — the old single message blamed the pi
+			// version for what is really a mode constraint.
+			if (nextVisible && !supportsTuiWidget(mode)) {
+				notifyUi(
+					ctx,
+					`pi-lens widget needs an interactive TUI — unavailable in "${mode}" mode.`,
+					"warning",
+				);
+				return;
+			}
 			const changed = nextVisible
-				? mountLensWidget(ctx.ui)
+				? mountLensWidget(ctx.ui, mode)
 				: unmountLensWidget(ctx.ui);
 			if (!changed) {
-				ctx.ui.notify(
+				notifyUi(
+					ctx,
 					"pi-lens widget is not supported by this pi version.",
 					"warning",
 				);
@@ -613,7 +828,8 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			lensWidgetVisible = nextVisible;
-			ctx.ui.notify(
+			notifyUi(
+				ctx,
 				lensWidgetVisible
 					? "pi-lens widget shown. Run /lens-widget-toggle to hide it."
 					: "pi-lens widget hidden. Run /lens-widget-toggle to show it.",
@@ -656,7 +872,7 @@ export default function (pi: ExtensionAPI) {
 				summary,
 			];
 
-			ctx.ui.notify(lines.join("\n"), "info");
+			notifyUi(ctx, lines.join("\n"), "info");
 		},
 	});
 
@@ -696,9 +912,10 @@ export default function (pi: ExtensionAPI) {
 						"Graph exceeded the map's node cap — showing the highest-degree files only (see the in-page note).",
 					);
 				}
-				ctx.ui.notify(lines.join("\n"), "info");
+				notifyUi(ctx, lines.join("\n"), "info");
 			} catch (err) {
-				ctx.ui.notify(
+				notifyUi(
+					ctx,
 					`Failed to generate the project map: ${err instanceof Error ? err.message : String(err)}`,
 					"error",
 				);
@@ -821,7 +1038,10 @@ export default function (pi: ExtensionAPI) {
 			// Memory attribution (#1123 item 2) — reuses the same O(1) accessors the
 			// periodic latency.log `memory_sample` uses; see clients/memory-sampler.ts.
 			try {
-				lines.push("", formatMemoryHealthLine(buildMemorySample(runtime.wordIndex)));
+				lines.push(
+					"",
+					formatMemoryHealthLine(buildMemorySample(runtime.wordIndex)),
+				);
 			} catch {
 				// best-effort — a health-line render must never break /lens-health
 			}
@@ -909,7 +1129,7 @@ export default function (pi: ExtensionAPI) {
 				lines.push("", slopScoreLine);
 			}
 
-			ctx.ui.notify(lines.join("\n"), "info");
+			notifyUi(ctx, lines.join("\n"), "info");
 		},
 	});
 
@@ -923,9 +1143,18 @@ export default function (pi: ExtensionAPI) {
 				const report = await collectLatencyPerformance({
 					sessionStartedAt: runtime.sessionStartedAt,
 				});
-				ctx.ui.notify(renderLatencyPerformanceReport(report), "info");
+				const degradations = getDegradationSummary();
+				const degradationText = degradations.length
+					? `\n\nDegradations:\n${degradations.map((group) => `  ${group.kind}: ${group.count} (${group.latestReasons.at(-1)?.subject}: ${group.latestReasons.at(-1)?.reason})`).join("\n")}`
+					: "";
+				notifyUi(
+					ctx,
+					`${renderLatencyPerformanceReport(report)}${degradationText}`,
+					"info",
+				);
 			} catch (err) {
-				ctx.ui.notify(
+				notifyUi(
+					ctx,
 					`Failed to read performance telemetry: ${err instanceof Error ? err.message : String(err)}`,
 					"error",
 				);
@@ -1028,7 +1257,7 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 
-			ctx.ui.notify(lines.join("\n"), "info");
+			notifyUi(ctx, lines.join("\n"), "info");
 		},
 	});
 
@@ -1038,7 +1267,7 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const [rawTarget] = normalizeCommandArgs(args);
 			if (!rawTarget) {
-				ctx.ui.notify("Usage: /lens-allow-edit <path>", "warning");
+				notifyUi(ctx, "Usage: /lens-allow-edit <path>", "warning");
 				return;
 			}
 
@@ -1046,7 +1275,8 @@ export default function (pi: ExtensionAPI) {
 				? rawTarget
 				: path.resolve(ctx.cwd ?? runtime.projectRoot, rawTarget);
 			runtime.readGuard.addExemption(targetPath);
-			ctx.ui.notify(
+			notifyUi(
+				ctx,
 				`Read guard override armed for next edit: ${targetPath}`,
 				"info",
 			);
@@ -1167,7 +1397,22 @@ export default function (pi: ExtensionAPI) {
 		LAZY_TOOL_CATALOG,
 	);
 
-	for (const tool of [...alwaysActiveTools, activateToolsTool, ...lazyTools]) {
+	// #1327: opt-in compact one-line tool rendering. Read once at load (like
+	// the other session-scoped flags above) rather than per-render, so the
+	// flag-off path registers the ORIGINAL tool definitions untouched —
+	// byte-identical to pre-#1327 behavior (no renderCall/renderResult added
+	// or altered). Only tools that already define `renderResult` (every
+	// substantive pi-lens tool — see tools/render-compact.ts) are wrapped;
+	// the rest pass through wrapToolsForCompactLine unchanged.
+	const compactToolLineEnabled = getLensFlag("lens-compact-tool-line") === true;
+	const toolsToRegister = [
+		...alwaysActiveTools,
+		activateToolsTool,
+		...lazyTools,
+	];
+	for (const tool of compactToolLineEnabled
+		? wrapToolsForCompactLine(toolsToRegister as any)
+		: toolsToRegister) {
 		try {
 			pi.registerTool(tool as any);
 		} catch {
@@ -1213,9 +1458,28 @@ export default function (pi: ExtensionAPI) {
 	// --- Events ---
 
 	pi.on("session_start", async (event, ctx) => {
+		rememberEventCtx(ctx);
 		const sessionStartFiredAt = Date.now();
 		try {
 			dbg("session_start fired");
+
+			// #1334 S5: adopt the HOST's project-trust decision before anything
+			// below can auto-install a tool or spawn an LSP server. pi-lens is a
+			// CONSUMER of trust (`ctx.isProjectTrusted()`), never a handler of the
+			// `project_trust` event — answering that question on the user's behalf
+			// is the host's/user's job. Re-read here and on every turn_start because
+			// fork/reload/resume can change cwd and trust can change mid-session.
+			// Feature-detected:
+			// a host without the accessor yields "unknown" and nothing is gated.
+			const trustState = adoptProjectTrustFromPorts(hostPorts);
+			if (trustState !== "unknown") {
+				dbg(`session_start: project trust = ${trustState}`);
+			}
+			if (trustState === "untrusted") {
+				dbg(
+					"session_start: untrusted project — tool auto-install and LSP spawns are disabled for this session",
+				);
+			}
 
 			// Dynamic tooling (#pi 0.80.x+): deactivate the 5 situational tools
 			// (LAZY_TOOL_CATALOG) now that the extension has actually finished
@@ -1391,7 +1655,7 @@ export default function (pi: ExtensionAPI) {
 				bootstrapClientsStartedAt,
 				bootstrapClientsDurationMs,
 				getFlag: (name: string) => getLensFlag(name),
-				notify: (msg, level) => ctx.ui.notify(msg, level),
+				notify: (msg, level) => notifyUi(ctx, msg, level),
 				dbg,
 				log,
 				runtime,
@@ -1519,7 +1783,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (lensWidgetVisible) {
-				mountLensWidget(ctx.ui);
+				mountLensWidget(ctx.ui, readExtensionMode(ctx));
 			}
 		} catch (sessionErr) {
 			dbg(`session_start crashed: ${sessionErr}`);
@@ -1564,6 +1828,7 @@ export default function (pi: ExtensionAPI) {
 	// Real-time feedback on file writes/edits
 	// biome-ignore lint/suspicious/noExplicitAny: pi.on overload mismatch for tool_result event type
 	(pi as any).on("tool_result", async (event: any, ctx: any) => {
+		rememberEventCtx(ctx);
 		if (!lensEnabled) return;
 		updateRuntimeIdentityFromEvent(event);
 		// Publish this turn's abort signal so the dispatch's linter/type-check
@@ -1621,6 +1886,10 @@ export default function (pi: ExtensionAPI) {
 	// --- Turn end: batch jscpd/madge on collected files, then clear state ---
 	// Clear cascade snapshot at start of each new turn so stale data never leaks
 	pi.on("turn_start", (_event: any, ctx) => {
+		rememberEventCtx(ctx);
+		// Trust can change without a new session. Re-adopt before this turn can
+		// reach any install-capable or LSP-spawn path.
+		adoptProjectTrustFromPorts(hostPorts);
 		runtime.beginTurn();
 		clearLastAnalyzedStateCache();
 
@@ -1700,7 +1969,7 @@ export default function (pi: ExtensionAPI) {
 					getLensFlag(name, filePath),
 				getFlagSource: (name: string, filePath?: string) =>
 					getLensFlagSource(name, filePath),
-				notify: (msg, level) => ctx.ui.notify(msg, level),
+				notify: (msg, level) => notifyUi(ctx, msg, level),
 				dbg,
 				runtime,
 				cacheManager,
@@ -1759,7 +2028,10 @@ export default function (pi: ExtensionAPI) {
 					sessionSuspectedStalls += 1;
 				} else {
 					lastLoggedLoopWorstMs = loopMaxMs;
-					sessionWorstRealBlockMs = Math.max(sessionWorstRealBlockMs, loopMaxMs);
+					sessionWorstRealBlockMs = Math.max(
+						sessionWorstRealBlockMs,
+						loopMaxMs,
+					);
 				}
 			}
 			// Start a fresh per-turn occupancy window so the next turn's worst
@@ -1793,7 +2065,7 @@ export default function (pi: ExtensionAPI) {
 			if (shouldCheckSmellsThisTurn(runtime.turnIndex)) {
 				try {
 					for (const note of checkSmellsAndNoteOnce(countRecentSmells())) {
-						ctx.ui.notify(note, "warning");
+						notifyUi(ctx, note, "warning");
 					}
 				} catch {
 					// best-effort observability — never fail turn_end over this

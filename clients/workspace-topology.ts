@@ -80,6 +80,7 @@ export interface DirectoryMarkers {
 	pnpmWorkspaceYamlPath: string | undefined;
 	cargoTomlPath: string | undefined;
 	goWorkPath: string | undefined;
+	chartYamlPath: string | undefined;
 }
 
 interface DirCacheEntry {
@@ -168,6 +169,7 @@ export function getDirectoryMarkers(dir: string): DirectoryMarkers {
 		pnpmWorkspaceYamlPath: resolveMarker("pnpm-workspace.yaml"),
 		cargoTomlPath: resolveMarker("Cargo.toml"),
 		goWorkPath: resolveMarker("go.work"),
+		chartYamlPath: resolveMarker("Chart.yaml"),
 	};
 	dirMarkerCache.set(resolvedDir, { dirMtimeMs, markers });
 	return markers;

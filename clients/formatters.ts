@@ -9,6 +9,7 @@
  * Inspired by OpenCode's formatter.ts pattern
  */
 
+import { logExtension } from "./extension-log.js";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TERRAGRUNT_FILENAMES } from "./file-kinds.js";
@@ -19,6 +20,7 @@ import {
 import { logLatency } from "./latency-logger.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import { assertInstallAllowed } from "./project-trust.js";
 import {
 	getAutoInstallToolIdForFormatter,
 	getFormatterPolicyForFile,
@@ -30,6 +32,7 @@ import {
 	hasCmakeFormatConfig,
 	hasGoogleJavaFormatConfig,
 	hasKtfmtConfig,
+	hasKtlintConfig,
 	hasNearestPackageJsonDependency,
 	hasNearestPackageJsonField,
 	hasOcamlformatConfig,
@@ -52,6 +55,7 @@ export async function tryLazyInstallFormatterTool(
 	tool: "rubocop" | "rustfmt",
 	cwd: string,
 ): Promise<boolean> {
+	if (!assertInstallAllowed(`formatter lazy install: ${tool}`)) return false;
 	const attemptKey = `${tool}:${cwd}`;
 	if (_lazyInstallAttempts.has(attemptKey)) return false;
 	_lazyInstallAttempts.add(attemptKey);
@@ -64,9 +68,11 @@ export async function tryLazyInstallFormatterTool(
 		});
 		const ok = !res.error && res.status === 0;
 		if (!ok) {
-			console.error(
-				`[format] lazy-install rubocop failed: ${res.error?.message ?? res.stderr ?? "exit " + res.status}`,
-			);
+			logExtension({
+				subsystem: "format",
+				message: `lazy-install rubocop failed: ${res.error?.message ?? res.stderr ?? "exit " + res.status}`,
+				metadata: { tool: "rubocop", cwd },
+			});
 		}
 		return ok;
 	}
@@ -78,9 +84,11 @@ export async function tryLazyInstallFormatterTool(
 	});
 	const ok = !res.error && res.status === 0;
 	if (!ok) {
-		console.error(
-			`[format] lazy-install rustfmt failed: ${res.error?.message ?? res.stderr ?? "exit " + res.status}`,
-		);
+		logExtension({
+			subsystem: "format",
+			message: `lazy-install rustfmt failed: ${res.error?.message ?? res.stderr ?? "exit " + res.status}`,
+			metadata: { tool: "rustfmt", cwd },
+		});
 	}
 	return ok;
 }
@@ -118,15 +126,32 @@ export interface FormatterInfo {
 		cwd: string,
 	): Promise<ResolvedFormatterCommand>;
 	/**
-	 * Treat a nonzero exit as a formatting failure. Off by default: the
-	 * lint-autofix formatters (`rubocop -a`, `ktlint -F`, `standardrb --fix`,
-	 * `sqlfluff fix`) exit nonzero when offenses remain AFTER a successful
-	 * rewrite, and failing those would surface an error on every file with an
-	 * unfixable offense. Set it on pure formatters, where a nonzero exit means
-	 * the tool never ran — and an untouched file is otherwise indistinguishable
-	 * from "already formatted".
+	 * Opt OUT of exit-code strictness, with the justification as the value.
+	 *
+	 * `formatFile` is strict BY DEFAULT (#1337): a nonzero exit is a formatting
+	 * failure, because a formatter that never ran leaves the file byte-identical
+	 * and that is indistinguishable from "already formatted". The old default was
+	 * the reverse — opt-IN strictness — and it let `ruff format` reject invented
+	 * flags with exit 2 and report a clean no-op for a full release cycle (#1336).
+	 *
+	 * Set this ONLY for lint-autofix formatters, which exit nonzero when offenses
+	 * remain AFTER a successful rewrite (`rubocop -a`, `ktlint -F`,
+	 * `standardrb --fix`, `sqlfluff fix`); failing those would surface an error on
+	 * every file with an unfixable offense. The type is a string rather than a
+	 * boolean so the evidence is structurally required at the opt-out site — an
+	 * opt-out with no documented benign-nonzero mode cannot be written silently.
+	 * `tests/clients/dispatch/formatter-exit-code-posture.test.ts` pins the set.
 	 */
-	strictExitCode?: boolean;
+	lenientExitCode?: string;
+	/**
+	 * The EXACT nonzero statuses the documented benign mode covers (#1343
+	 * review): lenient tools distinguish "offenses remain after a successful
+	 * rewrite" (typically 1) from command/config/crash failure (typically 2+).
+	 * Required whenever `lenientExitCode` is set -- a lenient formatter
+	 * accepting ALL nonzero statuses would let a bad flag or crashed child
+	 * read as success (the #1336 bug surviving behind the lenient label).
+	 */
+	lenientStatuses?: number[];
 }
 
 export interface FormatterResult {
@@ -358,6 +383,8 @@ function hasExplicitFormatterConfig(
 			return hasGoogleJavaFormatConfig(cwd);
 		case "ktfmt":
 			return hasKtfmtConfig(cwd);
+		case "ktlint":
+			return hasKtlintConfig(cwd);
 		case "cljfmt":
 			return hasCljfmtConfig(cwd);
 		case "cmake-format":
@@ -399,32 +426,71 @@ async function indentationArgs(
 	if (tool === "prettier") {
 		return [indentation.style === "tab" ? "--use-tabs" : "--no-use-tabs", "--tab-width", String(indentation.width)];
 	}
+	if (tool === "ruff") {
+		// `ruff format` has NO --indent-style/--indent-width flags (it errors with
+		// "unexpected argument" and exits 2, which formatFile reported as a silent
+		// clean no-op back when exit-code strictness was opt-in). Style is pinned
+		// through inline TOML overrides instead (#1144 follow-up).
+		return [
+			"--config",
+			`indent-width=${indentation.width}`,
+			"--config",
+			`format.indent-style='${indentation.style}'`,
+		];
+	}
 	return ["--indent-style", indentation.style, "--indent-width", String(indentation.width)];
 }
 
+/**
+ * Every biome invocation must carry this. Biome exits 1 with "No files were
+ * processed in the specified paths" when the path is ignored by the repo's own
+ * biome.json or carries an extension biome does not handle — a benign outcome
+ * that, under #1337's strict default, would otherwise report a formatting
+ * failure on every edit under an ignored directory. Verified against biome
+ * 2.4.12: ignored path → exit 1, +flag → exit 0; unsupported extension → exit
+ * 1, +flag → exit 0; and a real syntax error still exits 1 WITH the flag, so
+ * strictness is preserved for actual failures.
+ *
+ * `clients/dispatch/runners/biome-check.ts:108` already passes this on the lint
+ * path; the formatter path did not, which is what made biome the one
+ * misclassified formatter in the #1337 audit.
+ */
+const BIOME_UNMATCHED_FLAG = "--no-errors-on-unmatched";
+
 export const biomeFormatter: FormatterInfo = {
 	name: "biome",
-	command: ["npx", "@biomejs/biome", "format", "--write", "$FILE"],
+	command: [
+		"npx",
+		"@biomejs/biome",
+		"format",
+		"--write",
+		BIOME_UNMATCHED_FLAG,
+		"$FILE",
+	],
 	async resolveCommand(filePath, cwd) {
 		const editorConfigFlag = (await hasEditorConfig(cwd))
 			? ["--use-editorconfig=true"]
 			: [];
 		const styleArgs = await indentationArgs(filePath, "biome", cwd);
 		if (styleArgs === null) return SKIP_FORMATTING;
+		const args = [
+			"format",
+			"--write",
+			BIOME_UNMATCHED_FLAG,
+			...editorConfigFlag,
+			...styleArgs,
+		];
 		const local = await findInNodeModules("biome", cwd);
-		if (local)
-			return [local, "format", "--write", ...editorConfigFlag, ...styleArgs, filePath];
+		if (local) return [local, ...args, filePath];
 		// Any package manager's global bin dir (npm/pnpm/yarn/bun) before we
 		// auto-install — catches a `pnpm add -g @biomejs/biome` PATH misses (#375).
 		const global = await findGlobalBinary("biome");
-		if (global)
-			return [global, "format", "--write", ...editorConfigFlag, ...styleArgs, filePath];
+		if (global) return [global, ...args, filePath];
 		const toolId = getAutoInstallToolIdForFormatter("biome");
 		if (!toolId) return null;
 		const { ensureTool } = await import("./installer/index.js");
 		const installed = await ensureTool(toolId);
-		if (installed)
-			return [installed, "format", "--write", ...editorConfigFlag, ...styleArgs, filePath];
+		if (installed) return [installed, ...args, filePath];
 		return null;
 	},
 	extensions: [
@@ -506,6 +572,11 @@ export const prettierFormatter: FormatterInfo = {
 export const oxfmtFormatter: FormatterInfo = {
 	name: "oxfmt",
 	command: ["oxfmt", "$FILE"],
+	// #1337 audit: oxfmt (and the `vp fmt --write` path) publish no exit-code
+	// table. `--write` is the default and `--check` is the separate verification
+	// mode, so there is no documented nonzero-on-reformat. Absent a documented
+	// benign-nonzero mode, it stays strict — the safe direction, since the failure
+	// mode of guessing wrong the other way is a silent no-op (#1336).
 	async resolveCommand(filePath, cwd) {
 		if (hasVitePlusConfig(cwd)) {
 			const localVp = await findInNodeModules("vp", cwd);
@@ -538,6 +609,10 @@ export const ruffFormatter: FormatterInfo = {
 	name: "ruff",
 	command: ["ruff", "format", "$FILE"],
 	extensions: [".py", ".pyi"],
+	// Strict (the #1337 default): `ruff format` exits 0 on a successful in-place
+	// rewrite and 2 on argument rejection / syntax error (verified, ruff 0.x:
+	// well-formed → 0, reformatted → 0, unparseable → 2). The exit-2 no-op is
+	// exactly what hid the bad --indent-style flags for a full release cycle.
 	async resolveCommand(filePath, cwd) {
 		const styleArgs = await indentationArgs(filePath, "ruff", cwd);
 		if (styleArgs === null) return SKIP_FORMATTING;
@@ -579,6 +654,12 @@ export const sqlfluffFormatter: FormatterInfo = {
 	name: "sqlfluff",
 	command: ["sqlfluff", "fix", "--force", "$FILE"],
 	extensions: [".sql"],
+	lenientExitCode:
+		"lint-autofix: `sqlfluff fix` writes the corrected file and then exits 1 " +
+		"when unfixable violations remain (its documented exit codes are 0 = all " +
+		"clean, 1 = violations remain, 2 = command/config failure), so a nonzero " +
+		"exit routinely accompanies a successful rewrite.",
+	lenientStatuses: [1],
 	async resolveCommand(filePath, cwd) {
 		const venv = await findInVenv("sqlfluff", cwd);
 		if (venv) return [venv, "fix", "--force", filePath];
@@ -657,6 +738,9 @@ export const shfmtFormatter: FormatterInfo = {
 export const nixfmtFormatter: FormatterInfo = {
 	name: "nixfmt",
 	command: ["nixfmt", "$FILE"],
+	// #1337 audit: nixfmt's README documents in-place formatting but has no
+	// exit-code section and no change-detection mode, so nothing documents a
+	// benign nonzero. Strict by default (see oxfmt above for the rationale).
 	extensions: [".nix"],
 	async detect(_cwd: string) {
 		return (await which("nixfmt")) !== null;
@@ -702,6 +786,12 @@ export const ktlintFormatter: FormatterInfo = {
 	name: "ktlint",
 	command: ["ktlint", "-F", "$FILE"],
 	extensions: [".kt", ".kts"],
+	lenientExitCode:
+		"lint-autofix: `ktlint -F` autocorrects what it can and then exits 1 if " +
+		"any lint error remains unfixed — the documented CLI contract (ktlint " +
+		"exits nonzero whenever violations are reported, and -F does not suppress " +
+		"the ones it cannot correct).",
+	lenientStatuses: [1],
 	async resolveCommand(filePath, _cwd) {
 		const inPath = await which("ktlint");
 		if (inPath) return [inPath, "-F", filePath];
@@ -737,6 +827,13 @@ export const rubocopFormatter: FormatterInfo = {
 	name: "rubocop",
 	command: ["rubocop", "-a", "--no-color", "$FILE"],
 	extensions: [".rb", ".rake", ".gemspec", ".ru"],
+	lenientExitCode:
+		"lint-autofix: `rubocop -a` exits 1 whenever ANY offense remains after it " +
+		"has already rewritten the file. Verified locally (rubocop on Ruby 3.4): a " +
+		"file with an unfixable Lint/UselessAssignment exits 1, and even a " +
+		"tidy file exits 1 on an unfixable Style/Documentation offense — nonzero " +
+		"is the normal outcome, not a failure.",
+	lenientStatuses: [1],
 	async resolveCommand(filePath, cwd) {
 		if (await canUseBundleExec(cwd))
 			return ["bundle", "exec", "rubocop", "-a", "--no-color", filePath];
@@ -754,6 +851,10 @@ export const standardrbFormatter: FormatterInfo = {
 	name: "standardrb",
 	command: ["standardrb", "--fix", "$FILE"],
 	extensions: [".rb", ".rake"],
+	lenientExitCode:
+		"lint-autofix: standardrb is a RuboCop wrapper and inherits its exit " +
+		"contract — `--fix` exits 1 when offenses remain after the rewrite.",
+	lenientStatuses: [1],
 	async resolveCommand(filePath, cwd) {
 		if (await canUseBundleExec(cwd))
 			return ["bundle", "exec", "standardrb", "--fix", filePath];
@@ -791,10 +892,9 @@ export const terragruntHclFormatter: FormatterInfo = {
 	command: ["terragrunt", "hcl", "fmt", "--file", "$FILE"],
 	extensions: [],
 	filenames: TERRAGRUNT_FILENAMES,
-	// Pure formatter: verified exit 0 on a successful in-place format against
-	// terragrunt v1.1.2. A binary predating the `hcl` command group exits nonzero
-	// and touches nothing, which without this reads as "already formatted".
-	strictExitCode: true,
+	// Strict (the #1337 default): verified exit 0 on a successful in-place format
+	// against terragrunt v1.1.2. A binary predating the `hcl` command group exits
+	// nonzero and touches nothing, which unguarded reads as "already formatted".
 	async detect(_cwd: string) {
 		return (await which("terragrunt")) !== null;
 	},
@@ -941,23 +1041,44 @@ export const cmakeFormatFormatter: FormatterInfo = {
 	},
 };
 
+/**
+ * The PowerShell one-liner behind `psscriptanalyzer-format`.
+ *
+ * #1337 audit finding: without `$ErrorActionPreference = 'Stop'`, a failing
+ * `Invoke-Formatter` is a NON-TERMINATING error — pwsh still exits 0, so this
+ * formatter could never report a failure through the strict seam and the #1336
+ * silent-no-op class survived intact for `.ps1/.psm1/.psd1`. Verified: an
+ * `Invoke-Formatter` argument-validation failure exits 0 under the old script.
+ *
+ * Two more defects fixed here rather than left as landmines:
+ *  - the old script ran `Set-Content -Value $formatted` even when `$formatted`
+ *    was `$null`, which TRUNCATES the file it was asked to format;
+ *  - single-quoted interpolation broke on any path containing an apostrophe.
+ * An empty/whitespace-only file exits 0 without touching anything, so "nothing
+ * to format" stays a clean no-op rather than a reported failure.
+ */
+function psScriptAnalyzerCommand(filePath: string): string {
+	// PowerShell single-quoted strings escape an apostrophe by doubling it.
+	const quoted = filePath.replace(/'/g, "''");
+	return [
+		"$ErrorActionPreference = 'Stop'",
+		`$p = '${quoted}'`,
+		"$content = Get-Content -Raw -LiteralPath $p",
+		"if ([string]::IsNullOrWhiteSpace($content)) { exit 0 }",
+		"$formatted = Invoke-Formatter -ScriptDefinition $content",
+		"if ($null -eq $formatted) { throw 'Invoke-Formatter returned no output' }",
+		"Set-Content -LiteralPath $p -Value $formatted",
+	].join("; ");
+}
+
 export const psscriptanalyzerFormatFormatter: FormatterInfo = {
 	name: "psscriptanalyzer-format",
-	command: [
-		"pwsh",
-		"-Command",
-		"Invoke-Formatter -ScriptDefinition (Get-Content -Raw '$FILE') | Set-Content '$FILE'",
-	],
+	command: ["pwsh", "-NoProfile", "-Command", psScriptAnalyzerCommand("$FILE")],
 	extensions: [".ps1", ".psm1", ".psd1"],
 	async resolveCommand(filePath, _cwd) {
 		const pwsh = (await which("pwsh")) ?? (await which("powershell"));
 		if (!pwsh) return null;
-		return [
-			pwsh,
-			"-NoProfile",
-			"-Command",
-			`$content = Get-Content -Raw '${filePath}'; $formatted = Invoke-Formatter -ScriptDefinition $content; Set-Content -Path '${filePath}' -Value $formatted`,
-		];
+		return [pwsh, "-NoProfile", "-Command", psScriptAnalyzerCommand(filePath)];
 	},
 	async detect(_cwd: string) {
 		const pwsh = (await which("pwsh")) ?? (await which("powershell"));
@@ -1106,7 +1227,13 @@ export async function getFormattersForFile(
 				}
 			} catch (err) {
 				// pi-lens-ignore: missing-error-propagation — optional formatter detection, skip on failure
-				console.error(`[format] Detection failed for ${formatter.name}:`, err);
+				logExtension({
+					subsystem: "format",
+					message: `Detection failed for ${formatter.name}: ${
+						err instanceof Error ? err.message : String(err)
+					}`,
+					metadata: { formatter: formatter.name, cwd },
+				});
 			}
 		}
 	}
@@ -1152,6 +1279,73 @@ export function clearFormatterRuntimeState(): void {
 	_lazyInstallAttempts.clear();
 }
 
+// ESC is built via fromCharCode so no raw control byte sits in the source.
+const ANSI_ESCAPE = new RegExp(
+	`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`,
+	"g",
+);
+const BOX_DRAWING_GLOBAL = /[\u2500-\u257F]/g;
+const HAS_BOX_DRAWING = /[\u2500-\u257F]/;
+
+/**
+ * First line of `text` that actually carries a diagnostic.
+ *
+ * #1337 made nonzero exits user-visible, which put whatever this returns in
+ * front of the agent (`clients/pipeline.ts`) and in the end-of-turn summary
+ * (`clients/runtime-agent-end.ts`) — so "first line of stderr" is no longer
+ * good enough. Biome opens stderr with a decorated section rule
+ * (`format ━━━━━━━━━━━`), which as an error message is pure noise.
+ *
+ * Skips blank lines, pure box-drawing rules, and short banner headings; strips
+ * ANSI colour so the message stays readable in a plain-text surface.
+ */
+export function firstDiagnosticLine(text: string | undefined): string | undefined {
+	for (const raw of (text ?? "").split("\n")) {
+		const line = raw.replace(ANSI_ESCAPE, "").trimEnd();
+		const stripped = line.replace(BOX_DRAWING_GLOBAL, "").trim();
+		if (!stripped) continue;
+		// "format ━━━━━━━━" is a section banner, not a diagnostic. Require a rule
+		// AND a short remainder so a real one-line error containing a box
+		// character is not discarded.
+		if (HAS_BOX_DRAWING.test(line) && stripped.length <= 24) continue;
+		return stripped.slice(0, 300);
+	}
+	return undefined;
+}
+
+/**
+ * Resolve a formatter command without allowing the static command fallback to
+ * bypass a resolver's style-preservation refusal (#1345). `null` means the
+ * primary command is unavailable; the explicit sentinel means formatting is
+ * forbidden for this file and must be returned before the static command is
+ * materialized.
+ */
+async function resolveFormatterCommand(
+	formatter: FormatterInfo,
+	absolutePath: string,
+	cwd: string,
+): Promise<string[] | typeof SKIP_FORMATTING> {
+	const resolved = formatter.resolveCommand
+		? await formatter.resolveCommand(absolutePath, cwd)
+		: null;
+	if (resolved === SKIP_FORMATTING) return SKIP_FORMATTING;
+	if (resolved !== null) return resolved;
+	const fallback = formatter.command.map((c) => c.replace("$FILE", absolutePath));
+	// Trust gate on the install-capable static fallback (#1334 S5): npx can
+	// DOWNLOAD packages, so an untrusted project treats the fallback as
+	// unavailable -- a skip, not a formatter failure; may converge next turn.
+	if (
+		fallback[0] === "npx" &&
+		!assertInstallAllowed(`formatter npx fallback: ${formatter.name}`)
+	) {
+		// No second ledger entry here (#1366 review): assertInstallAllowed just
+		// recorded the trust-refusal with this formatter's context — recording
+		// formatter-skip too would count one user-visible degradation twice.
+		return SKIP_FORMATTING;
+	}
+	return fallback;
+}
+
 export async function formatFile(
 	filePath: string,
 	formatter: FormatterInfo,
@@ -1161,32 +1355,41 @@ export async function formatFile(
 		const cwd = path.dirname(absolutePath);
 		const contentBefore = await fs.readFile(absolutePath, "utf-8");
 
-		// Resolve command: prefer local (venv/vendor/node_modules) over global
-		const resolved = formatter.resolveCommand
-			? await formatter.resolveCommand(absolutePath, cwd)
-			: null;
-		if (resolved === SKIP_FORMATTING) {
+		// Resolve command: prefer local (venv/vendor/node_modules) over global.
+		// The shared seam must honor SKIP_FORMATTING before selecting the static
+		// command, including its npx fallback (#1345).
+		const cmd = await resolveFormatterCommand(formatter, absolutePath, cwd);
+		if (cmd === SKIP_FORMATTING) {
 			// Style-preserving refusal (#1144): no repo config and no detectable
 			// indentation to pin — formatting would impose the tool's stock style.
 			return { success: true, changed: false };
 		}
-		const cmd =
-			resolved ??
-			formatter.command.map((c) => c.replace("$FILE", absolutePath));
-
 		// Run formatter without blocking the event loop.
 		const result = await safeSpawnAsync(cmd[0], cmd.slice(1), {
 			timeout: 15000,
 			cwd,
 		});
 
-		if (result.error || (formatter.strictExitCode && result.status !== 0)) {
+		// Strict by default (#1337): only a formatter with a documented
+		// benign-nonzero mode (`lenientExitCode`) may exit nonzero and still be
+		// read as a successful run. Everything else that exits nonzero never
+		// rewrote the file, and reporting {success: true, changed: false} there is
+		// indistinguishable from "already formatted" — the #1336 silent no-op.
+		const lenientOk =
+			formatter.lenientExitCode !== undefined &&
+			result.status !== null &&
+			(formatter.lenientStatuses ?? []).includes(result.status);
+		if (result.error || (result.status !== 0 && !lenientOk)) {
 			return {
 				success: false,
 				changed: false,
 				error:
 					result.error?.message ||
-					result.stderr.trim().split("\n")[0] ||
+					firstDiagnosticLine(result.stderr) ||
+					// biome, ktlint and `mix format` report on STDOUT; without this
+					// their diagnostic is discarded and the user is told only that
+					// the tool "exited with status 1".
+					firstDiagnosticLine(result.stdout) ||
 					`${formatter.name} exited with status ${result.status}`,
 			};
 		}

@@ -9,10 +9,18 @@
  * Docs: https://github.com/pahen/madge
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { findNodeToolBinary } from "./package-manager.js";
+import { isFullyQualified } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import {
+	createAvailabilityChecker,
+	discoverManagedTool,
+	getManagedToolEnvironment,
+	resolveAvailableOrInstall,
+} from "./dispatch/runners/utils/runner-helpers.js";
 
 // --- Types ---
 
@@ -182,7 +190,7 @@ function classifyMadgeKind(
 	managedToolsDir: string,
 	projectRoot: string,
 ): MadgeCommandKind {
-	if (!path.isAbsolute(resolved)) return "path";
+	if (!isFullyQualified(resolved)) return "path";
 	if (isWithin(managedToolsDir, resolved)) return "managed";
 	if (isWithin(projectRoot, resolved)) return "local";
 	return "global";
@@ -212,7 +220,7 @@ async function resolvedCommandIsStale(
 	spawnableCache: Map<string, boolean>,
 ): Promise<boolean> {
 	if (resolved.kind === "npx") return false;
-	if (path.isAbsolute(resolved.cmd)) return !fs.existsSync(resolved.cmd);
+	if (isFullyQualified(resolved.cmd)) return !fs.existsSync(resolved.cmd);
 	const cached = spawnableCache.get(resolved.cmd);
 	if (cached !== undefined) return !cached;
 	const { isSpawnableCommand } = await import("./installer/index.js");
@@ -244,6 +252,15 @@ async function mapWithConcurrency<T>(
 // --- Client ---
 
 export class DependencyChecker {
+	private readonly madgeAvailability = createAvailabilityChecker(
+		"madge",
+		".cmd",
+		["--version"],
+		{
+			environment: (cwd) => getManagedToolEnvironment("madge", cwd),
+			unclassifiedFailureOutcome: "missing",
+		},
+	);
 	private available: boolean | null = null;
 	private ensureInFlight: Promise<boolean> | null = null;
 	private checkInFlight = new Map<string, Promise<DepCheckResult>>();
@@ -292,7 +309,7 @@ export class DependencyChecker {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[deps] ${msg}`)
+			? createSubsystemLogger("deps")
 			: () => {};
 		DependencyChecker.instances.add(new WeakRef(this));
 	}
@@ -387,9 +404,7 @@ export class DependencyChecker {
 	 */
 	private async doResolveMadge(projectRoot: string): Promise<ResolvedMadge> {
 		try {
-			const { ensureTool, getManagedToolsDir } = await import(
-				"./installer/index.js"
-			);
+			const { getManagedToolsDir } = await import("./installer/index.js");
 			const classify = (cmd: string): ResolvedMadge => ({
 				cmd,
 				prefix: [],
@@ -399,7 +414,7 @@ export class DependencyChecker {
 			const bin = await findNodeToolBinary("madge", projectRoot);
 			if (bin) return classify(bin);
 
-			const discovered = await ensureTool("madge", { allowInstall: false });
+			const discovered = await discoverManagedTool("madge");
 			if (discovered) return classify(discovered);
 		} catch (err) {
 			this.log(`Madge resolution failed, falling back to npx: ${String(err)}`);
@@ -428,12 +443,12 @@ export class DependencyChecker {
 	/**
 	 * Check if madge is available, auto-install if not
 	 */
-	async ensureAvailable(): Promise<boolean> {
+	async ensureAvailable(cwd = process.cwd()): Promise<boolean> {
 		// Fast path: already checked
 		if (this.available !== null) return this.available;
 		if (this.ensureInFlight) return this.ensureInFlight;
 
-		this.ensureInFlight = this.doEnsureAvailable();
+		this.ensureInFlight = this.doEnsureAvailable(cwd);
 		try {
 			return await this.ensureInFlight;
 		} finally {
@@ -441,32 +456,14 @@ export class DependencyChecker {
 		}
 	}
 
-	private async doEnsureAvailable(): Promise<boolean> {
-		// Check if available in PATH
-		const result = await safeSpawnAsync("madge", ["--version"], {
-			timeout: 5000,
-		});
-		this.available = !result.error && result.status === 0;
-
-		if (this.available) {
-			this.log(`Madge found: ${result.stdout?.trim()}`);
-			return true;
-		}
-
-		// Auto-install via pi-lens installer
-		this.log("Madge not found, attempting auto-install...");
-		const { ensureTool } = await import("./installer/index.js");
-		const installedPath = await ensureTool("madge");
-
-		if (installedPath) {
-			this.log(`Madge auto-installed: ${installedPath}`);
-			this.available = true;
-			return true;
-		}
-
-		this.available = false;
-		this.log("Madge auto-install failed");
-		return false;
+	private async doEnsureAvailable(cwd: string): Promise<boolean> {
+		const resolved = await resolveAvailableOrInstall(
+			this.madgeAvailability,
+			"madge",
+			cwd,
+		);
+		this.available = resolved !== null;
+		return this.available;
 	}
 
 	/**
@@ -607,7 +604,7 @@ export class DependencyChecker {
 		// Taken at classification time, not at publish time (see checkFilesBatch).
 		const gen = ++this.opGeneration;
 
-		if (!(await this.ensureAvailable())) {
+		if (!(await this.ensureAvailable(projectRoot))) {
 			return {
 				hasCircular: false,
 				circular: [],
@@ -842,7 +839,7 @@ export class DependencyChecker {
 			targetsTruncated: false,
 		};
 
-		if (missEntries.length > 0 && !(await this.ensureAvailable())) {
+		if (missEntries.length > 0 && !(await this.ensureAvailable(projectRoot))) {
 			// madge unavailable: mirrors checkFile()'s "not available" branch for
 			// every miss; hits still read whatever shared state already exists.
 			// The miss set counts as failed — reporting it as zero-of-everything
@@ -993,7 +990,7 @@ export class DependencyChecker {
 			return { circular: [], count: 0 };
 		}
 
-		if (!(await this.ensureAvailable())) {
+		if (!(await this.ensureAvailable(projectRoot))) {
 			return { circular: [], count: 0 };
 		}
 

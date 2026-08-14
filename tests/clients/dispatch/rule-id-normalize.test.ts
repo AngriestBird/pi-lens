@@ -12,7 +12,12 @@
  * the contract the matcher guarantees.
  */
 import { describe, expect, it } from "vitest";
-import { normalizeRuleId } from "../../../clients/dispatch/rule-id-normalize.js";
+import {
+	deriveRuleIdLanguageSuffixes,
+	normalizeRuleId,
+} from "../../../clients/dispatch/rule-id-normalize.js";
+
+const CODERABBIT_RULES_DIR = "rules/ast-grep-rules/coderabbit/rules";
 
 describe("rule-id-normalize", () => {
 	it("strips the ast-grep: prefix", () => {
@@ -21,6 +26,13 @@ describe("rule-id-normalize", () => {
 
 	it("strips the -js suffix", () => {
 		expect(normalizeRuleId("no-eval-js")).toBe("no-eval");
+	});
+
+	it("covers every language suffix present in the bundled CodeRabbit tree", () => {
+		const suffixes = deriveRuleIdLanguageSuffixes(CODERABBIT_RULES_DIR);
+		for (const suffix of suffixes) {
+			expect(normalizeRuleId(`rule-${suffix}`)).toBe("rule");
+		}
 	});
 
 	it("strips both forms (ast-grep: prefix + -js suffix)", () => {

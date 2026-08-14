@@ -20,9 +20,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { STAGE_TMP_PATTERN } from "../../clients/atomic-write.js";
 import { writeGzipStageFile } from "../../clients/gzip-stage-write.js";
+import { suspendAt, waitFor } from "./interleaving-kit.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 let dir: string;
@@ -149,21 +150,39 @@ describe("concurrent writes to one stagePath (#1217)", () => {
 
 	it("stages each concurrent call at a distinct path", async () => {
 		const stagePath = path.join(dir, "review-graph.json.gz.stage-1-0");
-		const seen = new Set<string>();
-		// Sample the staging files that exist while eight writes are in flight.
-		const inFlight = Promise.allSettled(
-			Array.from({ length: 8 }, (_, i) =>
-				writeGzipStageFile(i % 2 === 0 ? BIG : SMALL, stagePath),
-			),
-		);
-		for (let i = 0; i < 50; i++) {
-			for (const name of tmpLeftovers()) seen.add(name);
-			await new Promise((resolve) => setImmediate(resolve));
-		}
-		const settled = await inFlight;
+		const WRITERS = 8;
+		// #1298: the original version SAMPLED the directory while the writes
+		// raced, hoping to catch two staging files coexisting — on fast Linux
+		// CI the writes completed nearly sequentially and the sampler saw one.
+		// Deterministic form: gate every writer's publish rename behind a
+		// barrier, so all staging files MUST coexist before any rename runs —
+		// no scheduler luck in either direction.
+		const realRename = fs.promises.rename.bind(fs.promises);
+		const renameSpy = vi.spyOn(fs.promises, "rename");
+		const suspension = suspendAt(renameSpy, realRename);
+		try {
+			const inFlight = Promise.allSettled(
+				Array.from({ length: WRITERS }, (_, i) =>
+					writeGzipStageFile(i % 2 === 0 ? BIG : SMALL, stagePath),
+				),
+			);
+			// Bounded wait until every writer has finished streaming and is
+			// parked at the rename barrier, each with its own staging file on
+			// disk. Converges deterministically — the files must appear.
+			const staged = await waitFor(
+				() => tmpLeftovers(),
+				(value) => value.length >= WRITERS,
+			);
+			expect(staged.length).toBe(WRITERS);
+			expect(new Set(staged).size).toBe(WRITERS);
 
-		expect(seen.size).toBeGreaterThan(1);
-		expect(tmpLeftovers()).toEqual([]);
-		expectOnlyWindowsConcurrentRenameEpemr(settled);
+			suspension.release();
+			const settled = await inFlight;
+			expect(tmpLeftovers()).toEqual([]);
+			expectOnlyWindowsConcurrentRenameEpemr(settled);
+		} finally {
+			suspension.release();
+			suspension.restore();
+		}
 	});
 });

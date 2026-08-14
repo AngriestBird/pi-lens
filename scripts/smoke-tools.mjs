@@ -75,6 +75,14 @@ const FIXTURES = [
 		expectDiagnostic: true,
 	},
 	{
+		lang: "helm",
+		dir: "tests/fixtures/tool-smoke/helm",
+		file: "templates/bad.yaml",
+		targets: ["helm-lint"],
+		tools: ["helm"],
+		expectDiagnostic: true,
+	},
+	{
 		lang: "javascript",
 		dir: "tests/fixtures/tool-smoke/javascript",
 		file: "bad.js",
@@ -696,6 +704,13 @@ const LSP_FIXTURES = [
  * `tools` are installer ids to prefetch under --install (formatters auto-install
  * via their own resolveCommand otherwise). Toolchain-gated entries only pass
  * where the language toolchain is present (⚠ skip otherwise).
+ *
+ * STYLE-PRESERVING CONTRACT (#1144). biome/prettier/ruff/shfmt refuse to format
+ * when the workspace has NO formatter config AND the file offers no indentation
+ * evidence to pin — formatting would otherwise impose the tool's stock style.
+ * A `reformat` fixture for one of those four must therefore ship a config OR
+ * contain indented lines, else it legitimately no-ops and the row fails. The
+ * `expect: "preserve"` fixture pins the refusal itself.
  */
 const FORMAT_FIXTURES = [
 	{
@@ -951,6 +966,18 @@ const FORMAT_FIXTURES = [
 		file: "messy.cpp",
 		formatter: "clang-format",
 		tools: [],
+	},
+	{
+		// Inverse of every row above: biome IS selected, but the workspace has no
+		// config and the file has no indented line, so #1144's style-preserving
+		// refusal must leave it byte-identical. A rewrite here means the stock
+		// style is being imposed on repos that never chose it.
+		lang: "preserve-unconfigured",
+		dir: "tests/fixtures/format-smoke/preserve-unconfigured",
+		file: "messy.js",
+		formatter: "biome",
+		expect: "preserve",
+		tools: ["biome"],
 	},
 ];
 
@@ -1767,6 +1794,17 @@ async function runFormatSmoke({ langs, install, verbose }) {
 					push("skip", `tool not installed (${err})`);
 				} else {
 					push("fail", `formatter failed to run: ${err}`);
+				}
+			} else if (fx.expect === "preserve") {
+				// #1144: unconfigured workspace + no indentation evidence ⇒ the
+				// formatter must refuse rather than impose its stock style.
+				if (target.changed) {
+					push(
+						"fail",
+						`${fx.formatter} rewrote an unconfigured file with no detectable style (style-preserving refusal expected)`,
+					);
+				} else {
+					push("pass", `${fx.formatter} preserved the unconfigured file`);
 				}
 			} else if (target.changed) {
 				push("pass", `${fx.formatter} reformatted the file`);

@@ -73,7 +73,7 @@ describe("walkTreeStackSync / walkTreeStackAsync", () => {
 		walkTreeStackSync(root, recordingVisitor(syncSeen));
 		const asyncSeen: string[] = [];
 		const stopped = await walkTreeStackAsync(root, recordingVisitor(asyncSeen), {
-			yieldEvery: 2,
+			budgetMs: 0,
 		});
 		expect(stopped).toBe(false);
 		expect(asyncSeen.sort()).toEqual(syncSeen.sort());
@@ -127,7 +127,7 @@ describe("walkTreeStackSync / walkTreeStackAsync", () => {
 		}) as typeof setImmediate;
 		try {
 			const seen: string[] = [];
-			await walkTreeStackAsync(root, recordingVisitor(seen), { yieldEvery: 1 });
+			await walkTreeStackAsync(root, recordingVisitor(seen), { budgetMs: 0 });
 			// 6 entries processed (2 files + 2 dirs at root, then nested), one yield
 			// each at cadence 1 — at least one macrotask yield actually happened.
 			expect(immediates).toBeGreaterThan(0);
@@ -147,7 +147,7 @@ describe("walkTreeStackSync / walkTreeStackAsync", () => {
 				return entry.isDirectory() ? "recurse" : "skip";
 			},
 			{
-				yieldEvery: 10,
+				budgetMs: 0,
 				beforeWalk: async () => {
 					order.push("before");
 				},

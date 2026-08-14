@@ -5,7 +5,7 @@ import { logLatency } from "./latency-logger.js";
 import { resolvePackagePath } from "./package-root.js";
 import { findNearestContaining, walkUpDirs } from "./path-utils.js";
 import type { ProjectConventions } from "./project-conventions.js";
-import { loadProjectSnapshot } from "./project-snapshot.js";
+import { loadProjectSnapshotWithoutWordIndex } from "./project-snapshot.js";
 
 export type ToolGate = "config-first" | "smart-default" | "mixed";
 
@@ -847,6 +847,7 @@ export type LintRunnerName =
 	| "markdownlint"
 	| "htmlhint"
 	| "hadolint"
+	| "helm-lint"
 	| "golangci-lint"
 	| "phpstan"
 	| "ktlint"
@@ -983,6 +984,9 @@ const TOOL_EXECUTION_POLICY = new Map<string, ToolExecutionPolicy>([
 	["biome", { gate: "smart-default", autoInstall: true }],
 	["ruff", { gate: "smart-default", autoInstall: true }],
 	["jscpd", { gate: "smart-default", autoInstall: true }],
+	["madge", { gate: "smart-default", autoInstall: true }],
+	["knip", { gate: "smart-default", autoInstall: true }],
+	["ast-grep", { gate: "smart-default", autoInstall: true }],
 	["oxlint", { gate: "smart-default", autoInstall: true }],
 	["stylelint", { gate: "smart-default", autoInstall: true }],
 	["sqlfluff", { gate: "smart-default", autoInstall: true }],
@@ -993,6 +997,7 @@ const TOOL_EXECUTION_POLICY = new Map<string, ToolExecutionPolicy>([
 	["mypy", { gate: "config-first", autoInstall: true }],
 	["taplo", { gate: "smart-default", autoInstall: true }],
 	["hadolint", { gate: "smart-default", autoInstall: true }],
+	["helm", { gate: "smart-default", autoInstall: true }],
 	["htmlhint", { gate: "smart-default", autoInstall: true }],
 	["ktlint", { gate: "smart-default", autoInstall: true }],
 	// ktfmt is opt-in (a project's explicit formatting choice), so it only runs
@@ -1302,6 +1307,7 @@ export interface LinterPolicyContext {
 	hasMypyConfig?: boolean;
 	hasDetektConfig?: boolean;
 	hasKtfmtConfig?: boolean;
+	hasKtlintConfig?: boolean;
 	hasTflintConfig?: boolean;
 }
 
@@ -1315,6 +1321,7 @@ export interface AutofixPolicyContext {
 	hasDetektConfig?: boolean;
 	hasOxlintConfig?: boolean;
 	hasKtfmtConfig?: boolean;
+	hasKtlintConfig?: boolean;
 }
 
 export function getLinterPolicyForFile(
@@ -1597,7 +1604,7 @@ export function getLinterPolicyForFile(
 export function getCachedProjectConventions(
 	cwd: string,
 ): ProjectConventions | undefined {
-	const snapshot = loadProjectSnapshot(cwd);
+	const snapshot = loadProjectSnapshotWithoutWordIndex(cwd);
 	return snapshot?.conventions;
 }
 
@@ -1747,6 +1754,16 @@ export function getAutofixPolicyForFile(
 	}
 
 	if ([".kt", ".kts"].includes(ext)) {
+		if (context.hasKtlintConfig) {
+			return {
+				toolNames: ["ktlint", "ktfmt", "detekt"],
+				preferredTools: ["ktlint"],
+				defaultTool: "ktlint",
+				defaultWhenUnconfigured: false,
+				gate: "config-first",
+				safe: true,
+			};
+		}
 		// ktfmt is config-first and the project's explicit formatting choice, so it
 		// wins over both detekt and the ktlint smart-default when opted in (#129).
 		if (context.hasKtfmtConfig) {
@@ -2375,7 +2392,163 @@ const KTFMT_GRADLE_FILES = [
 	"settings.gradle",
 ];
 
+const KOTLIN_GRADLE_FILES = [
+	"build.gradle.kts",
+	"build.gradle",
+	"settings.gradle.kts",
+	"settings.gradle",
+];
+
+interface SpotlessKotlinConfigCacheEntry {
+	mtime: number;
+	ktlintConfig: boolean;
+	ktfmtConfig: boolean;
+}
+
+const spotlessKotlinConfigCache = new Map<
+	string,
+	SpotlessKotlinConfigCacheEntry
+>();
+let spotlessGradleReadCount = 0;
+
+/** Test-only observability for asserting the hot-path I/O bound. */
+export function _getSpotlessGradleReadCountForTests(): number {
+	return spotlessGradleReadCount;
+}
+
+/**
+ * Blank comments and quoted strings while preserving braces and newlines in
+ * executable Gradle source. This is deliberately a small lexical pre-pass,
+ * not a Groovy/Kotlin parser. In particular, statically disabled constructs
+ * such as `if (false) { ktlint() }` remain a documented false-positive.
+ */
+function stripGradleCommentsAndStrings(source: string): string {
+	let result = "";
+	let state: "code" | "line-comment" | "block-comment" | "string" = "code";
+	let quote = "";
+	for (let index = 0; index < source.length; index += 1) {
+		const char = source[index];
+		const next = source[index + 1];
+		if (state === "code") {
+			if (char === "/" && next === "/") {
+				result += "  ";
+				index += 1;
+				state = "line-comment";
+			} else if (char === "/" && next === "*") {
+				result += "  ";
+				index += 1;
+				state = "block-comment";
+			} else if (char === '"' || char === "'") {
+				result += " ";
+				quote = char;
+				state = "string";
+			} else {
+				result += char;
+			}
+			continue;
+		}
+
+		if (state === "line-comment") {
+			if (char === "\n" || char === "\r") {
+				result += char;
+				state = "code";
+			} else {
+				result += " ";
+			}
+			continue;
+		}
+
+		if (state === "block-comment") {
+			if (char === "*" && next === "/") {
+				result += "  ";
+				index += 1;
+				state = "code";
+			} else {
+				result += char === "\n" || char === "\r" ? char : " ";
+			}
+			continue;
+		}
+
+		if (char === "\\") {
+			result += " ";
+			if (index + 1 < source.length) {
+				result += source[index + 1] === "\n" ? "\n" : " ";
+				index += 1;
+			}
+		} else if (char === quote) {
+			result += " ";
+			state = "code";
+		} else {
+			result += char === "\n" || char === "\r" ? char : " ";
+		}
+	}
+	return result;
+}
+
+function namedGradleBlockBodies(source: string, name: string): string[] {
+	const bodies: string[] = [];
+	const startPattern = new RegExp(`\\b${name}\\s*\\{`, "g");
+	for (const match of source.matchAll(startPattern)) {
+		const open = source.indexOf("{", match.index);
+		let depth = 1;
+		for (let index = open + 1; index < source.length; index += 1) {
+			if (source[index] === "{") depth += 1;
+			if (source[index] === "}") depth -= 1;
+			if (depth === 0) {
+				bodies.push(source.slice(open + 1, index));
+				break;
+			}
+		}
+	}
+	return bodies;
+}
+
+export type SpotlessKotlinFormatter = "ktlint" | "ktfmt";
+
+/**
+ * Resolve the formatter elected by a Spotless `kotlin { ... }` block.
+ * ktlint is the deterministic tie-break if a malformed project names both.
+ */
+export function getSpotlessKotlinFormatter(
+	cwd: string,
+): SpotlessKotlinFormatter | undefined {
+	for (const dir of walkUpDirs(cwd)) {
+		for (const gradle of KOTLIN_GRADLE_FILES) {
+			const filePath = path.join(dir, gradle);
+			if (!fs.existsSync(filePath)) continue;
+			try {
+				const mtime = fs.statSync(filePath).mtimeMs;
+				let config = spotlessKotlinConfigCache.get(filePath);
+				if (!config || config.mtime !== mtime) {
+					const source = stripGradleCommentsAndStrings(
+						fs.readFileSync(filePath, "utf-8"),
+					);
+					spotlessGradleReadCount += 1;
+					const kotlinBodies = namedGradleBlockBodies(source, "spotless").flatMap(
+						(spotless) => namedGradleBlockBodies(spotless, "kotlin"),
+					);
+					config = {
+						mtime,
+						ktlintConfig: kotlinBodies.some((body) => /\bktlint\s*\(/.test(body)),
+						ktfmtConfig: kotlinBodies.some((body) => /\bktfmt\s*\(/.test(body)),
+					};
+					spotlessKotlinConfigCache.set(filePath, config);
+				}
+				if (config.ktlintConfig) return "ktlint";
+				if (config.ktfmtConfig) return "ktfmt";
+			} catch {}
+		}
+	}
+	return undefined;
+}
+
+export function hasKtlintConfig(cwd: string): boolean {
+	return getSpotlessKotlinFormatter(cwd) === "ktlint";
+}
+
 export function hasKtfmtConfig(cwd: string): boolean {
+	const spotlessFormatter = getSpotlessKotlinFormatter(cwd);
+	if (spotlessFormatter) return spotlessFormatter === "ktfmt";
 	for (const dir of walkUpDirs(cwd)) {
 		if (KTFMT_CONFIG_FILES.some((cfg) => fs.existsSync(path.join(dir, cfg))))
 			return true;

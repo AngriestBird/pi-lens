@@ -25,12 +25,14 @@ import path from "node:path";
 import { threadId, Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-	STAGE_TMP_PATTERN,
-	stageOwnerPidFromName,
-	stagePathFor,
 	writeFileAtomic,
 	writeFileAtomicAsync,
 } from "../../clients/atomic-write.js";
+import {
+	STAGE_TMP_PATTERN,
+	stageOwnerPidFromName,
+	stagePathFor,
+} from "../../clients/atomic-write-staging.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 let dir: string;

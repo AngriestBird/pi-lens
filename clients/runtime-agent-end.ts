@@ -308,6 +308,8 @@ export async function handleAgentEnd({
 						{ start: 1, end: lineCount },
 						hasImports,
 						bookkeepingCwd,
+						currentSessionId ?? runtime.telemetrySessionId,
+						"pi",
 					);
 				} catch (err) {
 					dbg(
@@ -526,6 +528,19 @@ export async function handleAgentEnd({
 		result: "deferred_format_complete",
 		metadata: {
 			queued: summary.queued,
+			formatted: summary.formatted,
+			changed: summary.changed.length,
+			failed: summary.failed.length,
+			skipped: summary.skipped.length,
+		},
+	});
+	logLatency({
+		type: "phase",
+		toolName: "agent_end",
+		filePath: ctxCwd ?? runtime.projectRoot,
+		phase: "agent_end_deferred_format_done",
+		durationMs: Date.now() - startedAt,
+		metadata: {
 			formatted: summary.formatted,
 			changed: summary.changed.length,
 			failed: summary.failed.length,

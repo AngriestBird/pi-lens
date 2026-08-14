@@ -138,7 +138,7 @@ describe("shared walk engine — directory-read event-loop occupancy (#1137)", (
 		const seen: string[] = [];
 		const block = await measureMaxSyncBlockMs(async () => {
 			await walkTreeStackAsync(tmpDir, recurseEverywhere(seen), {
-				yieldEvery: 50,
+				budgetMs: 8,
 			});
 		});
 
@@ -167,7 +167,7 @@ describe("shared walk engine — directory-read event-loop occupancy (#1137)", (
 		const asyncStopped = await walkTreeStackAsync(
 			tmpDir,
 			recurseEverywhere(asyncSeen),
-			{ yieldEvery: 1 },
+			{ budgetMs: 0 },
 		);
 
 		expect(asyncSeen).toEqual(syncSeen);

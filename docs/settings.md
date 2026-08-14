@@ -69,6 +69,7 @@ column is the effective behavior when nothing is set.
 | `--lens-actionable-warning-actions` | `actionableWarnings.includeLspCodeActions` | global | **off** |
 | `--lens-actionable-warning-autofix` | `actionableWarnings.autoFix.enabled` | project | **off** |
 | `--lens-actionable-warning-all` | `actionableWarnings.deltaOnly` (`false`) | global | `deltaOnly` **on** (report this turn only) |
+| `--lens-compact-tool-line` | `ui.compactToolLine` | global | **off** (two-row tool rendering) |
 
 `--lens-guard` is **EXPERIMENTAL and strictly opt-in**. When enabled, actual
 `git commit`/`git push` commands are blocked only for current, structured

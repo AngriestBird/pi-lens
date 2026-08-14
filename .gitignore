@@ -51,6 +51,8 @@ migrate-*.js
 
 # Documentation files - only keep specific docs in public repo
 *.md
+!tests/fixtures/changelog-entries/*.md
+!.changelog/*.md
 !AGENTS.md
 !README.md
 !CHANGELOG.md
@@ -82,6 +84,7 @@ migrate-*.js
 !docs/subagent-compat.md
 !docs/dispositions.md
 !docs/word-index.md
+!docs/durable-store-audit-1202.md
 !skills/**/*.md
 !.github/PULL_REQUEST_TEMPLATE.md
 

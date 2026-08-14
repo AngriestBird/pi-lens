@@ -931,6 +931,18 @@ function clearReviewGraphSizeSkip(cwd: string): void {
 	_sizeSkipVerdicts.delete(normalizeMapKey(cwd));
 }
 
+const REVIEW_GRAPH_SIZE_NEAR_MISS_RATIO = 0.05;
+
+function isReviewGraphSizeNearMiss(
+	sourceFileCount: number,
+	maxFileCount: number,
+): boolean {
+	return (
+		sourceFileCount > maxFileCount &&
+		sourceFileCount <= maxFileCount * (1 + REVIEW_GRAPH_SIZE_NEAR_MISS_RATIO)
+	);
+}
+
 /**
  * The most recent size-skip verdict for `cwd`, if one was recorded and it's
  * still within its TTL — undefined once expired (a shrink or a raised cap
@@ -971,6 +983,13 @@ export function _setReviewGraphEntryBudgetForTests(
 	_reviewGraphEntryBudgetForTests = maxScanEntries;
 }
 
+let _reviewGraphEntryCounterForTests: (() => void) | undefined;
+export function _setReviewGraphEntryCounterForTests(
+	counter?: () => void,
+): void {
+	_reviewGraphEntryCounterForTests = counter;
+}
+
 export async function getGraphSourceFiles(
 	cwd: string,
 ): Promise<GraphSourceFilesResult> {
@@ -996,6 +1015,9 @@ export async function getGraphSourceFiles(
 			...(_reviewGraphEntryBudgetForTests === undefined
 				? {}
 				: { maxScanEntries: _reviewGraphEntryBudgetForTests }),
+			...(_reviewGraphEntryCounterForTests === undefined
+				? {}
+				: { onEntryVisited: _reviewGraphEntryCounterForTests }),
 		});
 	if (entryBudgetExceeded) {
 		logLatency({
@@ -1595,7 +1617,9 @@ function writePendingOnMainThread(
 			pending,
 			workerState,
 		);
-		console.error("[review-graph] cache persist failed:", message);
+		// #1333: recordPersistFailure already emits `phase: "persist_failed"` to
+		// review-graph.log with this same message — the console.error was a
+		// duplicate RAW write into pi's frame, not a second destination.
 	}
 }
 
@@ -1617,7 +1641,22 @@ function handleWorkerResult(result: ReviewGraphPersistWorkerResult): void {
 	const { key, pending } = request;
 	const currentGeneration = _persistGenerations.get(key);
 	if (currentGeneration !== result.generation) {
-		fs.rm(result.stagePath, { force: true }, () => {});
+		// Removing the request makes completion observable to test/CLI waiters.
+		// Reap our completed loser synchronously first so "no requests in flight"
+		// also means its stage namespace is clean (#1318). Caught (#1361 review):
+		// force suppresses ENOENT but not EBUSY/EPERM (Windows AV/backup can
+		// briefly hold the handle) -- a failed reap must never abort this
+		// callback, or the WINNING generation's completion is lost with it. The
+		// startup sweep reclaims anything a failed unlink leaves behind.
+		try {
+			fs.rmSync(result.stagePath, { force: true });
+		} catch (reapErr) {
+			logReviewGraph({
+				cwd: key,
+				phase: "persist_failed",
+				reason: `superseded-stage reap failed: ${String(reapErr)}`,
+			});
+		}
 		logReviewGraph({
 			cwd: key,
 			phase: "persist_skipped",
@@ -2922,11 +2961,12 @@ async function ensureReviewGraphFacts(
 		await functionFactProvider.run(ctx, facts);
 		// pi-lens-ignore: missing-error-propagation
 	} catch (err) {
-		console.error(
-			`[pi-lens] review-graph structural facts disabled (degraded mode): ${
-				(err as Error)?.message ?? String(err)
-			}`,
-		);
+		logReviewGraph({
+			cwd,
+			phase: "build_skipped",
+			reason: "structural_facts_disabled",
+			error: (err as Error)?.message ?? String(err),
+		});
 	}
 }
 
@@ -4489,8 +4529,25 @@ async function _doBuildGraph(
 				cwd,
 				sourceFileCount,
 				maxFileCount: maxGraphFiles,
+				sourceFileCountLabel: `more than ${maxGraphFiles} files`,
+				sourceFileCountTruncated: true,
 			},
 		});
+		if (isReviewGraphSizeNearMiss(sourceFileCount, maxGraphFiles)) {
+			logLatency({
+				type: "phase",
+				phase: "review_graph_size_near_miss",
+				filePath: cwd,
+				durationMs: 0,
+				metadata: {
+					cwd,
+					maxFileCount: maxGraphFiles,
+					sourceFileCount,
+					sourceFileCountLabel: `more than ${maxGraphFiles} files`,
+					sourceFileCountTruncated: true,
+				},
+			});
+		}
 		setGraphBuildInfo(graph, {
 			reused: false,
 			mode: "skipped",

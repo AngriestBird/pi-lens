@@ -26,11 +26,13 @@ import { removeTempDirSync } from "../test-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
+const logLatency = vi.fn();
 vi.mock("../../../clients/lsp/config.js", () => ({
 	getServersForFileWithConfig,
 	getServerInitOverride: vi.fn().mockReturnValue(undefined),
 }));
 vi.mock("../../../clients/lsp/client.js", () => ({ createLSPClient }));
+vi.mock("../../../clients/latency-logger.js", () => ({ logLatency }));
 
 function makeTsServer(root: string) {
 	return {
@@ -650,4 +652,77 @@ describe("ensureWarmForSweep warmupOverride floor scoping (#799)", () => {
 		expect(waitCalls[0]!.ms).toBe(1500); // attempt 1: floored to strategyWait
 		expect(waitCalls[1]!.ms).toBe(50); // attempt 2: respects the caller cap
 	}, 10000);
+});
+
+describe("LSP warm-up telemetry pairing (#1374)", () => {
+	let tmp: string;
+
+	beforeEach(() => {
+		vi.resetModules();
+		logLatency.mockReset();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		tmp = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-warmup-1374-"));
+		process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS = "0";
+	});
+	afterEach(() => {
+		delete process.env.PI_LENS_LSP_WARMUP_RETRY_BACKOFF_MS;
+		removeTempDirSync(tmp);
+	});
+
+	it("emits one terminal for each start on success, failure, and abort", async () => {
+		const filePath = path.join(tmp, "a.md");
+		fs.writeFileSync(filePath, "# hi\n");
+		const server = makeServer("workspace-indexer-generic", ".md", tmp);
+		getServersForFileWithConfig.mockReturnValue([server]);
+
+		const successful = makeControlledClient(server.id, tmp, ["warm"]);
+		createLSPClient.mockResolvedValue(successful.client);
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		await service.ensureWarmForSweep(filePath, { timeoutMs: 50 });
+		let phases = logLatency.mock.calls
+			.map(([entry]) => entry.phase)
+			.filter((phase) => phase?.startsWith("lsp_sweep_warmup_"));
+		expect(phases.filter((phase) => phase === "lsp_sweep_warmup_start")).toHaveLength(1);
+		expect(phases.filter((phase) => phase !== "lsp_sweep_warmup_start")).toEqual([
+			"lsp_sweep_warmup_done",
+		]);
+
+		logLatency.mockReset();
+		const failed = makeControlledClient(server.id, tmp, ["timeout"]);
+		createLSPClient.mockResolvedValue(failed.client);
+		const failedService = new LSPService();
+		await failedService.ensureWarmForSweep(filePath, { timeoutMs: 1 });
+		phases = logLatency.mock.calls
+			.map(([entry]) => entry.phase)
+			.filter((phase) => phase?.startsWith("lsp_sweep_warmup_"));
+		expect(phases.filter((phase) => phase === "lsp_sweep_warmup_start")).toHaveLength(2);
+		expect(phases.filter((phase) => phase !== "lsp_sweep_warmup_start")).toHaveLength(2);
+		expect(phases).toContain("lsp_sweep_warmup_failed");
+
+		logLatency.mockReset();
+		const controller = new AbortController();
+		const pending = {
+			...failed.client,
+			waitForDiagnostics: vi.fn(() => {
+				controller.abort();
+				return new Promise<undefined>(() => {});
+			}),
+		};
+		createLSPClient.mockResolvedValue(pending);
+		const abortedService = new LSPService();
+		const abortRun = abortedService.ensureWarmForSweep(filePath, {
+			timeoutMs: 500,
+			signal: controller.signal,
+		});
+		await abortRun;
+		phases = logLatency.mock.calls
+			.map(([entry]) => entry.phase)
+			.filter((phase) => phase?.startsWith("lsp_sweep_warmup_"));
+		expect(phases.filter((phase) => phase === "lsp_sweep_warmup_start")).toHaveLength(1);
+		expect(phases.filter((phase) => phase !== "lsp_sweep_warmup_start")).toEqual([
+			"lsp_sweep_warmup_aborted",
+		]);
+	});
 });

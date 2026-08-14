@@ -139,6 +139,11 @@ export const LANGUAGE_CAPABILITY_MATRIX: Record<
 			{ mode: "all", runnerIds: ["actionlint"], filterKinds: ["yaml"] },
 		],
 	},
+	"helm-template": {
+		name: "Helm Template Linting",
+		capabilities: ["lint"],
+		writeGroups: [primary("helm-template")],
+	},
 	sql: {
 		name: "SQL Processing",
 		capabilities: ["format", "lint"],

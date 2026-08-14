@@ -9,6 +9,7 @@
  * All paths are relative to project root (process.cwd()).
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectDataDir } from "./file-utils.js";
@@ -103,7 +104,7 @@ export class CacheManager {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[cache] ${msg}`)
+			? createSubsystemLogger("cache")
 			: () => {};
 	}
 
@@ -412,20 +413,32 @@ export class CacheManager {
 	/**
 	 * Clear turn state (after turn_end processes it).
 	 */
-	clearTurnState(cwd: string): void {
+	clearTurnState(
+		cwd: string,
+		owner: Pick<TurnStateOwner, "kind" | "id">,
+	): boolean {
+		const currentState = this.readTurnState(cwd);
+		const isCurrentOwner = this.getTurnStateAccess(cwd, owner) !== "foreign-live";
+		if (!isCurrentOwner && process.pid !== currentState.owner?.pid) return false;
 		const state: TurnState = {
 			...DEFAULT_TURN_STATE,
 			files: {}, // fresh object — DEFAULT_TURN_STATE.files can be polluted by addModifiedRange
 			lastUpdated: new Date().toISOString(),
 		};
 		this.writeTurnState(state, cwd);
+		return true;
 	}
 
 	/**
 	 * Increment turn cycle counter.
 	 */
-	incrementTurnCycle(cwd: string): TurnState {
+	incrementTurnCycle(
+		cwd: string,
+		owner: Pick<TurnStateOwner, "kind" | "id">,
+	): TurnState {
 		const state = this.readTurnState(cwd);
+		const isCurrentOwner = this.getTurnStateAccess(cwd, owner) !== "foreign-live";
+		if (!isCurrentOwner && process.pid !== state.owner?.pid) return state;
 		state.turnCycles++;
 		this.writeTurnState(state, cwd);
 		return state;

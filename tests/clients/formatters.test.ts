@@ -31,6 +31,7 @@ import {
 	shfmtFormatter,
 } from "../../clients/formatters.ts";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
+import { _getSpotlessGradleReadCountForTests } from "../../clients/tool-policy.js";
 
 // ---------------------------------------------------------------------------
 // Platform helpers
@@ -193,6 +194,53 @@ describe("resolveCommand — .venv", () => {
 		expect(cmd![0]).toBe(binPath);
 		expect(cmd).toContain("format");
 		expect(cmd).toContain(filePath);
+	});
+
+	// `ruff format` rejects --indent-style/--indent-width ("unexpected argument",
+	// exit 2). Back when exit-code strictness was opt-in and ruff had not opted
+	// in, formatFile reported that as a clean unchanged file — every unconfigured
+	// Python file silently went
+	// unformatted. Style must be pinned via inline TOML overrides instead.
+	it("ruff: pins detected indentation via --config, never bare --indent-* flags", async () => {
+		const binPath = venvBin(tmpDir, "ruff");
+		makeFakeExe(binPath);
+		const filePath = fileIn(tmpDir, "main.py");
+		fs.writeFileSync(filePath, "def f():\n    return 1\n");
+
+		const cmd = await ruffFormatter.resolveCommand!(filePath, tmpDir);
+
+		expect(cmd).not.toBeNull();
+		// Exact argv, not containment: containment stayed green when a review
+		// probe appended an invented flag — only strict equality screens CLI
+		// drift against the real ruff interface (#1336 review finding).
+		expect(cmd).toEqual([
+			binPath,
+			"format",
+			"--config",
+			"indent-width=4",
+			"--config",
+			"format.indent-style='space'",
+			filePath,
+		]);
+	});
+
+	it("ruff: pins detected tab indentation via --config", async () => {
+		const binPath = venvBin(tmpDir, "ruff");
+		makeFakeExe(binPath);
+		const filePath = fileIn(tmpDir, "main.py");
+		fs.writeFileSync(filePath, "def f():\n\treturn 1\n");
+
+		const cmd = await ruffFormatter.resolveCommand!(filePath, tmpDir);
+
+		expect(cmd).toEqual([
+			binPath,
+			"format",
+			"--config",
+			"indent-width=1",
+			"--config",
+			"format.indent-style='tab'",
+			filePath,
+		]);
 	});
 
 	it("ruff: skips when indentation is undetectable and no config exists", async () => {
@@ -485,6 +533,54 @@ describe("getFormattersForFile — policy selection", () => {
 			const formatters = await getFormattersForFile(filePath, tmpDir);
 			expect(formatters.map((f) => f.name)).toEqual(["ktfmt"]);
 		});
+	});
+
+	it("selects Spotless ktlint on every invocation and never ktfmt (#1306)", async () => {
+		const fixtureRoot = path.resolve(
+			"tests/fixtures/formatter-policy/kotlin-ktlint",
+		);
+		const filePath = path.join(fixtureRoot, "src", "App.kt");
+		for (let invocation = 0; invocation < 5; invocation += 1) {
+			const formatters = await getFormattersForFile(filePath, fixtureRoot);
+			expect(formatters.map((formatter) => formatter.name)).toEqual(["ktlint"]);
+			expect(formatters.some((formatter) => formatter.name === "ktfmt")).toBe(false);
+		}
+	});
+
+	it("selects ktlint for a 76-file multi-directory session with one Gradle read (#1306)", async () => {
+		createTempFile(
+			tmpDir,
+			"settings.gradle.kts",
+			"spotless {\n  kotlin {\n    ktlint()\n  }\n}\n",
+		);
+		const files = Array.from({ length: 76 }, (_, index) => {
+			const filePath = path.join(
+				tmpDir,
+				"modules",
+				`module-${index % 13}`,
+				"src",
+				`File${index}.kt`,
+			);
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, `class File${index}\n`);
+			return filePath;
+		});
+		const readsBefore = _getSpotlessGradleReadCountForTests();
+		for (const filePath of files) {
+			const formatters = await getFormattersForFile(filePath, tmpDir);
+			expect(formatters.map((formatter) => formatter.name)).toEqual(["ktlint"]);
+		}
+		expect(_getSpotlessGradleReadCountForTests() - readsBefore).toBe(1);
+	});
+
+	it("selects Spotless ktfmt and never ktlint (#1306)", async () => {
+		createTempFile(
+			tmpDir,
+			"build.gradle.kts",
+			"spotless {\n  kotlin {\n    ktfmt()\n  }\n}\n",
+		);
+		const formatters = await getFormattersForFile(fileIn(tmpDir, "App.kt"), tmpDir);
+		expect(formatters.map((formatter) => formatter.name)).toEqual(["ktfmt"]);
 	});
 
 	it("does not force swiftformat on unconfigured Swift files", async () => {

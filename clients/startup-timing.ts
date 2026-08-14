@@ -1,5 +1,5 @@
 import { performance } from "node:perf_hooks";
-import { PI_LENS_EVAL_STARTED_MS } from "./startup-marker.js";
+import { PI_LENS_EVAL_STARTED_MS } from "./console-guard-install.js";
 
 /**
  * Startup timing for pi-lens.

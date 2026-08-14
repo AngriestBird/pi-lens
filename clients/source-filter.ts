@@ -95,9 +95,9 @@ function probeExists(filePath: string, cache?: ArtifactProbeCache): boolean {
  */
 export const SOURCE_PRECEDENCE: Record<string, string[]> = {
 	".ts": [".js", ".jsx", ".mjs", ".cjs"],
-	".tsx": [".js", ".jsx", ".mjs", ".cjs"],
-	".mts": [".js", ".jsx", ".mjs", ".cjs"],
-	".cts": [".js", ".jsx", ".mjs", ".cjs"],
+	".tsx": [".jsx", ".js", ".mjs", ".cjs"],
+	".mts": [".mjs", ".js", ".jsx", ".cjs"],
+	".cts": [".cjs", ".js", ".jsx", ".mjs"],
 	".vue": [".js", ".mjs"],
 	".svelte": [".js", ".mjs"],
 	".coffee": [".js"],
@@ -118,6 +118,8 @@ export function sourceTwinCandidates(filePath: string): string[] {
 			: ext === ".cjs"
 				? [".cts", ".ts", ".tsx", ".mts"]
 				: ext === ".jsx"
+					// Deliberately retain the broad fallback: a .jsx next to a .ts
+					// is treated as a build artifact even without a .tsx sibling.
 					? [".tsx", ".ts", ".mts", ".cts"]
 					: ext === ".js"
 						? [".ts", ".tsx", ".mts", ".cts"]
@@ -236,6 +238,8 @@ export interface SourceCollectionOptions {
 	 * consistently with startup-scan's entry budget. Refs #760.
 	 */
 	maxScanEntries?: number;
+	/** Test-only traversal counter; called once for each directory entry visited. */
+	onEntryVisited?: () => void;
 	/**
 	 * Give CODE_KINDS files priority within the `maxFiles` cap (#894 review).
 	 * With broadened enumeration, a walk-order pile of data/doc files
@@ -791,7 +795,7 @@ export function collectSourceFiles(
 /**
  * Async, chunked-yield twin of {@link collectSourceFiles}. Returns the exact
  * same file list (it shares `classifyEntry`), but yields to the event loop
- * every `yieldEvery` directory entries so a large tree never holds the loop in
+ * on a monotonic time budget so a large tree never holds the loop in
  * one synchronous burst.
  *
  * Why this exists: on a ~2k-file project the synchronous `collectSourceFiles`
@@ -803,7 +807,7 @@ export function collectSourceFiles(
  */
 export async function collectSourceFilesAsync(
 	dir: string,
-	options?: SourceCollectionOptions & { yieldEvery?: number },
+	options?: SourceCollectionOptions & { budgetMs?: number },
 ): Promise<string[]> {
 	return (await collectSourceFilesWithBudgetAsync(dir, options)).files;
 }
@@ -815,7 +819,7 @@ export async function collectSourceFilesAsync(
  */
 export async function collectSourceFilesWithBudgetAsync(
 	dir: string,
-	options?: SourceCollectionOptions & { yieldEvery?: number },
+	options?: SourceCollectionOptions & { budgetMs?: number },
 ): Promise<SourceCollectionResult> {
 	const rootDir = path.resolve(dir);
 	const cfg = resolveCollectionConfig(rootDir, options);
@@ -839,6 +843,7 @@ export async function collectSourceFilesWithBudgetAsync(
 	await walkTreeStackAsync(
 		rootDir,
 		(entry, fullPath) => {
+			options?.onEntryVisited?.();
 			if (!chargeEntryBudget(budget)) return "stop"; // entry budget (#760)
 			const { recurseInto, keepFile } = classifyEntry(
 				entry,
@@ -859,7 +864,7 @@ export async function collectSourceFilesWithBudgetAsync(
 			// even on a cold scan where every kept file pays the 4 KB generated-
 			// header read (measured on a 2k-file fixture). Larger values regress
 			// past the ~50ms event-loop budget; see PERF-AUDIT.md.
-			yieldEvery: Math.max(1, options?.yieldEvery ?? 50),
+			budgetMs: Math.max(1, options?.budgetMs ?? 8),
 			// #703: prime the tracked-files set once before the walk so a tracked
 			// file matching a `.gitignore`/global pattern still surfaces. Fail-open
 			// on no-git/spawn failure.

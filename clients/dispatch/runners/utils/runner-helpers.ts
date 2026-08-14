@@ -17,7 +17,11 @@ import {
 	normalizeEphemeralMapKey,
 	normalizeMapKey,
 } from "../../../path-utils.js";
-import { ensureTool, isSpawnableCommand } from "../../../installer/index.js";
+import {
+	ensureTool,
+	isSpawnableCommand,
+	resetPathWalkMemo,
+} from "../../../installer/index.js";
 import {
 	getServersForFileWithConfig,
 	isServerDisabled,
@@ -125,11 +129,41 @@ export function createVenvFinder(
 // AVAILABILITY CHECKER FACTORY
 // =============================================================================
 
-type AvailabilityOutcome =
+export type AvailabilityOutcome =
 	| "success"
 	| "missing"
 	| "transient"
 	| "non-installable";
+
+export type ClientAvailabilityResult<T> =
+	| { outcome: "success"; value: T }
+	| { outcome: Exclude<AvailabilityOutcome, "success">; value?: undefined };
+
+/** Typed client-facing install seam for ordered/custom candidate probes. */
+export async function resolveManagedToolClient<T>(options: {
+	toolId: string;
+	cwd: string;
+	probe: () => Promise<ClientAvailabilityResult<T>>;
+	acceptInstalled: (path: string) => Promise<T | null> | T | null;
+}): Promise<ClientAvailabilityResult<T>> {
+	const probed = await options.probe();
+	if (probed.outcome !== "missing") return probed;
+	if (!shouldAutoInstallTool(options.toolId)) return probed;
+	const state = installStateFor(options.cwd, options.toolId);
+	if (state.suppressed) return probed;
+	const installed = await ensureTool(options.toolId);
+	if (!installed) {
+		noteInstallFailure(options.toolId, options.cwd);
+		return probed;
+	}
+	const value = await options.acceptInstalled(installed);
+	if (value === null) {
+		noteInstallFailure(options.toolId, options.cwd);
+		return { outcome: "non-installable" };
+	}
+	noteInstallSuccess(options.toolId, options.cwd);
+	return { outcome: "success", value };
+}
 
 type AvailabilityCache = {
 	available: boolean | null;
@@ -140,6 +174,45 @@ type AvailabilityCache = {
 export interface AvailabilityCheckerOptions {
 	probeTimeout?: number;
 	fastPath?: () => string | null;
+	/** Environment used by both the availability probe and later client spawns. */
+	environment?: (cwd: string) => Promise<NodeJS.ProcessEnv>;
+	/** Compatibility for legacy probes whose test doubles carry no failure kind. */
+	unclassifiedFailureOutcome?: AvailabilityOutcome;
+}
+
+/**
+ * Child environment for managed-installable tools. Keeping this beside the
+ * probe/install seam makes managed npm shims visible to every standalone
+ * client, rather than only to Knip (#1289).
+ */
+export async function getManagedToolEnvironment(
+	_toolId: string,
+	cwd?: string,
+): Promise<NodeJS.ProcessEnv> {
+	let env: NodeJS.ProcessEnv;
+	try {
+		const { getToolEnvironment } = await import("../../../installer/index.js");
+		env = await getToolEnvironment();
+	} catch {
+		// Installer-isolated unit tests historically mock only ensureTool. The
+		// ambient fallback preserves that isolation; production always exports it.
+		env = { ...process.env };
+	}
+	if (!cwd) return env;
+	const separator = process.platform === "win32" ? ";" : ":";
+	const currentPath = env.PATH || env.Path || process.env.PATH || "";
+	const localBin = path.join(cwd, "node_modules", ".bin");
+	const augmentedPath = `${localBin}${separator}${currentPath}`;
+	return {
+		...env,
+		PATH: augmentedPath,
+		...(process.platform === "win32" ? { Path: augmentedPath } : {}),
+	};
+}
+
+/** Read-only managed/PATH discovery for spawn-time resolution memos. */
+export async function discoverManagedTool(toolId: string): Promise<string | null> {
+	return (await ensureTool(toolId, { allowInstall: false })) ?? null;
 }
 
 type InstallAttemptState = {
@@ -194,6 +267,7 @@ function noteInstallSuccess(toolId: string, cwd: string): void {
 export function resetDispatchAvailabilityState(): void {
 	installAttemptsByCwd.clear();
 	resolveInstallInFlightByCwd.clear();
+	resetPathWalkMemo();
 	availabilityStateGeneration += 1;
 }
 
@@ -259,7 +333,15 @@ export function createAvailabilityChecker(
 		ensureCurrentGeneration();
 		const resolvedCwd = cwd || process.cwd();
 		const cache = getCache(resolvedCwd);
-		if (cache.available !== null) return cache.available;
+		if (cache.available === false) return false;
+		if (cache.available === true && cache.command) {
+			if (await isSpawnableCommand(cache.command)) return true;
+			// Cached-positive spawn feedback: a removed absolute path or vanished
+			// PATH command must fall through to a fresh probe immediately.
+			cache.available = null;
+			cache.command = null;
+			cache.outcome = null;
+		}
 
 		const key = path.resolve(resolvedCwd);
 		const existing = inFlightByCwd.get(key);
@@ -293,8 +375,11 @@ export function createAvailabilityChecker(
 			}
 
 			const cmd = findCommand(resolvedCwd);
+			const env = await options.environment?.(resolvedCwd);
 			const result = await safeSpawnAsync(cmd, versionArgs, {
 				timeout: options.probeTimeout ?? 5000,
+				cwd: resolvedCwd,
+				env,
 			});
 
 			if (!result.error && result.status === 0) {
@@ -306,12 +391,14 @@ export function createAvailabilityChecker(
 
 			cache.available = false;
 			const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
-			if (result.failure === "spawn" && errorCode === "ENOENT") {
+			if (result.spawnFailure?.kind === "tool-not-found") {
+				resetPathWalkMemo();
 				cache.outcome = "missing";
 			} else if (
 				result.failure === "timeout" ||
 				result.failure === "aborted" ||
 				result.failure === "signal" ||
+				result.spawnFailure?.kind === "killed" ||
 				errorCode === "EAGAIN" ||
 				errorCode === "EBUSY"
 			) {
@@ -319,7 +406,8 @@ export function createAvailabilityChecker(
 			} else {
 				// A present command that rejects its version probe (or an EACCES/
 				// EINVAL/UNKNOWN failure) is not repaired by reinstalling it.
-				cache.outcome = "non-installable";
+				cache.outcome =
+					options.unclassifiedFailureOutcome ?? "non-installable";
 			}
 			return false;
 		})().finally(() => {
@@ -366,8 +454,15 @@ export function createAvailabilityChecker(
 export function createCwdCachedProbe(
 	probe: (cwd: string) => Promise<boolean>,
 ): (cwd: string) => Promise<boolean> {
-	const cacheByCwd = new Map<string, Promise<boolean>>();
+	const cacheByCwd = new PathKeyedMap<Promise<boolean>>(
+		normalizeEphemeralMapKey,
+	);
+	let probeGeneration = availabilityStateGeneration;
 	return (cwd: string) => {
+		if (probeGeneration !== availabilityStateGeneration) {
+			cacheByCwd.clear();
+			probeGeneration = availabilityStateGeneration;
+		}
 		const key = path.resolve(cwd || process.cwd());
 		const existing = cacheByCwd.get(key);
 		if (existing) return existing;
@@ -642,8 +737,19 @@ function buildSgLocalBins(): string[] {
 }
 
 let sgAvailableInFlight: Promise<boolean> | null = null;
+let sgAvailabilityGeneration = availabilityStateGeneration;
+
+function ensureCurrentSgGeneration(): void {
+	if (sgAvailabilityGeneration === availabilityStateGeneration) return;
+	sgAvailable = null;
+	sgCmd = null;
+	sgCmdArgs = [];
+	sgAvailableInFlight = null;
+	sgAvailabilityGeneration = availabilityStateGeneration;
+}
 
 export async function isSgAvailableAsync(): Promise<boolean> {
+	ensureCurrentSgGeneration();
 	if (sgAvailable !== null) return sgAvailable;
 	if (sgAvailableInFlight) return sgAvailableInFlight;
 
@@ -690,6 +796,7 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 }
 
 export function getSgCommand(): { cmd: string; args: string[] } {
+	ensureCurrentSgGeneration();
 	return {
 		cmd: sgCmd ?? "npx",
 		args: sgCmdArgs.length ? sgCmdArgs : ["--no", "--", "ast-grep"],

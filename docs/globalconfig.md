@@ -24,6 +24,7 @@ Each runtime toggle is settable from the CLI *and* from `config.json`. The two a
 | `--lens-actionable-warning-actions` | `actionableWarnings.includeLspCodeActions` | `false` |
 | `--lens-actionable-warning-autofix` | `actionableWarnings.autoFix.enabled` | `false` |
 | `--lens-actionable-warning-all` | `actionableWarnings.deltaOnly` (`false`) | `true` |
+| `--lens-compact-tool-line` | `ui.compactToolLine` | `false` |
 | `--lens-turn-end-madge` | `turnEnd.madge.enabled` | `false` |
 
 Keys are positive (`"enabled": true` means the feature runs), so a `--no-*` flag corresponds to setting its key `false`. A `no-*` flag on the command line is a one-way switch: it can disable, never re-enable, so `--no-lsp` wins over `lsp.enabled: true` but nothing on the CLI overrides `lsp.enabled: false`. Set the key back to `true` to re-enable.

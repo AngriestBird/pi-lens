@@ -154,12 +154,21 @@ const timingSensitiveInclude = [
 	//   - word-index-async-build: the async word-index build's yield behaviour.
 	//   - ruby-drive-dirs: not named "-occupancy", but runs two sampler-based
 	//     fail-then-pass screens over the Ruby drive-dir walk (#902 pattern).
+	//   - review-graph-superseded-persist: holds a worker generation in a 400ms
+	//     test-only suspension window while admitting its replacement. Two #1318
+	//     CI flakes under the default fork storm showed that deterministic
+	//     admission alone (#1329) does not make that window contention-proof.
 	"tests/tools/lens-diagnostics-occupancy.test.ts",
 	"tests/clients/lsp/workspace-diagnostics-occupancy.test.ts",
 	"tests/clients/lsp/ruby-drive-dirs.test.ts",
 	"tests/clients/performance-report-occupancy.test.ts",
 	"tests/clients/pipeline-snapshot-occupancy.test.ts",
 	"tests/clients/word-index-async-build.test.ts",
+	"tests/clients/word-index-cooperative-occupancy.test.ts",
+	//   - cooperative-budget: #1215 acceptance screens — sampler-based
+	//     occupancy at 800-item scale plus the abort-latency bound.
+	"tests/clients/cooperative-budget.test.ts",
+	"tests/clients/review-graph-superseded-persist.test.ts",
 	// #1137: the shared walk engine's directory-read occupancy screen. Same
 	// sampler, and its fail-then-pass pair injects a busy-wait stall, so it
 	// must not compete with a fork storm for CPU turns.

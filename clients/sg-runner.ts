@@ -5,10 +5,14 @@
  * Handles: spawn, spawnSync, temp dir management, JSON parsing.
  */
 
+import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getSgCommand } from "./dispatch/runners/utils/runner-helpers.js";
+import {
+	getSgCommand,
+	resolveManagedToolClient,
+} from "./dispatch/runners/utils/runner-helpers.js";
 import { getProjectIgnoreGlobs } from "./file-utils.js";
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync, type SpawnResult } from "./safe-spawn.js";
@@ -172,7 +176,7 @@ export class SgRunner {
 
 	constructor(verbose = false) {
 		this.log = verbose
-			? (msg: string) => console.error(`[sg-runner] ${msg}`)
+			? createSubsystemLogger("sg-runner")
 			: () => {};
 	}
 
@@ -252,16 +256,21 @@ export class SgRunner {
 			}
 		}
 
-		// Step 4: auto-install via pi-lens installer.
-		this.log("ast-grep not found, attempting auto-install...");
-		const { ensureTool } = await import("./installer/index.js");
-		const installedPath = await ensureTool("ast-grep");
+		// Step 4: install via the typed shared seam, then validate the returned
+		// absolute binary before publishing it.
+		const installed = await resolveManagedToolClient({
+			toolId: "ast-grep",
+			cwd: process.cwd(),
+			probe: async () => ({ outcome: "missing" as const }),
+			acceptInstalled: async (installedPath) =>
+				(await this.probeCommand(installedPath, [])) ? installedPath : null,
+		});
 
-		if (installedPath && (await this.probeCommand(installedPath, []))) {
-			this.sgPath = installedPath;
+		if (installed.outcome === "success") {
+			this.sgPath = installed.value;
 			this.sgArgsPrefix = [];
 			this.available = true;
-			this.log(`ast-grep auto-installed: ${installedPath}`);
+			this.log(`ast-grep auto-installed: ${installed.value}`);
 			return true;
 		}
 
@@ -389,16 +398,22 @@ export class SgRunner {
 	private failureForSpawnResult(result: {
 		error?: Error;
 		failure?: string;
+		spawnFailure?: SpawnResult["spawnFailure"];
 	}): SgFailureKind | undefined {
 		if (result.failure === "aborted") return "aborted";
-		if (result.failure === "timeout") return "timeout";
-		if (
-			result.error &&
-			/ENOENT|not found|not installed/i.test(result.error.message)
-		) {
-			return "unavailable";
+		switch (result.spawnFailure?.kind) {
+			case "tool-not-found":
+				return "unavailable";
+			case "timeout":
+				return "timeout";
+			case "killed":
+				return result.failure === "aborted" ? "aborted" : "cli-failure";
+			case "cwd-unresolvable":
+			case "permission-denied":
+			case "spawn-failed":
+			case undefined:
+				return result.error ? "cli-failure" : undefined;
 		}
-		return result.error ? "cli-failure" : undefined;
 	}
 
 	private formatPatternError(stderr: string, args: string[]): string {

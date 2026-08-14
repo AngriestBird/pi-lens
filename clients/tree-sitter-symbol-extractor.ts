@@ -3,6 +3,7 @@
  * Extracts definitions and references from source files
  */
 
+import { logTreeSitterDiagnostic } from "./tree-sitter-logger.js";
 import * as path from "node:path";
 import { loadWebTreeSitter } from "./deps/web-tree-sitter.js";
 import type { Symbol, SymbolKind, SymbolRef } from "./symbol-types.js";
@@ -695,10 +696,13 @@ export class TreeSitterSymbolExtractor {
 			return Boolean(this.defQuery || this.importQuery);
 		} catch (err) {
 			this.client.reportWasmAbort(err);
-			console.error(
-				`[symbol-extractor] Failed to init ${this.languageId}:`,
-				err,
-			);
+			logTreeSitterDiagnostic({
+				subsystem: "symbol-extractor",
+				languageId: this.languageId,
+				message: `Failed to init ${this.languageId}: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			});
 			return false;
 		}
 	}
@@ -709,9 +713,12 @@ export class TreeSitterSymbolExtractor {
 			return new Query(language, src);
 		} catch (err) {
 			if (this.client.reportWasmAbort(err)) throw err;
-			console.error(
-				`[symbol-extractor] ${this.languageId} ${label} query failed: ${(err as Error).message}`,
-			);
+			logTreeSitterDiagnostic({
+				subsystem: "symbol-extractor",
+				languageId: this.languageId,
+				message: `${this.languageId} ${label} query failed: ${(err as Error).message}`,
+				metadata: { query: label },
+			});
 			return null;
 		}
 	}

@@ -4,6 +4,16 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { removeTempDirSync } from "../test-utils.js";
 
+const toolNotFound = (message = "ENOENT: command not found") =>
+	Object.assign(new Error(message), { kind: "tool-not-found" as const });
+
+const observedReadFileSync = vi.hoisted(() => vi.fn());
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	observedReadFileSync.mockImplementation(actual.readFileSync);
+	return { ...actual, readFileSync: observedReadFileSync };
+});
+
 // Set test mode to isolate logging from production logs
 process.env.PI_LENS_TEST_MODE = "1";
 
@@ -35,6 +45,7 @@ afterEach(() => {
 	delete process.env.PI_LENS_DISABLE_LSP_INSTALL;
 	ensureTool.mockReset();
 	launchLSP.mockReset();
+	observedReadFileSync.mockClear();
 	vi.resetModules();
 });
 
@@ -277,7 +288,7 @@ describe("lsp server policy", () => {
 		);
 		dirs.push(tmp);
 
-		launchLSP.mockRejectedValue(new Error("ENOENT: command not found"));
+		launchLSP.mockRejectedValue(toolNotFound());
 
 		const spawned = await CSharpServer.spawn(tmp, { allowInstall: false });
 		expect(spawned).toBeUndefined();
@@ -365,6 +376,112 @@ describe("lsp server policy", () => {
 		fs.unlinkSync(path.join(tmp, "package.json"));
 		const r2 = await resolver(file2);
 		expect(r2).toBe(tmp);
+	});
+
+	it("attaches fixture files to the outer project instead of fixture manifests (#1325)", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-fixture-root-"));
+		dirs.push(tmp);
+
+		const fixture = path.join(tmp, "tests", "fixtures", "nested-project");
+		const file = path.join(fixture, "src", "index.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.mkdirSync(path.join(tmp, ".git"));
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
+		fs.writeFileSync(path.join(fixture, "package.json"), "{}\n");
+		fs.writeFileSync(file, "export const value = 1;\n");
+
+		await expect(NearestRoot(["package.json"])(file)).resolves.toBe(tmp);
+	});
+
+	it("does not classify a testdata substring as a fixture segment (#1328)", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-testdata-segment-"));
+		dirs.push(tmp);
+
+		const project = path.join(tmp, "testdata-tools");
+		const file = path.join(project, "src", "index.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.mkdirSync(path.join(tmp, ".git"));
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
+		fs.writeFileSync(path.join(project, "package.json"), "{}\n");
+		fs.writeFileSync(file, "export const value = 1;\n");
+
+		await expect(NearestRoot(["package.json"])(file)).resolves.toBe(project);
+	});
+
+	it("memoizes project ignore globs until .gitignore changes (#1328)", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const { isPathIgnoredByProject } = await import("../../../clients/file-utils.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ignore-cache-"));
+		dirs.push(tmp);
+
+		fs.mkdirSync(path.join(tmp, ".git"));
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
+		const gitignore = path.join(tmp, ".gitignore");
+		fs.writeFileSync(gitignore, "generated/\n");
+		// Warm the independent authoritative matcher, then count only the cheap
+		// positive-glob precheck used by root resolution.
+		isPathIgnoredByProject(path.join(tmp, "warmup"), tmp, true);
+		observedReadFileSync.mockClear();
+		for (const name of ["one", "two", "three"]) {
+			const project = path.join(tmp, name);
+			const file = path.join(project, "index.ts");
+			fs.mkdirSync(project);
+			fs.writeFileSync(path.join(project, "package.json"), "{}\n");
+			fs.writeFileSync(file, "");
+			await NearestRoot(["package.json"])(file);
+		}
+		const gitignoreReads = () =>
+			observedReadFileSync.mock.calls.filter(
+				([file]) => path.resolve(String(file)) === gitignore,
+			).length;
+		expect(gitignoreReads()).toBe(1);
+
+		const touchedAt = new Date(Date.now() + 2_000);
+		fs.utimesSync(gitignore, touchedAt, touchedAt);
+		const changedProject = path.join(tmp, "four");
+		const changedFile = path.join(changedProject, "index.ts");
+		fs.mkdirSync(changedProject);
+		fs.writeFileSync(path.join(changedProject, "package.json"), "{}\n");
+		fs.writeFileSync(changedFile, "");
+		await NearestRoot(["package.json"])(changedFile);
+		// Both the precheck and the authoritative matcher invalidate. The first
+		// post-touch resolution therefore performs one fresh read for each cache.
+		expect(gitignoreReads()).toBe(3);
+	});
+
+	it("caches empty project ignore globs when .gitignore is absent (#1328)", async () => {
+		const { getProjectIgnoreGlobs } = await import("../../../clients/file-utils.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-no-gitignore-cache-"));
+		dirs.push(tmp);
+		const gitignore = path.join(tmp, ".gitignore");
+
+		expect(getProjectIgnoreGlobs(tmp)).toEqual([]);
+		expect(getProjectIgnoreGlobs(tmp)).toEqual([]);
+		expect(getProjectIgnoreGlobs(tmp)).toEqual([]);
+		expect(
+			observedReadFileSync.mock.calls.filter(
+				([file]) => path.resolve(String(file)) === gitignore,
+			),
+		).toHaveLength(1);
+	});
+
+	it("does not make a gitignored manifest directory an LSP root (#1325)", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-ignored-root-"));
+		dirs.push(tmp);
+
+		const generated = path.join(tmp, "generated");
+		const file = path.join(generated, "index.ts");
+		fs.mkdirSync(path.join(tmp, ".git"));
+		fs.mkdirSync(generated);
+		fs.writeFileSync(path.join(tmp, ".gitignore"), "generated/\n");
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
+		fs.writeFileSync(path.join(generated, "package.json"), "{}\n");
+		fs.writeFileSync(file, "export const generated = true;\n");
+
+		await expect(NearestRoot(["package.json"])(file)).resolves.toBe(tmp);
 	});
 
 	it("deduplicates concurrent in-flight walks for the same directory", async () => {
@@ -519,7 +636,7 @@ describe("lsp server policy", () => {
 		);
 		dirs.push(tmp);
 
-		launchLSP.mockRejectedValue(new Error("ENOENT: command not found"));
+		launchLSP.mockRejectedValue(toolNotFound());
 
 		const spawned = await BashServer.spawn(tmp, { allowInstall: false });
 		expect(spawned).toBeUndefined();
@@ -555,7 +672,7 @@ describe("lsp server policy", () => {
 		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
 
 		process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
-		launchLSP.mockRejectedValue(new Error("ENOENT: command not found"));
+		launchLSP.mockRejectedValue(toolNotFound());
 
 		const spawned = await SvelteServer.spawn(tmp);
 		expect(spawned?.process).toBeUndefined();
@@ -569,7 +686,7 @@ describe("lsp server policy", () => {
 		dirs.push(tmp);
 		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
 
-		launchLSP.mockRejectedValue(new Error("ENOENT: command not found"));
+		launchLSP.mockRejectedValue(toolNotFound());
 
 		const spawned = await SvelteServer.spawn(tmp, { allowInstall: false });
 		expect(spawned?.process).toBeUndefined();
@@ -662,7 +779,7 @@ describe("lsp server policy", () => {
 					pid: 1234,
 				};
 			}
-			throw new Error(`unexpected command: ${command}`);
+			throw toolNotFound(`unexpected command: ${command}`);
 		});
 
 		const spawned = await PythonServer.spawn(tmp, { allowInstall: true });
@@ -699,7 +816,7 @@ describe("lsp server policy", () => {
 					pid: 5678,
 				};
 			}
-			throw new Error(`unexpected command: ${command}`);
+			throw toolNotFound(`unexpected command: ${command}`);
 		});
 
 		const spawned = await PythonServer.spawn(tmp, { allowInstall: true });
@@ -736,7 +853,7 @@ describe("lsp server policy", () => {
 					pid: 4321,
 				};
 			}
-			throw new Error(`unexpected command: ${command}`);
+			throw toolNotFound(`unexpected command: ${command}`);
 		});
 
 		const spawned = await PythonServer.spawn(tmp, { allowInstall: true });
@@ -778,7 +895,7 @@ describe("lsp server policy", () => {
 					pid: 4321,
 				};
 			}
-			throw new Error(`unexpected command: ${command}`);
+			throw toolNotFound(`unexpected command: ${command}`);
 		});
 
 		const spawned = await TomlServer.spawn(tmp, { allowInstall: true });
@@ -807,7 +924,7 @@ describe("lsp server policy", () => {
 					pid: 2468,
 				};
 			}
-			throw new Error(`unexpected command: ${command}`);
+			throw toolNotFound(`unexpected command: ${command}`);
 		});
 
 		const spawned = await KotlinServer.spawn(tmp, { allowInstall: true });
@@ -823,7 +940,7 @@ describe("lsp server policy", () => {
 		ensureTool.mockResolvedValue(path.join(tmp, "bin", "zls.exe"));
 		launchLSP.mockImplementation(async (command: string) => {
 			if (command === "zls") {
-				throw new Error("ENOENT: command not found");
+				throw toolNotFound();
 			}
 			if (command.endsWith(path.join("bin", "zls.exe"))) {
 				return {
@@ -834,7 +951,7 @@ describe("lsp server policy", () => {
 					pid: 9753,
 				};
 			}
-			throw new Error(`unexpected command: ${command}`);
+			throw toolNotFound(`unexpected command: ${command}`);
 		});
 
 		const spawned = await ZigServer.spawn(tmp, { allowInstall: true });
@@ -1069,7 +1186,14 @@ describe("lsp server policy", () => {
 			launchLSP.mockImplementation(async (command: string) => {
 				calls.push(`launch(${command})`);
 				if (calls.length <= 2) {
-					throw new Error("BROKEN");
+					throw Object.assign(new Error("tool not found"), {
+						kind: "tool-not-found",
+					});
+				}
+				if (command === "rust-analyzer") {
+					throw Object.assign(new Error("tool not found"), {
+						kind: "tool-not-found",
+					});
 				}
 				if (command === MANAGED) {
 					return {
@@ -1080,7 +1204,7 @@ describe("lsp server policy", () => {
 						pid: 9999,
 					};
 				}
-				throw new Error(`unexpected: ${command} (call #${calls.length})`);
+				throw toolNotFound(`unexpected: ${command} (call #${calls.length})`);
 			});
 
 			ensureTool.mockImplementation(
