@@ -16,6 +16,10 @@ import * as path from "node:path";
 import { getProjectDataDir } from "./file-utils.js";
 import { writeFileAtomic } from "./atomic-write.js";
 import { parseSymbolKey } from "./call-graph.js";
+import type { CallGraphCacheIdentity } from "./call-graph.js";
+import { detectFileRole } from "./file-role.js";
+import { isExternalOrVendorFile } from "./path-utils.js";
+import { isBuildArtifact } from "./source-filter.js";
 import type { FunctionCallGraph, SymbolKey } from "./call-graph.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -38,6 +42,10 @@ export interface ModelEntry {
 }
 
 export interface CodebaseModel {
+	version: typeof CODEBASE_MODEL_VERSION;
+	/** Canonical review graph identity of the call graph this model projects. */
+	reviewGraphVersion: string;
+	reviewGraphSignature: string;
 	generatedAt: string;
 	totalSymbols: number;
 	totalFiles: number;
@@ -47,9 +55,12 @@ export interface CodebaseModel {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_TOKEN_BUDGET = 1500;
+export const DEFAULT_CODEBASE_MODEL_TOKEN_BUDGET = 1500;
 const MAX_CALLS_PER_SYMBOL = 10;
 const MIN_IN_DEGREE = 0.5; // skip symbols with low centrality (avoids noise)
+
+/** Persisted model schema version. Bump when the persisted shape changes. */
+export const CODEBASE_MODEL_VERSION = 1;
 
 // ── Builder ───────────────────────────────────────────────────────────────────
 
@@ -83,8 +94,17 @@ function estimateTokens(entry: Omit<ModelEntry, "tokens">): number {
 export function buildCodebaseModel(
 	graph: FunctionCallGraph,
 	cwd: string,
-	budget = DEFAULT_TOKEN_BUDGET,
+	budget = DEFAULT_CODEBASE_MODEL_TOKEN_BUDGET,
+	identity?: CallGraphCacheIdentity,
 ): CodebaseModel {
+	// Standalone callers may build an unpersisted projection without the
+	// review-graph coordinator. Persisted/session models pass the canonical
+	// review-graph identity explicitly; this fallback is only a local call-graph
+	// identity for builder-only use.
+	const modelIdentity = identity ?? {
+		reviewGraphVersion: graph.builtAt || "call-graph-unknown",
+		reviewGraphSignature: graph.builtAt || "call-graph-unknown",
+	};
 	// Sort all callee keys by in-degree descending
 	const ranked = [...graph.inDegree.entries()]
 		.filter(([, score]) => score >= MIN_IN_DEGREE)
@@ -101,15 +121,13 @@ export function buildCodebaseModel(
 		const name = parsedCallee.symbolName ?? calleeKey;
 		const filePath = parsedCallee.filePath;
 
-		// Skip if file is in test/node_modules/generated directories
-		if (
-			filePath.includes("node_modules") ||
-			filePath.includes(".test.") ||
-			filePath.includes(".spec.") ||
-			filePath.includes("/__tests__/") ||
-			filePath.includes("/dist/") ||
-			filePath.includes("/generated/")
-		) {
+		// Keep this projection aligned with the shared file-role policy. The
+		// call graph is derived from the canonical review graph, so the model
+		// carries that graph's identity rather than inventing a second freshness
+		// policy.
+		const fileRole = detectFileRole(filePath);
+		if (fileRole === "test" || fileRole === "generated" ||
+			isExternalOrVendorFile(filePath, cwd) || isBuildArtifact(filePath)) {
 			continue;
 		}
 
@@ -154,6 +172,9 @@ export function buildCodebaseModel(
 	);
 
 	return {
+		version: CODEBASE_MODEL_VERSION,
+		reviewGraphVersion: modelIdentity.reviewGraphVersion,
+		reviewGraphSignature: modelIdentity.reviewGraphSignature,
 		generatedAt: new Date().toISOString(),
 		totalSymbols: graph.inDegree.size,
 		totalFiles: allFiles.size,
@@ -186,9 +207,21 @@ export function saveCodebaseModel(cwd: string, model: CodebaseModel): void {
 	}
 }
 
-export function loadCodebaseModel(cwd: string): CodebaseModel | undefined {
+/** Load only a model matching the canonical identity it was derived from. */
+export function loadCodebaseModel(
+	cwd: string,
+	expectedIdentity: CallGraphCacheIdentity,
+): CodebaseModel | undefined {
 	try {
-		return JSON.parse(fs.readFileSync(cacheFilePath(cwd), "utf-8")) as CodebaseModel;
+		const raw = JSON.parse(fs.readFileSync(cacheFilePath(cwd), "utf-8")) as Partial<CodebaseModel>;
+		if (raw.version !== CODEBASE_MODEL_VERSION ||
+		typeof raw.reviewGraphVersion !== "string" || raw.reviewGraphVersion.length === 0 ||
+			typeof raw.reviewGraphSignature !== "string" || raw.reviewGraphSignature.length === 0 ||
+			typeof raw.generatedAt !== "string" ||
+			!Array.isArray(raw.entries)) return undefined;
+		if (raw.reviewGraphVersion !== expectedIdentity.reviewGraphVersion ||
+			raw.reviewGraphSignature !== expectedIdentity.reviewGraphSignature) return undefined;
+		return raw as CodebaseModel;
 	} catch {
 		return undefined;
 	}
