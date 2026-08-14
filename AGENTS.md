@@ -199,6 +199,12 @@ once-record, and increment entry points normalize unknown values to bounded
 strings and swallow internal failures so telemetry never throws into a host
 path.
 
+LSP workspace-edit merge buckets are keyed by `pathIndexKey`, not raw URI
+spelling; each canonical bucket retains its first URI as the display key.
+Call-graph `allSymbols`/`allRefs` file keys are `normalizeMapKey`-canonical,
+and lookup, cross-file filtering, and same-file classification must use that
+same canonical form.
+
 TypeScript LSP clients are evicted after `PI_LENS_TS_IDLE_EVICT_MS` of inactivity
 (default five minutes). Eviction removes the client from service state before
 graceful shutdown, releasing the server-owned language-service programs and
