@@ -261,6 +261,12 @@ empty result, while the project ignore matcher remains authoritative.
 
 A pi coding-agent extension that runs automated checks on every file write/edit. Dispatches async parallel runners (LSP, biome, ruff, ast-grep, tree-sitter, jscpd, knip, Madge, and language-specific linters/build checks) and injects findings as context injections at turn-end and session-start.
 
+Startup lazy-loading (#1394 Phase 2): the dispatch runner graph is loaded through
+`clients/dispatch/lazy.ts`. Session-start callers may warm its shared promise
+without awaiting it; the per-edit pipeline must await that same promise before
+dispatch or cascade work. Keep host registrations eager and never create a
+second warm promise for concurrent/subagent session starts.
+
 The git guard's command-position classifier expands `$IFS`, `${IFS}`, and
 `$IFS$<positional>` forms before re-tokenizing guarded verbs. Known command-string
 launchers include shell families plus busybox, toybox, and nix-shell; an

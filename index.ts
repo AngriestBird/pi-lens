@@ -48,12 +48,7 @@ import {
 	sessionStartMode,
 } from "./clients/session-state-store.js";
 import { getDiagnosticTracker } from "./clients/diagnostic-tracker.js";
-import {
-	getCascadeSessionStats,
-	getDispatchSlopScoreLine,
-	getLatencyReports,
-	resetDispatchBaselines,
-} from "./clients/dispatch/integration.js";
+import { warmDispatchIntegration, loadDispatchIntegration } from "./clients/dispatch/lazy.js";
 import {
 	getFormatService,
 	resetFormatService,
@@ -188,6 +183,23 @@ import {
 } from "./clients/event-loop-monitor.js";
 import { logSessionStart } from "./clients/sessionstart-logger.js";
 import { logConcurrentSessionBind } from "./clients/session-start-observability.js";
+
+type DispatchIntegration = Awaited<ReturnType<typeof loadDispatchIntegration>>;
+let loadedDispatchIntegration: DispatchIntegration | undefined;
+
+function warmDispatchAtSessionStart(): void {
+	void warmDispatchIntegration().then((integration) => {
+		loadedDispatchIntegration = integration;
+	}).catch((err) => {
+		logExtension({ subsystem: "dispatch", level: "warn", message: `dispatch warm failed: ${err}` });
+	});
+}
+
+function resetDispatchBaselines(cwd?: string): void {
+	void loadDispatchIntegration().then(({ resetDispatchBaselines }) => {
+		resetDispatchBaselines(cwd);
+	});
+}
 
 // First executable statement: every import above has been evaluated, so the
 // full load/transpile cost has been paid. Capture it now.
@@ -957,7 +969,7 @@ export default function (pi: ExtensionAPI) {
 				0,
 			);
 
-			const reports = getLatencyReports();
+			const reports = loadedDispatchIntegration?.getLatencyReports() ?? [];
 			const last = reports.length > 0 ? reports[reports.length - 1] : undefined;
 			const diagStats = getDiagnosticTracker().getStats();
 			const slowRunners = last
@@ -990,7 +1002,7 @@ export default function (pi: ExtensionAPI) {
 					count: crashEntries.length,
 				}),
 			];
-			const slopScoreLine = getDispatchSlopScoreLine();
+			const slopScoreLine = loadedDispatchIntegration?.getDispatchSlopScoreLine() ?? "";
 
 			if (crashEntries.length > 0) {
 				lines.push("", t("lens.health.topCrashFiles", "Top crash files:"));
@@ -1133,7 +1145,11 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Cascade summary
-			const cascadeStats = getCascadeSessionStats();
+			const cascadeStats = loadedDispatchIntegration?.getCascadeSessionStats() ?? {
+				runs: 0,
+				diagnosticsSurfaced: 0,
+				coldSnapshotTouches: 0,
+			};
 			if (cascadeStats.runs > 0) {
 				lines.push(
 					"",
@@ -1480,6 +1496,7 @@ export default function (pi: ExtensionAPI) {
 	// --- Events ---
 
 	pi.on("session_start", async (event, ctx) => {
+		warmDispatchAtSessionStart();
 		rememberEventCtx(ctx);
 		refreshCtxDerivedPlumbing();
 		const sessionStartFiredAt = Date.now();
