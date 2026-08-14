@@ -129,6 +129,12 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 ## What it is
 
+Behavioral degradation is recorded through `clients/degradation-ledger.ts`, a
+per-session in-memory store retaining the latest 20 entries per kind while
+counting overflow. New quiet refusal/degradation paths must call
+`recordDegradation`; `pilens_health` exposes the detached structured summary and
+human-readable section, and `/lens-perf` includes the same current-session view.
+
 `isFullyQualified` follows host path semantics. Use `isFullyQualifiedWin32` or `isFullyQualifiedPosix` when the consuming path grammar is fixed independently of the host (for example, safe-spawn's Windows resolver).
 
 The weekly stale-open-issue detector is detection-only: `.github/workflows/stale-open-issues.yml`

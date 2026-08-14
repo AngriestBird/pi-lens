@@ -3,6 +3,10 @@ import "./clients/startup-marker.js";
 import { installConsoleGuard, logExtension } from "./clients/extension-log.js";
 import { wireUserNotifier } from "./clients/user-notify.js";
 import {
+	getDegradationSummary,
+	recordDegradation,
+} from "./clients/degradation-ledger.js";
+import {
 	adoptProjectTrustFromPorts,
 	assertInstallAllowed,
 	readProjectTrustFromContext,
@@ -242,6 +246,11 @@ function notifyUi(
 ): void {
 	const mode = readExtensionMode(ctx);
 	if (suppressesUserNotify(mode)) {
+		recordDegradation({
+			kind: "mode-suppression",
+			subject: "ctx.ui.notify",
+			reason: modeSuppressionNote(mode),
+		});
 		dbg(`notify ${modeSuppressionNote(mode)}: ${message.split("\n")[0]}`);
 		return;
 	}
@@ -292,7 +301,17 @@ export function createHostPorts(
 	return createDefaultHostPorts({
 		notify: {
 			user(message, level) {
-				if (currentMode() === "print" || currentMode() === "json") return;
+				const mode = currentMode();
+				if (mode === "print" || mode === "json") {
+					// #1366: suppressed notices are still LEDGERED so headless
+					// operators can see them in pilens_health.
+					recordDegradation({
+						kind: "mode-suppression",
+						subject: "user degradation notice",
+						reason: modeSuppressionNote(mode),
+					});
+					return;
+				}
 				context()?.ui?.notify?.(message, level ?? "warning");
 			},
 		},
@@ -1125,7 +1144,15 @@ export default function (pi: ExtensionAPI) {
 				const report = await collectLatencyPerformance({
 					sessionStartedAt: runtime.sessionStartedAt,
 				});
-				notifyUi(ctx, renderLatencyPerformanceReport(report), "info");
+				const degradations = getDegradationSummary();
+				const degradationText = degradations.length
+					? `\n\nDegradations:\n${degradations.map((group) => `  ${group.kind}: ${group.count} (${group.latestReasons.at(-1)?.subject}: ${group.latestReasons.at(-1)?.reason})`).join("\n")}`
+					: "";
+				notifyUi(
+					ctx,
+					`${renderLatencyPerformanceReport(report)}${degradationText}`,
+					"info",
+				);
 			} catch (err) {
 				notifyUi(
 					ctx,

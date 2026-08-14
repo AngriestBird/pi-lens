@@ -23,6 +23,8 @@ import {
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { logLatency } from "./latency-logger.js";
+import { recordDegradation } from "./degradation-ledger.js";
+import { logExtension } from "./extension-log.js";
 import { isFullyQualifiedWin32 } from "./path-utils.js";
 import { startSpawnUsageSampler } from "./resource-sampler.js";
 
@@ -156,36 +158,71 @@ function classifyWithCwdFlag(
 	cwdUnresolvable: boolean,
 ): SpawnFailureError {
 	const code = errorCode(cause);
+	let failure: SpawnFailureError;
 	if (
 		code === "ENOENT" &&
 		cwdUnresolvable &&
 		commandProbablyPresent(options.command) !== false
 	) {
-		return new SpawnFailureError(
+		failure = new SpawnFailureError(
 			"cwd-unresolvable",
 			`Cannot spawn ${options.command}: working directory is unresolvable (${options.cwd})`,
 			cause,
 		);
-	}
-	if (code === "ENOENT") {
-		return new SpawnFailureError(
+	} else if (code === "ENOENT") {
+		failure = new SpawnFailureError(
 			"tool-not-found",
 			`Cannot spawn ${options.command}: tool not found (${cause.message})`,
 			cause,
 		);
-	}
-	if (code === "EACCES" || code === "EPERM") {
-		return new SpawnFailureError(
+	} else if (code === "EACCES" || code === "EPERM") {
+		failure = new SpawnFailureError(
 			"permission-denied",
 			`Cannot spawn ${options.command}: permission denied`,
 			cause,
 		);
+	} else {
+		failure = new SpawnFailureError(
+			"spawn-failed",
+			`Cannot spawn ${options.command}: ${cause.message}`,
+			cause,
+		);
 	}
-	return new SpawnFailureError(
-		"spawn-failed",
-		`Cannot spawn ${options.command}: ${cause.message}`,
-		cause,
-	);
+	recordSpawnClassification(failure, options);
+	return failure;
+}
+
+const loggedSpawnClassifications = new Set<string>();
+const SPAWN_CLASSIFICATION_LOG_CAP = 200;
+
+function recordSpawnClassification(
+	failure: SpawnFailureError,
+	options: { command: string; cwd?: string },
+): void {
+	const pair = `${failure.kind}\0${options.command}`;
+	if (!loggedSpawnClassifications.has(pair)) {
+		if (loggedSpawnClassifications.size >= SPAWN_CLASSIFICATION_LOG_CAP) {
+			loggedSpawnClassifications.clear();
+		}
+		loggedSpawnClassifications.add(pair);
+		logExtension({
+			subsystem: "safe-spawn",
+			level: "debug",
+			message: "spawn failure classified",
+			metadata: {
+				kind: failure.kind,
+				command: options.command,
+				cwd: options.cwd,
+			},
+		});
+	}
+	if (failure.kind !== "tool-not-found") {
+		recordDegradation({
+			kind: "spawn-failure",
+			subject: options.command,
+			reason: `${failure.kind}${options.cwd ? ` in ${options.cwd}` : ""}`,
+		});
+	}
 }
 
 /** Classify a raw Node spawn error without discarding its errno-bearing Error. */
@@ -681,6 +718,7 @@ const windowsCommandCache = new Map<string, WindowsCommandCacheEntry>();
 /** Reset after session replacement or a successful managed install. */
 export function resetSafeSpawnWindowsCommandCache(): void {
 	windowsCommandCache.clear();
+	loggedSpawnClassifications.clear();
 }
 
 function cacheWindowsCommandResult(

@@ -22,6 +22,7 @@ import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
 import { logLatency } from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
+import { recordDegradation } from "../degradation-ledger.js";
 import {
 	isLspSpawnAllowedByTrust,
 	assertInstallAllowed,
@@ -1168,6 +1169,11 @@ export class LSPService {
 					// like the other eviction paths and must not reject from a timer callback.
 				}
 				logSessionStart(`lsp typescript idle eviction: released ${key}`);
+				recordDegradation({
+					kind: "ts-idle-eviction",
+					subject: key,
+					reason: "idle TypeScript client released to bound memory",
+				});
 			}).catch(() => {});
 		}, getTypeScriptIdleEvictMs());
 		timer.unref?.();
