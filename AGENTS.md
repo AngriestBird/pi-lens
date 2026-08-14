@@ -188,6 +188,11 @@ Unsupported pull responses are also recognized by the standard message-only
 variants (`method not found`, `unknown method`, and `unsupported method`).
 Status consumers receive detached, 200-character-bounded failure entries.
 
+The git guard classifies wrapper launchers only after basename/PATHEXT
+normalization, and strips shell escapes only from command-verb tokens; path
+arguments retain the shared lexer’s Windows-backslash behavior. Failed bash
+results never register grep/read coverage.
+
 Degradation-ledger recording is best-effort observability: its public record,
 once-record, and increment entry points normalize unknown values to bounded
 strings and swallow internal failures so telemetry never throws into a host

@@ -97,7 +97,11 @@ function getShellCommand(input: unknown): string {
 
 function executableName(value: string): string {
 	const normalized = value.replace(/\\/g, "/");
-	return (normalized.slice(normalized.lastIndexOf("/") + 1) ?? "").toLowerCase();
+	let name = (normalized.slice(normalized.lastIndexOf("/") + 1) ?? "").toLowerCase();
+	// Shell launchers are commonly supplied as resolved Windows paths or as
+	// PATHEXT-qualified names. Guard classification must happen after the same
+	// basename/extension normalization for every wrapper family.
+	return name.replace(/\.(?:exe|com|bat|cmd)$/i, "");
 }
 
 function isShellWrapper(value: string): boolean {
@@ -108,11 +112,8 @@ function isShellWrapper(value: string): boolean {
 		"zsh",
 		"ash",
 		"cmd",
-		"cmd.exe",
 		"pwsh",
-		"pwsh.exe",
 		"powershell",
-		"powershell.exe",
 	]).has(executableName(value));
 }
 
@@ -122,6 +123,19 @@ function isGitExecutable(value: string): boolean {
 	);
 }
 
+/** Normalize only a command-position token; never apply this to path args. */
+function normalizeGuardVerbToken(value: string): string {
+	return value
+		.replace(/\\(?=[A-Za-z0-9_])/g, "")
+		.replace(/`(?=.)/g, "")
+		.replace(/\^(?=.)/g, "")
+		.replace(/\$\{IFS\}|\$IFS/g, " ");
+}
+
+function expandGuardVerbToken(value: string): string[] {
+	return normalizeGuardVerbToken(value).trim().split(/\s+/).filter(Boolean);
+}
+
 function containsCommitOrPush(tokens: string[], depth: number): boolean {
 	if (depth > 3 || tokens.length === 0) return false;
 	let commandTokens = tokens;
@@ -129,6 +143,10 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 		commandTokens = commandTokens.slice(1);
 	}
 	if (commandTokens.length === 0) return false;
+	const expandedHead = expandGuardVerbToken(commandTokens[0] ?? "");
+	if (expandedHead.length > 1) {
+		commandTokens = [...expandedHead, ...commandTokens.slice(1)];
+	}
 	const gitIndex = commandTokens.findIndex((token) => isGitExecutable(token));
 	if (gitIndex >= 0) {
 		const preceding = commandTokens.slice(0, gitIndex);
@@ -180,7 +198,8 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 			}
 			i += takesValue.has(option) ? 2 : 1;
 		}
-		return gitTokens[i] === "commit" || gitTokens[i] === "push";
+		const verb = normalizeGuardVerbToken(gitTokens[i] ?? "");
+		return verb === "commit" || verb === "push";
 	}
 	if (!isShellWrapper(commandTokens[0])) return false;
 	const lower = commandTokens.slice(1).map((token) => token.toLowerCase());
@@ -194,11 +213,14 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 			token === "-command:" ||
 			token === "-encodedcommand",
 	);
-	if (switchIndex < 0 || switchIndex + 2 > commandTokens.length) return false;
+	if (switchIndex < 0 || switchIndex + 1 >= commandTokens.length) return false;
 	// Encoded PowerShell is intentionally unsupported: decoding it here would
 	// be a second shell/parser and could turn an ambiguous command into a false
 	// allow. Plain -Command/-c is safely handed back to the shared lexer.
 	if (lower[switchIndex] === "-encodedcommand") return false;
+	// switchIndex is relative to commandTokens.slice(1), so +2 addresses the
+	// command token after the switch for both cmd and PowerShell. This also
+	// handles cmd options preceding /C (for example `/S /C`).
 	let commandIndex = switchIndex + 2;
 	if (commandTokens[commandIndex] === "--") commandIndex += 1;
 	const nestedCommand = commandTokens.slice(commandIndex).join(" ");

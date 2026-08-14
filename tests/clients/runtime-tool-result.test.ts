@@ -60,6 +60,33 @@ describe("bash grep searchReads registration", () => {
 		}
 	});
 
+	it("does not register grep output from a failed bash result", async () => {
+		const env = setupTestEnvironment("pi-lens-bash-failed-grep-");
+		try {
+			const filePath = path.join(env.tmpDir, "sample.ts");
+			fs.writeFileSync(filePath, "one\ntwo\nthree\n");
+			const recordRead = vi.fn();
+			const base = {
+				getFlag: () => false,
+				dbg: () => {},
+				runtime: Object.assign(new RuntimeCoordinator(), { projectRoot: env.tmpDir }),
+				cacheManager: new CacheManager(false),
+				biomeClient: {}, ruffClient: {}, metricsClient: {}, resetLSPService: () => {},
+				agentBehaviorRecord: () => [], formatBehaviorWarnings: () => "",
+				readGuard: { recordRead },
+			} as any;
+			await handleToolResult({
+				...base,
+				event: {
+					toolName: "bash", isError: true,
+					input: { command: `grep -n two ${filePath}; false` },
+					content: [{ type: "text", text: `${filePath}:2:two` }],
+				},
+			});
+			expect(recordRead).not.toHaveBeenCalled();
+		} finally { env.cleanup(); }
+	});
+
 	it("records grep -n output lines as read-guard search reads", async () => {
 		const env = setupTestEnvironment("pi-lens-grep-search-reads-");
 		try {

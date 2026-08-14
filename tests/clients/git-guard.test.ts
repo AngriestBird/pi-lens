@@ -54,6 +54,34 @@ describe("git-guard", () => {
 		expect(isGitCommitOrPushAttempt("bash", { command: "powershell -Command git push origin main" })).toBe(true);
 	});
 
+	it("blocks executable and path-qualified wrapper launchers", () => {
+		for (const command of [
+			"cmd.exe /c git push",
+			"cmd.exe /S /C git push",
+			"C:\\Windows\\System32\\cmd.exe /c git push",
+			"POWERSHELL.EXE -c git push",
+			"C:\\Windows\\System32\\powershell.com -Command git push",
+			"sh.exe -c git push",
+			"bash.com -c git push",
+			"C:\\tools\\env.bat FOO=bar git push",
+			"xargs.cmd git push",
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
+		}
+	});
+
+	it("blocks shell escapes embedded in a guarded git verb", () => {
+		for (const command of [
+			"git pu\\sh",
+			"git pu`sh",
+			"git pu^sh",
+			"git${IFS}push",
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
+		}
+		expect(isGitCommitOrPushAttempt("bash", { command: "git add C:\\proj\\a.ts" })).toBe(false);
+	});
+
 	it("detects launcher prefixes, shell keywords, combined flags, and continuations", () => {
 		const continued = "git \\" + "\ncommit -m x";
 		expect(tokenizeShellCommand(continued)[0]?.tokens).toEqual(["git", "commit", "-m", "x"]);
