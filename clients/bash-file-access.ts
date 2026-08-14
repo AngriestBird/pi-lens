@@ -15,6 +15,7 @@
  */
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
+import { isReadableSourceFile } from "./file-kinds.js";
 import { countFileLines } from "./read-guard-tool-lines.js";
 import type { SearchReadLocation } from "./search-read-registration.js";
 
@@ -26,11 +27,6 @@ export interface ReadSpan {
 	/** Number of lines read. */
 	limit: number;
 }
-
-// Source-ish extensions worth registering. Anchored end-check → linear (no
-// catastrophic backtracking).
-const READABLE_EXT_RE =
-	/\.(?:ts|tsx|js|jsx|mjs|cjs|py|sh|rs|go|cs|java|kt|rb|php|c|cpp|cc|h|hpp|json|jsonc|yaml|yml|toml|md|txt|env|cfg|conf|ini|html|css|scss|less|xml|sql|vue|svelte)$/i;
 
 function stripQuotes(token: string): string {
 	if (token.length >= 2) {
@@ -91,13 +87,25 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 			continue;
 		}
 		if (escaped) {
-			word += ch;
+			// A backslash-newline is a shell line continuation, not part of the
+			// command argument. Keeping the newline here makes a continued git command
+			// visible to command guards.
+			if (ch !== "\n") word += ch;
 			escaped = false;
 			atTokenStart = false;
 			continue;
 		}
 		if (ch === "\\") {
-			escaped = true;
+			// Bash uses backslash as a general escape, but command inputs on
+			// Windows routinely contain native paths (C:\\src\\file.ts). Preserve
+			// backslashes before ordinary path characters while still honoring
+			// shell escapes and line continuations.
+			if (next === "\n" || /[\s\\'\";$|&<>]/.test(next ?? "")) {
+				escaped = true;
+			} else {
+				word += ch;
+				atTokenStart = false;
+			}
 			atTokenStart = false;
 			continue;
 		}
@@ -140,15 +148,10 @@ export function tokenizeShellCommand(command: string): ShellCommandSegment[] {
 	return segments;
 }
 
-function tokenizeSegment(segment: string): string[] {
-	const matches = segment.match(/'[^']*'|"(?:[^"\\]|\\.)*"|\S+/g);
-	return matches ?? [];
-}
-
 /** Resolve a token to an absolute path if it looks like a source file. */
 function resolveCandidate(token: string, cwd: string): string | null {
 	const cleaned = stripQuotes(token);
-	if (!cleaned || cleaned.startsWith("-") || !READABLE_EXT_RE.test(cleaned)) {
+	if (!cleaned || cleaned.startsWith("-") || !isReadableSourceFile(cleaned)) {
 		return null;
 	}
 	return path.isAbsolute(cleaned) ? cleaned : path.resolve(cwd, cleaned);
@@ -162,8 +165,59 @@ function parseCountFlag(token: string): number | undefined {
 	return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-function splitSegments(command: string): string[] {
-	return command.split(/&&|\|\||[;|\n]/);
+function commandSegments(command: string): string[][] {
+	return tokenizeShellCommand(command).map((segment) => segment.tokens);
+}
+
+/** Find redirect targets without treating quoted `>` characters as syntax. */
+function extractRedirectTargets(command: string): string[] {
+	const targets: string[] = [];
+	let quote: "single" | "double" | undefined;
+	let escaped = false;
+	for (let i = 0; i < command.length; i += 1) {
+		const ch = command[i];
+		if (quote === "single") {
+			if (ch === "'") quote = undefined;
+			continue;
+		}
+		if (quote === "double") {
+			if (escaped) escaped = false;
+			else if (ch === "\\") escaped = true;
+			else if (ch === '"') quote = undefined;
+			continue;
+		}
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (ch === "'") {
+			quote = "single";
+			continue;
+		}
+		if (ch === '"') {
+			quote = "double";
+			continue;
+		}
+		if (ch !== ">") continue;
+		while (i + 1 < command.length && /\s/.test(command[i + 1])) i += 1;
+		if (command[i + 1] === ">") i += 1;
+		while (i + 1 < command.length && /\s/.test(command[i + 1])) i += 1;
+		let target = "";
+		for (i += 1; i < command.length; i += 1) {
+			const next = command[i];
+			if (/\s/.test(next) || next === ";" || next === "|" || next === "&") {
+				i -= 1;
+				break;
+			}
+			target += next;
+		}
+		if (target) targets.push(target);
+	}
+	return targets;
 }
 
 /**
@@ -206,10 +260,8 @@ export function extractReadPathsFromCommand(
 		spans.push({ filePath: file.abs, offset, limit });
 	};
 
-	for (const rawSegment of splitSegments(command)) {
-		const segment = rawSegment.trim();
-		if (!segment) continue;
-		const tokens = segment.split(/\s+/);
+	for (const tokens of commandSegments(command)) {
+		if (tokens.length === 0) continue;
 		const verb = path.basename(tokens[0] ?? "");
 		const args = tokens.slice(1);
 
@@ -352,8 +404,7 @@ function collectGrepCommandFiles(
 ): { hasLineNumberGrep: boolean; files: Set<string> } {
 	const files = new Set<string>();
 	let hasLineNumberGrep = false;
-	for (const rawSegment of splitSegments(command)) {
-		const tokens = tokenizeSegment(rawSegment.trim());
+	for (const tokens of commandSegments(command)) {
 		const verb = path.basename(stripQuotes(tokens[0] ?? ""));
 		if (verb !== "grep" && verb !== "egrep" && verb !== "fgrep") continue;
 		const args = tokens.slice(1);
@@ -432,15 +483,21 @@ export function extractWrittenPathsFromCommand(
 		if (abs) out.add(abs);
 	};
 
-	for (const rawSegment of splitSegments(command)) {
-		const segment = rawSegment.trim();
-		if (!segment) continue;
+	for (const tokens of commandSegments(command)) {
+		if (tokens.length === 0) continue;
 
-		// Redirect targets: the token after `>` / `>>` (optionally prefixed by a
-		// file descriptor like `2>` or `&>`, with or without a space).
-		for (const m of segment.matchAll(/>>?\s*([^\s>|&]+)/g)) add(m[1]);
+		// Redirect targets are collected by a quote-aware scanner. The shared
+		// tokenizer supplies the normalized command arguments; it deliberately
+		// does not expose shell redirection operators as arguments.
+		for (const target of extractRedirectTargets(command)) add(target);
+		// A command may contain multiple segments; only the first pass should
+		// attach redirects, otherwise targets would be duplicated harmlessly but
+		// needlessly rescanned.
+		break;
 
-		const tokens = segment.split(/\s+/);
+	}
+	for (const tokens of commandSegments(command)) {
+		if (tokens.length === 0) continue;
 		const verb = path.basename(tokens[0] ?? "");
 		const args = tokens.slice(1);
 

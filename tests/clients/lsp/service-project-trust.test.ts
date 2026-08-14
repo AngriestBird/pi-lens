@@ -1,4 +1,8 @@
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const FIXTURE_ROOT = path.join(process.cwd(), "project-trust-fixture");
+const FIXTURE_FILE = path.join(FIXTURE_ROOT, "main.py");
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -56,7 +60,7 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 				id: "python",
 				name: "Python",
 				extensions: [".py"],
-				root: async () => "C:/repo",
+				root: async () => FIXTURE_ROOT,
 				spawn,
 			},
 		]);
@@ -67,7 +71,7 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		const { trust, service, spawn } = await setup();
 		trust.setProjectTrustState("untrusted");
 
-		const client = await service.getClientForFile("C:/repo/main.py");
+		const client = await service.getClientForFile(FIXTURE_FILE);
 
 		expect(spawn).not.toHaveBeenCalled();
 		expect(createLSPClient).not.toHaveBeenCalled();
@@ -86,7 +90,7 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		const { trust, service, spawn } = await setup();
 		trust.setProjectTrustState("trusted");
 
-		const client = await service.getClientForFile("C:/repo/main.py");
+		const client = await service.getClientForFile(FIXTURE_FILE);
 
 		expect(spawn).toHaveBeenCalledTimes(1);
 		expect(client?.client).toBeTruthy();
@@ -99,7 +103,7 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		// ctx.isProjectTrusted must behave exactly as before.
 		expect(trust.getProjectTrustState()).toBe("unknown");
 
-		const client = await service.getClientForFile("C:/repo/main.py");
+		const client = await service.getClientForFile(FIXTURE_FILE);
 
 		expect(spawn).toHaveBeenCalledTimes(1);
 		expect(client?.client).toBeTruthy();
@@ -111,10 +115,10 @@ describe("LSPService project-trust gate (#1334 S5)", () => {
 		const { trust, service, spawn } = await setup();
 		trust.setProjectTrustState("trusted");
 
-		await service.getClientForFile("C:/repo/main.py");
+		await service.getClientForFile(FIXTURE_FILE);
 
 		expect(spawn).toHaveBeenCalledWith(
-			"C:/repo",
+			FIXTURE_ROOT,
 			expect.objectContaining({ allowInstall: true }),
 		);
 		trust.resetProjectTrust();

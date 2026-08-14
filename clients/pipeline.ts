@@ -28,10 +28,7 @@ import type { BiomeClient } from "./biome-client.js";
 import { recordDiagnostics } from "./widget-state.js";
 import { getDiagnosticLogger } from "./diagnostic-logger.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
-import {
-	computeCascadeForFile,
-	dispatchLintWithResult,
-} from "./dispatch/integration.js";
+import { loadDispatchIntegration } from "./dispatch/lazy.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import {
 	createAvailabilityChecker,
@@ -57,14 +54,16 @@ import {
 	wasPreviouslyReportedDirty,
 	type PilensDiagnosticEntry,
 } from "./diagnostics-publish.js";
-import { getLSPService } from "./lsp/index.js";
+import { loadLspService } from "./lsp-lazy.js";
 import type { MetricsClient } from "./metrics-client.js";
 import { clearGraphCache } from "./review-graph/builder.js";
+import { BoundedLruCache } from "./bounded-cache.js";
 import type { RuffClient } from "./ruff-client.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import type { WordIndex } from "./word-index.js";
 import { getAmbientAbortSignal, safeSpawnAsync } from "./safe-spawn.js";
 import { combineAbortSignals } from "./deadline-utils.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import {
 	getAutofixPolicyForFile,
 	getPreferredAutofixTools,
@@ -364,10 +363,7 @@ export {
 	hasStylelintConfig,
 };
 
-const _eslintCache = new Map<
-	string,
-	{ available: boolean; bin: string | null }
->();
+const _eslintCache = new BoundedLruCache<string, { available: boolean; bin: string | null }>(32);
 
 /**
  * Run eslint --fix on a file. Runs a single spawn and diffs the file before/after,
@@ -380,7 +376,9 @@ const _eslintCache = new Map<
 async function tryEslintFix(filePath: string, cwd: string): Promise<number> {
 	const userHasConfig = hasEslintConfig(cwd);
 	if (!userHasConfig) return 0;
-	const cacheKey = path.resolve(cwd);
+	// PATH is part of command resolution; include it so an install or PATH
+	// refresh cannot leave a negative eslint result live for the session.
+	const cacheKey = `${path.resolve(cwd)}|${process.env.PATH ?? ""}`;
 	let cached = _eslintCache.get(cacheKey);
 	if (!cached) {
 		const candidate = resolveToolCommand(cwd, "eslint") ?? "eslint";
@@ -910,7 +908,7 @@ export async function resyncLspFile(
 	if (limitCheck.tooLarge) return;
 
 	try {
-		const lspService = getLSPService();
+		const lspService = (await loadLspService()).getLSPService();
 		if (lspService.supportsLSP(filePath)) {
 			// Push the final post-format/post-fix content through touchFile (not the
 			// bare openFile) so it registers in the touch-debounce map via
@@ -989,7 +987,11 @@ function toPilensDiagnosticEntry(d: Diagnostic): PilensDiagnosticEntry {
 	return entry;
 }
 
-type DispatchResult = Awaited<ReturnType<typeof dispatchLintWithResult>>;
+	type DispatchResult = Awaited<
+		ReturnType<
+			(typeof import("./dispatch/integration.js"))["dispatchLintWithResult"]
+		>
+	>;
 function buildAllClearOutput(
 	_dispatchResult: DispatchResult,
 	elapsed: number,
@@ -1042,6 +1044,13 @@ export async function runFormatPhase(
 		}
 		if (!result.allSucceeded) {
 			const failures = result.formatters.filter((f) => !f.success);
+			for (const failure of failures) {
+				recordDegradationOnce({
+					kind: "formatter-failure",
+					subject: `${failure.name}:${path.basename(filePath)}`,
+					reason: failure.error ?? "unknown error",
+				});
+			}
 			formatFailures.push(
 				...failures.map((f) => `${f.name}: ${f.error ?? "unknown error"}`),
 			);
@@ -1054,6 +1063,11 @@ export async function runFormatPhase(
 		}
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
+		recordDegradationOnce({
+			kind: "formatter-failure",
+			subject: `format-service:${path.basename(filePath)}`,
+			reason: message,
+		});
 		formatFailures.push(message);
 		dbg(`autoformat error: ${err}`);
 	}
@@ -1239,6 +1253,8 @@ export async function runPipeline(
 	const piApi: PiAgentAPI = {
 		getFlag: getFlag as (flag: string) => boolean | string | undefined,
 	};
+	const { dispatchLintWithResult, computeCascadeForFile } =
+		await loadDispatchIntegration();
 	const dispatchResult = await dispatchLintWithResult(
 		filePath,
 		cwd,

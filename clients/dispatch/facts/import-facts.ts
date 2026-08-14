@@ -1,4 +1,5 @@
 import { logLatency } from "../../latency-logger.js";
+import { isJstsFactFile } from "../../file-kinds.js";
 import type { FactProvider } from "../fact-provider-types.js";
 import {
 	childrenOfType,
@@ -30,20 +31,6 @@ export interface ReExportEntry {
 	/** Names re-exported. Empty array means `export * from '...'`. */
 	names: string[];
 }
-
-// JS/TS extensions this provider handles (→ tree-sitter typescript/tsx/javascript
-// grammars via resolveTreeSitterLanguage). Ported off the `typescript` compiler API
-// onto tree-sitter (#402) — the parse is served from the shared, cached client.
-const JSTS_EXTS = new Set([
-	".ts",
-	".tsx",
-	".mts",
-	".cts",
-	".js",
-	".jsx",
-	".mjs",
-	".cjs",
-]);
 
 function stripQuotes(raw: string): string {
 	return raw.replace(/^["'`]+|["'`]+$/g, "");
@@ -114,8 +101,7 @@ export const importFactProvider: FactProvider = {
 	provides: ["file.imports", "file.reexports", "file.importFactsCoverage"],
 	requires: ["file.content"],
 	appliesTo(ctx) {
-		const ext = ctx.filePath.slice(ctx.filePath.lastIndexOf(".")).toLowerCase();
-		return JSTS_EXTS.has(ext);
+		return isJstsFactFile(ctx.filePath);
 	},
 	async run(ctx, store) {
 		const content = store.getFileFact<string>(ctx.filePath, "file.content");

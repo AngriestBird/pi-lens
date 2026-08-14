@@ -374,3 +374,22 @@ describe("resetWorkspaceTopology", () => {
 		expect(fs.readdirSync).toHaveBeenCalled();
 	});
 });
+describe("workspace-topology Tier-2 idle recovery (#1389)", () => {
+	it("evicts an idle marker entry and rebuilds it on the next access", () => {
+		const previous = process.env.PI_LENS_WORKSPACE_TOPOLOGY_IDLE_EVICT_MS;
+		process.env.PI_LENS_WORKSPACE_TOPOLOGY_IDLE_EVICT_MS = "10";
+		vi.useFakeTimers();
+		try {
+			write("tsconfig.json");
+			getDirectoryMarkers(root);
+			vi.mocked(fs.readdirSync).mockClear();
+			vi.advanceTimersByTime(11);
+			getDirectoryMarkers(root);
+			expect(fs.readdirSync).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+			if (previous === undefined) delete process.env.PI_LENS_WORKSPACE_TOPOLOGY_IDLE_EVICT_MS;
+			else process.env.PI_LENS_WORKSPACE_TOPOLOGY_IDLE_EVICT_MS = previous;
+		}
+	});
+});

@@ -19,12 +19,17 @@ import {
 	wireBusEmitter,
 	wireBusEmitterGetter,
 } from "../../clients/bus-publish.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 
 describe("bus-publish — pilens:files:touched (#482)", () => {
 	const originalEnv = process.env.PI_LENS_BUS_PUBLISH;
 
 	beforeEach(() => {
 		_resetForTests();
+		resetDegradationLedger();
 		appendRecentTouches.mockClear();
 		appendRecentTouches.mockResolvedValue(undefined);
 		logBusEvent.mockClear();
@@ -32,6 +37,7 @@ describe("bus-publish — pilens:files:touched (#482)", () => {
 
 	afterEach(() => {
 		_resetForTests();
+		resetDegradationLedger();
 		if (originalEnv === undefined) {
 			delete process.env.PI_LENS_BUS_PUBLISH;
 		} else {
@@ -195,6 +201,36 @@ describe("bus-publish — pilens:files:touched (#482)", () => {
 			}),
 		).not.toThrow();
 		expect(dbg).toHaveBeenCalledTimes(1);
+	});
+
+	it("logs and ledgers each stale occurrence after a successful recovery", () => {
+		const stale = vi.fn(() => {
+			throw new Error("This extension ctx is stale after session replacement or reload");
+		});
+		const recovered = vi.fn();
+		let currentEmit: (channel: string, data: unknown) => void = stale;
+		wireBusEmitterGetter(() => currentEmit);
+		const dbg = vi.fn();
+		const publish = (path: string) =>
+			publishFilesTouched({ reason: "autofix", paths: [path], cwd: "/repo", dbg });
+
+		publish("/repo/a.ts");
+		publish("/repo/b.ts");
+		expect(dbg).toHaveBeenCalledTimes(1);
+		expect(getDegradationSummary()).toEqual([
+			expect.objectContaining({ kind: "bus-stale", count: 1 }),
+		]);
+
+		currentEmit = recovered;
+		publish("/repo/recovered.ts");
+		expect(recovered).toHaveBeenCalledTimes(1);
+
+		currentEmit = stale;
+		publish("/repo/c.ts");
+		expect(dbg).toHaveBeenCalledTimes(2);
+		expect(getDegradationSummary()).toEqual([
+			expect.objectContaining({ kind: "bus-stale", count: 2 }),
+		]);
 	});
 
 	describe("#502: fix-provenance additive fields", () => {

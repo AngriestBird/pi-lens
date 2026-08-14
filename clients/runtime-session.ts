@@ -35,7 +35,7 @@ import { logLatency } from "./latency-logger.js";
 import { runLogCleanup } from "./log-cleanup.js";
 import type { LSPShutdownOptions } from "./lsp/client.js";
 import { initLSPConfig, loadLSPConfig } from "./lsp/config.js";
-import { getLSPService } from "./lsp/index.js";
+import { loadLspService } from "./lsp-lazy.js";
 import type { MetricsClient } from "./metrics-client.js";
 import type { OpengrepClient, OpengrepResult } from "./opengrep-client.js";
 import { isAtOrAboveHomeDir } from "./path-utils.js";
@@ -411,7 +411,7 @@ async function igniteWarmFiles(
 		await initLSPConfig(cwd);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
 
-		const lspService = getLSPService();
+		const lspService = (await loadLspService()).getLSPService();
 		const total = warmFiles.length;
 		let loaded = 0;
 		let errors = 0;
@@ -467,7 +467,7 @@ async function igniteDominantLanguageWarm(
 		await initLSPConfig(cwd);
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
 
-		const lspService = getLSPService();
+		const lspService = (await loadLspService()).getLSPService();
 		const { collectSourceFilesAsync } = await import("./source-filter.js");
 		const { CODE_KINDS, detectFileKind } = await import("./file-kinds.js");
 		// Async, event-loop-yielding walk (deferred off the interactive path).
@@ -1283,6 +1283,7 @@ function scheduleStartupScans(
 	});
 
 	// call-graph — build function-level call graph from review graph data
+	let callGraphIdentity: { reviewGraphVersion: string; reviewGraphSignature: string } | undefined;
 	const callGraphTask = runTask("call-graph", async () => {
 		const { FactStore } = await import("./dispatch/fact-store.js");
 		const {
@@ -1308,6 +1309,10 @@ function scheduleStartupScans(
 			);
 			return;
 		}
+		callGraphIdentity = {
+			reviewGraphVersion: identity.version,
+			reviewGraphSignature: identity.signature,
+		};
 		const cached = loadCallGraph(snapshotRoot, {
 			reviewGraphVersion: identity.version,
 			reviewGraphSignature: identity.signature,
@@ -1343,10 +1348,11 @@ function scheduleStartupScans(
 		await callGraphTask;
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
 		if (!runtime.callGraph) return;
-		const { buildCodebaseModel, saveCodebaseModel } = await import(
+		const { buildCodebaseModel, saveCodebaseModel, DEFAULT_CODEBASE_MODEL_TOKEN_BUDGET } = await import(
 			"./codebase-model.js"
 		);
-		const model = buildCodebaseModel(runtime.callGraph, analysisRoot);
+		if (!callGraphIdentity) return;
+		const model = buildCodebaseModel(runtime.callGraph, analysisRoot, DEFAULT_CODEBASE_MODEL_TOKEN_BUDGET, callGraphIdentity);
 		saveCodebaseModel(snapshotRoot, model);
 		const top3 = model.entries
 			.slice(0, 3)
@@ -1970,7 +1976,7 @@ export async function handleSessionStart(
 			durationMs: totalDurationMs,
 			metadata: { mode: startupMode, reason: deps.sessionReason },
 		});
-		emitSmellsSessionStartLine(dbg);
+		emitSmellsSessionStartLine(dbg, sessionStartMs);
 		return;
 	}
 
@@ -2372,7 +2378,7 @@ export async function handleSessionStart(
 		durationMs: totalDurationMs,
 		metadata: { mode: startupMode, reason: deps.sessionReason },
 	});
-	emitSmellsSessionStartLine(dbg);
+	emitSmellsSessionStartLine(dbg, sessionStartMs);
 }
 
 /**
@@ -2381,9 +2387,14 @@ export async function handleSessionStart(
  * `clients/smells-rollup.ts` for the tail-scan cost bound and threshold
  * gating. Never throws: a rollup miss must not break session_start.
  */
-function emitSmellsSessionStartLine(dbg: (msg: string) => void): void {
+function emitSmellsSessionStartLine(
+	dbg: (msg: string) => void,
+	sessionStartMs: number,
+): void {
 	try {
-		const line = formatSmellsSessionStartLine(countRecentSmells());
+		const line = formatSmellsSessionStartLine(
+			countRecentSmells(undefined, sessionStartMs),
+		);
 		if (line) dbg(line);
 	} catch {
 		// best-effort — smells rollup must never break session_start

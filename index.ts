@@ -48,12 +48,7 @@ import {
 	sessionStartMode,
 } from "./clients/session-state-store.js";
 import { getDiagnosticTracker } from "./clients/diagnostic-tracker.js";
-import {
-	getCascadeSessionStats,
-	getDispatchSlopScoreLine,
-	getLatencyReports,
-	resetDispatchBaselines,
-} from "./clients/dispatch/integration.js";
+import { warmDispatchIntegration, loadDispatchIntegration } from "./clients/dispatch/lazy.js";
 import {
 	getFormatService,
 	resetFormatService,
@@ -86,6 +81,7 @@ import { formatCascadeNeighborDiagnostics } from "./clients/cascade-format.js";
 import { convertLspDiagnostics } from "./clients/dispatch/utils/lsp-diagnostics.js";
 import { initLSPConfig } from "./clients/lsp/config.js";
 import { getLSPService, resetLSPService } from "./clients/lsp/index.js";
+import { warmLspService } from "./clients/lsp-lazy.js";
 import {
 	sweepOrphans,
 	sweepUntrackedOrphans,
@@ -188,6 +184,24 @@ import {
 } from "./clients/event-loop-monitor.js";
 import { logSessionStart } from "./clients/sessionstart-logger.js";
 import { logConcurrentSessionBind } from "./clients/session-start-observability.js";
+import { warmFormatters } from "./clients/formatters-lazy.js";
+
+type DispatchIntegration = Awaited<ReturnType<typeof loadDispatchIntegration>>;
+let loadedDispatchIntegration: DispatchIntegration | undefined;
+
+function warmDispatchAtSessionStart(): void {
+	void warmDispatchIntegration().then((integration) => {
+		loadedDispatchIntegration = integration;
+	}).catch((err) => {
+		logExtension({ subsystem: "dispatch", level: "warn", message: `dispatch warm failed: ${err}` });
+	});
+}
+
+function resetDispatchBaselines(cwd?: string): void {
+	void loadDispatchIntegration().then(({ resetDispatchBaselines }) => {
+		resetDispatchBaselines(cwd);
+	});
+}
 
 // First executable statement: every import above has been evaluated, so the
 // full load/transpile cost has been paid. Capture it now.
@@ -417,12 +431,18 @@ let _turnSummaryEmitCtx:
 	  }
 	| undefined;
 const _lspConfigInitializedCwds = new Set<string>();
+const LSP_CONFIG_CWD_CAP = 128;
 
 async function ensureLSPConfigInitialized(cwd: string): Promise<void> {
 	const normalizedCwd = path.resolve(cwd);
 	if (_lspConfigInitializedCwds.has(normalizedCwd)) return;
 	await initLSPConfig(normalizedCwd);
 	_lspConfigInitializedCwds.add(normalizedCwd);
+	while (_lspConfigInitializedCwds.size > LSP_CONFIG_CWD_CAP) {
+		const oldest = _lspConfigInitializedCwds.values().next().value;
+		if (oldest === undefined) break;
+		_lspConfigInitializedCwds.delete(oldest);
+	}
 }
 
 function updateRuntimeIdentityFromEvent(event: unknown): void {
@@ -508,13 +528,21 @@ export default function (pi: ExtensionAPI) {
 	// never captured once — a session replacement invalidates the old ctx.ui.
 	// #1334 S2: the ports notifier owns mode suppression + live-ctx resolution
 	// (per-call, never captured -- the #338/#798 detached-callback rule).
-	wireUserNotifier(hostPorts);
-	initLensEventsGetter(() => ({ emit: hostPorts.emit.lens }));
-	const getLiveEmit = () => hostPorts.emit.bus;
-	wireBusEmitterGetter(getLiveEmit);
-	wireDiagnosticsBusEmitterGetter(getLiveEmit);
-	wireDispositionBusEmitterGetter(getLiveEmit);
-	wireFormatEventsBusEmitterGetter(getLiveEmit);
+	const refreshCtxDerivedPlumbing = (): void => {
+		// These targets are module singletons, while hostPorts is scoped to this
+		// extension activation. A sibling activation can overwrite them and then
+		// become stale; every session_start must reclaim them before #473 can
+		// return early for a concurrent in-process subagent. (#1383)
+		wireUserNotifier(hostPorts);
+		initLensEventsGetter(() => ({ emit: hostPorts.emit.lens }));
+		const getLiveEmit = () => hostPorts.emit.bus;
+		wireBusEmitterGetter(getLiveEmit);
+		wireDiagnosticsBusEmitterGetter(getLiveEmit);
+		wireDispositionBusEmitterGetter(getLiveEmit);
+		wireFormatEventsBusEmitterGetter(getLiveEmit);
+		setRenderCallback(() => hostPorts.render.invalidate());
+	};
+	refreshCtxDerivedPlumbing();
 	// #485: read-only bus subscriber — never publishes, so the #482 loop guard
 	// (ingest -> write -> publish) has no write side to trip here.
 	wireAgentNudgeSubscriber({
@@ -671,6 +699,8 @@ export default function (pi: ExtensionAPI) {
 	// from the registry's PI_LENS_NO_CONTEXT_INJECTION env binding (#166).
 	let contextInjectionEnabled = !getLensFlag("no-lens-context");
 	let lensWidgetVisible = globalConfig?.widget?.visible !== false;
+	let mountedLensWidgetUi: LensWidgetUi | undefined;
+	let widgetMountFailureLogged = false;
 	// #190 Phase 2: snapshot of the source session's diagnostics, captured at
 	// `session_before_fork` and adopted by the forked session at the subsequent
 	// `session_start` (reason="fork"). In-memory hand-off (same process) — avoids
@@ -713,7 +743,17 @@ export default function (pi: ExtensionAPI) {
 			dbg(`widget mount ${modeSuppressionNote(mode)}`);
 			return false;
 		}
-		if (typeof ui?.setWidget !== "function") return false;
+		if (typeof ui?.setWidget !== "function") {
+			if (!widgetMountFailureLogged) {
+				widgetMountFailureLogged = true;
+				logExtension({
+					subsystem: "widget",
+					level: "debug",
+					message: "widget mount unavailable: host ui.setWidget is missing",
+				});
+			}
+			return false;
+		}
 		const setWidget = ui.setWidget as LensWidgetSetWidget;
 		setWidget(
 			"pi-lens",
@@ -736,6 +776,7 @@ export default function (pi: ExtensionAPI) {
 			},
 			{ placement: "belowEditor" },
 		);
+		mountedLensWidgetUi = ui;
 		return true;
 	}
 
@@ -745,6 +786,7 @@ export default function (pi: ExtensionAPI) {
 		if (typeof ui?.setWidget !== "function") return false;
 		const setWidget = ui.setWidget as LensWidgetSetWidget;
 		setWidget("pi-lens", undefined);
+		mountedLensWidgetUi = undefined;
 		return true;
 	}
 
@@ -935,7 +977,10 @@ export default function (pi: ExtensionAPI) {
 				0,
 			);
 
-			const reports = getLatencyReports();
+			const dispatchIntegration =
+				loadedDispatchIntegration ?? (await loadDispatchIntegration());
+			loadedDispatchIntegration = dispatchIntegration;
+			const reports = dispatchIntegration.getLatencyReports();
 			const last = reports.length > 0 ? reports[reports.length - 1] : undefined;
 			const diagStats = getDiagnosticTracker().getStats();
 			const slowRunners = last
@@ -968,7 +1013,7 @@ export default function (pi: ExtensionAPI) {
 					count: crashEntries.length,
 				}),
 			];
-			const slopScoreLine = getDispatchSlopScoreLine();
+			const slopScoreLine = dispatchIntegration.getDispatchSlopScoreLine();
 
 			if (crashEntries.length > 0) {
 				lines.push("", t("lens.health.topCrashFiles", "Top crash files:"));
@@ -1111,7 +1156,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Cascade summary
-			const cascadeStats = getCascadeSessionStats();
+			const cascadeStats = dispatchIntegration.getCascadeSessionStats();
 			if (cascadeStats.runs > 0) {
 				lines.push(
 					"",
@@ -1458,7 +1503,15 @@ export default function (pi: ExtensionAPI) {
 	// --- Events ---
 
 	pi.on("session_start", async (event, ctx) => {
+		warmDispatchAtSessionStart();
+		void warmLspService().catch((err) =>
+			logExtension({ subsystem: "lsp", level: "warn", message: `LSP warm failed: ${err}` }),
+		);
+		void warmFormatters().catch((err) =>
+			logExtension({ subsystem: "format", level: "warn", message: `formatter warm failed: ${err}` }),
+		);
 		rememberEventCtx(ctx);
+		refreshCtxDerivedPlumbing();
 		const sessionStartFiredAt = Date.now();
 		try {
 			dbg("session_start fired");
@@ -1890,6 +1943,13 @@ export default function (pi: ExtensionAPI) {
 		// Trust can change without a new session. Re-adopt before this turn can
 		// reach any install-capable or LSP-spawn path.
 		adoptProjectTrustFromPorts(hostPorts);
+		if (
+			lensWidgetVisible &&
+			ctx?.ui &&
+			(mountedLensWidgetUi === undefined || mountedLensWidgetUi !== ctx.ui)
+		) {
+			mountLensWidget(ctx.ui, readExtensionMode(ctx));
+		}
 		runtime.beginTurn();
 		clearLastAnalyzedStateCache();
 

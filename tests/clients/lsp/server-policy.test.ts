@@ -8,6 +8,7 @@ const toolNotFound = (message = "ENOENT: command not found") =>
 	Object.assign(new Error(message), { kind: "tool-not-found" as const });
 
 const observedReadFileSync = vi.hoisted(() => vi.fn());
+const logSessionStart = vi.hoisted(() => vi.fn());
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	observedReadFileSync.mockImplementation(actual.readFileSync);
@@ -36,6 +37,10 @@ vi.mock("../../../clients/latency-logger.js", () => ({
 	resetLatencyLog: vi.fn(),
 }));
 
+vi.mock("../../../clients/sessionstart-logger.js", () => ({
+	logSessionStart,
+}));
+
 const dirs: string[] = [];
 
 afterEach(() => {
@@ -46,6 +51,7 @@ afterEach(() => {
 	ensureTool.mockReset();
 	launchLSP.mockReset();
 	observedReadFileSync.mockClear();
+	logSessionStart.mockClear();
 	vi.resetModules();
 });
 
@@ -573,6 +579,31 @@ describe("lsp server policy", () => {
 			const resolver = NearestRoot([".git"], undefined, stopDir);
 			const result = await resolver(file);
 			expect(result).toBeUndefined();
+		} finally {
+			cwdSpy.mockRestore();
+		}
+	});
+
+	it("clamps a marker root above the session cwd and logs once (#1373)", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-clamp-"));
+		dirs.push(tmp);
+
+		const project = path.join(tmp, "project");
+		const file = path.join(project, "nested", "doc.md");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(path.join(tmp, ".marksman.toml"), "[core]\n");
+		fs.writeFileSync(file, "# Doc\n");
+
+		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(project);
+		try {
+			const resolver = NearestRoot([".marksman.toml"]);
+			await expect(resolver(file)).resolves.toBe(project);
+			await expect(resolver(file)).resolves.toBe(project);
+			expect(logSessionStart).toHaveBeenCalledTimes(1);
+			expect(logSessionStart).toHaveBeenCalledWith(
+				expect.stringContaining("lsp root clamped to session cwd"),
+			);
 		} finally {
 			cwdSpy.mockRestore();
 		}

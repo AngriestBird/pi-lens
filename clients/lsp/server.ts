@@ -76,6 +76,83 @@ const FALLBACK_PROJECT_MARKERS = [
 	"Package.swift",
 ] as const;
 
+/**
+ * Markers that make a nested root an independently hosted project rather than
+ * a config-only directory that should share an ancestor's LSP client.
+ */
+const PROJECT_BOUNDARY_MARKERS = [
+	"package.json",
+	"package-lock.json",
+	"pnpm-lock.yaml",
+	"yarn.lock",
+	"bun.lock",
+	"bun.lockb",
+	"go.work",
+	"go.mod",
+	"Cargo.toml",
+	"Cargo.lock",
+	"pyproject.toml",
+	"uv.lock",
+	"poetry.lock",
+	"Pipfile",
+	"Pipfile.lock",
+	"pom.xml",
+	"build.gradle",
+	"build.gradle.kts",
+	"settings.gradle",
+	"settings.gradle.kts",
+	"mix.exs",
+	"pubspec.yaml",
+	"Package.swift",
+] as const;
+
+// This is process-global state, so each candidate pair is logged once per
+// process (not once per session). Keep the root-boundary marker below aligned
+// with FALLBACK_PROJECT_MARKERS, the shared fallback root-policy marker set.
+const loggedRootCeilingClamps = new Set<string>();
+
+function isSameOrWithin(ancestor: string, candidate: string): boolean {
+	const relative = path.relative(path.resolve(ancestor), path.resolve(candidate));
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+/** Enforce the session cwd as the hard boundary for LSP client root selection. */
+export function enforceLspRootCeiling(
+	root: string,
+	sessionCwd: string,
+	filePath?: string,
+): string {
+	const resolvedRoot = path.resolve(root);
+	const resolvedCwd = path.resolve(sessionCwd);
+	// Callers may explicitly inspect an out-of-session file (notably isolated
+	// tests and API consumers). The cwd ceiling governs roots for files that are
+	// actually inside the declared session project.
+	if (filePath && !isSameOrWithin(resolvedCwd, path.resolve(filePath))) {
+		return resolvedRoot;
+	}
+	if (isSameOrWithin(resolvedCwd, resolvedRoot)) return resolvedRoot;
+
+	const logKey = `${normalizeMapKey(resolvedCwd)}:${normalizeMapKey(resolvedRoot)}`;
+	if (!loggedRootCeilingClamps.has(logKey)) {
+		loggedRootCeilingClamps.add(logKey);
+		logSessionStart(
+			`lsp root clamped to session cwd: candidate=${resolvedRoot} cwd=${resolvedCwd}`,
+		);
+	}
+	return resolvedCwd;
+}
+
+export async function hasProjectBoundaryMarker(dir: string): Promise<boolean> {
+	// A nested Git checkout is an independently hosted project even when it has
+	// no language manifest. Keep this directory boundary aligned with the shared
+	// FALLBACK_PROJECT_MARKERS policy used by nearestNonExcludedFallbackRoot.
+	if (await markerExists(dir, ".git")) return true;
+	for (const marker of PROJECT_BOUNDARY_MARKERS) {
+		if (await markerExists(dir, marker)) return true;
+	}
+	return false;
+}
+
 function pathSegments(dir: string): string[] {
 	const parsed = path.parse(path.resolve(dir));
 	return path
@@ -231,6 +308,18 @@ const DIRECT_LSP_NEGATIVE_TTL_MS = Math.max(
 const directLspCommandUnavailableUntil = new Map<string, number>();
 const directLspCommandSkipLoggedUntil = new Map<string, number>();
 
+function pruneExpiredDirectLspNegativeEntries(now = Date.now()): void {
+	for (const [command, until] of directLspCommandUnavailableUntil) {
+		if (until <= now) {
+			directLspCommandUnavailableUntil.delete(command);
+			directLspCommandSkipLoggedUntil.delete(command);
+		}
+	}
+	for (const [command, until] of directLspCommandSkipLoggedUntil) {
+		if (until <= now) directLspCommandSkipLoggedUntil.delete(command);
+	}
+}
+
 function isSimpleCommand(command: string): boolean {
 	return (
 		!isFullyQualified(command) &&
@@ -242,15 +331,17 @@ function isSimpleCommand(command: string): boolean {
 export function isDirectLspCommandTemporarilyUnavailable(
 	command: string,
 ): boolean {
+	const now = Date.now();
+	pruneExpiredDirectLspNegativeEntries(now);
 	const until = directLspCommandUnavailableUntil.get(command);
-	if (!until || until <= Date.now()) {
+	if (!until || until <= now) {
 		directLspCommandUnavailableUntil.delete(command);
 		return false;
 	}
 	const loggedUntil = directLspCommandSkipLoggedUntil.get(command) ?? 0;
-	if (loggedUntil <= Date.now()) {
+	if (loggedUntil <= now) {
 		logSessionStart(
-			`lsp direct command ${command}: skipped by negative availability cache (${Math.max(0, until - Date.now())}ms remaining)`,
+			`lsp direct command ${command}: skipped by negative availability cache (${Math.max(0, until - now)}ms remaining)`,
 		);
 		directLspCommandSkipLoggedUntil.set(command, until);
 	}
@@ -1019,7 +1110,7 @@ export function NearestRoot(
 						(await markerExists(currentDir, pattern)) &&
 						!(await isExcludedLspRoot(currentDir))
 					) {
-						return currentDir;
+						return enforceLspRootCeiling(currentDir, process.cwd(), file);
 					}
 				}
 

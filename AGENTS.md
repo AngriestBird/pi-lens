@@ -1,5 +1,13 @@
 # pi-lens — agent context
 
+LSP client root selection has a hard session-cwd ceiling: marker/config lookup
+may consult parents, but the root used for client identity and spawn never may.
+`NearestRoot` clamps an above-cwd marker to cwd and logs that clamp once. After
+fixture/gitignore filtering, `LSPService` coalesces a config-only nested root to
+an already-hosted same-server ancestor; a nested manifest/lockfile boundary
+keeps its independent client. Keep both policies deterministic and free of
+wall-clock expiry. (#1328, #1373)
+
 MCP warm word indexes are bounded per root in `clients/mcp/analyze.ts`: callers
 must acquire/release a lease around every use, because idle and LRU eviction
 must never retire an index mid-query. Idle timers are generation-owned,
@@ -16,6 +24,14 @@ and `.tpl` edits inside a chart dispatch one canonical-root-deduplicated,
 bounded `helm lint` pass through the ordinary typed availability/install seam.
 It is smart-default and read-only; rendered-manifest validation remains deferred
 to #1283 slice B.
+
+Session degradation telemetry owns its dedupe and tally state in
+`clients/degradation-ledger.ts`: use `recordDegradationOnce` for a repeated
+site/subject that represents one user-visible degradation, and
+`incrementDegradationCount` when every event contributes to the exact group
+count but health should retain only one updated entry per subject. Both reset
+with the ledger at the session boundary; do not add caller-local duplicate
+sets or count one blocked action at both policy gates. (#1366, #1292)
 
 ## Maintaining this file (do this on every commit)
 
@@ -66,6 +82,14 @@ first client operation with `tests/clients/interleaving-kit.ts`, never sleeps.
 The TypeScript idle default is 20 minutes to preserve warm LSPs across subagent
 bursts; every non-idle removal path must also clear timer ownership. (#1332)
 
+**Path-keyed Tier-3 caches normalize at both boundaries.** Widget LSP server
+roots, startup-scan context keys, and Ruby drive-root memo keys use
+`normalizeMapKey`; equivalent separator/case spellings must share one entry.
+Widget file-record cardinality eviction is render-aware: only idle records with
+no live diagnostic may be evicted. Formatter detection signatures include
+formatter config metadata, and tsconfig-path signatures include recursive
+`extends`/project-reference configs. (#1389)
+
 **Spawn repair decisions use the typed safe-spawn taxonomy.** A raw OS
 `ENOENT` can mean either a missing executable or an invalid child cwd. Consume
 `SpawnResult.spawnFailure.kind` / `SpawnFailureError.kind`, never errno or
@@ -102,14 +126,22 @@ For human contributors and issue/PR authors, see `CONTRIBUTING.md` at the repo r
 
 **Shape 12 — a durable commit followed by an out-of-guard mirror refresh** (found #1309 review, 2026-08-12; swept same day: dispositions was the sole member, probe-cache is the reference-correct pattern). When a writer atomically replaces shared state and THEN refreshes an in-memory mirror, stat/metadata, or validity cache, the refresh must occur before releasing the lock/guard — or be revalidated against the committed generation/object identity. Otherwise a sibling writer commits between publication and refresh, pairing one writer's mirror metadata with another's durable state. When you touch any lock consumer, atomic-write-plus-mirror seam, or worker promotion: verify the mirror update executes INSIDE the guard (`durable-store.ts`'s `afterWriteLocked` is the sanctioned seam), and classify advisory/rebuildable mirrors separately from behavior-gating state. Detection: grep the release call, then look downward for cache/memo/flag assignments.
 
+**Every bug fix ships a regression test that FAILS on the pre-fix code (red-first), and the fix makes it pass (green).** A fix without a test that reproduces the bug is not done. Prove the red-first: run the new test against the unmodified pre-fix code and confirm it fails for the RIGHT reason (the bug), not a setup error; a test that passes on pre-fix code is vacuous (defect-shape 7) and does not protect against regression. Reviews mutation-verify this: revert the fix, the test must go red. When a bug reveals a class (see the bug-class sweep discipline), the regression test should cover the class shape, not just the single reported input.
+
+**Clean up after merged PRs: the worktree AND the branch (local + remote).** Merged branches and their worktrees accumulate fast (a single burn-down session left 130+ worktrees). Note that `gh pr merge --delete-branch` SILENTLY fails to delete a branch a worktree still holds (`cannot delete branch … used by worktree`), so merging does not auto-clean when a worktree checks the branch out. Periodically and at session end: `git worktree remove` your own temp worktrees when done; `git worktree prune` dead entries; `git push origin --delete <branch>` for merged remote branches (works regardless of local worktrees); `git branch -d <merged-branch>` locally. For plegma `~/.plegma/work/sub-*` worktrees, the daemon auto-cleans unchanged ones — force-remove committed-branch ones only once their PR merged and the agent is no longer live.
+
 ### Recurring defect shapes — screen against these BEFORE you write code
 
 The captured-at-subscribe / used-after-replace shape also applies to pi's
 `events` API: `pi.events.emit` is a session-bound wrapper whose runtime is
 invalidated on replacement. Long-lived publishers must retain a getter and
 resolve the emitter at delivery time; deferred callbacks must resolve inside
-the callback, never before scheduling. This is the pattern established by
-#1128 for the bus and lens-event publishers.
+the callback, never before scheduling. The getter itself is activation-scoped:
+module-singleton bus/notifier/widget-render plumbing must be re-wired from the
+current factory on every `session_start`, BEFORE the #473 concurrent-secondary
+guard can return, because a sibling activation can overwrite the singleton and
+later go stale. Emit-failure suppression is occurrence-scoped (success re-arms
+it), and a stale occurrence records one `bus-stale` degradation. (#1128, #1383)
 
 This is the payoff of the two disciplines above: a bounded checklist of defect *shapes* that each recurred ≥2× across the arc. Read it at task start; when your change matches a shape, treat the screen as an acceptance criterion (and the regression test the shape implies). Each entry is **SHAPE → SCREEN (when you touch X, verify Y) → canonical example → detection**. Where a shape has a fuller treatment above, this cross-references rather than restates it.
 
@@ -138,7 +170,37 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 **ast-grep candidates:** shapes 4, 2, 1, and 6 are *syntactically* detectable and could become dogfooded rules (assessed for false-positive load in **#1158**); shapes 3, 5, 7, 8, 10 are semantic — good and bad uses are syntactically identical — and stay review-enforced. Do not author rules here; #1158 tracks the viable set.
 
+## Standing maintenance routines (invoke on request)
+
+These are named, well-scoped sweeps a maintainer can ask for by name; each is dispatched deliberately (often to a worker), never run autonomously, and the DELETION routines require proof + adversarial verification before anything is removed. Several overlap existing disciplines: bug-class sweeps, single-source-of-truth/consolidation, and red-first regression tests.
+
+- **Crash fuzzer** — find real crashes and hangs, then open root-cause fix issues. **Trigger/scope:** explicit request to exercise a named surface or bounded scenario. **SAFETY RAIL:** reproduce first; distinguish a real defect from a build, cache, or environment artifact per the dogfooding rule.
+- **Internal-only shipper** — ship or delete forgotten internal-only features based on ACTUAL usage. **Trigger/scope:** explicit request covering a named internal-only feature or bounded feature set. **SAFETY RAIL:** usage-based deletion needs real usage evidence (telemetry or grep of call sites), never inference; deletion requires sign-off.
+- **Logic simplifier** — simplify convoluted logic. **Trigger/scope:** explicit request for named logic or a bounded module. **SAFETY RAIL:** behavior-preserving only; the full test suite must be green; no semantic change.
+- **Logic bugfixer** — model tricky logic to find and fix bugs. **Trigger/scope:** explicit request for a named stateful, ordered, or otherwise tricky logic seam. **SAFETY RAIL:** add a red-first regression test for every fix.
+- **Dup unifier** — merge duplicated implementations into one (this IS our single-source-of-truth discipline). **Trigger/scope:** explicit request for a named duplicate family or bounded code area. **SAFETY RAIL:** prove the duplicates are semantically identical; a coverage test must bind the merged form.
+- **Dead-code removal** — delete provably unreachable code. **Trigger/scope:** explicit request for named code or a bounded reachability sweep. **SAFETY RAIL:** “provably” means traced (with no dynamic, reflective, or config-driven reachability), not guessed; perform adversarial verification before deletion.
+- **Useless-test pruner** — delete tests that cannot fail (defect-shape 7 vacuous tests). **Trigger/scope:** explicit request for named tests or a bounded test family. **SAFETY RAIL:** prove vacuity via mutation (the test passes on deliberately broken code) before deleting; unfamiliar ≠ useless.
+- **Shipped-feature inliner** — remove flags for fully shipped features. **Trigger/scope:** explicit request for a named shipped feature and its flag. **SAFETY RAIL:** confirm the flag is default-on everywhere and no consumer sets it off; remove both branches cleanly.
+- **Flaky-test fixer** — root-cause flaky CI tests (never mute). **Trigger/scope:** explicit request for named flaky tests or a bounded CI failure pattern. **SAFETY RAIL:** identify the actual nondeterminism (timing, order, or environment); fix the cause; the fix must be deterministic.
+- **Abstraction improver** — flatten over-engineered abstractions. **Trigger/scope:** explicit request for a named abstraction or bounded call chain. **SAFETY RAIL:** behavior-preserving; keep one caller-visible surface unchanged.
+- **Abstraction police** — fix layering violations. **Trigger/scope:** explicit request for a named boundary or bounded dependency direction. **SAFETY RAIL:** define the intended layering; restore it without breaking the public contract.
+
+Each routine's output is a PR (or a tracked issue for discovery routines), reviewed under the same two-tier adversarial-review + red-first discipline as any change. Deletions are irreversible-adjacent — treat them with the confirm-before-destructive-action rule.
+
 ## What it is
+
+The `agent_end` deferred-format drain runs at most three formatter subprocesses
+concurrently, then processes claimed results in admission order with a
+`setImmediate` yield between bookkeeping steps. Keep formatter invocation and
+per-file bookkeeping isolated so multi-file batches cannot recreate one
+CPU-bound event-loop burst. (#1387)
+
+Review-graph workspace cache invalidation uses a process-wide epoch component
+that survives all-workspace clears; per-workspace eviction/reset increments the
+workspace component. Any new in-flight cache publication must capture and pass
+the combined epoch. Authoritative project-snapshot deletion goes through the
+single timer-clearing helper so idle timers cannot retain deleted generations.
 
 The review-graph size gate uses the shared cooperative source walker with a
 `maxFileCount + 1` sentinel: it stops at the first over-cap source entry, so
@@ -164,9 +226,33 @@ writes the workflow summary; it must never close or edit detected issues.
 The LSP status surface includes a bounded per-client history of operational
 diagnostic-pull failures; unsupported `-32601` responses are intentionally
 excluded. Strategy-gated `didSave` remains separate and out of scope here.
+
+Git-guard command classification canonicalizes IFS parameter-expansion
+separators in one quote-aware pass before tokenization, including nested
+command strings. Any non-leading guarded `git` token is treated as indirect;
+unknown wrappers and arbitrary run flags therefore fail closed, while literal
+text consumers (`echo`, `printf`, `grep`) do not turn quoted prose into a
+blocked operation. Keep the canonicalizer scoped to command classification so
+quoted arguments remain intact.
 Unsupported pull responses are also recognized by the standard message-only
 variants (`method not found`, `unknown method`, and `unsupported method`).
 Status consumers receive detached, 200-character-bounded failure entries.
+
+The git guard classifies wrapper launchers only after basename/PATHEXT
+normalization, and strips shell escapes only from command-verb tokens; path
+arguments retain the shared lexer’s Windows-backslash behavior. Failed bash
+results never register grep/read coverage.
+
+Degradation-ledger recording is best-effort observability: its public record,
+once-record, and increment entry points normalize unknown values to bounded
+strings and swallow internal failures so telemetry never throws into a host
+path.
+
+LSP workspace-edit merge buckets are keyed by `pathIndexKey`, not raw URI
+spelling; each canonical bucket retains its first URI as the display key.
+Call-graph `allSymbols`/`allRefs` file keys are `normalizeMapKey`-canonical,
+and lookup, cross-file filtering, and same-file classification must use that
+same canonical form.
 
 TypeScript LSP clients are evicted after `PI_LENS_TS_IDLE_EVICT_MS` of inactivity
 (default five minutes). Eviction removes the client from service state before
@@ -176,7 +262,45 @@ must stay unref'd, reset on reuse, busy-client guarded, and cleared on shutdown.
 
 Rule-id normalization derives its language suffixes from the bundled CodeRabbit rule tree at startup; tests must keep that derived set covered so new vendored language rules cannot silently evade project policy matching.
 
+Small process-lifetime memo tables use `clients/bounded-cache.ts` when an
+insertion-ordered LRU cap is sufficient; path-root caches still normalize keys
+at the seam. Widget-state's file map remains a plain map because active
+diagnostic records must not be evicted; it opportunistically removes only
+records idle beyond the active window at one lifecycle size boundary (never
+from every `getOrCreate` call on a full scan) and can therefore temporarily
+exceed its cap when all records are active. #1389's bounded-by-nature tables (finite
+package-manager/profile/package-root/session domains) require no cache layer.
+
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
+
+The session-start smells rollup still uses bounded tail reads, but its session-start path must pass the current `sessionStartMs` into `countRecentSmells`; scoped scans admit only rows with a parseable `ts` at or after that boundary, dropping un-timestamped rows rather than surfacing ambiguous history. Unscoped calls remain available for non-session diagnostic/test consumers.
+
+Git-guard reconciliation must clear persisted `blockerContent` only when an
+explicit `blockingFiles` record exactly matches the parsed blocker-content
+paths and the current per-file dispatch reconciles the last blocker clean.
+Malformed or incomplete provenance remains unknown/blocking; otherwise a clean
+per-file result can remove `affectedFiles` while leaving stale content that
+blocks every later commit lookup (#1084).
+
+Tier-2 cache bounds (#1389) use the Tier-1 idle-timer/LRU shape where entries are rebuildable: reverse-dependency and topology entries clear their timers through one deletion helper, tree-sitter query caches use insertion-order LRU with query disposal. ReadGuard is the exception: its reads are behavior-gating state, so unconsumed reads are retained until edit or session end, subject to a high sanity cap that evicts oldest→needs-re-read; reads are never silently allowed post-eviction. Only consumed reads may be evicted at the compact file cap. Widget-state and Tier-3 cache bounds remain deferred.
+
+Extension policy tests bind JS/TS fact applicability and bash source-like file
+access to `KIND_EXTENSIONS`; the only intentional exceptions are the documented
+Vue/Svelte fact exclusion and the small legacy text/config allowlist in
+`clients/file-kinds.ts`. Keep new language extensions there rather than adding
+provider-local regexes or sets.
+
+Review-graph workspace caches and authoritative project snapshots are bounded to
+8 roots and use 20-minute per-root idle eviction by default. Their windows are
+env-tunable with `PI_LENS_REVIEW_GRAPH_IDLE_EVICT_MS` and
+`PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS`; graph eviction also drops completed
+build-dedup promises so the next access is a true cold rebuild. Async graph
+writes carry a per-workspace epoch, preventing an in-flight build from
+resurrecting an evicted entry. (#1389)
+
+Git guard text-consumer allowances apply only to literal arguments: command,
+backtick, and process substitutions are execution contexts and must recurse
+through the canonicalizer before `echo`/`printf`/`grep` can allow text.
 
 LSP root exclusion recognizes fixture conventions by exact path segment; Go's
 `testdata` convention applies ancestor-wide, but names such as `testdata-tools`
@@ -186,6 +310,26 @@ empty result, while the project ignore matcher remains authoritative.
 
 
 A pi coding-agent extension that runs automated checks on every file write/edit. Dispatches async parallel runners (LSP, biome, ruff, ast-grep, tree-sitter, jscpd, knip, Madge, and language-specific linters/build checks) and injects findings as context injections at turn-end and session-start.
+
+Startup lazy-loading (#1394 Phase 2): the dispatch runner graph is loaded through
+`clients/dispatch/lazy.ts`. Session-start callers may warm its shared promise
+without awaiting it; the per-edit pipeline must await that same promise before
+dispatch or cascade work. Keep host registrations eager and never create a
+second warm promise for concurrent/subagent session starts.
+The formatter catalog follows the same rule through `clients/formatters-lazy.ts`;
+`format-service.ts` must await that shared promise before catalog lookup or
+formatter execution.
+The LSP service follows it through `clients/lsp-lazy.ts` for async pipeline,
+session, and warm-attach consumers. The `index.ts` status/reset adapter remains
+eager because its synchronous shutdown/status contracts are host-visible; do
+not make those callbacks async without updating their ordering contract/tests.
+
+The git guard's command-position classifier expands `$IFS`, `${IFS}`, and
+`$IFS$<positional>` forms before re-tokenizing guarded verbs. Known command-string
+launchers include shell families plus busybox, toybox, and nix-shell; an
+unrecognized leading launcher with `-c`/`--run`/`/c`/`-Command` is inspected
+recursively and fails closed only when its command string contains an actual
+guarded git verb (literal mentions such as `echo git push` remain allowed).
 
 CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
 PR bodies may not use a comma-separated close list because GitHub applies only
@@ -212,6 +356,18 @@ clients/
   mcp/                     host-neutral facades: analyze, session, review, ipc, host-shim
   runtime-session.ts      session_start handler — snapshot hydrate, tool preinstall, background scans, LSP warm
   project-snapshot.ts     Versioned seq-stamped project snapshot cache
+
+One-shot cascades release workspace-topology cache eviction timers through
+`releaseWorkspaceTopologyIdleTimers()` while retaining reusable entries; cache
+access re-arms eviction. Keep cascade-discovered tier-2 cache timers on this
+release path so print-mode operations do not leave a liveness tail.
+
+The diagnostics widget records the exact `ctx.ui` identity only after a
+successful `setWidget` mount. A visible widget re-asserts that mount on
+`turn_start` when the host replaces its UI object; this remains gated by the
+live run mode and `lensWidgetVisible`, so a user toggle-off or headless mode is
+never undone. Missing `ui.setWidget` is a log-once-per-extension-session
+diagnostic rather than a silent mount failure. (#1381)
   project-changes.ts      Append-only project/file sequence change log
   reverse-deps.ts         Snapshot-backed reverse dependency index/query helpers
   word-index.ts           Identifier inverted index + BM25 ranking (#162) — built in the session scan, persisted with per-file mtimes in the snapshot; consumed by BOTH the pi symbol_search tool and the MCP pilens_symbol_search mirror (#348 phase 1); session warmup preflights the bounded current file set and incrementally refreshes only sparse stale/new/deleted documents. A stale set whose ESTIMATED WORK exceeds one full rebuild (posting-scan + re-read cost vs totalTokens + corpus re-read cost), a dense stale set (≥32 documents AND >30% of the corpus), >30% file-set churn, or legacy metadata selects a separately-built full replacement BEFORE mutating the old index (#1197): repeated per-document posting-array filters become effectively quadratic (2,061 all-stale docs took 216.8s vs a 7.5s full build), and because per-document cost GROWS with the corpus no density ratio or absolute count is a bound — 800 docs / 239 stale at 29.875% measured 90.6s with a 39.6s loop block. Every bulk path (async build + both refresh loops) yields on an ~8ms monotonic budget OR'd with its item checkpoint — never count-only, which bounds nothing when per-item cost is unbounded — including within large documents and after any line ≥4,096 chars. Synchronous `buildWordIndex` is the small/test/reference primitive only. Superseded builds never publish a partial index and never escape as an exception into a caller's warmup pass.
@@ -685,7 +841,7 @@ LSP server definitions resolve in `clients/lsp/config.ts` as project
 `serverOverrides` merge by ID; project `disabledServers` and `warmFiles` replace
 the global arrays when present.
 
-All pi packages are `@earendil-works/*` (migrated from `@mariozechner/*` in 0.74.0). Peer dep: `@earendil-works/pi-coding-agent`. Runtime dep: `@earendil-works/pi-tui`.
+All pi packages are `@earendil-works/*` (migrated from `@mariozechner/*` in 0.74.0). Peer dep: `@earendil-works/pi-coding-agent`. Runtime dep: `@earendil-works/pi-tui`. The v4-safe dependency baseline resolves both host packages at `0.84.2`; the peer remains broad at runtime and the devDependency pins the SDK for type/compatibility checks. Re-audit host declarations before taking a future major/minor bump.
 
 ## Git & PR workflow
 
@@ -1065,7 +1221,7 @@ pi-lens's lifecycle hooks (`session_start`, `tool_call`, `tool_result`, `context
 - **No hook's synchronous burst should block > ~50ms.** Heavy work is async + time-budgeted through `clients/cooperative-budget.ts` (`createDeadline` / `yieldIfOverBudget` / `forEachCooperatively`) or **deferred past the typing window** (a few-second `setTimeout`, not `setImmediate`). Count/modulus yielding does not bound occupancy when per-item cost grows; call the cheap monotonic deadline check at every work unit.
 - **Bounding a promise by a timer? Use `clients/deadline-utils.ts`** (`withTimeout` reject-on-timeout · `withBudget` resolve-`undefined`-on-timeout · `withinRemaining` deadline-based swallow · `withDeadline` core). Do **not** hand-roll another `Promise.race` + `setTimeout` — it drifted into three near-identical copies (#366), two with latent bugs (a missing late-rejection guard → unhandled rejection when the timer wins; an uncleared timer). The core suppresses the loser promise's late rejection and clears its timer in one place.
 - **Every new async step added to a bulk/sweep/per-file loop needs BOTH bounds, not just one (#615).** `runWorkspaceDiagnostics`'s per-file `processFile` was already `withDeadline`-wrapped, but the #608 fix (`preOpenGroupFiles`, a batch pre-open pass inserted ahead of it) shipped with **no bound at all** — a hung `getClientsForFile`/`notify.open` call (stuck server spawn, stuck notification write) froze the entire sweep with no heartbeat and, worse, pressing Escape didn't help either: the loop's `signal?.aborted` check only runs *between* files, never while one is mid-await. A real dogfooding incident hit this (`lsp_workspace_diagnostics_start` logged, then total silence, un-abortable). The fix needed two independent bounds: a `withDeadline` timer (catches a hang even with no user action) **and** a `Promise.race` against the abort signal (so an explicit Escape/turn-abort unblocks immediately instead of waiting out the rest of the per-item budget) — see `tests/clients/lsp/workspace-diagnostics-sweep-batch-open.test.ts`'s `#615` block for the pattern, including the "confirm the regression test actually hangs against the unbounded code" verification step. When adding a new async unit of work to an existing bounded loop, ask both questions: *what stops this if it hangs on its own?* and *what stops this if the user aborts?* — a "yes" to only one is not done.
-- **Per-file / per-event work must be O(1) amortized** — memoize expensive derivations keyed by an invalidation signal (`.gitignore` mtime, `fileSeq`, content hash); never recompute-from-scratch on repeat (e.g. `ignoreMatcher.isIgnored` was recomputed per file per scan — now memoized). Project config discovery uses `walkUpDirs` with a start-dir cache validated by ancestor directory mtimes plus the actual inherited `.pi-lens.json`/`pi-lens.json` path + mtime (not just a file directly under the git root), so editing project `ignore` patterns drops the cached matcher without a session restart while hot dispatch paths avoid repeated candidate probes. The matcher cache key also includes the **global** `~/.pi-lens/config.json` mtime: `ignore` patterns there apply across all projects at **lowest precedence** (global → project `.gitignore` → project `.pi-lens.json`, so a project `!negation` re-includes a globally-ignored path — #252).
+- **Per-file / per-event work must be O(1) amortized** — memoize expensive derivations keyed by an invalidation signal (`.gitignore` mtime, `fileSeq`, content hash); never recompute-from-scratch on repeat (e.g. `ignoreMatcher.isIgnored` was recomputed per file per scan — now memoized). Project config discovery uses `walkUpDirs` with a start-dir cache validated by ancestor directory mtimes plus the actual inherited `.pi-lens.json`/`pi-lens.json` path + mtime (not just a file directly under the git root), so editing project `ignore` patterns drops the cached matcher without a session restart while hot dispatch paths avoid repeated candidate probes. The matcher cache key also includes the **global** `~/.pi-lens/config.json` mtime: `ignore` patterns there apply across all projects at **lowest precedence** (global → project `.gitignore` → project `.pi-lens.json`, so a project `!negation` re-includes a globally-ignored path — #252). Directory-mtime memos such as `getModuleSourceFiles` also re-walk stamps younger than the filesystem's coarse-granularity guard window, because an equal mtime cannot prove that a same-tick write was absent.
 - **Expensive scans run once, cache (process memo + disk), reuse across sessions/turns.** Cold start does the minimum (forced "quick" mode), then a deferred background warmup fills caches.
 - **Register every `Worker` listener before calling `worker.unref()` (#1148).** Adding the first `"message"` listener references the Worker's public `MessagePort` again, so `unref()`-then-listen leaves an idle persistence worker able to keep a completed one-shot process alive. Real child-process exit tests guard this lifecycle behavior; fake timers and in-process assertions cannot see referenced worker handles.
 - **Detached timers must not capture pi `ctx` getters.** After `ctx.newSession()` / `ctx.fork()` / `ctx.switchSession()` / `ctx.reload()`, pi invalidates the old extension context; a later timer that reads `ctx.ui`/`ctx.cwd` crashes with a stale-context error (#338). Capture any needed primitive/function while the event is active, guard delayed work with `RuntimeCoordinator.sessionGeneration`, cancel on `session_shutdown`, and make timer callbacks best-effort/no-throw.
@@ -1396,6 +1552,32 @@ Mock the **environment** (tool presence, network, abort/error injection) — nev
 - Use `closes` only when the commit fully resolves the entire issue; use `refs` for any partial work.
 - GitHub auto-closes an issue on any commit containing `closes #NNN` regardless of trailing text — "closes #125 Phase 1" still closes #125.
 
+### Commit message style
+
+**Commit messages follow the seven-rules discipline, on top of the repo's conventional-commit prefix.** See [A Note About Git Commit Messages](https://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html) and [How to Write a Git Commit Message](https://cbea.ms/git-commit/). Keep the `type(scope): subject` prefix and the `(closes #NNN)`/`(refs #NNN)` issue reference (see above). Then:
+
+1. Use the imperative mood for the subject: `add X`, `fix Y`, never `added`, `adds`, or `fixing`. Test it with: “If applied, this commit will `<subject>`.”
+2. Keep the subject concise. Aim for 50 characters or fewer, with a hard cap of about 72 characters including the prefix. Do not add a trailing period. Use lowercase after the colon, matching repo style.
+3. Put a blank line between the subject and body.
+4. Wrap the body at about 72 columns.
+5. Explain what changed and why, not how. The diff shows how. Include motivation, the problem fixed, side effects, and rejected alternatives when relevant.
+6. Keep the `Co-Authored-By:` trailer.
+
+Short, obvious changes may use a subject only. Non-trivial changes get a body.
+
+### Documentation and prose style
+
+**Prose in docs, changelog, and PR descriptions follows the [Google developer documentation style guide](https://developers.google.com/style) and [Simplified Technical English (ASD-STE100) principles](https://asd-ste100.org/).** This is a principles-only adoption of ASD-STE100, a proprietary aerospace controlled-language specification; it does not adopt its licensed word list. Apply this standard to `README`, `docs/`, `AGENTS.md`, changelog entries, and PR bodies:
+
+- Use active voice and present tense.
+- Use second person (`you`) for instructions. Use the imperative for procedure steps.
+- Use short sentences. Keep one idea or instruction per sentence. Aim for about 20–25 words or fewer.
+- Use consistent terminology. Use the same word for the same thing every time. Do not swap synonyms.
+- Use sentence case for headings.
+- Define an acronym on first use. Prefer a plain word over jargon when one exists.
+- Avoid gerund or noun pile-ups and ambiguous constructions. Avoid `please`. Use the Oxford comma.
+- These rules are machine-checkable. Pi-lens ships a config-gated Vale runner (`clients/dispatch/runners/vale.js`). A `.vale.ini` with the Google style package would enforce this section automatically; track that separately.
+
 ## Issue triage & labels
 
 Every issue should carry **one TYPE label + at least one `area:` label**.
@@ -1424,6 +1606,7 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
 - `ast_grep_outline` (#311, `tools/ast-grep-outline.ts` → `AstGrepClient.outline` → `ast-grep outline --json=compact`) is a SYNTAX-ONLY structure tool (no index/LSP); `module_report` stays the pi-lens-aware default. pi tool only — not mirrored to MCP (parity deferred, like `read_enclosing`).
 - `clients/runtime-config.ts` is "pure constants" by intent. Resolutions that read disk or env (e.g. `getRunnerTimeoutFloorMs`) must be **lazy memoized getters** with a `_resetForTests` hook, not module-level reads, so importing the file has no I/O side effect and tests can override inputs deterministically.
 - **Project-wide extension enumeration derives from `KIND_EXTENSIONS`** (#894). `ALL_SCANNABLE_EXTENSIONS`, `WARMUP_SOURCE_EXTS`, and `SUPPORTED_FILE_KINDS` must never regain hand-maintained per-language lists; adding a file kind in `clients/file-kinds.ts` automatically makes source scans and language-profile warmup see it. Preserve consumer-specific narrowing with an explicit `extensions` override at that call site, not by narrowing the shared defaults.
+- Codebase-model file selection uses `detectFileRole`, `isBuildArtifact`, and `isExternalOrVendorFile`; generated-artifact directory names (including `dist`) are maintained in `clients/generated-artifacts.ts`, not reimplemented as model-local substring tests. Persisted models carry the canonical review-graph identity and `CODEBASE_MODEL_VERSION`; load rejects either mismatch.
 - Numeric inputs from env vars or JSON config that flow into `Math.max` / `Math.min` must be coerced through a `Number.isFinite(n) && n > 0` guard. `Number(undefined) === NaN`, and a single NaN argument makes `Math.max` return NaN, which `setTimeout` silently treats as 0.
 - **Cross-process LSP pressure is one session-boundary snapshot** (`clients/lsp-budget.ts`, #821): count pressure and the optional complete/fresh aggregate-RSS ceiling (`PI_LENS_LSP_BUDGET_RSS_MB`) feed one cached decision used for auxiliary shedding, the current session's short idle reset, and pull-only diagnostics. Missing/stale RSS samples fail open to count-only; capability decisions reuse `classifyServerWaitTier` (`"pull-capable"`), and the `PI_LENS_CROSS_PROCESS_BUDGET=0` kill switch disables every policy.
 - **Per-session LSP clients have one conservative root/cap policy** (#1325): root candidates under `tests/fixtures`, `__fixtures__`, `testdata`, project ignore rules, or the shared atomic-write staging namespace are declined and resolution continues to an eligible ancestor. Client identity remains `serverId:normalizeMapKey(root)` with in-flight same-key dedupe. `PI_LENS_LSP_CLIENT_CEILING` defaults to 24; the serialized spawn gate counts live/in-flight keys once, gracefully evicts the LRU client with no active LSP request, and declines a new spawn when every capacity candidate is busy.
@@ -1433,3 +1616,8 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
   Capture `ctx.ui.setStatus` and `ctx.ui.theme` while the host event is active;
   async sweep/timer callbacks must never dereference `ctx.ui`, which can become
   stale after session replacement.
+- Guard command analysis uses `tokenizeShellCommand` for quoted/separated argv;
+  bash read/ownership grants are committed only from successful `tool_result`
+  events. Tool-call inspection must not mutate read-guard state, and wrapper,
+  launcher, and continuation forms must remain conservative for git commits and
+  pushes.

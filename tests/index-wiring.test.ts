@@ -6,6 +6,16 @@ import { CacheManager } from "../clients/cache-manager.js";
 import { getLatencyLogPath } from "../clients/latency-logger.js";
 import { LENS_FLAGS } from "../clients/lens-flag-registry.js";
 import extension from "../index.js";
+import {
+	_resetForTests as resetBusPublishForTests,
+	publishFilesTouched,
+	wireBusEmitter,
+} from "../clients/bus-publish.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../clients/degradation-ledger.js";
+import { _resetSessionLifecycleForTests } from "../clients/session-lifecycle.js";
 import { createPiMock, makeCtx } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
@@ -91,6 +101,74 @@ const EXPECTED_HOOKS = [
 ];
 
 describe("index.ts extension wiring", () => {
+	it("re-wires a recovered bus on a #473-guarded subagent session_start (#1383)", async () => {
+		_resetSessionLifecycleForTests();
+		resetBusPublishForTests();
+		resetDegradationLedger();
+		try {
+			const parent = createPiMock();
+			const parentApi = parent.asExtensionAPI();
+			(parentApi as unknown as { events: { emit: ReturnType<typeof vi.fn> } }).events = {
+				emit: vi.fn(),
+			};
+			extension(parentApi);
+			await parent.emit(
+				"session_start",
+				{ reason: "startup" },
+				makeCtx({ cwd: process.cwd(), sessionId: "parent" }),
+			);
+
+			const dbg = vi.fn();
+			wireBusEmitter(() => {
+				throw new Error("This extension ctx is stale after session replacement or reload");
+			});
+			publishFilesTouched({
+				reason: "autofix",
+				paths: ["/repo/stale.ts"],
+				cwd: "/repo",
+				dbg,
+			});
+			expect(dbg).toHaveBeenCalledTimes(1);
+			expect(getDegradationSummary()).toEqual([
+				expect.objectContaining({ kind: "bus-stale", count: 1 }),
+			]);
+
+			const recoveredEmit = vi.fn();
+			const subagent = createPiMock();
+			const subagentApi = subagent.asExtensionAPI();
+			(subagentApi as unknown as { events: { emit: typeof recoveredEmit } }).events = {
+				emit: recoveredEmit,
+			};
+			extension(subagentApi);
+			// Model another activation winning the module singleton after factory
+			// load. The guarded session_start itself must reclaim the wiring.
+			wireBusEmitter(() => {
+				throw new Error("This extension ctx is stale after session replacement or reload");
+			});
+			await subagent.emit(
+				"session_start",
+				{ reason: "startup" },
+				makeCtx({ cwd: process.cwd(), sessionId: "subagent" }),
+			);
+			publishFilesTouched({
+				reason: "autofix",
+				paths: ["/repo/recovered.ts"],
+				cwd: "/repo",
+				dbg,
+			});
+
+			expect(recoveredEmit).toHaveBeenCalledWith(
+				"pilens:files:touched",
+				expect.objectContaining({ paths: [expect.stringContaining("recovered.ts")] }),
+			);
+			expect(dbg).toHaveBeenCalledTimes(1);
+		} finally {
+			_resetSessionLifecycleForTests();
+			resetBusPublishForTests();
+			resetDegradationLedger();
+		}
+	});
+
 	describe("registration", () => {
 		it("registers every expected flag, command, tool, and lifecycle hook", () => {
 			const pi = createPiMock();

@@ -20,6 +20,7 @@ import {
 	type PiLensFlagSource,
 } from "./lens-config.js";
 import { resyncLspFile, runFormatPhase } from "./pipeline.js";
+import { getAmbientAbortSignal } from "./safe-spawn.js";
 import {
 	appendProjectChange,
 	type ProjectChangeSource,
@@ -35,6 +36,7 @@ import type { RuntimeCoordinator } from "./runtime-coordinator.js";
  * extra staleness for guaranteed eventual formatting. (#791)
  */
 export const DEFERRED_FORMAT_STALE_AFTER_MS = 10 * 60_000;
+const DEFERRED_FORMAT_CONCURRENCY = 3;
 
 interface AgentEndDeps {
 	ctxCwd?: string;
@@ -223,57 +225,79 @@ export async function handleAgentEnd({
 	});
 
 	if (formatRecords.length > 0) {
-		type FormatOutcome =
-			| { kind: "skipped"; filePath: string; reason: string }
-			| { kind: "failed"; filePath: string; message: string; fileStart: number }
-			| {
-					kind: "done";
-					record: (typeof records)[number];
-					filePath: string;
-					result: Awaited<ReturnType<typeof runFormatPhase>>;
-					fileStart: number;
-			  };
-
-		// Run all formatter subprocesses concurrently — no shared state touched here.
-		// bumpFileSeq / cacheManager mutations happen in the sequential pass below.
-		const outcomes = await Promise.all(
-			formatRecords.map(async (record): Promise<FormatOutcome> => {
+		// Formatter subprocesses are independent across files, so retain bounded
+		// overlap here. Result application stays admission-ordered below because
+		// its synchronous file reads/bookkeeping are observable shared state.
+		type FormatWork = {
+			record: (typeof formatRecords)[number];
+			filePath: string;
+			fileStart: number;
+			result?: Awaited<ReturnType<typeof runFormatPhase>>;
+			error?: string;
+			missing?: boolean;
+		};
+		const work = new Array<FormatWork | undefined>(formatRecords.length);
+		const started = new Set<number>();
+		let nextIndex = 0;
+		const ambientSignal = getAmbientAbortSignal();
+		const worker = async (): Promise<void> => {
+			while (nextIndex < formatRecords.length) {
+				const index = nextIndex++;
+				if (ambientSignal?.aborted) return;
+				const record = formatRecords[index];
 				const fileStart = Date.now();
 				const filePath = path.resolve(record.filePath);
+				started.add(index);
 				if (!nodeFs.existsSync(filePath)) {
-					dbg(`agent_end deferred_format skipped missing file: ${filePath}`);
-					return { kind: "skipped", filePath, reason: "missing" };
+					work[index] = { record, filePath, fileStart, missing: true };
+					continue;
 				}
 				try {
-					const result = await runFormatPhase(filePath, getFormatService, dbg);
-					return { kind: "done", record, filePath, result, fileStart };
+					work[index] = {
+						record,
+						filePath,
+						fileStart,
+						result: await runFormatPhase(filePath, getFormatService, dbg),
+					};
 				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					dbg(`agent_end deferred_format failed for ${filePath}: ${message}`);
-					return { kind: "failed", filePath, message, fileStart };
+					work[index] = {
+						record,
+						filePath,
+						fileStart,
+						error: err instanceof Error ? err.message : String(err),
+					};
 				}
-			}),
+			}
+		};
+		await Promise.all(
+			Array.from(
+				{ length: Math.min(DEFERRED_FORMAT_CONCURRENCY, formatRecords.length) },
+				() => worker(),
+			),
 		);
+		if (ambientSignal?.aborted) {
+			runtime.requeueDeferredFormatFiles(
+				formatRecords.filter((_, index) => !started.has(index)),
+			);
+		}
 
-		// Process results sequentially — bumpFileSeq and cacheManager mutations
-		// must stay ordered to avoid sequence number races.
-		for (const outcome of outcomes) {
-			if (outcome.kind === "skipped") {
-				summary.skipped.push({
-					filePath: outcome.filePath,
-					reason: outcome.reason,
-				});
+		for (const entry of work) {
+			if (!entry) continue;
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			const { record, filePath, fileStart } = entry;
+			if (entry.missing) {
+				dbg(`agent_end deferred_format skipped missing file: ${filePath}`);
+				summary.skipped.push({ filePath, reason: "missing" });
 				continue;
 			}
-			if (outcome.kind === "failed") {
-				summary.failed.push({
-					filePath: outcome.filePath,
-					errors: [outcome.message],
-				});
+			if (entry.error) {
+				dbg(`agent_end deferred_format failed for ${filePath}: ${entry.error}`);
+				summary.failed.push({ filePath, errors: [entry.error] });
 				continue;
 			}
+			const result = entry.result;
+			if (!result) continue;
 
-			const { record, filePath, result, fileStart } = outcome;
 			summary.formatted++;
 
 			if (result.formatFailures.length > 0) {

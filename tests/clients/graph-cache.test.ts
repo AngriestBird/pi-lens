@@ -9,7 +9,11 @@ import {
 	clearReviewGraphWorkspaceCache,
 	getLastGraphBuildInfo,
 	getReviewGraphCacheIdentity,
+	getReviewGraphWorkspaceCacheSnapshot,
+	_getReviewGraphWorkspaceCacheKeysForTests,
+	_setReviewGraphBuildGateForTests,
 } from "../../clients/review-graph/builder.js";
+import { normalizeMapKey } from "../../clients/path-utils.js";
 import {
 	createTempFile,
 	removeTempDirSync,
@@ -32,10 +36,37 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 	});
 
 	afterEach(() => {
+		_setReviewGraphBuildGateForTests(undefined);
 		vi.unstubAllEnvs();
 		for (const dir of dirs.splice(0)) {
 			removeTempDirSync(dir);
 		}
+	});
+
+	it("does not resurrect a build captured before an all-workspace reset", async () => {
+		const cwd = tmpDir();
+		const facts = new FactStore();
+		let release!: () => void;
+		const admitted = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let entered!: () => void;
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		_setReviewGraphBuildGateForTests(async () => {
+			entered();
+			await admitted;
+		});
+
+		const build = buildOrUpdateGraph(cwd, [], facts);
+		await started;
+		clearReviewGraphWorkspaceCache();
+		release();
+
+		const graph = await build;
+		expect(graph).toHaveProperty("nodes");
+		expect(getReviewGraphWorkspaceCacheSnapshot().cacheEntries).toBe(0);
 	});
 
 	function tmpDir(): string {
@@ -51,6 +82,35 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 		const p2 = buildOrUpdateGraph(cwd, [path.join(cwd, "a.ts")], facts);
 		expect(p1).toBe(p2);
 		await p1;
+	});
+
+	it("evicts an idle workspace and rebuilds it", async () => {
+		vi.useFakeTimers();
+		vi.stubEnv("PI_LENS_REVIEW_GRAPH_IDLE_EVICT_MS", "1000");
+		const cwd = tmpDir();
+		const facts = new FactStore();
+		const first = await buildOrUpdateGraph(cwd, [], facts);
+		expect(getReviewGraphWorkspaceCacheSnapshot().cacheEntries).toBe(1);
+		vi.advanceTimersByTime(1001);
+		expect(getReviewGraphWorkspaceCacheSnapshot().cacheEntries).toBe(0);
+		const second = await buildOrUpdateGraph(cwd, [], facts);
+		expect(second).not.toBe(first);
+		expect(second.nodes.size).toBe(first.nodes.size);
+		vi.useRealTimers();
+	});
+
+	it("keeps the eight most recently used workspaces", async () => {
+		const facts = new FactStore();
+		const roots: string[] = [];
+		for (let i = 0; i < 9; i++) {
+			const cwd = tmpDir();
+			roots.push(cwd);
+			await buildOrUpdateGraph(cwd, [], facts);
+		}
+		const keys = _getReviewGraphWorkspaceCacheKeysForTests();
+		expect(keys).toHaveLength(8);
+		expect(keys).not.toContain(normalizeMapKey(roots[0]));
+		expect(keys).toContain(normalizeMapKey(roots[8]));
 	});
 
 	it("normalises changedFiles order — same promise regardless of sort order", async () => {
