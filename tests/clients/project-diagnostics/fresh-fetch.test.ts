@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BootstrapClients } from "../../../clients/bootstrap.js";
 import { snapshotAdvisoryProvenance } from "../../../clients/advisory-provenance.js";
 import { fetchFreshProjectDiagnostics } from "../../../clients/project-diagnostics/fresh-fetch.js";
+import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 // fetchFreshProjectDiagnostics calls each client through the plain
@@ -567,6 +568,16 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			rule: "test:vitest",
 			message: "foo works: expected true to be false",
 		});
+
+		const mismatched = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+			undefined,
+			{ runtime: new RuntimeCoordinator() },
+		);
+		expect(mismatched.diagnostics.find((d) => d.tool === "test-runner"))
+			.toMatchObject({ severity: "info", semantic: "none" });
 	});
 
 	// #1004 review follow-up (honesty gap, #533): test-runner's cache can be

@@ -64,7 +64,10 @@ import { isSubagentSession } from "./subagent-mode.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import type { TurnStateOwner } from "./cache-manager.js";
 import type { TestResult, TestRunnerClient } from "./test-runner-client.js";
-import { snapshotAdvisoryProvenance } from "./advisory-provenance.js";
+import {
+	MAX_ADVISORY_AFFECTED_FILES,
+	snapshotAdvisoryProvenance,
+} from "./advisory-provenance.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
 
 interface TurnEndDeps {
@@ -961,7 +964,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							"test-runner-findings",
 							cwd,
 						)?.data?.testRunGeneration;
-						if (currentGeneration !== testRunGeneration) {
+						if (currentGeneration !== undefined && currentGeneration > testRunGeneration) {
 							dbg(`turn_end: test generation ${testRunGeneration} superseded by ${currentGeneration}`);
 							return;
 						}
@@ -1366,20 +1369,25 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				testFailureFiles: existingGuard?.testFailureFiles,
 			});
 		} else {
-			const affectedFiles = [
+			const allAffectedFiles = [
 				...files.map((file) => resolveRunnerPath(cwd, file)),
 				...cascadeResults.flatMap((result) => result.neighbors
 					.filter((neighbor) => neighbor.diagnostics.length > 0)
 					.map((neighbor) => resolveRunnerPath(cwd, neighbor.filePath))),
 			];
+			const affectedFiles = [...new Set(allAffectedFiles)]
+				.slice(0, MAX_ADVISORY_AFFECTED_FILES);
+			const affectedFilesTruncated = new Set(allAffectedFiles).size > affectedFiles.length;
 			cacheManager.writeCache("turn-end-findings", {
 				content,
 				affectedFiles,
+				affectedFilesTruncated,
 				provenance: snapshotAdvisoryProvenance({
 					cwd,
 					runtime,
 					generation: 0,
 					files: affectedFiles.map((file) => ({ path: file, role: "affected" as const })),
+					truncated: affectedFilesTruncated,
 				}),
 			}, cwd);
 		}

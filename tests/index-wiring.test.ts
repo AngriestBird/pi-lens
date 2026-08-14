@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
+import { snapshotAdvisoryProvenance } from "../clients/advisory-provenance.js";
 import { getLatencyLogPath } from "../clients/latency-logger.js";
 import { LENS_FLAGS } from "../clients/lens-flag-registry.js";
 import extension from "../index.js";
@@ -456,15 +457,25 @@ describe("index.ts extension wiring", () => {
 			removeTempDirSync(tmp);
 		});
 
-		function seedTurnEndFindings(cwd: string, content: string): void {
-			new CacheManager().writeCache("turn-end-findings", { content }, cwd);
+		function seedTurnEndFindings(cwd: string, content: string, sessionId: string): void {
+			const file = path.join(cwd, "unchanged.ts");
+			fs.writeFileSync(file, "export const unchanged = true;\n");
+			const provenance = snapshotAdvisoryProvenance({
+				cwd,
+				runtime: { telemetrySessionId: sessionId, projectSeq: 0, turnIndex: 0 },
+				generation: 1,
+				files: [{ path: file, role: "affected" }],
+			});
+			new CacheManager().writeCache("turn-end-findings", { content, provenance }, cwd);
 		}
 
 		it("suppresses injection when --no-lens-context is set, then injects after /lens-context-toggle", async () => {
 			// Start OFF deterministically via the CLI flag (env → CLI → config).
+			_resetSessionLifecycleForTests();
 			const pi = createPiMock({ "no-lens-context": true });
 			extension(pi.asExtensionAPI());
-			seedTurnEndFindings(tmp, "TESTFINDINGS_XYZZY");
+			await pi.emit("session_start", { sessionId: "wiring-session" }, makeCtx({ cwd: tmp, sessionId: "wiring-session" }));
+			seedTurnEndFindings(tmp, "TESTFINDINGS_XYZZY", "wiring-session");
 
 			const existing = [{ role: "system", content: "orig" }];
 
@@ -494,8 +505,7 @@ describe("index.ts extension wiring", () => {
 			expect(on?.messages, "expected injected messages").toBeDefined();
 			expect(on?.messages[0]).toEqual({ role: "system", content: "orig" });
 			expect(on?.messages.at(-1)?.content).toMatch(/TESTFINDINGS_XYZZY/);
-			expect(on?.messages.at(-1)?.content).toContain("Historical finding");
-			expect(on?.messages.at(-1)?.content).not.toContain("Address 🔴 blockers");
+			expect(on?.messages.at(-1)?.content).toContain("Address 🔴 blockers");
 		});
 	});
 

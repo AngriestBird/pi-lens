@@ -31,6 +31,8 @@ import { resetDispatchBaselines } from "../dispatch/integration.js";
 import { resetFormatService } from "../format-service.js";
 import { getLSPService, resetLSPService } from "../lsp/index.js";
 import {
+	acknowledgeTestFindings,
+	acknowledgeTurnEndFindings,
 	consumeSessionStartGuidance,
 	consumeTestFindings,
 	consumeTurnEndFindings,
@@ -322,8 +324,8 @@ async function runTurnEndNow(
 		outcome,
 		commit: () => {
 			if (!deferredDelivery) return;
-			consumeTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime);
-			consumeTestFindings(ctx.cacheManager, cwd, ctx.runtime);
+			acknowledgeTurnEndFindings(ctx.cacheManager, cwd);
+			acknowledgeTestFindings(ctx.cacheManager, cwd);
 		},
 	};
 }
@@ -414,8 +416,8 @@ function runTurnEndForIpcNow(cwd: string): Promise<TurnEndDelivery> {
 			? {
 					outcome: cachedOutcome,
 					commit: () => {
-						consumeTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime);
-						consumeTestFindings(ctx.cacheManager, cwd, ctx.runtime);
+						acknowledgeTurnEndFindings(ctx.cacheManager, cwd);
+						acknowledgeTestFindings(ctx.cacheManager, cwd);
 					},
 				}
 			: await runTurnEndNow(cwd, [], true);

@@ -3,7 +3,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { snapshotAdvisoryProvenance } from "../../../clients/advisory-provenance.js";
+import { CacheManager } from "../../../clients/cache-manager.js";
 import { testRunnerFindingsToProjectDiagnostics } from "../../../clients/project-diagnostics/runner-adapters/runner-findings.js";
+import { peekTestFindings } from "../../../clients/runtime-context.js";
+import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 describe("test finding provenance adapter (#1413)", () => {
@@ -41,6 +44,19 @@ describe("test finding provenance adapter (#1413)", () => {
 			expect(testRunnerFindingsToProjectDiagnostics(cache, cwd)[0])
 				.toMatchObject({ severity: "info", semantic: "none" });
 		}
+	});
+
+	it("classifies a session-mismatched record identically on context and project surfaces", () => {
+		const { cwd, provenance, result } = fixture();
+		const cache = { content: "fail", results: [result], provenance };
+		const runtime = new RuntimeCoordinator();
+		runtime.setTelemetryIdentity({ sessionId: "different-session" });
+		const cacheManager = new CacheManager(false);
+		cacheManager.writeCache("test-runner-findings", cache, cwd);
+		expect(peekTestFindings(cacheManager, cwd, runtime)?.messages[0]?.content)
+			.toContain("Historical finding");
+		expect(testRunnerFindingsToProjectDiagnostics(cache, cwd, runtime)[0])
+			.toMatchObject({ severity: "info", semantic: "none" });
 	});
 
 	it("drops deleted targets and returns none after consumption", () => {

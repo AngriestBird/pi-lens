@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
+import { snapshotAdvisoryProvenance } from "../../clients/advisory-provenance.js";
 import {
 	consumeSessionStartGuidance,
 	consumeTestFindings,
@@ -998,18 +999,26 @@ describe("context injection framing", () => {
 	it("consumeTestFindings includes automated-check framing", () => {
 		const env = setupTestEnvironment("pi-lens-ctx-test-");
 		const cacheManager = new CacheManager(false);
+		const runtime = new RuntimeCoordinator();
+		const testFile = path.join(env.tmpDir, "sample.test.ts");
+		fs.writeFileSync(testFile, "test('sample', () => {});\n");
+		const provenance = snapshotAdvisoryProvenance({
+			cwd: env.tmpDir,
+			runtime,
+			generation: 1,
+			files: [{ path: testFile, role: "test" }],
+		});
 
 		cacheManager.writeCache(
 			"test-runner-findings",
-			{ content: "[Tests] ✗ 1/3 failed — vitest\n" },
+			{ content: "[Tests] ✗ 1/3 failed — vitest\n", provenance },
 			env.tmpDir,
 		);
 
-		const result = consumeTestFindings(cacheManager, env.tmpDir);
+		const result = consumeTestFindings(cacheManager, env.tmpDir, runtime);
 		expect(result).toBeDefined();
 		expect(result!.messages[0].content).toContain("not a user request");
-		expect(result!.messages[0].content).toContain("Historical finding");
-		expect(result!.messages[0].content).not.toContain("fix before continuing");
+		expect(result!.messages[0].content).toContain("fix before continuing");
 		expect(result!.messages[0].content).toContain("[Tests] ✗ 1/3 failed");
 
 		env.cleanup();
@@ -1472,6 +1481,38 @@ describe("turn_end test runner — stale results are cached, not discarded", () 
 			await new Promise((resolve) => setImmediate(resolve));
 			const cached = cacheManager.readCache<{ content: string; testRunGeneration: number }>("test-runner-findings", env.tmpDir)?.data;
 			expect(cached).toMatchObject({ content: "generation-2", testRunGeneration: 2 });
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("publishes a settling failure after an empty context delivery", async () => {
+		const env = setupTestEnvironment("pi-lens-test-empty-consume-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "empty-consume-session" });
+			const cacheManager = new CacheManager(false);
+			const srcFile = path.join(env.tmpDir, "src/foo.ts");
+			const testFile = path.join(env.tmpDir, "src/foo.test.ts");
+			fs.mkdirSync(path.dirname(srcFile), { recursive: true });
+			fs.writeFileSync(srcFile, "export const x = 1;\n");
+			fs.writeFileSync(testFile, "test('x', () => {});\n");
+			cacheManager.addModifiedRange(srcFile, { start: 1, end: 1 }, false, env.tmpDir, "empty-consume-session");
+			let resolveRun!: (value: any) => void;
+			const run = new Promise<any>((resolve) => { resolveRun = resolve; });
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, {
+				ctxCwd: env.tmpDir,
+				testRunnerClient: {
+					getTestRunTarget: () => ({ testFile, runner: "vitest", config: {}, strategy: "related" as const }),
+					runTestFileAsync: () => run,
+					formatResult: () => "late failure",
+				},
+			}));
+			expect(consumeTestFindings(cacheManager, env.tmpDir, runtime)).toBeUndefined();
+			resolveRun({ file: testFile, sourceFile: srcFile, runner: "vitest", passed: 0, failed: 1, skipped: 0, failures: [], duration: 1 });
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(cacheManager.readCache<{ content: string }>("test-runner-findings", env.tmpDir)?.data?.content)
+				.toBe("late failure");
 		} finally {
 			env.cleanup();
 		}

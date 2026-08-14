@@ -55,6 +55,8 @@ vi.mock("../../../clients/lsp/index.js", () => ({
 // Hoisted (not inlined in the factory) so the delivery tests can make a consume
 // THROW — the #1274 error path the two-phase protocol exists to survive.
 const runtimeContext = vi.hoisted(() => ({
+	acknowledgeTurnEndFindings: vi.fn(),
+	acknowledgeTestFindings: vi.fn(),
 	consumeSessionStartGuidance: vi.fn(() => ({
 		messages: [{ role: "user", content: "PROJECT GUIDANCE" }],
 	})),
@@ -198,7 +200,7 @@ describe("runTurnEnd", () => {
 		const delivery = await runTurnEndForIpc(tmpDir);
 		expect(delivery.deliveryId).toBeTypeOf("string");
 
-		runtimeContext.consumeTurnEndFindings.mockImplementationOnce(() => {
+		runtimeContext.acknowledgeTurnEndFindings.mockImplementationOnce(() => {
 			throw new Error("cache write failed");
 		});
 		expect(() =>
@@ -265,9 +267,17 @@ describe("runTurnEnd", () => {
 	});
 
 	it("commits finding delivery only after the Stop reply is acknowledged", async () => {
+		runtimeContext.peekTurnEndFindings.mockClear();
+		runtimeContext.consumeTurnEndFindings.mockClear();
+		runtimeContext.acknowledgeTurnEndFindings.mockClear();
+		runtimeContext.acknowledgeTestFindings.mockClear();
 		const delivery = await runTurnEndForIpc(tmpDir);
 		expect(delivery.outcome.turnEnd).toBe("TURN ADVISORY");
+		expect(runtimeContext.peekTurnEndFindings).toHaveBeenCalledTimes(1);
+		expect(runtimeContext.consumeTurnEndFindings).not.toHaveBeenCalled();
 		expect(acknowledgeTurnEnd(tmpDir, delivery.deliveryId!)).toBe(true);
+		expect(runtimeContext.acknowledgeTurnEndFindings).toHaveBeenCalledTimes(1);
+		expect(runtimeContext.acknowledgeTestFindings).toHaveBeenCalledTimes(1);
 		expect(acknowledgeTurnEnd(tmpDir, delivery.deliveryId!)).toBe(false);
 	});
 

@@ -1,5 +1,3 @@
-import * as fs from "node:fs";
-import * as path from "node:path";
 import type { CacheManager } from "./cache-manager.js";
 import type { TurnEndFindingsCache } from "./git-guard.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
@@ -20,6 +18,12 @@ function historicalPrefix(provenance: AdvisoryProvenance | undefined): string {
 	return `Historical finding; workspace changed since capture; re-run to confirm. (${provenanceStamp(provenance)})`;
 }
 
+function historicalTestContent(content: string, provenance?: AdvisoryProvenance): string {
+	return content.startsWith("[from a prior turn")
+		? content
+		: `${historicalPrefix(provenance)}\n\n${content}`;
+}
+
 function turnEndMessage(
 	content: string,
 	current: boolean,
@@ -33,20 +37,6 @@ function turnEndMessage(
 	};
 }
 
-function allCapturedFilesDeleted(
-	provenance: AdvisoryProvenance | undefined,
-	cwd: string,
-): boolean {
-	return !!provenance?.files.length && provenance.files.every((file) => {
-		try {
-			fs.statSync(path.resolve(cwd, file.path));
-			return false;
-		} catch (error) {
-			return (error as NodeJS.ErrnoException).code === "ENOENT";
-		}
-	});
-}
-
 /** Read a turn-end finding without changing its durable delivery state. */
 export function peekTurnEndFindings(
 	cacheManager: CacheManager,
@@ -58,8 +48,8 @@ export function peekTurnEndFindings(
 		cwd,
 	);
 	if (!findings?.data?.content || findings.data.consumed === true) return;
-	if (allCapturedFilesDeleted(findings.data.provenance, cwd)) return;
 	const validation = validateAdvisoryProvenance(findings.data, cwd, runtime);
+	if (validation.allFilesDeleted) return;
 	return {
 		messages: [turnEndMessage(
 			findings.data.content,
@@ -79,7 +69,6 @@ export function consumeTurnEndFindings(
 		cwd,
 	);
 	if (!findings?.data?.content || findings.data.consumed === true) return;
-	const deleted = allCapturedFilesDeleted(findings.data.provenance, cwd);
 	const validation = validateAdvisoryProvenance(findings.data, cwd, runtime);
 
 	// A blocker record is also the opt-in commit gate's durable state. Mark the
@@ -97,7 +86,7 @@ export function consumeTurnEndFindings(
 	} else {
 		cacheManager.clearCache("turn-end-findings", cwd);
 	}
-	if (deleted) return;
+	if (validation.allFilesDeleted) return;
 	return {
 		messages: [turnEndMessage(
 			findings.data.content,
@@ -118,8 +107,8 @@ export function peekTestFindings(
 		cwd,
 	);
 	if (!findings?.data?.content) return;
-	if (allCapturedFilesDeleted(findings.data.provenance, cwd)) return;
 	const validation = validateAdvisoryProvenance(findings.data, cwd, runtime);
+	if (validation.allFilesDeleted) return;
 	const current = validation.status === "current";
 	return {
 		messages: [
@@ -127,7 +116,7 @@ export function peekTestFindings(
 				role: "user",
 				content: current
 					? `${AUTOMATION_FRAMING}Test failures detected last turn — fix before continuing:\n\n${findings.data.content}`
-					: `${AUTOMATION_FRAMING}${historicalPrefix(findings.data.provenance)}\n\n${findings.data.content}`,
+					: `${AUTOMATION_FRAMING}${historicalTestContent(findings.data.content, findings.data.provenance)}`,
 			},
 		],
 	};
@@ -139,12 +128,30 @@ export function consumeTestFindings(
 	runtime?: RuntimeCoordinator,
 ): ContextResult | undefined {
 	const findings = peekTestFindings(cacheManager, cwd, runtime);
+	if (!findings) return;
 	cacheManager.writeCache(
 		"test-runner-findings",
 		null as unknown as TestRunnerFindingsCache,
 		cwd,
 	);
 	return findings;
+}
+
+/** Complete an acknowledged MCP delivery without re-validating or re-rendering it. */
+export function acknowledgeTurnEndFindings(cacheManager: CacheManager, cwd: string): void {
+	const findings = cacheManager.readCache<Partial<TurnEndFindingsCache>>("turn-end-findings", cwd);
+	if (!findings?.data?.content || findings.data.consumed === true) return;
+	if (findings.data.hasBlockers === true && typeof findings.data.sessionId === "string") {
+		cacheManager.writeCache("turn-end-findings", { ...findings.data, consumed: true }, cwd);
+	} else {
+		cacheManager.clearCache("turn-end-findings", cwd);
+	}
+}
+
+export function acknowledgeTestFindings(cacheManager: CacheManager, cwd: string): void {
+	const findings = cacheManager.readCache<TestRunnerFindingsCache>("test-runner-findings", cwd);
+	if (!findings?.data?.content) return;
+	cacheManager.writeCache("test-runner-findings", null as unknown as TestRunnerFindingsCache, cwd);
 }
 
 export function consumeSessionStartGuidance(

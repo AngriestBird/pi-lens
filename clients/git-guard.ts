@@ -8,6 +8,7 @@ import { logLatency } from "./latency-logger.js";
 import {
 	advisoryFileHash,
 	advisoryPathKey,
+	MAX_ADVISORY_AFFECTED_FILES,
 	snapshotAdvisoryProvenance,
 	type AdvisoryProvenance,
 } from "./advisory-provenance.js";
@@ -42,8 +43,6 @@ type GuardDecision = {
 	reason?: string;
 };
 
-const MAX_AFFECTED_FILES = 256;
-
 function resolveGuardPath(filePath: string, cwd: string): string {
 	return path.resolve(cwd, filePath);
 }
@@ -67,23 +66,14 @@ function currentFileFingerprint(filePath: string): string {
 	}
 }
 
-function snapshotFileHashes(files: string[], cwd: string): Record<string, string> {
-	const hashes: Record<string, string> = {};
-	for (const file of files) {
-		const resolved = resolveGuardPath(file, cwd);
-		hashes[guardPathKey(resolved, cwd)] = currentFileFingerprint(resolved);
-	}
-	return hashes;
-}
-
 function capAffectedFiles(files: string[], cwd: string): {
 	files: string[];
 	truncated: boolean;
 } {
 	const unique = [...new Set(files.map((file) => resolveGuardPath(file, cwd)))];
 	return {
-		files: unique.slice(0, MAX_AFFECTED_FILES),
-		truncated: unique.length > MAX_AFFECTED_FILES,
+		files: unique.slice(0, MAX_ADVISORY_AFFECTED_FILES),
+		truncated: unique.length > MAX_ADVISORY_AFFECTED_FILES,
 	};
 }
 
@@ -498,6 +488,17 @@ export function writeGitGuardRecord(
 			fileSeqByPath[key] = runtime.getFileSeq(resolveGuardPath(file, cwd));
 		}
 	}
+	const currentProvenance = snapshotAdvisoryProvenance({
+		cwd,
+		runtime,
+		generation: 0,
+		files: capped.files.map((file) => ({ path: file, role: "affected" as const })),
+		truncated: capped.truncated,
+	});
+	const fileContentHashes = Object.fromEntries(currentProvenance.files.map((file) => [
+		guardPathKey(file.path, cwd),
+		file.sha256,
+	]));
 	const data: TurnEndFindingsCache = {
 		...record,
 		affectedFiles: capped.files,
@@ -506,14 +507,8 @@ export function writeGitGuardRecord(
 		blockingFiles: Array.isArray(record.blockingFiles)
 			? capAffectedFiles(record.blockingFiles, cwd).files
 			: undefined,
-		fileContentHashes: snapshotFileHashes(capped.files, cwd),
-		provenance: record.provenance ?? snapshotAdvisoryProvenance({
-			cwd,
-			runtime,
-			generation: 0,
-			files: capped.files.map((file) => ({ path: file, role: "affected" as const })),
-			truncated: capped.truncated,
-		}),
+		fileContentHashes,
+		provenance: record.provenance ?? currentProvenance,
 	};
 	try {
 		cacheManager.writeCache("turn-end-findings", data, cwd);

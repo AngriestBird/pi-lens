@@ -1344,6 +1344,7 @@ export default function (pi: ExtensionAPI) {
 			// write (or vice versa).
 			() => runtime.nextWriteIndex(),
 			captureLspStatusRepaint,
+			() => runtime,
 		),
 		createLspDiagnosticsTool(
 			// #571: same reconciliation wiring as lens_diagnostics mode=full, for

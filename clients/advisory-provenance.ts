@@ -29,7 +29,10 @@ export interface AdvisoryProvenance {
 export interface AdvisoryValidation {
 	status: "current" | "superseded" | "unknown";
 	reasons: string[];
+	allFilesDeleted: boolean;
 }
+
+export const MAX_ADVISORY_AFFECTED_FILES = 256;
 
 export function advisoryPathKey(filePath: string, cwd: string): string {
 	return normalizeMapKey(path.resolve(cwd, filePath));
@@ -131,7 +134,7 @@ export function validateAdvisoryProvenance(
 	runtime?: Pick<RuntimeCoordinator, "telemetrySessionId" | "projectSeq" | "turnIndex">,
 ): AdvisoryValidation {
 	if (!isWellFormed(record.provenance)) {
-		return { status: "unknown", reasons: ["malformed-or-legacy-provenance"] };
+		return { status: "unknown", reasons: ["malformed-or-legacy-provenance"], allFilesDeleted: false };
 	}
 	const provenance = record.provenance;
 	const reasons: string[] = [];
@@ -139,9 +142,8 @@ export function validateAdvisoryProvenance(
 	if (unknown) reasons.push("truncated-provenance");
 	if (runtime) {
 		if (provenance.revision.sessionId !== runtime.telemetrySessionId) reasons.push("session-mismatch");
-		if (provenance.revision.projectSeq !== runtime.projectSeq) reasons.push("project-sequence-mismatch");
-		if (provenance.revision.turnIndex !== runtime.turnIndex) reasons.push("turn-mismatch");
 	}
+	let deletedFiles = 0;
 	for (const captured of provenance.files) {
 		const resolved = path.resolve(cwd, captured.path);
 		let stat: fs.Stats;
@@ -149,7 +151,12 @@ export function validateAdvisoryProvenance(
 			stat = fs.statSync(resolved);
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code ?? "unknown";
-			if (code === "ENOENT") reasons.push(`missing:${advisoryPathKey(resolved, cwd)}`);
+			if (code === "ENOENT") {
+				if (captured.sha256 !== "missing") {
+					deletedFiles += 1;
+					reasons.push(`missing:${advisoryPathKey(resolved, cwd)}`);
+				}
+			}
 			else {
 				unknown = true;
 				reasons.push(`unreadable:${advisoryPathKey(resolved, cwd)}:${code}`);
@@ -168,14 +175,19 @@ export function validateAdvisoryProvenance(
 		if (stat.mtimeMs !== captured.mtimeMs || stat.size !== captured.size) {
 			reasons.push(`metadata-changed:${advisoryPathKey(resolved, cwd)}`);
 		}
-		if (advisoryFileHash(resolved) !== captured.sha256) {
+		const currentHash = advisoryFileHash(resolved);
+		if (currentHash.startsWith("unreadable:")) {
+			unknown = true;
+			reasons.push(`${currentHash}:${advisoryPathKey(resolved, cwd)}`);
+		} else if (currentHash !== captured.sha256) {
 			reasons.push(`content-changed:${advisoryPathKey(resolved, cwd)}`);
 		}
 	}
-	if (unknown) return { status: "unknown", reasons };
+	const allFilesDeleted = deletedFiles === provenance.files.length;
+	if (unknown) return { status: "unknown", reasons, allFilesDeleted };
 	return reasons.length > 0
-		? { status: "superseded", reasons }
-		: { status: "current", reasons: [] };
+		? { status: "superseded", reasons, allFilesDeleted }
+		: { status: "current", reasons: [], allFilesDeleted };
 }
 
 export function provenanceStamp(provenance: unknown): string {
