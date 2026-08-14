@@ -85,6 +85,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { BootstrapClients } from "../bootstrap.js";
 import type { CacheManager } from "../cache-manager.js";
+import type { RuntimeCoordinator } from "../runtime-coordinator.js";
 import { getKnipIgnorePatterns } from "../file-utils.js";
 import { isAtOrAboveHomeDir } from "../path-utils.js";
 import { GitleaksClient } from "../gitleaks-client.js";
@@ -169,7 +170,7 @@ export async function fetchFreshProjectDiagnostics(
 	cwd: string,
 	clients: BootstrapClients,
 	signal?: AbortSignal,
-	options: { homeDir?: string } = {},
+	options: { homeDir?: string; runtime?: RuntimeCoordinator } = {},
 ): Promise<FreshProjectDiagnosticsResult> {
 	const analysisRoot = path.resolve(cwd);
 	// #747: refuse to spawn any heavyweight analyzer when the analysis root is
@@ -490,7 +491,7 @@ export async function fetchFreshProjectDiagnostics(
 			}
 			record(
 				"test-runner",
-				testRunnerFindingsToProjectDiagnostics(cached.data),
+				testRunnerFindingsToProjectDiagnostics(cached.data, analysisRoot, options.runtime),
 				Date.now() - startMs,
 			);
 		}),

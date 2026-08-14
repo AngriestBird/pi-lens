@@ -1341,6 +1341,9 @@ describe("lens_diagnostics mode=full", () => {
 			"/proj",
 			expect.anything(),
 			expect.anything(),
+			// #1413: full mode threads the runtime through for advisory
+			// provenance validation ({runtime: undefined} without a getRuntime).
+			expect.objectContaining({}),
 		);
 	});
 

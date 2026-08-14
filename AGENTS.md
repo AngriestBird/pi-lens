@@ -1,5 +1,14 @@
 # pi-lens — agent context
 
+Advisory caches must carry immutable capture provenance and validate it again
+at every delivery surface. A finding is current only when session/turn state
+matches and every affected file is SHA-256-confirmed (size+mtime is only the
+cheap tier); legacy, malformed, truncated, unreadable, or superseded records
+are historical and non-blocking, while deleted per-file findings are omitted.
+Async test batches publish only when their persisted monotonic generation is
+still current. Keep peek/consume classification identical and preserve
+one-shot delivery, MCP acknowledgement, and git-guard structured state. (#1413)
+
 LSP client root selection has a hard session-cwd ceiling: marker/config lookup
 may consult parents, but the root used for client identity and spawn never may.
 `NearestRoot` clamps an above-cwd marker to cwd and logs that clamp once. After

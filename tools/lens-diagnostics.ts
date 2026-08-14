@@ -200,6 +200,9 @@ export function createLensDiagnosticsTool(
 	// The returned closure is safe for the later async sweep to invoke because it
 	// never dereferences the session-guarded ctx.ui getter.
 	captureLspStatusRepaint?: (ctx: unknown) => (() => void) | undefined,
+	getRuntime?: () =>
+		| import("../clients/runtime-coordinator.js").RuntimeCoordinator
+		| undefined,
 ) {
 	return {
 		name: "lens_diagnostics" as const,
@@ -434,6 +437,7 @@ export function createLensDiagnosticsTool(
 					onServerReady: repaintLspStatus,
 					pathsScope,
 					nextWriteIndex,
+					runtime: getRuntime?.(),
 				});
 			}
 			return formatDeltaMode(cacheManager, cwd, severity, pathsScope);
@@ -1249,6 +1253,7 @@ async function formatFullMode(
 		onServerReady?: () => void;
 		pathsScope?: PathsScope;
 		nextWriteIndex?: () => number;
+		runtime?: import("../clients/runtime-coordinator.js").RuntimeCoordinator;
 		/**
 		 * #1107 phase 2 review: scan WITHOUT the generated/artifact NAME-
 		 * heuristic filter — the actionable opt-out `generatedSkipNotice`
@@ -1299,7 +1304,7 @@ async function formatFullMode(
 	// signal from the same starting point instead of stacking.
 	const analyzersPromise = shouldIncludeProjectRunners(options.refreshRunners)
 		? loadBootstrapClients().then((clients) =>
-				fetchFreshProjectDiagnostics(cacheManager, cwd, clients, signal),
+				fetchFreshProjectDiagnostics(cacheManager, cwd, clients, signal, { runtime: options.runtime }),
 			)
 		: Promise.resolve<FreshProjectDiagnosticsResult>({
 				diagnostics: [],

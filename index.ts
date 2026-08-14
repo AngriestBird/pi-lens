@@ -1350,6 +1350,7 @@ export default function (pi: ExtensionAPI) {
 			// write (or vice versa).
 			() => runtime.nextWriteIndex(),
 			captureLspStatusRepaint,
+			() => runtime,
 		),
 		createLspDiagnosticsTool(
 			// #571: same reconciliation wiring as lens_diagnostics mode=full, for
@@ -2565,9 +2566,9 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
-				const turnEndFindings = consumeTurnEndFindings(cacheManager, cwd);
+				const turnEndFindings = consumeTurnEndFindings(cacheManager, cwd, runtime);
 				const sessionGuidance = consumeSessionStartGuidance(cacheManager, cwd);
-				const testFindings = consumeTestFindings(cacheManager, cwd);
+				const testFindings = consumeTestFindings(cacheManager, cwd, runtime);
 				const agentNudge = consumeAgentNudge(dbg);
 				const sourceMessages = [
 					{
