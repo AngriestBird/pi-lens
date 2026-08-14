@@ -2,6 +2,7 @@ import * as nodeCrypto from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import {
+	extractReadPathsFromCommand,
 	extractGrepSearchReadsFromOutput,
 	extractWrittenPathsFromCommand,
 } from "./bash-file-access.js";
@@ -405,6 +406,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			workspaceRoot,
 		).filter(
 			(wp) =>
+				event.isError !== true &&
 				!isExternalOrVendorFile(wp, workspaceRoot) &&
 				!isPathIgnoredByProject(wp, workspaceRoot, false),
 		);
@@ -416,13 +418,30 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				_bypassDebounce: true,
 			});
 		}
+		if (event.isError !== true && !getFlag("no-read-guard")) {
+			for (const span of extractReadPathsFromCommand(command, workspaceRoot)) {
+				if (isExternalOrVendorFile(span.filePath, workspaceRoot)) continue;
+				if (isPathIgnoredByProject(span.filePath, workspaceRoot, false)) continue;
+				deps.readGuard?.recordRead({
+					filePath: span.filePath,
+					requestedOffset: span.offset,
+					requestedLimit: span.limit,
+					effectiveOffset: span.offset,
+					effectiveLimit: span.limit,
+					expandedByLsp: false,
+					turnIndex: runtime.turnIndex,
+					writeIndex: runtime.peekWriteIndex(),
+					timestamp: Date.now(),
+				});
+			}
+		}
 	}
 
 	// Search tools reveal specific lines (file:line) the agent then edits — register
 	// those shown lines (± context) as reads so the follow-up edit isn't blocked (#169).
 	// Our tools attach locations as `details.searchReads`; bash grep is parsed from
 	// `grep -n` output. Only shown lines are registered, never the whole file.
-	if (deps.readGuard && !getFlag("no-read-guard")) {
+	if (deps.readGuard && event.isError !== true && !getFlag("no-read-guard")) {
 		const searchReads: SearchReadLocation[] = [];
 		const detailSearchReads = (
 			event.details as { searchReads?: SearchReadLocation[] }
