@@ -1,6 +1,9 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { logExtension } from "../../clients/extension-log.js";
+vi.mock("../../clients/extension-log.js", () => ({ logExtension: vi.fn() }));
 import {
 	DEGRADATION_ENTRIES_PER_KIND,
+	DEGRADATION_MAX_DISTINCT_KINDS,
 	getDegradationSummary,
 	incrementDegradationCount,
 	recordDegradation,
@@ -9,7 +12,10 @@ import {
 	resetDegradationLedger,
 } from "../../clients/degradation-ledger.js";
 
-beforeEach(resetDegradationLedger);
+beforeEach(() => {
+	resetDegradationLedger();
+	vi.mocked(logExtension).mockClear();
+});
 
 describe("session degradation ledger", () => {
 	it("groups kinds and returns detached latest reasons", () => {
@@ -102,9 +108,29 @@ describe("session degradation ledger", () => {
 		]);
 	});
 
+	it("bounds distinct kinds and truncates oversized kinds", () => {
+		for (let i = 0; i < 100; i++) {
+			recordDegradation({ kind: `garbage-${i}`, subject: "s", reason: "r" });
+		}
+		expect(getDegradationSummary()).toHaveLength(DEGRADATION_MAX_DISTINCT_KINDS);
+		expect(() => renderDegradationLines()).not.toThrow();
+
+		resetDegradationLedger();
+		recordDegradation({ kind: "k".repeat(10_000), subject: "s", reason: "r" });
+		expect(getDegradationSummary()[0].kind.length).toBeLessThanOrEqual(201);
+	});
+
 	it("swallows failures caused by corrupted telemetry input", () => {
 		const corrupted = { toString: () => { throw new Error("corrupted ledger value"); } };
 		expect(() => recordDegradation({ kind: "spawn-failure", subject: corrupted, reason: "ignored" })).not.toThrow();
+		expect(() => recordDegradationOnce({ kind: "spawn-failure", subject: corrupted, reason: "ignored" })).not.toThrow();
 		expect(() => incrementDegradationCount({ kind: "spawn-failure", subject: "ok", reason: corrupted })).not.toThrow();
+		expect(vi.mocked(logExtension).mock.calls.filter(([entry]) =>
+		entry.level === "debug" && entry.subsystem === "degradation-ledger",
+	)).toHaveLength(3);
+	});
+
+	it.each([null, undefined, { malformed: true }, [{ kind: "bad" }]])("renders malformed summary %p as empty", (summary) => {
+		expect(renderDegradationLines(summary)).toEqual([]);
 	});
 });

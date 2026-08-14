@@ -1,5 +1,7 @@
 /** Bounded, process-local telemetry for behavior degraded during one session. */
 
+import { logExtension } from "./extension-log.js";
+
 export type DegradationKind =
 	| "trust-refusal"
 	| "mode-suppression"
@@ -28,6 +30,8 @@ export interface DegradationGroup {
 }
 
 const ENTRIES_PER_KIND = 20;
+const MAX_DISTINCT_KINDS = 32;
+const OVERFLOW_KIND = "other";
 const groups = new Map<
 	string,
 	{ count: number; entries: Array<{ subject: string; reason: string }> }
@@ -37,7 +41,7 @@ const tallies = new Map<string, number>();
 
 export function recordDegradation(record: DegradationRecord): void {
 	try {
-		const kind = normalizeForLedger(record.kind);
+		const kind = boundedKind(record.kind);
 		const subject = truncateForLedger(record.subject);
 		const reason = truncateForLedger(record.reason);
 		let group = groups.get(kind);
@@ -51,7 +55,8 @@ export function recordDegradation(record: DegradationRecord): void {
 		// retained string.
 		group.entries.push({ subject, reason });
 		if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
-	} catch {
+	} catch (error) {
+		debugLedgerFailure("record", error);
 		// Telemetry must never break the observed path.
 	}
 }
@@ -59,13 +64,14 @@ export function recordDegradation(record: DegradationRecord): void {
 /** Record at most once per kind/subject during the current session. */
 export function recordDegradationOnce(record: DegradationRecord): void {
 	try {
-		const kind = normalizeForLedger(record.kind);
+		const kind = boundedKind(record.kind);
 		const subject = truncateForLedger(record.subject);
 		const key = `${kind}\0${subject}`;
 		if (onceKeys.has(key)) return;
 		onceKeys.add(key);
 		recordDegradation({ kind, subject, reason: record.reason });
-	} catch {
+	} catch (error) {
+		debugLedgerFailure("record-once", error);
 		// Telemetry must never break the observed path.
 	}
 }
@@ -76,7 +82,7 @@ export function recordDegradationOnce(record: DegradationRecord): void {
  */
 export function incrementDegradationCount(record: DegradationRecord): void {
 	try {
-		const kind = normalizeForLedger(record.kind);
+		const kind = boundedKind(record.kind);
 		const subject = truncateForLedger(record.subject);
 		const reason = truncateForLedger(record.reason);
 		const key = `${kind}\0${subject}`;
@@ -93,7 +99,8 @@ export function incrementDegradationCount(record: DegradationRecord): void {
 		if (existing >= 0) group.entries.splice(existing, 1);
 		group.entries.push(entry);
 		if (group.entries.length > ENTRIES_PER_KIND) group.entries.shift();
-	} catch {
+	} catch (error) {
+		debugLedgerFailure("increment", error);
 		// Telemetry must never break the observed path.
 	}
 }
@@ -103,6 +110,13 @@ const LEDGER_FIELD_MAX = 200;
 
 function normalizeForLedger(value: unknown): string {
 	return String(value ?? "unknown");
+}
+
+function boundedKind(value: unknown): string {
+	const kind = truncateForLedger(value);
+	if (groups.has(kind) || kind === OVERFLOW_KIND) return kind;
+	// Keep one slot available for all kinds beyond the cardinality bound.
+	return groups.size < MAX_DISTINCT_KINDS - 1 ? kind : OVERFLOW_KIND;
 }
 
 function truncateForLedger(value: unknown): string {
@@ -121,7 +135,28 @@ export function getDegradationSummary(): DegradationGroup[] {
 	}));
 }
 
-export function renderDegradationLines(summary = getDegradationSummary()): string[] {
+function isRenderableSummary(value: unknown): value is DegradationGroup[] {
+	if (!Array.isArray(value)) return false;
+	return value.every((group) => {
+		if (group === null || typeof group !== "object") return false;
+		const candidate = group as Partial<DegradationGroup>;
+		return (
+			typeof candidate.kind === "string" &&
+			typeof candidate.count === "number" &&
+			Array.isArray(candidate.latestReasons) &&
+			candidate.latestReasons.every(
+				(entry) =>
+					entry !== null &&
+					typeof entry === "object" &&
+					typeof (entry as { subject?: unknown }).subject === "string" &&
+					typeof (entry as { reason?: unknown }).reason === "string",
+			)
+		);
+	});
+}
+
+export function renderDegradationLines(summary: unknown = getDegradationSummary()): string[] {
+	if (!isRenderableSummary(summary)) return [];
 	if (summary.length === 0) return [];
 	return [
 		"Degradations:",
@@ -132,6 +167,18 @@ export function renderDegradationLines(summary = getDegradationSummary()): strin
 	];
 }
 
+function debugLedgerFailure(operation: string, error: unknown): void {
+	try {
+		logExtension({
+			subsystem: "degradation-ledger",
+			level: "debug",
+			message: `${operation} failed: ${error instanceof Error ? error.message : String(error)}`,
+		});
+	} catch {
+		// Debug logging must not compromise the non-fatal telemetry contract.
+	}
+}
+
 /** Session-boundary/test reset. */
 export function resetDegradationLedger(): void {
 	groups.clear();
@@ -140,3 +187,4 @@ export function resetDegradationLedger(): void {
 }
 
 export const DEGRADATION_ENTRIES_PER_KIND = ENTRIES_PER_KIND;
+export const DEGRADATION_MAX_DISTINCT_KINDS = MAX_DISTINCT_KINDS;
