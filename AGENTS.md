@@ -190,6 +190,14 @@ Rule-id normalization derives its language suffixes from the bundled CodeRabbit 
 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
 
+Review-graph workspace caches and authoritative project snapshots are bounded to
+8 roots and use 20-minute per-root idle eviction by default. Their windows are
+env-tunable with `PI_LENS_REVIEW_GRAPH_IDLE_EVICT_MS` and
+`PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS`; graph eviction also drops completed
+build-dedup promises so the next access is a true cold rebuild. Async graph
+writes carry a per-workspace epoch, preventing an in-flight build from
+resurrecting an evicted entry. (#1389)
+
 LSP root exclusion recognizes fixture conventions by exact path segment; Go's
 `testdata` convention applies ancestor-wide, but names such as `testdata-tools`
 remain ordinary project directories. The positive `.gitignore` glob precheck is

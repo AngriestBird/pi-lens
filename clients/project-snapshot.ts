@@ -305,12 +305,59 @@ interface AuthoritativeSnapshotEntry {
 	 * mtime is `<=` this value.
 	 */
 	knownMtime: number;
+	lastUsedAt: number;
+	idleTimer?: ReturnType<typeof setTimeout>;
 }
 const authoritativeSnapshots = new Map<string, AuthoritativeSnapshotEntry>();
+const PROJECT_SNAPSHOT_MAX_WARM_ROOTS = 8;
+const PROJECT_SNAPSHOT_IDLE_EVICT_MS_DEFAULT = 20 * 60_000;
+
+function projectSnapshotIdleEvictMs(): number {
+	const value = Number.parseInt(process.env.PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS ?? "", 10);
+	return Number.isSafeInteger(value) && value > 0 ? value : PROJECT_SNAPSHOT_IDLE_EVICT_MS_DEFAULT;
+}
+
+function clearAuthoritativeSnapshotTimer(entry: AuthoritativeSnapshotEntry): void {
+	if (entry.idleTimer) clearTimeout(entry.idleTimer);
+	entry.idleTimer = undefined;
+}
+
+function scheduleAuthoritativeSnapshotEviction(key: string, entry: AuthoritativeSnapshotEntry): void {
+	clearAuthoritativeSnapshotTimer(entry);
+	const generation = entry.lastUsedAt;
+	entry.idleTimer = setTimeout(() => {
+		entry.idleTimer = undefined;
+		if (authoritativeSnapshots.get(key) !== entry || entry.lastUsedAt !== generation) return;
+		authoritativeSnapshots.delete(key);
+	}, projectSnapshotIdleEvictMs());
+	entry.idleTimer.unref?.();
+}
+
+function touchAuthoritativeSnapshot(key: string, entry: AuthoritativeSnapshotEntry): void {
+	entry.lastUsedAt = Date.now();
+	scheduleAuthoritativeSnapshotEviction(key, entry);
+}
+
+function enforceAuthoritativeSnapshotCap(): void {
+	while (authoritativeSnapshots.size > PROJECT_SNAPSHOT_MAX_WARM_ROOTS) {
+		const victim = [...authoritativeSnapshots.entries()].sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
+		if (!victim) return;
+		clearAuthoritativeSnapshotTimer(victim[1]);
+		authoritativeSnapshots.delete(victim[0]);
+	}
+}
+
+/** Test-only cache keys, in LRU order from oldest to newest. */
+export function _getAuthoritativeSnapshotCacheKeysForTests(): string[] {
+	return [...authoritativeSnapshots.entries()]
+		.sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)
+		.map(([key]) => key);
+}
 
 /** Test hook: drop all cached parses + authoritative writes (per-worker isolation). */
 export function _resetProjectSnapshotParseCacheForTests(): void {
 	snapshotParseCache.clear();
+	for (const entry of authoritativeSnapshots.values()) clearAuthoritativeSnapshotTimer(entry);
 	authoritativeSnapshots.clear();
 }
 
@@ -424,6 +471,7 @@ function loadProjectSnapshotInternal(
 	if (authoritative) {
 		const diskMtime = body ? body.mtimeMs : Number.NEGATIVE_INFINITY;
 		if (diskMtime <= authoritative.knownMtime) {
+			touchAuthoritativeSnapshot(key, authoritative);
 			return authoritative.snapshot;
 		}
 		// An external writer moved past our write — honor disk and stop
@@ -927,7 +975,14 @@ export function saveProjectSnapshot(
 	// legacy body to a merge-consumer, silently dropping this snapshot's fields.
 	const priorBody = resolveSnapshotBodyPath(cwd);
 	const knownMtime = priorBody ? priorBody.mtimeMs : Number.NEGATIVE_INFINITY;
-	authoritativeSnapshots.set(key, { snapshot, knownMtime });
+	const authoritativeEntry: AuthoritativeSnapshotEntry = {
+		snapshot,
+		knownMtime,
+		lastUsedAt: Date.now(),
+	};
+	authoritativeSnapshots.set(key, authoritativeEntry);
+	scheduleAuthoritativeSnapshotEviction(key, authoritativeEntry);
+	enforceAuthoritativeSnapshotCap();
 	// A stale disk-parse-cache entry for this path must not out-vote the fresh
 	// authoritative write once the latter is dropped (oversized bodies).
 	snapshotParseCache.delete(gzPath);
