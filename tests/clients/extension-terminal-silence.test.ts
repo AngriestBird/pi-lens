@@ -261,3 +261,12 @@ it("console guard is index.ts's first import (import-time install)", () => {
 	expect(firstImport).toContain("./clients/console-guard-install.js");
 });
 
+it("captures the startup marker before installing the console guard", () => {
+	const src = fs.readFileSync(
+		path.join(REPO_ROOT, "clients/console-guard-install.ts"),
+		"utf8",
+	);
+	expect(src.indexOf("PI_LENS_EVAL_STARTED_MS = performance.now()"))
+		.toBeLessThan(src.indexOf("installConsoleGuard();"));
+	expect(src).not.toContain("startup-marker");
+});

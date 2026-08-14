@@ -1,5 +1,4 @@
 import "./clients/console-guard-install.js";
-import "./clients/startup-marker.js";
 import { installConsoleGuard, logExtension } from "./clients/extension-log.js";
 import { wireUserNotifier } from "./clients/user-notify.js";
 import {

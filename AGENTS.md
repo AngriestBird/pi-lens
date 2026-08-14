@@ -470,8 +470,10 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   Client shutdown's fire-and-forget instance-registry removal is serialized at
   its read-modify-write seam so concurrent removals cannot lose siblings;
  process-tree kills remain concurrent.
-- **Session-start timing is end-to-end attributable (#948).** `index.ts` imports
-  `clients/startup-marker.ts` first, then logs `host_boot`, `extension_eval`, and
+- **Session-start timing is end-to-end attributable (#948, #1374).** `index.ts`
+  imports `clients/console-guard-install.ts` first; that module captures the
+  evaluation marker as its first statement before installing the guard. The
+  extension then logs `host_boot`, `extension_eval`, and
   the continuity `extension_loaded` record. Primary session starts pass the host
   hook/bootstrap timestamps into `handleSessionStart`, which records pre-handler,
   runtime-reset, sequence/snapshot (with bytes/freshness/seq), total, and

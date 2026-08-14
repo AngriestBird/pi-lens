@@ -1,3 +1,9 @@
+import { performance } from "node:perf_hooks";
+
+// Capture this before the guard's other module initialization so host boot is
+// not charged to extension evaluation (#1374).
+export const PI_LENS_EVAL_STARTED_MS = performance.now();
+
 // #1333: install the console guard as an import side-effect so it runs before
 // any other module's initialization code. Installing inside the extension
 // factory is too late — by the time the factory runs, every static/transitive
