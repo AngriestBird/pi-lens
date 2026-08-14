@@ -82,6 +82,14 @@ describe("git-guard", () => {
 		]) {
 			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
 		}
+		for (const command of [
+			"git$IFS push",
+			"git${IFS%x}push",
+			"git$IFS$9push",
+			"sh -c 'git$IFS$9push'",
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
+		}
 		expect(
 			isGitCommitOrPushAttempt("bash", { command: 'git commit -m "$IFS is a var"' }),
 		).toBe(true);
@@ -97,12 +105,29 @@ describe("git-guard", () => {
 			"toybox sh -c 'git commit'",
 			"nix-shell -p git --run 'git push'",
 			'someunknownwrapper -c "git push"',
+			'weird --command "git push"',
+			'weird -e "git push"',
+			'weird /R "git push"',
+			"weirdwrapper git push",
 		]) {
 			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
 		}
 		expect(isGitCommitOrPushAttempt("bash", { command: 'myprog -c "echo hi"' })).toBe(false);
-		expect(isGitCommitOrPushAttempt("bash", { command: 'myprog git push' })).toBe(false);
+		expect(isGitCommitOrPushAttempt("bash", { command: 'myprog git push' })).toBe(true);
 		expect(isGitCommitOrPushAttempt("bash", { command: 'myprog -c "echo git push"' })).toBe(false);
+	});
+
+	it("does not treat literal git text as an indirect operation", () => {
+		for (const command of [
+			'echo "remember to git push later"',
+			'grep "git push" file',
+			'docker run -c "echo hi"',
+			'myprog --run "build"',
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(false);
+		}
+		expect(isGitCommitOrPushAttempt("bash", { command: 'git push' })).toBe(true);
+		expect(isGitCommitOrPushAttempt("bash", { command: 'git commit -m "prep for git push"' })).toBe(true);
 	});
 
 	it("detects launcher prefixes, shell keywords, combined flags, and continuations", () => {

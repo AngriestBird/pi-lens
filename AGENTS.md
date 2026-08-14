@@ -184,6 +184,14 @@ writes the workflow summary; it must never close or edit detected issues.
 The LSP status surface includes a bounded per-client history of operational
 diagnostic-pull failures; unsupported `-32601` responses are intentionally
 excluded. Strategy-gated `didSave` remains separate and out of scope here.
+
+Git-guard command classification canonicalizes IFS parameter-expansion
+separators in one quote-aware pass before tokenization, including nested
+command strings. Any non-leading guarded `git` token is treated as indirect;
+unknown wrappers and arbitrary run flags therefore fail closed, while literal
+text consumers (`echo`, `printf`, `grep`) do not turn quoted prose into a
+blocked operation. Keep the canonicalizer scoped to command classification so
+quoted arguments remain intact.
 Unsupported pull responses are also recognized by the standard message-only
 variants (`method not found`, `unknown method`, and `unsupported method`).
 Status consumers receive detached, 200-character-bounded failure entries.

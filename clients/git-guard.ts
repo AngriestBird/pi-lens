@@ -129,16 +129,69 @@ function isCommandStringWrapper(value: string): boolean {
 	return COMMAND_STRING_WRAPPERS.has(executableName(value));
 }
 
+/**
+ * Canonicalize shell parameter separators before command classification. The
+ * quote-aware pass deliberately leaves literal arguments alone; the lexer
+ * then supplies the command-position boundaries used by the guard.
+ */
+function canonicalizeGuardCommand(command: string): string {
+	let result = "";
+	let quote: "single" | "double" | undefined;
+	let escaped = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote === "single") {
+			result += ch;
+			if (ch === "'") quote = undefined;
+			continue;
+		}
+		if (quote === "double") {
+			result += ch;
+			if (escaped) escaped = false;
+			else if (ch === "\\") escaped = true;
+			else if (ch === '"') quote = undefined;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch === "'" ? "single" : "double";
+			result += ch;
+			continue;
+		}
+		const parameter = command.slice(i).match(/^\$\{IFS[^}]*\}/)?.[0];
+		const positional = command.slice(i).match(/^\$IFS(?:\$[0-9]+)?/)?.[0];
+		if (parameter || positional) {
+			result += " ";
+		i += (parameter ?? positional ?? "").length - 1;
+			continue;
+		}
+		result += ch;
+	}
+	let collapsed = "";
+	let pendingSpace = false;
+	quote = undefined;
+	for (const ch of result) {
+		if (!quote && /\s/.test(ch)) {
+			pendingSpace = collapsed.length > 0;
+			continue;
+		}
+		if (pendingSpace) collapsed += " ";
+		pendingSpace = false;
+		collapsed += ch;
+		if (!quote && (ch === "'" || ch === '"')) {
+			quote = ch === "'" ? "single" : "double";
+		} else if ((quote === "single" && ch === "'") || (quote === "double" && ch === '"')) {
+			quote = undefined;
+		}
+	}
+	return collapsed.trim();
+}
+
 /** Normalize only a command-position token; never apply this to path args. */
 function normalizeGuardVerbToken(value: string): string {
 	return value
 		.replace(/\\(?=[A-Za-z0-9_])/g, "")
 		.replace(/`(?=.)/g, "")
-		.replace(/\^(?=.)/g, "")
-		// Positional parameters are commonly appended to IFS to consume the
-		// next shell character (for example `$IFS$9push`). They are still one
-		// word separator for command-position classification.
-		.replace(/(?:\$\{IFS\}|\$IFS)(?:\$[0-9]+)?/g, " ");
+		.replace(/\^(?=.)/g, "");
 }
 
 function expandGuardVerbToken(value: string): string[] {
@@ -161,37 +214,21 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 		const runIndex = lower.findIndex((token) => token === "--run");
 		if (runIndex >= 0 && runIndex + 1 < commandTokens.length) {
 			const nestedCommand = commandTokens.slice(runIndex + 2).join(" ");
-			return tokenizeShellCommand(nestedCommand).some(
+			return tokenizeShellCommand(canonicalizeGuardCommand(nestedCommand)).some(
 				(segment) => containsCommitOrPush(segment.tokens, depth + 1),
 			);
 		}
 	}
+	// These commands consume their following words as text/patterns; a bare
+	// git token in their arguments is not an indirect executable invocation.
+	if (["echo", "printf", "grep"].includes(executableName(commandTokens[0] ?? ""))) {
+		return false;
+	}
 	const gitIndex = commandTokens.findIndex((token) => isGitExecutable(token));
 	if (gitIndex >= 0) {
-		const preceding = commandTokens.slice(0, gitIndex);
-		const mayLaunchGit =
-			gitIndex === 0 ||
-			preceding.some((token) =>
-				[
-					"cmd",
-					"powershell",
-					"pwsh",
-					"sh",
-					"bash",
-					"dash",
-					"zsh",
-					"ash",
-					"env",
-					"exec",
-					"command",
-					"nohup",
-					"nice",
-					"xargs",
-					"then",
-					"do",
-				].includes(executableName(token)),
-			);
-		if (!mayLaunchGit) return false;
+		// Any non-leading git invocation is indirect. Do not maintain a wrapper
+		// or flag allowlist: unknown launchers are the security boundary here.
+		if (gitIndex > 0) return true;
 		const gitTokens = commandTokens.slice(gitIndex);
 		let i = 1;
 		const takesValue = new Set([
@@ -227,22 +264,14 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 		// Unknown launchers are a fail-closed boundary only when they explicitly
 		// accept a command string. Re-tokenizing the value keeps literal mentions
 		// such as `myprog -c "echo git push"` out of the guarded-command path.
-		const unknownSwitchIndex = commandTokens.slice(1).findIndex((token) => {
-			const lower = token.toLowerCase();
-			return (
-				lower === "-c" ||
-				lower === "--run" ||
-				lower === "/c" ||
-				lower === "-command" ||
-				lower === "-command:" ||
-				(/^-[^-]*c$/.test(lower) && !lower.startsWith("--"))
-			);
-		});
+		const unknownSwitchIndex = commandTokens.slice(1).findIndex((token) =>
+			(token.startsWith("-") || token.startsWith("/")) && token.length > 1,
+		);
 		if (unknownSwitchIndex < 0) return false;
 		const commandIndex = unknownSwitchIndex + 2;
 		if (commandIndex >= commandTokens.length) return false;
 		const nestedCommand = commandTokens.slice(commandIndex).join(" ");
-		return tokenizeShellCommand(nestedCommand).some(
+		return tokenizeShellCommand(canonicalizeGuardCommand(nestedCommand)).some(
 			(segment) => containsCommitOrPush(segment.tokens, depth + 1),
 		);
 	}
@@ -269,7 +298,7 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 	let commandIndex = switchIndex + 2;
 	if (commandTokens[commandIndex] === "--") commandIndex += 1;
 	const nestedCommand = commandTokens.slice(commandIndex).join(" ");
-	return tokenizeShellCommand(nestedCommand).some(
+	return tokenizeShellCommand(canonicalizeGuardCommand(nestedCommand)).some(
 		(segment) => containsCommitOrPush(segment.tokens, depth + 1),
 	);
 }
@@ -279,7 +308,8 @@ export function isGitCommitOrPushAttempt(toolName: string, input: unknown): bool
 	if (toolName !== "bash") return false;
 	const command = getShellCommand(input);
 	if (!command) return false;
-	return tokenizeShellCommand(command).some((segment) =>
+	const canonical = canonicalizeGuardCommand(command);
+	return tokenizeShellCommand(canonical).some((segment) =>
 		containsCommitOrPush(segment.tokens, 0),
 	);
 }
