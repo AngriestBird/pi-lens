@@ -36,6 +36,8 @@ All notable changes to pi-lens will be documented in this file.
 
 - **Fully qualified Windows paths use one shared classifier (closes [#1213](https://github.com/apmantza/pi-lens/issues/1213))** — drive-relative (`C:foo`) and rooted-relative (`\\foo`) paths are no longer mistaken for self-contained absolute paths; UNC and drive-absolute paths remain fully qualified across command validation, installer caching, and managed-tool retention.
 
+- **Cascade module source-file walk is memoized on the existing freshness seams (refs [#1137](https://github.com/apmantza/pi-lens/issues/1137))** — `getModuleSourceFiles` (the #1318 slice-2 remnant) ran a recursive `readdirSync` walk per downstream module on every per-edit cascade in monorepos; it now memoizes per module root, revalidating on the visited directories' `mtimeMs` stamps plus ignore-matcher object identity (so `.gitignore`/`.pi-lens.json` edits re-walk), and clears with the module-graph cache.
+
 - **Kotlin formatter selection follows Spotless configuration deterministically (closes #1306)** — a Spotless `kotlin { ktlint() }` block pins ktlint and `kotlin { ktfmt() }` pins ktfmt, so both selection branches cannot claim the same Kotlin file and unconfigured projects retain the style-preserving no-format policy.
 
 - **Managed npm clients see and execute off-PATH installs (closes [#1289](https://github.com/apmantza/pi-lens/issues/1289))** — madge and Knip availability probes receive the managed environment, Knip threads the same environment into analysis, Biome checks the managed absolute candidate before its npx fallback, and every install result is retained as the command used by the client.
