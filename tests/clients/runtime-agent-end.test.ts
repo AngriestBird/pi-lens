@@ -7,6 +7,7 @@ import { resolvePiLensFlag } from "../../clients/lens-config.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { loadPiLensProjectConfig } from "../../clients/project-lens-config.js";
 import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
+import { getLastLoggedPhase } from "../../clients/latency-logger.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import {
@@ -94,6 +95,7 @@ describe("runtime-agent-end deferred formatting", () => {
 				"pi-lens deferred format applied to 1 file(s): app.ts",
 				"info",
 			);
+			expect(getLastLoggedPhase()?.phase).toBe("agent_end_deferred_format_done");
 		} finally {
 			if (previousDataDir === undefined) {
 				delete process.env.PILENS_DATA_DIR;

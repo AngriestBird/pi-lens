@@ -850,6 +850,8 @@ export class LSPService {
 	private readonly projectBoundaryCache = new Map<string, Promise<boolean>>();
 	private readonly warmStartLogged = new Set<string>();
 	private readonly optionalFailureLogged = new Set<string>();
+	/** Server/root pairs that already emitted unavailable for the current occurrence. */
+	private readonly unavailableLogged = new Set<string>();
 	private readonly optionalDisabled = new Set<string>();
 	/** Consecutive failure counts for exponential backoff circuit breaker */
 	private readonly failureCounts = new Map<string, number>();
@@ -1480,14 +1482,27 @@ export class LSPService {
 				}
 			}
 
+			const unavailable = (
+				await Promise.all(
+					servers.map(async (server) => {
+						const root = await server.root(filePath);
+						return {
+							server,
+							key: `${server.id}:${root ? normalizeMapKey(root) : "<unresolved>"}`,
+						};
+					}),
+				)
+			).filter(({ key }) => !this.unavailableLogged.has(key));
+			for (const { key } of unavailable) this.unavailableLogged.add(key);
+			if (unavailable.length === 0) return undefined;
 			logLatency({
 				type: "phase",
 				phase: "lsp_client_unavailable",
 				filePath,
 				durationMs: 0,
 				metadata: {
-					candidateCount: servers.length,
-					servers: servers.map((server) => server.id),
+					candidateCount: unavailable.length,
+					servers: unavailable.map(({ server }) => server.id),
 				},
 			});
 
@@ -1707,6 +1722,7 @@ export class LSPService {
 		const existing = this.state.clients.get(key);
 		if (existing) {
 			if (existing.isAlive()) {
+				this.unavailableLogged.delete(key);
 				this.clientLastUsedAt.set(key, Date.now());
 				this.scheduleTypeScriptIdleEviction(key);
 				if (!this.warmStartLogged.has(key)) {
@@ -2074,6 +2090,7 @@ export class LSPService {
 						};
 
 			this.state.clients.set(key, client);
+			this.unavailableLogged.delete(key);
 			this.state.clientSpawnedAt.set(key, Date.now());
 			this.clientLastUsedAt.set(key, Date.now());
 			this.scheduleTypeScriptIdleEviction(key);
@@ -2788,6 +2805,7 @@ export class LSPService {
 					durationMs: waitedMs,
 					metadata: {
 						source,
+						serverId: spawned[0]?.client.serverId,
 						clientScope,
 						diagnosticsMode,
 						mode: "race",
@@ -4314,16 +4332,21 @@ export class LSPService {
 						ms: timeoutMs,
 						onTimeout: "undefined",
 					}));
+			const coldServerIds = stillColdServerIds();
 			logLatency({
 				type: "phase",
-				phase: "lsp_sweep_warmup_done",
+				phase: options.signal?.aborted
+					? "lsp_sweep_warmup_aborted"
+					: coldServerIds.length > 0
+						? "lsp_sweep_warmup_failed"
+						: "lsp_sweep_warmup_done",
 				filePath: representativeFile,
 				durationMs: Date.now() - startedAt,
 				metadata: {
 					serverIds: servers.map((s) => s.id),
 					timeoutMs,
 					attempt,
-					coldServerIds: stillColdServerIds(),
+					coldServerIds,
 				},
 			});
 		};
@@ -4352,13 +4375,6 @@ export class LSPService {
 		}
 
 		if (failedServerIds.length > 0) {
-			logLatency({
-				type: "phase",
-				phase: "lsp_sweep_warmup_failed",
-				filePath: representativeFile,
-				durationMs: 0,
-				metadata: { failedServerIds, timeoutMs },
-			});
 			// #799: record the negative cache so a LATER sweep this session
 			// skips straight past re-paying this warm-up (initial + retry).
 			// Cleared automatically the moment the server demonstrates

@@ -106,3 +106,13 @@ describe("AgentBehaviorClient reset", () => {
 		);
 	});
 });
+
+describe("AgentBehaviorClient edit counts", () => {
+	it("matches mixed-separator and case-variant paths", () => {
+		const client = new AgentBehaviorClient();
+
+		client.recordToolCall("edit", "C:\\Repo\\SRC\\File.ts");
+
+		expect(client.getEditCount("c:/repo/src/file.ts")).toBe(1);
+	});
+});

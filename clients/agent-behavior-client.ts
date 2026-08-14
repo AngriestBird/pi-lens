@@ -159,7 +159,7 @@ export class AgentBehaviorClient {
 	 * Get edit count for a file in this session.
 	 */
 	getEditCount(filePath: string): number {
-		return this.fileEditCount.get(filePath) ?? 0;
+		return this.fileEditCount.get(normalizeMapKey(filePath)) ?? 0;
 	}
 
 	/**

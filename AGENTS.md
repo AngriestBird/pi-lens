@@ -116,8 +116,12 @@ The captured-at-subscribe / used-after-replace shape also applies to pi's
 `events` API: `pi.events.emit` is a session-bound wrapper whose runtime is
 invalidated on replacement. Long-lived publishers must retain a getter and
 resolve the emitter at delivery time; deferred callbacks must resolve inside
-the callback, never before scheduling. This is the pattern established by
-#1128 for the bus and lens-event publishers.
+the callback, never before scheduling. The getter itself is activation-scoped:
+module-singleton bus/notifier/widget-render plumbing must be re-wired from the
+current factory on every `session_start`, BEFORE the #473 concurrent-secondary
+guard can return, because a sibling activation can overwrite the singleton and
+later go stale. Emit-failure suppression is occurrence-scoped (success re-arms
+it), and a stale occurrence records one `bus-stale` degradation. (#1128, #1383)
 
 This is the payoff of the two disciplines above: a bounded checklist of defect *shapes* that each recurred ≥2× across the arc. Read it at task start; when your change matches a shape, treat the screen as an acceptance criterion (and the regression test the shape implies). Each entry is **SHAPE → SCREEN (when you touch X, verify Y) → canonical example → detection**. Where a shape has a fuller treatment above, this cross-references rather than restates it.
 
@@ -220,6 +224,13 @@ clients/
   mcp/                     host-neutral facades: analyze, session, review, ipc, host-shim
   runtime-session.ts      session_start handler — snapshot hydrate, tool preinstall, background scans, LSP warm
   project-snapshot.ts     Versioned seq-stamped project snapshot cache
+
+The diagnostics widget records the exact `ctx.ui` identity only after a
+successful `setWidget` mount. A visible widget re-asserts that mount on
+`turn_start` when the host replaces its UI object; this remains gated by the
+live run mode and `lensWidgetVisible`, so a user toggle-off or headless mode is
+never undone. Missing `ui.setWidget` is a log-once-per-extension-session
+diagnostic rather than a silent mount failure. (#1381)
   project-changes.ts      Append-only project/file sequence change log
   reverse-deps.ts         Snapshot-backed reverse dependency index/query helpers
   word-index.ts           Identifier inverted index + BM25 ranking (#162) — built in the session scan, persisted with per-file mtimes in the snapshot; consumed by BOTH the pi symbol_search tool and the MCP pilens_symbol_search mirror (#348 phase 1); session warmup preflights the bounded current file set and incrementally refreshes only sparse stale/new/deleted documents. A stale set whose ESTIMATED WORK exceeds one full rebuild (posting-scan + re-read cost vs totalTokens + corpus re-read cost), a dense stale set (≥32 documents AND >30% of the corpus), >30% file-set churn, or legacy metadata selects a separately-built full replacement BEFORE mutating the old index (#1197): repeated per-document posting-array filters become effectively quadratic (2,061 all-stale docs took 216.8s vs a 7.5s full build), and because per-document cost GROWS with the corpus no density ratio or absolute count is a bound — 800 docs / 239 stale at 29.875% measured 90.6s with a 39.6s loop block. Every bulk path (async build + both refresh loops) yields on an ~8ms monotonic budget OR'd with its item checkpoint — never count-only, which bounds nothing when per-item cost is unbounded — including within large documents and after any line ≥4,096 chars. Synchronous `buildWordIndex` is the small/test/reference primitive only. Superseded builds never publish a partial index and never escape as an exception into a caller's warmup pass.
@@ -496,8 +507,10 @@ a *second host adapter* alongside `index.ts`. Design rationale + progress: `mcp.
   Client shutdown's fire-and-forget instance-registry removal is serialized at
   its read-modify-write seam so concurrent removals cannot lose siblings;
  process-tree kills remain concurrent.
-- **Session-start timing is end-to-end attributable (#948).** `index.ts` imports
-  `clients/startup-marker.ts` first, then logs `host_boot`, `extension_eval`, and
+- **Session-start timing is end-to-end attributable (#948, #1374).** `index.ts`
+  imports `clients/console-guard-install.ts` first; that module captures the
+  evaluation marker as its first statement before installing the guard. The
+  extension then logs `host_boot`, `extension_eval`, and
   the continuity `extension_loaded` record. Primary session starts pass the host
   hook/bootstrap timestamps into `handleSessionStart`, which records pre-handler,
   runtime-reset, sequence/snapshot (with bytes/freshness/seq), total, and

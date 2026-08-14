@@ -24,7 +24,12 @@
 import { logBusEvent } from "./bus-events-logger.js";
 import { isBusPublishEnabled } from "./bus-publish.js";
 import { normalizeFilePath } from "./path-utils.js";
-import { createLiveBusEmitter, type BusEmitFn, type BusEmitGetter } from "./live-bus-emitter.js";
+import {
+	createLiveBusEmitter,
+	recordStaleBusFailure,
+	type BusEmitFn,
+	type BusEmitGetter,
+} from "./live-bus-emitter.js";
 
 export const BUS_DISPOSITION_EVENT = "pilens:diagnostic:disposition";
 export const BUS_DISPOSITION_VERSION = 1;
@@ -127,6 +132,7 @@ export function publishDisposition(args: PublishDispositionArgs): void {
 			reason: args.reason,
 		};
 		busEmit(BUS_DISPOSITION_EVENT, payload);
+		hasLoggedFailure = false;
 		logBusEvent({
 			event: BUS_DISPOSITION_EVENT,
 			outcome: "emitted",
@@ -141,6 +147,7 @@ export function publishDisposition(args: PublishDispositionArgs): void {
 		});
 		if (!hasLoggedFailure) {
 			hasLoggedFailure = true;
+			recordStaleBusFailure(BUS_DISPOSITION_EVENT, err);
 			args.dbg?.(
 				`disposition-publish: pilens:diagnostic:disposition emit failed (further failures suppressed): ${err}`,
 			);
