@@ -174,6 +174,21 @@ describe("extractGrepSearchReadsFromOutput", () => {
 // ── writes: agent authored the file (mirrors the Write tool) ────────────────
 
 describe("extractWrittenPathsFromCommand — bash writes", () => {
+	it("does not grant ownership for redirect syntax inside quoted arguments", () => {
+		const f = path.join(tmp, "results.ts");
+		fs.writeFileSync(f, "const result = 1;\n");
+		expect(
+			extractWrittenPathsFromCommand('git commit -m "output > results.ts"', tmp),
+		).toEqual([]);
+	});
+
+	it("does not grant read coverage for separators inside quoted arguments", () => {
+		const f = path.join(tmp, "foo.ts");
+		fs.writeFileSync(f, "const foo = 1;\n");
+		expect(
+			extractReadPathsFromCommand('git commit -m "fix: cat foo.ts; done"', tmp),
+		).toEqual([]);
+	});
 	const cases: Array<[string, (f: string) => string]> = [
 		["redirect (>)", (f) => `echo "x" > ${f}`],
 		["redirect no space (>file)", (f) => `echo "x" >${f}`],

@@ -129,8 +129,33 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 		commandTokens = commandTokens.slice(1);
 	}
 	if (commandTokens.length === 0) return false;
-	if (isGitExecutable(commandTokens[0])) {
-		const tokens = commandTokens;
+	const gitIndex = commandTokens.findIndex((token) => isGitExecutable(token));
+	if (gitIndex >= 0) {
+		const preceding = commandTokens.slice(0, gitIndex);
+		const mayLaunchGit =
+			gitIndex === 0 ||
+			preceding.some((token) =>
+				[
+					"cmd",
+					"powershell",
+					"pwsh",
+					"sh",
+					"bash",
+					"dash",
+					"zsh",
+					"ash",
+					"env",
+					"exec",
+					"command",
+					"nohup",
+					"nice",
+					"xargs",
+					"then",
+					"do",
+				].includes(executableName(token)),
+			);
+		if (!mayLaunchGit) return false;
+		const gitTokens = commandTokens.slice(gitIndex);
 		let i = 1;
 		const takesValue = new Set([
 			"-C",
@@ -141,10 +166,10 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 			"--exec-path",
 			"--namespace",
 		]);
-		while (i < tokens.length && tokens[i].startsWith("-")) {
-			const option = tokens[i];
+		while (i < gitTokens.length && gitTokens[i].startsWith("-")) {
+			const option = gitTokens[i];
 			if (["--help", "-h", "--version", "-v", "-V"].includes(option)) return false;
-			if (option === "--") return tokens[i + 1] === "commit" || tokens[i + 1] === "push";
+			if (option === "--") return gitTokens[i + 1] === "commit" || gitTokens[i + 1] === "push";
 			if (["-C", "-c"].some((prefix) => option.startsWith(prefix) && option.length > prefix.length)) {
 				i += 1;
 				continue;
@@ -155,7 +180,7 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 			}
 			i += takesValue.has(option) ? 2 : 1;
 		}
-		return tokens[i] === "commit" || tokens[i] === "push";
+		return gitTokens[i] === "commit" || gitTokens[i] === "push";
 	}
 	if (!isShellWrapper(commandTokens[0])) return false;
 	const lower = commandTokens.slice(1).map((token) => token.toLowerCase());
@@ -163,19 +188,21 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 		(token) =>
 			token === "-c" ||
 			token === "-lc" ||
+			(/^-[^-]*c$/.test(token) && !token.startsWith("--")) ||
 			token === "/c" ||
 			token === "-command" ||
 			token === "-command:" ||
 			token === "-encodedcommand",
 	);
-	if (switchIndex < 0 || switchIndex + 2 >= commandTokens.length) return false;
+	if (switchIndex < 0 || switchIndex + 2 > commandTokens.length) return false;
 	// Encoded PowerShell is intentionally unsupported: decoding it here would
 	// be a second shell/parser and could turn an ambiguous command into a false
 	// allow. Plain -Command/-c is safely handed back to the shared lexer.
 	if (lower[switchIndex] === "-encodedcommand") return false;
 	let commandIndex = switchIndex + 2;
 	if (commandTokens[commandIndex] === "--") commandIndex += 1;
-	return tokenizeShellCommand(commandTokens[commandIndex] ?? "").some(
+	const nestedCommand = commandTokens.slice(commandIndex).join(" ");
+	return tokenizeShellCommand(nestedCommand).some(
 		(segment) => containsCommitOrPush(segment.tokens, depth + 1),
 	);
 }

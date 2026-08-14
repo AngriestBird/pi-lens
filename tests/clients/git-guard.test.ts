@@ -13,6 +13,7 @@ import {
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { setupTestEnvironment } from "./test-utils.js";
+import { tokenizeShellCommand } from "../../clients/bash-file-access.js";
 
 function record(overrides: Partial<TurnEndFindingsCache> = {}): TurnEndFindingsCache {
 	return {
@@ -46,6 +47,31 @@ describe("git-guard", () => {
 		expect(isGitCommitOrPushAttempt("bash", { command: "echo \"git commit -m x\"" })).toBe(false);
 		expect(isGitCommitOrPushAttempt("bash", { command: "printf 'git push'" })).toBe(false);
 		expect(isGitCommitOrPushAttempt("write", { command: "git commit -m x" })).toBe(false);
+	});
+
+	it("detects wrapper commands when the shell joins unquoted argv", () => {
+		expect(isGitCommitOrPushAttempt("bash", { command: "cmd /c git commit -m x" })).toBe(true);
+		expect(isGitCommitOrPushAttempt("bash", { command: "powershell -Command git push origin main" })).toBe(true);
+	});
+
+	it("detects launcher prefixes, shell keywords, combined flags, and continuations", () => {
+		const continued = "git \\" + "\ncommit -m x";
+		expect(tokenizeShellCommand(continued)[0]?.tokens).toEqual(["git", "commit", "-m", "x"]);
+		for (const command of [
+			"env FOO=bar git commit -m x",
+			"exec git push origin main",
+			"command git commit -m x",
+			"nohup git push origin main",
+			"nice git commit -m x",
+			"xargs git push origin main",
+			"if true; then git commit -m x; fi",
+			"for x in one; do git push origin main; done",
+			"sh -ec 'git commit -m x'",
+			"bash -euc 'git push origin main'",
+			continued,
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
+		}
 	});
 
 	it("blocks runtime blockers and preserves their details", () => {
