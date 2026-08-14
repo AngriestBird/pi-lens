@@ -1,6 +1,9 @@
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import astGrepNapiRunner from "../../../../clients/dispatch/runners/ast-grep-napi.js";
+import astGrepNapiRunner, {
+	evaluateAstGrepRules,
+	resetAstGrepUnsupportedLanguageLog,
+} from "../../../../clients/dispatch/runners/ast-grep-napi.js";
 import type { Diagnostic } from "../../../../clients/dispatch/types.js";
 import {
 	linesFor,
@@ -72,6 +75,7 @@ describe("ast-grep NAPI utils: block passthrough (#663)", () => {
 	});
 
 	it("aggregates unsupported-language skips into latency telemetry", async () => {
+		resetAstGrepUnsupportedLanguageLog();
 		logLatency.mockClear();
 		const logs: string[] = [];
 		await diagnosticsOn("const value = 1;\n", "sample.ts", (message) =>
@@ -96,8 +100,41 @@ describe("ast-grep NAPI utils: block passthrough (#663)", () => {
 				{ count: number; ruleIds: string[] }
 			>
 		).python;
-		expect(python.ruleIds).toContain("no-compile-call");
-		expect(python.count).toBe(python.ruleIds.length);
+		expect(python.ruleIds.length).toBeGreaterThan(0);
+		expect(python.ruleIds.length).toBeLessThanOrEqual(5);
+		expect(python.count).toBeGreaterThanOrEqual(python.ruleIds.length);
+	});
+
+	it("dedupes unsupported-language telemetry across files and resets per session", async () => {
+		resetAstGrepUnsupportedLanguageLog();
+		logLatency.mockClear();
+		const root = { findAll: () => [] };
+		const first = env.addFile("first.ts", "const value = 1\n").filePath;
+		const second = env.addFile("second.ts", "const value = 2\n").filePath;
+		const options = { log: () => {} };
+		evaluateAstGrepRules(first, root, env.cwd, "python", options);
+		evaluateAstGrepRules(second, root, env.cwd, "python", options);
+		let entries = logLatency.mock.calls.filter(
+			([entry]) =>
+				(entry as { phase?: string }).phase ===
+				"astgrep_napi_unsupported_rules_skipped",
+		);
+		expect(entries).toHaveLength(1);
+
+		resetAstGrepUnsupportedLanguageLog();
+		evaluateAstGrepRules(first, root, env.cwd, "python", options);
+		entries = logLatency.mock.calls.filter(
+			([entry]) =>
+				(entry as { phase?: string }).phase ===
+				"astgrep_napi_unsupported_rules_skipped",
+		);
+		expect(entries).toHaveLength(2);
+		const python = (
+			(entries[0][0] as { metadata: any }).metadata.skippedByLanguage
+				.python
+		);
+		expect(python.count).toBeGreaterThan(python.ruleIds.length);
+		expect(python.ruleIds).toHaveLength(5);
 	});
 
 	it("logs each unsupported rule once for a shared dedup set", async () => {
@@ -131,7 +168,7 @@ describe("ast-grep NAPI utils: block passthrough (#663)", () => {
 			string,
 			{ ruleIds: string[] }
 		>;
-		expect(languages.python.ruleIds).toContain("no-compile-call");
+		expect(languages.python.ruleIds.length).toBeGreaterThan(0);
 	});
 
 	it("passes utils through the JavaScript no-dupe-keys twin", async () => {

@@ -42,6 +42,14 @@ import {
 	type YamlRule,
 } from "./yaml-rule-parser.js";
 
+const defaultUnsupportedLanguageLog = new Set<string>();
+const UNSUPPORTED_RULE_ID_SAMPLE_SIZE = 5;
+
+/** Clear per-session unsupported-language telemetry dedupe. */
+export function resetAstGrepUnsupportedLanguageLog(): void {
+	defaultUnsupportedLanguageLog.clear();
+}
+
 // Lazy load the napi package
 let sg: AstGrepNapi | undefined;
 let sgLoadAttempted = false;
@@ -319,7 +327,8 @@ export function evaluateAstGrepRules(
 		options.maxTotalDiagnostics ?? MAX_TOTAL_DIAGNOSTICS;
 	const blockingOnly = options.blockingOnly === true;
 	const log = options.log;
-	const unsupportedLanguageLog = options.unsupportedLanguageLog ?? new Set<string>();
+	const unsupportedLanguageLog =
+		options.unsupportedLanguageLog ?? defaultUnsupportedLanguageLog;
 
 	const diagnostics: Diagnostic[] = [];
 	const seenRuleIds = new Set<string>();
@@ -331,6 +340,17 @@ export function evaluateAstGrepRules(
 	const newlyUnsupported = new Map<string, string[]>();
 	const flushUnsupportedRuleSkips = (): void => {
 		if (newlyUnsupported.size === 0) return;
+		const firstSeenLanguages = Array.from(newlyUnsupported.entries()).filter(
+			([language]) => !unsupportedLanguageLog.has(language),
+		);
+		for (const [language] of firstSeenLanguages) {
+			unsupportedLanguageLog.add(language);
+		}
+		if (firstSeenLanguages.length === 0) {
+			newlyUnsupported.clear();
+			return;
+		}
+		for (const [language] of firstSeenLanguages) unsupportedLanguageLog.add(language);
 		logLatency({
 			type: "phase",
 			phase: "astgrep_napi_unsupported_rules_skipped",
@@ -338,9 +358,12 @@ export function evaluateAstGrepRules(
 			durationMs: 0,
 			metadata: {
 				skippedByLanguage: Object.fromEntries(
-					Array.from(newlyUnsupported.entries(), ([language, ruleIds]) => [
+					firstSeenLanguages.map(([language, ruleIds]) => [
 						language,
-						{ count: ruleIds.length, ruleIds },
+						{
+							count: ruleIds.length,
+							ruleIds: ruleIds.slice(0, UNSUPPORTED_RULE_ID_SAMPLE_SIZE),
+						},
 					]),
 				),
 			},
@@ -417,8 +440,7 @@ export function evaluateAstGrepRules(
 				lang !== "tsx" &&
 				lang !== "javascript"
 			) {
-				if (!unsupportedLanguageLog.has(rule.id)) {
-					unsupportedLanguageLog.add(rule.id);
+				if (!unsupportedLanguageLog.has(lang)) {
 					const ids = newlyUnsupported.get(lang) ?? [];
 					ids.push(rule.id);
 					newlyUnsupported.set(lang, ids);

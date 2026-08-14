@@ -19,10 +19,12 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { minimatch } from "minimatch";
 
 const DEFAULT_ROOT = path.join(os.homedir(), ".pi-lens");
 const DEFAULT_SINCE = "2d";
 const DEFAULT_LIMIT = 12;
+const DEFAULT_EXCLUDE_GLOBS = ["**/AppData/Local/Temp/claude/**", "**/heap-corpus*/**", "**/.plegma/work/**"];
 
 const args = parseArgs(process.argv.slice(2));
 const root = path.resolve(expandHome(args.root ?? DEFAULT_ROOT));
@@ -31,6 +33,10 @@ const limit =
 	Number.parseInt(args.limit ?? `${DEFAULT_LIMIT}`, 10) || DEFAULT_LIMIT;
 const outputJson = Boolean(args.json);
 const includeArchived = Boolean(args.archived);
+const excludeGlobs = [
+	...DEFAULT_EXCLUDE_GLOBS,
+	...(Array.isArray(args.exclude) ? args.exclude : args.exclude ? [args.exclude] : []),
+];
 
 const thresholds = {
 	startupSlowMs: Number.parseInt(args.startupSlowMs ?? "500", 10),
@@ -84,7 +90,14 @@ function parseArgs(argv) {
 			const key = arg.slice(2);
 			const next = argv[i + 1];
 			if (!next || next.startsWith("--")) out[key] = "true";
-			else out[key] = argv[++i];
+			else if (key === "exclude") {
+				const value = argv[++i];
+				out.exclude = out.exclude
+					? Array.isArray(out.exclude)
+						? [...out.exclude, value]
+						: [out.exclude, value]
+					: value;
+			} else out[key] = argv[++i];
 		}
 	}
 	return out;
@@ -159,6 +172,7 @@ function createState(files) {
 		window: { since: since?.toISOString() ?? "all", root },
 		files,
 		parseErrors: counter(),
+		excludedRows: 0,
 		seen: counter(),
 		projects: counter(),
 		smellTotals: counter(),
@@ -558,6 +572,10 @@ async function analyzeSessionStart(files, state) {
 			const ts = dateOf(match[1]);
 			if (!inWindow(ts)) return;
 			const message = match[2];
+			if (isExcludedText(message)) {
+				state.excludedRows++;
+				return;
+			}
 			state.seen.inc("sessionstart");
 
 			const cwd = /session_start cwd:\s*(.*)$/.exec(message)?.[1];
@@ -723,11 +741,43 @@ async function forEachJsonLine(file, bucket, state, visitor) {
 	await forEachLine(file, async (line) => {
 		if (!line.trim()) return;
 		try {
-			visitor(JSON.parse(line));
+			const entry = JSON.parse(line);
+			if (isExcludedEntry(entry)) {
+				state.excludedRows++;
+				return;
+			}
+			visitor(entry);
 		} catch {
 			state.parseErrors.inc(`${bucket}:${path.basename(file)}`);
 		}
 	});
+}
+
+function isExcludedEntry(entry) {
+	return pathValues(entry).some((value) =>
+		excludeGlobs.some((glob) =>
+			minimatch(value, glob, { nocase: true, dot: true }),
+		),
+	);
+}
+
+function pathValues(value, key = "") {
+	if (typeof value === "string") {
+		return /(file|path|cwd|root|project)/i.test(key) ? [normalizePath(value)] : [];
+	}
+	if (!value || typeof value !== "object") return [];
+	return Object.entries(value).flatMap(([childKey, child]) =>
+		pathValues(child, childKey),
+	);
+}
+
+function isExcludedText(text) {
+	const cwd = /session_start cwd:\s*(.*)$/.exec(text)?.[1];
+	return cwd
+		? excludeGlobs.some((glob) =>
+				minimatch(normalizePath(cwd), glob, { nocase: true, dot: true }),
+			)
+		: false;
 }
 
 async function forEachLine(file, visitor) {
@@ -1130,6 +1180,7 @@ function buildReport(state) {
 			Object.entries(state.files).map(([key, list]) => [key, list.length]),
 		),
 		rowsSeen: state.seen.toJSON(),
+		rowsExcluded: state.excludedRows,
 		parseErrors: state.parseErrors.toJSON(),
 		projects: state.projects.top(limit),
 		smells,
@@ -1233,6 +1284,7 @@ function printReport(report) {
 			.map(([k, v]) => `${k}=${v}`)
 			.join(", ")}`,
 	);
+	console.log(`${report.rowsExcluded} rows excluded (synthetic corpora)`);
 	if (Object.keys(report.parseErrors).length)
 		console.log(`parse errors: ${JSON.stringify(report.parseErrors)}`);
 
