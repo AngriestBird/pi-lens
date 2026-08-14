@@ -23,6 +23,7 @@ import {
 import { loadPiLensProjectConfig } from "../../clients/project-lens-config.js";
 import type { RuffClient } from "../../clients/ruff-client.js";
 import { TestRunnerClient } from "../../clients/test-runner-client.js";
+import { getDegradationSummary, resetDegradationLedger } from "../../clients/degradation-ledger.js";
 import { createTempFile, setupTestEnvironment } from "../clients/test-utils.js";
 import {
 	_resetForTests as resetBusPublish,
@@ -53,6 +54,7 @@ describe("Pipeline", () => {
 	let mockLSPService: ReturnType<typeof createMockLSPService>;
 
 	beforeEach(async () => {
+		resetDegradationLedger();
 		const env = setupTestEnvironment();
 		tmpDir = env.tmpDir;
 		mockLSPService = createMockLSPService();
@@ -336,6 +338,13 @@ describe("Pipeline", () => {
 
 			expect(result.output).toContain("Auto-format failed");
 			expect(result.output).toContain("prettier: timed out");
+			expect(getDegradationSummary()).toEqual([
+				expect.objectContaining({
+					kind: "formatter-failure",
+					count: 1,
+					latestReasons: [{ subject: "prettier:format-fails.ts", reason: "timed out" }],
+				}),
+			]);
 			expect(result.output).not.toMatch(/^✓ .*clean/);
 		});
 
