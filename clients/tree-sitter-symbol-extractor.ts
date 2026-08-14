@@ -513,6 +513,11 @@ SYMBOL_QUERIES.javascript = {
     `,
 };
 
+/** Language keys with symbol queries; used by fixture drift guards. */
+export function getSymbolQueryLanguages(): readonly string[] {
+	return Object.keys(SYMBOL_QUERIES);
+}
+
 // Per-language import-source extraction (#249). Optional and independent of
 // SYMBOL_QUERIES: a language without an entry simply yields no imports (its
 // symbols still extract). Each query captures the import source text as
