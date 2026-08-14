@@ -332,6 +332,17 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 		},
 	};
 
+/** Native TS7 can publish multiple versionless partial-program snapshots for a
+ * single open. Its first push is therefore provisional; a quiet window, rather
+ * than a protocol-unstable publication count, establishes the settled push. */
+const NATIVE_TS7_DIAGNOSTIC_STRATEGY: DiagnosticStrategy = {
+	...SERVER_DIAGNOSTIC_STRATEGIES.typescript,
+	seedFirstPush: false,
+	// Native TS7 demonstrably publishes on clean, so the classic-only marker
+	// must not leak through the shared server id.
+	silentOnClean: false,
+};
+
 /** Fallback for unknown servers. Conservative defaults. */
 export const DEFAULT_STRATEGY: DiagnosticStrategy = {
 	seedFirstPush: false,
@@ -341,6 +352,12 @@ export const DEFAULT_STRATEGY: DiagnosticStrategy = {
 	expectSemanticSecondPush: false,
 };
 
-export function getStrategy(serverId: string): DiagnosticStrategy {
+export function getStrategy(
+	serverId: string,
+	launchVariant?: "classic" | "native-ts7",
+): DiagnosticStrategy {
+	if (serverId === "typescript" && launchVariant === "native-ts7") {
+		return NATIVE_TS7_DIAGNOSTIC_STRATEGY;
+	}
 	return SERVER_DIAGNOSTIC_STRATEGIES[serverId] ?? DEFAULT_STRATEGY;
 }

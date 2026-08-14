@@ -8,6 +8,13 @@ an already-hosted same-server ancestor; a nested manifest/lockfile boundary
 keeps its independent client. Keep both policies deterministic and free of
 wall-clock expiry. (#1328, #1373)
 
+TypeScript diagnostic wait policy is launch-variant-aware: classic
+typescript-language-server may accept its complete first push, while native
+TS7's versionless publications are provisional until a bounded quiet window
+stabilizes the burst (or an advertised authoritative pull settles it). Pass the
+live `launchVariant` through every `getStrategy` consumer; never infer a fixed
+publication count or manufacture version freshness. (#1412)
+
 MCP warm word indexes are bounded per root in `clients/mcp/analyze.ts`: callers
 must acquire/release a lease around every use, because idle and LRU eviction
 must never retire an index mid-query. Idle timers are generation-owned,
