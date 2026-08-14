@@ -175,7 +175,9 @@ describe("runtime event flow", () => {
 			expect(checkFilesBatch).not.toHaveBeenCalled();
 			expect(ensureAvailable).not.toHaveBeenCalled();
 			const madge = latencyEntries.find((entry) => entry.phase === "madge");
-			expect(madge?.metadata).toBeUndefined();
+			// The skipped marker keeps a flag-off ~0ms phase distinguishable from
+			// "ran and was fast" in latency.log (#1307 review note).
+			expect(madge?.metadata).toEqual({ skipped: true });
 		} finally {
 			env.cleanup();
 		}

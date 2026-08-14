@@ -825,7 +825,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		filePath: cwd,
 		phase: "madge",
 		durationMs: Date.now() - t3,
-		...(madgeStats && { metadata: madgeStats }),
+		// A ~0ms entry with no metadata is indistinguishable from "ran and was
+		// fast" when re-analyzing the #766 tail — mark the skipped case.
+		metadata: madgeStats ?? { skipped: true },
 	});
 
 	// --- Test runner: fire once per turn after all edits are done ---
