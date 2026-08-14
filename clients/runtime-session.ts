@@ -1283,6 +1283,7 @@ function scheduleStartupScans(
 	});
 
 	// call-graph — build function-level call graph from review graph data
+	let callGraphIdentity: { reviewGraphVersion: string; reviewGraphSignature: string } | undefined;
 	const callGraphTask = runTask("call-graph", async () => {
 		const { FactStore } = await import("./dispatch/fact-store.js");
 		const {
@@ -1308,6 +1309,10 @@ function scheduleStartupScans(
 			);
 			return;
 		}
+		callGraphIdentity = {
+			reviewGraphVersion: identity.version,
+			reviewGraphSignature: identity.signature,
+		};
 		const cached = loadCallGraph(snapshotRoot, {
 			reviewGraphVersion: identity.version,
 			reviewGraphSignature: identity.signature,
@@ -1343,10 +1348,11 @@ function scheduleStartupScans(
 		await callGraphTask;
 		if (!runtime.isCurrentSession(sessionGeneration)) return;
 		if (!runtime.callGraph) return;
-		const { buildCodebaseModel, saveCodebaseModel } = await import(
+		const { buildCodebaseModel, saveCodebaseModel, DEFAULT_CODEBASE_MODEL_TOKEN_BUDGET } = await import(
 			"./codebase-model.js"
 		);
-		const model = buildCodebaseModel(runtime.callGraph, analysisRoot);
+		if (!callGraphIdentity) return;
+		const model = buildCodebaseModel(runtime.callGraph, analysisRoot, DEFAULT_CODEBASE_MODEL_TOKEN_BUDGET, callGraphIdentity);
 		saveCodebaseModel(snapshotRoot, model);
 		const top3 = model.entries
 			.slice(0, 3)
