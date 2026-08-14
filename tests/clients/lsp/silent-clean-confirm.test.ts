@@ -433,6 +433,17 @@ describe("touchFile capability-aware AGGREGATE wait (#814)", () => {
 		});
 
 		expect((result as { inconclusive?: boolean }).inconclusive).toBe(true);
+		const { getDegradationSummary } = await import("../../../clients/degradation-ledger.js");
+		expect(getDegradationSummary()).toEqual([
+			expect.objectContaining({
+				kind: "lsp-diagnostics-timeout",
+				count: 2,
+				latestReasons: expect.arrayContaining([
+					expect.objectContaining({ subject: "marksman" }),
+					expect.objectContaining({ subject: "typos" }),
+				]),
+			}),
+		]);
 	});
 
 	it("(d) scope-all: EVERY spawned server is silent+tier3-silent — resolves at the max of their budgets as CONFIRMED clean", async () => {
