@@ -235,10 +235,11 @@ Rule-id normalization derives its language suffixes from the bundled CodeRabbit 
 Source-filter tests pin the ordering agreement between the forward precedence map, reverse source-twin candidates, and filesystem sibling resolution; the intentionally broad `.jsx` fallback remains part of that contract.
 
 Git-guard reconciliation must clear persisted `blockerContent` only when an
-explicit `blockingFiles` record identifies the last blocker and the current
-per-file dispatch reconciles it clean. Records without that provenance remain
-fail-closed; otherwise a clean per-file result can remove `affectedFiles` while
-leaving stale content that blocks every later commit lookup (#1084).
+explicit `blockingFiles` record exactly matches the parsed blocker-content
+paths and the current per-file dispatch reconciles the last blocker clean.
+Malformed or incomplete provenance remains unknown/blocking; otherwise a clean
+per-file result can remove `affectedFiles` while leaving stale content that
+blocks every later commit lookup (#1084).
 
 Extension policy tests bind JS/TS fact applicability and bash source-like file
 access to `KIND_EXTENSIONS`; the only intentional exceptions are the documented

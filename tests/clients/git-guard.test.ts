@@ -343,6 +343,58 @@ describe("git-guard", () => {
 		}
 	});
 
+	it("fails closed when persisted blocker provenance omits a represented sibling", () => {
+		const env = setupTestEnvironment("pi-lens-git-guard-incomplete-provenance-");
+		try {
+			const files = ["a.ts", "b.ts"].map((name) => path.join(env.tmpDir, name));
+			for (const file of files) fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-A" });
+			const cache = new CacheManager(false);
+			writeGitGuardRecord(cache, runtime, env.tmpDir, record({
+				content: `${files[0]}: blocker A\n${files[1]}: blocker B`,
+				blockerContent: `${files[0]}: blocker A\n${files[1]}: blocker B`,
+				hasBlockers: true,
+				affectedFiles: files,
+				blockingFiles: [files[0]],
+				sessionId: "session-A",
+			}));
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, files[0]);
+
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it.each([123, null])("fails closed for forged blocking provenance (%s)", (forged) => {
+		const env = setupTestEnvironment("pi-lens-git-guard-forged-provenance-");
+		try {
+			const file = path.join(env.tmpDir, "a.ts");
+			fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-A" });
+			const cache = new CacheManager(false);
+			cache.writeCache("turn-end-findings", record({
+				content: `${file}: blocker`,
+				blockerContent: `${file}: blocker`,
+				hasBlockers: true,
+				affectedFiles: [file],
+				blockingFiles: [forged as unknown as string],
+				sessionId: "session-A",
+			}), env.tmpDir);
+
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toMatchObject({ block: true });
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("allows a missing record and blocks an old unstructured record", () => {
 		const env = setupTestEnvironment("pi-lens-git-guard-empty-");
 		try {
