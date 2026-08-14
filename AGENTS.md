@@ -824,7 +824,7 @@ LSP server definitions resolve in `clients/lsp/config.ts` as project
 `serverOverrides` merge by ID; project `disabledServers` and `warmFiles` replace
 the global arrays when present.
 
-All pi packages are `@earendil-works/*` (migrated from `@mariozechner/*` in 0.74.0). Peer dep: `@earendil-works/pi-coding-agent`. Runtime dep: `@earendil-works/pi-tui`.
+All pi packages are `@earendil-works/*` (migrated from `@mariozechner/*` in 0.74.0). Peer dep: `@earendil-works/pi-coding-agent`. Runtime dep: `@earendil-works/pi-tui`. The v4-safe dependency baseline resolves both host packages at `0.84.2`; the peer remains broad at runtime and the devDependency pins the SDK for type/compatibility checks. Re-audit host declarations before taking a future major/minor bump.
 
 ## Git & PR workflow
 
