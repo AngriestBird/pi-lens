@@ -260,6 +260,12 @@ const SNAPSHOT_PARSE_CACHE_MAX = 4;
 const SNAPSHOT_PARSE_CACHE_MAX_BYTES = 24 * 1024 * 1024;
 const snapshotParseCache = new Map<string, SnapshotParseCacheEntry>();
 
+function withoutWordIndex(snapshot: ProjectSnapshot | null): ProjectSnapshot | null {
+	if (!snapshot?.wordIndex) return snapshot;
+	const { wordIndex: _releasedPostings, ...stripped } = snapshot;
+	return stripped;
+}
+
 function cacheParsedSnapshot(
 	snapshotPath: string,
 	entry: SnapshotParseCacheEntry,
@@ -306,6 +312,13 @@ const authoritativeSnapshots = new Map<string, AuthoritativeSnapshotEntry>();
 export function _resetProjectSnapshotParseCacheForTests(): void {
 	snapshotParseCache.clear();
 	authoritativeSnapshots.clear();
+}
+
+/** Test hook: prove the parse-cache tier never owns serialized postings. */
+export function _projectSnapshotParseCacheRetainsWordIndexForTests(): boolean {
+	return [...snapshotParseCache.values()].some(
+		(entry) => entry.snapshot?.wordIndex !== undefined,
+	);
 }
 
 /** Resolve which body file is currently on disk: gz canonical, else legacy. */
@@ -397,7 +410,10 @@ function readSnapshotBody(
 	}
 }
 
-export function loadProjectSnapshot(cwd: string): ProjectSnapshot | null {
+function loadProjectSnapshotInternal(
+	cwd: string,
+	requireWordIndex: boolean,
+): ProjectSnapshot | null {
 	const key = normalizeMapKey(cwd);
 	const body = resolveSnapshotBodyPath(cwd);
 	// Authoritative in-process write wins while our own (possibly still
@@ -424,26 +440,43 @@ export function loadProjectSnapshot(cwd: string): ProjectSnapshot | null {
 	// SnapshotParseCacheEntry for why: coarse FAT/exFAT mtime resolution can
 	// otherwise alias a just-rewritten file onto a stale cache entry).
 	if (cached && cached.mtimeMs === body.mtimeMs && cached.size === body.size) {
-		return cached.snapshot;
+		if (!requireWordIndex || !cached.snapshot || cached.snapshot.wordIndex) {
+			return cached.snapshot;
+		}
 	}
 	const { snapshot, rawBytes } = readSnapshotBody(body.path, body.gz);
-	// Serialized postings expand into a much larger object graph. Keeping that
-	// graph here duplicates the live warm WordIndex, so word-index snapshots are
-	// deliberately one-shot disk reads rather than parse-cache residents (#1370).
+	// Serialized postings expand into a much larger object graph. Cache only a
+	// shallow postings-stripped body: metadata/report consumers stay warm while
+	// the live warm WordIndex remains the sole retained postings graph (#1370).
+	const cacheSnapshot = withoutWordIndex(snapshot);
 	if (
 		rawBytes > 0 &&
-		rawBytes <= SNAPSHOT_PARSE_CACHE_MAX_BYTES &&
-		!snapshot?.wordIndex
+		(rawBytes <= SNAPSHOT_PARSE_CACHE_MAX_BYTES || snapshot?.wordIndex)
 	) {
 		cacheParsedSnapshot(cacheKey, {
 			mtimeMs: body.mtimeMs,
 			size: body.size,
-			snapshot,
+			snapshot: cacheSnapshot,
 		});
 	} else {
 		snapshotParseCache.delete(cacheKey);
 	}
 	return snapshot;
+}
+
+/** Load the canonical body, including serialized postings when present. */
+export function loadProjectSnapshot(cwd: string): ProjectSnapshot | null {
+	return loadProjectSnapshotInternal(cwd, true);
+}
+
+/**
+ * Load snapshot metadata without retaining or re-reading serialized postings.
+ * After publication this is served by the postings-stripped parse cache.
+ */
+export function loadProjectSnapshotWithoutWordIndex(
+	cwd: string,
+): ProjectSnapshot | null {
+	return loadProjectSnapshotInternal(cwd, false);
 }
 
 // --- Worker-thread body persist (gzip off the save path, #958 item 2) --------
@@ -541,6 +574,16 @@ function reconcileAuthoritativeAfterWrite(
 	// WordIndex owns mutable Map/PathKeyedMap state. Drop the authoritative copy
 	// after publication; later merge-writers rehydrate the canonical disk body.
 	if (pending.snapshot.wordIndex) {
+		try {
+			const stat = fs.statSync(pending.gzPath);
+			cacheParsedSnapshot(pending.gzPath, {
+				mtimeMs: stat.mtimeMs,
+				size: stat.size,
+				snapshot: withoutWordIndex(pending.snapshot),
+			});
+		} catch {
+			// A cache miss is safe: the first metadata consumer reconstructs it.
+		}
 		authoritativeSnapshots.delete(pending.key);
 		logLatency({
 			type: "phase",

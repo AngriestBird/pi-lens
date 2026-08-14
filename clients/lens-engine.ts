@@ -31,7 +31,7 @@ import { acquireWarmWordIndex } from "./mcp/analyze.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { scanProjectDiagnostics } from "./project-diagnostics/scanner.js";
 import type { ProjectDiagnosticsSnapshot } from "./project-diagnostics/types.js";
-import { loadProjectSnapshot } from "./project-snapshot.js";
+import { loadProjectSnapshotWithoutWordIndex } from "./project-snapshot.js";
 import type { ReviewGraph } from "./review-graph/types.js";
 import {
 	getTreeSitterRuntimeStatus,
@@ -39,7 +39,6 @@ import {
 } from "./tree-sitter-shared.js";
 import {
 	centralityFromReverseDeps,
-	deserializeWordIndex,
 	getWordIndexBuildStatus,
 	type RankedFile,
 	searchWordIndex,
@@ -520,9 +519,9 @@ export async function symbolSearch(
 	limit = 20,
 	options: SymbolSearchOptions = {},
 ): Promise<SymbolSearchResult> {
-	const snapshot = loadProjectSnapshot(cwd);
 	const warmLease = acquireWarmWordIndex(cwd);
-	const index = warmLease.index ?? deserializeWordIndex(snapshot?.wordIndex);
+	const snapshot = loadProjectSnapshotWithoutWordIndex(cwd);
+	const index = warmLease.index;
 	if (!index) {
 		warmLease.release();
 		const priorStatus = getWordIndexBuildStatus(cwd);

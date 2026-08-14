@@ -36,7 +36,7 @@
 
 import * as path from "node:path";
 import { normalizeMapKey, toProjectRelativePath } from "./path-utils.js";
-import { loadProjectSnapshot } from "./project-snapshot.js";
+import { loadProjectSnapshotWithoutWordIndex } from "./project-snapshot.js";
 import type { ReviewGraph } from "./review-graph/types.js";
 
 export interface ProjectReportOptions {
@@ -279,7 +279,7 @@ function buildFileDegrees(graph: ReviewGraph): FileDegrees {
 
 function computeTrust(graph: ReviewGraph, cwd: string): ProjectReportTrust {
 	const filesCovered = graph.fileNodes.size;
-	const snapshot = loadProjectSnapshot(cwd);
+	const snapshot = loadProjectSnapshotWithoutWordIndex(cwd);
 	const snapshotFileCount = snapshot ? Object.keys(snapshot.files).length : 0;
 	const persistedTotal = graph.persistCoverage?.totalFiles ?? 0;
 	const filesTotal = Math.max(filesCovered, snapshotFileCount, persistedTotal);

@@ -5,11 +5,12 @@ import {
 	_resetWarmWordIndexCacheForTests,
 	acquireWarmWordIndex,
 } from "../../clients/mcp/analyze.js";
+import { symbolSearch } from "../../clients/lens-engine.js";
 import {
 	PROJECT_SNAPSHOT_VERSION,
+	_projectSnapshotParseCacheRetainsWordIndexForTests,
 	_resetProjectSnapshotParseCacheForTests,
 	getSnapshotBodyReadCountForTests,
-	loadProjectSnapshot,
 	resetSnapshotBodyReadCountForTests,
 	saveProjectSnapshot,
 } from "../../clients/project-snapshot.js";
@@ -142,12 +143,26 @@ describe("MCP warm word-index lifecycle (#1370)", () => {
 		});
 	});
 
-	it("does not retain serialized postings in authoritative or parse caches", () => {
+	it("re-reads the full body once per warm-index eviction cycle and serves metadata from the stripped cache", async () => {
 		const cwd = path.join(process.env.PILENS_DATA_DIR!, "snapshot-project");
 		persistIndex(cwd, "snapshotSymbol");
+		// Model a reader process that did not perform the write/promotion itself.
+		_resetProjectSnapshotParseCacheForTests();
 		resetSnapshotBodyReadCountForTests();
-		expect(loadProjectSnapshot(cwd)?.wordIndex).toBeDefined();
-		expect(loadProjectSnapshot(cwd)?.wordIndex).toBeDefined();
+
+		expect((await symbolSearch("snapshot symbol", cwd)).results).toHaveLength(1);
+		// acquireWarmWordIndex performs the sole full-body read; symbolSearch's
+		// metadata load shares the postings-stripped cached body.
+		expect(getSnapshotBodyReadCountForTests()).toBe(1);
+		expect(_projectSnapshotParseCacheRetainsWordIndexForTests()).toBe(false);
+
+		expect((await symbolSearch("snapshot symbol", cwd)).results).toHaveLength(1);
+		expect(getSnapshotBodyReadCountForTests()).toBe(1);
+
+		await vi.advanceTimersByTimeAsync(20);
+		expect(_getWarmWordIndexCacheStateForTests().size).toBe(0);
+		expect((await symbolSearch("snapshot symbol", cwd)).results).toHaveLength(1);
 		expect(getSnapshotBodyReadCountForTests()).toBe(2);
+		expect(_projectSnapshotParseCacheRetainsWordIndexForTests()).toBe(false);
 	});
 });

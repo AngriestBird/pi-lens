@@ -7,7 +7,9 @@ unref'd, and cleared on every removal/reset path; lifecycle eviction belongs in
 the word-index NDJSON log, never the degradation ledger. Snapshot persistence
 may retain serialized postings only until publication: afterward authoritative
 and parse caches must not pin them, because that duplicates the mutable warm
-index's expanded postings graph. (#1370)
+index's expanded postings graph. The parse cache instead keeps a shallow
+postings-stripped snapshot for metadata/report consumers; a cold analyze reloads
+the full body once and immediately rewarms the leased per-root index. (#1370)
 
 Helm chart linting uses the shared workspace-topology `Chart.yaml` marker. YAML
 and `.tpl` edits inside a chart dispatch one canonical-root-deduplicated,
