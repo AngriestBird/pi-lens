@@ -45,6 +45,8 @@ export type WordIndexLogPhase =
 	| "cold_build_refused"
 	/** Cold-query background build (build or persist) failed. */
 	| "cold_build_failed"
+	/** A warm MCP index was normally released by idle/LRU lifecycle policy. */
+	| "warm_cache_evicted"
 	/** A debounced snapshot persist landed — confirms the index is kept fresh
 	 *  across edits (the durable record the MCP host's no-op `dbg` couldn't give). */
 	| "persist_succeeded"

@@ -5,7 +5,7 @@ import { logLatency } from "./latency-logger.js";
 import { resolvePackagePath } from "./package-root.js";
 import { findNearestContaining, walkUpDirs } from "./path-utils.js";
 import type { ProjectConventions } from "./project-conventions.js";
-import { loadProjectSnapshot } from "./project-snapshot.js";
+import { loadProjectSnapshotWithoutWordIndex } from "./project-snapshot.js";
 
 export type ToolGate = "config-first" | "smart-default" | "mixed";
 
@@ -1604,7 +1604,7 @@ export function getLinterPolicyForFile(
 export function getCachedProjectConventions(
 	cwd: string,
 ): ProjectConventions | undefined {
-	const snapshot = loadProjectSnapshot(cwd);
+	const snapshot = loadProjectSnapshotWithoutWordIndex(cwd);
 	return snapshot?.conventions;
 }
 

@@ -27,11 +27,11 @@ import {
 } from "./instance-registry.js";
 import { initLSPConfig } from "./lsp/config.js";
 import { getLSPService } from "./lsp/index.js";
-import { getOrLoadWarmWordIndex } from "./mcp/analyze.js";
+import { acquireWarmWordIndex } from "./mcp/analyze.js";
 import { normalizeMapKey } from "./path-utils.js";
 import { scanProjectDiagnostics } from "./project-diagnostics/scanner.js";
 import type { ProjectDiagnosticsSnapshot } from "./project-diagnostics/types.js";
-import { loadProjectSnapshot } from "./project-snapshot.js";
+import { loadProjectSnapshotWithoutWordIndex } from "./project-snapshot.js";
 import type { ReviewGraph } from "./review-graph/types.js";
 import {
 	getTreeSitterRuntimeStatus,
@@ -39,7 +39,6 @@ import {
 } from "./tree-sitter-shared.js";
 import {
 	centralityFromReverseDeps,
-	deserializeWordIndex,
 	getWordIndexBuildStatus,
 	type RankedFile,
 	searchWordIndex,
@@ -495,7 +494,7 @@ function toSymbolSearchHit(result: RankedFile): SymbolSearchHit {
  * cwd, never blocking this call) so a retry shortly after succeeds (#348
  * decision 3).
  *
- * #536 rider: prefers the warm in-memory index (`getOrLoadWarmWordIndex`,
+ * #536 rider: prefers the warm in-memory index (`acquireWarmWordIndex`,
  * clients/mcp/analyze.ts) over a fresh disk read when one exists for this
  * cwd — a warm `pilens_analyze` call updates that live copy synchronously but
  * persists it to disk on a debounce (default 1500ms), so without this a query
@@ -526,10 +525,11 @@ export async function symbolSearch(
 	limit = 20,
 	options: SymbolSearchOptions = {},
 ): Promise<SymbolSearchResult> {
-	const snapshot = loadProjectSnapshot(cwd);
-	const index =
-		getOrLoadWarmWordIndex(cwd) ?? deserializeWordIndex(snapshot?.wordIndex);
+	const warmLease = acquireWarmWordIndex(cwd);
+	const snapshot = loadProjectSnapshotWithoutWordIndex(cwd);
+	const index = warmLease.index;
 	if (!index) {
+		warmLease.release();
 		const priorStatus = getWordIndexBuildStatus(cwd);
 		const status =
 			priorStatus?.state === "refused"
@@ -557,17 +557,19 @@ export async function symbolSearch(
 	}
 	// Boost well-connected files using the snapshot's reverse-dependency
 	// (importedBy) counts; snapshot keys are normalized, index keys are raw.
-	const centrality = centralityFromReverseDeps(
-		index,
-		snapshot?.reverseDeps,
-		(file) => normalizeMapKey(path.resolve(file)),
-	);
-	const fileFilter = buildSymbolSearchFileFilter(cwd, options);
-	const results = searchWordIndex(index, query, {
-		limit,
-		centrality,
-		fileFilter,
-	});
+	let centrality: Map<string, number>;
+	let results: RankedFile[];
+	try {
+		centrality = centralityFromReverseDeps(
+			index,
+			snapshot?.reverseDeps,
+			(file) => normalizeMapKey(path.resolve(file)),
+		);
+		const fileFilter = buildSymbolSearchFileFilter(cwd, options);
+		results = searchWordIndex(index, query, { limit, centrality, fileFilter });
+	} finally {
+		warmLease.release();
+	}
 	const hits = results.map(toSymbolSearchHit);
 
 	const { getCachedReviewGraph } = await import("./review-graph/builder.js");
