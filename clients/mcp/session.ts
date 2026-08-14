@@ -308,13 +308,13 @@ async function runTurnEndNow(
 
 	const outcome: TurnEndOutcome = deferredDelivery
 		? {
-				turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd)),
-				tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd)),
+				turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime)),
+				tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd, ctx.runtime)),
 				filesRegistered: registered,
 			}
 		: {
-				turnEnd: joinMessages(consumeTurnEndFindings(ctx.cacheManager, cwd)),
-				tests: joinMessages(consumeTestFindings(ctx.cacheManager, cwd)),
+				turnEnd: joinMessages(consumeTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime)),
+				tests: joinMessages(consumeTestFindings(ctx.cacheManager, cwd, ctx.runtime)),
 				filesRegistered: registered,
 			};
 
@@ -322,8 +322,8 @@ async function runTurnEndNow(
 		outcome,
 		commit: () => {
 			if (!deferredDelivery) return;
-			consumeTurnEndFindings(ctx.cacheManager, cwd);
-			consumeTestFindings(ctx.cacheManager, cwd);
+			consumeTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime);
+			consumeTestFindings(ctx.cacheManager, cwd, ctx.runtime);
 		},
 	};
 }
@@ -406,16 +406,16 @@ function runTurnEndForIpcNow(cwd: string): Promise<TurnEndDelivery> {
 
 		const ctx = await getMcpSessionContext();
 		const cachedOutcome: TurnEndOutcome = {
-			turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd)),
-			tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd)),
+			turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime)),
+			tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd, ctx.runtime)),
 			filesRegistered: 0,
 		};
 		const transaction = hasTurnEndFindings(cachedOutcome)
 			? {
 					outcome: cachedOutcome,
 					commit: () => {
-						consumeTurnEndFindings(ctx.cacheManager, cwd);
-						consumeTestFindings(ctx.cacheManager, cwd);
+						consumeTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime);
+						consumeTestFindings(ctx.cacheManager, cwd, ctx.runtime);
 					},
 				}
 			: await runTurnEndNow(cwd, [], true);

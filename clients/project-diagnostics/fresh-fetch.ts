@@ -490,7 +490,7 @@ export async function fetchFreshProjectDiagnostics(
 			}
 			record(
 				"test-runner",
-				testRunnerFindingsToProjectDiagnostics(cached.data),
+				testRunnerFindingsToProjectDiagnostics(cached.data, analysisRoot),
 				Date.now() - startMs,
 			);
 		}),

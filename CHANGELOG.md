@@ -36,6 +36,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Stale advisories are historical, not current blockers (refs #1413)** — turn-end and async test caches record immutable file/revision provenance and hash-confirm it at delivery. Changed, legacy, malformed, unreadable, and superseded findings retain historical context without imperative framing; deleted test targets disappear, and monotonic test generations prevent older batches from overwriting newer results. MCP and in-process delivery share the same classification without changing acknowledgement, one-shot consumption, or commit-gate state.
+
 - **Git guard closes shell-expansion and command-wrapper bypasses (refs #1084, PR #1395)** — command-position normalization now handles all supported IFS and positional-parameter forms, and guarded verbs nested in known or unknown command-string launchers fail closed while literal text remains non-blocking.
 
 - **LSP roots and per-session clients are conservatively bounded (closes #1325, refs #1126, refs #1129)** — manifest-bearing fixture conventions (`tests/fixtures`, `__fixtures__`, and `testdata`), gitignored directories, and atomic-write staging namespaces no longer become standalone LSP roots; their files attach to the nearest eligible ancestor project. Client reuse remains keyed by server and normalized resolved root, while a configurable `PI_LENS_LSP_CLIENT_CEILING` (24 by default) evicts the least-recently-used idle client through graceful shutdown before spawning another and never evicts a client with an active LSP request.

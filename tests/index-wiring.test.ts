@@ -494,6 +494,8 @@ describe("index.ts extension wiring", () => {
 			expect(on?.messages, "expected injected messages").toBeDefined();
 			expect(on?.messages[0]).toEqual({ role: "system", content: "orig" });
 			expect(on?.messages.at(-1)?.content).toMatch(/TESTFINDINGS_XYZZY/);
+			expect(on?.messages.at(-1)?.content).toContain("Historical finding");
+			expect(on?.messages.at(-1)?.content).not.toContain("Address 🔴 blockers");
 		});
 	});
 

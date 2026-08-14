@@ -146,6 +146,15 @@ describe("runTurnEnd", () => {
 		};
 		const turnState = deps.cacheManager.readTurnState(tmpDir);
 		expect(Object.keys(turnState.files).length).toBe(1);
+		// MCP delivery must classify provenance with the same live runtime as the
+		// in-process context hook; omitting this argument made legacy/stale data
+		// look current on one transport only.
+		expect(runtimeContext.consumeTurnEndFindings).toHaveBeenCalledWith(
+			expect.anything(), tmpDir, expect.anything(),
+		);
+		expect(runtimeContext.consumeTestFindings).toHaveBeenCalledWith(
+			expect.anything(), tmpDir, expect.anything(),
+		);
 	});
 
 	it("skips unreadable files without counting them", async () => {

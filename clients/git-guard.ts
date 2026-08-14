@@ -1,12 +1,16 @@
-import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { CacheManager } from "./cache-manager.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
 import { tokenizeShellCommand } from "./bash-file-access.js";
-import { normalizeMapKey } from "./path-utils.js";
 import { logLatency } from "./latency-logger.js";
+import {
+	advisoryFileHash,
+	advisoryPathKey,
+	snapshotAdvisoryProvenance,
+	type AdvisoryProvenance,
+} from "./advisory-provenance.js";
 
 /** The structured, single-source turn record used by context and git-guard. */
 export interface TurnEndFindingsCache {
@@ -29,6 +33,7 @@ export interface TurnEndFindingsCache {
 	testFailureContent?: string;
 	testFailureFiles?: string[];
 	blockerContent?: string;
+	provenance?: AdvisoryProvenance;
 }
 
 type GuardDecision = {
@@ -44,15 +49,11 @@ function resolveGuardPath(filePath: string, cwd: string): string {
 }
 
 function guardPathKey(filePath: string, cwd: string): string {
-	return normalizeMapKey(resolveGuardPath(filePath, cwd));
+	return advisoryPathKey(filePath, cwd);
 }
 
 function fileFingerprint(filePath: string): string {
-	try {
-		return createHash("sha256").update(nodeFs.readFileSync(filePath)).digest("hex");
-	} catch (err) {
-		return `unreadable:${(err as { code?: string }).code ?? "unknown"}`;
-	}
+	return advisoryFileHash(filePath);
 }
 
 function currentFileFingerprint(filePath: string): string {
@@ -506,6 +507,13 @@ export function writeGitGuardRecord(
 			? capAffectedFiles(record.blockingFiles, cwd).files
 			: undefined,
 		fileContentHashes: snapshotFileHashes(capped.files, cwd),
+		provenance: record.provenance ?? snapshotAdvisoryProvenance({
+			cwd,
+			runtime,
+			generation: 0,
+			files: capped.files.map((file) => ({ path: file, role: "affected" as const })),
+			truncated: capped.truncated,
+		}),
 	};
 	try {
 		cacheManager.writeCache("turn-end-findings", data, cwd);

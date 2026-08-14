@@ -1008,7 +1008,8 @@ describe("context injection framing", () => {
 		const result = consumeTestFindings(cacheManager, env.tmpDir);
 		expect(result).toBeDefined();
 		expect(result!.messages[0].content).toContain("not a user request");
-		expect(result!.messages[0].content).toContain("fix before continuing");
+		expect(result!.messages[0].content).toContain("Historical finding");
+		expect(result!.messages[0].content).not.toContain("fix before continuing");
 		expect(result!.messages[0].content).toContain("[Tests] ✗ 1/3 failed");
 
 		env.cleanup();
@@ -1392,12 +1393,85 @@ describe("turn_end test runner — stale results are cached, not discarded", () 
 			const cached = cacheManager.readCache<{
 				content: string;
 				stale?: boolean;
+				superseded?: boolean;
+				provenance?: { files: unknown[] };
 			}>("test-runner-findings", env.tmpDir);
 
 			// The old behavior discarded this entirely (no cache entry at all).
 			expect(cached?.data?.content).toContain("[Tests] ✗ 0/1 passed");
 			expect(cached?.data?.stale).toBe(true);
+			expect(cached?.data?.superseded).toBe(true);
+			expect(cached?.data?.provenance?.files.length).toBeGreaterThan(0);
 			expect(cached?.data?.content).toContain("prior turn");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("marks a same-turn external rewrite superseded", async () => {
+		const env = setupTestEnvironment("pi-lens-test-rewrite-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "rewrite-session" });
+			const cacheManager = new CacheManager(false);
+			const srcFile = path.join(env.tmpDir, "src/foo.ts");
+			const testFile = path.join(env.tmpDir, "src/foo.test.ts");
+			fs.mkdirSync(path.dirname(srcFile), { recursive: true });
+			fs.writeFileSync(srcFile, "export const x = 1;\n");
+			fs.writeFileSync(testFile, "test('x', () => {});\n");
+			cacheManager.addModifiedRange(srcFile, { start: 1, end: 1 }, false, env.tmpDir, "rewrite-session");
+			let resolveRun!: (value: any) => void;
+			const run = new Promise<any>((resolve) => { resolveRun = resolve; });
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, {
+				ctxCwd: env.tmpDir,
+				testRunnerClient: {
+					getTestRunTarget: () => ({ testFile, runner: "vitest", config: {}, strategy: "related" as const }),
+					runTestFileAsync: () => run,
+					formatResult: () => "rewrite failure",
+				},
+			}));
+			fs.writeFileSync(srcFile, "export const x = 2;\n");
+			resolveRun({ file: testFile, sourceFile: srcFile, runner: "vitest", passed: 0, failed: 1, skipped: 0, failures: [], duration: 1 });
+			await new Promise((resolve) => setImmediate(resolve));
+			const cached = cacheManager.readCache<{ superseded?: boolean; launchedFrom?: unknown; publishedAgainst?: unknown }>("test-runner-findings", env.tmpDir)?.data;
+			expect(runtime.turnIndex).toBe(0);
+			expect(cached).toMatchObject({ superseded: true });
+			expect(cached?.launchedFrom).toBeDefined();
+			expect(cached?.publishedAgainst).toBeDefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not let an older test generation overwrite a newer batch", async () => {
+		const env = setupTestEnvironment("pi-lens-test-generation-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "generation-session" });
+			const cacheManager = new CacheManager(false);
+			const srcFile = path.join(env.tmpDir, "src/foo.ts");
+			const testFile = path.join(env.tmpDir, "src/foo.test.ts");
+			fs.mkdirSync(path.dirname(srcFile), { recursive: true });
+			fs.writeFileSync(srcFile, "export const x = 1;\n");
+			fs.writeFileSync(testFile, "test('x', () => {});\n");
+			const resolvers: Array<(value: any) => void> = [];
+			const runner = {
+				getTestRunTarget: () => ({ testFile, runner: "vitest", config: {}, strategy: "related" as const }),
+				runTestFileAsync: () => new Promise<any>((resolve) => resolvers.push(resolve)),
+				formatResult: (result: { duration: number }) => `generation-${result.duration}`,
+			};
+			const fire = async () => {
+				cacheManager.addModifiedRange(srcFile, { start: 1, end: 1 }, false, env.tmpDir, "generation-session");
+				await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir, testRunnerClient: runner }));
+			};
+			await fire();
+			await fire();
+			resolvers[1]!({ file: testFile, sourceFile: srcFile, runner: "vitest", passed: 0, failed: 1, skipped: 0, failures: [], duration: 2 });
+			await new Promise((resolve) => setImmediate(resolve));
+			resolvers[0]!({ file: testFile, sourceFile: srcFile, runner: "vitest", passed: 0, failed: 1, skipped: 0, failures: [], duration: 1 });
+			await new Promise((resolve) => setImmediate(resolve));
+			const cached = cacheManager.readCache<{ content: string; testRunGeneration: number }>("test-runner-findings", env.tmpDir)?.data;
+			expect(cached).toMatchObject({ content: "generation-2", testRunGeneration: 2 });
 		} finally {
 			env.cleanup();
 		}

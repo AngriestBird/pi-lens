@@ -64,6 +64,8 @@ import { isSubagentSession } from "./subagent-mode.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import type { TurnStateOwner } from "./cache-manager.js";
 import type { TestResult, TestRunnerClient } from "./test-runner-client.js";
+import { snapshotAdvisoryProvenance } from "./advisory-provenance.js";
+import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
 
 interface TurnEndDeps {
 	ctxCwd?: string;
@@ -882,6 +884,26 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			);
 			const firedAtTurn = runtime.turnIndex;
 			const firedSessionId = runtime.telemetrySessionId;
+			const priorTestCache = cacheManager.readCache<TestRunnerFindingsCache>(
+				"test-runner-findings",
+				cwd,
+			)?.data;
+			const testRunGeneration = (priorTestCache?.testRunGeneration ?? 0) + 1;
+			const provenanceFiles = [
+				...candidates.map((candidate) => ({ path: candidate.abs, role: "source" as const })),
+				...targets.map((target) => ({ path: target.testFile, role: "test" as const })),
+			];
+			const launchedFrom = snapshotAdvisoryProvenance({
+				cwd,
+				runtime,
+				generation: testRunGeneration,
+				files: provenanceFiles,
+			});
+			cacheManager.writeCache(
+				"test-runner-findings",
+				{ ...(priorTestCache ?? { content: "" }), testRunGeneration },
+				cwd,
+			);
 			Promise.allSettled(
 				targets.map((t) =>
 					testRunnerClient.runTestFileAsync(
@@ -893,6 +915,19 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				),
 			)
 				.then((results) => {
+					const publishedAgainst = snapshotAdvisoryProvenance({
+						cwd,
+						runtime,
+						generation: testRunGeneration,
+						files: provenanceFiles,
+					});
+					const superseded = launchedFrom.revision.sessionId !== publishedAgainst.revision.sessionId ||
+						launchedFrom.revision.projectSeq !== publishedAgainst.revision.projectSeq ||
+						launchedFrom.revision.turnIndex !== publishedAgainst.revision.turnIndex ||
+						launchedFrom.files.some((file, index) =>
+							publishedAgainst.files[index]?.sha256 !== file.sha256 ||
+							publishedAgainst.files[index]?.path !== file.path
+						);
 					// #628: the turn advancing while tests ran no longer means the
 					// results are thrown away — a late result is still real
 					// information about what's currently broken. It's tagged `stale`
@@ -922,12 +957,29 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						}
 					}
 					if (failures.length > 0) {
+						const currentGeneration = cacheManager.readCache<TestRunnerFindingsCache>(
+							"test-runner-findings",
+							cwd,
+						)?.data?.testRunGeneration;
+						if (currentGeneration !== testRunGeneration) {
+							dbg(`turn_end: test generation ${testRunGeneration} superseded by ${currentGeneration}`);
+							return;
+						}
 						const content = stale
 							? `[from a prior turn — the edit that triggered this run had already been superseded by the time results came back]\n\n${failures.join("\n\n")}`
 							: failures.join("\n\n");
 						cacheManager.writeCache(
 							"test-runner-findings",
-							{ content, stale, results: resultValues },
+							{
+								content,
+								stale,
+								results: resultValues,
+								testRunGeneration,
+								launchedFrom,
+								publishedAgainst,
+								provenance: publishedAgainst,
+								superseded,
+							},
 							cwd,
 						);
 						if (getFlag("lens-guard") && firedSessionId === runtime.telemetrySessionId) {
@@ -1314,7 +1366,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				testFailureFiles: existingGuard?.testFailureFiles,
 			});
 		} else {
-			cacheManager.writeCache("turn-end-findings", { content }, cwd);
+			const affectedFiles = [
+				...files.map((file) => resolveRunnerPath(cwd, file)),
+				...cascadeResults.flatMap((result) => result.neighbors
+					.filter((neighbor) => neighbor.diagnostics.length > 0)
+					.map((neighbor) => resolveRunnerPath(cwd, neighbor.filePath))),
+			];
+			cacheManager.writeCache("turn-end-findings", {
+				content,
+				affectedFiles,
+				provenance: snapshotAdvisoryProvenance({
+					cwd,
+					runtime,
+					generation: 0,
+					files: affectedFiles.map((file) => ({ path: file, role: "affected" as const })),
+				}),
+			}, cwd);
 		}
 		cacheManager.writeCache(
 			"turn-end-findings-last",

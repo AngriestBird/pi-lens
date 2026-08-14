@@ -2555,9 +2555,9 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
-				const turnEndFindings = consumeTurnEndFindings(cacheManager, cwd);
+				const turnEndFindings = consumeTurnEndFindings(cacheManager, cwd, runtime);
 				const sessionGuidance = consumeSessionStartGuidance(cacheManager, cwd);
-				const testFindings = consumeTestFindings(cacheManager, cwd);
+				const testFindings = consumeTestFindings(cacheManager, cwd, runtime);
 				const agentNudge = consumeAgentNudge(dbg);
 				const sourceMessages = [
 					{
