@@ -545,6 +545,12 @@ export function syncGitGuardRecord(
 	const existingBlockingFiles = existing?.blockingFiles ?? [];
 	const editedKey = editedFilePath ? guardPathKey(editedFilePath, cwd) : undefined;
 	const testFiles = existing?.testFailureFiles ?? [];
+	const remainingBlockingFiles =
+		editedKey && existingBlockingFiles.length > 0
+			? existingBlockingFiles.filter(
+					(file) => guardPathKey(file, cwd) !== editedKey,
+				)
+			: existingBlockingFiles;
 	let affectedFiles = [...(existing?.affectedFiles ?? []), ...inlineFiles];
 	if (!entries.length && editedKey && existing) {
 		const isStillTestFailure = testFiles.some(
@@ -558,10 +564,22 @@ export function syncGitGuardRecord(
 			);
 		}
 	}
+	// A clean per-file dispatch is authoritative for that file. When the
+	// persisted record has explicit blocking-file provenance and the last such
+	// file just reconciled clean, retaining blockerContent would resurrect a
+	// stale blocker on every later git-guard lookup. Records without that
+	// provenance remain fail-closed: they cannot be safely cleared here.
+	const clearedLastKnownBlocker =
+		!entries.length &&
+		!!editedKey &&
+		existingBlockingFiles.length > 0 &&
+		remainingBlockingFiles.length === 0;
 	const blockerContent =
 		entries.length > 0
 			? entries.map((entry) => `${entry.filePath}: ${entry.summary}`).join("\n")
-			: existing?.blockerContent;
+			: clearedLastKnownBlocker
+				? undefined
+				: existing?.blockerContent;
 	const hasTestFailures = existing?.testFailures === true;
 	const hasBlockers = !!blockerContent || hasTestFailures;
 	const content = [blockerContent, hasTestFailures ? existing?.testFailureContent : undefined]
@@ -574,7 +592,7 @@ export function syncGitGuardRecord(
 	writeGitGuardRecord(cacheManager, runtime, cwd, {
 		content: content || existing?.content || "",
 		blockerContent,
-		blockingFiles: entries.length > 0 ? inlineFiles : existingBlockingFiles,
+		blockingFiles: entries.length > 0 ? inlineFiles : remainingBlockingFiles,
 		hasBlockers,
 		affectedFiles,
 		sessionId: runtime.telemetrySessionId,
