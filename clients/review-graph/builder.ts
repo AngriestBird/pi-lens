@@ -180,7 +180,15 @@ interface WorkspaceGraphCacheEntry {
 const _workspaceGraphCache = new Map<string, WorkspaceGraphCacheEntry>();
 const REVIEW_GRAPH_MAX_WARM_WORKSPACES = 8;
 const REVIEW_GRAPH_IDLE_EVICT_MS_DEFAULT = 20 * 60_000;
+// A workspace-wide clear must invalidate builds for workspaces that are not
+// resident yet, too. This process-wide component therefore survives cache
+// deletion; per-workspace eviction/reset increments the map component below.
+let _workspaceCacheEpoch = 0;
 const _workspaceCacheEpochs = new Map<string, number>();
+
+function workspaceCacheEpoch(key: string): number {
+	return _workspaceCacheEpoch + (_workspaceCacheEpochs.get(key) ?? 0);
+}
 
 function reviewGraphIdleEvictMs(): number {
 	const value = Number.parseInt(process.env.PI_LENS_REVIEW_GRAPH_IDLE_EVICT_MS ?? "", 10);
@@ -207,10 +215,10 @@ function evictWorkspaceGraph(key: string, entry: WorkspaceGraphCacheEntry): void
 
 function scheduleWorkspaceGraphEviction(key: string, entry: WorkspaceGraphCacheEntry): void {
 	clearWorkspaceGraphTimer(entry);
-	const epoch = _workspaceCacheEpochs.get(key) ?? 0;
+	const epoch = workspaceCacheEpoch(key);
 	entry.idleTimer = setTimeout(() => {
 		entry.idleTimer = undefined;
-		if (_workspaceGraphCache.get(key) !== entry || (_workspaceCacheEpochs.get(key) ?? 0) !== epoch) return;
+		if (_workspaceGraphCache.get(key) !== entry || workspaceCacheEpoch(key) !== epoch) return;
 		evictWorkspaceGraph(key, entry);
 	}, reviewGraphIdleEvictMs());
 	entry.idleTimer.unref?.();
@@ -224,7 +232,7 @@ function touchWorkspaceGraph(key: string): void {
 }
 
 function setWorkspaceGraph(key: string, entry: Omit<WorkspaceGraphCacheEntry, "lastUsedAt" | "idleTimer">, epoch?: number): boolean {
-	if (epoch !== undefined && (_workspaceCacheEpochs.get(key) ?? 0) !== epoch) return false;
+	if (epoch !== undefined && workspaceCacheEpoch(key) !== epoch) return false;
 	const resident: WorkspaceGraphCacheEntry = { ...entry, lastUsedAt: Date.now() };
 	_workspaceGraphCache.set(key, resident);
 	scheduleWorkspaceGraphEviction(key, resident);
@@ -389,7 +397,7 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 		_buildCache.clear();
 		for (const entry of _workspaceGraphCache.values()) clearWorkspaceGraphTimer(entry);
 		_workspaceGraphCache.clear();
-		_workspaceCacheEpochs.clear();
+		_workspaceCacheEpoch++;
 		_sizeSkipVerdicts.clear();
 	} else {
 		const normalized = normalizeMapKey(cwd);
@@ -408,6 +416,15 @@ export function clearReviewGraphWorkspaceCache(cwd?: string): void {
 	// #1179: the global slot is back to the pristine default, so a subsequent
 	// identity miss can safely serve it again (it cannot be a sibling's state).
 	_anyGraphStamped = false;
+}
+
+let _reviewGraphBuildGateForTests: (() => Promise<void>) | undefined;
+
+/** Test seam for deterministically interleaving a build with cache eviction. */
+export function _setReviewGraphBuildGateForTests(
+	gate: (() => Promise<void>) | undefined,
+): void {
+	_reviewGraphBuildGateForTests = gate;
 }
 
 export interface ReviewGraphWorkspaceCacheSnapshot {
@@ -4496,7 +4513,8 @@ async function _doBuildGraph(
 	buildId?: number,
 ): Promise<ReviewGraph> {
 	const normalizedCwd = normalizeMapKey(cwd);
-	const cacheEpoch = _workspaceCacheEpochs.get(normalizedCwd) ?? 0;
+	const cacheEpoch = workspaceCacheEpoch(normalizedCwd);
+	await _reviewGraphBuildGateForTests?.();
 	const normalizedChanged = changedFiles.map((file) => normalizeMapKey(file));
 	const normalizedChangedSet = new Set(normalizedChanged);
 	logCwdWorktreeMismatchOnce(cwd);
@@ -4662,6 +4680,7 @@ async function _doBuildGraph(
 	// base too, so the build falls through to a full rebuild.
 	if (memCached?.graph.persistCoverage?.partial) memCached = undefined;
 	if (memCached?.signature === signature) {
+		touchWorkspaceGraph(normalizedCwd);
 		const graph = cloneGraph(memCached.graph);
 		rebuildIndexes(graph);
 		graph.changedSymbolsByFile.clear();

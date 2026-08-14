@@ -152,6 +152,12 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 ## What it is
 
+Review-graph workspace cache invalidation uses a process-wide epoch component
+that survives all-workspace clears; per-workspace eviction/reset increments the
+workspace component. Any new in-flight cache publication must capture and pass
+the combined epoch. Authoritative project-snapshot deletion goes through the
+single timer-clearing helper so idle timers cannot retain deleted generations.
+
 The review-graph size gate uses the shared cooperative source walker with a
 `maxFileCount + 1` sentinel: it stops at the first over-cap source entry, so
 skip telemetry and user-facing messages must describe the count as “more than

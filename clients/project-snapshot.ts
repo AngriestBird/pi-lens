@@ -322,13 +322,19 @@ function clearAuthoritativeSnapshotTimer(entry: AuthoritativeSnapshotEntry): voi
 	entry.idleTimer = undefined;
 }
 
+function deleteAuthoritativeSnapshot(key: string): void {
+	const entry = authoritativeSnapshots.get(key);
+	if (entry) clearAuthoritativeSnapshotTimer(entry);
+	authoritativeSnapshots.delete(key);
+}
+
 function scheduleAuthoritativeSnapshotEviction(key: string, entry: AuthoritativeSnapshotEntry): void {
 	clearAuthoritativeSnapshotTimer(entry);
 	const generation = entry.lastUsedAt;
 	entry.idleTimer = setTimeout(() => {
 		entry.idleTimer = undefined;
 		if (authoritativeSnapshots.get(key) !== entry || entry.lastUsedAt !== generation) return;
-		authoritativeSnapshots.delete(key);
+		deleteAuthoritativeSnapshot(key);
 	}, projectSnapshotIdleEvictMs());
 	entry.idleTimer.unref?.();
 }
@@ -343,7 +349,7 @@ function enforceAuthoritativeSnapshotCap(): void {
 		const victim = [...authoritativeSnapshots.entries()].sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
 		if (!victim) return;
 		clearAuthoritativeSnapshotTimer(victim[1]);
-		authoritativeSnapshots.delete(victim[0]);
+		deleteAuthoritativeSnapshot(victim[0]);
 	}
 }
 
@@ -476,7 +482,7 @@ function loadProjectSnapshotInternal(
 		}
 		// An external writer moved past our write — honor disk and stop
 		// serving the now-stale in-memory object.
-		authoritativeSnapshots.delete(key);
+		deleteAuthoritativeSnapshot(key);
 	}
 	if (!body) {
 		snapshotParseCache.delete(getProjectSnapshotPath(cwd));
@@ -571,7 +577,7 @@ function recordSnapshotPersistFailure(cwd: string, error: string): void {
 	// seq), and dropping the authoritative entry means the next load reflects
 	// what is ACTUALLY on disk rather than the object we failed to persist.
 	_lastSnapshotPersistErrorForTests = error;
-	authoritativeSnapshots.delete(normalizeMapKey(cwd));
+	deleteAuthoritativeSnapshot(normalizeMapKey(cwd));
 	logLatency({
 		type: "phase",
 		phase: "project_snapshot_persist_failed",
@@ -632,7 +638,7 @@ function reconcileAuthoritativeAfterWrite(
 		} catch {
 			// A cache miss is safe: the first metadata consumer reconstructs it.
 		}
-		authoritativeSnapshots.delete(pending.key);
+		deleteAuthoritativeSnapshot(pending.key);
 		logLatency({
 			type: "phase",
 			phase: "project_snapshot_word_index_released",
@@ -652,7 +658,7 @@ function reconcileAuthoritativeAfterWrite(
 			durationMs: 0,
 			metadata: { rawBytes, maxBytes: SNAPSHOT_PARSE_CACHE_MAX_BYTES },
 		});
-		authoritativeSnapshots.delete(pending.key);
+		deleteAuthoritativeSnapshot(pending.key);
 		return;
 	}
 	try {

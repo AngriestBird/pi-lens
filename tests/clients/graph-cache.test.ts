@@ -11,6 +11,7 @@ import {
 	getReviewGraphCacheIdentity,
 	getReviewGraphWorkspaceCacheSnapshot,
 	_getReviewGraphWorkspaceCacheKeysForTests,
+	_setReviewGraphBuildGateForTests,
 } from "../../clients/review-graph/builder.js";
 import { normalizeMapKey } from "../../clients/path-utils.js";
 import {
@@ -35,10 +36,37 @@ describe("buildOrUpdateGraph — Promise dedup cache", () => {
 	});
 
 	afterEach(() => {
+		_setReviewGraphBuildGateForTests(undefined);
 		vi.unstubAllEnvs();
 		for (const dir of dirs.splice(0)) {
 			removeTempDirSync(dir);
 		}
+	});
+
+	it("does not resurrect a build captured before an all-workspace reset", async () => {
+		const cwd = tmpDir();
+		const facts = new FactStore();
+		let release!: () => void;
+		const admitted = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let entered!: () => void;
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		_setReviewGraphBuildGateForTests(async () => {
+			entered();
+			await admitted;
+		});
+
+		const build = buildOrUpdateGraph(cwd, [], facts);
+		await started;
+		clearReviewGraphWorkspaceCache();
+		release();
+
+		const graph = await build;
+		expect(graph).toHaveProperty("nodes");
+		expect(getReviewGraphWorkspaceCacheSnapshot().cacheEntries).toBe(0);
 	});
 
 	function tmpDir(): string {

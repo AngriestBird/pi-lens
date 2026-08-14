@@ -164,6 +164,33 @@ describe("project snapshot", () => {
 			vi.useRealTimers();
 		}));
 
+	it("clears the idle timer when an authoritative entry is deleted", () =>
+		withProjectDataDir((cwd) => {
+			vi.useFakeTimers();
+			vi.stubEnv("PI_LENS_PROJECT_SNAPSHOT_IDLE_EVICT_MS", "1000");
+			const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+			const snapshot: ProjectSnapshot = {
+				version: PROJECT_SNAPSHOT_VERSION,
+				projectRoot: cwd,
+				generatedAt: new Date().toISOString(),
+				seq: 0,
+				files: {},
+				symbols: {},
+				reverseDeps: {},
+				cachedExports: [],
+			};
+			saveProjectSnapshot(cwd, snapshot);
+			const bodyPath = getProjectSnapshotPath(cwd);
+			const future = new Date(Date.now() + 10_000);
+			fs.utimesSync(bodyPath, future, future);
+			expect(loadProjectSnapshot(cwd)).not.toBeNull();
+			expect(clearTimeoutSpy).toHaveBeenCalled();
+
+			vi.advanceTimersByTime(1001);
+			expect(_getAuthoritativeSnapshotCacheKeysForTests()).toEqual([]);
+			vi.useRealTimers();
+		}));
+
 	it("embeds the derived sequence index in BOTH the body and the meta sidecar (#1019)", () =>
 		withProjectDataDir((cwd) => {
 			// A runtime with a real per-file sequence state at seq=3.
