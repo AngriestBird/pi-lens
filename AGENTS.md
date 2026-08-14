@@ -196,9 +196,22 @@ writes the workflow summary; it must never close or edit detected issues.
 The LSP status surface includes a bounded per-client history of operational
 diagnostic-pull failures; unsupported `-32601` responses are intentionally
 excluded. Strategy-gated `didSave` remains separate and out of scope here.
+
+Git-guard command classification canonicalizes IFS parameter-expansion
+separators in one quote-aware pass before tokenization, including nested
+command strings. Any non-leading guarded `git` token is treated as indirect;
+unknown wrappers and arbitrary run flags therefore fail closed, while literal
+text consumers (`echo`, `printf`, `grep`) do not turn quoted prose into a
+blocked operation. Keep the canonicalizer scoped to command classification so
+quoted arguments remain intact.
 Unsupported pull responses are also recognized by the standard message-only
 variants (`method not found`, `unknown method`, and `unsupported method`).
 Status consumers receive detached, 200-character-bounded failure entries.
+
+The git guard classifies wrapper launchers only after basename/PATHEXT
+normalization, and strips shell escapes only from command-verb tokens; path
+arguments retain the shared lexer’s Windows-backslash behavior. Failed bash
+results never register grep/read coverage.
 
 Degradation-ledger recording is best-effort observability: its public record,
 once-record, and increment entry points normalize unknown values to bounded
@@ -235,6 +248,10 @@ build-dedup promises so the next access is a true cold rebuild. Async graph
 writes carry a per-workspace epoch, preventing an in-flight build from
 resurrecting an evicted entry. (#1389)
 
+Git guard text-consumer allowances apply only to literal arguments: command,
+backtick, and process substitutions are execution contexts and must recurse
+through the canonicalizer before `echo`/`printf`/`grep` can allow text.
+
 LSP root exclusion recognizes fixture conventions by exact path segment; Go's
 `testdata` convention applies ancestor-wide, but names such as `testdata-tools`
 remain ordinary project directories. The positive `.gitignore` glob precheck is
@@ -243,6 +260,13 @@ empty result, while the project ignore matcher remains authoritative.
 
 
 A pi coding-agent extension that runs automated checks on every file write/edit. Dispatches async parallel runners (LSP, biome, ruff, ast-grep, tree-sitter, jscpd, knip, Madge, and language-specific linters/build checks) and injects findings as context injections at turn-end and session-start.
+
+The git guard's command-position classifier expands `$IFS`, `${IFS}`, and
+`$IFS$<positional>` forms before re-tokenizing guarded verbs. Known command-string
+launchers include shell families plus busybox, toybox, and nix-shell; an
+unrecognized leading launcher with `-c`/`--run`/`/c`/`-Command` is inspected
+recursively and fails closed only when its command string contains an actual
+guarded git verb (literal mentions such as `echo git push` remain allowed).
 
 CI validates GitHub close-keyword syntax through `scripts/check-close-keywords.mjs`:
 PR bodies may not use a comma-separated close list because GitHub applies only
@@ -1497,3 +1521,8 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
   Capture `ctx.ui.setStatus` and `ctx.ui.theme` while the host event is active;
   async sweep/timer callbacks must never dereference `ctx.ui`, which can become
   stale after session replacement.
+- Guard command analysis uses `tokenizeShellCommand` for quoted/separated argv;
+  bash read/ownership grants are committed only from successful `tool_result`
+  events. Tool-call inspection must not mutate read-guard state, and wrapper,
+  launcher, and continuation forms must remain conservative for git commits and
+  pushes.

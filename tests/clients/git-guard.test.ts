@@ -13,6 +13,7 @@ import {
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { getProjectDataDir } from "../../clients/file-utils.js";
 import { setupTestEnvironment } from "./test-utils.js";
+import { tokenizeShellCommand } from "../../clients/bash-file-access.js";
 
 function record(overrides: Partial<TurnEndFindingsCache> = {}): TurnEndFindingsCache {
 	return {
@@ -46,6 +47,131 @@ describe("git-guard", () => {
 		expect(isGitCommitOrPushAttempt("bash", { command: "echo \"git commit -m x\"" })).toBe(false);
 		expect(isGitCommitOrPushAttempt("bash", { command: "printf 'git push'" })).toBe(false);
 		expect(isGitCommitOrPushAttempt("write", { command: "git commit -m x" })).toBe(false);
+	});
+
+	it("detects wrapper commands when the shell joins unquoted argv", () => {
+		expect(isGitCommitOrPushAttempt("bash", { command: "cmd /c git commit -m x" })).toBe(true);
+		expect(isGitCommitOrPushAttempt("bash", { command: "powershell -Command git push origin main" })).toBe(true);
+	});
+
+	it("blocks executable and path-qualified wrapper launchers", () => {
+		for (const command of [
+			"cmd.exe /c git push",
+			"cmd.exe /S /C git push",
+			"C:\\Windows\\System32\\cmd.exe /c git push",
+			"POWERSHELL.EXE -c git push",
+			"C:\\Windows\\System32\\powershell.com -Command git push",
+			"sh.exe -c git push",
+			"bash.com -c git push",
+			"C:\\tools\\env.bat FOO=bar git push",
+			"xargs.cmd git push",
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
+		}
+	});
+
+	it("blocks shell escapes embedded in a guarded git verb", () => {
+		for (const command of [
+			"git pu\\sh",
+			"git pu`sh",
+			"git pu^sh",
+			"git${IFS}push",
+			"git$IFS$9push",
+			"git ${IFS}pu^sh",
+			"git$IFS$1push",
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
+		}
+		for (const command of [
+			"git$IFS push",
+			"git${IFS%x}push",
+			"git$IFS$9push",
+			"sh -c 'git$IFS$9push'",
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
+		}
+		expect(
+			isGitCommitOrPushAttempt("bash", { command: 'git commit -m "$IFS is a var"' }),
+		).toBe(true);
+		expect(
+			isGitCommitOrPushAttempt("bash", { command: 'git add -m "$IFS is a var"' }),
+		).toBe(false);
+		expect(isGitCommitOrPushAttempt("bash", { command: "git add C:\\proj\\a.ts" })).toBe(false);
+	});
+
+	it("fails closed for recognized and unknown command-string wrappers", () => {
+		for (const command of [
+			"busybox sh -c 'git push'",
+			"toybox sh -c 'git commit'",
+			"nix-shell -p git --run 'git push'",
+			'someunknownwrapper -c "git push"',
+			'weird --command "git push"',
+			'weird -e "git push"',
+			'weird /R "git push"',
+			"weirdwrapper git push",
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
+		}
+		expect(isGitCommitOrPushAttempt("bash", { command: 'myprog -c "echo hi"' })).toBe(false);
+		expect(isGitCommitOrPushAttempt("bash", { command: 'myprog git push' })).toBe(true);
+		expect(isGitCommitOrPushAttempt("bash", { command: 'myprog -c "echo git push"' })).toBe(false);
+	});
+
+	it("does not treat literal git text as an indirect operation", () => {
+		for (const command of [
+			'echo "remember to git push later"',
+			'grep "git push" file',
+			'docker run -c "echo hi"',
+			'myprog --run "build"',
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(false);
+		}
+		expect(isGitCommitOrPushAttempt("bash", { command: 'git push' })).toBe(true);
+		expect(isGitCommitOrPushAttempt("bash", { command: 'git commit -m "prep for git push"' })).toBe(true);
+	});
+
+	it("blocks guarded verbs executed by shell substitutions, including text consumers", () => {
+		for (const command of [
+			"echo $(git push)",
+			'printf "%s" "$(git push)"',
+			"grep -f <(git push) x",
+			"echo `git push`",
+			"cat >(git push)",
+			"echo $(git$IFS$9push)",
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
+		}
+	});
+
+	it("allows plain text that only mentions guarded verbs", () => {
+		for (const command of [
+			'echo "remember to git push later"',
+			'grep "git push" file.txt',
+			"echo git push",
+			'docker run -c "echo hi"',
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(false);
+		}
+	});
+
+	it("detects launcher prefixes, shell keywords, combined flags, and continuations", () => {
+		const continued = "git \\" + "\ncommit -m x";
+		expect(tokenizeShellCommand(continued)[0]?.tokens).toEqual(["git", "commit", "-m", "x"]);
+		for (const command of [
+			"env FOO=bar git commit -m x",
+			"exec git push origin main",
+			"command git commit -m x",
+			"nohup git push origin main",
+			"nice git commit -m x",
+			"xargs git push origin main",
+			"if true; then git commit -m x; fi",
+			"for x in one; do git push origin main; done",
+			"sh -ec 'git commit -m x'",
+			"bash -euc 'git push origin main'",
+			continued,
+		]) {
+			expect(isGitCommitOrPushAttempt("bash", { command }), command).toBe(true);
+		}
 	});
 
 	it("blocks runtime blockers and preserves their details", () => {

@@ -97,7 +97,11 @@ function getShellCommand(input: unknown): string {
 
 function executableName(value: string): string {
 	const normalized = value.replace(/\\/g, "/");
-	return (normalized.slice(normalized.lastIndexOf("/") + 1) ?? "").toLowerCase();
+	let name = (normalized.slice(normalized.lastIndexOf("/") + 1) ?? "").toLowerCase();
+	// Shell launchers are commonly supplied as resolved Windows paths or as
+	// PATHEXT-qualified names. Guard classification must happen after the same
+	// basename/extension normalization for every wrapper family.
+	return name.replace(/\.(?:exe|com|bat|cmd)$/i, "");
 }
 
 function isShellWrapper(value: string): boolean {
@@ -108,11 +112,8 @@ function isShellWrapper(value: string): boolean {
 		"zsh",
 		"ash",
 		"cmd",
-		"cmd.exe",
 		"pwsh",
-		"pwsh.exe",
 		"powershell",
-		"powershell.exe",
 	]).has(executableName(value));
 }
 
@@ -122,6 +123,173 @@ function isGitExecutable(value: string): boolean {
 	);
 }
 
+const COMMAND_STRING_WRAPPERS = new Set(["busybox", "toybox", "nix-shell"]);
+
+function isCommandStringWrapper(value: string): boolean {
+	return COMMAND_STRING_WRAPPERS.has(executableName(value));
+}
+
+/**
+ * Canonicalize shell parameter separators before command classification. The
+ * quote-aware pass deliberately leaves literal arguments alone; the lexer
+ * then supplies the command-position boundaries used by the guard.
+ */
+function canonicalizeGuardCommand(command: string): string {
+	let result = "";
+	let quote: "single" | "double" | undefined;
+	let escaped = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote === "single") {
+			result += ch;
+			if (ch === "'") quote = undefined;
+			continue;
+		}
+		if (quote === "double") {
+			result += ch;
+			if (escaped) escaped = false;
+			else if (ch === "\\") escaped = true;
+			else if (ch === '"') quote = undefined;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch === "'" ? "single" : "double";
+			result += ch;
+			continue;
+		}
+		const parameter = command.slice(i).match(/^\$\{IFS[^}]*\}/)?.[0];
+		const positional = command.slice(i).match(/^\$IFS(?:\$[0-9]+)?/)?.[0];
+		if (parameter || positional) {
+			result += " ";
+		i += (parameter ?? positional ?? "").length - 1;
+			continue;
+		}
+		result += ch;
+	}
+	let collapsed = "";
+	let pendingSpace = false;
+	quote = undefined;
+	for (const ch of result) {
+		if (!quote && /\s/.test(ch)) {
+			pendingSpace = collapsed.length > 0;
+			continue;
+		}
+		if (pendingSpace) collapsed += " ";
+		pendingSpace = false;
+		collapsed += ch;
+		if (!quote && (ch === "'" || ch === '"')) {
+			quote = ch === "'" ? "single" : "double";
+		} else if ((quote === "single" && ch === "'") || (quote === "double" && ch === '"')) {
+			quote = undefined;
+		}
+	}
+	return collapsed.trim();
+}
+
+/** Normalize only a command-position token; never apply this to path args. */
+function normalizeGuardVerbToken(value: string): string {
+	return value
+		.replace(/\\(?=[A-Za-z0-9_])/g, "")
+		.replace(/`(?=.)/g, "")
+		.replace(/\^(?=.)/g, "");
+}
+
+function expandGuardVerbToken(value: string): string[] {
+	return normalizeGuardVerbToken(value).trim().split(/\s+/).filter(Boolean);
+}
+
+function delimitedSubstitutionBody(
+	command: string,
+	start: number,
+	opener: string,
+	closer: string,
+): { body: string; end: number } | undefined {
+	let depth = 1;
+	let quote: "single" | "double" | undefined;
+	let escaped = false;
+	for (let i = start + opener.length; i < command.length; i++) {
+		const ch = command[i];
+		if (quote === "single") {
+			if (ch === "'") quote = undefined;
+			continue;
+		}
+		if (quote === "double" && ch === '"') {
+			quote = undefined;
+			continue;
+		}
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch === "'" ? "single" : "double";
+			continue;
+		}
+		if (command.startsWith(opener, i)) {
+			depth += 1;
+			i += opener.length - 1;
+			continue;
+		}
+		if (command.startsWith(closer, i) && --depth === 0) {
+			return { body: command.slice(start + opener.length, i), end: i };
+		}
+	}
+	return undefined;
+}
+
+function containsGuardedSubstitution(command: string, depth: number): boolean {
+	if (depth > 3) return false;
+	let quote: "single" | "double" | undefined;
+	let escaped = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote === "single") {
+			if (ch === "'") quote = undefined;
+			continue;
+		}
+		if (quote === "double" && ch === '"') {
+			quote = undefined;
+			continue;
+		}
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch === "'" ? "single" : "double";
+			continue;
+		}
+		const substitution = command.startsWith("$(", i)
+			? delimitedSubstitutionBody(command, i, "$(", ")")
+			: command.startsWith("<(", i)
+				? delimitedSubstitutionBody(command, i, "<(", ")")
+				: command.startsWith(">(", i)
+					? delimitedSubstitutionBody(command, i, ">(", ")")
+					: ch === "`"
+						? { body: command.slice(i + 1, command.indexOf("`", i + 1)), end: command.indexOf("`", i + 1) }
+						: undefined;
+		if (substitution && substitution.end >= 0) {
+			const nested = canonicalizeGuardCommand(substitution.body);
+			if (
+				containsGuardedSubstitution(nested, depth + 1) ||
+				tokenizeShellCommand(nested).some((segment) => containsCommitOrPush(segment.tokens, depth + 1))
+			) {
+				return true;
+			}
+			i = substitution.end;
+		}
+	}
+	return false;
+}
+
 function containsCommitOrPush(tokens: string[], depth: number): boolean {
 	if (depth > 3 || tokens.length === 0) return false;
 	let commandTokens = tokens;
@@ -129,8 +297,33 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 		commandTokens = commandTokens.slice(1);
 	}
 	if (commandTokens.length === 0) return false;
-	if (isGitExecutable(commandTokens[0])) {
-		const tokens = commandTokens;
+	const expandedHead = expandGuardVerbToken(commandTokens[0] ?? "");
+	if (expandedHead.length > 1) {
+		commandTokens = [...expandedHead, ...commandTokens.slice(1)];
+	}
+	if (isCommandStringWrapper(commandTokens[0] ?? "")) {
+		const lower = commandTokens.slice(1).map((token) => token.toLowerCase());
+		const runIndex = lower.findIndex((token) => token === "--run");
+		if (runIndex >= 0 && runIndex + 1 < commandTokens.length) {
+			const nestedCommand = commandTokens.slice(runIndex + 2).join(" ");
+			return tokenizeShellCommand(canonicalizeGuardCommand(nestedCommand)).some(
+				(segment) => containsCommitOrPush(segment.tokens, depth + 1),
+			);
+		}
+	}
+	// These commands consume their following words as text/patterns; a bare
+	// git token in their arguments is not an indirect executable invocation.
+	// `$(git push)` is execution and must block; `"git push"` as literal text
+	// is allowed. Substitutions are screened before this text-consumer escape.
+	if (["echo", "printf", "grep"].includes(executableName(commandTokens[0] ?? ""))) {
+		return false;
+	}
+	const gitIndex = commandTokens.findIndex((token) => isGitExecutable(token));
+	if (gitIndex >= 0) {
+		// Any non-leading git invocation is indirect. Do not maintain a wrapper
+		// or flag allowlist: unknown launchers are the security boundary here.
+		if (gitIndex > 0) return true;
+		const gitTokens = commandTokens.slice(gitIndex);
 		let i = 1;
 		const takesValue = new Set([
 			"-C",
@@ -141,10 +334,10 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 			"--exec-path",
 			"--namespace",
 		]);
-		while (i < tokens.length && tokens[i].startsWith("-")) {
-			const option = tokens[i];
+		while (i < gitTokens.length && gitTokens[i].startsWith("-")) {
+			const option = gitTokens[i];
 			if (["--help", "-h", "--version", "-v", "-V"].includes(option)) return false;
-			if (option === "--") return tokens[i + 1] === "commit" || tokens[i + 1] === "push";
+			if (option === "--") return gitTokens[i + 1] === "commit" || gitTokens[i + 1] === "push";
 			if (["-C", "-c"].some((prefix) => option.startsWith(prefix) && option.length > prefix.length)) {
 				i += 1;
 				continue;
@@ -155,27 +348,51 @@ function containsCommitOrPush(tokens: string[], depth: number): boolean {
 			}
 			i += takesValue.has(option) ? 2 : 1;
 		}
-		return tokens[i] === "commit" || tokens[i] === "push";
+		const verbs = expandGuardVerbToken(gitTokens[i] ?? "");
+		return verbs.length === 1 && (verbs[0] === "commit" || verbs[0] === "push");
 	}
-	if (!isShellWrapper(commandTokens[0])) return false;
+	const leadingExecutable = commandTokens[0] ?? "";
+	const knownCommandStringWrapper =
+		isShellWrapper(leadingExecutable) || isCommandStringWrapper(leadingExecutable);
+	if (!knownCommandStringWrapper) {
+		// Unknown launchers are a fail-closed boundary only when they explicitly
+		// accept a command string. Re-tokenizing the value keeps literal mentions
+		// such as `myprog -c "echo git push"` out of the guarded-command path.
+		const unknownSwitchIndex = commandTokens.slice(1).findIndex((token) =>
+			(token.startsWith("-") || token.startsWith("/")) && token.length > 1,
+		);
+		if (unknownSwitchIndex < 0) return false;
+		const commandIndex = unknownSwitchIndex + 2;
+		if (commandIndex >= commandTokens.length) return false;
+		const nestedCommand = commandTokens.slice(commandIndex).join(" ");
+		return tokenizeShellCommand(canonicalizeGuardCommand(nestedCommand)).some(
+			(segment) => containsCommitOrPush(segment.tokens, depth + 1),
+		);
+	}
 	const lower = commandTokens.slice(1).map((token) => token.toLowerCase());
 	const switchIndex = lower.findIndex(
 		(token) =>
 			token === "-c" ||
+			token === "--run" ||
 			token === "-lc" ||
+			(/^-[^-]*c$/.test(token) && !token.startsWith("--")) ||
 			token === "/c" ||
 			token === "-command" ||
 			token === "-command:" ||
 			token === "-encodedcommand",
 	);
-	if (switchIndex < 0 || switchIndex + 2 >= commandTokens.length) return false;
+	if (switchIndex < 0 || switchIndex + 1 >= commandTokens.length) return false;
 	// Encoded PowerShell is intentionally unsupported: decoding it here would
 	// be a second shell/parser and could turn an ambiguous command into a false
 	// allow. Plain -Command/-c is safely handed back to the shared lexer.
 	if (lower[switchIndex] === "-encodedcommand") return false;
+	// switchIndex is relative to commandTokens.slice(1), so +2 addresses the
+	// command token after the switch for both cmd and PowerShell. This also
+	// handles cmd options preceding /C (for example `/S /C`).
 	let commandIndex = switchIndex + 2;
 	if (commandTokens[commandIndex] === "--") commandIndex += 1;
-	return tokenizeShellCommand(commandTokens[commandIndex] ?? "").some(
+	const nestedCommand = commandTokens.slice(commandIndex).join(" ");
+	return tokenizeShellCommand(canonicalizeGuardCommand(nestedCommand)).some(
 		(segment) => containsCommitOrPush(segment.tokens, depth + 1),
 	);
 }
@@ -185,7 +402,9 @@ export function isGitCommitOrPushAttempt(toolName: string, input: unknown): bool
 	if (toolName !== "bash") return false;
 	const command = getShellCommand(input);
 	if (!command) return false;
-	return tokenizeShellCommand(command).some((segment) =>
+	const canonical = canonicalizeGuardCommand(command);
+	if (containsGuardedSubstitution(canonical, 0)) return true;
+	return tokenizeShellCommand(canonical).some((segment) =>
 		containsCommitOrPush(segment.tokens, 0),
 	);
 }
