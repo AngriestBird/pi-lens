@@ -15,13 +15,8 @@ import { logExtension } from "./extension-log.js";
 import * as path from "node:path";
 import { recordFormatter } from "./widget-state.js";
 import { FileTime } from "./file-time.js";
-import {
-	clearFormatterRuntimeState,
-	type FormatterInfo,
-	type FormatterResult,
-	formatFile,
-	getFormattersForFile,
-} from "./formatters.js";
+import type { FormatterInfo, FormatterResult } from "./formatters.js";
+import { loadFormatters } from "./formatters-lazy.js";
 
 // --- Configuration ---
 
@@ -99,7 +94,7 @@ export class FormatService {
 		// Get formatters for this file
 		const formatters = options.formatters
 			? await this.getFormattersByName(options.formatters)
-			: await getFormattersForFile(absolutePath, cwd);
+			: await (await loadFormatters()).getFormattersForFile(absolutePath, cwd);
 
 		if (formatters.length === 0) {
 			return {
@@ -177,7 +172,7 @@ export class FormatService {
 				});
 
 				const result = await Promise.race([
-					formatFile(filePath, formatter),
+					loadFormatters().then(({ formatFile }) => formatFile(filePath, formatter)),
 					timeoutPromise,
 				]);
 				results.push(result);
@@ -199,9 +194,7 @@ export class FormatService {
 	 * Get formatters by name (for explicit formatter selection)
 	 */
 	private async getFormattersByName(names: string[]): Promise<FormatterInfo[]> {
-		const { listAllFormatters, ...formatters } = await import(
-			"./formatters.js"
-		);
+		const { listAllFormatters, ...formatters } = await loadFormatters();
 		const allNames = listAllFormatters();
 
 		return names
@@ -244,7 +237,9 @@ export class FormatService {
 	 * Clear detection cache
 	 */
 	clearCache(): void {
-		clearFormatterRuntimeState();
+		void loadFormatters().then(({ clearFormatterRuntimeState }) =>
+			clearFormatterRuntimeState(),
+		);
 	}
 }
 
@@ -271,7 +266,9 @@ export function getFormatService(
 }
 
 export function resetFormatService(): void {
-	clearFormatterRuntimeState();
+	void loadFormatters().then(({ clearFormatterRuntimeState }) =>
+		clearFormatterRuntimeState(),
+	);
 	globalFormatService = null;
 	currentSessionID = null;
 }

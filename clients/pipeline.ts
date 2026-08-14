@@ -28,10 +28,7 @@ import type { BiomeClient } from "./biome-client.js";
 import { recordDiagnostics } from "./widget-state.js";
 import { getDiagnosticLogger } from "./diagnostic-logger.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
-import {
-	computeCascadeForFile,
-	dispatchLintWithResult,
-} from "./dispatch/integration.js";
+import { loadDispatchIntegration } from "./dispatch/lazy.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import {
 	createAvailabilityChecker,
@@ -57,7 +54,7 @@ import {
 	wasPreviouslyReportedDirty,
 	type PilensDiagnosticEntry,
 } from "./diagnostics-publish.js";
-import { getLSPService } from "./lsp/index.js";
+import { loadLspService } from "./lsp-lazy.js";
 import type { MetricsClient } from "./metrics-client.js";
 import { clearGraphCache } from "./review-graph/builder.js";
 import type { RuffClient } from "./ruff-client.js";
@@ -911,7 +908,7 @@ export async function resyncLspFile(
 	if (limitCheck.tooLarge) return;
 
 	try {
-		const lspService = getLSPService();
+		const lspService = (await loadLspService()).getLSPService();
 		if (lspService.supportsLSP(filePath)) {
 			// Push the final post-format/post-fix content through touchFile (not the
 			// bare openFile) so it registers in the touch-debounce map via
@@ -990,7 +987,11 @@ function toPilensDiagnosticEntry(d: Diagnostic): PilensDiagnosticEntry {
 	return entry;
 }
 
-type DispatchResult = Awaited<ReturnType<typeof dispatchLintWithResult>>;
+	type DispatchResult = Awaited<
+		ReturnType<
+			(typeof import("./dispatch/integration.js"))["dispatchLintWithResult"]
+		>
+	>;
 function buildAllClearOutput(
 	_dispatchResult: DispatchResult,
 	elapsed: number,
@@ -1252,6 +1253,8 @@ export async function runPipeline(
 	const piApi: PiAgentAPI = {
 		getFlag: getFlag as (flag: string) => boolean | string | undefined,
 	};
+	const { dispatchLintWithResult, computeCascadeForFile } =
+		await loadDispatchIntegration();
 	const dispatchResult = await dispatchLintWithResult(
 		filePath,
 		cwd,
