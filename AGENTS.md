@@ -152,6 +152,11 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 ## What it is
 
+The `agent_end` deferred-format drain processes claimed files in queue order
+and yields with `setImmediate` between files. Keep formatter invocation and
+per-file bookkeeping isolated so multi-file batches cannot recreate one
+CPU-bound event-loop burst; single-file drains have no inter-file yield. (#1387)
+
 The review-graph size gate uses the shared cooperative source walker with a
 `maxFileCount + 1` sentinel: it stops at the first over-cap source entry, so
 skip telemetry and user-facing messages must describe the count as “more than

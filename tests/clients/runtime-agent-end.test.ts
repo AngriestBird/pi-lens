@@ -162,6 +162,55 @@ describe("runtime-agent-end deferred formatting", () => {
 		}
 	});
 
+	it("yields between deferred files without adding a single-file boundary (#1387)", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-yield-");
+		const setImmediateSpy = vi.spyOn(globalThis, "setImmediate");
+		try {
+			const files = ["a.ts", "b.ts", "c.ts"].map((name) =>
+				createTempFile(env.tmpDir, name, `const ${name[0]}=1`),
+			);
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			for (const file of files) {
+				runtime.deferFormat(file, env.tmpDir, "edit", env.tmpDir);
+			}
+			const immediateCallsAtFormat: number[] = [];
+			const formatFile = vi.fn(async (filePath: string) => {
+				immediateCallsAtFormat.push(setImmediateSpy.mock.calls.length);
+				return {
+					filePath,
+					formatters: [{ name: "fake", success: true, changed: false }],
+					anyChanged: false,
+					allSucceeded: true,
+				};
+			});
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) => name === "no-lsp",
+				notify: vi.fn(),
+				dbg: () => {},
+				runtime,
+				cacheManager: { addModifiedRange: vi.fn() } as any,
+				getFormatService: () => ({ recordRead: () => {}, formatFile }) as any,
+			});
+
+			expect(formatFile).toHaveBeenCalledTimes(files.length);
+			expect(immediateCallsAtFormat).toHaveLength(files.length);
+			// The first (and therefore a single-file drain) starts immediately.
+			expect(immediateCallsAtFormat[0]).toBe(0);
+			expect(immediateCallsAtFormat[1]).toBeGreaterThan(
+				immediateCallsAtFormat[0],
+			);
+			expect(immediateCallsAtFormat[2]).toBeGreaterThan(
+				immediateCallsAtFormat[1],
+			);
+		} finally {
+			setImmediateSpy.mockRestore();
+			env.cleanup();
+		}
+	});
+
 	it("rejects deferFormat calls that omit turnStateCwd at compile time (PR #114 lock)", () => {
 		const runtime = new RuntimeCoordinator();
 		// @ts-expect-error — turnStateCwd is required; omitting it would

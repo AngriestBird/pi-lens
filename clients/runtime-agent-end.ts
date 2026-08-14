@@ -223,57 +223,32 @@ export async function handleAgentEnd({
 	});
 
 	if (formatRecords.length > 0) {
-		type FormatOutcome =
-			| { kind: "skipped"; filePath: string; reason: string }
-			| { kind: "failed"; filePath: string; message: string; fileStart: number }
-			| {
-					kind: "done";
-					record: (typeof records)[number];
-					filePath: string;
-					result: Awaited<ReturnType<typeof runFormatPhase>>;
-					fileStart: number;
-			  };
-
-		// Run all formatter subprocesses concurrently — no shared state touched here.
-		// bumpFileSeq / cacheManager mutations happen in the sequential pass below.
-		const outcomes = await Promise.all(
-			formatRecords.map(async (record): Promise<FormatOutcome> => {
-				const fileStart = Date.now();
-				const filePath = path.resolve(record.filePath);
-				if (!nodeFs.existsSync(filePath)) {
-					dbg(`agent_end deferred_format skipped missing file: ${filePath}`);
-					return { kind: "skipped", filePath, reason: "missing" };
-				}
-				try {
-					const result = await runFormatPhase(filePath, getFormatService, dbg);
-					return { kind: "done", record, filePath, result, fileStart };
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					dbg(`agent_end deferred_format failed for ${filePath}: ${message}`);
-					return { kind: "failed", filePath, message, fileStart };
-				}
-			}),
-		);
-
-		// Process results sequentially — bumpFileSeq and cacheManager mutations
-		// must stay ordered to avoid sequence number races.
-		for (const outcome of outcomes) {
-			if (outcome.kind === "skipped") {
-				summary.skipped.push({
-					filePath: outcome.filePath,
-					reason: outcome.reason,
-				});
-				continue;
+		// A deferred batch can contain many large files. Keep each file's
+		// formatter and bookkeeping together so the next file cannot start in
+		// the same event-loop turn. This retains queue order and isolates errors,
+		// while preventing Promise.all from launching an unbounded CPU burst.
+		for (const [index, record] of formatRecords.entries()) {
+			if (index > 0) {
+				await new Promise<void>((resolve) => setImmediate(resolve));
 			}
-			if (outcome.kind === "failed") {
-				summary.failed.push({
-					filePath: outcome.filePath,
-					errors: [outcome.message],
-				});
+			const fileStart = Date.now();
+			const filePath = path.resolve(record.filePath);
+			if (!nodeFs.existsSync(filePath)) {
+				dbg(`agent_end deferred_format skipped missing file: ${filePath}`);
+				summary.skipped.push({ filePath, reason: "missing" });
 				continue;
 			}
 
-			const { record, filePath, result, fileStart } = outcome;
+			let result: Awaited<ReturnType<typeof runFormatPhase>>;
+			try {
+				result = await runFormatPhase(filePath, getFormatService, dbg);
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				dbg(`agent_end deferred_format failed for ${filePath}: ${message}`);
+				summary.failed.push({ filePath, errors: [message] });
+				continue;
+			}
+
 			summary.formatted++;
 
 			if (result.formatFailures.length > 0) {
