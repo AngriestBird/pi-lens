@@ -1,4 +1,5 @@
 import type { FactProvider } from "../fact-provider-types.js";
+import { isJstsFactFile } from "../../file-kinds.js";
 import { findOwnerName } from "../../symbol-containment.js";
 import {
 	extractFactsFromTree,
@@ -86,11 +87,6 @@ const FUNCTION_TYPES = new Set([
 	"function_expression",
 	"arrow_function",
 ]);
-
-// The same tree-sitter TypeScript integration parses both TS/TSX and the
-// JavaScript grammar. Keep this extension set local to the provider rather
-// than adding another parser or a JS-specific extraction path.
-const FUNCTION_FACT_EXTS = /\.(?:c|m)?(?:js|jsx|ts|tsx)$/i;
 
 // Decision points for McCabe complexity (matches the old ts.SyntaxKind set).
 const COMPLEXITY_TYPES = new Set([
@@ -364,7 +360,7 @@ export const functionFactProvider: FactProvider = {
 	provides: ["file.functionSummaries", "file.functionFactsCoverage"],
 	requires: ["file.content"],
 	appliesTo(ctx) {
-		return FUNCTION_FACT_EXTS.test(ctx.filePath);
+		return isJstsFactFile(ctx.filePath);
 	},
 	async run(ctx, store) {
 		await extractFactsFromTree(
