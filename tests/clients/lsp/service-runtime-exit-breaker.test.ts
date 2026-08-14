@@ -24,19 +24,17 @@
  * after spawning but wasn't attached-to again for an hour must still read as
  * an early, breaker-worthy exit.
  *
- * Test keys are computed via `normalizeMapKey`, not hardcoded, because
- * `isWindowsPath()` (clients/path-utils.ts) treats a drive-letter-shaped
- * string like "C:/repo" as Windows-shaped on ANY platform, routing it
- * through the realpath-fallback branch even on Linux CI. A
- * platform-dependent `dirname` call inside that fallback then collapses the
- * non-existent path down to `process.cwd()`, producing a real key that is
- * NOT the literal "C:/repo" — it only stays byte-identical on Windows,
- * which is why an earlier version of this file (hardcoding the key) passed
- * locally but failed on Linux CI: the hardcoded literal silently diverged
- * from the key the service actually used internally, so map lookups missed.
+ * The fixture root is deliberately a legitimate child of the session cwd.
+ * Root-policy tests cover ceiling/clamping separately; these tests isolate
+ * breaker behavior and assert the same canonical root used by the client map
+ * on every host OS.
  */
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
+
+const FIXTURE_ROOT = path.join(process.cwd(), "runtime-exit-breaker-fixture");
+const FIXTURE_FILE = path.join(FIXTURE_ROOT, "main.fake");
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -101,7 +99,7 @@ function makeSpawnServer(id: string) {
 		id,
 		name: id,
 		extensions: [".fake"],
-		root: async () => "C:/repo",
+		root: async () => FIXTURE_ROOT,
 		spawn,
 		getSpawnCount: () => spawnCount,
 	};
@@ -137,9 +135,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 			return c;
 		});
 
-		const file = "C:/repo/main.fake";
-		// See header comment: key computed via normalizeMapKey, not hardcoded.
-		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		const file = FIXTURE_FILE;
+		const key = `opengrep:${normalizeMapKey(FIXTURE_ROOT)}`;
 		const BROKEN_PERMANENT_AFTER = 5;
 
 		// Initial spawn — no existing (dead) client yet, so this goes straight
@@ -211,9 +208,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		const client = makeFakeClient("opengrep");
 		createLSPClient.mockResolvedValue(client);
 
-		const file = "C:/repo/main.fake";
-		// See header comment: key computed via normalizeMapKey, not hardcoded.
-		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		const file = FIXTURE_FILE;
+		const key = `opengrep:${normalizeMapKey(FIXTURE_ROOT)}`;
 
 		const first = await service.getClientForFile(file);
 		expect(first).toBeDefined();
@@ -256,9 +252,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 			return c;
 		});
 
-		const file = "C:/repo/main.fake";
-		// See header comment: key computed via normalizeMapKey, not hardcoded.
-		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		const file = FIXTURE_FILE;
+		const key = `opengrep:${normalizeMapKey(FIXTURE_ROOT)}`;
 
 		// Simulate 8 deliberate restarts (well past BROKEN_PERMANENT_AFTER=5) —
 		// e.g. a resync/reopen-style path that calls shutdown() itself before
@@ -299,9 +294,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 		const client = makeFakeClient("opengrep");
 		createLSPClient.mockResolvedValue(client);
 
-		const file = "C:/repo/main.fake";
-		// See header comment: key computed via normalizeMapKey, not hardcoded.
-		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		const file = FIXTURE_FILE;
+		const key = `opengrep:${normalizeMapKey(FIXTURE_ROOT)}`;
 
 		const first = await service.getClientForFile(file);
 		expect(first).toBeDefined();
@@ -349,9 +343,8 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
 			client.notify.open = vi.fn().mockReturnValue(new Promise(() => {}));
 			createLSPClient.mockResolvedValue(client);
 
-			const file = "C:/repo/main.fake";
-			// See header comment: key computed via normalizeMapKey, not hardcoded.
-			const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+			const file = FIXTURE_FILE;
+			const key = `opengrep:${normalizeMapKey(FIXTURE_ROOT)}`;
 
 			// NOTIFY_BACKPRESSURE_BROKEN_AFTER = 3 consecutive timeouts evict.
 			for (let i = 0; i < 3; i++) {
@@ -392,8 +385,7 @@ describe("LSPService circuit breaker — post-init runtime exits (#1127)", () =>
  * These tests inject controllable `clientSpawnedAt`/`exitedAt` timestamps (same
  * approach as the #1127 suite above) — never wall-clock sleeps — so the "just
  * past the threshold" lifetime and the death spacing within the window are
- * exact and non-flaky. Keys are computed via `normalizeMapKey`, never hardcoded
- * (see this file's header for the Linux-CI drive-letter-shape reason).
+ * exact and non-flaky. Keys are computed via `normalizeMapKey`, never hardcoded.
  */
 describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 	const TRIP_COUNT = 5; // RUNTIME_EXIT_WINDOW_TRIP_COUNT (= BROKEN_PERMANENT_AFTER)
@@ -432,8 +424,8 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 			return c;
 		});
 
-		const file = "C:/repo/main.fake";
-		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		const file = FIXTURE_FILE;
+		const key = `opengrep:${normalizeMapKey(FIXTURE_ROOT)}`;
 		// 75s: OVER the 60s fast-path threshold (so #1139's consecutive-early
 		// counter never counts a single one), UNDER the 10min sleep-gap ceiling.
 		const LIFETIME_MS = 75_000;
@@ -506,8 +498,8 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 			return c;
 		});
 
-		const file = "C:/repo/main.fake";
-		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		const file = FIXTURE_FILE;
+		const key = `opengrep:${normalizeMapKey(FIXTURE_ROOT)}`;
 
 		const initial = await service.getClientForFile(file);
 		expect(initial).toBeDefined();
@@ -551,8 +543,8 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 			return c;
 		});
 
-		const file = "C:/repo/main.fake";
-		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		const file = FIXTURE_FILE;
+		const key = `opengrep:${normalizeMapKey(FIXTURE_ROOT)}`;
 		// 20min lifetime — OVER the 10min ceiling. Models either a genuinely long
 		// healthy run that crashed once, or an `exitedAt - spawnedAt` inflated by a
 		// Modern-Standby suspend. Neither is crash-loop churn; neither is recorded.
@@ -594,8 +586,8 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 			return c;
 		});
 
-		const file = "C:/repo/main.fake";
-		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		const file = FIXTURE_FILE;
+		const key = `opengrep:${normalizeMapKey(FIXTURE_ROOT)}`;
 		const LIFETIME_MS = 75_000; // under the ceiling — these DO get recorded
 
 		// Two genuine short-lived crashes, spaced 20min apart (past the 15min
@@ -646,8 +638,8 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 			return c;
 		});
 
-		const file = "C:/repo/main.fake";
-		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		const file = FIXTURE_FILE;
+		const key = `opengrep:${normalizeMapKey(FIXTURE_ROOT)}`;
 
 		// 8 intentional restarts (well past TRIP_COUNT=5) — user restart / config
 		// reload / session change / #743 eviction all call shutdown() first. The
@@ -687,8 +679,8 @@ describe("LSPService circuit breaker — windowed-rate trip (#1142)", () => {
 			return c;
 		});
 
-		const file = "C:/repo/main.fake";
-		const key = `opengrep:${normalizeMapKey("C:/repo")}`;
+		const file = FIXTURE_FILE;
+		const key = `opengrep:${normalizeMapKey(FIXTURE_ROOT)}`;
 
 		const initial = await service.getClientForFile(file);
 		expect(initial).toBeDefined();

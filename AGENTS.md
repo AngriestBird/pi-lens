@@ -1,5 +1,13 @@
 # pi-lens — agent context
 
+LSP client root selection has a hard session-cwd ceiling: marker/config lookup
+may consult parents, but the root used for client identity and spawn never may.
+`NearestRoot` clamps an above-cwd marker to cwd and logs that clamp once. After
+fixture/gitignore filtering, `LSPService` coalesces a config-only nested root to
+an already-hosted same-server ancestor; a nested manifest/lockfile boundary
+keeps its independent client. Keep both policies deterministic and free of
+wall-clock expiry. (#1328, #1373)
+
 MCP warm word indexes are bounded per root in `clients/mcp/analyze.ts`: callers
 must acquire/release a lease around every use, because idle and LRU eviction
 must never retire an index mid-query. Idle timers are generation-owned,
@@ -108,8 +116,12 @@ The captured-at-subscribe / used-after-replace shape also applies to pi's
 `events` API: `pi.events.emit` is a session-bound wrapper whose runtime is
 invalidated on replacement. Long-lived publishers must retain a getter and
 resolve the emitter at delivery time; deferred callbacks must resolve inside
-the callback, never before scheduling. This is the pattern established by
-#1128 for the bus and lens-event publishers.
+the callback, never before scheduling. The getter itself is activation-scoped:
+module-singleton bus/notifier/widget-render plumbing must be re-wired from the
+current factory on every `session_start`, BEFORE the #473 concurrent-secondary
+guard can return, because a sibling activation can overwrite the singleton and
+later go stale. Emit-failure suppression is occurrence-scoped (success re-arms
+it), and a stale occurrence records one `bus-stale` degradation. (#1128, #1383)
 
 This is the payoff of the two disciplines above: a bounded checklist of defect *shapes* that each recurred ≥2× across the arc. Read it at task start; when your change matches a shape, treat the screen as an acceptance criterion (and the regression test the shape implies). Each entry is **SHAPE → SCREEN (when you touch X, verify Y) → canonical example → detection**. Where a shape has a fuller treatment above, this cross-references rather than restates it.
 
@@ -212,6 +224,13 @@ clients/
   mcp/                     host-neutral facades: analyze, session, review, ipc, host-shim
   runtime-session.ts      session_start handler — snapshot hydrate, tool preinstall, background scans, LSP warm
   project-snapshot.ts     Versioned seq-stamped project snapshot cache
+
+The diagnostics widget records the exact `ctx.ui` identity only after a
+successful `setWidget` mount. A visible widget re-asserts that mount on
+`turn_start` when the host replaces its UI object; this remains gated by the
+live run mode and `lensWidgetVisible`, so a user toggle-off or headless mode is
+never undone. Missing `ui.setWidget` is a log-once-per-extension-session
+diagnostic rather than a silent mount failure. (#1381)
   project-changes.ts      Append-only project/file sequence change log
   reverse-deps.ts         Snapshot-backed reverse dependency index/query helpers
   word-index.ts           Identifier inverted index + BM25 ranking (#162) — built in the session scan, persisted with per-file mtimes in the snapshot; consumed by BOTH the pi symbol_search tool and the MCP pilens_symbol_search mirror (#348 phase 1); session warmup preflights the bounded current file set and incrementally refreshes only sparse stale/new/deleted documents. A stale set whose ESTIMATED WORK exceeds one full rebuild (posting-scan + re-read cost vs totalTokens + corpus re-read cost), a dense stale set (≥32 documents AND >30% of the corpus), >30% file-set churn, or legacy metadata selects a separately-built full replacement BEFORE mutating the old index (#1197): repeated per-document posting-array filters become effectively quadratic (2,061 all-stale docs took 216.8s vs a 7.5s full build), and because per-document cost GROWS with the corpus no density ratio or absolute count is a bound — 800 docs / 239 stale at 29.875% measured 90.6s with a 39.6s loop block. Every bulk path (async build + both refresh loops) yields on an ~8ms monotonic budget OR'd with its item checkpoint — never count-only, which bounds nothing when per-item cost is unbounded — including within large documents and after any line ≥4,096 chars. Synchronous `buildWordIndex` is the small/test/reference primitive only. Superseded builds never publish a partial index and never escape as an exception into a caller's warmup pass.

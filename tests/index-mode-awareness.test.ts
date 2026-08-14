@@ -10,6 +10,12 @@ import {
 	resetDegradationLedger,
 } from "../clients/degradation-ledger.js";
 
+const { logExtensionSpy } = vi.hoisted(() => ({ logExtensionSpy: vi.fn() }));
+vi.mock("../clients/extension-log.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../clients/extension-log.js")>()),
+	logExtension: logExtensionSpy,
+}));
+
 // Same two heavy seams tests/index-wiring.test.ts stubs, so firing
 // session_start stays a fast deterministic wiring check.
 vi.mock("../clients/bootstrap.js", () => ({
@@ -119,6 +125,57 @@ describe("widget mounting is mode-derived (#1334 S2)", () => {
 		const ctx = await toggleTwice(null);
 
 		expect(mounts(ctx)).toHaveLength(1);
+	});
+
+	it("re-mounts on the live UI when the host replaces it (#1381)", async () => {
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		const ctxA = makeCtx({ cwd: tmpProject(), mode: "tui" });
+		const ctxB = makeCtx({ cwd: ctxA.cwd, mode: "tui" });
+		const setWidgetA = vi.spyOn(ctxA.ui, "setWidget");
+		const setWidgetB = vi.spyOn(ctxB.ui, "setWidget");
+
+		await pi.runCommand("lens-widget-toggle", "", ctxA);
+		await pi.runCommand("lens-widget-toggle", "", ctxA);
+		await pi.emit("turn_start", {}, ctxB);
+
+		expect(setWidgetA.mock.calls.filter(([, content]) => typeof content === "function")).toHaveLength(1);
+		expect(setWidgetB.mock.calls.filter(([, content]) => typeof content === "function")).toHaveLength(1);
+	});
+
+	it("does not resurrect a widget toggled off before a UI replacement (#1381)", async () => {
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		const ctxA = makeCtx({ cwd: tmpProject(), mode: "tui" });
+		const ctxB = makeCtx({ cwd: ctxA.cwd, mode: "tui" });
+		const setWidgetB = vi.spyOn(ctxB.ui, "setWidget");
+
+		await pi.runCommand("lens-widget-toggle", "", ctxA);
+		await pi.runCommand("lens-widget-toggle", "", ctxA);
+		await pi.runCommand("lens-widget-toggle", "", ctxA);
+		await pi.emit("turn_start", {}, ctxB);
+
+		expect(setWidgetB).not.toHaveBeenCalled();
+	});
+
+	it("logs a missing setWidget host once and never throws (#1381)", async () => {
+		const pi = createPiMock();
+		extension(pi.asExtensionAPI());
+		logExtensionSpy.mockClear();
+		const ctx = makeCtx({ cwd: tmpProject(), mode: "tui" });
+		delete (ctx.ui as { setWidget?: unknown }).setWidget;
+
+		await expect(pi.runCommand("lens-widget-toggle", "", ctx)).resolves.toBeUndefined();
+		await expect(pi.runCommand("lens-widget-toggle", "", ctx)).resolves.toBeUndefined();
+		await expect(pi.emit("turn_start", {}, ctx)).resolves.toBeUndefined();
+
+		expect(
+			logExtensionSpy.mock.calls.filter(
+				([entry]) =>
+					entry.message ===
+					"widget mount unavailable: host ui.setWidget is missing",
+			),
+		).toHaveLength(1);
 	});
 });
 
