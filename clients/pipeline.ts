@@ -80,6 +80,7 @@ import {
 	hasStylelintConfig,
 	markdownlintConfigArgs,
 } from "./tool-policy.js";
+import type { PathSetLike } from "./runtime-coordinator.js";
 
 const LSP_MAX_FILE_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
 const LSP_MAX_FILE_LINES = RUNTIME_CONFIG.pipeline.lspMaxFileLines;
@@ -230,6 +231,8 @@ export interface PipelineContext {
 	/** Authoritative workspace root used for project-wide policy and state. */
 	projectRoot?: string;
 	toolName: string;
+	/** Receipt-time decision; never infer this after debounce coalescing. */
+	autofixMode?: "immediate" | "deferred";
 	modifiedRanges?: { start: number; end: number }[];
 	telemetry?: {
 		model: string;
@@ -277,7 +280,7 @@ export interface PipelineDeps {
 	ruffClient: RuffClient;
 	metricsClient: MetricsClient;
 	getFormatService: () => FormatService;
-	fixedThisTurn: Set<string>;
+	fixedThisTurn: PathSetLike;
 }
 
 export interface PipelineResult {
@@ -317,6 +320,8 @@ export interface PipelineResult {
 	fixedCount?: number;
 	/** `tool:count` labels for autofix tools that ran this run. */
 	autofixTools?: string[];
+	/** Authoritative bytes after an immediate mutation of the target file. */
+	postMutation?: { filePath: string; content: string; source: "autofix" };
 }
 
 // --- Phase timing helpers ---
@@ -1191,14 +1196,23 @@ export async function runPipeline(
 
 	// --- 3. Auto-fix ---
 	phase.start("autofix");
-	const {
+	let fixedCount = 0;
+	let autofixTools: string[] = [];
+	let attemptedTools: string[] = [];
+	let autofixChangedFiles: string[] = [];
+	let fixRefresh = false;
+	let autofixSkipReason: string | undefined;
+	if (ctx.autofixMode === "deferred") {
+		autofixSkipReason = "deferred_to_agent_end";
+		dbg(`autofix: deferred until agent_end for ${filePath}`);
+	} else ({
 		fixedCount,
 		autofixTools,
 		attemptedTools,
 		changedFiles: autofixChangedFiles,
 		needsContentRefresh: fixRefresh,
 		skipReason: autofixSkipReason,
-	} = await runAutofix(filePath, cwd, getFlag, dbg, deps, getFlagSource);
+	} = await runAutofix(filePath, cwd, getFlag, dbg, deps, getFlagSource));
 	for (const changedFile of autofixChangedFiles) {
 		piChangedFiles.add(path.resolve(changedFile));
 	}
@@ -1384,7 +1398,14 @@ export async function runPipeline(
 		const fileList = changedList.length
 			? "\nModified files:\n" + topFiles + overflow
 			: "";
-		output += `\n\n⚠️ **File was modified by auto-format/fix. You MUST re-read modified file(s) before making any further edits — the content on disk has changed (whitespace, indentation, quotes, or code). Editing from memory will produce mismatches.**${fileList}`;
+		const targetHasAuthoritativeAttachment =
+			ctx.autofixMode !== "deferred" &&
+			autofixChangedFiles.some(
+				(changedFile) => path.resolve(changedFile) === path.resolve(filePath),
+			);
+		output += targetHasAuthoritativeAttachment
+			? `\n\n⚠️ **The attached full content for ${toRunnerDisplayPath(cwd, filePath)} is authoritative after autofix. You MUST re-read any other modified side-effect files before editing them.**${fileList}`
+			: `\n\n⚠️ **File was modified by auto-format/fix. You MUST re-read modified file(s) before making any further edits — the content on disk has changed (whitespace, indentation, quotes, or code). Editing from memory will produce mismatches.**${fileList}`;
 	}
 	phase.end("dispatch_lint", {
 		hasOutput: !!dispatchResult.output,
@@ -1480,5 +1501,9 @@ export async function runPipeline(
 		formattersUsed,
 		fixedCount,
 		autofixTools,
+		postMutation:
+			ctx.autofixMode !== "deferred" && autofixChangedFiles.some((f) => path.resolve(f) === path.resolve(filePath)) && fileContent !== undefined
+				? { filePath: path.resolve(filePath), content: fileContent, source: "autofix" }
+				: undefined,
 	};
 }

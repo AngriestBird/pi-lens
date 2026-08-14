@@ -41,6 +41,9 @@ import type { RuffClient } from "./ruff-client.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { syncGitGuardRecord } from "./git-guard.js";
 import { scheduleWordIndexPersist } from "./word-index.js";
+import { RUNTIME_CONFIG } from "./runtime-config.js";
+
+const AUTHORITATIVE_CONTENT_MAX_BYTES = RUNTIME_CONFIG.pipeline.lspMaxFileBytes;
 
 interface ToolResultEvent {
 	toolName: string;
@@ -90,6 +93,8 @@ interface ToolResultDeps {
 	/** Internal bounded provenance carried through debounce/coalescing. */
 	_telemetryParticipantIds?: string[];
 	_telemetryParticipantTotal?: number;
+	/** Receipt-time decision preserved across debounce replacement. */
+	_autofixMode?: "immediate" | "deferred";
 }
 
 function parseDiffRanges(diff: string): { start: number; end: number }[] {
@@ -387,6 +392,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			: path.resolve(workspaceRoot, rawFilePath)
 		: rawFilePath;
 	const behaviorWarnings = agentBehaviorRecord(event.toolName, filePath);
+	const syntheticWriteContent: Array<{ type: string; text?: string }> = [];
+	let syntheticAttachmentBytes = 0;
 
 	// Bash writes (redirects, tee, sed -i, cp/mv, touch, git checkout/restore) —
 	// these change file content but never go through the edit tool, so bash
@@ -412,11 +419,49 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		);
 		for (const wp of written) {
 			if (!getFlag("no-read-guard")) deps.readGuard?.recordWritten(wp);
-			await handleToolResult({
+			const receipt = (runtime as Partial<RuntimeCoordinator>).recordMutationToolReceipt;
+			const autofixMode = receipt
+				? receipt.call(runtime, wp, "write").autofixMode
+				: "immediate";
+			const syntheticResult = await handleToolResult({
 				...deps,
 				event: { ...event, toolName: "write", input: { path: wp } },
 				_bypassDebounce: true,
+				_autofixMode: autofixMode,
 			});
+			if (syntheticResult) {
+				// The per-attachment cap bounds each file, but a multi-file bash
+				// write (`sed -i` over globs, `;`-chained rewrites) appends one
+				// attachment per path — share ONE authoritative-content budget
+				// across the whole command so the aggregate tool result stays
+				// bounded too. Past the budget, degrade to the re-read warning.
+				for (const block of syntheticResult.content.slice(
+					event.content.length,
+				)) {
+					const blockBytes =
+						typeof block.text === "string"
+							? Buffer.byteLength(block.text, "utf-8")
+							: 0;
+					const isAuthoritativeAttachment =
+						typeof block.text === "string" &&
+						block.text.startsWith("pi-lens applied autofix to ");
+					if (
+						isAuthoritativeAttachment &&
+						syntheticAttachmentBytes + blockBytes >
+							AUTHORITATIVE_CONTENT_MAX_BYTES
+					) {
+						syntheticWriteContent.push({
+							type: "text",
+							text: `⚠️ **File was modified by auto-format/fix. You MUST re-read ${wp} before making any further edits — the aggregate authoritative content for this command is too large to attach.**`,
+						});
+						continue;
+					}
+					if (isAuthoritativeAttachment) {
+						syntheticAttachmentBytes += blockBytes;
+					}
+					syntheticWriteContent.push(block);
+				}
+			}
 		}
 		if (event.isError !== true && !getFlag("no-read-guard")) {
 			for (const span of extractReadPathsFromCommand(command, workspaceRoot)) {
@@ -473,7 +518,9 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		dbg(
 			`tool_result: skipped turn tracking - toolName="${event.toolName}" (not write/edit)`,
 		);
-		return;
+		return syntheticWriteContent.length > 0
+			? { content: [...event.content, ...syntheticWriteContent] }
+			: undefined;
 	}
 	if (!filePath) {
 		dbg(
@@ -527,6 +574,17 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		return { content: event.content, isError: true };
 	}
 
+	// Must happen before debounce admission: latestDeps intentionally retains only
+	// the latest event, but write -> edit is a sticky turn transition.
+	const receipt = (runtime as Partial<RuntimeCoordinator>).recordMutationToolReceipt;
+	const autofixMode = deps._bypassDebounce
+		? (deps._autofixMode ?? (event.toolName === "edit" ? "deferred" : "immediate"))
+		: receipt
+			? receipt.call(runtime, filePath, event.toolName).autofixMode
+			: event.toolName === "edit"
+				? "deferred"
+				: "immediate";
+
 	// Coalesce sequential edits to the same file into one pipeline run against
 	// the final state. Only the debounce-fired call (with _bypassDebounce=true)
 	// proceeds to the pipeline body; in-window callers share its promise.
@@ -535,6 +593,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		if (debounceMs > 0) {
 			return scheduleDebounced(filePath, debounceMs, {
 				...deps,
+				_autofixMode: autofixMode,
 				_telemetryParticipantIds: [readGuardCorrelationId],
 				_telemetryParticipantTotal: 1,
 			});
@@ -715,6 +774,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			cwd: dispatchCwd,
 			projectRoot: turnStateCwd,
 			toolName: event.toolName,
+			autofixMode,
 			modifiedRanges,
 			telemetry: {
 				model: runtime.telemetryModel,
@@ -893,10 +953,21 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		}
 	}
 
+	let autofixNewlyQueued = false;
+	if (!result.isError && autofixMode === "deferred" && nodeFs.existsSync(filePath)) {
+		autofixNewlyQueued =
+			(runtime as Partial<RuntimeCoordinator>).deferMutation?.call(
+				runtime, filePath, dispatchCwd, event.toolName, turnStateCwd,
+				"autofix", deps.sessionId,
+			) ?? false;
+		dbg(`tool_result: queued deferred autofix for ${filePath}`);
+	}
+	let formatQueued = false;
+
 	if (
 		!result.isError &&
 		!getFlag("no-autoformat", filePath) &&
-		!getFlag("immediate-format") &&
+		(autofixMode === "deferred" || !getFlag("immediate-format")) &&
 		nodeFs.existsSync(filePath)
 	) {
 		const isNewlyQueued = runtime.deferFormat(
@@ -906,6 +977,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			turnStateCwd,
 			deps.sessionId,
 		);
+		formatQueued = true;
 		dbg(`tool_result: queued deferred format for ${filePath}`);
 		logLatency({
 			type: "phase",
@@ -915,18 +987,20 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			durationMs: 0,
 			metadata: { cwd: dispatchCwd },
 		});
-		// #673: only publish on first queue entry — a re-touch of an already
-		// queued file (a second edit before agent_end) is a structural no-op
-		// for a listener that just wants to know "has this file entered the
-		// queue", so re-emitting would be spam with zero new information.
-		if (isNewlyQueued) {
+		// Publish a file's first queue entry and each newly added kind. A same-kind
+		// re-touch before agent_end carries no new information and stays silent.
+		if (isNewlyQueued || autofixNewlyQueued) {
 			publishFormatQueued({
 				filePath,
 				cwd: dispatchCwd,
 				tool: event.toolName,
 				dbg,
+				kinds: autofixMode === "deferred" ? ["autofix", "format"] : ["format"],
 			});
 		}
+	}
+	if (autofixNewlyQueued && !formatQueued) {
+		publishFormatQueued({ filePath, cwd: dispatchCwd, tool: event.toolName, kinds: ["autofix"], dbg });
 	}
 
 	for (const changedFile of result.changedFiles ?? []) {
@@ -1044,9 +1118,27 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 
 	runtime.reportedThisTurn.add(filePath);
 
-	if (!output) return;
+	const postMutation = result.postMutation;
+	const attachAuthoritativeContent = postMutation !== undefined &&
+		Buffer.byteLength(postMutation.content, "utf-8") <= AUTHORITATIVE_CONTENT_MAX_BYTES;
+	const returnedContent = attachAuthoritativeContent
+		? [
+				...event.content,
+				{
+					type: "text",
+					text: `pi-lens applied autofix to ${postMutation!.filePath}. The following full content is authoritative for subsequent edits:\n\n${postMutation!.content}`,
+				},
+			]
+		: event.content;
+	if (postMutation && !attachAuthoritativeContent) {
+		output = `${output ? `${output}\n\n` : ""}⚠️ **File was modified by auto-format/fix. You MUST re-read ${postMutation.filePath} before making any further edits — the authoritative content is too large to attach.**`;
+	}
+
+	if (!output && !result.postMutation) return;
 
 	return {
-		content: [...event.content, { type: "text", text: output }],
+		content: output
+			? [...returnedContent, { type: "text", text: output }]
+			: returnedContent,
 	};
 }

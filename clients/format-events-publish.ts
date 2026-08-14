@@ -92,6 +92,7 @@ export interface FormatQueuedPayload {
 	filePath: string;
 	cwd: string;
 	tool: "write" | "edit";
+	kinds?: Array<"autofix" | "format">;
 }
 
 export interface FormatStartPayload {
@@ -100,6 +101,7 @@ export interface FormatStartPayload {
 	cwd: string;
 	paths: string[];
 	fileCount: number;
+	kinds?: Array<"autofix" | "format">;
 }
 
 export interface AutofixStartPayload {
@@ -154,6 +156,7 @@ export interface PublishFormatQueuedArgs {
 	filePath: string;
 	cwd: string;
 	tool: "write" | "edit";
+	kinds?: Array<"autofix" | "format">;
 	dbg?: (msg: string) => void;
 }
 
@@ -196,6 +199,7 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 			filePath: normalizeFilePath(args.filePath),
 			cwd: normalizeFilePath(args.cwd),
 			tool: args.tool,
+			...(args.kinds ? { kinds: args.kinds } : {}),
 		};
 		busEmit(BUS_FORMAT_QUEUED_EVENT, payload);
 		hasLoggedQueuedFailure = false;
@@ -225,6 +229,7 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 export interface PublishFormatStartArgs {
 	cwd: string;
 	paths: string[];
+	kinds?: Array<"autofix" | "format">;
 	dbg?: (msg: string) => void;
 }
 
@@ -270,6 +275,7 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 			cwd: normalizeFilePath(args.cwd),
 			paths,
 			fileCount: paths.length,
+			...(args.kinds ? { kinds: args.kinds } : {}),
 		};
 		busEmit(BUS_FORMAT_START_EVENT, payload);
 		hasLoggedStartFailure = false;
