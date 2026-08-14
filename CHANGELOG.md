@@ -36,8 +36,6 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
-- **Native TS7 diagnostic waits stabilize versionless publication bursts (refs [#1412](https://github.com/apmantza/pi-lens/issues/1412))** — TypeScript wait strategy resolution now follows the launched server variant: classic typescript-language-server retains authoritative first-push seeding, while native `tsc --lsp --stdio` debounces provisional pushes until a quiet window or advertised pull provides the settled result. Bounded latency telemetry records publication shape and settle source without diagnostic text.
-
 - **Git guard closes shell-expansion and command-wrapper bypasses (refs #1084, PR #1395)** — command-position normalization now handles all supported IFS and positional-parameter forms, and guarded verbs nested in known or unknown command-string launchers fail closed while literal text remains non-blocking.
 
 - **LSP roots and per-session clients are conservatively bounded (closes #1325, refs #1126, refs #1129)** — manifest-bearing fixture conventions (`tests/fixtures`, `__fixtures__`, and `testdata`), gitignored directories, and atomic-write staging namespaces no longer become standalone LSP roots; their files attach to the nearest eligible ancestor project. Client reuse remains keyed by server and normalized resolved root, while a configurable `PI_LENS_LSP_CLIENT_CEILING` (24 by default) evicts the least-recently-used idle client through graceful shutdown before spawning another and never evicts a client with an active LSP request.

@@ -16,6 +16,7 @@ import {
 	applyDynamicCapabilities,
 	CLIENT_CAPABILITIES,
 	clientRequestWorkspaceDiagnostics,
+	clearDiagnosticsForPath,
 	clientShutdown,
 	clientWaitForDiagnostics,
 	closeDocument,
@@ -1005,6 +1006,31 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 
 		expect(Date.now() - startedAt).toBeLessThan(300);
 		expect(state.pushDiagnostics.get(TEST_KEY)?.[0]?.message).toBe("single result");
+	});
+
+	it("cancels a pending native TS7 quiet-window timer on clear/resync", async () => {
+		// The headline #1412 safety property: a versionless publication armed
+		// BEFORE a resync must never land its (stale) diagnostics AFTER the
+		// document content changed. clearDiagnosticsForPath is what every
+		// didChange/resync/initial-open path calls — deleting its clearTimeout
+		// must turn this test red.
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		Object.defineProperty(state, "serverId", { value: "typescript" });
+		Object.defineProperty(state, "launchVariant", { value: "native-ts7" });
+
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			diagnostics: [diagnostic("stale pre-resync error", "2345")],
+		});
+		expect(state.pendingDiagnostics.has(TEST_KEY)).toBe(true);
+
+		clearDiagnosticsForPath(state, TEST_KEY);
+		expect(state.pendingDiagnostics.has(TEST_KEY)).toBe(false);
+
+		// Wait past the quiet window: the canceled timer must not fire and
+		// resurrect the pre-resync diagnostics.
+		await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+		expect(state.pushDiagnostics.has(TEST_KEY)).toBe(false);
 	});
 
 	it("drops a late push whose version lags the current document version, without poisoning the cache", async () => {

@@ -668,9 +668,12 @@ export interface LSPClientState {
 	readonly pullFailureHistory: LSPPullFailure[];
 	readonly pendingDiagnostics: Map<string, ReturnType<typeof setTimeout>>;
 	/** Receive sequence and didOpen epoch used only for bounded TypeScript
-	 * diagnostic-publication telemetry. */
-	readonly diagnosticPublicationCounts: PathKeyedMap<number>;
-	readonly documentOpenedAt: PathKeyedMap<number>;
+	 * diagnostic-publication telemetry. Plain Maps keyed by the already
+	 * normalized document path: every access site passes `normalizedPath`, and
+	 * a PathKeyedMap here would re-run the uncached realpath normalizer on the
+	 * hot JSON-RPC receive path (~60µs/call) for a value only telemetry reads. */
+	readonly diagnosticPublicationCounts: Map<string, number>;
+	readonly documentOpenedAt: Map<string, number>;
 	readonly diagnosticEmitter: EventEmitter;
 	diagnosticsVersion: number;
 	readonly documentVersions: Map<string, number>;
@@ -1042,7 +1045,10 @@ function getMergedDiagnosticsForPath(
 	);
 }
 
-function clearDiagnosticsForPath(
+/** Exported for tests: the quiet-window timer cancel on clear/resync is the
+ * headline #1412 safety property (a stale versionless publication must never
+ * land after the document content changed). */
+export function clearDiagnosticsForPath(
 	state: LSPClientState,
 	normalizedPath: string,
 ): void {
@@ -1236,13 +1242,22 @@ export function setupIncomingHandlers(
 				});
 			}
 			const strategy = getStrategy(state.serverId, state.launchVariant);
-			const publicationIndex =
-				(state.diagnosticPublicationCounts.get(normalizedPath) ?? 0) + 1;
-			state.diagnosticPublicationCounts.set(normalizedPath, publicationIndex);
-			const diagnosticCodes = [...new Set(newDiags
-				.map((diagnostic) => diagnostic.code)
-				.filter((code): code is string | number => code !== undefined)
-				.map(String))].slice(0, 8);
+			// Publication counting and code extraction exist only for the
+			// TypeScript diagnostic-sequence telemetry; skip the bookkeeping for
+			// every other push server on this hot receive path.
+			const isTypeScriptTelemetry = state.serverId === "typescript";
+			const publicationIndex = isTypeScriptTelemetry
+				? (state.diagnosticPublicationCounts.get(normalizedPath) ?? 0) + 1
+				: 0;
+			if (isTypeScriptTelemetry) {
+				state.diagnosticPublicationCounts.set(normalizedPath, publicationIndex);
+			}
+			const diagnosticCodes = isTypeScriptTelemetry
+				? [...new Set(newDiags
+					.map((diagnostic) => diagnostic.code)
+					.filter((code): code is string | number => code !== undefined)
+					.map(String))].slice(0, 8)
+				: [];
 			const logSequence = (
 				settledReturn: boolean,
 				settleSource?: "first-push" | "quiet-window",
@@ -2583,8 +2598,8 @@ export async function createLSPClient(options: {
 		documentPullDiagnosticTimestamps: new Map(),
 		pullFailureHistory: [],
 		pendingDiagnostics: new Map(),
-		diagnosticPublicationCounts: new PathKeyedMap<number>(normalizeMapKey),
-		documentOpenedAt: new PathKeyedMap<number>(normalizeMapKey),
+		diagnosticPublicationCounts: new Map(),
+		documentOpenedAt: new Map(),
 		diagnosticEmitter,
 		diagnosticsVersion: 0,
 		documentVersions: new Map(),
