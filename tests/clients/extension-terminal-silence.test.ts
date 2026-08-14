@@ -261,3 +261,28 @@ it("console guard is index.ts's first import (import-time install)", () => {
 	expect(firstImport).toContain("./clients/console-guard-install.js");
 });
 
+it("captures the startup marker before installing the console guard", () => {
+	const src = fs.readFileSync(
+		path.join(REPO_ROOT, "clients/console-guard-install.ts"),
+		"utf8",
+	);
+	expect(src.indexOf("PI_LENS_EVAL_STARTED_MS = performance.now()"))
+		.toBeLessThan(src.indexOf("installConsoleGuard();"));
+	expect(src).not.toContain("startup-marker");
+	// #1374 review P2: strictly pin the marker as the FIRST executable
+	// statement -- anything (even another import's side effect declared in
+	// this file) sliding above it re-bills that cost to host_boot and
+	// silently skews the host_boot/extension_eval latency split.
+	const firstStatement = src
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(
+			(line) =>
+				line.length > 0 &&
+				!line.startsWith("//") &&
+				!line.startsWith("/*") &&
+				!line.startsWith("*") &&
+				!line.startsWith("import "),
+		)[0];
+	expect(firstStatement).toContain("PI_LENS_EVAL_STARTED_MS");
+});
