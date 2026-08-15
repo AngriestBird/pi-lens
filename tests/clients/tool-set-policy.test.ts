@@ -48,6 +48,33 @@ describe("tool-set cache policy", () => {
 	});
 
 	describe("planToolSet", () => {
+		it("restores remembered tools in ACTIVATION order, not registration order", () => {
+			// A host rebuild reports tools in REGISTRATION order; the parent's
+			// array had them appended in ACTIVATION order. The active-tools
+			// array is what serializes into the request's tool block, so a
+			// transposition is a changed prefix — i.e. a cache miss on the
+			// first post-fork/resume/reload turn (#1453 review residual).
+			const registrationOrder = [
+				"lens_diagnostics",
+				"pi_lens_activate_tools",
+				"ast_grep_search",
+				"lsp_navigation",
+			];
+			const lazy = new Set(["ast_grep_search", "lsp_navigation"]);
+			// The parent activated lsp_navigation FIRST, then ast_grep_search.
+			const remembered = new Set(["lsp_navigation", "ast_grep_search"]);
+
+			const plan = planToolSet(registrationOrder, lazy, remembered);
+
+			expect(plan.desired).toEqual([
+				"lens_diagnostics",
+				"pi_lens_activate_tools",
+				"lsp_navigation",
+				"ast_grep_search",
+			]);
+			expect(plan.changed).toBe(false);
+		});
+
 		it("shrinks to the baseline when nothing was activated (startup/new)", () => {
 			const plan = planToolSet(ALL_ACTIVE, LAZY, new Set());
 

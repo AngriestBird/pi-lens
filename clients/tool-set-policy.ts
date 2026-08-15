@@ -77,7 +77,12 @@ export function planToolSet(
 	remembered: ReadonlySet<string>,
 ): ToolSetPlan {
 	const desired = active.filter(
-		(name) => !lazyNames.has(name) || remembered.has(name),
+		// Lazy tools are dropped here and re-appended below in REMEMBERED
+		// (= activation) order. Keeping them in the host's registration
+		// position would restore the right SET in the wrong ARRAY order, and
+		// the active-tools array is what serializes into the request's tool
+		// block — a transposition is a changed prefix, i.e. a cache miss.
+		(name) => !lazyNames.has(name),
 	);
 	// A remembered tool the host did not list as active still belongs in the
 	// set (defensive: the host controls what `getActiveTools` returns).
