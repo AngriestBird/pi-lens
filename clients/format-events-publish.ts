@@ -73,6 +73,7 @@ import { normalizeFilePath } from "./path-utils.js";
 import {
 	createLiveBusEmitter,
 	recordStaleBusFailure,
+	resolveLiveBusEmitter,
 	type BusEmitFn,
 	type BusEmitGetter,
 } from "./live-bus-emitter.js";
@@ -179,16 +180,11 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 		}
 		return;
 	}
-	const resolution = liveEmitter.resolve();
-	if (resolution.outcome === "stale-session") {
-		logBusEvent({
-			event: BUS_FORMAT_QUEUED_EVENT,
-			outcome: "skipped_stale_session",
-			level: "info",
-			cwd: normalizeFilePath(args.cwd),
-		});
-		return;
-	}
+	const resolution = resolveLiveBusEmitter(liveEmitter, {
+		event: BUS_FORMAT_QUEUED_EVENT,
+		cwd: normalizeFilePath(args.cwd),
+	});
+	if (resolution.outcome === "stale-session") return;
 	if (resolution.outcome === "unwired") {
 		if (!hasLoggedQueuedUnwired) {
 			hasLoggedQueuedUnwired = true;
@@ -264,16 +260,11 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 		}
 		return;
 	}
-	const resolution = liveEmitter.resolve();
-	if (resolution.outcome === "stale-session") {
-		logBusEvent({
-			event: BUS_FORMAT_START_EVENT,
-			outcome: "skipped_stale_session",
-			level: "info",
-			cwd: normalizeFilePath(args.cwd),
-		});
-		return;
-	}
+	const resolution = resolveLiveBusEmitter(liveEmitter, {
+		event: BUS_FORMAT_START_EVENT,
+		cwd: normalizeFilePath(args.cwd),
+	});
+	if (resolution.outcome === "stale-session") return;
 	if (resolution.outcome === "unwired") {
 		if (!hasLoggedStartUnwired) {
 			hasLoggedStartUnwired = true;
@@ -353,16 +344,11 @@ export function publishAutofixStart(args: PublishAutofixStartArgs): void {
 		}
 		return;
 	}
-	const resolution = liveEmitter.resolve();
-	if (resolution.outcome === "stale-session") {
-		logBusEvent({
-			event: BUS_AUTOFIX_START_EVENT,
-			outcome: "skipped_stale_session",
-			level: "info",
-			cwd: normalizeFilePath(args.cwd),
-		});
-		return;
-	}
+	const resolution = resolveLiveBusEmitter(liveEmitter, {
+		event: BUS_AUTOFIX_START_EVENT,
+		cwd: normalizeFilePath(args.cwd),
+	});
+	if (resolution.outcome === "stale-session") return;
 	if (resolution.outcome === "unwired") {
 		if (!hasLoggedAutofixStartUnwired) {
 			hasLoggedAutofixStartUnwired = true;

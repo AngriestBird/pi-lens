@@ -1,12 +1,17 @@
 import { recordDegradation } from "./degradation-ledger.js";
 import { probeCtxActive } from "./session-lifecycle.js";
+import {
+	logBusEvent,
+	type BusEventLogEntry,
+} from "./bus-events-logger.js";
 
 /** Resolve a pi event-bus emitter and its ctx at delivery time, not
  * subscription time. */
 export type BusEmitFn = (channel: string, data: unknown) => void;
 export interface BusEmitTarget {
 	emit: BusEmitFn;
-	ctx: unknown;
+	/** Optional for legacy/direct wiring; an absent ctx makes the probe inconclusive. */
+	ctx?: unknown;
 }
 export type BusEmitGetter = () => BusEmitFn | BusEmitTarget | undefined;
 export type BusEmitResolution =
@@ -61,4 +66,20 @@ export function createLiveBusEmitter(): LiveBusEmitter {
 			getter = undefined;
 		},
 	};
+}
+
+/** Resolve through the shared stale-session guard and record a declined target. */
+export function resolveLiveBusEmitter(
+	liveEmitter: LiveBusEmitter,
+	entry: Omit<BusEventLogEntry, "ts" | "outcome" | "level">,
+): BusEmitResolution {
+	const resolution = liveEmitter.resolve();
+	if (resolution.outcome === "stale-session") {
+		logBusEvent({
+			...entry,
+			outcome: "skipped_stale_session",
+			level: "info",
+		});
+	}
+	return resolution;
 }

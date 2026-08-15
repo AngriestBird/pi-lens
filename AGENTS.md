@@ -168,8 +168,10 @@ The captured-at-subscribe / used-after-replace shape also applies to pi's
 `events` API: `pi.events.emit` is a session-bound wrapper whose runtime is
 invalidated on replacement. Long-lived publishers must retain a getter and
 resolve the emitter at delivery time; deferred callbacks must resolve inside
-the callback, never before scheduling. The resolved target carries the process-latest event ctx (a per-activation ctx is a known refinement, #1415);
-the shared live-emitter seam probes that ctx immediately before delivery and
+the callback, never before scheduling. The resolved target pairs the emitter
+with its activation-owned event ctx and uses the process-latest ctx only during
+the activation's boot window. The shared live-emitter seam probes that ctx
+immediately before delivery and
 records `skipped_stale_session` instead of invoking a confirmed-stale target.
 The getter itself is activation-scoped:
 module-singleton bus/notifier/widget-render plumbing must be re-wired from the

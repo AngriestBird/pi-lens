@@ -64,6 +64,7 @@ import { normalizeFilePath } from "./path-utils.js";
 import {
 	createLiveBusEmitter,
 	recordStaleBusFailure,
+	resolveLiveBusEmitter,
 	type BusEmitFn,
 	type BusEmitGetter,
 } from "./live-bus-emitter.js";
@@ -218,16 +219,11 @@ export function publishDiagnostics(args: PublishDiagnosticsArgs): void {
 		}
 		return;
 	}
-	const resolution = liveEmitter.resolve();
-	if (resolution.outcome === "stale-session") {
-		logBusEvent({
-			event: BUS_DIAGNOSTICS_EVENT,
-			outcome: "skipped_stale_session",
-			level: "info",
-			cwd: normalizeFilePath(args.cwd),
-		});
-		return;
-	}
+	const resolution = resolveLiveBusEmitter(liveEmitter, {
+		event: BUS_DIAGNOSTICS_EVENT,
+		cwd: normalizeFilePath(args.cwd),
+	});
+	if (resolution.outcome === "stale-session") return;
 	if (resolution.outcome === "unwired") {
 		if (!hasLoggedUnwired) {
 			hasLoggedUnwired = true;

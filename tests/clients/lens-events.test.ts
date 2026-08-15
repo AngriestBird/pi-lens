@@ -61,6 +61,31 @@ describe("lens inter-extension events", () => {
 		expect(newEmit).toHaveBeenCalledTimes(1);
 	});
 
+	it("does not invoke a lens emitter whose paired ctx is stale", async () => {
+		const emit = vi.fn();
+		initLensEventsGetter(() => ({
+			emit,
+			ctx: {
+				isIdle: () => {
+					throw new Error("This extension ctx is stale after session replacement");
+				},
+			},
+		}));
+
+		emitLensTurnFindings({
+			cwd: "/repo",
+			filePaths: [],
+			sessionId: "session-1",
+			turnIndex: 1,
+			blockerSections: 0,
+			advisorySections: 0,
+			content: "stale",
+		});
+		await waitImmediate();
+
+		expect(emit).not.toHaveBeenCalled();
+	});
+
 	it("emits analysis-complete for every analysis and findings only when diagnostics exist", async () => {
 		const emit = vi.fn();
 		initLensEvents({ events: { emit } });

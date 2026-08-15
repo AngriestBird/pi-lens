@@ -2,4 +2,4 @@
 section: Fixed
 ---
 
-- **Bus publishers avoid stale session contexts (refs #1415)** — Event producers re-resolve the current activation at delivery time and intentionally skip a confirmed-stale session target instead of logging a failed emit.
+- **Bus publishers keep activation context ownership (closes #1415)** — Event producers pair each live emitter with its activation context, guard lens events through the shared stale-session seam, and retain the process-latest context only as a boot-window fallback.

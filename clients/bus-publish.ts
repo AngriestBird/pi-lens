@@ -23,6 +23,7 @@ import { appendRecentTouches } from "./recent-touches.js";
 import {
 	createLiveBusEmitter,
 	recordStaleBusFailure,
+	resolveLiveBusEmitter,
 	type BusEmitFn,
 	type BusEmitGetter,
 } from "./live-bus-emitter.js";
@@ -174,17 +175,12 @@ export function publishFilesTouched(args: PublishFilesTouchedArgs): void {
 		args.dbg?.(`bus-publish: recent-touches append failed: ${err}`);
 	});
 
-	const resolution = liveEmitter.resolve();
-	if (resolution.outcome === "stale-session") {
-		logBusEvent({
-			event: BUS_FILES_TOUCHED_EVENT,
-			outcome: "skipped_stale_session",
-			level: "info",
-			cwd: normalizeFilePath(args.cwd),
-			reason: args.reason,
-		});
-		return;
-	}
+	const resolution = resolveLiveBusEmitter(liveEmitter, {
+		event: BUS_FILES_TOUCHED_EVENT,
+		cwd: normalizeFilePath(args.cwd),
+		reason: args.reason,
+	});
+	if (resolution.outcome === "stale-session") return;
 	if (resolution.outcome === "unwired") {
 		if (!hasLoggedUnwired) {
 			hasLoggedUnwired = true;

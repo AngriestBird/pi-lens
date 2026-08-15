@@ -170,6 +170,117 @@ describe("index.ts extension wiring", () => {
 		}
 	});
 
+	it("probes the ctx owned by the activation whose emitter is selected", async () => {
+		_resetSessionLifecycleForTests();
+		resetBusPublishForTests();
+		try {
+			const liveCtx = makeCtx({ cwd: process.cwd(), sessionId: "live-owner" });
+			const staleCtx = makeCtx({ cwd: process.cwd(), sessionId: "stale-sibling" });
+			staleCtx.isIdle = () => {
+				throw new Error("This extension ctx is stale after session replacement");
+			};
+
+			const ownerEmit = vi.fn();
+			const owner = createPiMock();
+			const ownerApi = owner.asExtensionAPI();
+			(ownerApi as unknown as { events: { emit: typeof ownerEmit } }).events = {
+				emit: ownerEmit,
+			};
+			extension(ownerApi);
+			await owner.emit("session_start", { reason: "startup" }, liveCtx);
+
+			const sibling = createPiMock();
+			extension(sibling.asExtensionAPI());
+			// Reclaim the process-global publisher for the owner, then let a stale
+			// sibling handler overwrite only the process-global fallback ctx.
+			await owner.emit("session_start", { reason: "resume" }, liveCtx);
+			await sibling.emit("turn_start", {}, staleCtx);
+			publishFilesTouched({
+				reason: "autofix",
+				paths: ["/repo/live-owner.ts"],
+				cwd: "/repo",
+			});
+
+			expect(
+				ownerEmit.mock.calls.filter(([event]) => event === "pilens:files:touched"),
+			).toHaveLength(1);
+		} finally {
+			_resetSessionLifecycleForTests();
+			resetBusPublishForTests();
+		}
+	});
+
+	it("skips a stale owning ctx even when the global fallback is fresh", async () => {
+		_resetSessionLifecycleForTests();
+		resetBusPublishForTests();
+		try {
+			const staleOwnerCtx = makeCtx({ cwd: process.cwd(), sessionId: "stale-owner" });
+			staleOwnerCtx.isIdle = () => {
+				throw new Error("This extension ctx is stale after session replacement");
+			};
+			const freshGlobalCtx = makeCtx({ cwd: process.cwd(), sessionId: "fresh-sibling" });
+			const ownerEmit = vi.fn();
+			const owner = createPiMock();
+			const ownerApi = owner.asExtensionAPI();
+			(ownerApi as unknown as { events: { emit: typeof ownerEmit } }).events = {
+				emit: ownerEmit,
+			};
+			extension(ownerApi);
+			await owner.emit("session_start", { reason: "startup" }, staleOwnerCtx);
+
+			const sibling = createPiMock();
+			extension(sibling.asExtensionAPI());
+			await owner.emit("session_start", { reason: "resume" }, staleOwnerCtx);
+			await sibling.emit("turn_start", {}, freshGlobalCtx);
+			publishFilesTouched({
+				reason: "autofix",
+				paths: ["/repo/stale-owner.ts"],
+				cwd: "/repo",
+			});
+
+			expect(
+				ownerEmit.mock.calls.filter(([event]) => event === "pilens:files:touched"),
+			).toHaveLength(0);
+		} finally {
+			_resetSessionLifecycleForTests();
+			resetBusPublishForTests();
+		}
+	});
+
+	it("falls back to the latest event ctx before an activation receives one", async () => {
+		_resetSessionLifecycleForTests();
+		resetBusPublishForTests();
+		try {
+			const seed = createPiMock();
+			extension(seed.asExtensionAPI());
+			await seed.emit(
+				"turn_start",
+				{},
+				makeCtx({ cwd: process.cwd(), sessionId: "boot-fallback" }),
+			);
+
+			const bootEmit = vi.fn();
+			const boot = createPiMock();
+			const bootApi = boot.asExtensionAPI();
+			(bootApi as unknown as { events: { emit: typeof bootEmit } }).events = {
+				emit: bootEmit,
+			};
+			extension(bootApi);
+			publishFilesTouched({
+				reason: "autofix",
+				paths: ["/repo/boot.ts"],
+				cwd: "/repo",
+			});
+
+			expect(
+				bootEmit.mock.calls.filter(([event]) => event === "pilens:files:touched"),
+			).toHaveLength(1);
+		} finally {
+			_resetSessionLifecycleForTests();
+			resetBusPublishForTests();
+		}
+	});
+
 	describe("registration", () => {
 		it("registers every expected flag, command, tool, and lifecycle hook", () => {
 			const pi = createPiMock();

@@ -54,7 +54,10 @@ export type BusEventName =
 	| "pilens:diagnostic:disposition"
 	| "pilens:format:queued"
 	| "pilens:format:start"
-	| "pilens:autofix:start";
+	| "pilens:autofix:start"
+	| "pi-lens/analysis-complete"
+	| "pi-lens/findings"
+	| "pi-lens/turn-findings";
 
 export type BusEventOutcome =
 	| "emitted"

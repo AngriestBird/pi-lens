@@ -1,5 +1,13 @@
 import { logExtension } from "./extension-log.js";
 import type { Diagnostic } from "./dispatch/types.js";
+import { logBusEvent } from "./bus-events-logger.js";
+import { normalizeFilePath } from "./path-utils.js";
+import {
+	createLiveBusEmitter,
+	recordStaleBusFailure,
+	resolveLiveBusEmitter,
+	type BusEmitGetter,
+} from "./live-bus-emitter.js";
 
 export const LENS_EVENT_VERSION = 1;
 
@@ -14,7 +22,6 @@ type LensEventName = (typeof LENS_EVENT_NAMES)[keyof typeof LENS_EVENT_NAMES];
 type LensEventBus = {
 	emit?: (event: string, payload: unknown) => void;
 };
-type LensEventBusGetter = () => LensEventBus | undefined;
 
 export interface LensTelemetryPayload {
 	model: string;
@@ -54,18 +61,15 @@ export interface LensTurnFindingsPayload {
 	content: string;
 }
 
-let lensEventBus: LensEventBus | undefined;
-let lensEventBusGetter: LensEventBusGetter | undefined;
+const liveEmitter = createLiveBusEmitter();
 
 export function initLensEvents(pi: { events?: LensEventBus }): void {
-	lensEventBus = pi.events;
-	lensEventBusGetter = undefined;
+	liveEmitter.wire(pi.events?.emit);
 }
 
 /** Keep deferred deliveries on the live extension activation. */
-export function initLensEventsGetter(getter: LensEventBusGetter | undefined): void {
-	lensEventBusGetter = getter;
-	lensEventBus = undefined;
+export function initLensEventsGetter(getter: BusEmitGetter | undefined): void {
+	liveEmitter.wireGetter(getter);
 }
 
 function truncateText(
@@ -97,25 +101,37 @@ let _droppedEmitLogged = false;
 
 function emitLensEvent(eventName: LensEventName, payload: unknown): void {
 	setImmediate(() => {
-		try {
-			const bus = lensEventBusGetter?.() ?? lensEventBus;
-			const emit = bus?.emit;
-			if (!emit) {
-				if (!_droppedEmitLogged) {
-					_droppedEmitLogged = true;
-					logExtension({
-						subsystem: "lens-events",
-						level: "warn",
-						message: `lens event dropped (no live bus): ${eventName} — further drops logged once per process`,
-						metadata: { eventName },
-					});
-				}
-				return;
+		const cwd = normalizeFilePath((payload as { cwd?: string }).cwd ?? process.cwd());
+		const resolution = resolveLiveBusEmitter(liveEmitter, {
+			event: eventName,
+			cwd,
+		});
+		if (resolution.outcome === "stale-session") return;
+		if (resolution.outcome === "unwired") {
+			if (!_droppedEmitLogged) {
+				_droppedEmitLogged = true;
+				logExtension({
+					subsystem: "lens-events",
+					level: "warn",
+					message: `lens event dropped (no live bus): ${eventName} — further drops logged once per process`,
+					metadata: { eventName },
+				});
 			}
-			emit.call(bus, eventName, payload);
-		} catch {
+			return;
+		}
+		try {
+			resolution.emit(eventName, payload);
+			logBusEvent({ event: eventName, outcome: "emitted", cwd });
+		} catch (err) {
+			logBusEvent({
+				event: eventName,
+				outcome: "emit_failed",
+				cwd,
+				error: String(err),
+			});
+			recordStaleBusFailure(eventName, err);
 			// Inter-extension events are observational. A listener must never break
-			// the pi-lens hook path or delay agent progress with error handling noise.
+			// the pi-lens hook path or delay agent progress.
 		}
 	});
 }
