@@ -1068,17 +1068,12 @@ export function NearestRoot(
 	// different servers (e.g. TypeScript vs Go) with different marker sets never
 	// share entries. vi.resetModules() in tests resets module state between cases.
 	const cache = new Map<string, string>();
-	// #1412 M4: memo of "walked from this starting dir up to the boundary and
-	// found nothing" — without this, a repo with NO config (e.g. a plain JS
-	// project probed by TypeScriptConfigRoot) re-walks to the filesystem root
-	// (~2 stats/level) on EVERY resolution for that directory, forever, since
-	// only hits were cached before. Same invalidation story as the positive
-	// cache: this is a process-lifetime memo with no invalidation — a marker
-	// file that appears mid-session (positive OR negative case) already
-	// required a client restart to be picked up before this change, so this
-	// doesn't introduce a new staleness hazard, only extends the existing one
-	// to the negative case.
-	const negativeCache = new Set<string>();
+	// Only cache successful hits. Undefined results are NOT cached so that a
+	// newly-created root marker (e.g. package.json or tsconfig.json scaffolded
+	// mid-session by the agent) is detected on the next call — the absent →
+	// present transition must work without a process restart. The uncached
+	// re-walk cost for configless repos is a known trade-off; bounding the
+	// walk with stopDir for in-cwd files is the tracked optimization (#1412).
 	const inFlight = new Map<string, Promise<string | undefined>>();
 
 	return async (file: string): Promise<string | undefined> => {
@@ -1089,7 +1084,6 @@ export function NearestRoot(
 		// Fast path: already resolved for this directory.
 		const cached = cache.get(dirKey);
 		if (cached !== undefined) return cached;
-		if (negativeCache.has(dirKey)) return undefined;
 
 		// In-flight deduplication: if N parallel pipelines edit files in the same
 		// directory simultaneously, only one stat-walk runs; the rest await the same
@@ -1150,10 +1144,7 @@ export function NearestRoot(
 		inFlight.set(dirKey, promise);
 		try {
 			const result = await promise;
-			// #1412 M4: cache both outcomes now — see negativeCache's comment above
-			// for why a miss is just as safe to memoize as a hit.
 			if (result !== undefined) cache.set(dirKey, result);
-			else negativeCache.add(dirKey);
 			return result;
 		} finally {
 			inFlight.delete(dirKey);

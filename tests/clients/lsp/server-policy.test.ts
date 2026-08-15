@@ -513,15 +513,11 @@ describe("lsp server policy", () => {
 		expect(results).toEqual([tmp, tmp, tmp, tmp]);
 	});
 
-	// #1412 M4: previously undefined results were never cached, so a repo with
-	// no matching marker re-walked to the filesystem/stop boundary on EVERY
-	// resolution. The fix memoizes the miss too — same process-lifetime memo
-	// story as the positive cache — so a marker created AFTER the first miss
-	// is intentionally NOT picked up without a fresh resolver/client restart.
-	// (This inverts the old "does not cache undefined — re-walks when root
-	// marker is later created" expectation; that staleness window is now
-	// symmetric with the positive cache's, not a regression.)
-	it("caches undefined — does not re-walk when a root marker is later created", async () => {
+	// Misses are deliberately NOT cached: the absent → present transition
+	// (agent scaffolds package.json/tsconfig.json mid-session) must be picked
+	// up on the next resolution without a process restart. Only hits are
+	// process-lifetime memos.
+	it("does not cache undefined — re-walks when root marker is later created", async () => {
 		const { NearestRoot } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-nocache-"));
 		dirs.push(tmp);
@@ -536,10 +532,10 @@ describe("lsp server policy", () => {
 		const r1 = await resolver(file);
 		expect(r1).toBeUndefined();
 
-		// Marker created AFTER the miss was cached — the cached miss wins.
+		// Marker created AFTER the first miss — the next walk must find it.
 		fs.writeFileSync(path.join(tmp, "package.json"), "{}");
 		const r2 = await resolver(file);
-		expect(r2).toBeUndefined();
+		expect(r2).toBe(tmp);
 	});
 
 	it("isolates cache per NearestRoot instance — different marker sets are independent", async () => {
@@ -615,32 +611,6 @@ describe("lsp server policy", () => {
 		} finally {
 			cwdSpy.mockRestore();
 		}
-	});
-
-	// #1412 M4: NearestRoot previously cached only hits — a repo with no config
-	// re-walked to the filesystem root on EVERY resolution. The fix memoizes
-	// misses too, with the same process-lifetime (no invalidation) story the
-	// positive cache already had: a marker appearing mid-session already
-	// required a restart to be picked up before this change, so caching the
-	// miss doesn't introduce new staleness, it just extends existing behavior.
-	it("caches a miss so a marker created mid-session is not picked up without a restart", async () => {
-		const { NearestRoot } = await import("../../../clients/lsp/server.js");
-		const tmp = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-root-negative-cache-"),
-		);
-		dirs.push(tmp);
-
-		const project = path.join(tmp, "project");
-		const file = path.join(project, "nested", "doc.md");
-		fs.mkdirSync(path.dirname(file), { recursive: true });
-		fs.writeFileSync(file, "# Doc\n");
-
-		const resolver = NearestRoot([".marksman.toml"]);
-		await expect(resolver(file)).resolves.toBeUndefined();
-
-		// The marker appears AFTER the miss was cached.
-		fs.writeFileSync(path.join(tmp, ".marksman.toml"), "[core]\n");
-		await expect(resolver(file)).resolves.toBeUndefined();
 	});
 
 	it("matches Dockerfile by basename in configured server lookup", async () => {
