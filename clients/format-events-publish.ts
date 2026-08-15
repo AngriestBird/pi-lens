@@ -179,8 +179,17 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 		}
 		return;
 	}
-	const busEmit = liveEmitter.get();
-	if (!busEmit) {
+	const resolution = liveEmitter.resolve();
+	if (resolution.outcome === "stale-session") {
+		logBusEvent({
+			event: BUS_FORMAT_QUEUED_EVENT,
+			outcome: "skipped_stale_session",
+			level: "info",
+			cwd: normalizeFilePath(args.cwd),
+		});
+		return;
+	}
+	if (resolution.outcome === "unwired") {
 		if (!hasLoggedQueuedUnwired) {
 			hasLoggedQueuedUnwired = true;
 			logBusEvent({
@@ -191,6 +200,7 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 		}
 		return;
 	}
+	const busEmit = resolution.emit;
 
 	try {
 		const payload: FormatQueuedPayload = {
@@ -254,8 +264,17 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 		}
 		return;
 	}
-	const busEmit = liveEmitter.get();
-	if (!busEmit) {
+	const resolution = liveEmitter.resolve();
+	if (resolution.outcome === "stale-session") {
+		logBusEvent({
+			event: BUS_FORMAT_START_EVENT,
+			outcome: "skipped_stale_session",
+			level: "info",
+			cwd: normalizeFilePath(args.cwd),
+		});
+		return;
+	}
+	if (resolution.outcome === "unwired") {
 		if (!hasLoggedStartUnwired) {
 			hasLoggedStartUnwired = true;
 			logBusEvent({
@@ -266,6 +285,7 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 		}
 		return;
 	}
+	const busEmit = resolution.emit;
 
 	try {
 		const paths = args.paths.map((p) => normalizeFilePath(p));
@@ -333,8 +353,17 @@ export function publishAutofixStart(args: PublishAutofixStartArgs): void {
 		}
 		return;
 	}
-	const busEmit = liveEmitter.get();
-	if (!busEmit) {
+	const resolution = liveEmitter.resolve();
+	if (resolution.outcome === "stale-session") {
+		logBusEvent({
+			event: BUS_AUTOFIX_START_EVENT,
+			outcome: "skipped_stale_session",
+			level: "info",
+			cwd: normalizeFilePath(args.cwd),
+		});
+		return;
+	}
+	if (resolution.outcome === "unwired") {
 		if (!hasLoggedAutofixStartUnwired) {
 			hasLoggedAutofixStartUnwired = true;
 			logBusEvent({
@@ -345,6 +374,7 @@ export function publishAutofixStart(args: PublishAutofixStartArgs): void {
 		}
 		return;
 	}
+	const busEmit = resolution.emit;
 
 	try {
 		const paths = args.paths.map((p) => normalizeFilePath(p));

@@ -1,13 +1,23 @@
 import { recordDegradation } from "./degradation-ledger.js";
+import { probeCtxActive } from "./session-lifecycle.js";
 
-/** Resolve a pi event-bus emitter at delivery time, not subscription time. */
+/** Resolve a pi event-bus emitter and its ctx at delivery time, not
+ * subscription time. */
 export type BusEmitFn = (channel: string, data: unknown) => void;
-export type BusEmitGetter = () => BusEmitFn | undefined;
+export interface BusEmitTarget {
+	emit: BusEmitFn;
+	ctx: unknown;
+}
+export type BusEmitGetter = () => BusEmitFn | BusEmitTarget | undefined;
+export type BusEmitResolution =
+	| { outcome: "ready"; emit: BusEmitFn }
+	| { outcome: "unwired" }
+	| { outcome: "stale-session" };
 
 export interface LiveBusEmitter {
 	wire(emit: BusEmitFn | undefined): void;
 	wireGetter(getter: BusEmitGetter | undefined): void;
-	get(): BusEmitFn | undefined;
+	resolve(): BusEmitResolution;
 	reset(): void;
 }
 
@@ -32,8 +42,19 @@ export function createLiveBusEmitter(): LiveBusEmitter {
 			getter = next;
 			emit = undefined;
 		},
-		get() {
-			return getter?.() ?? emit;
+		resolve() {
+			// Invoke the getter for every delivery so session_start rewiring can
+			// replace a captured pre-await activation with the current primary. When
+			// the current target is nevertheless confirmed stale, never invoke it.
+			const target = getter?.() ?? emit;
+			if (!target) return { outcome: "unwired" };
+			if (typeof target === "function") {
+				return { outcome: "ready", emit: target };
+			}
+			if (probeCtxActive(target.ctx) === false) {
+				return { outcome: "stale-session" };
+			}
+			return { outcome: "ready", emit: target.emit };
 		},
 		reset() {
 			emit = undefined;

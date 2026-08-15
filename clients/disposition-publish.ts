@@ -105,8 +105,17 @@ export function publishDisposition(args: PublishDispositionArgs): void {
 		}
 		return;
 	}
-	const busEmit = liveEmitter.get();
-	if (!busEmit) {
+	const resolution = liveEmitter.resolve();
+	if (resolution.outcome === "stale-session") {
+		logBusEvent({
+			event: BUS_DISPOSITION_EVENT,
+			outcome: "skipped_stale_session",
+			level: "info",
+			cwd: normalizeFilePath(args.cwd),
+		});
+		return;
+	}
+	if (resolution.outcome === "unwired") {
 		if (!hasLoggedUnwired) {
 			hasLoggedUnwired = true;
 			logBusEvent({
@@ -117,6 +126,7 @@ export function publishDisposition(args: PublishDispositionArgs): void {
 		}
 		return;
 	}
+	const busEmit = resolution.emit;
 
 	try {
 		const payload: PilensDispositionPayload = {
