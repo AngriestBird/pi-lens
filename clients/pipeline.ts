@@ -239,6 +239,10 @@ export interface PipelineContext {
 		sessionId: string;
 		turnIndex: number;
 		writeIndex: number;
+		/** Raw model id / provider, separate from the combined `model` display
+		 * string above — worklog attribution (#1448) wants the two apart. */
+		modelId?: string;
+		provider?: string;
 	};
 	/** pi.getFlag accessor */
 	getFlag: (name: string, filePath?: string) => boolean | string | undefined;
@@ -1283,6 +1287,8 @@ export async function runPipeline(
 		{
 			projectRoot: ctx.projectRoot,
 			writeIndex: ctx.telemetry?.writeIndex,
+			telemetryModel: ctx.telemetry?.modelId,
+			telemetryProvider: ctx.telemetry?.provider,
 		},
 	);
 	recordDiagnostics(

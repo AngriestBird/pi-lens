@@ -1445,7 +1445,10 @@ function activateExtension(hostPi: ExtensionAPI) {
 			readGuard: runtime.readGuard,
 			dbg,
 		}),
-		createLensDiagnosticMarkTool(() => runtime.projectRoot),
+		createLensDiagnosticMarkTool(() => runtime.projectRoot, () => ({
+			model: runtime.telemetryModelId,
+			provider: runtime.telemetryProviderId,
+		})),
 	];
 	const LAZY_TOOL_CATALOG: ActivatableToolInfo[] = [
 		{
