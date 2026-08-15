@@ -65,6 +65,9 @@ let lastPhase: { phase: string; ts: string } | undefined;
  * `agent_end_deferred_mutation_requeue` (S2d gap 4's per-requeue record) and
  * `session_end_bus_rollup` (S2d gap 5's session-end rollup) are new
  * zero-duration siblings of the same shape, added alongside them.
+ * #1453: `tool_set_mutation` records an active-tool-set rewrite (zero-duration
+ * bookkeeping, and it fires during session_start where a real stall must stay
+ * attributed to the work around it), so it is excluded for the same reason.
  */
 const LAST_PHASE_EXCLUDED = new Set([
 	"loop_block",
@@ -74,6 +77,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"agent_end_deferred_mutation_drain",
 	"agent_end_deferred_mutation_requeue",
 	"session_end_bus_rollup",
+	"tool_set_mutation",
 ]);
 
 /**

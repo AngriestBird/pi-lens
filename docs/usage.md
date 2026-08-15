@@ -109,6 +109,7 @@ pi --no-opengrep         # Disable the Opengrep security scanner (default-on aux
 pi --no-read-guard       # Disable the read-before-edit behavior monitor
 pi --lens-turn-summary   # Persist a per-turn summary of diagnostics, autofixes, and autoformats
 pi --lens-compact-tool-line   # Render tool results as one compact, theme-aware line (closes #1327)
+pi --no-lazy-tools       # Keep every pi-lens tool active instead of activating the situational ones on demand
 
 # Actionable warnings (all default off)
 pi --lens-actionable-warnings          # Report fixable warnings at turn end
