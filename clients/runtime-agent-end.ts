@@ -136,6 +136,11 @@ export async function handleAgentEnd({
 			staleAfterMs,
 		);
 	const records = [...claimed, ...staleClaimed];
+	const requeuedKinds = new Set<"autofix" | "format">();
+	const requeue = (pending: Parameters<RuntimeCoordinator["requeueDeferredMutations"]>[0]): void => {
+		for (const record of pending) for (const kind of record.kinds) requeuedKinds.add(kind);
+		runtime.requeueDeferredMutations(pending);
+	};
 	const rootActionableAutofixEnabled = !!getFlag(
 		"lens-actionable-warning-autofix",
 	);
@@ -214,7 +219,7 @@ export async function handleAgentEnd({
 	for (let autofixIndex = 0; autofixIndex < autofixRecords.length; autofixIndex++) {
 		const record = autofixRecords[autofixIndex];
 		if (ambientSignal?.aborted) {
-			runtime.requeueDeferredMutations(
+			requeue(
 				autofixRecords.slice(autofixIndex).map((pending) => ({
 					...pending,
 					kinds: new Set(["autofix" as const]),
@@ -230,7 +235,7 @@ export async function handleAgentEnd({
 		}
 		if (!biomeClient || !ruffClient) {
 			dbg(`agent_end deferred_autofix: clients unavailable for ${filePath}`);
-			runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["autofix"]), toolNames: new Set(record.toolNames) }]);
+			requeue([{ ...record, kinds: new Set(["autofix"]), toolNames: new Set(record.toolNames) }]);
 			continue;
 		}
 		const policy = getAutofixPolicyForFile(filePath, {
@@ -280,7 +285,7 @@ export async function handleAgentEnd({
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			summary.failed.push({ filePath, errors: [message] });
-			runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["autofix"]), toolNames: new Set(record.toolNames) }]);
+			requeue([{ ...record, kinds: new Set(["autofix"]), toolNames: new Set(record.toolNames) }]);
 		}
 	}
 	if (deferredAutofixFixes.length > 0) {
@@ -393,7 +398,7 @@ export async function handleAgentEnd({
 			),
 		);
 		if (ambientSignal?.aborted) {
-			runtime.requeueDeferredMutations(
+			requeue(
 				formatRecords.filter((_, index) => !started.has(index)).map((record) => ({
 					...record,
 					kinds: new Set(["format" as const]),
@@ -416,7 +421,7 @@ export async function handleAgentEnd({
 			if (entry.error) {
 				dbg(`agent_end deferred_format failed for ${filePath}: ${entry.error}`);
 				summary.failed.push({ filePath, errors: [entry.error] });
-				runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["format"]), toolNames: new Set(record.toolNames) }]);
+				requeue([{ ...record, kinds: new Set(["format"]), toolNames: new Set(record.toolNames) }]);
 				continue;
 			}
 			const result = entry.result;
@@ -426,7 +431,7 @@ export async function handleAgentEnd({
 
 			if (result.formatFailures.length > 0) {
 				summary.failed.push({ filePath, errors: result.formatFailures });
-				runtime.requeueDeferredMutations([{ ...record, kinds: new Set(["format"]), toolNames: new Set(record.toolNames) }]);
+				requeue([{ ...record, kinds: new Set(["format"]), toolNames: new Set(record.toolNames) }]);
 			}
 
 			if (result.formatChanged) {
@@ -677,6 +682,19 @@ export async function handleAgentEnd({
 		}
 	}
 
+	logLatency({
+		type: "phase",
+		toolName: "agent_end",
+		filePath: ctxCwd ?? runtime.projectRoot,
+		phase: "agent_end_deferred_mutation_drain",
+		durationMs: Date.now() - startedAt,
+		metadata: {
+			autofixRecords: autofixRecords.length,
+			formatRecords: formatRecords.length,
+			coalescedPaths: records.length,
+			requeuedKinds: [...requeuedKinds].sort(),
+		},
+	});
 	logLatency({
 		type: "tool_result",
 		toolName: "agent_end",

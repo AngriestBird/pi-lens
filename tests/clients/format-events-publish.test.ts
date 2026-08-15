@@ -92,6 +92,7 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 				v: BUS_FORMAT_QUEUED_VERSION,
 				source: "pi-lens",
 				tool: "edit",
+				kinds: ["format"],
 			});
 			expect(payload.filePath).toEqual(expect.any(String));
 			expect(payload.cwd).toEqual(expect.any(String));
@@ -215,6 +216,7 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 				v: BUS_FORMAT_START_VERSION,
 				source: "pi-lens",
 				fileCount: 2,
+				kinds: ["format"],
 			});
 			expect(payload.paths).toHaveLength(2);
 		});

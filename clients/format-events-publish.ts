@@ -92,7 +92,7 @@ export interface FormatQueuedPayload {
 	filePath: string;
 	cwd: string;
 	tool: "write" | "edit";
-	kinds?: Array<"autofix" | "format">;
+	kinds: Array<"autofix" | "format">;
 }
 
 export interface FormatStartPayload {
@@ -101,7 +101,7 @@ export interface FormatStartPayload {
 	cwd: string;
 	paths: string[];
 	fileCount: number;
-	kinds?: Array<"autofix" | "format">;
+	kinds: Array<"autofix" | "format">;
 }
 
 export interface AutofixStartPayload {
@@ -185,6 +185,7 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 			event: BUS_FORMAT_QUEUED_EVENT,
 			outcome: "skipped_stale_session",
 			level: "info",
+			ctxSource: resolution.ctxSource,
 			cwd: normalizeFilePath(args.cwd),
 		});
 		return;
@@ -209,7 +210,7 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 			filePath: normalizeFilePath(args.filePath),
 			cwd: normalizeFilePath(args.cwd),
 			tool: args.tool,
-			...(args.kinds ? { kinds: args.kinds } : {}),
+			kinds: args.kinds ?? ["format"],
 		};
 		busEmit(BUS_FORMAT_QUEUED_EVENT, payload);
 		hasLoggedQueuedFailure = false;
@@ -225,6 +226,7 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 			outcome: "emit_failed",
 			cwd: normalizeFilePath(args.cwd),
 			error: String(err),
+			ctxSource: resolution.ctxSource,
 		});
 		if (!hasLoggedQueuedFailure) {
 			hasLoggedQueuedFailure = true;
@@ -270,6 +272,7 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 			event: BUS_FORMAT_START_EVENT,
 			outcome: "skipped_stale_session",
 			level: "info",
+			ctxSource: resolution.ctxSource,
 			cwd: normalizeFilePath(args.cwd),
 		});
 		return;
@@ -295,7 +298,7 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 			cwd: normalizeFilePath(args.cwd),
 			paths,
 			fileCount: paths.length,
-			...(args.kinds ? { kinds: args.kinds } : {}),
+			kinds: args.kinds ?? ["format"],
 		};
 		busEmit(BUS_FORMAT_START_EVENT, payload);
 		hasLoggedStartFailure = false;
@@ -311,6 +314,7 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 			outcome: "emit_failed",
 			cwd: normalizeFilePath(args.cwd),
 			error: String(err),
+			ctxSource: resolution.ctxSource,
 		});
 		if (!hasLoggedStartFailure) {
 			hasLoggedStartFailure = true;
@@ -359,6 +363,7 @@ export function publishAutofixStart(args: PublishAutofixStartArgs): void {
 			event: BUS_AUTOFIX_START_EVENT,
 			outcome: "skipped_stale_session",
 			level: "info",
+			ctxSource: resolution.ctxSource,
 			cwd: normalizeFilePath(args.cwd),
 		});
 		return;
@@ -400,6 +405,7 @@ export function publishAutofixStart(args: PublishAutofixStartArgs): void {
 			outcome: "emit_failed",
 			cwd: normalizeFilePath(args.cwd),
 			error: String(err),
+			ctxSource: resolution.ctxSource,
 		});
 		if (!hasLoggedAutofixStartFailure) {
 			hasLoggedAutofixStartFailure = true;

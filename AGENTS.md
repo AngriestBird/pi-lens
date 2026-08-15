@@ -1,5 +1,14 @@
 # pi-lens — agent context
 
+Post-fix decision observability is durable and bounded: advisory delivery logs
+one `advisory_provenance_decision` per consume, classic TypeScript project
+identity logs every success/failure outcome, deferred mutation drains summarize
+coalescing and requeues, and authoritative-content branches log attachment
+decisions. Bus stale/failure rows carry the resolver's ctx source. Automatic
+smell warnings count only the current session, or a 24-hour fallback window
+when no session boundary is available; explicit health remains separately
+labeled. (#1432)
+
 Advisory caches must carry immutable capture provenance and validate it again
 at every delivery surface. A finding is current only when session/turn state
 matches and every affected file is SHA-256-confirmed (size+mtime is only the

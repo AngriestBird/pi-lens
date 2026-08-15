@@ -55,6 +55,7 @@ import { getGlobalPiLensDir } from "./file-utils.js";
 
 /** Bounded tail-read budget PER source log file — never a full-file scan. */
 export const SMELLS_TAIL_BYTES_PER_FILE = 64 * 1024;
+export const SMELLS_ROLLING_WINDOW_MS = 24 * 60 * 60_000;
 
 /** Re-check cadence at `turn_end`, mirroring `memory-sampler.ts`'s pattern —
  *  cheap enough (bounded ~128KB I/O) not to need finer throttling, but a
@@ -178,6 +179,7 @@ export function countRecentSmells(
 	root: string = getGlobalPiLensDir(),
 	sessionStartMs?: number,
 ): SmellsRollupCounts {
+	const sinceMs = sessionStartMs ?? Date.now() - SMELLS_ROLLING_WINDOW_MS;
 	const busTail = tailReadText(
 		path.join(root, "bus-events.log"),
 		SMELLS_TAIL_BYTES_PER_FILE,
@@ -190,12 +192,12 @@ export function countRecentSmells(
 		staleCtxEmitFailed: countMatchingLines(
 			busTail,
 			isStaleCtxEmitFailed,
-			sessionStartMs,
+			sinceMs,
 		),
 		opengrepRespawn: countMatchingLines(
 			latencyTail,
 			isOpengrepRespawn,
-			sessionStartMs,
+			sinceMs,
 		),
 	};
 }

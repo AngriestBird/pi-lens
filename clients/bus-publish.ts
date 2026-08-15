@@ -180,6 +180,7 @@ export function publishFilesTouched(args: PublishFilesTouchedArgs): void {
 			event: BUS_FILES_TOUCHED_EVENT,
 			outcome: "skipped_stale_session",
 			level: "info",
+			ctxSource: resolution.ctxSource,
 			cwd: normalizeFilePath(args.cwd),
 			reason: args.reason,
 		});
@@ -229,6 +230,7 @@ export function publishFilesTouched(args: PublishFilesTouchedArgs): void {
 			cwd: normalizeFilePath(args.cwd),
 			reason: args.reason,
 			error: String(err),
+			ctxSource: resolution.ctxSource,
 		});
 		if (!hasLoggedFailure) {
 			hasLoggedFailure = true;

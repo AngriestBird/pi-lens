@@ -189,6 +189,15 @@ describe("countRecentSmells", () => {
 		expect(countRecentSmells(tmpDir, sessionStartMs).staleCtxEmitFailed).toBe(1);
 	});
 
+	it("excludes pre-window rows and counts rows inside the rolling fallback window", () => {
+		const now = Date.now();
+		writeLines(path.join(tmpDir, "bus-events.log"), [
+			staleCtxLine(new Date(now - 25 * 60 * 60_000).toISOString()),
+			staleCtxLine(new Date(now - 23 * 60 * 60_000).toISOString()),
+		]);
+		expect(countRecentSmells(tmpDir).staleCtxEmitFailed).toBe(1);
+	});
+
 	it("does not report matching rows without a parseable timestamp when scoped", () => {
 		// An explicitly unparseable ts, NOT the helper default (which is
 		// `new Date().toISOString()` — a valid current timestamp that on a fast

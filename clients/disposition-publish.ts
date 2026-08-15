@@ -111,6 +111,7 @@ export function publishDisposition(args: PublishDispositionArgs): void {
 			event: BUS_DISPOSITION_EVENT,
 			outcome: "skipped_stale_session",
 			level: "info",
+			ctxSource: resolution.ctxSource,
 			cwd: normalizeFilePath(args.cwd),
 		});
 		return;
@@ -154,6 +155,7 @@ export function publishDisposition(args: PublishDispositionArgs): void {
 			outcome: "emit_failed",
 			cwd: normalizeFilePath(args.cwd),
 			error: String(err),
+			ctxSource: resolution.ctxSource,
 		});
 		if (!hasLoggedFailure) {
 			hasLoggedFailure = true;

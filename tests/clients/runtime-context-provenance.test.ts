@@ -1,6 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const logLatency = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/latency-logger.js", () => ({ logLatency }));
 import {
 	advisoryPathKey,
 	snapshotAdvisoryProvenance,
@@ -18,7 +21,10 @@ import { setupTestEnvironment } from "./test-utils.js";
 
 describe("advisory provenance at context delivery (#1413)", () => {
 	const cleanups: Array<() => void> = [];
-	afterEach(() => cleanups.splice(0).forEach((cleanup) => cleanup()));
+	afterEach(() => {
+		cleanups.splice(0).forEach((cleanup) => cleanup());
+		logLatency.mockReset();
+	});
 
 	function setup() {
 		const env = setupTestEnvironment("pi-lens-advisory-");
@@ -51,6 +57,14 @@ describe("advisory provenance at context delivery (#1413)", () => {
 		expect(peeked).toEqual(consumed);
 		expect(consumed?.messages[0]?.content).toContain("Address 🔴 blockers");
 		expect(consumed?.messages[0]?.content).not.toContain("Historical finding");
+		expect(logLatency).toHaveBeenCalledTimes(1);
+		expect(logLatency).toHaveBeenCalledWith(expect.objectContaining({
+			phase: "advisory_provenance_decision",
+			metadata: expect.objectContaining({
+				decision: "current", reasons: [], changedPathCount: 0,
+				provenanceStamp: expect.stringContaining("generation 7"), advisoryKind: "turn-end",
+			}),
+		}));
 	});
 
 	it("keeps unchanged blockers live across beginTurn and project sequence drift", () => {
@@ -69,6 +83,13 @@ describe("advisory provenance at context delivery (#1413)", () => {
 		fs.writeFileSync(file, "export const value = 2;\n");
 		expect(consumeTurnEndFindings(cache, env.tmpDir, runtime)?.messages[0]?.content)
 			.toContain("Historical finding; workspace changed since capture; re-run to confirm.");
+		expect(logLatency).toHaveBeenCalledWith(expect.objectContaining({
+			metadata: expect.objectContaining({
+				decision: "historical",
+				reasons: expect.arrayContaining([expect.stringContaining("content-changed:")]),
+				changedPathCount: 1,
+			}),
+		}));
 	});
 
 	it("hash-detects same-size same-mtime rewrites", () => {

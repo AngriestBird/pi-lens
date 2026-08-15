@@ -83,13 +83,17 @@ describe("classic TypeScript project-identity telemetry (#1412)", () => {
 	});
 
 	it.each([
-		["error", vi.fn().mockRejectedValue(new Error("projectInfo failed"))],
-		["timeout", vi.fn().mockResolvedValue({ executed: false, reason: "timed out" })],
-	])("silently ignores a command %s", async (_name, executeCommand) => {
+		["error", "threw", vi.fn().mockRejectedValue(new Error("projectInfo failed"))],
+		["timeout", "not-executed", vi.fn().mockResolvedValue({ executed: false, reason: "timed out" })],
+		["no response", "no-response", vi.fn().mockResolvedValue({ executed: true })],
+		["unsuccessful", "unsuccessful", vi.fn().mockResolvedValue({ executed: true, result: { success: false } })],
+	])("logs a bounded outcome for a command %s", async (_name, expectedOutcome, executeCommand) => {
 		await expect(
 			probeTsserverProjectIdentity(options(executeCommand)),
 		).resolves.toBeUndefined();
-		expect(logLatency).not.toHaveBeenCalled();
+		expect(logLatency).toHaveBeenCalledWith(expect.objectContaining({
+			metadata: expect.objectContaining({ outcome: expectedOutcome }),
+		}));
 	});
 
 	it("deduplicates normalized aliases once per client and file", async () => {
@@ -102,7 +106,7 @@ describe("classic TypeScript project-identity telemetry (#1412)", () => {
 		await probeTsserverProjectIdentity({ ...first, file: "c:\\repo\\src\\APP.ts" });
 
 		expect(executeCommand).toHaveBeenCalledTimes(1);
-		expect(logLatency).toHaveBeenCalledTimes(1);
+		expect(logLatency).toHaveBeenCalledTimes(2);
 		expect(logLatency).toHaveBeenCalledWith(
 			expect.objectContaining({
 				metadata: expect.objectContaining({
@@ -111,6 +115,9 @@ describe("classic TypeScript project-identity telemetry (#1412)", () => {
 				}),
 			}),
 		);
+		expect(logLatency).toHaveBeenCalledWith(expect.objectContaining({
+			metadata: expect.objectContaining({ outcome: "not-executed" }),
+		}));
 	});
 
 	// #1412 L2: handleNotifyOpen already computes normalizeMapKey(filePath)
@@ -148,5 +155,8 @@ describe("classic TypeScript project-identity telemetry (#1412)", () => {
 			launchVariant: "native-ts7",
 		});
 		expect(executeCommand).not.toHaveBeenCalled();
+		expect(logLatency).toHaveBeenCalledWith(expect.objectContaining({
+			metadata: expect.objectContaining({ outcome: "not-executed" }),
+		}));
 	});
 });

@@ -10,9 +10,9 @@ export interface BusEmitTarget {
 }
 export type BusEmitGetter = () => BusEmitFn | BusEmitTarget | undefined;
 export type BusEmitResolution =
-	| { outcome: "ready"; emit: BusEmitFn }
-	| { outcome: "unwired" }
-	| { outcome: "stale-session" };
+	| { outcome: "ready"; emit: BusEmitFn; ctxSource: "own" | "global-fallback" }
+	| { outcome: "unwired"; ctxSource: "unwired" }
+	| { outcome: "stale-session"; ctxSource: "own" };
 
 export interface LiveBusEmitter {
 	wire(emit: BusEmitFn | undefined): void;
@@ -47,14 +47,14 @@ export function createLiveBusEmitter(): LiveBusEmitter {
 			// replace a captured pre-await activation with the current primary. When
 			// the current target is nevertheless confirmed stale, never invoke it.
 			const target = getter?.() ?? emit;
-			if (!target) return { outcome: "unwired" };
+			if (!target) return { outcome: "unwired", ctxSource: "unwired" };
 			if (typeof target === "function") {
-				return { outcome: "ready", emit: target };
+				return { outcome: "ready", emit: target, ctxSource: "global-fallback" };
 			}
 			if (probeCtxActive(target.ctx) === false) {
-				return { outcome: "stale-session" };
+				return { outcome: "stale-session", ctxSource: "own" };
 			}
-			return { outcome: "ready", emit: target.emit };
+			return { outcome: "ready", emit: target.emit, ctxSource: "own" };
 		},
 		reset() {
 			emit = undefined;

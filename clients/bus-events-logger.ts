@@ -77,6 +77,8 @@ export interface BusEventLogEntry {
 	seq?: number;
 	/** emit_failed detail. */
 	error?: string;
+	/** Which event ctx source backed stale/failure classification. */
+	ctxSource?: "own" | "global-fallback" | "unwired";
 }
 
 export function logBusEvent(entry: Omit<BusEventLogEntry, "ts">): void {

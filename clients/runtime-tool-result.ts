@@ -450,6 +450,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 						syntheticAttachmentBytes + blockBytes >
 							AUTHORITATIVE_CONTENT_MAX_BYTES
 					) {
+						logLatency({
+							type: "phase",
+							phase: "authoritative_content_attachment_decision",
+							filePath: wp,
+							durationMs: 0,
+							metadata: { path: wp, bytes: blockBytes, decision: "aggregate-budget-degraded" },
+						});
 						syntheticWriteContent.push({
 							type: "text",
 							text: `⚠️ **File was modified by auto-format/fix. You MUST re-read ${wp} before making any further edits — the aggregate authoritative content for this command is too large to attach.**`,
@@ -1121,6 +1128,16 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	const postMutation = result.postMutation;
 	const attachAuthoritativeContent = postMutation !== undefined &&
 		Buffer.byteLength(postMutation.content, "utf-8") <= AUTHORITATIVE_CONTENT_MAX_BYTES;
+	if (postMutation) {
+		const bytes = Buffer.byteLength(postMutation.content, "utf-8");
+		logLatency({
+			type: "phase",
+			phase: "authoritative_content_attachment_decision",
+			filePath: postMutation.filePath,
+			durationMs: 0,
+			metadata: { path: postMutation.filePath, bytes, decision: attachAuthoritativeContent ? "attached" : "size-capped" },
+		});
+	}
 	const returnedContent = attachAuthoritativeContent
 		? [
 				...event.content,

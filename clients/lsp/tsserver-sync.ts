@@ -133,28 +133,35 @@ function classifyProjectInfo(body: unknown): {
 export async function probeTsserverProjectIdentity(
 	options: TsserverProjectIdentityProbeOptions,
 ): Promise<void> {
+	const normalizedFile = options.normalizedFile ?? normalizeMapKey(options.file);
+	const startedAt = Date.now();
+	const logOutcome = (outcome: "ok" | "not-executed" | "no-response" | "unsuccessful" | "threw", metadata: Record<string, unknown> = {}) => logLatency({
+		type: "phase", phase: "lsp_typescript_project_identity", filePath: normalizedFile,
+		durationMs: Date.now() - startedAt,
+		metadata: { serverId: options.serverId, launchVariant: options.launchVariant, clientRoot: options.clientRoot, outcome, ...metadata },
+	});
 	if (
 		options.serverId !== "typescript" ||
 		options.launchVariant !== "classic" ||
 		typeof options.commandChannel.executeCommand !== "function"
 	) {
+		logOutcome("not-executed");
 		return;
 	}
-	const normalizedFile = options.normalizedFile ?? normalizeMapKey(options.file);
-	if (options.probedFiles.has(normalizedFile)) return;
+	if (options.probedFiles.has(normalizedFile)) { logOutcome("not-executed"); return; }
 	// Claim before yielding so concurrent opens cannot issue duplicate probes.
 	options.probedFiles.add(normalizedFile);
-	const startedAt = Date.now();
 	try {
 		const outcome = await options.commandChannel.executeCommand(
 			TSSERVER_REQUEST_COMMAND,
 			["projectInfo", { file: options.file, needFileNameList: false }],
 		);
-		if (!outcome.executed) return;
+		if (!outcome.executed) { logOutcome("not-executed"); return; }
 		const response = outcome.result as
 			| { success?: boolean; body?: unknown }
 			| undefined;
-		if (!response || response.success !== true) return;
+		if (!response) { logOutcome("no-response"); return; }
+		if (response.success !== true) { logOutcome("unsuccessful"); return; }
 		const identity = classifyProjectInfo(response.body);
 		logLatency({
 			type: "phase",
@@ -162,6 +169,7 @@ export async function probeTsserverProjectIdentity(
 			filePath: normalizedFile,
 			durationMs: Date.now() - startedAt,
 			metadata: {
+				outcome: "ok",
 				serverId: options.serverId,
 				launchVariant: options.launchVariant,
 				clientRoot: options.clientRoot,
@@ -171,6 +179,7 @@ export async function probeTsserverProjectIdentity(
 			},
 		});
 	} catch {
+		logOutcome("threw");
 		// Best-effort telemetry: command errors/timeouts never reach diagnostics.
 	}
 }

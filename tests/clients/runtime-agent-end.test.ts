@@ -8,6 +8,7 @@ import { readChangesSince } from "../../clients/project-changes.js";
 import { loadPiLensProjectConfig } from "../../clients/project-lens-config.js";
 import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
 import { getLastLoggedPhase } from "../../clients/latency-logger.js";
+import * as latencyLogger from "../../clients/latency-logger.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { setAmbientAbortSignal } from "../../clients/safe-spawn.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
@@ -107,6 +108,7 @@ describe("runtime-agent-end deferred formatting", () => {
 	it("runs deferred autofix before format on the final edit state", async () => {
 		const env = setupTestEnvironment("pi-lens-agent-end-mutation-order-");
 		try {
+			const logSpy = vi.spyOn(latencyLogger, "logLatency");
 			const filePath = createTempFile(env.tmpDir, "src/app.ts", "let value=1\n");
 			fs.writeFileSync(path.join(env.tmpDir, "biome.json"), "{}\n");
 			const runtime = new RuntimeCoordinator();
@@ -138,6 +140,12 @@ describe("runtime-agent-end deferred formatting", () => {
 			});
 			expect(order).toEqual(["autofix", "format"]);
 			expect(fs.readFileSync(filePath, "utf-8")).toBe("const value = 1;\n");
+			expect(logSpy).toHaveBeenCalledWith(expect.objectContaining({
+				phase: "agent_end_deferred_mutation_drain",
+				metadata: expect.objectContaining({
+					autofixRecords: 1, formatRecords: 1, coalescedPaths: 1, requeuedKinds: [],
+				}),
+			}));
 		} finally { env.cleanup(); }
 	});
 
