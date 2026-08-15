@@ -7,10 +7,15 @@ export function formatCascadeNeighborDiagnostics(
 	options: { noun?: string; includeReason?: boolean } = {},
 ): string {
 	const withErrors = neighbors.filter((n) => n.diagnostics.length > 0);
-	if (withErrors.length === 0) return "";
+	const inconclusive = neighbors.filter(
+		(n) => n.inconclusive === true && n.diagnostics.length === 0,
+	);
+	if (withErrors.length === 0 && inconclusive.length === 0) return "";
 
 	const noun = options.noun ?? "neighbor";
-	let out = `📐 Cascade errors in ${withErrors.length} ${noun} file(s) — fix before finishing turn:`;
+	let out = withErrors.length > 0
+		? `📐 Cascade errors in ${withErrors.length} ${noun} file(s) — fix before finishing turn:`
+		: "";
 	for (const neighbor of withErrors) {
 		const display = toRunnerDisplayPath(cwd, neighbor.filePath);
 		const reason = options.includeReason ? ` reason="${neighbor.reason}"` : "";
@@ -22,6 +27,13 @@ export function formatCascadeNeighborDiagnostics(
 			out += `\n  line ${line}, col ${col}${rule}: ${d.message.split("\n")[0].slice(0, 100)}`;
 		}
 		out += "\n</diagnostics>";
+	}
+	if (inconclusive.length > 0) {
+		if (out) out += "\n";
+		out += `⚠️ Cascade diagnostics inconclusive for ${inconclusive.length} ${noun} file(s) — no clean result was confirmed:`;
+		for (const neighbor of inconclusive) {
+			out += `\n  ${toRunnerDisplayPath(cwd, neighbor.filePath)}`;
+		}
 	}
 	return out;
 }

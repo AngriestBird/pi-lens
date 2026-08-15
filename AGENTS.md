@@ -39,6 +39,13 @@ stabilizes the burst (or an advertised authoritative pull settles it). Pass the
 live `launchVariant` through every `getStrategy` consumer; never infer a fixed
 publication count or manufacture version freshness. (#1412)
 
+Native TS7 cascade neighbor checks use a cascade-only collect-later tier. The
+lane sends a no-wait primary touch and quiet-window reconciliation consumes a
+newer per-file push or pull publication. The shared server wait policy stays
+`waits`, so main-lane behavior is unchanged. Cascade results carry an explicit
+`inconclusive` marker through formatting, and only confirmed touches enter the
+neighbor cache. (#1444)
+
 MCP warm word indexes are bounded per root in `clients/mcp/analyze.ts`: callers
 must acquire/release a lease around every use, because idle and LRU eviction
 must never retire an index mid-query. Idle timers are generation-owned,

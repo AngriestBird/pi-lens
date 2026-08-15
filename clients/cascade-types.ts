@@ -11,6 +11,8 @@ export interface CascadeNeighborResult {
 	reason: "imports" | "calls" | "references" | "fallback";
 	diagnostics: Diagnostic[];
 	lspTouched: boolean;
+	/** The touch did not confirm either clean state or diagnostics. */
+	inconclusive?: boolean;
 	durationMs?: number;
 }
 

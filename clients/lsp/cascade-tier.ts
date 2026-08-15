@@ -32,6 +32,12 @@
  * NOT tier-3 — the caller keeps today's full in-lane wait. Fail-safe is
  * always "wait like before".
  *
+ * Native TS7 is the cascade-only exception. It is not silent on clean, but
+ * its publication does not settle inside the cold-snapshot budget. Cascade
+ * classifies it as `collect-later`, sends the same no-wait touch, and
+ * reconciles its later per-file push or pull publication. The shared server
+ * policy remains `waits`, so main-lane behavior does not change.
+ *
  * #524/#529/#541/#558: a server id can now be backed by more than one actual
  * binary — "typescript" is classic typescript-language-server OR TS7's
  * native `tsc --lsp --stdio` (PR #526). PR #526 originally routed the
@@ -46,9 +52,11 @@
  * confirmed still silent (`cleanPubs=0(v:0)`) in the same run. This is
  * therefore an EVIDENCE-BASED revert, not the original unverified caution:
  * native-ts7's clean-signal behavior IS known, and it is "publishes, not
- * silent". The snapshot's `launchVariant` marker again routes a native-ts7
- * snapshot through "waits" while the shared `silentOnClean` flag stays
- * `true` for classic. `scripts/probe-clean-signal.mjs`'s drift check no
+ * silent". The shared classifier still routes a native-ts7 snapshot through
+ * `waits`. The cascade-only wrapper routes it through `collect-later` because
+ * the measured publication arrives after the in-lane budget. The shared
+ * `silentOnClean` flag stays `true` for classic.
+ * `scripts/probe-clean-signal.mjs`'s drift check no
  * longer compares native-ts7 rows against the shared marker (it now expects
  * `false` for them explicitly) — see that file's header for the regression
  * watch this sets up for a future TS7 build that becomes silent again.
@@ -58,14 +66,43 @@ import { logCascade } from "../cascade-logger.js";
 import { logLatency } from "../latency-logger.js";
 import { normalizeMapKey } from "../path-utils.js";
 import { registerQuietWindowTask } from "../quiet-window.js";
+import { getServersForFileWithConfig } from "./config.js";
 import type { LSPDiagnostic } from "./client.js";
 import type { LSPService } from "./index.js";
 
-export {
-	classifyCascadeWaitTier,
+import {
 	classifyServerWaitTier,
-	type CascadeWaitTier,
+	type CascadeWaitTier as SharedCascadeWaitTier,
 } from "./wait-policy/classification.js";
+
+export { classifyServerWaitTier };
+
+/** Cascade-only extension of the shared wait policy. Native TS7 keeps the
+ * shared `waits` policy everywhere else, but cascade collects its late pull
+ * result outside the bounded in-lane fan-out. */
+export type CascadeWaitTier = SharedCascadeWaitTier | "collect-later";
+
+export function classifyCascadeWaitTier(
+	lspService: Pick<LSPService, "getCapabilitySnapshots">,
+	filePath: string,
+	snapshots: Awaited<ReturnType<LSPService["getCapabilitySnapshots"]>>,
+): CascadeWaitTier {
+	void lspService;
+	const servers = getServersForFileWithConfig(filePath).filter(
+		(s) => s.role !== "auxiliary",
+	);
+	const primary = servers[0];
+	if (!primary) return "waits";
+	const snapshot = snapshots.find((s) => s.serverId === primary.id);
+	if (
+		primary.id === "typescript" &&
+		snapshot?.launchVariant === "native-ts7" &&
+		snapshot.workspaceDiagnosticsSupport?.mode === "push-only"
+	) {
+		return "collect-later";
+	}
+	return classifyServerWaitTier(primary.id, snapshot);
+}
 
 // --- Kill switch (lazy, memoized — house style per clients/runtime-config.ts /
 // clients/quiet-window.ts's isQuietWindowEnabled) ---

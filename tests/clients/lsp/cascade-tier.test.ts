@@ -91,9 +91,9 @@ describe("classifyCascadeWaitTier", () => {
 	// native-ts7 now publishes 2 version-less diagnostic sets on clean
 	// (`cleanPubs=2(v:0)`) — NOT silent, a drift from the #541 measurement.
 	// Classic was re-confirmed silent in the same run and is unaffected. This
-	// is an evidence-based revert: the classifier again routes a native-ts7
-	// snapshot through the fail-safe "waits" path via its `launchVariant`.
-	it("classifies a native-ts7 typescript snapshot as waits — native-ts7 drifted off silent-on-clean, re-measured 2026-07-12 (#558)", () => {
+	// The shared policy stays on "waits". The cascade wrapper now uses its late
+	// publication through the bounded collect-later path.
+	it("classifies a native-ts7 typescript snapshot for cascade collect-later (#1444)", () => {
 		getServersForFileWithConfig.mockReturnValue([server("typescript")]);
 		const snapshots = [
 			{
@@ -108,7 +108,22 @@ describe("classifyCascadeWaitTier", () => {
 		];
 		expect(
 			mod.classifyCascadeWaitTier({} as any, FILE, snapshots as any),
-		).toBe("waits");
+		).toBe("collect-later");
+	});
+
+	it("keeps the shared native-ts7 server policy on waits outside cascade", () => {
+		const snapshot = {
+			serverId: "typescript",
+			root: "C:/repo",
+			operationSupport: {} as any,
+			workspaceDiagnosticsSupport: { mode: "push-only" as const },
+			advertisedCommands: [],
+			rawCapabilityKeys: [],
+			launchVariant: "native-ts7" as const,
+		};
+		expect(mod.classifyServerWaitTier("typescript", snapshot as any)).toBe(
+			"waits",
+		);
 	});
 
 	it("classifies a typescript snapshot with NO launchVariant marker (older snapshot) as tier3-silent — unchanged today-behavior", () => {

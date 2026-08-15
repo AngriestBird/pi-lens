@@ -54,10 +54,10 @@ import type {
 } from "../cascade-types.js";
 import { getDiagnosticTracker } from "../diagnostic-tracker.js";
 import {
+	classifyCascadeWaitTier,
 	isTierAwareCascadeEnabled,
 	recordOutstandingCascadeTouch,
 } from "../lsp/cascade-tier.js";
-import { classifyCascadeWaitTier } from "../lsp/wait-policy/index.js";
 import {
 	type BoundToCurrentDisk,
 	type TouchFileResult,
@@ -1584,10 +1584,10 @@ export async function computeCascadeForFile(
 				// A6: async read to avoid blocking event loop on network-mounted drives
 				const content = await nodeFs.promises.readFile(neighborPath, "utf8");
 
-				// #458: tier-aware cascade-lane wait. A Tier-3 (push-only,
-				// silent-on-clean — typescript is the lone core-set instance today)
-				// primary can never give this in-lane wait an affirmative clean
-				// signal, so the budget is pure cost. Fire the touch (didOpen/
+				// #458/#1444: tier-aware cascade-lane wait. A Tier-3 silent server
+				// cannot give this wait an affirmative clean signal. Native TS7 does
+				// publish, but not inside the cold-snapshot budget. In both cases the
+				// in-lane budget is pure cost. Fire the touch (didOpen/
 				// didChange still happens — the server starts real work) and record
 				// it as outstanding for the agent_settled quiet window to reconcile
 				// instead of waiting here. Ambiguous/missing capability data always
@@ -1605,7 +1605,7 @@ export async function computeCascadeForFile(
 							neighborPath,
 							snapshots,
 						);
-						if (tier === "tier3-silent") {
+						if (tier === "tier3-silent" || tier === "collect-later") {
 							const spawnedForTouch =
 								await lspService.getClientForFile(neighborPath);
 							if (spawnedForTouch) {
@@ -1635,7 +1635,10 @@ export async function computeCascadeForFile(
 									durationMs,
 									lspServerCount: configuredServerCount,
 									coldSnapshot: isColdSnapshot,
-									metadata: { serverId: spawnedForTouch.client.serverId },
+									metadata: {
+										serverId: spawnedForTouch.client.serverId,
+										waitTier: tier,
+									},
 								});
 								// Deliberately NOT cached as clean/diagnosed — the wait was
 								// skipped, not resolved, so neither neighborTouchCache nor
@@ -1695,8 +1698,9 @@ export async function computeCascadeForFile(
 				);
 				const durationMs = Date.now() - neighborStart;
 
-				// Update cache for this neighbor at the current write sequence
-				if (writeSeq != null) {
+				// Cache only a confirmed answer. An inconclusive or binding-rejected
+				// result must not become a confirmed cache hit on the next cascade.
+				if (writeSeq != null && confirmed) {
 					neighborTouchCache.set(cacheKey, {
 						turnSeq,
 						writeSeq,
@@ -1767,6 +1771,7 @@ export async function computeCascadeForFile(
 					reason: neighborReason(importerSet, callerSet, neighborPath),
 					diagnostics: diags,
 					lspTouched: true as const,
+					...(inconclusive && { inconclusive: true as const }),
 					durationMs,
 				} satisfies CascadeResult["neighbors"][number];
 			}),

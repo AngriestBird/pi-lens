@@ -7,6 +7,7 @@ import type {
 	ReviewGraph,
 } from "../../clients/review-graph/types.js";
 import { setupTestEnvironment } from "./test-utils.js";
+import { normalizeMapKey } from "../../clients/path-utils.js";
 
 type ImpactHitMock = {
 	symbol: string;
@@ -666,6 +667,94 @@ describe("computeCascadeForFile", () => {
 				"../../clients/lsp/cascade-tier.js"
 			);
 			_resetTierAwareCascadeEnabledForTests();
+		}
+	});
+
+	it("#1444: native-ts7 skips the in-lane wait and records a collect-later touch", async () => {
+		const env = setupTestEnvironment("cascade-native-ts7-collect-later-");
+		try {
+			const primary = path.join(env.tmpDir, "src", "primary.ts");
+			const neighbor = path.join(env.tmpDir, "src", "neighbor.ts");
+			fs.mkdirSync(path.dirname(primary), { recursive: true });
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			fs.writeFileSync(neighbor, "import { x } from './primary';\n");
+			mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+			const touchFile = vi.fn();
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				getCapabilitySnapshots: vi.fn().mockResolvedValue([
+					{
+						serverId: "typescript",
+						root: env.tmpDir,
+						workspaceDiagnosticsSupport: { mode: "push-only" },
+						launchVariant: "native-ts7",
+					},
+				]),
+				getClientForFile: vi.fn().mockResolvedValue({
+					client: { serverId: "typescript" },
+				}),
+				touchFile,
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			const {
+				_getOutstandingCascadeTouchesForTests,
+				reconcileOutstandingCascadeTouches,
+			} = await import(
+				"../../clients/lsp/cascade-tier.js"
+			);
+			await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			expect(touchFile).toHaveBeenCalledWith(
+				neighbor,
+				expect.any(String),
+				expect.objectContaining({
+					diagnostics: "none",
+					collectDiagnostics: false,
+					clientScope: "primary",
+				}),
+			);
+			expect(_getOutstandingCascadeTouchesForTests()).toEqual([
+				expect.objectContaining({ filePath: neighbor, serverId: "typescript" }),
+			]);
+			expect(mocks.logCascade).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "cascade_tier3_skip",
+					metadata: expect.objectContaining({ waitTier: "collect-later" }),
+				}),
+			);
+			const settled = await reconcileOutstandingCascadeTouches({
+				getWarmClientForFile: vi.fn().mockResolvedValue({
+					client: {
+						serverId: "typescript",
+						getAllDiagnostics: vi.fn().mockReturnValue(
+							new Map([
+								[
+									normalizeMapKey(neighbor),
+									{ diags: [lspError("late native TS7 error")], ts: Date.now() + 1 },
+								],
+							]),
+						),
+					},
+				}),
+			} as any);
+			expect(settled).toEqual([
+				expect.objectContaining({
+					outcome: "resolved-found",
+					diagnosticCount: 1,
+					diagnostics: [
+						expect.objectContaining({ message: "late native TS7 error" }),
+					],
+				}),
+			]);
+		} finally {
+			env.cleanup();
 		}
 	});
 
@@ -1535,7 +1624,7 @@ describe("computeCascadeForFile", () => {
 					getDiagnostics: vi.fn(),
 				});
 
-				const { computeCascadeForFile } = await import(
+				const { computeCascadeForFile, getDispatchCascadeCacheStats } = await import(
 					"../../clients/dispatch/integration.js"
 				);
 				const { recordDiagnostics, getFileDiagnostics } = await import(
@@ -1556,7 +1645,7 @@ describe("computeCascadeForFile", () => {
 					1,
 				);
 
-				await computeCascadeForFile(primary, env.tmpDir, {
+				const run = await computeCascadeForFile(primary, env.tmpDir, {
 					turnSeq: 1,
 					writeSeq: 5,
 				});
@@ -1576,6 +1665,11 @@ describe("computeCascadeForFile", () => {
 				expect(neighborTouchEntry?.metadata).toMatchObject({
 					inconclusive: true,
 				});
+				expect(getDispatchCascadeCacheStats().neighborTouchCacheSize).toBe(0);
+				expect(run.result?.neighbors[0]).toMatchObject({
+					inconclusive: true,
+				});
+				expect(run.result?.formatted).toContain("inconclusive");
 			} finally {
 				env.cleanup();
 			}
