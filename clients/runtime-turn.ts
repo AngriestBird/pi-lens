@@ -523,8 +523,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			return `${frame.lead(fileCount, reasons)}\n${lines.join("\n")}`;
 		};
 
+		// #1445: `excluded_by_role` (test files excluded from the graph BY DESIGN,
+		// #260) is never agent-facing — it is not a graph failure, and #1080
+		// already excludes test-role files from every neighbor surface, so "a
+		// clean result does not cover them" would itself be a false claim. It
+		// stays visible in the `cascade_indeterminate` log below (metadata-only,
+		// info-level) so the log can tell an intentional exclusion from a real
+		// graph gap, but it never reaches `buildAdvisory`/the agent.
 		const graphRuns = indeterminateRuns.filter(
-			(r) => r.indeterminate?.reason !== "lsp_binding_rejected",
+			(r) =>
+				r.indeterminate?.reason !== "lsp_binding_rejected" &&
+				r.indeterminate?.reason !== "excluded_by_role",
 		);
 		const bindingRuns = indeterminateRuns.filter(
 			(r) => r.indeterminate?.reason === "lsp_binding_rejected",

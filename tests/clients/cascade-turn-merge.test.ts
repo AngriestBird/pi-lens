@@ -743,6 +743,83 @@ describe("cascade turn-end merge", () => {
 		}
 	});
 
+	// #1445: a `missing_node` compute has two causes that read identically to
+	// the advisory text but mean opposite things — "the graph genuinely
+	// doesn't know this file" versus "this file's role (test, #260) is
+	// excluded from the graph BY DESIGN". The latter is expected behavior, not
+	// a graph failure, and must not produce the "review graph was unavailable"
+	// advisory that mis-attributes the cause to agents (19% of dogfooded
+	// cascades in the reporting window were exactly this false alarm on
+	// test-file edits against a healthy graph). RED on pre-fix code: before
+	// #1445 every `missing_node` — role-excluded or not — fed the same
+	// graph-unavailability frame.
+	it("does NOT surface a graph-unavailability advisory for a test-file edit excluded by role", async () => {
+		const env = setupTestEnvironment("cascade-excluded-by-role-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const primary = path.join(env.tmpDir, "widget.test.ts");
+			fs.writeFileSync(primary, "import './widget';\n");
+			cacheManager.addModifiedRange(
+				primary,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+
+			runtime.appendCascadeRun({
+				filePath: primary,
+				result: undefined,
+				neighborCount: 0,
+				diagnosticCount: 0,
+				skipReason: "indeterminate",
+				indeterminate: {
+					reason: "excluded_by_role",
+					detail:
+						"test-role file — excluded from the review graph by design (#260)",
+				},
+			});
+
+			logCascadeMock.mockClear();
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			const findings = consumeTurnEndFindings(cacheManager, env.tmpDir);
+			const content = findings?.messages[0]?.content ?? "";
+			// No wrong-cause advisory reaches the agent at all for this run.
+			expect(content).not.toContain(
+				"Cascade could not compute downstream impact",
+			);
+			expect(content).not.toContain("the review graph was unavailable");
+			expect(content).not.toContain("widget.test.ts");
+
+			// The distinction is STILL visible in telemetry (info-level, not
+			// agent-facing) — cascade_indeterminate logs the real reason so the log
+			// can tell an intentional exclusion from a genuine graph gap.
+			const indeterminateLog = logCascadeMock.mock.calls
+				.map((args) => args[0])
+				.find((entry) => entry?.phase === "cascade_indeterminate");
+			expect(indeterminateLog?.metadata?.reasons).toContain(
+				"excluded_by_role",
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	// #1023 over-correction guard: a HEALTHY run that genuinely found no
 	// dependents (skipReason "no_neighbors", no indeterminate marker) must NOT
 	// emit the advisory — a real clean leaf edit stays silent (no crying wolf).
