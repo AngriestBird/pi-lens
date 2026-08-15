@@ -26,7 +26,8 @@ export interface CascadeLogEntry {
 		| "cascade_turn_end" // merged result emitted at turn_end
 		| "cascade_indeterminate" // #1023: impact could not be computed — honest advisory surfaced
 		| "cascade_tier3_skip" // #458: in-lane wait skipped for a tier-3 neighbor touch
-		| "cascade_tier3_reconcile"; // #458: quiet-window reconcile of outstanding tier-3 touches
+		| "cascade_tier3_reconcile" // #458: quiet-window reconcile of outstanding tier-3 touches
+		| "cascade_carry_over_drop"; // #1443: late/carried run dropped — superseded by a later write, or the one-turn carry bound lapsed
 	filePath: string;
 	neighborFile?: string;
 	reason?: string;
