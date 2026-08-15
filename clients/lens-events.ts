@@ -139,6 +139,7 @@ function emitLensEvent(eventName: LensEventName, payload: unknown): void {
 				outcome: "emit_failed",
 				cwd,
 				error: String(err),
+				ctxSource: resolution.ctxSource,
 			});
 			if (!hasLoggedFailure) {
 				hasLoggedFailure = true;
