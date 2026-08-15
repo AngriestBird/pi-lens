@@ -23,6 +23,7 @@ import * as path from "node:path";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { assertInstallAllowed } from "./project-trust.js";
 import { SecurityScanClient } from "./security-scan-client.js";
+import { classifyProbeFailure } from "./dispatch/runners/utils/availability-policy.js";
 
 // --- Types ---
 
@@ -121,6 +122,15 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 			this.available = true;
 			return true;
 		}
+		if (this.probeWasTransient()) {
+			// #1467: a timed-out/killed probe says nothing about whether
+			// govulncheck is on PATH. Latching `false` here disabled it for the
+			// life of the process; a `go install` here would be a heavyweight
+			// reaction to a host hiccup. Record an expiring verdict, retry later.
+			this.log("govulncheck probe timed out; retrying later (not installing)");
+			this.markTransientlyUnavailable(this.lastProbeCause ?? "probe-timeout");
+			return false;
+		}
 		if (!assertInstallAllowed("govulncheck go install")) {
 			// Deliberately NOT latching `available = false` (#1350 delta review):
 			// trust denial is policy, not tool absence -- a later trust grant
@@ -139,6 +149,12 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 			timeout: 5000,
 		});
 		if (goOnPath.error || goOnPath.status !== 0) {
+			const { outcome, cause } = classifyProbeFailure(goOnPath);
+			if (outcome === "transient") {
+				this.log("`go version` probe timed out; retrying govulncheck later");
+				this.markTransientlyUnavailable(cause);
+				return false;
+			}
 			this.log("go binary not on PATH — cannot auto-install govulncheck");
 			this.available = false;
 			return false;

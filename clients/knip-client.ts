@@ -12,7 +12,7 @@
 import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getProjectDataDir } from "./file-utils.js";
+import { getGlobalPiLensDir, getProjectDataDir } from "./file-utils.js";
 import { findNearestMarkerRoot } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import {
@@ -20,6 +20,10 @@ import {
 	getManagedToolEnvironment,
 	resolveAvailableOrInstall,
 } from "./dispatch/runners/utils/runner-helpers.js";
+import {
+	createAvailabilityLatch,
+	describeUnavailability,
+} from "./dispatch/runners/utils/availability-policy.js";
 
 // --- Types ---
 
@@ -46,6 +50,13 @@ export interface KnipResult {
 	unusedDeps: KnipIssue[];
 	unlistedDeps: KnipIssue[];
 	summary: string;
+	/**
+	 * Why an unsuccessful run failed, in a form readers can branch on without
+	 * pattern-matching prose (#1467). `unavailable-transient` marks a result the
+	 * cache must NOT keep over a good one and the turn loop must not treat as a
+	 * hard knip failure — the tool is installed, the probe just timed out.
+	 */
+	failureKind?: "unavailable-transient" | "unavailable-missing";
 }
 
 const EMPTY_RESULT: Omit<KnipResult, "summary"> = {
@@ -97,6 +108,31 @@ export function readOverridePinnedPackageNames(targetDir: string): Set<string> {
 
 // --- Client ---
 
+/**
+ * Managed knip shim on disk, or null. Mirrors jscpd's fast path: when
+ * `~/.pi-lens/tools/node_modules/.bin/knip*` exists the tool IS installed, so
+ * resolving availability needs no spawn at all — and a spawn that cannot happen
+ * cannot time out (#1467).
+ */
+function findManagedKnipBinary(): string | null {
+	const base = path.join(
+		getGlobalPiLensDir(),
+		"tools",
+		"node_modules",
+		".bin",
+		"knip",
+	);
+	const candidates =
+		process.platform === "win32"
+			? [`${base}.cmd`, `${base}.exe`, base]
+			: [base];
+	try {
+		return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+	} catch {
+		return null;
+	}
+}
+
 export class KnipClient {
 	private readonly knipAvailability = createAvailabilityChecker(
 		"knip",
@@ -105,9 +141,15 @@ export class KnipClient {
 		{
 			environment: (cwd) => getManagedToolEnvironment("knip", cwd),
 			unclassifiedFailureOutcome: "missing",
+			fastPath: findManagedKnipBinary,
 		},
 	);
-	private knipAvailable: boolean | null = null;
+	/**
+	 * Client-side memo. Only a DURABLE verdict is latched — a transient probe
+	 * failure expires, so an installed knip becomes available again without a
+	 * host restart (#1467).
+	 */
+	private readonly availabilityLatch = createAvailabilityLatch();
 	private knipCommand = "knip";
 	private ensureInFlight: Promise<boolean> | null = null;
 	private log: (msg: string) => void;
@@ -160,11 +202,16 @@ export class KnipClient {
 	}
 
 	/**
-	 * Check if knip CLI is available, auto-install if not
+	 * Check if knip CLI is available, auto-install if not.
+	 *
+	 * The memo returns `null` when the last verdict was transient and its
+	 * cooldown has expired, which re-enters the probe. That is the difference
+	 * between "knip is missing" (a fact worth caching) and "the probe timed out"
+	 * (a moment worth retrying).
 	 */
 	async ensureAvailable(): Promise<boolean> {
-		// Fast path: already checked
-		if (this.knipAvailable !== null) return this.knipAvailable;
+		const memo = this.availabilityLatch.read();
+		if (memo !== null) return memo;
 		if (this.ensureInFlight) return this.ensureInFlight;
 
 		this.ensureInFlight = this.doEnsureAvailable();
@@ -176,14 +223,47 @@ export class KnipClient {
 	}
 
 	private async doEnsureAvailable(): Promise<boolean> {
+		const cwd = process.cwd();
 		const resolved = await resolveAvailableOrInstall(
 			this.knipAvailability,
 			"knip",
-			process.cwd(),
+			cwd,
 		);
-		this.knipAvailable = resolved !== null;
-		if (resolved) this.knipCommand = resolved;
-		return this.knipAvailable;
+		if (resolved !== null) {
+			this.knipCommand = resolved;
+			this.availabilityLatch.noteAvailable();
+			return true;
+		}
+		const verdict = this.knipAvailability.getVerdict(cwd);
+		this.availabilityLatch.noteUnavailable(
+			verdict.outcome ?? "missing",
+			verdict.cause ?? "not-found",
+		);
+		return false;
+	}
+
+	/**
+	 * The single place a knip-unavailable result is worded. A transient probe
+	 * failure must never be reported as "install knip" — knip is on disk.
+	 */
+	private unavailableResult(): KnipResult {
+		const verdict = this.knipAvailability.getVerdict(process.cwd());
+		const transient = verdict.outcome === "transient";
+		const retryAfterMs = verdict.retryAtMs
+			? Math.max(0, verdict.retryAtMs - Date.now())
+			: undefined;
+		return {
+			...EMPTY_RESULT,
+			failureKind: transient ? "unavailable-transient" : "unavailable-missing",
+			summary: describeUnavailability({
+				tool: "Knip",
+				installHint: "npm install -D knip",
+				outcome: verdict.outcome,
+				cause: verdict.cause,
+				elapsedMs: verdict.elapsedMs,
+				retryAfterMs,
+			}),
+		};
 	}
 
 	/**
@@ -214,10 +294,7 @@ export class KnipClient {
 		}
 
 		if (!(await this.ensureAvailable())) {
-			return {
-				...EMPTY_RESULT,
-				summary: "Knip not available. Install with: npm install -D knip",
-			};
+			return this.unavailableResult();
 		}
 
 		const key = path.resolve(targetDir);
