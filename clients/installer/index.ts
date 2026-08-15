@@ -398,6 +398,7 @@ export const TOOLS: ToolDefinition[] = [
 		// The managed compiler serves the classic typescript-language-server
 		// fallback. TypeScript 7 removed lib/tsserver.js and is selected only from
 		// project-local installs through the native `tsc --lsp --stdio` path.
+		// Revisit when typescript-language-server supports TS 7 — refs #1436.
 		packageName: "typescript@5.9.3",
 		binaryName: "tsc",
 	},
