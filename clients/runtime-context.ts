@@ -15,6 +15,21 @@ export const AUTOMATION_FRAMING =
 
 type ContextResult = { messages: Array<{ role: "user"; content: string }> };
 
+// #1432 review (S3b): a multi-file bash write can carry hundreds of changed
+// paths, one `reasons` entry apiece — logging all of them shrinks the
+// smells-rollup tail window (a fixed-size ring) to a handful of these
+// records. Cap what this decision row carries; the full list is never
+// needed for triage, only "how many and roughly what kind".
+const MAX_LOGGED_REASONS = 8;
+
+function boundedReasons(reasons: string[]): string[] {
+	if (reasons.length <= MAX_LOGGED_REASONS) return reasons;
+	return [
+		...reasons.slice(0, MAX_LOGGED_REASONS),
+		`+${reasons.length - MAX_LOGGED_REASONS} more`,
+	];
+}
+
 function logProvenanceDecision(
 	validation: ReturnType<typeof validateAdvisoryProvenance>,
 	provenance: AdvisoryProvenance | undefined,
@@ -28,7 +43,7 @@ function logProvenanceDecision(
 		durationMs: 0,
 		metadata: {
 			decision: validation.status === "current" ? "current" : "historical",
-			reasons: validation.reasons,
+			reasons: boundedReasons(validation.reasons),
 			changedPathCount: validation.changedPathCount,
 			provenanceStamp: provenanceStamp(provenance),
 			advisoryKind,
@@ -156,13 +171,8 @@ export function consumeTestFindings(
 ): ContextResult | undefined {
 	const record = cacheManager.readCache<TestRunnerFindingsCache>("test-runner-findings", cwd);
 	if (!record?.data?.content) return;
-	const validation = validateAdvisoryProvenance(record.data, cwd, runtime);
-	logProvenanceDecision(validation, record.data.provenance, "test-findings", cwd);
-	if (validation.allFilesDeleted) return;
-	const current = validation.status === "current";
-	const findings: ContextResult = { messages: [{ role: "user", content: current
-		? `${AUTOMATION_FRAMING}Test failures detected last turn â€” fix before continuing:\n\n${record.data.content}`
-		: `${AUTOMATION_FRAMING}${historicalTestContent(record.data.content, record.data.provenance)}` }] };
+	const findings = peekTestFindings(cacheManager, cwd, runtime, true);
+	if (!findings) return;
 	// Retire the content but PRESERVE the generation high-water mark: nulling
 	// the whole slot would let a still-in-flight OLDER batch see `undefined`,
 	// pass the strictly-greater suppression check, and resurrect a consumed

@@ -59,7 +59,15 @@
  * New optional fields may be added under the same `v: 1` for any of the three
  * events; a breaking change to an existing field's meaning must bump that
  * event's `v` independently (each event versions separately since they're
- * unrelated payloads).
+ * unrelated payloads). `FormatQueuedPayload.kinds` (S3d, #1432 review) is now
+ * an always-present required field at `publishFormatQueued`'s call boundary —
+ * both in-repo callers already passed it, so the `?? ["format"]` fallback
+ * was fabricating data no caller asked for. This is NOT a `v` bump: `kinds`
+ * was already part of the v1 payload shape and every wire-format consumer
+ * still reads the same field; a v1 emitter built against an older copy of
+ * this module that omits `kinds` at the call site now fails to compile
+ * rather than silently emitting a guessed value, and any reader written
+ * against v1 that still treats `kinds` as possibly-absent remains correct.
  *
  * Fire-and-forget: publishing must never affect the write path's or
  * `agent_end`'s success or latency. Any failure (bus unavailable, emit
@@ -157,7 +165,11 @@ export interface PublishFormatQueuedArgs {
 	filePath: string;
 	cwd: string;
 	tool: "write" | "edit";
-	kinds?: Array<"autofix" | "format">;
+	// S3d (#1432 review): required, not `?? ["format"]` fabrication — both
+	// in-repo call sites (clients/runtime-tool-result.ts) already know and
+	// pass the real kind(s) being queued, so a silent "format" default would
+	// only ever mask a caller that forgot to pass it.
+	kinds: Array<"autofix" | "format">;
 	dbg?: (msg: string) => void;
 }
 
@@ -205,7 +217,7 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 			filePath: normalizeFilePath(args.filePath),
 			cwd: normalizeFilePath(args.cwd),
 			tool: args.tool,
-			kinds: args.kinds ?? ["format"],
+			kinds: args.kinds,
 		};
 		busEmit(BUS_FORMAT_QUEUED_EVENT, payload);
 		hasLoggedQueuedFailure = false;

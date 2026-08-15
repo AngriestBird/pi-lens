@@ -24,14 +24,19 @@
  * alongside.
  *
  * The tail scan is bounded, but the tail can contain prior-session rows. The
- * session-start caller supplies the session boundary, and rows are admitted
- * only when their own UTC timestamp is at or after that boundary. This keeps
- * the same bounded read without reporting historical failures as current, so
- * this module does not additionally instrument the write call sites
- * (`bus-publish.ts`, `clients/lsp/index.ts`'s respawn path) with parallel
- * live counters. That keeps the change contained to one new module + three
- * small call sites (session_start, `/lens-health`, `turn_end`) instead of
- * touching every producer of the two source logs.
+ * `session_start` and `turn_end` callers supply the in-process session
+ * boundary (`runtime.sessionStartedAt`), and rows are admitted only when
+ * their own UTC timestamp is at or after that boundary. `/lens-health` has
+ * no per-session caller to anchor to (it can run at any point, including
+ * outside a turn) so it omits `sessionStartMs` and falls back to
+ * `SMELLS_ROLLING_WINDOW_MS` (24h) — its rendered line is labeled "last 24h
+ * tail-scan" to say so explicitly rather than implying a session-scoped
+ * count it isn't. This keeps the same bounded read without reporting
+ * historical failures as current, so this module does not additionally
+ * instrument the write call sites (`bus-publish.ts`, `clients/lsp/index.ts`'s
+ * respawn path) with parallel live counters. That keeps the change contained
+ * to one new module + three small call sites (session_start, `/lens-health`,
+ * `turn_end`) instead of touching every producer of the two source logs.
  *
  * Smells covered (deliberately a SUBSET — the two the issue named as having
  * gone unnoticed; the full catalogue stays in the manual analyzer):
@@ -230,7 +235,7 @@ export function formatSmellsSessionStartLine(
  */
 export function formatSmellsHealthLine(counts: SmellsRollupCounts): string {
 	return (
-		`Smells (recent tail-scan): stale-ctx emit_failed=${counts.staleCtxEmitFailed}` +
+		`Smells (last 24h tail-scan): stale-ctx emit_failed=${counts.staleCtxEmitFailed}` +
 		` · opengrep respawn=${counts.opengrepRespawn}`
 	);
 }

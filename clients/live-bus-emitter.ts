@@ -64,10 +64,16 @@ export function createLiveBusEmitter(): LiveBusEmitter {
 			if (typeof target === "function") {
 				return { outcome: "ready", emit: target, ctxSource: "global-fallback" };
 			}
+			// Object targets are always "own"-sourced (only `wire(fn)`'s bare
+			// function arm is "global-fallback", and it never reaches this
+			// branch) — compute it once so the ready/stale-session outcomes
+			// below both carry the same value instead of restating the
+			// literal independently.
+			const ctxSource = "own" as const;
 			if (probeCtxActive(target.ctx) === false) {
-				return { outcome: "stale-session", ctxSource: "own" };
+				return { outcome: "stale-session", ctxSource };
 			}
-			return { outcome: "ready", emit: target.emit, ctxSource: "own" };
+			return { outcome: "ready", emit: target.emit, ctxSource };
 		},
 		reset() {
 			emit = undefined;

@@ -96,7 +96,7 @@ describe("classic TypeScript project-identity telemetry (#1412)", () => {
 		}));
 	});
 
-	it("deduplicates normalized aliases once per client and file", async () => {
+	it("deduplicates normalized aliases once per client and file, without logging the dedupe", async () => {
 		const executeCommand = vi.fn().mockResolvedValue({
 			executed: true,
 			result: { success: true, body: {} },
@@ -106,7 +106,9 @@ describe("classic TypeScript project-identity telemetry (#1412)", () => {
 		await probeTsserverProjectIdentity({ ...first, file: "c:\\repo\\src\\APP.ts" });
 
 		expect(executeCommand).toHaveBeenCalledTimes(1);
-		expect(logLatency).toHaveBeenCalledTimes(2);
+		// Dedupe is a routine, high-volume no-op — it must NOT write a second
+		// telemetry row (that was the #1432-review log-flood finding).
+		expect(logLatency).toHaveBeenCalledTimes(1);
 		expect(logLatency).toHaveBeenCalledWith(
 			expect.objectContaining({
 				metadata: expect.objectContaining({
@@ -115,9 +117,6 @@ describe("classic TypeScript project-identity telemetry (#1412)", () => {
 				}),
 			}),
 		);
-		expect(logLatency).toHaveBeenCalledWith(expect.objectContaining({
-			metadata: expect.objectContaining({ outcome: "not-executed" }),
-		}));
 	});
 
 	// #1412 L2: handleNotifyOpen already computes normalizeMapKey(filePath)
@@ -148,15 +147,16 @@ describe("classic TypeScript project-identity telemetry (#1412)", () => {
 		);
 	});
 
-	it("is a no-op for native TS7", async () => {
+	it("is a silent no-op for native TS7 (ineligible servers must not log)", async () => {
 		const executeCommand = vi.fn();
 		await probeTsserverProjectIdentity({
 			...options(executeCommand),
 			launchVariant: "native-ts7",
 		});
 		expect(executeCommand).not.toHaveBeenCalled();
-		expect(logLatency).toHaveBeenCalledWith(expect.objectContaining({
-			metadata: expect.objectContaining({ outcome: "not-executed" }),
-		}));
+		// Ineligible servers (wrong launchVariant/serverId) are the common case
+		// on every non-TS didOpen (python, go, opengrep, ...) — logging here was
+		// the #1432-review log-flood finding.
+		expect(logLatency).not.toHaveBeenCalled();
 	});
 });

@@ -258,6 +258,10 @@ describe("formatSmellsHealthLine (always-on)", () => {
 		});
 		expect(line).toContain("stale-ctx emit_failed=0");
 		expect(line).toContain("opengrep respawn=0");
+		// S3c (#1432 review): /lens-health has no session boundary to anchor to
+		// and falls back to the 24h rolling window — label it explicitly rather
+		// than the ambiguous "recent tail-scan".
+		expect(line).toContain("last 24h tail-scan");
 	});
 });
 

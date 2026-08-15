@@ -62,6 +62,7 @@ describe("runtime-agent-end deferred formatting", () => {
 		controller.abort();
 		setAmbientAbortSignal(controller.signal);
 		try {
+			const logSpy = vi.spyOn(latencyLogger, "logLatency");
 			const filePath = createTempFile(env.tmpDir, "both.ts", "const x=1\n");
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
@@ -76,6 +77,17 @@ describe("runtime-agent-end deferred formatting", () => {
 			});
 
 			expect(runtime.consumeDeferredFormatFiles()[0].kinds).toEqual(new Set(["autofix", "format"]));
+			// S2d (gap 4, #1432 review): one per-requeue record per abort branch,
+			// distinguishable by reason/kinds instead of collapsing into the
+			// aggregate drain row's coalesced requeuedKinds set.
+			expect(logSpy).toHaveBeenCalledWith(expect.objectContaining({
+				phase: "agent_end_deferred_mutation_requeue",
+				metadata: expect.objectContaining({ reason: "abort", kinds: ["autofix"], fileCount: 1 }),
+			}));
+			expect(logSpy).toHaveBeenCalledWith(expect.objectContaining({
+				phase: "agent_end_deferred_mutation_requeue",
+				metadata: expect.objectContaining({ reason: "abort", kinds: ["format"], fileCount: 1 }),
+			}));
 		} finally {
 			setAmbientAbortSignal(undefined);
 			env.cleanup();
@@ -85,6 +97,7 @@ describe("runtime-agent-end deferred formatting", () => {
 	it("preserves both kinds when autofix clients and formatting fail", async () => {
 		const env = setupTestEnvironment("pi-lens-agent-end-both-fail-");
 		try {
+			const logSpy = vi.spyOn(latencyLogger, "logLatency");
 			const filePath = createTempFile(env.tmpDir, "both.ts", "const x=1\n");
 			const runtime = new RuntimeCoordinator();
 			runtime.projectRoot = env.tmpDir;
@@ -102,6 +115,18 @@ describe("runtime-agent-end deferred formatting", () => {
 			});
 
 			expect(runtime.consumeDeferredFormatFiles()[0].kinds).toEqual(new Set(["autofix", "format"]));
+			// S2d (gap 4, #1432 review): no biomeClient/ruffClient were passed, so
+			// the autofix branch requeues for "clients-unavailable"; the format
+			// branch requeues separately for "format-failed" — two distinct
+			// per-requeue records, not one indistinguishable aggregate.
+			expect(logSpy).toHaveBeenCalledWith(expect.objectContaining({
+				phase: "agent_end_deferred_mutation_requeue",
+				metadata: expect.objectContaining({ reason: "clients-unavailable", kinds: ["autofix"], fileCount: 1 }),
+			}));
+			expect(logSpy).toHaveBeenCalledWith(expect.objectContaining({
+				phase: "agent_end_deferred_mutation_requeue",
+				metadata: expect.objectContaining({ reason: "format-failed", kinds: ["format"], fileCount: 1 }),
+			}));
 		} finally { env.cleanup(); }
 	});
 

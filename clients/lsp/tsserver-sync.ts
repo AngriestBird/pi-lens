@@ -135,6 +135,12 @@ export async function probeTsserverProjectIdentity(
 ): Promise<void> {
 	const normalizedFile = options.normalizedFile ?? normalizeMapKey(options.file);
 	const startedAt = Date.now();
+	// Logging starts only once a probe is actually eligible and attempted:
+	// ineligible servers (wrong serverId/launchVariant, no command channel) and
+	// already-probed dedupe are both routine, high-volume, and per-server — a
+	// bare return keeps them out of the telemetry stream entirely instead of
+	// writing an `lsp_typescript_project_identity` row per didOpen on every
+	// server (python, go, opengrep, ...).
 	const logOutcome = (outcome: "ok" | "not-executed" | "no-response" | "unsuccessful" | "threw", metadata: Record<string, unknown> = {}) => logLatency({
 		type: "phase", phase: "lsp_typescript_project_identity", filePath: normalizedFile,
 		durationMs: Date.now() - startedAt,
@@ -145,10 +151,9 @@ export async function probeTsserverProjectIdentity(
 		options.launchVariant !== "classic" ||
 		typeof options.commandChannel.executeCommand !== "function"
 	) {
-		logOutcome("not-executed");
 		return;
 	}
-	if (options.probedFiles.has(normalizedFile)) { logOutcome("not-executed"); return; }
+	if (options.probedFiles.has(normalizedFile)) return;
 	// Claim before yielding so concurrent opens cannot issue duplicate probes.
 	options.probedFiles.add(normalizedFile);
 	try {

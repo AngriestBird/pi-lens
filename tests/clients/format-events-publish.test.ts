@@ -47,6 +47,7 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 					filePath: "/repo/src/a.ts",
 					cwd: "/repo",
 					tool: "write",
+					kinds: ["format"],
 				}),
 			).not.toThrow();
 		});
@@ -62,7 +63,7 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 				},
 			}));
 
-			publishFormatQueued({ filePath: "/repo/a.ts", cwd: "/repo", tool: "write" });
+			publishFormatQueued({ filePath: "/repo/a.ts", cwd: "/repo", tool: "write", kinds: ["format"] });
 
 			expect(emit).not.toHaveBeenCalled();
 			expect(logBusEvent).toHaveBeenCalledWith(expect.objectContaining({
@@ -80,6 +81,7 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 				filePath: "/repo/src/a.ts",
 				cwd: "/repo",
 				tool: "edit",
+				kinds: ["format"],
 			});
 
 			expect(emit).toHaveBeenCalledTimes(1);
@@ -106,6 +108,7 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 				filePath: "C:\\repo\\src\\a.ts",
 				cwd: "C:\\repo",
 				tool: "write",
+				kinds: ["format"],
 			});
 
 			const payload = emit.mock.calls[0][1] as {
@@ -126,6 +129,7 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 				filePath: "/repo/a.ts",
 				cwd: "/repo",
 				tool: "write",
+				kinds: ["format"],
 			});
 
 			expect(emit).not.toHaveBeenCalled();
@@ -143,6 +147,7 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 					filePath: "/repo/a.ts",
 					cwd: "/repo",
 					tool: "write",
+					kinds: ["format"],
 					dbg,
 				}),
 			).not.toThrow();
@@ -153,6 +158,7 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 					filePath: "/repo/b.ts",
 					cwd: "/repo",
 					tool: "write",
+					kinds: ["format"],
 					dbg,
 				}),
 			).not.toThrow();
@@ -168,6 +174,7 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 				filePath: "/repo/a.ts",
 				cwd: "/repo",
 				tool: "write",
+				kinds: ["format"],
 			});
 
 			expect(logBusEvent).toHaveBeenCalledWith(
@@ -180,8 +187,8 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 		});
 
 		it("logs 'skipped_unwired' once when busEmit was never wired", () => {
-			publishFormatQueued({ filePath: "/repo/a.ts", cwd: "/repo", tool: "write" });
-			publishFormatQueued({ filePath: "/repo/b.ts", cwd: "/repo", tool: "write" });
+			publishFormatQueued({ filePath: "/repo/a.ts", cwd: "/repo", tool: "write", kinds: ["format"] });
+			publishFormatQueued({ filePath: "/repo/b.ts", cwd: "/repo", tool: "write", kinds: ["format"] });
 
 			const unwiredCalls = logBusEvent.mock.calls.filter(
 				(c) => (c[0] as { outcome: string }).outcome === "skipped_unwired",

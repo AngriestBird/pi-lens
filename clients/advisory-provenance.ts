@@ -176,6 +176,7 @@ export function validateAdvisoryProvenance(
 		}
 		if (captured.sha256 === "missing") {
 			reasons.push(`created:${advisoryPathKey(resolved, cwd)}`);
+			changedPaths.add(advisoryPathKey(resolved, cwd));
 			continue;
 		}
 		if (stat.mtimeMs !== captured.mtimeMs || stat.size !== captured.size) {
