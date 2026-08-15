@@ -714,6 +714,78 @@ describe("lsp server policy", () => {
 		);
 	});
 
+	it("repairs an incompatible managed TypeScript compiler for the classic fallback", async () => {
+		const { TypeScriptServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ts-managed-repair-"),
+		);
+		dirs.push(tmp);
+		fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
+
+		const managedRoot = path.join(tmp, "managed");
+		const binDir = path.join(managedRoot, "node_modules", ".bin");
+		fs.mkdirSync(binDir, { recursive: true });
+		const isWin = process.platform === "win32";
+		const lspPath = path.join(
+			binDir,
+			isWin ? "typescript-language-server.cmd" : "typescript-language-server",
+		);
+		const tscPath = path.join(binDir, isWin ? "tsc.cmd" : "tsc");
+		fs.writeFileSync(lspPath, "#!/usr/bin/env node\n");
+		fs.writeFileSync(tscPath, "#!/usr/bin/env node\n");
+
+		const repairedTsserver = path.join(
+			managedRoot,
+			"node_modules",
+			"typescript",
+			"lib",
+			"tsserver.js",
+		);
+		ensureTool.mockImplementation(
+			async (
+				toolId: string,
+				options?: { forceReinstall?: boolean },
+			) => {
+				if (toolId === "typescript-language-server") return lspPath;
+				if (toolId !== "typescript") return undefined;
+				if (options?.forceReinstall) {
+					fs.mkdirSync(path.dirname(repairedTsserver), { recursive: true });
+					fs.writeFileSync(repairedTsserver, "// repaired classic compiler\n");
+				}
+				return tscPath;
+			},
+		);
+		launchLSP.mockResolvedValue({
+			process: { killed: false } as never,
+			stdin: {} as never,
+			stdout: {} as never,
+			stderr: {} as never,
+			pid: 3333,
+		});
+
+		const spawned = await TypeScriptServer.spawn(tmp);
+
+		expect(spawned).toBeDefined();
+		expect(ensureTool).toHaveBeenCalledWith("typescript", {
+			allowInstall: true,
+		});
+		expect(ensureTool).toHaveBeenCalledWith("typescript", {
+			allowInstall: true,
+			forceReinstall: true,
+		});
+		expect(launchLSP).toHaveBeenCalledWith(
+			lspPath,
+			["--stdio"],
+			expect.objectContaining({
+				cwd: tmp,
+				env: expect.objectContaining({ TSSERVER_PATH: repairedTsserver }),
+			}),
+		);
+		expect(logSessionStart).toHaveBeenCalledWith(
+			"lsp typescript: managed compiler lacks tsserver.js; reinstalling classic fallback",
+		);
+	});
+
 	it("skips PowerShell bash-language-server shim candidates on Windows", async () => {
 		const { BashServer } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(

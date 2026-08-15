@@ -1291,13 +1291,11 @@ async function findTsserverPath(
 	} catch {
 		/* not found */
 	}
-	// Discover the typescript install (PATH / npm-global) even when install is
-	// disabled; only the download is gated by allowInstall.
-	const tscPath = await ensureTool("typescript", {
-		allowInstall: canInstall(allowInstall),
-	});
-	if (tscPath) {
-		for (const p of [
+	const tsserverForTsc = async (
+		tscPath: string | undefined,
+	): Promise<string | undefined> => {
+		if (!tscPath) return undefined;
+		for (const candidate of [
 			path.join(
 				path.dirname(tscPath),
 				"..",
@@ -1315,14 +1313,39 @@ async function findTsserverPath(
 			),
 		]) {
 			try {
-				await fs.access(p);
-				return p;
+				await fs.access(candidate);
+				return candidate;
 			} catch {
 				/* not found */
 			}
 		}
+		return undefined;
+	};
+
+	// Discover the TypeScript install (PATH / npm-global) even when installation
+	// is disabled; only the download is gated by allowInstall.
+	const installAllowed = canInstall(allowInstall);
+	const discoveredTsc = await ensureTool("typescript", {
+		allowInstall: installAllowed,
+	});
+	const discoveredTsserver = await tsserverForTsc(discoveredTsc);
+	if (discoveredTsserver || !discoveredTsc || !installAllowed) {
+		return discoveredTsserver;
 	}
-	return undefined;
+
+	// npm may have satisfied typescript-language-server's unconstrained peer with
+	// managed TypeScript 7, whose native compiler intentionally has no
+	// lib/tsserver.js. Reinstall the registry-pinned classic compiler once so an
+	// existing incompatible managed tree self-heals without deleting user or
+	// project-local TypeScript installations.
+	logSessionStart(
+		"lsp typescript: managed compiler lacks tsserver.js; reinstalling classic fallback",
+	);
+	const repairedTsc = await ensureTool("typescript", {
+		allowInstall: true,
+		forceReinstall: true,
+	});
+	return tsserverForTsc(repairedTsc);
 }
 
 interface NativeTypeScriptLsp {
