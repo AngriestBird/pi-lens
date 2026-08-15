@@ -1624,6 +1624,8 @@ Short, obvious changes may use a subject only. Non-trivial changes get a body.
 - Avoid gerund or noun pile-ups and ambiguous constructions. Avoid `please`. Use the Oxford comma.
 - These rules are machine-checkable. Pi-lens ships a config-gated Vale runner (`clients/dispatch/runners/vale.js`). A `.vale.ini` with the Google style package would enforce this section automatically; track that separately.
 
+**The standard also governs how agents talk to the maintainer.** Chat replies, status updates, and reports follow the same Zinsser frame. Lead with the outcome. Strip words that do no work. Prefer short sentences over dense em-dash chains. Clarity beats brevity when they conflict. Write like a person, not a system emitting a report.
+
 ## Issue triage & labels
 
 Every issue should carry **one TYPE label + at least one `area:` label**.
