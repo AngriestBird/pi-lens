@@ -145,6 +145,36 @@ describe("partitionFindingsByCitedPath (#1461 slice 1)", () => {
 		expect(findingPathExistence(dead)).toBe("missing");
 	});
 
+	// #1461 HIGH-1: the drop decision must resolve a cited path the SAME way
+	// `toRunnerDisplayPath` resolves it for the message the agent actually
+	// sees (runtime-turn.ts). A bare `path.resolve(cwd, cited)` cannot find a
+	// file that only exists via the ancestor-walk-up `resolveRunnerPath`
+	// performs — so a scanner root one level above `cwd` would strictly
+	// "not exist" and get dropped, while the display path would have found
+	// and rendered it correctly.
+	it("delivers a finding whose cited path only resolves via an ancestor root", () => {
+		const env = setupTestEnvironment("pi-lens-finding-paths-ancestor-");
+		cleanups.push(env.cleanup);
+		const cwd = path.join(env.tmpDir, "packages", "sub");
+		fs.mkdirSync(cwd, { recursive: true });
+		// The scanner ran from `env.tmpDir` and cited a path relative to THAT
+		// root; the agent's cwd at delivery time is the nested `packages/sub`.
+		// `path.resolve(cwd, cited)` lands one level too deep and finds
+		// nothing; only walking up from `cwd` finds the real file.
+		const sharedDir = path.join(env.tmpDir, "shared");
+		fs.mkdirSync(sharedDir, { recursive: true });
+		const cited = path.join("shared", "secret.env");
+		fs.writeFileSync(path.join(sharedDir, "secret.env"), "KEY=AKIA...\n");
+
+		const result = partitionFindingsByCitedPath<Finding>({
+			findings: [{ file: cited, rule: "ancestor-root" }],
+			cwd,
+			citedPath,
+		});
+		expect(result.live.map((f) => f.rule)).toEqual(["ancestor-root"]);
+		expect(result.dropped).toEqual([]);
+	});
+
 	// Shape 7 / shape 1 probe: spellings that the FILESYSTEM confirms name one
 	// file must fold to one key, one stat, one verdict. Which extra spellings
 	// exist is decided by probing the FS, never by `process.platform` — on a

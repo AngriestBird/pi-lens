@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { logLatency } from "./latency-logger.js";
 import { normalizeMapKey, toProjectRelativePath } from "./path-utils.js";
+import { resolveRunnerPath } from "./dispatch/runner-context.js";
 
 export type AdvisoryFileRole = "source" | "test" | "affected";
 
@@ -220,14 +221,27 @@ export function validateAdvisoryProvenance(
 //     path (EACCES/EPERM/EBUSY), or a path past the stat budget is DELIVERED.
 //     Unreadable is not absent; a missed drop is noise, a wrong drop is a lost
 //     secret.
-//   - Bounded cost: paths are deduped by `advisoryPathKey` before probing, so
-//     it is one stat per UNIQUE path, capped at `MAX_FINDING_PATH_STATS`. A
-//     256-finding record over one deleted directory costs a single stat. This
-//     is what keeps `formatDeltaMode`'s "instant" contract reachable in slice 3.
-//   - Path identity uses the guard normalizer (`advisoryPathKey` →
-//     `normalizeMapKey`) for dedup and the shape-aware `toProjectRelativePath`
-//     for display, so Windows spellings of one path collapse to one stat and
-//     one log entry (defect shapes 1 and 2).
+//   - Bounded cost: findings are deduped by their RAW cited string first —
+//     zero filesystem work — before anything pays for `resolveRunnerPath`'s
+//     ancestor walk or `normalizeMapKey`'s realpath. A first cut that deduped
+//     by the resolved/canonical key instead still ran that expensive step
+//     once per FINDING, not once per unique path, because the dedup lookup
+//     came after the cost it was meant to avoid: #1461's live 126-finding
+//     record measured 72.7ms in that shape, all of it before the first
+//     `statSync`. Deduping the raw string first drops the same record to a
+//     ~1.6ms median (this repo, Windows, 10-sample bench) — the remaining
+//     cost is one canonicalization + one stat per distinct cited string,
+//     capped at `MAX_FINDING_PATH_STATS`.
+//   - Path identity uses the guard normalizer (`resolveRunnerPath` →
+//     `normalizeMapKey`) for the canonical-key dedup and the shape-aware
+//     `toProjectRelativePath` for display, so Windows spellings of one path
+//     collapse to one stat and one log entry (defect shapes 1 and 2). This
+//     helper has no zero-I/O contract of its own to protect — it stats.
+//     Slice 3 (delta mode) must find and name its OWN seam before reusing
+//     this shape; `formatDeltaMode` (tools/lens-diagnostics.ts) reads only
+//     actionable-warnings, code-quality-warnings, and the delta report, none
+//     of which any #1461 slice writes yet, so nothing here currently touches
+//     it.
 
 /** Stat budget: one per unique cited path, sharing the envelope's own cap. */
 export const MAX_FINDING_PATH_STATS = MAX_ADVISORY_AFFECTED_FILES;
@@ -280,6 +294,17 @@ export function partitionFindingsByCitedPath<T>(args: {
 }): FindingPathPartition<T> {
 	const limit = args.maxUniquePaths ?? MAX_FINDING_PATH_STATS;
 	const probe = args.existence ?? findingPathExistence;
+	// Two dedup layers, cheapest first. `rawVerdicts` collapses findings that
+	// cite the IDENTICAL string with zero filesystem work — the dominant case
+	// (#1460's live record: 126 findings over a handful of distinct `file`
+	// strings). Only a raw string not seen before pays for
+	// `resolveRunnerPath`/`advisoryPathKey`, which folds FS-confirmed spelling
+	// variants (case, separators, ancestor walk-up) into `verdicts`, the
+	// canonical-key map that `statCount` reports. Keying the expensive work by
+	// the RESOLVED path instead of the raw one (the pre-#1461-HIGH-2 shape)
+	// still called it once per finding, since the dedup lookup came after the
+	// cost it was meant to dedupe.
+	const rawVerdicts = new Map<string, FindingPathExistence>();
 	const verdicts = new Map<string, FindingPathExistence>();
 	const live: T[] = [];
 	const dropped: T[] = [];
@@ -291,20 +316,31 @@ export function partitionFindingsByCitedPath<T>(args: {
 			live.push(finding);
 			continue;
 		}
-		const resolved = path.resolve(args.cwd, cited);
-		const key = advisoryPathKey(resolved, args.cwd);
-		let verdict = verdicts.get(key);
+		let verdict = rawVerdicts.get(cited);
 		if (verdict === undefined) {
-			if (verdicts.size >= limit) {
-				// Budget spent on paths we have not seen before — deliver rather
-				// than guess. Already-probed paths below still use their verdict.
-				truncated = true;
-				live.push(finding);
-				continue;
+			// Ancestor-tolerant, same as `toRunnerDisplayPath`'s resolution in
+			// runtime-turn.ts — a bare `path.resolve` here would decide the drop
+			// against a different root than the one used to render the survivor,
+			// dropping findings the display path would have shown correctly
+			// (#1461 HIGH-1). `resolveRunnerPath` already runs its result through
+			// `normalizeMapKey`, so the resolved path IS the canonical key — a
+			// second `advisoryPathKey` pass would re-pay the same realpath cost.
+			const resolved = resolveRunnerPath(args.cwd, cited);
+			const key = resolved;
+			verdict = verdicts.get(key);
+			if (verdict === undefined) {
+				if (verdicts.size >= limit) {
+					// Budget spent on paths we have not seen before — deliver rather
+					// than guess. Already-probed paths keep their cached verdict.
+					truncated = true;
+					verdict = "live";
+				} else {
+					verdict = probe(resolved);
+					verdicts.set(key, verdict);
+					if (verdict === "missing") deadPaths.push(resolved);
+				}
 			}
-			verdict = probe(resolved);
-			verdicts.set(key, verdict);
-			if (verdict === "missing") deadPaths.push(resolved);
+			rawVerdicts.set(cited, verdict);
 		}
 		if (verdict === "missing") dropped.push(finding);
 		else live.push(finding);
