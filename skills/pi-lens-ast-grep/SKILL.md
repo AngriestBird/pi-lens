@@ -56,11 +56,11 @@ Use these instead of writing raw YAML:
 |---|---|---|
 | `insideKind` | both | Only match inside an ancestor of this node kind (searches ALL ancestors, `stopBy: end`) |
 | `hasKind` | both | Only match nodes whose **immediate child** has this kind (`stopBy: neighbor` — NOT recursive) |
-| `hasDescendantKind` | `ast_grep_search` only | Only match nodes containing this kind **anywhere in their descendants** (`stopBy: end`) — use this instead of `hasKind` when the target isn't a direct child |
+| `hasDescendantKind` | both | Only match nodes containing this kind **anywhere in their descendants** (`stopBy: end`) — use this instead of `hasKind` when the target isn't a direct child |
 | `follows` | both | Only match nodes preceded by a sibling matching this pattern |
 | `precedes` | both | Only match nodes followed by a sibling matching this pattern |
 
-⚠ `ast_grep_replace` has no `hasDescendantKind` param — only `hasKind` (immediate child, same as `ast_grep_search`'s). Refs #1423.
+`hasKind` and `hasDescendantKind` are mutually exclusive on both tools — combining them errors.
 
 ```
 # console.log only inside functions
