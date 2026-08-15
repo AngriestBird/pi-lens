@@ -1094,7 +1094,18 @@ export function NearestRoot(
 		const promise = (async (): Promise<string | undefined> => {
 			let currentDir = startDir;
 			const fsRoot = path.parse(currentDir).root;
-			const stop = stopDir ? path.resolve(stopDir) : fsRoot;
+			const sessionCwd = path.resolve(process.cwd());
+			// Every marker hit for an in-session file is clamped to sessionCwd by
+			// enforceLspRootCeiling below, so walking above it cannot change the
+			// selected root. Bound that otherwise-wasted configless-repo walk without
+			// caching misses: a marker scaffolded later is still found on the next call.
+			// Out-of-cwd files deliberately retain the filesystem-root walk because the
+			// cwd ceiling does not apply to them (#1373).
+			const stop = stopDir
+				? path.resolve(stopDir)
+				: isSameOrWithin(sessionCwd, startDir)
+					? sessionCwd
+					: fsRoot;
 
 			while (true) {
 				if (

@@ -295,6 +295,13 @@ graceful shutdown, releasing the server-owned language-service programs and
 document registry; the next request rebuilds transparently. The per-root timers
 must stay unref'd, reset on reuse, busy-client guarded, and cleared on shutdown.
 
+`NearestRoot` bounds default walks at the session cwd only for in-cwd files;
+every such marker hit would be clamped there by the root ceiling. Out-of-cwd
+files retain filesystem-root discovery. Misses remain uncached so marker
+scaffolding is visible on the next lookup. The live native-TS7/Vitest fixture
+suite is opt-in with `PI_LENS_INTEGRATION=1`; it copies the excluded fixture to
+a temporary non-fixture project before launching the real server. (#1412)
+
 Rule-id normalization derives its language suffixes from the bundled CodeRabbit rule tree at startup; tests must keep that derived set covered so new vendored language rules cannot silently evade project policy matching.
 
 Small process-lifetime memo tables use `clients/bounded-cache.ts` when an

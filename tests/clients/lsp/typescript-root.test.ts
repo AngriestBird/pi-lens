@@ -94,7 +94,7 @@ describe("TypeScript config-aware roots (#1412)", () => {
 		await expect(TypeScriptServer.root(file)).resolves.toBe(nested);
 	});
 
-	it("clamps a governing config above the session cwd", async () => {
+	it("does not inspect a governing config above the session cwd", async () => {
 		const parent = tempProject("pi-lens-tsconfig-ceiling-");
 		write(path.join(parent, "tsconfig.json"));
 		const session = path.join(parent, "workspace");
@@ -102,7 +102,7 @@ describe("TypeScript config-aware roots (#1412)", () => {
 		write(file, "export {};\n");
 		vi.spyOn(process, "cwd").mockReturnValue(session);
 
-		await expect(TypeScriptServer.root(file)).resolves.toBe(session);
+		await expect(TypeScriptServer.root(file)).resolves.toBe(path.dirname(file));
 	});
 
 	// Case (a) from the #1412 review's case table: config + manifest in the
