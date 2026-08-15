@@ -582,6 +582,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 	refreshCtxDerivedPlumbing();
 	// #485: read-only bus subscriber — never publishes, so the #482 loop guard
 	// (ingest -> write -> publish) has no write side to trip here.
+	// #1434 residual risk, accepted not fixed: `pi.events` is the raw host bus,
+	// not `pi` itself, so `withConsoleCaptureWindows` does not wrap its
+	// `subscribe`. A future subscriber body that logs would bypass the capture
+	// window. Subscribers registered on this bus are subscribe-only today
+	// (never publish), so nothing currently exercises that gap — revisit if
+	// `pi.events` grows a subscriber that does real work inside its callback.
 	wireAgentNudgeSubscriber({
 		events: pi.events,
 		getReadGuard: () => runtime.readGuard,

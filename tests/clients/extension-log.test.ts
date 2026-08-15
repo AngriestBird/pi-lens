@@ -310,6 +310,11 @@ describe("console guard capture windows (#1434)", () => {
 
 	it("opens a window around every handler and tool registered through the API", async () => {
 		const sink = await loadSink();
+		// #1434 S1b: the capture-window AsyncLocalStorage is now built lazily,
+		// and only once the guard has actually installed -- install it first so
+		// runInConsoleCaptureWindow (which inCaptureWindow calls under the hood)
+		// does not treat "guard never installed" as "no window" here.
+		expect(sink.installConsoleGuard()).toBe(true);
 		const handlers = new Map<string, (...args: unknown[]) => unknown>();
 		const tools: { execute?: (...args: unknown[]) => unknown }[] = [];
 		const hostApi = {
@@ -352,5 +357,6 @@ describe("console guard capture windows (#1434)", () => {
 		expect(handlerSawWindow).toBe(true);
 		expect(toolSawWindow).toBe(true);
 		expect(sink.isConsoleCaptureActive()).toBe(false);
+		sink.uninstallConsoleGuard();
 	});
 });

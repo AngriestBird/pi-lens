@@ -1665,7 +1665,19 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
   method. Windows come from three places only — the module-evaluation flag
   opened in `clients/console-guard-install.ts`, the activation window in
   `index.ts`'s default export, and the per-entry-point windows that
-  `withConsoleCaptureWindows` adds to `on` handlers and tool bodies. Register a
-  new host entry point through that wrapped API, never the raw one, or its
-  console writes escape to the terminal. `closeModuleLoadConsoleWindow()` must
-  stay the last statement in `index.ts`.
+  `withConsoleCaptureWindows` adds around every `on`/`register*` call — a
+  DENY-LIST keyed on the property name (`isCaptureSeam`), not a hand-maintained
+  list of the specific methods pi-lens happens to call today, so a new
+  `register*` seam the host adds later is covered without an edit here. Every
+  function argument gets wrapped, including one ONE LEVEL inside an
+  options/tool object (`options.handler`, `tool.execute`) — deliberately not
+  recursive past that level, since walking a tool's full nested schema on
+  every registration measurably slowed activation; a coverage test
+  (`tests/clients/console-capture-window-coverage.test.ts`) derives the
+  member list from the host's own `ExtensionAPI` type and asserts none of them
+  bypass the window. Register a new host entry point through the wrapped API,
+  never the raw one, or its console writes escape to the terminal.
+  `closeModuleLoadConsoleWindow()` must stay the last statement in `index.ts`.
+  Known gap, accepted not fixed: `pi.events` (a separate bus, not an
+  `ExtensionAPI` member) is unwrapped — fine today because every subscriber on
+  it is subscribe-only.
