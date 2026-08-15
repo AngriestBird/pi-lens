@@ -13,6 +13,7 @@ import { ReadGuard } from "./read-guard.js";
 import type { RuleScanResult } from "./rules-scanner.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { TurnSummaryCollector } from "./turn-summary.js";
+import { deriveProviderFromModelId } from "./model-provider.js";
 
 export interface ErrorDebtBaseline {
 	testsPassed: boolean;
@@ -106,6 +107,13 @@ export class RuntimeCoordinator {
 	private _lifecycleReason: string | undefined;
 	private _hasStableSessionId = false;
 	private _telemetryModel = "unknown";
+	// Raw model/provider identity, separate from the combined `provider/model`
+	// display string above — worklog/disposition attribution (#1448) wants the
+	// two fields apart, blank when the host never supplied them. `_telemetryProvider`
+	// is the explicit host value when given, else derived from the model id
+	// (deriveProviderFromModelId, blank on ambiguity — never guessed).
+	private _telemetryModelId = "";
+	private _telemetryProvider = "";
 	private _turnIndex = 0;
 	private _writeIndex = 0;
 	private _projectSeq = 0;
@@ -170,6 +178,8 @@ export class RuntimeCoordinator {
 		this._telemetrySessionId = `lens-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 		this._hasStableSessionId = false;
 		this._telemetryModel = "unknown";
+		this._telemetryModelId = "";
+		this._telemetryProvider = "";
 		this._turnIndex = 0;
 		this._writeIndex = 0;
 		this._projectSeq = 0;
@@ -325,6 +335,15 @@ export class RuntimeCoordinator {
 		} else if (provider) {
 			this._telemetryModel = provider;
 		}
+		if (model) this._telemetryModelId = model;
+		if (provider) {
+			this._telemetryProvider = provider;
+		} else if (model && !this._telemetryProvider) {
+			// Only fall back to derivation when no provider has ever been reported
+			// this session — an explicit provider (even from an earlier call) must
+			// never be overwritten by a same-session guess.
+			this._telemetryProvider = deriveProviderFromModelId(model);
+		}
 	}
 
 	get telemetrySessionId(): string {
@@ -360,6 +379,19 @@ export class RuntimeCoordinator {
 
 	get telemetryModel(): string {
 		return this._telemetryModel;
+	}
+
+	/** Raw model id (never the combined `provider/model` display string), blank
+	 * when the host hasn't reported one this session. Worklog/disposition
+	 * attribution (#1448) reads this, not {@link telemetryModel}. */
+	get telemetryModelId(): string {
+		return this._telemetryModelId;
+	}
+
+	/** Explicit host-reported provider, or a conservative derivation from the
+	 * model id (see clients/model-provider.ts), blank when neither is known. */
+	get telemetryProviderId(): string {
+		return this._telemetryProvider;
 	}
 
 	get turnIndex(): number {

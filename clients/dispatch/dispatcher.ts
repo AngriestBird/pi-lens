@@ -161,6 +161,10 @@ export function createDispatchContext(
 	projectRoot?: string,
 	/** Ordered per-file pipeline token, when this is a post-write dispatch. */
 	writeIndex?: number,
+	/** Runtime telemetry identity, when known (#1448) — threaded to the
+	 * worklog append; see DispatchContext.telemetryModel's doc. */
+	telemetryModel?: string,
+	telemetryProvider?: string,
 ): DispatchContext {
 	const absoluteFilePath = resolveRunnerPath(cwd, filePath);
 	const normalizedProjectRoot = normalizeMapKey(
@@ -191,6 +195,8 @@ export function createDispatchContext(
 		blockingOnly,
 		modifiedRanges,
 		writeIndex,
+		telemetryModel,
+		telemetryProvider,
 
 		async hasTool(command: string): Promise<boolean> {
 			return checkToolAvailability(command, facts);
@@ -852,11 +858,16 @@ export async function dispatchForFile(
 	);
 	const fixedItems = visibleDiagnostics.filter((d) => d.semantic === "fixed");
 
-	// Append fixed and fixable diagnostics to the persistent worklog
+	// Append fixed and fixable diagnostics to the persistent worklog, attributed
+	// to the runtime's active model/provider when known (#1448).
+	const worklogIdentity = {
+		model: ctx.telemetryModel,
+		provider: ctx.telemetryProvider,
+	};
 	if (fixedItems.length > 0) {
 		import("../fix-worklog.js")
 			.then(({ appendToWorklog }) => {
-				appendToWorklog(ctx.cwd, fixedItems, true);
+				appendToWorklog(ctx.cwd, fixedItems, true, worklogIdentity);
 			})
 			.catch(() => {});
 	}
@@ -864,7 +875,7 @@ export async function dispatchForFile(
 	if (fixableWarnings.length > 0) {
 		import("../fix-worklog.js")
 			.then(({ appendToWorklog }) => {
-				appendToWorklog(ctx.cwd, fixableWarnings, false);
+				appendToWorklog(ctx.cwd, fixableWarnings, false, worklogIdentity);
 			})
 			.catch(() => {});
 	}

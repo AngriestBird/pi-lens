@@ -2190,6 +2190,10 @@ export async function dispatchLintWithResult(
 		projectRoot?: string;
 		/** Ordered per-file pipeline token, when called from tool_result. */
 		writeIndex?: number;
+		/** Runtime telemetry identity, when known (#1448) — see
+		 * DispatchContext.telemetryModel's doc. */
+		telemetryModel?: string;
+		telemetryProvider?: string;
 	},
 ): Promise<DispatchResult> {
 	// Default true preserves the per-edit fast path (errors only). Callers that
@@ -2204,6 +2208,8 @@ export async function dispatchLintWithResult(
 		modifiedRanges,
 		options?.projectRoot,
 		options?.writeIndex,
+		options?.telemetryModel,
+		options?.telemetryProvider,
 	);
 	sessionFacts.clearFileFactsFor(ctx.filePath);
 
