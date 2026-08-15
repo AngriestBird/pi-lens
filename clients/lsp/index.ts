@@ -354,13 +354,15 @@ function readTsserverSyncGraceMs(): number {
 }
 /**
  * Read the `PI_LENS_AUX_GRACE_MS` env override at call time (not module
- * load time) so tests can set it per-case. Controls how long auxiliary-role
- * promises (opengrep, ast-grep, zizmor, …) are waited after all primary-role
- * promises have settled in both getDiagnostics (raceToCompletion) and the
- * touchFile push wait. Default 500ms — conservative enough to include
- * auxiliaries that are nearly done while not blocking the primary result.
- * Returns undefined when the var is absent (caller falls back to the
- * raceToCompletion default of 500ms, keeping the two in sync).
+ * load time) so tests can set it per-case. Controls the CEILING on how long
+ * auxiliary-role promises (opengrep, ast-grep, zizmor, …) are waited after
+ * all primary-role promises have settled, in both getDiagnostics
+ * (raceToCompletion) and the touchFile push wait (#1458 S2 — the two lanes
+ * share the same declared-budget-capped-by-ceiling shape). Each auxiliary
+ * still gets only its OWN declared `aggregateWaitMs` up to this ceiling —
+ * this is not a flat per-touch wait. Returns undefined when the var is
+ * absent; each call site then supplies its own default ceiling (touchFile:
+ * 2000ms; getDiagnostics: 2000ms — see the `?? 2000` at each call site).
  */
 function readEnvAuxGraceMs(): number | undefined {
 	const raw = process.env.PI_LENS_AUX_GRACE_MS;
@@ -2674,8 +2676,18 @@ export class LSPService {
 			// The #707 tsserver sync race operates exclusively on single-server
 			// primary-scope touches (guarded by `clientScope === "primary" &&
 			// spawned.length === 1`), so there is NO interaction with this path.
+			// #1458 S4: also gated on `collectDiagnostics` — a non-collecting
+			// with-auxiliary touch has nothing to carry the aux wait's result
+			// INTO (its diagnostics are discarded either way), so paying up to
+			// `auxCeilingMs` of extra latency for it buys nothing. Both current
+			// callers (`getDiagnostics`'s with-auxiliary path and the cascade's
+			// collecting touch) already pass `collectDiagnostics: true`, so this
+			// is latent-today defense, not a behavior change — but a future
+			// non-collecting with-auxiliary caller must not silently inherit the
+			// full aux-grace cost for diagnostics it's about to throw away.
 			const hasTouchAuxiliaries =
 				clientScope === "with-auxiliary" &&
+				options.collectDiagnostics === true &&
 				spawned.some((e) => e.info.role === "auxiliary");
 
 			// Per-server wait promises (each already bounded by its own
@@ -2723,16 +2735,31 @@ export class LSPService {
 						const primaryWaits = perServerWaits.filter(
 							(_, i) => spawned[i].info.role !== "auxiliary",
 						);
-						// Aux waits: auxiliary servers (advisory).
+						// Aux waits: auxiliary servers (advisory). `client` and the
+						// pre-notify `diagnosticsVersion` baseline travel alongside the
+						// promise so the outcome can be decided from EVIDENCE after the
+						// race, not from how the raced promise settled (#1458 S1 — see
+						// below).
 						const auxWaits = perServerWaits
 							.map((p, i) =>
 								spawned[i].info.role === "auxiliary"
-									? { promise: p, serverId: spawned[i].info.id }
+									? {
+											promise: p,
+											serverId: spawned[i].info.id,
+											client: spawned[i].client,
+											baseline: diagnosticBaselines.get(spawned[i].client),
+										}
 									: null,
 							)
 							.filter(
-								(x): x is { promise: Promise<void | undefined>; serverId: string } =>
-									x !== null,
+								(
+									x,
+								): x is {
+									promise: Promise<void | undefined>;
+									serverId: string;
+									client: (typeof spawned)[number]["client"];
+									baseline: number | undefined;
+								} => x !== null,
 							);
 						const auxCeilingMs = readEnvAuxGraceMs() ?? 2000;
 						// After all primaries settle, give each auxiliary the smaller of
@@ -2762,21 +2789,51 @@ export class LSPService {
 											timer.unref?.();
 										}
 									});
-									const settled = await Promise.race([
+									const raced = await Promise.race([
 										aux.promise.then(() => true as const),
 										timeout,
 									]);
 									if (timer) clearTimeout(timer);
+									// #1458 S1: `waitForDiagnostics` RESOLVES on its own timeout
+									// (client.ts) — it never rejects, and a silent scanner that
+									// published nothing looks identical, promise-wise, to one
+									// that answered. `raced === true` only means "the promise
+									// settled before our timer fired"; it is not proof anything
+									// was published. Decide the outcome from evidence instead:
+									// did this aux's `diagnosticsVersion` advance past the
+									// pre-notify baseline captured before the wait started?
+									//   - raced === false            → "cut_off" (our timer won;
+									//     the aux's own wait never got to answer for itself).
+									//   - raced === true, no evidence → "silent" (the aux's own
+									//     wait gave up within its budget with nothing to report —
+									//     NOT the same as having answered).
+									//   - raced === true, evidence   → "answered" (a fresh
+									//     publication actually landed for this touch).
+									const publishedEvidence =
+										raced &&
+										Number.isFinite(aux.baseline) &&
+										aux.client.diagnosticsVersion > (aux.baseline as number);
+									const outcome = !raced
+										? ("cut_off" as const)
+										: publishedEvidence
+											? ("answered" as const)
+											: ("silent" as const);
 									return {
 										serverId: aux.serverId,
-										outcome: settled ? ("settled" as const) : ("starved" as const),
+										outcome,
 										budgetMs,
 										elapsedMs: Date.now() - auxWaitStartedAt,
+										// #1458 S3: elapsed measured from BEFORE the primary wait
+										// (waitStartedAt), not just from auxWaitStartedAt — this is
+										// what lets a latency row validate the ~1.3s warm-scanner
+										// figure the 2000ms ceiling was set from; `elapsedMs` alone
+										// only covers the POST-primary aux phase.
+										elapsedSinceNotifyMs: Date.now() - waitStartedAt,
 									};
 								}),
 							);
 							const unfinished = outcomes
-								.filter((outcome) => outcome.outcome === "starved")
+								.filter((outcome) => outcome.outcome === "cut_off")
 								.map((outcome) => outcome.serverId);
 							if (unfinished.length > 0) auxCutOffServerIds = unfinished;
 							logLatency({
@@ -3461,17 +3518,27 @@ export class LSPService {
 		// Full mode: 400ms grace — wait a bit for other clients to catch up.
 		const graceMs = diagnosticsMode === "document" ? 0 : EARLY_UNBLOCK_GRACE_MS;
 
-		// R8 (#714): per-promise role descriptors so raceToCompletion can apply
-		// a bounded aux grace once all primary-role promises have settled.
-		// Servers with role:"auxiliary" (opengrep, ast-grep, zizmor, …) get at
-		// most PI_LENS_AUX_GRACE_MS (default 500ms) after the primary settles;
-		// late arrivals are dropped (advisory only — they land in the client
+		// R8 (#714) / #1458 S2: per-promise role descriptors so raceToCompletion
+		// can apply a bounded aux grace once all primary-role promises have
+		// settled. Servers with role:"auxiliary" (opengrep, ast-grep, zizmor, …)
+		// get their OWN declared `aggregateWaitMs` budget after the primary
+		// settles, capped by the PI_LENS_AUX_GRACE_MS global ceiling (default
+		// 2000ms) — the same "declared budget, capped by a ceiling" shape
+		// `touchFile`'s with-auxiliary push wait uses, so this lane can no longer
+		// starve a scanner whose measured warm run (e.g. opengrep ~1.3s) is
+		// shorter than the ceiling but longer than a flat short grace. Late
+		// arrivals are still dropped (advisory only — they land in the client
 		// cache and surface on the next edit). Primary-only callers have no
 		// auxiliary descriptors, so this path is never entered and there is
 		// zero behavior change for the single-server hot path.
-		const diagDescriptors: PromiseDescriptor[] = spawned.map((entry) => ({
-			role: entry.info.role === "auxiliary" ? "auxiliary" : "primary",
-		}));
+		const diagDescriptors: PromiseDescriptor[] = spawned.map((entry) => {
+			if (entry.info.role !== "auxiliary") return { role: "primary" };
+			const strategy = getStrategy(
+				entry.info.id,
+				entry.client.getLaunchVariant?.(),
+			);
+			return { role: "auxiliary", budgetMs: strategy.aggregateWaitMs };
+		});
 
 		// Result-aware racing: trigger early-unblock when any client has results,
 		// OR when a seedFirstPush server returns (its first push is authoritative
@@ -3494,7 +3561,10 @@ export class LSPService {
 				),
 				graceMs,
 				descriptors: diagDescriptors,
-				auxGraceMs: readEnvAuxGraceMs(),
+				// #1458 S2: ceiling, not a flat wait — each auxiliary's own
+				// budgetMs (above) determines the actual per-touch grace up to
+				// this cap. Matches touchFile's `readEnvAuxGraceMs() ?? 2000`.
+				auxGraceMs: readEnvAuxGraceMs() ?? 2000,
 			},
 		);
 

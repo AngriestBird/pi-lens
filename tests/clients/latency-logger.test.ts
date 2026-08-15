@@ -75,4 +75,20 @@ describe("getLastLoggedPhase (loop_block attribution, #1122/#1123)", () => {
 		});
 		expect(getLastLoggedPhase()?.phase).toBe("word_index_build");
 	});
+
+	// #1458 S5: lsp_aux_wait_outcome carries a REAL wait duration (unlike its
+	// zero-duration LAST_PHASE_EXCLUDED siblings above) but is still a wait-
+	// OUTCOME record, not the stall itself — pin its exclusion so a future edit
+	// can't drop the entry and silently start misattributing loop_block stalls
+	// to this summary row.
+	it("does not record lsp_aux_wait_outcome as the last phase despite its real duration", () => {
+		logLatency({ type: "phase", phase: "word_index_build", filePath: "<x>", durationMs: 5 });
+		logLatency({
+			type: "phase",
+			phase: "lsp_aux_wait_outcome",
+			filePath: "/repo/src/app.ts",
+			durationMs: 1800,
+		});
+		expect(getLastLoggedPhase()?.phase).toBe("word_index_build");
+	});
 });

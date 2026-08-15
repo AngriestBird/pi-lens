@@ -47,9 +47,11 @@ newer per-file push or pull publication. The shared server wait policy stays
 neighbor cache. (#1444)
 
 Auxiliary LSP waits use each server's declared aggregate wait, capped by a
-2-second global post-primary ceiling. This admits measured warm scanner runs
-without charging every edit for a scanner's longer cold-start budget. An
-explicit `PI_LENS_AUX_GRACE_MS` overrides the global ceiling. (#1458)
+2-second global post-primary ceiling — in both the touchFile push wait and the
+`getDiagnostics` `raceToCompletion` aggregation lane (`aggregation.ts`'s
+`PromiseDescriptor.budgetMs`). This admits measured warm scanner runs without
+charging every edit for a scanner's longer cold-start budget. An explicit
+`PI_LENS_AUX_GRACE_MS` overrides the global ceiling. (#1458)
 
 Late auxiliary LSP publications are captured before the next resync clears the
 client cache. Carry them into that read only when their stored SHA-256 content
@@ -57,9 +59,16 @@ binding matches the touch content exactly. Unknown or changed-content bindings
 never replay. (#1458)
 
 Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row.
-Its per-server outcomes record settled or starved, elapsed time, and the
-effective budget. This decision-only phase never becomes last-phase stall
-attribution. (#1458)
+Its per-server outcomes record answered, silent, or cut-off — decided from
+EVIDENCE (whether the client's `diagnosticsVersion` advanced past the
+pre-notify baseline), never from whether the raced wait promise settled,
+because `waitForDiagnostics` resolves on its own timeout and never rejects, so
+a silent scanner's promise settling looks identical to an answer unless the
+outcome is corroborated against the diagnostics cache. This phase's
+`durationMs` is a REAL bounded wait (unlike its zero-duration `LAST_PHASE_EXCLUDED`
+siblings), but it stays excluded from last-phase stall attribution because it
+is a post-hoc record of a wait that already ran inside the touch's own phase,
+not the stall itself. (#1458)
 
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach

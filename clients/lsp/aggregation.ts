@@ -21,6 +21,18 @@
  */
 export interface PromiseDescriptor {
 	role?: "primary" | "auxiliary";
+	/**
+	 * Declared wait budget for THIS promise. Only consulted for `role:
+	 * "auxiliary"` entries. When at least one still-pending auxiliary carries a
+	 * `budgetMs`, the aux-grace window is `min(options.auxGraceMs ?? 500,
+	 * max(budgetMs of still-pending auxiliaries))` — the same "declared budget,
+	 * capped by a global ceiling" shape `touchFile`'s per-server aux wait uses
+	 * (#1458 S2), so a fast auxiliary's short budget can't be stretched to the
+	 * ceiling and a slow one isn't cut short of its own declared need (up to
+	 * the ceiling). Omit to keep the flat `options.auxGraceMs` window for every
+	 * auxiliary — the original, still-supported behavior.
+	 */
+	budgetMs?: number;
 }
 
 /**
@@ -44,9 +56,12 @@ export interface PromiseDescriptor {
  *   receive `options.auxGraceMs` before the race finalises. Aux results within
  *   that window are included; later arrivals are dropped. When no descriptors
  *   carry `role:"auxiliary"` the aux-grace path is never entered.
- * @param options.auxGraceMs - Grace period given to auxiliary promises after all
- *   primary promises have settled. Only relevant when at least one descriptor
- *   carries `role:"auxiliary"`. Defaults to 500ms.
+ * @param options.auxGraceMs - Ceiling on the grace period given to auxiliary
+ *   promises after all primary promises have settled. Only relevant when at
+ *   least one descriptor carries `role:"auxiliary"`. Defaults to 500ms. When a
+ *   still-pending auxiliary's descriptor carries `budgetMs`, the actual window
+ *   is `min(auxGraceMs, max(budgetMs of still-pending auxiliaries))` — see
+ *   `PromiseDescriptor.budgetMs`.
  */
 export async function raceToCompletion<T>(
 	promises: Promise<T>[],
@@ -104,7 +119,24 @@ export async function raceToCompletion<T>(
 		const startAuxGrace = () => {
 			if (auxGraceStarted || completed) return;
 			auxGraceStarted = true;
-			const graceMs = options.auxGraceMs ?? 500;
+			const ceilingMs = options.auxGraceMs ?? 500;
+			// #1458 S2: cap the grace window by the still-pending auxiliaries' own
+			// declared budgets, not just the flat ceiling — mirrors touchFile's
+			// per-server `min(declared, ceiling)`. max(min(d_i, C)) === min(max(d_i), C)
+			// for a constant C, so computing it as a single shared timer (rather than
+			// per-promise deadlines) is equivalent: the window is exactly as long as
+			// the slowest still-pending auxiliary needs, capped by the ceiling.
+			// Auxiliaries without a declared `budgetMs` don't shrink the window (a
+			// caller that never sets `budgetMs` gets byte-identical behavior to the
+			// flat ceiling, matching the original signature).
+			const pendingAuxBudgets = [...auxIndices]
+				.filter((i) => results[i] === undefined)
+				.map((i) => descriptors[i]?.budgetMs)
+				.filter((b): b is number => typeof b === "number" && b >= 0);
+			const graceMs =
+				pendingAuxBudgets.length > 0
+					? Math.min(ceilingMs, Math.max(...pendingAuxBudgets))
+					: ceilingMs;
 			if (graceMs <= 0) {
 				finalize();
 				return;
