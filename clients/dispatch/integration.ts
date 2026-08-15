@@ -925,6 +925,12 @@ export async function computeCascadeForFile(
 	let importerSet = new Set<string>();
 	let callerSet = new Set<string>();
 	let referenceCount = 0;
+	// #1446 item 4: how many eligible neighbors the flat CASCADE_NEIGHBOUR_BUDGET
+	// cut off, distinct from candidates dropped by the filters above it
+	// (missing on disk, vendor, ignored, already-primary-this-turn) — those are
+	// never actionable regardless of budget, so counting them as "truncated"
+	// would overstate what a larger budget could actually recover.
+	let cascadeBudgetTruncated = 0;
 
 	if (CASCADE_GRAPH_KINDS.has(fileKind)) {
 		const graphStart = Date.now();
@@ -1309,7 +1315,7 @@ export async function computeCascadeForFile(
 		referenceCount = impact.neighborFiles.filter(
 			(n) => !importerOrCallerSet.has(n),
 		).length;
-		sortedNeighbors = [...impact.neighborFiles]
+		const eligibleNeighbors = [...impact.neighborFiles]
 			.filter((n) => nodeFs.existsSync(n))
 			.filter((n) => !isExternalOrVendorFile(n, cwd))
 			// Honour the project's ignore config: a user-ignored neighbour (e.g.
@@ -1322,8 +1328,12 @@ export async function computeCascadeForFile(
 				const rank = (p: string) =>
 					importerSet.has(p) ? 0 : callerSet.has(p) ? 1 : 2;
 				return rank(a) - rank(b);
-			})
-			.slice(0, CASCADE_NEIGHBOUR_BUDGET);
+			});
+		cascadeBudgetTruncated = Math.max(
+			0,
+			eligibleNeighbors.length - CASCADE_NEIGHBOUR_BUDGET,
+		);
+		sortedNeighbors = eligibleNeighbors.slice(0, CASCADE_NEIGHBOUR_BUDGET);
 	} else {
 		logCascade({
 			phase: "cascade_skip",
@@ -1380,6 +1390,12 @@ export async function computeCascadeForFile(
 	// deferred EVERY neighbour is distinguishable from a genuine leaf (both are
 	// `neighborCount: 0` with no output otherwise).
 	let collectLaterSkipped = 0;
+	// #1446 item 5: `recentlyCleanNeighborCache` and `neighborTouchCache` hits
+	// are the whole point of both caches, but neither was ever counted — the
+	// only visible signal was 267s/day of touch wall time with no way to tell
+	// whether the caches were absorbing repeat work or every touch was cold.
+	let recentlyCleanHits = 0;
+	let cacheHits = 0;
 
 	if (sortedNeighbors.length > 0) {
 		const snapshotPaths = sortedNeighbors.filter(shouldReadCascadeFromSnapshot);
@@ -1524,6 +1540,7 @@ export async function computeCascadeForFile(
 					!hasFreshPassiveErrors
 				) {
 					producedLspData = true;
+					recentlyCleanHits++;
 					const durationMs = Date.now() - neighborStart;
 					logCascade({
 						phase: "neighbor_snapshot",
@@ -1553,6 +1570,7 @@ export async function computeCascadeForFile(
 					writeSeq != null ? neighborTouchCache.get(cacheKey) : undefined;
 				if (cached?.turnSeq === turnSeq && cached?.writeSeq === writeSeq) {
 					producedLspData = true;
+					cacheHits++;
 					const durationMs = Date.now() - neighborStart;
 					logCascade({
 						phase: "neighbor_snapshot",
@@ -1912,6 +1930,17 @@ export async function computeCascadeForFile(
 			// Log when cascade ran but found nothing — distinguishes "clean" from "no signal"
 			noNeighbors: visibleNeighbors.length === 0,
 			noErrors: visibleNeighbors.length > 0 && filesWithErrors === 0,
+			// #1446 item 5: cache effectiveness as a number instead of an inference
+			// from `coldSnapshot`/`snapshotMissing` flags scattered across
+			// per-neighbor `neighbor_touch`/`neighbor_snapshot` rows.
+			cacheHits,
+			recentlyCleanHits,
+			coldTouches: coldSnapshotPaths.length,
+			// #1446 item 4: the budget in force and how many eligible candidates
+			// it cut off this run — the correctness half (a truncated run being
+			// silently discarded) is #1443; this is observability only.
+			neighborBudget: CASCADE_NEIGHBOUR_BUDGET,
+			budgetTruncated: cascadeBudgetTruncated,
 			neighbors: visibleNeighbors.slice(0, 10).map((n) => ({
 				file: n.filePath.replace(/\\/g, "/").split("/").slice(-2).join("/"),
 				diagnostics: n.diagnostics.length,

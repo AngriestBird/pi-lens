@@ -420,12 +420,29 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			}
 		}
 		const parts: string[] = [];
+		// #1446 item 1: track what actually gets injected — a suppressed result
+		// (real formatted cascade text, but every one of its neighbors was claimed
+		// by a LATER result — see the reverse-iteration ownership pass above) was
+		// previously indistinguishable from "no output"; this counts it explicitly
+		// instead of letting it vanish.
+		let injectedNeighborCount = 0;
+		let injectedDiagnosticCount = 0;
+		let suppressedByOwnership = 0;
 		for (const result of seen.values()) {
 			const pk = normalizeMapKey(result.filePath);
 			const ownsAny = result.neighbors.some(
 				(n) => neighborOwner.get(normalizeMapKey(n.filePath)) === pk,
 			);
-			if (ownsAny && result.formatted) parts.push(result.formatted);
+			if (ownsAny && result.formatted) {
+				parts.push(result.formatted);
+				injectedNeighborCount += result.neighbors.length;
+				injectedDiagnosticCount += result.neighbors.reduce(
+					(s, n) => s + n.diagnostics.length,
+					0,
+				);
+			} else if (!ownsAny && result.formatted) {
+				suppressedByOwnership++;
+			}
 		}
 		// Suggest tests for cascade neighbors (files with diagnostics)
 		const neighborFilesWithErrors = cascadeResults
@@ -433,6 +450,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			.filter((n) => n.diagnostics.length > 0)
 			.map((n) => n.filePath);
 		const uniqueNeighborFiles = [...new Set(neighborFilesWithErrors)];
+		let testSuggestionCount = 0;
 		if (
 			uniqueNeighborFiles.length > 0 &&
 			typeof testRunnerClient.suggestTestFiles === "function"
@@ -441,6 +459,23 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				uniqueNeighborFiles,
 				cwd,
 			);
+			testSuggestionCount = testSuggestions.length;
+			// #1446 item 2: this path previously emitted nothing to any log — a
+			// zero-suggestion outcome (neighbors had errors but no test file
+			// resolved for any of them) is the more interesting case, so it is
+			// recorded on the same phase rather than only logging on a hit.
+			logCascade({
+				phase: "cascade_test_targets",
+				filePath: files[0] ?? cwd,
+				neighborCount: uniqueNeighborFiles.length,
+				metadata: {
+					neighborFiles: uniqueNeighborFiles.slice(0, 10),
+					suggestedTestFiles: testSuggestions.slice(0, 10).map((s) => s.testFile),
+					runner: testSuggestions[0]?.runner,
+					truncated: testSuggestions.length > 10,
+					zeroSuggestions: testSuggestions.length === 0,
+				},
+			});
 			if (testSuggestions.length > 0) {
 				const testLines = testSuggestions
 					.slice(0, 5)
@@ -454,7 +489,25 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				parts.push(testSection);
 			}
 		}
-		if (parts.length > 0) blockerParts.push(parts.join("\n\n"));
+		if (parts.length > 0) {
+			const section = parts.join("\n\n");
+			blockerParts.push(section);
+			// #1446 item 1: proves the cascade section actually reached
+			// blockerParts (and therefore the agent-facing injected text) — the
+			// counters alone (cascade_result, cascade_turn_end) never confirmed
+			// delivery, only computation.
+			logCascade({
+				phase: "cascade_injected",
+				filePath: files[0] ?? cwd,
+				neighborCount: injectedNeighborCount,
+				diagnosticCount: injectedDiagnosticCount,
+				metadata: {
+					sectionChars: section.length,
+					testSuggestionCount,
+					suppressedByOwnership,
+				},
+			});
+		}
 		logCascade({
 			phase: "cascade_turn_end",
 			filePath: files[0] ?? cwd,
