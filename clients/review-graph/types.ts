@@ -142,7 +142,8 @@ export interface ReviewGraphPersistCoverage {
  */
 export type CascadeIndeterminateReason =
 	| "graph_degraded" // review graph skipped (too_many_files / unsafe_root)
-	| "missing_node" // changed file has no node in the (otherwise-built) graph
+	| "missing_node" // changed file has no node in the (otherwise-built) graph, and the graph SHOULD know it — a real gap
+	| "excluded_by_role" // #1445: changed file has no node because its role (test, #260) is excluded from the graph BY DESIGN — not a gap, never agent-facing
 	| "error" // the deferred compute threw before producing a result
 	| "lsp_binding_rejected"; // #1104: every degraded-fallback display candidate was binding-rejected (stale/pre-fix-edit snapshot) and withheld
 

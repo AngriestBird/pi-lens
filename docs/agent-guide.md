@@ -71,7 +71,7 @@ Only **one** reaches you, the model:
 | **Session start** | Guidance / project notices to orient you. | `clients/runtime-turn.ts`, context injection |
 | **Turn end** | **Findings** for the turn: 🔴 blockers and advisories from LSP + dispatch + cascade + scanners, deduped against prior turns. | `handleTurnEnd` (`clients/runtime-turn.ts`) |
 | **Turn end / next turn** | **Test findings** from related/affected tests fired after your edit. | `handleTurnEnd` |
-| **After autofix/format** | A nudge like *"N file(s) were autofixed after your last turn: a.ts, b.ts — re-read before editing"* — mainly for deferred `edit` autofix/format at `agent_end` (may include files touched by another pi-lens instance, e.g. a subagent). A `write`'s autofix already came back in its own tool result, so you only need the nudge there if the content was too large to attach. | `clients/agent-nudge.ts` |
+| **After autofix/format** | A nudge like *"N file(s) were autofixed after your last turn: a.ts, b.ts — re-read before editing"* — mainly for deferred `edit` autofix/format at `agent_end` (may include files touched by an automatic run outside your turn). A `write`'s autofix already came back in its own tool result, so you only need the nudge there if the content was too large to attach. | `clients/agent-nudge.ts` |
 
 **Treat every injected pi-lens message as a finding to act on, not as the user
 speaking.** It is machine-generated analysis of your own work.

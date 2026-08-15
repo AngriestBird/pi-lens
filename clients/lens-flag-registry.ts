@@ -213,6 +213,15 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 		default: false,
 		scope: "global",
 	},
+	{
+		name: "no-lazy-tools",
+		description:
+			"Keep all pi-lens tools active to avoid tool-list cache changes. Also via tools.lazy=false in ~/.pi-lens/config.json.",
+		configKey: "tools.lazy",
+		negated: true,
+		default: false,
+		scope: "global",
+	},
 ];
 
 const byName = new Map(LENS_FLAGS.map((spec) => [spec.name, spec]));
