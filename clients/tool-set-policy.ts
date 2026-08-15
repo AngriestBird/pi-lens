@@ -2,6 +2,7 @@ import { logLatency } from "./latency-logger.js";
 
 export type ToolSetMutationReason =
 	| "fresh_session_lazy_deactivation"
+	| "session_rebuild_restore"
 	| "lazy_activation";
 
 export interface ToolSetMutation {
@@ -11,43 +12,91 @@ export interface ToolSetMutation {
 	deferralApplies: boolean;
 }
 
+/** The only part of the host model object this module reads. */
 type DeferredToolModel = {
-	api?: string;
-	provider?: string;
-	id?: string;
 	compat?: {
 		supportsToolReferences?: boolean;
-		supportsToolSearch?: boolean;
 	};
 };
 
-/** Match pi's provider capability decision without depending on an internal API. */
-export function supportsDeferredTools(model: DeferredToolModel | undefined): boolean {
-	if (!model) return false;
-	if (
-		model.api === "openai-responses" ||
-		model.api === "azure-openai-responses" ||
-		model.api === "openai-codex-responses"
-	) {
-		return model.compat?.supportsToolSearch === true;
-	}
-	if (model.api !== "anthropic-messages") return false;
-	if (model.compat?.supportsToolReferences !== undefined) {
-		return model.compat.supportsToolReferences;
-	}
-	if (model.provider !== "anthropic" || model.id?.includes("haiku")) return false;
-	const version = model.id?.match(
-		/^claude-(?:opus|sonnet|fable)-(\d+)(?:-(\d+))?(?:-|$)/,
-	);
-	if (!version) return false;
-	const major = Number(version[1]);
-	const minor = version[2] && version[2].length < 8 ? Number(version[2]) : 0;
-	return major > 4 || (major === 4 && minor >= 5);
+/**
+ * Whether the host will send this model deferred (searchable) tool
+ * definitions rather than the full inline list.
+ *
+ * Read the host's own decision off `ctx.model.compat` — pi resolves that
+ * flag from the model config (`core/model-config`, `compat.supportsToolReferences`)
+ * and it is the only capability signal a consumer can honestly observe.
+ * A missing flag means "unknown", which we report as false: this value only
+ * annotates the `tool_set_mutation` log line, so guessing high would make the
+ * log lie, while guessing low merely under-claims.
+ */
+export function supportsDeferredTools(
+	model: DeferredToolModel | undefined,
+): boolean {
+	return model?.compat?.supportsToolReferences === true;
 }
 
-/** Only a new logical conversation may shrink the active tool set. */
+/**
+ * A fresh logical conversation — the only reasons that start with an empty
+ * activation memory. `undefined` is included because older hosts fire
+ * `session_start` with no `reason` at all.
+ *
+ * Every OTHER reason (fork/reload/resume) is a session REBUILD: the host
+ * constructs a brand-new AgentSession with `includeAllExtensionTools: true`
+ * (pi `core/agent-session.js`), so every registered pi-lens tool is active
+ * again by the time our handler runs, while pi-lens's own extension closure
+ * state survives. Those reasons must RESTORE the previous posture, not skip.
+ */
 export function isFreshSessionStart(reason: unknown): boolean {
 	return reason === undefined || reason === "startup" || reason === "new";
+}
+
+export interface ToolSetPlan {
+	/** The exact set to hand `pi.setActiveTools`. */
+	desired: string[];
+	addedCount: number;
+	removedCount: number;
+	/** False when `desired` already equals the host's active set. */
+	changed: boolean;
+}
+
+/**
+ * Compute the active-tool set pi-lens wants: everything currently active that
+ * is not a lazy tool, plus exactly the lazy tools the model activated in this
+ * logical session (`remembered`).
+ *
+ * On startup/new `remembered` is empty and this is the plain baseline shrink.
+ * On fork/reload/resume the host has just re-activated all registered tools,
+ * and this restores the parent's posture character-for-character — which both
+ * preserves the model's activations and keeps the advertised tool list equal
+ * to the one the prompt cache prefix was built from.
+ */
+export function planToolSet(
+	active: readonly string[],
+	lazyNames: ReadonlySet<string>,
+	remembered: ReadonlySet<string>,
+): ToolSetPlan {
+	const desired = active.filter(
+		(name) => !lazyNames.has(name) || remembered.has(name),
+	);
+	// A remembered tool the host did not list as active still belongs in the
+	// set (defensive: the host controls what `getActiveTools` returns).
+	const desiredSet = new Set(desired);
+	for (const name of remembered) {
+		if (!desiredSet.has(name)) {
+			desired.push(name);
+			desiredSet.add(name);
+		}
+	}
+	const activeSet = new Set(active);
+	const removedCount = active.filter((name) => !desiredSet.has(name)).length;
+	const addedCount = desired.filter((name) => !activeSet.has(name)).length;
+	return {
+		desired,
+		addedCount,
+		removedCount,
+		changed: addedCount > 0 || removedCount > 0,
+	};
 }
 
 export function recordToolSetMutation(mutation: ToolSetMutation): void {

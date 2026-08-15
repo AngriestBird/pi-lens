@@ -167,6 +167,7 @@ import { createSymbolSearchTool } from "./tools/symbol-search.js";
 import { getLastLoggedPhase, logLatency } from "./clients/latency-logger.js";
 import {
 	isFreshSessionStart,
+	planToolSet,
 	recordToolSetMutation,
 	supportsDeferredTools,
 } from "./clients/tool-set-policy.js";
@@ -1484,6 +1485,13 @@ function activateExtension(hostPi: ExtensionAPI) {
 				"Record a disposition for a diagnostic: false-positive / suppress (inline ignore comment) / defer (this session) / flagged (to fix).",
 		},
 	];
+	// #1453: the lazy tools the model activated in THIS logical conversation.
+	// Extension closure state outlives a session rebuild (the runner keeps the
+	// activated extension; it does not re-run this factory), which is exactly
+	// what lets a fork/reload/resume restore the parent's tool posture. Reset
+	// on startup/new, carried across fork/reload/resume — see the session_start
+	// handler below.
+	const rememberedLazyTools = new Set<string>();
 	const activateToolsTool = createActivateToolsTool(
 		pi as unknown as {
 			getActiveTools?: () => string[];
@@ -1491,6 +1499,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 		},
 		LAZY_TOOL_CATALOG,
 		{
+			onActivated: (names) => {
+				for (const name of names) rememberedLazyTools.add(name);
+			},
 			deferredToolSupport: (ctx) => {
 				try {
 					return supportsDeferredTools(
@@ -1597,49 +1608,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 				);
 			}
 
-			// Dynamic tooling (#pi 0.80.x+): deactivate the situational tools only
-			// (LAZY_TOOL_CATALOG) now that the extension has actually finished
-			// loading — session_start is the correct lifecycle point for this
-			// call (#643; see the comment left at the old call site above, right
-			// after tool registration, for why it can never succeed there).
-			// Feature-detected the same way as elsewhere in this handler:
-			// `pi.getActiveTools`/`setActiveTools` aren't guaranteed present on
-			// every host the broad `@earendil-works/pi-coding-agent` peer
-			// dependency allows, so probe with typeof rather than assuming the
-			// pinned devDependency version's API exists at runtime. Only startup/new
-			// may shrink the set; fork/reload/resume preserve monotonic growth. The
-			// no-lazy-tools policy leaves the registered default set unchanged.
-			try {
-				const piWithActiveTools = pi as unknown as {
-					getActiveTools?: () => string[];
-					setActiveTools?: (names: string[]) => void;
-				};
-				if (
-					isFreshSessionStart(sessionReason) &&
-					getLensFlag("no-lazy-tools") !== true &&
-					typeof piWithActiveTools.getActiveTools === "function" &&
-					typeof piWithActiveTools.setActiveTools === "function"
-				) {
-					const lazyNames = new Set(LAZY_TOOL_CATALOG.map((t) => t.name));
-					const active = piWithActiveTools.getActiveTools();
-					const initiallyActive = active.filter((name) => !lazyNames.has(name));
-					const removedCount = active.length - initiallyActive.length;
-					if (removedCount > 0) {
-						piWithActiveTools.setActiveTools(initiallyActive);
-						recordToolSetMutation({
-							addedCount: 0,
-							removedCount,
-							reason: "fresh_session_lazy_deactivation",
-							deferralApplies: false,
-						});
-					}
-				}
-			} catch (deactivateErr) {
-				dbg(
-					`dynamic tool deactivation failed (older pi host lacking getActiveTools/setActiveTools, or a genuine host error): ${deactivateErr}`,
-				);
-			}
-
 			// #190: pi's session lifecycle. `reason` distinguishes new/resume/fork/
 			// reload/startup; the STABLE session id comes from the session manager
 			// (the event carries none), and is what lets a resumed session rehydrate.
@@ -1671,6 +1639,77 @@ function activateExtension(hostPi: ExtensionAPI) {
 					sameCwd: (ctx as { cwd?: string })?.cwd === process.cwd(),
 				});
 				return;
+			}
+
+			// Dynamic tooling (#pi 0.80.x+): put the active tool set back to the
+			// posture this logical conversation had — the always-active baseline
+			// plus exactly the lazy tools (LAZY_TOOL_CATALOG) the model activated
+			// via pi_lens_activate_tools. session_start is the correct lifecycle
+			// point for this call (#643; see the comment left at the old call site
+			// above, right after tool registration, for why it can never succeed
+			// there).
+			//
+			// #1453: this RESTORES, it does not merely shrink. Every session_start
+			// reason arrives with all registered pi-lens tools active, because the
+			// host builds a fresh AgentSession with `includeAllExtensionTools: true`
+			// on fork/reload/resume just as it does on startup, and never persists
+			// an active-tool set per session. Skipping the call on those reasons
+			// would therefore leave every lazy tool active forever AND change the
+			// advertised tool list relative to the parent's cached prompt prefix.
+			// Rebuilding the same set instead keeps the prefix identical and
+			// genuinely preserves the model's activations, because pi-lens's own
+			// closure state (`rememberedLazyTools`) survives the rebuild.
+			//
+			// Deliberately BELOW the #473 concurrent-secondary guard: the active
+			// tool set is shared runtime state (one loader per process), so a
+			// secondary's session_start must never rewrite the still-live
+			// primary's set — last writer would win.
+			//
+			// Feature-detected the same way as elsewhere in this handler:
+			// `pi.getActiveTools`/`setActiveTools` aren't guaranteed present on
+			// every host the broad `@earendil-works/pi-coding-agent` peer
+			// dependency allows, so probe with typeof rather than assuming the
+			// pinned devDependency version's API exists at runtime. Under
+			// `--no-lazy-tools` nothing is touched at all: all-active IS the
+			// requested posture.
+			try {
+				const piWithActiveTools = pi as unknown as {
+					getActiveTools?: () => string[];
+					setActiveTools?: (names: string[]) => void;
+				};
+				if (
+					getLensFlag("no-lazy-tools") !== true &&
+					typeof piWithActiveTools.getActiveTools === "function" &&
+					typeof piWithActiveTools.setActiveTools === "function"
+				) {
+					// A fresh conversation starts with no activation memory; a
+					// rebuild inherits the parent's.
+					if (isFreshSessionStart(sessionReason)) rememberedLazyTools.clear();
+					const lazyNames = new Set(LAZY_TOOL_CATALOG.map((t) => t.name));
+					const plan = planToolSet(
+						piWithActiveTools.getActiveTools(),
+						lazyNames,
+						rememberedLazyTools,
+					);
+					if (plan.changed) {
+						piWithActiveTools.setActiveTools(plan.desired);
+						recordToolSetMutation({
+							addedCount: plan.addedCount,
+							removedCount: plan.removedCount,
+							reason: isFreshSessionStart(sessionReason)
+								? "fresh_session_lazy_deactivation"
+								: "session_rebuild_restore",
+							deferralApplies: supportsDeferredTools(
+								(ctx as { model?: Parameters<typeof supportsDeferredTools>[0] })
+									?.model,
+							),
+						});
+					}
+				}
+			} catch (toolSetErr) {
+				dbg(
+					`dynamic tool set restore failed (older pi host lacking getActiveTools/setActiveTools, or a genuine host error): ${toolSetErr}`,
+				);
 			}
 
 			// #449 slice 1 / #472: register this process in the cross-process

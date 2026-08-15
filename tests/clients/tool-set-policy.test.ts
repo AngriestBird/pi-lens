@@ -6,9 +6,20 @@ vi.mock("../../clients/latency-logger.js", () => ({ logLatency }));
 
 import {
 	isFreshSessionStart,
+	planToolSet,
 	recordToolSetMutation,
 	supportsDeferredTools,
 } from "../../clients/tool-set-policy.js";
+
+const LAZY = new Set(["ast_grep_search", "ast_grep_replace", "lsp_navigation"]);
+/** What the host hands us on EVERY session_start: all tools active. */
+const ALL_ACTIVE = [
+	"lens_diagnostics",
+	"pi_lens_activate_tools",
+	"ast_grep_search",
+	"ast_grep_replace",
+	"lsp_navigation",
+];
 
 describe("tool-set cache policy", () => {
 	beforeEach(() => logLatency.mockClear());
@@ -22,27 +33,76 @@ describe("tool-set cache policy", () => {
 		}
 	});
 
-	it("matches the host's deferred-tool capability signal", () => {
+	it("reads the host's own deferred-tool capability flag", () => {
 		expect(
-			supportsDeferredTools({
-				api: "anthropic-messages",
-				provider: "anthropic",
-				id: "claude-sonnet-4-5",
-			}),
+			supportsDeferredTools({ compat: { supportsToolReferences: true } }),
 		).toBe(true);
 		expect(
-			supportsDeferredTools({
-				api: "anthropic-messages",
-				provider: "openrouter",
-				id: "claude-sonnet-4-5",
-			}),
+			supportsDeferredTools({ compat: { supportsToolReferences: false } }),
 		).toBe(false);
-		expect(
-			supportsDeferredTools({
-				api: "openai-responses",
-				compat: { supportsToolSearch: true },
-			}),
-		).toBe(true);
+		// Unknown (no flag / no compat / no model) is reported as false rather
+		// than guessed.
+		expect(supportsDeferredTools({ compat: {} })).toBe(false);
+		expect(supportsDeferredTools({})).toBe(false);
+		expect(supportsDeferredTools(undefined)).toBe(false);
+	});
+
+	describe("planToolSet", () => {
+		it("shrinks to the baseline when nothing was activated (startup/new)", () => {
+			const plan = planToolSet(ALL_ACTIVE, LAZY, new Set());
+
+			expect(plan.desired).toEqual([
+				"lens_diagnostics",
+				"pi_lens_activate_tools",
+			]);
+			expect(plan).toMatchObject({
+				addedCount: 0,
+				removedCount: 3,
+				changed: true,
+			});
+		});
+
+		it("restores baseline + remembered from an all-active rebuild", () => {
+			const plan = planToolSet(ALL_ACTIVE, LAZY, new Set(["ast_grep_search"]));
+
+			expect(plan.desired).toEqual([
+				"lens_diagnostics",
+				"pi_lens_activate_tools",
+				"ast_grep_search",
+			]);
+			expect(plan).toMatchObject({
+				addedCount: 0,
+				removedCount: 2,
+				changed: true,
+			});
+		});
+
+		it("re-adds a remembered tool the host did not report as active", () => {
+			const plan = planToolSet(
+				["lens_diagnostics"],
+				LAZY,
+				new Set(["lsp_navigation"]),
+			);
+
+			expect(plan.desired).toEqual(["lens_diagnostics", "lsp_navigation"]);
+			expect(plan).toMatchObject({
+				addedCount: 1,
+				removedCount: 0,
+				changed: true,
+			});
+		});
+
+		it("reports no change when the active set already matches", () => {
+			const plan = planToolSet(
+				["lens_diagnostics", "ast_grep_search"],
+				LAZY,
+				new Set(["ast_grep_search"]),
+			);
+
+			expect(plan.changed).toBe(false);
+			expect(plan.addedCount).toBe(0);
+			expect(plan.removedCount).toBe(0);
+		});
 	});
 
 	it("logs bounded mutation counts, reason, and deferral capability", () => {
