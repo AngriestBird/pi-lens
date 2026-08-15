@@ -240,7 +240,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 
 	const files = Object.keys(turnState.files);
 
-	if (files.length === 0) {
+	// R1 (#1443 follow-up): a read-only turn (no files touched) must not take
+	// the fast idle-reset path while a carried cascade run — or one still
+	// settling — is waiting for its delivery opportunity. Falling through to
+	// the normal pipeline lets the settle/drain/merge logic below run exactly
+	// as it does for an edit turn, so a carried finding reaches the agent
+	// instead of dying unrendered. `hasCascadeRuns()` is a cheap peek (no
+	// pending work almost every turn), so the common read-only turn still
+	// takes the early return below.
+	if (files.length === 0 && !runtime.hasCascadeRuns()) {
 		// A genuinely clean session must invalidate the persisted guard record.
 		// Blocker records are retained only while the runtime still reports one.
 		if (getFlag("lens-guard") && !runtime.gitGuardHasBlockers) {
@@ -351,26 +359,46 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// producers' contracts were dead code: the measured cases were the two
 		// highest-fan-out cascades of the day (38 and 40 neighbours).
 		//
-		// `projectSeq` is the real signal — it advances on every pi-observed write,
-		// so a mismatch means a newer write superseded this result's content. A
-		// late-but-not-superseded run is surfaced; a superseded one is dropped with
-		// a RECORD (never silently), so the loss stays countable.
-		if (originSeq !== undefined && originSeq !== runtime.projectSeq) {
-			logCascade({
-				phase: "cascade_carry_over_drop",
-				filePath: run.filePath,
-				neighborCount: run.neighborCount,
-				diagnosticCount: run.diagnosticCount,
-				reason: "superseded_by_later_write",
-				metadata: {
-					originProjectSeq: originSeq,
-					projectSeq: runtime.projectSeq,
-					originTurnSeq: originTurn,
-					turnIndex: runtime.turnIndex,
-					carriedTurns: run.carriedTurns,
-				},
-			});
-			return false;
+		// R2 (#1443 follow-up): `projectSeq` alone is NOT a per-file supersede
+		// signal — it is GLOBAL, advancing on every pi-observed write anywhere in
+		// the project. Rejecting on any mismatch meant an edit to an unrelated
+		// file superseded a run that had nothing to do with it, reintroducing the
+		// exact 38/40-neighbour loss #1443 was written to fix, one filter down.
+		// `getFilesChangedSince` (#451) is the honest per-file signal: a run is
+		// superseded only if its own primary file or one of its neighbours was
+		// actually rewritten since it launched. A late-but-not-superseded run is
+		// surfaced; a superseded one is dropped with a RECORD (never silently),
+		// so the loss stays countable.
+		if (originSeq !== undefined) {
+			const changedSince = runtime.getFilesChangedSince(originSeq);
+			if (changedSince.length > 0) {
+				const changedSet = new Set(changedSince);
+				const primaryKey = normalizeMapKey(path.resolve(run.filePath));
+				const neighborKeys = (run.result?.neighbors ?? []).map((n) =>
+					normalizeMapKey(path.resolve(n.filePath)),
+				);
+				const supersededByOwnFile =
+					changedSet.has(primaryKey) ||
+					neighborKeys.some((k) => changedSet.has(k));
+				if (supersededByOwnFile) {
+					logCascade({
+						phase: "cascade_carry_over_drop",
+						filePath: run.filePath,
+						neighborCount: run.neighborCount,
+						diagnosticCount: run.diagnosticCount,
+						reason: "superseded_by_later_write",
+						metadata: {
+							originProjectSeq: originSeq,
+							projectSeq: runtime.projectSeq,
+							originTurnSeq: originTurn,
+							turnIndex: runtime.turnIndex,
+							carriedTurns: run.carriedTurns,
+							changedFiles: changedSince,
+						},
+					});
+					return false;
+				}
+			}
 		}
 		return true;
 	});

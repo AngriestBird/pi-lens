@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import type { CascadeResult } from "../../clients/cascade-types.js";
 import type { Diagnostic } from "../../clients/dispatch/types.js";
@@ -8,6 +8,16 @@ import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { handleTurnEnd } from "../../clients/runtime-turn.js";
 import { setupTestEnvironment } from "./test-utils.js";
+
+// R2 (#1443 follow-up): logCascade no-ops under isTestMode(), so asserting the
+// "superseded_by_later_write" drop is logged with the honest per-file
+// `changedFiles` list requires spying on it directly.
+const logCascadeMock = vi.fn();
+vi.mock("../../clients/cascade-logger.js", () => ({
+	logCascade: (...args: unknown[]) => logCascadeMock(...args),
+	flushCascadeLog: vi.fn().mockResolvedValue(undefined),
+	getCascadeLogPath: vi.fn().mockReturnValue("/tmp/cascade.log"),
+}));
 
 const EMPTY_KNIP_RESULT = {
 	success: true,
@@ -347,6 +357,230 @@ describe("cascade turn-end merge", () => {
 			).not.toContain("late native TS7 error");
 		} finally {
 			_resetOutstandingCascadeTouchesForTests();
+			env.cleanup();
+		}
+	});
+
+	// R1 (#1443 follow-up): a read-only turn — the agent answers a question and
+	// touches no files — must NOT burn the one-turn carry allowance on a run
+	// that never got a chance to reach a drain. Pre-fix, the files-empty early
+	// return in `handleTurnEnd` skipped `consumeCascadeRuns` entirely, so the
+	// EDIT turn that follows the read-only turn saw `beginTurn` stamp
+	// `carriedTurns` past the bound and drop the run before that turn's
+	// turn_end ever ran — the carry was consumed by a turn that could not have
+	// delivered it either way.
+	it("delivers a carried cascade finding across edit -> read-only -> edit turns (#1443 R1)", async () => {
+		const env = setupTestEnvironment("cascade-readonly-carry-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const primary = path.join(env.tmpDir, "primary.ts");
+			const neighbor = path.join(env.tmpDir, "neighbor.ts");
+			const later = path.join(env.tmpDir, "later.ts");
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			fs.writeFileSync(neighbor, "import { x } from './primary';\n");
+			fs.writeFileSync(later, "export const y = 2;\n");
+
+			const turnEnd = async () =>
+				await handleTurnEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: () => false,
+					dbg: () => {},
+					runtime,
+					cacheManager,
+					knipClient: {
+						ensureAvailable: async () => false,
+						analyze: async () => EMPTY_KNIP_RESULT,
+					},
+					depChecker: { ensureAvailable: async () => false },
+					testRunnerClient: { getTestRunTarget: () => null },
+					resetLSPService: () => {},
+					resetFormatService: () => {},
+				} as any);
+
+			// --- Turn 1 (edit): the write's cascade compute misses this turn's
+			// settle cap; the quiet-window reconcile appends the CascadeRun only
+			// AFTER this turn_end already ran (mirrors the reconcile path in the
+			// test above, simplified to a direct appendCascadeRun stamped with
+			// this turn's origin).
+			runtime.beginTurn();
+			cacheManager.addModifiedRange(
+				primary,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+			await turnEnd();
+			expect(
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
+					"",
+			).not.toContain("neighbor.ts");
+
+			runtime.appendCascadeRun({
+				filePath: primary,
+				origin: { turnSeq: runtime.turnIndex, projectSeq: runtime.projectSeq },
+				result: cascade(primary, neighbor, "late carried error"),
+				neighborCount: 1,
+				diagnosticCount: 1,
+			});
+
+			// --- Turn 2 (read-only): the agent answers a question, touches no
+			// files. The carried run must still be able to reach a drain here.
+			runtime.beginTurn();
+			await turnEnd();
+			const turn2Content =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
+				"";
+
+			// --- Turn 3 (edit): if turn 2 already delivered it, turn 3 must NOT
+			// see it again (exactly-once). If turn 2 did not deliver it, turn 3
+			// must still see it (never lost) — either is a pass; only silent loss
+			// across both turns is the bug (the pre-fix outcome).
+			runtime.beginTurn();
+			cacheManager.addModifiedRange(
+				later,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+			await turnEnd();
+			const turn3Content =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
+				"";
+
+			const deliveredOnce =
+				(turn2Content.includes("late carried error") ? 1 : 0) +
+				(turn3Content.includes("late carried error") ? 1 : 0);
+			expect(deliveredOnce).toBe(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// R2 (#1443 follow-up): `projectSeq` is GLOBAL — it used to reject a late
+	// run whenever ANY file anywhere in the project was written after the run
+	// launched, not just a file the run actually covers. An edit to a wholly
+	// unrelated file must not supersede it.
+	it("delivers a late run past an unrelated write (#1443 R2)", async () => {
+		const env = setupTestEnvironment("cascade-r2-unrelated-");
+		logCascadeMock.mockClear();
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const primary = path.join(env.tmpDir, "logger.ts");
+			const neighbor = path.join(env.tmpDir, "consumer.ts");
+			const unrelated = path.join(env.tmpDir, "unrelated.ts");
+			fs.writeFileSync(primary, "export const log = 1;\n");
+			fs.writeFileSync(neighbor, "import { log } from './logger';\n");
+			fs.writeFileSync(unrelated, "export const z = 1;\n");
+
+			const originProjectSeq = runtime.bumpFileSeq(primary).projectSeq;
+			runtime.appendCascadeRun({
+				filePath: primary,
+				origin: { turnSeq: runtime.turnIndex, projectSeq: originProjectSeq },
+				result: cascade(primary, neighbor, "unrelated-write-survives"),
+				neighborCount: 1,
+				diagnosticCount: 1,
+			});
+
+			// A write to a file this run has nothing to do with.
+			runtime.bumpFileSeq(unrelated);
+
+			cacheManager.addModifiedRange(
+				primary,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			const content =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
+				"";
+			expect(content).toContain("unrelated-write-survives");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// R2 (#1443 follow-up): a write that DOES touch the run's own primary file
+	// must still supersede it — the honest per-file drop, logged with the
+	// changed-file list instead of the global projectSeq.
+	it("drops a late run whose own primary file was rewritten, with a log (#1443 R2)", async () => {
+		const env = setupTestEnvironment("cascade-r2-own-file-");
+		logCascadeMock.mockClear();
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const primary = path.join(env.tmpDir, "logger.ts");
+			const neighbor = path.join(env.tmpDir, "consumer.ts");
+			fs.writeFileSync(primary, "export const log = 1;\n");
+			fs.writeFileSync(neighbor, "import { log } from './logger';\n");
+
+			const originProjectSeq = runtime.bumpFileSeq(primary).projectSeq;
+			runtime.appendCascadeRun({
+				filePath: primary,
+				origin: { turnSeq: runtime.turnIndex, projectSeq: originProjectSeq },
+				result: cascade(primary, neighbor, "superseded-by-own-write"),
+				neighborCount: 1,
+				diagnosticCount: 1,
+			});
+
+			// A later write to the run's OWN primary file.
+			runtime.bumpFileSeq(primary);
+
+			cacheManager.addModifiedRange(
+				primary,
+				{ start: 2, end: 2 },
+				false,
+				env.tmpDir,
+			);
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			const content =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
+				"";
+			expect(content).not.toContain("superseded-by-own-write");
+			expect(logCascadeMock).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "cascade_carry_over_drop",
+					reason: "superseded_by_later_write",
+					metadata: expect.objectContaining({
+						changedFiles: expect.arrayContaining([
+							expect.stringContaining("logger.ts"),
+						]),
+					}),
+				}),
+			);
+		} finally {
 			env.cleanup();
 		}
 	});

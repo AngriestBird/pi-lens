@@ -56,9 +56,11 @@ export interface CascadeRun {
 	 * consumed. Stamped by `RuntimeCoordinator.beginTurn` when it carries a run
 	 * appended after the previous turn_end's `consumeCascadeRuns` (the
 	 * quiet-window reconcile's late re-injection). The carry is bounded to ONE
-	 * turn — beginTurn drops (and logs) anything that would reach 2 — and the
-	 * turn-end origin filter reads it so a carried run is not rejected as
-	 * "computed in an earlier turn".
+	 * turn — beginTurn drops (and logs) anything that would reach 2. The
+	 * turn-end origin filter does NOT read this field to decide whether to
+	 * keep or reject a run (see `getFilesChangedSince` in runtime-turn.ts for
+	 * the actual per-file supersede check) — it is carried through only for
+	 * observability in the drop log's metadata.
 	 */
 	carriedTurns?: number;
 }

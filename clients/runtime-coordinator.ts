@@ -268,7 +268,7 @@ export class RuntimeCoordinator {
 					filePath: run.filePath,
 					neighborCount: run.neighborCount,
 					diagnosticCount: run.diagnosticCount,
-					metadata: { carriedTurns: run.carriedTurns, turnIndex: this._turnIndex },
+					metadata: { carriedTurns, turnIndex: this._turnIndex },
 				});
 				return [];
 			}
@@ -577,6 +577,21 @@ export class RuntimeCoordinator {
 		const runs = this._cascadeRuns;
 		this._cascadeRuns = [];
 		return runs;
+	}
+
+	/**
+	 * R1 (#1443 follow-up): non-destructive peek used by turn_end's read-only
+	 * fast path. A carried cascade run (or one still in flight) represents a
+	 * DELIVERY OPPORTUNITY, not turn activity — an agent that answers a question
+	 * without editing anything must still get yesterday's late finding. Before
+	 * this, the files-empty early return skipped `settleCascadeRuns` /
+	 * `consumeCascadeRuns` entirely on a read-only turn, so `beginTurn`'s next
+	 * carry pass saw the run as having survived a turn_start with no offsetting
+	 * drain and dropped it — burning the one-turn carry allowance on a turn that
+	 * never had a chance to deliver.
+	 */
+	hasCascadeRuns(): boolean {
+		return this._cascadeRuns.length > 0 || this._pendingCascadeRuns.length > 0;
 	}
 
 	recordInlineBlockers(filePath: string, summary: string): void {
