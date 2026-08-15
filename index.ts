@@ -346,7 +346,7 @@ export function createHostPorts(
 			sink: (subsystem) => (entry) =>
 				logExtension({ subsystem, level: "debug", message: "host sink entry", metadata: { entry } }),
 		},
-		emit: { bus: emit, lens: emit },
+		emit: { bus: emit },
 		status: { set: (name, value) => context()?.ui?.setStatus?.(name, value) },
 		spawn: { abortSignal: () => context()?.signal, isAllowed: assertInstallAllowed },
 		render: { invalidate: () => options.getRenderInvalidator?.()?.() },
@@ -504,6 +504,16 @@ function cleanStaleTsBuildInfo(cwd: string): string[] {
 // --- Extension ---
 
 export default function (pi: ExtensionAPI) {
+	// Event contexts belong to the activation that owns this factory closure.
+	// The process-global latest ctx remains only a boot-window fallback.
+	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
+	let ownEventCtx: any;
+	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
+	const rememberOwnEventCtx = (ctx: any): void => {
+		if (!ctx) return;
+		ownEventCtx = ctx;
+		rememberEventCtx(ctx);
+	};
 	let renderInvalidator: (() => void) | undefined;
 	const hostPorts = createHostPorts(pi, {
 		getContext: () => latestEventCtx,
@@ -534,8 +544,20 @@ export default function (pi: ExtensionAPI) {
 		// become stale; every session_start must reclaim them before #473 can
 		// return early for a concurrent in-process subagent. (#1383)
 		wireUserNotifier(hostPorts);
-		initLensEventsGetter(() => ({ emit: hostPorts.emit.lens }));
-		const getLiveEmit = () => ({ emit: hostPorts.emit.bus, ctx: latestEventCtx });
+		const getLiveEmit = () => ({
+			emit: hostPorts.emit.bus,
+			// H2 (#1415 review): NOT `?? latestEventCtx`. The global belongs to
+			// whichever activation last received an event — a SIBLING activation
+			// after a replacement, with no relation to this closure's `pi.events`.
+			// Falling back to it pairs a live emitter with a foreign ctx, which
+			// the stale-session probe cannot catch (it looks live) and silently
+			// drops every publish until this activation's own first handler
+			// fires. An unset `ownEventCtx` (this activation's own boot window)
+			// must probe undefined -> "ready" -> delivery attempted, exactly like
+			// today, not borrow a sibling's ctx.
+			ctx: ownEventCtx,
+		});
+		initLensEventsGetter(getLiveEmit);
 		wireBusEmitterGetter(getLiveEmit);
 		wireDiagnosticsBusEmitterGetter(getLiveEmit);
 		wireDispositionBusEmitterGetter(getLiveEmit);
@@ -1511,7 +1533,7 @@ export default function (pi: ExtensionAPI) {
 		void warmFormatters().catch((err) =>
 			logExtension({ subsystem: "format", level: "warn", message: `formatter warm failed: ${err}` }),
 		);
-		rememberEventCtx(ctx);
+		rememberOwnEventCtx(ctx);
 		refreshCtxDerivedPlumbing();
 		const sessionStartFiredAt = Date.now();
 		try {
@@ -1882,7 +1904,7 @@ export default function (pi: ExtensionAPI) {
 	// Real-time feedback on file writes/edits
 	// biome-ignore lint/suspicious/noExplicitAny: pi.on overload mismatch for tool_result event type
 	(pi as any).on("tool_result", async (event: any, ctx: any) => {
-		rememberEventCtx(ctx);
+		rememberOwnEventCtx(ctx);
 		if (!lensEnabled) return;
 		updateRuntimeIdentityFromEvent(event);
 		// Publish this turn's abort signal so the dispatch's linter/type-check
@@ -1940,7 +1962,7 @@ export default function (pi: ExtensionAPI) {
 	// --- Turn end: batch jscpd/madge on collected files, then clear state ---
 	// Clear cascade snapshot at start of each new turn so stale data never leaks
 	pi.on("turn_start", (_event: any, ctx) => {
-		rememberEventCtx(ctx);
+		rememberOwnEventCtx(ctx);
 		// Trust can change without a new session. Re-adopt before this turn can
 		// reach any install-capable or LSP-spawn path.
 		adoptProjectTrustFromPorts(hostPorts);
