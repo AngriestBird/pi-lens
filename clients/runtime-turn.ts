@@ -492,10 +492,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		if (parts.length > 0) {
 			const section = parts.join("\n\n");
 			blockerParts.push(section);
-			// #1446 item 1: proves the cascade section actually reached
-			// blockerParts (and therefore the agent-facing injected text) — the
-			// counters alone (cascade_result, cascade_turn_end) never confirmed
-			// delivery, only computation.
+			// #1446 item 1: proves the cascade section reached `blockerParts` —
+			// i.e. it was QUEUED for persistence into the turn-end advisory — not
+			// that it reached the agent. The counters alone (cascade_result,
+			// cascade_turn_end) never confirmed even that much, only computation.
+			// Actual delivery happens later, via consumeTurnEndFindings/
+			// peekTurnEndFindings, and can still be suppressed after this point
+			// (e.g. allFilesDeleted, cross-turn dedup, or the session ending
+			// before the next turn_end drains it) — this record does not prove
+			// the agent ever saw the text.
 			logCascade({
 				phase: "cascade_injected",
 				filePath: files[0] ?? cwd,

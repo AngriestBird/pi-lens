@@ -1396,6 +1396,17 @@ export async function computeCascadeForFile(
 	// whether the caches were absorbing repeat work or every touch was cold.
 	let recentlyCleanHits = 0;
 	let cacheHits = 0;
+	// F1 (#1446 follow-up): `coldTouches` must be counted at the point each
+	// neighbour's OUTCOME is actually known, not derived from `coldSnapshotPaths`
+	// (finalized earlier, before the cache-hit checks below run against it). Using
+	// the pre-outcome list let a neighbour double-count (cold-snapshot AND cache/
+	// recently-clean hit) or vanish from every bucket (an `activePaths` neighbour —
+	// e.g. Python/Go — that misses both caches). These four counters partition the
+	// touched-neighbour set `[...activePaths, ...coldSnapshotPaths]` exactly once
+	// each: a neighbour with no LSP server configured is the only outcome
+	// deliberately excluded (never attempted, no bucket).
+	let deferredTouches = 0;
+	let coldTouches = 0;
 
 	if (sortedNeighbors.length > 0) {
 		const snapshotPaths = sortedNeighbors.filter(shouldReadCascadeFromSnapshot);
@@ -1652,6 +1663,12 @@ export async function computeCascadeForFile(
 								});
 								const durationMs = Date.now() - neighborStart;
 								if (tier === "collect-later") collectLaterSkipped++;
+								// F1: both tier3-silent and collect-later skip the in-lane
+								// wait and record an outstanding touch for the quiet-window
+								// reconcile — neither a cache hit nor a genuine completed
+								// cold touch, so both share this explicit "deferred" bucket
+								// instead of falling out of the partition uncounted.
+								deferredTouches++;
 								logCascade({
 									phase: "cascade_tier3_skip",
 									filePath,
@@ -1685,6 +1702,14 @@ export async function computeCascadeForFile(
 				// Cold-snapshot neighbors (autoPropagate LSP, server warm) use a tighter
 				// 1000ms budget — they should respond quickly; we'd rather return zero
 				// than block cascade for 2s on a slow open.
+				// F1: this is the ONE remaining outcome after cache hit, recently-clean
+				// hit, and tier-aware deferral have all been ruled out — a genuine
+				// active LSP touch is being issued right now. Count it here (an
+				// attempt, whether it resolves, times out, or the promise rejects
+				// below in the allSettled catch) rather than from `coldSnapshotPaths`,
+				// which is finalized before any of the above checks run and includes
+				// neighbours that resolve via cache/recently-clean instead.
+				coldTouches++;
 				const rawDiags = await lspService.touchFile(neighborPath, content, {
 					diagnostics: "document",
 					collectDiagnostics: true,
@@ -1933,9 +1958,16 @@ export async function computeCascadeForFile(
 			// #1446 item 5: cache effectiveness as a number instead of an inference
 			// from `coldSnapshot`/`snapshotMissing` flags scattered across
 			// per-neighbor `neighbor_touch`/`neighbor_snapshot` rows.
+			// F1: cacheHits + recentlyCleanHits + deferredTouches + coldTouches
+			// partition `[...activePaths, ...coldSnapshotPaths]` exactly — each
+			// counter increments at the point its neighbour's outcome is actually
+			// decided, not from `coldSnapshotPaths` (a pre-outcome list finalized
+			// before the cache-hit checks run). A neighbour with no LSP server
+			// configured is the one deliberately uncounted outcome (never touched).
 			cacheHits,
 			recentlyCleanHits,
-			coldTouches: coldSnapshotPaths.length,
+			deferredTouches,
+			coldTouches,
 			// #1446 item 4: the budget in force and how many eligible candidates
 			// it cut off this run — the correctness half (a truncated run being
 			// silently discarded) is #1443; this is observability only.
