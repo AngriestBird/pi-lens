@@ -612,6 +612,32 @@ describe("handleNotifyOpen", () => {
 		expect(state.openDocuments.has(TEST_KEY)).toBe(true);
 	});
 
+	it("detaches the classic TypeScript projectInfo probe after didOpen", async () => {
+		const state = createMockState({
+			serverId: "typescript",
+			launchVariant: "classic",
+			advertisedCommands: new Set(["typescript.tsserverRequest"]),
+		});
+		vi.mocked(state.connection.sendRequest).mockResolvedValue({
+			success: true,
+			body: { configFileName: "/project/tsconfig.json" },
+		});
+
+		await handleNotifyOpen(state, TEST_FILE, "const x = 1;", "typescript");
+		await vi.waitFor(() => {
+			expect(state.connection.sendRequest).toHaveBeenCalledWith(
+				"workspace/executeCommand",
+				{
+					command: "typescript.tsserverRequest",
+					arguments: [
+						"projectInfo",
+						{ file: TEST_FILE, needFileNameList: false },
+					],
+				},
+			);
+		});
+	});
+
 	it("suppresses didChangeWatchedFiles in silent open mode", async () => {
 		const state = createMockState();
 		await handleNotifyOpen(

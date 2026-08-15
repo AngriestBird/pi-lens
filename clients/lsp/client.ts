@@ -42,6 +42,7 @@ import {
 import { recordLspChild, removeLspChild } from "../instance-registry.js";
 import type { LSPProcess } from "./launch.js";
 import { normalizeMapKey, uriToPath } from "./path-utils.js";
+import { probeTsserverProjectIdentity } from "./tsserver-sync.js";
 import {
 	ADVERTISED_POSITION_ENCODINGS,
 	convertCharacterOffset,
@@ -723,6 +724,8 @@ export interface LSPClientState {
 	/** Original URI spelling for each open document; path keys are normalized. */
 	readonly openDocumentUris?: Map<string, string>;
 	readonly pendingOpens: Set<string>;
+	/** Normalized files already claimed by the classic tsserver project probe. */
+	projectIdentityProbedFiles?: Set<string>;
 	/** Mutable: updated by applyDynamicCapabilities after registerCapability events */
 	workspaceDiagnosticsSupport: LSPWorkspaceDiagnosticsSupport;
 	/** Mutable: upgraded by applyDynamicCapabilities after registerCapability events */
@@ -2026,6 +2029,22 @@ export async function handleNotifyOpen(
 	state.openDocuments.add(normalizedPath);
 	state.closedDocuments?.delete(normalizedPath);
 	state.openDocumentUris?.set(normalizedPath, uri);
+	// Telemetry is deliberately detached after didOpen succeeds. runServerCommand
+	// supplies the existing bounded executeCommand backstop; the probe itself is
+	// classic-only and swallows every failure.
+	void probeTsserverProjectIdentity({
+		serverId: state.serverId,
+		launchVariant: state.launchVariant,
+		clientRoot: state.root,
+		file: filePath,
+		probedFiles:
+			state.projectIdentityProbedFiles ??
+			(state.projectIdentityProbedFiles = new Set()),
+		commandChannel: {
+			executeCommand: (command, args) =>
+				runServerCommand(state, command, args),
+		},
+	});
 }
 
 export async function handleNotifyChange(
@@ -2611,6 +2630,7 @@ export async function createLSPClient(options: {
 		closedDocuments: new Set(),
 		openDocumentUris: new Map(),
 		pendingOpens: new Set(),
+		projectIdentityProbedFiles: new Set(),
 		// these are filled in after initialize — cast to avoid two-phase init
 		workspaceDiagnosticsSupport:
 			undefined as unknown as LSPWorkspaceDiagnosticsSupport,

@@ -31,6 +31,7 @@ import {
 	direntsHaveMarkerGlobMatch,
 	isAtOrAboveHomeDir,
 	isFullyQualified,
+	isWindowsPath,
 } from "../path-utils.js";
 import {
 	ensureTool,
@@ -112,8 +113,16 @@ const PROJECT_BOUNDARY_MARKERS = [
 const loggedRootCeilingClamps = new Set<string>();
 
 function isSameOrWithin(ancestor: string, candidate: string): boolean {
-	const relative = path.relative(path.resolve(ancestor), path.resolve(candidate));
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+	const windowsShaped = isWindowsPath(ancestor) || isWindowsPath(candidate);
+	const pathApi = windowsShaped ? path.win32 : path;
+	const relative = pathApi.relative(
+		pathApi.resolve(ancestor),
+		pathApi.resolve(candidate),
+	);
+	return (
+		relative === "" ||
+		(!relative.startsWith("..") && !pathApi.isAbsolute(relative))
+	);
 }
 
 /** Enforce the session cwd as the hard boundary for LSP client root selection. */
@@ -122,12 +131,14 @@ export function enforceLspRootCeiling(
 	sessionCwd: string,
 	filePath?: string,
 ): string {
-	const resolvedRoot = path.resolve(root);
-	const resolvedCwd = path.resolve(sessionCwd);
+	const windowsShaped = isWindowsPath(root) || isWindowsPath(sessionCwd);
+	const pathApi = windowsShaped ? path.win32 : path;
+	const resolvedRoot = pathApi.resolve(root);
+	const resolvedCwd = pathApi.resolve(sessionCwd);
 	// Callers may explicitly inspect an out-of-session file (notably isolated
 	// tests and API consumers). The cwd ceiling governs roots for files that are
 	// actually inside the declared session project.
-	if (filePath && !isSameOrWithin(resolvedCwd, path.resolve(filePath))) {
+	if (filePath && !isSameOrWithin(resolvedCwd, pathApi.resolve(filePath))) {
 		return resolvedRoot;
 	}
 	if (isSameOrWithin(resolvedCwd, resolvedRoot)) return resolvedRoot;
@@ -1467,10 +1478,13 @@ const JS_TS_LSP_EXTENSIONS = KIND_EXTENSIONS["jsts"].filter(
 	(ext) => ext !== ".svelte" && ext !== ".vue",
 );
 
-// Marker set used for both the unbounded TypeScriptProjectRoot walk and the
-// extension-bounded walk below. Kept in one place so both code paths look
-// for the same project signals.
-const TS_PROJECT_MARKERS = [
+// TypeScript identity and tooling discovery deliberately use separate marker
+// families. A governing config wins even when a package directory supplies
+// hoisted binaries. Keep configs out of PROJECT_BOUNDARY_MARKERS: #1373 still
+// coalesces a config-only nested root when an ancestor client was hosted first
+// (nested-config-first remains intentionally open-order-sensitive).
+const TS_CONFIG_MARKERS = ["tsconfig.json", "jsconfig.json"] as const;
+const TS_TOOLING_MARKERS = [
 	"package-lock.json",
 	"bun.lockb",
 	"bun.lock",
@@ -1479,9 +1493,26 @@ const TS_PROJECT_MARKERS = [
 	"package.json",
 ] as const;
 
-const TypeScriptProjectRoot = IgnoreHomeRoot(
-	createRootDetector([...TS_PROJECT_MARKERS]),
+const TypeScriptConfigRoot = IgnoreHomeRoot(
+	createRootDetector([...TS_CONFIG_MARKERS]),
 );
+const TypeScriptToolingRoot = IgnoreHomeRoot(
+	createRootDetector([...TS_TOOLING_MARKERS]),
+);
+
+async function findTypeScriptProjectRoot(
+	file: string,
+): Promise<string | undefined> {
+	const [configRoot, toolingRoot] = await Promise.all([
+		TypeScriptConfigRoot(file),
+		TypeScriptToolingRoot(file),
+	]);
+	if (!configRoot) return toolingRoot;
+	if (!toolingRoot) return configRoot;
+	// A config inside (or beside) the nearest package governs its files. A
+	// config above a nearer package must not erase that topology boundary.
+	return isSameOrWithin(toolingRoot, configRoot) ? configRoot : toolingRoot;
+}
 
 /**
  * Walk up from the file's directory looking for a TypeScript project marker,
@@ -1498,8 +1529,9 @@ async function findExtensionBoundedRoot(
 ): Promise<string | undefined> {
 	const startDir = path.resolve(path.dirname(file));
 	let currentDir = startDir;
+	let toolingRoot: string | undefined;
 	while (true) {
-		for (const pattern of TS_PROJECT_MARKERS) {
+		for (const pattern of TS_CONFIG_MARKERS) {
 			try {
 				await stat(path.join(currentDir, pattern));
 				return currentDir;
@@ -1507,12 +1539,26 @@ async function findExtensionBoundedRoot(
 				/* not found, try next marker */
 			}
 		}
+		if (!toolingRoot) {
+			for (const pattern of TS_TOOLING_MARKERS) {
+				try {
+					await stat(path.join(currentDir, pattern));
+					toolingRoot = currentDir;
+					break;
+				} catch {
+					/* not found, try next marker */
+				}
+			}
+		}
+		// A package/lockfile is a hard topology boundary. A config in this
+		// directory already won above; do not cross this boundary for one above.
+		if (toolingRoot) return toolingRoot;
 		// Stop at or beyond the extensions root — never walk into the
 		// pi-agent-wide scope.
 		const currentKey = normalizeSlashKey(currentDir);
-		if (currentKey === extensionRootKey) return undefined;
+		if (currentKey === extensionRootKey) return toolingRoot;
 		const parent = path.dirname(currentDir);
-		if (parent === currentDir) return undefined;
+		if (parent === currentDir) return toolingRoot;
 		currentDir = parent;
 	}
 }
@@ -1529,7 +1575,7 @@ async function hasAgentLevelProjectMarker(
 ): Promise<boolean> {
 	const agentDir = path.dirname(extensionRootKey);
 	if (!agentDir || agentDir === extensionRootKey) return false;
-	for (const pattern of TS_PROJECT_MARKERS) {
+	for (const pattern of [...TS_CONFIG_MARKERS, ...TS_TOOLING_MARKERS]) {
 		try {
 			await stat(path.join(agentDir, pattern));
 			return true;
@@ -1559,7 +1605,7 @@ const TypeScriptRoot: RootFunction = DenoExcludeRoot(async (file) => {
 		// analyze a lone .ts file with no package.json above or below).
 		return undefined;
 	}
-	const projectRoot = await TypeScriptProjectRoot(file);
+	const projectRoot = await findTypeScriptProjectRoot(file);
 	if (projectRoot) return projectRoot;
 	return FileDirRoot(file);
 });

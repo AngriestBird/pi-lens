@@ -36,6 +36,7 @@ import { shouldPreferPullOnlyDiagnostics } from "../lsp-budget.js";
 import { withDeadline } from "../deadline-utils.js";
 import {
 	isAtOrAboveHomeDir,
+	isWindowsPath,
 	normalizeMapKey,
 	uriToPath,
 } from "../path-utils.js";
@@ -1018,11 +1019,15 @@ export class LSPService {
 		])) {
 			if (!key.startsWith(prefix)) continue;
 			const ancestorKey = key.slice(prefix.length);
-			const relative = path.relative(ancestorKey, rootKey);
+			const pathApi =
+				isWindowsPath(ancestorKey) || isWindowsPath(rootKey)
+					? path.win32
+					: path;
+			const relative = pathApi.relative(ancestorKey, rootKey);
 			if (
 				relative === "" ||
 				relative.startsWith("..") ||
-				path.isAbsolute(relative)
+				pathApi.isAbsolute(relative)
 			) {
 				continue;
 			}
