@@ -67,7 +67,7 @@ constraints:                  # metavariable regex constraints work
 
 ⚠ **`has`/`inside` default to the immediate child/parent (`stopBy: neighbor`).** For a
 recursive descendant/ancestor search add `stopBy: end`. This is the #1 migration
-gotcha — see the `has` note below.
+gotcha — see the `has` note in `reference.md`.
 
 ## YAML quoting — REQUIRED (js-yaml will reject the rule otherwise)
 

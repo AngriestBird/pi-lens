@@ -22,12 +22,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { createAstGrepSearchTool } from "../../tools/ast-grep-search.js";
-import { createAstGrepReplaceTool } from "../../tools/ast-grep-replace.js";
-import { createAstGrepOutlineTool } from "../../tools/ast-grep-outline.js";
 import { createAstGrepDumpTool } from "../../tools/ast-dump.js";
-import { createLspNavigationTool } from "../../tools/lsp-navigation.js";
+import { createAstGrepOutlineTool } from "../../tools/ast-grep-outline.js";
+import { createAstGrepReplaceTool } from "../../tools/ast-grep-replace.js";
+import { createAstGrepSearchTool } from "../../tools/ast-grep-search.js";
 import { createLspDiagnosticsTool } from "../../tools/lsp-diagnostics.js";
+import { createLspNavigationTool } from "../../tools/lsp-navigation.js";
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
 const SKILLS_DIR = path.join(REPO_ROOT, "skills");
@@ -156,7 +156,10 @@ function extractTableParamCandidates(text: string): string[] {
 			if (!cell) continue;
 			// cell may list several comma-separated params, e.g. "path, line, character"
 			for (const raw of cell.split(",")) {
-				const token = raw.replace(/[`*]/g, "").trim().split(/[#\s(]/)[0];
+				const token = raw
+					.replace(/[`*]/g, "")
+					.trim()
+					.split(/[#\s(]/)[0];
 				if (token && IDENT_RE.test(token)) out.push(token);
 			}
 		}
@@ -203,6 +206,11 @@ describe("skill doc param-name drift (#1423/#1424)", () => {
 
 		it(`${rel}: table param references exist on a documented tool's real schema`, () => {
 			const candidates = extractTableParamCandidates(text);
+			// Zero-extraction guard: a regex regression that extracts NOTHING
+			// must fail loudly, not pass on an empty candidate list. Floors are
+			// the current per-file counts minus headroom for legitimate doc
+			// shrinkage; raise them if the docs grow.
+			expect(candidates.length).toBeGreaterThanOrEqual(4);
 			const unknown = candidates.filter(
 				(c) => !known.has(c) && !RULE_DSL_ALLOWLIST.has(c),
 			);
@@ -215,6 +223,8 @@ describe("skill doc param-name drift (#1423/#1424)", () => {
 
 		it(`${rel}: fenced-example param= references exist on a documented tool's real schema`, () => {
 			const candidates = extractCodeBlockParamCandidates(text);
+			// Same zero-extraction guard as the table check above.
+			expect(candidates.length).toBeGreaterThanOrEqual(3);
 			const unknown = candidates.filter(
 				(c) => !known.has(c) && !RULE_DSL_ALLOWLIST.has(c),
 			);
@@ -249,12 +259,7 @@ const PUBLISHED_DIRS = new Set(
 		.map((f) => f.replace(/\/$/, "")),
 );
 
-const SOURCE_CHECKOUT_DIRS = new Set([
-	"clients",
-	"tests",
-	"tools",
-	"scripts",
-]);
+const SOURCE_CHECKOUT_DIRS = new Set(["clients", "tests", "tools", "scripts"]);
 
 const SOURCE_CHECKOUT_PHRASE_RE = /source checkout/i;
 
@@ -296,10 +301,7 @@ describe("skill doc path drift (#1424)", () => {
 					problems.push(`${truncated} does not exist on disk`);
 					continue;
 				}
-				if (
-					SOURCE_CHECKOUT_DIRS.has(topDir) &&
-					!PUBLISHED_DIRS.has(topDir)
-				) {
+				if (SOURCE_CHECKOUT_DIRS.has(topDir) && !PUBLISHED_DIRS.has(topDir)) {
 					// require the annotation within a generous window around the mention
 					const windowStart = Math.max(0, index - 600);
 					const windowEnd = Math.min(text.length, index + 600);
@@ -329,7 +331,10 @@ describe("rule-writing skill language lists vs rule-schema.json (#1424, pins the
 		const listLine = skillText
 			.split("\n")
 			.find((l) => l.startsWith("`TypeScript`"));
-		expect(listLine, "expected a backtick-delimited language list line").toBeTruthy();
+		expect(
+			listLine,
+			"expected a backtick-delimited language list line",
+		).toBeTruthy();
 		const documented = new Set(
 			[...(listLine ?? "").matchAll(/`([A-Za-z]+)`/g)].map((m) => m[1]),
 		);
@@ -378,9 +383,7 @@ describe("rule-writing skill language lists vs rule-schema.json (#1424, pins the
 		const activeDirs = new Set(
 			fs
 				.readdirSync(tsQueriesDir)
-				.filter((d) =>
-					fs.statSync(path.join(tsQueriesDir, d)).isDirectory(),
-				)
+				.filter((d) => fs.statSync(path.join(tsQueriesDir, d)).isDirectory())
 				.filter((d) => !d.endsWith("-disabled")),
 		);
 
