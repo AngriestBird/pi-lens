@@ -51,6 +51,11 @@ Auxiliary LSP waits use each server's declared aggregate wait, capped by a
 without charging every edit for a scanner's longer cold-start budget. An
 explicit `PI_LENS_AUX_GRACE_MS` overrides the global ceiling. (#1458)
 
+Late auxiliary LSP publications are captured before the next resync clears the
+client cache. Carry them into that read only when their stored SHA-256 content
+binding matches the touch content exactly. Unknown or changed-content bindings
+never replay. (#1458)
+
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
 the agent. `turnSeq` is not a staleness signal for such a run (a late run is by

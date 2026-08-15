@@ -2343,6 +2343,22 @@ export class LSPService {
 		const diagnosticBaselines = new Map(
 			spawned.map((entry) => [entry.client, entry.client.diagnosticsVersion]),
 		);
+		// #1458: read a late auxiliary publication BEFORE the ordinary resync
+		// clears its client cache. Carry it only when the publication's exact
+		// sent-content fingerprint matches this touch's content. A changed edit,
+		// version-less publication, or malformed binding fails closed and is not
+		// replayed. The fresh notify still runs below, so scanners continue toward
+		// a publication for this touch while the prior late result reaches the read.
+		const touchContentHash = this.hashContent(content);
+		const carriedAuxiliary = options.collectDiagnostics
+			? spawned.flatMap((entry) => {
+					if (entry.info.role !== "auxiliary") return [];
+					const binding = entry.client.getDiagnosticBinding?.(filePath);
+					if (binding?.contentHash !== touchContentHash) return [];
+					const diags = entry.client.getDiagnostics(filePath);
+					return diags.length > 0 ? [{ diags, binding }] : [];
+				})
+			: [];
 		// #743: PER-SERVER notify-write deadlines. Each server's didOpen/didChange
 		// write gets its OWN notifyWriteBudgetMs budget rather than one shared
 		// deadline over a single Promise.all — otherwise one backpressured server
@@ -2992,9 +3008,10 @@ export class LSPService {
 		let collected = options.collectDiagnostics
 			? tsserverSyncConfirmed !== undefined
 				? mergeLspDiagnostics(tsserverSyncConfirmed)
-				: mergeLspDiagnostics(
-						spawned.flatMap((entry) => entry.client.getDiagnostics(filePath)),
-					)
+				: mergeLspDiagnostics([
+						...spawned.flatMap((entry) => entry.client.getDiagnostics(filePath)),
+						...carriedAuxiliary.flatMap((entry) => entry.diags),
+					])
 			: undefined;
 		// #1095 (P3-b): whether `collected` came from a tsserver sync confirm
 		// (`tsserverSyncRequest`) rather than the publish cache. A sync-confirmed
@@ -3229,9 +3246,12 @@ export class LSPService {
 						// Optional-chain so a client without the getter (test doubles, a
 						// partially-mocked client) yields "unknown" rather than throwing —
 						// unknown preserves pre-#1095 behavior for that contributor.
-						spawned.map((entry) =>
-							entry.client.getDiagnosticBinding?.(filePath),
-						),
+						[
+							...spawned.map((entry) =>
+								entry.client.getDiagnosticBinding?.(filePath),
+							),
+							...carriedAuxiliary.map((entry) => entry.binding),
+						],
 					);
 			result.binding = binding;
 		}

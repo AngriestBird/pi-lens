@@ -15,6 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -122,6 +123,34 @@ function makeClient(
 						waitSettled = true;
 						resolve();
 					}, delayMs),
+				),
+		),
+	};
+}
+
+function makeLateBoundClient(content: string) {
+	let published = false;
+	const diagnostic = makeDiagnostic("late aux finding");
+	return {
+		...makeClient(2500),
+		getDiagnostics: vi.fn(() => (published ? [diagnostic] : [])),
+		getDiagnosticBinding: vi.fn(() =>
+			published ? { contentHash: hashDiagnosticContent(content) } : undefined,
+		),
+		notify: {
+			open: vi.fn(async () => {
+				published = false;
+			}),
+			change: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		},
+		waitForDiagnostics: vi.fn(
+			() =>
+				new Promise<void>((resolve) =>
+					setTimeout(() => {
+						published = true;
+						resolve();
+					}, 2500),
 				),
 		),
 	};
@@ -321,6 +350,74 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 			(d: { message: string }) => d.message,
 		);
 		expect(messages).toContain("primary error");
+	});
+
+	it("carries a late bound auxiliary publication into the next unchanged read", async () => {
+		const content = "const value = 1;";
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(100))
+			.mockResolvedValueOnce(makeLateBoundClient(content));
+		await service.getClientsForFile(FILE);
+
+		const first = service.touchFile(FILE, content, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		expect((await first).diags).toHaveLength(0);
+		await vi.advanceTimersByTimeAsync(400);
+
+		const next = service.touchFile(FILE, content, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		expect((await next).diags.map((diagnostic) => diagnostic.message)).toContain(
+			"late aux finding",
+		);
+	});
+
+	it("rejects a late auxiliary publication when the next read changes content", async () => {
+		const oldContent = "const value = 1;";
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(100))
+			.mockResolvedValueOnce(makeLateBoundClient(oldContent));
+		await service.getClientsForFile(FILE);
+
+		const first = service.touchFile(FILE, oldContent, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		await first;
+		await vi.advanceTimersByTimeAsync(400);
+
+		const next = service.touchFile(FILE, "const value = 2;", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		expect((await next).diags).toHaveLength(0);
 	});
 });
 
