@@ -1375,6 +1375,11 @@ export async function computeCascadeForFile(
 	// the latter must not collapse into a clean-looking result (#1104 honesty
 	// rule, same doctrine as #1023's graph-degraded indeterminate marker).
 	let fallbackBindingRejected = false;
+	// #1444: neighbours whose in-lane wait was skipped for the quiet-window
+	// reconcile to answer later. Logged on `cascade_result` so a cascade that
+	// deferred EVERY neighbour is distinguishable from a genuine leaf (both are
+	// `neighborCount: 0` with no output otherwise).
+	let collectLaterSkipped = 0;
 
 	if (sortedNeighbors.length > 0) {
 		const snapshotPaths = sortedNeighbors.filter(shouldReadCascadeFromSnapshot);
@@ -1628,6 +1633,7 @@ export async function computeCascadeForFile(
 									touchedAt,
 								});
 								const durationMs = Date.now() - neighborStart;
+								if (tier === "collect-later") collectLaterSkipped++;
 								logCascade({
 									phase: "cascade_tier3_skip",
 									filePath,
@@ -1901,6 +1907,8 @@ export async function computeCascadeForFile(
 		metadata: {
 			filesWithErrors,
 			hasOutput: formatted.length > 0,
+			// #1444: >0 means "answers are still outstanding", not "nothing found".
+			collectLaterSkipped,
 			// Log when cascade ran but found nothing — distinguishes "clean" from "no signal"
 			noNeighbors: visibleNeighbors.length === 0,
 			noErrors: visibleNeighbors.length > 0 && filesWithErrors === 0,

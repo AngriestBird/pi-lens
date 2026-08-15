@@ -606,6 +606,71 @@ describe("registerCascadeTierReconcileTask", () => {
 
 		expect(onResolvedFound).not.toHaveBeenCalled();
 	});
+
+	// #1444 (issue impact #2): the mirror case. A resolved-CLEAN outcome is a
+	// CONFIRMED observation (a per-file publish that landed after the touch), and
+	// it is the only thing that can clear the neighbour's now-stale footer errors
+	// — the skipped in-lane wait never reconciled anything. It must be handed to
+	// the caller with the publish timestamp as the observation time.
+	it("hands a resolved-clean outcome to onResolvedClean with its publish time", async () => {
+		const onResolvedFound = vi.fn();
+		const onResolvedClean = vi.fn();
+		const warm = {
+			client: {
+				serverId: "typescript",
+				getAllDiagnostics: vi.fn().mockReturnValue(
+					new Map([
+						[normalizeMapKey("C:/repo/neighbor.ts"), { diags: [], ts: 2_000 }],
+					]),
+				),
+			},
+		};
+		mod.registerCascadeTierReconcileTask(
+			() => ({ getWarmClientForFile: vi.fn().mockResolvedValue(warm) }) as any,
+			{ onResolvedFound, onResolvedClean },
+		);
+		mod.recordOutstandingCascadeTouch({
+			filePath: "C:/repo/neighbor.ts",
+			serverId: "typescript",
+			touchedAt: 1_000,
+		});
+		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
+		await task();
+
+		expect(onResolvedFound).not.toHaveBeenCalled();
+		expect(onResolvedClean).toHaveBeenCalledTimes(1);
+		expect(onResolvedClean).toHaveBeenCalledWith({
+			filePath: "C:/repo/neighbor.ts",
+			serverId: "typescript",
+			publishedAt: 2_000,
+		});
+	});
+
+	// #240 doctrine: an UNRESOLVED touch is not a clean answer, so it must never
+	// reach the footer-clearing callback.
+	it("never calls onResolvedClean for an unresolved touch", async () => {
+		const onResolvedClean = vi.fn();
+		const warm = {
+			client: {
+				serverId: "typescript",
+				// Nothing published for the file since the touch.
+				getAllDiagnostics: vi.fn().mockReturnValue(new Map()),
+			},
+		};
+		mod.registerCascadeTierReconcileTask(
+			() => ({ getWarmClientForFile: vi.fn().mockResolvedValue(warm) }) as any,
+			{ onResolvedClean },
+		);
+		mod.recordOutstandingCascadeTouch({
+			filePath: "C:/repo/neighbor.ts",
+			serverId: "typescript",
+			touchedAt: 1_000,
+		});
+		const task = registerQuietWindowTask.mock.calls[0][1] as () => Promise<void>;
+		await task();
+
+		expect(onResolvedClean).not.toHaveBeenCalled();
+	});
 });
 
 describe("isTierAwareCascadeEnabled kill switch", () => {

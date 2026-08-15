@@ -729,6 +729,15 @@ describe("computeCascadeForFile", () => {
 					metadata: expect.objectContaining({ waitTier: "collect-later" }),
 				}),
 			);
+			// #1444: a cascade that deferred EVERY neighbour looks exactly like a
+			// clean leaf in cascade.log (no neighbours, no output) unless the
+			// deferral count says otherwise.
+			expect(mocks.logCascade).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "cascade_result",
+					metadata: expect.objectContaining({ collectLaterSkipped: 1 }),
+				}),
+			);
 			const settled = await reconcileOutstandingCascadeTouches({
 				getWarmClientForFile: vi.fn().mockResolvedValue({
 					client: {
@@ -1670,6 +1679,57 @@ describe("computeCascadeForFile", () => {
 					inconclusive: true,
 				});
 				expect(run.result?.formatted).toContain("inconclusive");
+
+				// #1444 (CLASSIC lane, end to end): the marker is a deliberate
+				// behavior change on the classic full-wait path — output that was
+				// empty for a lapsed budget is now a non-empty honest note. Assert it
+				// through the turn-end seam, not just the formatter: a marker that
+				// never reaches the agent's message is not an honesty improvement.
+				const { RuntimeCoordinator } = await import(
+					"../../clients/runtime-coordinator.js"
+				);
+				const { CacheManager } = await import("../../clients/cache-manager.js");
+				const { handleTurnEnd } = await import("../../clients/runtime-turn.js");
+				const { consumeTurnEndFindings } = await import(
+					"../../clients/runtime-context.js"
+				);
+				const runtime = new RuntimeCoordinator();
+				const cacheManager = new CacheManager(false);
+				cacheManager.addModifiedRange(
+					primary,
+					{ start: 1, end: 1 },
+					false,
+					env.tmpDir,
+				);
+				runtime.appendCascadeRun(run);
+				await handleTurnEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: () => false,
+					dbg: () => {},
+					runtime,
+					cacheManager,
+					knipClient: {
+						ensureAvailable: async () => false,
+						analyze: async () => ({
+							success: true,
+							issues: [],
+							unusedExports: [],
+							unusedFiles: [],
+							unusedDeps: [],
+							unlistedDeps: [],
+							summary: "skipped",
+						}),
+					},
+					depChecker: { ensureAvailable: async () => false },
+					testRunnerClient: { getTestRunTarget: () => null },
+					resetLSPService: () => {},
+					resetFormatService: () => {},
+				} as any);
+				const turnEndContent =
+					consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]
+						?.content ?? "";
+				expect(turnEndContent).toContain("inconclusive");
+				expect(turnEndContent).toContain("api.py");
 			} finally {
 				env.cleanup();
 			}

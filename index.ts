@@ -38,6 +38,7 @@ import {
 	getSessionLanguages,
 	importWidgetState,
 	type PersistedWidgetState,
+	reconcileCascadeNeighborLspErrors,
 	renderWidget,
 	scheduleStaleReconcile,
 	setRenderCallback,
@@ -84,8 +85,7 @@ import {
 	readCrossProcessTouchesForTurnStart,
 } from "./clients/recent-touches.js";
 import { registerCascadeTierReconcileTask } from "./clients/lsp/cascade-tier.js";
-import { formatCascadeNeighborDiagnostics } from "./clients/cascade-format.js";
-import { convertLspDiagnostics } from "./clients/dispatch/utils/lsp-diagnostics.js";
+import { buildResolvedFoundCascadeRun } from "./clients/cascade-format.js";
 import { initLSPConfig } from "./clients/lsp/config.js";
 import { getLSPService, resetLSPService } from "./clients/lsp/index.js";
 import { warmLspService } from "./clients/lsp-lazy.js";
@@ -2276,43 +2276,27 @@ function activateExtension(hostPi: ExtensionAPI) {
 	// previously this outcome was logs-only, a silent under-report (#533).
 	registerCascadeTierReconcileTask(() => getLSPService(), {
 		onResolvedFound: ({ filePath, diagnostics }) => {
-			const cwd = runtime.projectRoot;
-			const diags = convertLspDiagnostics(
-				diagnostics.filter((d) => d.severity === 1),
+			const run = buildResolvedFoundCascadeRun(runtime.projectRoot, {
 				filePath,
-				{ tool: "lsp" },
-			);
-			if (diags.length === 0) return;
-			const neighbors = [
-				{
-					filePath,
-					reason: "references" as const,
-					diagnostics: diags,
-					lspTouched: true,
-				},
-			];
-			const formatted = formatCascadeNeighborDiagnostics(cwd, neighbors, {
-				noun: "cold neighbor",
+				diagnostics,
 			});
-			if (!formatted) return;
-			runtime.appendCascadeRun({
-				filePath,
-				result: {
-					filePath,
-					impact: {
-						filePath,
-						changedSymbols: [],
-						directImporters: [],
-						directCallers: [],
-						neighborFiles: [filePath],
-						riskFlags: [],
-					},
-					neighbors,
-					formatted,
-				},
-				neighborCount: 1,
-				diagnosticCount: diags.length,
-			});
+			// #1443: the appended run outlives this turn's consumption —
+			// `beginTurn` carries it into the next turn_end exactly once instead
+			// of wiping it (which used to dead-end this whole delivery path).
+			if (run) runtime.appendCascadeRun(run);
+		},
+		// #1444 (issue impact #2): the mirror case — the neighbour published
+		// CLEAN after the skipped in-lane wait. The in-lane path reconciles that
+		// into the footer (`reconcileCascadeNeighborLspErrors`, the #1093 seam);
+		// the skipped path never could, so a fixed neighbour kept showing its old
+		// errors. Errors-only MERGE, so a live warning/biome finding survives; no
+		// write token exists at quiet-window time (the run is idle, nothing is
+		// racing this write), and `publishedAt` stamps the real observation time.
+		// Scope caveat: the touch was `clientScope: "primary"`, so this clears the
+		// LSP-error entries of a multi-primary-server file on one server's clean —
+		// the same errors-only tradeoff the in-lane reconcile documents.
+		onResolvedClean: ({ filePath, publishedAt }) => {
+			reconcileCascadeNeighborLspErrors(filePath, [], undefined, publishedAt);
 		},
 	});
 	// #484: emit the opt-in run summary entry HERE, not at turn_end. The SDK's

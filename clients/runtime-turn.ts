@@ -338,12 +338,41 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const cascadeRuns = runtime.consumeCascadeRuns().filter((run) => {
 		const originSeq = run.origin?.projectSeq;
 		const originTurn = run.origin?.turnSeq;
-		// A deferred result from before a later write/turn is not current state.
-		// Old test fixtures without provenance remain accepted for compatibility.
-		return (
-			(originSeq === undefined || originSeq === runtime.projectSeq) &&
-			(originTurn === undefined || originTurn === runtime.turnIndex)
-		);
+		// A deferred result from AFTER a later write is not current state. Old test
+		// fixtures without provenance remain accepted for compatibility.
+		//
+		// #1443: `turnSeq` alone is NOT a supersede signal, and it used to be an
+		// unconditional reject. Every LATE run — one whose compute missed the
+		// settle cap and was re-parked by `settleCascadeRuns`, and one the
+		// quiet-window reconcile appended after this turn's predecessor already
+		// consumed (carried across turn_start by `beginTurn`) — is BY DEFINITION
+		// from an earlier turn, so `originTurn === runtime.turnIndex` was always
+		// false for exactly the runs the carry-over was built to preserve. Both
+		// producers' contracts were dead code: the measured cases were the two
+		// highest-fan-out cascades of the day (38 and 40 neighbours).
+		//
+		// `projectSeq` is the real signal — it advances on every pi-observed write,
+		// so a mismatch means a newer write superseded this result's content. A
+		// late-but-not-superseded run is surfaced; a superseded one is dropped with
+		// a RECORD (never silently), so the loss stays countable.
+		if (originSeq !== undefined && originSeq !== runtime.projectSeq) {
+			logCascade({
+				phase: "cascade_carry_over_drop",
+				filePath: run.filePath,
+				neighborCount: run.neighborCount,
+				diagnosticCount: run.diagnosticCount,
+				reason: "superseded_by_later_write",
+				metadata: {
+					originProjectSeq: originSeq,
+					projectSeq: runtime.projectSeq,
+					originTurnSeq: originTurn,
+					turnIndex: runtime.turnIndex,
+					carriedTurns: run.carriedTurns,
+				},
+			});
+			return false;
+		}
+		return true;
 	});
 	const cascadeResults = cascadeRuns.flatMap((r) =>
 		r.result ? [r.result] : [],

@@ -5,6 +5,7 @@ import type { ActionableWarningRecord } from "./actionable-warnings.js";
 import type { FunctionCallGraph } from "./call-graph.js";
 import type { WordIndex } from "./word-index.js";
 import type { CascadeRun } from "./cascade-types.js";
+import { logCascade } from "./cascade-logger.js";
 import type { CodeQualityWarningRecord } from "./code-quality-warnings.js";
 import type { FileComplexity } from "./complexity-client.js";
 import { normalizeMapKey } from "./path-utils.js";
@@ -249,7 +250,30 @@ export class RuntimeCoordinator {
 	}
 
 	beginTurn(): void {
-		this._cascadeRuns = [];
+		// #1443: runs sitting here at turn_start were appended AFTER the last
+		// turn_end drained them (consumeCascadeRuns) — the quiet-window reconcile's
+		// late re-injection (`onResolvedFound`, clients/lsp/cascade-tier.ts) lands
+		// in exactly that window. Wiping them dead-ended that delivery path: the
+		// finding was computed, formatted, appended, and then deleted before any
+		// turn_end could render it. Carry them into THIS turn instead, exactly
+		// once: `carriedTurns` is stamped on the way through and a run that the
+		// next turn_end still did not consume is dropped here with a log line
+		// rather than queued forever (a stale finding must not outlive the state
+		// it describes, and an unbounded queue would replay it every turn).
+		this._cascadeRuns = this._cascadeRuns.flatMap((run) => {
+			const carriedTurns = (run.carriedTurns ?? 0) + 1;
+			if (carriedTurns > 1) {
+				logCascade({
+					phase: "cascade_carry_over_drop",
+					filePath: run.filePath,
+					neighborCount: run.neighborCount,
+					diagnosticCount: run.diagnosticCount,
+					metadata: { carriedTurns: run.carriedTurns, turnIndex: this._turnIndex },
+				});
+				return [];
+			}
+			return [{ ...run, carriedTurns }];
+		});
 		// _pendingCascadeRuns is deliberately NOT cleared here: a cascade compute
 		// still in flight past last turn_end's settle cap (fresh graph builds have
 		// measured up to ~19s) must surface on the NEXT turn_end, not be dropped —

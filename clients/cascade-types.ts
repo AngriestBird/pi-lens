@@ -51,4 +51,14 @@ export interface CascadeRun {
 	 * `skipReason` so a thrown compute (`skipReason: "error"`) can surface too.
 	 */
 	indeterminate?: CascadeIndeterminate;
+	/**
+	 * #1443: how many turn boundaries this run has survived without being
+	 * consumed. Stamped by `RuntimeCoordinator.beginTurn` when it carries a run
+	 * appended after the previous turn_end's `consumeCascadeRuns` (the
+	 * quiet-window reconcile's late re-injection). The carry is bounded to ONE
+	 * turn — beginTurn drops (and logs) anything that would reach 2 — and the
+	 * turn-end origin filter reads it so a carried run is not rejected as
+	 * "computed in an earlier turn".
+	 */
+	carriedTurns?: number;
 }
