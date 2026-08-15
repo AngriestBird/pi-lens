@@ -57,6 +57,51 @@ describe("pi_lens_activate_tools", () => {
 		});
 	});
 
+	it("mutates once per distinct tool and reports the actual added count", async () => {
+		let active = ["lens_diagnostics"];
+		const setCalls: string[][] = [];
+		const mutations: Array<Record<string, unknown>> = [];
+		const pi = {
+			getActiveTools: () => active,
+			setActiveTools: (names: string[]) => {
+				setCalls.push(names);
+				active = names;
+			},
+		};
+		const tool = createActivateToolsTool(pi, CATALOG, {
+			deferredToolSupport: () => false,
+			onMutation: (mutation) => mutations.push(mutation),
+		});
+
+		await tool.execute(
+			"monotonic-1",
+			{ tools: ["ast_grep_search"] },
+			undefined,
+			null,
+		);
+		const repeated = await tool.execute(
+			"monotonic-2",
+			{ tools: ["ast_grep_search"] },
+			undefined,
+			null,
+		);
+
+		expect(setCalls).toHaveLength(1);
+		expect(active).toEqual(["lens_diagnostics", "ast_grep_search"]);
+		expect(repeated.details).toEqual({
+			matches: ["ast_grep_search"],
+			added: [],
+		});
+		expect(mutations).toEqual([
+			expect.objectContaining({
+				addedCount: 1,
+				removedCount: 0,
+				reason: "lazy_activation",
+				deferralApplies: false,
+			}),
+		]);
+	});
+
 	it("ignores unknown tool names not in the catalog", async () => {
 		const pi = {
 			getActiveTools: () => [],

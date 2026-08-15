@@ -32,9 +32,20 @@ export type ActiveToolsHost = {
 	setActiveTools?: (names: string[]) => void;
 };
 
+export interface ActivateToolsOptions {
+	deferredToolSupport?: (ctx: unknown) => boolean;
+	onMutation?: (mutation: {
+		addedCount: number;
+		removedCount: number;
+		reason: "lazy_activation";
+		deferralApplies: boolean;
+	}) => void;
+}
+
 export function createActivateToolsTool(
 	pi: ActiveToolsHost,
 	lazyTools: ActivatableToolInfo[],
+	options: ActivateToolsOptions = {},
 ) {
 	const lazyNames = lazyTools.map((t) => t.name);
 	const lazyNameSet = new Set(lazyNames);
@@ -61,6 +72,7 @@ export function createActivateToolsTool(
 			params: Record<string, unknown>,
 			_signal: AbortSignal | undefined,
 			_onUpdate: unknown,
+			ctx?: unknown,
 		) {
 			const requested = Array.isArray(params.tools)
 				? (params.tools as unknown[]).filter(
@@ -85,9 +97,17 @@ export function createActivateToolsTool(
 			// tools in the same call.
 			const active =
 				typeof pi.getActiveTools === "function" ? pi.getActiveTools() : [];
-			const merged = [...new Set([...active, ...requested])];
-			if (typeof pi.setActiveTools === "function") {
+			const activeSet = new Set(active);
+			const added = requested.filter((name) => !activeSet.has(name));
+			const merged = [...new Set([...active, ...added])];
+			if (added.length > 0 && typeof pi.setActiveTools === "function") {
 				pi.setActiveTools(merged);
+				options.onMutation?.({
+					addedCount: added.length,
+					removedCount: 0,
+					reason: "lazy_activation",
+					deferralApplies: options.deferredToolSupport?.(ctx) ?? false,
+				});
 			}
 
 			return {
@@ -97,7 +117,7 @@ export function createActivateToolsTool(
 						text: `Activated: ${requested.join(", ")}. Available starting next turn.`,
 					},
 				],
-				details: { matches: requested, added: requested },
+				details: { matches: requested, added },
 			};
 		},
 	};

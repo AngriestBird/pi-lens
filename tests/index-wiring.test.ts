@@ -443,6 +443,67 @@ describe("index.ts extension wiring", () => {
 			}
 		});
 
+		it.each(["fork", "reload"])(
+			"preserves model-activated tools on %s session_start",
+			async (reason) => {
+				const tmp = fs.mkdtempSync(
+					path.join(os.tmpdir(), `pi-lens-wiring-${reason}-`),
+				);
+				const prevDataDir = process.env.PILENS_DATA_DIR;
+				process.env.PILENS_DATA_DIR = path.join(tmp, "data");
+				try {
+					const pi = createPiMock();
+					extension(pi.asExtensionAPI());
+					const ctx = makeCtx({ cwd: tmp, sessionId: `cache-${reason}` });
+					await pi.emit("session_start", { reason: "startup" }, ctx);
+					const loader = pi.getTool("pi_lens_activate_tools") as {
+						execute: (...args: unknown[]) => Promise<unknown>;
+					};
+					await loader.execute(
+						"activate",
+						{ tools: ["ast_grep_search"] },
+						undefined,
+						undefined,
+						ctx,
+					);
+					expect(pi.activeTools.has("ast_grep_search")).toBe(true);
+
+					await pi.emit("session_start", { reason }, ctx);
+
+					expect(pi.activeTools.has("ast_grep_search")).toBe(true);
+				} finally {
+					if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+					else process.env.PILENS_DATA_DIR = prevDataDir;
+					removeTempDirSync(tmp);
+				}
+			},
+		);
+
+		it("keeps every tool statically active when lazy tooling is disabled", async () => {
+			const tmp = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-wiring-static-tools-"),
+			);
+			const prevDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(tmp, "data");
+			try {
+				const pi = createPiMock({ "no-lazy-tools": true });
+				extension(pi.asExtensionAPI());
+				await pi.emit(
+					"session_start",
+					{ reason: "startup" },
+					makeCtx({ cwd: tmp }),
+				);
+
+				for (const tool of EXPECTED_TOOLS) {
+					expect(pi.activeTools.has(tool), tool).toBe(true);
+				}
+			} finally {
+				if (prevDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+				else process.env.PILENS_DATA_DIR = prevDataDir;
+				removeTempDirSync(tmp);
+			}
+		});
+
 		// #1327: opt-in compact one-line tool rendering, gated by
 		// `lens-compact-tool-line` / `ui.compactToolLine`. Off by default — the
 		// off path must register the ORIGINAL tool definitions untouched (no

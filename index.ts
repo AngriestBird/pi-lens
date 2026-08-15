@@ -166,6 +166,11 @@ import { createProjectReportTool } from "./tools/project-report.js";
 import { createSymbolSearchTool } from "./tools/symbol-search.js";
 import { getLastLoggedPhase, logLatency } from "./clients/latency-logger.js";
 import {
+	isFreshSessionStart,
+	recordToolSetMutation,
+	supportsDeferredTools,
+} from "./clients/tool-set-policy.js";
+import {
 	clearCachePrefixSession,
 	logCacheUsage,
 	observeCacheContext,
@@ -1485,6 +1490,18 @@ function activateExtension(hostPi: ExtensionAPI) {
 			setActiveTools?: (names: string[]) => void;
 		},
 		LAZY_TOOL_CATALOG,
+		{
+			deferredToolSupport: (ctx) => {
+				try {
+					return supportsDeferredTools(
+						(ctx as { model?: Parameters<typeof supportsDeferredTools>[0] })?.model,
+					);
+				} catch {
+					return false;
+				}
+			},
+			onMutation: recordToolSetMutation,
+		},
 	);
 
 	// #1327: opt-in compact one-line tool rendering. Read once at load (like
@@ -1560,6 +1577,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 		const sessionStartFiredAt = Date.now();
 		try {
 			dbg("session_start fired");
+			const sessionReason = (event as { reason?: string }).reason;
 
 			// #1334 S5: adopt the HOST's project-trust decision before anything
 			// below can auto-install a tool or spawn an LSP server. pi-lens is a
@@ -1599,13 +1617,24 @@ function activateExtension(hostPi: ExtensionAPI) {
 					setActiveTools?: (names: string[]) => void;
 				};
 				if (
+					isFreshSessionStart(sessionReason) &&
+					getLensFlag("no-lazy-tools") !== true &&
 					typeof piWithActiveTools.getActiveTools === "function" &&
 					typeof piWithActiveTools.setActiveTools === "function"
 				) {
 					const lazyNames = new Set(LAZY_TOOL_CATALOG.map((t) => t.name));
 					const active = piWithActiveTools.getActiveTools();
 					const initiallyActive = active.filter((name) => !lazyNames.has(name));
-					piWithActiveTools.setActiveTools(initiallyActive);
+					const removedCount = active.length - initiallyActive.length;
+					if (removedCount > 0) {
+						piWithActiveTools.setActiveTools(initiallyActive);
+						recordToolSetMutation({
+							addedCount: 0,
+							removedCount,
+							reason: "fresh_session_lazy_deactivation",
+							deferralApplies: false,
+						});
+					}
 				}
 			} catch (deactivateErr) {
 				dbg(
@@ -1616,7 +1645,6 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// #190: pi's session lifecycle. `reason` distinguishes new/resume/fork/
 			// reload/startup; the STABLE session id comes from the session manager
 			// (the event carries none), and is what lets a resumed session rehydrate.
-			const sessionReason = (event as { reason?: string }).reason;
 			const stableSessionId = (() => {
 				try {
 					return (
