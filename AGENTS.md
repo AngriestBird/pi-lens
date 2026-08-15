@@ -283,6 +283,16 @@ graceful shutdown, releasing the server-owned language-service programs and
 document registry; the next request rebuilds transparently. The per-root timers
 must stay unref'd, reset on reuse, busy-client guarded, and cleared on shutdown.
 
+The live native-TS7/Vitest fixture suite is opt-in with
+`PI_LENS_INTEGRATION=1`; it copies the excluded fixture to a temporary
+non-fixture project INSIDE the repo before launching the real server — the
+in-repo location is load-bearing (the copied project has no node_modules, so
+native-TS7 detection and vitest type resolution walk up into the repo's own).
+Root-walk misses remain uncached, and bounding the walk at cwd is a PROVEN
+regression (found-above-cwd and not-found are different answers: bare
+detectors and the Deno exclusion gate depend on the distinction) — do not
+reattempt without solving that. (#1412)
+
 Rule-id normalization derives its language suffixes from the bundled CodeRabbit rule tree at startup; tests must keep that derived set covered so new vendored language rules cannot silently evade project policy matching.
 
 Small process-lifetime memo tables use `clients/bounded-cache.ts` when an
