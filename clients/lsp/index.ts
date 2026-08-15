@@ -2739,9 +2739,10 @@ export class LSPService {
 						// its declared wait budget and the global auxiliary ceiling. The
 						// 2000ms default admits measured ~1.3s warm scanner runs without
 						// making every edit pay opengrep's 3500ms cold-start allowance.
-						// Late aux results are dropped from the wait (advisory only — they
-						// land in the client cache and surface on the next edit); aux servers
-						// that did answer within the grace are included automatically since
+						// Late aux results are dropped from this wait. A later unchanged-
+						// content read may carry a SHA-256-bound cache publication before its
+						// resync clears the cache; changed or unknown content never replays.
+						// Aux servers that answer within the grace are included automatically since
 						// their waitForDiagnostics already resolved. The cut-off server ids
 						// are logged in the latency metadata (lsp_touch_file phase, field
 						// `auxCutOffServerIds`).
