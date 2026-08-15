@@ -77,6 +77,61 @@ describe("bus-publish — pilens:files:touched (#482)", () => {
 		)).toBe(false);
 	});
 
+	it("skips a resolved emitter whose session ctx is stale", () => {
+		const emit = vi.fn();
+		const staleCtx = {
+			isIdle: () => {
+				throw new Error("This extension ctx is stale after session replacement or reload");
+			},
+		};
+		wireBusEmitterGetter(() => ({ emit, ctx: staleCtx }));
+
+		publishFilesTouched({
+			reason: "autofix",
+			paths: ["/repo/src/a.ts"],
+			cwd: "/repo",
+		});
+
+		expect(emit).not.toHaveBeenCalled();
+		expect(logBusEvent).toHaveBeenCalledWith(
+			expect.objectContaining({
+				event: BUS_FILES_TOUCHED_EVENT,
+				outcome: "skipped_stale_session",
+				level: "info",
+			}),
+		);
+		expect(logBusEvent.mock.calls.some(([entry]) =>
+			(entry as { outcome?: string }).outcome === "emit_failed",
+		)).toBe(false);
+	});
+
+	it("re-resolves and publishes through the fresh session ctx", () => {
+		const staleEmit = vi.fn();
+		const freshEmit = vi.fn();
+		let current: {
+			emit: (channel: string, data: unknown) => void;
+			ctx: { isIdle: () => unknown };
+		} = {
+			emit: staleEmit,
+			ctx: {
+				isIdle: () => {
+					throw new Error("This extension ctx is stale after session replacement or reload");
+				},
+			},
+		};
+		wireBusEmitterGetter(() => current);
+		current = { emit: freshEmit, ctx: { isIdle: () => false } };
+
+		publishFilesTouched({
+			reason: "autofix",
+			paths: ["/repo/src/a.ts"],
+			cwd: "/repo",
+		});
+
+		expect(staleEmit).not.toHaveBeenCalled();
+		expect(freshEmit).toHaveBeenCalledTimes(1);
+	});
+
 	it("emits the exact payload shape from the issue: v, source, reason, paths, cwd", () => {
 		const emit = vi.fn();
 		wireBusEmitter(emit);
