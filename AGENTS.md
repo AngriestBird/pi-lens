@@ -1613,7 +1613,7 @@ Short, obvious changes may use a subject only. Non-trivial changes get a body.
 
 ### Documentation and prose style
 
-**Prose in docs, changelog, and PR descriptions follows the [Google developer documentation style guide](https://developers.google.com/style) and [Simplified Technical English (ASD-STE100) principles](https://asd-ste100.org/).** This is a principles-only adoption of ASD-STE100, a proprietary aerospace controlled-language specification; it does not adopt its licensed word list. Apply this standard to `README`, `docs/`, `AGENTS.md`, changelog entries, and PR bodies:
+**Prose in docs, changelog, and PR descriptions follows the [Google developer documentation style guide](https://developers.google.com/style) and [Simplified Technical English (ASD-STE100) principles](https://asd-ste100.org/), framed by Zinsser's four principles from *On Writing Well*: simplicity, brevity, clarity, and humanity.** Zinsser is the spirit; the two guides below are the mechanics. This is a principles-only adoption of ASD-STE100, a proprietary aerospace controlled-language specification; it does not adopt its licensed word list. Apply this standard to `README`, `docs/`, `AGENTS.md`, changelog entries, and PR bodies:
 
 - Use active voice and present tense.
 - Use second person (`you`) for instructions. Use the imperative for procedure steps.
