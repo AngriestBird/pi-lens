@@ -32,6 +32,11 @@ const FIXTURE = path.join(
 describe.skipIf(!RUN_LIVE_NATIVE_TS7)(
 	"live native TS7 Vitest diagnostics",
 	() => {
+		// The copy lives INSIDE the repo deliberately (L2): the temp project has
+		// no node_modules, so native-TS7 detection and `types: ["vitest/globals"]`
+		// resolution work only because the ancestor walk reaches the repo's own
+		// node_modules. Moving this to os.tmpdir() breaks launchVariant detection
+		// (the assertion below fails loudly if that regresses).
 		const projectRoot = path.join(
 			process.cwd(),
 			"tests",
@@ -72,7 +77,10 @@ describe.skipIf(!RUN_LIVE_NATIVE_TS7)(
 				],
 				{ cwd: projectRoot },
 			);
-			expect(cleanTsc.stderr).toBe("");
+			// tsc reports diagnostics on STDOUT (L3); a non-zero exit already
+			// rejects the promisified execFile, so assert the stream that would
+			// actually carry diagnostics.
+			expect(cleanTsc.stdout.trim()).toBe("");
 			fs.writeFileSync(controlFile, intentionalControl);
 
 			spawned = await TypeScriptServer.spawn(projectRoot, {

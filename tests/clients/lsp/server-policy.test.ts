@@ -538,32 +538,6 @@ describe("lsp server policy", () => {
 		expect(r2).toBe(tmp);
 	});
 
-	it("bounds in-cwd walks at cwd but preserves out-of-cwd discovery", async () => {
-		const { NearestRoot } = await import("../../../clients/lsp/server.js");
-		const tmp = fs.mkdtempSync(
-			path.join(os.tmpdir(), "pi-lens-root-cwd-bound-"),
-		);
-		dirs.push(tmp);
-
-		const sessionCwd = path.join(tmp, "session");
-		const inCwdFile = path.join(sessionCwd, "src", "inside.ts");
-		const outsideFile = path.join(tmp, "outside", "src", "outside.ts");
-		fs.mkdirSync(path.dirname(inCwdFile), { recursive: true });
-		fs.mkdirSync(path.dirname(outsideFile), { recursive: true });
-		fs.writeFileSync(path.join(tmp, ".walk-boundary"), "");
-		fs.writeFileSync(inCwdFile, "");
-		fs.writeFileSync(outsideFile, "");
-
-		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(sessionCwd);
-		try {
-			const resolver = NearestRoot([".walk-boundary"]);
-			await expect(resolver(inCwdFile)).resolves.toBeUndefined();
-			await expect(resolver(outsideFile)).resolves.toBe(tmp);
-		} finally {
-			cwdSpy.mockRestore();
-		}
-	});
-
 	it("isolates cache per NearestRoot instance — different marker sets are independent", async () => {
 		const { NearestRoot } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-isolate-"));
@@ -614,7 +588,7 @@ describe("lsp server policy", () => {
 		}
 	});
 
-	it("does not walk above cwd for an in-session file (#1373, #1412)", async () => {
+	it("clamps a marker root above the session cwd and logs once (#1373)", async () => {
 		const { NearestRoot } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-clamp-"));
 		dirs.push(tmp);
@@ -628,9 +602,12 @@ describe("lsp server policy", () => {
 		const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(project);
 		try {
 			const resolver = NearestRoot([".marksman.toml"]);
-			await expect(resolver(file)).resolves.toBeUndefined();
-			await expect(resolver(file)).resolves.toBeUndefined();
-			expect(logSessionStart).not.toHaveBeenCalled();
+			await expect(resolver(file)).resolves.toBe(project);
+			await expect(resolver(file)).resolves.toBe(project);
+			expect(logSessionStart).toHaveBeenCalledTimes(1);
+			expect(logSessionStart).toHaveBeenCalledWith(
+				expect.stringContaining("lsp root clamped to session cwd"),
+			);
 		} finally {
 			cwdSpy.mockRestore();
 		}
