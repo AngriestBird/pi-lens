@@ -23,9 +23,9 @@ export interface BusEmitTarget {
 }
 export type BusEmitGetter = () => BusEmitFn | BusEmitTarget | undefined;
 export type BusEmitResolution =
-	| { outcome: "ready"; emit: BusEmitFn }
-	| { outcome: "unwired" }
-	| { outcome: "stale-session" };
+	| { outcome: "ready"; emit: BusEmitFn; ctxSource: "own" | "global-fallback" }
+	| { outcome: "unwired"; ctxSource: "unwired" }
+	| { outcome: "stale-session"; ctxSource: "own" };
 
 export interface LiveBusEmitter {
 	wire(emit: BusEmitFn | undefined): void;
@@ -60,14 +60,20 @@ export function createLiveBusEmitter(): LiveBusEmitter {
 			// replace a captured pre-await activation with the current primary. When
 			// the current target is nevertheless confirmed stale, never invoke it.
 			const target = getter?.() ?? emit;
-			if (!target) return { outcome: "unwired" };
+			if (!target) return { outcome: "unwired", ctxSource: "unwired" };
 			if (typeof target === "function") {
-				return { outcome: "ready", emit: target };
+				return { outcome: "ready", emit: target, ctxSource: "global-fallback" };
 			}
+			// Object targets are always "own"-sourced (only `wire(fn)`'s bare
+			// function arm is "global-fallback", and it never reaches this
+			// branch) — compute it once so the ready/stale-session outcomes
+			// below both carry the same value instead of restating the
+			// literal independently.
+			const ctxSource = "own" as const;
 			if (probeCtxActive(target.ctx) === false) {
-				return { outcome: "stale-session" };
+				return { outcome: "stale-session", ctxSource };
 			}
-			return { outcome: "ready", emit: target.emit };
+			return { outcome: "ready", emit: target.emit, ctxSource };
 		},
 		reset() {
 			emit = undefined;
@@ -97,6 +103,7 @@ export function resolveLiveBusEmitter(
 			...entry(),
 			outcome: "skipped_stale_session",
 			level: "info",
+			ctxSource: resolution.ctxSource,
 		});
 	}
 	return resolution;

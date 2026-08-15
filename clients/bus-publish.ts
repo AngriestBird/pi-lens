@@ -225,6 +225,7 @@ export function publishFilesTouched(args: PublishFilesTouchedArgs): void {
 			cwd: normalizeFilePath(args.cwd),
 			reason: args.reason,
 			error: String(err),
+			ctxSource: resolution.ctxSource,
 		});
 		if (!hasLoggedFailure) {
 			hasLoggedFailure = true;

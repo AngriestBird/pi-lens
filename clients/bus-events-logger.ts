@@ -47,6 +47,7 @@ import { isTestMode } from "./env-utils.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 import { createNdjsonLogger } from "./ndjson-logger.js";
 import { getMaxLogSizeMB } from "./log-cleanup.js";
+import { logLatency } from "./latency-logger.js";
 
 const BUS_EVENTS_LOG_FILE = path.join(getGlobalPiLensDir(), "bus-events.log");
 
@@ -87,13 +88,78 @@ export interface BusEventLogEntry {
 	seq?: number;
 	/** emit_failed detail. */
 	error?: string;
+	/** Which event ctx source backed stale/failure classification. */
+	ctxSource?: "own" | "global-fallback" | "unwired";
+}
+
+// S2d (gap 5, #1432 review): a per-event-name {emitted, skipped_stale_session,
+// emit_failed} rollup, counted at this shared seam so every producer AND
+// `resolveLiveBusEmitter`'s own `skipped_stale_session` write (the seam
+// exception documented in bus-producer-coverage.test.ts) are covered without
+// touching each producer individually. In-memory only — bounded by the fixed
+// set of event names in `BusEventName`, reset at session_shutdown after the
+// rollup row is logged (see index.ts) so counts never leak across sessions.
+type BusEventRollupOutcome = "emitted" | "skipped_stale_session" | "emit_failed";
+const eventRollupCounts = new Map<BusEventName, Record<BusEventRollupOutcome, number>>();
+
+function bumpRollupCount(event: BusEventName, outcome: BusEventRollupOutcome): void {
+	const existing = eventRollupCounts.get(event) ?? {
+		emitted: 0,
+		skipped_stale_session: 0,
+		emit_failed: 0,
+	};
+	existing[outcome] += 1;
+	eventRollupCounts.set(event, existing);
 }
 
 export function logBusEvent(entry: Omit<BusEventLogEntry, "ts">): void {
+	if (
+		entry.outcome === "emitted" ||
+		entry.outcome === "skipped_stale_session" ||
+		entry.outcome === "emit_failed"
+	) {
+		bumpRollupCount(entry.event, entry.outcome);
+	}
 	if (isTestMode()) {
 		return;
 	}
 	writer.log({ ts: new Date().toISOString(), ...entry });
+}
+
+/** Snapshot the current session's rollup, keyed by event name. Non-mutating —
+ *  pair with {@link resetBusEventRollupCounts} at session end. */
+export function getBusEventRollupCounts(): Record<
+	string,
+	Record<BusEventRollupOutcome, number>
+> {
+	return Object.fromEntries(eventRollupCounts);
+}
+
+/** Clear the rollup — call once the session-end snapshot has been logged
+ *  (or from tests) so a new session starts from zero. */
+export function resetBusEventRollupCounts(): void {
+	eventRollupCounts.clear();
+}
+
+/**
+ * Log one `session_end_bus_rollup` latency row per event NAME that had any
+ * activity this session, then clear the rollup. Called from index.ts's
+ * `session_shutdown` handler (the session-end hook this repo's other
+ * teardown work — LSP fleet shutdown, cache-prefix eviction — already runs
+ * from). A no-op (logs nothing) when nothing was ever published, matching
+ * `formatSmellsSessionStartLine`'s "no noise on an ordinary session" shape.
+ */
+export function emitBusEventRollupAtSessionEnd(cwd: string): void {
+	for (const [event, counts] of eventRollupCounts) {
+		logLatency({
+			type: "phase",
+			phase: "session_end_bus_rollup",
+			filePath: cwd,
+			durationMs: 0,
+			metadata: { event, ...counts },
+		});
+	}
+	resetBusEventRollupCounts();
 }
 
 export function getBusEventsLogPath(): string {

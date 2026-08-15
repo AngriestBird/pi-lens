@@ -73,6 +73,7 @@ import { wireBusEmitterGetter } from "./clients/bus-publish.js";
 import { wireDiagnosticsBusEmitterGetter } from "./clients/diagnostics-publish.js";
 import { wireDispositionBusEmitterGetter } from "./clients/disposition-publish.js";
 import { wireFormatEventsBusEmitterGetter } from "./clients/format-events-publish.js";
+import { emitBusEventRollupAtSessionEnd } from "./clients/bus-events-logger.js";
 import {
 	consumeAgentNudge,
 	recordCrossProcessTouches,
@@ -2172,7 +2173,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// gate). See clients/smells-rollup.ts for the tail-scan cost bound.
 			if (shouldCheckSmellsThisTurn(runtime.turnIndex)) {
 				try {
-					for (const note of checkSmellsAndNoteOnce(countRecentSmells())) {
+					// S3c (#1432 review): use the in-process session start instead of
+					// letting countRecentSmells() fall back to its 24h rolling
+					// window — turn_end already knows exactly when this session
+					// began, so admitted rows are scoped to it, not to a day-wide
+					// guess that could straddle multiple sessions.
+					for (const note of checkSmellsAndNoteOnce(countRecentSmells(undefined, runtime.sessionStartedAt))) {
 						notifyUi(ctx, note, "warning");
 					}
 				} catch {
@@ -2484,6 +2490,12 @@ function activateExtension(hostPi: ExtensionAPI) {
 			processExiting: true,
 			reason: "session_shutdown",
 		});
+		// S2d (gap 5, #1432 review): one session_end_bus_rollup row per event
+		// name with any activity this session — same primary-only placement as
+		// the shared-infra teardown above (a concurrent secondary already
+		// returned before reaching here), since the rollup counters are
+		// process-wide module state a live secondary would still need.
+		emitBusEventRollupAtSessionEnd(runtime.projectRoot);
 		// #1123 item 4: dump active handles AFTER teardown — whatever is still
 		// alive at this point is exactly what would keep a --print/--no-session
 		// process from exiting (the #1097 lesson: what survives IS the leak).

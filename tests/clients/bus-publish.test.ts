@@ -98,6 +98,7 @@ describe("bus-publish — pilens:files:touched (#482)", () => {
 				event: BUS_FILES_TOUCHED_EVENT,
 				outcome: "skipped_stale_session",
 				level: "info",
+				ctxSource: "own",
 			}),
 		);
 		expect(logBusEvent.mock.calls.some(([entry]) =>
@@ -524,6 +525,7 @@ describe("bus-publish — pilens:files:touched (#482)", () => {
 					event: BUS_FILES_TOUCHED_EVENT,
 					outcome: "emit_failed",
 					error: expect.stringContaining("bus explosion"),
+					ctxSource: "global-fallback",
 				}),
 			);
 		});

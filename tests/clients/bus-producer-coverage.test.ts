@@ -117,6 +117,25 @@ describe("bus producer guarded-seam coverage", () => {
 		expect(violations).toEqual([]);
 	});
 
+	it("carries ctxSource on every producer's emit_failed row", () => {
+		// #1432 review (S2c): lens-events.ts's emit_failed row was missing
+		// ctxSource while the other four producers already carried it — a
+		// static source scan (not a runtime assertion) so a future producer
+		// that copy-pastes the emit_failed shape without ctxSource fails loud
+		// instead of silently dropping the field like this one did.
+		const producers = discoverProducerFiles();
+		for (const file of producers) {
+			const source = fs.readFileSync(path.join(clientsDir, file), "utf8");
+			const failedIndex = source.indexOf('outcome: "emit_failed"');
+			expect(failedIndex, `${file}: no emit_failed outcome found`).toBeGreaterThanOrEqual(0);
+			const blockEnd = source.indexOf("});", failedIndex);
+			const block = source.slice(failedIndex, blockEnd === -1 ? undefined : blockEnd);
+			expect(block, `${file}: emit_failed row missing ctxSource`).toMatch(
+				/ctxSource:\s*resolution\.ctxSource/,
+			);
+		}
+	});
+
 	it("keeps the complete lens producer family in the guarded producer set", () => {
 		expect(Object.values(LENS_EVENT_NAMES)).toEqual([
 			"pi-lens/analysis-complete",

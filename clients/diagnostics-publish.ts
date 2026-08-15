@@ -278,6 +278,7 @@ export function publishDiagnostics(args: PublishDiagnosticsArgs): void {
 			outcome: "emit_failed",
 			cwd: normalizeFilePath(args.cwd),
 			error: String(err),
+			ctxSource: resolution.ctxSource,
 		});
 		if (!hasLoggedFailure) {
 			hasLoggedFailure = true;

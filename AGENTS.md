@@ -1,5 +1,14 @@
 # pi-lens — agent context
 
+Post-fix decision observability is durable and bounded: advisory delivery logs
+one `advisory_provenance_decision` per consume, classic TypeScript project
+identity logs every success/failure outcome, deferred mutation drains summarize
+coalescing and requeues, and authoritative-content branches log attachment
+decisions. Bus stale/failure rows carry the resolver's ctx source. Automatic
+smell warnings count only the current session, or a 24-hour fallback window
+when no session boundary is available; explicit health remains separately
+labeled. (#1432)
+
 Advisory caches must carry immutable capture provenance and validate it again
 at every delivery surface. A finding is current only when session/turn state
 matches and every affected file is SHA-256-confirmed (size+mtime is only the
@@ -141,6 +150,8 @@ preserved as `cause`. (#1214)
 ## Contributing
 
 For human contributors and issue/PR authors, see `CONTRIBUTING.md` at the repo root. It covers the development workflow, how to add runners, LSP servers, formatters, and rules, and the issue/PR templates. This `AGENTS.md` is the durable agent context; `CONTRIBUTING.md` is the public contributor guide.
+
+**External-PR handling.** Maintainer agents may commit directly to a contributor's PR branch when "allow edits from maintainers" is enabled. Prefer this over asking the contributor to apply small review asks. Keep the contributor's authorship: commit only the review deltas, write clear commit messages, and reference the review. When you post a review on an external PR, thank the contributor first. Then state plainly that the review is AI-generated and that a maintainer supervises the process.
 
 **Pi-lens dogfooding is part of every pi session.** When pi-lens is installed while we work in pi, the agent is also a pi-lens consumer and debugger. If an observed behavior is not as expected (including stale/deleted-file diagnostics, a misfiring command, a stale installed-copy result, a hang, or a misleading clean/unconfirmed state), first distinguish a real defect from an artifact of the installed build, cache, or environment; then open or update a labeled tracking issue with the reproduction, observed-versus-expected behavior, evidence, affected surfaces, acceptance criteria, non-goals, and test matrix, and notify the user with the link. The same obligation applies to enhancement opportunities identified through consumption of the extension (performance, observability, ergonomics, or architectural seams), even when the current task is unrelated. Do not silently dismiss a finding as "just dogfooding" or leave it only in chat. Example: #1259 tracks the latency benchmark needed after #1254's default all-scope LSP collection change.
 

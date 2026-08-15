@@ -83,16 +83,20 @@ describe("classic TypeScript project-identity telemetry (#1412)", () => {
 	});
 
 	it.each([
-		["error", vi.fn().mockRejectedValue(new Error("projectInfo failed"))],
-		["timeout", vi.fn().mockResolvedValue({ executed: false, reason: "timed out" })],
-	])("silently ignores a command %s", async (_name, executeCommand) => {
+		["error", "threw", vi.fn().mockRejectedValue(new Error("projectInfo failed"))],
+		["timeout", "not-executed", vi.fn().mockResolvedValue({ executed: false, reason: "timed out" })],
+		["no response", "no-response", vi.fn().mockResolvedValue({ executed: true })],
+		["unsuccessful", "unsuccessful", vi.fn().mockResolvedValue({ executed: true, result: { success: false } })],
+	])("logs a bounded outcome for a command %s", async (_name, expectedOutcome, executeCommand) => {
 		await expect(
 			probeTsserverProjectIdentity(options(executeCommand)),
 		).resolves.toBeUndefined();
-		expect(logLatency).not.toHaveBeenCalled();
+		expect(logLatency).toHaveBeenCalledWith(expect.objectContaining({
+			metadata: expect.objectContaining({ outcome: expectedOutcome }),
+		}));
 	});
 
-	it("deduplicates normalized aliases once per client and file", async () => {
+	it("deduplicates normalized aliases once per client and file, without logging the dedupe", async () => {
 		const executeCommand = vi.fn().mockResolvedValue({
 			executed: true,
 			result: { success: true, body: {} },
@@ -102,6 +106,8 @@ describe("classic TypeScript project-identity telemetry (#1412)", () => {
 		await probeTsserverProjectIdentity({ ...first, file: "c:\\repo\\src\\APP.ts" });
 
 		expect(executeCommand).toHaveBeenCalledTimes(1);
+		// Dedupe is a routine, high-volume no-op — it must NOT write a second
+		// telemetry row (that was the #1432-review log-flood finding).
 		expect(logLatency).toHaveBeenCalledTimes(1);
 		expect(logLatency).toHaveBeenCalledWith(
 			expect.objectContaining({
@@ -141,12 +147,16 @@ describe("classic TypeScript project-identity telemetry (#1412)", () => {
 		);
 	});
 
-	it("is a no-op for native TS7", async () => {
+	it("is a silent no-op for native TS7 (ineligible servers must not log)", async () => {
 		const executeCommand = vi.fn();
 		await probeTsserverProjectIdentity({
 			...options(executeCommand),
 			launchVariant: "native-ts7",
 		});
 		expect(executeCommand).not.toHaveBeenCalled();
+		// Ineligible servers (wrong launchVariant/serverId) are the common case
+		// on every non-TS didOpen (python, go, opengrep, ...) — logging here was
+		// the #1432-review log-flood finding.
+		expect(logLatency).not.toHaveBeenCalled();
 	});
 });
