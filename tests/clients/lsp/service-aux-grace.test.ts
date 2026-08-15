@@ -303,7 +303,8 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 
 		await vi.advanceTimersByTimeAsync(1310);
 		const result = await touchPromise;
-		expect(result.diags.map((diagnostic) => diagnostic.message)).toContain(
+		expect(result).toBeDefined();
+		expect(result?.diags.map((diagnostic) => diagnostic.message)).toContain(
 			"aux finding",
 		);
 	});
@@ -376,7 +377,7 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 			diagnostics: "document",
 		});
 		await vi.advanceTimersByTimeAsync(2110);
-		expect((await first).diags).toHaveLength(0);
+		expect((await first)?.diags).toHaveLength(0);
 		await vi.advanceTimersByTimeAsync(400);
 
 		const next = service.touchFile(FILE, content, {
@@ -386,7 +387,7 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 			diagnostics: "document",
 		});
 		await vi.advanceTimersByTimeAsync(2110);
-		expect((await next).diags.map((diagnostic) => diagnostic.message)).toContain(
+		expect((await next)?.diags.map((diagnostic) => diagnostic.message)).toContain(
 			"late aux finding",
 		);
 	});
@@ -421,7 +422,7 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 			diagnostics: "document",
 		});
 		await vi.advanceTimersByTimeAsync(2110);
-		expect((await next).diags).toHaveLength(0);
+		expect((await next)?.diags).toHaveLength(0);
 	});
 
 	it("logs the settled and starved auxiliary outcomes for the touch", async () => {
