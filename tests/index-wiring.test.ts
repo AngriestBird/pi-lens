@@ -247,17 +247,33 @@ describe("index.ts extension wiring", () => {
 		}
 	});
 
-	it("falls back to the latest event ctx before an activation receives one", async () => {
+	it("delivers through its own boot window without borrowing a stale sibling's ctx (H2, #1415)", async () => {
+		// Pins the boot-window behavior directly, replacing a test that
+		// asserted delivery via `ownEventCtx ?? latestEventCtx` -- the
+		// reviewer proved that assertion vacuous, since it passes exactly
+		// the same way with the fallback arm removed (an unset ownEventCtx
+		// probes as inconclusive and falls through to "ready" either way).
+		//
+		// This version proves the fallback's ABSENCE actually matters: a
+		// sibling activation ("A") sets the process-global latest-ctx to a
+		// CONFIRMED-STALE ctx. Under the old `?? latestEventCtx` fallback, a
+		// fresh boot activation ("B") with no ctx of its own would have
+		// paired its live emitter with A's stale ctx and been silently
+		// DROPPED (stale-session). With the fallback removed, B's own unset
+		// `ownEventCtx` correctly probes as undefined (inconclusive) rather
+		// than confirmed-stale, so delivery is still attempted.
 		_resetSessionLifecycleForTests();
 		resetBusPublishForTests();
 		try {
-			const seed = createPiMock();
-			extension(seed.asExtensionAPI());
-			await seed.emit(
-				"turn_start",
-				{},
-				makeCtx({ cwd: process.cwd(), sessionId: "boot-fallback" }),
-			);
+			const staleSiblingCtx = makeCtx({ cwd: process.cwd(), sessionId: "stale-sibling" });
+			staleSiblingCtx.isIdle = () => {
+				throw new Error("This extension ctx is stale after session replacement");
+			};
+			const sibling = createPiMock();
+			extension(sibling.asExtensionAPI());
+			// Sets the process-global `latestEventCtx` to a confirmed-stale ctx
+			// belonging to a DIFFERENT activation than the one created below.
+			await sibling.emit("turn_start", {}, staleSiblingCtx);
 
 			const bootEmit = vi.fn();
 			const boot = createPiMock();
@@ -266,6 +282,8 @@ describe("index.ts extension wiring", () => {
 				emit: bootEmit,
 			};
 			extension(bootApi);
+			// Boot activation never receives an event of its own -- its
+			// `ownEventCtx` closure variable stays unset.
 			publishFilesTouched({
 				reason: "autofix",
 				paths: ["/repo/boot.ts"],

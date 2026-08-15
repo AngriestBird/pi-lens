@@ -19,10 +19,6 @@ export const LENS_EVENT_NAMES = {
 
 type LensEventName = (typeof LENS_EVENT_NAMES)[keyof typeof LENS_EVENT_NAMES];
 
-type LensEventBus = {
-	emit?: (event: string, payload: unknown) => void;
-};
-
 export interface LensTelemetryPayload {
 	model: string;
 	sessionId: string;
@@ -63,10 +59,6 @@ export interface LensTurnFindingsPayload {
 
 const liveEmitter = createLiveBusEmitter();
 
-export function initLensEvents(pi: { events?: LensEventBus }): void {
-	liveEmitter.wire(pi.events?.emit);
-}
-
 /** Keep deferred deliveries on the live extension activation. */
 export function initLensEventsGetter(getter: BusEmitGetter | undefined): void {
 	liveEmitter.wireGetter(getter);
@@ -99,13 +91,30 @@ function normalizeDiagnostics(diagnostics: Diagnostic[]): Diagnostic[] {
 // process — enough to notice a permanently-missing bus without spamming.
 let _droppedEmitLogged = false;
 
+// Emit-failure gating (H1, #1415 review): occurrence-scoped, matching every
+// other producer's `hasLoggedFailure` guard (see clients/bus-publish.ts) and
+// AGENTS.md's "one bus-stale degradation per occurrence" invariant. A success
+// re-arms it, so a later failure records a fresh degradation rather than
+// being silently absorbed by an earlier one.
+let hasLoggedFailure = false;
+
+/** Test-only: reset module state between test files. */
+export function _resetForTests(): void {
+	liveEmitter.reset();
+	_droppedEmitLogged = false;
+	hasLoggedFailure = false;
+}
+
 function emitLensEvent(eventName: LensEventName, payload: unknown): void {
 	setImmediate(() => {
-		const cwd = normalizeFilePath((payload as { cwd?: string }).cwd ?? process.cwd());
-		const resolution = resolveLiveBusEmitter(liveEmitter, {
+		const rawCwd = (payload as { cwd?: string }).cwd ?? process.cwd();
+		// M1: normalizeFilePath is a sync realpathSync.native on Windows — build
+		// the resolveLiveBusEmitter log entry lazily so the ready-path (the
+		// common case) never pays it. Only the stale-session branch needs it.
+		const resolution = resolveLiveBusEmitter(liveEmitter, () => ({
 			event: eventName,
-			cwd,
-		});
+			cwd: normalizeFilePath(rawCwd),
+		}));
 		if (resolution.outcome === "stale-session") return;
 		if (resolution.outcome === "unwired") {
 			if (!_droppedEmitLogged) {
@@ -119,8 +128,10 @@ function emitLensEvent(eventName: LensEventName, payload: unknown): void {
 			}
 			return;
 		}
+		const cwd = normalizeFilePath(rawCwd);
 		try {
 			resolution.emit(eventName, payload);
+			hasLoggedFailure = false;
 			logBusEvent({ event: eventName, outcome: "emitted", cwd });
 		} catch (err) {
 			logBusEvent({
@@ -129,7 +140,10 @@ function emitLensEvent(eventName: LensEventName, payload: unknown): void {
 				cwd,
 				error: String(err),
 			});
-			recordStaleBusFailure(eventName, err);
+			if (!hasLoggedFailure) {
+				hasLoggedFailure = true;
+				recordStaleBusFailure(eventName, err);
+			}
 			// Inter-extension events are observational. A listener must never break
 			// the pi-lens hook path or delay agent progress.
 		}

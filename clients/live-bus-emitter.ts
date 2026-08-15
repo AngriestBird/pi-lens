@@ -10,8 +10,16 @@ import {
 export type BusEmitFn = (channel: string, data: unknown) => void;
 export interface BusEmitTarget {
 	emit: BusEmitFn;
-	/** Optional for legacy/direct wiring; an absent ctx makes the probe inconclusive. */
-	ctx?: unknown;
+	/**
+	 * Required (L3, #1415 review): every `BusEmitTarget` wiring must pair its
+	 * emitter with the ctx it belongs to, or use the bare-function
+	 * `BusEmitFn` union arm instead (which the resolver treats as ctxless by
+	 * construction, not by an omitted field). Making `ctx` optional here let a
+	 * wiring forget it silently — the stale-session guard would then never
+	 * fire for that target. A caller with no ctx to pair should reach for the
+	 * `BusEmitFn` arm, not `{ emit, ctx: undefined }`.
+	 */
+	ctx: unknown;
 }
 export type BusEmitGetter = () => BusEmitFn | BusEmitTarget | undefined;
 export type BusEmitResolution =
@@ -68,15 +76,25 @@ export function createLiveBusEmitter(): LiveBusEmitter {
 	};
 }
 
-/** Resolve through the shared stale-session guard and record a declined target. */
+/**
+ * Resolve through the shared stale-session guard and record a declined
+ * target.
+ *
+ * `entry` is a THUNK, not a value (M1, #1415 review): building the log entry
+ * (every producer's version normalizes `cwd` via `normalizeFilePath`, a sync
+ * `realpathSync.native` call on Windows) is real per-publish cost that used
+ * to be paid on EVERY call regardless of outcome, even though it is only
+ * consumed on the `stale-session` branch. Invoking the thunk only there means
+ * the common `ready` path pays nothing for it.
+ */
 export function resolveLiveBusEmitter(
 	liveEmitter: LiveBusEmitter,
-	entry: Omit<BusEventLogEntry, "ts" | "outcome" | "level">,
+	entry: () => Omit<BusEventLogEntry, "ts" | "outcome" | "level">,
 ): BusEmitResolution {
 	const resolution = liveEmitter.resolve();
 	if (resolution.outcome === "stale-session") {
 		logBusEvent({
-			...entry,
+			...entry(),
 			outcome: "skipped_stale_session",
 			level: "info",
 		});

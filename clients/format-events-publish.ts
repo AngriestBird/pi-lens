@@ -180,10 +180,10 @@ export function publishFormatQueued(args: PublishFormatQueuedArgs): void {
 		}
 		return;
 	}
-	const resolution = resolveLiveBusEmitter(liveEmitter, {
+	const resolution = resolveLiveBusEmitter(liveEmitter, () => ({
 		event: BUS_FORMAT_QUEUED_EVENT,
 		cwd: normalizeFilePath(args.cwd),
-	});
+	}));
 	if (resolution.outcome === "stale-session") return;
 	if (resolution.outcome === "unwired") {
 		if (!hasLoggedQueuedUnwired) {
@@ -260,10 +260,10 @@ export function publishFormatStart(args: PublishFormatStartArgs): void {
 		}
 		return;
 	}
-	const resolution = resolveLiveBusEmitter(liveEmitter, {
+	const resolution = resolveLiveBusEmitter(liveEmitter, () => ({
 		event: BUS_FORMAT_START_EVENT,
 		cwd: normalizeFilePath(args.cwd),
-	});
+	}));
 	if (resolution.outcome === "stale-session") return;
 	if (resolution.outcome === "unwired") {
 		if (!hasLoggedStartUnwired) {
@@ -344,10 +344,10 @@ export function publishAutofixStart(args: PublishAutofixStartArgs): void {
 		}
 		return;
 	}
-	const resolution = resolveLiveBusEmitter(liveEmitter, {
+	const resolution = resolveLiveBusEmitter(liveEmitter, () => ({
 		event: BUS_AUTOFIX_START_EVENT,
 		cwd: normalizeFilePath(args.cwd),
-	});
+	}));
 	if (resolution.outcome === "stale-session") return;
 	if (resolution.outcome === "unwired") {
 		if (!hasLoggedAutofixStartUnwired) {

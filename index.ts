@@ -346,7 +346,7 @@ export function createHostPorts(
 			sink: (subsystem) => (entry) =>
 				logExtension({ subsystem, level: "debug", message: "host sink entry", metadata: { entry } }),
 		},
-		emit: { bus: emit, lens: emit },
+		emit: { bus: emit },
 		status: { set: (name, value) => context()?.ui?.setStatus?.(name, value) },
 		spawn: { abortSignal: () => context()?.signal, isAllowed: assertInstallAllowed },
 		render: { invalidate: () => options.getRenderInvalidator?.()?.() },
@@ -546,7 +546,16 @@ export default function (pi: ExtensionAPI) {
 		wireUserNotifier(hostPorts);
 		const getLiveEmit = () => ({
 			emit: hostPorts.emit.bus,
-			ctx: ownEventCtx ?? latestEventCtx,
+			// H2 (#1415 review): NOT `?? latestEventCtx`. The global belongs to
+			// whichever activation last received an event — a SIBLING activation
+			// after a replacement, with no relation to this closure's `pi.events`.
+			// Falling back to it pairs a live emitter with a foreign ctx, which
+			// the stale-session probe cannot catch (it looks live) and silently
+			// drops every publish until this activation's own first handler
+			// fires. An unset `ownEventCtx` (this activation's own boot window)
+			// must probe undefined -> "ready" -> delivery attempted, exactly like
+			// today, not borrow a sibling's ctx.
+			ctx: ownEventCtx,
 		});
 		initLensEventsGetter(getLiveEmit);
 		wireBusEmitterGetter(getLiveEmit);

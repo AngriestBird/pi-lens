@@ -1,13 +1,20 @@
 /**
  * Persistent NDJSON trace of `pi.events` bus publish attempts
  * (`pilens:files:touched` #482 / `pilens:diagnostics` #502 /
- * `pilens:format:queued` + `pilens:format:start` #673).
+ * `pilens:diagnostic:disposition` / `pilens:format:queued` +
+ * `pilens:format:start` + `pilens:autofix:start` #673/#684 /
+ * `pi-lens/analysis-complete` + `pi-lens/findings` + `pi-lens/turn-findings`
+ * #1415) — nine event names across five producers.
  *
- * All four producers (clients/bus-publish.ts, clients/diagnostics-publish.ts,
- * clients/format-events-publish.ts) are fire-and-forget: on failure or on a
- * structural no-op (never wired, kill switch off) they only invoke an
- * optional `dbg` callback, which varies by host and is a documented no-op in
- * the MCP host (clients/mcp/session.ts's `dbg: noop`). That leaves
+ * All five producers (clients/bus-publish.ts, clients/diagnostics-publish.ts,
+ * clients/disposition-publish.ts, clients/format-events-publish.ts,
+ * clients/lens-events.ts) are fire-and-forget: on failure or on a structural
+ * no-op (never wired, kill switch off) the four #482/#502/#673/#684
+ * producers only invoke an optional `dbg` callback, which varies by host and
+ * is a documented no-op in the MCP host (clients/mcp/session.ts's
+ * `dbg: noop`); `lens-events.ts` (#1415) has no `dbg` param at all — its
+ * events are purely observational inter-extension telemetry, so this NDJSON
+ * trace is its ONLY failure-visible surface. Either way, that leaves
  * bus-publish outcomes invisible in exactly the context where they matter
  * most — same failure shape as the #544 MCP session_start incident this repo
  * already fixed once.
