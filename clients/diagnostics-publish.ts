@@ -218,8 +218,17 @@ export function publishDiagnostics(args: PublishDiagnosticsArgs): void {
 		}
 		return;
 	}
-	const busEmit = liveEmitter.get();
-	if (!busEmit) {
+	const resolution = liveEmitter.resolve();
+	if (resolution.outcome === "stale-session") {
+		logBusEvent({
+			event: BUS_DIAGNOSTICS_EVENT,
+			outcome: "skipped_stale_session",
+			level: "info",
+			cwd: normalizeFilePath(args.cwd),
+		});
+		return;
+	}
+	if (resolution.outcome === "unwired") {
 		if (!hasLoggedUnwired) {
 			hasLoggedUnwired = true;
 			logBusEvent({
@@ -230,6 +239,7 @@ export function publishDiagnostics(args: PublishDiagnosticsArgs): void {
 		}
 		return;
 	}
+	const busEmit = resolution.emit;
 
 	try {
 		const fileEntries: PilensDiagnosticsFileEntry[] = args.files.map((f) => {

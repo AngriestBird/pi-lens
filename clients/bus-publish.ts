@@ -174,8 +174,18 @@ export function publishFilesTouched(args: PublishFilesTouchedArgs): void {
 		args.dbg?.(`bus-publish: recent-touches append failed: ${err}`);
 	});
 
-	const busEmit = liveEmitter.get();
-	if (!busEmit) {
+	const resolution = liveEmitter.resolve();
+	if (resolution.outcome === "stale-session") {
+		logBusEvent({
+			event: BUS_FILES_TOUCHED_EVENT,
+			outcome: "skipped_stale_session",
+			level: "info",
+			cwd: normalizeFilePath(args.cwd),
+			reason: args.reason,
+		});
+		return;
+	}
+	if (resolution.outcome === "unwired") {
 		if (!hasLoggedUnwired) {
 			hasLoggedUnwired = true;
 			logBusEvent({
@@ -187,6 +197,7 @@ export function publishFilesTouched(args: PublishFilesTouchedArgs): void {
 		}
 		return;
 	}
+	const busEmit = resolution.emit;
 
 	try {
 		const payload: FilesTouchedPayload = {

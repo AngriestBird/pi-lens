@@ -535,7 +535,7 @@ export default function (pi: ExtensionAPI) {
 		// return early for a concurrent in-process subagent. (#1383)
 		wireUserNotifier(hostPorts);
 		initLensEventsGetter(() => ({ emit: hostPorts.emit.lens }));
-		const getLiveEmit = () => hostPorts.emit.bus;
+		const getLiveEmit = () => ({ emit: hostPorts.emit.bus, ctx: latestEventCtx });
 		wireBusEmitterGetter(getLiveEmit);
 		wireDiagnosticsBusEmitterGetter(getLiveEmit);
 		wireDispositionBusEmitterGetter(getLiveEmit);

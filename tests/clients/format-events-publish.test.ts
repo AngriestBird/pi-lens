@@ -17,6 +17,7 @@ import {
 	publishFormatQueued,
 	publishFormatStart,
 	wireFormatEventsBusEmitter,
+	wireFormatEventsBusEmitterGetter,
 } from "../../clients/format-events-publish.js";
 import { _resetForTests as _resetBusPublishForTests } from "../../clients/bus-publish.js";
 
@@ -48,6 +49,27 @@ describe("format-events-publish — pilens:format:queued / pilens:format:start (
 					tool: "write",
 				}),
 			).not.toThrow();
+		});
+
+		it("skips a stale session target without attempting emit", () => {
+			const emit = vi.fn();
+			wireFormatEventsBusEmitterGetter(() => ({
+				emit,
+				ctx: {
+					isIdle: () => {
+						throw new Error("This extension ctx is stale after session replacement or reload");
+					},
+				},
+			}));
+
+			publishFormatQueued({ filePath: "/repo/a.ts", cwd: "/repo", tool: "write" });
+
+			expect(emit).not.toHaveBeenCalled();
+			expect(logBusEvent).toHaveBeenCalledWith(expect.objectContaining({
+				event: BUS_FORMAT_QUEUED_EVENT,
+				outcome: "skipped_stale_session",
+				level: "info",
+			}));
 		});
 
 		it("emits the exact payload shape: v, source, filePath, cwd, tool", () => {
