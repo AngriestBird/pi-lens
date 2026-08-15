@@ -2876,6 +2876,12 @@ export class LSPService {
 					durationMs: waitedMs,
 					metadata: {
 						source,
+						// #1444: WHICH server(s) burned the budget — without this the
+						// ~221/day timeout rows can't be attributed to a server at all.
+						// `info.id` (not `client.serverId`) for the same reason the
+						// degradation ledger above uses it: test doubles and lightweight
+						// clients need not expose `serverId`.
+						serverIds: spawned.map((e) => e.info.id),
 						clientScope,
 						diagnosticsMode,
 						timeoutMs,
