@@ -1597,7 +1597,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				);
 			}
 
-			// Dynamic tooling (#pi 0.80.x+): deactivate the 5 situational tools
+			// Dynamic tooling (#pi 0.80.x+): deactivate the situational tools only
 			// (LAZY_TOOL_CATALOG) now that the extension has actually finished
 			// loading — session_start is the correct lifecycle point for this
 			// call (#643; see the comment left at the old call site above, right
@@ -1606,11 +1606,9 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// `pi.getActiveTools`/`setActiveTools` aren't guaranteed present on
 			// every host the broad `@earendil-works/pi-coding-agent` peer
 			// dependency allows, so probe with typeof rather than assuming the
-			// pinned devDependency version's API exists at runtime. session_start
-			// fires multiple times per process (fork/reload/new/resume, see the
-			// reasonLabel handling below); re-running this every time is fine —
-			// `setActiveTools` just replaces the current active set, it isn't
-			// additive or stateful across calls.
+			// pinned devDependency version's API exists at runtime. Only startup/new
+			// may shrink the set; fork/reload/resume preserve monotonic growth. The
+			// no-lazy-tools policy leaves the registered default set unchanged.
 			try {
 				const piWithActiveTools = pi as unknown as {
 					getActiveTools?: () => string[];
