@@ -60,4 +60,19 @@ describe("getLastLoggedPhase (loop_block attribution, #1122/#1123)", () => {
 		logLatency({ type: "runner", filePath: "a.ts", durationMs: 1, runnerId: "biome" });
 		expect(getLastLoggedPhase()?.phase).toBe("cascade");
 	});
+
+	// #1412 L3: the classic-TS first-open project-identity probe is a detached,
+	// best-effort telemetry sample, not genuine work — it must not win
+	// lastPhase and overwrite the real stall attribution for a loop_block that
+	// happens to land right after a first open.
+	it("does not record lsp_typescript_project_identity as the last phase (no probe self-attribution)", () => {
+		logLatency({ type: "phase", phase: "word_index_build", filePath: "<x>", durationMs: 5 });
+		logLatency({
+			type: "phase",
+			phase: "lsp_typescript_project_identity",
+			filePath: "/repo/src/app.ts",
+			durationMs: 12,
+		});
+		expect(getLastLoggedPhase()?.phase).toBe("word_index_build");
+	});
 });

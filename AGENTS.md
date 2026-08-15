@@ -15,7 +15,13 @@ may consult parents, but the root used for client identity and spawn never may.
 fixture/gitignore filtering, `LSPService` coalesces a config-only nested root to
 an already-hosted same-server ancestor; a nested manifest/lockfile boundary
 keeps its independent client. Keep both policies deterministic and free of
-wall-clock expiry. (#1328, #1373)
+wall-clock expiry. TypeScript resolves governing `tsconfig.json`/`jsconfig.json`
+separately from package/tooling markers and prefers the config directory for
+identity; the same coalescer still folds a config-only nested root when the
+ancestor was hosted first (the accepted #1373 open-order sensitivity). Classic
+TypeScript clients sample `projectInfo` once per normalized file after the first
+successful `didOpen`; this bounded best-effort telemetry never runs for native
+TS7 or blocks diagnostics. (#1328, #1373, #1412)
 
 TypeScript diagnostic wait policy is launch-variant-aware: classic
 typescript-language-server may accept its complete first push, while native

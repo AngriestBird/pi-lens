@@ -513,6 +513,10 @@ describe("lsp server policy", () => {
 		expect(results).toEqual([tmp, tmp, tmp, tmp]);
 	});
 
+	// Misses are deliberately NOT cached: the absent → present transition
+	// (agent scaffolds package.json/tsconfig.json mid-session) must be picked
+	// up on the next resolution without a process restart. Only hits are
+	// process-lifetime memos.
 	it("does not cache undefined — re-walks when root marker is later created", async () => {
 		const { NearestRoot } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-nocache-"));
@@ -528,7 +532,7 @@ describe("lsp server policy", () => {
 		const r1 = await resolver(file);
 		expect(r1).toBeUndefined();
 
-		// Now create the marker — next call must detect it despite no cached entry.
+		// Marker created AFTER the first miss — the next walk must find it.
 		fs.writeFileSync(path.join(tmp, "package.json"), "{}");
 		const r2 = await resolver(file);
 		expect(r2).toBe(tmp);
@@ -658,6 +662,56 @@ describe("lsp server policy", () => {
 
 		const spawned = await TypeScriptServer.spawn(tmp);
 		expect(spawned).toBeUndefined();
+	});
+
+	// #1412 M1: a nested config root (e.g. cypress/tsconfig.json) with
+	// node_modules only at the REPO ROOT must still find the classic
+	// typescript-language-server wrapper AND tsserver.js by walking up from the
+	// LSP root — pre-fix this only checked <root> itself and degraded to
+	// managed download/no-LSP.
+	it("finds classic TypeScript tooling at an ancestor node_modules for a nested config root", async () => {
+		const { TypeScriptServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ts-nested-root-"),
+		);
+		dirs.push(tmp);
+
+		const binDir = path.join(tmp, "node_modules", ".bin");
+		fs.mkdirSync(binDir, { recursive: true });
+		const isWin = process.platform === "win32";
+		const lspBin = path.join(
+			binDir,
+			isWin ? "typescript-language-server.cmd" : "typescript-language-server",
+		);
+		fs.writeFileSync(lspBin, "#!/usr/bin/env node\n");
+
+		const tsserverDir = path.join(tmp, "node_modules", "typescript", "lib");
+		fs.mkdirSync(tsserverDir, { recursive: true });
+		const tsserverPath = path.join(tsserverDir, "tsserver.js");
+		fs.writeFileSync(tsserverPath, "// fake tsserver\n");
+
+		const nestedRoot = path.join(tmp, "cypress");
+		fs.mkdirSync(nestedRoot, { recursive: true });
+		fs.writeFileSync(path.join(nestedRoot, "tsconfig.json"), "{}\n");
+
+		launchLSP.mockResolvedValue({
+			process: { killed: false } as never,
+			stdin: {} as never,
+			stdout: {} as never,
+			stderr: {} as never,
+			pid: 2222,
+		});
+
+		const spawned = await TypeScriptServer.spawn(nestedRoot);
+		expect(spawned).toBeDefined();
+		expect(launchLSP).toHaveBeenCalledWith(
+			lspBin,
+			["--stdio"],
+			expect.objectContaining({
+				cwd: nestedRoot,
+				env: expect.objectContaining({ TSSERVER_PATH: tsserverPath }),
+			}),
+		);
 	});
 
 	it("skips PowerShell bash-language-server shim candidates on Windows", async () => {
