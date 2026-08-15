@@ -129,6 +129,17 @@ describe("RuntimeCoordinator", () => {
 			expect(runtime.telemetryProviderId).toBe("openai");
 		});
 
+		it("re-derives a DERIVED provider across a mid-session model switch with no explicit provider", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ model: "gpt-5-mini" });
+			expect(runtime.telemetryProviderId).toBe("openai");
+
+			// Switch models without an explicit provider — the stale "openai"
+			// derivation must not survive; it has to re-derive for the new model.
+			runtime.setTelemetryIdentity({ model: "claude-sonnet-4-5" });
+			expect(runtime.telemetryProviderId).toBe("anthropic");
+		});
+
 		it("resetForSession clears the raw model/provider identity", () => {
 			const runtime = new RuntimeCoordinator();
 			runtime.setTelemetryIdentity({ model: "claude-sonnet-4-5", provider: "anthropic" });

@@ -114,6 +114,12 @@ export class RuntimeCoordinator {
 	// (deriveProviderFromModelId, blank on ambiguity — never guessed).
 	private _telemetryModelId = "";
 	private _telemetryProvider = "";
+	// True once a host has supplied an explicit provider this session. An
+	// explicit provider is never downgraded by a derivation from a later
+	// model-only call; a DERIVED provider, by contrast, is re-derived on
+	// every model-only call so a mid-session model switch (e.g. gpt-5-mini →
+	// claude-sonnet-4-5) doesn't leave a stale provider from the old model.
+	private _telemetryProviderIsExplicit = false;
 	private _turnIndex = 0;
 	private _writeIndex = 0;
 	private _projectSeq = 0;
@@ -180,6 +186,7 @@ export class RuntimeCoordinator {
 		this._telemetryModel = "unknown";
 		this._telemetryModelId = "";
 		this._telemetryProvider = "";
+		this._telemetryProviderIsExplicit = false;
 		this._turnIndex = 0;
 		this._writeIndex = 0;
 		this._projectSeq = 0;
@@ -338,10 +345,16 @@ export class RuntimeCoordinator {
 		if (model) this._telemetryModelId = model;
 		if (provider) {
 			this._telemetryProvider = provider;
-		} else if (model && !this._telemetryProvider) {
-			// Only fall back to derivation when no provider has ever been reported
-			// this session — an explicit provider (even from an earlier call) must
-			// never be overwritten by a same-session guess.
+			this._telemetryProviderIsExplicit = true;
+		} else if (model && !this._telemetryProviderIsExplicit) {
+			// No explicit provider has ever been reported this session, so the
+			// provider is (still) a derivation — re-derive it from the CURRENT
+			// model id every time. Without this, a stale derived provider from
+			// an earlier model would survive a mid-session model switch (e.g.
+			// gpt-5-mini → claude-sonnet-4-5 with no explicit provider on
+			// either call) because the old "has any provider ever been set"
+			// guard treated the derived value as sticky. An explicit provider,
+			// once set, is never touched here regardless of later model calls.
 			this._telemetryProvider = deriveProviderFromModelId(model);
 		}
 	}
