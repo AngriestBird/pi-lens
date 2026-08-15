@@ -1167,7 +1167,7 @@ function resolveLangExtensions(value: string): readonly string[] {
 	const kind = value.toLowerCase() as FileKind;
 	const extensions = KIND_EXTENSIONS[kind];
 	if (!extensions) {
-		const known = Object.keys(KIND_EXTENSIONS).sort().join(", ");
+		const known = Object.keys(KIND_EXTENSIONS).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).join(", ");
 		throw new WordIndexQueryError(
 			`Unknown lang: "${value}" in word-index query — supported languages: ${known}.`,
 		);
