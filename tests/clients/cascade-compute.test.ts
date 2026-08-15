@@ -767,6 +767,277 @@ describe("computeCascadeForFile", () => {
 		}
 	});
 
+	it("#1446 item 5: cascade_result records recentlyCleanHits when the recently-clean cache short-circuits a re-touch", async () => {
+		const env = setupTestEnvironment("cascade-recently-clean-hits-");
+		try {
+			const primary = path.join(env.tmpDir, "model.py");
+			const neighbor = path.join(env.tmpDir, "api.py");
+			fs.writeFileSync(primary, "class User: pass\n");
+			fs.writeFileSync(neighbor, "from model import User\n");
+			mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+			const touchFile = vi.fn().mockResolvedValue({ diags: [] });
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile,
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+
+			// First cascade: a confirmed clean touch seeds recentlyCleanNeighborCache.
+			await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+			expect(touchFile).toHaveBeenCalledTimes(1);
+			mocks.logCascade.mockClear();
+
+			// Second cascade, one turn later (within RECENTLY_CLEAN_TTL_TURNS = 5):
+			// must short-circuit without touching the LSP again, and the skip must
+			// be counted rather than silently disappearing into "no signal".
+			await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 2,
+				writeSeq: 2,
+			});
+			expect(touchFile).toHaveBeenCalledTimes(1);
+			expect(mocks.logCascade).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "cascade_result",
+					metadata: expect.objectContaining({
+						recentlyCleanHits: 1,
+						cacheHits: 0,
+					}),
+				}),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("#1446 item 5: cascade_result records cacheHits when the same-write neighbor cache short-circuits a re-touch", async () => {
+		const env = setupTestEnvironment("cascade-cache-hits-");
+		try {
+			const primary = path.join(env.tmpDir, "model.py");
+			const neighbor = path.join(env.tmpDir, "api.py");
+			fs.writeFileSync(primary, "class User: pass\n");
+			fs.writeFileSync(neighbor, "from model import User\n");
+			mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+			const touchFile = vi
+				.fn()
+				.mockResolvedValue({ diags: [lspError("cascade result")] });
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile,
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+
+			// First cascade at turnSeq/writeSeq 1 performs the real touch and
+			// populates neighborTouchCache.
+			await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+			expect(touchFile).toHaveBeenCalledTimes(1);
+			mocks.logCascade.mockClear();
+
+			// A second cascade run for the SAME turn/write (a second primary edited
+			// in the same pipeline pass touching the same neighbor) must reuse the
+			// cached diagnostics rather than re-touch, and the reuse must be counted.
+			await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+			expect(touchFile).toHaveBeenCalledTimes(1);
+			expect(mocks.logCascade).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "cascade_result",
+					metadata: expect.objectContaining({
+						cacheHits: 1,
+						recentlyCleanHits: 0,
+					}),
+				}),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// F1 (adversarial review of #1446): `coldTouches` used to be derived from
+	// `coldSnapshotPaths.length`, a list finalized BEFORE the cache-hit checks
+	// inside the touch pool run — so a coldSnapshotPaths neighbour that then hit
+	// neighborTouchCache/recentlyCleanNeighborCache was double-counted (cold AND
+	// cache/clean), while a non-autopropagate (activePaths) neighbour that missed
+	// both caches and took a genuine touch was counted in neither bucket. This
+	// exercises all four touch-pool outcomes in ONE run, with BOTH failure modes
+	// live at once: `neighborCache` (.ts, autoPropagate) sits in
+	// `coldSnapshotPaths` on every run (its snapshot is never valid) yet resolves
+	// via `neighborTouchCache` on this run — the double-count case — while
+	// `neighborCold` (.py, activePaths) takes a genuine cold touch and would be
+	// invisible to the old `coldSnapshotPaths.length` derivation entirely — the
+	// silent-drop case. The four counters must still partition the touched-
+	// neighbour count exactly.
+	it("F1: cacheHits/recentlyCleanHits/coldTouches/deferredTouches partition the touched-neighbour set", async () => {
+		const env = setupTestEnvironment("cascade-f1-partition-");
+		try {
+			const primary = path.join(env.tmpDir, "hub.py");
+			const neighborCache = path.join(env.tmpDir, "src", "cache_hit.ts");
+			const neighborClean = path.join(env.tmpDir, "recently_clean.py");
+			const neighborCold = path.join(env.tmpDir, "genuinely_cold.py");
+			const neighborDeferred = path.join(env.tmpDir, "src", "deferred.ts");
+			fs.writeFileSync(primary, "class Hub: pass\n");
+			fs.mkdirSync(path.dirname(neighborCache), { recursive: true });
+			fs.writeFileSync(neighborCache, "export const cacheHit = 1;\n");
+			fs.writeFileSync(neighborClean, "from hub import Hub  # clean\n");
+			fs.writeFileSync(neighborCold, "from hub import Hub  # cold\n");
+			fs.writeFileSync(neighborDeferred, "import { cacheHit } from './cache_hit';\n");
+
+			const touchFile = vi.fn().mockImplementation(async (p: string) => {
+				if (p === neighborCache) return { diags: [lspError("cache seed")] };
+				if (p === neighborClean) return { diags: [] };
+				if (p === neighborCold) return { diags: [lspError("genuinely cold")] };
+				return undefined; // neighborDeferred's notify-only touch
+			});
+			const getCapabilitySnapshots = vi
+				.fn()
+				.mockImplementation(async (p: string) => {
+					if (p !== neighborDeferred) return [];
+					return [
+						{
+							serverId: "typescript",
+							root: env.tmpDir,
+							workspaceDiagnosticsSupport: { mode: "push-only" },
+							launchVariant: "native-ts7",
+						},
+					];
+				});
+			const getClientForFile = vi.fn().mockResolvedValue({
+				client: { serverId: "typescript" },
+			});
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				getCapabilitySnapshots,
+				getClientForFile,
+				touchFile,
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+
+			// Setup run: seeds neighborTouchCache (neighborCache, a real error)
+			// and recentlyCleanNeighborCache (neighborClean, a confirmed clean
+			// touch) at turnSeq=1/writeSeq=1.
+			mocks.computeImpactCascade.mockReturnValueOnce(
+				impact(primary, [neighborCache, neighborClean]),
+			);
+			await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+			expect(touchFile).toHaveBeenCalledTimes(2);
+			mocks.logCascade.mockClear();
+
+			// Main run, SAME turnSeq/writeSeq (so neighborCache's cache entry
+			// matches exactly) plus two new neighbours neither cache has seen.
+			mocks.computeImpactCascade.mockReturnValueOnce(
+				impact(primary, [
+					neighborCache,
+					neighborClean,
+					neighborCold,
+					neighborDeferred,
+				]),
+			);
+			await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			const resultCall = mocks.logCascade.mock.calls.find(
+				(call) => (call[0] as { phase?: string }).phase === "cascade_result",
+			);
+			expect(resultCall).toBeDefined();
+			const metadata = (
+				resultCall![0] as {
+					metadata: {
+						cacheHits: number;
+						recentlyCleanHits: number;
+						coldTouches: number;
+						deferredTouches: number;
+					};
+				}
+			).metadata;
+			expect(metadata).toMatchObject({
+				cacheHits: 1,
+				recentlyCleanHits: 1,
+				coldTouches: 1,
+				deferredTouches: 1,
+			});
+			// The partition invariant: every touched neighbour (the 4 in this
+			// run's pool) lands in EXACTLY one bucket — no double-count (the old
+			// coldSnapshotPaths.length bug), no silent drop (the old activePaths
+			// undercounting bug).
+			const touchedNeighbourCount = 4;
+			expect(
+				metadata.cacheHits +
+					metadata.recentlyCleanHits +
+					metadata.coldTouches +
+					metadata.deferredTouches,
+			).toBe(touchedNeighbourCount);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("#1446 item 4: cascade_result records the neighbour budget in force and how many eligible candidates it truncated", async () => {
+		const env = setupTestEnvironment("cascade-budget-truncated-");
+		try {
+			const primary = path.join(env.tmpDir, "hub.py");
+			fs.writeFileSync(primary, "class Hub: pass\n");
+			// One more neighbour than the default 40-neighbour budget so the cap
+			// (not the existence/vendor/ignore filters) is the thing truncating.
+			const neighborCount = 41;
+			const neighbors: string[] = [];
+			for (let i = 0; i < neighborCount; i++) {
+				const neighborPath = path.join(env.tmpDir, `dep${i}.py`);
+				fs.writeFileSync(neighborPath, `from hub import Hub  # dep ${i}\n`);
+				neighbors.push(neighborPath);
+			}
+			mocks.computeImpactCascade.mockReturnValue(impact(primary, neighbors));
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile: vi.fn().mockResolvedValue({ diags: [] }),
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			expect(mocks.logCascade).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "cascade_result",
+					metadata: expect.objectContaining({
+						neighborBudget: 40,
+						budgetTruncated: 1,
+					}),
+				}),
+			);
+		} finally {
+			env.cleanup();
+		}
+	}, 30_000);
+
 	it("does not touch jsts neighbor when snapshot is valid (warm session)", async () => {
 		const env = setupTestEnvironment("cascade-warm-snapshot-");
 		try {
