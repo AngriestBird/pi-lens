@@ -43,6 +43,71 @@ vi.mock("../../../clients/sessionstart-logger.js", () => ({
 
 const dirs: string[] = [];
 
+const IS_WIN = process.platform === "win32";
+
+/**
+ * Build a fake managed tools tree for the classic TypeScript fallback (#1436):
+ * a project dir, a managed `node_modules/.bin` holding the wrapper and `tsc`,
+ * and a TypeScript package whose version and `lib/tsserver.js` the caller
+ * controls through `writeCompiler`. Each case then states only its own facts.
+ */
+function createManagedTypeScriptTree(label: string) {
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `pi-lens-ts-${label}-`));
+	dirs.push(tmp);
+	fs.writeFileSync(path.join(tmp, "package.json"), "{}\n");
+
+	const binDir = path.join(tmp, "managed", "node_modules", ".bin");
+	fs.mkdirSync(binDir, { recursive: true });
+	const lspPath = path.join(
+		binDir,
+		IS_WIN ? "typescript-language-server.cmd" : "typescript-language-server",
+	);
+	const tscPath = path.join(binDir, IS_WIN ? "tsc.cmd" : "tsc");
+	fs.writeFileSync(lspPath, "#!/usr/bin/env node\n");
+	fs.writeFileSync(tscPath, "#!/usr/bin/env node\n");
+
+	const typescriptDir = path.join(tmp, "managed", "node_modules", "typescript");
+	const tsserverPath = path.join(typescriptDir, "lib", "tsserver.js");
+
+	const writeCompiler = (version: string, withTsserver = false) => {
+		fs.mkdirSync(path.join(typescriptDir, "lib"), { recursive: true });
+		fs.writeFileSync(
+			path.join(typescriptDir, "package.json"),
+			`${JSON.stringify({ name: "typescript", version })}\n`,
+		);
+		if (withTsserver) {
+			fs.writeFileSync(tsserverPath, "// fake tsserver\n");
+		} else {
+			fs.rmSync(tsserverPath, { force: true });
+		}
+	};
+
+	/** Resolve `ensureTool` to this tree; `onForceReinstall` models the repair. */
+	const mockEnsureTool = (onForceReinstall?: () => void) => {
+		ensureTool.mockImplementation(
+			async (toolId: string, options?: { forceReinstall?: boolean }) => {
+				if (toolId === "typescript-language-server") return lspPath;
+				if (toolId !== "typescript") return undefined;
+				if (options?.forceReinstall) onForceReinstall?.();
+				return tscPath;
+			},
+		);
+	};
+
+	return { tmp, lspPath, tscPath, tsserverPath, writeCompiler, mockEnsureTool };
+}
+
+/** Resolve the mocked LSP launch with a stub process. */
+function mockLaunchedProcess(pid: number): void {
+	launchLSP.mockResolvedValue({
+		process: { killed: false } as never,
+		stdin: {} as never,
+		stdout: {} as never,
+		stderr: {} as never,
+		pid,
+	});
+}
+
 afterEach(() => {
 	for (const dir of dirs.splice(0)) {
 		removeTempDirSync(dir);
@@ -712,6 +777,129 @@ describe("lsp server policy", () => {
 				env: expect.objectContaining({ TSSERVER_PATH: tsserverPath }),
 			}),
 		);
+	});
+
+	it("repairs an incompatible managed TypeScript compiler for the classic fallback", async () => {
+		const { TypeScriptServer, _resetClassicTsRepairForTests } = await import(
+			"../../../clients/lsp/server.js"
+		);
+		_resetClassicTsRepairForTests();
+		const tree = createManagedTypeScriptTree("managed-repair");
+		tree.writeCompiler("7.0.2");
+		tree.mockEnsureTool(() => tree.writeCompiler("5.9.3", true));
+		mockLaunchedProcess(3333);
+
+		const spawned = await TypeScriptServer.spawn(tree.tmp);
+
+		expect(spawned).toBeDefined();
+		expect(ensureTool).toHaveBeenCalledWith("typescript", {
+			allowInstall: true,
+		});
+		expect(ensureTool).toHaveBeenCalledWith("typescript", {
+			allowInstall: true,
+			forceReinstall: true,
+		});
+		// A refactor must not double-install: exactly one forced reinstall.
+		expect(
+			ensureTool.mock.calls.filter(
+				(call) => call[0] === "typescript" && call[1]?.forceReinstall === true,
+			),
+		).toHaveLength(1);
+		expect(launchLSP).toHaveBeenCalledWith(
+			tree.lspPath,
+			["--stdio"],
+			expect.objectContaining({
+				cwd: tree.tmp,
+				env: expect.objectContaining({ TSSERVER_PATH: tree.tsserverPath }),
+			}),
+		);
+		expect(logSessionStart).toHaveBeenCalledWith(
+			"lsp typescript: managed compiler resolved to TypeScript 7.0.2, which ships no tsserver.js; reinstalling pinned classic fallback",
+		);
+	});
+
+	// The once-guard: a repair that yields no tsserver.js must not retry on the
+	// next spawn. ensureTool caches successful installs, so only the FAILING
+	// path can loop — three call sites, each with a 120 s install timeout.
+	it("attempts the classic TypeScript repair at most once per process", async () => {
+		const { TypeScriptServer, _resetClassicTsRepairForTests } = await import(
+			"../../../clients/lsp/server.js"
+		);
+		_resetClassicTsRepairForTests();
+		const tree = createManagedTypeScriptTree("repair-once");
+		tree.writeCompiler("7.0.2");
+		// The reinstall does not produce a usable compiler (offline, partial).
+		tree.mockEnsureTool();
+		mockLaunchedProcess(4444);
+
+		const first = await TypeScriptServer.spawn(tree.tmp);
+		const second = await TypeScriptServer.spawn(tree.tmp);
+
+		expect(first?.initialization).toBeUndefined();
+		expect(second?.initialization).toBeUndefined();
+		expect(launchLSP).toHaveBeenCalledWith(
+			tree.lspPath,
+			["--stdio"],
+			expect.objectContaining({
+				env: expect.objectContaining({ TSSERVER_PATH: undefined }),
+			}),
+		);
+		expect(
+			ensureTool.mock.calls.filter(
+				(call) => call[0] === "typescript" && call[1]?.forceReinstall === true,
+			),
+		).toHaveLength(1);
+	});
+
+	// AC-5: discovery-only callers never mutate the tools tree, even when a
+	// discovered TypeScript 7 compiler is present. This reaches the repair
+	// branch's gate rather than short-circuiting on an undefined ensureTool.
+	it("never reinstalls the classic TypeScript compiler when install is disabled", async () => {
+		const { TypeScriptServer, _resetClassicTsRepairForTests } = await import(
+			"../../../clients/lsp/server.js"
+		);
+		_resetClassicTsRepairForTests();
+		const tree = createManagedTypeScriptTree("repair-disabled");
+		tree.writeCompiler("7.0.2");
+		tree.mockEnsureTool();
+		mockLaunchedProcess(5555);
+		process.env.PI_LENS_DISABLE_LSP_INSTALL = "1";
+
+		const spawned = await TypeScriptServer.spawn(tree.tmp);
+
+		expect(spawned?.initialization).toBeUndefined();
+		expect(ensureTool).toHaveBeenCalledWith("typescript", {
+			allowInstall: false,
+		});
+		expect(
+			ensureTool.mock.calls.filter((call) => call[1]?.forceReinstall === true),
+		).toHaveLength(0);
+		expect(logSessionStart).not.toHaveBeenCalledWith(
+			expect.stringContaining("reinstalling pinned classic fallback"),
+		);
+	});
+
+	// A bare `tsc` from PATH has no readable version and no adjacent package
+	// layout. Repairing there would force-reinstall over a healthy global 5.x.
+	it("skips the classic TypeScript repair for a bare PATH compiler", async () => {
+		const { TypeScriptServer, _resetClassicTsRepairForTests } = await import(
+			"../../../clients/lsp/server.js"
+		);
+		_resetClassicTsRepairForTests();
+		const tree = createManagedTypeScriptTree("repair-path-hit");
+		ensureTool.mockImplementation(async (toolId: string) => {
+			if (toolId === "typescript-language-server") return tree.lspPath;
+			if (toolId === "typescript") return "tsc";
+			return undefined;
+		});
+		mockLaunchedProcess(6666);
+
+		const spawned = await TypeScriptServer.spawn(tree.tmp);
+
+		expect(spawned?.initialization).toBeUndefined();
+		expect(
+			ensureTool.mock.calls.filter((call) => call[1]?.forceReinstall === true),
+		).toHaveLength(0);
 	});
 
 	it("skips PowerShell bash-language-server shim candidates on Windows", async () => {

@@ -1261,6 +1261,75 @@ async function findAncestorFileAmong(
 }
 
 /**
+ * A failed classic-compiler repair must not repeat. `ensureTool` caches
+ * successful installs, so a repair that works short-circuits later calls on
+ * its own. A repair that fails leaves nothing behind, and `findTsserverPath`
+ * has three call sites (TypeScript, Vue, Svelte). Without this guard an
+ * offline or partial install re-runs a 120 s forced reinstall on every spawn.
+ */
+let classicTsRepairAttempted = false;
+
+/** Test hook — clears the per-process classic-repair guard. */
+export function _resetClassicTsRepairForTests(): void {
+	classicTsRepairAttempted = false;
+}
+
+/**
+ * Directories that may hold the TypeScript package next to a resolved `tsc`
+ * binary: `<bin>/../typescript` (npm-global layout) and
+ * `<bin>/../../typescript` (managed `node_modules/.bin` layout).
+ */
+function typescriptDirsForTsc(tscPath: string): string[] {
+	const binDir = path.dirname(tscPath);
+	return [
+		path.join(binDir, "..", "typescript"),
+		path.join(binDir, "..", "..", "typescript"),
+	];
+}
+
+/**
+ * Read the major version of the TypeScript package that backs a resolved
+ * `tsc` binary. Returns undefined when the version is unknowable: `ensureTool`
+ * returns the bare string `"tsc"` for a PATH hit, and `path.dirname("tsc")` is
+ * `"."`, so the candidates would go cwd-relative. Callers must not repair on
+ * an unknown version — a healthy global TypeScript 5.x would be reinstalled
+ * for nothing.
+ */
+async function typescriptVersionForTsc(
+	tscPath: string,
+): Promise<{ version: string; major: number } | undefined> {
+	if (!path.isAbsolute(tscPath)) return undefined;
+	for (const dir of typescriptDirsForTsc(tscPath)) {
+		let manifest: string;
+		try {
+			manifest = await readFile(path.join(dir, "package.json"), "utf8");
+		} catch {
+			continue;
+		}
+		let version: string;
+		try {
+			const parsed: unknown = JSON.parse(manifest);
+			if (
+				typeof parsed !== "object" ||
+				parsed === null ||
+				!("version" in parsed) ||
+				typeof parsed.version !== "string"
+			) {
+				return undefined;
+			}
+			version = parsed.version;
+		} catch {
+			return undefined;
+		}
+		const majorText = version.split(".", 1)[0] ?? "";
+		const major = /^\d+$/.test(majorText) ? Number(majorText) : Number.NaN;
+		if (!Number.isFinite(major)) return undefined;
+		return { version, major };
+	}
+	return undefined;
+}
+
+/**
  * Locate tsserver.js — tries local project (walking up from root, #1412 M1),
  * then process.cwd() as a last-resort fallback, then pi-lens managed
  * TypeScript. Returns the path to tsserver.js, or undefined if not found.
@@ -1291,38 +1360,57 @@ async function findTsserverPath(
 	} catch {
 		/* not found */
 	}
-	// Discover the typescript install (PATH / npm-global) even when install is
-	// disabled; only the download is gated by allowInstall.
-	const tscPath = await ensureTool("typescript", {
-		allowInstall: canInstall(allowInstall),
-	});
-	if (tscPath) {
-		for (const p of [
-			path.join(
-				path.dirname(tscPath),
-				"..",
-				"typescript",
-				"lib",
-				"tsserver.js",
-			),
-			path.join(
-				path.dirname(tscPath),
-				"..",
-				"..",
-				"typescript",
-				"lib",
-				"tsserver.js",
-			),
-		]) {
+	const tsserverForTsc = async (
+		tscPath: string | undefined,
+	): Promise<string | undefined> => {
+		if (!tscPath) return undefined;
+		for (const dir of typescriptDirsForTsc(tscPath)) {
+			const candidate = path.join(dir, "lib", "tsserver.js");
 			try {
-				await fs.access(p);
-				return p;
+				await fs.access(candidate);
+				return candidate;
 			} catch {
 				/* not found */
 			}
 		}
+		return undefined;
+	};
+
+	// Discover the TypeScript install (PATH / npm-global) even when installation
+	// is disabled; only the download is gated by allowInstall.
+	const installAllowed = canInstall(allowInstall);
+	const discoveredTsc = await ensureTool("typescript", {
+		allowInstall: installAllowed,
+	});
+	const discoveredTsserver = await tsserverForTsc(discoveredTsc);
+	if (
+		discoveredTsserver ||
+		!discoveredTsc ||
+		!installAllowed ||
+		classicTsRepairAttempted
+	) {
+		return discoveredTsserver;
 	}
-	return undefined;
+
+	// Repair only a compiler we can prove is TypeScript 7+. TypeScript 7 dropped
+	// lib/tsserver.js, so the classic wrapper cannot start against it. Any other
+	// version — or a version we cannot read, such as a bare PATH `tsc` — is left
+	// alone rather than force-reinstalled.
+	const discoveredVersion = await typescriptVersionForTsc(discoveredTsc);
+	if (!discoveredVersion || discoveredVersion.major < 7) return undefined;
+
+	// An older managed tree took `latest` before the registry pinned the classic
+	// compiler. Reinstall the pinned version once so that tree self-heals,
+	// without deleting user or project-local TypeScript installations.
+	classicTsRepairAttempted = true;
+	logSessionStart(
+		`lsp typescript: managed compiler resolved to TypeScript ${discoveredVersion.version}, which ships no tsserver.js; reinstalling pinned classic fallback`,
+	);
+	const repairedTsc = await ensureTool("typescript", {
+		allowInstall: true,
+		forceReinstall: true,
+	});
+	return tsserverForTsc(repairedTsc);
 }
 
 interface NativeTypeScriptLsp {
