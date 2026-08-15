@@ -105,6 +105,32 @@ describe("bus-publish — pilens:files:touched (#482)", () => {
 		)).toBe(false);
 	});
 
+	it("fails open when the probe cannot classify the ctx", () => {
+		// The tri-state matters: only a CONFIRMED-stale ctx (probe === false)
+		// may skip delivery. A ctx without isIdle (undefined) and a ctx whose
+		// probe throws a NON-stale error (undefined — "don't guess") must both
+		// fall through to the emit, where a real failure still logs
+		// emit_failed. Silent inversion here would drop telemetry for any
+		// odd-shaped ctx.
+		for (const oddCtx of [
+			{},
+			{ isIdle: () => { throw new Error("boom, not the stale fragment"); } },
+		]) {
+			const emit = vi.fn();
+			wireBusEmitterGetter(() => ({ emit, ctx: oddCtx }));
+			publishFilesTouched({
+				reason: "autofix",
+				paths: ["/repo/src/a.ts"],
+				cwd: "/repo",
+			});
+			expect(emit).toHaveBeenCalledTimes(1);
+			expect(logBusEvent.mock.calls.some(([entry]) =>
+				(entry as { outcome?: string }).outcome === "skipped_stale_session",
+			)).toBe(false);
+			vi.clearAllMocks();
+		}
+	});
+
 	it("re-resolves and publishes through the fresh session ctx", () => {
 		const staleEmit = vi.fn();
 		const freshEmit = vi.fn();
