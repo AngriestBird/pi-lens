@@ -26,6 +26,9 @@
  * spam one identical line per write batch for an entire session with zero
  * new information after the first. Both are gated log-once-per-process, the
  * same `hasLoggedFailure` shape the producers already use for emit_failed.
+ * `skipped_stale_session` is an info-level per-occurrence outcome: the emit
+ * seam intentionally declined a target whose associated ctx was confirmed
+ * stale, so it is neither a bus failure nor input for the smells rollup.
  * The empty-batch branch (`paths.length === 0` / `files.length === 0`) is
  * NOT logged at all: every call site already guards against invoking these
  * functions with nothing to report (see clients/pipeline.ts,
@@ -57,12 +60,14 @@ export type BusEventOutcome =
 	| "emitted"
 	| "skipped_unwired"
 	| "skipped_disabled"
+	| "skipped_stale_session"
 	| "emit_failed";
 
 export interface BusEventLogEntry {
 	ts: string;
 	event: BusEventName;
 	outcome: BusEventOutcome;
+	level?: "info";
 	cwd: string;
 	/** paths.length (files:touched) / files.length (diagnostics), for `emitted`. */
 	fileCount?: number;

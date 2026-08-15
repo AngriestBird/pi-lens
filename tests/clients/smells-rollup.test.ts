@@ -116,6 +116,10 @@ describe("countRecentSmells", () => {
 		writeLines(path.join(tmpDir, "bus-events.log"), [
 			staleCtxLine(),
 			staleCtxLine(),
+			JSON.stringify({
+				outcome: "skipped_stale_session",
+				error: "Error: ctx is stale after session replacement",
+			}),
 			JSON.stringify({ outcome: "emitted", event: "x" }),
 			JSON.stringify({ outcome: "emit_failed", error: "ECONNRESET" }),
 			"not json at all",
