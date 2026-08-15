@@ -1,5 +1,11 @@
 import "./clients/console-guard-install.js";
-import { installConsoleGuard, logExtension } from "./clients/extension-log.js";
+import {
+	closeModuleLoadConsoleWindow,
+	installConsoleGuard,
+	logExtension,
+	runInConsoleCaptureWindow,
+	withConsoleCaptureWindows,
+} from "./clients/extension-log.js";
 import { wireUserNotifier } from "./clients/user-notify.js";
 import {
 	getDegradationSummary,
@@ -67,6 +73,7 @@ import { wireBusEmitterGetter } from "./clients/bus-publish.js";
 import { wireDiagnosticsBusEmitterGetter } from "./clients/diagnostics-publish.js";
 import { wireDispositionBusEmitterGetter } from "./clients/disposition-publish.js";
 import { wireFormatEventsBusEmitterGetter } from "./clients/format-events-publish.js";
+import { emitBusEventRollupAtSessionEnd } from "./clients/bus-events-logger.js";
 import {
 	consumeAgentNudge,
 	recordCrossProcessTouches,
@@ -503,7 +510,16 @@ function cleanStaleTsBuildInfo(cwd: string): string[] {
 
 // --- Extension ---
 
-export default function (pi: ExtensionAPI) {
+/**
+ * The extension activation. Always reached through the default export below,
+ * which runs it inside a console capture window (#1434).
+ */
+function activateExtension(hostPi: ExtensionAPI) {
+	// #1434: every pi-lens entry point registered through this API runs inside a
+	// capture window, so a dependency writing to console during our work reaches
+	// the log instead of pi's frame. Host-initiated output stays on the real
+	// console, because it runs outside every window.
+	const pi = withConsoleCaptureWindows(hostPi);
 	// Event contexts belong to the activation that owns this factory closure.
 	// The process-global latest ctx remains only a boot-window fallback.
 	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
@@ -567,6 +583,12 @@ export default function (pi: ExtensionAPI) {
 	refreshCtxDerivedPlumbing();
 	// #485: read-only bus subscriber — never publishes, so the #482 loop guard
 	// (ingest -> write -> publish) has no write side to trip here.
+	// #1434 residual risk, accepted not fixed: `pi.events` is the raw host bus,
+	// not `pi` itself, so `withConsoleCaptureWindows` does not wrap its
+	// `subscribe`. A future subscriber body that logs would bypass the capture
+	// window. Subscribers registered on this bus are subscribe-only today
+	// (never publish), so nothing currently exercises that gap — revisit if
+	// `pi.events` grows a subscriber that does real work inside its callback.
 	wireAgentNudgeSubscriber({
 		events: pi.events,
 		getReadGuard: () => runtime.readGuard,
@@ -2151,7 +2173,12 @@ export default function (pi: ExtensionAPI) {
 			// gate). See clients/smells-rollup.ts for the tail-scan cost bound.
 			if (shouldCheckSmellsThisTurn(runtime.turnIndex)) {
 				try {
-					for (const note of checkSmellsAndNoteOnce(countRecentSmells())) {
+					// S3c (#1432 review): use the in-process session start instead of
+					// letting countRecentSmells() fall back to its 24h rolling
+					// window — turn_end already knows exactly when this session
+					// began, so admitted rows are scoped to it, not to a day-wide
+					// guess that could straddle multiple sessions.
+					for (const note of checkSmellsAndNoteOnce(countRecentSmells(undefined, runtime.sessionStartedAt))) {
 						notifyUi(ctx, note, "warning");
 					}
 				} catch {
@@ -2463,6 +2490,12 @@ export default function (pi: ExtensionAPI) {
 			processExiting: true,
 			reason: "session_shutdown",
 		});
+		// S2d (gap 5, #1432 review): one session_end_bus_rollup row per event
+		// name with any activity this session — same primary-only placement as
+		// the shared-infra teardown above (a concurrent secondary already
+		// returned before reaching here), since the rollup counters are
+		// process-wide module state a live secondary would still need.
+		emitBusEventRollupAtSessionEnd(runtime.projectRoot);
 		// #1123 item 4: dump active handles AFTER teardown — whatever is still
 		// alive at this point is exactly what would keep a --print/--no-session
 		// process from exiting (the #1097 lesson: what survives IS the leak).
@@ -2674,3 +2707,13 @@ export default function (pi: ExtensionAPI) {
 		},
 	);
 }
+
+export default function (pi: ExtensionAPI) {
+	return runInConsoleCaptureWindow(() => activateExtension(pi));
+}
+
+// #1434: the import graph has finished evaluating, so the module window closes
+// here. Everything after this point is host-owned execution, until one of
+// pi-lens's own entry points opens its own window. This must stay the last
+// statement in index.ts.
+closeModuleLoadConsoleWindow();

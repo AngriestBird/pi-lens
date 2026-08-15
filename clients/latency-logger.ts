@@ -58,8 +58,23 @@ let lastPhase: { phase: string; ts: string } | undefined;
  * telemetry sample fired on every first didOpen, not genuine work. Letting it
  * win `lastPhase` would overwrite the real stall attribution for a
  * loop_block that happens to land right after a first open.
+ * #1432 review: `advisory_provenance_decision`,
+ * `authoritative_content_attachment_decision`, and
+ * `agent_end_deferred_mutation_drain` are the same shape — zero-duration
+ * decision telemetry, not genuine work — so they get the same exclusion.
+ * `agent_end_deferred_mutation_requeue` (S2d gap 4's per-requeue record) and
+ * `session_end_bus_rollup` (S2d gap 5's session-end rollup) are new
+ * zero-duration siblings of the same shape, added alongside them.
  */
-const LAST_PHASE_EXCLUDED = new Set(["loop_block", "lsp_typescript_project_identity"]);
+const LAST_PHASE_EXCLUDED = new Set([
+	"loop_block",
+	"lsp_typescript_project_identity",
+	"advisory_provenance_decision",
+	"authoritative_content_attachment_decision",
+	"agent_end_deferred_mutation_drain",
+	"agent_end_deferred_mutation_requeue",
+	"session_end_bus_rollup",
+]);
 
 /**
  * The last non-`loop_block` phase logged, or undefined if none yet. Carries its

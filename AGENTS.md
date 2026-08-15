@@ -1,5 +1,14 @@
 # pi-lens — agent context
 
+Post-fix decision observability is durable and bounded: advisory delivery logs
+one `advisory_provenance_decision` per consume, classic TypeScript project
+identity logs every success/failure outcome, deferred mutation drains summarize
+coalescing and requeues, and authoritative-content branches log attachment
+decisions. Bus stale/failure rows carry the resolver's ctx source. Automatic
+smell warnings count only the current session, or a 24-hour fallback window
+when no session boundary is available; explicit health remains separately
+labeled. (#1432)
+
 Advisory caches must carry immutable capture provenance and validate it again
 at every delivery surface. A finding is current only when session/turn state
 matches and every affected file is SHA-256-confirmed (size+mtime is only the
@@ -141,6 +150,8 @@ preserved as `cause`. (#1214)
 ## Contributing
 
 For human contributors and issue/PR authors, see `CONTRIBUTING.md` at the repo root. It covers the development workflow, how to add runners, LSP servers, formatters, and rules, and the issue/PR templates. This `AGENTS.md` is the durable agent context; `CONTRIBUTING.md` is the public contributor guide.
+
+**External-PR handling.** Maintainer agents may commit directly to a contributor's PR branch when "allow edits from maintainers" is enabled. Prefer this over asking the contributor to apply small review asks. Keep the contributor's authorship: commit only the review deltas, write clear commit messages, and reference the review. When you post a review on an external PR, thank the contributor first. Then state plainly that the review is AI-generated and that a maintainer supervises the process.
 
 **Pi-lens dogfooding is part of every pi session.** When pi-lens is installed while we work in pi, the agent is also a pi-lens consumer and debugger. If an observed behavior is not as expected (including stale/deleted-file diagnostics, a misfiring command, a stale installed-copy result, a hang, or a misleading clean/unconfirmed state), first distinguish a real defect from an artifact of the installed build, cache, or environment; then open or update a labeled tracking issue with the reproduction, observed-versus-expected behavior, evidence, affected surfaces, acceptance criteria, non-goals, and test matrix, and notify the user with the link. The same obligation applies to enhancement opportunities identified through consumption of the extension (performance, observability, ergonomics, or architectural seams), even when the current task is unrelated. Do not silently dismiss a finding as "just dogfooding" or leave it only in chat. Example: #1259 tracks the latency benchmark needed after #1254's default all-scope LSP collection change.
 
@@ -1657,3 +1668,27 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
   events. Tool-call inspection must not mutate read-guard state, and wrapper,
   launcher, and continuation forms must remain conservative for git commits and
   pushes.
+- **The console guard captures only inside a pi-lens execution window** (#1434).
+  The host shares this process and prints its own CLI output through
+  `console.log`, so a permanent global reroute silences commands like
+  `pi list`. `installConsoleGuard` installs a dispatcher: inside a window the
+  write goes to the extension log, outside one it goes to the original console
+  method. Windows come from three places only — the module-evaluation flag
+  opened in `clients/console-guard-install.ts`, the activation window in
+  `index.ts`'s default export, and the per-entry-point windows that
+  `withConsoleCaptureWindows` adds around every `on`/`register*` call — a
+  DENY-LIST keyed on the property name (`isCaptureSeam`), not a hand-maintained
+  list of the specific methods pi-lens happens to call today, so a new
+  `register*` seam the host adds later is covered without an edit here. Every
+  function argument gets wrapped, including one ONE LEVEL inside an
+  options/tool object (`options.handler`, `tool.execute`) — deliberately not
+  recursive past that level, since walking a tool's full nested schema on
+  every registration measurably slowed activation; a coverage test
+  (`tests/clients/console-capture-window-coverage.test.ts`) derives the
+  member list from the host's own `ExtensionAPI` type and asserts none of them
+  bypass the window. Register a new host entry point through the wrapped API,
+  never the raw one, or its console writes escape to the terminal.
+  `closeModuleLoadConsoleWindow()` must stay the last statement in `index.ts`.
+  Known gap, accepted not fixed: `pi.events` (a separate bus, not an
+  `ExtensionAPI` member) is unwrapped — fine today because every subscriber on
+  it is subscribe-only.
