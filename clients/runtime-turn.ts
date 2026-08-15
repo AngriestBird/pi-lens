@@ -66,6 +66,7 @@ import type { TurnStateOwner } from "./cache-manager.js";
 import type { TestResult, TestRunnerClient } from "./test-runner-client.js";
 import {
 	MAX_ADVISORY_AFFECTED_FILES,
+	dropFindingsForMissingPaths,
 	snapshotAdvisoryProvenance,
 } from "./advisory-provenance.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
@@ -815,11 +816,25 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		"gitleaks",
 		cwd,
 	)?.data;
+	// #1461 slice 1 (#1460): the gitleaks cache is TTL-only, so a finding for a
+	// file deleted after the scan is still served as a 🔴 blocker for the rest
+	// of the 30-minute window — the live case, and 119 of 126 findings in
+	// pi-lens's own cache. This read is the single agent-facing consumer of that
+	// store (session_start's read only decides whether to re-scan; the
+	// project-diagnostics path re-scans fresh and reconciles at load), so the
+	// drop belongs here, before the findings enter the shared secret pipeline.
+	// gitleaks only in this slice — trivy secrets are slice 1's sibling store.
+	const gitleaksFindings = dropFindingsForMissingPaths({
+		store: "gitleaks",
+		findings: gitleaksData?.findings ?? [],
+		cwd,
+		citedPath: (finding) => finding.file,
+	});
 	const astSecretWarnings = runtime
 		.peekActionableWarnings()
 		.filter(isSecretWarning);
 	const sessionSecrets = dedupeSecretFindings([
-		...fromGitleaks(gitleaksData?.findings ?? []),
+		...fromGitleaks(gitleaksFindings),
 		...fromTrivySecrets(trivyCacheEntry?.data?.secrets ?? []),
 	]);
 	// Locations already surfaced as session-scan secret blockers — used to enrich

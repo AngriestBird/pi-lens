@@ -68,6 +68,10 @@ let lastPhase: { phase: string; ts: string } | undefined;
  * #1453: `tool_set_mutation` records an active-tool-set rewrite (zero-duration
  * bookkeeping, and it fires during session_start where a real stall must stay
  * attributed to the work around it), so it is excluded for the same reason.
+ *
+ * #1461 slice 1: `finding_dead_path_drop` is the same shape — the record a
+ * delivery seam writes when it drops findings whose cited path no longer
+ * exists.
  */
 const LAST_PHASE_EXCLUDED = new Set([
 	"loop_block",
@@ -78,6 +82,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"agent_end_deferred_mutation_requeue",
 	"session_end_bus_rollup",
 	"tool_set_mutation",
+	"finding_dead_path_drop",
 ]);
 
 /**
