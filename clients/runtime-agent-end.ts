@@ -166,9 +166,9 @@ export async function handleAgentEnd({
 			durationMs: 0,
 			metadata: {
 				reason,
-				kinds: [...kinds].sort(),
+				kinds: [...kinds].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
 				fileCount: pending.length,
-				toolNames: [...toolNames].sort(),
+				toolNames: [...toolNames].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
 			},
 		});
 		runtime.requeueDeferredMutations(pending);
@@ -726,7 +726,7 @@ export async function handleAgentEnd({
 			autofixRecords: autofixRecords.length,
 			formatRecords: formatRecords.length,
 			coalescedPaths: records.length,
-			requeuedKinds: [...requeuedKinds].sort(),
+			requeuedKinds: [...requeuedKinds].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
 		},
 	});
 	logLatency({
