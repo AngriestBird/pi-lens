@@ -113,6 +113,34 @@ describe("classic TypeScript project-identity telemetry (#1412)", () => {
 		);
 	});
 
+	// #1412 L2: handleNotifyOpen already computes normalizeMapKey(filePath)
+	// before calling in — the probe must use that value verbatim instead of
+	// recomputing it. Pass a normalizedFile that deliberately does NOT match
+	// normalizeMapKey(file) to prove the supplied value wins.
+	it("uses the caller-supplied normalizedFile instead of recomputing it", async () => {
+		const executeCommand = vi.fn().mockResolvedValue({
+			executed: true,
+			result: { success: true, body: {} },
+		});
+		const probedFiles = new Set<string>();
+		const customKey = "already-normalized-key";
+		await probeTsserverProjectIdentity({
+			serverId: "typescript",
+			launchVariant: "classic",
+			clientRoot: "/repo",
+			file: "/repo/src/app.ts",
+			normalizedFile: customKey,
+			probedFiles,
+			commandChannel: { executeCommand },
+		});
+
+		expect(probedFiles.has(customKey)).toBe(true);
+		expect(probedFiles.has(normalizeMapKey("/repo/src/app.ts"))).toBe(false);
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({ filePath: customKey }),
+		);
+	});
+
 	it("is a no-op for native TS7", async () => {
 		const executeCommand = vi.fn();
 		await probeTsserverProjectIdentity({

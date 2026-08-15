@@ -590,6 +590,13 @@ const EXECUTE_COMMAND_TIMEOUT_MS = positiveIntFromEnv(
 	"PI_LENS_LSP_EXECUTE_COMMAND_TIMEOUT_MS",
 	30_000,
 );
+// #1412 H1: short ceiling for the read-only tsserver project-identity probe.
+// This is a telemetry sample, not a mutation — it must never hold the door
+// open for anything close to EXECUTE_COMMAND_TIMEOUT_MS.
+const PROBE_COMMAND_TIMEOUT_MS = positiveIntFromEnv(
+	"PI_LENS_LSP_PROJECT_IDENTITY_PROBE_TIMEOUT_MS",
+	2_500,
+);
 
 const LSP_CRASH_CODES = new Set([
 	"ERR_STREAM_DESTROYED",
@@ -2029,20 +2036,24 @@ export async function handleNotifyOpen(
 	state.openDocuments.add(normalizedPath);
 	state.closedDocuments?.delete(normalizedPath);
 	state.openDocumentUris?.set(normalizedPath, uri);
-	// Telemetry is deliberately detached after didOpen succeeds. runServerCommand
-	// supplies the existing bounded executeCommand backstop; the probe itself is
-	// classic-only and swallows every failure.
+	// Telemetry is deliberately detached after didOpen succeeds.
+	// #1412 H1: routed through runReadOnlyServerCommand, NOT runServerCommand —
+	// the probe must never open the serverEditsAllowed/activeMutationContext
+	// mutation-acceptance window; it is a diagnostic sample, not a mutation, and
+	// carries its own short PROBE_COMMAND_TIMEOUT_MS backstop. The probe itself
+	// is classic-only and swallows every failure.
 	void probeTsserverProjectIdentity({
 		serverId: state.serverId,
 		launchVariant: state.launchVariant,
 		clientRoot: state.root,
 		file: filePath,
+		normalizedFile: normalizedPath,
 		probedFiles:
 			state.projectIdentityProbedFiles ??
 			(state.projectIdentityProbedFiles = new Set()),
 		commandChannel: {
 			executeCommand: (command, args) =>
-				runServerCommand(state, command, args),
+				runReadOnlyServerCommand(state, command, args),
 		},
 	});
 }
@@ -2102,6 +2113,11 @@ export async function closeDocument(
 	state.documentVersions.delete(normalizedPath);
 	state.documentOpenedAt.delete(normalizedPath);
 	state.diagnosticPublicationCounts.delete(normalizedPath);
+	// #1412 L1: projectIdentityProbedFiles is a claim-once memo scoped to the
+	// document's open lifetime (re-probing a closed-then-reopened file is
+	// harmless and cheap) — mirror openDocuments' own per-close cleanup so it
+	// doesn't grow unbounded across a long session's worth of open/close churn.
+	state.projectIdentityProbedFiles?.delete(normalizedPath);
 	clearDiagnosticsForPath(state, normalizedPath);
 }
 
@@ -2120,6 +2136,9 @@ export async function clientShutdown(
 	state.pendingOpens.clear();
 	state.openDocuments.clear();
 	state.openDocumentUris?.clear();
+	// #1412 L1: mirror openDocuments' clear — a shut-down/evicted client's
+	// probe memo is moot along with everything else document-scoped.
+	state.projectIdentityProbedFiles?.clear();
 	// #271: drop any pending watched-files batch + its timer (a dying client's
 	// queued FS changes are moot, and the timer must not outlive the connection).
 	state.watchQueue?.cancel();
@@ -2351,6 +2370,51 @@ export async function runServerCommand(
 		state.serverEditsAllowed -= 1;
 		state.activeMutationDepth = Math.max(0, (state.activeMutationDepth ?? 0) - 1);
 		if (state.activeMutationDepth === 0) state.activeMutationContext = undefined;
+	}
+}
+
+// #1412 H1/H2: read-only sibling of runServerCommand for telemetry/identity
+// probes that must NOT participate in the mutation-acceptance window. Unlike
+// runServerCommand this never touches serverEditsAllowed, activeMutationDepth,
+// or activeMutationContext — a probe firing mid-flight must leave a concurrent
+// real executeCommand's mutation context untouched, and must not itself open
+// the workspace/applyEdit acceptance window (client.ts's applyEdit handler
+// gates on serverEditsAllowed > 0). Preserves the allowlist-by-advertisement
+// invariant. Short PROBE_COMMAND_TIMEOUT_MS backstop — this is a diagnostic
+// sample, not a mutation, and must never hold anything up for anywhere near
+// EXECUTE_COMMAND_TIMEOUT_MS.
+export async function runReadOnlyServerCommand(
+	state: LSPClientState,
+	command: string,
+	args: unknown[] | undefined,
+	timeoutMs: number = PROBE_COMMAND_TIMEOUT_MS,
+): Promise<{ executed: boolean; result?: unknown; reason?: string }> {
+	if (!isClientAlive(state)) {
+		return { executed: false, reason: "lsp client not alive" };
+	}
+	if (!state.advertisedCommands.has(command)) {
+		return {
+			executed: false,
+			reason: `command "${command}" is not advertised by the ${state.serverId} server`,
+		};
+	}
+	try {
+		const result = await withTimeout(
+			safeSendRequest<unknown>(state.connection, "workspace/executeCommand", {
+				command,
+				arguments: args ?? [],
+			}),
+			timeoutMs,
+		);
+		return { executed: true, result };
+	} catch (err) {
+		if (err instanceof Error && err.message.startsWith("Timeout after")) {
+			return {
+				executed: false,
+				reason: `workspace/executeCommand timed out after ${timeoutMs}ms`,
+			};
+		}
+		throw err;
 	}
 }
 

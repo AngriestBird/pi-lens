@@ -52,6 +52,16 @@ export interface LatencyEntry {
 let lastPhase: { phase: string; ts: string } | undefined;
 
 /**
+ * Phases excluded from `lastPhase` attribution alongside `loop_block`.
+ * #1412 L3: `lsp_typescript_project_identity` is the classic-TS first-open
+ * project-identity probe (tsserver-sync.ts) — a detached, best-effort
+ * telemetry sample fired on every first didOpen, not genuine work. Letting it
+ * win `lastPhase` would overwrite the real stall attribution for a
+ * loop_block that happens to land right after a first open.
+ */
+const LAST_PHASE_EXCLUDED = new Set(["loop_block", "lsp_typescript_project_identity"]);
+
+/**
  * The last non-`loop_block` phase logged, or undefined if none yet. Carries its
  * own `ts` so a consumer can gauge staleness: it is intentionally NOT cleared at
  * turn/window boundaries, so on a turn that logged no phase of its own it may
@@ -64,7 +74,7 @@ export function getLastLoggedPhase(): { phase: string; ts: string } | undefined 
 
 export function logLatency(entry: LatencyEntry): void {
 	const ts = new Date().toISOString();
-	if (entry.type === "phase" && entry.phase && entry.phase !== "loop_block") {
+	if (entry.type === "phase" && entry.phase && !LAST_PHASE_EXCLUDED.has(entry.phase)) {
 		lastPhase = { phase: entry.phase, ts };
 	}
 	if (isTestMode()) {

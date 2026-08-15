@@ -104,4 +104,48 @@ describe("TypeScript config-aware roots (#1412)", () => {
 
 		await expect(TypeScriptServer.root(file)).resolves.toBe(session);
 	});
+
+	// Case (a) from the #1412 review's case table: config + manifest in the
+	// SAME directory — the overwhelmingly common layout — must resolve
+	// identically to before this change (the directory itself, not a nested
+	// or ancestor root).
+	it("hosts a project at the same directory when config and manifest are colocated (case a)", async () => {
+		const project = tempProject("pi-lens-tsconfig-colocated-");
+		vi.spyOn(process, "cwd").mockReturnValue(project);
+		write(path.join(project, "tsconfig.json"));
+		write(path.join(project, "package.json"));
+		const file = path.join(project, "src", "app.ts");
+		write(file, "export {};\n");
+
+		await expect(TypeScriptServer.root(file)).resolves.toBe(project);
+	});
+
+	// #1412 M3, case (g): tsserver associates jsconfig.json with JS files only
+	// — a .ts file under a jsconfig-only directory must NOT root there. It must
+	// keep walking up for a real tsconfig.json.
+	it("skips a jsconfig-only directory for a .ts file and roots at the ancestor tsconfig (case g)", async () => {
+		const project = tempProject("pi-lens-jsconfig-ts-skip-");
+		vi.spyOn(process, "cwd").mockReturnValue(project);
+		write(path.join(project, "tsconfig.json"));
+		const nested = path.join(project, "legacy-js");
+		write(path.join(nested, "jsconfig.json"));
+		const file = path.join(nested, "src", "app.ts");
+		write(file, "export {};\n");
+
+		await expect(TypeScriptServer.root(file)).resolves.toBe(project);
+	});
+
+	// The JS-family counterpart: a .js file under the same jsconfig-only
+	// directory DOES root there — jsconfig governs JS files.
+	it("still roots a .js file at a jsconfig-only directory (case g counterpart)", async () => {
+		const project = tempProject("pi-lens-jsconfig-js-accept-");
+		vi.spyOn(process, "cwd").mockReturnValue(project);
+		write(path.join(project, "tsconfig.json"));
+		const nested = path.join(project, "legacy-js");
+		write(path.join(nested, "jsconfig.json"));
+		const file = path.join(nested, "src", "app.js");
+		write(file, "export {};\n");
+
+		await expect(TypeScriptServer.root(file)).resolves.toBe(nested);
+	});
 });

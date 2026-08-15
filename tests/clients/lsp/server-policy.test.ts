@@ -513,7 +513,15 @@ describe("lsp server policy", () => {
 		expect(results).toEqual([tmp, tmp, tmp, tmp]);
 	});
 
-	it("does not cache undefined — re-walks when root marker is later created", async () => {
+	// #1412 M4: previously undefined results were never cached, so a repo with
+	// no matching marker re-walked to the filesystem/stop boundary on EVERY
+	// resolution. The fix memoizes the miss too — same process-lifetime memo
+	// story as the positive cache — so a marker created AFTER the first miss
+	// is intentionally NOT picked up without a fresh resolver/client restart.
+	// (This inverts the old "does not cache undefined — re-walks when root
+	// marker is later created" expectation; that staleness window is now
+	// symmetric with the positive cache's, not a regression.)
+	it("caches undefined — does not re-walk when a root marker is later created", async () => {
 		const { NearestRoot } = await import("../../../clients/lsp/server.js");
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-root-nocache-"));
 		dirs.push(tmp);
@@ -528,10 +536,10 @@ describe("lsp server policy", () => {
 		const r1 = await resolver(file);
 		expect(r1).toBeUndefined();
 
-		// Now create the marker — next call must detect it despite no cached entry.
+		// Marker created AFTER the miss was cached — the cached miss wins.
 		fs.writeFileSync(path.join(tmp, "package.json"), "{}");
 		const r2 = await resolver(file);
-		expect(r2).toBe(tmp);
+		expect(r2).toBeUndefined();
 	});
 
 	it("isolates cache per NearestRoot instance — different marker sets are independent", async () => {
@@ -609,6 +617,32 @@ describe("lsp server policy", () => {
 		}
 	});
 
+	// #1412 M4: NearestRoot previously cached only hits — a repo with no config
+	// re-walked to the filesystem root on EVERY resolution. The fix memoizes
+	// misses too, with the same process-lifetime (no invalidation) story the
+	// positive cache already had: a marker appearing mid-session already
+	// required a restart to be picked up before this change, so caching the
+	// miss doesn't introduce new staleness, it just extends existing behavior.
+	it("caches a miss so a marker created mid-session is not picked up without a restart", async () => {
+		const { NearestRoot } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-root-negative-cache-"),
+		);
+		dirs.push(tmp);
+
+		const project = path.join(tmp, "project");
+		const file = path.join(project, "nested", "doc.md");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, "# Doc\n");
+
+		const resolver = NearestRoot([".marksman.toml"]);
+		await expect(resolver(file)).resolves.toBeUndefined();
+
+		// The marker appears AFTER the miss was cached.
+		fs.writeFileSync(path.join(tmp, ".marksman.toml"), "[core]\n");
+		await expect(resolver(file)).resolves.toBeUndefined();
+	});
+
 	it("matches Dockerfile by basename in configured server lookup", async () => {
 		const { getServersForFileWithConfig } = await import(
 			"../../../clients/lsp/config.js"
@@ -658,6 +692,56 @@ describe("lsp server policy", () => {
 
 		const spawned = await TypeScriptServer.spawn(tmp);
 		expect(spawned).toBeUndefined();
+	});
+
+	// #1412 M1: a nested config root (e.g. cypress/tsconfig.json) with
+	// node_modules only at the REPO ROOT must still find the classic
+	// typescript-language-server wrapper AND tsserver.js by walking up from the
+	// LSP root — pre-fix this only checked <root> itself and degraded to
+	// managed download/no-LSP.
+	it("finds classic TypeScript tooling at an ancestor node_modules for a nested config root", async () => {
+		const { TypeScriptServer } = await import("../../../clients/lsp/server.js");
+		const tmp = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-ts-nested-root-"),
+		);
+		dirs.push(tmp);
+
+		const binDir = path.join(tmp, "node_modules", ".bin");
+		fs.mkdirSync(binDir, { recursive: true });
+		const isWin = process.platform === "win32";
+		const lspBin = path.join(
+			binDir,
+			isWin ? "typescript-language-server.cmd" : "typescript-language-server",
+		);
+		fs.writeFileSync(lspBin, "#!/usr/bin/env node\n");
+
+		const tsserverDir = path.join(tmp, "node_modules", "typescript", "lib");
+		fs.mkdirSync(tsserverDir, { recursive: true });
+		const tsserverPath = path.join(tsserverDir, "tsserver.js");
+		fs.writeFileSync(tsserverPath, "// fake tsserver\n");
+
+		const nestedRoot = path.join(tmp, "cypress");
+		fs.mkdirSync(nestedRoot, { recursive: true });
+		fs.writeFileSync(path.join(nestedRoot, "tsconfig.json"), "{}\n");
+
+		launchLSP.mockResolvedValue({
+			process: { killed: false } as never,
+			stdin: {} as never,
+			stdout: {} as never,
+			stderr: {} as never,
+			pid: 2222,
+		});
+
+		const spawned = await TypeScriptServer.spawn(nestedRoot);
+		expect(spawned).toBeDefined();
+		expect(launchLSP).toHaveBeenCalledWith(
+			lspBin,
+			["--stdio"],
+			expect.objectContaining({
+				cwd: nestedRoot,
+				env: expect.objectContaining({ TSSERVER_PATH: tsserverPath }),
+			}),
+		);
 	});
 
 	it("skips PowerShell bash-language-server shim candidates on Windows", async () => {

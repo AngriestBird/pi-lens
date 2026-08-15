@@ -78,6 +78,13 @@ export interface TsserverProjectIdentityProbeOptions {
 	launchVariant?: "classic" | "native-ts7";
 	clientRoot: string;
 	file: string;
+	/**
+	 * #1412 L2: caller-supplied `normalizeMapKey(file)`. `handleNotifyOpen`
+	 * already computes this before calling in (client.ts) — recomputing it here
+	 * would just repeat the same normalization for every first open. Falls back
+	 * to normalizing `file` locally if a caller (e.g. an older test) omits it.
+	 */
+	normalizedFile?: string;
 	probedFiles: Set<string>;
 	commandChannel: TsserverProjectIdentityCommandChannel;
 }
@@ -133,7 +140,7 @@ export async function probeTsserverProjectIdentity(
 	) {
 		return;
 	}
-	const normalizedFile = normalizeMapKey(options.file);
+	const normalizedFile = options.normalizedFile ?? normalizeMapKey(options.file);
 	if (options.probedFiles.has(normalizedFile)) return;
 	// Claim before yielding so concurrent opens cannot issue duplicate probes.
 	options.probedFiles.add(normalizedFile);
