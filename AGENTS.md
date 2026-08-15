@@ -46,6 +46,11 @@ newer per-file push or pull publication. The shared server wait policy stays
 `inconclusive` marker through formatting, and only confirmed touches enter the
 neighbor cache. (#1444)
 
+Auxiliary LSP waits use each server's declared aggregate wait, capped by a
+2-second global post-primary ceiling. This admits measured warm scanner runs
+without charging every edit for a scanner's longer cold-start budget. An
+explicit `PI_LENS_AUX_GRACE_MS` overrides the global ceiling. (#1458)
+
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
 the agent. `turnSeq` is not a staleness signal for such a run (a late run is by

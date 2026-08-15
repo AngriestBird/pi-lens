@@ -243,6 +243,38 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		expect(messages).toContain("aux finding");
 	});
 
+	it("gives an auxiliary its declared budget up to the global ceiling", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const primaryClient = makeClient(100, [makeDiagnostic("primary error")]);
+		// Opengrep's declared 3500ms budget exceeds the 2000ms global aux ceiling,
+		// but its measured ~1.3s warm scan must no longer be cut off at 500ms.
+		const auxClient = makeClient(1300, [makeDiagnostic("aux finding")]);
+
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(primaryClient)
+			.mockResolvedValueOnce(auxClient);
+
+		await service.getClientsForFile(FILE);
+		const touchPromise = service.touchFile(FILE, "content-budget", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+
+		await vi.advanceTimersByTimeAsync(1310);
+		const result = await touchPromise;
+		expect(result.diags.map((diagnostic) => diagnostic.message)).toContain(
+			"aux finding",
+		);
+	});
+
 	it("still waits for slow primary even if aux settles early", async () => {
 		process.env.PI_LENS_AUX_GRACE_MS = String(AUX_GRACE_MS);
 

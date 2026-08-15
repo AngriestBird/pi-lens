@@ -2718,8 +2718,11 @@ export class LSPService {
 								(x): x is { promise: Promise<void | undefined>; serverId: string } =>
 									x !== null,
 							);
-						const auxGraceMs = readEnvAuxGraceMs() ?? 500;
-						// After all primaries settle, give auxiliaries at most auxGraceMs.
+						const auxCeilingMs = readEnvAuxGraceMs() ?? 2000;
+						// After all primaries settle, give each auxiliary the smaller of
+						// its declared wait budget and the global auxiliary ceiling. The
+						// 2000ms default admits measured ~1.3s warm scanner runs without
+						// making every edit pay opengrep's 3500ms cold-start allowance.
 						// Late aux results are dropped from the wait (advisory only — they
 						// land in the client cache and surface on the next edit); aux servers
 						// that did answer within the grace are included automatically since
@@ -2728,31 +2731,31 @@ export class LSPService {
 						// `auxCutOffServerIds`).
 						return Promise.all(primaryWaits).then(async () => {
 							if (auxWaits.length === 0) return;
-							const auxTimeout = new Promise<"timeout">((resolve) => {
-								const t = setTimeout(() => resolve("timeout"), auxGraceMs);
-								if (typeof t === "object" && "unref" in t) t.unref?.();
-							});
-							const auxAll = Promise.all(auxWaits.map((a) => a.promise)).then(
-								() => "done" as const,
-							);
-							const outcome = await Promise.race([auxAll, auxTimeout]);
-							if (outcome === "timeout") {
-								// Record which auxiliaries did NOT finish in time.
-								const unfinished: string[] = [];
-								for (const a of auxWaits) {
-									let done = false;
-									// Check synchronously if already resolved by racing against
-									// a resolved promise.
-									await Promise.race([
-										a.promise.then(() => {
-											done = true;
-										}),
-										Promise.resolve(),
+							const outcomes = await Promise.all(
+								auxWaits.map(async (aux) => {
+									const budgetMs = Math.min(
+										timeoutFor(aux.serverId),
+										auxCeilingMs,
+									);
+									let timer: ReturnType<typeof setTimeout> | undefined;
+									const timeout = new Promise<false>((resolve) => {
+										timer = setTimeout(() => resolve(false), budgetMs);
+										if (typeof timer === "object" && "unref" in timer) {
+											timer.unref?.();
+										}
+									});
+									const settled = await Promise.race([
+										aux.promise.then(() => true as const),
+										timeout,
 									]);
-									if (!done) unfinished.push(a.serverId);
-								}
-								if (unfinished.length > 0) auxCutOffServerIds = unfinished;
-							}
+									if (timer) clearTimeout(timer);
+									return { serverId: aux.serverId, settled };
+								}),
+							);
+							const unfinished = outcomes
+								.filter((outcome) => !outcome.settled)
+								.map((outcome) => outcome.serverId);
+							if (unfinished.length > 0) auxCutOffServerIds = unfinished;
 						});
 					})()
 				: Promise.all(perServerWaits).then(() => {});
