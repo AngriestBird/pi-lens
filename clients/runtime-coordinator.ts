@@ -591,7 +591,13 @@ export class RuntimeCoordinator {
 	 * never had a chance to deliver.
 	 */
 	hasCascadeRuns(): boolean {
-		return this._cascadeRuns.length > 0 || this._pendingCascadeRuns.length > 0;
+		// Carried, ALREADY-BUILT runs only. Pending (still-settling) computes are
+		// deliberately excluded: a read-only turn that fell through for a pending
+		// run would block on the full settle cap — every turn, forever, when the
+		// compute never resolves (re-review finding F1). A pending run loses
+		// nothing by waiting: settleCascadeRuns re-parks it and the next turn
+		// that actually settles it delivers it.
+		return this._cascadeRuns.length > 0;
 	}
 
 	recordInlineBlockers(filePath: string, summary: string): void {

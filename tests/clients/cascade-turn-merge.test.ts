@@ -369,6 +369,39 @@ describe("cascade turn-end merge", () => {
 	// `carriedTurns` past the bound and drop the run before that turn's
 	// turn_end ever ran — the carry was consumed by a turn that could not have
 	// delivered it either way.
+	it("returns promptly from a read-only turn when only a PENDING run exists (F1)", async () => {
+		const env = setupTestEnvironment("pi-lens-cascade-f1-pending-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			// A compute that never settles: the peek must NOT route the
+			// read-only turn into the settle-cap wait for it.
+			runtime.appendCascadePromise(new Promise(() => {}));
+			expect(runtime.hasCascadeRuns()).toBe(false);
+			runtime.beginTurn();
+			const startedAt = Date.now();
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+			// The early-return path must be taken: no settle-cap wait.
+			expect(Date.now() - startedAt).toBeLessThan(1000);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("delivers a carried cascade finding across edit -> read-only -> edit turns (#1443 R1)", async () => {
 		const env = setupTestEnvironment("cascade-readonly-carry-");
 		try {
