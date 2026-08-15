@@ -84,7 +84,13 @@ function typeScriptVersion(toolsDir: string): string | undefined {
 }
 
 function tsserverPathIn(toolsDir: string): string {
-	return path.join(toolsDir, "node_modules", "typescript", "lib", "tsserver.js");
+	return path.join(
+		toolsDir,
+		"node_modules",
+		"typescript",
+		"lib",
+		"tsserver.js",
+	);
 }
 
 /**
@@ -249,8 +255,11 @@ describe.skipIf(!RUN_LIVE_CLASSIC_REPAIR)(
 			expect(typeScriptVersion(toolsDir)?.split(".")[0]).toBe("7");
 			expect(fs.existsSync(tsserverPathIn(toolsDir))).toBe(false);
 
-			const { server, launch, client: clientModule } =
-				await importServerBoundTo(home);
+			const {
+				server,
+				launch,
+				client: clientModule,
+			} = await importServerBoundTo(home);
 			server._resetClassicTsRepairForTests();
 
 			// `findTsserverPath` probes `process.cwd()/node_modules` before the
@@ -285,9 +294,7 @@ describe.skipIf(!RUN_LIVE_CLASSIC_REPAIR)(
 			// ...and the spawn is the CLASSIC variant carrying that tsserver.
 			expect(spawned.launchVariant).toBe("classic");
 			const resolvedTsserver = (
-				spawned.initialization as
-					| { tsserver?: { path?: string } }
-					| undefined
+				spawned.initialization as { tsserver?: { path?: string } } | undefined
 			)?.tsserver?.path;
 			expect(typeof resolvedTsserver).toBe("string");
 			expect(fs.existsSync(String(resolvedTsserver))).toBe(true);
@@ -328,6 +335,11 @@ describe.skipIf(!RUN_LIVE_CLASSIC_REPAIR)(
 
 			const { home, toolsDir } = stageBrokenHome("no-install");
 			const { root } = stageProject("no-install");
+
+			// Same pre-spawn shape assertion as the repair case: the control is
+			// only meaningful against a genuinely broken tree.
+			expect(typeScriptVersion(toolsDir)?.split(".")[0]).toBe("7");
+			expect(fs.existsSync(tsserverPathIn(toolsDir))).toBe(false);
 			const manifestPath = path.join(
 				toolsDir,
 				"node_modules",
