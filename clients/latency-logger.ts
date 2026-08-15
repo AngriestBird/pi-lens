@@ -65,6 +65,9 @@ let lastPhase: { phase: string; ts: string } | undefined;
  * `agent_end_deferred_mutation_requeue` (S2d gap 4's per-requeue record) and
  * `session_end_bus_rollup` (S2d gap 5's session-end rollup) are new
  * zero-duration siblings of the same shape, added alongside them.
+ * #1461 slice 1: `finding_dead_path_drop` is the same shape — the record a
+ * delivery seam writes when it drops findings whose cited path no longer
+ * exists.
  */
 const LAST_PHASE_EXCLUDED = new Set([
 	"loop_block",
@@ -74,6 +77,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"agent_end_deferred_mutation_drain",
 	"agent_end_deferred_mutation_requeue",
 	"session_end_bus_rollup",
+	"finding_dead_path_drop",
 ]);
 
 /**

@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { logLatency } from "./latency-logger.js";
+import { normalizeMapKey, toProjectRelativePath } from "./path-utils.js";
 
 export type AdvisoryFileRole = "source" | "test" | "affected";
 
@@ -196,6 +197,158 @@ export function validateAdvisoryProvenance(
 	return reasons.length > 0
 		? { status: "superseded", reasons, allFilesDeleted, changedPathCount: changedPaths.size }
 		: { status: "current", reasons: [], allFilesDeleted, changedPathCount: 0 };
+}
+
+// ── Finding-cited path existence (#1461 slice 1) ──────────────────────────────
+//
+// `validateAdvisoryProvenance` above answers "did the files the agent EDITED
+// change since capture?". A cached scanner finding asks a different question:
+// "does the file this finding NAMES still exist?". #1460's live case is the gap
+// between them — a gitleaks blocker for a directory deleted eleven minutes
+// earlier shipped as `current` seven consecutive times, because the edited
+// files were all intact and the cited path was never in the envelope.
+//
+// CONTRACT (the five remaining #1461 slices reuse this verbatim):
+//   - Input is any finding shape; the caller supplies `citedPath`, so nothing
+//     here knows about gitleaks, trivy, govulncheck, vulture, or delta mode.
+//   - A finding whose cited path is absent (ENOENT/ENOTDIR) is DROPPED, not
+//     demoted. There is no remediation for a file that is gone — the agent
+//     cannot rotate a credential in it or delete a line from it. Content drift
+//     on a SURVIVING file stays `validateAdvisoryProvenance`'s job, and that
+//     one demotes.
+//   - Fail open, never closed: a finding with no cited path, an unreadable
+//     path (EACCES/EPERM/EBUSY), or a path past the stat budget is DELIVERED.
+//     Unreadable is not absent; a missed drop is noise, a wrong drop is a lost
+//     secret.
+//   - Bounded cost: paths are deduped by `advisoryPathKey` before probing, so
+//     it is one stat per UNIQUE path, capped at `MAX_FINDING_PATH_STATS`. A
+//     256-finding record over one deleted directory costs a single stat. This
+//     is what keeps `formatDeltaMode`'s "instant" contract reachable in slice 3.
+//   - Path identity uses the guard normalizer (`advisoryPathKey` →
+//     `normalizeMapKey`) for dedup and the shape-aware `toProjectRelativePath`
+//     for display, so Windows spellings of one path collapse to one stat and
+//     one log entry (defect shapes 1 and 2).
+
+/** Stat budget: one per unique cited path, sharing the envelope's own cap. */
+export const MAX_FINDING_PATH_STATS = MAX_ADVISORY_AFFECTED_FILES;
+
+/** How many dead paths a single drop record names before it stops. */
+const MAX_LOGGED_DEAD_PATHS = 3;
+
+/**
+ * Existence verdict for one resolved cited path. `unknown` is the fail-open
+ * arm: the path may well be there, we just could not tell.
+ */
+export type FindingPathExistence = "live" | "missing" | "unknown";
+
+export function findingPathExistence(resolvedPath: string): FindingPathExistence {
+	try {
+		fs.statSync(resolvedPath);
+		return "live";
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+		// ENOTDIR: an ancestor component is no longer a directory — the cited
+		// path cannot exist either, same as ENOENT.
+		return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
+	}
+}
+
+export interface FindingPathPartition<T> {
+	/** Findings safe to deliver: cited path exists, is unreadable, or absent. */
+	live: T[];
+	/** Findings whose cited path is confirmed gone. */
+	dropped: T[];
+	/** Resolved dead paths, unique and in first-seen order. */
+	deadPaths: string[];
+	/** Unique cited paths actually probed. */
+	statCount: number;
+	/** True when the stat budget was hit and some findings failed open. */
+	truncated: boolean;
+}
+
+/**
+ * Partition findings into `{live, dropped}` by whether the path each one names
+ * still exists. Pure apart from the `fs.statSync` probe, which is injectable so
+ * the partition rules are unit-testable without a filesystem.
+ */
+export function partitionFindingsByCitedPath<T>(args: {
+	findings: readonly T[];
+	cwd: string;
+	citedPath: (finding: T) => string | undefined;
+	maxUniquePaths?: number;
+	existence?: (resolvedPath: string) => FindingPathExistence;
+}): FindingPathPartition<T> {
+	const limit = args.maxUniquePaths ?? MAX_FINDING_PATH_STATS;
+	const probe = args.existence ?? findingPathExistence;
+	const verdicts = new Map<string, FindingPathExistence>();
+	const live: T[] = [];
+	const dropped: T[] = [];
+	const deadPaths: string[] = [];
+	let truncated = false;
+	for (const finding of args.findings) {
+		const cited = args.citedPath(finding);
+		if (!cited) {
+			live.push(finding);
+			continue;
+		}
+		const resolved = path.resolve(args.cwd, cited);
+		const key = advisoryPathKey(resolved, args.cwd);
+		let verdict = verdicts.get(key);
+		if (verdict === undefined) {
+			if (verdicts.size >= limit) {
+				// Budget spent on paths we have not seen before — deliver rather
+				// than guess. Already-probed paths below still use their verdict.
+				truncated = true;
+				live.push(finding);
+				continue;
+			}
+			verdict = probe(resolved);
+			verdicts.set(key, verdict);
+			if (verdict === "missing") deadPaths.push(resolved);
+		}
+		if (verdict === "missing") dropped.push(finding);
+		else live.push(finding);
+	}
+	return { live, dropped, deadPaths, statCount: verdicts.size, truncated };
+}
+
+/**
+ * Delivery-seam wrapper: partition, then emit one bounded `finding_dead_path_drop`
+ * record when anything was dropped, and return only what is safe to deliver.
+ *
+ * The record is the #1432 Gap 1 principle applied here — an eviction that logs
+ * nothing is only confirmable by the absence of complaints. One record per
+ * store per delivery, with a capped path sample; never one per finding.
+ */
+export function dropFindingsForMissingPaths<T>(args: {
+	/** Cache/store name as it appears in telemetry, e.g. `"gitleaks"`. */
+	store: string;
+	findings: readonly T[];
+	cwd: string;
+	citedPath: (finding: T) => string | undefined;
+	maxUniquePaths?: number;
+	existence?: (resolvedPath: string) => FindingPathExistence;
+}): T[] {
+	const partition = partitionFindingsByCitedPath(args);
+	if (partition.dropped.length === 0) return partition.live;
+	logLatency({
+		type: "phase",
+		phase: "finding_dead_path_drop",
+		filePath: args.cwd,
+		durationMs: 0,
+		metadata: {
+			store: args.store,
+			droppedDeadPaths: partition.dropped.length,
+			deadPathCount: partition.deadPaths.length,
+			deliveredCount: partition.live.length,
+			statCount: partition.statCount,
+			samplePaths: partition.deadPaths
+				.slice(0, MAX_LOGGED_DEAD_PATHS)
+				.map((deadPath) => toProjectRelativePath(deadPath, args.cwd)),
+			...(partition.truncated ? { truncated: true } : {}),
+		},
+	});
+	return partition.live;
 }
 
 export function provenanceStamp(provenance: unknown): string {
