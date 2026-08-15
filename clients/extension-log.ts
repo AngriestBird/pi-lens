@@ -281,9 +281,13 @@ function isCaptureSeam(prop: PropertyKey): boolean {
  * activation (a wiring test tripped its 5s budget under transform load; see
  * the commit body for the measured before/after). Checking only the
  * argument's own top-level keys is O(keys), independent of how deep an
- * unrelated nested value's own structure goes, and covers every shape the
- * host's `ExtensionAPI` type actually uses (`options.handler`, `tool.execute`
- * — never two levels deep).
+ * unrelated nested value's own structure goes, and covers every shape
+ * PI-LENS actually registers (`options.handler`, `tool.execute` — never two
+ * levels deep). It does NOT cover every shape the host's `ExtensionAPI` type
+ * permits: `registerProvider`'s `config.oauth.*` callbacks sit two levels
+ * deep and `config.models[]` sits behind a skipped array. pi-lens never
+ * calls `registerProvider`; extend the descent if that changes (same known-
+ * gap convention as the `pi.events` note in AGENTS.md).
  *
  * Mutates the object in place rather than copying — a spread copy would drop
  * non-enumerable or prototype-carried members of a definition object (defect
