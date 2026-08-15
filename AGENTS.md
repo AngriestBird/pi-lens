@@ -1657,3 +1657,15 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
   events. Tool-call inspection must not mutate read-guard state, and wrapper,
   launcher, and continuation forms must remain conservative for git commits and
   pushes.
+- **The console guard captures only inside a pi-lens execution window** (#1434).
+  The host shares this process and prints its own CLI output through
+  `console.log`, so a permanent global reroute silences commands like
+  `pi list`. `installConsoleGuard` installs a dispatcher: inside a window the
+  write goes to the extension log, outside one it goes to the original console
+  method. Windows come from three places only — the module-evaluation flag
+  opened in `clients/console-guard-install.ts`, the activation window in
+  `index.ts`'s default export, and the per-entry-point windows that
+  `withConsoleCaptureWindows` adds to `on` handlers and tool bodies. Register a
+  new host entry point through that wrapped API, never the raw one, or its
+  console writes escape to the terminal. `closeModuleLoadConsoleWindow()` must
+  stay the last statement in `index.ts`.

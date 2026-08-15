@@ -1,5 +1,11 @@
 import "./clients/console-guard-install.js";
-import { installConsoleGuard, logExtension } from "./clients/extension-log.js";
+import {
+	closeModuleLoadConsoleWindow,
+	installConsoleGuard,
+	logExtension,
+	runInConsoleCaptureWindow,
+	withConsoleCaptureWindows,
+} from "./clients/extension-log.js";
 import { wireUserNotifier } from "./clients/user-notify.js";
 import {
 	getDegradationSummary,
@@ -503,7 +509,16 @@ function cleanStaleTsBuildInfo(cwd: string): string[] {
 
 // --- Extension ---
 
-export default function (pi: ExtensionAPI) {
+/**
+ * The extension activation. Always reached through the default export below,
+ * which runs it inside a console capture window (#1434).
+ */
+function activateExtension(hostPi: ExtensionAPI) {
+	// #1434: every pi-lens entry point registered through this API runs inside a
+	// capture window, so a dependency writing to console during our work reaches
+	// the log instead of pi's frame. Host-initiated output stays on the real
+	// console, because it runs outside every window.
+	const pi = withConsoleCaptureWindows(hostPi);
 	// Event contexts belong to the activation that owns this factory closure.
 	// The process-global latest ctx remains only a boot-window fallback.
 	// biome-ignore lint/suspicious/noExplicitAny: heterogeneous pi event ctx shapes
@@ -2674,3 +2689,13 @@ export default function (pi: ExtensionAPI) {
 		},
 	);
 }
+
+export default function (pi: ExtensionAPI) {
+	return runInConsoleCaptureWindow(() => activateExtension(pi));
+}
+
+// #1434: the import graph has finished evaluating, so the module window closes
+// here. Everything after this point is host-owned execution, until one of
+// pi-lens's own entry points opens its own window. This must stay the last
+// statement in index.ts.
+closeModuleLoadConsoleWindow();

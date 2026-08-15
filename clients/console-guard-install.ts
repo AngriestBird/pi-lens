@@ -12,6 +12,13 @@ export const PI_LENS_EVAL_STARTED_MS = performance.now();
 // MUST remain the first import of index.ts; the enforcement test pins that.
 // installConsoleGuard() itself is idempotent and no-ops under test mode and
 // PI_LENS_CONSOLE_GUARD=0.
-import { installConsoleGuard } from "./extension-log.js";
+// #1434: the guard captures only while pi-lens owns execution, so the module
+// window must be open for the rest of the import graph. index.ts closes it on
+// its last line; an unref'd backstop closes it if that never runs.
+import {
+	installConsoleGuard,
+	openModuleLoadConsoleWindow,
+} from "./extension-log.js";
 
 installConsoleGuard();
+openModuleLoadConsoleWindow();
