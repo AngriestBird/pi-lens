@@ -2747,6 +2747,7 @@ export class LSPService {
 						// `auxCutOffServerIds`).
 						return Promise.all(primaryWaits).then(async () => {
 							if (auxWaits.length === 0) return;
+							const auxWaitStartedAt = Date.now();
 							const outcomes = await Promise.all(
 								auxWaits.map(async (aux) => {
 									const budgetMs = Math.min(
@@ -2765,13 +2766,25 @@ export class LSPService {
 										timeout,
 									]);
 									if (timer) clearTimeout(timer);
-									return { serverId: aux.serverId, settled };
+									return {
+										serverId: aux.serverId,
+										outcome: settled ? ("settled" as const) : ("starved" as const),
+										budgetMs,
+										elapsedMs: Date.now() - auxWaitStartedAt,
+									};
 								}),
 							);
 							const unfinished = outcomes
-								.filter((outcome) => !outcome.settled)
+								.filter((outcome) => outcome.outcome === "starved")
 								.map((outcome) => outcome.serverId);
 							if (unfinished.length > 0) auxCutOffServerIds = unfinished;
+							logLatency({
+								type: "phase",
+								phase: "lsp_aux_wait_outcome",
+								filePath: normalizedPath,
+								durationMs: Date.now() - auxWaitStartedAt,
+								metadata: { clientScope, outcomes },
+							});
 						});
 					})()
 				: Promise.all(perServerWaits).then(() => {});

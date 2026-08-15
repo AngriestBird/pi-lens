@@ -19,6 +19,9 @@ import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.j
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
+const logLatency = vi.fn();
+
+vi.mock("../../../clients/latency-logger.js", () => ({ logLatency }));
 
 vi.mock("../../../clients/lsp/config.js", () => ({
 	getServersForFileWithConfig,
@@ -162,6 +165,7 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
+		logLatency.mockReset();
 		delete process.env.PI_LENS_AUX_GRACE_MS;
 	});
 
@@ -418,6 +422,43 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		});
 		await vi.advanceTimersByTimeAsync(2110);
 		expect((await next).diags).toHaveLength(0);
+	});
+
+	it("logs the settled and starved auxiliary outcomes for the touch", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(100))
+			.mockResolvedValueOnce({ ...makeClient(3000), serverId: "opengrep" });
+		await service.getClientsForFile(FILE);
+
+		const touch = service.touchFile(FILE, "telemetry", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		await touch;
+
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_aux_wait_outcome",
+				metadata: expect.objectContaining({
+					outcomes: [
+						expect.objectContaining({
+							serverId: "opengrep",
+							outcome: "starved",
+							budgetMs: 2000,
+						}),
+					],
+				}),
+			}),
+		);
 	});
 });
 

@@ -56,6 +56,11 @@ client cache. Carry them into that read only when their stored SHA-256 content
 binding matches the touch content exactly. Unknown or changed-content bindings
 never replay. (#1458)
 
+Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row.
+Its per-server outcomes record settled or starved, elapsed time, and the
+effective budget. This decision-only phase never becomes last-phase stall
+attribution. (#1458)
+
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
 the agent. `turnSeq` is not a staleness signal for such a run (a late run is by

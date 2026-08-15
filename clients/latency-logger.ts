@@ -74,6 +74,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"agent_end_deferred_mutation_drain",
 	"agent_end_deferred_mutation_requeue",
 	"session_end_bus_rollup",
+	"lsp_aux_wait_outcome",
 ]);
 
 /**
