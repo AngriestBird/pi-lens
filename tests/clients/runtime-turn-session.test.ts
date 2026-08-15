@@ -571,6 +571,97 @@ describe("knip turn-end backoff", () => {
 			env.cleanup();
 		}
 	});
+
+	it("keeps the last good result when a run fails (#925 / #1467)", async () => {
+		const env = setupTestEnvironment("pi-lens-knip-cache-keep-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const filePath = path.join(env.tmpDir, "src/current.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			cacheManager.addModifiedRange(
+				filePath,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+			const good = {
+				...EMPTY_KNIP_RESULT,
+				success: true,
+				issues: [{ type: "export", name: "unusedThing", file: "src/old.ts" }],
+				unusedExports: [
+					{ type: "export", name: "unusedThing", file: "src/old.ts" },
+				],
+				summary: "Found 1 issues",
+			};
+			cacheManager.writeCache("knip", good, env.tmpDir);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, {
+					ctxCwd: env.tmpDir,
+					knipClient: {
+						ensureAvailable: async () => false,
+						analyze: async () => ({
+							...EMPTY_KNIP_RESULT,
+							success: false,
+							failureKind: "unavailable-transient",
+							summary: "Knip availability probe timed out after 5528ms.",
+						}),
+					},
+				}),
+			);
+
+			// Pre-fix, this 194-byte failure record replaced the real findings and
+			// every reader afterwards served the failure as the answer.
+			const cached = cacheManager.readCache<typeof good>("knip", env.tmpDir);
+			expect(cached?.data.success).toBe(true);
+			expect(cached?.data.issues).toHaveLength(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not back off when the cached failure was an availability verdict", async () => {
+		const env = setupTestEnvironment("pi-lens-knip-availability-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const filePath = path.join(env.tmpDir, "src/current.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			cacheManager.addModifiedRange(
+				filePath,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+			cacheManager.writeCache(
+				"knip",
+				{
+					...EMPTY_KNIP_RESULT,
+					success: false,
+					failureKind: "unavailable-transient",
+					summary: "Knip availability probe timed out after 5528ms.",
+				},
+				env.tmpDir,
+			);
+			const analyze = vi.fn(async () => EMPTY_KNIP_RESULT);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, {
+					ctxCwd: env.tmpDir,
+					knipClient: { ensureAvailable: async () => true, analyze },
+				}),
+			);
+
+			// knip never ran, so there is nothing to back off from — and backing
+			// off on the word "timed out" is how a probe verdict became permanent.
+			expect(analyze).toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
 });
 
 // ── Call-graph impact delta persistence (#179 / #533) ────────────────────────

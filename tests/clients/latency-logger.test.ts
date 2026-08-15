@@ -55,6 +55,18 @@ describe("getLastLoggedPhase (loop_block attribution, #1122/#1123)", () => {
 		expect(getLastLoggedPhase()?.phase).toBe("word_index_build");
 	});
 
+	it("does not let an availability decision win block attribution (#1467)", () => {
+		logLatency({ type: "phase", phase: "knip", filePath: "<x>", durationMs: 5 });
+		logLatency({
+			type: "phase",
+			phase: "availability_decision",
+			filePath: "<pi-lens>",
+			durationMs: 5528,
+			metadata: { tool: "knip", cause: "host-stall" },
+		});
+		expect(getLastLoggedPhase()?.phase).toBe("knip");
+	});
+
 	it("ignores non-phase entries", () => {
 		logLatency({ type: "phase", phase: "cascade", filePath: "<x>", durationMs: 1 });
 		logLatency({ type: "runner", filePath: "a.ts", durationMs: 1, runnerId: "biome" });
