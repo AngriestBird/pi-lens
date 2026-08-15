@@ -1653,6 +1653,18 @@ Short, obvious changes may use a subject only. Non-trivial changes get a body.
 
 **The standard also governs how agents talk to the maintainer.** Chat replies, status updates, and reports follow the same Zinsser frame. Lead with the outcome. Strip words that do no work. Prefer short sentences over dense em-dash chains. Clarity beats brevity when they conflict. Write like a person, not a system emitting a report.
 
+## Observability assessment
+
+**Every issue and every PR carries an observability assessment.** Answer one question in the body: after this ships, can someone confirm the behavior from logs alone?
+
+- For an issue, name the record that would prove the defect is real and the record that would prove it fixed. If neither exists, that gap is part of the issue.
+- For a PR, state which existing record proves the change works, or add one. A fix whose decision is invisible ships blind.
+- If a change deliberately adds no telemetry, say so and say why. Silence is a choice, not an oversight.
+
+Three failures in one day forced this rule. knip died and reported "not available" for weeks, because a timing-out probe logged nothing a reader could distinguish from a missing tool. The opengrep LSP lane starved on every edit while its CLI kept finding real issues, and no record showed the lane losing the race. Five merged fixes could not be verified from telemetry at all, which is why #1432 exists. Each was found by reading code, not logs, long after it started costing us.
+
+Keep the records bounded, use the existing log conventions, and exclude zero-duration decision phases from `lastPhase` attribution.
+
 ## Issue triage & labels
 
 Every issue should carry **one TYPE label + at least one `area:` label**.
