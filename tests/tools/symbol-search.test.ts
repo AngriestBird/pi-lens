@@ -448,20 +448,30 @@ describe("symbol_search tool", () => {
 			}
 		});
 
-		it("unknown prefix (e.g. type:foo) fails loudly with the supported list, not as a literal term", async () => {
+		it("an unknown colon token searches as a plain term; a bad lang: value fails loudly", async () => {
 			const env = setupTestEnvironment("pi-lens-symbolsearch-queryunknown-");
 			try {
 				makeFixture(env);
 				const tool = createSymbolSearchTool(() => env.tmpDir);
-				const result = await tool.execute(
+				// Colon-bearing term: no error, ordinary search (old behavior).
+				const passThrough = await tool.execute(
 					"1",
 					{ query: "type:foo authenticate user" },
 					undefined,
 					null,
 					{ cwd: env.tmpDir },
 				);
-				expect(result.isError).toBe(true);
-				expect(String(result.content[0]?.text)).toMatch(/lang:|file:|ext:/);
+				expect(passThrough.isError).not.toBe(true);
+				// Known key, bad value: the loud-failure contract survives.
+				const badValue = await tool.execute(
+					"2",
+					{ query: "lang:notalang authenticate user" },
+					undefined,
+					null,
+					{ cwd: env.tmpDir },
+				);
+				expect(badValue.isError).toBe(true);
+				expect(String(badValue.content[0]?.text)).toContain("lang");
 			} finally {
 				env.cleanup();
 			}

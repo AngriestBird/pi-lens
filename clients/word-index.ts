@@ -1138,9 +1138,15 @@ export function parseWordIndexQuery(query: string): ParsedWordIndexQuery {
 			continue;
 		}
 		if (!(WORD_INDEX_QUERY_FILTER_KEYS as readonly string[]).includes(key)) {
-			throw new WordIndexQueryError(
-				`Unsupported word-index filter "${keyRaw}:" in query — supported prefixes: ${WORD_INDEX_QUERY_FILTER_KEYS.map((k) => `${k}:`).join(", ")}.`,
-			);
+			// Not a recognized filter key. Ordinary search terms legitimately
+			// contain colons (std::vector, error:foo, http://…, C:\ paths, a
+			// TODO:tag), and the old tokenizer searched them fine — a hard
+			// error here is a usability regression, not typo protection. The
+			// token passes through as a plain term; the loud-failure contract
+			// survives where it is unambiguous: a KNOWN key with a bad value
+			// (lang:notalang) still throws.
+			termParts.push(raw);
+			continue;
 		}
 		filters.push({
 			key: key as WordIndexQueryFilterKey,

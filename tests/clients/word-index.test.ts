@@ -12,7 +12,6 @@ import {
 	splitIdentifier,
 	tokenizeLine,
 	WORD_INDEX_FORMAT_VERSION,
-	WORD_INDEX_QUERY_FILTER_KEYS,
 	WordIndexQueryError,
 	wordIndexKey,
 	_resetWordIndexBuildGuardForTests,
@@ -120,18 +119,34 @@ describe("parseWordIndexQuery (#1450)", () => {
 		]);
 	});
 
-	it("throws WordIndexQueryError for an unknown prefix, naming the supported list", () => {
-		expect(() => parseWordIndexQuery("type:foo rank")).toThrow(WordIndexQueryError);
+	it("passes an unknown colon token through as an ordinary term", () => {
+		// Legitimate search terms carry colons: C++ scope operators, log
+		// prefixes, URLs, Windows paths, TODO tags. None may throw; all must
+		// search as plain terms, matching the pre-filter behavior.
+		for (const query of [
+			"std::vector rank",
+			"error:foo",
+			"http://example.com",
+			"TODO:fixme",
+			String.raw`C:\Users\foo`,
+			"type:foo rank",
+		]) {
+			const parsed = parseWordIndexQuery(query);
+			expect(parsed.filters).toEqual([]);
+			expect(parsed.terms).toBe(query);
+		}
+	});
+
+	it("still throws WordIndexQueryError for a KNOWN key with a bad value", () => {
+		// The throw lives at filter-build time (eager resolution), not parse.
+		const parsed = parseWordIndexQuery("lang:notalang rank");
 		let caught: unknown;
 		try {
-			parseWordIndexQuery("type:foo rank");
+			buildWordIndexQueryFilter(parsed.filters);
 		} catch (err) {
 			caught = err;
 		}
 		expect(caught).toBeInstanceOf(WordIndexQueryError);
-		for (const key of WORD_INDEX_QUERY_FILTER_KEYS) {
-			expect((caught as Error).message).toContain(`${key}:`);
-		}
 	});
 
 	it("treats a bare hyphenated term (no colon) as an ordinary term, not a filter", () => {
