@@ -797,6 +797,8 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				sessionId: runtime.telemetrySessionId,
 				turnIndex: runtime.turnIndex,
 				writeIndex,
+				modelId: runtime.telemetryModelId,
+				provider: runtime.telemetryProviderId,
 			},
 			getFlag,
 			getFlagSource,

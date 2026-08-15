@@ -13,6 +13,7 @@ import { ReadGuard } from "./read-guard.js";
 import type { RuleScanResult } from "./rules-scanner.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { TurnSummaryCollector } from "./turn-summary.js";
+import { deriveProviderFromModelId } from "./model-provider.js";
 
 export interface ErrorDebtBaseline {
 	testsPassed: boolean;
@@ -106,6 +107,19 @@ export class RuntimeCoordinator {
 	private _lifecycleReason: string | undefined;
 	private _hasStableSessionId = false;
 	private _telemetryModel = "unknown";
+	// Raw model/provider identity, separate from the combined `provider/model`
+	// display string above — worklog/disposition attribution (#1448) wants the
+	// two fields apart, blank when the host never supplied them. `_telemetryProvider`
+	// is the explicit host value when given, else derived from the model id
+	// (deriveProviderFromModelId, blank on ambiguity — never guessed).
+	private _telemetryModelId = "";
+	private _telemetryProvider = "";
+	// True once a host has supplied an explicit provider this session. An
+	// explicit provider is never downgraded by a derivation from a later
+	// model-only call; a DERIVED provider, by contrast, is re-derived on
+	// every model-only call so a mid-session model switch (e.g. gpt-5-mini →
+	// claude-sonnet-4-5) doesn't leave a stale provider from the old model.
+	private _telemetryProviderIsExplicit = false;
 	private _turnIndex = 0;
 	private _writeIndex = 0;
 	private _projectSeq = 0;
@@ -170,6 +184,9 @@ export class RuntimeCoordinator {
 		this._telemetrySessionId = `lens-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 		this._hasStableSessionId = false;
 		this._telemetryModel = "unknown";
+		this._telemetryModelId = "";
+		this._telemetryProvider = "";
+		this._telemetryProviderIsExplicit = false;
 		this._turnIndex = 0;
 		this._writeIndex = 0;
 		this._projectSeq = 0;
@@ -325,6 +342,21 @@ export class RuntimeCoordinator {
 		} else if (provider) {
 			this._telemetryModel = provider;
 		}
+		if (model) this._telemetryModelId = model;
+		if (provider) {
+			this._telemetryProvider = provider;
+			this._telemetryProviderIsExplicit = true;
+		} else if (model && !this._telemetryProviderIsExplicit) {
+			// No explicit provider has ever been reported this session, so the
+			// provider is (still) a derivation — re-derive it from the CURRENT
+			// model id every time. Without this, a stale derived provider from
+			// an earlier model would survive a mid-session model switch (e.g.
+			// gpt-5-mini → claude-sonnet-4-5 with no explicit provider on
+			// either call) because the old "has any provider ever been set"
+			// guard treated the derived value as sticky. An explicit provider,
+			// once set, is never touched here regardless of later model calls.
+			this._telemetryProvider = deriveProviderFromModelId(model);
+		}
 	}
 
 	get telemetrySessionId(): string {
@@ -360,6 +392,19 @@ export class RuntimeCoordinator {
 
 	get telemetryModel(): string {
 		return this._telemetryModel;
+	}
+
+	/** Raw model id (never the combined `provider/model` display string), blank
+	 * when the host hasn't reported one this session. Worklog/disposition
+	 * attribution (#1448) reads this, not {@link telemetryModel}. */
+	get telemetryModelId(): string {
+		return this._telemetryModelId;
+	}
+
+	/** Explicit host-reported provider, or a conservative derivation from the
+	 * model id (see clients/model-provider.ts), blank when neither is known. */
+	get telemetryProviderId(): string {
+		return this._telemetryProvider;
 	}
 
 	get turnIndex(): number {
