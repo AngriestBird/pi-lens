@@ -1668,3 +1668,27 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
   events. Tool-call inspection must not mutate read-guard state, and wrapper,
   launcher, and continuation forms must remain conservative for git commits and
   pushes.
+- **The console guard captures only inside a pi-lens execution window** (#1434).
+  The host shares this process and prints its own CLI output through
+  `console.log`, so a permanent global reroute silences commands like
+  `pi list`. `installConsoleGuard` installs a dispatcher: inside a window the
+  write goes to the extension log, outside one it goes to the original console
+  method. Windows come from three places only — the module-evaluation flag
+  opened in `clients/console-guard-install.ts`, the activation window in
+  `index.ts`'s default export, and the per-entry-point windows that
+  `withConsoleCaptureWindows` adds around every `on`/`register*` call — a
+  DENY-LIST keyed on the property name (`isCaptureSeam`), not a hand-maintained
+  list of the specific methods pi-lens happens to call today, so a new
+  `register*` seam the host adds later is covered without an edit here. Every
+  function argument gets wrapped, including one ONE LEVEL inside an
+  options/tool object (`options.handler`, `tool.execute`) — deliberately not
+  recursive past that level, since walking a tool's full nested schema on
+  every registration measurably slowed activation; a coverage test
+  (`tests/clients/console-capture-window-coverage.test.ts`) derives the
+  member list from the host's own `ExtensionAPI` type and asserts none of them
+  bypass the window. Register a new host entry point through the wrapped API,
+  never the raw one, or its console writes escape to the terminal.
+  `closeModuleLoadConsoleWindow()` must stay the last statement in `index.ts`.
+  Known gap, accepted not fixed: `pi.events` (a separate bus, not an
+  `ExtensionAPI` member) is unwrapped — fine today because every subscriber on
+  it is subscribe-only.
