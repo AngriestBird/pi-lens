@@ -1057,14 +1057,27 @@ export class TestRunnerClient {
 		interface JsonResult {
 			numPassedTests: number;
 			numFailedTests: number;
+			// #1452: neither reporter emits `numSkippedTests`. Measured against
+			// vitest 4.1.10 and jest 30.4.2: a `test.skip` lands in
+			// `numPendingTests`, and `test.todo` in `numTodoTests`. Kept in the
+			// shape (and still read first) because older reporter versions did
+			// emit it and reading a present field costs nothing.
 			numSkippedTests?: number;
+			numPendingTests?: number;
+			numTodoTests?: number;
 			testResults?: Array<{
 				name: string;
 				status: string;
 				message?: string;
+				// #1452: per-suite wall clock, epoch ms. Present in BOTH reporters
+				// (vitest emits `endTime` as a float). NOT `perfStats` — see
+				// `jsonRunDurationMs`.
+				startTime?: number;
+				endTime?: number;
 				assertionResults?: Array<{
 					status: string;
 					title: string;
+					duration?: number | null;
 					failureMessages?: string[];
 					location?: { line: number; column: number };
 				}>;
@@ -1099,9 +1112,16 @@ export class TestRunnerClient {
 				runner,
 				passed: json.numPassedTests || 0,
 				failed: json.numFailedTests || 0,
-				skipped: json.numSkippedTests || 0,
+				// #1452: `numSkippedTests` is absent from both reporters' JSON, so
+				// this read was always 0. `numPendingTests` is where a `test.skip`
+				// actually lands; `numTodoTests` is counted with it because the
+				// text parsers (pytest `N skipped`, mix `N excluded` + `N skipped`)
+				// also fold every not-run test into one `skipped` figure.
+				skipped:
+					json.numSkippedTests ??
+					(json.numPendingTests || 0) + (json.numTodoTests || 0),
 				failures,
-				duration: 0,
+				duration: this.jsonRunDurationMs(json.testResults),
 			};
 		} catch (err) {
 			void err;
@@ -1113,6 +1133,68 @@ export class TestRunnerClient {
 				failed ? "Tests failed (could not parse output)" : undefined,
 			);
 		}
+	}
+
+	/**
+	 * #1452: real run duration in ms from a vitest/jest `--json` payload.
+	 *
+	 * NOT `testResults[].perfStats`. That field exists on jest's INTERNAL
+	 * `TestResult`, but the JSON reporter's `formatTestResults` projects it to
+	 * per-suite `startTime`/`endTime` and drops it — measured absent from both
+	 * vitest 4.1.10 and jest 30.4.2 output, so reading it would have left this
+	 * at 0. The per-suite epoch pair is what both reporters actually emit.
+	 *
+	 * Wall-clock SPAN across suites (max end - min start), not a sum: suites in
+	 * one payload may have run in parallel workers, and summing would report
+	 * more elapsed time than the run took. With the single suite pi-lens
+	 * actually produces (one test file per invocation) the two agree.
+	 *
+	 * The span deliberately excludes the runner's own startup — top-level
+	 * `startTime` is ~330ms earlier than the first suite's on this repo — which
+	 * matches what the text parsers already report: pytest's `in 0.05s` and
+	 * ExUnit's `Finished in 0.05 seconds` are both the runner's test time, not
+	 * process wall clock.
+	 *
+	 * Falls back to the summed per-assertion `duration` when a reporter omits
+	 * the suite pair, then to 0. Never returns a negative or non-finite value —
+	 * a garbled payload must degrade to "unmeasured" (`formatResult` already
+	 * suppresses the suffix on `duration > 0 ? ... : ""`), not to a wrong number.
+	 */
+	private jsonRunDurationMs(
+		suites:
+			| Array<{
+					startTime?: number;
+					endTime?: number;
+					assertionResults?: Array<{ duration?: number | null }>;
+			  }>
+			| undefined,
+	): number {
+		let minStart = Number.POSITIVE_INFINITY;
+		let maxEnd = Number.NEGATIVE_INFINITY;
+		let assertionTotal = 0;
+		for (const suite of suites || []) {
+			if (
+				typeof suite.startTime === "number" &&
+				Number.isFinite(suite.startTime) &&
+				typeof suite.endTime === "number" &&
+				Number.isFinite(suite.endTime)
+			) {
+				minStart = Math.min(minStart, suite.startTime);
+				maxEnd = Math.max(maxEnd, suite.endTime);
+			}
+			for (const assertion of suite.assertionResults || []) {
+				if (
+					typeof assertion.duration === "number" &&
+					Number.isFinite(assertion.duration) &&
+					assertion.duration > 0
+				) {
+					assertionTotal += assertion.duration;
+				}
+			}
+		}
+		const span = maxEnd - minStart;
+		if (Number.isFinite(span) && span > 0) return Math.round(span);
+		return Math.round(Math.max(0, assertionTotal));
 	}
 
 	// --- Vitest Parser ---
@@ -1247,6 +1329,48 @@ export class TestRunnerClient {
 			failures.push({ name: match[1], message: match[1] });
 		}
 
+		// #1452: PHPUnit prints its own elapsed time and this parser dropped it,
+		// so every PHPUnit run reported 0ms. Two shapes are accepted because the
+		// summary changed across supported majors:
+		//   PHPUnit >= 9.3   "Time: 00:00.123, Memory: 8.00 MB"   (HH:)MM:SS.mmm
+		//   PHPUnit <= 9.2   "Time: 1.23 seconds, Memory: 10.00MB" | "Time: 123 ms"
+		// NOT VERIFIED AGAINST A LIVE PHPUnit — there is no PHP toolchain on the
+		// box this was written on. Both shapes are covered by unit tests against
+		// literal summary lines taken from the PHPUnit printers, and the parser
+		// leaves duration at 0 when neither matches, so an unrecognised summary
+		// degrades to today's behaviour rather than to a wrong figure.
+		let duration = 0;
+		const clockMatch = output.match(
+			/^Time:\s*(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?/im,
+		);
+		if (clockMatch) {
+			const hours = clockMatch[1] ? Number.parseInt(clockMatch[1], 10) : 0;
+			const minutes = Number.parseInt(clockMatch[2], 10);
+			const seconds = Number.parseInt(clockMatch[3], 10);
+			// ".1" is a tenth, ".12" hundredths — pad rather than parseInt, or
+			// "Time: 00:00.1" would read as 1ms instead of 100ms.
+			const millis = clockMatch[4]
+				? Number.parseInt(clockMatch[4].padEnd(3, "0"), 10)
+				: 0;
+			duration = ((hours * 60 + minutes) * 60 + seconds) * 1000 + millis;
+		} else {
+			const legacyMatch = output.match(
+				/^Time:\s*([\d.]+)\s*(seconds?|s|ms|milliseconds?|minutes?)\b/im,
+			);
+			if (legacyMatch) {
+				const value = Number.parseFloat(legacyMatch[1]);
+				const unit = legacyMatch[2].toLowerCase();
+				const scale = unit.startsWith("ms") || unit.startsWith("milli")
+					? 1
+					: unit.startsWith("min")
+						? 60_000
+						: 1000;
+				if (Number.isFinite(value) && value > 0) {
+					duration = Math.round(value * scale);
+				}
+			}
+		}
+
 		return {
 			file: testFile,
 			sourceFile: "",
@@ -1255,7 +1379,7 @@ export class TestRunnerClient {
 			failed,
 			skipped,
 			failures,
-			duration: 0,
+			duration,
 			error:
 				exitCode !== 0 && passed === 0 && failed === 0
 					? "PHPUnit runner error"
