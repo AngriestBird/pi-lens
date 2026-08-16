@@ -2007,6 +2007,72 @@ describe("computeCascadeForFile", () => {
 			}
 		});
 
+		it("a PARTIALLY confirmed active touch (auxiliary cut off) does NOT wipe a live footer finding (#1470)", async () => {
+			const env = setupTestEnvironment("cascade-reconcile-partial-touch-");
+			try {
+				const primary = path.join(env.tmpDir, "model.py");
+				const neighbor = path.join(env.tmpDir, "api.py");
+				fs.writeFileSync(primary, "class User: pass\n");
+				fs.writeFileSync(neighbor, "from model import User\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				// #1470: the touch resolves empty `.diags` and is NOT inconclusive —
+				// the primary answered — but an auxiliary was cut off by the aux grace
+				// timer, so the merged result is missing that scanner's coverage. Pre-
+				// fix, `isConfirmedTouch` read only `inconclusive`, so this wiped the
+				// live finding and seeded the recently-clean cache, making the wipe
+				// self-sustaining on the next cascade.
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile: vi.fn().mockResolvedValue({
+						diags: [],
+						confirmation: "partial",
+						unconfirmedServerIds: ["opengrep"],
+					}),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile, getDispatchCascadeCacheStats } =
+					await import("../../clients/dispatch/integration.js");
+				const { recordDiagnostics, getFileDiagnostics } = await import(
+					"../../clients/widget-state.js"
+				);
+
+				recordDiagnostics(
+					neighbor,
+					[
+						{
+							tool: "lsp",
+							severity: "error",
+							semantic: "blocking",
+							message: "live cross-file error",
+						},
+					],
+					1,
+				);
+
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+
+				const diags = getFileDiagnostics(neighbor);
+				expect(diags).toHaveLength(1);
+				expect(diags?.[0]?.message).toBe("live cross-file error");
+				// Not cached as a confirmed neighbor result either.
+				expect(getDispatchCascadeCacheStats().neighborTouchCacheSize).toBe(0);
+				// The third unconfirmed-touch cause is named in cascade.log, so it is
+				// distinguishable from the inconclusive and bound-false causes.
+				const neighborTouchEntry = mocks.logCascade.mock.calls
+					.map(([entry]) => entry)
+					.find((entry) => entry.phase === "neighbor_touch");
+				expect(neighborTouchEntry?.metadata).toMatchObject({
+					unconfirmedServerIds: ["opengrep"],
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("a confirmed LSP-clean cascade clears the neighbor's LSP error but PRESERVES a live biome finding (merge, not replace)", async () => {
 			const env = setupTestEnvironment("cascade-reconcile-merge-");
 			try {
