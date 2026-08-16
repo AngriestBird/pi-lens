@@ -8,6 +8,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Changed
 
+- **Dead-code surfaces its findings on knip's per-turn contract ([#1477](https://github.com/apmantza/pi-lens/issues/1477), refs [#127](https://github.com/apmantza/pi-lens/issues/127))** — turn-end re-injected the whole project-wide vulture cache every turn, so the one actionable signal (a symbol the current edit just orphaned) never arrived, while a fixed list of pre-existing findings burned context every turn. The harness now mirrors knip exactly: a new `owns()` seam gates the re-scan on whether the turn touched a file of that language, the result is diffed against the previous scan and filtered to the edited files, and only that delta is injected. The delta feeds `projectDiagnosticsDelta`/`projectDiagnosticsSources`; the block moved ahead of the delta-report write, so a dead-code-only turn now persists a report `lens_diagnostics` can read. A timed-out or killed previous scan backs the runner off the way knip's `previousFailedHard` does. The project-wide list stays available on demand through `lens_diagnostics`. vulture also receives `--ignore-decorators` for framework-invoked symbols (test fixtures, route and task handlers): it cannot see their call sites, so those findings were permanent noise no reader could resolve.
+
 ### Deprecated
 
 ### Removed

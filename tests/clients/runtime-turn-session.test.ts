@@ -47,6 +47,7 @@ function makeTurnEndDeps(
 			ensureAvailable: async () => false,
 			analyze: async () => EMPTY_KNIP_RESULT,
 		},
+		deadCodeClients: [],
 		depChecker: { ensureAvailable: async () => false },
 		testRunnerClient: { getTestRunTarget: () => null },
 		resetLSPService: () => {},

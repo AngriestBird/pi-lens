@@ -45,11 +45,16 @@ import {
 } from "./secret-findings.js";
 import type { KnipClient, KnipIssue, KnipResult } from "./knip-client.js";
 import type { DeadCodeClient, DeadCodeResult } from "./dead-code-client.js";
-import { formatDeadCodeAdvisory } from "./dead-code-client.js";
+import {
+	deadCodeIssueKey,
+	deadCodeIssues,
+	formatDeadCodeDelta,
+} from "./dead-code-client.js";
 import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
 	writeProjectDiagnosticsDeltaReport,
 } from "./project-diagnostics/cache.js";
+import { deadCodeIssueToProjectDiagnostic } from "./project-diagnostics/runner-adapters/dead-code.js";
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
 import { logLatency } from "./latency-logger.js";
@@ -800,6 +805,78 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		metadata: knipMeta,
 	});
 
+	// Cross-file dead-code (#127) for non-JS/TS languages, on knip's contract:
+	// re-scan only when this turn touched a file the client owns, then inject the
+	// ATTRIBUTABLE delta — symbols in those files that became unused because of
+	// the edit. The project-wide list is deliberately NOT injected per turn (the
+	// same reasoning as knip above) and stays available via lens_diagnostics.
+	// MUST run before the projectDiagnosticsDelta write below, or a dead-code-only
+	// turn would persist nothing.
+	const tDeadCode = Date.now();
+	const deadCodeMeta: {
+		skipped?: boolean;
+		reason?: string;
+		newIssues?: number;
+	} = {};
+	if (runtime.isStartupScanInFlight("dead-code")) {
+		dbg("turn_end: skipping dead-code (startup scan still in flight)");
+		deadCodeMeta.skipped = true;
+	} else {
+		const modifiedSet = new Set(files.map((f) => resolveRunnerPath(cwd, f)));
+		let newIssueTotal = 0;
+		for (const client of deadCodeClients) {
+			if (!client.detect(cwd)) continue;
+			if (![...modifiedSet].some((f) => client.owns(f))) continue;
+			const cacheKey = `dead-code-${client.id}`;
+			const prev = cacheManager.readCache<DeadCodeResult>(cacheKey, cwd);
+			// Back off after a timeout/kill so an unresponsive scanner cannot cost
+			// every later turn its full analysis budget (mirrors knip).
+			if (
+				prev &&
+				!prev.data.success &&
+				/(timed out|killed|SIGTERM|SIGKILL|SIGABRT)/i.test(prev.data.summary)
+			) {
+				dbg(`turn_end: skipping dead-code after failure: ${prev.data.summary}`);
+				deadCodeMeta.skipped = true;
+				deadCodeMeta.reason = prev.data.summary;
+				continue;
+			}
+			try {
+				const result = await client.analyze(cwd);
+				cacheManager.writeCache(cacheKey, result, cwd);
+				if (!result.success || !prev?.data.success) continue;
+				const prevKeys = new Set(
+					deadCodeIssues(prev.data).map(deadCodeIssueKey),
+				);
+				const newIssues = deadCodeIssues(result).filter((issue) => {
+					if (prevKeys.has(deadCodeIssueKey(issue))) return false;
+					if (!issue.file) return false;
+					return modifiedSet.has(resolveRunnerPath(cwd, issue.file));
+				});
+				if (newIssues.length === 0) continue;
+				newIssueTotal += newIssues.length;
+				projectDiagnosticsDelta.push(
+					...newIssues.map((issue) =>
+						deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
+					),
+				);
+				projectDiagnosticsSources.add("dead-code");
+				advisoryParts.push(formatDeadCodeDelta(newIssues, result.language));
+			} catch (err) {
+				dbg(`turn_end: dead-code(${client.id}) failed: ${err}`);
+			}
+		}
+		deadCodeMeta.newIssues = newIssueTotal;
+	}
+	logLatency({
+		type: "phase",
+		toolName: "turn_end",
+		filePath: cwd,
+		phase: "dead-code",
+		durationMs: Date.now() - tDeadCode,
+		metadata: deadCodeMeta,
+	});
+
 	// govulncheck — surface session_start-cached Go CVE findings as advisory.
 	// No per-turn re-run in this slice; the cache refreshes at next session_start.
 	const govCacheEntry = cacheManager.readCache<GovulncheckResult>(
@@ -1412,26 +1489,6 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				error: err instanceof Error ? err.message : String(err),
 			},
 		});
-	}
-
-	// Cross-file dead-code (#127): surface the cached session_start scan as an
-	// advisory (project-wide unused symbols are slow to compute, so we read the
-	// cache rather than re-scanning every turn — the analogue of knip's cache
-	// for non-JS/TS languages). Merged across languages for polyglot repos.
-	try {
-		const deadCodeResults: DeadCodeResult[] = [];
-		for (const client of deadCodeClients) {
-			if (!client.detect(cwd)) continue;
-			const cached = cacheManager.readCache<DeadCodeResult>(
-				`dead-code-${client.id}`,
-				cwd,
-			);
-			if (cached?.data) deadCodeResults.push(cached.data);
-		}
-		const advisory = formatDeadCodeAdvisory(deadCodeResults);
-		if (advisory) advisoryParts.push(advisory);
-	} catch (err) {
-		dbg(`turn_end: dead-code advisory failed: ${err}`);
 	}
 
 	cacheManager.incrementTurnCycle(cwd, currentOwner);
