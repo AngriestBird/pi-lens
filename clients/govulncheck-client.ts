@@ -23,7 +23,10 @@ import * as path from "node:path";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { assertInstallAllowed } from "./project-trust.js";
 import { SecurityScanClient } from "./security-scan-client.js";
-import { classifyProbeFailure } from "./dispatch/runners/utils/availability-policy.js";
+import {
+	classifyProbeFailure,
+	logAvailabilityDecision,
+} from "./dispatch/runners/utils/availability-policy.js";
 
 // --- Types ---
 
@@ -59,6 +62,8 @@ const EMPTY_RESULT: Omit<GovulncheckResult, "scannedAt"> = {
 };
 
 const SCAN_TIMEOUT_MS = 120_000;
+/** Budget for the `go install` auto-install, ms. */
+const INSTALL_TIMEOUT_MS = 60_000;
 
 // --- Internal: raw record shapes from govulncheck's JSON stream ---
 
@@ -161,15 +166,39 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 		}
 
 		this.log("govulncheck not found, attempting auto-install via go install");
+		const installStartedAt = Date.now();
 		const install = await safeSpawnAsync(
 			"go",
 			["install", "golang.org/x/vuln/cmd/govulncheck@latest"],
-			{ timeout: 60_000 },
+			{ timeout: INSTALL_TIMEOUT_MS },
 		);
 		if (install.error || install.status !== 0) {
 			this.log(
 				`govulncheck auto-install failed: ${(install.stderr ?? "").slice(0, 200)}`,
 			);
+			// #1476: `go install` runs against a 60 s budget over the network. A
+			// timed-out or killed install says nothing about whether govulncheck
+			// can ever be installed here, so it must not latch the durable
+			// "tool is not installed" verdict the way a real install refusal does.
+			// A non-zero exit (module not found, compile error) still latches:
+			// that IS evidence about this machine, and retrying it every turn
+			// would be a `go install` storm.
+			const { outcome, cause } = classifyProbeFailure(install);
+			if (outcome === "transient") {
+				this.markTransientlyUnavailable(cause);
+				// One record per decision, so an install that keeps timing out is
+				// readable in latency.log the same day (#1467's forensic trail).
+				logAvailabilityDecision({
+					tool: "govulncheck",
+					verdict: "unavailable",
+					outcome,
+					cause,
+					elapsedMs: Date.now() - installStartedAt,
+					latched: false,
+					budgetMs: INSTALL_TIMEOUT_MS,
+				});
+				return false;
+			}
 			this.available = false;
 			return false;
 		}
@@ -211,6 +240,26 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 			}
 		}
 
+		// The install SUCCEEDED, so the tool is on this machine somewhere. If the
+		// re-probe merely timed out, latching "not installed" would be the #1467
+		// mistake one step later in the same function (#1476).
+		const { outcome, cause } = classifyProbeFailure(reprobe);
+		if (outcome === "transient") {
+			this.log(
+				"govulncheck installed but the re-probe timed out; retrying later",
+			);
+			this.markTransientlyUnavailable(cause);
+			logAvailabilityDecision({
+				tool: "govulncheck",
+				verdict: "unavailable",
+				outcome,
+				cause,
+				elapsedMs: 0,
+				latched: false,
+				budgetMs: 5000,
+			});
+			return false;
+		}
 		this.log(
 			"govulncheck auto-install succeeded but binary not locatable — check $GOBIN / $GOPATH",
 		);

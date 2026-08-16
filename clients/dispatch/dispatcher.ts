@@ -31,6 +31,12 @@ import { loadPiLensProjectConfig } from "../project-lens-config.js";
 import { RUNTIME_CONFIG, getRunnerTimeoutFloorMs } from "../runtime-config.js";
 import { safeSpawnAsync } from "../safe-spawn.js";
 import { classifyDiagnostic } from "./diagnostic-taxonomy.js";
+import {
+	classifyProbeFailure,
+	logAvailabilityDecision,
+	startHostStallSampler,
+	transientRetryDelayMs,
+} from "./runners/utils/availability-policy.js";
 import type { FactStore } from "./fact-store.js";
 import { applyDispositions } from "../diagnostic-dispositions.js";
 import { applyInlineSuppressions } from "./inline-suppressions.js";
@@ -100,7 +106,29 @@ export function normalizeCacheKey(cmd: string): string {
 	return `session.toolCache.${normalized}`;
 }
 
-async function checkToolAvailability(
+/** Probe budget for the generic `hasTool` availability check, ms. */
+const TOOL_PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * Session fact holding the epoch ms after which a TRANSIENT verdict for a
+ * command may be re-probed. Kept beside the boolean fact so both share the
+ * session's lifetime — no second global to reset (#1476).
+ */
+function transientRetryKey(command: string): string {
+	return `${normalizeCacheKey(command)}.retryAt`;
+}
+
+/**
+ * Is `command` usable right now? Cached per session.
+ *
+ * Latch policy (#1467/#1476): a `false` from a genuine absence is durable and
+ * is remembered for the session. A `false` from a TIMED-OUT probe is not — this
+ * is the highest-traffic availability consumer in the codebase, and caching a
+ * host stall here silently disabled a healthy tool for every later dispatch in
+ * the session. A transient verdict instead holds only for a bounded cooldown,
+ * which also stops a sick host from being re-probed on every dispatch.
+ */
+export async function checkToolAvailability(
 	command: string,
 	facts: FactStore,
 ): Promise<boolean> {
@@ -109,6 +137,8 @@ async function checkToolAvailability(
 	if (cached !== undefined) {
 		return cached;
 	}
+	const retryAt = facts.getSessionFact<number>(transientRetryKey(command));
+	if (retryAt !== undefined && Date.now() < retryAt) return false;
 	// A command that isn't even on disk can't pass a --version probe; the ~μs
 	// stat/PATH walk saves a guaranteed-to-fail spawn round-trip per cold tool.
 	if (!(await isSpawnableCommand(command))) {
@@ -116,12 +146,59 @@ async function checkToolAvailability(
 		return false;
 	}
 	try {
-		const result = await safeSpawnAsync(command, ["--version"], {
-			timeout: 5000,
+		// The budget is enforced by a HOST-side timer, so measure the loop stall
+		// that overlapped the window and let the shared classifier read it.
+		const sampler = startHostStallSampler();
+		const startedAt = Date.now();
+		let result: Awaited<ReturnType<typeof safeSpawnAsync>>;
+		let hostStallMs: number;
+		try {
+			result = await safeSpawnAsync(command, ["--version"], {
+				timeout: TOOL_PROBE_TIMEOUT_MS,
+			});
+		} finally {
+			hostStallMs = sampler.stop();
+		}
+		const elapsedMs = Date.now() - startedAt;
+		if (result.status === 0) {
+			facts.setSessionFact(key, true);
+			logAvailabilityDecision({
+				tool: command,
+				verdict: "available",
+				outcome: "success",
+				cause: "ok",
+				elapsedMs,
+				latched: true,
+				hostStallMs,
+				budgetMs: TOOL_PROBE_TIMEOUT_MS,
+			});
+			return true;
+		}
+		// `missing` for anything unclassified preserves the pre-#1476 meaning of
+		// a non-zero exit: durable, cached for the session.
+		const { outcome, cause } = classifyProbeFailure(result, {
+			hostStallMs,
+			unclassifiedFailureOutcome: "missing",
 		});
-		const available = result.status === 0;
-		facts.setSessionFact(key, available);
-		return available;
+		let retryAfterMs: number | undefined;
+		if (outcome === "transient") {
+			retryAfterMs = transientRetryDelayMs(1, cause);
+			facts.setSessionFact(transientRetryKey(command), Date.now() + retryAfterMs);
+		} else {
+			facts.setSessionFact(key, false);
+		}
+		logAvailabilityDecision({
+			tool: command,
+			verdict: "unavailable",
+			outcome,
+			cause,
+			elapsedMs,
+			latched: outcome !== "transient",
+			hostStallMs,
+			...(retryAfterMs !== undefined && { retryAfterMs }),
+			budgetMs: TOOL_PROBE_TIMEOUT_MS,
+		});
+		return false;
 	} catch {
 		facts.setSessionFact(key, false);
 		return false;

@@ -11,6 +11,13 @@ import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import {
+	type AvailabilityCause,
+	classifyProbeFailure,
+	createAvailabilityLatch,
+	logAvailabilityDecision,
+	startHostStallSampler,
+} from "./dispatch/runners/utils/availability-policy.js";
 
 // --- Types ---
 
@@ -33,6 +40,9 @@ const CARGO_WINDOWS_PATHS = [
 	"cargo.exe", // PATH
 ];
 
+/** Budget for the PATH candidate's `cargo --version` probe, ms. */
+const PROBE_TIMEOUT_MS = 3_000;
+
 const CARGO_UNIX_PATHS = [
 	path.join(process.env.HOME || "", ".cargo", "bin", "cargo"),
 	"/usr/local/cargo/bin/cargo",
@@ -43,8 +53,19 @@ const CARGO_UNIX_PATHS = [
 // --- Client ---
 
 export class RustClient {
-	private cargoAvailable: boolean | null = null;
+	/**
+	 * Availability memo, behind the shared transient-aware latch (#1476). The
+	 * PATH candidate is resolved by spawning `cargo --version` with a 3 s budget,
+	 * so a host stall could latch "no cargo" for the session and silently disable
+	 * every Rust diagnostic until restart.
+	 */
+	private readonly availabilityLatch = createAvailabilityLatch();
 	private cargoPath: string | null = null;
+	/** Classification of the candidate sweep, for the retry decision. */
+	private sweepSawTransient = false;
+	private sweepTransientCause: AvailabilityCause = "probe-timeout";
+	private sweepHostStallMs = 0;
+	private ensureInFlight: Promise<boolean> | null = null;
 	private log: (msg: string) => void;
 
 	constructor(verbose = false) {
@@ -61,6 +82,9 @@ export class RustClient {
 
 		const paths =
 			process.platform === "win32" ? CARGO_WINDOWS_PATHS : CARGO_UNIX_PATHS;
+		this.sweepSawTransient = false;
+		this.sweepTransientCause = "probe-timeout";
+		this.sweepHostStallMs = 0;
 
 		for (const p of paths) {
 			try {
@@ -70,12 +94,29 @@ export class RustClient {
 						return p;
 					}
 				} else {
-					const result = await safeSpawnAsync(p, ["--version"], {
-						timeout: 3000,
-					});
+					// Host-side budget: measure the loop stall that overlapped the probe
+					// so the shared policy can tell "no cargo" from "the host was busy".
+					const sampler = startHostStallSampler();
+					let result: Awaited<ReturnType<typeof safeSpawnAsync>>;
+					let hostStallMs: number;
+					try {
+						result = await safeSpawnAsync(p, ["--version"], {
+							timeout: PROBE_TIMEOUT_MS,
+						});
+					} finally {
+						hostStallMs = sampler.stop();
+						this.sweepHostStallMs += hostStallMs;
+					}
 					if (!result.error && result.status === 0) {
 						this.cargoPath = p;
 						return p;
+					}
+					const { outcome, cause } = classifyProbeFailure(result, {
+						hostStallMs,
+					});
+					if (outcome === "transient") {
+						this.sweepSawTransient = true;
+						this.sweepTransientCause = cause;
 					}
 				}
 			} catch (err) {
@@ -90,12 +131,58 @@ export class RustClient {
 	 * Check if cargo is installed (cached)
 	 */
 	async isAvailableAsync(): Promise<boolean> {
-		if (this.cargoAvailable !== null) return this.cargoAvailable;
-		this.cargoAvailable = (await this.findCargoPathAsync()) !== null;
-		if (this.cargoAvailable) {
-			this.log(`Cargo found: ${this.cargoPath}`);
+		// `read()` returns null when the last verdict was transient and its
+		// cooldown expired, which re-enters the candidate sweep (#1476).
+		const memo = this.availabilityLatch.read();
+		if (memo !== null) return memo;
+		// Now that a verdict can expire, concurrent callers arriving just after a
+		// cooldown must share ONE sweep rather than each spawning their own.
+		if (this.ensureInFlight) return this.ensureInFlight;
+		this.ensureInFlight = this.resolveAvailability();
+		try {
+			return await this.ensureInFlight;
+		} finally {
+			this.ensureInFlight = null;
 		}
-		return this.cargoAvailable;
+	}
+
+	private async resolveAvailability(): Promise<boolean> {
+		const startedAt = Date.now();
+		const found = (await this.findCargoPathAsync()) !== null;
+		if (found) {
+			this.availabilityLatch.noteAvailable();
+			this.log(`Cargo found: ${this.cargoPath}`);
+			logAvailabilityDecision({
+				tool: "cargo",
+				verdict: "available",
+				outcome: "success",
+				cause: "ok",
+				elapsedMs: Date.now() - startedAt,
+				latched: true,
+				hostStallMs: this.sweepHostStallMs,
+				budgetMs: PROBE_TIMEOUT_MS,
+			});
+			return true;
+		}
+		// A timed-out `cargo --version` is evidence about this moment, not about
+		// whether the toolchain is installed; it expires instead of latching.
+		const outcome = this.sweepSawTransient ? "transient" : "missing";
+		const cause = this.sweepSawTransient
+			? this.sweepTransientCause
+			: "not-found";
+		const retryAfterMs = this.availabilityLatch.noteUnavailable(outcome, cause);
+		logAvailabilityDecision({
+			tool: "cargo",
+			verdict: "unavailable",
+			outcome,
+			cause,
+			elapsedMs: Date.now() - startedAt,
+			latched: outcome !== "transient",
+			hostStallMs: this.sweepHostStallMs,
+			...(retryAfterMs > 0 && { retryAfterMs }),
+			budgetMs: PROBE_TIMEOUT_MS,
+		});
+		return false;
 	}
 
 	/**
