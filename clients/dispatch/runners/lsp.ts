@@ -177,11 +177,23 @@ const lspRunner: RunnerDefinition = {
 			usedWarmAttach = attached?.available === true;
 			// #1179 (shape-5 structural fix): both branches normalize to the
 			// `touchFile` wrapper shape. The warm-attach IPC branch resolves a plain
-			// diagnostics array (the socket cannot carry a side-channel; the IPC client
-			// already rejected any inconclusive answer, so `available` ⟹ confirmed) —
-			// wrap it as `{ diags }`; the incumbent branch already returns the wrapper.
+			// diagnostics array — `available` no longer implies a fully confirmed
+			// answer: a `partial` confirmation (an auxiliary cut off by the grace
+			// timer) is served as `available: true` too (the IPC gate at
+			// `clients/mcp/ipc.ts:248` rejects only `inconclusive`). Carry the
+			// incumbent's `unconfirmedServerIds` onto the wrapper so
+			// `touchCoverageGap` below sees it — dropping it here is the same
+			// false-clean defect already fixed at `clients/lsp/index.ts` (the
+			// workspace sweep wrapper) and `tools/lsp-diagnostics.ts` (the tool
+			// consumer); wrap it as `{ diags }`; the incumbent branch already
+			// returns the wrapper.
 			const touched = attached?.available
-				? { diags: attached.response.diagnostics }
+				? {
+						diags: attached.response.diagnostics,
+						...(attached.response.unconfirmedServerIds !== undefined && {
+							unconfirmedServerIds: attached.response.unconfirmedServerIds,
+						}),
+					}
 				: await lspService.touchFile(ctx.filePath, content, {
 				diagnostics: "document",
 				collectDiagnostics: true,
