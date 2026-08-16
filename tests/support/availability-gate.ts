@@ -60,10 +60,11 @@ const SPAWN_CALLS = new Set([
 
 /**
  * Calls that spawn on the unit's behalf. A module that delegates its probe to
- * `createAvailabilityChecker` or a `probeX` helper is still probing.
+ * `createAvailabilityChecker`, `createToolchainAvailability` or a `probeX`
+ * helper is still probing.
  */
 const SPAWN_DELEGATES =
-	/^(?:probe|spawn|exec|run|which|isCommandAvailable|createAvailabilityChecker|createCwdCachedProbe|resolveCommandWithInstallFallback|verifyOrInstall)/i;
+	/^(?:probe|spawn|exec|run|which|isCommandAvailable|createAvailabilityChecker|createCwdCachedProbe|createToolchainAvailability|resolveCommandWithInstallFallback|verifyOrInstall)/i;
 
 /** Every flag a CLI is asked for its version with. */
 const VERSION_FLAGS = new Set([
@@ -105,6 +106,10 @@ const VERSION_FLAG_TEXT = new RegExp(
 const POLICY_FACTORIES = new Set([
 	"createAvailabilityChecker",
 	"createAvailabilityLatch",
+	// Owns the latch, the in-flight dedupe and the decision records for the
+	// toolchain clients (#1476). A client that hands its lifecycle to this
+	// factory is routed as surely as one that calls the latch itself.
+	"createToolchainAvailability",
 ]);
 const POLICY_CALLS = new Set([
 	...POLICY_FACTORIES,
@@ -434,9 +439,15 @@ function readImports(root: SgNode): {
 				.filter(Boolean);
 			const fromPolicy = /availability-policy\.js$/.test(source);
 			const fromHelpers = /runner-helpers\.js$/.test(source);
+			// The module that owns the toolchain lifecycle, same standing as
+			// `runner-helpers.ts` for `createAvailabilityChecker`.
+			const fromToolchain = /utils\/toolchain-availability\.js$/.test(source);
 			for (const name of names) {
 				if (fromPolicy && POLICY_CALLS.has(name)) policyBindings.add(name);
 				if (fromHelpers && name === "createAvailabilityChecker") {
+					policyBindings.add(name);
+				}
+				if (fromToolchain && name === "createToolchainAvailability") {
 					policyBindings.add(name);
 				}
 				if (name === "SecurityScanClient") securityScanClientImported = true;

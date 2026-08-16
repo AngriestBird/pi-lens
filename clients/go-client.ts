@@ -10,11 +10,9 @@
 import { createSubsystemLogger } from "./extension-log.js";
 import * as path from "node:path";
 import {
-	type AvailabilityCause,
-	createAvailabilityLatch,
-	logAvailabilityDecision,
-} from "./dispatch/runners/utils/availability-policy.js";
-import { probeAvailabilityCandidates } from "./dispatch/runners/utils/candidate-probe.js";
+	type ToolchainAvailability,
+	createToolchainAvailability,
+} from "./dispatch/runners/utils/toolchain-availability.js";
 
 // --- Types ---
 
@@ -50,102 +48,41 @@ const GO_UNIX_PATHS = [
 
 export class GoClient {
 	/**
-	 * Availability memo, behind the shared transient-aware latch (#1476). The
-	 * PATH candidate is resolved by spawning `go version` with a 3 s budget, so
-	 * a host stall could latch "no Go toolchain" for the whole session and
+	 * Availability lifecycle, behind the shared transient-aware latch (#1476).
+	 * The PATH candidate is resolved by spawning `go version` with a 3 s budget,
+	 * so a host stall could latch "no Go toolchain" for the whole session and
 	 * silently disable every Go diagnostic until restart.
 	 */
-	private readonly availabilityLatch = createAvailabilityLatch();
-	private goPath: string | null = null;
-	/** Classification of the candidate sweep, for the retry decision. */
-	private sweepSawTransient = false;
-	private sweepTransientCause: AvailabilityCause = "probe-timeout";
-	private sweepHostStallMs = 0;
-	private ensureInFlight: Promise<boolean> | null = null;
+	private readonly availability: ToolchainAvailability;
 	private log: (msg: string) => void;
 
 	constructor(verbose = false) {
 		this.log = verbose
 			? createSubsystemLogger("go")
 			: () => {};
+		this.availability = createToolchainAvailability({
+			tool: "go",
+			label: "Go",
+			windowsPaths: GO_WINDOWS_PATHS,
+			unixPaths: GO_UNIX_PATHS,
+			probeArgs: ["version"],
+			budgetMs: PROBE_TIMEOUT_MS,
+			log: (msg) => this.log(msg),
+		});
 	}
 
 	/**
 	 * Find go executable path (async — probes PATH candidates off the event loop).
 	 */
 	async findGoPathAsync(): Promise<string | null> {
-		if (this.goPath) return this.goPath;
-
-		const paths =
-			process.platform === "win32" ? GO_WINDOWS_PATHS : GO_UNIX_PATHS;
-		const sweep = await probeAvailabilityCandidates(
-			paths,
-			["version"],
-			PROBE_TIMEOUT_MS,
-		);
-		this.sweepSawTransient = sweep.sawTransient;
-		this.sweepTransientCause = sweep.transientCause;
-		this.sweepHostStallMs = sweep.hostStallMs;
-		if (sweep.foundPath) this.goPath = sweep.foundPath;
-		return sweep.foundPath;
+		return this.availability.findPath();
 	}
 
 	/**
 	 * Check if Go is installed (cached)
 	 */
 	async isGoAvailableAsync(): Promise<boolean> {
-		// `read()` returns null when the last verdict was transient and its
-		// cooldown expired, which re-enters the candidate sweep (#1476).
-		const memo = this.availabilityLatch.read();
-		if (memo !== null) return memo;
-		// Now that a verdict can expire, concurrent callers arriving just after a
-		// cooldown must share ONE sweep rather than each spawning their own.
-		if (this.ensureInFlight) return this.ensureInFlight;
-		this.ensureInFlight = this.resolveAvailability();
-		try {
-			return await this.ensureInFlight;
-		} finally {
-			this.ensureInFlight = null;
-		}
-	}
-
-	private async resolveAvailability(): Promise<boolean> {
-		const startedAt = Date.now();
-		const found = (await this.findGoPathAsync()) !== null;
-		if (found) {
-			this.availabilityLatch.noteAvailable();
-			this.log(`Go found: ${this.goPath}`);
-			logAvailabilityDecision({
-				tool: "go",
-				verdict: "available",
-				outcome: "success",
-				cause: "ok",
-				elapsedMs: Date.now() - startedAt,
-				latched: true,
-				hostStallMs: this.sweepHostStallMs,
-				budgetMs: PROBE_TIMEOUT_MS,
-			});
-			return true;
-		}
-		// A timed-out `go version` is evidence about this moment, not about
-		// whether the toolchain is installed; it expires instead of latching.
-		const outcome = this.sweepSawTransient ? "transient" : "missing";
-		const cause = this.sweepSawTransient
-			? this.sweepTransientCause
-			: "not-found";
-		const retryAfterMs = this.availabilityLatch.noteUnavailable(outcome, cause);
-		logAvailabilityDecision({
-			tool: "go",
-			verdict: "unavailable",
-			outcome,
-			cause,
-			elapsedMs: Date.now() - startedAt,
-			latched: outcome !== "transient",
-			hostStallMs: this.sweepHostStallMs,
-			...(retryAfterMs > 0 && { retryAfterMs }),
-			budgetMs: PROBE_TIMEOUT_MS,
-		});
-		return false;
+		return this.availability.isAvailable();
 	}
 
 	/**

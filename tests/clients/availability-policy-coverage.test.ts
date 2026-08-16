@@ -209,6 +209,24 @@ const EVASIONS: ReadonlyArray<{ name: string; source: string }> = [
 		`,
 	},
 	{
+		// Pins the #1476 follow-up widening: `createToolchainAvailability` counts
+		// as routed ONLY when it is the shared helper. A same-named factory from
+		// anywhere else is a private copy of the rule, which is the defect.
+		name: "a lookalike availability factory imported from outside the policy",
+		source: `
+			import { createToolchainAvailability } from "./tool-checks.js";
+			export class NewToolClient {
+				private readonly availability = createToolchainAvailability({
+					tool: "newtool",
+					probeArgs: ["--version"],
+				});
+				async ensureAvailable(): Promise<boolean> {
+					return this.availability.isAvailable();
+				}
+			}
+		`,
+	},
+	{
 		name: "the defect shape plus a comment that names availability-policy.js",
 		source: `
 			import { safeSpawnAsync } from "./safe-spawn.js";
@@ -383,6 +401,31 @@ describe("availability policy coverage (#1476)", () => {
 	it("a migrated client passes the gate", async () => {
 		const units = await analyzeAvailabilityUnits(
 			COMPLIANT,
+			"clients/new-tool-client.ts",
+		);
+		expect(units.map((unit) => unit.unit)).toEqual(["NewToolClient"]);
+		expect(units[0]?.governed).toBe(true);
+	});
+
+	it("a client that delegates its lifecycle to the shared helper is routed", async () => {
+		// The #1476 follow-up moved the latch, the in-flight dedupe and the
+		// decision records out of `go-client.ts` and `rust-client.ts` and into
+		// `toolchain-availability.ts`. The clients must stay VISIBLE as consumers
+		// — a refactor that made them vanish from the scan would read as green
+		// while removing them from the gate's coverage.
+		const units = await analyzeAvailabilityUnits(
+			`
+				import { createToolchainAvailability } from "./dispatch/runners/utils/toolchain-availability.js";
+				export class NewToolClient {
+					private readonly availability = createToolchainAvailability({
+						tool: "newtool",
+						probeArgs: ["--version"],
+					});
+					async ensureAvailable(): Promise<boolean> {
+						return this.availability.isAvailable();
+					}
+				}
+			`,
 			"clients/new-tool-client.ts",
 		);
 		expect(units.map((unit) => unit.unit)).toEqual(["NewToolClient"]);
