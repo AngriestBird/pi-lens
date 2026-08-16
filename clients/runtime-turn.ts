@@ -1117,10 +1117,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						// never measured, and this line says which one it has.
 						const elapsed =
 							duration === undefined ? "unmeasured" : `${duration}ms`;
+						// Lifted out of the template below for the same reason
+						// `elapsed` is: the pair read as a nested ternary, which
+						// this line only got flagged for because #1479 touched it.
+						const verdict = failed > 0 ? "FAIL" : "PASS";
 						const summary =
 							error && passed === 0 && failed === 0
 								? `error: ${error}`
-								: `${failed > 0 ? "FAIL" : "PASS"} ${passed}p/${failed}f (${elapsed})`;
+								: `${verdict} ${passed}p/${failed}f (${elapsed})`;
 						dbg(
 							`turn_end: ${stale ? "[stale] " : ""}test ${runner} ${shortFile} → ${summary}`,
 						);
