@@ -122,13 +122,20 @@ export async function raceToCompletion<T>(
 			const ceilingMs = options.auxGraceMs ?? 500;
 			// #1458 S2: cap the grace window by the still-pending auxiliaries' own
 			// declared budgets, not just the flat ceiling — mirrors touchFile's
-			// per-server `min(declared, ceiling)`. max(min(d_i, C)) === min(max(d_i), C)
-			// for a constant C, so computing it as a single shared timer (rather than
-			// per-promise deadlines) is equivalent: the window is exactly as long as
-			// the slowest still-pending auxiliary needs, capped by the ceiling.
-			// Auxiliaries without a declared `budgetMs` don't shrink the window (a
-			// caller that never sets `budgetMs` gets byte-identical behavior to the
-			// flat ceiling, matching the original signature).
+			// per-server `min(declared, ceiling)`.
+			//
+			// This is ONE shared timer, not a deadline per promise, so it grants
+			// every pending auxiliary the window of its slowest pending sibling.
+			// That is safe here only because of an invariant the caller upholds,
+			// not because of anything this function enforces: every promise
+			// `getDiagnostics` passes in is already self-bounded by the same
+			// `strategy.aggregateWaitMs` it declares as `budgetMs`, so a fast
+			// auxiliary resolves on its own deadline long before a slow sibling's
+			// window expires. A caller that passes a promise NOT self-bounded by
+			// its descriptor's `budgetMs` — or one that outlives it, the way
+			// `expectSemanticSecondPush` extends a primary — would get a window
+			// wider than it declared. `PromiseDescriptor` is public, so treat that
+			// as a real constraint on new callers rather than a theoretical one.
 			const pendingAuxBudgets = [...auxIndices]
 				.filter((i) => results[i] === undefined)
 				.map((i) => descriptors[i]?.budgetMs)

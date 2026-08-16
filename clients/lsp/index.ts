@@ -3537,6 +3537,16 @@ export class LSPService {
 				entry.info.id,
 				entry.client.getLaunchVariant?.(),
 			);
+			// Deleting this `budgetMs` fails no end-to-end test, and that is
+			// expected rather than a coverage gap: every promise in `clientWaits`
+			// already self-bounds at this same `strategy.aggregateWaitMs`, so an
+			// auxiliary cuts itself off at its declared budget whether or not the
+			// shared grace timer also knows about it. The descriptor is what keeps
+			// the two agreeing — it is the mitigation for the over-granting
+			// `raceToCompletion` documents, and it starts mattering the moment a
+			// promise here stops self-bounding. The narrowing itself is pinned in
+			// tests/clients/lsp/aggregation.test.ts, which can build the
+			// non-self-bounded promises this path cannot.
 			return { role: "auxiliary", budgetMs: strategy.aggregateWaitMs };
 		});
 
