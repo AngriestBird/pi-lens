@@ -384,6 +384,38 @@ describe("runner status/semantic edge cases", () => {
 		}
 	});
 
+	it("lsp runner returns skipped for a warm-attached EMPTY result whose auxiliary was cut off (#1470)", async () => {
+		// The same #1470 shape as the incumbent-touch test above, but on the
+		// warm-attach IPC route: `available: true` with an empty diagnostics
+		// array and `unconfirmedServerIds` on the response DTO. The wrapper this
+		// runner builds from a warm-attach answer must carry that field through
+		// to `touchCoverageGap`, not drop it — a hung opengrep must not read as
+		// a clean bill of health here either.
+		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
+			.default;
+		const env = setupTestEnvironment("pi-lens-lsp-warm-cutoff-");
+		try {
+			const filePath = path.join(env.tmpDir, "main.ts");
+			fs.writeFileSync(filePath, "const x = 1;\n");
+
+			warmAttach.diagnostics.mockResolvedValue({
+				available: true,
+				response: {
+					diagnostics: [],
+					confirmation: "partial",
+					unconfirmedServerIds: ["opengrep"],
+				},
+			});
+
+			const result = await runner.run(ctx(filePath, env.tmpDir) as never);
+			expect(result.status).toBe("skipped");
+			expect(result.diagnostics).toEqual([]);
+			expect(touchFile).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("lsp runner returns warning semantic when server open fails", async () => {
 		const runner = (await import("../../../../clients/dispatch/runners/lsp.js"))
 			.default;
