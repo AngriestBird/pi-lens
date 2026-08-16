@@ -1,0 +1,5 @@
+---
+section: Changed
+---
+
+- **Dead code reports the per-turn delta, not the whole project ([#1477](https://github.com/apmantza/pi-lens/issues/1477), refs [#127](https://github.com/apmantza/pi-lens/issues/127))** — turn_end used to re-inject the entire vulture cache every turn. A fixed list of pre-existing findings burned context, and the one actionable signal — a symbol the current edit just orphaned — never stood out. Dead code now follows knip's contract: a new `owns()` seam re-scans only when the turn touched a file of that language, and the result is diffed against the previous scan and filtered to the edited files. Only that delta is injected. It also feeds `projectDiagnosticsDelta`, and the block moved ahead of the delta-report write, so a dead-code-only turn persists a report `lens_diagnostics` can read. A timed-out or killed scan backs the runner off, and a failed scan never overwrites a good cached one. The project-wide list stays available on demand through `lens_diagnostics`. vulture also gets `--ignore-decorators`, so framework-invoked symbols such as fixtures and route handlers stop appearing as permanent noise.
