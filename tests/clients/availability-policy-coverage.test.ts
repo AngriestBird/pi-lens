@@ -5,9 +5,22 @@
  * "tool is not installed" verdict. Its class sweep still missed three more, and
  * the #1476 sweep found three beyond those — including `ctx.hasTool`, the
  * generic seam every CLI runner gates on. The next tool would have been the
- * eleventh. This test is the durable close: it DERIVES the consumer list from
- * the source tree and fails when any consumer decides availability with its own
- * copy of the rule.
+ * eleventh. This test DERIVES the consumer list from the source tree and fails
+ * when a consumer it can SEE decides availability with its own copy of the rule.
+ *
+ * It is not a proof that no such consumer exists, and it must not be cited as
+ * one. A verification round invented twelve shapes it does not catch — accessor
+ * pairs, WeakMap and symbol-keyed stores, cross-module probe helpers, spawn
+ * behind a constructor-assigned indirection, string-union verdicts — and three
+ * of those are already idiomatic in this repo. Five known unrouted sites are
+ * invisible to it today: `createCwdCachedProbe` with its eslint, credo and
+ * rust-clippy consumers (#1494), `formatters.ts` (#1495) and
+ * `package-manager.ts` (#1496); the last two memoize a resolved PATH rather than
+ * a boolean verdict, so the verdict-shape rule cannot reach them at all.
+ *
+ * The first version of this gate was regexes and a review broke it seven ways in
+ * one sitting. Treating a gate as proof is how that happened; every widening
+ * below is pinned by a fixture so the next narrowing is visible.
  *
  * ## Structural, and per unit
  *
@@ -59,7 +72,7 @@ const repoRoot = path.resolve(
 const KNOWN_GAPS: ReadonlyArray<{ id: string; why: string }> = [
 	{
 		id: "clients/pipeline.ts::tryEslintFix",
-		why: "`_eslintCache` latches an eslint --version verdict per cwd+PATH; filed from the #1489 review alongside createCwdCachedProbe's credo/rust-clippy consumers.",
+		why: "`_eslintCache` latches an eslint --version verdict per cwd+PATH. Filed as #1494. Note this baseline covers ONLY this unit — `createCwdCachedProbe`'s eslint/credo/rust-clippy consumers are unrouted too but the gate does not detect them, so their absence here is a blind spot, not a clean bill.",
 	},
 ];
 
@@ -87,6 +100,24 @@ const KNOWN_CONSUMERS = [
  * without a fixture is how the gate silently narrows again.
  */
 const EVASIONS: ReadonlyArray<{ name: string; source: string }> = [
+	{
+		// A verification round found this one escaping, and the cause was a bug
+		// rather than a scoping choice: memo writes resolve against the DECLARED
+		// name, and the analyser took the last dot segment, so `registry.toolAvailable`
+		// looked up a declaration called `toolAvailable` and found nothing. The
+		// same slip let a nested `cached.entries.set(...)` through.
+		name: "a verdict parked on a module-level registry object",
+		source: `
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			const registry: { toolAvailable: boolean | null } = { toolAvailable: null };
+			export async function hasTool(): Promise<boolean> {
+				if (registry.toolAvailable !== null) return registry.toolAvailable;
+				const probe = await safeSpawnAsync("newtool", ["--version"], {});
+				registry.toolAvailable = probe.status === 0;
+				return registry.toolAvailable;
+			}
+		`,
+	},
 	{
 		name: "a Map<string, boolean> cwd cache instead of an `avail`-named field",
 		source: `

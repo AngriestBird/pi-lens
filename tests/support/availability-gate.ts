@@ -150,6 +150,20 @@ function baseName(callee: string): string {
 	return parts[parts.length - 1] ?? callee;
 }
 
+/**
+ * The declared name a member expression hangs off: `registry` for
+ * `registry.toolAvailable`, `cached` for `cached.entries.set`.
+ *
+ * Memo writes are resolved against declarations, and it is the ROOT that is
+ * declared — the trailing segments are properties of it. Taking the last
+ * segment instead loses the container entirely, so a verdict parked on a
+ * module-level registry object reads as an undeclared local and escapes the
+ * gate.
+ */
+function rootName(expr: string): string {
+	return expr.split(".")[0] ?? expr;
+}
+
 /** Stable identity for a node, used as a scope key. */
 function scopeKey(node: SgNode | null): string {
 	if (!node) return "<module>";
@@ -247,7 +261,7 @@ function collectUnit(
 					const args = node.field("arguments")?.children() ?? [];
 					facts.writes.push({
 						target: callee,
-						base: baseName(container),
+						base: rootName(container),
 						scope: childScope,
 						isThisMember: container.startsWith("this."),
 						valueText: args[args.length - 2]?.text() ?? "",
@@ -286,7 +300,7 @@ function collectUnit(
 				const right = (node.field("right")?.text() ?? "").trim();
 				facts.writes.push({
 					target: left,
-					base: baseName(left),
+					base: rootName(left),
 					scope: childScope,
 					isThisMember: left.startsWith("this."),
 					valueText: right,
