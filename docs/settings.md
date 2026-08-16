@@ -70,6 +70,12 @@ column is the effective behavior when nothing is set.
 | `--lens-actionable-warning-autofix` | `actionableWarnings.autoFix.enabled` | project | **off** |
 | `--lens-actionable-warning-all` | `actionableWarnings.deltaOnly` (`false`) | global | `deltaOnly` **on** (report this turn only) |
 | `--lens-compact-tool-line` | `ui.compactToolLine` | global | **off** (two-row tool rendering) |
+| `--no-lazy-tools` | `tools.lazy` | global | lazy tools **on** (six situational tools start inactive) |
+
+`--no-lazy-tools` keeps every pi-lens tool active for the whole session, so the
+advertised tool list never changes. The `pi_lens_activate_tools` loader stays
+registered and keeps its usual description; under this flag the tools it names
+are already active, so calling it is a no-op.
 
 `--lens-guard` is **EXPERIMENTAL and strictly opt-in**. When enabled, actual
 `git commit`/`git push` commands are blocked only for current, structured

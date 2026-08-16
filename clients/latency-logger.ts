@@ -74,6 +74,13 @@ let lastPhase: { phase: string; ts: string } | undefined;
  * `lsp_touch_file`/diagnostics phase surrounding it, so letting this summary
  * row win `lastPhase` would misattribute a `loop_block` to the record instead
  * of to whatever phase is actually stalled when the block fires.
+ * #1453: `tool_set_mutation` records an active-tool-set rewrite (zero-duration
+ * bookkeeping, and it fires during session_start where a real stall must stay
+ * attributed to the work around it), so it is excluded for the same reason.
+ *
+ * #1461 slice 1: `finding_dead_path_drop` is the same shape — the record a
+ * delivery seam writes when it drops findings whose cited path no longer
+ * exists.
  */
 const LAST_PHASE_EXCLUDED = new Set([
 	"loop_block",
@@ -84,6 +91,8 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"agent_end_deferred_mutation_requeue",
 	"session_end_bus_rollup",
 	"lsp_aux_wait_outcome",
+	"tool_set_mutation",
+	"finding_dead_path_drop",
 ]);
 
 /**
