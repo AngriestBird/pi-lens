@@ -64,6 +64,7 @@ describe("runtime event flow", () => {
 			await handleTurnEnd({
 				ctxCwd: env.tmpDir, getFlag: () => false, dbg, runtime, cacheManager,
 				knipClient: { ensureAvailable: async () => false, analyze: async () => EMPTY_KNIP_RESULT },
+				deadCodeClients: [],
 				depChecker: { ensureAvailable: async () => true, checkFilesBatch } as any,
 				testRunnerClient: { getTestRunTarget: () => null },
 				resetLSPService: () => {}, resetFormatService: () => {},
@@ -121,6 +122,7 @@ describe("runtime event flow", () => {
 					isAvailable: () => false,
 					ensureAvailable: async () => false,
 				},
+				deadCodeClients: [],
 				depChecker: {
 					isAvailable: () => false,
 					ensureAvailable: async () => false,
@@ -174,6 +176,7 @@ describe("runtime event flow", () => {
 					ensureAvailable: async () => false,
 					analyze: async () => EMPTY_KNIP_RESULT,
 				},
+				deadCodeClients: [],
 				depChecker: { ensureAvailable: async () => false },
 				testRunnerClient: { getTestRunTarget: () => null },
 				resetLSPService: () => {},
