@@ -1,0 +1,5 @@
+---
+section: Fixed
+---
+
+- **Cargo, dotnet, maven, rspec and minitest runs report a real duration (closes [#1480](https://github.com/apmantza/pi-lens/issues/1480))** — `parseGenericRunnerOutput` read an elapsed time only for go, so the seven runner families behind it reported a hardcoded `0`. Each duration is now parsed from the summary block the runner already prints, and each pattern is applied only to the runner it belongs to, so no runner can be scored by another's output — gradle used to satisfy go's probe and report the whole-build wall clock as test time. Gradle stays unmeasured: its console summary carries no test elapsed time. Multi-module maven runs are scored by the sum of their surefire aggregates rather than by a single module, a runner that exits non-zero can no longer be reported as a pass, and the pytest and ExUnit summaries are rounded to whole milliseconds instead of logging `2009.9999999999998ms`. The "was this measured at all" rule now lives in one module (`clients/run-duration.ts`) that both the turn-end log and the agent-facing summary read, rather than being re-derived at each site.
