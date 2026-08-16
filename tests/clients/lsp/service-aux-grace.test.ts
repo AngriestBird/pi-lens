@@ -853,17 +853,22 @@ describe("R8 — aux grace: raceToCompletion per-role unit tests", () => {
  * #1470 — a cut-off auxiliary must not yield a conclusive touch.
  *
  * The three-way probe the #1458 review used, promoted from telemetry into the
- * touch's own honesty state. All three auxiliaries carry the SAME amount of
- * evidence about the file in the failing cases — none — so all three must be
- * distinguishable in what the touch CLAIMS:
+ * touch's own honesty state. What the touch CLAIMS in each case, as of this
+ * change:
  *
- *   - silent inside its own budget → `inconclusive` (pre-existing, unchanged)
- *   - published within grace       → `confirmation: "confirmed"`
- *   - hung, grace timer wins       → `confirmation: "partial"` naming it
+ *   - published within grace       → `confirmation: "confirmed"` (correct)
+ *   - hung, grace timer wins       → `confirmation: "partial"` naming it (fixed here)
+ *   - silent inside its own budget → `confirmation: "confirmed"` (STILL WRONG)
  *
- * The pre-fix defect: the hung case resolved `confirmation: "confirmed"` with
- * `inconclusive: undefined`, so a hung opengrep read as confirmed-clean on the
- * security lane.
+ * The pre-fix defect this change closes: the hung case resolved
+ * `confirmation: "confirmed"` with `inconclusive: undefined`, so a hung opengrep
+ * read as confirmed-clean on the security lane.
+ *
+ * The third line is a KNOWN, SEPARATELY FILED GAP (#1493), not a claim of
+ * correctness: a silent scanner carries exactly as little evidence as a hung one
+ * and still reads as clean. It is the same #533 class in the same lane, neither
+ * introduced nor closed by #1470, and the probe below pins today's wrong answer
+ * so #1493's fix has to come through this file.
  */
 describe("#1470 — cut-off auxiliary honesty", () => {
 	beforeEach(() => {
@@ -936,18 +941,30 @@ describe("#1470 — cut-off auxiliary honesty", () => {
 	});
 
 	// CLASS SWEEP (#1470's own acceptance criterion). opengrep is the scanner the
-	// issue was reported against, and today it is the ONLY auxiliary whose
-	// declared budget (3500ms) exceeds the 2000ms ceiling — which is precisely the
-	// condition that makes our grace timer win with time left on the touch's own
-	// deadline, producing a cut-off that is not also a timeout. ast-grep (1800),
-	// typos (1500) and zizmor (2000) are cut off AT the touch deadline instead, so
-	// they already fell into `diagnosticsTimedOut` and read as inconclusive.
+	// issue was reported against, and under today's DEFAULTS it is the only
+	// auxiliary that can reach the cut-off shape: `budgetMs = Math.min(
+	// timeoutFor(id), auxCeilingMs)` (index.ts), and the aux's OWN
+	// `waitForDiagnostics` timer is armed when `perServerWaits` is built —
+	// strictly before the grace timer, which is armed only after
+	// `Promise.all(primaryWaits)`. So when the two budgets are equal the aux's
+	// own timer always resolves first and the race reads "answered", never
+	// "cut_off". `cut_off` therefore requires the ceiling to be STRICTLY LESS
+	// than the declared budget: opengrep (3500) qualifies against the 2000
+	// default; zizmor (2000) never can, and ast-grep (1800) and typos (1500)
+	// cannot either.
 	//
-	// That is a property of today's numbers, not of the code: `PI_LENS_AUX_GRACE_MS`
-	// moves the ceiling for every auxiliary, and any budget change moves the
-	// boundary. So the narrowing is keyed on `role === "auxiliary"` — the same
-	// predicate that builds `auxWaits` — never on a server id. Lowering the ceiling
-	// puts each of the four into the cut-off shape and each must narrow identically.
+	// What those three do INSTEAD is NOT "read as inconclusive". A silent
+	// auxiliary that settles inside its own budget still yields
+	// `confirmation: "confirmed"` with no coverage caveat — the sibling probe
+	// below pins that, and it is the separately filed #1493. #1470 neither
+	// introduces nor closes it.
+	//
+	// The cut-off boundary is a property of today's numbers, not of the code:
+	// `PI_LENS_AUX_GRACE_MS` moves the ceiling for every auxiliary, and any budget
+	// change moves the boundary. So the narrowing is keyed on `role ===
+	// "auxiliary"` — the same predicate that builds `auxWaits` — never on a server
+	// id. Lowering the ceiling puts each of the four into the cut-off shape and
+	// each must narrow identically.
 	it.each(["opengrep", "ast-grep", "zizmor", "typos"])(
 		"narrows the confirmation for a cut-off %s, not just opengrep",
 		async (auxId) => {
@@ -978,17 +995,28 @@ describe("#1470 — cut-off auxiliary honesty", () => {
 		},
 	);
 
-	it("a SILENT auxiliary is left exactly as it was — #1470 narrows only cut_off", async () => {
+	it("KNOWN GAP (#1493): a SILENT auxiliary STILL reads as confirmed clean — #1470 narrows only cut_off", async () => {
 		// Aux settles at 900ms, inside its own budget, publishing nothing — the
-		// same silent-scanner shape #1458's evidence-based outcome test uses. The
-		// issue's acceptance criterion is that this path is UNCHANGED: whatever
-		// honesty verdict it produced before (in the dogfood run, an inconclusive
-		// touch, because a silent aux burns the budget that is also the touch's
-		// detection deadline) it still produces. It must not acquire a cut_off
-		// coverage gap it did not earn.
+		// same silent-scanner shape #1458's evidence-based outcome test uses.
+		//
+		// This asserts what is TRUE TODAY, not what should be true. The touch
+		// resolves `confirmation: "confirmed"` with an empty `diags` and no
+		// `inconclusive` flag, so a scanner that said nothing at all reads as a
+		// clean bill of health — the #533 class, in the same lane, arriving through
+		// a different door than #1470's cut_off. It is NOT introduced by #1470 and
+		// NOT fixed by it; it is filed separately as #1493.
+		//
+		// The assertion #1470 actually owns is the last one: a silent aux must not
+		// acquire a cut_off coverage gap it did not earn. The confirmed/inconclusive
+		// assertions above it are a REGRESSION FENCE for #1493 — when that issue is
+		// fixed this test must fail, and the fix should rewrite it to assert the
+		// narrowed verdict rather than delete it.
 		const { result, outcome } = await probe(900, []);
 		expect(outcome).toBe("silent");
-		expect(result?.confirmation).not.toBe("partial");
+		expect(result?.confirmation).toBe("confirmed"); // #1493: the false clean
+		expect(result?.inconclusive).toBeUndefined(); // #1493: not even flagged
+		expect(result?.diags).toEqual([]);
+		// #1470's own contract: no cut_off gap was earned here.
 		expect(result?.unconfirmedServerIds).toBeUndefined();
 	});
 

@@ -135,6 +135,11 @@ async function serveRequest(
 		source: "warm-attach-incumbent",
 	});
 	const servedAt = Date.now();
+	// #1470: the coverage gap is read through the shared helper, never re-derived
+	// from `confirmation === "partial"`. The two fields are set together today, so
+	// either test passes — which is exactly the coincidence `touchCoverageGap`'s
+	// own doc comment warns against. One reader, one rule.
+	const coverageGap = touchCoverageGap(touched);
 	if (servedAt <= req.deadlineAt && touched !== undefined && !touched.inconclusive) {
 		state.servedDiagnosticHashes.set(
 			normalizeFilePath(req.file),
@@ -167,10 +172,10 @@ async function serveRequest(
 			// would be indistinguishable from an old incumbent that never sent the
 			// field — and the whole point of narrowing is that the reader can tell
 			// which coverage is real.
-			...(touched?.confirmation === "partial"
+			...(coverageGap.length > 0
 				? {
 						confirmation: "partial" as const,
-						unconfirmedServerIds: [...touchCoverageGap(touched)],
+						unconfirmedServerIds: [...coverageGap],
 					}
 				: {}),
 		},

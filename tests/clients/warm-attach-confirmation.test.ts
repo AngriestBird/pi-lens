@@ -142,6 +142,24 @@ describe("#1253 — warm-attach serves the touch confirmation", () => {
 		expect(overTheWire.confirmation).not.toBe("confirmed");
 	});
 
+	it("reads the coverage gap through touchCoverageGap, not off the confirmation string (#1470)", async () => {
+		// `touchCoverageGap`'s own doc comment forbids re-deriving the rule from a
+		// `confirmation` string literal. The producer sets both fields together
+		// today, so a re-derivation passes every other test in this file — this one
+		// hands the serve path a touch that names a coverage gap WITHOUT the
+		// narrowed string, which is exactly what a second producer (or a widened
+		// confirmation vocabulary) would look like. One reader, one rule.
+		touchFile.mockResolvedValue({
+			diags: [],
+			unconfirmedServerIds: ["opengrep"],
+		});
+
+		const result = await serve();
+
+		expect(result.confirmation).toBe("partial");
+		expect(result.unconfirmedServerIds).toEqual(["opengrep"]);
+	});
+
 	it("survives the JSON round trip the socket actually performs", async () => {
 		touchFile.mockResolvedValue({ diags: [], confirmation: "confirmed" });
 

@@ -54,6 +54,7 @@ import {
 	bindingStateLabel,
 	composeBoundToCurrentDisk,
 	createDiskBindingCache,
+	touchCoverageGap,
 	type BoundToCurrentDisk,
 	type DiagnosticBinding,
 	type DiskBindingCache,
@@ -3242,10 +3243,13 @@ export class LSPService {
 
 		// #1470: an auxiliary whose push wait was CUT OFF by the aux grace timer
 		// (R8/#714) contributed exactly as much evidence about this file as one that
-		// went silent inside its own budget — none. The silent case already reads as
-		// inconclusive; the cut-off case did not, so a hung opengrep resolved
+		// went silent inside its own budget — none. A hung opengrep resolved
 		// `confirmation: "confirmed"` and read as confirmed-clean on the security
-		// lane. This does NOT flip the touch to inconclusive: that would discard a
+		// lane. (The SILENT case still does, and is NOT addressed here: a scanner
+		// that settles inside its own budget without publishing also yields an
+		// unqualified confirmation. Same #533 class, same lane, different door —
+		// filed as #1493, deliberately untouched by this change.)
+		// This does NOT flip the touch to inconclusive: that would discard a
 		// primary answer that IS trustworthy (#533 honesty doctrine cuts both ways —
 		// overclaiming and underclaiming are both dishonest). Instead the confirmation
 		// is NARROWED: `"partial"`, naming the servers it does not speak for, so every
@@ -4937,7 +4941,17 @@ export class LSPService {
 				// answer, so `available` implies confirmed) — wrap it as `{ diags }`;
 				// the incumbent branch already returns the wrapper.
 				const touchResult = attached?.available
-					? { diags: attached.response.diagnostics }
+					? {
+							diags: attached.response.diagnostics,
+							// #1470: the incumbent's coverage gap crosses the socket as an
+							// explicit DTO field, so carry it onto the wrapper the sweep
+							// reads. Dropping it here would let a partially covered
+							// incumbent answer be persisted as a confirmed sweep result —
+							// the same false clean this change closes on the local route.
+							...(attached.response.unconfirmedServerIds !== undefined && {
+								unconfirmedServerIds: attached.response.unconfirmedServerIds,
+							}),
+						}
 					: await withDeadline(
 							this.touchFile(filePath, content, {
 								diagnostics: "document",
@@ -4962,7 +4976,19 @@ export class LSPService {
 				// `perFileMs` deadline, which only catches a touch that never returned at
 				// all within budget. Either one means the result wasn't confirmed.
 				const inconclusive = touchResult?.inconclusive === true;
-				const timedOut = touchResult === undefined || inconclusive;
+				// #1470: a cut-off auxiliary is the THIRD reason this result is not a
+				// confirmed observation, and it is deliberately not `inconclusive`. The
+				// record loop below persists every `!timedOut` result into the workspace
+				// cache, so reading `inconclusive` alone caches a partially covered
+				// answer as clean and replays it on every later sweep. Today the only
+				// route that can reach this branch with a gap is the warm-attach
+				// incumbent, whose touch runs `clientScope: "with-auxiliary"`; the
+				// sweep's own local touch uses `clientScope: "all"`, which never arms
+				// the aux grace timer at all. Both are gated here so a future scope
+				// change cannot reopen the hole silently.
+				const coverageGap = touchCoverageGap(touchResult).length > 0;
+				const timedOut =
+					touchResult === undefined || inconclusive || coverageGap;
 				if (timedOut) timedOutFiles += 1;
 				// #1104 (shape 5 — AGENTS.md): the touch's content binding is an
 				// EXPLICIT enumerable field on the wrapper now (#1179), so it survives
