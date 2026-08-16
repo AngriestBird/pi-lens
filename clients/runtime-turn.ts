@@ -69,6 +69,7 @@ import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { isSubagentSession } from "./subagent-mode.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import type { TurnStateOwner } from "./cache-manager.js";
+import { formatRunDurationMs } from "./run-duration.js";
 import type { TestResult, TestRunnerClient } from "./test-runner-client.js";
 import {
 	MAX_ADVISORY_AFFECTED_FILES,
@@ -1275,10 +1276,30 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						resultValues.push(r.value);
 						const { file, runner, passed, failed, duration, error } = r.value;
 						const shortFile = path.basename(file);
+						// #1479: `(0ms)` used to be printed for a run nobody
+						// timed — a payload with no suite timestamps, an
+						// unrecognised summary line, or an empty result — and
+						// that is the same string a genuinely sub-millisecond
+						// run produces. A reader could not tell "measured 0"
+						// from "not measured", which is the confusion #1452 was
+						// reported for. `duration` is now absent when it was
+						// never measured, and this line says which one it has.
+						//
+						// #1480: the test is `formatRunDurationMs`, not an
+						// inline comparison. The "absent = unmeasured" contract
+						// was being re-derived at every site that read a
+						// duration, and a site that gets it slightly wrong —
+						// treating a measured `0` as absent — puts the bug back
+						// without touching this comment.
+						const elapsed = formatRunDurationMs(duration);
+						// Lifted out of the template below for the same reason
+						// `elapsed` is: the pair read as a nested ternary, which
+						// this line only got flagged for because #1479 touched it.
+						const verdict = failed > 0 ? "FAIL" : "PASS";
 						const summary =
 							error && passed === 0 && failed === 0
 								? `error: ${error}`
-								: `${failed > 0 ? "FAIL" : "PASS"} ${passed}p/${failed}f (${duration}ms)`;
+								: `${verdict} ${passed}p/${failed}f (${elapsed})`;
 						dbg(
 							`turn_end: ${stale ? "[stale] " : ""}test ${runner} ${shortFile} → ${summary}`,
 						);
