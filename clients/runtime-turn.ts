@@ -63,6 +63,7 @@ import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { isSubagentSession } from "./subagent-mode.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import type { TurnStateOwner } from "./cache-manager.js";
+import { formatRunDurationMs } from "./run-duration.js";
 import type { TestResult, TestRunnerClient } from "./test-runner-client.js";
 import {
 	MAX_ADVISORY_AFFECTED_FILES,
@@ -1115,8 +1116,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						// from "not measured", which is the confusion #1452 was
 						// reported for. `duration` is now absent when it was
 						// never measured, and this line says which one it has.
-						const elapsed =
-							duration === undefined ? "unmeasured" : `${duration}ms`;
+						//
+						// #1480: the test is `formatRunDurationMs`, not an
+						// inline comparison. The "absent = unmeasured" contract
+						// was being re-derived at every site that read a
+						// duration, and a site that gets it slightly wrong —
+						// treating a measured `0` as absent — puts the bug back
+						// without touching this comment.
+						const elapsed = formatRunDurationMs(duration);
 						// Lifted out of the template below for the same reason
 						// `elapsed` is: the pair read as a nested ternary, which
 						// this line only got flagged for because #1479 touched it.
