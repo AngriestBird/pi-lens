@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
+import { snapshotAdvisoryProvenance } from "../../clients/advisory-provenance.js";
 import {
 	consumeSessionStartGuidance,
 	consumeTestFindings,
@@ -46,6 +47,7 @@ function makeTurnEndDeps(
 			ensureAvailable: async () => false,
 			analyze: async () => EMPTY_KNIP_RESULT,
 		},
+		deadCodeClients: [],
 		depChecker: { ensureAvailable: async () => false },
 		testRunnerClient: { getTestRunTarget: () => null },
 		resetLSPService: () => {},
@@ -570,6 +572,97 @@ describe("knip turn-end backoff", () => {
 			env.cleanup();
 		}
 	});
+
+	it("keeps the last good result when a run fails (#925 / #1467)", async () => {
+		const env = setupTestEnvironment("pi-lens-knip-cache-keep-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const filePath = path.join(env.tmpDir, "src/current.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			cacheManager.addModifiedRange(
+				filePath,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+			const good = {
+				...EMPTY_KNIP_RESULT,
+				success: true,
+				issues: [{ type: "export", name: "unusedThing", file: "src/old.ts" }],
+				unusedExports: [
+					{ type: "export", name: "unusedThing", file: "src/old.ts" },
+				],
+				summary: "Found 1 issues",
+			};
+			cacheManager.writeCache("knip", good, env.tmpDir);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, {
+					ctxCwd: env.tmpDir,
+					knipClient: {
+						ensureAvailable: async () => false,
+						analyze: async () => ({
+							...EMPTY_KNIP_RESULT,
+							success: false,
+							failureKind: "unavailable-transient",
+							summary: "Knip availability probe timed out after 5528ms.",
+						}),
+					},
+				}),
+			);
+
+			// Pre-fix, this 194-byte failure record replaced the real findings and
+			// every reader afterwards served the failure as the answer.
+			const cached = cacheManager.readCache<typeof good>("knip", env.tmpDir);
+			expect(cached?.data.success).toBe(true);
+			expect(cached?.data.issues).toHaveLength(1);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not back off when the cached failure was an availability verdict", async () => {
+		const env = setupTestEnvironment("pi-lens-knip-availability-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const filePath = path.join(env.tmpDir, "src/current.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			cacheManager.addModifiedRange(
+				filePath,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+			cacheManager.writeCache(
+				"knip",
+				{
+					...EMPTY_KNIP_RESULT,
+					success: false,
+					failureKind: "unavailable-transient",
+					summary: "Knip availability probe timed out after 5528ms.",
+				},
+				env.tmpDir,
+			);
+			const analyze = vi.fn(async () => EMPTY_KNIP_RESULT);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, {
+					ctxCwd: env.tmpDir,
+					knipClient: { ensureAvailable: async () => true, analyze },
+				}),
+			);
+
+			// knip never ran, so there is nothing to back off from — and backing
+			// off on the word "timed out" is how a probe verdict became permanent.
+			expect(analyze).toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
 });
 
 // ── Call-graph impact delta persistence (#179 / #533) ────────────────────────
@@ -998,14 +1091,23 @@ describe("context injection framing", () => {
 	it("consumeTestFindings includes automated-check framing", () => {
 		const env = setupTestEnvironment("pi-lens-ctx-test-");
 		const cacheManager = new CacheManager(false);
+		const runtime = new RuntimeCoordinator();
+		const testFile = path.join(env.tmpDir, "sample.test.ts");
+		fs.writeFileSync(testFile, "test('sample', () => {});\n");
+		const provenance = snapshotAdvisoryProvenance({
+			cwd: env.tmpDir,
+			runtime,
+			generation: 1,
+			files: [{ path: testFile, role: "test" }],
+		});
 
 		cacheManager.writeCache(
 			"test-runner-findings",
-			{ content: "[Tests] ✗ 1/3 failed — vitest\n" },
+			{ content: "[Tests] ✗ 1/3 failed — vitest\n", provenance },
 			env.tmpDir,
 		);
 
-		const result = consumeTestFindings(cacheManager, env.tmpDir);
+		const result = consumeTestFindings(cacheManager, env.tmpDir, runtime);
 		expect(result).toBeDefined();
 		expect(result!.messages[0].content).toContain("not a user request");
 		expect(result!.messages[0].content).toContain("fix before continuing");
@@ -1261,6 +1363,123 @@ describe("turn_end unified secret surfacing", () => {
 	});
 });
 
+// ── Dead-path gitleaks findings (#1461 slice 1 / #1460) ───────────────────────
+
+describe("turn_end gitleaks findings for deleted files", () => {
+	// The live #1460 shape: a gitleaks scan flags a path, the directory is
+	// deleted, and the finding is still inside the 30-minute TTL at turn_end.
+	// Before the fix it shipped as a 🔴 STOP blocker naming a file the agent
+	// cannot fix.
+	function setupSecretTurn(prefix: string) {
+		const env = setupTestEnvironment(prefix);
+		const runtime = new RuntimeCoordinator();
+		runtime.setTelemetryIdentity({ sessionId: "dead-path-session" });
+		const cacheManager = new CacheManager(false);
+		// An edited file that still exists — so provenance sees a live workspace
+		// and the advisory is never suppressed for the unrelated `allFilesDeleted`
+		// reason. This is exactly why #1419's guard answered "current".
+		const editedFile = path.join(env.tmpDir, "src/edited.ts");
+		fs.mkdirSync(path.dirname(editedFile), { recursive: true });
+		fs.writeFileSync(editedFile, "export const value = 1;\n");
+		cacheManager.addModifiedRange(
+			editedFile,
+			{ start: 1, end: 1 },
+			false,
+			env.tmpDir,
+			"dead-path-session",
+		);
+		return { env, runtime, cacheManager };
+	}
+
+	function writeGitleaksCache(
+		cacheManager: CacheManager,
+		cwd: string,
+		findings: Array<{ ruleId: string; file: string; startLine: number; description: string }>,
+	) {
+		cacheManager.writeCache(
+			"gitleaks",
+			{ success: true, scannedAt: "", findings },
+			cwd,
+		);
+	}
+
+	it("does NOT deliver a cached finding whose file was deleted after the scan", async () => {
+		const { env, runtime, cacheManager } = setupSecretTurn("pi-lens-dead-path-");
+		try {
+			const deletedDir = path.join(env.tmpDir, ".pi/smoke-research/data");
+			const deletedFile = path.join(deletedDir, "sources.json");
+			fs.mkdirSync(deletedDir, { recursive: true });
+			fs.writeFileSync(deletedFile, '{"key":"AKIA..."}\n');
+			writeGitleaksCache(cacheManager, env.tmpDir, [
+				{
+					ruleId: "generic-api-key",
+					file: deletedFile,
+					startLine: 1341,
+					description: "Detected a Generic API Key",
+				},
+			]);
+			// The deletion that the TTL cannot see.
+			fs.rmSync(path.join(env.tmpDir, ".pi"), { recursive: true, force: true });
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
+
+			const content =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages?.[0]
+					?.content ?? "";
+			expect(content).not.toContain("hardcoded secrets detected");
+			expect(content).not.toContain("sources.json");
+			expect(content).not.toContain("generic-api-key");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("delivers live-path findings unchanged and drops only the dead ones", async () => {
+		const { env, runtime, cacheManager } = setupSecretTurn("pi-lens-mixed-path-");
+		try {
+			const liveFile = path.join(env.tmpDir, "src/config.ts");
+			fs.writeFileSync(liveFile, "const k = 'AKIA...';\n");
+			const deletedFile = path.join(env.tmpDir, "scratch/sources.json");
+			fs.mkdirSync(path.dirname(deletedFile), { recursive: true });
+			fs.writeFileSync(deletedFile, '{"key":"AKIA..."}\n');
+			writeGitleaksCache(cacheManager, env.tmpDir, [
+				{
+					ruleId: "generic-api-key",
+					file: deletedFile,
+					startLine: 1341,
+					description: "Detected a Generic API Key",
+				},
+				{
+					ruleId: "aws-access-token",
+					file: liveFile,
+					startLine: 42,
+					description: "AWS key",
+				},
+			]);
+			fs.rmSync(path.join(env.tmpDir, "scratch"), {
+				recursive: true,
+				force: true,
+			});
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
+
+			const content =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages?.[0]
+					?.content ?? "";
+			expect(content).toContain("hardcoded secrets detected");
+			expect(content).toContain("src/config.ts:42");
+			expect(content).toContain("aws-access-token");
+			expect(content).not.toContain("sources.json");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
 // ── License-risk advisory (#131 Mode 4) ───────────────────────────────────────
 
 describe("turn_end license-risk surfacing", () => {
@@ -1392,12 +1611,117 @@ describe("turn_end test runner — stale results are cached, not discarded", () 
 			const cached = cacheManager.readCache<{
 				content: string;
 				stale?: boolean;
+				superseded?: boolean;
+				provenance?: { files: unknown[] };
 			}>("test-runner-findings", env.tmpDir);
 
 			// The old behavior discarded this entirely (no cache entry at all).
 			expect(cached?.data?.content).toContain("[Tests] ✗ 0/1 passed");
 			expect(cached?.data?.stale).toBe(true);
+			expect(cached?.data?.superseded).toBe(true);
+			expect(cached?.data?.provenance?.files.length).toBeGreaterThan(0);
 			expect(cached?.data?.content).toContain("prior turn");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("marks a same-turn external rewrite superseded", async () => {
+		const env = setupTestEnvironment("pi-lens-test-rewrite-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "rewrite-session" });
+			const cacheManager = new CacheManager(false);
+			const srcFile = path.join(env.tmpDir, "src/foo.ts");
+			const testFile = path.join(env.tmpDir, "src/foo.test.ts");
+			fs.mkdirSync(path.dirname(srcFile), { recursive: true });
+			fs.writeFileSync(srcFile, "export const x = 1;\n");
+			fs.writeFileSync(testFile, "test('x', () => {});\n");
+			cacheManager.addModifiedRange(srcFile, { start: 1, end: 1 }, false, env.tmpDir, "rewrite-session");
+			let resolveRun!: (value: any) => void;
+			const run = new Promise<any>((resolve) => { resolveRun = resolve; });
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, {
+				ctxCwd: env.tmpDir,
+				testRunnerClient: {
+					getTestRunTarget: () => ({ testFile, runner: "vitest", config: {}, strategy: "related" as const }),
+					runTestFileAsync: () => run,
+					formatResult: () => "rewrite failure",
+				},
+			}));
+			fs.writeFileSync(srcFile, "export const x = 2;\n");
+			resolveRun({ file: testFile, sourceFile: srcFile, runner: "vitest", passed: 0, failed: 1, skipped: 0, failures: [], duration: 1 });
+			await new Promise((resolve) => setImmediate(resolve));
+			const cached = cacheManager.readCache<{ superseded?: boolean; launchedFrom?: unknown; publishedAgainst?: unknown }>("test-runner-findings", env.tmpDir)?.data;
+			expect(runtime.turnIndex).toBe(0);
+			expect(cached).toMatchObject({ superseded: true });
+			expect(cached?.launchedFrom).toBeDefined();
+			expect(cached?.publishedAgainst).toBeDefined();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does not let an older test generation overwrite a newer batch", async () => {
+		const env = setupTestEnvironment("pi-lens-test-generation-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "generation-session" });
+			const cacheManager = new CacheManager(false);
+			const srcFile = path.join(env.tmpDir, "src/foo.ts");
+			const testFile = path.join(env.tmpDir, "src/foo.test.ts");
+			fs.mkdirSync(path.dirname(srcFile), { recursive: true });
+			fs.writeFileSync(srcFile, "export const x = 1;\n");
+			fs.writeFileSync(testFile, "test('x', () => {});\n");
+			const resolvers: Array<(value: any) => void> = [];
+			const runner = {
+				getTestRunTarget: () => ({ testFile, runner: "vitest", config: {}, strategy: "related" as const }),
+				runTestFileAsync: () => new Promise<any>((resolve) => resolvers.push(resolve)),
+				formatResult: (result: { duration: number }) => `generation-${result.duration}`,
+			};
+			const fire = async () => {
+				cacheManager.addModifiedRange(srcFile, { start: 1, end: 1 }, false, env.tmpDir, "generation-session");
+				await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir, testRunnerClient: runner }));
+			};
+			await fire();
+			await fire();
+			resolvers[1]!({ file: testFile, sourceFile: srcFile, runner: "vitest", passed: 0, failed: 1, skipped: 0, failures: [], duration: 2 });
+			await new Promise((resolve) => setImmediate(resolve));
+			resolvers[0]!({ file: testFile, sourceFile: srcFile, runner: "vitest", passed: 0, failed: 1, skipped: 0, failures: [], duration: 1 });
+			await new Promise((resolve) => setImmediate(resolve));
+			const cached = cacheManager.readCache<{ content: string; testRunGeneration: number }>("test-runner-findings", env.tmpDir)?.data;
+			expect(cached).toMatchObject({ content: "generation-2", testRunGeneration: 2 });
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("publishes a settling failure after an empty context delivery", async () => {
+		const env = setupTestEnvironment("pi-lens-test-empty-consume-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "empty-consume-session" });
+			const cacheManager = new CacheManager(false);
+			const srcFile = path.join(env.tmpDir, "src/foo.ts");
+			const testFile = path.join(env.tmpDir, "src/foo.test.ts");
+			fs.mkdirSync(path.dirname(srcFile), { recursive: true });
+			fs.writeFileSync(srcFile, "export const x = 1;\n");
+			fs.writeFileSync(testFile, "test('x', () => {});\n");
+			cacheManager.addModifiedRange(srcFile, { start: 1, end: 1 }, false, env.tmpDir, "empty-consume-session");
+			let resolveRun!: (value: any) => void;
+			const run = new Promise<any>((resolve) => { resolveRun = resolve; });
+			await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, {
+				ctxCwd: env.tmpDir,
+				testRunnerClient: {
+					getTestRunTarget: () => ({ testFile, runner: "vitest", config: {}, strategy: "related" as const }),
+					runTestFileAsync: () => run,
+					formatResult: () => "late failure",
+				},
+			}));
+			expect(consumeTestFindings(cacheManager, env.tmpDir, runtime)).toBeUndefined();
+			resolveRun({ file: testFile, sourceFile: srcFile, runner: "vitest", passed: 0, failed: 1, skipped: 0, failures: [], duration: 1 });
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(cacheManager.readCache<{ content: string }>("test-runner-findings", env.tmpDir)?.data?.content)
+				.toBe("late failure");
 		} finally {
 			env.cleanup();
 		}
@@ -1461,6 +1785,103 @@ describe("turn_end test runner — stale results are cached, not discarded", () 
 		} finally {
 			env.cleanup();
 		}
+	});
+});
+
+// ── #1479: the turn-end line must not print a measurement it does not have ────
+//
+// `(0ms)` was printed both for a run that took under a millisecond and for one
+// nobody timed. Only the second is a defect, so these three cases pin BOTH
+// directions: a falsy check (`duration ? ... : "unmeasured"`) would satisfy the
+// unmeasured case and silently relabel a real zero, which is the mistake this
+// issue is about, one layer up.
+
+describe("turn_end test runner — unmeasured duration is not printed as 0ms", () => {
+	async function logLineFor(
+		durationField: Record<string, unknown>,
+		tmpPrefix: string,
+	): Promise<string> {
+		const env = setupTestEnvironment(tmpPrefix);
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "duration-session" });
+			const cacheManager = new CacheManager(false);
+
+			const srcFile = path.join(env.tmpDir, "src/foo.ts");
+			const testFile = path.join(env.tmpDir, "src/foo.test.ts");
+			fs.mkdirSync(path.dirname(srcFile), { recursive: true });
+			fs.writeFileSync(srcFile, "export const x = 1;\n");
+			fs.writeFileSync(testFile, "test('x', () => {});\n");
+			cacheManager.addModifiedRange(
+				srcFile,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+				"duration-session",
+			);
+
+			const lines: string[] = [];
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, {
+					ctxCwd: env.tmpDir,
+					dbg: (msg: string) => {
+						lines.push(msg);
+					},
+					testRunnerClient: {
+						getTestRunTarget: () => ({
+							testFile,
+							runner: "vitest",
+							config: {} as any,
+							strategy: "related" as const,
+						}),
+						runTestFileAsync: async () => ({
+							file: testFile,
+							sourceFile: srcFile,
+							runner: "vitest",
+							passed: 2,
+							failed: 0,
+							skipped: 0,
+							failures: [],
+							...durationField,
+						}),
+						formatResult: () => "",
+					},
+				}),
+			);
+			await new Promise((resolve) => setImmediate(resolve));
+
+			const line = lines.find((l) => l.includes("turn_end: test vitest"));
+			expect(line).toBeDefined();
+			return line as string;
+		} finally {
+			env.cleanup();
+		}
+	}
+
+	it("prints (unmeasured) when the runner reported no duration", async () => {
+		// No `duration` key at all — an emptyResult, a runner error, or a JSON
+		// payload with no readable suite timestamps all arrive in this shape.
+		const line = await logLineFor({}, "pi-lens-turn-unmeasured-");
+
+		expect(line).toContain("PASS 2p/0f (unmeasured)");
+		expect(line).not.toContain("0ms");
+	});
+
+	it("still prints (0ms) for a run that was measured at zero", async () => {
+		// pytest really does print `in 0.00s`, and a suite whose startTime
+		// equals its endTime really did run in under a millisecond. Those are
+		// measurements and must survive.
+		const line = await logLineFor({ duration: 0 }, "pi-lens-turn-zero-");
+
+		expect(line).toContain("PASS 2p/0f (0ms)");
+		expect(line).not.toContain("unmeasured");
+	});
+
+	it("prints the measured value unchanged for a normal run", async () => {
+		const line = await logLineFor({ duration: 137 }, "pi-lens-turn-measured-");
+
+		expect(line).toContain("PASS 2p/0f (137ms)");
+		expect(line).not.toContain("unmeasured");
 	});
 });
 

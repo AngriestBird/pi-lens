@@ -1,12 +1,85 @@
 # pi-lens — agent context
 
+Post-fix decision observability is durable and bounded: advisory delivery logs
+one `advisory_provenance_decision` per consume, classic TypeScript project
+identity logs every success/failure outcome, deferred mutation drains summarize
+coalescing and requeues, and authoritative-content branches log attachment
+decisions, and a delivery seam that drops findings naming deleted files logs one
+bounded `finding_dead_path_drop` per store. Bus stale/failure rows carry the
+resolver's ctx source. Automatic
+smell warnings count only the current session, or a 24-hour fallback window
+when no session boundary is available; explicit health remains separately
+labeled. (#1432)
+
+Advisory caches must carry immutable capture provenance and validate it again
+at every delivery surface. A finding is current only when session/turn state
+matches and every affected file is SHA-256-confirmed (size+mtime is only the
+cheap tier); legacy, malformed, truncated, unreadable, or superseded records
+are historical and non-blocking, while deleted per-file findings are omitted.
+Async test batches publish only when their persisted monotonic generation is
+still current. Keep peek/consume classification identical and preserve
+one-shot delivery, MCP acknowledgement, and git-guard structured state. (#1413)
+
 LSP client root selection has a hard session-cwd ceiling: marker/config lookup
 may consult parents, but the root used for client identity and spawn never may.
 `NearestRoot` clamps an above-cwd marker to cwd and logs that clamp once. After
 fixture/gitignore filtering, `LSPService` coalesces a config-only nested root to
 an already-hosted same-server ancestor; a nested manifest/lockfile boundary
 keeps its independent client. Keep both policies deterministic and free of
-wall-clock expiry. (#1328, #1373)
+wall-clock expiry. TypeScript resolves governing `tsconfig.json`/`jsconfig.json`
+separately from package/tooling markers and prefers the config directory for
+identity; the same coalescer still folds a config-only nested root when the
+ancestor was hosted first (the accepted #1373 open-order sensitivity). Classic
+TypeScript clients sample `projectInfo` once per normalized file after the first
+successful `didOpen`; this bounded best-effort telemetry never runs for native
+TS7 or blocks diagnostics. (#1328, #1373, #1412)
+
+TypeScript diagnostic wait policy is launch-variant-aware: classic
+typescript-language-server may accept its complete first push, while native
+TS7's versionless publications are provisional until a bounded quiet window
+stabilizes the burst (or an advertised authoritative pull settles it). Pass the
+live `launchVariant` through every `getStrategy` consumer; never infer a fixed
+publication count or manufacture version freshness. (#1412)
+
+Native TS7 cascade neighbor checks use a cascade-only collect-later tier. The
+lane sends a no-wait primary touch and quiet-window reconciliation consumes a
+newer per-file push or pull publication. The shared server wait policy stays
+`waits`, so main-lane behavior is unchanged. Cascade results carry an explicit
+`inconclusive` marker through formatting, and only confirmed touches enter the
+neighbor cache. (#1444)
+
+Auxiliary LSP waits use each server's declared aggregate wait, capped by a
+2-second global post-primary ceiling — in both the touchFile push wait and the
+`getDiagnostics` `raceToCompletion` aggregation lane (`aggregation.ts`'s
+`PromiseDescriptor.budgetMs`). This admits measured warm scanner runs without
+charging every edit for a scanner's longer cold-start budget. An explicit
+`PI_LENS_AUX_GRACE_MS` overrides the global ceiling. (#1458)
+
+Late auxiliary LSP publications are captured before the next resync clears the
+client cache. Carry them into that read only when their stored SHA-256 content
+binding matches the touch content exactly. Unknown or changed-content bindings
+never replay. (#1458)
+
+Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row.
+Its per-server outcomes record answered, silent, or cut-off — decided from
+EVIDENCE (whether the client's `diagnosticsVersion` advanced past the
+pre-notify baseline), never from whether the raced wait promise settled,
+because `waitForDiagnostics` resolves on its own timeout and never rejects, so
+a silent scanner's promise settling looks identical to an answer unless the
+outcome is corroborated against the diagnostics cache. This phase's
+`durationMs` is a REAL bounded wait (unlike its zero-duration `LAST_PHASE_EXCLUDED`
+siblings), but it stays excluded from last-phase stall attribution because it
+is a post-hoc record of a wait that already ran inside the touch's own phase,
+not the stall itself. (#1458)
+
+A deferred cascade result that arrives LATE — past the turn-end settle cap, or
+in the quiet window after the turn already consumed its runs — must still reach
+the agent. `turnSeq` is not a staleness signal for such a run (a late run is by
+definition from an earlier turn); `projectSeq` is, because it advances on every
+pi-observed write. When you add a `consume*` drain guarded by a monotonic
+counter, ask whether the producer's contract is carry-over, and make every drop
+emit a record: a carried value that a freshness filter rejects unconditionally
+is dead code that silently loses findings. (#1443)
 
 MCP warm word indexes are bounded per root in `clients/mcp/analyze.ts`: callers
 must acquire/release a lease around every use, because idle and LRU eviction
@@ -18,6 +91,16 @@ and parse caches must not pin them, because that duplicates the mutable warm
 index's expanded postings graph. The parse cache instead keeps a shallow
 postings-stripped snapshot for metadata/report consumers; a cold analyze reloads
 the full body once and immediately rewarms the leased per-root index. (#1370)
+
+Bounded async metadata walks must separate admission order from completion
+order: use a fixed-size indexed cursor pool, store each result at its original
+walk index, and publish only by iterating that array from index zero. Check
+supersession before every claim and after all in-flight work settles; per-item
+metadata failures retain the prior synchronous skip semantics. Never let
+parallel filesystem completion order drive a behavior-gating Map or preflight
+list. The word-index resume stat walk defaults to 8 workers (libuv's threadpool
+caps real fs parallelism at 4; the surplus is queue depth) and follows this
+pattern. (#1409)
 
 Helm chart linting uses the shared workspace-topology `Chart.yaml` marker. YAML
 and `.tpl` edits inside a chart dispatch one canonical-root-deduplicated,
@@ -110,6 +193,8 @@ preserved as `cause`. (#1214)
 
 For human contributors and issue/PR authors, see `CONTRIBUTING.md` at the repo root. It covers the development workflow, how to add runners, LSP servers, formatters, and rules, and the issue/PR templates. This `AGENTS.md` is the durable agent context; `CONTRIBUTING.md` is the public contributor guide.
 
+**External-PR handling.** Maintainer agents may commit directly to a contributor's PR branch when "allow edits from maintainers" is enabled. Prefer this over asking the contributor to apply small review asks. Keep the contributor's authorship: commit only the review deltas, write clear commit messages, and reference the review. When you post a review on an external PR, thank the contributor first. Then state plainly that the review is AI-generated and that a maintainer supervises the process.
+
 **Pi-lens dogfooding is part of every pi session.** When pi-lens is installed while we work in pi, the agent is also a pi-lens consumer and debugger. If an observed behavior is not as expected (including stale/deleted-file diagnostics, a misfiring command, a stale installed-copy result, a hang, or a misleading clean/unconfirmed state), first distinguish a real defect from an artifact of the installed build, cache, or environment; then open or update a labeled tracking issue with the reproduction, observed-versus-expected behavior, evidence, affected surfaces, acceptance criteria, non-goals, and test matrix, and notify the user with the link. The same obligation applies to enhancement opportunities identified through consumption of the extension (performance, observability, ergonomics, or architectural seams), even when the current task is unrelated. Do not silently dismiss a finding as "just dogfooding" or leave it only in chat. Example: #1259 tracks the latency benchmark needed after #1254's default all-scope LSP collection change.
 
 **Always look at the bigger picture — a fix's PATTERN matters more than its instance.** When a change fixes or improves one thing, ask before implementing: *does the same class apply to its siblings?* Conformity and maintainability are anchor values in this repo — one convention applied everywhere beats four local variations, and a fix that leaves identical latent instances behind is half a fix. Recent examples of the discipline: #519 reported ONE skill-name collision (`ast-grep`) but the fix namespaces ALL four bundled skills (same collision class, uniform `pi-lens-` prefix); #513 was ONE renderer crashing on width, and the fix extracted the shared `tui-fit.ts` helper + audited every other render surface; #210 was one read-guard map with raw keys, and the invariant became "EVERY guard map keys through `normalizeFilePath`". How to apply: name the pattern class in the PR/issue (not just the instance), sweep the codebase for other members of the class, fix the contained ones in the same PR, file an issue for the rest — and when the sweep would expand scope materially, surface the question to the maintainer BEFORE implementing the narrow version.
@@ -132,16 +217,7 @@ For human contributors and issue/PR authors, see `CONTRIBUTING.md` at the repo r
 
 ### Recurring defect shapes — screen against these BEFORE you write code
 
-The captured-at-subscribe / used-after-replace shape also applies to pi's
-`events` API: `pi.events.emit` is a session-bound wrapper whose runtime is
-invalidated on replacement. Long-lived publishers must retain a getter and
-resolve the emitter at delivery time; deferred callbacks must resolve inside
-the callback, never before scheduling. The getter itself is activation-scoped:
-module-singleton bus/notifier/widget-render plumbing must be re-wired from the
-current factory on every `session_start`, BEFORE the #473 concurrent-secondary
-guard can return, because a sibling activation can overwrite the singleton and
-later go stale. Emit-failure suppression is occurrence-scoped (success re-arms
-it), and a stale occurrence records one `bus-stale` degradation. (#1128, #1383)
+The captured-at-subscribe / used-after-replace shape also applies to pi's `events` API: `pi.events.emit` is a session-bound wrapper whose runtime is invalidated on replacement. Long-lived publishers must retain a getter and resolve the emitter at delivery time; deferred callbacks must resolve inside the callback, never before scheduling. The resolved target pairs the emitter with its OWN activation's event ctx — never a process-global "latest ctx", which can belong to an unrelated sibling activation after a replacement and would silently pass the stale-session probe (a live-looking ctx with no relation to the paired emitter, dropping every publish until the new activation's own first handler arrives; #1415). The shared live-emitter seam probes that ctx immediately before delivery and records `skipped_stale_session` instead of invoking a confirmed-stale target. The getter itself is activation-scoped: module-singleton bus/notifier/widget-render plumbing must be re-wired from the current factory on every `session_start`, BEFORE the #473 concurrent-secondary guard can return, because a sibling activation can overwrite the singleton and later go stale. Emit-failure suppression is occurrence-scoped (success re-arms it), and a stale occurrence records one `bus-stale` degradation. (#1128, #1383, #1415)
 
 This is the payoff of the two disciplines above: a bounded checklist of defect *shapes* that each recurred ≥2× across the arc. Read it at task start; when your change matches a shape, treat the screen as an acceptance criterion (and the regression test the shape implies). Each entry is **SHAPE → SCREEN (when you touch X, verify Y) → canonical example → detection**. Where a shape has a fuller treatment above, this cross-references rather than restates it.
 
@@ -156,7 +232,7 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 5. **A side-channel property dropped by spread / map / filter / `JSON`.** A flag or content-binding hung on an object is silently lost when the object is copied or serialized; the consumer reads `undefined` and mis-decides. *Screen:* read the signal off the ORIGINAL producer object, not a derived copy; if it must survive a copy, make it an enumerable field the copy carries. *e.g.* the diagnostics content-binding thread — #1095/#1104 (cascade fallback-display gated on binding read from the source, not the reconciled copy); #1094/#1096. *Detect:* trace whether the property survives every `{...x}`/`.map`/`JSON.parse(JSON.stringify(...))` between producer and consumer. Not ast-grep-able. **The corollary that broke the nightly (#1240):** when a seam's RETURN CONTRACT changes (the #1179 `touchFile` array→`TouchFileResult` wrapper), sweep the **un-type-checked consumers too** — `scripts/*.mjs` are outside the tsc surface, so the smoke script's `Array.isArray(touched)` reads survived the sweep and silently misread every wrapper as "no client ready" (43 skips + 5 aux fails, 7 green nights → red).
 
-6. **A freshness stamp that doesn't cover what the data depends on.** mtime alone misses content changes that preserve mtime (git checkout, formatters, same-second writes); an mtime keyed on file A misses a cross-file dependency on B. *Screen:* cache validity = `size` + `mtimeMs` as the cheap first tier, then a content-hash confirm; a diagnostic depending on B invalidates when B changes, not just A. The review-graph's `size:mtimeMs` + `confirmContentChanged` is the gold standard. *e.g.* #1105 (word-index refresh + `importsChanged` fast path bound to size, not mtime alone), #1088/#1092. *Detect:* grep `mtimeMs`/`.mtime` in an equality/cache-key lacking a sibling `.size`/hash; weak signal — #1158.
+6. **A freshness stamp that doesn't cover what the data depends on.** mtime alone misses content changes that preserve mtime (git checkout, formatters, same-second writes); an mtime keyed on file A misses a cross-file dependency on B. *Screen:* cache validity = `size` + `mtimeMs` as the cheap first tier, then a content-hash confirm; a diagnostic depending on B invalidates when B changes, not just A. The review-graph's `size:mtimeMs` + `confirmContentChanged` is the gold standard. *e.g.* #1105 (word-index refresh + `importsChanged` fast path bound to size, not mtime alone), #1088/#1092. *Detect:* grep `mtimeMs`/`.mtime` in an equality/cache-key lacking a sibling `.size`/hash; weak signal — #1158. **Second axis — existence, not content (#1460/#1461):** a stamp can be perfectly valid about content and still describe a file that no longer exists. A TTL-only scanner cache served a gitleaks 🔴 blocker for a directory deleted eleven minutes earlier, and the #1419 provenance guard certified it `current` seven times because it validates the files the agent EDITED, not the paths named INSIDE the findings. *Screen:* when a cached finding names a path, validate at delivery that the path still exists — not only that the cache is young. Drop the finding when the path is gone (there is no remediation for a deleted file); demote only for content drift on a surviving one. Use `dropFindingsForMissingPaths` (`clients/advisory-provenance.ts`): one stat per unique path, fails open on unreadable paths, and logs one bounded `finding_dead_path_drop` record. *Detect:* grep `readCache<` for stores whose findings carry a file path, and check the delivery seam for an existence probe.
 
 7. **A vacuous test fixture that never exercises the code under test.** A hardcoded version literal orphaned by a version bump; a mock missing the property the guarded code reads (so both guard branches pass for free); a drive-letter literal fed to a normalizer as an *expected key* on the assumption it's a no-op. *Screen:* every regression test must FAIL on pre-fix code, and the fixture must actually reach the code under test. *e.g.* #1114 (kill-process-tree mock had no `.once`/`.killed`, so the SIGKILL-escalation guard passed vacuously — the escalation was dead code), #1089/#1106 (fixture version drift), #1139/#1150 (Windows-shaped literal as expected key — see the OS-agnostic paragraph). *Detect:* the "confirm the regression test fails against pre-fix code" step; a mock asserted on a method it never defines. Not ast-grep-able.
 
@@ -167,6 +243,17 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 10. **Silencing counted as fixing.** A persistently-suppressed finding counted "resolved" every dispatch; a baseline computed WITHOUT the same filter pipeline the live pass uses; a producer error read as "0 findings = clean." *Screen:* a suppressed/filtered/errored result is not a resolved one — the baseline must pass through the identical filter pipeline as the comparison, and an empty result must distinguish clean from unavailable/errored. *e.g.* #1087 (sg-scan exit-1 matches dropped, making a failing scan read clean; swept as "silencing is not fixing"). *Detect:* review question — does "0" mean clean, or did the producer error / get filtered?
 
 11. **Skipped-CI-on-conflict, counted as green.** A DIRTY (merge-conflicted) PR can't build its merge-ref, so the real gates are *skipped, not failed* — absent, so a naive check reads them as passing. *Screen:* before merge, verify `Unit tests`/`Lint` actually RAN and passed on the current head SHA — an absent required check is not a passing one. Full treatment in the adversarial-review note above (skipped-CI-on-conflict trap).
+
+### AI-authorship smells
+
+A separate, narrower family from the shapes above: not a recurring bug, but a recurring *tell* that generated code stopped at "it compiles" instead of "it's correct." Each member fabricates or launders type evidence rather than earning it — the assert-until-it-compiles pattern. Six members are shipped as ast-grep rules today (`rules/ast-grep-rules/rules/`); each entry below is **SHAPE → SCREEN → detect**.
+
+1. **`as any` type assertion.** Casting straight to `any` discards every property the compiler could still check. *Screen:* narrow to the real type, or route the cast through `unknown` if the compiler genuinely can't verify it. *Detect:* `no-as-any.yml` (`$X as any`).
+2. **Explicit `any` type.** An `any`-typed binding, parameter, or return silently opts out of checking everywhere it flows. *Screen:* same as above — a real type, a generic, or `unknown` at the boundary. *Detect:* `no-any-type.yml` (`predefined_type` leaf, regex `^any(\[\])?$`, plus `$X as any`/`$X as any[]`).
+3. **`type X = unknown` alias.** An alias that only renames `unknown` carries zero type information — every consumer still narrows from scratch. *Screen:* give the alias real shape, or drop it and let the rare genuine unknown-input site say `unknown` directly. *Detect:* `no-unknown-laundering.yml` (`type $T = unknown`). Scoped to the alias form only — an FP-scan found `unknown` return types, parameters, and `Record<string, unknown>` dictionaries are the CORRECT, idiomatic contract at validator/parser/Proxy-trap boundaries in this codebase (166+192+9 hits, all legitimate), so those arms were dropped rather than shipped noisy.
+4. **Conditional empty-object spread.** `{...(cond ? {} : {x})}` hides field omission behind a ternary instead of an explicit branch. *Screen:* prefer an explicit `if`/`else` that builds the object directly. *Detect:* `no-conditional-empty-object-spread.yml` / `-js` (spread of a ternary whose consequence or alternative is an empty object literal). Shipped at `hint` severity: an FP-scan found 147 existing pi-lens uses of this exact shape, which is this codebase's established idiom for optional-field construction, not a shape mismatch.
+5. **`Reflect.apply`/`Reflect.get` calls.** Reflection where a typed call or property access already works. *Screen:* prefer `fn(...args)`/`fn.apply(...)` and `obj.prop`/`obj[key]`. *Detect:* `no-reflect-apply.yml` / `no-reflect-get.yml` (+ `-js` twins). `no-reflect-get` is scoped to the 2-argument form — the 3-argument `Reflect.get(target, key, receiver)` form is the standard Proxy `get`-trap receiver-forwarding idiom (found in an FP-scan) and stays allowed.
+6. **Chained type assertions.** `x as A as B` stacks two unrelated-type assertions with no runtime check between them. *Screen:* narrow with a type guard, or assert once to the type actually needed. *Detect:* `no-chained-type-assertions.yml` (`$X as $A as $B`, excluding `as const` and `as unknown as $B` — the latter is the standard safe-cast idiom `no-as-any.yml`'s own note recommends, and an FP-scan found every chained-assertion hit in this codebase was that form).
 
 **ast-grep candidates:** shapes 4, 2, 1, and 6 are *syntactically* detectable and could become dogfooded rules (assessed for false-positive load in **#1158**); shapes 3, 5, 7, 8, 10 are semantic — good and bad uses are syntactically identical — and stay review-enforced. Do not author rules here; #1158 tracks the viable set.
 
@@ -259,6 +346,16 @@ TypeScript LSP clients are evicted after `PI_LENS_TS_IDLE_EVICT_MS` of inactivit
 graceful shutdown, releasing the server-owned language-service programs and
 document registry; the next request rebuilds transparently. The per-root timers
 must stay unref'd, reset on reuse, busy-client guarded, and cleared on shutdown.
+
+The live native-TS7/Vitest fixture suite is opt-in with
+`PI_LENS_INTEGRATION=1`; it copies the excluded fixture to a temporary
+non-fixture project INSIDE the repo before launching the real server — the
+in-repo location is load-bearing (the copied project has no node_modules, so
+native-TS7 detection and vitest type resolution walk up into the repo's own).
+Root-walk misses remain uncached, and bounding the walk at cwd is a PROVEN
+regression (found-above-cwd and not-found are different answers: bare
+detectors and the Deno exclusion gate depend on the distinction) — do not
+reattempt without solving that. (#1412)
 
 Rule-id normalization derives its language suffixes from the bundled CodeRabbit rule tree at startup; tests must keep that derived set covered so new vendored language rules cannot silently evade project policy matching.
 
@@ -1262,7 +1359,7 @@ A 2026 audit against `@earendil-works/pi-coding-agent` confirmed a few places wh
 
 ## TypeScript LSP version split
 
-`TypeScriptServer.spawn()` must resolve the compiler from the workspace before probing/installing the classic wrapper. Resolve the **nearest** `node_modules/typescript` from the selected LSP root upward (normal Node ancestor semantics, stopping before `$HOME`) so a nested monorepo package can use its hoisted compiler without skipping a nearer package; a nearest major version 7+ launches the matching ancestor's `node_modules/.bin/tsc --lsp --stdio` (Windows: prefer `tsc.cmd`, then `.exe`/extensionless). Never substitute a PATH/global `tsc`, because that can bind the workspace to an unrelated compiler. TypeScript <=6 keeps `typescript-language-server --stdio` plus `TSSERVER_PATH`/`initialization.tsserver`. If the nearest TS 7 package has no local `tsc` binary or invalid metadata, fail open to the classic discovery path rather than reporting the server available without a process. Regression coverage: `tests/clients/lsp/typescript-native-lsp.test.ts`.
+`TypeScriptServer.spawn()` must resolve the compiler from the workspace before probing/installing the classic wrapper. Resolve the **nearest** `node_modules/typescript` from the selected LSP root upward (normal Node ancestor semantics, stopping before `$HOME`) so a nested monorepo package can use its hoisted compiler without skipping a nearer package; a nearest major version 7+ launches the matching ancestor's `node_modules/.bin/tsc --lsp --stdio` (Windows: prefer `tsc.cmd`, then `.exe`/extensionless). Never substitute a PATH/global `tsc`, because that can bind the workspace to an unrelated compiler. TypeScript <=6 keeps `typescript-language-server --stdio` plus `TSSERVER_PATH`/`initialization.tsserver`. The installer registry pins the managed classic fallback to `typescript@5.9.3`. `typescript-language-server@5.3.0` declares no dependencies and no peer dependencies, so it never pulled a compiler in. The cause was pi-lens's own `typescript` tools entry: it was unpinned, so the managed install resolved `latest` and landed TypeScript 7.0.2, which ships no `lib/tsserver.js`. The wrapper then started and failed initialization. 5.9.3 is the conservative choice — the last 5.x — not the only version other managed consumers accept. If a managed `tsc` resolves to TypeScript 7+ and installation is allowed, `findTsserverPath` force-reinstalls the pinned compiler. The repair runs at most once per process, and only when the compiler version is readable; a bare PATH `tsc` is left alone. Discovery-only callers never mutate the tools tree. If the nearest project TS 7 package has no local `tsc` binary or invalid metadata, fail open to the classic discovery path rather than reporting the server available without a process. Regression coverage: `tests/clients/lsp/typescript-native-lsp.test.ts` and `tests/clients/lsp/server-policy.test.ts`.
 
 ## Open design TODOs
 
@@ -1334,11 +1431,13 @@ One feed of pi-lens's out-of-band activity (autofix/format writes, diagnostic di
 
 **Shared schema with #478 (bound, not merged):** `PilensDiagnosticsPayload` is defined once in `clients/diagnostics-publish.ts` and MUST be reused verbatim by #478's future `pilens:rpc:diagnostics` pull response — push (this event) and pull (#478) are two deliveries of the same shape over the same lens-engine seam. #478 stays separately gated on #449 registry dogfooding; when it unblocks it is pure plumbing over an already-defined type.
 
+**Per-edit autofix mutation boundary (#1414).** Successful `write` tool results retain immediate pipeline autofix and append the authoritative full post-fix target content to the returned content array. Every `edit` defers pipeline autofix until its owning `agent_end`; a write followed by an edit demotes later writes to deferred autofix for that path until `beginTurn`, and receipt ordering is recorded before debounce admission. The owner-scoped deferred record coalesces `kinds: Set<"autofix" | "format">`; drain order is always autofix then format, with no diagnostics between phases, and independently failed or aborted phases merge their kinds when requeued. Cargo/Dart project-wide fixers dedupe by tool plus language-project root. Concurrent-secondary `agent_end` remains excluded, so the existing session-keyed `getFormatService(sessionId, true)` seam is sufficient; no additional process singleton is introduced. The v1 queued/start bus events expose `kinds` additively.
+
 **Fix provenance (#502):** rather than a new event, fix provenance is an ADDITIVE optional `fixes?: FixProvenanceEntry[]` field on the existing `FilesTouchedPayload` (#482) — old consumers unaffected, satisfies the frozen-additive discipline, and the data (autofix tool names, format tool names) was already being collected at every `publishFilesTouched` call site for the #484 turn-summary. Attribution is best-effort where the underlying tool runner can't report a per-changed-file breakdown (a multi-tool autofix batch attributes every tool that fired to every file the batch changed); precise where it can (deferred-format's per-file `formattersUsed`, the actionable-warnings autofix's single `lsp-quickfix` tool).
 
 ### Cross-process extension (#492)
 
-The #482 bus and the #485 accumulator are both in-process — nothing crosses a real process boundary, but subagents spawn actual child `pi` processes (the nicobailon/pi-subagents model). `clients/recent-touches.ts` is the shared substrate: a project-scoped `recent-touches.json` (`getProjectDataDir(cwd)`, ~50-entry ring buffer, atomic tmp+rename — same pattern as the #474 instance registry) that every instance both appends to and reads from. The producer is wired into the *existing* `publishFilesTouched` call (not a new seam) so every current and future bus-publish call site gets cross-process propagation for free, independent of whether a `pi.events` bus is even wired. Two consumers feed entries into the SAME `_touched` accumulator via a new `recordCrossProcessTouches` export (never a second accumulator, never a second injected message): a **child at `session_start`** (`readCrossProcessTouchesForSessionStart`) and a **parent at `turn_start`** (`readCrossProcessTouchesForTurnStart` — mtime-gated, one `fs.stat` per turn when nothing changed, plus a consumed-ts cursor so an entry never re-surfaces). BOTH readers apply the same shared baseline filter (foreign pid + 15-minute freshness window + file still exists — `passesForeignEntryFilter`, one private helper so the two can never drift); the ring buffer caps count, not age, so without the freshness filter a fresh process's first read would nudge about days-old touches of since-deleted files. Beyond that baseline, the parent deliberately has NO read-guard drop path (a parent about to commit needs attribution even for files it hasn't read this session). `AccumulatedFile.origin` (`"local" | "cross-process"`) tracks provenance; **local is sticky** — a file reported by both channels reads as local, never cross-process, because the session's own bus having seen it makes the "another instance did this" framing stale. `consumeAgentNudge` attribution is three-way and never assigns a local file to another instance: all-local keeps the #485 wording ("after your last turn"), all-cross-process reads "by another pi-lens instance (e.g. a subagent's)", and a mixed batch reads "after your last turn (N of them by another pi-lens instance)" — always exactly one message. Kill switches — note BOTH gates affect the cross-process feed: `PI_LENS_AGENT_NUDGE=0` disables the record producer and both consumers (the #485 switch, no new env var), and `PI_LENS_BUS_PUBLISH=0` also silences the record append because the producer lives inside `publishFilesTouched` (both deliveries of a touch — bus and record — die together behind that gate). NOT gated on subagent light mode (#449) since this is a cheap file read. No IPC/daemon/`fs.watch` — passive file only, per the #449 no-daemon doctrine.
+The #482 bus and the #485 accumulator are both in-process — nothing crosses a real process boundary, but subagents spawn actual child `pi` processes (the nicobailon/pi-subagents model). `clients/recent-touches.ts` is the shared substrate: a project-scoped `recent-touches.json` (`getProjectDataDir(cwd)`, ~50-entry ring buffer, atomic tmp+rename — same pattern as the #474 instance registry) that every instance both appends to and reads from. The producer is wired into the *existing* `publishFilesTouched` call (not a new seam) so every current and future bus-publish call site gets cross-process propagation for free, independent of whether a `pi.events` bus is even wired. Two consumers feed entries into the SAME `_touched` accumulator via a new `recordCrossProcessTouches` export (never a second accumulator, never a second injected message): a **child at `session_start`** (`readCrossProcessTouchesForSessionStart`) and a **parent at `turn_start`** (`readCrossProcessTouchesForTurnStart` — mtime-gated, one `fs.stat` per turn when nothing changed, plus a consumed-ts cursor so an entry never re-surfaces). BOTH readers apply the same shared baseline filter (foreign pid + 15-minute freshness window + file still exists — `passesForeignEntryFilter`, one private helper so the two can never drift); the ring buffer caps count, not age, so without the freshness filter a fresh process's first read would nudge about days-old touches of since-deleted files. Beyond that baseline, the parent deliberately has NO read-guard drop path (a parent about to commit needs attribution even for files it hasn't read this session). `AccumulatedFile.origin` (`"local" | "cross-process"`) tracks provenance; **local is sticky** — a file reported by both channels reads as local, never cross-process, because the session's own bus having seen it makes the "another instance did this" framing stale. `consumeAgentNudge` attribution is three-way and never assigns a local file to another instance: all-local keeps the #485 wording ("after your last turn"), all-cross-process reads "by an automatic run outside your turn", and a mixed batch reads "after your last turn (N of them by an automatic run outside it)" — always exactly one message. Kill switches — note BOTH gates affect the cross-process feed: `PI_LENS_AGENT_NUDGE=0` disables the record producer and both consumers (the #485 switch, no new env var), and `PI_LENS_BUS_PUBLISH=0` also silences the record append because the producer lives inside `publishFilesTouched` (both deliveries of a touch — bus and record — die together behind that gate). NOT gated on subagent light mode (#449) since this is a cheap file read. No IPC/daemon/`fs.watch` — passive file only, per the #449 no-daemon doctrine.
 
 **`ast_grep_search` agent UX contract.** The tool accepts expert `pattern`/raw `rule` syntax plus `nodeKind` (an exact, language-specific grammar-kind escape hatch) and `hasDescendantKind` (explicit recursive matching); `hasKind` intentionally keeps ast-grep's immediate-child semantics. `details.matchLocations` and `details.searchReads` must stay aligned with the displayed, bounded `maxMatches` page. Searches carry the combined abort signal and a shared deadline through `SgRunner`; subprocess output is capped, generated-rule/validation CLI failures surface as errors, and status-one with no diagnostic output remains a genuine no-match. The lazy tool is activated through `pi_lens_activate_tools` and becomes visible on the next turn. A future canonical language-neutral `query` facade must compile through this existing rule path with per-language adapters; do not pretend raw grammar kinds are universal.
 
@@ -1567,7 +1666,7 @@ Short, obvious changes may use a subject only. Non-trivial changes get a body.
 
 ### Documentation and prose style
 
-**Prose in docs, changelog, and PR descriptions follows the [Google developer documentation style guide](https://developers.google.com/style) and [Simplified Technical English (ASD-STE100) principles](https://asd-ste100.org/).** This is a principles-only adoption of ASD-STE100, a proprietary aerospace controlled-language specification; it does not adopt its licensed word list. Apply this standard to `README`, `docs/`, `AGENTS.md`, changelog entries, and PR bodies:
+**Prose in docs, changelog, and PR descriptions follows the [Google developer documentation style guide](https://developers.google.com/style) and [Simplified Technical English (ASD-STE100) principles](https://asd-ste100.org/), framed by Zinsser's four principles from *On Writing Well*: simplicity, brevity, clarity, and humanity.** Zinsser is the spirit; the two guides below are the mechanics. This is a principles-only adoption of ASD-STE100, a proprietary aerospace controlled-language specification; it does not adopt its licensed word list. Apply this standard to `README`, `docs/`, `AGENTS.md`, changelog entries, and PR bodies:
 
 - Use active voice and present tense.
 - Use second person (`you`) for instructions. Use the imperative for procedure steps.
@@ -1577,6 +1676,20 @@ Short, obvious changes may use a subject only. Non-trivial changes get a body.
 - Define an acronym on first use. Prefer a plain word over jargon when one exists.
 - Avoid gerund or noun pile-ups and ambiguous constructions. Avoid `please`. Use the Oxford comma.
 - These rules are machine-checkable. Pi-lens ships a config-gated Vale runner (`clients/dispatch/runners/vale.js`). A `.vale.ini` with the Google style package would enforce this section automatically; track that separately.
+
+**The standard also governs how agents talk to the maintainer.** Chat replies, status updates, and reports follow the same Zinsser frame. Lead with the outcome. Strip words that do no work. Prefer short sentences over dense em-dash chains. Clarity beats brevity when they conflict. Write like a person, not a system emitting a report.
+
+## Observability assessment
+
+**Every issue and every PR carries an observability assessment.** Answer one question in the body: after this ships, can someone confirm the behavior from logs alone?
+
+- For an issue, name the record that would prove the defect is real and the record that would prove it fixed. If neither exists, that gap is part of the issue.
+- For a PR, state which existing record proves the change works, or add one. A fix whose decision is invisible ships blind.
+- If a change deliberately adds no telemetry, say so and say why. Silence is a choice, not an oversight.
+
+Three failures in one day forced this rule. knip died and reported "not available" for weeks, because a timing-out probe logged nothing a reader could distinguish from a missing tool. The opengrep LSP lane starved on every edit while its CLI kept finding real issues, and no record showed the lane losing the race. Five merged fixes could not be verified from telemetry at all, which is why #1432 exists. Each was found by reading code, not logs, long after it started costing us.
+
+Keep the records bounded, use the existing log conventions, and exclude zero-duration decision phases from `lastPhase` attribution.
 
 ## Issue triage & labels
 
@@ -1601,11 +1714,12 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
 - `logSessionStart()` is a no-op in test mode (`VITEST` env var)
 - LSP tool: use `goToDefinition` / `findReferences` before grepping for symbols
 - ast-grep debug tool is named `ast_grep_dump` (the former `ast_dump` compatibility-alias registration was dropped — same underlying implementation, redundant tool-list weight).
-- **Dynamic tooling (pi's registered-but-inactive tool loading, `index.ts` tool-registration block).** 6 tools stay always-active: `lens_diagnostics`, `lsp_diagnostics`, `module_report`, `read_symbol`, `read_enclosing`, `symbol_search`. 6 situational tools — `ast_grep_search`, `ast_grep_replace`, `ast_grep_outline`, `ast_grep_dump`, `lsp_navigation`, `lens_diagnostic_mark` — are registered inactive and activated on demand via the always-active loader tool `pi_lens_activate_tools` (`tools/activate-tools.ts`), which calls `pi.setActiveTools([...active, ...requested])` additively. Feature-detected the same way as the `agent_settled` registration (try/catch, "older pi host?"): if `pi.getActiveTools`/`pi.setActiveTools` aren't functions on the connected host, the 6 situational tools are left statically active — no throw, no behavior change from pre-dynamic-tooling pi-lens. `LAZY_TOOL_CATALOG` (right below the `lazyTools` array) is the enum source `pi_lens_activate_tools` advertises — a tool added to `lazyTools` but NOT to this catalog is permanently unreachable on a dynamic-tooling host (caught in #690: `lens_diagnostic_mark` was added to `lazyTools` but initially missing from the catalog).
+- **Dynamic tooling (pi's registered-but-inactive tool loading, `index.ts` tool-registration block).** 6 tools stay always-active: `lens_diagnostics`, `lsp_diagnostics`, `module_report`, `read_symbol`, `read_enclosing`, `symbol_search`. 6 situational tools — `ast_grep_search`, `ast_grep_replace`, `ast_grep_outline`, `ast_grep_dump`, `lsp_navigation`, `lens_diagnostic_mark` — are registered inactive and activated on demand via the always-active loader tool `pi_lens_activate_tools` (`tools/activate-tools.ts`). Activation is additive and skips `setActiveTools` when the requested set is already active. pi-lens RESTORES the set on EVERY `session_start` reason, it never skips: the host builds a fresh `AgentSession` with `includeAllExtensionTools: true` on fork/reload/resume exactly as on startup and never persists an active-tool set per session, so every registered tool is active again by the time the handler runs. `startup`/`new` clear the remembered-activation set (`rememberedLazyTools` in `index.ts`) and the restore is therefore the plain baseline shrink; fork/reload/resume keep it, so the restore reproduces the parent's posture character-for-character — which both preserves the model's activations and keeps the advertised tool list equal to the one the cached prompt prefix was built from. The mutation block sits BELOW the #473 concurrent-secondary guard: the active tool set is process-shared runtime state and a secondary must not rewrite the live primary's. `--no-lazy-tools` or `tools.lazy=false` keeps every tool statically active when stable prompt caching matters more than tool-list weight. `clients/tool-set-policy.ts` owns the restore plan (`planToolSet`), reads the host’s own deferred-tool flag (`ctx.model.compat.supportsToolReferences`) rather than re-deriving it, and logs each real mutation to `latency.log` as `tool_set_mutation`. Feature detection remains fail-open: if `pi.getActiveTools`/`pi.setActiveTools` are absent, all situational tools remain statically active. `LAZY_TOOL_CATALOG` (right below the `lazyTools` array) is the enum source `pi_lens_activate_tools` advertises — a tool added to `lazyTools` but NOT to this catalog is permanently unreachable on a dynamic-tooling host (caught in #690: `lens_diagnostic_mark` was added to `lazyTools` but initially missing from the catalog). (#1453)
 - `lens_diagnostic_mark` (#690, `tools/lens-diagnostic-mark.ts` + `clients/diagnostic-dispositions.ts` + `clients/dispatch/suppress-writer.ts`) is an agent-facing disposition layer over dispatch diagnostics: `false-positive` / `suppress` (writes an inline `pi-lens-ignore` comment) / `defer` (session-only, in-memory) / `flagged` (persists, tagged `📌 flagged-to-fix` in `lens_diagnostics mode=full`). Content-anchored with per-disposition binding strength — `false-positive` uses a STRICT anchor (rule+message+the flagged line's own content hash, so a rewritten line gets a fresh chance to re-fire); `suppress`/`defer`/`flagged` use a WEAK anchor (rule+message only, no line hash) so the mark survives incidental edits elsewhere on that line. Wired into both the per-edit dispatch path (`dispatcher.ts`) and the `mode=full` sweep (`lens-diagnostics.ts`). Every mark is NDJSON-logged (`clients/disposition-logger.ts` → `~/.pi-lens/dispositions.log`, incl. `previousDisposition` on re-marks and in-memory-only `defer` marks — the #181 rule-tuning signal, especially `false-positive` rates per rule) and published on the bus as `pilens:diagnostic:disposition` (`clients/disposition-publish.ts`, sibling producer per the format-events-publish "owns nothing in common" rule; emitter wired in index.ts alongside the other three), both from the single `markDisposition` choke point. pi-lens-internal only — situational, NOT mirrored into the MCP server (MCP has no equivalent tool; would need its own engine seam + tool route if that gap gets closed).
 - `ast_grep_outline` (#311, `tools/ast-grep-outline.ts` → `AstGrepClient.outline` → `ast-grep outline --json=compact`) is a SYNTAX-ONLY structure tool (no index/LSP); `module_report` stays the pi-lens-aware default. pi tool only — not mirrored to MCP (parity deferred, like `read_enclosing`).
 - `clients/runtime-config.ts` is "pure constants" by intent. Resolutions that read disk or env (e.g. `getRunnerTimeoutFloorMs`) must be **lazy memoized getters** with a `_resetForTests` hook, not module-level reads, so importing the file has no I/O side effect and tests can override inputs deterministically.
 - **Project-wide extension enumeration derives from `KIND_EXTENSIONS`** (#894). `ALL_SCANNABLE_EXTENSIONS`, `WARMUP_SOURCE_EXTS`, and `SUPPORTED_FILE_KINDS` must never regain hand-maintained per-language lists; adding a file kind in `clients/file-kinds.ts` automatically makes source scans and language-profile warmup see it. Preserve consumer-specific narrowing with an explicit `extensions` override at that call site, not by narrowing the shared defaults.
+- **Skill docs (`skills/*/SKILL.md`, `reference.md`) are prose, not type-checked source, so they drift silently** (#1423/#1424: a stale `filePath` param name, a missing `php` tree-sitter language dir). `tests/skills/skill-doc-drift.test.ts` pins them against the real sources of truth instead of relying on manual review: tool-call param names/tables against each tool's real TypeBox schema (imported live from `tools/*.ts`), path references against the filesystem and `package.json`'s published `files` (unpublished dirs — `clients`, `tests`, `tools`, `scripts` — require a nearby "source checkout only" qualifier), and both rule-writing skills' language lists against their `rule-schema.json` enums. A load-bearing behavioral claim in a skill doc should carry a `<!-- verified: <ref>, <shortSHA> -->` comment (format pinned by the same test) so a future edit can tell a checked claim from an assumed one.
 - Codebase-model file selection uses `detectFileRole`, `isBuildArtifact`, and `isExternalOrVendorFile`; generated-artifact directory names (including `dist`) are maintained in `clients/generated-artifacts.ts`, not reimplemented as model-local substring tests. Persisted models carry the canonical review-graph identity and `CODEBASE_MODEL_VERSION`; load rejects either mismatch.
 - Numeric inputs from env vars or JSON config that flow into `Math.max` / `Math.min` must be coerced through a `Number.isFinite(n) && n > 0` guard. `Number(undefined) === NaN`, and a single NaN argument makes `Math.max` return NaN, which `setTimeout` silently treats as 0.
 - **Cross-process LSP pressure is one session-boundary snapshot** (`clients/lsp-budget.ts`, #821): count pressure and the optional complete/fresh aggregate-RSS ceiling (`PI_LENS_LSP_BUDGET_RSS_MB`) feed one cached decision used for auxiliary shedding, the current session's short idle reset, and pull-only diagnostics. Missing/stale RSS samples fail open to count-only; capability decisions reuse `classifyServerWaitTier` (`"pull-capable"`), and the `PI_LENS_CROSS_PROCESS_BUDGET=0` kill switch disables every policy.
@@ -1621,3 +1735,27 @@ Every issue should carry **one TYPE label + at least one `area:` label**.
   events. Tool-call inspection must not mutate read-guard state, and wrapper,
   launcher, and continuation forms must remain conservative for git commits and
   pushes.
+- **The console guard captures only inside a pi-lens execution window** (#1434).
+  The host shares this process and prints its own CLI output through
+  `console.log`, so a permanent global reroute silences commands like
+  `pi list`. `installConsoleGuard` installs a dispatcher: inside a window the
+  write goes to the extension log, outside one it goes to the original console
+  method. Windows come from three places only — the module-evaluation flag
+  opened in `clients/console-guard-install.ts`, the activation window in
+  `index.ts`'s default export, and the per-entry-point windows that
+  `withConsoleCaptureWindows` adds around every `on`/`register*` call — a
+  DENY-LIST keyed on the property name (`isCaptureSeam`), not a hand-maintained
+  list of the specific methods pi-lens happens to call today, so a new
+  `register*` seam the host adds later is covered without an edit here. Every
+  function argument gets wrapped, including one ONE LEVEL inside an
+  options/tool object (`options.handler`, `tool.execute`) — deliberately not
+  recursive past that level, since walking a tool's full nested schema on
+  every registration measurably slowed activation; a coverage test
+  (`tests/clients/console-capture-window-coverage.test.ts`) derives the
+  member list from the host's own `ExtensionAPI` type and asserts none of them
+  bypass the window. Register a new host entry point through the wrapped API,
+  never the raw one, or its console writes escape to the terminal.
+  `closeModuleLoadConsoleWindow()` must stay the last statement in `index.ts`.
+  Known gap, accepted not fixed: `pi.events` (a separate bus, not an
+  `ExtensionAPI` member) is unwrapped — fine today because every subscriber on
+  it is subscribe-only.

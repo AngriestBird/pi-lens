@@ -5,6 +5,56 @@ import { describe, expect, it } from "vitest";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.ts";
 
 describe("RuntimeCoordinator", () => {
+	it("makes edit autofix deferral sticky after a write until beginTurn", () => {
+		const runtime = new RuntimeCoordinator();
+		const filePath = path.resolve("src/sticky.ts");
+
+		expect(runtime.recordMutationToolReceipt(filePath, "write").autofixMode).toBe("immediate");
+		expect(runtime.recordMutationToolReceipt(filePath, "edit").autofixMode).toBe("deferred");
+		expect(runtime.recordMutationToolReceipt(filePath, "write").autofixMode).toBe("deferred");
+
+		runtime.beginTurn();
+		expect(runtime.recordMutationToolReceipt(filePath, "write").autofixMode).toBe("immediate");
+	});
+
+	it("coalesces autofix and format kinds on one owner-scoped path record", () => {
+		const runtime = new RuntimeCoordinator();
+		const filePath = path.resolve("src/coalesced.ts");
+		expect(runtime.deferMutation(filePath, process.cwd(), "edit", process.cwd(), "autofix", "owner")).toBe(true);
+		expect(runtime.deferMutation(filePath, process.cwd(), "edit", process.cwd(), "format", "owner")).toBe(true);
+
+		const [record] = runtime.consumeDeferredFormatFiles();
+		expect(record.kinds).toEqual(new Set(["autofix", "format"]));
+		expect(record.ownerSessionId).toBe("owner");
+	});
+
+	it("merges independently requeued kinds and tool names for one path", () => {
+		const runtime = new RuntimeCoordinator();
+		const filePath = path.resolve("src/requeued.ts");
+		runtime.deferMutation(filePath, process.cwd(), "write", process.cwd(), "autofix");
+		const [claimed] = runtime.consumeDeferredFormatFiles();
+		runtime.requeueDeferredMutations([{ ...claimed, kinds: new Set(["autofix"]), toolNames: new Set(["write"]) }]);
+		runtime.requeueDeferredMutations([{ ...claimed, kinds: new Set(["format"]), toolNames: new Set(["edit"]) }]);
+
+		const [requeued] = runtime.consumeDeferredFormatFiles();
+		expect(requeued.kinds).toEqual(new Set(["autofix", "format"]));
+		expect(requeued.toolNames).toEqual(new Set(["write", "edit"]));
+	});
+
+	it("merges a requeued phase into a newer record queued during the drain", () => {
+		const runtime = new RuntimeCoordinator();
+		const filePath = path.resolve("src/newer.ts");
+		runtime.deferMutation(filePath, "old-cwd", "write", "old-root", "autofix", "old-owner");
+		const [claimed] = runtime.consumeDeferredFormatFiles();
+		runtime.deferMutation(filePath, "new-cwd", "edit", "new-root", "format", "new-owner");
+		runtime.requeueDeferredMutations([claimed]);
+
+		const [record] = runtime.consumeDeferredFormatFiles();
+		expect(record.kinds).toEqual(new Set(["format", "autofix"]));
+		expect(record.toolNames).toEqual(new Set(["edit", "write"]));
+		expect(record.cwd).toBe("new-cwd");
+		expect(record.ownerSessionId).toBe("new-owner");
+	});
 	it("resetForSession clears any existing read guard state", () => {
 		const runtime = new RuntimeCoordinator();
 		const runtimeState = runtime as any;
@@ -38,6 +88,67 @@ describe("RuntimeCoordinator", () => {
 
 		runtime.clearLspReadWarmState(filePath);
 		expect(runtime.shouldWarmLspOnRead(filePath)).toBe(true);
+	});
+
+	describe("telemetry model/provider identity (#1448)", () => {
+		it("exposes the raw model id separately from the combined display string", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ model: "claude-sonnet-4-5", provider: "anthropic" });
+
+			expect(runtime.telemetryModelId).toBe("claude-sonnet-4-5");
+			expect(runtime.telemetryProviderId).toBe("anthropic");
+			expect(runtime.telemetryModel).toBe("anthropic/claude-sonnet-4-5");
+		});
+
+		it("derives a blank provider before any identity is set", () => {
+			const runtime = new RuntimeCoordinator();
+
+			expect(runtime.telemetryModelId).toBe("");
+			expect(runtime.telemetryProviderId).toBe("");
+		});
+
+		it("derives provider from a known model-id prefix when the host omits provider", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ model: "claude-sonnet-4-5" });
+
+			expect(runtime.telemetryProviderId).toBe("anthropic");
+		});
+
+		it("leaves provider blank when the model id is ambiguous", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ model: "some-custom-finetune" });
+
+			expect(runtime.telemetryProviderId).toBe("");
+		});
+
+		it("never lets a later ambiguous model overwrite an already-known provider", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ model: "gpt-5", provider: "openai" });
+			runtime.setTelemetryIdentity({ model: "some-custom-finetune" });
+
+			expect(runtime.telemetryProviderId).toBe("openai");
+		});
+
+		it("re-derives a DERIVED provider across a mid-session model switch with no explicit provider", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ model: "gpt-5-mini" });
+			expect(runtime.telemetryProviderId).toBe("openai");
+
+			// Switch models without an explicit provider — the stale "openai"
+			// derivation must not survive; it has to re-derive for the new model.
+			runtime.setTelemetryIdentity({ model: "claude-sonnet-4-5" });
+			expect(runtime.telemetryProviderId).toBe("anthropic");
+		});
+
+		it("resetForSession clears the raw model/provider identity", () => {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ model: "claude-sonnet-4-5", provider: "anthropic" });
+
+			runtime.resetForSession();
+
+			expect(runtime.telemetryModelId).toBe("");
+			expect(runtime.telemetryProviderId).toBe("");
+		});
 	});
 
 	describe("getFilesChangedSince (#451)", () => {

@@ -71,6 +71,7 @@ import {
 import { createAstGrepReplaceTool } from "../tools/ast-grep-replace.js";
 import { createAstGrepSearchTool } from "../tools/ast-grep-search.js";
 import { createLensDiagnosticsTool } from "../tools/lens-diagnostics.js";
+import { peekMcpSessionRuntime } from "../clients/mcp/session.js";
 import { createLspDiagnosticsTool } from "../tools/lsp-diagnostics.js";
 import { createLspNavigationTool } from "../tools/lsp-navigation.js";
 import {
@@ -545,6 +546,15 @@ const cacheManager = new CacheManager();
 const lensDiagnosticsTool = createLensDiagnosticsTool(
 	cacheManager,
 	() => DEFAULT_CWD,
+	undefined,
+	undefined,
+	undefined,
+	undefined,
+	// #1413 surface parity: validate cached test-runner findings against the
+	// same session identity the in-process path uses. Resolved lazily — until
+	// an MCP session context exists there is no session to compare against and
+	// validation skips the check, which is the honest classification.
+	() => peekMcpSessionRuntime(),
 );
 const astGrepClient = new AstGrepClient();
 const astGrepSearchTool = createAstGrepSearchTool(astGrepClient);
@@ -695,7 +705,8 @@ const ALL_TOOLS = [
 			properties: {
 				query: {
 					type: "string",
-					description: "Identifier-ish query, e.g. 'authenticate user'.",
+					description:
+						"Identifier-ish query, e.g. 'authenticate user'. Mix in composable prefix filters: lang:<kind> (e.g. lang:jsts, lang:python — kinds from file-kinds.ts), file:<substr> (path substring), ext:<ext> (e.g. ext:ts or ext:.ts), each optionally negated with a leading '-' (-file:test). Filters apply before ranking; e.g. 'lang:jsts file:clients/ -file:test rank'. Unknown prefixes/kinds error with the supported list.",
 				},
 				cwd: { type: "string" },
 				limit: {

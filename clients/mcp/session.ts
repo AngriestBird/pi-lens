@@ -31,6 +31,8 @@ import { resetDispatchBaselines } from "../dispatch/integration.js";
 import { resetFormatService } from "../format-service.js";
 import { getLSPService, resetLSPService } from "../lsp/index.js";
 import {
+	acknowledgeTestFindings,
+	acknowledgeTurnEndFindings,
 	consumeSessionStartGuidance,
 	consumeTestFindings,
 	consumeTurnEndFindings,
@@ -50,21 +52,35 @@ interface McpSessionContext {
 }
 
 let contextPromise: Promise<McpSessionContext> | undefined;
+let resolvedRuntime: RuntimeCoordinator | undefined;
 
 /** Lazily build (once) the persistent session context shared across MCP calls. */
 export function getMcpSessionContext(): Promise<McpSessionContext> {
-	contextPromise ??= (async () => ({
-		runtime: new RuntimeCoordinator(),
-		cacheManager: new CacheManager(),
-		astGrepClient: new AstGrepClient(),
-		clients: await loadBootstrapClients(),
-	}))();
+	contextPromise ??= (async () => {
+		const context: McpSessionContext = {
+			runtime: new RuntimeCoordinator(),
+			cacheManager: new CacheManager(),
+			astGrepClient: new AstGrepClient(),
+			clients: await loadBootstrapClients(),
+		};
+		resolvedRuntime = context.runtime;
+		return context;
+	})();
 	return contextPromise;
+}
+
+/** Synchronous peek at the session runtime, for construction sites that cannot
+ * await (e.g. the MCP server's tool wiring). Returns undefined until a session
+ * context has actually been built — advisory validation then honestly skips
+ * the session-identity check instead of comparing against a phantom session. */
+export function peekMcpSessionRuntime(): RuntimeCoordinator | undefined {
+	return resolvedRuntime;
 }
 
 /** Test hook — drop the cached context so a fresh one is built next call. */
 export function _resetMcpSessionContext(): void {
 	contextPromise = undefined;
+	resolvedRuntime = undefined;
 }
 
 const noop = (): void => {};
@@ -308,13 +324,13 @@ async function runTurnEndNow(
 
 	const outcome: TurnEndOutcome = deferredDelivery
 		? {
-				turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd)),
-				tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd)),
+				turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime, true)),
+				tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd, ctx.runtime, true)),
 				filesRegistered: registered,
 			}
 		: {
-				turnEnd: joinMessages(consumeTurnEndFindings(ctx.cacheManager, cwd)),
-				tests: joinMessages(consumeTestFindings(ctx.cacheManager, cwd)),
+				turnEnd: joinMessages(consumeTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime)),
+				tests: joinMessages(consumeTestFindings(ctx.cacheManager, cwd, ctx.runtime)),
 				filesRegistered: registered,
 			};
 
@@ -322,8 +338,8 @@ async function runTurnEndNow(
 		outcome,
 		commit: () => {
 			if (!deferredDelivery) return;
-			consumeTurnEndFindings(ctx.cacheManager, cwd);
-			consumeTestFindings(ctx.cacheManager, cwd);
+			acknowledgeTurnEndFindings(ctx.cacheManager, cwd);
+			acknowledgeTestFindings(ctx.cacheManager, cwd);
 		},
 	};
 }
@@ -406,16 +422,16 @@ function runTurnEndForIpcNow(cwd: string): Promise<TurnEndDelivery> {
 
 		const ctx = await getMcpSessionContext();
 		const cachedOutcome: TurnEndOutcome = {
-			turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd)),
-			tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd)),
+			turnEnd: joinMessages(peekTurnEndFindings(ctx.cacheManager, cwd, ctx.runtime, true)),
+			tests: joinMessages(peekTestFindings(ctx.cacheManager, cwd, ctx.runtime, true)),
 			filesRegistered: 0,
 		};
 		const transaction = hasTurnEndFindings(cachedOutcome)
 			? {
 					outcome: cachedOutcome,
 					commit: () => {
-						consumeTurnEndFindings(ctx.cacheManager, cwd);
-						consumeTestFindings(ctx.cacheManager, cwd);
+						acknowledgeTurnEndFindings(ctx.cacheManager, cwd);
+						acknowledgeTestFindings(ctx.cacheManager, cwd);
 					},
 				}
 			: await runTurnEndNow(cwd, [], true);

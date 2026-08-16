@@ -87,7 +87,11 @@ export interface DiagnosticBinding extends StoredDiagnosticBinding {
  * `diags` is always present (empty array when nothing was collected). `inconclusive`
  * is present-and-true only for a genuinely unconfirmed collect (the notify write
  * and/or diagnostics wait lapsed its deadline). `confirmation` is present only when
- * this touch completed its configured diagnostics/confirmation policy. It is required
+ * this touch completed its configured diagnostics/confirmation policy — `"confirmed"`
+ * for every spawned server, or (#1470) `"partial"` when an auxiliary's push wait was
+ * cut off by the aux grace timer and `unconfirmedServerIds` names it. A partial touch
+ * is deliberately NOT `inconclusive`: the primary answered and its findings stand;
+ * only the claim of full coverage is withdrawn. It is required
  * before treating an empty result from a known silent-on-clean server as clean, but is
  * not a substitute for a consumer's stricter scope-specific fallback — notably, an
  * all-scope classic TypeScript touch still needs the tool's synchronous tsserver check.
@@ -108,9 +112,51 @@ export interface DiagnosticBinding extends StoredDiagnosticBinding {
  */
 export interface TouchFileResult {
 	diags: import("./client.js").LSPDiagnostic[];
-	confirmation?: "confirmed";
+	confirmation?: "confirmed" | "partial";
 	inconclusive?: boolean;
+	/**
+	 * #1470: server ids this touch carries NO evidence for. Populated (and
+	 * `confirmation` narrowed to `"partial"`) when an auxiliary's push wait was
+	 * cut off by the aux grace timer — R8/#714's `auxCutOffServerIds`. Absent
+	 * when every spawned server got to answer for itself.
+	 */
+	unconfirmedServerIds?: string[];
 	binding?: DiagnosticBinding;
+}
+
+/**
+ * #1470: the single source of truth for "which servers did this touch NOT hear
+ * from". Read this instead of comparing `confirmation` to a string literal — a
+ * consumer that tests `confirmation === "confirmed"` is correct only by accident
+ * (it happens to fail closed for `"partial"`), and one that tests `!inconclusive`
+ * is outright wrong, because a partially-confirmed touch is deliberately NOT
+ * inconclusive: the primary's answer is still trustworthy and must survive.
+ */
+export function touchCoverageGap(
+	result: TouchFileResult | undefined,
+): readonly string[] {
+	return result?.unconfirmedServerIds ?? [];
+}
+
+/**
+ * #1470: did this touch complete its configured confirmation policy at all —
+ * `"confirmed"` (for every spawned server) or `"partial"` (for every server
+ * except the named cut-off auxiliaries)?
+ *
+ * This is deliberately NOT `confirmation === "confirmed"`. A consumer asking
+ * "did the PRIMARY confirm?" must answer yes for a partial touch: `partial`
+ * implies neither the notify write nor the diagnostics wait lapsed, so the
+ * silent-clean gates ran to completion exactly as they do for a full
+ * confirmation. Reading `=== "confirmed"` there looks safely fail-closed but
+ * reports "the language server could not confirm clean" when the truth is "the
+ * language server confirmed clean and a scanner was cut off" — the same overclaim
+ * pointing the other way. Pair this with {@link touchCoverageGap}, which names
+ * what the touch does not speak for.
+ */
+export function touchCompletedConfirmationPolicy(
+	result: TouchFileResult | undefined,
+): boolean {
+	return result?.confirmation !== undefined;
 }
 
 /**

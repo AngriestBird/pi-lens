@@ -3,7 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BootstrapClients } from "../../../clients/bootstrap.js";
+import { snapshotAdvisoryProvenance } from "../../../clients/advisory-provenance.js";
 import { fetchFreshProjectDiagnostics } from "../../../clients/project-diagnostics/fresh-fetch.js";
+import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
 import { removeTempDirSync } from "../test-utils.js";
 
 // fetchFreshProjectDiagnostics calls each client through the plain
@@ -505,6 +507,8 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 	// missing "test-runner") and pass once the cache-read task is wired.
 	it("surfaces cached test-runner findings via mode=full without re-running the suite (#1004)", async () => {
 		const cacheManager = makeCacheManager();
+		fs.mkdirSync(path.join(tmp, "src"), { recursive: true });
+		fs.writeFileSync(path.join(tmp, "src/foo.test.ts"), "test('foo', () => {});\n");
 		const testResult = {
 			file: path.join(path.resolve(tmp), "src/foo.test.ts"),
 			runner: "vitest",
@@ -519,11 +523,17 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 				},
 			],
 		};
+		const provenance = snapshotAdvisoryProvenance({
+			cwd: tmp,
+			runtime: { telemetrySessionId: "scan", projectSeq: 0, turnIndex: 0 },
+			generation: 1,
+			files: [{ path: testResult.file, role: "test" }],
+		});
 		(cacheManager.readCache as ReturnType<typeof vi.fn>).mockImplementation(
 			(scanner: string) => {
 				if (scanner === "test-runner-findings") {
 					return {
-						data: { content: "FAIL", stale: false, results: [testResult] },
+						data: { content: "FAIL", stale: false, results: [testResult], provenance },
 						meta: { timestamp: new Date().toISOString() },
 					};
 				}
@@ -558,6 +568,16 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 			rule: "test:vitest",
 			message: "foo works: expected true to be false",
 		});
+
+		const mismatched = await fetchFreshProjectDiagnostics(
+			cacheManager,
+			tmp,
+			clients,
+			undefined,
+			{ runtime: new RuntimeCoordinator() },
+		);
+		expect(mismatched.diagnostics.find((d) => d.tool === "test-runner"))
+			.toMatchObject({ severity: "info", semantic: "none" });
 	});
 
 	// #1004 review follow-up (honesty gap, #533): test-runner's cache can be

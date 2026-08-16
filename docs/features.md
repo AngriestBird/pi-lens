@@ -40,6 +40,19 @@ Repositories can disable all immediate and deferred auto-format mutations with
 keeping formatter detection, lint dispatch, LSP synchronization, and
 diagnostics available.
 
+**Auto-fix timing depends on the tool.** A `write` (new file, full overwrite,
+or a bash-authored write like `sed -i`/a redirect) still gets pipeline autofix
+immediately, in the same tool result; when it changes the file, the result
+carries the full authoritative post-fix content (capped at 2 MiB per file, one
+shared budget across a multi-file bash write — past that it degrades to a
+re-read warning). An `edit` defers autofix to `agent_end`, where it joins the
+same per-file deferred-mutation queue as deferred formatting — one coalesced
+record per file (`kinds: {autofix, format}`), autofix draining before format
+so the final state is formatter-stable. A `write` immediately followed by an
+`edit` on the same file in the same turn demotes the write's autofix to
+deferred too. See `clients/pipeline.ts`, `clients/runtime-tool-result.ts`, and
+`clients/runtime-agent-end.ts`.
+
 Deferred formatting (the `agent_end` default) runs with **bounded
 concurrency**: at most three formatter subprocesses in flight at once, with
 results applied in admission order and cooperative yields between files, so a
@@ -155,7 +168,7 @@ When `actionableWarnings.autoFix.enabled` is set in global or project config (or
 
 ### Bus Events — `pilens:files:touched` (#482)
 
-pi-lens writes files **outside the agent's own tool calls**: dispatch autofix (biome/ruff/eslint/stylelint/sqlfluff/rubocop/ktlint/rust-clippy/dart-fix/golangci-lint/detekt/ktfmt/markdownlint/oxlint --fix) and formatter runs (immediate or deferred-at-`agent_end`) both mutate files after the fact, and the conservative actionable-warnings autofix above applies LSP quickfixes the same way. Other extensions in the same session that track file mutations are otherwise blind to those writes.
+pi-lens writes files **outside the agent's own tool calls**: dispatch autofix (biome/ruff/eslint/stylelint/sqlfluff/rubocop/ktlint/ktfmt/rust-clippy/dart-fix/golangci-lint/detekt/markdownlint/oxlint --fix) mutates the file immediately for a `write` and at `agent_end` for a deferred `edit` (see "Formatters" above); formatter runs (immediate or deferred-at-`agent_end`) do the same; and the conservative actionable-warnings autofix above applies LSP quickfixes at `agent_end` the same way. Other extensions in the same session that track file mutations are otherwise blind to those writes — this event, published either way, is how they find out.
 
 pi-lens broadcasts them on pi's shared in-process event bus (`pi.events`, exposed to every extension via the `ExtensionAPI`) as a single named event:
 

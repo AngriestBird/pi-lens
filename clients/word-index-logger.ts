@@ -60,6 +60,14 @@ export interface WordIndexLogEntry {
 	/** Which lifecycle produced this: "session_start" | "cold_query" | "per_edit". */
 	trigger?: string;
 	durationMs?: number;
+	phaseDurationsMs?: {
+		snapshotLoadMs?: number;
+		deserializeMs?: number;
+		sourceWalkMs?: number;
+		statWalkMs?: number;
+		refreshReadsMs?: number;
+		snapshotSaveSyncMs?: number;
+	};
 	/** Docs actually represented in the index (mirrors indexedFileCount, #928). */
 	indexedFileCount?: number;
 	/** True when the source walk reached its file cap — searches may be partial. */

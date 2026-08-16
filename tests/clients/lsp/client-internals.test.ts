@@ -16,6 +16,7 @@ import {
 	applyDynamicCapabilities,
 	CLIENT_CAPABILITIES,
 	clientRequestWorkspaceDiagnostics,
+	clearDiagnosticsForPath,
 	clientShutdown,
 	clientWaitForDiagnostics,
 	closeDocument,
@@ -417,6 +418,8 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 		documentPullDiagnosticTimestamps: new Map(),
 		pullFailureHistory: [],
 		pendingDiagnostics: new Map(),
+		diagnosticPublicationCounts: new Map(),
+		documentOpenedAt: new Map(),
 		diagnosticEmitter,
 		diagnosticsVersion: 0,
 		documentVersions: new Map(),
@@ -596,6 +599,44 @@ describe("clientShutdown", () => {
 		expect(process.kill).toHaveBeenCalledWith("SIGTERM");
 		expect(process.unref).toHaveBeenCalledTimes(1);
 	});
+
+	// #1412 L1: projectIdentityProbedFiles is unbounded without lifecycle
+	// cleanup — mirror openDocuments' own clear on shutdown/eviction.
+	it("clears projectIdentityProbedFiles (#1412 L1)", async () => {
+		const process = {
+			killed: false,
+			kill: vi.fn(() => true),
+			unref: vi.fn(),
+		};
+		const state = createMockState({
+			lspProcess: { ...createMockLspProcess(), pid: 0, process } as any,
+			projectIdentityProbedFiles: new Set([TEST_KEY, "/project/other.ts"]),
+		});
+
+		await clientShutdown(state, { fast: true });
+
+		expect(state.projectIdentityProbedFiles?.size).toBe(0);
+	});
+});
+
+describe("closeDocument", () => {
+	// #1412 L1: a claim-once probe memo scoped to the open lifetime — a closed
+	// document's entry must not linger forever across a long session's worth of
+	// open/close churn, mirroring openDocuments' own per-close cleanup.
+	it("clears the closed file's projectIdentityProbedFiles entry (#1412 L1)", async () => {
+		const state = createMockState({
+			projectIdentityProbedFiles: new Set([TEST_KEY, "/project/other.ts"]),
+		});
+		state.openDocuments.add(TEST_KEY);
+		state.openDocumentUris?.set(TEST_KEY, pathToFileURL(TEST_FILE).href);
+
+		await closeDocument(state, TEST_FILE);
+
+		expect(state.projectIdentityProbedFiles?.has(TEST_KEY)).toBe(false);
+		expect(state.projectIdentityProbedFiles?.has("/project/other.ts")).toBe(
+			true,
+		);
+	});
 });
 
 describe("handleNotifyOpen", () => {
@@ -607,6 +648,153 @@ describe("handleNotifyOpen", () => {
 		const didOpenCall = calls.find((c) => c[0] === "textDocument/didOpen");
 		expect(didOpenCall).toBeDefined();
 		expect(state.openDocuments.has(TEST_KEY)).toBe(true);
+	});
+
+	it("detaches the classic TypeScript projectInfo probe after didOpen", async () => {
+		const state = createMockState({
+			serverId: "typescript",
+			launchVariant: "classic",
+			advertisedCommands: new Set(["typescript.tsserverRequest"]),
+		});
+		vi.mocked(state.connection.sendRequest).mockResolvedValue({
+			success: true,
+			body: { configFileName: "/project/tsconfig.json" },
+		});
+
+		await handleNotifyOpen(state, TEST_FILE, "const x = 1;", "typescript");
+		await vi.waitFor(() => {
+			expect(state.connection.sendRequest).toHaveBeenCalledWith(
+				"workspace/executeCommand",
+				{
+					command: "typescript.tsserverRequest",
+					arguments: [
+						"projectInfo",
+						{ file: TEST_FILE, needFileNameList: false },
+					],
+				},
+			);
+		});
+	});
+
+	// #1412 H1: the projectInfo probe must route through the READ-ONLY
+	// runReadOnlyServerCommand path, never runServerCommand — it must not open
+	// the workspace/applyEdit acceptance window (serverEditsAllowed > 0) for the
+	// whole 30s EXECUTE_COMMAND_TIMEOUT_MS on every classic-TS first open. This
+	// reproduces the reviewer's red case: gate the probe's sendRequest so it is
+	// still in flight, and assert the mutation-acceptance state never moved.
+	it("keeps serverEditsAllowed and activeMutationDepth at 0 while the classic projectInfo probe is in flight (#1412 H1)", async () => {
+		const state = createMockState({
+			serverId: "typescript",
+			launchVariant: "classic",
+			advertisedCommands: new Set(["typescript.tsserverRequest"]),
+			// Mirror production's real initial values (createLSPClientState sets
+			// both to 0) — the mock factory leaves these fields undefined by
+			// default since most tests never touch mutation bookkeeping.
+			activeMutationDepth: 0,
+			activeMutationContext: undefined,
+		});
+		let resolveProbe!: (value: unknown) => void;
+		const gate = new Promise((resolve) => {
+			resolveProbe = resolve;
+		});
+		vi.mocked(state.connection.sendRequest).mockImplementation(() => gate);
+
+		await handleNotifyOpen(state, TEST_FILE, "const x = 1;", "typescript");
+		await vi.waitFor(() => {
+			expect(state.connection.sendRequest).toHaveBeenCalledWith(
+				"workspace/executeCommand",
+				expect.objectContaining({ command: "typescript.tsserverRequest" }),
+			);
+		});
+
+		// The probe's executeCommand is still unresolved (gated) — if it were
+		// routed through runServerCommand this would read 1, not 0.
+		expect(state.serverEditsAllowed).toBe(0);
+		expect(state.activeMutationDepth).toBe(0);
+		expect(state.activeMutationContext).toBeUndefined();
+
+		resolveProbe({ success: true, body: {} });
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(state.serverEditsAllowed).toBe(0);
+	});
+
+	// #1412 H2: a probe firing mid-flight must not clobber a concurrent REAL
+	// executeCommand's activeMutationContext — the two must be fully isolated
+	// since the probe no longer touches the mutation-bookkeeping fields at all.
+	it("does not disturb a concurrent real executeCommand's activeMutationContext when a probe fires mid-flight (#1412 H2)", async () => {
+		const state = createMockState({
+			serverId: "typescript",
+			launchVariant: "classic",
+			advertisedCommands: new Set([
+				"typescript.tsserverRequest",
+				"real.command",
+			]),
+		});
+		let resolveProbe!: (value: unknown) => void;
+		const probeGate = new Promise((resolve) => {
+			resolveProbe = resolve;
+		});
+		let resolveReal!: (value: unknown) => void;
+		const realGate = new Promise((resolve) => {
+			resolveReal = resolve;
+		});
+		vi.mocked(state.connection.sendRequest).mockImplementation(
+			((method: string, params: { command?: string }) => {
+				if (method === "workspace/executeCommand") {
+					if (params?.command === "typescript.tsserverRequest") {
+						return probeGate;
+					}
+					if (params?.command === "real.command") {
+						return realGate;
+					}
+				}
+				return Promise.resolve({ ok: true });
+			}) as never,
+		);
+
+		await handleNotifyOpen(state, TEST_FILE, "const x = 1;", "typescript");
+		await vi.waitFor(() => {
+			expect(state.connection.sendRequest).toHaveBeenCalledWith(
+				"workspace/executeCommand",
+				expect.objectContaining({ command: "typescript.tsserverRequest" }),
+			);
+		});
+
+		// A real mutation starts WHILE the probe is still in flight. Both are
+		// gated so neither settles until this test drives them explicitly.
+		const realContext = {
+			cwd: state.root,
+			correlationId: "real-command-1",
+			tool: "rename",
+			source: "lsp-edit" as const,
+		};
+		const realPromise = runServerCommand(
+			state,
+			"real.command",
+			[],
+			5000,
+			realContext,
+		);
+		await vi.waitFor(() => {
+			expect(state.connection.sendRequest).toHaveBeenCalledWith(
+				"workspace/executeCommand",
+				expect.objectContaining({ command: "real.command" }),
+			);
+		});
+		expect(state.activeMutationContext).toBe(realContext);
+		expect(state.serverEditsAllowed).toBe(1);
+
+		// Let the probe resolve while the real command is still pending.
+		resolveProbe({ success: true, body: {} });
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		// The probe resolving must not have touched the real command's context.
+		expect(state.activeMutationContext).toBe(realContext);
+		expect(state.serverEditsAllowed).toBe(1);
+
+		resolveReal({ ok: true });
+		await realPromise;
+		expect(state.serverEditsAllowed).toBe(0);
+		expect(state.activeMutationContext).toBeUndefined();
 	});
 
 	it("suppresses didChangeWatchedFiles in silent open mode", async () => {
@@ -919,6 +1107,115 @@ describe("publishDiagnostics handler — superseded push guard (cache-poisoning 
 	// DEFAULT_STRATEGY (seedFirstPush: false, debounceMs: 150) — the debounced
 	// cache-write path exercised here is the common one across real servers.
 	const DEBOUNCE_WAIT_MS = 220;
+
+	function diagnostic(message: string, code?: string): LSPDiagnostic {
+		return {
+			severity: 1,
+			message,
+			code,
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 1 },
+			},
+		};
+	}
+
+	it("waits for native TS7's versionless push burst to stabilize", async () => {
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		Object.defineProperty(state, "serverId", { value: "typescript" });
+		Object.defineProperty(state, "launchVariant", { value: "native-ts7" });
+		const wait = clientWaitForDiagnostics(state, TEST_FILE, 500);
+
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			diagnostics: [diagnostic("bogus partial-program error", "2345")],
+		});
+		setTimeout(() => {
+			emitPublishDiagnostics({
+				uri: pathToFileURL(TEST_FILE).href,
+				diagnostics: [],
+			});
+		}, 20);
+
+		await wait;
+		expect(state.pushDiagnostics.get(TEST_KEY)).toEqual([]);
+	});
+
+	it("keeps classic TypeScript's first publication authoritative", () => {
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		Object.defineProperty(state, "serverId", { value: "typescript" });
+		Object.defineProperty(state, "launchVariant", { value: "classic" });
+
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			diagnostics: [diagnostic("classic result", "2322")],
+		});
+
+		expect(state.pushDiagnostics.get(TEST_KEY)?.[0]?.message).toBe(
+			"classic result",
+		);
+	});
+
+	it("surfaces an intentional native TS7 error present across the burst", async () => {
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		Object.defineProperty(state, "serverId", { value: "typescript" });
+		Object.defineProperty(state, "launchVariant", { value: "native-ts7" });
+		const wait = clientWaitForDiagnostics(state, TEST_FILE, 500);
+
+		for (const delay of [0, 20]) {
+			setTimeout(() => {
+				emitPublishDiagnostics({
+					uri: pathToFileURL(TEST_FILE).href,
+					diagnostics: [diagnostic("real error", "2322")],
+				});
+			}, delay);
+		}
+
+		await wait;
+		expect(state.pushDiagnostics.get(TEST_KEY)?.[0]?.message).toBe("real error");
+	});
+
+	it("settles a single native TS7 publication within the bounded quiet window", async () => {
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		Object.defineProperty(state, "serverId", { value: "typescript" });
+		Object.defineProperty(state, "launchVariant", { value: "native-ts7" });
+		const startedAt = Date.now();
+		const wait = clientWaitForDiagnostics(state, TEST_FILE, 500);
+
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			diagnostics: [diagnostic("single result", "2322")],
+		});
+		await wait;
+
+		expect(Date.now() - startedAt).toBeLessThan(300);
+		expect(state.pushDiagnostics.get(TEST_KEY)?.[0]?.message).toBe("single result");
+	});
+
+	it("cancels a pending native TS7 quiet-window timer on clear/resync", async () => {
+		// The headline #1412 safety property: a versionless publication armed
+		// BEFORE a resync must never land its (stale) diagnostics AFTER the
+		// document content changed. clearDiagnosticsForPath is what every
+		// didChange/resync/initial-open path calls — deleting its clearTimeout
+		// must turn this test red.
+		const { state, emitPublishDiagnostics } = createCapturingState();
+		Object.defineProperty(state, "serverId", { value: "typescript" });
+		Object.defineProperty(state, "launchVariant", { value: "native-ts7" });
+
+		emitPublishDiagnostics({
+			uri: pathToFileURL(TEST_FILE).href,
+			diagnostics: [diagnostic("stale pre-resync error", "2345")],
+		});
+		expect(state.pendingDiagnostics.has(TEST_KEY)).toBe(true);
+
+		clearDiagnosticsForPath(state, TEST_KEY);
+		expect(state.pendingDiagnostics.has(TEST_KEY)).toBe(false);
+
+		// Wait past the quiet window: the canceled timer must not fire and
+		// resurrect the pre-resync diagnostics.
+		await new Promise((resolve) => setTimeout(resolve, DEBOUNCE_WAIT_MS));
+		expect(state.pushDiagnostics.has(TEST_KEY)).toBe(false);
+	});
 
 	it("drops a late push whose version lags the current document version, without poisoning the cache", async () => {
 		const { state, emitPublishDiagnostics } = createCapturingState();

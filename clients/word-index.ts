@@ -16,6 +16,12 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+	createDeadline,
+	forEachCooperatively,
+	yieldIfOverBudget,
+} from "./cooperative-budget.js";
+import { KIND_EXTENSIONS, type FileKind } from "./file-kinds.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
 import { isAtOrAboveHomeDir, normalizeEphemeralMapKey } from "./path-utils.js";
 import {
@@ -24,11 +30,6 @@ import {
 } from "./persist-debounce.js";
 import { getWordIndexMaxFilesDerived } from "./project-scale.js";
 import { logWordIndex } from "./word-index-logger.js";
-import {
-	createDeadline,
-	forEachCooperatively,
-	yieldIfOverBudget,
-} from "./cooperative-budget.js";
 
 export interface WordHit {
 	file: string;
@@ -127,17 +128,57 @@ export interface RankOptions {
 // postings without improving relevance. Kept deliberately small and
 // language-agnostic.
 const STOPWORDS = new Set([
-	"the", "and", "for", "let", "var", "const", "function", "return", "if",
-	"else", "import", "export", "from", "class", "interface", "type", "enum",
-	"new", "this", "self", "void", "null", "true", "false", "async", "await",
-	"public", "private", "protected", "static", "def", "fn", "func", "struct",
-	"impl", "pub", "use", "mod", "in", "of", "as", "is", "not", "with",
+	"the",
+	"and",
+	"for",
+	"let",
+	"var",
+	"const",
+	"function",
+	"return",
+	"if",
+	"else",
+	"import",
+	"export",
+	"from",
+	"class",
+	"interface",
+	"type",
+	"enum",
+	"new",
+	"this",
+	"self",
+	"void",
+	"null",
+	"true",
+	"false",
+	"async",
+	"await",
+	"public",
+	"private",
+	"protected",
+	"static",
+	"def",
+	"fn",
+	"func",
+	"struct",
+	"impl",
+	"pub",
+	"use",
+	"mod",
+	"in",
+	"of",
+	"as",
+	"is",
+	"not",
+	"with",
 ]);
 
 const TEST_VENDOR_RE =
 	/(?:(^|[\\/])(?:tests?|__tests__|spec|specs|__mocks__|vendor|node_modules|examples?|fixtures?|\.git|dist|build|coverage)([\\/]|$))|(?:\.(?:test|spec)\.[a-z]+$)/i;
 
-const DOC_FILE_RE = /\.(?:md|mdx|markdown|json|json5|jsonc|txt|rst|lock|ya?ml|toml|csv)$/i;
+const DOC_FILE_RE =
+	/\.(?:md|mdx|markdown|json|json5|jsonc|txt|rst|lock|ya?ml|toml|csv)$/i;
 
 const TEST_VENDOR_PENALTY = 0.3;
 const DOC_FILE_PENALTY = 0.5;
@@ -623,8 +664,7 @@ export async function collectWordIndexDocs(
 	// visited-entry budget (DEFAULT_MAX_SCAN_ENTRIES), so a mixed tree with few
 	// source files among a huge pile of non-source files can't force a
 	// full-tree walk either; an index over the truncated list is acceptable.
-	const maxFiles =
-		preflightFiles?.length ?? getWordIndexMaxFilesDerived(root);
+	const maxFiles = preflightFiles?.length ?? getWordIndexMaxFilesDerived(root);
 	// #894 review: prioritize code kinds within the cap — with broadened
 	// enumeration, thousands of data/doc files (locale JSON, fixtures, …)
 	// ahead of the code dirs in walk order could exhaust `maxFiles` and evict
@@ -688,6 +728,13 @@ export interface WordIndexRefreshResult {
 	/** Files that were stale but unreadable this pass; posting left intact. */
 	skipped: number;
 	reused: number;
+	timings: WordIndexRefreshTimings;
+}
+
+export interface WordIndexRefreshTimings {
+	sourceWalkMs: number;
+	statWalkMs: number;
+	refreshReadsMs: number;
 }
 
 export interface WordIndexRebuildRequired {
@@ -698,11 +745,22 @@ export interface WordIndexRebuildRequired {
 		| "stale-document-churn";
 	/** Bounded walk+stat result for a rebuild without repeating the full walk. */
 	preflightFiles?: WordIndexPreflightFiles;
+	timings: WordIndexRefreshTimings;
 }
 
 export type WordIndexRefreshOutcome =
 	| WordIndexRefreshResult
 	| WordIndexRebuildRequired;
+
+export interface WordIndexRefreshOptions {
+	statFile?: (file: string) => Promise<Pick<fs.Stats, "mtimeMs" | "size">>;
+	statConcurrency?: number;
+}
+
+// Node's fs.promises.stat runs on libuv's threadpool (default 4 slots), so
+// real parallelism tops out there; the surplus workers are queue depth that
+// keeps the pool saturated without starving other threadpool consumers.
+export const WORD_INDEX_STAT_CONCURRENCY = 8;
 
 const WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD = 0.3;
 // A ratio alone misclassifies one stale file in a three-file project as dense.
@@ -742,19 +800,23 @@ export async function refreshWordIndexIncrementally(
 	index: WordIndex,
 	root: string,
 	shouldContinue: () => boolean = () => true,
+	options: WordIndexRefreshOptions = {},
 ): Promise<WordIndexRefreshOutcome> {
 	if (!index.forward || !index.fileMtimes || !index.fileSizes) {
 		return {
 			mode: "full-required",
 			reason: "missing-incremental-metadata",
+			timings: { sourceWalkMs: 0, statWalkMs: 0, refreshReadsMs: 0 },
 		};
 	}
 	const { collectSourceFilesAsync } = await import("./source-filter.js");
 	const maxFiles = getWordIndexMaxFilesDerived(root);
+	const sourceWalkStartMs = Date.now();
 	const walked = await collectSourceFilesAsync(root, {
 		maxFiles,
 		prioritizeCodeKinds: true,
 	});
+	const sourceWalkMs = Date.now() - sourceWalkStartMs;
 	if (!shouldContinue()) throw new Error("word index refresh superseded");
 
 	// This set-difference must run in the SAME normalized key space the path
@@ -773,27 +835,56 @@ export async function refreshWordIndexIncrementally(
 		string,
 		{ path: string; mtimeMs: number; size: number }
 	>();
-	// Check both supersession and the monotonic budget at every stat unit. Unlike
-	// the former modulus cadence, this remains bounded as per-file work changes.
-	const deadline = createDeadline(WORD_INDEX_BUILD_YIELD_BUDGET_MS);
-	for (const file of walked) {
-		if (!shouldContinue()) throw new Error("word index refresh superseded");
-		try {
-			const stat = fs.statSync(file);
-			if (stat.size <= WORD_INDEX_MAX_BYTES) {
-				current.set(wordIndexKey(file), {
-					path: file,
-					mtimeMs: stat.mtimeMs,
-					size: stat.size,
-				});
+	const statWalkStartMs = Date.now();
+	const statFile =
+		options.statFile ?? ((file: string) => fs.promises.stat(file));
+	const requestedConcurrency =
+		options.statConcurrency ?? WORD_INDEX_STAT_CONCURRENCY;
+	const statConcurrency =
+		Number.isFinite(requestedConcurrency) && requestedConcurrency > 0
+			? Math.max(1, Math.floor(requestedConcurrency))
+			: WORD_INDEX_STAT_CONCURRENCY;
+	const statResults = new Array<
+		{ path: string; mtimeMs: number; size: number } | undefined
+	>(walked.length);
+	let cursor = 0;
+	let superseded = false;
+	const worker = async (): Promise<void> => {
+		while (true) {
+			if (!shouldContinue()) {
+				superseded = true;
+				return;
 			}
-		} catch {
-			// A file vanishing between walk and stat is simply absent.
+			const slot = cursor++;
+			if (slot >= walked.length) return;
+			const file = walked[slot];
+			try {
+				const stat = await statFile(file);
+				if (stat.size <= WORD_INDEX_MAX_BYTES) {
+					statResults[slot] = {
+						path: file,
+						mtimeMs: stat.mtimeMs,
+						size: stat.size,
+					};
+				}
+			} catch {
+				// A rejection has statSync parity: the file is simply absent.
+			}
 		}
-		if (deadline.expired() && (await yieldIfOverBudget(deadline))) {
-			if (!shouldContinue()) throw new Error("word index refresh superseded");
-		}
+	};
+	await Promise.all(
+		Array.from({ length: Math.min(statConcurrency, walked.length) }, () =>
+			worker(),
+		),
+	);
+	if (superseded || !shouldContinue()) {
+		throw new Error("word index refresh superseded");
 	}
+	const statWalkMs = Date.now() - statWalkStartMs;
+	for (const result of statResults) {
+		if (result) current.set(wordIndexKey(result.path), result);
+	}
+	const timings = { sourceWalkMs, statWalkMs, refreshReadsMs: 0 };
 	const preflightFiles = Object.assign([...current.values()], {
 		truncated: walked.length === maxFiles,
 	});
@@ -804,7 +895,12 @@ export async function refreshWordIndexIncrementally(
 	for (const key of current.keys()) if (!oldSet.has(key)) changedSet++;
 	const denominator = Math.max(oldSet.size, current.size, 1);
 	if (changedSet / denominator > WORD_INDEX_INCREMENTAL_CHURN_THRESHOLD) {
-		return { mode: "full-required", reason: "file-set-churn", preflightFiles };
+		return {
+			mode: "full-required",
+			reason: "file-set-churn",
+			preflightFiles,
+			timings,
+		};
 	}
 
 	// Replacing one document filters every shared posting array for that
@@ -884,9 +980,11 @@ export async function refreshWordIndexIncrementally(
 			mode: "full-required",
 			reason: "stale-document-churn",
 			preflightFiles,
+			timings,
 		};
 	}
 
+	const deadline = createDeadline(WORD_INDEX_BUILD_YIELD_BUDGET_MS);
 	let dropped = 0;
 	for (const key of oldSet) {
 		if (!current.has(key)) {
@@ -901,6 +999,7 @@ export async function refreshWordIndexIncrementally(
 
 	let refreshed = 0;
 	let skipped = 0;
+	const refreshReadsStartMs = Date.now();
 	for (const { path: file, mtimeMs, size } of current.values()) {
 		// #1105: mtime-first, size-second freshness — mtime alone is a stale
 		// signal (mtime-preserving content changes serve stale identifiers to
@@ -951,6 +1050,7 @@ export async function refreshWordIndexIncrementally(
 			if (!shouldContinue()) throw new Error("word index refresh superseded");
 		}
 	}
+	timings.refreshReadsMs = Date.now() - refreshReadsStartMs;
 	index.truncated = walked.length === maxFiles;
 	return {
 		mode: "incremental",
@@ -958,13 +1058,256 @@ export async function refreshWordIndexIncrementally(
 		dropped,
 		skipped,
 		reused: current.size - refreshed - skipped,
+		timings,
 	};
+}
+
+// --- Query prefix filters (#1450) --------------------------------------------
+//
+// Composable `lang:`/`file:`/`ext:` filters mixed into the plain query string,
+// e.g. `lang:ts file:clients/ -file:test rank`. Hand-rolled tokenizer (a regex
+// split per whitespace token) rather than a grammar — the issue's explicit
+// direction, and the query language is small enough that a grammar would be
+// pure overhead. Landed HERE, in `searchWordIndex` (the word-index query entry
+// point), so both the pi `symbol_search` tool and the MCP
+// `pilens_symbol_search` mirror inherit the syntax for free: they already pass
+// their `query` argument straight through to `symbolSearch` → `searchWordIndex`
+// with no filter-specific plumbing of their own.
+
+/** The three supported inline query-filter prefixes (#1450). */
+export type WordIndexQueryFilterKey = "lang" | "file" | "ext";
+
+export const WORD_INDEX_QUERY_FILTER_KEYS: readonly WordIndexQueryFilterKey[] =
+	["lang", "file", "ext"];
+
+export interface WordIndexQueryFilter {
+	key: WordIndexQueryFilterKey;
+	value: string;
+	/** True when the token was `-key:value` — always subtracts, never OR's with a positive filter of the same key. */
+	negated: boolean;
+}
+
+export interface ParsedWordIndexQuery {
+	/** The query with filter tokens stripped, ready for {@link tokenizeLine} — identical to the input when it contains no filters. */
+	terms: string;
+	filters: WordIndexQueryFilter[];
+}
+
+/** Thrown by {@link parseWordIndexQuery}/{@link buildWordIndexQueryFilter} for
+ * an unrecognized `key:` prefix or an unrecognized `lang:` value — a query
+ * typo fails loudly with the supported list instead of silently degrading
+ * into a literal search term (#1450 acceptance criterion). */
+export class WordIndexQueryError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "WordIndexQueryError";
+	}
+}
+
+const WORD_INDEX_FILTER_TOKEN_RE = /^(-)?([A-Za-z][A-Za-z0-9_-]*):(.+)$/;
+
+/**
+ * Split a word-index query string into plain search terms and `key:value`
+ * prefix filters (#1450). Whitespace-delimited, one regex per token — no
+ * quoting scheme invented here, matching the pre-existing query path (which
+ * never supported quoting either). A `-` immediately before a recognized
+ * `key:` negates that filter; a bare `-term` (no colon) is left as an
+ * ordinary token, unchanged from prior behavior — `tokenizeLine` already
+ * strips the leading `-` when it extracts identifiers.
+ *
+ * An unrecognized `key:` (e.g. `type:foo`) throws {@link WordIndexQueryError}
+ * naming the supported prefixes, rather than falling through as a literal
+ * term — a typo must fail loudly, never silently rank as if the filter never
+ * existed. An empty value (`lang:`) is not treated as a filter token at all
+ * (kept as a term) since there is nothing to filter by.
+ */
+export function parseWordIndexQuery(query: string): ParsedWordIndexQuery {
+	const filters: WordIndexQueryFilter[] = [];
+	const termParts: string[] = [];
+	for (const raw of query.split(/\s+/)) {
+		if (!raw) continue;
+		const match = raw.match(WORD_INDEX_FILTER_TOKEN_RE);
+		if (!match) {
+			termParts.push(raw);
+			continue;
+		}
+		const [, negation, keyRaw, value] = match;
+		const key = keyRaw.toLowerCase();
+		if (!value) {
+			termParts.push(raw);
+			continue;
+		}
+		if (!(WORD_INDEX_QUERY_FILTER_KEYS as readonly string[]).includes(key)) {
+			// Not a recognized filter key. Ordinary search terms legitimately
+			// contain colons (std::vector, error:foo, http://…, C:\ paths, a
+			// TODO:tag), and the old tokenizer searched them fine — a hard
+			// error here is a usability regression, not typo protection. The
+			// token passes through as a plain term; the loud-failure contract
+			// survives where it is unambiguous: a KNOWN key with a bad value
+			// (lang:notalang) still throws.
+			termParts.push(raw);
+			continue;
+		}
+		filters.push({
+			key: key as WordIndexQueryFilterKey,
+			value,
+			negated: negation === "-",
+		});
+	}
+	return { terms: termParts.join(" "), filters };
+}
+
+/** `lang:X` → the extension set for FileKind X (case-insensitive), drawn
+ * exclusively from `KIND_EXTENSIONS` (clients/file-kinds.ts) — the single
+ * source of truth (#894 invariant: no second, hand-maintained language list).
+ * An unrecognized kind throws {@link WordIndexQueryError} listing the accepted
+ * kinds (KIND_EXTENSIONS' own keys), the same loud-failure contract as an
+ * unsupported `key:` prefix. */
+function resolveLangExtensions(value: string): readonly string[] {
+	const kind = value.toLowerCase() as FileKind;
+	const extensions = KIND_EXTENSIONS[kind];
+	if (!extensions) {
+		const known = Object.keys(KIND_EXTENSIONS).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).join(", ");
+		throw new WordIndexQueryError(
+			`Unknown lang: "${value}" in word-index query — supported languages: ${known}.`,
+		);
+	}
+	return extensions;
+}
+
+/** `ext:ts` / `ext:.ts` → normalized to a single leading-dot, lowercased form for extname comparison. */
+function normalizeExtFilterValue(value: string): string {
+	return `.${value.replace(/^\.+/, "").toLowerCase()}`;
+}
+
+interface ResolvedWordIndexFilter {
+	key: WordIndexQueryFilterKey;
+	negated: boolean;
+	test: (file: string, displayPath: string) => boolean;
+}
+
+function resolveWordIndexFilter(
+	filter: WordIndexQueryFilter,
+): ResolvedWordIndexFilter {
+	if (filter.key === "lang") {
+		const extensions = resolveLangExtensions(filter.value);
+		return {
+			key: filter.key,
+			negated: filter.negated,
+			test: (file) => extensions.includes(path.extname(file).toLowerCase()),
+		};
+	}
+	if (filter.key === "ext") {
+		const normalized = normalizeExtFilterValue(filter.value);
+		return {
+			key: filter.key,
+			negated: filter.negated,
+			test: (file) => path.extname(file).toLowerCase() === normalized,
+		};
+	}
+	// "file": substring match against the index's own normalized display path
+	// (#1450 — see the doc comment on {@link buildWordIndexQueryFilter} for the
+	// case-behavior choice). Both sides fold through `wordIndexKey` so the
+	// comparison matches the SAME normalization the index's own path keys use.
+	const needle = wordIndexKey(filter.value);
+	return {
+		key: filter.key,
+		negated: filter.negated,
+		test: (_file, displayPath) => displayPath.includes(needle),
+	};
+}
+
+/**
+ * Build a pre-ranking predicate from parsed query filters (#1450). Composes
+ * (AND) with `searchWordIndex`'s pre-existing `fileFilter` option (#771) —
+ * `symbol_search`'s structured `paths`/`lang` params and this query's inline
+ * filters both apply when both are present.
+ *
+ * Semantics: multiple positive filters of the SAME key OR together
+ * (`lang:ts lang:go` matches either); filters of DIFFERENT keys AND
+ * (`lang:ts file:clients/` requires both); a negated filter always subtracts,
+ * regardless of any positive filter sharing its key.
+ *
+ * All filters are RESOLVED EAGERLY (extension lookups, `WordIndexQueryError`
+ * thrown) here at build time — before any candidate file is tested — so a bad
+ * `lang:` value fails once, loudly, rather than per-file during the scoring
+ * loop.
+ *
+ * `file:` case behavior: matched via `wordIndexKey` (this module's single
+ * path-key normalizer, `normalizeEphemeralMapKey`) on BOTH the candidate path
+ * and the filter value — slash-folded everywhere, and case-folded ONLY on
+ * win32 (Windows' case-insensitive filesystem), preserved on POSIX. This
+ * mirrors the SAME normalization the word index's own path-keyed maps already
+ * apply (#1025), rather than inventing a second, divergent case rule for this
+ * one filter. The candidate path matched is the RAW index-stored path (not
+ * cwd-relativized) — the index already stores paths in the form the caller
+ * built it with (relative in tests, absolute in the real project walk), and
+ * an absolute path's tail always contains its project-relative suffix, so
+ * `file:clients/word-index.ts` still matches naturally either way.
+ */
+export function buildWordIndexQueryFilter(
+	filters: readonly WordIndexQueryFilter[],
+): ((file: string) => boolean) | undefined {
+	if (filters.length === 0) return undefined;
+	const resolved = filters.map(resolveWordIndexFilter);
+	const positivesByKey = new Map<
+		WordIndexQueryFilterKey,
+		ResolvedWordIndexFilter[]
+	>();
+	const negatives: ResolvedWordIndexFilter[] = [];
+	for (const r of resolved) {
+		if (r.negated) {
+			negatives.push(r);
+			continue;
+		}
+		const group = positivesByKey.get(r.key) ?? [];
+		group.push(r);
+		positivesByKey.set(r.key, group);
+	}
+	return (file: string) => {
+		const displayPath = wordIndexKey(file);
+		for (const negative of negatives) {
+			if (negative.test(file, displayPath)) return false;
+		}
+		for (const group of positivesByKey.values()) {
+			if (!group.some((r) => r.test(file, displayPath))) return false;
+		}
+		return true;
+	};
+}
+
+function combineFileFilters(
+	a: ((file: string) => boolean) | undefined,
+	b: ((file: string) => boolean) | undefined,
+): ((file: string) => boolean) | undefined {
+	if (!a) return b;
+	if (!b) return a;
+	return (file: string) => a(file) && b(file);
 }
 
 /**
  * Rank files for a query by BM25 over the query's identifier tokens, then apply
  * priors: demote test/vendor and doc/data files, and boost by graph centrality
  * when supplied. Returns the top {@link RankOptions.limit} files, highest first.
+ *
+ * The query string may mix plain terms with `lang:`/`file:`/`ext:` prefix
+ * filters (+ `-` negation, #1450) — parsed by {@link parseWordIndexQuery} and
+ * applied as a `fileFilter` (composed, AND, with any caller-supplied one)
+ * BEFORE scoring, same as the pre-existing `paths`/`lang` options (#771): a
+ * surviving file's score is unaffected by filtering. A query with no filter
+ * tokens reproduces prior output byte-for-byte.
+ *
+ * DF-normalization note: BM25's per-token `idf` is computed from `docFrequency`
+ * over the FULL (unfiltered) postings for that token — `fileFilter` (whether
+ * from `options.fileFilter` or from this query's inline filters) is applied
+ * AFTER `idf` is computed, per file, inside the same loop. This means a
+ * filtered query reuses the GLOBAL, corpus-wide document frequency rather than
+ * recomputing it over just the filtered subset. That is the pre-existing #771
+ * behavior this change does not alter; it is an acceptable approximation
+ * (idf reflects true corpus rarity, not an artifact of the filter) and keeps
+ * filtered/unfiltered scores for the SAME file directly comparable, which is
+ * the property #1450 asks for ("BM25 and centrality stay comparable within
+ * the filtered set").
  */
 export function searchWordIndex(
 	index: WordIndex,
@@ -979,7 +1322,11 @@ export function searchWordIndex(
 		fileFilter,
 	} = options;
 
-	const queryTokens = [...new Set(tokenizeLine(query))];
+	const parsedQuery = parseWordIndexQuery(query);
+	const queryFilter = buildWordIndexQueryFilter(parsedQuery.filters);
+	const combinedFilter = combineFileFilters(fileFilter, queryFilter);
+
+	const queryTokens = [...new Set(tokenizeLine(parsedQuery.terms))];
 	if (queryTokens.length === 0) return [];
 
 	const docCount = index.docCount || 1;
@@ -1007,14 +1354,13 @@ export function searchWordIndex(
 		);
 
 		for (const [file, lines] of linesByFile) {
-			if (fileFilter && !fileFilter(file)) continue;
+			if (combinedFilter && !combinedFilter(file)) continue;
 			const termFrequency = lines.length;
 			const docLength = index.docLengths.get(file) ?? avgDocLength;
 			const denominator =
 				termFrequency +
 				BM25_K1 * (1 - BM25_B + BM25_B * (docLength / avgDocLength));
-			const termScore =
-				idf * ((termFrequency * (BM25_K1 + 1)) / denominator);
+			const termScore = idf * ((termFrequency * (BM25_K1 + 1)) / denominator);
 
 			const entry = scores.get(file) ?? {
 				score: 0,
@@ -1171,8 +1517,12 @@ export function deserializeWordIndex(
 	const docLengths = new PathKeyedMap<number>(wordIndexKey);
 	const fileMtimes = new PathKeyedMap<number>(wordIndexKey);
 	const fileSizes = new PathKeyedMap<number>(wordIndexKey);
-	data.files.forEach((file, i) => docLengths.set(file, data.docLengths[i] ?? 0));
-	data.files.forEach((file, i) => fileMtimes.set(file, data.fileMtimes[i] ?? 0));
+	data.files.forEach((file, i) =>
+		docLengths.set(file, data.docLengths[i] ?? 0),
+	);
+	data.files.forEach((file, i) =>
+		fileMtimes.set(file, data.fileMtimes[i] ?? 0),
+	);
 	// #1105: `fileSizes` is optional on the wire (pre-#1105 snapshots omit it).
 	// Only populate when the array is present AND parallel to `files`; otherwise
 	// leave it empty so the refresh gate re-reads every file once to repopulate,
@@ -1223,8 +1573,7 @@ export function deserializeWordIndex(
 	return {
 		postings,
 		docLengths,
-		totalTokens:
-			typeof data.totalTokens === "number" ? data.totalTokens : 0,
+		totalTokens: typeof data.totalTokens === "number" ? data.totalTokens : 0,
 		docCount: data.files.length,
 		truncated: data.truncated === true,
 		forward,
@@ -1302,8 +1651,11 @@ export function triggerBackgroundWordIndexBuild(
 	void (async () => {
 		const startMs = Date.now();
 		try {
-			const { loadProjectSnapshot, saveProjectSnapshot, PROJECT_SNAPSHOT_VERSION } =
-				await import("./project-snapshot.js");
+			const {
+				loadProjectSnapshot,
+				saveProjectSnapshot,
+				PROJECT_SNAPSHOT_VERSION,
+			} = await import("./project-snapshot.js");
 			const docs = await collectWordIndexDocs(key);
 			const index = await buildWordIndexAsync(docs);
 			const existing = loadProjectSnapshot(key);
@@ -1403,8 +1755,11 @@ async function writeWordIndexSnapshot(
 	dbg?: (msg: string) => void,
 ): Promise<void> {
 	try {
-		const { loadProjectSnapshot, saveProjectSnapshot, PROJECT_SNAPSHOT_VERSION } =
-			await import("./project-snapshot.js");
+		const {
+			loadProjectSnapshot,
+			saveProjectSnapshot,
+			PROJECT_SNAPSHOT_VERSION,
+		} = await import("./project-snapshot.js");
 		const existing = loadProjectSnapshot(cwd);
 		const snapshot = existing ?? {
 			version: PROJECT_SNAPSHOT_VERSION,

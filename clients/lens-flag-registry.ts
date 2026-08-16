@@ -214,6 +214,15 @@ export const LENS_FLAGS: readonly LensFlagSpec[] = [
 		scope: "global",
 	},
 	{
+		name: "no-lazy-tools",
+		description:
+			"Keep all pi-lens tools active to avoid tool-list cache changes. Also via tools.lazy=false in ~/.pi-lens/config.json.",
+		configKey: "tools.lazy",
+		negated: true,
+		default: false,
+		scope: "global",
+	},
+	{
 		name: "lens-turn-end-madge",
 		description:
 			"Run the per-turn-end madge circular-dependency check on import-changed files. Off by default: the pass only writes debug output, and user-facing madge diagnostics come from the session-start scan cache + lens_diagnostics. Also via turnEnd.madge.enabled=true in ~/.pi-lens/config.json.",

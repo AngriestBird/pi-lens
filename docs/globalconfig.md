@@ -25,7 +25,18 @@ Each runtime toggle is settable from the CLI *and* from `config.json`. The two a
 | `--lens-actionable-warning-autofix` | `actionableWarnings.autoFix.enabled` | `false` |
 | `--lens-actionable-warning-all` | `actionableWarnings.deltaOnly` (`false`) | `true` |
 | `--lens-compact-tool-line` | `ui.compactToolLine` | `false` |
+| `--no-lazy-tools` | `tools.lazy` | `true` |
 | `--lens-turn-end-madge` | `turnEnd.madge.enabled` | `false` |
+
+By default pi-lens registers six situational tools (the `ast_grep_*` family,
+`lsp_navigation`, `lens_diagnostic_mark`) inactive and exposes a small loader,
+`pi_lens_activate_tools`, that the model calls to activate the ones it needs.
+`--no-lazy-tools` turns that off: every pi-lens tool is active from the first
+turn and pi-lens never changes the tool list. Use it if you would rather spend
+the tokens of a longer tool list than have the list change mid-session. The
+loader tool is still registered and still describes itself as activating
+inactive tools; under this flag those tools are already active, so calling it
+does nothing.
 
 Keys are positive (`"enabled": true` means the feature runs), so a `--no-*` flag corresponds to setting its key `false`. A `no-*` flag on the command line is a one-way switch: it can disable, never re-enable, so `--no-lsp` wins over `lsp.enabled: true` but nothing on the CLI overrides `lsp.enabled: false`. Set the key back to `true` to re-enable.
 

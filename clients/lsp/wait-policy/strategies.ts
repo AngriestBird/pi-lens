@@ -238,7 +238,8 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 		// (#242), so on a 2500ms-capped edit opengrep waits min(2500, 3500)=2500
 		// and on uncapped paths it gets its full 3500. 3500 covers warm and most
 		// cold; a cold scan that overruns isn't lost — late diagnostics are cached
-		// and surface on the next edit.
+		// and surface on the next unchanged-content read through the content-bound
+		// auxiliary carry-over path.
 		opengrep: {
 			seedFirstPush: false,
 			pullRetryBudgetMs: 0,
@@ -274,7 +275,8 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 		// reopen-on-resync. A native single-workflow audit is sub-second offline;
 		// online mode may add a GitHub-API round-trip, so 2000ms gives headroom
 		// (bounded by the per-edit caller cap as a ceiling, #242), and any late online
-		// finding is cached and surfaces on the next edit.
+		// finding can surface on the next unchanged-content read through the
+		// content-bound auxiliary carry-over path.
 		zizmor: {
 			seedFirstPush: true,
 			pullRetryBudgetMs: 0,
@@ -332,6 +334,17 @@ export const SERVER_DIAGNOSTIC_STRATEGIES: Record<string, DiagnosticStrategy> =
 		},
 	};
 
+/** Native TS7 can publish multiple versionless partial-program snapshots for a
+ * single open. Its first push is therefore provisional; a quiet window, rather
+ * than a protocol-unstable publication count, establishes the settled push. */
+const NATIVE_TS7_DIAGNOSTIC_STRATEGY: DiagnosticStrategy = {
+	...SERVER_DIAGNOSTIC_STRATEGIES.typescript,
+	seedFirstPush: false,
+	// Native TS7 demonstrably publishes on clean, so the classic-only marker
+	// must not leak through the shared server id.
+	silentOnClean: false,
+};
+
 /** Fallback for unknown servers. Conservative defaults. */
 export const DEFAULT_STRATEGY: DiagnosticStrategy = {
 	seedFirstPush: false,
@@ -341,6 +354,12 @@ export const DEFAULT_STRATEGY: DiagnosticStrategy = {
 	expectSemanticSecondPush: false,
 };
 
-export function getStrategy(serverId: string): DiagnosticStrategy {
+export function getStrategy(
+	serverId: string,
+	launchVariant?: "classic" | "native-ts7",
+): DiagnosticStrategy {
+	if (serverId === "typescript" && launchVariant === "native-ts7") {
+		return NATIVE_TS7_DIAGNOSTIC_STRATEGY;
+	}
 	return SERVER_DIAGNOSTIC_STRATEGIES[serverId] ?? DEFAULT_STRATEGY;
 }

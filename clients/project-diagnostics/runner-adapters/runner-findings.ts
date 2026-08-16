@@ -1,5 +1,13 @@
 import type { TestFailure, TestResult } from "../../test-runner-client.js";
 import type { ProjectDiagnostic } from "../types.js";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import type { RuntimeCoordinator } from "../../runtime-coordinator.js";
+import {
+	advisoryPathKey,
+	validateAdvisoryProvenance,
+	type AdvisoryProvenance,
+} from "../../advisory-provenance.js";
 
 /**
  * #628 item 4: the test-runner-findings cache (written at turn_end, see
@@ -22,6 +30,11 @@ export interface TestRunnerFindingsCache {
 	content: string;
 	stale?: boolean;
 	results?: TestResult[];
+	testRunGeneration?: number;
+	launchedFrom?: AdvisoryProvenance;
+	publishedAgainst?: AdvisoryProvenance;
+	provenance?: AdvisoryProvenance;
+	superseded?: boolean;
 }
 
 function failureMessage(failure: TestFailure): string {
@@ -109,9 +122,29 @@ export function testResultToProjectDiagnostics(
 
 export function testRunnerFindingsToProjectDiagnostics(
 	cache: TestRunnerFindingsCache,
+	cwd?: string,
+	runtime?: RuntimeCoordinator,
 ): ProjectDiagnostic[] {
 	if (!cache.results || cache.results.length === 0) return [];
-	return cache.results.flatMap((r) =>
-		testResultToProjectDiagnostics(r, cache.stale),
+	const validation = cwd
+		? validateAdvisoryProvenance(cache, cwd, runtime)
+		: { status: "unknown" as const, reasons: ["validation-context-missing"] };
+	const root = cwd ?? process.cwd();
+	const missingKeys = new Set(
+		(cache.provenance?.files ?? [])
+			.filter((file) => !fs.existsSync(path.resolve(root, file.path)))
+			.map((file) => advisoryPathKey(file.path, root)),
 	);
+	const historical = cache.superseded === true || cache.stale === true || validation.status !== "current";
+	return cache.results
+		.filter((result) => !missingKeys.has(advisoryPathKey(result.file, root)))
+		.flatMap((result) => testResultToProjectDiagnostics(result, historical))
+		.map((diagnostic) => historical ? {
+			...diagnostic,
+			severity: "info" as const,
+			semantic: "none" as const,
+			message: diagnostic.message.startsWith("[stale")
+				? diagnostic.message
+				: `[historical — re-run to confirm] ${diagnostic.message}`,
+		} : diagnostic);
 }

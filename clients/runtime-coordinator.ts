@@ -5,6 +5,7 @@ import type { ActionableWarningRecord } from "./actionable-warnings.js";
 import type { FunctionCallGraph } from "./call-graph.js";
 import type { WordIndex } from "./word-index.js";
 import type { CascadeRun } from "./cascade-types.js";
+import { logCascade } from "./cascade-logger.js";
 import type { CodeQualityWarningRecord } from "./code-quality-warnings.js";
 import type { FileComplexity } from "./complexity-client.js";
 import { normalizeMapKey } from "./path-utils.js";
@@ -13,6 +14,7 @@ import { ReadGuard } from "./read-guard.js";
 import type { RuleScanResult } from "./rules-scanner.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 import { TurnSummaryCollector } from "./turn-summary.js";
+import { deriveProviderFromModelId } from "./model-provider.js";
 
 export interface ErrorDebtBaseline {
 	testsPassed: boolean;
@@ -25,7 +27,16 @@ export interface CascadeSessionStats {
 	coldSnapshotTouches: number;
 }
 
-export interface DeferredFormatRecord {
+export type DeferredMutationKind = "autofix" | "format";
+
+export interface PathSetLike {
+	add(value: string): PathSetLike;
+	has(value: string): boolean;
+	delete(value: string): boolean;
+	clear(): void;
+}
+
+export interface DeferredMutationRecord {
 	filePath: string;
 	/** Formatter/language cwd captured when the edit was analyzed. */
 	cwd: string;
@@ -39,6 +50,7 @@ export interface DeferredFormatRecord {
 	firstTouchedAt: number;
 	lastTouchedAt: number;
 	toolNames: Set<"write" | "edit">;
+	kinds: Set<DeferredMutationKind>;
 	/**
 	 * The runtime's turn counter at the moment this file was (most recently)
 	 * queued/re-touched. Carried purely for provenance/instrumentation (#791)
@@ -62,6 +74,9 @@ export interface DeferredFormatRecord {
 	ownerSessionId: string | undefined;
 }
 
+/** @deprecated Use DeferredMutationRecord. */
+export type DeferredFormatRecord = DeferredMutationRecord;
+
 export class RuntimeCoordinator {
 	private _projectRoot = normalizeMapKey(process.cwd());
 	private _sessionGeneration = 0;
@@ -81,7 +96,9 @@ export class RuntimeCoordinator {
 		coldSnapshotTouches: 0,
 	};
 	private _complexityBaselines = new Map<string, FileComplexity>();
-	private _fixedThisTurn = new Set<string>();
+	private readonly _fixedThisTurn = new PathKeyedMap<true>(normalizeMapKey);
+	private readonly _writtenThisTurn = new PathKeyedMap<true>(normalizeMapKey);
+	private readonly _autofixDemotedThisTurn = new PathKeyedMap<true>(normalizeMapKey);
 	private readonly _reportedThisTurn = new Set<string>();
 	private _projectRulesScan: RuleScanResult = {
 		rules: [],
@@ -91,6 +108,19 @@ export class RuntimeCoordinator {
 	private _lifecycleReason: string | undefined;
 	private _hasStableSessionId = false;
 	private _telemetryModel = "unknown";
+	// Raw model/provider identity, separate from the combined `provider/model`
+	// display string above — worklog/disposition attribution (#1448) wants the
+	// two fields apart, blank when the host never supplied them. `_telemetryProvider`
+	// is the explicit host value when given, else derived from the model id
+	// (deriveProviderFromModelId, blank on ambiguity — never guessed).
+	private _telemetryModelId = "";
+	private _telemetryProvider = "";
+	// True once a host has supplied an explicit provider this session. An
+	// explicit provider is never downgraded by a derivation from a later
+	// model-only call; a DERIVED provider, by contrast, is re-derived on
+	// every model-only call so a mid-session model switch (e.g. gpt-5-mini →
+	// claude-sonnet-4-5) doesn't leave a stale provider from the old model.
+	private _telemetryProviderIsExplicit = false;
 	private _turnIndex = 0;
 	private _writeIndex = 0;
 	private _projectSeq = 0;
@@ -107,10 +137,9 @@ export class RuntimeCoordinator {
 	callGraph: FunctionCallGraph | null = null;
 	wordIndex: WordIndex | null = null;
 	private _readGuard: ReadGuard | null = null;
-	private readonly _pendingDeferredFormatFiles = new Map<
-		string,
-		DeferredFormatRecord
-	>();
+	private readonly _pendingDeferredMutations = new PathKeyedMap<DeferredMutationRecord>(
+		normalizeMapKey,
+	);
 	private readonly _lspReadWarmState = new Map<
 		string,
 		{ status: "warming" | "ready"; ts: number }
@@ -150,10 +179,15 @@ export class RuntimeCoordinator {
 			coldSnapshotTouches: 0,
 		};
 		this._fixedThisTurn.clear();
+		this._writtenThisTurn.clear();
+		this._autofixDemotedThisTurn.clear();
 		this._reportedThisTurn.clear();
 		this._telemetrySessionId = `lens-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 		this._hasStableSessionId = false;
 		this._telemetryModel = "unknown";
+		this._telemetryModelId = "";
+		this._telemetryProvider = "";
+		this._telemetryProviderIsExplicit = false;
 		this._turnIndex = 0;
 		this._writeIndex = 0;
 		this._projectSeq = 0;
@@ -164,7 +198,7 @@ export class RuntimeCoordinator {
 		this._gitGuardSummary = "";
 		this._gitGuardCacheUnknownReason = undefined;
 		this._readGuard = null;
-		this._pendingDeferredFormatFiles.clear();
+		this._pendingDeferredMutations.clear();
 		this._lspReadWarmState.clear();
 		this._pendingInlineBlockers.clear();
 		this._actionableWarningsThisTurn.clear();
@@ -233,7 +267,30 @@ export class RuntimeCoordinator {
 	}
 
 	beginTurn(): void {
-		this._cascadeRuns = [];
+		// #1443: runs sitting here at turn_start were appended AFTER the last
+		// turn_end drained them (consumeCascadeRuns) — the quiet-window reconcile's
+		// late re-injection (`onResolvedFound`, clients/lsp/cascade-tier.ts) lands
+		// in exactly that window. Wiping them dead-ended that delivery path: the
+		// finding was computed, formatted, appended, and then deleted before any
+		// turn_end could render it. Carry them into THIS turn instead, exactly
+		// once: `carriedTurns` is stamped on the way through and a run that the
+		// next turn_end still did not consume is dropped here with a log line
+		// rather than queued forever (a stale finding must not outlive the state
+		// it describes, and an unbounded queue would replay it every turn).
+		this._cascadeRuns = this._cascadeRuns.flatMap((run) => {
+			const carriedTurns = (run.carriedTurns ?? 0) + 1;
+			if (carriedTurns > 1) {
+				logCascade({
+					phase: "cascade_carry_over_drop",
+					filePath: run.filePath,
+					neighborCount: run.neighborCount,
+					diagnosticCount: run.diagnosticCount,
+					metadata: { carriedTurns, turnIndex: this._turnIndex },
+				});
+				return [];
+			}
+			return [{ ...run, carriedTurns }];
+		});
 		// _pendingCascadeRuns is deliberately NOT cleared here: a cascade compute
 		// still in flight past last turn_end's settle cap (fresh graph builds have
 		// measured up to ~19s) must surface on the NEXT turn_end, not be dropped —
@@ -254,6 +311,29 @@ export class RuntimeCoordinator {
 		this._turnIndex += 1;
 		this._writeIndex = 0;
 		this._reportedThisTurn.clear();
+		this._writtenThisTurn.clear();
+		this._autofixDemotedThisTurn.clear();
+	}
+
+	/** Atomically records write/edit ordering before debounce can coalesce it. */
+	recordMutationToolReceipt(
+		filePath: string,
+		toolName: "write" | "edit",
+	): { autofixMode: "immediate" | "deferred" } {
+		if (toolName === "write") {
+			this._writtenThisTurn.set(filePath, true);
+		} else if (this._writtenThisTurn.has(filePath)) {
+			this._autofixDemotedThisTurn.set(filePath, true);
+			// A later edit establishes a new final state that must be eligible for
+			// the deferred pass even if the preceding write was fixed immediately.
+			this._fixedThisTurn.delete(filePath);
+		}
+		return {
+			autofixMode:
+				toolName === "edit" || this._autofixDemotedThisTurn.has(filePath)
+					? "deferred"
+					: "immediate",
+		};
 	}
 
 	get reportedThisTurn(): Set<string> {
@@ -285,6 +365,21 @@ export class RuntimeCoordinator {
 			this._telemetryModel = model;
 		} else if (provider) {
 			this._telemetryModel = provider;
+		}
+		if (model) this._telemetryModelId = model;
+		if (provider) {
+			this._telemetryProvider = provider;
+			this._telemetryProviderIsExplicit = true;
+		} else if (model && !this._telemetryProviderIsExplicit) {
+			// No explicit provider has ever been reported this session, so the
+			// provider is (still) a derivation — re-derive it from the CURRENT
+			// model id every time. Without this, a stale derived provider from
+			// an earlier model would survive a mid-session model switch (e.g.
+			// gpt-5-mini → claude-sonnet-4-5 with no explicit provider on
+			// either call) because the old "has any provider ever been set"
+			// guard treated the derived value as sticky. An explicit provider,
+			// once set, is never touched here regardless of later model calls.
+			this._telemetryProvider = deriveProviderFromModelId(model);
 		}
 	}
 
@@ -321,6 +416,19 @@ export class RuntimeCoordinator {
 
 	get telemetryModel(): string {
 		return this._telemetryModel;
+	}
+
+	/** Raw model id (never the combined `provider/model` display string), blank
+	 * when the host hasn't reported one this session. Worklog/disposition
+	 * attribution (#1448) reads this, not {@link telemetryModel}. */
+	get telemetryModelId(): string {
+		return this._telemetryModelId;
+	}
+
+	/** Explicit host-reported provider, or a conservative derivation from the
+	 * model id (see clients/model-provider.ts), blank when neither is known. */
+	get telemetryProviderId(): string {
+		return this._telemetryProvider;
 	}
 
 	get turnIndex(): number {
@@ -516,6 +624,27 @@ export class RuntimeCoordinator {
 		return runs;
 	}
 
+	/**
+	 * R1 (#1443 follow-up): non-destructive peek used by turn_end's read-only
+	 * fast path. A carried cascade run (or one still in flight) represents a
+	 * DELIVERY OPPORTUNITY, not turn activity — an agent that answers a question
+	 * without editing anything must still get yesterday's late finding. Before
+	 * this, the files-empty early return skipped `settleCascadeRuns` /
+	 * `consumeCascadeRuns` entirely on a read-only turn, so `beginTurn`'s next
+	 * carry pass saw the run as having survived a turn_start with no offsetting
+	 * drain and dropped it — burning the one-turn carry allowance on a turn that
+	 * never had a chance to deliver.
+	 */
+	hasCascadeRuns(): boolean {
+		// Carried, ALREADY-BUILT runs only. Pending (still-settling) computes are
+		// deliberately excluded: a read-only turn that fell through for a pending
+		// run would block on the full settle cap — every turn, forever, when the
+		// compute never resolves (re-review finding F1). A pending run loses
+		// nothing by waiting: settleCascadeRuns re-parks it and the next turn
+		// that actually settles it delivers it.
+		return this._cascadeRuns.length > 0;
+	}
+
 	recordInlineBlockers(filePath: string, summary: string): void {
 		this._pendingInlineBlockers.set(path.resolve(filePath), {
 			filePath,
@@ -612,8 +741,20 @@ export class RuntimeCoordinator {
 		return this._complexityBaselines;
 	}
 
-	get fixedThisTurn(): Set<string> {
-		return this._fixedThisTurn;
+	get fixedThisTurn(): PathSetLike {
+		// Self-referencing local so chained add() returns the same facade
+		// instead of re-entering this getter and allocating a new one per call
+		// (sonar S7725).
+		const facade: PathSetLike = {
+			add: (filePath) => {
+				this._fixedThisTurn.set(filePath, true);
+				return facade;
+			},
+			has: (filePath) => this._fixedThisTurn.has(filePath),
+			delete: (filePath) => this._fixedThisTurn.delete(filePath),
+			clear: () => this._fixedThisTurn.clear(),
+		};
+		return facade;
 	}
 
 	get projectRulesScan(): RuleScanResult {
@@ -630,12 +771,47 @@ export class RuntimeCoordinator {
 	}
 
 	/**
-	 * Queue `filePath` for deferred formatting at `agent_end`. Returns `true`
-	 * when this call created a NEW pending entry, `false` when it re-touched
-	 * an already-queued file. #673: the caller uses this to publish
-	 * `pilens:format:queued` only on first queue entry, so repeated edits to
-	 * the same already-queued file before `agent_end` don't spam the bus.
+	 * Queue one mutation kind for `filePath` at `agent_end`. Returns `true`
+	 * when this call created a pending entry or added a new kind, and `false`
+	 * for a same-kind re-touch. Callers publish each kind's first transition
+	 * without spamming repeated edits before `agent_end`.
 	 */
+	deferMutation(
+		filePath: string,
+		cwd: string,
+		toolName: "write" | "edit",
+		turnStateCwd: string,
+		kind: DeferredMutationKind,
+		ownerSessionId?: string,
+	): boolean {
+		const key = path.resolve(filePath);
+		const now = Date.now();
+		const existing = this._pendingDeferredMutations.get(key);
+		if (existing) {
+			const addedKind = !existing.kinds.has(kind);
+			existing.lastTouchedAt = now;
+			existing.cwd = cwd;
+			existing.turnStateCwd = turnStateCwd;
+			existing.toolNames.add(toolName);
+			existing.kinds.add(kind);
+			existing.queuedTurnIndex = this._turnIndex;
+			existing.ownerSessionId = ownerSessionId;
+			return addedKind;
+		}
+		this._pendingDeferredMutations.set(key, {
+			filePath: key,
+			cwd,
+			turnStateCwd,
+			firstTouchedAt: now,
+			lastTouchedAt: now,
+			toolNames: new Set([toolName]),
+			kinds: new Set([kind]),
+			queuedTurnIndex: this._turnIndex,
+			ownerSessionId,
+		});
+		return true;
+	}
+
 	deferFormat(
 		filePath: string,
 		cwd: string,
@@ -643,33 +819,15 @@ export class RuntimeCoordinator {
 		turnStateCwd: string,
 		ownerSessionId?: string,
 	): boolean {
-		const key = path.resolve(filePath);
-		const now = Date.now();
-		const existing = this._pendingDeferredFormatFiles.get(key);
-		if (existing) {
-			existing.lastTouchedAt = now;
-			existing.cwd = cwd;
-			existing.turnStateCwd = turnStateCwd;
-			existing.toolNames.add(toolName);
-			existing.queuedTurnIndex = this._turnIndex;
-			existing.ownerSessionId = ownerSessionId;
-			return false;
-		}
-		this._pendingDeferredFormatFiles.set(key, {
-			filePath: key,
-			cwd,
-			turnStateCwd,
-			firstTouchedAt: now,
-			lastTouchedAt: now,
-			toolNames: new Set([toolName]),
-			queuedTurnIndex: this._turnIndex,
-			ownerSessionId,
-		});
-		return true;
+		return this.deferMutation(filePath, cwd, toolName, turnStateCwd, "format", ownerSessionId);
 	}
 
 	get pendingDeferredFormatCount(): number {
-		return this._pendingDeferredFormatFiles.size;
+		return this._pendingDeferredMutations.size;
+	}
+
+	get pendingDeferredMutationCount(): number {
+		return this._pendingDeferredMutations.size;
 	}
 
 	/**
@@ -678,8 +836,8 @@ export class RuntimeCoordinator {
 	 * flush call sites should prefer {@link claimDeferredFormatFiles}.
 	 */
 	consumeDeferredFormatFiles(): DeferredFormatRecord[] {
-		const records = [...this._pendingDeferredFormatFiles.values()];
-		this._pendingDeferredFormatFiles.clear();
+		const records = [...this._pendingDeferredMutations.values()];
+		this._pendingDeferredMutations.clear();
 		return records;
 	}
 
@@ -712,20 +870,20 @@ export class RuntimeCoordinator {
 		const claimed: DeferredFormatRecord[] = [];
 		const staleClaimed: DeferredFormatRecord[] = [];
 		const deferredToOwner: DeferredFormatRecord[] = [];
-		for (const [key, record] of this._pendingDeferredFormatFiles) {
+		for (const [key, record] of this._pendingDeferredMutations) {
 			const sameSession =
 				record.ownerSessionId === undefined ||
 				currentSessionId === undefined ||
 				record.ownerSessionId === currentSessionId;
 			if (sameSession) {
 				claimed.push(record);
-				this._pendingDeferredFormatFiles.delete(key);
+				this._pendingDeferredMutations.delete(key);
 				continue;
 			}
 			const age = now - record.lastTouchedAt;
 			if (age > staleAfterMs) {
 				staleClaimed.push(record);
-				this._pendingDeferredFormatFiles.delete(key);
+				this._pendingDeferredMutations.delete(key);
 				continue;
 			}
 			deferredToOwner.push(record);
@@ -737,10 +895,26 @@ export class RuntimeCoordinator {
 	requeueDeferredFormatFiles(records: DeferredFormatRecord[]): void {
 		for (const record of records) {
 			const key = path.resolve(record.filePath);
-			if (!this._pendingDeferredFormatFiles.has(key)) {
-				this._pendingDeferredFormatFiles.set(key, record);
+			const existing = this._pendingDeferredMutations.get(key);
+			if (existing) {
+				for (const kind of record.kinds) existing.kinds.add(kind);
+				for (const toolName of record.toolNames) existing.toolNames.add(toolName);
+				continue;
 			}
+			this._pendingDeferredMutations.set(key, {
+				...record,
+				kinds: new Set(record.kinds),
+				toolNames: new Set(record.toolNames),
+			});
 		}
+	}
+
+	claimDeferredMutations(currentSessionId: string | undefined, now: number, staleAfterMs: number) {
+		return this.claimDeferredFormatFiles(currentSessionId, now, staleAfterMs);
+	}
+
+	requeueDeferredMutations(records: DeferredMutationRecord[]): void {
+		this.requeueDeferredFormatFiles(records);
 	}
 
 	shouldWarmLspOnRead(filePath: string, maxAgeMs = 120_000): boolean {
