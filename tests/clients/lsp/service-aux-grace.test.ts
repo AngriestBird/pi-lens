@@ -15,9 +15,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { hashDiagnosticContent } from "../../../clients/lsp/diagnostic-binding.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
+const logLatency = vi.fn();
+
+vi.mock("../../../clients/latency-logger.js", () => ({ logLatency }));
 
 vi.mock("../../../clients/lsp/config.js", () => ({
 	getServersForFileWithConfig,
@@ -95,8 +99,10 @@ function makeDiagnostic(message: string) {
 function makeClient(
 	delayMs: number,
 	diags: ReturnType<typeof makeDiagnostic>[] = [],
+	options: { serverId?: string } = {},
 ) {
 	let waitSettled = false;
+	let version = 0;
 	return {
 		isAlive: () => true,
 		shutdown: async () => {},
@@ -106,7 +112,23 @@ function makeClient(
 			diagnosticProviderKind: "none",
 		}),
 		getOperationSupport: () => ({}),
-		diagnosticsVersion: 0,
+		// #1458 S6: production always sets `serverId` on the real client
+		// (`createLSPClient({ serverId: server.id, ... })` in index.ts) and the
+		// per-server budget lookup (`perServerTimeout`) matches entries by
+		// `entry.client.serverId`. A double that omits it silently falls
+		// through that match to a different branch, so a budgetMs assertion
+		// can pass without exercising the real lookup at all. Always pass
+		// `options.serverId` matching the server descriptor's id.
+		serverId: options.serverId,
+		// #1458 S1: a real publish advances `diagnosticsVersion` (client.ts
+		// `recordBinding`/push handling). This is a GETTER (not a static
+		// field) so the evidence-based aux-outcome check can observe the
+		// bump. Spreading this object (`{...makeClient(...)}`) evaluates the
+		// getter once and freezes its value — callers that need a live
+		// version must construct via `options.serverId` instead of spreading.
+		get diagnosticsVersion() {
+			return version;
+		},
 		// Only returns diagnostics after waitForDiagnostics has resolved,
 		// matching real client behaviour (server pushes → client caches → wait resolves).
 		getDiagnostics: vi.fn(() => (waitSettled ? diags : [])),
@@ -120,8 +142,76 @@ function makeClient(
 				new Promise<void>((resolve) =>
 					setTimeout(() => {
 						waitSettled = true;
+						// A genuine publish (non-empty diags) is what advances the
+						// version on a real client; a silent/empty settle must not,
+						// or the evidence-based outcome check below can't tell the
+						// two apart.
+						if (diags.length > 0) version += 1;
 						resolve();
 					}, delayMs),
+				),
+		),
+	};
+}
+
+function makeLateBoundClient(content: string, serverId = "opengrep") {
+	let published = false;
+	const diagnostic = makeDiagnostic("late aux finding");
+	return {
+		...makeClient(2500, [], { serverId }),
+		getDiagnostics: vi.fn(() => (published ? [diagnostic] : [])),
+		getDiagnosticBinding: vi.fn(() =>
+			published ? { contentHash: hashDiagnosticContent(content) } : undefined,
+		),
+		notify: {
+			open: vi.fn(async () => {
+				published = false;
+			}),
+			change: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		},
+		waitForDiagnostics: vi.fn(
+			() =>
+				new Promise<void>((resolve) =>
+					setTimeout(() => {
+						published = true;
+						resolve();
+					}, 2500),
+				),
+		),
+	};
+}
+
+/**
+ * #1458 S7: a version-less publish (server never reports `publishDiagnostics.
+ * version`) makes `client.ts`'s `recordBinding` DELETE any stored binding
+ * (`docVersion === undefined` branch) — never resurrect a stale one, never
+ * synthesize a contentHash. `getDiagnosticBinding` must therefore keep
+ * returning `undefined` even after diagnostics genuinely landed, so the
+ * carry-over check (`binding?.contentHash !== touchContentHash`) fails
+ * closed instead of replaying an unverifiable late result.
+ */
+function makeVersionlessLateClient(serverId = "opengrep") {
+	let published = false;
+	const diagnostic = makeDiagnostic("late aux finding");
+	return {
+		...makeClient(2500, [], { serverId }),
+		getDiagnostics: vi.fn(() => (published ? [diagnostic] : [])),
+		getDiagnosticBinding: vi.fn(() => undefined),
+		notify: {
+			open: vi.fn(async () => {
+				published = false;
+			}),
+			change: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		},
+		waitForDiagnostics: vi.fn(
+			() =>
+				new Promise<void>((resolve) =>
+					setTimeout(() => {
+						published = true;
+						resolve();
+					}, 2500),
 				),
 		),
 	};
@@ -133,6 +223,7 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		vi.resetModules();
 		getServersForFileWithConfig.mockReset();
 		createLSPClient.mockReset();
+		logLatency.mockReset();
 		delete process.env.PI_LENS_AUX_GRACE_MS;
 	});
 
@@ -149,8 +240,12 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		const service = new LSPService();
 
 		// Primary settles quickly; aux takes 3000ms (well beyond grace).
-		const primaryClient = makeClient(100, [makeDiagnostic("primary error")]);
-		const auxClient = makeClient(3000, [makeDiagnostic("aux finding")]);
+		const primaryClient = makeClient(100, [makeDiagnostic("primary error")], {
+			serverId: "ts-primary",
+		});
+		const auxClient = makeClient(3000, [makeDiagnostic("aux finding")], {
+			serverId: "opengrep-aux",
+		});
 
 		const primaryServer = makePrimaryServer("ts-primary");
 		const auxServer = makeAuxServer("opengrep-aux");
@@ -210,8 +305,12 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		const service = new LSPService();
 
 		// Primary settles at 100ms, aux settles at 400ms (within 500ms grace).
-		const primaryClient = makeClient(100, [makeDiagnostic("primary error")]);
-		const auxClient = makeClient(400, [makeDiagnostic("aux finding")]);
+		const primaryClient = makeClient(100, [makeDiagnostic("primary error")], {
+			serverId: "ts-primary",
+		});
+		const auxClient = makeClient(400, [makeDiagnostic("aux finding")], {
+			serverId: "opengrep-aux",
+		});
 
 		const primaryServer = makePrimaryServer("ts-primary");
 		const auxServer = makeAuxServer("opengrep-aux");
@@ -243,6 +342,43 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		expect(messages).toContain("aux finding");
 	});
 
+	it("gives an auxiliary its declared budget up to the global ceiling", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const primaryClient = makeClient(100, [makeDiagnostic("primary error")], {
+			serverId: "ts-primary",
+		});
+		// Opengrep's declared 3500ms budget exceeds the 2000ms global aux ceiling,
+		// but its measured ~1.3s warm scan must no longer be cut off at 500ms.
+		const auxClient = makeClient(1300, [makeDiagnostic("aux finding")], {
+			serverId: "opengrep",
+		});
+
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(primaryClient)
+			.mockResolvedValueOnce(auxClient);
+
+		await service.getClientsForFile(FILE);
+		const touchPromise = service.touchFile(FILE, "content-budget", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+
+		await vi.advanceTimersByTimeAsync(1310);
+		const result = await touchPromise;
+		expect(result).toBeDefined();
+		expect(result?.diags.map((diagnostic) => diagnostic.message)).toContain(
+			"aux finding",
+		);
+	});
+
 	it("still waits for slow primary even if aux settles early", async () => {
 		process.env.PI_LENS_AUX_GRACE_MS = String(AUX_GRACE_MS);
 
@@ -250,8 +386,12 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		const service = new LSPService();
 
 		// Aux settles fast; primary is slow.
-		const primaryClient = makeClient(1200, [makeDiagnostic("primary error")]);
-		const auxClient = makeClient(50, [makeDiagnostic("aux finding")]);
+		const primaryClient = makeClient(1200, [makeDiagnostic("primary error")], {
+			serverId: "ts-primary",
+		});
+		const auxClient = makeClient(50, [makeDiagnostic("aux finding")], {
+			serverId: "opengrep-aux",
+		});
 
 		const primaryServer = makePrimaryServer("ts-primary");
 		const auxServer = makeAuxServer("opengrep-aux");
@@ -289,6 +429,264 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 			(d: { message: string }) => d.message,
 		);
 		expect(messages).toContain("primary error");
+	});
+
+	it("carries a late bound auxiliary publication into the next unchanged read", async () => {
+		const content = "const value = 1;";
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(100, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(makeLateBoundClient(content));
+		await service.getClientsForFile(FILE);
+
+		const first = service.touchFile(FILE, content, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		expect((await first)?.diags).toHaveLength(0);
+		await vi.advanceTimersByTimeAsync(400);
+
+		const next = service.touchFile(FILE, content, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		expect((await next)?.diags.map((diagnostic) => diagnostic.message)).toContain(
+			"late aux finding",
+		);
+	});
+
+	it("rejects a late auxiliary publication when the next read changes content", async () => {
+		const oldContent = "const value = 1;";
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(100, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(makeLateBoundClient(oldContent));
+		await service.getClientsForFile(FILE);
+
+		const first = service.touchFile(FILE, oldContent, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		await first;
+		await vi.advanceTimersByTimeAsync(400);
+
+		const next = service.touchFile(FILE, "const value = 2;", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		expect((await next)?.diags).toHaveLength(0);
+	});
+
+	it("logs a cut-off auxiliary outcome when the grace timer wins the race", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(100, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(makeClient(3000, [], { serverId: "opengrep" }));
+		await service.getClientsForFile(FILE);
+
+		const touch = service.touchFile(FILE, "telemetry", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		await touch;
+
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_aux_wait_outcome",
+				metadata: expect.objectContaining({
+					outcomes: [
+						expect.objectContaining({
+							serverId: "opengrep",
+							// #1458 S1: the grace timer (2000ms) wins over the aux's own
+							// 3000ms wait — "cut_off", not "settled"/"answered".
+							outcome: "cut_off",
+							budgetMs: 2000,
+							elapsedSinceNotifyMs: expect.any(Number),
+						}),
+					],
+				}),
+			}),
+		);
+	});
+
+	// #1458 S1: `waitForDiagnostics` RESOLVES on its own timeout and never
+	// rejects (client.ts) — so a silent auxiliary's promise settling within
+	// budget looks, promise-wise, identical to one that actually answered.
+	// The outcome must be decided from EVIDENCE (a `diagnosticsVersion` bump)
+	// rather than from whether the raced promise settled before the grace
+	// timer. Reproduces the reviewer's repro: primary settles, opengrep
+	// settles silently (no publish) well within its budget — must record
+	// "silent", never "answered"/"settled".
+	it("does not record a silent auxiliary as answered (evidence-based outcome)", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		// Primary settles at 800ms. Aux's OWN wait resolves at 900ms (well
+		// within its ~2000ms budget) but publishes NOTHING — this is the
+		// "silent scanner" case: the promise settles, but no evidence exists
+		// that a publication landed.
+		createLSPClient
+			.mockResolvedValueOnce(
+				makeClient(800, [makeDiagnostic("primary error")], {
+					serverId: "ts-primary",
+				}),
+			)
+			.mockResolvedValueOnce(makeClient(900, [], { serverId: "opengrep" }));
+		await service.getClientsForFile(FILE);
+
+		const touch = service.touchFile(FILE, "silent-aux", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(800);
+		await vi.advanceTimersByTimeAsync(100);
+		await vi.advanceTimersByTimeAsync(10);
+		await touch;
+
+		const call = logLatency.mock.calls.find(
+			([entry]) => entry.phase === "lsp_aux_wait_outcome",
+		);
+		expect(call).toBeDefined();
+		const outcomes = call?.[0]?.metadata?.outcomes as
+			| Array<{ serverId: string; outcome: string }>
+			| undefined;
+		expect(outcomes).toEqual([
+			expect.objectContaining({ serverId: "opengrep", outcome: "silent" }),
+		]);
+		// The mutation this pins against: recording the outcome as "settled"
+		// whenever the raced promise resolves (rather than from evidence) would
+		// mark this silent scanner "answered"/"settled" — it must not.
+		expect(outcomes?.[0]?.outcome).not.toBe("answered");
+		expect(outcomes?.[0]?.outcome).not.toBe("settled");
+	});
+
+	it("rejects a version-less late auxiliary publication (recordBinding fails closed, #1458 S7)", async () => {
+		const content = "const value = 1;";
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(100, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(makeVersionlessLateClient());
+		await service.getClientsForFile(FILE);
+
+		const first = service.touchFile(FILE, content, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		expect((await first)?.diags).toHaveLength(0);
+		await vi.advanceTimersByTimeAsync(400);
+
+		const next = service.touchFile(FILE, content, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(2110);
+		// The auxiliary DID publish (getDiagnostics now returns a finding), but
+		// the publish was version-less, so no binding was ever recorded —
+		// carry must fail closed rather than replay an unverifiable result.
+		expect((await next)?.diags).toHaveLength(0);
+	});
+});
+
+describe("R8 — aux grace: getDiagnostics with-auxiliary path (#1458 S2 extend)", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		logLatency.mockReset();
+		delete process.env.PI_LENS_AUX_GRACE_MS;
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		delete process.env.PI_LENS_AUX_GRACE_MS;
+	});
+
+	// #1458 S2: the SECOND aux-wait implementation (raceToCompletion, used by
+	// LSPService.getDiagnostics — the path actionable-warnings.ts hits on a
+	// content-hash cache miss) used to hand every auxiliary a flat 500ms
+	// grace regardless of its declared budget, starving the exact same
+	// opengrep warm-run figure the touchFile fix (S2 above) was built around.
+	// Extending PromiseDescriptor.budgetMs to raceToCompletion closes that
+	// second lane with the identical declared-budget-capped-by-ceiling shape.
+	it("includes a warm auxiliary (1300ms) that a flat 500ms default would have starved", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(
+				makeClient(100, [makeDiagnostic("primary error")], {
+					serverId: "ts-primary",
+				}),
+			)
+			.mockResolvedValueOnce(
+				makeClient(1300, [makeDiagnostic("aux finding")], {
+					serverId: "opengrep",
+				}),
+			);
+		await service.getClientsForFile(FILE);
+		createLSPClient.mockReset();
+
+		// "document" mode → 0ms quality grace, so only the aux-grace ceiling
+		// governs (matches touchFile's test scenarios and isolates the aux
+		// budget behavior from the unrelated early-unblock quality grace).
+		const diagnosticsPromise = service.getDiagnostics(FILE, "document");
+		await vi.advanceTimersByTimeAsync(1300);
+		await vi.advanceTimersByTimeAsync(10);
+
+		const diags = await diagnosticsPromise;
+		const messages = diags.map((d) => d.message);
+		expect(messages).toContain("primary error");
+		expect(messages).toContain("aux finding");
 	});
 });
 
