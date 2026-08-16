@@ -120,6 +120,28 @@ describe("#1253 — warm-attach serves the touch confirmation", () => {
 		expect(result.diagnostics).toHaveLength(1);
 	});
 
+	it("carries the NARROWED confirmation and the server ids across the wire (#1470)", async () => {
+		// A partial touch is not inconclusive — the primary answered — so without
+		// an explicit narrowed value the far side would read `confirmation` as
+		// absent and be unable to tell "old incumbent" from "opengrep was cut off".
+		touchFile.mockResolvedValue({
+			diags: [],
+			confirmation: "partial",
+			unconfirmedServerIds: ["opengrep"],
+		});
+
+		const result = await serve();
+		const overTheWire = JSON.parse(
+			JSON.stringify(result),
+		) as WarmDiagnosticsResponse;
+
+		expect(overTheWire.confirmation).toBe("partial");
+		expect(overTheWire.unconfirmedServerIds).toEqual(["opengrep"]);
+		// The load-bearing consequence: every existing consumer tests
+		// `=== "confirmed"`, so the narrowing fails closed for free.
+		expect(overTheWire.confirmation).not.toBe("confirmed");
+	});
+
 	it("survives the JSON round trip the socket actually performs", async () => {
 		touchFile.mockResolvedValue({ diags: [], confirmation: "confirmed" });
 

@@ -3240,6 +3240,20 @@ export class LSPService {
 		// confirmed answer.
 		const inconclusive = notifyWriteTimedOut || diagnosticsTimedOut;
 
+		// #1470: an auxiliary whose push wait was CUT OFF by the aux grace timer
+		// (R8/#714) contributed exactly as much evidence about this file as one that
+		// went silent inside its own budget — none. The silent case already reads as
+		// inconclusive; the cut-off case did not, so a hung opengrep resolved
+		// `confirmation: "confirmed"` and read as confirmed-clean on the security
+		// lane. This does NOT flip the touch to inconclusive: that would discard a
+		// primary answer that IS trustworthy (#533 honesty doctrine cuts both ways —
+		// overclaiming and underclaiming are both dishonest). Instead the confirmation
+		// is NARROWED: `"partial"`, naming the servers it does not speak for, so every
+		// consumer that treats confirmation as proof of coverage fails closed while
+		// the primary's findings still flow.
+		const unconfirmedServerIds = auxCutOffServerIds ?? [];
+		const coverageGap = unconfirmedServerIds.length > 0;
+
 		// #667: a confirmed (non-inconclusive) diagnostics-mode touch is the
 		// "actually warm" signal `ensureWarmForSweep` waits for — mark every
 		// spawned server so a later sweep in this session sees the check as a
@@ -3250,10 +3264,18 @@ export class LSPService {
 		// write stalled must still be eligible, so only servers whose OWN write
 		// timed out are skipped here (rather than gating the whole loop on the
 		// file-level `inconclusive`).
+		//
+		// #1470: same per-server reasoning for a CUT-OFF auxiliary. "Demonstrated
+		// ready" means this server answered for this file; an auxiliary our grace
+		// timer cut off demonstrably did not, so marking it warm would let
+		// `ensureWarmForSweep` skip the warm-up round trip on the strength of a touch
+		// it never answered.
 		const notifyTimedOutServerIds = new Set(notifyWriteTimedOutServerIds);
+		const cutOffServerIds = new Set(unconfirmedServerIds);
 		if (diagnosticsMode !== "none" && !diagnosticsTimedOut) {
 			for (const entry of spawned) {
 				if (notifyTimedOutServerIds.has(entry.info.id)) continue;
+				if (cutOffServerIds.has(entry.info.id)) continue;
 				const key = await this.demonstratedReadyKeyFor(entry.info, filePath);
 				if (key) this.markDemonstratedReadyKey(key);
 			}
@@ -3268,7 +3290,14 @@ export class LSPService {
 		// empty `collected` must never erase a previously-confirmed non-empty
 		// record (that's the #570 bug — a timeout silently reporting as clean
 		// and wiping out known-good diagnostic state).
-		if (collected !== undefined && !inconclusive) {
+		// #1470: a PARTIAL touch is the same hazard wearing a different flag. Its
+		// merged array is missing whatever the cut-off auxiliary would have said, so
+		// priming the cache with it would let `actionable-warnings`' hash-guarded
+		// read replay a partially-covered result as an authoritative observation —
+		// and an empty one would DELETE a previously-confirmed record on the strength
+		// of a scanner that never answered. Skip the prime; the next read pays a real
+		// round trip instead of trusting an incomplete one.
+		if (collected !== undefined && !inconclusive && !coverageGap) {
 			const normalizedKey = normalizeMapKey(filePath);
 			if (collected.length > 0) {
 				this.lastKnownDiagnostics.set(normalizedKey, collected);
@@ -3292,6 +3321,13 @@ export class LSPService {
 
 		if (collected !== undefined && inconclusive) {
 			result.inconclusive = true;
+		} else if (collected !== undefined && coverageGap) {
+			// #1470: narrowed, not collapsed. The primary's findings ride along in
+			// `.diags` exactly as before; what changes is that the touch now states
+			// which servers it does not speak for, so no consumer can read this as a
+			// full clean bill of health.
+			result.confirmation = "partial";
+			result.unconfirmedServerIds = [...unconfirmedServerIds];
 		} else if (collected !== undefined) {
 			// Preserve the lower-level affirmative result across consumers. In
 			// particular, the silent-clean gates above clear diagnosticsTimedOut only
@@ -3364,6 +3400,13 @@ export class LSPService {
 				}),
 				diagnosticsTimedOut,
 				inconclusive,
+				// #1470: the touch's own honesty verdict, so a `cut_off` row in
+				// `lsp_aux_wait_outcome` can be joined to the touch that produced it and
+				// shown NOT to have claimed confirmation for that server's coverage.
+				// Absent for a non-collecting touch, which claims nothing either way.
+				...(result.confirmation !== undefined && {
+					confirmation: result.confirmation,
+				}),
 				// R8 (#714): server ids of auxiliaries whose push wait was cut off by
 				// the aux grace window (primary settled clean + aux timed out in grace).
 				// Absent when no aux was cut off. These servers' diagnostics are

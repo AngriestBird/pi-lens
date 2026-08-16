@@ -13,6 +13,7 @@
  */
 
 import { logExtension } from "../../extension-log.js";
+import { touchCoverageGap } from "../../lsp/diagnostic-binding.js";
 import { getLSPService } from "../../lsp/index.js";
 import { RUNTIME_CONFIG } from "../../runtime-config.js";
 import { PRIORITY } from "../priorities.js";
@@ -143,6 +144,11 @@ const lspRunner: RunnerDefinition = {
 		// one spawned server) — an empty `lspDiags` in that case is NOT a
 		// confirmed clean result and must not be reported as one (#570).
 		let diagnosticsInconclusive = false;
+		// #1470: server ids the touch carries no evidence for — an auxiliary whose
+		// push wait our aux grace timer cut off. The touch is NOT inconclusive (the
+		// primary answered, and its findings below are real), so this is tracked
+		// separately: the only claim it invalidates is "0 diagnostics means clean".
+		let unconfirmedServerIds: readonly string[] = [];
 		let usedWarmAttach = false;
 		let failureReason = "";
 		const content = readFileContent(ctx.filePath);
@@ -190,6 +196,7 @@ const lspRunner: RunnerDefinition = {
 			} else {
 				lspDiags = touched.diags;
 				diagnosticsInconclusive = touched.inconclusive === true;
+				unconfirmedServerIds = touchCoverageGap(touched);
 			}
 		} catch (err) {
 			serverFailed = true;
@@ -252,6 +259,20 @@ const lspRunner: RunnerDefinition = {
 		}
 
 		if (lspDiags.length === 0) {
+			if (unconfirmedServerIds.length > 0) {
+				// #1470: an auxiliary was cut off by the aux grace timer, so this empty
+				// merged result is missing whatever that scanner would have said — a
+				// hung opengrep must not read as a clean bill of health on the security
+				// lane. `RunnerResult` has no channel for "clean for these servers,
+				// unknown for those", so the only honest verdict this seam can express
+				// for an EMPTY result is "not checked" — which is what "skipped" means
+				// here, and it lets the coverage notice say so once. Nothing is thrown
+				// away: the primary answered with zero findings, so there is nothing to
+				// report; when it DOES have findings the branches below still report
+				// them (see the non-empty path), which is how a trustworthy primary
+				// stays trustworthy under a cut-off auxiliary.
+				return { status: "skipped", diagnostics: [], semantic: "none" };
+			}
 			return {
 				status: "succeeded",
 				diagnostics: [],

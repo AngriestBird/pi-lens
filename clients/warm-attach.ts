@@ -10,6 +10,7 @@ import {
 	STALE_HEARTBEAT_MS,
 } from "./instance-reaper.js";
 import { logLatency } from "./latency-logger.js";
+import { touchCoverageGap } from "./lsp/diagnostic-binding.js";
 import { loadLspService } from "./lsp-lazy.js";
 import {
 	contentHash,
@@ -160,6 +161,17 @@ async function serveRequest(
 			// server is indistinguishable from "never answered" on the far side.
 			...(touched?.confirmation === "confirmed"
 				? { confirmation: "confirmed" as const }
+				: {}),
+			// #1470: a PARTIAL touch crosses the socket as itself rather than as a
+			// missing key. Omitting it would still fail closed on the far side, but it
+			// would be indistinguishable from an old incumbent that never sent the
+			// field — and the whole point of narrowing is that the reader can tell
+			// which coverage is real.
+			...(touched?.confirmation === "partial"
+				? {
+						confirmation: "partial" as const,
+						unconfirmedServerIds: [...touchCoverageGap(touched)],
+					}
 				: {}),
 		},
 	};

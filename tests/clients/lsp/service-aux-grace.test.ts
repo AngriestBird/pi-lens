@@ -848,3 +848,169 @@ describe("R8 — aux grace: raceToCompletion per-role unit tests", () => {
 		expect(result.find((r) => r.id === "primary")).toBeDefined();
 	});
 });
+
+/**
+ * #1470 — a cut-off auxiliary must not yield a conclusive touch.
+ *
+ * The three-way probe the #1458 review used, promoted from telemetry into the
+ * touch's own honesty state. All three auxiliaries carry the SAME amount of
+ * evidence about the file in the failing cases — none — so all three must be
+ * distinguishable in what the touch CLAIMS:
+ *
+ *   - silent inside its own budget → `inconclusive` (pre-existing, unchanged)
+ *   - published within grace       → `confirmation: "confirmed"`
+ *   - hung, grace timer wins       → `confirmation: "partial"` naming it
+ *
+ * The pre-fix defect: the hung case resolved `confirmation: "confirmed"` with
+ * `inconclusive: undefined`, so a hung opengrep read as confirmed-clean on the
+ * security lane.
+ */
+describe("#1470 — cut-off auxiliary honesty", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		logLatency.mockReset();
+		delete process.env.PI_LENS_AUX_GRACE_MS;
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		delete process.env.PI_LENS_AUX_GRACE_MS;
+	});
+
+	/**
+	 * Drives one touch with a primary that answers at 800ms and a single
+	 * auxiliary whose own wait settles at `auxDelayMs`, then returns both the
+	 * touch result and the `lsp_aux_wait_outcome` row it produced — so each probe
+	 * can assert that the telemetry outcome and the claimed confirmation agree.
+	 */
+	async function probe(
+		auxDelayMs: number,
+		auxDiags: ReturnType<typeof makeDiagnostic>[],
+	) {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(
+				makeClient(800, [], { serverId: "ts-primary" }),
+			)
+			.mockResolvedValueOnce(
+				makeClient(auxDelayMs, auxDiags, { serverId: "opengrep" }),
+			);
+		await service.getClientsForFile(FILE);
+
+		const touch = service.touchFile(FILE, "probe", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		// 800 (primary) + 2000 (aux ceiling) + slack covers every probe.
+		await vi.advanceTimersByTimeAsync(3000);
+		const result = await touch;
+		const outcomes = logLatency.mock.calls.find(
+			([entry]) => entry.phase === "lsp_aux_wait_outcome",
+		)?.[0]?.metadata?.outcomes as
+			| Array<{ serverId: string; outcome: string }>
+			| undefined;
+		return { result, outcome: outcomes?.[0]?.outcome };
+	}
+
+	it("a HUNG auxiliary (cut_off) narrows the confirmation and names the server", async () => {
+		// Aux wait outlives the 2000ms ceiling → our grace timer wins.
+		const { result, outcome } = await probe(3000, [makeDiagnostic("never")]);
+		expect(outcome).toBe("cut_off");
+		// The defect: this was "confirmed" with no coverage caveat at all.
+		expect(result?.confirmation).toBe("partial");
+		expect(result?.unconfirmedServerIds).toEqual(["opengrep"]);
+		// NARROWED, not collapsed — the primary answered, so the touch is not
+		// inconclusive and its diagnostics are not discarded (#533 cuts both ways).
+		expect(result?.inconclusive).toBeUndefined();
+	});
+
+	it("a SILENT auxiliary is left exactly as it was — #1470 narrows only cut_off", async () => {
+		// Aux settles at 900ms, inside its own budget, publishing nothing — the
+		// same silent-scanner shape #1458's evidence-based outcome test uses. The
+		// issue's acceptance criterion is that this path is UNCHANGED: whatever
+		// honesty verdict it produced before (in the dogfood run, an inconclusive
+		// touch, because a silent aux burns the budget that is also the touch's
+		// detection deadline) it still produces. It must not acquire a cut_off
+		// coverage gap it did not earn.
+		const { result, outcome } = await probe(900, []);
+		expect(outcome).toBe("silent");
+		expect(result?.confirmation).not.toBe("partial");
+		expect(result?.unconfirmedServerIds).toBeUndefined();
+	});
+
+	it("an auxiliary that PUBLISHES within grace still yields an unqualified confirmation", async () => {
+		const { result, outcome } = await probe(
+			900,
+			[makeDiagnostic("aux finding")],
+		);
+		expect(outcome).toBe("answered");
+		expect(result?.confirmation).toBe("confirmed");
+		expect(result?.unconfirmedServerIds).toBeUndefined();
+		expect(
+			(result?.diags ?? []).map((d: { message: string }) => d.message),
+		).toContain("aux finding");
+	});
+
+	it("records the narrowed verdict on the same lsp_touch_file row as auxCutOffServerIds", async () => {
+		// Observability contract from the issue: a `cut_off` row must coincide
+		// with a touch that no longer claims confirmation for that server. Both
+		// facts have to be readable from latency.log without a code read.
+		await probe(3000, [makeDiagnostic("never")]);
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					confirmation: "partial",
+					auxCutOffServerIds: ["opengrep"],
+					inconclusive: false,
+				}),
+			}),
+		);
+	});
+
+	it("does not prime the last-known cache from a partially covered touch", async () => {
+		// #570's wipe class re-entering through the cut-off door: the merged array
+		// is missing whatever the cut-off scanner would have said, so an empty one
+		// must not delete a previously-confirmed record and a non-empty one must
+		// not be replayed as an authoritative observation.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(
+				makeClient(100, [makeDiagnostic("primary error")], {
+					serverId: "ts-primary",
+				}),
+			)
+			.mockResolvedValueOnce(makeClient(3000, [], { serverId: "opengrep" }));
+		await service.getClientsForFile(FILE);
+
+		const content = "cache-probe";
+		const touch = service.touchFile(FILE, content, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(3000);
+		const result = await touch;
+		expect(result?.confirmation).toBe("partial");
+		expect(
+			service.getLastKnownDiagnostics(FILE, hashDiagnosticContent(content)),
+		).toBeUndefined();
+	});
+});

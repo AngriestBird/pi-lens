@@ -1130,6 +1130,43 @@ describe("lsp_diagnostics tool", () => {
 			}
 		});
 
+		it("a cut-off auxiliary demotes the file verdict but keeps the primary line honest (#1470)", async () => {
+			// The narrowing, end to end on the tool that IS the security lane's read
+			// surface. The primary confirmed clean; opengrep was cut off. Pre-fix
+			// this rendered "Primary LSP: confirmed clean." + "No auxiliary
+			// findings." with `unconfirmed: false` — a clean bill of health for a
+			// scan that never ran. It must now say which coverage is missing WITHOUT
+			// claiming the primary failed to confirm (that would be the same
+			// overclaim pointing the other way).
+			mocked.cascadeTier = "tier3-silent";
+			(mocked.service as any).touchFile = vi.fn().mockResolvedValue({
+				diags: [],
+				confirmation: "partial",
+				unconfirmedServerIds: ["opengrep"],
+			});
+			const tmpDir = fs.mkdtempSync(
+				path.join(os.tmpdir(), "pi-lens-marksman-cutoff-"),
+			);
+			const file = path.join(tmpDir, "README.md");
+			fs.writeFileSync(file, "# Example\n");
+
+			try {
+				const result = await runMarkdown(
+					{ path: file, severity: "all", serverScope: "all", waitMs: 500 },
+					[file],
+				);
+				const text = result.content?.[0]?.text ?? "";
+				expect(result.details?.unconfirmed).toBe(true);
+				expect(result.details?.unconfirmedServerIds).toEqual(["opengrep"]);
+				expect(text).toContain("Auxiliary coverage INCOMPLETE");
+				expect(text).toContain("opengrep");
+				// The primary's own verdict is untouched — no silent-on-clean text.
+				expect(text).not.toContain("push-only, silent-on-clean");
+			} finally {
+				removeTempDirSync(tmpDir);
+			}
+		});
+
 		it("missing confirmation metadata stays unconfirmed and does not try a TypeScript command", async () => {
 			mocked.cascadeTier = "tier3-silent";
 			const getAdvertisedCommands = vi.fn().mockResolvedValue([]);
