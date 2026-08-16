@@ -446,16 +446,24 @@ export function deadCodeIssues(result: DeadCodeResult): DeadCodeIssue[] {
 }
 
 /**
- * Stable identity for diffing one scan against the previous one.
- *
- * Deliberately excludes the line number. An edit shifts every line below it,
- * and the delta is then filtered to exactly the files the edit touched — so a
- * line in the key turns each shifted pre-existing finding into a "newly unused"
- * report under a heading that blames the agent's own edit for orphaning it.
- * Inserting four lines above one real finding produced four false ones.
+ * Joins finding-identity parts into a stable key for diffing one scan
+ * against the previous one. Deliberately takes no line number: an edit
+ * shifts every line below it, and a scan delta is then filtered to exactly
+ * the files the edit touched — so a line in the key turns each shifted
+ * pre-existing finding into a "newly unused" report under a heading that
+ * blames the agent's own edit for orphaning it. Inserting four lines above
+ * one real finding produced four false ones (#1477, #1483). Shared by
+ * knip's per-turn delta in runtime-turn.ts so the rule lives in one place.
  */
+export function stableFindingKey(
+	...parts: Array<string | number | undefined>
+): string {
+	return parts.map((part) => part ?? "").join(":");
+}
+
+/** Stable identity for diffing one scan against the previous one. */
 export function deadCodeIssueKey(issue: DeadCodeIssue): string {
-	return `${issue.category}:${issue.file ?? ""}:${issue.name}`;
+	return stableFindingKey(issue.category, issue.file, issue.name);
 }
 
 /**
