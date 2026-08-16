@@ -227,6 +227,13 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 		let sawTransient = false;
 		let transientCause: ReturnType<typeof classifyProbeFailure>["cause"] =
 			"probe-timeout";
+		// Accumulated across ALL candidates, because the failure verdicts below
+		// are about the whole sweep rather than any one probe. Reporting zero
+		// here would erase the evidence that cracked #1467: four 5s probes and
+		// a stalled host look identical to an absent tool without these two
+		// numbers.
+		const sweepStartedAt = Date.now();
+		let sweepHostStallMs = 0;
 		for (const c of candidates) {
 			const sampler = startHostStallSampler();
 			const startedAt = Date.now();
@@ -238,6 +245,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 				});
 			} finally {
 				hostStallMs = sampler.stop();
+				sweepHostStallMs += hostStallMs;
 			}
 			if (!probe.error && probe.status === 0) {
 				this.resolved = c;
@@ -272,7 +280,8 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 				verdict: "unavailable",
 				outcome: "transient",
 				cause: transientCause,
-				elapsedMs: 0,
+				elapsedMs: Date.now() - sweepStartedAt,
+				hostStallMs: sweepHostStallMs,
 				latched: false,
 				retryAfterMs,
 				budgetMs: 5000,
@@ -286,7 +295,8 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 			verdict: "unavailable",
 			outcome: "missing",
 			cause: "not-found",
-			elapsedMs: 0,
+			elapsedMs: Date.now() - sweepStartedAt,
+			hostStallMs: sweepHostStallMs,
 			latched: true,
 			budgetMs: 5000,
 		});

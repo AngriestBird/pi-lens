@@ -128,6 +128,42 @@ describe("knip availability (#1467)", () => {
 		}
 	});
 
+	// The timeout test above proves the WORDING, not the wiring: it never
+	// asserts a duration, so dropping `elapsedMs` on the way from the probe to
+	// the message leaves it green. That figure is the whole forensic value of
+	// the record — "probe timed out" without it cannot distinguish a tool that
+	// answered slowly from a host that never gave it the loop, which is the
+	// distinction #1467 turned on. So make the probe cost real time and assert
+	// the message reports it.
+	it("reports how long the probe actually took, not just that it timed out", async () => {
+		const spawn = await spawnMock();
+		// `Date` is faked suite-wide, so a real setTimeout would still measure
+		// zero. Advance the clock the probe reads, which is both deterministic
+		// and closer to what a 5s budget expiring actually looks like.
+		spawn.mockImplementation(async () => {
+			vi.setSystemTime(new Date(Date.now() + 4800));
+			return timeoutResult as never;
+		});
+
+		const { KnipClient } = await import("../../clients/knip-client.js");
+		const client = new KnipClient(false);
+		const projectDir = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-1467-elapsed-"),
+		);
+		try {
+			fs.writeFileSync(path.join(projectDir, "package.json"), '{"name":"d"}');
+
+			const failed = await client.analyze(projectDir);
+			expect(failed.failureKind).toBe("unavailable-transient");
+
+			const elapsed = failed.summary.match(/after (\d+)ms/);
+			expect(elapsed).not.toBeNull();
+			expect(Number(elapsed?.[1])).toBe(4800);
+		} finally {
+			removeTempDirSync(projectDir);
+		}
+	});
+
 	it("still tells the user to install a genuinely missing knip", async () => {
 		(await spawnMock()).mockResolvedValue(missingResult as never);
 

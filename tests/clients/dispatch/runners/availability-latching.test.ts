@@ -241,6 +241,28 @@ describe("availability policy: cause taxonomy and messages (#1467)", () => {
 		}
 		expect(sampler.stop()).toBeGreaterThan(400);
 	});
+
+	// The test above never exercises the interval: nothing fires during a
+	// synchronous block, so its whole figure comes from the tail computed in
+	// stop(). Zeroing the interval's accumulation therefore leaves it green,
+	// which would retire the sampler's entire reason for existing — and with
+	// it the host-stall vs probe-timeout split that decides whether a verdict
+	// latches. Here the loop RECOVERS before stop(), so the tail is negligible
+	// and the figure can only come from the interval observing its own
+	// lateness.
+	it("attributes a stall the loop recovered from before the probe settled", async () => {
+		vi.useRealTimers();
+		const sampler = startHostStallSampler(50);
+		const until = Date.now() + 400;
+		while (Date.now() < until) {
+			// Same deliberate block, but the sampler keeps running afterwards.
+		}
+		// Let the loop run quietly: the first tick after the block reports ~400ms
+		// of lateness, and subsequent ticks are on time, so `last` ends up fresh.
+		await new Promise((r) => setTimeout(r, 200));
+		const stallMs = sampler.stop();
+		expect(stallMs).toBeGreaterThan(300);
+	});
 });
 
 describe("availability latch: shared client-side memo (#1467)", () => {
