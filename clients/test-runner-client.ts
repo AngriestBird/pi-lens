@@ -1117,9 +1117,13 @@ export class TestRunnerClient {
 				// actually lands; `numTodoTests` is counted with it because the
 				// text parsers (pytest `N skipped`, mix `N excluded` + `N skipped`)
 				// also fold every not-run test into one `skipped` figure.
-				skipped:
-					json.numSkippedTests ??
+				// `??` would accept a present 0, so a reporter that emits
+				// `numSkippedTests: 0` beside a real `numPendingTests` would
+				// reproduce the very defect this removes. Take the larger reading.
+				skipped: Math.max(
+					json.numSkippedTests ?? 0,
 					(json.numPendingTests || 0) + (json.numTodoTests || 0),
+				),
 				failures,
 				duration: this.jsonRunDurationMs(json.testResults),
 			};
@@ -1149,11 +1153,15 @@ export class TestRunnerClient {
 	 * more elapsed time than the run took. With the single suite pi-lens
 	 * actually produces (one test file per invocation) the two agree.
 	 *
-	 * The span deliberately excludes the runner's own startup — top-level
-	 * `startTime` is ~330ms earlier than the first suite's on this repo — which
-	 * matches what the text parsers already report: pytest's `in 0.05s` and
-	 * ExUnit's `Finished in 0.05 seconds` are both the runner's test time, not
-	 * process wall clock.
+	 * The span excludes the runner's own startup: the top-level `startTime` is
+	 * ~330ms earlier than the first suite's on this repo. What the per-suite
+	 * pair then measures is NOT the same quantity across runners. On vitest it
+	 * tracks test time closely (135ms span against 134ms of summed assertions),
+	 * but jest stamps a suite's `startTime` before transform and module load,
+	 * so the same fields give 5595ms against 128ms of assertions. Both are
+	 * honest suite wall clock; neither is comparable to the other, and only the
+	 * vitest figure is close to what pytest's `in 0.05s` or ExUnit's
+	 * `Finished in 0.05 seconds` report.
 	 *
 	 * Falls back to the summed per-assertion `duration` when a reporter omits
 	 * the suite pair, then to 0. Never returns a negative or non-finite value —

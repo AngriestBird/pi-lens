@@ -930,6 +930,70 @@ describe("test-runner-client", () => {
 		expect(jest.skipped).toBe(1);
 	});
 
+	// Both captures above happen to carry `numTodoTests: 0`, so the todo half of
+	// the skip count is unasserted and can be deleted without failing anything.
+	// Real runs do emit it: a `test.todo` alongside a `test.skip` gives
+	// numPendingTests 1 / numTodoTests 1 on vitest 4.1.10 and jest 30.4.2.
+	// Synthetic rather than captured — kept minimal so it is obviously not
+	// passing itself off as one of the recorded payloads above.
+	it("folds numTodoTests into the same skipped figure as numPendingTests", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parseVitestOutput(
+			JSON.stringify({
+				numPassedTests: 1,
+				numFailedTests: 0,
+				numPendingTests: 1,
+				numTodoTests: 2,
+				testResults: [
+					{
+						name: "/tmp/vtjson/todo.test.js",
+						status: "passed",
+						startTime: 1786866554330,
+						endTime: 1786866554430,
+						assertionResults: [{ status: "passed", title: "p", duration: 1 }],
+					},
+				],
+			}),
+			"",
+			"/tmp/vtjson/todo.test.js",
+			"/tmp/vtjson",
+			"vitest",
+		);
+
+		expect(result.skipped).toBe(3);
+	});
+
+	// A reporter that emits `numSkippedTests: 0` while a skip really did happen
+	// must not resurrect the defect: `??` accepts a present 0, so the count has
+	// to be the larger of the two readings rather than the first one found.
+	it("does not let a zero numSkippedTests mask a real pending count", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parseVitestOutput(
+			JSON.stringify({
+				numPassedTests: 1,
+				numFailedTests: 0,
+				numSkippedTests: 0,
+				numPendingTests: 3,
+				numTodoTests: 0,
+				testResults: [
+					{
+						name: "/tmp/vtjson/mask.test.js",
+						status: "passed",
+						startTime: 1786866554330,
+						endTime: 1786866554430,
+						assertionResults: [{ status: "passed", title: "p", duration: 1 }],
+					},
+				],
+			}),
+			"",
+			"/tmp/vtjson/mask.test.js",
+			"/tmp/vtjson",
+			"vitest",
+		);
+
+		expect(result.skipped).toBe(3);
+	});
+
 	it("falls back to summed assertion durations when a payload carries only perfStats", () => {
 		const client = new TestRunnerClient(false) as any;
 		// The pre-#1452 suggestion was to read `testResults[].perfStats`. This
