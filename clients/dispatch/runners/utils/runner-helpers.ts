@@ -33,6 +33,29 @@ import {
 	shouldAutoInstallTool,
 } from "../../../tool-policy.js";
 import type { DispatchContext } from "../../types.js";
+import {
+	type AvailabilityCause,
+	type AvailabilityOutcome,
+	classifyProbeFailure,
+	isLatchingOutcome,
+	logAvailabilityDecision,
+	startHostStallSampler,
+	transientRetryDelayMs,
+} from "./availability-policy.js";
+
+export type {
+	AvailabilityCause,
+	AvailabilityDecision,
+	AvailabilityOutcome,
+} from "./availability-policy.js";
+export {
+	createAvailabilityLatch,
+	classifyProbeFailure,
+	describeUnavailability,
+	isTransientDecision,
+	logAvailabilityDecision,
+	startHostStallSampler,
+} from "./availability-policy.js";
 
 /**
  * True when the LSP runner will cover `ctx.filePath` via the given PRIMARY server
@@ -129,12 +152,6 @@ export function createVenvFinder(
 // AVAILABILITY CHECKER FACTORY
 // =============================================================================
 
-export type AvailabilityOutcome =
-	| "success"
-	| "missing"
-	| "transient"
-	| "non-installable";
-
 export type ClientAvailabilityResult<T> =
 	| { outcome: "success"; value: T }
 	| { outcome: Exclude<AvailabilityOutcome, "success">; value?: undefined };
@@ -169,6 +186,13 @@ type AvailabilityCache = {
 	available: boolean | null;
 	command: string | null;
 	outcome: AvailabilityOutcome | null;
+	cause: AvailabilityCause | null;
+	/** How long the last probe took, ms — surfaced in the unavailable message. */
+	elapsedMs: number;
+	/** Epoch ms after which a transient `false` may be re-probed; 0 = latched. */
+	retryAtMs: number;
+	/** Consecutive transient failures, for the bounded exponential cooldown. */
+	transientAttempts: number;
 };
 
 export interface AvailabilityCheckerOptions {
@@ -271,6 +295,17 @@ export function resetDispatchAvailabilityState(): void {
 	availabilityStateGeneration += 1;
 }
 
+/** What the last probe for a cwd decided, for messaging and telemetry (#1467). */
+export interface AvailabilityVerdict {
+	outcome: AvailabilityOutcome | null;
+	cause: AvailabilityCause | null;
+	elapsedMs: number;
+	/** True when the verdict is remembered until the next session reset. */
+	latched: boolean;
+	/** Epoch ms after which a transient verdict may be re-probed; 0 = latched. */
+	retryAtMs: number;
+}
+
 /**
  * Create a cached availability checker for a command.
  * The checker will look for the command in venv first, then global.
@@ -280,6 +315,13 @@ export function resetDispatchAvailabilityState(): void {
  * `zig --version`). Passing the wrong probe makes the runner silently skip on
  * every machine, so toolchains with a non-standard version command must override
  * this.
+ *
+ * ## Latch policy (#1467)
+ *
+ * A `missing` / `non-installable` verdict is durable and is cached for the
+ * session. A `transient` verdict — timeout, abort, EAGAIN — is NOT: it is
+ * cached only for a bounded cooldown, after which the next caller re-probes.
+ * An installed tool therefore recovers on its own, without a host restart.
  */
 export function createAvailabilityChecker(
 	command: string,
@@ -290,6 +332,7 @@ export function createAvailabilityChecker(
 	isAvailableAsync: (cwd?: string) => Promise<boolean>;
 	getCommand: (cwd?: string) => string | null;
 	getOutcome: (cwd?: string) => AvailabilityOutcome | null;
+	getVerdict: (cwd?: string) => AvailabilityVerdict;
 	reset: () => void;
 } {
 	const cacheByCwd = new PathKeyedMap<AvailabilityCache>(
@@ -324,16 +367,77 @@ export function createAvailabilityChecker(
 			available: null,
 			command: null,
 			outcome: null,
+			cause: null,
+			elapsedMs: 0,
+			retryAtMs: 0,
+			transientAttempts: 0,
 		};
 		cacheByCwd.set(key, created);
 		return created;
+	}
+
+	/** Record a verdict on the cache and emit exactly one decision record. */
+	function noteDecision(
+		cache: AvailabilityCache,
+		resolvedCwd: string,
+		verdict: {
+			available: boolean;
+			outcome: AvailabilityOutcome;
+			cause: AvailabilityCause;
+			elapsedMs: number;
+			hostStallMs?: number;
+		},
+	): void {
+		cache.available = verdict.available;
+		cache.outcome = verdict.outcome;
+		cache.cause = verdict.cause;
+		cache.elapsedMs = verdict.elapsedMs;
+		let retryAfterMs: number | undefined;
+		if (verdict.available) {
+			cache.retryAtMs = 0;
+			cache.transientAttempts = 0;
+		} else if (isLatchingOutcome(verdict.outcome)) {
+			cache.retryAtMs = 0;
+			cache.transientAttempts = 0;
+		} else {
+			cache.transientAttempts += 1;
+			retryAfterMs = transientRetryDelayMs(
+				cache.transientAttempts,
+				verdict.cause,
+			);
+			cache.retryAtMs = Date.now() + retryAfterMs;
+		}
+		logAvailabilityDecision(
+			{
+				tool: command,
+				verdict: verdict.available ? "available" : "unavailable",
+				outcome: verdict.outcome,
+				cause: verdict.cause,
+				elapsedMs: verdict.elapsedMs,
+				latched: verdict.available || isLatchingOutcome(verdict.outcome),
+				...(verdict.hostStallMs !== undefined && {
+					hostStallMs: verdict.hostStallMs,
+				}),
+				...(retryAfterMs !== undefined && { retryAfterMs }),
+				budgetMs: options.probeTimeout ?? 5000,
+			},
+			resolvedCwd,
+		);
 	}
 
 	async function isAvailableAsync(cwd?: string): Promise<boolean> {
 		ensureCurrentGeneration();
 		const resolvedCwd = cwd || process.cwd();
 		const cache = getCache(resolvedCwd);
-		if (cache.available === false) return false;
+		if (cache.available === false) {
+			// A durable "this machine does not have the tool" stays cached; a
+			// transient probe failure only holds until its cooldown expires, so an
+			// installed tool cannot be disabled for the life of the process by one
+			// slow second at warm-up (#1467).
+			if (cache.outcome !== "transient") return false;
+			if (Date.now() < cache.retryAtMs) return false;
+			cache.available = null;
+		}
 		if (cache.available === true && cache.command) {
 			if (await isSpawnableCommand(cache.command)) return true;
 			// Cached-positive spawn feedback: a removed absolute path or vanished
@@ -341,6 +445,7 @@ export function createAvailabilityChecker(
 			cache.available = null;
 			cache.command = null;
 			cache.outcome = null;
+			cache.cause = null;
 		}
 
 		const key = path.resolve(resolvedCwd);
@@ -352,9 +457,13 @@ export function createAvailabilityChecker(
 		promise = (async () => {
 			const fastPath = options.fastPath?.();
 			if (fastPath) {
-				cache.available = true;
-				cache.outcome = "success";
 				cache.command = fastPath;
+				noteDecision(cache, resolvedCwd, {
+					available: true,
+					outcome: "success",
+					cause: "fast-path",
+					elapsedMs: 0,
+				});
 				return true;
 			}
 
@@ -364,51 +473,71 @@ export function createAvailabilityChecker(
 			try {
 				const cwdStat = await fs.promises.stat(resolvedCwd);
 				if (!cwdStat.isDirectory()) {
-					cache.available = false;
-					cache.outcome = "non-installable";
+					noteDecision(cache, resolvedCwd, {
+						available: false,
+						outcome: "non-installable",
+						cause: "bad-cwd",
+						elapsedMs: 0,
+					});
 					return false;
 				}
 			} catch {
-				cache.available = false;
-				cache.outcome = "non-installable";
+				noteDecision(cache, resolvedCwd, {
+					available: false,
+					outcome: "non-installable",
+					cause: "bad-cwd",
+					elapsedMs: 0,
+				});
 				return false;
 			}
 
 			const cmd = findCommand(resolvedCwd);
 			const env = await options.environment?.(resolvedCwd);
-			const result = await safeSpawnAsync(cmd, versionArgs, {
-				timeout: options.probeTimeout ?? 5000,
-				cwd: resolvedCwd,
-				env,
-			});
+			// The probe budget is enforced by a HOST-side timer, so host event-loop
+			// stalls are charged to the child. Measure the stall that overlapped the
+			// window and hand it to the classifier (#1467).
+			const stallSampler = startHostStallSampler();
+			const startedAt = Date.now();
+			let result: Awaited<ReturnType<typeof safeSpawnAsync>>;
+			let hostStallMs: number;
+			try {
+				result = await safeSpawnAsync(cmd, versionArgs, {
+					timeout: options.probeTimeout ?? 5000,
+					cwd: resolvedCwd,
+					env,
+				});
+			} finally {
+				hostStallMs = stallSampler.stop();
+			}
+			const elapsedMs = Date.now() - startedAt;
 
 			if (!result.error && result.status === 0) {
-				cache.available = true;
-				cache.outcome = "success";
 				cache.command = cmd;
+				noteDecision(cache, resolvedCwd, {
+					available: true,
+					outcome: "success",
+					cause: "ok",
+					elapsedMs,
+					hostStallMs,
+				});
 				return true;
 			}
 
-			cache.available = false;
-			const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
-			if (result.spawnFailure?.kind === "tool-not-found") {
-				resetPathWalkMemo();
-				cache.outcome = "missing";
-			} else if (
-				result.failure === "timeout" ||
-				result.failure === "aborted" ||
-				result.failure === "signal" ||
-				result.spawnFailure?.kind === "killed" ||
-				errorCode === "EAGAIN" ||
-				errorCode === "EBUSY"
-			) {
-				cache.outcome = "transient";
-			} else {
-				// A present command that rejects its version probe (or an EACCES/
-				// EINVAL/UNKNOWN failure) is not repaired by reinstalling it.
-				cache.outcome =
-					options.unclassifiedFailureOutcome ?? "non-installable";
-			}
+			const { outcome, cause } = classifyProbeFailure(result, {
+				hostStallMs,
+				unclassifiedFailureOutcome: options.unclassifiedFailureOutcome,
+			});
+			// Only a TYPED tool-not-found invalidates the PATH walk memo; an
+			// `unclassifiedFailureOutcome: "missing"` compatibility verdict is a
+			// guess, not evidence that PATH changed.
+			if (result.spawnFailure?.kind === "tool-not-found") resetPathWalkMemo();
+			noteDecision(cache, resolvedCwd, {
+				available: false,
+				outcome,
+				cause,
+				elapsedMs,
+				hostStallMs,
+			});
 			return false;
 		})().finally(() => {
 			// A session reset clears this map and a caller may immediately start a
@@ -436,7 +565,20 @@ export function createAvailabilityChecker(
 		return getCache(cwd || process.cwd()).outcome;
 	}
 
-	return { isAvailableAsync, getCommand, getOutcome, reset };
+	function getVerdict(cwd?: string): AvailabilityVerdict {
+		ensureCurrentGeneration();
+		const cache = getCache(cwd || process.cwd());
+		return {
+			outcome: cache.outcome,
+			cause: cache.cause,
+			elapsedMs: cache.elapsedMs,
+			latched:
+				cache.available !== false || isLatchingOutcome(cache.outcome ?? "missing"),
+			retryAtMs: cache.retryAtMs,
+		};
+	}
+
+	return { isAvailableAsync, getCommand, getOutcome, getVerdict, reset };
 }
 
 /**

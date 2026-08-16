@@ -77,6 +77,11 @@ let lastPhase: { phase: string; ts: string } | undefined;
  * #1453: `tool_set_mutation` records an active-tool-set rewrite (zero-duration
  * bookkeeping, and it fires during session_start where a real stall must stay
  * attributed to the work around it), so it is excluded for the same reason.
+ * #1467: `availability_decision` records a tool-probe verdict. Its `durationMs`
+ * is the child's own probe time (often zero for a fast path or a cached
+ * decision) and the record is bookkeeping ABOUT a probe, not host work — a
+ * loop_block landing next to one must stay attributed to whatever really
+ * stalled the loop, which is frequently the very thing that expired the probe.
  *
  * #1461 slice 1: `finding_dead_path_drop` is the same shape — the record a
  * delivery seam writes when it drops findings whose cited path no longer
@@ -92,6 +97,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"session_end_bus_rollup",
 	"lsp_aux_wait_outcome",
 	"tool_set_mutation",
+	"availability_decision",
 	"finding_dead_path_drop",
 ]);
 

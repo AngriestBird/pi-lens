@@ -671,6 +671,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		newIssues?: number;
 		blockerIssues?: number;
 		reason?: string;
+		/** Set when the failure was an availability verdict, not a knip run. */
+		failureKind?: string;
+		/** True when a failed run left the previous good cache in place (#1467). */
+		cacheKept?: boolean;
 	} = {};
 	if (runtime.isStartupScanInFlight("knip")) {
 		dbg("turn_end: skipping knip (startup scan still in flight)");
@@ -681,9 +685,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// run tool checks every turn. Also back off after a timeout/kill so every
 		// agent turn does not spend 30s launching another heavyweight knip process.
 		const prevKnip = cacheManager.readCache<KnipResult>("knip", cwd);
+		// An availability failure is NOT a hard knip failure: knip never ran, so
+		// there is nothing to back off from, and backing off would make an
+		// expiring probe verdict permanent again (#1467).
 		const previousFailedHard =
 			prevKnip &&
 			!prevKnip.data.success &&
+			!prevKnip.data.failureKind &&
 			/(timed out|killed|SIGTERM|SIGKILL|SIGABRT)/i.test(prevKnip.data.summary);
 
 		if (previousFailedHard) {
@@ -693,13 +701,26 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			knipMeta = { skipped: true, reason: prevKnip.data.summary };
 		} else {
 			const knipResult = await knipClient.analyze(cwd, getKnipIgnorePatterns());
-			cacheManager.writeCache("knip", knipResult, cwd);
+			// Never overwrite a good scan with a failure (#925, #1467): the 194-byte
+			// "not available" record replaced 149 KB of real findings in every
+			// dogfood project and readers then served the failure as the answer.
+			// The last good result stays until a new successful scan replaces it.
+			const wouldPoisonCache = !knipResult.success && prevKnip?.data.success;
+			if (wouldPoisonCache) {
+				dbg(
+					`turn_end: keeping last good knip cache; this run failed: ${knipResult.summary}`,
+				);
+			} else {
+				cacheManager.writeCache("knip", knipResult, cwd);
+			}
 			knipMeta = {
 				success: knipResult.success,
 				totalIssues: knipResult.issues.length,
 				newIssues: 0,
 				blockerIssues: 0,
 				...(!knipResult.success && { reason: knipResult.summary }),
+				...(knipResult.failureKind && { failureKind: knipResult.failureKind }),
+				...(wouldPoisonCache && { cacheKept: true }),
 			};
 
 			if (knipResult.success && knipResult.issues.length > 0) {
