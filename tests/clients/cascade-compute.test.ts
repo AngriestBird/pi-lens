@@ -1991,6 +1991,7 @@ describe("computeCascadeForFile", () => {
 							summary: "skipped",
 						}),
 					},
+					deadCodeClients: [],
 					depChecker: { ensureAvailable: async () => false },
 					testRunnerClient: { getTestRunTarget: () => null },
 					resetLSPService: () => {},

@@ -58,6 +58,8 @@ export interface DeadCodeClient {
 	readonly language: string;
 	/** Cheap synchronous probe: does a project of this language live at cwd? */
 	detect(cwd: string): boolean;
+	/** Is this file one this client analyzes? Gates the per-turn delta re-scan. */
+	owns(filePath: string): boolean;
 	/** Resolve the binary (PATH first, then auto-install). */
 	ensureAvailable(): Promise<boolean>;
 	/** Project-wide scan. Never throws; failures come back as success:false. */
@@ -89,6 +91,22 @@ const VULTURE_EXCLUDES = [
 	"*/site-packages/*",
 	"*/__pycache__/*",
 	"*/.eggs/*",
+];
+
+// Decorators whose target is called by a framework, never by name in the tree.
+// vulture cannot see those call sites, so every such symbol is a permanent
+// false positive that reappears in every scan — the fastest way to teach a
+// reader to stop reading the advisory. Glob-matched by vulture itself.
+const VULTURE_IGNORE_DECORATORS = [
+	"@pytest.fixture",
+	"@pytest.fixture(*",
+	"@fixture",
+	"@fixture(*",
+	"@app.*",
+	"@router.*",
+	"@celery.task*",
+	"@task",
+	"@shared_task*",
 ];
 
 // vulture line: `path/to/file.py:12: unused function 'foo' (60% confidence)`
@@ -170,6 +188,11 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 
 	detect(cwd: string): boolean {
 		return this.resolveProjectRoot(cwd) !== null;
+	}
+
+	owns(filePath: string): boolean {
+		const ext = path.extname(filePath).toLowerCase();
+		return ext === ".py" || ext === ".pyi";
 	}
 
 	/**
@@ -338,6 +361,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 			".",
 			`--min-confidence=${this.minConfidence}`,
 			`--exclude=${VULTURE_EXCLUDES.join(",")}`,
+			`--ignore-decorators=${VULTURE_IGNORE_DECORATORS.join(",")}`,
 		];
 		const result = await safeSpawnAsync(invocation.cmd, args, {
 			timeout: ANALYSIS_TIMEOUT_MS,
@@ -411,37 +435,51 @@ export function deadCodeIssueCount(result: DeadCodeResult): number {
 	);
 }
 
-/**
- * Format cached dead-code results into one turn_end advisory, or "" when there
- * is nothing to report. Merges multiple languages (polyglot repos) under one
- * `[Dead code]` heading so it reads consistently next to the Knip advisory.
- * Advisory-only: these are project-wide signals, never blockers.
- */
-export function formatDeadCodeAdvisory(
-	results: DeadCodeResult[],
-	maxPerLang = 10,
-): string {
-	const withFindings = results.filter(
-		(r) => r.success && deadCodeIssueCount(r) > 0,
-	);
-	if (withFindings.length === 0) return "";
+/** Every bucket flattened — delta diffing and diagnostic mapping want one list. */
+export function deadCodeIssues(result: DeadCodeResult): DeadCodeIssue[] {
+	return [
+		...result.unusedExports,
+		...result.unusedFiles,
+		...result.unusedDeps,
+		...result.unlistedDeps,
+	];
+}
 
-	const lines: string[] = [];
-	for (const r of withFindings) {
-		const count = deadCodeIssueCount(r);
-		lines.push(`${r.language}: ${count} unused symbol(s)`);
-		for (const issue of r.unusedExports.slice(0, maxPerLang)) {
-			const loc = issue.file
-				? ` (${issue.file}${issue.line ? `:${issue.line}` : ""})`
-				: "";
-			lines.push(`    - unused ${issue.kind} '${issue.name}'${loc}`);
-		}
-		if (r.unusedExports.length > maxPerLang) {
-			lines.push(`    … and ${r.unusedExports.length - maxPerLang} more`);
-		}
+/**
+ * Stable identity for diffing one scan against the previous one.
+ *
+ * Deliberately excludes the line number. An edit shifts every line below it,
+ * and the delta is then filtered to exactly the files the edit touched — so a
+ * line in the key turns each shifted pre-existing finding into a "newly unused"
+ * report under a heading that blames the agent's own edit for orphaning it.
+ * Inserting four lines above one real finding produced four false ones.
+ */
+export function deadCodeIssueKey(issue: DeadCodeIssue): string {
+	return `${issue.category}:${issue.file ?? ""}:${issue.name}`;
+}
+
+/**
+ * Format this turn's ATTRIBUTABLE delta — symbols that became unused in files
+ * the agent just edited — or "" when there is nothing to report. Mirrors the
+ * Knip advisory's contract deliberately: the project-wide list is not injected
+ * per turn (hundreds of pre-existing findings would drown the blockers and burn
+ * context every turn), it stays available on demand via lens_diagnostics.
+ */
+export function formatDeadCodeDelta(
+	issues: DeadCodeIssue[],
+	language: string,
+	max = 5,
+): string {
+	if (issues.length === 0) return "";
+	let report = `💀 Newly unused ${language} symbols in files you edited — check if callers need updating (dead-code):\n`;
+	for (const issue of issues.slice(0, max)) {
+		const loc = issue.file
+			? `${issue.file}${issue.line ? `:${issue.line}` : ""}`
+			: "(unknown)";
+		report += `  ${loc} — unused ${issue.kind} ${issue.name}\n`;
 	}
-	return (
-		"💀 [Dead code] project-wide unused symbols — verify before removing:\n  " +
-		lines.join("\n  ")
-	);
+	if (issues.length > max) {
+		report += `  … and ${issues.length - max} more\n`;
+	}
+	return report;
 }
