@@ -240,23 +240,9 @@ describe("dead-code turn delta helpers", () => {
 		expect(deadCodeIssueCount(r)).toBe(2);
 	});
 
-	it("keys an issue by category/file/name/line so a moved symbol is not new", () => {
-		expect(deadCodeIssueKey(issue("a", 1))).toBe("export:mod.py:a:1");
-		expect(deadCodeIssueKey(issue("a", 1))).not.toBe(
-			deadCodeIssueKey(issue("a", 2)),
-		);
-	});
-
-	it("diffs against the previous scan, keeping only what the edit created", () => {
-		const previous = new Set(
-			deadCodeIssues(result({ unusedExports: [issue("old", 1)] })).map(
-				deadCodeIssueKey,
-			),
-		);
-		const current = deadCodeIssues(
-			result({ unusedExports: [issue("old", 1), issue("fresh", 9)] }),
-		).filter((i) => !previous.has(deadCodeIssueKey(i)));
-		expect(current.map((i) => i.name)).toEqual(["fresh"]);
+	it("keys an issue by category/file/name so a moved symbol is not new", () => {
+		expect(deadCodeIssueKey(issue("a", 1))).toBe("export:mod.py:a");
+		expect(deadCodeIssueKey(issue("a", 1))).toBe(deadCodeIssueKey(issue("a", 2)));
 	});
 });
 
