@@ -50,6 +50,7 @@ import {
 	deadCodeIssues,
 	formatDeadCodeDelta,
 } from "./dead-code-client.js";
+import { logDeadCodeScan } from "./dead-code-logger.js";
 import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
 	writeProjectDiagnosticsDeltaReport,
@@ -90,6 +91,21 @@ interface TurnEndDeps {
 	owner?: TurnStateOwner;
 	resetLSPService: () => void;
 	resetFormatService: () => void;
+}
+
+/**
+ * Would writing `next` over `prev` throw away a good scan for a failed one?
+ *
+ * A failed run carries no findings. Writing it evicts the last good result, and
+ * every later reader then serves the failure as the answer — a 194-byte "not
+ * available" record replaced 149 KB of real findings in every dogfood project
+ * (#925, #1467). Callers keep the previous cache when this returns true.
+ */
+function wouldPoisonCache(
+	prev: { data: { success: boolean } } | null | undefined,
+	next: { success: boolean },
+): boolean {
+	return !next.success && prev?.data.success === true;
 }
 
 // LSP idle reset scheduling — prevents thrashing by delaying shutdown
@@ -706,12 +722,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			knipMeta = { skipped: true, reason: prevKnip.data.summary };
 		} else {
 			const knipResult = await knipClient.analyze(cwd, getKnipIgnorePatterns());
-			// Never overwrite a good scan with a failure (#925, #1467): the 194-byte
-			// "not available" record replaced 149 KB of real findings in every
-			// dogfood project and readers then served the failure as the answer.
-			// The last good result stays until a new successful scan replaces it.
-			const wouldPoisonCache = !knipResult.success && prevKnip?.data.success;
-			if (wouldPoisonCache) {
+			// Never overwrite a good scan with a failure (#925, #1467): the last
+			// good result stays until a new successful scan replaces it.
+			const knipWouldPoison = wouldPoisonCache(prevKnip, knipResult);
+			if (knipWouldPoison) {
 				dbg(
 					`turn_end: keeping last good knip cache; this run failed: ${knipResult.summary}`,
 				);
@@ -725,7 +739,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				blockerIssues: 0,
 				...(!knipResult.success && { reason: knipResult.summary }),
 				...(knipResult.failureKind && { failureKind: knipResult.failureKind }),
-				...(wouldPoisonCache && { cacheKept: true }),
+				...(knipWouldPoison && { cacheKept: true }),
 			};
 
 			if (knipResult.success && knipResult.issues.length > 0) {
@@ -815,58 +829,135 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const tDeadCode = Date.now();
 	const deadCodeMeta: {
 		skipped?: boolean;
-		reason?: string;
+		success?: boolean;
+		totalIssues?: number;
 		newIssues?: number;
+		/** Why this turn produced no delta — the five states are otherwise identical. */
+		reason?: string;
+		/** True when a failed run left the previous good cache in place (#1467). */
+		cacheKept?: boolean;
 	} = {};
 	if (runtime.isStartupScanInFlight("dead-code")) {
 		dbg("turn_end: skipping dead-code (startup scan still in flight)");
 		deadCodeMeta.skipped = true;
+		deadCodeMeta.reason = "startup_scan_in_flight";
+	} else if (deadCodeClients.length === 0) {
+		deadCodeMeta.reason = "no_clients";
 	} else {
-		const modifiedSet = new Set(files.map((f) => resolveRunnerPath(cwd, f)));
+		// The modified-file set costs a resolveRunnerPath per file, and that walks
+		// every ancestor to the filesystem root on a miss. Build it lazily, only
+		// once a client has actually claimed this project, so an all-JS repo with
+		// no dead-code client pays nothing per turn. Knip does the same.
+		let modifiedSet: Set<string> | null = null;
+		const modifiedFiles = (): Set<string> =>
+			(modifiedSet ??= new Set(files.map((f) => resolveRunnerPath(cwd, f))));
 		let newIssueTotal = 0;
-		for (const client of deadCodeClients) {
-			if (!client.detect(cwd)) continue;
-			if (![...modifiedSet].some((f) => client.owns(f))) continue;
-			const cacheKey = `dead-code-${client.id}`;
-			const prev = cacheManager.readCache<DeadCodeResult>(cacheKey, cwd);
-			// Back off after a timeout/kill so an unresponsive scanner cannot cost
-			// every later turn its full analysis budget (mirrors knip).
-			if (
-				prev &&
-				!prev.data.success &&
-				/(timed out|killed|SIGTERM|SIGKILL|SIGABRT)/i.test(prev.data.summary)
-			) {
-				dbg(`turn_end: skipping dead-code after failure: ${prev.data.summary}`);
-				deadCodeMeta.skipped = true;
-				deadCodeMeta.reason = prev.data.summary;
-				continue;
+		const reasons: string[] = [];
+		// A malformed client or deps object must never abort turn_end. Before the
+		// per-turn delta this block only read a cache; now it iterates and awaits,
+		// so the whole thing needs the guard, not just `client.analyze`.
+		try {
+			for (const client of deadCodeClients) {
+				if (!client.detect(cwd)) {
+					reasons.push(`${client.id}:not_detected`);
+					continue;
+				}
+				if (![...modifiedFiles()].some((f) => client.owns(f))) {
+					reasons.push(`${client.id}:no_owned_files`);
+					continue;
+				}
+				const cacheKey = `dead-code-${client.id}`;
+				const prev = cacheManager.readCache<DeadCodeResult>(cacheKey, cwd);
+				// Back off after a timeout/kill so an unresponsive scanner cannot cost
+				// every later turn its full analysis budget (mirrors knip).
+				if (
+					prev &&
+					!prev.data.success &&
+					/(timed out|killed|SIGTERM|SIGKILL|SIGABRT)/i.test(prev.data.summary)
+				) {
+					dbg(
+						`turn_end: skipping dead-code after failure: ${prev.data.summary}`,
+					);
+					deadCodeMeta.skipped = true;
+					reasons.push(`${client.id}:backoff:${prev.data.summary}`);
+					continue;
+				}
+				const startMs = Date.now();
+				try {
+					const result = await client.analyze(cwd);
+					const durationMs = Date.now() - startMs;
+					// Never overwrite a good scan with a failure (#925, #1467): a
+					// vulture timeout on one .py turn would otherwise evict the
+					// session_start scan, and the backoff above would then latch
+					// off the poisoned record.
+					if (wouldPoisonCache(prev, result)) {
+						dbg(
+							`turn_end: keeping last good dead-code(${client.id}) cache; this run failed: ${result.summary}`,
+						);
+						deadCodeMeta.cacheKept = true;
+					} else {
+						cacheManager.writeCache(cacheKey, result, cwd, {
+							scanDurationMs: durationMs,
+						});
+					}
+					// One event per cross-file scan (AGENTS.md) — the per-turn scan is
+					// now the primary path, so dead-code.log must see it too.
+					logDeadCodeScan({
+						language: client.language,
+						success: result.success,
+						cached: false,
+						unusedExports: result.unusedExports.length,
+						unusedFiles: result.unusedFiles.length,
+						unusedDeps: result.unusedDeps.length,
+						unlistedDeps: result.unlistedDeps.length,
+						durationMs: result.durationMs ?? durationMs,
+						...(!result.success && { reason: result.summary }),
+					});
+					deadCodeMeta.success = result.success;
+					if (!result.success) {
+						reasons.push(`${client.id}:scan_failed:${result.summary}`);
+						continue;
+					}
+					deadCodeMeta.totalIssues =
+						(deadCodeMeta.totalIssues ?? 0) + deadCodeIssues(result).length;
+					// No baseline means every finding looks new. Report nothing rather
+					// than blame the edit for the whole project's pre-existing debt.
+					if (!prev?.data.success) {
+						reasons.push(`${client.id}:no_previous_scan`);
+						continue;
+					}
+					const prevKeys = new Set(
+						deadCodeIssues(prev.data).map(deadCodeIssueKey),
+					);
+					const modified = modifiedFiles();
+					const newIssues = deadCodeIssues(result).filter((issue) => {
+						if (prevKeys.has(deadCodeIssueKey(issue))) return false;
+						if (!issue.file) return false;
+						return modified.has(resolveRunnerPath(cwd, issue.file));
+					});
+					if (newIssues.length === 0) {
+						reasons.push(`${client.id}:clean`);
+						continue;
+					}
+					newIssueTotal += newIssues.length;
+					projectDiagnosticsDelta.push(
+						...newIssues.map((issue) =>
+							deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
+						),
+					);
+					projectDiagnosticsSources.add("dead-code");
+					advisoryParts.push(formatDeadCodeDelta(newIssues, result.language));
+				} catch (err) {
+					dbg(`turn_end: dead-code(${client.id}) failed: ${err}`);
+					reasons.push(`${client.id}:threw`);
+				}
 			}
-			try {
-				const result = await client.analyze(cwd);
-				cacheManager.writeCache(cacheKey, result, cwd);
-				if (!result.success || !prev?.data.success) continue;
-				const prevKeys = new Set(
-					deadCodeIssues(prev.data).map(deadCodeIssueKey),
-				);
-				const newIssues = deadCodeIssues(result).filter((issue) => {
-					if (prevKeys.has(deadCodeIssueKey(issue))) return false;
-					if (!issue.file) return false;
-					return modifiedSet.has(resolveRunnerPath(cwd, issue.file));
-				});
-				if (newIssues.length === 0) continue;
-				newIssueTotal += newIssues.length;
-				projectDiagnosticsDelta.push(
-					...newIssues.map((issue) =>
-						deadCodeIssueToProjectDiagnostic(cwd, issue, result.language),
-					),
-				);
-				projectDiagnosticsSources.add("dead-code");
-				advisoryParts.push(formatDeadCodeDelta(newIssues, result.language));
-			} catch (err) {
-				dbg(`turn_end: dead-code(${client.id}) failed: ${err}`);
-			}
+		} catch (err) {
+			dbg(`turn_end: dead-code block failed: ${err}`);
+			reasons.push("block_threw");
 		}
 		deadCodeMeta.newIssues = newIssueTotal;
+		if (reasons.length > 0) deadCodeMeta.reason = reasons.join(",");
 	}
 	logLatency({
 		type: "phase",
