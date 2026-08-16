@@ -16,6 +16,12 @@ import { createSubsystemLogger } from "./extension-log.js";
 import * as path from "node:path";
 import { findNearestMarkerRoot } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
+import {
+	classifyProbeFailure,
+	createAvailabilityLatch,
+	logAvailabilityDecision,
+	startHostStallSampler,
+} from "./dispatch/runners/utils/availability-policy.js";
 
 // --- Types ---
 
@@ -137,7 +143,12 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 	readonly id = "python";
 	readonly language = "Python";
 
-	private available: boolean | null = null;
+	/**
+	 * Transient-aware memo (#1467): only a durable "vulture is not installed"
+	 * verdict is remembered for the session. A probe that timed out expires and
+	 * is re-probed, so vulture cannot be disabled for the process by one stall.
+	 */
+	private readonly availabilityLatch = createAvailabilityLatch();
 	private resolved: { cmd: string; prefix: string[] } | null = null;
 	private ensureInFlight: Promise<boolean> | null = null;
 	private inFlight = new Map<string, Promise<DeadCodeResult>>();
@@ -187,7 +198,8 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 	}
 
 	async ensureAvailable(): Promise<boolean> {
-		if (this.available !== null) return this.available;
+		const memo = this.availabilityLatch.read();
+		if (memo !== null) return memo;
 		if (this.ensureInFlight) return this.ensureInFlight;
 		this.ensureInFlight = this.doEnsureAvailable();
 		try {
@@ -210,19 +222,84 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 			{ cmd: "python", prefix: ["-m", "vulture"] },
 			{ cmd: "python3", prefix: ["-m", "vulture"] },
 		];
+		// A timeout on ANY candidate means the machine, not the tool, answered —
+		// the run gets a bounded retry instead of a permanent skip (#1467).
+		let sawTransient = false;
+		let transientCause: ReturnType<typeof classifyProbeFailure>["cause"] =
+			"probe-timeout";
+		// Accumulated across ALL candidates, because the failure verdicts below
+		// are about the whole sweep rather than any one probe. Reporting zero
+		// here would erase the evidence that cracked #1467: four 5s probes and
+		// a stalled host look identical to an absent tool without these two
+		// numbers.
+		const sweepStartedAt = Date.now();
+		let sweepHostStallMs = 0;
 		for (const c of candidates) {
-			const probe = await safeSpawnAsync(c.cmd, [...c.prefix, "--version"], {
-				timeout: 5000,
-			});
+			const sampler = startHostStallSampler();
+			const startedAt = Date.now();
+			let probe: Awaited<ReturnType<typeof safeSpawnAsync>>;
+			let hostStallMs: number;
+			try {
+				probe = await safeSpawnAsync(c.cmd, [...c.prefix, "--version"], {
+					timeout: 5000,
+				});
+			} finally {
+				hostStallMs = sampler.stop();
+				sweepHostStallMs += hostStallMs;
+			}
 			if (!probe.error && probe.status === 0) {
 				this.resolved = c;
-				this.available = true;
+				this.availabilityLatch.noteAvailable();
 				this.log(`vulture found: ${[c.cmd, ...c.prefix].join(" ")}`);
+				logAvailabilityDecision({
+					tool: "vulture",
+					verdict: "available",
+					outcome: "success",
+					cause: "ok",
+					elapsedMs: Date.now() - startedAt,
+					latched: true,
+					hostStallMs,
+					budgetMs: 5000,
+				});
 				return true;
 			}
+			const classified = classifyProbeFailure(probe, { hostStallMs });
+			if (classified.outcome === "transient") {
+				sawTransient = true;
+				transientCause = classified.cause;
+			}
 		}
-		this.available = false;
+		if (sawTransient) {
+			const retryAfterMs = this.availabilityLatch.noteUnavailable(
+				"transient",
+				transientCause,
+			);
+			this.log("vulture probe timed out; will retry (not treated as missing)");
+			logAvailabilityDecision({
+				tool: "vulture",
+				verdict: "unavailable",
+				outcome: "transient",
+				cause: transientCause,
+				elapsedMs: Date.now() - sweepStartedAt,
+				hostStallMs: sweepHostStallMs,
+				latched: false,
+				retryAfterMs,
+				budgetMs: 5000,
+			});
+			return false;
+		}
+		this.availabilityLatch.noteUnavailable("missing", "not-found");
 		this.log("vulture not installed; skipping (no auto-install)");
+		logAvailabilityDecision({
+			tool: "vulture",
+			verdict: "unavailable",
+			outcome: "missing",
+			cause: "not-found",
+			elapsedMs: Date.now() - sweepStartedAt,
+			hostStallMs: sweepHostStallMs,
+			latched: true,
+			budgetMs: 5000,
+		});
 		return false;
 	}
 
