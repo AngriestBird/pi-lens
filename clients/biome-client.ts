@@ -59,6 +59,14 @@ export class BiomeClient {
 	private readonly availabilityLatch = createAvailabilityLatch();
 	/** Cause of the last probe, read when the resolution comes back. */
 	private lastProbeCause: AvailabilityCause | null = null;
+	/**
+	 * Measurements of the last failed probe, held until the latch decides how
+	 * long the verdict lasts. The decision record is emitted after that, so it
+	 * can carry `retryAfterMs` — a latch you can see is worth little if the
+	 * retry schedule is not greppable beside it (#1474).
+	 */
+	private lastProbeElapsedMs = 0;
+	private lastProbeHostStallMs = 0;
 	// Per-cwd cache of the resolved biome binary. Keying by cwd matters in
 	// monorepos where different sub-packages each ship their own biome
 	// installation; sharing one slot across the whole client would cause
@@ -221,16 +229,10 @@ export class BiomeClient {
 		const failureOutcome: Exclude<AvailabilityOutcome, "success"> =
 			outcome === "success" ? "non-installable" : outcome;
 		this.lastProbeCause = cause;
-		logAvailabilityDecision({
-			tool: "biome",
-			verdict: "unavailable",
-			outcome: failureOutcome,
-			cause,
-			elapsedMs,
-			latched: failureOutcome !== "transient",
-			hostStallMs,
-			budgetMs: PROBE_TIMEOUT_MS,
-		});
+		this.lastProbeElapsedMs = elapsedMs;
+		this.lastProbeHostStallMs = hostStallMs;
+		// The record is emitted by `doEnsureAvailable`, once the latch has said how
+		// long this verdict holds.
 		return { outcome: failureOutcome };
 	}
 
@@ -246,14 +248,41 @@ export class BiomeClient {
 		});
 		if (resolved.outcome === "success") {
 			this.availabilityLatch.noteAvailable();
+			// The probe itself logs a clean hit. This arm is the other way to
+			// succeed — the install repaired a durable miss — and it needs its own
+			// record, or "biome went missing and came back" reads as silence.
+			if (this.lastProbeCause !== null && this.lastProbeCause !== "ok") {
+				logAvailabilityDecision({
+					tool: "biome",
+					verdict: "available",
+					outcome: "success",
+					cause: "ok",
+					elapsedMs: this.lastProbeElapsedMs,
+					latched: true,
+					hostStallMs: this.lastProbeHostStallMs,
+					budgetMs: PROBE_TIMEOUT_MS,
+				});
+			}
 			return true;
 		}
 		// A transient probe expires; a durable verdict is remembered for the
 		// session exactly as before.
-		this.availabilityLatch.noteUnavailable(
+		const cause = this.lastProbeCause ?? "not-found";
+		const retryAfterMs = this.availabilityLatch.noteUnavailable(
 			resolved.outcome,
-			this.lastProbeCause ?? "not-found",
+			cause,
 		);
+		logAvailabilityDecision({
+			tool: "biome",
+			verdict: "unavailable",
+			outcome: resolved.outcome,
+			cause,
+			elapsedMs: this.lastProbeElapsedMs,
+			latched: resolved.outcome !== "transient",
+			hostStallMs: this.lastProbeHostStallMs,
+			...(retryAfterMs > 0 && { retryAfterMs }),
+			budgetMs: PROBE_TIMEOUT_MS,
+		});
 		if (resolved.outcome === "transient") {
 			this.log("biome availability probe timed out; will retry (not installing)");
 		}

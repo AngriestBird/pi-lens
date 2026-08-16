@@ -5,164 +5,370 @@
  * "tool is not installed" verdict. Its class sweep still missed three more, and
  * the #1476 sweep found three beyond those — including `ctx.hasTool`, the
  * generic seam every CLI runner gates on. The next tool would have been the
- * eleventh. This test is the durable close: it DERIVES the consumer list from the
- * source tree and fails when any consumer decides availability with its own
+ * eleventh. This test is the durable close: it DERIVES the consumer list from
+ * the source tree and fails when any consumer decides availability with its own
  * copy of the rule.
  *
- * ## How the list is derived — and why it is not a list
+ * ## Structural, and per unit
  *
- * A hand-maintained roster of consumers is exactly the defect shape #883
- * established: it drifts the moment someone adds a tool, and a test that lies
- * is worse than no test. So the set is computed by scanning `clients/**\/*.ts`
- * for the shape that defines the defect:
+ * The analysis lives in `tests/support/availability-gate.ts` and runs on the
+ * real AST (`@ast-grep/napi`), not on file text. Two properties come from that
+ * and both were bought with review findings:
  *
- *   1. the module spawns a VERSION PROBE (a spawn call plus a version-flag
- *      literal in the same file) — it decides availability by running the tool;
- *   2. it MEMOIZES the verdict — an `avail`-named boolean/`null` field or
- *      variable, an assignment to one, a session fact (the dispatcher's memo
- *      for `hasTool`), or one of the shared memo factories.
+ *   * "routed through the policy" means an `import_statement` node binds a
+ *     policy symbol. A `// route this through availability-policy.js` comment
+ *     used to clear a file. It no longer parses as anything at all.
+ *   * the unit of judgement is a top-level declaration, not a file. The
+ *     file-level gate cleared `runner-helpers.ts` and `govulncheck-client.ts`
+ *     because each already imported the policy for a DIFFERENT memo, hiding two
+ *     of the seven sites this change migrates.
  *
- * Anything matching both must route through `availability-policy.ts`: directly,
- * via `createAvailabilityChecker` (which applies the policy internally), or by
- * extending `SecurityScanClient` (which does the same for the scanners).
+ * A unit is a consumer when it spawns a version probe AND parks the verdict in
+ * state that outlives the call. It must then reach the shared policy: directly,
+ * via `createAvailabilityChecker`, or by extending `SecurityScanClient`.
  *
- * ## What this gate does NOT prove
+ * ## The known-gap baseline
  *
- * Granularity is per FILE. A module that already imports the policy for one
- * memo can still add a second, hand-rolled one beside it and stay green here —
- * `runner-helpers.ts` held exactly such a second memo (the shared ast-grep
- * cache) until #1476. Per-declaration binding would need real type analysis;
- * the review question stays "does every latch in this file go through the
- * policy", and this gate covers the file-level case that recurred twice.
+ * `KNOWN_GAPS` is a shrink-only list of latches that predate this gate and are
+ * tracked separately. It is not the hand-maintained roster #883 warned about:
+ * nothing is added to it silently — a NEW unrouted consumer fails the gate, and
+ * a baseline entry that stops being flagged ALSO fails, so a fix cannot leave
+ * dead scaffolding behind.
  */
 
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import {
+	type AvailabilityUnit,
+	analyzeAvailabilityUnits,
+	scanClientsTree,
+	unitId,
+} from "../support/availability-gate.js";
 
 const repoRoot = path.resolve(
 	path.dirname(fileURLToPath(import.meta.url)),
 	"..",
 	"..",
 );
-const clientsRoot = path.join(repoRoot, "clients");
 
-/** The module runs a tool to decide whether the tool is there. */
-const VERSION_PROBE =
-	/\b(?:safeSpawnAsync|safeSpawn|spawnSync|spawn)\s*\(/;
-const VERSION_ARG = /"(?:--version|-version|-V|version|--Version)"/;
-/** The verdict is remembered, rather than recomputed per call. */
-const AVAILABILITY_MEMO = new RegExp(
-	[
-		// The shared memo factories.
-		"createAvailabilityLatch\\(\\)",
-		"createAvailabilityChecker\\(",
-		// A hand-rolled memo: `private fooAvailable: boolean | null = null`.
-		"(?:private|protected|public|let|var)\\s+(?:readonly\\s+)?[A-Za-z_$][\\w$]*[Aa]vail[\\w$]*\\s*(?::[^=;]*)?=\\s*(?:null|false|true)\\b",
-		// …or a write to one: `this.available = false`.
-		"\\bthis\\.[\\w$]*[Aa]vail[\\w$]*\\s*=\\s*(?:null|false|true)\\b",
-		// …or a session fact, which is the dispatcher's memo for `hasTool`.
-		"setSessionFact\\(",
-	].join("|"),
-);
-/** The three legitimate ways to reach the shared policy. */
-const ROUTED_THROUGH_POLICY =
-	/availability-policy\.js|createAvailabilityChecker|extends SecurityScanClient/;
+/**
+ * Hand-rolled latches that predate this gate. Each is a real instance of the
+ * shape, filed for its own fix; none may grow without a review noticing.
+ */
+const KNOWN_GAPS: ReadonlyArray<{ id: string; why: string }> = [
+	{
+		id: "clients/pipeline.ts::tryEslintFix",
+		why: "`_eslintCache` latches an eslint --version verdict per cwd+PATH; filed from the #1489 review alongside createCwdCachedProbe's credo/rust-clippy consumers.",
+	},
+];
 
-function* walkTs(dir: string): Generator<string> {
-	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-		const full = path.join(dir, entry.name);
-		if (entry.isDirectory()) {
-			if (entry.name === "node_modules") continue;
-			yield* walkTs(full);
-		} else if (
-			entry.isFile() &&
-			entry.name.endsWith(".ts") &&
-			!entry.name.endsWith(".d.ts") &&
-			!entry.name.endsWith(".test.ts")
-		) {
-			yield full;
-		}
-	}
-}
+/** Every consumer the #1467/#1476 sweeps migrated; the scan must still see them. */
+const KNOWN_CONSUMERS = [
+	"clients/biome-client.ts::BiomeClient",
+	"clients/dead-code-client.ts::PythonDeadCodeClient",
+	"clients/dependency-checker.ts::DependencyChecker",
+	"clients/dispatch/dispatcher.ts::checkToolAvailability",
+	"clients/dispatch/runners/utils/runner-helpers.ts::createAvailabilityChecker",
+	// The second latch in the same file — invisible to a per-file gate.
+	"clients/dispatch/runners/utils/runner-helpers.ts::isSgAvailableAsync",
+	"clients/go-client.ts::GoClient",
+	"clients/govulncheck-client.ts::GovulncheckClient",
+	"clients/jscpd-client.ts::jscpdAvailability",
+	"clients/knip-client.ts::KnipClient",
+	"clients/rust-client.ts::RustClient",
+	"clients/sg-runner.ts::SgRunner",
+];
 
-function isAvailabilityConsumer(source: string): boolean {
-	return (
-		VERSION_PROBE.test(source) &&
-		VERSION_ARG.test(source) &&
-		AVAILABILITY_MEMO.test(source)
-	);
-}
-
-interface Consumer {
-	file: string;
-	routed: boolean;
-}
-
-function collectConsumers(): Consumer[] {
-	const consumers: Consumer[] = [];
-	for (const file of walkTs(clientsRoot)) {
-		const source = fs.readFileSync(file, "utf-8");
-		if (!isAvailabilityConsumer(source)) continue;
-		consumers.push({
-			file: path.relative(repoRoot, file).replace(/\\/g, "/"),
-			routed: ROUTED_THROUGH_POLICY.test(source),
-		});
-	}
-	return consumers.sort((a, b) => a.file.localeCompare(b.file));
-}
-
-describe("availability policy coverage (#1476)", () => {
-	const consumers = collectConsumers();
-
-	it("every availability consumer routes through the shared policy", () => {
-		const unrouted = consumers.filter((c) => !c.routed).map((c) => c.file);
-		expect(unrouted, [
-			"These modules decide tool availability with their own copy of the rule.",
-			"Route them through clients/dispatch/runners/utils/availability-policy.ts",
-			"(directly, via createAvailabilityChecker, or via SecurityScanClient) so a",
-			"timed-out probe cannot latch as 'the tool is not installed' (#1467/#1476).",
-		].join(" ")).toEqual([]);
-	});
-
-	it("the derived set actually covers the known consumers", () => {
-		// Guards the scan itself: a regex that stopped matching would make the
-		// assertion above pass over an empty set — defect shape 7, a vacuous test.
-		const files = consumers.map((c) => c.file);
-		for (const known of [
-			"clients/biome-client.ts",
-			"clients/sg-runner.ts",
-			"clients/go-client.ts",
-			"clients/rust-client.ts",
-			"clients/knip-client.ts",
-			"clients/dead-code-client.ts",
-			"clients/dependency-checker.ts",
-			"clients/govulncheck-client.ts",
-			"clients/jscpd-client.ts",
-			"clients/dispatch/runners/utils/runner-helpers.ts",
-			"clients/dispatch/dispatcher.ts",
-		]) {
-			expect(files).toContain(known);
-		}
-	});
-
-	it("the shape rule can fail: an unrouted hand-rolled latch is detected", () => {
-		// The mutation proof, inline: if this synthetic module were added to
-		// clients/, the gate above would flag it.
-		const reintroduced = `
+/**
+ * The seven ways a reviewer broke the regex version of this gate, each written
+ * as it would appear in `clients/`. Every one must read as an unrouted
+ * consumer. They are the gate's own regression suite: widening the vocabulary
+ * without a fixture is how the gate silently narrows again.
+ */
+const EVASIONS: ReadonlyArray<{ name: string; source: string }> = [
+	{
+		name: "a Map<string, boolean> cwd cache instead of an `avail`-named field",
+		source: `
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			const cacheByCwd = new Map<string, boolean>();
+			export async function hasTool(cwd: string): Promise<boolean> {
+				const hit = cacheByCwd.get(cwd);
+				if (hit !== undefined) return hit;
+				const probe = await safeSpawnAsync("newtool", ["--version"], { cwd });
+				cacheByCwd.set(cwd, probe.status === 0);
+				return probe.status === 0;
+			}
+		`,
+	},
+	{
+		name: "a field named `installed`",
+		source: `
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			export class NewToolClient {
+				private installed: boolean | null = null;
+				async ensureAvailable(): Promise<boolean> {
+					if (this.installed !== null) return this.installed;
+					const probe = await safeSpawnAsync("newtool", ["--version"], {});
+					this.installed = probe.status === 0;
+					return this.installed;
+				}
+			}
+		`,
+	},
+	{
+		name: "a closure factory holding `let cached`",
+		source: `
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			export function createNewToolProbe(): () => Promise<boolean> {
+				let cached: boolean | null = null;
+				return async () => {
+					if (cached !== null) return cached;
+					const probe = await safeSpawnAsync("newtool", ["--version"], {});
+					cached = probe.status === 0;
+					return cached;
+				};
+			}
+		`,
+	},
+	{
+		name: "a probe flag hoisted into a const rather than written as a literal",
+		source: `
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			const VERSION_ARGS = ["--version"];
+			export class NewToolClient {
+				private toolAvailable: boolean | null = null;
+				async ensureAvailable(): Promise<boolean> {
+					if (this.toolAvailable !== null) return this.toolAvailable;
+					const probe = await safeSpawnAsync("newtool", VERSION_ARGS, {});
+					this.toolAvailable = probe.status === 0;
+					return this.toolAvailable;
+				}
+			}
+		`,
+	},
+	{
+		name: "a probe that asks with `-v`",
+		source: `
 			import { safeSpawnAsync } from "./safe-spawn.js";
 			export class NewToolClient {
 				private toolAvailable: boolean | null = null;
 				async ensureAvailable(): Promise<boolean> {
 					if (this.toolAvailable !== null) return this.toolAvailable;
-					const probe = await safeSpawnAsync("newtool", ["--version"], {});
-					this.toolAvailable = !probe.error && probe.status === 0;
+					const probe = await safeSpawnAsync("newtool", ["-v"], {});
+					this.toolAvailable = probe.status === 0;
 					return this.toolAvailable;
 				}
 			}
-		`;
-		expect(isAvailabilityConsumer(reintroduced)).toBe(true);
-		expect(ROUTED_THROUGH_POLICY.test(reintroduced)).toBe(false);
+		`,
+	},
+	{
+		name: "an optional boolean field with no initialiser",
+		source: `
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			export class NewToolClient {
+				private fooAvailable?: boolean;
+				async ensureAvailable(): Promise<boolean> {
+					if (this.fooAvailable !== undefined) return this.fooAvailable;
+					const probe = await safeSpawnAsync("newtool", ["--version"], {});
+					this.fooAvailable = probe.status === 0;
+					return this.fooAvailable;
+				}
+			}
+		`,
+	},
+	{
+		name: "the defect shape plus a comment that names availability-policy.js",
+		source: `
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			// TODO: route this through availability-policy.js
+			export class NewToolClient {
+				private toolAvailable: boolean | null = null;
+				async ensureAvailable(): Promise<boolean> {
+					if (this.toolAvailable !== null) return this.toolAvailable;
+					const probe = await safeSpawnAsync("newtool", ["--version"], {});
+					this.toolAvailable = probe.status === 0;
+					return this.toolAvailable;
+				}
+			}
+		`,
+	},
+];
+
+/** The positive control: the same client, migrated. It must pass. */
+const COMPLIANT = `
+	import { safeSpawnAsync } from "./safe-spawn.js";
+	import {
+		classifyProbeFailure,
+		createAvailabilityLatch,
+	} from "./dispatch/runners/utils/availability-policy.js";
+	export class NewToolClient {
+		private readonly availabilityLatch = createAvailabilityLatch();
+		async ensureAvailable(): Promise<boolean> {
+			const memo = this.availabilityLatch.read();
+			if (memo !== null) return memo;
+			const probe = await safeSpawnAsync("newtool", ["--version"], {});
+			if (probe.status === 0) {
+				this.availabilityLatch.noteAvailable();
+				return true;
+			}
+			const { outcome, cause } = classifyProbeFailure(probe);
+			this.availabilityLatch.noteUnavailable(outcome, cause);
+			return false;
+		}
+	}
+`;
+
+describe("availability policy coverage (#1476)", () => {
+	let consumers: AvailabilityUnit[];
+
+	beforeAll(async () => {
+		consumers = await scanClientsTree(repoRoot);
+	});
+
+	it("every availability consumer routes through the shared policy", () => {
+		const baseline = new Set(KNOWN_GAPS.map((gap) => gap.id));
+		const unrouted = consumers
+			.filter((unit) => !unit.governed)
+			.map(unitId)
+			.filter((id) => !baseline.has(id));
+		expect(
+			unrouted,
+			[
+				"These units decide tool availability with their own copy of the rule.",
+				"Route them through clients/dispatch/runners/utils/availability-policy.ts",
+				"(directly, via createAvailabilityChecker, or via SecurityScanClient) so a",
+				"timed-out probe cannot latch as 'the tool is not installed' (#1467/#1476).",
+			].join(" "),
+		).toEqual([]);
+	});
+
+	it("the known-gap baseline is still accurate", () => {
+		// A baseline entry that stopped being flagged is scaffolding around a fix
+		// that already landed; deleting it is part of the fix.
+		const flagged = new Set(
+			consumers.filter((unit) => !unit.governed).map(unitId),
+		);
+		const stale = KNOWN_GAPS.map((gap) => gap.id).filter(
+			(id) => !flagged.has(id),
+		);
+		expect(
+			stale,
+			"These KNOWN_GAPS entries are no longer flagged — delete them.",
+		).toEqual([]);
+	});
+
+	it("the derived set actually covers the known consumers", () => {
+		// Guards the scan itself: an analysis that stopped matching would make the
+		// assertion above pass over an empty set — defect shape 7, a vacuous test.
+		const ids = consumers.map(unitId);
+		for (const known of KNOWN_CONSUMERS) {
+			expect(ids).toContain(known);
+		}
+	});
+
+	describe("the gate catches every shape the review evaded it with", () => {
+		for (const evasion of EVASIONS) {
+			it(evasion.name, async () => {
+				const units = await analyzeAvailabilityUnits(
+					evasion.source,
+					"clients/new-tool-client.ts",
+				);
+				expect(
+					units.map((unit) => unit.unit),
+					"the analysis did not recognise this as an availability consumer",
+				).not.toEqual([]);
+				expect(
+					units.filter((unit) => unit.governed),
+					"an unrouted latch was reported as routed through the policy",
+				).toEqual([]);
+			});
+		}
+	});
+
+	it("flags a second hand-rolled latch beside a compliant one", async () => {
+		// The per-FILE gate cleared this shape, and that is how two of the seven
+		// sites this change migrates stayed invisible: the file already imported
+		// the policy, for a different memo.
+		const units = await analyzeAvailabilityUnits(
+			`
+				import { safeSpawnAsync } from "./safe-spawn.js";
+				import { createAvailabilityLatch } from "./dispatch/runners/utils/availability-policy.js";
+				export class MigratedClient {
+					private readonly availabilityLatch = createAvailabilityLatch();
+					async ensureAvailable(): Promise<boolean> {
+						const memo = this.availabilityLatch.read();
+						if (memo !== null) return memo;
+						const probe = await safeSpawnAsync("newtool", ["--version"], {});
+						if (probe.status === 0) {
+							this.availabilityLatch.noteAvailable();
+							return true;
+						}
+						this.availabilityLatch.noteUnavailable("missing", "not-found");
+						return false;
+					}
+				}
+				let secondToolAvailable: boolean | null = null;
+				export async function isSecondToolAvailable(): Promise<boolean> {
+					if (secondToolAvailable !== null) return secondToolAvailable;
+					const probe = await safeSpawnAsync("secondtool", ["--version"], {});
+					secondToolAvailable = probe.status === 0;
+					return secondToolAvailable;
+				}
+			`,
+			"clients/two-latches.ts",
+		);
+		expect(units.filter((unit) => !unit.governed).map((unit) => unit.unit)).toEqual(
+			["isSecondToolAvailable"],
+		);
+		expect(units.filter((unit) => unit.governed).map((unit) => unit.unit)).toEqual(
+			["MigratedClient"],
+		);
+	});
+
+	it("follows a probe that lives one helper away from the latch", async () => {
+		// `runner-helpers.ts` pre-#1476: the `--version` literal and the spawn sat
+		// in `probeAstGrepCommandAsync` while the latch sat in `isSgAvailableAsync`.
+		const units = await analyzeAvailabilityUnits(
+			`
+				import { safeSpawnAsync } from "./safe-spawn.js";
+				let toolAvailable: boolean | null = null;
+				async function probeTool(cmd: string): Promise<boolean> {
+					const check = await safeSpawnAsync(cmd, ["--version"], { timeout: 5000 });
+					return !check.error && check.status === 0;
+				}
+				export async function isToolAvailableAsync(): Promise<boolean> {
+					if (toolAvailable !== null) return toolAvailable;
+					toolAvailable = await probeTool("newtool");
+					return toolAvailable;
+				}
+			`,
+			"clients/helper-split.ts",
+		);
+		expect(units.map((unit) => unit.unit)).toContain("isToolAvailableAsync");
+		expect(units.filter((unit) => unit.governed)).toEqual([]);
+	});
+
+	it("a migrated client passes the gate", async () => {
+		const units = await analyzeAvailabilityUnits(
+			COMPLIANT,
+			"clients/new-tool-client.ts",
+		);
+		expect(units.map((unit) => unit.unit)).toEqual(["NewToolClient"]);
+		expect(units[0]?.governed).toBe(true);
+	});
+
+	it("a client with no probe is not a consumer at all", async () => {
+		// The scan must not drag in every module that happens to own a cache.
+		const units = await analyzeAvailabilityUnits(
+			`
+				const cacheByCwd = new Map<string, boolean>();
+				export function rememberTrust(cwd: string, trusted: boolean): void {
+					cacheByCwd.set(cwd, trusted);
+				}
+			`,
+			"clients/trust-cache.ts",
+		);
+		expect(units).toEqual([]);
 	});
 });

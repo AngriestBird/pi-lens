@@ -14,7 +14,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TRANSIENT_BASE_COOLDOWN_MS } from "../../clients/dispatch/runners/utils/availability-policy.ts";
+import {
+	HOST_STALL_COOLDOWN_MS,
+	TRANSIENT_BASE_COOLDOWN_MS,
+} from "../../clients/dispatch/runners/utils/availability-policy.ts";
 
 /**
  * Reset through the SAME module instance the clients load (the compiled `.js`),
@@ -28,11 +31,31 @@ async function resetDispatchAvailabilityState(): Promise<void> {
 	helpers.resetDispatchAvailabilityState();
 }
 
-const { safeSpawnAsync, safeSpawn, ensureTool } = vi.hoisted(() => ({
+const { safeSpawnAsync, safeSpawn, ensureTool, logLatency } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
 	safeSpawn: vi.fn(),
 	ensureTool: vi.fn(),
+	logLatency: vi.fn(),
 }));
+
+// Spread the real module: only `logLatency` is intercepted, so the rest of the
+// import graph keeps working.
+vi.mock("../../clients/latency-logger.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../clients/latency-logger.js")>();
+	return { ...actual, logLatency };
+});
+
+/** Availability decision records emitted for `tool`, oldest first. */
+function decisionsFor(tool: string): Array<Record<string, unknown>> {
+	return logLatency.mock.calls
+		.map((call) => call[0] as Record<string, unknown>)
+		.filter(
+			(entry) =>
+				entry?.phase === "availability_decision" &&
+				(entry.metadata as Record<string, unknown> | undefined)?.tool === tool,
+		);
+}
 
 vi.mock("../../clients/safe-spawn.js", () => ({
 	safeSpawn,
@@ -304,6 +327,115 @@ describe("govulncheck availability (#1476)", () => {
 	});
 });
 
+describe("SgRunner: a slow npx must not veto the install (#1489 review)", () => {
+	/** Route the sweep per command so each candidate's verdict is explicit. */
+	function route(byCommand: Record<string, unknown>, fallback: unknown): void {
+		safeSpawnAsync.mockImplementation(async (cmd: string) =>
+			cmd in byCommand ? byCommand[cmd] : fallback,
+		);
+	}
+
+	it("installs when ast-grep is genuinely absent and only npx timed out", async () => {
+		// The exact shape of a cold or busy Windows box: the binary is not there,
+		// and `npx --no -- ast-grep` cannot answer inside a 5 s budget because it
+		// has to start Node first. Gating the install on ANY transient turned this
+		// into "never install, re-spawn the slow npx every sweep, forever".
+		route(
+			{
+				"ast-grep": missingResult,
+				sg: missingResult,
+				npx: timeoutResult,
+				"/managed/ast-grep": okResult("ast-grep 0.32.3"),
+			},
+			missingResult,
+		);
+		ensureTool.mockResolvedValue("/managed/ast-grep");
+		const { SgRunner } = await import("../../clients/sg-runner.js");
+		const runner = new SgRunner();
+
+		expect(await runner.ensureAvailable()).toBe(true);
+		expect(ensureTool).toHaveBeenCalledWith("ast-grep");
+	});
+
+	it("still refuses to install when a DIRECT candidate timed out", async () => {
+		// The #1476 guarantee, unchanged: `ast-grep` itself failing to answer is a
+		// statement about the host, not about the tool.
+		route({ "ast-grep": timeoutResult, sg: missingResult, npx: missingResult }, missingResult);
+		const { SgRunner } = await import("../../clients/sg-runner.js");
+		const runner = new SgRunner();
+
+		expect(await runner.ensureAvailable()).toBe(false);
+		expect(ensureTool).not.toHaveBeenCalled();
+	});
+
+	it("does not latch 'missing' when the install fails after an npx timeout", async () => {
+		route({ "ast-grep": missingResult, sg: missingResult, npx: timeoutResult }, missingResult);
+		ensureTool.mockResolvedValue(null);
+		const { SgRunner } = await import("../../clients/sg-runner.js");
+		const runner = new SgRunner();
+
+		expect(await runner.ensureAvailable()).toBe(false);
+		expect(ensureTool).toHaveBeenCalledWith("ast-grep");
+
+		// npx never got a fair hearing, so "ast-grep is not installed" is not a
+		// fact yet; the verdict expires and a later sweep finds it.
+		advancePastCooldown();
+		safeSpawnAsync.mockResolvedValue(okResult("ast-grep 0.32.3"));
+		expect(await runner.ensureAvailable()).toBe(true);
+	});
+});
+
+describe("biome records its retry schedule (#1489 review)", () => {
+	it("a transient verdict carries retryAfterMs, not just a latch flag", async () => {
+		safeSpawnAsync.mockResolvedValue(timeoutResult);
+		const { BiomeClient } = await import("../../clients/biome-client.js");
+
+		expect(await new BiomeClient().ensureAvailable()).toBe(false);
+		const decisions = decisionsFor("biome");
+		const unavailable = decisions.filter(
+			(entry) =>
+				(entry.metadata as Record<string, unknown>).verdict === "unavailable",
+		);
+		expect(unavailable).toHaveLength(1);
+		const metadata = unavailable[0]?.metadata as Record<string, unknown>;
+		expect(metadata.latched).toBe(false);
+		// Pre-fix the return of `noteUnavailable` was discarded, so the record said
+		// "off" without ever saying "back at".
+		expect(metadata.retryAfterMs).toBe(TRANSIENT_BASE_COOLDOWN_MS);
+	});
+});
+
+describe("govulncheck records a real duration (#1489 review)", () => {
+	it("the post-install re-probe reports its own elapsed time and cooldown", async () => {
+		// `elapsedMs: 0` was hard-coded here — the #1474 defect verbatim, a
+		// duration field that measures nothing. Burn 1234 ms inside the re-probe
+		// so a re-hard-coded zero cannot pass.
+		safeSpawnAsync.mockImplementation(async (cmd: string, args: string[]) => {
+			if (cmd === "go" && args[0] === "install") return okResult("");
+			if (cmd === "go") return okResult("go version go1.23.0");
+			if (cmd === "govulncheck" && safeSpawnAsync.mock.calls.length > 1) {
+				vi.setSystemTime(new Date(Date.now() + 1234));
+				return timeoutResult;
+			}
+			return missingResult;
+		});
+		const { GovulncheckClient } = await import(
+			"../../clients/govulncheck-client.js"
+		);
+
+		expect(await new GovulncheckClient().ensureAvailable()).toBe(false);
+		const reprobe = decisionsFor("govulncheck").at(-1);
+		expect(reprobe?.durationMs).toBe(1234);
+		const metadata = reprobe?.metadata as Record<string, unknown>;
+		// The 1234 ms burned above is host time, not tool time — and now that the
+		// re-probe is sampled, the classifier sees it and says so: a short
+		// host-stall cooldown instead of the tool's own escalating one.
+		expect(metadata.hostStallMs).toBeGreaterThan(500);
+		expect(metadata.cause).toBe("host-stall");
+		expect(metadata.retryAfterMs).toBe(HOST_STALL_COOLDOWN_MS);
+	});
+});
+
 describe("dispatch hasTool availability (#1476)", () => {
 	/** The generic seam every CLI runner gates on: `ctx.hasTool(command)`. */
 	async function load() {
@@ -351,5 +483,54 @@ describe("dispatch hasTool availability (#1476)", () => {
 		advancePastCooldown();
 		safeSpawnAsync.mockResolvedValue(okResult("1.2.3"));
 		expect(await checkToolAvailability("sometool", facts)).toBe(true);
+	});
+
+	it("the cooldown ESCALATES across repeated transients (#1489 review)", async () => {
+		// The attempt count was hard-coded to 1, so the backoff sat flat at 30 s
+		// forever. On a permanently sick host that is a re-probe every 30 s per
+		// command for the whole session — ten times the storm the policy bounds,
+		// at the highest-traffic consumer in the product.
+		safeSpawnAsync.mockResolvedValue(timeoutResult);
+		const { checkToolAvailability, facts } = await load();
+
+		expect(await checkToolAvailability("sometool", facts)).toBe(false);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+
+		// First cooldown: 30 s. Second verdict is attempt 2, so 60 s.
+		vi.setSystemTime(new Date(Date.now() + TRANSIENT_BASE_COOLDOWN_MS + 1));
+		expect(await checkToolAvailability("sometool", facts)).toBe(false);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(2);
+
+		// 30 s later is still inside the second cooldown: no third probe.
+		vi.setSystemTime(new Date(Date.now() + TRANSIENT_BASE_COOLDOWN_MS + 1));
+		expect(await checkToolAvailability("sometool", facts)).toBe(false);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(2);
+
+		// 60 s after the second verdict, it re-probes and the tool comes back.
+		vi.setSystemTime(new Date(Date.now() + TRANSIENT_BASE_COOLDOWN_MS + 1));
+		safeSpawnAsync.mockResolvedValue(okResult("1.2.3"));
+		expect(await checkToolAvailability("sometool", facts)).toBe(true);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(3);
+	});
+
+	it("a later success retires the cooldown facts (#1489 review)", async () => {
+		safeSpawnAsync.mockResolvedValue(timeoutResult);
+		const { checkToolAvailability, facts } = await load();
+		expect(await checkToolAvailability("sometool", facts)).toBe(false);
+		expect(
+			facts.getSessionFact<number>("session.toolCache.sometool.retryAt"),
+		).toBeGreaterThan(0);
+
+		advancePastCooldown();
+		safeSpawnAsync.mockResolvedValue(okResult("1.2.3"));
+		expect(await checkToolAvailability("sometool", facts)).toBe(true);
+		expect(
+			facts.getSessionFact<number>("session.toolCache.sometool.retryAt"),
+		).toBe(0);
+		expect(
+			facts.getSessionFact<number>(
+				"session.toolCache.sometool.transientAttempts",
+			),
+		).toBe(0);
 	});
 });

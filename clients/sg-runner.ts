@@ -190,9 +190,19 @@ export class SgRunner {
 	 */
 	private readonly availabilityLatch = createAvailabilityLatch();
 	private ensureInFlight: Promise<boolean> | null = null;
-	/** Whether ANY candidate in the current sweep failed for a transient reason. */
+	/**
+	 * Whether a DIRECT candidate — one that would have been ast-grep itself —
+	 * failed for a transient reason in the current sweep. Only these block the
+	 * install: a slow `npx` says nothing about whether ast-grep is on this
+	 * machine, and letting it block turned "ast-grep is genuinely absent on a
+	 * slow host" into "ast-grep is never installed and npx is re-spawned every
+	 * sweep, forever".
+	 */
 	private sweepSawTransient = false;
 	private sweepTransientCause: AvailabilityCause = "probe-timeout";
+	/** A transient on the npx fallback: not evidence, but not nothing either. */
+	private sweepFallbackTransient = false;
+	private sweepFallbackCause: AvailabilityCause = "probe-timeout";
 	/** Host stall summed over every probe of the current sweep, ms. */
 	private sweepHostStallMs = 0;
 
@@ -229,6 +239,8 @@ export class SgRunner {
 		const startedAt = Date.now();
 		this.sweepSawTransient = false;
 		this.sweepTransientCause = "probe-timeout";
+		this.sweepFallbackTransient = false;
+		this.sweepFallbackCause = "probe-timeout";
 		this.sweepHostStallMs = 0;
 
 		// Step 1: PATH — canonical binary names + npx fallback.
@@ -236,7 +248,10 @@ export class SgRunner {
 		const pathCommand = await this.probeCommandCandidates([
 			{ cmd: "ast-grep", argsPrefix: [] },
 			{ cmd: "sg", argsPrefix: [] },
-			{ cmd: "npx", argsPrefix: ["--no", "--", "ast-grep"] },
+			// `npx --no -- ast-grep` starts a Node process before it can answer, so
+			// it is the candidate most likely to blow a 5 s budget on a cold or busy
+			// box. Marked a fallback so its timeout cannot veto the install.
+			{ cmd: "npx", argsPrefix: ["--no", "--", "ast-grep"], fallback: true },
 		]);
 		if (pathCommand) {
 			this.sgPath = pathCommand.cmd;
@@ -284,10 +299,16 @@ export class SgRunner {
 			}
 		}
 
-		// A timeout on ANY candidate means the machine answered, not the tool
+		// A timeout on a DIRECT candidate means the machine answered, not the tool
 		// (#1476). Installing ast-grep because the host event loop stalled is a
 		// heavyweight reaction to a hiccup, and latching the result disabled the
 		// tool until restart. Retry the sweep later instead.
+		//
+		// The npx fallback is deliberately NOT part of this test. Gating the
+		// install on it regressed the very host this change targets: a slow box
+		// with no ast-grep timed out `npx --no -- ast-grep` every sweep, so the
+		// install below was never reached and the slow npx was re-spawned on each
+		// escalating retry instead — worse than the latch it replaced.
 		if (this.sweepSawTransient) {
 			this.log(
 				"ast-grep availability probe timed out; will retry (not installing)",
@@ -316,6 +337,15 @@ export class SgRunner {
 			return true;
 		}
 
+		// The install failed AND the npx fallback never got a fair hearing, so
+		// "ast-grep is not installed" is not a fact yet. Expire the verdict.
+		if (this.sweepFallbackTransient) {
+			return this.noteUnavailable(
+				startedAt,
+				"transient",
+				this.sweepFallbackCause,
+			);
+		}
 		return this.noteUnavailable(startedAt, "missing", "not-found");
 	}
 
@@ -453,6 +483,7 @@ export class SgRunner {
 	private async probeCommand(
 		cmd: string,
 		argsPrefix: string[],
+		fallback = false,
 	): Promise<boolean> {
 		// Host-side budget: measure the loop stall that overlapped the window so
 		// the classifier can tell "the tool is slow" from "the host was busy".
@@ -476,17 +507,28 @@ export class SgRunner {
 		}
 		const { outcome, cause } = classifyProbeFailure(result, { hostStallMs });
 		if (outcome === "transient") {
-			this.sweepSawTransient = true;
-			this.sweepTransientCause = cause;
+			if (fallback) {
+				this.sweepFallbackTransient = true;
+				this.sweepFallbackCause = cause;
+			} else {
+				this.sweepSawTransient = true;
+				this.sweepTransientCause = cause;
+			}
 		}
 		return false;
 	}
 
 	private async probeCommandCandidates(
-		candidates: Array<{ cmd: string; argsPrefix: string[] }>,
+		candidates: Array<{ cmd: string; argsPrefix: string[]; fallback?: boolean }>,
 	): Promise<{ cmd: string; argsPrefix: string[] } | undefined> {
 		for (const candidate of candidates) {
-			if (await this.probeCommand(candidate.cmd, candidate.argsPrefix)) {
+			if (
+				await this.probeCommand(
+					candidate.cmd,
+					candidate.argsPrefix,
+					candidate.fallback ?? false,
+				)
+			) {
 				return candidate;
 			}
 		}

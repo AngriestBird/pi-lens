@@ -119,6 +119,21 @@ function transientRetryKey(command: string): string {
 }
 
 /**
+ * Consecutive transient verdicts for a command, so the cooldown ESCALATES the
+ * way the policy documents (30 s, 60 s, 120 s … capped at 5 min) instead of
+ * sitting flat at 30 s.
+ *
+ * This is the highest-traffic availability consumer in the product. A flat
+ * cooldown here means a permanently sick host is re-probed every 30 s per
+ * command for the whole session — ten times the storm the policy claims to
+ * bound, and the one place the bound matters most. `createAvailabilityChecker`
+ * tracks the same counter; this keeps the two seams telling one story.
+ */
+function transientAttemptsKey(command: string): string {
+	return `${normalizeCacheKey(command)}.transientAttempts`;
+}
+
+/**
  * Is `command` usable right now? Cached per session.
  *
  * Latch policy (#1467/#1476): a `false` from a genuine absence is durable and
@@ -162,6 +177,10 @@ export async function checkToolAvailability(
 		const elapsedMs = Date.now() - startedAt;
 		if (result.status === 0) {
 			facts.setSessionFact(key, true);
+			// The tool answered: retire the cooldown facts rather than leaving a
+			// stale retry deadline behind a `true`.
+			facts.setSessionFact(transientRetryKey(command), 0);
+			facts.setSessionFact(transientAttemptsKey(command), 0);
 			logAvailabilityDecision({
 				tool: command,
 				verdict: "available",
@@ -182,10 +201,14 @@ export async function checkToolAvailability(
 		});
 		let retryAfterMs: number | undefined;
 		if (outcome === "transient") {
-			retryAfterMs = transientRetryDelayMs(1, cause);
+			const attempts =
+				(facts.getSessionFact<number>(transientAttemptsKey(command)) ?? 0) + 1;
+			facts.setSessionFact(transientAttemptsKey(command), attempts);
+			retryAfterMs = transientRetryDelayMs(attempts, cause);
 			facts.setSessionFact(transientRetryKey(command), Date.now() + retryAfterMs);
 		} else {
 			facts.setSessionFact(key, false);
+			facts.setSessionFact(transientAttemptsKey(command), 0);
 		}
 		logAvailabilityDecision({
 			tool: command,

@@ -26,6 +26,7 @@ import { SecurityScanClient } from "./security-scan-client.js";
 import {
 	classifyProbeFailure,
 	logAvailabilityDecision,
+	startHostStallSampler,
 } from "./dispatch/runners/utils/availability-policy.js";
 
 // --- Types ---
@@ -150,14 +151,35 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 		// project has a go.mod the user has the Go toolchain by definition.
 		// Same shape as rust-clippy / cargo: lean on the language's own
 		// install mechanism rather than adding a new installer strategy.
-		const goOnPath = await safeSpawnAsync("go", ["version"], {
-			timeout: 5000,
-		});
+		const goProbeStartedAt = Date.now();
+		const goSampler = startHostStallSampler();
+		let goOnPath: Awaited<ReturnType<typeof safeSpawnAsync>>;
+		let goHostStallMs: number;
+		try {
+			goOnPath = await safeSpawnAsync("go", ["version"], {
+				timeout: 5000,
+			});
+		} finally {
+			goHostStallMs = goSampler.stop();
+		}
 		if (goOnPath.error || goOnPath.status !== 0) {
-			const { outcome, cause } = classifyProbeFailure(goOnPath);
+			const { outcome, cause } = classifyProbeFailure(goOnPath, {
+				hostStallMs: goHostStallMs,
+			});
 			if (outcome === "transient") {
 				this.log("`go version` probe timed out; retrying govulncheck later");
-				this.markTransientlyUnavailable(cause);
+				const retryAfterMs = this.markTransientlyUnavailable(cause);
+				logAvailabilityDecision({
+					tool: "govulncheck",
+					verdict: "unavailable",
+					outcome,
+					cause,
+					elapsedMs: Date.now() - goProbeStartedAt,
+					latched: false,
+					hostStallMs: goHostStallMs,
+					...(retryAfterMs > 0 && { retryAfterMs }),
+					budgetMs: 5000,
+				});
 				return false;
 			}
 			this.log("go binary not on PATH — cannot auto-install govulncheck");
@@ -167,11 +189,18 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 
 		this.log("govulncheck not found, attempting auto-install via go install");
 		const installStartedAt = Date.now();
-		const install = await safeSpawnAsync(
-			"go",
-			["install", "golang.org/x/vuln/cmd/govulncheck@latest"],
-			{ timeout: INSTALL_TIMEOUT_MS },
-		);
+		const installSampler = startHostStallSampler();
+		let install: Awaited<ReturnType<typeof safeSpawnAsync>>;
+		let installHostStallMs: number;
+		try {
+			install = await safeSpawnAsync(
+				"go",
+				["install", "golang.org/x/vuln/cmd/govulncheck@latest"],
+				{ timeout: INSTALL_TIMEOUT_MS },
+			);
+		} finally {
+			installHostStallMs = installSampler.stop();
+		}
 		if (install.error || install.status !== 0) {
 			this.log(
 				`govulncheck auto-install failed: ${(install.stderr ?? "").slice(0, 200)}`,
@@ -183,9 +212,11 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 			// A non-zero exit (module not found, compile error) still latches:
 			// that IS evidence about this machine, and retrying it every turn
 			// would be a `go install` storm.
-			const { outcome, cause } = classifyProbeFailure(install);
+			const { outcome, cause } = classifyProbeFailure(install, {
+				hostStallMs: installHostStallMs,
+			});
 			if (outcome === "transient") {
-				this.markTransientlyUnavailable(cause);
+				const retryAfterMs = this.markTransientlyUnavailable(cause);
 				// One record per decision, so an install that keeps timing out is
 				// readable in latency.log the same day (#1467's forensic trail).
 				logAvailabilityDecision({
@@ -195,6 +226,8 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 					cause,
 					elapsedMs: Date.now() - installStartedAt,
 					latched: false,
+					hostStallMs: installHostStallMs,
+					...(retryAfterMs > 0 && { retryAfterMs }),
 					budgetMs: INSTALL_TIMEOUT_MS,
 				});
 				return false;
@@ -206,9 +239,17 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 		// `go install` writes to `$GOBIN` or `$GOPATH/bin`. The user may not
 		// have that on `$PATH`. Re-probe by name (works when it is on PATH)
 		// then fall back to the canonical bin dirs.
-		const reprobe = await safeSpawnAsync("govulncheck", ["-version"], {
-			timeout: 5000,
-		});
+		const reprobeStartedAt = Date.now();
+		const reprobeSampler = startHostStallSampler();
+		let reprobe: Awaited<ReturnType<typeof safeSpawnAsync>>;
+		let reprobeHostStallMs: number;
+		try {
+			reprobe = await safeSpawnAsync("govulncheck", ["-version"], {
+				timeout: 5000,
+			});
+		} finally {
+			reprobeHostStallMs = reprobeSampler.stop();
+		}
 		if (!reprobe.error && reprobe.status === 0) {
 			this.log("govulncheck auto-installed and found on PATH");
 			this.available = true;
@@ -243,19 +284,25 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 		// The install SUCCEEDED, so the tool is on this machine somewhere. If the
 		// re-probe merely timed out, latching "not installed" would be the #1467
 		// mistake one step later in the same function (#1476).
-		const { outcome, cause } = classifyProbeFailure(reprobe);
+		const { outcome, cause } = classifyProbeFailure(reprobe, {
+			hostStallMs: reprobeHostStallMs,
+		});
 		if (outcome === "transient") {
 			this.log(
 				"govulncheck installed but the re-probe timed out; retrying later",
 			);
-			this.markTransientlyUnavailable(cause);
+			const retryAfterMs = this.markTransientlyUnavailable(cause);
 			logAvailabilityDecision({
 				tool: "govulncheck",
 				verdict: "unavailable",
 				outcome,
 				cause,
-				elapsedMs: 0,
+				// The re-probe's own wall time. A hard-coded 0 here was the #1474
+				// defect verbatim: a duration field that measures nothing.
+				elapsedMs: Date.now() - reprobeStartedAt,
 				latched: false,
+				hostStallMs: reprobeHostStallMs,
+				...(retryAfterMs > 0 && { retryAfterMs }),
 				budgetMs: 5000,
 			});
 			return false;
