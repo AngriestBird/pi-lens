@@ -3267,9 +3267,16 @@ export class LSPService {
 		//
 		// #1470: same per-server reasoning for a CUT-OFF auxiliary. "Demonstrated
 		// ready" means this server answered for this file; an auxiliary our grace
-		// timer cut off demonstrably did not, so marking it warm would let
-		// `ensureWarmForSweep` skip the warm-up round trip on the strength of a touch
-		// it never answered.
+		// timer cut off demonstrably did not.
+		//
+		// NO TEST PINS THIS LINE, and that is a property of today's readers rather
+		// than a coverage gap: `ensureWarmForSweep` filters `role === "auxiliary"`
+		// out of its server list entirely, so no reader consumes an auxiliary's
+		// `demonstratedReady` mark and deleting this `continue` changes no observable
+		// behavior (verified by mutation — the LSP suite stays green). It stays
+		// because the mark's meaning is "this server answered", and the moment any
+		// reader stops filtering auxiliaries out, marking a cut-off scanner warm
+		// would let it skip a warm-up it never earned.
 		const notifyTimedOutServerIds = new Set(notifyWriteTimedOutServerIds);
 		const cutOffServerIds = new Set(unconfirmedServerIds);
 		if (diagnosticsMode !== "none" && !diagnosticsTimedOut) {

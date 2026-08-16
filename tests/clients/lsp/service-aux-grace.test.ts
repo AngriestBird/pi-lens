@@ -935,6 +935,49 @@ describe("#1470 — cut-off auxiliary honesty", () => {
 		expect(result?.inconclusive).toBeUndefined();
 	});
 
+	// CLASS SWEEP (#1470's own acceptance criterion). opengrep is the scanner the
+	// issue was reported against, and today it is the ONLY auxiliary whose
+	// declared budget (3500ms) exceeds the 2000ms ceiling — which is precisely the
+	// condition that makes our grace timer win with time left on the touch's own
+	// deadline, producing a cut-off that is not also a timeout. ast-grep (1800),
+	// typos (1500) and zizmor (2000) are cut off AT the touch deadline instead, so
+	// they already fell into `diagnosticsTimedOut` and read as inconclusive.
+	//
+	// That is a property of today's numbers, not of the code: `PI_LENS_AUX_GRACE_MS`
+	// moves the ceiling for every auxiliary, and any budget change moves the
+	// boundary. So the narrowing is keyed on `role === "auxiliary"` — the same
+	// predicate that builds `auxWaits` — never on a server id. Lowering the ceiling
+	// puts each of the four into the cut-off shape and each must narrow identically.
+	it.each(["opengrep", "ast-grep", "zizmor", "typos"])(
+		"narrows the confirmation for a cut-off %s, not just opengrep",
+		async (auxId) => {
+			// Ceiling well under every declared budget, so the grace timer wins with
+			// the touch's own deadline (the aux's declared budget) still far away.
+			process.env.PI_LENS_AUX_GRACE_MS = "300";
+			const { LSPService } = await import("../../../clients/lsp/index.js");
+			const service = new LSPService();
+			getServersForFileWithConfig.mockReturnValue([
+				makePrimaryServer("ts-primary"),
+				makeAuxServer(auxId),
+			]);
+			createLSPClient
+				.mockResolvedValueOnce(makeClient(100, [], { serverId: "ts-primary" }))
+				.mockResolvedValueOnce(makeClient(9000, [], { serverId: auxId }));
+			await service.getClientsForFile(FILE);
+
+			const touch = service.touchFile(FILE, "sweep", {
+				clientScope: "with-auxiliary",
+				auxiliaryServerIds: [auxId],
+				collectDiagnostics: true,
+				diagnostics: "document",
+			});
+			await vi.advanceTimersByTimeAsync(500);
+			const result = await touch;
+			expect(result?.confirmation).toBe("partial");
+			expect(result?.unconfirmedServerIds).toEqual([auxId]);
+		},
+	);
+
 	it("a SILENT auxiliary is left exactly as it was — #1470 narrows only cut_off", async () => {
 		// Aux settles at 900ms, inside its own budget, publishing nothing — the
 		// same silent-scanner shape #1458's evidence-based outcome test uses. The
