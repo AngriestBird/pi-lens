@@ -739,6 +739,338 @@ describe("test-runner-client", () => {
 		expect(result.failures[0].name).toBe("Foo\\BarTest::testSomething");
 	});
 
+	// #1452: PHPUnit's own elapsed time was never parsed, so every PHPUnit run
+	// reported 0ms. The summary line changed shape across supported majors, so
+	// both are pinned. Literal lines, not a live run — there is no PHP toolchain
+	// on the machine this was written on.
+	it("parses the PHPUnit >= 9.3 clock Time line (MM:SS.mmm)", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parsePhpunitOutput(
+			"...\n\nTime: 00:00.123, Memory: 8.00 MB\n\nOK (12 tests, 34 assertions)\n",
+			"",
+			0,
+			"/tmp/BarTest.php",
+			"phpunit",
+		);
+
+		expect(result.passed).toBe(12);
+		expect(result.duration).toBe(123);
+	});
+
+	it("reads a PHPUnit fractional second as tenths, not as milliseconds", () => {
+		const client = new TestRunnerClient(false) as any;
+		// "00:00.1" is a TENTH of a second. Parsing the fraction as an integer
+		// would report 1ms for a 100ms run.
+		const result = client.parsePhpunitOutput(
+			"Time: 00:00.1, Memory: 8.00 MB\nOK (1 test, 1 assertion)\n",
+			"",
+			0,
+			"/tmp/BarTest.php",
+			"phpunit",
+		);
+
+		expect(result.duration).toBe(100);
+	});
+
+	it("parses a PHPUnit Time line carrying hours", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parsePhpunitOutput(
+			"Time: 01:02:03.456, Memory: 8.00 MB\nOK (1 test, 1 assertion)\n",
+			"",
+			0,
+			"/tmp/BarTest.php",
+			"phpunit",
+		);
+
+		expect(result.duration).toBe(3_723_456);
+	});
+
+	it("parses the legacy PHPUnit <= 9.2 Time line (seconds and ms)", () => {
+		const client = new TestRunnerClient(false) as any;
+		const seconds = client.parsePhpunitOutput(
+			"Time: 1.23 seconds, Memory: 10.00MB\nOK (2 tests, 2 assertions)\n",
+			"",
+			0,
+			"/tmp/BarTest.php",
+			"phpunit",
+		);
+		const millis = client.parsePhpunitOutput(
+			"Time: 123 ms, Memory: 10.00MB\nOK (2 tests, 2 assertions)\n",
+			"",
+			0,
+			"/tmp/BarTest.php",
+			"phpunit",
+		);
+
+		expect(seconds.duration).toBe(1230);
+		expect(millis.duration).toBe(123);
+	});
+
+	it("leaves the PHPUnit duration at 0 when no Time line is present", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parsePhpunitOutput(
+			"...\n\nOK (12 tests, 34 assertions)\n",
+			"",
+			0,
+			"/tmp/BarTest.php",
+			"phpunit",
+		);
+
+		// An unrecognised summary must degrade to "unmeasured" — formatResult
+		// suppresses the suffix on `duration > 0` — never to a wrong number.
+		expect(result.duration).toBe(0);
+	});
+
+	// --- vitest / jest JSON reporter (#1452) ---
+	//
+	// The payloads below are trimmed captures of REAL runs of a three-test file
+	// (one 120ms pass, one fail, one skip) under vitest 4.1.10 and jest 30.4.2
+	// on node 24.5.0. Trimmed of `snapshot`/`failureMessages`/suite counters
+	// only — every field these assertions read is verbatim, including vitest's
+	// float `endTime` and jest's `duration: null` on the skipped assertion.
+	//
+	// Note what is NOT in either capture: `perfStats`. It lives on jest's
+	// internal TestResult, not on the JSON reporter's output, so a duration fix
+	// that reads it would still report 0.
+
+	const VITEST_JSON = JSON.stringify({
+		numPassedTests: 1,
+		numFailedTests: 1,
+		numPendingTests: 1,
+		numTodoTests: 0,
+		startTime: 1786866554004,
+		testResults: [
+			{
+				name: "/tmp/vtjson/sample.test.js",
+				status: "failed",
+				startTime: 1786866554330,
+				endTime: 1786866554461.674,
+				assertionResults: [
+					{ status: "passed", title: "slow pass", duration: 122.60340400000001 },
+					{ status: "failed", title: "quick fail", duration: 8.674104 },
+					{ status: "skipped", title: "skipped" },
+				],
+			},
+		],
+	});
+
+	const JEST_JSON = JSON.stringify({
+		numPassedTests: 1,
+		numFailedTests: 1,
+		numPendingTests: 1,
+		numTodoTests: 0,
+		startTime: 1786866618394,
+		testResults: [
+			{
+				name: "/tmp/jestjson/sample.test.js",
+				status: "failed",
+				startTime: 1786866618477,
+				endTime: 1786866619206,
+				assertionResults: [
+					{ status: "passed", title: "slow pass", duration: 124 },
+					{ status: "failed", title: "quick fail", duration: 3 },
+					{ status: "pending", title: "skipped", duration: null },
+				],
+			},
+		],
+	});
+
+	it("extracts a real duration from a vitest --reporter=json payload", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parseVitestOutput(
+			VITEST_JSON,
+			"",
+			"/tmp/vtjson/sample.test.js",
+			"/tmp/vtjson",
+			"vitest",
+		);
+
+		expect(result.passed).toBe(1);
+		expect(result.failed).toBe(1);
+		// 1786866554461.674 - 1786866554330, rounded. Pinned exactly rather than
+		// "> 0": the whole defect was a plausible-looking constant.
+		expect(result.duration).toBe(132);
+	});
+
+	it("extracts a real duration from a jest --json payload", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parseJestOutput(
+			JEST_JSON,
+			"",
+			"/tmp/jestjson/sample.test.js",
+			"/tmp/jestjson",
+			"jest",
+		);
+
+		expect(result.passed).toBe(1);
+		expect(result.failed).toBe(1);
+		expect(result.duration).toBe(729);
+	});
+
+	it("counts a skipped test from numPendingTests, which is what both reporters emit", () => {
+		const client = new TestRunnerClient(false) as any;
+		const vitest = client.parseVitestOutput(
+			VITEST_JSON,
+			"",
+			"/tmp/vtjson/sample.test.js",
+			"/tmp/vtjson",
+			"vitest",
+		);
+		const jest = client.parseJestOutput(
+			JEST_JSON,
+			"",
+			"/tmp/jestjson/sample.test.js",
+			"/tmp/jestjson",
+			"jest",
+		);
+
+		// Neither payload has `numSkippedTests`, which is the field the parser
+		// used to read — so this was always 0 for a file with skips in it.
+		expect(vitest.skipped).toBe(1);
+		expect(jest.skipped).toBe(1);
+	});
+
+	// Both captures above happen to carry `numTodoTests: 0`, so the todo half of
+	// the skip count is unasserted and can be deleted without failing anything.
+	// Real runs do emit it: a `test.todo` alongside a `test.skip` gives
+	// numPendingTests 1 / numTodoTests 1 on vitest 4.1.10 and jest 30.4.2.
+	// Synthetic rather than captured — kept minimal so it is obviously not
+	// passing itself off as one of the recorded payloads above.
+	it("folds numTodoTests into the same skipped figure as numPendingTests", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parseVitestOutput(
+			JSON.stringify({
+				numPassedTests: 1,
+				numFailedTests: 0,
+				numPendingTests: 1,
+				numTodoTests: 2,
+				testResults: [
+					{
+						name: "/tmp/vtjson/todo.test.js",
+						status: "passed",
+						startTime: 1786866554330,
+						endTime: 1786866554430,
+						assertionResults: [{ status: "passed", title: "p", duration: 1 }],
+					},
+				],
+			}),
+			"",
+			"/tmp/vtjson/todo.test.js",
+			"/tmp/vtjson",
+			"vitest",
+		);
+
+		expect(result.skipped).toBe(3);
+	});
+
+	// A reporter that emits `numSkippedTests: 0` while a skip really did happen
+	// must not resurrect the defect: `??` accepts a present 0, so the count has
+	// to be the larger of the two readings rather than the first one found.
+	it("does not let a zero numSkippedTests mask a real pending count", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parseVitestOutput(
+			JSON.stringify({
+				numPassedTests: 1,
+				numFailedTests: 0,
+				numSkippedTests: 0,
+				numPendingTests: 3,
+				numTodoTests: 0,
+				testResults: [
+					{
+						name: "/tmp/vtjson/mask.test.js",
+						status: "passed",
+						startTime: 1786866554330,
+						endTime: 1786866554430,
+						assertionResults: [{ status: "passed", title: "p", duration: 1 }],
+					},
+				],
+			}),
+			"",
+			"/tmp/vtjson/mask.test.js",
+			"/tmp/vtjson",
+			"vitest",
+		);
+
+		expect(result.skipped).toBe(3);
+	});
+
+	it("falls back to summed assertion durations when a payload carries only perfStats", () => {
+		const client = new TestRunnerClient(false) as any;
+		// The pre-#1452 suggestion was to read `testResults[].perfStats`. This
+		// payload is that hypothetical shape: perfStats present, the per-suite
+		// epoch pair absent. The fallback keeps a real figure rather than 0.
+		const result = client.parseVitestOutput(
+			JSON.stringify({
+				numPassedTests: 2,
+				numFailedTests: 0,
+				testResults: [
+					{
+						name: "/tmp/a.test.js",
+						status: "passed",
+						perfStats: { start: 1000, end: 1400, runtime: 400, slow: false },
+						assertionResults: [
+							{ status: "passed", title: "a", duration: 30.4 },
+							{ status: "passed", title: "b", duration: 11.2 },
+						],
+					},
+				],
+			}),
+			"",
+			"/tmp/a.test.js",
+			"/tmp",
+			"vitest",
+		);
+
+		expect(result.duration).toBe(42);
+	});
+
+	it("reports the wall-clock span, not the sum, across parallel suites", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parseJestOutput(
+			JSON.stringify({
+				numPassedTests: 2,
+				numFailedTests: 0,
+				testResults: [
+					{ name: "/tmp/a.test.js", status: "passed", startTime: 1000, endTime: 1500 },
+					{ name: "/tmp/b.test.js", status: "passed", startTime: 1100, endTime: 1900 },
+				],
+			}),
+			"",
+			"/tmp/a.test.js",
+			"/tmp",
+			"jest",
+		);
+
+		// Summing the two suites would claim 1300ms of elapsed time for a run
+		// that took 900ms of wall clock.
+		expect(result.duration).toBe(900);
+	});
+
+	it("reports 0 rather than a negative duration when suite timestamps are inverted", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parseVitestOutput(
+			JSON.stringify({
+				numPassedTests: 1,
+				numFailedTests: 0,
+				testResults: [
+					{
+						name: "/tmp/a.test.js",
+						status: "passed",
+						startTime: 2000,
+						endTime: 1000,
+						assertionResults: [{ status: "passed", title: "a", duration: null }],
+					},
+				],
+			}),
+			"",
+			"/tmp/a.test.js",
+			"/tmp",
+			"vitest",
+		);
+
+		expect(result.duration).toBe(0);
+	});
+
 	// --- mix test (ExUnit) ---
 
 	it("detects mix via mix.exs", () => {
