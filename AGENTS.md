@@ -4,7 +4,9 @@ Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
 identity logs every success/failure outcome, deferred mutation drains summarize
 coalescing and requeues, and authoritative-content branches log attachment
-decisions. Bus stale/failure rows carry the resolver's ctx source. Automatic
+decisions, and a delivery seam that drops findings naming deleted files logs one
+bounded `finding_dead_path_drop` per store. Bus stale/failure rows carry the
+resolver's ctx source. Automatic
 smell warnings count only the current session, or a 24-hour fallback window
 when no session boundary is available; explicit health remains separately
 labeled. (#1432)
@@ -45,6 +47,30 @@ newer per-file push or pull publication. The shared server wait policy stays
 `waits`, so main-lane behavior is unchanged. Cascade results carry an explicit
 `inconclusive` marker through formatting, and only confirmed touches enter the
 neighbor cache. (#1444)
+
+Auxiliary LSP waits use each server's declared aggregate wait, capped by a
+2-second global post-primary ceiling — in both the touchFile push wait and the
+`getDiagnostics` `raceToCompletion` aggregation lane (`aggregation.ts`'s
+`PromiseDescriptor.budgetMs`). This admits measured warm scanner runs without
+charging every edit for a scanner's longer cold-start budget. An explicit
+`PI_LENS_AUX_GRACE_MS` overrides the global ceiling. (#1458)
+
+Late auxiliary LSP publications are captured before the next resync clears the
+client cache. Carry them into that read only when their stored SHA-256 content
+binding matches the touch content exactly. Unknown or changed-content bindings
+never replay. (#1458)
+
+Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row.
+Its per-server outcomes record answered, silent, or cut-off — decided from
+EVIDENCE (whether the client's `diagnosticsVersion` advanced past the
+pre-notify baseline), never from whether the raced wait promise settled,
+because `waitForDiagnostics` resolves on its own timeout and never rejects, so
+a silent scanner's promise settling looks identical to an answer unless the
+outcome is corroborated against the diagnostics cache. This phase's
+`durationMs` is a REAL bounded wait (unlike its zero-duration `LAST_PHASE_EXCLUDED`
+siblings), but it stays excluded from last-phase stall attribution because it
+is a post-hoc record of a wait that already ran inside the touch's own phase,
+not the stall itself. (#1458)
 
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
@@ -206,7 +232,7 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 
 5. **A side-channel property dropped by spread / map / filter / `JSON`.** A flag or content-binding hung on an object is silently lost when the object is copied or serialized; the consumer reads `undefined` and mis-decides. *Screen:* read the signal off the ORIGINAL producer object, not a derived copy; if it must survive a copy, make it an enumerable field the copy carries. *e.g.* the diagnostics content-binding thread — #1095/#1104 (cascade fallback-display gated on binding read from the source, not the reconciled copy); #1094/#1096. *Detect:* trace whether the property survives every `{...x}`/`.map`/`JSON.parse(JSON.stringify(...))` between producer and consumer. Not ast-grep-able. **The corollary that broke the nightly (#1240):** when a seam's RETURN CONTRACT changes (the #1179 `touchFile` array→`TouchFileResult` wrapper), sweep the **un-type-checked consumers too** — `scripts/*.mjs` are outside the tsc surface, so the smoke script's `Array.isArray(touched)` reads survived the sweep and silently misread every wrapper as "no client ready" (43 skips + 5 aux fails, 7 green nights → red).
 
-6. **A freshness stamp that doesn't cover what the data depends on.** mtime alone misses content changes that preserve mtime (git checkout, formatters, same-second writes); an mtime keyed on file A misses a cross-file dependency on B. *Screen:* cache validity = `size` + `mtimeMs` as the cheap first tier, then a content-hash confirm; a diagnostic depending on B invalidates when B changes, not just A. The review-graph's `size:mtimeMs` + `confirmContentChanged` is the gold standard. *e.g.* #1105 (word-index refresh + `importsChanged` fast path bound to size, not mtime alone), #1088/#1092. *Detect:* grep `mtimeMs`/`.mtime` in an equality/cache-key lacking a sibling `.size`/hash; weak signal — #1158.
+6. **A freshness stamp that doesn't cover what the data depends on.** mtime alone misses content changes that preserve mtime (git checkout, formatters, same-second writes); an mtime keyed on file A misses a cross-file dependency on B. *Screen:* cache validity = `size` + `mtimeMs` as the cheap first tier, then a content-hash confirm; a diagnostic depending on B invalidates when B changes, not just A. The review-graph's `size:mtimeMs` + `confirmContentChanged` is the gold standard. *e.g.* #1105 (word-index refresh + `importsChanged` fast path bound to size, not mtime alone), #1088/#1092. *Detect:* grep `mtimeMs`/`.mtime` in an equality/cache-key lacking a sibling `.size`/hash; weak signal — #1158. **Second axis — existence, not content (#1460/#1461):** a stamp can be perfectly valid about content and still describe a file that no longer exists. A TTL-only scanner cache served a gitleaks 🔴 blocker for a directory deleted eleven minutes earlier, and the #1419 provenance guard certified it `current` seven times because it validates the files the agent EDITED, not the paths named INSIDE the findings. *Screen:* when a cached finding names a path, validate at delivery that the path still exists — not only that the cache is young. Drop the finding when the path is gone (there is no remediation for a deleted file); demote only for content drift on a surviving one. Use `dropFindingsForMissingPaths` (`clients/advisory-provenance.ts`): one stat per unique path, fails open on unreadable paths, and logs one bounded `finding_dead_path_drop` record. *Detect:* grep `readCache<` for stores whose findings carry a file path, and check the delivery seam for an existence probe.
 
 7. **A vacuous test fixture that never exercises the code under test.** A hardcoded version literal orphaned by a version bump; a mock missing the property the guarded code reads (so both guard branches pass for free); a drive-letter literal fed to a normalizer as an *expected key* on the assumption it's a no-op. *Screen:* every regression test must FAIL on pre-fix code, and the fixture must actually reach the code under test. *e.g.* #1114 (kill-process-tree mock had no `.once`/`.killed`, so the SIGKILL-escalation guard passed vacuously — the escalation was dead code), #1089/#1106 (fixture version drift), #1139/#1150 (Windows-shaped literal as expected key — see the OS-agnostic paragraph). *Detect:* the "confirm the regression test fails against pre-fix code" step; a mock asserted on a method it never defines. Not ast-grep-able.
 
@@ -1411,7 +1437,7 @@ One feed of pi-lens's out-of-band activity (autofix/format writes, diagnostic di
 
 ### Cross-process extension (#492)
 
-The #482 bus and the #485 accumulator are both in-process — nothing crosses a real process boundary, but subagents spawn actual child `pi` processes (the nicobailon/pi-subagents model). `clients/recent-touches.ts` is the shared substrate: a project-scoped `recent-touches.json` (`getProjectDataDir(cwd)`, ~50-entry ring buffer, atomic tmp+rename — same pattern as the #474 instance registry) that every instance both appends to and reads from. The producer is wired into the *existing* `publishFilesTouched` call (not a new seam) so every current and future bus-publish call site gets cross-process propagation for free, independent of whether a `pi.events` bus is even wired. Two consumers feed entries into the SAME `_touched` accumulator via a new `recordCrossProcessTouches` export (never a second accumulator, never a second injected message): a **child at `session_start`** (`readCrossProcessTouchesForSessionStart`) and a **parent at `turn_start`** (`readCrossProcessTouchesForTurnStart` — mtime-gated, one `fs.stat` per turn when nothing changed, plus a consumed-ts cursor so an entry never re-surfaces). BOTH readers apply the same shared baseline filter (foreign pid + 15-minute freshness window + file still exists — `passesForeignEntryFilter`, one private helper so the two can never drift); the ring buffer caps count, not age, so without the freshness filter a fresh process's first read would nudge about days-old touches of since-deleted files. Beyond that baseline, the parent deliberately has NO read-guard drop path (a parent about to commit needs attribution even for files it hasn't read this session). `AccumulatedFile.origin` (`"local" | "cross-process"`) tracks provenance; **local is sticky** — a file reported by both channels reads as local, never cross-process, because the session's own bus having seen it makes the "another instance did this" framing stale. `consumeAgentNudge` attribution is three-way and never assigns a local file to another instance: all-local keeps the #485 wording ("after your last turn"), all-cross-process reads "by another pi-lens instance (e.g. a subagent's)", and a mixed batch reads "after your last turn (N of them by another pi-lens instance)" — always exactly one message. Kill switches — note BOTH gates affect the cross-process feed: `PI_LENS_AGENT_NUDGE=0` disables the record producer and both consumers (the #485 switch, no new env var), and `PI_LENS_BUS_PUBLISH=0` also silences the record append because the producer lives inside `publishFilesTouched` (both deliveries of a touch — bus and record — die together behind that gate). NOT gated on subagent light mode (#449) since this is a cheap file read. No IPC/daemon/`fs.watch` — passive file only, per the #449 no-daemon doctrine.
+The #482 bus and the #485 accumulator are both in-process — nothing crosses a real process boundary, but subagents spawn actual child `pi` processes (the nicobailon/pi-subagents model). `clients/recent-touches.ts` is the shared substrate: a project-scoped `recent-touches.json` (`getProjectDataDir(cwd)`, ~50-entry ring buffer, atomic tmp+rename — same pattern as the #474 instance registry) that every instance both appends to and reads from. The producer is wired into the *existing* `publishFilesTouched` call (not a new seam) so every current and future bus-publish call site gets cross-process propagation for free, independent of whether a `pi.events` bus is even wired. Two consumers feed entries into the SAME `_touched` accumulator via a new `recordCrossProcessTouches` export (never a second accumulator, never a second injected message): a **child at `session_start`** (`readCrossProcessTouchesForSessionStart`) and a **parent at `turn_start`** (`readCrossProcessTouchesForTurnStart` — mtime-gated, one `fs.stat` per turn when nothing changed, plus a consumed-ts cursor so an entry never re-surfaces). BOTH readers apply the same shared baseline filter (foreign pid + 15-minute freshness window + file still exists — `passesForeignEntryFilter`, one private helper so the two can never drift); the ring buffer caps count, not age, so without the freshness filter a fresh process's first read would nudge about days-old touches of since-deleted files. Beyond that baseline, the parent deliberately has NO read-guard drop path (a parent about to commit needs attribution even for files it hasn't read this session). `AccumulatedFile.origin` (`"local" | "cross-process"`) tracks provenance; **local is sticky** — a file reported by both channels reads as local, never cross-process, because the session's own bus having seen it makes the "another instance did this" framing stale. `consumeAgentNudge` attribution is three-way and never assigns a local file to another instance: all-local keeps the #485 wording ("after your last turn"), all-cross-process reads "by an automatic run outside your turn", and a mixed batch reads "after your last turn (N of them by an automatic run outside it)" — always exactly one message. Kill switches — note BOTH gates affect the cross-process feed: `PI_LENS_AGENT_NUDGE=0` disables the record producer and both consumers (the #485 switch, no new env var), and `PI_LENS_BUS_PUBLISH=0` also silences the record append because the producer lives inside `publishFilesTouched` (both deliveries of a touch — bus and record — die together behind that gate). NOT gated on subagent light mode (#449) since this is a cheap file read. No IPC/daemon/`fs.watch` — passive file only, per the #449 no-daemon doctrine.
 
 **`ast_grep_search` agent UX contract.** The tool accepts expert `pattern`/raw `rule` syntax plus `nodeKind` (an exact, language-specific grammar-kind escape hatch) and `hasDescendantKind` (explicit recursive matching); `hasKind` intentionally keeps ast-grep's immediate-child semantics. `details.matchLocations` and `details.searchReads` must stay aligned with the displayed, bounded `maxMatches` page. Searches carry the combined abort signal and a shared deadline through `SgRunner`; subprocess output is capped, generated-rule/validation CLI failures surface as errors, and status-one with no diagnostic output remains a genuine no-match. The lazy tool is activated through `pi_lens_activate_tools` and becomes visible on the next turn. A future canonical language-neutral `query` facade must compile through this existing rule path with per-language adapters; do not pretend raw grammar kinds are universal.
 
@@ -1652,6 +1678,18 @@ Short, obvious changes may use a subject only. Non-trivial changes get a body.
 - These rules are machine-checkable. Pi-lens ships a config-gated Vale runner (`clients/dispatch/runners/vale.js`). A `.vale.ini` with the Google style package would enforce this section automatically; track that separately.
 
 **The standard also governs how agents talk to the maintainer.** Chat replies, status updates, and reports follow the same Zinsser frame. Lead with the outcome. Strip words that do no work. Prefer short sentences over dense em-dash chains. Clarity beats brevity when they conflict. Write like a person, not a system emitting a report.
+
+## Observability assessment
+
+**Every issue and every PR carries an observability assessment.** Answer one question in the body: after this ships, can someone confirm the behavior from logs alone?
+
+- For an issue, name the record that would prove the defect is real and the record that would prove it fixed. If neither exists, that gap is part of the issue.
+- For a PR, state which existing record proves the change works, or add one. A fix whose decision is invisible ships blind.
+- If a change deliberately adds no telemetry, say so and say why. Silence is a choice, not an oversight.
+
+Three failures in one day forced this rule. knip died and reported "not available" for weeks, because a timing-out probe logged nothing a reader could distinguish from a missing tool. The opengrep LSP lane starved on every edit while its CLI kept finding real issues, and no record showed the lane losing the race. Five merged fixes could not be verified from telemetry at all, which is why #1432 exists. Each was found by reading code, not logs, long after it started costing us.
+
+Keep the records bounded, use the existing log conventions, and exclude zero-duration decision phases from `lastPhase` attribution.
 
 ## Issue triage & labels
 

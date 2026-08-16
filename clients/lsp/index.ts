@@ -354,13 +354,15 @@ function readTsserverSyncGraceMs(): number {
 }
 /**
  * Read the `PI_LENS_AUX_GRACE_MS` env override at call time (not module
- * load time) so tests can set it per-case. Controls how long auxiliary-role
- * promises (opengrep, ast-grep, zizmor, …) are waited after all primary-role
- * promises have settled in both getDiagnostics (raceToCompletion) and the
- * touchFile push wait. Default 500ms — conservative enough to include
- * auxiliaries that are nearly done while not blocking the primary result.
- * Returns undefined when the var is absent (caller falls back to the
- * raceToCompletion default of 500ms, keeping the two in sync).
+ * load time) so tests can set it per-case. Controls the CEILING on how long
+ * auxiliary-role promises (opengrep, ast-grep, zizmor, …) are waited after
+ * all primary-role promises have settled, in both getDiagnostics
+ * (raceToCompletion) and the touchFile push wait (#1458 S2 — the two lanes
+ * share the same declared-budget-capped-by-ceiling shape). Each auxiliary
+ * still gets only its OWN declared `aggregateWaitMs` up to this ceiling —
+ * this is not a flat per-touch wait. Returns undefined when the var is
+ * absent; each call site then supplies its own default ceiling (touchFile:
+ * 2000ms; getDiagnostics: 2000ms — see the `?? 2000` at each call site).
  */
 function readEnvAuxGraceMs(): number | undefined {
 	const raw = process.env.PI_LENS_AUX_GRACE_MS;
@@ -2343,6 +2345,22 @@ export class LSPService {
 		const diagnosticBaselines = new Map(
 			spawned.map((entry) => [entry.client, entry.client.diagnosticsVersion]),
 		);
+		// #1458: read a late auxiliary publication BEFORE the ordinary resync
+		// clears its client cache. Carry it only when the publication's exact
+		// sent-content fingerprint matches this touch's content. A changed edit,
+		// version-less publication, or malformed binding fails closed and is not
+		// replayed. The fresh notify still runs below, so scanners continue toward
+		// a publication for this touch while the prior late result reaches the read.
+		const touchContentHash = this.hashContent(content);
+		const carriedAuxiliary = options.collectDiagnostics
+			? spawned.flatMap((entry) => {
+					if (entry.info.role !== "auxiliary") return [];
+					const binding = entry.client.getDiagnosticBinding?.(filePath);
+					if (binding?.contentHash !== touchContentHash) return [];
+					const diags = entry.client.getDiagnostics(filePath);
+					return diags.length > 0 ? [{ diags, binding }] : [];
+				})
+			: [];
 		// #743: PER-SERVER notify-write deadlines. Each server's didOpen/didChange
 		// write gets its OWN notifyWriteBudgetMs budget rather than one shared
 		// deadline over a single Promise.all — otherwise one backpressured server
@@ -2658,8 +2676,18 @@ export class LSPService {
 			// The #707 tsserver sync race operates exclusively on single-server
 			// primary-scope touches (guarded by `clientScope === "primary" &&
 			// spawned.length === 1`), so there is NO interaction with this path.
+			// #1458 S4: also gated on `collectDiagnostics` — a non-collecting
+			// with-auxiliary touch has nothing to carry the aux wait's result
+			// INTO (its diagnostics are discarded either way), so paying up to
+			// `auxCeilingMs` of extra latency for it buys nothing. Both current
+			// callers (`getDiagnostics`'s with-auxiliary path and the cascade's
+			// collecting touch) already pass `collectDiagnostics: true`, so this
+			// is latent-today defense, not a behavior change — but a future
+			// non-collecting with-auxiliary caller must not silently inherit the
+			// full aux-grace cost for diagnostics it's about to throw away.
 			const hasTouchAuxiliaries =
 				clientScope === "with-auxiliary" &&
+				options.collectDiagnostics === true &&
 				spawned.some((e) => e.info.role === "auxiliary");
 
 			// Per-server wait promises (each already bounded by its own
@@ -2707,52 +2735,114 @@ export class LSPService {
 						const primaryWaits = perServerWaits.filter(
 							(_, i) => spawned[i].info.role !== "auxiliary",
 						);
-						// Aux waits: auxiliary servers (advisory).
+						// Aux waits: auxiliary servers (advisory). `client` and the
+						// pre-notify `diagnosticsVersion` baseline travel alongside the
+						// promise so the outcome can be decided from EVIDENCE after the
+						// race, not from how the raced promise settled (#1458 S1 — see
+						// below).
 						const auxWaits = perServerWaits
 							.map((p, i) =>
 								spawned[i].info.role === "auxiliary"
-									? { promise: p, serverId: spawned[i].info.id }
+									? {
+											promise: p,
+											serverId: spawned[i].info.id,
+											client: spawned[i].client,
+											baseline: diagnosticBaselines.get(spawned[i].client),
+										}
 									: null,
 							)
 							.filter(
-								(x): x is { promise: Promise<void | undefined>; serverId: string } =>
-									x !== null,
+								(
+									x,
+								): x is {
+									promise: Promise<void | undefined>;
+									serverId: string;
+									client: (typeof spawned)[number]["client"];
+									baseline: number | undefined;
+								} => x !== null,
 							);
-						const auxGraceMs = readEnvAuxGraceMs() ?? 500;
-						// After all primaries settle, give auxiliaries at most auxGraceMs.
-						// Late aux results are dropped from the wait (advisory only — they
-						// land in the client cache and surface on the next edit); aux servers
-						// that did answer within the grace are included automatically since
+						const auxCeilingMs = readEnvAuxGraceMs() ?? 2000;
+						// After all primaries settle, give each auxiliary the smaller of
+						// its declared wait budget and the global auxiliary ceiling. The
+						// 2000ms default admits measured ~1.3s warm scanner runs without
+						// making every edit pay opengrep's 3500ms cold-start allowance.
+						// Late aux results are dropped from this wait. A later unchanged-
+						// content read may carry a SHA-256-bound cache publication before its
+						// resync clears the cache; changed or unknown content never replays.
+						// Aux servers that answer within the grace are included automatically since
 						// their waitForDiagnostics already resolved. The cut-off server ids
 						// are logged in the latency metadata (lsp_touch_file phase, field
 						// `auxCutOffServerIds`).
 						return Promise.all(primaryWaits).then(async () => {
 							if (auxWaits.length === 0) return;
-							const auxTimeout = new Promise<"timeout">((resolve) => {
-								const t = setTimeout(() => resolve("timeout"), auxGraceMs);
-								if (typeof t === "object" && "unref" in t) t.unref?.();
-							});
-							const auxAll = Promise.all(auxWaits.map((a) => a.promise)).then(
-								() => "done" as const,
-							);
-							const outcome = await Promise.race([auxAll, auxTimeout]);
-							if (outcome === "timeout") {
-								// Record which auxiliaries did NOT finish in time.
-								const unfinished: string[] = [];
-								for (const a of auxWaits) {
-									let done = false;
-									// Check synchronously if already resolved by racing against
-									// a resolved promise.
-									await Promise.race([
-										a.promise.then(() => {
-											done = true;
-										}),
-										Promise.resolve(),
+							const auxWaitStartedAt = Date.now();
+							const outcomes = await Promise.all(
+								auxWaits.map(async (aux) => {
+									const budgetMs = Math.min(
+										timeoutFor(aux.serverId),
+										auxCeilingMs,
+									);
+									let timer: ReturnType<typeof setTimeout> | undefined;
+									const timeout = new Promise<false>((resolve) => {
+										timer = setTimeout(() => resolve(false), budgetMs);
+										if (typeof timer === "object" && "unref" in timer) {
+											timer.unref?.();
+										}
+									});
+									const raced = await Promise.race([
+										aux.promise.then(() => true as const),
+										timeout,
 									]);
-									if (!done) unfinished.push(a.serverId);
-								}
-								if (unfinished.length > 0) auxCutOffServerIds = unfinished;
-							}
+									if (timer) clearTimeout(timer);
+									// #1458 S1: `waitForDiagnostics` RESOLVES on its own timeout
+									// (client.ts) — it never rejects, and a silent scanner that
+									// published nothing looks identical, promise-wise, to one
+									// that answered. `raced === true` only means "the promise
+									// settled before our timer fired"; it is not proof anything
+									// was published. Decide the outcome from evidence instead:
+									// did this aux's `diagnosticsVersion` advance past the
+									// pre-notify baseline captured before the wait started?
+									//   - raced === false            → "cut_off" (our timer won;
+									//     the aux's own wait never got to answer for itself).
+									//   - raced === true, no evidence → "silent" (the aux's own
+									//     wait gave up within its budget with nothing to report —
+									//     NOT the same as having answered).
+									//   - raced === true, evidence   → "answered" (a fresh
+									//     publication actually landed for this touch).
+									const publishedEvidence =
+										raced &&
+										Number.isFinite(aux.baseline) &&
+										aux.client.diagnosticsVersion > (aux.baseline as number);
+									const outcome = !raced
+										? ("cut_off" as const)
+										: publishedEvidence
+											? ("answered" as const)
+											: ("silent" as const);
+									return {
+										serverId: aux.serverId,
+										outcome,
+										budgetMs,
+										elapsedMs: Date.now() - auxWaitStartedAt,
+										// #1458 S3: elapsed measured from BEFORE the primary wait
+										// (waitStartedAt), not just from auxWaitStartedAt — this is
+										// what lets a latency row validate the ~1.3s warm-scanner
+										// figure the 2000ms ceiling was set from; `elapsedMs` alone
+										// only covers the POST-primary aux phase.
+										elapsedSinceNotifyMs: Date.now() - waitStartedAt,
+									};
+								}),
+							);
+							const unfinished = outcomes
+								.filter((outcome) => outcome.outcome === "cut_off")
+								.map((outcome) => outcome.serverId);
+							if (unfinished.length > 0) auxCutOffServerIds = unfinished;
+							logLatency({
+								type: "phase",
+								phase: "lsp_aux_wait_outcome",
+								filePath: normalizedPath,
+								durationMs: Date.now() - auxWaitStartedAt,
+								metadata: { clientScope, outcomes },
+							});
 						});
 					})()
 				: Promise.all(perServerWaits).then(() => {});
@@ -2989,9 +3079,10 @@ export class LSPService {
 		let collected = options.collectDiagnostics
 			? tsserverSyncConfirmed !== undefined
 				? mergeLspDiagnostics(tsserverSyncConfirmed)
-				: mergeLspDiagnostics(
-						spawned.flatMap((entry) => entry.client.getDiagnostics(filePath)),
-					)
+				: mergeLspDiagnostics([
+						...spawned.flatMap((entry) => entry.client.getDiagnostics(filePath)),
+						...carriedAuxiliary.flatMap((entry) => entry.diags),
+					])
 			: undefined;
 		// #1095 (P3-b): whether `collected` came from a tsserver sync confirm
 		// (`tsserverSyncRequest`) rather than the publish cache. A sync-confirmed
@@ -3226,9 +3317,12 @@ export class LSPService {
 						// Optional-chain so a client without the getter (test doubles, a
 						// partially-mocked client) yields "unknown" rather than throwing —
 						// unknown preserves pre-#1095 behavior for that contributor.
-						spawned.map((entry) =>
-							entry.client.getDiagnosticBinding?.(filePath),
-						),
+						[
+							...spawned.map((entry) =>
+								entry.client.getDiagnosticBinding?.(filePath),
+							),
+							...carriedAuxiliary.map((entry) => entry.binding),
+						],
 					);
 			result.binding = binding;
 		}
@@ -3424,17 +3518,37 @@ export class LSPService {
 		// Full mode: 400ms grace — wait a bit for other clients to catch up.
 		const graceMs = diagnosticsMode === "document" ? 0 : EARLY_UNBLOCK_GRACE_MS;
 
-		// R8 (#714): per-promise role descriptors so raceToCompletion can apply
-		// a bounded aux grace once all primary-role promises have settled.
-		// Servers with role:"auxiliary" (opengrep, ast-grep, zizmor, …) get at
-		// most PI_LENS_AUX_GRACE_MS (default 500ms) after the primary settles;
-		// late arrivals are dropped (advisory only — they land in the client
+		// R8 (#714) / #1458 S2: per-promise role descriptors so raceToCompletion
+		// can apply a bounded aux grace once all primary-role promises have
+		// settled. Servers with role:"auxiliary" (opengrep, ast-grep, zizmor, …)
+		// get their OWN declared `aggregateWaitMs` budget after the primary
+		// settles, capped by the PI_LENS_AUX_GRACE_MS global ceiling (default
+		// 2000ms) — the same "declared budget, capped by a ceiling" shape
+		// `touchFile`'s with-auxiliary push wait uses, so this lane can no longer
+		// starve a scanner whose measured warm run (e.g. opengrep ~1.3s) is
+		// shorter than the ceiling but longer than a flat short grace. Late
+		// arrivals are still dropped (advisory only — they land in the client
 		// cache and surface on the next edit). Primary-only callers have no
 		// auxiliary descriptors, so this path is never entered and there is
 		// zero behavior change for the single-server hot path.
-		const diagDescriptors: PromiseDescriptor[] = spawned.map((entry) => ({
-			role: entry.info.role === "auxiliary" ? "auxiliary" : "primary",
-		}));
+		const diagDescriptors: PromiseDescriptor[] = spawned.map((entry) => {
+			if (entry.info.role !== "auxiliary") return { role: "primary" };
+			const strategy = getStrategy(
+				entry.info.id,
+				entry.client.getLaunchVariant?.(),
+			);
+			// Deleting this `budgetMs` fails no end-to-end test, and that is
+			// expected rather than a coverage gap: every promise in `clientWaits`
+			// already self-bounds at this same `strategy.aggregateWaitMs`, so an
+			// auxiliary cuts itself off at its declared budget whether or not the
+			// shared grace timer also knows about it. The descriptor is what keeps
+			// the two agreeing — it is the mitigation for the over-granting
+			// `raceToCompletion` documents, and it starts mattering the moment a
+			// promise here stops self-bounding. The narrowing itself is pinned in
+			// tests/clients/lsp/aggregation.test.ts, which can build the
+			// non-self-bounded promises this path cannot.
+			return { role: "auxiliary", budgetMs: strategy.aggregateWaitMs };
+		});
 
 		// Result-aware racing: trigger early-unblock when any client has results,
 		// OR when a seedFirstPush server returns (its first push is authoritative
@@ -3457,7 +3571,10 @@ export class LSPService {
 				),
 				graceMs,
 				descriptors: diagDescriptors,
-				auxGraceMs: readEnvAuxGraceMs(),
+				// #1458 S2: ceiling, not a flat wait — each auxiliary's own
+				// budgetMs (above) determines the actual per-touch grace up to
+				// this cap. Matches touchFile's `readEnvAuxGraceMs() ?? 2000`.
+				auxGraceMs: readEnvAuxGraceMs() ?? 2000,
 			},
 		);
 

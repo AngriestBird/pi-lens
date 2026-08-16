@@ -1362,6 +1362,123 @@ describe("turn_end unified secret surfacing", () => {
 	});
 });
 
+// ── Dead-path gitleaks findings (#1461 slice 1 / #1460) ───────────────────────
+
+describe("turn_end gitleaks findings for deleted files", () => {
+	// The live #1460 shape: a gitleaks scan flags a path, the directory is
+	// deleted, and the finding is still inside the 30-minute TTL at turn_end.
+	// Before the fix it shipped as a 🔴 STOP blocker naming a file the agent
+	// cannot fix.
+	function setupSecretTurn(prefix: string) {
+		const env = setupTestEnvironment(prefix);
+		const runtime = new RuntimeCoordinator();
+		runtime.setTelemetryIdentity({ sessionId: "dead-path-session" });
+		const cacheManager = new CacheManager(false);
+		// An edited file that still exists — so provenance sees a live workspace
+		// and the advisory is never suppressed for the unrelated `allFilesDeleted`
+		// reason. This is exactly why #1419's guard answered "current".
+		const editedFile = path.join(env.tmpDir, "src/edited.ts");
+		fs.mkdirSync(path.dirname(editedFile), { recursive: true });
+		fs.writeFileSync(editedFile, "export const value = 1;\n");
+		cacheManager.addModifiedRange(
+			editedFile,
+			{ start: 1, end: 1 },
+			false,
+			env.tmpDir,
+			"dead-path-session",
+		);
+		return { env, runtime, cacheManager };
+	}
+
+	function writeGitleaksCache(
+		cacheManager: CacheManager,
+		cwd: string,
+		findings: Array<{ ruleId: string; file: string; startLine: number; description: string }>,
+	) {
+		cacheManager.writeCache(
+			"gitleaks",
+			{ success: true, scannedAt: "", findings },
+			cwd,
+		);
+	}
+
+	it("does NOT deliver a cached finding whose file was deleted after the scan", async () => {
+		const { env, runtime, cacheManager } = setupSecretTurn("pi-lens-dead-path-");
+		try {
+			const deletedDir = path.join(env.tmpDir, ".pi/smoke-research/data");
+			const deletedFile = path.join(deletedDir, "sources.json");
+			fs.mkdirSync(deletedDir, { recursive: true });
+			fs.writeFileSync(deletedFile, '{"key":"AKIA..."}\n');
+			writeGitleaksCache(cacheManager, env.tmpDir, [
+				{
+					ruleId: "generic-api-key",
+					file: deletedFile,
+					startLine: 1341,
+					description: "Detected a Generic API Key",
+				},
+			]);
+			// The deletion that the TTL cannot see.
+			fs.rmSync(path.join(env.tmpDir, ".pi"), { recursive: true, force: true });
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
+
+			const content =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages?.[0]
+					?.content ?? "";
+			expect(content).not.toContain("hardcoded secrets detected");
+			expect(content).not.toContain("sources.json");
+			expect(content).not.toContain("generic-api-key");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("delivers live-path findings unchanged and drops only the dead ones", async () => {
+		const { env, runtime, cacheManager } = setupSecretTurn("pi-lens-mixed-path-");
+		try {
+			const liveFile = path.join(env.tmpDir, "src/config.ts");
+			fs.writeFileSync(liveFile, "const k = 'AKIA...';\n");
+			const deletedFile = path.join(env.tmpDir, "scratch/sources.json");
+			fs.mkdirSync(path.dirname(deletedFile), { recursive: true });
+			fs.writeFileSync(deletedFile, '{"key":"AKIA..."}\n');
+			writeGitleaksCache(cacheManager, env.tmpDir, [
+				{
+					ruleId: "generic-api-key",
+					file: deletedFile,
+					startLine: 1341,
+					description: "Detected a Generic API Key",
+				},
+				{
+					ruleId: "aws-access-token",
+					file: liveFile,
+					startLine: 42,
+					description: "AWS key",
+				},
+			]);
+			fs.rmSync(path.join(env.tmpDir, "scratch"), {
+				recursive: true,
+				force: true,
+			});
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
+
+			const content =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages?.[0]
+					?.content ?? "";
+			expect(content).toContain("hardcoded secrets detected");
+			expect(content).toContain("src/config.ts:42");
+			expect(content).toContain("aws-access-token");
+			expect(content).not.toContain("sources.json");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
 // ── License-risk advisory (#131 Mode 4) ───────────────────────────────────────
 
 describe("turn_end license-risk surfacing", () => {

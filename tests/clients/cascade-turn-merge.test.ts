@@ -868,4 +868,161 @@ describe("cascade turn-end merge", () => {
 			env.cleanup();
 		}
 	});
+
+	// F2 (adversarial review of #1446): `cascade_injected` had zero test
+	// coverage — the whole logCascade block that emits it could be deleted and
+	// all targeted tests still passed. Assert the call shape directly, on the
+	// SAME `blockerParts`-population path exercised by the dedup test above.
+	it("F2: logs cascade_injected with the section's neighbour/diagnostic counts once it reaches blockerParts", async () => {
+		const env = setupTestEnvironment("cascade-injected-record-");
+		logCascadeMock.mockClear();
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const primary = path.join(env.tmpDir, "primary.ts");
+			const neighbor = path.join(env.tmpDir, "neighbor.ts");
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			fs.writeFileSync(neighbor, "import { x } from './primary';\n");
+			cacheManager.addModifiedRange(
+				primary,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+
+			runtime.appendCascadeRun({
+				filePath: primary,
+				result: cascade(primary, neighbor, "injected error"),
+				neighborCount: 1,
+				diagnosticCount: 1,
+			});
+
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			// The record fired means the section reached blockerParts — confirm
+			// the text was actually queued, the precondition the record proves.
+			const content =
+				consumeTurnEndFindings(cacheManager, env.tmpDir)?.messages[0]?.content ??
+				"";
+			expect(content).toContain("injected error");
+
+			expect(logCascadeMock).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "cascade_injected",
+					neighborCount: 1,
+					diagnosticCount: 1,
+					metadata: expect.objectContaining({
+						sectionChars: expect.any(Number),
+						testSuggestionCount: 0,
+						suppressedByOwnership: 0,
+					}),
+				}),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// F2 (adversarial review of #1446): `cascade_test_targets` had zero test
+	// coverage — same as `cascade_injected` above, the whole logCascade block
+	// could be deleted with no test noticing. Covers both the "suggestion
+	// found" and "zero suggestions" outcomes the record was written to
+	// distinguish.
+	it("F2: logs cascade_test_targets for both a resolved suggestion and the zero-suggestion case", async () => {
+		const env = setupTestEnvironment("cascade-test-targets-record-");
+		try {
+			const primary = path.join(env.tmpDir, "primary.ts");
+			const neighbor = path.join(env.tmpDir, "neighbor.ts");
+			const neighborTestFile = path.join(env.tmpDir, "neighbor.test.ts");
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			fs.writeFileSync(neighbor, "import { x } from './primary';\n");
+
+			const turnEnd = async (testRunnerClient: unknown) => {
+				const runtime = new RuntimeCoordinator();
+				const cacheManager = new CacheManager(false);
+				cacheManager.addModifiedRange(
+					primary,
+					{ start: 1, end: 1 },
+					false,
+					env.tmpDir,
+				);
+				runtime.appendCascadeRun({
+					filePath: primary,
+					result: cascade(primary, neighbor, "targets error"),
+					neighborCount: 1,
+					diagnosticCount: 1,
+				});
+				await handleTurnEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: () => false,
+					dbg: () => {},
+					runtime,
+					cacheManager,
+					knipClient: {
+						ensureAvailable: async () => false,
+						analyze: async () => EMPTY_KNIP_RESULT,
+					},
+					depChecker: { ensureAvailable: async () => false },
+					testRunnerClient,
+					resetLSPService: () => {},
+					resetFormatService: () => {},
+				} as any);
+			};
+
+			// A resolved suggestion.
+			logCascadeMock.mockClear();
+			await turnEnd({
+				getTestRunTarget: () => null,
+				suggestTestFiles: () => [
+					{ testFile: neighborTestFile, sourceFile: neighbor, runner: "vitest" },
+				],
+			});
+			expect(logCascadeMock).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "cascade_test_targets",
+					neighborCount: 1,
+					metadata: expect.objectContaining({
+						neighborFiles: expect.arrayContaining([neighbor]),
+						suggestedTestFiles: expect.arrayContaining([neighborTestFile]),
+						runner: "vitest",
+						zeroSuggestions: false,
+					}),
+				}),
+			);
+
+			// The zero-suggestion outcome — neighbours had errors, but no test
+			// file resolved for any of them. Previously logged nothing at all.
+			logCascadeMock.mockClear();
+			await turnEnd({
+				getTestRunTarget: () => null,
+				suggestTestFiles: () => [],
+			});
+			expect(logCascadeMock).toHaveBeenCalledWith(
+				expect.objectContaining({
+					phase: "cascade_test_targets",
+					neighborCount: 1,
+					metadata: expect.objectContaining({
+						suggestedTestFiles: [],
+						zeroSuggestions: true,
+					}),
+				}),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
 });
