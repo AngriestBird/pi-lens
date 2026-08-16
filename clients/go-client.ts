@@ -8,16 +8,13 @@
  */
 
 import { createSubsystemLogger } from "./extension-log.js";
-import * as fs from "node:fs";
 import * as path from "node:path";
-import { safeSpawnAsync } from "./safe-spawn.js";
 import {
 	type AvailabilityCause,
-	classifyProbeFailure,
 	createAvailabilityLatch,
 	logAvailabilityDecision,
-	startHostStallSampler,
 } from "./dispatch/runners/utils/availability-policy.js";
+import { probeAvailabilityCandidates } from "./dispatch/runners/utils/candidate-probe.js";
 
 // --- Types ---
 
@@ -81,51 +78,16 @@ export class GoClient {
 
 		const paths =
 			process.platform === "win32" ? GO_WINDOWS_PATHS : GO_UNIX_PATHS;
-		this.sweepSawTransient = false;
-		this.sweepTransientCause = "probe-timeout";
-		this.sweepHostStallMs = 0;
-
-		for (const p of paths) {
-			try {
-				if (p.includes("\\") || p.includes("/")) {
-					// Absolute path - check if exists
-					if (fs.existsSync(p)) {
-						this.goPath = p;
-						return p;
-					}
-				} else {
-					// Relative (PATH) - try running it. The 3 s budget is enforced by a
-					// HOST-side timer, so measure the loop stall that overlapped it and
-					// let the shared policy tell "no Go" from "the host was busy".
-					const sampler = startHostStallSampler();
-					let result: Awaited<ReturnType<typeof safeSpawnAsync>>;
-					let hostStallMs: number;
-					try {
-						result = await safeSpawnAsync(p, ["version"], {
-							timeout: PROBE_TIMEOUT_MS,
-						});
-					} finally {
-						hostStallMs = sampler.stop();
-						this.sweepHostStallMs += hostStallMs;
-					}
-					if (!result.error && result.status === 0) {
-						this.goPath = p;
-						return p;
-					}
-					const { outcome, cause } = classifyProbeFailure(result, {
-						hostStallMs,
-					});
-					if (outcome === "transient") {
-						this.sweepSawTransient = true;
-						this.sweepTransientCause = cause;
-					}
-				}
-			} catch (err) {
-				void err;
-			}
-		}
-
-		return null;
+		const sweep = await probeAvailabilityCandidates(
+			paths,
+			["version"],
+			PROBE_TIMEOUT_MS,
+		);
+		this.sweepSawTransient = sweep.sawTransient;
+		this.sweepTransientCause = sweep.transientCause;
+		this.sweepHostStallMs = sweep.hostStallMs;
+		if (sweep.foundPath) this.goPath = sweep.foundPath;
+		return sweep.foundPath;
 	}
 
 	/**
