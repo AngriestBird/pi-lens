@@ -77,8 +77,12 @@ export async function probeAvailabilityCandidates(
 				sawTransient = true;
 				transientCause = cause;
 			}
-		} catch (err) {
-			void err;
+		} catch {
+			// A candidate that throws is one this host does not have — the sweep's
+			// normal case, not an error worth surfacing. The verdict comes from
+			// whether any LATER candidate answers, and a genuine host problem
+			// still reaches the caller as a transient through `classifyProbeFailure`
+			// above rather than through a thrown spawn.
 		}
 	}
 
