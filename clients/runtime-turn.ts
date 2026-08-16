@@ -1107,10 +1107,20 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						resultValues.push(r.value);
 						const { file, runner, passed, failed, duration, error } = r.value;
 						const shortFile = path.basename(file);
+						// #1479: `(0ms)` used to be printed for a run nobody
+						// timed — a payload with no suite timestamps, an
+						// unrecognised summary line, or an empty result — and
+						// that is the same string a genuinely sub-millisecond
+						// run produces. A reader could not tell "measured 0"
+						// from "not measured", which is the confusion #1452 was
+						// reported for. `duration` is now absent when it was
+						// never measured, and this line says which one it has.
+						const elapsed =
+							duration === undefined ? "unmeasured" : `${duration}ms`;
 						const summary =
 							error && passed === 0 && failed === 0
 								? `error: ${error}`
-								: `${failed > 0 ? "FAIL" : "PASS"} ${passed}p/${failed}f (${duration}ms)`;
+								: `${failed > 0 ? "FAIL" : "PASS"} ${passed}p/${failed}f (${elapsed})`;
 						dbg(
 							`turn_end: ${stale ? "[stale] " : ""}test ${runner} ${shortFile} → ${summary}`,
 						);

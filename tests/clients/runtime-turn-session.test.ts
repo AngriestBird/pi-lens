@@ -1787,6 +1787,103 @@ describe("turn_end test runner — stale results are cached, not discarded", () 
 	});
 });
 
+// ── #1479: the turn-end line must not print a measurement it does not have ────
+//
+// `(0ms)` was printed both for a run that took under a millisecond and for one
+// nobody timed. Only the second is a defect, so these three cases pin BOTH
+// directions: a falsy check (`duration ? ... : "unmeasured"`) would satisfy the
+// unmeasured case and silently relabel a real zero, which is the mistake this
+// issue is about, one layer up.
+
+describe("turn_end test runner — unmeasured duration is not printed as 0ms", () => {
+	async function logLineFor(
+		durationField: Record<string, unknown>,
+		tmpPrefix: string,
+	): Promise<string> {
+		const env = setupTestEnvironment(tmpPrefix);
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "duration-session" });
+			const cacheManager = new CacheManager(false);
+
+			const srcFile = path.join(env.tmpDir, "src/foo.ts");
+			const testFile = path.join(env.tmpDir, "src/foo.test.ts");
+			fs.mkdirSync(path.dirname(srcFile), { recursive: true });
+			fs.writeFileSync(srcFile, "export const x = 1;\n");
+			fs.writeFileSync(testFile, "test('x', () => {});\n");
+			cacheManager.addModifiedRange(
+				srcFile,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+				"duration-session",
+			);
+
+			const lines: string[] = [];
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, {
+					ctxCwd: env.tmpDir,
+					dbg: (msg: string) => {
+						lines.push(msg);
+					},
+					testRunnerClient: {
+						getTestRunTarget: () => ({
+							testFile,
+							runner: "vitest",
+							config: {} as any,
+							strategy: "related" as const,
+						}),
+						runTestFileAsync: async () => ({
+							file: testFile,
+							sourceFile: srcFile,
+							runner: "vitest",
+							passed: 2,
+							failed: 0,
+							skipped: 0,
+							failures: [],
+							...durationField,
+						}),
+						formatResult: () => "",
+					},
+				}),
+			);
+			await new Promise((resolve) => setImmediate(resolve));
+
+			const line = lines.find((l) => l.includes("turn_end: test vitest"));
+			expect(line).toBeDefined();
+			return line as string;
+		} finally {
+			env.cleanup();
+		}
+	}
+
+	it("prints (unmeasured) when the runner reported no duration", async () => {
+		// No `duration` key at all — an emptyResult, a runner error, or a JSON
+		// payload with no readable suite timestamps all arrive in this shape.
+		const line = await logLineFor({}, "pi-lens-turn-unmeasured-");
+
+		expect(line).toContain("PASS 2p/0f (unmeasured)");
+		expect(line).not.toContain("0ms");
+	});
+
+	it("still prints (0ms) for a run that was measured at zero", async () => {
+		// pytest really does print `in 0.00s`, and a suite whose startTime
+		// equals its endTime really did run in under a millisecond. Those are
+		// measurements and must survive.
+		const line = await logLineFor({ duration: 0 }, "pi-lens-turn-zero-");
+
+		expect(line).toContain("PASS 2p/0f (0ms)");
+		expect(line).not.toContain("unmeasured");
+	});
+
+	it("prints the measured value unchanged for a normal run", async () => {
+		const line = await logLineFor({ duration: 137 }, "pi-lens-turn-measured-");
+
+		expect(line).toContain("PASS 2p/0f (137ms)");
+		expect(line).not.toContain("unmeasured");
+	});
+});
+
 // ── #628: cascade-neighbor test companions are also fired ─────────────────────
 
 describe("turn_end test runner — cascade neighbors get their own test companion run", () => {

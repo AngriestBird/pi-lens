@@ -29,7 +29,21 @@ export interface TestResult {
 	failed: number;
 	skipped: number;
 	failures: TestFailure[];
-	duration: number; // ms
+	/**
+	 * #1479: elapsed run time in ms, or `undefined` when this run was not
+	 * measured at all.
+	 *
+	 * The two states are different facts and a reader must be able to tell
+	 * them apart. A present `0` is a MEASUREMENT — pytest really does print
+	 * `in 0.00s`, and a suite whose `startTime` equals its `endTime` really did
+	 * run in under a millisecond. `undefined` means no runner-reported figure
+	 * was found: no suite timestamps in the payload, an unrecognised summary
+	 * line, a runner error, or nothing run at all.
+	 *
+	 * Producers must not substitute `0` for "did not measure". That is the
+	 * defect #1452 removed from the JSON path and #1479 removes from the log.
+	 */
+	duration?: number; // ms; absent = not measured
 	error?: string; // if runner itself failed
 }
 
@@ -1164,9 +1178,14 @@ export class TestRunnerClient {
 	 * `Finished in 0.05 seconds` report.
 	 *
 	 * Falls back to the summed per-assertion `duration` when a reporter omits
-	 * the suite pair, then to 0. Never returns a negative or non-finite value —
-	 * a garbled payload must degrade to "unmeasured" (`formatResult` already
-	 * suppresses the suffix on `duration > 0 ? ... : ""`), not to a wrong number.
+	 * the suite pair. Never returns a negative or non-finite value — a garbled
+	 * payload must degrade to "unmeasured", not to a wrong number.
+	 *
+	 * #1479: that degradation is now literal. This used to return 0 for a
+	 * payload it could not read, which is the figure a sub-millisecond suite
+	 * also produces, so the caller could not tell them apart. It returns
+	 * `undefined` instead. A readable pair whose span is 0 still returns 0,
+	 * because that is a measurement.
 	 */
 	private jsonRunDurationMs(
 		suites:
@@ -1176,7 +1195,7 @@ export class TestRunnerClient {
 					assertionResults?: Array<{ duration?: number | null }>;
 			  }>
 			| undefined,
-	): number {
+	): number | undefined {
 		let minStart = Number.POSITIVE_INFINITY;
 		let maxEnd = Number.NEGATIVE_INFINITY;
 		let assertionTotal = 0;
@@ -1202,7 +1221,14 @@ export class TestRunnerClient {
 		}
 		const span = maxEnd - minStart;
 		if (Number.isFinite(span) && span > 0) return Math.round(span);
-		return Math.round(Math.max(0, assertionTotal));
+		if (assertionTotal > 0) return Math.round(assertionTotal);
+		// Ordering above is unchanged from #1452 on purpose: a positive span
+		// still beats the assertion sum, and the sum still beats a suite pair
+		// that read as zero. Only the terminal case moved. A pair we could
+		// read whose span is 0 is a run that took under a millisecond — report
+		// it. Everything else was never measured.
+		if (Number.isFinite(span) && span === 0) return 0;
+		return undefined;
 	}
 
 	// --- Vitest Parser ---
@@ -1248,7 +1274,9 @@ export class TestRunnerClient {
 		let passed = 0;
 		let failed = 0;
 		let skipped = 0;
-		let duration = 0;
+		// #1479: undefined until pytest's own `in N.NNs` is read. `in 0.00s` is
+		// a real pytest summary, so 0 has to stay available as a measurement.
+		let duration: number | undefined;
 
 		if (summaryMatch) {
 			// Extract numbers from various patterns
@@ -1260,7 +1288,7 @@ export class TestRunnerClient {
 			passed = passedMatch ? parseInt(passedMatch[1], 10) : 0;
 			failed = failedMatch ? parseInt(failedMatch[1], 10) : 0;
 			skipped = skippedMatch ? parseInt(skippedMatch[1], 10) : 0;
-			duration = durationMatch ? parseFloat(durationMatch[1]) * 1000 : 0;
+			if (durationMatch) duration = parseFloat(durationMatch[1]) * 1000;
 		}
 
 		// Parse individual failures: "FAILED tests/test_foo.py::test_something - AssertionError: ..."
@@ -1345,9 +1373,11 @@ export class TestRunnerClient {
 		// NOT VERIFIED AGAINST A LIVE PHPUnit — there is no PHP toolchain on the
 		// box this was written on. Both shapes are covered by unit tests against
 		// literal summary lines taken from the PHPUnit printers, and the parser
-		// leaves duration at 0 when neither matches, so an unrecognised summary
-		// degrades to today's behaviour rather than to a wrong figure.
-		let duration = 0;
+		// leaves duration UNMEASURED when neither matches (#1479 — it used to
+		// leave 0, which the turn-end log printed as a measurement), so an
+		// unrecognised summary degrades to "we do not know" rather than to a
+		// wrong figure.
+		let duration: number | undefined;
 		const clockMatch = output.match(
 			/^Time:\s*(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?/im,
 		);
@@ -1408,7 +1438,8 @@ export class TestRunnerClient {
 		let passed = 0;
 		let failed = 0;
 		let skipped = 0;
-		let duration = 0;
+		// #1479: undefined until ExUnit's own `Finished in N seconds` is read.
+		let duration: number | undefined;
 
 		// Summary: "3 tests, 1 failure" (optionally ", N excluded" / ", N skipped")
 		const summaryMatch = output.match(
@@ -1594,8 +1625,15 @@ export class TestRunnerClient {
 			return ""; // No tests to report
 		}
 
+		// #1479 deliberately does NOT change this surface. The agent-facing
+		// string already suppressed the suffix for a 0, so an unmeasured run
+		// and a zero-length one look the same here and always did. The issue
+		// scopes the unmeasured/zero distinction to the turn-end log line;
+		// widening it to the LLM prompt is a separate call about prompt noise.
 		const durationStr =
-			result.duration > 0 ? ` (${(result.duration / 1000).toFixed(2)}s)` : "";
+			result.duration !== undefined && result.duration > 0
+				? ` (${(result.duration / 1000).toFixed(2)}s)`
+				: "";
 
 		if (result.failed === 0) {
 			return `[Tests] ✓ ${result.passed}/${total} passed${durationStr} — ${result.runner}`;
@@ -1778,7 +1816,8 @@ export class TestRunnerClient {
 			failed: 0,
 			skipped: 0,
 			failures: [],
-			duration: 0,
+			// #1479: no duration key at all. Nothing ran, so there is nothing
+			// to report — this used to say 0, which reads as "ran, instantly".
 			error,
 		};
 	}

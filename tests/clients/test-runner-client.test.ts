@@ -806,7 +806,7 @@ describe("test-runner-client", () => {
 		expect(millis.duration).toBe(123);
 	});
 
-	it("leaves the PHPUnit duration at 0 when no Time line is present", () => {
+	it("leaves the PHPUnit duration unmeasured when no Time line is present", () => {
 		const client = new TestRunnerClient(false) as any;
 		const result = client.parsePhpunitOutput(
 			"...\n\nOK (12 tests, 34 assertions)\n",
@@ -816,9 +816,11 @@ describe("test-runner-client", () => {
 			"phpunit",
 		);
 
-		// An unrecognised summary must degrade to "unmeasured" — formatResult
-		// suppresses the suffix on `duration > 0` — never to a wrong number.
-		expect(result.duration).toBe(0);
+		// #1479: this assertion used to read `toBe(0)` while its own comment
+		// said the parser "must degrade to unmeasured". It could not — the type
+		// had no way to say so, and 0 is what a sub-millisecond run reports.
+		// Now it can, so the assertion says what the comment always meant.
+		expect(result.duration).toBeUndefined();
 	});
 
 	// --- vitest / jest JSON reporter (#1452) ---
@@ -1046,7 +1048,7 @@ describe("test-runner-client", () => {
 		expect(result.duration).toBe(900);
 	});
 
-	it("reports 0 rather than a negative duration when suite timestamps are inverted", () => {
+	it("reports unmeasured rather than a negative duration when suite timestamps are inverted", () => {
 		const client = new TestRunnerClient(false) as any;
 		const result = client.parseVitestOutput(
 			JSON.stringify({
@@ -1068,7 +1070,149 @@ describe("test-runner-client", () => {
 			"vitest",
 		);
 
+		// #1479: an inverted pair is garbage, not a measurement of zero. The
+		// assertion sum is unavailable too (`duration: null`), so there is
+		// nothing to report and the result says exactly that.
+		expect(result.duration).toBeUndefined();
+	});
+
+	// --- #1479: unmeasured is a distinct state from zero ---
+	//
+	// Every case below pins an EXACT value rather than a relation. `> 0` would
+	// accept the next plausible constant and `toBeFalsy()` would accept both
+	// states at once, which is the confusion being removed.
+
+	it("reports a measured zero when a readable suite pair has no elapsed span", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parseVitestOutput(
+			JSON.stringify({
+				numPassedTests: 1,
+				numFailedTests: 0,
+				testResults: [
+					{
+						name: "/tmp/a.test.js",
+						status: "passed",
+						startTime: 1_760_000_000_000,
+						endTime: 1_760_000_000_000,
+						assertionResults: [{ status: "passed", title: "a", duration: null }],
+					},
+				],
+			}),
+			"",
+			"/tmp/a.test.js",
+			"/tmp",
+			"vitest",
+		);
+
+		// The timestamps were read and they were equal. That is a sub-millisecond
+		// run, not a missing measurement, and 0 is the honest figure.
 		expect(result.duration).toBe(0);
+	});
+
+	it("reports unmeasured when a JSON payload carries no suite timing at all", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parseVitestOutput(
+			JSON.stringify({
+				numPassedTests: 1,
+				numFailedTests: 0,
+				testResults: [
+					{
+						name: "/tmp/a.test.js",
+						status: "passed",
+						assertionResults: [{ status: "passed", title: "a", duration: null }],
+					},
+				],
+			}),
+			"",
+			"/tmp/a.test.js",
+			"/tmp",
+			"vitest",
+		);
+
+		expect(result.duration).toBeUndefined();
+	});
+
+	it("reports unmeasured when a runner's output cannot be parsed at all", () => {
+		const client = new TestRunnerClient(false) as any;
+		// Unparseable stdout takes the emptyResult path — the same object a
+		// runner crash and a spawn failure return. Nothing ran, so there is no
+		// elapsed time; this used to carry `duration: 0`.
+		const result = client.parseVitestOutput(
+			"FAIL  not json at all\n",
+			"",
+			"/tmp/a.test.js",
+			"/tmp",
+			"vitest",
+		);
+
+		expect(result.error).toBe("Tests failed (could not parse output)");
+		expect(result.duration).toBeUndefined();
+	});
+
+	it("reports unmeasured for pytest output with no summary line", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parsePytestOutput(
+			"collected 0 items\n\nno tests ran\n",
+			"",
+			0,
+			"/tmp/test_foo.py",
+			"/tmp",
+			"pytest",
+		);
+
+		expect(result.duration).toBeUndefined();
+	});
+
+	it("reports unmeasured when pytest's summary is detected but not extractable", () => {
+		const client = new TestRunnerClient(false) as any;
+		// PRE-EXISTING AND NOT CHANGED HERE: the summary DETECTOR carries `/i`
+		// and every extractor below it does not, so an upper-cased summary is
+		// recognised and then reads back as nothing — passed included. This
+		// fixture is the only way to reach the parser's inner duration branch.
+		// #1479's point is narrow: that branch used to substitute 0, and a 0 in
+		// the turn-end log is a claim. It now declines to claim one.
+		const result = client.parsePytestOutput(
+			"=== 3 PASSED IN 0.50S ===\n",
+			"",
+			0,
+			"/tmp/test_foo.py",
+			"/tmp",
+			"pytest",
+		);
+
+		expect(result.passed).toBe(0);
+		expect(result.duration).toBeUndefined();
+	});
+
+	it("reports a measured zero for pytest's own `in 0.00s`", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parsePytestOutput(
+			"=== 3 passed in 0.00s ===\n",
+			"",
+			0,
+			"/tmp/test_foo.py",
+			"/tmp",
+			"pytest",
+		);
+
+		// pytest prints this for a fast file. It is a real reading and the only
+		// reason `0` has to stay distinguishable from absence at all.
+		expect(result.passed).toBe(3);
+		expect(result.duration).toBe(0);
+	});
+
+	it("reports unmeasured for mix test output with no `Finished in` line", () => {
+		const client = new TestRunnerClient(false) as any;
+		const result = client.parseMixTestOutput(
+			"3 tests, 0 failures\n",
+			"",
+			0,
+			"/tmp/foo_test.exs",
+			"mix",
+		);
+
+		expect(result.passed).toBe(3);
+		expect(result.duration).toBeUndefined();
 	});
 
 	// --- mix test (ExUnit) ---
