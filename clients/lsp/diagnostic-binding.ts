@@ -119,6 +119,12 @@ export interface TouchFileResult {
 	 * `confirmation` narrowed to `"partial"`) when an auxiliary's push wait was
 	 * cut off by the aux grace timer — R8/#714's `auxCutOffServerIds`. Absent
 	 * when every spawned server got to answer for itself.
+	 *
+	 * #1459 adds the two silent doors into the same room: a scanner whose circuit
+	 * breaker was open (so it never attached at all) and one whose `didOpen` resync
+	 * the fan-out gate deferred (so it never received this content). Neither used
+	 * to mark the result, which is how a 15 s opengrep cooldown read as a clean
+	 * security verdict for every file a cascade sweep touched inside it.
 	 */
 	unconfirmedServerIds?: string[];
 	binding?: DiagnosticBinding;

@@ -16,6 +16,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Security
 
+- **A cascade sweep no longer blacks out the security scanner, and a blackout no longer reads as clean (closes [#1459](https://github.com/apmantza/pi-lens/issues/1459))** — A `clientScope: "all"` sweep used to fan a full-text `didOpen` resync at opengrep for every neighbour at once. Its stdin stopped draining, three per-server notify-write deadlines expired, and the #743 breaker opened for 15 s; every touch inside that window skipped the scanner and still resolved `confirmation: "confirmed"`. An auxiliary now gets at most one outstanding resync — the rest defer and report the scanner as uncovered — a write that lands after its deadline retracts the timeout it was charged for, and a write nothing accepts for the whole wedge window still demotes the server. A scanner that never attached (breaker open) or never received the content (deferred resync) now lands in `unconfirmedServerIds` and narrows the touch to `"partial"`, so no consumer can read the gap as a clean bill of health. New `latency.log` records: `lsp_scanner_coverage_gap`, `lsp_notify_resync_deferred`, `lsp_notify_write_late_landed`.
+
 ## [4.0.1] - 2026-08-16
 
 ### Added

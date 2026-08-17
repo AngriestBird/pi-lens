@@ -72,6 +72,20 @@ siblings), but it stays excluded from last-phase stall attribution because it
 is a post-hoc record of a wait that already ran inside the touch's own phase,
 not the stall itself. (#1458)
 
+An auxiliary scanner gets at most ONE outstanding `didOpen` resync at a time.
+A `clientScope: "all"` sweep fans a full re-scan at every neighbour inside a few
+milliseconds, so an unbounded fan-out stalls the scanner's stdin and walks the
+#743 notify-write breaker open. While a write is outstanding the next touch
+defers its own and reports the scanner as uncovered; a write that lands after
+its deadline retracts the timeout it was charged for (slow is not broken), and
+one nothing accepts for the whole wedge window still demotes the server so the
+gate cannot defer a dead input path forever. The screen when you add an
+auxiliary: if its per-file scan can exceed the notify-write budget, a whole-tree
+sweep will break it — and its silence reads as CLEAN unless the touch names it.
+A scanner that never attached (breaker open) or never received the content
+(deferred resync) belongs in `unconfirmedServerIds`, exactly like a cut-off
+auxiliary, with one `lsp_scanner_coverage_gap` row per touch. (#1459)
+
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
 the agent. `turnSeq` is not a staleness signal for such a run (a late run is by
