@@ -61,7 +61,10 @@ binding matches the touch content exactly. Unknown or changed-content bindings
 never replay. (#1458)
 
 Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row.
-Its per-server outcomes record answered, silent, or cut-off — decided from
+Its per-server outcomes record answered, silent, cut-off, or (#1459) deferred —
+a deferred scanner was never sent the content, so it must never occupy the
+`silent` row, which is reserved for one that had the content and published
+nothing. Outcomes are decided from
 EVIDENCE (whether the client's `diagnosticsVersion` advanced past the
 pre-notify baseline), never from whether the raced wait promise settled,
 because `waitForDiagnostics` resolves on its own timeout and never rejects, so

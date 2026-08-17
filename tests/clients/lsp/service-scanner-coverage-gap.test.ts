@@ -92,7 +92,15 @@ function makeClient(
 	diags: ReturnType<typeof makeDiagnostic>[] = [],
 	publishes: "immediately" | "never" = "immediately",
 ) {
+	// Concurrency instrumentation. Call COUNT cannot see the defect the gate
+	// exists to prevent: N writes issued back-to-back and N issued simultaneously
+	// are the same count. `maxInFlight` is the invariant — one outstanding resync
+	// per auxiliary — and `openOffsets` shows the flood shape when it breaks.
+	const startedAt = Date.now();
+	let inFlight = 0;
+	const stats = { maxInFlight: 0, openOffsets: [] as number[] };
 	return {
+		stats,
 		serverId,
 		isAlive: () => true,
 		shutdown: vi.fn(async () => {}),
@@ -105,13 +113,18 @@ function makeClient(
 		diagnosticsVersion: 0,
 		getDiagnostics: vi.fn(() => diags),
 		notify: {
-			open: vi.fn(
-				() =>
-					new Promise<void>((resolve) => {
-						if (writeMs === undefined) return;
-						setTimeout(resolve, writeMs);
-					}),
-			),
+			open: vi.fn(() => {
+				inFlight += 1;
+				stats.maxInFlight = Math.max(stats.maxInFlight, inFlight);
+				stats.openOffsets.push(Date.now() - startedAt);
+				return new Promise<void>((resolve) => {
+					if (writeMs === undefined) return;
+					setTimeout(() => {
+						inFlight -= 1;
+						resolve();
+					}, writeMs);
+				});
+			}),
 			change: vi.fn(async () => {}),
 			close: vi.fn(async () => {}),
 		},
@@ -229,6 +242,7 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 
 		// The gate let exactly one resync through; the other three deferred.
 		expect(aux.notify.open).toHaveBeenCalledTimes(1);
+		expect(aux.stats.maxInFlight).toBe(1);
 		expect(rowsFor("lsp_notify_resync_deferred")).toHaveLength(3);
 
 		// The breaker never opened, and no streak survived the late landing.
@@ -325,7 +339,7 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		expect(
 			(demotions[0]?.metadata as { outstandingMs?: number } | undefined)
 				?.outstandingMs,
-		).toBeGreaterThan(NOTIFY_BUDGET_MS * 5);
+		).toBeGreaterThanOrEqual(NOTIFY_BUDGET_MS * 5);
 		expect(brokenKeys(service).some((k) => k.startsWith(AUX_KEY_PREFIX))).toBe(
 			true,
 		);
@@ -370,15 +384,21 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		});
 	});
 
-	// Negative control. The gate is a QUEUE, not a drop: a healthy scanner accepts
-	// each write in milliseconds, so every neighbour of a sweep still gets scanned
-	// and every touch still claims full confirmation. Without this, the tests above
-	// would also pass an implementation that simply stopped scanning.
-	it("a healthy scanner still gets every file, and every touch stays confirmed", async () => {
+	// The load-bearing concurrency assertion, and the negative control in one.
+	// The gate is a QUEUE, not a drop: a healthy scanner accepts each write in
+	// milliseconds, so all SIX concurrent touches still get scanned and every touch
+	// still claims full confirmation — but they go through ONE AT A TIME.
+	//
+	// Call count alone cannot see the defect: a version of the gate that checked
+	// the slot and then let each caller insert its own record after an `await`
+	// passed a count assertion while measuring maxInFlight 5 (one write, then a
+	// five-wide flood one budget later) — #1459's own root cause rebuilt inside the
+	// fix. `writeMs` must be NONZERO for the probe to have anything to overlap.
+	it("a healthy scanner gets every file, one resync at a time, still confirmed", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 
-		const aux = makeClient("opengrep", 0);
+		const aux = makeClient("opengrep", 10);
 		const primary = makeClient("typescript", 0, [
 			makeDiagnostic("primary finding"),
 		]);
@@ -390,20 +410,94 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 			options?.serverId === "opengrep" ? aux : primary,
 		);
 
-		const files = ["a.ts", "b.ts", "c.ts", "d.ts"].map((f) => `${ROOT}/${f}`);
+		const files = ["a.ts", "b.ts", "c.ts", "d.ts", "e.ts", "f.ts"].map(
+			(f) => `${ROOT}/${f}`,
+		);
 		const pending = touchAll(service, files);
 		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
 		const results = (await pending) as Array<
 			{ confirmation?: string; unconfirmedServerIds?: string[] } | undefined
 		>;
 
-		expect(aux.notify.open).toHaveBeenCalledTimes(4);
+		expect(aux.stats.maxInFlight).toBe(1);
+		expect(aux.notify.open).toHaveBeenCalledTimes(6);
 		expect(rowsFor("lsp_notify_resync_deferred")).toHaveLength(0);
 		expect(rowsFor("lsp_scanner_coverage_gap")).toHaveLength(0);
 		for (const result of results) {
 			expect(result?.confirmation).toBe("confirmed");
 			expect(result?.unconfirmedServerIds).toBeUndefined();
 		}
+	});
+
+	it("a wedged scanner is demoted by its own write's wedge timer, without a later touch", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		// Wedged: the write never lands, and NOTHING touches this server again.
+		const aux = makeClient("opengrep", undefined);
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("opengrep", "auxiliary"),
+		]);
+		createLSPClient.mockResolvedValue(aux);
+
+		const pending = service.touchFile(`${ROOT}/a.ts`, "one", {
+			clientScope: "all",
+			diagnostics: "document",
+			collectDiagnostics: true,
+			source: "cascade",
+		});
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
+		await pending;
+
+		const demotions = rowsFor("lsp_notify_backpressure_broken");
+		expect(demotions).toHaveLength(1);
+		expect(brokenKeys(service).some((k) => k.startsWith(AUX_KEY_PREFIX))).toBe(
+			true,
+		);
+		expect(aux.shutdown).toHaveBeenCalled();
+	});
+
+	it("a queued resync never waits longer than the caller's own budget", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		// The scanner holds its write far past any budget, so the second touch can
+		// only queue — and its caller allowed a total of a THIRD of the write budget.
+		const aux = makeClient("opengrep", NOTIFY_BUDGET_MS * 50, [], "never");
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("opengrep", "auxiliary"),
+		]);
+		createLSPClient.mockResolvedValue(aux);
+
+		void service.touchFile(`${ROOT}/a.ts`, "one", {
+			clientScope: "all",
+			diagnostics: "document",
+			collectDiagnostics: true,
+			source: "cascade",
+		});
+		await vi.advanceTimersByTimeAsync(1);
+
+		const callerCapMs = Math.floor(NOTIFY_BUDGET_MS / 3);
+		const queuedAt = Date.now();
+		const second = service.touchFile(`${ROOT}/b.ts`, "two", {
+			clientScope: "all",
+			diagnostics: "document",
+			collectDiagnostics: true,
+			source: "cascade",
+			maxClientWaitMs: callerCapMs,
+		});
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
+		await second;
+
+		const deferrals = rowsFor("lsp_notify_resync_deferred");
+		expect(deferrals).toHaveLength(1);
+		const row = deferrals[0] as { metadata?: Record<string, unknown> };
+		// The queue wait was capped by the caller's own budget, not by the flat
+		// write budget — a caller that asked for less must not be taxed more.
+		expect(row.metadata?.queueWaitMs).toBeLessThanOrEqual(callerCapMs);
+		// And the queued touch never pushed a second, overlapping resync.
+		expect(aux.stats.openOffsets).toHaveLength(1);
+		expect(queuedAt).toBeGreaterThan(0);
 	});
 
 	it("a deferred scanner's stale findings are not merged as this touch's answer", async () => {

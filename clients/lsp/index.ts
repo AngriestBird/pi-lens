@@ -982,7 +982,12 @@ export class LSPService {
 	 */
 	private readonly outstandingAuxNotifyWrites = new Map<
 		string,
-		{ startedAt: number; client: LSPClientInfo; settled: Promise<void> }
+		{
+			startedAt: number;
+			client: LSPClientInfo;
+			settled: Promise<void>;
+			wedgeTimer: ReturnType<typeof setTimeout>;
+		}
 	>();
 	/** LRU clock for capacity eviction, keyed by the canonical server/root key. */
 	private readonly clientLastUsedAt = new Map<string, number>();
@@ -1495,7 +1500,7 @@ export class LSPService {
 	}
 
 	/**
-	 * #1459: wait for this auxiliary's resync slot, bounded by `budgetMs`.
+	 * #1459: take this auxiliary's resync slot, waiting up to `budgetMs` for it.
 	 *
 	 * The gate is a QUEUE, not a drop: a healthy scanner accepts a `didOpen` in
 	 * milliseconds, so a sweep's neighbours take their turns one after another and
@@ -1504,40 +1509,84 @@ export class LSPService {
 	 * inside the budget makes a waiter give up, and giving up is reported as a
 	 * coverage gap rather than pushed anyway.
 	 *
-	 * Resolves `"clear"` when the slot is free (write now). Otherwise returns how
-	 * long the blocking write has been outstanding, and whether that exceeds the
-	 * wedge window — a write nothing has accepted for that long is a dead input
-	 * path, and the caller demotes the server so the gate cannot defer forever.
+	 * The slot is CLAIMED SYNCHRONOUSLY: the check and the insert sit in one
+	 * uninterrupted run of statements, and the returned handle owns the entry. A
+	 * version that returned "the slot looks free, go write" and let the caller
+	 * insert its own record after an `await` was not a gate at all — when the
+	 * holder's write landed, every waiter woke in the same microtask batch, each
+	 * read an empty map, and all of them wrote at once (measured: one write at t=0,
+	 * then a five-wide flood at t=50 for six touches). That is #1459's own root
+	 * cause rebuilt inside the fix for it.
+	 *
+	 * Returns a handle with `release()` (call on the write's settle, idempotent), or
+	 * a verdict naming how long the blocking write has been outstanding.
 	 */
-	private async awaitAuxNotifyTurn(
+	private async claimAuxNotifySlot(
 		clientKey: string,
 		entry: SpawnedServer,
+		filePath: string,
 		budgetMs: number,
-	): Promise<"clear" | { outstandingMs: number; wedged: boolean }> {
+	): Promise<{ release: () => void } | { outstandingMs: number }> {
 		const deadline = Date.now() + budgetMs;
 		for (;;) {
 			const outstanding = this.outstandingAuxNotifyWrites.get(clientKey);
-			if (!outstanding) return "clear";
 			// A record left behind by a PREVIOUS client generation (evicted,
-			// respawned) says nothing about this client's stdin — drop it and write,
-			// so a stale entry can never starve a healthy server or get a fresh
-			// client demoted for its predecessor's stall.
-			if (outstanding.client !== entry.client) {
+			// respawned) says nothing about this client's stdin — drop it, so a stale
+			// entry can never starve a healthy server.
+			if (outstanding && outstanding.client !== entry.client) {
 				this.outstandingAuxNotifyWrites.delete(clientKey);
-				return "clear";
+			} else if (outstanding) {
+				const outstandingMs = Date.now() - outstanding.startedAt;
+				const remainingMs = deadline - Date.now();
+				if (remainingMs <= 0) return { outstandingMs };
+				// `settled` never rejects, so this only resolves or times out.
+				await withDeadline(outstanding.settled, {
+					ms: remainingMs,
+					onTimeout: "undefined",
+					onReject: "undefined",
+				});
+				continue;
 			}
-			const outstandingMs = Date.now() - outstanding.startedAt;
-			if (outstandingMs > notifyWedgedMs()) {
-				return { outstandingMs, wedged: true };
+			// This client was evicted or replaced while we queued — writing to it
+			// would target a retired generation. Report the gap instead.
+			const current = this.state.clients.get(clientKey);
+			if (current !== undefined && current !== entry.client) {
+				return { outstandingMs: 0 };
 			}
-			const remainingMs = deadline - Date.now();
-			if (remainingMs <= 0) return { outstandingMs, wedged: false };
-			// `settled` never rejects, so this only resolves or times out.
-			await withDeadline(outstanding.settled, {
-				ms: remainingMs,
-				onTimeout: "undefined",
-				onReject: "undefined",
+			// ---- No `await` from here to the `set` below: the claim is atomic. ----
+			let resolveSettled: (() => void) | undefined;
+			const settled = new Promise<void>((resolve) => {
+				resolveSettled = resolve;
 			});
+			const token = {
+				startedAt: Date.now(),
+				client: entry.client,
+				settled,
+				// A write nothing accepts for the whole wedge window is a dead input
+				// path, not a slow scan. Armed HERE rather than checked by the next
+				// waiter: inside a burst every waiter arrives within one budget, so a
+				// waiter-side check could never see the wedge window elapse and a
+				// wedged scanner was never demoted. Unref'd so it cannot hold a
+				// one-shot host alive, and cleared on release.
+				wedgeTimer: setTimeout(() => {
+					if (this.outstandingAuxNotifyWrites.get(clientKey) !== token) return;
+					this.demoteForNotifyStall(clientKey, entry, filePath, {
+						outstandingMs: Date.now() - token.startedAt,
+					});
+					resolveSettled?.();
+				}, notifyWedgedMs()),
+			};
+			token.wedgeTimer.unref?.();
+			this.outstandingAuxNotifyWrites.set(clientKey, token);
+			return {
+				release: (): void => {
+					clearTimeout(token.wedgeTimer);
+					if (this.outstandingAuxNotifyWrites.get(clientKey) === token) {
+						this.outstandingAuxNotifyWrites.delete(clientKey);
+					}
+					resolveSettled?.();
+				},
+			};
 		}
 	}
 
@@ -2566,6 +2615,20 @@ export class LSPService {
 		const notifyDeferredServerIds: string[] = [];
 		if (!notifySkipped) {
 			const budget = notifyWriteBudgetMs();
+			// #1459: how long a queued auxiliary may wait for its resync slot. Bounded
+			// by the write budget AND by whatever the caller already declared it is
+			// willing to spend on this touch (`maxClientWaitMs` — cascade's cold
+			// snapshot passes 1000ms), minus what the client wait above already spent.
+			// A flat write-budget wait would tax a caller that asked for less than one
+			// budget in total. Non-positive means "no time left to queue": the server
+			// is reported as uncovered immediately.
+			const queueWaitMs =
+				options.maxClientWaitMs !== undefined
+					? Math.min(
+							budget,
+							Math.max(0, options.maxClientWaitMs - (Date.now() - startedAt)),
+						)
+					: budget;
 			await Promise.all(
 				spawned.map(async (entry) => {
 					// #743: this server already has this content from a recent touch
@@ -2583,35 +2646,36 @@ export class LSPService {
 					// target a `clientScope: "all"` sweep floods.
 					const gated =
 						entry.info.role === "auxiliary" && clientKey !== undefined;
+					let slot: { release: () => void } | undefined;
 					if (gated && clientKey) {
-						const turn = await this.awaitAuxNotifyTurn(clientKey, entry, budget);
-						if (turn !== "clear") {
+						const claim = await this.claimAuxNotifySlot(
+							clientKey,
+							entry,
+							filePath,
+							queueWaitMs,
+						);
+						if ("outstandingMs" in claim) {
 							// Queued behind a write the scanner has not accepted inside our
 							// budget. Pushing anyway is what floods it, so this touch reports
-							// the scanner as uncovered instead — and a write nothing accepted
-							// for the whole wedge window demotes the server so the gate can
-							// never defer a dead input path forever.
+							// the scanner as uncovered instead. The wedge timer armed with the
+							// blocking write is what demotes a dead input path.
 							notifyDeferredServerIds.push(entry.info.id);
 							logLatency({
 								type: "phase",
 								phase: "lsp_notify_resync_deferred",
 								filePath: normalizedPath,
-								durationMs: turn.outstandingMs,
+								durationMs: claim.outstandingMs,
 								metadata: {
 									serverId: entry.info.id,
 									source,
 									clientScope,
-									outstandingMs: turn.outstandingMs,
-									wedged: turn.wedged,
+									outstandingMs: claim.outstandingMs,
+									queueWaitMs,
 								},
 							});
-							if (turn.wedged) {
-								this.demoteForNotifyStall(clientKey, entry, filePath, {
-									outstandingMs: turn.outstandingMs,
-								});
-							}
 							return;
 						}
+						slot = claim;
 					}
 					let wrote: true | undefined;
 					let rejected = false;
@@ -2623,26 +2687,13 @@ export class LSPService {
 						const writePromise = entry.client.notify
 							.open(filePath, content, languageId, undefined, silent)
 							.then(() => true as const);
-						if (gated && clientKey) {
+						if (slot && clientKey) {
 							const client = entry.client;
-							const token = {
-								startedAt: writeStartedAt,
-								client,
-								// Waiters queue on this, so it must never reject.
-								settled: writePromise.then(
-									() => undefined,
-									() => undefined,
-								),
-							};
-							this.outstandingAuxNotifyWrites.set(clientKey, token);
-							// Release the gate on the write's OWN settle, whatever the caller
-							// below decided to wait for. Identity-checked so a demotion (which
-							// clears the map) or a later write cannot be released by this one.
-							const release = (): void => {
-								if (this.outstandingAuxNotifyWrites.get(clientKey) === token) {
-									this.outstandingAuxNotifyWrites.delete(clientKey);
-								}
-							};
+							const release = slot.release;
+							// Release the slot on the write's OWN settle, whatever the caller
+							// below decided to wait for. The handle is identity-checked, so a
+							// demotion (which clears the map) or a later claim cannot be
+							// released by this one.
 							void writePromise.then(
 								() => {
 									release();
@@ -2678,6 +2729,10 @@ export class LSPService {
 						// rejection is not a stdin-backpressure signal and must not count
 						// toward the backpressure demotion streak.
 						rejected = true;
+						// A synchronous throw (a client double without `notify`) never
+						// reached the settle handlers that release the slot — release it
+						// here so one bad client cannot wedge the queue. Idempotent.
+						slot?.release();
 					}
 					if (wrote === true) {
 						// A clean write clears any accrued backpressure streak (#743).
@@ -2898,9 +2953,15 @@ export class LSPService {
 				timeoutFor = () => callerCap ?? modeFloor;
 			}
 			// Detection deadline = the slowest individual server's budget.
+			// #1459: computed over the servers actually WAITED ON. A deferred server
+			// contributes no wait, so including its (typically longest) scanner budget
+			// here would raise the aggregate threshold above anything that can elapse
+			// and mask a real timeout on the servers that did wait.
 			const timeoutMs = Math.max(
 				0,
-				...spawned.map((e) => timeoutFor(e.client.serverId)),
+				...spawned
+					.filter((e) => !deferredResyncServerIds.has(e.info.id))
+					.map((e) => timeoutFor(e.client.serverId)),
 			);
 
 			// #707: evaluate the tsserver sync clean-confirm gate BEFORE the wait
@@ -3098,11 +3159,19 @@ export class LSPService {
 										raced &&
 										Number.isFinite(aux.baseline) &&
 										aux.client.diagnosticsVersion > (aux.baseline as number);
-									const outcome = !raced
-										? ("cut_off" as const)
-										: publishedEvidence
-											? ("answered" as const)
-											: ("silent" as const);
+									// #1459: a DEFERRED aux was never sent this content and is not
+									// waited on at all, so its instantly-resolved placeholder
+									// promise must not read as "silent". "Silent" is the reserved
+									// signal for a scanner that HAD the content, finished inside
+									// its own budget, and published nothing (#1493) — recording a
+									// deferral there would corrupt the one row that tracks it.
+									const outcome = deferredResyncServerIds.has(aux.serverId)
+										? ("deferred" as const)
+										: !raced
+											? ("cut_off" as const)
+											: publishedEvidence
+												? ("answered" as const)
+												: ("silent" as const);
 									return {
 										serverId: aux.serverId,
 										outcome,
