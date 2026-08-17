@@ -70,11 +70,20 @@ export function isZizmorAuditTarget(filePath: string): boolean {
 // proven absent) latches now; a timeout/stall/unspawnable probe expires on the
 // shared cooldown and is re-probed on the next call.
 //
-// The cooldown ladder is capped well below zizmor's own respawn cadence
-// (`clients/runtime-turn.ts`'s 240s LSP idle reset): the shared default cap
-// (`TRANSIENT_MAX_COOLDOWN_MS`, 5 min) would otherwise let a still-cooling
-// verdict outlive a respawn, so the respawn would read the cache instead of
-// re-probing and start silently offline (#1535 review).
+// The cooldown ladder is capped below zizmor's respawn cadence, but that
+// cadence isn't a single number: `clients/runtime-turn.ts`'s ordinary LSP
+// idle reset is 240s, while a subagent session or budget pressure can
+// recycle the fleet on `clients/lsp-budget.ts`'s shorter
+// `DEFAULT_LSP_BUDGET_IDLE_TIMEOUT_MS` (60s). The 120s cap sits BELOW the
+// 240s cadence but ABOVE the 60s one, so that faster respawn can still land
+// inside a still-cooling verdict — the shared default cap
+// (`TRANSIENT_MAX_COOLDOWN_MS`, 5 min) would make either respawn read the
+// cache instead of re-probing. The 60s gap is covered differently: the
+// cache-hit path in `resolveZizmorGitHubToken` logs an
+// `availability_decision` and counts a degradation on every transient cache
+// read, not only on the probe that produced it, so a respawn landing inside
+// EITHER cadence is still observable even when it isn't re-probed (#1535
+// review).
 const ZIZMOR_TOKEN_MAX_COOLDOWN_MS = 120_000;
 const ghTokenLatch = createAvailabilityLatch({
 	maxCooldownMs: ZIZMOR_TOKEN_MAX_COOLDOWN_MS,
@@ -282,7 +291,19 @@ export async function resolveZizmorGitHubToken(): Promise<string | undefined> {
 			// below `TRANSIENT_MAX_COOLDOWN_MS` via `ZIZMOR_TOKEN_MAX_COOLDOWN_MS`
 			// for exactly this reason) a spawn could start offline with nothing
 			// in latency.log or the degradation ledger to say so (#1535 review).
-			const cause = ghTokenLatch.getCause() ?? "probe-timeout";
+			const cause = ghTokenLatch.getCause();
+			if (cause === null) {
+				// `getOutcome() === "transient"` is only ever set by `noteUnavailable`
+				// in the same call that sets `cause` — the two fields are written
+				// together, so this can't happen without the latch's own invariant
+				// breaking. Assert rather than fabricate a plausible-looking default
+				// (e.g. `?? "probe-timeout"`): a fake cause here would silently
+				// mislabel WHY the current cycle is offline, in exactly the spot
+				// this fix exists to make honest.
+				throw new Error(
+					"zizmor gh-token latch: transient outcome with no cause (invariant violated)",
+				);
+			}
 			const retryAfterMs = Math.max(0, ghTokenLatch.getRetryAtMs() - Date.now());
 			recordZizmorOfflineDegradation(
 				`gh auth token still cooling down (${cause}); serving cached offline verdict, retry allowed in ${Math.round(retryAfterMs / 1000)}s`,
@@ -294,6 +315,7 @@ export async function resolveZizmorGitHubToken(): Promise<string | undefined> {
 				cause,
 				elapsedMs: 0,
 				latched: false,
+				hostStallMs: 0,
 				...(retryAfterMs > 0 && { retryAfterMs }),
 				budgetMs: GH_TOKEN_PROBE_TIMEOUT_MS,
 			});

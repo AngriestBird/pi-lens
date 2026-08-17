@@ -335,6 +335,12 @@ export function describeUnavailability(options: {
  *
  * Bounded by construction: the seam probes each tool at most once per cwd per
  * session generation, plus once per expired transient cooldown.
+ *
+ * Exception: a consumer whose own respawn cadence can be shorter than its
+ * cooldown ladder may deliberately ALSO log on a still-cooling cache hit, so
+ * a respawn landing inside that window isn't silently unobservable — see
+ * `clients/zizmor-config.ts`'s `resolveZizmorGitHubToken` (#1535). That is an
+ * opt-in per caller, not a change to this function's own bound.
  */
 export function logAvailabilityDecision(
 	decision: AvailabilityDecision,
