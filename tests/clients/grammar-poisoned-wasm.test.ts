@@ -248,6 +248,33 @@ describe("non-wasm grammar download (#1548)", () => {
 		).toContain("not a wasm module");
 	});
 
+	it("records the ignored file again after a session boundary (#1560 review F1)", async () => {
+		const grammarFile = "tree-sitter-across-sessions.wasm";
+		const grammarPath = path.join(env.tmpDir, grammarFile);
+		fs.writeFileSync(grammarPath, CAPTIVE_PORTAL_PAGE);
+
+		const client = await makeClient(env.tmpDir);
+		const countFor = (): number | undefined =>
+			getDegradationSummary().find((g) => g.kind === "grammar-blocked")?.count;
+
+		expect(client.resolveGrammarFile(grammarFile)).toBeUndefined();
+		expect(countFor()).toBe(1);
+		// Same session, same file: one ring slot, no flood.
+		expect(client.resolveGrammarFile(grammarFile)).toBeUndefined();
+		expect(countFor()).toBe(1);
+
+		// A new session starts (handleSessionStart calls resetDegradationLedger
+		// first thing) while the poisoned file is STILL on disk. The report gate
+		// is a client-lifetime Set, so without a session-scoped re-arm the ledger
+		// comes back empty and the degradation is invisible for the rest of the
+		// process — state that must re-arm at session_start cannot hide behind a
+		// process-lifetime latch.
+		resetDegradationLedger();
+		expect(countFor()).toBeUndefined();
+		expect(client.resolveGrammarFile(grammarFile)).toBeUndefined();
+		expect(countFor()).toBe(1);
+	});
+
 	it("re-checks a verified grammar once the file on disk changes", async () => {
 		const grammarFile = "tree-sitter-restamped.wasm";
 		const grammarPath = path.join(env.tmpDir, grammarFile);

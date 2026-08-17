@@ -530,15 +530,39 @@ export class TreeSitterClient {
 	}
 
 	/**
+	 * Clear the once-per-session grammar report gates when the degradation
+	 * ledger's own generation has moved (#1536 review F5). Lazy
+	 * compare-at-use-time against a monotonic counter, bumped by
+	 * `resetDegradationLedger`, which `handleSessionStart` calls first thing —
+	 * no listener, no retention. Every gate keyed to a SESSION rather than to
+	 * the process lives here, so a new one cannot forget to re-arm: a gate that
+	 * outlives the ledger it guards silently swallows the record it was only
+	 * ever meant to de-duplicate (#1560 review F1).
+	 */
+	private refreshGrammarSessionLatches(): void {
+		const ledgerGen = getDegradationLedgerGeneration();
+		if (ledgerGen === this.grammarNotificationsLedgerGen) return;
+		this.grammarNotificationsLedgerGen = ledgerGen;
+		this.grammarLastNotifiedDelayMs.clear();
+		this.poisonedGrammarPaths.clear();
+	}
+
+	/**
 	 * Log + record a grammar file on disk that isn't a wasm module, once per
-	 * path. No user notification here: the caller goes on to attempt a
-	 * re-download, and `recordGrammarFailure` is what interrupts the user if
+	 * path per session. No user notification here: the caller goes on to attempt
+	 * a re-download, and `recordGrammarFailure` is what interrupts the user if
 	 * that also fails. A silent recovery should stay silent.
 	 */
 	private reportPoisonedGrammarFile(
 		candidate: string,
 		grammarFile: string,
 	): void {
+		// Per SESSION, not per process (#1560 review F1). The file is still
+		// poisoned after a session boundary and still degrades the language, so
+		// the new session's ledger has to carry the entry — a client-lifetime
+		// gate would leave `resetDegradationLedger` with a permanently empty
+		// grammar-blocked group and no record of why the language is degraded.
+		this.refreshGrammarSessionLatches();
 		if (this.poisonedGrammarPaths.has(candidate)) return;
 		this.poisonedGrammarPaths.add(candidate);
 		logTreeSitterDiagnostic({
@@ -696,9 +720,13 @@ export class TreeSitterClient {
 		// permanent verdict — only concurrent callers during the SAME in-flight
 		// attempt should ever observe this promise.
 		//
-		// The trailing `.catch` guards the DERIVED promise `finally` returns:
-		// it rejects whenever `task` does, even when every real caller awaited
-		// `task` itself and handled it (#1548).
+		// The trailing `.catch` is UNFALSIFIABLE scaffolding, not verified
+		// defence (#1560 review F3): `finally` returns a DERIVED promise that
+		// rejects whenever `task` does, but the task's own try/catch above means
+		// it cannot reject, so no test can make this handler fire and removing it
+		// changes nothing today. It is here for the day the try/catch above stops
+		// being exhaustive — or the eviction callback itself throws — because at
+		// that point the fork becomes an unhandled rejection nobody is awaiting.
 		void task
 			.finally(() => {
 				if (this.grammarEnsurePromises.get(grammarFile) === task) {
@@ -706,7 +734,7 @@ export class TreeSitterClient {
 				}
 			})
 			.catch(() => {
-				/* the task's own catch is the handler; this only silences the fork */
+				/* see above: the task's own catch is the real handler */
 			});
 		return task;
 	}
@@ -845,18 +873,7 @@ export class TreeSitterClient {
 				: `runtime grammar download failed — durable (${detail.trim()})`,
 		});
 
-		// Session-scoped re-arm (#1536 review F5): a NEW session must be able to
-		// re-notify even for a grammar that has been failing continuously since
-		// before the session boundary. Lazy compare-at-use-time against the
-		// ledger's own generation (bumped by resetDegradationLedger, which
-		// handleSessionStart calls first thing) -- the same clear-on-transition
-		// shape as trustBlockedGrammarNotifications/trustNotificationsGeneration
-		// above, just keyed to a session boundary instead of a trust change.
-		const ledgerGen = getDegradationLedgerGeneration();
-		if (ledgerGen !== this.grammarNotificationsLedgerGen) {
-			this.grammarNotificationsLedgerGen = ledgerGen;
-			this.grammarLastNotifiedDelayMs.clear();
-		}
+		this.refreshGrammarSessionLatches();
 		// HUMAN-audience: an offline grammar fetch silently degrades this
 		// language's features, so it reaches the user through the HOST's render
 		// path (#1333) rather than a raw terminal write. Notify once per DISTINCT
