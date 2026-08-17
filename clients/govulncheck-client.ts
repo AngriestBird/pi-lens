@@ -26,9 +26,11 @@ import { SecurityScanClient } from "./security-scan-client.js";
 import {
 	classifyProbeFailure,
 	describeProbeEvidence,
+	INSTALL_TRANSIENT_MAX_ATTEMPTS,
 	logAvailabilityDecision,
 	startHostStallSampler,
 } from "./dispatch/runners/utils/availability-policy.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 
 // --- Types ---
 
@@ -226,19 +228,53 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 				hostStallMs: installHostStallMs,
 			});
 			if (outcome === "transient") {
-				const retryAfterMs = this.markTransientlyUnavailable(cause);
+				// #1497: the retried operation here is a ≤60s network compile,
+				// not a cheap probe, so it escalates on the install-class
+				// schedule and latches at the attempt ceiling instead of
+				// re-compiling every few minutes forever.
+				const retryAfterMs = this.markTransientlyUnavailable(cause, {
+					operationClass: "install",
+				});
+				const exhausted = retryAfterMs === 0;
+				const ceilingReason = `go install timed out ${INSTALL_TRANSIENT_MAX_ATTEMPTS} times; install retries disabled until the next session`;
+				if (exhausted) {
+					// The symptom a user notices is an unexplained busy core, not a
+					// missing tool — so the terminal verdict gets the louder record.
+					// Once per session, matching the latch's own lifetime: both re-arm
+					// at `session_start` (review F3).
+					recordDegradationOnce({
+						kind: "install-retry-exhausted",
+						subject: "govulncheck",
+						reason: ceilingReason,
+					});
+				}
 				// One record per decision, so an install that keeps timing out is
 				// readable in latency.log the same day (#1467's forensic trail).
 				logAvailabilityDecision({
 					tool: "govulncheck",
 					verdict: "unavailable",
 					outcome,
-					cause,
+					// At the ceiling the latch rewrote the cause; a row still saying
+					// `probe-timeout` would read as "cooling down" (#1497 review F5).
+					cause: exhausted ? (this.latchedCause() ?? cause) : cause,
 					elapsedMs: Date.now() - installStartedAt,
-					latched: false,
+					latched: exhausted,
 					hostStallMs: installHostStallMs,
 					...(retryAfterMs > 0 && { retryAfterMs }),
 					budgetMs: INSTALL_TIMEOUT_MS,
+					// The ceiling verdict is an ASSERTION by this call site, not a
+					// classification of one spawn, and #1534's convention is that such a
+					// row says so and carries the install facts behind it. Every retry
+					// DID run a `go install` that failed, so `install: "failed"` is
+					// earned, and the reason names the ceiling rather than the spawn.
+					...(exhausted && {
+						classifiedBy: "caller" as const,
+						evidence: {
+							...describeProbeEvidence(install, "go install"),
+							install: "failed" as const,
+							installReason: ceilingReason,
+						},
+					}),
 				});
 				return false;
 			}

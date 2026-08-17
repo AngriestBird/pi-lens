@@ -225,11 +225,29 @@ export abstract class SecurityScanClient<TResult> {
 	 * For NON-probe transient failures only (scan/install timeouts):
 	 * `probeVersion` latches and logs its own transient verdicts (#1501), so
 	 * re-marking one here would double-escalate the cooldown.
+	 *
+	 * Pass `opts.operationClass: "install"` when the failed operation was a
+	 * network install/compile rather than a cheap probe (#1497): the retry
+	 * escalates on the install-class schedule, on its OWN cooldown slot (a
+	 * cheap probe failure can never shorten it), and latches for the session at
+	 * the attempt ceiling, in which case the return is 0 (latched).
 	 */
 	protected markTransientlyUnavailable(
 		cause: AvailabilityCause = "probe-timeout",
+		opts?: { operationClass?: "probe" | "install" },
 	): number {
-		return this.availabilityLatch.noteUnavailable("transient", cause);
+		return this.availabilityLatch.noteUnavailable("transient", cause, opts);
+	}
+
+	/**
+	 * The cause the LATCH settled on, which is not always the cause the caller
+	 * passed in: at the install-class ceiling the latch rewrites it to
+	 * `install-retry-exhausted` (#1497). A decision record built from the
+	 * caller's own cause would say `probe-timeout` for a verdict that is no
+	 * longer being retried, so the record reads it back from here.
+	 */
+	protected latchedCause(): AvailabilityCause | null {
+		return this.availabilityLatch.getCause();
 	}
 
 	/**
