@@ -1116,7 +1116,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 
 	const t3 = Date.now();
 	let madgeStats: MadgeBatchStats | undefined;
-	if (await depChecker.ensureAvailable()) {
+	// Off by default (#766): this pass only writes debug output, and user-facing
+	// madge diagnostics come from the session-start `madge` cache + the
+	// `lens_diagnostics` extractor. Enabled with `--lens-turn-end-madge` /
+	// `turnEnd.madge.enabled=true` for those who want the per-edit circular note.
+	if (getFlag("lens-turn-end-madge") && (await depChecker.ensureAvailable())) {
 		const madgeFiles = cacheManager.getFilesForMadge(cwd);
 		if (madgeFiles.length > 0) {
 			dbg(
@@ -1158,7 +1162,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		filePath: cwd,
 		phase: "madge",
 		durationMs: Date.now() - t3,
-		...(madgeStats && { metadata: madgeStats }),
+		// A ~0ms entry with no metadata is indistinguishable from "ran and was
+		// fast" when re-analyzing the #766 tail — mark the skipped case.
+		metadata: madgeStats ?? { skipped: true },
 	});
 
 	// --- Test runner: fire once per turn after all edits are done ---
