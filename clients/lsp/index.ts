@@ -3726,16 +3726,32 @@ export class LSPService {
 			}
 		}
 
-		// #1549: the same hazard through a different door. An AUXILIARY whose notify
-		// write never landed also still holds the previous content's findings — nothing
-		// cleared its cache — and before this change that touch was blanket
-		// `inconclusive`, so no consumer read the merged array. Now the primary's answer
-		// flows, which means the auxiliary's stale findings would flow with it and be
-		// reported (with the previous revision's line numbers) as this touch's answer.
-		// Drop them; the write failure is reported as a coverage gap instead.
-		// #1493's exemption still outranks the drop: an auxiliary whose stored
-		// publication is bound to exactly these bytes DID cover this content, whatever
-		// happened to this touch's write.
+		// #1549: does this auxiliary's CURRENT publication describe exactly the bytes
+		// this touch carries? Read at merge time, and unioned with the pre-notify
+		// snapshot rather than replacing it — the two answer different questions:
+		//
+		//   - `auxPublishedThisContent` was captured BEFORE the notify (#1493), because
+		//     a landed write clears the cache and would erase the evidence that the
+		//     scanner had already reported on these bytes.
+		//   - the live read below catches the opposite race, and it is #1459's own
+		//     documented signature: a write charged as timed out that LANDS LATE, after
+		//     which the scanner publishes for this touch's content. Judging that
+		//     auxiliary on the pre-notify snapshot alone drops its CURRENT findings and
+		//     names it uncovered — an underclaim about a scanner that answered.
+		//
+		// Either match means covered; both are content-bound, so neither can pass off
+		// another revision's findings as this touch's answer.
+		const auxCoversThisContent = (entry: (typeof spawned)[number]): boolean =>
+			auxPublishedThisContent.has(entry.info.id) ||
+			entry.client.getDiagnosticBinding?.(filePath)?.contentHash ===
+				touchContentHash;
+		// An AUXILIARY whose notify write never landed still holds the previous
+		// content's findings — nothing cleared its cache — and before this change that
+		// touch was blanket `inconclusive`, so no consumer read the merged array. Now
+		// the primary's answer flows, which means the auxiliary's stale findings would
+		// flow with it and be reported (with the previous revision's line numbers) as
+		// this touch's answer. Drop them; the write failure is reported as a coverage
+		// gap instead.
 		// Auxiliaries only. A PRIMARY keeps #570's deliberate
 		// timeout-preserves-last-known-diagnostics semantics, and its write failure
 		// makes the touch inconclusive anyway, so no consumer reads the array as
@@ -3746,7 +3762,7 @@ export class LSPService {
 					(entry) =>
 						entry.info.role === "auxiliary" &&
 						notifyWriteTimedOutServerIds.includes(entry.info.id) &&
-						!auxPublishedThisContent.has(entry.info.id),
+						!auxCoversThisContent(entry),
 				)
 				.map((entry) => entry.info.id),
 		);
@@ -3992,18 +4008,19 @@ export class LSPService {
 		// way. Two shapes reach this and no aux outcome row: an auxiliary whose notify
 		// write timed out or rejected, and one that produced no publication evidence
 		// when the wait lapsed (including on a NON-collecting touch, which derives no
-		// outcome rows at all). #1493's exemption is honored — an auxiliary with a
-		// stored publication for exactly these bytes did cover this content — and the
-		// Set dedups against the ids `auxiliaryCoverageGap` already reported.
+		// outcome rows at all). The content-bound exemption is honored through the same
+		// `auxCoversThisContent` predicate the merge uses — one rule, so a scanner
+		// cannot be named uncovered while its findings ride along in `.diags`, or the
+		// reverse. The Set dedups against the ids `auxiliaryCoverageGap` reported.
 		const auxNoAnswerServerIds = spawned
-			.filter((entry) => entry.info.role === "auxiliary")
-			.map((entry) => entry.info.id)
 			.filter(
-				(serverId) =>
-					(diagnosticsUnansweredServerIds.includes(serverId) ||
-						notifyWriteTimedOutServerIds.includes(serverId)) &&
-					!auxPublishedThisContent.has(serverId),
-			);
+				(entry) =>
+					entry.info.role === "auxiliary" &&
+					(diagnosticsUnansweredServerIds.includes(entry.info.id) ||
+						notifyWriteTimedOutServerIds.includes(entry.info.id)) &&
+					!auxCoversThisContent(entry),
+			)
+			.map((entry) => entry.info.id);
 		const unconfirmedServerIds = [
 			...new Set([
 				...(auxUnconfirmedServerIds ?? []),
@@ -4067,20 +4084,21 @@ export class LSPService {
 		// reader stops filtering auxiliaries out, marking a cut-off scanner warm
 		// would let it skip a warm-up it never earned.
 		//
-		// #1549: the same per-server reasoning, for the flag that used to be the
-		// blanket one. `diagnosticsTimedOut` is now primary-attributed, so the loop can
-		// be reached with an auxiliary that never answered — and on a NON-collecting
-		// touch that auxiliary reaches no coverage-gap list either. Skip every server
-		// the diagnostics wait heard nothing from, whatever its role, so a scanner can
-		// never be marked warm on a wait it did not answer.
+		// #1549: `diagnosticsTimedOut` is primary-attributed now, so this loop can be
+		// reached with an auxiliary that never answered — including on a NON-COLLECTING
+		// touch, which derives no aux wait-outcome rows. `unconfirmedServerIds` covers
+		// that case because `auxNoAnswerServerIds` is computed for every touch, not only
+		// a collecting one; an unheard scanner is therefore already excluded here and
+		// needs no separate guard. A primary cannot reach this loop unheard at all: it
+		// would have set `diagnosticsTimedOut`, and the gates that clear that flag
+		// retract its attribution precisely because they certified its silence AS the
+		// answer (`retractPrimaryTimeoutAttribution`).
 		const notifyTimedOutServerIds = new Set(notifyWriteTimedOutServerIds);
 		const uncoveredServerIds = new Set(unconfirmedServerIds);
-		const unansweredServerIds = new Set(diagnosticsUnansweredServerIds);
 		if (diagnosticsMode !== "none" && !diagnosticsTimedOut) {
 			for (const entry of spawned) {
 				if (notifyTimedOutServerIds.has(entry.info.id)) continue;
 				if (uncoveredServerIds.has(entry.info.id)) continue;
-				if (unansweredServerIds.has(entry.info.id)) continue;
 				const key = await this.demonstratedReadyKeyFor(entry.info, filePath);
 				if (key) this.markDemonstratedReadyKey(key);
 			}

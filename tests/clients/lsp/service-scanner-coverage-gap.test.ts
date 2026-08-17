@@ -326,7 +326,24 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 				)?.auxNoAnswerServerIds?.includes("opengrep"),
 			),
 		).toHaveLength(1);
-		expect(gapRows[0]?.metadata).toMatchObject({ source: "cascade" });
+		// The EXACT list on a deferral row, not just membership: a deferred touch
+		// names the one scanner it does not speak for and nothing else.
+		const deferredRow = gapRows.find((row) =>
+			(row.metadata as { deferredResyncServerIds?: string[] })
+				?.deferredResyncServerIds,
+		);
+		expect(deferredRow?.metadata).toMatchObject({
+			deferredResyncServerIds: ["opengrep"],
+			source: "cascade",
+		});
+		// And the exact list on the late-write row, through its own door.
+		const lateWriteRow = gapRows.find((row) =>
+			(row.metadata as { auxNoAnswerServerIds?: string[] })?.auxNoAnswerServerIds,
+		);
+		expect(lateWriteRow?.metadata).toMatchObject({
+			auxNoAnswerServerIds: ["opengrep"],
+			source: "cascade",
+		});
 	});
 
 	it("a write that lands after its deadline retracts the timeout it was charged for", async () => {

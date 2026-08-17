@@ -27,7 +27,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveTouchVerdict } from "../../../clients/lsp/diagnostic-binding.js";
+import {
+	hashDiagnosticContent,
+	resolveTouchVerdict,
+} from "../../../clients/lsp/diagnostic-binding.js";
+import { normalizeMapKey } from "../../../clients/path-utils.js";
 
 const getServersForFileWithConfig = vi.fn();
 const createLSPClient = vi.fn();
@@ -80,11 +84,24 @@ function makeDiagnostic(message: string) {
 }
 
 /**
- * A client whose wait settles after `delayMs`, and which advances the PER-PATH
- * publication stamp (#1531) only when it actually publishes something —
- * findings, or an empty result with `publishesWhenClean`. That stamp is the
- * evidence the per-server verdict reads, so a double that bumps it
- * unconditionally would make every probe here vacuous (defect shape 7).
+ * A faithful client double. Three production behaviours matter to every probe in
+ * this file, and a double that skips any of them makes the probe vacuous
+ * (defect shape 7):
+ *
+ *  1. `notify.open` CLEARS this path's diagnostics cache entry
+ *     (`clearDiagnosticsForPath`) when the write lands. A present entry after a
+ *     touch is therefore a fresh answer, which is the second evidence signal the
+ *     verdict reads — and the signal the #814 aggregate gate reads through
+ *     `getAllDiagnostics`, a REQUIRED method on `LSPClient`. Omitting it makes
+ *     that gate throw into its own catch, so a fail-safe would pass by accident.
+ *  2. A publication advances the PER-PATH stamp (#1531) and records a content
+ *     BINDING for the exact bytes it was computed from (#1095/#1493) — only when
+ *     the server actually publishes: findings, or an empty result under
+ *     `publishesWhenClean`.
+ *  3. A write can be SLOW without being lost. `notifyDelayMs` models the
+ *     late-landing write that #1459 documents: charged as timed out against the
+ *     caller's budget, it still lands, and the scanner then publishes for these
+ *     bytes. `hangingNotify` is the other shape — a write that never lands at all.
  */
 function makeClient(
 	delayMs: number,
@@ -92,13 +109,30 @@ function makeClient(
 	options: {
 		serverId: string;
 		publishesWhenClean?: boolean;
-		/** Model a write that never lands (stalled stdin / backpressure). */
-		hangingNotify?: boolean;
+		/**
+		 * Model a write that never lands (stalled stdin / backpressure), from the
+		 * Nth write onward. `0` hangs every write; `1` lets the first land and hangs
+		 * the rest, which is how a scanner ends up holding a PREVIOUS revision's
+		 * findings while the touch that would have cleared them stalls.
+		 */
+		hangingNotifyAfterWrites?: number;
+		/** Model a write that lands LATE (past the caller's notify budget). */
+		notifyDelayMs?: number;
 	},
 ) {
-	let settled = false;
 	let version = 0;
+	let writeCount = 0;
 	const stampsByPath = new Map<string, number>();
+	const cache = new Map<string, { diags: unknown[]; ts: number }>();
+	const bindings = new Map<string, string>();
+	/** The content each path's write last delivered, i.e. what a publish binds to. */
+	const deliveredContent = new Map<string, string>();
+	const publishes = diags.length > 0 || options.publishesWhenClean === true;
+	const landWrite = (filePath: string, content: string): void => {
+		cache.delete(normalizeMapKey(filePath));
+		bindings.delete(filePath);
+		deliveredContent.set(filePath, content);
+	};
 	return {
 		isAlive: () => true,
 		shutdown: async () => {},
@@ -119,11 +153,37 @@ function makeClient(
 		getDiagnosticsVersionForPath: vi.fn(
 			(filePath: string) => stampsByPath.get(filePath) ?? 0,
 		),
-		getDiagnostics: vi.fn(() => (settled ? diags : [])),
+		getDiagnostics: vi.fn(
+			(filePath: string) =>
+				(cache.get(normalizeMapKey(filePath))?.diags ?? []) as ReturnType<
+					typeof makeDiagnostic
+				>[],
+		),
+		getAllDiagnostics: vi.fn(() => cache),
+		getDiagnosticBinding: vi.fn((filePath: string) => {
+			const contentHash = bindings.get(filePath);
+			return contentHash === undefined ? undefined : { contentHash };
+		}),
 		notify: {
-			open: options.hangingNotify
-				? vi.fn(() => new Promise<void>(() => {}))
-				: vi.fn(async () => {}),
+			open: vi.fn((filePath: string, content: string) => {
+				writeCount += 1;
+				if (
+					options.hangingNotifyAfterWrites !== undefined &&
+					writeCount > options.hangingNotifyAfterWrites
+				) {
+					return new Promise<void>(() => {});
+				}
+				if (options.notifyDelayMs === undefined) {
+					landWrite(filePath, content);
+					return Promise.resolve();
+				}
+				return new Promise<void>((resolve) =>
+					setTimeout(() => {
+						landWrite(filePath, content);
+						resolve();
+					}, options.notifyDelayMs),
+				);
+			}),
 			change: vi.fn(async () => {}),
 			close: vi.fn(async () => {}),
 		},
@@ -132,10 +192,19 @@ function makeClient(
 			(filePath: string) =>
 				new Promise<void>((resolve) =>
 					setTimeout(() => {
-						settled = true;
-						if (diags.length > 0 || options.publishesWhenClean) {
+						// A server publishes about the content it actually RECEIVED. With
+						// no write landed there is nothing new to say, so a hanging write
+						// leaves the previous publication (and its binding) in place —
+						// exactly the stale-findings hazard the merge has to drop.
+						const delivered = deliveredContent.get(filePath);
+						if (publishes && delivered !== undefined) {
 							version += 1;
 							stampsByPath.set(filePath, version);
+							cache.set(normalizeMapKey(filePath), {
+								diags,
+								ts: Date.now(),
+							});
+							bindings.set(filePath, hashDiagnosticContent(delivered));
 						}
 						resolve();
 					}, delayMs),
@@ -160,22 +229,61 @@ function latencyRows(phase: string) {
 		.filter((entry) => entry?.phase === phase);
 }
 
+/**
+ * Mount a service over the given clients. `primary` may be omitted to model a
+ * file whose only configured server is a scanner (no language server) — the
+ * aux-only fail-safe shape.
+ */
+async function mountService(clients: {
+	primary?: ReturnType<typeof makeClient>;
+	aux: ReturnType<typeof makeClient>;
+}) {
+	const { LSPService } = await import("../../../clients/lsp/index.js");
+	const service = new LSPService();
+	getServersForFileWithConfig.mockReturnValue([
+		...(clients.primary ? [makeServer("ts-primary")] : []),
+		makeServer("opengrep", "auxiliary"),
+	]);
+	createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+		options?.serverId === "opengrep" ? clients.aux : clients.primary,
+	);
+	return service;
+}
+
+async function touchOnce(
+	service: {
+		touchFile: (
+			filePath: string,
+			content: string,
+			options: Record<string, unknown>,
+		) => Promise<
+			| {
+					diags: Array<{ message: string }>;
+					confirmation?: string;
+					inconclusive?: boolean;
+					inconclusiveServerIds?: string[];
+					inconclusiveReason?: string;
+					unconfirmedServerIds?: string[];
+			  }
+			| undefined
+		>;
+	},
+	content = "const x = 1;",
+	overrides: Record<string, unknown> = {},
+) {
+	const touch = service.touchFile(FILE, content, {
+		...CASCADE_TOUCH,
+		...overrides,
+	});
+	await vi.advanceTimersByTimeAsync(8000);
+	return await touch;
+}
+
 async function runTouch(
 	primary: ReturnType<typeof makeClient>,
 	aux: ReturnType<typeof makeClient>,
 ) {
-	const { LSPService } = await import("../../../clients/lsp/index.js");
-	const service = new LSPService();
-	getServersForFileWithConfig.mockReturnValue([
-		makeServer("ts-primary"),
-		makeServer("opengrep", "auxiliary"),
-	]);
-	createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-		options?.serverId === "opengrep" ? aux : primary,
-	);
-	const touch = service.touchFile(FILE, "const x = 1;", CASCADE_TOUCH);
-	await vi.advanceTimersByTimeAsync(8000);
-	return await touch;
+	return await touchOnce(await mountService({ primary, aux }));
 }
 
 describe("#1549 — per-server touch verdict", () => {
@@ -280,10 +388,9 @@ describe("#1549 — per-server touch verdict", () => {
 
 	it("an AUXILIARY's notify write timing out is a coverage gap, not a verdict", async () => {
 		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "50";
-		// opengrep's write never lands, so whatever it publishes describes OTHER
-		// bytes: it answered its wait (`publishesWhenClean`) and is STILL uncovered
-		// for this content. That is the union `auxiliaryCoverageGap` cannot see —
-		// the write failed before any wait outcome existed.
+		// opengrep's write never lands, so it was never sent these bytes and has
+		// nothing to say about them. The primary answered, so the touch stands on its
+		// findings and names the scanner instead of collapsing.
 		const result = await runTouch(
 			makeClient(100, [makeDiagnostic("primary error")], {
 				serverId: "ts-primary",
@@ -291,7 +398,7 @@ describe("#1549 — per-server touch verdict", () => {
 			makeClient(100, [], {
 				serverId: "opengrep",
 				publishesWhenClean: true,
-				hangingNotify: true,
+				hangingNotifyAfterWrites: 0,
 			}),
 		);
 
@@ -301,6 +408,112 @@ describe("#1549 — per-server touch verdict", () => {
 		);
 		expect(result?.confirmation).toBe("partial");
 		expect(result?.unconfirmedServerIds).toEqual(["opengrep"]);
+		// The blackout keeps a record of its own, through the door that produced it —
+		// a failed write leaves no wait outcome row for the coverage policy to read.
+		expect(latencyRows("lsp_scanner_coverage_gap")[0]?.metadata).toMatchObject({
+			auxNoAnswerServerIds: ["opengrep"],
+		});
+	});
+
+	it("an auxiliary holding the PREVIOUS revision's findings does not get them merged as this touch's answer", async () => {
+		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "50";
+		// The scanner's first write lands and it publishes a finding for revision one.
+		// On the second touch its write stalls, so nothing clears that cache: the
+		// finding is about bytes this touch does not carry. Before #1549 the touch was
+		// blanket `inconclusive` and no consumer read `.diags`; now the primary's
+		// answer flows, so the stale finding would have flowed with it, carrying the
+		// previous revision's line numbers.
+		const service = await mountService({
+			primary: makeClient(100, [makeDiagnostic("primary error")], {
+				serverId: "ts-primary",
+			}),
+			aux: makeClient(100, [makeDiagnostic("scanner finding rev1")], {
+				serverId: "opengrep",
+				hangingNotifyAfterWrites: 1,
+			}),
+		});
+
+		const first = await touchOnce(service, "revision one");
+		// A precondition, not the assertion under test: revision one WAS covered.
+		expect((first?.diags ?? []).map((d) => d.message)).toContain(
+			"scanner finding rev1",
+		);
+		expect(first?.confirmation).toBe("confirmed");
+
+		const second = await touchOnce(service, "revision two");
+		expect((second?.diags ?? []).map((d) => d.message)).toEqual([
+			"primary error",
+		]);
+		expect(second?.inconclusive).toBeUndefined();
+		expect(second?.confirmation).toBe("partial");
+		expect(second?.unconfirmedServerIds).toEqual(["opengrep"]);
+	});
+
+	it("#1493 outranks the drop at MERGE time: a late-landing write that publishes for THESE bytes is covered", async () => {
+		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "50";
+		// #1459's documented signature: the write is charged as timed out against the
+		// caller's budget and then LANDS anyway, after which the scanner publishes for
+		// this touch's content. The pre-notify content snapshot cannot see that — it
+		// was captured before the write — so judging the scanner on it alone drops
+		// findings that ARE about these bytes and names a scanner that answered. The
+		// exemption is therefore re-read at merge time.
+		const result = await runTouch(
+			makeClient(100, [makeDiagnostic("primary error")], {
+				serverId: "ts-primary",
+			}),
+			makeClient(300, [makeDiagnostic("scanner finding")], {
+				serverId: "opengrep",
+				notifyDelayMs: 150,
+			}),
+		);
+
+		expect((result?.diags ?? []).map((d) => d.message)).toEqual([
+			"primary error",
+			"scanner finding",
+		]);
+		expect(result?.inconclusive).toBeUndefined();
+		expect(result?.confirmation).toBe("confirmed");
+		expect(result?.unconfirmedServerIds).toBeUndefined();
+	});
+
+	it("FAIL-SAFE: a touch with NO primary keeps the pre-#1549 touch-wide verdict", async () => {
+		// A file whose only configured server is a scanner has no primary answer to
+		// preserve, so there is nothing to absolve the touch WITH. Absolving it would
+		// report "we heard from everyone we needed" about a touch that heard from
+		// nobody — the overclaim direction of the same dishonesty.
+		const service = await mountService({
+			aux: makeClient(5000, [], { serverId: "opengrep" }),
+		});
+		const result = await touchOnce(service);
+
+		expect(result?.inconclusive).toBe(true);
+		expect(result?.confirmation).toBeUndefined();
+		// Nobody to attribute it to: the verdict stands on the flag, honestly
+		// unattributed, rather than blaming an auxiliary it never blames elsewhere.
+		expect(result?.inconclusiveServerIds).toBeUndefined();
+		expect(result?.inconclusiveReason).toBe("diagnostics-wait");
+	});
+
+	it("a scanner that went unheard is not marked warm, even on a NON-COLLECTING touch", async () => {
+		// `demonstratedReady` means "this server answered for this file". A
+		// non-collecting touch derives no auxiliary wait-outcome rows, so the coverage
+		// list is the only thing between an unheard scanner and a warm mark it never
+		// earned — which would then let it skip a warm-up it still needs.
+		const service = await mountService({
+			primary: makeClient(100, [makeDiagnostic("primary error")], {
+				serverId: "ts-primary",
+			}),
+			aux: makeClient(5000, [], { serverId: "opengrep" }),
+		});
+		await touchOnce(service, "const x = 1;", { collectDiagnostics: false });
+
+		const ready = [
+			...(
+				service as unknown as { state: { demonstratedReady: Set<string> } }
+			).state.demonstratedReady,
+		].join(" ");
+		expect(ready).toContain("ts-primary");
+		expect(ready).not.toContain("opengrep");
 	});
 
 	it("a PRIMARY's notify write timing out is a verdict, attributed to notify-write", async () => {
@@ -311,7 +524,7 @@ describe("#1549 — per-server touch verdict", () => {
 		const result = await runTouch(
 			makeClient(100, [makeDiagnostic("stale finding")], {
 				serverId: "ts-primary",
-				hangingNotify: true,
+				hangingNotifyAfterWrites: 0,
 			}),
 			makeClient(100, [], { serverId: "opengrep", publishesWhenClean: true }),
 		);

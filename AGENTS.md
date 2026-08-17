@@ -128,7 +128,12 @@ can only narrow a verdict and never invent a confirmation. The capability-aware
 silent-clean gates are primary-scoped for the same reason. Two obligations ride
 with the change: an auxiliary whose write never landed must have its stale
 findings dropped from `.diags` (they describe the previous revision, and the
-blanket verdict used to hide them), and an inconclusive touch must name its cause
+blanket verdict used to hide them) — and that drop is judged on a MERGE-TIME
+content-binding read unioned with the pre-notify snapshot, because #1493's
+snapshot is captured before the write and cannot see a write that lands late and
+then publishes for these bytes (#1459's own signature); one predicate decides both
+the drop and the coverage naming, so a scanner can never be named uncovered while
+its findings ride along. And an inconclusive touch must name its cause
 — `inconclusiveServerIds` plus `inconclusiveReason` (`notify-write` /
 `diagnostics-wait` / `mixed`) on the result, in `lsp_touch_file`, and in the
 cascade's `neighbor_touch` row. (#1549)
