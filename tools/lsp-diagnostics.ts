@@ -670,11 +670,12 @@ type DiagnosticsCollectionResult = {
 	 */
 	confirmedByTouch: boolean;
 	/**
-	 * #1470: server ids the touch carries no evidence for — an auxiliary whose push
-	 * wait was cut off by the aux grace timer. Empty when every spawned server got
-	 * to answer. `confirmedByTouch` stays TRUE in that case: the primary's own
-	 * confirmation is untouched, and conflating the two would report a hung opengrep
-	 * as "typescript could not confirm clean", which is a different lie. The caller
+	 * #1470/#1493: server ids the touch carries no evidence for — an auxiliary whose
+	 * push wait was cut off by the aux grace timer (#1470), or one that stayed silent
+	 * with no stored publication for this content (#1493). Empty when every spawned
+	 * server got to answer. `confirmedByTouch` stays TRUE in that case: the primary's
+	 * own confirmation is untouched, and conflating the two would report a hung or
+	 * silent opengrep as "typescript could not confirm clean", a different lie. The caller
 	 * demotes the FILE-level verdict to "unconfirmed" while keeping the primary line
 	 * honest.
 	 */
@@ -1147,7 +1148,8 @@ async function collectFileDiagnosticResult(
 	// re-cementing path). "unknown"/true bindings leave the verdict untouched.
 	const boundMismatch = binding?.boundToCurrentDisk === false;
 	if (boundMismatch) confirmation = "unconfirmed";
-	// #1470: an auxiliary cut off by the aux grace timer contributed no evidence
+	// #1470/#1493: an auxiliary that never reported — cut off by the aux grace timer,
+	// or silent with nothing published for this content — contributed no evidence
 	// about this file, so a "clean" verdict computed from the merged result would
 	// be claiming coverage this batch does not have. Demote it — that also keeps
 	// the entry out of the workspace cache below, which would otherwise replay the
@@ -1254,9 +1256,10 @@ async function runFileDiagnostics(
 	// longer "definitionally confirmed". "unknown"/true bindings are unchanged.
 	const boundMismatch = binding?.boundToCurrentDisk === false;
 	if (boundMismatch) confirmation = "unconfirmed";
-	// #1470: NARROWED, not collapsed. An auxiliary the aux grace timer cut off makes
-	// the FILE-level verdict unconfirmed — the merged result is missing whatever that
-	// scanner would have said, and this tool is the security lane's read surface. The
+	// #1470/#1493: NARROWED, not collapsed. An auxiliary that never reported — the aux
+	// grace timer cut it off, or it stayed silent with nothing published for this
+	// content — makes the FILE-level verdict unconfirmed. The merged result is missing
+	// whatever that scanner would have said, and this tool is the security lane's read surface. The
 	// PRIMARY's own verdict is untouched (`primaryCoverageGapOnly` below), so a
 	// TypeScript answer stays "confirmed clean" on its own line while an explicit
 	// line names the scanner whose coverage is absent.

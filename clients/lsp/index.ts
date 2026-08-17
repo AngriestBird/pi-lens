@@ -8,7 +8,6 @@
  * - Resource cleanup
  */
 
-import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -51,9 +50,11 @@ import {
 } from "../lsp-mutation.js";
 import { createLSPClient } from "./client.js";
 import {
+	auxiliaryCoverageGap,
 	bindingStateLabel,
 	composeBoundToCurrentDisk,
 	createDiskBindingCache,
+	hashDiagnosticContent,
 	touchCoverageGap,
 	type BoundToCurrentDisk,
 	type DiagnosticBinding,
@@ -2362,6 +2363,22 @@ export class LSPService {
 					return diags.length > 0 ? [{ diags, binding }] : [];
 				})
 			: [];
+		// #1493: auxiliaries whose STORED publication already covers exactly the
+		// bytes this touch carries. Read BEFORE the notify below, which clears each
+		// client's cache for the file. Unlike `carriedAuxiliary` this does not
+		// require findings: an empty publication bound to this content is evidence
+		// the scanner reported, which is what keeps a genuinely clean file clean
+		// when its wait produces nothing new (a debounce-skipped notify, or a late
+		// publication carried in from the previous touch).
+		const auxPublishedThisContent = new Set(
+			spawned.flatMap((entry) =>
+				entry.info.role === "auxiliary" &&
+				entry.client.getDiagnosticBinding?.(filePath)?.contentHash ===
+					touchContentHash
+					? [entry.info.id]
+					: [],
+			),
+		);
 		// #743: PER-SERVER notify-write deadlines. Each server's didOpen/didChange
 		// write gets its OWN notifyWriteBudgetMs budget rather than one shared
 		// deadline over a single Promise.all — otherwise one backpressured server
@@ -2448,6 +2465,12 @@ export class LSPService {
 		// the aux grace window. Undefined when no aux was cut off (primary-only
 		// paths never set this). Logged in lsp_touch_file metadata.
 		let auxCutOffServerIds: string[] | undefined;
+		// #1493: aux-role servers this touch carries NO evidence from — the cut-off
+		// set above PLUS the ones that stayed silent through their own budget with
+		// no stored publication for this content. This is what narrows the
+		// confirmation; `auxCutOffServerIds` stays cut_off-only so the R8 latency
+		// field keeps its original meaning.
+		let auxUnconfirmedServerIds: string[] | undefined;
 		// #707: tsserver sync clean-confirm state. `tsserverSyncEligible` is the
 		// full gate (evaluated once, before the wait); `tsserverSyncConfirmed`
 		// holds the sync commands' answer when the racing confirm won the wait
@@ -2822,6 +2845,13 @@ export class LSPService {
 									return {
 										serverId: aux.serverId,
 										outcome,
+										// #1493: carried into the coverage-gap policy so a silent
+										// auxiliary that already published for these exact bytes is
+										// not demoted. Logged too — it is the reason a `silent` row
+										// did not narrow the touch.
+										publishedThisContent: auxPublishedThisContent.has(
+											aux.serverId,
+										),
 										budgetMs,
 										elapsedMs: Date.now() - auxWaitStartedAt,
 										// #1458 S3: elapsed measured from BEFORE the primary wait
@@ -2837,6 +2867,11 @@ export class LSPService {
 								.filter((outcome) => outcome.outcome === "cut_off")
 								.map((outcome) => outcome.serverId);
 							if (unfinished.length > 0) auxCutOffServerIds = unfinished;
+							// #1493: one policy over both no-answer shapes. Lives in
+							// diagnostic-binding.ts so no consumer re-derives the rule from
+							// an outcome string.
+							const uncovered = auxiliaryCoverageGap(outcomes);
+							if (uncovered.length > 0) auxUnconfirmedServerIds = uncovered;
 							logLatency({
 								type: "phase",
 								phase: "lsp_aux_wait_outcome",
@@ -3241,21 +3276,21 @@ export class LSPService {
 		// confirmed answer.
 		const inconclusive = notifyWriteTimedOut || diagnosticsTimedOut;
 
-		// #1470: an auxiliary whose push wait was CUT OFF by the aux grace timer
-		// (R8/#714) contributed exactly as much evidence about this file as one that
-		// went silent inside its own budget — none. A hung opengrep resolved
-		// `confirmation: "confirmed"` and read as confirmed-clean on the security
-		// lane. (The SILENT case still does, and is NOT addressed here: a scanner
-		// that settles inside its own budget without publishing also yields an
-		// unqualified confirmation. Same #533 class, same lane, different door —
-		// filed as #1493, deliberately untouched by this change.)
+		// #1470/#1493: an auxiliary whose push wait was CUT OFF by the aux grace
+		// timer (R8/#714) contributed exactly as much evidence about this file as one
+		// that went silent inside its own budget — none. Both now narrow the
+		// confirmation, through the one `auxiliaryCoverageGap` policy. A hung or
+		// silent opengrep used to resolve `confirmation: "confirmed"` and read as
+		// confirmed-clean on the security lane; the silent half survived #1470
+		// because it only tripped `diagnosticsTimedOut` when it was the ONLY
+		// auxiliary, so a fast sibling hid it (#1493).
 		// This does NOT flip the touch to inconclusive: that would discard a
 		// primary answer that IS trustworthy (#533 honesty doctrine cuts both ways —
 		// overclaiming and underclaiming are both dishonest). Instead the confirmation
 		// is NARROWED: `"partial"`, naming the servers it does not speak for, so every
 		// consumer that treats confirmation as proof of coverage fails closed while
 		// the primary's findings still flow.
-		const unconfirmedServerIds = auxCutOffServerIds ?? [];
+		const unconfirmedServerIds = auxUnconfirmedServerIds ?? [];
 		const coverageGap = unconfirmedServerIds.length > 0;
 
 		// #667: a confirmed (non-inconclusive) diagnostics-mode touch is the
@@ -3269,9 +3304,10 @@ export class LSPService {
 		// timed out are skipped here (rather than gating the whole loop on the
 		// file-level `inconclusive`).
 		//
-		// #1470: same per-server reasoning for a CUT-OFF auxiliary. "Demonstrated
-		// ready" means this server answered for this file; an auxiliary our grace
-		// timer cut off demonstrably did not.
+		// #1470/#1493: same per-server reasoning for an auxiliary that contributed
+		// no evidence. "Demonstrated ready" means this server answered for this
+		// file; an auxiliary our grace timer cut off, or one that stayed silent
+		// through its own budget, demonstrably did not.
 		//
 		// NO TEST PINS THIS LINE, and that is a property of today's readers rather
 		// than a coverage gap: `ensureWarmForSweep` filters `role === "auxiliary"`
@@ -3282,11 +3318,11 @@ export class LSPService {
 		// reader stops filtering auxiliaries out, marking a cut-off scanner warm
 		// would let it skip a warm-up it never earned.
 		const notifyTimedOutServerIds = new Set(notifyWriteTimedOutServerIds);
-		const cutOffServerIds = new Set(unconfirmedServerIds);
+		const uncoveredServerIds = new Set(unconfirmedServerIds);
 		if (diagnosticsMode !== "none" && !diagnosticsTimedOut) {
 			for (const entry of spawned) {
 				if (notifyTimedOutServerIds.has(entry.info.id)) continue;
-				if (cutOffServerIds.has(entry.info.id)) continue;
+				if (uncoveredServerIds.has(entry.info.id)) continue;
 				const key = await this.demonstratedReadyKeyFor(entry.info, filePath);
 				if (key) this.markDemonstratedReadyKey(key);
 			}
@@ -3301,8 +3337,8 @@ export class LSPService {
 		// empty `collected` must never erase a previously-confirmed non-empty
 		// record (that's the #570 bug — a timeout silently reporting as clean
 		// and wiping out known-good diagnostic state).
-		// #1470: a PARTIAL touch is the same hazard wearing a different flag. Its
-		// merged array is missing whatever the cut-off auxiliary would have said, so
+		// #1470/#1493: a PARTIAL touch is the same hazard wearing a different flag.
+		// Its merged array is missing whatever the unreporting auxiliary would have said, so
 		// priming the cache with it would let `actionable-warnings`' hash-guarded
 		// read replay a partially-covered result as an authoritative observation —
 		// and an empty one would DELETE a previously-confirmed record on the strength
@@ -3333,10 +3369,12 @@ export class LSPService {
 		if (collected !== undefined && inconclusive) {
 			result.inconclusive = true;
 		} else if (collected !== undefined && coverageGap) {
-			// #1470: narrowed, not collapsed. The primary's findings ride along in
-			// `.diags` exactly as before; what changes is that the touch now states
-			// which servers it does not speak for, so no consumer can read this as a
-			// full clean bill of health.
+			// #1470/#1493: narrowed, not collapsed. Reached for EITHER no-answer
+			// shape — a cut-off auxiliary or a silent one with nothing published for
+			// this content. The primary's findings ride along in `.diags` exactly as
+			// before; what changes is that the touch now states which servers it does
+			// not speak for, so no consumer can read this as a full clean bill of
+			// health.
 			result.confirmation = "partial";
 			result.unconfirmedServerIds = [...unconfirmedServerIds];
 		} else if (collected !== undefined) {
@@ -3423,6 +3461,15 @@ export class LSPService {
 				// Absent when no aux was cut off. These servers' diagnostics are
 				// advisory-only and will surface on the next edit from their cache.
 				...(auxCutOffServerIds !== undefined && { auxCutOffServerIds }),
+				// #1493: the full set the confirmation was narrowed on — the cut-off
+				// ids plus every auxiliary that stayed silent with nothing published
+				// for this content. Absent when the touch speaks for every server.
+				// This is the join key for the issue's observability contract: a
+				// `silent` row in `lsp_aux_wait_outcome` must appear here, on a touch
+				// whose `confirmation` is `"partial"`.
+				...(auxUnconfirmedServerIds !== undefined && {
+					auxUnconfirmedServerIds,
+				}),
 			},
 		});
 		return result;
@@ -3726,8 +3773,15 @@ export class LSPService {
 		return merged;
 	}
 
+	/**
+	 * Delegates to {@link hashDiagnosticContent} rather than re-hashing here. Every
+	 * comparison this hash takes part in (`publishedThisContent`, the carried-aux
+	 * check, the last-known content guard) is against a hash the client produced
+	 * with that function, so the two implementations must agree byte for byte —
+	 * a duplicate is a silent divergence waiting for one of them to be tuned.
+	 */
 	private hashContent(content: string): string {
-		return createHash("sha256").update(content).digest("hex");
+		return hashDiagnosticContent(content);
 	}
 
 	/**
@@ -4976,15 +5030,18 @@ export class LSPService {
 				// `perFileMs` deadline, which only catches a touch that never returned at
 				// all within budget. Either one means the result wasn't confirmed.
 				const inconclusive = touchResult?.inconclusive === true;
-				// #1470: a cut-off auxiliary is the THIRD reason this result is not a
-				// confirmed observation, and it is deliberately not `inconclusive`. The
+				// #1470/#1493: an auxiliary that never reported — cut off by the grace
+				// timer, or silent with nothing published for this content — is the
+				// THIRD reason this result is not a confirmed observation, and it is
+				// deliberately not `inconclusive`. The
 				// record loop below persists every `!timedOut` result into the workspace
 				// cache, so reading `inconclusive` alone caches a partially covered
 				// answer as clean and replays it on every later sweep. Today the only
 				// route that can reach this branch with a gap is the warm-attach
 				// incumbent, whose touch runs `clientScope: "with-auxiliary"`; the
-				// sweep's own local touch uses `clientScope: "all"`, which never arms
-				// the aux grace timer at all. Both are gated here so a future scope
+				// sweep's own local touch uses `clientScope: "all"`, which never enters
+				// the auxiliary wait at all — so neither no-answer shape can arise
+				// there. Both are gated here so a future scope
 				// change cannot reopen the hole silently.
 				const coverageGap = touchCoverageGap(touchResult).length > 0;
 				const timedOut =
