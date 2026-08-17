@@ -332,7 +332,21 @@ Trivy requires an **explicit** opt-in (rather than just a manifest being present
 }
 ```
 
-**IaC misconfiguration (per-edit, not a session scan).** When `trivy.enabled` is set, pi-lens also runs `trivy config` as an on-write dispatch runner (alongside hadolint/tflint) over **Dockerfiles** and **Kubernetes manifests** (YAML with an `apiVersion:` + `kind:` signature) — Trivy's security-policy engine (runs-as-root, no `HEALTHCHECK`, `privileged: true`, missing resource limits, …), a different class from hadolint's lint. On Dockerfiles, trivy-config findings that hadolint already reports at the same line are suppressed, so it only adds the security checks hadolint lacks. Terraform/Helm/Compose/CloudFormation are tracked as follow-ups.
+**IaC misconfiguration (per-edit, not a session scan).** When `trivy.enabled` is set, pi-lens also runs `trivy config` as an on-write dispatch runner (alongside hadolint/tflint) over **Dockerfiles** and **Kubernetes manifests** (YAML with an `apiVersion:` + `kind:` signature) — Trivy's security-policy engine (runs-as-root, no `HEALTHCHECK`, `privileged: true`, missing resource limits, …), a different class from hadolint's lint. On Dockerfiles, trivy-config findings that hadolint already reports at the same line are suppressed, so it only adds the security checks hadolint lacks. Compose/CloudFormation are tracked as follow-ups; Terraform is covered by the same runner, and Helm charts are covered by rendered-manifest validation below.
+
+**Rendered-manifest validation for Helm charts (opt-in).** `helm lint` checks a chart's source; it cannot see what the chart produces. When a project sets
+
+```json
+{ "helm": { "renderValidation": { "enabled": true } } }
+```
+
+pi-lens also renders the nearest chart with `helm template` into a scratch directory under the system temp dir and validates the output:
+
+- a **failed render** (a missing values key, a nil pointer in a template expression, a dependency declared in `Chart.yaml` but absent from `charts/`) is reported as a blocking finding on the template that failed — charts that pass `helm lint` and still cannot be installed;
+- every rendered document must declare `apiVersion` and `kind`, so a conditional that renders a headless fragment is flagged instead of installing as a silent no-op;
+- when `trivy.enabled` is also set, `trivy config` runs over the rendered manifests, which is the only way Trivy's Kubernetes policy checks can see a chart's real output.
+
+It is **off by default** because rendering executes chart-authored template code. Nothing is written to the chart directory, `--dependency-update` is never passed, and the scratch directory is removed on every exit path. Findings map back to the source template through helm's own `# Source:` annotations; rendered line numbers travel in the message, since they do not correspond to template lines. Full OpenAPI schema validation (kubeconform) is not included.
 
 ### MCP Server (Experimental)
 

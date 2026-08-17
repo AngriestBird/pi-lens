@@ -141,7 +141,7 @@ export const LANGUAGE_CAPABILITY_MATRIX: Record<
 	},
 	"helm-template": {
 		name: "Helm Template Linting",
-		capabilities: ["lint"],
+		capabilities: ["lint", "security"],
 		writeGroups: [primary("helm-template")],
 	},
 	sql: {

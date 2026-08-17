@@ -107,6 +107,7 @@ field docs.
 | `maxProjectFiles` | project | `2000` | Base scale knob; derives five subsystem size budgets |
 | `reviewGraph.maxFiles` | project | derived (clamped `100`–`20000`) | Explicit review-graph file budget |
 | `trivy.enabled` / `trivy.minSeverity` | project | off | Opt-in Trivy vulnerability scanning |
+| `helm.renderValidation.enabled` | project | off | Opt-in `helm template` rendering plus rendered-manifest validation (rendering executes chart templates) |
 
 ## Global vs project config
 
@@ -142,7 +143,7 @@ A project file honors **only**:
 
 - the three mutation controls — `format.enabled`, `autofix.enabled`,
   `actionableWarnings.autoFix.enabled`;
-- `ignore`, `rules`, `maxProjectFiles`, `reviewGraph`, and `trivy`.
+- `ignore`, `rules`, `maxProjectFiles`, `reviewGraph`, `trivy`, and `helm`.
 
 Most toggles are **global-only**. Putting a global-only key such as
 `"lsp": { "enabled": false }` in a `.pi-lens.json` is **not** honored at project
