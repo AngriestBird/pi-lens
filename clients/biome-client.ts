@@ -25,6 +25,7 @@ import {
 	type AvailabilityOutcome,
 	type ProbeEvidence,
 	classifyProbeFailure,
+	describeInstallAttempt,
 	createAvailabilityLatch,
 	logAvailabilityDecision,
 	startHostStallSampler,
@@ -276,6 +277,19 @@ export class BiomeClient {
 			resolved.outcome,
 			cause,
 		);
+		// `missing` IS the install-failure arm (#1500 review). `resolveManagedToolClient`
+		// only reaches the installer when the probe said `missing`, so every `missing`
+		// verdict here has already been through it — declined, suppressed, or tried
+		// and failed, which is what `describeInstallAttempt` separates. The earlier
+		// marker sat on the `non-installable` arm instead, and that arm cannot happen
+		// for biome at all: its `acceptInstalled` always accepts. So the one row that
+		// needed the fact was the one shipping without it.
+		let installEvidence: ProbeEvidence | undefined;
+		if (resolved.outcome === "missing") {
+			const { getInstallFailureReason } = await import("./installer/index.js");
+			installEvidence = describeInstallAttempt(getInstallFailureReason("biome"));
+		}
+		const evidence = { ...this.lastProbeEvidence, ...installEvidence };
 		logAvailabilityDecision({
 			tool: "biome",
 			verdict: "unavailable",
@@ -286,15 +300,14 @@ export class BiomeClient {
 			hostStallMs: this.lastProbeHostStallMs,
 			...(retryAfterMs > 0 && { retryAfterMs }),
 			budgetMs: PROBE_TIMEOUT_MS,
-			classifiedBy: "probe",
-			// `non-installable` here means the install ran and its binary failed
-			// validation, which the raw probe facts alone would not show (#1500).
-			evidence: {
-				...this.lastProbeEvidence,
-				...(resolved.outcome === "non-installable" && {
-					install: "failed" as const,
-				}),
-			},
+			// Per arm: a probe-derived verdict says `probe`, while a verdict asserted
+			// by the install seam — or a cause that fell back because no probe ran —
+			// says `caller`.
+			classifiedBy:
+				this.lastProbeCause === null || resolved.outcome === "non-installable"
+					? "caller"
+					: "probe",
+			...(Object.keys(evidence).length > 0 && { evidence }),
 		});
 		if (resolved.outcome === "transient") {
 			this.log("biome availability probe timed out; will retry (not installing)");

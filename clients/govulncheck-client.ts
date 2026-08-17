@@ -187,7 +187,13 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 			this.log("go binary not on PATH — cannot auto-install govulncheck");
 			// Derived from the `go version` probe above, and recorded with it: a
 			// reader can see WHY govulncheck went quiet without re-running it (#1500).
-			this.noteDurableAbsence(describeProbeEvidence(goOnPath));
+			// The evidence names `go`, because that is what was spawned — a row that
+			// carried go's errno unlabelled under `tool: "govulncheck"` invited the
+			// exact misreading the field exists to prevent.
+			this.noteDurableAbsence({
+				...describeProbeEvidence(goOnPath, "go"),
+				install: "not-attempted",
+			});
 			return false;
 		}
 
@@ -239,10 +245,13 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 			// A non-transient install failure (module not found, compile error) IS
 			// evidence about this machine, so it latches — but the row says the
 			// install was tried and failed, which a plain absence never does (#1500).
-			this.noteDurableAbsence({
-				...describeProbeEvidence(install),
-				install: "failed",
-			});
+			this.noteDurableAbsence(
+				{
+					...describeProbeEvidence(install, "go install"),
+					install: "failed",
+				},
+				{ elapsedMs: Date.now() - installStartedAt },
+			);
 			return false;
 		}
 
@@ -317,10 +326,22 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 			});
 			return false;
 		}
+		// The third silent arm (#1500 review): the install SUCCEEDED and the binary
+		// is nowhere the re-probe or the canonical bin dirs could find it. That is a
+		// durable, actionable fact — and until now it latched with no record at all,
+		// so a $GOBIN misconfiguration was indistinguishable from govulncheck simply
+		// not being installed. `install: "succeeded"` appears here and nowhere else.
 		this.log(
 			"govulncheck auto-install succeeded but binary not locatable — check $GOBIN / $GOPATH",
 		);
-		this.available = false;
+		this.noteDurableAbsence(
+			{
+				...describeProbeEvidence(reprobe, "govulncheck"),
+				install: "succeeded",
+				installReason: "installed binary not found on PATH, $GOBIN or $GOPATH/bin",
+			},
+			{ elapsedMs: Date.now() - reprobeStartedAt },
+		);
 		return false;
 	}
 

@@ -60,6 +60,13 @@ export type AvailabilityCause =
  * trust it.
  */
 export interface ProbeEvidence {
+	/**
+	 * The command this evidence DESCRIBES, when it is not the tool the row is
+	 * about. govulncheck's install path probes `go`, and a row that carries go's
+	 * errno under `tool: "govulncheck"` invites the exact misreading this field
+	 * exists to prevent (#1500 review).
+	 */
+	command?: string;
 	/** Exit status the probe returned; `null` when it never exited. */
 	status?: number | null;
 	/** `safeSpawnAsync`'s structured failure reason. */
@@ -68,14 +75,32 @@ export interface ProbeEvidence {
 	spawnFailureKind?: string;
 	/** errno from the spawn's Error, when there was one. */
 	errno?: string;
-	/** A repair was attempted after the probe, and how it went. */
-	install?: "succeeded" | "failed";
+	/**
+	 * A repair was attempted after the probe, and how it went.
+	 *
+	 * `not-attempted` is its own value on purpose: an installer that declines
+	 * (auto-install off, trust denied, attempt already suppressed) returns the
+	 * same empty result as one that tried and failed, and writing `failed` for
+	 * both fabricates an attempt that never happened.
+	 */
+	install?: "succeeded" | "failed" | "not-attempted";
+	/** Bounded reason the installer gave for a failed attempt. */
+	installReason?: string;
 }
 
-/** Read the evidence off a spawn result, dropping keys it does not carry. */
-export function describeProbeEvidence(result: ProbeFailureShape): ProbeEvidence {
+/**
+ * Read the evidence off a spawn result, dropping keys it does not carry.
+ *
+ * `command` is worth passing whenever the spawn is NOT the tool the decision is
+ * about — a preflight, a fallback candidate, an interpreter.
+ */
+export function describeProbeEvidence(
+	result: ProbeFailureShape,
+	command?: string,
+): ProbeEvidence {
 	const errno = (result.error as NodeJS.ErrnoException | undefined)?.code;
 	return {
+		...(command !== undefined && { command }),
 		...(result.status !== undefined && { status: result.status }),
 		...(result.failure !== undefined && { failure: result.failure }),
 		...(result.spawnFailure?.kind !== undefined && {
@@ -83,6 +108,32 @@ export function describeProbeEvidence(result: ProbeFailureShape): ProbeEvidence 
 		}),
 		...(errno !== undefined && { errno }),
 	};
+}
+
+/**
+ * Evidence for an install attempt, from what the installer actually reported.
+ *
+ * The installer answers the same empty result whether it TRIED and failed or
+ * declined to try (auto-install off, project trust denied, attempt already
+ * suppressed), so the attempt is read from the failure reason it records —
+ * writing `failed` for both fabricates an attempt that never happened (#1500
+ * review). The reason is passed in rather than fetched here, so the policy stays
+ * free of the installer graph.
+ */
+export function describeInstallAttempt(
+	failureReason: string | undefined,
+	options: { installedButRejected?: boolean } = {},
+): ProbeEvidence {
+	if (options.installedButRejected) {
+		return {
+			install: "failed",
+			installReason: failureReason?.slice(0, 200) ?? "installed binary failed validation",
+		};
+	}
+	if (failureReason) {
+		return { install: "failed", installReason: failureReason.slice(0, 200) };
+	}
+	return { install: "not-attempted" };
 }
 
 export interface AvailabilityDecision {
@@ -161,6 +212,8 @@ export interface ProbeFailureShape {
 export interface ClassifyOptions {
 	/** Host stall observed during the probe window, ms. */
 	hostStallMs?: number;
+	/** The command that was spawned, recorded on the returned evidence. */
+	command?: string;
 	/** Compatibility for legacy probes whose test doubles carry no failure kind. */
 	unclassifiedFailureOutcome?: AvailabilityOutcome;
 }
@@ -184,7 +237,7 @@ export function classifyProbeFailure(
 	/** The facts this verdict was derived from, for the decision record (#1500). */
 	evidence: ProbeEvidence;
 } {
-	const evidence = describeProbeEvidence(result);
+	const evidence = describeProbeEvidence(result, options.command);
 	const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
 	if (result.spawnFailure?.kind === "tool-not-found") {
 		return { outcome: "missing", cause: "not-found", evidence };

@@ -20,11 +20,13 @@ import {
 	describeProbeEvidence,
 } from "../../clients/dispatch/runners/utils/availability-policy.ts";
 
-const { safeSpawnAsync, logLatencySpy, ensureTool } = vi.hoisted(() => ({
-	safeSpawnAsync: vi.fn(),
-	logLatencySpy: vi.fn(),
-	ensureTool: vi.fn(),
-}));
+const { safeSpawnAsync, logLatencySpy, ensureTool, getInstallFailureReason } =
+	vi.hoisted(() => ({
+		safeSpawnAsync: vi.fn(),
+		logLatencySpy: vi.fn(),
+		ensureTool: vi.fn(),
+		getInstallFailureReason: vi.fn(),
+	}));
 
 vi.mock("../../clients/safe-spawn.js", () => ({
 	safeSpawnAsync,
@@ -36,9 +38,14 @@ vi.mock("../../clients/latency-logger.js", () => ({
 }));
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
+	getInstallFailureReason,
 	isSpawnableCommand: async () => true,
 	resetPathWalkMemo: () => {},
 	getToolEnvironment: async () => ({ ...process.env }),
+}));
+vi.mock("../../clients/project-trust.js", () => ({
+	assertInstallAllowed: () => true,
+	projectTrustDenialReason: () => "",
 }));
 vi.mock("../../clients/sessionstart-logger.js", () => ({
 	logSessionStart: vi.fn(),
@@ -87,6 +94,7 @@ beforeEach(() => {
 	safeSpawnAsync.mockReset();
 	logLatencySpy.mockReset();
 	ensureTool.mockReset();
+	getInstallFailureReason.mockReset();
 	resetDispatchAvailabilityState();
 });
 
@@ -150,6 +158,7 @@ describe("a failed install is a recorded assertion, not a silent latch (#1500)",
 	it("records the install failure beside the missing verdict", async () => {
 		safeSpawnAsync.mockResolvedValue(notFoundResult);
 		ensureTool.mockResolvedValue(null);
+		getInstallFailureReason.mockReturnValue("download timed out");
 		const client = new FakeScanClient();
 
 		expect(await client.ensureAvailable()).toBe(false);
@@ -173,6 +182,36 @@ describe("a failed install is a recorded assertion, not a silent latch (#1500)",
 		});
 	});
 
+	it("does not claim an install failed when none was attempted", async () => {
+		// `ensureTool` answers the same empty result whether it tried and failed or
+		// declined to try. Writing `install: "failed"` for both fabricates an
+		// attempt — the review found exactly that on the trust-denied path.
+		safeSpawnAsync.mockResolvedValue(notFoundResult);
+		ensureTool.mockResolvedValue(null);
+		getInstallFailureReason.mockReturnValue(undefined);
+
+		expect(await new FakeScanClient().ensureAvailable()).toBe(false);
+		expect(decisions()[1]).toMatchObject({
+			classifiedBy: "caller",
+			evidence: { install: "not-attempted" },
+		});
+	});
+
+	it("records the installer's reason when an attempt did fail", async () => {
+		safeSpawnAsync.mockResolvedValue(notFoundResult);
+		ensureTool.mockResolvedValue(null);
+		getInstallFailureReason.mockReturnValue("release asset 404 for linux-arm64");
+
+		expect(await new FakeScanClient().ensureAvailable()).toBe(false);
+		expect(decisions()[1]).toMatchObject({
+			classifiedBy: "caller",
+			evidence: {
+				install: "failed",
+				installReason: "release asset 404 for linux-arm64",
+			},
+		});
+	});
+
 	it("still refuses to install — or latch — on a timed-out probe", async () => {
 		safeSpawnAsync.mockResolvedValue(timeoutResult);
 		const client = new FakeScanClient();
@@ -184,6 +223,106 @@ describe("a failed install is a recorded assertion, not a silent latch (#1500)",
 			outcome: "transient",
 			classifiedBy: "probe",
 			latched: false,
+		});
+	});
+});
+
+/**
+ * govulncheck writes its own durable-absence arms rather than going through
+ * `ensureViaInstaller`, and the review found all three untested: reverting them
+ * left 43 tests green. These cover each one, and each names the command its
+ * evidence describes — `go` is not govulncheck, and a row that says otherwise is
+ * the misreading the `command` field exists to prevent.
+ */
+describe("govulncheck's own durable-absence arms (#1500)", () => {
+	async function govulncheck(): Promise<{
+		ensureAvailable(): Promise<boolean>;
+	}> {
+		const { GovulncheckClient } = await import(
+			"../../clients/govulncheck-client.js"
+		);
+		return new GovulncheckClient();
+	}
+
+	const goMissing = Object.assign(new Error("spawn go ENOENT"), {
+		code: "ENOENT",
+	});
+
+	it("records the go preflight when go is not on PATH", async () => {
+		safeSpawnAsync.mockImplementation(async (cmd: string) =>
+			cmd === "go"
+				? {
+						stdout: "",
+						stderr: "",
+						status: null,
+						error: goMissing,
+						failure: "spawn",
+						spawnFailure: { kind: "tool-not-found" },
+					}
+				: notFoundResult,
+		);
+
+		expect(await (await govulncheck()).ensureAvailable()).toBe(false);
+		const last = decisions()[decisions().length - 1];
+		expect(last).toMatchObject({
+			tool: "govulncheck",
+			outcome: "missing",
+			classifiedBy: "caller",
+			evidence: {
+				command: "go",
+				errno: "ENOENT",
+				install: "not-attempted",
+			},
+		});
+	});
+
+	it("records a durable `go install` failure as an attempt that failed", async () => {
+		safeSpawnAsync.mockImplementation(
+			async (cmd: string, args: string[]) => {
+				if (cmd !== "go") return notFoundResult;
+				if (args[0] === "version") return { stdout: "go1.22", stderr: "", status: 0 };
+				// `go install` ran and refused: module not found, compile error.
+				return { stdout: "", stderr: "no required module provides", status: 1 };
+			},
+		);
+
+		expect(await (await govulncheck()).ensureAvailable()).toBe(false);
+		const last = decisions()[decisions().length - 1];
+		expect(last).toMatchObject({
+			tool: "govulncheck",
+			outcome: "missing",
+			latched: true,
+			classifiedBy: "caller",
+			evidence: { command: "go install", status: 1, install: "failed" },
+		});
+	});
+
+	it("records the install-succeeded-but-unlocatable arm instead of latching silently", async () => {
+		// The third silent arm: `go install` succeeded, the binary is not on PATH
+		// and not in $GOBIN/$GOPATH. Durable and actionable, and until now it went
+		// quiet with no record — indistinguishable from a plain absence.
+		safeSpawnAsync.mockImplementation(async (cmd: string, args: string[]) => {
+			if (cmd === "go" && args[0] === "version") {
+				return { stdout: "go1.22", stderr: "", status: 0 };
+			}
+			if (cmd === "go" && args[0] === "install") {
+				return { stdout: "", stderr: "", status: 0 };
+			}
+			// Both the first probe and the post-install re-probe miss.
+			return notFoundResult;
+		});
+
+		expect(await (await govulncheck()).ensureAvailable()).toBe(false);
+		const last = decisions()[decisions().length - 1];
+		expect(last).toMatchObject({
+			tool: "govulncheck",
+			outcome: "missing",
+			latched: true,
+			classifiedBy: "caller",
+			evidence: { command: "govulncheck", install: "succeeded" },
+		});
+		expect(last?.evidence).toMatchObject({
+			installReason: expect.stringContaining("GOBIN"),
 		});
 	});
 });

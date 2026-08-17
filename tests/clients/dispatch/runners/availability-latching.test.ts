@@ -183,27 +183,38 @@ describe("availability seam: transient failures do not latch (#1467)", () => {
 
 describe("availability policy: cause taxonomy and messages (#1467)", () => {
 	it("blames the host, not the tool, when a stall overlapped the probe window", () => {
-		// `toMatchObject`, not `toEqual`: since #1500 the classification also
-		// carries the `evidence` it was derived from. The evidence itself is
-		// asserted in `availability-classification-evidence.test.ts`.
-		expect(
-			classifyProbeFailure(timeoutResult(), { hostStallMs: 0 }),
-		).toMatchObject({
+		// EXACT shape, including the `evidence` #1500 added: a `toMatchObject` here
+		// would stop noticing a field that appears or disappears, which is the one
+		// thing a classification pin is for.
+		const timeoutEvidence = {
+			status: null,
+			failure: "timeout",
+			spawnFailureKind: "timeout",
+		};
+		expect(classifyProbeFailure(timeoutResult(), { hostStallMs: 0 })).toEqual({
 			outcome: "transient",
 			cause: "probe-timeout",
+			evidence: timeoutEvidence,
 		});
-		expect(
-			classifyProbeFailure(timeoutResult(), { hostStallMs: 4618 }),
-		).toMatchObject({
+		expect(classifyProbeFailure(timeoutResult(), { hostStallMs: 4618 })).toEqual({
 			outcome: "transient",
 			cause: "host-stall",
+			evidence: timeoutEvidence,
 		});
-		expect(
-			classifyProbeFailure(missingResult(), { hostStallMs: 4618 }),
-		).toMatchObject({
+		expect(classifyProbeFailure(missingResult(), { hostStallMs: 4618 })).toEqual({
 			outcome: "missing",
 			cause: "not-found",
+			evidence: {
+				status: null,
+				failure: "spawn",
+				spawnFailureKind: "tool-not-found",
+				errno: "ENOENT",
+			},
 		});
+		// `command` is carried only when the caller names the spawn.
+		expect(
+			classifyProbeFailure(missingResult(), { command: "go" }).evidence.command,
+		).toBe("go");
 	});
 
 	it("words a timed-out probe as a timeout, never as a missing install", () => {
