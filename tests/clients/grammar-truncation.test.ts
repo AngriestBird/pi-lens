@@ -34,7 +34,10 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resetDegradationLedger } from "../../clients/degradation-ledger.js";
+import {
+	getDegradationSummary,
+	resetDegradationLedger,
+} from "../../clients/degradation-ledger.js";
 import {
 	_setGrammarManifestForTests,
 	downloadGrammarDetailed,
@@ -202,6 +205,34 @@ describe("truncated-but-magic-valid grammar download (#1564)", () => {
 			const result = await downloadGrammarDetailed(env.tmpDir, grammarFile);
 
 			expect(result).toEqual({ ok: true, retryable: true });
+		});
+	});
+
+	// #1564 G3: a missing/unloadable manifest silently downgrades every
+	// download to the weaker Content-Length check (or no check at all) — the
+	// STRONGEST check being skipped repo-wide needs to be on the record, once
+	// per session, not invisible.
+	describe("missing-manifest observability", () => {
+		it("records a degradation once when the manifest can't be loaded", async () => {
+			_setGrammarManifestForTests(null);
+			vi.spyOn(globalThis, "fetch").mockResolvedValue(
+				new Response(TRUNCATED_WASM, { status: 200 }),
+			);
+
+			await downloadGrammarDetailed(env.tmpDir, "tree-sitter-one.wasm");
+			await downloadGrammarDetailed(env.tmpDir, "tree-sitter-two.wasm");
+
+			const group = getDegradationSummary().find(
+				(g) => g.kind === "grammar-blocked",
+			);
+			// One record for the missing manifest itself, not one per download —
+			// recordDegradationOnce dedupes on the fixed "grammars.lock.json"
+			// subject regardless of how many grammars are fetched.
+			const manifestEntries = group?.latestReasons.filter(
+				(r) => r.subject === "grammars.lock.json",
+			);
+			expect(manifestEntries).toHaveLength(1);
+			expect(manifestEntries?.[0]?.reason).toContain("manifest is unavailable");
 		});
 	});
 });

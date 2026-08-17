@@ -14,6 +14,7 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { writeFileAtomic } from "./atomic-write.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import { getPackageRoot } from "./package-root.js";
 
 /** tree-sitter-wasms release the grammars are pulled from. */
@@ -291,12 +292,11 @@ function grammarManifestPath(): string {
 }
 
 /**
- * Load + cache `scripts/grammars.lock.json`. Returns `null` (never throws) if
- * the file is missing or malformed — an installed package predating this fix,
- * or a corrupted lock file, degrades to the Content-Length check
- * (`downloadGrammarDetailed`) instead of blocking every runtime grammar fetch.
+ * The manifest, without the missing-manifest degradation report — split out
+ * so `loadGrammarManifest` can report on every `null` return (cached misses
+ * included), while this half stays a pure cache lookup.
  */
-function loadGrammarManifest(): GrammarManifest | null {
+function resolveGrammarManifest(): GrammarManifest | null {
 	if (manifestOverride !== undefined) return manifestOverride;
 	if (cachedManifest !== undefined) return cachedManifest;
 	try {
@@ -306,6 +306,32 @@ function loadGrammarManifest(): GrammarManifest | null {
 		cachedManifest = null;
 	}
 	return cachedManifest;
+}
+
+/**
+ * Load + cache `scripts/grammars.lock.json`. Returns `null` (never throws) if
+ * the file is missing or malformed — an installed package predating this fix,
+ * or a corrupted lock file, degrades to the Content-Length check
+ * (`downloadGrammarDetailed`) instead of blocking every runtime grammar
+ * fetch. That fallback is silent to the CALLER by design (it's not a fetch
+ * failure), so it would otherwise never reach the record a bug report shows —
+ * report once per session that the STRONGEST check (sha256) is being skipped
+ * repo-wide, so a downgrade to the weaker Content-Length-only path is on the
+ * record rather than invisible.
+ */
+function loadGrammarManifest(): GrammarManifest | null {
+	const manifest = resolveGrammarManifest();
+	if (manifest === null) {
+		recordDegradationOnce({
+			kind: "grammar-blocked",
+			subject: "grammars.lock.json",
+			reason:
+				"the pinned sha256 manifest is unavailable — runtime grammar downloads " +
+				"fall back to the weaker Content-Length check (or no integrity check at " +
+				"all for a source with neither).",
+		});
+	}
+	return manifest;
 }
 
 /** Test-only manifest injection — see `manifestOverride` above. */
@@ -318,6 +344,21 @@ export function _setGrammarManifestForTests(
 /** `sha256:<hex>` digest of `data`, matching the manifest's format. */
 function sha256Hex(data: Buffer): string {
 	return `sha256:${createHash("sha256").update(data).digest("hex")}`;
+}
+
+/**
+ * First 12 hex characters of a `sha256:<hex>` digest, for log/ledger/
+ * notification strings. Printing the full 64-hex digest on BOTH sides of a
+ * mismatch overran the degradation ledger's 200-character field cap (the
+ * truncation `describeNonWasmBody` above already designs around) and left
+ * the user notification — 579 characters, almost entirely hex — clipping the
+ * more diagnostic PINNED hash mid-string before a reader ever saw it. 12 hex
+ * characters (48 bits) is more than enough to tell "genuinely the wrong
+ * file" from a coincidence in a log line; it is not a security boundary.
+ */
+function shortHash(hash: string): string {
+	const hex = hash.startsWith("sha256:") ? hash.slice("sha256:".length) : hash;
+	return `sha256:${hex.slice(0, 12)}…`;
 }
 
 /**
@@ -411,8 +452,8 @@ export async function downloadGrammarDetailed(
 					ok: false,
 					retryable: true,
 					reason:
-						`The download's sha256 (${actualHash}) does not match the pinned ` +
-						`manifest (${expectedHash}) — a corrupt or truncated transfer.`,
+						`The download's sha256 (${shortHash(actualHash)}) does not match the ` +
+						`pinned manifest (${shortHash(expectedHash)}) — a corrupt or truncated transfer.`,
 				};
 			}
 		}

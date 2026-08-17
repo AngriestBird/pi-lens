@@ -917,6 +917,22 @@ export class TreeSitterClient {
 	 * machinery rather than hand-rolling a parallel one — a persistently
 	 * truncated CDN response would otherwise re-download and re-fail on every
 	 * single parse.
+	 *
+	 * A DURABLE decode failure (the bytes are complete and correct, but ABI-
+	 * incompatible with the installed `web-tree-sitter` — a version drift, not
+	 * a truncation) is classified `retryable` here too, same as everything
+	 * else this method sees: there is no way to tell "truncated" from "wrong
+	 * ABI" from the error message alone, so it re-downloads and re-fails once
+	 * per cooldown tier instead of latching forever. That is bounded by the
+	 * cooldown ladder (this never re-fetches faster than #1536's backoff) and
+	 * by `BLOCKED_GRAMMARS` for the narrower case that's fatal to the process
+	 * rather than just wrong (`grammar-source.ts`). The redownload only helps
+	 * if a fresh fetch could actually be a DIFFERENT (compatible) build,
+	 * which is exactly what the `grammar-source.test.ts` version/lock sync
+	 * guard (`lock.version === TREE_SITTER_WASMS_VERSION`) exists to keep
+	 * true — without it, a version bump with a stale lock would make every
+	 * redownload land the identical bytes and spin the ladder against a file
+	 * that can never pass.
 	 */
 	private recordGrammarLoadFailure(
 		grammarPath: string,
