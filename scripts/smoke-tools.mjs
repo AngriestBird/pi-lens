@@ -819,6 +819,13 @@ const FORMAT_FIXTURES = [
 		tools: [],
 	},
 	{
+		lang: "cue",
+		dir: "tests/fixtures/format-smoke/cue",
+		file: "messy.cue",
+		formatter: "cue",
+		tools: ["cue"],
+	},
+	{
 		// ktlint is a smart-default (auto-installs); elixir's `mix format` is
 		// toolchain-detected. No project config required.
 		lang: "kotlin",

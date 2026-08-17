@@ -663,6 +663,15 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			defaultWhenUnconfigured: false,
 			gate: "smart-default",
 		},
+  ],
+  [
+		".cue",
+		{
+			formatterNames: ["cue"],
+			defaultFormatter: "cue",
+			defaultWhenUnconfigured: true,
+			gate: "smart-default",
+		},
 	],
 ]);
 

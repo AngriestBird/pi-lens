@@ -1299,6 +1299,15 @@ export const cmakeFormatFormatter: FormatterInfo = {
 	},
 };
 
+export const cueFormatter: FormatterInfo = {
+	name: "cue",
+	command: ["cue", "fmt", "-w", "$FILE"],
+	extensions: [".cue"],
+	async detect(_cwd: string) {
+		return (await which("cue")) !== null;
+	},
+};
+
 /**
  * The PowerShell one-liner behind `psscriptanalyzer-format`.
  *
@@ -1409,6 +1418,7 @@ export const ALL_FORMATTERS: FormatterInfo[] = [
 	googleJavaFormatFormatter,
 	cljfmtFormatter,
 	cmakeFormatFormatter,
+	cueFormatter,
 	psscriptanalyzerFormatFormatter,
 ];
 
