@@ -47,6 +47,7 @@ const { resetWorkspaceTopology } = await import(
 const {
 	default: helmRenderRunner,
 	checkManifestShape,
+	extractTemplateRef,
 	isHelmRenderEnabled,
 	mapRenderedToSource,
 	parseHelmTemplateFailure,
@@ -683,6 +684,34 @@ describe("parseHelmTemplateFailure", () => {
 		);
 		expect(diagnostics).toHaveLength(1);
 		expect(diagnostics[0].message).toContain("unclosed action");
+	});
+});
+
+describe("extractTemplateRef", () => {
+	it("finds the first slashed template reference and its line", () => {
+		expect(
+			extractTemplateRef(
+				'Error: template: c/templates/deploy.yaml:12:20: executing "c/templates/deploy.yaml" at <.Values.a.b>: nil pointer',
+			),
+		).toEqual({ ref: "c/templates/deploy.yaml", line: 12 });
+		expect(
+			extractTemplateRef("Error: parse error at (c/templates/x.tpl:5): boom"),
+		).toEqual({ ref: "c/templates/x.tpl", line: 5 });
+		// No line number, and a bare filename with no directory is not a reference.
+		expect(extractTemplateRef("Error: c/templates/x.yaml is bad")).toEqual({
+			ref: "c/templates/x.yaml",
+			line: undefined,
+		});
+		expect(
+			extractTemplateRef("Error: values.yaml is missing a key"),
+		).toBeNull();
+	});
+
+	it("stays linear on a long line with no reference", () => {
+		// The regex this replaced backtracked super-linearly on exactly this shape.
+		const started = Date.now();
+		expect(extractTemplateRef(`Error: ${"a:b,".repeat(4000)}`)).toBeNull();
+		expect(Date.now() - started).toBeLessThan(1000);
 	});
 });
 

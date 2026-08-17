@@ -158,6 +158,38 @@ function chartYaml(chartRoot: string): string {
 	return path.join(chartRoot, "Chart.yaml");
 }
 
+const HELM_INSTALL_HINT = "https://helm.sh/docs/intro/install/";
+const TRIVY_INSTALL_HINT =
+	"https://trivy.dev/latest/getting-started/installation/";
+
+/** Helm's own provenance comment, written into every rendered document. */
+const SOURCE_ANNOTATION = /^#\s*Source:\s*(\S+)\s*$/m;
+
+/** Template extensions a helm source reference can name. */
+const TEMPLATE_EXTENSION = /\.(?:ya?ml|tpl)$/i;
+
+/**
+ * Pull the first `<chart>/templates/x.yaml[:line]` reference out of one line of
+ * helm output. Tokenized rather than pattern-matched on purpose: the obvious
+ * regex for "a slashed path with an optional `:line`" nests two unbounded
+ * negated character classes and backtracks super-linearly on a long error line.
+ */
+export function extractTemplateRef(
+	line: string,
+): { ref: string; line?: number } | null {
+	for (const token of line.split(/[\s(),<>"']+/)) {
+		const parts = token.split(":");
+		const ref = parts[0];
+		if (!ref.includes("/")) continue;
+		if (!TEMPLATE_EXTENSION.test(ref)) continue;
+		const lineNumber = /^\d+$/.test(parts[1] ?? "")
+			? Number(parts[1])
+			: undefined;
+		return { ref, line: lineNumber };
+	}
+	return null;
+}
+
 /**
  * Where a rendered-manifest finding belongs. Prefer the `# Source:` annotation
  * helm writes into the manifest; fall back to the `--output-dir` layout, which
@@ -170,9 +202,7 @@ export function mapRenderedToSource(options: {
 	outputDir: string;
 	chartRoot: string;
 }): { filePath: string; mapped: boolean } {
-	const annotation = options.renderedContent.match(
-		/^#\s*Source:\s*(\S+)\s*$/m,
-	);
+	const annotation = SOURCE_ANNOTATION.exec(options.renderedContent);
 	if (annotation) {
 		const resolved = resolveTemplateSource(annotation[1], options.chartRoot);
 		if (resolved) return { filePath: resolved, mapped: true };
@@ -206,19 +236,18 @@ export function parseHelmTemplateFailure(
 	for (const line of text.split(/\r?\n/)) {
 		const trimmed = line.trim();
 		if (!trimmed.startsWith("Error:")) continue;
-		const location = trimmed.match(
-			/([^\s(),:]+\/[^\s(),:]+\.(?:ya?ml|tpl))(?::(\d+))?/,
-		);
+		const location = extractTemplateRef(trimmed);
 		const resolved = location
-			? resolveTemplateSource(location[1], chartRoot)
+			? resolveTemplateSource(location.ref, chartRoot)
 			: null;
+		const chartName = path.basename(chartRoot);
 		diagnostics.push({
 			id: `helm-render-error-${diagnostics.length + 1}`,
 			message: resolved
 				? trimmed
-				: `${trimmed} (helm template failed for chart ${path.basename(chartRoot)})`,
+				: `${trimmed} (helm template failed for chart ${chartName})`,
 			filePath: resolved ?? chartYaml(chartRoot),
-			line: resolved && location?.[2] ? Number(location[2]) : 1,
+			line: resolved ? (location?.line ?? 1) : 1,
 			column: 1,
 			severity: "error",
 			semantic: "blocking",
@@ -374,10 +403,7 @@ function unavailableResult(tool: string, cwd: string): RunnerResult {
 		failureKind: "unavailable",
 		failureMessage: describeUnavailability({
 			tool,
-			installHint:
-				tool === "helm"
-					? "https://helm.sh/docs/intro/install/"
-					: "https://trivy.dev/latest/getting-started/installation/",
+			installHint: tool === "helm" ? HELM_INSTALL_HINT : TRIVY_INSTALL_HINT,
 			outcome: verdict.outcome,
 			cause: verdict.cause,
 			elapsedMs: verdict.elapsedMs,
@@ -432,20 +458,158 @@ function collectRenderedFiles(root: string): string[] {
 			}
 		}
 	}
-	return files.sort();
+	return files.sort((left, right) => left.localeCompare(right));
 }
 
 function summarize(diagnostics: Diagnostic[]): RunnerResult {
-	const hasBlocking = diagnostics.some((item) => item.severity === "error");
+	let semantic: RunnerResult["semantic"] = "none";
+	if (diagnostics.some((item) => item.severity === "error")) {
+		semantic = "blocking";
+	} else if (diagnostics.length > 0) {
+		semantic = "warning";
+	}
+	return { status: "succeeded", diagnostics, semantic };
+}
+
+/** One rendered manifest, paired with the template it came from. */
+interface RenderedManifest {
+	renderedPath: string;
+	relativePath: string;
+	content: string;
+	sourcePath: string;
+	sourceMapped: boolean;
+}
+
+/** Read the rendered tree back and resolve each file to its source template. */
+function readRenderedTree(
+	outputDir: string,
+	chartRoot: string,
+): RenderedManifest[] {
+	const manifests: RenderedManifest[] = [];
+	for (const renderedPath of collectRenderedFiles(outputDir)) {
+		let content: string;
+		try {
+			content = fs.readFileSync(renderedPath, "utf-8");
+		} catch {
+			continue;
+		}
+		const mapping = mapRenderedToSource({
+			renderedContent: content,
+			renderedPath,
+			outputDir,
+			chartRoot,
+		});
+		manifests.push({
+			renderedPath,
+			relativePath: path.relative(outputDir, renderedPath),
+			content,
+			sourcePath: mapping.filePath,
+			sourceMapped: mapping.mapped,
+		});
+	}
+	return manifests;
+}
+
+/**
+ * One `info` diagnostic saying a requested pass did not happen. Zero findings
+ * from a pass that never ran must not read as a clean pass (defect shape 10).
+ */
+function iacPassGap(
+	chartRoot: string,
+	rule: "iac-pass-unavailable" | "iac-pass-failed",
+	detail: string,
+): Diagnostic {
 	return {
-		status: "succeeded",
-		diagnostics,
-		semantic: hasBlocking
-			? "blocking"
-			: diagnostics.length > 0
-				? "warning"
-				: "none",
+		id: `helm-render-${rule}`,
+		message: `Rendered-manifest IaC checks did not run: ${detail}`,
+		filePath: chartYaml(chartRoot),
+		line: 1,
+		column: 1,
+		severity: "info",
+		semantic: "warning",
+		tool: "helm-render",
+		rule,
+		fixable: false,
 	};
+}
+
+/**
+ * The Trivy half of the pass. Returns the findings it produced, or a single gap
+ * diagnostic when it could not run — never an empty "clean" answer.
+ */
+async function runIacPass(options: {
+	chartRoot: string;
+	cwd: string;
+	outputDir: string;
+	manifests: RenderedManifest[];
+}): Promise<Diagnostic[]> {
+	const { chartRoot, cwd, outputDir } = options;
+	const trivyCmd = await resolveAvailableOrInstall(trivy, "trivy", cwd);
+	if (!trivyCmd) {
+		const verdict = trivy.getVerdict(cwd);
+		return [
+			iacPassGap(
+				chartRoot,
+				"iac-pass-unavailable",
+				describeUnavailability({
+					tool: "trivy",
+					installHint: TRIVY_INSTALL_HINT,
+					outcome: verdict.outcome,
+					cause: verdict.cause,
+					elapsedMs: verdict.elapsedMs,
+				}),
+			),
+		];
+	}
+
+	const scan = await safeSpawnAsync(
+		trivyCmd,
+		[
+			"config",
+			"--quiet",
+			"--no-progress",
+			"--format",
+			"json",
+			"--severity",
+			resolveSeverityFloor(cwd).join(","),
+			outputDir,
+		],
+		{
+			cwd,
+			timeout: TRIVY_TIMEOUT_MS,
+			deadlineAt: Date.now() + TRIVY_TIMEOUT_MS,
+			resourceLabel: "helm-render-trivy",
+		},
+	);
+	const scanFailure = spawnFailureKind(scan);
+	if (scanFailure || (scan.status !== 0 && !scan.stdout?.trim())) {
+		const why = scanFailure ?? `exit ${scan.status}`;
+		const detail = (scan.stderr || scan.error?.message || "no output").slice(
+			0,
+			200,
+		);
+		return [iacPassGap(chartRoot, "iac-pass-failed", `${why} - ${detail}`)];
+	}
+
+	const sourceByRendered = new PathKeyedMap<{
+		filePath: string;
+		detail: string;
+	}>(normalizeMapKey);
+	for (const manifest of options.manifests) {
+		sourceByRendered.set(manifest.renderedPath, {
+			filePath: manifest.sourcePath,
+			detail: manifest.relativePath,
+		});
+	}
+	return parseRenderedTrivyOutput(scan.stdout || "", (target) => {
+		const hit = sourceByRendered.get(path.resolve(outputDir, target));
+		return (
+			hit ?? {
+				filePath: chartYaml(chartRoot),
+				detail: target || "rendered manifest",
+			}
+		);
+	});
 }
 
 async function renderAndValidate(
@@ -480,128 +644,34 @@ async function renderAndValidate(
 				render.error?.message || `helm template ${startupFailure}`,
 			);
 		}
-		const renderOutput = [render.stdout, render.stderr]
-			.filter(Boolean)
-			.join("\n");
 		if (render.status !== 0) {
 			// A failed RENDER is a real diagnostic: the chart cannot be installed.
+			const renderOutput = [render.stdout, render.stderr]
+				.filter(Boolean)
+				.join("\n");
 			return summarize(parseHelmTemplateFailure(renderOutput, chartRoot));
 		}
 
-		const renderedFiles = collectRenderedFiles(outputDir);
+		const manifests = readRenderedTree(outputDir, chartRoot);
 		const diagnostics: Diagnostic[] = [];
-		const sourceByRendered = new Map<
-			string,
-			{ filePath: string; detail: string }
-		>();
-		for (const renderedPath of renderedFiles) {
-			let content = "";
-			try {
-				content = fs.readFileSync(renderedPath, "utf-8");
-			} catch {
-				continue;
-			}
-			const relative = path.relative(outputDir, renderedPath);
-			const mapping = mapRenderedToSource({
-				renderedContent: content,
-				renderedPath,
-				outputDir,
-				chartRoot,
-			});
-			sourceByRendered.set(normalizeMapKey(renderedPath), {
-				filePath: mapping.filePath,
-				detail: relative,
-			});
+		for (const manifest of manifests) {
 			diagnostics.push(
 				...checkManifestShape({
-					renderedContent: content,
-					renderedRelativePath: relative,
-					sourcePath: mapping.filePath,
-					sourceMapped: mapping.mapped,
+					renderedContent: manifest.content,
+					renderedRelativePath: manifest.relativePath,
+					sourcePath: manifest.sourcePath,
+					sourceMapped: manifest.sourceMapped,
 				}),
 			);
 		}
 
 		// The IaC pass keeps trivy's own consent switch — that switch authorizes
 		// installing the binary and pulling its policy bundle.
-		if (!isTrivyEnabled(cwd)) return summarize(diagnostics);
-
-		const trivyCmd = await resolveAvailableOrInstall(trivy, "trivy", cwd);
-		if (!trivyCmd) {
-			const verdict = trivy.getVerdict(cwd);
-			diagnostics.push({
-				id: "helm-render-trivy-unavailable",
-				message: `Rendered-manifest IaC checks did not run: ${describeUnavailability(
-					{
-						tool: "trivy",
-						installHint:
-							"https://trivy.dev/latest/getting-started/installation/",
-						outcome: verdict.outcome,
-						cause: verdict.cause,
-						elapsedMs: verdict.elapsedMs,
-					},
-				)}`,
-				filePath: chartYaml(chartRoot),
-				line: 1,
-				column: 1,
-				severity: "info",
-				semantic: "warning",
-				tool: "helm-render",
-				rule: "iac-pass-unavailable",
-				fixable: false,
-			});
-			return summarize(diagnostics);
+		if (isTrivyEnabled(cwd)) {
+			diagnostics.push(
+				...(await runIacPass({ chartRoot, cwd, outputDir, manifests })),
+			);
 		}
-
-		const scan = await safeSpawnAsync(
-			trivyCmd,
-			[
-				"config",
-				"--quiet",
-				"--no-progress",
-				"--format",
-				"json",
-				"--severity",
-				resolveSeverityFloor(cwd).join(","),
-				outputDir,
-			],
-			{
-				cwd,
-				timeout: TRIVY_TIMEOUT_MS,
-				deadlineAt: Date.now() + TRIVY_TIMEOUT_MS,
-				resourceLabel: "helm-render-trivy",
-			},
-		);
-		const scanFailure = spawnFailureKind(scan);
-		if (scanFailure || (scan.status !== 0 && !scan.stdout?.trim())) {
-			// Half the pass is missing. Say so on the chart rather than returning
-			// the shape findings as if the security pass had run and found nothing.
-			diagnostics.push({
-				id: "helm-render-trivy-failed",
-				message: `Rendered-manifest IaC checks failed to complete (${scanFailure ?? `exit ${scan.status}`}): ${(scan.stderr || scan.error?.message || "no output").slice(0, 200)}`,
-				filePath: chartYaml(chartRoot),
-				line: 1,
-				column: 1,
-				severity: "info",
-				semantic: "warning",
-				tool: "helm-render",
-				rule: "iac-pass-failed",
-				fixable: false,
-			});
-			return summarize(diagnostics);
-		}
-
-		diagnostics.push(
-			...parseRenderedTrivyOutput(scan.stdout || "", (target) => {
-				const absolute = path.resolve(outputDir, target);
-				const hit = sourceByRendered.get(normalizeMapKey(absolute));
-				if (hit) return hit;
-				return {
-					filePath: chartYaml(chartRoot),
-					detail: target || "rendered manifest",
-				};
-			}),
-		);
 		return summarize(diagnostics);
 	} finally {
 		fs.rmSync(outputDir, { recursive: true, force: true });
