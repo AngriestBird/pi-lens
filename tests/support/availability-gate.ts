@@ -51,22 +51,32 @@
  * An unrecognised shape now defaults to NOT inheriting, which is the safe
  * default a blacklist can never offer — it must relearn every disguise.
  *
- * The whitelist has its own known blind spots, both narrower than the
- * blacklist's:
+ * The whitelist has its own known blind spots:
  *
  *   * a wrapper reached through TWO hops of module-local helpers (unit A calls
  *     helper B, which calls helper C, which calls the factory) is invisible —
  *     `policyHandles` is built from each unit's own direct `policyCalls`, not
  *     propagated transitively, so only a one-hop wrapper like `makeEslintProbe`
- *     is recognised;
+ *     is recognised. This narrows what a unit may inherit routing from, so it
+ *     is a false NEGATIVE (an actually-routed unit reads as unrouted) — the
+ *     safer failure direction, and the one the whitelist was built for;
  *   * a `POLICY_FACTORY` imported under a renamed binding
  *     (`import { createCwdCachedProbe as ccp }`) does not match the factory's
- *     canonical name and reads as a hand-rolled latch, not a handle.
- *
- * Both narrow the set of things a unit may WRONGLY inherit routing from, so
- * either failure mode is a false NEGATIVE (an actually-routed unit gets flagged
- * unrouted) rather than the false POSITIVE the blacklist was prone to — a
- * safer place for an unproven shape to land.
+ *     canonical name and reads as a hand-rolled latch, not a handle. Also a
+ *     false negative, and not new here — the boolean-shape blacklist this
+ *     replaced had the same gap, since neither version resolves import
+ *     aliases;
+ *   * the whitelist reads a memo's DECLARED shape (`typeText`/`valueText`)
+ *     only — never a write's own inlined expression, and never a session fact
+ *     (`setSessionFact` records a value, it does not call a factory). A round
+ *     of review (#1552 round 2) found both omissions matter: reading a
+ *     write's text let an inlined wrapper call
+ *     (`cache.set(cwd, await makeToolProbe(cwd))`) leak the wrapper's name
+ *     into a plain `Map<string, boolean>` latch's shape, and an unguarded
+ *     session-fact check returned non-null unconditionally, so either read as
+ *     a policy handle and inherited routing it never earned — the false
+ *     POSITIVE the whitelist exists to rule out. Both are fixed; the
+ *     `EVASIONS` fixtures below pin them.
  */
 
 import * as fs from "node:fs";
@@ -382,7 +392,12 @@ function findMemo(
 	// through a type alias never spells a factory name and is refused by
 	// default, which is what a blacklist on "looks like a boolean" could not
 	// guarantee (#1552 evaded it by never spelling the banned word).
-	if (facts.sessionFact) return "setSessionFact";
+	// A session fact is not a factory-built HANDLE — `setSessionFact` records a
+	// value, it never calls a `POLICY_FACTORY` — so in `policyHandleOnly` mode
+	// its presence must not itself grant inheritance. In the default mode it is
+	// still the memo: a unit that only ever writes a session fact has no other
+	// state to report.
+	if (facts.sessionFact && !options.policyHandleOnly) return "setSessionFact";
 	// A latch built by a policy factory IS a policy handle, in both senses of
 	// the question this function is asked.
 	if (facts.latchDecl) return facts.latchDecl;
@@ -411,7 +426,7 @@ function findMemo(
 					enclosesScope(decl.scope, write.scope)));
 		if (!persistent) continue;
 		if (options.policyHandleOnly) {
-			if (isPolicyHandleMemoShape(decl, write.valueText, options.policyHandles ?? new Map())) {
+			if (isPolicyHandleMemoShape(decl, options.policyHandles ?? new Map())) {
 				return write.target;
 			}
 			continue;
@@ -423,7 +438,7 @@ function findMemo(
 		if (!MEMO_NAME.test(decl.name)) continue;
 		if (!decl.isClassField && decl.scope !== "<module>") continue;
 		if (options.policyHandleOnly) {
-			if (isPolicyHandleMemoShape(decl, "", options.policyHandles ?? new Map())) {
+			if (isPolicyHandleMemoShape(decl, options.policyHandles ?? new Map())) {
 				return decl.name;
 			}
 			continue;
@@ -446,13 +461,21 @@ function findMemo(
  * straight to a factory (`makeEslintProbe` ← `createCwdCachedProbe`) — so
  * `Map<string, ReturnType<typeof makeEslintProbe>>` is recognised without a
  * second, hand-rolled classifier.
+ *
+ * Deliberately reads only the DECLARATION's own `typeText`/`valueText`, never
+ * a write's inlined value: a review probe (#1552 round 2) inlined the wrapper
+ * call straight into the write site —
+ * `toolAvailableByCwd.set(cwd, await makeToolProbe(cmd)(cwd))` against a plain
+ * `Map<string, boolean>` declaration — and reading the write's own text let
+ * the wrapper's name leak into a hand-rolled boolean latch's shape and pass it
+ * off as a handle. A write can echo whatever name it likes; only what the
+ * variable was DECLARED to hold is evidence of what it actually is.
  */
 function isPolicyHandleMemoShape(
 	decl: Decl | undefined,
-	writtenValue: string,
 	policyHandles: Map<string, string>,
 ): boolean {
-	const shape = `${decl?.typeText ?? ""} ${decl?.valueText ?? ""} ${writtenValue}`;
+	const shape = `${decl?.typeText ?? ""} ${decl?.valueText ?? ""}`;
 	for (const factory of POLICY_FACTORIES) {
 		if (new RegExp(`\\b${factory}\\b`).test(shape)) return true;
 	}
