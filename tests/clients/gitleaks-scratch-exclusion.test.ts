@@ -3,12 +3,11 @@
  * a pi-ecosystem web-research cache) and served a placeholder curl-doc-example
  * (`-H "Authorization: Bearer YOUR_API_KEY"`) to the agent as a leaked secret.
  *
- * Two compounding defects, both covered here:
+ * Compounding defects, covered here:
  *   1. Scope: gitleaks's own tree walk (`--source <dir>`) bypassed pi-lens's
- *      shared scratch/cache-tree exclusion (`EXCLUDED_DIRS`/`isExcludedDirName`
- *      in `file-utils.ts`) because it never routes through pi-lens's own
- *      walker — the generated `--config` (`writeScopedGitleaksConfig`) and the
- *      TS-side backstop (`classifyAndFilterFindings`) both close that gap.
+ *      shared scratch-tree exclusion because it never routes through
+ *      pi-lens's own walker — the generated `--config` (`writeScopedGitleaksConfig`)
+ *      and the TS-side backstop (`classifyAndFilterFindings`) both close that gap.
  *   2. Placeholder recognition: `YOUR_API_KEY`-class values must be allowlisted
  *      even OUTSIDE scratch trees (a placeholder in a tracked example file is
  *      just as much a non-finding).
@@ -16,6 +15,24 @@
  * The over-correction pin (#1562 design note): an untracked `.env` with a
  * REAL-shaped secret must still be reported — the fix must not become a
  * blanket "respect .gitignore".
+ *
+ * Review-round fixes folded in here (#1562 second pass):
+ *   - F1: the secrets-lane exclusion is the NARROW `SECRETS_LANE_SCRATCH_DIR_NAMES`
+ *     tier, not the broad walker-parity `EXCLUDED_DIRS` list — a probe seeded a
+ *     real-AWS-shaped secret in 9 walker-only dirs (`dist/`, `vendor/`,
+ *     `.vscode/`, `build/`, `out/`, `target/`, `third_party/`, `third-party/`,
+ *     `coverage/`) and found the first cut silently dropping all 9.
+ *   - F2: a secrets-lane-scratch finding is DEMOTED (`pathStatus: "scratch"`,
+ *     surfaced by the adapter as `severity: "info"`/`semantic: "none"`), never
+ *     silently DELETED — the observability criterion requires the fourth value
+ *     to be reachable.
+ *   - F3: the placeholder allowlist's angle-bracket regex now matches the
+ *     issue's own literal example, bare `<your-key>` (not just `<your-api-key>`),
+ *     and the `xxx` run-of-x regex now matches the issue's literal 3-x example.
+ *   - F4: the generated allowlist path regexes accept BOTH `/` and `\`
+ *     separators (gitleaks's `File` field preserves the OS-native separator
+ *     from Go's directory walk, so a forward-slash-only anchor never matches
+ *     on Windows).
  */
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -32,6 +49,7 @@ import {
 	writeScopedGitleaksConfig,
 } from "../../clients/gitleaks-client.js";
 import { gitleaksFindingToProjectDiagnostic } from "../../clients/project-diagnostics/runner-adapters/gitleaks.js";
+import { getSecretsLaneAllowlistPaths } from "../../clients/scratch-tree-policy.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
 function initGitRepo(cwd: string): void {
@@ -56,8 +74,8 @@ afterEach(() => {
 	_resetTrackedFilesCacheForTests();
 });
 
-describe("classifyAndFilterFindings — scratch-tree exclusion (#1562)", () => {
-	it("drops a finding under .pi/greedysearch-sources/** (the doc-example fixture from the incident)", async () => {
+describe("classifyAndFilterFindings — secrets-lane scratch exclusion (#1562)", () => {
+	it("demotes (does not delete) a finding under .pi/greedysearch-sources/** (the doc-example fixture from the incident)", async () => {
 		const env = setupTestEnvironment("pi-lens-gitleaks-scratch-");
 		try {
 			const findings = [
@@ -68,13 +86,14 @@ describe("classifyAndFilterFindings — scratch-tree exclusion (#1562)", () => {
 				}),
 			];
 			const result = await classifyAndFilterFindings(findings, env.tmpDir);
-			expect(result).toHaveLength(0);
+			expect(result).toHaveLength(1);
+			expect(result[0].pathStatus).toBe("scratch");
 		} finally {
 			env.cleanup();
 		}
 	});
 
-	it("drops findings under other shared scratch/cache trees (.claude/, node_modules/)", async () => {
+	it("demotes findings under other pi-ecosystem/agent scratch trees (.claude/, node_modules/)", async () => {
 		const env = setupTestEnvironment("pi-lens-gitleaks-scratch2-");
 		try {
 			const findings = [
@@ -82,7 +101,39 @@ describe("classifyAndFilterFindings — scratch-tree exclusion (#1562)", () => {
 				finding({ file: "node_modules/some-pkg/README.md" }),
 			];
 			const result = await classifyAndFilterFindings(findings, env.tmpDir);
-			expect(result).toHaveLength(0);
+			expect(result).toHaveLength(2);
+			expect(result.every((f) => f.pathStatus === "scratch")).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// #1562 review-round F1 pin: these 9 dirs are WALKER-ONLY exclusions (real
+	// leak surfaces — build output, vendored source, editor config), NOT
+	// secrets-lane scratch. A finding under any of them must survive with
+	// normal (non-"scratch") classification, exactly like an ordinary source
+	// file.
+	it("does NOT demote findings under walker-only dirs (dist/vendor/.vscode/build/out/target/third_party/third-party/coverage)", async () => {
+		const env = setupTestEnvironment("pi-lens-gitleaks-walkeronly-");
+		try {
+			initGitRepo(env.tmpDir);
+			const walkerOnlyPaths = [
+				"dist/config.js",
+				"vendor/lib/keys.go",
+				".vscode/launch.json",
+				"build/bundle.js",
+				"out/main.js",
+				"target/release/config.rs",
+				"third_party/lib/secrets.py",
+				"third-party/lib/secrets.py",
+				"coverage/lcov-report/index.html",
+			];
+			const findings = walkerOnlyPaths.map((file) => finding({ file }));
+			const result = await classifyAndFilterFindings(findings, env.tmpDir);
+			expect(result).toHaveLength(walkerOnlyPaths.length);
+			for (const f of result) {
+				expect(f.pathStatus).not.toBe("scratch");
+			}
 		} finally {
 			env.cleanup();
 		}
@@ -184,9 +235,31 @@ describe("gitleaksFindingToProjectDiagnostic — pathStatus observability (#1562
 		const diag = gitleaksFindingToProjectDiagnostic("/repo", finding({}));
 		expect(diag.message).not.toContain("[git:");
 	});
+
+	// #1562 review-round F2: a demoted "scratch" finding must never read as a
+	// blocking secret alarm, while still being present (reachable) for an
+	// audit read.
+	it("demotes a pathStatus:'scratch' finding to info/none, never blocking", () => {
+		const diag = gitleaksFindingToProjectDiagnostic(
+			"/repo",
+			finding({ file: ".pi/greedysearch-sources/doc.md", pathStatus: "scratch" }),
+		);
+		expect(diag.severity).toBe("info");
+		expect(diag.semantic).toBe("none");
+		expect(diag.message).toContain("[git: scratch]");
+	});
+
+	it("keeps a non-scratch finding blocking (error/blocking)", () => {
+		const diag = gitleaksFindingToProjectDiagnostic(
+			"/repo",
+			finding({ file: ".env", pathStatus: "untracked" }),
+		);
+		expect(diag.severity).toBe("error");
+		expect(diag.semantic).toBe("blocking");
+	});
 });
 
-describe("writeScopedGitleaksConfig — placeholder allowlist + scratch paths (#1562)", () => {
+describe("writeScopedGitleaksConfig — placeholder allowlist + secrets-lane paths (#1562)", () => {
 	let outDir: string;
 
 	beforeEach(() => {
@@ -221,15 +294,41 @@ describe("writeScopedGitleaksConfig — placeholder allowlist + scratch paths (#
 		}
 	});
 
-	it("includes an allowlist path pattern for every shared scratch-tree directory", () => {
+	it("includes an allowlist path pattern for every secrets-lane scratch directory (the narrow list, not the walker-parity one)", () => {
 		const env = setupTestEnvironment("pi-lens-gitleaks-cfg-paths-");
 		try {
 			const configPath = writeScopedGitleaksConfig(outDir, env.tmpDir);
 			const toml = fs.readFileSync(configPath, "utf-8");
 			expect(toml).toContain("[allowlist]");
 			expect(toml).toContain("paths = [");
-			// Same source EXCLUDED_DIRS derives from — .pi is the #1562 dir.
-			expect(toml).toMatch(/\\\.pi\(/);
+			for (const pattern of getSecretsLaneAllowlistPaths()) {
+				expect(toml).toContain(JSON.stringify(pattern));
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("does NOT include allowlist path patterns for walker-only dirs (dist/vendor/.vscode/…) — #1562 review-round F1", () => {
+		const env = setupTestEnvironment("pi-lens-gitleaks-cfg-nowalker-");
+		try {
+			const configPath = writeScopedGitleaksConfig(outDir, env.tmpDir);
+			const toml = fs.readFileSync(configPath, "utf-8");
+			const pathsBlock = toml.match(/paths = \[([\s\S]*?)\n\]/)?.[1] ?? "";
+			expect(pathsBlock.length).toBeGreaterThan(0);
+			for (const walkerOnlyName of [
+				"dist",
+				"vendor",
+				".vscode",
+				"build",
+				"out",
+				"target",
+				"third_party",
+				"third-party",
+				"coverage",
+			]) {
+				expect(pathsBlock).not.toContain(walkerOnlyName);
+			}
 		} finally {
 			env.cleanup();
 		}
@@ -249,17 +348,40 @@ describe("writeScopedGitleaksConfig — placeholder allowlist + scratch paths (#
 		}
 	});
 
-	it("the placeholder-secret regex set matches the #1562 incident value and common variants, but never a real-shaped secret", () => {
+	it("the placeholder-secret regex set matches the issue's literal acceptance examples (YOUR_API_KEY / <your-key> / xxx), but never a real-shaped secret", () => {
 		const stripped = PLACEHOLDER_SECRET_REGEXES.map((p) =>
 			p.replace(/^\(\?i\)/, ""),
 		);
 		const regexes = stripped.map((p) => new RegExp(p, "i"));
 		expect(regexes.some((r) => r.test("YOUR_API_KEY"))).toBe(true);
+		// #1562 review-round F3: the issue's own literal example is bare
+		// `<your-key>` (no "api" infix) — the weaker `<your-api-key>` used to
+		// be the only variant covered.
+		expect(regexes.some((r) => r.test("<your-key>"))).toBe(true);
 		expect(regexes.some((r) => r.test("<your-api-key>"))).toBe(true);
+		// #1562 review-round F3: the issue's own literal example is the
+		// 3-character run "xxx", not a 6+ character one.
+		expect(regexes.some((r) => r.test("xxx"))).toBe(true);
 		expect(regexes.some((r) => r.test("xxxxxxxxxxxx"))).toBe(true);
 		// Must NOT match a real-shaped secret.
 		expect(
 			regexes.some((r) => r.test("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")),
 		).toBe(false);
+	});
+
+	// #1562 review-round F4: gitleaks preserves the OS-native separator from
+	// Go's directory walk on `File` — a forward-slash-only anchor never
+	// matches on Windows. Assert the generated regex source itself accepts a
+	// backslash-separated path, independent of the TOML/JSON round-trip.
+	it("the generated allowlist path regexes match a backslash-separated (Windows-shaped) finding path", () => {
+		const env = setupTestEnvironment("pi-lens-gitleaks-cfg-winsep-");
+		try {
+			writeScopedGitleaksConfig(outDir, env.tmpDir);
+			const patterns = getSecretsLaneAllowlistPaths().map((p) => new RegExp(p));
+			const winPath = ".pi\\greedysearch-sources\\cline-api-docs.md";
+			expect(patterns.some((r) => r.test(winPath))).toBe(true);
+		} finally {
+			env.cleanup();
+		}
 	});
 });

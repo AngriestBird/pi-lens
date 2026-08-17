@@ -33,14 +33,26 @@
  *   - trivy `config` (IaC misconfig, `clients/dispatch/runners/trivy-config.ts`)
  *     — per-EDIT dispatch runner over a single file already selected by the
  *     dispatch pipeline, not a directory scan — deliberately left.
+ *
+ * #1562 review-round F1 note: trivy/opengrep still consume the WALKER-PARITY
+ * `EXCLUDED_DIRS`-derived list (`getScratchTreeGlobPatterns`/
+ * `getScratchTreeDirNames`) tested below — that's correct for trivy's
+ * vuln/license scanners and for opengrep's general SAST findings (skipping
+ * `dist`/`build`/`vendor` there is the RIGHT call, unlike gitleaks's
+ * secrets-only lane). Whether trivy's bundled `secret` scanner needs its own
+ * narrower list, the way gitleaks now does (`SECRETS_LANE_SCRATCH_DIR_NAMES`),
+ * is deliberately deferred — see the F5 follow-up issue referenced in the
+ * PR body; a single `--skip-dirs` invocation can't vary by sub-scanner
+ * without a structural change this round didn't attempt.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	getScratchTreeDirNames,
 	getScratchTreeFnmatchPatterns,
-	getScratchTreeGitleaksAllowlistPaths,
 	getScratchTreeGlobPatterns,
-	isUnderScratchTree,
+	getSecretsLaneAllowlistPaths,
+	isUnderSecretsLaneScratchTree,
+	SECRETS_LANE_SCRATCH_DIR_NAMES,
 } from "../../clients/scratch-tree-policy.js";
 import { EXCLUDED_DIRS } from "../../clients/file-utils.js";
 
@@ -51,26 +63,76 @@ const { safeSpawnAsync, safeSpawn } = vi.hoisted(() => ({
 vi.mock("../../clients/safe-spawn.js", () => ({ safeSpawnAsync, safeSpawn }));
 
 describe("scratch-tree-policy — single source of truth (#1562)", () => {
-	it("every tool-format list is derived from (never a copy that can drift from) EXCLUDED_DIRS", () => {
+	it("walker-parity tool-format lists are derived from (never a copy that can drift from) EXCLUDED_DIRS", () => {
 		const literalNames = EXCLUDED_DIRS.filter(
 			(n) => !n.includes("*") && !n.includes("?"),
 		);
 		expect(getScratchTreeDirNames()).toEqual(literalNames);
 		expect(getScratchTreeGlobPatterns().length).toBe(EXCLUDED_DIRS.length);
-		expect(getScratchTreeGitleaksAllowlistPaths().length).toBe(
-			literalNames.length,
-		);
 		expect(getScratchTreeFnmatchPatterns().length).toBe(literalNames.length);
 	});
+});
 
-	it("isUnderScratchTree matches .pi/greedysearch-sources/** (the #1562 fixture) and rejects an ordinary source path", () => {
+// #1562 review-round F1: the first cut of this fix used the FULL
+// EXCLUDED_DIRS list as gitleaks's secrets-lane exclusion too. A reviewer
+// probe seeded a real-AWS-shaped secret in 9 "walker-only" dirs (build
+// OUTPUT / vendored SOURCE / editor config — never pi-ecosystem scratch) and
+// found every one of them silently dropped. This pins the fix: those 9 stay
+// OUT of the secrets-lane exclusion, while the genuine pi-ecosystem/agent/
+// cache dirs stay IN it.
+describe("scratch-tree-policy — secrets-lane tier is narrower than walker-parity (#1562 review-round F1)", () => {
+	const walkerOnlyProbePaths = [
+		"dist/config.js",
+		"vendor/lib/keys.go",
+		".vscode/launch.json",
+		"build/bundle.js",
+		"out/main.js",
+		"target/release/config.rs",
+		"third_party/lib/secrets.py",
+		"third-party/lib/secrets.py",
+		"coverage/lcov-report/index.html",
+	];
+
+	it("the 9-path probe: none of the walker-only dirs are in the secrets-lane dir list", () => {
+		const secretsLane = new Set(
+			SECRETS_LANE_SCRATCH_DIR_NAMES.map((n) => n.toLowerCase()),
+		);
+		for (const probePath of walkerOnlyProbePaths) {
+			const topDir = probePath.split("/")[0].toLowerCase();
+			expect(secretsLane.has(topDir)).toBe(false);
+		}
+	});
+
+	it("the 9-path probe: isUnderSecretsLaneScratchTree keeps (does not flag) every walker-only path", () => {
+		for (const probePath of walkerOnlyProbePaths) {
+			expect(isUnderSecretsLaneScratchTree(probePath)).toBe(false);
+		}
+	});
+
+	it("still excludes genuine pi-ecosystem/agent/cache dirs, including the #1562 fixture", () => {
 		expect(
-			isUnderScratchTree(".pi/greedysearch-sources/cline-docs.md"),
+			isUnderSecretsLaneScratchTree(".pi/greedysearch-sources/cline-docs.md"),
 		).toBe(true);
-		expect(isUnderScratchTree("src/config.ts")).toBe(false);
+		for (const scratchDir of [".claude", ".codex", ".agents", "node_modules", ".git", ".next", "venv"]) {
+			expect(isUnderSecretsLaneScratchTree(`${scratchDir}/some/file.txt`)).toBe(
+				true,
+			);
+		}
+	});
+
+	it("rejects an ordinary source path and doesn't false-positive on a substring match", () => {
+		expect(isUnderSecretsLaneScratchTree("src/config.ts")).toBe(false);
 		// Must not false-positive on a filename that merely CONTAINS an
 		// excluded name as a substring (e.g. "api.pipeline.ts" vs ".pi").
-		expect(isUnderScratchTree("src/api.pipeline.ts")).toBe(false);
+		expect(isUnderSecretsLaneScratchTree("src/api.pipeline.ts")).toBe(false);
+	});
+
+	it("getSecretsLaneAllowlistPaths matches both forward- and back-slash separators (#1562 review-round F4)", () => {
+		const patterns = getSecretsLaneAllowlistPaths().map((p) => new RegExp(p));
+		const forwardSlash = ".pi/greedysearch-sources/cline-docs.md";
+		const backSlash = ".pi\\greedysearch-sources\\cline-docs.md";
+		expect(patterns.some((r) => r.test(forwardSlash))).toBe(true);
+		expect(patterns.some((r) => r.test(backSlash))).toBe(true);
 	});
 });
 

@@ -31,17 +31,25 @@
  * Scope policy (#1562): gitleaks is handed a `--config` generated per scan
  * (`writeScopedGitleaksConfig`) that EXTENDS the project's own `.gitleaks.toml`
  * (or gitleaks's built-in defaults, if none) with two additions — an
- * `[allowlist] paths` entry per shared scratch/cache tree
- * (`scratch-tree-policy.ts`'s `EXCLUDED_DIRS`-derived list: `.pi/`, `.claude/`,
- * `node_modules/`, …) and an `[allowlist] regexes` entry per known
- * placeholder-secret shape (`YOUR_API_KEY`, `<your-key>`, `xxxxxxxx`, …).
- * Deliberately NOT `.gitignore`-based — see `scratch-tree-policy.ts`'s module
- * doc for why blanket gitignore-respect is wrong for a secrets scanner (an
- * untracked `.env` with a real credential is exactly the case gitleaks exists
- * to catch, and `.env` is commonly gitignored). `classifyAndFilterFindings`
- * backstops the config with a TS-side scratch-tree drop plus a `pathStatus`
- * (tracked/ignored/scratch/untracked) observability field on every finding
- * that survives.
+ * `[allowlist] paths` entry per NARROW secrets-lane scratch tree
+ * (`scratch-tree-policy.ts`'s `SECRETS_LANE_SCRATCH_DIR_NAMES` — pi-ecosystem/
+ * agent data dirs, `node_modules`, `.git`, generic build caches; deliberately
+ * NOT the broader walker-parity `EXCLUDED_DIRS` list knip/jscpd use, which
+ * also drops real leak surfaces like `dist/`, `vendor/`, `.vscode/` — see that
+ * module's doc for the review-round probe that caught the too-broad first
+ * cut) and an `[allowlist] regexes` entry per known placeholder-secret shape
+ * (`YOUR_API_KEY`, `<your-key>`, `xxxxxxxx`, …). An allowlist entry is a
+ * POST-DETECTION filter, not a walk exclusion — gitleaks still visits every
+ * file; the allowlist only decides which raw hits get suppressed from the
+ * report. Deliberately NOT `.gitignore`-based — see `scratch-tree-policy.ts`'s
+ * module doc for why blanket gitignore-respect is wrong for a secrets scanner
+ * (an untracked `.env` with a real credential is exactly the case gitleaks
+ * exists to catch, and `.env` is commonly gitignored). `classifyAndFilterFindings`
+ * backstops the config with a TS-side re-classification: a finding under the
+ * secrets-lane scratch tier is DEMOTED (not deleted) to `severity: "info"`,
+ * `semantic: "none"`, `pathStatus: "scratch"` — visible for an audit read,
+ * but it can never surface as a blocking "leaked secret" alarm. Every other
+ * finding gets `pathStatus` from git's tracked/ignored view.
  *
  * Refs: #130, #1562
  */
@@ -58,8 +66,8 @@ import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { SecurityScanClient } from "./security-scan-client.js";
 import {
-	getScratchTreeGitleaksAllowlistPaths,
-	isUnderScratchTree,
+	getSecretsLaneAllowlistPaths,
+	isUnderSecretsLaneScratchTree,
 } from "./scratch-tree-policy.js";
 
 // --- Types ---
@@ -86,9 +94,17 @@ export interface GitleaksFinding {
 	 * instead of re-debunking it by hand. `undefined` when git itself
 	 * degraded (no repo, spawn failure, timeout) — fail-open, matching
 	 * `git-tracked-ignore.ts`'s own degrade contract.
-	 *   - "scratch": under a shared scratch/cache tree (`EXCLUDED_DIRS`) —
-	 *     should already be excluded from the scan itself; this is the
-	 *     backstop label if one still slips through.
+	 *   - "scratch": under the narrow SECRETS-LANE scratch tier
+	 *     (`SECRETS_LANE_SCRATCH_DIR_NAMES` — pi-ecosystem/agent data dirs,
+	 *     `node_modules`, `.git`, build caches; NOT the broader walker-parity
+	 *     `EXCLUDED_DIRS` list, which also covers real leak surfaces like
+	 *     `dist/`/`vendor/`/`.vscode/` — #1562 review-round F1). DEMOTED, not
+	 *     dropped (#1562 review-round F2 — the observability criterion
+	 *     requires this value to actually be reachable): the adapter
+	 *     (`gitleaksFindingToProjectDiagnostic`) reports a `pathStatus:
+	 *     "scratch"` finding as `severity: "info"`/`semantic: "none"` so it
+	 *     can never surface as a blocking "leaked secret" alarm, while still
+	 *     being present for an audit read.
 	 *   - "tracked": committed to git.
 	 *   - "ignored": untracked AND matched by `.gitignore`.
 	 *   - "untracked": untracked and NOT gitignored — the operational case
@@ -134,27 +150,39 @@ function findLocalGitleaksConfig(cwd: string): string | undefined {
 }
 
 // The #1562 incident: a curl doc example's `-H "Authorization: Bearer
-// YOUR_API_KEY"` (cached under gitignored scratch, see the scratch-tree
+// YOUR_API_KEY"` (cached under gitignored scratch, see the secrets-lane
 // exclusion below) read as a leaked secret. These match gitleaks's own
 // `Secret`/`Match` value case-insensitively, catching the canonical
 // placeholder shapes: `YOUR_API_KEY`-style tokens, `<your-key>`-style angle
 // brackets, run-of-`x` filler, and the common changeme/example/dummy family.
 // Scoped to the whole matched value (`^...$`) so a REAL secret that merely
 // contains the substring "key" is never caught by accident.
+//
+// #1562 review-round F3: regex 2's alternation required "key" to be prefixed
+// (`api[-_ ]?key`) — the issue's own literal acceptance example, `<your-key>`
+// (bare "key", no "api" prefix), didn't match. Added a bare `key` alternative;
+// still safe because the match is scoped to the WHOLE bracketed value
+// (`^<...>$`), so a real secret that happens to be wrapped in angle brackets
+// AND merely contain the substring "key" still wouldn't collide with this —
+// only a value that is ENTIRELY `<...key...>`-shaped does.
 export const PLACEHOLDER_SECRET_REGEXES = [
 	String.raw`(?i)^(your|my|insert|replace|enter|add)[-_ ]?(the[-_ ]?)?(api[-_ ]?)?(key|token|secret|password|credential)s?$`,
-	String.raw`(?i)^<[^<>]*(api[-_ ]?key|token|secret|password|credential)[^<>]*>$`,
-	String.raw`(?i)^x{6,}$`,
+	String.raw`(?i)^<[^<>]*(api[-_ ]?key|token|secret|password|credential|key)[^<>]*>$`,
+	String.raw`(?i)^x{3,}$`,
 	String.raw`(?i)^(changeme|change[-_]me|example|placeholder|dummy|fake|redacted|xxxxxxxx)$`,
 ];
 
 /**
  * Build a temp gitleaks config that EXTENDS the project's own config (if any,
  * else gitleaks's built-in defaults) with two additions:
- *   1. `[allowlist] paths` — the shared scratch-tree exclusion
- *      (`scratch-tree-policy.ts`), so `.pi/**`, `.claude/**`, `node_modules/**`
- *      etc. never reach gitleaks's own tree walk (#1562 scope defect).
+ *   1. `[allowlist] paths` — the NARROW secrets-lane scratch exclusion
+ *      (`scratch-tree-policy.ts`'s `getSecretsLaneAllowlistPaths`, NOT the
+ *      broader walker-parity `EXCLUDED_DIRS` list — #1562 review-round F1).
  *   2. `[allowlist] regexes` — the placeholder-secret class above.
+ *
+ * An `[allowlist]` entry is a POST-DETECTION filter (#1562 review-round F4):
+ * gitleaks still visits every file under `--source`; the allowlist decides
+ * which of the raw hits it reports, it does not shrink the walk itself.
  *
  * gitleaks's `[extend]` allowlist merge is additive (append, not replace —
  * see gitleaks/config/config.go), so a project's own curated allowlist keeps
@@ -169,7 +197,7 @@ export function writeScopedGitleaksConfig(outDir: string, cwd: string): string {
 	const extendLine = localConfig
 		? `path = ${JSON.stringify(localConfig)}`
 		: "useDefault = true";
-	const pathPatterns = getScratchTreeGitleaksAllowlistPaths()
+	const pathPatterns = getSecretsLaneAllowlistPaths()
 		.map((p) => `    ${JSON.stringify(p)},`)
 		.join("\n");
 	const regexPatterns = PLACEHOLDER_SECRET_REGEXES.map(
@@ -414,18 +442,25 @@ export class GitleaksClient extends SecurityScanClient<GitleaksResult> {
 // --- Post-scan classification / filter ---
 
 /**
- * Backstop for the scoped-config scratch-tree exclusion above, plus the
+ * Backstop for the scoped-config secrets-lane exclusion above, plus the
  * `pathStatus` observability field (#1562).
  *
  * Two things happen here, both defense-in-depth relative to the generated
  * gitleaks config:
- *   1. Any finding still under a shared scratch/cache tree is DROPPED — we
+ *   1. Any finding still under the NARROW secrets-lane scratch tier
+ *      (`isUnderSecretsLaneScratchTree` — NOT the broader walker-parity
+ *      `EXCLUDED_DIRS` list) is DEMOTED, never DROPPED (#1562 review-round
+ *      F2: the observability criterion requires this value to actually be
+ *      reachable, so a scratch finding survives with `pathStatus: "scratch"`
+ *      and the adapter (`gitleaksFindingToProjectDiagnostic`) reports it as
+ *      `severity: "info"`/`semantic: "none"` — visible for an audit read,
+ *      but it can never surface as a blocking "leaked secret" alarm). We
  *      can't exercise gitleaks's own TOML-regex engine in unit tests, only
- *      assert the config we hand it, so this guarantees the #1562 acceptance
- *      criterion ("a scratch-tree finding never reaches the agent") even if
- *      the generated regex ever mismatches gitleaks's own path normalization.
- *   2. Every SURVIVING finding gets `pathStatus` set from git's tracked/
- *      ignored view, so a future false-positive triage is a log read.
+ *      assert the config we hand it, so this backstop guarantees the demotion
+ *      even if the generated regex ever mismatches gitleaks's own path
+ *      normalization.
+ *   2. Every OTHER finding gets `pathStatus` set from git's tracked/ignored
+ *      view, so a future false-positive triage is a log read.
  *
  * `collectTrackedFiles`/`collectUntrackedIgnoredIds` degrade to `undefined`
  * when git itself is unavailable (no repo, spawn failure) — findings just
@@ -443,9 +478,12 @@ export async function classifyAndFilterFindings(
 		collectUntrackedIgnoredIds(cwd),
 	]);
 
-	const kept: GitleaksFinding[] = [];
+	const classified: GitleaksFinding[] = [];
 	for (const finding of findings) {
-		if (isUnderScratchTree(finding.file)) continue;
+		if (isUnderSecretsLaneScratchTree(finding.file)) {
+			classified.push({ ...finding, pathStatus: "scratch" });
+			continue;
+		}
 
 		const absPath = path.isAbsolute(finding.file)
 			? finding.file
@@ -463,9 +501,9 @@ export async function classifyAndFilterFindings(
 			pathStatus = "untracked";
 		}
 
-		kept.push(pathStatus ? { ...finding, pathStatus } : finding);
+		classified.push(pathStatus ? { ...finding, pathStatus } : finding);
 	}
-	return kept;
+	return classified;
 }
 
 // --- Parser ---

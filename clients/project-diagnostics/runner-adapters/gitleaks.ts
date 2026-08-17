@@ -5,6 +5,13 @@ import type { ProjectDiagnostic } from "../types.js";
 /**
  * A gitleaks finding is a leaked secret at a concrete `file:startLine`. Secrets
  * are treated as **blocking** — a committed credential is not a style nit.
+ *
+ * Exception: `pathStatus: "scratch"` (#1562 review-round F2) — a finding
+ * `classifyAndFilterFindings` demoted rather than dropped, so the observability
+ * criterion ("record carries tracked/ignored/scratch status") stays honest
+ * about a fourth REACHABLE value instead of silently deleting it. Demoted to
+ * `severity: "info"`/`semantic: "none"` so it can never read as a blocking
+ * "leaked secret" alarm, while remaining visible for an audit read.
  */
 export function gitleaksFindingToProjectDiagnostic(
 	cwd: string,
@@ -14,13 +21,14 @@ export function gitleaksFindingToProjectDiagnostic(
 	// finding's message so a triage is a read, not a re-derivation. Omitted
 	// when git itself degraded (`pathStatus` undefined) rather than guessed.
 	const statusSuffix = finding.pathStatus ? ` [git: ${finding.pathStatus}]` : "";
+	const isScratch = finding.pathStatus === "scratch";
 	return {
 		filePath: path.isAbsolute(finding.file)
 			? finding.file
 			: path.resolve(cwd, finding.file),
 		line: finding.startLine,
-		severity: "error",
-		semantic: "blocking",
+		severity: isScratch ? "info" : "error",
+		semantic: isScratch ? "none" : "blocking",
 		tool: "gitleaks",
 		runner: "gitleaks",
 		rule: `gitleaks:${finding.ruleId}`,
