@@ -30,6 +30,20 @@
  *
  * With the switch absent the runner never spawns anything at all.
  *
+ * ## Two gates, because the switch ships INSIDE the repository
+ *
+ * `.pi-lens.json` is a tracked file, so a cloned repository can arrive with the
+ * switch already on — a malicious chart repo would authorize execution of its
+ * own templates just by containing the config that says so. Consent from the
+ * repo is therefore necessary but not sufficient: the render also requires
+ * PROJECT TRUST from the host (`getProjectTrustState()`), the same gate that
+ * governs LSP spawns and tool installs. In untrusted mode the runner refuses to
+ * spawn and says trust is the reason, rather than skipping silently.
+ *
+ * The consent lookup is keyed off the WORKSPACE ROOT whose chart is about to
+ * run, not `ctx.cwd`. Those differ, and keying on the cwd let an opt-in in one
+ * directory authorize rendering a chart belonging to a different project root.
+ *
  * The Trivy pass keeps Trivy's OWN consent switch (`trivy.enabled`), because
  * that is the switch that authorizes installing the binary. Opting into
  * rendering therefore gets render + manifest-shape validation; the IaC pass
@@ -63,6 +77,10 @@ import { logLatency } from "../../latency-logger.js";
 import { PathKeyedMap } from "../../path-keyed-map.js";
 import { normalizeMapKey } from "../../path-utils.js";
 import { loadPiLensProjectConfig } from "../../project-lens-config.js";
+import {
+	getProjectTrustState,
+	projectTrustDenialReason,
+} from "../../project-trust.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { isTrivyEnabled, resolveSeverityFloor } from "../../trivy-client.js";
 import { findNearestDirWithMarker } from "../../workspace-topology.js";
@@ -125,10 +143,14 @@ function isWithin(root: string, candidate: string): boolean {
  * so the default is OFF and only an explicit `helm.renderValidation.enabled`
  * in `.pi-lens.json` (the loader walks up, so `~/.pi-lens.json` enables it for
  * every project) turns it on. Exported for tests and gate-before-spawn callers.
+ *
+ * Pass the WORKSPACE ROOT of the chart about to render, not a process cwd: this
+ * answers "did THIS project consent", and reading it from an unrelated cwd let
+ * one directory's opt-in authorize another project root's chart.
  */
-export function isHelmRenderEnabled(cwd: string): boolean {
+export function isHelmRenderEnabled(workspaceRoot: string): boolean {
 	try {
-		const config = loadPiLensProjectConfig(cwd);
+		const config = loadPiLensProjectConfig(workspaceRoot);
 		const helmConfig = (
 			config.raw as
 				| { helm?: { renderValidation?: { enabled?: unknown } } }
@@ -513,6 +535,38 @@ function failedResult(kind: string, message: string): RunnerResult {
 	};
 }
 
+/**
+ * The flags pi-lens itself puts on the command line. If helm complains about one
+ * of THESE, the complaint is about us, not about the chart.
+ */
+const OUR_RENDER_FLAGS = ["--output-dir"] as const;
+
+/**
+ * True when helm's output is a rejection of OUR invocation rather than a verdict
+ * on the chart: `unknown flag`, `unknown shorthand flag`, `flag provided but not
+ * defined`, or an `unknown command`, naming one of our own flags. helm v2 has no
+ * `template --output-dir` at all, and a wrapper shim can reject it too. Without
+ * this, a tooling mismatch is reported to the user as a broken chart — the #1487
+ * lesson inverted.
+ *
+ * Returns the matched flag (for the message) or null.
+ */
+export function rejectedOurInvocation(output: string): string | null {
+	if (!output) return null;
+	const complaint =
+		/unknown flag|unknown shorthand flag|flag provided but not defined|unknown command|unrecognized (?:flag|option)/i.test(
+			output,
+		);
+	if (!complaint) return null;
+	for (const flag of OUR_RENDER_FLAGS) {
+		if (output.includes(flag)) return flag;
+	}
+	// A flag complaint that names none of our flags could still be ours (helm
+	// wording drift), but it could equally come from a chart's own hook or a
+	// plugin. Stay conservative: only OUR flag names buy the runner-error verdict.
+	return null;
+}
+
 /** Classify a spawn that never produced a verdict about the chart. */
 function spawnFailureKind(result: {
 	failure?: string;
@@ -630,7 +684,10 @@ type CoverageRule =
 	| "iac-pass-unavailable"
 	| "iac-pass-failed"
 	| "iac-report-unreadable"
-	| "render-truncated";
+	| "render-truncated"
+	| "rendered-file-unreadable"
+	| "render-empty"
+	| "render-untrusted";
 
 /**
  * One `info` diagnostic saying part of the pass did not happen. Zero findings
@@ -859,11 +916,27 @@ async function renderAndValidate(
 				render.error?.message || `helm template ${startupFailure}`,
 			);
 		}
+		const renderOutput = [render.stdout, render.stderr]
+			.filter(Boolean)
+			.join("\n");
 		if (render.status !== 0) {
+			// Before blaming the chart: did helm reject OUR OWN command line? An old
+			// helm (v2 has no `helm template --output-dir`) or a wrapper shim exits
+			// non-zero on the invocation, which says nothing about the chart.
+			// Reporting that as a chart finding is the #1487 inversion, upside down.
+			const ourFlag = rejectedOurInvocation(renderOutput);
+			if (ourFlag) {
+				logRenderPass(filePath, chartRoot, startedAt, {
+					outcome: "runner-failed",
+					failureKind: "invocation_rejected",
+					flag: ourFlag,
+				});
+				return failedResult(
+					"invocation_rejected",
+					`helm rejected pi-lens's own invocation (${ourFlag}); this is a helm/pi-lens compatibility problem, not a chart defect: ${renderOutput.trim().slice(0, 160)}`,
+				);
+			}
 			// A failed RENDER is a real diagnostic: the chart cannot be installed.
-			const renderOutput = [render.stdout, render.stderr]
-				.filter(Boolean)
-				.join("\n");
 			const diagnostics = parseHelmTemplateFailure(renderOutput, chartRoot);
 			if (render.outputTruncated) {
 				diagnostics.push(
@@ -900,6 +973,29 @@ async function renderAndValidate(
 					chartRoot,
 					"render-truncated",
 					`This chart rendered more than ${MAX_RENDERED_FILES} manifests; only the first ${MAX_RENDERED_FILES} were validated, so the rest are UNCHECKED rather than clean.`,
+				),
+			);
+		}
+		if (tree.unreadable > 0) {
+			// Same asymmetry as truncation, one level down: a manifest we could not
+			// read back was not validated, so its silence is not evidence.
+			diagnostics.push(
+				coverageGap(
+					chartRoot,
+					"rendered-file-unreadable",
+					`${tree.unreadable} rendered manifest(s) could not be read back from the scratch directory and are UNCHECKED rather than clean.`,
+				),
+			);
+		}
+		if (tree.manifests.length === 0) {
+			// helm exited 0 and produced nothing readable. That is not a clean
+			// chart, it is an unknown one — an all-templates-disabled values file,
+			// a chart with no templates, or a scratch directory we failed to walk.
+			diagnostics.push(
+				coverageGap(
+					chartRoot,
+					"render-empty",
+					"helm template succeeded but produced no manifests to validate, so this chart is UNVALIDATED rather than clean. Check whether the chart's values disable every template.",
 				),
 			);
 		}
@@ -941,15 +1037,38 @@ const helmRenderRunner: RunnerDefinition = {
 
 	async run(ctx: DispatchContext): Promise<RunnerResult> {
 		const cwd = ctx.cwd || process.cwd();
-		// Off by default: rendering executes chart-authored template code.
-		if (!isHelmRenderEnabled(cwd)) return SKIPPED;
-
 		const workspaceRoot = path.resolve(ctx.projectRoot ?? cwd);
+
+		// Gate 1 — consent, read from the project whose chart would run. Keying
+		// this on `cwd` let an opt-in in one directory authorize a DIFFERENT
+		// project root's chart.
+		if (!isHelmRenderEnabled(workspaceRoot)) return SKIPPED;
+
 		const startDir = path.dirname(path.resolve(ctx.filePath));
 		const discovered = findNearestDirWithMarker(startDir, "chartYamlPath");
 		if (!discovered) return SKIPPED;
 		const chartRoot = path.resolve(discovered);
 		if (!isWithin(workspaceRoot, chartRoot)) return SKIPPED;
+
+		// Gate 2 — project trust. `.pi-lens.json` is a TRACKED file, so consent
+		// can arrive inside a cloned repository: a hostile chart repo would
+		// authorize execution of its own templates simply by shipping the switch.
+		// Trust is the host's answer, not the repo's, so it cannot be forged by
+		// content. Same gate as LSP spawns and tool installs.
+		if (getProjectTrustState() === "untrusted") {
+			// Not a silent skip: the user asked for this pass, and "no findings"
+			// must not be how they learn it never ran (defect shape 10).
+			logRenderPass(ctx.filePath, chartRoot, Date.now(), {
+				outcome: "refused-untrusted",
+			});
+			return summarize([
+				coverageGap(
+					chartRoot,
+					"render-untrusted",
+					`Helm rendered-manifest validation did not run: ${projectTrustDenialReason() ?? "project trust denied"}. Rendering executes this chart's own templates, so it needs host trust in addition to the \`helm.renderValidation.enabled\` switch — and that switch is a tracked file a cloned repository can set for itself.`,
+				),
+			]);
+		}
 
 		const existing = inFlightByChartRoot.get(chartRoot);
 		if (existing) return existing;

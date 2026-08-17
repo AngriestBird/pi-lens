@@ -346,7 +346,7 @@ pi-lens also renders the nearest chart with `helm template` into a scratch direc
 - every rendered document must declare `apiVersion` and `kind`, so a conditional that renders a headless fragment is flagged instead of installing as a silent no-op;
 - when `trivy.enabled` is also set, `trivy config` runs over the rendered manifests, which is the only way Trivy's Kubernetes policy checks can see a chart's real output.
 
-It is **off by default** because rendering executes chart-authored template code. Nothing is written to the chart directory, `--dependency-update` is never passed, and the scratch directory is removed on every exit path. Findings map back to the source template through helm's own `# Source:` annotations; rendered line numbers travel in the message, since they do not correspond to template lines. Full OpenAPI schema validation (kubeconform) is not included.
+It is **off by default** because rendering executes chart-authored template code, and the switch alone is not enough: the render also requires **host project trust**, since `.pi-lens.json` is a tracked file a cloned repository could ship pre-enabled. The switch is read from the chart's own project root, not the current directory. In untrusted mode the refusal is reported rather than silently skipped. Nothing is written to the chart directory, `--dependency-update` is never passed, and the scratch directory is removed on every exit path. Findings map back to the source template through helm's own `# Source:` annotations; rendered line numbers travel in the message, since they do not correspond to template lines. Full OpenAPI schema validation (kubeconform) is not included.
 
 ### MCP Server (Experimental)
 

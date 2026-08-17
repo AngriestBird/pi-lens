@@ -41,6 +41,9 @@ vi.mock(
 const { resetProjectLensConfigCache } = await import(
 	"../../../../clients/project-lens-config.js"
 );
+const { resetProjectTrust, setProjectTrustState } = await import(
+	"../../../../clients/project-trust.js"
+);
 const { resetWorkspaceTopology } = await import(
 	"../../../../clients/workspace-topology.js"
 );
@@ -173,12 +176,14 @@ beforeEach(() => {
 	safeSpawnAsync.mockReset();
 	resetProjectLensConfigCache();
 	resetWorkspaceTopology();
+	resetProjectTrust();
 });
 
 afterEach(() => {
 	fs.rmSync(workspace, { recursive: true, force: true });
 	resetProjectLensConfigCache();
 	resetWorkspaceTopology();
+	resetProjectTrust();
 });
 
 describe("helm-render opt-in gate", () => {
@@ -214,6 +219,63 @@ describe("helm-render opt-in gate", () => {
 		expect(result.status).toBe("skipped");
 		expect(safeSpawnAsync).not.toHaveBeenCalled();
 		expect(isHelmRenderEnabled(workspace)).toBe(false);
+	});
+
+	it("refuses to render an untrusted project even with the switch on", async () => {
+		// `.pi-lens.json` is a TRACKED file: a hostile chart repo can arrive with
+		// consent already granted, authorizing execution of its own templates.
+		// Trust is the host's answer and cannot be forged by repo content.
+		const chart = installChart("valid-chart");
+		optIn({ helm: { renderValidation: { enabled: true } } });
+		setProjectTrustState("untrusted");
+		stubSpawns({ render: { status: 0 } });
+
+		const result = await helmRenderRunner.run(
+			makeRunnerCtx(
+				path.join(chart, "templates", "deployment.yaml"),
+				workspace,
+				{ kind: "yaml", projectRoot: workspace },
+			),
+		);
+
+		expect(safeSpawnAsync).not.toHaveBeenCalled();
+		expect(resolveAvailableOrInstall).not.toHaveBeenCalled();
+		// And the refusal is legible — not a silent skip the user reads as clean.
+		expect(result.diagnostics).toHaveLength(1);
+		expect(result.diagnostics[0].rule).toBe("render-untrusted");
+		expect(result.diagnostics[0].message).toContain("trust");
+		expect(result.semantic).not.toBe("none");
+	});
+
+	it("reads consent from the chart's project root, not an unrelated cwd", async () => {
+		// The scoping hole: consent granted in one directory must not authorize
+		// rendering a chart that belongs to a different project root.
+		const otherProject = path.join(workspace, "consenting-elsewhere");
+		fs.mkdirSync(otherProject, { recursive: true });
+		fs.writeFileSync(
+			path.join(otherProject, ".pi-lens.json"),
+			JSON.stringify({ helm: { renderValidation: { enabled: true } } }),
+		);
+		const chartProject = path.join(workspace, "no-consent-project");
+		fs.mkdirSync(chartProject, { recursive: true });
+		fs.cpSync(
+			path.join(fixtures, "valid-chart"),
+			path.join(chartProject, "chart"),
+			{ recursive: true },
+		);
+		resetProjectLensConfigCache();
+		stubSpawns({ render: { status: 0 } });
+
+		const result = await helmRenderRunner.run(
+			makeRunnerCtx(
+				path.join(chartProject, "chart", "templates", "deployment.yaml"),
+				otherProject,
+				{ kind: "yaml", projectRoot: chartProject },
+			),
+		);
+
+		expect(result.status).toBe("skipped");
+		expect(safeSpawnAsync).not.toHaveBeenCalled();
 	});
 
 	it("renders once the switch is explicitly true", async () => {
@@ -695,6 +757,116 @@ describe("helm-render rendered-manifest checks", () => {
 		);
 		expect(truncated).toHaveLength(1);
 		expect(truncated[0].message).toContain("UNCHECKED");
+	});
+
+	it("blames itself, not the chart, when helm rejects its own flags", async () => {
+		// helm v2 has no `template --output-dir`, and a wrapper shim can reject it
+		// too. Exit status alone would report that as a broken chart — the #1487
+		// lesson upside down.
+		const chart = installChart("valid-chart");
+		optIn({ helm: { renderValidation: { enabled: true } } });
+		stubSpawns({
+			render: {
+				status: 1,
+				stdout: "",
+				stderr: "Error: unknown flag: --output-dir\n",
+			},
+		});
+
+		const result = await helmRenderRunner.run(
+			makeRunnerCtx(
+				path.join(chart, "templates", "deployment.yaml"),
+				workspace,
+				{ kind: "yaml", projectRoot: workspace },
+			),
+		);
+
+		expect(result).toMatchObject({
+			status: "failed",
+			failureKind: "invocation_rejected",
+			diagnostics: [],
+		});
+		expect(result.failureMessage).toContain("not a chart defect");
+	});
+
+	it("says the chart is unvalidated when a successful render produces nothing", async () => {
+		const chart = installChart("valid-chart");
+		optIn({ helm: { renderValidation: { enabled: true } } });
+		// Exit 0, empty scratch dir — every template disabled by values, or a walk
+		// that found nothing. Unknown, not clean.
+		stubSpawns({ render: { status: 0, stdout: "", stderr: "" } });
+
+		const result = await helmRenderRunner.run(
+			makeRunnerCtx(
+				path.join(chart, "templates", "deployment.yaml"),
+				workspace,
+				{ kind: "yaml", projectRoot: workspace },
+			),
+		);
+
+		expect(result.semantic).not.toBe("none");
+		expect(result.diagnostics).toHaveLength(1);
+		expect(result.diagnostics[0].rule).toBe("render-empty");
+		expect(result.diagnostics[0].message).toContain("UNVALIDATED");
+	});
+
+	it("says so when a rendered manifest cannot be read back", async (ctx) => {
+		// The walk requires `isFile()`, so the read failure has to be a real
+		// permission denial. `chmod` is a no-op on Windows, so probe first and skip
+		// honestly rather than asserting something this host cannot produce.
+		const probe = path.join(workspace, "chmod-probe.yaml");
+		fs.writeFileSync(probe, "x\n");
+		fs.chmodSync(probe, 0o000);
+		let chmodBites = false;
+		try {
+			fs.readFileSync(probe, "utf-8");
+		} catch {
+			chmodBites = true;
+		}
+		fs.chmodSync(probe, 0o600);
+		if (!chmodBites) {
+			ctx.skip();
+			return;
+		}
+
+		const chart = installChart("valid-chart");
+		optIn({ helm: { renderValidation: { enabled: true } } });
+		stubSpawns({
+			render: (outputDir) => {
+				writeRendered(
+					outputDir,
+					path.join("pi-lens-render-valid", "templates", "readable.yaml"),
+					RENDERED_DEPLOYMENT,
+				);
+				const denied = path.join(
+					outputDir,
+					"pi-lens-render-valid",
+					"templates",
+					"denied.yaml",
+				);
+				writeRendered(
+					outputDir,
+					path.join("pi-lens-render-valid", "templates", "denied.yaml"),
+					RENDERED_DEPLOYMENT,
+				);
+				fs.chmodSync(denied, 0o000);
+				return { status: 0, stdout: "", stderr: "" };
+			},
+		});
+
+		const result = await helmRenderRunner.run(
+			makeRunnerCtx(
+				path.join(chart, "templates", "deployment.yaml"),
+				workspace,
+				{ kind: "yaml", projectRoot: workspace },
+			),
+		);
+
+		const gaps = result.diagnostics.filter(
+			(item: { rule?: string }) => item.rule === "rendered-file-unreadable",
+		);
+		expect(gaps).toHaveLength(1);
+		expect(gaps[0].message).toContain("UNCHECKED");
 	});
 
 	it("reports every Error line from a multi-fault render", async () => {
