@@ -15,10 +15,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TRANSIENT_BASE_COOLDOWN_MS } from "../../clients/dispatch/runners/utils/availability-policy.ts";
 
-const { safeSpawnAsync, safeSpawn, ensureTool, logLatency } = vi.hoisted(() => ({
+const {
+	safeSpawnAsync,
+	safeSpawn,
+	ensureTool,
+	getInstallAttempt,
+	logLatency,
+} = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
 	safeSpawn: vi.fn(),
 	ensureTool: vi.fn(),
+	getInstallAttempt: vi.fn(),
 	logLatency: vi.fn(),
 }));
 
@@ -39,6 +46,7 @@ vi.mock("../../clients/safe-spawn.js", () => ({
 
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
+	getInstallAttempt,
 	isSpawnableCommand: vi.fn(async () => true),
 	resetPathWalkMemo: vi.fn(),
 	getToolEnvironment: vi.fn(async () => ({})),
@@ -115,10 +123,20 @@ function metadataOf(record: Record<string, unknown>): Record<string, unknown> {
 	return record.metadata as Record<string, unknown>;
 }
 
-/** The metadata key set every probe record carries today. */
+/**
+ * The metadata key set every probe record carries today.
+ *
+ * `classifiedBy` and `evidence` joined it in #1500: a verdict now says whether a
+ * probe derived it or a call site asserted it, and carries the spawn facts it was
+ * derived FROM. Both are unconditional on a probe record — a probe always has a
+ * result to describe — so they belong in the exact-shape pin rather than behind a
+ * `toMatchObject`.
+ */
 const BASELINE_KEYS = [
 	"budgetMs",
 	"cause",
+	"classifiedBy",
+	"evidence",
 	"hostStallMs",
 	"latched",
 	"outcome",
@@ -172,7 +190,10 @@ describe.each(CONSUMERS)("probeVersion telemetry: %s (#1501)", (tool) => {
 
 		expect(await client.ensureAvailable()).toBe(false);
 		const records = decisionsFor(tool);
-		expect(records).toHaveLength(1);
+		// TWO rows since #1500: the probe's verdict, then the durable-absence
+		// ASSERTION that follows the install path. The second one used to be
+		// silent — the tool went quiet for the session with nothing to audit.
+		expect(records).toHaveLength(2);
 		expect(metadataOf(records[0])).toMatchObject({
 			tool,
 			verdict: "unavailable",
@@ -180,8 +201,29 @@ describe.each(CONSUMERS)("probeVersion telemetry: %s (#1501)", (tool) => {
 			cause: "not-found",
 			latched: true,
 			budgetMs: 5000,
+			classifiedBy: "probe",
 		});
 		expect(Object.keys(metadataOf(records[0])).sort()).toEqual(BASELINE_KEYS);
+
+		// The assertion row has no probe of its own: no budget, no stall, and its
+		// evidence describes the install rather than a spawn result.
+		expect(metadataOf(records[1])).toMatchObject({
+			tool,
+			verdict: "unavailable",
+			outcome: "missing",
+			cause: "not-found",
+			latched: true,
+			classifiedBy: "caller",
+		});
+		expect(Object.keys(metadataOf(records[1])).sort()).toEqual([
+			"cause",
+			"classifiedBy",
+			"evidence",
+			"latched",
+			"outcome",
+			"tool",
+			"verdict",
+		]);
 	});
 
 	it("a transient verdict carries retryAfterMs at log time", async () => {

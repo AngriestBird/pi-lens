@@ -35,6 +35,7 @@ import {
 	classifyProbeFailure,
 	createAvailabilityChecker,
 	createAvailabilityLatch,
+	describeProbeEvidence,
 	logAvailabilityDecision,
 	startHostStallSampler,
 	resolveAvailableOrInstall,
@@ -443,12 +444,17 @@ async function tryEslintFix(filePath: string, cwd: string): Promise<number> {
 					latched: true,
 					hostStallMs,
 					budgetMs: ESLINT_FIX_PROBE_BUDGET_MS,
+					classifiedBy: "probe",
+					evidence: describeProbeEvidence(check, "eslint"),
 				},
 				decisionCwd,
 			);
 		} else {
 			cached.bin = null;
-			const { outcome, cause } = classifyProbeFailure(check, { hostStallMs });
+			const { outcome, cause, evidence } = classifyProbeFailure(check, {
+				hostStallMs,
+				command: "eslint",
+			});
 			const retryAfterMs = cached.latch.noteUnavailable(outcome, cause);
 			logAvailabilityDecision(
 				{
@@ -461,6 +467,8 @@ async function tryEslintFix(filePath: string, cwd: string): Promise<number> {
 					hostStallMs,
 					...(retryAfterMs > 0 && { retryAfterMs }),
 					budgetMs: ESLINT_FIX_PROBE_BUDGET_MS,
+					classifiedBy: "probe",
+					evidence,
 				},
 				decisionCwd,
 			);

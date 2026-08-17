@@ -37,9 +37,11 @@ import {
 	type AvailabilityCause,
 	type AvailabilityLatch,
 	type AvailabilityOutcome,
+	type ProbeEvidence,
 	type ProbeFailureShape,
 	classifyProbeFailure,
 	createAvailabilityLatch,
+	describeProbeEvidence,
 	isLatchingOutcome,
 	logAvailabilityDecision,
 	startHostStallSampler,
@@ -55,6 +57,7 @@ export type {
 export {
 	createAvailabilityLatch,
 	classifyProbeFailure,
+	describeProbeEvidence,
 	describeUnavailability,
 	isTransientDecision,
 	logAvailabilityDecision,
@@ -417,6 +420,9 @@ export function createAvailabilityChecker(
 			cause: AvailabilityCause;
 			elapsedMs: number;
 			hostStallMs?: number;
+			/** How the outcome was reached, and the facts behind it (#1500). */
+			classifiedBy?: "probe" | "caller";
+			evidence?: ProbeEvidence;
 		},
 	): void {
 		cache.available = verdict.available;
@@ -446,6 +452,10 @@ export function createAvailabilityChecker(
 				cause: verdict.cause,
 				elapsedMs: verdict.elapsedMs,
 				latched: verdict.available || isLatchingOutcome(verdict.outcome),
+				...(verdict.classifiedBy !== undefined && {
+					classifiedBy: verdict.classifiedBy,
+				}),
+				...(verdict.evidence !== undefined && { evidence: verdict.evidence }),
 				...(verdict.hostStallMs !== undefined && {
 					hostStallMs: verdict.hostStallMs,
 				}),
@@ -494,6 +504,9 @@ export function createAvailabilityChecker(
 					outcome: "success",
 					cause: "fast-path",
 					elapsedMs: 0,
+					// Caller-asserted, and justifiably: an on-disk shim IS the tool, so
+					// there is no spawn to derive anything from (#1500).
+					classifiedBy: "caller",
 				});
 				return true;
 			}
@@ -509,6 +522,9 @@ export function createAvailabilityChecker(
 						outcome: "non-installable",
 						cause: "bad-cwd",
 						elapsedMs: 0,
+						// The workspace is gone. Asserted from a stat, not a probe, and it
+						// must never read as "the tool is missing" (#1500).
+						classifiedBy: "caller",
 					});
 					return false;
 				}
@@ -518,6 +534,7 @@ export function createAvailabilityChecker(
 					outcome: "non-installable",
 					cause: "bad-cwd",
 					elapsedMs: 0,
+					classifiedBy: "caller",
 				});
 				return false;
 			}
@@ -550,11 +567,13 @@ export function createAvailabilityChecker(
 					cause: "ok",
 					elapsedMs,
 					hostStallMs,
+					classifiedBy: "probe",
+					evidence: describeProbeEvidence(result),
 				});
 				return true;
 			}
 
-			const { outcome, cause } = classifyProbeFailure(result, {
+			const { outcome, cause, evidence } = classifyProbeFailure(result, {
 				hostStallMs,
 				unclassifiedFailureOutcome: options.unclassifiedFailureOutcome,
 			});
@@ -568,6 +587,8 @@ export function createAvailabilityChecker(
 				cause,
 				elapsedMs,
 				hostStallMs,
+				classifiedBy: "probe",
+				evidence,
 			});
 			return false;
 		})().finally(() => {
@@ -694,6 +715,8 @@ export function createCwdCachedProbe(
 			cause: AvailabilityCause;
 			elapsedMs: number;
 			hostStallMs: number;
+			/** What the spawn returned, for the record's audit trail (#1500). */
+			evidence?: ProbeEvidence;
 		},
 	): void {
 		let retryAfterMs: number | undefined;
@@ -714,6 +737,9 @@ export function createCwdCachedProbe(
 				hostStallMs: verdict.hostStallMs,
 				...(retryAfterMs !== undefined && { retryAfterMs }),
 				...(options.budgetMs !== undefined && { budgetMs: options.budgetMs }),
+				// Every verdict here is derived from the probe this seam just ran.
+				classifiedBy: "probe",
+				...(verdict.evidence !== undefined && { evidence: verdict.evidence }),
 			},
 			key,
 		);
@@ -760,12 +786,14 @@ export function createCwdCachedProbe(
 					cause: "ok",
 					elapsedMs,
 					hostStallMs,
+					evidence: describeProbeEvidence(result, options.tool),
 				});
 				return true;
 			}
 
-			const { outcome, cause } = classifyProbeFailure(shape, {
+			const { outcome, cause, evidence } = classifyProbeFailure(shape, {
 				hostStallMs,
+				command: options.tool,
 				unclassifiedFailureOutcome: options.unclassifiedFailureOutcome,
 			});
 			note(latch, key, {
@@ -774,6 +802,7 @@ export function createCwdCachedProbe(
 				cause,
 				elapsedMs,
 				hostStallMs,
+				evidence,
 			});
 			return false;
 		})().finally(() => {

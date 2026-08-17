@@ -137,6 +137,37 @@ describe("eslint autofix availability latch (#1494)", () => {
 		expect(decision?.hostStallMs).toBeGreaterThanOrEqual(500);
 	});
 
+	it("records how the verdict was classified and what the probe returned", async () => {
+		// The other half of #1500's leftover: this row landed with no
+		// `classifiedBy` and no `evidence` while every other consumer's carried both.
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+			args.includes("--version")
+				? {
+						stdout: "",
+						stderr: "",
+						status: null,
+						error: Object.assign(new Error("spawn eslint ENOENT"), {
+							code: "ENOENT",
+						}),
+						failure: "spawn",
+						spawnFailure: { kind: "tool-not-found" },
+					}
+				: { error: null, status: 0, stdout: "", stderr: "" },
+		);
+
+		expect((await fix()).fixedCount).toBe(0);
+		expect(
+			logLatencySpy.mock.calls
+				.map((call) => call[0])
+				.find((entry) => entry?.phase === "availability_decision")?.metadata,
+		).toMatchObject({
+			tool: "eslint",
+			outcome: "missing",
+			classifiedBy: "probe",
+			evidence: { command: "eslint", errno: "ENOENT" },
+		});
+	});
+
 	it("latches a genuinely missing eslint and stops probing", async () => {
 		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
 			args.includes("--version")
