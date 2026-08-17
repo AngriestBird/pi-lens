@@ -161,13 +161,25 @@ export function grammarBlockReason(
 	return block?.blocked(rt) ? block.reason : null;
 }
 
+export interface GrammarDownloadResult {
+	ok: boolean;
+	/**
+	 * Whether a later attempt might succeed. `false` only for a DURABLE
+	 * verdict — the CDN itself said this wasm doesn't exist (404/410), which a
+	 * retry cannot fix. Every other failure (network error, timeout, DNS,
+	 * 5xx, a rate limit) says nothing durable about the grammar and is
+	 * retryable (#1536 review F4). Always `true` when `ok` is `true`.
+	 */
+	retryable: boolean;
+}
+
 /**
  * Fetch one grammar wasm into `destDir`, staged and renamed via
- * `atomic-write.ts` so a reader never sees a half-written wasm. Returns true
- * on success. Never throws — a failed fetch (offline, 4xx) degrades to "grammar
- * unavailable" so callers can decide how to handle it. A grammar that crashes the
- * runtime is protected at LOAD time (BLOCKED_GRAMMARS / grammarBlockReason), not
- * by refusing to download it.
+ * `atomic-write.ts` so a reader never sees a half-written wasm. Never
+ * throws — a failed fetch (offline, 4xx) degrades to "grammar unavailable"
+ * so callers can decide how to handle it. A grammar that crashes the runtime
+ * is protected at LOAD time (BLOCKED_GRAMMARS / grammarBlockReason), not by
+ * refusing to download it.
  *
  * #1217: the staging name used to be hand-rolled `.${filename}.${pid}.tmp` —
  * per-process, so two concurrent fetches of one grammar shared a staging inode
@@ -175,20 +187,38 @@ export function grammarBlockReason(
  * which made that hard to reach through the runtime path but did not cover
  * direct callers.
  */
-export async function downloadGrammar(
+export async function downloadGrammarDetailed(
 	destDir: string,
 	filename: string,
-): Promise<boolean> {
+): Promise<GrammarDownloadResult> {
 	try {
 		fs.mkdirSync(destDir, { recursive: true });
 		const res = await fetch(grammarSourceUrl(filename));
-		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		if (!res.ok) {
+			// 404/410: the CDN has authoritatively answered "this wasm does not
+			// exist at this URL" — a retry hits the same answer. Every other
+			// non-ok status (429, 5xx, a captive-portal 200-shaped error page
+			// this branch never reaches since res.ok gates it) is retryable.
+			const retryable = res.status !== 404 && res.status !== 410;
+			return { ok: false, retryable };
+		}
 		const data = Buffer.from(await res.arrayBuffer());
 		// bestEffort: false — a swallowed write failure would return true for a
 		// grammar that never landed.
 		writeFileAtomic(path.join(destDir, filename), data, { bestEffort: false });
-		return true;
+		return { ok: true, retryable: true };
 	} catch {
-		return false;
+		// A thrown fetch (offline, DNS failure, aborted, ECONNRESET) or a write
+		// failure is transient by construction — the CDN never got to answer.
+		return { ok: false, retryable: true };
 	}
+}
+
+/** Back-compat boolean-only wrapper for callers that only need pass/fail
+ * (the postinstall script, prewarm-grammars test helper). */
+export async function downloadGrammar(
+	destDir: string,
+	filename: string,
+): Promise<boolean> {
+	return (await downloadGrammarDetailed(destDir, filename)).ok;
 }
