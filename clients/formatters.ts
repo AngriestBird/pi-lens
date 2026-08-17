@@ -10,6 +10,7 @@
  */
 
 import { logExtension } from "./extension-log.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { BoundedLruCache } from "./bounded-cache.js";
@@ -239,20 +240,153 @@ const whichLatchByCommand = new Map<
  */
 const whichTransientCommands = new Set<string>();
 
+/**
+ * The binaries `which()` was asked about inside the current `detect()` call
+ * (#1539).
+ *
+ * This replaces the `command[0]` approximation the poison guard used to run on.
+ * `command[0]` is the formatter's own binary, which is exact for most
+ * `detect()`s and wrong for the ones that consult a second binary — and the
+ * "extras are harmless" argument does not hold: `rustfmt` answering a GENUINE
+ * absence while `which rustup` stalls skips the lazy install and leaves nothing
+ * in the transient set for `command[0]` to match. Recording the actual probes
+ * makes the guard exact in both directions: it also stops a leftover transient
+ * verdict for some other pass's binary from being blamed on this decision.
+ *
+ * `AsyncLocalStorage` because `detect()` is async and two selection passes can
+ * be in flight at once (`tests/clients/formatters-which-latch.test.ts` runs
+ * exactly that); a module-level set would let one pass's probes leak into the
+ * other's verdict. Built eagerly — unlike `extension-log.ts`'s lazy console
+ * capture, this store is entered on every detection pass, so there is no window
+ * where paying for it is avoidable.
+ */
+const probedCommandsStorage = new AsyncLocalStorage<Set<string>>();
+
+/**
+ * How a single candidate was eliminated — the per-candidate CAUSE the selection
+ * pass needs and a boolean `detect()` cannot carry (#1539).
+ *
+ * `unreachable` is the one that matters: it means the candidate was never
+ * actually asked, so neither "it won" nor "it lost" is a fact about this
+ * project.
+ */
+type CandidateVerdict = "available" | "missing" | "unreachable";
+
+interface CandidateOutcome {
+	name: string;
+	verdict: CandidateVerdict;
+	/** Binaries this candidate probed whose verdict is currently transient. */
+	stalledCommands: string[];
+}
+
+/**
+ * Run one candidate's `detect()` and read the per-candidate verdict back out of
+ * the PATH latch (#1539). `detected` is the plain boolean the caller still needs
+ * for selection; `verdict` is why.
+ */
+async function detectCandidate(
+	formatter: FormatterInfo,
+	cwd: string,
+): Promise<{ detected: boolean; error?: unknown; outcome: CandidateOutcome }> {
+	const probed = new Set<string>();
+	let detected = false;
+	let error: unknown;
+	try {
+		detected = await probedCommandsStorage.run(probed, () =>
+			formatter.detect(cwd),
+		);
+	} catch (err) {
+		// A `detect()` that threw still probed whatever it probed first, and those
+		// probes are the fact the guard needs. Swallowing them here would let a
+		// stall inside a throwing detection cache as a clean "not this project".
+		error = err;
+	}
+	const stalledCommands = [...probed].filter((command) =>
+		whichTransientCommands.has(command),
+	);
+	return {
+		detected,
+		...(error !== undefined && { error }),
+		outcome: {
+			name: formatter.name,
+			verdict: detected
+				? "available"
+				: stalledCommands.length > 0
+					? "unreachable"
+					: "missing",
+			stalledCommands,
+		},
+	};
+}
+
 /** Drop the PATH verdicts, so a newly installed binary is visible at once. */
 function resetWhichLatches(): void {
 	whichLatchByCommand.clear();
 	whichTransientCommands.clear();
+	cooldownRecordedForRetryAtMs.clear();
+}
+
+/**
+ * Last `retryAtMs` a cooldown-served record was emitted for, per command.
+ *
+ * The bound (#1539): the memo branch used to return before
+ * `logAvailabilityDecision`, so a formatter held off by a transient cooldown
+ * produced ONE record for arbitrarily many decisions — a reader counting
+ * `availability_decision` rows undercounted how long it had been off. Logging
+ * every cache hit is not an option either: this seam is consulted per save.
+ * One extra row per cooldown WINDOW is the compromise, and `retryAtMs` is the
+ * window's identity, so the ladder itself does the rate limiting.
+ */
+const cooldownRecordedForRetryAtMs = new Map<string, number>();
+
+/**
+ * Record that a still-cooling verdict was served from the latch, at most once
+ * per cooldown window (#1539's second defect).
+ */
+function noteCooldownServedVerdict(
+	command: string,
+	latch: AvailabilityLatch,
+): void {
+	if (latch.getOutcome() !== "transient") return;
+	const retryAtMs = latch.getRetryAtMs();
+	if (retryAtMs <= 0) return;
+	if (cooldownRecordedForRetryAtMs.get(command) === retryAtMs) return;
+	cooldownRecordedForRetryAtMs.set(command, retryAtMs);
+	const cause = latch.getCause();
+	if (cause === null) {
+		// `getOutcome() === "transient"` is only ever set by `noteUnavailable` in
+		// the same call that sets `cause`. Assert rather than invent a plausible
+		// default: a fabricated cause here would mislabel WHY this formatter is
+		// off, in the exact record this fix exists to make honest (#1535's rule).
+		throw new Error(
+			`formatter which latch: transient outcome with no cause for ${command} (invariant violated)`,
+		);
+	}
+	logAvailabilityDecision({
+		tool: command,
+		verdict: "unavailable",
+		outcome: "transient",
+		cause,
+		elapsedMs: 0,
+		latched: false,
+		retryAfterMs: Math.max(1, retryAtMs - Date.now()),
+		budgetMs: WHICH_BUDGET_MS,
+		servedFromCooldown: true,
+	});
 }
 
 async function which(command: string): Promise<string | null> {
+	probedCommandsStorage.getStore()?.add(command);
 	let entry = whichLatchByCommand.get(command);
 	if (!entry) {
 		entry = { latch: createAvailabilityLatch(), resolved: null };
 		whichLatchByCommand.set(command, entry);
 	}
 	const memo = entry.latch.read();
-	if (memo !== null) return memo ? entry.resolved : null;
+	if (memo !== null) {
+		if (!memo) noteCooldownServedVerdict(command, entry.latch);
+		return memo ? entry.resolved : null;
+	}
 
 	const stallSampler = startHostStallSampler();
 	const startedAt = Date.now();
@@ -272,6 +406,7 @@ async function which(command: string): Promise<string | null> {
 		entry.resolved = resolved;
 		entry.latch.noteAvailable();
 		whichTransientCommands.delete(command);
+		cooldownRecordedForRetryAtMs.delete(command);
 		logAvailabilityDecision({
 			tool: command,
 			verdict: "available",
@@ -309,6 +444,9 @@ async function which(command: string): Promise<string | null> {
 	const retryAfterMs = entry.latch.noteUnavailable(outcome, cause);
 	if (outcome === "transient") whichTransientCommands.add(command);
 	else whichTransientCommands.delete(command);
+	// A fresh probe opens a new cooldown window (or ends the cooldown), so the
+	// next cache hit is entitled to its own record.
+	cooldownRecordedForRetryAtMs.delete(command);
 	logAvailabilityDecision({
 		tool: command,
 		verdict: "unavailable",
@@ -1355,6 +1493,13 @@ export async function getFormattersForFile(
 		: matching;
 
 	let selected: FormatterInfo | undefined;
+	/**
+	 * One entry per candidate this pass actually ASKED, in the order it asked
+	 * them (#1539). Candidates eliminated without a probe — an explicit-config
+	 * decision is pure filesystem — contribute nothing, which is the point: a
+	 * decision that never probed cannot have been degraded by a probe.
+	 */
+	const candidateOutcomes: CandidateOutcome[] = [];
 	if (formatterPolicy) {
 		const explicitlyConfigured = candidateFormatters.filter((formatter) =>
 			hasExplicitFormatterConfig(formatter.name, cwd, ext),
@@ -1378,27 +1523,39 @@ export async function getFormattersForFile(
 				const autoInstallToolId = getAutoInstallToolIdForFormatter(
 					smartDefaultFormatter.name,
 				);
-				if (autoInstallToolId || (await smartDefaultFormatter.detect(cwd))) {
+				if (autoInstallToolId) {
 					selected = smartDefaultFormatter;
+				} else {
+					const { detected, error, outcome } = await detectCandidate(
+						smartDefaultFormatter,
+						cwd,
+					);
+					candidateOutcomes.push(outcome);
+					// This branch never caught a throwing detection, and still
+					// does not: `detectCandidate` catches only so the probes survive.
+					if (error !== undefined) throw error;
+					if (detected) selected = smartDefaultFormatter;
 				}
 			}
 		}
 	} else {
 		for (const formatter of candidateFormatters) {
-			try {
-				if (await formatter.detect(cwd)) {
-					selected = formatter;
-					break;
-				}
-			} catch (err) {
+			const { detected, error, outcome } = await detectCandidate(formatter, cwd);
+			candidateOutcomes.push(outcome);
+			if (error !== undefined) {
 				// pi-lens-ignore: missing-error-propagation — optional formatter detection, skip on failure
 				logExtension({
 					subsystem: "format",
 					message: `Detection failed for ${formatter.name}: ${
-						err instanceof Error ? err.message : String(err)
+						error instanceof Error ? error.message : String(error)
 					}`,
 					metadata: { formatter: formatter.name, cwd },
 				});
+				continue;
+			}
+			if (detected) {
+				selected = formatter;
+				break;
 			}
 		}
 	}
@@ -1408,29 +1565,48 @@ export async function getFormattersForFile(
 	// PATH probe was timing out is not a finding about this project. Caching it
 	// would survive until a config file's mtime or size changed, so leave the
 	// cache untouched and let the next turn re-detect.
-	// Which of THIS file's candidates are currently un-answered? Scoped to the
-	// candidates' own binaries, so a stalled `which rustfmt` cannot stop a shell
-	// or Python detection from caching (#1495 review).
+	// Which of THIS file's candidates are currently un-answered? Read off the
+	// binaries the candidates' own `detect()`s actually probed (#1539), so a
+	// stalled `which rustfmt` cannot stop a shell or Python detection from
+	// caching (#1495 review) AND a leftover transient verdict for a binary this
+	// pass never consulted cannot be blamed on this decision.
 	//
-	// Residual: a formatter whose detection consults MORE than `command[0]` is
-	// matched on that primary only, and the extras come in two shapes.
-	//   * Install fallbacks — `rustfmt`→`rustup`, `csharpier`→`dotnet`. Harmless
-	//     here: they are reached only after the primary already answered, so the
-	//     primary is in the transient set whenever the answer was not real.
-	//   * Co-equal ALTERNATIVES — psscriptanalyzer-format's `pwsh` ?? `powershell`,
-	//     oxfmt's global `vp`. Neither is `command[0]`, so a stall on the
-	//     alternative alone still yields an empty result this guard will cache.
-	// That second shape is tracked with the degraded-selection work in #1539, and
-	// `tests/clients/formatter-probe-commands.test.ts` fails if a new formatter
-	// grows an extra probed binary without being accounted for.
-	const stalledCandidateCommands = candidateFormatters
-		.map((formatter) => formatter.command[0])
-		.filter((command) => command && whichTransientCommands.has(command));
+	// This replaces the `command[0]` approximation, which missed both shapes of
+	// extra probe: a co-equal ALTERNATIVE (`pwsh` ?? `powershell`) and — the
+	// case the old comment wrongly called harmless — an install FALLBACK reached
+	// after the primary answered a GENUINE absence. `rustfmt` missing plus a
+	// stalled `which rustup` skips the lazy install, and nothing named `rustfmt`
+	// is transient, so the empty result used to cache for the session.
+	const stalledCandidateCommands = [
+		...new Set(candidateOutcomes.flatMap((outcome) => outcome.stalledCommands)),
+	];
 	const poisonedByTransientProbe =
 		enabled.length === 0 && stalledCandidateCommands.length > 0;
 
+	// A NON-empty result the poison guard cannot see (#1539): the winner won only
+	// because a candidate ahead of it was never asked. `candidateOutcomes` is in
+	// ask order and the loop stops at the winner, so every entry before the
+	// winner's is a candidate that lost — and an `unreachable` one did not lose
+	// on the merits. Caching this would hand the session to the runner-up until
+	// a config file's mtime or size changed.
+	const winnerIndex = selected
+		? candidateOutcomes.findIndex((outcome) => outcome.name === selected.name)
+		: -1;
+	const unreachablePreferred = candidateOutcomes
+		.slice(0, winnerIndex === -1 ? 0 : winnerIndex)
+		.filter((outcome) => outcome.verdict === "unreachable")
+		.map((outcome) => outcome.name);
+	const degradedSelection = unreachablePreferred.length > 0;
+
 	let selectionReason: string;
-	if (!selected) {
+	if (poisonedByTransientProbe) {
+		selectionReason = "probe-timeout";
+	} else if (degradedSelection) {
+		// The reason now describes how the winner WON, not just what the config
+		// looks like. "explicit-config" on a selection whose preferred candidate
+		// was never reachable was the most misleading record in this seam.
+		selectionReason = "preferred-unreachable";
+	} else if (!selected) {
 		selectionReason = "none";
 	} else if (!formatterPolicy) {
 		selectionReason = "detect";
@@ -1441,6 +1617,7 @@ export async function getFormattersForFile(
 			? "explicit-config"
 			: "smart-default";
 	}
+	const provisional = poisonedByTransientProbe || degradedSelection;
 	logLatency({
 		type: "phase",
 		phase: "formatter_selected",
@@ -1448,16 +1625,20 @@ export async function getFormattersForFile(
 		durationMs: 0,
 		metadata: {
 			formatter: selected?.name ?? null,
-			reason: poisonedByTransientProbe ? "probe-timeout" : selectionReason,
+			reason: selectionReason,
 			cwd,
-			...(poisonedByTransientProbe && {
+			...(provisional && {
 				cached: false,
 				stalledProbes: stalledCandidateCommands,
 			}),
+			...(degradedSelection && { unreachablePreferred }),
 		},
 	});
 
-	if (poisonedByTransientProbe) return enabled;
+	// Provisional either way: not cached, so the next pass re-detects once the
+	// cooldown expires and the preferred formatter's recovery takes effect
+	// without waiting on a config-file edit.
+	if (provisional) return enabled;
 
 	// Store the list of enabled formatter names in cache
 	const enabledNames = enabled.map((f) => f.name);
