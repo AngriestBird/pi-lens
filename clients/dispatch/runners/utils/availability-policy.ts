@@ -44,7 +44,8 @@ export type AvailabilityCause =
 	| "host-stall"
 	| "probe-rejected"
 	| "bad-cwd"
-	| "policy-denied";
+	| "policy-denied"
+	| "empty-result";
 
 export interface AvailabilityDecision {
 	tool: string;
@@ -93,11 +94,20 @@ export function isLatchingOutcome(outcome: AvailabilityOutcome): boolean {
 export function transientRetryDelayMs(
 	attempts: number,
 	cause: AvailabilityCause,
+	/**
+	 * Override for `TRANSIENT_MAX_COOLDOWN_MS`. A caller whose own respawn
+	 * cadence is shorter than the shared 5-minute ceiling (e.g. an LSP auxiliary
+	 * whose idle reset recycles the process well before the ladder maxes out)
+	 * must cap its own ladder below that cadence — otherwise a respawn can land
+	 * inside a still-cooling-down cache window and start silently offline
+	 * (#1535).
+	 */
+	maxCooldownMs: number = TRANSIENT_MAX_COOLDOWN_MS,
 ): number {
 	if (cause === "host-stall") return HOST_STALL_COOLDOWN_MS;
 	const exponent = Math.max(0, attempts - 1);
 	return Math.min(
-		TRANSIENT_MAX_COOLDOWN_MS,
+		maxCooldownMs,
 		TRANSIENT_BASE_COOLDOWN_MS * 2 ** Math.min(exponent, 10),
 	);
 }
@@ -216,12 +226,25 @@ export interface AvailabilityLatch {
 	getRetryAtMs(): number;
 }
 
-export function createAvailabilityLatch(): AvailabilityLatch {
+export interface AvailabilityLatchOptions {
+	/**
+	 * Cap on the transient cooldown ladder, ms. Defaults to the shared
+	 * `TRANSIENT_MAX_COOLDOWN_MS` (5 min). Pass a lower value when this latch's
+	 * own process respawns on a shorter cadence, so the ladder can never
+	 * outlive it (see `transientRetryDelayMs`'s `maxCooldownMs` doc, #1535).
+	 */
+	maxCooldownMs?: number;
+}
+
+export function createAvailabilityLatch(
+	options: AvailabilityLatchOptions = {},
+): AvailabilityLatch {
 	let available: boolean | null = null;
 	let outcome: AvailabilityOutcome | null = null;
 	let cause: AvailabilityCause | null = null;
 	let retryAtMs = 0;
 	let transientAttempts = 0;
+	const maxCooldownMs = options.maxCooldownMs ?? TRANSIENT_MAX_COOLDOWN_MS;
 
 	return {
 		read(): boolean | null {
@@ -248,7 +271,11 @@ export function createAvailabilityLatch(): AvailabilityLatch {
 				return 0;
 			}
 			transientAttempts += 1;
-			const delay = transientRetryDelayMs(transientAttempts, nextCause);
+			const delay = transientRetryDelayMs(
+				transientAttempts,
+				nextCause,
+				maxCooldownMs,
+			);
 			retryAtMs = Date.now() + delay;
 			return delay;
 		},

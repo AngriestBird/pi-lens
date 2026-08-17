@@ -44,6 +44,7 @@ import {
 } from "../../clients/degradation-ledger.js";
 import {
 	_resetZizmorTokenCacheForTests,
+	resetZizmorTokenAvailability,
 	resolveZizmorGitHubToken,
 } from "../../clients/zizmor-config.js";
 
@@ -72,6 +73,24 @@ const notAuthenticatedResult = {
 	stdout: "",
 	stderr: "not logged in\n",
 	status: 1,
+	error: undefined,
+};
+
+/** `gh` genuinely isn't on PATH at all. */
+const missingResult = {
+	stdout: "",
+	stderr: "",
+	status: null,
+	error: Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" }),
+	failure: "spawn" as const,
+	spawnFailure: { kind: "tool-not-found" },
+};
+
+/** `gh` ran to completion, exit 0, but answered with nothing. */
+const emptyTokenResult = {
+	stdout: "\n",
+	stderr: "",
+	status: 0,
 	error: undefined,
 };
 
@@ -209,5 +228,155 @@ describe("offline-mode degradation observability (#1535, #1459)", () => {
 		// unexpected happened, so nothing should be recorded for it.
 		const summary = getDegradationSummary();
 		expect(summary.find((g) => g.kind === "mode-suppression")).toBeUndefined();
+	});
+
+	it("bounds repeated transient degradations to one updated entry (AGENTS.md:144-150)", async () => {
+		// The bare `recordDegradation` call the first review round shipped would
+		// push a distinct entry every cycle; the shared ledger caps retained
+		// entries per kind at 20, so 5 near-identical "gh auth token probe
+		// probe-timeout" lines would all survive and clutter the health view.
+		// `incrementDegradationCount` keeps exactly one updated entry per
+		// subject while still counting every occurrence.
+		safeSpawnAsync.mockResolvedValue(timeoutResult);
+		for (let i = 0; i < 5; i++) {
+			await resolveZizmorGitHubToken();
+			// Jump well past the (capped) cooldown so every cycle is a fresh probe.
+			vi.setSystemTime(new Date(Date.now() + 130_000));
+		}
+
+		const summary = getDegradationSummary();
+		const group = summary.find((g) => g.kind === "mode-suppression");
+		expect(group).toBeDefined();
+		// Every cycle contributed to the count...
+		expect(group?.count).toBe(5);
+		// ...but only one entry for "zizmor" is retained, not five.
+		const zizmorEntries = group?.latestReasons.filter(
+			(entry) => entry.subject === "zizmor",
+		);
+		expect(zizmorEntries).toHaveLength(1);
+	});
+});
+
+describe("session-boundary reset (#1535 P1)", () => {
+	it("forgets a durable verdict at session_start, so a fresh session re-probes", async () => {
+		safeSpawnAsync.mockResolvedValue(notAuthenticatedResult);
+		expect(await resolveZizmorGitHubToken()).toBeUndefined();
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+
+		// Within the same process, the durable "not authenticated" verdict must
+		// stay cached — this is the P2 non-installable/probe-rejected contract.
+		expect(await resolveZizmorGitHubToken()).toBeUndefined();
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+
+		// Simulate `session_start` (clients/runtime-session.ts calls this
+		// alongside the sibling #1266 resetDispatchAvailabilityState reset): the
+		// user ran `gh auth login` in between sessions. Pre-fix, nothing ever
+		// called a reset for this latch outside the test hook, so the stale "no
+		// token" verdict from the PREVIOUS session would still answer here.
+		resetZizmorTokenAvailability();
+		safeSpawnAsync.mockResolvedValue(okResult("gho_after_login"));
+		expect(await resolveZizmorGitHubToken()).toBe("gho_after_login");
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("gh answered but had nothing to say (#1535 P2)", () => {
+	it("treats exit-0/empty-stdout as a durable 'no token' verdict, never as success", async () => {
+		safeSpawnAsync.mockResolvedValue(emptyTokenResult);
+
+		expect(await resolveZizmorGitHubToken()).toBeUndefined();
+		const records = tokenDecisions();
+		expect(records).toHaveLength(1);
+		// The pre-fix branch called noteAvailable()/logged verdict:"available"
+		// here regardless of whether stdout was empty — the telemetry claimed
+		// the online audits ran while zizmor was actually about to launch
+		// offline (the #1535 silence moved into the log instead of being fixed).
+		expect(records[0].metadata).toMatchObject({
+			verdict: "unavailable",
+			outcome: "non-installable",
+			cause: "empty-result",
+			latched: true,
+		});
+
+		// A durable, well-understood "no token" answer is safe to cache.
+		expect(await resolveZizmorGitHubToken()).toBeUndefined();
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+	});
+
+	it("latches a genuinely-absent gh (tool-not-found) as durable, not transient", async () => {
+		safeSpawnAsync.mockResolvedValue(missingResult);
+
+		expect(await resolveZizmorGitHubToken()).toBeUndefined();
+		const records = tokenDecisions();
+		expect(records).toHaveLength(1);
+		expect(records[0].metadata).toMatchObject({
+			outcome: "missing",
+			cause: "not-found",
+			latched: true,
+		});
+
+		expect(await resolveZizmorGitHubToken()).toBeUndefined();
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("the silent-cooldown path is now visible (#1535 P2)", () => {
+	it("logs and counts a degradation on a cache-served transient verdict, not just on the probe", async () => {
+		safeSpawnAsync.mockResolvedValue(timeoutResult);
+
+		expect(await resolveZizmorGitHubToken()).toBeUndefined();
+		expect(tokenDecisions()).toHaveLength(1);
+		const afterProbe = getDegradationSummary().find(
+			(g) => g.kind === "mode-suppression",
+		)?.count;
+		expect(afterProbe).toBe(1);
+
+		// Still inside the cooldown: served straight from the latch, no new
+		// `gh` spawn. Pre-fix this path was completely silent — a zizmor
+		// respawn landing here would start offline with nothing in
+		// latency.log or the degradation ledger to say so.
+		logLatency.mockClear();
+		expect(await resolveZizmorGitHubToken()).toBeUndefined();
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1); // still no new probe
+		const cachedRecords = tokenDecisions();
+		expect(cachedRecords).toHaveLength(1);
+		expect(cachedRecords[0].metadata).toMatchObject({
+			verdict: "unavailable",
+			outcome: "transient",
+			latched: false,
+		});
+
+		const afterCacheHit = getDegradationSummary().find(
+			(g) => g.kind === "mode-suppression",
+		)?.count;
+		expect(afterCacheHit).toBe(2);
+	});
+});
+
+describe("cooldown ladder stays under zizmor's own respawn cadence (#1535 P2)", () => {
+	it("never logs a retryAfterMs at or above the 240s LSP idle-reset cadence", async () => {
+		safeSpawnAsync.mockResolvedValue(timeoutResult);
+		const seen: number[] = [];
+		for (let i = 0; i < 8; i++) {
+			await resolveZizmorGitHubToken();
+			const last = tokenDecisions().at(-1);
+			const retryAfterMs = (last?.metadata as { retryAfterMs?: number })
+				?.retryAfterMs;
+			if (typeof retryAfterMs === "number") seen.push(retryAfterMs);
+			// Jump well past any capped cooldown so the ladder gets to escalate
+			// on every iteration instead of stalling on a still-live cache hit.
+			vi.setSystemTime(new Date(Date.now() + 130_000));
+		}
+
+		expect(seen.length).toBeGreaterThan(0);
+		for (const delay of seen) {
+			// clients/runtime-turn.ts's default LSP idle reset is 240_000ms — a
+			// cooldown at or above that can outlive the respawn that would
+			// otherwise clear it.
+			expect(delay).toBeLessThan(240_000);
+		}
+		// The ladder still escalates (it isn't just flatly capped at the base
+		// delay from the first attempt).
+		expect(Math.max(...seen)).toBeGreaterThan(TRANSIENT_BASE_COOLDOWN_MS);
 	});
 });

@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { type SpawnResult, safeSpawnAsync } from "./safe-spawn.js";
 import { findLocalToolConfig } from "./path-utils.js";
-import { recordDegradation } from "./degradation-ledger.js";
+import { incrementDegradationCount } from "./degradation-ledger.js";
 import {
 	type AvailabilityCause,
 	type AvailabilityOutcome,
@@ -69,15 +69,37 @@ export function isZizmorAuditTarget(filePath: string): boolean {
 // success. Only a genuine answer (gh ran and returned a real exit code, or is
 // proven absent) latches now; a timeout/stall/unspawnable probe expires on the
 // shared cooldown and is re-probed on the next call.
-const ghTokenLatch = createAvailabilityLatch();
+//
+// The cooldown ladder is capped well below zizmor's own respawn cadence
+// (`clients/runtime-turn.ts`'s 240s LSP idle reset): the shared default cap
+// (`TRANSIENT_MAX_COOLDOWN_MS`, 5 min) would otherwise let a still-cooling
+// verdict outlive a respawn, so the respawn would read the cache instead of
+// re-probing and start silently offline (#1535 review).
+const ZIZMOR_TOKEN_MAX_COOLDOWN_MS = 120_000;
+const ghTokenLatch = createAvailabilityLatch({
+	maxCooldownMs: ZIZMOR_TOKEN_MAX_COOLDOWN_MS,
+});
 let cachedToken: string | undefined;
 
 const GH_TOKEN_PROBE_TIMEOUT_MS = 5000;
 
-/** Test-only: clear the memoized `gh auth token` lookup. */
-export function _resetZizmorTokenCacheForTests(): void {
+/**
+ * Forget the memoized `gh auth token` verdict. Called at `session_start`
+ * (`clients/runtime-session.ts`, alongside the sibling `#1266`
+ * `resetDispatchAvailabilityState` reset) so a user who runs `gh auth login`
+ * and starts a new session doesn't keep reading a stale "no token" answer
+ * from the previous one — the latch is process-lived storage, but its
+ * DURABILITY contract is per-session, matching every other dispatch
+ * availability latch.
+ */
+export function resetZizmorTokenAvailability(): void {
 	ghTokenLatch.reset();
 	cachedToken = undefined;
+}
+
+/** Test-only alias — kept so existing tests don't need a rename. */
+export function _resetZizmorTokenCacheForTests(): void {
+	resetZizmorTokenAvailability();
 }
 
 /**
@@ -133,33 +155,57 @@ async function deriveGhCliToken(): Promise<string | undefined> {
 
 	if (!res.error && res.status === 0) {
 		const token = res.stdout.trim();
-		ghTokenLatch.noteAvailable();
-		logAvailabilityDecision({
-			tool: "zizmor-gh-token",
-			verdict: "available",
-			outcome: "success",
-			cause: "ok",
+		if (token.length > 0) {
+			ghTokenLatch.noteAvailable();
+			logAvailabilityDecision({
+				tool: "zizmor-gh-token",
+				verdict: "available",
+				outcome: "success",
+				cause: "ok",
+				elapsedMs,
+				latched: true,
+				hostStallMs,
+				budgetMs: GH_TOKEN_PROBE_TIMEOUT_MS,
+			});
+			return token;
+		}
+		// `gh` ran cleanly and answered with nothing — a genuine, durable "no
+		// token" verdict (distinct from a rejected/nonzero exit), so it is safe
+		// to cache. Reviewer-caught #1535 gap: the pre-fix version of this
+		// branch called `noteAvailable()` / logged `verdict:"available"` here
+		// regardless of whether `token` was empty, so the record claimed the
+		// online audits ran while zizmor was actually about to launch offline
+		// — the #1535 silence moved into the telemetry instead of being fixed.
+		return recordGhTokenUnavailable(
+			{ outcome: "non-installable", cause: "empty-result" },
 			elapsedMs,
-			latched: true,
 			hostStallMs,
-			budgetMs: GH_TOKEN_PROBE_TIMEOUT_MS,
-		});
-		return token.length > 0 ? token : undefined;
+		);
 	}
 
-	const { outcome, cause } = classifyGhTokenFailure(res, hostStallMs);
+	return recordGhTokenUnavailable(
+		classifyGhTokenFailure(res, hostStallMs),
+		elapsedMs,
+		hostStallMs,
+	);
+}
+
+/**
+ * Shared tail for every "no token" verdict: latches (or cools down) the
+ * memo, records the degradation this causes when it isn't durable-expected,
+ * and logs the decision. Centralized so the empty-answer and failure paths
+ * can't drift on which fields get set.
+ */
+function recordGhTokenUnavailable(
+	{ outcome, cause }: { outcome: AvailabilityOutcome; cause: AvailabilityCause },
+	elapsedMs: number,
+	hostStallMs: number,
+): undefined {
 	const retryAfterMs = ghTokenLatch.noteUnavailable(outcome, cause);
 	if (outcome === "transient") {
-		// The degradation itself: zizmor is about to run offline this turn
-		// (known-vulnerable-actions/unpinned-uses/impostor-commit skipped) NOT
-		// because the token is genuinely absent, but because this one probe
-		// never got a fair hearing. Make that legible instead of letting the
-		// scan silently report "clean" (#1459's security-silence shape).
-		recordDegradation({
-			kind: "mode-suppression",
-			subject: "zizmor",
-			reason: `gh auth token probe ${cause}; running offline this turn, retrying in ${Math.round(retryAfterMs / 1000)}s`,
-		});
+		recordZizmorOfflineDegradation(
+			`gh auth token probe ${cause}; running offline until the next zizmor start (retry allowed in ${Math.round(retryAfterMs / 1000)}s)`,
+		);
 	}
 	logAvailabilityDecision({
 		tool: "zizmor-gh-token",
@@ -176,6 +222,28 @@ async function deriveGhCliToken(): Promise<string | undefined> {
 }
 
 /**
+ * The degradation itself: zizmor is about to run offline
+ * (known-vulnerable-actions/unpinned-uses/impostor-commit skipped) NOT
+ * because the token is genuinely absent, but because a probe never got a
+ * fair hearing (or is still cooling down from one). Make that legible
+ * instead of letting the scan silently report "clean" (#1459's
+ * security-silence shape).
+ *
+ * `incrementDegradationCount` (not the bare `recordDegradation`) per
+ * AGENTS.md's degradation-telemetry convention: every offline spawn across a
+ * cooldown cycle contributes to the exact group count, but the health view
+ * retains only one updated entry per subject instead of five near-identical
+ * lines.
+ */
+function recordZizmorOfflineDegradation(reason: string): void {
+	incrementDegradationCount({
+		kind: "mode-suppression",
+		subject: "zizmor",
+		reason,
+	});
+}
+
+/**
  * Resolve a GitHub token to put zizmor into ONLINE mode, so the audits that need
  * the GitHub API (e.g. `known-vulnerable-actions`, `unpinned-uses`,
  * `impostor-commit`) actually run instead of being silently skipped.
@@ -185,11 +253,17 @@ async function deriveGhCliToken(): Promise<string | undefined> {
  * enables online mode. Those env vars already flow to the spawned server
  * (launchLSP merges `process.env`), so the ONLY gap we close here is the very
  * common case of a user who has authenticated the `gh` CLI but exported no
- * token — we derive one via `gh auth token`. Memoized per process through a
- * transient-aware latch (#1535): only a genuine answer (gh ran and returned
- * an exit code, or is proven absent) is remembered for the session — a
- * timeout/stall/unspawnable probe expires on a cooldown and is re-derived on
- * the next call, so a single slow `gh` can't disable online audits forever.
+ * token — we derive one via `gh auth token`. Memoized per session through a
+ * transient-aware latch (#1535, reset by `resetZizmorTokenAvailability` at
+ * `session_start`): only a genuine answer (gh ran and returned an exit code,
+ * or is proven absent) is remembered — a timeout/stall/unspawnable probe
+ * expires on a cooldown and is re-derived on the next call, so a single slow
+ * `gh` can't disable online audits for the rest of the session.
+ *
+ * Caveat callers should know: this only decides what token a NEW zizmor spawn
+ * receives. A warm zizmor process already has its `GH_TOKEN` set at launch
+ * time (`ZizmorServer.spawn`) and does not re-read it — recovering from a
+ * transient failure means the NEXT spawn goes online, not the current one.
  */
 export async function resolveZizmorGitHubToken(): Promise<string | undefined> {
 	// Respect an explicit offline request — never derive a token then.
@@ -200,7 +274,32 @@ export async function resolveZizmorGitHubToken(): Promise<string | undefined> {
 		process.env.GITHUB_TOKEN;
 	if (fromEnv) return fromEnv;
 	const memo = ghTokenLatch.read();
-	if (memo !== null) return memo ? cachedToken : undefined;
+	if (memo !== null) {
+		if (memo === false && ghTokenLatch.getOutcome() === "transient") {
+			// Served straight from the still-cooling latch: no new probe runs,
+			// so `deriveGhCliToken`'s own logging never fires. Without this, once
+			// the cooldown ladder crosses zizmor's own respawn cadence (bounded
+			// below `TRANSIENT_MAX_COOLDOWN_MS` via `ZIZMOR_TOKEN_MAX_COOLDOWN_MS`
+			// for exactly this reason) a spawn could start offline with nothing
+			// in latency.log or the degradation ledger to say so (#1535 review).
+			const cause = ghTokenLatch.getCause() ?? "probe-timeout";
+			const retryAfterMs = Math.max(0, ghTokenLatch.getRetryAtMs() - Date.now());
+			recordZizmorOfflineDegradation(
+				`gh auth token still cooling down (${cause}); serving cached offline verdict, retry allowed in ${Math.round(retryAfterMs / 1000)}s`,
+			);
+			logAvailabilityDecision({
+				tool: "zizmor-gh-token",
+				verdict: "unavailable",
+				outcome: "transient",
+				cause,
+				elapsedMs: 0,
+				latched: false,
+				...(retryAfterMs > 0 && { retryAfterMs }),
+				budgetMs: GH_TOKEN_PROBE_TIMEOUT_MS,
+			});
+		}
+		return memo ? cachedToken : undefined;
+	}
 	cachedToken = await deriveGhCliToken();
 	return cachedToken;
 }
