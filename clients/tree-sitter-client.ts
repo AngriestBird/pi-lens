@@ -25,6 +25,7 @@ import {
 	recordDegradationOnce,
 } from "./degradation-ledger.js";
 import { loadWebTreeSitter } from "./deps/web-tree-sitter.js";
+import { transientRetryDelayMs } from "./dispatch/runners/utils/availability-policy.js";
 import { getProjectIgnoreMatcher, isExcludedDirName } from "./file-utils.js";
 import {
 	downloadGrammar,
@@ -177,8 +178,25 @@ export class TreeSitterClient {
 	private treeCache: TreeCache;
 	private navigator = new TreeSitterNavigator();
 	private grammarsDir: string;
-	/** In-flight/settled lazy grammar fetches, keyed by wasm filename. */
+	/** In-flight lazy grammar fetches, keyed by wasm filename. Evicted on
+	 * settle (#1536) — a rejected/false attempt must not be remembered as the
+	 * permanent answer for the session; only concurrent demands during the
+	 * SAME probe share it. */
 	private grammarEnsurePromises = new Map<string, Promise<boolean>>();
+	/** Epoch ms before which a failed grammar download is not retried
+	 * (#1536). A transient download failure — offline, DNS hiccup, CDN blip —
+	 * says nothing durable about the grammar, so it gets a bounded cooldown
+	 * (the `transientRetryDelayMs` shape from availability-policy.ts) instead
+	 * of latching for the process lifetime. */
+	private grammarRetryAtMs = new Map<string, number>();
+	/** Consecutive download failures per grammar, for the exponential
+	 * cooldown; reset on success. */
+	private grammarFailureAttempts = new Map<string, number>();
+	/** Grammars whose failure has already reached the user this session — the
+	 * cooldown lets the ensure loop retry silently in the background; only
+	 * the FIRST failure (and any failure after a success reset the streak)
+	 * needs to interrupt the user. */
+	private grammarFailureNotified = new Set<string>();
 	private trustBlockedGrammarNotifications = new Set<string>();
 	private trustNotificationsGeneration = getProjectTrustGeneration();
 	// biome-ignore lint/suspicious/noExplicitAny: Optional dependency loaded dynamically
@@ -545,6 +563,15 @@ export class TreeSitterClient {
 		const inflight = this.grammarEnsurePromises.get(grammarFile);
 		if (inflight) return inflight;
 
+		// A failed download only stays refused for its cooldown window (#1536):
+		// past that, fall through and retry rather than remembering an offline
+		// moment for the life of the process. No download is attempted while the
+		// cooldown is live, so a hard-down CDN is not re-hit on every parse.
+		const retryAt = this.grammarRetryAtMs.get(grammarFile);
+		if (retryAt !== undefined && Date.now() < retryAt) {
+			return false;
+		}
+
 		const task = (async (): Promise<boolean> => {
 			const dir =
 				this.grammarsDir && fs.existsSync(this.grammarsDir)
@@ -556,6 +583,9 @@ export class TreeSitterClient {
 			const ok = await downloadGrammar(dir, grammarFile);
 			if (ok) {
 				if (!this.grammarsDir) this.grammarsDir = dir;
+				this.grammarRetryAtMs.delete(grammarFile);
+				this.grammarFailureAttempts.delete(grammarFile);
+				this.grammarFailureNotified.delete(grammarFile);
 				logTreeSitterDiagnostic({
 					subsystem: "tree-sitter-client",
 					level: "warn",
@@ -563,33 +593,66 @@ export class TreeSitterClient {
 					metadata: { grammarFile, outcome: "fetched" },
 				});
 			} else {
-				// Surface the degradation once per grammar (the promise cache dedupes)
-				// instead of failing silently — otherwise pnpm/bun users offline get
-				// no signal that a language's tree-sitter features are unavailable.
+				// downloadGrammar collapses every failure mode (offline, DNS, a
+				// down CDN, a 404) to `false` — see clients/grammar-source.ts. All
+				// of those are treated as transient here: the cheap fix from #1536
+				// is a bounded cooldown for the whole arm, since a genuinely
+				// unsupported grammar just keeps failing every cooldown window at
+				// negligible cost, while treating a transient blip as durable
+				// disables the language for the rest of the session.
+				const attempts =
+					(this.grammarFailureAttempts.get(grammarFile) ?? 0) + 1;
+				this.grammarFailureAttempts.set(grammarFile, attempts);
+				const retryDelayMs = transientRetryDelayMs(attempts, "probe-timeout");
+				this.grammarRetryAtMs.set(grammarFile, Date.now() + retryDelayMs);
+				const retrySeconds = Math.round(retryDelayMs / 1000);
+
 				const unavailable =
 					`tree-sitter grammar '${grammarFile}' is unavailable — ` +
 					`symbol search, module reports and structural rules for this language will be degraded. ` +
 					`The package manager skipped install scripts and the runtime download failed (offline or CDN unreachable). ` +
-					`Fix: reinstall with a manager that runs postinstall, allow its build scripts ` +
-					`(pnpm approve-builds / bun trustedDependencies), or restore network access.`;
+					`pi-lens will retry automatically in ${retrySeconds}s; if the problem persists, allow the package ` +
+					`manager's build scripts (pnpm approve-builds / bun trustedDependencies) or restore network access.`;
 				logTreeSitterDiagnostic({
 					subsystem: "tree-sitter-client",
 					message: unavailable,
-					metadata: { grammarFile, outcome: "unavailable" },
+					metadata: {
+						grammarFile,
+						outcome: "unavailable",
+						retryable: true,
+						retryDelayMs,
+						attempts,
+					},
 				});
 				recordDegradation({
 					kind: "grammar-blocked",
 					subject: grammarFile,
-					reason: "runtime grammar download failed",
+					reason: `runtime grammar download failed (retryable, retrying in ${retrySeconds}s)`,
 				});
 				// HUMAN-audience: an offline grammar fetch silently degrades this
 				// language's features, so it reaches the user through the HOST's
-				// render path (#1333) rather than a raw terminal write.
-				notifyUserDegradation(`pi-lens: ${unavailable}`);
+				// render path (#1333) rather than a raw terminal write. Once per
+				// failure streak (#1536) — the cooldown above already keeps the
+				// download itself from spamming the CDN, and repeat failures while
+				// still cooling down must not spam the user either.
+				if (!this.grammarFailureNotified.has(grammarFile)) {
+					this.grammarFailureNotified.add(grammarFile);
+					notifyUserDegradation(`pi-lens: ${unavailable}`);
+				}
 			}
 			return ok;
 		})();
 		this.grammarEnsurePromises.set(grammarFile, task);
+		// Evict on settle regardless of outcome (#1536): a resolved TRUE is
+		// superseded by resolveGrammarFile() finding the file on disk on the
+		// next call, and a resolved FALSE must not be remembered as the
+		// permanent verdict — only concurrent callers during the SAME in-flight
+		// attempt should ever observe this promise.
+		task.finally(() => {
+			if (this.grammarEnsurePromises.get(grammarFile) === task) {
+				this.grammarEnsurePromises.delete(grammarFile);
+			}
+		});
 		return task;
 	}
 
