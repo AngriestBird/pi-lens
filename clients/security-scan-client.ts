@@ -145,11 +145,15 @@ export abstract class SecurityScanClient<TResult> {
 	/**
 	 * Record a non-durable unavailability: the verdict expires after a cooldown
 	 * and the next `ensureAvailable` re-probes.
+	 *
+	 * Returns that cooldown in ms so the caller can put it in its decision
+	 * record. A latch you can read in `latency.log` without the retry schedule
+	 * beside it only tells you the tool is off, not when it comes back.
 	 */
 	protected markTransientlyUnavailable(
 		cause: AvailabilityCause = "probe-timeout",
-	): void {
-		this.availabilityLatch.noteUnavailable("transient", cause);
+	): number {
+		return this.availabilityLatch.noteUnavailable("transient", cause);
 	}
 
 	/**

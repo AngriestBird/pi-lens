@@ -12,11 +12,12 @@
 import { createSubsystemLogger } from "./extension-log.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getGlobalPiLensDir, getProjectDataDir } from "./file-utils.js";
+import { getProjectDataDir } from "./file-utils.js";
 import { findNearestMarkerRoot } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import {
 	createAvailabilityChecker,
+	findManagedNodeToolBinary,
 	getManagedToolEnvironment,
 	resolveAvailableOrInstall,
 } from "./dispatch/runners/utils/runner-helpers.js";
@@ -108,31 +109,6 @@ export function readOverridePinnedPackageNames(targetDir: string): Set<string> {
 
 // --- Client ---
 
-/**
- * Managed knip shim on disk, or null. Mirrors jscpd's fast path: when
- * `~/.pi-lens/tools/node_modules/.bin/knip*` exists the tool IS installed, so
- * resolving availability needs no spawn at all — and a spawn that cannot happen
- * cannot time out (#1467).
- */
-function findManagedKnipBinary(): string | null {
-	const base = path.join(
-		getGlobalPiLensDir(),
-		"tools",
-		"node_modules",
-		".bin",
-		"knip",
-	);
-	const candidates =
-		process.platform === "win32"
-			? [`${base}.cmd`, `${base}.exe`, base]
-			: [base];
-	try {
-		return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
-	} catch {
-		return null;
-	}
-}
-
 export class KnipClient {
 	private readonly knipAvailability = createAvailabilityChecker(
 		"knip",
@@ -141,7 +117,7 @@ export class KnipClient {
 		{
 			environment: (cwd) => getManagedToolEnvironment("knip", cwd),
 			unclassifiedFailureOutcome: "missing",
-			fastPath: findManagedKnipBinary,
+			fastPath: () => findManagedNodeToolBinary("knip"),
 		},
 	);
 	/**
