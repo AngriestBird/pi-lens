@@ -1406,6 +1406,17 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// #571: same reconciliation wiring as lens_diagnostics mode=full, for
 			// the standalone on-demand check.
 			() => runtime.nextWriteIndex(),
+			// #1561: and the same confirmed result must retire this file's stale
+			// inline blocker, not only correct the footer. The eviction is logged so
+			// it is confirmable from the runtime log rather than from the absence of
+			// complaints (#1432 Gap 1).
+			(filePath, writeIndex) => {
+				if (runtime.retireInlineBlockerOnConfirmedClean(filePath, writeIndex)) {
+					dbg(
+						`inline_blocker: retired for ${filePath} — lsp_diagnostics confirmed clean (writeIndex ${writeIndex ?? "none"})`,
+					);
+				}
+			},
 		),
 		createSymbolSearchTool(() => runtime.projectRoot),
 		createProjectReportTool(() => runtime.projectRoot),

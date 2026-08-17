@@ -255,6 +255,87 @@ describe("RuntimeCoordinator", () => {
 			}
 		});
 
+		it("keeps re-serving a blocker whose CAUSE was fixed in another file (#1561)", () => {
+			// The live incident: 3 blockers land on a test file, the signature that
+			// caused them is fixed in the provider it imports, and the provider —
+			// not the test file — is what gets re-dispatched. Neither existing
+			// invalidation path (re-dispatch of the SAME path, #1245's existence
+			// check) covers that, so the verdict is never re-taken.
+			const runtime = new RuntimeCoordinator();
+			const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-blocker-crossfile-"));
+			const testFile = path.join(dir, "provider.test.ts");
+			const provider = path.join(dir, "provider.ts");
+			writeFileSync(testFile, "import './provider.ts';\n");
+			writeFileSync(provider, "export const x = 1;\n");
+			try {
+				runtime.recordInlineBlockers(testFile, "🔴 STOP L320", 1);
+				// The fix: the PROVIDER re-dispatches clean. Its own entry clears…
+				runtime.clearInlineBlockers(provider);
+				// …and the test file's stale verdict is still there, by design.
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+
+				// A fresh, confirmed-clean view of the test file must retire it.
+				expect(runtime.retireInlineBlockerOnConfirmedClean(testFile, 2)).toBe(
+					true,
+				);
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it("does not let an older confirmed clean erase a newer blocker (#1198 inv. 1-2)", () => {
+			const runtime = new RuntimeCoordinator();
+			const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-blocker-order-"));
+			const file = path.join(dir, "raced.ts");
+			writeFileSync(file, "export const x = 1;\n");
+			try {
+				// A clean check that STARTED at token 4 settles after a dispatch at
+				// token 7 found real blockers. The slow old answer must lose.
+				runtime.recordInlineBlockers(file, "🔴 STOP", 7);
+				expect(runtime.retireInlineBlockerOnConfirmedClean(file, 4)).toBe(false);
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+				// Equal tokens are the same observation, not a newer one.
+				expect(runtime.retireInlineBlockerOnConfirmedClean(file, 7)).toBe(false);
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+				// Strictly newer retires.
+				expect(runtime.retireInlineBlockerOnConfirmedClean(file, 8)).toBe(true);
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it("reports no retire for a path that has no blocker", () => {
+			const runtime = new RuntimeCoordinator();
+			expect(
+				runtime.retireInlineBlockerOnConfirmedClean(
+					path.resolve("never/recorded.ts"),
+					9,
+				),
+			).toBe(false);
+		});
+
+		it("releases the git guard once the blocker is retired (#1561)", () => {
+			const runtime = new RuntimeCoordinator();
+			const dir = mkdtempSync(
+				path.join(tmpdir(), "pi-lens-blocker-retire-guard-"),
+			);
+			const file = path.join(dir, "gated.ts");
+			writeFileSync(file, "export const x = 1;\n");
+			try {
+				runtime.recordInlineBlockers(file, "🔴 STOP", 1);
+				runtime.updateGitGuardStatus(false, "");
+				expect(runtime.gitGuardHasBlockers).toBe(true);
+
+				expect(runtime.retireInlineBlockerOnConfirmedClean(file, 2)).toBe(true);
+				runtime.updateGitGuardStatus(false, "");
+				expect(runtime.gitGuardHasBlockers).toBe(false);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
 		it("no longer counts a deleted file's blocker toward the git guard", () => {
 			const runtime = new RuntimeCoordinator();
 			const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-blocker-guard-"));

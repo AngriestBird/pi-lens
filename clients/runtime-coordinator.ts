@@ -147,6 +147,14 @@ export class RuntimeCoordinator {
 	private readonly _pendingInlineBlockers = new PathKeyedMap<{
 		filePath: string;
 		summary: string;
+		/**
+		 * #1561: the `nextWriteIndex()` token of the dispatch that produced this
+		 * verdict. Without it the record carries no evidence of WHICH state it
+		 * was a verdict about, so a later confirmed-clean result cannot be
+		 * ordered against it and #1198's invariants 1-2 (a slow old clean must
+		 * not erase a newer blocker) are unenforceable.
+		 */
+		writeIndex?: number;
 	}>(normalizeMapKey);
 	private readonly _actionableWarningsThisTurn = new Map<
 		string,
@@ -645,15 +653,67 @@ export class RuntimeCoordinator {
 		return this._cascadeRuns.length > 0;
 	}
 
-	recordInlineBlockers(filePath: string, summary: string): void {
+	recordInlineBlockers(
+		filePath: string,
+		summary: string,
+		writeIndex?: number,
+	): void {
 		this._pendingInlineBlockers.set(path.resolve(filePath), {
 			filePath,
 			summary,
+			writeIndex,
 		});
 	}
 
 	clearInlineBlockers(filePath: string): void {
 		this._pendingInlineBlockers.delete(path.resolve(filePath));
+	}
+
+	/**
+	 * Retire a file's inline blocker because a FRESH, content-bound diagnostic
+	 * verdict proved it gone (#1561).
+	 *
+	 * The map was invalidated by exactly two events: a later dispatch of the
+	 * SAME path returning no blockers, and that path ceasing to exist (#1245).
+	 * Neither covers the common case that produced #1561 — a blocker on file F
+	 * whose cause lives in file G. Fixing G re-dispatches G, not F, so F's
+	 * verdict was never re-taken and "Unresolved from this turn" was re-injected
+	 * for the rest of the session. In the live case the agent then ran
+	 * `lsp_diagnostics` on F, pi-lens answered "confirmed clean", and the
+	 * blocker was STILL re-served on the next three turn ends: #571 wired that
+	 * tool's confirmed result into the widget footer and stopped there.
+	 *
+	 * This is the seam #1198 invariant 4 left undecided, decided: an affirmative
+	 * clean from the authoritative current view retires the stale verdict.
+	 *
+	 * Ordering (#1198 invariants 1-2). Both stores draw from the same
+	 * `nextWriteIndex()` counter, so when both sides are stamped the retire
+	 * requires the clean verdict to be strictly NEWER. A slow old clean that
+	 * settles after a fresh dispatch found real blockers must not erase them.
+	 * When either side is unstamped the two cannot be ordered at all; the fresh
+	 * confirmed verdict wins, because it is the only one of the two backed by an
+	 * actual observation of current content. Only production's single record site
+	 * is stamped, so in practice the unstamped branch is legacy callers/tests.
+	 *
+	 * @returns true when an entry was retired — the caller logs it, so an
+	 * eviction is never silent (#1432 Gap 1).
+	 */
+	retireInlineBlockerOnConfirmedClean(
+		filePath: string,
+		confirmedAtWriteIndex?: number,
+	): boolean {
+		const key = path.resolve(filePath);
+		const existing = this._pendingInlineBlockers.get(key);
+		if (!existing) return false;
+		if (
+			existing.writeIndex !== undefined &&
+			confirmedAtWriteIndex !== undefined &&
+			confirmedAtWriteIndex <= existing.writeIndex
+		) {
+			return false;
+		}
+		this._pendingInlineBlockers.delete(key);
+		return true;
 	}
 
 	reconcileInlineBlockers(): void {

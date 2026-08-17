@@ -1100,7 +1100,14 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 	}
 
 	if (result.inlineBlockerSummary) {
-		runtime.recordInlineBlockers(filePath, result.inlineBlockerSummary);
+		// #1561: stamp the verdict with THIS dispatch's write token — the same
+		// counter `lsp_diagnostics`' reconciliation seam draws from — so a later
+		// confirmed-clean result can be ordered against it instead of racing it.
+		runtime.recordInlineBlockers(
+			filePath,
+			result.inlineBlockerSummary,
+			writeIndex,
+		);
 	} else {
 		runtime.clearInlineBlockers(filePath);
 	}
