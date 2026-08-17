@@ -18,6 +18,7 @@ import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync, type SpawnResult } from "./safe-spawn.js";
 import {
 	type AvailabilityCause,
+	type ProbeEvidence,
 	classifyProbeFailure,
 	createAvailabilityLatch,
 	logAvailabilityDecision,
@@ -346,7 +347,13 @@ export class SgRunner {
 				this.sweepFallbackCause,
 			);
 		}
-		return this.noteUnavailable(startedAt, "missing", "not-found");
+		// #1500: asserted, and justified — every candidate probe answered "not
+		// found", so the absence is real. The install failure is recorded as
+		// evidence rather than folded into the verdict, because it is the one fact
+		// that distinguishes "never installable here" from "the download failed".
+		return this.noteUnavailable(startedAt, "missing", "not-found", {
+			install: "failed",
+		});
 	}
 
 	/** Record a successful sweep: available, latched, one decision record. */
@@ -376,6 +383,7 @@ export class SgRunner {
 		startedAt: number,
 		outcome: "missing" | "transient",
 		cause: AvailabilityCause,
+		evidence?: ProbeEvidence,
 	): false {
 		const retryAfterMs = this.availabilityLatch.noteUnavailable(outcome, cause);
 		logAvailabilityDecision({
@@ -388,6 +396,10 @@ export class SgRunner {
 			hostStallMs: this.sweepHostStallMs,
 			...(retryAfterMs > 0 && { retryAfterMs }),
 			budgetMs: PROBE_TIMEOUT_MS,
+			// The sweep classifies from its own candidate probes, so the derivation
+			// is the sweep's; `evidence` carries whatever extra fact the caller has.
+			classifiedBy: "probe",
+			...(evidence !== undefined && { evidence }),
 		});
 		return false;
 	}

@@ -46,11 +46,58 @@ export type AvailabilityCause =
 	| "bad-cwd"
 	| "policy-denied";
 
+/**
+ * What the spawn ACTUALLY returned, carried beside the verdict derived from it
+ * (#1500).
+ *
+ * Migrating a tool to this policy makes its storage correct and says nothing
+ * about its classification. A call site can hand the latch `("missing",
+ * "not-found")` for a failure that was really transient, and the resulting row
+ * is a well-formed `missing` verdict — indistinguishable from a genuine
+ * absence. That defect is deliberately ungated (a lint that flags every literal
+ * classification would fire on every correct post-ENOENT write), so the record
+ * carries the raw facts instead: a reader can audit the derivation rather than
+ * trust it.
+ */
+export interface ProbeEvidence {
+	/** Exit status the probe returned; `null` when it never exited. */
+	status?: number | null;
+	/** `safeSpawnAsync`'s structured failure reason. */
+	failure?: string;
+	/** Typed spawn-boundary failure kind. */
+	spawnFailureKind?: string;
+	/** errno from the spawn's Error, when there was one. */
+	errno?: string;
+	/** A repair was attempted after the probe, and how it went. */
+	install?: "succeeded" | "failed";
+}
+
+/** Read the evidence off a spawn result, dropping keys it does not carry. */
+export function describeProbeEvidence(result: ProbeFailureShape): ProbeEvidence {
+	const errno = (result.error as NodeJS.ErrnoException | undefined)?.code;
+	return {
+		...(result.status !== undefined && { status: result.status }),
+		...(result.failure !== undefined && { failure: result.failure }),
+		...(result.spawnFailure?.kind !== undefined && {
+			spawnFailureKind: result.spawnFailure.kind,
+		}),
+		...(errno !== undefined && { errno }),
+	};
+}
+
 export interface AvailabilityDecision {
 	tool: string;
 	verdict: "available" | "unavailable";
 	outcome: AvailabilityOutcome;
 	cause: AvailabilityCause;
+	/**
+	 * How the outcome/cause was reached. `probe` means `classifyProbeFailure`
+	 * derived it from `evidence`; `caller` means the call site asserted it. A
+	 * `caller` row is the one a reviewer has to justify (#1500).
+	 */
+	classifiedBy?: "probe" | "caller";
+	/** The raw spawn facts the verdict was derived FROM. */
+	evidence?: ProbeEvidence;
 	/** Wall time the probe took, ms. 0 for fast paths and cached decisions. */
 	elapsedMs: number;
 	/** True when this verdict is remembered until the next session reset. */
@@ -131,10 +178,16 @@ export interface ClassifyOptions {
 export function classifyProbeFailure(
 	result: ProbeFailureShape,
 	options: ClassifyOptions = {},
-): { outcome: AvailabilityOutcome; cause: AvailabilityCause } {
+): {
+	outcome: AvailabilityOutcome;
+	cause: AvailabilityCause;
+	/** The facts this verdict was derived from, for the decision record (#1500). */
+	evidence: ProbeEvidence;
+} {
+	const evidence = describeProbeEvidence(result);
 	const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
 	if (result.spawnFailure?.kind === "tool-not-found") {
-		return { outcome: "missing", cause: "not-found" };
+		return { outcome: "missing", cause: "not-found", evidence };
 	}
 	if (
 		result.failure === "timeout" ||
@@ -149,6 +202,7 @@ export function classifyProbeFailure(
 		return {
 			outcome: "transient",
 			cause: stalled ? "host-stall" : "probe-timeout",
+			evidence,
 		};
 	}
 	// A present command that rejects its version probe (or an EACCES/EINVAL/
@@ -157,6 +211,7 @@ export function classifyProbeFailure(
 	return {
 		outcome,
 		cause: outcome === "missing" ? "not-found" : "probe-rejected",
+		evidence,
 	};
 }
 
@@ -324,6 +379,12 @@ export function logAvailabilityDecision(
 			outcome: decision.outcome,
 			cause: decision.cause,
 			latched: decision.latched,
+			...(decision.classifiedBy !== undefined && {
+				classifiedBy: decision.classifiedBy,
+			}),
+			// The raw facts sit beside the verdict they produced, so a `missing` row
+			// can be read as justified or not without re-running anything (#1500).
+			...(decision.evidence !== undefined && { evidence: decision.evidence }),
 			...(decision.hostStallMs !== undefined && {
 				hostStallMs: decision.hostStallMs,
 			}),

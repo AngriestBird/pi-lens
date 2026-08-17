@@ -23,6 +23,7 @@ import {
 import {
 	type AvailabilityCause,
 	type AvailabilityOutcome,
+	type ProbeEvidence,
 	classifyProbeFailure,
 	createAvailabilityLatch,
 	logAvailabilityDecision,
@@ -67,6 +68,8 @@ export class BiomeClient {
 	 */
 	private lastProbeElapsedMs = 0;
 	private lastProbeHostStallMs = 0;
+	/** Raw facts from the last probe, carried into the decision record (#1500). */
+	private lastProbeEvidence: ProbeEvidence | undefined;
 	// Per-cwd cache of the resolved biome binary. Keying by cwd matters in
 	// monorepos where different sub-packages each ship their own biome
 	// installation; sharing one slot across the whole client would cause
@@ -220,7 +223,7 @@ export class BiomeClient {
 		// `unclassifiedFailureOutcome: "missing"` preserves the pre-#1476
 		// meaning of a plain non-zero exit (npx reporting no biome package):
 		// still "missing", still installable. Only the timeout/abort arm changes.
-		const { outcome, cause } = classifyProbeFailure(result, {
+		const { outcome, cause, evidence } = classifyProbeFailure(result, {
 			hostStallMs,
 			unclassifiedFailureOutcome: "missing",
 		});
@@ -231,6 +234,7 @@ export class BiomeClient {
 		this.lastProbeCause = cause;
 		this.lastProbeElapsedMs = elapsedMs;
 		this.lastProbeHostStallMs = hostStallMs;
+		this.lastProbeEvidence = evidence;
 		// The record is emitted by `doEnsureAvailable`, once the latch has said how
 		// long this verdict holds.
 		return { outcome: failureOutcome };
@@ -282,6 +286,15 @@ export class BiomeClient {
 			hostStallMs: this.lastProbeHostStallMs,
 			...(retryAfterMs > 0 && { retryAfterMs }),
 			budgetMs: PROBE_TIMEOUT_MS,
+			classifiedBy: "probe",
+			// `non-installable` here means the install ran and its binary failed
+			// validation, which the raw probe facts alone would not show (#1500).
+			evidence: {
+				...this.lastProbeEvidence,
+				...(resolved.outcome === "non-installable" && {
+					install: "failed" as const,
+				}),
+			},
 		});
 		if (resolved.outcome === "transient") {
 			this.log("biome availability probe timed out; will retry (not installing)");

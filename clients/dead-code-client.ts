@@ -308,6 +308,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 				latched: false,
 				retryAfterMs,
 				budgetMs: 5000,
+				classifiedBy: "probe",
 			});
 			return false;
 		}
@@ -322,6 +323,8 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 			hostStallMs: sweepHostStallMs,
 			latched: true,
 			budgetMs: 5000,
+			// Every candidate probe was classified, and none was transient (#1500).
+			classifiedBy: "probe",
 		});
 		return false;
 	}

@@ -92,6 +92,7 @@ export function createToolchainAvailability(
 				latched: true,
 				hostStallMs: sweepHostStallMs,
 				budgetMs: config.budgetMs,
+				classifiedBy: "probe",
 			});
 			return true;
 		}
@@ -110,6 +111,8 @@ export function createToolchainAvailability(
 			hostStallMs: sweepHostStallMs,
 			...(retryAfterMs > 0 && { retryAfterMs }),
 			budgetMs: config.budgetMs,
+			// Derived from the sweep's own candidate probes (#1500).
+			classifiedBy: "probe",
 		});
 		return false;
 	}

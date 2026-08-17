@@ -36,8 +36,10 @@ import type { DispatchContext } from "../../types.js";
 import {
 	type AvailabilityCause,
 	type AvailabilityOutcome,
+	type ProbeEvidence,
 	classifyProbeFailure,
 	createAvailabilityLatch,
+	describeProbeEvidence,
 	isLatchingOutcome,
 	logAvailabilityDecision,
 	startHostStallSampler,
@@ -414,6 +416,9 @@ export function createAvailabilityChecker(
 			cause: AvailabilityCause;
 			elapsedMs: number;
 			hostStallMs?: number;
+			/** How the outcome was reached, and the facts behind it (#1500). */
+			classifiedBy?: "probe" | "caller";
+			evidence?: ProbeEvidence;
 		},
 	): void {
 		cache.available = verdict.available;
@@ -443,6 +448,10 @@ export function createAvailabilityChecker(
 				cause: verdict.cause,
 				elapsedMs: verdict.elapsedMs,
 				latched: verdict.available || isLatchingOutcome(verdict.outcome),
+				...(verdict.classifiedBy !== undefined && {
+					classifiedBy: verdict.classifiedBy,
+				}),
+				...(verdict.evidence !== undefined && { evidence: verdict.evidence }),
 				...(verdict.hostStallMs !== undefined && {
 					hostStallMs: verdict.hostStallMs,
 				}),
@@ -491,6 +500,9 @@ export function createAvailabilityChecker(
 					outcome: "success",
 					cause: "fast-path",
 					elapsedMs: 0,
+					// Caller-asserted, and justifiably: an on-disk shim IS the tool, so
+					// there is no spawn to derive anything from (#1500).
+					classifiedBy: "caller",
 				});
 				return true;
 			}
@@ -506,6 +518,9 @@ export function createAvailabilityChecker(
 						outcome: "non-installable",
 						cause: "bad-cwd",
 						elapsedMs: 0,
+						// The workspace is gone. Asserted from a stat, not a probe, and it
+						// must never read as "the tool is missing" (#1500).
+						classifiedBy: "caller",
 					});
 					return false;
 				}
@@ -515,6 +530,7 @@ export function createAvailabilityChecker(
 					outcome: "non-installable",
 					cause: "bad-cwd",
 					elapsedMs: 0,
+					classifiedBy: "caller",
 				});
 				return false;
 			}
@@ -547,11 +563,13 @@ export function createAvailabilityChecker(
 					cause: "ok",
 					elapsedMs,
 					hostStallMs,
+					classifiedBy: "probe",
+					evidence: describeProbeEvidence(result),
 				});
 				return true;
 			}
 
-			const { outcome, cause } = classifyProbeFailure(result, {
+			const { outcome, cause, evidence } = classifyProbeFailure(result, {
 				hostStallMs,
 				unclassifiedFailureOutcome: options.unclassifiedFailureOutcome,
 			});
@@ -565,6 +583,8 @@ export function createAvailabilityChecker(
 				cause,
 				elapsedMs,
 				hostStallMs,
+				classifiedBy: "probe",
+				evidence,
 			});
 			return false;
 		})().finally(() => {

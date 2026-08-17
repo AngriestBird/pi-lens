@@ -25,6 +25,7 @@ import { assertInstallAllowed } from "./project-trust.js";
 import { SecurityScanClient } from "./security-scan-client.js";
 import {
 	classifyProbeFailure,
+	describeProbeEvidence,
 	logAvailabilityDecision,
 	startHostStallSampler,
 } from "./dispatch/runners/utils/availability-policy.js";
@@ -184,7 +185,9 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 				return false;
 			}
 			this.log("go binary not on PATH — cannot auto-install govulncheck");
-			this.available = false;
+			// Derived from the `go version` probe above, and recorded with it: a
+			// reader can see WHY govulncheck went quiet without re-running it (#1500).
+			this.noteDurableAbsence(describeProbeEvidence(goOnPath));
 			return false;
 		}
 
@@ -233,7 +236,13 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 				});
 				return false;
 			}
-			this.available = false;
+			// A non-transient install failure (module not found, compile error) IS
+			// evidence about this machine, so it latches — but the row says the
+			// install was tried and failed, which a plain absence never does (#1500).
+			this.noteDurableAbsence({
+				...describeProbeEvidence(install),
+				install: "failed",
+			});
 			return false;
 		}
 

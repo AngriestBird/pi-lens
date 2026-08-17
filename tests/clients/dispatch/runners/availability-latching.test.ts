@@ -183,15 +183,24 @@ describe("availability seam: transient failures do not latch (#1467)", () => {
 
 describe("availability policy: cause taxonomy and messages (#1467)", () => {
 	it("blames the host, not the tool, when a stall overlapped the probe window", () => {
-		expect(classifyProbeFailure(timeoutResult(), { hostStallMs: 0 })).toEqual({
+		// `toMatchObject`, not `toEqual`: since #1500 the classification also
+		// carries the `evidence` it was derived from. The evidence itself is
+		// asserted in `availability-classification-evidence.test.ts`.
+		expect(
+			classifyProbeFailure(timeoutResult(), { hostStallMs: 0 }),
+		).toMatchObject({
 			outcome: "transient",
 			cause: "probe-timeout",
 		});
-		expect(classifyProbeFailure(timeoutResult(), { hostStallMs: 4618 })).toEqual({
+		expect(
+			classifyProbeFailure(timeoutResult(), { hostStallMs: 4618 }),
+		).toMatchObject({
 			outcome: "transient",
 			cause: "host-stall",
 		});
-		expect(classifyProbeFailure(missingResult(), { hostStallMs: 4618 })).toEqual({
+		expect(
+			classifyProbeFailure(missingResult(), { hostStallMs: 4618 }),
+		).toMatchObject({
 			outcome: "missing",
 			cause: "not-found",
 		});
