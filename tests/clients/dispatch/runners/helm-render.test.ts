@@ -846,7 +846,7 @@ describe("helm-render source mapping", () => {
 		expect(resolveTemplateSource("chart/templates/absent.yaml", chart)).toBeNull();
 	});
 
-	it("refuses a template that is a symlink out of the chart", () => {
+	it("refuses a template that is a symlink out of the chart", (ctx) => {
 		const chart = installChart("valid-chart");
 		const outsideFile = path.join(workspace, "outside-secret.yaml");
 		fs.writeFileSync(outsideFile, "secret: true\n");
@@ -854,7 +854,10 @@ describe("helm-render source mapping", () => {
 		try {
 			fs.symlinkSync(outsideFile, link);
 		} catch {
-			// Unprivileged Windows cannot create symlinks; the Linux CI run covers it.
+			// Unprivileged Windows returns EPERM. Report the gap as a SKIP rather
+			// than returning early: a silent pass would claim coverage this host
+			// never had, and Linux CI is where this case is actually exercised.
+			ctx.skip();
 			return;
 		}
 		// The textual containment fold does not canonicalize on Linux/macOS, so
@@ -863,6 +866,55 @@ describe("helm-render source mapping", () => {
 		expect(
 			resolveTemplateSource("pi-lens-render-valid/templates/linked.yaml", chart),
 		).toBeNull();
+	});
+
+	it("refuses a template behind a symlinked DIRECTORY", (ctx) => {
+		// lstat only inspects the leaf. A linked `templates/` resolves to a real
+		// regular file whose textual path is perfectly chart-relative, so the
+		// realpath containment check is what closes this one.
+		const chart = installChart("valid-chart");
+		const outsideDir = path.join(workspace, "outside-templates");
+		fs.mkdirSync(outsideDir, { recursive: true });
+		fs.writeFileSync(path.join(outsideDir, "sneaky.yaml"), "kind: Pod\n");
+		const linkedDir = path.join(chart, "linked-templates");
+		try {
+			fs.symlinkSync(outsideDir, linkedDir, "dir");
+		} catch {
+			ctx.skip();
+			return;
+		}
+		expect(fs.existsSync(path.join(linkedDir, "sneaky.yaml"))).toBe(true);
+		expect(
+			resolveTemplateSource(
+				"pi-lens-render-valid/linked-templates/sneaky.yaml",
+				chart,
+			),
+		).toBeNull();
+	});
+
+	it("still resolves a chart that lives under a symlinked parent", (ctx) => {
+		// The counterpart guard: canonicalizing only the candidate would reject
+		// every chart beneath a symlinked parent (a linked /tmp, /home, or git
+		// worktree), which is the common case on macOS.
+		const realParent = path.join(workspace, "real-parent");
+		fs.mkdirSync(realParent, { recursive: true });
+		fs.cpSync(path.join(fixtures, "valid-chart"), path.join(realParent, "c"), {
+			recursive: true,
+		});
+		const linkedParent = path.join(workspace, "linked-parent");
+		try {
+			fs.symlinkSync(realParent, linkedParent, "dir");
+		} catch {
+			ctx.skip();
+			return;
+		}
+		const chartViaLink = path.join(linkedParent, "c");
+		expect(
+			resolveTemplateSource(
+				"pi-lens-render-valid/templates/deployment.yaml",
+				chartViaLink,
+			),
+		).toBe(path.join(chartViaLink, "templates", "deployment.yaml"));
 	});
 
 	it("prefers the # Source annotation, then the output-dir layout, then Chart.yaml", () => {

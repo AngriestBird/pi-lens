@@ -151,10 +151,16 @@ export function isHelmRenderEnabled(cwd: string): boolean {
  * boundary the opt-in exists for, so containment has to hold on every OS. The
  * textual `isWithin` fold is not enough on its own: `normalizeFilePath` only
  * canonicalizes through `realpath` on win32, so on Linux and macOS a symlinked
- * template would pass the string test and then be followed by `stat`. `lstat`
- * closes that — a symlink is not `isFile()`, so a link out of the chart tree is
- * rejected rather than followed (recurring defect shape 2: verify on the CI OS,
- * not the host).
+ * template passes the string test and is then followed by `stat`. Two checks
+ * close it, and BOTH are needed (recurring defect shape 2 — verify on the CI OS,
+ * not the host):
+ *
+ *   * `lstat` for the LEAF: a symlink is not `isFile()`, so a linked template is
+ *     rejected rather than followed;
+ *   * `realpath` containment for the ANCESTORS: `lstat` says nothing about a
+ *     symlinked directory mid-path, so `templates/` (or `charts/child/`) being a
+ *     link out of the tree would still resolve to a regular file with a
+ *     perfectly chart-relative textual path.
  */
 export function resolveTemplateSource(
 	sourceRef: string,
@@ -168,6 +174,12 @@ export function resolveTemplateSource(
 	if (!isWithin(chartRoot, candidate)) return null;
 	try {
 		if (!fs.lstatSync(candidate).isFile()) return null;
+		// Canonicalize both sides: comparing a resolved path against an
+		// unresolved root would reject every chart that legitimately lives under
+		// a symlinked parent (a /tmp or /home symlink, or a linked worktree).
+		if (!isWithin(fs.realpathSync(chartRoot), fs.realpathSync(candidate))) {
+			return null;
+		}
 	} catch {
 		return null;
 	}
