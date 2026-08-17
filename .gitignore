@@ -51,6 +51,7 @@ migrate-*.js
 
 # Documentation files - only keep specific docs in public repo
 *.md
+!CLAUDE.md
 !tests/fixtures/changelog-entries/*.md
 !.changelog/*.md
 !AGENTS.md
@@ -123,6 +124,13 @@ clients/lsp/.intelephense/
 AGENTS.md
 .npmignore
 .claude/
+!.claude/
+.claude/*
+!.claude/agents/
+!.claude/agents/*.md
+!.claude/skills/
+!.claude/skills/**
+!.claude/skills/**/*.md
 autoresearch.jsonl
 coverage/
 PR_issues_Audit.md
