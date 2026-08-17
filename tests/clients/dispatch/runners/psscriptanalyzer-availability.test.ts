@@ -15,9 +15,10 @@ import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TRANSIENT_BASE_COOLDOWN_MS } from "../../../../clients/dispatch/runners/utils/availability-policy.ts";
 
-const { safeSpawnAsync, logLatencySpy } = vi.hoisted(() => ({
+const { safeSpawnAsync, logLatencySpy, recordDegradationSpy } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
 	logLatencySpy: vi.fn(),
+	recordDegradationSpy: vi.fn(),
 }));
 
 vi.mock("../../../../clients/safe-spawn.js", () => ({
@@ -28,6 +29,11 @@ vi.mock("../../../../clients/latency-logger.js", () => ({
 	logLatency: logLatencySpy,
 	getLastLoggedPhase: () => undefined,
 }));
+vi.mock("../../../../clients/degradation-ledger.js", () => ({
+	recordDegradation: recordDegradationSpy,
+	recordDegradationOnce: vi.fn(),
+	incrementDegradationCount: vi.fn(),
+}));
 
 /**
  * Fresh module state per test. The memoized verdicts live at module scope, and
@@ -36,7 +42,9 @@ vi.mock("../../../../clients/latency-logger.js", () => ({
  * run fails on the latch, not on missing test scaffolding.
  */
 async function loadRunner(): Promise<{
-	run: (ctx: never) => Promise<{ status: string }>;
+	run: (
+		ctx: never,
+	) => Promise<{ status: string; diagnostics: unknown[] }>;
 }> {
 	vi.resetModules();
 	const mod = await import(
@@ -106,9 +114,50 @@ function healthyHost(): void {
 	);
 }
 
+/**
+ * A real `-File` run under `Restricted`/`AllSigned`: exit 1, empty stdout, a
+ * `SecurityError`/`UnauthorizedAccess` on stderr. Reproduced live on Windows
+ * (`powershell -ExecutionPolicy Restricted -File ...`) -- see the #1540 PR
+ * body for the transcript.
+ */
+const executionPolicyBlockedResult = {
+	stdout: "",
+	stderr:
+		"File repro.ps1 cannot be loaded because running scripts is disabled on this system. " +
+		"For more information, see about_Execution_Policies.\n" +
+		"    + CategoryInfo          : SecurityError: (:) [], ParentContainsErrorRecordException\n" +
+		"    + FullyQualifiedErrorId : UnauthorizedAccess",
+	status: 1,
+};
+
+/** The `-File` child crashed or was signal-killed: no exit status at all. */
+const fileRunStatusNullResult = {
+	stdout: "",
+	stderr: "",
+	status: null,
+	error: new Error("Process timed out after 30000ms"),
+	failure: "timeout",
+	spawnFailure: { kind: "timeout" },
+};
+
+/** Both `-Command` probes answer; only the `-File` analysis run differs. */
+function hostWithFileResult(fileResult: {
+	stdout: string;
+	stderr: string;
+	status: number | null;
+	error?: Error;
+	failure?: string;
+	spawnFailure?: { kind?: string };
+}): void {
+	safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+		args.includes("-File") ? fileResult : ok(),
+	);
+}
+
 beforeEach(() => {
 	safeSpawnAsync.mockReset();
 	logLatencySpy.mockReset();
+	recordDegradationSpy.mockReset();
 	vi.useFakeTimers({ toFake: ["Date"] });
 	return () => vi.useRealTimers();
 });
@@ -247,5 +296,76 @@ describe("psscriptanalyzer availability (#1490)", () => {
 		vi.setSystemTime(new Date(Date.now() + TRANSIENT_BASE_COOLDOWN_MS * 4));
 		expect((await runner.run(ctx())).status).toBe("skipped");
 		expect(callsMatching("Get-Module")).toHaveLength(1);
+	});
+});
+
+describe("psscriptanalyzer execution-policy-blocked -File run (#1540)", () => {
+	it("never reads an execution-policy-blocked -File run as clean", async () => {
+		const runner = await loadRunner();
+		hostWithFileResult(executionPolicyBlockedResult);
+
+		const result = await runner.run(ctx());
+		// The pre-fix bug: empty stdout from a failed run parses to zero
+		// diagnostics, and the runner reports "succeeded" -- a blocked analyzer
+		// masquerading as a clean file.
+		expect(result.status).not.toBe("succeeded");
+
+		const execDecision = decisions().find(
+			(entry) => entry.metadata?.tool === "psscriptanalyzer-exec",
+		);
+		expect(execDecision?.metadata).toMatchObject({
+			outcome: "non-installable",
+			cause: "policy-denied",
+			latched: true,
+		});
+		expect(recordDegradationSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				kind: "grammar-blocked",
+				subject: "psscriptanalyzer",
+				reason: expect.stringMatching(/execution polic/i),
+			}),
+		);
+	});
+
+	it("latches the policy block so a later save does not re-spawn -File", async () => {
+		const runner = await loadRunner();
+		hostWithFileResult(executionPolicyBlockedResult);
+		await runner.run(ctx());
+		expect(callsMatching("-File")).toHaveLength(1);
+
+		expect((await runner.run(ctx())).status).not.toBe("succeeded");
+		// Still latched -- no second -File spawn for the same session.
+		expect(callsMatching("-File")).toHaveLength(1);
+	});
+
+	it("does not silently skip when the -File run's status is null", async () => {
+		const runner = await loadRunner();
+		hostWithFileResult(fileRunStatusNullResult);
+
+		const result = await runner.run(ctx());
+		expect(result.status).not.toBe("succeeded");
+
+		// The pre-fix bug: `status === null` returned `skipped` with no
+		// availability_decision at all -- indistinguishable from a project with
+		// no PowerShell files.
+		const execDecision = decisions().find(
+			(entry) => entry.metadata?.tool === "psscriptanalyzer-exec",
+		);
+		expect(execDecision).toBeDefined();
+		expect(execDecision?.metadata).toMatchObject({ outcome: "transient" });
+		expect(recordDegradationSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				kind: "grammar-blocked",
+				subject: "psscriptanalyzer",
+			}),
+		);
+	});
+
+	it("still reports a genuinely clean -File run as succeeded", async () => {
+		const runner = await loadRunner();
+		healthyHost();
+		const result = await runner.run(ctx());
+		expect(result.status).toBe("succeeded");
+		expect(result.diagnostics).toHaveLength(0);
 	});
 });
