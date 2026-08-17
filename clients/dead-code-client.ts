@@ -447,7 +447,8 @@ export function deadCodeIssues(result: DeadCodeResult): DeadCodeIssue[] {
 
 /**
  * Joins finding-identity parts into a stable key for diffing one scan
- * against the previous one. Deliberately takes no line number: an edit
+ * against the previous one. The string-only signature is load-bearing: a
+ * line/column number cannot be passed without a compile error. An edit
  * shifts every line below it, and a scan delta is then filtered to exactly
  * the files the edit touched — so a line in the key turns each shifted
  * pre-existing finding into a "newly unused" report under a heading that
@@ -456,7 +457,7 @@ export function deadCodeIssues(result: DeadCodeResult): DeadCodeIssue[] {
  * knip's per-turn delta in runtime-turn.ts so the rule lives in one place.
  */
 export function stableFindingKey(
-	...parts: Array<string | number | undefined>
+	...parts: Array<string | undefined>
 ): string {
 	return parts.map((part) => part ?? "").join(":");
 }
