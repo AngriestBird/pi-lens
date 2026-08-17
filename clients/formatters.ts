@@ -1330,8 +1330,6 @@ export async function getFormattersForFile(
 		detectionCache.delete(normalizedCwd);
 		cached = undefined;
 		resetWhichLatches();
-	} else if (cached?.signature !== configSignature) {
-		cached = undefined;
 	}
 	if (!cached) {
 		cached = { signature: configSignature, entries: new Map() };
@@ -1412,10 +1410,19 @@ export async function getFormattersForFile(
 	// cache untouched and let the next turn re-detect.
 	// Which of THIS file's candidates are currently un-answered? Scoped to the
 	// candidates' own binaries, so a stalled `which rustfmt` cannot stop a shell
-	// or Python detection from caching (#1495 review). Residual: a candidate whose
-	// detection consults a SECOND binary (rustfmt→rustup, csharpier→dotnet) is
-	// matched on its primary only — the secondary is an install fallback, reached
-	// after the primary already answered.
+	// or Python detection from caching (#1495 review).
+	//
+	// Residual: a formatter whose detection consults MORE than `command[0]` is
+	// matched on that primary only, and the extras come in two shapes.
+	//   * Install fallbacks — `rustfmt`→`rustup`, `csharpier`→`dotnet`. Harmless
+	//     here: they are reached only after the primary already answered, so the
+	//     primary is in the transient set whenever the answer was not real.
+	//   * Co-equal ALTERNATIVES — psscriptanalyzer-format's `pwsh` ?? `powershell`,
+	//     oxfmt's global `vp`. Neither is `command[0]`, so a stall on the
+	//     alternative alone still yields an empty result this guard will cache.
+	// That second shape is tracked with the degraded-selection work in #1539, and
+	// `tests/clients/formatter-probe-commands.test.ts` fails if a new formatter
+	// grows an extra probed binary without being accounted for.
 	const stalledCandidateCommands = candidateFormatters
 		.map((formatter) => formatter.command[0])
 		.filter((command) => command && whichTransientCommands.has(command));
