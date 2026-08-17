@@ -37,6 +37,36 @@
  * in from another module is out of reach without full type resolution. The
  * vocabulary is deliberately wide (see `MEMO_NAME`), and every widening is
  * pinned by an evasion fixture in the gate's test.
+ *
+ * ROUTING INHERITANCE — whether a unit that does not spawn its own probe may
+ * borrow the routing of the callee it delegates the spawn to — used to be a
+ * BLACKLIST: inherit unless the unit's own memo "looks boolean". A #1529 review
+ * (#1552) broke that with a memo that is neither boolean nor a policy handle
+ * (`Map<string, "yes" | "no">`) and with a genuine boolean reached through a
+ * type alias no factory name ever touches — neither spells "boolean", so both
+ * inherited routing they never earned. It is now a WHITELIST
+ * (`isPolicyHandleMemoShape`): inherit only when the unit's own memo is
+ * traceably a `POLICY_FACTORY`'s handle, directly or one hop through a
+ * module-local wrapper (`Map<string, ReturnType<typeof makeEslintProbe>>`).
+ * An unrecognised shape now defaults to NOT inheriting, which is the safe
+ * default a blacklist can never offer — it must relearn every disguise.
+ *
+ * The whitelist has its own known blind spots, both narrower than the
+ * blacklist's:
+ *
+ *   * a wrapper reached through TWO hops of module-local helpers (unit A calls
+ *     helper B, which calls helper C, which calls the factory) is invisible —
+ *     `policyHandles` is built from each unit's own direct `policyCalls`, not
+ *     propagated transitively, so only a one-hop wrapper like `makeEslintProbe`
+ *     is recognised;
+ *   * a `POLICY_FACTORY` imported under a renamed binding
+ *     (`import { createCwdCachedProbe as ccp }`) does not match the factory's
+ *     canonical name and reads as a hand-rolled latch, not a handle.
+ *
+ * Both narrow the set of things a unit may WRONGLY inherit routing from, so
+ * either failure mode is a false NEGATIVE (an actually-routed unit gets flagged
+ * unrouted) rather than the false POSITIVE the blacklist was prone to — a
+ * safer place for an unproven shape to land.
  */
 
 import * as fs from "node:fs";
@@ -341,16 +371,21 @@ function hasVersionFlagText(text: string): boolean {
 function findMemo(
 	facts: Omit<UnitFacts, "name">,
 	moduleDecls: Map<string, Decl>,
-	options: { booleanOnly?: boolean } = {},
+	options: { policyHandleOnly?: boolean; policyHandles?: Map<string, string> } = {},
 ): string | null {
-	// `booleanOnly` asks the narrower question that decides ROUTING INHERITANCE:
-	// does this unit park a boolean VERDICT of its own? A memo holding a policy
-	// handle (`Map<string, ReturnType<typeof makeEslintProbe>>`) is the routed
-	// shape; a memo holding `boolean` / `Promise<boolean>` is a hand-rolled latch
-	// and must never inherit a helper's routing.
+	// `policyHandleOnly` asks the narrower question that decides ROUTING
+	// INHERITANCE (#1552): does this unit park a POLICY HANDLE of its own — a
+	// verdict object a `POLICY_FACTORY` built, directly or one hop through a
+	// module-local wrapper? Only that shape may borrow a callee's routing.
+	// Everything else defaults to NOT inheriting: a plain boolean, a
+	// `Map<string, "yes" | "no">` string-union verdict, or a boolean reached
+	// through a type alias never spells a factory name and is refused by
+	// default, which is what a blacklist on "looks like a boolean" could not
+	// guarantee (#1552 evaded it by never spelling the banned word).
 	if (facts.sessionFact) return "setSessionFact";
-	// A latch built by a policy factory is a handle, not a boolean verdict.
-	if (facts.latchDecl && !options.booleanOnly) return facts.latchDecl;
+	// A latch built by a policy factory IS a policy handle, in both senses of
+	// the question this function is asked.
+	if (facts.latchDecl) return facts.latchDecl;
 
 	// Module-level bindings are in scope for every unit, and a `const cache = new
 	// Map()` at the top of the file is exactly where a latch hides from a
@@ -375,8 +410,10 @@ function findMemo(
 					// a same-named local in a sibling branch outlives nothing.
 					enclosesScope(decl.scope, write.scope)));
 		if (!persistent) continue;
-		if (options.booleanOnly) {
-			if (isBooleanVerdictShape(decl, write.valueText)) return write.target;
+		if (options.policyHandleOnly) {
+			if (isPolicyHandleMemoShape(decl, write.valueText, options.policyHandles ?? new Map())) {
+				return write.target;
+			}
 			continue;
 		}
 		if (holdsVerdict(decl, write.valueText, write.target)) return write.target;
@@ -385,8 +422,10 @@ function findMemo(
 	for (const decl of facts.decls) {
 		if (!MEMO_NAME.test(decl.name)) continue;
 		if (!decl.isClassField && decl.scope !== "<module>") continue;
-		if (options.booleanOnly) {
-			if (isBooleanVerdictShape(decl, "")) return decl.name;
+		if (options.policyHandleOnly) {
+			if (isPolicyHandleMemoShape(decl, "", options.policyHandles ?? new Map())) {
+				return decl.name;
+			}
 			continue;
 		}
 		if (holdsVerdict(decl, "", decl.name)) return decl.name;
@@ -395,19 +434,32 @@ function findMemo(
 }
 
 /**
- * Does this state hold a BOOLEAN verdict — the hand-rolled-latch shape — rather
- * than a handle the shared policy owns? Deliberately narrower than
- * `holdsVerdict`: no `avail`-in-the-name fallback, because a map of policy
- * handles is usually named after availability and is exactly what must still be
- * allowed to inherit its helper's routing.
+ * Does this state hold a POLICY HANDLE — a verdict object a `POLICY_FACTORY`
+ * built, directly or through one hop of a module-local wrapper — rather than a
+ * hand-rolled latch? This is the WHITELIST #1552 replaced the boolean-shape
+ * blacklist with: reachability to a factory NAME is the only thing that grants
+ * inheritance, so an unrecognised shape is refused rather than accepted.
+ *
+ * `policyHandles` is the same name→factory map `collectUnit` already resolves
+ * member-call reach against (`java.isAvailableAsync` ← `createAvailabilityChecker`),
+ * extended with every top-level function whose OWN body hands its verdict
+ * straight to a factory (`makeEslintProbe` ← `createCwdCachedProbe`) — so
+ * `Map<string, ReturnType<typeof makeEslintProbe>>` is recognised without a
+ * second, hand-rolled classifier.
  */
-function isBooleanVerdictShape(
+function isPolicyHandleMemoShape(
 	decl: Decl | undefined,
 	writtenValue: string,
+	policyHandles: Map<string, string>,
 ): boolean {
 	const shape = `${decl?.typeText ?? ""} ${decl?.valueText ?? ""} ${writtenValue}`;
-	if (/\bboolean\b/i.test(shape)) return true;
-	return BOOL_LITERAL.test(writtenValue.trim());
+	for (const factory of POLICY_FACTORIES) {
+		if (new RegExp(`\\b${factory}\\b`).test(shape)) return true;
+	}
+	for (const handleName of policyHandles.keys()) {
+		if (new RegExp(`\\b${handleName}\\b`).test(shape)) return true;
+	}
+	return false;
 }
 
 /** Is `outer` a strictly enclosing scope of `inner`? Keys are source ranges. */
@@ -595,7 +647,20 @@ export async function analyzeAvailabilityUnits(
 		name: unitLabel(node),
 		facts: collectUnit(node, constInitializers, policyHandles),
 	}));
-	propagateProbeReach(units, moduleDecls);
+	// A top-level FUNCTION whose own body hands its verdict straight to a
+	// factory (`makeEslintProbe` returns `createCwdCachedProbe(...)`) is a
+	// handle producer as surely as a module-level `const x = createXxx(...)` —
+	// `collectUnit` already recorded that reach in the unit's own `policyCalls`,
+	// with no propagation needed, since the call sits in the function's own
+	// body. Folding it into the same `policyHandles` map is what lets
+	// `Map<string, ReturnType<typeof makeEslintProbe>>` read as a policy handle
+	// via the ONE whitelist (#1552), instead of a second name-matching rule.
+	for (const unit of units) {
+		for (const call of unit.facts.policyCalls) {
+			if (POLICY_FACTORIES.has(call)) policyHandles.set(unit.name, call);
+		}
+	}
+	propagateProbeReach(units, moduleDecls, policyHandles);
 
 	const found: AvailabilityUnit[] = [];
 	for (const unit of units) {
@@ -626,21 +691,29 @@ export async function analyzeAvailabilityUnits(
 function propagateProbeReach(
 	units: Array<{ name: string; facts: Omit<UnitFacts, "name"> }>,
 	moduleDecls: Map<string, Decl>,
+	policyHandles: Map<string, string>,
 ): void {
 	const byName = new Map(units.map((unit) => [unit.name, unit.facts]));
 	// Whether a unit spawns on its OWN, captured before propagation starts. A
 	// unit that owns its spawn owns its classification too, so it never inherits
 	// a neighbour's routing (that separation is why the gate judges per unit).
 	const ownSpawn = new Map(units.map((unit) => [unit.facts, unit.facts.spawns]));
-	// A unit that parks a BOOLEAN verdict of its own is a hand-rolled latch, and
-	// no amount of routing in the helper it borrows the spawn from makes that
-	// latch transient-aware. A review probe re-added #1494's own latch beside
-	// `getEslintProbe`, delegating the spawn to the routed factory, and the first
-	// version of this propagation read it as routed.
-	const ownBooleanMemo = new Map(
+	// WHITELIST (#1552): a unit may only inherit a callee's routing when its OWN
+	// memo is itself traceable to a policy factory — a handle, not a hand-rolled
+	// latch. The inverse (blacklist "not recognisably boolean") let anything
+	// unspoken through: a `Map<string, "yes" | "no">` string-union verdict, or a
+	// boolean reached through a type alias, neither of which spell "boolean",
+	// evaded it and inherited routing they never earned. A review probe re-added
+	// #1494's own latch beside `getEslintProbe`, delegating the spawn to the
+	// routed factory, and the first version of this propagation read it as
+	// routed for the same reason.
+	const ownPolicyHandleMemo = new Map(
 		units.map((unit) => [
 			unit.facts,
-			findMemo(unit.facts, moduleDecls, { booleanOnly: true }) !== null,
+			findMemo(unit.facts, moduleDecls, {
+				policyHandleOnly: true,
+				policyHandles,
+			}) !== null,
 		]),
 	);
 	let changed = true;
@@ -667,7 +740,7 @@ function propagateProbeReach(
 				if (
 					callee.spawns &&
 					!ownSpawn.get(unit.facts) &&
-					!ownBooleanMemo.get(unit.facts)
+					ownPolicyHandleMemo.get(unit.facts)
 				) {
 					for (const policyCall of callee.policyCalls) {
 						if (unit.facts.policyCalls.has(policyCall)) continue;

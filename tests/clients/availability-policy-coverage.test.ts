@@ -260,6 +260,64 @@ const EVASIONS: ReadonlyArray<{ name: string; source: string }> = [
 		`,
 	},
 	{
+		// #1552. `isBooleanVerdictShape` was a BLACKLIST: inherit routing unless
+		// the unit's own memo "looks boolean". A string-union verdict never spells
+		// "boolean" and never spells a factory name either — it is neither a
+		// latch nor a handle, and the blacklist waved it through anyway.
+		name: "a string-union verdict that is neither boolean nor a policy handle",
+		source: `
+			import { createCwdCachedProbe } from "./dispatch/runners/utils/runner-helpers.js";
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			function makeToolProbe(cmd: string) {
+				return createCwdCachedProbe(
+					(cwd) => safeSpawnAsync(cmd, ["--version"], { timeout: 5000, cwd }),
+					{ tool: "newtool" },
+				);
+			}
+			const toolAvailableByCwd = new Map<string, "yes" | "no">();
+			export function getToolProbe(cmd: string) {
+				return async (cwd: string) => {
+					const hit = toolAvailableByCwd.get(cwd);
+					if (hit !== undefined) return hit === "yes";
+					const probed = await makeToolProbe(cmd)(cwd);
+					toolAvailableByCwd.set(cwd, probed ? "yes" : "no");
+					return probed;
+				};
+			}
+		`,
+	},
+	{
+		// #1552. The same laundering shape as the `Promise<boolean>` probe above,
+		// but the boolean is reached through a type alias. A blacklist that
+		// text-matches `\bboolean\b` on the memo's own type never sees it — the
+		// alias's own declaration is the only place the word appears — so it
+		// misclassifies the memo as "not boolean" and inherits routing it never
+		// earned. The whitelist does not need to catch this spelling: an alias
+		// name is not a factory name either, so it is refused by default.
+		name: "a hand-rolled boolean latch reached through a type alias",
+		source: `
+			import { createCwdCachedProbe } from "./dispatch/runners/utils/runner-helpers.js";
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			type ToolVerdict = boolean;
+			function makeToolProbe(cmd: string) {
+				return createCwdCachedProbe(
+					(cwd) => safeSpawnAsync(cmd, ["--version"], { timeout: 5000, cwd }),
+					{ tool: "newtool" },
+				);
+			}
+			const toolAvailableByCwd = new Map<string, ToolVerdict>();
+			export function getToolProbe(cmd: string) {
+				return (cwd: string) => {
+					const hit = toolAvailableByCwd.get(cwd);
+					if (hit !== undefined) return Promise.resolve(hit);
+					const probed = makeToolProbe(cmd)(cwd);
+					probed.then((verdict) => toolAvailableByCwd.set(cwd, verdict));
+					return probed;
+				};
+			}
+		`,
+	},
+	{
 		name: "the defect shape plus a comment that names availability-policy.js",
 		source: `
 			import { safeSpawnAsync } from "./safe-spawn.js";
