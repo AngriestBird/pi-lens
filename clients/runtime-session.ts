@@ -94,6 +94,7 @@ import { isWarmAttached } from "./warm-attach.js";
 import { setSessionLanguages } from "./widget-state.js";
 import { logWordIndex } from "./word-index-logger.js";
 import { resetWorkspaceTopology } from "./workspace-topology.js";
+import { resetZizmorTokenAvailability } from "./zizmor-config.js";
 
 interface SessionStartDeps {
 	ctxCwd?: string;
@@ -1842,6 +1843,12 @@ export async function handleSessionStart(
 	// the tool for the rest of the process lifetime. Clear it here, same
 	// boundary as the other per-session caches on this line.
 	resetDispatchAvailabilityState();
+	// #1535: same #1266 pattern, one caller earlier — the `gh auth token` latch
+	// zizmor's spawn reads is process-lived storage whose durability contract is
+	// per SESSION, not per process. Without this, a user who runs `gh auth
+	// login` and starts a fresh session still reads the previous session's
+	// stale "no token" verdict until the cooldown (if any) happens to expire.
+	resetZizmorTokenAvailability();
 	// psscriptanalyzer's two latches are module-local, so the generation counter
 	// above does not reach them (#1490).
 	resetPsScriptAnalyzerAvailability();

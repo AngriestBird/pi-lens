@@ -2584,8 +2584,25 @@ export class LSPService {
 		);
 		const notifySkipped =
 			spawned.length > 0 && notifySkippedServerIds.size === spawned.length;
+		// #1531: the pre-notify diagnostics baseline for THIS file on each client.
+		// It used to be `client.diagnosticsVersion`, a client-GLOBAL counter that also
+		// advances for files this touch never mentions — which let a sibling file's
+		// publication both end this file's wait early and read as an answer for it.
+		// `getDiagnosticsVersionForPath` returns that same counter's value as of this
+		// file's last publication, so every comparison downstream stays on one axis
+		// while ignoring sibling paths. Captured here because the notify below clears
+		// each client's cache for the file.
+		//
+		// The accessor is REQUIRED on `LSPClient`, so a real client always answers
+		// with a number. The optional call is only so a hand-written test double that
+		// predates it fails CLOSED — `undefined` keeps the existing "no usable
+		// baseline" branch below and can never satisfy the evidence check — instead of
+		// quietly reverting to the global counter, which is the defect itself.
+		const readPathVersion = (
+			client: (typeof spawned)[number]["client"],
+		): number | undefined => client.getDiagnosticsVersionForPath?.(filePath);
 		const diagnosticBaselines = new Map(
-			spawned.map((entry) => [entry.client, entry.client.diagnosticsVersion]),
+			spawned.map((entry) => [entry.client, readPathVersion(entry.client)]),
 		);
 		// #1458: read a late auxiliary publication BEFORE the ordinary resync
 		// clears its client cache. Carry it only when the publication's exact
@@ -3078,6 +3095,12 @@ export class LSPService {
 					return Promise.resolve(undefined);
 				}
 				const serverTimeout = timeoutFor(entry.client.serverId);
+				// #1531: a per-path baseline. `clientWaitForDiagnostics` compares it
+				// against this path's own publication stamp, so a sibling file's
+				// publication on a shared client can no longer end this wait before the
+				// server's own budget lapses — which is what kept the outcome labels
+				// honest (`cut_off` means our grace won, `silent` means the server's own
+				// budget lapsed with nothing published).
 				const baseline = diagnosticBaselines.get(entry.client);
 				const pullOnly =
 					classifyServerWaitTier(
@@ -3185,10 +3208,21 @@ export class LSPService {
 									//     NOT the same as having answered).
 									//   - raced === true, evidence   → "answered" (a fresh
 									//     publication actually landed for this touch).
+									//
+									// #1531: the evidence is read PER PATH. The global
+									// `diagnosticsVersion` advances for every file this client
+									// publishes, so a concurrent touch of an unrelated file used to
+									// hand this one an unearned "answered" row. The per-path stamp
+									// carries the global counter's value at store time, so the
+									// comparison stays monotonic across cache evictions while
+									// ignoring sibling paths — and it is the SAME axis `baseline`
+									// was captured on above.
+									const currentPathVersion = readPathVersion(aux.client);
 									const publishedEvidence =
 										raced &&
 										Number.isFinite(aux.baseline) &&
-										aux.client.diagnosticsVersion > (aux.baseline as number);
+										currentPathVersion !== undefined &&
+										currentPathVersion > (aux.baseline as number);
 									// #1459: a DEFERRED aux was never sent this content and is not
 									// waited on at all, so its instantly-resolved placeholder
 									// promise must not read as "silent". "Silent" is the reserved
