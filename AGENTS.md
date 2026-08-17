@@ -92,10 +92,18 @@ cleared it never ran. The screen when you add an auxiliary: if its per-file scan
 can exceed the notify-write budget, a whole-tree sweep will break it — and its
 silence reads as CLEAN unless the touch names it. A scanner that never attached
 (breaker open) or never received the content (deferred resync) belongs in
-`unconfirmedServerIds`, exactly like a cut-off auxiliary, and the gap must reach
-the AGENT-facing surface too (`CascadeNeighborResult.unconfirmedServerIds` and
-the cascade formatter), not only the result wrapper. One
-`lsp_scanner_coverage_gap` row per touch records it. (#1459)
+`unconfirmedServerIds`, exactly like a cut-off or silent auxiliary, and the gap
+must reach the AGENT-facing surface too
+(`CascadeNeighborResult.unconfirmedServerIds` and the cascade formatter), not
+only the result wrapper. One `lsp_scanner_coverage_gap` row per touch records it.
+#1493's content-hash exemption outranks a deferral: a scanner whose STORED
+publication is bound to exactly these bytes has reported on this file, so the
+skipped resync withholds nothing — it stays covered, and its stored findings
+must still reach `.diags` through the carried-auxiliary path. Both breaker-skip
+and deferral open BEFORE any wait, so `auxiliaryCoverageGap` (which reads wait
+outcomes) cannot see them on the `clientScope: "all"` sweep path, which emits no
+outcome rows at all — they are unioned into `unconfirmedServerIds` separately.
+(#1459)
 
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach

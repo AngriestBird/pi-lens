@@ -630,4 +630,71 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		expect(deferred).toBeDefined();
 		expect(deferred?.diags).toEqual([]);
 	});
+
+	// #1493 integration: the content-hash exemption outranks the deferral. A
+	// scanner that already published for EXACTLY these bytes has reported on this
+	// file, so the gate skipping its resync withholds nothing — and its stored
+	// findings must still reach the result. Fail this and the merge either
+	// overclaims (drops findings while saying "confirmed") or underclaims (reports
+	// a gap for a file the scanner demonstrably covered).
+	it("a deferred scanner that already published these exact bytes stays covered", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const { hashDiagnosticContent } = await import(
+			"../../../clients/lsp/diagnostic-binding.js"
+		);
+		const service = new LSPService();
+
+		const storedFinding = makeDiagnostic("stored scanner finding");
+		const aux = makeClient("opengrep", NOTIFY_BUDGET_MS * 3, [], "never");
+		// Its stored publication is bound to the SECOND file's exact content.
+		const auxWithBinding = {
+			...aux,
+			getDiagnostics: vi.fn((filePath: string) =>
+				filePath.endsWith("b.ts") ? [storedFinding] : [],
+			),
+			getDiagnosticBinding: vi.fn((filePath: string) =>
+				filePath.endsWith("b.ts")
+					? { contentHash: hashDiagnosticContent("two"), boundToCurrentDisk: true }
+					: undefined,
+			),
+		};
+		const primary = makeClient("typescript", 0);
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("opengrep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep" ? auxWithBinding : primary,
+		);
+
+		const touchOptions = {
+			clientScope: "with-auxiliary" as const,
+			auxiliaryServerIds: ["opengrep"],
+			diagnostics: "document" as const,
+			collectDiagnostics: true,
+			source: "cascade",
+		};
+		const first = service.touchFile(`${ROOT}/a.ts`, "one", touchOptions);
+		await vi.advanceTimersByTimeAsync(1);
+		const second = service.touchFile(`${ROOT}/b.ts`, "two", touchOptions);
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
+		const [, result] = (await Promise.all([first, second])) as Array<
+			| {
+					diags: Array<{ message: string }>;
+					confirmation?: string;
+					unconfirmedServerIds?: string[];
+			  }
+			| undefined
+		>;
+
+		// Deferred, so the resync never went out …
+		expect(rowsFor("lsp_notify_resync_deferred")).not.toHaveLength(0);
+		// … but the scanner had already spoken for these bytes, so no gap …
+		expect(result?.unconfirmedServerIds ?? []).not.toContain("opengrep");
+		expect(result?.confirmation).toBe("confirmed");
+		// … and its stored findings still reach the caller.
+		expect(result?.diags.map((d) => d.message)).toContain(
+			"stored scanner finding",
+		);
+	});
 });

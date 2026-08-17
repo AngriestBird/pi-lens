@@ -573,11 +573,13 @@ function readBoundToCurrentDisk(
  * a future flag cannot be silently missed at just one of the several gate sites:
  *  - `inconclusive` (#1093/#571): the notify/diagnostics wait lapsed its deadline,
  *    so a resolved `[]` is NOT a confirmed clean (the #533 false-clean trap).
- *  - a COVERAGE GAP (#1470): an auxiliary's push wait was cut off by the aux grace
- *    timer, so the merged result is missing whatever that scanner would have said.
- *    Such a touch is deliberately NOT `inconclusive` (the primary answered), which
- *    is exactly why it needs naming here: reading `!inconclusive` alone would let a
- *    hung opengrep wipe a live footer finding and seed the recently-clean cache.
+ *  - a COVERAGE GAP (#1470/#1493): an auxiliary never reported — its push wait was
+ *    cut off by the aux grace timer (#1470), or it stayed silent with no stored
+ *    publication for this content (#1493) — so the merged result is missing whatever
+ *    that scanner would have said. Such a touch is deliberately NOT `inconclusive`
+ *    (the primary answered), which is exactly why it needs naming here: reading
+ *    `!inconclusive` alone would let a hung or silent opengrep wipe a live footer
+ *    finding and seed the recently-clean cache.
  *  - `binding.boundToCurrentDisk === false` (#1095): the diagnostics were computed
  *    against a DIFFERENT disk state than what is on disk now (the server's view
  *    diverged / a pre-fix buffer) — not an observation of current disk. `true` and
@@ -1744,9 +1746,10 @@ export async function computeCascadeForFile(
 				const confirmed = isConfirmedTouch(rawDiags);
 				const bindingRejected = readBoundToCurrentDisk(rawDiags) === false;
 				const inconclusive = readInconclusive(rawDiags);
-				// #1470: the third, independent reason a touch is unconfirmed — an
-				// auxiliary our grace timer cut off. Logged alongside the other two so
-				// cascade.log alone still tells the three apart.
+				// #1470/#1493: the third, independent reason a touch is unconfirmed — an
+				// auxiliary that never reported, cut off by our grace timer or silent
+				// with nothing published for this content. Logged alongside the other two
+				// so cascade.log alone still tells the three apart.
 				const unconfirmedServerIds = touchCoverageGap(rawDiags);
 				// #692: `source: "cascade"` no longer overrides `rule` (see the
 				// doc comment on the sibling call above) — dropped rather than
