@@ -26,6 +26,7 @@ import { classifyDefect } from "../diagnostic-taxonomy.js";
 import { isAuxiliaryLspAlive } from "../../lsp/index.js";
 import { resolveAstGrepNativeExe } from "../../lsp/wait-policy/index.js";
 import { PRIORITY } from "../priorities.js";
+import { transientRetryDelayMs } from "./utils/availability-policy.js";
 import type {
 	Diagnostic,
 	DispatchContext,
@@ -50,22 +51,96 @@ export function resetAstGrepUnsupportedLanguageLog(): void {
 	defaultUnsupportedLanguageLog.clear();
 }
 
-// Lazy load the napi package
+// Lazy load the napi package.
 let sg: AstGrepNapi | undefined;
-let sgLoadAttempted = false;
+/**
+ * In-flight load, shared by every caller (#1567). The per-edit fallback
+ * runner and the session-start scanner (clients/project-diagnostics/scanner.ts)
+ * both call `loadSg()` and can race: without this, a second caller arriving
+ * while the first load is still pending saw neither `sg` nor a latch yet, so
+ * it started a REDUNDANT second `import()` of the native addon instead of
+ * awaiting the one already in flight.
+ *
+ * Evicted on settle (#1536's pattern, see clients/tree-sitter-client.ts) — a
+ * rejected load must not be remembered as the permanent answer; only
+ * concurrent callers during the SAME attempt observe this promise.
+ */
+let sgLoadPromise: Promise<AstGrepNapi | undefined> | undefined;
+/**
+ * Set once a load fails for a reason judged durable for the session (package
+ * genuinely absent, native binding incompatible with this platform). Cleared
+ * by `resetAstGrepNapiLoadState()` at session_start — a process-lifetime latch
+ * here would survive a repaired install across session boundaries, the same
+ * #1266/#1490/#1497/#1535 shape.
+ */
+let sgGenuineFailure = false;
+/** Epoch ms before which a transient load failure is not retried. */
+let sgRetryAtMs: number | undefined;
+/** Consecutive transient failures, for the cooldown ladder; reset on success. */
+let sgTransientAttempts = 0;
 
-export async function loadSg(): Promise<
-	AstGrepNapi | undefined
-> {
-	if (sg) return sg;
-	if (sgLoadAttempted) return undefined; // Don't retry if already failed
-	sgLoadAttempted = true;
-	try {
-		sg = await loadAstGrepNapi();
-		return sg;
-	} catch {
-		return undefined;
+/**
+ * Node's module-resolution and native-binding errors that mean "this addon
+ * is not going to load on this machine, no matter how soon we retry" — as
+ * opposed to a momentary FS/native-binding hiccup, which is worth a retry
+ * after a cooldown rather than a session-long latch.
+ */
+function isGenuineAstGrepLoadFailure(err: unknown): boolean {
+	const code = (err as { code?: string } | undefined)?.code;
+	if (code === "MODULE_NOT_FOUND" || code === "ERR_MODULE_NOT_FOUND") {
+		return true;
 	}
+	const message = err instanceof Error ? err.message : String(err);
+	return /cannot find module|not supported on this platform|unsupported platform|invalid elf header|was compiled against a different|dlopen/i.test(
+		message,
+	);
+}
+
+export async function loadSg(): Promise<AstGrepNapi | undefined> {
+	if (sg) return sg;
+	if (sgLoadPromise) return sgLoadPromise;
+	if (sgGenuineFailure) return undefined; // Durable for the session; re-arms at session_start.
+	if (sgRetryAtMs !== undefined && Date.now() < sgRetryAtMs) {
+		return undefined; // Still cooling down from a transient failure.
+	}
+
+	const task = (async (): Promise<AstGrepNapi | undefined> => {
+		try {
+			const loaded = await loadAstGrepNapi();
+			sg = loaded;
+			sgRetryAtMs = undefined;
+			sgTransientAttempts = 0;
+			return loaded;
+		} catch (err) {
+			if (isGenuineAstGrepLoadFailure(err)) {
+				sgGenuineFailure = true;
+			} else {
+				sgTransientAttempts += 1;
+				sgRetryAtMs =
+					Date.now() + transientRetryDelayMs(sgTransientAttempts, "probe-timeout");
+			}
+			return undefined;
+		}
+	})();
+	sgLoadPromise = task;
+	task.finally(() => {
+		if (sgLoadPromise === task) sgLoadPromise = undefined;
+	});
+	return task;
+}
+
+/**
+ * Re-arm the napi load latch for a new session (#1567). `sg` itself is left
+ * alone — a successful load stays valid and cached for the process — but a
+ * genuine-failure verdict and a live transient cooldown are both session-
+ * scoped state and must not outlive the session that set them. Called from
+ * `resetDispatchBaselines()` (clients/dispatch/integration.ts) beside
+ * `resetAstGrepUnsupportedLanguageLog`, this module's other session latch.
+ */
+export function resetAstGrepNapiLoadState(): void {
+	sgGenuineFailure = false;
+	sgRetryAtMs = undefined;
+	sgTransientAttempts = 0;
 }
 
 // Supported extensions for NAPI
