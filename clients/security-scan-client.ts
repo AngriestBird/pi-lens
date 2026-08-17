@@ -29,9 +29,11 @@ export abstract class SecurityScanClient<TResult> {
 	 * Availability memo, backed by the shared transient-aware latch (#1467).
 	 *
 	 * Assigning `false` still means "durable: this machine does not have the
-	 * tool" — every existing subclass write keeps its meaning. A probe that
-	 * merely timed out must go through `markTransientlyUnavailable` instead, so
-	 * it expires and the tool can come back without a host restart.
+	 * tool" — every existing subclass write keeps its meaning. A transient
+	 * failure must expire instead: `probeVersion` latches its own transient
+	 * verdicts (#1501), and any other transient failure (a scan or install
+	 * timeout) goes through `markTransientlyUnavailable`, so the tool can come
+	 * back without a host restart.
 	 */
 	private readonly availabilityLatch = createAvailabilityLatch();
 	protected get available(): boolean | null {
@@ -44,9 +46,8 @@ export abstract class SecurityScanClient<TResult> {
 		else this.availabilityLatch.reset();
 	}
 
-	/** Outcome/cause of the most recent `probeVersion` call. */
+	/** Outcome of the most recent `probeVersion` call. */
 	protected lastProbeOutcome: AvailabilityOutcome | null = null;
-	protected lastProbeCause: AvailabilityCause | null = null;
 
 	private ensureInFlight: Promise<boolean> | null = null;
 	protected readonly inFlight = new Map<string, Promise<TResult>>();
@@ -87,10 +88,17 @@ export abstract class SecurityScanClient<TResult> {
 
 	/**
 	 * Spawn `toolName <versionArgs>` and report whether it answered cleanly.
-	 * Does NOT mutate `this.available` — callers decide what a hit/miss means —
-	 * but it does classify the failure (`lastProbeOutcome`/`lastProbeCause`) and
-	 * emit one availability-decision record, so a probe that keeps timing out is
-	 * visible in latency.log rather than inferred from silence (#1467).
+	 * Classifies the failure (`lastProbeOutcome`) and emits one
+	 * availability-decision record, so a probe that keeps timing out is visible
+	 * in latency.log rather than inferred from silence (#1467).
+	 *
+	 * Latch ownership is split by outcome: success and durable failures leave
+	 * `this.available` to the caller (a missing binary may still be
+	 * auto-installed), while a TRANSIENT failure is latched by the seam itself
+	 * with its cooldown — the retry schedule only exists once the latch owns
+	 * the verdict, and the record is incomplete without it (#1501). Callers
+	 * must not re-mark a probe transient (a second noteUnavailable would
+	 * double-escalate the cooldown).
 	 */
 	protected async probeVersion(versionArgs: string[]): Promise<boolean> {
 		const sampler = startHostStallSampler();
@@ -107,7 +115,6 @@ export abstract class SecurityScanClient<TResult> {
 		const elapsedMs = Date.now() - startedAt;
 		if (!probe.error && probe.status === 0) {
 			this.lastProbeOutcome = "success";
-			this.lastProbeCause = "ok";
 			this.log(`${this.toolName} found: ${probe.stdout.trim().split("\n")[0]}`);
 			logAvailabilityDecision({
 				tool: this.toolName,
@@ -123,7 +130,14 @@ export abstract class SecurityScanClient<TResult> {
 		}
 		const { outcome, cause } = classifyProbeFailure(probe, { hostStallMs });
 		this.lastProbeOutcome = outcome;
-		this.lastProbeCause = cause;
+		// A transient verdict's record is incomplete without the retry schedule,
+		// and the schedule only exists once the latch owns the verdict — so the
+		// seam writes the expiring verdict itself, at log time (#1501). Durable
+		// outcomes stay caller-owned (a missing binary may still be installed).
+		const retryAfterMs =
+			outcome === "transient"
+				? this.availabilityLatch.noteUnavailable("transient", cause)
+				: 0;
 		logAvailabilityDecision({
 			tool: this.toolName,
 			verdict: "unavailable",
@@ -132,6 +146,7 @@ export abstract class SecurityScanClient<TResult> {
 			elapsedMs,
 			latched: outcome !== "transient",
 			hostStallMs,
+			...(retryAfterMs > 0 && { retryAfterMs }),
 			budgetMs: 5000,
 		});
 		return false;
@@ -149,6 +164,10 @@ export abstract class SecurityScanClient<TResult> {
 	 * Returns that cooldown in ms so the caller can put it in its decision
 	 * record. A latch you can read in `latency.log` without the retry schedule
 	 * beside it only tells you the tool is off, not when it comes back.
+	 *
+	 * For NON-probe transient failures only (scan/install timeouts):
+	 * `probeVersion` latches and logs its own transient verdicts (#1501), so
+	 * re-marking one here would double-escalate the cooldown.
 	 */
 	protected markTransientlyUnavailable(
 		cause: AvailabilityCause = "probe-timeout",
@@ -168,11 +187,12 @@ export abstract class SecurityScanClient<TResult> {
 		}
 		if (this.probeWasTransient()) {
 			// A timed-out probe is not evidence the tool is absent, so it must not
-			// trigger an install NOR latch a permanent `false`.
+			// trigger an install NOR latch a permanent `false`. probeVersion has
+			// already recorded the expiring verdict and its retry schedule
+			// (#1501) — re-marking it here would double-escalate the cooldown.
 			this.log(
 				`${this.toolName} availability probe timed out; not installing, will retry`,
 			);
-			this.markTransientlyUnavailable(this.lastProbeCause ?? "probe-timeout");
 			return false;
 		}
 		this.log(`${this.toolName} not found, attempting auto-install`);

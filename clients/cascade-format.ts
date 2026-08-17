@@ -12,7 +12,23 @@ export function formatCascadeNeighborDiagnostics(
 	const inconclusive = neighbors.filter(
 		(n) => n.inconclusive === true && n.diagnostics.length === 0,
 	);
-	if (withErrors.length === 0 && inconclusive.length === 0) return "";
+	// #1459: a neighbour whose scanner never looked at it is not a clean leaf. It
+	// is also not `inconclusive` — the language server answered — so it gets its
+	// own honest line instead of being folded into either bucket. Only the
+	// zero-diagnostic case needs saying: a neighbour with findings already renders.
+	const uncovered = neighbors.filter(
+		(n) =>
+			n.diagnostics.length === 0 &&
+			n.inconclusive !== true &&
+			(n.unconfirmedServerIds?.length ?? 0) > 0,
+	);
+	if (
+		withErrors.length === 0 &&
+		inconclusive.length === 0 &&
+		uncovered.length === 0
+	) {
+		return "";
+	}
 
 	const noun = options.noun ?? "neighbor";
 	let out = withErrors.length > 0
@@ -35,6 +51,14 @@ export function formatCascadeNeighborDiagnostics(
 		out += `⚠️ Cascade diagnostics inconclusive for ${inconclusive.length} ${noun} file(s) — no clean result was confirmed:`;
 		for (const neighbor of inconclusive) {
 			out += `\n  ${toRunnerDisplayPath(cwd, neighbor.filePath)}`;
+		}
+	}
+	if (uncovered.length > 0) {
+		if (out) out += "\n";
+		out += `⚠️ Cascade scanners did not cover ${uncovered.length} ${noun} file(s) — no findings does NOT mean clean here:`;
+		for (const neighbor of uncovered) {
+			const servers = (neighbor.unconfirmedServerIds ?? []).join(", ");
+			out += `\n  ${toRunnerDisplayPath(cwd, neighbor.filePath)} (not scanned by ${servers})`;
 		}
 	}
 	return out;

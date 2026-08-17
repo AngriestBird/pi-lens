@@ -132,9 +132,10 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 			// #1467: a timed-out/killed probe says nothing about whether
 			// govulncheck is on PATH. Latching `false` here disabled it for the
 			// life of the process; a `go install` here would be a heavyweight
-			// reaction to a host hiccup. Record an expiring verdict, retry later.
+			// reaction to a host hiccup. probeVersion has already recorded the
+			// expiring verdict and its retry schedule (#1501) — re-marking it
+			// here would double-escalate the cooldown. Retry later.
 			this.log("govulncheck probe timed out; retrying later (not installing)");
-			this.markTransientlyUnavailable(this.lastProbeCause ?? "probe-timeout");
 			return false;
 		}
 		if (!assertInstallAllowed("govulncheck go install")) {

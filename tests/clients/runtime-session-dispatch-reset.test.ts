@@ -144,4 +144,36 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 		expect(third).toBeNull();
 		expect(ensureToolMock).toHaveBeenCalledTimes(2);
 	});
+
+	// #1490: psscriptanalyzer's interpreter and module verdicts live in
+	// module-local latches, so `resetDispatchAvailabilityState`'s generation
+	// counter — the mechanism every other runner inherits — does not reach them.
+	// Without explicit wiring, a PowerShell install done mid-process stayed
+	// invisible until the host restarted. Same shape as #1266 above: the helper
+	// worked when called directly, and nothing called it.
+	it("re-probes PowerShell after handleSessionStart", async () => {
+		const spawnMod = await import("../../clients/safe-spawn.js");
+		const spawnMock = vi.mocked(spawnMod.safeSpawnAsync);
+		const runner = (
+			await import("../../clients/dispatch/runners/psscriptanalyzer.js")
+		).default;
+		const psProbes = () =>
+			spawnMock.mock.calls.filter((call) =>
+				(call[1] as string[] | undefined)?.includes("-NoProfile"),
+			).length;
+
+		const ctx = { cwd: tmpDir, filePath: `${tmpDir}/script.ps1` } as never;
+		expect((await runner.run(ctx)).status).toBe("skipped");
+		const afterFirst = psProbes();
+		expect(afterFirst).toBeGreaterThan(0);
+
+		// Same session: the verdict is latched, so nothing is re-probed.
+		expect((await runner.run(ctx)).status).toBe("skipped");
+		expect(psProbes()).toBe(afterFirst);
+
+		await handleSessionStart(makeDeps(tmpDir));
+
+		expect((await runner.run(ctx)).status).toBe("skipped");
+		expect(psProbes()).toBeGreaterThan(afterFirst);
+	});
 });
