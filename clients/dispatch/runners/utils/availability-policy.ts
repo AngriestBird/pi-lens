@@ -102,6 +102,33 @@ export function transientRetryDelayMs(
 	);
 }
 
+/**
+ * Install-class transient policy (#1497): the operation being retried is a
+ * network install/compile with a ~60 s budget (govulncheck's `go install`),
+ * not a 1.5–5 s version probe. The probe schedule above would re-run that
+ * compile every 5 minutes indefinitely — a ~20% duty cycle on one core with
+ * nothing that ever gives up.
+ *
+ * The cost, stated: base 5 min, doubling, capped at 30 min, and at most
+ * INSTALL_TRANSIENT_MAX_ATTEMPTS retries — three ≤60 s compiles across ~15
+ * minutes, then the verdict is terminal for the session. Session reset (or a
+ * successful run) re-arms it, so a genuinely repaired network still recovers
+ * without a host restart; what ends is the *indefinite* retry. There is no
+ * host-stall shortcut here: the retry itself is the expensive part, no matter
+ * who ate the budget.
+ */
+export const INSTALL_TRANSIENT_BASE_COOLDOWN_MS = 300_000;
+export const INSTALL_TRANSIENT_MAX_COOLDOWN_MS = 1_800_000;
+export const INSTALL_TRANSIENT_MAX_ATTEMPTS = 3;
+
+export function installRetryDelayMs(attempts: number): number {
+	const exponent = Math.max(0, attempts - 1);
+	return Math.min(
+		INSTALL_TRANSIENT_MAX_COOLDOWN_MS,
+		INSTALL_TRANSIENT_BASE_COOLDOWN_MS * 2 ** Math.min(exponent, 10),
+	);
+}
+
 /** The subset of a spawn result the classification actually reads. */
 export interface ProbeFailureShape {
 	/** The spawn's Error, whose `code` carries the errno when there is one. */
@@ -207,8 +234,19 @@ export function startHostStallSampler(intervalMs = 100): { stop: () => number } 
 export interface AvailabilityLatch {
 	read(): boolean | null;
 	noteAvailable(cause?: AvailabilityCause): void;
-	/** Returns the retry delay in ms; 0 means the verdict is latched. */
-	noteUnavailable(outcome: AvailabilityOutcome, cause: AvailabilityCause): number;
+	/**
+	 * Returns the retry delay in ms; 0 means the verdict is latched.
+	 *
+	 * `opts.operationClass: "install"` marks the failure of an install-class
+	 * operation (a network install/compile, #1497) rather than a cheap probe:
+	 * it escalates on the install schedule and latches for the session once
+	 * INSTALL_TRANSIENT_MAX_ATTEMPTS is reached, instead of retrying forever.
+	 */
+	noteUnavailable(
+		outcome: AvailabilityOutcome,
+		cause: AvailabilityCause,
+		opts?: { operationClass?: "probe" | "install" },
+	): number;
 	reset(): void;
 	getOutcome(): AvailabilityOutcome | null;
 	getCause(): AvailabilityCause | null;
@@ -222,10 +260,13 @@ export function createAvailabilityLatch(): AvailabilityLatch {
 	let cause: AvailabilityCause | null = null;
 	let retryAtMs = 0;
 	let transientAttempts = 0;
+	let installAttempts = 0;
+	let installExhausted = false;
 
 	return {
 		read(): boolean | null {
 			if (available !== false) return available;
+			if (installExhausted) return false;
 			if (outcome !== "transient") return false;
 			return Date.now() >= retryAtMs ? null : false;
 		},
@@ -235,10 +276,13 @@ export function createAvailabilityLatch(): AvailabilityLatch {
 			cause = nextCause;
 			retryAtMs = 0;
 			transientAttempts = 0;
+			installAttempts = 0;
+			installExhausted = false;
 		},
 		noteUnavailable(
 			nextOutcome: AvailabilityOutcome,
 			nextCause: AvailabilityCause,
+			opts?: { operationClass?: "probe" | "install" },
 		): number {
 			available = false;
 			outcome = nextOutcome;
@@ -246,6 +290,20 @@ export function createAvailabilityLatch(): AvailabilityLatch {
 			if (isLatchingOutcome(nextOutcome)) {
 				retryAtMs = 0;
 				return 0;
+			}
+			if (opts?.operationClass === "install") {
+				installAttempts += 1;
+				if (installAttempts >= INSTALL_TRANSIENT_MAX_ATTEMPTS) {
+					// Terminal for the session (#1497): the caller reads the 0 as
+					// "latched" and must surface it, because the user-visible symptom
+					// of an unbounded install retry is a busy core, not a missing tool.
+					installExhausted = true;
+					retryAtMs = 0;
+					return 0;
+				}
+				const installDelay = installRetryDelayMs(installAttempts);
+				retryAtMs = Date.now() + installDelay;
+				return installDelay;
 			}
 			transientAttempts += 1;
 			const delay = transientRetryDelayMs(transientAttempts, nextCause);
@@ -258,6 +316,8 @@ export function createAvailabilityLatch(): AvailabilityLatch {
 			cause = null;
 			retryAtMs = 0;
 			transientAttempts = 0;
+			installAttempts = 0;
+			installExhausted = false;
 		},
 		getOutcome: () => outcome,
 		getCause: () => cause,

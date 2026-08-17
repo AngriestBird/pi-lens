@@ -13,8 +13,13 @@ import {
 	createAvailabilityLatch,
 	describeUnavailability,
 	HOST_STALL_COOLDOWN_MS,
+	INSTALL_TRANSIENT_BASE_COOLDOWN_MS,
+	INSTALL_TRANSIENT_MAX_ATTEMPTS,
+	INSTALL_TRANSIENT_MAX_COOLDOWN_MS,
+	installRetryDelayMs,
 	startHostStallSampler,
 	TRANSIENT_BASE_COOLDOWN_MS,
+	TRANSIENT_MAX_COOLDOWN_MS,
 	transientRetryDelayMs,
 } from "../../../../clients/dispatch/runners/utils/availability-policy.ts";
 import {
@@ -135,6 +140,18 @@ describe("availability seam: transient failures do not latch (#1467)", () => {
 		// A host stall is not evidence about the tool, so its retry stays short
 		// and never escalates.
 		expect(transientRetryDelayMs(7, "host-stall")).toBe(HOST_STALL_COOLDOWN_MS);
+	});
+
+	it("gives install-class retries their own, much longer schedule (#1497)", () => {
+		// The retried operation is a ≤60s network compile, not a 1.5–5s probe,
+		// so the probe-class base/cap would run it at a ~20% duty cycle forever.
+		expect(installRetryDelayMs(1)).toBe(INSTALL_TRANSIENT_BASE_COOLDOWN_MS);
+		expect(installRetryDelayMs(2)).toBe(INSTALL_TRANSIENT_BASE_COOLDOWN_MS * 2);
+		expect(installRetryDelayMs(50)).toBe(INSTALL_TRANSIENT_MAX_COOLDOWN_MS);
+		// The install base starts where the probe schedule tops out.
+		expect(INSTALL_TRANSIENT_BASE_COOLDOWN_MS).toBeGreaterThanOrEqual(
+			TRANSIENT_MAX_COOLDOWN_MS,
+		);
 	});
 
 	it("writes one availability decision record per verdict", async () => {
@@ -298,6 +315,52 @@ describe("availability latch: shared client-side memo (#1467)", () => {
 		latch.noteUnavailable("transient", "probe-timeout");
 		latch.noteAvailable();
 		expect(latch.read()).toBe(true);
+		expect(latch.noteUnavailable("transient", "probe-timeout")).toBe(
+			TRANSIENT_BASE_COOLDOWN_MS,
+		);
+	});
+
+	it("latches an install-class operation after the attempt ceiling (#1497)", () => {
+		const latch = createAvailabilityLatch();
+		const install = { operationClass: "install" as const };
+
+		let delay = latch.noteUnavailable("transient", "probe-timeout", install);
+		expect(delay).toBe(INSTALL_TRANSIENT_BASE_COOLDOWN_MS);
+		expect(latch.read()).toBe(false);
+		vi.setSystemTime(new Date(Date.now() + delay + 1));
+		expect(latch.read()).toBeNull();
+
+		delay = latch.noteUnavailable("transient", "probe-timeout", install);
+		expect(delay).toBe(INSTALL_TRANSIENT_BASE_COOLDOWN_MS * 2);
+		vi.setSystemTime(new Date(Date.now() + delay + 1));
+		expect(latch.read()).toBeNull();
+
+		// The third consecutive timeout reaches the ceiling: the verdict becomes
+		// terminal for the session (a returned 0 means latched) and no cooldown
+		// expiry ever re-arms it…
+		expect(
+			latch.noteUnavailable("transient", "probe-timeout", install),
+		).toBe(0);
+		expect(INSTALL_TRANSIENT_MAX_ATTEMPTS).toBe(3);
+		expect(latch.read()).toBe(false);
+		vi.setSystemTime(new Date(Date.now() + 3_600_000));
+		expect(latch.read()).toBe(false);
+
+		// …but the recovery paths still work: a success re-arms the schedule.
+		latch.noteAvailable();
+		expect(latch.read()).toBe(true);
+		expect(latch.noteUnavailable("transient", "probe-timeout", install)).toBe(
+			INSTALL_TRANSIENT_BASE_COOLDOWN_MS,
+		);
+	});
+
+	it("keeps install-class attempts independent of the probe-class schedule", () => {
+		const latch = createAvailabilityLatch();
+		latch.noteUnavailable("transient", "probe-timeout", {
+			operationClass: "install",
+		});
+		// A probe-class failure on the same latch still gets the probe schedule,
+		// unaffected by the install attempt that came before it.
 		expect(latch.noteUnavailable("transient", "probe-timeout")).toBe(
 			TRANSIENT_BASE_COOLDOWN_MS,
 		);

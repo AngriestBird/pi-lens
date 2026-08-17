@@ -149,11 +149,17 @@ export abstract class SecurityScanClient<TResult> {
 	 * Returns that cooldown in ms so the caller can put it in its decision
 	 * record. A latch you can read in `latency.log` without the retry schedule
 	 * beside it only tells you the tool is off, not when it comes back.
+	 *
+	 * Pass `opts.operationClass: "install"` when the failed operation was a
+	 * network install/compile rather than a cheap probe (#1497): the retry
+	 * escalates on the install-class schedule and latches for the session at
+	 * the attempt ceiling, in which case the return is 0 (latched).
 	 */
 	protected markTransientlyUnavailable(
 		cause: AvailabilityCause = "probe-timeout",
+		opts?: { operationClass?: "probe" | "install" },
 	): number {
-		return this.availabilityLatch.noteUnavailable("transient", cause);
+		return this.availabilityLatch.noteUnavailable("transient", cause, opts);
 	}
 
 	/**

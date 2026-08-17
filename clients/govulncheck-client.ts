@@ -25,9 +25,11 @@ import { assertInstallAllowed } from "./project-trust.js";
 import { SecurityScanClient } from "./security-scan-client.js";
 import {
 	classifyProbeFailure,
+	INSTALL_TRANSIENT_MAX_ATTEMPTS,
 	logAvailabilityDecision,
 	startHostStallSampler,
 } from "./dispatch/runners/utils/availability-policy.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 
 // --- Types ---
 
@@ -216,7 +218,22 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 				hostStallMs: installHostStallMs,
 			});
 			if (outcome === "transient") {
-				const retryAfterMs = this.markTransientlyUnavailable(cause);
+				// #1497: the retried operation here is a ≤60s network compile,
+				// not a cheap probe, so it escalates on the install-class
+				// schedule and latches at the attempt ceiling instead of
+				// re-compiling every few minutes forever.
+				const retryAfterMs = this.markTransientlyUnavailable(cause, {
+					operationClass: "install",
+				});
+				if (retryAfterMs === 0) {
+					// The symptom a user notices is an unexplained busy core, not a
+					// missing tool — so the terminal verdict gets the louder record.
+					recordDegradationOnce({
+						kind: "install-retry-exhausted",
+						subject: "govulncheck",
+						reason: `go install timed out ${INSTALL_TRANSIENT_MAX_ATTEMPTS} times; install retries disabled until the next session`,
+					});
+				}
 				// One record per decision, so an install that keeps timing out is
 				// readable in latency.log the same day (#1467's forensic trail).
 				logAvailabilityDecision({
@@ -225,7 +242,7 @@ export class GovulncheckClient extends SecurityScanClient<GovulncheckResult> {
 					outcome,
 					cause,
 					elapsedMs: Date.now() - installStartedAt,
-					latched: false,
+					latched: retryAfterMs === 0,
 					hostStallMs: installHostStallMs,
 					...(retryAfterMs > 0 && { retryAfterMs }),
 					budgetMs: INSTALL_TIMEOUT_MS,
