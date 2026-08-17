@@ -301,8 +301,19 @@ export interface LSPClientInfo {
 	 * the binding as "unknown", i.e. pre-#1095 behavior).
 	 */
 	getDiagnosticBinding(filePath: string): StoredDiagnosticBinding | undefined;
-	/** Monotonic counter bumped when fresh diagnostics are stored for this client. */
+	/** Monotonic counter bumped when fresh diagnostics are stored for this client.
+	 *  Client-GLOBAL: any path's publication advances it, so it cannot answer
+	 *  "did this server report on file X?" — use `getDiagnosticsVersionForPath`. */
 	readonly diagnosticsVersion: number;
+	/**
+	 * #1531: the value `diagnosticsVersion` held when diagnostics were last stored
+	 * for `filePath` — 0 when this client has stored none. Compare a baseline read
+	 * before a notify against a later read to prove a publication landed for THAT
+	 * file, rather than for an unrelated one on the same client. Optional so
+	 * pre-#1531 client doubles keep type-checking; callers fall back to the global
+	 * counter, which is the pre-#1531 behavior.
+	 */
+	getDiagnosticsVersionForPath?(filePath: string): number;
 	waitForDiagnostics(
 		filePath: string,
 		timeoutMs?: number,
@@ -683,6 +694,18 @@ export interface LSPClientState {
 	readonly documentOpenedAt: Map<string, number>;
 	readonly diagnosticEmitter: EventEmitter;
 	diagnosticsVersion: number;
+	/** #1531: the value `diagnosticsVersion` had when fresh diagnostics were last
+	 *  STORED for each path. It records the global counter's value rather than a
+	 *  private per-path sequence, so the numbers stay globally monotonic: a
+	 *  baseline captured for path A remains comparable even after A's entry is
+	 *  evicted, while a publication for path B never moves A's stamp. That is what
+	 *  lets the auxiliary evidence check ask "did this aux publish for THIS file?"
+	 *  instead of "did anything at all land on this client?". Written in lockstep
+	 *  with `pushDiagnostics`/`documentPullDiagnostics`, cleared by
+	 *  `clearDiagnosticsForPath`. A plain Map keyed by the already normalized path
+	 *  for the same hot-receive-path reason as `diagnosticPublicationCounts`
+	 *  above; readers fold their input through `normalizeMapKey`. */
+	readonly diagnosticsVersionsByPath: Map<string, number>;
 	readonly documentVersions: Map<string, number>;
 	/** The LSP document version (`publishDiagnostics.version`) the cached
 	 *  diagnostics for a path were computed against. Only set when the server
@@ -1054,6 +1077,28 @@ function getMergedDiagnosticsForPath(
 	);
 }
 
+/** #1531: bump the client-global diagnostics counter and stamp the path it was
+ * bumped FOR. The single seam every "fresh diagnostics stored" site goes
+ * through, so the per-path stamp can never drift from the global counter. */
+export function bumpDiagnosticsVersion(
+	state: LSPClientState,
+	normalizedPath: string,
+): void {
+	state.diagnosticsVersion += 1;
+	state.diagnosticsVersionsByPath?.set(normalizedPath, state.diagnosticsVersion);
+}
+
+/** #1531: the global counter's value when diagnostics were last stored for
+ * `normalizedPath`, or 0 when nothing is stored. 0 is a safe floor because the
+ * counter starts at 0 and only ever increases, so any later publication for the
+ * path compares greater than a baseline read while it was absent. */
+export function diagnosticsVersionForPath(
+	state: LSPClientState,
+	normalizedPath: string,
+): number {
+	return state.diagnosticsVersionsByPath?.get(normalizedPath) ?? 0;
+}
+
 /** Exported for tests: the quiet-window timer cancel on clear/resync is the
  * headline #1412 safety property (a stale versionless publication must never
  * land after the document content changed). */
@@ -1078,6 +1123,12 @@ export function clearDiagnosticsForPath(
 	// `documentContentHashes` record is intentionally retained: it describes what
 	// we sent, which the NEXT publish for that version still needs to bind to.)
 	state.diagnosticBindings?.delete(normalizedPath);
+	// #1531: the per-path publication stamp describes diagnostics that no longer
+	// exist — drop it with them. Safe because the stamps hold the GLOBAL counter's
+	// value: a baseline captured before this clear still compares less than any
+	// later publication for the path, so dropping the entry cannot manufacture a
+	// missed answer.
+	state.diagnosticsVersionsByPath?.delete(normalizedPath);
 	// #1104: a resync invalidates any `unchanged`-report basis too — the next
 	// pull must not inherit a resultId/contentHash computed against the
 	// content this resync just replaced.
@@ -1340,10 +1391,12 @@ export function setupIncomingHandlers(
 			// Known, deliberately out-of-scope gaps: the pull-diagnostics path
 			// (clientRequestPullDiagnostics/clientRequestWorkspaceDiagnostics) has no
 			// version stamp to compare against in this codebase's current handling,
-			// so nothing analogous is applied there. And diagnosticsVersion is a
-			// single global counter rather than per-path, so an unrelated path's
-			// fresh push can still satisfy a wait for this path's version bump —
-			// both are separate, larger changes.
+			// so nothing analogous is applied there. `diagnosticsVersion` is still a
+			// single global counter, so an unrelated path's fresh push can satisfy the
+			// `minVersion` gate on a wait for this path (the timeout stays the
+			// backstop); #1531 fixed the EVIDENCE side of that — every bump now also
+			// stamps `diagnosticsVersionsByPath`, so the aux answered/silent outcome
+			// is decided per path and never from a sibling file's publication.
 			const isSupersededPush = (): boolean => {
 				if (docVersion === undefined) return false;
 				const currentVersion = state.documentVersions.get(normalizedPath);
@@ -1360,7 +1413,7 @@ export function setupIncomingHandlers(
 				state.pushDiagnostics.set(normalizedPath, newDiags);
 				state.pushDiagnosticTimestamps.set(normalizedPath, Date.now());
 				recordDocVersion();
-				state.diagnosticsVersion += 1;
+				bumpDiagnosticsVersion(state, normalizedPath);
 				state.diagnosticEmitter.emit("diagnostics", normalizedPath);
 				logSequence(true, "first-push");
 				return;
@@ -1376,7 +1429,7 @@ export function setupIncomingHandlers(
 				state.pushDiagnostics.set(normalizedPath, newDiags);
 				state.pushDiagnosticTimestamps.set(normalizedPath, Date.now());
 				recordDocVersion();
-				state.diagnosticsVersion += 1;
+				bumpDiagnosticsVersion(state, normalizedPath);
 				state.diagnosticEmitter.emit("diagnostics", normalizedPath);
 				logSequence(true, "quiet-window");
 			}, strategy.debounceMs);
@@ -1626,7 +1679,7 @@ async function clientRequestPullDiagnostics(
 			const primaryItems = normalizeLspDiagnostics(report.items ?? []);
 			state.documentPullDiagnostics.set(normalizedPath, primaryItems);
 			state.documentPullDiagnosticTimestamps.set(normalizedPath, now);
-			state.diagnosticsVersion += 1;
+			bumpDiagnosticsVersion(state, normalizedPath);
 			state.diagnosticBindings.set(normalizedPath, { contentHash: sentHash });
 			totalCount = primaryItems.length;
 		}
@@ -2684,6 +2737,7 @@ export async function createLSPClient(options: {
 		documentOpenedAt: new Map(),
 		diagnosticEmitter,
 		diagnosticsVersion: 0,
+		diagnosticsVersionsByPath: new Map(),
 		documentVersions: new Map(),
 		diagnosticDocVersions: new Map(),
 		documentContentHashes: new Map(),
@@ -2888,6 +2942,10 @@ export async function createLSPClient(options: {
 
 		getDiagnosticBinding(filePath) {
 			return state.diagnosticBindings.get(normalizeMapKey(filePath));
+		},
+
+		getDiagnosticsVersionForPath(filePath) {
+			return diagnosticsVersionForPath(state, normalizeMapKey(filePath));
 		},
 
 		getAllDiagnostics() {

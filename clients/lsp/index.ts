@@ -2347,6 +2347,19 @@ export class LSPService {
 		const diagnosticBaselines = new Map(
 			spawned.map((entry) => [entry.client, entry.client.diagnosticsVersion]),
 		);
+		// #1531: the same baseline, read PER PATH. `diagnosticsVersion` above is a
+		// client-global counter, so it also advances for files this touch never
+		// mentions — comparing it after the wait made a sibling file's publication
+		// read as an answer for THIS file. Captured here, alongside the global
+		// baseline, because the notify below clears the client's cache for the file.
+		// `undefined` for a client that predates the accessor; the evidence check
+		// then falls back to the global pair.
+		const pathDiagnosticBaselines = new Map(
+			spawned.map((entry) => [
+				entry.client,
+				entry.client.getDiagnosticsVersionForPath?.(filePath),
+			]),
+		);
 		// #1458: read a late auxiliary publication BEFORE the ordinary resync
 		// clears its client cache. Carry it only when the publication's exact
 		// sent-content fingerprint matches this touch's content. A changed edit,
@@ -2772,6 +2785,9 @@ export class LSPService {
 											serverId: spawned[i].info.id,
 											client: spawned[i].client,
 											baseline: diagnosticBaselines.get(spawned[i].client),
+											pathBaseline: pathDiagnosticBaselines.get(
+												spawned[i].client,
+											),
 										}
 									: null,
 							)
@@ -2783,6 +2799,7 @@ export class LSPService {
 									serverId: string;
 									client: (typeof spawned)[number]["client"];
 									baseline: number | undefined;
+									pathBaseline: number | undefined;
 								} => x !== null,
 							);
 						const auxCeilingMs = readEnvAuxGraceMs() ?? 2000;
@@ -2833,10 +2850,32 @@ export class LSPService {
 									//     NOT the same as having answered).
 									//   - raced === true, evidence   → "answered" (a fresh
 									//     publication actually landed for this touch).
+									//
+									// #1531: the evidence is read PER PATH. The global
+									// `diagnosticsVersion` advances for every file this client
+									// publishes, so a concurrent touch of an unrelated file would
+									// hand this one an unearned "answered" row. The per-path stamp
+									// carries the global counter's value at store time, so the
+									// comparison stays monotonic across cache evictions while
+									// ignoring sibling paths. Baseline and current reading are
+									// taken from the SAME axis — a client without the accessor
+									// falls back to the global pair, i.e. pre-#1531 behavior.
+									const perPathVersion =
+										aux.pathBaseline === undefined
+											? undefined
+											: aux.client.getDiagnosticsVersionForPath?.(filePath);
+									const evidenceBaseline =
+										perPathVersion === undefined
+											? aux.baseline
+											: aux.pathBaseline;
+									const evidenceVersion =
+										perPathVersion === undefined
+											? aux.client.diagnosticsVersion
+											: perPathVersion;
 									const publishedEvidence =
 										raced &&
-										Number.isFinite(aux.baseline) &&
-										aux.client.diagnosticsVersion > (aux.baseline as number);
+										Number.isFinite(evidenceBaseline) &&
+										evidenceVersion > (evidenceBaseline as number);
 									const outcome = !raced
 										? ("cut_off" as const)
 										: publishedEvidence

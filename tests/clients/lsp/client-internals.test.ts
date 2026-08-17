@@ -20,6 +20,7 @@ import {
 	clientShutdown,
 	clientWaitForDiagnostics,
 	closeDocument,
+	diagnosticsVersionForPath,
 	normalizeClientWorkspaceEdit,
 	handleNotifyChange,
 	navRequest,
@@ -422,6 +423,7 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 		documentOpenedAt: new Map(),
 		diagnosticEmitter,
 		diagnosticsVersion: 0,
+		diagnosticsVersionsByPath: new Map(),
 		documentVersions: new Map(),
 		diagnosticDocVersions: new Map(),
 		documentContentHashes: new Map(),
@@ -2327,5 +2329,94 @@ describe("clientRequestWorkspaceDiagnostics — real report parsing", () => {
 		});
 		vi.mocked(state.connection.sendRequest).mockRejectedValue(new Error("dead"));
 		expect(await clientRequestWorkspaceDiagnostics(state, 1000)).toBeUndefined();
+	});
+});
+
+describe("per-path diagnostics versions (#1531)", () => {
+	const FILE_A = "/project/a.ts";
+	const FILE_B = "/project/b.ts";
+	const KEY_A = normalizeMapKey(FILE_A);
+	const KEY_B = normalizeMapKey(FILE_B);
+
+	/** Drive the REAL `textDocument/publishDiagnostics` handler, so the per-path
+	 * stamp is proven to be written by the same code path that stores
+	 * `pushDiagnostics` — not by a helper the production push path might skip.
+	 * `typos` is used because its strategy seeds the first push (no debounce
+	 * timer), which keeps the store synchronous. */
+	function publishHandlerFor(state: LSPClientState) {
+		setupIncomingHandlers(state, {});
+		const calls = vi.mocked(state.connection.onNotification).mock
+			.calls as unknown as Array<[string, (params: unknown) => void]>;
+		const entry = calls.find((c) => c[0] === "textDocument/publishDiagnostics");
+		expect(entry, "publishDiagnostics handler registered").toBeDefined();
+		return entry![1];
+	}
+
+	function diagnostic(message: string): LSPDiagnostic {
+		return {
+			severity: 1,
+			message,
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 1 },
+			},
+		};
+	}
+
+	it("stamps only the published path, never a sibling", () => {
+		const state = createMockState({ serverId: "typos" });
+		const publish = publishHandlerFor(state);
+
+		expect(diagnosticsVersionForPath(state, KEY_A)).toBe(0);
+		expect(diagnosticsVersionForPath(state, KEY_B)).toBe(0);
+
+		publish({
+			uri: pathToFileURL(FILE_A).href,
+			diagnostics: [diagnostic("typo in A")],
+		});
+
+		// The client-global counter advanced — which is exactly why it cannot
+		// answer "did this server report on B?".
+		expect(state.diagnosticsVersion).toBe(1);
+		expect(state.pushDiagnostics.has(KEY_A)).toBe(true);
+		expect(diagnosticsVersionForPath(state, KEY_A)).toBe(1);
+		// The regression this pins: B never got a publication, so its per-path
+		// version must stay at its baseline. Reading the global counter here
+		// (pre-#1531 behavior) reports 1 > 0 and manufactures evidence.
+		expect(state.pushDiagnostics.has(KEY_B)).toBe(false);
+		expect(diagnosticsVersionForPath(state, KEY_B)).toBe(0);
+	});
+
+	it("keeps stamps globally monotonic so a cleared path cannot look answered", () => {
+		const state = createMockState({ serverId: "typos" });
+		const publish = publishHandlerFor(state);
+
+		publish({
+			uri: pathToFileURL(FILE_A).href,
+			diagnostics: [diagnostic("typo in A")],
+		});
+		const baselineA = diagnosticsVersionForPath(state, KEY_A);
+
+		// A resync drops A's stamp along with the diagnostics it described.
+		clearDiagnosticsForPath(state, KEY_A);
+		expect(diagnosticsVersionForPath(state, KEY_A)).toBe(0);
+
+		// A publication for B while A's touch is in flight must not lift A back
+		// above its captured baseline.
+		publish({
+			uri: pathToFileURL(FILE_B).href,
+			diagnostics: [diagnostic("typo in B")],
+		});
+		expect(diagnosticsVersionForPath(state, KEY_A)).toBeLessThanOrEqual(
+			baselineA,
+		);
+
+		// A's own next publication does clear the baseline — the stamps carry the
+		// global counter's value, so they never restart below an earlier one.
+		publish({
+			uri: pathToFileURL(FILE_A).href,
+			diagnostics: [diagnostic("typo in A again")],
+		});
+		expect(diagnosticsVersionForPath(state, KEY_A)).toBeGreaterThan(baselineA);
 	});
 });

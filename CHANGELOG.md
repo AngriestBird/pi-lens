@@ -14,6 +14,8 @@ All notable changes to pi-lens will be documented in this file.
 
 ### Fixed
 
+- **Auxiliary `answered` evidence is now decided per file (closes [#1531](https://github.com/apmantza/pi-lens/issues/1531))** — `diagnosticsVersion` is a per-client counter that any file's publication advances, so a concurrent touch of an unrelated file on the same auxiliary recorded `answered` for a publication that never mentioned it. Every store of fresh diagnostics now also stamps the path it was stored for (`diagnosticsVersionsByPath`, written by the new `bumpDiagnosticsVersion` seam and cleared with the rest of a path's state in `clearDiagnosticsForPath`), and the aux wait compares that per-path stamp against a per-path baseline. Direction was under-detection only — a false `answered`, never a false finding — but it poisoned the `lsp_aux_wait_outcome` rows used to reason about auxiliary health.
+
 ### Security
 
 ## [4.0.1] - 2026-08-16
