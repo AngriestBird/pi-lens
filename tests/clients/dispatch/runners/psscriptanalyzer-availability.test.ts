@@ -67,6 +67,19 @@ const ok = (stdout = "") => ({ stdout, stderr: "", status: 0 });
 /** `Get-Module -ListAvailable` ran and found nothing: the module is absent. */
 const moduleMissing = { stdout: "", stderr: "", status: 1 };
 
+/** The child never started. Windows' `spawn UNKNOWN`, the #533 class. */
+const spawnUnknownResult = {
+	stdout: "",
+	stderr: "",
+	status: null,
+	error: Object.assign(new Error("spawn UNKNOWN"), { code: "UNKNOWN" }),
+	failure: "spawn",
+	spawnFailure: { kind: "spawn-failed" },
+};
+
+/** PowerShell is present and refuses the probe: durable, but not missing. */
+const rejectedResult = { stdout: "", stderr: "not authorized", status: 5 };
+
 type Call = [string, string[], Record<string, unknown> | undefined];
 
 const callsMatching = (needle: string): Call[] =>
@@ -182,6 +195,42 @@ describe("psscriptanalyzer availability (#1490)", () => {
 		vi.setSystemTime(new Date(Date.now() + TRANSIENT_BASE_COOLDOWN_MS + 1));
 		healthyHost();
 		expect((await runner.run(ctx())).status).toBe("succeeded");
+	});
+
+	it("does not read a failed module spawn as a missing module", async () => {
+		const runner = await loadRunner();
+		// `spawn UNKNOWN` is the #533 Windows class: the child never started, so
+		// nothing was learned about the module. Latching it as "not installed"
+		// disabled PowerShell analysis for the session on hosts that had it.
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+			args.some((arg) => arg.includes("Get-Module")) ? spawnUnknownResult : ok(),
+		);
+		expect((await runner.run(ctx())).status).toBe("skipped");
+		expect(
+			decisions().find((entry) => entry.metadata?.tool === "psscriptanalyzer")
+				?.metadata,
+		).toMatchObject({ outcome: "transient", latched: false });
+
+		vi.setSystemTime(new Date(Date.now() + TRANSIENT_BASE_COOLDOWN_MS + 1));
+		healthyHost();
+		expect((await runner.run(ctx())).status).toBe("succeeded");
+	});
+
+	it("reports a present-but-rejecting interpreter as rejected, not missing", async () => {
+		const runner = await loadRunner();
+		// pwsh is absent, powershell answers and refuses. Collapsing both to
+		// not-found tells the user to install PowerShell they already have, and
+		// fabricates the cause in the telemetry.
+		safeSpawnAsync.mockImplementation(async (cmd: string) =>
+			cmd === "pwsh" ? notFoundResult : rejectedResult,
+		);
+		expect((await runner.run(ctx())).status).toBe("skipped");
+		expect(decisions()[0]?.metadata).toMatchObject({
+			tool: "powershell",
+			outcome: "non-installable",
+			cause: "probe-rejected",
+			latched: true,
+		});
 	});
 
 	it("latches a genuinely missing module", async () => {

@@ -114,6 +114,22 @@ function notePsDecision(
 }
 
 /**
+ * Drop both verdicts at the session boundary (#1490 review).
+ *
+ * Every other runner gets this for free through
+ * `resetDispatchAvailabilityState`'s generation counter; these latches are local
+ * to the module, so `session_start` clears them explicitly. Without it, a
+ * PowerShell or module install performed mid-process is invisible until the host
+ * restarts — the same "suppression outliving its session" defect #1222 fixed for
+ * install attempts.
+ */
+export function resetPsScriptAnalyzerAvailability(): void {
+	psCmdLatch.reset();
+	psAnalyzerLatchByCmd.clear();
+	psCmd = null;
+}
+
+/**
  * Resolve the PowerShell binary, once per session per verdict.
  *
  * A candidate that times out is NOT evidence that PowerShell is absent, so the
@@ -125,7 +141,15 @@ async function resolvePowerShellCmd(): Promise<string | null> {
 	const memo = psCmdLatch.read();
 	if (memo !== null) return memo ? psCmd : null;
 
+	// Rank what the candidates said, rather than collapsing every failure to
+	// "not-found" (#1490 review). A stall outranks everything: it means we never
+	// got an answer. A present-but-rejecting interpreter (nonzero exit, EACCES)
+	// is durable but is NOT a missing install, and reporting it as one both sends
+	// the user to install PowerShell they already have and fabricates the cause in
+	// `availability_decision`. Only an all-candidates ENOENT sweep is `missing`.
 	let transient: { outcome: AvailabilityOutcome; cause: AvailabilityCause } | null =
+		null;
+	let rejected: { outcome: AvailabilityOutcome; cause: AvailabilityCause } | null =
 		null;
 	let elapsedTotalMs = 0;
 	let stallTotalMs = 0;
@@ -152,14 +176,20 @@ async function resolvePowerShellCmd(): Promise<string | null> {
 			return candidate;
 		}
 		const classified = classifyProbeFailure(result, { hostStallMs });
-		if (classified.outcome === "transient") transient = classified;
+		if (classified.outcome === "transient") transient ??= classified;
+		else if (classified.outcome !== "missing") rejected ??= classified;
 	}
 
 	psCmd = null;
+	const verdict = transient ??
+		rejected ?? {
+			outcome: "missing" as AvailabilityOutcome,
+			cause: "not-found" as AvailabilityCause,
+		};
 	notePsDecision(psCmdLatch, "powershell", {
 		available: false,
-		outcome: transient?.outcome ?? "missing",
-		cause: transient?.cause ?? "not-found",
+		outcome: verdict.outcome,
+		cause: verdict.cause,
 		elapsedMs: elapsedTotalMs,
 		hostStallMs: stallTotalMs,
 	});
@@ -193,13 +223,26 @@ async function checkModuleAvailable(cmd: string): Promise<boolean> {
 		});
 		return true;
 	}
-	// `exit 1` is the module genuinely not being installed — a durable fact with
-	// an install that fixes it, so it is classified `missing` rather than left as
-	// an unclassified rejection.
-	const { outcome, cause } = classifyProbeFailure(result, {
+	// A CLEAN `exit 1` is the module genuinely not being installed — the one
+	// outcome an install fixes, so that alone earns the `missing` override.
+	//
+	// Everything else did not answer the question (#1490 review). A `spawn
+	// UNKNOWN`, an EMFILE, an EACCES, or a PowerShell that vanished between the
+	// two probes all arrive with an error and no status, and calling those
+	// "PSScriptAnalyzer is not installed" latched PowerShell analysis off for the
+	// session on hosts where the module was present the whole time.
+	const moduleAbsent =
+		result.status === 1 && !result.failure && !result.error;
+	const classified = classifyProbeFailure(result, {
 		hostStallMs,
-		unclassifiedFailureOutcome: "missing",
+		...(moduleAbsent && { unclassifiedFailureOutcome: "missing" as const }),
 	});
+	let { outcome, cause } = classified;
+	if (!moduleAbsent && outcome !== "transient") {
+		// Nothing here is evidence about the module, so the verdict must expire.
+		outcome = "transient";
+		cause = "probe-rejected";
+	}
 	notePsDecision(latch, "psscriptanalyzer", {
 		available: false,
 		outcome,
