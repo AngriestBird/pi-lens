@@ -202,6 +202,16 @@ export class SgRunner {
 	 */
 	private sweepSawTransient = false;
 	private sweepTransientCause: AvailabilityCause = "probe-timeout";
+	/**
+	 * The DIRECT candidates that were unreachable, in ask order (#1568).
+	 *
+	 * The sweep returns at the first candidate that answers, so at the moment of
+	 * a win this is exactly the set of preferred tiers the winner did not beat on
+	 * the merits. Fallbacks are excluded on purpose: `npx` is asked before the
+	 * global-bin and platform-package tiers, and a slow `npx` says nothing about
+	 * a winner that is a real binary.
+	 */
+	private sweepUnreachable: string[] = [];
 	/** A transient on the npx fallback: not evidence, but not nothing either. */
 	private sweepFallbackTransient = false;
 	private sweepFallbackCause: AvailabilityCause = "probe-timeout";
@@ -241,6 +251,7 @@ export class SgRunner {
 		const startedAt = Date.now();
 		this.sweepSawTransient = false;
 		this.sweepTransientCause = "probe-timeout";
+		this.sweepUnreachable = [];
 		this.sweepFallbackTransient = false;
 		this.sweepFallbackCause = "probe-timeout";
 		this.sweepHostStallMs = 0;
@@ -366,19 +377,46 @@ export class SgRunner {
 		);
 	}
 
-	/** Record a successful sweep: available, latched, one decision record. */
+	/**
+	 * Record a successful sweep, with one decision record.
+	 *
+	 * The win is latched for the session UNLESS a direct candidate ahead of it
+	 * was unreachable (#1568). `sweepSawTransient` is set only by candidates the
+	 * sweep already asked, and the sweep returns at the first one that answers,
+	 * so at this point the flag means "a tier the winner is supposed to lose to
+	 * never got a fair hearing". Latching that pinned the session to
+	 * `npx --no -- ast-grep` — a Node start per invocation — over a healthy
+	 * ast-grep on PATH, until the next restart. Provisional instead: served now,
+	 * re-swept once the stalled tier's cooldown expires.
+	 *
+	 * The install arm cannot reach here provisionally: `doEnsureAvailable`
+	 * returns before Step 4 whenever `sweepSawTransient` is set.
+	 */
 	private noteAvailable(startedAt: number, message: string): void {
-		this.availabilityLatch.noteAvailable();
+		const provisional = this.sweepSawTransient;
+		let retryAfterMs = 0;
+		if (provisional) {
+			retryAfterMs = this.availabilityLatch.noteProvisionallyAvailable(
+				this.sweepTransientCause,
+			);
+		} else {
+			this.availabilityLatch.noteAvailable();
+		}
 		this.log(message);
 		logAvailabilityDecision({
 			tool: "ast-grep",
 			verdict: "available",
 			outcome: "success",
-			cause: "ok",
+			cause: provisional ? this.sweepTransientCause : "ok",
 			elapsedMs: Date.now() - startedAt,
-			latched: true,
+			latched: !provisional,
 			hostStallMs: this.sweepHostStallMs,
 			budgetMs: PROBE_TIMEOUT_MS,
+			...(provisional && {
+				provisional: true,
+				unreachablePreferred: [...this.sweepUnreachable],
+				...(retryAfterMs > 0 && { retryAfterMs }),
+			}),
 		});
 	}
 
@@ -541,6 +579,9 @@ export class SgRunner {
 			} else {
 				this.sweepSawTransient = true;
 				this.sweepTransientCause = cause;
+				if (!this.sweepUnreachable.includes(cmd)) {
+					this.sweepUnreachable.push(cmd);
+				}
 			}
 		}
 		return false;

@@ -1067,6 +1067,14 @@ let sgCmdArgs: string[] = [];
 let sgSweepSawTransient = false;
 let sgSweepTransientCause: AvailabilityCause = "probe-timeout";
 let sgSweepHostStallMs = 0;
+/**
+ * Candidates that were UNREACHABLE, in ask order (#1568).
+ *
+ * The sweep stops at the first candidate that answers, so at the moment of a
+ * win this list is exactly the set of candidates ahead of the winner that never
+ * got a fair hearing — i.e. the preferred tiers the winner did not really beat.
+ */
+let sgSweepUnreachable: string[] = [];
 
 function isAstGrepVersionOutput(output: string): boolean {
 	return /\bast[- ]grep\b/i.test(output);
@@ -1098,6 +1106,7 @@ async function probeAstGrepCommandAsync(
 	if (outcome === "transient") {
 		sgSweepSawTransient = true;
 		sgSweepTransientCause = cause;
+		if (!sgSweepUnreachable.includes(cmd)) sgSweepUnreachable.push(cmd);
 	}
 	return false;
 }
@@ -1158,6 +1167,7 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 		sgSweepSawTransient = false;
 		sgSweepTransientCause = "probe-timeout";
 		sgSweepHostStallMs = 0;
+		sgSweepUnreachable = [];
 		// 1. Local node_modules/.bin
 		for (const localBin of buildSgLocalBins()) {
 			if (await probeAstGrepCommandAsync(localBin)) {
@@ -1204,18 +1214,38 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 	return sgAvailableInFlight;
 }
 
-/** Record a successful shared-ast-grep sweep, with one decision record. */
+/**
+ * Record a successful shared-ast-grep sweep, with one decision record.
+ *
+ * A win reached while an EARLIER candidate was unreachable is provisional
+ * (#1568). The sweep stops at the first candidate that answers, so
+ * `sgSweepSawTransient` at this point means precisely "a tier this one is
+ * supposed to lose to never got a fair hearing" — the winner is used now, but
+ * caching it for the session would pin a healthy PATH ast-grep behind `npx`
+ * until the next restart.
+ */
 function noteSgAvailable(startedAt: number): void {
-	sgLatch.noteAvailable();
+	const provisional = sgSweepSawTransient;
+	let retryAfterMs = 0;
+	if (provisional) {
+		retryAfterMs = sgLatch.noteProvisionallyAvailable(sgSweepTransientCause);
+	} else {
+		sgLatch.noteAvailable();
+	}
 	logAvailabilityDecision({
 		tool: "ast-grep",
 		verdict: "available",
 		outcome: "success",
-		cause: "ok",
+		cause: provisional ? sgSweepTransientCause : "ok",
 		elapsedMs: Date.now() - startedAt,
-		latched: true,
+		latched: !provisional,
 		hostStallMs: sgSweepHostStallMs,
 		budgetMs: 5000,
+		...(provisional && {
+			provisional: true,
+			unreachablePreferred: [...sgSweepUnreachable],
+			...(retryAfterMs > 0 && { retryAfterMs }),
+		}),
 	});
 }
 
