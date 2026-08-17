@@ -689,9 +689,19 @@ describe("test-runner-client", () => {
 			);
 		});
 
-		it("reports an unknown-runner (bazel) failure, not a runner error", () => {
+		it("reports an unknown-runner (bazel) failure with a parseable count summary, not a runner error", () => {
+			// #1524-r3: updated from the original round's fixture, which
+			// relied on a bare `FAILED ...`/`Error: ...` text pair alone to
+			// veto the runner-error branch. That is exactly the ambiguous
+			// shape #1524-r3 removed the veto from — see the gradle/maven/
+			// rspec runner-error tests below, which use the same bare-text
+			// shape and now correctly render AS runner errors. An
+			// unrecognised runner with no `--- FAIL:` marker of its own can
+			// still report a real failure, but only via a count summary a
+			// parser actually recognises (rspec's `N examples, N failures`
+			// applies to any runner name, not just `rspec`).
 			const result = parse(
-				"FAILED //pkg:test\nError: expected 1 to equal 2\n",
+				"3 examples, 1 failure\nError: expected 1 to equal 2\n",
 				1,
 				"bazel",
 			);
@@ -706,6 +716,100 @@ describe("test-runner-client", () => {
 			expect(result.error).toBe("Runner go exited with 1");
 			expect(result.failed).toBe(0);
 			expect(result.failures).toEqual([]);
+		});
+	});
+
+	// #1524-r3: a round-2 review found the fix itself had two defects.
+	//
+	// S2: the `FAILED`/`Failure:` name regexes let their own `\s+` gap cross
+	// a newline. A bare keyword at end-of-line has nothing after it on that
+	// line, so the gap ate the newline and the capture grabbed the FIRST
+	// TOKEN OF THE NEXT LINE as the "test name" — and, worse, that invented
+	// name then counted as evidence a test ran, vetoing the runner-error
+	// branch for build-tool failures (a gradle task failing to compile, a
+	// maven goal failing before surefire runs, an rspec file that never
+	// loaded) that have nothing to do with any test.
+	//
+	// S3: go's only text evidence was `--- FAIL: TestName`, which a panic in
+	// `TestMain`/package `init` never prints — the process dies before any
+	// test runs, so there is no test to name. That real go failure (exit 2,
+	// `FAIL\t<pkg>`, no `--- FAIL:`) still hit the runner-error branch.
+	describe("failure-name regexes and go's count parser (#1524-r3)", () => {
+		const parse = (
+			output: string,
+			exitCode: number,
+			runner: string,
+			runnerFile = `/tmp/test.${runner}`,
+		) =>
+			(new TestRunnerClient(false) as any).parseGenericRunnerOutput(
+				"",
+				output,
+				exitCode,
+				runnerFile,
+				runner,
+			);
+
+		it("reports a gradle compile failure as a runner error, not a fabricated test failure", () => {
+			const result = parse(
+				"> Task :compileJava FAILED\n\nFAILURE: Build failed with an exception.\n\n* What went wrong:\nexecution failed\nerror: cannot find symbol\n",
+				1,
+				"gradle",
+			);
+
+			expect(result.error).toBe("Runner gradle exited with 1");
+			expect(result.failed).toBe(0);
+			expect(result.failures).toEqual([]);
+		});
+
+		it("reports a maven failed-goal build as a runner error, not a fabricated test failure", () => {
+			const result = parse(
+				"[ERROR] Failed to execute goal org.apache.maven.plugins:maven-compiler-plugin:3.11.0:compile (default-compile) on project foo: Compilation failure: FAILED\n[ERROR] error: cannot find symbol\n",
+				1,
+				"maven",
+			);
+
+			expect(result.error).toBe("Runner maven exited with 1");
+			expect(result.failed).toBe(0);
+			expect(result.failures).toEqual([]);
+		});
+
+		it("reports an rspec load error as a runner error, not a fabricated test failure", () => {
+			const result = parse(
+				"An error occurred while loading ./spec/foo_spec.rb.\nFailure:\n  cannot load such file -- foo\n",
+				1,
+				"rspec",
+			);
+
+			expect(result.error).toBe("Runner rspec exited with 1");
+			expect(result.failed).toBe(0);
+			expect(result.failures).toEqual([]);
+		});
+
+		it("reports a go panic in TestMain as a test failure, not a runner error", () => {
+			// No `--- FAIL:` — the process died in TestMain/init before any
+			// individual test ran — but `FAIL\t<pkg>` is go's own verdict
+			// line for exactly this case, and the go count parser reads it.
+			// Uses go's real nil-pointer panic wording, which contains
+			// "error" ("runtime error: ...") — the S3 scenario specifically
+			// requires that word present, or the old code's `lower.includes
+			// ("error")` gate would never have fired in the first place and
+			// this test would not prove the bug.
+			const result = parse(
+				"panic: runtime error: invalid memory address or nil pointer dereference [signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0x476f00]\n\ngoroutine 1 [running]:\nexample.com/pkg.TestMain(0x0)\n\t/repo/main_test.go:10 +0x20\nFAIL\texample.com/pkg\t0.00s\n",
+				2,
+				"go",
+			);
+
+			expect(result.error).toBeUndefined();
+			expect(result.failed).toBeGreaterThan(0);
+		});
+
+		it("does not invent a failure name from the line after a newline-spanning FAILED", () => {
+			const result = parse("FAILED\n\nsome trailing note\n", 1, "cargo");
+
+			expect(
+				result.failures.some((f: { name: string }) => f.name === "some trailing note"),
+			).toBe(false);
 		});
 	});
 

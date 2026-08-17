@@ -1862,24 +1862,66 @@ export class TestRunnerClient {
 			matched = true;
 		}
 
-		// #1487/#1524: failure NAMES are extracted before `runnerError` is
-		// decided, not after. `--- FAIL: TestParse` (go) or a bare `Error:`
-		// line (an unrecognised runner) is direct evidence the suite ran and
-		// produced a verdict, even for a runner with no count parser above —
-		// go has no entry in the cargo/dotnet/maven/rspec/minitest/gradle
-		// matches, so `matched` alone can't tell "never started" from "ran
-		// and failed" for it. Deciding `runnerError` first and extracting
-		// names after (the pre-#1524 order) meant a real go test failure
-		// with "error" in its own output — `unexpected error: bad token` —
-		// still had `matched === false` and rendered as "Could not run
-		// tests" while `failures` silently held the real failing test name.
-		const failures: TestFailure[] = [];
-		const names = [
-			...output.matchAll(/--- FAIL:\s+([^\s(]+)/g),
-			...output.matchAll(/\bFAILED\s+([^\n]+)/g),
-			...output.matchAll(/Failure:\s+([^\n]+)/g),
+		// #1487/#1524/#1524-r3: `--- FAIL: TestName` is extracted first and
+		// separately from the other two name patterns, because it is the
+		// ONLY one of the three that is unambiguous evidence a real go test
+		// ran — see the `runnerError` comment below for why the other two
+		// may no longer veto on their own. go otherwise has no count parser
+		// at all (only a duration probe), so without this go's `matched`
+		// stayed false even on a real failure.
+		//
+		// #1524-r3: go ALSO gets a real count parser here, not just a name
+		// extractor. A panic inside `TestMain`/package `init` (exit 2) never
+		// prints a `--- FAIL:` line — there is no test to name, the process
+		// died before any test ran — so `goFailNames` alone left `matched`
+		// false and such a panic hit the same runner-error branch as a
+		// spawn failure, even though `go test` DID run and DID fail. `FAIL
+		// \t<pkg>` is go's own per-package verdict line and is printed for
+		// exactly this case; `ok  <pkg>  <n>s` is its pass counterpart.
+		// Package-line counts, like the go duration probe above, take the
+		// FIRST package summary only — the same known limit already
+		// documented on `parseGenericRunnerDuration`.
+		const goFailNames = [
+			...output.matchAll(/--- FAIL:[^\S\n]+([^\s(]+)/g),
 		];
-		for (const m of names.slice(0, 5)) {
+		if (runner === "go") {
+			const goFailPackage = /^FAIL[^\S\n]+\S+/m.test(output);
+			const goOkPackages = [
+				...output.matchAll(/^ok[^\S\n]+\S+[^\S\n]+[\d.]+s/gm),
+			];
+			if (goFailNames.length > 0 || goFailPackage) {
+				failed = Math.max(failed, goFailNames.length || 1);
+				matched = true;
+			} else if (goOkPackages.length > 0) {
+				passed = Math.max(passed, goOkPackages.length);
+				matched = true;
+			}
+		}
+
+		// #1524-r3: anchored to line START (`^`), and `[^\S\n]` (horizontal
+		// whitespace only) in place of `\s` between the keyword and the
+		// name. The prior `\bFAILED\s+([^\n]+)` and `Failure:\s+([^\n]+)`
+		// let their OWN `\s+` gap cross the newline: a bare `FAILED` at the
+		// end of a line has nothing after it on that line, so `\s+` ate the
+		// newline itself and `([^\n]+)` captured the FIRST TOKEN OF THE
+		// NEXT LINE as the "test name" — proven on a gradle compile failure
+		// (`> Task :compileJava FAILED` followed by
+		// `FAILURE: Build failed with an exception.`, which then rendered
+		// as the invented failure name) and the newline-spanning shape in
+		// general (`FAILED\n\nsome trailing note` → name "some trailing
+		// note"). Requiring `(\S.*)$` on the SAME line makes a keyword with
+		// nothing following it on that line simply not match, rather than
+		// reaching across for content that was never the name.
+		const failures: TestFailure[] = [];
+		for (const m of goFailNames.slice(0, 5)) {
+			failures.push({ name: m[1].trim(), message: m[1].trim() });
+		}
+		const otherNames = [
+			...output.matchAll(/^[^\S\n]*FAILED[^\S\n]+(\S.*)$/gm),
+			...output.matchAll(/^[^\S\n]*Failure:[^\S\n]+(\S.*)$/gm),
+		];
+		for (const m of otherNames) {
+			if (failures.length >= 5) break;
 			failures.push({ name: m[1].trim(), message: m[1].trim() });
 		}
 
@@ -1892,16 +1934,22 @@ export class TestRunnerClient {
 		// runner error, and the exit-code-distrust guard below still forces
 		// at least one failure so it can't render as PASS.
 		//
-		// #1524: also gated on `failures.length === 0`. `matched` only
-		// covers the runners with a count parser above; go (and any other
-		// unrecognised runner) has none, so a real `--- FAIL:`/`Error:` name
-		// pulled out just above is the only signal a text-only runner's
-		// failure ran to completion. Requiring both keeps a genuine
-		// spawn/config failure (no counts, no failure names) reported as a
-		// runner error while a real failing run — matched or not — is never
-		// downgraded out from under its own failure name.
+		// #1524-r3: the veto is `goFailNames.length === 0`, NOT
+		// `failures.length === 0`. Only `--- FAIL:` is a marker a test
+		// runner emits SPECIFICALLY for a failed test; `FAILED`/`Failure:`
+		// are generic words a build tool prints for reasons that have
+		// nothing to do with a test — a gradle task failing to compile, a
+		// maven goal failing before surefire ever runs, an rspec file that
+		// never loaded. Letting those two veto the runner-error branch on
+		// their own reintroduced #1487's exact symptom for the commonest
+		// gradle/maven/rspec failure shapes (proven: `[ERROR] Failed to
+		// execute goal ... FAILED` and rspec's `Failure: cannot load such
+		// file` both rendered as a fabricated test failure instead of the
+		// runner error they actually are). They still label a name onto
+		// `failures` above when `matched` or `goFailNames` already settled
+		// the question some other way, but they no longer settle it alone.
 		const runnerError =
-			exitCode !== 0 && !matched && failures.length === 0 && lower.includes("error")
+			exitCode !== 0 && !matched && goFailNames.length === 0 && lower.includes("error")
 				? `Runner ${runner} exited with ${exitCode}`
 				: undefined;
 
