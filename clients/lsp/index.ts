@@ -1549,8 +1549,15 @@ export class LSPService {
 			}
 			// This client was evicted or replaced while we queued — writing to it
 			// would target a retired generation. Report the gap instead.
+			//
+			// `!== entry.client` covers BOTH shapes, and the missing-entry one is the
+			// dangerous half: eviction (idle, capacity, a #743 demotion) DELETES the
+			// registry entry, so an `undefined`-exempting guard would wave the waiter
+			// through to a corpse whose write resolves `true` — and `markTouched` would
+			// then record this content as delivered, which is exactly the #1253
+			// laundering the debounce entry must never do.
 			const current = this.state.clients.get(clientKey);
-			if (current !== undefined && current !== entry.client) {
+			if (current !== entry.client) {
 				return { outstandingMs: 0 };
 			}
 			// ---- No `await` from here to the `set` below: the claim is atomic. ----

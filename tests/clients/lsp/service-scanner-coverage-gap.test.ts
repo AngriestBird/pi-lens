@@ -478,7 +478,6 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		await vi.advanceTimersByTimeAsync(1);
 
 		const callerCapMs = Math.floor(NOTIFY_BUDGET_MS / 3);
-		const queuedAt = Date.now();
 		const second = service.touchFile(`${ROOT}/b.ts`, "two", {
 			clientScope: "all",
 			diagnostics: "document",
@@ -497,7 +496,99 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		expect(row.metadata?.queueWaitMs).toBeLessThanOrEqual(callerCapMs);
 		// And the queued touch never pushed a second, overlapping resync.
 		expect(aux.stats.openOffsets).toHaveLength(1);
-		expect(queuedAt).toBeGreaterThan(0);
+	});
+
+	it("a queued touch does not write to a client that was evicted while it waited", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		// The holder's write settles INSIDE the queue budget, so the waiter really
+		// reaches the claim — a write that outlasts the budget would make the waiter
+		// time out first and never exercise the guard at all (shape 7).
+		const aux = makeClient("opengrep", NOTIFY_BUDGET_MS / 2, [], "never");
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("opengrep", "auxiliary"),
+		]);
+		createLSPClient.mockResolvedValue(aux);
+
+		void service.touchFile(`${ROOT}/a.ts`, "one", {
+			clientScope: "all",
+			diagnostics: "document",
+			collectDiagnostics: true,
+			source: "cascade",
+		});
+		await vi.advanceTimersByTimeAsync(1);
+		expect(aux.notify.open).toHaveBeenCalledTimes(1);
+
+		const second = service.touchFile(`${ROOT}/b.ts`, "two", {
+			clientScope: "all",
+			diagnostics: "document",
+			collectDiagnostics: true,
+			source: "cascade",
+		});
+		// Evict the client while the second touch is queued behind its write. An
+		// eviction DELETES the registry entry, which is exactly the shape a guard
+		// that exempted "no entry" waved through: the waiter would take the freed
+		// slot, write to the corpse, and `markTouched` would record this content as
+		// delivered (#1253 laundering).
+		await vi.advanceTimersByTimeAsync(1);
+		(
+			service as unknown as { state: { clients: Map<string, unknown> } }
+		).state.clients.delete(AUX_KEY_PREFIX);
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
+		await second;
+
+		// No second write, and the retired generation earned no debounce entry.
+		expect(aux.notify.open).toHaveBeenCalledTimes(1);
+		expect(rowsFor("lsp_notify_resync_deferred")).toHaveLength(1);
+		const touched = (
+			service as unknown as { recentTouches: Map<string, unknown> }
+		).recentTouches;
+		expect([...touched.keys()].some((k) => k.includes("b.ts"))).toBe(false);
+	});
+
+	it("a deferred auxiliary records a `deferred` aux-wait outcome, never `silent`", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		// The with-auxiliary path is the one that emits `lsp_aux_wait_outcome`.
+		const aux = makeClient("opengrep", NOTIFY_BUDGET_MS * 50, [], "never");
+		const primary = makeClient("typescript", 0, [
+			makeDiagnostic("primary finding"),
+		]);
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("opengrep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep" ? aux : primary,
+		);
+
+		const touchOptions = {
+			clientScope: "with-auxiliary" as const,
+			auxiliaryServerIds: ["opengrep"],
+			diagnostics: "document" as const,
+			collectDiagnostics: true,
+			source: "cascade",
+		};
+		const first = service.touchFile(`${ROOT}/a.ts`, "one", touchOptions);
+		await vi.advanceTimersByTimeAsync(1);
+		const second = service.touchFile(`${ROOT}/b.ts`, "two", touchOptions);
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
+		await Promise.all([first, second]);
+
+		const outcomes = rowsFor("lsp_aux_wait_outcome").flatMap(
+			(row) =>
+				(row.metadata as { outcomes?: Array<{ serverId: string; outcome: string }> })
+					?.outcomes ?? [],
+		);
+		const opengrepOutcomes = outcomes
+			.filter((entry) => entry.serverId === "opengrep")
+			.map((entry) => entry.outcome);
+		// #1493 boundary: `silent` stays reserved for a scanner that HAD the content
+		// and published nothing. A deferral must never be recorded there.
+		expect(opengrepOutcomes).toContain("deferred");
+		expect(opengrepOutcomes).not.toContain("silent");
 	});
 
 	it("a deferred scanner's stale findings are not merged as this touch's answer", async () => {
