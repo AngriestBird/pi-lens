@@ -113,12 +113,21 @@ describe("evaluatePredicates fails closed on malformed textPredicates (#1523)", 
 		});
 	});
 
-	it("re-records the degradation after a session boundary (#1523 review R1)", () => {
+	it("re-records the degradation after a session boundary, for the SAME cached Query object (#1523 review R1)", () => {
 		const client = new TreeSitterClient();
 		const match = { patternIndex: 0, captures: [] };
+		// One Query object, reused across the reset boundary below. This is the
+		// realistic case: queryCache/queryBatchCache (clients/tree-sitter-client.ts
+		// ~:189/:191) are LRU-EVICTED only, never cleared — a session boundary does
+		// NOT force a fresh Query object. A prior version of this test handed
+		// session 2 a fresh `{}`, which passed even with a process-lifetime
+		// short-circuit that skipped recordDegradationOnce for any already-seen
+		// query — the exact bug R1 identifies. Reusing the same object here is
+		// what actually exercises that path.
+		const query = {} as { textPredicates?: unknown };
 
 		// Session 1: a stripped query blackout gets recorded.
-		evaluatePredicates(client, {} as { textPredicates?: unknown }, match);
+		evaluatePredicates(client, query, match);
 		expect(getDegradationSummary()).toEqual([
 			expect.objectContaining({ kind: "query-predicates-invalid", count: 1 }),
 		]);
@@ -127,15 +136,16 @@ describe("evaluatePredicates fails closed on malformed textPredicates (#1523)", 
 		// first thing (clients/runtime-session.ts), but the TreeSitterClient
 		// singleton survives it (clients/tree-sitter-shared.ts only nulls it on
 		// a WASM abort) — so `client` here stands in for session 2 reusing the
-		// same warm instance.
+		// same warm instance, and `query` stands in for the same cached Query
+		// object surviving with it.
 		resetDegradationLedger();
 		expect(getDegradationSummary()).toEqual([]);
 
-		// Session 2: the SAME stripped-query condition recurs (a different Query
-		// object, since the query cache doesn't survive either, but the same
-		// upstream malformation). The blackout must be visible again, not
-		// permanently silenced by a latch that never re-arms.
-		evaluatePredicates(client, {} as { textPredicates?: unknown }, match);
+		// Session 2: the exact same Query object flows through evaluatePredicates
+		// again (e.g. a cache hit on a query that was never evicted). The
+		// blackout must be visible again, not permanently silenced by a
+		// process-lifetime short-circuit that never re-arms.
+		evaluatePredicates(client, query, match);
 		expect(getDegradationSummary()).toEqual([
 			expect.objectContaining({ kind: "query-predicates-invalid", count: 1 }),
 		]);

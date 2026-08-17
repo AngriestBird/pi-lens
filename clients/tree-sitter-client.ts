@@ -3598,27 +3598,14 @@ export class TreeSitterClient {
 	}
 
 	/**
-	 * Queries whose `textPredicates` shape has already failed validation (#1523).
-	 * web-tree-sitter compiles #match?/#eq? predicates into
-	 * `query.textPredicates[patternIndex]`, but the property is untyped and
-	 * undocumented on the public Query type. `Array.isArray` is O(1), so re-checking
-	 * it on every match costs nothing — this WeakSet exists only so a query that's
-	 * already known-bad short-circuits without re-deriving that verdict, not to
-	 * memoize the check itself.
-	 */
-	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter Query instances
-	private queriesWithInvalidTextPredicates = new WeakSet<any>();
-
-	/**
 	 * Latch so the "textPredicates is malformed" diagnostic log line fires once
 	 * per `TreeSitterClient` instance for the life of the process (this client is
 	 * a process-wide singleton in production — see clients/tree-sitter-shared.ts),
-	 * not once per Query object. Query results are cached with LRU eviction (see
-	 * the query cache above), so a stripped/renamed property would otherwise
-	 * re-trigger this log on every cache rebuild — unbounded log volume for what
-	 * is, functionally, one event. This gates ONLY the log line: process-wide
-	 * log volume is the concern here, not the user-facing degradation record
-	 * below, which must re-arm every session (see recordDegradationOnce).
+	 * not once per call. This gates ONLY the log line: process-wide log volume is
+	 * the concern here, not the user-facing degradation record below, which must
+	 * re-arm every session (see recordDegradationOnce) — including for a Query
+	 * object the LRU query cache (queryCache/queryBatchCache above) kept alive
+	 * across a session boundary, since the cache is evicted, never cleared.
 	 */
 	private textPredicatesInvalidLogged = false;
 
@@ -3632,13 +3619,23 @@ export class TreeSitterClient {
 	 * across every language while pi-lens reports "no issues found." Fail loud (log
 	 * once per client instance, record a degradation so it reaches the user) and
 	 * closed (report the query has no usable predicates) instead of guessing.
+	 *
+	 * No WeakSet short-circuit for already-known-bad queries here (#1523 review
+	 * R1): `Array.isArray` is O(1), so memoizing it buys nothing, and a
+	 * process-lifetime WeakSet would make the SAME cached Query object (the query
+	 * cache is LRU-evicted, never cleared) skip straight past
+	 * `recordDegradationOnce` on every call after the first — which is exactly
+	 * what made the degradation record fail to re-arm across a session boundary
+	 * for a query the cache kept warm. `recordDegradationOnce` itself is called
+	 * unconditionally on every invalid check; the ledger's own once-per-kind/
+	 * subject dedupe (cleared by resetDegradationLedger, which handleSessionStart
+	 * calls first thing — clients/runtime-session.ts) is the single source of
+	 * truth for "how often does this actually get recorded."
 	 */
 	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter Query instances
 	private hasValidTextPredicates(query: any): boolean {
-		if (this.queriesWithInvalidTextPredicates.has(query)) return false;
 		const valid = Array.isArray(query?.textPredicates);
 		if (!valid) {
-			this.queriesWithInvalidTextPredicates.add(query);
 			if (!this.textPredicatesInvalidLogged) {
 				this.textPredicatesInvalidLogged = true;
 				logTreeSitterDiagnostic({
@@ -3650,15 +3647,9 @@ export class TreeSitterClient {
 					metadata: { textPredicatesType: typeof query?.textPredicates },
 				});
 			}
-			// User-facing signal (#1523 review F1), re-armed every session via the
-			// ledger's own once-per-kind/subject dedupe (recordDegradationOnce's
-			// onceKeys is cleared by resetDegradationLedger, which handleSessionStart
-			// calls first thing — clients/runtime-session.ts). The TreeSitterClient
-			// singleton and its `textPredicatesInvalidLogged` latch above both
-			// survive session_start, so gating this on that same boolean would make
-			// the blackout invisible from session 2 onward (review R1, AGENTS.md
-			// shape 10). Single source of truth: let the ledger own this dedupe
-			// instead of hand-rolling a second one here.
+			// User-facing signal (#1523 review F1). Called unconditionally on every
+			// invalid check (not gated by a client-lifetime latch) so it re-arms
+			// every session, per the R1 fix above.
 			recordDegradationOnce({
 				kind: "query-predicates-invalid",
 				subject: "web-tree-sitter",
