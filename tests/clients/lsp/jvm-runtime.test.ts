@@ -8,10 +8,24 @@ import { removeTempDirSync } from "../test-utils.js";
 const isWin = process.platform === "win32";
 const JAVA_EXE = isWin ? "java.exe" : "java";
 
-const { safeSpawnAsync, allowedFsRoots } = vi.hoisted(() => ({
+const { safeSpawnAsync, allowedFsRoots, logLatencySpy } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
 	allowedFsRoots: [] as string[],
+	logLatencySpy: vi.fn(),
 }));
+
+// Assert an `availability_decision` record lands even for a memo served
+// mid-cooldown — the review-round finding that this state left zero trace in
+// latency.log.
+vi.mock("../../../clients/latency-logger.js", () => ({
+	logLatency: logLatencySpy,
+	getLastLoggedPhase: () => undefined,
+}));
+
+const decisions = () =>
+	logLatencySpy.mock.calls
+		.map((call) => call[0])
+		.filter((entry) => entry?.phase === "availability_decision");
 
 // `jvm-runtime.ts` probes `java` through `safeSpawnAsync` directly (#1538),
 // mirroring the #1496 package-manager fix — mock at that boundary. Also
@@ -196,6 +210,7 @@ describe("jvm-runtime — resolveJavaRuntimeEnv (#241)", () => {
 		);
 		_resetJvmRuntimeCacheForTests();
 		safeSpawnAsync.mockReset();
+		logLatencySpy.mockReset();
 		// See the first describe block: clear the host's real JAVA_HOME so
 		// `resolveJavaRuntimeEnv`'s unfenced `discoverJdkHome()` call can't pick
 		// up an actual JDK on a dev/CI box; tests that need one set it back
@@ -273,6 +288,19 @@ describe("jvm-runtime — resolveJavaRuntimeEnv (#241)", () => {
 	 * Post-fix, a transient verdict must not be cached: this call must FAIL on
 	 * pre-fix code, which returns `undefined` from BOTH calls with only one
 	 * probe recorded (latched after the first).
+	 *
+	 * Review-round addition: the in-cooldown call between the two probes is
+	 * the exact shape a real jdtls retry hits. jdtls's failed-spawn cooldown
+	 * (`BROKEN_BASE_COOLDOWN_MS`, `clients/lsp/index.ts`) is ~15-20s, inside
+	 * this probe's 30s transient cooldown, so the FIRST retry after a stall
+	 * always lands here. `AvailabilityLatch.read()` returns `false` (not
+	 * `null`) for that in-cooldown call — indistinguishable at that layer from
+	 * a durable "not found" — so a naive caller launders it into `_cachedEnv`
+	 * anyway, one call deeper than the original bug. Proven by: the in-cooldown
+	 * call must not add a probe, AND a later call past the cooldown must still
+	 * re-probe (proof `_cachedEnv` was never written by the in-cooldown call).
+	 * It must also leave an `availability_decision` record — the reviewer's
+	 * "zero record in latency.log" finding.
 	 */
 	it("a timed-out probe is not cached: retried on the next demand call", async () => {
 		safeSpawnAsync.mockImplementation(async (cmd: string, args: string[]) =>
@@ -283,20 +311,39 @@ describe("jvm-runtime — resolveJavaRuntimeEnv (#241)", () => {
 		);
 
 		expect(await resolveJavaRuntimeEnv()).toBeUndefined();
-		// The transient verdict's own short cooldown (#1467's policy) means an
-		// IMMEDIATE re-call correctly doesn't re-probe yet — that's the "short
-		// cooldown so repeated calls don't pay 5s each" half of the fix. Advance
-		// past it to prove the verdict was never latched for the SESSION.
+
+		// An IMMEDIATE re-call lands inside the transient cooldown (the
+		// jdtls-retry shape above). It must not spawn a second probe...
+		logLatencySpy.mockClear();
+		expect(await resolveJavaRuntimeEnv()).toBeUndefined();
+		const probesDuringCooldown = safeSpawnAsync.mock.calls.filter(
+			([cmd, args]) => cmd === finder() && args[0] === "java",
+		).length;
+		expect(probesDuringCooldown).toBe(1);
+		// ...but it must still be recorded: this is the state that left zero
+		// trace in latency.log pre-fix-round-2.
+		expect(decisions()).toContainEqual(
+			expect.objectContaining({
+				phase: "availability_decision",
+				metadata: expect.objectContaining({
+					tool: "java",
+					verdict: "unavailable",
+					outcome: "transient",
+				}),
+			}),
+		);
+
+		// Advance past the cooldown to prove the in-cooldown call above never
+		// latched anything into `_cachedEnv`: pre-#1538-round-2, that call would
+		// have written `_cachedEnv = { value: undefined }`, and THIS call would
+		// short-circuit on it without probing — the assertion below would fail
+		// (probes would stay at 1 forever).
 		advancePastCooldown();
 		expect(await resolveJavaRuntimeEnv()).toBeUndefined();
 
 		const javaProbes = safeSpawnAsync.mock.calls.filter(
 			([cmd, args]) => cmd === finder() && args[0] === "java",
 		).length;
-		// Pre-fix: the first timeout latches `false` forever, so the second call
-		// hits the `_cachedEnv` memo and never re-probes — this assertion fails
-		// (probes stays at 1). Post-fix: a transient verdict is never cached, so
-		// resolveJavaRuntimeEnv re-probes once its cooldown expires.
 		expect(javaProbes).toBeGreaterThan(1);
 	});
 
@@ -333,10 +380,19 @@ describe("jvm-runtime — resolveJavaRuntimeEnv (#241)", () => {
 		// First call: probe stalls, no JDK discoverable — falls back to
 		// undefined (no override) for THIS call, but must not cache it.
 		expect(await resolveJavaRuntimeEnv()).toBeUndefined();
-		// Second call, past the transient cooldown: `java` is reachable again —
-		// correctly discovered and (since java is now on PATH) still no override
-		// needed, but this time as a DURABLE verdict, proven by the probe having
-		// run again.
+		// An immediate in-cooldown retry (the real jdtls-retry shape) must not
+		// spawn a probe, and — the point of this test — must not launder the
+		// transient verdict into the session cache either.
+		expect(await resolveJavaRuntimeEnv()).toBeUndefined();
+		const probesDuringCooldown = safeSpawnAsync.mock.calls.filter(
+			([cmd, args]) => cmd === finder() && args[0] === "java",
+		).length;
+		expect(probesDuringCooldown).toBe(1);
+		// Past the transient cooldown: `java` is reachable again — correctly
+		// discovered and (since java is now on PATH) still no override needed,
+		// but this time as a DURABLE verdict, proven by the probe having run
+		// again. If the in-cooldown call above had wrongly cached `undefined`,
+		// this call would short-circuit on `_cachedEnv` and never re-probe.
 		advancePastCooldown();
 		expect(await resolveJavaRuntimeEnv()).toBeUndefined();
 
@@ -351,5 +407,36 @@ describe("jvm-runtime — resolveJavaRuntimeEnv (#241)", () => {
 			([cmd, args]) => cmd === finder() && args[0] === "java",
 		).length;
 		expect(javaProbesAfter).toBe(2);
+	});
+
+	/**
+	 * MEDIUM (review round): without a shared in-flight promise, two concurrent
+	 * `resolveJavaRuntimeEnv` calls each fire their own 5s probe — the shape a
+	 * multi-root Java project hits spawning jdtls per root, and (post-blocker-fix)
+	 * a shape that recurs every time a transient cooldown expires, not just once
+	 * at startup. Mirrors `clients/package-manager.ts`'s `inFlightProbes` pattern
+	 * (the #1496 sibling this fix already cites).
+	 */
+	it("concurrent calls share one probe", async () => {
+		let spawnCount = 0;
+		safeSpawnAsync.mockImplementation(async (cmd: string, args: string[]) => {
+			if (cmd === finder() && args[0] === "java") {
+				spawnCount += 1;
+				return okResult;
+			}
+			return notFoundResult;
+		});
+		const { resolveJavaRuntimeEnv } = await import(
+			"../../../clients/lsp/jvm-runtime.js"
+		);
+
+		const results = await Promise.all([
+			resolveJavaRuntimeEnv(),
+			resolveJavaRuntimeEnv(),
+			resolveJavaRuntimeEnv(),
+		]);
+
+		expect(results).toEqual([undefined, undefined, undefined]);
+		expect(spawnCount).toBe(1);
 	});
 });

@@ -153,21 +153,75 @@ let _cachedEnv: { value: NodeJS.ProcessEnv | undefined } | undefined;
  */
 const javaAvailabilityLatch = createAvailabilityLatch();
 
+/**
+ * Shared spawn while a probe is in flight (#1538 follow-up). Without this, two
+ * concurrent `resolveJavaRuntimeEnv` calls — e.g. a multi-root Java project
+ * spawning jdtls per root — each fire their own 5 s `where`/`which java`, and
+ * every expired cooldown reopens that window for the process's whole
+ * lifetime, not just at startup.
+ */
+let inFlightJavaProbe: Promise<boolean | undefined> | null = null;
+
 export function _resetJvmRuntimeCacheForTests(): void {
 	_cachedEnv = undefined;
 	javaAvailabilityLatch.reset();
+	inFlightJavaProbe = null;
 }
 
 /**
  * Probe `java` on PATH, distinguishing a durable verdict (found, or genuinely
  * absent) from a transient probe failure. Returns `true`/`false` for a durable
- * verdict; `undefined` when the probe was transient, so the caller must not
- * treat this call as proof `java` is absent.
+ * verdict; `undefined` when the probe was transient — including a memo served
+ * from mid-cooldown — so the caller must not treat this call as proof `java`
+ * is absent.
+ *
+ * `AvailabilityLatch.read()` returns `false` (not `null`) for BOTH a durable
+ * "not found" AND a transient verdict whose cooldown hasn't expired yet — the
+ * latch's own contract is "cache a safe fallback answer for this call", not
+ * "this is durable". Blindly forwarding that `false` as durable is exactly
+ * the #1538 bug moved one call deeper: jdtls's failed-spawn retry
+ * (`BROKEN_BASE_COOLDOWN_MS`, `clients/lsp/index.ts`) re-enters
+ * `resolveJavaRuntimeEnv` ~15-20 s later — inside this probe's 30 s transient
+ * cooldown — so the very first retry after a stall would otherwise still
+ * launder into the permanent `_cachedEnv`. Only `javaAvailabilityLatch`'s own
+ * `outcome` distinguishes the two; a durable verdict is never `"transient"`.
  */
-async function probeJavaOnPath(): Promise<boolean | undefined> {
+function probeJavaOnPath(): Promise<boolean | undefined> {
 	const memo = javaAvailabilityLatch.read();
-	if (memo !== null) return memo;
+	if (memo !== null) {
+		if (javaAvailabilityLatch.getOutcome() === "transient") {
+			// Served from the memo, but the cooldown from the earlier stall
+			// hasn't expired — this is NOT a durable verdict. Log it (otherwise
+			// this state leaves zero record in latency.log) and surface
+			// `undefined` so the caller never writes the session cache.
+			logAvailabilityDecision({
+				tool: "java",
+				verdict: "unavailable",
+				outcome: "transient",
+				cause: javaAvailabilityLatch.getCause() ?? "probe-timeout",
+				elapsedMs: 0,
+				latched: false,
+				retryAfterMs: Math.max(
+					0,
+					javaAvailabilityLatch.getRetryAtMs() - Date.now(),
+				),
+				budgetMs: JAVA_PROBE_TIMEOUT_MS,
+			});
+			return Promise.resolve(undefined);
+		}
+		return Promise.resolve(memo);
+	}
 
+	if (inFlightJavaProbe) return inFlightJavaProbe;
+	inFlightJavaProbe = runJavaProbe().finally(() => {
+		inFlightJavaProbe = null;
+	});
+	return inFlightJavaProbe;
+}
+
+/** The actual `where`/`which java` spawn + classification. Never call this
+ * directly — go through `probeJavaOnPath()`, which memoizes and dedupes it. */
+async function runJavaProbe(): Promise<boolean | undefined> {
 	const finder = process.platform === "win32" ? "where" : "which";
 	const startedAt = Date.now();
 	const sampler = startHostStallSampler();
