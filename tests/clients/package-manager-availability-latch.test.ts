@@ -1,10 +1,11 @@
 /**
  * #1496 — `isAvailable` in `package-manager.ts` memoized a `where`/`which <pm>`
- * probe for the life of the process. A timeout (a 5 s host-side budget the
+ * probe for the life of the process. A timeout (a 5 s host-side budget, the
  * same shape as #1467/#1476) was remembered as "this manager is not
- * installed", so a project whose lockfile declared pnpm or yarn would
- * silently fall back to npm — wrong install semantics, wrong lockfile —
- * for the rest of the session.
+ * installed", so a declared pnpm/yarn manager would silently fall back to npm
+ * for the rest of the session. The affected call sites are internal (installs
+ * into pi-lens's managed tools directory, `pilens_rebuild` on a source
+ * checkout) — no user-project lockfile was ever at risk.
  *
  * These tests exercise `resolveNodePackageManager`, the public surface every
  * caller (the installer, `pilens_rebuild`) actually uses, rather than the

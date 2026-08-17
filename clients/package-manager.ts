@@ -105,8 +105,10 @@ const PROBE_TIMEOUT_MS = 5_000;
 
 /**
  * A timed-out probe used to be memoized as a permanent `false` — the process
- * would silently downgrade a pnpm/yarn project to npm for its whole life,
- * with the wrong install semantics and the wrong lockfile (#1496). Each
+ * would silently downgrade a declared pnpm/yarn manager to npm for its whole
+ * life. The blast radius was internal: this resolver only serves installs
+ * into pi-lens's own managed tools directory and `pilens_rebuild` on a
+ * pi-lens source checkout, never a user project's lockfile (#1496). Each
  * manager now sits behind the shared transient-aware latch (#1467/#1476):
  * only a genuine absence (`where`/`which` exits non-zero, or ENOENT) latches;
  * a timeout, abort or host stall expires on a cooldown and is re-probed.
