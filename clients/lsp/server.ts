@@ -2623,10 +2623,6 @@ export const ClojureServer: LSPServerInfo = {
 	},
 };
 
-// CUE Language Server
-// Runs via `cue lsp serve`. The `cue` binary is a single self-contained binary
-// distributed via GitHub releases — prefer a PATH install, fall back to the
-// managed bundle (#241 canonical-bin discovery applies here too).
 export const CueServer: LSPServerInfo = {
 	id: "cue",
 	name: "CUE Language Server",

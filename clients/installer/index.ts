@@ -1338,8 +1338,8 @@ export const TOOLS: ToolDefinition[] = [
 			},
 			binaryInArchive: "clojure-lsp",
 		},
-  },
-  {
+	},
+	{
 		// CUE ships a single native binary per platform on GitHub releases;
 		// the LSP runs via `cue lsp serve`. Used as managedToolId by CueServer.
 		id: "cue",
