@@ -10,9 +10,11 @@
  *    mirror — guarded against drift by `tests/clients/grammar-source.test.ts`.
  */
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { writeFileAtomic } from "./atomic-write.js";
+import { getPackageRoot } from "./package-root.js";
 
 /** tree-sitter-wasms release the grammars are pulled from. */
 export const TREE_SITTER_WASMS_VERSION = "0.1.13";
@@ -254,6 +256,70 @@ export function describeNonWasmBody(bytes: Uint8Array): string {
 	);
 }
 
+/** Provenance for a single grammar in `scripts/grammars.lock.json`. */
+export interface GrammarManifest {
+	package: string;
+	version: string;
+	/** filename → "sha256:<hex>" */
+	grammars: Record<string, string>;
+	overrides?: Record<string, GrammarSourceOverride>;
+}
+
+/**
+ * Override applied for tests only (`_setGrammarManifestForTests`): `undefined`
+ * means "no override — use the real cached/loaded manifest", so `null` is a
+ * distinct, deliberate value (simulates a missing/corrupt lock file).
+ */
+let manifestOverride: GrammarManifest | null | undefined;
+let cachedManifest: GrammarManifest | null | undefined;
+
+/**
+ * `scripts/grammars.lock.json`'s absolute path, resolved from the installed
+ * PACKAGE ROOT rather than a fixed relative offset from this module (#1564).
+ * `import.meta.url` collapses to the bundle's own file once `dist/index.js`
+ * is esbuild-bundled (every merged module reports the bundle's URL, not its
+ * own), so a `join(dirname(fileURLToPath(import.meta.url)), "../scripts/...")`
+ * offset — correct in the unbundled repo/`npm run build` layout — resolves to
+ * the wrong directory once bundled. `getPackageRoot` instead walks up from
+ * wherever this module actually loaded from until it finds `package.json`,
+ * which lands on the package root under both layouts; `scripts/grammars.lock.json`
+ * is committed and shipped there (see `files` in package.json), so both the
+ * repo checkout and an installed npm package resolve it correctly.
+ */
+function grammarManifestPath(): string {
+	return path.join(getPackageRoot(import.meta.url), "scripts", "grammars.lock.json");
+}
+
+/**
+ * Load + cache `scripts/grammars.lock.json`. Returns `null` (never throws) if
+ * the file is missing or malformed — an installed package predating this fix,
+ * or a corrupted lock file, degrades to the Content-Length check
+ * (`downloadGrammarDetailed`) instead of blocking every runtime grammar fetch.
+ */
+function loadGrammarManifest(): GrammarManifest | null {
+	if (manifestOverride !== undefined) return manifestOverride;
+	if (cachedManifest !== undefined) return cachedManifest;
+	try {
+		const raw = fs.readFileSync(grammarManifestPath(), "utf-8");
+		cachedManifest = JSON.parse(raw) as GrammarManifest;
+	} catch {
+		cachedManifest = null;
+	}
+	return cachedManifest;
+}
+
+/** Test-only manifest injection — see `manifestOverride` above. */
+export function _setGrammarManifestForTests(
+	manifest: GrammarManifest | null | undefined,
+): void {
+	manifestOverride = manifest;
+}
+
+/** `sha256:<hex>` digest of `data`, matching the manifest's format. */
+function sha256Hex(data: Buffer): string {
+	return `sha256:${createHash("sha256").update(data).digest("hex")}`;
+}
+
 /**
  * Fetch one grammar wasm into `destDir`, staged and renamed via
  * `atomic-write.ts` so a reader never sees a half-written wasm. Never
@@ -266,6 +332,17 @@ export function describeNonWasmBody(bytes: Uint8Array): string {
  * crashes the runtime
  * is protected at LOAD time (BLOCKED_GRAMMARS / grammarBlockReason), not by
  * refusing to download it.
+ *
+ * #1564: the magic-number check alone lets a TRUNCATED-but-genuine wasm body
+ * through — a connection dropped mid-transfer still starts with `\0asm`. Two
+ * further checks close that: (1) when the pinned manifest
+ * (`scripts/grammars.lock.json`, already trusted by the postinstall path) has
+ * a sha256 for this grammar, the full body must match it; (2) when the
+ * response reports `Content-Length`, the received byte count must match it —
+ * cheaper, and the only check available when no pinned hash exists (an
+ * override not yet in the manifest, or a future grammar added before
+ * `--write-manifest` is re-run). Both are retryable failures, same shape as a
+ * captive portal: the CDN answered, but the bytes are not trustworthy.
  *
  * #1217: the staging name used to be hand-rolled `.${filename}.${pid}.tmp` —
  * per-process, so two concurrent fetches of one grammar shared a staging inode
@@ -300,6 +377,44 @@ export async function downloadGrammarDetailed(
 		// shape as an offline fetch, so it flows through #1536's cooldown ladder.
 		if (!hasWasmMagic(data)) {
 			return { ok: false, retryable: true, reason: describeNonWasmBody(data) };
+		}
+		// #1564 cheap check: a body shorter (or longer) than the server's own
+		// declared Content-Length is a truncated/corrupted transfer, regardless
+		// of whether a pinned hash exists for this grammar.
+		const declaredLength = res.headers.get("content-length");
+		if (declaredLength !== null) {
+			const expectedBytes = Number.parseInt(declaredLength, 10);
+			if (Number.isFinite(expectedBytes) && expectedBytes !== data.length) {
+				return {
+					ok: false,
+					retryable: true,
+					reason:
+						`The download reported Content-Length: ${expectedBytes} but only ` +
+						`${data.length} bytes arrived — a truncated transfer.`,
+				};
+			}
+		}
+		// #1564 primary check: verify the full body against the pinned sha256,
+		// closing the gap Content-Length can't (a proxy that sets a matching
+		// Content-Length on a truncated body, or a chunked response with none at
+		// all). `manifest.grammars[filename]` is keyed by filename regardless of
+		// override — an overridden grammar's hash was generated against the
+		// override's own URL (`scripts/download-grammars.ts --write-manifest`
+		// fetches via the same `SOURCE_OVERRIDES` map), so no extra alignment is
+		// needed here. No entry (manifest missing, or a grammar added before the
+		// manifest was regenerated) falls back to the Content-Length check above.
+		const expectedHash = loadGrammarManifest()?.grammars[filename];
+		if (expectedHash) {
+			const actualHash = sha256Hex(data);
+			if (actualHash !== expectedHash) {
+				return {
+					ok: false,
+					retryable: true,
+					reason:
+						`The download's sha256 (${actualHash}) does not match the pinned ` +
+						`manifest (${expectedHash}) — a corrupt or truncated transfer.`,
+				};
+			}
 		}
 		// bestEffort: false — a swallowed write failure would return true for a
 		// grammar that never landed.
