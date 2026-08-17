@@ -10,6 +10,10 @@ export function gitleaksFindingToProjectDiagnostic(
 	cwd: string,
 	finding: GitleaksFinding,
 ): ProjectDiagnostic {
+	// #1562 observability criterion: surface the git status right in the
+	// finding's message so a triage is a read, not a re-derivation. Omitted
+	// when git itself degraded (`pathStatus` undefined) rather than guessed.
+	const statusSuffix = finding.pathStatus ? ` [git: ${finding.pathStatus}]` : "";
 	return {
 		filePath: path.isAbsolute(finding.file)
 			? finding.file
@@ -20,7 +24,7 @@ export function gitleaksFindingToProjectDiagnostic(
 		tool: "gitleaks",
 		runner: "gitleaks",
 		rule: `gitleaks:${finding.ruleId}`,
-		message: `Potential secret: ${finding.description || finding.ruleId}`,
+		message: `Potential secret: ${finding.description || finding.ruleId}${statusSuffix}`,
 		source: "project-scan",
 	};
 }

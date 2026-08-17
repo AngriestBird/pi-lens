@@ -28,15 +28,39 @@
  * (installer entry registered in clients/installer/index.ts) and runs
  * `gitleaks detect --no-git --report-format json` against the analysis root.
  *
- * Refs: #130
+ * Scope policy (#1562): gitleaks is handed a `--config` generated per scan
+ * (`writeScopedGitleaksConfig`) that EXTENDS the project's own `.gitleaks.toml`
+ * (or gitleaks's built-in defaults, if none) with two additions — an
+ * `[allowlist] paths` entry per shared scratch/cache tree
+ * (`scratch-tree-policy.ts`'s `EXCLUDED_DIRS`-derived list: `.pi/`, `.claude/`,
+ * `node_modules/`, …) and an `[allowlist] regexes` entry per known
+ * placeholder-secret shape (`YOUR_API_KEY`, `<your-key>`, `xxxxxxxx`, …).
+ * Deliberately NOT `.gitignore`-based — see `scratch-tree-policy.ts`'s module
+ * doc for why blanket gitignore-respect is wrong for a secrets scanner (an
+ * untracked `.env` with a real credential is exactly the case gitleaks exists
+ * to catch, and `.env` is commonly gitignored). `classifyAndFilterFindings`
+ * backstops the config with a TS-side scratch-tree drop plus a `pathStatus`
+ * (tracked/ignored/scratch/untracked) observability field on every finding
+ * that survives.
+ *
+ * Refs: #130, #1562
  */
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { mkdtempSync } from "node:fs";
+import {
+	collectTrackedFiles,
+	collectUntrackedIgnoredIds,
+} from "./git-tracked-ignore.js";
+import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { SecurityScanClient } from "./security-scan-client.js";
+import {
+	getScratchTreeGitleaksAllowlistPaths,
+	isUnderScratchTree,
+} from "./scratch-tree-policy.js";
 
 // --- Types ---
 
@@ -56,6 +80,21 @@ export interface GitleaksFinding {
 	commit?: string;
 	author?: string;
 	date?: string;
+	/**
+	 * Git status of `file`, best-effort (#1562 observability criterion) — lets
+	 * a future triage read "this is scratch/ignored" from the finding record
+	 * instead of re-debunking it by hand. `undefined` when git itself
+	 * degraded (no repo, spawn failure, timeout) — fail-open, matching
+	 * `git-tracked-ignore.ts`'s own degrade contract.
+	 *   - "scratch": under a shared scratch/cache tree (`EXCLUDED_DIRS`) —
+	 *     should already be excluded from the scan itself; this is the
+	 *     backstop label if one still slips through.
+	 *   - "tracked": committed to git.
+	 *   - "ignored": untracked AND matched by `.gitignore`.
+	 *   - "untracked": untracked and NOT gitignored — the operational case
+	 *     (e.g. a fresh `.env`) gitleaks exists to catch.
+	 */
+	pathStatus?: "scratch" | "tracked" | "ignored" | "untracked";
 }
 
 export interface GitleaksResult {
@@ -72,6 +111,86 @@ const EMPTY_RESULT: Omit<GitleaksResult, "scannedAt"> = {
 
 const SCAN_TIMEOUT_MS = 120_000;
 
+// gitleaks discovers its own config at `<source>/.gitleaks.toml` (or `.yaml`/
+// `.yml`) when no `--config` is passed. Kept as a named constant so the
+// generated scoped config (below) can EXTEND whichever of these the project
+// already has, instead of silently replacing the project's own rules.
+const LOCAL_GITLEAKS_CONFIG_NAMES = [
+	".gitleaks.toml",
+	".gitleaks.yaml",
+	".gitleaks.yml",
+] as const;
+
+function findLocalGitleaksConfig(cwd: string): string | undefined {
+	for (const name of LOCAL_GITLEAKS_CONFIG_NAMES) {
+		const candidate = path.join(cwd, name);
+		try {
+			if (fs.existsSync(candidate)) return candidate;
+		} catch {
+			// non-fatal
+		}
+	}
+	return undefined;
+}
+
+// The #1562 incident: a curl doc example's `-H "Authorization: Bearer
+// YOUR_API_KEY"` (cached under gitignored scratch, see the scratch-tree
+// exclusion below) read as a leaked secret. These match gitleaks's own
+// `Secret`/`Match` value case-insensitively, catching the canonical
+// placeholder shapes: `YOUR_API_KEY`-style tokens, `<your-key>`-style angle
+// brackets, run-of-`x` filler, and the common changeme/example/dummy family.
+// Scoped to the whole matched value (`^...$`) so a REAL secret that merely
+// contains the substring "key" is never caught by accident.
+export const PLACEHOLDER_SECRET_REGEXES = [
+	String.raw`(?i)^(your|my|insert|replace|enter|add)[-_ ]?(the[-_ ]?)?(api[-_ ]?)?(key|token|secret|password|credential)s?$`,
+	String.raw`(?i)^<[^<>]*(api[-_ ]?key|token|secret|password|credential)[^<>]*>$`,
+	String.raw`(?i)^x{6,}$`,
+	String.raw`(?i)^(changeme|change[-_]me|example|placeholder|dummy|fake|redacted|xxxxxxxx)$`,
+];
+
+/**
+ * Build a temp gitleaks config that EXTENDS the project's own config (if any,
+ * else gitleaks's built-in defaults) with two additions:
+ *   1. `[allowlist] paths` — the shared scratch-tree exclusion
+ *      (`scratch-tree-policy.ts`), so `.pi/**`, `.claude/**`, `node_modules/**`
+ *      etc. never reach gitleaks's own tree walk (#1562 scope defect).
+ *   2. `[allowlist] regexes` — the placeholder-secret class above.
+ *
+ * gitleaks's `[extend]` allowlist merge is additive (append, not replace —
+ * see gitleaks/config/config.go), so a project's own curated allowlist keeps
+ * working unchanged; this only ever ADDS exclusions, never removes one the
+ * project opted into.
+ *
+ * Returns the generated file's path; caller owns cleanup (same temp dir as
+ * the report, removed together in `runScan`'s `finally`).
+ */
+export function writeScopedGitleaksConfig(outDir: string, cwd: string): string {
+	const localConfig = findLocalGitleaksConfig(cwd);
+	const extendLine = localConfig
+		? `path = ${JSON.stringify(localConfig)}`
+		: "useDefault = true";
+	const pathPatterns = getScratchTreeGitleaksAllowlistPaths()
+		.map((p) => `    ${JSON.stringify(p)},`)
+		.join("\n");
+	const regexPatterns = PLACEHOLDER_SECRET_REGEXES.map(
+		(r) => `    ${JSON.stringify(r)},`,
+	).join("\n");
+	const toml = `[extend]
+${extendLine}
+
+[allowlist]
+paths = [
+${pathPatterns}
+]
+regexes = [
+${regexPatterns}
+]
+`;
+	const configPath = path.join(outDir, "gitleaks-scoped-config.toml");
+	fs.writeFileSync(configPath, toml, "utf-8");
+	return configPath;
+}
+
 // --- Detection ---
 
 /**
@@ -83,12 +202,7 @@ const SCAN_TIMEOUT_MS = 120_000;
  * the client.
  */
 export function hasGitleaksSignal(cwd: string): boolean {
-	const candidates = [
-		".gitleaks.toml",
-		".gitleaks.yaml",
-		".gitleaks.yml",
-		".gitleaksignore",
-	];
+	const candidates = [...LOCAL_GITLEAKS_CONFIG_NAMES, ".gitleaksignore"];
 	for (const candidate of candidates) {
 		try {
 			if (fs.existsSync(path.join(cwd, candidate))) return true;
@@ -228,6 +342,7 @@ export class GitleaksClient extends SecurityScanClient<GitleaksResult> {
 		const outDir = mkdtempSync(path.join(os.tmpdir(), "pi-lens-gitleaks-"));
 		const reportPath = path.join(outDir, "gitleaks-report.json");
 		try {
+			const configPath = writeScopedGitleaksConfig(outDir, cwd);
 			const result = await safeSpawnAsync(
 				bin,
 				[
@@ -235,6 +350,8 @@ export class GitleaksClient extends SecurityScanClient<GitleaksResult> {
 					"--no-git",
 					"--source",
 					cwd,
+					"--config",
+					configPath,
 					"--report-format",
 					"json",
 					"--report-path",
@@ -268,9 +385,10 @@ export class GitleaksClient extends SecurityScanClient<GitleaksResult> {
 				};
 			}
 
-			const findings = parseGitleaksReport(
+			const rawFindings = parseGitleaksReport(
 				fs.readFileSync(reportPath, "utf-8"),
 			);
+			const findings = await classifyAndFilterFindings(rawFindings, cwd);
 			return {
 				success: true,
 				findings,
@@ -291,6 +409,63 @@ export class GitleaksClient extends SecurityScanClient<GitleaksResult> {
 			}
 		}
 	}
+}
+
+// --- Post-scan classification / filter ---
+
+/**
+ * Backstop for the scoped-config scratch-tree exclusion above, plus the
+ * `pathStatus` observability field (#1562).
+ *
+ * Two things happen here, both defense-in-depth relative to the generated
+ * gitleaks config:
+ *   1. Any finding still under a shared scratch/cache tree is DROPPED — we
+ *      can't exercise gitleaks's own TOML-regex engine in unit tests, only
+ *      assert the config we hand it, so this guarantees the #1562 acceptance
+ *      criterion ("a scratch-tree finding never reaches the agent") even if
+ *      the generated regex ever mismatches gitleaks's own path normalization.
+ *   2. Every SURVIVING finding gets `pathStatus` set from git's tracked/
+ *      ignored view, so a future false-positive triage is a log read.
+ *
+ * `collectTrackedFiles`/`collectUntrackedIgnoredIds` degrade to `undefined`
+ * when git itself is unavailable (no repo, spawn failure) — findings just
+ * keep `pathStatus: undefined` rather than a guessed value (fail-open,
+ * matching `git-tracked-ignore.ts`'s own contract). Exported for unit tests.
+ */
+export async function classifyAndFilterFindings(
+	findings: GitleaksFinding[],
+	cwd: string,
+): Promise<GitleaksFinding[]> {
+	if (findings.length === 0) return findings;
+
+	const [trackedIds, untrackedIgnoredIds] = await Promise.all([
+		collectTrackedFiles(cwd),
+		collectUntrackedIgnoredIds(cwd),
+	]);
+
+	const kept: GitleaksFinding[] = [];
+	for (const finding of findings) {
+		if (isUnderScratchTree(finding.file)) continue;
+
+		const absPath = path.isAbsolute(finding.file)
+			? finding.file
+			: path.resolve(cwd, finding.file);
+
+		let pathStatus: GitleaksFinding["pathStatus"];
+		if (trackedIds?.has(normalizeEphemeralMapKey(absPath))) {
+			pathStatus = "tracked";
+		} else if (untrackedIgnoredIds?.has(normalizeMapKey(absPath))) {
+			pathStatus = "ignored";
+		} else if (trackedIds !== undefined || untrackedIgnoredIds !== undefined) {
+			// At least one of the two git-backed sets resolved, so the absence
+			// from both is a real answer ("untracked, not gitignored") rather
+			// than an unresolved probe.
+			pathStatus = "untracked";
+		}
+
+		kept.push(pathStatus ? { ...finding, pathStatus } : finding);
+	}
+	return kept;
 }
 
 // --- Parser ---
