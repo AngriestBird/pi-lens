@@ -1,12 +1,20 @@
 /** Shared lazy formatter catalog seam (#1394). */
+import { createLazyImport } from "./lazy-import.js";
 
 type FormatterModule = typeof import("./formatters.js");
-let formatterPromise: Promise<FormatterModule> | undefined;
+const lazyFormatters = createLazyImport<FormatterModule>(() =>
+	import("./formatters.js"),
+);
 
 export function warmFormatters(): Promise<FormatterModule> {
-	return (formatterPromise ??= import("./formatters.js"));
+	return lazyFormatters.get();
 }
 
 export function loadFormatters(): Promise<FormatterModule> {
 	return warmFormatters();
+}
+
+/** Test-only: evict a settled (including rejected) memo. */
+export function _resetFormattersLazyForTests(): void {
+	lazyFormatters.resetForTests();
 }

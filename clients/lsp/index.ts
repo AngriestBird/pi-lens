@@ -70,6 +70,7 @@ import {
 	enforceLspRootCeiling,
 	hasProjectBoundaryMarker,
 	isDirectLspCommandTemporarilyUnavailable,
+	resetClassicTsRepairGuard,
 } from "./server.js";
 import {
 	classifyCascadeWaitTier,
@@ -6300,6 +6301,13 @@ export async function isAuxiliaryLspAlive(
 }
 
 export function resetLSPService(options: LSPShutdownOptions = {}): void {
+	// A new session must get its own classic-tsserver-repair attempt: the
+	// guard is a process-lifetime flag (see resetClassicTsRepairGuard), so a
+	// repair that failed transiently in an earlier session must not stay
+	// latched for the rest of the extension-host process (#1570).
+	if (options.reason === "session_start") {
+		resetClassicTsRepairGuard();
+	}
 	const retiringService = globalLSPService;
 	globalLSPService = null;
 	if (!retiringService) return;

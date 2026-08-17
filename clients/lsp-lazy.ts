@@ -1,12 +1,18 @@
 /** Shared lazy LSP service seam (#1394). */
+import { createLazyImport } from "./lazy-import.js";
 
 type LspModule = typeof import("./lsp/index.js");
-let lspPromise: Promise<LspModule> | undefined;
+const lazyLsp = createLazyImport<LspModule>(() => import("./lsp/index.js"));
 
 export function warmLspService(): Promise<LspModule> {
-	return (lspPromise ??= import("./lsp/index.js"));
+	return lazyLsp.get();
 }
 
 export function loadLspService(): Promise<LspModule> {
 	return warmLspService();
+}
+
+/** Test-only: evict a settled (including rejected) memo. */
+export function _resetLspLazyForTests(): void {
+	lazyLsp.resetForTests();
 }
