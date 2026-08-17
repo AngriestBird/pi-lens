@@ -1041,11 +1041,20 @@ describe("extractTemplateRef", () => {
 		).toBeNull();
 	});
 
-	it("stays linear on a long line with no reference", () => {
-		// The regex this replaced backtracked super-linearly on exactly this shape.
+	it("stays linear on a slash-dense line with no template reference", () => {
+		// The regex this replaced was `([^\s(),:]+\/[^\s(),:]+\.(?:ya?ml|tpl))…`:
+		// two unbounded negated classes either side of a `/`, so the catastrophic
+		// input is SLASH-DENSE with no matching extension. Measured on the old
+		// pattern: 7648ms, against 0.18ms for a line with no slash at all — the
+		// first version of this test used the latter shape and therefore passed on
+		// the pre-fix regex, proving nothing (defect shape 7).
+		//
+		// helm's own output is the input here and the render spawn sets no
+		// maxOutputBytes, so the line length is not ours to bound.
+		const slashDense = `Error: ${"a/".repeat(1600)}X`;
 		const started = Date.now();
-		expect(extractTemplateRef(`Error: ${"a:b,".repeat(4000)}`)).toBeNull();
-		expect(Date.now() - started).toBeLessThan(1000);
+		expect(extractTemplateRef(slashDense)).toBeNull();
+		expect(Date.now() - started).toBeLessThan(500);
 	});
 });
 

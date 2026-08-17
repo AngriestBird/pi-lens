@@ -161,10 +161,16 @@ export function isHelmRenderEnabled(cwd: string): boolean {
  *     symlinked directory mid-path, so `templates/` (or `charts/child/`) being a
  *     link out of the tree would still resolve to a regular file with a
  *     perfectly chart-relative textual path.
+ *
+ * `realChartRoot` lets a caller resolving many references for ONE chart hoist
+ * the root's canonicalization out of the loop: at the 400-manifest cap this
+ * function runs up to four times per manifest, and the root's realpath is the
+ * same answer every time. Omit it and the root is canonicalized per call.
  */
 export function resolveTemplateSource(
 	sourceRef: string,
 	chartRoot: string,
+	realChartRoot?: string,
 ): string | null {
 	const segments = sourceRef
 		.split(/[\\/]+/)
@@ -177,13 +183,25 @@ export function resolveTemplateSource(
 		// Canonicalize both sides: comparing a resolved path against an
 		// unresolved root would reject every chart that legitimately lives under
 		// a symlinked parent (a /tmp or /home symlink, or a linked worktree).
-		if (!isWithin(fs.realpathSync(chartRoot), fs.realpathSync(candidate))) {
-			return null;
-		}
+		const root = realChartRoot ?? fs.realpathSync(chartRoot);
+		if (!isWithin(root, fs.realpathSync(candidate))) return null;
 	} catch {
 		return null;
 	}
 	return candidate;
+}
+
+/**
+ * Canonicalize a chart root once per pass, for the `realChartRoot` argument
+ * above. Falls back to the uncanonicalized root when realpath fails, which
+ * keeps containment conservative rather than skipping the check.
+ */
+function canonicalChartRoot(chartRoot: string): string {
+	try {
+		return fs.realpathSync(chartRoot);
+	} catch {
+		return chartRoot;
+	}
 }
 
 function chartYaml(chartRoot: string): string {
@@ -233,18 +251,25 @@ export function mapRenderedToSource(options: {
 	renderedPath: string;
 	outputDir: string;
 	chartRoot: string;
+	/** Canonicalized chart root, hoisted by the per-pass caller. */
+	realChartRoot?: string;
 }): { filePath: string; mapped: boolean } {
+	const { chartRoot, realChartRoot } = options;
 	const annotation = SOURCE_ANNOTATION.exec(options.renderedContent);
 	if (annotation) {
-		const resolved = resolveTemplateSource(annotation[1], options.chartRoot);
+		const resolved = resolveTemplateSource(
+			annotation[1],
+			chartRoot,
+			realChartRoot,
+		);
 		if (resolved) return { filePath: resolved, mapped: true };
 	}
 	const relative = path.relative(options.outputDir, options.renderedPath);
 	if (relative && !relative.startsWith("..")) {
-		const resolved = resolveTemplateSource(relative, options.chartRoot);
+		const resolved = resolveTemplateSource(relative, chartRoot, realChartRoot);
 		if (resolved) return { filePath: resolved, mapped: true };
 	}
-	return { filePath: chartYaml(options.chartRoot), mapped: false };
+	return { filePath: chartYaml(chartRoot), mapped: false };
 }
 
 /**
@@ -265,12 +290,13 @@ export function parseHelmTemplateFailure(
 ): Diagnostic[] {
 	const diagnostics: Diagnostic[] = [];
 	const text = raw.trim();
+	const realRoot = canonicalChartRoot(chartRoot);
 	for (const line of text.split(/\r?\n/)) {
 		const trimmed = line.trim();
 		if (!trimmed.startsWith("Error:")) continue;
 		const location = extractTemplateRef(trimmed);
 		const resolved = location
-			? resolveTemplateSource(location.ref, chartRoot)
+			? resolveTemplateSource(location.ref, chartRoot, realRoot)
 			: null;
 		const chartName = path.basename(chartRoot);
 		diagnostics.push({
@@ -570,6 +596,9 @@ function readRenderedTree(
 ): { manifests: RenderedManifest[]; truncated: boolean; unreadable: number } {
 	const manifests: RenderedManifest[] = [];
 	const walk = collectRenderedFiles(outputDir);
+	// Hoisted: the chart root's realpath is one answer for the whole pass, and
+	// the mapping below asks for it up to four times per manifest.
+	const realChartRoot = canonicalChartRoot(chartRoot);
 	let unreadable = 0;
 	for (const renderedPath of walk.files) {
 		let content: string;
@@ -584,6 +613,7 @@ function readRenderedTree(
 			renderedPath,
 			outputDir,
 			chartRoot,
+			realChartRoot,
 		});
 		manifests.push({
 			renderedPath,
