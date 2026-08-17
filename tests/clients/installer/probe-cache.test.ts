@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.unmock("../../../clients/installer/index.ts");
+vi.unmock("../../../clients/installer/index.js");
 
 const mockFsReadFile = vi.hoisted(() => vi.fn());
 const mockFsAccess = vi.hoisted(() => vi.fn());
@@ -49,7 +49,7 @@ import {
 	flushProbeCache,
 	resetProbeCacheStateForTesting,
 	updateProbeCache,
-} from "../../../clients/installer/index.ts";
+} from "../../../clients/installer/index.js";
 
 const TOOL_ID = "typescript-language-server";
 const TOOL_PATH = "/home/user/.pi-lens/tools/node_modules/.bin/typescript-language-server";

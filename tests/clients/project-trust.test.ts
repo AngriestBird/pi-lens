@@ -15,7 +15,7 @@ import {
 	readProjectTrustFromContext,
 	resetProjectTrust,
 	setProjectTrustState,
-} from "../../clients/project-trust.ts";
+} from "../../clients/project-trust.js";
 
 vi.mock("../../clients/extension-log.js", () => ({ logExtension }));
 

@@ -20,11 +20,11 @@ import {
 	TRANSIENT_BASE_COOLDOWN_MS,
 	TRANSIENT_MAX_COOLDOWN_MS,
 	transientRetryDelayMs,
-} from "../../../../clients/dispatch/runners/utils/availability-policy.ts";
+} from "../../../../clients/dispatch/runners/utils/availability-policy.js";
 import {
 	createAvailabilityChecker,
 	resetDispatchAvailabilityState,
-} from "../../../../clients/dispatch/runners/utils/runner-helpers.ts";
+} from "../../../../clients/dispatch/runners/utils/runner-helpers.js";
 
 const { logLatencySpy } = vi.hoisted(() => ({ logLatencySpy: vi.fn() }));
 

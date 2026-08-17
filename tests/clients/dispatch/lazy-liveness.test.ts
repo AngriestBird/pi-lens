@@ -37,7 +37,7 @@ describe("dispatch session warm/first-use liveness (#1394)", () => {
 				getStatus: () => [], getAliveServerIds: () => [],
 			}), resetLSPService: () => {},
 		}));
-		const { default: registerExtension } = await import("../../../index.ts");
+		const { default: registerExtension } = await import("../../../index.js");
 		const pi = createPiMock({ "no-lsp": true, "no-autoformat": true });
 		registerExtension(pi.asExtensionAPI());
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-dispatch-live-"));

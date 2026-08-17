@@ -26,7 +26,7 @@ describe("LSP session warm/first-use liveness (#1394)", () => {
 			testRunnerClient: { detectRunner: () => null }, goClient: { isGoAvailableAsync: async () => false }, rustClient: { isAvailableAsync: async () => false },
 			agentBehaviorClient: { recordToolCall: () => [], formatWarnings: () => "" }, complexityClient: { isSupportedFile: () => false, analyzeFile: () => null },
 		}) }));
-		const { default: registerExtension } = await import("../../index.ts");
+		const { default: registerExtension } = await import("../../index.js");
 		const pi = createPiMock({ "no-autoformat": true });
 		registerExtension(pi.asExtensionAPI());
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-lsp-live-"));

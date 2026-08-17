@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.unmock("../../../clients/installer/index.ts");
+vi.unmock("../../../clients/installer/index.js");
 
 // This file deliberately exercises the REAL getGlobalPiLensDir() resolver
 // (via the node:os mock below forcing TEST_HOME) rather than #525's
@@ -182,7 +182,7 @@ import {
 	ensureTool,
 	getToolPath,
 	resetProbeCacheStateForTesting,
-} from "../../../clients/installer/index.ts";
+} from "../../../clients/installer/index.js";
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -456,7 +456,7 @@ describe("ensureTool allowInstall policy", () => {
 describe("ensureTool force-reinstall", () => {
 	it("does not return the stale cached path after forceReinstall", async () => {
 		const { updateProbeCache } = await import(
-			"../../../clients/installer/index.ts"
+			"../../../clients/installer/index.js"
 		);
 		// Use a path that can't collide with a real tool on PATH
 		const stalePath = "/fake/stale/rust-analyzer";
