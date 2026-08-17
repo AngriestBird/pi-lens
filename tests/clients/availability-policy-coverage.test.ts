@@ -229,6 +229,35 @@ const EVASIONS: ReadonlyArray<{ name: string; source: string }> = [
 		`,
 	},
 	{
+		// The #1494 review probe. Routing propagates along the call edge a unit
+		// inherits its probe from, and the first version of that let a hand-rolled
+		// latch launder itself: park a permanent `Promise<boolean>` per cwd, hand
+		// the spawn to the ROUTED factory, and the unit read as routed while its
+		// own memo still latched a timeout for the life of the process. A memo that
+		// holds a boolean verdict never inherits its helper's routing.
+		name: "a hand-rolled boolean latch that delegates its spawn to a routed helper",
+		source: `
+			import { createCwdCachedProbe } from "./dispatch/runners/utils/runner-helpers.js";
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			function makeToolProbe(cmd: string) {
+				return createCwdCachedProbe(
+					(cwd) => safeSpawnAsync(cmd, ["--version"], { timeout: 5000, cwd }),
+					{ tool: "newtool" },
+				);
+			}
+			const toolAvailableByCwd = new Map<string, Promise<boolean>>();
+			export function getToolProbe(cmd: string) {
+				return (cwd: string) => {
+					const hit = toolAvailableByCwd.get(cwd);
+					if (hit) return hit;
+					const probed = makeToolProbe(cmd)(cwd);
+					toolAvailableByCwd.set(cwd, probed);
+					return probed;
+				};
+			}
+		`,
+	},
+	{
 		name: "the defect shape plus a comment that names availability-policy.js",
 		source: `
 			import { safeSpawnAsync } from "./safe-spawn.js";

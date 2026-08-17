@@ -36,6 +36,7 @@ import {
 	createAvailabilityChecker,
 	createAvailabilityLatch,
 	logAvailabilityDecision,
+	startHostStallSampler,
 	resolveAvailableOrInstall,
 	resolveCommandArgsWithInstallFallback,
 	resolveToolCommand,
@@ -410,12 +411,25 @@ async function tryEslintFix(filePath: string, cwd: string): Promise<number> {
 	}
 	if (cached.latch.read() === null) {
 		const candidate = resolveToolCommand(cwd, "eslint") ?? "eslint";
+		// The budget is enforced by a HOST-side timer, so a stalled event loop
+		// expires it while eslint is still healthy. Measure the overlapping stall
+		// and hand it to the classifier, exactly like the runner path: without it a
+		// host-stall timeout is re-caused as `probe-timeout` and gets the escalating
+		// 30s→300s cooldown instead of the 5s host-stall one (#1467).
+		const stallSampler = startHostStallSampler();
 		const startedAt = Date.now();
-		const check = await safeSpawnAsync(candidate, ["--version"], {
-			timeout: ESLINT_FIX_PROBE_BUDGET_MS,
-			cwd,
-		});
+		let check: Awaited<ReturnType<typeof safeSpawnAsync>>;
+		let hostStallMs: number;
+		try {
+			check = await safeSpawnAsync(candidate, ["--version"], {
+				timeout: ESLINT_FIX_PROBE_BUDGET_MS,
+				cwd,
+			});
+		} finally {
+			hostStallMs = stallSampler.stop();
+		}
 		const elapsedMs = Date.now() - startedAt;
+		const decisionCwd = path.resolve(cwd);
 		if (!check.error && check.status === 0) {
 			cached.bin = candidate;
 			cached.latch.noteAvailable();
@@ -427,13 +441,14 @@ async function tryEslintFix(filePath: string, cwd: string): Promise<number> {
 					cause: "ok",
 					elapsedMs,
 					latched: true,
+					hostStallMs,
 					budgetMs: ESLINT_FIX_PROBE_BUDGET_MS,
 				},
-				cwd,
+				decisionCwd,
 			);
 		} else {
 			cached.bin = null;
-			const { outcome, cause } = classifyProbeFailure(check);
+			const { outcome, cause } = classifyProbeFailure(check, { hostStallMs });
 			const retryAfterMs = cached.latch.noteUnavailable(outcome, cause);
 			logAvailabilityDecision(
 				{
@@ -443,10 +458,11 @@ async function tryEslintFix(filePath: string, cwd: string): Promise<number> {
 					cause,
 					elapsedMs,
 					latched: retryAfterMs === 0,
+					hostStallMs,
 					...(retryAfterMs > 0 && { retryAfterMs }),
 					budgetMs: ESLINT_FIX_PROBE_BUDGET_MS,
 				},
-				cwd,
+				decisionCwd,
 			);
 		}
 	}

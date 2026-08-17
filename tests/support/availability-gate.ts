@@ -341,9 +341,16 @@ function hasVersionFlagText(text: string): boolean {
 function findMemo(
 	facts: Omit<UnitFacts, "name">,
 	moduleDecls: Map<string, Decl>,
+	options: { booleanOnly?: boolean } = {},
 ): string | null {
+	// `booleanOnly` asks the narrower question that decides ROUTING INHERITANCE:
+	// does this unit park a boolean VERDICT of its own? A memo holding a policy
+	// handle (`Map<string, ReturnType<typeof makeEslintProbe>>`) is the routed
+	// shape; a memo holding `boolean` / `Promise<boolean>` is a hand-rolled latch
+	// and must never inherit a helper's routing.
 	if (facts.sessionFact) return "setSessionFact";
-	if (facts.latchDecl) return facts.latchDecl;
+	// A latch built by a policy factory is a handle, not a boolean verdict.
+	if (facts.latchDecl && !options.booleanOnly) return facts.latchDecl;
 
 	// Module-level bindings are in scope for every unit, and a `const cache = new
 	// Map()` at the top of the file is exactly where a latch hides from a
@@ -368,15 +375,39 @@ function findMemo(
 					// a same-named local in a sibling branch outlives nothing.
 					enclosesScope(decl.scope, write.scope)));
 		if (!persistent) continue;
+		if (options.booleanOnly) {
+			if (isBooleanVerdictShape(decl, write.valueText)) return write.target;
+			continue;
+		}
 		if (holdsVerdict(decl, write.valueText, write.target)) return write.target;
 	}
 
 	for (const decl of facts.decls) {
 		if (!MEMO_NAME.test(decl.name)) continue;
 		if (!decl.isClassField && decl.scope !== "<module>") continue;
+		if (options.booleanOnly) {
+			if (isBooleanVerdictShape(decl, "")) return decl.name;
+			continue;
+		}
 		if (holdsVerdict(decl, "", decl.name)) return decl.name;
 	}
 	return null;
+}
+
+/**
+ * Does this state hold a BOOLEAN verdict — the hand-rolled-latch shape — rather
+ * than a handle the shared policy owns? Deliberately narrower than
+ * `holdsVerdict`: no `avail`-in-the-name fallback, because a map of policy
+ * handles is usually named after availability and is exactly what must still be
+ * allowed to inherit its helper's routing.
+ */
+function isBooleanVerdictShape(
+	decl: Decl | undefined,
+	writtenValue: string,
+): boolean {
+	const shape = `${decl?.typeText ?? ""} ${decl?.valueText ?? ""} ${writtenValue}`;
+	if (/\bboolean\b/i.test(shape)) return true;
+	return BOOL_LITERAL.test(writtenValue.trim());
 }
 
 /** Is `outer` a strictly enclosing scope of `inner`? Keys are source ranges. */
@@ -564,7 +595,7 @@ export async function analyzeAvailabilityUnits(
 		name: unitLabel(node),
 		facts: collectUnit(node, constInitializers, policyHandles),
 	}));
-	propagateProbeReach(units);
+	propagateProbeReach(units, moduleDecls);
 
 	const found: AvailabilityUnit[] = [];
 	for (const unit of units) {
@@ -594,12 +625,24 @@ export async function analyzeAvailabilityUnits(
  */
 function propagateProbeReach(
 	units: Array<{ name: string; facts: Omit<UnitFacts, "name"> }>,
+	moduleDecls: Map<string, Decl>,
 ): void {
 	const byName = new Map(units.map((unit) => [unit.name, unit.facts]));
 	// Whether a unit spawns on its OWN, captured before propagation starts. A
 	// unit that owns its spawn owns its classification too, so it never inherits
 	// a neighbour's routing (that separation is why the gate judges per unit).
 	const ownSpawn = new Map(units.map((unit) => [unit.facts, unit.facts.spawns]));
+	// A unit that parks a BOOLEAN verdict of its own is a hand-rolled latch, and
+	// no amount of routing in the helper it borrows the spawn from makes that
+	// latch transient-aware. A review probe re-added #1494's own latch beside
+	// `getEslintProbe`, delegating the spawn to the routed factory, and the first
+	// version of this propagation read it as routed.
+	const ownBooleanMemo = new Map(
+		units.map((unit) => [
+			unit.facts,
+			findMemo(unit.facts, moduleDecls, { booleanOnly: true }) !== null,
+		]),
+	);
 	let changed = true;
 	while (changed) {
 		changed = false;
@@ -621,7 +664,11 @@ function propagateProbeReach(
 				// hands the verdict to the shared policy (#1494). Only for a unit that
 				// does not spawn itself — otherwise a hand-rolled latch would launder
 				// its verdict through a compliant neighbour.
-				if (callee.spawns && !ownSpawn.get(unit.facts)) {
+				if (
+					callee.spawns &&
+					!ownSpawn.get(unit.facts) &&
+					!ownBooleanMemo.get(unit.facts)
+				) {
 					for (const policyCall of callee.policyCalls) {
 						if (unit.facts.policyCalls.has(policyCall)) continue;
 						unit.facts.policyCalls.add(policyCall);

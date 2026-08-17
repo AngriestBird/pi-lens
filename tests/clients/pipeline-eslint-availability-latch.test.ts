@@ -10,7 +10,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setupTestEnvironment } from "./test-utils.js";
-import { TRANSIENT_BASE_COOLDOWN_MS } from "../../clients/dispatch/runners/utils/availability-policy.ts";
+import {
+	HOST_STALL_COOLDOWN_MS,
+	TRANSIENT_BASE_COOLDOWN_MS,
+} from "../../clients/dispatch/runners/utils/availability-policy.ts";
 
 const { safeSpawnAsync, logLatencySpy } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
@@ -105,6 +108,33 @@ describe("eslint autofix availability latch (#1494)", () => {
 				.map((call) => call[0])
 				.find((entry) => entry?.phase === "availability_decision")?.metadata,
 		).toMatchObject({ tool: "eslint", outcome: "transient", latched: false });
+	});
+
+	it("blames the host when the event loop stalled through the probe window", async () => {
+		// The budget is enforced host-side, so a stalled loop expires it while
+		// eslint is healthy. Without the stall sampler the timeout is re-caused as
+		// `probe-timeout` and gets the escalating 30s cooldown instead of the 5s
+		// host-stall one — a six-fold longer outage charged to the wrong party.
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) => {
+			if (!args.includes("--version")) {
+				return { error: null, status: 0, stdout: "", stderr: "" };
+			}
+			// The loop was unavailable for 3 s of this probe's window.
+			vi.setSystemTime(new Date(Date.now() + 3000));
+			return timeoutResult;
+		});
+
+		expect((await fix()).fixedCount).toBe(0);
+		const decision = logLatencySpy.mock.calls
+			.map((call) => call[0])
+			.find((entry) => entry?.phase === "availability_decision")?.metadata;
+		expect(decision).toMatchObject({
+			tool: "eslint",
+			outcome: "transient",
+			cause: "host-stall",
+			retryAfterMs: HOST_STALL_COOLDOWN_MS,
+		});
+		expect(decision?.hostStallMs).toBeGreaterThanOrEqual(500);
 	});
 
 	it("latches a genuinely missing eslint and stops probing", async () => {

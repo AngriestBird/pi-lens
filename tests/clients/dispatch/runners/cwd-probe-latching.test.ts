@@ -178,6 +178,39 @@ describe("createCwdCachedProbe latch policy (#1494)", () => {
 		expect(probe).toHaveBeenCalledTimes(2);
 	});
 
+	it("reports latched only for a verdict that is actually held", async () => {
+		const probe = vi.fn().mockResolvedValue(timeoutResult());
+		const cached = createCwdCachedProbe(probe, { tool: "widget" });
+
+		// Never probed: there is nothing latched, and `read()` answers null here
+		// exactly as it does for an expired cooldown — which is why the verdict
+		// must be derived from the OUTCOME, not from `read()`.
+		expect(cached.getVerdict("/tmp/project-verdict")).toMatchObject({
+			outcome: null,
+			latched: false,
+		});
+
+		await cached("/tmp/project-verdict");
+		expect(cached.getVerdict("/tmp/project-verdict")).toMatchObject({
+			outcome: "transient",
+			latched: false,
+		});
+
+		// Cooldown expired, verdict not yet replaced: still not latched.
+		advancePastCooldown();
+		expect(cached.getVerdict("/tmp/project-verdict")).toMatchObject({
+			outcome: "transient",
+			latched: false,
+		});
+
+		probe.mockResolvedValue(okResult());
+		await cached("/tmp/project-verdict");
+		expect(cached.getVerdict("/tmp/project-verdict")).toMatchObject({
+			outcome: "success",
+			latched: true,
+		});
+	});
+
 	it("classifies a thrown probe instead of collapsing it to a latched false", async () => {
 		const probe = vi
 			.fn()
