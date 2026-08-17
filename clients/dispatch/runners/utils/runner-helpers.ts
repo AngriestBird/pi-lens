@@ -1073,6 +1073,9 @@ let sgSweepHostStallMs = 0;
  * The sweep stops at the first candidate that answers, so at the moment of a
  * win this list is exactly the set of candidates ahead of the winner that never
  * got a fair hearing — i.e. the preferred tiers the winner did not really beat.
+ *
+ * Basenames, because tier 1 is an absolute `node_modules/.bin` path and this
+ * list is written to latency.log (#1568 review F3).
  */
 let sgSweepUnreachable: string[] = [];
 
@@ -1106,7 +1109,8 @@ async function probeAstGrepCommandAsync(
 	if (outcome === "transient") {
 		sgSweepSawTransient = true;
 		sgSweepTransientCause = cause;
-		if (!sgSweepUnreachable.includes(cmd)) sgSweepUnreachable.push(cmd);
+		const name = path.basename(cmd);
+		if (!sgSweepUnreachable.includes(name)) sgSweepUnreachable.push(name);
 	}
 	return false;
 }
@@ -1200,6 +1204,17 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 			return true;
 		}
 
+		// Nothing answered, and nothing answered TRANSIENTLY, while the verdict we
+		// are about to overwrite is a provisional win whose command we still hold.
+		// #1476's principle applies to the result as much as to the probe: a
+		// timeout says nothing about the tool, so it cannot erase a command this
+		// process proved working one cooldown ago. Keep serving it and re-arm
+		// (#1568 review F1).
+		if (sgSweepSawTransient && sgLatch.isProvisional() && sgCmd !== null) {
+			noteSgAvailable(startedAt, { retained: true });
+			return true;
+		}
+
 		// A timeout on ANY candidate is evidence about the host, not the tool.
 		noteSgUnavailable(
 			startedAt,
@@ -1223,8 +1238,15 @@ export async function isSgAvailableAsync(): Promise<boolean> {
  * supposed to lose to never got a fair hearing" — the winner is used now, but
  * caching it for the session would pin a healthy PATH ast-grep behind `npx`
  * until the next restart.
+ *
+ * `retained` marks the other provisional case (#1568 review F1): no candidate
+ * answered at all, so the winner being reported is the one the previous sweep
+ * found, kept rather than discarded on a timeout.
  */
-function noteSgAvailable(startedAt: number): void {
+function noteSgAvailable(
+	startedAt: number,
+	opts: { retained?: boolean } = {},
+): void {
 	const provisional = sgSweepSawTransient;
 	let retryAfterMs = 0;
 	if (provisional) {
@@ -1244,6 +1266,7 @@ function noteSgAvailable(startedAt: number): void {
 		...(provisional && {
 			provisional: true,
 			unreachablePreferred: [...sgSweepUnreachable],
+			...(opts.retained === true && { retained: true }),
 			...(retryAfterMs > 0 && { retryAfterMs }),
 		}),
 	});

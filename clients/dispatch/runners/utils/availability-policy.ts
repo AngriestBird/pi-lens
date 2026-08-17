@@ -220,8 +220,22 @@ export interface AvailabilityDecision {
 	/**
 	 * The candidates ahead of the winner that were unreachable, in ask order.
 	 * Named as in #1559's `formatter_selected` record so one grep covers both.
+	 *
+	 * Candidate NAMES, never resolved paths: a tier can be an absolute
+	 * `node_modules/.bin/<name>` under the user's home, and every sibling row in
+	 * this log carries a bare tool name. Writing the path there would both leak
+	 * it and break the grep (#1568 review F3).
 	 */
 	unreachablePreferred?: readonly string[];
+	/**
+	 * No candidate answered this sweep; the verdict re-serves the winner the
+	 * previous (provisional) sweep found (#1568 review F1).
+	 *
+	 * Only ever set beside `provisional`, and only when the failure class was
+	 * transient. It is the row that explains why an `available` verdict was
+	 * emitted by a sweep in which nothing was reachable.
+	 */
+	retained?: boolean;
 }
 
 /**
@@ -467,6 +481,15 @@ export interface AvailabilityLatch {
 	 */
 	noteProvisionallyAvailable(transientCause: AvailabilityCause): number;
 	/**
+	 * True while the current verdict is an available-but-provisional one.
+	 *
+	 * The question a re-sweep has to ask before it gives up: "was the answer I am
+	 * about to overwrite a real verdict, or a placeholder?" A sweep that finds
+	 * nothing TRANSIENTLY must not turn a working tool off when the answer it
+	 * holds came from a candidate that actually ran (#1568 review F1).
+	 */
+	isProvisional(): boolean;
+	/**
 	 * Returns the retry delay in ms; 0 means the verdict is latched.
 	 *
 	 * `opts.operationClass: "install"` marks the failure of an install-class
@@ -492,6 +515,11 @@ export interface AvailabilityLatch {
 	 * install-class cooldowns, which is exactly what `read()` enforces. A
 	 * caller that reads one class's slot alone would conclude a retry is due
 	 * while the other class is still cooling (#1497 review F2).
+	 *
+	 * "0 if latched" is not the same as "0 whenever the tool is available". A
+	 * PROVISIONAL verdict is both: `read()` returns `true` — the tool works and
+	 * is being served — while this returns a future timestamp, because the sweep
+	 * is still due for re-evaluation (#1568). Read the pair, not either alone.
 	 */
 	getRetryAtMs(): number;
 	/** True once install-class retries are spent for this session (#1497). */
@@ -669,6 +697,7 @@ export function createAvailabilityLatch(
 		getOutcome: () => outcome,
 		getCause: () => cause,
 		getRetryAtMs: () => effectiveRetryAtMs(),
+		isProvisional: () => provisional,
 		isInstallExhausted: () => {
 			syncInstallGeneration();
 			return installExhausted;
@@ -764,6 +793,7 @@ export function logAvailabilityDecision(
 			...(decision.unreachablePreferred !== undefined && {
 				unreachablePreferred: decision.unreachablePreferred,
 			}),
+			...(decision.retained === true && { retained: true }),
 		},
 	});
 }

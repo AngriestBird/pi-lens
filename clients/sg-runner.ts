@@ -210,6 +210,10 @@ export class SgRunner {
 	 * the merits. Fallbacks are excluded on purpose: `npx` is asked before the
 	 * global-bin and platform-package tiers, and a slow `npx` says nothing about
 	 * a winner that is a real binary.
+	 *
+	 * Basenames, because a candidate can be an absolute global-bin or
+	 * platform-package path and this list is written to latency.log (#1568
+	 * review F3).
 	 */
 	private sweepUnreachable: string[] = [];
 	/** A transient on the npx fallback: not evidence, but not nothing either. */
@@ -323,6 +327,19 @@ export class SgRunner {
 		// install below was never reached and the slow npx was re-spawned on each
 		// escalating retry instead — worse than the latch it replaced.
 		if (this.sweepSawTransient) {
+			// Nothing answered, transiently, while we are still holding a command a
+			// previous provisional sweep proved working. Discarding it here would
+			// run #1476 backwards — a timeout erasing a positive result — and it
+			// would send the sweep on to Step 4 to install a tool that is already
+			// runnable. Keep the winner and re-arm the cooldown (#1568 review F1).
+			if (this.availabilityLatch.isProvisional() && this.sgPath) {
+				this.noteAvailable(
+					startedAt,
+					`ast-grep re-probe stalled; keeping ${this.sgPath}`,
+					{ retained: true },
+				);
+				return true;
+			}
 			this.log(
 				"ast-grep availability probe timed out; will retry (not installing)",
 			);
@@ -391,8 +408,16 @@ export class SgRunner {
 	 *
 	 * The install arm cannot reach here provisionally: `doEnsureAvailable`
 	 * returns before Step 4 whenever `sweepSawTransient` is set.
+	 *
+	 * `retained` marks the other provisional case (#1568 review F1): no candidate
+	 * answered at all, and the winner being reported is the one the previous
+	 * sweep found, kept rather than discarded on a timeout.
 	 */
-	private noteAvailable(startedAt: number, message: string): void {
+	private noteAvailable(
+		startedAt: number,
+		message: string,
+		opts: { retained?: boolean } = {},
+	): void {
 		const provisional = this.sweepSawTransient;
 		let retryAfterMs = 0;
 		if (provisional) {
@@ -415,6 +440,7 @@ export class SgRunner {
 			...(provisional && {
 				provisional: true,
 				unreachablePreferred: [...this.sweepUnreachable],
+				...(opts.retained === true && { retained: true }),
 				...(retryAfterMs > 0 && { retryAfterMs }),
 			}),
 		});
@@ -579,8 +605,9 @@ export class SgRunner {
 			} else {
 				this.sweepSawTransient = true;
 				this.sweepTransientCause = cause;
-				if (!this.sweepUnreachable.includes(cmd)) {
-					this.sweepUnreachable.push(cmd);
+				const name = path.basename(cmd);
+				if (!this.sweepUnreachable.includes(name)) {
+					this.sweepUnreachable.push(name);
 				}
 			}
 		}
