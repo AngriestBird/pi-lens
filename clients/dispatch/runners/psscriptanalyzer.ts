@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { spawn } from "node:child_process";
+import { safeSpawnAsync, type SpawnResult } from "../../safe-spawn.js";
 import type {
 	Diagnostic,
 	DispatchContext,
@@ -9,6 +9,15 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { PRIORITY } from "../priorities.js";
+import {
+	type AvailabilityCause,
+	type AvailabilityOutcome,
+	classifyProbeFailure,
+	createAvailabilityLatch,
+	isLatchingOutcome,
+	logAvailabilityDecision,
+	startHostStallSampler,
+} from "./utils/availability-policy.js";
 
 interface PSAnalyzerResult {
 	RuleName?: string;
@@ -18,9 +27,9 @@ interface PSAnalyzerResult {
 	Message?: string;
 }
 
-// The PS script written to a temp file each run — avoids cmd.exe quoting issues
-// safeSpawnAsync uses shell:true on Windows, which mangles -Command strings.
-// Using -File with a temp script sidesteps all escaping problems.
+// The PS script written to a temp file each run. `-File` with a temp script
+// keeps the analysis argv free of embedded script text; safe-spawn itself never
+// uses a shell (#817), so nothing here is quoting-sensitive.
 const PS_SCRIPT = `
 param([string]$FilePath)
 Import-Module PSScriptAnalyzer -ErrorAction Stop
@@ -29,74 +38,176 @@ if ($results.Count -eq 0) { Write-Output '[]'; exit 0 }
 $results | ConvertTo-Json -Depth 3 -Compress
 `.trim();
 
-// Cache resolved powershell binary and module availability per process
-let psCmd: string | null | undefined = undefined;
-let psAnalyzerAvailable: boolean | undefined = undefined;
-
 const PS_TIMEOUT_MS = 30000;
 
-function spawnPs(cmd: string, args: string[], timeoutMs = PS_TIMEOUT_MS): Promise<{ stdout: string; stderr: string; status: number | null }> {
-	return new Promise((resolve) => {
-		let child: ReturnType<typeof spawn>;
-		try {
-			child = spawn(cmd, args, { windowsHide: true, shell: false });
-		} catch {
-			// SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL, the pidusage
-			// bug class, #533) — this best-effort runner must resolve, not reject.
-			resolve({ stdout: "", stderr: "", status: null });
-			return;
-		}
-		let stdout = "";
-		let stderr = "";
-		let settled = false;
-
-		const done = (status: number | null) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			resolve({ stdout, stderr, status });
-		};
-
-		const timer = setTimeout(() => {
-			if (!settled) {
-				child.kill("SIGTERM");
-				setTimeout(() => { if (!settled) child.kill("SIGKILL"); }, 1000);
-				done(null);
-			}
-		}, timeoutMs);
-
-		child.stdout?.setEncoding("utf-8");
-		child.stderr?.setEncoding("utf-8");
-		child.stdout?.on("data", (d) => (stdout += d));
-		child.stderr?.on("data", (d) => (stderr += d));
-		child.on("close", (code) => done(code));
-		child.on("error", () => done(null));
+/**
+ * PowerShell spawns go through `safeSpawnAsync` (#1490).
+ *
+ * The hand-rolled version returned `status: null` for a timeout, a synchronous
+ * `spawn UNKNOWN` and a missing binary alike, so the call site had nothing to
+ * classify and remembered every one of them as "PowerShell analysis is not
+ * available". `safeSpawnAsync` carries the standard taxonomy — `failure`,
+ * `spawnFailure.kind` and the errno on `error` — which is what lets the
+ * availability policy tell a stall from an absence.
+ */
+function spawnPs(
+	cmd: string,
+	args: string[],
+	timeoutMs = PS_TIMEOUT_MS,
+): Promise<SpawnResult> {
+	return safeSpawnAsync(cmd, args, {
+		timeout: timeoutMs,
+		resourceLabel: "psscriptanalyzer",
 	});
 }
 
-async function resolvePowerShellCmd(): Promise<string | null> {
-	if (psCmd !== undefined) return psCmd;
-	for (const candidate of ["pwsh", "powershell"]) {
-		const r = await spawnPs(candidate, ["-NoProfile", "-NonInteractive", "-Command", "exit 0"]);
-		if (r.status === 0) {
-			psCmd = candidate;
-			return psCmd;
-		}
+/**
+ * The two verdicts this runner memoizes, both owned by the shared policy.
+ *
+ * The availability-policy coverage gate never flagged either of them, and the
+ * reason is not a bug in the gate: it recognises a probe by a quoted VERSION
+ * FLAG, and neither probe below asks for a version. One runs `exit 0` to see if
+ * an interpreter answers; the other asks `Get-Module -ListAvailable`. A
+ * capability probe with no version flag is invisible to that pre-filter, so this
+ * file was skipped before any unit was analysed. The residual gate blindness is
+ * tracked with #1489's gate work; the migration here does not depend on it.
+ */
+const psCmdLatch = createAvailabilityLatch();
+const psAnalyzerLatchByCmd = new Map<
+	string,
+	ReturnType<typeof createAvailabilityLatch>
+>();
+let psCmd: string | null = null;
+
+/** Record one decision, and report whether the caller may retry later. */
+function notePsDecision(
+	latch: ReturnType<typeof createAvailabilityLatch>,
+	tool: string,
+	verdict:
+		| { available: true; elapsedMs: number; hostStallMs: number }
+		| {
+				available: false;
+				outcome: AvailabilityOutcome;
+				cause: AvailabilityCause;
+				elapsedMs: number;
+				hostStallMs: number;
+			},
+): void {
+	let retryAfterMs: number | undefined;
+	if (verdict.available) {
+		latch.noteAvailable();
+	} else {
+		const delay = latch.noteUnavailable(verdict.outcome, verdict.cause);
+		if (delay > 0) retryAfterMs = delay;
 	}
+	logAvailabilityDecision({
+		tool,
+		verdict: verdict.available ? "available" : "unavailable",
+		outcome: verdict.available ? "success" : verdict.outcome,
+		cause: verdict.available ? "ok" : verdict.cause,
+		elapsedMs: verdict.elapsedMs,
+		latched: verdict.available || isLatchingOutcome(verdict.outcome),
+		hostStallMs: verdict.hostStallMs,
+		...(retryAfterMs !== undefined && { retryAfterMs }),
+		budgetMs: PS_TIMEOUT_MS,
+	});
+}
+
+/**
+ * Resolve the PowerShell binary, once per session per verdict.
+ *
+ * A candidate that times out is NOT evidence that PowerShell is absent, so the
+ * loop only concludes "missing" when every candidate answered with a durable
+ * failure. One transient candidate makes the whole verdict transient, and the
+ * next turn after the cooldown probes again.
+ */
+async function resolvePowerShellCmd(): Promise<string | null> {
+	const memo = psCmdLatch.read();
+	if (memo !== null) return memo ? psCmd : null;
+
+	let transient: { outcome: AvailabilityOutcome; cause: AvailabilityCause } | null =
+		null;
+	let elapsedTotalMs = 0;
+	let stallTotalMs = 0;
+	for (const candidate of ["pwsh", "powershell"]) {
+		const sampler = startHostStallSampler();
+		const startedAt = Date.now();
+		const result = await spawnPs(candidate, [
+			"-NoProfile",
+			"-NonInteractive",
+			"-Command",
+			"exit 0",
+		]);
+		const hostStallMs = sampler.stop();
+		const elapsedMs = Date.now() - startedAt;
+		elapsedTotalMs += elapsedMs;
+		stallTotalMs += hostStallMs;
+		if (!result.error && result.status === 0) {
+			psCmd = candidate;
+			notePsDecision(psCmdLatch, "powershell", {
+				available: true,
+				elapsedMs,
+				hostStallMs,
+			});
+			return candidate;
+		}
+		const classified = classifyProbeFailure(result, { hostStallMs });
+		if (classified.outcome === "transient") transient = classified;
+	}
+
 	psCmd = null;
+	notePsDecision(psCmdLatch, "powershell", {
+		available: false,
+		outcome: transient?.outcome ?? "missing",
+		cause: transient?.cause ?? "not-found",
+		elapsedMs: elapsedTotalMs,
+		hostStallMs: stallTotalMs,
+	});
 	return null;
 }
 
 async function checkModuleAvailable(cmd: string): Promise<boolean> {
-	if (psAnalyzerAvailable !== undefined) return psAnalyzerAvailable;
-	const r = await spawnPs(cmd, [
+	let latch = psAnalyzerLatchByCmd.get(cmd);
+	if (!latch) {
+		latch = createAvailabilityLatch();
+		psAnalyzerLatchByCmd.set(cmd, latch);
+	}
+	const memo = latch.read();
+	if (memo !== null) return memo;
+
+	const sampler = startHostStallSampler();
+	const startedAt = Date.now();
+	const result = await spawnPs(cmd, [
 		"-NoProfile",
 		"-NonInteractive",
 		"-Command",
 		"if (Get-Module -ListAvailable PSScriptAnalyzer) { exit 0 } else { exit 1 }",
 	]);
-	psAnalyzerAvailable = r.status === 0;
-	return psAnalyzerAvailable;
+	const hostStallMs = sampler.stop();
+	const elapsedMs = Date.now() - startedAt;
+	if (!result.error && result.status === 0) {
+		notePsDecision(latch, "psscriptanalyzer", {
+			available: true,
+			elapsedMs,
+			hostStallMs,
+		});
+		return true;
+	}
+	// `exit 1` is the module genuinely not being installed — a durable fact with
+	// an install that fixes it, so it is classified `missing` rather than left as
+	// an unclassified rejection.
+	const { outcome, cause } = classifyProbeFailure(result, {
+		hostStallMs,
+		unclassifiedFailureOutcome: "missing",
+	});
+	notePsDecision(latch, "psscriptanalyzer", {
+		available: false,
+		outcome,
+		cause,
+		elapsedMs,
+		hostStallMs,
+	});
+	return false;
 }
 
 function parsePSAnalyzerOutput(raw: string, filePath: string): Diagnostic[] {
