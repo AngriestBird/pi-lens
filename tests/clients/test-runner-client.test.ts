@@ -813,6 +813,94 @@ describe("test-runner-client", () => {
 		});
 	});
 
+	// #1524-r4: a third review pass found three residuals in the go count
+	// parser round 3 added.
+	//
+	// S3: `/^FAIL[^\S\n]+\S+/m` (a real per-package verdict line) also
+	// matched go's INFRASTRUCTURE verdict lines — `FAIL <pkg> [build
+	// failed]` (a compile error) and `FAIL <pkg> [setup failed]` (no
+	// packages to test). Neither ran a single test, but both rendered as a
+	// fabricated `✗ 1/1 failed` instead of the runner error they are.
+	//
+	// S4a: the ok-package pass count was in an `else if` off the fail
+	// branch, so a mixed multi-package run — some packages clean, one
+	// package with a real failure — silently dropped the clean packages'
+	// pass count.
+	//
+	// S4b: every `--- FAIL:` line was counted, but go prints one PER LEVEL
+	// of a failing subtest tree — a parent `TestA` and its child
+	// `TestA/sub` both get a line for what is one underlying failure — so
+	// counting lines inflated `failed`.
+	describe("go infrastructure verdicts, mixed-package counts, subtests (#1524-r4)", () => {
+		const parse = (output: string, exitCode: number, runner = "go") =>
+			(new TestRunnerClient(false) as any).parseGenericRunnerOutput(
+				"",
+				output,
+				exitCode,
+				`/tmp/test.${runner}`,
+				runner,
+			);
+
+		it("reports a go compile failure ([build failed]) as a runner error", () => {
+			const result = parse(
+				"# example.com/pkg\n./main_test.go:8:2: undefined: Bar (compile error)\nFAIL\texample.com/pkg [build failed]\n",
+				1,
+			);
+
+			expect(result.error).toBe("Runner go exited with 1");
+			expect(result.failed).toBe(0);
+			expect(result.failures).toEqual([]);
+		});
+
+		it("reports a go setup failure ([setup failed]) as a runner error", () => {
+			const result = parse(
+				"FAIL\texample.com/pkg [setup failed]\nerror: no packages to test\n",
+				1,
+			);
+
+			expect(result.error).toBe("Runner go exited with 1");
+			expect(result.failed).toBe(0);
+			expect(result.failures).toEqual([]);
+		});
+
+		it("counts clean packages as passed alongside a real failure in the same run", () => {
+			const result = parse(
+				"ok  \texample.com/a\t0.01s\n--- FAIL: TestB\n    b_test.go:5: assertion failed\nFAIL\texample.com/b\t0.01s\nok  \texample.com/c\t0.02s\n",
+				1,
+			);
+
+			expect(result.passed).toBe(2);
+			expect(result.failed).toBe(1);
+		});
+
+		it("does not double-count a failing subtest against its already-counted parent", () => {
+			const result = parse(
+				"--- FAIL: TestA\n--- FAIL: TestA/sub1\n--- FAIL: TestA/sub2\nFAIL\texample.com/pkg\t0.01s\n",
+				1,
+			);
+
+			expect(result.failed).toBe(1);
+		});
+	});
+
+	// #1524-r4 (tidy): a runner-error result must not also carry leftover
+	// failure names — the two branches of `formatResult` are mutually
+	// exclusive, so a `TestResult` claiming both is self-contradictory.
+	describe("a runner-error result has no leftover failure names (#1524-r4 tidy)", () => {
+		it("clears failures when the rspec load-error text also matches a same-line Failure: name", () => {
+			const result = (new TestRunnerClient(false) as any).parseGenericRunnerOutput(
+				"",
+				"An error occurred while loading ./spec/foo_spec.rb.\nFailure: cannot load such file -- foo\n",
+				1,
+				"/tmp/spec/foo_spec.rb",
+				"rspec",
+			);
+
+			expect(result.error).toBe("Runner rspec exited with 1");
+			expect(result.failures).toEqual([]);
+		});
+	});
+
 	// #1480 P3: `parseFloat(seconds) * 1000` is not an integer count of
 	// milliseconds. `in 2.01s` is 2009.9999999999998, and the turn-end log
 	// prints the number as it stands.

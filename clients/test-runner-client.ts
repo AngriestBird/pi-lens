@@ -1884,15 +1884,48 @@ export class TestRunnerClient {
 		const goFailNames = [
 			...output.matchAll(/--- FAIL:[^\S\n]+([^\s(]+)/g),
 		];
+		// #1524-r4: only COUNT unparented failures. go prints a `--- FAIL:`
+		// line for every level of a failing subtest tree — `TestA` AND
+		// `TestA/sub` each get their own line for what is really one
+		// underlying failure — so counting every line inflated `failed`
+		// (two lines here read as two failures for one broken test). A name
+		// containing "/" whose prefix up to that "/" is itself in the list
+		// is a subtest of an already-counted parent; only names that are
+		// NOT such a subtest count. `goFailNames` itself (all lines) is
+		// still what decides `matched`/the runner-error veto below and
+		// what's listed in `failures` — subtest names are still useful
+		// detail there, just not double-counted.
+		const goFailNameSet = new Set(goFailNames.map((m) => m[1].trim()));
+		const goTopLevelFailCount = goFailNames.filter((m) => {
+			const name = m[1].trim();
+			const slash = name.indexOf("/");
+			return slash === -1 || !goFailNameSet.has(name.slice(0, slash));
+		}).length;
 		if (runner === "go") {
-			const goFailPackage = /^FAIL[^\S\n]+\S+/m.test(output);
+			// #1524-r4: `(?![^\n]*\[(?:build|setup) failed\])` rejects go's
+			// INFRASTRUCTURE verdict lines — `FAIL <pkg> [build failed]` (a
+			// compile error) and `FAIL <pkg> [setup failed]` (no packages to
+			// test) — which matched the same shape as a real `FAIL <pkg>
+			// <duration>` test verdict line. Neither ran a single test; both
+			// were rendering as `✗ 1/1 failed ✗ go failure` instead of the
+			// runner error they are.
+			const goFailPackage =
+				/^FAIL(?![^\n]*\[(?:build|setup) failed\])[^\S\n]+\S+/m.test(
+					output,
+				);
 			const goOkPackages = [
 				...output.matchAll(/^ok[^\S\n]+\S+[^\S\n]+[\d.]+s/gm),
 			];
 			if (goFailNames.length > 0 || goFailPackage) {
-				failed = Math.max(failed, goFailNames.length || 1);
+				failed = Math.max(failed, goTopLevelFailCount || 1);
 				matched = true;
-			} else if (goOkPackages.length > 0) {
+			}
+			// #1524-r4: unconditional, not `else if`. A multi-package run
+			// can have BOTH a real failure and packages that passed clean —
+			// `ok a` / `--- FAIL: TestB` / `ok c` is 2 passed AND 1 failed,
+			// not "1 failed, 0 passed" with the green packages silently
+			// dropped because the fail branch above already ran.
+			if (goOkPackages.length > 0) {
 				passed = Math.max(passed, goOkPackages.length);
 				matched = true;
 			}
@@ -1952,6 +1985,18 @@ export class TestRunnerClient {
 			exitCode !== 0 && !matched && goFailNames.length === 0 && lower.includes("error")
 				? `Runner ${runner} exited with ${exitCode}`
 				: undefined;
+
+		// #1524-r4 (tidy): a runner-error result reports through
+		// `formatResult`'s runner-error branch, not the failed-tests
+		// branch, so any name `otherNames` picked up before this was
+		// decided (e.g. a same-line `Failure: cannot load such file`)
+		// would sit in `failures` unused but visible to anything reading
+		// the raw `TestResult` — an error result with a non-empty
+		// `failures` list is a self-contradiction. Clear it here so the
+		// result is one or the other, never both.
+		if (runnerError) {
+			failures.length = 0;
+		}
 
 		// #1480 (adjacent): a non-zero exit is the runner saying the run
 		// failed. Every count parser above can legitimately arrive at
