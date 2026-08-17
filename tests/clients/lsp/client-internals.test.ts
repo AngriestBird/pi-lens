@@ -14,12 +14,14 @@ import { describe, expect, it, vi } from "vitest";
 import type { MessageConnection } from "vscode-jsonrpc";
 import {
 	applyDynamicCapabilities,
+	bumpDiagnosticsVersion,
 	CLIENT_CAPABILITIES,
 	clientRequestWorkspaceDiagnostics,
 	clearDiagnosticsForPath,
 	clientShutdown,
 	clientWaitForDiagnostics,
 	closeDocument,
+	diagnosticsVersionForPath,
 	normalizeClientWorkspaceEdit,
 	handleNotifyChange,
 	navRequest,
@@ -422,6 +424,7 @@ function createMockState(overrides?: Partial<LSPClientState>): LSPClientState {
 		documentOpenedAt: new Map(),
 		diagnosticEmitter,
 		diagnosticsVersion: 0,
+		diagnosticsVersionsByPath: new Map(),
 		documentVersions: new Map(),
 		diagnosticDocVersions: new Map(),
 		documentContentHashes: new Map(),
@@ -1020,11 +1023,79 @@ describe("clientWaitForDiagnostics", () => {
 		});
 
 		setTimeout(() => {
-			state.diagnosticsVersion = 2;
+			// #1531: advance through the production seam. Assigning the global counter
+			// alone no longer satisfies the gate, which now reads the per-path stamp —
+			// and a test that hand-rolls the bump would stop modelling a real publish.
+			bumpDiagnosticsVersion(state, TEST_KEY);
 			state.diagnosticEmitter.emit("diagnostics", TEST_FILE);
 		}, 50);
 
 		await waitPromise;
+	});
+
+	// #1531: a SIBLING file's publication must not satisfy this file's freshness
+	// gate. The exposure is the early-return: a resync that preserves diagnostics
+	// (format-only touches) leaves this path's cache populated, and pre-fix the gate
+	// asked only whether the client-GLOBAL counter had advanced past the baseline —
+	// which a sibling's publication does. The wait then returned instantly, serving
+	// the file's PREVIOUS diagnostics as fresh for this touch, and downstream the
+	// outcome row read `silent` (a label reserved for "this server's own budget
+	// lapsed with nothing published") rather than the truth.
+	it("does not treat a SIBLING path's publication as fresh diagnostics for this file", async () => {
+		const state = createMockState();
+		const siblingKey = normalizeMapKey("/project/other.ts");
+		// This path's cache holds diagnostics from an EARLIER touch, preserved
+		// across the resync.
+		state.pushDiagnostics.set(TEST_KEY, [
+			{
+				severity: 1,
+				message: "previous finding",
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 1 },
+				},
+			},
+		]);
+		bumpDiagnosticsVersion(state, TEST_KEY);
+		const baseline = state.diagnosticsVersion;
+
+		// A publication for the SIBLING advances the client-global counter past the
+		// baseline. Nothing new landed for this file.
+		bumpDiagnosticsVersion(state, siblingKey);
+		expect(state.diagnosticsVersion).toBeGreaterThan(baseline);
+		expect(diagnosticsVersionForPath(state, TEST_KEY)).toBeLessThanOrEqual(
+			baseline,
+		);
+
+		const startedAt = Date.now();
+		await clientWaitForDiagnostics(state, TEST_FILE, 120, {
+			minVersion: baseline,
+		});
+		// Pre-fix this returned in ~0ms on the sibling's bump. The wait must instead
+		// run to its own timeout, because no publication landed for THIS file.
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(100);
+	});
+
+	it("still resolves immediately when THIS file's own publication is fresh", async () => {
+		const state = createMockState();
+		const baseline = state.diagnosticsVersion;
+		state.pushDiagnostics.set(TEST_KEY, [
+			{
+				severity: 1,
+				message: "own fresh finding",
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 1 },
+				},
+			},
+		]);
+		bumpDiagnosticsVersion(state, TEST_KEY);
+
+		const startedAt = Date.now();
+		await clientWaitForDiagnostics(state, TEST_FILE, 500, {
+			minVersion: baseline,
+		});
+		expect(Date.now() - startedAt).toBeLessThan(100);
 	});
 
 	it("resolves when diagnostics arrive via emitter", async () => {
@@ -2327,5 +2398,94 @@ describe("clientRequestWorkspaceDiagnostics — real report parsing", () => {
 		});
 		vi.mocked(state.connection.sendRequest).mockRejectedValue(new Error("dead"));
 		expect(await clientRequestWorkspaceDiagnostics(state, 1000)).toBeUndefined();
+	});
+});
+
+describe("per-path diagnostics versions (#1531)", () => {
+	const FILE_A = "/project/a.ts";
+	const FILE_B = "/project/b.ts";
+	const KEY_A = normalizeMapKey(FILE_A);
+	const KEY_B = normalizeMapKey(FILE_B);
+
+	/** Drive the REAL `textDocument/publishDiagnostics` handler, so the per-path
+	 * stamp is proven to be written by the same code path that stores
+	 * `pushDiagnostics` — not by a helper the production push path might skip.
+	 * `typos` is used because its strategy seeds the first push (no debounce
+	 * timer), which keeps the store synchronous. */
+	function publishHandlerFor(state: LSPClientState) {
+		setupIncomingHandlers(state, {});
+		const calls = vi.mocked(state.connection.onNotification).mock
+			.calls as unknown as Array<[string, (params: unknown) => void]>;
+		const entry = calls.find((c) => c[0] === "textDocument/publishDiagnostics");
+		expect(entry, "publishDiagnostics handler registered").toBeDefined();
+		return entry![1];
+	}
+
+	function diagnostic(message: string): LSPDiagnostic {
+		return {
+			severity: 1,
+			message,
+			range: {
+				start: { line: 0, character: 0 },
+				end: { line: 0, character: 1 },
+			},
+		};
+	}
+
+	it("stamps only the published path, never a sibling", () => {
+		const state = createMockState({ serverId: "typos" });
+		const publish = publishHandlerFor(state);
+
+		expect(diagnosticsVersionForPath(state, KEY_A)).toBe(0);
+		expect(diagnosticsVersionForPath(state, KEY_B)).toBe(0);
+
+		publish({
+			uri: pathToFileURL(FILE_A).href,
+			diagnostics: [diagnostic("typo in A")],
+		});
+
+		// The client-global counter advanced — which is exactly why it cannot
+		// answer "did this server report on B?".
+		expect(state.diagnosticsVersion).toBe(1);
+		expect(state.pushDiagnostics.has(KEY_A)).toBe(true);
+		expect(diagnosticsVersionForPath(state, KEY_A)).toBe(1);
+		// The regression this pins: B never got a publication, so its per-path
+		// version must stay at its baseline. Reading the global counter here
+		// (pre-#1531 behavior) reports 1 > 0 and manufactures evidence.
+		expect(state.pushDiagnostics.has(KEY_B)).toBe(false);
+		expect(diagnosticsVersionForPath(state, KEY_B)).toBe(0);
+	});
+
+	it("keeps stamps globally monotonic so a cleared path cannot look answered", () => {
+		const state = createMockState({ serverId: "typos" });
+		const publish = publishHandlerFor(state);
+
+		publish({
+			uri: pathToFileURL(FILE_A).href,
+			diagnostics: [diagnostic("typo in A")],
+		});
+		const baselineA = diagnosticsVersionForPath(state, KEY_A);
+
+		// A resync drops A's stamp along with the diagnostics it described.
+		clearDiagnosticsForPath(state, KEY_A);
+		expect(diagnosticsVersionForPath(state, KEY_A)).toBe(0);
+
+		// A publication for B while A's touch is in flight must not lift A back
+		// above its captured baseline.
+		publish({
+			uri: pathToFileURL(FILE_B).href,
+			diagnostics: [diagnostic("typo in B")],
+		});
+		expect(diagnosticsVersionForPath(state, KEY_A)).toBeLessThanOrEqual(
+			baselineA,
+		);
+
+		// A's own next publication does clear the baseline — the stamps carry the
+		// global counter's value, so they never restart below an earlier one.
+		publish({
+			uri: pathToFileURL(FILE_A).href,
+			diagnostics: [diagnostic("typo in A again")],
+		});
+		expect(diagnosticsVersionForPath(state, KEY_A)).toBeGreaterThan(baselineA);
 	});
 });
