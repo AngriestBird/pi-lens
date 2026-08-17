@@ -49,6 +49,21 @@ const timeoutResult = {
 
 /** `which`/`where` ran and found nothing: a genuine absence. */
 const notFoundResult = { stdout: "", stderr: "", status: 1 };
+
+/**
+ * The prober itself could not run. Not a timeout, so it lands in
+ * `classifyProbeFailure`'s unclassified arm — where the `missing` override used
+ * to turn it into "rustfmt is not installed", for every which-gated formatter at
+ * once, for the session.
+ */
+const proberUnspawnableResult = {
+	stdout: "",
+	stderr: "",
+	status: null,
+	error: Object.assign(new Error("spawn where EACCES"), { code: "EACCES" }),
+	failure: "spawn",
+	spawnFailure: { kind: "permission-denied" },
+};
 const foundResult = (binary: string) => ({
 	stdout: `/usr/bin/${binary}\n`,
 	stderr: "",
@@ -136,12 +151,77 @@ describe("formatter PATH probes (#1495)", () => {
 		expect(whichCalls("rustfmt")).toHaveLength(1);
 	});
 
-	it("caches a positive detection instead of re-probing PATH every save", async () => {
+	it("does not latch when the prober itself could not run", async () => {
 		const { cwd, filePath } = rustFile();
+		safeSpawnAsync.mockImplementation(async () => proberUnspawnableResult);
+
+		expect(await names(cwd, filePath)).toEqual([]);
+		expect(decisions()[0]?.metadata).toMatchObject({
+			tool: "rustfmt",
+			outcome: "transient",
+			cause: "probe-rejected",
+			latched: false,
+		});
+
+		// An unspawnable prober is shared by every which-gated formatter, so a
+		// durable verdict here would take out a dozen languages at once.
+		vi.setSystemTime(new Date(Date.now() + TRANSIENT_BASE_COOLDOWN_MS + 1));
+		safeSpawnAsync.mockImplementation(async () => foundResult("rustfmt"));
+		expect(await names(cwd, filePath)).toEqual(["rustfmt"]);
+	});
+
+	it("keeps a stalled probe from suppressing an unrelated language", async () => {
+		// The first cut counted transients process-wide, so one stalled
+		// `which rustfmt` stopped a shell detection from caching and stamped
+		// `reason: "probe-timeout"` on a selection where nothing timed out.
+		const rust = rustFile();
+		const shellCwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-which-latch-sh-"),
+		);
+		const shellFile = path.join(shellCwd, "script.sh");
+		fs.writeFileSync(shellFile, "echo hi\n");
+
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+			(args as string[])[0] === "shfmt"
+				? foundResult("shfmt")
+				: timeoutResult,
+		);
+
+		// Overlapping passes: the stalled one must not change the healthy one.
+		const [rustNames, shellNames] = await Promise.all([
+			names(rust.cwd, rust.filePath),
+			names(shellCwd, shellFile),
+		]);
+		expect(rustNames).toEqual([]);
+		expect(shellNames).toEqual(["shfmt"]);
+
+		const selections = logLatencySpy.mock.calls
+			.map((call) => call[0])
+			.filter((entry) => entry?.phase === "formatter_selected");
+		expect(
+			selections.find((entry) => entry.metadata?.formatter === "shfmt")?.metadata
+				?.reason,
+		).not.toBe("probe-timeout");
+		expect(
+			selections.find((entry) => entry.metadata?.reason === "probe-timeout")
+				?.metadata?.stalledProbes,
+		).toEqual(["rustfmt"]);
+
+		// The shell result is cached; the stalled Rust one is not.
+		safeSpawnAsync.mockClear();
+		expect(await names(shellCwd, shellFile)).toEqual(["shfmt"]);
+		expect(whichCalls("shfmt")).toHaveLength(0);
+	});
+
+	it("caches a positive verdict per command, not just per directory", async () => {
+		// Two directories, so `detectionCache` cannot be what answers the second
+		// call: the PATH latch is what keeps this to one probe.
+		const first = rustFile();
+		const second = rustFile();
 		safeSpawnAsync.mockImplementation(async () => foundResult("rustfmt"));
 
-		expect(await names(cwd, filePath)).toEqual(["rustfmt"]);
-		expect(await names(cwd, filePath)).toEqual(["rustfmt"]);
+		expect(await names(first.cwd, first.filePath)).toEqual(["rustfmt"]);
+		expect(await names(second.cwd, second.filePath)).toEqual(["rustfmt"]);
 		expect(whichCalls("rustfmt")).toHaveLength(1);
 	});
 });

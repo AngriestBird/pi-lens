@@ -227,20 +227,22 @@ const whichLatchByCommand = new Map<
 >();
 
 /**
- * How many times a TRANSIENT `which` verdict has been served this process,
- * fresh or from within its cooldown. `getFormattersForFile` reads it before and
- * after detection: a change means this pass saw a probe that never got a fair
- * hearing, so an empty result is not evidence and must not be cached.
+ * Commands whose CURRENT `which` verdict is transient — a probe that never got a
+ * fair hearing, still inside its cooldown.
  *
- * A counter rather than a flag because detection passes overlap. A concurrent
- * pass can only inflate it, which makes this pass skip a cache write — the safe
- * direction.
+ * Scoped per command on purpose (#1495 review). The first cut counted transient
+ * verdicts process-wide and compared the count across a detection pass, which
+ * over-suppressed: one stalled `which rustfmt` stopped an unrelated Python or
+ * shell detection from caching, and stamped `reason: "probe-timeout"` on
+ * selections where nothing had timed out. A command leaves the set as soon as
+ * its verdict becomes trustworthy — a resolved path or a genuine absence.
  */
-let whichTransientServed = 0;
+const whichTransientCommands = new Set<string>();
 
 /** Drop the PATH verdicts, so a newly installed binary is visible at once. */
 function resetWhichLatches(): void {
 	whichLatchByCommand.clear();
+	whichTransientCommands.clear();
 }
 
 async function which(command: string): Promise<string | null> {
@@ -250,10 +252,7 @@ async function which(command: string): Promise<string | null> {
 		whichLatchByCommand.set(command, entry);
 	}
 	const memo = entry.latch.read();
-	if (memo !== null) {
-		if (!memo && entry.latch.getOutcome() === "transient") whichTransientServed++;
-		return memo ? entry.resolved : null;
-	}
+	if (memo !== null) return memo ? entry.resolved : null;
 
 	const stallSampler = startHostStallSampler();
 	const startedAt = Date.now();
@@ -272,6 +271,7 @@ async function which(command: string): Promise<string | null> {
 	if (resolved) {
 		entry.resolved = resolved;
 		entry.latch.noteAvailable();
+		whichTransientCommands.delete(command);
 		logAvailabilityDecision({
 			tool: command,
 			verdict: "available",
@@ -286,14 +286,29 @@ async function which(command: string): Promise<string | null> {
 	}
 
 	entry.resolved = null;
-	// A `which`/`where` that RAN and found nothing exits nonzero with no spawn
-	// error: that is a genuine absence, and an install is what fixes it.
-	const { outcome, cause } = classifyProbeFailure(result, {
+	// A `which`/`where` that RAN and found nothing exits nonzero with NO spawn
+	// error, and only that is a genuine absence an install would fix.
+	//
+	// An UNSPAWNABLE prober is the opposite (#1495 review): EACCES, `spawn
+	// UNKNOWN`, EMFILE, an unresolvable cwd, or `where`/`which` itself missing
+	// says nothing about the tool that was asked for. Claiming `missing` there
+	// was the worst version of this bug, because the prober is shared by every
+	// which-gated formatter — one EACCES would have latched a dozen of them off
+	// for the session. So the `missing` override is granted only to a prober that
+	// ran, and anything that stopped it from running stays transient.
+	const proberRan = !result.error;
+	const classified = classifyProbeFailure(result, {
 		hostStallMs,
-		unclassifiedFailureOutcome: "missing",
+		...(proberRan && { unclassifiedFailureOutcome: "missing" as const }),
 	});
+	let { outcome, cause } = classified;
+	if (!proberRan && outcome !== "transient") {
+		outcome = "transient";
+		cause = "probe-rejected";
+	}
 	const retryAfterMs = entry.latch.noteUnavailable(outcome, cause);
-	if (outcome === "transient") whichTransientServed++;
+	if (outcome === "transient") whichTransientCommands.add(command);
+	else whichTransientCommands.delete(command);
 	logAvailabilityDecision({
 		tool: command,
 		verdict: "unavailable",
@@ -1290,7 +1305,6 @@ export async function getFormattersForFile(
 	filePath: string,
 	cwd: string,
 ): Promise<FormatterInfo[]> {
-	const transientProbesBefore = whichTransientServed;
 	const ext = path.extname(filePath).toLowerCase();
 	const base = path.basename(filePath).toLowerCase();
 	// Filename-keyed formatters (e.g. terragrunt.hcl) can share an extension
@@ -1306,13 +1320,18 @@ export async function getFormattersForFile(
 	const configSignature = await formatterConfigSignature(cwd);
 	// Check cache
 	let cached = detectionCache.get(normalizedCwd);
-	if (cached?.signature !== configSignature) {
-		cached = undefined;
+	if (cached && cached.signature !== configSignature) {
+		// An EXISTING entry whose signature moved is the user telling us the world
+		// changed. Re-probe PATH too, so "install the tool, touch the config" still
+		// works within one session now that a durable absence latches (#1495).
+		// Scoped to a real change on purpose: keying this off "no entry yet" would
+		// drop every PATH verdict on the first save in each new directory, which in
+		// a monorepo means re-probing forever.
 		detectionCache.delete(normalizedCwd);
-		// A config change is the user telling us the world moved. Re-probe PATH
-		// too, so "install the tool, touch the config" still works within one
-		// session now that a durable absence latches (#1495).
+		cached = undefined;
 		resetWhichLatches();
+	} else if (cached?.signature !== configSignature) {
+		cached = undefined;
 	}
 	if (!cached) {
 		cached = { signature: configSignature, entries: new Map() };
@@ -1391,8 +1410,17 @@ export async function getFormattersForFile(
 	// PATH probe was timing out is not a finding about this project. Caching it
 	// would survive until a config file's mtime or size changed, so leave the
 	// cache untouched and let the next turn re-detect.
+	// Which of THIS file's candidates are currently un-answered? Scoped to the
+	// candidates' own binaries, so a stalled `which rustfmt` cannot stop a shell
+	// or Python detection from caching (#1495 review). Residual: a candidate whose
+	// detection consults a SECOND binary (rustfmt→rustup, csharpier→dotnet) is
+	// matched on its primary only — the secondary is an install fallback, reached
+	// after the primary already answered.
+	const stalledCandidateCommands = candidateFormatters
+		.map((formatter) => formatter.command[0])
+		.filter((command) => command && whichTransientCommands.has(command));
 	const poisonedByTransientProbe =
-		enabled.length === 0 && whichTransientServed !== transientProbesBefore;
+		enabled.length === 0 && stalledCandidateCommands.length > 0;
 
 	let selectionReason: string;
 	if (!selected) {
@@ -1415,7 +1443,10 @@ export async function getFormattersForFile(
 			formatter: selected?.name ?? null,
 			reason: poisonedByTransientProbe ? "probe-timeout" : selectionReason,
 			cwd,
-			...(poisonedByTransientProbe && { cached: false }),
+			...(poisonedByTransientProbe && {
+				cached: false,
+				stalledProbes: stalledCandidateCommands,
+			}),
 		},
 	});
 
