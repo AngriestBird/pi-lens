@@ -1603,20 +1603,40 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 		}
 	});
 
-	// BLAST-RADIUS PIN (#1533 review). The highest-frequency `"all"` caller is the
+	// BLAST-RADIUS PINS (#1533 review). The highest-frequency `"all"` caller is the
 	// cascade per-edit neighbour fan-out, which caps the touch at 1000/2000ms and
 	// does NOT exclude opengrep. The concern raised was that newly-`silent` verdicts
 	// there would block `neighborTouchCache`/`recentlyCleanNeighborCache` seeding via
 	// `isConfirmedTouch`.
 	//
-	// They do not, and this test is why: `timeoutFor(aux) = min(callerCap, 3500)`, so
-	// on that path the auxiliary's budget EQUALS the caller cap, which is also
-	// `timeoutMs` (the max over waited servers). An auxiliary that burns its budget
-	// therefore trips `diagnosticsTimedOut` and the touch was ALREADY `inconclusive`
-	// before #1533 — and `inconclusive` is decided BEFORE `coverageGap` in the result
-	// branch, so the wrapper those callers read is byte-identical. Delete the #1533
-	// block and this test still passes; that is the point.
-	it("a per-edit-shaped touch whose aux burns the caller cap stays inconclusive, not newly partial", async () => {
+	// The answer has TWO cases, and stating only the first would be the same
+	// impossibility-proof overreach #1533 was filed about. The dividing question is
+	// whether the auxiliary's budget is the MAX over waited servers, because
+	// `perServerTimeout` is `min(callerCap, strategyWait)` per server while
+	// `timeoutMs` is the max across them:
+	//
+	//   1. AUX IS THE MAX (this test). opengrep declares 3500, above either per-edit
+	//      cap, so `timeoutFor(opengrep) = callerCap = timeoutMs`. An opengrep that
+	//      burns its budget therefore trips `diagnosticsTimedOut`, and the touch was
+	//      ALREADY `inconclusive` before #1533 — `inconclusive` is decided BEFORE
+	//      `coverageGap` in the result branch, so the wrapper those callers read is
+	//      byte-identical. Delete the #1533 block and this test still passes; that is
+	//      the point. This covers every auxiliary on every current per-edit path,
+	//      because opengrep is the only one attached there and its budget always
+	//      exceeds the cap.
+	//
+	//   2. AUX IS NOT THE MAX (the test after this one). A faster auxiliary beside a
+	//      slower primary — typos (1500) or ast-grep (1800) next to rust-analyzer
+	//      (3000) under a 2000ms cap — settles inside `timeoutMs`, so
+	//      `waitedMs + 20 >= timeoutMs` never trips and the touch is NOT
+	//      inconclusive. Here #1533 genuinely DOES narrow a result that previously
+	//      read `confirmed`. That is the fix working as intended: the scanner said
+	//      nothing about these bytes, so the verdict is honest and fail-safe (the
+	//      primary's findings still ride along in `.diags`; only the coverage claim
+	//      is withdrawn). The cost is a cache seed skipped for that file, bounded by
+	//      how often a fast auxiliary is paired with a slower primary on a collecting
+	//      `"all"` touch.
+	it("case 1 — a per-edit-shaped touch whose aux budget IS the max stays inconclusive, not newly partial", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		getServersForFileWithConfig.mockReturnValue([
@@ -1645,6 +1665,70 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 		// And #1533 did not convert it into a confirmation claim of any kind, which is
 		// what `isConfirmedTouch` reads.
 		expect(result?.confirmation).toBeUndefined();
+	});
+
+	it("case 2 — a fast silent aux beside a SLOWER primary does newly narrow, and should", async () => {
+		// The counter-case to the test above, and the honest half of the blast radius.
+		// rust-analyzer declares 3000 and typos 1500, so under a 2000ms cap:
+		//   timeoutFor(rust-analyzer) = min(2000, 3000) = 2000
+		//   timeoutFor(typos)         = min(2000, 1500) = 1500
+		//   timeoutMs                 = max(2000, 1500) = 2000
+		// The primary answers at 800ms and typos settles silently at 1500ms, so the
+		// wait ends at 1500 — comfortably inside `timeoutMs`, which is why
+		// `diagnosticsTimedOut` does NOT trip and the pre-#1533 result was a clean
+		// `confirmed`. Post-#1533 it is `partial` naming typos, because typos published
+		// nothing about these bytes.
+		//
+		// Asserting the budgets alongside the verdict keeps the arithmetic above from
+		// silently drifting if a strategy number changes — the whole point of this pin
+		// is the INEQUALITY (aux budget < timeoutMs), not the specific milliseconds.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const file = "C:/repo/main.rs";
+		const primaryClient = makeClient(800, [makeDiagnostic("borrow error")], {
+			serverId: "rust-analyzer",
+		});
+		const auxClient = makeClient(1500, [], { serverId: "typos" });
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("rust-analyzer", ".rs"),
+			makeAuxServer("typos", ".rs"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "typos" ? auxClient : primaryClient,
+		);
+
+		const touch = service.touchFile(file, "fn main() {}", {
+			// The cascade neighbour fan-out's own shape, non-cold-snapshot lane.
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+			maxClientWaitMs: 2000,
+			silent: true,
+			source: "cascade",
+		});
+		await vi.advanceTimersByTimeAsync(4000);
+		const result = await touch;
+
+		// The inequality that puts this touch in case 2 rather than case 1.
+		expect(auxClient.waitForDiagnostics).toHaveBeenCalledWith(
+			file,
+			1500,
+			expect.anything(),
+		);
+		expect(primaryClient.waitForDiagnostics).toHaveBeenCalledWith(
+			file,
+			2000,
+			expect.anything(),
+		);
+		// NOT inconclusive — this is what makes the narrowing new rather than a
+		// relabelling of an already-unconfirmed touch.
+		expect(result?.inconclusive).toBeUndefined();
+		// The new verdict: honest about typos, and the primary's finding survives.
+		expect(result?.confirmation).toBe("partial");
+		expect(result?.unconfirmedServerIds).toEqual(["typos"]);
+		expect(
+			(result?.diags ?? []).map((d: { message: string }) => d.message),
+		).toContain("borrow error");
 	});
 
 	// #1531 (closes with #1544's per-path counter). `diagnosticsVersion` is a

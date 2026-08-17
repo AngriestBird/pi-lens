@@ -3340,6 +3340,21 @@ export class LSPService {
 			// here would pay back the latency that gate just recovered. The evidence is
 			// free; only the verdict changes.
 			//
+			// WHICH verdicts change, stated without overreach. Where the auxiliary's
+			// budget is the MAX over waited servers (`perServerTimeout` is
+			// `min(callerCap, strategyWait)` per server, `timeoutMs` is the max across
+			// them), a silent auxiliary already tripped `diagnosticsTimedOut` and the
+			// touch was already `inconclusive` — which is decided BEFORE the coverage
+			// gap, so those results are unchanged. That covers opengrep on every current
+			// per-edit path, whose 3500 exceeds either cap. But a FASTER auxiliary beside
+			// a slower primary (typos 1500 or ast-grep 1800 next to rust-analyzer 3000
+			// under a 2000 cap) settles inside `timeoutMs`, so nothing timed out and this
+			// block genuinely narrows a result that used to read `confirmed`. That is the
+			// fix working: the scanner said nothing about these bytes. It is fail-safe —
+			// the primary's findings still ride along and only the coverage claim is
+			// withdrawn — and the cost is a skipped cache seed for that file. Both cases
+			// are pinned in `tests/clients/lsp/service-aux-grace.test.ts`.
+			//
 			// `cut_off` cannot arise on this path — there is no grace timer to end a
 			// wait early — so the shapes are `answered` / `silent` / `deferred`, decided
 			// by exactly the rules the grace path uses (#1458 S1: a settled promise is
