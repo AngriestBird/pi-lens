@@ -1661,10 +1661,33 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 	it.skip("#1531/#1544: a concurrent sibling's publication must not cover a silent touch", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
-		// ONE aux client shared by both files: it publishes for a.ts only.
+		// Built from the shape that DEMONSTRABLY exhibits the gap (verified by probe:
+		// both touches resolve `confirmed`, both rows read `answered`, though only
+		// a.ts was ever published for). Deliberately NOT assembled from `makeClient`
+		// above — a spread of that double changed the outcome for an unrelated reason
+		// and made this pin pass without exercising the shared counter at all, which
+		// is exactly the vacuous-fixture trap (defect shape 7) this test is about.
 		let version = 0;
+		const shared = {
+			isAlive: () => true,
+			shutdown: async () => {},
+			getWorkspaceDiagnosticsSupport: () => ({
+				advertised: false,
+				mode: "push-only" as const,
+				diagnosticProviderKind: "none",
+			}),
+			getOperationSupport: () => ({}),
+			getDiagnostics: vi.fn(() => []),
+			notify: {
+				open: vi.fn(async () => {}),
+				change: vi.fn(async () => {}),
+				close: vi.fn(async () => {}),
+			},
+		};
+		// ONE aux client shared by both files, publishing for a.ts only.
 		const auxClient = {
-			...makeClient(900, [], { serverId: "opengrep" }),
+			...shared,
+			serverId: "opengrep",
 			get diagnosticsVersion() {
 				return version;
 			},
@@ -1678,14 +1701,20 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 					),
 			),
 		};
+		const primaryClient = {
+			...shared,
+			serverId: "ts-primary",
+			diagnosticsVersion: 0,
+			waitForDiagnostics: vi.fn(
+				() => new Promise<void>((resolve) => setTimeout(resolve, 100)),
+			),
+		};
 		getServersForFileWithConfig.mockReturnValue([
 			makePrimaryServer("ts-primary"),
 			makeAuxServer("opengrep"),
 		]);
 		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
-			options?.serverId === "opengrep"
-				? auxClient
-				: makeClient(100, [], { serverId: "ts-primary" }),
+			options?.serverId === "opengrep" ? auxClient : primaryClient,
 		);
 
 		const touchOptions = {
@@ -1693,14 +1722,13 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 			collectDiagnostics: true,
 			diagnostics: "document" as const,
 		};
-		const [, second] = await (async () => {
-			const a = service.touchFile("C:/repo/a.ts", "one", touchOptions);
-			const b = service.touchFile("C:/repo/b.ts", "two", touchOptions);
-			await vi.advanceTimersByTimeAsync(5000);
-			return Promise.all([a, b]);
-		})();
-		// b.ts got no publication of its own. Post-#1544 the per-path counter makes
-		// that visible; today the shared counter hides it behind a.ts's bump.
+		const a = service.touchFile("C:/repo/a.ts", "one", touchOptions);
+		const b = service.touchFile("C:/repo/b.ts", "two", touchOptions);
+		await vi.advanceTimersByTimeAsync(5000);
+		const [, second] = await Promise.all([a, b]);
+		// b.ts got no publication of its own. Post-#1544's per-path counter that is
+		// visible; today a.ts's bump satisfies b.ts's baseline and this reads
+		// `confirmed` with no named server.
 		expect(second?.confirmation).toBe("partial");
 		expect(second?.unconfirmedServerIds).toEqual(["opengrep"]);
 	});
