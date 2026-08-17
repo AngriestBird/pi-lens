@@ -3597,14 +3597,56 @@ export class TreeSitterClient {
 	}
 
 	/**
+	 * Queries whose `textPredicates` shape has been checked (#1523). web-tree-sitter
+	 * compiles #match?/#eq? predicates into `query.textPredicates[patternIndex]`, but
+	 * the property is untyped and undocumented on the public Query type. Validate its
+	 * shape once per Query object rather than on every match.
+	 */
+	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter Query instances
+	private queriesWithInvalidTextPredicates = new WeakSet<any>();
+	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter Query instances
+	private queriesWithValidatedTextPredicates = new WeakSet<any>();
+
+	/**
+	 * Typed accessor for `query.textPredicates`, validated once at query-construction
+	 * (first-use) time. If the property is missing or the wrong shape — e.g. a future
+	 * web-tree-sitter upgrade renames or removes it — `query.textPredicates?.[i] ?? []`
+	 * would silently mean "no predicates for this pattern," passing every match through
+	 * unfiltered. That's a silent fail-open on #match?/#eq? predicates that rules rely
+	 * on for correctness. Fail loud (log once) and closed (report the query has no
+	 * usable predicates) instead of guessing.
+	 */
+	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter Query instances
+	private hasValidTextPredicates(query: any): boolean {
+		if (this.queriesWithValidatedTextPredicates.has(query)) {
+			return !this.queriesWithInvalidTextPredicates.has(query);
+		}
+		this.queriesWithValidatedTextPredicates.add(query);
+		const valid = Array.isArray(query?.textPredicates);
+		if (!valid) {
+			this.queriesWithInvalidTextPredicates.add(query);
+			logTreeSitterDiagnostic({
+				subsystem: "tree-sitter-client",
+				message:
+					"web-tree-sitter Query.textPredicates is missing or not an array — " +
+					"#match?/#eq? predicates cannot be evaluated. Failing CLOSED: matches " +
+					"for this query are dropped rather than reported unfiltered.",
+				metadata: { textPredicatesType: typeof query?.textPredicates },
+			});
+		}
+		return valid;
+	}
+
+	/**
 	 * Evaluate text predicates (#match?, #eq?) for a query match.
 	 * web-tree-sitter stores these as compiled functions in query.textPredicates[patternIndex]
 	 * and does NOT apply them automatically via .matches().
 	 */
 	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter types
 	private evaluatePredicates(query: any, match: any): boolean {
+		if (!this.hasValidTextPredicates(query)) return false;
 		const predicates: Array<(captures: unknown) => boolean> =
-			query.textPredicates?.[match.patternIndex] ?? [];
+			query.textPredicates[match.patternIndex] ?? [];
 		return predicates.every((fn) => fn(match.captures));
 	}
 
