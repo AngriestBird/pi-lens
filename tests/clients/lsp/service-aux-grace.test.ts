@@ -1294,3 +1294,275 @@ describe("#1470 — cut-off auxiliary honesty", () => {
 		).toBeUndefined();
 	});
 });
+
+/**
+ * #1533 — the same honesty on `clientScope: "all"`, the batch/directory scan
+ * surface.
+ *
+ * `"all"` spawns auxiliaries into the client set (#573) but never enters the aux
+ * GRACE wait, so before this fix no evidence was derived on that scope: a silent
+ * scanner resolved `confirmation: "confirmed"` with no `unconfirmedServerIds`,
+ * the exact #1493 false clean surviving one scope over. #1527 fixed only the
+ * per-file lane, per its scope.
+ *
+ * The fix derives the outcomes from POST-WAIT state rather than entering a second
+ * wait — every auxiliary is already waited on inside the aggregate
+ * `Promise.all`, so the evidence is free and #1459's fan-out saving is untouched.
+ * `cut_off` cannot arise here (no ceiling is armed), so the rows carry
+ * `waitShape: "aggregate"` and the three remaining shapes.
+ *
+ * These probes are the regression fence: on pre-fix code every `"partial"`
+ * assertion below reads `"confirmed"` and no `lsp_aux_wait_outcome` row exists at
+ * all.
+ */
+describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		logLatency.mockReset();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	/**
+	 * One `clientScope: "all"` touch over a primary that answers at 100ms and one
+	 * auxiliary whose own wait settles at `auxDelayMs`. Returns the touch result
+	 * plus the aux-wait row it produced, so each probe can assert the telemetry and
+	 * the claimed confirmation agree — the same shape the with-auxiliary `probe`
+	 * above uses.
+	 */
+	async function probeAll(
+		auxDelayMs: number,
+		auxDiags: ReturnType<typeof makeDiagnostic>[],
+		auxOptions: { publishesWhenClean?: boolean } = {},
+	) {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep"
+					? makeClient(auxDelayMs, auxDiags, {
+							serverId: "opengrep",
+							...auxOptions,
+						})
+					: makeClient(100, [makeDiagnostic("primary error")], {
+							serverId: "ts-primary",
+						}),
+		);
+
+		const touch = service.touchFile(FILE, "probe-all", {
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		// Covers opengrep's full 3500ms declared budget plus slack.
+		await vi.advanceTimersByTimeAsync(5000);
+		const result = await touch;
+		const row = logLatency.mock.calls.find(
+			([entry]) => entry.phase === "lsp_aux_wait_outcome",
+		)?.[0];
+		const outcomes = row?.metadata?.outcomes as
+			| Array<{ serverId: string; outcome: string; publishedThisContent?: boolean }>
+			| undefined;
+		return { result, row, outcomes, outcome: outcomes?.[0]?.outcome };
+	}
+
+	it("a SILENT auxiliary narrows the confirmation and names the server", async () => {
+		// The reported defect, verbatim: aux settles at 900ms inside its own budget
+		// having published nothing, and the touch used to claim "confirmed" with
+		// empty `unconfirmedServerIds`.
+		const { result, outcome } = await probeAll(900, []);
+		expect(outcome).toBe("silent");
+		expect(result?.confirmation).toBe("partial");
+		expect(result?.unconfirmedServerIds).toEqual(["opengrep"]);
+		// NARROWED, not collapsed: the primary answered at 100ms, so its findings
+		// stand and the touch is not inconclusive (#533 cuts both ways).
+		expect(result?.inconclusive).toBeUndefined();
+		expect(
+			(result?.diags ?? []).map((d: { message: string }) => d.message),
+		).toContain("primary error");
+	});
+
+	it("emits an lsp_aux_wait_outcome row for the \"all\" scope, tagged as the aggregate producer", async () => {
+		// The issue's observability criterion: the field-data analysis from #1493's
+		// review must cover this lane too, and a query must be able to tell the two
+		// producers apart.
+		const { row, outcomes } = await probeAll(900, []);
+		expect(row).toBeDefined();
+		expect(row?.metadata).toMatchObject({
+			clientScope: "all",
+			waitShape: "aggregate",
+		});
+		expect(outcomes).toEqual([
+			expect.objectContaining({
+				serverId: "opengrep",
+				outcome: "silent",
+				publishedThisContent: false,
+			}),
+		]);
+		// No grace ceiling is armed on this path, so the row must never claim one won.
+		expect(outcomes?.some((entry) => entry.outcome === "cut_off")).toBe(false);
+	});
+
+	it("records the narrowed verdict on the same lsp_touch_file row", async () => {
+		await probeAll(900, []);
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					clientScope: "all",
+					confirmation: "partial",
+					auxUnconfirmedServerIds: ["opengrep"],
+					inconclusive: false,
+				}),
+			}),
+		);
+	});
+
+	it("an auxiliary that ran to budget and published nothing keeps the touch clean", async () => {
+		// The overcorrection guard, mirrored from the with-auxiliary lane: an empty
+		// PUBLICATION advances `diagnosticsVersion` in production exactly like a
+		// finding does, so the scanner is covered and the touch stays unqualified.
+		// Without this the fix would demote nearly every clean sweep file.
+		const { result, outcome } = await probeAll(900, [], {
+			publishesWhenClean: true,
+		});
+		expect(outcome).toBe("answered");
+		expect(result?.confirmation).toBe("confirmed");
+		expect(result?.unconfirmedServerIds).toBeUndefined();
+	});
+
+	it("an auxiliary that publishes findings keeps the touch clean and merges them", async () => {
+		const { result, outcome } = await probeAll(900, [
+			makeDiagnostic("aux finding"),
+		]);
+		expect(outcome).toBe("answered");
+		expect(result?.confirmation).toBe("confirmed");
+		expect(
+			(result?.diags ?? []).map((d: { message: string }) => d.message),
+		).toContain("aux finding");
+	});
+
+	it("a silent auxiliary already bound to this content stays covered", async () => {
+		// #1493's content-hash exemption must apply on this scope for the same
+		// reason it applies on the other: a scanner whose stored publication is bound
+		// to EXACTLY these bytes has reported, so a wait producing nothing new
+		// withholds nothing. Fails closed only against a hash match, never a timer.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const content = "bound-all";
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep"
+				? {
+						...makeClient(900, [], { serverId: "opengrep" }),
+						getDiagnosticBinding: vi.fn(() => ({
+							contentHash: hashDiagnosticContent(content),
+							boundToCurrentDisk: true,
+						})),
+					}
+				: makeClient(100, [], { serverId: "ts-primary" }),
+		);
+
+		const touch = service.touchFile(FILE, content, {
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(5000);
+		const result = await touch;
+		const outcomes = logLatency.mock.calls.find(
+			([entry]) => entry.phase === "lsp_aux_wait_outcome",
+		)?.[0]?.metadata?.outcomes as
+			| Array<{ outcome: string; publishedThisContent?: boolean }>
+			| undefined;
+		// Still recorded as silent — the exemption is in the coverage POLICY, not in
+		// the outcome, so the row keeps saying what actually happened.
+		expect(outcomes?.[0]?.outcome).toBe("silent");
+		expect(outcomes?.[0]?.publishedThisContent).toBe(true);
+		expect(result?.confirmation).toBe("confirmed");
+		expect(result?.unconfirmedServerIds).toBeUndefined();
+	});
+
+	it("does not report an EXCLUDED scanner as a coverage gap", async () => {
+		// The #584 workspace-sweep exclusion is a routing decision, not a blackout:
+		// opengrep's sweep findings come from its own CLI extractor. An excluded
+		// server never reaches `spawned`, so it must not be named here — otherwise
+		// every sweep file would report a permanent gap for a scanner nobody asked.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep"
+				? makeClient(900, [], { serverId: "opengrep" })
+				: makeClient(100, [], { serverId: "ts-primary" }),
+		);
+
+		const touch = service.touchFile(FILE, "excluded", {
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+			excludeServerIds: new Set(["opengrep"]),
+		});
+		await vi.advanceTimersByTimeAsync(5000);
+		const result = await touch;
+		expect(result?.confirmation).toBe("confirmed");
+		expect(result?.unconfirmedServerIds).toBeUndefined();
+		// No auxiliary was spawned, so there is nothing to report an outcome for.
+		expect(
+			logLatency.mock.calls.some(
+				([entry]) => entry.phase === "lsp_aux_wait_outcome",
+			),
+		).toBe(false);
+	});
+
+	it("does not enter a second wait: the touch still completes on the aggregate budget", async () => {
+		// The cost guard. #1459's resync gate absorbs the aux fan-out of an
+		// "all"-scope sweep; a per-neighbour aux grace here would pay that latency
+		// back. The evidence is derived from state the aggregate wait already
+		// produced, so a silent aux must not extend the touch beyond its own budget.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep"
+				? makeClient(900, [], { serverId: "opengrep" })
+				: makeClient(100, [], { serverId: "ts-primary" }),
+		);
+
+		const startedAt = Date.now();
+		const touch = service.touchFile(FILE, "cost", {
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		let settledAt: number | undefined;
+		void touch.then(() => {
+			settledAt = Date.now();
+		});
+		await vi.advanceTimersByTimeAsync(5000);
+		await touch;
+		// The aux's own wait settled at 900ms; nothing was armed after it.
+		expect((settledAt ?? Number.POSITIVE_INFINITY) - startedAt).toBeLessThan(
+			1500,
+		);
+	});
+});

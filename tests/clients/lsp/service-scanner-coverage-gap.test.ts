@@ -85,6 +85,15 @@ function makeDiagnostic(message: string) {
  * for a scanner that was not sent this content: its version cannot advance, so a
  * wait on it can only expire. A test that resolves this instantly would let the
  * touch reach `"partial"` on a timing profile production never has.
+ *
+ * #1533: `"immediately"` must ALSO advance `diagnosticsVersion`, because that is
+ * what a real client's early resolve MEANS — the wait settles when a publication
+ * lands (client.ts). A double that resolved without the bump modelled a client
+ * production does not have, and the `"all"`-scope evidence check reads it as a
+ * silent scanner (shape 7: the fixture, not the code, decided the verdict).
+ * `diagnosticsVersion` is therefore a GETTER; a caller that spreads this object
+ * (`{...makeClient(...)}`) freezes the value at spread time and must not rely on
+ * later bumps.
  */
 function makeClient(
 	serverId: string,
@@ -98,6 +107,7 @@ function makeClient(
 	// per auxiliary — and `openOffsets` shows the flood shape when it breaks.
 	const startedAt = Date.now();
 	let inFlight = 0;
+	let version = 0;
 	const stats = { maxInFlight: 0, openOffsets: [] as number[] };
 	return {
 		stats,
@@ -110,7 +120,9 @@ function makeClient(
 			diagnosticProviderKind: "none",
 		}),
 		getOperationSupport: () => ({}),
-		diagnosticsVersion: 0,
+		get diagnosticsVersion() {
+			return version;
+		},
 		getDiagnostics: vi.fn(() => diags),
 		notify: {
 			open: vi.fn(() => {
@@ -136,7 +148,11 @@ function makeClient(
 			(_filePath: string, timeoutMs?: number) =>
 				new Promise<void>((resolve) => {
 					if (publishes === "never") setTimeout(resolve, timeoutMs ?? 1000);
-					else resolve();
+					else {
+						// A publication landing is what resolves a real wait early.
+						version += 1;
+						resolve();
+					}
 				}),
 		),
 	};
@@ -384,6 +400,11 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		});
 	});
 
+	// #1533 makes the "still confirmed" half load-bearing on this scope too: `"all"`
+	// now derives auxiliary coverage evidence from post-wait state, so a scanner that
+	// publishes for every file must keep every touch unqualified. This is the
+	// overcorrection guard for the aggregate path.
+	//
 	// The load-bearing concurrency assertion, and the negative control in one.
 	// The gate is a QUEUE, not a drop: a healthy scanner accepts each write in
 	// milliseconds, so all SIX concurrent touches still get scanned and every touch
