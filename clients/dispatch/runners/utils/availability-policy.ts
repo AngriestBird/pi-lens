@@ -466,8 +466,6 @@ export interface AvailabilityLatch {
 	 * Returns the cooldown applied, in ms, for the decision record.
 	 */
 	noteProvisionallyAvailable(transientCause: AvailabilityCause): number;
-	/** True while the current `available` verdict is provisional (#1568). */
-	isProvisional(): boolean;
 	/**
 	 * Returns the retry delay in ms; 0 means the verdict is latched.
 	 *
@@ -671,7 +669,6 @@ export function createAvailabilityLatch(
 		getOutcome: () => outcome,
 		getCause: () => cause,
 		getRetryAtMs: () => effectiveRetryAtMs(),
-		isProvisional: () => provisional,
 		isInstallExhausted: () => {
 			syncInstallGeneration();
 			return installExhausted;
