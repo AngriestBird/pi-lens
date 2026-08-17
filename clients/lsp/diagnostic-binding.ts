@@ -123,6 +123,15 @@ export interface TouchFileResult {
 	 * stored publication for this touch's content either. See
 	 * {@link auxiliaryCoverageGap}, which owns the rule. Absent when every spawned
 	 * server answered for itself.
+	 *
+	 * #1459 adds the two doors that open BEFORE any wait: a scanner whose circuit
+	 * breaker was open (so it never attached at all) and one whose `didOpen` resync
+	 * the fan-out gate deferred (so it never received this content). Neither used
+	 * to mark the result, which is how a 15 s opengrep cooldown read as a clean
+	 * security verdict for every file a cascade sweep touched inside it. A deferred
+	 * auxiliary reaches {@link auxiliaryCoverageGap} as outcome `"deferred"`, so a
+	 * stored publication whose content hash matches these exact bytes still keeps
+	 * it covered — the same exemption `cut_off` and `silent` get.
 	 */
 	unconfirmedServerIds?: string[];
 	binding?: DiagnosticBinding;
@@ -180,8 +189,17 @@ export function touchCompletedConfirmationPolicy(
  *     policy below pairs it with `publishedThisContent`.
  *   - `cut_off`  → the aux grace timer won; the auxiliary's own wait never got
  *     to answer for itself.
+ *   - `deferred` (#1459) → the fan-out gate deferred this auxiliary's `didOpen`
+ *     resync, so it was never sent these bytes and is not waited on at all. Kept
+ *     distinct from `silent` deliberately: `silent` is the reserved signal for a
+ *     scanner that HAD the content and published nothing, which is the whole
+ *     subject of #1493 — recording a deferral there would corrupt it.
  */
-export type AuxiliaryWaitOutcome = "answered" | "silent" | "cut_off";
+export type AuxiliaryWaitOutcome =
+	| "answered"
+	| "silent"
+	| "cut_off"
+	| "deferred";
 
 /** One auxiliary's contribution to a touch, as {@link auxiliaryCoverageGap} reads it. */
 export interface AuxiliaryWaitEvidence {
@@ -203,6 +221,10 @@ export interface AuxiliaryWaitEvidence {
  * fact about coverage:
  *   - `cut_off` (#1470) — our grace timer ended the wait.
  *   - `silent` — the auxiliary's own budget lapsed with nothing published.
+ *   - `deferred` (#1459) — the fan-out gate never sent it these bytes.
+ * The rule is written as `outcome !== "answered"`, not as a list, so a new
+ * no-answer shape fails closed by default instead of needing to be remembered
+ * here — which is how `deferred` joined without touching this filter.
  * An auxiliary that never reported has told us nothing about the file, and
  * whether a SIBLING answered fast enough for the wait to settle early is
  * irrelevant to that. Before this policy, a silent auxiliary was a gap only by

@@ -11,6 +11,7 @@ import { resetDegradationLedger } from "./degradation-ledger.js";
 import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
+import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
 import {
@@ -1841,6 +1842,9 @@ export async function handleSessionStart(
 	// the tool for the rest of the process lifetime. Clear it here, same
 	// boundary as the other per-session caches on this line.
 	resetDispatchAvailabilityState();
+	// psscriptanalyzer's two latches are module-local, so the generation counter
+	// above does not reach them (#1490).
+	resetPsScriptAnalyzerAvailability();
 	// #1123 item 3: a fresh session can re-report smells that a prior session
 	// already surfaced once (see `checkSmellsAndNoteOnce`'s once-per-session gate).
 	resetSmellsSessionState();
