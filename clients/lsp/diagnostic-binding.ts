@@ -88,8 +88,9 @@ export interface DiagnosticBinding extends StoredDiagnosticBinding {
  * is present-and-true only for a genuinely unconfirmed collect (the notify write
  * and/or diagnostics wait lapsed its deadline). `confirmation` is present only when
  * this touch completed its configured diagnostics/confirmation policy — `"confirmed"`
- * for every spawned server, or (#1470) `"partial"` when an auxiliary's push wait was
- * cut off by the aux grace timer and `unconfirmedServerIds` names it. A partial touch
+ * for every spawned server, or `"partial"` when an auxiliary contributed no evidence —
+ * cut off by the aux grace timer (#1470) or silent inside its own budget (#1493) — and
+ * `unconfirmedServerIds` names it. A partial touch
  * is deliberately NOT `inconclusive`: the primary answered and its findings stand;
  * only the claim of full coverage is withdrawn. It is required
  * before treating an empty result from a known silent-on-clean server as clean, but is
@@ -115,10 +116,12 @@ export interface TouchFileResult {
 	confirmation?: "confirmed" | "partial";
 	inconclusive?: boolean;
 	/**
-	 * #1470: server ids this touch carries NO evidence for. Populated (and
-	 * `confirmation` narrowed to `"partial"`) when an auxiliary's push wait was
-	 * cut off by the aux grace timer — R8/#714's `auxCutOffServerIds`. Absent
-	 * when every spawned server got to answer for itself.
+	 * #1470/#1493: server ids this touch carries NO evidence for. Populated (and
+	 * `confirmation` narrowed to `"partial"`) for every auxiliary that never
+	 * reported — cut off by the aux grace timer (R8/#714's `auxCutOffServerIds`)
+	 * or silent through its own budget with no stored publication for this
+	 * content. See {@link auxiliaryCoverageGap}, which owns the rule. Absent when
+	 * every spawned server answered for itself.
 	 */
 	unconfirmedServerIds?: string[];
 	binding?: DiagnosticBinding;
@@ -157,6 +160,70 @@ export function touchCompletedConfirmationPolicy(
 	result: TouchFileResult | undefined,
 ): boolean {
 	return result?.confirmation !== undefined;
+}
+
+/**
+ * #1458: how an auxiliary's push wait ended for one touch, decided from
+ * EVIDENCE (did a publication land) rather than from how the raced promise
+ * settled. Recorded per auxiliary per touch on `lsp_aux_wait_outcome`.
+ *   - `answered` → a fresh publication landed for this touch. An EMPTY
+ *     publication counts: a scanner that ran and found nothing still bumps
+ *     `diagnosticsVersion`, which is what makes "clean" distinguishable from
+ *     "never spoke".
+ *   - `silent`   → the auxiliary's own wait gave up inside its own budget with
+ *     nothing published.
+ *   - `cut_off`  → the aux grace timer won; the auxiliary's own wait never got
+ *     to answer for itself.
+ */
+export type AuxiliaryWaitOutcome = "answered" | "silent" | "cut_off";
+
+/** One auxiliary's contribution to a touch, as {@link auxiliaryCoverageGap} reads it. */
+export interface AuxiliaryWaitEvidence {
+	serverId: string;
+	outcome: AuxiliaryWaitOutcome;
+	/**
+	 * #1493: independent proof this auxiliary already published for EXACTLY the
+	 * content this touch carries — a stored binding whose `contentHash` equals
+	 * the touch's content hash. Such an auxiliary has reported on this file's
+	 * current bytes, so its silence during this touch withholds nothing.
+	 * Absent/false → this touch has no publication of its own to point at.
+	 */
+	publishedThisContent?: boolean;
+}
+
+/**
+ * #1493: the single policy deciding which auxiliaries a touch carries NO
+ * evidence from. Both no-answer shapes belong here, because they are the same
+ * fact about coverage:
+ *   - `cut_off` (#1470) — our grace timer ended the wait.
+ *   - `silent` — the auxiliary's own budget lapsed with nothing published.
+ * An auxiliary that never reported has told us nothing about the file, and
+ * whether a SIBLING answered fast enough for the wait to settle early is
+ * irrelevant to that. Before this policy, a silent auxiliary was a gap only by
+ * accident: it burned the whole touch deadline when it was the only one, which
+ * tripped `diagnosticsTimedOut`. With a fast sibling the wait settled early and
+ * the silence went unrecorded, so the touch claimed an unqualified
+ * `"confirmed"` for a scanner that said nothing (#1493, the #1470 shape on the
+ * sibling outcome).
+ *
+ * NOT an overcorrection into demoting every clean file: `answered` is decided
+ * by a publication landing, not by findings existing, so an auxiliary that ran
+ * to budget and published an empty set is covered and its touch stays
+ * `"confirmed"`. `publishedThisContent` covers the second honest case — an
+ * auxiliary whose publication for these exact bytes is already stored (the
+ * touch's notify was debounce-skipped, or its late publication was carried in),
+ * which has reported even though nothing new landed during this wait.
+ */
+export function auxiliaryCoverageGap(
+	evidence: readonly AuxiliaryWaitEvidence[],
+): string[] {
+	return evidence
+		.filter(
+			(aux) =>
+				aux.outcome === "cut_off" ||
+				(aux.outcome === "silent" && aux.publishedThisContent !== true),
+		)
+		.map((aux) => aux.serverId);
 }
 
 /**
