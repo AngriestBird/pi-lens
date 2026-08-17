@@ -7,6 +7,7 @@ import {
 	getModuleSourceFiles,
 } from "./workspace-modules.js";
 import type {
+	CascadeMissingNodeDiagnostic,
 	ImpactCascadeResult,
 	ReviewGraph,
 	ReviewGraphEdge,
@@ -121,6 +122,50 @@ export function computeTransitiveImpact(
 	return { seedFile: normalized, hits, truncated: false, maxDepthReached };
 }
 
+/**
+ * #1550: evidence for a `missing_node` verdict — the node id sought and the
+ * nearest thing the graph actually held. Runs ONLY on the miss path (one pass
+ * over `fileNodes`, which the same call already consulted), so the hot path is
+ * untouched. Keys are compared as the graph keys them (`normalizeMapKey`), so a
+ * key-shape divergence shows up as "nearest is the same path" rather than
+ * hiding behind a bare "missing".
+ */
+function describeMissingNode(
+	graph: ReviewGraph,
+	normalizedFile: string,
+): CascadeMissingNodeDiagnostic {
+	const lastSlash = normalizedFile.lastIndexOf("/");
+	const dir = lastSlash === -1 ? "" : normalizedFile.slice(0, lastSlash);
+	const base = normalizedFile.slice(lastSlash + 1);
+	const stem = base.replace(/\.[^./]*$/, "");
+
+	let sameDirFileCount = 0;
+	let sameDirSibling: string | undefined;
+	let sameStemTwin: string | undefined;
+	for (const known of graph.fileNodes.keys()) {
+		const knownLastSlash = known.lastIndexOf("/");
+		const knownDir = knownLastSlash === -1 ? "" : known.slice(0, knownLastSlash);
+		const knownBase = known.slice(knownLastSlash + 1);
+		if (knownDir === dir) {
+			sameDirFileCount += 1;
+			sameDirSibling ??= known;
+			// A same-stem twin in the same directory is the strongest hint —
+			// an extension/compiled-twin resolution miss rather than an absent file.
+			if (sameStemTwin === undefined && knownBase.replace(/\.[^./]*$/, "") === stem) {
+				sameStemTwin = known;
+			}
+		}
+	}
+
+	return {
+		soughtNodeId: `file:${normalizedFile}`,
+		graphFileCount: graph.fileNodes.size,
+		symbolNodeCount: graph.symbolNodesByFile.get(normalizedFile)?.length ?? 0,
+		sameDirFileCount,
+		nearestFile: sameStemTwin ?? sameDirSibling,
+	};
+}
+
 export function computeImpactCascade(
 	graph: ReviewGraph,
 	changedFile: string,
@@ -164,7 +209,12 @@ export function computeImpactCascade(
 			directCallers: [],
 			neighborFiles: [],
 			riskFlags: [],
-			indeterminate: { reason: "missing_node" },
+			indeterminate: {
+				reason: "missing_node",
+				// #1550: the reason alone forced a manual re-derivation on every
+				// occurrence. Attach the evidence (log-only — see the type doc).
+				diagnostic: describeMissingNode(graph, normalizedFile),
+			},
 		};
 	}
 

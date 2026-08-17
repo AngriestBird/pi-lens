@@ -121,3 +121,64 @@ describe("missing_node cause disambiguation (#1445)", () => {
 		},
 	);
 });
+
+/**
+ * #1550: `missing_node` carried no evidence — the reason alone could not tell a
+ * cold/empty graph from a healthy graph that simply never admitted this file,
+ * so every occurrence needed a manual re-derivation. Attach what was SOUGHT and
+ * what was NEAREST, log-only, so the next occurrence is diagnosable from the
+ * record. Never agent-facing: the advisory keeps grouping on `detail`, and a
+ * per-file diagnostic string in there would fragment one bucket per file.
+ */
+describe("missing_node diagnostic evidence (#1550)", () => {
+	it("records the node sought and the nearest node found", async () => {
+		const env = makeEnv("pi-lens-missing-node-diagnostic-");
+		createTempFile(env.tmpDir, "widget.ts", "export const widget = 1;\n");
+		createTempFile(env.tmpDir, "helper.ts", "export const helper = 2;\n");
+
+		const facts = new FactStore();
+		const graph = await buildOrUpdateGraph(env.tmpDir, [], facts);
+		expect(graph.fileNodes.size).toBeGreaterThan(0);
+
+		// Same-directory sibling name that the graph does NOT know.
+		const missing = `${env.tmpDir.replace(/\\/g, "/")}/nowhere.ts`;
+		const impact = computeImpactCascade(graph, missing, env.tmpDir);
+		expect(impact.indeterminate?.reason).toBe("missing_node");
+
+		const diagnostic = impact.indeterminate?.diagnostic;
+		expect(diagnostic).toBeDefined();
+		// What was sought: the file node id, by the same key the graph is keyed on.
+		expect(diagnostic?.soughtNodeId).toBe(`file:${normalizeMapKey(missing)}`);
+		// Proof this is not a cold/empty graph: it knows other files, including
+		// siblings in the very directory the sought file lives in.
+		expect(diagnostic?.graphFileCount).toBe(graph.fileNodes.size);
+		expect(diagnostic?.sameDirFileCount).toBeGreaterThan(0);
+		expect(diagnostic?.nearestFile).toContain("/");
+		// No symbol nodes either — so this is an absent file, not a graph
+		// inconsistency (file node dropped while its symbols survived).
+		expect(diagnostic?.symbolNodeCount).toBe(0);
+	});
+
+	it("flags the file-node/symbol-node inconsistency distinctly", async () => {
+		const env = makeEnv("pi-lens-missing-node-inconsistent-");
+		const widget = createTempFile(
+			env.tmpDir,
+			"widget.ts",
+			["export function widget() {", "  return 1;", "}"].join("\n"),
+		);
+		const facts = new FactStore();
+		const graph = await buildOrUpdateGraph(env.tmpDir, [], facts);
+
+		const key = normalizeMapKey(widget);
+		expect(graph.symbolNodesByFile.get(key)?.length ?? 0).toBeGreaterThan(0);
+		// Simulate the shape that would otherwise be indistinguishable from an
+		// unknown file: symbols present, file node gone.
+		graph.fileNodes.delete(key);
+
+		const impact = computeImpactCascade(graph, widget, env.tmpDir);
+		expect(impact.indeterminate?.reason).toBe("missing_node");
+		expect(impact.indeterminate?.diagnostic?.symbolNodeCount).toBeGreaterThan(
+			0,
+		);
+	});
+});
