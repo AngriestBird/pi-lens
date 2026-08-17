@@ -18,8 +18,11 @@ import { safeSpawnAsync } from "./safe-spawn.js";
 import {
 	type AvailabilityCause,
 	type AvailabilityOutcome,
+	type ProbeEvidence,
 	classifyProbeFailure,
 	createAvailabilityLatch,
+	describeInstallAttempt,
+	describeProbeEvidence,
 	logAvailabilityDecision,
 	startHostStallSampler,
 } from "./dispatch/runners/utils/availability-policy.js";
@@ -36,14 +39,62 @@ export abstract class SecurityScanClient<TResult> {
 	 * back without a host restart.
 	 */
 	private readonly availabilityLatch = createAvailabilityLatch();
+
 	protected get available(): boolean | null {
 		return this.availabilityLatch.read();
 	}
 	protected set available(value: boolean | null) {
-		if (value === true) this.availabilityLatch.noteAvailable();
-		else if (value === false)
-			this.availabilityLatch.noteUnavailable("missing", "not-found");
-		else this.availabilityLatch.reset();
+		if (value === true) {
+			this.availabilityLatch.noteAvailable();
+			return;
+		}
+		if (value !== false) {
+			this.availabilityLatch.reset();
+			return;
+		}
+		this.availabilityLatch.noteUnavailable("missing", "not-found");
+		this.logDurableAbsence();
+	}
+
+	/**
+	 * Latch a durable absence WITH the facts behind it. Prefer this over
+	 * `available = false` wherever the call site knows what actually failed — a
+	 * `missing` row carrying `install: "failed"` is a retry candidate, one
+	 * carrying `install: "not-attempted"` is a policy decision, and a bare one is
+	 * a plain absence. Only the record can tell them apart.
+	 */
+	protected noteDurableAbsence(
+		evidence: ProbeEvidence,
+		options: { elapsedMs?: number } = {},
+	): void {
+		this.availabilityLatch.noteUnavailable("missing", "not-found");
+		this.logDurableAbsence(evidence, options.elapsedMs);
+	}
+
+	/**
+	 * One record per durable-absence ASSERTION, whether or not the call site had
+	 * evidence. Before this, `available = false` after a failed install was a
+	 * silent latch: the tool went quiet for the session with nothing in
+	 * latency.log to audit (#1500). Bounded — the verdict latches, so at most one
+	 * row per client per session.
+	 *
+	 * `elapsedMs` is whatever the caller measured (an install attempt's duration);
+	 * there is no probe here, so it is 0 unless the caller has something real.
+	 */
+	private logDurableAbsence(
+		evidence?: ProbeEvidence,
+		elapsedMs = 0,
+	): void {
+		logAvailabilityDecision({
+			tool: this.toolName,
+			verdict: "unavailable",
+			outcome: "missing",
+			cause: "not-found",
+			elapsedMs,
+			latched: true,
+			classifiedBy: "caller",
+			...(evidence !== undefined && { evidence }),
+		});
 	}
 
 	/** Outcome of the most recent `probeVersion` call. */
@@ -125,10 +176,14 @@ export abstract class SecurityScanClient<TResult> {
 				latched: true,
 				hostStallMs,
 				budgetMs: 5000,
+				classifiedBy: "probe",
+				evidence: describeProbeEvidence(probe),
 			});
 			return true;
 		}
-		const { outcome, cause } = classifyProbeFailure(probe, { hostStallMs });
+		const { outcome, cause, evidence } = classifyProbeFailure(probe, {
+			hostStallMs,
+		});
 		this.lastProbeOutcome = outcome;
 		// A transient verdict's record is incomplete without the retry schedule,
 		// and the schedule only exists once the latch owns the verdict — so the
@@ -148,6 +203,8 @@ export abstract class SecurityScanClient<TResult> {
 			hostStallMs,
 			...(retryAfterMs > 0 && { retryAfterMs }),
 			budgetMs: 5000,
+			classifiedBy: "probe",
+			evidence,
 		});
 		return false;
 	}
@@ -196,11 +253,32 @@ export abstract class SecurityScanClient<TResult> {
 			return false;
 		}
 		this.log(`${this.toolName} not found, attempting auto-install`);
-		const { ensureTool } = await import("./installer/index.js");
+		const { ensureTool, getInstallAttempt } = await import(
+			"./installer/index.js"
+		);
+		const installStartedAt = Date.now();
 		const installed = await ensureTool(this.toolName);
 		if (!installed) {
-			this.log(`${this.toolName} auto-install failed`);
-			this.available = false;
+			// #1500: this classification is ASSERTED, not derived. It is justified —
+			// the probe already classified a genuine absence, and a failed repair
+			// leaves the tool absent — but the install failure has no taxonomy of
+			// its own, so a network blip and a permanently unavailable release look
+			// identical from here. Record what happened rather than only the verdict.
+			//
+			// `ensureTool` answers the same empty result whether it TRIED and failed
+			// or declined to try (auto-install off, project trust denied), so the
+			// attempt is read from the reason it records rather than assumed — the
+			// review found `install: "failed"` being written for attempts that never
+			// happened.
+			const attempt = getInstallAttempt(this.toolName);
+			this.log(
+				attempt?.outcome === "failed"
+					? `${this.toolName} auto-install failed: ${attempt.reason ?? "unknown reason"}`
+					: `${this.toolName} auto-install did not run: ${attempt?.reason ?? "no attempt recorded"}`,
+			);
+			this.noteDurableAbsence(describeInstallAttempt(attempt), {
+				elapsedMs: Date.now() - installStartedAt,
+			});
 			return false;
 		}
 		this.binaryPath = installed;

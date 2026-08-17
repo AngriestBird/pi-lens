@@ -195,7 +195,7 @@ export async function checkToolAvailability(
 		}
 		// `missing` for anything unclassified preserves the pre-#1476 meaning of
 		// a non-zero exit: durable, cached for the session.
-		const { outcome, cause } = classifyProbeFailure(result, {
+		const { outcome, cause, evidence } = classifyProbeFailure(result, {
 			hostStallMs,
 			unclassifiedFailureOutcome: "missing",
 		});
@@ -220,6 +220,8 @@ export async function checkToolAvailability(
 			hostStallMs,
 			...(retryAfterMs !== undefined && { retryAfterMs }),
 			budgetMs: TOOL_PROBE_TIMEOUT_MS,
+			classifiedBy: "probe",
+			evidence,
 		});
 		return false;
 	} catch {

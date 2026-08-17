@@ -23,7 +23,9 @@ import {
 import {
 	type AvailabilityCause,
 	type AvailabilityOutcome,
+	type ProbeEvidence,
 	classifyProbeFailure,
+	describeInstallAttempt,
 	createAvailabilityLatch,
 	logAvailabilityDecision,
 	startHostStallSampler,
@@ -67,6 +69,8 @@ export class BiomeClient {
 	 */
 	private lastProbeElapsedMs = 0;
 	private lastProbeHostStallMs = 0;
+	/** Raw facts from the last probe, carried into the decision record (#1500). */
+	private lastProbeEvidence: ProbeEvidence | undefined;
 	// Per-cwd cache of the resolved biome binary. Keying by cwd matters in
 	// monorepos where different sub-packages each ship their own biome
 	// installation; sharing one slot across the whole client would cause
@@ -220,7 +224,7 @@ export class BiomeClient {
 		// `unclassifiedFailureOutcome: "missing"` preserves the pre-#1476
 		// meaning of a plain non-zero exit (npx reporting no biome package):
 		// still "missing", still installable. Only the timeout/abort arm changes.
-		const { outcome, cause } = classifyProbeFailure(result, {
+		const { outcome, cause, evidence } = classifyProbeFailure(result, {
 			hostStallMs,
 			unclassifiedFailureOutcome: "missing",
 		});
@@ -231,6 +235,7 @@ export class BiomeClient {
 		this.lastProbeCause = cause;
 		this.lastProbeElapsedMs = elapsedMs;
 		this.lastProbeHostStallMs = hostStallMs;
+		this.lastProbeEvidence = evidence;
 		// The record is emitted by `doEnsureAvailable`, once the latch has said how
 		// long this verdict holds.
 		return { outcome: failureOutcome };
@@ -272,6 +277,19 @@ export class BiomeClient {
 			resolved.outcome,
 			cause,
 		);
+		// `missing` IS the install-failure arm (#1500 review). `resolveManagedToolClient`
+		// only reaches the installer when the probe said `missing`, so every `missing`
+		// verdict here has already been through it — declined, suppressed, or tried
+		// and failed, which is what `describeInstallAttempt` separates. The earlier
+		// marker sat on the `non-installable` arm instead, and that arm cannot happen
+		// for biome at all: its `acceptInstalled` always accepts. So the one row that
+		// needed the fact was the one shipping without it.
+		let installEvidence: ProbeEvidence | undefined;
+		if (resolved.outcome === "missing") {
+			const { getInstallAttempt } = await import("./installer/index.js");
+			installEvidence = describeInstallAttempt(getInstallAttempt("biome"));
+		}
+		const evidence = { ...this.lastProbeEvidence, ...installEvidence };
 		logAvailabilityDecision({
 			tool: "biome",
 			verdict: "unavailable",
@@ -282,6 +300,14 @@ export class BiomeClient {
 			hostStallMs: this.lastProbeHostStallMs,
 			...(retryAfterMs > 0 && { retryAfterMs }),
 			budgetMs: PROBE_TIMEOUT_MS,
+			// Per arm: a probe-derived verdict says `probe`, while a verdict asserted
+			// by the install seam — or a cause that fell back because no probe ran —
+			// says `caller`.
+			classifiedBy:
+				this.lastProbeCause === null || resolved.outcome === "non-installable"
+					? "caller"
+					: "probe",
+			...(Object.keys(evidence).length > 0 && { evidence }),
 		});
 		if (resolved.outcome === "transient") {
 			this.log("biome availability probe timed out; will retry (not installing)");
