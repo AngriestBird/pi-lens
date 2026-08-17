@@ -66,6 +66,9 @@ vi.mock("../../clients/safe-spawn.js", () => ({
 
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
+	// #1500: the durable-absence arms read the installer's own attempt record, so
+	// an attempt that failed is distinguishable from one that never ran.
+	getInstallAttempt: vi.fn(() => undefined),
 	isSpawnableCommand: vi.fn(async () => true),
 	resetPathWalkMemo: vi.fn(),
 	getToolEnvironment: vi.fn(async () => ({})),

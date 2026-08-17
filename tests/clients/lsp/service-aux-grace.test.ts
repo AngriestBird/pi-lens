@@ -99,10 +99,26 @@ function makeDiagnostic(message: string) {
 function makeClient(
 	delayMs: number,
 	diags: ReturnType<typeof makeDiagnostic>[] = [],
-	options: { serverId?: string } = {},
+	options: {
+		serverId?: string;
+		/**
+		 * #1493: publish on settle even with an EMPTY diagnostics set — a scanner
+		 * that ran to budget and found nothing. Production bumps
+		 * `diagnosticsVersion` for that publish too (client.ts stores the empty
+		 * array like any other), which is what makes "clean" distinguishable from
+		 * "never spoke". Default false so the existing probes keep meaning "settled
+		 * without publishing".
+		 */
+		publishesWhenClean?: boolean;
+	} = {},
 ) {
 	let waitSettled = false;
 	let version = 0;
+	// #1531: production stamps the PATH each publication was stored for, and both
+	// the wait's freshness gate and the aux evidence check read that stamp. A
+	// single-file double can key every stamp off the one file it is touched with;
+	// `makePathAwareAuxClient` below models the multi-file case.
+	const stampsByPath = new Map<string, number>();
 	return {
 		isAlive: () => true,
 		shutdown: async () => {},
@@ -129,6 +145,9 @@ function makeClient(
 		get diagnosticsVersion() {
 			return version;
 		},
+		getDiagnosticsVersionForPath: vi.fn(
+			(filePath: string) => stampsByPath.get(filePath) ?? 0,
+		),
 		// Only returns diagnostics after waitForDiagnostics has resolved,
 		// matching real client behaviour (server pushes → client caches → wait resolves).
 		getDiagnostics: vi.fn(() => (waitSettled ? diags : [])),
@@ -138,15 +157,20 @@ function makeClient(
 			close: vi.fn(async () => {}),
 		},
 		waitForDiagnostics: vi.fn(
-			() =>
+			(filePath: string) =>
 				new Promise<void>((resolve) =>
 					setTimeout(() => {
 						waitSettled = true;
-						// A genuine publish (non-empty diags) is what advances the
-						// version on a real client; a silent/empty settle must not,
-						// or the evidence-based outcome check below can't tell the
-						// two apart.
-						if (diags.length > 0) version += 1;
+						// A genuine publish is what advances the version on a real
+						// client; a settle with NOTHING published must not, or the
+						// evidence-based outcome check below can't tell the two apart.
+						// #1493: an empty publish is still a publish — opt into it with
+						// `publishesWhenClean` to model a scanner that ran and found
+						// nothing.
+						if (diags.length > 0 || options.publishesWhenClean) {
+							version += 1;
+							stampsByPath.set(filePath, version);
+						}
 						resolve();
 					}, delayMs),
 				),
@@ -177,6 +201,49 @@ function makeLateBoundClient(content: string, serverId = "opengrep") {
 						published = true;
 						resolve();
 					}, 2500),
+				),
+		),
+	};
+}
+
+/**
+ * #1531: an auxiliary that models production's version bookkeeping faithfully.
+ * A real client keeps a per-client GLOBAL `diagnosticsVersion` that ANY path's
+ * publication advances, plus a per-path stamp recording the counter's value at
+ * that publication (`bumpDiagnosticsVersion` in client.ts). `publishesFor` is
+ * the set of files this scanner actually reports on; a touch of any other file
+ * settles its wait having published nothing for that file.
+ *
+ * The getter and `getDiagnosticsVersionForPath` are declared AFTER the spread on
+ * purpose: spreading `makeClient(...)` evaluates its `diagnosticsVersion` getter
+ * once and freezes the value, so the live readings must be redefined here.
+ */
+function makePathAwareAuxClient(
+	publishesFor: string[],
+	delayMs: number,
+	serverId = "opengrep",
+) {
+	let version = 0;
+	const stampsByPath = new Map<string, number>();
+	const publishable = new Set(publishesFor);
+	return {
+		...makeClient(delayMs, [], { serverId }),
+		get diagnosticsVersion() {
+			return version;
+		},
+		getDiagnosticsVersionForPath: vi.fn(
+			(filePath: string) => stampsByPath.get(filePath) ?? 0,
+		),
+		waitForDiagnostics: vi.fn(
+			(filePath: string) =>
+				new Promise<void>((resolve) =>
+					setTimeout(() => {
+						if (publishable.has(filePath)) {
+							version += 1;
+							stampsByPath.set(filePath, version);
+						}
+						resolve();
+					}, delayMs),
 				),
 		),
 	};
@@ -595,6 +662,61 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		expect(outcomes?.[0]?.outcome).not.toBe("settled");
 	});
 
+	// #1531: `diagnosticsVersion` is a per-CLIENT counter, so a publication for
+	// file A advances it for every file in flight on that client. The evidence
+	// check used to read it directly, which handed a concurrent touch of file B an
+	// `answered` row for a publication that never mentioned B — a false clean in
+	// exactly the field data used to reason about auxiliary health. Two files, one
+	// aux client, publication only for A: B's row must read `silent`.
+	it("does not read a sibling file's publication as an answer for this file", async () => {
+		const FILE_A = "C:/repo/a.ts";
+		const FILE_B = "C:/repo/b.ts";
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		// One primary and one auxiliary client, shared by both files (same root,
+		// same server ids) — which is what makes the counter shared.
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(100, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(makePathAwareAuxClient([FILE_A], 900));
+		await service.getClientsForFile(FILE_A);
+		await service.getClientsForFile(FILE_B);
+
+		const touchOptions = {
+			clientScope: "with-auxiliary" as const,
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document" as const,
+		};
+		const touchA = service.touchFile(FILE_A, "a", touchOptions);
+		const touchB = service.touchFile(FILE_B, "b", touchOptions);
+		await vi.advanceTimersByTimeAsync(2110);
+		await Promise.all([touchA, touchB]);
+
+		const rowFor = (suffix: string) => {
+			const call = logLatency.mock.calls.find(
+				([entry]) =>
+					entry.phase === "lsp_aux_wait_outcome" &&
+					String(entry.filePath).endsWith(suffix),
+			);
+			const outcomes = call?.[0]?.metadata?.outcomes as
+				| Array<{ serverId: string; outcome: string }>
+				| undefined;
+			return outcomes?.find((o) => o.serverId === "opengrep");
+		};
+
+		// The aux DID publish for A within its grace — A keeps its answer.
+		expect(rowFor("a.ts")?.outcome).toBe("answered");
+		// B's wait settled inside the grace too, but nothing was published for B.
+		// Pre-#1531 this read the global counter (advanced by A) and recorded
+		// "answered".
+		expect(rowFor("b.ts")?.outcome).not.toBe("answered");
+		expect(rowFor("b.ts")?.outcome).toBe("silent");
+	});
+
 	it("rejects a version-less late auxiliary publication (recordBinding fails closed, #1458 S7)", async () => {
 		const content = "const value = 1;";
 		const { LSPService } = await import("../../../clients/lsp/index.js");
@@ -850,25 +972,28 @@ describe("R8 — aux grace: raceToCompletion per-role unit tests", () => {
 });
 
 /**
- * #1470 — a cut-off auxiliary must not yield a conclusive touch.
+ * #1470/#1493 — an auxiliary that never reported must not yield a conclusive
+ * touch.
  *
  * The three-way probe the #1458 review used, promoted from telemetry into the
- * touch's own honesty state. What the touch CLAIMS in each case, as of this
- * change:
+ * touch's own honesty state. What the touch CLAIMS in each case:
  *
- *   - published within grace       → `confirmation: "confirmed"` (correct)
- *   - hung, grace timer wins       → `confirmation: "partial"` naming it (fixed here)
- *   - silent inside its own budget → `confirmation: "confirmed"` (STILL WRONG)
+ *   - published within grace       → `confirmation: "confirmed"` (#1470)
+ *   - hung, grace timer wins       → `confirmation: "partial"` naming it (#1470)
+ *   - silent inside its own budget → `confirmation: "partial"` naming it (#1493)
  *
- * The pre-fix defect this change closes: the hung case resolved
- * `confirmation: "confirmed"` with `inconclusive: undefined`, so a hung opengrep
- * read as confirmed-clean on the security lane.
+ * The defect #1470 closed: the hung case resolved `confirmation: "confirmed"`
+ * with `inconclusive: undefined`, so a hung opengrep read as confirmed-clean on
+ * the security lane. #1493 closed the same overclaim on the sibling outcome — a
+ * silent scanner carries exactly as little evidence as a hung one, and only its
+ * habit of burning the whole touch deadline when it was the ONLY auxiliary kept
+ * that honest. A fast sibling let the wait settle early and the silence went
+ * unrecorded.
  *
- * The third line is a KNOWN, SEPARATELY FILED GAP (#1493), not a claim of
- * correctness: a silent scanner carries exactly as little evidence as a hung one
- * and still reads as clean. It is the same #533 class in the same lane, neither
- * introduced nor closed by #1470, and the probe below pins today's wrong answer
- * so #1493's fix has to come through this file.
+ * Both narrowings run through the one `auxiliaryCoverageGap` policy in
+ * `diagnostic-binding.ts`. What keeps the signal alive is that `answered` is
+ * decided by a PUBLICATION landing, not by findings existing: a scanner that ran
+ * to budget and published an empty set is covered, and its touch stays clean.
  */
 describe("#1470 — cut-off auxiliary honesty", () => {
 	beforeEach(() => {
@@ -953,11 +1078,9 @@ describe("#1470 — cut-off auxiliary honesty", () => {
 	// default; zizmor (2000) never can, and ast-grep (1800) and typos (1500)
 	// cannot either.
 	//
-	// What those three do INSTEAD is NOT "read as inconclusive". A silent
-	// auxiliary that settles inside its own budget still yields
-	// `confirmation: "confirmed"` with no coverage caveat — the sibling probe
-	// below pins that, and it is the separately filed #1493. #1470 neither
-	// introduces nor closes it.
+	// What those three do INSTEAD is settle SILENTLY inside their own budget,
+	// which #1470 left reading as an unqualified confirmation and #1493 now
+	// narrows the same way — see the silent probes below.
 	//
 	// The cut-off boundary is a property of today's numbers, not of the code:
 	// `PI_LENS_AUX_GRACE_MS` moves the ceiling for every auxiliary, and any budget
@@ -995,29 +1118,224 @@ describe("#1470 — cut-off auxiliary honesty", () => {
 		},
 	);
 
-	it("KNOWN GAP (#1493): a SILENT auxiliary STILL reads as confirmed clean — #1470 narrows only cut_off", async () => {
+	it("#1493: a SILENT auxiliary narrows the confirmation and names the server", async () => {
 		// Aux settles at 900ms, inside its own budget, publishing nothing — the
 		// same silent-scanner shape #1458's evidence-based outcome test uses.
 		//
-		// This asserts what is TRUE TODAY, not what should be true. The touch
-		// resolves `confirmation: "confirmed"` with an empty `diags` and no
-		// `inconclusive` flag, so a scanner that said nothing at all reads as a
-		// clean bill of health — the #533 class, in the same lane, arriving through
-		// a different door than #1470's cut_off. It is NOT introduced by #1470 and
-		// NOT fixed by it; it is filed separately as #1493.
-		//
-		// The assertion #1470 actually owns is the last one: a silent aux must not
-		// acquire a cut_off coverage gap it did not earn. The confirmed/inconclusive
-		// assertions above it are a REGRESSION FENCE for #1493 — when that issue is
-		// fixed this test must fail, and the fix should rewrite it to assert the
-		// narrowed verdict rather than delete it.
+		// This test was #1470's regression fence, asserting the false clean
+		// (`confirmation: "confirmed"`, no `inconclusive`, empty `diags`) so #1493's
+		// fix had to come through this file. It now asserts the narrowed verdict: a
+		// scanner that said nothing carries exactly as little evidence as a cut-off
+		// one, so the touch withdraws its claim of that server's coverage.
 		const { result, outcome } = await probe(900, []);
 		expect(outcome).toBe("silent");
-		expect(result?.confirmation).toBe("confirmed"); // #1493: the false clean
-		expect(result?.inconclusive).toBeUndefined(); // #1493: not even flagged
+		expect(result?.confirmation).toBe("partial");
+		expect(result?.unconfirmedServerIds).toEqual(["opengrep"]);
+		// NARROWED, not collapsed — the primary answered at 800ms, so the touch
+		// keeps its findings and is not inconclusive (#533 cuts both ways).
+		expect(result?.inconclusive).toBeUndefined();
 		expect(result?.diags).toEqual([]);
-		// #1470's own contract: no cut_off gap was earned here.
+	});
+
+	it("#1493: an auxiliary that ran to budget and published nothing keeps the touch clean", async () => {
+		// The overcorrection guard the issue asks for. A scanner that ran and found
+		// nothing PUBLISHES an empty set, which advances `diagnosticsVersion` in
+		// production exactly like a finding does, so the evidence-based outcome is
+		// `answered` and the touch stays an unqualified clean bill of health. This
+		// is what keeps the fix above from demoting nearly every result.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(800, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(
+				makeClient(900, [], {
+					serverId: "opengrep",
+					publishesWhenClean: true,
+				}),
+			);
+		await service.getClientsForFile(FILE);
+
+		const touch = service.touchFile(FILE, "clean", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(3000);
+		const result = await touch;
+		const outcomes = logLatency.mock.calls.find(
+			([entry]) => entry.phase === "lsp_aux_wait_outcome",
+		)?.[0]?.metadata?.outcomes as Array<{ outcome: string }> | undefined;
+		expect(outcomes?.[0]?.outcome).toBe("answered");
+		expect(result?.confirmation).toBe("confirmed");
 		expect(result?.unconfirmedServerIds).toBeUndefined();
+		expect(result?.diags).toEqual([]);
+	});
+
+	it("#1493: a silent auxiliary is named even when a sibling answers fast", async () => {
+		// The reported shape. opengrep answers at 400ms, typos stays silent through
+		// its 1500ms budget. The aux `Promise.all` settles at ~1500ms — inside the
+		// 2500ms touch deadline — so `diagnosticsTimedOut` never fires and, before
+		// this fix, the fast sibling's answer let the touch resolve
+		// `{ confirmation: "confirmed", diags: [], inconclusive: undefined }` while
+		// typos had said nothing about the file. Only the silent server is named:
+		// the one that answered keeps its coverage.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+			makeAuxServer("typos"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(800, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(
+				makeClient(400, [makeDiagnostic("opengrep finding")], {
+					serverId: "opengrep",
+				}),
+			)
+			.mockResolvedValueOnce(makeClient(1500, [], { serverId: "typos" }));
+		await service.getClientsForFile(FILE);
+
+		const touch = service.touchFile(FILE, "two-aux", {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep", "typos"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(3000);
+		const result = await touch;
+		const outcomes = logLatency.mock.calls.find(
+			([entry]) => entry.phase === "lsp_aux_wait_outcome",
+		)?.[0]?.metadata?.outcomes as
+			| Array<{ serverId: string; outcome: string }>
+			| undefined;
+		expect(outcomes).toEqual([
+			expect.objectContaining({ serverId: "opengrep", outcome: "answered" }),
+			expect.objectContaining({ serverId: "typos", outcome: "silent" }),
+		]);
+		expect(result?.confirmation).toBe("partial");
+		expect(result?.unconfirmedServerIds).toEqual(["typos"]);
+		expect(result?.inconclusive).toBeUndefined();
+		// The answering sibling's finding still rides along.
+		expect(
+			(result?.diags ?? []).map((d: { message: string }) => d.message),
+		).toContain("opengrep finding");
+		// Observability contract: the join key is on the touch row.
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					confirmation: "partial",
+					auxUnconfirmedServerIds: ["typos"],
+				}),
+			}),
+		);
+	});
+
+	it("#1493: a silent auxiliary already bound to this content stays covered", async () => {
+		// The second honest case. This auxiliary published nothing during the wait,
+		// but a stored publication is bound to EXACTLY the bytes this touch carries
+		// — it has reported on this file's current content, so its silence withholds
+		// nothing and the touch keeps its unqualified confirmation.
+		const content = "already-scanned";
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(800, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce({
+				...makeClient(900, [], { serverId: "opengrep" }),
+				getDiagnosticBinding: vi.fn(() => ({
+					contentHash: hashDiagnosticContent(content),
+				})),
+				waitForDiagnostics: vi.fn(
+					() => new Promise<void>((resolve) => setTimeout(resolve, 900)),
+				),
+			});
+		await service.getClientsForFile(FILE);
+
+		const touch = service.touchFile(FILE, content, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(3000);
+		const result = await touch;
+		const outcomes = logLatency.mock.calls.find(
+			([entry]) => entry.phase === "lsp_aux_wait_outcome",
+		)?.[0]?.metadata?.outcomes as
+			| Array<{ outcome: string; publishedThisContent?: boolean }>
+			| undefined;
+		expect(outcomes?.[0]?.outcome).toBe("silent");
+		expect(outcomes?.[0]?.publishedThisContent).toBe(true);
+		expect(result?.confirmation).toBe("confirmed");
+		expect(result?.unconfirmedServerIds).toBeUndefined();
+	});
+
+	it("#1493: a CUT-OFF auxiliary already bound to this content stays covered", async () => {
+		// The same exemption on the other no-answer shape. This auxiliary's wait
+		// outlives the 2000ms ceiling, so the grace timer cuts it off — but a stored
+		// publication is bound to EXACTLY the bytes this touch carries, so it has
+		// already reported on this content and how the abandoned wait would have
+		// ended changes nothing. Exempting the silent shape but not this one would
+		// report identical coverage two ways depending on which timer won.
+		const content = "already-scanned-then-hung";
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(800, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce({
+				...makeClient(3000, [], { serverId: "opengrep" }),
+				getDiagnosticBinding: vi.fn(() => ({
+					contentHash: hashDiagnosticContent(content),
+				})),
+				waitForDiagnostics: vi.fn(
+					() => new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+				),
+			});
+		await service.getClientsForFile(FILE);
+
+		const touch = service.touchFile(FILE, content, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(4000);
+		const result = await touch;
+		const outcomes = logLatency.mock.calls.find(
+			([entry]) => entry.phase === "lsp_aux_wait_outcome",
+		)?.[0]?.metadata?.outcomes as
+			| Array<{ outcome: string; publishedThisContent?: boolean }>
+			| undefined;
+		expect(outcomes?.[0]?.outcome).toBe("cut_off");
+		expect(outcomes?.[0]?.publishedThisContent).toBe(true);
+		expect(result?.confirmation).toBe("confirmed");
+		expect(result?.unconfirmedServerIds).toBeUndefined();
+		// The cut-off record itself is unchanged — the latency field still reports
+		// which auxiliary the timer cut off, whatever the coverage verdict was.
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					auxCutOffServerIds: ["opengrep"],
+					confirmation: "confirmed",
+				}),
+			}),
+		);
 	});
 
 	it("an auxiliary that PUBLISHES within grace still yields an unqualified confirmation", async () => {
@@ -1083,5 +1401,582 @@ describe("#1470 — cut-off auxiliary honesty", () => {
 		expect(
 			service.getLastKnownDiagnostics(FILE, hashDiagnosticContent(content)),
 		).toBeUndefined();
+	});
+});
+
+/**
+ * #1533 — the same honesty on `clientScope: "all"`, the batch/directory scan
+ * surface.
+ *
+ * `"all"` spawns auxiliaries into the client set (#573) but never enters the aux
+ * GRACE wait, so before this fix no evidence was derived on that scope: a silent
+ * scanner resolved `confirmation: "confirmed"` with no `unconfirmedServerIds`,
+ * the exact #1493 false clean surviving one scope over. #1527 fixed only the
+ * per-file lane, per its scope.
+ *
+ * The fix derives the outcomes from POST-WAIT state rather than entering a second
+ * wait — every auxiliary is already waited on inside the aggregate
+ * `Promise.all`, so the evidence is free and #1459's fan-out saving is untouched.
+ * `cut_off` cannot arise here (no ceiling is armed), so the rows carry
+ * `waitShape: "aggregate"` and the three remaining shapes.
+ *
+ * These probes are the regression fence: on pre-fix code every `"partial"`
+ * assertion below reads `"confirmed"` and no `lsp_aux_wait_outcome` row exists at
+ * all.
+ */
+describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		logLatency.mockReset();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	/**
+	 * One `clientScope: "all"` touch over a primary that answers at 100ms and one
+	 * auxiliary whose own wait settles at `auxDelayMs`. Returns the touch result
+	 * plus the aux-wait row it produced, so each probe can assert the telemetry and
+	 * the claimed confirmation agree — the same shape the with-auxiliary `probe`
+	 * above uses.
+	 */
+	async function probeAll(
+		auxDelayMs: number,
+		auxDiags: ReturnType<typeof makeDiagnostic>[],
+		auxOptions: { publishesWhenClean?: boolean } = {},
+	) {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(
+			async (options: { serverId?: string }) =>
+				options?.serverId === "opengrep"
+					? makeClient(auxDelayMs, auxDiags, {
+							serverId: "opengrep",
+							...auxOptions,
+						})
+					: makeClient(100, [makeDiagnostic("primary error")], {
+							serverId: "ts-primary",
+						}),
+		);
+
+		const touch = service.touchFile(FILE, "probe-all", {
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		// Covers opengrep's full 3500ms declared budget plus slack.
+		await vi.advanceTimersByTimeAsync(5000);
+		const result = await touch;
+		const row = logLatency.mock.calls.find(
+			([entry]) => entry.phase === "lsp_aux_wait_outcome",
+		)?.[0];
+		const outcomes = row?.metadata?.outcomes as
+			| Array<{ serverId: string; outcome: string; publishedThisContent?: boolean }>
+			| undefined;
+		return { result, row, outcomes, outcome: outcomes?.[0]?.outcome };
+	}
+
+	it("a SILENT auxiliary narrows the confirmation and names the server", async () => {
+		// The reported defect, verbatim: aux settles at 900ms inside its own budget
+		// having published nothing, and the touch used to claim "confirmed" with
+		// empty `unconfirmedServerIds`.
+		const { result, outcome } = await probeAll(900, []);
+		expect(outcome).toBe("silent");
+		expect(result?.confirmation).toBe("partial");
+		expect(result?.unconfirmedServerIds).toEqual(["opengrep"]);
+		// NARROWED, not collapsed: the primary answered at 100ms, so its findings
+		// stand and the touch is not inconclusive (#533 cuts both ways).
+		expect(result?.inconclusive).toBeUndefined();
+		expect(
+			(result?.diags ?? []).map((d: { message: string }) => d.message),
+		).toContain("primary error");
+	});
+
+	it("emits an lsp_aux_wait_outcome row for the \"all\" scope, tagged as the aggregate producer", async () => {
+		// The issue's observability criterion: the field-data analysis from #1493's
+		// review must cover this lane too, and a query must be able to tell the two
+		// producers apart.
+		const { row, outcomes } = await probeAll(900, []);
+		expect(row).toBeDefined();
+		expect(row?.metadata).toMatchObject({
+			clientScope: "all",
+			waitShape: "aggregate",
+		});
+		expect(outcomes).toEqual([
+			expect.objectContaining({
+				serverId: "opengrep",
+				outcome: "silent",
+				publishedThisContent: false,
+			}),
+		]);
+		// No grace ceiling is armed on this path, so the row must never claim one won.
+		expect(outcomes?.some((entry) => entry.outcome === "cut_off")).toBe(false);
+	});
+
+	it("records the narrowed verdict on the same lsp_touch_file row", async () => {
+		await probeAll(900, []);
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					clientScope: "all",
+					confirmation: "partial",
+					auxUnconfirmedServerIds: ["opengrep"],
+					inconclusive: false,
+				}),
+			}),
+		);
+	});
+
+	it("an auxiliary that ran to budget and published nothing keeps the touch clean", async () => {
+		// The overcorrection guard, mirrored from the with-auxiliary lane: an empty
+		// PUBLICATION advances `diagnosticsVersion` in production exactly like a
+		// finding does, so the scanner is covered and the touch stays unqualified.
+		// Without this the fix would demote nearly every clean sweep file.
+		const { result, outcome } = await probeAll(900, [], {
+			publishesWhenClean: true,
+		});
+		expect(outcome).toBe("answered");
+		expect(result?.confirmation).toBe("confirmed");
+		expect(result?.unconfirmedServerIds).toBeUndefined();
+	});
+
+	it("an auxiliary that publishes findings keeps the touch clean and merges them", async () => {
+		const { result, outcome } = await probeAll(900, [
+			makeDiagnostic("aux finding"),
+		]);
+		expect(outcome).toBe("answered");
+		expect(result?.confirmation).toBe("confirmed");
+		expect(
+			(result?.diags ?? []).map((d: { message: string }) => d.message),
+		).toContain("aux finding");
+	});
+
+	it("a silent auxiliary already bound to this content stays covered", async () => {
+		// #1493's content-hash exemption must apply on this scope for the same
+		// reason it applies on the other: a scanner whose stored publication is bound
+		// to EXACTLY these bytes has reported, so a wait producing nothing new
+		// withholds nothing. Fails closed only against a hash match, never a timer.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const content = "bound-all";
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep"
+				? {
+						...makeClient(900, [], { serverId: "opengrep" }),
+						getDiagnosticBinding: vi.fn(() => ({
+							contentHash: hashDiagnosticContent(content),
+							boundToCurrentDisk: true,
+						})),
+					}
+				: makeClient(100, [], { serverId: "ts-primary" }),
+		);
+
+		const touch = service.touchFile(FILE, content, {
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(5000);
+		const result = await touch;
+		const outcomes = logLatency.mock.calls.find(
+			([entry]) => entry.phase === "lsp_aux_wait_outcome",
+		)?.[0]?.metadata?.outcomes as
+			| Array<{ outcome: string; publishedThisContent?: boolean }>
+			| undefined;
+		// Still recorded as silent — the exemption is in the coverage POLICY, not in
+		// the outcome, so the row keeps saying what actually happened.
+		expect(outcomes?.[0]?.outcome).toBe("silent");
+		expect(outcomes?.[0]?.publishedThisContent).toBe(true);
+		expect(result?.confirmation).toBe("confirmed");
+		expect(result?.unconfirmedServerIds).toBeUndefined();
+	});
+
+	it("does not report an EXCLUDED scanner as a coverage gap", async () => {
+		// The #584 workspace-sweep exclusion is a routing decision, not a blackout:
+		// opengrep's sweep findings come from its own CLI extractor. An excluded
+		// server never reaches `spawned`, so it must not be named here — otherwise
+		// every sweep file would report a permanent gap for a scanner nobody asked.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep"
+				? makeClient(900, [], { serverId: "opengrep" })
+				: makeClient(100, [], { serverId: "ts-primary" }),
+		);
+
+		const touch = service.touchFile(FILE, "excluded", {
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+			excludeServerIds: new Set(["opengrep"]),
+		});
+		await vi.advanceTimersByTimeAsync(5000);
+		const result = await touch;
+		expect(result?.confirmation).toBe("confirmed");
+		expect(result?.unconfirmedServerIds).toBeUndefined();
+		// No auxiliary was spawned, so there is nothing to report an outcome for.
+		expect(
+			logLatency.mock.calls.some(
+				([entry]) => entry.phase === "lsp_aux_wait_outcome",
+			),
+		).toBe(false);
+	});
+
+	it("a DEFERRED auxiliary records `deferred`, never `silent`, on this scope too", async () => {
+		// #1459's boundary, pinned on the aggregate producer: `silent` is reserved for
+		// a scanner that HAD the content and published nothing. A scanner the resync
+		// gate never sent these bytes must not occupy that row — the reviewer verified
+		// this behavior by hand, so it gets a test.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "100";
+		try {
+			// One shared aux client whose write is held far past any budget, so the
+			// SECOND concurrent touch can only be deferred behind it.
+			const auxClient = {
+				...makeClient(9000, [], { serverId: "opengrep" }),
+				notify: {
+					open: vi.fn(() => new Promise<void>(() => {})),
+					change: vi.fn(async () => {}),
+					close: vi.fn(async () => {}),
+				},
+			};
+			getServersForFileWithConfig.mockReturnValue([
+				makePrimaryServer("ts-primary"),
+				makeAuxServer("opengrep"),
+			]);
+			createLSPClient.mockImplementation(
+				async (options: { serverId?: string }) =>
+					options?.serverId === "opengrep"
+						? auxClient
+						: makeClient(100, [], { serverId: "ts-primary" }),
+			);
+
+			const touchOptions = {
+				clientScope: "all" as const,
+				collectDiagnostics: true,
+				diagnostics: "document" as const,
+			};
+			const first = service.touchFile("C:/repo/a.ts", "one", touchOptions);
+			await vi.advanceTimersByTimeAsync(1);
+			const second = service.touchFile("C:/repo/b.ts", "two", touchOptions);
+			await vi.advanceTimersByTimeAsync(20_000);
+			await Promise.all([first, second]);
+
+			const outcomes = logLatency.mock.calls
+				.map(([entry]) => entry)
+				.filter((entry) => entry?.phase === "lsp_aux_wait_outcome")
+				.flatMap(
+					(entry) =>
+						(
+							entry.metadata as {
+								outcomes?: Array<{ serverId: string; outcome: string }>;
+							}
+						)?.outcomes ?? [],
+				)
+				.filter((entry) => entry.serverId === "opengrep")
+				.map((entry) => entry.outcome);
+			expect(outcomes).toContain("deferred");
+			// Every row came from the aggregate producer, and no deferral was laundered
+			// into the reserved `silent` row.
+			expect(
+				logLatency.mock.calls
+					.map(([entry]) => entry)
+					.filter((entry) => entry?.phase === "lsp_aux_wait_outcome")
+					.every(
+						(entry) =>
+							(entry.metadata as { waitShape?: string })?.waitShape ===
+							"aggregate",
+					),
+			).toBe(true);
+		} finally {
+			delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+		}
+	});
+
+	// BLAST-RADIUS PINS (#1533 review). The highest-frequency `"all"` caller is the
+	// cascade per-edit neighbour fan-out, which caps the touch at 1000/2000ms and
+	// does NOT exclude opengrep. The concern raised was that newly-`silent` verdicts
+	// there would block `neighborTouchCache`/`recentlyCleanNeighborCache` seeding via
+	// `isConfirmedTouch`.
+	//
+	// The answer has TWO cases, and stating only the first would be the same
+	// impossibility-proof overreach #1533 was filed about. The dividing question is
+	// whether the auxiliary's budget is the MAX over waited servers, because
+	// `perServerTimeout` is `min(callerCap, strategyWait)` per server while
+	// `timeoutMs` is the max across them:
+	//
+	//   1. AUX IS THE MAX (this test). opengrep declares 3500, above either per-edit
+	//      cap, so `timeoutFor(opengrep) = callerCap = timeoutMs`. An opengrep that
+	//      burns its budget therefore trips `diagnosticsTimedOut`, and the touch was
+	//      ALREADY `inconclusive` before #1533 — `inconclusive` is decided BEFORE
+	//      `coverageGap` in the result branch, so the wrapper those callers read is
+	//      byte-identical. Delete the #1533 block and this test still passes; that is
+	//      the point. This covers every auxiliary on every current per-edit path,
+	//      because opengrep is the only one attached there and its budget always
+	//      exceeds the cap.
+	//
+	//   2. AUX IS NOT THE MAX (the test after this one). A faster auxiliary beside a
+	//      slower primary — typos (1500) or ast-grep (1800) next to rust-analyzer
+	//      (3000) under a 2000ms cap — settles inside `timeoutMs`, so
+	//      `waitedMs + 20 >= timeoutMs` never trips and the touch is NOT
+	//      inconclusive. Here #1533 genuinely DOES narrow a result that previously
+	//      read `confirmed`. That is the fix working as intended: the scanner said
+	//      nothing about these bytes, so the verdict is honest and fail-safe (the
+	//      primary's findings still ride along in `.diags`; only the coverage claim
+	//      is withdrawn). The cost is a cache seed skipped for that file, bounded by
+	//      how often a fast auxiliary is paired with a slower primary on a collecting
+	//      `"all"` touch.
+	it("case 1 — a per-edit-shaped touch whose aux budget IS the max stays inconclusive, not newly partial", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep"
+				? makeClient(5000, [], { serverId: "opengrep" })
+				: makeClient(100, [], { serverId: "ts-primary" }),
+		);
+
+		const touch = service.touchFile(FILE, "per-edit", {
+			// The cascade neighbour fan-out's own shape (integration.ts).
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+			maxClientWaitMs: 1000,
+			silent: true,
+			source: "cascade",
+		});
+		await vi.advanceTimersByTimeAsync(6000);
+		const result = await touch;
+		// The pre-existing verdict, unchanged: the aggregate deadline lapsed.
+		expect(result?.inconclusive).toBe(true);
+		// And #1533 did not convert it into a confirmation claim of any kind, which is
+		// what `isConfirmedTouch` reads.
+		expect(result?.confirmation).toBeUndefined();
+	});
+
+	it("case 2 — a fast silent aux beside a SLOWER primary does newly narrow, and should", async () => {
+		// The counter-case to the test above, and the honest half of the blast radius.
+		// rust-analyzer declares 3000 and typos 1500, so under a 2000ms cap:
+		//   timeoutFor(rust-analyzer) = min(2000, 3000) = 2000
+		//   timeoutFor(typos)         = min(2000, 1500) = 1500
+		//   timeoutMs                 = max(2000, 1500) = 2000
+		// The primary answers at 800ms and typos settles silently at 1500ms, so the
+		// wait ends at 1500 — comfortably inside `timeoutMs`, which is why
+		// `diagnosticsTimedOut` does NOT trip and the pre-#1533 result was a clean
+		// `confirmed`. Post-#1533 it is `partial` naming typos, because typos published
+		// nothing about these bytes.
+		//
+		// Asserting the budgets alongside the verdict keeps the arithmetic above from
+		// silently drifting if a strategy number changes — the whole point of this pin
+		// is the INEQUALITY (aux budget < timeoutMs), not the specific milliseconds.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const file = "C:/repo/main.rs";
+		const primaryClient = makeClient(800, [makeDiagnostic("borrow error")], {
+			serverId: "rust-analyzer",
+		});
+		const auxClient = makeClient(1500, [], { serverId: "typos" });
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("rust-analyzer", ".rs"),
+			makeAuxServer("typos", ".rs"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "typos" ? auxClient : primaryClient,
+		);
+
+		const touch = service.touchFile(file, "fn main() {}", {
+			// The cascade neighbour fan-out's own shape, non-cold-snapshot lane.
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+			maxClientWaitMs: 2000,
+			silent: true,
+			source: "cascade",
+		});
+		await vi.advanceTimersByTimeAsync(4000);
+		const result = await touch;
+
+		// The inequality that puts this touch in case 2 rather than case 1.
+		expect(auxClient.waitForDiagnostics).toHaveBeenCalledWith(
+			file,
+			1500,
+			expect.anything(),
+		);
+		expect(primaryClient.waitForDiagnostics).toHaveBeenCalledWith(
+			file,
+			2000,
+			expect.anything(),
+		);
+		// NOT inconclusive — this is what makes the narrowing new rather than a
+		// relabelling of an already-unconfirmed touch.
+		expect(result?.inconclusive).toBeUndefined();
+		// The new verdict: honest about typos, and the primary's finding survives.
+		expect(result?.confirmation).toBe("partial");
+		expect(result?.unconfirmedServerIds).toEqual(["typos"]);
+		expect(
+			(result?.diags ?? []).map((d: { message: string }) => d.message),
+		).toContain("borrow error");
+	});
+
+	// #1531, now CLOSED and live rather than pending. The client-global
+	// `diagnosticsVersion` advances for every file a client publishes, so two
+	// CONCURRENT touches sharing one auxiliary client used to cross-satisfy: a
+	// publication for a.ts advanced the counter b.ts's baseline was compared against,
+	// and b.ts read `answered` on its sibling's evidence. The cascade neighbour
+	// fan-out is a `Promise.allSettled`, so that is the common shape, not a corner.
+	//
+	// #1531 landed the per-path publication stamp on master while #1533 was in
+	// review, and the aggregate evidence read uses the same `readPathVersion`
+	// accessor, so this is now a live regression fence for BOTH producers on that
+	// axis. It was authored as a skipped pin of the desired behavior; it is unskipped
+	// because the behavior arrived. If it ever goes red, the aggregate path has
+	// drifted back to the global counter.
+	it("#1531: a concurrent sibling's publication must not cover a silent touch", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		// Built from the shape that demonstrably exhibited the gap before #1531 landed
+		// (verified by probe: both touches resolved `confirmed`, both rows read
+		// `answered`, though only a.ts was ever published for). Deliberately NOT
+		// assembled from `makeClient` above — a spread of that double changed the
+		// outcome for an unrelated reason and made this pin pass without exercising the
+		// counter at all, the vacuous-fixture trap (defect shape 7) this test is about.
+		//
+		// The double advances BOTH axes on a publication, exactly as `client.ts` does:
+		// the global counter (which a.ts's publication bumps for the whole client) and
+		// the per-path stamp (recorded for a.ts only). That pairing is what makes the
+		// assertion meaningful — a read on the global axis sees a.ts's bump from b.ts
+		// and calls it covered; the per-path read does not.
+		let version = 0;
+		const stampsByPath = new Map<string, number>();
+		const shared = {
+			isAlive: () => true,
+			shutdown: async () => {},
+			getWorkspaceDiagnosticsSupport: () => ({
+				advertised: false,
+				mode: "push-only" as const,
+				diagnosticProviderKind: "none",
+			}),
+			getOperationSupport: () => ({}),
+			getDiagnostics: vi.fn(() => []),
+			notify: {
+				open: vi.fn(async () => {}),
+				change: vi.fn(async () => {}),
+				close: vi.fn(async () => {}),
+			},
+		};
+		// ONE aux client shared by both files, publishing for a.ts only.
+		const auxClient = {
+			...shared,
+			serverId: "opengrep",
+			get diagnosticsVersion() {
+				return version;
+			},
+			getDiagnosticsVersionForPath: vi.fn(
+				(filePath: string) => stampsByPath.get(filePath) ?? 0,
+			),
+			waitForDiagnostics: vi.fn(
+				(filePath: string) =>
+					new Promise<void>((resolve) =>
+						setTimeout(() => {
+							// a.ts publishes: the client-global counter advances (it is
+							// client-wide, so b.ts sees this bump too) but only a.ts's path
+							// stamp records it. b.ts publishes nothing on either axis.
+							if (filePath.endsWith("a.ts")) {
+								version += 1;
+								stampsByPath.set(filePath, version);
+							}
+							resolve();
+						}, 900),
+					),
+			),
+		};
+		const primaryClient = {
+			...shared,
+			serverId: "ts-primary",
+			diagnosticsVersion: 0,
+			getDiagnosticsVersionForPath: vi.fn(() => 0),
+			waitForDiagnostics: vi.fn(
+				() => new Promise<void>((resolve) => setTimeout(resolve, 100)),
+			),
+		};
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep" ? auxClient : primaryClient,
+		);
+
+		const touchOptions = {
+			clientScope: "all" as const,
+			collectDiagnostics: true,
+			diagnostics: "document" as const,
+		};
+		const a = service.touchFile("C:/repo/a.ts", "one", touchOptions);
+		const b = service.touchFile("C:/repo/b.ts", "two", touchOptions);
+		await vi.advanceTimersByTimeAsync(5000);
+		const [, second] = await Promise.all([a, b]);
+		// b.ts got no publication of its own. Post-#1544's per-path counter that is
+		// visible; today a.ts's bump satisfies b.ts's baseline and this reads
+		// `confirmed` with no named server.
+		expect(second?.confirmation).toBe("partial");
+		expect(second?.unconfirmedServerIds).toEqual(["opengrep"]);
+	});
+
+	it("does not enter a second wait: the touch still completes on the aggregate budget", async () => {
+		// The cost guard. #1459's resync gate absorbs the aux fan-out of an
+		// "all"-scope sweep; a per-neighbour aux grace here would pay that latency
+		// back. The evidence is derived from state the aggregate wait already
+		// produced, so a silent aux must not extend the touch beyond its own budget.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep"
+				? makeClient(900, [], { serverId: "opengrep" })
+				: makeClient(100, [], { serverId: "ts-primary" }),
+		);
+
+		const startedAt = Date.now();
+		const touch = service.touchFile(FILE, "cost", {
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		let settledAt: number | undefined;
+		void touch.then(() => {
+			settledAt = Date.now();
+		});
+		await vi.advanceTimersByTimeAsync(5000);
+		await touch;
+		// The aux's own wait settled at 900ms; nothing was armed after it.
+		expect((settledAt ?? Number.POSITIVE_INFINITY) - startedAt).toBeLessThan(
+			1500,
+		);
 	});
 });

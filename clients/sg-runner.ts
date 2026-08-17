@@ -18,7 +18,9 @@ import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync, type SpawnResult } from "./safe-spawn.js";
 import {
 	type AvailabilityCause,
+	type ProbeEvidence,
 	classifyProbeFailure,
+	describeInstallAttempt,
 	createAvailabilityLatch,
 	logAvailabilityDecision,
 	startHostStallSampler,
@@ -346,7 +348,22 @@ export class SgRunner {
 				this.sweepFallbackCause,
 			);
 		}
-		return this.noteUnavailable(startedAt, "missing", "not-found");
+		// #1500: ASSERTED, not derived — and justified, because every candidate
+		// probe answered "not found", so the absence is real. What the install did
+		// is recorded as evidence rather than folded into the verdict: it is the one
+		// fact separating "never installable here" from "the download failed", and
+		// from "no install was attempted at all" (auto-install off, trust denied,
+		// or an attempt already suppressed this session).
+		const { getInstallAttempt } = await import("./installer/index.js");
+		return this.noteUnavailable(
+			startedAt,
+			"missing",
+			"not-found",
+			describeInstallAttempt(getInstallAttempt("ast-grep"), {
+				installedButRejected: installed.outcome === "non-installable",
+			}),
+			"caller",
+		);
 	}
 
 	/** Record a successful sweep: available, latched, one decision record. */
@@ -376,6 +393,15 @@ export class SgRunner {
 		startedAt: number,
 		outcome: "missing" | "transient",
 		cause: AvailabilityCause,
+		evidence?: ProbeEvidence,
+		/**
+		 * How this arm reached its verdict. Per arm on purpose (#1500 review): the
+		 * sweep's own transient/missing conclusions ARE derived from candidate
+		 * probes, but the post-install assertion is not, and hardcoding `"probe"`
+		 * here labelled an assertion as a derivation — the exact confusion the
+		 * field was added to remove.
+		 */
+		classifiedBy: "probe" | "caller" = "probe",
 	): false {
 		const retryAfterMs = this.availabilityLatch.noteUnavailable(outcome, cause);
 		logAvailabilityDecision({
@@ -388,6 +414,8 @@ export class SgRunner {
 			hostStallMs: this.sweepHostStallMs,
 			...(retryAfterMs > 0 && { retryAfterMs }),
 			budgetMs: PROBE_TIMEOUT_MS,
+			classifiedBy,
+			...(evidence !== undefined && { evidence }),
 		});
 		return false;
 	}

@@ -44,13 +44,149 @@ export type AvailabilityCause =
 	| "host-stall"
 	| "probe-rejected"
 	| "bad-cwd"
-	| "policy-denied";
+	| "policy-denied"
+	| "empty-result";
+
+/**
+ * What the spawn ACTUALLY returned, carried beside the verdict derived from it
+ * (#1500).
+ *
+ * Migrating a tool to this policy makes its storage correct and says nothing
+ * about its classification. A call site can hand the latch `("missing",
+ * "not-found")` for a failure that was really transient, and the resulting row
+ * is a well-formed `missing` verdict — indistinguishable from a genuine
+ * absence. That defect is deliberately ungated (a lint that flags every literal
+ * classification would fire on every correct post-ENOENT write), so the record
+ * carries the raw facts instead: a reader can audit the derivation rather than
+ * trust it.
+ */
+export interface ProbeEvidence {
+	/**
+	 * The command this evidence DESCRIBES, when it is not the tool the row is
+	 * about. govulncheck's install path probes `go`, and a row that carries go's
+	 * errno under `tool: "govulncheck"` invites the exact misreading this field
+	 * exists to prevent (#1500 review).
+	 */
+	command?: string;
+	/** Exit status the probe returned; `null` when it never exited. */
+	status?: number | null;
+	/** `safeSpawnAsync`'s structured failure reason. */
+	failure?: string;
+	/** Typed spawn-boundary failure kind. */
+	spawnFailureKind?: string;
+	/**
+	 * `error.code` from the spawn's Error, when there was one — Node's errno
+	 * STRING (`"ENOENT"`, `"EACCES"`, `"UNKNOWN"`), never the numeric errno. Named
+	 * `errno` because that is what a log reader greps for; the type is the
+	 * contract.
+	 */
+	errno?: string;
+	/**
+	 * A repair was attempted after the probe, and how it went.
+	 *
+	 * `not-attempted` is its own value on purpose: an installer that declines
+	 * (auto-install off, trust denied, attempt already suppressed) returns the
+	 * same empty result as one that tried and failed, and writing `failed` for
+	 * both fabricates an attempt that never happened.
+	 */
+	install?: "succeeded" | "failed" | "not-attempted";
+	/**
+	 * Bounded (200 char) reason the installer gave, verbatim.
+	 *
+	 * Deliberately FREE TEXT, not a taxonomy: it is read by humans debugging one
+	 * host, and every attempt to enumerate installer failure modes ages worse than
+	 * the strings themselves. `install` is the field to branch on; this one is the
+	 * field to read. If a consumer ever needs to branch on the reason, that is the
+	 * signal to promote the specific case into `install` rather than to parse this.
+	 */
+	installReason?: string;
+}
+
+/**
+ * Read the evidence off a spawn result, dropping keys it does not carry.
+ *
+ * `command` is worth passing whenever the spawn is NOT the tool the decision is
+ * about — a preflight, a fallback candidate, an interpreter.
+ */
+export function describeProbeEvidence(
+	result: ProbeFailureShape,
+	command?: string,
+): ProbeEvidence {
+	const errno = (result.error as NodeJS.ErrnoException | undefined)?.code;
+	return {
+		...(command !== undefined && { command }),
+		...(result.status !== undefined && { status: result.status }),
+		...(result.failure !== undefined && { failure: result.failure }),
+		...(result.spawnFailure?.kind !== undefined && {
+			spawnFailureKind: result.spawnFailure.kind,
+		}),
+		...(errno !== undefined && { errno }),
+	};
+}
+
+/** The installer's own record of what its last attempt did. */
+export interface InstallAttemptFact {
+	outcome: "succeeded" | "failed" | "declined" | "skipped";
+	reason?: string;
+}
+
+/**
+ * Evidence for an install attempt, from what the installer EXPLICITLY recorded.
+ *
+ * The first version of this inferred attempt-ness from the installer's failure
+ * REASON map, and a review proved that inverts the answer in both directions:
+ * that map is written by the kill-switch and install-lock branches and by
+ * nothing on the genuine-failure or success paths, so a policy decline read as a
+ * failed download and every real download failure — the retry candidate this
+ * evidence exists to surface — read as a policy decision. `getInstallAttempt`
+ * now records the outcome at each branch that knows it, and this maps it.
+ *
+ * `declined` and `skipped` both collapse to `not-attempted`, because that is the
+ * distinction a reader acts on; which of the two it was survives in `reason`.
+ *
+ * The fact is passed in rather than fetched here, so the policy module stays
+ * free of the installer graph.
+ */
+export function describeInstallAttempt(
+	attempt: InstallAttemptFact | undefined,
+	options: { installedButRejected?: boolean } = {},
+): ProbeEvidence {
+	const reason = attempt?.reason?.slice(0, 200);
+	if (options.installedButRejected) {
+		// The install ran and produced a binary the caller then refused. Claiming
+		// `failed` would blame the download for a validation verdict.
+		return {
+			install: "succeeded",
+			installReason: reason ?? "installed binary failed validation",
+		};
+	}
+	if (attempt === undefined) return { install: "not-attempted" };
+	switch (attempt.outcome) {
+		case "succeeded":
+			return { install: "succeeded", ...(reason && { installReason: reason }) };
+		case "failed":
+			return { install: "failed", ...(reason && { installReason: reason }) };
+		default:
+			return {
+				install: "not-attempted",
+				...(reason && { installReason: reason }),
+			};
+	}
+}
 
 export interface AvailabilityDecision {
 	tool: string;
 	verdict: "available" | "unavailable";
 	outcome: AvailabilityOutcome;
 	cause: AvailabilityCause;
+	/**
+	 * How the outcome/cause was reached. `probe` means `classifyProbeFailure`
+	 * derived it from `evidence`; `caller` means the call site asserted it. A
+	 * `caller` row is the one a reviewer has to justify (#1500).
+	 */
+	classifiedBy?: "probe" | "caller";
+	/** The raw spawn facts the verdict was derived FROM. */
+	evidence?: ProbeEvidence;
 	/** Wall time the probe took, ms. 0 for fast paths and cached decisions. */
 	elapsedMs: number;
 	/** True when this verdict is remembered until the next session reset. */
@@ -93,11 +229,20 @@ export function isLatchingOutcome(outcome: AvailabilityOutcome): boolean {
 export function transientRetryDelayMs(
 	attempts: number,
 	cause: AvailabilityCause,
+	/**
+	 * Override for `TRANSIENT_MAX_COOLDOWN_MS`. A caller whose own respawn
+	 * cadence is shorter than the shared 5-minute ceiling (e.g. an LSP auxiliary
+	 * whose idle reset recycles the process well before the ladder maxes out)
+	 * must cap its own ladder below that cadence — otherwise a respawn can land
+	 * inside a still-cooling-down cache window and start silently offline
+	 * (#1535).
+	 */
+	maxCooldownMs: number = TRANSIENT_MAX_COOLDOWN_MS,
 ): number {
 	if (cause === "host-stall") return HOST_STALL_COOLDOWN_MS;
 	const exponent = Math.max(0, attempts - 1);
 	return Math.min(
-		TRANSIENT_MAX_COOLDOWN_MS,
+		maxCooldownMs,
 		TRANSIENT_BASE_COOLDOWN_MS * 2 ** Math.min(exponent, 10),
 	);
 }
@@ -141,6 +286,8 @@ export interface ProbeFailureShape {
 export interface ClassifyOptions {
 	/** Host stall observed during the probe window, ms. */
 	hostStallMs?: number;
+	/** The command that was spawned, recorded on the returned evidence. */
+	command?: string;
 	/** Compatibility for legacy probes whose test doubles carry no failure kind. */
 	unclassifiedFailureOutcome?: AvailabilityOutcome;
 }
@@ -158,10 +305,16 @@ export interface ClassifyOptions {
 export function classifyProbeFailure(
 	result: ProbeFailureShape,
 	options: ClassifyOptions = {},
-): { outcome: AvailabilityOutcome; cause: AvailabilityCause } {
+): {
+	outcome: AvailabilityOutcome;
+	cause: AvailabilityCause;
+	/** The facts this verdict was derived from, for the decision record (#1500). */
+	evidence: ProbeEvidence;
+} {
+	const evidence = describeProbeEvidence(result, options.command);
 	const errorCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
 	if (result.spawnFailure?.kind === "tool-not-found") {
-		return { outcome: "missing", cause: "not-found" };
+		return { outcome: "missing", cause: "not-found", evidence };
 	}
 	if (
 		result.failure === "timeout" ||
@@ -176,6 +329,7 @@ export function classifyProbeFailure(
 		return {
 			outcome: "transient",
 			cause: stalled ? "host-stall" : "probe-timeout",
+			evidence,
 		};
 	}
 	// A present command that rejects its version probe (or an EACCES/EINVAL/
@@ -184,6 +338,7 @@ export function classifyProbeFailure(
 	return {
 		outcome,
 		cause: outcome === "missing" ? "not-found" : "probe-rejected",
+		evidence,
 	};
 }
 
@@ -254,7 +409,19 @@ export interface AvailabilityLatch {
 	getRetryAtMs(): number;
 }
 
-export function createAvailabilityLatch(): AvailabilityLatch {
+export interface AvailabilityLatchOptions {
+	/**
+	 * Cap on the transient cooldown ladder, ms. Defaults to the shared
+	 * `TRANSIENT_MAX_COOLDOWN_MS` (5 min). Pass a lower value when this latch's
+	 * own process respawns on a shorter cadence, so the ladder can never
+	 * outlive it (see `transientRetryDelayMs`'s `maxCooldownMs` doc, #1535).
+	 */
+	maxCooldownMs?: number;
+}
+
+export function createAvailabilityLatch(
+	options: AvailabilityLatchOptions = {},
+): AvailabilityLatch {
 	let available: boolean | null = null;
 	let outcome: AvailabilityOutcome | null = null;
 	let cause: AvailabilityCause | null = null;
@@ -262,6 +429,7 @@ export function createAvailabilityLatch(): AvailabilityLatch {
 	let transientAttempts = 0;
 	let installAttempts = 0;
 	let installExhausted = false;
+	const maxCooldownMs = options.maxCooldownMs ?? TRANSIENT_MAX_COOLDOWN_MS;
 
 	return {
 		read(): boolean | null {
@@ -306,7 +474,11 @@ export function createAvailabilityLatch(): AvailabilityLatch {
 				return installDelay;
 			}
 			transientAttempts += 1;
-			const delay = transientRetryDelayMs(transientAttempts, nextCause);
+			const delay = transientRetryDelayMs(
+				transientAttempts,
+				nextCause,
+				maxCooldownMs,
+			);
 			retryAtMs = Date.now() + delay;
 			return delay;
 		},
@@ -368,6 +540,12 @@ export function describeUnavailability(options: {
  *
  * Bounded by construction: the seam probes each tool at most once per cwd per
  * session generation, plus once per expired transient cooldown.
+ *
+ * Exception: a consumer whose own respawn cadence can be shorter than its
+ * cooldown ladder may deliberately ALSO log on a still-cooling cache hit, so
+ * a respawn landing inside that window isn't silently unobservable — see
+ * `clients/zizmor-config.ts`'s `resolveZizmorGitHubToken` (#1535). That is an
+ * opt-in per caller, not a change to this function's own bound.
  */
 export function logAvailabilityDecision(
 	decision: AvailabilityDecision,
@@ -384,6 +562,12 @@ export function logAvailabilityDecision(
 			outcome: decision.outcome,
 			cause: decision.cause,
 			latched: decision.latched,
+			...(decision.classifiedBy !== undefined && {
+				classifiedBy: decision.classifiedBy,
+			}),
+			// The raw facts sit beside the verdict they produced, so a `missing` row
+			// can be read as justified or not without re-running anything (#1500).
+			...(decision.evidence !== undefined && { evidence: decision.evidence }),
 			...(decision.hostStallMs !== undefined && {
 				hostStallMs: decision.hostStallMs,
 			}),

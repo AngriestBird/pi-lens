@@ -12,11 +12,13 @@
  * one. A verification round invented twelve shapes it does not catch — accessor
  * pairs, WeakMap and symbol-keyed stores, cross-module probe helpers, spawn
  * behind a constructor-assigned indirection, string-union verdicts — and three
- * of those are already idiomatic in this repo. Five known unrouted sites are
- * invisible to it today: `createCwdCachedProbe` with its eslint, credo and
- * rust-clippy consumers (#1494), `formatters.ts` (#1495) and
- * `package-manager.ts` (#1496); the last two memoize a resolved PATH rather than
- * a boolean verdict, so the verdict-shape rule cannot reach them at all.
+ * of those are already idiomatic in this repo. Five sites it could not see are
+ * now migrated — `createCwdCachedProbe` with its eslint, credo and rust-clippy
+ * consumers (#1494), `formatters.ts` (#1495), `package-manager.ts` (#1496) —
+ * and the last two are STILL invisible to it, which is the clearest statement of
+ * the limit: they probe with `which <command>`, so there is no version flag for
+ * the pre-filter to find. A fix the gate cannot see is also a regression the gate
+ * cannot catch, and that residual is tracked in #1499.
  *
  * The first version of this gate was regexes and a review broke it seven ways in
  * one sitting. Treating a gate as proof is how that happened; every widening
@@ -69,16 +71,18 @@ const repoRoot = path.resolve(
  * Hand-rolled latches that predate this gate. Each is a real instance of the
  * shape, filed for its own fix; none may grow without a review noticing.
  */
-const KNOWN_GAPS: ReadonlyArray<{ id: string; why: string }> = [
-	{
-		id: "clients/pipeline.ts::tryEslintFix",
-		why: "`_eslintCache` latches an eslint --version verdict per cwd+PATH. Filed as #1494. Note this baseline covers ONLY this unit — `createCwdCachedProbe`'s eslint/credo/rust-clippy consumers are unrouted too but the gate does not detect them, so their absence here is a blind spot, not a clean bill.",
-	},
-];
+const KNOWN_GAPS: ReadonlyArray<{ id: string; why: string }> = [];
 
 /** Every consumer the #1467/#1476 sweeps migrated; the scan must still see them. */
 const KNOWN_CONSUMERS = [
 	"clients/biome-client.ts::BiomeClient",
+	// The three `createCwdCachedProbe` consumers #1494 migrated. They are visible
+	// to the scan only because the helper is now a recognised policy factory: the
+	// verdict they park is a handle it built, so de-routing one flags here.
+	"clients/dispatch/runners/credo.ts::probeCredo",
+	"clients/dispatch/runners/eslint.ts::getEslintProbe",
+	"clients/dispatch/runners/rust-clippy.ts::refreshClippyProbe",
+	"clients/pipeline.ts::tryEslintFix",
 	"clients/dead-code-client.ts::PythonDeadCodeClient",
 	"clients/dependency-checker.ts::DependencyChecker",
 	"clients/dispatch/dispatcher.ts::checkToolAvailability",
@@ -223,6 +227,35 @@ const EVASIONS: ReadonlyArray<{ name: string; source: string }> = [
 				async ensureAvailable(): Promise<boolean> {
 					return this.availability.isAvailable();
 				}
+			}
+		`,
+	},
+	{
+		// The #1494 review probe. Routing propagates along the call edge a unit
+		// inherits its probe from, and the first version of that let a hand-rolled
+		// latch launder itself: park a permanent `Promise<boolean>` per cwd, hand
+		// the spawn to the ROUTED factory, and the unit read as routed while its
+		// own memo still latched a timeout for the life of the process. A memo that
+		// holds a boolean verdict never inherits its helper's routing.
+		name: "a hand-rolled boolean latch that delegates its spawn to a routed helper",
+		source: `
+			import { createCwdCachedProbe } from "./dispatch/runners/utils/runner-helpers.js";
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			function makeToolProbe(cmd: string) {
+				return createCwdCachedProbe(
+					(cwd) => safeSpawnAsync(cmd, ["--version"], { timeout: 5000, cwd }),
+					{ tool: "newtool" },
+				);
+			}
+			const toolAvailableByCwd = new Map<string, Promise<boolean>>();
+			export function getToolProbe(cmd: string) {
+				return (cwd: string) => {
+					const hit = toolAvailableByCwd.get(cwd);
+					if (hit) return hit;
+					const probed = makeToolProbe(cmd)(cwd);
+					toolAvailableByCwd.set(cwd, probed);
+					return probed;
+				};
 			}
 		`,
 	},

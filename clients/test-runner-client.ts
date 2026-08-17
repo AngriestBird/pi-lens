@@ -1750,8 +1750,17 @@ export class TestRunnerClient {
 		const lower = output.toLowerCase();
 
 		let passed = 0;
-		let failed = exitCode === 0 ? 0 : 1;
+		// #1487: NOT `exitCode === 0 ? 0 : 1`. Pre-seeding `failed` to 1 on a
+		// non-zero exit made the runner-error branch below unreachable — it
+		// requires `failed === 0`, which a spawn/config/load failure (no
+		// counts to parse) could never reach once this had already claimed
+		// the slot. `matched` tracks whether a count parser actually found
+		// real counts; the exit-code-distrust fallback further down uses it
+		// to tell "a runner that never ran" from "a runner whose summary
+		// legitimately parsed to zero failures".
+		let failed = 0;
 		let skipped = 0;
+		let matched = false;
 		// #1480: `number | undefined`, and sourced per runner. This used to be
 		// `let duration = 0` with only go's probe able to move it, so every
 		// other runner reported a zero it never measured.
@@ -1764,6 +1773,7 @@ export class TestRunnerClient {
 			passed = Number.parseInt(cargoSummary[1], 10);
 			failed = Number.parseInt(cargoSummary[2], 10);
 			skipped = Number.parseInt(cargoSummary[3], 10);
+			matched = true;
 		}
 
 		const dotnetSummary = output.match(
@@ -1773,6 +1783,7 @@ export class TestRunnerClient {
 			failed = Number.parseInt(dotnetSummary[1], 10);
 			passed = Number.parseInt(dotnetSummary[2], 10);
 			skipped = Number.parseInt(dotnetSummary[3], 10);
+			matched = true;
 		}
 
 		// #1480 (adjacent, duration-independent): surefire prints one
@@ -1816,6 +1827,7 @@ export class TestRunnerClient {
 			failed = mavenFailed;
 			skipped = mavenSkipped;
 			passed = Math.max(0, total - failed - skipped);
+			matched = true;
 		}
 
 		const rspecSummary = output.match(
@@ -1825,6 +1837,7 @@ export class TestRunnerClient {
 			const total = Number.parseInt(rspecSummary[1], 10);
 			failed = Number.parseInt(rspecSummary[2], 10);
 			passed = Math.max(0, total - failed);
+			matched = true;
 		}
 
 		const minitestSummary = output.match(
@@ -1836,6 +1849,7 @@ export class TestRunnerClient {
 			const errors = Number.parseInt(minitestSummary[3], 10);
 			failed = failures + errors;
 			passed = Math.max(0, total - failed);
+			matched = true;
 		}
 
 		const gradleSummary = output.match(
@@ -1845,15 +1859,144 @@ export class TestRunnerClient {
 			const total = Number.parseInt(gradleSummary[1], 10);
 			failed = Number.parseInt(gradleSummary[2], 10);
 			passed = Math.max(0, total - failed);
+			matched = true;
 		}
 
-		// Captured BEFORE the guard below, which rewrites `failed` out of the
-		// state this condition reads. Without this the runner-error string
-		// silently became unreachable.
+		// #1487/#1524/#1524-r3: `--- FAIL: TestName` is extracted first and
+		// separately from the other two name patterns, because it is the
+		// ONLY one of the three that is unambiguous evidence a real go test
+		// ran — see the `runnerError` comment below for why the other two
+		// may no longer veto on their own. go otherwise has no count parser
+		// at all (only a duration probe), so without this go's `matched`
+		// stayed false even on a real failure.
+		//
+		// #1524-r3: go ALSO gets a real count parser here, not just a name
+		// extractor. A panic inside `TestMain`/package `init` (exit 2) never
+		// prints a `--- FAIL:` line — there is no test to name, the process
+		// died before any test ran — so `goFailNames` alone left `matched`
+		// false and such a panic hit the same runner-error branch as a
+		// spawn failure, even though `go test` DID run and DID fail. `FAIL
+		// \t<pkg>` is go's own per-package verdict line and is printed for
+		// exactly this case; `ok  <pkg>  <n>s` is its pass counterpart.
+		// Package-line counts, like the go duration probe above, take the
+		// FIRST package summary only — the same known limit already
+		// documented on `parseGenericRunnerDuration`.
+		const goFailNames = [
+			...output.matchAll(/--- FAIL:[^\S\n]+([^\s(]+)/g),
+		];
+		// #1524-r4: only COUNT unparented failures. go prints a `--- FAIL:`
+		// line for every level of a failing subtest tree — `TestA` AND
+		// `TestA/sub` each get their own line for what is really one
+		// underlying failure — so counting every line inflated `failed`
+		// (two lines here read as two failures for one broken test). A name
+		// containing "/" whose prefix up to that "/" is itself in the list
+		// is a subtest of an already-counted parent; only names that are
+		// NOT such a subtest count. `goFailNames` itself (all lines) is
+		// still what decides `matched`/the runner-error veto below and
+		// what's listed in `failures` — subtest names are still useful
+		// detail there, just not double-counted.
+		const goFailNameSet = new Set(goFailNames.map((m) => m[1].trim()));
+		const goTopLevelFailCount = goFailNames.filter((m) => {
+			const name = m[1].trim();
+			const slash = name.indexOf("/");
+			return slash === -1 || !goFailNameSet.has(name.slice(0, slash));
+		}).length;
+		if (runner === "go") {
+			// #1524-r4: `(?![^\n]*\[(?:build|setup) failed\])` rejects go's
+			// INFRASTRUCTURE verdict lines — `FAIL <pkg> [build failed]` (a
+			// compile error) and `FAIL <pkg> [setup failed]` (no packages to
+			// test) — which matched the same shape as a real `FAIL <pkg>
+			// <duration>` test verdict line. Neither ran a single test; both
+			// were rendering as `✗ 1/1 failed ✗ go failure` instead of the
+			// runner error they are.
+			const goFailPackage =
+				/^FAIL(?![^\n]*\[(?:build|setup) failed\])[^\S\n]+\S+/m.test(
+					output,
+				);
+			const goOkPackages = [
+				...output.matchAll(/^ok[^\S\n]+\S+[^\S\n]+[\d.]+s/gm),
+			];
+			if (goFailNames.length > 0 || goFailPackage) {
+				failed = Math.max(failed, goTopLevelFailCount || 1);
+				matched = true;
+			}
+			// #1524-r4: unconditional, not `else if`. A multi-package run
+			// can have BOTH a real failure and packages that passed clean —
+			// `ok a` / `--- FAIL: TestB` / `ok c` is 2 passed AND 1 failed,
+			// not "1 failed, 0 passed" with the green packages silently
+			// dropped because the fail branch above already ran.
+			if (goOkPackages.length > 0) {
+				passed = Math.max(passed, goOkPackages.length);
+				matched = true;
+			}
+		}
+
+		// #1524-r3: anchored to line START (`^`), and `[^\S\n]` (horizontal
+		// whitespace only) in place of `\s` between the keyword and the
+		// name. The prior `\bFAILED\s+([^\n]+)` and `Failure:\s+([^\n]+)`
+		// let their OWN `\s+` gap cross the newline: a bare `FAILED` at the
+		// end of a line has nothing after it on that line, so `\s+` ate the
+		// newline itself and `([^\n]+)` captured the FIRST TOKEN OF THE
+		// NEXT LINE as the "test name" — proven on a gradle compile failure
+		// (`> Task :compileJava FAILED` followed by
+		// `FAILURE: Build failed with an exception.`, which then rendered
+		// as the invented failure name) and the newline-spanning shape in
+		// general (`FAILED\n\nsome trailing note` → name "some trailing
+		// note"). Requiring `(\S.*)$` on the SAME line makes a keyword with
+		// nothing following it on that line simply not match, rather than
+		// reaching across for content that was never the name.
+		const failures: TestFailure[] = [];
+		for (const m of goFailNames.slice(0, 5)) {
+			failures.push({ name: m[1].trim(), message: m[1].trim() });
+		}
+		const otherNames = [
+			...output.matchAll(/^[^\S\n]*FAILED[^\S\n]+(\S.*)$/gm),
+			...output.matchAll(/^[^\S\n]*Failure:[^\S\n]+(\S.*)$/gm),
+		];
+		for (const m of otherNames) {
+			if (failures.length >= 5) break;
+			failures.push({ name: m[1].trim(), message: m[1].trim() });
+		}
+
+		// #1487: gated on `!matched`, not on `failed === 0`. A non-zero exit
+		// with NO count parser match — a spawn/config/load failure, nothing
+		// ran — is infrastructure, not a test verdict: report it as a runner
+		// error. A non-zero exit a count parser DID match (even to a
+		// legitimate `failed === 0`, e.g. a green last module of a red
+		// reactor) is a real run that produced real counts, so it is never a
+		// runner error, and the exit-code-distrust guard below still forces
+		// at least one failure so it can't render as PASS.
+		//
+		// #1524-r3: the veto is `goFailNames.length === 0`, NOT
+		// `failures.length === 0`. Only `--- FAIL:` is a marker a test
+		// runner emits SPECIFICALLY for a failed test; `FAILED`/`Failure:`
+		// are generic words a build tool prints for reasons that have
+		// nothing to do with a test — a gradle task failing to compile, a
+		// maven goal failing before surefire ever runs, an rspec file that
+		// never loaded. Letting those two veto the runner-error branch on
+		// their own reintroduced #1487's exact symptom for the commonest
+		// gradle/maven/rspec failure shapes (proven: `[ERROR] Failed to
+		// execute goal ... FAILED` and rspec's `Failure: cannot load such
+		// file` both rendered as a fabricated test failure instead of the
+		// runner error they actually are). They still label a name onto
+		// `failures` above when `matched` or `goFailNames` already settled
+		// the question some other way, but they no longer settle it alone.
 		const runnerError =
-			exitCode !== 0 && failed === 0 && lower.includes("error")
+			exitCode !== 0 && !matched && goFailNames.length === 0 && lower.includes("error")
 				? `Runner ${runner} exited with ${exitCode}`
 				: undefined;
+
+		// #1524-r4 (tidy): a runner-error result reports through
+		// `formatResult`'s runner-error branch, not the failed-tests
+		// branch, so any name `otherNames` picked up before this was
+		// decided (e.g. a same-line `Failure: cannot load such file`)
+		// would sit in `failures` unused but visible to anything reading
+		// the raw `TestResult` — an error result with a non-empty
+		// `failures` list is a self-contradiction. Clear it here so the
+		// result is one or the other, never both.
+		if (runnerError) {
+			failures.length = 0;
+		}
 
 		// #1480 (adjacent): a non-zero exit is the runner saying the run
 		// failed. Every count parser above can legitimately arrive at
@@ -1861,8 +2004,11 @@ export class TestRunnerClient {
 		// module of a red reactor build, a failure outside any test — and the
 		// turn-end log would then print PASS over a build the runner rejected.
 		// Trust the exit code: no parse of the text may talk it out of at least
-		// one failure.
-		if (exitCode !== 0 && failed === 0) {
+		// one failure. Skipped when `runnerError` is set — that case already
+		// reports through `formatResult`'s runner-error branch, which requires
+		// `passed === 0 && failed === 0` to stay reachable, and forcing
+		// `failed` to 1 here would make it unreachable again (#1487).
+		if (exitCode !== 0 && failed === 0 && !runnerError) {
 			failed = 1;
 		}
 
@@ -1870,15 +2016,6 @@ export class TestRunnerClient {
 			passed = 1;
 		}
 
-		const failures: TestFailure[] = [];
-		const names = [
-			...output.matchAll(/--- FAIL:\s+([^\s(]+)/g),
-			...output.matchAll(/\bFAILED\s+([^\n]+)/g),
-			...output.matchAll(/Failure:\s+([^\n]+)/g),
-		];
-		for (const m of names.slice(0, 5)) {
-			failures.push({ name: m[1].trim(), message: m[1].trim() });
-		}
 		if (failures.length === 0 && failed > 0) {
 			const firstLine =
 				output
@@ -1888,6 +2025,12 @@ export class TestRunnerClient {
 					.slice(0, 300) || `Tests failed for runner ${runner}`;
 			failures.push({ name: `${runner} failure`, message: firstLine });
 		}
+
+		this.log(
+			runnerError
+				? `Generic runner ${runner}: never started (${runnerError})`
+				: `Generic runner ${runner}: ran (matched=${matched}, passed=${passed}, failed=${failed}, failures=${failures.length})`,
+		);
 
 		return {
 			file: testFile,

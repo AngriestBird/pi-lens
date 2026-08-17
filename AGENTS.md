@@ -60,8 +60,18 @@ client cache. Carry them into that read only when their stored SHA-256 content
 binding matches the touch content exactly. Unknown or changed-content bindings
 never replay. (#1458)
 
-Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row.
-Its per-server outcomes record answered, silent, or cut-off — decided from
+Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row, on
+both producers: the `with-auxiliary` grace wait (`waitShape: "aux_grace"`) and,
+since #1533, the `clientScope: "all"` aggregate wait (`waitShape: "aggregate"`),
+which derives the same evidence from post-wait state without arming a grace of
+its own. Read `waitShape` before comparing rows — `cut_off` cannot arise on the
+aggregate path, and its `durationMs` covers the WHOLE diagnostics wait rather
+than just the post-primary aux phase, so the same auxiliary reports a
+systematically larger number there.
+Its per-server outcomes record answered, silent, cut-off, or (#1459) deferred —
+a deferred scanner was never sent the content, so it must never occupy the
+`silent` row, which is reserved for one that had the content and published
+nothing. Outcomes are decided from
 EVIDENCE (whether the client's `diagnosticsVersion` advanced past the
 pre-notify baseline), never from whether the raced wait promise settled,
 because `waitForDiagnostics` resolves on its own timeout and never rejects, so
@@ -71,6 +81,36 @@ outcome is corroborated against the diagnostics cache. This phase's
 siblings), but it stays excluded from last-phase stall attribution because it
 is a post-hoc record of a wait that already ran inside the touch's own phase,
 not the stall itself. (#1458)
+
+An auxiliary scanner gets at most ONE outstanding `didOpen` resync at a time.
+A `clientScope: "all"` sweep fans a full re-scan at every neighbour inside a few
+milliseconds, so an unbounded fan-out stalls the scanner's stdin and walks the
+#743 notify-write breaker open. The gate is a QUEUE, not a drop: a healthy
+scanner accepts each write in milliseconds, so every file still gets scanned,
+and only a scanner that cannot accept a write inside the budget makes a waiter
+give up. A write that lands after its deadline but inside the wedge window
+retracts the timeout it was charged for (slow is not broken); one nothing
+accepts for the whole wedge window keeps its strike and demotes the server, so
+the gate cannot defer a dead input path forever. A DEFERRED server is neither
+waited on nor read from — its version cannot advance, so waiting only burns its
+budget and would flip the touch to `inconclusive`, and its diagnostics cache
+still holds the previous content's findings because the resync that would have
+cleared it never ran. The screen when you add an auxiliary: if its per-file scan
+can exceed the notify-write budget, a whole-tree sweep will break it — and its
+silence reads as CLEAN unless the touch names it. A scanner that never attached
+(breaker open) or never received the content (deferred resync) belongs in
+`unconfirmedServerIds`, exactly like a cut-off or silent auxiliary, and the gap
+must reach the AGENT-facing surface too
+(`CascadeNeighborResult.unconfirmedServerIds` and the cascade formatter), not
+only the result wrapper. One `lsp_scanner_coverage_gap` row per touch records it.
+#1493's content-hash exemption outranks a deferral: a scanner whose STORED
+publication is bound to exactly these bytes has reported on this file, so the
+skipped resync withholds nothing — it stays covered, and its stored findings
+must still reach `.diags` through the carried-auxiliary path. Both breaker-skip
+and deferral open BEFORE any wait, so `auxiliaryCoverageGap` (which reads wait
+outcomes) cannot see them on the `clientScope: "all"` sweep path, which emits no
+outcome rows at all — they are unioned into `unconfirmedServerIds` separately.
+(#1459)
 
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
@@ -186,7 +226,7 @@ preserved as `cause`. (#1214)
 - **Design the state space before coding.** For stateful, ordered, resource-mutating, or security-sensitive work, write the invariants, supported transitions, explicit deferrals, and a cross-product test matrix before implementation. Examples are not enough: cover operation order, preview/apply, validation/normalization/execution seams, failure atomicity, observability bounds, and OS/path/encoding axes. If adversarial review finds repeated cross-product defects, stop patching one symptom at a time and return to the model.
 - **Concurrency tests wait on the right clock.** Use `tests/clients/interleaving-kit.ts` for suspension and polling: every suspension belongs in `try/finally` with `release()` plus `restore()`, and waits on worker-thread or child-process progress must use the wall-time default. A custom tick yield is only valid for progress guaranteed to occur on the current event loop. Prefer a suspended call's `completed` promise over draining unrelated global work, and reset in-memory mirrors before asserting on durable disk state.
 - **Preserve the model in handoffs.** Every issue or PR should name the defect/capability class, separate in-scope acceptance criteria from explicit non-goals, state invariants and failure semantics, and enumerate relevant test dimensions. A PR must say which existing seams it extends, how it preserves those invariants, and which matrix cells it tests. Keep cross-cutting capabilities in separate PRs unless their composition is explicitly designed and tested.
-- **Adversarial-review every PR before merge.** For every non-trivial PR, run a read-only review against the actual final head after rebases/merges and CI. The reviewer must challenge the invariants, cross-product matrix, security boundaries, failure atomicity, observability bounds, and composition with merged changes—not merely repeat the happy-path tests. Request changes for real P1/P2 findings; after repeated cross-product findings, return to the state-space model instead of applying isolated patches. Do not merge on green CI alone. **Beware the skipped-CI-on-conflict trap:** a `DIRTY` (merge-conflicted) PR cannot have its merge-ref built, so `ci.yml`'s `Lint & type-check` and `Unit tests` jobs are **silently skipped, not failed** — the PR shows only the always-runnable checks (CodeQL/Sonar) green, and a naive `gh pr checks | grep -cv pass` reads zero because a skipped required check is absent, not failing. Resolving the conflict and pushing re-triggers `ci.yml`; before merging, verify the `Unit tests` job actually **ran and passed on the current head SHA** (e.g. `gh api repos/.../commits/<sha>/check-runs`), and never `--admin`-merge a formerly-DIRTY PR without that fresh green. **Conversely, SonarCloud is NOT a required check** — only `Lint & type-check` and `Unit tests` gate merge (confirm via `gh api repos/.../branches/master/protection/required_status_checks`); a red SonarCloud gate does NOT block merge and must not trigger correction rounds. Its `new_duplicated_lines_density` CPD over-flags inherently-repetitive code (lookup tables / policy maps — #1169's `FORMATTER_POLICY_BY_EXTENSION`), and its Automatic Analysis re-analyzes async so it **lags the head SHA** (a stale ERROR often clears once it catches up). Treat it as advisory: read the finding, don't contort correct code to satisfy CPD, and don't take a reviewer's assertion that "Sonar is a required gate" at face value — check the protection list (this cost two correction rounds on #1169). A `BLOCKED` merge-state with `Lint`+`Unit` green is usually just a non-required check (Sonar/install-matrix) pending — mergeable.
+- **Adversarial-review every PR before merge.** For every non-trivial PR, run a read-only review against the actual final head after rebases/merges and CI. The reviewer must challenge the invariants, cross-product matrix, security boundaries, failure atomicity, observability bounds, and composition with merged changes—not merely repeat the happy-path tests. Request changes for real P1/P2 findings; after repeated cross-product findings, return to the state-space model instead of applying isolated patches. Do not merge on green CI alone. **Beware the skipped-CI-on-conflict trap:** a `DIRTY` (merge-conflicted) PR cannot have its merge-ref built, so `ci.yml`'s `Lint & type-check` and `Unit tests` jobs are **silently skipped, not failed** — the PR shows only the always-runnable checks (CodeQL/Sonar) green, and a naive `gh pr checks | grep -cv pass` reads zero because a skipped required check is absent, not failing. Resolving the conflict and pushing re-triggers `ci.yml`; before merging, verify the `Unit tests` job actually **ran and passed on the current head SHA** (e.g. `gh api repos/.../commits/<sha>/check-runs`), and never `--admin`-merge a formerly-DIRTY PR without that fresh green. **Conversely, SonarCloud is NOT a required check** — only `Lint & type-check` and `Unit tests` gate merge (confirm via `gh api repos/.../branches/master/protection/required_status_checks`); a red SonarCloud gate does NOT block merge and must not trigger correction rounds. Its `new_duplicated_lines_density` CPD over-flags inherently-repetitive code (lookup tables / policy maps — #1169's `FORMATTER_POLICY_BY_EXTENSION`), and its Automatic Analysis re-analyzes async so it **lags the head SHA** (a stale ERROR often clears once it catches up). Treat it as advisory: read the finding, don't contort correct code to satisfy CPD, and don't take a reviewer's assertion that "Sonar is a required gate" at face value — check the protection list (this cost two correction rounds on #1169). A `BLOCKED` merge-state with `Lint`+`Unit` green is usually just a non-required check (Sonar/install-matrix) pending — mergeable. **One review question the gates cannot ask (#1500):** when a call site hands a shared policy an outcome or classification it did not DERIVE from the evidence — `noteUnavailable("missing", "not-found")`, `available = false`, a hard-coded severity or verdict — ask what actually failed, and require either a derivation (`classifyProbeFailure`) or a comment justifying the assertion plus a record carrying the raw facts. Governed storage with a wrong classification looks identical to a correct verdict in the logs.
 - **Map blast radius for every code PR.** Before and after editing, use `module_report` on each touched production module with `blastRadius: true`; inspect `callbacks[]`, closures, `usedBy`, entry points, and risk flags, then use `read_symbol`/`read_enclosing` for relevant bodies. The PR must state affected dependents, callbacks/entry points, and the verification plan—or explicitly record that the blast radius is empty/unavailable and why. Re-run this map after conflict resolution or architectural changes. `module_report` is a navigable structural/dependent view, not a complete function-level call graph; for call-graph work reuse `clients/call-graph.ts` or LSP incoming/outgoing-call navigation instead of inferring completeness from `usedBy` or `blastRadius`.
 
 ## Contributing
@@ -243,6 +283,10 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 10. **Silencing counted as fixing.** A persistently-suppressed finding counted "resolved" every dispatch; a baseline computed WITHOUT the same filter pipeline the live pass uses; a producer error read as "0 findings = clean." *Screen:* a suppressed/filtered/errored result is not a resolved one — the baseline must pass through the identical filter pipeline as the comparison, and an empty result must distinguish clean from unavailable/errored. *e.g.* #1087 (sg-scan exit-1 matches dropped, making a failing scan read clean; swept as "silencing is not fixing"). *Detect:* review question — does "0" mean clean, or did the producer error / get filtered?
 
 11. **Skipped-CI-on-conflict, counted as green.** A DIRTY (merge-conflicted) PR can't build its merge-ref, so the real gates are *skipped, not failed* — absent, so a naive check reads them as passing. *Screen:* before merge, verify `Unit tests`/`Lint` actually RAN and passed on the current head SHA — an absent required check is not a passing one. Full treatment in the adversarial-review note above (skipped-CI-on-conflict trap).
+
+12. **A durable commit followed by an out-of-guard mirror refresh.** Full treatment in the "Shape 12" paragraph above (#1309); listed here so the catalog's numbering matches it.
+
+13. **A transient failure classified as durable INSIDE an already-governed latch.** Migrating a memo to the shared availability policy makes its *storage* correct and says nothing about its *classification*. `govulncheck-client.ts` wrote `this.available = false` after a failed `go install`, and that setter routes into `availabilityLatch.noteUnavailable("missing", "not-found")` — governed plumbing, wrong classification, and the resulting `availability_decision` row is a well-formed `missing` verdict indistinguishable from a genuine absence. *Screen:* when a call site hands the policy an outcome it did NOT derive from `classifyProbeFailure`, justify it in a comment at the call site AND record what actually failed — `classifiedBy: "caller"` plus `evidence` (`clients/dispatch/runners/utils/availability-policy.ts`), so the row can be audited instead of trusted. An install failure, a stat, or a shim on disk are all legitimate caller assertions; a spawn result is not — derive it. *e.g.* #1500 (the class), #1467/#1476/#1489 (the migrations that made storage correct). *Detect:* **deliberately ungated.** The available shortcut — flag any literal `"missing"`/`"not-found"` passed into a governed latch — fires on every correct post-ENOENT write, and a gate that cries wolf gets baselined rather than fixed. Review-enforced: grep `noteUnavailable(`/`available = false` and ask what spawn result justified each one.
 
 ### AI-authorship smells
 

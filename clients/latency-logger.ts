@@ -67,8 +67,14 @@ let lastPhase: { phase: string; ts: string } | undefined;
  * zero-duration siblings of the same shape, added alongside them.
  *
  * `lsp_aux_wait_outcome` (#1458) is DIFFERENT from every entry above: its
- * `durationMs` is a REAL bounded wait (the post-primary auxiliary grace, up
- * to a few seconds), not zero-duration decision telemetry. It is still
+ * `durationMs` is a REAL bounded wait, not zero-duration decision telemetry.
+ * WHICH wait depends on the row's `waitShape` (#1533), so read that field before
+ * comparing two rows: `"aux_grace"` measures only the post-primary auxiliary
+ * grace (up to a few seconds), while `"aggregate"` — the `clientScope: "all"`
+ * producer, which arms no grace of its own — measures the whole diagnostics wait
+ * from before the primaries settled. The `"aggregate"` number is therefore
+ * systematically larger for the same auxiliary; it is not a regression. It is
+ * still
  * excluded because it is a WAIT-OUTCOME RECORD written after the aux wait
  * already completed, not the stall itself — that wait ran inside the
  * `lsp_touch_file`/diagnostics phase surrounding it, so letting this summary
@@ -86,6 +92,13 @@ let lastPhase: { phase: string; ts: string } | undefined;
  * #1461 slice 1: `finding_dead_path_drop` is the same shape — the record a
  * delivery seam writes when it drops findings whose cited path no longer
  * exists.
+ *
+ * #1459: the three scanner-coverage records are summary rows written from inside
+ * `lsp_touch_file`, and two of them carry ANOTHER write's age as `durationMs`
+ * (`lsp_notify_resync_deferred`, `lsp_notify_write_late_landed`) rather than
+ * their own work. `lsp_scanner_coverage_gap` reports the touch's elapsed time for
+ * joinability. Letting any of them win `lastPhase` would attribute a `loop_block`
+ * to the record instead of to the touch that is actually stalled.
  */
 const LAST_PHASE_EXCLUDED = new Set([
 	"loop_block",
@@ -99,6 +112,9 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"tool_set_mutation",
 	"availability_decision",
 	"finding_dead_path_drop",
+	"lsp_scanner_coverage_gap",
+	"lsp_notify_resync_deferred",
+	"lsp_notify_write_late_landed",
 ]);
 
 /**

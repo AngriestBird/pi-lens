@@ -154,7 +154,7 @@ async function probeAvailability(pm: NodePackageManager): Promise<boolean> {
 		return true;
 	}
 
-	const { outcome, cause } = classifyProbeFailure(result, {
+	const { outcome, cause, evidence } = classifyProbeFailure(result, {
 		hostStallMs,
 		// Preserve pre-#1496 meaning for anything the classifier can't place: a
 		// present manager that rejects its probe is durable, same as before.
@@ -171,6 +171,8 @@ async function probeAvailability(pm: NodePackageManager): Promise<boolean> {
 		hostStallMs,
 		...(retryAfterMs > 0 && { retryAfterMs }),
 		budgetMs: PROBE_TIMEOUT_MS,
+		classifiedBy: "probe",
+		evidence,
 	});
 	return false;
 }

@@ -14,6 +14,7 @@
 
 import {
 	type AvailabilityCause,
+	type ProbeEvidence,
 	createAvailabilityLatch,
 	logAvailabilityDecision,
 } from "./availability-policy.js";
@@ -58,6 +59,8 @@ export function createToolchainAvailability(
 	let sweepSawTransient = false;
 	let sweepTransientCause: AvailabilityCause = "probe-timeout";
 	let sweepHostStallMs = 0;
+	/** What the last classified candidate returned, for the decision record. */
+	let sweepEvidence: ProbeEvidence | undefined;
 	let ensureInFlight: Promise<boolean> | null = null;
 
 	async function findPath(): Promise<string | null> {
@@ -73,6 +76,7 @@ export function createToolchainAvailability(
 		sweepSawTransient = sweep.sawTransient;
 		sweepTransientCause = sweep.transientCause;
 		sweepHostStallMs = sweep.hostStallMs;
+		sweepEvidence = sweep.evidence;
 		if (sweep.foundPath) toolPath = sweep.foundPath;
 		return sweep.foundPath;
 	}
@@ -92,6 +96,8 @@ export function createToolchainAvailability(
 				latched: true,
 				hostStallMs: sweepHostStallMs,
 				budgetMs: config.budgetMs,
+				classifiedBy: "probe",
+				...(sweepEvidence !== undefined && { evidence: sweepEvidence }),
 			});
 			return true;
 		}
@@ -110,6 +116,10 @@ export function createToolchainAvailability(
 			hostStallMs: sweepHostStallMs,
 			...(retryAfterMs > 0 && { retryAfterMs }),
 			budgetMs: config.budgetMs,
+			// Derived from the sweep's own candidate probes, and carrying what the
+			// last of them returned (#1500).
+			classifiedBy: "probe",
+			...(sweepEvidence !== undefined && { evidence: sweepEvidence }),
 		});
 		return false;
 	}
