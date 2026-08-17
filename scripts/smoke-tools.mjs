@@ -385,6 +385,13 @@ const LSP_FIXTURES = [
 		tools: ["marksman"],
 	},
 	{
+		lang: "cue",
+		dir: "tests/fixtures/tool-smoke/cue",
+		file: "bad.cue",
+		serverHint: "CUE Language Server (cue lsp serve)",
+		tools: ["cue"],
+	},
+	{
 		lang: "prisma",
 		dir: "tests/fixtures/tool-smoke/prisma",
 		file: "schema.prisma",

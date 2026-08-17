@@ -2623,6 +2623,28 @@ export const ClojureServer: LSPServerInfo = {
 	},
 };
 
+// CUE Language Server
+// Runs via `cue lsp serve`. The `cue` binary is a single self-contained binary
+// distributed via GitHub releases — prefer a PATH install, fall back to the
+// managed bundle (#241 canonical-bin discovery applies here too).
+export const CueServer: LSPServerInfo = {
+	id: "cue",
+	name: "CUE Language Server",
+	extensions: KIND_EXTENSIONS["cue"],
+	root: RootWithFallback(createRootDetector(["cue.mod", ".git"])),
+	async spawn(root, options) {
+		return resolveAndLaunch(
+			{
+				candidates: ["cue"],
+				args: ["lsp", "serve"],
+				cwd: root,
+				managedToolId: "cue",
+			},
+			options?.allowInstall,
+		);
+	},
+};
+
 export const TerraformServer: LSPServerInfo = {
 	id: "terraform",
 	name: "Terraform LSP",
@@ -3287,7 +3309,8 @@ export const LSP_SERVERS: LSPServerInfo[] = [
 	GleamServer,
 	MarksmanServer,
 	OCamlServer,
-	ClojureServer,
+  ClojureServer,
+  CueServer,
 	TerraformServer,
 	NixServer,
 	BashServer,

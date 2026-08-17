@@ -46,4 +46,5 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | Terragrunt            | —   | terragrunt                                                                                                     | terragrunt hcl fmt      |
 | Nix                   | ✓   | lsp                                                                                                            | nixfmt                  |
 | TOML                  | ✓   | lsp, taplo                                                                                                     | taplo                   |
-| CMake                 | ✓ (cmake-language-server) | lsp                                                                                           | cmake-format            |
+| CMake                 | ✓ (cmake-language-server) | lsp                                                                                      | cmake-format            |
+| CUE                   | ✓ (CUE Language Server)   | lsp                                                                                      | —                       |

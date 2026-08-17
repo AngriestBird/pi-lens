@@ -81,6 +81,7 @@ export const LANGUAGE_POLICY: Record<FileKind, LanguagePolicy> = {
 	gleam: { lspCapable: true },
 	ocaml: { lspCapable: true },
 	clojure: { lspCapable: true },
+	cue: { lspCapable: true },
 	terraform: { lspCapable: true },
 	terragrunt: { lspCapable: false },
 	nix: { lspCapable: true },
@@ -221,6 +222,11 @@ const PRIMARY_DISPATCH_GROUPS: Partial<Record<FileKind, RunnerGroup>> = {
 	},
 	ocaml: { mode: "fallback", runnerIds: ["lsp"], filterKinds: ["ocaml"] },
 	clojure: { mode: "fallback", runnerIds: ["lsp"], filterKinds: ["clojure"] },
+  cue: {
+    mode: "fallback",
+    runnerIds: ["lsp"],
+    filterKinds: ["cue"]
+  },
 	terraform: {
 		mode: "all",
 		runnerIds: ["lsp", "tflint", "trivy-config"],
