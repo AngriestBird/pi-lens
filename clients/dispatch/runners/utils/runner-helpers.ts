@@ -144,20 +144,17 @@ export function findManagedNodeToolBinary(tool: string): string | null {
 // VENV-AWARE COMMAND FINDER
 // =============================================================================
 
-export interface VenvPathConfig {
-	unixPaths: string[];
-	windowsPaths: string[];
-	quoteWindowsPaths?: boolean;
-}
-
 /**
  * Find a command in venv first, then fall back to global.
  * Checks common venv locations (.venv, venv) before trying global.
+ *
+ * The resolved path is returned verbatim: every spawn consumer runs with
+ * `shell: false` (safe-spawn, #817), so wrapping it in quotes would make it
+ * a literal filename that ENOENTs on every platform (#1508).
  */
 export function createVenvFinder(
 	command: string,
 	windowsExt = "",
-	quoteWindows = false,
 ): (cwd: string) => string {
 	return (cwd: string): string => {
 		const venvPaths = [
@@ -170,7 +167,7 @@ export function createVenvFinder(
 		for (const venvPath of venvPaths) {
 			const fullPath = path.join(cwd, venvPath);
 			if (fs.existsSync(fullPath)) {
-				return quoteWindows && windowsExt ? `"${fullPath}"` : fullPath;
+				return fullPath;
 			}
 		}
 
@@ -374,7 +371,7 @@ export function createAvailabilityChecker(
 	);
 	let checkerGeneration = availabilityStateGeneration;
 
-	const findCommand = createVenvFinder(command, windowsExt, true);
+	const findCommand = createVenvFinder(command, windowsExt);
 
 	function ensureCurrentGeneration(): void {
 		if (checkerGeneration === availabilityStateGeneration) return;
