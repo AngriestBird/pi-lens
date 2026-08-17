@@ -12,11 +12,16 @@
  * one. A verification round invented twelve shapes it does not catch — accessor
  * pairs, WeakMap and symbol-keyed stores, cross-module probe helpers, spawn
  * behind a constructor-assigned indirection, string-union verdicts — and three
- * of those are already idiomatic in this repo. Five known unrouted sites are
- * invisible to it today: `createCwdCachedProbe` with its eslint, credo and
+ * of those are already idiomatic in this repo. Five known unrouted sites were
+ * invisible to it: `createCwdCachedProbe` with its eslint, credo and
  * rust-clippy consumers (#1494), `formatters.ts` (#1495) and
  * `package-manager.ts` (#1496); the last two memoize a resolved PATH rather than
  * a boolean verdict, so the verdict-shape rule cannot reach them at all.
+ *
+ * `formatters.ts` is migrated (#1495) and STILL invisible here, which is the
+ * clearest statement of the limit: its probe is `which <command>`, so there is
+ * no version flag for the pre-filter to find, and a fix the gate cannot see is
+ * also a regression the gate cannot catch.
  *
  * The first version of this gate was regexes and a review broke it seven ways in
  * one sitting. Treating a gate as proof is how that happened; every widening
