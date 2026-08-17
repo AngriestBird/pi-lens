@@ -86,6 +86,13 @@ let lastPhase: { phase: string; ts: string } | undefined;
  * #1461 slice 1: `finding_dead_path_drop` is the same shape — the record a
  * delivery seam writes when it drops findings whose cited path no longer
  * exists.
+ *
+ * #1459: the three scanner-coverage records are summary rows written from inside
+ * `lsp_touch_file`, and two of them carry ANOTHER write's age as `durationMs`
+ * (`lsp_notify_resync_deferred`, `lsp_notify_write_late_landed`) rather than
+ * their own work. `lsp_scanner_coverage_gap` reports the touch's elapsed time for
+ * joinability. Letting any of them win `lastPhase` would attribute a `loop_block`
+ * to the record instead of to the touch that is actually stalled.
  */
 const LAST_PHASE_EXCLUDED = new Set([
 	"loop_block",
@@ -99,6 +106,9 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"tool_set_mutation",
 	"availability_decision",
 	"finding_dead_path_drop",
+	"lsp_scanner_coverage_gap",
+	"lsp_notify_resync_deferred",
+	"lsp_notify_write_late_landed",
 ]);
 
 /**

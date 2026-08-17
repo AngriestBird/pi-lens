@@ -35,8 +35,10 @@ import {
 import type { DispatchContext } from "../../types.js";
 import {
 	type AvailabilityCause,
+	type AvailabilityLatch,
 	type AvailabilityOutcome,
 	type ProbeEvidence,
+	type ProbeFailureShape,
 	classifyProbeFailure,
 	createAvailabilityLatch,
 	describeProbeEvidence,
@@ -49,11 +51,13 @@ import {
 export type {
 	AvailabilityCause,
 	AvailabilityDecision,
+	AvailabilityLatch,
 	AvailabilityOutcome,
 } from "./availability-policy.js";
 export {
 	createAvailabilityLatch,
 	classifyProbeFailure,
+	describeProbeEvidence,
 	describeUnavailability,
 	isTransientDecision,
 	logAvailabilityDecision,
@@ -629,37 +633,215 @@ export function createAvailabilityChecker(
 	return { isAvailableAsync, getCommand, getOutcome, getVerdict, reset };
 }
 
+/** What a `createCwdCachedProbe` probe hands back for classification (#1494). */
+export interface CwdProbeResult extends ProbeFailureShape {
+	status?: number | null;
+}
+
+export interface CwdCachedProbeOptions {
+	/** Tool name used in the `availability_decision` record. */
+	tool: string;
+	/** Probe budget the verdict was measured against, ms. Reported, not enforced. */
+	budgetMs?: number;
+	/** Outcome for a failure the taxonomy cannot classify. Default non-installable. */
+	unclassifiedFailureOutcome?: AvailabilityOutcome;
+}
+
+export interface CwdCachedProbe {
+	(cwd: string): Promise<boolean>;
+	/** The last verdict for a cwd, for messaging and telemetry. */
+	getVerdict(cwd: string): AvailabilityVerdict;
+	reset(): void;
+}
+
 /**
  * Per-cwd cached availability probe for spawn signatures that don't fit
- * `createAvailabilityChecker` — multi-arg subcommands like `npx biome
- * --version`, `cargo clippy --version`, `mix credo --version`, or a
- * dynamically-resolved `<cmd> --version`. Each cwd is probed at most once;
- * concurrent first-time callers share the in-flight promise.
+ * `createAvailabilityChecker` — multi-arg subcommands like `cargo clippy
+ * --version` and `mix credo --version`, or a dynamically-resolved
+ * `<cmd> --version` such as eslint's local-then-global binary. Each cwd is
+ * probed at most once per verdict; concurrent first-time callers share the
+ * in-flight promise.
  *
- * The cache stores the boolean outcome forever (same shape as
- * `createAvailabilityChecker`): once known unavailable for a cwd, the
- * runner stays skipped for that cwd until the process restarts. Pass a
- * fresh probe for retry-after-install flows.
+ * Those three ARE the consumers. `npx biome --version` used to be named here as
+ * one and never was: biome resolves through `resolveManagedToolClient` and its
+ * own latch in `biome-client.ts`.
+ *
+ * ## Latch policy (#1494)
+ *
+ * This used to cache the boolean forever, so one stalled `eslint --version`
+ * disabled eslint for that cwd until the process restarted. The verdict now
+ * goes through `availability-policy.ts`: the probe returns the SPAWN RESULT,
+ * the policy classifies it, and only a durable outcome (`missing` /
+ * `non-installable`) latches. A timeout, abort or host stall expires on a
+ * bounded cooldown and the next caller re-probes.
  */
 export function createCwdCachedProbe(
-	probe: (cwd: string) => Promise<boolean>,
-): (cwd: string) => Promise<boolean> {
-	const cacheByCwd = new PathKeyedMap<Promise<boolean>>(
+	probe: (cwd: string) => Promise<CwdProbeResult>,
+	options: CwdCachedProbeOptions,
+): CwdCachedProbe {
+	const latchByCwd = new PathKeyedMap<AvailabilityLatch>(
+		normalizeEphemeralMapKey,
+	);
+	const inFlightByCwd = new PathKeyedMap<Promise<boolean>>(
 		normalizeEphemeralMapKey,
 	);
 	let probeGeneration = availabilityStateGeneration;
-	return (cwd: string) => {
-		if (probeGeneration !== availabilityStateGeneration) {
-			cacheByCwd.clear();
-			probeGeneration = availabilityStateGeneration;
-		}
-		const key = path.resolve(cwd || process.cwd());
-		const existing = cacheByCwd.get(key);
+
+	function clear(): void {
+		latchByCwd.clear();
+		inFlightByCwd.clear();
+	}
+
+	function ensureCurrentGeneration(): void {
+		if (probeGeneration === availabilityStateGeneration) return;
+		clear();
+		probeGeneration = availabilityStateGeneration;
+	}
+
+	function latchFor(key: string): AvailabilityLatch {
+		const existing = latchByCwd.get(key);
 		if (existing) return existing;
-		const promise = probe(key).catch(() => false);
-		cacheByCwd.set(key, promise);
+		const created = createAvailabilityLatch();
+		latchByCwd.set(key, created);
+		return created;
+	}
+
+	function note(
+		latch: AvailabilityLatch,
+		key: string,
+		verdict: {
+			available: boolean;
+			outcome: AvailabilityOutcome;
+			cause: AvailabilityCause;
+			elapsedMs: number;
+			hostStallMs: number;
+			/** What the spawn returned, for the record's audit trail (#1500). */
+			evidence?: ProbeEvidence;
+		},
+	): void {
+		let retryAfterMs: number | undefined;
+		if (verdict.available) {
+			latch.noteAvailable(verdict.cause);
+		} else {
+			const delay = latch.noteUnavailable(verdict.outcome, verdict.cause);
+			if (delay > 0) retryAfterMs = delay;
+		}
+		logAvailabilityDecision(
+			{
+				tool: options.tool,
+				verdict: verdict.available ? "available" : "unavailable",
+				outcome: verdict.outcome,
+				cause: verdict.cause,
+				elapsedMs: verdict.elapsedMs,
+				latched: verdict.available || isLatchingOutcome(verdict.outcome),
+				hostStallMs: verdict.hostStallMs,
+				...(retryAfterMs !== undefined && { retryAfterMs }),
+				...(options.budgetMs !== undefined && { budgetMs: options.budgetMs }),
+				// Every verdict here is derived from the probe this seam just ran.
+				classifiedBy: "probe",
+				...(verdict.evidence !== undefined && { evidence: verdict.evidence }),
+			},
+			key,
+		);
+	}
+
+	const run = (cwd: string): Promise<boolean> => {
+		ensureCurrentGeneration();
+		const key = path.resolve(cwd || process.cwd());
+		const latch = latchFor(key);
+		const memo = latch.read();
+		if (memo !== null) return Promise.resolve(memo);
+
+		const existing = inFlightByCwd.get(key);
+		if (existing) return existing;
+
+		const promiseGeneration = probeGeneration;
+		let promise: Promise<boolean>;
+		promise = (async () => {
+			// The probe budget is enforced by a HOST-side timer, so a stalled event
+			// loop expires it while the child is still healthy. Measure the stall
+			// that overlapped the window and hand it to the classifier (#1467).
+			const stallSampler = startHostStallSampler();
+			const startedAt = Date.now();
+			let result: CwdProbeResult | undefined;
+			let thrown: unknown;
+			try {
+				result = await probe(key);
+			} catch (error) {
+				thrown = error;
+			}
+			const hostStallMs = stallSampler.stop();
+			const elapsedMs = Date.now() - startedAt;
+			// A probe that threw carries its errno in the Error, which is exactly
+			// what the taxonomy reads — so a thrown EAGAIN stays transient instead
+			// of collapsing into an untyped `false`.
+			const shape: CwdProbeResult = result ?? {
+				error: thrown instanceof Error ? thrown : new Error(String(thrown)),
+			};
+
+			if (result && !result.error && result.status === 0) {
+				note(latch, key, {
+					available: true,
+					outcome: "success",
+					cause: "ok",
+					elapsedMs,
+					hostStallMs,
+					evidence: describeProbeEvidence(result, options.tool),
+				});
+				return true;
+			}
+
+			const { outcome, cause, evidence } = classifyProbeFailure(shape, {
+				hostStallMs,
+				command: options.tool,
+				unclassifiedFailureOutcome: options.unclassifiedFailureOutcome,
+			});
+			note(latch, key, {
+				available: false,
+				outcome,
+				cause,
+				elapsedMs,
+				hostStallMs,
+				evidence,
+			});
+			return false;
+		})().finally(() => {
+			// A session reset clears the map and a caller may immediately start a
+			// replacement probe for the same cwd; the old promise must not delete
+			// that newer-generation entry when it settles.
+			if (
+				probeGeneration === promiseGeneration &&
+				inFlightByCwd.get(key) === promise
+			) {
+				inFlightByCwd.delete(key);
+			}
+		});
+		inFlightByCwd.set(key, promise);
 		return promise;
 	};
+
+	const cached = run as CwdCachedProbe;
+	cached.getVerdict = (cwd: string): AvailabilityVerdict => {
+		ensureCurrentGeneration();
+		const latch = latchFor(path.resolve(cwd || process.cwd()));
+		const outcome = latch.getOutcome();
+		return {
+			outcome,
+			cause: latch.getCause(),
+			elapsedMs: 0,
+			// Read the OUTCOME, never `read()`: `read()` answers `null` both for a
+			// cwd that was never probed and for a transient verdict whose cooldown
+			// expired, and `!== false` turned both of those into `latched: true` —
+			// the opposite of the truth in the expired case.
+			latched: outcome !== null && isLatchingOutcome(outcome),
+			retryAtMs: latch.getRetryAtMs(),
+		};
+	};
+	cached.reset = (): void => {
+		clear();
+		probeGeneration = availabilityStateGeneration;
+	};
+	return cached;
 }
 
 export function resolveNodeToolCommand(

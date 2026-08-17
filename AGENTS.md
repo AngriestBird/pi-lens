@@ -61,7 +61,10 @@ binding matches the touch content exactly. Unknown or changed-content bindings
 never replay. (#1458)
 
 Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row.
-Its per-server outcomes record answered, silent, or cut-off — decided from
+Its per-server outcomes record answered, silent, cut-off, or (#1459) deferred —
+a deferred scanner was never sent the content, so it must never occupy the
+`silent` row, which is reserved for one that had the content and published
+nothing. Outcomes are decided from
 EVIDENCE (whether the client's `diagnosticsVersion` advanced past the
 pre-notify baseline), never from whether the raced wait promise settled,
 because `waitForDiagnostics` resolves on its own timeout and never rejects, so
@@ -71,6 +74,36 @@ outcome is corroborated against the diagnostics cache. This phase's
 siblings), but it stays excluded from last-phase stall attribution because it
 is a post-hoc record of a wait that already ran inside the touch's own phase,
 not the stall itself. (#1458)
+
+An auxiliary scanner gets at most ONE outstanding `didOpen` resync at a time.
+A `clientScope: "all"` sweep fans a full re-scan at every neighbour inside a few
+milliseconds, so an unbounded fan-out stalls the scanner's stdin and walks the
+#743 notify-write breaker open. The gate is a QUEUE, not a drop: a healthy
+scanner accepts each write in milliseconds, so every file still gets scanned,
+and only a scanner that cannot accept a write inside the budget makes a waiter
+give up. A write that lands after its deadline but inside the wedge window
+retracts the timeout it was charged for (slow is not broken); one nothing
+accepts for the whole wedge window keeps its strike and demotes the server, so
+the gate cannot defer a dead input path forever. A DEFERRED server is neither
+waited on nor read from — its version cannot advance, so waiting only burns its
+budget and would flip the touch to `inconclusive`, and its diagnostics cache
+still holds the previous content's findings because the resync that would have
+cleared it never ran. The screen when you add an auxiliary: if its per-file scan
+can exceed the notify-write budget, a whole-tree sweep will break it — and its
+silence reads as CLEAN unless the touch names it. A scanner that never attached
+(breaker open) or never received the content (deferred resync) belongs in
+`unconfirmedServerIds`, exactly like a cut-off or silent auxiliary, and the gap
+must reach the AGENT-facing surface too
+(`CascadeNeighborResult.unconfirmedServerIds` and the cascade formatter), not
+only the result wrapper. One `lsp_scanner_coverage_gap` row per touch records it.
+#1493's content-hash exemption outranks a deferral: a scanner whose STORED
+publication is bound to exactly these bytes has reported on this file, so the
+skipped resync withholds nothing — it stays covered, and its stored findings
+must still reach `.diags` through the carried-auxiliary path. Both breaker-skip
+and deferral open BEFORE any wait, so `auxiliaryCoverageGap` (which reads wait
+outcomes) cannot see them on the `clientScope: "all"` sweep path, which emits no
+outcome rows at all — they are unioned into `unconfirmedServerIds` separately.
+(#1459)
 
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
