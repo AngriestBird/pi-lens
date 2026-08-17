@@ -49,6 +49,7 @@ import {
 	deadCodeIssueKey,
 	deadCodeIssues,
 	formatDeadCodeDelta,
+	stableFindingKey,
 } from "./dead-code-client.js";
 import { logDeadCodeScan } from "./dead-code-logger.js";
 import {
@@ -744,8 +745,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			};
 
 			if (knipResult.success && knipResult.issues.length > 0) {
+				// Deliberately excludes the line number — see stableFindingKey's
+				// doc comment (#1483: mirrors the dead-code fix in #1477).
 				const issueKey = (i: KnipIssue) =>
-					`${i.type}:${i.file ?? ""}:${i.name}:${i.line ?? 0}:${i.package ?? ""}`;
+					stableFindingKey(i.type, i.file, i.name, i.package);
 				const prevKeys = new Set((prevKnip?.data?.issues ?? []).map(issueKey));
 				const modifiedSet = new Set(
 					files.map((f) => resolveRunnerPath(cwd, f)),

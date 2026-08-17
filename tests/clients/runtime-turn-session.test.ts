@@ -531,6 +531,71 @@ describe("knip turn-end backoff", () => {
 		}
 	});
 
+	it("does not report a pre-existing issue that only moved lines (#1483)", async () => {
+		const env = setupTestEnvironment("pi-lens-knip-shift-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.setTelemetryIdentity({ sessionId: "knip-shift-session" });
+			const cacheManager = new CacheManager(false);
+			const filePath = path.join(env.tmpDir, "src/current.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			cacheManager.addModifiedRange(
+				filePath,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+
+			// Previous scan found this dependency at line 1.
+			cacheManager.writeCache(
+				"knip",
+				{
+					...EMPTY_KNIP_RESULT,
+					success: true,
+					issues: [
+						{ type: "unlisted", name: "left-pad", file: filePath, line: 1 },
+					],
+					summary: "Found 1 issues",
+				},
+				env.tmpDir,
+			);
+
+			// This turn's edit inserted lines above it, so the SAME finding now
+			// reports at line 12 — nothing about it is new.
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, {
+					ctxCwd: env.tmpDir,
+					knipClient: {
+						ensureAvailable: async () => true,
+						analyze: async () => ({
+							...EMPTY_KNIP_RESULT,
+							success: true,
+							issues: [
+								{
+									type: "unlisted",
+									name: "left-pad",
+									file: filePath,
+									line: 12,
+								},
+							],
+							summary: "Found 1 issues",
+						}),
+					},
+				}),
+			);
+
+			const report = loadProjectDiagnosticsDeltaReport(env.tmpDir);
+			expect(report).toBeUndefined();
+		} finally {
+			if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+			else process.env.PILENS_DATA_DIR = previousDataDir;
+			env.cleanup();
+		}
+	});
+
 	it("skips knip after a recent timeout failure", async () => {
 		const env = setupTestEnvironment("pi-lens-knip-backoff-");
 		try {
