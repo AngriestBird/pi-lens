@@ -138,8 +138,9 @@ pattern. (#1409)
 Helm chart linting uses the shared workspace-topology `Chart.yaml` marker. YAML
 and `.tpl` edits inside a chart dispatch one canonical-root-deduplicated,
 bounded `helm lint` pass through the ordinary typed availability/install seam.
-It is smart-default and read-only; rendered-manifest validation remains deferred
-to #1283 slice B.
+It is smart-default and read-only. Rendered-manifest validation (#1283 slice B)
+ships beside it as the separately-gated, OFF-by-default `helm-render` runner —
+see the IaC-misconfig note in the pipeline section.
 
 Session degradation telemetry owns its dedupe and tally state in
 `clients/degradation-ledger.ts`: use `recordDegradationOnce` for a repeated

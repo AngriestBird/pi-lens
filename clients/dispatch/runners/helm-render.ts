@@ -59,6 +59,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { logLatency } from "../../latency-logger.js";
 import { PathKeyedMap } from "../../path-keyed-map.js";
 import { normalizeMapKey } from "../../path-utils.js";
 import { loadPiLensProjectConfig } from "../../project-lens-config.js";
@@ -85,10 +86,20 @@ const inFlightByChartRoot = new PathKeyedMap<Promise<RunnerResult>>(
 	normalizeMapKey,
 );
 
-const RENDER_TIMEOUT_MS = 45_000;
-const TRIVY_TIMEOUT_MS = 60_000;
+/**
+ * Budget, stated deliberately. Both spawns are sequential, so the runner's own
+ * ceiling is their sum plus slack — 85s, in the same band as the other heavy
+ * per-edit runners (detekt, golangci-lint, rust-clippy at 90s) rather than above
+ * them. The pass re-renders on every edit beneath a chart, with no freshness
+ * cache; that cost is the reason the feature is opt-in, and a chart-tree content
+ * stamp to skip an unchanged re-render is a tracked follow-up on #1283.
+ */
+const RENDER_TIMEOUT_MS = 30_000;
+const TRIVY_TIMEOUT_MS = 45_000;
 /** Rendered manifests we are willing to read back, so a chart cannot flood us. */
 const MAX_RENDERED_FILES = 400;
+/** Bytes of trivy report we retain. Truncation is reported, never parsed past. */
+const MAX_REPORT_BYTES = 8 * 1024 * 1024;
 
 const SKIPPED: RunnerResult = {
 	status: "skipped",
@@ -134,7 +145,16 @@ export function isHelmRenderEnabled(cwd: string): boolean {
  * in `# Source:` annotations and template error messages) to the template file
  * on disk. Helm prefixes every reference with the chart NAME, which is not a
  * directory under the chart root, so the first segment is dropped. Returns null
- * when the result would not be a file inside the chart.
+ * when the result would not be a real file inside the chart.
+ *
+ * A `# Source:` annotation is content the CHART wrote, which is the same trust
+ * boundary the opt-in exists for, so containment has to hold on every OS. The
+ * textual `isWithin` fold is not enough on its own: `normalizeFilePath` only
+ * canonicalizes through `realpath` on win32, so on Linux and macOS a symlinked
+ * template would pass the string test and then be followed by `stat`. `lstat`
+ * closes that — a symlink is not `isFile()`, so a link out of the chart tree is
+ * rejected rather than followed (recurring defect shape 2: verify on the CI OS,
+ * not the host).
  */
 export function resolveTemplateSource(
 	sourceRef: string,
@@ -147,7 +167,7 @@ export function resolveTemplateSource(
 	const candidate = path.resolve(chartRoot, ...segments.slice(1));
 	if (!isWithin(chartRoot, candidate)) return null;
 	try {
-		if (!fs.statSync(candidate).isFile()) return null;
+		if (!fs.lstatSync(candidate).isFile()) return null;
 	} catch {
 		return null;
 	}
@@ -320,24 +340,51 @@ export function checkManifestShape(options: {
 }
 
 /**
+ * The outcome of reading a Trivy report. `understood: false` means the report
+ * could not be read at all — an empty body, invalid JSON, or a shape without a
+ * `Results` array. That is NOT the same answer as "no misconfigurations", and
+ * the caller must not let it settle as a clean pass (recurring defect shape 10:
+ * a producer error read as "0 findings = clean").
+ */
+export interface RenderedTrivyReport {
+	understood: boolean;
+	diagnostics: Diagnostic[];
+	/** Why the report could not be read; undefined when it could. */
+	problem?: string;
+}
+
+/**
  * Map `trivy config --format json` over the rendered tree onto source
  * templates. Deliberately separate from `trivy-config.ts`'s parser: that one
  * pins every finding to the single file it was handed, while this one has to
- * read each result's `Target` and route it back through the render mapping.
+ * read each result's `Target` and route it back through the render mapping —
+ * and it has to distinguish an unreadable report from an empty one.
  */
 export function parseRenderedTrivyOutput(
 	raw: string,
 	locate: (target: string) => { filePath: string; detail: string },
-): Diagnostic[] {
-	if (!raw.trim()) return [];
+): RenderedTrivyReport {
+	if (!raw.trim()) {
+		return { understood: false, diagnostics: [], problem: "empty report" };
+	}
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(raw);
 	} catch {
-		return [];
+		return {
+			understood: false,
+			diagnostics: [],
+			problem: "report was not valid JSON",
+		};
 	}
 	const results = (parsed as { Results?: unknown })?.Results;
-	if (!Array.isArray(results)) return [];
+	if (!Array.isArray(results)) {
+		return {
+			understood: false,
+			diagnostics: [],
+			problem: "report carried no Results array",
+		};
+	}
 
 	const diagnostics: Diagnostic[] = [];
 	for (const entry of results) {
@@ -386,12 +433,16 @@ export function parseRenderedTrivyOutput(
 			});
 		}
 	}
-	return diagnostics;
+	return { understood: true, diagnostics };
 }
 
-function unavailableResult(tool: string, cwd: string): RunnerResult {
-	const verdict =
-		tool === "helm" ? helm.getVerdict(cwd) : trivy.getVerdict(cwd);
+/**
+ * The runner could not start. Helm is the only tool that can reach this: an
+ * absent trivy leaves the render findings standing and is reported as a pass
+ * gap instead, so there is no second arm to generalize for.
+ */
+function helmUnavailableResult(cwd: string): RunnerResult {
+	const verdict = helm.getVerdict(cwd);
 	return {
 		status: "failed",
 		diagnostics: [],
@@ -402,8 +453,8 @@ function unavailableResult(tool: string, cwd: string): RunnerResult {
 		// seam has already logged the decision with its honest cause.
 		failureKind: "unavailable",
 		failureMessage: describeUnavailability({
-			tool,
-			installHint: tool === "helm" ? HELM_INSTALL_HINT : TRIVY_INSTALL_HINT,
+			tool: "helm",
+			installHint: HELM_INSTALL_HINT,
 			outcome: verdict.outcome,
 			cause: verdict.cause,
 			elapsedMs: verdict.elapsedMs,
@@ -437,10 +488,24 @@ function spawnFailureKind(result: {
 	return null;
 }
 
-function collectRenderedFiles(root: string): string[] {
+/**
+ * Walk the scratch tree for rendered manifests. `truncated` is load-bearing: a
+ * chart bigger than the cap is only PARTLY validated, and a partial pass that
+ * reports no findings would read as a clean one (recurring defect shape 10), so
+ * the caller turns the flag into a visible diagnostic.
+ *
+ * `withFileTypes` gives `lstat`-shaped entries, so a symlink is neither
+ * `isDirectory()` nor `isFile()` and the walk cannot be led out of the scratch
+ * directory. Keep it that way.
+ */
+function collectRenderedFiles(root: string): {
+	files: string[];
+	truncated: boolean;
+} {
 	const files: string[] = [];
 	const stack = [root];
-	while (stack.length > 0 && files.length < MAX_RENDERED_FILES) {
+	let truncated = false;
+	while (stack.length > 0 && !truncated) {
 		const dir = stack.pop() as string;
 		let entries: fs.Dirent[];
 		try {
@@ -453,12 +518,18 @@ function collectRenderedFiles(root: string): string[] {
 			if (entry.isDirectory()) {
 				stack.push(full);
 			} else if (entry.isFile() && /\.ya?ml$/i.test(entry.name)) {
+				if (files.length >= MAX_RENDERED_FILES) {
+					truncated = true;
+					break;
+				}
 				files.push(full);
-				if (files.length >= MAX_RENDERED_FILES) break;
 			}
 		}
 	}
-	return files.sort((left, right) => left.localeCompare(right));
+	return {
+		files: files.sort((left, right) => left.localeCompare(right)),
+		truncated,
+	};
 }
 
 function summarize(diagnostics: Diagnostic[]): RunnerResult {
@@ -484,13 +555,16 @@ interface RenderedManifest {
 function readRenderedTree(
 	outputDir: string,
 	chartRoot: string,
-): RenderedManifest[] {
+): { manifests: RenderedManifest[]; truncated: boolean; unreadable: number } {
 	const manifests: RenderedManifest[] = [];
-	for (const renderedPath of collectRenderedFiles(outputDir)) {
+	const walk = collectRenderedFiles(outputDir);
+	let unreadable = 0;
+	for (const renderedPath of walk.files) {
 		let content: string;
 		try {
 			content = fs.readFileSync(renderedPath, "utf-8");
 		} catch {
+			unreadable += 1;
 			continue;
 		}
 		const mapping = mapRenderedToSource({
@@ -507,21 +581,28 @@ function readRenderedTree(
 			sourceMapped: mapping.mapped,
 		});
 	}
-	return manifests;
+	return { manifests, truncated: walk.truncated, unreadable };
 }
 
+type CoverageRule =
+	| "iac-pass-unavailable"
+	| "iac-pass-failed"
+	| "iac-report-unreadable"
+	| "render-truncated";
+
 /**
- * One `info` diagnostic saying a requested pass did not happen. Zero findings
- * from a pass that never ran must not read as a clean pass (defect shape 10).
+ * One `info` diagnostic saying part of the pass did not happen. Zero findings
+ * from a pass that did not fully run must never read as a clean pass (recurring
+ * defect shape 10), and a silent exclusion needs a record (shape 8).
  */
-function iacPassGap(
+function coverageGap(
 	chartRoot: string,
-	rule: "iac-pass-unavailable" | "iac-pass-failed",
-	detail: string,
+	rule: CoverageRule,
+	message: string,
 ): Diagnostic {
 	return {
 		id: `helm-render-${rule}`,
-		message: `Rendered-manifest IaC checks did not run: ${detail}`,
+		message,
 		filePath: chartYaml(chartRoot),
 		line: 1,
 		column: 1,
@@ -548,16 +629,16 @@ async function runIacPass(options: {
 	if (!trivyCmd) {
 		const verdict = trivy.getVerdict(cwd);
 		return [
-			iacPassGap(
+			coverageGap(
 				chartRoot,
 				"iac-pass-unavailable",
-				describeUnavailability({
+				`Rendered-manifest IaC checks did not run: ${describeUnavailability({
 					tool: "trivy",
 					installHint: TRIVY_INSTALL_HINT,
 					outcome: verdict.outcome,
 					cause: verdict.cause,
 					elapsedMs: verdict.elapsedMs,
-				}),
+				})}`,
 			),
 		];
 	}
@@ -579,16 +660,38 @@ async function runIacPass(options: {
 			timeout: TRIVY_TIMEOUT_MS,
 			deadlineAt: Date.now() + TRIVY_TIMEOUT_MS,
 			resourceLabel: "helm-render-trivy",
+			// The report is the whole rendered tree's misconfigurations; cap what we
+			// hold in memory rather than trusting the chart's size (shape 9).
+			maxOutputBytes: MAX_REPORT_BYTES,
 		},
 	);
 	const scanFailure = spawnFailureKind(scan);
-	if (scanFailure || (scan.status !== 0 && !scan.stdout?.trim())) {
+	// `trivy config` is not given `--exit-code`, so it exits 0 whenever it
+	// completed. ANY nonzero status is therefore a real error, with or without
+	// something on stdout — the earlier "nonzero AND no output" gate let a
+	// half-written report through as a completed pass.
+	if (scanFailure || scan.status !== 0) {
 		const why = scanFailure ?? `exit ${scan.status}`;
 		const detail = (scan.stderr || scan.error?.message || "no output").slice(
 			0,
 			200,
 		);
-		return [iacPassGap(chartRoot, "iac-pass-failed", `${why} - ${detail}`)];
+		return [
+			coverageGap(
+				chartRoot,
+				"iac-pass-failed",
+				`Rendered-manifest IaC checks failed to complete (${why}): ${detail}`,
+			),
+		];
+	}
+	if (scan.outputTruncated) {
+		return [
+			coverageGap(
+				chartRoot,
+				"iac-report-unreadable",
+				`Rendered-manifest IaC checks did not run: the trivy report exceeded ${MAX_REPORT_BYTES} bytes and was truncated before parsing.`,
+			),
+		];
 	}
 
 	const sourceByRendered = new PathKeyedMap<{
@@ -601,7 +704,7 @@ async function runIacPass(options: {
 			detail: manifest.relativePath,
 		});
 	}
-	return parseRenderedTrivyOutput(scan.stdout || "", (target) => {
+	const report = parseRenderedTrivyOutput(scan.stdout || "", (target) => {
 		const hit = sourceByRendered.get(path.resolve(outputDir, target));
 		return (
 			hit ?? {
@@ -610,14 +713,80 @@ async function runIacPass(options: {
 			}
 		);
 	});
+	if (!report.understood) {
+		// trivy exited 0 but we cannot read what it said. "No misconfigurations"
+		// and "unreadable report" are different answers (defect shape 10).
+		return [
+			coverageGap(
+				chartRoot,
+				"iac-report-unreadable",
+				`Rendered-manifest IaC checks produced no readable result (${report.problem}), so the manifests are UNSCANNED rather than clean.`,
+			),
+		];
+	}
+	return report.diagnostics;
+}
+
+/**
+ * One record per render pass, so what this runner did is answerable from
+ * latency.log rather than inferred: whether it rendered, how many manifests it
+ * validated, whether the walk was truncated, whether the IaC pass was asked
+ * for, and how many diagnostics came out. The availability seam logs its own
+ * decision, which covers only the tool-probe arm.
+ */
+function logRenderPass(
+	filePath: string,
+	chartRoot: string,
+	startedAt: number,
+	metadata: Record<string, unknown>,
+): void {
+	logLatency({
+		type: "phase",
+		phase: "helm_render_pass",
+		filePath,
+		durationMs: Date.now() - startedAt,
+		metadata: { chartRoot, ...metadata },
+	});
+}
+
+/**
+ * Remove the scratch tree. Deliberately swallowing: a cleanup that throws out
+ * of a `finally` would DISCARD the result the caller was about to return, so a
+ * chart with a real blocking finding would be reported as a runner exception
+ * with zero diagnostics because temp-dir removal lost a race with an AV scanner
+ * (recurring defect shape 10, from the cleanup side). The leak is logged, and
+ * the OS reclaims the directory.
+ */
+export function discardScratchDir(
+	outputDir: string,
+	filePath: string,
+	remove: (target: string) => void = (target) =>
+		fs.rmSync(target, { recursive: true, force: true }),
+): void {
+	try {
+		remove(outputDir);
+	} catch (error) {
+		logLatency({
+			type: "phase",
+			phase: "helm_render_scratch_leak",
+			filePath,
+			durationMs: 0,
+			metadata: {
+				outputDir,
+				error: error instanceof Error ? error.message : String(error),
+			},
+		});
+	}
 }
 
 async function renderAndValidate(
 	chartRoot: string,
 	cwd: string,
+	filePath: string,
 ): Promise<RunnerResult> {
+	const startedAt = Date.now();
 	const helmCmd = await resolveAvailableOrInstall(helm, "helm", cwd);
-	if (!helmCmd) return unavailableResult("helm", cwd);
+	if (!helmCmd) return helmUnavailableResult(cwd);
 
 	const outputDir = fs.mkdtempSync(
 		path.join(os.tmpdir(), "pi-lens-helm-render-"),
@@ -639,6 +808,10 @@ async function renderAndValidate(
 			// The runner never got a verdict about the chart. Reporting this as a
 			// chart finding would blame the user's chart for our own missing tool
 			// (#1487); reporting nothing would read as clean (defect shape 10).
+			logRenderPass(filePath, chartRoot, startedAt, {
+				outcome: "runner-failed",
+				failureKind: startupFailure,
+			});
 			return failedResult(
 				startupFailure,
 				render.error?.message || `helm template ${startupFailure}`,
@@ -649,12 +822,26 @@ async function renderAndValidate(
 			const renderOutput = [render.stdout, render.stderr]
 				.filter(Boolean)
 				.join("\n");
-			return summarize(parseHelmTemplateFailure(renderOutput, chartRoot));
+			const diagnostics = parseHelmTemplateFailure(renderOutput, chartRoot);
+			if (render.outputTruncated) {
+				diagnostics.push(
+					coverageGap(
+						chartRoot,
+						"render-truncated",
+						"helm template output was truncated, so this failure report may be incomplete.",
+					),
+				);
+			}
+			logRenderPass(filePath, chartRoot, startedAt, {
+				outcome: "render-failed",
+				diagnostics: diagnostics.length,
+			});
+			return summarize(diagnostics);
 		}
 
-		const manifests = readRenderedTree(outputDir, chartRoot);
+		const tree = readRenderedTree(outputDir, chartRoot);
 		const diagnostics: Diagnostic[] = [];
-		for (const manifest of manifests) {
+		for (const manifest of tree.manifests) {
 			diagnostics.push(
 				...checkManifestShape({
 					renderedContent: manifest.content,
@@ -664,17 +851,41 @@ async function renderAndValidate(
 				}),
 			);
 		}
+		if (tree.truncated) {
+			// A partly-validated chart reported as clean is the shape-10 trap.
+			diagnostics.push(
+				coverageGap(
+					chartRoot,
+					"render-truncated",
+					`This chart rendered more than ${MAX_RENDERED_FILES} manifests; only the first ${MAX_RENDERED_FILES} were validated, so the rest are UNCHECKED rather than clean.`,
+				),
+			);
+		}
 
 		// The IaC pass keeps trivy's own consent switch — that switch authorizes
 		// installing the binary and pulling its policy bundle.
-		if (isTrivyEnabled(cwd)) {
+		const iacRequested = isTrivyEnabled(cwd);
+		if (iacRequested) {
 			diagnostics.push(
-				...(await runIacPass({ chartRoot, cwd, outputDir, manifests })),
+				...(await runIacPass({
+					chartRoot,
+					cwd,
+					outputDir,
+					manifests: tree.manifests,
+				})),
 			);
 		}
+		logRenderPass(filePath, chartRoot, startedAt, {
+			outcome: "rendered",
+			manifests: tree.manifests.length,
+			truncated: tree.truncated,
+			unreadable: tree.unreadable,
+			iacRequested,
+			diagnostics: diagnostics.length,
+		});
 		return summarize(diagnostics);
 	} finally {
-		fs.rmSync(outputDir, { recursive: true, force: true });
+		discardScratchDir(outputDir, filePath);
 	}
 }
 
@@ -700,7 +911,7 @@ const helmRenderRunner: RunnerDefinition = {
 
 		const existing = inFlightByChartRoot.get(chartRoot);
 		if (existing) return existing;
-		const promise = renderAndValidate(chartRoot, cwd).finally(() => {
+		const promise = renderAndValidate(chartRoot, cwd, ctx.filePath).finally(() => {
 			if (inFlightByChartRoot.get(chartRoot) === promise)
 				inFlightByChartRoot.delete(chartRoot);
 		});
