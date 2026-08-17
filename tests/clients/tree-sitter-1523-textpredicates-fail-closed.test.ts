@@ -90,7 +90,7 @@ describe("evaluatePredicates fails closed on malformed textPredicates (#1523)", 
 		]);
 	});
 
-	it("logs the malformed-textPredicates degradation once per session, not once per Query object (#1523 review F2)", () => {
+	it("records the malformed-textPredicates degradation once, not once per Query object (#1523 review F2)", () => {
 		const client = new TreeSitterClient();
 		const match = { patternIndex: 0, captures: [] };
 
@@ -100,13 +100,45 @@ describe("evaluatePredicates fails closed on malformed textPredicates (#1523)", 
 		evaluatePredicates(client, {} as { textPredicates?: unknown }, match);
 		evaluatePredicates(client, {} as { textPredicates?: unknown }, match);
 
-		// One event recorded per query (fail-closed still applies to each), but the
-		// underlying diagnostic log is a session-level latch — the degradation count
-		// still reflects one record per offending query object, but must not grow
-		// unbounded from re-validating the exact same Query instance.
+		// Three distinct offending Query objects must still collapse to ONE
+		// ledger record. Asserting only `toHaveLength(1)` on the kind list is
+		// vacuous here — a single kind bucket has length 1 whether it holds one
+		// record or three, so it can't tell a working dedupe from a missing one.
+		// Assert the record COUNT instead.
 		const summary = getDegradationSummary();
 		expect(summary).toHaveLength(1);
-		expect(summary[0]).toMatchObject({ kind: "query-predicates-invalid" });
+		expect(summary[0]).toMatchObject({
+			kind: "query-predicates-invalid",
+			count: 1,
+		});
+	});
+
+	it("re-records the degradation after a session boundary (#1523 review R1)", () => {
+		const client = new TreeSitterClient();
+		const match = { patternIndex: 0, captures: [] };
+
+		// Session 1: a stripped query blackout gets recorded.
+		evaluatePredicates(client, {} as { textPredicates?: unknown }, match);
+		expect(getDegradationSummary()).toEqual([
+			expect.objectContaining({ kind: "query-predicates-invalid", count: 1 }),
+		]);
+
+		// Session boundary: handleSessionStart calls resetDegradationLedger()
+		// first thing (clients/runtime-session.ts), but the TreeSitterClient
+		// singleton survives it (clients/tree-sitter-shared.ts only nulls it on
+		// a WASM abort) — so `client` here stands in for session 2 reusing the
+		// same warm instance.
+		resetDegradationLedger();
+		expect(getDegradationSummary()).toEqual([]);
+
+		// Session 2: the SAME stripped-query condition recurs (a different Query
+		// object, since the query cache doesn't survive either, but the same
+		// upstream malformation). The blackout must be visible again, not
+		// permanently silenced by a latch that never re-arms.
+		evaluatePredicates(client, {} as { textPredicates?: unknown }, match);
+		expect(getDegradationSummary()).toEqual([
+			expect.objectContaining({ kind: "query-predicates-invalid", count: 1 }),
+		]);
 	});
 
 	it("fails closed without throwing when textPredicates is removed after a prior successful validation (#1523 review F3)", () => {

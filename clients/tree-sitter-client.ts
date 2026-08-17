@@ -20,6 +20,10 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
+import {
+	recordDegradation,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import { loadWebTreeSitter } from "./deps/web-tree-sitter.js";
 import { getProjectIgnoreMatcher, isExcludedDirName } from "./file-utils.js";
 import {
@@ -28,7 +32,6 @@ import {
 	LANGUAGE_TO_GRAMMAR,
 } from "./grammar-source.js";
 import { resolvePackagePath } from "./package-root.js";
-import { recordDegradation } from "./degradation-ledger.js";
 import {
 	assertInstallAllowed,
 	getProjectTrustGeneration,
@@ -2765,8 +2768,7 @@ export class TreeSitterClient {
 			}
 			case "eq_mod_fn": {
 				// Belt-and-braces re-check of the #eq? predicates that
-				// evaluatePredicates already enforces (clients/tree-sitter-client.ts),
-				// plus the first-argument check that predicates can't express.
+				// evaluatePredicates already enforces (clients/tree-sitter-client.ts).
 				// This filter re-applies the #eq? checks at post_filter time.
 				const mod = captures.MOD?.text ?? "";
 				const fn = captures.FN?.text ?? "";
@@ -3608,11 +3610,15 @@ export class TreeSitterClient {
 	private queriesWithInvalidTextPredicates = new WeakSet<any>();
 
 	/**
-	 * Session-level latch so the "textPredicates is malformed" diagnostic logs
-	 * once total, not once per Query object. Query results are cached with LRU
-	 * eviction (see the query cache above), so a stripped/renamed property would
-	 * otherwise re-trigger this log on every cache rebuild for the life of the
-	 * session — unbounded log volume for what is, functionally, one event.
+	 * Latch so the "textPredicates is malformed" diagnostic log line fires once
+	 * per `TreeSitterClient` instance for the life of the process (this client is
+	 * a process-wide singleton in production — see clients/tree-sitter-shared.ts),
+	 * not once per Query object. Query results are cached with LRU eviction (see
+	 * the query cache above), so a stripped/renamed property would otherwise
+	 * re-trigger this log on every cache rebuild — unbounded log volume for what
+	 * is, functionally, one event. This gates ONLY the log line: process-wide
+	 * log volume is the concern here, not the user-facing degradation record
+	 * below, which must re-arm every session (see recordDegradationOnce).
 	 */
 	private textPredicatesInvalidLogged = false;
 
@@ -3624,8 +3630,8 @@ export class TreeSitterClient {
 	 * #match?/#eq? predicates that rules rely on for correctness, and because this
 	 * runs for every match of every query, it would zero out ALL structural matches
 	 * across every language while pi-lens reports "no issues found." Fail loud (log
-	 * once per session, record a degradation so it reaches the user) and closed
-	 * (report the query has no usable predicates) instead of guessing.
+	 * once per client instance, record a degradation so it reaches the user) and
+	 * closed (report the query has no usable predicates) instead of guessing.
 	 */
 	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter Query instances
 	private hasValidTextPredicates(query: any): boolean {
@@ -3643,19 +3649,24 @@ export class TreeSitterClient {
 						"for this query are dropped rather than reported unfiltered.",
 					metadata: { textPredicatesType: typeof query?.textPredicates },
 				});
-				// User-facing signal (#1523 review F1): without this, the blackout is
-				// invisible outside tree-sitter.log — pi-lens silently reports "no
-				// issues found" for every structural rule in every language instead
-				// of surfacing that its predicate evaluation is degraded.
-				recordDegradation({
-					kind: "query-predicates-invalid",
-					subject: "web-tree-sitter",
-					reason:
-						"Query.textPredicates is missing or not an array — #match?/#eq? " +
-						"predicates cannot be evaluated; structural matches relying on them " +
-						"are dropped fail-closed",
-				});
 			}
+			// User-facing signal (#1523 review F1), re-armed every session via the
+			// ledger's own once-per-kind/subject dedupe (recordDegradationOnce's
+			// onceKeys is cleared by resetDegradationLedger, which handleSessionStart
+			// calls first thing — clients/runtime-session.ts). The TreeSitterClient
+			// singleton and its `textPredicatesInvalidLogged` latch above both
+			// survive session_start, so gating this on that same boolean would make
+			// the blackout invisible from session 2 onward (review R1, AGENTS.md
+			// shape 10). Single source of truth: let the ledger own this dedupe
+			// instead of hand-rolling a second one here.
+			recordDegradationOnce({
+				kind: "query-predicates-invalid",
+				subject: "web-tree-sitter",
+				reason:
+					"Query.textPredicates is missing or not an array — #match?/#eq? " +
+					"predicates cannot be evaluated; structural matches relying on them " +
+					"are dropped fail-closed",
+			});
 		}
 		return valid;
 	}
