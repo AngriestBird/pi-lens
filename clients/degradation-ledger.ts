@@ -13,7 +13,8 @@ export type DegradationKind =
 	| "formatter-failure"
 	| "wasm-abort"
 	| "lsp-diagnostics-timeout"
-	| "bus-stale";
+	| "bus-stale"
+	| "query-predicates-invalid";
 
 export interface DegradationRecord {
 	kind: unknown;
