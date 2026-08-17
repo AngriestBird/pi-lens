@@ -31,6 +31,7 @@ import { transientRetryDelayMs } from "./dispatch/runners/utils/availability-pol
 import { getProjectIgnoreMatcher, isExcludedDirName } from "./file-utils.js";
 import {
 	downloadGrammarDetailed,
+	fileHasWasmMagic,
 	grammarBlockReason,
 	LANGUAGE_TO_GRAMMAR,
 } from "./grammar-source.js";
@@ -165,6 +166,21 @@ function createParserCounters(): TreeSitterParserCounters {
 	};
 }
 
+/**
+ * `size:mtimeMs` identity for a grammar candidate, or undefined when the path
+ * is absent or not a regular file. Doubles as the existence check on the
+ * resolve path and as the invalidation key for the verified-preamble memo
+ * (#1548) — `size` + `mtimeMs` is the codebase's standard cheap stamp.
+ */
+function grammarFileStamp(filePath: string): string | undefined {
+	try {
+		const stat = fs.statSync(filePath);
+		return stat.isFile() ? `${stat.size}:${stat.mtimeMs}` : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 export function isTreeSitterWasmAbortError(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
 	return message.includes("Aborted") || message.includes("abort()");
@@ -191,6 +207,19 @@ export class TreeSitterClient {
 	 * (the `transientRetryDelayMs` shape from availability-policy.ts) instead
 	 * of latching for the process lifetime. */
 	private grammarRetryAtMs = new Map<string, number>();
+	/**
+	 * Grammar path → the `size:mtimeMs` stamp at which its wasm preamble was
+	 * verified (#1548). A POSITIVE-only memo, so the steady-state resolve costs
+	 * one `stat` (which the old `existsSync` already paid) and re-reads the
+	 * header only when the stamp moves. Stamped rather than a bare `Set`
+	 * because a memo that never expires is defect-shape 6: the file it vouches
+	 * for can be replaced under it. Failures are deliberately NOT memoized — a
+	 * poisoned path must be re-examined on the next resolve so a successful
+	 * re-download over it is picked up immediately.
+	 */
+	private verifiedGrammarPaths = new Map<string, string>();
+	/** Paths already reported as non-wasm, to log/record them once each. */
+	private poisonedGrammarPaths = new Set<string>();
 	/** Consecutive download failures per grammar, for the exponential
 	 * cooldown; reset on success. */
 	private grammarFailureAttempts = new Map<string, number>();
@@ -473,13 +502,84 @@ export class TreeSitterClient {
 		return dirs;
 	}
 
-	/** Absolute path to `grammarFile` across all source dirs, else undefined. */
+	/**
+	 * Absolute path to `grammarFile` across all source dirs, else undefined.
+	 *
+	 * Existence is not enough (#1548): a file whose first four bytes aren't the
+	 * wasm preamble is not a grammar, and returning it would report the language
+	 * as available while every `Language.load` fails — the permanent-poisoning
+	 * shape this issue is about. #1548 stops NEW poisoned files from being
+	 * written, but a file poisoned before that shipped is already on disk, so
+	 * the resolve path has to reject it too: a rejected candidate is treated as
+	 * absent, which lets `ensureGrammar` re-download over it.
+	 */
 	private resolveGrammarFile(grammarFile: string): string | undefined {
 		for (const dir of this.grammarSourceDirs()) {
 			const candidate = path.join(dir, grammarFile);
-			if (fs.existsSync(candidate)) return candidate;
+			const stamp = grammarFileStamp(candidate);
+			if (!stamp) continue;
+			if (this.verifiedGrammarPaths.get(candidate) === stamp) return candidate;
+			if (fileHasWasmMagic(candidate)) {
+				this.verifiedGrammarPaths.set(candidate, stamp);
+				return candidate;
+			}
+			this.verifiedGrammarPaths.delete(candidate);
+			this.reportPoisonedGrammarFile(candidate, grammarFile);
 		}
 		return undefined;
+	}
+
+	/**
+	 * Clear the once-per-session grammar report gates when the degradation
+	 * ledger's own generation has moved (#1536 review F5). Lazy
+	 * compare-at-use-time against a monotonic counter, bumped by
+	 * `resetDegradationLedger`, which `handleSessionStart` calls first thing —
+	 * no listener, no retention. Every gate keyed to a SESSION rather than to
+	 * the process lives here, so a new one cannot forget to re-arm: a gate that
+	 * outlives the ledger it guards silently swallows the record it was only
+	 * ever meant to de-duplicate (#1560 review F1).
+	 */
+	private refreshGrammarSessionLatches(): void {
+		const ledgerGen = getDegradationLedgerGeneration();
+		if (ledgerGen === this.grammarNotificationsLedgerGen) return;
+		this.grammarNotificationsLedgerGen = ledgerGen;
+		this.grammarLastNotifiedDelayMs.clear();
+		this.poisonedGrammarPaths.clear();
+	}
+
+	/**
+	 * Log + record a grammar file on disk that isn't a wasm module, once per
+	 * path per session. No user notification here: the caller goes on to attempt
+	 * a re-download, and `recordGrammarFailure` is what interrupts the user if
+	 * that also fails. A silent recovery should stay silent.
+	 */
+	private reportPoisonedGrammarFile(
+		candidate: string,
+		grammarFile: string,
+	): void {
+		// Per SESSION, not per process (#1560 review F1). The file is still
+		// poisoned after a session boundary and still degrades the language, so
+		// the new session's ledger has to carry the entry — a client-lifetime
+		// gate would leave `resetDegradationLedger` with a permanently empty
+		// grammar-blocked group and no record of why the language is degraded.
+		this.refreshGrammarSessionLatches();
+		if (this.poisonedGrammarPaths.has(candidate)) return;
+		this.poisonedGrammarPaths.add(candidate);
+		logTreeSitterDiagnostic({
+			subsystem: "tree-sitter-client",
+			level: "warn",
+			message:
+				`ignoring ${candidate}: the file is not a wasm module (missing the \\0asm preamble) — ` +
+				`most likely a captive-portal or proxy page written by an earlier download (#1548). ` +
+				`pi-lens will treat the grammar as missing and try to fetch it again.`,
+			metadata: { grammarFile, path: candidate, outcome: "not-wasm" },
+		});
+		incrementDegradationCount({
+			kind: "grammar-blocked",
+			subject: grammarFile,
+			reason:
+				"on-disk grammar file is not a wasm module — ignored, re-fetching",
+		});
 	}
 
 	/** Find tree-sitter grammar directory */
@@ -594,53 +694,24 @@ export class TreeSitterClient {
 		}
 
 		const task = (async (): Promise<boolean> => {
-			const dir =
-				this.grammarsDir && fs.existsSync(this.grammarsDir)
-					? this.grammarsDir
-					: this.grammarsWriteDir();
-			if (!dir) {
-				// No writable grammars directory could be located (e.g. pi compiled
-				// this module to a temp dir and web-tree-sitter isn't resolvable
-				// from there yet). This is an environment condition, not a CDN
-				// verdict — #1536 review F2: it must get the same cooldown +
-				// notification treatment as a download failure, not a silent
-				// unmemoized `false` that re-does the same failing resolution
-				// sweep on every single demand.
+			try {
+				return await this.fetchGrammar(grammarFile);
+			} catch (err) {
+				// Defensive (#1548): nothing in `fetchGrammar` throws today —
+				// `downloadGrammarDetailed` catches internally. But a thrown error
+				// here used to skip the whole `else` arm, so NO cooldown was armed
+				// and the rejection escaped through `task.finally` — the exact
+				// pre-#1536 shape (no cooldown, possible unhandled rejection). Funnel
+				// it into the same retryable failure path instead, so a future
+				// refactor that lets an exception out cannot regress to it.
+				const message = err instanceof Error ? err.message : String(err);
 				this.recordGrammarFailure(
 					grammarFile,
-					"No writable grammars directory could be located for the runtime fetch.",
+					`The runtime grammar fetch threw an unexpected error (${message}).`,
 					/* retryable */ true,
 				);
 				return false;
 			}
-			// Reuse the shared single-file downloader (same CDN/source as the
-			// postinstall) — see clients/grammar-source.ts.
-			const { ok, retryable } = await downloadGrammarDetailed(dir, grammarFile);
-			if (ok) {
-				if (!this.grammarsDir) this.grammarsDir = dir;
-				this.grammarRetryAtMs.delete(grammarFile);
-				this.grammarFailureAttempts.delete(grammarFile);
-				this.grammarLastNotifiedDelayMs.delete(grammarFile);
-				logTreeSitterDiagnostic({
-					subsystem: "tree-sitter-client",
-					level: "warn",
-					message: `fetched missing tree-sitter grammar ${grammarFile} at runtime (install scripts were skipped by the package manager)`,
-					metadata: { grammarFile, outcome: "fetched" },
-				});
-			} else {
-				// `retryable` distinguishes a durable CDN verdict (404/410 — a
-				// retry hits the same answer) from everything else (offline, DNS,
-				// a down CDN, a 5xx, a timeout), which says nothing durable about
-				// the grammar (#1536 review F4). Only the retryable case gets the
-				// bounded cooldown; a durable failure keeps the pre-#1536 latched
-				// behavior, matching the issue's own allowance.
-				this.recordGrammarFailure(
-					grammarFile,
-					"The package manager skipped install scripts and the runtime download failed.",
-					retryable,
-				);
-			}
-			return ok;
 		})();
 		this.grammarEnsurePromises.set(grammarFile, task);
 		// Evict on settle regardless of outcome (#1536): a resolved TRUE is
@@ -648,12 +719,89 @@ export class TreeSitterClient {
 		// next call, and a resolved FALSE must not be remembered as the
 		// permanent verdict — only concurrent callers during the SAME in-flight
 		// attempt should ever observe this promise.
-		task.finally(() => {
-			if (this.grammarEnsurePromises.get(grammarFile) === task) {
-				this.grammarEnsurePromises.delete(grammarFile);
-			}
-		});
+		//
+		// The trailing `.catch` is UNFALSIFIABLE scaffolding, not verified
+		// defence (#1560 review F3): `finally` returns a DERIVED promise that
+		// rejects whenever `task` does, but the task's own try/catch above means
+		// it cannot reject, so no test can make this handler fire and removing it
+		// changes nothing today. It is here for the day the try/catch above stops
+		// being exhaustive — or the eviction callback itself throws — because at
+		// that point the fork becomes an unhandled rejection nobody is awaiting.
+		void task
+			.finally(() => {
+				if (this.grammarEnsurePromises.get(grammarFile) === task) {
+					this.grammarEnsurePromises.delete(grammarFile);
+				}
+			})
+			.catch(() => {
+				/* see above: the task's own catch is the real handler */
+			});
 		return task;
+	}
+
+	/**
+	 * One grammar-fetch attempt: locate a writable dir, download, and record the
+	 * outcome. Split out of `ensureGrammar` so the whole body sits under one
+	 * try/catch that funnels any throw into `recordGrammarFailure` (#1548).
+	 */
+	private async fetchGrammar(grammarFile: string): Promise<boolean> {
+		const dir =
+			this.grammarsDir && fs.existsSync(this.grammarsDir)
+				? this.grammarsDir
+				: this.grammarsWriteDir();
+		if (!dir) {
+			// No writable grammars directory could be located (e.g. pi compiled
+			// this module to a temp dir and web-tree-sitter isn't resolvable
+			// from there yet). This is an environment condition, not a CDN
+			// verdict — #1536 review F2: it must get the same cooldown +
+			// notification treatment as a download failure, not a silent
+			// unmemoized `false` that re-does the same failing resolution
+			// sweep on every single demand.
+			this.recordGrammarFailure(
+				grammarFile,
+				"No writable grammars directory could be located for the runtime fetch.",
+				/* retryable */ true,
+			);
+			return false;
+		}
+		// Reuse the shared single-file downloader (same CDN/source as the
+		// postinstall) — see clients/grammar-source.ts.
+		const { ok, retryable, reason } = await downloadGrammarDetailed(
+			dir,
+			grammarFile,
+		);
+		if (ok) {
+			if (!this.grammarsDir) this.grammarsDir = dir;
+			this.grammarRetryAtMs.delete(grammarFile);
+			this.grammarFailureAttempts.delete(grammarFile);
+			this.grammarLastNotifiedDelayMs.delete(grammarFile);
+			logTreeSitterDiagnostic({
+				subsystem: "tree-sitter-client",
+				level: "warn",
+				message: `fetched missing tree-sitter grammar ${grammarFile} at runtime (install scripts were skipped by the package manager)`,
+				metadata: { grammarFile, outcome: "fetched" },
+			});
+		} else {
+			// `retryable` distinguishes a durable CDN verdict (404/410 — a
+			// retry hits the same answer) from everything else (offline, DNS,
+			// a down CDN, a 5xx, a timeout), which says nothing durable about
+			// the grammar (#1536 review F4). Only the retryable case gets the
+			// bounded cooldown; a durable failure keeps the pre-#1536 latched
+			// behavior, matching the issue's own allowance.
+			//
+			// `reason`, when the downloader supplies one, names the actual failure
+			// shape (#1548: "returned an HTML page, not a wasm module") instead of
+			// the generic guess — the difference between a diagnosable log line
+			// and one that sends the user to inspect their package manager while a
+			// captive portal is the real cause.
+			this.recordGrammarFailure(
+				grammarFile,
+				reason ??
+					"The package manager skipped install scripts and the runtime download failed.",
+				retryable,
+			);
+		}
+		return ok;
 	}
 
 	/**
@@ -716,23 +864,16 @@ export class TreeSitterClient {
 		incrementDegradationCount({
 			kind: "grammar-blocked",
 			subject: grammarFile,
+			// #1548: carry `detail` into the RETRYABLE reason too. All retryable
+			// failures used to share one string, so the ledger could not tell an
+			// offline laptop from a captive portal serving HTML — the two need
+			// different user actions, and the ledger is what a bug report shows.
 			reason: retryable
-				? "runtime grammar download failed — retryable (offline/CDN/network)"
+				? `runtime grammar download failed — retryable (${detail.trim()})`
 				: `runtime grammar download failed — durable (${detail.trim()})`,
 		});
 
-		// Session-scoped re-arm (#1536 review F5): a NEW session must be able to
-		// re-notify even for a grammar that has been failing continuously since
-		// before the session boundary. Lazy compare-at-use-time against the
-		// ledger's own generation (bumped by resetDegradationLedger, which
-		// handleSessionStart calls first thing) -- the same clear-on-transition
-		// shape as trustBlockedGrammarNotifications/trustNotificationsGeneration
-		// above, just keyed to a session boundary instead of a trust change.
-		const ledgerGen = getDegradationLedgerGeneration();
-		if (ledgerGen !== this.grammarNotificationsLedgerGen) {
-			this.grammarNotificationsLedgerGen = ledgerGen;
-			this.grammarLastNotifiedDelayMs.clear();
-		}
+		this.refreshGrammarSessionLatches();
 		// HUMAN-audience: an offline grammar fetch silently degrades this
 		// language's features, so it reaches the user through the HOST's render
 		// path (#1333) rather than a raw terminal write. Notify once per DISTINCT
