@@ -1531,6 +1531,180 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 		).toBe(false);
 	});
 
+	it("a DEFERRED auxiliary records `deferred`, never `silent`, on this scope too", async () => {
+		// #1459's boundary, pinned on the aggregate producer: `silent` is reserved for
+		// a scanner that HAD the content and published nothing. A scanner the resync
+		// gate never sent these bytes must not occupy that row — the reviewer verified
+		// this behavior by hand, so it gets a test.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = "100";
+		try {
+			// One shared aux client whose write is held far past any budget, so the
+			// SECOND concurrent touch can only be deferred behind it.
+			const auxClient = {
+				...makeClient(9000, [], { serverId: "opengrep" }),
+				notify: {
+					open: vi.fn(() => new Promise<void>(() => {})),
+					change: vi.fn(async () => {}),
+					close: vi.fn(async () => {}),
+				},
+			};
+			getServersForFileWithConfig.mockReturnValue([
+				makePrimaryServer("ts-primary"),
+				makeAuxServer("opengrep"),
+			]);
+			createLSPClient.mockImplementation(
+				async (options: { serverId?: string }) =>
+					options?.serverId === "opengrep"
+						? auxClient
+						: makeClient(100, [], { serverId: "ts-primary" }),
+			);
+
+			const touchOptions = {
+				clientScope: "all" as const,
+				collectDiagnostics: true,
+				diagnostics: "document" as const,
+			};
+			const first = service.touchFile("C:/repo/a.ts", "one", touchOptions);
+			await vi.advanceTimersByTimeAsync(1);
+			const second = service.touchFile("C:/repo/b.ts", "two", touchOptions);
+			await vi.advanceTimersByTimeAsync(20_000);
+			await Promise.all([first, second]);
+
+			const outcomes = logLatency.mock.calls
+				.map(([entry]) => entry)
+				.filter((entry) => entry?.phase === "lsp_aux_wait_outcome")
+				.flatMap(
+					(entry) =>
+						(
+							entry.metadata as {
+								outcomes?: Array<{ serverId: string; outcome: string }>;
+							}
+						)?.outcomes ?? [],
+				)
+				.filter((entry) => entry.serverId === "opengrep")
+				.map((entry) => entry.outcome);
+			expect(outcomes).toContain("deferred");
+			// Every row came from the aggregate producer, and no deferral was laundered
+			// into the reserved `silent` row.
+			expect(
+				logLatency.mock.calls
+					.map(([entry]) => entry)
+					.filter((entry) => entry?.phase === "lsp_aux_wait_outcome")
+					.every(
+						(entry) =>
+							(entry.metadata as { waitShape?: string })?.waitShape ===
+							"aggregate",
+					),
+			).toBe(true);
+		} finally {
+			delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+		}
+	});
+
+	// BLAST-RADIUS PIN (#1533 review). The highest-frequency `"all"` caller is the
+	// cascade per-edit neighbour fan-out, which caps the touch at 1000/2000ms and
+	// does NOT exclude opengrep. The concern raised was that newly-`silent` verdicts
+	// there would block `neighborTouchCache`/`recentlyCleanNeighborCache` seeding via
+	// `isConfirmedTouch`.
+	//
+	// They do not, and this test is why: `timeoutFor(aux) = min(callerCap, 3500)`, so
+	// on that path the auxiliary's budget EQUALS the caller cap, which is also
+	// `timeoutMs` (the max over waited servers). An auxiliary that burns its budget
+	// therefore trips `diagnosticsTimedOut` and the touch was ALREADY `inconclusive`
+	// before #1533 — and `inconclusive` is decided BEFORE `coverageGap` in the result
+	// branch, so the wrapper those callers read is byte-identical. Delete the #1533
+	// block and this test still passes; that is the point.
+	it("a per-edit-shaped touch whose aux burns the caller cap stays inconclusive, not newly partial", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep"
+				? makeClient(5000, [], { serverId: "opengrep" })
+				: makeClient(100, [], { serverId: "ts-primary" }),
+		);
+
+		const touch = service.touchFile(FILE, "per-edit", {
+			// The cascade neighbour fan-out's own shape (integration.ts).
+			clientScope: "all",
+			collectDiagnostics: true,
+			diagnostics: "document",
+			maxClientWaitMs: 1000,
+			silent: true,
+			source: "cascade",
+		});
+		await vi.advanceTimersByTimeAsync(6000);
+		const result = await touch;
+		// The pre-existing verdict, unchanged: the aggregate deadline lapsed.
+		expect(result?.inconclusive).toBe(true);
+		// And #1533 did not convert it into a confirmation claim of any kind, which is
+		// what `isConfirmedTouch` reads.
+		expect(result?.confirmation).toBeUndefined();
+	});
+
+	// #1531 (closes with #1544's per-path counter). `diagnosticsVersion` is a
+	// per-CLIENT counter, so two CONCURRENT touches sharing one auxiliary client can
+	// cross-satisfy: a publication for a.ts advances the counter b.ts's baseline is
+	// compared against, and b.ts reads `answered` on its sibling's evidence. The
+	// cascade neighbour fan-out is a `Promise.allSettled`, so this is the common
+	// shape, not a corner.
+	//
+	// FAIL-OPEN: the gap can only MISS a silence, never fabricate one, so it weakens
+	// the acceptance criterion for concurrent touches without making any verdict
+	// wrong. Skipped rather than deleted because it pins the DESIRED post-#1544
+	// behavior at the seam that will change; unskip it with that PR.
+	it.skip("#1531/#1544: a concurrent sibling's publication must not cover a silent touch", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		// ONE aux client shared by both files: it publishes for a.ts only.
+		let version = 0;
+		const auxClient = {
+			...makeClient(900, [], { serverId: "opengrep" }),
+			get diagnosticsVersion() {
+				return version;
+			},
+			waitForDiagnostics: vi.fn(
+				(filePath: string) =>
+					new Promise<void>((resolve) =>
+						setTimeout(() => {
+							if (filePath.endsWith("a.ts")) version += 1;
+							resolve();
+						}, 900),
+					),
+			),
+		};
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep"
+				? auxClient
+				: makeClient(100, [], { serverId: "ts-primary" }),
+		);
+
+		const touchOptions = {
+			clientScope: "all" as const,
+			collectDiagnostics: true,
+			diagnostics: "document" as const,
+		};
+		const [, second] = await (async () => {
+			const a = service.touchFile("C:/repo/a.ts", "one", touchOptions);
+			const b = service.touchFile("C:/repo/b.ts", "two", touchOptions);
+			await vi.advanceTimersByTimeAsync(5000);
+			return Promise.all([a, b]);
+		})();
+		// b.ts got no publication of its own. Post-#1544 the per-path counter makes
+		// that visible; today the shared counter hides it behind a.ts's bump.
+		expect(second?.confirmation).toBe("partial");
+		expect(second?.unconfirmedServerIds).toEqual(["opengrep"]);
+	});
+
 	it("does not enter a second wait: the touch still completes on the aggregate budget", async () => {
 		// The cost guard. #1459's resync gate absorbs the aux fan-out of an
 		// "all"-scope sweep; a per-neighbour aux grace here would pay that latency

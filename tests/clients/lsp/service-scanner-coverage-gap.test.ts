@@ -572,7 +572,10 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 
-		// The with-auxiliary path is the one that emits `lsp_aux_wait_outcome`.
+		// The with-auxiliary path, i.e. the `waitShape: "aux_grace"` producer. Since
+		// #1533 the `"all"` scope emits `lsp_aux_wait_outcome` too, so this probe pins
+		// the grace producer specifically; the aggregate producer's deferral row is
+		// pinned by its own test below.
 		const aux = makeClient("opengrep", NOTIFY_BUDGET_MS * 50, [], "never");
 		const primary = makeClient("typescript", 0, [
 			makeDiagnostic("primary finding"),

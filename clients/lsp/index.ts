@@ -3365,6 +3365,21 @@ export class LSPService {
 			// there is no separate post-primary aux phase to measure, so both describe
 			// the one aggregate wait. Both fields are kept so a query can read either
 			// producer's rows without special-casing the schema.
+			//
+			// KNOWN COMPOSITION GAP, stated so the next reader does not over-trust this
+			// (#1531, closed by the per-path counter in #1544). `diagnosticsVersion` is a
+			// per-CLIENT counter, not per-file, so two CONCURRENT touches sharing one
+			// auxiliary client can cross-satisfy: a publication for a.ts advances the
+			// counter that b.ts's baseline is compared against, and b.ts reads `answered`
+			// on a sibling's evidence. This is pre-existing and affects the grace path
+			// identically — the same counter, the same read — but it matters more here
+			// because the highest-frequency `"all"` caller (the cascade neighbour
+			// fan-out, `clients/dispatch/integration.ts`) is a `Promise.allSettled`, so
+			// its touches are always concurrent. The failure direction is FAIL-OPEN: it
+			// can MISS a silence, never fabricate one, so nothing here reports a gap that
+			// does not exist and the serial case is exact. Once #1544 makes the counter
+			// per-path this becomes exact for concurrent touches too, with no change
+			// needed at this read.
 			if (!hasTouchAuxiliaries && options.collectDiagnostics === true) {
 				const auxEntries = spawned.filter(
 					(entry) => entry.info.role === "auxiliary",

@@ -92,9 +92,19 @@ function makeServer(
 	};
 }
 
-/** A push-only server that never publishes — a clean file under marksman. */
+/**
+ * A push-only server that never publishes — a clean file under marksman.
+ *
+ * `diagnosticsVersion` is present and NEVER advances. That is the whole point of
+ * this double, and stating it explicitly matters: with the property absent, the
+ * pre-notify baseline is `undefined`, so #1533's evidence check reads "no
+ * publication" for the same reason it reads it for a genuinely silent server —
+ * the verdict would come from the fixture's omission rather than from modelled
+ * behavior (defect shape 7). Silence here is earned, not inferred from a gap.
+ */
 function makeSilentClient(serverId: string, root: string) {
 	return {
+		diagnosticsVersion: 0,
 		isAlive: () => true,
 		shutdown: async () => {},
 		getWorkspaceDiagnosticsSupport: () => ({
@@ -121,16 +131,33 @@ function makeSilentClient(serverId: string, root: string) {
 	};
 }
 
-/** A server that answers promptly (found something, or a confirmed empty). */
+/**
+ * A server that answers promptly (found something, or a confirmed empty).
+ *
+ * #1533: "answers" means a PUBLICATION LANDED, which advances
+ * `diagnosticsVersion` on a real client (`client.ts` `recordBinding`). An empty
+ * publication counts — that is exactly what makes a confirmed-clean scanner
+ * distinguishable from one that never spoke. `diagnosticsVersion` is a GETTER
+ * declared on THIS object rather than inherited through the spread of
+ * `makeSilentClient`, because a spread would evaluate a getter once and freeze
+ * it; the bump has to be observable after the wait resolves.
+ */
 function makeAnsweringClient(
 	serverId: string,
 	root: string,
 	filePath: string,
 	diagnostics: unknown[],
 ) {
+	let version = 0;
 	return {
 		...makeSilentClient(serverId, root),
-		waitForDiagnostics: vi.fn().mockResolvedValue(undefined),
+		get diagnosticsVersion() {
+			return version;
+		},
+		waitForDiagnostics: vi.fn(async () => {
+			version += 1;
+			return undefined;
+		}),
 		getDiagnostics: vi.fn(() => diagnostics),
 		getAllDiagnostics: vi.fn(
 			() =>

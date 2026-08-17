@@ -60,7 +60,14 @@ client cache. Carry them into that read only when their stored SHA-256 content
 binding matches the touch content exactly. Unknown or changed-content bindings
 never replay. (#1458)
 
-Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row.
+Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row, on
+both producers: the `with-auxiliary` grace wait (`waitShape: "aux_grace"`) and,
+since #1533, the `clientScope: "all"` aggregate wait (`waitShape: "aggregate"`),
+which derives the same evidence from post-wait state without arming a grace of
+its own. Read `waitShape` before comparing rows — `cut_off` cannot arise on the
+aggregate path, and its `durationMs` covers the WHOLE diagnostics wait rather
+than just the post-primary aux phase, so the same auxiliary reports a
+systematically larger number there.
 Its per-server outcomes record answered, silent, cut-off, or (#1459) deferred —
 a deferred scanner was never sent the content, so it must never occupy the
 `silent` row, which is reserved for one that had the content and published
