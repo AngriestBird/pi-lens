@@ -205,6 +205,13 @@ export interface AvailabilityDecision {
 	retryAfterMs?: number;
 	/** Probe budget the verdict was measured against, ms. */
 	budgetMs?: number;
+	/**
+	 * True when NO probe ran: the latch served a still-cooling verdict and the
+	 * caller opted to record it anyway (#1539). It keeps the opt-in rows below
+	 * separable from real decisions, so a reader counting probes and a reader
+	 * asking "how long has this been off" get different, honest answers.
+	 */
+	servedFromCooldown?: boolean;
 }
 
 /**
@@ -690,6 +697,7 @@ export function logAvailabilityDecision(
 				retryAfterMs: decision.retryAfterMs,
 			}),
 			...(decision.budgetMs !== undefined && { budgetMs: decision.budgetMs }),
+			...(decision.servedFromCooldown === true && { servedFromCooldown: true }),
 		},
 	});
 }
