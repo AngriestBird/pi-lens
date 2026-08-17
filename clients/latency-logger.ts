@@ -67,8 +67,14 @@ let lastPhase: { phase: string; ts: string } | undefined;
  * zero-duration siblings of the same shape, added alongside them.
  *
  * `lsp_aux_wait_outcome` (#1458) is DIFFERENT from every entry above: its
- * `durationMs` is a REAL bounded wait (the post-primary auxiliary grace, up
- * to a few seconds), not zero-duration decision telemetry. It is still
+ * `durationMs` is a REAL bounded wait, not zero-duration decision telemetry.
+ * WHICH wait depends on the row's `waitShape` (#1533), so read that field before
+ * comparing two rows: `"aux_grace"` measures only the post-primary auxiliary
+ * grace (up to a few seconds), while `"aggregate"` — the `clientScope: "all"`
+ * producer, which arms no grace of its own — measures the whole diagnostics wait
+ * from before the primaries settled. The `"aggregate"` number is therefore
+ * systematically larger for the same auxiliary; it is not a regression. It is
+ * still
  * excluded because it is a WAIT-OUTCOME RECORD written after the aux wait
  * already completed, not the stall itself — that wait ran inside the
  * `lsp_touch_file`/diagnostics phase surrounding it, so letting this summary
