@@ -69,16 +69,18 @@ const repoRoot = path.resolve(
  * Hand-rolled latches that predate this gate. Each is a real instance of the
  * shape, filed for its own fix; none may grow without a review noticing.
  */
-const KNOWN_GAPS: ReadonlyArray<{ id: string; why: string }> = [
-	{
-		id: "clients/pipeline.ts::tryEslintFix",
-		why: "`_eslintCache` latches an eslint --version verdict per cwd+PATH. Filed as #1494. Note this baseline covers ONLY this unit — `createCwdCachedProbe`'s eslint/credo/rust-clippy consumers are unrouted too but the gate does not detect them, so their absence here is a blind spot, not a clean bill.",
-	},
-];
+const KNOWN_GAPS: ReadonlyArray<{ id: string; why: string }> = [];
 
 /** Every consumer the #1467/#1476 sweeps migrated; the scan must still see them. */
 const KNOWN_CONSUMERS = [
 	"clients/biome-client.ts::BiomeClient",
+	// The three `createCwdCachedProbe` consumers #1494 migrated. They are visible
+	// to the scan only because the helper is now a recognised policy factory: the
+	// verdict they park is a handle it built, so de-routing one flags here.
+	"clients/dispatch/runners/credo.ts::probeCredo",
+	"clients/dispatch/runners/eslint.ts::getEslintProbe",
+	"clients/dispatch/runners/rust-clippy.ts::refreshClippyProbe",
+	"clients/pipeline.ts::tryEslintFix",
 	"clients/dead-code-client.ts::PythonDeadCodeClient",
 	"clients/dependency-checker.ts::DependencyChecker",
 	"clients/dispatch/dispatcher.ts::checkToolAvailability",

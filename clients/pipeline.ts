@@ -31,7 +31,11 @@ import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { loadDispatchIntegration } from "./dispatch/lazy.js";
 import { toRunnerDisplayPath } from "./dispatch/runner-context.js";
 import {
+	type AvailabilityLatch,
+	classifyProbeFailure,
 	createAvailabilityChecker,
+	createAvailabilityLatch,
+	logAvailabilityDecision,
 	resolveAvailableOrInstall,
 	resolveCommandArgsWithInstallFallback,
 	resolveToolCommand,
@@ -372,7 +376,18 @@ export {
 	hasStylelintConfig,
 };
 
-const _eslintCache = new BoundedLruCache<string, { available: boolean; bin: string | null }>(32);
+/**
+ * eslint autofix availability, per cwd + PATH. The verdict is owned by the
+ * shared availability latch (#1494): a `missing` / `non-installable` outcome
+ * sticks for the session, a timeout expires on a cooldown and is re-probed, so
+ * one stalled probe cannot silently stop autofixing a project's JS/TS.
+ */
+const ESLINT_FIX_PROBE_BUDGET_MS = 5000;
+
+const _eslintCache = new BoundedLruCache<
+	string,
+	{ latch: AvailabilityLatch; bin: string | null }
+>(32);
 
 /**
  * Run eslint --fix on a file. Runs a single spawn and diffs the file before/after,
@@ -390,18 +405,52 @@ async function tryEslintFix(filePath: string, cwd: string): Promise<number> {
 	const cacheKey = `${path.resolve(cwd)}|${process.env.PATH ?? ""}`;
 	let cached = _eslintCache.get(cacheKey);
 	if (!cached) {
-		const candidate = resolveToolCommand(cwd, "eslint") ?? "eslint";
-		const check = await safeSpawnAsync(candidate, ["--version"], {
-			timeout: 5000,
-			cwd,
-		});
-		cached = {
-			available: !check.error && check.status === 0,
-			bin: !check.error && check.status === 0 ? candidate : null,
-		};
+		cached = { latch: createAvailabilityLatch(), bin: null };
 		_eslintCache.set(cacheKey, cached);
 	}
-	if (!cached.available || !cached.bin) return 0;
+	if (cached.latch.read() === null) {
+		const candidate = resolveToolCommand(cwd, "eslint") ?? "eslint";
+		const startedAt = Date.now();
+		const check = await safeSpawnAsync(candidate, ["--version"], {
+			timeout: ESLINT_FIX_PROBE_BUDGET_MS,
+			cwd,
+		});
+		const elapsedMs = Date.now() - startedAt;
+		if (!check.error && check.status === 0) {
+			cached.bin = candidate;
+			cached.latch.noteAvailable();
+			logAvailabilityDecision(
+				{
+					tool: "eslint",
+					verdict: "available",
+					outcome: "success",
+					cause: "ok",
+					elapsedMs,
+					latched: true,
+					budgetMs: ESLINT_FIX_PROBE_BUDGET_MS,
+				},
+				cwd,
+			);
+		} else {
+			cached.bin = null;
+			const { outcome, cause } = classifyProbeFailure(check);
+			const retryAfterMs = cached.latch.noteUnavailable(outcome, cause);
+			logAvailabilityDecision(
+				{
+					tool: "eslint",
+					verdict: "unavailable",
+					outcome,
+					cause,
+					elapsedMs,
+					latched: retryAfterMs === 0,
+					...(retryAfterMs > 0 && { retryAfterMs }),
+					budgetMs: ESLINT_FIX_PROBE_BUDGET_MS,
+				},
+				cwd,
+			);
+		}
+	}
+	if (cached.latch.read() !== true || !cached.bin) return 0;
 	const cmd = cached.bin;
 
 	return detectFileChangedAfterCommand(

@@ -1,0 +1,289 @@
+/**
+ * #1494 — `createCwdCachedProbe` cached a boolean verdict per cwd forever, so
+ * one stalled `--version` probe disabled eslint, credo or clippy for that cwd
+ * until the host restarted. The three runners it feeds were the last consumers
+ * of that shape after #1467/#1476.
+ *
+ * These tests assert the shared seam AND each of the three runners, because the
+ * latch lives in the helper while the user-visible damage lands in the runners.
+ * `safeSpawnAsync` is mocked; the probe argv is asserted directly, so the tests
+ * do not depend on which function issues the spawn.
+ */
+
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { TRANSIENT_BASE_COOLDOWN_MS } from "../../../../clients/dispatch/runners/utils/availability-policy.ts";
+import {
+	createCwdCachedProbe,
+	resetDispatchAvailabilityState,
+} from "../../../../clients/dispatch/runners/utils/runner-helpers.ts";
+
+const { logLatencySpy, safeSpawnAsync, tryLazyInstall, findCargoPathAsync } =
+	vi.hoisted(() => ({
+		logLatencySpy: vi.fn(),
+		safeSpawnAsync: vi.fn(),
+		tryLazyInstall: vi.fn(async () => false),
+		findCargoPathAsync: vi.fn(async () => "cargo"),
+	}));
+
+vi.mock("../../../../clients/latency-logger.js", () => ({
+	logLatency: logLatencySpy,
+	getLastLoggedPhase: () => undefined,
+}));
+
+vi.mock("../../../../clients/safe-spawn.js", () => ({
+	safeSpawn: vi.fn(() => ({ stdout: "", stderr: "", status: 1 })),
+	safeSpawnAsync,
+}));
+
+vi.mock("../../../../clients/dispatch/runners/utils/lazy-installer.js", () => ({
+	tryLazyInstall,
+}));
+
+vi.mock("../../../../clients/rust-client.js", () => ({
+	RustClient: class {
+		findCargoPathAsync = findCargoPathAsync;
+	},
+}));
+
+const timeoutResult = () => ({
+	stdout: "",
+	stderr: "",
+	status: null,
+	error: new Error("Process timed out after 5000ms"),
+	failure: "timeout" as const,
+	spawnFailure: { kind: "timeout" } as never,
+});
+
+const notFoundResult = () => ({
+	stdout: "",
+	stderr: "",
+	status: null,
+	error: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }),
+	failure: "spawn" as const,
+	spawnFailure: { kind: "tool-not-found" } as never,
+});
+
+const okResult = (stdout = "1.0.0") => ({ stdout, stderr: "", status: 0 });
+
+const decisions = () =>
+	logLatencySpy.mock.calls
+		.map((call) => call[0])
+		.filter((entry) => entry?.phase === "availability_decision");
+
+function advancePastCooldown(): void {
+	vi.setSystemTime(new Date(Date.now() + TRANSIENT_BASE_COOLDOWN_MS + 1));
+}
+
+/** Calls whose argv asks a tool for its version. */
+function versionProbeCalls(): unknown[][] {
+	return safeSpawnAsync.mock.calls.filter((call) =>
+		(call[1] as string[] | undefined)?.includes("--version"),
+	);
+}
+
+function tempDir(prefix: string): string {
+	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+beforeEach(() => {
+	logLatencySpy.mockReset();
+	safeSpawnAsync.mockReset();
+	tryLazyInstall.mockReset();
+	tryLazyInstall.mockResolvedValue(false);
+	resetDispatchAvailabilityState();
+	vi.useFakeTimers({ toFake: ["Date"] });
+	return () => vi.useRealTimers();
+});
+
+describe("createCwdCachedProbe latch policy (#1494)", () => {
+	it("re-probes after a timeout once the cooldown expires", async () => {
+		const probe = vi
+			.fn()
+			.mockResolvedValueOnce(timeoutResult())
+			.mockResolvedValueOnce(okResult());
+		const cached = createCwdCachedProbe(probe, { tool: "widget" });
+
+		expect(await cached("/tmp/project-a")).toBe(false);
+		// Inside the cooldown the verdict is reused: no probe storm.
+		expect(await cached("/tmp/project-a")).toBe(false);
+		expect(probe).toHaveBeenCalledTimes(1);
+
+		advancePastCooldown();
+		expect(await cached("/tmp/project-a")).toBe(true);
+		expect(probe).toHaveBeenCalledTimes(2);
+	});
+
+	it("latches a genuine absence and never re-probes it", async () => {
+		const probe = vi.fn().mockResolvedValue(notFoundResult());
+		const cached = createCwdCachedProbe(probe, { tool: "widget" });
+
+		expect(await cached("/tmp/project-b")).toBe(false);
+		advancePastCooldown();
+		advancePastCooldown();
+		expect(await cached("/tmp/project-b")).toBe(false);
+		expect(probe).toHaveBeenCalledTimes(1);
+		expect(cached.getVerdict("/tmp/project-b")).toMatchObject({
+			outcome: "missing",
+			cause: "not-found",
+			latched: true,
+		});
+	});
+
+	it("records the cause and the retry window in availability_decision", async () => {
+		const probe = vi.fn().mockResolvedValue(timeoutResult());
+		const cached = createCwdCachedProbe(probe, {
+			tool: "widget",
+			budgetMs: 5000,
+		});
+
+		await cached("/tmp/project-c");
+		expect(decisions()).toHaveLength(1);
+		expect(decisions()[0]?.metadata).toMatchObject({
+			tool: "widget",
+			verdict: "unavailable",
+			outcome: "transient",
+			cause: "probe-timeout",
+			latched: false,
+			retryAfterMs: TRANSIENT_BASE_COOLDOWN_MS,
+			budgetMs: 5000,
+		});
+	});
+
+	it("dedupes concurrent first-time callers and scopes the verdict per cwd", async () => {
+		let settle: ((value: unknown) => void) | undefined;
+		const probe = vi
+			.fn()
+			.mockImplementationOnce(
+				() =>
+					new Promise((resolve) => {
+						settle = resolve;
+					}),
+			)
+			.mockResolvedValueOnce(notFoundResult());
+		const cached = createCwdCachedProbe(probe, { tool: "widget" });
+
+		const inFlight = [
+			cached("/tmp/project-d"),
+			cached("/tmp/project-d"),
+			cached("/tmp/project-d"),
+		];
+		expect(probe).toHaveBeenCalledTimes(1);
+		settle?.(okResult());
+		expect(await Promise.all(inFlight)).toEqual([true, true, true]);
+
+		expect(await cached("/tmp/project-e")).toBe(false);
+		expect(probe).toHaveBeenCalledTimes(2);
+	});
+
+	it("classifies a thrown probe instead of collapsing it to a latched false", async () => {
+		const probe = vi
+			.fn()
+			.mockRejectedValueOnce(
+				Object.assign(new Error("resource temporarily unavailable"), {
+					code: "EAGAIN",
+				}),
+			)
+			.mockResolvedValueOnce(okResult());
+		const cached = createCwdCachedProbe(probe, { tool: "widget" });
+
+		expect(await cached("/tmp/project-f")).toBe(false);
+		expect(cached.getVerdict("/tmp/project-f").outcome).toBe("transient");
+		advancePastCooldown();
+		expect(await cached("/tmp/project-f")).toBe(true);
+	});
+});
+
+describe("eslint runner: a stalled probe does not disable the runner (#1494)", () => {
+	it("re-probes and lints after the cooldown expires", async () => {
+		const cwd = tempDir("pi-lens-eslint-latch-");
+		fs.writeFileSync(path.join(cwd, "eslint.config.js"), "export default [];");
+		const filePath = path.join(cwd, "a.ts");
+		fs.writeFileSync(filePath, "export const a = 1;\n");
+
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+			args.includes("--version") ? timeoutResult() : okResult("[]"),
+		);
+		const runner = (await import("../../../../clients/dispatch/runners/eslint.ts"))
+			.default;
+		const ctx = { cwd, filePath } as never;
+
+		expect((await runner.run(ctx)).status).toBe("skipped");
+		expect(versionProbeCalls()).toHaveLength(1);
+		// Still inside the cooldown: skipped without a fresh probe.
+		expect((await runner.run(ctx)).status).toBe("skipped");
+		expect(versionProbeCalls()).toHaveLength(1);
+
+		advancePastCooldown();
+		safeSpawnAsync.mockClear();
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+			args.includes("--version") ? okResult() : okResult("[]"),
+		);
+		expect((await runner.run(ctx)).status).toBe("succeeded");
+		expect(versionProbeCalls()).toHaveLength(1);
+	});
+});
+
+describe("credo runner: a stalled probe does not disable the runner (#1494)", () => {
+	it("re-probes and runs credo after the cooldown expires", async () => {
+		const cwd = tempDir("pi-lens-credo-latch-");
+		fs.writeFileSync(path.join(cwd, "mix.exs"), "defmodule X do end");
+		const filePath = path.join(cwd, "a.ex");
+		fs.writeFileSync(filePath, "defmodule A do end\n");
+
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+			args.includes("--version")
+				? timeoutResult()
+				: okResult(JSON.stringify({ issues: [] })),
+		);
+		const runner = (await import("../../../../clients/dispatch/runners/credo.ts"))
+			.default;
+		const ctx = { cwd, filePath } as never;
+
+		expect((await runner.run(ctx)).status).toBe("skipped");
+		expect(versionProbeCalls()).toHaveLength(1);
+
+		advancePastCooldown();
+		safeSpawnAsync.mockClear();
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+			args.includes("--version")
+				? okResult()
+				: okResult(JSON.stringify({ issues: [] })),
+		);
+		expect((await runner.run(ctx)).status).toBe("succeeded");
+		expect(versionProbeCalls()).toHaveLength(1);
+	});
+});
+
+describe("rust-clippy runner: a stalled probe does not disable the runner (#1494)", () => {
+	it("skips without an install attempt, then re-probes after the cooldown", async () => {
+		const cwd = tempDir("pi-lens-clippy-latch-");
+		fs.writeFileSync(path.join(cwd, "Cargo.toml"), "[package]\nname='a'\n");
+		const filePath = path.join(cwd, "a.rs");
+		fs.writeFileSync(filePath, "fn main() {}\n");
+
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+			args.includes("--version") ? timeoutResult() : okResult(""),
+		);
+		const runner = (
+			await import("../../../../clients/dispatch/runners/rust-clippy.ts")
+		).default;
+		const ctx = { cwd, filePath } as never;
+
+		expect((await runner.run(ctx)).status).toBe("skipped");
+		expect(versionProbeCalls()).toHaveLength(1);
+		// A timeout is not evidence clippy is missing, so it must not drive an
+		// install — and it must not be remembered past its cooldown.
+		expect(tryLazyInstall).not.toHaveBeenCalled();
+
+		advancePastCooldown();
+		safeSpawnAsync.mockClear();
+		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
+			args.includes("--version") ? okResult() : okResult(""),
+		);
+		expect((await runner.run(ctx)).status).toBe("succeeded");
+		expect(versionProbeCalls()).toHaveLength(1);
+	});
+});

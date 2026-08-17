@@ -110,6 +110,11 @@ const POLICY_FACTORIES = new Set([
 	// toolchain clients (#1476). A client that hands its lifecycle to this
 	// factory is routed as surely as one that calls the latch itself.
 	"createToolchainAvailability",
+	// Same standing since #1494: it owns a per-cwd latch, the in-flight dedupe
+	// and the decision record for the multi-arg probes (eslint, credo, clippy).
+	// Before that migration it stored a bare boolean forever, and listing it here
+	// is what makes its consumers VISIBLE to the scan at all.
+	"createCwdCachedProbe",
 ]);
 const POLICY_CALLS = new Set([
 	...POLICY_FACTORIES,
@@ -443,8 +448,10 @@ function readImports(root: SgNode): {
 			// `runner-helpers.ts` for `createAvailabilityChecker`.
 			const fromToolchain = /utils\/toolchain-availability\.js$/.test(source);
 			for (const name of names) {
-				if (fromPolicy && POLICY_CALLS.has(name)) policyBindings.add(name);
-				if (fromHelpers && name === "createAvailabilityChecker") {
+				// `runner-helpers.ts` owns `createAvailabilityChecker` /
+				// `createCwdCachedProbe` and RE-EXPORTS the rest of the policy surface,
+				// so an import from there binds the same functions as the policy module.
+				if ((fromPolicy || fromHelpers) && POLICY_CALLS.has(name)) {
 					policyBindings.add(name);
 				}
 				if (fromToolchain && name === "createToolchainAvailability") {
@@ -589,6 +596,10 @@ function propagateProbeReach(
 	units: Array<{ name: string; facts: Omit<UnitFacts, "name"> }>,
 ): void {
 	const byName = new Map(units.map((unit) => [unit.name, unit.facts]));
+	// Whether a unit spawns on its OWN, captured before propagation starts. A
+	// unit that owns its spawn owns its classification too, so it never inherits
+	// a neighbour's routing (that separation is why the gate judges per unit).
+	const ownSpawn = new Map(units.map((unit) => [unit.facts, unit.facts.spawns]));
 	let changed = true;
 	while (changed) {
 		changed = false;
@@ -603,6 +614,19 @@ function propagateProbeReach(
 				if (callee.spawns && !unit.facts.spawns) {
 					unit.facts.spawns = true;
 					changed = true;
+				}
+				// The probe this unit memoizes is PERFORMED by the callee, so the
+				// callee's routing is this unit's routing: `getEslintProbe` parks a
+				// handle built by `makeEslintProbe`, and it is `makeEslintProbe` that
+				// hands the verdict to the shared policy (#1494). Only for a unit that
+				// does not spawn itself — otherwise a hand-rolled latch would launder
+				// its verdict through a compliant neighbour.
+				if (callee.spawns && !ownSpawn.get(unit.facts)) {
+					for (const policyCall of callee.policyCalls) {
+						if (unit.facts.policyCalls.has(policyCall)) continue;
+						unit.facts.policyCalls.add(policyCall);
+						changed = true;
+					}
 				}
 			}
 		}
