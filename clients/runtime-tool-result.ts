@@ -1107,6 +1107,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			filePath,
 			result.inlineBlockerSummary,
 			writeIndex,
+			result.inlineBlockerSources,
 		);
 	} else {
 		runtime.clearInlineBlockers(filePath);

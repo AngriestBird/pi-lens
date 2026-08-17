@@ -30,6 +30,10 @@ import { createDefaultHostPorts, type HostPorts } from "./clients/host-ports.js"
 import { AstGrepClient } from "./clients/ast-grep-client.js";
 import { loadBootstrapClients } from "./clients/bootstrap.js";
 import { CacheManager } from "./clients/cache-manager.js";
+// #1561 F2: the retire hook re-syncs the gate latch and the persisted record
+// the same way the per-dispatch path does, so a retired blocker stops gating
+// the commit.
+import { retireInlineBlockerAndResyncGuard } from "./clients/git-guard.js";
 import { resolvePackagePath } from "./clients/package-root.js";
 import {
 	clearWidgetState,
@@ -1410,10 +1414,21 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// inline blocker, not only correct the footer. The eviction is logged so
 			// it is confirmable from the runtime log rather than from the absence of
 			// complaints (#1432 Gap 1).
-			(filePath, writeIndex) => {
-				if (runtime.retireInlineBlockerOnConfirmedClean(filePath, writeIndex)) {
+			// #1561 F2: the retire also recomputes the commit-gate latch and the
+			// persisted record — see `retireInlineBlockerAndResyncGuard`.
+			({ filePath, writeIndex, coveredSources, cwd }) => {
+				const retired = retireInlineBlockerAndResyncGuard({
+					runtime,
+					cacheManager,
+					cwd,
+					filePath,
+					writeIndex,
+					coveredSources,
+					lensGuardEnabled: getLensFlag("lens-guard") === true,
+				});
+				if (retired) {
 					dbg(
-						`inline_blocker: retired for ${filePath} — lsp_diagnostics confirmed clean (writeIndex ${writeIndex ?? "none"})`,
+						`inline_blocker: retired for ${filePath} — lsp_diagnostics confirmed clean (writeIndex ${writeIndex ?? "none"}, covered ${coveredSources.join(",") || "none"})`,
 					);
 				}
 			},

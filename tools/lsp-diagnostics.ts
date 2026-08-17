@@ -22,7 +22,10 @@ import {
 	createWorkspaceDiagnosticsCacheContext,
 	type WorkspaceDiagnosticsCacheContext,
 } from "../clients/lsp/workspace-diagnostics-cache.js";
-import { primaryServerId } from "../clients/lsp/config.js";
+import {
+	getServersForFileWithConfig,
+	primaryServerId,
+} from "../clients/lsp/config.js";
 import { combineAbortSignals, withDeadline } from "../clients/deadline-utils.js";
 import {
 	applyAuxiliarySuppressions,
@@ -129,7 +132,7 @@ type BatchOptions = {
 	// #1561: per-file blocker-retire hook, threaded so a batch/directory sweep
 	// retires the same stale verdicts a single-file check does. A sibling surface
 	// left without it would be the very defect this fixes, one call site over.
-	onConfirmedNoBlockers?: (filePath: string, writeIndex?: number) => void;
+	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void;
 };
 
 type FileDiag = {
@@ -390,7 +393,7 @@ export function createLspDiagnosticsTool(
 	// injecting "Unresolved from this turn" for three more turns after answering
 	// "confirmed clean" for the same file. index.ts injects
 	// `runtime.retireInlineBlockerOnConfirmedClean`. Optional/undefined in tests.
-	onConfirmedNoBlockers?: (filePath: string, writeIndex?: number) => void,
+	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void,
 ) {
 	return {
 		name: "lsp_diagnostics" as const,
@@ -1012,6 +1015,60 @@ type LspReconcileVerdict = {
 	blocking: boolean;
 };
 
+/**
+ * #1561 F1: what this check is entitled to speak for.
+ *
+ * Inline blockers are raised by the whole dispatch — eslint, biome-check,
+ * actionlint, ast-grep security rules — while this tool only ever consults
+ * language servers. Retiring one therefore needs an explicit coverage claim,
+ * and the honest claim is exactly the servers this check consulted and got an
+ * answer from. `serverScope: "primary"` consults only the primary, so its claim
+ * is `"lsp"` alone; an all-scope check adds each auxiliary server by id, which
+ * is the same vocabulary `retagAuxiliaryDiagnostics` tags their findings with.
+ *
+ * A server named in `unconfirmedServerIds` is dropped: it produced no evidence
+ * for this content, so claiming coverage for it would be the #1470/#1493 lie one
+ * layer up. (Today an aux gap also demotes the whole verdict to "unconfirmed",
+ * so the hook does not fire at all — this stays correct if that ever narrows.)
+ */
+function coveredSourcesForCheck(
+	file: string,
+	serverScope: "primary" | "all",
+	unconfirmedServerIds: readonly string[],
+): string[] {
+	const unconfirmed = new Set(unconfirmedServerIds);
+	const covered = new Set<string>();
+	let servers: Array<{ id: string; role?: string }> = [];
+	try {
+		servers = (getServersForFileWithConfig(file) ?? []) as Array<{
+			id: string;
+			role?: string;
+		}>;
+	} catch {
+		// A registry we cannot read is not a coverage claim. Returning an empty
+		// set makes every retire fail closed, which is the safe direction for a
+		// commit gate.
+		return [];
+	}
+	for (const server of servers) {
+		const auxiliary = server.role === "auxiliary";
+		if (auxiliary && serverScope === "primary") continue;
+		if (unconfirmed.has(server.id)) continue;
+		// The dispatch runner tags the primary language server's findings `lsp`;
+		// auxiliaries keep their own tool id.
+		covered.add(auxiliary ? server.id : "lsp");
+	}
+	return [...covered];
+}
+
+/** #1561: everything the retire decision needs, as one argument. */
+export type ConfirmedNoBlockersInfo = {
+	filePath: string;
+	writeIndex?: number;
+	coveredSources: string[];
+	cwd: string;
+};
+
 function reconcileWidgetFromLspResult(
 	file: string,
 	rawDiags: LSPDiagnostic[],
@@ -1084,7 +1141,7 @@ async function collectFileDiagnosticResult(
 	// #1561: see `createLspDiagnosticsTool`'s parameter doc. Called only for a
 	// FRESH observation — never on the cache-hit replay below, whose `rawDiags`
 	// are an OLD observation (#1093) and therefore no evidence about now.
-	onConfirmedNoBlockers?: (filePath: string, writeIndex?: number) => void,
+	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void,
 ): Promise<FileDiagnosticResult> {
 	// Reserve the ordering token when this diagnostic operation starts, not when
 	// its LSP promise settles. A slower old result must not receive a newer token
@@ -1206,7 +1263,16 @@ async function collectFileDiagnosticResult(
 		boundMismatch,
 	);
 	if (verdict.confirmed && !verdict.blocking) {
-		onConfirmedNoBlockers?.(file, writeIndex);
+		onConfirmedNoBlockers?.({
+			filePath: file,
+			writeIndex,
+			coveredSources: coveredSourcesForCheck(
+				file,
+				serverScope,
+				unconfirmedServerIds,
+			),
+			cwd,
+		});
 	}
 	// #671: only a CONFIRMED outcome ("clean", or a non-empty result — either
 	// is definitionally confirmed per this function's own doctrine above) is
@@ -1246,7 +1312,7 @@ async function runFileDiagnostics(
 	cwd: string = process.cwd(),
 	// #1561: see `createLspDiagnosticsTool`'s parameter doc. This is the path the
 	// live incident took (`mode: "file"`).
-	onConfirmedNoBlockers?: (filePath: string, writeIndex?: number) => void,
+	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void,
 ) {
 	// Reserve the token before awaiting this file's LSP result. The direct-file
 	// path performs its own confirmation/reconciliation below (#1198).
@@ -1329,7 +1395,16 @@ async function runFileDiagnostics(
 	// but never reached, which is how a resolved cross-file finding kept being
 	// injected as "Unresolved from this turn" for the rest of the session.
 	if (verdict.confirmed && !verdict.blocking) {
-		onConfirmedNoBlockers?.(absPath, writeIndex);
+		onConfirmedNoBlockers?.({
+			filePath: absPath,
+			writeIndex,
+			coveredSources: coveredSourcesForCheck(
+				absPath,
+				serverScope,
+				unconfirmedServerIds,
+			),
+			cwd,
+		});
 	}
 
 	const primaryId = primaryServerId(absPath);

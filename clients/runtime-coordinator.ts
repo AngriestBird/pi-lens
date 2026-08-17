@@ -155,6 +155,18 @@ export class RuntimeCoordinator {
 		 * not erase a newer blocker) are unenforceable.
 		 */
 		writeIndex?: number;
+		/**
+		 * #1561 F1: the `tool` ids of the blocking diagnostics behind this
+		 * summary. Inline blockers are NOT an LSP-only concept — `dispatcher.ts`
+		 * builds them from `semantic === "blocking"` across EVERY runner, so an
+		 * eslint, biome-check, actionlint, or ast-grep security-rule finding
+		 * (`cors-wildcard`, `no-commented-credentials`) lands here too. A retire
+		 * driven by a language-server verdict must therefore prove it covers the
+		 * sources that actually raised the blocker; without this field the record
+		 * carries no way to tell an `lsp`-origin blocker from a security-rule one,
+		 * and an LSP-only clean silently retires both.
+		 */
+		sources?: readonly string[];
 	}>(normalizeMapKey);
 	private readonly _actionableWarningsThisTurn = new Map<
 		string,
@@ -657,11 +669,13 @@ export class RuntimeCoordinator {
 		filePath: string,
 		summary: string,
 		writeIndex?: number,
+		sources?: readonly string[],
 	): void {
 		this._pendingInlineBlockers.set(path.resolve(filePath), {
 			filePath,
 			summary,
 			writeIndex,
+			sources,
 		});
 	}
 
@@ -695,12 +709,24 @@ export class RuntimeCoordinator {
 	 * actual observation of current content. Only production's single record site
 	 * is stamped, so in practice the unstamped branch is legacy callers/tests.
 	 *
+	 * COVERAGE (#1561 F1). A blocker is retired only by a verdict that can speak
+	 * for the tools that raised it. Inline blockers come from the whole dispatch,
+	 * not just the language server: `dispatcher.ts` collects every
+	 * `semantic === "blocking"` diagnostic across all runners, so eslint,
+	 * biome-check, actionlint, elixir/gleam-check and ast-grep security rules all
+	 * land in this map. A language-server check knows nothing about any of them,
+	 * so `coveredSources` must be a SUPERSET of the recorded sources or the entry
+	 * stands. This is a commit gate: a record whose provenance is unknown (no
+	 * `sources`) fails CLOSED and is never retired, because "we don't know what
+	 * raised this" must not resolve to "an LSP check can clear it".
+	 *
 	 * @returns true when an entry was retired — the caller logs it, so an
 	 * eviction is never silent (#1432 Gap 1).
 	 */
 	retireInlineBlockerOnConfirmedClean(
 		filePath: string,
 		confirmedAtWriteIndex?: number,
+		coveredSources?: readonly string[],
 	): boolean {
 		const key = path.resolve(filePath);
 		const existing = this._pendingInlineBlockers.get(key);
@@ -712,6 +738,12 @@ export class RuntimeCoordinator {
 		) {
 			return false;
 		}
+		// Fail closed on unknown provenance, and on any source the fresh verdict
+		// did not consult. An eslint-origin blocker outliving an LSP-only clean is
+		// the correct outcome — the next dispatch of that file is what clears it.
+		if (!existing.sources || existing.sources.length === 0) return false;
+		const covered = new Set(coveredSources ?? []);
+		if (!existing.sources.every((source) => covered.has(source))) return false;
 		this._pendingInlineBlockers.delete(key);
 		return true;
 	}

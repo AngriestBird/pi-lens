@@ -268,17 +268,74 @@ describe("RuntimeCoordinator", () => {
 			writeFileSync(testFile, "import './provider.ts';\n");
 			writeFileSync(provider, "export const x = 1;\n");
 			try {
-				runtime.recordInlineBlockers(testFile, "🔴 STOP L320", 1);
+				runtime.recordInlineBlockers(testFile, "🔴 STOP L320", 1, ["lsp"]);
 				// The fix: the PROVIDER re-dispatches clean. Its own entry clears…
 				runtime.clearInlineBlockers(provider);
 				// …and the test file's stale verdict is still there, by design.
 				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
 
 				// A fresh, confirmed-clean view of the test file must retire it.
-				expect(runtime.retireInlineBlockerOnConfirmedClean(testFile, 2)).toBe(
-					true,
-				);
+				expect(
+					runtime.retireInlineBlockerOnConfirmedClean(testFile, 2, ["lsp"]),
+				).toBe(true);
 				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it("#1561 F1: refuses to retire a source the verdict did not cover", () => {
+			// Inline blockers span every runner, not just the language server —
+			// `dispatcher.ts` filters `semantic === "blocking"` across all of them.
+			// An LSP-only clean must not clear an ast-grep security rule.
+			const runtime = new RuntimeCoordinator();
+			const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-blocker-source-"));
+			const file = path.join(dir, "app.ts");
+			writeFileSync(file, "export const x = 1;\n");
+			try {
+				runtime.recordInlineBlockers(file, "🔴 STOP cors-wildcard", 1, [
+					"ast-grep",
+				]);
+				expect(
+					runtime.retireInlineBlockerOnConfirmedClean(file, 2, ["lsp"]),
+				).toBe(false);
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
+
+				// Partial coverage is not coverage.
+				runtime.recordInlineBlockers(file, "🔴 STOP", 1, ["lsp", "eslint"]);
+				expect(
+					runtime.retireInlineBlockerOnConfirmedClean(file, 2, [
+						"lsp",
+						"ast-grep",
+					]),
+				).toBe(false);
+
+				// Full coverage does retire.
+				expect(
+					runtime.retireInlineBlockerOnConfirmedClean(file, 2, [
+						"lsp",
+						"eslint",
+					]),
+				).toBe(true);
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+
+		it("#1561 F1: a record with unknown provenance fails closed", () => {
+			const runtime = new RuntimeCoordinator();
+			const dir = mkdtempSync(path.join(tmpdir(), "pi-lens-blocker-unknown-"));
+			const file = path.join(dir, "app.ts");
+			writeFileSync(file, "export const x = 1;\n");
+			try {
+				// No sources recorded — "we don't know what raised this" must not
+				// resolve to "an LSP check can clear it".
+				runtime.recordInlineBlockers(file, "🔴 STOP", 1);
+				expect(
+					runtime.retireInlineBlockerOnConfirmedClean(file, 2, ["lsp"]),
+				).toBe(false);
+				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
 			} finally {
 				rmSync(dir, { recursive: true, force: true });
 			}
@@ -292,14 +349,20 @@ describe("RuntimeCoordinator", () => {
 			try {
 				// A clean check that STARTED at token 4 settles after a dispatch at
 				// token 7 found real blockers. The slow old answer must lose.
-				runtime.recordInlineBlockers(file, "🔴 STOP", 7);
-				expect(runtime.retireInlineBlockerOnConfirmedClean(file, 4)).toBe(false);
+				runtime.recordInlineBlockers(file, "🔴 STOP", 7, ["lsp"]);
+				expect(
+					runtime.retireInlineBlockerOnConfirmedClean(file, 4, ["lsp"]),
+				).toBe(false);
 				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
 				// Equal tokens are the same observation, not a newer one.
-				expect(runtime.retireInlineBlockerOnConfirmedClean(file, 7)).toBe(false);
+				expect(
+					runtime.retireInlineBlockerOnConfirmedClean(file, 7, ["lsp"]),
+				).toBe(false);
 				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(1);
 				// Strictly newer retires.
-				expect(runtime.retireInlineBlockerOnConfirmedClean(file, 8)).toBe(true);
+				expect(
+					runtime.retireInlineBlockerOnConfirmedClean(file, 8, ["lsp"]),
+				).toBe(true);
 				expect(runtime.getInlineBlockersSnapshot()).toHaveLength(0);
 			} finally {
 				rmSync(dir, { recursive: true, force: true });
@@ -324,11 +387,13 @@ describe("RuntimeCoordinator", () => {
 			const file = path.join(dir, "gated.ts");
 			writeFileSync(file, "export const x = 1;\n");
 			try {
-				runtime.recordInlineBlockers(file, "🔴 STOP", 1);
+				runtime.recordInlineBlockers(file, "🔴 STOP", 1, ["lsp"]);
 				runtime.updateGitGuardStatus(false, "");
 				expect(runtime.gitGuardHasBlockers).toBe(true);
 
-				expect(runtime.retireInlineBlockerOnConfirmedClean(file, 2)).toBe(true);
+				expect(
+					runtime.retireInlineBlockerOnConfirmedClean(file, 2, ["lsp"]),
+				).toBe(true);
 				runtime.updateGitGuardStatus(false, "");
 				expect(runtime.gitGuardHasBlockers).toBe(false);
 			} finally {
