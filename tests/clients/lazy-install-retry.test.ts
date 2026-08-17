@@ -324,6 +324,48 @@ describe("concurrent callers share one install (#1537 review F3)", () => {
 		expect(await tryLazyInstall("rubocop", cwd)).toBe(true);
 	});
 
+	it("does not settle an old session's attempt count into a new session (#1537 review P3)", async () => {
+		// `resetLazyInstallAttempts` clears `attempts` but deliberately leaves
+		// `inFlight`, so an install can outlive the session that started it. The
+		// attempt counter used to be captured BEFORE the ≤180 s spawn and written
+		// after it settled, so that survivor stamped the OLD session's count onto
+		// the NEW session's empty map: burn rungs 1 and 2, have the third settle
+		// across `session_start`, and the fresh session opened already HELD with
+		// zero attempts of its own.
+		const cwd = freshCwd();
+		safeSpawnAsync.mockResolvedValue(failedResult);
+
+		// Rungs 1 and 2 of the old session.
+		expect(await tryLazyInstall("rubocop", cwd)).toBe(false);
+		advance(installRetryDelayMs(1) + 1);
+		expect(await tryLazyInstall("rubocop", cwd)).toBe(false);
+		advance(installRetryDelayMs(2) + 1);
+
+		// The third install is still in flight when the session turns over.
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		safeSpawnAsync.mockImplementation(async () => {
+			await gate;
+			return failedResult;
+		});
+		const survivor = tryLazyInstall("rubocop", cwd);
+		resetLazyInstallAttempts();
+		release?.();
+		expect(await survivor).toBe(false);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(3);
+
+		// The new session must still own a ladder. Either the settle counts as its
+		// first attempt or it is dropped entirely — both are fine. What must not
+		// happen is a fresh session that is already held.
+		const spawnsBefore = safeSpawnAsync.mock.calls.length;
+		safeSpawnAsync.mockResolvedValue(okResult);
+		advance(installRetryDelayMs(1) + 1);
+		expect(await tryLazyInstall("rubocop", cwd)).toBe(true);
+		expect(safeSpawnAsync.mock.calls.length).toBe(spawnsBefore + 1);
+	});
+
 	it("gives every concurrent caller the same answer on success", async () => {
 		const cwd = freshCwd();
 		let release: (() => void) | undefined;

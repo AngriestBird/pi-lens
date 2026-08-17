@@ -214,7 +214,7 @@ async function runLazyInstall(
 		return false;
 	}
 
-	const started = performInstall(k, tool, cwd, spec, previous);
+	const started = performInstall(k, tool, cwd, spec);
 	inFlight.set(k, started);
 	try {
 		return await started;
@@ -228,7 +228,6 @@ async function performInstall(
 	tool: LazyInstallTool,
 	cwd: string,
 	spec: LazyInstallSpec,
-	previous: LazyInstallState | undefined,
 ): Promise<boolean> {
 	let result: Awaited<ReturnType<typeof safeSpawnAsync>>;
 	try {
@@ -277,7 +276,19 @@ async function performInstall(
 		.trim()
 		.slice(0, 200);
 
-	const transientAttempts = durable ? 0 : (previous?.transientAttempts ?? 0) + 1;
+	// Re-read the record rather than trusting one captured before the spawn
+	// (#1537 review P3). `resetLazyInstallAttempts` clears `attempts` but leaves
+	// `inFlight`, so an install can outlive the session that started it — and a
+	// captured counter let that survivor stamp the OLD session's attempt count
+	// onto the NEW session's empty map, opening a fresh session already HELD with
+	// no attempts of its own. Re-reading makes the settle count as attempt 1 of
+	// whatever session is current. Nothing else can write this key while the
+	// install is in flight (the in-flight map is what guarantees that), so in the
+	// ordinary case this reads exactly what was captured.
+	const settledPrevious = attempts.get(k);
+	const transientAttempts = durable
+		? 0
+		: (settledPrevious?.transientAttempts ?? 0) + 1;
 	// The ceiling is READ OFF the ladder: `installRetryDelayMs` returns 0 once its
 	// list is spent, which is the same "no retry, the verdict is latched" signal
 	// `noteUnavailable` returns. No separate max-attempts comparison to disagree
