@@ -30,10 +30,7 @@ import {
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { assertInstallAllowed } from "./project-trust.js";
-import {
-	resetLazyInstallAttempts,
-	tryLazyInstallForFormatter,
-} from "./dispatch/runners/utils/lazy-installer.js";
+import { tryLazyInstallForFormatter } from "./dispatch/runners/utils/lazy-installer.js";
 import {
 	getAutoInstallToolIdForFormatter,
 	getFormatterPolicyForFile,
@@ -1449,9 +1446,11 @@ export function clearFormatterCache(): void {
 export function clearFormatterRuntimeState(): void {
 	detectionCache.clear();
 	resetWhichLatches();
-	// Shared with the runner seam now (#1537), which had no session reset of its
-	// own — a durable hold used to outlive the session that justified it.
-	resetLazyInstallAttempts();
+	// NO `resetLazyInstallAttempts()` here (#1537 review F1). This function runs
+	// from `resetFormatService()`, which `handleTurnEnd` calls every turn — so
+	// clearing the lazy-install hold here made "held for the session" mean "held
+	// for a turn", and a failing install re-ran every turn. The hold's only reset
+	// is `session_start`'s block in runtime-session.ts.
 }
 
 // ESC is built via fromCharCode so no raw control byte sits in the source.

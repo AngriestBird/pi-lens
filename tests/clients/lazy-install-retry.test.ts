@@ -18,22 +18,41 @@ import {
 	resetProjectTrust,
 	setProjectTrustState,
 } from "../../clients/project-trust.js";
-import { describeInstallAttempt } from "../../clients/dispatch/runners/utils/availability-policy.js";
 import {
-	LAZY_INSTALL_BASE_COOLDOWN_MS,
-	LAZY_INSTALL_MAX_COOLDOWN_MS,
-	LAZY_INSTALL_MAX_TRANSIENT_ATTEMPTS,
+	INSTALL_TRANSIENT_COOLDOWNS_MS,
+	INSTALL_TRANSIENT_MAX_ATTEMPTS,
+	describeInstallAttempt,
+	installRetryDelayMs,
+} from "../../clients/dispatch/runners/utils/availability-policy.js";
+import {
 	getLazyInstallAttempt,
-	lazyInstallRetryDelayMs,
 	resetLazyInstallAttempts,
 	tryLazyInstall,
 } from "../../clients/dispatch/runners/utils/lazy-installer.js";
+
+/** The first cooldown the shared install ladder owes (#1514's list, not a formula). */
+const FIRST_COOLDOWN_MS = INSTALL_TRANSIENT_COOLDOWNS_MS[0] ?? 0;
 
 const { safeSpawnAsync } = vi.hoisted(() => ({ safeSpawnAsync: vi.fn() }));
 
 vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../clients/safe-spawn.js")>()),
 	safeSpawnAsync,
+}));
+
+// The session_start wiring assertion drives the real handler, so the heavy
+// collaborators it reaches are stubbed the same way
+// `runtime-session-dispatch-reset.test.ts` stubs them.
+vi.mock("../../clients/lsp/config.js", () => ({
+	loadLSPConfig: vi.fn().mockResolvedValue({}),
+	initLSPConfig: vi.fn().mockResolvedValue(undefined),
+	getServerInitOverride: vi.fn().mockReturnValue(undefined),
+}));
+vi.mock("../../clients/lsp/index.js", () => ({
+	getLSPService: vi.fn(() => ({
+		touchFile: vi.fn().mockResolvedValue(undefined),
+		supportsLSP: () => false,
+	})),
 }));
 
 const okResult = { stdout: "", stderr: "", status: 0 };
@@ -70,6 +89,55 @@ const managerMissingResult = {
 
 const advance = (ms: number) => vi.setSystemTime(new Date(Date.now() + ms));
 
+/** Minimal deps for the real `handleSessionStart`, per the #1266 test's shape. */
+function makeSessionStartDeps(ctxCwd: string): Parameters<
+	typeof import("../../clients/runtime-session.js").handleSessionStart
+>[0] {
+	const unavailable = {
+		isAvailable: () => false,
+		ensureAvailable: async () => false,
+	};
+	return {
+		ctxCwd,
+		getFlag: () => false,
+		notify: vi.fn(),
+		dbg: () => {},
+		log: () => {},
+		runtime: {
+			sessionGeneration: 1,
+			isCurrentSession: () => true,
+			markStartupScanInFlight: () => {},
+			clearStartupScanInFlight: () => {},
+			complexityBaselines: new Map(),
+			resetForSession: () => {},
+			projectRoot: "",
+			projectRulesScan: { hasCustomRules: false, rules: [] },
+			cachedExports: new Map(),
+			errorDebtBaseline: { testsPassed: true, buildPassed: true },
+		},
+		metricsClient: { reset: () => {} },
+		cacheManager: { writeCache: () => {}, readCache: () => null },
+		todoScanner: { scanDirectory: () => ({ items: [] }) },
+		astGrepClient: { ...unavailable, scanExports: async () => new Map() },
+		biomeClient: unavailable,
+		ruffClient: unavailable,
+		knipClient: unavailable,
+		jscpdClient: unavailable,
+		depChecker: unavailable,
+		testRunnerClient: {
+			detectRunner: () => ({ runner: "vitest", config: null }),
+			runTestFile: () => ({ failed: 1, error: false }),
+		},
+		goClient: { isGoAvailableAsync: async () => false },
+		rustClient: { isAvailableAsync: async () => false },
+		ensureTool: vi.fn(async () => null),
+		cleanStaleTsBuildInfo: () => [],
+		resetDispatchBaselines: () => {},
+		resetLSPService: () => {},
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	} as any;
+}
+
 let cwdSeq = 0;
 const freshCwd = () => `/proj/lazy-install-${cwdSeq++}`;
 
@@ -92,7 +160,7 @@ describe("a transient lazy-install failure is retried (#1537)", () => {
 		expect(await tryLazyInstall("rust-clippy", cwd)).toBe(false);
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
 
-		advance(LAZY_INSTALL_BASE_COOLDOWN_MS + 1);
+		advance(FIRST_COOLDOWN_MS + 1);
 		safeSpawnAsync.mockResolvedValue(okResult);
 		expect(await tryLazyInstall("rust-clippy", cwd)).toBe(true);
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(2);
@@ -109,7 +177,7 @@ describe("a transient lazy-install failure is retried (#1537)", () => {
 		expect(await tryLazyInstallFormatterTool("rubocop", cwd)).toBe(false);
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
 
-		advance(LAZY_INSTALL_BASE_COOLDOWN_MS + 1);
+		advance(FIRST_COOLDOWN_MS + 1);
 		safeSpawnAsync.mockResolvedValue(okResult);
 		expect(await tryLazyInstallFormatterTool("rubocop", cwd)).toBe(true);
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(2);
@@ -124,7 +192,7 @@ describe("a transient lazy-install failure is retried (#1537)", () => {
 
 		expect(await tryLazyInstall("rust-clippy", cwd)).toBe(false);
 		for (let i = 0; i < 5; i++) {
-			advance(LAZY_INSTALL_BASE_COOLDOWN_MS / 10);
+			advance(FIRST_COOLDOWN_MS / 10);
 			expect(await tryLazyInstall("rust-clippy", cwd)).toBe(false);
 		}
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
@@ -136,32 +204,189 @@ describe("a transient lazy-install failure is retried (#1537)", () => {
 		const cwd = freshCwd();
 		safeSpawnAsync.mockResolvedValue(timedOutResult);
 
-		for (let attempt = 1; attempt <= LAZY_INSTALL_MAX_TRANSIENT_ATTEMPTS; attempt++) {
+		for (let attempt = 1; attempt <= INSTALL_TRANSIENT_MAX_ATTEMPTS; attempt++) {
 			expect(await tryLazyInstall("rust-clippy", cwd)).toBe(false);
-			advance(lazyInstallRetryDelayMs(attempt) + 1);
+			advance(installRetryDelayMs(attempt) + 1);
 		}
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(
-			LAZY_INSTALL_MAX_TRANSIENT_ATTEMPTS,
+			INSTALL_TRANSIENT_MAX_ATTEMPTS,
 		);
 
 		// Past every cooldown the ladder could produce: still held.
-		advance(LAZY_INSTALL_BASE_COOLDOWN_MS * 1000);
+		advance(FIRST_COOLDOWN_MS * 1000);
 		expect(await tryLazyInstall("rust-clippy", cwd)).toBe(false);
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(
-			LAZY_INSTALL_MAX_TRANSIENT_ATTEMPTS,
+			INSTALL_TRANSIENT_MAX_ATTEMPTS,
 		);
 	});
 });
 
-describe("the retry ladder respects the caller's cadence (#1537)", () => {
-	it("starts far above a save interval and caps", () => {
-		// The cooldown-vs-cadence screen. These installs are up to 3 minutes and
-		// both entry points are reached per save, so a probe-sized 30 s base would
-		// make the guard decorative.
-		expect(lazyInstallRetryDelayMs(1)).toBe(LAZY_INSTALL_BASE_COOLDOWN_MS);
-		expect(lazyInstallRetryDelayMs(2)).toBe(LAZY_INSTALL_BASE_COOLDOWN_MS * 2);
-		expect(lazyInstallRetryDelayMs(50)).toBe(LAZY_INSTALL_MAX_COOLDOWN_MS);
-		expect(LAZY_INSTALL_BASE_COOLDOWN_MS).toBeGreaterThan(60_000);
+describe("the retry ladder is the shared install-class one (#1537 review F2)", () => {
+	it("uses #1514's ladder, with no second copy to drift from it", () => {
+		// The first cut wrote its own doubling formula with a 30-minute cap and a
+		// 3-attempt ceiling that could never reach it — the exact pattern #1514's
+		// review rejected, and which availability-policy.ts now documents as
+		// rejected. There is one ladder: an explicit list whose length IS the
+		// ceiling, no arithmetic, nothing unreachable.
+		expect(INSTALL_TRANSIENT_MAX_ATTEMPTS).toBe(
+			INSTALL_TRANSIENT_COOLDOWNS_MS.length + 1,
+		);
+		// Every rung is reachable, and the last attempt is owed no cooldown at all
+		// — 0 is the ladder's own "held" signal.
+		for (let attempt = 1; attempt < INSTALL_TRANSIENT_MAX_ATTEMPTS; attempt++) {
+			expect(installRetryDelayMs(attempt)).toBeGreaterThan(0);
+		}
+		expect(installRetryDelayMs(INSTALL_TRANSIENT_MAX_ATTEMPTS)).toBe(0);
+
+		// The cooldown-vs-cadence screen: these installs are up to 3 minutes and
+		// both entry points are reached per save, so a probe-sized 30 s first rung
+		// would make the guard decorative.
+		expect(FIRST_COOLDOWN_MS).toBeGreaterThan(60_000);
+	});
+});
+
+describe("only a session boundary clears a lazy-install hold (#1537 review F1)", () => {
+	it("survives a turn boundary", async () => {
+		// The hold was reachable only through `clearFormatterRuntimeState()`
+		// (formatters.ts) <- `resetFormatService()` (format-service.ts) <-
+		// `handleTurnEnd` (runtime-turn.ts:309,327,1719,1835). That runs EVERY
+		// TURN, so "held for the session" was held for a turn: six turns against a
+		// missing package manager meant six `gem install` spawns where the pre-fix
+		// code managed one, and the InstallAttemptFact was wiped at the same
+		// moment. A transient failure meant a full 180 s install per turn — the
+		// #1497 storm this fix cites in its own docstring.
+		const { clearFormatterRuntimeState } = await import(
+			"../../clients/formatters.js"
+		);
+		const cwd = freshCwd();
+		safeSpawnAsync.mockResolvedValue(managerMissingResult);
+		expect(await tryLazyInstall("rubocop", cwd)).toBe(false);
+
+		for (let turn = 0; turn < 6; turn++) {
+			clearFormatterRuntimeState();
+			expect(await tryLazyInstall("rubocop", cwd)).toBe(false);
+		}
+		// One spawn across six turn boundaries.
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+		expect(getLazyInstallAttempt("rubocop", cwd)?.outcome).toBe("failed");
+	});
+
+	it("is cleared by the real session_start handler, not just by the helper", async () => {
+		// The wiring assertion. The previous test passed under BOTH wirings, which
+		// is precisely how the turn-boundary reset went unnoticed: it proved the
+		// helper works when called directly, never that production calls it at the
+		// right boundary (the #1266 lesson, and the pattern
+		// `runtime-session-dispatch-reset.test.ts` established).
+		const { handleSessionStart } = await import(
+			"../../clients/runtime-session.js"
+		);
+		const cwd = freshCwd();
+		safeSpawnAsync.mockResolvedValue(managerMissingResult);
+		expect(await tryLazyInstall("rubocop", cwd)).toBe(false);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+
+		await handleSessionStart(makeSessionStartDeps(cwd));
+
+		safeSpawnAsync.mockResolvedValue(okResult);
+		expect(await tryLazyInstall("rubocop", cwd)).toBe(true);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("concurrent callers share one install (#1537 review F3)", () => {
+	it("spawns once for callers that arrive during the install", async () => {
+		// Check-then-act split by a 180-second await. The storm-guard test above is
+		// SEQUENTIAL, so it never saw this: three concurrent callers each read "no
+		// record yet" and each spawned, the ladder counted one failure, and a stale
+		// success could overwrite a later failure.
+		const cwd = freshCwd();
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		safeSpawnAsync.mockImplementation(async () => {
+			await gate;
+			return failedResult;
+		});
+
+		const inFlight = [
+			tryLazyInstall("rubocop", cwd),
+			tryLazyInstall("rubocop", cwd),
+			tryLazyInstall("rubocop", cwd),
+		];
+		release?.();
+		expect(await Promise.all(inFlight)).toEqual([false, false, false]);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+
+		// One failure, so one rung of the ladder is spent — not three.
+		advance(FIRST_COOLDOWN_MS + 1);
+		safeSpawnAsync.mockResolvedValue(okResult);
+		expect(await tryLazyInstall("rubocop", cwd)).toBe(true);
+	});
+
+	it("gives every concurrent caller the same answer on success", async () => {
+		const cwd = freshCwd();
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		safeSpawnAsync.mockImplementation(async () => {
+			await gate;
+			return okResult;
+		});
+
+		const inFlight = [
+			tryLazyInstall("rust-clippy", cwd),
+			tryLazyInstall("rust-clippy", cwd),
+		];
+		release?.();
+		// Both callers observe the install they were waiting on, rather than one of
+		// them being told "already handled" for an install that had not finished.
+		expect(await Promise.all(inFlight)).toEqual([true, true]);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("the two seams share one hold per tool+cwd (#1537 review F4)", () => {
+	it("suppresses the formatter seam after the runner seam already tried", async () => {
+		// A deliberate consequence of merging the copies, pinned so it cannot drift
+		// back silently: `gem install rubocop` is a MACHINE-GLOBAL install, so the
+		// second seam asking for the same one must be suppressed, not run again.
+		const { tryLazyInstallFormatterTool } = await import(
+			"../../clients/formatters.js"
+		);
+		const cwd = freshCwd();
+		safeSpawnAsync.mockResolvedValue(managerMissingResult);
+
+		expect(await tryLazyInstall("rubocop", cwd)).toBe(false);
+		expect(await tryLazyInstallFormatterTool("rubocop", cwd)).toBe(false);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+	});
+
+	it("uses the same spawn options whichever seam wins the race", async () => {
+		// Sharing a hold while the options depended on WHICH caller happened to
+		// spawn first made cancellation semantics nondeterministic. The options are
+		// a property of the tool now, so both orders produce the same spawn.
+		const { tryLazyInstallFormatterTool } = await import(
+			"../../clients/formatters.js"
+		);
+		safeSpawnAsync.mockResolvedValue(okResult);
+
+		// Distinct cwds, so each seam actually spawns; `cwd` is the one option that
+		// legitimately differs, so it is excluded from the comparison.
+		const spawnShape = () => {
+			const call = safeSpawnAsync.mock.calls.at(-1);
+			const { cwd: _cwd, ...options } = (call?.[2] ?? {}) as Record<string, unknown>;
+			return { command: call?.[0], args: call?.[1], options };
+		};
+
+		await tryLazyInstall("rubocop", freshCwd());
+		const viaRunner = spawnShape();
+		await tryLazyInstallFormatterTool("rubocop", freshCwd());
+		const viaFormatter = spawnShape();
+
+		expect(viaFormatter).toEqual(viaRunner);
+		expect(viaRunner.options).toMatchObject({ ignoreAmbientSignal: true });
 	});
 });
 
@@ -174,7 +399,7 @@ describe("a durable lazy-install failure keeps its session-long hold (#1537)", (
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
 
 		// No cooldown expiry rescues this: there is no `gem` to run.
-		advance(LAZY_INSTALL_BASE_COOLDOWN_MS * 100);
+		advance(FIRST_COOLDOWN_MS * 100);
 		expect(await tryLazyInstall("rubocop", cwd)).toBe(false);
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
 	});
@@ -185,16 +410,18 @@ describe("a durable lazy-install failure keeps its session-long hold (#1537)", (
 		safeSpawnAsync.mockResolvedValue(okResult);
 
 		expect(await tryLazyInstall("rust-clippy", cwd)).toBe(true);
-		advance(LAZY_INSTALL_BASE_COOLDOWN_MS * 100);
+		advance(FIRST_COOLDOWN_MS * 100);
 		expect(await tryLazyInstall("rust-clippy", cwd)).toBe(false);
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
 	});
 });
 
 describe("lazy-install state re-arms and is readable (#1537)", () => {
-	it("re-arms on a session reset", async () => {
-		// A suppression that outlives the session is the #1494 permanent-latch
-		// shape. The runner copy had no reset at all before this.
+	it("re-arms when the reset helper is called", async () => {
+		// The helper's own unit. Deliberately NOT the wiring proof: this passes
+		// whether the helper is called at session_start or at turn_end, which is
+		// exactly how the turn-boundary reset slipped through. See the
+		// handleSessionStart test above for the binding assertion.
 		const cwd = freshCwd();
 		safeSpawnAsync.mockResolvedValue(managerMissingResult);
 		expect(await tryLazyInstall("rubocop", cwd)).toBe(false);
@@ -205,16 +432,28 @@ describe("lazy-install state re-arms and is readable (#1537)", () => {
 		expect(safeSpawnAsync).toHaveBeenCalledTimes(2);
 	});
 
-	it("clearing formatter runtime state re-arms the shared seam", async () => {
-		const { clearFormatterRuntimeState, tryLazyInstallFormatterTool } =
-			await import("../../clients/formatters.js");
+	it("survives a per-save caller cadence", async () => {
+		// #1539 changes this seam's caller cadence from once-per-session to
+		// once-per-SAVE: while a preferred formatter is unreachable the selection is
+		// provisional, so `detect()` — and therefore this install — is reached on
+		// every save. The ladder has to be sized against that caller, not against a
+		// once-per-session one. 40 saves a minute apart, one 5-minute rung.
+		const { tryLazyInstallFormatterTool } = await import(
+			"../../clients/formatters.js"
+		);
 		const cwd = freshCwd();
 		safeSpawnAsync.mockResolvedValue(failedResult);
-		expect(await tryLazyInstallFormatterTool("rustfmt", cwd)).toBe(false);
+		expect(await tryLazyInstallFormatterTool("rubocop", cwd)).toBe(false);
 
-		clearFormatterRuntimeState();
-		safeSpawnAsync.mockResolvedValue(okResult);
-		expect(await tryLazyInstallFormatterTool("rustfmt", cwd)).toBe(true);
+		const saveIntervalMs = 60_000;
+		expect(FIRST_COOLDOWN_MS).toBeGreaterThan(saveIntervalMs);
+		for (let save = 0; save < 40; save++) {
+			advance(saveIntervalMs);
+			await tryLazyInstallFormatterTool("rubocop", cwd);
+		}
+		// 40 minutes of saves against a 5/10-minute ladder that gives up: the three
+		// attempts the ladder allows, and then nothing.
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(INSTALL_TRANSIENT_MAX_ATTEMPTS);
 	});
 
 	it("reports the attempt in #1534's vocabulary, for install evidence", async () => {
@@ -237,9 +476,28 @@ describe("lazy-install state re-arms and is readable (#1537)", () => {
 		);
 
 		safeSpawnAsync.mockResolvedValue(okResult);
-		advance(LAZY_INSTALL_BASE_COOLDOWN_MS + 1);
+		advance(FIRST_COOLDOWN_MS + 1);
 		await tryLazyInstall("rubocop", cwd);
 		expect(getLazyInstallAttempt("rubocop", cwd)?.outcome).toBe("succeeded");
+	});
+
+	it("feeds the rust-clippy runner's availability_decision (#1537 review F5)", async () => {
+		// `getLazyInstallAttempt` is only worth having if something reads it. The
+		// rust-clippy runner is the production consumer: when the post-install
+		// re-probe still fails it records WHY, so "we ran `rustup component add` and
+		// the network failed" reaches latency.log instead of a silent skip.
+		const cwd = freshCwd();
+		safeSpawnAsync.mockResolvedValue(failedResult);
+		await tryLazyInstall("rust-clippy", cwd);
+
+		const evidence = describeInstallAttempt(
+			getLazyInstallAttempt("rust-clippy", cwd),
+		);
+		expect(evidence).toMatchObject({ install: "failed" });
+		expect(evidence.installReason).toContain("network is unreachable");
+		// The runner's own wiring — that it passes this into an
+		// `availability_decision` — is asserted by driving the real runner in
+		// `tests/clients/dispatch/runners/cwd-probe-latching.test.ts`.
 	});
 
 	it("does not record a trust denial, so a later grant retries", async () => {

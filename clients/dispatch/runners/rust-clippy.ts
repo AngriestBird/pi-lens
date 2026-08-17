@@ -9,7 +9,14 @@ import { findNearestContaining } from "../../path-utils.js";
 import { RustClient } from "../../rust-client.js";
 import { safeSpawnAsync } from "../../safe-spawn.js";
 import { stripAnsi } from "../../sanitize.js";
-import { tryLazyInstall } from "./utils/lazy-installer.js";
+import {
+	getLazyInstallAttempt,
+	tryLazyInstall,
+} from "./utils/lazy-installer.js";
+import {
+	describeInstallAttempt,
+	logAvailabilityDecision,
+} from "./utils/availability-policy.js";
 import type {
 	Diagnostic,
 	DispatchContext,
@@ -83,8 +90,30 @@ const rustClippyRunner: RunnerDefinition = {
 				return { status: "skipped", diagnostics: [], semantic: "none" };
 			}
 			await tryLazyInstall("rust-clippy", ctx.cwd);
-			// Bust the cwd-keyed cache so the post-install state is observed.
-			if (!(await refreshClippyProbe(cargoExe)(ctx.cwd))) {
+			// Bust the cwd-keyed cache so the post-install state is observed. Held in
+			// a local: `refreshClippyProbe` REPLACES the cached probe, so calling it
+			// again to read the verdict would spend a second probe.
+			const refreshedProbe = refreshClippyProbe(cargoExe);
+			if (!(await refreshedProbe(ctx.cwd))) {
+				// #1537: clippy is still absent, and the interesting question is WHY —
+				// "we tried `rustup component add` and the network failed" is a
+				// different fact from "this machine has no rustup", and until now the
+				// lazy installers recorded neither. Put the attempt beside the verdict
+				// it produced (#1500), so a reader does not have to infer the install
+				// from a runner that silently skipped.
+				const verdict = refreshedProbe.getVerdict(ctx.cwd);
+				logAvailabilityDecision({
+					tool: "rust-clippy",
+					verdict: "unavailable",
+					outcome: verdict.outcome ?? "missing",
+					cause: verdict.cause ?? "not-found",
+					classifiedBy: "caller",
+					evidence: describeInstallAttempt(
+						getLazyInstallAttempt("rust-clippy", ctx.cwd),
+					),
+					elapsedMs: 0,
+					latched: false,
+				});
 				return { status: "skipped", diagnostics: [], semantic: "none" };
 			}
 		}
