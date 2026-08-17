@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { findNearestMarkerRoot } from "./path-utils.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import {
+	type ProbeEvidence,
 	classifyProbeFailure,
 	createAvailabilityLatch,
 	logAvailabilityDecision,
@@ -257,6 +258,10 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 		// numbers.
 		const sweepStartedAt = Date.now();
 		let sweepHostStallMs = 0;
+		/** What the last classified candidate returned (#1500 review): this was
+		 * computed and thrown away, so every vulture row said "missing" with no
+		 * trace of which candidate reported what. */
+		let sweepEvidence: ProbeEvidence | undefined;
 		for (const c of candidates) {
 			const sampler = startHostStallSampler();
 			const startedAt = Date.now();
@@ -286,7 +291,11 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 				});
 				return true;
 			}
-			const classified = classifyProbeFailure(probe, { hostStallMs });
+			const classified = classifyProbeFailure(probe, {
+				hostStallMs,
+				command: c.cmd,
+			});
+			sweepEvidence = classified.evidence;
 			if (classified.outcome === "transient") {
 				sawTransient = true;
 				transientCause = classified.cause;
@@ -309,6 +318,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 				retryAfterMs,
 				budgetMs: 5000,
 				classifiedBy: "probe",
+				...(sweepEvidence !== undefined && { evidence: sweepEvidence }),
 			});
 			return false;
 		}
@@ -325,6 +335,7 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 			budgetMs: 5000,
 			// Every candidate probe was classified, and none was transient (#1500).
 			classifiedBy: "probe",
+			...(sweepEvidence !== undefined && { evidence: sweepEvidence }),
 		});
 		return false;
 	}

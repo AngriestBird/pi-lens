@@ -286,8 +286,8 @@ export class BiomeClient {
 		// needed the fact was the one shipping without it.
 		let installEvidence: ProbeEvidence | undefined;
 		if (resolved.outcome === "missing") {
-			const { getInstallFailureReason } = await import("./installer/index.js");
-			installEvidence = describeInstallAttempt(getInstallFailureReason("biome"));
+			const { getInstallAttempt } = await import("./installer/index.js");
+			installEvidence = describeInstallAttempt(getInstallAttempt("biome"));
 		}
 		const evidence = { ...this.lastProbeEvidence, ...installEvidence };
 		logAvailabilityDecision({

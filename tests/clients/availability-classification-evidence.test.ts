@@ -20,12 +20,12 @@ import {
 	describeProbeEvidence,
 } from "../../clients/dispatch/runners/utils/availability-policy.ts";
 
-const { safeSpawnAsync, logLatencySpy, ensureTool, getInstallFailureReason } =
+const { safeSpawnAsync, logLatencySpy, ensureTool, getInstallAttempt } =
 	vi.hoisted(() => ({
 		safeSpawnAsync: vi.fn(),
 		logLatencySpy: vi.fn(),
 		ensureTool: vi.fn(),
-		getInstallFailureReason: vi.fn(),
+		getInstallAttempt: vi.fn(),
 	}));
 
 vi.mock("../../clients/safe-spawn.js", () => ({
@@ -38,7 +38,7 @@ vi.mock("../../clients/latency-logger.js", () => ({
 }));
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
-	getInstallFailureReason,
+	getInstallAttempt,
 	isSpawnableCommand: async () => true,
 	resetPathWalkMemo: () => {},
 	getToolEnvironment: async () => ({ ...process.env }),
@@ -94,7 +94,7 @@ beforeEach(() => {
 	safeSpawnAsync.mockReset();
 	logLatencySpy.mockReset();
 	ensureTool.mockReset();
-	getInstallFailureReason.mockReset();
+	getInstallAttempt.mockReset();
 	resetDispatchAvailabilityState();
 });
 
@@ -158,7 +158,11 @@ describe("a failed install is a recorded assertion, not a silent latch (#1500)",
 	it("records the install failure beside the missing verdict", async () => {
 		safeSpawnAsync.mockResolvedValue(notFoundResult);
 		ensureTool.mockResolvedValue(null);
-		getInstallFailureReason.mockReturnValue("download timed out");
+		getInstallAttempt.mockReturnValue({
+			outcome: "failed",
+			reason: "download timed out",
+			at: Date.now(),
+		});
 		const client = new FakeScanClient();
 
 		expect(await client.ensureAvailable()).toBe(false);
@@ -188,7 +192,11 @@ describe("a failed install is a recorded assertion, not a silent latch (#1500)",
 		// attempt — the review found exactly that on the trust-denied path.
 		safeSpawnAsync.mockResolvedValue(notFoundResult);
 		ensureTool.mockResolvedValue(null);
-		getInstallFailureReason.mockReturnValue(undefined);
+		getInstallAttempt.mockReturnValue({
+			outcome: "declined",
+			reason: "installation disabled by PI_LENS_DISABLE_TOOL_INSTALL=1",
+			at: Date.now(),
+		});
 
 		expect(await new FakeScanClient().ensureAvailable()).toBe(false);
 		expect(decisions()[1]).toMatchObject({
@@ -200,7 +208,11 @@ describe("a failed install is a recorded assertion, not a silent latch (#1500)",
 	it("records the installer's reason when an attempt did fail", async () => {
 		safeSpawnAsync.mockResolvedValue(notFoundResult);
 		ensureTool.mockResolvedValue(null);
-		getInstallFailureReason.mockReturnValue("release asset 404 for linux-arm64");
+		getInstallAttempt.mockReturnValue({
+			outcome: "failed",
+			reason: "release asset 404 for linux-arm64",
+			at: Date.now(),
+		});
 
 		expect(await new FakeScanClient().ensureAvailable()).toBe(false);
 		expect(decisions()[1]).toMatchObject({

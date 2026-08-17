@@ -354,12 +354,12 @@ export class SgRunner {
 		// fact separating "never installable here" from "the download failed", and
 		// from "no install was attempted at all" (auto-install off, trust denied,
 		// or an attempt already suppressed this session).
-		const { getInstallFailureReason } = await import("./installer/index.js");
+		const { getInstallAttempt } = await import("./installer/index.js");
 		return this.noteUnavailable(
 			startedAt,
 			"missing",
 			"not-found",
-			describeInstallAttempt(getInstallFailureReason("ast-grep"), {
+			describeInstallAttempt(getInstallAttempt("ast-grep"), {
 				installedButRejected: installed.outcome === "non-installable",
 			}),
 			"caller",

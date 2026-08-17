@@ -73,7 +73,12 @@ export interface ProbeEvidence {
 	failure?: string;
 	/** Typed spawn-boundary failure kind. */
 	spawnFailureKind?: string;
-	/** errno from the spawn's Error, when there was one. */
+	/**
+	 * `error.code` from the spawn's Error, when there was one — Node's errno
+	 * STRING (`"ENOENT"`, `"EACCES"`, `"UNKNOWN"`), never the numeric errno. Named
+	 * `errno` because that is what a log reader greps for; the type is the
+	 * contract.
+	 */
 	errno?: string;
 	/**
 	 * A repair was attempted after the probe, and how it went.
@@ -84,7 +89,15 @@ export interface ProbeEvidence {
 	 * both fabricates an attempt that never happened.
 	 */
 	install?: "succeeded" | "failed" | "not-attempted";
-	/** Bounded reason the installer gave for a failed attempt. */
+	/**
+	 * Bounded (200 char) reason the installer gave, verbatim.
+	 *
+	 * Deliberately FREE TEXT, not a taxonomy: it is read by humans debugging one
+	 * host, and every attempt to enumerate installer failure modes ages worse than
+	 * the strings themselves. `install` is the field to branch on; this one is the
+	 * field to read. If a consumer ever needs to branch on the reason, that is the
+	 * signal to promote the specific case into `install` rather than to parse this.
+	 */
 	installReason?: string;
 }
 
@@ -110,30 +123,54 @@ export function describeProbeEvidence(
 	};
 }
 
+/** The installer's own record of what its last attempt did. */
+export interface InstallAttemptFact {
+	outcome: "succeeded" | "failed" | "declined" | "skipped";
+	reason?: string;
+}
+
 /**
- * Evidence for an install attempt, from what the installer actually reported.
+ * Evidence for an install attempt, from what the installer EXPLICITLY recorded.
  *
- * The installer answers the same empty result whether it TRIED and failed or
- * declined to try (auto-install off, project trust denied, attempt already
- * suppressed), so the attempt is read from the failure reason it records —
- * writing `failed` for both fabricates an attempt that never happened (#1500
- * review). The reason is passed in rather than fetched here, so the policy stays
+ * The first version of this inferred attempt-ness from the installer's failure
+ * REASON map, and a review proved that inverts the answer in both directions:
+ * that map is written by the kill-switch and install-lock branches and by
+ * nothing on the genuine-failure or success paths, so a policy decline read as a
+ * failed download and every real download failure — the retry candidate this
+ * evidence exists to surface — read as a policy decision. `getInstallAttempt`
+ * now records the outcome at each branch that knows it, and this maps it.
+ *
+ * `declined` and `skipped` both collapse to `not-attempted`, because that is the
+ * distinction a reader acts on; which of the two it was survives in `reason`.
+ *
+ * The fact is passed in rather than fetched here, so the policy module stays
  * free of the installer graph.
  */
 export function describeInstallAttempt(
-	failureReason: string | undefined,
+	attempt: InstallAttemptFact | undefined,
 	options: { installedButRejected?: boolean } = {},
 ): ProbeEvidence {
+	const reason = attempt?.reason?.slice(0, 200);
 	if (options.installedButRejected) {
+		// The install ran and produced a binary the caller then refused. Claiming
+		// `failed` would blame the download for a validation verdict.
 		return {
-			install: "failed",
-			installReason: failureReason?.slice(0, 200) ?? "installed binary failed validation",
+			install: "succeeded",
+			installReason: reason ?? "installed binary failed validation",
 		};
 	}
-	if (failureReason) {
-		return { install: "failed", installReason: failureReason.slice(0, 200) };
+	if (attempt === undefined) return { install: "not-attempted" };
+	switch (attempt.outcome) {
+		case "succeeded":
+			return { install: "succeeded", ...(reason && { installReason: reason }) };
+		case "failed":
+			return { install: "failed", ...(reason && { installReason: reason }) };
+		default:
+			return {
+				install: "not-attempted",
+				...(reason && { installReason: reason }),
+			};
 	}
-	return { install: "not-attempted" };
 }
 
 export interface AvailabilityDecision {

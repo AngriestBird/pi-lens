@@ -253,7 +253,7 @@ export abstract class SecurityScanClient<TResult> {
 			return false;
 		}
 		this.log(`${this.toolName} not found, attempting auto-install`);
-		const { ensureTool, getInstallFailureReason } = await import(
+		const { ensureTool, getInstallAttempt } = await import(
 			"./installer/index.js"
 		);
 		const installStartedAt = Date.now();
@@ -270,13 +270,13 @@ export abstract class SecurityScanClient<TResult> {
 			// attempt is read from the reason it records rather than assumed — the
 			// review found `install: "failed"` being written for attempts that never
 			// happened.
-			const reason = getInstallFailureReason(this.toolName);
+			const attempt = getInstallAttempt(this.toolName);
 			this.log(
-				reason
-					? `${this.toolName} auto-install failed: ${reason}`
-					: `${this.toolName} auto-install did not run`,
+				attempt?.outcome === "failed"
+					? `${this.toolName} auto-install failed: ${attempt.reason ?? "unknown reason"}`
+					: `${this.toolName} auto-install did not run: ${attempt?.reason ?? "no attempt recorded"}`,
 			);
-			this.noteDurableAbsence(describeInstallAttempt(reason), {
+			this.noteDurableAbsence(describeInstallAttempt(attempt), {
 				elapsedMs: Date.now() - installStartedAt,
 			});
 			return false;

@@ -19,13 +19,13 @@ const {
 	safeSpawnAsync,
 	safeSpawn,
 	ensureTool,
-	getInstallFailureReason,
+	getInstallAttempt,
 	logLatency,
 } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
 	safeSpawn: vi.fn(),
 	ensureTool: vi.fn(),
-	getInstallFailureReason: vi.fn(),
+	getInstallAttempt: vi.fn(),
 	logLatency: vi.fn(),
 }));
 
@@ -46,7 +46,7 @@ vi.mock("../../clients/safe-spawn.js", () => ({
 
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
-	getInstallFailureReason,
+	getInstallAttempt,
 	isSpawnableCommand: vi.fn(async () => true),
 	resetPathWalkMemo: vi.fn(),
 	getToolEnvironment: vi.fn(async () => ({})),
