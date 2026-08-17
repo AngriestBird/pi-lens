@@ -37,6 +37,7 @@ import {
 	type AvailabilityCause,
 	type AvailabilityOutcome,
 	classifyProbeFailure,
+	createAvailabilityLatch,
 	isLatchingOutcome,
 	logAvailabilityDecision,
 	startHostStallSampler,
@@ -108,6 +109,36 @@ if (typeof __dirname !== "undefined") {
 
 // Managed tools directory (~/.pi-lens/tools) — where ensureTool() installs binaries
 const _managedToolsDir = path.join(getGlobalPiLensDir(), "tools");
+
+/**
+ * The managed shim for a Node CLI tool (`~/.pi-lens/tools/node_modules/.bin/<tool>`),
+ * or null when it is not on disk.
+ *
+ * When the shim exists the tool IS installed, so availability needs no spawn at
+ * all — and a spawn that cannot happen cannot time out (#1467). knip and jscpd
+ * each carried a line-for-line copy of this resolver; #1476 folds them into one
+ * definition so the next managed tool inherits the fast path instead of a
+ * fourth copy.
+ *
+ * The pi-lens dir is read per call, never memoized at module load, so tests that
+ * point `getGlobalPiLensDir` at a temp home still see their own tree.
+ */
+export function findManagedNodeToolBinary(tool: string): string | null {
+	const base = path.join(
+		getGlobalPiLensDir(),
+		"tools",
+		"node_modules",
+		".bin",
+		tool,
+	);
+	const candidates =
+		process.platform === "win32" ? [`${base}.cmd`, `${base}.exe`, base] : [base];
+	try {
+		return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+	} catch {
+		return null;
+	}
+}
 
 // =============================================================================
 // VENV-AWARE COMMAND FINDER
@@ -824,10 +855,19 @@ export function resolveAvailableOrInstall(
 // SHARED AST-GREP AVAILABILITY
 // =============================================================================
 
-// Shared ast-grep availability cache across all slop runners
-let sgAvailable: boolean | null = null;
+/**
+ * Shared ast-grep availability across all slop runners, behind the transient-
+ * aware latch (#1476). This module-level memo carried the same shape `SgRunner`
+ * did — one failed sweep, including a timeout, disabled ast-grep for every slop
+ * runner for the life of the process.
+ */
+const sgLatch = createAvailabilityLatch();
 let sgCmd: string | null = null;
 let sgCmdArgs: string[] = [];
+/** Classification of the current sweep, accumulated across candidates. */
+let sgSweepSawTransient = false;
+let sgSweepTransientCause: AvailabilityCause = "probe-timeout";
+let sgSweepHostStallMs = 0;
 
 function isAstGrepVersionOutput(output: string): boolean {
 	return /\bast[- ]grep\b/i.test(output);
@@ -837,14 +877,30 @@ async function probeAstGrepCommandAsync(
 	cmd: string,
 	argsPrefix: string[] = [],
 ): Promise<boolean> {
-	const check = await safeSpawnAsync(cmd, [...argsPrefix, "--version"], {
-		timeout: 5000,
-	});
-	return (
+	const sampler = startHostStallSampler();
+	let check: Awaited<ReturnType<typeof safeSpawnAsync>>;
+	let hostStallMs: number;
+	try {
+		check = await safeSpawnAsync(cmd, [...argsPrefix, "--version"], {
+			timeout: 5000,
+		});
+	} finally {
+		hostStallMs = sampler.stop();
+		sgSweepHostStallMs += hostStallMs;
+	}
+	if (
 		!check.error &&
 		check.status === 0 &&
 		isAstGrepVersionOutput(`${check.stdout}\n${check.stderr}`)
-	);
+	) {
+		return true;
+	}
+	const { outcome, cause } = classifyProbeFailure(check, { hostStallMs });
+	if (outcome === "transient") {
+		sgSweepSawTransient = true;
+		sgSweepTransientCause = cause;
+	}
+	return false;
 }
 
 /** Pre-filter local node_modules/.bin candidates that actually exist on disk. */
@@ -883,7 +939,7 @@ let sgAvailabilityGeneration = availabilityStateGeneration;
 
 function ensureCurrentSgGeneration(): void {
 	if (sgAvailabilityGeneration === availabilityStateGeneration) return;
-	sgAvailable = null;
+	sgLatch.reset();
 	sgCmd = null;
 	sgCmdArgs = [];
 	sgAvailableInFlight = null;
@@ -892,14 +948,21 @@ function ensureCurrentSgGeneration(): void {
 
 export async function isSgAvailableAsync(): Promise<boolean> {
 	ensureCurrentSgGeneration();
-	if (sgAvailable !== null) return sgAvailable;
+	// `read()` returns null when the last verdict was transient and its cooldown
+	// expired: re-probe rather than stay dead for the session (#1476).
+	const memo = sgLatch.read();
+	if (memo !== null) return memo;
 	if (sgAvailableInFlight) return sgAvailableInFlight;
 
 	sgAvailableInFlight = (async () => {
+		const startedAt = Date.now();
+		sgSweepSawTransient = false;
+		sgSweepTransientCause = "probe-timeout";
+		sgSweepHostStallMs = 0;
 		// 1. Local node_modules/.bin
 		for (const localBin of buildSgLocalBins()) {
 			if (await probeAstGrepCommandAsync(localBin)) {
-				sgCmd = localBin; sgCmdArgs = []; sgAvailable = true;
+				sgCmd = localBin; sgCmdArgs = []; noteSgAvailable(startedAt);
 				return true;
 			}
 		}
@@ -907,7 +970,7 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 		// 2. Global PATH
 		for (const cmd of ["ast-grep", "sg"]) {
 			if (await probeAstGrepCommandAsync(cmd)) {
-				sgCmd = cmd; sgCmdArgs = []; sgAvailable = true;
+				sgCmd = cmd; sgCmdArgs = []; noteSgAvailable(startedAt);
 				return true;
 			}
 		}
@@ -917,24 +980,64 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 		for (const name of ["ast-grep", "sg"]) {
 			const globalBin = await findGlobalBinary(name);
 			if (globalBin && (await probeAstGrepCommandAsync(globalBin))) {
-				sgCmd = globalBin; sgCmdArgs = []; sgAvailable = true;
+				sgCmd = globalBin; sgCmdArgs = []; noteSgAvailable(startedAt);
 				return true;
 			}
 		}
 
 		// 3. npx --no (cache-only, no silent download).
 		if (await probeAstGrepCommandAsync("npx", ["--no", "--", "ast-grep"])) {
-			sgCmd = "npx"; sgCmdArgs = ["--no", "--", "ast-grep"]; sgAvailable = true;
+			sgCmd = "npx"; sgCmdArgs = ["--no", "--", "ast-grep"]; noteSgAvailable(startedAt);
 			return true;
 		}
 
-		sgAvailable = false;
+		// A timeout on ANY candidate is evidence about the host, not the tool.
+		noteSgUnavailable(
+			startedAt,
+			sgSweepSawTransient ? "transient" : "missing",
+			sgSweepSawTransient ? sgSweepTransientCause : "not-found",
+		);
 		return false;
 	})().finally(() => {
 		sgAvailableInFlight = null;
 	});
 
 	return sgAvailableInFlight;
+}
+
+/** Record a successful shared-ast-grep sweep, with one decision record. */
+function noteSgAvailable(startedAt: number): void {
+	sgLatch.noteAvailable();
+	logAvailabilityDecision({
+		tool: "ast-grep",
+		verdict: "available",
+		outcome: "success",
+		cause: "ok",
+		elapsedMs: Date.now() - startedAt,
+		latched: true,
+		hostStallMs: sgSweepHostStallMs,
+		budgetMs: 5000,
+	});
+}
+
+/** Record a failed shared-ast-grep sweep; a transient verdict expires. */
+function noteSgUnavailable(
+	startedAt: number,
+	outcome: "missing" | "transient",
+	cause: AvailabilityCause,
+): void {
+	const retryAfterMs = sgLatch.noteUnavailable(outcome, cause);
+	logAvailabilityDecision({
+		tool: "ast-grep",
+		verdict: "unavailable",
+		outcome,
+		cause,
+		elapsedMs: Date.now() - startedAt,
+		latched: outcome !== "transient",
+		hostStallMs: sgSweepHostStallMs,
+		...(retryAfterMs > 0 && { retryAfterMs }),
+		budgetMs: 5000,
+	});
 }
 
 export function getSgCommand(): { cmd: string; args: string[] } {
