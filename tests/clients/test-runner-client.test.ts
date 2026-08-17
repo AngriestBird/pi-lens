@@ -576,6 +576,68 @@ describe("test-runner-client", () => {
 		});
 	});
 
+	// #1487: a runner that never ran (spawn/config/load failure) must not be
+	// reported to the agent as a failing test. `failed` used to be pre-seeded
+	// to 1 for any non-zero exit, which made the runner-error branch
+	// (`failed === 0`) unreachable on exactly the path it exists for.
+	describe("runner-start failures report as errors, not test failures (#1487)", () => {
+		const parse = (output: string, exitCode: number, runner = "cargo") =>
+			(new TestRunnerClient(false) as any).parseGenericRunnerOutput(
+				"",
+				output,
+				exitCode,
+				`/tmp/test.${runner}`,
+				runner,
+			);
+
+		it("reports a non-zero exit with no counts and error text as a runner error, not a failing test", () => {
+			const result = parse("error: could not load configuration file", 1);
+
+			expect(result.error).toBe("Runner cargo exited with 1");
+			expect(result.passed).toBe(0);
+			expect(result.failed).toBe(0);
+		});
+
+		it("does not invent a failure name for a runner-start error", () => {
+			const result = parse("error: could not load configuration file", 1);
+
+			expect(result.failures).toEqual([]);
+		});
+
+		it("renders the runner-error surface, not a failed-test surface", () => {
+			const client = new TestRunnerClient(false);
+			const result = parse("error: could not load configuration file", 1);
+
+			expect(client.formatResult(result)).toBe(
+				"[Tests] ⚠ Could not run tests: Runner cargo exited with 1",
+			);
+		});
+
+		it("still reports parsed counts, and never PASS, for a non-zero exit with real counts", () => {
+			// Counts DID parse (0 failed via the cargo summary), so this is a
+			// real run, not a runner-start failure — the #1480 guard must
+			// still force at least one failure rather than reading it as a
+			// runner error.
+			const result = parse(
+				"test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out",
+				1,
+			);
+
+			expect(result.error).toBeUndefined();
+			expect(result.failed).toBeGreaterThan(0);
+		});
+
+		it("still reports a failure for a non-zero exit with no counts and no error text", () => {
+			// No count parser matched AND no "error" text — ambiguous, but
+			// still a non-zero exit, so the #1480 exit-code-distrust guard
+			// must still apply and this must not render as PASS.
+			const result = parse("unexpected termination", 1);
+
+			expect(result.error).toBeUndefined();
+			expect(result.failed).toBeGreaterThan(0);
+		});
+	});
+
 	// #1480 P3: `parseFloat(seconds) * 1000` is not an integer count of
 	// milliseconds. `in 2.01s` is 2009.9999999999998, and the turn-end log
 	// prints the number as it stands.

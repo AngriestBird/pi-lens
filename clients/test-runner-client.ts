@@ -1750,8 +1750,17 @@ export class TestRunnerClient {
 		const lower = output.toLowerCase();
 
 		let passed = 0;
-		let failed = exitCode === 0 ? 0 : 1;
+		// #1487: NOT `exitCode === 0 ? 0 : 1`. Pre-seeding `failed` to 1 on a
+		// non-zero exit made the runner-error branch below unreachable — it
+		// requires `failed === 0`, which a spawn/config/load failure (no
+		// counts to parse) could never reach once this had already claimed
+		// the slot. `matched` tracks whether a count parser actually found
+		// real counts; the exit-code-distrust fallback further down uses it
+		// to tell "a runner that never ran" from "a runner whose summary
+		// legitimately parsed to zero failures".
+		let failed = 0;
 		let skipped = 0;
+		let matched = false;
 		// #1480: `number | undefined`, and sourced per runner. This used to be
 		// `let duration = 0` with only go's probe able to move it, so every
 		// other runner reported a zero it never measured.
@@ -1764,6 +1773,7 @@ export class TestRunnerClient {
 			passed = Number.parseInt(cargoSummary[1], 10);
 			failed = Number.parseInt(cargoSummary[2], 10);
 			skipped = Number.parseInt(cargoSummary[3], 10);
+			matched = true;
 		}
 
 		const dotnetSummary = output.match(
@@ -1773,6 +1783,7 @@ export class TestRunnerClient {
 			failed = Number.parseInt(dotnetSummary[1], 10);
 			passed = Number.parseInt(dotnetSummary[2], 10);
 			skipped = Number.parseInt(dotnetSummary[3], 10);
+			matched = true;
 		}
 
 		// #1480 (adjacent, duration-independent): surefire prints one
@@ -1816,6 +1827,7 @@ export class TestRunnerClient {
 			failed = mavenFailed;
 			skipped = mavenSkipped;
 			passed = Math.max(0, total - failed - skipped);
+			matched = true;
 		}
 
 		const rspecSummary = output.match(
@@ -1825,6 +1837,7 @@ export class TestRunnerClient {
 			const total = Number.parseInt(rspecSummary[1], 10);
 			failed = Number.parseInt(rspecSummary[2], 10);
 			passed = Math.max(0, total - failed);
+			matched = true;
 		}
 
 		const minitestSummary = output.match(
@@ -1836,6 +1849,7 @@ export class TestRunnerClient {
 			const errors = Number.parseInt(minitestSummary[3], 10);
 			failed = failures + errors;
 			passed = Math.max(0, total - failed);
+			matched = true;
 		}
 
 		const gradleSummary = output.match(
@@ -1845,13 +1859,19 @@ export class TestRunnerClient {
 			const total = Number.parseInt(gradleSummary[1], 10);
 			failed = Number.parseInt(gradleSummary[2], 10);
 			passed = Math.max(0, total - failed);
+			matched = true;
 		}
 
-		// Captured BEFORE the guard below, which rewrites `failed` out of the
-		// state this condition reads. Without this the runner-error string
-		// silently became unreachable.
+		// #1487: gated on `!matched`, not on `failed === 0`. A non-zero exit
+		// with NO count parser match — a spawn/config/load failure, nothing
+		// ran — is infrastructure, not a test verdict: report it as a runner
+		// error. A non-zero exit a count parser DID match (even to a
+		// legitimate `failed === 0`, e.g. a green last module of a red
+		// reactor) is a real run that produced real counts, so it is never a
+		// runner error, and the exit-code-distrust guard below still forces
+		// at least one failure so it can't render as PASS.
 		const runnerError =
-			exitCode !== 0 && failed === 0 && lower.includes("error")
+			exitCode !== 0 && !matched && lower.includes("error")
 				? `Runner ${runner} exited with ${exitCode}`
 				: undefined;
 
@@ -1861,8 +1881,11 @@ export class TestRunnerClient {
 		// module of a red reactor build, a failure outside any test — and the
 		// turn-end log would then print PASS over a build the runner rejected.
 		// Trust the exit code: no parse of the text may talk it out of at least
-		// one failure.
-		if (exitCode !== 0 && failed === 0) {
+		// one failure. Skipped when `runnerError` is set — that case already
+		// reports through `formatResult`'s runner-error branch, which requires
+		// `passed === 0 && failed === 0` to stay reachable, and forcing
+		// `failed` to 1 here would make it unreachable again (#1487).
+		if (exitCode !== 0 && failed === 0 && !runnerError) {
 			failed = 1;
 		}
 
