@@ -982,7 +982,7 @@ export class LSPService {
 	 */
 	private readonly outstandingAuxNotifyWrites = new Map<
 		string,
-		{ startedAt: number; client: LSPClientInfo }
+		{ startedAt: number; client: LSPClientInfo; settled: Promise<void> }
 	>();
 	/** LRU clock for capacity eviction, keyed by the canonical server/root key. */
 	private readonly clientLastUsedAt = new Map<string, number>();
@@ -1475,7 +1475,11 @@ export class LSPService {
 		serverId: string,
 		filePath: string,
 		outstandingMs: number,
+		client: LSPClientInfo,
 	): void {
+		// Generation-checked, exactly like the gate: a predecessor's late landing
+		// must not decrement its SUCCESSOR's streak and mask a real stall.
+		if (this.state.clients.get(key) !== client) return;
 		const streak = this.notifyWriteBackpressureStreak.get(key);
 		if (!streak) return;
 		const streakAfter = streak - 1;
@@ -1488,6 +1492,53 @@ export class LSPService {
 			durationMs: outstandingMs,
 			metadata: { serverId, outstandingMs, streakAfter },
 		});
+	}
+
+	/**
+	 * #1459: wait for this auxiliary's resync slot, bounded by `budgetMs`.
+	 *
+	 * The gate is a QUEUE, not a drop: a healthy scanner accepts a `didOpen` in
+	 * milliseconds, so a sweep's neighbours take their turns one after another and
+	 * every file still gets scanned — what the gate prevents is N simultaneous
+	 * full re-scans flooding one stdin. Only a scanner that cannot accept a write
+	 * inside the budget makes a waiter give up, and giving up is reported as a
+	 * coverage gap rather than pushed anyway.
+	 *
+	 * Resolves `"clear"` when the slot is free (write now). Otherwise returns how
+	 * long the blocking write has been outstanding, and whether that exceeds the
+	 * wedge window — a write nothing has accepted for that long is a dead input
+	 * path, and the caller demotes the server so the gate cannot defer forever.
+	 */
+	private async awaitAuxNotifyTurn(
+		clientKey: string,
+		entry: SpawnedServer,
+		budgetMs: number,
+	): Promise<"clear" | { outstandingMs: number; wedged: boolean }> {
+		const deadline = Date.now() + budgetMs;
+		for (;;) {
+			const outstanding = this.outstandingAuxNotifyWrites.get(clientKey);
+			if (!outstanding) return "clear";
+			// A record left behind by a PREVIOUS client generation (evicted,
+			// respawned) says nothing about this client's stdin — drop it and write,
+			// so a stale entry can never starve a healthy server or get a fresh
+			// client demoted for its predecessor's stall.
+			if (outstanding.client !== entry.client) {
+				this.outstandingAuxNotifyWrites.delete(clientKey);
+				return "clear";
+			}
+			const outstandingMs = Date.now() - outstanding.startedAt;
+			if (outstandingMs > notifyWedgedMs()) {
+				return { outstandingMs, wedged: true };
+			}
+			const remainingMs = deadline - Date.now();
+			if (remainingMs <= 0) return { outstandingMs, wedged: false };
+			// `settled` never rejects, so this only resolves or times out.
+			await withDeadline(outstanding.settled, {
+				ms: remainingMs,
+				onTimeout: "undefined",
+				onReject: "undefined",
+			});
+		}
 	}
 
 	/**
@@ -1505,6 +1556,14 @@ export class LSPService {
 	 * `no_clients` failure kind and the demonstrated-cold path; the false-clean
 	 * hazard this addresses is the scanner lane, where an empty result is the
 	 * normal, expected answer.
+	 *
+	 * SCOPE, stated so the next reader does not assume the room is closed: this
+	 * covers the BREAKER doors only (cooldown + permanent). `ensureClientForServer`
+	 * also drops a scanner for a temporarily-unavailable command (the #1496 latch),
+	 * `optionalDisabled`, a spawn failure, or capacity eviction. Those are the same
+	 * defect class in the same lane, but they are persistent-absence states rather
+	 * than a transient blackout, so flagging every touch partial for them is a
+	 * broader behavior change than #1459 is scoped to make. Tracked separately.
 	 */
 	private async brokenSkippedAuxiliaryServerIds(
 		filePath: string,
@@ -2522,79 +2581,92 @@ export class LSPService {
 					// #1459: one outstanding resync per auxiliary. Primaries are
 					// untouched — they serve one file per touch and are not the fan-out
 					// target a `clientScope: "all"` sweep floods.
-					const gated = entry.info.role === "auxiliary" && clientKey !== undefined;
+					const gated =
+						entry.info.role === "auxiliary" && clientKey !== undefined;
 					if (gated && clientKey) {
-						const outstanding = this.outstandingAuxNotifyWrites.get(clientKey);
-						// A record left behind by a PREVIOUS client generation (evicted,
-						// respawned) says nothing about this client's stdin — drop it and
-						// write, so a stale entry can never defer a healthy server forever
-						// or get a fresh client demoted for its predecessor's stall.
-						if (outstanding && outstanding.client !== entry.client) {
-							this.outstandingAuxNotifyWrites.delete(clientKey);
-						} else if (outstanding) {
-							const outstandingMs = Date.now() - outstanding.startedAt;
+						const turn = await this.awaitAuxNotifyTurn(clientKey, entry, budget);
+						if (turn !== "clear") {
+							// Queued behind a write the scanner has not accepted inside our
+							// budget. Pushing anyway is what floods it, so this touch reports
+							// the scanner as uncovered instead — and a write nothing accepted
+							// for the whole wedge window demotes the server so the gate can
+							// never defer a dead input path forever.
 							notifyDeferredServerIds.push(entry.info.id);
 							logLatency({
 								type: "phase",
 								phase: "lsp_notify_resync_deferred",
 								filePath: normalizedPath,
-								durationMs: outstandingMs,
+								durationMs: turn.outstandingMs,
 								metadata: {
 									serverId: entry.info.id,
 									source,
 									clientScope,
-									outstandingMs,
+									outstandingMs: turn.outstandingMs,
+									wedged: turn.wedged,
 								},
 							});
-							// A write nothing has accepted for the whole wedge window is not
-							// a slow scan — demote it so the client is evicted and respawned
-							// rather than deferred forever behind a dead input path.
-							if (outstandingMs > notifyWedgedMs()) {
+							if (turn.wedged) {
 								this.demoteForNotifyStall(clientKey, entry, filePath, {
-									outstandingMs,
+									outstandingMs: turn.outstandingMs,
 								});
 							}
 							return;
 						}
 					}
-					const writeStartedAt = Date.now();
-					const writePromise = entry.client.notify
-						.open(filePath, content, languageId, undefined, silent)
-						.then(() => true as const);
-					if (gated && clientKey) {
-						const token = { startedAt: writeStartedAt, client: entry.client };
-						this.outstandingAuxNotifyWrites.set(clientKey, token);
-						// Release the gate on the write's OWN settle, whatever the caller
-						// below decided to wait for. Identity-checked so a demotion (which
-						// clears the map) or a later write cannot be released by this one.
-						const release = (): void => {
-							if (this.outstandingAuxNotifyWrites.get(clientKey) === token) {
-								this.outstandingAuxNotifyWrites.delete(clientKey);
-							}
-						};
-						void writePromise.then(
-							() => {
-								release();
-								// The write landed, just not inside the caller's budget —
-								// retract the timeout it was charged for. A write that landed
-								// IN budget took the success path below, which clears the
-								// streak outright, so only the late case retracts.
-								const outstandingMs = Date.now() - writeStartedAt;
-								if (outstandingMs > budget) {
-									this.retractNotifyWriteBackpressure(
-										clientKey,
-										entry.info.id,
-										filePath,
-										outstandingMs,
-									);
-								}
-							},
-							release,
-						);
-					}
 					let wrote: true | undefined;
 					let rejected = false;
 					try {
+						const writeStartedAt = Date.now();
+						// Constructed inside the try so a client double without `notify`
+						// (or any synchronous throw) still reads as a rejected write rather
+						// than rejecting the whole per-file `Promise.all`.
+						const writePromise = entry.client.notify
+							.open(filePath, content, languageId, undefined, silent)
+							.then(() => true as const);
+						if (gated && clientKey) {
+							const client = entry.client;
+							const token = {
+								startedAt: writeStartedAt,
+								client,
+								// Waiters queue on this, so it must never reject.
+								settled: writePromise.then(
+									() => undefined,
+									() => undefined,
+								),
+							};
+							this.outstandingAuxNotifyWrites.set(clientKey, token);
+							// Release the gate on the write's OWN settle, whatever the caller
+							// below decided to wait for. Identity-checked so a demotion (which
+							// clears the map) or a later write cannot be released by this one.
+							const release = (): void => {
+								if (this.outstandingAuxNotifyWrites.get(clientKey) === token) {
+									this.outstandingAuxNotifyWrites.delete(clientKey);
+								}
+							};
+							void writePromise.then(
+								() => {
+									release();
+									// The write landed, just not inside the caller's budget —
+									// retract the timeout it was charged for. A write that landed
+									// IN budget took the success path below, which clears the
+									// streak outright, so only the late case retracts. A landing
+									// past the WEDGE window keeps its strike: at that point the
+									// stall was long enough that #743's demotion is the honest
+									// verdict, not a latency artifact.
+									const outstandingMs = Date.now() - writeStartedAt;
+									if (outstandingMs > budget && outstandingMs <= notifyWedgedMs()) {
+										this.retractNotifyWriteBackpressure(
+											clientKey,
+											entry.info.id,
+											filePath,
+											outstandingMs,
+											client,
+										);
+									}
+								},
+								release,
+							);
+						}
 						wrote = await withDeadline(writePromise, {
 							ms: budget,
 							onTimeout: "undefined",
@@ -2643,6 +2715,9 @@ export class LSPService {
 		// File-level flag: at least one server's write timed out (kept for the
 		// conservative touch-wide `inconclusive` merge semantics — see below).
 		const notifyWriteTimedOut = notifyWriteTimedOutServerIds.length > 0;
+		// #1459: read by the diagnostics wait and the merge below — a deferred
+		// server is neither waited on nor read from.
+		const deferredResyncServerIds = new Set(notifyDeferredServerIds);
 
 		let diagnosticsTimedOut = false;
 		// R8 (#714): server ids of aux-role servers whose push wait was cut off by
@@ -2903,6 +2978,14 @@ export class LSPService {
 				}
 			}
 			const perServerWaits = spawned.map((entry) => {
+				// #1459: a DEFERRED server never received this content, so its version
+				// can never advance past the baseline — waiting on it burns its whole
+				// budget and would flip the touch to `inconclusive`, discarding a
+				// primary answer that IS trustworthy. It contributes no wait; the
+				// coverage gap below is what reports its absence.
+				if (deferredResyncServerIds.has(entry.info.id)) {
+					return Promise.resolve(undefined);
+				}
 				const serverTimeout = timeoutFor(entry.client.serverId);
 				const baseline = diagnosticBaselines.get(entry.client);
 				const pullOnly =
@@ -3282,7 +3365,16 @@ export class LSPService {
 			? tsserverSyncConfirmed !== undefined
 				? mergeLspDiagnostics(tsserverSyncConfirmed)
 				: mergeLspDiagnostics([
-						...spawned.flatMap((entry) => entry.client.getDiagnostics(filePath)),
+						// #1459: a DEFERRED server's cache still holds the PREVIOUS
+						// content's findings — the resync that would have cleared it never
+						// ran. Merging them would report another revision's findings (and
+						// its line numbers) as this touch's answer, the one hazard the
+						// gate itself creates. Drop them; the gap is reported instead.
+						...spawned.flatMap((entry) =>
+							deferredResyncServerIds.has(entry.info.id)
+								? []
+								: entry.client.getDiagnostics(filePath),
+						),
 						...carriedAuxiliary.flatMap((entry) => entry.diags),
 					])
 			: undefined;
@@ -3461,7 +3553,7 @@ export class LSPService {
 		// content — both contributed exactly as much evidence as a cut-off auxiliary,
 		// namely none, and both used to leave the touch claiming full confirmation.
 		const brokenSkippedServerIds =
-			diagnosticsMode !== "none"
+			collected !== undefined
 				? await this.brokenSkippedAuxiliaryServerIds(
 						filePath,
 						clientScope,
@@ -3603,9 +3695,11 @@ export class LSPService {
 						// partially-mocked client) yields "unknown" rather than throwing —
 						// unknown preserves pre-#1095 behavior for that contributor.
 						[
-							...spawned.map((entry) =>
-								entry.client.getDiagnosticBinding?.(filePath),
-							),
+							// #1459: a deferred server contributed no diagnostics (above), so
+							// its stale binding must not decide the merged verdict either.
+							...spawned
+								.filter((entry) => !deferredResyncServerIds.has(entry.info.id))
+								.map((entry) => entry.client.getDiagnosticBinding?.(filePath)),
 							...carriedAuxiliary.map((entry) => entry.binding),
 						],
 					);
@@ -5225,12 +5319,13 @@ export class LSPService {
 				// confirmed observation, and it is deliberately not `inconclusive`. The
 				// record loop below persists every `!timedOut` result into the workspace
 				// cache, so reading `inconclusive` alone caches a partially covered
-				// answer as clean and replays it on every later sweep. Today the only
-				// route that can reach this branch with a gap is the warm-attach
-				// incumbent, whose touch runs `clientScope: "with-auxiliary"`; the
-				// sweep's own local touch uses `clientScope: "all"`, which never arms
-				// the aux grace timer at all. Both are gated here so a future scope
-				// change cannot reopen the hole silently.
+				// answer as clean and replays it on every later sweep. The warm-attach
+				// incumbent reaches this branch through the aux grace timer (its touch
+				// runs `clientScope: "with-auxiliary"`). #1459: the sweep's own local
+				// `clientScope: "all"` touch now reaches it too — not via the grace
+				// timer, which "all" still never arms, but via a scanner whose breaker
+				// was open or whose resync the fan-out gate deferred. Both routes are
+				// gated here.
 				const coverageGap = touchCoverageGap(touchResult).length > 0;
 				const timedOut =
 					touchResult === undefined || inconclusive || coverageGap;
@@ -5722,6 +5817,10 @@ export class LSPService {
 		});
 		this.state.clients.clear();
 		this.state.broken.clear();
+		// #1459: every gated client is gone, so no outstanding-write record can
+		// describe a live one. The gate's identity check already neutralises a stale
+		// entry; clearing keeps the map honest rather than relying on that.
+		this.outstandingAuxNotifyWrites.clear();
 		this.workspaceProbeLogged.clear();
 		this.warmStartLogged.clear();
 	}

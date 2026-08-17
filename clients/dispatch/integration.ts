@@ -1838,6 +1838,15 @@ export async function computeCascadeForFile(
 					diagnostics: diags,
 					lspTouched: true as const,
 					...(inconclusive && { inconclusive: true as const }),
+					// #1459: carry the coverage gap to the agent-facing surface. A
+					// scanner whose breaker was open, whose resync the fan-out gate
+					// deferred, or whom the aux grace timer cut off never looked at this
+					// file — without this the neighbour reaches the agent as
+					// `{ diagnostics: [] }` with no marker, which is the false-clean the
+					// touch already refuses to claim for itself.
+					...(unconfirmedServerIds.length > 0 && {
+						unconfirmedServerIds: [...unconfirmedServerIds],
+					}),
 					durationMs,
 				} satisfies CascadeResult["neighbors"][number];
 			}),

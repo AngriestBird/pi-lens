@@ -80,11 +80,17 @@ function makeDiagnostic(message: string) {
 /**
  * A fake client. `writeMs` is how long its `didOpen` takes to be accepted:
  * `undefined` means it never lands (a wedged stdin), 0 means immediately.
+ *
+ * `publishes` models the diagnostics wait. `"never"` is the production profile
+ * for a scanner that was not sent this content: its version cannot advance, so a
+ * wait on it can only expire. A test that resolves this instantly would let the
+ * touch reach `"partial"` on a timing profile production never has.
  */
 function makeClient(
 	serverId: string,
 	writeMs: number | undefined,
 	diags: ReturnType<typeof makeDiagnostic>[] = [],
+	publishes: "immediately" | "never" = "immediately",
 ) {
 	return {
 		serverId,
@@ -109,7 +115,17 @@ function makeClient(
 			change: vi.fn(async () => {}),
 			close: vi.fn(async () => {}),
 		},
-		waitForDiagnostics: vi.fn(async () => undefined),
+		// A real client resolves this on its OWN timeout and never rejects, so the
+		// silent profile must resolve at `timeoutMs` WITHOUT advancing
+		// `diagnosticsVersion` — a promise that never settles would model a client
+		// production does not have.
+		waitForDiagnostics: vi.fn(
+			(_filePath: string, timeoutMs?: number) =>
+				new Promise<void>((resolve) => {
+					if (publishes === "never") setTimeout(resolve, timeoutMs ?? 1000);
+					else resolve();
+				}),
+		),
 	};
 }
 
@@ -182,7 +198,10 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		const service = new LSPService();
 
 		// The scanner is slow (3x the write budget) but healthy — its write lands.
-		const aux = makeClient("opengrep", NOTIFY_BUDGET_MS * 3);
+		// It never publishes for the files it was not sent, which is what makes the
+		// "deferred servers are not waited on" half of the fix load-bearing: a wait
+		// on this client could only expire, flipping the touch to `inconclusive`.
+		const aux = makeClient("opengrep", NOTIFY_BUDGET_MS * 3, [], "never");
 		const primary = makeClient("typescript", 0, [
 			makeDiagnostic("primary finding"),
 		]);
@@ -197,9 +216,15 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 
 		const files = ["a.ts", "b.ts", "c.ts", "d.ts"].map((f) => `${ROOT}/${f}`);
 		const pending = touchAll(service, files);
-		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 20);
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
 		const results = (await pending) as Array<
-			{ confirmation?: string; unconfirmedServerIds?: string[] } | undefined
+			| {
+					diags: unknown[];
+					confirmation?: string;
+					inconclusive?: boolean;
+					unconfirmedServerIds?: string[];
+			  }
+			| undefined
 		>;
 
 		// The gate let exactly one resync through; the other three deferred.
@@ -221,7 +246,11 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		);
 		expect(deferred).toHaveLength(3);
 		for (const result of deferred) {
+			// Narrowed, not collapsed: the primary's answer stands, and the deferred
+			// scanner is not waited on, so nothing flips the touch to inconclusive.
 			expect(result?.confirmation).toBe("partial");
+			expect(result?.inconclusive).toBeUndefined();
+			expect(result?.diags).toHaveLength(1);
 		}
 		const gapRows = rowsFor("lsp_scanner_coverage_gap");
 		expect(gapRows).toHaveLength(3);
@@ -339,5 +368,81 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		expect(gapRows[0]?.metadata).toMatchObject({
 			brokenSkippedServerIds: ["opengrep"],
 		});
+	});
+
+	// Negative control. The gate is a QUEUE, not a drop: a healthy scanner accepts
+	// each write in milliseconds, so every neighbour of a sweep still gets scanned
+	// and every touch still claims full confirmation. Without this, the tests above
+	// would also pass an implementation that simply stopped scanning.
+	it("a healthy scanner still gets every file, and every touch stays confirmed", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const aux = makeClient("opengrep", 0);
+		const primary = makeClient("typescript", 0, [
+			makeDiagnostic("primary finding"),
+		]);
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("opengrep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep" ? aux : primary,
+		);
+
+		const files = ["a.ts", "b.ts", "c.ts", "d.ts"].map((f) => `${ROOT}/${f}`);
+		const pending = touchAll(service, files);
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
+		const results = (await pending) as Array<
+			{ confirmation?: string; unconfirmedServerIds?: string[] } | undefined
+		>;
+
+		expect(aux.notify.open).toHaveBeenCalledTimes(4);
+		expect(rowsFor("lsp_notify_resync_deferred")).toHaveLength(0);
+		expect(rowsFor("lsp_scanner_coverage_gap")).toHaveLength(0);
+		for (const result of results) {
+			expect(result?.confirmation).toBe("confirmed");
+			expect(result?.unconfirmedServerIds).toBeUndefined();
+		}
+	});
+
+	it("a deferred scanner's stale findings are not merged as this touch's answer", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		// The scanner still holds the PREVIOUS content's finding: the resync that
+		// would have cleared its cache is the one the gate deferred.
+		const aux = makeClient(
+			"opengrep",
+			NOTIFY_BUDGET_MS * 3,
+			[makeDiagnostic("stale scanner finding")],
+			"never",
+		);
+		const primary = makeClient("typescript", 0);
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("opengrep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep" ? aux : primary,
+		);
+
+		const files = ["a.ts", "b.ts"].map((f) => `${ROOT}/${f}`);
+		const pending = touchAll(service, files);
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
+		const results = (await pending) as Array<
+			| {
+					diags: unknown[];
+					confirmation?: string;
+					unconfirmedServerIds?: string[];
+			  }
+			| undefined
+		>;
+
+		const deferred = results.find((r) =>
+			r?.unconfirmedServerIds?.includes("opengrep"),
+		);
+		expect(deferred).toBeDefined();
+		expect(deferred?.diags).toEqual([]);
 	});
 });

@@ -75,16 +75,24 @@ not the stall itself. (#1458)
 An auxiliary scanner gets at most ONE outstanding `didOpen` resync at a time.
 A `clientScope: "all"` sweep fans a full re-scan at every neighbour inside a few
 milliseconds, so an unbounded fan-out stalls the scanner's stdin and walks the
-#743 notify-write breaker open. While a write is outstanding the next touch
-defers its own and reports the scanner as uncovered; a write that lands after
-its deadline retracts the timeout it was charged for (slow is not broken), and
-one nothing accepts for the whole wedge window still demotes the server so the
-gate cannot defer a dead input path forever. The screen when you add an
-auxiliary: if its per-file scan can exceed the notify-write budget, a whole-tree
-sweep will break it — and its silence reads as CLEAN unless the touch names it.
-A scanner that never attached (breaker open) or never received the content
-(deferred resync) belongs in `unconfirmedServerIds`, exactly like a cut-off
-auxiliary, with one `lsp_scanner_coverage_gap` row per touch. (#1459)
+#743 notify-write breaker open. The gate is a QUEUE, not a drop: a healthy
+scanner accepts each write in milliseconds, so every file still gets scanned,
+and only a scanner that cannot accept a write inside the budget makes a waiter
+give up. A write that lands after its deadline but inside the wedge window
+retracts the timeout it was charged for (slow is not broken); one nothing
+accepts for the whole wedge window keeps its strike and demotes the server, so
+the gate cannot defer a dead input path forever. A DEFERRED server is neither
+waited on nor read from — its version cannot advance, so waiting only burns its
+budget and would flip the touch to `inconclusive`, and its diagnostics cache
+still holds the previous content's findings because the resync that would have
+cleared it never ran. The screen when you add an auxiliary: if its per-file scan
+can exceed the notify-write budget, a whole-tree sweep will break it — and its
+silence reads as CLEAN unless the touch names it. A scanner that never attached
+(breaker open) or never received the content (deferred resync) belongs in
+`unconfirmedServerIds`, exactly like a cut-off auxiliary, and the gap must reach
+the AGENT-facing surface too (`CascadeNeighborResult.unconfirmedServerIds` and
+the cascade formatter), not only the result wrapper. One
+`lsp_scanner_coverage_gap` row per touch records it. (#1459)
 
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
