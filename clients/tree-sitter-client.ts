@@ -2764,20 +2764,19 @@ export class TreeSitterClient {
 				return !hasExceptionSpec;
 			}
 			case "eq_mod_fn": {
-				// Workaround for web-tree-sitter not auto-applying #eq? predicates
-				// on the structural pattern of a query that has predicates. The
-				// query captures @MOD, @FN but the predicates aren't enforced
-				// (see evaluatePredicates in clients/tree-sitter-client.ts).
+				// Belt-and-braces re-check of the #eq? predicates that
+				// evaluatePredicates already enforces (clients/tree-sitter-client.ts),
+				// plus the first-argument check that predicates can't express.
 				// This filter re-applies the #eq? checks at post_filter time.
 				const mod = captures.MOD?.text ?? "";
 				const fn = captures.FN?.text ?? "";
 				return mod === "threading" && fn === "Thread";
 			}
 			case "regex_first_arg_identifier": {
-				// Workaround for web-tree-sitter not auto-applying #eq?/#match?
-				// predicates on the structural pattern (see evaluatePredicates).
-				// This post_filter re-applies both predicate checks AND
-				// the first-argument check:
+				// Belt-and-braces re-check of the #eq?/#match? predicates that
+				// evaluatePredicates already enforces, plus the first-argument
+				// check that predicates can't express. This post_filter re-applies
+				// both predicate checks AND the first-argument check:
 				// 1. MOD must be "re"  (would-be #eq? @MOD "re")
 				// 2. FUNC must match the regex method pattern (#match? @FUNC ...)
 				// 3. First arg must be an identifier (dynamic pattern)
@@ -3597,56 +3596,88 @@ export class TreeSitterClient {
 	}
 
 	/**
-	 * Queries whose `textPredicates` shape has been checked (#1523). web-tree-sitter
-	 * compiles #match?/#eq? predicates into `query.textPredicates[patternIndex]`, but
-	 * the property is untyped and undocumented on the public Query type. Validate its
-	 * shape once per Query object rather than on every match.
+	 * Queries whose `textPredicates` shape has already failed validation (#1523).
+	 * web-tree-sitter compiles #match?/#eq? predicates into
+	 * `query.textPredicates[patternIndex]`, but the property is untyped and
+	 * undocumented on the public Query type. `Array.isArray` is O(1), so re-checking
+	 * it on every match costs nothing — this WeakSet exists only so a query that's
+	 * already known-bad short-circuits without re-deriving that verdict, not to
+	 * memoize the check itself.
 	 */
 	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter Query instances
 	private queriesWithInvalidTextPredicates = new WeakSet<any>();
-	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter Query instances
-	private queriesWithValidatedTextPredicates = new WeakSet<any>();
 
 	/**
-	 * Typed accessor for `query.textPredicates`, validated once at query-construction
-	 * (first-use) time. If the property is missing or the wrong shape — e.g. a future
-	 * web-tree-sitter upgrade renames or removes it — `query.textPredicates?.[i] ?? []`
-	 * would silently mean "no predicates for this pattern," passing every match through
-	 * unfiltered. That's a silent fail-open on #match?/#eq? predicates that rules rely
-	 * on for correctness. Fail loud (log once) and closed (report the query has no
-	 * usable predicates) instead of guessing.
+	 * Session-level latch so the "textPredicates is malformed" diagnostic logs
+	 * once total, not once per Query object. Query results are cached with LRU
+	 * eviction (see the query cache above), so a stripped/renamed property would
+	 * otherwise re-trigger this log on every cache rebuild for the life of the
+	 * session — unbounded log volume for what is, functionally, one event.
+	 */
+	private textPredicatesInvalidLogged = false;
+
+	/**
+	 * Typed accessor for `query.textPredicates`. If the property is missing or the
+	 * wrong shape — e.g. a future web-tree-sitter upgrade renames or removes it —
+	 * `query.textPredicates?.[i] ?? []` would silently mean "no predicates for this
+	 * pattern," passing every match through unfiltered. That's a silent fail-open on
+	 * #match?/#eq? predicates that rules rely on for correctness, and because this
+	 * runs for every match of every query, it would zero out ALL structural matches
+	 * across every language while pi-lens reports "no issues found." Fail loud (log
+	 * once per session, record a degradation so it reaches the user) and closed
+	 * (report the query has no usable predicates) instead of guessing.
 	 */
 	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter Query instances
 	private hasValidTextPredicates(query: any): boolean {
-		if (this.queriesWithValidatedTextPredicates.has(query)) {
-			return !this.queriesWithInvalidTextPredicates.has(query);
-		}
-		this.queriesWithValidatedTextPredicates.add(query);
+		if (this.queriesWithInvalidTextPredicates.has(query)) return false;
 		const valid = Array.isArray(query?.textPredicates);
 		if (!valid) {
 			this.queriesWithInvalidTextPredicates.add(query);
-			logTreeSitterDiagnostic({
-				subsystem: "tree-sitter-client",
-				message:
-					"web-tree-sitter Query.textPredicates is missing or not an array — " +
-					"#match?/#eq? predicates cannot be evaluated. Failing CLOSED: matches " +
-					"for this query are dropped rather than reported unfiltered.",
-				metadata: { textPredicatesType: typeof query?.textPredicates },
-			});
+			if (!this.textPredicatesInvalidLogged) {
+				this.textPredicatesInvalidLogged = true;
+				logTreeSitterDiagnostic({
+					subsystem: "tree-sitter-client",
+					message:
+						"web-tree-sitter Query.textPredicates is missing or not an array — " +
+						"#match?/#eq? predicates cannot be evaluated. Failing CLOSED: matches " +
+						"for this query are dropped rather than reported unfiltered.",
+					metadata: { textPredicatesType: typeof query?.textPredicates },
+				});
+				// User-facing signal (#1523 review F1): without this, the blackout is
+				// invisible outside tree-sitter.log — pi-lens silently reports "no
+				// issues found" for every structural rule in every language instead
+				// of surfacing that its predicate evaluation is degraded.
+				recordDegradation({
+					kind: "query-predicates-invalid",
+					subject: "web-tree-sitter",
+					reason:
+						"Query.textPredicates is missing or not an array — #match?/#eq? " +
+						"predicates cannot be evaluated; structural matches relying on them " +
+						"are dropped fail-closed",
+				});
+			}
 		}
 		return valid;
 	}
 
 	/**
-	 * Evaluate text predicates (#match?, #eq?) for a query match.
-	 * web-tree-sitter stores these as compiled functions in query.textPredicates[patternIndex]
-	 * and does NOT apply them automatically via .matches().
+	 * Evaluate text predicates (#match?, #eq?) for a query match. web-tree-sitter
+	 * 0.25's `Query.matches()` DOES apply these predicates itself (probed on the
+	 * shipped grammars — see clients/tree-sitter-symbol-extractor.ts), so this is a
+	 * belt-and-braces re-filter, not a workaround for missing enforcement. It also
+	 * doubles as the fail-closed guard (#1523): if `query.textPredicates` is ever
+	 * missing or malformed, this drops the match instead of assuming it already
+	 * passed upstream.
 	 */
 	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter types
 	private evaluatePredicates(query: any, match: any): boolean {
 		if (!this.hasValidTextPredicates(query)) return false;
+		// `?.` guards a post-validation removal of the property (e.g. a later
+		// mutation strips it after the first successful check) so the read can't
+		// throw here — an uncaught throw would be swallowed by the outer try/catch
+		// in searchFileWithQuery and silently zero out matches for the whole file.
 		const predicates: Array<(captures: unknown) => boolean> =
-			query.textPredicates[match.patternIndex] ?? [];
+			query.textPredicates?.[match.patternIndex] ?? [];
 		return predicates.every((fn) => fn(match.captures));
 	}
 
@@ -3682,7 +3713,9 @@ export class TreeSitterClient {
 							}
 						}
 
-						// Evaluate #match? and #eq? predicates that web-tree-sitter doesn't enforce automatically
+						// Belt-and-braces re-check of #match?/#eq? predicates (web-tree-sitter
+						// 0.25's Query.matches() already applies them) plus the fail-closed
+						// guard for a malformed query.textPredicates (see evaluatePredicates).
 						if (!this.evaluatePredicates(query, match)) {
 							continue;
 						}
