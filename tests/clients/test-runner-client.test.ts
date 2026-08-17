@@ -638,6 +638,77 @@ describe("test-runner-client", () => {
 		});
 	});
 
+	// #1524: a REAL failing run must never be downgraded to "could not run
+	// tests" just because its runner has no count parser in
+	// `parseGenericRunnerDuration`/the count-matching block above. go (the
+	// `default:` case's only text-only runner with no cargo/dotnet/maven/
+	// rspec/minitest/gradle summary shape) never sets `matched`, so before
+	// this fix `exitCode !== 0 && !matched && lower.includes("error")` fired
+	// on a genuine `--- FAIL:`/panic that happened to mention the word
+	// "error" — a real failing test rendered as a runner-start error, and
+	// the failing test's own name was extracted into `failures` and then
+	// discarded because `runnerError` was already decided first.
+	describe("a real failing run is never downgraded to a runner error (#1524)", () => {
+		const parse = (
+			output: string,
+			exitCode: number,
+			runner = "go",
+			runnerFile = `/tmp/test.${runner}`,
+		) =>
+			(new TestRunnerClient(false) as any).parseGenericRunnerOutput(
+				"",
+				output,
+				exitCode,
+				runnerFile,
+				runner,
+			);
+
+		it("reports a go test failure by name, not as a runner error", () => {
+			const result = parse(
+				"--- FAIL: TestParse\n    parse_test.go:22: unexpected error: bad token\nFAIL\texample.com/pkg\t0.01s\n",
+				1,
+			);
+
+			expect(result.error).toBeUndefined();
+			expect(result.failed).toBeGreaterThan(0);
+			expect(result.failures).toEqual(
+				expect.arrayContaining([expect.objectContaining({ name: "TestParse" })]),
+			);
+		});
+
+		it("reports a go panic by name, not as a runner error", () => {
+			const result = parse(
+				"--- FAIL: TestBoom\npanic: runtime error: index out of range [3] with length 3\n\ngoroutine 1 [running]:\nFAIL\texample.com/pkg\t0.01s\n",
+				2,
+			);
+
+			expect(result.error).toBeUndefined();
+			expect(result.failed).toBeGreaterThan(0);
+			expect(result.failures).toEqual(
+				expect.arrayContaining([expect.objectContaining({ name: "TestBoom" })]),
+			);
+		});
+
+		it("reports an unknown-runner (bazel) failure, not a runner error", () => {
+			const result = parse(
+				"FAILED //pkg:test\nError: expected 1 to equal 2\n",
+				1,
+				"bazel",
+			);
+
+			expect(result.error).toBeUndefined();
+			expect(result.failed).toBeGreaterThan(0);
+		});
+
+		it("still reports a genuine runner-start failure as an error (no failure names, #1487 stays green)", () => {
+			const result = parse("go: cannot find main module; error initializing", 1);
+
+			expect(result.error).toBe("Runner go exited with 1");
+			expect(result.failed).toBe(0);
+			expect(result.failures).toEqual([]);
+		});
+	});
+
 	// #1480 P3: `parseFloat(seconds) * 1000` is not an integer count of
 	// milliseconds. `in 2.01s` is 2009.9999999999998, and the turn-end log
 	// prints the number as it stands.

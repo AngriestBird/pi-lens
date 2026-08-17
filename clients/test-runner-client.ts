@@ -1862,6 +1862,27 @@ export class TestRunnerClient {
 			matched = true;
 		}
 
+		// #1487/#1524: failure NAMES are extracted before `runnerError` is
+		// decided, not after. `--- FAIL: TestParse` (go) or a bare `Error:`
+		// line (an unrecognised runner) is direct evidence the suite ran and
+		// produced a verdict, even for a runner with no count parser above —
+		// go has no entry in the cargo/dotnet/maven/rspec/minitest/gradle
+		// matches, so `matched` alone can't tell "never started" from "ran
+		// and failed" for it. Deciding `runnerError` first and extracting
+		// names after (the pre-#1524 order) meant a real go test failure
+		// with "error" in its own output — `unexpected error: bad token` —
+		// still had `matched === false` and rendered as "Could not run
+		// tests" while `failures` silently held the real failing test name.
+		const failures: TestFailure[] = [];
+		const names = [
+			...output.matchAll(/--- FAIL:\s+([^\s(]+)/g),
+			...output.matchAll(/\bFAILED\s+([^\n]+)/g),
+			...output.matchAll(/Failure:\s+([^\n]+)/g),
+		];
+		for (const m of names.slice(0, 5)) {
+			failures.push({ name: m[1].trim(), message: m[1].trim() });
+		}
+
 		// #1487: gated on `!matched`, not on `failed === 0`. A non-zero exit
 		// with NO count parser match — a spawn/config/load failure, nothing
 		// ran — is infrastructure, not a test verdict: report it as a runner
@@ -1870,8 +1891,17 @@ export class TestRunnerClient {
 		// reactor) is a real run that produced real counts, so it is never a
 		// runner error, and the exit-code-distrust guard below still forces
 		// at least one failure so it can't render as PASS.
+		//
+		// #1524: also gated on `failures.length === 0`. `matched` only
+		// covers the runners with a count parser above; go (and any other
+		// unrecognised runner) has none, so a real `--- FAIL:`/`Error:` name
+		// pulled out just above is the only signal a text-only runner's
+		// failure ran to completion. Requiring both keeps a genuine
+		// spawn/config failure (no counts, no failure names) reported as a
+		// runner error while a real failing run — matched or not — is never
+		// downgraded out from under its own failure name.
 		const runnerError =
-			exitCode !== 0 && !matched && lower.includes("error")
+			exitCode !== 0 && !matched && failures.length === 0 && lower.includes("error")
 				? `Runner ${runner} exited with ${exitCode}`
 				: undefined;
 
@@ -1893,15 +1923,6 @@ export class TestRunnerClient {
 			passed = 1;
 		}
 
-		const failures: TestFailure[] = [];
-		const names = [
-			...output.matchAll(/--- FAIL:\s+([^\s(]+)/g),
-			...output.matchAll(/\bFAILED\s+([^\n]+)/g),
-			...output.matchAll(/Failure:\s+([^\n]+)/g),
-		];
-		for (const m of names.slice(0, 5)) {
-			failures.push({ name: m[1].trim(), message: m[1].trim() });
-		}
 		if (failures.length === 0 && failed > 0) {
 			const firstLine =
 				output
@@ -1911,6 +1932,12 @@ export class TestRunnerClient {
 					.slice(0, 300) || `Tests failed for runner ${runner}`;
 			failures.push({ name: `${runner} failure`, message: firstLine });
 		}
+
+		this.log(
+			runnerError
+				? `Generic runner ${runner}: never started (${runnerError})`
+				: `Generic runner ${runner}: ran (matched=${matched}, passed=${passed}, failed=${failed}, failures=${failures.length})`,
+		);
 
 		return {
 			file: testFile,

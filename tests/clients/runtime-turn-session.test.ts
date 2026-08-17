@@ -4,6 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { snapshotAdvisoryProvenance } from "../../clients/advisory-provenance.js";
 import {
+	evaluateGitGuard,
+	mergeGitGuardTestFailure,
+} from "../../clients/git-guard.js";
+import {
 	consumeSessionStartGuidance,
 	consumeTestFindings,
 	consumeTurnEndFindings,
@@ -1847,6 +1851,93 @@ describe("turn_end test runner — stale results are cached, not discarded", () 
 			expect(cached?.data?.content).toContain("[Tests] ✗ 0/1 passed");
 			expect(cached?.data?.stale).toBe(false);
 			expect(cached?.data?.content).not.toContain("prior turn");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+// ── #1524: a runner-error result must not clear a real git-guard blocker ──────
+//
+// A runner that never started (spawn/config/load failure) reports
+// `failed === 0` — nothing ran, so nothing could fail — but it is not a pass.
+// Before this fix, `turn_end` only pushed a formatted message into its local
+// `failures` array when `failed > 0`, so a runner-error result left that
+// array empty and fell into the "all tests passed" branch, which called
+// `clearGitGuardTestFailure` unconditionally and erased a real prior
+// test-failure blocker.
+
+describe("turn_end test runner — a runner-error result does not clear a real git-guard blocker (#1524)", () => {
+	it("keeps a pre-existing test-failure blocker after a runner-start failure", async () => {
+		const env = setupTestEnvironment("pi-lens-test-guard-error-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "guard-error-session" });
+			const cacheManager = new CacheManager(false);
+
+			const srcFile = path.join(env.tmpDir, "src/main.go");
+			fs.mkdirSync(path.dirname(srcFile), { recursive: true });
+			fs.writeFileSync(srcFile, "package main\n");
+			cacheManager.addModifiedRange(
+				srcFile,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+				"guard-error-session",
+			);
+
+			// Seed a REAL prior test-failure blocker on this exact go test file
+			// — a previous turn genuinely ran it and it failed. The scenario
+			// under test is this same file now failing to even START (a
+			// spawn/config error), which must not read as "it passed" and
+			// clear the blocker it earned last turn.
+			const goTestFile = path.join(env.tmpDir, "src/main_test.go");
+			fs.writeFileSync(goTestFile, "package main\n");
+			mergeGitGuardTestFailure(
+				cacheManager,
+				env.tmpDir,
+				runtime,
+				"[Tests] ✗ 0/1 passed — go",
+				[goTestFile],
+			);
+			expect(evaluateGitGuard(runtime, cacheManager, env.tmpDir).block).toBe(true);
+
+			const runnerErrorResult = {
+				file: goTestFile,
+				sourceFile: srcFile,
+				runner: "go",
+				passed: 0,
+				failed: 0,
+				skipped: 0,
+				failures: [],
+				duration: 1,
+				error: "Runner go exited with 1",
+			};
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, {
+					ctxCwd: env.tmpDir,
+					getFlag: (flag: string) => flag === "lens-guard",
+					testRunnerClient: {
+						getTestRunTarget: () => ({
+							testFile: goTestFile,
+							runner: "go",
+							config: {} as any,
+							strategy: "related" as const,
+						}),
+						runTestFileAsync: async () => runnerErrorResult,
+						formatResult: (r: { error?: string; passed: number; failed: number }) =>
+							r.error && r.passed === 0 && r.failed === 0
+								? `[Tests] ⚠ Could not run tests: ${r.error}`
+								: "",
+					},
+				}),
+			);
+			await new Promise((resolve) => setImmediate(resolve));
+
+			// The prior real test-failure blocker must still be in force — a
+			// suite that never started must not read as a pass that clears it.
+			expect(evaluateGitGuard(runtime, cacheManager, env.tmpDir).block).toBe(true);
 		} finally {
 			env.cleanup();
 		}
