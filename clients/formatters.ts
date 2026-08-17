@@ -31,6 +31,7 @@ import {
 import { findGlobalBinary } from "./package-manager.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import { assertInstallAllowed } from "./project-trust.js";
+import { tryLazyInstallForFormatter } from "./dispatch/runners/utils/lazy-installer.js";
 import {
 	getAutoInstallToolIdForFormatter,
 	getFormatterPolicyForFile,
@@ -59,50 +60,22 @@ import {
 	OXFMT_SUPPORTED_EXTENSIONS,
 } from "./tool-policy.js";
 
-const _lazyInstallAttempts = new Set<string>();
-
+/**
+ * Lazy-install a formatter's tool, through the shared seam (#1537).
+ *
+ * This used to own a second copy of the attempt guard — `_lazyInstallAttempts`,
+ * a Set keyed before the install ran and never cleared — so a `gem install
+ * rubocop` that died on a network blip was never retried for the session. The
+ * state, the transient/durable classification and the retry ladder now live in
+ * `lazy-installer.ts`; what stays here is the one thing that is formatter
+ * business: a fresh binary on PATH invalidates every "not found" verdict (#1495).
+ */
 export async function tryLazyInstallFormatterTool(
 	tool: "rubocop" | "rustfmt",
 	cwd: string,
 ): Promise<boolean> {
-	if (!assertInstallAllowed(`formatter lazy install: ${tool}`)) return false;
-	const attemptKey = `${tool}:${cwd}`;
-	if (_lazyInstallAttempts.has(attemptKey)) return false;
-	_lazyInstallAttempts.add(attemptKey);
-
-	if (tool === "rubocop") {
-		const res = await safeSpawnAsync("gem", ["install", "rubocop", "--no-document"], {
-			timeout: 180000,
-			cwd,
-			ignoreAmbientSignal: true,
-		});
-		const ok = !res.error && res.status === 0;
-		// A fresh binary on PATH invalidates every "not found" verdict (#1495).
-		if (ok) resetWhichLatches();
-		if (!ok) {
-			logExtension({
-				subsystem: "format",
-				message: `lazy-install rubocop failed: ${res.error?.message ?? res.stderr ?? "exit " + res.status}`,
-				metadata: { tool: "rubocop", cwd },
-			});
-		}
-		return ok;
-	}
-
-	const res = await safeSpawnAsync("rustup", ["component", "add", "rustfmt"], {
-		timeout: 180000,
-		cwd,
-		ignoreAmbientSignal: true,
-	});
-	const ok = !res.error && res.status === 0;
+	const ok = await tryLazyInstallForFormatter(tool, cwd);
 	if (ok) resetWhichLatches();
-	if (!ok) {
-		logExtension({
-			subsystem: "format",
-			message: `lazy-install rustfmt failed: ${res.error?.message ?? res.stderr ?? "exit " + res.status}`,
-			metadata: { tool: "rustfmt", cwd },
-		});
-	}
 	return ok;
 }
 
@@ -1669,7 +1642,11 @@ export function clearFormatterCache(): void {
 export function clearFormatterRuntimeState(): void {
 	detectionCache.clear();
 	resetWhichLatches();
-	_lazyInstallAttempts.clear();
+	// NO `resetLazyInstallAttempts()` here (#1537 review F1). This function runs
+	// from `resetFormatService()`, which `handleTurnEnd` calls every turn — so
+	// clearing the lazy-install hold here made "held for the session" mean "held
+	// for a turn", and a failing install re-ran every turn. The hold's only reset
+	// is `session_start`'s block in runtime-session.ts.
 }
 
 // ESC is built via fromCharCode so no raw control byte sits in the source.
