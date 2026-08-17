@@ -112,6 +112,27 @@ outcomes) cannot see them on the `clientScope: "all"` sweep path, which emits no
 outcome rows at all — they are unioned into `unconfirmedServerIds` separately.
 (#1459)
 
+**A touch's `inconclusive` verdict is PRIMARY-scoped; an auxiliary can only
+narrow it.** `resolveTouchVerdict` (`clients/lsp/diagnostic-binding.ts`) owns the
+one rule, and both its inputs name primary-role servers only. An auxiliary that
+missed any deadline — notify write, aux grace, or its own diagnostics budget — is
+a COVERAGE GAP (`confirmation: "partial"` plus `unconfirmedServerIds`), never a
+verdict, because the diagnostics deadline is the MAX over the servers waited on:
+a touch-wide flag let opengrep's 3500 ms budget discard a TypeScript answer that
+landed in 100 ms (97.6% of 6,079 cascade sweeps read inconclusive, against 15%
+for edit-time touches). The screen when you touch this merge: decide "did it
+answer" from EVIDENCE — a per-path publication stamp advancing past the
+pre-notify baseline (#1531), or a fresh per-file cache entry — never from how a
+promise settled, and fail CLOSED on a client that exposes neither, so the rule
+can only narrow a verdict and never invent a confirmation. The capability-aware
+silent-clean gates are primary-scoped for the same reason. Two obligations ride
+with the change: an auxiliary whose write never landed must have its stale
+findings dropped from `.diags` (they describe the previous revision, and the
+blanket verdict used to hide them), and an inconclusive touch must name its cause
+— `inconclusiveServerIds` plus `inconclusiveReason` (`notify-write` /
+`diagnostics-wait` / `mixed`) on the result, in `lsp_touch_file`, and in the
+cascade's `neighbor_touch` row. (#1549)
+
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
 the agent. `turnSeq` is not a staleness signal for such a run (a late run is by

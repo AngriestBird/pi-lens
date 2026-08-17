@@ -291,11 +291,16 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 			false,
 		);
 
-		// Every deferred touch says so: the scanner never saw that content.
+		// Every touch says the scanner did not cover its content. Three because the
+		// gate deferred their resync; the FOURTH because the write it did issue took
+		// 3x the budget to land, so that touch has no evidence from opengrep either.
+		// #1549: before the per-server verdict, that fourth touch reported blanket
+		// `inconclusive` instead — a slow-but-healthy scanner discarding a primary
+		// answer, which is the defect the gap list is supposed to replace.
 		const deferred = results.filter((r) =>
 			r?.unconfirmedServerIds?.includes("opengrep"),
 		);
-		expect(deferred).toHaveLength(3);
+		expect(deferred).toHaveLength(4);
 		for (const result of deferred) {
 			// Narrowed, not collapsed: the primary's answer stands, and the deferred
 			// scanner is not waited on, so nothing flips the touch to inconclusive.
@@ -303,12 +308,25 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 			expect(result?.inconclusive).toBeUndefined();
 			expect(result?.diags).toHaveLength(1);
 		}
+		// One row per uncovered touch: three deferrals plus #1549's late write, which
+		// names its own door (`auxNoAnswerServerIds`) so the two causes stay legible.
 		const gapRows = rowsFor("lsp_scanner_coverage_gap");
-		expect(gapRows).toHaveLength(3);
-		expect(gapRows[0]?.metadata).toMatchObject({
-			deferredResyncServerIds: ["opengrep"],
-			source: "cascade",
-		});
+		expect(gapRows).toHaveLength(4);
+		expect(
+			gapRows.filter((row) =>
+				(
+					row.metadata as { deferredResyncServerIds?: string[] }
+				)?.deferredResyncServerIds?.includes("opengrep"),
+			),
+		).toHaveLength(3);
+		expect(
+			gapRows.filter((row) =>
+				(
+					row.metadata as { auxNoAnswerServerIds?: string[] }
+				)?.auxNoAnswerServerIds?.includes("opengrep"),
+			),
+		).toHaveLength(1);
+		expect(gapRows[0]?.metadata).toMatchObject({ source: "cascade" });
 	});
 
 	it("a write that lands after its deadline retracts the timeout it was charged for", async () => {
