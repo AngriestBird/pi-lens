@@ -21,6 +21,8 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import {
+	getDegradationLedgerGeneration,
+	incrementDegradationCount,
 	recordDegradation,
 	recordDegradationOnce,
 } from "./degradation-ledger.js";
@@ -28,7 +30,7 @@ import { loadWebTreeSitter } from "./deps/web-tree-sitter.js";
 import { transientRetryDelayMs } from "./dispatch/runners/utils/availability-policy.js";
 import { getProjectIgnoreMatcher, isExcludedDirName } from "./file-utils.js";
 import {
-	downloadGrammar,
+	downloadGrammarDetailed,
 	grammarBlockReason,
 	LANGUAGE_TO_GRAMMAR,
 } from "./grammar-source.js";
@@ -192,11 +194,26 @@ export class TreeSitterClient {
 	/** Consecutive download failures per grammar, for the exponential
 	 * cooldown; reset on success. */
 	private grammarFailureAttempts = new Map<string, number>();
-	/** Grammars whose failure has already reached the user this session — the
-	 * cooldown lets the ensure loop retry silently in the background; only
-	 * the FIRST failure (and any failure after a success reset the streak)
-	 * needs to interrupt the user. */
-	private grammarFailureNotified = new Set<string>();
+	/**
+	 * Retry delay (ms) last SHOWN to the user for this grammar, or `-1` for a
+	 * durable (non-retryable) failure already announced. The cooldown lets
+	 * the ensure loop retry silently in the background — only the delay's
+	 * FIRST appearance, and any later escalation the user was never told
+	 * about, needs to interrupt them (#1536 review F6): a fresh 30s cooldown
+	 * re-notifies the same as an escalated 300s one once it's a genuinely new
+	 * number, but two consecutive 30s cooldowns (identical, nothing new to
+	 * say) do not. Absence means "not yet notified this streak."
+	 *
+	 * Session-scoped (#1536 review F5): cleared whenever the degradation
+	 * ledger's own generation moves past `grammarNotificationsLedgerGen`,
+	 * mirroring `trustBlockedGrammarNotifications` below — a lazy
+	 * compare-at-use-time against a monotonic counter, not a listener. Tied to
+	 * the LEDGER's generation (bumped by `resetDegradationLedger`, which
+	 * `handleSessionStart` calls first thing) rather than trust, since this
+	 * is a session boundary, not a trust transition.
+	 */
+	private grammarLastNotifiedDelayMs = new Map<string, number>();
+	private grammarNotificationsLedgerGen = getDegradationLedgerGeneration();
 	private trustBlockedGrammarNotifications = new Set<string>();
 	private trustNotificationsGeneration = getProjectTrustGeneration();
 	// biome-ignore lint/suspicious/noExplicitAny: Optional dependency loaded dynamically
@@ -566,7 +583,11 @@ export class TreeSitterClient {
 		// A failed download only stays refused for its cooldown window (#1536):
 		// past that, fall through and retry rather than remembering an offline
 		// moment for the life of the process. No download is attempted while the
-		// cooldown is live, so a hard-down CDN is not re-hit on every parse.
+		// cooldown is live, so a hard-down CDN is not re-hit on every parse. A
+		// DURABLE failure (grammarBlockDurable below) sets this to +Infinity,
+		// which reads the same as "still cooling down" here — it just never
+		// expires, matching the issue's "a genuinely unavailable grammar may
+		// still latch" allowance.
 		const retryAt = this.grammarRetryAtMs.get(grammarFile);
 		if (retryAt !== undefined && Date.now() < retryAt) {
 			return false;
@@ -577,15 +598,29 @@ export class TreeSitterClient {
 				this.grammarsDir && fs.existsSync(this.grammarsDir)
 					? this.grammarsDir
 					: this.grammarsWriteDir();
-			if (!dir) return false;
+			if (!dir) {
+				// No writable grammars directory could be located (e.g. pi compiled
+				// this module to a temp dir and web-tree-sitter isn't resolvable
+				// from there yet). This is an environment condition, not a CDN
+				// verdict — #1536 review F2: it must get the same cooldown +
+				// notification treatment as a download failure, not a silent
+				// unmemoized `false` that re-does the same failing resolution
+				// sweep on every single demand.
+				this.recordGrammarFailure(
+					grammarFile,
+					"No writable grammars directory could be located for the runtime fetch.",
+					/* retryable */ true,
+				);
+				return false;
+			}
 			// Reuse the shared single-file downloader (same CDN/source as the
 			// postinstall) — see clients/grammar-source.ts.
-			const ok = await downloadGrammar(dir, grammarFile);
+			const { ok, retryable } = await downloadGrammarDetailed(dir, grammarFile);
 			if (ok) {
 				if (!this.grammarsDir) this.grammarsDir = dir;
 				this.grammarRetryAtMs.delete(grammarFile);
 				this.grammarFailureAttempts.delete(grammarFile);
-				this.grammarFailureNotified.delete(grammarFile);
+				this.grammarLastNotifiedDelayMs.delete(grammarFile);
 				logTreeSitterDiagnostic({
 					subsystem: "tree-sitter-client",
 					level: "warn",
@@ -593,52 +628,17 @@ export class TreeSitterClient {
 					metadata: { grammarFile, outcome: "fetched" },
 				});
 			} else {
-				// downloadGrammar collapses every failure mode (offline, DNS, a
-				// down CDN, a 404) to `false` — see clients/grammar-source.ts. All
-				// of those are treated as transient here: the cheap fix from #1536
-				// is a bounded cooldown for the whole arm, since a genuinely
-				// unsupported grammar just keeps failing every cooldown window at
-				// negligible cost, while treating a transient blip as durable
-				// disables the language for the rest of the session.
-				const attempts =
-					(this.grammarFailureAttempts.get(grammarFile) ?? 0) + 1;
-				this.grammarFailureAttempts.set(grammarFile, attempts);
-				const retryDelayMs = transientRetryDelayMs(attempts, "probe-timeout");
-				this.grammarRetryAtMs.set(grammarFile, Date.now() + retryDelayMs);
-				const retrySeconds = Math.round(retryDelayMs / 1000);
-
-				const unavailable =
-					`tree-sitter grammar '${grammarFile}' is unavailable — ` +
-					`symbol search, module reports and structural rules for this language will be degraded. ` +
-					`The package manager skipped install scripts and the runtime download failed (offline or CDN unreachable). ` +
-					`pi-lens will retry automatically in ${retrySeconds}s; if the problem persists, allow the package ` +
-					`manager's build scripts (pnpm approve-builds / bun trustedDependencies) or restore network access.`;
-				logTreeSitterDiagnostic({
-					subsystem: "tree-sitter-client",
-					message: unavailable,
-					metadata: {
-						grammarFile,
-						outcome: "unavailable",
-						retryable: true,
-						retryDelayMs,
-						attempts,
-					},
-				});
-				recordDegradation({
-					kind: "grammar-blocked",
-					subject: grammarFile,
-					reason: `runtime grammar download failed (retryable, retrying in ${retrySeconds}s)`,
-				});
-				// HUMAN-audience: an offline grammar fetch silently degrades this
-				// language's features, so it reaches the user through the HOST's
-				// render path (#1333) rather than a raw terminal write. Once per
-				// failure streak (#1536) — the cooldown above already keeps the
-				// download itself from spamming the CDN, and repeat failures while
-				// still cooling down must not spam the user either.
-				if (!this.grammarFailureNotified.has(grammarFile)) {
-					this.grammarFailureNotified.add(grammarFile);
-					notifyUserDegradation(`pi-lens: ${unavailable}`);
-				}
+				// `retryable` distinguishes a durable CDN verdict (404/410 — a
+				// retry hits the same answer) from everything else (offline, DNS,
+				// a down CDN, a 5xx, a timeout), which says nothing durable about
+				// the grammar (#1536 review F4). Only the retryable case gets the
+				// bounded cooldown; a durable failure keeps the pre-#1536 latched
+				// behavior, matching the issue's own allowance.
+				this.recordGrammarFailure(
+					grammarFile,
+					"The package manager skipped install scripts and the runtime download failed.",
+					retryable,
+				);
 			}
 			return ok;
 		})();
@@ -654,6 +654,96 @@ export class TreeSitterClient {
 			}
 		});
 		return task;
+	}
+
+	/**
+	 * Record one failed grammar-ensure attempt: arm (or extend) the retry
+	 * cooldown, record the degradation, and notify the user at most once per
+	 * session per DISTINCT retry delay (#1536 review F1/F2/F4/F5/F6). Shared
+	 * by the "no writable directory" and "download failed" arms of
+	 * `ensureGrammar` — both are failures of the SAME ensure attempt, just
+	 * with a different point of failure.
+	 */
+	private recordGrammarFailure(
+		grammarFile: string,
+		detail: string,
+		retryable: boolean,
+	): void {
+		const attempts = (this.grammarFailureAttempts.get(grammarFile) ?? 0) + 1;
+		this.grammarFailureAttempts.set(grammarFile, attempts);
+		// A durable verdict (404/410) never expires -- matches the issue's "a
+		// genuinely unavailable grammar may still latch" allowance. Everything
+		// else gets the bounded exponential cooldown.
+		const retryDelayMs = retryable
+			? transientRetryDelayMs(attempts, "probe-timeout")
+			: undefined;
+		this.grammarRetryAtMs.set(
+			grammarFile,
+			retryDelayMs === undefined
+				? Number.POSITIVE_INFINITY
+				: Date.now() + retryDelayMs,
+		);
+
+		const unavailable = retryable
+			? `tree-sitter grammar '${grammarFile}' is unavailable — symbol search, ` +
+				`module reports and structural rules for this language will be degraded. ` +
+				`${detail} pi-lens will retry automatically in ${Math.round((retryDelayMs as number) / 1000)}s; ` +
+				`if the problem persists, allow the package manager's build scripts ` +
+				`(pnpm approve-builds / bun trustedDependencies) or restore network access.`
+			: `tree-sitter grammar '${grammarFile}' is unavailable — symbol search, ` +
+				`module reports and structural rules for this language will be degraded. ` +
+				`${detail} The grammar source reports it does not exist (not a network problem), so this will not ` +
+				`resolve on retry. Fix: reinstall with a manager that runs postinstall, allow its build scripts ` +
+				`(pnpm approve-builds / bun trustedDependencies), or restore network access.`;
+
+		logTreeSitterDiagnostic({
+			subsystem: "tree-sitter-client",
+			message: unavailable,
+			metadata: {
+				grammarFile,
+				outcome: "unavailable",
+				retryable,
+				retryDelayMs,
+				attempts,
+			},
+		});
+		// #1536 review F1: incrementDegradationCount keeps ONE ring-buffer slot
+		// per subject (bumping its count in place) instead of recordDegradation's
+		// one-new-entry-per-call — a grammar retrying every cooldown window would
+		// otherwise flood the shared "grammar-blocked" kind's 20-slot ring and
+		// evict unrelated entries (e.g. a different grammar's V8-crash block
+		// reason from loadLanguage/grammarBlockReason) after ~20 cycles.
+		incrementDegradationCount({
+			kind: "grammar-blocked",
+			subject: grammarFile,
+			reason: retryable
+				? "runtime grammar download failed — retryable (offline/CDN/network)"
+				: `runtime grammar download failed — durable (${detail.trim()})`,
+		});
+
+		// Session-scoped re-arm (#1536 review F5): a NEW session must be able to
+		// re-notify even for a grammar that has been failing continuously since
+		// before the session boundary. Lazy compare-at-use-time against the
+		// ledger's own generation (bumped by resetDegradationLedger, which
+		// handleSessionStart calls first thing) -- the same clear-on-transition
+		// shape as trustBlockedGrammarNotifications/trustNotificationsGeneration
+		// above, just keyed to a session boundary instead of a trust change.
+		const ledgerGen = getDegradationLedgerGeneration();
+		if (ledgerGen !== this.grammarNotificationsLedgerGen) {
+			this.grammarNotificationsLedgerGen = ledgerGen;
+			this.grammarLastNotifiedDelayMs.clear();
+		}
+		// HUMAN-audience: an offline grammar fetch silently degrades this
+		// language's features, so it reaches the user through the HOST's render
+		// path (#1333) rather than a raw terminal write. Notify once per DISTINCT
+		// retry delay this session (#1536 review F6) -- a fresh failure streak or
+		// an escalated backoff is new information worth surfacing; an unchanged
+		// repeat during the same cooldown tier is not.
+		const notifyKey = retryDelayMs ?? -1;
+		if (this.grammarLastNotifiedDelayMs.get(grammarFile) !== notifyKey) {
+			this.grammarLastNotifiedDelayMs.set(grammarFile, notifyKey);
+			notifyUserDegradation(`pi-lens: ${unavailable}`);
+		}
 	}
 
 	/** Initialize tree-sitter WASM runtime */
