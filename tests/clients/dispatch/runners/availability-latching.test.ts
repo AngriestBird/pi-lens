@@ -15,7 +15,6 @@ import {
 	HOST_STALL_COOLDOWN_MS,
 	INSTALL_TRANSIENT_BASE_COOLDOWN_MS,
 	INSTALL_TRANSIENT_MAX_ATTEMPTS,
-	INSTALL_TRANSIENT_MAX_COOLDOWN_MS,
 	installRetryDelayMs,
 	startHostStallSampler,
 	TRANSIENT_BASE_COOLDOWN_MS,
@@ -147,11 +146,24 @@ describe("availability seam: transient failures do not latch (#1467)", () => {
 		// so the probe-class base/cap would run it at a ~20% duty cycle forever.
 		expect(installRetryDelayMs(1)).toBe(INSTALL_TRANSIENT_BASE_COOLDOWN_MS);
 		expect(installRetryDelayMs(2)).toBe(INSTALL_TRANSIENT_BASE_COOLDOWN_MS * 2);
-		expect(installRetryDelayMs(50)).toBe(INSTALL_TRANSIENT_MAX_COOLDOWN_MS);
 		// The install base starts where the probe schedule tops out.
 		expect(INSTALL_TRANSIENT_BASE_COOLDOWN_MS).toBeGreaterThanOrEqual(
 			TRANSIENT_MAX_COOLDOWN_MS,
 		);
+	});
+
+	it("owes no cooldown at or past the attempt ceiling (#1497 review F4)", () => {
+		// The ceiling is DERIVED from the ladder, so every attempt the ladder does
+		// not fund returns 0 — the same "latched, nothing will retry" signal
+		// `noteUnavailable` returns. An earlier cut paired a doubling formula with
+		// a 30-minute cap the 3-attempt ceiling could never reach, and a test
+		// pinned that unreachable branch as if it were policy.
+		expect(installRetryDelayMs(INSTALL_TRANSIENT_MAX_ATTEMPTS)).toBe(0);
+		expect(installRetryDelayMs(50)).toBe(0);
+		// Every attempt BELOW the ceiling is funded; the two numbers cannot drift.
+		for (let attempt = 1; attempt < INSTALL_TRANSIENT_MAX_ATTEMPTS; attempt += 1) {
+			expect(installRetryDelayMs(attempt)).toBeGreaterThan(0);
+		}
 	});
 
 	it("writes one availability decision record per verdict", async () => {
@@ -384,5 +396,51 @@ describe("availability latch: shared client-side memo (#1467)", () => {
 		expect(latch.noteUnavailable("transient", "probe-timeout")).toBe(
 			TRANSIENT_BASE_COOLDOWN_MS,
 		);
+	});
+
+	it("never lets a probe failure shorten an install cooldown (#1497 review F2)", () => {
+		const latch = createAvailabilityLatch();
+		const installDelay = latch.noteUnavailable("transient", "probe-timeout", {
+			operationClass: "install",
+		});
+		expect(installDelay).toBe(INSTALL_TRANSIENT_BASE_COOLDOWN_MS);
+		const installGate = latch.getRetryAtMs();
+
+		// A cheap `--version` probe fails while the install is still cooling. A
+		// host stall gets the 5 s shortcut — correct for the probe, and fatal if it
+		// reschedules the 60 s compile with it. Assert the GATE, not the returned
+		// delay: the delay is right in both worlds.
+		expect(latch.noteUnavailable("transient", "host-stall")).toBe(
+			HOST_STALL_COOLDOWN_MS,
+		);
+		expect(latch.getRetryAtMs()).toBe(installGate);
+
+		vi.setSystemTime(new Date(Date.now() + HOST_STALL_COOLDOWN_MS + 1));
+		expect(latch.read()).toBe(false);
+		vi.setSystemTime(new Date(installGate + 1));
+		expect(latch.read()).toBeNull();
+	});
+
+	it("describes an exhausted ceiling honestly (#1497 review F5)", () => {
+		const latch = createAvailabilityLatch();
+		const install = { operationClass: "install" as const };
+		for (let i = 1; i < INSTALL_TRANSIENT_MAX_ATTEMPTS; i += 1) {
+			latch.noteUnavailable("transient", "probe-timeout", install);
+		}
+		expect(latch.noteUnavailable("transient", "probe-timeout", install)).toBe(0);
+
+		// The failures WERE transient, so the outcome stays transient — which is
+		// why the cause has to carry the terminal-ness. Without it the message
+		// below ends in "It will be retried", and nothing will.
+		expect(latch.getCause()).toBe("install-retry-exhausted");
+		const message = describeUnavailability({
+			tool: "govulncheck",
+			installHint: "go install golang.org/x/vuln/cmd/govulncheck@latest",
+			outcome: latch.getOutcome(),
+			cause: latch.getCause(),
+		});
+		expect(message).not.toContain("It will be retried");
+		expect(message).toMatch(/retry ceiling/i);
+		expect(message).toContain("next session");
 	});
 });

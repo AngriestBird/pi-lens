@@ -11,6 +11,7 @@ import { resetDegradationLedger } from "./degradation-ledger.js";
 import type { DependencyChecker } from "./dependency-checker.js";
 import { getDiagnosticTracker } from "./diagnostic-tracker.js";
 import { resetDispatchAvailabilityState } from "./dispatch/runners/utils/runner-helpers.js";
+import { resetInstallRetryLatches } from "./dispatch/runners/utils/availability-policy.js";
 import { resetPsScriptAnalyzerAvailability } from "./dispatch/runners/psscriptanalyzer.js";
 import type { FileKind } from "./file-kinds.js";
 import { clearAllSessions as clearFileTimeSessions } from "./file-time.js";
@@ -1852,6 +1853,12 @@ export async function handleSessionStart(
 	// psscriptanalyzer's two latches are module-local, so the generation counter
 	// above does not reach them (#1490).
 	resetPsScriptAnalyzerAvailability();
+	// #1497: the install-class retry ceiling is terminal for a SESSION, but the
+	// latches holding it live on process-lived client instances (bootstrap builds
+	// them once). Same #1266/#1490/#1535 shape — without this line "terminal for
+	// the session" is terminal for the process, and a repaired network never
+	// re-earns its `go install`.
+	resetInstallRetryLatches();
 	// #1123 item 3: a fresh session can re-report smells that a prior session
 	// already surfaced once (see `checkSmellsAndNoteOnce`'s once-per-session gate).
 	resetSmellsSessionState();
