@@ -45,7 +45,15 @@ export type AvailabilityCause =
 	| "probe-rejected"
 	| "bad-cwd"
 	| "policy-denied"
-	| "empty-result";
+	| "empty-result"
+	/**
+	 * An install-class operation kept failing transiently and hit its retry
+	 * ceiling (#1497). The outcome stays `transient` — the failures WERE
+	 * transient — so this cause is the only thing that stops the verdict from
+	 * being described as "it will be retried" when nothing will retry it until
+	 * the next session.
+	 */
+	| "install-retry-exhausted";
 
 /**
  * What the spawn ACTUALLY returned, carried beside the verdict derived from it
@@ -247,6 +255,71 @@ export function transientRetryDelayMs(
 	);
 }
 
+/**
+ * Install-class transient policy (#1497): the operation being retried is a
+ * network install/compile with a ~60 s budget (govulncheck's `go install`),
+ * not a 1.5–5 s version probe. The probe schedule above would re-run that
+ * compile every 5 minutes indefinitely — a ~20% duty cycle on one core with
+ * nothing that ever gives up.
+ *
+ * The cost, stated: the ladder IS `INSTALL_TRANSIENT_COOLDOWNS_MS` — 5 min,
+ * then 10 min, then give up. Three ≤60 s compiles across ~15 minutes, and then
+ * the verdict is terminal FOR THE SESSION: `resetInstallRetryLatches()` at the
+ * next `session_start` (or a successful run) re-arms it, so a genuinely
+ * repaired network still recovers without a host restart. What ends is the
+ * *indefinite* retry, not the recovery #1489 fixed.
+ *
+ * The ceiling is DERIVED from the ladder rather than written beside it: an
+ * earlier revision paired a doubling formula with a 30-minute cap that a
+ * 3-attempt ceiling could never reach, so the stated cost and the real one
+ * disagreed. One list, no arithmetic, nothing unreachable.
+ *
+ * There is no host-stall shortcut here, and install-class failures keep their
+ * own cooldown slot: the retry itself is the expensive part no matter who ate
+ * the budget, so a cheap probe failure must not be able to shorten it.
+ */
+export const INSTALL_TRANSIENT_BASE_COOLDOWN_MS = 300_000;
+
+/** Cooldown before install retry N, in order. Its length sets the ceiling. */
+export const INSTALL_TRANSIENT_COOLDOWNS_MS: readonly number[] = [
+	INSTALL_TRANSIENT_BASE_COOLDOWN_MS,
+	INSTALL_TRANSIENT_BASE_COOLDOWN_MS * 2,
+];
+
+/** Install attempts allowed per session, including the one that gives up. */
+export const INSTALL_TRANSIENT_MAX_ATTEMPTS =
+	INSTALL_TRANSIENT_COOLDOWNS_MS.length + 1;
+
+/**
+ * Cooldown owed after `attempts` install-class failures, or **0** when the
+ * ladder is spent — the same "no retry, the verdict is latched" signal
+ * `noteUnavailable` returns.
+ */
+export function installRetryDelayMs(attempts: number): number {
+	return INSTALL_TRANSIENT_COOLDOWNS_MS[Math.max(0, attempts - 1)] ?? 0;
+}
+
+/**
+ * Session generation for install-class retry state (#1497 review F1).
+ *
+ * The exhausted verdict is durable for a SESSION, but the latches holding it
+ * belong to process-lived client instances (`SecurityScanClient` and friends
+ * are built once in `bootstrap.ts`). Without this, "terminal for the session"
+ * silently became terminal for the process: a repaired network plus a full
+ * `session_start` reset still read exhausted, which is the #1266/#1490/#1535
+ * shape. A counter rather than a latch registry, so nothing has to be
+ * hand-maintained and no latch is retained for the sake of resetting it.
+ */
+let installRetryGeneration = 0;
+
+/**
+ * Re-arm install-class retries in every latch. Called from `session_start`'s
+ * per-session reset block beside `resetDispatchAvailabilityState()`.
+ */
+export function resetInstallRetryLatches(): void {
+	installRetryGeneration += 1;
+}
+
 /** The subset of a spawn result the classification actually reads. */
 export interface ProbeFailureShape {
 	/** The spawn's Error, whose `code` carries the errno when there is one. */
@@ -362,13 +435,36 @@ export function startHostStallSampler(intervalMs = 100): { stop: () => number } 
 export interface AvailabilityLatch {
 	read(): boolean | null;
 	noteAvailable(cause?: AvailabilityCause): void;
-	/** Returns the retry delay in ms; 0 means the verdict is latched. */
-	noteUnavailable(outcome: AvailabilityOutcome, cause: AvailabilityCause): number;
+	/**
+	 * Returns the retry delay in ms; 0 means the verdict is latched.
+	 *
+	 * `opts.operationClass: "install"` marks the failure of an install-class
+	 * operation (a network install/compile, #1497) rather than a cheap probe:
+	 * it escalates on the install schedule, holds its own cooldown slot, and
+	 * latches for the session once INSTALL_TRANSIENT_MAX_ATTEMPTS is reached,
+	 * instead of retrying forever. The cause is rewritten to
+	 * `install-retry-exhausted` at the ceiling so the verdict describes itself
+	 * honestly.
+	 */
+	noteUnavailable(
+		outcome: AvailabilityOutcome,
+		cause: AvailabilityCause,
+		opts?: { operationClass?: "probe" | "install" },
+	): number;
 	reset(): void;
 	getOutcome(): AvailabilityOutcome | null;
 	getCause(): AvailabilityCause | null;
-	/** Epoch ms after which a transient verdict may be re-probed; 0 if latched. */
+	/**
+	 * Epoch ms after which a transient verdict may be re-probed; 0 if latched.
+	 *
+	 * This is the EFFECTIVE gate: the later of the probe-class and
+	 * install-class cooldowns, which is exactly what `read()` enforces. A
+	 * caller that reads one class's slot alone would conclude a retry is due
+	 * while the other class is still cooling (#1497 review F2).
+	 */
 	getRetryAtMs(): number;
+	/** True once install-class retries are spent for this session (#1497). */
+	isInstallExhausted(): boolean;
 }
 
 export interface AvailabilityLatchOptions {
@@ -389,31 +485,103 @@ export function createAvailabilityLatch(
 	let cause: AvailabilityCause | null = null;
 	let retryAtMs = 0;
 	let transientAttempts = 0;
+	let installAttempts = 0;
+	let installExhausted = false;
+	// Install-class failures own their own cooldown slot (#1497 review F2). A
+	// cheap probe failure that lands mid-install-cooldown must not be able to
+	// shorten it — the 5 s host-stall shortcut on the probe ladder would
+	// otherwise collapse 5 minutes of install spacing into seconds.
+	let installRetryAtMs = 0;
 	const maxCooldownMs = options.maxCooldownMs ?? TRANSIENT_MAX_COOLDOWN_MS;
+	let installGeneration = installRetryGeneration;
+
+	function clearVerdict(): void {
+		available = null;
+		outcome = null;
+		cause = null;
+		retryAtMs = 0;
+		transientAttempts = 0;
+		installAttempts = 0;
+		installExhausted = false;
+		installRetryAtMs = 0;
+	}
+
+	/**
+	 * Fold in any `resetInstallRetryLatches()` that happened since the last
+	 * touch. Install-class state is per-session, so a new generation drops the
+	 * attempt count and the cooldown; when the exhausted verdict IS the state,
+	 * the whole verdict goes with it and the next `read()` returns `null` so the
+	 * caller re-probes.
+	 */
+	function syncInstallGeneration(): void {
+		if (installGeneration === installRetryGeneration) return;
+		installGeneration = installRetryGeneration;
+		if (installExhausted) {
+			clearVerdict();
+			return;
+		}
+		installAttempts = 0;
+		installRetryAtMs = 0;
+	}
+
+	/** The later of the two class cooldowns — the gate `read()` enforces. */
+	function effectiveRetryAtMs(): number {
+		return Math.max(retryAtMs, installRetryAtMs);
+	}
 
 	return {
 		read(): boolean | null {
+			syncInstallGeneration();
 			if (available !== false) return available;
+			if (installExhausted) return false;
 			if (outcome !== "transient") return false;
-			return Date.now() >= retryAtMs ? null : false;
+			return Date.now() >= effectiveRetryAtMs() ? null : false;
 		},
 		noteAvailable(nextCause: AvailabilityCause = "ok"): void {
+			installGeneration = installRetryGeneration;
 			available = true;
 			outcome = "success";
 			cause = nextCause;
 			retryAtMs = 0;
 			transientAttempts = 0;
+			installAttempts = 0;
+			installExhausted = false;
+			installRetryAtMs = 0;
 		},
 		noteUnavailable(
 			nextOutcome: AvailabilityOutcome,
 			nextCause: AvailabilityCause,
+			opts?: { operationClass?: "probe" | "install" },
 		): number {
+			syncInstallGeneration();
 			available = false;
 			outcome = nextOutcome;
 			cause = nextCause;
 			if (isLatchingOutcome(nextOutcome)) {
 				retryAtMs = 0;
+				installRetryAtMs = 0;
 				return 0;
+			}
+			if (opts?.operationClass === "install") {
+				installAttempts += 1;
+				const installDelay = installRetryDelayMs(installAttempts);
+				if (installDelay === 0) {
+					// Terminal for the session (#1497): the caller reads the 0 as
+					// "latched" and must surface it, because the user-visible symptom
+					// of an unbounded install retry is a busy core, not a missing tool.
+					// The cause carries that, so no describe path can promise a retry
+					// that will not happen before the next session (review F5).
+					installExhausted = true;
+					cause = "install-retry-exhausted";
+					retryAtMs = 0;
+					installRetryAtMs = 0;
+					return 0;
+				}
+				// Install-class keeps its OWN slot: a cheap probe failure landing
+				// inside this window (host-stall's 5 s shortcut, say) must not be
+				// able to pull the next 60 s compile forward (review F2).
+				installRetryAtMs = Date.now() + installDelay;
+				return installDelay;
 			}
 			transientAttempts += 1;
 			const delay = transientRetryDelayMs(
@@ -425,15 +593,16 @@ export function createAvailabilityLatch(
 			return delay;
 		},
 		reset(): void {
-			available = null;
-			outcome = null;
-			cause = null;
-			retryAtMs = 0;
-			transientAttempts = 0;
+			installGeneration = installRetryGeneration;
+			clearVerdict();
 		},
 		getOutcome: () => outcome,
 		getCause: () => cause,
-		getRetryAtMs: () => retryAtMs,
+		getRetryAtMs: () => effectiveRetryAtMs(),
+		isInstallExhausted: () => {
+			syncInstallGeneration();
+			return installExhausted;
+		},
 	};
 }
 
@@ -461,6 +630,12 @@ export function describeUnavailability(options: {
 	const { tool, installHint } = options;
 	if (options.outcome !== "transient") {
 		return `${tool} not available. Install with: ${installHint}`;
+	}
+	if (options.cause === "install-retry-exhausted") {
+		// A transient outcome whose retries are spent. The generic transient arm
+		// below ends in "It will be retried", which nothing will do before the
+		// next session — so this case describes itself instead (#1497 review F5).
+		return `${tool} install kept timing out and reached its retry ceiling (${INSTALL_TRANSIENT_MAX_ATTEMPTS} attempts). ${tool} is not reported missing — the install is not being retried again this session, and recovers at the next session. To install it now: ${installHint}`;
 	}
 	const elapsed = options.elapsedMs ? ` after ${options.elapsedMs}ms` : "";
 	const stalled =

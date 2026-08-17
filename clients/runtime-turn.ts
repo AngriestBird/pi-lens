@@ -429,6 +429,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const cascadeResults = cascadeRuns.flatMap((r) =>
 		r.result ? [r.result] : [],
 	);
+	// #1550 class sweep: every cascade record below summarises `cascadeResults`
+	// — runs, which carry their own paths and can be carried across turns
+	// (#1443) — so labelling them with the turn's first EDITED file is the same
+	// mis-attribution the `cascade_indeterminate` fix removes. On a read-only
+	// drain turn `files` is empty and the old `?? cwd` fallback stamped a bare
+	// DIRECTORY as the record's file. These three are turn-level AGGREGATES (no
+	// per-file cause is claimed), so one label suffices; the edited file and cwd
+	// stay as fallbacks.
+	const cascadeLogFilePath = cascadeResults[0]?.filePath ?? files[0] ?? cwd;
 	if (cascadeResults.length > 0) {
 		const seen = new Map<string, (typeof cascadeResults)[number]>();
 		for (const result of cascadeResults) {
@@ -490,7 +499,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// recorded on the same phase rather than only logging on a hit.
 			logCascade({
 				phase: "cascade_test_targets",
-				filePath: files[0] ?? cwd,
+				filePath: cascadeLogFilePath,
 				neighborCount: uniqueNeighborFiles.length,
 				metadata: {
 					neighborFiles: uniqueNeighborFiles.slice(0, 10),
@@ -527,7 +536,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// the agent ever saw the text.
 			logCascade({
 				phase: "cascade_injected",
-				filePath: files[0] ?? cwd,
+				filePath: cascadeLogFilePath,
 				neighborCount: injectedNeighborCount,
 				diagnosticCount: injectedDiagnosticCount,
 				metadata: {
@@ -539,7 +548,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		}
 		logCascade({
 			phase: "cascade_turn_end",
-			filePath: files[0] ?? cwd,
+			filePath: cascadeLogFilePath,
 			neighborCount: cascadeResults.reduce((s, r) => s + r.neighbors.length, 0),
 			diagnosticCount: cascadeResults.reduce(
 				(s, r) =>
@@ -649,12 +658,35 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const fileCount = new Set(
 			indeterminateRuns.map((r) => normalizeMapKey(r.filePath)),
 		).size;
+		// #1550: attribute each reason to the file that PRODUCED it. This record
+		// used to stamp `filePath: files[0] ?? cwd` — the turn's first EDITED file
+		// — and a bare `reasons` array with no file association. The two sets are
+		// disjoint: a run can be carried across turns (#1443), and an edited file
+		// can skip the graph entirely (markdown/JSON return `non_code` before
+		// computeImpactCascade ever runs). So the log blamed a file that could not
+		// have produced the reason — a markdown file credited with `missing_node`,
+		// a non-test source file credited with `excluded_by_role` — and the defect
+		// read as "concentrated on test files" only because the first edited file
+		// of a turn usually is one. `fileCount` and the agent-facing advisory
+		// already keyed off `r.filePath`; only this record's labels did not.
+		const byFile = indeterminateRuns.map((r) => ({
+			file: toRunnerDisplayPath(cwd, r.filePath),
+			reason: r.indeterminate?.reason,
+			...(r.indeterminate?.detail && { detail: r.indeterminate.detail }),
+			...(r.indeterminate?.diagnostic && {
+				diagnostic: r.indeterminate.diagnostic,
+			}),
+		}));
 		logCascade({
 			phase: "cascade_indeterminate",
-			filePath: files[0] ?? cwd,
+			// The first indeterminate run's own file. `files[0] ?? cwd` survives only
+			// as a last resort for a run with no path at all.
+			filePath: indeterminateRuns[0]?.filePath ?? files[0] ?? cwd,
 			metadata: {
 				fileCount,
 				reasons: indeterminateRuns.map((r) => r.indeterminate?.reason),
+				byFile: byFile.slice(0, 20),
+				...(byFile.length > 20 && { byFileTruncated: byFile.length - 20 }),
 			},
 		});
 	}

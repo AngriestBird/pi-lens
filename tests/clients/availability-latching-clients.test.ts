@@ -11,7 +11,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TRANSIENT_BASE_COOLDOWN_MS } from "../../clients/dispatch/runners/utils/availability-policy.ts";
+import {
+	INSTALL_TRANSIENT_BASE_COOLDOWN_MS,
+	TRANSIENT_BASE_COOLDOWN_MS,
+} from "../../clients/dispatch/runners/utils/availability-policy.ts";
 import { resetDispatchAvailabilityState } from "../../clients/dispatch/runners/utils/runner-helpers.ts";
 import { removeTempDirSync } from "./test-utils.js";
 
@@ -212,6 +215,52 @@ describe("govulncheck availability (#1467)", () => {
 		advancePastCooldown();
 		spawn.mockResolvedValue(versionOk as never);
 		expect(await client.ensureAvailable()).toBe(true);
+	});
+
+	it("stops re-running a repeatedly timing-out `go install` after the ceiling (#1497)", async () => {
+		const spawn = await spawnMock();
+		// govulncheck missing on PATH; the Go toolchain answers; every
+		// `go install` eats its 60s budget without producing the binary.
+		spawn.mockImplementation(async (cmd, args) => {
+			const argv = Array.isArray(args) ? args.join(" ") : "";
+			if (String(cmd) === "go" && argv.startsWith("version"))
+				return { stdout: "go1.22.0", stderr: "", status: 0 } as never;
+			if (String(cmd) === "go" && argv.startsWith("install"))
+				return timeoutResult as never;
+			return missingResult as never;
+		});
+		const installCount = () =>
+			spawn.mock.calls.filter(
+				([cmd, args]) =>
+					String(cmd) === "go" &&
+					Array.isArray(args) &&
+					args[0] === "install",
+			).length;
+
+		const { GovulncheckClient } = await import("../../clients/govulncheck-client.js");
+		const client = new GovulncheckClient(false);
+
+		// Each attempt is a fresh 60s compile; the install-class schedule spaces
+		// them 5/10 minutes apart, and the third timeout is terminal.
+		expect(await client.ensureAvailable()).toBe(false);
+		expect(installCount()).toBe(1);
+
+		vi.setSystemTime(
+			new Date(Date.now() + INSTALL_TRANSIENT_BASE_COOLDOWN_MS + 1),
+		);
+		expect(await client.ensureAvailable()).toBe(false);
+		expect(installCount()).toBe(2);
+
+		vi.setSystemTime(
+			new Date(Date.now() + INSTALL_TRANSIENT_BASE_COOLDOWN_MS * 2 + 1),
+		);
+		expect(await client.ensureAvailable()).toBe(false);
+		expect(installCount()).toBe(3);
+
+		// Ceiling reached: no fourth compile, no matter how much time passes.
+		vi.setSystemTime(new Date(Date.now() + 3_600_000));
+		expect(await client.ensureAvailable()).toBe(false);
+		expect(installCount()).toBe(3);
 	});
 });
 
