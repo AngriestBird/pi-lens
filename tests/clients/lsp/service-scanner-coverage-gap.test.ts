@@ -109,6 +109,7 @@ function makeClient(
 	let inFlight = 0;
 	let version = 0;
 	const stats = { maxInFlight: 0, openOffsets: [] as number[] };
+	const stampsByPath = new Map<string, number>();
 	return {
 		stats,
 		serverId,
@@ -123,6 +124,21 @@ function makeClient(
 		get diagnosticsVersion() {
 			return version;
 		},
+		// #1531: production decides freshness and aux evidence from the PER-PATH
+		// publication stamp, not the client-global counter, so the double answers on
+		// that axis too — an accessor-less double would silently exercise only the
+		// fail-closed branch and never the real read.
+		//
+		// #1533 merge: the `"never"` profile still stamps nothing, so every read is an
+		// honest 0 and its silence is modelled rather than inferred. The
+		// `"immediately"` profile DOES stamp the path it published for, because that is
+		// what an early-resolving wait means for a notified push-only auxiliary — and
+		// the per-path stamp is now the axis the evidence check reads, so stamping only
+		// the global counter would leave a publishing scanner looking silent.
+		stampsByPath,
+		getDiagnosticsVersionForPath: vi.fn(
+			(filePath: string) => stampsByPath.get(filePath) ?? 0,
+		),
 		getDiagnostics: vi.fn(() => diags),
 		notify: {
 			open: vi.fn(() => {
@@ -145,12 +161,17 @@ function makeClient(
 		// `diagnosticsVersion` — a promise that never settles would model a client
 		// production does not have.
 		waitForDiagnostics: vi.fn(
-			(_filePath: string, timeoutMs?: number) =>
+			(filePath: string, timeoutMs?: number) =>
 				new Promise<void>((resolve) => {
 					if (publishes === "never") setTimeout(resolve, timeoutMs ?? 1000);
 					else {
-						// A publication landing is what resolves a real wait early.
+						// A publication landing is what resolves a real wait early. Stamp
+						// BOTH axes exactly as `client.ts` does: the global counter advances
+						// and the per-path stamp records that counter's value for this file
+						// (#1531). Bumping only the global counter would leave the evidence
+						// check — which reads per-path — seeing a silent scanner.
 						version += 1;
+						stampsByPath.set(filePath, version);
 						resolve();
 					}
 				}),

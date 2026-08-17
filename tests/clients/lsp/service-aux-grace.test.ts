@@ -114,6 +114,11 @@ function makeClient(
 ) {
 	let waitSettled = false;
 	let version = 0;
+	// #1531: production stamps the PATH each publication was stored for, and both
+	// the wait's freshness gate and the aux evidence check read that stamp. A
+	// single-file double can key every stamp off the one file it is touched with;
+	// `makePathAwareAuxClient` below models the multi-file case.
+	const stampsByPath = new Map<string, number>();
 	return {
 		isAlive: () => true,
 		shutdown: async () => {},
@@ -140,6 +145,9 @@ function makeClient(
 		get diagnosticsVersion() {
 			return version;
 		},
+		getDiagnosticsVersionForPath: vi.fn(
+			(filePath: string) => stampsByPath.get(filePath) ?? 0,
+		),
 		// Only returns diagnostics after waitForDiagnostics has resolved,
 		// matching real client behaviour (server pushes → client caches → wait resolves).
 		getDiagnostics: vi.fn(() => (waitSettled ? diags : [])),
@@ -149,7 +157,7 @@ function makeClient(
 			close: vi.fn(async () => {}),
 		},
 		waitForDiagnostics: vi.fn(
-			() =>
+			(filePath: string) =>
 				new Promise<void>((resolve) =>
 					setTimeout(() => {
 						waitSettled = true;
@@ -159,7 +167,10 @@ function makeClient(
 						// #1493: an empty publish is still a publish — opt into it with
 						// `publishesWhenClean` to model a scanner that ran and found
 						// nothing.
-						if (diags.length > 0 || options.publishesWhenClean) version += 1;
+						if (diags.length > 0 || options.publishesWhenClean) {
+							version += 1;
+							stampsByPath.set(filePath, version);
+						}
 						resolve();
 					}, delayMs),
 				),
@@ -190,6 +201,49 @@ function makeLateBoundClient(content: string, serverId = "opengrep") {
 						published = true;
 						resolve();
 					}, 2500),
+				),
+		),
+	};
+}
+
+/**
+ * #1531: an auxiliary that models production's version bookkeeping faithfully.
+ * A real client keeps a per-client GLOBAL `diagnosticsVersion` that ANY path's
+ * publication advances, plus a per-path stamp recording the counter's value at
+ * that publication (`bumpDiagnosticsVersion` in client.ts). `publishesFor` is
+ * the set of files this scanner actually reports on; a touch of any other file
+ * settles its wait having published nothing for that file.
+ *
+ * The getter and `getDiagnosticsVersionForPath` are declared AFTER the spread on
+ * purpose: spreading `makeClient(...)` evaluates its `diagnosticsVersion` getter
+ * once and freezes the value, so the live readings must be redefined here.
+ */
+function makePathAwareAuxClient(
+	publishesFor: string[],
+	delayMs: number,
+	serverId = "opengrep",
+) {
+	let version = 0;
+	const stampsByPath = new Map<string, number>();
+	const publishable = new Set(publishesFor);
+	return {
+		...makeClient(delayMs, [], { serverId }),
+		get diagnosticsVersion() {
+			return version;
+		},
+		getDiagnosticsVersionForPath: vi.fn(
+			(filePath: string) => stampsByPath.get(filePath) ?? 0,
+		),
+		waitForDiagnostics: vi.fn(
+			(filePath: string) =>
+				new Promise<void>((resolve) =>
+					setTimeout(() => {
+						if (publishable.has(filePath)) {
+							version += 1;
+							stampsByPath.set(filePath, version);
+						}
+						resolve();
+					}, delayMs),
 				),
 		),
 	};
@@ -606,6 +660,61 @@ describe("R8 — aux grace: touchFile with-auxiliary path", () => {
 		// mark this silent scanner "answered"/"settled" — it must not.
 		expect(outcomes?.[0]?.outcome).not.toBe("answered");
 		expect(outcomes?.[0]?.outcome).not.toBe("settled");
+	});
+
+	// #1531: `diagnosticsVersion` is a per-CLIENT counter, so a publication for
+	// file A advances it for every file in flight on that client. The evidence
+	// check used to read it directly, which handed a concurrent touch of file B an
+	// `answered` row for a publication that never mentioned B — a false clean in
+	// exactly the field data used to reason about auxiliary health. Two files, one
+	// aux client, publication only for A: B's row must read `silent`.
+	it("does not read a sibling file's publication as an answer for this file", async () => {
+		const FILE_A = "C:/repo/a.ts";
+		const FILE_B = "C:/repo/b.ts";
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		// One primary and one auxiliary client, shared by both files (same root,
+		// same server ids) — which is what makes the counter shared.
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(100, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce(makePathAwareAuxClient([FILE_A], 900));
+		await service.getClientsForFile(FILE_A);
+		await service.getClientsForFile(FILE_B);
+
+		const touchOptions = {
+			clientScope: "with-auxiliary" as const,
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document" as const,
+		};
+		const touchA = service.touchFile(FILE_A, "a", touchOptions);
+		const touchB = service.touchFile(FILE_B, "b", touchOptions);
+		await vi.advanceTimersByTimeAsync(2110);
+		await Promise.all([touchA, touchB]);
+
+		const rowFor = (suffix: string) => {
+			const call = logLatency.mock.calls.find(
+				([entry]) =>
+					entry.phase === "lsp_aux_wait_outcome" &&
+					String(entry.filePath).endsWith(suffix),
+			);
+			const outcomes = call?.[0]?.metadata?.outcomes as
+				| Array<{ serverId: string; outcome: string }>
+				| undefined;
+			return outcomes?.find((o) => o.serverId === "opengrep");
+		};
+
+		// The aux DID publish for A within its grace — A keeps its answer.
+		expect(rowFor("a.ts")?.outcome).toBe("answered");
+		// B's wait settled inside the grace too, but nothing was published for B.
+		// Pre-#1531 this read the global counter (advanced by A) and recorded
+		// "answered".
+		expect(rowFor("b.ts")?.outcome).not.toBe("answered");
+		expect(rowFor("b.ts")?.outcome).toBe("silent");
 	});
 
 	it("rejects a version-less late auxiliary publication (recordBinding fails closed, #1458 S7)", async () => {
@@ -1731,27 +1840,36 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 		).toContain("borrow error");
 	});
 
-	// #1531 (closes with #1544's per-path counter). `diagnosticsVersion` is a
-	// per-CLIENT counter, so two CONCURRENT touches sharing one auxiliary client can
-	// cross-satisfy: a publication for a.ts advances the counter b.ts's baseline is
-	// compared against, and b.ts reads `answered` on its sibling's evidence. The
-	// cascade neighbour fan-out is a `Promise.allSettled`, so this is the common
-	// shape, not a corner.
+	// #1531, now CLOSED and live rather than pending. The client-global
+	// `diagnosticsVersion` advances for every file a client publishes, so two
+	// CONCURRENT touches sharing one auxiliary client used to cross-satisfy: a
+	// publication for a.ts advanced the counter b.ts's baseline was compared against,
+	// and b.ts read `answered` on its sibling's evidence. The cascade neighbour
+	// fan-out is a `Promise.allSettled`, so that is the common shape, not a corner.
 	//
-	// FAIL-OPEN: the gap can only MISS a silence, never fabricate one, so it weakens
-	// the acceptance criterion for concurrent touches without making any verdict
-	// wrong. Skipped rather than deleted because it pins the DESIRED post-#1544
-	// behavior at the seam that will change; unskip it with that PR.
-	it.skip("#1531/#1544: a concurrent sibling's publication must not cover a silent touch", async () => {
+	// #1531 landed the per-path publication stamp on master while #1533 was in
+	// review, and the aggregate evidence read uses the same `readPathVersion`
+	// accessor, so this is now a live regression fence for BOTH producers on that
+	// axis. It was authored as a skipped pin of the desired behavior; it is unskipped
+	// because the behavior arrived. If it ever goes red, the aggregate path has
+	// drifted back to the global counter.
+	it("#1531: a concurrent sibling's publication must not cover a silent touch", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
-		// Built from the shape that DEMONSTRABLY exhibits the gap (verified by probe:
-		// both touches resolve `confirmed`, both rows read `answered`, though only
-		// a.ts was ever published for). Deliberately NOT assembled from `makeClient`
-		// above — a spread of that double changed the outcome for an unrelated reason
-		// and made this pin pass without exercising the shared counter at all, which
-		// is exactly the vacuous-fixture trap (defect shape 7) this test is about.
+		// Built from the shape that demonstrably exhibited the gap before #1531 landed
+		// (verified by probe: both touches resolved `confirmed`, both rows read
+		// `answered`, though only a.ts was ever published for). Deliberately NOT
+		// assembled from `makeClient` above — a spread of that double changed the
+		// outcome for an unrelated reason and made this pin pass without exercising the
+		// counter at all, the vacuous-fixture trap (defect shape 7) this test is about.
+		//
+		// The double advances BOTH axes on a publication, exactly as `client.ts` does:
+		// the global counter (which a.ts's publication bumps for the whole client) and
+		// the per-path stamp (recorded for a.ts only). That pairing is what makes the
+		// assertion meaningful — a read on the global axis sees a.ts's bump from b.ts
+		// and calls it covered; the per-path read does not.
 		let version = 0;
+		const stampsByPath = new Map<string, number>();
 		const shared = {
 			isAlive: () => true,
 			shutdown: async () => {},
@@ -1775,11 +1893,20 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 			get diagnosticsVersion() {
 				return version;
 			},
+			getDiagnosticsVersionForPath: vi.fn(
+				(filePath: string) => stampsByPath.get(filePath) ?? 0,
+			),
 			waitForDiagnostics: vi.fn(
 				(filePath: string) =>
 					new Promise<void>((resolve) =>
 						setTimeout(() => {
-							if (filePath.endsWith("a.ts")) version += 1;
+							// a.ts publishes: the client-global counter advances (it is
+							// client-wide, so b.ts sees this bump too) but only a.ts's path
+							// stamp records it. b.ts publishes nothing on either axis.
+							if (filePath.endsWith("a.ts")) {
+								version += 1;
+								stampsByPath.set(filePath, version);
+							}
 							resolve();
 						}, 900),
 					),
@@ -1789,6 +1916,7 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 			...shared,
 			serverId: "ts-primary",
 			diagnosticsVersion: 0,
+			getDiagnosticsVersionForPath: vi.fn(() => 0),
 			waitForDiagnostics: vi.fn(
 				() => new Promise<void>((resolve) => setTimeout(resolve, 100)),
 			),
