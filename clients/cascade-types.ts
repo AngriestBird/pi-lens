@@ -13,6 +13,14 @@ export interface CascadeNeighborResult {
 	lspTouched: boolean;
 	/** The touch did not confirm either clean state or diagnostics. */
 	inconclusive?: boolean;
+	/**
+	 * #1459/#1470: scanners that did NOT look at this file — breaker open, resync
+	 * deferred by the fan-out gate, or cut off by the aux grace timer. Present
+	 * means "these findings are not a full picture", so a zero-diagnostic
+	 * neighbour must not be rendered as a clean leaf. Deliberately separate from
+	 * `inconclusive`: the primary answered and its findings stand.
+	 */
+	unconfirmedServerIds?: string[];
 	durationMs?: number;
 }
 

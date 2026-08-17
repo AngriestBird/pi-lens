@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { MessageConnection } from "vscode-jsonrpc";
 import {
 	applyDynamicCapabilities,
+	bumpDiagnosticsVersion,
 	CLIENT_CAPABILITIES,
 	clientRequestWorkspaceDiagnostics,
 	clearDiagnosticsForPath,
@@ -1022,11 +1023,79 @@ describe("clientWaitForDiagnostics", () => {
 		});
 
 		setTimeout(() => {
-			state.diagnosticsVersion = 2;
+			// #1531: advance through the production seam. Assigning the global counter
+			// alone no longer satisfies the gate, which now reads the per-path stamp —
+			// and a test that hand-rolls the bump would stop modelling a real publish.
+			bumpDiagnosticsVersion(state, TEST_KEY);
 			state.diagnosticEmitter.emit("diagnostics", TEST_FILE);
 		}, 50);
 
 		await waitPromise;
+	});
+
+	// #1531: a SIBLING file's publication must not satisfy this file's freshness
+	// gate. The exposure is the early-return: a resync that preserves diagnostics
+	// (format-only touches) leaves this path's cache populated, and pre-fix the gate
+	// asked only whether the client-GLOBAL counter had advanced past the baseline —
+	// which a sibling's publication does. The wait then returned instantly, serving
+	// the file's PREVIOUS diagnostics as fresh for this touch, and downstream the
+	// outcome row read `silent` (a label reserved for "this server's own budget
+	// lapsed with nothing published") rather than the truth.
+	it("does not treat a SIBLING path's publication as fresh diagnostics for this file", async () => {
+		const state = createMockState();
+		const siblingKey = normalizeMapKey("/project/other.ts");
+		// This path's cache holds diagnostics from an EARLIER touch, preserved
+		// across the resync.
+		state.pushDiagnostics.set(TEST_KEY, [
+			{
+				severity: 1,
+				message: "previous finding",
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 1 },
+				},
+			},
+		]);
+		bumpDiagnosticsVersion(state, TEST_KEY);
+		const baseline = state.diagnosticsVersion;
+
+		// A publication for the SIBLING advances the client-global counter past the
+		// baseline. Nothing new landed for this file.
+		bumpDiagnosticsVersion(state, siblingKey);
+		expect(state.diagnosticsVersion).toBeGreaterThan(baseline);
+		expect(diagnosticsVersionForPath(state, TEST_KEY)).toBeLessThanOrEqual(
+			baseline,
+		);
+
+		const startedAt = Date.now();
+		await clientWaitForDiagnostics(state, TEST_FILE, 120, {
+			minVersion: baseline,
+		});
+		// Pre-fix this returned in ~0ms on the sibling's bump. The wait must instead
+		// run to its own timeout, because no publication landed for THIS file.
+		expect(Date.now() - startedAt).toBeGreaterThanOrEqual(100);
+	});
+
+	it("still resolves immediately when THIS file's own publication is fresh", async () => {
+		const state = createMockState();
+		const baseline = state.diagnosticsVersion;
+		state.pushDiagnostics.set(TEST_KEY, [
+			{
+				severity: 1,
+				message: "own fresh finding",
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 1 },
+				},
+			},
+		]);
+		bumpDiagnosticsVersion(state, TEST_KEY);
+
+		const startedAt = Date.now();
+		await clientWaitForDiagnostics(state, TEST_FILE, 500, {
+			minVersion: baseline,
+		});
+		expect(Date.now() - startedAt).toBeLessThan(100);
 	});
 
 	it("resolves when diagnostics arrive via emitter", async () => {

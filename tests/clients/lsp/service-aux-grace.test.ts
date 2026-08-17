@@ -114,6 +114,11 @@ function makeClient(
 ) {
 	let waitSettled = false;
 	let version = 0;
+	// #1531: production stamps the PATH each publication was stored for, and both
+	// the wait's freshness gate and the aux evidence check read that stamp. A
+	// single-file double can key every stamp off the one file it is touched with;
+	// `makePathAwareAuxClient` below models the multi-file case.
+	const stampsByPath = new Map<string, number>();
 	return {
 		isAlive: () => true,
 		shutdown: async () => {},
@@ -140,6 +145,9 @@ function makeClient(
 		get diagnosticsVersion() {
 			return version;
 		},
+		getDiagnosticsVersionForPath: vi.fn(
+			(filePath: string) => stampsByPath.get(filePath) ?? 0,
+		),
 		// Only returns diagnostics after waitForDiagnostics has resolved,
 		// matching real client behaviour (server pushes → client caches → wait resolves).
 		getDiagnostics: vi.fn(() => (waitSettled ? diags : [])),
@@ -149,7 +157,7 @@ function makeClient(
 			close: vi.fn(async () => {}),
 		},
 		waitForDiagnostics: vi.fn(
-			() =>
+			(filePath: string) =>
 				new Promise<void>((resolve) =>
 					setTimeout(() => {
 						waitSettled = true;
@@ -159,7 +167,10 @@ function makeClient(
 						// #1493: an empty publish is still a publish — opt into it with
 						// `publishesWhenClean` to model a scanner that ran and found
 						// nothing.
-						if (diags.length > 0 || options.publishesWhenClean) version += 1;
+						if (diags.length > 0 || options.publishesWhenClean) {
+							version += 1;
+							stampsByPath.set(filePath, version);
+						}
 						resolve();
 					}, delayMs),
 				),

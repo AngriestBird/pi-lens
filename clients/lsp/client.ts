@@ -309,11 +309,12 @@ export interface LSPClientInfo {
 	 * #1531: the value `diagnosticsVersion` held when diagnostics were last stored
 	 * for `filePath` — 0 when this client has stored none. Compare a baseline read
 	 * before a notify against a later read to prove a publication landed for THAT
-	 * file, rather than for an unrelated one on the same client. Optional so
-	 * pre-#1531 client doubles keep type-checking; callers fall back to the global
-	 * counter, which is the pre-#1531 behavior.
+	 * file, rather than for an unrelated one on the same client. REQUIRED: an
+	 * optional accessor let a double silently fall back to the global counter,
+	 * which is the very defect this closes — every client, real or test, answers
+	 * per path.
 	 */
-	getDiagnosticsVersionForPath?(filePath: string): number;
+	getDiagnosticsVersionForPath(filePath: string): number;
 	waitForDiagnostics(
 		filePath: string,
 		timeoutMs?: number,
@@ -1391,12 +1392,12 @@ export function setupIncomingHandlers(
 			// Known, deliberately out-of-scope gaps: the pull-diagnostics path
 			// (clientRequestPullDiagnostics/clientRequestWorkspaceDiagnostics) has no
 			// version stamp to compare against in this codebase's current handling,
-			// so nothing analogous is applied there. `diagnosticsVersion` is still a
-			// single global counter, so an unrelated path's fresh push can satisfy the
-			// `minVersion` gate on a wait for this path (the timeout stays the
-			// backstop); #1531 fixed the EVIDENCE side of that — every bump now also
-			// stamps `diagnosticsVersionsByPath`, so the aux answered/silent outcome
-			// is decided per path and never from a sibling file's publication.
+			// so nothing analogous is applied there. The other gap this note used to
+			// record — `diagnosticsVersion` being a single global counter, so an
+			// unrelated path's fresh push satisfied a wait for THIS path — is closed by
+			// #1531: every bump also stamps `diagnosticsVersionsByPath`, and both the
+			// `minVersion` freshness gate and the auxiliary answered/silent evidence
+			// check read that per-path stamp.
 			const isSupersededPush = (): boolean => {
 				if (docVersion === undefined) return false;
 				const currentVersion = state.documentVersions.get(normalizedPath);
@@ -1689,6 +1690,14 @@ async function clientRequestPullDiagnostics(
 			state.pullResultIds.delete(normalizedPath);
 		}
 
+		// #1531 note (pre-existing, unchanged): a related document's diagnostics are
+		// STORED below but earn no version bump and therefore no per-path stamp —
+		// exactly as before, since this loop never bumped the global counter either.
+		// A wait on a path that only ever hears about itself through some other
+		// document's `relatedDocuments` sees no freshness evidence and rides its
+		// timeout. Direction is under-detection, and correcting it means deciding
+		// what a related-document publication is evidence OF (its binding is
+		// honestly "unknown" per #1104), so it stays out of scope here.
 		if (report.relatedDocuments) {
 			for (const [relatedUri, related] of Object.entries(
 				report.relatedDocuments,
@@ -1869,8 +1878,17 @@ export async function clientWaitForDiagnostics(
 ): Promise<void> {
 	const normalizedPath = normalizeMapKey(filePath);
 	const minVersion = options.minVersion;
+	// #1531: the freshness gate is PER PATH. `minVersion` is a reading of the
+	// client-global counter, and `diagnosticsVersionsByPath` stores that same
+	// counter's value at each store — the two are on one axis, so comparing them
+	// asks "has a publication landed for THIS file since the baseline?" instead of
+	// "has anything at all landed on this client?". Reading the global counter here
+	// let a sibling file's publication end this file's wait before its own budget
+	// lapsed, which then labelled the outcome row `silent` (reserved for "own
+	// budget lapsed with nothing published") instead of `cut_off`.
 	const hasFreshDiagnostics = (): boolean =>
-		minVersion === undefined || state.diagnosticsVersion > minVersion;
+		minVersion === undefined ||
+		diagnosticsVersionForPath(state, normalizedPath) > minVersion;
 
 	// Version coherence: a cached push is "stale" only when the server reported
 	// the document version it computed against AND that version lags the latest
