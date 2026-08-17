@@ -89,8 +89,8 @@ export interface DiagnosticBinding extends StoredDiagnosticBinding {
  * and/or diagnostics wait lapsed its deadline). `confirmation` is present only when
  * this touch completed its configured diagnostics/confirmation policy — `"confirmed"`
  * for every spawned server, or `"partial"` when an auxiliary contributed no evidence —
- * cut off by the aux grace timer (#1470) or silent inside its own budget (#1493) — and
- * `unconfirmedServerIds` names it. A partial touch
+ * cut off by the aux grace timer (#1470), or silent with no stored publication for this
+ * content (#1493) — and `unconfirmedServerIds` names it. A partial touch
  * is deliberately NOT `inconclusive`: the primary answered and its findings stand;
  * only the claim of full coverage is withdrawn. It is required
  * before treating an empty result from a known silent-on-clean server as clean, but is
@@ -118,10 +118,11 @@ export interface TouchFileResult {
 	/**
 	 * #1470/#1493: server ids this touch carries NO evidence for. Populated (and
 	 * `confirmation` narrowed to `"partial"`) for every auxiliary that never
-	 * reported — cut off by the aux grace timer (R8/#714's `auxCutOffServerIds`)
-	 * or silent through its own budget with no stored publication for this
-	 * content. See {@link auxiliaryCoverageGap}, which owns the rule. Absent when
-	 * every spawned server answered for itself.
+	 * reported — its push wait cut off by the aux grace timer (R8/#714's
+	 * `auxCutOffServerIds`) or settled with nothing published — and that has no
+	 * stored publication for this touch's content either. See
+	 * {@link auxiliaryCoverageGap}, which owns the rule. Absent when every spawned
+	 * server answered for itself.
 	 */
 	unconfirmedServerIds?: string[];
 	binding?: DiagnosticBinding;
@@ -152,7 +153,7 @@ export function touchCoverageGap(
  * silent-clean gates ran to completion exactly as they do for a full
  * confirmation. Reading `=== "confirmed"` there looks safely fail-closed but
  * reports "the language server could not confirm clean" when the truth is "the
- * language server confirmed clean and a scanner was cut off" — the same overclaim
+ * language server confirmed clean and a scanner never reported" — the same overclaim
  * pointing the other way. Pair this with {@link touchCoverageGap}, which names
  * what the touch does not speak for.
  */
@@ -170,8 +171,13 @@ export function touchCompletedConfirmationPolicy(
  *     publication counts: a scanner that ran and found nothing still bumps
  *     `diagnosticsVersion`, which is what makes "clean" distinguishable from
  *     "never spoke".
- *   - `silent`   → the auxiliary's own wait gave up inside its own budget with
- *     nothing published.
+ *   - `silent`   → the wait settled with nothing published for this touch. The
+ *     usual cause is the auxiliary's own budget lapsing, but not the only one: a
+ *     debounce-skipped notify (#743/#1253) leaves the auxiliary nothing new to
+ *     answer, and a wait satisfied by a non-empty cache can settle at ~0ms, so
+ *     `silent` does NOT imply the auxiliary spent its budget. It means only
+ *     that no publication landed during this wait — which is why the coverage
+ *     policy below pairs it with `publishedThisContent`.
  *   - `cut_off`  → the aux grace timer won; the auxiliary's own wait never got
  *     to answer for itself.
  */
@@ -185,7 +191,7 @@ export interface AuxiliaryWaitEvidence {
 	 * #1493: independent proof this auxiliary already published for EXACTLY the
 	 * content this touch carries — a stored binding whose `contentHash` equals
 	 * the touch's content hash. Such an auxiliary has reported on this file's
-	 * current bytes, so its silence during this touch withholds nothing.
+	 * current bytes, so a wait that produced nothing new withholds nothing.
 	 * Absent/false → this touch has no publication of its own to point at.
 	 */
 	publishedThisContent?: boolean;
@@ -213,6 +219,14 @@ export interface AuxiliaryWaitEvidence {
  * auxiliary whose publication for these exact bytes is already stored (the
  * touch's notify was debounce-skipped, or its late publication was carried in),
  * which has reported even though nothing new landed during this wait.
+ *
+ * The `publishedThisContent` exemption applies to BOTH no-answer shapes, for the
+ * same reason it applies to either: the question is whether this auxiliary has
+ * reported on these exact bytes, and how a wait we abandoned would have ended is
+ * irrelevant once a verified publication for them exists. Exempting `silent` but
+ * not `cut_off` on identical evidence would report the same coverage two ways
+ * depending on which timer happened to win. This stays fail-closed — it
+ * un-narrows only against a content-hash match, never against a timer.
  */
 export function auxiliaryCoverageGap(
 	evidence: readonly AuxiliaryWaitEvidence[],
@@ -220,8 +234,7 @@ export function auxiliaryCoverageGap(
 	return evidence
 		.filter(
 			(aux) =>
-				aux.outcome === "cut_off" ||
-				(aux.outcome === "silent" && aux.publishedThisContent !== true),
+				aux.outcome !== "answered" && aux.publishedThisContent !== true,
 		)
 		.map((aux) => aux.serverId);
 }

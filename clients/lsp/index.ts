@@ -8,7 +8,6 @@
  * - Resource cleanup
  */
 
-import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -55,6 +54,7 @@ import {
 	bindingStateLabel,
 	composeBoundToCurrentDisk,
 	createDiskBindingCache,
+	hashDiagnosticContent,
 	touchCoverageGap,
 	type BoundToCurrentDisk,
 	type DiagnosticBinding,
@@ -3337,8 +3337,8 @@ export class LSPService {
 		// empty `collected` must never erase a previously-confirmed non-empty
 		// record (that's the #570 bug — a timeout silently reporting as clean
 		// and wiping out known-good diagnostic state).
-		// #1470: a PARTIAL touch is the same hazard wearing a different flag. Its
-		// merged array is missing whatever the cut-off auxiliary would have said, so
+		// #1470/#1493: a PARTIAL touch is the same hazard wearing a different flag.
+		// Its merged array is missing whatever the unreporting auxiliary would have said, so
 		// priming the cache with it would let `actionable-warnings`' hash-guarded
 		// read replay a partially-covered result as an authoritative observation —
 		// and an empty one would DELETE a previously-confirmed record on the strength
@@ -3369,10 +3369,12 @@ export class LSPService {
 		if (collected !== undefined && inconclusive) {
 			result.inconclusive = true;
 		} else if (collected !== undefined && coverageGap) {
-			// #1470: narrowed, not collapsed. The primary's findings ride along in
-			// `.diags` exactly as before; what changes is that the touch now states
-			// which servers it does not speak for, so no consumer can read this as a
-			// full clean bill of health.
+			// #1470/#1493: narrowed, not collapsed. Reached for EITHER no-answer
+			// shape — a cut-off auxiliary or a silent one with nothing published for
+			// this content. The primary's findings ride along in `.diags` exactly as
+			// before; what changes is that the touch now states which servers it does
+			// not speak for, so no consumer can read this as a full clean bill of
+			// health.
 			result.confirmation = "partial";
 			result.unconfirmedServerIds = [...unconfirmedServerIds];
 		} else if (collected !== undefined) {
@@ -3771,8 +3773,15 @@ export class LSPService {
 		return merged;
 	}
 
+	/**
+	 * Delegates to {@link hashDiagnosticContent} rather than re-hashing here. Every
+	 * comparison this hash takes part in (`publishedThisContent`, the carried-aux
+	 * check, the last-known content guard) is against a hash the client produced
+	 * with that function, so the two implementations must agree byte for byte —
+	 * a duplicate is a silent divergence waiting for one of them to be tuned.
+	 */
 	private hashContent(content: string): string {
-		return createHash("sha256").update(content).digest("hex");
+		return hashDiagnosticContent(content);
 	}
 
 	/**
@@ -5021,15 +5030,18 @@ export class LSPService {
 				// `perFileMs` deadline, which only catches a touch that never returned at
 				// all within budget. Either one means the result wasn't confirmed.
 				const inconclusive = touchResult?.inconclusive === true;
-				// #1470: a cut-off auxiliary is the THIRD reason this result is not a
-				// confirmed observation, and it is deliberately not `inconclusive`. The
+				// #1470/#1493: an auxiliary that never reported — cut off by the grace
+				// timer, or silent with nothing published for this content — is the
+				// THIRD reason this result is not a confirmed observation, and it is
+				// deliberately not `inconclusive`. The
 				// record loop below persists every `!timedOut` result into the workspace
 				// cache, so reading `inconclusive` alone caches a partially covered
 				// answer as clean and replays it on every later sweep. Today the only
 				// route that can reach this branch with a gap is the warm-attach
 				// incumbent, whose touch runs `clientScope: "with-auxiliary"`; the
-				// sweep's own local touch uses `clientScope: "all"`, which never arms
-				// the aux grace timer at all. Both are gated here so a future scope
+				// sweep's own local touch uses `clientScope: "all"`, which never enters
+				// the auxiliary wait at all — so neither no-answer shape can arise
+				// there. Both are gated here so a future scope
 				// change cannot reopen the hole silently.
 				const coverageGap = touchCoverageGap(touchResult).length > 0;
 				const timedOut =

@@ -1172,6 +1172,63 @@ describe("#1470 — cut-off auxiliary honesty", () => {
 		expect(result?.unconfirmedServerIds).toBeUndefined();
 	});
 
+	it("#1493: a CUT-OFF auxiliary already bound to this content stays covered", async () => {
+		// The same exemption on the other no-answer shape. This auxiliary's wait
+		// outlives the 2000ms ceiling, so the grace timer cuts it off — but a stored
+		// publication is bound to EXACTLY the bytes this touch carries, so it has
+		// already reported on this content and how the abandoned wait would have
+		// ended changes nothing. Exempting the silent shape but not this one would
+		// report identical coverage two ways depending on which timer won.
+		const content = "already-scanned-then-hung";
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		getServersForFileWithConfig.mockReturnValue([
+			makePrimaryServer("ts-primary"),
+			makeAuxServer("opengrep"),
+		]);
+		createLSPClient
+			.mockResolvedValueOnce(makeClient(800, [], { serverId: "ts-primary" }))
+			.mockResolvedValueOnce({
+				...makeClient(3000, [], { serverId: "opengrep" }),
+				getDiagnosticBinding: vi.fn(() => ({
+					contentHash: hashDiagnosticContent(content),
+				})),
+				waitForDiagnostics: vi.fn(
+					() => new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+				),
+			});
+		await service.getClientsForFile(FILE);
+
+		const touch = service.touchFile(FILE, content, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			collectDiagnostics: true,
+			diagnostics: "document",
+		});
+		await vi.advanceTimersByTimeAsync(4000);
+		const result = await touch;
+		const outcomes = logLatency.mock.calls.find(
+			([entry]) => entry.phase === "lsp_aux_wait_outcome",
+		)?.[0]?.metadata?.outcomes as
+			| Array<{ outcome: string; publishedThisContent?: boolean }>
+			| undefined;
+		expect(outcomes?.[0]?.outcome).toBe("cut_off");
+		expect(outcomes?.[0]?.publishedThisContent).toBe(true);
+		expect(result?.confirmation).toBe("confirmed");
+		expect(result?.unconfirmedServerIds).toBeUndefined();
+		// The cut-off record itself is unchanged — the latency field still reports
+		// which auxiliary the timer cut off, whatever the coverage verdict was.
+		expect(logLatency).toHaveBeenCalledWith(
+			expect.objectContaining({
+				phase: "lsp_touch_file",
+				metadata: expect.objectContaining({
+					auxCutOffServerIds: ["opengrep"],
+					confirmation: "confirmed",
+				}),
+			}),
+		);
+	});
+
 	it("an auxiliary that PUBLISHES within grace still yields an unqualified confirmation", async () => {
 		const { result, outcome } = await probe(
 			900,
