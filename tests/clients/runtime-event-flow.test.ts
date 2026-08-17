@@ -40,23 +40,67 @@ vi.mock("../../clients/pipeline.js", () => ({
 	})),
 }));
 
+type MadgeFixture = ReturnType<typeof createMadgeFixture>;
+
+function createMadgeFixture(prefix: string) {
+	const env = setupTestEnvironment(prefix);
+	const runtime = new RuntimeCoordinator();
+	const cacheManager = new CacheManager(false);
+	const filePath = path.join(env.tmpDir, "src", "cycle.ts");
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, "export const value = 1;\n");
+	return { env, runtime, cacheManager, filePath, dbg: vi.fn() };
+}
+
+function markMadgeFileModified(input: {
+	fixture: MadgeFixture;
+	importsChanged: boolean;
+}) {
+	const { fixture, importsChanged } = input;
+	fixture.cacheManager.addModifiedRange(
+		fixture.filePath,
+		{ start: 1, end: 1 },
+		importsChanged,
+		fixture.env.tmpDir,
+	);
+}
+
+async function runMadgeTurnEnd(input: {
+	fixture: MadgeFixture;
+	getFlag?: (name: string) => boolean;
+	ensureAvailable?: ReturnType<typeof vi.fn>;
+	checkFilesBatch?: ReturnType<typeof vi.fn>;
+}) {
+	const { fixture } = input;
+	const { env, runtime, cacheManager, dbg } = fixture;
+	const ensureAvailable = input.ensureAvailable ?? vi.fn(async () => true);
+	const checkFilesBatch = input.checkFilesBatch ?? vi.fn();
+	await handleTurnEnd({
+		ctxCwd: env.tmpDir,
+		getFlag:
+			input.getFlag ?? ((name: string) => name === "lens-turn-end-madge"),
+		dbg,
+		runtime,
+		cacheManager,
+		knipClient: {
+			ensureAvailable: async () => false,
+			analyze: async () => EMPTY_KNIP_RESULT,
+		},
+		deadCodeClients: [],
+		depChecker: { ensureAvailable, checkFilesBatch } as any,
+		testRunnerClient: { getTestRunTarget: () => null },
+		resetLSPService: () => {},
+		resetFormatService: () => {},
+	} as any);
+	return { ensureAvailable, checkFilesBatch };
+}
+
 describe("runtime event flow", () => {
 	it("runs the real turn-end madge batch and carries its result metadata (#1251)", async () => {
-		const env = setupTestEnvironment("pi-lens-madge-turn-end-");
-		const runtime = new RuntimeCoordinator();
-		const cacheManager = new CacheManager(false);
-		const filePath = path.join(env.tmpDir, "src", "cycle.ts");
-		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, "export const value = 1;\n");
-		const dbg = vi.fn();
+		const fixture = createMadgeFixture("pi-lens-madge-turn-end-");
 		latencyEntries.length = 0;
 		try {
-			cacheManager.addModifiedRange(
-				filePath,
-				{ start: 1, end: 1 },
-				true,
-				env.tmpDir,
-			);
+			markMadgeFileModified({ fixture, importsChanged: true });
 			const stats = {
 				requested: 1,
 				missing: 0,
@@ -68,15 +112,14 @@ describe("runtime event flow", () => {
 				targets: [{ file: "src/cycle.ts", durationMs: 125, ok: true }],
 				targetsTruncated: false,
 			};
+			const resolvedFile = path.resolve(fixture.filePath);
 			const checkFilesBatch = vi.fn(async () => ({
 				results: new Map([
 					[
-						path.resolve(filePath),
+						resolvedFile,
 						{
 							hasCircular: true,
-							circular: [
-								{ file: path.resolve(filePath), path: path.resolve(filePath) },
-							],
+							circular: [{ file: resolvedFile, path: resolvedFile }],
 							checked: true,
 							cacheHit: false,
 						},
@@ -85,190 +128,74 @@ describe("runtime event flow", () => {
 				stats,
 			}));
 
-			await handleTurnEnd({
-				ctxCwd: env.tmpDir,
-				getFlag: (name: string) => name === "lens-turn-end-madge",
-				dbg,
-				runtime,
-				cacheManager,
-				knipClient: {
-					ensureAvailable: async () => false,
-					analyze: async () => EMPTY_KNIP_RESULT,
-				},
-				deadCodeClients: [],
-				depChecker: {
-					ensureAvailable: async () => true,
-					checkFilesBatch,
-				} as any,
-				testRunnerClient: { getTestRunTarget: () => null },
-				resetLSPService: () => {},
-				resetFormatService: () => {},
-			} as any);
+			await runMadgeTurnEnd({ fixture, checkFilesBatch });
 
 			expect(checkFilesBatch).toHaveBeenCalledWith(
-				[path.resolve(filePath)],
-				env.tmpDir,
+				[resolvedFile],
+				fixture.env.tmpDir,
 			);
-			expect(dbg).toHaveBeenCalledWith(
+			expect(fixture.dbg).toHaveBeenCalledWith(
 				expect.stringContaining("circular dependency note"),
 			);
 			const madge = latencyEntries.find((entry) => entry.phase === "madge");
 			expect(madge?.metadata).toEqual(stats);
 		} finally {
-			env.cleanup();
+			fixture.env.cleanup();
 		}
 	});
 
 	it("skips the turn-end madge batch entirely when the flag is off (default, #766)", async () => {
-		const env = setupTestEnvironment("pi-lens-madge-flag-off-");
-		const runtime = new RuntimeCoordinator();
-		const cacheManager = new CacheManager(false);
-		const filePath = path.join(env.tmpDir, "src", "cycle.ts");
-		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, "export const value = 1;\n");
-		const dbg = vi.fn();
+		const fixture = createMadgeFixture("pi-lens-madge-flag-off-");
 		latencyEntries.length = 0;
 		try {
-			cacheManager.addModifiedRange(
-				filePath,
-				{ start: 1, end: 1 },
-				true,
-				env.tmpDir,
-			);
-			const checkFilesBatch = vi.fn(async () => ({
-				results: new Map(),
-				stats: {
-					requested: 0,
-					missing: 0,
-					cacheHits: 0,
-					spawned: 0,
-					failed: 0,
-				},
-			}));
-			const ensureAvailable = vi.fn(async () => true);
-
-			// The whole point of #766 is the pass is off unless explicitly enabled.
-			// A registry-default flip to true would silently re-introduce the tail;
-			// the mocked-getFlag variant below can't see it (it hardcodes false), and
-			// lens-config's it.each only asserts value===spec.default, so pin the
-			// default here AND drive the gate through the REAL resolver.
+			markMadgeFileModified({ fixture, importsChanged: true });
 			expect(resolvePiLensFlag("lens-turn-end-madge", false, {})).toBe(false);
-
-			await handleTurnEnd({
-				ctxCwd: env.tmpDir,
-				getFlag: (name: string) =>
+			const { ensureAvailable, checkFilesBatch } = await runMadgeTurnEnd({
+				fixture,
+				getFlag: (name) =>
 					name === "lens-turn-end-madge"
-						? resolvePiLensFlag(name, false, {})
+						? resolvePiLensFlag(name, false, {}) === true
 						: false,
-				dbg,
-				runtime,
-				cacheManager,
-				knipClient: {
-					ensureAvailable: async () => false,
-					analyze: async () => EMPTY_KNIP_RESULT,
-				},
-				deadCodeClients: [],
-				depChecker: { ensureAvailable, checkFilesBatch } as any,
-				testRunnerClient: { getTestRunTarget: () => null },
-				resetLSPService: () => {},
-				resetFormatService: () => {},
-			} as any);
+			});
 
 			expect(checkFilesBatch).not.toHaveBeenCalled();
 			expect(ensureAvailable).not.toHaveBeenCalled();
 			const madge = latencyEntries.find((entry) => entry.phase === "madge");
-			// The skipped marker keeps a flag-off ~0ms phase distinguishable from
-			// "ran and was fast" in latency.log (#1307 review note).
 			expect(madge?.metadata).toEqual({ skipped: true });
 		} finally {
-			env.cleanup();
+			fixture.env.cleanup();
 		}
 	});
 
 	it("skips the turn-end madge batch when enabled but madge is unavailable (#766)", async () => {
-		const env = setupTestEnvironment("pi-lens-madge-unavailable-");
-		const runtime = new RuntimeCoordinator();
-		const cacheManager = new CacheManager(false);
-		const filePath = path.join(env.tmpDir, "src", "cycle.ts");
-		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, "export const value = 1;\n");
-		const dbg = vi.fn();
+		const fixture = createMadgeFixture("pi-lens-madge-unavailable-");
 		try {
-			cacheManager.addModifiedRange(
-				filePath,
-				{ start: 1, end: 1 },
-				true,
-				env.tmpDir,
-			);
-			const checkFilesBatch = vi.fn();
+			markMadgeFileModified({ fixture, importsChanged: true });
 			const ensureAvailable = vi.fn(async () => false);
+			const { checkFilesBatch } = await runMadgeTurnEnd({
+				fixture,
+				ensureAvailable,
+			});
 
-			await handleTurnEnd({
-				ctxCwd: env.tmpDir,
-				getFlag: (name: string) => name === "lens-turn-end-madge",
-				dbg,
-				runtime,
-				cacheManager,
-				knipClient: {
-					ensureAvailable: async () => false,
-					analyze: async () => EMPTY_KNIP_RESULT,
-				},
-				deadCodeClients: [],
-				depChecker: { ensureAvailable, checkFilesBatch } as any,
-				testRunnerClient: { getTestRunTarget: () => null },
-				resetLSPService: () => {},
-				resetFormatService: () => {},
-			} as any);
-
-			// Availability probe still runs (flag is on); the short-circuit must stop
-			// before spawning madge when it reports unavailable.
 			expect(ensureAvailable).toHaveBeenCalled();
 			expect(checkFilesBatch).not.toHaveBeenCalled();
 		} finally {
-			env.cleanup();
+			fixture.env.cleanup();
 		}
 	});
 
 	it("does not spawn madge when enabled but no import-changed files exist (#766)", async () => {
-		const env = setupTestEnvironment("pi-lens-madge-no-import-changes-");
-		const runtime = new RuntimeCoordinator();
-		const cacheManager = new CacheManager(false);
-		const filePath = path.join(env.tmpDir, "src", "cycle.ts");
-		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		fs.writeFileSync(filePath, "export const value = 1;\n");
-		const dbg = vi.fn();
+		const fixture = createMadgeFixture("pi-lens-madge-no-import-changes-");
 		try {
-			// importsChanged=false → the file is not eligible for the turn-end pass.
-			cacheManager.addModifiedRange(
-				filePath,
-				{ start: 1, end: 1 },
-				false,
-				env.tmpDir,
-			);
-			const checkFilesBatch = vi.fn();
-			const ensureAvailable = vi.fn(async () => true);
-
-			await handleTurnEnd({
-				ctxCwd: env.tmpDir,
-				getFlag: (name: string) => name === "lens-turn-end-madge",
-				dbg,
-				runtime,
-				cacheManager,
-				knipClient: {
-					ensureAvailable: async () => false,
-					analyze: async () => EMPTY_KNIP_RESULT,
-				},
-				deadCodeClients: [],
-				depChecker: { ensureAvailable, checkFilesBatch } as any,
-				testRunnerClient: { getTestRunTarget: () => null },
-				resetLSPService: () => {},
-				resetFormatService: () => {},
-			} as any);
+			markMadgeFileModified({ fixture, importsChanged: false });
+			const { ensureAvailable, checkFilesBatch } = await runMadgeTurnEnd({
+				fixture,
+			});
 
 			expect(ensureAvailable).toHaveBeenCalled();
 			expect(checkFilesBatch).not.toHaveBeenCalled();
 		} finally {
-			env.cleanup();
+			fixture.env.cleanup();
 		}
 	});
 
