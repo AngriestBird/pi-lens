@@ -1,17 +1,26 @@
+import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
 	fileFromScriptUrl,
 	summarizePreciseCoverage,
 } from "./v8-coverage.js";
 
-const root = "/repo";
+// Host-rooted, not a POSIX literal: on Windows `file:///repo/...` has no
+// drive letter and fileURLToPath() throws, so the fixture must derive an
+// absolute root via path.resolve and build URLs with pathToFileURL —
+// never hardcode a POSIX-shaped path or assume process.platform.
+const root = path.resolve(path.sep, "repo");
+const url = (...segments: string[]) => pathToFileURL(path.join(root, ...segments)).toString();
 
 describe("summarizePreciseCoverage", () => {
 	it("maps file URLs under root and ignores outsiders", () => {
-		expect(fileFromScriptUrl("file:///repo/clients/source-filter.js", root)).toBe(
+		expect(fileFromScriptUrl(url("clients", "source-filter.js"), root)).toBe(
 			"clients/source-filter.js",
 		);
-		expect(fileFromScriptUrl("file:///elsewhere/x.js", root)).toBeUndefined();
+		expect(
+			fileFromScriptUrl(pathToFileURL(path.resolve(path.sep, "elsewhere", "x.js")).toString(), root),
+		).toBeUndefined();
 		expect(fileFromScriptUrl("node:internal/process", root)).toBeUndefined();
 	});
 
@@ -19,18 +28,18 @@ describe("summarizePreciseCoverage", () => {
 		const summary = summarizePreciseCoverage(
 			[
 				{
-					url: "file:///repo/clients/hot.js",
+					url: url("clients", "hot.js"),
 					functions: [
 						{ functionName: "a", ranges: [{ count: 2 }, { count: 0 }] },
 						{ functionName: "b", ranges: [{ count: 0 }] },
 					],
 				},
 				{
-					url: "file:///repo/clients/cold.js",
+					url: url("clients", "cold.js"),
 					functions: [{ functionName: "c", ranges: [{ count: 0 }] }],
 				},
 				{
-					url: "file:///repo/tests/ignore.js",
+					url: url("tests", "ignore.js"),
 					functions: [{ functionName: "noise", ranges: [{ count: 9 }] }],
 				},
 			],

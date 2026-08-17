@@ -20,6 +20,10 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
+import {
+	recordDegradation,
+	recordDegradationOnce,
+} from "./degradation-ledger.js";
 import { loadWebTreeSitter } from "./deps/web-tree-sitter.js";
 import { getProjectIgnoreMatcher, isExcludedDirName } from "./file-utils.js";
 import {
@@ -28,7 +32,6 @@ import {
 	LANGUAGE_TO_GRAMMAR,
 } from "./grammar-source.js";
 import { resolvePackagePath } from "./package-root.js";
-import { recordDegradation } from "./degradation-ledger.js";
 import {
 	assertInstallAllowed,
 	getProjectTrustGeneration,
@@ -2764,20 +2767,18 @@ export class TreeSitterClient {
 				return !hasExceptionSpec;
 			}
 			case "eq_mod_fn": {
-				// Workaround for web-tree-sitter not auto-applying #eq? predicates
-				// on the structural pattern of a query that has predicates. The
-				// query captures @MOD, @FN but the predicates aren't enforced
-				// (see evaluatePredicates in clients/tree-sitter-client.ts).
+				// Belt-and-braces re-check of the #eq? predicates that
+				// evaluatePredicates already enforces (clients/tree-sitter-client.ts).
 				// This filter re-applies the #eq? checks at post_filter time.
 				const mod = captures.MOD?.text ?? "";
 				const fn = captures.FN?.text ?? "";
 				return mod === "threading" && fn === "Thread";
 			}
 			case "regex_first_arg_identifier": {
-				// Workaround for web-tree-sitter not auto-applying #eq?/#match?
-				// predicates on the structural pattern (see evaluatePredicates).
-				// This post_filter re-applies both predicate checks AND
-				// the first-argument check:
+				// Belt-and-braces re-check of the #eq?/#match? predicates that
+				// evaluatePredicates already enforces, plus the first-argument
+				// check that predicates can't express. This post_filter re-applies
+				// both predicate checks AND the first-argument check:
 				// 1. MOD must be "re"  (would-be #eq? @MOD "re")
 				// 2. FUNC must match the regex method pattern (#match? @FUNC ...)
 				// 3. First arg must be an identifier (dynamic pattern)
@@ -3597,12 +3598,86 @@ export class TreeSitterClient {
 	}
 
 	/**
-	 * Evaluate text predicates (#match?, #eq?) for a query match.
-	 * web-tree-sitter stores these as compiled functions in query.textPredicates[patternIndex]
-	 * and does NOT apply them automatically via .matches().
+	 * Latch so the "textPredicates is malformed" diagnostic log line fires once
+	 * per `TreeSitterClient` instance for the life of the process (this client is
+	 * a process-wide singleton in production — see clients/tree-sitter-shared.ts),
+	 * not once per call. This gates ONLY the log line: process-wide log volume is
+	 * the concern here, not the user-facing degradation record below, which must
+	 * re-arm every session (see recordDegradationOnce) — including for a Query
+	 * object the LRU query cache (queryCache/queryBatchCache above) kept alive
+	 * across a session boundary, since the cache is evicted, never cleared.
+	 */
+	private textPredicatesInvalidLogged = false;
+
+	/**
+	 * Typed accessor for `query.textPredicates`. If the property is missing or the
+	 * wrong shape — e.g. a future web-tree-sitter upgrade renames or removes it —
+	 * `query.textPredicates?.[i] ?? []` would silently mean "no predicates for this
+	 * pattern," passing every match through unfiltered. That's a silent fail-open on
+	 * #match?/#eq? predicates that rules rely on for correctness, and because this
+	 * runs for every match of every query, it would zero out ALL structural matches
+	 * across every language while pi-lens reports "no issues found." Fail loud (log
+	 * once per client instance, record a degradation so it reaches the user) and
+	 * closed (report the query has no usable predicates) instead of guessing.
+	 *
+	 * No WeakSet short-circuit for already-known-bad queries here (#1523 review
+	 * R1): `Array.isArray` is O(1), so memoizing it buys nothing, and a
+	 * process-lifetime WeakSet would make the SAME cached Query object (the query
+	 * cache is LRU-evicted, never cleared) skip straight past
+	 * `recordDegradationOnce` on every call after the first — which is exactly
+	 * what made the degradation record fail to re-arm across a session boundary
+	 * for a query the cache kept warm. `recordDegradationOnce` itself is called
+	 * unconditionally on every invalid check; the ledger's own once-per-kind/
+	 * subject dedupe (cleared by resetDegradationLedger, which handleSessionStart
+	 * calls first thing — clients/runtime-session.ts) is the single source of
+	 * truth for "how often does this actually get recorded."
+	 */
+	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter Query instances
+	private hasValidTextPredicates(query: any): boolean {
+		const valid = Array.isArray(query?.textPredicates);
+		if (!valid) {
+			if (!this.textPredicatesInvalidLogged) {
+				this.textPredicatesInvalidLogged = true;
+				logTreeSitterDiagnostic({
+					subsystem: "tree-sitter-client",
+					message:
+						"web-tree-sitter Query.textPredicates is missing or not an array — " +
+						"#match?/#eq? predicates cannot be evaluated. Failing CLOSED: matches " +
+						"for this query are dropped rather than reported unfiltered.",
+					metadata: { textPredicatesType: typeof query?.textPredicates },
+				});
+			}
+			// User-facing signal (#1523 review F1). Called unconditionally on every
+			// invalid check (not gated by a client-lifetime latch) so it re-arms
+			// every session, per the R1 fix above.
+			recordDegradationOnce({
+				kind: "query-predicates-invalid",
+				subject: "web-tree-sitter",
+				reason:
+					"Query.textPredicates is missing or not an array — #match?/#eq? " +
+					"predicates cannot be evaluated; structural matches relying on them " +
+					"are dropped fail-closed",
+			});
+		}
+		return valid;
+	}
+
+	/**
+	 * Evaluate text predicates (#match?, #eq?) for a query match. web-tree-sitter
+	 * 0.25's `Query.matches()` DOES apply these predicates itself (probed on the
+	 * shipped grammars — see clients/tree-sitter-symbol-extractor.ts), so this is a
+	 * belt-and-braces re-filter, not a workaround for missing enforcement. It also
+	 * doubles as the fail-closed guard (#1523): if `query.textPredicates` is ever
+	 * missing or malformed, this drops the match instead of assuming it already
+	 * passed upstream.
 	 */
 	// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter types
 	private evaluatePredicates(query: any, match: any): boolean {
+		if (!this.hasValidTextPredicates(query)) return false;
+		// `?.` guards a post-validation removal of the property (e.g. a later
+		// mutation strips it after the first successful check) so the read can't
+		// throw here — an uncaught throw would be swallowed by the outer try/catch
+		// in searchFileWithQuery and silently zero out matches for the whole file.
 		const predicates: Array<(captures: unknown) => boolean> =
 			query.textPredicates?.[match.patternIndex] ?? [];
 		return predicates.every((fn) => fn(match.captures));
@@ -3640,7 +3715,9 @@ export class TreeSitterClient {
 							}
 						}
 
-						// Evaluate #match? and #eq? predicates that web-tree-sitter doesn't enforce automatically
+						// Belt-and-braces re-check of #match?/#eq? predicates (web-tree-sitter
+						// 0.25's Query.matches() already applies them) plus the fail-closed
+						// guard for a malformed query.textPredicates (see evaluatePredicates).
 						if (!this.evaluatePredicates(query, match)) {
 							continue;
 						}

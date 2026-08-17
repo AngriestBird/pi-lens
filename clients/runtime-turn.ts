@@ -1312,7 +1312,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						dbg(
 							`turn_end: ${stale ? "[stale] " : ""}test ${runner} ${shortFile} → ${summary}`,
 						);
-						if (failed > 0) {
+						// #1524: also fires on `error` alone, not just `failed > 0`.
+						// A runner-error result (the suite never started — spawn/
+						// config failure) has `failed === 0` by construction, so
+						// gating on `failed > 0` alone dropped it silently: the
+						// agent got no context at all, and the empty `failures`
+						// array below sent this result down the "all tests
+						// passed" branch, clearing any prior real test-failure
+						// git-guard blocker. `formatResult` already renders the
+						// error-only case as "Could not run tests: ...".
+						if (failed > 0 || error) {
 							const formatted = testRunnerClient.formatResult(r.value);
 							if (formatted) failures.push(formatted);
 						}
@@ -1344,14 +1353,25 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							cwd,
 						);
 						if (getFlag("lens-guard") && firedSessionId === runtime.telemetrySessionId) {
-							clearGitGuardTestFailure(
-								cacheManager,
-								cwd,
-								runtime,
-								resultValues
-									.filter((value) => value.failed === 0)
-									.map((value) => value.file),
-							);
+							// #1524: `&& !value.error` — a runner-error result has
+							// `failed === 0` (the suite never ran, so nothing could
+							// fail), but it is not a pass. Without the filter it
+							// would clear a prior real test-failure git-guard
+							// blocker on the strength of a suite that never
+							// started. And the call itself is skipped when this
+							// list is empty rather than passed as `[]`:
+							// `clearGitGuardTestFailure`'s own empty-array
+							// fallback treats "no files named" as "clear every
+							// blocked file", so an all-error batch (one go file,
+							// runner-error, zero clean files) would otherwise
+							// clear every blocker through that fallback instead
+							// of clearing none.
+							const cleanFiles = resultValues
+								.filter((value) => value.failed === 0 && !value.error)
+								.map((value) => value.file);
+							if (cleanFiles.length > 0) {
+								clearGitGuardTestFailure(cacheManager, cwd, runtime, cleanFiles);
+							}
 							mergeGitGuardTestFailure(
 								cacheManager,
 								cwd,
