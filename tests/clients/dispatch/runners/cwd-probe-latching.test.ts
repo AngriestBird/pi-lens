@@ -152,6 +152,35 @@ describe("createCwdCachedProbe latch policy (#1494)", () => {
 		});
 	});
 
+	it("records how each verdict was classified and what the probe returned", async () => {
+		// #1500's last leftover: this seam and tryEslintFix landed their rows with
+		// no `classifiedBy` and no `evidence`, so a `missing` verdict here could not
+		// be audited the way every other consumer's could.
+		const probe = vi
+			.fn()
+			.mockResolvedValueOnce(timeoutResult())
+			.mockResolvedValueOnce(okResult());
+		const cached = createCwdCachedProbe(probe, { tool: "widget" });
+
+		await cached("/tmp/project-evidence");
+		expect(decisions()[0]?.metadata).toMatchObject({
+			classifiedBy: "probe",
+			evidence: {
+				command: "widget",
+				failure: "timeout",
+				spawnFailureKind: "timeout",
+			},
+		});
+
+		advancePastCooldown();
+		await cached("/tmp/project-evidence");
+		expect(decisions()[1]?.metadata).toMatchObject({
+			verdict: "available",
+			classifiedBy: "probe",
+			evidence: { command: "widget", status: 0 },
+		});
+	});
+
 	it("dedupes concurrent first-time callers and scopes the verdict per cwd", async () => {
 		let settle: ((value: unknown) => void) | undefined;
 		const probe = vi

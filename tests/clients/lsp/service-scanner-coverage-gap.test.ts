@@ -99,6 +99,7 @@ function makeClient(
 	const startedAt = Date.now();
 	let inFlight = 0;
 	const stats = { maxInFlight: 0, openOffsets: [] as number[] };
+	const stampsByPath = new Map<string, number>();
 	return {
 		stats,
 		serverId,
@@ -111,6 +112,16 @@ function makeClient(
 		}),
 		getOperationSupport: () => ({}),
 		diagnosticsVersion: 0,
+		// #1531: production decides freshness and aux evidence from the PER-PATH
+		// publication stamp, not the client-global counter, so the double answers on
+		// that axis too — an accessor-less double would silently exercise only the
+		// fail-closed branch and never the real read. This double models scanners
+		// whose version never advances (see the note above), so no path is ever
+		// stamped; `stampsByPath` stays empty and every read is an honest 0.
+		stampsByPath,
+		getDiagnosticsVersionForPath: vi.fn(
+			(filePath: string) => stampsByPath.get(filePath) ?? 0,
+		),
 		getDiagnostics: vi.fn(() => diags),
 		notify: {
 			open: vi.fn(() => {
