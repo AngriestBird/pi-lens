@@ -124,6 +124,12 @@ export interface TouchFileResult {
 	 * {@link auxiliaryCoverageGap}, which owns the rule. Absent when every spawned
 	 * server answered for itself.
 	 *
+	 * #1533 extends the same evidence to `clientScope: "all"` — the batch/directory
+	 * scan surface, where auxiliaries are spawned but the grace wait is never
+	 * entered. It derives the outcomes from post-wait state instead of waiting a
+	 * second time, so an `"all"`-scope sweep reports a silent scanner without
+	 * paying back the fan-out latency #1459's resync gate recovered.
+	 *
 	 * #1459 adds the two doors that open BEFORE any wait: a scanner whose circuit
 	 * breaker was open (so it never attached at all) and one whose `didOpen` resync
 	 * the fan-out gate deferred (so it never received this content). Neither used
@@ -188,7 +194,10 @@ export function touchCompletedConfirmationPolicy(
  *     that no publication landed during this wait — which is why the coverage
  *     policy below pairs it with `publishedThisContent`.
  *   - `cut_off`  → the aux grace timer won; the auxiliary's own wait never got
- *     to answer for itself.
+ *     to answer for itself. Only the `with-auxiliary` grace wait can produce
+ *     this. The `"all"`-scope aggregate path (#1533) arms no ceiling of its own,
+ *     so it emits only the other three shapes — see the `waitShape` field on
+ *     `lsp_aux_wait_outcome`, which names the producer.
  *   - `deferred` (#1459) → the fan-out gate deferred this auxiliary's `didOpen`
  *     resync, so it was never sent these bytes and is not waited on at all. Kept
  *     distinct from `silent` deliberately: `silent` is the reserved signal for a
