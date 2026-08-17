@@ -355,12 +355,21 @@ function noteCooldownServedVerdict(
 	const cause = latch.getCause();
 	if (cause === null) {
 		// `getOutcome() === "transient"` is only ever set by `noteUnavailable` in
-		// the same call that sets `cause`. Assert rather than invent a plausible
-		// default: a fabricated cause here would mislabel WHY this formatter is
-		// off, in the exact record this fix exists to make honest (#1535's rule).
-		throw new Error(
-			`formatter which latch: transient outcome with no cause for ${command} (invariant violated)`,
-		);
+		// the same call that sets `cause`, so this is unreachable today. It is
+		// still not a throw (#1539 review F2): this runs inside `which()`, which
+		// runs inside `detect()`, and the smart-default branch of the selection
+		// pass rethrows a detection failure — so an invariant break in a LOGGING
+		// helper could take down formatting for the file. Nothing is fabricated
+		// either (#1535's rule: a made-up cause would mislabel WHY a formatter is
+		// off, in the record this fix exists to make honest). The row is dropped
+		// and the anomaly is reported, bounded by the same once-per-window gate
+		// this function already passed.
+		logExtension({
+			subsystem: "format",
+			message: `which latch: transient outcome with no cause for ${command}; cooldown-served record dropped`,
+			metadata: { tool: command, retryAtMs },
+		});
+		return;
 	}
 	logAvailabilityDecision({
 		tool: command,
@@ -1577,6 +1586,12 @@ export async function getFormattersForFile(
 	// after the primary answered a GENUINE absence. `rustfmt` missing plus a
 	// stalled `which rustup` skips the lazy install, and nothing named `rustfmt`
 	// is transient, so the empty result used to cache for the session.
+	//
+	// Residual: the record covers this module's own `which()` only. A detection
+	// that reaches PATH some other way is invisible to it — ktlint's `detect()`
+	// falls back to the installer's `getToolPath("ktlint")`, which has its own
+	// probe and its own 24-hour cache. Widening the record to those is deferred to
+	// the installer-side follow-up rather than bolted on here.
 	const stalledCandidateCommands = [
 		...new Set(candidateOutcomes.flatMap((outcome) => outcome.stalledCommands)),
 	];

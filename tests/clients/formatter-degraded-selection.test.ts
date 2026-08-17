@@ -228,18 +228,41 @@ describe("the poison guard sees every binary a detect probed (#1539)", () => {
 	});
 
 	it("does not claim a stall for a candidate this pass never probed", async () => {
-		// A transient verdict for a binary left over from an unrelated pass is not
-		// this decision's business. `.rb` selection never probes `rustup`.
-		const rust = rustProject();
-		const ruby = rubyProject();
-		safeSpawnAsync.mockImplementation(
-			pathLookups({ rustfmt: "missing", rustup: "stall", standardrb: "found" }),
-		);
+		// The binding case for replacing the `command[0]` derivation, and the one
+		// an earlier version of this test missed: its scenario produced a NON-empty
+		// result, and `poisonedByTransientProbe` is gated on empty, so master's
+		// derivation passed it too.
+		//
+		// Here the second pass is genuinely EMPTY. Directory A has a `.rubocop.yml`
+		// and a stalled `which rubocop`, which puts "rubocop" in the transient set.
+		// Directory B is a `.rb` file with NO rubocop and NO standardrb config, so
+		// BOTH detections return false from the filesystem without probing
+		// anything. Nothing stalled for THIS decision — "no Ruby formatter is
+		// configured here" is a real finding and must cache.
+		//
+		// Master's derivation matches candidates on `command[0]`, sees "rubocop" in
+		// the transient set, and refuses to cache a correct answer on every save,
+		// stamping `probe-timeout` on a pass where no probe ran.
+		const dirA = rubyProject();
+		safeSpawnAsync.mockImplementation(pathLookups({ rubocop: "stall" }));
+		expect(await names(dirA.cwd, dirA.filePath)).toEqual([]);
 
-		expect(await names(rust.cwd, rust.filePath)).toEqual([]);
+		const dirB = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-degraded-rb-bare-"));
+		const bareFile = path.join(dirB, "bare.rb");
+		fs.writeFileSync(bareFile, "puts 1\n");
 		logLatencySpy.mockClear();
-		expect(await names(ruby.cwd, ruby.filePath)).toEqual(["standardrb"]);
-		expect(selections()[0]?.metadata?.reason).toBe("detect");
+		safeSpawnAsync.mockClear();
+
+		expect(await names(dirB, bareFile)).toEqual([]);
+		expect(safeSpawnAsync).not.toHaveBeenCalled();
+		expect(selections()[0]?.metadata).toMatchObject({ reason: "none" });
+		expect(selections()[0]?.metadata?.cached).toBeUndefined();
+		expect(selections()[0]?.metadata?.stalledProbes).toBeUndefined();
+
+		// And it is genuinely cached: a second pass is served from the cache, so it
+		// logs no new selection at all.
+		expect(await names(dirB, bareFile)).toEqual([]);
+		expect(selections()).toHaveLength(1);
 	});
 });
 
