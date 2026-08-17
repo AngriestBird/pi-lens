@@ -77,6 +77,7 @@ import * as path from "node:path";
 import { getGlobalPiLensDir } from "../../../clients/file-utils.js";
 import {
 	checkProbeCache,
+	flushProbeCache,
 	getToolPath,
 	resetProbeCacheStateForTesting,
 	updateProbeCache,
@@ -160,6 +161,22 @@ describe("#1569 transient-tainted probe-cache entries", () => {
 
 		const cached = await checkProbeCache(TOOL_ID);
 		expect(cached).toBeUndefined();
+	});
+
+	it("prunes a sibling process's stale transient entry during the authoritative write-side merge", async () => {
+		mockFsStat.mockResolvedValue({ mtimeMs: 1 });
+		const sixMinutesAgo = Date.now() - 6 * 60 * 1000;
+		mockFsReadFile.mockResolvedValue(
+			JSON.stringify({
+				ruff: { path: "/sibling/ruff", mtimeMs: 1, cachedAt: sixMinutesAgo, transient: true },
+			}),
+		);
+
+		await updateProbeCache(TOOL_ID, EXE_PATH);
+		await flushProbeCache();
+
+		const [, content] = mockWriteFileAtomicAsync.mock.calls[0] as [string, string];
+		expect(JSON.parse(content).ruff).toBeUndefined();
 	});
 
 	it("still serves a clean (non-transient) entry at the same six-minute age", async () => {
