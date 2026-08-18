@@ -34,6 +34,7 @@ import {
 	fileHasWasmMagic,
 	grammarBlockReason,
 	LANGUAGE_TO_GRAMMAR,
+	vendoredGrammarsDir,
 } from "./grammar-source.js";
 import { resolvePackagePath } from "./package-root.js";
 import {
@@ -498,16 +499,38 @@ export class TreeSitterClient {
 		}
 	}
 
+	private _vendoredGrammarsDir?: string;
+	/**
+	 * The committed `vendor/grammars` dir, if it exists. Cached only on a hit,
+	 * mirroring `bundledGrammarsDir`.
+	 */
+	private vendoredGrammarsDir(): string | undefined {
+		if (this._vendoredGrammarsDir) return this._vendoredGrammarsDir;
+		try {
+			const dir = vendoredGrammarsDir();
+			if (fs.existsSync(dir)) this._vendoredGrammarsDir = dir;
+			return this._vendoredGrammarsDir;
+		} catch {
+			return undefined;
+		}
+	}
+
 	/**
 	 * All directories that may hold grammar wasms, in precedence order: the
-	 * bundled core dir, the resolved `this.grammarsDir`, and the web-tree-sitter
-	 * grammars dir (the lazy-fetch write target). Deduped.
+	 * committed vendor dir, the bundled core dir, the resolved
+	 * `this.grammarsDir`, and the web-tree-sitter grammars dir (the lazy-fetch
+	 * write target). Deduped.
+	 *
+	 * `vendor/grammars` comes first because it is the ONLY source for a grammar
+	 * we build ourselves (`VENDORED_GRAMMARS`) — nothing downloads into the
+	 * later dirs for it, so a miss here is a miss everywhere.
 	 */
 	private grammarSourceDirs(): string[] {
 		const dirs: string[] = [];
 		const push = (d: string | undefined): void => {
 			if (d && !dirs.includes(d)) dirs.push(d);
 		};
+		push(this.vendoredGrammarsDir());
 		push(this.bundledGrammarsDir());
 		push(this.grammarsDir || undefined);
 		push(this.resolveWebTreeSitterAsset("grammars"));

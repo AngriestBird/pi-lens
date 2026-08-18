@@ -62,6 +62,64 @@ export function grammarSourceUrl(filename: string): string {
 	return GRAMMAR_SOURCE_OVERRIDES[filename]?.url ?? `${GRAMMAR_CDN_BASE}/${filename}`;
 }
 
+/**
+ * Provenance for a grammar this repo BUILDS and commits, because no publisher
+ * ships a wasm for it. Distinct from `GRAMMAR_SOURCE_OVERRIDES`, which still
+ * names a URL to fetch: a vendored grammar has no remote source at all, so
+ * every download path must skip it and every resolve path must find it in
+ * `vendor/grammars/`.
+ *
+ * The fields are the reproduction recipe. Re-running `buildCommand` inside a
+ * checkout of `repo` at `commit` reproduces the bytes whose sha256 is pinned in
+ * `scripts/grammars.lock.json` under `vendored`, and
+ * `scripts/check-grammar-provenance.mjs` re-hashes the committed file against
+ * that pin — so the committed binary cannot drift unnoticed.
+ */
+export interface VendoredGrammarSource {
+	/** Upstream repository the grammar is built from. */
+	repo: string;
+	/** Exact upstream commit. Pinned by SHA because upstream cuts no releases. */
+	commit: string;
+	/** Upstream licence, recorded because the built artifact is redistributed. */
+	license: string;
+	/** The command run inside that checkout to produce the wasm. */
+	buildCommand: string;
+}
+
+/**
+ * Grammars built in-house and committed to `vendor/grammars/`.
+ *
+ * tree-sitter-cue: CUE has no published wasm anywhere — not on npm
+ * (`tree-sitter-cue` there is a native binding only), not in the
+ * `tree-sitter-wasms` aggregator, and upstream cuts no releases (#1522).
+ * Building it ourselves, with a modern `dylink.0` section, is the only way to
+ * give `.cue` structural analysis, so the artifact is committed and pinned
+ * rather than fetched. Mirrored by `VENDORED_GRAMMARS` in
+ * scripts/download-grammars.
+ */
+export const VENDORED_GRAMMARS: Record<string, VendoredGrammarSource> = {
+	"tree-sitter-cue.wasm": {
+		repo: "https://github.com/eonpatapon/tree-sitter-cue",
+		commit: "dd7b90e0770ff18070c515937ba3c3d6d93db00e",
+		license: "MIT",
+		buildCommand: "npx tree-sitter-cli build --wasm",
+	},
+};
+
+/** Is `filename` built in-house rather than fetched from a CDN? */
+export function isVendoredGrammar(filename: string): boolean {
+	return Object.hasOwn(VENDORED_GRAMMARS, filename);
+}
+
+/**
+ * Absolute path to the committed `vendor/grammars` directory. Resolved from the
+ * package root for the same reason `grammarManifestPath` is (#1564): an
+ * `import.meta.url` offset collapses once `dist/index.js` is bundled.
+ */
+export function vendoredGrammarsDir(): string {
+	return path.join(getPackageRoot(import.meta.url), "vendor", "grammars");
+}
+
 /** Language id → grammar wasm filename. */
 export const LANGUAGE_TO_GRAMMAR: Record<string, string> = {
 	typescript: "tree-sitter-typescript.wasm",
@@ -90,6 +148,7 @@ export const LANGUAGE_TO_GRAMMAR: Record<string, string> = {
 	vue: "tree-sitter-vue.wasm",
 	yaml: "tree-sitter-yaml.wasm",
 	zig: "tree-sitter-zig.wasm",
+	cue: "tree-sitter-cue.wasm",
 };
 
 /** The full set of grammar wasm filenames (deduped). */
@@ -264,6 +323,8 @@ export interface GrammarManifest {
 	/** filename → "sha256:<hex>" */
 	grammars: Record<string, string>;
 	overrides?: Record<string, GrammarSourceOverride>;
+	/** filename → build provenance + pinned sha256 for committed grammars. */
+	vendored?: Record<string, VendoredGrammarSource & { sha256: string }>;
 }
 
 /**
@@ -395,6 +456,21 @@ export async function downloadGrammarDetailed(
 	destDir: string,
 	filename: string,
 ): Promise<GrammarDownloadResult> {
+	// A vendored grammar has no remote source (`VENDORED_GRAMMARS`): it ships in
+	// `vendor/grammars/`, which the resolve path searches first, so reaching here
+	// means the committed file is missing from the install. That is a packaging
+	// fault, not a network one — no retry, no cooldown ladder, and above all no
+	// fetch of a CDN URL that would 404 forever. Non-retryable is the honest
+	// verdict here precisely because a later attempt cannot change it.
+	if (isVendoredGrammar(filename)) {
+		return {
+			ok: false,
+			retryable: false,
+			reason:
+				`${filename} is built in-house and ships in vendor/grammars/; it has no ` +
+				`download source, so a missing copy means the install is incomplete.`,
+		};
+	}
 	try {
 		fs.mkdirSync(destDir, { recursive: true });
 		const res = await fetch(grammarSourceUrl(filename));
