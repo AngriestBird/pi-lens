@@ -25,9 +25,22 @@ const freshFetchMocks = vi.hoisted(() => ({
 	fetchFreshProjectDiagnostics: vi.fn(),
 }));
 
-vi.mock("../../clients/project-diagnostics/fresh-fetch.js", () => ({
-	fetchFreshProjectDiagnostics: freshFetchMocks.fetchFreshProjectDiagnostics,
-}));
+// #1632 landed `ANALYZER_IDS` as the single source of truth for the cold-lane
+// list, and `formatFullMode` reads it from this module — so keep the real
+// exports and override only the fetch.
+vi.mock(
+	"../../clients/project-diagnostics/fresh-fetch.js",
+	async (importOriginal) => {
+		const actual = await importOriginal<
+			typeof import("../../clients/project-diagnostics/fresh-fetch.js")
+		>();
+		return {
+			...actual,
+			fetchFreshProjectDiagnostics:
+				freshFetchMocks.fetchFreshProjectDiagnostics,
+		};
+	},
+);
 
 vi.mock("../../clients/bootstrap.js", () => ({
 	loadBootstrapClients: vi.fn().mockResolvedValue({}),
