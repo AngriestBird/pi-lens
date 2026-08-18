@@ -806,6 +806,7 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 	const FILE = `${ROOT}/a.ts`;
 	const CONTENT = "const value = 1;";
 	const LATE_FINDING = "late scanner finding";
+	const POST_MERGE_FINDING = "post-merge scanner finding";
 	const PRIMARY_PUBLISH_MS = 700;
 
 	beforeEach(() => {
@@ -1021,23 +1022,252 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 		},
 	);
 
-	it("keeps ONE coverage predicate: the pre-notify snapshot has a single read site", async () => {
-		// The single-predicate property, asserted by construction. Every door —
-		// the merge drop, the aux wait-outcome rows, the deferred door, the
-		// coverage naming — must go through `auxCoversThisContent`, so the
-		// pre-notify snapshot it unions in is read in exactly two places: its own
-		// declaration and that predicate. A new read site here is a second
-		// coverage rule, which is the defect class this test fences.
+	it("a deferred scanner covered only by the PRE-NOTIFY snapshot stays covered", async () => {
+		// The other half of the union, which nothing pinned. The scanner published
+		// for these bytes BEFORE this touch, so the deferred touch's snapshot has it;
+		// then the holding touch's write lands and CLEARS its cache, so the live read
+		// at merge time finds nothing. Coverage must survive that — the snapshot is
+		// in the union precisely because a landed write erases the evidence. A door
+		// that keeps only the live half passes every other probe in this file.
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const { hashDiagnosticContent } = await import(
+			"../../../clients/lsp/diagnostic-binding.js"
+		);
+		const service = new LSPService();
+
+		const storedFinding = makeDiagnostic("previously published finding");
+		const auxBase = makeClient("opengrep", NOTIFY_BUDGET_MS * 3, [], "never");
+		// Starts holding a publication for exactly this content; the write that
+		// lands clears both, exactly as `clearDiagnosticsForPath` does in production.
+		let cacheCleared = false;
+		const aux = {
+			...auxBase,
+			getDiagnostics: vi.fn(() => (cacheCleared ? [] : [storedFinding])),
+			getDiagnosticBinding: vi.fn(() =>
+				cacheCleared ? undefined : { contentHash: hashDiagnosticContent(CONTENT) },
+			),
+			notify: {
+				...auxBase.notify,
+				open: vi.fn(() =>
+					auxBase.notify.open().then(() => {
+						cacheCleared = true;
+					}),
+				),
+			},
+		};
+		// The delayed primary is load-bearing: it keeps the deferred touch inside its
+		// diagnostics wait until AFTER the holding write lands, so the live read is
+		// already empty when the merge asks. With an instantly-publishing primary the
+		// deferred touch merges before the clear and the live half answers, which
+		// leaves the snapshot half untested.
+		const primary = makePublishingPrimary(PRIMARY_PUBLISH_MS);
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("opengrep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep" ? aux : primary,
+		);
+
+		const touchOptions = {
+			clientScope: "with-auxiliary" as const,
+			auxiliaryServerIds: ["opengrep"],
+			diagnostics: "document" as const,
+			collectDiagnostics: true,
+			source: "cascade",
+		};
+		const holding = service.touchFile(FILE, CONTENT, touchOptions);
+		await vi.advanceTimersByTimeAsync(1);
+		const deferred = service.touchFile(FILE, CONTENT, touchOptions);
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
+		const [, deferredResult] = (await Promise.all([holding, deferred])) as [
+			TouchResult,
+			TouchResult,
+		];
+
+		expect(rowsFor("lsp_notify_resync_deferred")).toHaveLength(1);
+		// The live read is empty by now — only the pre-notify snapshot can cover it.
+		expect(aux.getDiagnosticBinding()).toBeUndefined();
+		expect(deferredResult?.unconfirmedServerIds ?? []).not.toContain("opengrep");
+		expect(deferredResult?.confirmation).toBe("confirmed");
+		// Carried in from the snapshot, since the live cache is empty by now.
+		expect(deferredResult?.diags.map((d) => d.message)).toContain(
+			"previously published finding",
+		);
+	});
+
+	/**
+	 * #1586 review round (F1). The merge freezes its drop decisions and applies
+	 * them; `touchFile` then AWAITS — `brokenSkippedAuxiliaryServerIds` on every
+	 * collecting touch, plus the tsserver-sync and liveness gates on their paths —
+	 * before it settles `unconfirmedServerIds`. Asking the live predicate again at
+	 * that second instant lets a publication that landed in between un-name a
+	 * scanner whose findings the first instant already dropped: the result claims
+	 * `confirmed` while its `.diags` is missing the scanner's answer, and the
+	 * `lsp_scanner_coverage_gap` row (frozen at the merge) contradicts it. That is
+	 * #1459's blackout reading as scanned-clean — the overclaim direction, which
+	 * also unblocks the `lastKnownDiagnostics` prime and the `demonstratedReady`
+	 * mark that `coverageGap` exists to hold shut.
+	 *
+	 * The pair below shares one clock: the auxiliary's publication becomes visible
+	 * once the merge has read the PRIMARY's cache. That read is the merge's own
+	 * `getDiagnostics` call, made exactly once per collecting touch, so it marks
+	 * the instant the drop was frozen and applied — everything the auxiliary
+	 * reports after it lands in the window the naming filter used to re-read.
+	 *
+	 * Spreading `makeClient` freezes its `diagnosticsVersion` getter; harmless
+	 * here because every evidence check in play reads the per-path stamp, whose
+	 * accessor closes over the live map.
+	 */
+	function makePostMergePublishPair(auxWriteMs: number, contentHash: string) {
+		let merged = false;
+		const primaryBase = makeClient("typescript", 0, [
+			makeDiagnostic("primary finding"),
+		]);
+		const primary = {
+			...primaryBase,
+			getDiagnostics: vi.fn(() => {
+				merged = true;
+				return primaryBase.getDiagnostics();
+			}),
+		};
+		const auxBase = makeClient("opengrep", auxWriteMs, [], "never");
+		const aux = {
+			...auxBase,
+			getDiagnostics: vi.fn(() =>
+				merged ? [makeDiagnostic(POST_MERGE_FINDING)] : [],
+			),
+			getDiagnosticBinding: vi.fn(() => (merged ? { contentHash } : undefined)),
+		};
+		return { primary, aux };
+	}
+
+	function lastKnownFor(service: unknown, filePath: string): unknown {
+		return (
+			service as { lastKnownDiagnostics: Map<string, unknown> }
+		).lastKnownDiagnostics.get(normalizeMapKey(filePath));
+	}
+
+	it("stale-write door: a publication landing after the merge cannot un-name the drop", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const { hashDiagnosticContent } = await import(
+			"../../../clients/lsp/diagnostic-binding.js"
+		);
+		const service = new LSPService();
+
+		// The write is charged as timed out (3x the budget), so the merge drops the
+		// scanner's findings. The scan then publishes — after the merge.
+		const { primary, aux } = makePostMergePublishPair(
+			NOTIFY_BUDGET_MS * 3,
+			hashDiagnosticContent(CONTENT),
+		);
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("opengrep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep" ? aux : primary,
+		);
+
+		const touch = service.touchFile(FILE, CONTENT, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			diagnostics: "document",
+			collectDiagnostics: true,
+			source: "cascade",
+		});
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
+		const result = (await touch) as TouchResult;
+
+		// The drop stands — that decision was made and cannot be unmade here.
+		expect(result?.diags.map((d) => d.message)).not.toContain(POST_MERGE_FINDING);
+		// So the touch must still say it does not speak for the scanner.
+		expect(result?.unconfirmedServerIds).toContain("opengrep");
+		expect(result?.confirmation).toBe("partial");
+		// And the gap row must not contradict the result it was logged beside.
+		const gapRow = rowsFor("lsp_scanner_coverage_gap")[0];
+		expect(
+			(gapRow?.metadata as { auxNoAnswerServerIds?: string[] })
+				?.auxNoAnswerServerIds,
+		).toContain("opengrep");
+		// Downstream: `coverageGap` is what holds the cache prime shut (#1470/#1493).
+		expect(lastKnownFor(service, FILE)).toBeUndefined();
+	});
+
+	it("deferred door: a publication landing after the merge cannot un-name the drop", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const { hashDiagnosticContent } = await import(
+			"../../../clients/lsp/diagnostic-binding.js"
+		);
+		const service = new LSPService();
+
+		const { primary, aux } = makePostMergePublishPair(
+			NOTIFY_BUDGET_MS * 3,
+			hashDiagnosticContent(CONTENT),
+		);
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("opengrep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep" ? aux : primary,
+		);
+
+		const touchOptions = {
+			clientScope: "with-auxiliary" as const,
+			auxiliaryServerIds: ["opengrep"],
+			diagnostics: "document" as const,
+			collectDiagnostics: true,
+			source: "cascade",
+		};
+		const holding = service.touchFile(FILE, CONTENT, touchOptions);
+		await vi.advanceTimersByTimeAsync(1);
+		const deferred = service.touchFile(FILE, CONTENT, touchOptions);
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
+		const [, deferredResult] = (await Promise.all([holding, deferred])) as [
+			TouchResult,
+			TouchResult,
+		];
+
+		expect(rowsFor("lsp_notify_resync_deferred")).toHaveLength(1);
+		expect(deferredResult?.diags.map((d) => d.message)).not.toContain(
+			POST_MERGE_FINDING,
+		);
+		expect(deferredResult?.unconfirmedServerIds).toContain("opengrep");
+		expect(deferredResult?.confirmation).toBe("partial");
+		// No cache assertion here: the HOLDING touch merges after the publication and
+		// is legitimately confirmed, so it primes the cache on its own evidence. The
+		// single-touch probe above is where the prime is pinned.
+	});
+
+	it("keeps ONE content-match rule and ONE coverage predicate", async () => {
+		// The single-predicate property, asserted by construction — and tightened
+		// after the review round, which showed the previous form fenced a second
+		// read of the SNAPSHOT VARIABLE rather than a second coverage RULE: a door
+		// given its own inline `contentHash === touchContentHash` test sailed
+		// through green.
+		//
+		// Both atoms are pinned now. `touchContentHash` is readable only by the one
+		// comparator every content-bound question goes through (including
+		// `carriedAuxiliary`, which asks it before the notify), and the pre-notify
+		// snapshot is readable only by `auxCoversThisContent`. A door that invents
+		// its own rule has to reference one of them and turns this red.
 		const source = await fs.readFile(
 			fileURLToPath(new URL("../../../clients/lsp/index.ts", import.meta.url)),
 			"utf-8",
 		);
-		const sites = source
+		const code = source
 			.split("\n")
-			.filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
-			.filter((line) => line.includes("auxPublishedThisContent"));
-		expect(sites).toHaveLength(2);
-		expect(sites[0]).toContain("const auxPublishedThisContent");
-		expect(sites[1]).toContain("auxPublishedThisContent.has(serverId)");
+			.filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line));
+		const hashSites = code.filter((line) => line.includes("touchContentHash"));
+		expect(hashSites).toHaveLength(2);
+		expect(hashSites[0]).toContain("const touchContentHash");
+		expect(hashSites[1]).toContain("=== touchContentHash");
+		const snapshotSites = code.filter((line) =>
+			line.includes("auxPublishedThisContent"),
+		);
+		expect(snapshotSites).toHaveLength(2);
+		expect(snapshotSites[0]).toContain("const auxPublishedThisContent");
+		expect(snapshotSites[1]).toContain("auxPublishedThisContent.has(serverId)");
 	});
 });

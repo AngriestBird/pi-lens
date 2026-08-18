@@ -2613,11 +2613,20 @@ export class LSPService {
 		// replayed. The fresh notify still runs below, so scanners continue toward
 		// a publication for this touch while the prior late result reaches the read.
 		const touchContentHash = this.hashContent(content);
+		// #1586: THE content-match atom. Every content-bound question in this touch
+		// — the carry-over below, #1493's pre-notify snapshot, and the merge-time
+		// coverage predicate — asks it here and nowhere else, so a door cannot
+		// acquire a rule of its own by writing the comparison inline. A binding with
+		// no `contentHash` (version-less publish) fails closed: `undefined` never
+		// equals a hash.
+		const bindingMatchesTouchContent = (
+			binding: StoredDiagnosticBinding | undefined,
+		): boolean => binding?.contentHash === touchContentHash;
 		const carriedAuxiliary = options.collectDiagnostics
 			? spawned.flatMap((entry) => {
 					if (entry.info.role !== "auxiliary") return [];
 					const binding = entry.client.getDiagnosticBinding?.(filePath);
-					if (binding?.contentHash !== touchContentHash) return [];
+					if (!bindingMatchesTouchContent(binding)) return [];
 					const diags = entry.client.getDiagnostics(filePath);
 					return diags.length > 0 ? [{ diags, binding }] : [];
 				})
@@ -2632,8 +2641,7 @@ export class LSPService {
 		const auxPublishedThisContent = new Set(
 			spawned.flatMap((entry) =>
 				entry.info.role === "auxiliary" &&
-				entry.client.getDiagnosticBinding?.(filePath)?.contentHash ===
-					touchContentHash
+				bindingMatchesTouchContent(entry.client.getDiagnosticBinding?.(filePath))
 					? [entry.info.id]
 					: [],
 			),
@@ -2642,10 +2650,9 @@ export class LSPService {
 			spawned.map((entry) => [entry.info.id, entry]),
 		);
 		// #1549/#1586: does this auxiliary's publication describe exactly the bytes
-		// this touch carries? THE coverage predicate — every door goes through it (the
-		// merge drop, the aux wait-outcome rows, the deferred door, the coverage
-		// naming), so a scanner can never be named uncovered while its findings ride
-		// along in `.diags`, or the reverse.
+		// this touch carries? THE coverage predicate — every door reads it, so a
+		// scanner can never be named uncovered while its findings ride along in
+		// `.diags`, or the reverse.
 		//
 		// It UNIONS two content-bound reads rather than replacing one with the other,
 		// because they answer different questions:
@@ -2661,9 +2668,17 @@ export class LSPService {
 		//     underclaim about a scanner that answered.
 		//
 		// Either match means covered; both are content-bound, so neither can pass off
-		// another revision's findings as this touch's answer. Deliberately a function,
-		// not a precomputed set: each door evaluates it when IT decides, so a
-		// publication landing between the aux wait and the merge still counts.
+		// another revision's findings as this touch's answer.
+		//
+		// WHEN it is asked is part of the rule. The live half moves over the life of
+		// a touch, so two doors that ask at two instants can disagree — and the merge
+		// ACTS on its answer by dropping findings, which a later answer cannot undo.
+		// Every door that shares the merge's consequences therefore reads ONE frozen
+		// evaluation (`auxCoveredAtMerge`, below), taken immediately before the merge
+		// and never re-asked afterwards. The only callers of this function are that
+		// freeze and the two aux wait-outcome producers, whose rows describe their own
+		// instant and are reconciled against the freeze before anything is claimed.
+		//
 		// Everything it cannot speak for fails CLOSED — an id that never reached
 		// `spawned` (a breaker-skipped scanner, which never attached) and any
 		// primary-role server, whose findings are governed by #570's
@@ -2673,8 +2688,7 @@ export class LSPService {
 			if (entry?.info.role !== "auxiliary") return false;
 			return (
 				auxPublishedThisContent.has(serverId) ||
-				entry.client.getDiagnosticBinding?.(filePath)?.contentHash ===
-					touchContentHash
+				bindingMatchesTouchContent(entry.client.getDiagnosticBinding?.(filePath))
 			);
 		};
 		// #743: PER-SERVER notify-write deadlines. Each server's didOpen/didChange
@@ -3766,14 +3780,32 @@ export class LSPService {
 			}
 		}
 
-		// #1586: which DEFERRED auxiliaries this touch genuinely carries no evidence
-		// from, judged by the one predicate at MERGE TIME. The deferral itself only
-		// proves the gate did not send these bytes on THIS touch; whether the scanner
-		// has reported on them is a content-hash question, and the pre-notify snapshot
-		// cannot answer it for a write that landed after the snapshot was taken.
-		// Read by the merge below and by the coverage naming, so the two agree.
+		// #1586: THE coverage evaluation, taken ONCE, here — the last statement before
+		// the merge, with no `await` between it and the drop it authorizes. Everything
+		// that shares the merge's consequences reads this frozen set and never asks
+		// the live predicate again.
+		//
+		// The review round on this change proved why the freeze has to be the unit.
+		// `touchFile` awaits after the merge — `brokenSkippedAuxiliaryServerIds` on
+		// every collecting touch, the tsserver sync and liveness gates on theirs — and
+		// a publication landing in that window flips the live predicate. Re-asking it
+		// when the coverage gap was named then un-named a scanner whose findings the
+		// merge had ALREADY dropped: `.diags` missing the scanner's answer while the
+		// touch claimed `confirmed`, which unblocks the `lastKnownDiagnostics` prime
+		// and the `demonstratedReady` mark that `coverageGap` exists to hold shut.
+		// That is #1459's blackout reading as scanned-clean — the overclaim direction,
+		// and the worse one. A drop is an action; a later answer cannot undo it, so
+		// the naming must be settled from the same instant that authorized it.
+		const auxCoveredAtMerge = new Set(
+			spawned
+				.filter((entry) => auxCoversThisContent(entry.info.id))
+				.map((entry) => entry.info.id),
+		);
+		// Which DEFERRED auxiliaries this touch genuinely carries no evidence from.
+		// The deferral itself only proves the gate did not send these bytes on THIS
+		// touch; whether the scanner has reported on them is a content-hash question.
 		const uncoveredDeferredServerIds = notifyDeferredServerIds.filter(
-			(serverId) => !auxCoversThisContent(serverId),
+			(serverId) => !auxCoveredAtMerge.has(serverId),
 		);
 		// An AUXILIARY whose notify write never landed still holds the previous
 		// content's findings — nothing cleared its cache — and before this change that
@@ -3786,16 +3818,24 @@ export class LSPService {
 		// timeout-preserves-last-known-diagnostics semantics, and its write failure
 		// makes the touch inconclusive anyway, so no consumer reads the array as
 		// current.
-		const staleWriteAuxiliaryServerIds = new Set(
-			spawned
-				.filter(
-					(entry) =>
-						entry.info.role === "auxiliary" &&
-						notifyWriteTimedOutServerIds.includes(entry.info.id) &&
-						!auxCoversThisContent(entry.info.id),
-				)
-				.map((entry) => entry.info.id),
-		);
+		const staleWriteAuxiliaryServerIds = spawned
+			.filter(
+				(entry) =>
+					entry.info.role === "auxiliary" &&
+					notifyWriteTimedOutServerIds.includes(entry.info.id) &&
+					!auxCoveredAtMerge.has(entry.info.id),
+			)
+			.map((entry) => entry.info.id);
+		// #1586: every contribution this merge withholds, in one set. The merged
+		// BINDING reads it too (#1459's door, which filtered the raw deferral set and
+		// so excluded the fingerprint of a deferred-but-covered scanner whose findings
+		// the merge had just kept) — a dropped contributor must lose its findings and
+		// its binding together, or the merged `boundToCurrentDisk` describes bytes the
+		// result no longer contains.
+		const droppedAuxiliaryServerIds = new Set([
+			...uncoveredDeferredServerIds,
+			...staleWriteAuxiliaryServerIds,
+		]);
 		// #707: when the racing sync confirm won the wait, its answer IS the
 		// collected result — the file's real syntactic + semantic state straight
 		// from tsserver (clean = [], dirty = real findings that a silentOnClean
@@ -3811,11 +3851,10 @@ export class LSPService {
 						// its line numbers) as this touch's answer, the one hazard the
 						// gate itself creates. Drop them; the gap is reported instead.
 						// #1586: unless the scanner has since published for exactly these
-						// bytes, which is the same content-bound question the coverage
-						// naming asks — `uncoveredDeferredServerIds` is that one answer.
+						// bytes — `droppedAuxiliaryServerIds` is the one frozen answer the
+						// coverage naming and the merged binding read too.
 						...spawned.flatMap((entry) =>
-							uncoveredDeferredServerIds.includes(entry.info.id) ||
-							staleWriteAuxiliaryServerIds.has(entry.info.id)
+							droppedAuxiliaryServerIds.has(entry.info.id)
 								? []
 								: entry.client.getDiagnostics(filePath),
 						),
@@ -4051,20 +4090,20 @@ export class LSPService {
 					entry.info.role === "auxiliary" &&
 					(diagnosticsUnansweredServerIds.includes(entry.info.id) ||
 						notifyWriteTimedOutServerIds.includes(entry.info.id)) &&
-					!auxCoversThisContent(entry.info.id),
+					!auxCoveredAtMerge.has(entry.info.id),
 			)
 			.map((entry) => entry.info.id);
 		// #1586: whatever the doors contributed, the RESULT's coverage claim is
-		// settled here, at merge time, by the one predicate — so no future door can
-		// name a scanner on a rule of its own. The per-door filters above are not
-		// redundant with this one: they shape the `lsp_scanner_coverage_gap` fields,
-		// which each answer "what did THIS door see", while this settles "what does
-		// the touch speak for". It matters most for `auxUnconfirmedServerIds`, decided
-		// when the aux wait ended and therefore strictly before the merge — a
-		// publication landing in between is exactly #1459's late signature, and
-		// letting that verdict stand would name a scanner whose findings the merge
-		// above just kept. A breaker-skipped scanner never reached `spawned`, so the
-		// predicate has no client to read for it and it stays named: fail closed.
+		// settled from the MERGE's frozen evaluation — never a fresh one, which is
+		// what made this an overclaim in review (see `auxCoveredAtMerge`). The
+		// per-door filters above are not redundant with this one: they shape the
+		// `lsp_scanner_coverage_gap` fields, which each answer "what did THIS door
+		// see", while this settles "what does the touch speak for". It matters most
+		// for `auxUnconfirmedServerIds`, decided when the aux wait ended and therefore
+		// strictly BEFORE the merge — reconciling it here is what keeps a scanner from
+		// being named while the merge kept its findings. A breaker-skipped scanner
+		// never reached `spawned`, so it is not in the covered set and stays named:
+		// fail closed.
 		const unconfirmedServerIds = [
 			...new Set([
 				...(auxUnconfirmedServerIds ?? []),
@@ -4072,7 +4111,7 @@ export class LSPService {
 				...uncoveredDeferredServerIds,
 				...brokenSkippedServerIds,
 			]),
-		].filter((serverId) => !auxCoversThisContent(serverId));
+		].filter((serverId) => !auxCoveredAtMerge.has(serverId));
 		const coverageGap = unconfirmedServerIds.length > 0;
 		// The record that proves a blackout is no longer read as clean: one row per
 		// touch that a scanner did not cover, naming the scanner and the reason.
@@ -4234,17 +4273,16 @@ export class LSPService {
 						// partially-mocked client) yields "unknown" rather than throwing —
 						// unknown preserves pre-#1095 behavior for that contributor.
 						[
-							// #1459: a deferred server contributed no diagnostics (above), so
-							// its stale binding must not decide the merged verdict either.
-							// #1549: same for an auxiliary whose write never landed — its
-							// findings were dropped above, so its binding describes bytes this
-							// result no longer contains.
+							// #1459/#1549: a contributor whose findings the merge DROPPED must
+							// not decide the merged verdict either — its binding describes
+							// bytes this result no longer contains.
+							// #1586: read off the same frozen set the drop used. Filtering the
+							// raw deferral set instead excluded the fingerprint of a
+							// deferred-but-COVERED scanner whose findings the merge had just
+							// kept, which diverges whenever the primary is version-less and
+							// that scanner is the only contributor with a fingerprint.
 							...spawned
-								.filter(
-									(entry) =>
-										!deferredResyncServerIds.has(entry.info.id) &&
-										!staleWriteAuxiliaryServerIds.has(entry.info.id),
-								)
+								.filter((entry) => !droppedAuxiliaryServerIds.has(entry.info.id))
 								.map((entry) => entry.client.getDiagnosticBinding?.(filePath)),
 							...carriedAuxiliary.map((entry) => entry.binding),
 						],
