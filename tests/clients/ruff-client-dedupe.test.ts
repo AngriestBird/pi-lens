@@ -7,6 +7,13 @@ const ensureTool = vi.fn();
 vi.mock("../../clients/safe-spawn.js", () => ({ safeSpawnAsync, safeSpawn }));
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
+	// #1612: resolveAvailableOrInstallUnshared reads these on the install-
+	// success path to derive honest evidence rather than asserting "succeeded".
+	getInstallAttempt: vi.fn(() => undefined),
+	// #1636: read alongside getInstallAttempt for the compensating row's
+	// `resolved` tag. Undefined falls back to "cache".
+	getLastEnsureResolutionSource: vi.fn(() => undefined),
+	getToolInstallStrategy: vi.fn(() => undefined),
 	resetPathWalkMemo: vi.fn(),
 	// Seam probes route through this on cached hits (#1203); default spawnable.
 	isSpawnableCommand: vi.fn(async () => true),
