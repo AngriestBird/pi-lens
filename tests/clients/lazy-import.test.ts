@@ -45,6 +45,10 @@ describe("createLazyImport (#1570)", () => {
 
 		const a = lazy.get();
 		const b = lazy.get();
+		// `get()` defers the loader call by one microtask (see the
+		// synchronous-throw contract test below), so `load` has not run yet at
+		// this point — wait for it before resolving.
+		await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(1));
 		resolveLoad({ ok: true });
 		await Promise.all([a, b]);
 
@@ -60,5 +64,15 @@ describe("createLazyImport (#1570)", () => {
 		await lazy.get();
 
 		expect(load).toHaveBeenCalledTimes(2);
+	});
+
+	it("returns a rejected promise instead of throwing, even if the loader throws synchronously", () => {
+		const load = vi.fn(() => {
+			throw new Error("sync boom");
+		});
+		const lazy = createLazyImport(load);
+
+		expect(() => lazy.get()).not.toThrow();
+		return expect(lazy.get()).rejects.toThrow("sync boom");
 	});
 });

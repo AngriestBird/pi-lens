@@ -13,8 +13,3 @@ export function warmFormatters(): Promise<FormatterModule> {
 export function loadFormatters(): Promise<FormatterModule> {
 	return warmFormatters();
 }
-
-/** Test-only: evict a settled (including rejected) memo. */
-export function _resetFormattersLazyForTests(): void {
-	lazyFormatters.resetForTests();
-}

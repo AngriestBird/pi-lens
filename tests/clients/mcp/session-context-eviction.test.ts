@@ -20,6 +20,17 @@ vi.mock("../../../clients/lsp/index.js", () => ({
 	resetLSPService: vi.fn(),
 }));
 
+// Static (module-load-time) import, not a dynamic `await import(...)` inside
+// the it() body — a dynamic import's module-graph transform cost (measured
+// 3.3-5.2s under contention) was charged against the per-test timeout and
+// flaked. Mocks above still hoist ahead of this import (vitest hoists
+// vi.mock calls regardless of import position), matching session.test.ts's
+// pattern.
+import {
+	_resetMcpSessionContext,
+	getMcpSessionContext,
+} from "../../../clients/mcp/session.js";
+
 beforeEach(() => {
 	loadBootstrapClients.mockReset();
 });
@@ -30,9 +41,6 @@ afterEach(() => {
 
 describe("getMcpSessionContext memo eviction (#1570)", () => {
 	it("retries after a rejected build instead of replaying the same rejection forever", async () => {
-		const { getMcpSessionContext, _resetMcpSessionContext } = await import(
-			"../../../clients/mcp/session.js"
-		);
 		_resetMcpSessionContext();
 
 		loadBootstrapClients.mockRejectedValueOnce(

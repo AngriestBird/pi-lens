@@ -11,8 +11,3 @@ export function warmLspService(): Promise<LspModule> {
 export function loadLspService(): Promise<LspModule> {
 	return warmLspService();
 }
-
-/** Test-only: evict a settled (including rejected) memo. */
-export function _resetLspLazyForTests(): void {
-	lazyLsp.resetForTests();
-}

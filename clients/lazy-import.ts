@@ -22,10 +22,17 @@ export function createLazyImport<T>(load: () => Promise<T>): LazyImport<T> {
 	let cached: Promise<T> | undefined;
 	return {
 		get(): Promise<T> {
-			return (cached ??= load().catch((err: unknown) => {
-				cached = undefined;
-				throw err;
-			}));
+			// `Promise.resolve().then(load)` (not a bare `load()`) so a loader
+			// that throws SYNCHRONOUSLY — rather than returning a rejected
+			// promise — still yields a rejected promise instead of throwing out
+			// of `get()` itself. `import(...)` never throws synchronously, but a
+			// caller-supplied `load` is not guaranteed to keep that contract.
+			return (cached ??= Promise.resolve()
+				.then(() => load())
+				.catch((err: unknown) => {
+					cached = undefined;
+					throw err;
+				}));
 		},
 		resetForTests(): void {
 			cached = undefined;
