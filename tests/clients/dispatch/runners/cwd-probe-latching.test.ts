@@ -14,11 +14,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { TRANSIENT_BASE_COOLDOWN_MS } from "../../../../clients/dispatch/runners/utils/availability-policy.ts";
+import { TRANSIENT_BASE_COOLDOWN_MS } from "../../../../clients/dispatch/runners/utils/availability-policy.js";
 import {
 	createCwdCachedProbe,
 	resetDispatchAvailabilityState,
-} from "../../../../clients/dispatch/runners/utils/runner-helpers.ts";
+} from "../../../../clients/dispatch/runners/utils/runner-helpers.js";
 
 const {
 	logLatencySpy,
@@ -277,7 +277,7 @@ describe("eslint runner: a stalled probe does not disable the runner (#1494)", (
 		safeSpawnAsync.mockImplementation(async (_cmd: string, args: string[]) =>
 			args.includes("--version") ? timeoutResult() : okResult("[]"),
 		);
-		const runner = (await import("../../../../clients/dispatch/runners/eslint.ts"))
+		const runner = (await import("../../../../clients/dispatch/runners/eslint.js"))
 			.default;
 		const ctx = { cwd, filePath } as never;
 
@@ -309,7 +309,7 @@ describe("credo runner: a stalled probe does not disable the runner (#1494)", ()
 				? timeoutResult()
 				: okResult(JSON.stringify({ issues: [] })),
 		);
-		const runner = (await import("../../../../clients/dispatch/runners/credo.ts"))
+		const runner = (await import("../../../../clients/dispatch/runners/credo.js"))
 			.default;
 		const ctx = { cwd, filePath } as never;
 
@@ -339,7 +339,7 @@ describe("rust-clippy runner: a stalled probe does not disable the runner (#1494
 			args.includes("--version") ? timeoutResult() : okResult(""),
 		);
 		const runner = (
-			await import("../../../../clients/dispatch/runners/rust-clippy.ts")
+			await import("../../../../clients/dispatch/runners/rust-clippy.js")
 		).default;
 		const ctx = { cwd, filePath } as never;
 
@@ -379,7 +379,7 @@ describe("rust-clippy runner: a stalled probe does not disable the runner (#1494
 		});
 
 		const runner = (
-			await import("../../../../clients/dispatch/runners/rust-clippy.ts")
+			await import("../../../../clients/dispatch/runners/rust-clippy.js")
 		).default;
 		expect((await runner.run({ cwd, filePath } as never)).status).toBe("skipped");
 		expect(tryLazyInstall).toHaveBeenCalledWith("rust-clippy", cwd);
@@ -409,7 +409,7 @@ describe("rust-clippy runner: a stalled probe does not disable the runner (#1494
 		getLazyInstallAttempt.mockReturnValue(undefined);
 
 		const runner = (
-			await import("../../../../clients/dispatch/runners/rust-clippy.ts")
+			await import("../../../../clients/dispatch/runners/rust-clippy.js")
 		).default;
 		await runner.run({ cwd, filePath } as never);
 

@@ -18,7 +18,7 @@ import {
 	HOST_STALL_COOLDOWN_MS,
 	INSTALL_TRANSIENT_BASE_COOLDOWN_MS,
 	TRANSIENT_BASE_COOLDOWN_MS,
-} from "../../clients/dispatch/runners/utils/availability-policy.ts";
+} from "../../clients/dispatch/runners/utils/availability-policy.js";
 
 /**
  * Reset through the SAME module instance the clients load (the compiled `.js`),

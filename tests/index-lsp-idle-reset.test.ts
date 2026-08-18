@@ -97,7 +97,7 @@ describe("index.ts LSP idle reset", () => {
 			}),
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi({ "no-lsp": false });
 		registerExtension(pi);
 
@@ -164,7 +164,7 @@ describe("index.ts LSP idle reset", () => {
 				}),
 			}));
 
-			const { default: registerExtension } = await import("../index.ts");
+			const { default: registerExtension } = await import("../index.js");
 			const { pi, handlers } = createMockPi({ "no-lsp": false });
 			registerExtension(pi);
 
@@ -224,7 +224,7 @@ describe("index.ts LSP idle reset", () => {
 			}),
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi({ "no-lsp": false });
 		registerExtension(pi);
 
@@ -283,7 +283,7 @@ describe("index.ts LSP idle reset", () => {
 				}),
 			}));
 
-			const { default: registerExtension } = await import("../index.ts");
+			const { default: registerExtension } = await import("../index.js");
 			const { pi, handlers } = createMockPi({ "no-lsp": false });
 			registerExtension(pi);
 
