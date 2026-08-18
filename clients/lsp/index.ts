@@ -4876,6 +4876,47 @@ export class LSPService {
 	}
 
 	/**
+	 * #1640: run a read-only probe command against a server that is ALREADY
+	 * running for this file. Two hard guarantees the mutation-channel
+	 * `executeCommand` above cannot give a render-path probe:
+	 *
+	 * - **Never spawns.** It resolves the already-connected client map the way
+	 *   `isServerAliveForFile` does, instead of routing through
+	 *   `getClientForFile` → `ensureClientForServer`. A probe that spawns a
+	 *   language-server fleet to answer a question about how to RENDER a
+	 *   diagnostic is a cost the caller never asked for — and under warm attach
+	 *   the freshly spawned server's answer would not even be the warm session's
+	 *   answer.
+	 * - **Never opens the mutation window.** `executeReadOnlyCommand` leaves
+	 *   `serverEditsAllowed` and `activeMutationContext` alone, so an in-flight
+	 *   real command's mutation context survives a concurrent probe.
+	 *
+	 * Returns `{executed:false}` — never a thrown error and never a spawn — when
+	 * no live client owns the file. Callers must read that as UNKNOWN.
+	 */
+	async executeReadOnlyCommandOnLiveClient(
+		filePath: string,
+		command: string,
+		args?: unknown[],
+	): Promise<{ executed: boolean; result?: unknown; reason?: string }> {
+		if (this.checkDestroyed()) {
+			return { executed: false, reason: "lsp service destroyed" };
+		}
+		for (const server of getServersForFileWithConfig(filePath)) {
+			const root = await this.resolveServerRoot(server, filePath);
+			if (!root) continue;
+			const entry = this.state.clients.get(
+				`${server.id}:${normalizeMapKey(root)}`,
+			);
+			if (!entry?.isAlive()) continue;
+			const run = entry.executeReadOnlyCommand;
+			if (typeof run !== "function") continue;
+			return run.call(entry, command, args);
+		}
+		return { executed: false, reason: "no live LSP server for file" };
+	}
+
+	/**
 	 * Capability snapshot for LSP operations.
 	 * If filePath is provided, probes that server; otherwise uses first active client.
 	 */

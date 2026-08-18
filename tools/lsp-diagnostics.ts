@@ -45,6 +45,7 @@ import {
 	attemptTsserverSyncDiagnostics,
 } from "../clients/lsp/tsserver-sync.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
+import { demoteInferredProjectDiagnostics } from "../clients/lsp/inferred-project.js";
 import { isBlocking, reconcileScanDiagnostics } from "../clients/widget-state.js";
 import { baseName, compactRenderResult } from "./render-compact.js";
 import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
@@ -1061,6 +1062,32 @@ function coveredSourcesForCheck(
 	return [...covered];
 }
 
+/**
+ * #1645 review F3: `lsp_diagnostics` writes into the SAME widget store as
+ * `lens_diagnostics mode=full`. Two tools writing one store must apply ONE rule
+ * for "is this file's diagnostics demoted" — otherwise an orphan file blocks or
+ * does not depending purely on which tool ran last, which is the #1633-V1
+ * lesson. Every path in this file that reaches `reconcileWidgetFromLspResult`
+ * or the rendered output routes its raw diagnostics through here first, so the
+ * store, the counts, and the text all agree.
+ *
+ * Applied AFTER the confirmation verdict is computed, never before: confirmation
+ * asks "did the server answer for this content", which the demotion must not
+ * influence.
+ */
+function demoteInferredForFile(
+	file: string,
+	diagnostics: LSPDiagnostic[],
+	cwd: string,
+	lspService: NonNullable<ReturnType<typeof getLSPService>>,
+): Promise<LSPDiagnostic[]> {
+	return demoteInferredProjectDiagnostics(diagnostics, {
+		filePath: file,
+		cwd,
+		service: lspService,
+	});
+}
+
 /** #1561: everything the retire decision needs, as one argument. */
 export type ConfirmedNoBlockersInfo = {
 	filePath: string;
@@ -1164,9 +1191,19 @@ async function collectFileDiagnosticResult(
 		// NOT served — fall through to a fresh touch instead of replaying a stale
 		// cached result. "unknown"/true bindings serve as before.
 		if (cached && cached.binding.boundToCurrentDisk !== false) {
-			const filteredDiags = applySeverityFilter(cached.diagnostics, severity);
 			const confirmation: "clean" | undefined =
 				cached.diagnostics.length === 0 ? "clean" : undefined;
+			// #1645 review F3: a cache REPLAY writes the widget store exactly like a
+			// fresh touch does, so it gets the same demotion. Without this, replaying
+			// yesterday's cached blocker would re-cement an orphan file as blocking
+			// after mode=full had demoted it.
+			const cachedDiags = await demoteInferredForFile(
+				file,
+				cached.diagnostics,
+				cwd,
+				lspService,
+			);
+			const filteredDiags = applySeverityFilter(cachedDiags, severity);
 			// #692: cached.diagnostics were already suppression-/skipTestFiles-
 			// filtered at write time (this same code path); no file content was
 			// cached alongside them, so `undefined` here is a safe re-check, not
@@ -1178,7 +1215,7 @@ async function collectFileDiagnosticResult(
 			// forever (the #1092 defect).
 			reconcileWidgetFromLspResult(
 				file,
-				cached.diagnostics,
+				cachedDiags,
 				confirmation,
 				writeIndex,
 				cwd,
@@ -1252,6 +1289,13 @@ async function collectFileDiagnosticResult(
 	if (unconfirmedServerIds.length > 0 && confirmation === "clean") {
 		confirmation = "unconfirmed";
 	}
+	// #1645 review F3: one demotion rule for every writer of the widget store.
+	effectiveRawDiags = await demoteInferredForFile(
+		file,
+		effectiveRawDiags,
+		cwd,
+		lspService,
+	);
 	const filteredDiags = applySeverityFilter(effectiveRawDiags, severity);
 	const verdict = reconcileWidgetFromLspResult(
 		file,
@@ -1376,6 +1420,13 @@ async function runFileDiagnostics(
 	const primaryCoverageGapOnly =
 		unconfirmedServerIds.length > 0 && confirmation === "clean";
 	if (primaryCoverageGapOnly) confirmation = "unconfirmed";
+	// #1645 review F3: one demotion rule for every writer of the widget store.
+	effectiveRawDiags = await demoteInferredForFile(
+		absPath,
+		effectiveRawDiags,
+		cwd,
+		lspService,
+	);
 	const filtered = applySeverityFilter(effectiveRawDiags, severity);
 	const total = filtered.length;
 	const truncated = total > MAX_DIAGNOSTICS;
