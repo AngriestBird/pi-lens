@@ -76,7 +76,24 @@
  *     session-fact check returned non-null unconditionally, so either read as
  *     a policy handle and inherited routing it never earned — the false
  *     POSITIVE the whitelist exists to rule out. Both are fixed; the
- *     `EVASIONS` fixtures below pin them.
+ *     `EVASIONS` fixtures below pin them;
+ *   * (#1566) the same "reads only the declared shape" rule from the point
+ *     above had its own gap: the shape check was a bare `\bname\b` substring
+ *     test, so a declared type or value that merely MENTIONED a handle's
+ *     name — anywhere in the text — passed, whether or not the memo actually
+ *     held that handle. `Map<string, Awaited<ReturnType<ReturnType<typeof
+ *     makeToolProbe>>>>` unwraps the wrapper's own return type twice and
+ *     peels the promise, landing on a plain `boolean`; `emptyCache<boolean>
+ *     (makeToolProbe)` merely hands the wrapper to an unrelated helper as an
+ *     argument. Both spell the handle's name and neither holds it. The check
+ *     is now shape-anchored: a handle counts only when its name is the
+ *     memo's own un-nested `ReturnType<typeof name>` (what a legitimate
+ *     one-hop wrapper like `makeEslintProbe` still spells exactly) or the
+ *     memo's own direct `= name(...)` call — never a name merely present
+ *     somewhere in the text. This closes the two fixtures below without
+ *     narrowing the one-hop wrapper case #1552 was built for; the residual
+ *     blind spots two points above (transitive wrapper hops, renamed policy
+ *     imports) are unchanged and still tracked there.
  */
 
 import * as fs from "node:fs";
@@ -477,12 +494,65 @@ function isPolicyHandleMemoShape(
 ): boolean {
 	const shape = `${decl?.typeText ?? ""} ${decl?.valueText ?? ""}`;
 	for (const factory of POLICY_FACTORIES) {
-		if (new RegExp(`\\b${factory}\\b`).test(shape)) return true;
+		if (
+			isDeclaredAsTypeConstructor(shape, factory) ||
+			isDirectCall(shape, factory)
+		) {
+			return true;
+		}
 	}
 	for (const handleName of policyHandles.keys()) {
-		if (new RegExp(`\\b${handleName}\\b`).test(shape)) return true;
+		if (
+			isDeclaredAsTypeConstructor(shape, handleName) ||
+			isDirectCall(shape, handleName)
+		) {
+			return true;
+		}
 	}
 	return false;
+}
+
+/**
+ * Does `name` appear as the memo's own `ReturnType<typeof name>` — one hop,
+ * un-nested — rather than merely somewhere in the declaration's text? (#1566)
+ *
+ * The bare `\bname\b` substring test this replaces reads the handle's name
+ * off ANY position in the type, so unwrapping a wrapper's return type all
+ * the way down to a plain `boolean` (`Awaited<ReturnType<ReturnType<typeof
+ * makeToolProbe>>>`) still spelled the name and passed — the type mentions
+ * the handle, but the memo does not hold it. Requiring `ReturnType<typeof
+ * name>` to sit un-wrapped (nothing but whitespace, `Map<string, …>`, or the
+ * start of the text immediately before it) is what a legitimate one-hop
+ * wrapper handle (`Map<string, ReturnType<typeof makeEslintProbe>>`, #1494)
+ * still spells exactly, while the doubled/`Awaited`-peeled evasion above
+ * does not — its `ReturnType<typeof name>` is immediately preceded by
+ * another `ReturnType<` or `Awaited<`, which this rejects.
+ */
+function isDeclaredAsTypeConstructor(shape: string, name: string): boolean {
+	const normalized = shape.replace(/\s+/g, "");
+	const needle = `ReturnType<typeof${name}>`;
+	let from = 0;
+	for (;;) {
+		const at = normalized.indexOf(needle, from);
+		if (at === -1) return false;
+		const before = normalized.slice(Math.max(0, at - "ReturnType<".length), at);
+		if (!/(?:ReturnType|Awaited)<$/.test(before)) return true;
+		from = at + 1;
+	}
+}
+
+/**
+ * Does the declaration's own value directly CALL `name` — `= name(...)` —
+ * rather than merely pass `name` as an argument to something else? (#1566)
+ *
+ * `emptyCache<boolean>(makeToolProbe)` hands the wrapper to an unrelated
+ * helper; the memo it produces is whatever `emptyCache` returns (a plain
+ * boolean map), not the wrapper's own handle. A bare substring test could
+ * not tell "calls" from "is handed to", which is exactly how that shape
+ * inherited routing it never earned.
+ */
+function isDirectCall(shape: string, name: string): boolean {
+	return baseName(shape.trim().split("(")[0] ?? "") === name;
 }
 
 /** Is `outer` a strictly enclosing scope of `inner`? Keys are source ranges. */
