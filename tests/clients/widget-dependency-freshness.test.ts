@@ -88,7 +88,7 @@ describe("widget-store dependency freshness gate (#1631)", () => {
 
 		driftIntoFuture(dep);
 
-		const demoted = await reconcileStaleWidgetDependencyBlockers(dir);
+		const { demoted } = await reconcileStaleWidgetDependencyBlockers(dir);
 		expect(demoted).toBe(1);
 
 		// Demoted, not dropped: the finding survives but is no longer blocking.
@@ -117,7 +117,7 @@ describe("widget-store dependency freshness gate (#1631)", () => {
 		recordBlocking(consumer, "a real blocker", Date.now() - 60_000);
 		pushIntoPast(dep);
 
-		const demoted = await reconcileStaleWidgetDependencyBlockers(dir);
+		const { demoted } = await reconcileStaleWidgetDependencyBlockers(dir);
 		expect(demoted).toBe(0);
 		expect(
 			(getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d)),
@@ -141,7 +141,7 @@ describe("widget-store dependency freshness gate (#1631)", () => {
 		pushIntoPast(dep);
 		driftIntoFuture(consumer); // own file drifts, dep does not
 
-		const demoted = await reconcileStaleWidgetDependencyBlockers(dir);
+		const { demoted } = await reconcileStaleWidgetDependencyBlockers(dir);
 		expect(demoted).toBe(0);
 	});
 
@@ -164,7 +164,7 @@ describe("widget-store dependency freshness gate (#1631)", () => {
 		);
 		driftIntoFuture(dep);
 
-		const demoted = await reconcileStaleWidgetDependencyBlockers(dir);
+		const { demoted } = await reconcileStaleWidgetDependencyBlockers(dir);
 		expect(demoted).toBe(0);
 	});
 
@@ -181,7 +181,44 @@ describe("widget-store dependency freshness gate (#1631)", () => {
 		recordBlocking(consumer, "blocker", Date.now() - 60_000);
 		driftIntoFuture(dep);
 
-		expect(await reconcileStaleWidgetDependencyBlockers(dir)).toBe(1);
-		expect(await reconcileStaleWidgetDependencyBlockers(dir)).toBe(0);
+		expect((await reconcileStaleWidgetDependencyBlockers(dir)).demoted).toBe(1);
+		expect((await reconcileStaleWidgetDependencyBlockers(dir)).demoted).toBe(0);
+	});
+
+	// #1631 review F4: a BLOCKING finding from a non-language-server tool (an
+	// ast-grep hardcoded-secret rule, a govulncheck CVE) doesn't stop being true
+	// because a file it imports changed — only a language-server verdict is
+	// invalidated by that shape of drift.
+	it("does not demote a non-LSP blocking finding on dependency drift", async () => {
+		const dir = makeDir("pi-lens-widget-fresh-nonlsp-");
+		const consumer = path.join(dir, "consumer.ts");
+		const dep = path.join(dir, "dep.ts");
+		fs.writeFileSync(dep, "export const x = 1;\n");
+		fs.writeFileSync(
+			consumer,
+			'import { x } from "./dep.js";\nexport const y = x;\n',
+		);
+
+		recordDiagnostics(
+			consumer,
+			[
+				{
+					severity: "error",
+					semantic: "blocking",
+					message: "hardcoded secret",
+					tool: "ast-grep",
+					line: 1,
+				},
+			],
+			1,
+			Date.now() - 60_000,
+		);
+		driftIntoFuture(dep);
+
+		const { demoted } = await reconcileStaleWidgetDependencyBlockers(dir);
+		expect(demoted).toBe(0);
+		expect(
+			(getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d)),
+		).toBe(true);
 	});
 });

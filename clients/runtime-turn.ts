@@ -366,8 +366,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			total: blockerFreshness.total,
 			kept: blockerFreshness.kept,
 			revalidated: blockerFreshness.revalidated,
-			retired: blockerFreshness.retired,
 			alreadyStale: blockerFreshness.alreadyStale,
+			truncatedImports: blockerFreshness.truncatedImports,
 		},
 	});
 

@@ -5,7 +5,11 @@ import { visibleWidth } from "./deps/pi-tui.js";
 import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { fitLine } from "./tui-fit.js";
 import { WriteOrderingGuard } from "./write-ordering-guard.js";
-import { collectForwardImportMtimes } from "./blocker-freshness.js";
+import {
+	collectForwardImportMtimes,
+	MTIME_DRIFT_TOLERANCE_MS,
+} from "./blocker-freshness.js";
+import { STALE_LINE_MARKER } from "./runtime-turn.js";
 
 /**
  * Canonical key for the `files` map (and `diagnosticsWriteGuard`) — #1020.
@@ -205,7 +209,17 @@ export function clearWidgetState(): void {
 // migrates a v1 record by inheriting each entry's `observedAt` from the record's
 // `touchedAt`. A v1 file must never be rejected (that would silently drop resume
 // diagnostics) nor crash.
-export const WIDGET_STATE_VERSION = 2;
+//
+// v2 → v3 (#1631 review F3): a dependency-drift `stale` demotion is a verdict
+// about THIS session's disk state — the next session starts with a fresh (and
+// possibly different) dependency graph, so a demotion from the last session
+// must not outlive it. `exportWidgetState` had been serializing `stale: true`
+// verbatim; on restore, a genuine type error stayed non-blocking across a
+// resume with the dependency pinned back into the past. Same shape as the
+// #1348 failed-formatter precedent one field over: `importWidgetState` strips
+// `stale` on every restored entry so a resumed session re-evaluates from
+// scratch instead of inheriting a possibly-stale-itself verdict.
+export const WIDGET_STATE_VERSION = 3;
 
 /** Serializable snapshot of the per-file diagnostic state (#190). */
 export interface PersistedWidgetState {
@@ -257,14 +271,22 @@ export function exportWidgetState(): PersistedWidgetState {
  * with the record's `touchedAt` (the single stamp the whole record shared under
  * v1). Non-mutating; entries that already carry a stamp (a v2 record) pass
  * through untouched.
+ *
+ * #1631 review F3 (v2→v3): also strips `stale` from every entry. A dependency
+ * drift demotion is scoped to the session that observed the drift; restoring it
+ * verbatim would let a real blocking finding resume as permanently non-blocking
+ * (#1348 precedent — see `WIDGET_STATE_VERSION`'s doc comment).
  */
 function migrateEntryStamps(
 	entries: WidgetDiagnostic[] | undefined,
 	recordTouchedAt: number,
 ): WidgetDiagnostic[] {
-	return (entries ?? []).map((d) =>
-		d.observedAt == null ? { ...d, observedAt: recordTouchedAt } : d,
-	);
+	return (entries ?? []).map((d) => {
+		const { stale: _stale, ...rest } = d;
+		return rest.observedAt == null
+			? { ...rest, observedAt: recordTouchedAt }
+			: rest;
+	});
 }
 
 export function importWidgetState(state: PersistedWidgetState | undefined): boolean {
@@ -697,8 +719,18 @@ export async function reconcileStaleWidgetFiles(): Promise<number> {
 			// A clean record (no findings) has no per-entry stamps to consult —
 			// gate it on the record's own `touchedAt` exactly as before, so a ✓
 			// entry for a file that changed on disk still drops.
+			//
+			// #1631 review F11 follow-up: a THIRD site hitting the same Windows
+			// mtime-vs-`Date.now()` skew F2 named for `blocker-freshness.ts` and
+			// `reconcileStaleWidgetDependencyBlockers` — a file's mtime can lead
+			// `Date.now()` by up to ~11.4ms measured (#1491/#1498 precedent), so a
+			// record touched immediately after its own write dropped here at +1ms
+			// with zero real drift. Found investigating F11: `lens-diagnostics-
+			// mode-all-freshness.test.ts`'s "control" case (and its sibling) failed
+			// under this gate, not from cross-test state. Same tolerance, same
+			// constant, for the same reason.
 			if (rec.allDiagnostics.length === 0) {
-				return mtimeMs > rec.touchedAt + 1
+				return mtimeMs > rec.touchedAt + MTIME_DRIFT_TOLERANCE_MS
 					? { mapKey, action: "drop" as const }
 					: { mapKey, action: "keep" as const };
 			}
@@ -707,10 +739,10 @@ export async function reconcileStaleWidgetFiles(): Promise<number> {
 			// preserved entry beside an entry replayed from an aging snapshot, so a
 			// per-RECORD gate over-cleared the whole record (the residual documented
 			// at dispatch/integration.ts). A missing per-entry stamp (a migrated
-			// pre-#1186 record) inherits the record's `touchedAt`. +1ms tolerance:
-			// a freshly-recorded file has observedAt >= mtime.
+			// pre-#1186 record) inherits the record's `touchedAt`. Tolerance matches
+			// the Windows host-clock skew rationale above.
 			const survivors = rec.allDiagnostics.filter(
-				(d) => !(mtimeMs > (d.observedAt ?? rec.touchedAt) + 1),
+				(d) => !(mtimeMs > (d.observedAt ?? rec.touchedAt) + MTIME_DRIFT_TOLERANCE_MS),
 			);
 			if (survivors.length === rec.allDiagnostics.length) {
 				return { mapKey, action: "keep" as const }; // nothing stale
@@ -757,31 +789,63 @@ export async function reconcileStaleWidgetFiles(): Promise<number> {
  * than dropping it (#1419). Own-file staleness stays `reconcileStaleWidgetFiles`'
  * job; the two reconciles are paired at the `mode=all` read site.
  *
- * Returns the number of blocking diagnostics demoted. Never throws on a per-record
- * failure: an unresolvable import list simply leaves the record untouched.
+ * Scope (#1631 review F4): only demotes findings with `tool === "lsp"`. An
+ * ast-grep secret, a govulncheck CVE, or any other non-language-server finding is
+ * not invalidated by an import graph changing — its truth doesn't depend on what
+ * the file imports — so it stays fully blocking through a dependency edit.
+ *
+ * Resolution boundary (#1631 review F8): shares `collectForwardImportMtimes` with
+ * the inline-blocker sweep, so it shares that module's static-import-only
+ * boundary too — see `blocker-freshness.ts`'s module doc for the dynamic
+ * `import()`/`require()` gap.
+ *
+ * Returns per-call counts: `demoted` blocking diagnostics and `truncatedImports`
+ * records whose import list exceeded the drift-check cap (#1631 review F7 — see
+ * `blocker-freshness.ts`'s `MAX_DRIFT_CHECK_IMPORTS`). Never throws on a
+ * per-record failure: an unresolvable import list simply leaves the record
+ * untouched.
  */
+export interface WidgetDependencyBlockerReconcileResult {
+	demoted: number;
+	truncatedImports: number;
+}
+
 export async function reconcileStaleWidgetDependencyBlockers(
 	cwd: string,
-): Promise<number> {
+	turnIndex?: number,
+): Promise<WidgetDependencyBlockerReconcileResult> {
 	let demoted = 0;
+	let truncatedImports = 0;
 	for (const [, rec] of files.entries()) {
-		// Only records with an effective (not already stale) blocking finding need the
-		// import-closure check; clean or already-demoted records are skipped cheaply.
-		if (!rec.allDiagnostics.some((d) => isBlocking(d))) continue;
+		// #1631 review F4: narrow demotion to LSP-sourced findings. The import-closure
+		// drift check only knows how to reason about IMPORT graphs — an ast-grep
+		// hardcoded-secret or a govulncheck CVE finding doesn't stop being true because
+		// a file this diagnostic's file imports changed; only a language-server verdict
+		// (`tool === "lsp"`, the same predicate `isLspErrorEntry` above uses) is actually
+		// invalidated by that shape of drift. Documented trade: a non-LSP blocking
+		// finding on a file with drifted imports stays fully authoritative until its own
+		// content changes or it is explicitly re-run.
+		if (!rec.allDiagnostics.some((d) => isBlocking(d) && d.tool === "lsp")) continue;
 		let importMtimes: Array<{ path: string; mtimeMs: number }> = [];
 		try {
-			importMtimes = await collectForwardImportMtimes(cwd, rec.filePath);
+			const result = await collectForwardImportMtimes(cwd, rec.filePath, undefined, turnIndex);
+			importMtimes = result.mtimes;
+			if (result.truncated) truncatedImports += 1;
 		} catch {
 			importMtimes = [];
 		}
 		if (importMtimes.length === 0) continue;
 		let changed = false;
 		for (const d of rec.allDiagnostics) {
-			if (!isBlocking(d)) continue;
+			if (!isBlocking(d) || d.tool !== "lsp") continue;
 			const baseline = d.observedAt ?? rec.touchedAt;
-			// +1ms tolerance: matches `reconcileStaleWidgetFiles` and the inline-blocker
-			// sweep — a same-millisecond write must not read as drifted.
-			if (importMtimes.some((im) => im.mtimeMs > baseline + 1)) {
+			// +50ms tolerance (#1631 review F2): a whole-millisecond `Date.now()`
+			// baseline vs. sub-millisecond mtime precision only needs +1ms, but on
+			// Windows a file's mtime can LEAD `Date.now()` by up to ~11.4ms (measured
+			// across 200 writes; #1491/#1498 precedent for the same host-clock skew).
+			// +1ms produced 42 false demotions in 50 runs on Windows; +50ms clears the
+			// measured skew while staying far below the gap between real edits.
+			if (importMtimes.some((im) => im.mtimeMs > baseline + MTIME_DRIFT_TOLERANCE_MS)) {
 				d.stale = true;
 				changed = true;
 				demoted += 1;
@@ -793,7 +857,7 @@ export async function reconcileStaleWidgetDependencyBlockers(
 		}
 	}
 	if (demoted > 0) requestRenderFn?.();
-	return demoted;
+	return { demoted, truncatedImports };
 }
 
 /**
@@ -985,11 +1049,20 @@ export function renderWidget(
 		}
 	}
 
-	// Diagnostics — blocking only, from the most recently touched file that has them.
-	// Vertical mode keeps the divider/filename context; horizontal already shows the
-	// filename on the packed row above, so we drop the extra header noise there.
+	// Diagnostics — blocking (or dependency-drift-demoted) only, from the most
+	// recently touched file that has them. Vertical mode keeps the divider/filename
+	// context; horizontal already shows the filename on the packed row above, so
+	// we drop the extra header noise there.
+	//
+	// #1631 review F10: `isBlocking` answers false for a demoted (`stale`) finding
+	// by design (#1419 demote-not-drop) — but this render loop used that same
+	// predicate to pick which findings to SHOW, so a demoted finding vanished from
+	// the footer entirely instead of demoting visibly. `isBlockingOrDemoted` keeps
+	// it in the list; the per-entry render below distinguishes the two with a
+	// dimmed marker instead of the red dot.
+	const isBlockingOrDemoted = (d: WidgetDiagnostic) => isBlocking(d) || d.stale === true;
 	const withBlocking = recencySorted.filter((r) =>
-		r.diagnostics.some(isBlocking),
+		r.diagnostics.some(isBlockingOrDemoted),
 	);
 	if (withBlocking.length > 0) {
 		const rec = withBlocking[0];
@@ -997,14 +1070,15 @@ export function renderWidget(
 			lines.push(fitLine(dim("─".repeat(Math.min(w, 60))), w));
 			lines.push(fitLine(` ${dim(path.basename(rec.filePath))}`, w));
 		}
-		const blockers = rec.diagnostics.filter(isBlocking).slice(0, 5);
+		const blockers = rec.diagnostics.filter(isBlockingOrDemoted).slice(0, 5);
 		for (const d of blockers) {
 			const loc = d.line != null ? osc8(d.uri ?? "", `L${d.line}`) : "";
 			const rule = d.rule ? dim(` ${d.rule}`) : "";
-			const prefix = `   ${red("●")} ${loc}${rule}  `;
-			const msgWidth = Math.max(1, w - visibleWidth(prefix));
+			const staleTag = d.stale ? dim(` ${STALE_LINE_MARKER}`) : "";
+			const prefix = `   ${d.stale ? dim("○") : red("●")} ${loc}${rule}  `;
+			const msgWidth = Math.max(1, w - visibleWidth(prefix) - visibleWidth(staleTag));
 			const msg = fitLine(d.message, msgWidth, "…");
-			lines.push(fitLine(`${prefix}${msg}`, w));
+			lines.push(fitLine(`${prefix}${msg}${staleTag}`, w));
 		}
 	}
 

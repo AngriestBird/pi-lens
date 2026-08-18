@@ -416,15 +416,22 @@ export function createLensDiagnosticsTool(
 				// findings whose forward imports drifted out-of-band. Paired reconciles, one
 				// read site — the same gate that covers the turn-end inline-blocker store.
 				const dependencyGateStart = Date.now();
-				const dependencyDemoted =
-					await reconcileStaleWidgetDependencyBlockers(cwd);
+				const { demoted: dependencyDemoted, truncatedImports } =
+					await reconcileStaleWidgetDependencyBlockers(
+						cwd,
+						getRuntime?.()?.turnIndex,
+					);
 				logLatency({
 					type: "phase",
 					toolName: "lens_diagnostics",
 					filePath: cwd,
 					phase: "blocker_freshness_widget_gate",
 					durationMs: Date.now() - dependencyGateStart,
-					metadata: { demoted: dependencyDemoted, surface: "mode=all" },
+					metadata: {
+						demoted: dependencyDemoted,
+						truncatedImports,
+						surface: "mode=all",
+					},
 				});
 				return formatAllMode(
 					cwd,

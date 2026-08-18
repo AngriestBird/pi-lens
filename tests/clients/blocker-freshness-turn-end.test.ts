@@ -134,7 +134,6 @@ describe("turn-end blocker freshness (#1631)", () => {
 				total: 1,
 				revalidated: 1,
 				kept: 0,
-				retired: 0,
 			});
 		} finally {
 			env.cleanup();

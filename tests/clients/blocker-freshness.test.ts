@@ -259,4 +259,87 @@ describe("blocker freshness sweep — drift demotion (#1631)", () => {
 		expect(counts.revalidated).toBe(0);
 		expect(runtime.getInlineBlockersSnapshot()[0]?.stale).toBe(false);
 	});
+
+	// #1631 review F2: on Windows a file's mtime can LEAD the `Date.now()` baseline
+	// by a measurable margin (reviewer measurement: up to ~11.4ms across 200 writes),
+	// not just sub-millisecond rounding. A +1ms tolerance falsely demoted a blocker
+	// with zero real drift; +50ms must absorb that lead without absorbing an actual
+	// edit gap.
+	it("does not demote for a small mtime lead within host-clock skew tolerance (#1631 review F2)", async () => {
+		const dir = makeDir("pi-lens-fresh-skew-");
+		const consumer = path.join(dir, "consumer.ts");
+		const dep = path.join(dir, "dep.ts");
+		fs.writeFileSync(dep, "export const x = 1;\n");
+		fs.writeFileSync(
+			consumer,
+			'import { x } from "./dep.js";\nexport const y = x;\n',
+		);
+
+		const runtime = new RuntimeCoordinator();
+		runtime.recordInlineBlockers(consumer, "🔴 blocker", 1, ["lsp"]);
+		const recordedAtMs = runtime.getInlineBlockersSnapshot()[0]?.recordedAtMs;
+		expect(recordedAtMs).toBeDefined();
+
+		// Simulate the host-clock skew directly rather than depending on real OS
+		// timing: the dependency's mtime leads the verdict baseline by 10ms — beyond
+		// the old +1ms tolerance, comfortably inside the measured Windows skew.
+		const skewed = new Date((recordedAtMs as number) + 10);
+		fs.utimesSync(dep, skewed, skewed);
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir);
+		expect(counts.kept).toBe(1);
+		expect(counts.revalidated).toBe(0);
+		expect(runtime.getInlineBlockersSnapshot()[0]?.stale).toBe(false);
+	});
+
+	// #1631 review F4: an inline blocker whose recorded `sources` are NOT (all)
+	// `"lsp"` — an ast-grep secret, a CVE, any non-language-server verdict — must
+	// not demote on import drift. Its truth doesn't depend on what the file imports.
+	it("does not demote a non-LSP-sourced blocker on dependency drift (#1631 review F4)", async () => {
+		const dir = makeDir("pi-lens-fresh-nonlsp-");
+		const consumer = path.join(dir, "consumer.ts");
+		const dep = path.join(dir, "dep.ts");
+		fs.writeFileSync(dep, "export const x = 1;\n");
+		fs.writeFileSync(
+			consumer,
+			'import { x } from "./dep.js";\nexport const y = x;\n',
+		);
+
+		const runtime = new RuntimeCoordinator();
+		runtime.recordInlineBlockers(consumer, "🔴 hardcoded secret", 1, [
+			"ast-grep",
+		]);
+		driftIntoFuture(dep);
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir);
+		expect(counts.kept).toBe(1);
+		expect(counts.revalidated).toBe(0);
+		expect(runtime.getInlineBlockersSnapshot()[0]?.stale).toBe(false);
+	});
+
+	// A blocker with MIXED sources (some lsp, some not) is provenance the sweep
+	// cannot fully vouch for either — same fail-closed shape as
+	// `retireInlineBlockerOnConfirmedClean`'s coverage gate.
+	it("does not demote a mixed-sources blocker on dependency drift (#1631 review F4)", async () => {
+		const dir = makeDir("pi-lens-fresh-mixed-");
+		const consumer = path.join(dir, "consumer.ts");
+		const dep = path.join(dir, "dep.ts");
+		fs.writeFileSync(dep, "export const x = 1;\n");
+		fs.writeFileSync(
+			consumer,
+			'import { x } from "./dep.js";\nexport const y = x;\n',
+		);
+
+		const runtime = new RuntimeCoordinator();
+		runtime.recordInlineBlockers(consumer, "🔴 mixed blocker", 1, [
+			"lsp",
+			"ast-grep",
+		]);
+		driftIntoFuture(dep);
+
+		const counts = await sweepInlineBlockerFreshness(runtime, dir);
+		expect(counts.kept).toBe(1);
+		expect(counts.revalidated).toBe(0);
+		expect(runtime.getInlineBlockersSnapshot()[0]?.stale).toBe(false);
+	});
 });

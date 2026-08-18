@@ -25,6 +25,24 @@
  * explicit re-run or the next dispatch to resolve. That keeps the sweep bounded and
  * free of the document-resync hazard the issue calls out (re-querying an LSP whose
  * in-memory dependency document is itself stale would regenerate the stale verdict).
+ *
+ * Scope (#1631 review F4): an inline blocker is not always LSP-only —
+ * `dispatcher.ts` builds it from every `semantic === "blocking"` diagnostic across
+ * all runners, so an eslint, biome-check, or ast-grep security-rule (hardcoded
+ * secret, CVE) finding can land here too. Only a language-server verdict is
+ * actually invalidated by an IMPORT changing; an ast-grep secret match doesn't stop
+ * being true because a file it imports was edited. The sweep therefore demotes an
+ * entry only when its recorded `sources` (`InlineBlockerRecord.sources`) are ALL
+ * `"lsp"` — a mixed or non-LSP-sourced blocker is left fully authoritative, the same
+ * fail-closed shape `retireInlineBlockerOnConfirmedClean` already uses for
+ * provenance it can't yet reason about.
+ *
+ * Resolution boundary (#1631 review F8): `extractForwardImportPaths` parses static
+ * import/require syntax via tree-sitter. It does not, and cannot, resolve a
+ * dependency reached only through a dynamic `import()` or `require()` behind a
+ * runtime condition — that edge is invisible to this gate, so a blocker whose only
+ * stale dependency arrives that way survives a replay. This is an honest boundary,
+ * not a silently-closed one.
  */
 import * as fs from "node:fs";
 import { resolveImportToFiles } from "./review-graph/import-resolvers.js";
@@ -35,7 +53,20 @@ import {
 } from "./tree-sitter-shared.js";
 import { TreeSitterSymbolExtractor } from "./tree-sitter-symbol-extractor.js";
 
-/** Per-turn result of the freshness sweep over the cached inline blockers. */
+/**
+ * Per-turn result of the freshness sweep over the cached inline blockers.
+ *
+ * #1631 review F5: there is deliberately no `retired` count. The gate's whole
+ * design is demote-not-drop (#1419) — every branch either leaves an entry alone
+ * (`kept`), flips its `stale` bit (`revalidated`/`alreadyStale`), or fails closed
+ * and leaves it alone. None of those branches, nor any combination reachable
+ * through `RuntimeCoordinator`, ever removes an entry from the map; deletion is
+ * `clearInlineBlockers`'/`retireInlineBlockerOnConfirmedClean`'s job, driven by an
+ * actual re-dispatch or confirmed-clean check, not by this read-time sweep. A
+ * `retired` field on this type would therefore always read 0 — not an
+ * under-implemented case, but one this gate cannot reach by design. Dropped
+ * rather than kept as permanently-dead API surface.
+ */
 export interface BlockerFreshnessCounts {
 	/** Cached blocker entries present when the sweep ran. */
 	total: number;
@@ -43,10 +74,15 @@ export interface BlockerFreshnessCounts {
 	kept: number;
 	/** Drift detected this turn — demoted to `[stale — re-run to confirm]`. */
 	revalidated: number;
-	/** Removed by the gate this turn (drift confirmed resolved). */
-	retired: number;
 	/** Already demoted on a prior turn and still stale — re-served as `[stale]`. */
 	alreadyStale: number;
+	/**
+	 * #1631 review F7: entries whose forward-import list exceeded
+	 * {@link MAX_DRIFT_CHECK_IMPORTS} and was truncated before the drift check —
+	 * a signal the sweep could have missed drift past the cap, surfaced rather
+	 * than folded silently into a clean-looking `kept`/`revalidated` count.
+	 */
+	truncatedImports: number;
 }
 
 /**
@@ -98,9 +134,70 @@ function getExtractor(
 	return cached;
 }
 
-/** Test-only: clear the extractor memo so a grammar state change re-probes. */
+/**
+ * #1631 review F6: memoized forward-import RESOLUTION (the parse step, not the
+ * per-dependency mtime stats — those must always be read fresh so drift is never
+ * missed). Reviewer measurement: ~450ms/turn at 8 blockers × 300 imports
+ * unmemoized, ~435ms per `mode=all` call, because both the turn-end sweep and the
+ * `mode=all` gate independently re-parse the SAME consumer files' import lists.
+ *
+ * Keyed on (path, own mtime) — a cache hit is safe by construction: if the file's
+ * mtime hasn't moved, its parsed import LIST cannot have changed (the imports
+ * themselves may still have drifted; that's what the mtime stats after this cache
+ * check are for). Scoped PER TURN, not process-lifetime (the latch screen this
+ * class of state must pass): `noteImportResolutionMemoTurn` clears it whenever the
+ * `RuntimeCoordinator`'s `turnIndex` advances, so a resolver injected for one test
+ * or a project whose import graph is edited mid-session is never served a result
+ * from a stale earlier turn. When no turn index is available (mode=all called
+ * outside a tracked turn, or a test with no runtime), the cache is left alone —
+ * still correct because of the mtime key, just not turn-bounded in that case.
+ */
+const importResolutionMemo = new Map<
+	string,
+	{ mtimeMs: number; imports: string[] }
+>();
+let importResolutionMemoTurnIndex: number | undefined;
+
+function noteImportResolutionMemoTurn(turnIndex: number | undefined): void {
+	if (turnIndex === undefined) return;
+	if (importResolutionMemoTurnIndex !== turnIndex) {
+		importResolutionMemo.clear();
+		importResolutionMemoTurnIndex = turnIndex;
+	}
+}
+
+async function resolveForwardImportsMemoized(
+	cwd: string,
+	filePath: string,
+	resolveForwardImports: ForwardImportResolver,
+): Promise<string[]> {
+	const mtimeMs = await statMtimeMs(filePath);
+	if (mtimeMs === undefined) {
+		// Can't key reliably (deleted/unreadable) — resolve uncached rather than
+		// risk serving a memo entry for content that may no longer exist.
+		try {
+			return await resolveForwardImports(cwd, filePath);
+		} catch {
+			return [];
+		}
+	}
+	const cached = importResolutionMemo.get(filePath);
+	if (cached && cached.mtimeMs === mtimeMs) return cached.imports;
+	let imports: string[];
+	try {
+		imports = await resolveForwardImports(cwd, filePath);
+	} catch {
+		imports = [];
+	}
+	importResolutionMemo.set(filePath, { mtimeMs, imports });
+	return imports;
+}
+
+/** Test-only: clear the extractor and import-resolution memos. */
 export function _resetBlockerFreshnessForTests(): void {
 	extractorCache.clear();
+	importResolutionMemo.clear();
+	importResolutionMemoTurnIndex = undefined;
 }
 
 /**
@@ -158,6 +255,18 @@ async function statMtimeMs(filePath: string): Promise<number | undefined> {
 	}
 }
 
+/** Result of {@link collectForwardImportMtimes}. */
+export interface ForwardImportMtimes {
+	mtimes: Array<{ path: string; mtimeMs: number }>;
+	/**
+	 * #1631 review F7: true when the resolved import list exceeded
+	 * {@link MAX_DRIFT_CHECK_IMPORTS} and was truncated before stat-checking. A
+	 * truncated check can miss drift in an import past the cap, so callers fold
+	 * this into their latency record rather than reporting a clean sweep silently.
+	 */
+	truncated: boolean;
+}
+
 /**
  * Resolve `filePath`'s forward imports and stat each, returning the imports that
  * exist together with their mtime. Shared by the inline-blocker sweep and the
@@ -169,19 +278,22 @@ export async function collectForwardImportMtimes(
 	cwd: string,
 	filePath: string,
 	resolveForwardImports: ForwardImportResolver = extractForwardImportPaths,
-): Promise<Array<{ path: string; mtimeMs: number }>> {
+	turnIndex?: number,
+): Promise<ForwardImportMtimes> {
+	noteImportResolutionMemoTurn(turnIndex);
 	let imports: string[] = [];
 	try {
-		imports = await resolveForwardImports(cwd, filePath);
+		imports = await resolveForwardImportsMemoized(cwd, filePath, resolveForwardImports);
 	} catch {
 		imports = [];
 	}
+	const truncated = imports.length > MAX_DRIFT_CHECK_IMPORTS;
 	const out: Array<{ path: string; mtimeMs: number }> = [];
 	for (const dep of imports.slice(0, MAX_DRIFT_CHECK_IMPORTS)) {
 		const mtimeMs = await statMtimeMs(dep);
 		if (mtimeMs !== undefined) out.push({ path: dep, mtimeMs });
 	}
-	return out;
+	return { mtimes: out, truncated };
 }
 
 /**
@@ -191,31 +303,48 @@ export async function collectForwardImportMtimes(
  * already dropped by `reconcileInlineBlockers`, and a deleted dependency is not a
  * content drift this gate is responsible for.
  *
- * +1ms tolerance, the same convention as `reconcileStaleWidgetFiles` and
- * `reconcileProjectDiagnosticsSnapshot`: the verdict baseline is a whole-millisecond
- * `Date.now()`, but filesystem mtimes carry sub-millisecond precision, so a file
- * written in the very millisecond the verdict was recorded can otherwise read as
- * drifted and demote a blocker that was correct when taken.
+ * +50ms tolerance. The verdict baseline is `Date.now()`, but on Windows a file's
+ * mtime can LEAD `Date.now()` by a measurable margin — not just sub-millisecond
+ * rounding. Reviewer measurement across 200 writes on Windows: 184/200 mtimes read
+ * ahead of the immediately-following `Date.now()`, by up to ~11.4ms, the same host
+ * skew #1491/#1498 hit for install-probe timestamps. A +1ms tolerance (the
+ * convention borrowed from `reconcileStaleWidgetFiles` /
+ * `reconcileProjectDiagnosticsSnapshot`, both same-process single-writer paths
+ * without this skew) demoted a blocker recorded immediately after its own file
+ * write with zero real drift — 42 false demotions in 50 runs, and two of this
+ * gate's own tests went host-dependent (red 3/6 runs on Windows, green 6/6 at
+ * +50ms). +50ms comfortably clears the measured skew while staying far below the
+ * gap between genuinely distinct edits.
  */
+export const MTIME_DRIFT_TOLERANCE_MS = 50;
+
+interface DriftResult {
+	drifted: string[];
+	truncated: boolean;
+}
+
 async function detectDrift(
 	cwd: string,
 	filePath: string,
 	recordedAtMs: number,
 	resolveForwardImports: ForwardImportResolver,
-): Promise<string[]> {
+	turnIndex: number | undefined,
+): Promise<DriftResult> {
 	const drifted: string[] = [];
 	const ownMtimeMs = await statMtimeMs(filePath);
-	if (ownMtimeMs !== undefined && ownMtimeMs > recordedAtMs + 1) {
+	if (ownMtimeMs !== undefined && ownMtimeMs > recordedAtMs + MTIME_DRIFT_TOLERANCE_MS) {
 		drifted.push(filePath);
 	}
-	for (const { path, mtimeMs } of await collectForwardImportMtimes(
+	const { mtimes, truncated } = await collectForwardImportMtimes(
 		cwd,
 		filePath,
 		resolveForwardImports,
-	)) {
-		if (mtimeMs > recordedAtMs + 1) drifted.push(path);
+		turnIndex,
+	);
+	for (const { path, mtimeMs } of mtimes) {
+		if (mtimeMs > recordedAtMs + MTIME_DRIFT_TOLERANCE_MS) drifted.push(path);
 	}
-	return drifted;
+	return { drifted, truncated };
 }
 
 /**
@@ -237,13 +366,24 @@ export async function sweepInlineBlockerFreshness(
 		total: 0,
 		kept: 0,
 		revalidated: 0,
-		retired: 0,
 		alreadyStale: 0,
+		truncatedImports: 0,
 	};
 	const resolveForwardImports =
 		options?.resolveForwardImports ?? extractForwardImportPaths;
+	let turnIndex: number | undefined;
+	try {
+		turnIndex = runtime.turnIndex;
+	} catch {
+		turnIndex = undefined;
+	}
 
-	let entries: Array<{ filePath: string; stale?: boolean; recordedAtMs?: number }>;
+	let entries: Array<{
+		filePath: string;
+		stale?: boolean;
+		recordedAtMs?: number;
+		sources?: readonly string[];
+	}>;
 	try {
 		entries = runtime.getInlineBlockersSnapshot();
 	} catch {
@@ -264,12 +404,25 @@ export async function sweepInlineBlockerFreshness(
 				counts.kept += 1;
 				continue;
 			}
-			const drifted = await detectDrift(
+			// #1631 review F4: fail-closed on non-LSP (or unknown) provenance. Import
+			// drift only invalidates a language-server verdict; a mixed or non-`"lsp"`
+			// `sources` list is kept at full authority rather than demoted.
+			const isLspSourced =
+				entry.sources !== undefined &&
+				entry.sources.length > 0 &&
+				entry.sources.every((source) => source === "lsp");
+			if (!isLspSourced) {
+				counts.kept += 1;
+				continue;
+			}
+			const { drifted, truncated } = await detectDrift(
 				cwd,
 				entry.filePath,
 				entry.recordedAtMs,
 				resolveForwardImports,
+				turnIndex,
 			);
+			if (truncated) counts.truncatedImports += 1;
 			if (drifted.length > 0) {
 				runtime.markInlineBlockerStale(entry.filePath);
 				counts.revalidated += 1;
