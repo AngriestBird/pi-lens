@@ -74,8 +74,12 @@ export interface WidgetDiagnostic {
  * (`semantic === "blocking"`). Falls back to severity for sources that
  * don't set `semantic` (raw tsc/eslint diagnostics) so the red dot still
  * fires on traditional compile errors.
+ *
+ * #1561: exported so the blocker-retire decision in `tools/lsp-diagnostics.ts`
+ * asks THIS predicate rather than growing a second severity rule that can drift
+ * from what the footer counts.
  */
-function isBlocking(d: WidgetDiagnostic): boolean {
+export function isBlocking(d: WidgetDiagnostic): boolean {
 	if (d.semantic === "blocking") return true;
 	if (d.semantic == null && d.severity === "error") return true;
 	return false;
