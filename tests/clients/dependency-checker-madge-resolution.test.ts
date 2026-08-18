@@ -47,6 +47,14 @@ vi.mock("../../clients/package-manager.js", () => ({ findNodeToolBinary }));
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
 	getManagedToolsDir: () => MANAGED_TOOLS_DIR,
+	// #1612: resolveAvailableOrInstallUnshared reads these on the install-
+	// success path to derive honest evidence rather than asserting "succeeded".
+	getInstallAttempt: vi.fn(() => undefined),
+	// #1636: read alongside getInstallAttempt when deriving the compensating
+	// row's `resolved` tag. Undefined falls back to "cache", matching this
+	// suite's existing not-attempted expectations.
+	getLastEnsureResolutionSource: vi.fn(() => undefined),
+	getToolInstallStrategy: vi.fn(() => undefined),
 	isSpawnableCommand,
 }));
 

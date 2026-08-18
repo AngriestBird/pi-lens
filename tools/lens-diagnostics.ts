@@ -34,6 +34,8 @@ import {
 import { getLSPService } from "../clients/lsp/index.js";
 import { primaryServerId } from "../clients/lsp/config.js";
 import type { LSPDiagnostic } from "../clients/lsp/client.js";
+import type { LSPWorkspaceUnconfirmedReason } from "../clients/lsp/index.js";
+import { getFullScanWallClockMs } from "../clients/lsp/workspace-sweep-hold.js";
 import {
 	hashDiagnosticContent,
 	type BoundToCurrentDisk,
@@ -124,6 +126,8 @@ type WorkspaceLspDiagnosticResult = {
 	// file's per-file check didn't complete within budget (or threw), so
 	// `diagnostics` is a default-empty placeholder, not a confirmed result.
 	timedOut?: boolean;
+	// #1618: WHY `timedOut` is true — see LSPWorkspaceUnconfirmedReason.
+	unconfirmedReason?: LSPWorkspaceUnconfirmedReason;
 	// #1093: set only for cache-hit results (a replay of an older scan) — the
 	// wall-clock time the diagnostics were originally observed. Threaded into the
 	// footer reconcile so a cache-served mode=full doesn't re-arm the widget's
@@ -139,10 +143,11 @@ type WorkspaceLspDiagnosticResult = {
 // spawn/initialize across many files) could otherwise stall the tool
 // indefinitely — an unattended session was observed hung for ~8h. This hard cap
 // aborts the scan so it always returns (partial) rather than never. Env-tunable.
-const FULL_SCAN_WALL_CLOCK_MS = (() => {
-	const raw = Number(process.env.PI_LENS_LENS_DIAGNOSTICS_FULL_TIMEOUT_MS);
-	return Number.isFinite(raw) && raw > 0 ? raw : 300_000; // 5 min default
-})();
+// #1618: single source with `clients/runtime-turn.ts`'s idle-reset base delay
+// (see `getBaseLspIdleResetMs`), which derives itself from this value so the
+// two constants can no longer drift back into the idle-reset-fires-mid-sweep
+// relationship that caused #1618 in the first place.
+const FULL_SCAN_WALL_CLOCK_MS = getFullScanWallClockMs();
 
 // Binding verification is a fallback for result producers that supplied a
 // content hash without an already-computed disk verdict. Keep it one-file-at-a-
@@ -962,6 +967,97 @@ function summarizeDiagnostics(
 	};
 }
 
+// #1618: sentence form used when exactly one reason accounts for every
+// unconfirmed file — mirrors the pre-#1618 two-case ternary's phrasing so
+// existing single-reason callers see unchanged text.
+const UNCONFIRMED_REASON_SENTENCE: Record<LSPWorkspaceUnconfirmedReason, string> = {
+	budget: "check didn't complete within budget",
+	inconclusive:
+		"check was inconclusive (notify-write or diagnostics wait timed out)",
+	coverage_gap: "an auxiliary scanner coverage gap",
+	service_destroyed: "the LSP service was reset mid-sweep",
+	error: "check errored",
+	// #1618 review round 2: the LSP layer considered this touch CONFIRMED —
+	// the file's content changed under it (stale binding), which is a
+	// completely different failure from a timeout. Must never collapse into
+	// "within budget", the exact string this PR exists to stop misrendering.
+	binding_mismatch: "the file changed on disk since this result was computed",
+};
+
+// Short per-reason label used only when MORE than one reason is present, so
+// the note can still say "N timed out, M errored" instead of collapsing to
+// one sentence that can't carry two counts.
+const UNCONFIRMED_REASON_COUNT_LABEL: Record<LSPWorkspaceUnconfirmedReason, string> = {
+	budget: "timed out",
+	inconclusive: "inconclusive",
+	coverage_gap: "coverage gap",
+	service_destroyed: "service reset mid-sweep",
+	error: "errored",
+	binding_mismatch: "stale binding",
+};
+
+/**
+ * #1618: a result predating the `unconfirmedReason` field (a legacy/test
+ * double, or `LSPWorkspaceDiagnosticResult`'s own pre-#1618 shape) is
+ * classified from its OTHER fields exactly the way the dead
+ * `unconfirmedErrored = length - unconfirmedTimedOut` subtraction meant to,
+ * before that subtraction was structurally always 0 (the sweep's catch
+ * block sets both `error` and `timedOut`, so `unconfirmedErrored` never had
+ * a way to become nonzero). An explicit `result.error` now wins even when
+ * `unconfirmedReason` is absent, so an errored file is never rendered as
+ * "within budget".
+ *
+ * #1618 review round 2: `mismatched` MUST be checked first. A binding
+ * mismatch is discovered HERE, after the sweep already returned the result
+ * as confirmed (`!timedOut`, no `.error`, no `.unconfirmedReason`) — the
+ * `?? "budget"` fallback below would otherwise silently claim a
+ * stale-binding file as "within budget", the exact string this PR exists to
+ * stop misrendering.
+ */
+function classifyUnconfirmedReason(
+	result: WorkspaceLspDiagnosticResult,
+	mismatched: WeakSet<WorkspaceLspDiagnosticResult>,
+): LSPWorkspaceUnconfirmedReason {
+	if (mismatched.has(result)) return "binding_mismatch";
+	return result.unconfirmedReason ?? (result.error ? "error" : "budget");
+}
+
+/**
+ * #1618: replaces the `unconfirmedTimedOut`/`unconfirmedErrored` dead
+ * subtraction with a real per-reason tally read off each result's own
+ * `unconfirmedReason` (falling back to `classifyUnconfirmedReason` for a
+ * legacy result that predates the field). `mismatched` is threaded through
+ * so a stale-binding file is never counted under a fallback reason it
+ * doesn't have (review round 2).
+ */
+function tallyUnconfirmedReasons(
+	results: readonly WorkspaceLspDiagnosticResult[],
+	mismatched: WeakSet<WorkspaceLspDiagnosticResult>,
+): Map<LSPWorkspaceUnconfirmedReason, number> {
+	const tally = new Map<LSPWorkspaceUnconfirmedReason, number>();
+	for (const result of results) {
+		const reason = classifyUnconfirmedReason(result, mismatched);
+		tally.set(reason, (tally.get(reason) ?? 0) + 1);
+	}
+	return tally;
+}
+
+/** Render `tallyUnconfirmedReasons`' output as the clause inside the
+ *  "unconfirmed (...)" note — a single sentence when one reason accounts for
+ *  everything, else a comma-joined "N label" breakdown. */
+function formatUnconfirmedReasonClause(
+	tally: Map<LSPWorkspaceUnconfirmedReason, number>,
+): string {
+	const entries = [...tally.entries()].filter(([, count]) => count > 0);
+	if (entries.length === 0) return "";
+	if (entries.length === 1) {
+		return UNCONFIRMED_REASON_SENTENCE[entries[0][0]];
+	}
+	return entries
+		.map(([reason, count]) => `${count} ${UNCONFIRMED_REASON_COUNT_LABEL[reason]}`)
+		.join(", ");
+}
+
 /**
  * #646: break the confirmed/unconfirmed LSP-sweep tally down PER primary
  * server id (typescript, pyright, marksman, ...) instead of one flat
@@ -1531,10 +1627,10 @@ async function formatFullMode(
 	// as "0 diagnostics" — say explicitly which files the LSP sweep could not
 	// confirm and why, distinguishing a hard error from a soft timeout the
 	// same way #570 does upstream.
-	const unconfirmedTimedOut = unconfirmedLspResults.filter(
-		(result) => result.timedOut,
-	).length;
-	const unconfirmedErrored = unconfirmedLspResults.length - unconfirmedTimedOut;
+	const unconfirmedByReason = tallyUnconfirmedReasons(
+		unconfirmedLspResults,
+		mismatchedLspResults,
+	);
 	// #646: per-primary-server breakdown of the same confirmed/unconfirmed
 	// tally — lets an agent see AT A GLANCE which server is responsible for
 	// any unconfirmed files (e.g. "marksman: 0/34") instead of having to
@@ -1554,13 +1650,9 @@ async function formatFullMode(
 	const unconfirmedLspNote =
 		unconfirmedLspResults.length > 0
 			? `\n\n⚠ LSP sweep: ${confirmedLspResults.length} file(s) confirmed via LSP, ` +
-				`${unconfirmedLspResults.length} unconfirmed (${
-					unconfirmedTimedOut > 0 && unconfirmedErrored > 0
-						? `${unconfirmedTimedOut} timed out, ${unconfirmedErrored} errored`
-						: unconfirmedTimedOut > 0
-							? "check didn't complete within budget"
-							: "check errored"
-				})${serverBreakdownClause} — NOT the same as 0 diagnostics for: ${unconfirmedLspResults
+				`${unconfirmedLspResults.length} unconfirmed (${formatUnconfirmedReasonClause(
+					unconfirmedByReason,
+				)})${serverBreakdownClause} — NOT the same as 0 diagnostics for: ${unconfirmedLspResults
 					.slice(0, 20)
 					.map((result) => result.filePath)
 					.join(

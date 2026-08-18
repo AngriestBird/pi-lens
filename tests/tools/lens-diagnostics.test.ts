@@ -794,6 +794,80 @@ describe("lens_diagnostics mode=full", () => {
 		});
 	});
 
+	// #1618: a workspace sweep destroyed mid-run (the idle-reset race) used to
+	// leave every remaining file with a bare `timedOut: true` — rendered
+	// identically to a real budget timeout ("check didn't complete within
+	// budget"), even though the file was never even attempted. The
+	// discriminated `unconfirmedReason` must reach this note honestly.
+	it("renders a service-destroyed file distinctly from a budget timeout, never as 'within budget' (#1618)", async () => {
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{ filePath: "/proj/src/before.ts", diagnostics: [], count: 0 },
+				{
+					filePath: "/proj/src/after-1.ts",
+					diagnostics: [],
+					count: 0,
+					timedOut: true,
+					unconfirmedReason: "service_destroyed",
+				},
+				{
+					filePath: "/proj/src/after-2.ts",
+					diagnostics: [],
+					count: 0,
+					timedOut: true,
+					unconfirmedReason: "service_destroyed",
+				},
+			]),
+		};
+		const result = await run(makeTool({}, lspService), { mode: "full" });
+		const text = String(result.content[0].text);
+
+		expect(text).toContain("after-1.ts");
+		expect(text).toContain("after-2.ts");
+		expect(text).toMatch(/unconfirmed/i);
+		// The whole point: this must NOT read like a budget timeout.
+		expect(text).not.toContain("within budget");
+		expect(text).toContain("reset mid-sweep");
+		expect(result.details).toMatchObject({
+			lspFilesConfirmed: 1,
+			lspFilesUnconfirmed: 2,
+			unconfirmedLspFiles: ["/proj/src/after-1.ts", "/proj/src/after-2.ts"],
+		});
+	});
+
+	// #1618 review round 2: `findFullScanBindingMismatches` discovers a stale
+	// binding (`boundToCurrentDisk: false`) AFTER the sweep already returned
+	// the result as confirmed — no `.timedOut`, no `.error`, no
+	// `.unconfirmedReason`. The `classifyUnconfirmedReason`
+	// `result.unconfirmedReason ?? (result.error ? "error" : "budget")`
+	// fallback would otherwise silently claim it as "within budget", the
+	// exact string this whole PR exists to stop misrendering.
+	it("renders a stale-binding file as binding_mismatch, never as 'within budget' (#1618 R2)", async () => {
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{ filePath: "/proj/src/clean.ts", diagnostics: [], count: 0 },
+				{
+					filePath: "/proj/src/stale-binding.ts",
+					diagnostics: [],
+					count: 0,
+					boundToCurrentDisk: false,
+				},
+			]),
+		};
+		const result = await run(makeTool({}, lspService), { mode: "full" });
+		const text = String(result.content[0].text);
+
+		expect(text).toContain("stale-binding.ts");
+		expect(text).toMatch(/unconfirmed/i);
+		expect(text).not.toContain("within budget");
+		expect(text).toContain("changed on disk");
+		expect(result.details).toMatchObject({
+			lspFilesConfirmed: 1,
+			lspFilesUnconfirmed: 1,
+			unconfirmedLspFiles: ["/proj/src/stale-binding.ts"],
+		});
+	});
+
 	it("does not surface an unconfirmed note when every LSP result is confirmed (#630)", async () => {
 		const lspService = {
 			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([

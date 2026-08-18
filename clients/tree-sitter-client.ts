@@ -33,7 +33,10 @@ import {
 	downloadGrammarDetailed,
 	fileHasWasmMagic,
 	grammarBlockReason,
+	isVendoredGrammar,
 	LANGUAGE_TO_GRAMMAR,
+	vendoredGrammarRefusal,
+	vendoredGrammarsDir,
 } from "./grammar-source.js";
 import { resolvePackagePath } from "./package-root.js";
 import {
@@ -498,16 +501,38 @@ export class TreeSitterClient {
 		}
 	}
 
+	private _vendoredGrammarsDir?: string;
+	/**
+	 * The committed `vendor/grammars` dir, if it exists. Cached only on a hit,
+	 * mirroring `bundledGrammarsDir`.
+	 */
+	private vendoredGrammarsDir(): string | undefined {
+		if (this._vendoredGrammarsDir) return this._vendoredGrammarsDir;
+		try {
+			const dir = vendoredGrammarsDir();
+			if (fs.existsSync(dir)) this._vendoredGrammarsDir = dir;
+			return this._vendoredGrammarsDir;
+		} catch {
+			return undefined;
+		}
+	}
+
 	/**
 	 * All directories that may hold grammar wasms, in precedence order: the
-	 * bundled core dir, the resolved `this.grammarsDir`, and the web-tree-sitter
-	 * grammars dir (the lazy-fetch write target). Deduped.
+	 * committed vendor dir, the bundled core dir, the resolved
+	 * `this.grammarsDir`, and the web-tree-sitter grammars dir (the lazy-fetch
+	 * write target). Deduped.
+	 *
+	 * `vendor/grammars` comes first because it is the ONLY source for a grammar
+	 * we build ourselves (`VENDORED_GRAMMARS`) — nothing downloads into the
+	 * later dirs for it, so a miss here is a miss everywhere.
 	 */
 	private grammarSourceDirs(): string[] {
 		const dirs: string[] = [];
 		const push = (d: string | undefined): void => {
 			if (d && !dirs.includes(d)) dirs.push(d);
 		};
+		push(this.vendoredGrammarsDir());
 		push(this.bundledGrammarsDir());
 		push(this.grammarsDir || undefined);
 		push(this.resolveWebTreeSitterAsset("grammars"));
@@ -763,6 +788,22 @@ export class TreeSitterClient {
 	 * try/catch that funnels any throw into `recordGrammarFailure` (#1548).
 	 */
 	private async fetchGrammar(grammarFile: string): Promise<boolean> {
+		// BEFORE resolving a write directory: a vendored grammar is never
+		// downloaded, so the write dir has no bearing on its verdict. Resolving
+		// first let the "no writable grammars directory" branch below answer
+		// RETRYABLE for a missing vendored wasm on any host where
+		// web-tree-sitter isn't locatable — reporting a packaging fault as a
+		// transient download failure, and arming a cooldown for a fetch that can
+		// never happen.
+		if (isVendoredGrammar(grammarFile)) {
+			const { reason } = vendoredGrammarRefusal(grammarFile);
+			this.recordGrammarFailure(
+				grammarFile,
+				reason ?? `${grammarFile} is missing from vendor/grammars/.`,
+				/* retryable */ false,
+			);
+			return false;
+		}
 		const dir =
 			this.grammarsDir && fs.existsSync(this.grammarsDir)
 				? this.grammarsDir
