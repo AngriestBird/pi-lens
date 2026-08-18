@@ -218,6 +218,18 @@ export class TreeSitterClient {
 	 * re-download over it is picked up immediately.
 	 */
 	private verifiedGrammarPaths = new Map<string, string>();
+	/**
+	 * Grammar path → the `size:mtimeMs` stamp at which `Language.load` failed
+	 * on it despite passing the wasm-preamble check (#1564) — e.g. a truncated
+	 * download whose first four bytes are a genuine `\0asm` preamble but whose
+	 * body decodes short ("Code section extends past end of the module"). The
+	 * preamble check alone can't see this; only a real decode attempt can.
+	 * `resolveGrammarFile` treats a path recorded here (at the SAME stamp) as
+	 * absent, so the next demand re-fetches instead of reusing the same broken
+	 * file forever. Stamped so a fresh download (new mtime) is re-examined
+	 * rather than permanently distrusted — same shape as `verifiedGrammarPaths`.
+	 */
+	private decodeFailedGrammarPaths = new Map<string, string>();
 	/** Paths already reported as non-wasm, to log/record them once each. */
 	private poisonedGrammarPaths = new Set<string>();
 	/** Consecutive download failures per grammar, for the exponential
@@ -518,6 +530,12 @@ export class TreeSitterClient {
 			const candidate = path.join(dir, grammarFile);
 			const stamp = grammarFileStamp(candidate);
 			if (!stamp) continue;
+			// #1564: a file that passed the preamble check but failed
+			// `Language.load` at this exact stamp is known-bad — treat it as
+			// absent so `ensureGrammar` re-fetches over it, same as the
+			// non-wasm-magic case below. A stamp mismatch (the file changed —
+			// re-downloaded) falls through to re-examine it fresh.
+			if (this.decodeFailedGrammarPaths.get(candidate) === stamp) continue;
 			if (this.verifiedGrammarPaths.get(candidate) === stamp) return candidate;
 			if (fileHasWasmMagic(candidate)) {
 				this.verifiedGrammarPaths.set(candidate, stamp);
@@ -887,6 +905,60 @@ export class TreeSitterClient {
 		}
 	}
 
+	/**
+	 * Record a `Language.load` failure on a file `resolveGrammarFile` had just
+	 * vouched for (#1564) — the diagnosis gap #1548 left open: the preamble
+	 * check proves the first four bytes are `\0asm`, not that the whole body
+	 * decodes. A decode error here (a truncated download, on-disk corruption)
+	 * is evidence the FILE is bad, so it gets the exact same treatment as an
+	 * ensure-time download failure: invalidate the resolve memo so the next
+	 * demand re-fetches instead of reusing the same broken file forever, and
+	 * reuse `recordGrammarFailure`'s cooldown/degradation/notification
+	 * machinery rather than hand-rolling a parallel one — a persistently
+	 * truncated CDN response would otherwise re-download and re-fail on every
+	 * single parse.
+	 *
+	 * A DURABLE decode failure (the bytes are complete and correct, but ABI-
+	 * incompatible with the installed `web-tree-sitter` — a version drift, not
+	 * a truncation) is classified `retryable` here too, same as everything
+	 * else this method sees: there is no way to tell "truncated" from "wrong
+	 * ABI" from the error message alone, so it re-downloads and re-fails once
+	 * per cooldown tier instead of latching forever. That is bounded by the
+	 * cooldown ladder (this never re-fetches faster than #1536's backoff) and
+	 * by `BLOCKED_GRAMMARS` for the narrower case that's fatal to the process
+	 * rather than just wrong (`grammar-source.ts`). The redownload only helps
+	 * if a fresh fetch could actually be a DIFFERENT (compatible) build,
+	 * which is exactly what the `grammar-source.test.ts` version/lock sync
+	 * guard (`lock.version === TREE_SITTER_WASMS_VERSION`) exists to keep
+	 * true — without it, a version bump with a stale lock would make every
+	 * redownload land the identical bytes and spin the ladder against a file
+	 * that can never pass.
+	 */
+	private recordGrammarLoadFailure(
+		grammarPath: string,
+		grammarFile: string,
+		err: unknown,
+	): void {
+		const stamp = grammarFileStamp(grammarPath);
+		this.verifiedGrammarPaths.delete(grammarPath);
+		if (stamp) this.decodeFailedGrammarPaths.set(grammarPath, stamp);
+		const message = err instanceof Error ? err.message : String(err);
+		logTreeSitterDiagnostic({
+			subsystem: "tree-sitter-client",
+			level: "warn",
+			message:
+				`Language.load failed for ${grammarPath} even though the wasm preamble check ` +
+				`passed (${message}) — most likely a truncated download (#1564). Treating the ` +
+				`grammar as missing so the next demand re-fetches it.`,
+			metadata: { grammarFile, path: grammarPath, outcome: "load-failed" },
+		});
+		this.recordGrammarFailure(
+			grammarFile,
+			`Language.load failed on a resolved grammar file (${message}).`,
+			/* retryable */ true,
+		);
+	}
+
 	/** Initialize tree-sitter WASM runtime */
 	async init(): Promise<boolean> {
 		if (this.wasmAborted) return false;
@@ -1013,7 +1085,16 @@ export class TreeSitterClient {
 			}
 			return language;
 		} catch (err) {
-			this.reportWasmAbort(err);
+			// An uncatchable-shaped WASM abort poisons the whole process (#402) —
+			// `reportWasmAbort` already records + handles it. Everything else
+			// (#1564) is a DECODE failure on a file `resolveGrammarFile` just
+			// vouched for — e.g. "Code section extends past end of the module" on
+			// a truncated-but-magic-valid download. That is evidence the file
+			// itself is bad, not the runtime, so record it and stop vouching for
+			// this exact file so the next demand can re-fetch it.
+			if (!this.reportWasmAbort(err)) {
+				this.recordGrammarLoadFailure(grammarPath, grammarFile, err);
+			}
 			this.dbg(`Language load error: ${err}`);
 			return null;
 		}

@@ -202,6 +202,20 @@ export class SgRunner {
 	 */
 	private sweepSawTransient = false;
 	private sweepTransientCause: AvailabilityCause = "probe-timeout";
+	/**
+	 * The DIRECT candidates that were unreachable, in ask order (#1568).
+	 *
+	 * The sweep returns at the first candidate that answers, so at the moment of
+	 * a win this is exactly the set of preferred tiers the winner did not beat on
+	 * the merits. Fallbacks are excluded on purpose: `npx` is asked before the
+	 * global-bin and platform-package tiers, and a slow `npx` says nothing about
+	 * a winner that is a real binary.
+	 *
+	 * Basenames, because a candidate can be an absolute global-bin or
+	 * platform-package path and this list is written to latency.log (#1568
+	 * review F3).
+	 */
+	private sweepUnreachable: string[] = [];
 	/** A transient on the npx fallback: not evidence, but not nothing either. */
 	private sweepFallbackTransient = false;
 	private sweepFallbackCause: AvailabilityCause = "probe-timeout";
@@ -241,6 +255,7 @@ export class SgRunner {
 		const startedAt = Date.now();
 		this.sweepSawTransient = false;
 		this.sweepTransientCause = "probe-timeout";
+		this.sweepUnreachable = [];
 		this.sweepFallbackTransient = false;
 		this.sweepFallbackCause = "probe-timeout";
 		this.sweepHostStallMs = 0;
@@ -312,6 +327,19 @@ export class SgRunner {
 		// install below was never reached and the slow npx was re-spawned on each
 		// escalating retry instead — worse than the latch it replaced.
 		if (this.sweepSawTransient) {
+			// Nothing answered, transiently, while we are still holding a command a
+			// previous provisional sweep proved working. Discarding it here would
+			// run #1476 backwards — a timeout erasing a positive result — and it
+			// would send the sweep on to Step 4 to install a tool that is already
+			// runnable. Keep the winner and re-arm the cooldown (#1568 review F1).
+			if (this.availabilityLatch.isProvisional() && this.sgPath) {
+				this.noteAvailable(
+					startedAt,
+					`ast-grep re-probe stalled; keeping ${this.sgPath}`,
+					{ retained: true },
+				);
+				return true;
+			}
 			this.log(
 				"ast-grep availability probe timed out; will retry (not installing)",
 			);
@@ -366,19 +394,55 @@ export class SgRunner {
 		);
 	}
 
-	/** Record a successful sweep: available, latched, one decision record. */
-	private noteAvailable(startedAt: number, message: string): void {
-		this.availabilityLatch.noteAvailable();
+	/**
+	 * Record a successful sweep, with one decision record.
+	 *
+	 * The win is latched for the session UNLESS a direct candidate ahead of it
+	 * was unreachable (#1568). `sweepSawTransient` is set only by candidates the
+	 * sweep already asked, and the sweep returns at the first one that answers,
+	 * so at this point the flag means "a tier the winner is supposed to lose to
+	 * never got a fair hearing". Latching that pinned the session to
+	 * `npx --no -- ast-grep` — a Node start per invocation — over a healthy
+	 * ast-grep on PATH, until the next restart. Provisional instead: served now,
+	 * re-swept once the stalled tier's cooldown expires.
+	 *
+	 * The install arm cannot reach here provisionally: `doEnsureAvailable`
+	 * returns before Step 4 whenever `sweepSawTransient` is set.
+	 *
+	 * `retained` marks the other provisional case (#1568 review F1): no candidate
+	 * answered at all, and the winner being reported is the one the previous
+	 * sweep found, kept rather than discarded on a timeout.
+	 */
+	private noteAvailable(
+		startedAt: number,
+		message: string,
+		opts: { retained?: boolean } = {},
+	): void {
+		const provisional = this.sweepSawTransient;
+		let retryAfterMs = 0;
+		if (provisional) {
+			retryAfterMs = this.availabilityLatch.noteProvisionallyAvailable(
+				this.sweepTransientCause,
+			);
+		} else {
+			this.availabilityLatch.noteAvailable();
+		}
 		this.log(message);
 		logAvailabilityDecision({
 			tool: "ast-grep",
 			verdict: "available",
 			outcome: "success",
-			cause: "ok",
+			cause: provisional ? this.sweepTransientCause : "ok",
 			elapsedMs: Date.now() - startedAt,
-			latched: true,
+			latched: !provisional,
 			hostStallMs: this.sweepHostStallMs,
 			budgetMs: PROBE_TIMEOUT_MS,
+			...(provisional && {
+				provisional: true,
+				unreachablePreferred: [...this.sweepUnreachable],
+				...(opts.retained === true && { retained: true }),
+				...(retryAfterMs > 0 && { retryAfterMs }),
+			}),
 		});
 	}
 
@@ -541,6 +605,10 @@ export class SgRunner {
 			} else {
 				this.sweepSawTransient = true;
 				this.sweepTransientCause = cause;
+				const name = path.basename(cmd);
+				if (!this.sweepUnreachable.includes(name)) {
+					this.sweepUnreachable.push(name);
+				}
 			}
 		}
 		return false;
