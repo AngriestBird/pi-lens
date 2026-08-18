@@ -86,6 +86,8 @@ export class RuntimeCoordinator {
 	private _cachedExports = new Map<string, string>();
 	private _startupScansInFlight = new Map<string, number>();
 	private _cascadeRuns: CascadeRun[] = [];
+	private _turnEndCascadeSettleStarts = new Map<number, number>();
+	private _nextCascadeSettleToken = 0;
 	// Cascade computes are kicked off unawaited by the pipeline (#450); their
 	// promises park here until turn_end drains them via settleCascadeRuns. Each is
 	// guaranteed non-rejecting by the pipeline's .catch.
@@ -173,6 +175,7 @@ export class RuntimeCoordinator {
 		this._startupScansInFlight.clear();
 		this._cascadeRuns = [];
 		this._pendingCascadeRuns = [];
+		this._turnEndCascadeSettleStarts.clear();
 		this._cascadeSessionStats = {
 			runs: 0,
 			diagnosticsSurfaced: 0,
@@ -569,6 +572,13 @@ export class RuntimeCoordinator {
 		this._pendingCascadeRuns.push(p);
 	}
 
+	/** The active turn_end settle clock, or undefined outside that wait. */
+	getTurnEndCascadeSettleStart(): number | undefined {
+		let latest: number | undefined;
+		for (const start of this._turnEndCascadeSettleStarts.values()) latest = start;
+		return latest;
+	}
+
 	/**
 	 * Drain the deferred cascade computes kicked off this turn (#450), racing them
 	 * against a bounded wait. Fulfilled runs feed the same accumulator as inline
@@ -578,44 +588,57 @@ export class RuntimeCoordinator {
 	 */
 	async settleCascadeRuns(
 		maxWaitMs: number,
+		settleOptions: { trackTurnEndClock?: boolean } = {},
 	): Promise<{ settled: number; timedOut: number }> {
 		const pending = this._pendingCascadeRuns;
 		if (pending.length === 0) return { settled: 0, timedOut: 0 };
 		this._pendingCascadeRuns = [];
+		const settleToken = settleOptions.trackTurnEndClock
+			? ++this._nextCascadeSettleToken
+			: undefined;
+		if (settleToken !== undefined) {
+			this._turnEndCascadeSettleStarts.set(settleToken, Date.now());
+		}
 
-		// Track per-promise settlement so promises still in flight at the cap can be
-		// carried over. A settled entry records its run; an unsettled one is re-parked.
-		const tracked = pending.map((p) => {
-			const entry: { done: boolean; run?: CascadeRun; promise: Promise<CascadeRun> } =
-				{ done: false, promise: p };
-			entry.promise = p.then((run) => {
-				entry.done = true;
-				entry.run = run;
-				return run;
+		try {
+			// Track per-promise settlement so promises still in flight at the cap can be
+			// carried over. A settled entry records its run; an unsettled one is re-parked.
+			const tracked = pending.map((p) => {
+				const entry: { done: boolean; run?: CascadeRun; promise: Promise<CascadeRun> } =
+					{ done: false, promise: p };
+				entry.promise = p.then((run) => {
+					entry.done = true;
+					entry.run = run;
+					return run;
+				});
+				return entry;
 			});
-			return entry;
-		});
 
-		const timeout = new Promise<void>((resolve) => {
-			setTimeout(resolve, maxWaitMs).unref?.();
-		});
-		await Promise.race([
-			Promise.allSettled(tracked.map((t) => t.promise)),
-			timeout,
-		]);
+			const timeout = new Promise<void>((resolve) => {
+				setTimeout(resolve, maxWaitMs).unref?.();
+			});
+			await Promise.race([
+				Promise.allSettled(tracked.map((t) => t.promise)),
+				timeout,
+			]);
 
-		let settled = 0;
-		let timedOut = 0;
-		for (const entry of tracked) {
-			if (entry.done && entry.run) {
-				this.appendCascadeRun(entry.run);
-				settled += 1;
-			} else {
-				this._pendingCascadeRuns.push(entry.promise);
-				timedOut += 1;
+			let settled = 0;
+			let timedOut = 0;
+			for (const entry of tracked) {
+				if (entry.done && entry.run) {
+					this.appendCascadeRun(entry.run);
+					settled += 1;
+				} else {
+					this._pendingCascadeRuns.push(entry.promise);
+					timedOut += 1;
+				}
+			}
+			return { settled, timedOut };
+		} finally {
+			if (settleToken !== undefined) {
+				this._turnEndCascadeSettleStarts.delete(settleToken);
 			}
 		}
-		return { settled, timedOut };
 	}
 
 	consumeCascadeRuns(): CascadeRun[] {

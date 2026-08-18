@@ -812,6 +812,10 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 				getFilesChangedSince: (seq: number) =>
 					runtime.getFilesChangedSince(seq),
 			},
+			// The settle clock is live because the deferred cascade may reach its
+			// budget derivation before or after turn_end starts waiting.
+			turnEndCascadeSettleStart: () =>
+				runtime.getTurnEndCascadeSettleStart(),
 			// #348 phase 2: live reference so the deferred cascade can update the
 			// warm word index in place at the same seam as the graph rebuild.
 			// `runtime.wordIndex` is read fresh (not captured) via this closure-free

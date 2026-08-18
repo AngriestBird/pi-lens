@@ -273,6 +273,8 @@ export interface PipelineContext {
 		projectSeq: () => number;
 		getFilesChangedSince: (seq: number) => string[];
 	};
+	/** Current turn_end cascade settle start, or undefined outside that wait. */
+	turnEndCascadeSettleStart?: () => number | undefined;
 	/**
 	 * Live reference to `runtime.wordIndex` (#348 phase 2), threaded to the
 	 * deferred cascade so it can update the warm in-memory word index at the
@@ -1510,6 +1512,7 @@ export async function runPipeline(
 				turnSeq: ctx.telemetry?.turnIndex,
 				writeSeq: ctx.telemetry?.writeIndex,
 				seqState: ctx.seqState,
+				turnEndCascadeSettleStart: ctx.turnEndCascadeSettleStart,
 				fileContent,
 				wordIndex: ctx.wordIndex,
 				onWordIndexUpdated: ctx.onWordIndexUpdated,

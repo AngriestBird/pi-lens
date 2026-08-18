@@ -21,8 +21,10 @@
  * The walk cost is a MODEL, not a fresh measurement: touches fan out in
  * parallel, so the number that matters is the marginal wall-clock cost of one
  * more neighbour under LSP contention. 97 ms is the issue's own measurement
- * (3.88 s at nbr=40, 3.71 s at nbr=38). Preludes are the measured graph-build /
- * reverse-deps times from the same window.
+ * (3.88 s at nbr=40, 3.71 s at nbr=38). Preludes include work before turn_end
+ * and are the measured graph-build / reverse-deps times from the same window.
+ * `--turn-end-gap-ms` controls the pre-turn gap that is outside the settle
+ * deadline and therefore is not charged against the on-time window.
  *
  * "Dropped" is the column that matters against a narrowed budget: a neighbour
  * cut by the budget is gone for good, while a neighbour on a LATE run is not —
@@ -41,11 +43,18 @@ const numArg = (name, fallback) => {
 
 const DIVISOR_MS = numArg("divisor-ms", 100);
 const SETTLE_MS = numArg("settle-ms", 5000);
+const parsedTurnEndGapMs = numArg("turn-end-gap-ms", 0);
+const TURN_END_GAP_MS = Math.max(
+	0,
+	Number.isFinite(parsedTurnEndGapMs) && parsedTurnEndGapMs >= 0
+		? parsedTurnEndGapMs
+		: 0,
+);
 const QUIET_DRAIN_MS = numArg("quiet-drain-ms", 15000);
 const CEILING = 40;
 const FLOOR = 5;
 
-// [label, prelude ms before the walk is sized, eligible neighbours]
+// [label, prelude ms including work before turn_end, eligible neighbours]
 const SCENARIOS = [
 	["median cascade (30 ms, nbr=1)", 30, 1],
 	["cline-headers.ts (1.33 s prelude, nbr=3)", 1330, 3],
@@ -68,8 +77,9 @@ function evaluate(trueCostMs) {
 	};
 
 	for (const [label, preludeMs, eligible] of SCENARIOS) {
+		const settleElapsedMs = Math.max(0, preludeMs - TURN_END_GAP_MS);
 		const { budget, zone } = deriveCascadeNeighbourBudget({
-			elapsedMs: preludeMs,
+			elapsedMs: settleElapsedMs,
 			settleWaitMs: SETTLE_MS,
 			quietDrainMs: QUIET_DRAIN_MS,
 			ceiling: CEILING,
@@ -79,8 +89,9 @@ function evaluate(trueCostMs) {
 
 		const flatWalked = Math.min(eligible, CEILING);
 		const derivedWalked = Math.min(eligible, budget);
-		const flatTotal = preludeMs + Math.round(flatWalked * trueCostMs);
-		const derivedTotal = preludeMs + Math.round(derivedWalked * trueCostMs);
+		const flatTotal = settleElapsedMs + Math.round(flatWalked * trueCostMs);
+		const derivedTotal =
+			settleElapsedMs + Math.round(derivedWalked * trueCostMs);
 		const flatFits = flatTotal <= SETTLE_MS;
 		const derivedFits = derivedTotal <= SETTLE_MS;
 		const dropped = flatWalked - derivedWalked;
@@ -114,7 +125,7 @@ const padL = (s, w) => String(s).padStart(w);
 function printTable(trueCostMs) {
 	const { rows, totals } = evaluate(trueCostMs);
 	console.log(
-		`\ntrue marginal cost ${trueCostMs} ms/neighbour | production divisor ${DIVISOR_MS} ms | on-time window ${SETTLE_MS} ms | pipeline drain ${SETTLE_MS + QUIET_DRAIN_MS} ms\n`,
+		`\ntrue marginal cost ${trueCostMs} ms/neighbour | production divisor ${DIVISOR_MS} ms | prelude includes work before turn_end | uncharged turn_end gap ${TURN_END_GAP_MS} ms | settle window ${SETTLE_MS} ms | pipeline drain ${SETTLE_MS + QUIET_DRAIN_MS} ms\n`,
 	);
 	console.log(
 		`${pad("scenario", 52)}${padL("nbr", 4)}${padL("zone", 18)}${padL("flat", 6)}${padL("total", 8)}${padL("fits", 6)}${padL("drv", 5)}${padL("total", 8)}${padL("fits", 6)}${padL("dropped", 9)}`,

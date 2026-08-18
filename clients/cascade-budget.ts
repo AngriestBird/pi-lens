@@ -148,18 +148,17 @@ export interface CascadeBudgetDecision {
 }
 
 /**
- * Size one run's neighbour walk against the on-time window it has left.
+ * Size one run's neighbour walk against the on-time window supplied by its
+ * caller.
  *
- * `elapsedMs` is the run's own age. A deferred cascade starts at the write and
- * the settle wait starts at turn_end, so its age is not literally settle time
- * spent — but the worst case (and the measured one: the 12:09 event dispatched
- * at 12:09:29.245 and its settle wait timed out at 5001 ms with `settled: 0`) is
- * a turn_end that follows the write immediately. Charging the run's own prelude
- * against the window is the conservative read, and it is the only one the
- * compute can observe from where it sits.
+ * `elapsedMs` is arithmetic input, not an observation made by this function.
+ * The production caller measures it against the active turn_end settle window
+ * and passes that elapsed time here. When that boundary is unavailable, the
+ * caller passes zero to preserve the flat cap. Legacy callers may still pass
+ * deferred run age for compatibility.
  *
  * Every override exists so the derivation can be tested and benchmarked as a
- * pure function; production passes `elapsedMs` alone.
+ * pure function; the function itself does not observe a deferred run's age.
  */
 export function deriveCascadeNeighbourBudget(options: {
 	elapsedMs: number;

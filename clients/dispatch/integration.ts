@@ -657,8 +657,13 @@ const REVERSE_DEPS_MAX_WARM_ROOTS = 8;
 const REVERSE_DEPS_IDLE_EVICT_MS_DEFAULT = 20 * 60_000;
 
 function reverseDepsIdleEvictMs(): number {
-	const value = Number.parseInt(process.env.PI_LENS_REVERSE_DEPS_IDLE_EVICT_MS ?? "", 10);
-	return Number.isSafeInteger(value) && value > 0 ? value : REVERSE_DEPS_IDLE_EVICT_MS_DEFAULT;
+	const value = Number.parseInt(
+		process.env.PI_LENS_REVERSE_DEPS_IDLE_EVICT_MS ?? "",
+		10,
+	);
+	return Number.isSafeInteger(value) && value > 0
+		? value
+		: REVERSE_DEPS_IDLE_EVICT_MS_DEFAULT;
 }
 
 function deleteReverseDepsEntry(key: string): void {
@@ -694,7 +699,9 @@ function setReverseDepsEntry(
 	reverseDepsIndexCache.set(key, resident);
 	touchReverseDepsEntry(key, resident, armIdleTimer);
 	while (reverseDepsIndexCache.size > REVERSE_DEPS_MAX_WARM_ROOTS) {
-		const victim = [...reverseDepsIndexCache.entries()].sort(([, a], [, b]) => a.lastUsedAt - b.lastUsedAt)[0];
+		const victim = [...reverseDepsIndexCache.entries()].sort(
+			([, a], [, b]) => a.lastUsedAt - b.lastUsedAt,
+		)[0];
 		if (!victim) break;
 		deleteReverseDepsEntry(victim[0]);
 	}
@@ -862,6 +869,8 @@ export async function computeCascadeForFile(
 			projectSeq: () => number;
 			getFilesChangedSince: (seq: number) => string[];
 		};
+		/** Current turn_end cascade settle start, or undefined outside that wait. */
+		turnEndCascadeSettleStart?: () => number | undefined;
 		/**
 		 * Post-format/post-fix file content, already read by the pipeline before
 		 * this deferred cascade runs (#348 phase 2). Reused here to update the
@@ -887,10 +896,9 @@ export async function computeCascadeForFile(
 ): Promise<CascadeRun> {
 	const reverseDepsTimersToRelease = new Set<string>();
 	const reverseDepsEntriesAtStart = new Set(reverseDepsIndexCache.values());
-	// #1462: this run's own age, charged against the settle window when the
-	// neighbour walk is sized below. Sampled at entry so the graph build and the
-	// reverse-deps refresh — the 2046 ms prelude that pushed the measured
-	// 38-neighbour cascade past the 5 s cap — are inside it.
+	// #1462: legacy callers use this run's age when sizing the neighbour walk.
+	// The pipeline supplies a live turn_end clock so deferred work does not charge
+	// time that elapsed before turn_end began waiting.
 	const cascadeStart = Date.now();
 	try {
 	const {
@@ -899,6 +907,7 @@ export async function computeCascadeForFile(
 		turnSeq = 0,
 		writeSeq,
 		seqState,
+			turnEndCascadeSettleStart,
 		fileContent,
 		wordIndex,
 		onWordIndexUpdated,
@@ -975,12 +984,16 @@ export async function computeCascadeForFile(
 	let importerSet = new Set<string>();
 	let callerSet = new Set<string>();
 	let referenceCount = 0;
+		let cascadeCandidateCount = 0;
+		let cascadeEligibleCount = 0;
+		let cascadeFilterDroppedCount = 0;
 	// #1446 item 4: how many eligible neighbors the flat CASCADE_NEIGHBOUR_BUDGET
 	// cut off, distinct from candidates dropped by the filters above it
 	// (missing on disk, vendor, ignored, already-primary-this-turn) — those are
 	// never actionable regardless of budget, so counting them as "truncated"
 	// would overstate what a larger budget could actually recover.
 	let cascadeBudgetTruncated = 0;
+		let transitiveTruncated = false;
 	// #1462: the budget actually in force for THIS run and the settle time left
 	// when it was sized. Both are overwritten inside the graph branch below,
 	// which is the only path that reaches `cascade_result` — the other branch
@@ -1083,7 +1096,9 @@ export async function computeCascadeForFile(
 				index: reverseDepsIndex,
 				savedToSnapshot: reverseDepsSaved,
 				generation: graph.buildGeneration,
-			}, false);
+					},
+					false,
+				);
 			reverseDepsTimersToRelease.add(workspaceKey);
 			logCascade({
 				phase: "reverse_deps_cache",
@@ -1109,7 +1124,9 @@ export async function computeCascadeForFile(
 				index: reverseDepsIndex,
 				savedToSnapshot: reverseDepsSaved,
 				generation: graph.buildGeneration,
-			}, false);
+					},
+					false,
+				);
 			reverseDepsTimersToRelease.add(workspaceKey);
 			logCascade({
 				phase: "reverse_deps_cache",
@@ -1258,7 +1275,12 @@ export async function computeCascadeForFile(
 				let refsTimer: ReturnType<typeof setTimeout> | undefined;
 				try {
 					const refs = await Promise.race([
-						lspService.references(normalizedFile, line - 1, column - 1, false),
+							lspService.references(
+								normalizedFile,
+								line - 1,
+								column - 1,
+								false,
+							),
 						new Promise<never>((_, reject) => {
 							refsTimer = setTimeout(() => reject(new Error("timeout")), 750);
 						}),
@@ -1310,11 +1332,16 @@ export async function computeCascadeForFile(
 		// Narrowing happens ONLY inside the rescue band (see cascade-budget.ts):
 		// a run that is merely late keeps the whole set and is delivered complete
 		// by #1443's carry-over, because a dropped neighbour is lost for good
-		// while a late one is not.
+			// while a late one is not. A wired callback that cannot observe an active
+			// turn_end wait uses zero elapsed time rather than charging pre-turn age.
 		{
-			const decision = deriveCascadeNeighbourBudget({
-				elapsedMs: Date.now() - cascadeStart,
-			});
+				const settleStart = turnEndCascadeSettleStart?.();
+				const elapsedMs = turnEndCascadeSettleStart
+					? settleStart !== undefined && Number.isFinite(settleStart)
+						? Math.max(0, Date.now() - settleStart)
+						: 0
+					: Date.now() - cascadeStart;
+				const decision = deriveCascadeNeighbourBudget({ elapsedMs });
 			cascadeNeighbourBudget = decision.budget;
 			cascadeBudgetRemainingMs = decision.remainingMs;
 			cascadeBudgetZone = decision.zone;
@@ -1330,6 +1357,7 @@ export async function computeCascadeForFile(
 				maxDepth: CASCADE_TRANSITIVE_DEPTH,
 				maxHits: cascadeNeighbourBudget,
 			});
+				transitiveTruncated = transitive.truncated;
 			const added = [
 				...new Set(
 					transitive.hits
@@ -1370,6 +1398,7 @@ export async function computeCascadeForFile(
 		// touched solely for cascade diagnostics. Composes the shared `detectFileRole`
 		// seam; a classifier failure RETAINS the candidate (honest — never a false
 		// clean). The project ignore filter below is separate and unchanged (#297).
+			cascadeCandidateCount = impact.neighborFiles.length;
 		impact.directImporters = impact.directImporters.filter(
 			(f) => !isTestRoleCollateral(f),
 		);
@@ -1406,11 +1435,48 @@ export async function computeCascadeForFile(
 					importerSet.has(p) ? 0 : callerSet.has(p) ? 1 : 2;
 				return rank(a) - rank(b);
 			});
+			cascadeEligibleCount = eligibleNeighbors.length;
+			cascadeFilterDroppedCount = Math.max(
+				0,
+				cascadeCandidateCount - cascadeEligibleCount,
+			);
 		cascadeBudgetTruncated = Math.max(
 			0,
 			eligibleNeighbors.length - cascadeNeighbourBudget,
 		);
 		sortedNeighbors = eligibleNeighbors.slice(0, cascadeNeighbourBudget);
+			if (cascadeBudgetTruncated > 0 || transitiveTruncated) {
+				const budget = {
+					candidateCount: cascadeCandidateCount,
+					eligibleCount: cascadeEligibleCount,
+					selectedCount: sortedNeighbors.length,
+					truncatedCount: cascadeBudgetTruncated,
+					...(transitiveTruncated && { transitiveTruncated: true }),
+				};
+				const detailParts = [
+					...(cascadeBudgetTruncated > 0
+						? [
+								`cascade neighbor budget checked ${budget.selectedCount} of ${budget.eligibleCount} eligible dependents ` +
+									`(${budget.truncatedCount} omitted)`,
+							]
+						: []),
+					...(transitiveTruncated
+						? [
+								"transitive expansion was capped before all eligible dependents were enumerated",
+							]
+						: []),
+				];
+				const detail = detailParts.join("; ");
+				impact.indeterminate = impact.indeterminate
+					? {
+							...impact.indeterminate,
+							detail: impact.indeterminate.detail
+								? `${impact.indeterminate.detail}; ${detail}`
+								: detail,
+							budget,
+						}
+					: { reason: "budget_truncated", detail, budget };
+			}
 	} else {
 		logCascade({
 			phase: "cascade_skip",
@@ -1436,7 +1502,13 @@ export async function computeCascadeForFile(
 		callerCount: impact.directCallers.length,
 		referenceCount: Math.max(0, referenceCount),
 		riskFlags: impact.riskFlags,
-		metadata: { neighbors: sortedNeighbors.slice(0, 10) },
+			metadata: {
+				neighbors: sortedNeighbors.slice(0, 10),
+				candidateNeighborCount: cascadeCandidateCount,
+				eligibleNeighborCount: cascadeEligibleCount,
+				filterDroppedCount: cascadeFilterDroppedCount,
+				budgetTrimmedCount: cascadeBudgetTruncated,
+			},
 	});
 
 	const lspService = getLSPService();
@@ -1462,6 +1534,7 @@ export async function computeCascadeForFile(
 	// the latter must not collapse into a clean-looking result (#1104 honesty
 	// rule, same doctrine as #1023's graph-degraded indeterminate marker).
 	let fallbackBindingRejected = false;
+		const noLspCandidatePaths = new Set<string>();
 	// #1444: neighbours whose in-lane wait was skipped for the quiet-window
 	// reconcile to answer later. Logged on `cascade_result` so a cascade that
 	// deferred EVERY neighbour is distinguishable from a genuine leaf (both are
@@ -1478,15 +1551,21 @@ export async function computeCascadeForFile(
 	// (finalized earlier, before the cache-hit checks below run against it). Using
 	// the pre-outcome list let a neighbour double-count (cold-snapshot AND cache/
 	// recently-clean hit) or vanish from every bucket (an `activePaths` neighbour —
-	// e.g. Python/Go — that misses both caches). These four counters partition the
-	// touched-neighbour set `[...activePaths, ...coldSnapshotPaths]` exactly once
-	// each: a neighbour with no LSP server configured is the only outcome
-	// deliberately excluded (never attempted, no bucket).
+		// e.g. Python/Go — that misses both caches). These counters partition the
+		// selected-neighbour outcomes; passive snapshots and no-server selections are
+		// tracked separately instead of silently disappearing from the denominator.
+		// `coldTouches` includes every genuine active touch attempt, while
+		// `touchFailures` is its separate bounded failure subtype.
 	let deferredTouches = 0;
 	let coldTouches = 0;
+		let passiveSnapshotHits = 0;
+		let noLspConfigured = 0;
+		let touchFailures = 0;
 
 	if (sortedNeighbors.length > 0) {
-		const snapshotPaths = sortedNeighbors.filter(shouldReadCascadeFromSnapshot);
+			const snapshotPaths = sortedNeighbors.filter(
+				shouldReadCascadeFromSnapshot,
+			);
 		const activePaths = sortedNeighbors.filter(
 			(n) => !shouldReadCascadeFromSnapshot(n),
 		);
@@ -1556,6 +1635,7 @@ export async function computeCascadeForFile(
 				neighborPath,
 			);
 			producedLspData = true;
+				passiveSnapshotHits++;
 			const durationMs = Date.now() - neighborStart;
 
 			logCascade({
@@ -1682,6 +1762,8 @@ export async function computeCascadeForFile(
 				const configuredServerCount =
 					getServersForFileWithConfig(neighborPath).length;
 				if (configuredServerCount === 0) {
+						noLspConfigured++;
+						noLspCandidatePaths.add(cacheKey);
 					logCascade({
 						phase: "neighbor_fallback",
 						filePath,
@@ -1873,7 +1955,9 @@ export async function computeCascadeForFile(
 						// #1549: WHICH primary and WHICH deadline, present only when the
 						// touch actually reported itself inconclusive.
 						...(inconclusive && readInconclusiveAttribution(rawDiags)),
-						...(bindingRejected && { bindingState: bindingStateLabel(false) }),
+							...(bindingRejected && {
+								bindingState: bindingStateLabel(false),
+							}),
 						...(unconfirmedServerIds.length > 0 && {
 							unconfirmedServerIds: [...unconfirmedServerIds],
 						}),
@@ -1930,6 +2014,7 @@ export async function computeCascadeForFile(
 			if (result.status === "fulfilled") {
 				if (result.value) neighbors.push(result.value);
 			} else {
+					touchFailures++;
 				// A3: one failed LSP doesn't kill the rest — fall back to passive snapshot
 				dbg?.(
 					`cascade neighbor touch error for ${neighborPath}: ${result.reason}`,
@@ -1987,16 +2072,28 @@ export async function computeCascadeForFile(
 	}
 
 	// CR-3/A2: degraded fallback when no neighbor produced trustworthy LSP data —
-	// not merely when the graph returned zero neighbors.
-	if (!producedLspData) {
+		// not merely when the graph returned zero neighbors. In a mixed run, only
+		// candidates that had no configured LSP may use passive fallback; broadening
+		// to unrelated cache entries would make the partial active result misleading.
+		if (producedLspData && noLspCandidatePaths.size > 0) {
 		const bindingRejected = appendFallbackNeighbors(
 			neighbors,
 			allDiags,
 			normalizedFileKey,
 			cwd,
 			filePath,
+				noLspCandidatePaths,
 		);
 		if (bindingRejected) fallbackBindingRejected = true;
+		} else if (!producedLspData) {
+			const bindingRejected = appendFallbackNeighbors(
+				neighbors,
+				allDiags,
+				normalizedFileKey,
+				cwd,
+				filePath,
+			);
+			if (bindingRejected) fallbackBindingRejected = true;
 		if (neighbors.some((n) => n.reason === "fallback")) {
 			logCascade({
 				phase: "neighbor_fallback",
@@ -2036,6 +2133,17 @@ export async function computeCascadeForFile(
 	const filesWithErrors = visibleNeighbors.filter(
 		(n) => n.diagnostics.length > 0,
 	).length;
+		const selectedOutcomeCount =
+			passiveSnapshotHits +
+			cacheHits +
+			recentlyCleanHits +
+			deferredTouches +
+			coldTouches +
+			noLspConfigured;
+		const selectedOutcomeGap = Math.max(
+			0,
+			sortedNeighbors.length - selectedOutcomeCount,
+		);
 	logCascade({
 		phase: "cascade_result",
 		filePath,
@@ -2047,6 +2155,16 @@ export async function computeCascadeForFile(
 		metadata: {
 			filesWithErrors,
 			hasOutput: formatted.length > 0,
+				indeterminateReason: impact.indeterminate?.reason,
+				candidateNeighborCount: cascadeCandidateCount,
+				eligibleNeighborCount: cascadeEligibleCount,
+				filterDroppedCount: cascadeFilterDroppedCount,
+				selectedNeighborCount: sortedNeighbors.length,
+				selectedOutcomeCount,
+				selectedOutcomeGap,
+				passiveSnapshotHits,
+				noLspConfigured,
+				touchFailures,
 			// #1444: >0 means "answers are still outstanding", not "nothing found".
 			collectLaterSkipped,
 			// Log when cascade ran but found nothing — distinguishes "clean" from "no signal"
@@ -2056,11 +2174,9 @@ export async function computeCascadeForFile(
 			// from `coldSnapshot`/`snapshotMissing` flags scattered across
 			// per-neighbor `neighbor_touch`/`neighbor_snapshot` rows.
 			// F1: cacheHits + recentlyCleanHits + deferredTouches + coldTouches
-			// partition `[...activePaths, ...coldSnapshotPaths]` exactly — each
-			// counter increments at the point its neighbour's outcome is actually
-			// decided, not from `coldSnapshotPaths` (a pre-outcome list finalized
-			// before the cache-hit checks run). A neighbour with no LSP server
-			// configured is the one deliberately uncounted outcome (never touched).
+				// retain their outcome semantics. Passive snapshots and no-server selections
+				// complete the selected-neighbor denominator; touchFailures is a bounded
+				// subtype of coldTouches, not an additional outcome.
 			cacheHits,
 			recentlyCleanHits,
 			deferredTouches,
@@ -2088,6 +2204,13 @@ export async function computeCascadeForFile(
 			budgetZone: cascadeBudgetZone,
 			budgetDeliveryWindowMs: cascadeDeliveryWindowMs,
 			budgetTruncated: cascadeBudgetTruncated,
+				transitiveTruncated,
+				budgetTrimmedCount: cascadeBudgetTruncated,
+				budgetDerivationDisabled: cascadeBudgetZone === "no-rescue-window",
+				budgetDerivationDisabledReason:
+					cascadeBudgetZone === "no-rescue-window"
+						? "no-rescue-window"
+						: undefined,
 			neighbors: visibleNeighbors.slice(0, 10).map((n) => ({
 				file: n.filePath.replace(/\\/g, "/").split("/").slice(-2).join("/"),
 				diagnostics: n.diagnostics.length,
@@ -2117,6 +2240,7 @@ export async function computeCascadeForFile(
 				diagnosticCount: diagCount,
 				skipReason: "indeterminate",
 				indeterminate: impact.indeterminate,
+					selectedNeighborPaths: sortedNeighbors.slice(),
 			};
 		}
 		const skipReason: CascadeSkipReason =
@@ -2214,6 +2338,7 @@ function appendFallbackNeighbors(
 	normalizedFileKey: string,
 	cwd: string,
 	filePath: string,
+	allowedPaths?: ReadonlySet<string>,
 ): boolean {
 	const now = Date.now();
 	const seen = new Set(neighbors.map((n) => normalizeMapKey(n.filePath)));
@@ -2222,6 +2347,7 @@ function appendFallbackNeighbors(
 		const { diags, ts } = entry;
 		const diagKey = normalizeMapKey(diagPath);
 		if (diagKey === normalizedFileKey || seen.has(diagKey)) continue;
+		if (allowedPaths && !allowedPaths.has(diagKey)) continue;
 		if (primaryFilesThisTurn.has(diagKey)) continue;
 		if (isExternalOrVendorFile(diagPath, cwd)) continue;
 		if (isIgnoredCascadeNeighbor(diagPath, cwd)) continue;

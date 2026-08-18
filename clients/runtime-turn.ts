@@ -345,6 +345,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const cascadeSettleStart = Date.now();
 	const { settled, timedOut } = await runtime.settleCascadeRuns(
 		cascadeSettleWaitMs(),
+		{ trackTurnEndClock: true },
 	);
 	logLatency({
 		type: "phase",
@@ -392,9 +393,10 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			if (changedSince.length > 0) {
 				const changedSet = new Set(changedSince);
 				const primaryKey = normalizeMapKey(path.resolve(run.filePath));
-				const neighborKeys = (run.result?.neighbors ?? []).map((n) =>
-					normalizeMapKey(path.resolve(n.filePath)),
-				);
+				const neighborKeys = [
+					...(run.result?.neighbors ?? []).map((n) => n.filePath),
+					...(run.selectedNeighborPaths ?? []),
+				].map((filePath) => normalizeMapKey(path.resolve(filePath)));
 				const supersededByOwnFile =
 					changedSet.has(primaryKey) ||
 					neighborKeys.some((k) => changedSet.has(k));
@@ -556,8 +558,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		});
 	}
 	// #1023: surface an HONEST note whenever a cascade run could not compute
-	// downstream impact (degraded/over-cap graph, missing node, or a thrown
-	// compute) — never a silent all-clear (#533). This goes to the ADVISORY tier,
+	// downstream impact (degraded/over-cap graph, missing node, a thrown compute,
+	// or a deliberately budget-truncated neighbor set) — never a silent all-clear
+	// (#533). This goes to the ADVISORY tier,
 	// NOT the blocker tier: in an over-cap monorepo the graph is `skipped` on
 	// every edit, so a blocker would fire hard and never clear turn state every
 	// turn (over-escalation — the mirror of the silent-all-clear bug). Advisory
@@ -581,9 +584,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			runs: typeof indeterminateRuns,
 			frame: {
 				lead: (fileCount: number, reasons: string) => string;
-				fallbackDetail: (
-					r: (typeof indeterminateRuns)[number],
-				) => string;
+				fallbackDetail: (r: (typeof indeterminateRuns)[number]) => string;
 			},
 		): string | undefined => {
 			if (runs.length === 0) return undefined;
@@ -601,9 +602,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				const more = files.length > 5 ? ` (+${files.length - 5} more)` : "";
 				lines.push(`  • ${detail}: ${shown}${more}`);
 			}
-			const fileCount = new Set(
-				runs.map((r) => normalizeMapKey(r.filePath)),
-			).size;
+			const fileCount = new Set(runs.map((r) => normalizeMapKey(r.filePath)))
+				.size;
 			const reasons = [...byDetail.keys()].join("; ");
 			return `${frame.lead(fileCount, reasons)}\n${lines.join("\n")}`;
 		};
@@ -618,10 +618,21 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const graphRuns = indeterminateRuns.filter(
 			(r) =>
 				r.indeterminate?.reason !== "lsp_binding_rejected" &&
-				r.indeterminate?.reason !== "excluded_by_role",
+				r.indeterminate?.reason !== "excluded_by_role" &&
+				r.indeterminate?.reason !== "budget_truncated" &&
+				r.indeterminate?.budget === undefined,
 		);
 		const bindingRuns = indeterminateRuns.filter(
-			(r) => r.indeterminate?.reason === "lsp_binding_rejected",
+			(r) =>
+				r.indeterminate?.reason === "lsp_binding_rejected" &&
+				r.indeterminate?.budget === undefined,
+		);
+		// Budget coverage can be merged into a graph or binding marker, so its
+		// advisory bucket follows the evidence rather than replacing that reason.
+		const budgetRuns = indeterminateRuns.filter(
+			(r) =>
+				r.indeterminate?.reason === "budget_truncated" ||
+				r.indeterminate?.budget !== undefined,
 		);
 
 		// Factual/informational phrasing — the advisory tier wraps this with an
@@ -649,6 +660,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		});
 		if (bindingAdvisory) advisoryParts.push(bindingAdvisory);
 
+		const budgetAdvisory = buildAdvisory(budgetRuns, {
+			lead: (fileCount, reasons) =>
+				`Cascade checked the selected neighbors for ${fileCount} edited file(s) this turn, ` +
+				`but some eligible dependents were not checked because the cascade budget ` +
+				`was exhausted (${reasons}); a clean cascade result does not cover them.`,
+			fallbackDetail: (r) => {
+				const budget = r.indeterminate?.budget;
+				if (!budget) return "cascade budget omitted eligible dependents";
+				const detail = `cascade budget checked ${budget.selectedCount} of ${budget.eligibleCount} eligible dependents (${budget.truncatedCount} omitted)`;
+				return budget.transitiveTruncated
+					? `${detail}; transitive expansion was capped before all eligible dependents were enumerated`
+					: detail;
+			},
+		});
+		if (budgetAdvisory) advisoryParts.push(budgetAdvisory);
+
 		const fileCount = new Set(
 			indeterminateRuns.map((r) => normalizeMapKey(r.filePath)),
 		).size;
@@ -667,6 +694,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			file: toRunnerDisplayPath(cwd, r.filePath),
 			reason: r.indeterminate?.reason,
 			...(r.indeterminate?.detail && { detail: r.indeterminate.detail }),
+			...(r.indeterminate?.budget && { budget: r.indeterminate.budget }),
 			...(r.indeterminate?.diagnostic && {
 				diagnostic: r.indeterminate.diagnostic,
 			}),
@@ -1209,8 +1237,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		// LSP cascade-diagnostics merge — no second reverse-dependency walk, and the
 		// neighbor set inherits whatever budget the cascade compute already applied
 		// (CASCADE_NEIGHBOUR_BUDGET), so this can't turn into unbounded per-edit work.
-		const candidates: Array<{ display: string; abs: string; isNeighbor: boolean }> =
-			[];
+		const candidates: Array<{
+			display: string;
+			abs: string;
+			isNeighbor: boolean;
+		}> = [];
 		const seenCandidateKeys = new Set<string>();
 		for (const file of files) {
 			const abs = resolveRunnerPath(cwd, file);
@@ -1257,8 +1288,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			)?.data;
 			const testRunGeneration = (priorTestCache?.testRunGeneration ?? 0) + 1;
 			const provenanceFiles = [
-				...candidates.map((candidate) => ({ path: candidate.abs, role: "source" as const })),
-				...targets.map((target) => ({ path: target.testFile, role: "test" as const })),
+				...candidates.map((candidate) => ({
+					path: candidate.abs,
+					role: "source" as const,
+				})),
+				...targets.map((target) => ({
+					path: target.testFile,
+					role: "test" as const,
+				})),
 			];
 			const launchedFrom = snapshotAdvisoryProvenance({
 				cwd,
@@ -1293,7 +1330,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						launchedFrom.revision.turnIndex !== publishedAgainst.revision.turnIndex ||
 						launchedFrom.files.some((file, index) =>
 							publishedAgainst.files[index]?.sha256 !== file.sha256 ||
-							publishedAgainst.files[index]?.path !== file.path
+								publishedAgainst.files[index]?.path !== file.path,
 						);
 					// #628: the turn advancing while tests ran no longer means the
 					// results are thrown away — a late result is still real
@@ -1357,8 +1394,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							"test-runner-findings",
 							cwd,
 						)?.data?.testRunGeneration;
-						if (currentGeneration !== undefined && currentGeneration > testRunGeneration) {
-							dbg(`turn_end: test generation ${testRunGeneration} superseded by ${currentGeneration}`);
+						if (
+							currentGeneration !== undefined &&
+							currentGeneration > testRunGeneration
+						) {
+							dbg(
+								`turn_end: test generation ${testRunGeneration} superseded by ${currentGeneration}`,
+							);
 							return;
 						}
 						const content = stale
@@ -1396,7 +1438,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 								.filter((value) => value.failed === 0 && !value.error)
 								.map((value) => value.file);
 							if (cleanFiles.length > 0) {
-								clearGitGuardTestFailure(cacheManager, cwd, runtime, cleanFiles);
+								clearGitGuardTestFailure(
+									cacheManager,
+									cwd,
+									runtime,
+									cleanFiles,
+								);
 							}
 							mergeGitGuardTestFailure(
 								cacheManager,
@@ -1412,8 +1459,16 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							`turn_end: ${failures.length} test failure(s) cached for next context injection${stale ? " (stale — turn advanced while tests ran)" : ""}`,
 						);
 					} else if (results.length > 0) {
-						if (getFlag("lens-guard") && firedSessionId === runtime.telemetrySessionId) {
-							clearGitGuardTestFailure(cacheManager, cwd, runtime, resultValues.map((value) => value.file));
+						if (
+							getFlag("lens-guard") &&
+							firedSessionId === runtime.telemetrySessionId
+						) {
+							clearGitGuardTestFailure(
+								cacheManager,
+								cwd,
+								runtime,
+								resultValues.map((value) => value.file),
+							);
 						}
 						dbg(
 							`turn_end: all tests passed${stale ? " (stale — turn advanced while tests ran)" : ""}`,
@@ -1465,18 +1520,27 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					"./project-diagnostics/runner-adapters/call-graph-impact.js"
 				);
 			const impactLines: string[] = [];
-			const impactFindings: { calleeKey: string; results: ReturnType<typeof impact> }[] =
-				[];
+				const impactFindings: {
+					calleeKey: string;
+					results: ReturnType<typeof impact>;
+				}[] = [];
 			for (const filePath of files.slice(0, 5)) {
 				// Turn-state files may be cwd-relative while graph keys are absolute,
 				// and persisted graphs can contain either slash style/casing. Compare
 				// through the shared normalized path seam; keep the original filePath
 				// only for display and diagnostics.
-				const changedFileKey = normalizeMapKey(resolveRunnerPath(cwd, filePath));
-				const fileCallerKeys = [...runtime.callGraph.callers.keys()].filter((k) => {
+					const changedFileKey = normalizeMapKey(
+						resolveRunnerPath(cwd, filePath),
+					);
+					const fileCallerKeys = [...runtime.callGraph.callers.keys()].filter(
+						(k) => {
 					const graphFilePath = parseSymbolKey(k).filePath;
-					return normalizeMapKey(resolveRunnerPath(cwd, graphFilePath)) === changedFileKey;
-				});
+							return (
+								normalizeMapKey(resolveRunnerPath(cwd, graphFilePath)) ===
+								changedFileKey
+							);
+						},
+					);
 				for (const calleeKey of fileCallerKeys.slice(0, 3)) {
 					// #1080: drop KNOWN test-role callers BEFORE both the human advisory
 					// (formatImpact below) and the persisted delta (impactFindings →
@@ -1496,7 +1560,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						impactFindings.push({ calleeKey, results });
 						const summary = formatImpact(results, cwd);
 						if (summary)
-							impactLines.push(`  ${parseSymbolKey(calleeKey).symbolName ?? calleeKey}: ${summary}`);
+								impactLines.push(
+									`  ${parseSymbolKey(calleeKey).symbolName ?? calleeKey}: ${summary}`,
+								);
 					}
 				}
 			}
@@ -1685,10 +1751,9 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				"turn_end: duplicate findings detected (same session), suppressing re-prompt",
 			);
 			if (getFlag("lens-guard")) {
-				const existingGuard = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
-					"turn-end-findings",
-					cwd,
-				)?.data;
+				const existingGuard = cacheManager.readCache<
+					Partial<TurnEndFindingsCache>
+				>("turn-end-findings", cwd)?.data;
 				if (existingGuard) {
 					writeGitGuardRecord(cacheManager, runtime, cwd, {
 						...(existingGuard as TurnEndFindingsCache),
@@ -1701,7 +1766,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						projectSeqStart: runtime.turnStartProjectSeq,
 						projectSeqEnd: runtime.projectSeq,
 						fileSeqByPath: Object.fromEntries(
-								runtime.getFileSeqEntries().map(([filePath, seq]) => [normalizeMapKey(path.resolve(filePath)), seq]),
+							runtime
+								.getFileSeqEntries()
+								.map(([filePath, seq]) => [
+									normalizeMapKey(path.resolve(filePath)),
+									seq,
+								]),
 						),
 						fileContentHashes: {},
 						consumed: false,
@@ -1718,11 +1788,11 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			fileSeqByPath[normalizeMapKey(path.resolve(filePath))] = seq;
 		}
 		if (getFlag("lens-guard")) {
-			const existingGuard = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
-				"turn-end-findings",
-				cwd,
-			)?.data;
-			const blockingContent = blockerParts.length > 0
+			const existingGuard = cacheManager.readCache<
+				Partial<TurnEndFindingsCache>
+			>("turn-end-findings", cwd)?.data;
+			const blockingContent =
+				blockerParts.length > 0
 				? capTurnEndMessage(blockerParts.join("\n\n"))
 				: undefined;
 			const affectedFiles = [
@@ -1757,12 +1827,18 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				...files.map((file) => resolveRunnerPath(cwd, file)),
 				...cascadeResults.flatMap((result) => result.neighbors
 					.filter((neighbor) => neighbor.diagnostics.length > 0)
-					.map((neighbor) => resolveRunnerPath(cwd, neighbor.filePath))),
+						.map((neighbor) => resolveRunnerPath(cwd, neighbor.filePath)),
+				),
 			];
-			const affectedFiles = [...new Set(allAffectedFiles)]
-				.slice(0, MAX_ADVISORY_AFFECTED_FILES);
-			const affectedFilesTruncated = new Set(allAffectedFiles).size > affectedFiles.length;
-			cacheManager.writeCache("turn-end-findings", {
+			const affectedFiles = [...new Set(allAffectedFiles)].slice(
+				0,
+				MAX_ADVISORY_AFFECTED_FILES,
+			);
+			const affectedFilesTruncated =
+				new Set(allAffectedFiles).size > affectedFiles.length;
+			cacheManager.writeCache(
+				"turn-end-findings",
+				{
 				content,
 				affectedFiles,
 				affectedFilesTruncated,
@@ -1770,10 +1846,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					cwd,
 					runtime,
 					generation: 0,
-					files: affectedFiles.map((file) => ({ path: file, role: "affected" as const })),
+						files: affectedFiles.map((file) => ({
+							path: file,
+							role: "affected" as const,
+						})),
 					truncated: affectedFilesTruncated,
 				}),
-			}, cwd);
+				},
+				cwd,
+			);
 		}
 		cacheManager.writeCache(
 			"turn-end-findings-last",

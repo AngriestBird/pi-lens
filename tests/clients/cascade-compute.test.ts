@@ -229,6 +229,50 @@ describe("computeCascadeForFile", () => {
 		}
 	});
 
+	it("marks a capped transitive expansion indeterminate even when the file slice fits", async () => {
+		const env = setupTestEnvironment("cascade-transitive-truncated-");
+		try {
+			const primary = path.join(env.tmpDir, "src", "primary.ts");
+			const neighbor = path.join(env.tmpDir, "src", "neighbor.py");
+			fs.mkdirSync(path.dirname(primary), { recursive: true });
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			fs.writeFileSync(neighbor, "from primary import x\n");
+			mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+			mocks.computeTransitiveImpact.mockReturnValue({
+				seedFile: primary,
+				hits: [{ symbol: "", file: neighbor, depth: 1, relation: "imports" }],
+				truncated: true,
+				maxDepthReached: 1,
+			});
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile: vi.fn().mockResolvedValue({ diags: [lspError("capped")] }),
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			const run = await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			expect(run.indeterminate).toMatchObject({
+				reason: "budget_truncated",
+				budget: { truncatedCount: 0, transitiveTruncated: true },
+			});
+			expect(run.indeterminate?.detail).toContain(
+				"transitive expansion was capped before all eligible dependents were enumerated",
+			);
+			expect(cascadeResultMetadata()).toMatchObject({
+				transitiveTruncated: true,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("adds LSP reference files for changed-symbol blast radius", async () => {
 		const env = setupTestEnvironment("cascade-lsp-refs-");
 		try {
@@ -483,6 +527,101 @@ describe("computeCascadeForFile", () => {
 				result?.result?.neighbors.some((n) => n.reason === "fallback"),
 			).toBe(true);
 			expect(result?.result?.formatted).toContain("fallback error");
+
+			const cascadeResultEntry = mocks.logCascade.mock.calls
+				.map(([entry]) => entry)
+				.find((entry) => entry.phase === "cascade_result");
+			expect(cascadeResultEntry?.metadata).toMatchObject({
+				candidateNeighborCount: 1,
+				eligibleNeighborCount: 1,
+				filterDroppedCount: 0,
+				selectedNeighborCount: 1,
+				selectedOutcomeCount: 1,
+				noLspConfigured: 1,
+				passiveSnapshotHits: 0,
+				selectedOutcomeGap: 0,
+			});
+
+			const neighborFallbackEntry = mocks.logCascade.mock.calls
+				.map(([entry]) => entry)
+				.find((entry) => entry.phase === "neighbor_fallback");
+			expect(neighborFallbackEntry).toMatchObject({
+				fallbackUsed: false,
+				error: "no_lsp_server_configured",
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("uses passive fallback only for no-LSP candidates in a mixed cascade", async () => {
+		const env = setupTestEnvironment("cascade-mixed-fallback-");
+		try {
+			const primary = path.join(env.tmpDir, "main.ts");
+			const noLspNeighbor = path.join(env.tmpDir, "neighbor.foo");
+			const normalNeighbor = path.join(env.tmpDir, "neighbor.py");
+			const unrelated = path.join(env.tmpDir, "unrelated.ts");
+			fs.writeFileSync(primary, "export const x = 1;\n");
+			fs.writeFileSync(noLspNeighbor, "neighbor\n");
+			fs.writeFileSync(normalNeighbor, "from main import x\n");
+			fs.writeFileSync(unrelated, "const unrelated = true;\n");
+			mocks.computeImpactCascade.mockReturnValue(
+				impact(primary, [noLspNeighbor, normalNeighbor]),
+			);
+			const touchFile = vi
+				.fn()
+				.mockResolvedValue({ diags: [lspError("normal error")] });
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(
+					new Map([
+						[
+							noLspNeighbor.split(path.sep).join("/"),
+							{ diags: [lspError("no-server error")], ts: Date.now() },
+						],
+						[
+							unrelated.split(path.sep).join("/"),
+							{ diags: [lspError("unrelated error")], ts: Date.now() },
+						],
+					]),
+				),
+				touchFile,
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			const result = await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			expect(touchFile).toHaveBeenCalledWith(
+				normalNeighbor,
+				expect.any(String),
+				expect.objectContaining({ source: "cascade" }),
+			);
+			const formatted = result?.result?.formatted ?? "";
+			expect(formatted).toContain("normal error");
+			expect(formatted).toContain("no-server error");
+			expect(formatted).not.toContain("unrelated error");
+			const neighborFiles = (result?.result?.neighbors ?? []).map(
+				(n) => n.filePath,
+			);
+			expect(neighborFiles).toContain(noLspNeighbor);
+			expect(neighborFiles).not.toContain(unrelated);
+
+			const neighborFallbackEntry = mocks.logCascade.mock.calls
+				.map(([entry]) => entry)
+				.find(
+					(entry) =>
+						entry.phase === "neighbor_fallback" &&
+						entry.neighborFile === noLspNeighbor,
+				);
+			expect(neighborFallbackEntry).toMatchObject({
+				fallbackUsed: false,
+				error: "no_lsp_server_configured",
+			});
 		} finally {
 			env.cleanup();
 		}
@@ -746,7 +885,10 @@ describe("computeCascadeForFile", () => {
 							new Map([
 								[
 									normalizeMapKey(neighbor),
-									{ diags: [lspError("late native TS7 error")], ts: Date.now() + 1 },
+									{
+										diags: [lspError("late native TS7 error")],
+										ts: Date.now() + 1,
+									},
 								],
 							]),
 						),
@@ -895,7 +1037,10 @@ describe("computeCascadeForFile", () => {
 			fs.writeFileSync(neighborCache, "export const cacheHit = 1;\n");
 			fs.writeFileSync(neighborClean, "from hub import Hub  # clean\n");
 			fs.writeFileSync(neighborCold, "from hub import Hub  # cold\n");
-			fs.writeFileSync(neighborDeferred, "import { cacheHit } from './cache_hit';\n");
+			fs.writeFileSync(
+				neighborDeferred,
+				"import { cacheHit } from './cache_hit';\n",
+			);
 
 			const touchFile = vi.fn().mockImplementation(async (p: string) => {
 				if (p === neighborCache) return { diags: [lspError("cache seed")] };
@@ -1088,17 +1233,24 @@ describe("computeCascadeForFile", () => {
 		// the shape of the measured logger.ts run (2046 ms reverse-deps refresh
 		// ahead of a 38-neighbour walk that then blew the cap). 1000 ms left is
 		// above the floor's 500 ms, so a shorter walk genuinely lands on time.
-		const clock = chargePrelude(4000, impact(fixture.primary, fixture.neighbors));
+		const clock = chargePrelude(
+			4000,
+			impact(fixture.primary, fixture.neighbors),
+		);
 		try {
 			const { computeCascadeForFile } = await import(
 				"../../clients/dispatch/integration.js"
 			);
-			await computeCascadeForFile(fixture.primary, env.tmpDir, {
+			const run = await computeCascadeForFile(fixture.primary, env.tmpDir, {
 				turnSeq: 1,
 				writeSeq: 1,
 			});
 
 			// 1000 ms left / 100 ms per neighbour = 10, not the flat 40.
+			expect(run.indeterminate).toMatchObject({
+				reason: "budget_truncated",
+				budget: { truncatedCount: 31 },
+			});
 			expect(fixture.touchFile).toHaveBeenCalledTimes(10);
 			expect(cascadeResultMetadata()).toMatchObject({
 				neighborBudget: 10,
@@ -1116,7 +1268,10 @@ describe("computeCascadeForFile", () => {
 	it("#1462: the transitive expansion is capped by the derived budget, not the flat one", async () => {
 		const env = setupTestEnvironment("cascade-budget-maxhits-");
 		const fixture = budgetFixture(env.tmpDir, 41);
-		const clock = chargePrelude(4000, impact(fixture.primary, fixture.neighbors));
+		const clock = chargePrelude(
+			4000,
+			impact(fixture.primary, fixture.neighbors),
+		);
 		try {
 			const { computeCascadeForFile } = await import(
 				"../../clients/dispatch/integration.js"
@@ -1149,7 +1304,10 @@ describe("computeCascadeForFile", () => {
 		// window any more, so narrowing would drop 35 neighbours PERMANENTLY and
 		// still miss — while #1443's carry-over delivers the whole set one turn
 		// late. Pre-#1462 behaviour is the correct behaviour here.
-		const clock = chargePrelude(19_000, impact(fixture.primary, fixture.neighbors));
+		const clock = chargePrelude(
+			19_000,
+			impact(fixture.primary, fixture.neighbors),
+		);
 		try {
 			const { computeCascadeForFile } = await import(
 				"../../clients/dispatch/integration.js"
@@ -1169,6 +1327,38 @@ describe("computeCascadeForFile", () => {
 			});
 		} finally {
 			clock.restore();
+			env.cleanup();
+		}
+	}, 30_000);
+
+	it("#1462: the active settle clock ignores the pre-turn gap", async () => {
+		const env = setupTestEnvironment("cascade-budget-pre-turn-gap-");
+		const fixture = budgetFixture(env.tmpDir, 41);
+		const base = 1_700_000_000_000;
+		let now = base;
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		mocks.computeImpactCascade.mockImplementation(() => {
+			now += 4000;
+			return impact(fixture.primary, fixture.neighbors);
+		});
+		try {
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			await computeCascadeForFile(fixture.primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+				turnEndCascadeSettleStart: () => base + 3000,
+			});
+
+			expect(fixture.touchFile).toHaveBeenCalledTimes(40);
+			expect(cascadeResultMetadata()).toMatchObject({
+				neighborBudget: 40,
+				budgetRemainingMs: 4000,
+				budgetZone: "fits",
+			});
+		} finally {
+			clock.mockRestore();
 			env.cleanup();
 		}
 	}, 30_000);
@@ -1552,7 +1742,9 @@ describe("computeCascadeForFile", () => {
 			const impactNeighbors = result?.result?.impact.neighborFiles ?? [];
 			expect(impactNeighbors).toContain(sourceNeighbor);
 			expect(impactNeighbors).not.toContain(testNeighbor);
-			expect(result?.result?.impact.directImporters).not.toContain(testNeighbor);
+			expect(result?.result?.impact.directImporters).not.toContain(
+				testNeighbor,
+			);
 		} finally {
 			env.cleanup();
 		}
@@ -1714,7 +1906,9 @@ describe("computeCascadeForFile", () => {
 			expect(fallbackFiles).not.toContain(
 				unignoredTest.split(path.sep).join("/"),
 			);
-			expect(fallbackFiles).not.toContain(ignoredTest.split(path.sep).join("/"));
+			expect(fallbackFiles).not.toContain(
+				ignoredTest.split(path.sep).join("/"),
+			);
 		} finally {
 			env.cleanup();
 		}
@@ -2686,7 +2880,10 @@ describe("computeCascadeForFile", () => {
 							[
 								neighbor.split(path.sep).join("/"),
 								withBinding(
-									{ diags: [lspError("unknown-bound error")], ts: Date.now() },
+									{
+										diags: [lspError("unknown-bound error")],
+										ts: Date.now(),
+									},
 									"unknown",
 								),
 							],
@@ -2871,7 +3068,10 @@ describe("computeCascadeForFile", () => {
 							[
 								rejectedNeighbor.split(path.sep).join("/"),
 								withBinding(
-									{ diags: [lspError("stale pre-fix error")], ts: Date.now() },
+									{
+										diags: [lspError("stale pre-fix error")],
+										ts: Date.now(),
+									},
 									false,
 								),
 							],
@@ -2929,7 +3129,10 @@ describe("computeCascadeForFile", () => {
 							[
 								neighbor.split(path.sep).join("/"),
 								withBinding(
-									{ diags: [lspError("unknown-bound stale error")], ts: Date.now() },
+									{
+										diags: [lspError("unknown-bound stale error")],
+										ts: Date.now(),
+									},
 									"unknown",
 								),
 							],
@@ -2947,9 +3150,9 @@ describe("computeCascadeForFile", () => {
 					writeSeq: 1,
 				});
 
-				expect(
-					result?.result?.neighbors[0]?.diagnostics[0]?.message,
-				).toBe("unknown-bound stale error");
+				expect(result?.result?.neighbors[0]?.diagnostics[0]?.message).toBe(
+					"unknown-bound stale error",
+				);
 			} finally {
 				env.cleanup();
 			}
@@ -2978,7 +3181,10 @@ describe("computeCascadeForFile", () => {
 							[
 								staleFile.split(path.sep).join("/"),
 								withBinding(
-									{ diags: [lspError("stale collateral error")], ts: Date.now() },
+									{
+										diags: [lspError("stale collateral error")],
+										ts: Date.now(),
+									},
 									false,
 								),
 							],
@@ -3013,9 +3219,7 @@ describe("computeCascadeForFile", () => {
 		});
 
 		it("characterization: appendFallbackNeighbors with unknown binding still displays the collateral entry exactly as before", async () => {
-			const env = setupTestEnvironment(
-				"cascade-1104-append-fallback-unknown-",
-			);
+			const env = setupTestEnvironment("cascade-1104-append-fallback-unknown-");
 			try {
 				const primary = path.join(env.tmpDir, "main.ts");
 				const noLspNeighbor = path.join(env.tmpDir, "neighbor.foo");
@@ -3032,7 +3236,10 @@ describe("computeCascadeForFile", () => {
 							[
 								fallbackFile.split(path.sep).join("/"),
 								withBinding(
-									{ diags: [lspError("unknown-bound fallback error")], ts: Date.now() },
+									{
+										diags: [lspError("unknown-bound fallback error")],
+										ts: Date.now(),
+									},
 									"unknown",
 								),
 							],
@@ -3076,7 +3283,10 @@ describe("computeCascadeForFile", () => {
 							[
 								staleFile.split(path.sep).join("/"),
 								withBinding(
-									{ diags: [lspError("withheld stale error")], ts: Date.now() },
+									{
+										diags: [lspError("withheld stale error")],
+										ts: Date.now(),
+									},
 									false,
 								),
 							],
