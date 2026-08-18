@@ -1,6 +1,7 @@
 import * as nodeCrypto from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
+import { noteAuthoritativeContentAttachment } from "./agent-nudge.js";
 import {
 	extractReadPathsFromCommand,
 	extractGrepSearchReadsFromOutput,
@@ -466,6 +467,11 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 							durationMs: 0,
 							metadata: { path: wp, bytes: blockBytes, decision: "aggregate-budget-degraded" },
 						});
+						// #1464: re-arm the nudge the inner per-file "attached"
+						// suppressed — this path's bytes are NOT in the result the
+						// caller sees, only the re-read warning below. Same
+						// last-row-wins ordering as the telemetry above.
+						noteAuthoritativeContentAttachment(path.resolve(wp), false);
 						syntheticWriteContent.push({
 							type: "text",
 							text: `⚠️ **File was modified by auto-format/fix. You MUST re-read ${wp} before making any further edits — the aggregate authoritative content for this command is too large to attach.**`,
@@ -1165,6 +1171,13 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			durationMs: 0,
 			metadata: { path: postMutation.filePath, bytes, decision: attachAuthoritativeContent ? "attached" : "size-capped" },
 		});
+		// #1464: the nudge suppresses exactly the paths this decision
+		// delivered. Same boolean the attachment below reads — the nudge layer
+		// never re-derives the cap or the budget for itself.
+		noteAuthoritativeContentAttachment(
+			postMutation.filePath,
+			attachAuthoritativeContent,
+		);
 	}
 	const returnedContent = attachAuthoritativeContent
 		? [
