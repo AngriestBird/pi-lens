@@ -33,13 +33,19 @@
  *    enumerate the built-ins only; pi-lens's `tool_call`/`tool_result` paths
  *    also key off `lsp_navigation` and pi-lens's own registered tools, which no
  *    host discriminator names.
- * 4. **Narrowing to the host union would LOSE fields pi-lens reads.** The host
+ * 4. **The host union is narrower than the events pi-lens handles.** The host
  *    `ToolResultEvent` declares `toolCallId`/`input`/`content`/`isError`/
  *    `details`/`usage`; pi-lens's local `ToolResultEvent`
- *    (`clients/runtime-tool-result.ts`) additionally carries
- *    `id`/`callId`/`requestId`/`provider`/`model`/`sessionId`/`session`, which
- *    the telemetry-identity path reads. A guard that narrowed to
- *    `EditToolResultEvent` would drop them.
+ *    (`clients/runtime-tool-result.ts`) declares the subset it reads. It used
+ *    to additionally carry `id`/`callId`/`requestId`/`provider`/`model`/
+ *    `sessionId`/`session` "for the telemetry-identity path" — #1655 item 2
+ *    deleted all seven, because pi's `afterToolCall` builds the event with
+ *    exactly `type`/`toolName`/`toolCallId`/`input`/`content`/`details`/
+ *    `isError`/`usage` (`dist/core/agent-session.js:243-256`, source
+ *    `src/core/agent-session.ts:502-516`), so the branch reading them was dead
+ *    code. The standing reason not to narrow is point 3: pi-lens also
+ *    synthesizes its OWN `tool_result` payloads (bash-derived writes,
+ *    partial-apply) that no host discriminator would admit.
  *
  * What IS consolidated is the part that costs nothing: the host's `details`
  * SHAPES are type-only exports, so `EditToolDetails` & co. are imported as

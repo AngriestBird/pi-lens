@@ -1034,3 +1034,33 @@ export class RuntimeCoordinator {
 		this._lspReadWarmState.delete(path.resolve(filePath));
 	}
 }
+
+/**
+ * Read the live model identity off a pi extension context (#1655 item 2).
+ *
+ * `ExtensionContext.model` is `AgentSession.model`, projected through a lazy
+ * getter guarded by `assertActive()`
+ * (`@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:488-491`;
+ * `dist/core/agent-session.js:580-582`). The value is a `Model` with `id` and
+ * `provider` (`@earendil-works/pi-ai/dist/types.d.ts:661-667`), or `undefined`
+ * when no model is selected.
+ *
+ * Because the getter is lazy and guarded, reading it on a REPLACED runner
+ * throws. Telemetry identity is advisory; a stale ctx must degrade to "no
+ * identity", never take down the event handler that happened to carry it.
+ */
+export function readHostModelIdentity(ctx: unknown): {
+	model?: string;
+	provider?: string;
+} {
+	try {
+		const model = (ctx as { model?: { id?: unknown; provider?: unknown } } | null)
+			?.model;
+		return {
+			model: typeof model?.id === "string" ? model.id : undefined,
+			provider: typeof model?.provider === "string" ? model.provider : undefined,
+		};
+	} catch {
+		return {};
+	}
+}

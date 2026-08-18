@@ -2,6 +2,7 @@ import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import { loadBootstrapClients } from "./bootstrap.js";
 import type { CacheManager } from "./cache-manager.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import { detectFileKind } from "./file-kinds.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
 import {
@@ -24,7 +25,11 @@ import {
 	findUniqueMatchLineRange,
 } from "./oldtext-autopatch.js";
 import { applyPartiallyApplicableEdits } from "./partial-edit-apply.js";
-import { isExternalOrVendorFile } from "./path-utils.js";
+import {
+	type HostPathVariantResolution,
+	isExternalOrVendorFile,
+	resolveHostPathVariants,
+} from "./path-utils.js";
 import {
 	EXPANSION_BUDGET_MS,
 	EXPANSION_LIMIT_LINES,
@@ -91,14 +96,33 @@ function getToolCallRawFilePath(
 	return undefined;
 }
 
+/**
+ * Resolve a tool_call's raw path to the file pi will actually touch.
+ *
+ * The `cwd` basis is the host `ctx.cwd`, which for the pinned host IS the same
+ * value the tools were constructed with — `AgentSession` passes its one `_cwd`
+ * to both `createAllToolDefinitions`
+ * (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:2026`, source
+ * `src/core/tools/index.ts:99-124`) and the `ExtensionRunner` behind `ctx.cwd`
+ * (`dist/core/agent-session.js:2037`; `runner.js:154`, `:476-479`). Neither is
+ * reassigned after construction, so there is no drift TODAY (#1655 item 4).
+ * `tests/clients/pi-host-contract.test.ts` pins that, because the day a host
+ * lets one move independently, every path here silently retargets.
+ *
+ * The returned path runs through pi's own unicode/spacing fallback ladder
+ * (#1655 item 5) so pi-lens keys its read guard and LSP touch off the file pi
+ * read, not off a naive `path.resolve` pi itself would have discarded.
+ */
 function resolveToolCallFilePath(
 	rawFilePath: string | undefined,
 	cwd: string | undefined,
 	projectRoot: string,
-): string | undefined {
+): HostPathVariantResolution | undefined {
 	if (!rawFilePath) return undefined;
-	if (path.isAbsolute(rawFilePath)) return rawFilePath;
-	return path.resolve(cwd ?? projectRoot, rawFilePath);
+	const naive = path.isAbsolute(rawFilePath)
+		? rawFilePath
+		: path.resolve(cwd ?? projectRoot, rawFilePath);
+	return resolveHostPathVariants(naive);
 }
 
 type ReadToolInput = {
@@ -268,7 +292,63 @@ interface ToolCallDeps {
 
 export type ToolCallResult = { block: true; reason?: string } | void;
 
+/**
+ * Total guard around the `tool_call` handler body (#1655 item 1).
+ *
+ * `tool_call` is the ONE pi emit path with no per-handler `try`/`catch`. Every
+ * sibling wraps each handler and routes a throw to `emitError`
+ * (`emitToolResult` at
+ * `@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:658-648`,
+ * source `src/core/extensions/runner.ts:877-930`; the generic `emit` at
+ * source `runner.ts:801-832`). `emitToolCall`
+ * (`dist/core/extensions/runner.js:701-717`, source `runner.ts:932-953`) calls
+ * `await handler(event, ctx)` bare, and its caller
+ * `AgentSession._installAgentToolHooks`'s `beforeToolCall`
+ * (`dist/core/agent-session.js:229-241`, source `agent-session.ts:~228-242`)
+ * rethrows: `throw new Error("Extension failed, blocking execution: ...")`.
+ *
+ * So an unguarded throw anywhere in pi-lens's `tool_call` handler does not
+ * degrade pi-lens — it BLOCKS the user's tool call outright. Advisory
+ * instrumentation must never be able to do that. Every failure degrades to
+ * "pi-lens did nothing for this call" (`undefined`, which pi reads as
+ * "no extension opinion") and lands one ledger entry per tool name.
+ *
+ * Returning `undefined` on a throw is deliberate: a partially-executed handler
+ * cannot have earned a `{ block: true }` verdict, and inventing one would turn
+ * a pi-lens bug into a refused user tool call — the exact outcome this guard
+ * exists to prevent.
+ */
 export async function handleToolCall(
+	deps: ToolCallDeps,
+): Promise<ToolCallResult> {
+	try {
+		return await handleToolCallInner(deps);
+	} catch (error) {
+		const toolName =
+			(deps.event as { toolName?: string } | undefined)?.toolName ?? "unknown";
+		const reason = error instanceof Error ? error.message : String(error);
+		// Once per tool name per session: a wedged handler fires on every call of
+		// that tool, and the ledger is a health surface, not a log.
+		recordDegradationOnce({
+			kind: "tool-call-handler-throw",
+			subject: toolName,
+			reason,
+		});
+		try {
+			deps.dbg?.(
+				`tool_call handler threw for ${toolName} (degraded, not blocking): ${reason}`,
+			);
+			if (error instanceof Error && error.stack) {
+				deps.dbg?.(`tool_call handler stack: ${error.stack}`);
+			}
+		} catch {
+			// A broken `dbg` must not resurrect the throw this guard just absorbed.
+		}
+		return undefined;
+	}
+}
+
+async function handleToolCallInner(
 	deps: ToolCallDeps,
 ): Promise<ToolCallResult> {
 	const {
@@ -294,12 +374,30 @@ export async function handleToolCall(
 	const editInputForTelemetry = (event as { input?: unknown }).input as
 		| { edits?: unknown[] }
 		| undefined;
+	// #1655 item 3: SNAPSHOT the requested batch width here, at handler entry.
+	// `input` is a live, mutable, extension-ordered object — pi types it
+	// `Record<string, unknown>` and hands the SAME reference to every handler in
+	// turn (`@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:701-716`
+	// passes `event` unchanged through the loop; source
+	// `src/core/extensions/types.ts:914-919`), and pi-lens itself rewrites it in
+	// place further down (indent correction, hashline resolution, range
+	// relocation). `requestedEditIndexes` was already a snapshot; the totals
+	// below used to RE-READ `editInputForTelemetry.edits.length` from the live
+	// object hundreds of lines and several `await`s later, so a batch that
+	// changed width in between produced an internally inconsistent summary —
+	// indexes from the call-time array, totals from the mutated one.
 	const requestedEditIndexes =
 		toolName === "write"
 			? [0]
 			: Array.isArray(editInputForTelemetry?.edits)
 				? boundedIndexesForCount(editInputForTelemetry.edits.length)
 				: [0];
+	const requestedEditTotal =
+		toolName === "write"
+			? 1
+			: Array.isArray(editInputForTelemetry?.edits)
+				? editInputForTelemetry.edits.length
+				: 1;
 	const logBlockedEditSummary = (source: string): void =>
 		logToolReadGuardEvent({
 				event: "edit_batch_summary",
@@ -309,22 +407,12 @@ export async function handleToolCall(
 					source,
 					editBatchSummary: createReadGuardEditBatchSummary({
 						requestedIndexes: requestedEditIndexes,
-						requestedTotal:
-							toolName === "write"
-								? 1
-								: Array.isArray(editInputForTelemetry?.edits)
-									? editInputForTelemetry.edits.length
-									: 1,
+						requestedTotal: requestedEditTotal,
 						rejectedReasons: requestedEditIndexes.map((index) => ({
 							index,
 							code: "preflight_blocked" as const,
 						})),
-						rejectedTotal:
-							toolName === "write"
-								? 1
-								: Array.isArray(editInputForTelemetry?.edits)
-									? editInputForTelemetry.edits.length
-									: 1,
+						rejectedTotal: requestedEditTotal,
 						terminalStatus: "blocked",
 					}),
 				},
@@ -348,11 +436,17 @@ export async function handleToolCall(
 	}
 
 	const rawFilePath = getToolCallRawFilePath(toolName, event);
-	filePath = resolveToolCallFilePath(
+	const pathResolution = resolveToolCallFilePath(
 		rawFilePath,
 		ctx.cwd,
 		runtime.projectRoot,
 	);
+	filePath = pathResolution?.path;
+	if (pathResolution?.variant) {
+		dbg(
+			`tool_call: path resolved via host ${pathResolution.variant} variant → ${filePath}`,
+		);
+	}
 
 	if (!getFlag("no-lsp")) {
 		try {
@@ -370,7 +464,27 @@ export async function handleToolCall(
 	dbg(
 		`tool_call fired for: ${filePath} (exists: ${nodeFs.existsSync(filePath)})`,
 	);
-	if (!nodeFs.existsSync(filePath)) return;
+	if (!nodeFs.existsSync(filePath)) {
+		// #1655 item 5: this early return used to be the whole story — pi-lens
+		// did nothing, said nothing, and the file pi went on to read stayed
+		// invisible to the read guard, the LSP warm, and the dispatch. The
+		// variant ladder above now finds the macOS-shaped cases; when it probed
+		// variants and STILL found nothing, say so rather than returning an
+		// indistinguishable silence (defect shape 10). `write` is exempt: it
+		// legitimately targets a file that does not exist yet.
+		if (
+			toolName !== "write" &&
+			pathResolution?.unresolved &&
+			pathResolution.triedVariants.length > 0
+		) {
+			recordDegradationOnce({
+				kind: "path-variant-unresolved",
+				subject: filePath,
+				reason: `${toolName}: no file at the resolved path, and none of pi's variants matched (tried ${pathResolution.triedVariants.join(", ")})`,
+			});
+		}
+		return;
+	}
 	if (isPathIgnoredByProject(filePath, runtime.projectRoot, false)) {
 		dbg(`tool_call: skipping gitignored file ${filePath}`);
 		return;
@@ -953,10 +1067,14 @@ export async function handleToolCall(
 										readGuardCorrelationId,
 									},
 										content: [],
-										provider: (event as { provider?: string }).provider,
-										model: (event as { model?: string }).model,
-										sessionId: (event as { sessionId?: string }).sessionId,
-										session: (event as { session?: { id?: string } }).session,
+										// #1655 item 2: `provider`/`model`/`sessionId`/`session`
+										// used to be forwarded here from the tool_call event.
+										// pi builds a `tool_call` with exactly
+										// `type`/`toolName`/`toolCallId`/`input`
+										// (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:230-234`,
+										// source `src/core/agent-session.ts:~228-236`), so all
+										// four were always `undefined` and the tool_result
+										// branch they fed was unreachable.
 									},
 									getFlag: (name: string) => getFlag(name),
 									dbg,

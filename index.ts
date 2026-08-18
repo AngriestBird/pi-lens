@@ -127,7 +127,10 @@ import {
 	consumeTestFindings,
 	consumeTurnEndFindings,
 } from "./clients/runtime-context.js";
-import { RuntimeCoordinator } from "./clients/runtime-coordinator.js";
+import {
+	readHostModelIdentity,
+	RuntimeCoordinator,
+} from "./clients/runtime-coordinator.js";
 import { handleSessionStart } from "./clients/runtime-session.js";
 import { handleToolCall } from "./clients/runtime-tool-call.js";
 import {
@@ -462,19 +465,34 @@ async function ensureLSPConfigInitialized(cwd: string): Promise<void> {
 	}
 }
 
-function updateRuntimeIdentityFromEvent(event: unknown): void {
-	const raw = event as {
-		provider?: string;
-		model?: string;
-		sessionId?: string;
-		session?: { id?: string };
-		id?: string;
-	};
-	runtime.setTelemetryIdentity({
-		provider: raw.provider,
-		model: raw.model,
-		sessionId: raw.sessionId ?? raw.session?.id ?? raw.id,
-	});
+/**
+ * Adopt this activation's telemetry identity from the host CONTEXT (#1655
+ * item 2).
+ *
+ * This used to read `provider`/`model`/`sessionId`/`session.id`/`id` off the
+ * EVENT. pi sets none of them on either event that called it: `session_start`
+ * is `{ type, reason }`
+ * (`@earendil-works/pi-coding-agent/dist/core/agent-session.js:152`,
+ * `:2072`), and `tool_result` is exactly
+ * `type`/`toolName`/`toolCallId`/`input`/`content`/`details`/`isError`/`usage`
+ * (`dist/core/agent-session.js:243-256`, source
+ * `src/core/agent-session.ts:502-516`). So every call passed all-undefined,
+ * `setTelemetryIdentity` ignored it, and `runtime.telemetryModel` stayed
+ * `"unknown"` for the whole session against a real host.
+ *
+ * The ctx DOES carry the model. `ExtensionContext.model` is the live `Model`
+ * (`dist/core/extensions/runner.js:488-491` → `AgentSession.model`, `:580-582`)
+ * with `id` and `provider` (`@earendil-works/pi-ai/dist/types.d.ts:661-667`).
+ *
+ * SESSION ID IS DELIBERATELY NOT SET HERE. `runtime.setSessionLifecycle`
+ * already pins it from `ctx.sessionManager.getSessionId()` inside
+ * `session_start`, behind the #473 concurrent-secondary guard. Adopting it
+ * again from a `tool_result` ctx would let a concurrent in-process secondary
+ * session overwrite the parent's identity on every tool result — the exact
+ * clobber that guard exists to prevent.
+ */
+function updateRuntimeIdentityFromCtx(ctx: unknown): void {
+	runtime.setTelemetryIdentity(readHostModelIdentity(ctx));
 }
 
 function normalizeCommandArgs(args: unknown): string[] {
@@ -1655,7 +1673,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 			// replacement BEFORE touching any process-shared singleton. A
 			// concurrent secondary must not run handleSessionStart (which resets
 			// the shared LSP fleet + runtime generation out from under the still
-			// -live parent) or updateRuntimeIdentityFromEvent (which would
+			// -live parent) or updateRuntimeIdentityFromCtx (which would
 			// overwrite the parent's telemetry identity).
 			const sessionStartDecision = decideSessionStart(ctx, stableSessionId);
 			if (!sessionStartDecision.runFullSessionStart) {
@@ -1812,7 +1830,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 				.catch((err) => {
 					dbg(`session_start: cross-process nudge read failed: ${err}`);
 				});
-			updateRuntimeIdentityFromEvent(event);
+			updateRuntimeIdentityFromCtx(ctx);
 			try {
 				await ensureLSPConfigInitialized(ctx.cwd ?? process.cwd());
 			} catch (cfgErr) {
@@ -2022,7 +2040,7 @@ function activateExtension(hostPi: ExtensionAPI) {
 	(pi as any).on("tool_result", async (event: any, ctx: any) => {
 		rememberOwnEventCtx(ctx);
 		if (!lensEnabled) return;
-		updateRuntimeIdentityFromEvent(event);
+		updateRuntimeIdentityFromCtx(ctx);
 		// Publish this turn's abort signal so the dispatch's linter/type-check
 		// child processes are killed if the agent is interrupted (#197 ctx.signal).
 		setAmbientAbortSignal(ctx?.signal);

@@ -503,3 +503,98 @@ export function direntsHaveMarkerGlobMatch(
 			nameMatchesMarkerGlob(entry.name, pattern),
 	);
 }
+
+/**
+ * Narrow no-break space, U+202F. macOS writes it before AM/PM in screenshot
+ * file names; users type an ordinary space.
+ */
+const NARROW_NO_BREAK_SPACE = "\u202F";
+/** Right single quotation mark, U+2019. macOS writes it; users type U+0027. */
+const RIGHT_SINGLE_QUOTE = "\u2019";
+
+export interface HostPathVariantResolution {
+	/** The path to use: the first variant that exists, else the naive resolve. */
+	path: string;
+	/** Set when a VARIANT matched — `path` differs from the naive resolve. */
+	variant?: "narrow-nbsp" | "nfd" | "curly-quote" | "nfd-curly-quote";
+	/**
+	 * The naive resolve did not exist and no variant did either. Distinct from
+	 * "the naive resolve existed": callers that expect the file to be there use
+	 * this to record a `path-variant-unresolved` degradation instead of
+	 * returning silently (defect shape 10 — an empty result must say WHY).
+	 */
+	unresolved: boolean;
+	/** Variant labels actually probed. Empty when the naive resolve existed. */
+	triedVariants: string[];
+}
+
+/**
+ * Mirror pi's read-path fallback ladder (#1655 item 5).
+ *
+ * pi does NOT open `resolve(cwd, input.path)`. `resolveReadPath`
+ * (`@earendil-works/pi-coding-agent/dist/core/tools/path-utils.js:45-70`,
+ * source `src/core/tools/path-utils.ts:52-83`) resolves, and when that path
+ * does not exist it silently retries four unicode/spacing variants in this
+ * exact order:
+ *
+ *   1. narrow no-break space before `AM.`/`PM.` (`tryMacOSScreenshotPath`)
+ *   2. NFD normalization (`tryNFDVariant`) — macOS stores names decomposed
+ *   3. U+0027 → U+2019 (`tryCurlyQuoteVariant`)
+ *   4. NFD + curly quote combined
+ *
+ * Each candidate is used only when it DIFFERS from the resolved path and the
+ * file exists; otherwise pi falls back to the resolved path. So the file pi
+ * actually read can differ from what a naive `path.resolve` produces, and
+ * pi-lens keyed its read guard, LSP touch, and dispatch off the naive form —
+ * silently doing nothing for exactly those files.
+ *
+ * Order matters: it is pi's, so pi-lens picks the same file pi did when more
+ * than one variant happens to exist.
+ *
+ * @param resolvedPath an already-resolved absolute path (the naive form)
+ * @param fileExists injectable existence probe; defaults to `existsSync`
+ */
+export function resolveHostPathVariants(
+	resolvedPath: string,
+	fileExists: (candidate: string) => boolean = existsSync,
+): HostPathVariantResolution {
+	if (fileExists(resolvedPath)) {
+		return { path: resolvedPath, unresolved: false, triedVariants: [] };
+	}
+
+	const nfd = resolvedPath.normalize("NFD");
+	const candidates: Array<{
+		variant: NonNullable<HostPathVariantResolution["variant"]>;
+		candidate: string;
+	}> = [
+		{
+			variant: "narrow-nbsp",
+			candidate: resolvedPath.replace(
+				/ (AM|PM)\./gi,
+				`${NARROW_NO_BREAK_SPACE}$1.`,
+			),
+		},
+		{ variant: "nfd", candidate: nfd },
+		{
+			variant: "curly-quote",
+			candidate: resolvedPath.replaceAll("'", RIGHT_SINGLE_QUOTE),
+		},
+		{
+			variant: "nfd-curly-quote",
+			candidate: nfd.replaceAll("'", RIGHT_SINGLE_QUOTE),
+		},
+	];
+
+	const triedVariants: string[] = [];
+	for (const { variant, candidate } of candidates) {
+		// pi skips a candidate identical to the resolved path, so pi-lens does
+		// too — otherwise a no-op "variant" would be reported as a match.
+		if (candidate === resolvedPath) continue;
+		triedVariants.push(variant);
+		if (fileExists(candidate)) {
+			return { path: candidate, variant, unresolved: false, triedVariants };
+		}
+	}
+
+	return { path: resolvedPath, unresolved: true, triedVariants };
+}
