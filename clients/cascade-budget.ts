@@ -131,10 +131,13 @@ export interface CascadeBudgetDecision {
 	/**
 	 * How long the delivery pipeline keeps a slow run alive before it needs a
 	 * later turn_end: the turn_end settle plus the `agent_settled` quiet-window
-	 * drain. RECORDED, not a divisor — it is why `past-rescue` keeps the full
-	 * budget rather than narrowing, and it puts the second window on the record
+	 * drain. RECORDED, not a divisor — it puts the second window on the record
 	 * so a reader of `cascade_result` sees the whole deadline stack instead of
-	 * just the 5000 ms one.
+	 * just the 5000 ms one. It does NOT feed any zone: kill the quiet window and
+	 * every budget this function returns is unchanged. What lets `past-rescue`
+	 * keep the full budget is `beginTurn` never clearing `_pendingCascadeRuns`
+	 * (`runtime-coordinator.ts`), which retains a slow compute until it resolves
+	 * however long that takes; the drain only gets it there sooner.
 	 *
 	 * Counts the drain only when it will actually run: `PI_LENS_QUIET_WINDOW=0`
 	 * disables the scheduler while `quietWindowWaitMs()` keeps returning its
