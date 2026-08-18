@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { incrementDegradationCount } from "../../degradation-ledger.js";
 import { safeSpawnAsync, type SpawnResult } from "../../safe-spawn.js";
 import type {
 	Diagnostic,
@@ -77,6 +78,22 @@ const psAnalyzerLatchByCmd = new Map<
 	string,
 	ReturnType<typeof createAvailabilityLatch>
 >();
+/**
+ * Whether `-File` actually executes, keyed by interpreter (#1540).
+ *
+ * Neither probe above asks `-File` a question -- both use `-Command`, which
+ * PowerShell's execution policy does not gate. Under `Restricted`/`AllSigned`
+ * that lets both probes report "available" while the real analysis spawn
+ * (which DOES go through `-File`) gets a policy `SecurityError` on stderr and
+ * exits nonzero with empty stdout. This latch is deliberately populated by
+ * the real analysis run rather than a third `-Command`-shaped probe, so the
+ * verdict it records is direct evidence about `-File`, not an inference from
+ * a proxy that has already been shown to disagree with it.
+ */
+const psExecLatchByCmd = new Map<
+	string,
+	ReturnType<typeof createAvailabilityLatch>
+>();
 let psCmd: string | null = null;
 
 /** Record one decision, and report whether the caller may retry later. */
@@ -126,6 +143,7 @@ function notePsDecision(
 export function resetPsScriptAnalyzerAvailability(): void {
 	psCmdLatch.reset();
 	psAnalyzerLatchByCmd.clear();
+	psExecLatchByCmd.clear();
 	psCmd = null;
 }
 
@@ -299,6 +317,18 @@ const psScriptAnalyzerRunner: RunnerDefinition = {
 			return { status: "skipped", diagnostics: [], semantic: "none" };
 		}
 
+		let execLatch = psExecLatchByCmd.get(cmd);
+		if (!execLatch) {
+			execLatch = createAvailabilityLatch();
+			psExecLatchByCmd.set(cmd, execLatch);
+		}
+		// A durably blocked `-File` execution (an execution policy, typically) is
+		// a fact about the interpreter, not about any one file -- re-spawning on
+		// every save would just re-confirm the same policy every time (#1540).
+		if (execLatch.read() === false) {
+			return { status: "skipped", diagnostics: [], semantic: "none" };
+		}
+
 		const cwd = ctx.cwd || process.cwd();
 		const absPath = path.resolve(cwd, ctx.filePath);
 
@@ -307,15 +337,105 @@ const psScriptAnalyzerRunner: RunnerDefinition = {
 		await fs.writeFile(tmpScript, PS_SCRIPT, "utf-8");
 
 		try {
+			const sampler = startHostStallSampler();
+			const startedAt = Date.now();
 			const result = await spawnPs(cmd, [
 				"-NoProfile",
 				"-NonInteractive",
 				"-File", tmpScript,
 				"-FilePath", absPath,
 			]);
+			const hostStallMs = sampler.stop();
+			const elapsedMs = Date.now() - startedAt;
 
+			// The two probes above use `-Command`, which PowerShell's execution
+			// policy does not gate; this run uses `-File`, which it does. A
+			// crashed/signal-killed process (#1540 second gap) or a blocked/
+			// erroring run (#1540 primary gap) must both produce a recorded,
+			// legible availability_decision -- never a silent "clean" read of
+			// empty stdout, and never a silent skip.
 			if (result.status === null) {
+				const classified = classifyProbeFailure(result, { hostStallMs });
+				let { outcome, cause } = classified;
+				// A `spawn UNKNOWN`/EMFILE/crash never ran the script, so it is not
+				// evidence that `-File` is broken (mirrors the nonzero-exit guard
+				// below, and checkModuleAvailable's own guard against over-latching
+				// an unclassified failure). Latching an unspawnable prober's
+				// verdict would durably disable analysis for the whole session on
+				// a host where `-File` works fine.
+				if (outcome !== "transient") {
+					outcome = "transient";
+					cause = "probe-rejected";
+				}
+				notePsDecision(execLatch, "psscriptanalyzer-exec", {
+					available: false,
+					outcome,
+					cause,
+					elapsedMs,
+					hostStallMs,
+				});
+				incrementDegradationCount({
+					kind: "grammar-blocked",
+					subject: "psscriptanalyzer",
+					reason: `PowerShell (${cmd}) -File analysis exited with no status -- crash or signal-killed process`,
+				});
 				return { status: "skipped", diagnostics: [], semantic: "none" };
+			}
+
+			if (result.status !== 0) {
+				const stderrText = result.stderr ?? "";
+				// Require the SecurityError/UnauthorizedAccess pairing that a real
+				// script-load block produces, not a bare "unauthorizedaccess"
+				// match (#1556 review F4) -- that word alone also appears in
+				// unrelated file-permission and access-denied stderr that has
+				// nothing to do with the execution policy, and misclassifying it
+				// as `policy-denied` would latch analysis off durably for a
+				// transient, per-file permission error.
+				const policyDenied =
+					/securityerror/i.test(stderrText) &&
+					(/execution polic(y|ies)/i.test(stderrText) ||
+						/running scripts is disabled/i.test(stderrText) ||
+						/unauthorizedaccess/i.test(stderrText));
+				const classified = classifyProbeFailure(result, { hostStallMs });
+				let { outcome, cause } = classified;
+				if (policyDenied) {
+					// Direct, unambiguous evidence: PowerShell's own execution
+					// policy refused to load the script. Durable until the policy
+					// changes, so this is the one case allowed to latch.
+					outcome = "non-installable";
+					cause = "policy-denied";
+				} else if (outcome !== "transient") {
+					// A single nonzero exit is not durable evidence that `-File`
+					// is broken for every file (mirrors checkModuleAvailable's own
+					// guard against over-latching an unclassified failure).
+					outcome = "transient";
+					cause = "probe-rejected";
+				}
+				notePsDecision(execLatch, "psscriptanalyzer-exec", {
+					available: false,
+					outcome,
+					cause,
+					elapsedMs,
+					hostStallMs,
+				});
+				incrementDegradationCount({
+					kind: "grammar-blocked",
+					subject: "psscriptanalyzer",
+					reason: policyDenied
+						? `PowerShell execution policy blocked -File analysis for ${cmd}: ${stderrText.trim().split("\n")[0] || "SecurityError"}`
+						: `PowerShell -File analysis for ${cmd} exited ${result.status}: ${stderrText.trim().slice(0, 200) || "no stderr"}`,
+				});
+				return { status: "skipped", diagnostics: [], semantic: "none" };
+			}
+
+			// `-File` ran and exited 0: direct proof it works. Log the decision
+			// once (memoized by the latch) rather than on every save.
+			if (execLatch.read() === null) {
+				notePsDecision(execLatch, "psscriptanalyzer-exec", {
+					available: true,
+					elapsedMs,
+					hostStallMs,
+				});
 			}
 
 			const diagnostics = parsePSAnalyzerOutput(result.stdout, ctx.filePath);
