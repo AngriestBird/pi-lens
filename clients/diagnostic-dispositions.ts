@@ -559,3 +559,56 @@ export function applyWeakDispositions<T extends DispositionCandidate>(
 		return true;
 	});
 }
+
+/**
+ * Multi-file variant of {@link applyDispositions} for lanes whose findings
+ * span many files in ONE report — gitleaks/trivy/govulncheck/opengrep
+ * project-wide scans (#1617), unlike the dispatch path's one-`ctx.filePath`-
+ * at-a-time shape. Groups by `filePathOf(diagnostic)`, reads each file's
+ * CURRENT content once, then delegates to `applyDispositions` per group —
+ * same anchor derivation, same strict/weak split, no cloned logic (#1617's
+ * single-source-of-truth requirement).
+ *
+ * Content read is best-effort: a file that no longer exists, or that this
+ * process can't read, degrades to `content: ""` for that group rather than
+ * dropping its diagnostics outright. `applyDispositions` already treats a
+ * missing/empty content argument safely — the STRICT (false-positive) anchor
+ * hashes the diagnostic's own line, so an empty content can't collide with a
+ * mark made against the file's real content and the finding simply isn't
+ * matched (fails OPEN — still reported); the WEAK anchor (suppress/defer)
+ * never looks at content at all, so those marks keep applying regardless.
+ * This is a deliberate choice, not an oversight: a security finding must
+ * never silently vanish just because its file went unreadable at filter
+ * time (a security finding staying VISIBLE on a read failure is the safe
+ * default; a stale mark quietly reappearing is recoverable, a leaked secret
+ * quietly disappearing is not).
+ */
+export function applyDispositionsMultiFile<T extends DispositionCandidate>(
+	diagnostics: T[],
+	cwd: string,
+	filePathOf: (diagnostic: T) => string,
+): T[] {
+	if (!diagnostics.length) return diagnostics;
+	const groups = new Map<string, T[]>();
+	for (const d of diagnostics) {
+		const filePath = filePathOf(d);
+		const group = groups.get(filePath);
+		if (group) group.push(d);
+		else groups.set(filePath, [d]);
+	}
+	const kept = new Set<T>();
+	for (const [filePath, group] of groups) {
+		let content = "";
+		try {
+			content = fs.readFileSync(filePath, "utf-8");
+		} catch {
+			// Unreadable/missing — fail open, see doc above.
+		}
+		for (const d of applyDispositions(group, cwd, filePath, content)) {
+			kept.add(d);
+		}
+	}
+	// Preserve the caller's original order/dedup by reference rather than the
+	// per-group insertion order above.
+	return diagnostics.filter((d) => kept.has(d));
+}

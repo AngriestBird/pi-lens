@@ -7,6 +7,10 @@ import { snapshotAdvisoryProvenance } from "../../../clients/advisory-provenance
 import { fetchFreshProjectDiagnostics } from "../../../clients/project-diagnostics/fresh-fetch.js";
 import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
 import { removeTempDirSync } from "../test-utils.js";
+import {
+	_resetStateCacheForTests,
+	markDisposition,
+} from "../../../clients/diagnostic-dispositions.js";
 
 // fetchFreshProjectDiagnostics calls each client through the plain
 // `BootstrapClients` interface, so a hand-rolled stub (not a real client
@@ -16,12 +20,19 @@ import { removeTempDirSync } from "../test-utils.js";
 // a real tmp-dir fixture.
 
 let tmp: string;
+let previousDataDir: string | undefined;
 
 beforeEach(() => {
 	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-fresh-fetch-"));
+	previousDataDir = process.env.PILENS_DATA_DIR;
+	process.env.PILENS_DATA_DIR = path.join(tmp, "pi-lens-data");
+	_resetStateCacheForTests();
 });
 
 afterEach(() => {
+	if (previousDataDir === undefined) delete process.env.PILENS_DATA_DIR;
+	else process.env.PILENS_DATA_DIR = previousDataDir;
+	_resetStateCacheForTests();
 	removeTempDirSync(tmp);
 });
 
@@ -395,6 +406,139 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		// A clean scan (no findings) doesn't land in `runners` by design (that
 		// list means "contributed a finding"), but `timings` proves it ran.
 		expect(result.timings.gitleaks).toBeDefined();
+	});
+
+	// #1617: gitleaks (and every other SecurityScanClient-family analyzer —
+	// trivy, govulncheck, opengrep — surfaced here too) had ZERO disposition
+	// wiring — a mark never suppressed a mode=full finding, only a dispatch
+	// (per-edit) one. These prove the fix actually reaches this lane, using
+	// the SAME `gitleaksFindingToProjectDiagnostic` identity mode=full already
+	// surfaces (so a real agent mark, made against exactly this tool/rule/
+	// message/line, is what's being tested here — not a hand-picked shortcut).
+	describe("agent/user dispositions filter mode=full findings (#1617)", () => {
+		function seedGitRepoWithFinding(): { file: string; content: string } {
+			fs.mkdirSync(path.join(tmp, ".git"));
+			const content = "const clientId = 'not-a-real-secret';\n";
+			fs.writeFileSync(path.join(tmp, "a.ts"), content);
+			return { file: path.resolve(tmp, "a.ts"), content };
+		}
+
+		it("drops a gitleaks finding the agent marked false-positive", async () => {
+			const { file, content } = seedGitRepoWithFinding();
+			const cacheManager = makeCacheManager();
+			const clients = makeClients();
+			(clients.gitleaksClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue({
+				success: true,
+				findings: [{ ruleId: "generic-api-key", file: "a.ts", startLine: 1 }],
+				scannedAt: "now",
+			});
+
+			// Pre-fix baseline: unmarked finding is reported.
+			const before = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			expect(before.diagnostics).toHaveLength(1);
+			expect(before.dispositionSuppressed ?? 0).toBe(0);
+
+			markDisposition(
+				path.resolve(tmp),
+				{
+					cwd: path.resolve(tmp),
+					filePath: file,
+					tool: "gitleaks",
+					rule: "gitleaks:generic-api-key",
+					message: "Potential secret: generic-api-key",
+					line: 1,
+					content,
+				},
+				"false-positive",
+			);
+
+			const after = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			expect(after.diagnostics).toHaveLength(0);
+			expect(after.dispositionSuppressed).toBe(1);
+		});
+
+		it("re-reports once the marked line's content changes (the disposition layer's own 'unmark' — no delete API exists anywhere in this store)", async () => {
+			// #690's false-positive is STRICT-anchored BY DESIGN (see
+			// diagnostic-dispositions.ts's module doc): "if the line is
+			// rewritten, the rule earned a fresh chance to fire on the new
+			// content, so the mark should NOT follow it." There is no
+			// unmark/delete API anywhere on this store (grepped the whole repo
+			// before writing this test) — a rewritten line IS how a
+			// false-positive mark is undone today. This proves that contract
+			// holds through the new mode=full wiring, not just dispatch.
+			const { file } = seedGitRepoWithFinding();
+			const cacheManager = makeCacheManager();
+			const clients = makeClients();
+			(clients.gitleaksClient.scan as ReturnType<typeof vi.fn>).mockResolvedValue({
+				success: true,
+				findings: [{ ruleId: "generic-api-key", file: "a.ts", startLine: 1 }],
+				scannedAt: "now",
+			});
+			const originalContent = fs.readFileSync(file, "utf-8");
+			markDisposition(
+				path.resolve(tmp),
+				{
+					cwd: path.resolve(tmp),
+					filePath: file,
+					tool: "gitleaks",
+					rule: "gitleaks:generic-api-key",
+					message: "Potential secret: generic-api-key",
+					line: 1,
+					content: originalContent,
+				},
+				"false-positive",
+			);
+			const suppressed = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			expect(suppressed.diagnostics).toHaveLength(0);
+
+			// The line is rewritten (still triggers the same rule at the same
+			// file:line) — the strict anchor's line-content hash no longer
+			// matches the mark, so gitleaks re-reporting it is a FRESH finding.
+			fs.writeFileSync(file, "const clientId = 'still-not-a-real-secret';\n");
+			const restored = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			expect(restored.diagnostics).toHaveLength(1);
+			expect(restored.dispositionSuppressed ?? 0).toBe(0);
+		});
+
+		it("drops a govulncheck finding marked won't-fix (suppress)", async () => {
+			fs.writeFileSync(path.join(tmp, "go.mod"), "module demo\n\ngo 1.21\n");
+			const content = "package main\n\nfunc main() {}\n";
+			fs.writeFileSync(path.join(tmp, "main.go"), content);
+			const cacheManager = makeCacheManager();
+			const clients = makeClients();
+			(clients.govulncheckClient.analyze as ReturnType<typeof vi.fn>).mockResolvedValue({
+				success: true,
+				findings: [
+					{
+						osv: "GO-2024-0001",
+						module: "example.com/vuln",
+						trace: [{ filename: "main.go", line: 1 }],
+					},
+				],
+				scannedAt: "now",
+			});
+
+			const before = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			expect(before.diagnostics).toHaveLength(1);
+
+			markDisposition(
+				path.resolve(tmp),
+				{
+					cwd: path.resolve(tmp),
+					filePath: path.resolve(tmp, "main.go"),
+					tool: "govulncheck",
+					rule: "govulncheck:GO-2024-0001",
+					message: "Vulnerability GO-2024-0001: reachable vulnerable dependency",
+					line: 1,
+					content,
+				},
+				"suppress",
+			);
+
+			const after = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+			expect(after.diagnostics).toHaveLength(0);
+			expect(after.dispositionSuppressed).toBe(1);
+		});
 	});
 
 	it("runs govulncheck fresh only when go.mod is present", async () => {

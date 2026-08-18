@@ -1604,6 +1604,14 @@ async function formatFullMode(
 					.map(({ id, summary }) => `${id} — ${summary}`)
 					.join(", ")}. These analyzers were not cached and will be retried; absence of their findings is NOT a clean verdict.`
 			: "";
+	// #1617: the #1616 suppressed-bucket rule applied to mode=full — a finding
+	// an agent/user marked false-positive/won't-fix now drops out of
+	// `diagnostics` (fresh-fetch.ts's `record()`), but that drop must stay
+	// visible as a count rather than reading as "nothing was wrong here".
+	const dispositionSuppressedNote =
+		(extracted.dispositionSuppressed ?? 0) > 0
+			? `\n\nsuppressed by disposition: ${extracted.dispositionSuppressed} finding(s) dropped from this result because they're marked false-positive or won't-fix. Not a clean verdict for those locations — they were found, then intentionally hidden.`
+			: "";
 	// #747/#250: the cheap project-diagnostics scan (scanProjectDiagnostics) and
 	// the LSP workspace sweep (collectWorkspaceDiagnosticFiles) both refuse to
 	// WALK from a cwd at/above $HOME — from there, walking would enumerate every
@@ -1664,6 +1672,7 @@ async function formatFullMode(
 			coldRunners: extracted.cold,
 			failedAnalyzers,
 			analyzerTimingsMs: extracted.timings,
+			dispositionSuppressed: extracted.dispositionSuppressed ?? 0,
 			analyzersAborted: extracted.aborted ?? false,
 			analyzersAbortedIds: extracted.abortedIds ?? [],
 			// #747: true when the fresh fetch refused an at-or-above-$HOME root —
@@ -1734,6 +1743,7 @@ async function formatFullMode(
 						coldNote +
 						testRunnerEditScopedNote +
 						failedNote +
+						dispositionSuppressedNote +
 						walkUnsafeRootNote +
 						scanTruncatedNote +
 						generatedSkipNote +
@@ -1750,6 +1760,7 @@ async function formatFullMode(
 		coldNote ||
 		testRunnerEditScopedNote ||
 		failedNote ||
+		dispositionSuppressedNote ||
 		walkUnsafeRootNote ||
 		scanTruncatedNote ||
 		generatedSkipNote ||
@@ -1769,6 +1780,7 @@ async function formatFullMode(
 						coldNote +
 						testRunnerEditScopedNote +
 						failedNote +
+						dispositionSuppressedNote +
 						walkUnsafeRootNote +
 						scanTruncatedNote +
 						generatedSkipNote +

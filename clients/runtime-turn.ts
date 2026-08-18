@@ -57,8 +57,12 @@ import {
 	writeProjectDiagnosticsDeltaReport,
 } from "./project-diagnostics/cache.js";
 import { deadCodeIssueToProjectDiagnostic } from "./project-diagnostics/runner-adapters/dead-code.js";
+import { gitleaksFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/gitleaks.js";
+import { govulncheckFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/govulncheck.js";
+import { trivyFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/trivy.js";
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
+import { applyDispositionsMultiFile } from "./diagnostic-dispositions.js";
 import { logLatency } from "./latency-logger.js";
 import {
 	getLspBudgetIdleTimeoutMs,
@@ -93,6 +97,50 @@ interface TurnEndDeps {
 	owner?: TurnStateOwner;
 	resetLSPService: () => void;
 	resetFormatService: () => void;
+}
+
+/**
+ * #1617: turn_end reads gitleaks/govulncheck/trivy straight from their
+ * session-scan caches and formats them into advisory/blocker text — a
+ * reporting lane parallel to (and, before this fix, entirely bypassing)
+ * `dispatcher.ts:924`'s `applyDispositions` filter. An agent-marked
+ * false-positive/won't-fix on one of these findings never suppressed it
+ * here, so it re-reported on every turn.
+ *
+ * Filters `findings` through the SAME anchor derivation the dispatch path
+ * and `lens_diagnostics mode=full` use (`applyDispositionsMultiFile` in
+ * `diagnostic-dispositions.ts`), keyed off each lane's own canonical
+ * `ProjectDiagnostic` adapter (`toDiagnostic`) — the exact tool/rule/message
+ * identity `lens_diagnostics` already surfaces and `lens_diagnostic_mark`
+ * already anchors a mark against, not a second, cloned identity that would
+ * silently diverge from what the agent actually marked.
+ *
+ * Returns the surviving findings plus how many were dropped, so a caller can
+ * still surface a "suppressed by disposition: N" trace (the #1616
+ * suppressed-bucket rule — a security finding must never vanish with no
+ * trace, even when the disposition that dropped it is working as intended).
+ */
+function filterFindingsByDisposition<F>(
+	findings: F[],
+	cwd: string,
+	toDiagnostic: (finding: F) => ProjectDiagnostic,
+): { kept: F[]; suppressed: number } {
+	if (findings.length === 0) return { kept: findings, suppressed: 0 };
+	const candidates = findings.map((finding) => ({
+		finding,
+		diagnostic: toDiagnostic(finding),
+	}));
+	const survivors = new Set(
+		applyDispositionsMultiFile(
+			candidates.map((c) => c.diagnostic),
+			cwd,
+			(d) => d.filePath,
+		),
+	);
+	const kept = candidates
+		.filter((c) => survivors.has(c.diagnostic))
+		.map((c) => c.finding);
+	return { kept, suppressed: findings.length - kept.length };
 }
 
 /**
@@ -1004,14 +1052,27 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		metadata: deadCodeMeta,
 	});
 
+	// #1617: running total of findings this turn's advisory/blocker sections
+	// dropped because an agent/user marked them false-positive/won't-fix —
+	// the #1616 suppressed-bucket rule applied to turn_end's own reporting
+	// lanes, so a mark's effect stays visible even though the finding itself
+	// no longer appears above.
+	let dispositionSuppressedTotal = 0;
+
 	// govulncheck — surface session_start-cached Go CVE findings as advisory.
 	// No per-turn re-run in this slice; the cache refreshes at next session_start.
 	const govCacheEntry = cacheManager.readCache<GovulncheckResult>(
 		"govulncheck",
 		cwd,
 	);
-	if (govCacheEntry?.data?.findings?.length) {
-		const findings = govCacheEntry.data.findings.slice(0, 5);
+	const govFiltered = filterFindingsByDisposition(
+		govCacheEntry?.data?.findings ?? [],
+		cwd,
+		(f) => govulncheckFindingToProjectDiagnostic(cwd, f),
+	);
+	dispositionSuppressedTotal += govFiltered.suppressed;
+	if (govFiltered.kept.length) {
+		const findings = govFiltered.kept.slice(0, 5);
 		let report =
 			"🛡️ Go CVEs reachable from this code (govulncheck) — upgrade where possible:\n";
 		for (const f of findings) {
@@ -1024,8 +1085,8 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				: " — no fix yet, track upstream";
 			report += `  ${f.osv} (${where})${fix}\n`;
 		}
-		if (govCacheEntry.data.findings.length > findings.length) {
-			report += `  … and ${govCacheEntry.data.findings.length - findings.length} more\n`;
+		if (govFiltered.kept.length > findings.length) {
+			report += `  … and ${govFiltered.kept.length - findings.length} more\n`;
 		}
 		advisoryParts.push(report);
 	}
@@ -1049,12 +1110,32 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// project-diagnostics path re-scans fresh and reconciles at load), so the
 	// drop belongs here, before the findings enter the shared secret pipeline.
 	// gitleaks only in this slice — trivy secrets are slice 1's sibling store.
-	const gitleaksFindings = dropFindingsForMissingPaths({
+	const gitleaksFindingsRaw = dropFindingsForMissingPaths({
 		store: "gitleaks",
 		findings: gitleaksData?.findings ?? [],
 		cwd,
 		citedPath: (finding) => finding.file,
 	});
+	// #1617: THE bug this issue exists for — gitleaks findings never passed
+	// through `applyDispositions`, so an agent-marked false-positive/won't-fix
+	// re-reported as a 🔴 STOP blocker on every turn. Filter through the SAME
+	// `gitleaksFindingToProjectDiagnostic` identity `lens_diagnostics
+	// mode=full` surfaces (tool="gitleaks", rule="gitleaks:<ruleId>", the
+	// exact "Potential secret: …" message) so a mark made against what the
+	// agent was shown is honored here too. Trivy-secret findings (below) are
+	// NOT yet wired — they have no existing lens_diagnostics-surfaced
+	// identity to anchor against (only the CVE-scanning trivy lane does);
+	// re-homed as a follow-up rather than inventing an unreviewed anchor
+	// shape under release time pressure. ast-grep secret findings need no
+	// filtering here — they already went through dispatch's applyDispositions
+	// before reaching `peekActionableWarnings()`.
+	const gitleaksFiltered = filterFindingsByDisposition(
+		gitleaksFindingsRaw,
+		cwd,
+		(f) => gitleaksFindingToProjectDiagnostic(cwd, f),
+	);
+	dispositionSuppressedTotal += gitleaksFiltered.suppressed;
+	const gitleaksFindings = gitleaksFiltered.kept;
 	const astSecretWarnings = runtime
 		.peekActionableWarnings()
 		.filter(isSecretWarning);
@@ -1094,8 +1175,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// CRITICAL is a blocker (a known-exploitable CVE in a shipped dep is real
 	// production risk); HIGH/MEDIUM/LOW are advisory. The agent gets the upgrade
 	// target as a hint and decides — we never auto-edit lockfiles.
-	if (trivyCacheEntry?.data?.findings?.length) {
-		const all = trivyCacheEntry.data.findings;
+	const trivyFindingsFiltered = filterFindingsByDisposition(
+		trivyCacheEntry?.data?.findings ?? [],
+		cwd,
+		(f) => trivyFindingToProjectDiagnostic(cwd, f),
+	);
+	dispositionSuppressedTotal += trivyFindingsFiltered.suppressed;
+	if (trivyFindingsFiltered.kept.length) {
+		const all = trivyFindingsFiltered.kept;
 		const critical = all.filter((f) => f.severity === "CRITICAL");
 		const advisory = all.filter((f) => f.severity !== "CRITICAL");
 		const fmt = (f: TrivyResult["findings"][number]): string => {
@@ -1144,6 +1231,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			report += `  … and ${licenses.length - shown.length} more\n`;
 		}
 		advisoryParts.push(report);
+	}
+
+	// #1616 suppressed-bucket rule: surface the running disposition-drop total
+	// as its own advisory line so a mark's effect is visible, not a silent
+	// absence — trace, not a vanish.
+	if (dispositionSuppressedTotal > 0) {
+		advisoryParts.push(
+			`suppressed by disposition: ${dispositionSuppressedTotal} finding(s) ` +
+				"dropped from this turn's gitleaks/govulncheck/trivy sections " +
+				"(marked false-positive or won't-fix).",
+		);
 	}
 
 	const t3 = Date.now();

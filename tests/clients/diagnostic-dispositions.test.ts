@@ -28,6 +28,7 @@ import {
 	_setDispositionStatForTests,
 	anchorsForDiagnostic,
 	applyDispositions,
+	applyDispositionsMultiFile,
 	applyWeakDispositions,
 	computeStrictAnchor,
 	getDisposition,
@@ -435,6 +436,112 @@ describe("markDisposition + applyDispositions (#690)", () => {
 		// serving the stale single-entry snapshot from the first read.
 		const kept = applyDispositions([diag, diag2], cwd(), filePath(), content);
 		expect(kept.map((d) => d.rule)).toEqual(["no-bad"]);
+	});
+});
+
+describe("applyDispositionsMultiFile (#1617 — cross-file lanes: gitleaks/trivy/govulncheck)", () => {
+	it("groups by each diagnostic's own filePath and reads each file's own content, not one shared file", () => {
+		const projectDir = cwd();
+		fs.mkdirSync(projectDir, { recursive: true });
+		const fileA = path.join(projectDir, "a.ts");
+		const fileB = path.join(projectDir, "b.ts");
+		fs.writeFileSync(fileA, "const secretA = 'aaa';\n");
+		fs.writeFileSync(fileB, "const secretB = 'bbb';\n");
+
+		const diagA = {
+			filePath: fileA,
+			tool: "gitleaks",
+			rule: "gitleaks:generic",
+			message: "Potential secret: generic",
+			line: 1,
+		};
+		const diagB = {
+			filePath: fileB,
+			tool: "gitleaks",
+			rule: "gitleaks:generic",
+			message: "Potential secret: generic",
+			line: 1,
+		};
+
+		markDisposition(
+			projectDir,
+			{ ...diagA, cwd: projectDir, content: "const secretA = 'aaa';\n" },
+			"false-positive",
+		);
+
+		// diagA is marked fp (dropped); diagB is unmarked (kept) — proves each
+		// group reads its OWN file's content, not fileA's content applied to
+		// both (which would either wrongly drop both or wrongly keep both).
+		const kept = applyDispositionsMultiFile(
+			[diagA, diagB],
+			projectDir,
+			(d) => d.filePath,
+		);
+		expect(kept).toEqual([diagB]);
+	});
+
+	it("preserves the caller's original element order across file groups", () => {
+		const projectDir = cwd();
+		fs.mkdirSync(projectDir, { recursive: true });
+		const fileA = path.join(projectDir, "a.ts");
+		const fileB = path.join(projectDir, "b.ts");
+		fs.writeFileSync(fileA, "x\n");
+		fs.writeFileSync(fileB, "y\n");
+		const d1 = { filePath: fileA, message: "m1", line: 1 };
+		const d2 = { filePath: fileB, message: "m2", line: 1 };
+		const d3 = { filePath: fileA, message: "m3", line: 1 };
+		expect(
+			applyDispositionsMultiFile([d1, d2, d3], projectDir, (d) => d.filePath),
+		).toEqual([d1, d2, d3]);
+	});
+
+	it("fails OPEN (still reports) a false-positive check when the file can't be read, but a weak-anchored suppress mark still applies with no content needed", () => {
+		const projectDir = cwd();
+		fs.mkdirSync(projectDir, { recursive: true });
+		const missingFile = path.join(projectDir, "does-not-exist.ts");
+
+		const fpTarget = {
+			filePath: missingFile,
+			tool: "trivy",
+			rule: "trivy:CVE-1",
+			message: "vuln",
+			line: 1,
+		};
+		// A false-positive mark made when the file DID exist (real content) —
+		// simulates the file having since been deleted before the next scan.
+		markDisposition(
+			projectDir,
+			{ ...fpTarget, cwd: projectDir, content: "package foo v1\n" },
+			"false-positive",
+		);
+		// The strict anchor's line-content hash can't be recomputed without the
+		// file, so it can't match the stored mark — fails open (still reported)
+		// rather than silently dropping a security finding on a read failure.
+		expect(
+			applyDispositionsMultiFile([fpTarget], projectDir, (d) => d.filePath),
+		).toEqual([fpTarget]);
+
+		// suppress is WEAK-anchored (never looks at content at all — see module
+		// doc), so it applies unconditionally even though the file is missing.
+		const suppressTarget = {
+			filePath: missingFile,
+			tool: "trivy",
+			rule: "trivy:CVE-2",
+			message: "vuln 2",
+			line: 1,
+		};
+		markDisposition(
+			projectDir,
+			{ ...suppressTarget, cwd: projectDir },
+			"suppress",
+		);
+		expect(
+			applyDispositionsMultiFile(
+				[suppressTarget],
+				projectDir,
+				(d) => d.filePath,
+			),
+		).toEqual([]);
 	});
 });
 

@@ -86,6 +86,7 @@ import * as path from "node:path";
 import type { BootstrapClients } from "../bootstrap.js";
 import type { CacheManager } from "../cache-manager.js";
 import type { RuntimeCoordinator } from "../runtime-coordinator.js";
+import { applyDispositionsMultiFile } from "../diagnostic-dispositions.js";
 import { getKnipIgnorePatterns } from "../file-utils.js";
 import { isAtOrAboveHomeDir } from "../path-utils.js";
 import { GitleaksClient } from "../gitleaks-client.js";
@@ -128,6 +129,16 @@ export interface FreshProjectDiagnosticsResult {
 	 *  nothing was spawned. Kept separate from the per-analyzer skip reasons so
 	 *  a caller can render "unsafe root" instead of "not applicable". */
 	unsafeRoot?: boolean;
+	/**
+	 * Count of findings dropped by an agent/user disposition (false-positive
+	 * or suppress mark — #1617) before landing in `diagnostics`. Every
+	 * analyzer here previously had ZERO disposition wiring — a mark never
+	 * suppressed a project-scan finding, only a dispatch (per-edit) one. Kept
+	 * as a count, not silently dropped: the #1616 suppressed-bucket rule — a
+	 * finding must never vanish with no trace, even when the disposition that
+	 * dropped it is working exactly as intended.
+	 */
+	dispositionSuppressed?: number;
 }
 
 /** The heavyweight analyzers surfaced in `lens_diagnostics mode=full` — this is
@@ -198,11 +209,29 @@ export async function fetchFreshProjectDiagnostics(
 	const failed: FailedProjectAnalyzer[] = [];
 	const timings: Record<string, number> = {};
 	const settledIds = new Set<string>();
+	let dispositionSuppressed = 0;
 
+	// #1617: this is the ONE choke point every analyzer's findings pass
+	// through on the way into `diagnostics`, so applying the agent/user
+	// disposition filter HERE covers the whole mode=full class (knip/jscpd/
+	// madge/gitleaks/govulncheck/opengrep/trivy/dead-code) in one place — the
+	// same anchor derivation `dispatcher.ts:924` uses, via
+	// `applyDispositionsMultiFile` (`diagnostic-dispositions.ts`), not a
+	// second cloned filter. Unlike the dispatch path's one-file-at-a-time
+	// shape, a project-wide scan's findings span many files, so this groups by
+	// each diagnostic's own `filePath` and reads each file's current content
+	// once — see that function's doc for the fail-open contract when a file
+	// can't be read.
 	function record(id: string, adapted: ProjectDiagnostic[], elapsedMs: number): void {
 		timings[id] = (timings[id] ?? 0) + elapsedMs;
-		if (adapted.length > 0) {
-			diagnostics.push(...adapted);
+		const kept = applyDispositionsMultiFile(
+			adapted,
+			analysisRoot,
+			(d) => d.filePath,
+		);
+		dispositionSuppressed += adapted.length - kept.length;
+		if (kept.length > 0) {
+			diagnostics.push(...kept);
 			pushUnique(runners, id);
 		}
 	}
@@ -530,8 +559,9 @@ export async function fetchFreshProjectDiagnostics(
 			timings,
 			aborted: true,
 			abortedIds,
+			dispositionSuppressed,
 		};
 	}
 
-	return { diagnostics, runners, cold, failed, timings };
+	return { diagnostics, runners, cold, failed, timings, dispositionSuppressed };
 }
