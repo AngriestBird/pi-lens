@@ -103,14 +103,14 @@ function makeLspService(
 	testFilePath: string,
 	options: {
 		configFileName?: string | undefined;
-		advertised?: string[];
-		executed?: boolean;
+		/** false = a service with no read-only probe channel at all. */
+		hasProbeChannel?: boolean;
 	} = {},
 ) {
-	const executeCommand = vi.fn(
-		async (_filePath: string | undefined, command: string, args?: unknown[]) => {
-			if (options.executed === false) return { executed: false };
-			const [sub] = (args ?? []) as [string, { file: string }];
+	const executeReadOnlyCommandOnLiveClient = vi.fn(
+		async (_file: string, command: string, args?: unknown[]) => {
+			if (options.hasProbeChannel === false) return { executed: false };
+			const [sub] = (args ?? []) as [string];
 			if (command !== "typescript.tsserverRequest" || sub !== "projectInfo") {
 				return { executed: false };
 			}
@@ -120,7 +120,6 @@ function makeLspService(
 					success: true,
 					body: {
 						configFileName: options.configFileName,
-						fileNames: undefined,
 						languageServiceDisabled: false,
 					},
 				},
@@ -128,10 +127,7 @@ function makeLspService(
 		},
 	);
 	return {
-		getAdvertisedCommands: vi.fn(async () =>
-			options.advertised ?? ["typescript.tsserverRequest"],
-		),
-		executeCommand,
+		executeReadOnlyCommandOnLiveClient,
 		runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
 			{
 				filePath: testFilePath,
@@ -211,9 +207,9 @@ describe("lens_diagnostics mode=full — inferred-project demotion (#1640)", () 
 	it("keeps blocking authority when the projectInfo probe cannot answer", async () => {
 		await withFixture(async (cwd) => {
 			const testFile = path.join(cwd, "tests", "unit", "spawn.test.ts");
-			// A server that does not advertise the tsserverRequest escape hatch:
-			// unknown membership, NOT a confirmed inferred project.
-			const lspService = makeLspService(testFile, { advertised: [] });
+			// A server with no read-only probe channel: unknown membership, NOT a
+			// confirmed inferred project.
+			const lspService = makeLspService(testFile, { hasProbeChannel: false });
 			const result = await run(cwd, lspService);
 			expect(result.details).toMatchObject({ totalBlocking: 1 });
 			expect(String(result.content[0].text)).not.toContain(

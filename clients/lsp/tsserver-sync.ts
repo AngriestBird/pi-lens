@@ -58,6 +58,18 @@ export interface TsserverSyncCapableService {
 		command: string,
 		args?: unknown[],
 	) => Promise<{ executed: boolean; result?: unknown; reason?: string }>;
+	/**
+	 * #1640: the non-spawning, non-mutating probe channel
+	 * (`LSPService.executeReadOnlyCommandOnLiveClient`). Optional so older test
+	 * doubles keep working — but a caller that NEEDS probe semantics must treat
+	 * its absence as "unknown" rather than falling back to `executeCommand`,
+	 * which is the mutation channel and spawns a server fleet to answer.
+	 */
+	executeReadOnlyCommandOnLiveClient?: (
+		filePath: string,
+		command: string,
+		args?: unknown[],
+	) => Promise<{ executed: boolean; result?: unknown; reason?: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +108,26 @@ export interface TsserverProjectIdentity {
 }
 
 /**
+ * tsserver's synthetic inferred-project name, as its own source builds it:
+ * `"/dev/null/inferredProject" + counter + "*"`. `/dev/null` is a deliberate
+ * sentinel prefix — no real config file can live there — and matching the WHOLE
+ * string against it is the only safe test.
+ *
+ * #1645 review F4: an earlier version also matched an UNANCHORED
+ * `/inferred[-_ ]?project/i` anywhere in the string. That inverted the verdict
+ * for a real project in a directory a human happened to name that way —
+ * `/repo/inferred-project/tsconfig.json` classified as INFERRED, which demoted
+ * its genuine blocking errors. A classifier that gates authority must never key
+ * off user-controlled directory names.
+ *
+ * The optional drive-letter/backslash arm covers a host that normalizes the
+ * sentinel through win32 path handling before it reaches us; the `/dev/null`
+ * prefix is still required.
+ */
+const INFERRED_PROJECT_SENTINEL =
+	/^(?:[A-Za-z]:)?[/\\]dev[/\\]null[/\\]inferredProject\d*\*?$/i;
+
+/**
  * Classify one tsserver `projectInfo` response body.
  *
  * `configFileName` is tsserver's own answer to "which project owns this file".
@@ -120,8 +152,7 @@ export function classifyProjectInfo(body: unknown): TsserverProjectIdentity {
 			? info.configFileName
 			: undefined;
 	const inferred = configFile
-		? /(?:^|[/\\])inferredProject\d*\*?$/i.test(configFile) ||
-				/inferred[-_ ]?project/i.test(configFile)
+		? INFERRED_PROJECT_SENTINEL.test(configFile)
 		: false;
 	const projectKind = configFile
 		? inferred
@@ -214,27 +245,38 @@ export async function probeTsserverProjectIdentity(
  * sampled once per didOpen — this is a request/response call a caller awaits
  * because it needs the answer to decide how to RENDER a diagnostic.
  *
- * Returns `undefined` for every "we do not know" path: no command channel, the
- * command is not advertised (non-classic server, older typescript-language-
- * server), the command was not executed, the response envelope is not
- * `{success:true}`, or the call threw/timed out. `undefined` must never be
- * treated as "inferred" — an unanswered probe is not a verdict (AGENTS.md
- * shape 10: an empty result must distinguish clean from unavailable).
+ * Routed through `executeReadOnlyCommandOnLiveClient` ONLY, never
+ * `executeCommand` (#1645 review F1/F2). The mutation channel would open the
+ * `workspace/applyEdit` acceptance window, clobber a concurrent command's
+ * `activeMutationContext`, carry the 30s mutation backstop instead of the short
+ * probe one, and spawn a language-server fleet to answer. All four are wrong for
+ * a passive render-path question. A service without the read-only channel is
+ * UNKNOWN, not a reason to fall back.
+ *
+ * Returns `undefined` for every "we do not know" path: no read-only channel, no
+ * live server for the file, the command is not advertised (non-classic server,
+ * older typescript-language-server), the command was not executed, the response
+ * envelope is not `{success:true}`, or the call threw/timed out. `undefined`
+ * must never be treated as "inferred" — an unanswered probe is not a verdict
+ * (AGENTS.md shape 10: an empty result must distinguish clean from unavailable).
  */
 export async function fetchTsserverProjectIdentity(
 	svc: TsserverSyncCapableService,
 	file: string,
 ): Promise<TsserverProjectIdentity | undefined> {
 	try {
-		if (typeof svc.executeCommand !== "function") return undefined;
-		if (typeof svc.getAdvertisedCommands === "function") {
-			const advertised = await svc.getAdvertisedCommands(file);
-			if (!advertised.includes(TSSERVER_REQUEST_COMMAND)) return undefined;
+		if (typeof svc.executeReadOnlyCommandOnLiveClient !== "function") {
+			return undefined;
 		}
-		const outcome = await svc.executeCommand(file, TSSERVER_REQUEST_COMMAND, [
-			"projectInfo",
-			{ file, needFileNameList: false },
-		]);
+		// No `getAdvertisedCommands` pre-flight: that helper routes through
+		// `getClientForFile`, which SPAWNS. The read-only channel already enforces
+		// allowlist-by-advertisement server-side and answers `executed:false` for
+		// a server that never advertised the command.
+		const outcome = await svc.executeReadOnlyCommandOnLiveClient(
+			file,
+			TSSERVER_REQUEST_COMMAND,
+			["projectInfo", { file, needFileNameList: false }],
+		);
 		if (!outcome.executed) return undefined;
 		const response = outcome.result as
 			| { success?: boolean; body?: unknown }

@@ -278,10 +278,24 @@ const lspRunner: RunnerDefinition = {
 		// sweep, so it applies the same demotion. Costs one bounded `projectInfo`
 		// request, and only when the file already has a TypeScript ERROR — an edit
 		// that type-checks clean pays nothing.
-		const validLspDiags = await demoteInferredProjectDiagnostics(
-			rawValidLspDiags,
-			{ filePath: diagnosticPath, cwd: ctx.cwd, service: lspService },
-		);
+		//
+		// #1645 review F2: NOT under warm attach. There, diagnostics came from an
+		// already-running remote session over IPC and no local client exists — so
+		// the probe would have to spawn a whole tsserver fleet to answer, breaking
+		// this branch's spawn-free contract (see the comment below), and the
+		// answer it spawned for would be the NEW server's project resolution, not
+		// the warm session's. A meaningless answer bought with a process is worse
+		// than no answer, so the warm-attach path keeps pre-#1640 rendering. This
+		// is a known gap, recorded on the issue rather than papered over with an
+		// "unverified" label that would fire on every warm-attach file including
+		// the properly configured majority.
+		const validLspDiags = usedWarmAttach
+			? rawValidLspDiags
+			: await demoteInferredProjectDiagnostics(rawValidLspDiags, {
+					filePath: diagnosticPath,
+					cwd: ctx.cwd,
+					service: lspService,
+				});
 		const fixSuggestionByIndex = new Map<number, string>();
 
 		// #1640: read severity off the RAW list. A demoted diagnostic is still

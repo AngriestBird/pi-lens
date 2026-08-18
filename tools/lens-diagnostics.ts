@@ -1434,6 +1434,9 @@ async function formatFullMode(
 		rawLspResults.filter((result) => includeFile(result.filePath)),
 		cwd,
 		lspService,
+		// #1645 review F1: the sweep that produced these results is signal-bounded,
+		// so the probe loop that post-processes them must be too.
+		signal,
 	);
 	// A result bound to a different document must not replace the current
 	// widget state, even when it contains real diagnostics. Pull results may carry

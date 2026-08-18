@@ -132,6 +132,12 @@ export interface InferredProjectDemotionOptions {
 	 * thing that changes the answer (AGENTS.md process-lifetime-latch screen).
 	 */
 	identityCache?: Map<string, TsserverProjectIdentity | undefined>;
+	/**
+	 * The caller's own abort signal. An already-aborted caller gets no probe:
+	 * the sweep that produced these diagnostics is signal-bounded, so a
+	 * post-abort probe would spend budget nobody is waiting for.
+	 */
+	signal?: AbortSignal;
 	/** Test seam: override the probe. */
 	fetchIdentity?: typeof fetchTsserverProjectIdentity;
 }
@@ -152,6 +158,7 @@ export async function demoteInferredProjectDiagnostics(
 	const { filePath, cwd, service } = options;
 	if (!isTsProjectFile(filePath)) return diagnostics;
 	if (!diagnostics.some(isDemotableDiagnostic)) return diagnostics;
+	if (options.signal?.aborted) return diagnostics;
 
 	const fetchIdentity = options.fetchIdentity ?? fetchTsserverProjectIdentity;
 	const cache = options.identityCache;
@@ -188,19 +195,38 @@ export const INFERRED_PROJECT_PROBE_BUDGET = 300;
  * The identity memo is local to this call. A module-level cache would pin the
  * first sweep's verdict for the life of the process, and editing a tsconfig is
  * precisely what changes the answer.
+ *
+ * The loop honors the caller's abort signal between files. The sweep that
+ * produced these results is itself signal-bounded, so continuing to probe after
+ * an abort would spend budget on an answer nobody will read (#1645 review F1).
  */
 export async function demoteInferredProjectSweepResults<
 	T extends { filePath: string; diagnostics?: LSPDiagnostic[] },
->(results: T[], cwd: string, service: TsserverSyncCapableService): Promise<T[]> {
-	if (typeof service?.executeCommand !== "function") return results;
+>(
+	results: T[],
+	cwd: string,
+	service: TsserverSyncCapableService,
+	signal?: AbortSignal,
+): Promise<T[]> {
+	if (typeof service?.executeReadOnlyCommandOnLiveClient !== "function") {
+		return results;
+	}
 	const startedAt = Date.now();
 	const identityCache = new Map<string, TsserverProjectIdentity | undefined>();
 	const out: T[] = [];
 	let demotedFiles = 0;
 	let demotedDiagnostics = 0;
 	let budgetExhausted = false;
+	let aborted = false;
 	for (const result of results) {
 		const diagnostics = result.diagnostics ?? [];
+		if (signal?.aborted) {
+			// Carry the remaining results through UNCHANGED rather than dropping
+			// them — an abort must cost the demotion, never a finding.
+			aborted = true;
+			out.push(result);
+			continue;
+		}
 		if (identityCache.size >= INFERRED_PROJECT_PROBE_BUDGET && !identityCache.has(result.filePath)) {
 			budgetExhausted = true;
 			out.push(result);
@@ -211,6 +237,7 @@ export async function demoteInferredProjectSweepResults<
 			cwd,
 			service,
 			identityCache,
+			signal,
 		});
 		if (demoted === diagnostics) {
 			out.push(result);
@@ -220,7 +247,7 @@ export async function demoteInferredProjectSweepResults<
 		demotedDiagnostics += demoted.filter((d, i) => d !== diagnostics[i]).length;
 		out.push({ ...result, diagnostics: demoted });
 	}
-	if (demotedFiles > 0 || budgetExhausted) {
+	if (demotedFiles > 0 || budgetExhausted || aborted) {
 		logLatency({
 			type: "phase",
 			phase: "lsp_inferred_project_demote",
@@ -232,6 +259,7 @@ export async function demoteInferredProjectSweepResults<
 				demotedFiles,
 				demotedDiagnostics,
 				budgetExhausted,
+				aborted,
 			},
 		});
 	}

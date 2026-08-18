@@ -30,14 +30,16 @@ function tsError(message = "Cannot find name 'describe'."): LSPDiagnostic {
 	};
 }
 
-function makeService(identity: unknown, advertised = ["typescript.tsserverRequest"]) {
-	return {
-		getAdvertisedCommands: vi.fn(async () => advertised),
-		executeCommand: vi.fn(async () => ({
-			executed: true,
-			result: { success: true, body: identity },
-		})),
-	};
+function makeService(identity: unknown, hasProbeChannel = true) {
+	const executeReadOnlyCommandOnLiveClient = vi.fn(async () => ({
+		executed: true,
+		result: { success: true, body: identity },
+	}));
+	return hasProbeChannel
+		? { executeReadOnlyCommandOnLiveClient }
+		: ({ executeReadOnlyCommandOnLiveClient: undefined } as unknown as {
+				executeReadOnlyCommandOnLiveClient: typeof executeReadOnlyCommandOnLiveClient;
+			});
 }
 
 const INFERRED_BODY = { configFileName: "/dev/null/inferredProject1*" };
@@ -126,14 +128,14 @@ describe("demoteInferredProjectDiagnostics", () => {
 	});
 
 	it("does NOT demote when the probe is unavailable — silence is not a verdict", async () => {
-		const service = makeService(INFERRED_BODY, []);
+		const service = makeService(INFERRED_BODY, false);
 		const out = await demoteInferredProjectDiagnostics([tsError()], {
 			filePath: "/proj/tests/unit/a.test.ts",
 			cwd: CWD,
 			service,
 		});
 		expect(out[0].severity).toBe(1);
-		expect(service.executeCommand).not.toHaveBeenCalled();
+		expect(service.executeReadOnlyCommandOnLiveClient).toBeUndefined();
 	});
 
 	it("does NOT demote when tsserver names no project at all", async () => {
@@ -158,7 +160,7 @@ describe("demoteInferredProjectDiagnostics", () => {
 			cwd: CWD,
 			service,
 		});
-		expect(service.executeCommand).not.toHaveBeenCalled();
+		expect(service.executeReadOnlyCommandOnLiveClient).not.toHaveBeenCalled();
 	});
 
 	it("never probes a non-TypeScript file", async () => {
@@ -167,13 +169,12 @@ describe("demoteInferredProjectDiagnostics", () => {
 			[{ ...tsError(), source: "typescript" }],
 			{ filePath: "/proj/tests/a.py", cwd: CWD, service },
 		);
-		expect(service.executeCommand).not.toHaveBeenCalled();
+		expect(service.executeReadOnlyCommandOnLiveClient).not.toHaveBeenCalled();
 	});
 
 	it("swallows a throwing probe and keeps the diagnostic as-is", async () => {
 		const service = {
-			getAdvertisedCommands: vi.fn(async () => ["typescript.tsserverRequest"]),
-			executeCommand: vi.fn(async () => {
+			executeReadOnlyCommandOnLiveClient: vi.fn(async () => {
 				throw new Error("No Project.");
 			}),
 		};
@@ -210,7 +211,7 @@ describe("demoteInferredProjectSweepResults", () => {
 		const out = await demoteInferredProjectSweepResults(results, CWD, service);
 		expect(out[0].diagnostics[0].severity).toBe(2);
 		expect(out[1]).toBe(untouched);
-		expect(service.executeCommand).toHaveBeenCalledTimes(1);
+		expect(service.executeReadOnlyCommandOnLiveClient).toHaveBeenCalledTimes(1);
 	});
 
 	it("stops demoting past the probe budget instead of guessing", async () => {
@@ -223,7 +224,7 @@ describe("demoteInferredProjectSweepResults", () => {
 			}),
 		);
 		const out = await demoteInferredProjectSweepResults(results, CWD, service);
-		expect(service.executeCommand).toHaveBeenCalledTimes(
+		expect(service.executeReadOnlyCommandOnLiveClient).toHaveBeenCalledTimes(
 			INFERRED_PROJECT_PROBE_BUDGET,
 		);
 		expect(out.at(-1)?.diagnostics[0].severity).toBe(1);
