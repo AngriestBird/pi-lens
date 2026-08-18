@@ -24,6 +24,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { writeFileAtomic, writeFileAtomicAsync } from "./atomic-write.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import { getGlobalPiLensDir } from "./file-utils.js";
 // #735: reuse the #449/#525 reaper's exact conservative liveness check
 // (`process.kill(pid, 0)`, ESRCH-only-means-dead) rather than inventing a
@@ -112,6 +113,31 @@ export function _resetInstanceRegistryEnabledForTests(): void {
 
 // --- Read ---
 
+/**
+ * Distinguishes "no registry yet" (ENOENT — a genuinely clean start, never
+ * recorded) from "a registry file exists but couldn't be trusted" (corrupt
+ * JSON, wrong shape, or another read error — e.g. a torn write left behind by
+ * a killed process, #1609 layer b). Both degrade to `{ instances: [] }`
+ * either way (this store is purely observational, per the module docstring),
+ * but only the latter is worth recording — a clean empty start must never
+ * read the same as a corrupt one, or a genuine torn-file regression would be
+ * invisible.
+ *
+ * `readRegistrySync`/`readRegistryAsync` are called from many sites across a
+ * session (register/heartbeat/reap/footprint — not only session_start), so
+ * this goes through `recordDegradationOnce` (#1609 review, the small fix)
+ * rather than a plain log call: the ledger's own per-kind/subject dedup caps
+ * it at one record for the session regardless of how many times the same
+ * torn file gets re-read, instead of re-logging on every call.
+ */
+function recordCorruptRegistryRead(reasonCode: string): void {
+	recordDegradationOnce({
+		kind: "instance-registry-corrupt",
+		subject: "instances.json",
+		reason: `read failed (${reasonCode}); treating as empty`,
+	});
+}
+
 function readRegistrySync(): RegistryFile {
 	try {
 		const raw = fs.readFileSync(registryPath(), "utf-8");
@@ -119,9 +145,14 @@ function readRegistrySync(): RegistryFile {
 		if (parsed && Array.isArray(parsed.instances)) {
 			return parsed as RegistryFile;
 		}
+		recordCorruptRegistryRead("invalid shape");
 		return { instances: [] };
-	} catch {
-		// Missing file, corrupt JSON, or wrong shape — treat as empty, never throw.
+	} catch (err) {
+		// Missing file, corrupt JSON, or a read error — treat as empty, never
+		// throw. Missing (ENOENT) is a clean start and stays silent; anything
+		// else is recorded so a corrupt/torn file is distinguishable from one.
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (code !== "ENOENT") recordCorruptRegistryRead(code ?? "invalid");
 		return { instances: [] };
 	}
 }
@@ -133,8 +164,11 @@ async function readRegistryAsync(): Promise<RegistryFile> {
 		if (parsed && Array.isArray(parsed.instances)) {
 			return parsed as RegistryFile;
 		}
+		recordCorruptRegistryRead("invalid shape");
 		return { instances: [] };
-	} catch {
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (code !== "ENOENT") recordCorruptRegistryRead(code ?? "invalid");
 		return { instances: [] };
 	}
 }

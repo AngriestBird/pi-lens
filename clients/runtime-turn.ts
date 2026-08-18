@@ -74,9 +74,15 @@ import { formatRunDurationMs } from "./run-duration.js";
 import type { TestResult, TestRunnerClient } from "./test-runner-client.js";
 import {
 	MAX_ADVISORY_AFFECTED_FILES,
-	dropFindingsForMissingPaths,
+	gateFindingsByPathFreshness,
 	snapshotAdvisoryProvenance,
 } from "./advisory-provenance.js";
+
+/**
+ * #1622 / #1419 precedent: what a demoted finding shows where its cached line
+ * number used to be. The finding survives, the untrustworthy coordinate does not.
+ */
+const STALE_LINE_MARKER = "[stale — re-run to confirm]";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
 
 interface TurnEndDeps {
@@ -330,6 +336,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 
 	const turnEndStart = Date.now();
 	const blockerParts: string[] = [];
+	/**
+	 * #1622 review M2: findings the freshness gate demoted. A third tier between
+	 * blockers and advisories — not a blocker, because the cached coordinate is
+	 * untrustworthy; not an advisory, because the advisory label reads "no action
+	 * required this turn" and these DO require a re-scan. Each part carries its
+	 * own imperative preamble rather than inheriting that label.
+	 */
+	const staleSecretParts: string[] = [];
 	const advisoryParts: string[] = [];
 	const projectDiagnosticsDelta: ProjectDiagnostic[] = [];
 	const projectDiagnosticsSources = new Set<string>();
@@ -1010,22 +1024,44 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		"govulncheck",
 		cwd,
 	);
-	if (govCacheEntry?.data?.findings?.length) {
-		const findings = govCacheEntry.data.findings.slice(0, 5);
+	// #1622: govulncheck renders a call site as `file:line`, and the cache is a
+	// session_start snapshot — the same stale-line shape as gitleaks, one tier
+	// lower. A CVE is pinned by go.mod, NOT by the call site, so neither an edit
+	// nor a deletion may drop it: `onMissing: "demote"` routes a vanished traced
+	// file into the same arm as an edited one. This gate only ever decides
+	// whether the cited LINE is still worth printing. (Review round H1: the first
+	// cut let a deleted trace file drop the CVE, contradicting this comment, and
+	// `citedPath` reads only the FIRST filename frame — so one deleted file in a
+	// long trace silently killed a CVE that go.mod still pins.)
+	const govGate = gateFindingsByPathFreshness({
+		store: "govulncheck",
+		findings: govCacheEntry?.data?.findings ?? [],
+		cwd,
+		scannedAt: govCacheEntry?.data?.scannedAt,
+		citedPath: (finding) => finding.trace.find((t) => t.filename)?.filename,
+		onMissing: "demote",
+	});
+	const govStale = new Set(govGate.stale);
+	const govFindings = [...govGate.live, ...govGate.stale];
+	// Guarded on the POST-gate list. A raw-cache-length guard prints the header
+	// with zero rows beneath it whenever the gate empties the list (review H1).
+	if (govFindings.length) {
+		const findings = govFindings.slice(0, 5);
 		let report =
 			"🛡️ Go CVEs reachable from this code (govulncheck) — upgrade where possible:\n";
 		for (const f of findings) {
 			const callSite = f.trace.find((t) => t.filename);
+			const stale = govStale.has(f);
 			const where = callSite?.filename
-				? `${toRunnerDisplayPath(cwd, callSite.filename)}${callSite.line ? `:${callSite.line}` : ""}`
+				? `${toRunnerDisplayPath(cwd, callSite.filename)}${!stale && callSite.line ? `:${callSite.line}` : ""}${stale ? ` ${STALE_LINE_MARKER}` : ""}`
 				: (f.module ?? f.packageName ?? "(module)");
 			const fix = f.fixedVersion
 				? ` — upgrade to ${f.fixedVersion} or later`
 				: " — no fix yet, track upstream";
 			report += `  ${f.osv} (${where})${fix}\n`;
 		}
-		if (govCacheEntry.data.findings.length > findings.length) {
-			report += `  … and ${govCacheEntry.data.findings.length - findings.length} more\n`;
+		if (govFindings.length > findings.length) {
+			report += `  … and ${govFindings.length - findings.length} more\n`;
 		}
 		advisoryParts.push(report);
 	}
@@ -1041,6 +1077,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		"gitleaks",
 		cwd,
 	)?.data;
+	const trivySecretsData = trivyCacheEntry?.data;
 	// #1461 slice 1 (#1460): the gitleaks cache is TTL-only, so a finding for a
 	// file deleted after the scan is still served as a 🔴 blocker for the rest
 	// of the 30-minute window — the live case, and 119 of 126 findings in
@@ -1048,20 +1085,55 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// store (session_start's read only decides whether to re-scan; the
 	// project-diagnostics path re-scans fresh and reconciles at load), so the
 	// drop belongs here, before the findings enter the shared secret pipeline.
-	// gitleaks only in this slice — trivy secrets are slice 1's sibling store.
-	const gitleaksFindings = dropFindingsForMissingPaths({
+	// #1622 extends that gate from existence to freshness, and adds trivy
+	// secrets — the sibling store with the identical shape. A cited file edited
+	// after the scan keeps its finding but loses its line number: the credential
+	// may still be there, just not where the snapshot says. Dropping instead
+	// would let any edit — malicious or accidental — mute a real secret.
+	const gitleaksGate = gateFindingsByPathFreshness({
 		store: "gitleaks",
 		findings: gitleaksData?.findings ?? [],
 		cwd,
+		scannedAt: gitleaksData?.scannedAt,
+		citedPath: (finding) => finding.file,
+	});
+	const trivySecretsGate = gateFindingsByPathFreshness({
+		store: "trivy-secrets",
+		findings: trivySecretsData?.secrets ?? [],
+		cwd,
+		scannedAt: trivySecretsData?.scannedAt,
 		citedPath: (finding) => finding.file,
 	});
 	const astSecretWarnings = runtime
 		.peekActionableWarnings()
 		.filter(isSecretWarning);
 	const sessionSecrets = dedupeSecretFindings([
-		...fromGitleaks(gitleaksFindings),
-		...fromTrivySecrets(trivyCacheEntry?.data?.secrets ?? []),
+		...fromGitleaks(gitleaksGate.live),
+		...fromTrivySecrets(trivySecretsGate.live),
 	]);
+	// Demoted secrets are addressed by FILE, never by line — the line is the one
+	// field the edit invalidated. Rule id and source survive it and must be
+	// carried through (review round M1): an agent triages an `aws-access-token`
+	// differently from a low-confidence `generic-api-key`, and cannot do that
+	// from a bare path. Deduped on file+rule+source so a file with twenty stale
+	// hits of one rule is named once.
+	const staleSecretEntries = [
+		...gitleaksGate.stale.map((f) => ({
+			file: toRunnerDisplayPath(cwd, f.file),
+			rule: f.ruleId,
+			source: "gitleaks",
+		})),
+		...trivySecretsGate.stale.map((f) => ({
+			file: toRunnerDisplayPath(cwd, f.file),
+			rule: f.ruleId,
+			source: "trivy",
+		})),
+	];
+	const staleSecrets = [
+		...new Map(
+			staleSecretEntries.map((e) => [`${e.file}|${e.rule}|${e.source}`, e]),
+		).values(),
+	];
 	// Locations already surfaced as session-scan secret blockers — used to enrich
 	// provenance where ast-grep agrees and to suppress the duplicate ast-grep copy
 	// from the actionable-warnings advisory below.
@@ -1088,6 +1160,24 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			report += `  … and ${enriched.length - shown.length} more\n`;
 		}
 		blockerParts.push(report);
+	}
+	if (staleSecrets.length) {
+		// Its OWN tier, never `advisoryParts` (review round M2). The advisory tier
+		// is labelled "no action required this turn", which would sit directly
+		// above copy telling the agent to re-scan — a section that contradicts its
+		// own heading. This preamble is imperative because the action is real: the
+		// finding is unverified, not dismissed.
+		const shown = staleSecrets.slice(0, 5);
+		let report =
+			`🔑 ACTION NEEDED — secrets were flagged in files that changed after the scan. ${STALE_LINE_MARKER}\n` +
+			"The cached line numbers are no longer trustworthy, so they are withheld. Re-run a secrets scan to confirm or clear these:\n";
+		for (const entry of shown) {
+			report += `  ${entry.file} — ${entry.rule} [${entry.source}]\n`;
+		}
+		if (staleSecrets.length > shown.length) {
+			report += `  … and ${staleSecrets.length - shown.length} more\n`;
+		}
+		staleSecretParts.push(report);
 	}
 
 	// trivy — surface session_start-cached dependency CVEs (#131, Phase 1).
@@ -1669,7 +1759,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const labeledAdvisoryParts = advisoryParts.map(
 		(p) => `ℹ️ Advisory — no action required this turn:\n${p}`,
 	);
-	const findingParts = [...blockerParts, ...labeledAdvisoryParts];
+	// Stale-secret parts sit between the two tiers and are NOT relabelled — they
+	// ship the imperative preamble they were built with (#1622 review M2).
+	const findingParts = [
+		...blockerParts,
+		...staleSecretParts,
+		...labeledAdvisoryParts,
+	];
 	if (findingParts.length > 0) {
 		dbg(
 			`turn_end: ${blockerParts.length} blocker section(s), ${advisoryParts.length} advisory section(s) found, persisting for next context`,
@@ -1803,7 +1899,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	}
 	if (blockerParts.length === 0) {
 		cacheManager.clearTurnState(cwd, currentOwner);
-		if (getFlag("lens-guard") && advisoryParts.length === 0 && !runtime.gitGuardHasBlockers) {
+		// `staleSecretParts` counts here too (#1622 review M2): clearing the
+		// findings record while a stale secret is still unverified would drop the
+		// only surviving trace of it.
+		if (
+			getFlag("lens-guard") &&
+			advisoryParts.length === 0 &&
+			staleSecretParts.length === 0 &&
+			!runtime.gitGuardHasBlockers
+		) {
 			const guardRecord = cacheManager.readCache<Partial<TurnEndFindingsCache>>(
 				"turn-end-findings",
 				cwd,
@@ -1825,10 +1929,19 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		toolName: "turn_end",
 		filePath: cwd,
 		durationMs: Date.now() - turnEndStart,
-		result: blockerParts.length > 0 ? "blockers_found" : "clean",
+		// #1622 review M2: a pending stale secret is NOT a clean turn. It gets its
+		// own result rather than being promoted to `blockers_found`, which would
+		// undo the demotion the freshness gate just made.
+		result:
+			blockerParts.length > 0
+				? "blockers_found"
+				: staleSecretParts.length > 0
+					? "stale_secrets_pending"
+					: "clean",
 		metadata: {
 			fileCount: files.length,
 			blockerSections: blockerParts.length,
+			staleSecretSections: staleSecretParts.length,
 			advisorySections: advisoryParts.length,
 		},
 	});
