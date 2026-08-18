@@ -15,6 +15,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	EXEMPT_RAW_WRITE_FILES,
+	findRawWriteSites,
 	scanRawWriteFiles,
 } from "../support/atomic-write-scan.js";
 
@@ -69,5 +70,52 @@ describe("atomic-write sweep (#1609 layer a)", () => {
 			(file) => !scannedFiles.has(file),
 		);
 		expect(stale).toEqual([]);
+	});
+
+	// #1609 review F2/F3: the reviewer smuggled two shapes past the scanner
+	// itself. These pin the scanner's own correctness against synthetic
+	// source, independent of what's currently in clients/ — a regression here
+	// would silently reopen the smuggle route even if no real file happens to
+	// hit it today.
+	describe("scanner smuggle probes (#1609 review F2/F3)", () => {
+		it("F2: a tmp-prefixed DATA argument does not clear a non-scratch TARGET", () => {
+			// registryPath() is the real target; tmpData only LOOKS temp-shaped
+			// because it shares the line — judging the whole line (the pre-fix
+			// behavior) would wrongly clear this as scratch.
+			const source =
+				'fs.writeFileSync(registryPath(), tmpData);\n';
+			const sites = findRawWriteSites("smuggle-f2.ts", source);
+			expect(sites).toHaveLength(1);
+			expect(sites[0].transientTarget).toBe(false);
+		});
+
+		it("F2 control: a genuinely tmp-named TARGET still clears", () => {
+			const source = "fs.writeFileSync(tmpArchive, assetBuffer);\n";
+			const sites = findRawWriteSites("smuggle-f2-control.ts", source);
+			expect(sites).toHaveLength(1);
+			expect(sites[0].transientTarget).toBe(true);
+		});
+
+		it("F3: a write reached through a differently-named fs import binding is still found", () => {
+			const source = [
+				'import * as nodeFs from "node:fs";',
+				"",
+				"function persist(p: string, d: string) {",
+				"\tnodeFs.writeFileSync(p, d);",
+				"}",
+				"",
+			].join("\n");
+			const sites = findRawWriteSites("smuggle-f3.ts", source);
+			expect(sites).toHaveLength(1);
+			// The target is a plain parameter, not a scratch path — still a
+			// violation unless the file is exempted.
+			expect(sites[0].transientTarget).toBe(false);
+		});
+
+		it("F3: the fs/fsp fallback still matches when a file imports neither name", () => {
+			const source = 'fsp.writeFile(destPath, buf);\n';
+			const sites = findRawWriteSites("smuggle-f3-fallback.ts", source);
+			expect(sites).toHaveLength(1);
+		});
 	});
 });

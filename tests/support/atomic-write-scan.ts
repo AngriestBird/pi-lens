@@ -45,22 +45,73 @@ export interface RawWriteSite {
 	line: number;
 	/** The matched call text (trimmed), for a legible failure message. */
 	snippet: string;
-	/** True when the call's own line names an obviously-scratch temp target
-	 *  (see {@link TMP_TARGET_PATTERN}) — cleared per SITE, never per file. */
+	/** True when the call's own TARGET (first) argument names an
+	 *  obviously-scratch temp path (see {@link TMP_TARGET_PATTERN}) — judged
+	 *  from that argument alone, never the whole line or file (#1609 review
+	 *  F2: a `tmp`-prefixed DATA argument must not clear an unrelated
+	 *  target). Cleared per SITE, never per file. */
 	transientTarget: boolean;
 }
 
 /**
- * Matches a raw write call that lands directly at its target path: the
- * `fs`/`fsp`-qualified forms of `writeFile`/`writeFileSync`/`appendFile`/
- * `appendFileSync`, and `createWriteStream`. Deliberately does NOT match
- * `writeFileAtomic(`/`writeFileAtomicAsync(` (different identifier) or a bare
- * `.writeFile(` on an arbitrary receiver (e.g. a file HANDLE from `fs.open`
- * — a different, O_EXCL-flavored atomicity discipline, reviewed per-site
- * instead).
+ * Import forms that bind a local identifier to `node:fs` or
+ * `node:fs/promises` as a whole (default or namespace import, or a
+ * `{ promises as X }` named-and-aliased import) — the shapes whose bound
+ * name can then be used as a `<name>.writeFile(...)`-style receiver.
+ * Deliberately does NOT need to catch a bare named import of `writeFile`
+ * itself (`import { writeFile } from "node:fs/promises"`): a repo-wide grep
+ * at #1609 review time found no such call site in `clients/`, so this stays
+ * scoped to the receiver forms actually in use rather than speculatively
+ * handling a shape nothing exercises.
  */
-const RAW_WRITE_PATTERN =
-	/\bfsp?\.(?:promises\.)?(writeFile(?:Sync)?|appendFile(?:Sync)?|createWriteStream)\(/g;
+const FS_BINDING_PATTERNS = [
+	/import\s+(?:\*\s+as\s+)?(\w+)\s+from\s+["']node:fs(?:\/promises)?["']/g,
+	/import\s*\{[^}]*\bpromises\s+as\s+(\w+)[^}]*\}\s*from\s+["']node:fs["']/g,
+];
+
+/**
+ * #1609 review F3: the receiver alternation used to be hardcoded to the
+ * literal names `fs`/`fsp`, which a differently-named import binding
+ * (`nodeFs`, `fsPromises`, …) — already in use across a dozen files in this
+ * very codebase — trivially escapes. Deriving the receiver set from each
+ * file's OWN `node:fs`/`node:fs/promises` import bindings closes that:
+ * whatever local name a file chose, the scan matches calls through it. `fs`
+ * and `fsp` stay in the set unconditionally as a defensive fallback (never a
+ * narrowing) for the (currently nonexistent, but cheap to guard) case of a
+ * write call reached through neither an import this scan recognizes nor one
+ * of the two conventional bare names.
+ */
+function importedFsBindings(source: string): string[] {
+	const bindings = new Set(["fs", "fsp"]);
+	for (const pattern of FS_BINDING_PATTERNS) {
+		for (const match of source.matchAll(pattern)) {
+			if (match[1]) bindings.add(match[1]);
+		}
+	}
+	return [...bindings];
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Matches a raw write call that lands directly at its target path: any of
+ * `bindings` (this file's own `node:fs`/`node:fs/promises` import names,
+ * plus the `fs`/`fsp` fallback) qualified with an optional `.promises.`,
+ * followed by `writeFile`/`writeFileSync`/`appendFile`/`appendFileSync`, or
+ * `createWriteStream`. Deliberately does NOT match `writeFileAtomic(`/
+ * `writeFileAtomicAsync(` (different identifier) or a bare `.writeFile(` on
+ * an arbitrary receiver (e.g. a file HANDLE from `fs.open` — a different,
+ * O_EXCL-flavored atomicity discipline, reviewed per-site instead).
+ */
+function buildRawWritePattern(bindings: string[]): RegExp {
+	const receivers = bindings.map(escapeRegExp).join("|");
+	return new RegExp(
+		`\\b(?:${receivers})\\.(?:promises\\.)?(writeFile(?:Sync)?|appendFile(?:Sync)?|createWriteStream)\\(`,
+		"g",
+	);
+}
 
 /**
  * A raw write whose OWN target argument is an obviously-scratch, per-call
@@ -166,23 +217,75 @@ export function clientSourceFiles(dir = CLIENTS_ROOT): string[] {
 	});
 }
 
+/**
+ * Extracts the TARGET (first) argument's source text for a call whose
+ * opening `(` is at `openParenIndex` in `source`. Tracks paren/bracket/brace
+ * depth and quote state so a nested call (`path.join(a, b)`), an object
+ * literal, or a comma/paren inside a string doesn't end the scan early, and
+ * stops at the first depth-0 comma (or the call's own closing paren, for a
+ * single-argument call). Scanning the source directly — not the single
+ * matched line — also correctly handles a call whose target argument sits on
+ * a later line than the `fs.writeFile(` token itself.
+ *
+ * #1609 review F2: judging "is this a scratch temp write" from the whole
+ * matched LINE let a `tmp`-prefixed DATA argument clear an unrelated,
+ * non-scratch TARGET — e.g. `fs.writeFileSync(registryPath(), tmpData)`
+ * writes to `registryPath()`, not a temp file, but the old line-wide check
+ * saw `tmpData` anywhere on the line and cleared it. Judging only the first
+ * argument closes that gap.
+ */
+function extractTargetArgument(source: string, openParenIndex: number): string {
+	let depth = 0;
+	let quote: '"' | "'" | "`" | undefined;
+	let i = openParenIndex + 1;
+	const start = i;
+	for (; i < source.length; i++) {
+		const ch = source[i];
+		if (quote) {
+			if (ch === "\\") {
+				i++; // skip the escaped character
+			} else if (ch === quote) {
+				quote = undefined;
+			}
+			continue;
+		}
+		if (ch === '"' || ch === "'" || ch === "`") {
+			quote = ch;
+		} else if (ch === "(" || ch === "[" || ch === "{") {
+			depth++;
+		} else if (ch === ")" || ch === "]" || ch === "}") {
+			if (depth === 0) break; // the call's own closing paren
+			depth--;
+		} else if (ch === "," && depth === 0) {
+			break;
+		}
+	}
+	return source.slice(start, i);
+}
+
 /** Raw write-call sites in `source`, with 1-based line numbers. Each site's
- *  `transientTarget` is judged from its OWN line, never from anything else
- *  the file imports — see {@link TMP_TARGET_PATTERN}'s docstring for why. */
+ *  `transientTarget` is judged from its own TARGET argument only — see
+ *  {@link extractTargetArgument}'s docstring for why, and
+ *  {@link TMP_TARGET_PATTERN}'s docstring for why per-file import checks are
+ *  not used either. */
 export function findRawWriteSites(
 	file: string,
 	source: string,
 ): RawWriteSite[] {
 	const sites: RawWriteSite[] = [];
-	for (const match of source.matchAll(RAW_WRITE_PATTERN)) {
-		const upTo = source.slice(0, match.index ?? 0);
+	const pattern = buildRawWritePattern(importedFsBindings(source));
+	for (const match of source.matchAll(pattern)) {
+		const matchIndex = match.index ?? 0;
+		const upTo = source.slice(0, matchIndex);
 		const line = upTo.split("\n").length;
 		const lineText = source.split("\n")[line - 1]?.trim() ?? match[0];
+		const openParenIndex = matchIndex + match[0].length - 1;
+		const targetArg = extractTargetArgument(source, openParenIndex);
 		sites.push({
 			file,
 			line,
 			snippet: lineText,
-			transientTarget: TMP_TARGET_PATTERN.test(lineText),
+			transientTarget: TMP_TARGET_PATTERN.test(targetArg),
 		});
 	}
 	return sites;

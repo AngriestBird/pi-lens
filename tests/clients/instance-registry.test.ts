@@ -19,16 +19,15 @@ vi.mock("../../clients/file-utils.js", () => ({
 	getGlobalPiLensDir: () => dir,
 }));
 
-const mockLogSessionStart = vi.hoisted(() => vi.fn());
-vi.mock("../../clients/sessionstart-logger.js", () => ({
-	logSessionStart: mockLogSessionStart,
-}));
-
 describe("instance-registry", () => {
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-instreg-"));
+		// vi.resetModules() gives every test a FRESH instance-registry.js
+		// instance, which means a fresh degradation-ledger.js too (its module
+		// state — the groups/onceKeys maps — is reinitialized on re-evaluation),
+		// so there is nothing to reset here: each test's dynamically-imported
+		// ledger already starts empty.
 		vi.resetModules();
-		mockLogSessionStart.mockClear();
 	});
 
 	afterEach(() => {
@@ -203,8 +202,19 @@ describe("instance-registry", () => {
 			fs.mkdirSync(dir, { recursive: true });
 			fs.writeFileSync(registryFilePath(), torn, "utf-8");
 
+			// #1609 review small fix: the degradation is recorded via
+			// recordDegradationOnce (deduped per session, not logged on every
+			// call), so the ledger must be imported through the SAME dynamic
+			// `import()` as instance-registry.js — vi.resetModules() in
+			// beforeEach means a statically-imported (module-top-level) copy of
+			// degradation-ledger.js would be a DIFFERENT instance from the one
+			// instance-registry.js's own fresh import resolves to (AGENTS.md
+			// defect shape 14).
 			const { readInstanceRegistry, registerInstance } = await import(
 				"../../clients/instance-registry.js"
+			);
+			const { getDegradationSummary } = await import(
+				"../../clients/degradation-ledger.js"
 			);
 
 			// No throw escapes, and the torn bytes are never half-trusted into a
@@ -213,11 +223,11 @@ describe("instance-registry", () => {
 			const instances = await readInstanceRegistry();
 			expect(instances).toEqual([]);
 
-			// The recovery is OBSERVABLE: a corrupt-but-present file logs, unlike
-			// a genuinely missing one (see the sibling "missing file" test above,
-			// which asserts silence).
-			expect(mockLogSessionStart).toHaveBeenCalledWith(
-				expect.stringContaining("instance-registry"),
+			// The recovery is OBSERVABLE: a corrupt-but-present file records a
+			// degradation, unlike a genuinely missing one (see the sibling
+			// "missing file" test below, which asserts nothing is recorded).
+			expect(getDegradationSummary()).toContainEqual(
+				expect.objectContaining({ kind: "instance-registry-corrupt" }),
 			);
 
 			// The registry keeps working afterward — no stuck latch.
@@ -231,11 +241,37 @@ describe("instance-registry", () => {
 			const { readInstanceRegistry } = await import(
 				"../../clients/instance-registry.js"
 			);
+			const { getDegradationSummary } = await import(
+				"../../clients/degradation-ledger.js"
+			);
 
 			const instances = await readInstanceRegistry();
 
 			expect(instances).toEqual([]);
-			expect(mockLogSessionStart).not.toHaveBeenCalled();
+			expect(getDegradationSummary()).not.toContainEqual(
+				expect.objectContaining({ kind: "instance-registry-corrupt" }),
+			);
+		});
+
+		it("records the degradation only ONCE across repeated reads of the same torn file", async () => {
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(registryFilePath(), "{not valid json!!", "utf-8");
+
+			const { readInstanceRegistry } = await import(
+				"../../clients/instance-registry.js"
+			);
+			const { getDegradationSummary } = await import(
+				"../../clients/degradation-ledger.js"
+			);
+
+			await readInstanceRegistry();
+			await readInstanceRegistry();
+			await readInstanceRegistry();
+
+			const entry = getDegradationSummary().find(
+				(group) => group.kind === "instance-registry-corrupt",
+			);
+			expect(entry?.count).toBe(1);
 		});
 	});
 
