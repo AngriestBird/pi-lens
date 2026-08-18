@@ -47,9 +47,15 @@ import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
 	reconcileProjectDiagnosticsSnapshot,
 } from "../clients/project-diagnostics/cache.js";
-import { warmTriggerFor } from "../clients/project-diagnostics/extractors.js";
+import {
+	formatCacheAge,
+	formatNotRunEntry,
+} from "../clients/project-diagnostics/extractors.js";
 import type { FreshProjectDiagnosticsResult } from "../clients/project-diagnostics/fresh-fetch.js";
-import { fetchFreshProjectDiagnostics } from "../clients/project-diagnostics/fresh-fetch.js";
+import {
+	ANALYZER_IDS,
+	fetchFreshProjectDiagnostics,
+} from "../clients/project-diagnostics/fresh-fetch.js";
 import { loadBootstrapClients } from "../clients/bootstrap.js";
 import {
 	generatedSkipNotice,
@@ -89,6 +95,15 @@ const MAX_DIAGNOSTICS_PER_FILE = 50;
 // caller can never believe it checked files it didn't (issue's stated
 // invariant).
 const MAX_PATHS_ENTRIES = 200;
+
+// #1623: the reason rendered for every heavyweight-analyzer lane (gitleaks,
+// trivy, govulncheck, dead-code, knip, jscpd, madge, opengrep, test-runner)
+// when mode=full is called without refreshRunners=cheap/all/cached — the
+// "quick mode" gate that skips the expensive fresh-fetch entirely (see
+// `formatFullMode`'s `analyzersPromise`). One shared string so it renders
+// identically everywhere it's used.
+const NOT_REQUESTED_REASON =
+	"refreshRunners not requested this call (quick mode) — pass refreshRunners=cheap/all/cached to lens_diagnostics mode=full to run it";
 
 type LSPServiceLike = ReturnType<typeof getLSPService> & {
 	runWorkspaceDiagnostics?: (
@@ -1424,14 +1439,28 @@ async function formatFullMode(
 	// could complete. Building its promise here, alongside the sweep and cheap
 	// scan, makes it genuinely concurrent — all three phases now race the SAME
 	// signal from the same starting point instead of stacking.
-	const analyzersPromise = shouldIncludeProjectRunners(options.refreshRunners)
+	const projectRunnersRequested = shouldIncludeProjectRunners(
+		options.refreshRunners,
+	);
+	const analyzersPromise = projectRunnersRequested
 		? loadBootstrapClients().then((clients) =>
 				fetchFreshProjectDiagnostics(cacheManager, cwd, clients, signal, { runtime: options.runtime }),
 			)
 		: Promise.resolve<FreshProjectDiagnosticsResult>({
 				diagnostics: [],
 				runners: [],
-				cold: [],
+				// #1623: every heavyweight analyzer is ELIGIBLE for this project but
+				// this call never asked for it (refreshRunners wasn't cheap/all/
+				// cached) — the expensive fetch below deliberately never runs in
+				// that case (see the comment above), but rendering total silence
+				// here reads exactly as "ran clean", the false-empty #1623 exists to
+				// close. `ANALYZER_IDS` (fresh-fetch.ts) is the single source of
+				// truth for which lanes this covers — reuse it rather than
+				// hand-listing ids here.
+				cold: [...ANALYZER_IDS],
+				coldReasons: Object.fromEntries(
+					ANALYZER_IDS.map((id) => [id, NOT_REQUESTED_REASON]),
+				),
 				failed: [],
 				timings: {},
 			});
@@ -1688,15 +1717,33 @@ async function formatFullMode(
 	// analyzers before anything spawns — rendering that as the per-analyzer
 	// "not applicable / unavailable" list would send the caller chasing seven
 	// wrong reasons. One note with the real one instead.
+	// #1623: prefer the SPECIFIC reason captured at each gate
+	// (`extracted.coldReasons`) over a generic guess — `formatNotRunEntry`
+	// falls back to `warmTriggerFor` only for an id this call's `coldReasons`
+	// doesn't cover (e.g. a caller-supplied `cold` list from an older cache
+	// shape). Single formatter (extractors.ts) so this note's wording can't
+	// drift from any other caller that renders the same `cold` list.
+	// #1623 fix-round F5: the "not requested" (quick-mode) batch shares ONE
+	// reason (`NOT_REQUESTED_REASON`) across every id — `formatNotRunEntry`
+	// repeating that same ~130-char sentence per id makes the note nearly
+	// unreadable, and the "not applicable / unavailable this run" header
+	// below is a dishonest label for it: these lanes ARE applicable and
+	// available, this call just never asked for them. Render that batch as
+	// its own compact note — bare ids, the shared reason stated once — and
+	// keep the detailed per-id format for genuinely cold lanes, where each
+	// id's reason really does differ (not a git repo vs binary unavailable
+	// vs retry cooldown, ...).
 	const coldNote = extracted.unsafeRoot
 		? `\n\nheavyweight analyzers skipped: the working directory resolves at or above the home directory, so a fresh knip/jscpd/madge/gitleaks/govulncheck/trivy/dead-code scan would walk every unrelated tree under it. Re-run from inside a project directory. Absence of their findings is NOT a clean verdict.`
-		: genuinelyColdIds.length > 0
-			? `\n\ncold (not applicable / unavailable this run): ${genuinelyColdIds
-					.map((id) => `${id} — ${warmTriggerFor(id)}`)
-					.join(
-						", ",
-					)}. These analyzers have not contributed to this result — absence of their findings is NOT a clean verdict.`
-			: "";
+		: !projectRunnersRequested && genuinelyColdIds.length > 0
+			? `\n\nnot run this call (quick mode): ${genuinelyColdIds.join(", ")}. ${NOT_REQUESTED_REASON}. Absence of their findings is NOT a clean verdict.`
+			: genuinelyColdIds.length > 0
+				? `\n\ncold (not applicable / unavailable this run): ${genuinelyColdIds
+						.map((id) => formatNotRunEntry(id, extracted.coldReasons))
+						.join(
+							", ",
+						)}. These analyzers have not contributed to this result — absence of their findings is NOT a clean verdict.`
+				: "";
 	// #1004: unlike every other analyzer above (knip/jscpd/madge/gitleaks/
 	// govulncheck/opengrep/trivy/dead-code all run a FRESH whole-project scan
 	// per the fresh-fetch.ts header, so "clean" there really does mean "the
@@ -1751,6 +1798,30 @@ async function formatFullMode(
 	const generatedSkipNote = generatedSkipNoticeText
 		? `\n\n${generatedSkipNoticeText}`
 		: "";
+	// #1623: the cheap in-process project scan (tree-sitter/fact-rules/
+	// ast-grep) is a THIRD lane `coldNote` never covers (it isn't one of
+	// `ANALYZER_IDS` — that list is fetch-fetch.ts's heavyweight analyzers
+	// only). It has three distinct states, all of which must render — the
+	// fix-round F2 finding: with `refreshRunners=cached` and no snapshot ever
+	// written yet, BOTH of the two notes below used to stay empty (one gated
+	// on `scannedAt` being present, the other on the "not requested" branch
+	// this call isn't in), so the original #1623 silence survived in exactly
+	// this mode. `cheapScanScannedAtMs` centralizes the one bit every branch
+	// needs: whether the stored snapshot has a usable timestamp (#1623
+	// fix-round F4 — a corrupt/missing `scannedAt` must not compute a NaN
+	// age, mirroring `./cache.ts`'s `Number.isFinite` guard).
+	const cheapScanScannedAtMs = rawProjectSnapshot?.scannedAt
+		? Date.parse(rawProjectSnapshot.scannedAt)
+		: undefined;
+	const cheapScanStatusNote = !projectRunnersRequested
+		? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run this call (${NOT_REQUESTED_REASON}).`
+		: options.refreshRunners === "cached"
+			? cheapScanScannedAtMs !== undefined && Number.isFinite(cheapScanScannedAtMs)
+				? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): served from cache, ${formatCacheAge(
+						Date.now() - cheapScanScannedAtMs,
+					)} old — not re-run this call.`
+				: `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run (no cached scan; refresh with refreshRunners=cheap/all to populate).`
+			: "";
 	const abortedNote =
 		abortedIds.size > 0
 			? `\n\nstopped mid-scan (still running in the background, not reflected in this result): ${[
@@ -1763,11 +1834,27 @@ async function formatFullMode(
 	// possibly-stale session_start cache — say so honestly, with per-analyzer
 	// elapsed time, since this can legitimately take a while (trivy's own
 	// ~180s ceiling).
-	const timingEntries = Object.entries(extracted.timings ?? {});
+	// #1623: `extracted.cachedAgeMs` marks ids that are a cache-read BY DESIGN
+	// (today, only test-runner — see fresh-fetch.ts) rather than a fresh
+	// execution this call. Exclude those from "fetched fresh" below — folding
+	// a cache replay into the same list as a genuine run is exactly the
+	// misread the second #1623 dogfood pass reported (a cached result read as
+	// "just ran"). They get their own note with an actual age instead.
+	const cachedAgeMs = extracted.cachedAgeMs ?? {};
+	const timingEntries = Object.entries(extracted.timings ?? {}).filter(
+		([id]) => !(id in cachedAgeMs),
+	);
 	const freshNote =
 		timingEntries.length > 0
 			? `\n\nfetched fresh this call: ${timingEntries
 					.map(([id, ms]) => `${id} (${Math.round(ms)}ms)`)
+					.join(", ")}.`
+			: "";
+	const cachedAgeEntries = Object.entries(cachedAgeMs);
+	const cachedAgeNote =
+		cachedAgeEntries.length > 0
+			? `\n\nserved from cache this call (not re-run): ${cachedAgeEntries
+					.map(([id, ms]) => `${id} (${formatCacheAge(ms)} old)`)
 					.join(", ")}.`
 			: "";
 	// coldRunners always lands in details (even when empty) so a caller can
@@ -1780,8 +1867,17 @@ async function formatFullMode(
 		details: {
 			...result.details,
 			coldRunners: extracted.cold,
+			// #1623: the specific reason each cold id was skipped (single source
+			// of truth: extractors.ts's `formatNotRunEntry` renders the same map
+			// into the text note above) — lets a caller check WHY without parsing
+			// text.
+			coldReasons: extracted.coldReasons ?? {},
 			failedAnalyzers,
 			analyzerTimingsMs: extracted.timings,
+			// #1623: ms-old each cache-read-by-design lane's data was (today, only
+			// test-runner) — lets a caller distinguish "just ran" from "served
+			// from cache" without parsing the text note.
+			analyzersCachedAgeMs: cachedAgeMs,
 			analyzersAborted: extracted.aborted ?? false,
 			analyzersAbortedIds: extracted.abortedIds ?? [],
 			// #747: true when the fresh fetch refused an at-or-above-$HOME root —
@@ -1857,6 +1953,8 @@ async function formatFullMode(
 						generatedSkipNote +
 						abortedNote +
 						freshNote +
+						cachedAgeNote +
+						cheapScanStatusNote +
 						missingNote,
 				},
 			],
@@ -1873,6 +1971,8 @@ async function formatFullMode(
 		generatedSkipNote ||
 		abortedNote ||
 		freshNote ||
+		cachedAgeNote ||
+		cheapScanStatusNote ||
 		unconfirmedLspNote ||
 		lspPrimaryVsAuxiliaryNote
 	) {
@@ -1892,6 +1992,8 @@ async function formatFullMode(
 						generatedSkipNote +
 						abortedNote +
 						freshNote +
+						cachedAgeNote +
+						cheapScanStatusNote +
 						missingNote,
 				},
 			],
