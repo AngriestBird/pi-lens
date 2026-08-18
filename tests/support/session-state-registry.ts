@@ -211,7 +211,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		reason:
 			"A `defer` mark suppresses a diagnostic for THIS session by design; carrying it into the next session hides a finding nobody deferred.",
 		gap:
-			"Not wired: the only reset is the test-only seam, so a deferred diagnostic stays suppressed for the life of the PROCESS rather than the session. PR #1625 does not close this (review round R1, S5): it scopes the Set's key per project and re-signs isDeferredThisSession, but adds no session_start reset. The gap survives #1625 and still needs an owner.",
+			"Not wired: the only reset is the test-only seam, so a deferred diagnostic stays suppressed for the life of the PROCESS rather than the session. PR #1625 has now merged and did NOT close this (review round R1, S5): it scoped the Set's key per project and re-signed isDeferredThisSession, but added no session_start reset. The gap survives it and still needs an owner.",
 		probe: {
 			arm: () => {
 				const cwd = scratchCwd();
@@ -417,22 +417,14 @@ let probeDeferredAnchor: string | undefined;
 let probeDeferredCwd: string | undefined;
 
 /**
- * Read the defer set across a signature change that is currently in flight.
- *
- * `isDeferredThisSession(anchor)` today; PR #1625 makes it
- * `isDeferredThisSession(cwd, anchor)` because a weak anchor encodes only a
- * relative path and so collides across projects. Both PRs touch this module,
- * and neither should have to wait on the other, so the probe reads the arity
- * rather than pinning one shape. Delete this branch once #1625 lands.
+ * Read the defer set. `cwd` is part of the key since #1625: a weak anchor
+ * encodes only a relative path, so the same anchor in two projects collided.
  */
 function probeIsDeferred(): boolean {
-	const anchor = probeDeferredAnchor as string;
-	const read = isDeferredThisSession as unknown as (
-		...args: string[]
-	) => boolean;
-	return read.length >= 2
-		? read(probeDeferredCwd as string, anchor)
-		: read(anchor);
+	return isDeferredThisSession(
+		probeDeferredCwd as string,
+		probeDeferredAnchor as string,
+	);
 }
 
 /** Drop probe scratch state so repeated conformance runs start clean. */
@@ -498,6 +490,8 @@ export const EXEMPT_SESSION_STATE_FILES: Readonly<Record<string, string>> = {
 	"ndjson-logger.ts": "registered log-file paths",
 	"latency-logger.ts": "the latency log file handle",
 	"quiet-window.ts": "quiet-window task registration",
+	"quiet-window-config.ts":
+		"the env-derived quiet-window kill switch and wait budget, split out of quiet-window.ts by #1462; a memo of configuration, not of a session verdict",
 	"lsp/cascade-tier.ts": "cascade-tier registration and outstanding-touch bookkeeping",
 	"dispatch/lazy.ts": "the lazy dispatch-integration import cell",
 	"extension-log.ts": "console-method guard installation",
