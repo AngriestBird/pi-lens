@@ -1380,6 +1380,14 @@ export async function safeSpawnAsync(
 		// #1656: wait for stdout/stderr to fall idle after exit instead of
 		// waiting for Node's "close" event (see the constants' doc comment
 		// above). Resolves immediately if the child has no pipes to drain.
+		//
+		// These timers stay REF'D, matching `timeoutId`/`escalationTimer`
+		// elsewhere in this function: the caller's own settlement depends on
+		// them firing, so unref'ing would let a short-lived host process (a
+		// one-shot CLI whose only other in-flight work was this spawn) exit
+		// the event loop before `finish` ever runs — silently abandoning this
+		// promise instead of merely leaking a handle. Both paths to `finish`
+		// clear both timers, so nothing outlives settlement either way.
 		const waitForPipeIdle = (): Promise<void> => {
 			if (!child.stdout && !child.stderr) return Promise.resolve();
 			return new Promise((finishIdleWait) => {
@@ -1388,7 +1396,6 @@ export async function safeSpawnAsync(
 				const capTimer: ReturnType<typeof setTimeout> = setTimeout(() => {
 					finish();
 				}, EXIT_PIPE_IDLE_MAX_WAIT_MS);
-				capTimer.unref?.();
 				const finish = (): void => {
 					if (settled) return;
 					settled = true;
@@ -1400,7 +1407,6 @@ export async function safeSpawnAsync(
 				rearmIdleGrace = (): void => {
 					if (graceTimer) clearTimeout(graceTimer);
 					graceTimer = setTimeout(finish, EXIT_PIPE_IDLE_GRACE_MS);
-					graceTimer.unref?.();
 				};
 				rearmIdleGrace();
 			});
