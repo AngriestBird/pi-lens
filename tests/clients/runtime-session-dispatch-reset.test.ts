@@ -245,4 +245,61 @@ describe("dispatch availability suppression is reset at session start (#1266)", 
 			vi.useRealTimers();
 		}
 	});
+
+	// #1653: package-manager.ts's `availabilityLatches` map is module-local
+	// (keyed by pnpm/yarn/bun/npm), same shape as psscriptanalyzer's latches
+	// above — `resetDispatchAvailabilityState`'s generation counter does not
+	// reach it, and nothing on the session_start path called the module's own
+	// `_resetPackageManagerCache` test hook. A genuine "pnpm is missing"
+	// verdict from one session stayed latched into the next: install pnpm mid
+	// day, start a fresh session, pi-lens still reports it missing until a
+	// process restart. Found by #1652's registry conformance sweep.
+	it("re-probes a latched-missing package manager after handleSessionStart", async () => {
+		const spawnMod = await import("../../clients/safe-spawn.js");
+		const spawnMock = vi.mocked(spawnMod.safeSpawnAsync);
+		const finder = process.platform === "win32" ? "where" : "which";
+		spawnMock.mockImplementation((async (cmd: unknown, args: unknown) => {
+			const argv = Array.isArray(args) ? args : [];
+			if (String(cmd) === finder && argv[0] === "pnpm") {
+				return { stdout: "", stderr: "", status: 1 };
+			}
+			return { stdout: "npm\n", stderr: "", status: 0 };
+		}) as never);
+
+		const { resolveNodePackageManager } = await import(
+			"../../clients/package-manager.js"
+		);
+		const fs = await import("node:fs");
+		const path = await import("node:path");
+		fs.writeFileSync(path.join(tmpDir, "pnpm-lock.yaml"), "");
+
+		const pnpmProbes = () =>
+			spawnMock.mock.calls.filter(
+				(call) =>
+					String(call[0]) === finder &&
+					(call[1] as string[] | undefined)?.[0] === "pnpm",
+			).length;
+
+		// pnpm declared, genuinely absent right now: falls back to npm and
+		// latches — a second resolve within the session does not re-probe.
+		expect(await resolveNodePackageManager(tmpDir)).toBe("npm");
+		const afterFirst = pnpmProbes();
+		expect(afterFirst).toBeGreaterThan(0);
+		expect(await resolveNodePackageManager(tmpDir)).toBe("npm");
+		expect(pnpmProbes()).toBe(afterFirst);
+
+		// pnpm gets installed mid-day; a fresh session must re-probe it rather
+		// than trusting the previous session's "missing" verdict.
+		await handleSessionStart(makeDeps(tmpDir));
+		spawnMock.mockImplementation((async (cmd: unknown, args: unknown) => {
+			const argv = Array.isArray(args) ? args : [];
+			if (String(cmd) === finder && argv[0] === "pnpm") {
+				return { stdout: "pnpm\n", stderr: "", status: 0 };
+			}
+			return { stdout: "npm\n", stderr: "", status: 0 };
+		}) as never);
+
+		expect(await resolveNodePackageManager(tmpDir)).toBe("pnpm");
+		expect(pnpmProbes()).toBeGreaterThan(afterFirst);
+	});
 });
