@@ -215,8 +215,15 @@ describe("truncated-but-magic-valid grammar download (#1564)", () => {
 	describe("missing-manifest observability", () => {
 		it("records a degradation once when the manifest can't be loaded", async () => {
 			_setGrammarManifestForTests(null);
-			vi.spyOn(globalThis, "fetch").mockResolvedValue(
-				new Response(TRUNCATED_WASM, { status: 200 }),
+			// A `Response` body is a single-use stream — two downloads sharing ONE
+			// `mockResolvedValue(new Response(...))` instance means the second
+			// `res.arrayBuffer()` reads empty and bails at the magic check before
+			// ever reaching `loadGrammarManifest`, so this test would pass even
+			// with the once-per-session dedupe deleted entirely (only one real
+			// call ever happened). A fresh `Response` per invocation is required
+			// for the second `downloadGrammarDetailed` call to actually run.
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				async () => new Response(TRUNCATED_WASM, { status: 200 }),
 			);
 
 			await downloadGrammarDetailed(env.tmpDir, "tree-sitter-one.wasm");

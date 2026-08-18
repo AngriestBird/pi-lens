@@ -11,10 +11,9 @@
  * itself is missing or broken — not because a test seam doesn't exist yet.
  *
  * The fixture is a genuine bundled grammar (`grammars/tree-sitter-json.wasm`,
- * checked into the repo and shipped in the npm package) truncated to half its
- * length — the exact #1564 shape: the wasm preamble at the front is
- * untouched, so `hasWasmMagic` passes, but the body is short and does not
- * match the pinned hash.
+ * shipped in the npm package) truncated to half its length — the exact #1564
+ * shape: the wasm preamble at the front is untouched, so `hasWasmMagic`
+ * passes, but the body is short and does not match the pinned hash.
  */
 
 import * as fs from "node:fs";
