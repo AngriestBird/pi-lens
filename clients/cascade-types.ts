@@ -51,12 +51,15 @@ export interface CascadeRun {
 	result: CascadeResult | undefined;
 	neighborCount: number;
 	diagnosticCount: number;
+	/** Preserves selected paths for result-less indeterminate runs; bounded to the selected slice. */
+	selectedNeighborPaths?: string[];
 	skipReason?: CascadeSkipReason;
 	/**
-	 * #1023: set when the impact compute was DEGRADED/COLD/ERRORED (see
+	 * #1023: set when the impact compute was DEGRADED/COLD/ERRORED or its
+	 * selected neighbor budget omitted eligible dependents (see
 	 * {@link CascadeIndeterminate}). Carries the detail the turn-end seam renders
-	 * into an honest "downstream impact not computed" advisory. Decoupled from
-	 * `skipReason` so a thrown compute (`skipReason: "error"`) can surface too.
+	 * into an honest advisory. Decoupled from `skipReason` so a thrown compute
+	 * (`skipReason: "error"`) can surface too.
 	 */
 	indeterminate?: CascadeIndeterminate;
 	/**
