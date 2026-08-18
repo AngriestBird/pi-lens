@@ -7,7 +7,7 @@ import {
 	findModuleForPath,
 	getDownstreamModules,
 	getModuleSourceFiles,
-} from "../../clients/review-graph/workspace-modules.ts";
+} from "../../clients/review-graph/workspace-modules.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 // Counts readdirSync calls made through the module under test so memo-hit

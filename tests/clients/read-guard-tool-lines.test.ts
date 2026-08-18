@@ -7,7 +7,7 @@ import {
 	relocateEditRange,
 	stripOldTextTrailingWhitespace,
 	tryCorrectIndentationMismatch,
-} from "../../clients/read-guard-tool-lines.ts";
+} from "../../clients/read-guard-tool-lines.js";
 import { logReadGuardEvent } from "../../clients/read-guard-logger.js";
 import { setupTestEnvironment } from "./test-utils.js";
 

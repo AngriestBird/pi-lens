@@ -54,7 +54,7 @@ import {
 	isSafePipelineAutofixTool,
 	shouldAutoInstallTool,
 	_getSpotlessGradleReadCountForTests,
-} from "../../clients/tool-policy.ts";
+} from "../../clients/tool-policy.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 describe("tool-policy", () => {

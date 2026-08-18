@@ -1851,8 +1851,9 @@ export async function handleSessionStart(
 	// login` and starts a fresh session still reads the previous session's
 	// stale "no token" verdict until the cooldown (if any) happens to expire.
 	resetZizmorTokenAvailability();
-	// psscriptanalyzer's two latches are module-local, so the generation counter
-	// above does not reach them (#1490).
+	// psscriptanalyzer's three latches (interpreter, module, -File exec) are
+	// module-local, so the generation counter above does not reach them
+	// (#1490, #1540).
 	resetPsScriptAnalyzerAvailability();
 	// #1497: the install-class retry ceiling is terminal for a SESSION, but the
 	// latches holding it live on process-lived client instances (bootstrap builds

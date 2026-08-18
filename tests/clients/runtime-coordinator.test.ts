@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { RuntimeCoordinator } from "../../clients/runtime-coordinator.ts";
+import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 
 describe("RuntimeCoordinator", () => {
 	it("makes edit autofix deferral sticky after a write until beginTurn", () => {

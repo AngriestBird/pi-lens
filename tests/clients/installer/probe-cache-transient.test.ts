@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.unmock("../../../clients/installer/index.ts");
+vi.unmock("../../../clients/installer/index.js");
 
 // ── fs/promises mock ───────────────────────────────────────────────────────
 const mockFsReadFile = vi.hoisted(() => vi.fn());
@@ -82,7 +82,7 @@ import {
 	resetProbeCacheStateForTesting,
 	updateProbeCache,
 	wasLastResolveTransient,
-} from "../../../clients/installer/index.ts";
+} from "../../../clients/installer/index.js";
 
 const TOOL_ID = "stylelint";
 const TOOLS_DIR = path.join(getGlobalPiLensDir(), "tools");
