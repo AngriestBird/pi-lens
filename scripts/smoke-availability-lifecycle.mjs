@@ -227,6 +227,12 @@ async function main() {
 	delete process.env.GH_TOKEN;
 	delete process.env.GITHUB_TOKEN;
 	delete process.env.ZIZMOR_GITHUB_TOKEN;
+	// TEMP DEBUG (#1651 review round 2): the fix landed but lane 2 phase 5
+	// still failed byte-identically -- confirm what "gh" actually resolves
+	// to in this exact environment before trusting the close/error-race
+	// theory any further.
+	console.log(`[debug] realGhPath=${JSON.stringify(realGhPath)}`);
+	console.log(`[debug] PATH=${process.env.PATH}`);
 
 	try {
 		const { resolveZizmorGitHubToken, resetZizmorTokenAvailability } =
@@ -377,6 +383,15 @@ async function main() {
 		// not fighting phase 4's cached good answer.
 		resetZizmorTokenAvailability();
 		removeFixtureGh(binDir);
+		// TEMP DEBUG (#1651 review round 2): probe exactly what a raw spawn of
+		// "gh" does in this exact env/PATH, right where resolveZizmorGitHubToken
+		// is about to do the same thing.
+		{
+			const dbg = spawnSync("gh", ["auth", "token"], { encoding: "utf8" });
+			console.log(
+				`[debug] raw spawnSync("gh", ["auth","token"]) -> status=${JSON.stringify(dbg.status)} signal=${JSON.stringify(dbg.signal)} error=${dbg.error ? dbg.error.code + ":" + dbg.error.message : "undefined"} stdout=${JSON.stringify(dbg.stdout)} stderr=${JSON.stringify(dbg.stderr)}`,
+			);
+		}
 		const t5a = await resolveZizmorGitHubToken();
 		assertEq("phase5 token (gh genuinely absent)", t5a, undefined);
 		const d5a = (
@@ -387,6 +402,7 @@ async function main() {
 			!!d5a,
 			"no availability_decision for the missing-gh probe",
 		);
+		console.log(`[debug] d5a metadata=${JSON.stringify(d5a?.metadata)}`);
 		if (d5a) {
 			assertEq("phase5 decision.outcome", d5a.metadata.outcome, "missing");
 			assertEq("phase5 decision.latched", d5a.metadata.latched, true);
