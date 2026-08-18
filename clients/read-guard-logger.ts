@@ -73,7 +73,7 @@ export interface ReadGuardEditBatchSummary {
 
 let generatedCorrelationCounter = 0;
 
-function sanitizeCorrelationId(value: unknown): string | undefined {
+export function sanitizeCorrelationId(value: unknown): string | undefined {
 	if (typeof value !== "string" && typeof value !== "number") return undefined;
 	const sanitized = String(value)
 		.trim()
