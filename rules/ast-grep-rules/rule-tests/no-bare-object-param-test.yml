@@ -1,5 +1,6 @@
 id: no-bare-object-param
 valid:
+  - "function f(x: string) {}"
   - "function f(x: Record<string, unknown>) {}"
   - "function f(x: { a: string }) {}"
   - "function f(x: Object) {}"
