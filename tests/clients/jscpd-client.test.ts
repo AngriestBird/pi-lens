@@ -8,6 +8,10 @@ const findNodeToolBinary = vi.fn();
 
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
+	// #1612: resolveAvailableOrInstallUnshared reads these on the install-
+	// success path to derive honest evidence rather than asserting "succeeded".
+	getInstallAttempt: vi.fn(() => undefined),
+	getToolInstallStrategy: vi.fn(() => undefined),
 	resetPathWalkMemo: vi.fn(),
 	// Seam probes route through this on cached hits (#1203); default spawnable.
 	isSpawnableCommand: vi.fn(async () => true),

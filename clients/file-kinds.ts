@@ -14,6 +14,7 @@ export type FileKind =
 	| "cmake" // CMake
 	| "csharp" // C#
 	| "css" // CSS
+	| "cue" // CUE
 	| "cxx" // C/C++
 	| "dart" // Dart
 	| "docker" // Dockerfile
@@ -70,6 +71,7 @@ export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
 		".sass",
 		".scss",
 	],
+	cue: [".cue"],
 	// From llvm-project/clang/lib/Driver/Types.cpp clang::driver::types::lookupTypeForExtension:
 	cxx: [
 		// C
@@ -409,6 +411,7 @@ export const CODE_KINDS: ReadonlySet<FileKind> = new Set<FileKind>([
 	"clojure",
 	"cmake",
 	"csharp",
+	"cue",
 	"cxx",
 	"dart",
 	"docker",
@@ -512,6 +515,7 @@ export function getFileKindLabel(kind: FileKind): string {
 		gleam: "Gleam",
 		ocaml: "OCaml",
 		clojure: "Clojure",
+		cue: "CUE",
 		terraform: "Terraform",
 		terragrunt: "Terragrunt",
 		nix: "Nix",
@@ -588,6 +592,7 @@ export function getLanguageId(kind: FileKind): string {
 		gleam: "gleam",
 		ocaml: "ocaml",
 		clojure: "clojure",
+		cue: "cue",
 		terraform: "terraform",
 		terragrunt: "terragrunt",
 		nix: "nix",

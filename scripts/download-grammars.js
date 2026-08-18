@@ -39,6 +39,24 @@ export const SOURCE_OVERRIDES = {
         url: "https://unpkg.com/@tree-sitter-grammars/tree-sitter-yaml@0.7.1/tree-sitter-yaml.wasm",
     },
 };
+/**
+ * Grammars committed under `vendor/grammars/` rather than fetched.
+ *
+ * tree-sitter-cue: no published wasm exists — npm's `tree-sitter-cue` is a
+ * native binding, the `tree-sitter-wasms` aggregator has no CUE, and upstream
+ * cuts no releases — so we build it from a pinned commit (#1522).
+ */
+export const VENDORED_GRAMMARS = {
+    "tree-sitter-cue.wasm": {
+        repo: "https://github.com/eonpatapon/tree-sitter-cue",
+        commit: "dd7b90e0770ff18070c515937ba3c3d6d93db00e",
+        license: "MIT",
+        buildCommand: "npx tree-sitter-cli build --wasm",
+        sha256: "sha256:751f8cc8ccf72da760133e3d365562ff7bbf5b951e0b73568576fd159db7d601",
+    },
+};
+/** Directory the committed grammars live in, relative to the package root. */
+export const VENDORED_DIR = "vendor/grammars";
 /** The package a grammar's sidecar records (override or the global aggregator). */
 export function expectedPackage(filename, manifest) {
     return manifest.overrides?.[filename]?.package ?? SOURCE_OVERRIDES[filename]?.package ?? manifest.package;
@@ -210,6 +228,13 @@ async function regenerateManifest() {
         version: TREE_SITTER_WASMS_VERSION,
         grammars: sorted,
         ...(Object.keys(SOURCE_OVERRIDES).length ? { overrides: SOURCE_OVERRIDES } : {}),
+        // Re-emitted from the map above, not copied from the old manifest: a
+        // `--write-manifest` run on a tree-sitter-wasms bump must not silently
+        // drop the committed grammars' provenance, which would leave the guard
+        // with nothing to check.
+        ...(Object.keys(VENDORED_GRAMMARS).length
+            ? { vendored: VENDORED_GRAMMARS }
+            : {}),
     };
     writeFileSync(MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`);
     console.error(`Wrote ${MANIFEST_PATH} (${GRAMMARS.length} grammars).`);

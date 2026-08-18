@@ -1341,6 +1341,29 @@ export const TOOLS: ToolDefinition[] = [
 		},
 	},
 	{
+		// CUE ships a single native binary per platform on GitHub releases;
+		// the LSP runs via `cue lsp serve`. Used as managedToolId by CueServer.
+		id: "cue",
+		name: "CUE",
+		checkCommand: "cue",
+		checkArgs: ["version"],
+		installStrategy: "github",
+		binaryName: "cue",
+		github: {
+			repo: "cue-lang/cue",
+			assetMatch: (platform, arch) => {
+				if (platform === "linux")
+					return arch === "arm64" ? "linux_arm64.tar.gz" : "linux_amd64.tar.gz";
+				if (platform === "darwin")
+					return arch === "arm64" ? "darwin_arm64.tar.gz" : "darwin_amd64.tar.gz";
+				if (platform === "win32")
+					return arch === "arm64" ? "windows_arm64.zip" : "windows_amd64.zip";
+				return undefined;
+			},
+			binaryInArchive: "cue",
+		},
+	},
+	{
 		// gleam ships a single static binary per platform on GitHub releases; the
 		// LSP runs via `gleam lsp`. Used as managedToolId by GleamServer. The linux
 		// build is a FLAT musl tarball (a bare `gleam`), handled by the recursive
@@ -4197,6 +4220,19 @@ export function isKnownToolId(toolId: string): boolean {
 }
 
 /**
+ * The registry's own install strategy for `toolId`, or `undefined` for an
+ * unknown id. Single source of truth for anything that needs to LABEL how a
+ * tool gets installed (e.g. the availability-decision evidence's `source`
+ * tag, #1612) — derived from the same `TOOLS` entry `ensureTool` dispatches
+ * on, so the label can never drift out of sync with the actual installer.
+ */
+export function getToolInstallStrategy(
+	toolId: string,
+): ToolDefinition["installStrategy"] | undefined {
+	return TOOLS.find((tool) => tool.id === toolId)?.installStrategy;
+}
+
+/**
  * GitHub-release tools that ship an asset for **every** supported
  * platform/arch combo (linux/darwin/win32 × x64/arm64). This is the set the
  * full asset-matrix test (tests/clients/installer/github-release.test.ts)
@@ -4229,6 +4265,7 @@ export const GITHUB_TOOLS = [
 	"opengrep",
 	"deno",
 	"clojure-lsp",
+	"cue",
 	"gleam",
 	"marksman",
 	"expert",

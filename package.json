@@ -70,6 +70,7 @@
     "dist/",
     "docs/",
     "grammars/",
+    "vendor/grammars/",
     "config/",
     "rules/",
     "skills/",
