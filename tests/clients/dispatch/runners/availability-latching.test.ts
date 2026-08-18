@@ -7,6 +7,7 @@
  * `availability-latching-clients.test.ts`.
  */
 
+import * as os from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	classifyProbeFailure,
@@ -24,6 +25,7 @@ import {
 import {
 	createAvailabilityChecker,
 	resetDispatchAvailabilityState,
+	resolveAvailableOrInstall,
 } from "../../../../clients/dispatch/runners/utils/runner-helpers.js";
 
 const { logLatencySpy } = vi.hoisted(() => ({ logLatencySpy: vi.fn() }));
@@ -44,6 +46,9 @@ vi.mock("../../../../clients/safe-spawn.js", () => ({
 
 vi.mock("../../../../clients/installer/index.js", () => ({
 	ensureTool: vi.fn(async () => null),
+	getInstallAttempt: vi.fn(() => undefined),
+	getLastEnsureResolutionSource: vi.fn(() => undefined),
+	getToolInstallStrategy: vi.fn(() => undefined),
 	isSpawnableCommand: vi.fn(async () => true),
 	resetPathWalkMemo: vi.fn(),
 	getToolEnvironment: vi.fn(async () => ({ ...process.env })),
@@ -442,5 +447,243 @@ describe("availability latch: shared client-side memo (#1467)", () => {
 		expect(message).not.toContain("It will be retried");
 		expect(message).toMatch(/retry ceiling/i);
 		expect(message).toContain("next session");
+	});
+});
+
+/**
+ * #1612 — class sibling of #1606: `resolveAvailableOrInstallUnshared` backs
+ * `resolveAvailableOrInstall`, the seam shared by ~16 runners (golangci-lint,
+ * ruff, shellcheck, pyright, knip, jscpd, …). When the PATH probe misses but
+ * the installer then resolves the binary, the probe's latched `unavailable`
+ * row stood alone: nothing recorded the recovery.
+ *
+ * Review round F1-F4: the first pass hand-picked `source: "managed-dir"` for
+ * every tool, asserted `install: "succeeded"` unconditionally, and claimed
+ * `latched: true` right after clearing the checker's own cache. This block
+ * replaces that with one case per installer strategy the registry actually
+ * uses behind this seam, derives the `install`/`resolved` evidence from
+ * `getInstallAttempt` instead of asserting it, asserts the honest `latched:
+ * false`, and covers the once-per-correction and failure-path angles the
+ * first pass missed.
+ */
+async function installerMocks() {
+	return import("../../../../clients/installer/index.js");
+}
+
+describe.each([
+	{ tool: "jscpd", strategy: "npm", source: "managed-dir" },
+	{ tool: "ruff", strategy: "pip", source: "pip-user" },
+	{ tool: "golangci-lint", strategy: "github", source: "github-release" },
+	{ tool: "spotbugs", strategy: "archive", source: "archive-dist" },
+	{ tool: "ktfmt", strategy: "maven", source: "maven-jar" },
+] as const)(
+	"resolveAvailableOrInstall compensating row: %s (#1612)",
+	({ tool, strategy, source }) => {
+		beforeEach(async () => {
+			const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+			const installerMod = await installerMocks();
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockReset();
+			vi.mocked(installerMod.ensureTool).mockReset();
+			vi.mocked(installerMod.getInstallAttempt).mockReset();
+			vi.mocked(installerMod.getToolInstallStrategy).mockReset();
+			vi.mocked(installerMod.isSpawnableCommand).mockReset();
+			vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(true);
+			vi.mocked(installerMod.getToolInstallStrategy).mockImplementation(
+				(id: string) => (id === tool ? strategy : undefined),
+			);
+			logLatencySpy.mockReset();
+			resetDispatchAvailabilityState();
+		});
+
+		it(`emits a compensating available row tagged "${source}" when ensureTool runs a real install`, async () => {
+			const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+			const installerMod = await installerMocks();
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingResult());
+			vi.mocked(installerMod.ensureTool).mockResolvedValue(
+				`/managed/bin/${tool}`,
+			);
+			// A REAL install just ran this call — the honest case for
+			// `install: "succeeded"` (#1612 review F2).
+			vi.mocked(installerMod.getInstallAttempt).mockReturnValue({
+				outcome: "succeeded",
+				at: Date.now(),
+			});
+			const checker = createAvailabilityChecker(tool);
+
+			const resolved = await resolveAvailableOrInstall(
+				checker,
+				tool,
+				process.cwd(),
+			);
+
+			expect(resolved).toBe(`/managed/bin/${tool}`);
+			const records = decisions();
+			expect(records).toHaveLength(2);
+
+			expect(records[0].metadata).toMatchObject({
+				tool,
+				verdict: "unavailable",
+				outcome: "missing",
+				cause: "not-found",
+				classifiedBy: "probe",
+			});
+
+			// The compensating row requires: the installer resolved the tool after
+			// the probe latched it absent, so a second row must say so — with the
+			// `source` tag DERIVED from the registry's own strategy for this tool
+			// (#1612 review F1), not a hand-picked constant.
+			expect(records[1].metadata).toMatchObject({
+				tool,
+				verdict: "available",
+				outcome: "success",
+				cause: "ok",
+				classifiedBy: "caller",
+				// checker.reset() just cleared the cache; nothing is held pinned the
+				// instant this row is written (#1612 review F3).
+				latched: false,
+				evidence: {
+					install: "succeeded",
+					binary: tool,
+					source,
+				},
+			});
+
+			// Explicit latch/log agreement (#1610 review angle 1, reapplied here):
+			// the value the ~16 callers act on and the verdict this row logs must
+			// say the same thing.
+			expect(Boolean(resolved)).toBe(records[1].metadata.verdict === "available");
+		});
+	},
+);
+
+describe("resolveAvailableOrInstall compensating row: once per correction (#1612 review F2)", () => {
+	beforeEach(async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await installerMocks();
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockReset();
+		vi.mocked(installerMod.ensureTool).mockReset();
+		vi.mocked(installerMod.getInstallAttempt).mockReset();
+		vi.mocked(installerMod.getToolInstallStrategy).mockReset();
+		vi.mocked(installerMod.isSpawnableCommand).mockReset();
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(true);
+		vi.mocked(installerMod.getToolInstallStrategy).mockReturnValue("pip");
+		logLatencySpy.mockReset();
+		resetDispatchAvailabilityState();
+	});
+
+	it("logs exactly one available row across three sequential calls, and a cache-only recovery never claims succeeded", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await installerMocks();
+		// Every probe misses, every call: `checker.reset()` clears the cache on
+		// each recovery, so the NEXT call re-probes PATH from scratch and misses
+		// again for a managed-dir-only install (the separate createVenvFinder
+		// bug). That must not read as three fresh corrections.
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingResult());
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/ruff");
+		// Only the FIRST call's `ensureTool` actually ran an install; calls 2 and
+		// 3 resolve from the installer's own cache with no fresh attempt —
+		// `getInstallAttempt` answers accordingly.
+		vi.mocked(installerMod.getInstallAttempt)
+			.mockReturnValueOnce({ outcome: "succeeded", at: Date.now() })
+			.mockReturnValue(undefined);
+		const checker = createAvailabilityChecker("ruff");
+		const cwd = process.cwd();
+
+		const first = await resolveAvailableOrInstall(checker, "ruff", cwd);
+		const second = await resolveAvailableOrInstall(checker, "ruff", cwd);
+		const third = await resolveAvailableOrInstall(checker, "ruff", cwd);
+
+		expect([first, second, third]).toEqual(Array(3).fill("/managed/bin/ruff"));
+
+		const available = decisions().filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		// Pre-fix, this was 3 (one per call, every one dishonestly claiming
+		// `install: "succeeded"`). Fixed, it is exactly 1 — the genuine
+		// correction — even though the caller keeps getting a resolved path on
+		// every call.
+		expect(available).toHaveLength(1);
+		expect(available[0].metadata.evidence).toMatchObject({
+			install: "succeeded",
+		});
+	});
+
+	it("tags a cache-resolved correction as not-attempted, never succeeded", async () => {
+		// A DIFFERENT cwd's first-ever correction for this tool, after some
+		// other cwd already installed it this session: `ensureTool` resolves it
+		// from its own cache (no fresh attempt), so this is a genuine new
+		// correction for THIS cwd, but the evidence must not claim an install
+		// that didn't happen here.
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await installerMocks();
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingResult());
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/ruff");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
+		const checker = createAvailabilityChecker("ruff");
+
+		// Must be a REAL, existing directory: the checker's probe path does a
+		// `fs.stat` on `cwd` first and reads a nonexistent one as "bad cwd", not
+		// "missing tool" — a different, non-installable outcome entirely.
+		const otherCwd = os.tmpdir();
+		const resolved = await resolveAvailableOrInstall(checker, "ruff", otherCwd);
+
+		expect(resolved).toBe("/managed/bin/ruff");
+		const available = decisions().filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		expect(available).toHaveLength(1);
+		expect(available[0].metadata.evidence).toMatchObject({
+			install: "not-attempted",
+			resolved: "cache",
+			binary: "ruff",
+		});
+		expect(available[0].metadata.evidence).not.toHaveProperty(
+			"install",
+			"succeeded",
+		);
+	});
+});
+
+describe("resolveAvailableOrInstall compensating row: failure path agreement (#1612 review F4)", () => {
+	beforeEach(async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await installerMocks();
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockReset();
+		vi.mocked(installerMod.ensureTool).mockReset();
+		vi.mocked(installerMod.getInstallAttempt).mockReset();
+		vi.mocked(installerMod.getToolInstallStrategy).mockReset();
+		vi.mocked(installerMod.isSpawnableCommand).mockReset();
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(true);
+		logLatencySpy.mockReset();
+		resetDispatchAvailabilityState();
+	});
+
+	it("logs no available row when the probe misses and the install ALSO fails", async () => {
+		// The #1610-review angle 1 agreement check is vacuous if it only ever
+		// exercises the success path (`true === true` by construction). This
+		// covers the other half: a falsy `resolved` must correspond to no
+		// `available` row at all, not just a differently-worded one.
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await installerMocks();
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingResult());
+		vi.mocked(installerMod.ensureTool).mockResolvedValue(undefined);
+		const checker = createAvailabilityChecker("ruff");
+
+		const resolved = await resolveAvailableOrInstall(
+			checker,
+			"ruff",
+			process.cwd(),
+		);
+
+		expect(resolved).toBeNull();
+		const records = decisions();
+		const available = records.filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		expect(Boolean(resolved)).toBe(available.length > 0);
+		expect(available).toHaveLength(0);
+		expect(records.some((record) => record.metadata.verdict === "unavailable")).toBe(
+			true,
+		);
 	});
 });

@@ -252,6 +252,29 @@ export abstract class SecurityScanClient<TResult> {
 	}
 
 	/**
+	 * #1623: public window onto the availability verdict for callers OUTSIDE
+	 * the dispatch graph (mode=full's fresh-fetch) that need to say WHY
+	 * `ensureAvailable()` most recently returned false — using the SAME
+	 * `AvailabilityOutcome`/`AvailabilityCause` taxonomy every dispatch-side
+	 * message is built from, rather than a re-guessed "binary unavailable"
+	 * that can't tell a transient retry-cooldown probe from a durable absence.
+	 * `latchedCause()`/`lastProbeOutcome` above stay `protected` for
+	 * dispatch-internal callers; this is the one public seam for everyone
+	 * else.
+	 */
+	getAvailabilityVerdict(): {
+		outcome: AvailabilityOutcome | null;
+		cause: AvailabilityCause | null;
+		retryAtMs: number;
+	} {
+		return {
+			outcome: this.availabilityLatch.getOutcome(),
+			cause: this.availabilityLatch.getCause(),
+			retryAtMs: this.availabilityLatch.getRetryAtMs(),
+		};
+	}
+
+	/**
 	 * Standard availability path for the GitHub-release tools (gitleaks, trivy):
 	 * PATH probe first, then fall back to the pi-lens installer's `ensureTool`.
 	 * Records the resolved binary path and sets `this.available`.

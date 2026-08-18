@@ -145,7 +145,14 @@ describe("truncated-but-magic-valid grammar download (#1564)", () => {
 			);
 			const manifest = JSON.parse(raw) as GrammarManifest;
 			for (const file of GRAMMAR_FILES) {
-				expect(manifest.grammars[file], `${file} lacks a pinned hash`).toMatch(
+				// A grammar is pinned in exactly one of two places: `grammars` for
+				// anything downloaded, `vendored` for anything we build and commit
+				// (#1522). The invariant is that EVERY mapped grammar is pinned
+				// somewhere — a vendored grammar never reaches the download path,
+				// so its hash guards the committed bytes instead of a transfer.
+				const pinned =
+					manifest.grammars[file] ?? manifest.vendored?.[file]?.sha256;
+				expect(pinned, `${file} lacks a pinned hash`).toMatch(
 					/^sha256:[0-9a-f]{64}$/,
 				);
 			}

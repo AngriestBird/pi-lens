@@ -1341,6 +1341,29 @@ export const TOOLS: ToolDefinition[] = [
 		},
 	},
 	{
+		// CUE ships a single native binary per platform on GitHub releases;
+		// the LSP runs via `cue lsp serve`. Used as managedToolId by CueServer.
+		id: "cue",
+		name: "CUE",
+		checkCommand: "cue",
+		checkArgs: ["version"],
+		installStrategy: "github",
+		binaryName: "cue",
+		github: {
+			repo: "cue-lang/cue",
+			assetMatch: (platform, arch) => {
+				if (platform === "linux")
+					return arch === "arm64" ? "linux_arm64.tar.gz" : "linux_amd64.tar.gz";
+				if (platform === "darwin")
+					return arch === "arm64" ? "darwin_arm64.tar.gz" : "darwin_amd64.tar.gz";
+				if (platform === "win32")
+					return arch === "arm64" ? "windows_arm64.zip" : "windows_amd64.zip";
+				return undefined;
+			},
+			binaryInArchive: "cue",
+		},
+	},
+	{
 		// gleam ships a single static binary per platform on GitHub releases; the
 		// LSP runs via `gleam lsp`. Used as managedToolId by GleamServer. The linux
 		// build is a FLAT musl tarball (a bare `gleam`), handled by the recursive
@@ -1493,6 +1516,33 @@ function noteInstallAttemptIfUnrecorded(
  */
 export function getInstallAttempt(toolId: string): InstallAttempt | undefined {
 	return installAttempts.get(toolId);
+}
+
+/**
+ * How the last `ensureTool` call for `toolId` resolved a path WITHOUT
+ * recording an install attempt (#1636 review). `getInstallAttempt` answers
+ * "undefined" for three different situations that a compensating-row consumer
+ * must not collapse into one label:
+ *
+ *   * `"session-cache"` — the in-memory `resolvedPathCache` already held a
+ *     verified path (fast path 1).
+ *   * `"probe-cache"`   — the persistent on-disk probe cache answered without
+ *     a fresh spawn (fast path 2).
+ *   * `"path"`          — `getToolPath` found the binary this call, on PATH,
+ *     a package manager's global bin dir, or the managed tools dir — a plain
+ *     discovery, not a cache hit.
+ *
+ * Reset alongside `installAttempts` at the top of every `ensureToolResolved`
+ * call so a stale source never survives past the attempt it described.
+ */
+export type EnsureResolutionSource = "session-cache" | "probe-cache" | "path";
+
+const lastEnsureResolutionSource = new Map<string, EnsureResolutionSource>();
+
+export function getLastEnsureResolutionSource(
+	toolId: string,
+): EnsureResolutionSource | undefined {
+	return lastEnsureResolutionSource.get(toolId);
 }
 
 // Session-lifetime cache: once a tool path is resolved, skip the process-spawn check on subsequent calls.
@@ -1878,6 +1928,7 @@ export function resetProbeCacheStateForTesting(): void {
 	ensureInFlight.clear();
 	installFailureReasons.clear();
 	installAttempts.clear();
+	lastEnsureResolutionSource.clear();
 	lastManagedInstallVersion.clear();
 	lastResolveTransient.clear();
 	resetPathWalkMemo();
@@ -3877,6 +3928,7 @@ async function ensureToolResolved(
 	// A fresh ensure supersedes whatever the last one recorded, and the trust-gate
 	// branch above deliberately keeps its `declined` record by never reaching here.
 	installAttempts.delete(toolId);
+	lastEnsureResolutionSource.delete(toolId);
 	const cacheResolvedPath = (result: string | undefined): string | undefined => {
 		if (result) {
 			resolvedPathCache.set(toolId, result);
@@ -3965,9 +4017,13 @@ async function ensureToolResolved(
 	// Fast path 1: in-memory session cache — no I/O.
 	const cached = resolvedPathCache.get(toolId);
 	if (cached) {
-		if (!isFullyQualified(cached)) return cached;
+		if (!isFullyQualified(cached)) {
+			lastEnsureResolutionSource.set(toolId, "session-cache");
+			return cached;
+		}
 		try {
 			await fs.access(cached);
+			lastEnsureResolutionSource.set(toolId, "session-cache");
 			return cached;
 		} catch {
 			// The executor would report ENOENT for this cached positive. Evict it
@@ -3986,6 +4042,7 @@ async function ensureToolResolved(
 	const diskCached = await checkProbeCache(toolId);
 	if (diskCached) {
 		resolvedPathCache.set(toolId, diskCached);
+		lastEnsureResolutionSource.set(toolId, "probe-cache");
 		logSessionStart(
 			`auto-install ensure ${toolId}: probe cache hit → ${diskCached}`,
 		);
@@ -4047,6 +4104,7 @@ async function ensureToolResolved(
 				existingPath,
 				wasLastResolveTransient(toolId),
 			);
+			lastEnsureResolutionSource.set(toolId, "path");
 			logSessionStart(
 				`auto-install ensure ${toolId}: already available at ${existingPath} (${Date.now() - ensureStartMs}ms)`,
 			);
@@ -4197,6 +4255,19 @@ export function isKnownToolId(toolId: string): boolean {
 }
 
 /**
+ * The registry's own install strategy for `toolId`, or `undefined` for an
+ * unknown id. Single source of truth for anything that needs to LABEL how a
+ * tool gets installed (e.g. the availability-decision evidence's `source`
+ * tag, #1612) — derived from the same `TOOLS` entry `ensureTool` dispatches
+ * on, so the label can never drift out of sync with the actual installer.
+ */
+export function getToolInstallStrategy(
+	toolId: string,
+): ToolDefinition["installStrategy"] | undefined {
+	return TOOLS.find((tool) => tool.id === toolId)?.installStrategy;
+}
+
+/**
  * GitHub-release tools that ship an asset for **every** supported
  * platform/arch combo (linux/darwin/win32 × x64/arm64). This is the set the
  * full asset-matrix test (tests/clients/installer/github-release.test.ts)
@@ -4229,6 +4300,7 @@ export const GITHUB_TOOLS = [
 	"opengrep",
 	"deno",
 	"clojure-lsp",
+	"cue",
 	"gleam",
 	"marksman",
 	"expert",
