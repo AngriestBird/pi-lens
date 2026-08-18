@@ -15,13 +15,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	downloadGrammarDetailed,
 	isVendoredGrammar,
 	LANGUAGE_TO_GRAMMAR,
 	VENDORED_GRAMMARS,
-	vendoredGrammarRefusal,
 	vendoredGrammarsDir,
 } from "../../clients/grammar-source.js";
 import type { TreeSitterClient } from "../../clients/tree-sitter-client.js";
@@ -164,17 +163,89 @@ describe("vendored grammars are never downloaded", () => {
 		expect(isVendoredGrammar("tree-sitter-python.wasm")).toBe(false);
 	});
 
-	// #1520 review F5: the refusal must be reachable BEFORE a write directory is
-	// resolved. `fetchGrammar` resolved one first, so on a host where
-	// web-tree-sitter is not locatable a missing vendored wasm came back as the
-	// generic RETRYABLE "no writable grammars directory" verdict — a packaging
-	// fault disguised as a transient download failure, arming a cooldown for a
-	// fetch that can never happen. The verdict is shared and dir-independent.
-	it("gives one non-retryable verdict with no write directory in play", () => {
-		expect(vendoredGrammarRefusal(CUE_GRAMMAR)).toEqual({
-			ok: false,
-			retryable: false,
-			reason: expect.stringContaining("vendor/grammars"),
-		});
+});
+
+/**
+ * #1520 review F5. `fetchGrammar` resolved a write directory BEFORE consulting
+ * the vendored short-circuit, so on a host where web-tree-sitter is not
+ * locatable a missing vendored wasm fell into the "no writable grammars
+ * directory" branch and was recorded as RETRYABLE — a packaging fault
+ * disguised as a transient download failure, arming a cooldown for a fetch
+ * that can never happen.
+ *
+ * These drive the real `fetchGrammar` on exactly that host (both directory
+ * sources stubbed to undefined) and assert on what it RECORDS. An earlier
+ * version of this test asserted the return value of `vendoredGrammarRefusal`,
+ * a pure constant — deleting the entire production fix left it green. The
+ * mutation that must fail here is removing the early-return block.
+ */
+describe("a missing vendored grammar on a host with no writable dir (#1520 F5)", () => {
+	interface FetchGrammarClient {
+		fetchGrammar(file: string): Promise<boolean>;
+		recordGrammarFailure(
+			file: string,
+			detail: string,
+			retryable: boolean,
+		): void;
+		resolveGrammarFile(file: string): string | undefined;
+		grammarsWriteDir(): string | undefined;
+		grammarsDir: string;
+	}
+
+	async function makeClient(): Promise<{
+		client: FetchGrammarClient;
+		recorded: Array<{ file: string; detail: string; retryable: boolean }>;
+	}> {
+		const { TreeSitterClient } = await import(
+			"../../clients/tree-sitter-client.js"
+		);
+		const client = new TreeSitterClient() as unknown as FetchGrammarClient;
+		// The host the fix names: nothing on disk, and no writable dir anywhere.
+		client.grammarsDir = "";
+		vi.spyOn(client, "resolveGrammarFile").mockReturnValue(undefined);
+		vi.spyOn(client, "grammarsWriteDir").mockReturnValue(undefined);
+		const recorded: Array<{
+			file: string;
+			detail: string;
+			retryable: boolean;
+		}> = [];
+		vi.spyOn(client, "recordGrammarFailure").mockImplementation(
+			(file, detail, retryable) => {
+				recorded.push({ file, detail, retryable });
+			},
+		);
+		return { client, recorded };
+	}
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("records the vendored grammar as NON-retryable", async () => {
+		const { client, recorded } = await makeClient();
+
+		await expect(client.fetchGrammar(CUE_GRAMMAR)).resolves.toBe(false);
+
+		expect(recorded).toHaveLength(1);
+		expect(recorded[0].file).toBe(CUE_GRAMMAR);
+		expect(recorded[0].retryable).toBe(false);
+		expect(recorded[0].detail).toContain("vendor/grammars");
+		// The regression wrote the write-dir message instead.
+		expect(recorded[0].detail).not.toContain("No writable grammars directory");
+	});
+
+	// The control. Without it, "everything is non-retryable" would also pass,
+	// and the branch would be proving nothing about vendored specifically.
+	it("still records a NORMAL grammar as retryable on the same host", async () => {
+		const { client, recorded } = await makeClient();
+
+		await expect(client.fetchGrammar("tree-sitter-python.wasm")).resolves.toBe(
+			false,
+		);
+
+		expect(recorded).toHaveLength(1);
+		expect(recorded[0].file).toBe("tree-sitter-python.wasm");
+		expect(recorded[0].retryable).toBe(true);
+		expect(recorded[0].detail).toContain("No writable grammars directory");
 	});
 });
