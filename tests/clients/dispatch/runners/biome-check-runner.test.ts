@@ -72,7 +72,7 @@ describe("biome-check runner", () => {
 				});
 
 			const runner = (
-				await import("../../../../clients/dispatch/runners/biome-check.ts")
+				await import("../../../../clients/dispatch/runners/biome-check.js")
 			).default;
 
 			await runner.run(createCtx(filePath, env.tmpDir) as never);

@@ -25,7 +25,7 @@ import {
 	setRenderCallback,
 	setSessionLanguages,
 	WIDGET_STATE_VERSION,
-} from "../../clients/widget-state.ts";
+} from "../../clients/widget-state.js";
 
 const e = String.fromCharCode(27);
 const theme = {

@@ -12,7 +12,7 @@ import { removeTempDirSync } from "./clients/test-utils.js";
 // mock-pi.ts is removed), and preserve the default flags these tests assume.
 // Call sites can move to the native createPiMock API (getHandlers/emit)
 // opportunistically (#171).
-// Each test does `vi.resetModules()` + `await import("../index.ts")`, so every
+// Each test does `vi.resetModules()` + `await import("../index.js")`, so every
 // case cold-evaluates the WHOLE extension dependency graph. That's inherently
 // heavy, and under full-suite parallel-transform contention the first/most
 // complex case (the session_start closure test) can exceed a tight per-test
@@ -186,7 +186,7 @@ describe("index.ts integration", () => {
 			ensureTool: ensureToolMock,
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi();
 		registerExtension(pi as any);
 
@@ -210,7 +210,7 @@ describe("index.ts integration", () => {
 			resetLSPService,
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi();
 		registerExtension(pi as any);
 
@@ -249,7 +249,7 @@ describe("index.ts integration", () => {
 			},
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi();
 		registerExtension(pi as any);
 
@@ -276,7 +276,7 @@ describe("index.ts integration", () => {
 			return { ...actual, emitBusEventRollupAtSessionEnd };
 		});
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi();
 		registerExtension(pi as any);
 
@@ -313,7 +313,7 @@ describe("index.ts integration", () => {
 			},
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi();
 		registerExtension(pi as any);
 
@@ -354,7 +354,7 @@ describe("index.ts integration", () => {
 			}),
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi({ "no-lsp": false });
 		registerExtension(pi as any);
 
@@ -400,7 +400,7 @@ describe("index.ts integration", () => {
 	// The real user prompt stays as the trailing message (cache breakpoint), and the
 	// existing transcript is never dropped (fe0ed5da: never emit empty input).
 	async function loadContextHandler() {
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi();
 		registerExtension(pi as any);
 		const context = handlers.context?.[0];
@@ -655,7 +655,7 @@ describe("index.ts integration", () => {
 			}),
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi({ "no-lsp": true });
 		registerExtension(pi as any);
 
@@ -748,7 +748,7 @@ describe("index.ts integration", () => {
 			}),
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi({ "no-lsp": true });
 		registerExtension(pi as any);
 
@@ -846,7 +846,7 @@ describe("index.ts integration", () => {
 			}),
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi({ "no-lsp": true });
 		registerExtension(pi as any);
 
@@ -961,7 +961,7 @@ describe("index.ts integration", () => {
 			resetLSPService: () => {},
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi({ "no-lsp": false });
 		registerExtension(pi as any);
 
@@ -1055,7 +1055,7 @@ describe("index.ts integration", () => {
 			resetLSPService: () => {},
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi({ "no-lsp": false });
 		registerExtension(pi as any);
 
@@ -1144,7 +1144,7 @@ describe("index.ts integration", () => {
 			resetLSPService: () => {},
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi({ "no-lsp": false });
 		registerExtension(pi as any);
 
@@ -1274,7 +1274,7 @@ describe("index.ts integration", () => {
 			}),
 		}));
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, commands } = createMockPi();
 		registerExtension(pi as any);
 
@@ -1482,7 +1482,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 
 	it("registers the turn_summary_emit quiet-window task", async () => {
 		mockSuiteDeps();
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi } = createMockPi();
 		registerExtension(pi as any);
 
@@ -1499,7 +1499,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
 		fs.writeFileSync(filePath, "export const x = 1;\n");
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers, sentMessages } = createMockPi({
 			"lens-turn-summary": true,
 		});
@@ -1552,7 +1552,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
 		fs.writeFileSync(filePath, "export const x = 1;\n");
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers, sentMessages } = createMockPi({
 			"lens-turn-summary": true,
 		});
@@ -1581,7 +1581,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
 		fs.writeFileSync(filePath, "export const x = 1;\n");
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers, sentMessages } = createMockPi({
 			"lens-turn-summary": true,
 		});
@@ -1603,7 +1603,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
 		fs.writeFileSync(filePath, "export const x = 1;\n");
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		// lens-turn-summary NOT set → getFlag resolves to its registered
 		// default (false) via createPiMock's registerFlag seeding.
 		const { pi, handlers, sentMessages } = createMockPi();
@@ -1617,7 +1617,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 
 	it("registers the pilens:turn-summary message renderer (feature-detected)", async () => {
 		mockSuiteDeps();
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, messageRenderers } = createMockPi();
 		registerExtension(pi as any);
 
@@ -1634,7 +1634,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
 		fs.writeFileSync(filePath, "export const x = 1;\n");
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers } = createMockPi({ "lens-turn-summary": true });
 		// Simulate an older host lacking both APIs entirely — registerExtension
 		// feature-detects registerMessageRenderer at setup time, and the
@@ -1657,7 +1657,7 @@ describe("#484 turn-summary emit at the agent_settled quiet window", () => {
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
 		fs.writeFileSync(filePath, "export const x = 1;\n");
 
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const { pi, handlers, sentMessages } = createMockPi({
 			"lens-turn-summary": true,
 		});
