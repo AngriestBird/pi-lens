@@ -1341,6 +1341,29 @@ export const TOOLS: ToolDefinition[] = [
 		},
 	},
 	{
+		// CUE ships a single native binary per platform on GitHub releases;
+		// the LSP runs via `cue lsp serve`. Used as managedToolId by CueServer.
+		id: "cue",
+		name: "CUE",
+		checkCommand: "cue",
+		checkArgs: ["version"],
+		installStrategy: "github",
+		binaryName: "cue",
+		github: {
+			repo: "cue-lang/cue",
+			assetMatch: (platform, arch) => {
+				if (platform === "linux")
+					return arch === "arm64" ? "linux_arm64.tar.gz" : "linux_amd64.tar.gz";
+				if (platform === "darwin")
+					return arch === "arm64" ? "darwin_arm64.tar.gz" : "darwin_amd64.tar.gz";
+				if (platform === "win32")
+					return arch === "arm64" ? "windows_arm64.zip" : "windows_amd64.zip";
+				return undefined;
+			},
+			binaryInArchive: "cue",
+		},
+	},
+	{
 		// gleam ships a single static binary per platform on GitHub releases; the
 		// LSP runs via `gleam lsp`. Used as managedToolId by GleamServer. The linux
 		// build is a FLAT musl tarball (a bare `gleam`), handled by the recursive
@@ -4242,6 +4265,7 @@ export const GITHUB_TOOLS = [
 	"opengrep",
 	"deno",
 	"clojure-lsp",
+	"cue",
 	"gleam",
 	"marksman",
 	"expert",
