@@ -4,12 +4,14 @@ import {
 	cascadeSettleWaitMs,
 	deriveCascadeNeighbourBudget,
 } from "../../clients/cascade-budget.js";
+import { _resetQuietWindowEnabledForTests } from "../../clients/quiet-window.js";
 
 const ENV_KEYS = [
 	"PI_LENS_CASCADE_SETTLE_WAIT_MS",
 	"PI_LENS_CASCADE_NEIGHBOUR_COST_MS",
 	"PI_LENS_CASCADE_NEIGHBOUR_FLOOR",
 	"PI_LENS_QUIET_WINDOW_WAIT_MS",
+	"PI_LENS_QUIET_WINDOW",
 ] as const;
 
 const saved = new Map<string, string | undefined>();
@@ -25,6 +27,9 @@ afterEach(() => {
 		else process.env[key] = value;
 	}
 	saved.clear();
+	// The kill switch is memoized on first read — clear it so a case that flips
+	// PI_LENS_QUIET_WINDOW cannot leak its answer into the next one.
+	_resetQuietWindowEnabledForTests();
 });
 
 describe("cascadeSettleWaitMs", () => {
@@ -138,6 +143,19 @@ describe("deriveCascadeNeighbourBudget", () => {
 		setEnv("PI_LENS_QUIET_WINDOW_WAIT_MS", "3000");
 		expect(deriveCascadeNeighbourBudget({ elapsedMs: 0 }).deliveryWindowMs).toBe(
 			8000,
+		);
+	});
+
+	it("does not count a drain that PI_LENS_QUIET_WINDOW=0 has switched off", () => {
+		// `quietWindowWaitMs()` keeps returning 15000 when the scheduler is
+		// disabled — it is the task budget, not a statement that the task runs.
+		// A field documented as the whole deadline stack must not claim a second
+		// window that no longer exists, or the past-rescue zone looks justified
+		// by 15 s of drain that is never going to happen.
+		setEnv("PI_LENS_QUIET_WINDOW", "0");
+		_resetQuietWindowEnabledForTests();
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 0 }).deliveryWindowMs).toBe(
+			5000,
 		);
 	});
 

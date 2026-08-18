@@ -47,7 +47,13 @@
  */
 
 import { toPositiveFinite } from "./env-utils.js";
-import { quietWindowWaitMs } from "./quiet-window.js";
+// The knobs only, never the scheduler: `quiet-window.ts` pulls
+// `resource-sampler.ts` → `pidusage` at import time, and this module sits on
+// the dispatch load path (#1462 review N4).
+import {
+	isQuietWindowEnabled,
+	quietWindowWaitMs,
+} from "./quiet-window-config.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
 
 /**
@@ -128,6 +134,11 @@ export interface CascadeBudgetDecision {
 	 * budget rather than narrowing, and it puts the second window on the record
 	 * so a reader of `cascade_result` sees the whole deadline stack instead of
 	 * just the 5000 ms one.
+	 *
+	 * Counts the drain only when it will actually run: `PI_LENS_QUIET_WINDOW=0`
+	 * disables the scheduler while `quietWindowWaitMs()` keeps returning its
+	 * budget, so reading the budget alone would claim 15 s of drain that no
+	 * longer exists (#1462 review N3).
 	 */
 	deliveryWindowMs: number;
 }
@@ -163,11 +174,19 @@ export function deriveCascadeNeighbourBudget(options: {
 	const elapsedMs = toPositiveFinite(options.elapsedMs);
 	const remainingMs = onTimeMs - elapsedMs;
 	const deliveryWindowMs =
-		onTimeMs + (options.quietDrainMs ?? quietWindowWaitMs());
+		onTimeMs +
+		(options.quietDrainMs ??
+			(isQuietWindowEnabled() ? quietWindowWaitMs() : 0));
 	const full = { budget: ceiling, ceiling, remainingMs, deliveryWindowMs };
 
 	// No on-time window at all, or one too small to ever fit a full walk. There
 	// is no late run to rescue here, only every run to shrink — stand down.
+	//
+	// Boundary, acknowledged rather than special-cased: at exactly
+	// `onTimeMs === ceiling * perNeighbourMs` this does not fire and the `fits`
+	// zone has zero width, so any prelude at all narrows slightly. Harmless (the
+	// budget still lands within one neighbour of the ceiling, and the rescue is
+	// genuine at that setting) and not worth a third comparison.
 	if (onTimeMs <= 0 || onTimeMs < ceiling * perNeighbourMs) {
 		return { ...full, zone: "no-rescue-window" };
 	}

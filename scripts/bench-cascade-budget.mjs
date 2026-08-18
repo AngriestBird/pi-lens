@@ -175,8 +175,19 @@ if (process.argv.includes("--sweep")) {
 			"anything and pure loss appears. The rescue band bounds the damage — it never\n" +
 			"narrows a run that is already past a floor-sized walk, which is what keeps\n" +
 			"the cold-session case identical to pre-#1462 — but it cannot rescue a run\n" +
-			"whose cost it mis-measured. Raise PI_LENS_CASCADE_NEIGHBOUR_COST_MS if a\n" +
-			"dogfood window shows the marginal cost above the divisor.",
+			"whose cost it mis-measured.\n\n" +
+			"So raising PI_LENS_CASCADE_NEIGHBOUR_COST_MS is the lever, WITHIN A RANGE.\n" +
+			`With the ${SETTLE_MS} ms window and a ceiling of ${CEILING}, measured by --divisor-ms:\n` +
+			"  <=112 ms  healthy — only runs that would have missed are narrowed\n" +
+			"  113-129   the fits zone has shrunk below the real preludes, so runs that\n" +
+			"            would have landed anyway start getting narrowed (--divisor-ms=113\n" +
+			"            narrows 1 such run; =125 narrows every row and drops 48)\n" +
+			"  >=130     ceiling * divisor exceeds the window, so no-rescue-window fires\n" +
+			"            on everything and the feature disarms\n\n" +
+			"The top of that is a SAFE failure mode — disarmed means the flat cap, which\n" +
+			"is pre-#1462 behaviour, 0 dropped. The middle is the one to avoid. If a\n" +
+			"dogfood window puts the true marginal cost above ~112 ms, raise the settle\n" +
+			"wait or lower the ceiling with the divisor rather than the divisor alone.",
 	);
 } else {
 	printTable(numArg("true-cost-ms", 97));
