@@ -90,6 +90,14 @@ export interface WriteFileAtomicOptions {
 	 * the same best-effort cleanup (the #757 disposition-store policy).
 	 */
 	bestEffort?: boolean;
+	/**
+	 * POSIX file mode (e.g. `0o750` for an installed executable) applied at
+	 * staging-file CREATION, so it travels with the file across the rename
+	 * rather than needing a separate `chmod` after publication. Ignored on
+	 * Windows (Node's `fs` mode support is POSIX-only there). Omit for the
+	 * default (umask-governed) mode.
+	 */
+	mode?: number;
 }
 
 /**
@@ -163,7 +171,10 @@ export function writeFileAtomic(
 	const bestEffort = options?.bestEffort ?? true;
 	const tmpPath = stagePathFor(targetPath);
 	try {
-		fs.writeFileSync(tmpPath, data, typeof data === "string" ? "utf-8" : undefined);
+		fs.writeFileSync(tmpPath, data, {
+			encoding: typeof data === "string" ? "utf-8" : undefined,
+			mode: options?.mode,
+		});
 		fs.renameSync(tmpPath, targetPath);
 	} catch (err) {
 		try {
@@ -189,11 +200,10 @@ export async function writeFileAtomicAsync(
 	const bestEffort = options?.bestEffort ?? true;
 	const tmpPath = stagePathFor(targetPath);
 	try {
-		await fs.promises.writeFile(
-			tmpPath,
-			data,
-			typeof data === "string" ? "utf-8" : undefined,
-		);
+		await fs.promises.writeFile(tmpPath, data, {
+			encoding: typeof data === "string" ? "utf-8" : undefined,
+			mode: options?.mode,
+		});
 		await fs.promises.rename(tmpPath, targetPath);
 	} catch (err) {
 		try {
