@@ -108,6 +108,13 @@ export interface ProbeEvidence {
 	 * signal to promote the specific case into `install` rather than to parse this.
 	 */
 	installReason?: string;
+	/**
+	 * Where the installer put the binary, when `install: "succeeded"`. The
+	 * compensating `available` row after a probe-then-install recovery (#1606,
+	 * #1612) is the only durable record that the tool came back — without the
+	 * path here, a reader can see the verdict flipped but not what resolved it.
+	 */
+	binaryPath?: string;
 }
 
 /**

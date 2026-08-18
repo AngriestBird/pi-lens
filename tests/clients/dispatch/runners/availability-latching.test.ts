@@ -24,6 +24,7 @@ import {
 import {
 	createAvailabilityChecker,
 	resetDispatchAvailabilityState,
+	resolveAvailableOrInstall,
 } from "../../../../clients/dispatch/runners/utils/runner-helpers.js";
 
 const { logLatencySpy } = vi.hoisted(() => ({ logLatencySpy: vi.fn() }));
@@ -444,3 +445,76 @@ describe("availability latch: shared client-side memo (#1467)", () => {
 		expect(message).toContain("next session");
 	});
 });
+
+/**
+ * #1612 — class sibling of #1606: `resolveAvailableOrInstallUnshared` backs
+ * `resolveAvailableOrInstall`, the seam shared by ~16 runners (golangci-lint,
+ * ruff, shellcheck, pyright, knip, jscpd, …). When the PATH probe misses but
+ * the installer then resolves the binary, the probe's latched `unavailable`
+ * row stood alone: nothing recorded the recovery. Parameterized over a few
+ * representative toolIds because the seam itself is tool-agnostic — every
+ * caller funnels through the same `checker`/`toolId`/`cwd` contract.
+ */
+describe.each(["ruff", "golangci-lint", "shellcheck"])(
+	"resolveAvailableOrInstall compensating row: %s (#1612)",
+	(tool) => {
+		beforeEach(async () => {
+			const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+			const installerMod = await import(
+				"../../../../clients/installer/index.js"
+			);
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockReset();
+			vi.mocked(installerMod.ensureTool).mockReset();
+			vi.mocked(installerMod.isSpawnableCommand).mockReset();
+			vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(true);
+			logLatencySpy.mockReset();
+			resetDispatchAvailabilityState();
+		});
+
+		it("emits a compensating available row when ensureTool recovers a failed probe", async () => {
+			const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+			const installerMod = await import(
+				"../../../../clients/installer/index.js"
+			);
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingResult());
+			vi.mocked(installerMod.ensureTool).mockResolvedValue(
+				`/managed/bin/${tool}`,
+			);
+			const checker = createAvailabilityChecker(tool);
+
+			const resolved = await resolveAvailableOrInstall(
+				checker,
+				tool,
+				process.cwd(),
+			);
+
+			expect(resolved).toBe(`/managed/bin/${tool}`);
+			const records = decisions();
+			expect(records).toHaveLength(2);
+
+			expect(records[0].metadata).toMatchObject({
+				tool,
+				verdict: "unavailable",
+				outcome: "missing",
+				cause: "not-found",
+				classifiedBy: "probe",
+			});
+
+			// The compensating row #1612 requires: the installer resolved the tool
+			// after the probe latched it absent, so a second row must say so — and
+			// its verdict must agree with what the caller got back (`resolved`
+			// above), not just exist.
+			expect(records[1].metadata).toMatchObject({
+				tool,
+				verdict: "available",
+				outcome: "success",
+				cause: "ok",
+				classifiedBy: "caller",
+				evidence: {
+					install: "succeeded",
+					binaryPath: `/managed/bin/${tool}`,
+				},
+			});
+		});
+	},
+);

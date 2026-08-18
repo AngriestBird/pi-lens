@@ -1005,10 +1005,29 @@ async function resolveAvailableOrInstallUnshared(
 	if (state.suppressed) {
 		return null;
 	}
+	const installStartedAt = Date.now();
 	const installed = await ensureTool(toolId);
 	if (installed) {
 		noteInstallSuccess(toolId, cwd);
 		checker.reset?.();
+		// The PATH probe above already wrote a latched `unavailable` row via
+		// `checker.isAvailableAsync`. Without a compensating row here, the durable
+		// log keeps saying the tool is off after the installer just brought it
+		// back — the shape #1606/PR #1610 fixed in `ensureViaInstaller`, shared
+		// here by ~16 runners behind this helper (#1612).
+		logAvailabilityDecision(
+			{
+				tool: toolId,
+				verdict: "available",
+				outcome: "success",
+				cause: "ok",
+				elapsedMs: Date.now() - installStartedAt,
+				latched: true,
+				classifiedBy: "caller",
+				evidence: { install: "succeeded", binaryPath: installed },
+			},
+			cwd,
+		);
 		return installed;
 	}
 	noteInstallFailure(toolId, cwd);
