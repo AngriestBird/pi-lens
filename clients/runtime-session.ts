@@ -1928,11 +1928,21 @@ export async function handleSessionStart(
 	// project data roots and machine-global registry root once per session start;
 	// this is fire-and-forget and bounded so it never delays startup.
 	const projectDataDir = getProjectDataDir(cwd);
+	// #1609 review F1: sweepOwnStagingFiles does not recurse, so the installer's
+	// bin/ and tools/ subdirectories (clients/installer/index.ts's
+	// GITHUB_BIN_DIR / TOOLS_DIR, now atomic-write.js writers too) need their
+	// own entries — otherwise an orphaned staging file from a kill mid-install
+	// (this PR's own motivating scenario) never gets reaped, and unique
+	// pid-thread-seq staging names mean repeated kills ACCUMULATE full-size
+	// orphan binaries instead of being cleaned up.
+	const globalDir = getGlobalPiLensDir();
 	void sweepAtomicWriteStages([
 		projectDataDir,
 		path.join(projectDataDir, "cache"),
 		path.join(projectDataDir, "sessions"),
-		getGlobalPiLensDir(),
+		globalDir,
+		path.join(globalDir, "bin"),
+		path.join(globalDir, "tools"),
 	]).catch(() => {
 		// best-effort lifecycle cleanup — never fail session_start
 	});
