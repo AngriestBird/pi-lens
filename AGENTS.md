@@ -1,5 +1,28 @@
 # pi-lens — agent context
 
+A detached process-lifetime timer must never fire into an operation that
+granted itself a longer wall-clock budget than the timer's own delay.
+`clients/lsp/workspace-sweep-hold.ts`'s counter-based hold is the pattern:
+the long-running operation (`LSPService.runWorkspaceDiagnostics`) acquires it
+for its whole lifetime in try/finally (so a throw or an overlapping second
+call still releases correctly — never a boolean, which a second holder could
+clear early), and the timer (`clients/runtime-turn.ts`'s idle-reset) checks
+the hold at FIRE time and defers instead of firing, re-arming a fresh delay
+once the last hold releases rather than resuming a stale countdown. The
+timer's base delay is also derived from the operation's own wall-clock
+ceiling plus a safety margin, so the two constants can't drift back into the
+relationship that caused this: a 240s idle-reset timer firing into an
+in-flight `lens_diagnostics mode=full` sweep (which grants itself 300s),
+destroying the very service the sweep was touching and mislabeling ~81
+service-destroyed files as budget exhaustion. A destroyed-mid-operation
+outcome needs its OWN discriminated reason, distinct from a real budget
+timeout or a thrown error — `LSPWorkspaceDiagnosticResult.unconfirmedReason`
+(`budget` / `inconclusive` / `coverage_gap` / `service_destroyed` / `error`)
+replaces a single ambiguous `timedOut` flag, and every render/log site that
+used to compute an errored count via `length - timedOutCount` (structurally
+always 0, since the error path also set `timedOut`) reads the discriminant
+directly instead. (#1618)
+
 Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
 identity logs every success/failure outcome, deferred mutation drains summarize

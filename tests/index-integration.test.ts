@@ -385,7 +385,7 @@ describe("index.ts integration", () => {
 
 			// 240s of total idle (no further turns) → the detached timer fires the
 			// wrapped reset, which releases the servers AND repaints to "Inactive".
-			await vi.advanceTimersByTimeAsync(240_000);
+			await vi.advanceTimersByTimeAsync(360_000);
 			expect(resetLSPService).toHaveBeenCalledTimes(1);
 			expect(lspStatuses().at(-1)).toBe("LSP Inactive");
 		} finally {

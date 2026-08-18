@@ -31,6 +31,11 @@ import {
 	toRunnerDisplayPath,
 } from "./dispatch/runner-context.js";
 import { getKnipIgnorePatterns } from "./file-utils.js";
+import {
+	getFullScanWallClockMs,
+	isWorkspaceSweepActive,
+	runWhenWorkspaceSweepIdle,
+} from "./lsp/workspace-sweep-hold.js";
 import { isTestRoleCollateral } from "./collateral-test-role.js";
 import type { GitleaksResult } from "./gitleaks-client.js";
 import type { GovulncheckResult } from "./govulncheck-client.js";
@@ -112,6 +117,13 @@ function wouldPoisonCache(
 
 // LSP idle reset scheduling — prevents thrashing by delaying shutdown
 let lspIdleResetTimeout: ReturnType<typeof setTimeout> | null = null;
+// #1618: set while this timer's fire is deferred behind an in-flight
+// workspace sweep (see `scheduleLSPIdleReset`'s `isWorkspaceSweepActive`
+// branch). `cancelLSPIdleReset` must be able to cancel THIS too — otherwise
+// an active-editing turn that cancels idle reset while a sweep is still
+// running would have it silently resurrected once the sweep finishes, even
+// though the session is no longer idle.
+let pendingSweepRearm: { cancelled: boolean } | null = null;
 
 function emitIdleResetReporterWarning(reportErr: unknown): void {
 	try {
@@ -150,6 +162,24 @@ function scheduleLSPIdleReset(
 	}
 	lspIdleResetTimeout = setTimeout(() => {
 		lspIdleResetTimeout = null;
+		// #1618: a full workspace sweep (`lens_diagnostics mode=full`) grants
+		// itself a wall-clock ceiling that can outlive this timer's delay — this
+		// used to fire straight into an in-flight sweep and destroy the very
+		// service the sweep was actively touching, mislabeling every file the
+		// sweep had not yet reached as budget exhaustion. Defer instead of
+		// firing: re-arm a FRESH `delayMs` timer once the sweep releases its
+		// hold, rather than resuming a countdown that's already elapsed (which
+		// would fire the instant the hold releases) or destroying mid-sweep.
+		if (isWorkspaceSweepActive()) {
+			const rearmToken = { cancelled: false };
+			pendingSweepRearm = rearmToken;
+			runWhenWorkspaceSweepIdle(() => {
+				if (rearmToken.cancelled) return;
+				if (pendingSweepRearm === rearmToken) pendingSweepRearm = null;
+				scheduleLSPIdleReset(resetFn, delayMs, options);
+			});
+			return;
+		}
 		try {
 			if (options.isCurrentSession && !options.isCurrentSession()) {
 				return;
@@ -168,10 +198,31 @@ function scheduleLSPIdleReset(
 	lspIdleResetTimeout.unref();
 }
 
+// #1618 acceptance criterion 6: FULL_SCAN_WALL_CLOCK_MS (the full-sweep wall
+// clock ceiling, `tools/lens-diagnostics.ts`) must stay under the base idle
+// reset delay — derived, not asserted, so the two constants can't drift back
+// into a relationship where a still-running sweep can outlive this timer.
+// The AC1 hold above already makes a mid-sweep fire impossible regardless of
+// this margin; this is defense in depth against a future caller that touches
+// the LSP service outside `runWorkspaceDiagnostics`' hold.
+const SWEEP_IDLE_SAFETY_MARGIN_MS = 60_000;
+const DEFAULT_LSP_IDLE_RESET_MS = 240_000;
+
+function getBaseLspIdleResetMs(): number {
+	return Math.max(
+		DEFAULT_LSP_IDLE_RESET_MS,
+		getFullScanWallClockMs() + SWEEP_IDLE_SAFETY_MARGIN_MS,
+	);
+}
+
 export function cancelLSPIdleReset(): void {
 	if (lspIdleResetTimeout) {
 		clearTimeout(lspIdleResetTimeout);
 		lspIdleResetTimeout = null;
+	}
+	if (pendingSweepRearm) {
+		pendingSweepRearm.cancelled = true;
+		pendingSweepRearm = null;
 	}
 }
 
@@ -295,7 +346,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const idleResetMs =
 			isSubagentSession() || shouldShortenLspIdleTimeout()
 				? getLspBudgetIdleTimeoutMs()
-				: 240_000;
+				: getBaseLspIdleResetMs();
 		dbg(
 			`turn_end: no modified files, scheduling LSP idle reset (${idleResetMs / 1000}s)`,
 		);

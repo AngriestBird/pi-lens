@@ -33,6 +33,7 @@ import {
 } from "../project-trust.js";
 import { shouldPreferPullOnlyDiagnostics } from "../lsp-budget.js";
 import { withDeadline } from "../deadline-utils.js";
+import { acquireWorkspaceSweepHold } from "./workspace-sweep-hold.js";
 import {
 	isAtOrAboveHomeDir,
 	isWindowsPath,
@@ -534,6 +535,37 @@ export interface LSPTouchFileOptions {
 	warmupAttempt?: number;
 }
 
+/**
+ * #1618: discriminated cause for an unconfirmed (`timedOut: true`)
+ * `LSPWorkspaceDiagnosticResult` — replaces the old single `timedOutFiles`
+ * bucket, which conflated a real budget timeout with a thrown error (the
+ * `unconfirmedErrored = length - unconfirmedTimedOut` dead-subtraction bug
+ * downstream in `tools/lens-diagnostics.ts` was structurally always 0
+ * because the sweep's own catch block set BOTH `error` and `timedOut`) and
+ * with a service torn down mid-sweep by the idle-reset race (81 files that
+ * left zero trace and rendered as "check didn't complete within budget").
+ *
+ * - `budget` — the outer per-file `withDeadline` wrapper never got a result
+ *   back at all within `perFileMs`.
+ * - `inconclusive` — `touchFile`'s own `.inconclusive` flag (#570): the
+ *   notify write or the diagnostics wait itself timed out. Also used for a
+ *   group skipped after a failed pre-sweep server warm-up (#744) — the
+ *   check was never even attempted, which is inconclusive, not a timeout.
+ * - `coverage_gap` — an auxiliary scanner never reported for this touch
+ *   (breaker-open, deferred resync, or a silent/cut-off wait — see
+ *   `touchCoverageGap`).
+ * - `service_destroyed` — the LSP service was torn down (`resetLSPService`)
+ *   while this sweep was still in flight; the remainder of the sweep never
+ *   even attempted a language-server round trip for this file.
+ * - `error` — the per-file check threw.
+ */
+export type LSPWorkspaceUnconfirmedReason =
+	| "budget"
+	| "inconclusive"
+	| "coverage_gap"
+	| "service_destroyed"
+	| "error";
+
 export interface LSPWorkspaceDiagnosticResult {
 	filePath: string;
 	diagnostics: import("./client.js").LSPDiagnostic[];
@@ -553,6 +585,12 @@ export interface LSPWorkspaceDiagnosticResult {
 	 * falls back to per-file, never a silent empty default).
 	 */
 	timedOut?: boolean;
+	/**
+	 * #1618: WHY `timedOut` is true — see {@link LSPWorkspaceUnconfirmedReason}.
+	 * Always set alongside `timedOut: true` on every path this sweep
+	 * produces; absent only on a legacy/test double that predates this field.
+	 */
+	unconfirmedReason?: LSPWorkspaceUnconfirmedReason;
 	/**
 	 * #744: true when this file's per-file check was never even attempted
 	 * because its primary language server failed the pre-sweep warm-up (an
@@ -2466,7 +2504,34 @@ export class LSPService {
 		// side-channels). See `TouchFileResult` for the field-presence contract.
 		TouchFileResult | undefined
 	> {
-		if (this.checkDestroyed()) return;
+		if (this.checkDestroyed()) {
+			// #1618: a destroyed service never reaches the language server — this
+			// early return used to log nothing at all, so a workspace sweep whose
+			// idle-reset timer fired mid-run left every remaining file with zero
+			// trace, indistinguishable from budget exhaustion. Cheap and local: no
+			// server round trip, matching the `no_clients`/`success` sibling
+			// records this phase already emits below.
+			const destroyedDiagnosticsMode = options.collectDiagnostics
+				? (options.diagnostics ?? "document")
+				: (options.diagnostics ?? "none");
+			logLatency({
+				type: "phase",
+				phase: "lsp_touch_file",
+				filePath: normalizeMapKey(filePath),
+				durationMs: 0,
+				metadata: {
+					serverCountAttempted: 0,
+					serverCountReady: 0,
+					clientScope:
+						options.clientScope ??
+						(destroyedDiagnosticsMode === "full" ? "all" : "primary"),
+					diagnosticsMode: destroyedDiagnosticsMode,
+					source: options.source ?? "unknown",
+					failureKind: "destroyed",
+				},
+			});
+			return;
+		}
 		const startedAt = Date.now();
 		const normalizedPath = normalizeMapKey(filePath);
 		const diagnosticsMode = options.collectDiagnostics
@@ -5538,6 +5603,31 @@ export class LSPService {
 			files?: string[];
 		} = {},
 	): Promise<LSPWorkspaceDiagnosticResult[]> {
+		// #1618: hold the shared sweep gate for this call's ENTIRE lifetime —
+		// counter-based (not a boolean) so two overlapping `mode=full` calls each
+		// release independently, and try/finally so a throw or an aborted sweep
+		// still releases it (a leaked hold would permanently disable idle reset,
+		// the inverse defect). While held, `clients/runtime-turn.ts`'s idle-reset
+		// timer defers instead of destroying this service mid-sweep.
+		const releaseSweepHold = acquireWorkspaceSweepHold();
+		try {
+			return await this.runWorkspaceDiagnosticsSwept(cwd, options);
+		} finally {
+			releaseSweepHold();
+		}
+	}
+
+	private async runWorkspaceDiagnosticsSwept(
+		cwd: string,
+		options: {
+			maxFiles?: number;
+			signal?: AbortSignal;
+			onProgress?: (completed: number, total: number) => void;
+			onServerReady?: () => void;
+			nextWriteIndex?: () => number;
+			files?: string[];
+		} = {},
+	): Promise<LSPWorkspaceDiagnosticResult[]> {
 		const startedAt = Date.now();
 		const root = path.resolve(cwd);
 		const { signal } = options;
@@ -5773,6 +5863,27 @@ export class LSPService {
 			}
 		};
 
+		// #1618: a service destroyed mid-sweep (idle-reset race, an explicit
+		// `resetLSPService` call, session replacement, …) must stop the loop for
+		// every file it has not yet reached and record WHY — never a bare
+		// `timedOut` that reads identically to a budget timeout. Cheap: no
+		// language-server round trip, just a results push.
+		const markServiceDestroyed = (remainingFiles: readonly string[]): void => {
+			for (const filePath of remainingFiles) {
+				results.push({
+					filePath,
+					diagnostics: [],
+					count: 0,
+					timedOut: true,
+					unconfirmedReason: "service_destroyed",
+					writeIndex: writeIndexByPath.get(normalizeMapKey(filePath)),
+				});
+				timedOutFiles += 1;
+				completed += 1;
+			}
+			options.onProgress?.(completed, files.length);
+		};
+
 		const processFile = async (filePath: string): Promise<void> => {
 			try {
 				const content =
@@ -5871,6 +5982,17 @@ export class LSPService {
 				const timedOut =
 					touchResult === undefined || inconclusive || coverageGap;
 				if (timedOut) timedOutFiles += 1;
+				// #1618: WHY, in priority order — the outer deadline (nothing came
+				// back at all) outranks an inner inconclusive signal, which outranks
+				// a narrower auxiliary coverage gap.
+				const unconfirmedReason: LSPWorkspaceUnconfirmedReason | undefined =
+					touchResult === undefined
+						? "budget"
+						: inconclusive
+							? "inconclusive"
+							: coverageGap
+								? "coverage_gap"
+								: undefined;
 				// #1104 (shape 5 — AGENTS.md): the touch's content binding is an
 				// EXPLICIT enumerable field on the wrapper now (#1179), so it survives
 				// `applyAuxiliarySuppressions` below rebuilding `.diags` via `.filter()`
@@ -5901,6 +6023,7 @@ export class LSPService {
 					diagnostics: filteredDiagnostics ?? [],
 					count: filteredDiagnostics?.length ?? 0,
 					timedOut,
+					unconfirmedReason,
 					contentHash: rawBinding?.contentHash,
 					boundToCurrentDisk: rawBinding?.boundToCurrentDisk,
 					writeIndex: writeIndexByPath.get(normalizeMapKey(filePath)),
@@ -5913,8 +6036,12 @@ export class LSPService {
 					error: err instanceof Error ? err.message : String(err),
 					// An errored check is exactly as inconclusive as a timed-out one —
 					// no confirmed result was obtained, so reconciliation (#571) must
-					// skip it the same way.
+					// skip it the same way. #1618: distinct from every OTHER
+					// `timedOut: true` reason — an `error` must never render as "didn't
+					// complete within budget" (the old dead-subtraction bug in
+					// tools/lens-diagnostics.ts's `unconfirmedErrored` computation).
 					timedOut: true,
+					unconfirmedReason: "error",
 					writeIndex: writeIndexByPath.get(normalizeMapKey(filePath)),
 				});
 			}
@@ -5954,6 +6081,13 @@ export class LSPService {
 			groupWorkers,
 			async (group) => {
 				if (signal?.aborted) return;
+				// #1618: checked before any per-group work (pull attempt, warm-up,
+				// per-file loop) so a service already destroyed when this group
+				// starts never pays for a language-server round trip it cannot get.
+				if (this.checkDestroyed()) {
+					markServiceDestroyed(group.files);
+					return;
+				}
 				// Fast path: one project-wide pull for the whole group (opt-in).
 				if (
 					!isWarmAttached() &&
@@ -6030,6 +6164,7 @@ export class LSPService {
 								diagnostics: [],
 								count: 0,
 								timedOut: true,
+								unconfirmedReason: "inconclusive",
 								skippedWarmupFailure: true,
 							});
 							timedOutFiles += 1;
@@ -6053,6 +6188,15 @@ export class LSPService {
 					chunkStart += WORKSPACE_SWEEP_PREOPEN_CHUNK_SIZE
 				) {
 					if (signal?.aborted) return;
+					// #1618: a service destroyed WHILE this group's chunk loop was
+					// already running (the group-start check above can't see a
+					// destruction that lands mid-loop) — stop here and mark every
+					// file from this chunk onward, rather than letting the remaining
+					// chunks pay for pre-opens/touches against a torn-down service.
+					if (this.checkDestroyed()) {
+						markServiceDestroyed(group.files.slice(chunkStart));
+						return;
+					}
 					const chunk = group.files.slice(
 						chunkStart,
 						chunkStart + WORKSPACE_SWEEP_PREOPEN_CHUNK_SIZE,
@@ -6062,6 +6206,12 @@ export class LSPService {
 						// Honor cancellation between files (#341); already-collected
 						// results are returned as a partial.
 						if (signal?.aborted) return;
+						if (this.checkDestroyed()) {
+							markServiceDestroyed(
+								group.files.slice(group.files.indexOf(filePath)),
+							);
+							return;
+						}
 						await processFile(filePath);
 					}
 				}
@@ -6069,6 +6219,18 @@ export class LSPService {
 			signal,
 		);
 
+		// #1618: per-reason tally alongside the flat `timedOutFiles` count (kept
+		// for the existing `scripts/analyze-pi-lens-logs.mjs` consumer) — a
+		// dashboard reading only the flat count can no longer mistake 81
+		// service-destroyed files for 81 budget-exhausted ones.
+		const unconfirmedByReason: Partial<
+			Record<LSPWorkspaceUnconfirmedReason, number>
+		> = {};
+		for (const result of results) {
+			if (!result.timedOut) continue;
+			const reason = result.unconfirmedReason ?? "budget";
+			unconfirmedByReason[reason] = (unconfirmedByReason[reason] ?? 0) + 1;
+		}
 		logLatency({
 			type: "phase",
 			phase: "lsp_workspace_diagnostics",
@@ -6085,6 +6247,7 @@ export class LSPService {
 				concurrency: groupWorkers,
 				maxFiles,
 				timedOutFiles,
+				unconfirmedByReason,
 				aborted: signal?.aborted ?? false,
 			},
 		});

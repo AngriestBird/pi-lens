@@ -132,7 +132,7 @@ describe("index.ts LSP idle reset", () => {
 			expect(lspStatuses().at(-1)).toBe("LSP Active: typescript");
 			stale = true;
 
-			await vi.advanceTimersByTimeAsync(240_000);
+			await vi.advanceTimersByTimeAsync(360_000);
 
 			expect(resetLSPService).toHaveBeenCalledTimes(1);
 			expect(lspStatuses().at(-1)).toBe("LSP Inactive");
@@ -200,7 +200,7 @@ describe("index.ts LSP idle reset", () => {
 		}
 	}, INTEGRATION_TIMEOUT_MS);
 
-	it("normal (non-subagent) session still uses 240s idle reset (#713)", async () => {
+	it("normal (non-subagent) session still uses the base idle reset (#713, #1618)", async () => {
 		// Ensure no subagent env vars are set
 		delete process.env.PI_SUBAGENT_CHILD;
 		delete process.env.PI_SUBAGENT_CHILD_AGENT;
@@ -248,11 +248,13 @@ describe("index.ts LSP idle reset", () => {
 			await vi.advanceTimersByTimeAsync(60_000);
 			expect(resetLSPService).not.toHaveBeenCalled();
 
-			// Should NOT fire at 239s
-			await vi.advanceTimersByTimeAsync(179_000);
+			// Should NOT fire at 359s. #1618: the base idle reset is now derived
+			// from `FULL_SCAN_WALL_CLOCK_MS` (300s default) plus a safety margin,
+			// so it fires at 360s rather than the old flat 240s.
+			await vi.advanceTimersByTimeAsync(299_000);
 			expect(resetLSPService).not.toHaveBeenCalled();
 
-			// Should fire at 240s
+			// Should fire at 360s
 			await vi.advanceTimersByTimeAsync(1_000);
 			expect(resetLSPService).toHaveBeenCalledTimes(1);
 		} finally {
@@ -260,7 +262,7 @@ describe("index.ts LSP idle reset", () => {
 		}
 	}, INTEGRATION_TIMEOUT_MS);
 
-	it("PI_LENS_SUBAGENT_FULL=1 restores 240s idle reset even in a subagent session (#713)", async () => {
+	it("PI_LENS_SUBAGENT_FULL=1 restores the base idle reset even in a subagent session (#713, #1618)", async () => {
 		process.env.PI_SUBAGENT_CHILD = "1";
 		process.env.PI_LENS_SUBAGENT_FULL = "1";
 		_resetSubagentModeForTests();
@@ -307,8 +309,8 @@ describe("index.ts LSP idle reset", () => {
 				await vi.advanceTimersByTimeAsync(60_000);
 				expect(resetLSPService).not.toHaveBeenCalled();
 
-				// Should fire at 240s (full behavior restored)
-				await vi.advanceTimersByTimeAsync(180_000);
+				// Should fire at 360s (full behavior restored — #1618's derived base)
+				await vi.advanceTimersByTimeAsync(300_000);
 				expect(resetLSPService).toHaveBeenCalledTimes(1);
 			} finally {
 				vi.useRealTimers();

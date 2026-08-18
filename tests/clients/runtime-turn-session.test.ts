@@ -135,7 +135,7 @@ describe("LSP idle reset", () => {
 			);
 
 			runtime.resetForSession();
-			await vi.advanceTimersByTimeAsync(240_000);
+			await vi.advanceTimersByTimeAsync(360_000);
 
 			expect(resetLSPService).not.toHaveBeenCalled();
 		} finally {
@@ -165,7 +165,7 @@ describe("LSP idle reset", () => {
 				}),
 			);
 
-			await vi.advanceTimersByTimeAsync(240_000);
+			await vi.advanceTimersByTimeAsync(360_000);
 
 			expect(resetLSPService).toHaveBeenCalledTimes(1);
 			expect(dbg).toHaveBeenCalledWith(`lsp idle reset failed: ${resetError}`);
@@ -204,7 +204,7 @@ describe("LSP idle reset", () => {
 				}),
 			);
 
-			await vi.advanceTimersByTimeAsync(240_000);
+			await vi.advanceTimersByTimeAsync(360_000);
 
 			expect(resetLSPService).toHaveBeenCalledTimes(1);
 			expect(emitWarning).toHaveBeenCalledWith(
