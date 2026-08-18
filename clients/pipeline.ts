@@ -314,6 +314,13 @@ export interface PipelineResult {
 	changedFiles?: string[];
 	/** Blocking-only formatted output for turn_end re-surfacing if agent didn't fix */
 	inlineBlockerSummary?: string;
+	/**
+	 * #1561 F1: the distinct `tool` ids that raised the blockers in
+	 * `inlineBlockerSummary`. Blockers span every runner, not just the language
+	 * server, so a later verdict has to prove it covers these before it may
+	 * retire the record (see `retireInlineBlockerOnConfirmedClean`).
+	 */
+	inlineBlockerSources?: string[];
 	/** Fixable warning diagnostics introduced by this pipeline run. */
 	actionableWarnings?: ActionableWarningRecord[];
 	/** Non-fixable code-quality warnings introduced/touched by this pipeline run. */
@@ -1573,6 +1580,18 @@ export async function runPipeline(
 		changedFiles,
 		inlineBlockerSummary: dispatchResult.hasBlockers
 			? dispatchResult.blockerOutput.trim() || undefined
+			: undefined,
+		// #1561 F1: taken from the very diagnostics `blockerOutput` was rendered
+		// from, so the provenance can never disagree with the text it guards. An
+		// untagged diagnostic contributes the literal "unknown", which no verdict
+		// claims coverage for — it pins the entry rather than silently widening
+		// what an LSP check is allowed to clear.
+		inlineBlockerSources: dispatchResult.hasBlockers
+			? [
+					...new Set(
+						dispatchResult.blockers.map((d) => d.tool?.trim() || "unknown"),
+					),
+				]
 			: undefined,
 		actionableWarnings,
 		codeQualityWarnings,
