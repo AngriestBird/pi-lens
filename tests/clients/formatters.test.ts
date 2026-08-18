@@ -30,7 +30,7 @@ import {
 	ruffFormatter,
 	standardrbFormatter,
 	shfmtFormatter,
-} from "../../clients/formatters.ts";
+} from "../../clients/formatters.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 import { _getSpotlessGradleReadCountForTests } from "../../clients/tool-policy.js";
 
@@ -1109,7 +1109,7 @@ describe("getFormattersForFile — policy selection", () => {
 			.spyOn(installer, "ensureTool")
 			.mockResolvedValue(managedPath);
 		try {
-			const formatters = await import("../../clients/formatters.ts");
+			const formatters = await import("../../clients/formatters.js");
 			const cmd = await formatters.taploFormatter.resolveCommand!(
 				fileIn(tmpDir, "config.toml"),
 				tmpDir,
@@ -1449,7 +1449,7 @@ describe("oxfmt formatter — .svelte conditional gate (#1134)", () => {
 describe("oxfmt extension registries stay in sync (#1134)", () => {
 	it("oxfmtFormatter.extensions matches tool-policy's OXFMT_SUPPORTED_EXTENSIONS exactly", async () => {
 		const { OXFMT_SUPPORTED_EXTENSIONS } = await import(
-			"../../clients/tool-policy.ts"
+			"../../clients/tool-policy.js"
 		);
 		expect(new Set(oxfmtFormatter.extensions)).toEqual(
 			OXFMT_SUPPORTED_EXTENSIONS,

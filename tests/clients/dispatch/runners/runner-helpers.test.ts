@@ -16,8 +16,8 @@ import {
 	resolveToolCommandWithInstallFallback,
 	resetDispatchAvailabilityState,
 	resolveVendorToolCommand,
-} from "../../../../clients/dispatch/runners/utils/runner-helpers.ts";
-import type { DispatchContext } from "../../../../clients/dispatch/types.ts";
+} from "../../../../clients/dispatch/runners/utils/runner-helpers.js";
+import type { DispatchContext } from "../../../../clients/dispatch/types.js";
 import { findGlobalBinary } from "../../../../clients/package-manager.js";
 import { setupTestEnvironment } from "../../test-utils.js";
 

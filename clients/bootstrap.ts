@@ -95,6 +95,14 @@ async function logBootstrapFailures(
 	}
 }
 
+/**
+ * Every per-client load below is individually fail-soft (`load`/`loadList`
+ * degrade to a stub instead of throwing), so this promise is not expected to
+ * reject in practice. It is still memoized with eviction-on-rejection —
+ * consistent with the other lazy-import memos (#1570) — so a genuinely
+ * unexpected throw (e.g. `logBootstrapFailures`) cannot latch a permanently
+ * rejected bootstrap for the rest of the process.
+ */
 export function loadBootstrapClients(): Promise<BootstrapClients> {
 	bootstrapPromise ??= (async () => {
 		const failures: { name: string; err: unknown }[] = [];
@@ -217,7 +225,10 @@ export function loadBootstrapClients(): Promise<BootstrapClients> {
 			agentBehaviorClient,
 			deadCodeClients,
 		};
-	})();
+	})().catch((err: unknown) => {
+		bootstrapPromise = null;
+		throw err;
+	});
 
 	return bootstrapPromise;
 }

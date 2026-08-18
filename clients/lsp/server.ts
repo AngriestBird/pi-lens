@@ -1261,17 +1261,30 @@ async function findAncestorFileAmong(
 }
 
 /**
- * A failed classic-compiler repair must not repeat. `ensureTool` caches
- * successful installs, so a repair that works short-circuits later calls on
- * its own. A repair that fails leaves nothing behind, and `findTsserverPath`
- * has three call sites (TypeScript, Vue, Svelte). Without this guard an
- * offline or partial install re-runs a 120 s forced reinstall on every spawn.
+ * A failed classic-compiler repair must not repeat within a session.
+ * `ensureTool` caches successful installs, so a repair that works
+ * short-circuits later calls on its own. A repair that fails leaves nothing
+ * behind, and `findTsserverPath` has three call sites (TypeScript, Vue,
+ * Svelte). Without this guard an offline or partial install re-runs a 120 s
+ * forced reinstall on every spawn.
+ *
+ * The guard is a plain module-level flag, so without an explicit re-arm it
+ * would latch for the whole extension-host process — a repair that failed
+ * once (transient registry hiccup) would stay unrepairable for every later
+ * session in that process. `resetClassicTsRepairGuard` re-arms it; callers
+ * wire that into `session_start` alongside the other per-session resets
+ * (#1570).
  */
 let classicTsRepairAttempted = false;
 
+/** Re-arm the classic-repair guard so a new session gets its own attempt. */
+export function resetClassicTsRepairGuard(): void {
+	classicTsRepairAttempted = false;
+}
+
 /** Test hook — clears the per-process classic-repair guard. */
 export function _resetClassicTsRepairForTests(): void {
-	classicTsRepairAttempted = false;
+	resetClassicTsRepairGuard();
 }
 
 /**
