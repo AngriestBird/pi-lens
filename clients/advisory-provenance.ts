@@ -285,12 +285,29 @@ export type FindingPathFreshness = "live" | "stale" | "missing" | "unknown";
 export type FindingPathExistence = "live" | "missing" | "unknown";
 
 /**
+ * What a store means by "the cited file is gone".
+ *
+ * `drop` is right when the finding IS the file's content: a secret in a deleted
+ * file cannot be rotated, and there is nothing left to remediate (#1460).
+ *
+ * `demote` is right when the cited path is merely EVIDENCE for a finding that
+ * lives somewhere else. A govulncheck CVE is pinned by `go.mod`; deleting one
+ * traced call site does not un-pin the vulnerable dependency, so dropping the
+ * finding would hide a live CVE on the strength of an unrelated deletion. The
+ * coordinate goes, the finding stays.
+ */
+export type FindingMissingPolicy = "drop" | "demote";
+
+/**
  * One stat, one verdict. With `scannedAtMs` supplied, a surviving file whose
  * mtime is newer than the scan reports `stale`.
  *
- * +1ms tolerance: a file scanned AT `scannedAt` legitimately has an mtime equal
- * to it, and coarse filesystem timestamps round. Mirrors
- * `reconcileProjectDiagnosticsSnapshot`.
+ * The boundary is `mtime > scannedAt`: a file scanned AT `scannedAt` reads
+ * live, one millisecond past it reads stale.
+ * `reconcileProjectDiagnosticsSnapshot` allows a further +1ms of slack; this
+ * gate deliberately does not, because its stale arm DEMOTES rather than drops.
+ * Over-demoting costs a line number; under-demoting replays a false coordinate.
+ * The cheaper error wins the tie.
  */
 export function findingPathFreshness(
 	resolvedPath: string,
@@ -298,7 +315,7 @@ export function findingPathFreshness(
 ): FindingPathFreshness {
 	try {
 		const stat = fs.statSync(resolvedPath);
-		if (scannedAtMs !== undefined && stat.mtimeMs > scannedAtMs + 1) {
+		if (scannedAtMs !== undefined && stat.mtimeMs > scannedAtMs) {
 			return "stale";
 		}
 		return "live";
@@ -364,6 +381,8 @@ export function partitionFindingsByCitedPath<T>(args: {
 	maxUniquePaths?: number;
 	/** Scan timestamp of the store being delivered. Omit to skip the stale arm. */
 	scannedAt?: string | number;
+	/** What a deleted cited path means for this store. See `FindingMissingPolicy`. */
+	onMissing?: FindingMissingPolicy;
 	existence?: (
 		resolvedPath: string,
 		scannedAtMs?: number,
@@ -372,6 +391,7 @@ export function partitionFindingsByCitedPath<T>(args: {
 	const limit = args.maxUniquePaths ?? MAX_FINDING_PATH_STATS;
 	const probe = args.existence ?? findingPathFreshness;
 	const scannedAtMs = parseScannedAtMs(args.scannedAt);
+	const onMissing = args.onMissing ?? "drop";
 	// Two dedup layers, cheapest first. `rawVerdicts` collapses findings that
 	// cite the IDENTICAL string with zero filesystem work — the dominant case
 	// (#1460's live record: 126 findings over a handful of distinct `file`
@@ -416,6 +436,12 @@ export function partitionFindingsByCitedPath<T>(args: {
 					verdict = "live";
 				} else {
 					verdict = probe(resolved, scannedAtMs);
+					// A store that treats deletion as evidence-loss rather than
+					// remediation-loss folds `missing` into the demote arm here, so
+					// every downstream list and record sees one consistent verdict.
+					if (verdict === "missing" && onMissing === "demote") {
+						verdict = "stale";
+					}
 					verdicts.set(key, verdict);
 					if (verdict === "missing") deadPaths.push(resolved);
 					else if (verdict === "stale") stalePaths.push(resolved);
@@ -492,6 +518,8 @@ export function gateFindingsByPathFreshness<T>(args: {
 	scannedAt?: string | number;
 	citedPath: (finding: T) => string | undefined;
 	maxUniquePaths?: number;
+	/** Defaults to `"drop"`, matching #1460's secrets behaviour. */
+	onMissing?: FindingMissingPolicy;
 	existence?: (
 		resolvedPath: string,
 		scannedAtMs?: number,

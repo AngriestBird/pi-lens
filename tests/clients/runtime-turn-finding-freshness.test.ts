@@ -13,7 +13,16 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// Partial mock: every real export stays, `logLatency` becomes a spy so the
+// turn-result telemetry (review round M2) is assertable.
+const logLatency = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/latency-logger.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../../clients/latency-logger.js")>()),
+	logLatency,
+}));
+
 import { CacheManager } from "../../clients/cache-manager.js";
 import { consumeTurnEndFindings } from "../../clients/runtime-context.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
@@ -96,6 +105,19 @@ async function turnEndContent(
 ): Promise<string> {
 	await handleTurnEnd(makeTurnEndDeps(runtime, cacheManager, { ctxCwd: cwd }));
 	return consumeTurnEndFindings(cacheManager, cwd)?.messages?.[0]?.content ?? "";
+}
+
+beforeEach(() => logLatency.mockReset());
+
+/** The `turn_end` tool_result telemetry row from the last handled turn. */
+function turnEndResult(): { result?: string; metadata?: Record<string, unknown> } {
+	const calls = logLatency.mock.calls
+		.map((call) => call[0] as Record<string, unknown>)
+		.filter((e) => e.type === "tool_result" && e.toolName === "turn_end");
+	return (calls[calls.length - 1] ?? {}) as {
+		result?: string;
+		metadata?: Record<string, unknown>;
+	};
 }
 
 // ── gitleaks ─────────────────────────────────────────────────────────────────
@@ -364,6 +386,250 @@ describe("turn_end govulncheck stale call-site gate (#1622 sibling sweep)", () =
 			expect(content).toContain("GO-2024-1234");
 			expect(content).toContain("cmd/main.go:88");
 			expect(content).not.toContain("stale");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+// ── Review round H1: a deleted govulncheck call site must not kill the CVE ───
+
+describe("turn_end govulncheck deleted call site (#1622 review H1)", () => {
+	function writeGovCacheAt(
+		cacheManager: CacheManager,
+		cwd: string,
+		filename: string,
+	) {
+		cacheManager.writeCache(
+			"govulncheck",
+			{
+				success: true,
+				scannedAt: SCANNED_AT,
+				findings: [
+					{
+						osv: "GO-2024-1234",
+						module: "example.com/mod",
+						fixedVersion: "v1.2.3",
+						trace: [{ filename, line: 88 }],
+					},
+				],
+			},
+			cwd,
+		);
+	}
+
+	// The CVE lives in go.mod, not in the call site. Deleting one traced file
+	// does not un-pin the vulnerable dependency, so a delete here must DEMOTE
+	// (keep the CVE, strip the coordinate), never drop.
+	it("keeps the CVE when its cited call-site file was deleted", async () => {
+		const { env, runtime, cacheManager } = setupSecretTurn("pi-lens-gov-dead-");
+		try {
+			const goFile = writeSecretFile(
+				env.tmpDir,
+				"cmd/gone/main.go",
+				SCANNED_AT_MS - 5_000,
+			);
+			writeGovCacheAt(cacheManager, env.tmpDir, goFile);
+			fs.rmSync(path.dirname(goFile), { recursive: true, force: true });
+
+			const content = await turnEndContent(runtime, cacheManager, env.tmpDir);
+
+			expect(content).toContain("GO-2024-1234");
+			expect(content).toContain("upgrade to v1.2.3");
+			// The coordinate is gone; the CVE is not.
+			expect(content).not.toContain(":88");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// The header guard must read the POST-gate list. Guarding on the raw cache
+	// length can print "Go CVEs reachable from this code" with nothing under it.
+	it("never prints the govulncheck header with zero rows beneath it", async () => {
+		const { env, runtime, cacheManager } = setupSecretTurn("pi-lens-gov-hdr-");
+		try {
+			const goFile = writeSecretFile(
+				env.tmpDir,
+				"cmd/gone/main.go",
+				SCANNED_AT_MS - 5_000,
+			);
+			writeGovCacheAt(cacheManager, env.tmpDir, goFile);
+			fs.rmSync(path.dirname(goFile), { recursive: true, force: true });
+
+			const content = await turnEndContent(runtime, cacheManager, env.tmpDir);
+
+			const headerIndex = content.indexOf("Go CVEs reachable from this code");
+			if (headerIndex !== -1) {
+				const after = content.slice(headerIndex);
+				const rows = after
+					.split("\n")
+					.slice(1)
+					.filter((line) => line.startsWith("  ") && line.trim().length > 0);
+				expect(rows.length).toBeGreaterThan(0);
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+// ── Review round M1 + M2: what a demoted secret says, and how it telemetries ──
+
+describe("turn_end demoted-secret rendering (#1622 review M1/M2)", () => {
+	function staleSecretTurn(prefix: string) {
+		const ctx = setupSecretTurn(prefix);
+		const secretFile = writeSecretFile(
+			ctx.env.tmpDir,
+			"src/stale.ts",
+			SCANNED_AT_MS + 5_000,
+		);
+		return { ...ctx, secretFile };
+	}
+
+	// M1: the line number goes, the rule identity and source must stay. An agent
+	// triages an aws-access-token differently from a generic-api-key.
+	it("carries the gitleaks rule id and source onto the demoted line", async () => {
+		const { env, runtime, cacheManager, secretFile } =
+			staleSecretTurn("pi-lens-m1-gl-");
+		try {
+			cacheManager.writeCache(
+				"gitleaks",
+				{
+					success: true,
+					scannedAt: SCANNED_AT,
+					findings: [
+						{
+							ruleId: "generic-api-key",
+							file: secretFile,
+							startLine: 397,
+							description: "Generic API key",
+						},
+					],
+				},
+				env.tmpDir,
+			);
+
+			const content = await turnEndContent(runtime, cacheManager, env.tmpDir);
+
+			expect(content).toContain("src/stale.ts");
+			expect(content).toContain("generic-api-key");
+			expect(content).toContain("gitleaks");
+			expect(content).not.toContain(":397");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("carries the trivy rule id and source onto the demoted line", async () => {
+		const { env, runtime, cacheManager, secretFile } =
+			staleSecretTurn("pi-lens-m1-tv-");
+		try {
+			cacheManager.writeCache(
+				"trivy",
+				{
+					success: true,
+					scannedAt: SCANNED_AT,
+					findings: [],
+					secrets: [
+						{ ruleId: "aws-access-key-id", file: secretFile, line: 234 },
+					],
+					licenses: [],
+				},
+				env.tmpDir,
+			);
+
+			const content = await turnEndContent(runtime, cacheManager, env.tmpDir);
+
+			expect(content).toContain("src/stale.ts");
+			expect(content).toContain("aws-access-key-id");
+			expect(content).toContain("trivy");
+			expect(content).not.toContain(":234");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// M2a: "no action required this turn" directly above "re-scan before you
+	// trust the all-clear" contradicts itself. The demotion tier needs its own
+	// imperative preamble.
+	it("does NOT file the demoted secret under the no-action-required label", async () => {
+		const { env, runtime, cacheManager, secretFile } =
+			staleSecretTurn("pi-lens-m2-label-");
+		try {
+			cacheManager.writeCache(
+				"gitleaks",
+				{
+					success: true,
+					scannedAt: SCANNED_AT,
+					findings: [
+						{
+							ruleId: "generic-api-key",
+							file: secretFile,
+							startLine: 397,
+							description: "Generic API key",
+						},
+					],
+				},
+				env.tmpDir,
+			);
+
+			const content = await turnEndContent(runtime, cacheManager, env.tmpDir);
+
+			const secretIndex = content.indexOf("src/stale.ts");
+			expect(secretIndex).toBeGreaterThan(-1);
+			const label = "ℹ️ Advisory — no action required this turn:";
+			const labelBefore = content.lastIndexOf(label, secretIndex);
+			// Either the label never appears, or it does not introduce this section.
+			if (labelBefore !== -1) {
+				const between = content.slice(labelBefore, secretIndex);
+				expect(between).toContain("\n\n");
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// M2b: a pending stale secret is not a clean turn.
+	it("does not telemetry the turn as clean when a stale secret is the only finding", async () => {
+		const { env, runtime, cacheManager, secretFile } =
+			staleSecretTurn("pi-lens-m2-telem-");
+		try {
+			cacheManager.writeCache(
+				"gitleaks",
+				{
+					success: true,
+					scannedAt: SCANNED_AT,
+					findings: [
+						{
+							ruleId: "generic-api-key",
+							file: secretFile,
+							startLine: 397,
+							description: "Generic API key",
+						},
+					],
+				},
+				env.tmpDir,
+			);
+
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
+
+			const entry = turnEndResult();
+			expect(entry.result).toBeDefined();
+			expect(entry.result).not.toBe("clean");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("still telemetries a genuinely empty turn as clean", async () => {
+		const { env, runtime, cacheManager } = setupSecretTurn("pi-lens-m2-clean-");
+		try {
+			await handleTurnEnd(
+				makeTurnEndDeps(runtime, cacheManager, { ctxCwd: env.tmpDir }),
+			);
+			expect(turnEndResult().result).toBe("clean");
 		} finally {
 			env.cleanup();
 		}

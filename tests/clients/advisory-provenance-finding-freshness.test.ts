@@ -273,3 +273,102 @@ describe("gateFindingsByPathFreshness records (#1622 criterion 5)", () => {
 		expect(logLatency).not.toHaveBeenCalled();
 	});
 });
+
+// ── Review round L1: the staleness boundary ──────────────────────────────────
+
+describe("freshness boundary (#1622 review L1)", () => {
+	const cleanups: Array<() => void> = [];
+	afterEach(() => {
+		cleanups.splice(0).forEach((cleanup) => cleanup());
+		logLatency.mockReset();
+	});
+
+	/**
+	 * Pins BOTH sides of the comparison so a `>` / `>=` mutation cannot survive:
+	 * mtime exactly AT the scan is unchanged, one millisecond past it is modified.
+	 */
+	it("treats mtime == scannedAt as live and scannedAt + 1 as stale", () => {
+		const env = setupTestEnvironment("pi-lens-freshness-boundary-");
+		cleanups.push(env.cleanup);
+		const scannedAtMs = Date.UTC(2026, 7, 18, 7, 0, 0);
+		const file = path.join(env.tmpDir, "src/boundary.ts");
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, "const k = 1;\n");
+
+		setMtime(file, scannedAtMs);
+		expect(findingPathFreshness(file, scannedAtMs)).toBe("live");
+
+		setMtime(file, scannedAtMs + 1);
+		expect(findingPathFreshness(file, scannedAtMs)).toBe("stale");
+	});
+
+	it("carries the same boundary through the partition", () => {
+		const env = setupTestEnvironment("pi-lens-freshness-boundary-part-");
+		cleanups.push(env.cleanup);
+		const scannedAtMs = Date.UTC(2026, 7, 18, 7, 0, 0);
+		const scannedAt = new Date(scannedAtMs).toISOString();
+		const at = path.join(env.tmpDir, "at.ts");
+		const past = path.join(env.tmpDir, "past.ts");
+		fs.writeFileSync(at, "1\n");
+		fs.writeFileSync(past, "1\n");
+		setMtime(at, scannedAtMs);
+		setMtime(past, scannedAtMs + 1);
+
+		const result = partitionFindingsByCitedPath<Finding>({
+			findings: [
+				{ file: at, rule: "at-scan" },
+				{ file: past, rule: "one-ms-past" },
+			],
+			cwd: env.tmpDir,
+			scannedAt,
+			citedPath,
+		});
+
+		expect(result.live.map((f) => f.rule)).toEqual(["at-scan"]);
+		expect(result.stale.map((f) => f.rule)).toEqual(["one-ms-past"]);
+	});
+});
+
+// ── Review round H1: onMissing=demote for whole-artifact findings ─────────────
+
+describe("gateFindingsByPathFreshness onMissing (#1622 review H1)", () => {
+	afterEach(() => logLatency.mockReset());
+
+	// A govulncheck CVE is pinned by go.mod, not by the call site. Deleting one
+	// traced file does not un-pin it, so `missing` must demote, not drop.
+	it("routes a missing path into stale when onMissing is demote", () => {
+		const gate = gateFindingsByPathFreshness<Finding>({
+			store: "govulncheck",
+			findings: [{ file: "/repo/gone/main.go", rule: "GO-2024-1234" }],
+			cwd: "/repo",
+			scannedAt: "2026-08-18T07:00:00.000Z",
+			citedPath,
+			onMissing: "demote",
+			existence: () => "missing",
+		});
+		expect(gate.stale.map((f) => f.rule)).toEqual(["GO-2024-1234"]);
+		expect(gate.live).toEqual([]);
+		const phases = logLatency.mock.calls.map(
+			(call) => (call[0] as { phase: string }).phase,
+		);
+		// Nothing was dropped, so no drop record — only the demote record.
+		expect(phases).toEqual(["finding_stale_line_demote"]);
+	});
+
+	it("still drops by default, so the secrets lanes are unchanged", () => {
+		const gate = gateFindingsByPathFreshness<Finding>({
+			store: "gitleaks",
+			findings: [{ file: "/repo/gone/a.json", rule: "generic-api-key" }],
+			cwd: "/repo",
+			scannedAt: "2026-08-18T07:00:00.000Z",
+			citedPath,
+			existence: () => "missing",
+		});
+		expect(gate.live).toEqual([]);
+		expect(gate.stale).toEqual([]);
+		const phases = logLatency.mock.calls.map(
+			(call) => (call[0] as { phase: string }).phase,
+		);
+		expect(phases).toEqual(["finding_dead_path_drop"]);
+	});
+});
