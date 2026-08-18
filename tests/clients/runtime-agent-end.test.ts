@@ -8,6 +8,8 @@ import { resolvePiLensFlag } from "../../clients/lens-config.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { loadPiLensProjectConfig } from "../../clients/project-lens-config.js";
 import { handleAgentEnd } from "../../clients/runtime-agent-end.js";
+import { handleToolCall } from "../../clients/runtime-tool-call.js";
+import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import { getLastLoggedPhase } from "../../clients/latency-logger.js";
 import * as latencyLogger from "../../clients/latency-logger.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
@@ -37,6 +39,15 @@ vi.mock("../../clients/actionable-warnings.js", async (importOriginal) => {
 			...args: Parameters<typeof actual.applyConservativeActionableWarningFixes>
 		) => applyConservativeActionableWarningFixesMock(...args),
 	};
+});
+
+// #1642 F3: only `runPipeline` (tool-result.ts's own dispatch, exercised by
+// the "drive the real queue path" test below via handleToolResult) is
+// stubbed — `runAutofix`/`runFormatPhase`/`resyncLspFile` stay REAL, since
+// every other test in this file relies on agent-end.ts's own use of them.
+vi.mock("../../clients/pipeline.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../../clients/pipeline.js")>();
+	return { ...actual, runPipeline: vi.fn() };
 });
 
 describe("runtime-agent-end deferred formatting", () => {
@@ -1559,6 +1570,132 @@ describe("runtime-agent-end deferred formatting", () => {
 				expect(dbg).toHaveBeenCalledWith(
 					expect.stringContaining("staleness fallback claimed"),
 				);
+			} finally {
+				if (previousDataDir === undefined) {
+					delete process.env.PILENS_DATA_DIR;
+				} else {
+					process.env.PILENS_DATA_DIR = previousDataDir;
+				}
+				env.cleanup();
+			}
+		});
+
+		it("staleness fallback: an orphan whose origin does not match the claiming context is left queued, never formatted (#1642 F3)", async () => {
+			const env = setupTestEnvironment(
+				"pi-lens-agent-end-ownership-origin-mismatch-",
+			);
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			try {
+				// #1642 F3 shape: a record queued from a WORKTREE (a different
+				// origin cwd than the parent checkout now running agent_end) must
+				// never be claimed by the stale-orphan fallback just because its
+				// owning session died and it aged out. Session identity alone
+				// isn't enough — the origin cwd must also match.
+				//
+				// Driven through the REAL queuing path (handleToolCall +
+				// handleToolResult) rather than a hand-written
+				// `runtime.deferFormat` call: `turnStateCwd` is ALWAYS the
+				// workspace root in production (`runtime-tool-result.ts`'s
+				// `path.resolve(workspaceRoot)`), so a test that varied
+				// `turnStateCwd` to simulate a worktree origin exercised a shape
+				// production never produces. `originCwd` (this PR's new field) is
+				// what production actually varies per call.
+				const { runPipeline } = await import("../../clients/pipeline.js");
+				vi.mocked(runPipeline).mockReset();
+				vi.mocked(runPipeline).mockResolvedValue({
+					output: "",
+					hasBlockers: false,
+					isError: false,
+					fileModified: false,
+				});
+
+				const worktreeRoot = path.join(env.tmpDir, "worktree");
+				const worktreeFile = createTempFile(
+					worktreeRoot,
+					"src/app.ts",
+					"const x=1",
+				);
+
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				const toolCallId = "call-origin-mismatch";
+
+				await handleToolCall({
+					event: {
+						toolCallId,
+						toolName: "write",
+						input: { path: "src/app.ts", content: "const x=1" },
+					},
+					ctx: { cwd: worktreeRoot },
+					lensEnabled: true,
+					getFlag: (name: string) => name === "no-lsp",
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					ensureLSPConfigInitialized: async () => {},
+					updateLspStatus: () => {},
+					resetLSPService: () => {},
+				} as any);
+
+				await handleToolResult({
+					event: {
+						toolCallId,
+						toolName: "write",
+						input: { path: "src/app.ts", content: "const x=1" },
+						content: [{ type: "text", text: "base" }],
+					},
+					getFlag: () => false,
+					dbg: () => {},
+					runtime,
+					cacheManager: new CacheManager(false),
+					biomeClient: {},
+					ruffClient: {},
+					metricsClient: {},
+					resetLSPService: () => {},
+					agentBehaviorRecord: () => [],
+					formatBehaviorWarnings: () => "",
+					sessionId: "session-dead-worktree",
+					dbgDebugMarker: true,
+				} as any);
+
+				// Sanity: the real queue path actually queued this file (under
+				// its own worktree origin) before agent_end ever runs.
+				expect(runtime.pendingDeferredFormatCount).toBe(1);
+
+				const formatFile = vi.fn(async (fp: string) => {
+					fs.writeFileSync(fp, "const x = 1;\n");
+					return {
+						filePath: fp,
+						formatters: [{ name: "biome", success: true, changed: true }],
+						anyChanged: true,
+						allSucceeded: true,
+					};
+				});
+				const dbg = vi.fn();
+
+				const summary = await handleAgentEnd({
+					ctxCwd: env.tmpDir, // the PARENT checkout is claiming
+					getFlag: (name) => name === "no-lsp",
+					notify: vi.fn(),
+					dbg,
+					runtime,
+					cacheManager: { addModifiedRange: vi.fn() } as any,
+					getFormatService: () =>
+						({ recordRead: () => {}, formatFile }) as any,
+					currentSessionId: "session-new-parent",
+					// Negative threshold: any elapsed time at all counts as stale.
+					staleAfterMs: -1,
+				});
+
+				expect(formatFile).not.toHaveBeenCalled();
+				expect(summary?.changed ?? []).toEqual([]);
+				// Left queued, NOT deleted: a legitimate crashed-session orphan
+				// from a different origin must stay claimable by that origin's
+				// own future flush, not vanish forever.
+				expect(runtime.pendingDeferredFormatCount).toBe(1);
+				expect(fs.readFileSync(worktreeFile, "utf-8")).toBe("const x=1");
+				expect(dbg).toHaveBeenCalledWith(expect.stringContaining("orphan"));
 			} finally {
 				if (previousDataDir === undefined) {
 					delete process.env.PILENS_DATA_DIR;
