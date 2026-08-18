@@ -91,7 +91,8 @@ let lastPhase: { phase: string; ts: string } | undefined;
  *
  * #1461 slice 1: `finding_dead_path_drop` is the same shape — the record a
  * delivery seam writes when it drops findings whose cited path no longer
- * exists.
+ * exists. #1622 adds `finding_stale_line_demote`, its sibling for findings
+ * whose cited file was edited after the scan.
  *
  * #1459: the three scanner-coverage records are summary rows written from inside
  * `lsp_touch_file`, and two of them carry ANOTHER write's age as `durationMs`
@@ -112,6 +113,7 @@ const LAST_PHASE_EXCLUDED = new Set([
 	"tool_set_mutation",
 	"availability_decision",
 	"finding_dead_path_drop",
+	"finding_stale_line_demote",
 	"lsp_scanner_coverage_gap",
 	"lsp_notify_resync_deferred",
 	"lsp_notify_write_late_landed",
