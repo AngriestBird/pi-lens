@@ -19,10 +19,16 @@ vi.mock("../../clients/file-utils.js", () => ({
 	getGlobalPiLensDir: () => dir,
 }));
 
+const mockLogSessionStart = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/sessionstart-logger.js", () => ({
+	logSessionStart: mockLogSessionStart,
+}));
+
 describe("instance-registry", () => {
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-instreg-"));
 		vi.resetModules();
+		mockLogSessionStart.mockClear();
 	});
 
 	afterEach(() => {
@@ -164,6 +170,73 @@ describe("instance-registry", () => {
 		await expect(registerInstance("/fresh/project")).resolves.not.toThrow();
 		const instances = await readInstanceRegistry();
 		expect(instances).toHaveLength(1);
+	});
+
+	// #1609 layer b: a process SIGKILLed mid-write can leave `instances.json`
+	// torn at an arbitrary byte offset. Recovery must be LEGIBLE, not just
+	// non-throwing: a genuinely missing file (clean start) is silent, but a
+	// present-and-corrupt file must be distinguishable in the logs — an empty
+	// result reading the same either way would hide a real torn-write
+	// regression behind "looks like a clean start" forever (the empty-must-
+	// distinguish-clean-from-errored invariant).
+	describe("torn-file fault injection", () => {
+		const validPayload = JSON.stringify({
+			instances: [
+				{
+					pid: 424_242,
+					startedAt: "2026-01-01T00:00:00.000Z",
+					projectRoot: "/some/project",
+					lspChildren: [],
+					lspChildCount: 0,
+					rssBytes: 0,
+					heartbeatAt: "2026-01-01T00:00:00.000Z",
+				},
+			],
+		});
+
+		it.each([
+			["zero bytes", ""],
+			["truncated to an opening brace", "{"],
+			["mid-JSON torn tail", validPayload.slice(0, Math.floor(validPayload.length / 2))],
+			["truncated to a single valid-JSON scalar (wrong shape)", "0"],
+		])("recovers legibly from a torn registry (%s)", async (_label, torn) => {
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(registryFilePath(), torn, "utf-8");
+
+			const { readInstanceRegistry, registerInstance } = await import(
+				"../../clients/instance-registry.js"
+			);
+
+			// No throw escapes, and the torn bytes are never half-trusted into a
+			// wrong-but-valid partial state — the read degrades to empty exactly
+			// like a missing file would, never a spliced/partial instance list.
+			const instances = await readInstanceRegistry();
+			expect(instances).toEqual([]);
+
+			// The recovery is OBSERVABLE: a corrupt-but-present file logs, unlike
+			// a genuinely missing one (see the sibling "missing file" test above,
+			// which asserts silence).
+			expect(mockLogSessionStart).toHaveBeenCalledWith(
+				expect.stringContaining("instance-registry"),
+			);
+
+			// The registry keeps working afterward — no stuck latch.
+			await expect(registerInstance("/after/recovery")).resolves.not.toThrow();
+			const after = await readInstanceRegistry();
+			expect(after).toHaveLength(1);
+		});
+
+		it("stays silent on a genuinely missing file (clean start, not an error)", async () => {
+			expect(fs.existsSync(registryFilePath())).toBe(false);
+			const { readInstanceRegistry } = await import(
+				"../../clients/instance-registry.js"
+			);
+
+			const instances = await readInstanceRegistry();
+
+			expect(instances).toEqual([]);
+			expect(mockLogSessionStart).not.toHaveBeenCalled();
+		});
 	});
 
 	it("recordLspChild appends a child under this pid's entry", async () => {

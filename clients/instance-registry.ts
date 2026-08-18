@@ -36,6 +36,7 @@ import { getGlobalPiLensDir } from "./file-utils.js";
 // import is actually invoked.
 import { realIsPidAlive } from "./instance-reaper.js";
 import { normalizeFilePath } from "./path-utils.js";
+import { logSessionStart } from "./sessionstart-logger.js";
 import {
 	getSubagentIdentity,
 	isSubagentSession,
@@ -112,6 +113,24 @@ export function _resetInstanceRegistryEnabledForTests(): void {
 
 // --- Read ---
 
+/**
+ * Distinguishes "no registry yet" (ENOENT — a genuinely clean start, never
+ * logged) from "a registry file exists but couldn't be trusted" (corrupt
+ * JSON, wrong shape, or another read error — e.g. a torn write left behind by
+ * a killed process, #1609 layer b). Both degrade to `{ instances: [] }`
+ * either way (this store is purely observational, per the module docstring),
+ * but only the latter is worth a session_start log line — a clean empty
+ * start must never read the same as a corrupt one in the logs, or a genuine
+ * torn-file regression would be invisible.
+ */
+function logCorruptRegistryRead(err: unknown): void {
+	const code = (err as NodeJS.ErrnoException | undefined)?.code;
+	if (code === "ENOENT") return;
+	logSessionStart(
+		`instance-registry: read failed (${code ?? "invalid shape"}); treating as empty`,
+	);
+}
+
 function readRegistrySync(): RegistryFile {
 	try {
 		const raw = fs.readFileSync(registryPath(), "utf-8");
@@ -119,9 +138,13 @@ function readRegistrySync(): RegistryFile {
 		if (parsed && Array.isArray(parsed.instances)) {
 			return parsed as RegistryFile;
 		}
+		logSessionStart("instance-registry: read shape invalid; treating as empty");
 		return { instances: [] };
-	} catch {
-		// Missing file, corrupt JSON, or wrong shape — treat as empty, never throw.
+	} catch (err) {
+		// Missing file, corrupt JSON, or a read error — treat as empty, never
+		// throw. Missing (ENOENT) is a clean start and stays silent; anything
+		// else is logged so a corrupt/torn file is distinguishable from one.
+		logCorruptRegistryRead(err);
 		return { instances: [] };
 	}
 }
@@ -133,8 +156,10 @@ async function readRegistryAsync(): Promise<RegistryFile> {
 		if (parsed && Array.isArray(parsed.instances)) {
 			return parsed as RegistryFile;
 		}
+		logSessionStart("instance-registry: read shape invalid; treating as empty");
 		return { instances: [] };
-	} catch {
+	} catch (err) {
+		logCorruptRegistryRead(err);
 		return { instances: [] };
 	}
 }

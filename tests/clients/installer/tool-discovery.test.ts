@@ -110,6 +110,19 @@ vi.mock("node:fs/promises", () => ({
 	rm: mockFsRm,
 }));
 
+// #1609: the installer's npm-tool package.json bootstrap now goes through
+// the shared atomic tmp+rename seam instead of a raw `fs.writeFile`, so it
+// must be mocked here too — otherwise it falls through to the REAL node:fs
+// (atomic-write.ts imports `node:fs` directly, not this mocked
+// `node:fs/promises`), which fails writing into this test's mocked,
+// non-existent-on-disk tools directory.
+const mockWriteFileAtomicAsync = vi.hoisted(() =>
+	vi.fn().mockResolvedValue(undefined),
+);
+vi.mock("../../../clients/atomic-write.js", () => ({
+	writeFileAtomicAsync: mockWriteFileAtomicAsync,
+}));
+
 // ── child_process spawn mock ────────────────────────────────────────────
 const spawnCalls = vi.hoisted(
 	() => [] as Array<{ cmd: string; args: string[] }>,

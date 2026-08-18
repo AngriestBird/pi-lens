@@ -387,4 +387,38 @@ describe("updateProbeCache", () => {
 		expect(written[TOOL_ID]).toBeDefined();
 		expect(written["other-tool"]).toMatchObject({ path: "/managed/other-tool" });
 	});
+
+	// #1609 layer b: a process SIGKILLed mid-write can leave a torn
+	// probe-cache.json behind. The ordinary session-lookup read path
+	// (`checkProbeCache`) already degrades a parse failure to "no cache"; this
+	// pins the WRITE-side authoritative read the locked commit performs before
+	// merging its own update. Pre-fix, `deserializeProbeCache` re-threw on a
+	// parse failure instead of degrading like `checkProbeCache` does, so the
+	// locked commit's `merge` step never ran and every flush attempt re-threw
+	// on the same torn bytes forever — the corrupt file was never repaired.
+	it.each([
+		["mid-JSON torn tail", '{"other-tool":{"path":"/x","mtimeMs":1,'],
+		["zero-byte file", ""],
+		["truncated to an opening brace", "{"],
+	])("self-heals a torn write-side read (%s)", async (_label, torn) => {
+		mockFsReadFile
+			.mockResolvedValueOnce(JSON.stringify({})) // ordinary session read
+			.mockResolvedValueOnce(torn); // locked authoritative read, mid-crash torn
+		mockFsStat.mockResolvedValue({ mtimeMs: MTIME_MS });
+
+		await updateProbeCache(TOOL_ID, TOOL_PATH);
+		const result = await flushProbeCache();
+
+		// No throw escaped, and the flush actually published a repaired file
+		// instead of giving up (or looping) on the torn bytes forever.
+		expect(result).toBe("written");
+		expect(mockWriteFileAtomicAsync).toHaveBeenCalledOnce();
+		const [, content] = mockWriteFileAtomicAsync.mock.calls[0] as [string, string];
+		const written = JSON.parse(content) as Record<string, unknown>;
+		expect(written[TOOL_ID]).toMatchObject({ path: TOOL_PATH });
+		// The torn entry must not survive as a half-trusted partial parse —
+		// deserializeProbeCache degrades the whole disk snapshot to `{}` on any
+		// parse failure, it does not attempt to salvage partial keys.
+		expect(Object.keys(written)).toEqual([TOOL_ID]);
+	});
 });
