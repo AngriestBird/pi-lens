@@ -236,6 +236,13 @@ export interface AvailabilityDecision {
 	 * emitted by a sweep in which nothing was reachable.
 	 */
 	retained?: boolean;
+	/**
+	 * True when NO probe ran: the latch served a still-cooling verdict and the
+	 * caller opted to record it anyway (#1539). It keeps the opt-in rows below
+	 * separable from real decisions, so a reader counting probes and a reader
+	 * asking "how long has this been off" get different, honest answers.
+	 */
+	servedFromCooldown?: boolean;
 }
 
 /**
@@ -794,6 +801,7 @@ export function logAvailabilityDecision(
 				unreachablePreferred: decision.unreachablePreferred,
 			}),
 			...(decision.retained === true && { retained: true }),
+			...(decision.servedFromCooldown === true && { servedFromCooldown: true }),
 		},
 	});
 }
