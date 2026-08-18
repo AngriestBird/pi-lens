@@ -146,6 +146,10 @@ function managedNodeToolCandidates(tool: string): string[] {
  * Verification verdicts for managed shims, keyed by path + mtime + size, so a
  * reinstall re-verifies and a session start re-arms. Only a verdict the prober
  * actually produced is stored; a timed-out or unspawnable probe is not.
+ *
+ * A plain `Map`, not a `PathKeyedMap`: `managedNodeToolCandidates` is the ONLY
+ * producer of these paths, so the write and read forms are the same string by
+ * construction and cannot diverge on case or separator.
  */
 const managedBinaryVerdicts = new Map<string, boolean>();
 
@@ -189,6 +193,13 @@ async function verifyManagedCandidate(
 	// memoized nor allowed to demote the candidate.
 	if (!ok && transient) return "unverified";
 	managedBinaryVerdicts.set(stamp, ok);
+	if (!ok) {
+		// Once per shim per session, at the moment the verdict is reached — the
+		// memo answers every later call, so this cannot become per-dispatch spam.
+		logSessionStart(
+			`dispatch availability: managed shim ${candidate} exists but does not run; falling through to PATH`,
+		);
+	}
 	return ok ? "ok" : "broken";
 }
 
@@ -214,11 +225,7 @@ export async function findManagedNodeToolBinary(
 ): Promise<string | null> {
 	for (const candidate of managedNodeToolCandidates(tool)) {
 		const verdict = await verifyManagedCandidate(candidate);
-		if (verdict === "absent") continue;
 		if (verdict === "ok" || verdict === "unverified") return candidate;
-		logSessionStart(
-			`dispatch availability ${tool}: managed shim ${candidate} exists but does not run; falling through to PATH`,
-		);
 	}
 	return null;
 }
