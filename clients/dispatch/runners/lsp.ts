@@ -26,6 +26,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { convertLspDiagnostics } from "../utils/lsp-diagnostics.js";
+import { demoteInferredProjectDiagnostics } from "../../lsp/inferred-project.js";
 import {
 	enabledAuxiliaryLspServerIds,
 	retagAuxiliaryDiagnostics,
@@ -270,12 +271,23 @@ const lspRunner: RunnerDefinition = {
 
 		// Convert LSP diagnostics to our format
 		// Defensive: filter out malformed diagnostics that may lack range
-		const validLspDiags = lspDiags.filter(
+		const rawValidLspDiags = lspDiags.filter(
 			(d) => d.range?.start?.line !== undefined,
+		);
+		// #1640: the per-edit path renders the same authority as the mode=full
+		// sweep, so it applies the same demotion. Costs one bounded `projectInfo`
+		// request, and only when the file already has a TypeScript ERROR — an edit
+		// that type-checks clean pays nothing.
+		const validLspDiags = await demoteInferredProjectDiagnostics(
+			rawValidLspDiags,
+			{ filePath: diagnosticPath, cwd: ctx.cwd, service: lspService },
 		);
 		const fixSuggestionByIndex = new Map<number, string>();
 
-		const blockingDiagIndexes = validLspDiags
+		// #1640: read severity off the RAW list. A demoted diagnostic is still
+		// worth a quick-fix suggestion — the demotion changes its authority, not
+		// whether tsserver can offer a fix. Indexes align 1:1 with `validLspDiags`.
+		const blockingDiagIndexes = rawValidLspDiags
 			.map((d, idx) => ({ d, idx }))
 			.filter(({ d }) => d.severity === 1)
 			.slice(0, WARM_CODE_ACTION_LOOKUP_LIMIT);

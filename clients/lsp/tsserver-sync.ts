@@ -89,11 +89,28 @@ export interface TsserverProjectIdentityProbeOptions {
 	commandChannel: TsserverProjectIdentityCommandChannel;
 }
 
-function classifyProjectInfo(body: unknown): {
+export interface TsserverProjectIdentity {
 	projectKind: "configured" | "inferred" | "unassociated";
 	configFile?: string;
 	association: "associated" | "unassociated" | "language-service-disabled";
-} {
+}
+
+/**
+ * Classify one tsserver `projectInfo` response body.
+ *
+ * `configFileName` is tsserver's own answer to "which project owns this file".
+ * A real project answers with a `tsconfig.json`/`jsconfig.json` path; a file
+ * that matches no project's `include`/`files` lands in tsserver's synthetic
+ * inferred project, whose `configFileName` is a `/dev/null/inferredProject1*`
+ * placeholder. The two are the same field, so the placeholder shape is the only
+ * thing that separates "checked against the project's real compiler options"
+ * from "checked against defaults nobody configured" (#1640).
+ *
+ * Exported so the diagnostic-demotion seam (`inferred-project.ts`) and the
+ * #1412 telemetry probe share ONE classifier — a second hand-rolled
+ * configFileName test would be a parallel source of truth for the same verdict.
+ */
+export function classifyProjectInfo(body: unknown): TsserverProjectIdentity {
 	if (!body || typeof body !== "object") {
 		return { projectKind: "unassociated", association: "unassociated" };
 	}
@@ -186,6 +203,46 @@ export async function probeTsserverProjectIdentity(
 	} catch {
 		logOutcome("threw");
 		// Best-effort telemetry: command errors/timeouts never reach diagnostics.
+	}
+}
+
+/**
+ * #1640: ask tsserver which project owns `file`, on demand, through the same
+ * `typescript.tsserverRequest` escape hatch the sync-diagnostics helpers use.
+ *
+ * Unlike {@link probeTsserverProjectIdentity} — fire-and-forget telemetry
+ * sampled once per didOpen — this is a request/response call a caller awaits
+ * because it needs the answer to decide how to RENDER a diagnostic.
+ *
+ * Returns `undefined` for every "we do not know" path: no command channel, the
+ * command is not advertised (non-classic server, older typescript-language-
+ * server), the command was not executed, the response envelope is not
+ * `{success:true}`, or the call threw/timed out. `undefined` must never be
+ * treated as "inferred" — an unanswered probe is not a verdict (AGENTS.md
+ * shape 10: an empty result must distinguish clean from unavailable).
+ */
+export async function fetchTsserverProjectIdentity(
+	svc: TsserverSyncCapableService,
+	file: string,
+): Promise<TsserverProjectIdentity | undefined> {
+	try {
+		if (typeof svc.executeCommand !== "function") return undefined;
+		if (typeof svc.getAdvertisedCommands === "function") {
+			const advertised = await svc.getAdvertisedCommands(file);
+			if (!advertised.includes(TSSERVER_REQUEST_COMMAND)) return undefined;
+		}
+		const outcome = await svc.executeCommand(file, TSSERVER_REQUEST_COMMAND, [
+			"projectInfo",
+			{ file, needFileNameList: false },
+		]);
+		if (!outcome.executed) return undefined;
+		const response = outcome.result as
+			| { success?: boolean; body?: unknown }
+			| undefined;
+		if (!response || response.success !== true) return undefined;
+		return classifyProjectInfo(response.body);
+	} catch {
+		return undefined;
 	}
 }
 

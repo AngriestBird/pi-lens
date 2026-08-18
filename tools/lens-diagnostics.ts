@@ -36,6 +36,7 @@ import { primaryServerId } from "../clients/lsp/config.js";
 import type { LSPDiagnostic } from "../clients/lsp/client.js";
 import type { LSPWorkspaceUnconfirmedReason } from "../clients/lsp/index.js";
 import { getFullScanWallClockMs } from "../clients/lsp/workspace-sweep-hold.js";
+import { demoteInferredProjectSweepResults } from "../clients/lsp/inferred-project.js";
 import {
 	hashDiagnosticContent,
 	type BoundToCurrentDisk,
@@ -1425,8 +1426,14 @@ async function formatFullMode(
 		analyzersPromise,
 	]);
 	const aborted = signal?.aborted ?? false;
-	const lspResults = rawLspResults.filter((result) =>
-		includeFile(result.filePath),
+	// #1640: before ANY consumer sees them — the footer reconcile, the widget
+	// merge, the rendered counts — demote TypeScript errors on files tsserver
+	// checked in its INFERRED project. Applied once, here, so a single seam
+	// governs the whole sweep instead of each renderer learning the rule.
+	const lspResults = await demoteInferredProjectSweepResults(
+		rawLspResults.filter((result) => includeFile(result.filePath)),
+		cwd,
+		lspService,
 	);
 	// A result bound to a different document must not replace the current
 	// widget state, even when it contains real diagnostics. Pull results may carry
