@@ -53,6 +53,8 @@
  * payloads (`searchReads`, `piLensPartialApply`) stay hand-declared — no host
  * type describes them.
  */
+import { sanitizeCorrelationId } from "./read-guard-logger.js";
+
 export function isToolCallEventType<T extends string>(
 	toolName: T,
 	event: unknown,
@@ -62,4 +64,37 @@ export function isToolCallEventType<T extends string>(
 		typeof event === "object" &&
 		(event as { toolName?: unknown }).toolName === toolName
 	);
+}
+
+/**
+ * Resolve a STABLE correlation id shared between a `tool_call` and its
+ * paired `tool_result`, checking every field name a host is known to use
+ * (#1642 F4) — the SDK declares `toolCallId` (see the file header above for
+ * why pi-lens can't import the SDK's own type at runtime), but
+ * `read-guard-logger.ts`'s `getReadGuardCorrelationId` already had to widen
+ * to `callId`/`requestId`/`id` for hosts that populate one of those instead.
+ * Single source of truth for that field list — do not hand-roll a narrower
+ * `event.toolCallId` read at a new call site.
+ *
+ * Deliberately does NOT fall back to a generated id the way
+ * `getReadGuardCorrelationId` does: that fallback is minted fresh on EVERY
+ * call (a bare per-invocation counter), which is exactly right for grouping
+ * one call's own log lines but useless — actively misleading — for
+ * correlating two SEPARATE events (a `tool_call` and its `tool_result`)
+ * against each other. `undefined` means the host supplies no stable
+ * identity at all under any known field; callers decide their own safe
+ * default for that case rather than treat a generated id as a match.
+ */
+export function resolveToolCallCorrelationId(event: unknown): string | undefined {
+	const value = (event ?? {}) as Record<string, unknown>;
+	for (const candidate of [
+		value.toolCallId,
+		value.callId,
+		value.requestId,
+		value.id,
+	]) {
+		const sanitized = sanitizeCorrelationId(candidate);
+		if (sanitized) return sanitized;
+	}
+	return undefined;
 }

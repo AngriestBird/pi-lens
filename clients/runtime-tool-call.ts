@@ -50,7 +50,7 @@ import {
 } from "./read-guard-tool-lines.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { handleToolResult } from "./runtime-tool-result.js";
-import { isToolCallEventType } from "./tool-event.js";
+import { isToolCallEventType, resolveToolCallCorrelationId } from "./tool-event.js";
 import { getSharedTreeSitterClient } from "./tree-sitter-shared.js";
 
 const LSP_TOOLCALL_NAV_TOUCH_BUDGET_MS = Math.max(
@@ -247,6 +247,14 @@ function getNewContentFromToolCall(event: unknown): string | undefined {
 
 interface ToolCallEvent {
 	toolName?: string;
+	/**
+	 * Host-assigned identity for this call, shared with the paired
+	 * `tool_result` event (SDK's `ToolCallEventBase.toolCallId`). Carried
+	 * through so the canonical resolved path can be correlated by identity
+	 * instead of the paired tool_result re-deriving it from its own metadata
+	 * (#1642).
+	 */
+	toolCallId?: string;
 	input?: unknown;
 	details?: unknown;
 	provider?: string;
@@ -298,7 +306,7 @@ export type ToolCallResult = { block: true; reason?: string } | void;
  * `tool_call` is the ONE pi emit path with no per-handler `try`/`catch`. Every
  * sibling wraps each handler and routes a throw to `emitError`
  * (`emitToolResult` at
- * `@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:658-648`,
+ * `@earendil-works/pi-coding-agent/dist/core/extensions/runner.js:649-707`,
  * source `src/core/extensions/runner.ts:877-930`; the generic `emit` at
  * source `runner.ts:801-832`). `emitToolCall`
  * (`dist/core/extensions/runner.js:701-717`, source `runner.ts:932-953`) calls
@@ -317,12 +325,29 @@ export type ToolCallResult = { block: true; reason?: string } | void;
  * cannot have earned a `{ block: true }` verdict, and inventing one would turn
  * a pi-lens bug into a refused user tool call — the exact outcome this guard
  * exists to prevent.
+ *
+ * #1642 F2 (inside the guard): a BLOCKED call (git-guard, read-guard
+ * preflight, the duplicate-export check) never gets a paired `tool_result` —
+ * the host never lets the tool execute. Any path attribution recorded for it
+ * below would otherwise sit in the correlation cache forever (bounded by its
+ * LRU cap, but pure garbage that can crowd out a live in-flight record under
+ * enough blocked-edit volume — a reviewer-reproduced leak). Clear it eagerly
+ * on the way out whenever the call was blocked; a no-op if nothing was
+ * recorded (a gitignored SKIP is not a block, so it is unaffected). This
+ * cleanup runs INSIDE the try, so a throw out of it is absorbed too.
  */
 export async function handleToolCall(
 	deps: ToolCallDeps,
 ): Promise<ToolCallResult> {
 	try {
-		return await handleToolCallInner(deps);
+		const result = await handleToolCallImpl(deps);
+		if (result && (result as { block?: boolean }).block) {
+			const toolCallId = resolveToolCallCorrelationId(deps.event);
+			if (toolCallId !== undefined) {
+				deps.runtime.takeToolCallAttribution(toolCallId);
+			}
+		}
+		return result;
 	} catch (error) {
 		const toolName =
 			(deps.event as { toolName?: string } | undefined)?.toolName ?? "unknown";
@@ -344,11 +369,14 @@ export async function handleToolCall(
 		} catch {
 			// A broken `dbg` must not resurrect the throw this guard just absorbed.
 		}
+		// Any attribution already recorded is deliberately LEFT in place: the
+		// tool now executes (this returns "no opinion"), so its paired
+		// `tool_result` still arrives and claims the record exactly once.
 		return undefined;
 	}
 }
 
-async function handleToolCallInner(
+async function handleToolCallImpl(
 	deps: ToolCallDeps,
 ): Promise<ToolCallResult> {
 	const {
@@ -464,14 +492,40 @@ async function handleToolCallInner(
 	dbg(
 		`tool_call fired for: ${filePath} (exists: ${nodeFs.existsSync(filePath)})`,
 	);
-	if (!nodeFs.existsSync(filePath)) {
+	const toolCallId = resolveToolCallCorrelationId(event);
+	const attributesMutationTarget =
+		toolCallId !== undefined && (toolName === "write" || toolName === "edit");
+	const targetMissing = !nodeFs.existsSync(filePath);
+	// #1642 F1: a brand-new file's WRITE is never a "skip" — `tool_call`
+	// fires PRE-execution, so `existsSync` is false for every path a write
+	// is about to CREATE. Gitignore is a pure pattern match (no existence
+	// requirement), so it is checked regardless of `targetMissing`; only an
+	// actual ignore verdict is a real "refuse". Folding `targetMissing` into
+	// `skipped` (the pre-fix-round-2 shape of this file) made EVERY new-file
+	// write's paired tool_result refuse to run diagnostics/autofix/format at
+	// all — a full pipeline regression worse than the bug #1642 fixes.
+	const targetIgnored = isPathIgnoredByProject(filePath, runtime.projectRoot, false);
+	if (attributesMutationTarget) {
+		// #1642: record the canonical target BY TOOL-CALL IDENTITY — including
+		// (especially) when it is being skipped here. The paired tool_result
+		// must take this exact verdict rather than re-deriving its own path
+		// from relative diff metadata, which is how a gitignored worktree
+		// edit got re-attributed onto a same-relative-path parent file.
+		runtime.recordToolCallAttribution(toolCallId, {
+			resolvedPath: filePath,
+			skipped: targetIgnored,
+			originCwd: ctx.cwd ?? runtime.projectRoot,
+		});
+	}
+	if (targetMissing) {
 		// #1655 item 5: this early return used to be the whole story — pi-lens
 		// did nothing, said nothing, and the file pi went on to read stayed
 		// invisible to the read guard, the LSP warm, and the dispatch. The
 		// variant ladder above now finds the macOS-shaped cases; when it probed
 		// variants and STILL found nothing, say so rather than returning an
-		// indistinguishable silence (defect shape 10). `write` is exempt: it
-		// legitimately targets a file that does not exist yet.
+		// indistinguishable silence (defect shape 10). `write` is exempt for the
+		// same reason #1642 F1 gives just above: a write's target legitimately
+		// does not exist yet.
 		if (
 			toolName !== "write" &&
 			pathResolution?.unresolved &&
@@ -485,7 +539,7 @@ async function handleToolCallInner(
 		}
 		return;
 	}
-	if (isPathIgnoredByProject(filePath, runtime.projectRoot, false)) {
+	if (targetIgnored) {
 		dbg(`tool_call: skipping gitignored file ${filePath}`);
 		return;
 	}

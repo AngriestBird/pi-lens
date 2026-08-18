@@ -187,14 +187,33 @@ function isAvailable(pm: NodePackageManager): Promise<boolean> {
 	const inFlight = inFlightProbes.get(pm);
 	if (inFlight) return inFlight;
 
-	const probe = probeAvailability(pm).finally(() => {
-		inFlightProbes.delete(pm);
+	// #1653 review F1: a probe started before a session reset can settle AFTER
+	// a later session's own probe for the same manager is already in flight.
+	// An unconditional delete-by-key would evict that NEWER entry out from
+	// under it, so a third caller in the gap finds nothing in-flight and
+	// spawns a duplicate. Only remove the entry if it is still THIS call's
+	// promise — the same identity guard `resolveMadge` uses in
+	// dependency-checker.ts for the equivalent race.
+	const probe: Promise<boolean> = probeAvailability(pm).finally(() => {
+		if (inFlightProbes.get(pm) === probe) inFlightProbes.delete(pm);
 	});
 	inFlightProbes.set(pm, probe);
 	return probe;
 }
 
-/** Clear the process-wide availability cache. Intended for tests. */
+/**
+ * Clear the process-wide availability cache: pnpm/yarn/bun/npm each sit
+ * behind their own module-local `AvailabilityLatch` in `availabilityLatches`,
+ * so `resetDispatchAvailabilityState`'s generation counter (the mechanism
+ * most dispatch runners inherit) never reaches them — the same shape as
+ * psscriptanalyzer's (#1490) and zizmor's (#1535) module-local latches.
+ * Without this wired into `session_start`, a genuine "pnpm is missing"
+ * verdict from one session stayed latched into the next: install pnpm mid
+ * day, start a fresh session, pi-lens still reports it missing until a
+ * process restart (#1653). Called from `handleSessionStart`'s per-session
+ * reset block beside `resetZizmorTokenAvailability()` /
+ * `resetPsScriptAnalyzerAvailability()`; also used directly by tests.
+ */
 export function _resetPackageManagerCache(): void {
 	availabilityLatches.clear();
 	inFlightProbes.clear();

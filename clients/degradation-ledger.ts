@@ -18,6 +18,7 @@ export type DegradationKind =
 	| "install-retry-exhausted"
 	| "ast-grep-napi-unavailable"
 	| "instance-registry-corrupt"
+	| "cascade-budget-override-disarmed"
 	/**
 	 * A pi-lens `tool_call` handler threw. pi's `emitToolCall` has no
 	 * per-handler catch, so an escaped throw blocks the user's tool call —
