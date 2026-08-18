@@ -54,6 +54,7 @@ import https from "node:https";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { writeFileAtomicAsync } from "../atomic-write.js";
 import { BoundedLruCache } from "../bounded-cache.js";
 import { isFullyQualified } from "../path-utils.js";
 import {
@@ -1633,13 +1634,32 @@ function snapshotProbeCacheChanges(): ProbeCacheFlushSnapshot {
 	};
 }
 
+/**
+ * Deserialize the on-disk probe-cache for the LOCKED write-side merge
+ * (`writeProbeCache`'s `commitDurableStoreAsync` call). Unlike `readProbeCache`
+ * (the ordinary session-lookup path, which already degrades a parse/shape
+ * failure to `{}`), this used to THROW on a torn/corrupt file — which does
+ * not crash the caller (`writeProbeCache` wraps the whole commit in try/catch
+ * and retries), but it also means the corrupt file on disk is never repaired:
+ * every retry re-reads the same torn bytes, re-throws, and gives up again,
+ * forever (#1609 layer b). Degrading here too, exactly like `readProbeCache`,
+ * lets the next successful flush's `merge` step overwrite the torn file with
+ * a valid one instead of looping on it indefinitely.
+ */
 function deserializeProbeCache(contents: string | undefined): ProbeCache {
 	if (contents === undefined) return {};
-	const parsed: unknown = JSON.parse(contents);
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-		throw new Error("probe-cache root is not an object");
+	try {
+		const parsed: unknown = JSON.parse(contents);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			throw new Error("probe-cache root is not an object");
+		}
+		return parsed as ProbeCache;
+	} catch (err) {
+		logSessionStart(
+			`auto-install probe-cache: write-side read was corrupt (${(err as Error).message}); recovering as empty`,
+		);
+		return {};
 	}
-	return parsed as ProbeCache;
 }
 
 function applyProbeCacheChanges(
@@ -2956,7 +2976,10 @@ async function installGitHubTool(
 				gunzip.on("error", reject);
 				gunzip.end(assetBuffer);
 			});
-			await fs.writeFile(destPath, decompressed, { mode: 0o750 });
+			await writeFileAtomicAsync(destPath, decompressed, {
+				bestEffort: false,
+				mode: 0o750,
+			});
 		} else if (assetName.endsWith(".tar.gz") || assetName.endsWith(".tar.xz")) {
 			// Write archive to temp file, extract with system tar
 			const tmpArchive = path.join(GITHUB_BIN_DIR, `_tmp_${assetName}`);
@@ -3055,7 +3078,10 @@ async function installGitHubTool(
 			if (!isWindows) await fs.chmod(destPath, 0o750);
 		} else {
 			// Bare binary (e.g. shfmt_*_linux_amd64)
-			await fs.writeFile(destPath, assetBuffer, { mode: 0o750 });
+			await writeFileAtomicAsync(destPath, assetBuffer, {
+				bestEffort: false,
+				mode: 0o750,
+			});
 		}
 	} catch (err) {
 		logSessionStart(
@@ -3077,9 +3103,11 @@ async function installGitHubTool(
 		}
 		try {
 			const extraBuffer = await httpsGet(extraAsset.browser_download_url);
-			await fs.writeFile(path.join(GITHUB_BIN_DIR, extraName), extraBuffer, {
-				mode: 0o750,
-			});
+			await writeFileAtomicAsync(
+				path.join(GITHUB_BIN_DIR, extraName),
+				extraBuffer,
+				{ bestEffort: false, mode: 0o750 },
+			);
 			logSessionStart(
 				`github-install ${tool.id}: installed extra asset ${extraName} (${extraBuffer.length} bytes)`,
 			);
@@ -3177,21 +3205,22 @@ async function installMavenTool(
 	try {
 		await fs.mkdir(GITHUB_BIN_DIR, { recursive: true });
 		const jarPath = path.join(GITHUB_BIN_DIR, `${tool.id}.jar`);
-		await fs.writeFile(jarPath, jarBuffer);
+		await writeFileAtomicAsync(jarPath, jarBuffer, { bestEffort: false });
 
 		// Launcher so the tool resolves as a normal command in the managed bin.
 		const launcherName = isWindows ? `${binaryName}.bat` : binaryName;
 		const launcherPath = path.join(GITHUB_BIN_DIR, launcherName);
 		if (isWindows) {
-			await fs.writeFile(
+			await writeFileAtomicAsync(
 				launcherPath,
 				`@echo off\r\njava -jar "%~dp0${tool.id}.jar" %*\r\n`,
+				{ bestEffort: false },
 			);
 		} else {
-			await fs.writeFile(
+			await writeFileAtomicAsync(
 				launcherPath,
 				`#!/bin/sh\nexec java -jar "$(dirname "$0")/${tool.id}.jar" "$@"\n`,
-				{ mode: 0o750 },
+				{ bestEffort: false, mode: 0o750 },
 			);
 		}
 		logSessionStart(
@@ -3358,15 +3387,16 @@ async function installArchiveTool(
 		const launcherName = isWindows ? `${binaryName}.bat` : binaryName;
 		const shimPath = path.join(GITHUB_BIN_DIR, launcherName);
 		if (isWindows) {
-			await fs.writeFile(
+			await writeFileAtomicAsync(
 				shimPath,
 				`@echo off\r\ncall "${resolvedInner}" %*\r\n`,
+				{ bestEffort: false },
 			);
 		} else {
-			await fs.writeFile(
+			await writeFileAtomicAsync(
 				shimPath,
 				`#!/bin/sh\nexec "${resolvedInner}" "$@"\n`,
-				{ mode: 0o750 },
+				{ bestEffort: false, mode: 0o750 },
 			);
 		}
 		logSessionStart(
@@ -3396,9 +3426,10 @@ async function installNpmTool(
 		try {
 			await fs.access(packageJsonPath);
 		} catch {
-			await fs.writeFile(
+			await writeFileAtomicAsync(
 				packageJsonPath,
 				JSON.stringify({ name: "pi-lens-tools", version: "1.0.0" }, null, 2),
+				{ bestEffort: false },
 			);
 		}
 
