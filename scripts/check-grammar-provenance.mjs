@@ -27,6 +27,8 @@ import {
 	loadManifest,
 	sha256,
 	sidecarPathFor,
+	VENDORED_DIR,
+	VENDORED_GRAMMARS,
 } from "./download-grammars.js";
 
 const grammarsDir = process.argv[2] ?? "grammars";
@@ -84,6 +86,49 @@ for (const filename of CORE) {
 	}
 }
 
+// Grammars we build ourselves and COMMIT (`vendor/grammars/`) never pass through
+// the downloader, so nothing else re-hashes them. Without this pass a committed
+// wasm could be replaced or corrupted and every check here would still be green,
+// because the file is not in `grammars/` at all. Three assertions, mirroring the
+// downloaded case: the file exists, its bytes match the pinned sha256, and the
+// lock file records the same build recipe the code does.
+const vendoredNames = Object.keys(VENDORED_GRAMMARS);
+for (const filename of vendoredNames) {
+	const expected = VENDORED_GRAMMARS[filename];
+	const wasmPath = path.join(VENDORED_DIR, filename);
+	if (!fs.existsSync(wasmPath)) {
+		problems.push(`${filename}: committed grammar missing from ${VENDORED_DIR}/`);
+		continue;
+	}
+	const actual = sha256(fs.readFileSync(wasmPath));
+	if (actual !== expected.sha256) {
+		problems.push(
+			`${filename}: committed bytes hash ${actual}, ${VENDORED_DIR} pin expects ${expected.sha256}`,
+		);
+	}
+	const pinned = manifest.vendored?.[filename];
+	if (!pinned) {
+		problems.push(`${filename}: no "vendored" entry in grammars.lock.json`);
+		continue;
+	}
+	for (const field of ["repo", "commit", "license", "buildCommand", "sha256"]) {
+		if (pinned[field] !== expected[field]) {
+			problems.push(
+				`${filename}: lock "${field}" is "${pinned[field]}", code expects "${expected[field]}"`,
+			);
+		}
+	}
+}
+// A lock entry with no code entry is drift in the other direction — the pin
+// would be checked against nothing.
+for (const filename of Object.keys(manifest.vendored ?? {})) {
+	if (!vendoredNames.includes(filename)) {
+		problems.push(
+			`${filename}: "vendored" in grammars.lock.json but absent from VENDORED_GRAMMARS`,
+		);
+	}
+}
+
 if (problems.length > 0) {
 	console.error(
 		`Grammar provenance check FAILED against ${manifest.package}@${manifest.version}:\n`,
@@ -98,5 +143,6 @@ if (problems.length > 0) {
 }
 
 console.log(
-	`Grammar provenance OK — ${wasmFiles.length} grammar(s) verified against ${manifest.package}@${manifest.version} ✓`,
+	`Grammar provenance OK — ${wasmFiles.length} grammar(s) verified against ${manifest.package}@${manifest.version}` +
+		`, plus ${vendoredNames.length} committed grammar(s) in ${VENDORED_DIR} ✓`,
 );
