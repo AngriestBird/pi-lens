@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../clients/cache-manager.js";
+import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
 import { createPiMock } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
@@ -383,9 +384,10 @@ describe("index.ts integration", () => {
 			expect(lspStatuses().at(-1)).toBe("LSP Active: typescript");
 			expect(resetLSPService).not.toHaveBeenCalled();
 
-			// 240s of total idle (no further turns) → the detached timer fires the
-			// wrapped reset, which releases the servers AND repaints to "Inactive".
-			await vi.advanceTimersByTimeAsync(360_000);
+			// Full idle delay elapses (no further turns) → the detached timer fires
+			// the wrapped reset, which releases the servers AND repaints to
+			// "Inactive". #1618: derived, so assert against the real computed value.
+			await vi.advanceTimersByTimeAsync(getEffectiveLspIdleResetMs());
 			expect(resetLSPService).toHaveBeenCalledTimes(1);
 			expect(lspStatuses().at(-1)).toBe("LSP Inactive");
 		} finally {

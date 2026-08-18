@@ -35,6 +35,7 @@ import {
 	getFullScanWallClockMs,
 	isWorkspaceSweepActive,
 	runWhenWorkspaceSweepIdle,
+	SWEEP_IDLE_SAFETY_MARGIN_MS,
 } from "./lsp/workspace-sweep-hold.js";
 import { isTestRoleCollateral } from "./collateral-test-role.js";
 import type { GitleaksResult } from "./gitleaks-client.js";
@@ -156,9 +157,17 @@ function scheduleLSPIdleReset(
 		onError?: (err: unknown) => void;
 	} = {},
 ): void {
-	// Clear any pending reset to avoid multiple timers
+	// Clear any pending reset to avoid multiple timers. #1618: also cancel a
+	// rearm still waiting on a prior sweep's hold — otherwise re-scheduling
+	// here (this call) leaves that OLD waiter armed too, and the sweep's
+	// eventual release would fire a SECOND, independent `scheduleLSPIdleReset`
+	// alongside this fresh one.
 	if (lspIdleResetTimeout) {
 		clearTimeout(lspIdleResetTimeout);
+	}
+	if (pendingSweepRearm) {
+		pendingSweepRearm.cancelled = true;
+		pendingSweepRearm = null;
 	}
 	lspIdleResetTimeout = setTimeout(() => {
 		lspIdleResetTimeout = null;
@@ -199,20 +208,51 @@ function scheduleLSPIdleReset(
 }
 
 // #1618 acceptance criterion 6: FULL_SCAN_WALL_CLOCK_MS (the full-sweep wall
-// clock ceiling, `tools/lens-diagnostics.ts`) must stay under the base idle
-// reset delay — derived, not asserted, so the two constants can't drift back
-// into a relationship where a still-running sweep can outlive this timer.
-// The AC1 hold above already makes a mid-sweep fire impossible regardless of
-// this margin; this is defense in depth against a future caller that touches
-// the LSP service outside `runWorkspaceDiagnostics`' hold.
-const SWEEP_IDLE_SAFETY_MARGIN_MS = 60_000;
+// clock ceiling, `tools/lens-diagnostics.ts`) must stay under EVERY idle
+// reset delay this module can arm — derived, not asserted, so the constants
+// can't drift back into a relationship where a still-running sweep can
+// outlive the timer. The AC1 hold above already makes a mid-sweep fire
+// impossible regardless of this margin; this is defense in depth against a
+// future caller that touches the LSP service outside
+// `runWorkspaceDiagnostics`' hold. `SWEEP_IDLE_SAFETY_MARGIN_MS` is
+// single-sourced from `workspace-sweep-hold.ts`, which also uses it for its
+// own max-hold-age failsafe — one tunable, not two.
 const DEFAULT_LSP_IDLE_RESET_MS = 240_000;
 
+function sweepDerivedFloorMs(): number {
+	return getFullScanWallClockMs() + SWEEP_IDLE_SAFETY_MARGIN_MS;
+}
+
+/** The normal (non-subagent, non-budget-pressured) idle-reset delay. */
 function getBaseLspIdleResetMs(): number {
-	return Math.max(
-		DEFAULT_LSP_IDLE_RESET_MS,
-		getFullScanWallClockMs() + SWEEP_IDLE_SAFETY_MARGIN_MS,
-	);
+	return Math.max(DEFAULT_LSP_IDLE_RESET_MS, sweepDerivedFloorMs());
+}
+
+/**
+ * #1618 (R4): the subagent-light (#713) and cross-process-budget-pressured
+ * (#449) paths used to arm a flat, much SHORTER delay (60s default) than the
+ * sweep's own 300s ceiling — a 5:1 inversion covered only by the AC1 hold.
+ * Deriving this path too means AC6 ("the sweep's ceiling stays under every
+ * idle-reset delay") holds universally, not just for the common path, and an
+ * env override to either constant can never invert it (`Math.max` floors at
+ * the derived value no matter how small the override pushes the other side).
+ *
+ * Accepted cost (deliberate, not incidental — see R6 in the PR body): under
+ * default settings this now ALSO arms the ~360s derived floor rather than a
+ * true 60s teardown, trading some of #713's "release a short-lived
+ * subagent's fleet fast" benefit for AC6 holding without exceptions.
+ */
+function getShortenedLspIdleResetMs(): number {
+	return Math.max(getLspBudgetIdleTimeoutMs(), sweepDerivedFloorMs());
+}
+
+/** The idle-reset delay `handleTurnEnd` actually arms on a file-less turn —
+ *  exported so tests assert against the REAL computed value instead of a
+ *  hand-derived literal that can silently drift from this function. */
+export function getEffectiveLspIdleResetMs(): number {
+	return isSubagentSession() || shouldShortenLspIdleTimeout()
+		? getShortenedLspIdleResetMs()
+		: getBaseLspIdleResetMs();
 }
 
 export function cancelLSPIdleReset(): void {
@@ -338,15 +378,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				cacheManager.clearCache("turn-end-findings", cwd);
 			}
 		}
-		// #713: subagent sessions use a shorter idle reset (60s) — a short-lived
-		// task agent holding a warm fleet for 4 minutes after its last turn is
-		// pure waste under fan-out. Classify ONCE here so every tick in this call
-		// path shares the same answer. PI_LENS_SUBAGENT_FULL=1 restores 240s via
-		// isSubagentSession() returning false.
-		const idleResetMs =
-			isSubagentSession() || shouldShortenLspIdleTimeout()
-				? getLspBudgetIdleTimeoutMs()
-				: getBaseLspIdleResetMs();
+		// #713: subagent sessions use a shorter idle reset (nominally 60s) — a
+		// short-lived task agent holding a warm fleet for 4 minutes after its
+		// last turn is pure waste under fan-out. Classify ONCE here so every
+		// tick in this call path shares the same answer. PI_LENS_SUBAGENT_FULL=1
+		// restores the base delay via isSubagentSession() returning false.
+		// #1618: both branches route through `getEffectiveLspIdleResetMs` so
+		// AC6's derivation applies universally — see that function's doc for
+		// why the "shorter" path is not always literally 60s anymore.
+		const idleResetMs = getEffectiveLspIdleResetMs();
 		dbg(
 			`turn_end: no modified files, scheduling LSP idle reset (${idleResetMs / 1000}s)`,
 		);
@@ -361,8 +401,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		return;
 	}
 
-	// Cancel any pending idle reset since we're actively working
-	if (lspIdleResetTimeout) {
+	// Cancel any pending idle reset since we're actively working. #1618: also
+	// checks `pendingSweepRearm` — a timer deferred behind an in-flight
+	// workspace sweep already nulled `lspIdleResetTimeout` (the setTimeout
+	// callback clears it before checking the hold), so this guard used to
+	// read "nothing pending" and skip the cancel while a rearm was still
+	// queued to fire the instant the sweep released its hold — resurrecting
+	// idle reset on a session that had since gone back to active editing.
+	if (lspIdleResetTimeout || pendingSweepRearm) {
 		cancelLSPIdleReset();
 		dbg("turn_end: cancelled pending LSP idle reset (active editing)");
 	}

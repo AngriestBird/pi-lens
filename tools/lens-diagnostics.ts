@@ -962,6 +962,11 @@ const UNCONFIRMED_REASON_SENTENCE: Record<LSPWorkspaceUnconfirmedReason, string>
 	coverage_gap: "an auxiliary scanner coverage gap",
 	service_destroyed: "the LSP service was reset mid-sweep",
 	error: "check errored",
+	// #1618 review round 2: the LSP layer considered this touch CONFIRMED —
+	// the file's content changed under it (stale binding), which is a
+	// completely different failure from a timeout. Must never collapse into
+	// "within budget", the exact string this PR exists to stop misrendering.
+	binding_mismatch: "the file changed on disk since this result was computed",
 };
 
 // Short per-reason label used only when MORE than one reason is present, so
@@ -973,6 +978,7 @@ const UNCONFIRMED_REASON_COUNT_LABEL: Record<LSPWorkspaceUnconfirmedReason, stri
 	coverage_gap: "coverage gap",
 	service_destroyed: "service reset mid-sweep",
 	error: "errored",
+	binding_mismatch: "stale binding",
 };
 
 /**
@@ -985,10 +991,19 @@ const UNCONFIRMED_REASON_COUNT_LABEL: Record<LSPWorkspaceUnconfirmedReason, stri
  * a way to become nonzero). An explicit `result.error` now wins even when
  * `unconfirmedReason` is absent, so an errored file is never rendered as
  * "within budget".
+ *
+ * #1618 review round 2: `mismatched` MUST be checked first. A binding
+ * mismatch is discovered HERE, after the sweep already returned the result
+ * as confirmed (`!timedOut`, no `.error`, no `.unconfirmedReason`) — the
+ * `?? "budget"` fallback below would otherwise silently claim a
+ * stale-binding file as "within budget", the exact string this PR exists to
+ * stop misrendering.
  */
 function classifyUnconfirmedReason(
 	result: WorkspaceLspDiagnosticResult,
+	mismatched: WeakSet<WorkspaceLspDiagnosticResult>,
 ): LSPWorkspaceUnconfirmedReason {
+	if (mismatched.has(result)) return "binding_mismatch";
 	return result.unconfirmedReason ?? (result.error ? "error" : "budget");
 }
 
@@ -996,14 +1011,17 @@ function classifyUnconfirmedReason(
  * #1618: replaces the `unconfirmedTimedOut`/`unconfirmedErrored` dead
  * subtraction with a real per-reason tally read off each result's own
  * `unconfirmedReason` (falling back to `classifyUnconfirmedReason` for a
- * legacy result that predates the field).
+ * legacy result that predates the field). `mismatched` is threaded through
+ * so a stale-binding file is never counted under a fallback reason it
+ * doesn't have (review round 2).
  */
 function tallyUnconfirmedReasons(
 	results: readonly WorkspaceLspDiagnosticResult[],
+	mismatched: WeakSet<WorkspaceLspDiagnosticResult>,
 ): Map<LSPWorkspaceUnconfirmedReason, number> {
 	const tally = new Map<LSPWorkspaceUnconfirmedReason, number>();
 	for (const result of results) {
-		const reason = classifyUnconfirmedReason(result);
+		const reason = classifyUnconfirmedReason(result, mismatched);
 		tally.set(reason, (tally.get(reason) ?? 0) + 1);
 	}
 	return tally;
@@ -1580,7 +1598,10 @@ async function formatFullMode(
 	// as "0 diagnostics" — say explicitly which files the LSP sweep could not
 	// confirm and why, distinguishing a hard error from a soft timeout the
 	// same way #570 does upstream.
-	const unconfirmedByReason = tallyUnconfirmedReasons(unconfirmedLspResults);
+	const unconfirmedByReason = tallyUnconfirmedReasons(
+		unconfirmedLspResults,
+		mismatchedLspResults,
+	);
 	// #646: per-primary-server breakdown of the same confirmed/unconfirmed
 	// tally — lets an agent see AT A GLANCE which server is responsible for
 	// any unconfirmed files (e.g. "marksman: 0/34") instead of having to

@@ -819,6 +819,39 @@ describe("lens_diagnostics mode=full", () => {
 		});
 	});
 
+	// #1618 review round 2: `findFullScanBindingMismatches` discovers a stale
+	// binding (`boundToCurrentDisk: false`) AFTER the sweep already returned
+	// the result as confirmed — no `.timedOut`, no `.error`, no
+	// `.unconfirmedReason`. The `classifyUnconfirmedReason`
+	// `result.unconfirmedReason ?? (result.error ? "error" : "budget")`
+	// fallback would otherwise silently claim it as "within budget", the
+	// exact string this whole PR exists to stop misrendering.
+	it("renders a stale-binding file as binding_mismatch, never as 'within budget' (#1618 R2)", async () => {
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{ filePath: "/proj/src/clean.ts", diagnostics: [], count: 0 },
+				{
+					filePath: "/proj/src/stale-binding.ts",
+					diagnostics: [],
+					count: 0,
+					boundToCurrentDisk: false,
+				},
+			]),
+		};
+		const result = await run(makeTool({}, lspService), { mode: "full" });
+		const text = String(result.content[0].text);
+
+		expect(text).toContain("stale-binding.ts");
+		expect(text).toMatch(/unconfirmed/i);
+		expect(text).not.toContain("within budget");
+		expect(text).toContain("changed on disk");
+		expect(result.details).toMatchObject({
+			lspFilesConfirmed: 1,
+			lspFilesUnconfirmed: 1,
+			unconfirmedLspFiles: ["/proj/src/stale-binding.ts"],
+		});
+	});
+
 	it("does not surface an unconfirmed note when every LSP result is confirmed (#630)", async () => {
 		const lspService = {
 			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([

@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _resetSubagentModeForTests } from "../clients/subagent-mode.js";
+import { getEffectiveLspIdleResetMs } from "../clients/runtime-turn.js";
 import { createPiMock } from "./support/pi-mock.js";
 import { removeTempDirSync } from "./clients/test-utils.js";
 
@@ -132,7 +133,7 @@ describe("index.ts LSP idle reset", () => {
 			expect(lspStatuses().at(-1)).toBe("LSP Active: typescript");
 			stale = true;
 
-			await vi.advanceTimersByTimeAsync(360_000);
+			await vi.advanceTimersByTimeAsync(getEffectiveLspIdleResetMs());
 
 			expect(resetLSPService).toHaveBeenCalledTimes(1);
 			expect(lspStatuses().at(-1)).toBe("LSP Inactive");
@@ -141,9 +142,17 @@ describe("index.ts LSP idle reset", () => {
 		}
 	}, INTEGRATION_TIMEOUT_MS);
 
-	// #713: subagent light mode uses a shorter idle reset (60s instead of 240s).
-	it("subagent session fires the idle reset at 60s, not 240s (#713)", async () => {
+	// #713: subagent light mode uses a shorter idle reset than a normal
+	// session. #1618 (R4): that shortened delay is now ALSO derived against
+	// the sweep's own wall-clock ceiling (`getEffectiveLspIdleResetMs` floors
+	// it at `FULL_SCAN_WALL_CLOCK_MS + margin`), so under the DEFAULT 300s
+	// ceiling the "shortened" and "normal" delays would collide (both floor
+	// at 360s) and this test would prove nothing. Override the ceiling down
+	// to isolate the #713 behavior this test actually targets: the subagent
+	// path stays shorter than the base path when the sweep ceiling is small.
+	it("subagent session fires the idle reset sooner than a normal session (#713, #1618)", async () => {
 		process.env.PI_SUBAGENT_CHILD = "1";
+		process.env.PI_LENS_LENS_DIAGNOSTICS_FULL_TIMEOUT_MS = "1";
 		_resetSubagentModeForTests();
 
 		try {
@@ -180,22 +189,27 @@ describe("index.ts LSP idle reset", () => {
 				},
 			};
 
+			const expectedMs = getEffectiveLspIdleResetMs();
+			// Still meaningfully shorter than the base 240s floor — proves the
+			// subagent classification is actually taking effect, not just
+			// coincidentally matching the derived floor.
+			expect(expectedMs).toBeLessThan(240_000);
+
 			vi.useFakeTimers();
 			try {
 				await turnEnd?.({}, ctx);
 
-				// Should NOT fire at 59 seconds
-				await vi.advanceTimersByTimeAsync(59_000);
+				await vi.advanceTimersByTimeAsync(expectedMs - 1);
 				expect(resetLSPService).not.toHaveBeenCalled();
 
-				// Should fire at exactly 60 seconds
-				await vi.advanceTimersByTimeAsync(1_000);
+				await vi.advanceTimersByTimeAsync(1);
 				expect(resetLSPService).toHaveBeenCalledTimes(1);
 			} finally {
 				vi.useRealTimers();
 			}
 		} finally {
 			delete process.env.PI_SUBAGENT_CHILD;
+			delete process.env.PI_LENS_LENS_DIAGNOSTICS_FULL_TIMEOUT_MS;
 			_resetSubagentModeForTests();
 		}
 	}, INTEGRATION_TIMEOUT_MS);

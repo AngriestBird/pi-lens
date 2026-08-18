@@ -17,6 +17,7 @@ import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 import { SESSION_START_GUIDANCE } from "../../clients/runtime-session.js";
 import {
 	cancelLSPIdleReset,
+	getEffectiveLspIdleResetMs,
 	handleTurnEnd,
 } from "../../clients/runtime-turn.js";
 import {
@@ -102,7 +103,11 @@ describe("LSP idle reset", () => {
 				}),
 			);
 
-			await vi.advanceTimersByTimeAsync(59_999);
+			// #1618: the budget-shortened delay is now derived (Math.max against
+			// the sweep's own wall-clock ceiling + margin), so assert against the
+			// REAL computed value rather than a hand-derived literal.
+			const expectedMs = getEffectiveLspIdleResetMs();
+			await vi.advanceTimersByTimeAsync(expectedMs - 1);
 			expect(resetLSPService).not.toHaveBeenCalled();
 			await vi.advanceTimersByTimeAsync(1);
 			expect(resetLSPService).toHaveBeenCalledTimes(1);
@@ -135,7 +140,7 @@ describe("LSP idle reset", () => {
 			);
 
 			runtime.resetForSession();
-			await vi.advanceTimersByTimeAsync(360_000);
+			await vi.advanceTimersByTimeAsync(getEffectiveLspIdleResetMs());
 
 			expect(resetLSPService).not.toHaveBeenCalled();
 		} finally {
@@ -165,7 +170,7 @@ describe("LSP idle reset", () => {
 				}),
 			);
 
-			await vi.advanceTimersByTimeAsync(360_000);
+			await vi.advanceTimersByTimeAsync(getEffectiveLspIdleResetMs());
 
 			expect(resetLSPService).toHaveBeenCalledTimes(1);
 			expect(dbg).toHaveBeenCalledWith(`lsp idle reset failed: ${resetError}`);
@@ -204,7 +209,7 @@ describe("LSP idle reset", () => {
 				}),
 			);
 
-			await vi.advanceTimersByTimeAsync(360_000);
+			await vi.advanceTimersByTimeAsync(getEffectiveLspIdleResetMs());
 
 			expect(resetLSPService).toHaveBeenCalledTimes(1);
 			expect(emitWarning).toHaveBeenCalledWith(

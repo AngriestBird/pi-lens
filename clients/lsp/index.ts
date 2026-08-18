@@ -33,7 +33,10 @@ import {
 } from "../project-trust.js";
 import { shouldPreferPullOnlyDiagnostics } from "../lsp-budget.js";
 import { withDeadline } from "../deadline-utils.js";
-import { acquireWorkspaceSweepHold } from "./workspace-sweep-hold.js";
+import {
+	acquireWorkspaceSweepHold,
+	clearWorkspaceSweepHoldForSessionStart,
+} from "./workspace-sweep-hold.js";
 import {
 	isAtOrAboveHomeDir,
 	isWindowsPath,
@@ -558,13 +561,21 @@ export interface LSPTouchFileOptions {
  *   while this sweep was still in flight; the remainder of the sweep never
  *   even attempted a language-server round trip for this file.
  * - `error` — the per-file check threw.
+ * - `binding_mismatch` — never set by this module. `tools/lens-diagnostics.ts`
+ *   classifies a result into this reason AFTER the sweep returns, when its
+ *   content-binding fingerprint no longer matches disk (`boundToCurrentDisk:
+ *   false`, or a hash check that failed post-hoc) — the LSP layer itself
+ *   considered the touch confirmed, but the file changed under it. Listed
+ *   here so both modules share one discriminated union rather than the tools
+ *   layer inventing a second, parallel one (#1618 review round 2).
  */
 export type LSPWorkspaceUnconfirmedReason =
 	| "budget"
 	| "inconclusive"
 	| "coverage_gap"
 	| "service_destroyed"
-	| "error";
+	| "error"
+	| "binding_mismatch";
 
 export interface LSPWorkspaceDiagnosticResult {
 	filePath: string;
@@ -6718,6 +6729,10 @@ export function resetLSPService(options: LSPShutdownOptions = {}): void {
 	// latched for the rest of the extension-host process (#1570).
 	if (options.reason === "session_start") {
 		resetClassicTsRepairGuard();
+		// #1618 (R3): a hold from a PRIOR generation's sweep must never survive
+		// a session boundary — state that must re-arm at session_start cannot
+		// hide behind a leaked/stuck guard from the generation before it.
+		clearWorkspaceSweepHoldForSessionStart();
 	}
 	const retiringService = globalLSPService;
 	globalLSPService = null;

@@ -1,28 +1,5 @@
 # pi-lens — agent context
 
-A detached process-lifetime timer must never fire into an operation that
-granted itself a longer wall-clock budget than the timer's own delay.
-`clients/lsp/workspace-sweep-hold.ts`'s counter-based hold is the pattern:
-the long-running operation (`LSPService.runWorkspaceDiagnostics`) acquires it
-for its whole lifetime in try/finally (so a throw or an overlapping second
-call still releases correctly — never a boolean, which a second holder could
-clear early), and the timer (`clients/runtime-turn.ts`'s idle-reset) checks
-the hold at FIRE time and defers instead of firing, re-arming a fresh delay
-once the last hold releases rather than resuming a stale countdown. The
-timer's base delay is also derived from the operation's own wall-clock
-ceiling plus a safety margin, so the two constants can't drift back into the
-relationship that caused this: a 240s idle-reset timer firing into an
-in-flight `lens_diagnostics mode=full` sweep (which grants itself 300s),
-destroying the very service the sweep was touching and mislabeling ~81
-service-destroyed files as budget exhaustion. A destroyed-mid-operation
-outcome needs its OWN discriminated reason, distinct from a real budget
-timeout or a thrown error — `LSPWorkspaceDiagnosticResult.unconfirmedReason`
-(`budget` / `inconclusive` / `coverage_gap` / `service_destroyed` / `error`)
-replaces a single ambiguous `timedOut` flag, and every render/log site that
-used to compute an errored count via `length - timedOutCount` (structurally
-always 0, since the error path also set `timedOut`) reads the discriminant
-directly instead. (#1618)
-
 Post-fix decision observability is durable and bounded: advisory delivery logs
 one `advisory_provenance_decision` per consume, classic TypeScript project
 identity logs every success/failure outcome, deferred mutation drains summarize
@@ -339,6 +316,8 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 13. **A transient failure classified as durable INSIDE an already-governed latch.** Migrating a memo to the shared availability policy makes its *storage* correct and says nothing about its *classification*. `govulncheck-client.ts` wrote `this.available = false` after a failed `go install`, and that setter routes into `availabilityLatch.noteUnavailable("missing", "not-found")` — governed plumbing, wrong classification, and the resulting `availability_decision` row is a well-formed `missing` verdict indistinguishable from a genuine absence. *Screen:* when a call site hands the policy an outcome it did NOT derive from `classifyProbeFailure`, justify it in a comment at the call site AND record what actually failed — `classifiedBy: "caller"` plus `evidence` (`clients/dispatch/runners/utils/availability-policy.ts`), so the row can be audited instead of trusted. An install failure, a stat, or a shim on disk are all legitimate caller assertions; a spawn result is not — derive it. *e.g.* #1500 (the class), #1467/#1476/#1489 (the migrations that made storage correct). *Detect:* **deliberately ungated.** The available shortcut — flag any literal `"missing"`/`"not-found"` passed into a governed latch — fires on every correct post-ENOENT write, and a gate that cries wolf gets baselined rather than fixed. Review-enforced: grep `noteUnavailable(`/`available = false` and ask what spawn result justified each one.
 
 14. **A test that resets a DUPLICATE of the module's state.** Vitest resolves an import specifier literally, and this repo's runtime is the compiled output, so `x.ts` and `x.js` are two module instances: the `.ts` spelling gives the test a private copy of that module's own mutable state (generation counters, latches, memo maps) while everything the module imports stays shared. A `beforeEach` reset called through `.ts` therefore clears the copy, the code under test keeps reading the compiled original, and the assertion passes without ever observing the state it claims to guard — shape 7 with no visible fixture defect to notice. Note the trap in the ordinary case too: a test whose imports are ALL `.ts` is accidentally self-consistent and green, so "it passes" says nothing; one co-imported `.js` module reaching the same file makes it vacuous. *Screen:* tests import the artifact the runtime imports — `.js` — for every module the build compiles, including `vi.mock` and dynamic-`import()` specifiers. *e.g.* #1514 (the near-miss: the fixer's session-re-arm test only bound after switching its imports to `.js`), #1565 (the class; 17 test files were reaching the same module both ways). *Detect:* `tests/config/module-instance-coverage.test.ts` — a static scan (`tests/support/module-instance-scan.ts`) over every specifier in `tests/`, with a reasoned allowlist. Static on purpose: a twin-on-disk check goes silent in an unbuilt tree.
+
+15. **A detached process-lifetime timer firing into an operation that granted itself a longer wall-clock budget than the timer's own delay.** A 240s LSP idle-reset timer (`clients/runtime-turn.ts`) fired straight into an in-flight `lens_diagnostics mode=full` sweep (which grants itself 300s), destroying the very service the sweep was touching and mislabeling ~81 service-destroyed files as budget exhaustion. *Screen:* when a background timer and a long-running operation can both touch the same resource, the operation must HOLD a gate for its whole lifetime (a counter, not a boolean — an overlapping second call or a throw must still release correctly via try/finally), and the timer must check that gate at FIRE time and defer — re-arming a FRESH delay once the gate releases, never resuming a countdown that already elapsed. Derive the timer's delay from the operation's own ceiling plus a safety margin so the two constants can't drift back into the dangerous relationship; extend the derivation to every path that arms the SAME timer (a shortened/degraded-mode delay is not exempt just because it's usually smaller). A destroyed-mid-operation outcome needs its OWN discriminated reason, distinct from a real timeout or a thrown error — collapsing them into one ambiguous flag reproduces shape 10 (silencing/misclassifying counted as fixing) one level up. And the hold itself is state that must re-arm at session_start (clear it unconditionally on a session boundary) and carry a bounded max-age failsafe (force-release past the operation's own ceiling, with a distinct log record) — a leaked hold that never releases is the INVERSE defect, permanently disabling the timer. *e.g.* #1618 (`clients/lsp/workspace-sweep-hold.ts`'s counter-based hold, `LSPWorkspaceDiagnosticResult.unconfirmedReason`). *Detect:* review question — can a background timer and a long operation touch the same resource, and does anything gate the timer on the operation's actual lifetime rather than a guessed delay? Not ast-grep-able (the racing pair is never syntactically adjacent).
 
 ### AI-authorship smells
 
