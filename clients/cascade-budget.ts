@@ -46,6 +46,7 @@
  * cascade at ~10 neighbours.
  */
 
+import { recordDegradationOnce } from "./degradation-ledger.js";
 import { toPositiveFinite } from "./env-utils.js";
 // The knobs only, never the scheduler — this module is arithmetic and has no
 // business depending on a task registry to read two numbers (#1462 review N4).
@@ -77,11 +78,25 @@ const MIN_NEIGHBOUR_BUDGET = RUNTIME_CONFIG.pipeline.cascadeMaxFiles;
  * The flat per-run cap: the most neighbours a cascade walks. Still the ceiling
  * — the derivation below only ever narrows it, and only inside the rescue band.
  */
+const DEFAULT_NEIGHBOUR_BUDGET = 40;
+
 export const CASCADE_NEIGHBOUR_BUDGET = Math.max(
 	MIN_NEIGHBOUR_BUDGET,
 	Number.parseInt(process.env.PI_LENS_CASCADE_NEIGHBOUR_BUDGET ?? "40", 10) ||
-		40,
+		DEFAULT_NEIGHBOUR_BUDGET,
 );
+
+/**
+ * True when `PI_LENS_CASCADE_NEIGHBOUR_BUDGET` moved the ceiling away from the
+ * default (#1462 review F-E). Raising it far enough can push
+ * `ceiling * perNeighbourMs` past the settle window, so EVERY cascade reads
+ * `no-rescue-window` — the whole derivation disarmed by a cap change nobody
+ * meant as a timeout change. Read once at load, same lifetime as the constant
+ * it describes.
+ */
+const NEIGHBOUR_BUDGET_OVERRIDDEN =
+	process.env.PI_LENS_CASCADE_NEIGHBOUR_BUDGET !== undefined &&
+	CASCADE_NEIGHBOUR_BUDGET !== DEFAULT_NEIGHBOUR_BUDGET;
 
 /**
  * Marginal wall-clock cost of one more neighbour in the walk, in ms. Calibrated
@@ -195,6 +210,21 @@ export function deriveCascadeNeighbourBudget(options: {
 	// than the `no-rescue-window` case this guard exists to catch. What it does
 	// cost is headroom — see the divisor bands in the bench's `--sweep` text.
 	if (onTimeMs <= 0 || onTimeMs < ceiling * perNeighbourMs) {
+		// #1462 review F-E: name the override, once per session, when it is the
+		// REASON the derivation stood down — not when a caller under test asked
+		// for a specific ceiling, and not on every one of the cascades this
+		// disarms for the rest of the session.
+		if (options.ceiling === undefined && NEIGHBOUR_BUDGET_OVERRIDDEN) {
+			recordDegradationOnce({
+				kind: "cascade-budget-override-disarmed",
+				subject: "cascade-neighbour-budget",
+				reason:
+					`PI_LENS_CASCADE_NEIGHBOUR_BUDGET=${CASCADE_NEIGHBOUR_BUDGET} needs ` +
+					`${ceiling * perNeighbourMs}ms to walk the full cap, which exceeds ` +
+					`the ${onTimeMs}ms settle window — the rescue band is disarmed and ` +
+					`every cascade keeps the flat (overridden) cap`,
+			});
+		}
 		return { ...full, zone: "no-rescue-window" };
 	}
 	// The full walk still fits. Nothing to buy.
@@ -204,6 +234,20 @@ export function deriveCascadeNeighbourBudget(options: {
 	// Past rescue: not even a floor-sized walk fits, so narrowing would drop the
 	// tail permanently and still miss the window. The carry-over delivers the
 	// whole set one turn later instead.
+	//
+	// #1462 review F-B, kept rather than shrunk: one dogfood log measured this
+	// zone at 0/1090 cascades, and asked whether a 3-zone module earns its keep
+	// at that frequency. It was measured against the WRITE-relative clock this
+	// same round fixed, which charges elapsed time no cascade actually spent
+	// waiting — so it under-counts how often a genuinely slow compute (a cold
+	// graph build, ~19 s) overlaps an already-running settle window, which is
+	// exactly what this zone exists to catch (F3, a real regression the first
+	// review round found: a floor-sized stub on that cold-start case is
+	// strictly worse than pre-#1462). Reachability under the corrected clock
+	// has not been re-measured; shrinking on a stale sample would trade a
+	// cheap, already-tested guard against a proven regression for a paper
+	// simplification. Revisit if a post-fix dogfood window confirms it still
+	// never fires.
 	if (remainingMs < floor * perNeighbourMs) {
 		return { ...full, zone: "past-rescue" };
 	}

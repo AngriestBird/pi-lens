@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	CASCADE_NEIGHBOUR_BUDGET,
 	cascadeSettleWaitMs,
@@ -130,6 +130,54 @@ describe("deriveCascadeNeighbourBudget", () => {
 			budget: CASCADE_NEIGHBOUR_BUDGET,
 			zone: "no-rescue-window",
 		});
+	});
+
+	it("#1462 review F-E: an env override that disarms the rescue band names itself once, in the degradation ledger", async () => {
+		// CASCADE_NEIGHBOUR_BUDGET is a module-level constant, frozen at import —
+		// exercising an override means loading a FRESH module instance with the
+		// env var already set, not mutating process.env after this file's static
+		// top-level import already baked in the default.
+		vi.resetModules();
+		const previous = process.env.PI_LENS_CASCADE_NEIGHBOUR_BUDGET;
+		// 60 * 100ms/neighbour = 6000ms, past the 5000ms default settle window —
+		// every cascade reads no-rescue-window. Nobody asked to disable the
+		// rescue band; they asked for a bigger cap, and it disarmed silently.
+		process.env.PI_LENS_CASCADE_NEIGHBOUR_BUDGET = "60";
+		try {
+			const { resetDegradationLedger, getDegradationSummary } = await import(
+				"../../clients/degradation-ledger.js"
+			);
+			resetDegradationLedger();
+			const freshBudget = await import("../../clients/cascade-budget.js");
+			expect(freshBudget.CASCADE_NEIGHBOUR_BUDGET).toBe(60);
+
+			const decision = freshBudget.deriveCascadeNeighbourBudget({
+				elapsedMs: 0,
+			});
+			expect(decision.zone).toBe("no-rescue-window");
+
+			const summary = getDegradationSummary();
+			const group = summary.find(
+				(g) => g.kind === "cascade-budget-override-disarmed",
+			);
+			expect(group).toBeDefined();
+			expect(group?.latestReasons[0]?.reason).toContain("60");
+
+			// Once per session — a second disarmed call must not double-log.
+			freshBudget.deriveCascadeNeighbourBudget({ elapsedMs: 0 });
+			expect(
+				getDegradationSummary().find(
+					(g) => g.kind === "cascade-budget-override-disarmed",
+				)?.count,
+			).toBe(1);
+		} finally {
+			if (previous === undefined) {
+				delete process.env.PI_LENS_CASCADE_NEIGHBOUR_BUDGET;
+			} else {
+				process.env.PI_LENS_CASCADE_NEIGHBOUR_BUDGET = previous;
+			}
+			vi.resetModules();
+		}
 	});
 
 	it("records the pipeline's whole drain, not just the turn_end settle", () => {

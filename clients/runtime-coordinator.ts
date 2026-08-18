@@ -592,7 +592,18 @@ export class RuntimeCoordinator {
 		this._pendingCascadeRuns.push(p);
 	}
 
-	/** The active turn_end settle clock, or undefined outside that wait. */
+	/**
+	 * The active turn_end settle clock, or undefined outside that wait.
+	 *
+	 * #1462 review F-F: every cascade compute in flight on this coordinator
+	 * reads the SAME clock. `_turnEndCascadeSettleStarts` is keyed by settle
+	 * token so `settleCascadeRuns` can distinguish its own drain from a nested
+	 * one, but this getter always answers with the latest active window —
+	 * there is one turn_end per runtime, not one per caller. A cascade begun
+	 * moments before turn_end and one begun long before it both measure elapsed
+	 * time against the same start, which is correct: they are racing the same
+	 * settle wait and share its deadline, not separate ones.
+	 */
 	getTurnEndCascadeSettleStart(): number | undefined {
 		let latest: number | undefined;
 		for (const start of this._turnEndCascadeSettleStarts.values()) latest = start;
