@@ -13,6 +13,7 @@
  */
 
 import { logExtension } from "../../extension-log.js";
+import { getLspCapableKinds } from "../../language-policy.js";
 import { touchCoverageGap } from "../../lsp/diagnostic-binding.js";
 import { getLSPService } from "../../lsp/index.js";
 import { RUNTIME_CONFIG } from "../../runtime-config.js";
@@ -78,41 +79,11 @@ function buildCodeActionSuggestion(
 
 const lspRunner: RunnerDefinition = {
 	id: "lsp",
-	appliesTo: [
-		"jsts",
-		"python",
-		"go",
-		"rust",
-		"ruby",
-		"cxx",
-		"cmake",
-		"shell",
-		"json",
-		"markdown",
-		"css",
-		"yaml",
-		"html",
-		"docker",
-		"php",
-		"powershell",
-		"prisma",
-		"csharp",
-		"fsharp",
-		"java",
-		"kotlin",
-		"swift",
-		"dart",
-		"lua",
-		"zig",
-		"haskell",
-		"elixir",
-		"gleam",
-		"ocaml",
-		"clojure",
-		"terraform",
-		"nix",
-		"toml",
-	],
+	// Derived from LANGUAGE_POLICY, never hand-maintained: the copy this
+	// replaced had drifted (fish was lspCapable but absent, so every surface
+	// that consults the registry reported fish as having no runner). Registering
+	// a language as lspCapable is now the only step this seam needs (#1545).
+	appliesTo: getLspCapableKinds(),
 	priority: PRIORITY.LSP_PRIMARY,
 	enabledByDefault: true,
 
