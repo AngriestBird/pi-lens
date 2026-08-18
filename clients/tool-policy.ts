@@ -2366,6 +2366,22 @@ export function hasCmakeFormatConfig(cwd: string): boolean {
 	);
 }
 
+// PSScriptAnalyzerSettings.psd1 is the conventional settings file PowerShell
+// projects use to configure `Invoke-Formatter`/`Invoke-ScriptAnalyzer` (passed
+// via `-Settings`); `ScriptAnalyzerSettings.psd1` is the same convention minus
+// the "PS" prefix and shows up in some repos too. Either one opting a project
+// into explicit PSScriptAnalyzer config is enough to select the formatter
+// (#1572 — `psscriptanalyzer-format` had no case here at all, so it could
+// never be selected regardless of project config).
+export function hasPSScriptAnalyzerConfig(cwd: string): boolean {
+	return (
+		findNearestContaining(cwd, [
+			"PSScriptAnalyzerSettings.psd1",
+			"ScriptAnalyzerSettings.psd1",
+		]) !== undefined
+	);
+}
+
 export function hasPhpstanConfig(cwd: string): boolean {
 	return findNearestContaining(cwd, PHPSTAN_CONFIGS) !== undefined;
 }

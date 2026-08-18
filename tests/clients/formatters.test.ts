@@ -856,6 +856,14 @@ describe("getFormattersForFile — policy selection", () => {
 				configFile: ".cmake-format",
 				content: "# cmake-format config\n",
 			},
+			{
+				// #1572: psscriptanalyzer-format had no hasExplicitFormatterConfig
+				// case at all, so no project configuration could ever select it.
+				name: "psscriptanalyzer-format",
+				ext: ".ps1",
+				configFile: "PSScriptAnalyzerSettings.psd1",
+				content: "@{}\n",
+			},
 		];
 
 		for (const testCase of cases) {
@@ -887,6 +895,7 @@ describe("getFormattersForFile — policy selection", () => {
 			["Main.java", ".java"],
 			["core.clj", ".clj"],
 			["CMakeLists.cmake", ".cmake"],
+			["script.ps1", ".ps1"],
 		];
 
 		for (const [fileName] of cases) {
@@ -943,6 +952,30 @@ describe("getFormattersForFile — policy selection", () => {
 			const formatters = await getFormattersForFile(filePath, tmpDir);
 			expect(formatters.map((f) => f.name)).toEqual(["cmake-format"]);
 		});
+	});
+
+	// #1572: `.ps1`'s policy sets defaultWhenUnconfigured: false, and
+	// psscriptanalyzer-format had no hasExplicitFormatterConfig case — so
+	// neither branch of getFormattersForFile could ever select it, regardless
+	// of project configuration. These two tests are the direct reproduction.
+	it("does not force psscriptanalyzer-format without config", async () => {
+		const filePath = fileIn(tmpDir, "script.ps1");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters).toEqual([]);
+	});
+
+	it("enables psscriptanalyzer-format when PSScriptAnalyzerSettings.psd1 is present", async () => {
+		createTempFile(tmpDir, "PSScriptAnalyzerSettings.psd1", "@{}\n");
+		const filePath = fileIn(tmpDir, "script.ps1");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters.map((f) => f.name)).toEqual(["psscriptanalyzer-format"]);
+	});
+
+	it("enables psscriptanalyzer-format when ScriptAnalyzerSettings.psd1 is present", async () => {
+		createTempFile(tmpDir, "ScriptAnalyzerSettings.psd1", "@{}\n");
+		const filePath = fileIn(tmpDir, "script.psm1");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters.map((f) => f.name)).toEqual(["psscriptanalyzer-format"]);
 	});
 
 	it("taplo resolveCommand falls back to managed install when not on PATH", async () => {

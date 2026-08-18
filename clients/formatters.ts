@@ -51,6 +51,7 @@ import {
 	hasOxfmtSvelteConfig,
 	hasPhpCsFixerConfig,
 	hasPrettierConfig,
+	hasPSScriptAnalyzerConfig,
 	hasRubocopConfig,
 	hasRuffConfig,
 	hasSqlfluffConfig,
@@ -569,69 +570,75 @@ async function resolveManagedSmartDefaultCommand(
 	return [installed, ...args, filePath];
 }
 
+/**
+ * One entry per formatter that can be selected via explicit project config
+ * (the `formatterPolicy` "explicit-config" branch of `getFormattersForFile`).
+ * A formatter with NO entry here can never win that branch — the switch this
+ * table replaced had exactly that failure mode for `psscriptanalyzer-format`
+ * (#1572: `.ps1`'s policy sets `defaultWhenUnconfigured: false` AND the
+ * formatter had no config check, so neither selection branch could ever pick
+ * it).
+ *
+ * This table IS the source of truth for "which formatters have an explicit-
+ * config check" — `FORMATTERS_WITH_EXPLICIT_CONFIG_CHECK` below derives its
+ * membership from these keys rather than hand-listing them a second time, so
+ * the coverage guard in formatter-policy-consistency.test.ts (#1572) can never
+ * drift from what this function actually does.
+ */
+const EXPLICIT_FORMATTER_CONFIG_CHECKS: Record<
+	string,
+	(cwd: string, ext: string) => boolean
+> = {
+	biome: (cwd) => hasBiomeConfig(cwd),
+	prettier: (cwd) =>
+		hasPrettierConfig(cwd) || hasNearestPackageJsonField(cwd, "prettier"),
+	// .svelte is conditional beyond "an oxfmt config exists": oxfmt requires the
+	// `svelte` package installed AND the config's `svelte` flag enabled
+	// (verified empirically — see hasOxfmtSvelteConfig). The generic checks
+	// below are NOT sufficient for .svelte — an oxfmt.toml with no svelte flag,
+	// or an oxfmt dependency alone, both fail at runtime for .svelte
+	// specifically (other extensions are unaffected by this stricter gate).
+	oxfmt: (cwd, ext) =>
+		ext === ".svelte"
+			? hasOxfmtSvelteConfig(cwd)
+			: hasOxfmtConfig(cwd) ||
+				hasVitePlusConfig(cwd) ||
+				// The published package is `oxfmt`; `@oxc-project/oxfmt` does not
+				// exist on npm. Accept both (scoped kept for forward-compat).
+				hasNearestPackageJsonDependency(cwd, "oxfmt") ||
+				hasNearestPackageJsonDependency(cwd, "@oxc-project/oxfmt"),
+	ruff: (cwd) => hasRuffConfig(cwd),
+	black: (cwd) => hasBlackConfig(cwd),
+	sqlfluff: (cwd) => hasSqlfluffConfig(cwd),
+	rubocop: (cwd) => hasRubocopConfig(cwd),
+	standardrb: (cwd) => hasStandardrbConfig(cwd),
+	"clang-format": (cwd) => hasClangFormatConfig(cwd),
+	"php-cs-fixer": (cwd) => hasPhpCsFixerConfig(cwd),
+	stylua: (cwd) => hasStyluaConfig(cwd),
+	ocamlformat: (cwd) => hasOcamlformatConfig(cwd),
+	"google-java-format": (cwd) => hasGoogleJavaFormatConfig(cwd),
+	ktfmt: (cwd) => hasKtfmtConfig(cwd),
+	ktlint: (cwd) => hasKtlintConfig(cwd),
+	cljfmt: (cwd) => hasCljfmtConfig(cwd),
+	"cmake-format": (cwd) => hasCmakeFormatConfig(cwd),
+	"psscriptanalyzer-format": (cwd) => hasPSScriptAnalyzerConfig(cwd),
+};
+
 function hasExplicitFormatterConfig(
 	formatterName: string,
 	cwd: string,
 	ext: string,
 ): boolean {
-	switch (formatterName) {
-		case "biome":
-			return hasBiomeConfig(cwd);
-		case "prettier":
-			return (
-				hasPrettierConfig(cwd) || hasNearestPackageJsonField(cwd, "prettier")
-			);
-		case "oxfmt":
-			// .svelte is conditional beyond "an oxfmt config exists": oxfmt
-			// requires the `svelte` package installed AND the config's `svelte`
-			// flag enabled (verified empirically — see hasOxfmtSvelteConfig).
-			// The generic checks below are NOT sufficient for .svelte — an
-			// oxfmt.toml with no svelte flag, or an oxfmt dependency alone,
-			// both fail at runtime for .svelte specifically (other extensions
-			// are unaffected by this stricter gate).
-			if (ext === ".svelte") {
-				return hasOxfmtSvelteConfig(cwd);
-			}
-			return (
-				hasOxfmtConfig(cwd) ||
-				hasVitePlusConfig(cwd) ||
-				// The published package is `oxfmt`; `@oxc-project/oxfmt` does not
-				// exist on npm. Accept both (scoped kept for forward-compat).
-				hasNearestPackageJsonDependency(cwd, "oxfmt") ||
-				hasNearestPackageJsonDependency(cwd, "@oxc-project/oxfmt")
-			);
-		case "ruff":
-			return hasRuffConfig(cwd);
-		case "black":
-			return hasBlackConfig(cwd);
-		case "sqlfluff":
-			return hasSqlfluffConfig(cwd);
-		case "rubocop":
-			return hasRubocopConfig(cwd);
-		case "standardrb":
-			return hasStandardrbConfig(cwd);
-		case "clang-format":
-			return hasClangFormatConfig(cwd);
-		case "php-cs-fixer":
-			return hasPhpCsFixerConfig(cwd);
-		case "stylua":
-			return hasStyluaConfig(cwd);
-		case "ocamlformat":
-			return hasOcamlformatConfig(cwd);
-		case "google-java-format":
-			return hasGoogleJavaFormatConfig(cwd);
-		case "ktfmt":
-			return hasKtfmtConfig(cwd);
-		case "ktlint":
-			return hasKtlintConfig(cwd);
-		case "cljfmt":
-			return hasCljfmtConfig(cwd);
-		case "cmake-format":
-			return hasCmakeFormatConfig(cwd);
-		default:
-			return false;
-	}
+	return EXPLICIT_FORMATTER_CONFIG_CHECKS[formatterName]?.(cwd, ext) ?? false;
 }
+
+// Exported for the "every registered formatter is selectable" coverage guard
+// (formatter-policy-consistency.test.ts, #1572): derived from the table above,
+// not hand-listed, so it cannot drift from what `hasExplicitFormatterConfig`
+// actually checks.
+export const FORMATTERS_WITH_EXPLICIT_CONFIG_CHECK = new Set<string>(
+	Object.keys(EXPLICIT_FORMATTER_CONFIG_CHECKS),
+);
 
 // --- Formatter Definitions ---
 

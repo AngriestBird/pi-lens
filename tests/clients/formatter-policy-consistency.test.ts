@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { ALL_FORMATTERS } from "../../clients/formatters.ts";
+import {
+	ALL_FORMATTERS,
+	FORMATTERS_WITH_EXPLICIT_CONFIG_CHECK,
+} from "../../clients/formatters.ts";
+import type { FormatterPolicy } from "../../clients/tool-policy.ts";
 import {
 	AUTO_INSTALLABLE_DEFAULT_FORMATTERS,
 	FORMATTER_POLICY_BY_EXTENSION,
@@ -219,5 +223,125 @@ describe("formatter ↔ policy consistency (#1135)", () => {
 			if (!FORMATTER_POLICY_BY_EXTENSION.has(ext)) actualNoPolicy.add(ext);
 		}
 		expect([...actualNoPolicy].sort()).toEqual([...NO_POLICY_FALLBACK_EXTS].sort());
+	});
+});
+
+// --- Every registered formatter is selectable under SOME configuration (#1572) ---
+//
+// `getFormattersForFile` (clients/formatters.ts) has exactly two ways to pick a
+// formatter once a policy applies:
+//   1. explicit-config branch: any candidate `hasExplicitFormatterConfig` says
+//      yes to (works regardless of `defaultWhenUnconfigured`);
+//   2. smart-default branch, reached ONLY when nothing matched (1): picks
+//      `policy.defaultFormatter`, but ONLY if `policy.defaultWhenUnconfigured`
+//      is true.
+// A formatter is unselectable if it can win NEITHER branch under any policy
+// that names it: it's not `hasExplicitFormatterConfig`-aware AND (it isn't the
+// policy's `defaultFormatter`, or `defaultWhenUnconfigured` is false).
+// `psscriptanalyzer-format` was exactly this: `.ps1`'s policy set
+// `defaultWhenUnconfigured: false` and the formatter had no explicit-config
+// check, so no configuration of a `.ps1` project could ever select it.
+//
+// #1595 tracks 8 more formatters found unreachable by this same check, root-
+// caused to the same commit (038cd1df) but out of #1572's scope to fix here.
+// Listing them keeps the guard honest instead of silently narrowing it: each
+// entry must be BOTH real (the check below considers it unreachable, so a
+// fixed one that goes stale here is caught) and necessary (removing a fixed
+// entry re-enables the guard for that name).
+const KNOWN_UNREACHABLE_FORMATTERS = new Set<string>([
+	"csharpier", // #1595
+	"ormolu", // #1595
+	"taplo", // #1595
+	"terraform", // #1595
+	"swiftformat", // #1595
+	"fantomas", // #1595
+	"nixfmt", // #1595
+	"mix", // #1595
+]);
+
+/** True iff `name` can win EITHER selection branch under `policy`. */
+function isFormatterSelectable(name: string, policy: FormatterPolicy): boolean {
+	if (FORMATTERS_WITH_EXPLICIT_CONFIG_CHECK.has(name)) return true;
+	return name === policy.defaultFormatter && policy.defaultWhenUnconfigured;
+}
+
+/** Every (policy-location, formatterName) pair to check, across both maps. */
+function allPolicyFormatterPairs(): { where: string; name: string; policy: FormatterPolicy }[] {
+	const pairs: { where: string; name: string; policy: FormatterPolicy }[] = [];
+	for (const [ext, policy] of FORMATTER_POLICY_BY_EXTENSION) {
+		for (const name of policy.formatterNames) {
+			pairs.push({ where: `extension ${ext}`, name, policy });
+		}
+	}
+	for (const [filename, policy] of FORMATTER_POLICY_BY_FILENAME) {
+		for (const name of policy.formatterNames) {
+			pairs.push({ where: `filename ${filename}`, name, policy });
+		}
+	}
+	return pairs;
+}
+
+describe("every registered formatter is selectable (#1572)", () => {
+	it("the checker itself flags an unreachable synthetic entry (red-first proof)", () => {
+		// A formatter with NO explicit-config check, named as a policy's
+		// defaultFormatter, under a policy with defaultWhenUnconfigured: false —
+		// exactly psscriptanalyzer-format's pre-fix shape. Neither branch can ever
+		// pick it; the checker must say so.
+		const unreachablePolicy: FormatterPolicy = {
+			formatterNames: ["totally-synthetic-formatter"],
+			defaultFormatter: "totally-synthetic-formatter",
+			defaultWhenUnconfigured: false,
+			gate: "smart-default",
+		};
+		expect(
+			isFormatterSelectable("totally-synthetic-formatter", unreachablePolicy),
+		).toBe(false);
+
+		// Sanity check the checker doesn't just always say no: the same name is
+		// selectable once defaultWhenUnconfigured flips true, or once it gains an
+		// explicit-config check.
+		expect(
+			isFormatterSelectable("totally-synthetic-formatter", {
+				...unreachablePolicy,
+				defaultWhenUnconfigured: true,
+			}),
+		).toBe(true);
+		expect(
+			isFormatterSelectable("biome", {
+				formatterNames: ["biome"],
+				defaultFormatter: "biome",
+				defaultWhenUnconfigured: false,
+				gate: "config-first",
+			}),
+		).toBe(true);
+	});
+
+	it("every real formatter policy names only selectable formatters, or a documented #1595 exception", () => {
+		const violations = allPolicyFormatterPairs()
+			.filter(({ name, policy }) => !isFormatterSelectable(name, policy))
+			.filter(({ name }) => !KNOWN_UNREACHABLE_FORMATTERS.has(name))
+			.map(
+				({ where, name }) =>
+					`${name} (policy: ${where}) has no explicit-config check and is not a defaultWhenUnconfigured default — unselectable under any configuration`,
+			);
+		expect(violations, violations.join("\n")).toEqual([]);
+	});
+
+	it("KNOWN_UNREACHABLE_FORMATTERS names only formatters that are ACTUALLY unreachable (no stale entries)", () => {
+		const pairs = allPolicyFormatterPairs();
+		const stillUnreachable = new Set(
+			pairs
+				.filter(({ name, policy }) => !isFormatterSelectable(name, policy))
+				.map(({ name }) => name),
+		);
+		const stale = [...KNOWN_UNREACHABLE_FORMATTERS].filter(
+			(name) => !stillUnreachable.has(name),
+		);
+		expect(
+			stale,
+			stale.length
+				? `${stale.join(", ")} is/are now selectable — remove from KNOWN_UNREACHABLE_FORMATTERS (#1595 progress)`
+				: "",
+		).toEqual([]);
 	});
 });

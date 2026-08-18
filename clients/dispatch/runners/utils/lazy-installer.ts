@@ -38,11 +38,7 @@ import {
 	type InstallAttemptFact,
 } from "./availability-policy.js";
 
-export type LazyInstallTool =
-	| "golangci-lint"
-	| "rubocop"
-	| "rust-clippy"
-	| "rustfmt";
+export type LazyInstallTool = "rubocop" | "rust-clippy" | "rustfmt";
 
 interface LazyInstallSpec {
 	command: string;
@@ -57,11 +53,13 @@ interface LazyInstallSpec {
  * formatter asking for the same `gem install rubocop` are asking for the same
  * one thing; the second must be suppressed, not run again.
  */
+// golangci-lint deliberately has no entry here: it auto-installs through the
+// shared TOOL_EXECUTION_POLICY seam instead (`resolveAvailableOrInstall` +
+// `ensureTool` in clients/dispatch/runners/utils/runner-helpers.ts, wired in
+// golangci-lint.ts). A "golangci-lint" arm briefly lived in this map with no
+// caller reaching it through EITHER `tryLazyInstall` or
+// `tryLazyInstallForFormatter` — dead since introduction (#1572 sweep).
 const LAZY_INSTALL_SPECS: Record<LazyInstallTool, LazyInstallSpec> = {
-	"golangci-lint": {
-		command: "go",
-		args: ["install", "github.com/golangci/golangci-lint/cmd/golangci-lint@latest"],
-	},
 	rubocop: { command: "gem", args: ["install", "rubocop", "--no-document"] },
 	"rust-clippy": { command: "rustup", args: ["component", "add", "clippy"] },
 	rustfmt: { command: "rustup", args: ["component", "add", "rustfmt"] },
