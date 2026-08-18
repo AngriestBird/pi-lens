@@ -18,19 +18,24 @@ import {
 	LANGUAGE_EXTENSIONS,
 } from "../../clients/lsp/language.js";
 
-// Every language id an lspCapable file can be announced as on didOpen. Each
-// one is a spelling some real server answers to, which is a fact about that
-// server and not something the code can derive: the registry's own id is a
-// pi-lens-internal label ("shell"), and the id vscode-json-language-server or
-// bash-language-server expects ("shellscript") is a separate decision. So the
-// set is pinned by hand, and a new or renamed id has to be added here
-// deliberately, after someone checks the target server accepts it.
+// Every language id an lspCapable file can be announced as on didOpen.
+//
+// Whether a server answers to a given spelling is a fact about that server,
+// not something the code can derive: the registry's id is a pi-lens-internal
+// label ("shell"), and the id bash-language-server expects ("shellscript") is
+// a separate decision. This list is a snapshot of what is reachable today, NOT
+// a set of verified-good ids — the entries inherited from the curated table
+// are grandfathered unchecked, and at least one is known dubious ("sass": the
+// only registered CSS server ignores languageId and parses indented Sass as
+// CSS). What the pin buys is that a NEW or RENAMED id cannot appear silently.
+// Adding one here is the review decision that it is the spelling the target
+// server wants.
 //
 // tests/clients/language-policy.test.ts already fails a kind with no
 // registered primary server at all; this covers the case that one slips past:
 // a kind that HAS a server but announces itself in a spelling the server's
 // DocumentSelector never matches.
-const ACCEPTED_LSP_LANGUAGE_IDS = [
+const PINNED_LSP_LANGUAGE_IDS = [
 	"c",
 	"clojure",
 	"cmake",
@@ -137,7 +142,7 @@ describe("lspCapable seam coverage", () => {
 	// per-kind id, so a kind registered with a label no server answers to
 	// ("Probe-Lang-Script") satisfies every guard above. Pinning the reachable
 	// set makes the spelling a review decision instead of an accident.
-	it("announces lspCapable files only under an accepted language id", () => {
+	it("announces lspCapable files only under a pinned language id", () => {
 		const reachable = [
 			...new Set(
 				getLspCapableKinds().flatMap((kind) =>
@@ -147,7 +152,7 @@ describe("lspCapable seam coverage", () => {
 				),
 			),
 		].sort();
-		expect(reachable).toEqual([...ACCEPTED_LSP_LANGUAGE_IDS].sort());
+		expect(reachable).toEqual([...PINNED_LSP_LANGUAGE_IDS].sort());
 	});
 
 	// Sweep findings the derivation fixed alongside fish — powershell had no
