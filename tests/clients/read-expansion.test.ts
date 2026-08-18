@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
-import { EXPANSION_LIMIT_LINES, tryExpandRead } from "../../clients/read-expansion.ts";
+import { EXPANSION_LIMIT_LINES, tryExpandRead } from "../../clients/read-expansion.js";
 import { setupTestEnvironment } from "./test-utils.js";
 
 function node(

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import * as path from "node:path";
 import type { ActionableWarningsReport } from "../../clients/actionable-warnings.js";
 import { CacheManager } from "../../clients/cache-manager.js";
+import { getProjectDataDir } from "../../clients/file-utils.js";
 import { resolvePiLensFlag } from "../../clients/lens-config.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { loadPiLensProjectConfig } from "../../clients/project-lens-config.js";
@@ -479,6 +480,146 @@ describe("runtime-agent-end deferred formatting", () => {
 		}
 	});
 
+	// #1607: the actionable-warnings cache is only ever written when the
+	// "lens-actionable-warnings" flag is on (clients/runtime-turn.ts). A
+	// reader that ignores that flag reads on every agent_end regardless, and
+	// with the writer off it always misses — logging a misleading "cache
+	// missing or expired" line at 100% of calls in a production host where
+	// only the (unrelated) autofix flag looks enabled.
+	it("skips the actionable-warnings cache read when the writer flag is off (#1607)", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-aw-writer-off-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const readCache = vi.fn();
+			const dbg = vi.fn();
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				// Only the autofix flag is on; the writer flag
+				// ("lens-actionable-warnings") is off, as in production.
+				// getFlagSource is a real (defined) resolver, matching the
+				// production wiring the issue describes.
+				getFlag: (name) => name === "lens-actionable-warning-autofix" || name === "no-lsp",
+				getFlagSource: () => "default",
+				notify: vi.fn(),
+				dbg,
+				runtime,
+				cacheManager: { readCache, addModifiedRange: vi.fn() } as any,
+				getFormatService: () =>
+					({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+			});
+
+			expect(readCache).not.toHaveBeenCalled();
+			expect(dbg).not.toHaveBeenCalledWith(
+				expect.stringContaining("cache missing or expired"),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("logs a distinct 'cache absent' reason when no cache file was ever written (#1607)", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-aw-cache-absent-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const dbg = vi.fn();
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) =>
+					name === "lens-actionable-warnings" ||
+					name === "lens-actionable-warning-autofix" ||
+					name === "no-lsp",
+				notify: vi.fn(),
+				dbg,
+				runtime,
+				// A real CacheManager with no cache file ever written for this
+				// project: the "no entry" case.
+				cacheManager: new CacheManager(false),
+				getFormatService: () =>
+					({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+			});
+
+			expect(dbg).toHaveBeenCalledWith(
+				expect.stringContaining("cache absent"),
+			);
+			expect(dbg).not.toHaveBeenCalledWith(
+				expect.stringContaining("cache missing or expired"),
+			);
+			expect(dbg).not.toHaveBeenCalledWith(
+				expect.stringContaining("cache expired"),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("logs a distinct 'cache expired' reason when the cache entry is older than the 10-minute TTL (#1607)", async () => {
+		const env = setupTestEnvironment("pi-lens-agent-end-aw-cache-expired-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			const dbg = vi.fn();
+			const cacheManager = new CacheManager(false);
+			const report: ActionableWarningsReport = {
+				generatedAt: new Date().toISOString(),
+				scope: "turn_delta",
+				sessionId: "s1",
+				turnIndex: 1,
+				projectSeqEnd: 1,
+				deltaOnly: true,
+				includeLspCodeActions: true,
+				files: [],
+				summary: {
+					warnings: 0,
+					unsuppressed: 0,
+					suppressed: 0,
+					files: 0,
+					actions: 0,
+					autoFixEligible: 0,
+				},
+			};
+			cacheManager.writeCache("actionable-warnings", report, env.tmpDir);
+			const metaPath = path.join(
+				getProjectDataDir(env.tmpDir),
+				"cache",
+				"actionable-warnings.meta.json",
+			);
+			const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+			// Older than the 10-minute TTL enforced at the read site.
+			meta.timestamp = new Date(Date.now() - 11 * 60_000).toISOString();
+			fs.writeFileSync(metaPath, JSON.stringify(meta));
+
+			await handleAgentEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: (name) =>
+					name === "lens-actionable-warnings" ||
+					name === "lens-actionable-warning-autofix" ||
+					name === "no-lsp",
+				notify: vi.fn(),
+				dbg,
+				runtime,
+				cacheManager,
+				getFormatService: () =>
+					({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+			});
+
+			expect(dbg).toHaveBeenCalledWith(
+				expect.stringContaining("cache expired"),
+			);
+			expect(dbg).not.toHaveBeenCalledWith(
+				expect.stringContaining("cache missing or expired"),
+			);
+			expect(dbg).not.toHaveBeenCalledWith(
+				expect.stringContaining("cache absent"),
+			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
 	it("skips actionable warning autofix when the cached report is stale", async () => {
 		const env = setupTestEnvironment("pi-lens-agent-end-stale-aw-");
 		try {
@@ -509,7 +650,9 @@ describe("runtime-agent-end deferred formatting", () => {
 			const summary = await handleAgentEnd({
 				ctxCwd: env.tmpDir,
 				getFlag: (name) =>
-					name === "lens-actionable-warning-autofix" || name === "no-lsp",
+					name === "lens-actionable-warning-autofix" ||
+					name === "lens-actionable-warnings" ||
+					name === "no-lsp",
 				notify,
 				dbg,
 				runtime,
@@ -634,7 +777,9 @@ describe("runtime-agent-end deferred formatting", () => {
 			await handleAgentEnd({
 				ctxCwd: env.tmpDir,
 				getFlag: (name) =>
-					name === "lens-actionable-warning-autofix" || name === "no-lsp",
+					name === "lens-actionable-warning-autofix" ||
+					name === "lens-actionable-warnings" ||
+					name === "no-lsp",
 				notify: vi.fn(),
 				dbg,
 				runtime,
@@ -946,7 +1091,9 @@ describe("runtime-agent-end deferred formatting", () => {
 			await handleAgentEnd({
 				ctxCwd: env.tmpDir,
 				getFlag: (name) =>
-					name === "lens-actionable-warning-autofix" || name === "no-lsp",
+					name === "lens-actionable-warning-autofix" ||
+					name === "lens-actionable-warnings" ||
+					name === "no-lsp",
 				notify: vi.fn(),
 				dbg: vi.fn(),
 				runtime,
@@ -1047,7 +1194,9 @@ describe("runtime-agent-end deferred formatting", () => {
 				await handleAgentEnd({
 					ctxCwd: env.tmpDir,
 					getFlag: (name) =>
-						name === "lens-actionable-warning-autofix" || name === "no-lsp",
+						name === "lens-actionable-warning-autofix" ||
+					name === "lens-actionable-warnings" ||
+					name === "no-lsp",
 					notify: vi.fn(),
 					dbg: vi.fn(),
 					runtime,
@@ -1188,7 +1337,9 @@ describe("runtime-agent-end deferred formatting", () => {
 				await handleAgentEnd({
 					ctxCwd: env.tmpDir,
 					getFlag: (name) =>
-						name === "lens-actionable-warning-autofix" || name === "no-lsp",
+						name === "lens-actionable-warning-autofix" ||
+					name === "lens-actionable-warnings" ||
+					name === "no-lsp",
 					notify: vi.fn(),
 					dbg,
 					runtime,

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.unmock("../../../clients/installer/index.ts");
+vi.unmock("../../../clients/installer/index.js");
 
 // This file deliberately exercises the REAL getGlobalPiLensDir() resolver
 // (mirrors tool-discovery.test.ts's setup) so TOOLS_DIR paths resolve
@@ -106,6 +106,19 @@ vi.mock("node:fs/promises", () => ({
 	chmod: mockFsChmod,
 }));
 
+// #1609: the installer's npm-tool package.json bootstrap now goes through
+// the shared atomic tmp+rename seam instead of a raw `fs.writeFile`, so it
+// must be mocked here too — otherwise it falls through to the REAL node:fs
+// (atomic-write.ts imports `node:fs` directly, not this mocked
+// `node:fs/promises`), which fails writing into this test's mocked,
+// non-existent-on-disk tools directory.
+const mockWriteFileAtomicAsync = vi.hoisted(() =>
+	vi.fn().mockResolvedValue(undefined),
+);
+vi.mock("../../../clients/atomic-write.js", () => ({
+	writeFileAtomicAsync: mockWriteFileAtomicAsync,
+}));
+
 // child_process spawn mock: `--version` probes resolve to a configurable
 // stdout string so tests can simulate an installed binary reporting an old
 // (drifted) or current (matching) version. Non-`--version` spawns (npm
@@ -166,7 +179,7 @@ import {
 	getToolPath,
 	resetProbeCacheStateForTesting,
 	TOOLS,
-} from "../../../clients/installer/index.ts";
+} from "../../../clients/installer/index.js";
 
 const TOOLS_DIR = path.join(TEST_HOME, ".pi-lens", "tools");
 const JSCPD_BIN = path.join(

@@ -54,7 +54,12 @@ interface McpSessionContext {
 let contextPromise: Promise<McpSessionContext> | undefined;
 let resolvedRuntime: RuntimeCoordinator | undefined;
 
-/** Lazily build (once) the persistent session context shared across MCP calls. */
+/**
+ * Lazily build (once) the persistent session context shared across MCP
+ * calls. A rejected build (e.g. `loadBootstrapClients` hitting a transient
+ * fs error) must not poison every later MCP call for the rest of the
+ * process — evict the memo on rejection so the next call retries (#1570).
+ */
 export function getMcpSessionContext(): Promise<McpSessionContext> {
 	contextPromise ??= (async () => {
 		const context: McpSessionContext = {
@@ -65,7 +70,10 @@ export function getMcpSessionContext(): Promise<McpSessionContext> {
 		};
 		resolvedRuntime = context.runtime;
 		return context;
-	})();
+	})().catch((err: unknown) => {
+		contextPromise = undefined;
+		throw err;
+	});
 	return contextPromise;
 }
 

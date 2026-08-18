@@ -28,7 +28,7 @@ vi.mock("../../../clients/installer/index.js", () => ({
 	getToolEnvironment: () => ({}),
 }));
 
-import { LuaServer } from "../../../clients/lsp/server.ts";
+import { LuaServer } from "../../../clients/lsp/server.js";
 
 const fakeProc = { stdout: {}, stderr: {} } as never;
 const ROOT = "/tmp/lua-project";

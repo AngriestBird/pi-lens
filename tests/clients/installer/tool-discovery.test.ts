@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.unmock("../../../clients/installer/index.ts");
+vi.unmock("../../../clients/installer/index.js");
 
 // This file deliberately exercises the REAL getGlobalPiLensDir() resolver
 // (via the node:os mock below forcing TEST_HOME) rather than #525's
@@ -110,6 +110,19 @@ vi.mock("node:fs/promises", () => ({
 	rm: mockFsRm,
 }));
 
+// #1609: the installer's npm-tool package.json bootstrap now goes through
+// the shared atomic tmp+rename seam instead of a raw `fs.writeFile`, so it
+// must be mocked here too — otherwise it falls through to the REAL node:fs
+// (atomic-write.ts imports `node:fs` directly, not this mocked
+// `node:fs/promises`), which fails writing into this test's mocked,
+// non-existent-on-disk tools directory.
+const mockWriteFileAtomicAsync = vi.hoisted(() =>
+	vi.fn().mockResolvedValue(undefined),
+);
+vi.mock("../../../clients/atomic-write.js", () => ({
+	writeFileAtomicAsync: mockWriteFileAtomicAsync,
+}));
+
 // ── child_process spawn mock ────────────────────────────────────────────
 const spawnCalls = vi.hoisted(
 	() => [] as Array<{ cmd: string; args: string[] }>,
@@ -182,7 +195,7 @@ import {
 	ensureTool,
 	getToolPath,
 	resetProbeCacheStateForTesting,
-} from "../../../clients/installer/index.ts";
+} from "../../../clients/installer/index.js";
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
@@ -456,7 +469,7 @@ describe("ensureTool allowInstall policy", () => {
 describe("ensureTool force-reinstall", () => {
 	it("does not return the stale cached path after forceReinstall", async () => {
 		const { updateProbeCache } = await import(
-			"../../../clients/installer/index.ts"
+			"../../../clients/installer/index.js"
 		);
 		// Use a path that can't collide with a real tool on PATH
 		const stalePath = "/fake/stale/rust-analyzer";

@@ -22,6 +22,11 @@ vi.mock("../../clients/file-utils.js", () => ({
 describe("instance-registry", () => {
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-instreg-"));
+		// vi.resetModules() gives every test a FRESH instance-registry.js
+		// instance, which means a fresh degradation-ledger.js too (its module
+		// state — the groups/onceKeys maps — is reinitialized on re-evaluation),
+		// so there is nothing to reset here: each test's dynamically-imported
+		// ledger already starts empty.
 		vi.resetModules();
 	});
 
@@ -164,6 +169,110 @@ describe("instance-registry", () => {
 		await expect(registerInstance("/fresh/project")).resolves.not.toThrow();
 		const instances = await readInstanceRegistry();
 		expect(instances).toHaveLength(1);
+	});
+
+	// #1609 layer b: a process SIGKILLed mid-write can leave `instances.json`
+	// torn at an arbitrary byte offset. Recovery must be LEGIBLE, not just
+	// non-throwing: a genuinely missing file (clean start) is silent, but a
+	// present-and-corrupt file must be distinguishable in the logs — an empty
+	// result reading the same either way would hide a real torn-write
+	// regression behind "looks like a clean start" forever (the empty-must-
+	// distinguish-clean-from-errored invariant).
+	describe("torn-file fault injection", () => {
+		const validPayload = JSON.stringify({
+			instances: [
+				{
+					pid: 424_242,
+					startedAt: "2026-01-01T00:00:00.000Z",
+					projectRoot: "/some/project",
+					lspChildren: [],
+					lspChildCount: 0,
+					rssBytes: 0,
+					heartbeatAt: "2026-01-01T00:00:00.000Z",
+				},
+			],
+		});
+
+		it.each([
+			["zero bytes", ""],
+			["truncated to an opening brace", "{"],
+			["mid-JSON torn tail", validPayload.slice(0, Math.floor(validPayload.length / 2))],
+			["truncated to a single valid-JSON scalar (wrong shape)", "0"],
+		])("recovers legibly from a torn registry (%s)", async (_label, torn) => {
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(registryFilePath(), torn, "utf-8");
+
+			// #1609 review small fix: the degradation is recorded via
+			// recordDegradationOnce (deduped per session, not logged on every
+			// call), so the ledger must be imported through the SAME dynamic
+			// `import()` as instance-registry.js — vi.resetModules() in
+			// beforeEach means a statically-imported (module-top-level) copy of
+			// degradation-ledger.js would be a DIFFERENT instance from the one
+			// instance-registry.js's own fresh import resolves to (AGENTS.md
+			// defect shape 14).
+			const { readInstanceRegistry, registerInstance } = await import(
+				"../../clients/instance-registry.js"
+			);
+			const { getDegradationSummary } = await import(
+				"../../clients/degradation-ledger.js"
+			);
+
+			// No throw escapes, and the torn bytes are never half-trusted into a
+			// wrong-but-valid partial state — the read degrades to empty exactly
+			// like a missing file would, never a spliced/partial instance list.
+			const instances = await readInstanceRegistry();
+			expect(instances).toEqual([]);
+
+			// The recovery is OBSERVABLE: a corrupt-but-present file records a
+			// degradation, unlike a genuinely missing one (see the sibling
+			// "missing file" test below, which asserts nothing is recorded).
+			expect(getDegradationSummary()).toContainEqual(
+				expect.objectContaining({ kind: "instance-registry-corrupt" }),
+			);
+
+			// The registry keeps working afterward — no stuck latch.
+			await expect(registerInstance("/after/recovery")).resolves.not.toThrow();
+			const after = await readInstanceRegistry();
+			expect(after).toHaveLength(1);
+		});
+
+		it("stays silent on a genuinely missing file (clean start, not an error)", async () => {
+			expect(fs.existsSync(registryFilePath())).toBe(false);
+			const { readInstanceRegistry } = await import(
+				"../../clients/instance-registry.js"
+			);
+			const { getDegradationSummary } = await import(
+				"../../clients/degradation-ledger.js"
+			);
+
+			const instances = await readInstanceRegistry();
+
+			expect(instances).toEqual([]);
+			expect(getDegradationSummary()).not.toContainEqual(
+				expect.objectContaining({ kind: "instance-registry-corrupt" }),
+			);
+		});
+
+		it("records the degradation only ONCE across repeated reads of the same torn file", async () => {
+			fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(registryFilePath(), "{not valid json!!", "utf-8");
+
+			const { readInstanceRegistry } = await import(
+				"../../clients/instance-registry.js"
+			);
+			const { getDegradationSummary } = await import(
+				"../../clients/degradation-ledger.js"
+			);
+
+			await readInstanceRegistry();
+			await readInstanceRegistry();
+			await readInstanceRegistry();
+
+			const entry = getDegradationSummary().find(
+				(group) => group.kind === "instance-registry-corrupt",
+			);
+			expect(entry?.count).toBe(1);
+		});
 	});
 
 	it("recordLspChild appends a child under this pid's entry", async () => {

@@ -78,7 +78,7 @@ describe("markdownlint runner — fixable metadata", () => {
 			});
 
 			const runner = (
-				await import("../../../../clients/dispatch/runners/markdownlint.ts")
+				await import("../../../../clients/dispatch/runners/markdownlint.js")
 			).default;
 			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
 
@@ -113,7 +113,7 @@ describe("markdownlint runner — fixable metadata", () => {
 			});
 
 			const runner = (
-				await import("../../../../clients/dispatch/runners/markdownlint.ts")
+				await import("../../../../clients/dispatch/runners/markdownlint.js")
 			).default;
 			await runner.run(createCtx(filePath, env.tmpDir) as never);
 
@@ -162,7 +162,7 @@ describe("markdownlint runner — fixable metadata", () => {
 			});
 
 			const runner = (
-				await import("../../../../clients/dispatch/runners/markdownlint.ts")
+				await import("../../../../clients/dispatch/runners/markdownlint.js")
 			).default;
 			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
 

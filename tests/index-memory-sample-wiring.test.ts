@@ -49,7 +49,7 @@ const turnCtx = {
 };
 
 async function driveTurns(count: number) {
-	const { default: registerExtension } = await import("../index.ts");
+	const { default: registerExtension } = await import("../index.js");
 	const mock = createPiMock({ "lens-lsp": true });
 	registerExtension(mock.asExtensionAPI() as never);
 	const turnStart = mock.getHandlers("turn_start")[0];

@@ -23,6 +23,7 @@ import { logLatency } from "../../latency-logger.js";
 import { hasEslintConfig } from "../../tool-policy.js";
 import { enabledAuxiliaryLspServerIds } from "../auxiliary-lsp.js";
 import { classifyDefect } from "../diagnostic-taxonomy.js";
+import { recordDegradationOnce } from "../../degradation-ledger.js";
 import { isAuxiliaryLspAlive } from "../../lsp/index.js";
 import { resolveAstGrepNativeExe } from "../../lsp/wait-policy/index.js";
 import { PRIORITY } from "../priorities.js";
@@ -50,22 +51,188 @@ export function resetAstGrepUnsupportedLanguageLog(): void {
 	defaultUnsupportedLanguageLog.clear();
 }
 
-// Lazy load the napi package
+// Lazy load the napi package.
 let sg: AstGrepNapi | undefined;
-let sgLoadAttempted = false;
+/**
+ * In-flight load, shared by every caller (#1567). The per-edit fallback
+ * runner and the session-start scanner (clients/project-diagnostics/scanner.ts)
+ * both call `loadSg()` and can race. Pre-fix, the "attempted" flag was set
+ * before the load and read by the SECOND caller as "already tried" while the
+ * first load was still pending and about to succeed — a false-negative
+ * STARVATION, not a duplicate load: the second caller got back `undefined`
+ * for a load that was in flight and would have succeeded, not a second
+ * redundant `import()`. Sharing one promise means every concurrent caller
+ * observes the SAME outcome instead of a subset of them starving.
+ *
+ * Evicted on settle (#1536's pattern, see clients/tree-sitter-client.ts) — a
+ * rejected load must not be remembered as the permanent answer; only
+ * concurrent callers during the SAME attempt observe this promise.
+ */
+let sgLoadPromise: Promise<AstGrepNapi | undefined> | undefined;
+/**
+ * Set on ANY load failure and cleared only by `resetAstGrepNapiLoadState()`
+ * at session_start (#1567 review round 2, F2).
+ *
+ * This holds for BOTH genuine and classified-transient failures, which is
+ * narrower than the original design (a cooldown-then-retry for transient
+ * failures within the same session). The reason: `loadAstGrepNapi()`
+ * (clients/deps/ast-grep-napi.ts) resolves the addon to a `file://` URL and
+ * dynamically `import()`s it. Node's ESM loader permanently memoizes a
+ * module record that threw during evaluation — re-importing the SAME
+ * resolved URL replays the cached rejection, it does not re-run the load.
+ * A cooldown-then-retry loop would therefore call `loadAstGrepNapi()` again
+ * after the cooldown and get back the identical cached rejection every
+ * time: a retry that LOOKS like it tries again but structurally cannot
+ * succeed within the process. Rather than ship that, every failure holds
+ * until the next `session_start`, which is the point this cache can
+ * actually be expected to have moved on (a fresh session re-arms the latch;
+ * whether the underlying Node module cache also gets a fresh start depends
+ * on whether the host recycles the process between sessions, but re-arming
+ * the latch is the most this in-process code can honestly promise).
+ */
+let sgSessionHold = false;
+/**
+ * Why `sgSessionHold` was set — feeds the degradation-ledger message and log
+ * line only. It does not change retry behavior: both classes hold
+ * identically for the session, per `sgSessionHold`'s doc above.
+ */
+let sgHoldReason: "transient" | "genuine" | undefined;
 
-export async function loadSg(): Promise<
-	AstGrepNapi | undefined
-> {
+/** A positively-identified, narrow errno family for a native-addon load: the
+ * kind of momentary FS contention (too many open files, a file mid-write,
+ * a transient permission/resource block) that says nothing durable about
+ * whether the addon itself can load. Everything NOT in this allowlist is
+ * genuine by default (#1567 review round 2, F1) — the original classifier
+ * inverted this: it matched a handful of message patterns as "genuine" and
+ * treated every OTHER error, including the real native-binding failure
+ * family (ABI mismatch, a missing platform package, a napi version
+ * mismatch, an unsupported arch), as transient. None of those recover on
+ * their own; an unrecognized error is far more likely to be one of them
+ * than a genuine FS hiccup. */
+const TRANSIENT_ERRNO_ALLOWLIST = new Set([
+	"EMFILE",
+	"EBUSY",
+	"EAGAIN",
+	"EPERM",
+	"ETXTBSY",
+]);
+
+/**
+ * `@ast-grep/napi`'s own terminal "this machine cannot run this addon"
+ * messages (from its `index.js` platform-detection shim). Already covered
+ * by the genuine-by-default policy above; listed explicitly so the
+ * classification is legible at the call site instead of an emergent
+ * property of "didn't match the allowlist".
+ */
+const KNOWN_GENUINE_NATIVE_LOAD_MESSAGES = [
+	/cannot find native binding/i,
+	/failed to load native binding/i,
+];
+
+/**
+ * Walk an error's `.cause` chain — Node/napi wrap the real dlopen/ABI
+ * failure there rather than on the top-level thrown Error — collecting
+ * every `code` and `message` seen along the way, so classification isn't
+ * blind to a nested cause (#1567 review round 2, F1).
+ */
+function collectErrorChain(err: unknown): {
+	codes: string[];
+	messages: string[];
+} {
+	const codes: string[] = [];
+	const messages: string[] = [];
+	let current: unknown = err;
+	const seen = new Set<unknown>();
+	while (current !== undefined && current !== null && !seen.has(current)) {
+		seen.add(current);
+		if (current instanceof Error) {
+			messages.push(current.message);
+			const code = (current as Error & { code?: unknown }).code;
+			if (typeof code === "string") codes.push(code);
+			current = (current as Error & { cause?: unknown }).cause;
+		} else {
+			messages.push(String(current));
+			break;
+		}
+	}
+	return { codes, messages };
+}
+
+/**
+ * Classify a `loadAstGrepNapi()` rejection. Transient requires a positively
+ * identified errno match somewhere in the cause chain AND no known-genuine
+ * native-load message anywhere in that same chain (an errno wrapping a
+ * "cannot find native binding" cause is genuine, not transient — the errno
+ * describes how the OS reported it, not what actually failed). Everything
+ * else — including an error with no `code` at all — is genuine.
+ */
+function classifyAstGrepLoadFailure(err: unknown): "transient" | "genuine" {
+	const { codes, messages } = collectErrorChain(err);
+	const hasKnownGenuineMessage = messages.some((message) =>
+		KNOWN_GENUINE_NATIVE_LOAD_MESSAGES.some((pattern) => pattern.test(message)),
+	);
+	if (hasKnownGenuineMessage) return "genuine";
+	const hasTransientErrno = codes.some((code) =>
+		TRANSIENT_ERRNO_ALLOWLIST.has(code),
+	);
+	return hasTransientErrno ? "transient" : "genuine";
+}
+
+function recordAstGrepUnavailableOnce(reason: "transient" | "genuine"): void {
+	recordDegradationOnce({
+		kind: "ast-grep-napi-unavailable",
+		subject: "ast-grep-napi",
+		reason:
+			reason === "genuine"
+				? "native addon failed to load (durable for this session)"
+				: "native addon load hit a transient error (durable for this session — see sgSessionHold doc)",
+	});
+}
+
+export async function loadSg(): Promise<AstGrepNapi | undefined> {
 	if (sg) return sg;
-	if (sgLoadAttempted) return undefined; // Don't retry if already failed
-	sgLoadAttempted = true;
-	try {
-		sg = await loadAstGrepNapi();
-		return sg;
-	} catch {
+	if (sgLoadPromise) return sgLoadPromise;
+	if (sgSessionHold) {
+		// #1567 review F4: a held/degraded load must be distinguishable from a
+		// clean scan that found nothing to report, not silently read as
+		// "skipped/empty" by every caller (clients/project-diagnostics/scanner.ts,
+		// this file's own runner) — otherwise the two are indistinguishable in
+		// the degradation ledger.
+		recordAstGrepUnavailableOnce(sgHoldReason ?? "genuine");
 		return undefined;
 	}
+
+	const task = (async (): Promise<AstGrepNapi | undefined> => {
+		try {
+			const loaded = await loadAstGrepNapi();
+			sg = loaded;
+			return loaded;
+		} catch (err) {
+			const reason = classifyAstGrepLoadFailure(err);
+			sgSessionHold = true;
+			sgHoldReason = reason;
+			recordAstGrepUnavailableOnce(reason);
+			return undefined;
+		}
+	})();
+	sgLoadPromise = task;
+	task.finally(() => {
+		if (sgLoadPromise === task) sgLoadPromise = undefined;
+	});
+	return task;
+}
+
+/**
+ * Re-arm the napi load latch for a new session (#1567). `sg` itself is left
+ * alone — a successful load stays valid and cached for the process — but a
+ * session hold (transient or genuine) is session-scoped state and must not
+ * outlive the session that set it. Called from `resetDispatchBaselines()`
+ * (clients/dispatch/integration.ts) beside `resetAstGrepUnsupportedLanguageLog`,
+ * this module's other session latch.
+ */
+export function resetAstGrepNapiLoadState(): void {
+	sgSessionHold = false;
+	sgHoldReason = undefined;
 }
 
 // Supported extensions for NAPI

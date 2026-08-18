@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveArchiveUrl, TOOLS } from "../../../clients/installer/index.ts";
+import { resolveArchiveUrl, TOOLS } from "../../../clients/installer/index.js";
 
 // Use the real installer module, not any mock another test file registered.
-vi.unmock("../../../clients/installer/index.ts");
+vi.unmock("../../../clients/installer/index.js");
 
 /**
  * Platform-matched archive URLs (#241). `ArchiveSpec.url` may be a resolver

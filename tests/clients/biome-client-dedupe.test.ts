@@ -11,6 +11,20 @@ vi.mock("../../clients/installer/index.js", () => ({
 	// tell an attempt that failed from one that never ran.
 	getInstallAttempt: vi.fn(() => undefined),
 }));
+// #1546: `getBiomeBinary` falls through to `findGlobalBinary` (#375) when no
+// local/pi-lens-managed binary exists, and that helper probes every installed
+// package manager's global bin dir — each check is its own `safeSpawnAsync`
+// call (`where npm`, `npm config get prefix`, etc). Left unmocked, those calls
+// share this file's `safeSpawnAsync` mock and silently consume the "one probe"
+// budget these tests assert on, which is a false positive on any machine that
+// happens to have a local/managed biome binary and a false failure on any
+// machine that doesn't (Windows local, #1546). Short-circuiting it here keeps
+// these tests scoped to `ensureAvailable`'s own in-flight dedupe (#120) rather
+// than incidentally exercising package-manager's spawn count — the same
+// isolation `biome-install-evidence.test.ts` already uses.
+vi.mock("../../clients/package-manager.js", () => ({
+	findGlobalBinary: vi.fn(async () => undefined),
+}));
 
 describe("BiomeClient.ensureAvailable() — in-flight dedupe (#120)", () => {
 	beforeEach(() => {

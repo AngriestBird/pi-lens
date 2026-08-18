@@ -73,7 +73,10 @@ import { getServersForFileWithConfig } from "../lsp/config.js";
 import { getLSPService } from "../lsp/index.js";
 import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";
 import { getProjectIgnoreMatcher } from "../file-utils.js";
-import { resetAstGrepUnsupportedLanguageLog } from "./runners/ast-grep-napi.js";
+import {
+	resetAstGrepNapiLoadState,
+	resetAstGrepUnsupportedLanguageLog,
+} from "./runners/ast-grep-napi.js";
 import { isTestRoleCollateral } from "../collateral-test-role.js";
 import {
 	clearReviewGraphWorkspaceCache,
@@ -424,6 +427,9 @@ export function getDispatchGroupsForKind(
 export function resetDispatchBaselines(cwd?: string): void {
 	if (cwd) applyProjectLensConfig(cwd);
 	resetAstGrepUnsupportedLanguageLog();
+	// #1567: a genuine-failure verdict or a live transient cooldown on the
+	// napi load latch is session-scoped state, not process-lifetime state.
+	resetAstGrepNapiLoadState();
 	sessionFacts.clearAll();
 	resetSessionSlopScore();
 	clearCoverageNoticeState();

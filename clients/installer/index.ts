@@ -54,6 +54,7 @@ import https from "node:https";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { writeFileAtomicAsync } from "../atomic-write.js";
 import { BoundedLruCache } from "../bounded-cache.js";
 import { isFullyQualified } from "../path-utils.js";
 import {
@@ -66,6 +67,7 @@ import { createGunzip } from "node:zlib";
 import { logSessionStart } from "../sessionstart-logger.js";
 import { commitDurableStoreAsync } from "../durable-store.js";
 import { getGlobalPiLensDir } from "../file-utils.js";
+import { TRANSIENT_MAX_COOLDOWN_MS } from "../dispatch/runners/utils/availability-policy.js";
 import {
 	allAvailableGlobalBinDirs,
 	installArgs,
@@ -1502,6 +1504,18 @@ interface ProbeCacheEntry {
 	path: string;
 	mtimeMs: number;
 	cachedAt: number;
+	/**
+	 * True when the `getToolPath` resolution that produced `path` saw a
+	 * transient probe failure (a stall, a kill, an unspawnable candidate) on
+	 * some tier before landing here — never a clean "not found" (#1569). Such
+	 * a selection may be a degraded fallback masking a preferred tier that was
+	 * merely unlucky at that moment, so it is not trusted for the full 24h
+	 * TTL: it ages out after `PROBE_CACHE_TRANSIENT_COOLDOWN_MS` instead, the
+	 * same window the live probe policy (`availability-policy.ts`) uses to
+	 * decide a transient verdict is worth re-checking. Absent/`false` means
+	 * every candidate along the way either succeeded or was cleanly missing.
+	 */
+	transient?: boolean;
 }
 
 type ProbeCache = Record<string, ProbeCacheEntry>;
@@ -1509,6 +1523,14 @@ type ProbeCache = Record<string, ProbeCacheEntry>;
 const PROBE_CACHE_PATH = path.join(getGlobalPiLensDir(), "probe-cache.json");
 const PROBE_CACHE_LOCK_STALE_MS = 180_000;
 const PROBE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long a transient-tainted entry (see `ProbeCacheEntry.transient`) is
+ * served before `getToolPath` is asked again, instead of the full 24h TTL
+ * (#1569). Shares the shared probe policy's transient ceiling rather than
+ * inventing a new number for the same "how long is a stall worth trusting"
+ * question.
+ */
+const PROBE_CACHE_TRANSIENT_COOLDOWN_MS = TRANSIENT_MAX_COOLDOWN_MS;
 const PROBE_CACHE_FLUSH_LOCK_WAIT_MS = 250;
 const PROBE_CACHE_FLUSH_RETRY_DELAY_MS = 300;
 const PROBE_CACHE_FLUSH_RETRY_MAX_DELAY_MS = 30_000;
@@ -1589,13 +1611,32 @@ function snapshotProbeCacheChanges(): ProbeCacheFlushSnapshot {
 	};
 }
 
+/**
+ * Deserialize the on-disk probe-cache for the LOCKED write-side merge
+ * (`writeProbeCache`'s `commitDurableStoreAsync` call). Unlike `readProbeCache`
+ * (the ordinary session-lookup path, which already degrades a parse/shape
+ * failure to `{}`), this used to THROW on a torn/corrupt file — which does
+ * not crash the caller (`writeProbeCache` wraps the whole commit in try/catch
+ * and retries), but it also means the corrupt file on disk is never repaired:
+ * every retry re-reads the same torn bytes, re-throws, and gives up again,
+ * forever (#1609 layer b). Degrading here too, exactly like `readProbeCache`,
+ * lets the next successful flush's `merge` step overwrite the torn file with
+ * a valid one instead of looping on it indefinitely.
+ */
 function deserializeProbeCache(contents: string | undefined): ProbeCache {
 	if (contents === undefined) return {};
-	const parsed: unknown = JSON.parse(contents);
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-		throw new Error("probe-cache root is not an object");
+	try {
+		const parsed: unknown = JSON.parse(contents);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+			throw new Error("probe-cache root is not an object");
+		}
+		return parsed as ProbeCache;
+	} catch (err) {
+		logSessionStart(
+			`auto-install probe-cache: write-side read was corrupt (${(err as Error).message}); recovering as empty`,
+		);
+		return {};
 	}
-	return parsed as ProbeCache;
 }
 
 function applyProbeCacheChanges(
@@ -1615,9 +1656,12 @@ function applyProbeCacheChanges(
  * supplies the probe cache's former quarantine/stale-owner recovery.
  */
 function ageProbeCache(disk: ProbeCache): void {
-	const cutoff = Date.now() - PROBE_CACHE_TTL_MS;
+	const now = Date.now();
 	for (const [toolId, entry] of Object.entries(disk)) {
-		if (!Number.isFinite(entry.cachedAt) || entry.cachedAt < cutoff) {
+		const ttl = entry.transient
+			? PROBE_CACHE_TRANSIENT_COOLDOWN_MS
+			: PROBE_CACHE_TTL_MS;
+		if (!Number.isFinite(entry.cachedAt) || entry.cachedAt < now - ttl) {
 			delete disk[toolId];
 		}
 	}
@@ -1754,8 +1798,17 @@ export async function checkProbeCache(
 	const entry = cache[toolId];
 	if (!entry) return undefined;
 
-	if (Date.now() - entry.cachedAt > PROBE_CACHE_TTL_MS) {
-		logSessionStart(`auto-install probe-cache ${toolId}: miss (ttl expired)`);
+	// A transient-tainted entry (#1569) is not trusted past the shorter
+	// transient cooldown, even inside the 24h TTL — the selection it recorded
+	// may be a degraded fallback that a since-recovered preferred tier should
+	// now beat.
+	const ttl = entry.transient
+		? PROBE_CACHE_TRANSIENT_COOLDOWN_MS
+		: PROBE_CACHE_TTL_MS;
+	if (Date.now() - entry.cachedAt > ttl) {
+		logSessionStart(
+			`auto-install probe-cache ${toolId}: miss (${entry.transient ? "transient cooldown" : "ttl"} expired)`,
+		);
 		delete cache[toolId];
 		markProbeCacheChange(toolId, null);
 		return undefined;
@@ -1795,14 +1848,16 @@ export async function checkProbeCache(
 export async function updateProbeCache(
 	toolId: string,
 	resolvedPath: string,
+	transient = false,
 ): Promise<void> {
 	try {
 		const stat = await fs.stat(resolvedPath);
 		const cache = await readProbeCache();
-		const entry = {
+		const entry: ProbeCacheEntry = {
 			path: resolvedPath,
 			mtimeMs: stat.mtimeMs,
 			cachedAt: Date.now(),
+			...(transient && { transient: true }),
 		};
 		cache[toolId] = entry;
 		markProbeCacheChange(toolId, entry);
@@ -1824,6 +1879,7 @@ export function resetProbeCacheStateForTesting(): void {
 	installFailureReasons.clear();
 	installAttempts.clear();
 	lastManagedInstallVersion.clear();
+	lastResolveTransient.clear();
 	resetPathWalkMemo();
 	if (_probeCacheFlushTimer !== null) {
 		clearTimeout(_probeCacheFlushTimer);
@@ -1970,6 +2026,16 @@ const lastManagedInstallVersion = new Map<string, string>();
 async function verifyToolBinary(
 	binPath: string,
 	onVersionOutput?: (output: string) => void,
+	/**
+	 * Called when a `false` verdict came from a probe that never got a fair
+	 * run — a spawn timeout/signal or a spawn-boundary EAGAIN/EBUSY/sync throw
+	 * — rather than the binary actually rejecting `--version` (#1569). An
+	 * unspawnable prober is never a durable verdict: a caller that falls
+	 * through to a lower-priority candidate on one of these must not let the
+	 * fallback's selection be trusted as if the preferred candidate were
+	 * genuinely broken.
+	 */
+	onTransient?: () => void,
 ): Promise<boolean> {
 	return new Promise((resolve) => {
 		const isWindows = installerPlatform() === "win32";
@@ -2006,9 +2072,11 @@ async function verifyToolBinary(
 		} catch (err) {
 			// SYNCHRONOUS spawn throw (Windows `spawn UNKNOWN`/EINVAL, the pidusage
 			// bug class, #533) — best-effort verify, resolve rather than reject.
+			// The prober itself never ran, so this says nothing about the binary.
 			logSessionStart(
 				`auto-install verify: spawn threw for ${binPath} (${err instanceof Error ? err.message : String(err)})`,
 			);
+			onTransient?.();
 			resolve(false);
 			return;
 		}
@@ -2019,7 +2087,7 @@ async function verifyToolBinary(
 		proc.stdout?.on("data", (data) => (stdout += data));
 		proc.stderr?.on("data", (data) => (stderr += data));
 
-		proc.on("exit", (code) => {
+		proc.on("exit", (code, signal) => {
 			if (code === 0) {
 				debugLog(`Verified: ${binPath} (version: ${stdout.trim()})`);
 				onVersionOutput?.(stdout);
@@ -2030,14 +2098,22 @@ async function verifyToolBinary(
 				debugLog(`Verified (stdio LSP, transport-required): ${binPath}`);
 				resolve(true);
 			} else {
+				// `code === null` (usually paired with a `signal`) means the 10s
+				// spawn timeout fired and the process was killed before it could
+				// exit on its own — a stall, not a verdict from the binary.
+				if (code === null || signal) onTransient?.();
 				logSessionStart(
-					`auto-install verify: failed for ${binPath} (exit=${code})`,
+					`auto-install verify: failed for ${binPath} (exit=${code}${signal ? `, signal=${signal}` : ""})`,
 				);
 				resolve(false);
 			}
 		});
 
 		proc.on("error", (err) => {
+			const errno = (err as NodeJS.ErrnoException).code;
+			if (errno === "EAGAIN" || errno === "EBUSY" || errno === "ETIMEDOUT") {
+				onTransient?.();
+			}
 			logSessionStart(
 				`auto-install verify: error for ${binPath}: ${err.message}`,
 			);
@@ -2284,7 +2360,42 @@ export function resolvePlatformPackageBinary(
 	return undefined;
 }
 
+/**
+ * Whether the most recent {@link getToolPath} resolution for a tool saw a
+ * transient probe failure on some candidate before landing on its answer
+ * (#1569). A side channel, in the same shape as `lastManagedInstallVersion`
+ * above: `getToolPath` keeps its `string | undefined` return so its many
+ * callers are untouched, and `ensureToolResolved` reads this immediately
+ * after awaiting it to decide how long the persisted probe-cache entry may
+ * be trusted for.
+ */
+const lastResolveTransient = new Map<string, boolean>();
+
+/**
+ * True when the tool path `getToolPath` most recently returned for `toolId`
+ * was selected after a candidate tier failed transiently — a stalled or
+ * unspawnable probe, never a clean "not found". Such a selection may be a
+ * degraded fallback masking a preferred tier that is actually fine, so a
+ * caller persisting it must not trust it for the full 24h TTL (#1569).
+ */
+export function wasLastResolveTransient(toolId: string): boolean {
+	return lastResolveTransient.get(toolId) ?? false;
+}
+
 export async function getToolPath(toolId: string): Promise<string | undefined> {
+	let sawTransient = false;
+	const markTransient = (): void => {
+		sawTransient = true;
+	};
+	const result = await getToolPathResolved(toolId, markTransient);
+	lastResolveTransient.set(toolId, sawTransient);
+	return result;
+}
+
+async function getToolPathResolved(
+	toolId: string,
+	onTransient: () => void,
+): Promise<string | undefined> {
 	const tool = TOOLS.find((t) => t.id === toolId);
 	if (!tool) return undefined;
 
@@ -2327,7 +2438,7 @@ export async function getToolPath(toolId: string): Promise<string | undefined> {
 		const cmdPath = `${localBase}.cmd`;
 		try {
 			await fs.access(cmdPath);
-			if (await verifyToolBinary(cmdPath, recordVersion)) {
+			if (await verifyToolBinary(cmdPath, recordVersion, onTransient)) {
 				return cmdPath;
 			}
 			logSessionStart(
@@ -2341,7 +2452,7 @@ export async function getToolPath(toolId: string): Promise<string | undefined> {
 		const exePath = `${localBase}.exe`;
 		try {
 			await fs.access(exePath);
-			if (await verifyToolBinary(exePath, recordVersion)) {
+			if (await verifyToolBinary(exePath, recordVersion, onTransient)) {
 				return exePath;
 			}
 			logSessionStart(
@@ -2354,7 +2465,7 @@ export async function getToolPath(toolId: string): Promise<string | undefined> {
 	if (installerPlatform() !== "win32") {
 		try {
 			await fs.access(localBase);
-			if (await verifyToolBinary(localBase, recordVersion)) {
+			if (await verifyToolBinary(localBase, recordVersion, onTransient)) {
 				return localBase;
 			}
 			logSessionStart(
@@ -2371,7 +2482,7 @@ export async function getToolPath(toolId: string): Promise<string | undefined> {
 	// before falling back to PATH or a (re)install.
 	if (tool.platformPackage) {
 		const platformBin = resolvePlatformPackageBinary(tool);
-		if (platformBin && (await verifyToolBinary(platformBin))) {
+		if (platformBin && (await verifyToolBinary(platformBin, undefined, onTransient))) {
 			logSessionStart(
 				`auto-install ${toolId}: resolved platform-package binary at ${platformBin}`,
 			);
@@ -2401,7 +2512,10 @@ export async function getToolPath(toolId: string): Promise<string | undefined> {
 	}
 
 	if (tool.installStrategy === "npm") {
-		const npmPath = await findNpmGlobalToolPath(tool.binaryName || tool.id);
+		const npmPath = await findNpmGlobalToolPath(
+			tool.binaryName || tool.id,
+			onTransient,
+		);
 		if (npmPath) {
 			return npmPath;
 		}
@@ -2409,7 +2523,10 @@ export async function getToolPath(toolId: string): Promise<string | undefined> {
 
 	// For pip tools, also probe user-level script locations
 	if (tool.installStrategy === "pip") {
-		const pipPath = await findPipUserToolPath(tool.binaryName || tool.id);
+		const pipPath = await findPipUserToolPath(
+			tool.binaryName || tool.id,
+			onTransient,
+		);
 		if (pipPath) {
 			return pipPath;
 		}
@@ -2477,6 +2594,7 @@ function getArchiveBinaryCandidates(
 
 async function findNpmGlobalToolPath(
 	binaryName: string,
+	onTransient?: () => void,
 ): Promise<string | undefined> {
 	const isWindows = process.platform === "win32";
 	const binDirs = await getNpmGlobalBinCandidates();
@@ -2492,7 +2610,7 @@ async function findNpmGlobalToolPath(
 		for (const candidate of candidates) {
 			try {
 				await fs.access(candidate);
-				if (await verifyToolBinary(candidate)) {
+				if (await verifyToolBinary(candidate, undefined, onTransient)) {
 					return candidate;
 				}
 			} catch {
@@ -2534,6 +2652,7 @@ async function getNpmGlobalBinCandidates(): Promise<string[]> {
 
 async function findPipUserToolPath(
 	binaryName: string,
+	onTransient?: () => void,
 ): Promise<string | undefined> {
 	const isWindows = process.platform === "win32";
 	const userBaseCandidates = await getPythonUserBaseCandidates();
@@ -2568,7 +2687,7 @@ async function findPipUserToolPath(
 			for (const candidate of candidates) {
 				try {
 					await fs.access(candidate);
-					if (await verifyToolBinary(candidate)) {
+					if (await verifyToolBinary(candidate, undefined, onTransient)) {
 						return candidate;
 					}
 				} catch {
@@ -2834,7 +2953,10 @@ async function installGitHubTool(
 				gunzip.on("error", reject);
 				gunzip.end(assetBuffer);
 			});
-			await fs.writeFile(destPath, decompressed, { mode: 0o750 });
+			await writeFileAtomicAsync(destPath, decompressed, {
+				bestEffort: false,
+				mode: 0o750,
+			});
 		} else if (assetName.endsWith(".tar.gz") || assetName.endsWith(".tar.xz")) {
 			// Write archive to temp file, extract with system tar
 			const tmpArchive = path.join(GITHUB_BIN_DIR, `_tmp_${assetName}`);
@@ -2933,7 +3055,10 @@ async function installGitHubTool(
 			if (!isWindows) await fs.chmod(destPath, 0o750);
 		} else {
 			// Bare binary (e.g. shfmt_*_linux_amd64)
-			await fs.writeFile(destPath, assetBuffer, { mode: 0o750 });
+			await writeFileAtomicAsync(destPath, assetBuffer, {
+				bestEffort: false,
+				mode: 0o750,
+			});
 		}
 	} catch (err) {
 		logSessionStart(
@@ -2955,9 +3080,11 @@ async function installGitHubTool(
 		}
 		try {
 			const extraBuffer = await httpsGet(extraAsset.browser_download_url);
-			await fs.writeFile(path.join(GITHUB_BIN_DIR, extraName), extraBuffer, {
-				mode: 0o750,
-			});
+			await writeFileAtomicAsync(
+				path.join(GITHUB_BIN_DIR, extraName),
+				extraBuffer,
+				{ bestEffort: false, mode: 0o750 },
+			);
 			logSessionStart(
 				`github-install ${tool.id}: installed extra asset ${extraName} (${extraBuffer.length} bytes)`,
 			);
@@ -3055,21 +3182,22 @@ async function installMavenTool(
 	try {
 		await fs.mkdir(GITHUB_BIN_DIR, { recursive: true });
 		const jarPath = path.join(GITHUB_BIN_DIR, `${tool.id}.jar`);
-		await fs.writeFile(jarPath, jarBuffer);
+		await writeFileAtomicAsync(jarPath, jarBuffer, { bestEffort: false });
 
 		// Launcher so the tool resolves as a normal command in the managed bin.
 		const launcherName = isWindows ? `${binaryName}.bat` : binaryName;
 		const launcherPath = path.join(GITHUB_BIN_DIR, launcherName);
 		if (isWindows) {
-			await fs.writeFile(
+			await writeFileAtomicAsync(
 				launcherPath,
 				`@echo off\r\njava -jar "%~dp0${tool.id}.jar" %*\r\n`,
+				{ bestEffort: false },
 			);
 		} else {
-			await fs.writeFile(
+			await writeFileAtomicAsync(
 				launcherPath,
 				`#!/bin/sh\nexec java -jar "$(dirname "$0")/${tool.id}.jar" "$@"\n`,
-				{ mode: 0o750 },
+				{ bestEffort: false, mode: 0o750 },
 			);
 		}
 		logSessionStart(
@@ -3236,15 +3364,16 @@ async function installArchiveTool(
 		const launcherName = isWindows ? `${binaryName}.bat` : binaryName;
 		const shimPath = path.join(GITHUB_BIN_DIR, launcherName);
 		if (isWindows) {
-			await fs.writeFile(
+			await writeFileAtomicAsync(
 				shimPath,
 				`@echo off\r\ncall "${resolvedInner}" %*\r\n`,
+				{ bestEffort: false },
 			);
 		} else {
-			await fs.writeFile(
+			await writeFileAtomicAsync(
 				shimPath,
 				`#!/bin/sh\nexec "${resolvedInner}" "$@"\n`,
-				{ mode: 0o750 },
+				{ bestEffort: false, mode: 0o750 },
 			);
 		}
 		logSessionStart(
@@ -3274,9 +3403,10 @@ async function installNpmTool(
 		try {
 			await fs.access(packageJsonPath);
 		} catch {
-			await fs.writeFile(
+			await writeFileAtomicAsync(
 				packageJsonPath,
 				JSON.stringify({ name: "pi-lens-tools", version: "1.0.0" }, null, 2),
+				{ bestEffort: false },
 			);
 		}
 
@@ -3750,7 +3880,7 @@ async function ensureToolResolved(
 	const cacheResolvedPath = (result: string | undefined): string | undefined => {
 		if (result) {
 			resolvedPathCache.set(toolId, result);
-			void updateProbeCache(toolId, result);
+			void updateProbeCache(toolId, result, wasLastResolveTransient(toolId));
 		}
 		return result;
 	};
@@ -3912,7 +4042,11 @@ async function ensureToolResolved(
 			}
 
 			resolvedPathCache.set(toolId, existingPath);
-			void updateProbeCache(toolId, existingPath);
+			void updateProbeCache(
+				toolId,
+				existingPath,
+				wasLastResolveTransient(toolId),
+			);
 			logSessionStart(
 				`auto-install ensure ${toolId}: already available at ${existingPath} (${Date.now() - ensureStartMs}ms)`,
 			);
@@ -3965,7 +4099,11 @@ async function ensureToolResolved(
 					"installed by a concurrent process",
 				);
 				resolvedPathCache.set(toolId, installedByPeer);
-				void updateProbeCache(toolId, installedByPeer);
+				void updateProbeCache(
+					toolId,
+					installedByPeer,
+					wasLastResolveTransient(toolId),
+				);
 				return installedByPeer;
 			}
 			installed = await installTool(toolId);
@@ -3985,7 +4123,7 @@ async function ensureToolResolved(
 		const result = await getToolPath(toolId);
 		if (result) {
 			resolvedPathCache.set(toolId, result);
-			void updateProbeCache(toolId, result);
+			void updateProbeCache(toolId, result, wasLastResolveTransient(toolId));
 			logSessionStart(
 				`auto-install ensure ${toolId}: success at ${result} (${Date.now() - ensureStartMs}ms)`,
 			);
