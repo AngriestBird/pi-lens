@@ -206,6 +206,37 @@ export interface AvailabilityDecision {
 	/** Probe budget the verdict was measured against, ms. */
 	budgetMs?: number;
 	/**
+	 * This verdict did not win on the merits (#1568). An ordered candidate walk
+	 * stopped at a tier that answered, but a tier AHEAD of it was unreachable
+	 * rather than absent — so the winner is in use provisionally and the sweep
+	 * is owed a re-run once the stalled tier's cooldown expires.
+	 *
+	 * Its own field rather than an inference from `latched: false`: on an
+	 * `available` row, `latched` was previously always `true`, so a reader had no
+	 * way to tell a real win from a degraded one (#1559's `formatter_selected`
+	 * lesson, in the tool-tier domain).
+	 */
+	provisional?: boolean;
+	/**
+	 * The candidates ahead of the winner that were unreachable, in ask order.
+	 * Named as in #1559's `formatter_selected` record so one grep covers both.
+	 *
+	 * Candidate NAMES, never resolved paths: a tier can be an absolute
+	 * `node_modules/.bin/<name>` under the user's home, and every sibling row in
+	 * this log carries a bare tool name. Writing the path there would both leak
+	 * it and break the grep (#1568 review F3).
+	 */
+	unreachablePreferred?: readonly string[];
+	/**
+	 * No candidate answered this sweep; the verdict re-serves the winner the
+	 * previous (provisional) sweep found (#1568 review F1).
+	 *
+	 * Only ever set beside `provisional`, and only when the failure class was
+	 * transient. It is the row that explains why an `available` verdict was
+	 * emitted by a sweep in which nothing was reachable.
+	 */
+	retained?: boolean;
+	/**
 	 * True when NO probe ran: the latch served a still-cooling verdict and the
 	 * caller opted to record it anyway (#1539). It keeps the opt-in rows below
 	 * separable from real decisions, so a reader counting probes and a reader
@@ -443,6 +474,29 @@ export interface AvailabilityLatch {
 	read(): boolean | null;
 	noteAvailable(cause?: AvailabilityCause): void;
 	/**
+	 * Record an available verdict that did NOT win on the merits (#1568): an
+	 * ordered candidate walk stopped at a tier that answered while a tier ahead
+	 * of it was unreachable rather than absent.
+	 *
+	 * The verdict is served — the tool works right now, and re-sweeping on every
+	 * call would be its own storm — but only until `transientCause`'s cooldown
+	 * expires, after which `read()` returns `null` and the caller re-sweeps.
+	 * Escalates on the same ladder as a transient failure, so a preferred tier
+	 * that keeps stalling is not re-probed every 30 s forever.
+	 *
+	 * Returns the cooldown applied, in ms, for the decision record.
+	 */
+	noteProvisionallyAvailable(transientCause: AvailabilityCause): number;
+	/**
+	 * True while the current verdict is an available-but-provisional one.
+	 *
+	 * The question a re-sweep has to ask before it gives up: "was the answer I am
+	 * about to overwrite a real verdict, or a placeholder?" A sweep that finds
+	 * nothing TRANSIENTLY must not turn a working tool off when the answer it
+	 * holds came from a candidate that actually ran (#1568 review F1).
+	 */
+	isProvisional(): boolean;
+	/**
 	 * Returns the retry delay in ms; 0 means the verdict is latched.
 	 *
 	 * `opts.operationClass: "install"` marks the failure of an install-class
@@ -468,6 +522,11 @@ export interface AvailabilityLatch {
 	 * install-class cooldowns, which is exactly what `read()` enforces. A
 	 * caller that reads one class's slot alone would conclude a retry is due
 	 * while the other class is still cooling (#1497 review F2).
+	 *
+	 * "0 if latched" is not the same as "0 whenever the tool is available". A
+	 * PROVISIONAL verdict is both: `read()` returns `true` — the tool works and
+	 * is being served — while this returns a future timestamp, because the sweep
+	 * is still due for re-evaluation (#1568). Read the pair, not either alone.
 	 */
 	getRetryAtMs(): number;
 	/** True once install-class retries are spent for this session (#1497). */
@@ -499,6 +558,13 @@ export function createAvailabilityLatch(
 	// shorten it — the 5 s host-stall shortcut on the probe ladder would
 	// otherwise collapse 5 minutes of install spacing into seconds.
 	let installRetryAtMs = 0;
+	/**
+	 * The current `available` verdict is a degraded selection (#1568), held only
+	 * until `retryAtMs`. Separate from `available` because it does not change
+	 * what the caller is told — the tool IS usable — only how long the answer
+	 * may be reused.
+	 */
+	let provisional = false;
 	const maxCooldownMs = options.maxCooldownMs ?? TRANSIENT_MAX_COOLDOWN_MS;
 	let installGeneration = installRetryGeneration;
 
@@ -511,6 +577,7 @@ export function createAvailabilityLatch(
 		installAttempts = 0;
 		installExhausted = false;
 		installRetryAtMs = 0;
+		provisional = false;
 	}
 
 	/**
@@ -539,6 +606,12 @@ export function createAvailabilityLatch(
 	return {
 		read(): boolean | null {
 			syncInstallGeneration();
+			// A provisional `true` expires exactly like a transient `false`: the
+			// answer was served, the sweep is still owed (#1568).
+			if (available === true) {
+				if (provisional && Date.now() >= effectiveRetryAtMs()) return null;
+				return true;
+			}
 			if (available !== false) return available;
 			if (installExhausted) return false;
 			if (outcome !== "transient") return false;
@@ -554,6 +627,30 @@ export function createAvailabilityLatch(
 			installAttempts = 0;
 			installExhausted = false;
 			installRetryAtMs = 0;
+			provisional = false;
+		},
+		noteProvisionallyAvailable(transientCause: AvailabilityCause): number {
+			syncInstallGeneration();
+			available = true;
+			outcome = "success";
+			// The cause names why the verdict is PROVISIONAL, which is the only
+			// thing about it worth recording: `ok` would describe a clean win.
+			cause = transientCause;
+			provisional = true;
+			installAttempts = 0;
+			installExhausted = false;
+			installRetryAtMs = 0;
+			// Same ladder as a transient failure, and the same counter: a preferred
+			// tier that stalls on every sweep must back off rather than buy a fresh
+			// 30 s window each time.
+			transientAttempts += 1;
+			const delay = transientRetryDelayMs(
+				transientAttempts,
+				transientCause,
+				maxCooldownMs,
+			);
+			retryAtMs = Date.now() + delay;
+			return delay;
 		},
 		noteUnavailable(
 			nextOutcome: AvailabilityOutcome,
@@ -564,6 +661,7 @@ export function createAvailabilityLatch(
 			available = false;
 			outcome = nextOutcome;
 			cause = nextCause;
+			provisional = false;
 			if (isLatchingOutcome(nextOutcome)) {
 				retryAtMs = 0;
 				installRetryAtMs = 0;
@@ -606,6 +704,7 @@ export function createAvailabilityLatch(
 		getOutcome: () => outcome,
 		getCause: () => cause,
 		getRetryAtMs: () => effectiveRetryAtMs(),
+		isProvisional: () => provisional,
 		isInstallExhausted: () => {
 			syncInstallGeneration();
 			return installExhausted;
@@ -697,6 +796,11 @@ export function logAvailabilityDecision(
 				retryAfterMs: decision.retryAfterMs,
 			}),
 			...(decision.budgetMs !== undefined && { budgetMs: decision.budgetMs }),
+			...(decision.provisional === true && { provisional: true }),
+			...(decision.unreachablePreferred !== undefined && {
+				unreachablePreferred: decision.unreachablePreferred,
+			}),
+			...(decision.retained === true && { retained: true }),
 			...(decision.servedFromCooldown === true && { servedFromCooldown: true }),
 		},
 	});
