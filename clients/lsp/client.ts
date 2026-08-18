@@ -395,6 +395,18 @@ export interface LSPClientInfo {
 		args?: unknown[],
 		mutationContext?: LspMutationContext,
 	): Promise<{ executed: boolean; result?: unknown; reason?: string }>;
+	/**
+	 * #1412/#1640: read-only sibling of `executeCommand` for identity and
+	 * telemetry probes. Same allowlist-by-advertisement hardening, but it never
+	 * touches `serverEditsAllowed` / `activeMutationContext` — so a probe firing
+	 * mid-flight cannot wipe a concurrent real command's mutation context, and
+	 * cannot itself open the `workspace/applyEdit` acceptance window. Carries the
+	 * short probe timeout, not the generous mutation backstop.
+	 */
+	executeReadOnlyCommand(
+		command: string,
+		args?: unknown[],
+	): Promise<{ executed: boolean; result?: unknown; reason?: string }>;
 	/** Go to definition — returns Location[] */
 	definition(
 		filePath: string,
@@ -3189,6 +3201,10 @@ export async function createLSPClient(options: {
 				EXECUTE_COMMAND_TIMEOUT_MS,
 				mutationContext,
 			);
+		},
+
+		async executeReadOnlyCommand(command, args) {
+			return runReadOnlyServerCommand(state, command, args);
 		},
 
 		get diagnosticsVersion() {
