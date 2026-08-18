@@ -285,7 +285,8 @@ describe.each(["gitleaks", "trivy", "opengrep"] as const)(
 				classifiedBy: "caller",
 				evidence: {
 					install: "succeeded",
-					binaryPath: "/managed/bin/" + tool,
+					binary: tool,
+					source: "managed-dir",
 				},
 			});
 		});

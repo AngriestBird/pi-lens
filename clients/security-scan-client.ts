@@ -13,6 +13,7 @@
  * Refs: #130, #131, #132
  */
 
+import * as path from "node:path";
 import { createSubsystemLogger } from "./extension-log.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import {
@@ -315,7 +316,11 @@ export abstract class SecurityScanClient<TResult> {
 			elapsedMs: Date.now() - installStartedAt,
 			latched: true,
 			classifiedBy: "caller",
-			evidence: { install: "succeeded", binaryPath: installed },
+			evidence: {
+				install: "succeeded",
+				binary: path.basename(installed),
+				source: "managed-dir",
+			},
 		});
 		return true;
 	}

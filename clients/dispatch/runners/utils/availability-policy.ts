@@ -109,12 +109,26 @@ export interface ProbeEvidence {
 	 */
 	installReason?: string;
 	/**
-	 * Where the installer put the binary, when `install: "succeeded"`. The
-	 * compensating `available` row after a probe-then-install recovery (#1606)
-	 * is the only durable record that the tool came back — without the path
-	 * here, a reader can see the verdict flipped but not what resolved it.
+	 * Basename of the binary the installer resolved, when `install:
+	 * "succeeded"`. The compensating `available` row after a probe-then-install
+	 * recovery (#1606) is the only durable record that the tool came back —
+	 * without a name here, a reader can see the verdict flipped but not what
+	 * resolved it.
+	 *
+	 * Deliberately a BASENAME, never the resolved absolute path — same rule as
+	 * `unreachablePreferred` below (#1568 review): an absolute path under the
+	 * user's home is a leak risk in a shared log, and it breaks a reader
+	 * grepping latency.log for a bare tool name across every row.
 	 */
-	binaryPath?: string;
+	binary?: string;
+	/**
+	 * Where `binary` was resolved from, alongside it. `"managed-dir"` for the
+	 * pi-lens installer's own tools directory (gitleaks, trivy, opengrep);
+	 * `"go-install"` for a Go-toolchain install (govulncheck) — a distinct
+	 * label since #1606's two known installer families disagree on where the
+	 * binary ends up and a reader needs to know which convention resolved it.
+	 */
+	source?: "managed-dir" | "go-install";
 }
 
 /**
