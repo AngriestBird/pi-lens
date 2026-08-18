@@ -21,6 +21,8 @@
  *     `"partial"` and names the scanner, not `"confirmed"`.
  */
 
+import * as fs from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeMapKey } from "../../../clients/path-utils.js";
 
@@ -776,5 +778,266 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		expect(result?.diags.map((d) => d.message)).toContain(
 			"stored scanner finding",
 		);
+	});
+});
+
+/**
+ * #1586 — the deferred door judged coverage from the PRE-NOTIFY snapshot.
+ *
+ * #1571 established the merge-time predicate (`auxCoversThisContent`): a stored
+ * binding read at MERGE time, unioned with #1493's pre-notify snapshot, deciding
+ * both whether an auxiliary's findings are dropped and whether it is named
+ * uncovered. The deferred door never went through it — it filtered
+ * `notifyDeferredServerIds` on the snapshot alone and dropped every deferred
+ * server's findings unconditionally. The snapshot is taken BEFORE the notify, so
+ * it cannot see the publication that #1459's own late-write signature produces:
+ * the outstanding write the gate deferred behind LANDS, the scanner scans, and it
+ * publishes for exactly these bytes while the deferred touch is still waiting.
+ *
+ * The fixture is that race, with two CONCURRENT touches of one file sharing one
+ * scanner client:
+ *   - the FIRST claims the scanner's single resync slot with a slow write;
+ *   - the SECOND is DEFERRED behind it, and its pre-notify snapshot sees nothing;
+ *   - the first write then lands and the scanner publishes;
+ *   - the primary publishes later still, so the deferred touch is demonstrably
+ *     mid-wait when that happens.
+ */
+describe("#1586 — deferred-door coverage is judged at merge time", () => {
+	const FILE = `${ROOT}/a.ts`;
+	const CONTENT = "const value = 1;";
+	const LATE_FINDING = "late scanner finding";
+	const PRIMARY_PUBLISH_MS = 700;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		logLatency.mockReset();
+		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = String(NOTIFY_BUDGET_MS);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+	});
+
+	/**
+	 * A primary that publishes at `publishAtMs` instead of instantly, so a
+	 * concurrent touch is still inside its diagnostics wait when the scanner's
+	 * late publication lands. It rides its own budget WITHOUT publishing when that
+	 * budget is shorter, so a mis-sized fixture fails as an inconclusive touch
+	 * rather than modelling a client production does not have.
+	 *
+	 * The `diagnosticsVersion` getter and the per-path stamp are redefined AFTER
+	 * the spread: spreading `makeClient(...)` evaluates its getter once and freezes
+	 * the value.
+	 */
+	function makePublishingPrimary(publishAtMs: number) {
+		let version = 0;
+		const stampsByPath = new Map<string, number>();
+		return {
+			...makeClient("typescript", 0),
+			get diagnosticsVersion() {
+				return version;
+			},
+			getDiagnosticsVersionForPath: vi.fn(
+				(filePath: string) => stampsByPath.get(filePath) ?? 0,
+			),
+			waitForDiagnostics: vi.fn(
+				(filePath: string, timeoutMs?: number) =>
+					new Promise<void>((resolve) => {
+						if (timeoutMs !== undefined && timeoutMs < publishAtMs) {
+							setTimeout(resolve, timeoutMs);
+							return;
+						}
+						setTimeout(() => {
+							version += 1;
+							stampsByPath.set(filePath, version);
+							resolve();
+						}, publishAtMs);
+					}),
+			),
+		};
+	}
+
+	/**
+	 * A scanner that holds NOTHING until its own `didOpen` write is accepted, and
+	 * from that moment reports a finding bound to `publishedContentHash`. That is
+	 * the production sequence the gate defers behind: the write lands, the scan
+	 * runs, the publication is stored with the fingerprint of the text that was
+	 * sent. Its wait still never resolves early (`"never"`), because a scanner that
+	 * was not sent THIS touch's bytes cannot answer this touch's wait.
+	 */
+	function makeLatePublishingAux(writeMs: number, publishedContentHash: string) {
+		const base = makeClient("opengrep", writeMs, [], "never");
+		let published = false;
+		return {
+			...base,
+			getDiagnostics: vi.fn(() =>
+				published ? [makeDiagnostic(LATE_FINDING)] : [],
+			),
+			getDiagnosticBinding: vi.fn(() =>
+				published ? { contentHash: publishedContentHash } : undefined,
+			),
+			notify: {
+				...base.notify,
+				open: vi.fn(() =>
+					base.notify.open().then(() => {
+						published = true;
+					}),
+				),
+			},
+		};
+	}
+
+	type TouchResult =
+		| {
+				diags: Array<{ message: string }>;
+				confirmation?: string;
+				inconclusive?: boolean;
+				unconfirmedServerIds?: string[];
+		  }
+		| undefined;
+
+	async function runDeferredPublishRace(
+		clientScope: "with-auxiliary" | "all",
+		publishedContentHash: string,
+	): Promise<{ holdingResult: TouchResult; deferredResult: TouchResult }> {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+
+		const aux = makeLatePublishingAux(
+			NOTIFY_BUDGET_MS * 3,
+			publishedContentHash,
+		);
+		const primary = makePublishingPrimary(PRIMARY_PUBLISH_MS);
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("opengrep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep" ? aux : primary,
+		);
+
+		const touchOptions = {
+			clientScope,
+			...(clientScope === "with-auxiliary" && {
+				auxiliaryServerIds: ["opengrep"],
+			}),
+			diagnostics: "document" as const,
+			collectDiagnostics: true,
+			source: "cascade",
+		};
+		const holding = service.touchFile(FILE, CONTENT, touchOptions);
+		await vi.advanceTimersByTimeAsync(1);
+		const deferred = service.touchFile(FILE, CONTENT, touchOptions);
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
+		const [holdingResult, deferredResult] = (await Promise.all([
+			holding,
+			deferred,
+		])) as [TouchResult, TouchResult];
+		return { holdingResult, deferredResult };
+	}
+
+	it.each(["with-auxiliary", "all"] as const)(
+		"%s: a deferred scanner bound to these bytes at merge time keeps its findings and is not named",
+		async (clientScope) => {
+			const { hashDiagnosticContent } = await import(
+				"../../../clients/lsp/diagnostic-binding.js"
+			);
+			const { deferredResult } = await runDeferredPublishRace(
+				clientScope,
+				hashDiagnosticContent(CONTENT),
+			);
+
+			// The gate really did defer the second touch's resync …
+			expect(rowsFor("lsp_notify_resync_deferred")).toHaveLength(1);
+			// … but by merge time the scanner had published for EXACTLY these bytes,
+			// so it has reported on this file and the deferral withholds nothing.
+			expect(deferredResult?.diags.map((d) => d.message)).toContain(
+				LATE_FINDING,
+			);
+			expect(deferredResult?.unconfirmedServerIds ?? []).not.toContain(
+				"opengrep",
+			);
+			expect(deferredResult?.confirmation).toBe("confirmed");
+			// The primary answered inside its budget; nothing here is inconclusive.
+			expect(deferredResult?.inconclusive).toBeFalsy();
+		},
+	);
+
+	it.each(["with-auxiliary", "all"] as const)(
+		"%s: a deferred scanner bound to OTHER bytes stays dropped and named",
+		async (clientScope) => {
+			const { hashDiagnosticContent } = await import(
+				"../../../clients/lsp/diagnostic-binding.js"
+			);
+			// The honest case, and the guard against un-narrowing on a timer: the
+			// scanner published, but for the PREVIOUS revision. Its findings carry
+			// that revision's line numbers and must not ride out as this touch's
+			// answer.
+			const { deferredResult } = await runDeferredPublishRace(
+				clientScope,
+				hashDiagnosticContent("const value = 2;"),
+			);
+
+			expect(rowsFor("lsp_notify_resync_deferred")).toHaveLength(1);
+			expect(deferredResult?.unconfirmedServerIds).toContain("opengrep");
+			expect(deferredResult?.confirmation).toBe("partial");
+			expect(deferredResult?.diags.map((d) => d.message)).not.toContain(
+				LATE_FINDING,
+			);
+			expect(deferredResult?.inconclusive).toBeFalsy();
+		},
+	);
+
+	it.each(["with-auxiliary", "all"] as const)(
+		"%s: no door names a scanner whose findings the merge kept",
+		async (clientScope) => {
+			// The single-predicate property, asserted behaviorally. The HOLDING touch
+			// is judged by three doors at once — the notify-write door (its write was
+			// charged as timed out), the aux wait-outcome door (its wait produced no
+			// publication for this touch), and the merge. #1571 put the merge on the
+			// merge-time predicate and left the wait-outcome door on the pre-notify
+			// snapshot, so the touch named a scanner whose findings it had just
+			// merged. Naming and merging must agree, whichever door reached first.
+			const { hashDiagnosticContent } = await import(
+				"../../../clients/lsp/diagnostic-binding.js"
+			);
+			const { holdingResult } = await runDeferredPublishRace(
+				clientScope,
+				hashDiagnosticContent(CONTENT),
+			);
+
+			expect(holdingResult?.diags.map((d) => d.message)).toContain(
+				LATE_FINDING,
+			);
+			expect(holdingResult?.unconfirmedServerIds ?? []).not.toContain(
+				"opengrep",
+			);
+			expect(holdingResult?.confirmation).toBe("confirmed");
+		},
+	);
+
+	it("keeps ONE coverage predicate: the pre-notify snapshot has a single read site", async () => {
+		// The single-predicate property, asserted by construction. Every door —
+		// the merge drop, the aux wait-outcome rows, the deferred door, the
+		// coverage naming — must go through `auxCoversThisContent`, so the
+		// pre-notify snapshot it unions in is read in exactly two places: its own
+		// declaration and that predicate. A new read site here is a second
+		// coverage rule, which is the defect class this test fences.
+		const source = await fs.readFile(
+			fileURLToPath(new URL("../../../clients/lsp/index.ts", import.meta.url)),
+			"utf-8",
+		);
+		const sites = source
+			.split("\n")
+			.filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+			.filter((line) => line.includes("auxPublishedThisContent"));
+		expect(sites).toHaveLength(2);
+		expect(sites[0]).toContain("const auxPublishedThisContent");
+		expect(sites[1]).toContain("auxPublishedThisContent.has(serverId)");
 	});
 });

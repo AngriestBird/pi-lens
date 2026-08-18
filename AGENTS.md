@@ -138,6 +138,23 @@ its findings ride along. And an inconclusive touch must name its cause
 `diagnostics-wait` / `mixed`) on the result, in `lsp_touch_file`, and in the
 cascade's `neighbor_touch` row. (#1549)
 
+**Content-bound coverage is judged at MERGE TIME on EVERY door, through ONE
+predicate.** `auxCoversThisContent` (`clients/lsp/index.ts`, inside `touchFile`)
+is that predicate — the pre-notify `auxPublishedThisContent` snapshot unioned
+with a live `getDiagnosticBinding` read — and it is the only place the snapshot
+is read. Four doors go through it: the merge drop, the aux wait-outcome rows'
+`publishedThisContent`, the deferred door, and the final `unconfirmedServerIds`.
+The notify-write door got it in #1549, which left the DEFERRED door filtering
+the snapshot alone — so a deferred scanner's findings were dropped and it was
+named uncovered even when it had published for exactly these bytes while its
+resync sat queued, the same underclaim one door over. The screen when you
+add a door: a snapshot taken before the notify cannot see a write that lands
+after it, and a verdict decided when the aux wait ends cannot see a publication
+that arrives before the merge, so ask the predicate where the decision is made,
+never earlier. The `lsp_notify_resync_deferred` row keeps recording the gate's
+action either way; the coverage fields report only what the touch is actually
+uncovered for. (#1586)
+
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
 the agent. `turnSeq` is not a staleness signal for such a run (a late run is by

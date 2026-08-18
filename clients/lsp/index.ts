@@ -2638,6 +2638,45 @@ export class LSPService {
 					: [],
 			),
 		);
+		const spawnedByServerId = new Map(
+			spawned.map((entry) => [entry.info.id, entry]),
+		);
+		// #1549/#1586: does this auxiliary's publication describe exactly the bytes
+		// this touch carries? THE coverage predicate — every door goes through it (the
+		// merge drop, the aux wait-outcome rows, the deferred door, the coverage
+		// naming), so a scanner can never be named uncovered while its findings ride
+		// along in `.diags`, or the reverse.
+		//
+		// It UNIONS two content-bound reads rather than replacing one with the other,
+		// because they answer different questions:
+		//
+		//   - `auxPublishedThisContent` was captured BEFORE the notify (#1493), because
+		//     a landed write clears the cache and would erase the evidence that the
+		//     scanner had already reported on these bytes.
+		//   - the read below is LIVE, and it catches the opposite race — #1459's own
+		//     documented signature: a write charged as timed out, or one the fan-out
+		//     gate deferred behind, that LANDS LATE, after which the scanner publishes
+		//     for this touch's content. Judging that auxiliary on the pre-notify
+		//     snapshot alone drops its CURRENT findings and names it uncovered — an
+		//     underclaim about a scanner that answered.
+		//
+		// Either match means covered; both are content-bound, so neither can pass off
+		// another revision's findings as this touch's answer. Deliberately a function,
+		// not a precomputed set: each door evaluates it when IT decides, so a
+		// publication landing between the aux wait and the merge still counts.
+		// Everything it cannot speak for fails CLOSED — an id that never reached
+		// `spawned` (a breaker-skipped scanner, which never attached) and any
+		// primary-role server, whose findings are governed by #570's
+		// timeout-preserves-last-known semantics rather than by this exemption.
+		const auxCoversThisContent = (serverId: string): boolean => {
+			const entry = spawnedByServerId.get(serverId);
+			if (entry?.info.role !== "auxiliary") return false;
+			return (
+				auxPublishedThisContent.has(serverId) ||
+				entry.client.getDiagnosticBinding?.(filePath)?.contentHash ===
+					touchContentHash
+			);
+		};
 		// #743: PER-SERVER notify-write deadlines. Each server's didOpen/didChange
 		// write gets its OWN notifyWriteBudgetMs budget rather than one shared
 		// deadline over a single Promise.all — otherwise one backpressured server
@@ -3278,9 +3317,9 @@ export class LSPService {
 										// auxiliary that already published for these exact bytes is
 										// not demoted. Logged too — it is the reason a `silent` row
 										// did not narrow the touch.
-										publishedThisContent: auxPublishedThisContent.has(
-											aux.serverId,
-										),
+										// #1586: through the one predicate, so this row and the merge
+										// below cannot disagree about the same scanner.
+										publishedThisContent: auxCoversThisContent(aux.serverId),
 										budgetMs,
 										elapsedMs: Date.now() - auxWaitStartedAt,
 										// #1458 S3: elapsed measured from BEFORE the primary wait
@@ -3481,7 +3520,7 @@ export class LSPService {
 								: publishedEvidence
 									? ("answered" as const)
 									: ("silent" as const),
-							publishedThisContent: auxPublishedThisContent.has(entry.info.id),
+							publishedThisContent: auxCoversThisContent(entry.info.id),
 							budgetMs: timeoutFor(entry.client.serverId),
 							elapsedMs: waitedMs,
 							elapsedSinceNotifyMs: waitedMs,
@@ -3727,25 +3766,15 @@ export class LSPService {
 			}
 		}
 
-		// #1549: does this auxiliary's CURRENT publication describe exactly the bytes
-		// this touch carries? Read at merge time, and unioned with the pre-notify
-		// snapshot rather than replacing it — the two answer different questions:
-		//
-		//   - `auxPublishedThisContent` was captured BEFORE the notify (#1493), because
-		//     a landed write clears the cache and would erase the evidence that the
-		//     scanner had already reported on these bytes.
-		//   - the live read below catches the opposite race, and it is #1459's own
-		//     documented signature: a write charged as timed out that LANDS LATE, after
-		//     which the scanner publishes for this touch's content. Judging that
-		//     auxiliary on the pre-notify snapshot alone drops its CURRENT findings and
-		//     names it uncovered — an underclaim about a scanner that answered.
-		//
-		// Either match means covered; both are content-bound, so neither can pass off
-		// another revision's findings as this touch's answer.
-		const auxCoversThisContent = (entry: (typeof spawned)[number]): boolean =>
-			auxPublishedThisContent.has(entry.info.id) ||
-			entry.client.getDiagnosticBinding?.(filePath)?.contentHash ===
-				touchContentHash;
+		// #1586: which DEFERRED auxiliaries this touch genuinely carries no evidence
+		// from, judged by the one predicate at MERGE TIME. The deferral itself only
+		// proves the gate did not send these bytes on THIS touch; whether the scanner
+		// has reported on them is a content-hash question, and the pre-notify snapshot
+		// cannot answer it for a write that landed after the snapshot was taken.
+		// Read by the merge below and by the coverage naming, so the two agree.
+		const uncoveredDeferredServerIds = notifyDeferredServerIds.filter(
+			(serverId) => !auxCoversThisContent(serverId),
+		);
 		// An AUXILIARY whose notify write never landed still holds the previous
 		// content's findings — nothing cleared its cache — and before this change that
 		// touch was blanket `inconclusive`, so no consumer read the merged array. Now
@@ -3763,7 +3792,7 @@ export class LSPService {
 					(entry) =>
 						entry.info.role === "auxiliary" &&
 						notifyWriteTimedOutServerIds.includes(entry.info.id) &&
-						!auxCoversThisContent(entry),
+						!auxCoversThisContent(entry.info.id),
 				)
 				.map((entry) => entry.info.id),
 		);
@@ -3781,8 +3810,11 @@ export class LSPService {
 						// ran. Merging them would report another revision's findings (and
 						// its line numbers) as this touch's answer, the one hazard the
 						// gate itself creates. Drop them; the gap is reported instead.
+						// #1586: unless the scanner has since published for exactly these
+						// bytes, which is the same content-bound question the coverage
+						// naming asks — `uncoveredDeferredServerIds` is that one answer.
 						...spawned.flatMap((entry) =>
-							deferredResyncServerIds.has(entry.info.id) ||
+							uncoveredDeferredServerIds.includes(entry.info.id) ||
 							staleWriteAuxiliaryServerIds.has(entry.info.id)
 								? []
 								: entry.client.getDiagnostics(filePath),
@@ -4019,25 +4051,34 @@ export class LSPService {
 					entry.info.role === "auxiliary" &&
 					(diagnosticsUnansweredServerIds.includes(entry.info.id) ||
 						notifyWriteTimedOutServerIds.includes(entry.info.id)) &&
-					!auxCoversThisContent(entry),
+					!auxCoversThisContent(entry.info.id),
 			)
 			.map((entry) => entry.info.id);
+		// #1586: whatever the doors contributed, the RESULT's coverage claim is
+		// settled here, at merge time, by the one predicate — so no future door can
+		// name a scanner on a rule of its own. The per-door filters above are not
+		// redundant with this one: they shape the `lsp_scanner_coverage_gap` fields,
+		// which each answer "what did THIS door see", while this settles "what does
+		// the touch speak for". It matters most for `auxUnconfirmedServerIds`, decided
+		// when the aux wait ended and therefore strictly before the merge — a
+		// publication landing in between is exactly #1459's late signature, and
+		// letting that verdict stand would name a scanner whose findings the merge
+		// above just kept. A breaker-skipped scanner never reached `spawned`, so the
+		// predicate has no client to read for it and it stays named: fail closed.
 		const unconfirmedServerIds = [
 			...new Set([
 				...(auxUnconfirmedServerIds ?? []),
 				...auxNoAnswerServerIds,
-				...notifyDeferredServerIds.filter(
-					(serverId) => !auxPublishedThisContent.has(serverId),
-				),
+				...uncoveredDeferredServerIds,
 				...brokenSkippedServerIds,
 			]),
-		];
+		].filter((serverId) => !auxCoversThisContent(serverId));
 		const coverageGap = unconfirmedServerIds.length > 0;
 		// The record that proves a blackout is no longer read as clean: one row per
 		// touch that a scanner did not cover, naming the scanner and the reason.
 		if (
 			brokenSkippedServerIds.length > 0 ||
-			notifyDeferredServerIds.length > 0 ||
+			uncoveredDeferredServerIds.length > 0 ||
 			// #1549: the auxiliary deadline misses that used to surface as a blanket
 			// `inconclusive` need their own row now that the touch reports usable
 			// findings — otherwise the fix would remove the only record of the blackout.
@@ -4052,8 +4093,12 @@ export class LSPService {
 					source,
 					clientScope,
 					...(brokenSkippedServerIds.length > 0 && { brokenSkippedServerIds }),
-					...(notifyDeferredServerIds.length > 0 && {
-						deferredResyncServerIds: notifyDeferredServerIds,
+					// #1586: the deferrals this touch is actually uncovered for. The raw
+					// gate action keeps its own record in `lsp_notify_resync_deferred`;
+					// this row exists to prove a blackout, and a scanner already bound to
+					// these bytes is not one.
+					...(uncoveredDeferredServerIds.length > 0 && {
+						deferredResyncServerIds: uncoveredDeferredServerIds,
 					}),
 					...(auxNoAnswerServerIds.length > 0 && { auxNoAnswerServerIds }),
 				},
@@ -4279,10 +4324,13 @@ export class LSPService {
 				// was open, or because the resync gate deferred their write. Separate
 				// fields because these two doors open BEFORE any wait, so neither can
 				// appear in an `lsp_aux_wait_outcome` row on the sweep path. Absent
-				// when every configured scanner got this content.
+				// when every configured scanner got this content — #1586 included: a
+				// deferred scanner already bound to these bytes is covered, so it is not
+				// named here either. The gate's own action is recorded regardless, in
+				// `lsp_notify_resync_deferred`.
 				...(brokenSkippedServerIds.length > 0 && { brokenSkippedServerIds }),
-				...(notifyDeferredServerIds.length > 0 && {
-					deferredResyncServerIds: notifyDeferredServerIds,
+				...(uncoveredDeferredServerIds.length > 0 && {
+					deferredResyncServerIds: uncoveredDeferredServerIds,
 				}),
 				// #1549: auxiliaries whose own deadline lapsed — the wait produced no
 				// publication, or the notify write never landed. Distinct from the fields
