@@ -68,7 +68,10 @@ import { getServersForFileWithConfig } from "../lsp/config.js";
 import { getLSPService } from "../lsp/index.js";
 import { isExternalOrVendorFile, normalizeMapKey } from "../path-utils.js";
 import { getProjectIgnoreMatcher } from "../file-utils.js";
-import { resetAstGrepUnsupportedLanguageLog } from "./runners/ast-grep-napi.js";
+import {
+	resetAstGrepNapiLoadState,
+	resetAstGrepUnsupportedLanguageLog,
+} from "./runners/ast-grep-napi.js";
 import { isTestRoleCollateral } from "../collateral-test-role.js";
 import {
 	clearReviewGraphWorkspaceCache,
@@ -419,6 +422,9 @@ export function getDispatchGroupsForKind(
 export function resetDispatchBaselines(cwd?: string): void {
 	if (cwd) applyProjectLensConfig(cwd);
 	resetAstGrepUnsupportedLanguageLog();
+	// #1567: a genuine-failure verdict or a live transient cooldown on the
+	// napi load latch is session-scoped state, not process-lifetime state.
+	resetAstGrepNapiLoadState();
 	sessionFacts.clearAll();
 	resetSessionSlopScore();
 	clearCoverageNoticeState();
@@ -573,6 +579,10 @@ function readBoundToCurrentDisk(
  * a future flag cannot be silently missed at just one of the several gate sites:
  *  - `inconclusive` (#1093/#571): the notify/diagnostics wait lapsed its deadline,
  *    so a resolved `[]` is NOT a confirmed clean (the #533 false-clean trap).
+ *    #1549: this now means a PRIMARY's deadline lapsed. A slow auxiliary lands in
+ *    the coverage-gap bullet below instead of collapsing the whole touch, so this
+ *    predicate still fails closed for it while the primary's findings survive —
+ *    which is the point: the two disqualifiers were doing one job for two causes.
  *  - a COVERAGE GAP (#1470/#1493): an auxiliary never reported — its push wait was
  *    cut off by the aux grace timer (#1470), or it stayed silent with no stored
  *    publication for this content (#1493) — so the merged result is missing whatever
@@ -592,6 +602,32 @@ function readBoundToCurrentDisk(
  */
 function readInconclusive(rawDiags: unknown): boolean {
 	return (rawDiags as { inconclusive?: boolean })?.inconclusive === true;
+}
+
+/**
+ * #1549: an inconclusive `neighbor_touch` row used to carry NO attribution, so a
+ * forensic sweep could only infer the cause from duration histograms. `touchFile`
+ * now names the PRIMARY server(s) whose deadline produced the verdict and which
+ * deadline it was (`notify-write` vs `diagnostics-wait`, or `mixed`) — carry both
+ * into cascade.log so the record stands on its own. Read off the wrapper, like
+ * every other flag here (#1179).
+ */
+function readInconclusiveAttribution(rawDiags: unknown): {
+	inconclusiveServerIds?: string[];
+	inconclusiveReason?: string;
+} {
+	const wrapper = rawDiags as {
+		inconclusiveServerIds?: string[];
+		inconclusiveReason?: string;
+	};
+	return {
+		...(wrapper?.inconclusiveServerIds?.length && {
+			inconclusiveServerIds: [...wrapper.inconclusiveServerIds],
+		}),
+		...(wrapper?.inconclusiveReason && {
+			inconclusiveReason: wrapper.inconclusiveReason,
+		}),
+	};
 }
 
 function isConfirmedTouch(rawDiags: TouchFileResult): boolean {
@@ -1805,6 +1841,9 @@ export async function computeCascadeForFile(
 					// stays conditional since "bound" carries no extra signal.
 					metadata: {
 						inconclusive,
+						// #1549: WHICH primary and WHICH deadline, present only when the
+						// touch actually reported itself inconclusive.
+						...(inconclusive && readInconclusiveAttribution(rawDiags)),
 						...(bindingRejected && { bindingState: bindingStateLabel(false) }),
 						...(unconfirmedServerIds.length > 0 && {
 							unconfirmedServerIds: [...unconfirmedServerIds],

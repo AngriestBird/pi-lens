@@ -22,7 +22,10 @@ import {
 	createWorkspaceDiagnosticsCacheContext,
 	type WorkspaceDiagnosticsCacheContext,
 } from "../clients/lsp/workspace-diagnostics-cache.js";
-import { primaryServerId } from "../clients/lsp/config.js";
+import {
+	getServersForFileWithConfig,
+	primaryServerId,
+} from "../clients/lsp/config.js";
 import { combineAbortSignals, withDeadline } from "../clients/deadline-utils.js";
 import {
 	applyAuxiliarySuppressions,
@@ -42,7 +45,7 @@ import {
 	attemptTsserverSyncDiagnostics,
 } from "../clients/lsp/tsserver-sync.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
-import { reconcileScanDiagnostics } from "../clients/widget-state.js";
+import { isBlocking, reconcileScanDiagnostics } from "../clients/widget-state.js";
 import { baseName, compactRenderResult } from "./render-compact.js";
 import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
 import {
@@ -126,6 +129,10 @@ type BatchOptions = {
 	// `runWorkspaceDiagnostics` (`lens_diagnostics mode=full`) reads/writes,
 	// letting a file swept by either tool benefit the other's next sweep.
 	cwd?: string;
+	// #1561: per-file blocker-retire hook, threaded so a batch/directory sweep
+	// retires the same stale verdicts a single-file check does. A sibling surface
+	// left without it would be the very defect this fixes, one call site over.
+	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void;
 };
 
 type FileDiag = {
@@ -380,6 +387,13 @@ export function createLspDiagnosticsTool(
 	// per-file check starts, so settlement order cannot make an older result look
 	// newer. Optional/undefined in tests.
 	nextWriteIndex?: () => number,
+	// #1561: #571 wired this tool's confirmed result into the widget footer and
+	// stopped there. The inline-blocker map is a SECOND agent-facing store fed by
+	// the same dispatch verdict, and nothing retired it — so pi-lens kept
+	// injecting "Unresolved from this turn" for three more turns after answering
+	// "confirmed clean" for the same file. index.ts injects
+	// `runtime.retireInlineBlockerOnConfirmedClean`. Optional/undefined in tests.
+	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void,
 ) {
 	return {
 		name: "lsp_diagnostics" as const,
@@ -594,6 +608,7 @@ export function createLspDiagnosticsTool(
 					nextWriteIndex,
 					serverScope,
 					cwd,
+					onConfirmedNoBlockers,
 				});
 			}
 
@@ -636,6 +651,7 @@ export function createLspDiagnosticsTool(
 					nextWriteIndex,
 					serverScope,
 					cwd,
+					onConfirmedNoBlockers,
 				});
 			}
 			return runFileDiagnostics(
@@ -646,6 +662,7 @@ export function createLspDiagnosticsTool(
 				nextWriteIndex,
 				serverScope,
 				cwd,
+				onConfirmedNoBlockers,
 			);
 		},
 	};
@@ -985,6 +1002,73 @@ function canTrustTouchConfirmation(
  * /skipTestFiles-filtered at write time — an empty string here is then a safe
  * no-op re-check, not a behavior gap).
  */
+/**
+ * #1561: what the reconcile actually established about this file.
+ *
+ * `confirmed: false` means the result was not trustworthy enough to write
+ * anywhere (unconfirmed, content-binding mismatch, or the reconcile threw), and
+ * `blocking` is then pinned `true` — an unknown verdict must never read as
+ * evidence of clean.
+ */
+type LspReconcileVerdict = {
+	confirmed: boolean;
+	blocking: boolean;
+};
+
+/**
+ * #1561 F1: what this check is entitled to speak for.
+ *
+ * Inline blockers are raised by the whole dispatch — eslint, biome-check,
+ * actionlint, ast-grep security rules — while this tool only ever consults
+ * language servers. Retiring one therefore needs an explicit coverage claim,
+ * and the honest claim is exactly the servers this check consulted and got an
+ * answer from. `serverScope: "primary"` consults only the primary, so its claim
+ * is `"lsp"` alone; an all-scope check adds each auxiliary server by id, which
+ * is the same vocabulary `retagAuxiliaryDiagnostics` tags their findings with.
+ *
+ * A server named in `unconfirmedServerIds` is dropped: it produced no evidence
+ * for this content, so claiming coverage for it would be the #1470/#1493 lie one
+ * layer up. (Today an aux gap also demotes the whole verdict to "unconfirmed",
+ * so the hook does not fire at all — this stays correct if that ever narrows.)
+ */
+function coveredSourcesForCheck(
+	file: string,
+	serverScope: "primary" | "all",
+	unconfirmedServerIds: readonly string[],
+): string[] {
+	const unconfirmed = new Set(unconfirmedServerIds);
+	const covered = new Set<string>();
+	let servers: Array<{ id: string; role?: string }> = [];
+	try {
+		servers = (getServersForFileWithConfig(file) ?? []) as Array<{
+			id: string;
+			role?: string;
+		}>;
+	} catch {
+		// A registry we cannot read is not a coverage claim. Returning an empty
+		// set makes every retire fail closed, which is the safe direction for a
+		// commit gate.
+		return [];
+	}
+	for (const server of servers) {
+		const auxiliary = server.role === "auxiliary";
+		if (auxiliary && serverScope === "primary") continue;
+		if (unconfirmed.has(server.id)) continue;
+		// The dispatch runner tags the primary language server's findings `lsp`;
+		// auxiliaries keep their own tool id.
+		covered.add(auxiliary ? server.id : "lsp");
+	}
+	return [...covered];
+}
+
+/** #1561: everything the retire decision needs, as one argument. */
+export type ConfirmedNoBlockersInfo = {
+	filePath: string;
+	writeIndex?: number;
+	coveredSources: string[];
+	cwd: string;
+};
+
 function reconcileWidgetFromLspResult(
 	file: string,
 	rawDiags: LSPDiagnostic[],
@@ -1006,10 +1090,10 @@ function reconcileWidgetFromLspResult(
 	// footer's `touchedAt` isn't re-armed to now() and the mtime-staleness gate
 	// stays live (the #1092 re-arming defect).
 	observedAt?: number,
-): void {
+): LspReconcileVerdict {
 	const confirmed =
 		(rawDiags.length > 0 || confirmation !== "unconfirmed") && !boundMismatch;
-	if (!confirmed) return;
+	if (!confirmed) return { confirmed: false, blocking: true };
 	try {
 		// #692: provenance label ONLY — must never affect `rule`/identity (see
 		// `ConvertLspDiagnosticsOptions.scanOrigin`'s doc comment).
@@ -1023,8 +1107,15 @@ function reconcileWidgetFromLspResult(
 			{ cwd, fileRole: detectFileRole(file, content) },
 		);
 		reconcileScanDiagnostics(file, retagged, true, writeIndex, observedAt);
+		// #1561: the blocking tally comes from the SAME `isBlocking` predicate the
+		// footer counts with — no second severity rule for the blocker-retire
+		// decision to drift away from.
+		return { confirmed: true, blocking: retagged.some(isBlocking) };
 	} catch {
 		// Never let a footer-reconciliation hiccup fail the diagnostics check.
+		// A verdict we could not compute is NOT evidence of clean: report it as
+		// still-blocking so no caller retires a blocker off a failed reconcile.
+		return { confirmed: false, blocking: true };
 	}
 }
 
@@ -1047,6 +1138,10 @@ async function collectFileDiagnosticResult(
 	// `process.cwd()` for any call site that predates this (there are none
 	// today besides the two below, both of which now pass it explicitly).
 	cwd: string = process.cwd(),
+	// #1561: see `createLspDiagnosticsTool`'s parameter doc. Called only for a
+	// FRESH observation — never on the cache-hit replay below, whose `rawDiags`
+	// are an OLD observation (#1093) and therefore no evidence about now.
+	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void,
 ): Promise<FileDiagnosticResult> {
 	// Reserve the ordering token when this diagnostic operation starts, not when
 	// its LSP promise settles. A slower old result must not receive a newer token
@@ -1158,7 +1253,7 @@ async function collectFileDiagnosticResult(
 		confirmation = "unconfirmed";
 	}
 	const filteredDiags = applySeverityFilter(effectiveRawDiags, severity);
-	reconcileWidgetFromLspResult(
+	const verdict = reconcileWidgetFromLspResult(
 		file,
 		effectiveRawDiags,
 		confirmation,
@@ -1167,6 +1262,18 @@ async function collectFileDiagnosticResult(
 		collectedContent,
 		boundMismatch,
 	);
+	if (verdict.confirmed && !verdict.blocking) {
+		onConfirmedNoBlockers?.({
+			filePath: file,
+			writeIndex,
+			coveredSources: coveredSourcesForCheck(
+				file,
+				serverScope,
+				unconfirmedServerIds,
+			),
+			cwd,
+		});
+	}
 	// #671: only a CONFIRMED outcome ("clean", or a non-empty result — either
 	// is definitionally confirmed per this function's own doctrine above) is
 	// safe to cache; "unconfirmed" (timeout OR a silent-tier server's
@@ -1203,6 +1310,9 @@ async function runFileDiagnostics(
 	nextWriteIndex?: () => number,
 	serverScope: "primary" | "all" = "all",
 	cwd: string = process.cwd(),
+	// #1561: see `createLspDiagnosticsTool`'s parameter doc. This is the path the
+	// live incident took (`mode: "file"`).
+	onConfirmedNoBlockers?: (info: ConfirmedNoBlockersInfo) => void,
 ) {
 	// Reserve the token before awaiting this file's LSP result. The direct-file
 	// path performs its own confirmation/reconciliation below (#1198).
@@ -1271,7 +1381,7 @@ async function runFileDiagnostics(
 	const truncated = total > MAX_DIAGNOSTICS;
 	const limited = truncated ? filtered.slice(0, MAX_DIAGNOSTICS) : filtered;
 	const unconfirmed = confirmation === "unconfirmed";
-	reconcileWidgetFromLspResult(
+	const verdict = reconcileWidgetFromLspResult(
 		absPath,
 		effectiveRawDiags,
 		confirmation,
@@ -1280,6 +1390,22 @@ async function runFileDiagnostics(
 		collectedContent,
 		boundMismatch,
 	);
+	// #1561: a confirmed current view with nothing at the blocking tier retires
+	// this file's stale inline blocker — the store #571 corrected the footer for
+	// but never reached, which is how a resolved cross-file finding kept being
+	// injected as "Unresolved from this turn" for the rest of the session.
+	if (verdict.confirmed && !verdict.blocking) {
+		onConfirmedNoBlockers?.({
+			filePath: absPath,
+			writeIndex,
+			coveredSources: coveredSourcesForCheck(
+				absPath,
+				serverScope,
+				unconfirmedServerIds,
+			),
+			cwd,
+		});
+	}
 
 	const primaryId = primaryServerId(absPath);
 	const primaryDiags = limited.filter((d) => d.source === primaryId);
@@ -1525,6 +1651,7 @@ async function collectBatchDiagnostics(
 				cacheCtx,
 				scopeKey,
 				resolvedCwd,
+				options.onConfirmedNoBlockers,
 			);
 			const bounded = withDeadline(work, {
 				ms: batchFileDeadlineMs(),
