@@ -16,7 +16,8 @@ export type DegradationKind =
 	| "bus-stale"
 	| "query-predicates-invalid"
 	| "install-retry-exhausted"
-	| "ast-grep-napi-unavailable";
+	| "ast-grep-napi-unavailable"
+	| "instance-registry-corrupt";
 
 export interface DegradationRecord {
 	kind: unknown;
