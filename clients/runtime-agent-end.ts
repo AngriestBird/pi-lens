@@ -129,11 +129,12 @@ export async function handleAgentEnd({
 	// session (e.g. a concurrent in-process secondary/subagent) stay queued
 	// for their owner's own agent_end, unless they've been stale long enough
 	// to fall back to "claim as orphaned" (see claimDeferredFormatFiles).
-	const { claimed, staleClaimed, deferredToOwner } =
+	const { claimed, staleClaimed, deferredToOwner, droppedOrphans } =
 		runtime.claimDeferredMutations(
 			currentSessionId,
 			Date.now(),
 			staleAfterMs,
+			ctxCwd ?? runtime.projectRoot,
 		);
 	const records = [...claimed, ...staleClaimed];
 	const requeuedKinds = new Set<"autofix" | "format">();
@@ -190,6 +191,37 @@ export async function handleAgentEnd({
 		actionableWarningsWriterEnabled &&
 		typeof cacheManager.readCache === "function" &&
 		(rootActionableAutofixEnabled || getFlagSource !== undefined);
+	if (droppedOrphans.length > 0) {
+		// #1642: a stale/foreign record whose origin (turnStateCwd) does NOT
+		// match this flush's own workspace/worktree is dropped, never
+		// formatted — claiming it would be the same worktree→parent
+		// re-attribution the reported incident hit, just via the orphan
+		// fallback instead of tool_result's path resolution.
+		dbg(
+			`agent_end deferred_format: dropped ${droppedOrphans.length} orphaned file(s) with a mismatched origin (unclaimed >${staleAfterMs}ms, never formatted): ${droppedOrphans
+				.map((r) => `${r.filePath} origin=${r.turnStateCwd}`)
+				.join(", ")}`,
+		);
+		logLatency({
+			type: "phase",
+			toolName: "agent_end",
+			filePath: ctxCwd ?? runtime.projectRoot,
+			phase: "agent_end_deferred_format_orphan_dropped",
+			durationMs: 0,
+			metadata: {
+				fileCount: droppedOrphans.length,
+				staleAfterMs,
+				currentOriginCwd: ctxCwd ?? runtime.projectRoot,
+				files: droppedOrphans.map((r) => ({
+					filePath: r.filePath,
+					originCwd: r.turnStateCwd,
+					ownerSessionId: r.ownerSessionId,
+					queuedTurnIndex: r.queuedTurnIndex,
+					ageMs: Date.now() - r.lastTouchedAt,
+				})),
+			},
+		});
+	}
 	if (records.length === 0 && !inspectActionableReport) return undefined;
 	if (deferredToOwner.length > 0) {
 		dbg(

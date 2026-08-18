@@ -18,7 +18,7 @@ import { publishFormatQueued } from "./format-events-publish.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
 import type { ReadGuard } from "./read-guard.js";
 import { getFormatService } from "./format-service.js";
-import { isExternalOrVendorFile, normalizeEphemeralMapKey } from "./path-utils.js";
+import { isExternalOrVendorFile, normalizeEphemeralMapKey, pathsEqual } from "./path-utils.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
 import { resolveLanguageRootForFile } from "./language-profile.js";
 import { logLatency } from "./latency-logger.js";
@@ -387,11 +387,60 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 
 	const rawFilePath = (event.input as { path?: string }).path;
 	const workspaceRoot = runtime.projectRoot || process.cwd();
-	const filePath = rawFilePath
-		? path.isAbsolute(rawFilePath)
-			? rawFilePath
-			: path.resolve(workspaceRoot, rawFilePath)
-		: rawFilePath;
+	const naiveResolve = (raw: string | undefined): string | undefined =>
+		raw
+			? path.isAbsolute(raw)
+				? raw
+				: path.resolve(workspaceRoot, raw)
+			: raw;
+
+	// #1642: correlate by tool-call identity instead of re-deriving a path
+	// from this event's own (possibly relative, possibly worktree-collapsing)
+	// metadata. A gitignored worktree edit got re-attributed onto a
+	// same-relative-path file in the parent checkout precisely because this
+	// used to always fall through to `naiveResolve` below, which knows
+	// nothing about the call's own cwd/worktree.
+	const toolCallId = event.toolCallId;
+	const attribution =
+		toolCallId !== undefined
+			? runtime.takeToolCallAttribution(String(toolCallId))
+			: undefined;
+
+	let filePath: string | undefined;
+	if (attribution) {
+		if (attribution.skipped) {
+			// tool_call already decided this target — a gitignored file, most
+			// often — must not be processed. Refuse outright, and if this
+			// event's own naive resolution would have landed on a DIFFERENT
+			// path (the collapse), log it legibly: that divergence is exactly
+			// what let the wrong file get queued for formatting.
+			const divergent = naiveResolve(rawFilePath);
+			if (
+				divergent &&
+				attribution.resolvedPath &&
+				!pathsEqual(divergent, attribution.resolvedPath)
+			) {
+				const message = `path_attribution_refused: call target ${attribution.resolvedPath} (originCwd=${attribution.originCwd}) vs tool_result resolved ${divergent}`;
+				dbg(message);
+				logLatency({
+					type: "phase",
+					toolName: event.toolName,
+					filePath: attribution.resolvedPath,
+					phase: "path_attribution_refused",
+					durationMs: 0,
+					metadata: {
+						callTarget: attribution.resolvedPath,
+						resolvedPath: divergent,
+						originCwd: attribution.originCwd,
+					},
+				});
+			}
+			return;
+		}
+		filePath = attribution.resolvedPath;
+	} else {
+		filePath = naiveResolve(rawFilePath);
+	}
 	const behaviorWarnings = agentBehaviorRecord(event.toolName, filePath);
 	const syntheticWriteContent: Array<{ type: string; text?: string }> = [];
 	let syntheticAttachmentBytes = 0;

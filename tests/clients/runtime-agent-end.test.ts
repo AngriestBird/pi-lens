@@ -1568,6 +1568,71 @@ describe("runtime-agent-end deferred formatting", () => {
 				env.cleanup();
 			}
 		});
+
+		it("staleness fallback: an orphan whose origin does not match the claiming context is dropped, never formatted (#1642)", async () => {
+			const env = setupTestEnvironment(
+				"pi-lens-agent-end-ownership-origin-mismatch-",
+			);
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			try {
+				// #1642 shape: a record queued from a WORKTREE (a different origin
+				// cwd than the parent checkout now running agent_end) must never be
+				// claimed by the stale-orphan fallback just because its owning
+				// session died and it aged out. Session identity alone isn't
+				// enough — the origin (turnStateCwd) must also match.
+				const worktreeRoot = path.join(env.tmpDir, "worktree");
+				const parentFile = createTempFile(env.tmpDir, "src/app.ts", "const x=1");
+				fs.mkdirSync(worktreeRoot, { recursive: true });
+
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.deferFormat(
+					parentFile,
+					worktreeRoot,
+					"edit",
+					worktreeRoot, // turnStateCwd: this record's ORIGIN is the worktree
+					"session-dead-worktree",
+				);
+
+				const formatFile = vi.fn(async (fp: string) => {
+					fs.writeFileSync(fp, "const x = 1;\n");
+					return {
+						filePath: fp,
+						formatters: [{ name: "biome", success: true, changed: true }],
+						anyChanged: true,
+						allSucceeded: true,
+					};
+				});
+				const dbg = vi.fn();
+
+				const summary = await handleAgentEnd({
+					ctxCwd: env.tmpDir, // the PARENT checkout is claiming
+					getFlag: (name) => name === "no-lsp",
+					notify: vi.fn(),
+					dbg,
+					runtime,
+					cacheManager: { addModifiedRange: vi.fn() } as any,
+					getFormatService: () =>
+						({ recordRead: () => {}, formatFile }) as any,
+					currentSessionId: "session-new-parent",
+					// Negative threshold: any elapsed time at all counts as stale.
+					staleAfterMs: -1,
+				});
+
+				expect(formatFile).not.toHaveBeenCalled();
+				expect(summary?.changed ?? []).toEqual([]);
+				expect(runtime.pendingDeferredFormatCount).toBe(0);
+				expect(dbg).toHaveBeenCalledWith(expect.stringContaining("orphan"));
+			} finally {
+				if (previousDataDir === undefined) {
+					delete process.env.PILENS_DATA_DIR;
+				} else {
+					process.env.PILENS_DATA_DIR = previousDataDir;
+				}
+				env.cleanup();
+			}
+		});
 	});
 
 	describe("#484 turn-summary collection gate", () => {

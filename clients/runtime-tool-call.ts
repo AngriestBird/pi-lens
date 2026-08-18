@@ -223,6 +223,14 @@ function getNewContentFromToolCall(event: unknown): string | undefined {
 
 interface ToolCallEvent {
 	toolName?: string;
+	/**
+	 * Host-assigned identity for this call, shared with the paired
+	 * `tool_result` event (SDK's `ToolCallEventBase.toolCallId`). Carried
+	 * through so the canonical resolved path can be correlated by identity
+	 * instead of the paired tool_result re-deriving it from its own metadata
+	 * (#1642).
+	 */
+	toolCallId?: string;
 	input?: unknown;
 	details?: unknown;
 	provider?: string;
@@ -370,8 +378,26 @@ export async function handleToolCall(
 	dbg(
 		`tool_call fired for: ${filePath} (exists: ${nodeFs.existsSync(filePath)})`,
 	);
-	if (!nodeFs.existsSync(filePath)) return;
-	if (isPathIgnoredByProject(filePath, runtime.projectRoot, false)) {
+	const toolCallId = (event as { toolCallId?: string }).toolCallId;
+	const attributesMutationTarget =
+		!!toolCallId && (toolName === "write" || toolName === "edit");
+	const targetMissing = !nodeFs.existsSync(filePath);
+	const targetIgnored =
+		!targetMissing && isPathIgnoredByProject(filePath, runtime.projectRoot, false);
+	if (attributesMutationTarget) {
+		// #1642: record the canonical target BY TOOL-CALL IDENTITY — including
+		// (especially) when it is being skipped here. The paired tool_result
+		// must take this exact verdict rather than re-deriving its own path
+		// from relative diff metadata, which is how a gitignored worktree
+		// edit got re-attributed onto a same-relative-path parent file.
+		runtime.recordToolCallAttribution(toolCallId as string, {
+			resolvedPath: filePath,
+			skipped: targetMissing || targetIgnored,
+			originCwd: ctx.cwd ?? runtime.projectRoot,
+		});
+	}
+	if (targetMissing) return;
+	if (targetIgnored) {
 		dbg(`tool_call: skipping gitignored file ${filePath}`);
 		return;
 	}

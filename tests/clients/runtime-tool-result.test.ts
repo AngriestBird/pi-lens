@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CacheManager } from "../../clients/cache-manager.js";
 import { readChangesSince } from "../../clients/project-changes.js";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
+import { handleToolCall } from "../../clients/runtime-tool-call.js";
 import { handleToolResult } from "../../clients/runtime-tool-result.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
@@ -1354,6 +1355,107 @@ describe("#484 turn-summary collection gate", () => {
 				},
 			});
 		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("path attribution across tool_call/tool_result (#1642)", () => {
+	beforeEach(async () => {
+		const pipeline = await import("../../clients/pipeline.js");
+		vi.mocked(pipeline.runPipeline).mockReset();
+		vi.mocked(pipeline.runPipeline).mockResolvedValue({
+			output: "",
+			hasBlockers: false,
+			isError: false,
+			fileModified: false,
+		});
+		logLatency.mockClear();
+	});
+
+	it("refuses a tool_result whose re-derived path would collapse a skipped worktree edit onto the parent checkout", async () => {
+		const env = setupTestEnvironment("pi-lens-worktree-attribution-");
+		const previousDataDir = process.env.PILENS_DATA_DIR;
+		process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+		try {
+			// Reproduce the #1642 report: a gitignored worktree (`.worktrees/`)
+			// holds its own `src/app.ts`, same relative path as the parent
+			// checkout's live `src/app.ts`. tool_call correctly resolves and
+			// SKIPS the worktree file (gitignored). The paired tool_result only
+			// carries the relative path from diff metadata — re-deriving it
+			// against the project root, instead of the call's own canonical
+			// target, must never collapse it onto the parent file.
+			const parentRoot = env.tmpDir;
+			fs.writeFileSync(path.join(parentRoot, ".gitignore"), ".worktrees/\n");
+			const parentFile = createTempFile(
+				parentRoot,
+				"src/app.ts",
+				"parent original\n",
+			);
+			const worktreeDir = path.join(parentRoot, ".worktrees", "wt1");
+			createTempFile(worktreeDir, "src/app.ts", "worktree edited\n");
+
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = parentRoot;
+
+			const dbg = vi.fn();
+			const toolCallId = "call-1642";
+
+			await handleToolCall({
+				event: {
+					toolCallId,
+					toolName: "edit",
+					input: { path: "src/app.ts" },
+				},
+				ctx: { cwd: worktreeDir },
+				lensEnabled: true,
+				getFlag: (name: string) => name === "no-lsp",
+				dbg,
+				runtime,
+				cacheManager: new CacheManager(false),
+				ensureLSPConfigInitialized: async () => {},
+				updateLspStatus: () => {},
+				resetLSPService: () => {},
+			} as any);
+
+			await handleToolResult({
+				event: {
+					toolCallId,
+					toolName: "edit",
+					input: { path: "src/app.ts" },
+					details: { diff: "+1 worktree edited" },
+					content: [{ type: "text", text: "base" }],
+				},
+				getFlag: () => false,
+				dbg,
+				runtime,
+				cacheManager: new CacheManager(false),
+				biomeClient: {},
+				ruffClient: {},
+				metricsClient: {},
+				resetLSPService: () => {},
+				agentBehaviorRecord: () => [],
+				formatBehaviorWarnings: () => "",
+			} as any);
+
+			// The paired tool_result must NOT create deferred-format work for the
+			// PARENT file — that is exactly what dirtied the live checkout in the
+			// reported incident (the staleness fallback later formats whatever
+			// got queued here).
+			expect(runtime.pendingDeferredFormatCount).toBe(0);
+			expect(fs.readFileSync(parentFile, "utf-8")).toBe("parent original\n");
+			expect(dbg).toHaveBeenCalledWith(
+				expect.stringContaining("path_attribution_refused"),
+			);
+			expect(logLatency).toHaveBeenCalledWith(
+				expect.objectContaining({ phase: "path_attribution_refused" }),
+			);
+		} finally {
+			if (previousDataDir === undefined) {
+				delete process.env.PILENS_DATA_DIR;
+			} else {
+				process.env.PILENS_DATA_DIR = previousDataDir;
+			}
 			env.cleanup();
 		}
 	});
