@@ -21,6 +21,10 @@ export interface LspFixture {
 	clean?: boolean;
 	lombokJar?: boolean;
 	expectNoMessageMatch?: string;
+	/** A diagnostic message that MUST arrive. The lane's default verdict passes
+	 * on zero diagnostics, which is backwards for a fixture whose purpose is to
+	 * prove a defect is seen; setting this makes zero diagnostics a FAILURE. */
+	expectMessageMatch?: string;
 	disableServers?: string[];
 	expectServerId?: string;
 	expectSourceMatch?: string;
@@ -55,6 +59,21 @@ export interface AutofixFixture {
 	tool: string;
 	tools?: string[];
 }
+/** One LSP diagnostic, as far as the harness's verdicts are concerned. */
+export interface SmokeDiagnostic {
+	message?: string;
+	source?: string;
+	severity?: number;
+}
+/**
+ * Diagnostics whose `message` matches `pattern` (case-insensitive). Exported so
+ * an `expectMessageMatch` fixture's pass/fail decision is testable without a
+ * live language server.
+ */
+export function matchDiagnosticMessages(
+	pattern: string,
+	diags: readonly SmokeDiagnostic[] | undefined,
+): SmokeDiagnostic[];
 export const FIXTURES: SmokeFixture[];
 export const LSP_FIXTURES: LspFixture[];
 export const FORMAT_FIXTURES: FormatFixture[];
