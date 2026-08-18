@@ -1,4 +1,5 @@
-// Mis-formatted CUE — `cue fmt -w` should collapse the extra blank line
+// Mis-formatted CUE — `cue fmt` should collapse the extra blank lines and
+// align the field values.
 a: int = 1
 
 

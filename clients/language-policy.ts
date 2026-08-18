@@ -222,11 +222,7 @@ const PRIMARY_DISPATCH_GROUPS: Partial<Record<FileKind, RunnerGroup>> = {
 	},
 	ocaml: { mode: "fallback", runnerIds: ["lsp"], filterKinds: ["ocaml"] },
 	clojure: { mode: "fallback", runnerIds: ["lsp"], filterKinds: ["clojure"] },
-  cue: {
-    mode: "fallback",
-    runnerIds: ["lsp"],
-    filterKinds: ["cue"]
-  },
+	cue: { mode: "fallback", runnerIds: ["lsp"], filterKinds: ["cue"] },
 	terraform: {
 		mode: "all",
 		runnerIds: ["lsp", "tflint", "trivy-config"],

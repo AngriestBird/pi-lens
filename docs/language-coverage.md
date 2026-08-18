@@ -47,4 +47,10 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | Nix                   | ✓   | lsp                                                                                                            | nixfmt                  |
 | TOML                  | ✓   | lsp, taplo                                                                                                     | taplo                   |
 | CMake                 | ✓ (cmake-language-server) | lsp                                                                                      | cmake-format            |
-| CUE                   | ✓ (CUE Language Server)   | lsp                                                                                      | `cue fmt`               |
+| CUE                   | syntax only (cue lsp)     | lsp                                                                                      | cue fmt                 |
+
+CUE is "syntax only" because `cue lsp` reports load and parse errors as you type
+but leaves conflicting values and failed constraints to `cue vet`. You get
+syntax and parse diagnostics, hover, definition, completion, code actions, and
+formatting; you do not get validation. `.cue` files still parse under
+tree-sitter, so structural analysis (symbols, imports) works.

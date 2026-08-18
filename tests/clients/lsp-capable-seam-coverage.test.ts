@@ -42,6 +42,9 @@ const PINNED_LSP_LANGUAGE_IDS = [
 	"cpp",
 	"csharp",
 	"css",
+	// cuelsp keys diagnostics off the file URI, but "cue" is the id the CUE
+	// wiki and every editor client use, and it matches the registry id (#1520).
+	"cue",
 	"dart",
 	"dockerfile",
 	"elixir",

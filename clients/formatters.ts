@@ -1301,7 +1301,11 @@ export const cmakeFormatFormatter: FormatterInfo = {
 
 export const cueFormatter: FormatterInfo = {
 	name: "cue",
-	command: ["cue", "fmt", "-w", "$FILE"],
+	// `cue fmt <file>` rewrites in place already. There is no `-w`: the only
+	// flags are --check, -d/--diff and --files, so `cue fmt -w` aborts with
+	// "unknown shorthand flag: 'w'" on every .cue write (verified on cue
+	// v0.17.1).
+	command: ["cue", "fmt", "$FILE"],
 	extensions: [".cue"],
 	async detect(_cwd: string) {
 		return (await which("cue")) !== null;

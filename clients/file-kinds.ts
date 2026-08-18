@@ -70,10 +70,8 @@ export const KIND_EXTENSIONS: Record<FileKind, readonly string[]> = {
 		".less",
 		".sass",
 		".scss",
-  ],
-  cue: [
-    ".cue"
-  ],
+	],
+	cue: [".cue"],
 	// From llvm-project/clang/lib/Driver/Types.cpp clang::driver::types::lookupTypeForExtension:
 	cxx: [
 		// C
