@@ -73,6 +73,7 @@ import { logLatency } from "../clients/latency-logger.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import { retagAuxiliaryDiagnostics } from "../clients/dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../clients/file-role.js";
+import { STALE_LINE_MARKER } from "../clients/runtime-turn.js";
 import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
 
 // The widget state exposes the full per-file diagnostic set; this is the tool's
@@ -1917,7 +1918,7 @@ function formatAllMode(
 						? "🔴 "
 						: ""
 					: "";
-			const staleTag = d.stale ? " [stale — re-run to confirm]" : "";
+			const staleTag = d.stale ? ` ${STALE_LINE_MARKER}` : "";
 			const label = d.rule ?? d.tool;
 			const tag = label ? ` [${label}]` : "";
 			const flaggedTag = d.flagged ? " 📌 flagged-to-fix" : "";
