@@ -379,7 +379,7 @@ describe("rust-clippy runner: a stalled probe does not disable the runner (#1494
 		});
 
 		const runner = (
-			await import("../../../../clients/dispatch/runners/rust-clippy.ts")
+			await import("../../../../clients/dispatch/runners/rust-clippy.js")
 		).default;
 		expect((await runner.run({ cwd, filePath } as never)).status).toBe("skipped");
 		expect(tryLazyInstall).toHaveBeenCalledWith("rust-clippy", cwd);
@@ -409,7 +409,7 @@ describe("rust-clippy runner: a stalled probe does not disable the runner (#1494
 		getLazyInstallAttempt.mockReturnValue(undefined);
 
 		const runner = (
-			await import("../../../../clients/dispatch/runners/rust-clippy.ts")
+			await import("../../../../clients/dispatch/runners/rust-clippy.js")
 		).default;
 		await runner.run({ cwd, filePath } as never);
 

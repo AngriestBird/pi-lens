@@ -62,18 +62,22 @@ describe("test imports bind the compiled module instance (#1565)", () => {
 		// The scan is regex-driven, so prove it on a synthetic sample rather than
 		// trusting an empty result: an empty result must distinguish clean from
 		// broken. A fixture-string import (a quoted snippet a test feeds to a
-		// parser) must NOT count; the four real binding forms must.
+		// parser) must NOT count; every real binding form must — including
+		// `vi.unmock`, whose registry key has to match the `vi.mock` spelling or
+		// it lifts nothing (a #1565 rebase sweep found one).
 		const suffix = ".t" + "s";
 		const sample = [
 			`import { a } from "../../clients/thing${suffix}";`,
 			`const b = await import("../../clients/other${suffix}");`,
 			`vi.mock("../../clients/mocked${suffix}", () => ({}));`,
+			`vi.unmock("../../clients/unmocked${suffix}");`,
 			`\tconst src = 'import { c } from "../../clients/fixture${suffix}";\\n';`,
 		].join("\n");
 		expect(importSpecifiers(sample).sort()).toEqual([
 			`../../clients/mocked${suffix}`,
 			`../../clients/other${suffix}`,
 			`../../clients/thing${suffix}`,
+			`../../clients/unmocked${suffix}`,
 		]);
 	});
 

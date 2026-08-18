@@ -68,10 +68,14 @@ export function isBuildCompiled(target: string, excluded: string[]): boolean {
 }
 
 /**
- * Every relative specifier a file pulls in, across the four forms that can bind
- * a module instance: static `import`/`export … from`, bare side-effect
- * `import "…"`, dynamic `import("…")`, and `vi.mock`/`vi.doMock` (whose factory
- * replaces the instance the graph resolves).
+ * Every relative specifier a file pulls in, across the forms that can bind a
+ * module instance: static `import`/`export … from`, bare side-effect
+ * `import "…"`, dynamic `import("…")`, and the `vi` mock registry
+ * (`mock`/`doMock`, whose factory replaces the instance the graph resolves, and
+ * `unmock`/`doUnmock`, which restore it). The unmock forms matter for the same
+ * reason as the rest and for one of their own: vitest keys the registry by
+ * resolved module, so an `unmock("x.ts")` against a `mock("x.js")` lifts
+ * nothing at all and fails silently.
  *
  * Static forms are anchored to the start of a line so that a quoted import
  * statement inside a test FIXTURE string (test bodies build source snippets to
@@ -82,7 +86,7 @@ export function importSpecifiers(source: string): string[] {
 		/^[ \t]*(?:import|export)\b[^;'"]*?from\s*["']([^"']+)["']/gm,
 		/^[ \t]*import\s*["']([^"']+)["']/gm,
 		/\bimport\(\s*["']([^"']+)["']/g,
-		/\bvi\.(?:mock|doMock)\(\s*["']([^"']+)["']/g,
+		/\bvi\.(?:mock|doMock|unmock|doUnmock)\(\s*["']([^"']+)["']/g,
 	];
 	const found: string[] = [];
 	for (const pattern of patterns) {
