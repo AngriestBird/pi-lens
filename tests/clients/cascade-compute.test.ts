@@ -1038,6 +1038,166 @@ describe("computeCascadeForFile", () => {
 		}
 	}, 30_000);
 
+	// #1462: the budget is derived from `Date.now() - <cascade entry>`, and
+	// `computeImpactCascade` runs between those two samples — advancing a stubbed
+	// clock inside it charges a synthetic prelude (graph build + reverse-deps
+	// refresh) against the settle window without sleeping in the test.
+	function chargePrelude(
+		preludeMs: number,
+		value: ImpactCascadeResult,
+	): { restore: () => void } {
+		let clock = 1_700_000_000_000;
+		const spy = vi.spyOn(Date, "now").mockImplementation(() => clock);
+		mocks.computeImpactCascade.mockImplementation(() => {
+			clock += preludeMs;
+			return value;
+		});
+		return { restore: () => spy.mockRestore() };
+	}
+
+	function budgetFixture(tmpDir: string, neighborCount: number) {
+		const primary = path.join(tmpDir, "hub.py");
+		fs.writeFileSync(primary, "class Hub: pass\n");
+		const neighbors: string[] = [];
+		for (let i = 0; i < neighborCount; i++) {
+			const neighborPath = path.join(tmpDir, `dep${i}.py`);
+			fs.writeFileSync(neighborPath, `from hub import Hub  # dep ${i}\n`);
+			neighbors.push(neighborPath);
+		}
+		const touchFile = vi.fn().mockResolvedValue({ diags: [] });
+		mocks.getLSPService.mockReturnValue({
+			getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+			touchFile,
+			getDiagnostics: vi.fn(),
+		});
+		return { primary, neighbors, touchFile };
+	}
+
+	function cascadeResultMetadata(): Record<string, unknown> {
+		const call = mocks.logCascade.mock.calls.find(
+			(c) => (c[0] as { phase?: string }).phase === "cascade_result",
+		);
+		expect(call).toBeDefined();
+		return (call![0] as { metadata: Record<string, unknown> }).metadata;
+	}
+
+	it("#1462: a cascade that already spent most of the settle window walks fewer neighbours instead of overrunning it", async () => {
+		const env = setupTestEnvironment("cascade-budget-pressured-");
+		const fixture = budgetFixture(env.tmpDir, 41);
+		// 4000 ms of the 5000 ms window gone before the walk is even sized —
+		// the shape of the measured logger.ts run (2046 ms reverse-deps refresh
+		// ahead of a 38-neighbour walk that then blew the cap).
+		const clock = chargePrelude(4000, impact(fixture.primary, fixture.neighbors));
+		try {
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			await computeCascadeForFile(fixture.primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			// 1000 ms left / 100 ms per neighbour = 10, not the flat 40.
+			expect(fixture.touchFile).toHaveBeenCalledTimes(10);
+			expect(cascadeResultMetadata()).toMatchObject({
+				neighborBudget: 10,
+				neighborBudgetCeiling: 40,
+				budgetRemainingMs: 1000,
+				budgetTruncated: 31,
+			});
+		} finally {
+			clock.restore();
+			env.cleanup();
+		}
+	}, 30_000);
+
+	it("#1462: a fully spent settle window narrows the walk to the floor, never to zero", async () => {
+		const env = setupTestEnvironment("cascade-budget-starved-");
+		const fixture = budgetFixture(env.tmpDir, 41);
+		const clock = chargePrelude(9000, impact(fixture.primary, fixture.neighbors));
+		try {
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			await computeCascadeForFile(fixture.primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			// The inversion guard: remaining is -4000 ms, so an unclamped
+			// derivation would walk nothing at all and report a false clean leaf.
+			expect(fixture.touchFile).toHaveBeenCalledTimes(5);
+			expect(cascadeResultMetadata()).toMatchObject({
+				neighborBudget: 5,
+				neighborBudgetCeiling: 40,
+				budgetRemainingMs: -4000,
+				budgetTruncated: 36,
+			});
+		} finally {
+			clock.restore();
+			env.cleanup();
+		}
+	}, 30_000);
+
+	it("#1462: the common fast cascade keeps the full flat budget", async () => {
+		const env = setupTestEnvironment("cascade-budget-ample-");
+		const fixture = budgetFixture(env.tmpDir, 41);
+		// Same stubbed clock as the pressured cases, zero prelude — so a failure
+		// here means the derivation narrowed the walk, not that the stub did.
+		const clock = chargePrelude(0, impact(fixture.primary, fixture.neighbors));
+		try {
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			await computeCascadeForFile(fixture.primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			expect(fixture.touchFile).toHaveBeenCalledTimes(40);
+			expect(cascadeResultMetadata()).toMatchObject({
+				neighborBudget: 40,
+				neighborBudgetCeiling: 40,
+				budgetRemainingMs: 5000,
+				budgetTruncated: 1,
+			});
+		} finally {
+			clock.restore();
+			env.cleanup();
+		}
+	}, 30_000);
+
+	it("#1462: the budget follows PI_LENS_CASCADE_SETTLE_WAIT_MS, not a second hardcoded window", async () => {
+		const env = setupTestEnvironment("cascade-budget-settle-env-");
+		const previous = process.env.PI_LENS_CASCADE_SETTLE_WAIT_MS;
+		process.env.PI_LENS_CASCADE_SETTLE_WAIT_MS = "1200";
+		const fixture = budgetFixture(env.tmpDir, 41);
+		const clock = chargePrelude(0, impact(fixture.primary, fixture.neighbors));
+		try {
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			await computeCascadeForFile(fixture.primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			expect(fixture.touchFile).toHaveBeenCalledTimes(12);
+			expect(cascadeResultMetadata()).toMatchObject({
+				neighborBudget: 12,
+				budgetRemainingMs: 1200,
+			});
+		} finally {
+			clock.restore();
+			if (previous === undefined) {
+				delete process.env.PI_LENS_CASCADE_SETTLE_WAIT_MS;
+			} else {
+				process.env.PI_LENS_CASCADE_SETTLE_WAIT_MS = previous;
+			}
+			env.cleanup();
+		}
+	}, 30_000);
+
 	it("does not touch jsts neighbor when snapshot is valid (warm session)", async () => {
 		const env = setupTestEnvironment("cascade-warm-snapshot-");
 		try {

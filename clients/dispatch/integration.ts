@@ -45,6 +45,10 @@ export { clearLatencyReports, formatLatencyReport, getLatencyReports };
 import * as nodeFs from "node:fs";
 import * as nodePath from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	CASCADE_NEIGHBOUR_BUDGET,
+	deriveCascadeNeighbourBudget,
+} from "../cascade-budget.js";
 import { formatCascadeNeighborDiagnostics } from "../cascade-format.js";
 import { logCascade } from "../cascade-logger.js";
 import type {
@@ -730,11 +734,9 @@ const CASCADE_TRANSITIVE_DEPTH = Math.max(
 	1,
 	Number.parseInt(process.env.PI_LENS_CASCADE_TRANSITIVE_DEPTH ?? "2", 10) || 2,
 );
-const CASCADE_NEIGHBOUR_BUDGET = Math.max(
-	MAX_FILES,
-	Number.parseInt(process.env.PI_LENS_CASCADE_NEIGHBOUR_BUDGET ?? "40", 10) ||
-		40,
-);
+// #1462: the cap itself, and the derivation that narrows it when this run has
+// already spent the settle window, live in clients/cascade-budget.ts alongside
+// `cascadeSettleWaitMs` — the two knobs only make sense read together.
 // Exported (not just module-local) so the MCP warm-analyze seam
 // (clients/mcp/analyze.ts, #536) can gate its own buildOrUpdateGraph call on
 // the SAME file-kind eligibility this cascade path uses — one source of truth
@@ -884,6 +886,11 @@ export async function computeCascadeForFile(
 ): Promise<CascadeRun> {
 	const reverseDepsTimersToRelease = new Set<string>();
 	const reverseDepsEntriesAtStart = new Set(reverseDepsIndexCache.values());
+	// #1462: this run's own age, charged against the settle window when the
+	// neighbour walk is sized below. Sampled at entry so the graph build and the
+	// reverse-deps refresh — the 2046 ms prelude that pushed the measured
+	// 38-neighbour cascade past the 5 s cap — are inside it.
+	const cascadeStart = Date.now();
 	try {
 	const {
 		hasBlockers = false,
@@ -973,6 +980,12 @@ export async function computeCascadeForFile(
 	// never actionable regardless of budget, so counting them as "truncated"
 	// would overstate what a larger budget could actually recover.
 	let cascadeBudgetTruncated = 0;
+	// #1462: the budget actually in force for THIS run and the settle time left
+	// when it was sized. Both are overwritten inside the graph branch below,
+	// which is the only path that reaches `cascade_result` — the other branch
+	// returns a `non_code` skip before any of this is logged.
+	let cascadeNeighbourBudget = CASCADE_NEIGHBOUR_BUDGET;
+	let cascadeBudgetRemainingMs = 0;
 
 	if (CASCADE_GRAPH_KINDS.has(fileKind)) {
 		const graphStart = Date.now();
@@ -1286,6 +1299,21 @@ export async function computeCascadeForFile(
 			}
 		}
 
+		// #1462: size the rest of this run against the settle time it has NOT
+		// already spent. Derived HERE — after the graph build, the reverse-deps
+		// refresh and the LSP-reference expansion, which is where the measured
+		// overruns were bought — and used for both the transitive BFS cap and the
+		// final slice, so a run that arrives late expands less as well as walking
+		// less. Never below the floor: pressure narrows the walk, it never
+		// starves it.
+		{
+			const decision = deriveCascadeNeighbourBudget({
+				elapsedMs: Date.now() - cascadeStart,
+			});
+			cascadeNeighbourBudget = decision.budget;
+			cascadeBudgetRemainingMs = decision.remainingMs;
+		}
+
 		// Bounded transitive expansion: add depth>1 dependents (indirect
 		// importers/callers/referencers) so the blast radius isn't limited to one
 		// hop. The one-hop sets above remain the floor (they sort first); these
@@ -1293,7 +1321,7 @@ export async function computeCascadeForFile(
 		if (CASCADE_TRANSITIVE_DEPTH > 1) {
 			const transitive = computeTransitiveImpact(graph, normalizedFile, {
 				maxDepth: CASCADE_TRANSITIVE_DEPTH,
-				maxHits: CASCADE_NEIGHBOUR_BUDGET,
+				maxHits: cascadeNeighbourBudget,
 			});
 			const added = [
 				...new Set(
@@ -1373,9 +1401,9 @@ export async function computeCascadeForFile(
 			});
 		cascadeBudgetTruncated = Math.max(
 			0,
-			eligibleNeighbors.length - CASCADE_NEIGHBOUR_BUDGET,
+			eligibleNeighbors.length - cascadeNeighbourBudget,
 		);
-		sortedNeighbors = eligibleNeighbors.slice(0, CASCADE_NEIGHBOUR_BUDGET);
+		sortedNeighbors = eligibleNeighbors.slice(0, cascadeNeighbourBudget);
 	} else {
 		logCascade({
 			phase: "cascade_skip",
@@ -2032,8 +2060,15 @@ export async function computeCascadeForFile(
 			coldTouches,
 			// #1446 item 4: the budget in force and how many eligible candidates
 			// it cut off this run — the correctness half (a truncated run being
-			// silently discarded) is #1443; this is observability only.
-			neighborBudget: CASCADE_NEIGHBOUR_BUDGET,
+			// silently discarded) is #1443.
+			// #1462: `neighborBudget` is now the DERIVED budget (still "the one in
+			// force"); `neighborBudgetCeiling` is the flat cap it was narrowed
+			// from, and `budgetRemainingMs` is the settle time that decided it. A
+			// row where budget < ceiling is a run that shortened its own walk to
+			// fit the window instead of overrunning it and delivering nothing.
+			neighborBudget: cascadeNeighbourBudget,
+			neighborBudgetCeiling: CASCADE_NEIGHBOUR_BUDGET,
+			budgetRemainingMs: cascadeBudgetRemainingMs,
 			budgetTruncated: cascadeBudgetTruncated,
 			neighbors: visibleNeighbors.slice(0, 10).map((n) => ({
 				file: n.filePath.replace(/\\/g, "/").split("/").slice(-2).join("/"),
