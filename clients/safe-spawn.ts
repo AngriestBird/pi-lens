@@ -1362,6 +1362,20 @@ export async function safeSpawnAsync(
 			abortSignal?.removeEventListener("abort", onAbort);
 			if (child.pid) lifetimeState.pids.delete(child.pid);
 			await killPromise;
+			// #1651: Node's own docs leave 'error' vs 'close' ordering unspecified
+			// for a child that never started (e.g. ENOENT) — "the 'exit' event may
+			// or may not fire after an error has occurred". The `spawnErrored`
+			// check above only catches 'close' firing AFTER 'error'; when 'close'
+			// wins the race instead, `error`'s listener still runs (synchronously,
+			// via the same process.nextTick batch) before the `await` just above
+			// yields back here, so re-checking the flag now catches that ordering
+			// too. Without this, a spawn that never launched resolved as a clean
+			// `status: null` "success" — a genuinely-missing tool misread as an
+			// answered probe (the lifecycle-smoke lane's phase 5: Windows'
+			// pre-spawn command resolution fails closed before real `spawn()` ever
+			// runs, so it never hit this race; Linux always goes through the raw
+			// event path and could win it either way).
+			if (spawnErrored) return;
 			// #1109: the child has exited — if killTree armed the non-Windows
 			// SIGTERM→SIGKILL escalation timer and it hasn't fired yet, clear it
 			// so it doesn't linger as a ref'd handle after this promise resolves.
