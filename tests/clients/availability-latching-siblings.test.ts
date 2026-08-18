@@ -16,6 +16,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	HOST_STALL_COOLDOWN_MS,
+	INSTALL_TRANSIENT_BASE_COOLDOWN_MS,
 	TRANSIENT_BASE_COOLDOWN_MS,
 } from "../../clients/dispatch/runners/utils/availability-policy.ts";
 
@@ -322,9 +323,13 @@ describe("govulncheck availability (#1476)", () => {
 
 		expect(await client.ensureAvailable()).toBe(false);
 
-		// Pre-fix, the 60 s network budget expiring once disabled govulncheck for
-		// the life of the process.
-		advancePastCooldown();
+		// Pre-#1476, the 60 s network budget expiring once disabled govulncheck
+		// for the life of the process. Post-#1497 the retry waits on the
+		// install-class schedule (the retried operation is a ≤60s compile, not
+		// a cheap probe), so advance past THAT cooldown.
+		vi.setSystemTime(
+			new Date(Date.now() + INSTALL_TRANSIENT_BASE_COOLDOWN_MS + 1),
+		);
 		route({ govulncheck: [okResult("govulncheck v1.1.3")] });
 		expect(await client.ensureAvailable()).toBe(true);
 	});

@@ -7,6 +7,7 @@ import {
 	evaluateGitGuard,
 	isGitCommitOrPushAttempt,
 	mergeGitGuardTestFailure,
+	retireInlineBlockerAndResyncGuard,
 	syncGitGuardRecord,
 	writeGitGuardRecord,
 	type TurnEndFindingsCache,
@@ -314,6 +315,115 @@ describe("git-guard", () => {
 			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
 
 			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({ block: false });
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("#1561 F2: retiring the last blocker unblocks the commit with no manual gate call", () => {
+		// The round-1 probe. `evaluateGitGuard` short-circuits on the
+		// `gitGuardHasBlockers` LATCH before it reads the persisted record, and
+		// the retire touched neither — so a "retired" blocker still blocked the
+		// commit and was quoted back as the reason. Nothing below calls
+		// `updateGitGuardStatus`/`syncGitGuardRecord` by hand after the retire;
+		// that is the whole point.
+		const env = setupTestEnvironment("pi-lens-git-guard-retire-");
+		try {
+			const file = path.join(env.tmpDir, "cleaned.ts");
+			fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-A" });
+			const cache = new CacheManager(false);
+			runtime.recordInlineBlockers(file, "blocker", 1, ["lsp"]);
+			runtime.updateGitGuardStatus(true, "blocker");
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
+
+			expect(
+				retireInlineBlockerAndResyncGuard({
+					runtime,
+					cacheManager: cache,
+					cwd: env.tmpDir,
+					filePath: file,
+					writeIndex: 2,
+					coveredSources: ["lsp"],
+					lensGuardEnabled: true,
+				}),
+			).toBe(true);
+
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir)).toEqual({
+				block: false,
+			});
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("#1561 F2: retiring ONE blocker still leaves a sibling file's blocker gating", () => {
+		// The latch recompute must not become a blanket "clear the gate".
+		const env = setupTestEnvironment("pi-lens-git-guard-retire-sibling-");
+		try {
+			const files = ["a.ts", "b.ts"].map((name) => path.join(env.tmpDir, name));
+			for (const file of files) fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-A" });
+			const cache = new CacheManager(false);
+			runtime.recordInlineBlockers(files[0], "blocker A", 1, ["lsp"]);
+			runtime.recordInlineBlockers(files[1], "blocker B", 1, ["lsp"]);
+			runtime.updateGitGuardStatus(true, "blockers");
+			syncGitGuardRecord(runtime, cache, env.tmpDir, files[0]);
+
+			expect(
+				retireInlineBlockerAndResyncGuard({
+					runtime,
+					cacheManager: cache,
+					cwd: env.tmpDir,
+					filePath: files[0],
+					writeIndex: 2,
+					coveredSources: ["lsp"],
+					lensGuardEnabled: true,
+				}),
+			).toBe(true);
+
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("#1561 F1: an ast-grep-origin blocker keeps gating after an LSP-only clean", () => {
+		// The security case: a `cors-wildcard` / `no-commented-credentials`
+		// finding must not become committable because a language server said the
+		// file was fine.
+		const env = setupTestEnvironment("pi-lens-git-guard-retire-source-");
+		try {
+			const file = path.join(env.tmpDir, "app.ts");
+			fs.writeFileSync(file, "const x = 1;\n");
+			const runtime = new RuntimeCoordinator();
+			runtime.projectRoot = env.tmpDir;
+			runtime.setTelemetryIdentity({ sessionId: "session-A" });
+			const cache = new CacheManager(false);
+			runtime.recordInlineBlockers(file, "🔴 STOP cors-wildcard", 1, [
+				"ast-grep",
+			]);
+			runtime.updateGitGuardStatus(true, "blocker");
+			syncGitGuardRecord(runtime, cache, env.tmpDir, file);
+
+			expect(
+				retireInlineBlockerAndResyncGuard({
+					runtime,
+					cacheManager: cache,
+					cwd: env.tmpDir,
+					filePath: file,
+					writeIndex: 2,
+					coveredSources: ["lsp"],
+					lensGuardEnabled: true,
+				}),
+			).toBe(false);
+
+			expect(evaluateGitGuard(runtime, cache, env.tmpDir).block).toBe(true);
 		} finally {
 			env.cleanup();
 		}

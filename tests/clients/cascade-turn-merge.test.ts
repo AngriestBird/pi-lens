@@ -1039,3 +1039,186 @@ describe("cascade turn-end merge", () => {
 		}
 	});
 });
+
+// #1550: the `cascade_indeterminate` record stamped `filePath: files[0] ?? cwd`
+// — the turn's FIRST EDITED file — while the indeterminate runs it summarises
+// are `cascadeRuns` entries carrying their own `run.filePath`, a disjoint set
+// (a run can be carried across turns, #1443, and an edited file can skip the
+// graph entirely). Every forensic read of the log therefore blamed the wrong
+// file. Two signatures from the dogfood window (2026-08-09 → 08-17, 135 lines):
+//
+//   13:20:48.511 cascade_skip          docs/tools.md  unsupported_graph_kind (markdown)
+//   13:20:48.518 cascade_indeterminate docs/tools.md  reasons:["missing_node"]
+//
+// A markdown file returns early with `skipReason: "non_code"` and never calls
+// computeImpactCascade, so it cannot be the missing_node file — the real one was
+// the previous turn's carried `probe-cap.tmp.mjs` run. And:
+//
+//   13:13:01.546 cascade_indeterminate providers/tokenrouter/tokenrouter.ts reasons:["excluded_by_role"]
+//
+// `excluded_by_role` is only ever produced for a test-role file, which that
+// source path is not. The label, not the verdict, was wrong — which is also why
+// the issue read as "concentrated on test files": the first edited file of a
+// turn is usually a test.
+describe("cascade_indeterminate attribution (#1550)", () => {
+	it("names the indeterminate run's own file, not the turn's first edited file", async () => {
+		const env = setupTestEnvironment("cascade-indeterminate-attribution-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			// The edited file this turn is markdown — it never reaches the graph.
+			const editedDoc = path.join(env.tmpDir, "notes.md");
+			fs.writeFileSync(editedDoc, "# notes\n");
+			cacheManager.addModifiedRange(
+				editedDoc,
+				{ start: 1, end: 1 },
+				false,
+				env.tmpDir,
+			);
+			// The indeterminate run belongs to an entirely different file.
+			const orphan = path.join(env.tmpDir, "orphan.mjs");
+			fs.writeFileSync(orphan, "export const orphan = 1;\n");
+			runtime.appendCascadeRun({
+				filePath: orphan,
+				result: undefined,
+				neighborCount: 0,
+				diagnosticCount: 0,
+				skipReason: "indeterminate",
+				indeterminate: { reason: "missing_node" },
+			});
+
+			logCascadeMock.mockClear();
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				deadCodeClients: [],
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			const entry = logCascadeMock.mock.calls
+				.map((args) => args[0])
+				.find((e) => e?.phase === "cascade_indeterminate");
+			expect(entry).toBeDefined();
+			// HEADLINE (red pre-fix): the record blamed the edited markdown file.
+			expect(entry?.filePath).toContain("orphan.mjs");
+			expect(entry?.filePath).not.toContain("notes.md");
+			// Each reason is attributed to the file that produced it, so a
+			// multi-file turn is diagnosable from the one line.
+			expect(entry?.metadata?.byFile).toEqual([
+				expect.objectContaining({ file: "orphan.mjs", reason: "missing_node" }),
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	// Class sweep: `cascade_test_targets`, `cascade_injected` and
+	// `cascade_turn_end` shared the same `files[0] ?? cwd` label over the same
+	// run-derived data. They claim no per-file cause, so one turn-level label is
+	// enough — but on a read-only drain turn it degenerated to a bare DIRECTORY.
+	it("labels the turn-level cascade records with the merged run's file on a read-only turn", async () => {
+		const env = setupTestEnvironment("cascade-turn-end-label-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			const primary = path.join(env.tmpDir, "carried-result.ts");
+			const neighbor = path.join(env.tmpDir, "neighbor.ts");
+			fs.writeFileSync(primary, "export const carried = 1;\n");
+			fs.writeFileSync(neighbor, "export const neighbor = 1;\n");
+			// No addModifiedRange — a read-only turn draining a carried run.
+			const result = cascade(primary, neighbor, "boom");
+			runtime.appendCascadeRun({
+				filePath: primary,
+				result,
+				neighborCount: 1,
+				diagnosticCount: 1,
+			});
+
+			logCascadeMock.mockClear();
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				deadCodeClients: [],
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			const turnEndEntry = logCascadeMock.mock.calls
+				.map((args) => args[0])
+				.find((e) => e?.phase === "cascade_turn_end");
+			expect(turnEndEntry).toBeDefined();
+			// RED pre-fix: `files` is empty, so this was the workspace directory.
+			expect(turnEndEntry?.filePath).toContain("carried-result.ts");
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("attributes a carried run on a read-only turn instead of falling back to cwd", async () => {
+		const env = setupTestEnvironment("cascade-indeterminate-readonly-");
+		try {
+			const runtime = new RuntimeCoordinator();
+			const cacheManager = new CacheManager(false);
+			// No edited files this turn — `files` is empty, and the pre-fix
+			// `files[0] ?? cwd` fallback stamped a bare DIRECTORY as the filePath.
+			const orphan = path.join(env.tmpDir, "carried.ts");
+			fs.writeFileSync(orphan, "export const carried = 1;\n");
+			runtime.appendCascadeRun({
+				filePath: orphan,
+				result: undefined,
+				neighborCount: 0,
+				diagnosticCount: 0,
+				skipReason: "indeterminate",
+				indeterminate: { reason: "missing_node" },
+			});
+
+			logCascadeMock.mockClear();
+			await handleTurnEnd({
+				ctxCwd: env.tmpDir,
+				getFlag: () => false,
+				dbg: () => {},
+				runtime,
+				cacheManager,
+				knipClient: {
+					ensureAvailable: async () => false,
+					analyze: async () => EMPTY_KNIP_RESULT,
+				},
+				deadCodeClients: [],
+				depChecker: { ensureAvailable: async () => false },
+				testRunnerClient: { getTestRunTarget: () => null },
+				resetLSPService: () => {},
+				resetFormatService: () => {},
+			} as any);
+
+			const entry = logCascadeMock.mock.calls
+				.map((args) => args[0])
+				.find((e) => e?.phase === "cascade_indeterminate");
+			expect(entry).toBeDefined();
+			expect(entry?.filePath).toContain("carried.ts");
+			expect(entry?.metadata?.byFile).toEqual([
+				expect.objectContaining({ file: "carried.ts", reason: "missing_node" }),
+			]);
+		} finally {
+			env.cleanup();
+		}
+	});
+});

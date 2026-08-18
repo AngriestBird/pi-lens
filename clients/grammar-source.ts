@@ -10,9 +10,12 @@
  *    mirror — guarded against drift by `tests/clients/grammar-source.test.ts`.
  */
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { writeFileAtomic } from "./atomic-write.js";
+import { recordDegradationOnce } from "./degradation-ledger.js";
+import { getPackageRoot } from "./package-root.js";
 
 /** tree-sitter-wasms release the grammars are pulled from. */
 export const TREE_SITTER_WASMS_VERSION = "0.1.13";
@@ -171,15 +174,216 @@ export interface GrammarDownloadResult {
 	 * retryable (#1536 review F4). Always `true` when `ok` is `true`.
 	 */
 	retryable: boolean;
+	/**
+	 * Failure-shape detail for the log line and the degradation ledger, when
+	 * the generic "the download failed" is not diagnosable enough. Set for the
+	 * #1548 non-wasm-body case ("got HTML, expected wasm") so a captive portal
+	 * is distinguishable from an offline laptop in the record. Sentence-shaped
+	 * and terminated, because callers splice it into a user-facing message.
+	 */
+	reason?: string;
+}
+
+/**
+ * The four-byte WebAssembly module preamble, `\0asm` — the first bytes of
+ * every valid `.wasm` file. Single source of truth for the #1548 validation:
+ * both the download path (validate before writing) and the on-disk path
+ * (`fileHasWasmMagic`, for a file poisoned before this shipped) key off it.
+ */
+export const WASM_MAGIC: readonly number[] = [0x00, 0x61, 0x73, 0x6d];
+
+/** Do `bytes` start with the wasm magic number? */
+export function hasWasmMagic(bytes: Uint8Array): boolean {
+	if (bytes.length < WASM_MAGIC.length) return false;
+	return WASM_MAGIC.every((byte, i) => bytes[i] === byte);
+}
+
+/**
+ * Does the file at `filePath` start with the wasm magic number? `false` if it
+ * doesn't, is shorter than four bytes, or cannot be read at all — every one of
+ * those means "do not hand this path to `Language.load`".
+ *
+ * Reads four bytes, so it is cheap enough to run on a resolve path; callers
+ * that resolve repeatedly should still memoize the positive answer.
+ */
+export function fileHasWasmMagic(filePath: string): boolean {
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(filePath, "r");
+		const head = Buffer.alloc(WASM_MAGIC.length);
+		const read = fs.readSync(fd, head, 0, head.length, 0);
+		return read === head.length && hasWasmMagic(head);
+	} catch {
+		return false;
+	} finally {
+		if (fd !== undefined) {
+			try {
+				fs.closeSync(fd);
+			} catch {
+				/* nothing useful to do */
+			}
+		}
+	}
+}
+
+const HTML_PREFIXES = ["<!doctype html", "<html", "<head", "<?xml"];
+
+/**
+ * A short, log-safe sentence naming what arrived instead of a wasm module
+ * (#1548). Never echoes the body — only its shape, byte count and the first
+ * four bytes in hex — so a proxy's login page cannot smuggle content into a
+ * user-facing notification.
+ */
+export function describeNonWasmBody(bytes: Uint8Array): string {
+	if (bytes.length === 0) {
+		return "The download returned an empty body (0 bytes) instead of a wasm module.";
+	}
+	const head = Buffer.from(
+		bytes.subarray(0, Math.min(16, bytes.length)),
+	).toString("latin1");
+	const lead = head.trimStart().toLowerCase();
+	const shape = HTML_PREFIXES.some((prefix) => lead.startsWith(prefix))
+		? "an HTML page (a captive portal or proxy intercepted the request)"
+		: "non-wasm data";
+	const magic = Buffer.from(bytes.subarray(0, WASM_MAGIC.length))
+		.toString("hex")
+		.replace(/../g, "$& ")
+		.trim();
+	// Kept short on purpose: this is spliced into a user notification and into
+	// the degradation ledger, whose fields truncate at 200 characters.
+	return (
+		`The download returned ${shape} — ` +
+		`${bytes.length} bytes starting ${magic}, not a wasm module.`
+	);
+}
+
+/** Provenance for a single grammar in `scripts/grammars.lock.json`. */
+export interface GrammarManifest {
+	package: string;
+	version: string;
+	/** filename → "sha256:<hex>" */
+	grammars: Record<string, string>;
+	overrides?: Record<string, GrammarSourceOverride>;
+}
+
+/**
+ * Override applied for tests only (`_setGrammarManifestForTests`): `undefined`
+ * means "no override — use the real cached/loaded manifest", so `null` is a
+ * distinct, deliberate value (simulates a missing/corrupt lock file).
+ */
+let manifestOverride: GrammarManifest | null | undefined;
+let cachedManifest: GrammarManifest | null | undefined;
+
+/**
+ * `scripts/grammars.lock.json`'s absolute path, resolved from the installed
+ * PACKAGE ROOT rather than a fixed relative offset from this module (#1564).
+ * `import.meta.url` collapses to the bundle's own file once `dist/index.js`
+ * is esbuild-bundled (every merged module reports the bundle's URL, not its
+ * own), so a `join(dirname(fileURLToPath(import.meta.url)), "../scripts/...")`
+ * offset — correct in the unbundled repo/`npm run build` layout — resolves to
+ * the wrong directory once bundled. `getPackageRoot` instead walks up from
+ * wherever this module actually loaded from until it finds `package.json`,
+ * which lands on the package root under both layouts; `scripts/grammars.lock.json`
+ * is committed and shipped there (see `files` in package.json), so both the
+ * repo checkout and an installed npm package resolve it correctly.
+ */
+function grammarManifestPath(): string {
+	return path.join(getPackageRoot(import.meta.url), "scripts", "grammars.lock.json");
+}
+
+/**
+ * The manifest, without the missing-manifest degradation report — split out
+ * so `loadGrammarManifest` can report on every `null` return (cached misses
+ * included), while this half stays a pure cache lookup.
+ */
+function resolveGrammarManifest(): GrammarManifest | null {
+	if (manifestOverride !== undefined) return manifestOverride;
+	if (cachedManifest !== undefined) return cachedManifest;
+	try {
+		const raw = fs.readFileSync(grammarManifestPath(), "utf-8");
+		cachedManifest = JSON.parse(raw) as GrammarManifest;
+	} catch {
+		cachedManifest = null;
+	}
+	return cachedManifest;
+}
+
+/**
+ * Load + cache `scripts/grammars.lock.json`. Returns `null` (never throws) if
+ * the file is missing or malformed — an installed package predating this fix,
+ * or a corrupted lock file, degrades to the Content-Length check
+ * (`downloadGrammarDetailed`) instead of blocking every runtime grammar
+ * fetch. That fallback is silent to the CALLER by design (it's not a fetch
+ * failure), so it would otherwise never reach the record a bug report shows —
+ * report once per session that the STRONGEST check (sha256) is being skipped
+ * repo-wide, so a downgrade to the weaker Content-Length-only path is on the
+ * record rather than invisible.
+ */
+function loadGrammarManifest(): GrammarManifest | null {
+	const manifest = resolveGrammarManifest();
+	if (manifest === null) {
+		recordDegradationOnce({
+			kind: "grammar-blocked",
+			subject: "grammars.lock.json",
+			reason:
+				"the pinned sha256 manifest is unavailable — runtime grammar downloads " +
+				"fall back to the weaker Content-Length check (or no integrity check at " +
+				"all for a source with neither).",
+		});
+	}
+	return manifest;
+}
+
+/** Test-only manifest injection — see `manifestOverride` above. */
+export function _setGrammarManifestForTests(
+	manifest: GrammarManifest | null | undefined,
+): void {
+	manifestOverride = manifest;
+}
+
+/** `sha256:<hex>` digest of `data`, matching the manifest's format. */
+function sha256Hex(data: Buffer): string {
+	return `sha256:${createHash("sha256").update(data).digest("hex")}`;
+}
+
+/**
+ * First 12 hex characters of a `sha256:<hex>` digest, for log/ledger/
+ * notification strings. Printing the full 64-hex digest on BOTH sides of a
+ * mismatch overran the degradation ledger's 200-character field cap (the
+ * truncation `describeNonWasmBody` above already designs around) and left
+ * the user notification — 579 characters, almost entirely hex — clipping the
+ * more diagnostic PINNED hash mid-string before a reader ever saw it. 12 hex
+ * characters (48 bits) is more than enough to tell "genuinely the wrong
+ * file" from a coincidence in a log line; it is not a security boundary.
+ */
+function shortHash(hash: string): string {
+	const hex = hash.startsWith("sha256:") ? hash.slice("sha256:".length) : hash;
+	return `sha256:${hex.slice(0, 12)}…`;
 }
 
 /**
  * Fetch one grammar wasm into `destDir`, staged and renamed via
  * `atomic-write.ts` so a reader never sees a half-written wasm. Never
  * throws — a failed fetch (offline, 4xx) degrades to "grammar unavailable"
- * so callers can decide how to handle it. A grammar that crashes the runtime
+ * so callers can decide how to handle it.
+ *
+ * #1548: the response BODY is validated against the wasm magic number before
+ * anything is written, so a 200-with-HTML from a captive portal is a failed
+ * (retryable) download rather than a poisoned file on disk. A grammar that
+ * crashes the runtime
  * is protected at LOAD time (BLOCKED_GRAMMARS / grammarBlockReason), not by
  * refusing to download it.
+ *
+ * #1564: the magic-number check alone lets a TRUNCATED-but-genuine wasm body
+ * through — a connection dropped mid-transfer still starts with `\0asm`. Two
+ * further checks close that: (1) when the pinned manifest
+ * (`scripts/grammars.lock.json`, already trusted by the postinstall path) has
+ * a sha256 for this grammar, the full body must match it; (2) when the
+ * response reports `Content-Length`, the received byte count must match it —
+ * cheaper, and the only check available when no pinned hash exists (an
+ * override not yet in the manifest, or a future grammar added before
+ * `--write-manifest` is re-run). Both are retryable failures, same shape as a
+ * captive portal: the CDN answered, but the bytes are not trustworthy.
  *
  * #1217: the staging name used to be hand-rolled `.${filename}.${pid}.tmp` —
  * per-process, so two concurrent fetches of one grammar shared a staging inode
@@ -197,12 +401,62 @@ export async function downloadGrammarDetailed(
 		if (!res.ok) {
 			// 404/410: the CDN has authoritatively answered "this wasm does not
 			// exist at this URL" — a retry hits the same answer. Every other
-			// non-ok status (429, 5xx, a captive-portal 200-shaped error page
-			// this branch never reaches since res.ok gates it) is retryable.
+			// non-ok status (429, 5xx) is retryable. A captive portal answers
+			// 200, so it never reaches here; the magic-number check below is
+			// what catches it (#1548).
 			const retryable = res.status !== 404 && res.status !== 410;
 			return { ok: false, retryable };
 		}
 		const data = Buffer.from(await res.arrayBuffer());
+		// #1548: `res.ok` says the transport succeeded, NOT that the body is a
+		// grammar. A captive portal (airport wifi, corporate proxy) answers 200
+		// with its own login page; writing that to disk as tree-sitter-<lang>.wasm
+		// poisons the path permanently, because every later resolve finds the
+		// (garbage) file and reports the grammar as available while
+		// `Language.load` fails on every parse. Validate the wasm preamble BEFORE
+		// writing, and classify a non-wasm body as a retryable failure — the same
+		// shape as an offline fetch, so it flows through #1536's cooldown ladder.
+		if (!hasWasmMagic(data)) {
+			return { ok: false, retryable: true, reason: describeNonWasmBody(data) };
+		}
+		// #1564 cheap check: a body shorter (or longer) than the server's own
+		// declared Content-Length is a truncated/corrupted transfer, regardless
+		// of whether a pinned hash exists for this grammar.
+		const declaredLength = res.headers.get("content-length");
+		if (declaredLength !== null) {
+			const expectedBytes = Number.parseInt(declaredLength, 10);
+			if (Number.isFinite(expectedBytes) && expectedBytes !== data.length) {
+				return {
+					ok: false,
+					retryable: true,
+					reason:
+						`The download reported Content-Length: ${expectedBytes} but only ` +
+						`${data.length} bytes arrived — a truncated transfer.`,
+				};
+			}
+		}
+		// #1564 primary check: verify the full body against the pinned sha256,
+		// closing the gap Content-Length can't (a proxy that sets a matching
+		// Content-Length on a truncated body, or a chunked response with none at
+		// all). `manifest.grammars[filename]` is keyed by filename regardless of
+		// override — an overridden grammar's hash was generated against the
+		// override's own URL (`scripts/download-grammars.ts --write-manifest`
+		// fetches via the same `SOURCE_OVERRIDES` map), so no extra alignment is
+		// needed here. No entry (manifest missing, or a grammar added before the
+		// manifest was regenerated) falls back to the Content-Length check above.
+		const expectedHash = loadGrammarManifest()?.grammars[filename];
+		if (expectedHash) {
+			const actualHash = sha256Hex(data);
+			if (actualHash !== expectedHash) {
+				return {
+					ok: false,
+					retryable: true,
+					reason:
+						`The download's sha256 (${shortHash(actualHash)}) does not match the ` +
+						`pinned manifest (${shortHash(expectedHash)}) — a corrupt or truncated transfer.`,
+				};
+			}
+		}
 		// bestEffort: false — a swallowed write failure would return true for a
 		// grammar that never landed.
 		writeFileAtomic(path.join(destDir, filename), data, { bestEffort: false });

@@ -279,6 +279,14 @@ describe("Dispatch Integration", () => {
 			expect(runners).toContain("lsp");
 		});
 
+		// #1545: fish is lspCapable but was absent from the lsp runner's
+		// appliesTo, so every registry-consulting surface reported fish as having
+		// no LSP coverage. appliesTo is now derived from LANGUAGE_POLICY.
+		it("returns the lsp runner for fish files", async () => {
+			const runners = await getAvailableRunners("/p/a.fish");
+			expect(runners[0]).toBe("lsp");
+		});
+
 		it("returns empty array for unsupported files", async () => {
 			const runners = await getAvailableRunners("data.csv");
 			expect(runners).toEqual([]);

@@ -260,6 +260,208 @@ const EVASIONS: ReadonlyArray<{ name: string; source: string }> = [
 		`,
 	},
 	{
+		// #1552. `isBooleanVerdictShape` was a BLACKLIST: inherit routing unless
+		// the unit's own memo "looks boolean". A string-union verdict never spells
+		// "boolean" and never spells a factory name either — it is neither a
+		// latch nor a handle, and the blacklist waved it through anyway.
+		name: "a string-union verdict that is neither boolean nor a policy handle",
+		source: `
+			import { createCwdCachedProbe } from "./dispatch/runners/utils/runner-helpers.js";
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			function makeToolProbe(cmd: string) {
+				return createCwdCachedProbe(
+					(cwd) => safeSpawnAsync(cmd, ["--version"], { timeout: 5000, cwd }),
+					{ tool: "newtool" },
+				);
+			}
+			const toolAvailableByCwd = new Map<string, "yes" | "no">();
+			export function getToolProbe(cmd: string) {
+				return async (cwd: string) => {
+					const hit = toolAvailableByCwd.get(cwd);
+					if (hit !== undefined) return hit === "yes";
+					const probed = await makeToolProbe(cmd)(cwd);
+					toolAvailableByCwd.set(cwd, probed ? "yes" : "no");
+					return probed;
+				};
+			}
+		`,
+	},
+	{
+		// #1552. The same laundering shape as the `Promise<boolean>` probe above,
+		// but the boolean is reached through a type alias. A blacklist that
+		// text-matches `\bboolean\b` on the memo's own type never sees it — the
+		// alias's own declaration is the only place the word appears — so it
+		// misclassifies the memo as "not boolean" and inherits routing it never
+		// earned. The whitelist does not need to catch this spelling: an alias
+		// name is not a factory name either, so it is refused by default.
+		name: "a hand-rolled boolean latch reached through a type alias",
+		source: `
+			import { createCwdCachedProbe } from "./dispatch/runners/utils/runner-helpers.js";
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			type ToolVerdict = boolean;
+			function makeToolProbe(cmd: string) {
+				return createCwdCachedProbe(
+					(cwd) => safeSpawnAsync(cmd, ["--version"], { timeout: 5000, cwd }),
+					{ tool: "newtool" },
+				);
+			}
+			const toolAvailableByCwd = new Map<string, ToolVerdict>();
+			export function getToolProbe(cmd: string) {
+				return (cwd: string) => {
+					const hit = toolAvailableByCwd.get(cwd);
+					if (hit !== undefined) return Promise.resolve(hit);
+					const probed = makeToolProbe(cmd)(cwd);
+					probed.then((verdict) => toolAvailableByCwd.set(cwd, verdict));
+					return probed;
+				};
+			}
+		`,
+	},
+	{
+		// #1552 round 2. The whitelist's own shape check read `writtenValue` — the
+		// WRITE's inlined expression — alongside the declaration's own type/value,
+		// so inlining the routed wrapper's call straight into the `.set(...)`
+		// site let its name leak into a plain `Map<string, boolean>` latch's
+		// shape and pass it off as a handle, even though the DECLARATION never
+		// mentions a factory or a wrapper at all.
+		name: "a hand-rolled boolean latch whose write inlines the routed wrapper's call",
+		source: `
+			import { createCwdCachedProbe } from "./dispatch/runners/utils/runner-helpers.js";
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			function makeToolProbe(cmd: string) {
+				return createCwdCachedProbe(
+					(cwd) => safeSpawnAsync(cmd, ["--version"], { timeout: 5000, cwd }),
+					{ tool: "newtool" },
+				);
+			}
+			const toolAvailableByCwd = new Map<string, boolean>();
+			export async function getToolProbe(cmd: string, cwd: string): Promise<boolean> {
+				const hit = toolAvailableByCwd.get(cwd);
+				if (hit !== undefined) return hit;
+				toolAvailableByCwd.set(cwd, await makeToolProbe(cmd)(cwd));
+				return toolAvailableByCwd.get(cwd) ?? false;
+			}
+		`,
+	},
+	{
+		// #1552 round 2. `findMemo`'s `sessionFact` early return fired before the
+		// `policyHandleOnly` branch, so ANY unit that records a session fact read
+		// as holding a policy handle regardless of shape — `setSessionFact`
+		// records a value, it never calls a `POLICY_FACTORY`, so this must never
+		// grant inheritance on its own.
+		name: "a session-fact latch that delegates its spawn to a routed helper",
+		source: `
+			import { createCwdCachedProbe } from "./dispatch/runners/utils/runner-helpers.js";
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			function makeToolProbe(cmd: string) {
+				return createCwdCachedProbe(
+					(cwd) => safeSpawnAsync(cmd, ["--version"], { timeout: 5000, cwd }),
+					{ tool: "newtool" },
+				);
+			}
+			export async function checkToolAvailability(cmd: string, cwd: string): Promise<boolean> {
+				const probed = await makeToolProbe(cmd)(cwd);
+				setSessionFact("toolAvailable", probed);
+				return probed;
+			}
+		`,
+	},
+	{
+		// #1552's own second probe: a genuine boolean reached through
+		// `ReturnType<typeof asVerdict>` rather than a plain type alias — a
+		// distinct indirection shape from the alias probe above. The whitelist
+		// does not need to catch this spelling either: `asVerdict` is not a
+		// factory and never appears in `policyHandles`, so it is refused by
+		// default the same way the alias is.
+		name: "a hand-rolled boolean latch reached through ReturnType<typeof asVerdict>",
+		source: `
+			import { createCwdCachedProbe } from "./dispatch/runners/utils/runner-helpers.js";
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			function makeToolProbe(cmd: string) {
+				return createCwdCachedProbe(
+					(cwd) => safeSpawnAsync(cmd, ["--version"], { timeout: 5000, cwd }),
+					{ tool: "newtool" },
+				);
+			}
+			function asVerdict(v: boolean): boolean {
+				return v;
+			}
+			const toolAvailableByCwd = new Map<string, ReturnType<typeof asVerdict>>();
+			export function getToolProbe(cmd: string) {
+				return (cwd: string) => {
+					const hit = toolAvailableByCwd.get(cwd);
+					if (hit !== undefined) return Promise.resolve(hit);
+					const probed = makeToolProbe(cmd)(cwd);
+					probed.then((verdict) => toolAvailableByCwd.set(cwd, verdict));
+					return probed;
+				};
+			}
+		`,
+	},
+	{
+		// #1566 (NE1). The whitelist's handle-name check was a bare `\bname\b`
+		// substring test over the memo's declared type, so a type that merely
+		// MENTIONS the wrapper's name still passed even after unwrapping it all
+		// the way down to a plain boolean. `ReturnType<ReturnType<typeof
+		// makeToolProbe>>` takes the wrapper's own return type apart twice, and
+		// `Awaited<...>` strips the outer promise, landing on the same bare
+		// `boolean` the blacklist used to catch by word alone — the handle's
+		// name is present in the text, but the memo does not hold the handle.
+		name: "a boolean latch typed by unwrapping the wrapper's own return type",
+		source: `
+			import { createCwdCachedProbe } from "./dispatch/runners/utils/runner-helpers.js";
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			function makeToolProbe(cmd: string) {
+				return createCwdCachedProbe(
+					(cwd) => safeSpawnAsync(cmd, ["--version"], { timeout: 5000, cwd }),
+					{ tool: "newtool" },
+				);
+			}
+			const toolAvailableByCwd = new Map<
+				string,
+				Awaited<ReturnType<ReturnType<typeof makeToolProbe>>>
+			>();
+			export async function getToolProbe(cmd: string, cwd: string): Promise<boolean> {
+				const hit = toolAvailableByCwd.get(cwd);
+				if (hit !== undefined) return hit;
+				const verdict = await makeToolProbe(cmd)(cwd);
+				toolAvailableByCwd.set(cwd, verdict);
+				return verdict;
+			}
+		`,
+	},
+	{
+		// #1566 (NE2). Same laundering as NE1, from the other direction: the
+		// handle's name shows up only as a bare CALL ARGUMENT to an unrelated
+		// helper, never as the memo's own type. `emptyCache<boolean>` is what
+		// actually shapes the memo — a boolean map — and `makeToolProbe` is
+		// merely handed to it, the way a probe factory might be handed to a
+		// scheduler. Master's blacklist caught this one by luck (the word
+		// "boolean" in the call's own type argument); the whitelist has no
+		// such luck to fall back on and must refuse on shape, not on which
+		// names appear in the text.
+		name: "a boolean cache from a helper that merely takes the wrapper as an argument",
+		source: `
+			import { createCwdCachedProbe } from "./dispatch/runners/utils/runner-helpers.js";
+			import { safeSpawnAsync } from "./safe-spawn.js";
+			import { emptyCache } from "./cache-utils.js";
+			function makeToolProbe(cmd: string) {
+				return createCwdCachedProbe(
+					(cwd) => safeSpawnAsync(cmd, ["--version"], { timeout: 5000, cwd }),
+					{ tool: "newtool" },
+				);
+			}
+			const cache = emptyCache<boolean>(makeToolProbe);
+			export async function getToolProbe(cmd: string, cwd: string): Promise<boolean> {
+				const hit = cache.get(cwd);
+				if (hit !== undefined) return hit;
+				const verdict = await makeToolProbe(cmd)(cwd);
+				cache.set(cwd, verdict);
+				return verdict;
+			}
+		`,
+	},
+	{
 		name: "the defect shape plus a comment that names availability-policy.js",
 		source: `
 			import { safeSpawnAsync } from "./safe-spawn.js";
