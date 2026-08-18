@@ -74,9 +74,15 @@ import { formatRunDurationMs } from "./run-duration.js";
 import type { TestResult, TestRunnerClient } from "./test-runner-client.js";
 import {
 	MAX_ADVISORY_AFFECTED_FILES,
-	dropFindingsForMissingPaths,
+	gateFindingsByPathFreshness,
 	snapshotAdvisoryProvenance,
 } from "./advisory-provenance.js";
+
+/**
+ * #1622 / #1419 precedent: what a demoted finding shows where its cached line
+ * number used to be. The finding survives, the untrustworthy coordinate does not.
+ */
+const STALE_LINE_MARKER = "[stale — re-run to confirm]";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
 
 interface TurnEndDeps {
@@ -1011,21 +1017,35 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		cwd,
 	);
 	if (govCacheEntry?.data?.findings?.length) {
-		const findings = govCacheEntry.data.findings.slice(0, 5);
+		// #1622: govulncheck renders a call site as `file:line`, and the cache is
+		// a session_start snapshot — the same stale-line shape as gitleaks, one
+		// tier lower. A CVE stays real after an edit, so nothing here drops; the
+		// gate only decides whether the cited LINE is still worth printing.
+		const govGate = gateFindingsByPathFreshness({
+			store: "govulncheck",
+			findings: govCacheEntry.data.findings,
+			cwd,
+			scannedAt: govCacheEntry.data.scannedAt,
+			citedPath: (finding) => finding.trace.find((t) => t.filename)?.filename,
+		});
+		const govStale = new Set(govGate.stale);
+		const govFindings = [...govGate.live, ...govGate.stale];
+		const findings = govFindings.slice(0, 5);
 		let report =
 			"🛡️ Go CVEs reachable from this code (govulncheck) — upgrade where possible:\n";
 		for (const f of findings) {
 			const callSite = f.trace.find((t) => t.filename);
+			const stale = govStale.has(f);
 			const where = callSite?.filename
-				? `${toRunnerDisplayPath(cwd, callSite.filename)}${callSite.line ? `:${callSite.line}` : ""}`
+				? `${toRunnerDisplayPath(cwd, callSite.filename)}${!stale && callSite.line ? `:${callSite.line}` : ""}${stale ? ` ${STALE_LINE_MARKER}` : ""}`
 				: (f.module ?? f.packageName ?? "(module)");
 			const fix = f.fixedVersion
 				? ` — upgrade to ${f.fixedVersion} or later`
 				: " — no fix yet, track upstream";
 			report += `  ${f.osv} (${where})${fix}\n`;
 		}
-		if (govCacheEntry.data.findings.length > findings.length) {
-			report += `  … and ${govCacheEntry.data.findings.length - findings.length} more\n`;
+		if (govFindings.length > findings.length) {
+			report += `  … and ${govFindings.length - findings.length} more\n`;
 		}
 		advisoryParts.push(report);
 	}
@@ -1041,6 +1061,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		"gitleaks",
 		cwd,
 	)?.data;
+	const trivySecretsData = trivyCacheEntry?.data;
 	// #1461 slice 1 (#1460): the gitleaks cache is TTL-only, so a finding for a
 	// file deleted after the scan is still served as a 🔴 blocker for the rest
 	// of the 30-minute window — the live case, and 119 of 126 findings in
@@ -1048,20 +1069,43 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// store (session_start's read only decides whether to re-scan; the
 	// project-diagnostics path re-scans fresh and reconciles at load), so the
 	// drop belongs here, before the findings enter the shared secret pipeline.
-	// gitleaks only in this slice — trivy secrets are slice 1's sibling store.
-	const gitleaksFindings = dropFindingsForMissingPaths({
+	// #1622 extends that gate from existence to freshness, and adds trivy
+	// secrets — the sibling store with the identical shape. A cited file edited
+	// after the scan keeps its finding but loses its line number: the credential
+	// may still be there, just not where the snapshot says. Dropping instead
+	// would let any edit — malicious or accidental — mute a real secret.
+	const gitleaksGate = gateFindingsByPathFreshness({
 		store: "gitleaks",
 		findings: gitleaksData?.findings ?? [],
 		cwd,
+		scannedAt: gitleaksData?.scannedAt,
+		citedPath: (finding) => finding.file,
+	});
+	const trivySecretsGate = gateFindingsByPathFreshness({
+		store: "trivy-secrets",
+		findings: trivySecretsData?.secrets ?? [],
+		cwd,
+		scannedAt: trivySecretsData?.scannedAt,
 		citedPath: (finding) => finding.file,
 	});
 	const astSecretWarnings = runtime
 		.peekActionableWarnings()
 		.filter(isSecretWarning);
 	const sessionSecrets = dedupeSecretFindings([
-		...fromGitleaks(gitleaksFindings),
-		...fromTrivySecrets(trivyCacheEntry?.data?.secrets ?? []),
+		...fromGitleaks(gitleaksGate.live),
+		...fromTrivySecrets(trivySecretsGate.live),
 	]);
+	// Demoted secrets are addressed by FILE, never by line — the line is the one
+	// field the edit invalidated. Collapse to unique display paths so a file with
+	// twenty stale hits is named once.
+	const staleSecretPaths = [
+		...new Set(
+			[
+				...gitleaksGate.stale.map((f) => f.file),
+				...trivySecretsGate.stale.map((f) => f.file),
+			].map((file) => toRunnerDisplayPath(cwd, file)),
+		),
+	];
 	// Locations already surfaced as session-scan secret blockers — used to enrich
 	// provenance where ast-grep agrees and to suppress the duplicate ast-grep copy
 	// from the actionable-warnings advisory below.
@@ -1088,6 +1132,15 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			report += `  … and ${enriched.length - shown.length} more\n`;
 		}
 		blockerParts.push(report);
+	}
+	if (staleSecretPaths.length) {
+		const shown = staleSecretPaths.slice(0, 5);
+		let report = `🔑 Possible secrets in files edited since the last scan ${STALE_LINE_MARKER} — re-scan before you trust the all-clear:\n`;
+		for (const file of shown) report += `  ${file}\n`;
+		if (staleSecretPaths.length > shown.length) {
+			report += `  … and ${staleSecretPaths.length - shown.length} more\n`;
+		}
+		advisoryParts.push(report);
 	}
 
 	// trivy — surface session_start-cached dependency CVEs (#131, Phase 1).

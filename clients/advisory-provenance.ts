@@ -249,15 +249,58 @@ export const MAX_FINDING_PATH_STATS = MAX_ADVISORY_AFFECTED_FILES;
 /** How many dead paths a single drop record names before it stops. */
 const MAX_LOGGED_DEAD_PATHS = 3;
 
+// ── Finding-cited path freshness (#1622) ─────────────────────────────────────
+//
+// Existence is not authority. #1460's gate answers "does the cited file still
+// exist?"; #1622's live case is the next question along: "does the cited file
+// still look the way the scan saw it?". A gitleaks blocker cited src:397 for
+// ~13 minutes after that file was edited, because the 30-minute TTL says the
+// CACHE is young and the existence gate says the FILE is there. Neither says
+// the LINE NUMBER is still true.
+//
+// The verdict is three-way, and the middle arm is the security-critical one:
+//   - missing → DROP, as #1460. Nothing to remediate in a file that is gone.
+//   - stale (mtimeMs > scannedAt) → DEMOTE, never drop. The secret may well
+//     still be there at a shifted line. Dropping would hand an attacker — or
+//     an innocent formatter — a one-touch mute button for a real credential.
+//     The caller renders demoted findings out of the blocker tier and WITHOUT
+//     the cached line number, which is the part that is now untrustworthy.
+//   - live → deliver unchanged, at full severity.
+//
+// Fail-safe on an unparseable/absent `scannedAt`: no staleness verdict at all,
+// so the gate degrades to #1460's existence-only behaviour rather than
+// demoting the whole store on a clock or format anomaly. Same rule, same
+// reason, as `reconcileProjectDiagnosticsSnapshot`.
+
 /**
- * Existence verdict for one resolved cited path. `unknown` is the fail-open
+ * Freshness verdict for one resolved cited path. `unknown` is the fail-open
  * arm: the path may well be there, we just could not tell.
+ */
+export type FindingPathFreshness = "live" | "stale" | "missing" | "unknown";
+
+/**
+ * Existence-only verdict, kept as the name #1460's callers and tests use. It is
+ * the subset of `FindingPathFreshness` that carries no staleness arm.
  */
 export type FindingPathExistence = "live" | "missing" | "unknown";
 
-export function findingPathExistence(resolvedPath: string): FindingPathExistence {
+/**
+ * One stat, one verdict. With `scannedAtMs` supplied, a surviving file whose
+ * mtime is newer than the scan reports `stale`.
+ *
+ * +1ms tolerance: a file scanned AT `scannedAt` legitimately has an mtime equal
+ * to it, and coarse filesystem timestamps round. Mirrors
+ * `reconcileProjectDiagnosticsSnapshot`.
+ */
+export function findingPathFreshness(
+	resolvedPath: string,
+	scannedAtMs?: number,
+): FindingPathFreshness {
 	try {
-		fs.statSync(resolvedPath);
+		const stat = fs.statSync(resolvedPath);
+		if (scannedAtMs !== undefined && stat.mtimeMs > scannedAtMs + 1) {
+			return "stale";
+		}
 		return "live";
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code ?? "unknown";
@@ -267,13 +310,37 @@ export function findingPathExistence(resolvedPath: string): FindingPathExistence
 	}
 }
 
+/** Existence-only probe. Retained for callers that have no scan timestamp. */
+export function findingPathExistence(resolvedPath: string): FindingPathExistence {
+	return findingPathFreshness(resolvedPath) as FindingPathExistence;
+}
+
+/**
+ * Parse a scan timestamp into epoch ms, or `undefined` when it cannot be
+ * trusted. `undefined` disables the staleness arm — never demote on a bad
+ * clock.
+ */
+export function parseScannedAtMs(
+	scannedAt: string | number | undefined,
+): number | undefined {
+	if (scannedAt === undefined || scannedAt === null || scannedAt === "") {
+		return undefined;
+	}
+	const ms = typeof scannedAt === "number" ? scannedAt : Date.parse(scannedAt);
+	return Number.isFinite(ms) ? ms : undefined;
+}
+
 export interface FindingPathPartition<T> {
-	/** Findings safe to deliver: cited path exists, is unreadable, or absent. */
+	/** Findings safe to deliver as-is: path exists, is unreadable, or absent. */
 	live: T[];
+	/** Findings whose cited file was edited after the scan — demote, never drop. */
+	stale: T[];
 	/** Findings whose cited path is confirmed gone. */
 	dropped: T[];
 	/** Resolved dead paths, unique and in first-seen order. */
 	deadPaths: string[];
+	/** Resolved edited-since-scan paths, unique and in first-seen order. */
+	stalePaths: string[];
 	/** Unique cited paths actually probed. */
 	statCount: number;
 	/** True when the stat budget was hit and some findings failed open. */
@@ -281,19 +348,30 @@ export interface FindingPathPartition<T> {
 }
 
 /**
- * Partition findings into `{live, dropped}` by whether the path each one names
- * still exists. Pure apart from the `fs.statSync` probe, which is injectable so
- * the partition rules are unit-testable without a filesystem.
+ * Partition findings into `{live, stale, dropped}` by what the path each one
+ * names looks like now. Pure apart from the `fs.statSync` probe, which is
+ * injectable so the partition rules are unit-testable without a filesystem.
+ *
+ * The stat memo lives in local `Map`s built fresh on every call — per delivery,
+ * never per process. A module-level cache here would be the process-lifetime
+ * latch shape: it would pin the first verdict for a path and re-serve it for
+ * every later turn, which is the very defect this gate exists to close.
  */
 export function partitionFindingsByCitedPath<T>(args: {
 	findings: readonly T[];
 	cwd: string;
 	citedPath: (finding: T) => string | undefined;
 	maxUniquePaths?: number;
-	existence?: (resolvedPath: string) => FindingPathExistence;
+	/** Scan timestamp of the store being delivered. Omit to skip the stale arm. */
+	scannedAt?: string | number;
+	existence?: (
+		resolvedPath: string,
+		scannedAtMs?: number,
+	) => FindingPathFreshness;
 }): FindingPathPartition<T> {
 	const limit = args.maxUniquePaths ?? MAX_FINDING_PATH_STATS;
-	const probe = args.existence ?? findingPathExistence;
+	const probe = args.existence ?? findingPathFreshness;
+	const scannedAtMs = parseScannedAtMs(args.scannedAt);
 	// Two dedup layers, cheapest first. `rawVerdicts` collapses findings that
 	// cite the IDENTICAL string with zero filesystem work — the dominant case
 	// (#1460's live record: 126 findings over a handful of distinct `file`
@@ -304,11 +382,13 @@ export function partitionFindingsByCitedPath<T>(args: {
 	// the RESOLVED path instead of the raw one (the pre-#1461-HIGH-2 shape)
 	// still called it once per finding, since the dedup lookup came after the
 	// cost it was meant to dedupe.
-	const rawVerdicts = new Map<string, FindingPathExistence>();
-	const verdicts = new Map<string, FindingPathExistence>();
+	const rawVerdicts = new Map<string, FindingPathFreshness>();
+	const verdicts = new Map<string, FindingPathFreshness>();
 	const live: T[] = [];
+	const stale: T[] = [];
 	const dropped: T[] = [];
 	const deadPaths: string[] = [];
+	const stalePaths: string[] = [];
 	let truncated = false;
 	for (const finding of args.findings) {
 		const cited = args.citedPath(finding);
@@ -335,17 +415,27 @@ export function partitionFindingsByCitedPath<T>(args: {
 					truncated = true;
 					verdict = "live";
 				} else {
-					verdict = probe(resolved);
+					verdict = probe(resolved, scannedAtMs);
 					verdicts.set(key, verdict);
 					if (verdict === "missing") deadPaths.push(resolved);
+					else if (verdict === "stale") stalePaths.push(resolved);
 				}
 			}
 			rawVerdicts.set(cited, verdict);
 		}
 		if (verdict === "missing") dropped.push(finding);
+		else if (verdict === "stale") stale.push(finding);
 		else live.push(finding);
 	}
-	return { live, dropped, deadPaths, statCount: verdicts.size, truncated };
+	return {
+		live,
+		stale,
+		dropped,
+		deadPaths,
+		stalePaths,
+		statCount: verdicts.size,
+		truncated,
+	};
 }
 
 /**
@@ -363,28 +453,111 @@ export function dropFindingsForMissingPaths<T>(args: {
 	cwd: string;
 	citedPath: (finding: T) => string | undefined;
 	maxUniquePaths?: number;
-	existence?: (resolvedPath: string) => FindingPathExistence;
+	existence?: (
+		resolvedPath: string,
+		scannedAtMs?: number,
+	) => FindingPathFreshness;
 }): T[] {
+	// No `scannedAt` — existence-only, so `partition.stale` is always empty.
 	const partition = partitionFindingsByCitedPath(args);
-	if (partition.dropped.length === 0) return partition.live;
+	emitDeadPathDropRecord(args.store, args.cwd, partition);
+	return partition.live;
+}
+
+/** What a freshness-gated delivery hands back to its caller. */
+export interface FindingFreshnessGate<T> {
+	/** Deliver at full severity: the cited file is unchanged since the scan. */
+	live: T[];
+	/**
+	 * Deliver DEMOTED: the cited file was edited after the scan, so the finding
+	 * may still be real but its cached line number is not. Callers must render
+	 * these out of the blocker tier and without the line.
+	 */
+	stale: T[];
+}
+
+/**
+ * Delivery-seam wrapper with the #1622 freshness verdict. Emits at most one
+ * `finding_dead_path_drop` and one `finding_stale_line_demote` record per store
+ * per delivery, each with a capped path sample; never one per finding.
+ *
+ * Callers that have no scan timestamp keep using `dropFindingsForMissingPaths`.
+ */
+export function gateFindingsByPathFreshness<T>(args: {
+	/** Cache/store name as it appears in telemetry, e.g. `"gitleaks"`. */
+	store: string;
+	findings: readonly T[];
+	cwd: string;
+	/** The store envelope's scan timestamp. Absent/unparseable disables demotion. */
+	scannedAt?: string | number;
+	citedPath: (finding: T) => string | undefined;
+	maxUniquePaths?: number;
+	existence?: (
+		resolvedPath: string,
+		scannedAtMs?: number,
+	) => FindingPathFreshness;
+}): FindingFreshnessGate<T> {
+	const partition = partitionFindingsByCitedPath(args);
+	emitDeadPathDropRecord(args.store, args.cwd, partition);
+	emitStaleLineDemoteRecord(args.store, args.cwd, args.scannedAt, partition);
+	return { live: partition.live, stale: partition.stale };
+}
+
+function emitDeadPathDropRecord<T>(
+	store: string,
+	cwd: string,
+	partition: FindingPathPartition<T>,
+): void {
+	if (partition.dropped.length === 0) return;
 	logLatency({
 		type: "phase",
 		phase: "finding_dead_path_drop",
-		filePath: args.cwd,
+		filePath: cwd,
 		durationMs: 0,
 		metadata: {
-			store: args.store,
+			store,
 			droppedDeadPaths: partition.dropped.length,
 			deadPathCount: partition.deadPaths.length,
 			deliveredCount: partition.live.length,
 			statCount: partition.statCount,
 			samplePaths: partition.deadPaths
 				.slice(0, MAX_LOGGED_DEAD_PATHS)
-				.map((deadPath) => toProjectRelativePath(deadPath, args.cwd)),
+				.map((deadPath) => toProjectRelativePath(deadPath, cwd)),
 			...(partition.truncated ? { truncated: true } : {}),
 		},
 	});
-	return partition.live;
+}
+
+/**
+ * #1622 criterion 5: the demote path gets the same record shape as the drop
+ * path. Before this, a stale-line replay window was reconstructible only by
+ * proxy — the blocker payload is written nowhere.
+ */
+function emitStaleLineDemoteRecord<T>(
+	store: string,
+	cwd: string,
+	scannedAt: string | number | undefined,
+	partition: FindingPathPartition<T>,
+): void {
+	if (partition.stale.length === 0) return;
+	logLatency({
+		type: "phase",
+		phase: "finding_stale_line_demote",
+		filePath: cwd,
+		durationMs: 0,
+		metadata: {
+			store,
+			demotedStalePaths: partition.stale.length,
+			stalePathCount: partition.stalePaths.length,
+			deliveredCount: partition.live.length,
+			statCount: partition.statCount,
+			samplePaths: partition.stalePaths
+				.slice(0, MAX_LOGGED_DEAD_PATHS)
+				.map((stalePath) => toProjectRelativePath(stalePath, cwd)),
+			...(scannedAt === undefined ? {} : { scannedAt: String(scannedAt) }),
+			...(partition.truncated ? { truncated: true } : {}),
+		},
+	});
 }
 
 export function provenanceStamp(provenance: unknown): string {
