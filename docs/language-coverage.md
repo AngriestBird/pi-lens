@@ -47,12 +47,13 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | Nix                   | ✓   | lsp                                                                                                            | nixfmt                  |
 | TOML                  | ✓   | lsp, taplo                                                                                                     | taplo                   |
 | CMake                 | ✓ (cmake-language-server) | lsp                                                                                      | cmake-format            |
-| CUE                   | syntax only (cue lsp)     | lsp                                                                                      | cue fmt                 |
+| CUE                   | ✓ (syntax via cue lsp, evaluation via cue vet) | lsp, cue-vet                                                              | cue fmt                 |
 
-CUE is "syntax only" because `cue lsp` reports load and parse errors as you type
-but leaves conflicting values and failed constraints to `cue vet`. You get
-syntax and parse diagnostics, hover, definition, completion, code actions, and
-formatting; you do not get validation. `.cue` files parse under tree-sitter,
-but no CUE symbol or import queries exist yet, so structural symbol search and
-import extraction skip them and search falls back to the word index. The query
-rules are tracked in #1522.
+`cue lsp` reports load and parse errors as you type but leaves conflicting
+values and failed constraints to `cue vet` — the `cue-vet` auxiliary runner
+(#1522) covers that gap, so together they give full coverage: syntax/parse
+diagnostics, hover, definition, completion, code actions, and formatting from
+the language server, plus evaluation-error validation from `cue vet` on every
+edit. `.cue` files parse under tree-sitter with symbol (`#Definition`s,
+fields, `let` bindings) and import queries (#1522), so structural symbol
+search and import extraction cover CUE the same as any other language.

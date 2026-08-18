@@ -117,6 +117,12 @@ const CASES: Record<string, ImportCase> = {
 		src: "source ./lib.sh\n. ./other.sh\necho hi\n",
 		expect: ["./lib.sh", "./other.sh"],
 	},
+	// #1522: `import_spec`'s `path:` field, verified against the committed wasm.
+	cue: {
+		file: "a.cue",
+		src: 'package a\n\nimport "strings"\nimport "encoding/json"\n',
+		expect: ["strings", "encoding/json"],
+	},
 };
 
 let client: TreeSitterClient;
