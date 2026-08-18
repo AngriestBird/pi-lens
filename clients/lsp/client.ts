@@ -1342,6 +1342,12 @@ export function setupIncomingHandlers(
 			diagnostics?: LSPDiagnostic[];
 			version?: number;
 		}) => {
+			// #1639: the settle operation's own clock for THIS publish. A
+			// "quiet-window" settle's durationMs below measures from here (when
+			// this publish arrived and — armed or re-armed — the debounce timer)
+			// to when that timer actually fires, i.e. the real debounce wait, not
+			// time-since-didOpen.
+			const publishReceivedAt = Date.now();
 			const filePath = uriToPath(params.uri);
 			const normalizedPath = normalizeMapKey(filePath);
 			// A server can flush a queued publish after didClose during teardown.
@@ -1375,9 +1381,34 @@ export function setupIncomingHandlers(
 					.filter((code): code is string | number => code !== undefined)
 					.map(String))].slice(0, 8)
 				: [];
+			// #1639: `durationMs` measures the settle operation, never
+			// time-since-didOpen — document age keeps its own honest name in
+			// `metadata.elapsedSinceDidOpenMs`, exactly like the pull-path
+			// producer above. Before this fix EVERY call (settled or not) logged
+			// the doc-age value as durationMs, which is what actually produced
+			// the issue's cited evidence: this push-path producer, not the pull
+			// path, emitted all 239 records (147 of them >60s "durations" for
+			// settles that took milliseconds; a 61ms same-file pair is this
+			// function's OWN unsettled-then-settled shape — the
+			// `logSequence(false)` raw-receipt record immediately followed by
+			// the `logSequence(true, ...)` settle record for the same publish).
+			// - "first-push": settles immediately — the seed-first-push strategy
+			//   bypasses the debounce timer entirely, so there is no wait to
+			//   measure; durationMs is 0.
+			// - "quiet-window": the real debounce wait, timed from THIS publish's
+			//   own receipt (a later publish that re-arms the timer captures its
+			//   OWN `publishReceivedAt`, so a re-armed wait is timed from the
+			//   push that actually won the debounce, not the first one that lost
+			//   it).
+			// - "publication": a raw per-publication receipt, never itself a
+			//   settle — durationMs is 0 and `settledReturn` stays false. This
+			//   is the record that used to log with NO settleSource at all;
+			//   giving it one closes AC3 (distinguish, don't silently overload,
+			//   the phase's two shapes) for the pairs that actually occur.
 			const logSequence = (
 				settledReturn: boolean,
-				settleSource?: "first-push" | "quiet-window",
+				settleSource: "first-push" | "quiet-window" | "publication",
+				durationMs: number,
 			): void => {
 				if (state.serverId !== "typescript") return;
 				const elapsedSinceDidOpenMs = Math.max(
@@ -1389,16 +1420,16 @@ export function setupIncomingHandlers(
 					type: "phase",
 					phase: "lsp_typescript_diagnostic_sequence",
 					filePath: normalizedPath,
-					durationMs: elapsedSinceDidOpenMs,
+					durationMs,
 					metadata: {
 						launchVariant: state.launchVariant ?? "unknown",
 						publicationIndex,
-						version: docVersion ?? null,
+						version: docVersion ?? "push-unversioned",
 						diagnosticCount: newDiags.length,
 						diagnosticCodes,
 						elapsedSinceDidOpenMs,
 						settledReturn,
-						...(settleSource && { settleSource }),
+						settleSource,
 					},
 				});
 			};
@@ -1472,10 +1503,12 @@ export function setupIncomingHandlers(
 				recordDocVersion();
 				bumpDiagnosticsVersion(state, normalizedPath);
 				state.diagnosticEmitter.emit("diagnostics", normalizedPath);
-				logSequence(true, "first-push");
+				// Immediate settle — no debounce wait to measure.
+				logSequence(true, "first-push", 0);
 				return;
 			}
-			logSequence(false);
+			// A raw per-publication receipt, not itself a settle.
+			logSequence(false, "publication", 0);
 
 			const existingTimer = state.pendingDiagnostics.get(normalizedPath);
 			if (existingTimer) clearTimeout(existingTimer);
@@ -1488,7 +1521,8 @@ export function setupIncomingHandlers(
 				recordDocVersion();
 				bumpDiagnosticsVersion(state, normalizedPath);
 				state.diagnosticEmitter.emit("diagnostics", normalizedPath);
-				logSequence(true, "quiet-window");
+				// The real debounce wait, timed from THIS publish's own receipt.
+				logSequence(true, "quiet-window", Date.now() - publishReceivedAt);
 			}, strategy.debounceMs);
 
 			state.pendingDiagnostics.set(normalizedPath, timer);
