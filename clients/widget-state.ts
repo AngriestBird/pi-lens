@@ -2,7 +2,6 @@ import { stat } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-	createLineCountCache,
 	demotePastEofDiagnostics,
 	type LineCountCache,
 } from "./diagnostic-line-freshness.js";
@@ -79,6 +78,11 @@ export interface WidgetDiagnostic {
 	 * are excluded from blocking/error/warning tallies (`isBlocking`,
 	 * `countDiagnostics`) and rendered with `PAST_EOF_STALE_MARKER` in place of
 	 * the line, since that coordinate is no longer trustworthy.
+	 *
+	 * RE-DERIVED on every read (`applyPastEofGate`), never a one-way latch: a
+	 * transient shrink that later restores (formatter pass, checkout) clears
+	 * this back to `false` on the next read once the line is back in bounds
+	 * (#1641 review round F3 — derive, don't latch).
 	 */
 	stale?: boolean;
 }
@@ -559,17 +563,23 @@ function countDiagnostics(diags: WidgetDiagnostic[]): {
  * for a file whose drift hasn't yet been fixed. `tools/lens-diagnostics.ts`'s
  * `formatAllMode` — an explicit, agent-invoked tool call — is the resync
  * trigger point (#1641 criterion 2); this gate still demotes/logs on its own.
+ *
+ * The gate RE-DERIVES every entry's `stale` flag on every call — it is never
+ * a one-way latch. A transient shrink that later restores (truncate-then-
+ * write, a formatter pass, a checkout) un-demotes on its own next read, so
+ * this always persists the freshly-derived array back into the record, not
+ * only when `demotedCount` (which counts RISING edges only, for telemetry)
+ * is nonzero.
  */
-function applyPastEofGate(rec: FileRecord, lineCountCache: LineCountCache): void {
+function applyPastEofGate(rec: FileRecord, lineCountCache?: LineCountCache): void {
 	if (rec.allDiagnostics.length === 0) return;
-	const { diagnostics, demotedCount } = demotePastEofDiagnostics({
+	const { diagnostics } = demotePastEofDiagnostics({
 		store: "widget-state",
 		cwd: process.cwd(),
 		filePath: rec.filePath,
 		diagnostics: rec.allDiagnostics,
 		lineCountCache,
 	});
-	if (demotedCount === 0) return;
 	rec.allDiagnostics = diagnostics;
 	rec.diagnostics = capStoredDiagnostics(diagnostics);
 	rec.diagnosticCounts = countDiagnostics(diagnostics);
@@ -828,9 +838,8 @@ export interface FileDiagnosticSummary {
  * everything, not just the 12 the TUI keeps for rendering.
  */
 export function getFileDiagnosticSummaries(): FileDiagnosticSummary[] {
-	const lineCountCache = createLineCountCache();
 	return [...files.values()].map((rec) => {
-		applyPastEofGate(rec, lineCountCache);
+		applyPastEofGate(rec);
 		return {
 			filePath: rec.filePath,
 			blocking: rec.diagnosticCounts.blocking,
@@ -863,7 +872,7 @@ export function getFileDiagnosticSummaries(): FileDiagnosticSummary[] {
 export function getFileDiagnostics(filePath: string): WidgetDiagnostic[] | undefined {
 	const rec = files.get(fileMapKey(filePath));
 	if (!rec) return undefined;
-	applyPastEofGate(rec, createLineCountCache());
+	applyPastEofGate(rec);
 	return rec.allDiagnostics.map((d) => ({ ...d }));
 }
 
@@ -993,7 +1002,7 @@ export function renderWidget(
 		// one turn stale; `reconcileStaleWidgetFiles`'s existing debounced sweep
 		// (scheduleStaleReconcile) already re-derives that aggregate on its own
 		// cadence, so this is a bounded, self-correcting gap, not a silent one.
-		applyPastEofGate(rec, createLineCountCache());
+		applyPastEofGate(rec);
 		if (!useHorizontal) {
 			lines.push(fitLine(dim("─".repeat(Math.min(w, 60))), w));
 			lines.push(fitLine(` ${dim(path.basename(rec.filePath))}`, w));

@@ -16,34 +16,67 @@
  *   - A diagnostic citing a line beyond the file's current line count is
  *     DEMOTED (`stale: true`), never dropped — the underlying issue may well
  *     still be real, just at a coordinate this gate can no longer vouch for.
- *   - Fail open: a file that cannot be stat'ed/read yields no verdict at all
- *     (every diagnostic passes through unchanged). An unreadable file is not
- *     evidence of anything; demoting on it would manufacture false staleness.
- *   - Cost discipline: one `statSync` + (when needed) one read per file per
- *     render pass, via a {@link LineCountCache} the CALLER creates fresh for
- *     that pass and discards afterward — never a module-level/cross-request
- *     cache. A persistent cache here would recreate exactly the staleness
- *     class this arc exists to kill (a cached verdict outliving the state it
- *     was computed from); a pass-scoped map has no lifetime to go stale
- *     across, by construction. Each render pass touches a given file at most
- *     a handful of times regardless, so the memo only dedupes stat/read calls
- *     WITHIN one pass (e.g. a file appearing in both a widget summary and a
- *     freshly-merged LSP result in the same `lens_diagnostics` call).
- *   - On a demotion, best-effort trigger a document resync (didClose/didOpen
- *     or a full-sync didChange) so the desync HEALS instead of re-serving the
+ *   - RE-ARMS, never latches: the verdict is recomputed from the gate's own
+ *     inputs (current mtime, current line count) on every call, so a
+ *     TRANSIENT shrink (truncate-then-write, a formatter pass, a checkout)
+ *     that later restores the line un-demotes on its own next read. A
+ *     persisted `stale: true` a caller stores between calls is a cache of the
+ *     last-derived verdict, never an independent source of truth that
+ *     overrides the next derivation — the #1633-V1 lesson: derive, don't latch.
+ *   - Fail open: a file that cannot be stat'ed/read, or exceeds the size gate,
+ *     yields no verdict at all (every diagnostic passes through unchanged).
+ *     An unreadable/oversized file is not evidence of anything; demoting on
+ *     it would manufacture false staleness.
+ *   - The line count matches the LSP's own addressing, not `wc -l`: a
+ *     document with N newline characters has N+1 ADDRESSABLE lines (the
+ *     line after the final `\n`, or the single line of an empty document,
+ *     is a real position a server can anchor a diagnostic to — e.g. TS1005
+ *     "'}' expected" at EOF). `WidgetDiagnostic.line` is always
+ *     `range.start.line + 1` from that same addressing, so the gate must
+ *     use it too or every trailing-newline file demotes its own valid EOF
+ *     diagnostics.
+ *   - Cost discipline: one `statSync` per served file; the file's newlines
+ *     are counted in bounded chunks via a raw fd read (never a full
+ *     `readFileSync` — no whole-file string materialization, no per-render
+ *     re-read of unchanged content), gated by a byte-size cap matching
+ *     `captureReadContentBinding`'s precedent (`read-guard.ts`). The count is
+ *     memoized by mtime in a small SHARED cache (module-scoped, bounded,
+ *     evicted FIFO past a cap) — NOT a process-lifetime latch, because every
+ *     read re-stats and only trusts the memo when the mtime it was computed
+ *     against still matches; a changed file is always recounted. Tests can
+ *     still inject an isolated {@link LineCountCache} via
+ *     {@link createLineCountCache} to avoid cross-test bleed.
+ *   - On a demotion EDGE (a diagnostic that was not already flagged past-EOF
+ *     and now is), best-effort trigger a document resync (didClose/didOpen or
+ *     a full-sync didChange) so the desync HEALS instead of re-serving the
  *     same stale verdict next time (#1631's resync-before-revalidate rule).
  *     Resync is fire-and-forget: a failure here must never block or fail the
- *     render path that discovered the drift.
+ *     render path that discovered the drift. Already-demoted entries and the
+ *     healing direction never re-trigger a resync — only the rising edge does.
  */
 import * as fs from "node:fs";
 import { logLatency } from "./latency-logger.js";
 import { toProjectRelativePath } from "./path-utils.js";
+import { STALE_LINE_MARKER } from "./stale-marker.js";
 
-/** Marker rendered in place of a demoted diagnostic's now-untrustworthy line. */
-export const PAST_EOF_STALE_MARKER = "[stale — line past EOF, re-run to confirm]";
+/** Marker rendered in place of a demoted diagnostic's now-untrustworthy line.
+ * Shares the base `STALE_LINE_MARKER` vocabulary with sibling freshness
+ * gates (#1622/#1633) and adds this gate's own specific reason as a suffix. */
+export const PAST_EOF_STALE_MARKER = `${STALE_LINE_MARKER} — line past EOF`;
 
 /** How many demoted cited lines a single record names before it stops. */
 const MAX_LOGGED_PAST_EOF_LINES = 3;
+
+/** Byte-size gate matching `captureReadContentBinding`'s precedent
+ * (`clients/read-guard.ts`'s `READ_BINDING_MAX_BYTES`) — a hot render/serve
+ * path must never pay to scan an unbounded file. */
+const MAX_GATE_BYTES = 4 * 1024 * 1024;
+
+/** Chunk size for the bounded newline scan — small enough to keep one read's
+ * memory footprint negligible, large enough that a multi-MB file finishes in
+ * single-digit reads rather than thousands. */
+const NEWLINE_SCAN_CHUNK_BYTES = 64 * 1024;
+const NEWLINE_BYTE = 0x0a;
 
 interface LineCountCacheEntry {
 	mtimeMs: number;
@@ -51,46 +84,108 @@ interface LineCountCacheEntry {
 }
 
 /**
- * Request-local memo for {@link getCachedLineCount}. The CALLER owns its
- * lifetime: create one with {@link createLineCountCache} at the start of a
- * render pass, thread it through every gate call in that pass, then let it
- * fall out of scope. Never store one on a module, a singleton, or anything
- * that outlives a single pass — see the module doc comment.
+ * Memo for {@link getCachedLineCount}, mtime-keyed so a stale entry is never
+ * trusted: every lookup re-stats the file and only reuses the memo when the
+ * stat's mtime still matches what the entry was computed against. A caller
+ * that wants full isolation (tests) can create its own with
+ * {@link createLineCountCache}; production call sites use the shared default.
  */
 export type LineCountCache = Map<string, LineCountCacheEntry>;
 
-/** One per render pass. Discard after the pass — do not cache the cache. */
+/** Test-only isolation seam. Production code uses the shared default cache. */
 export function createLineCountCache(): LineCountCache {
 	return new Map();
 }
 
-/**
- * Line count matching the conventional `wc -l` reading (and what the #1641
- * forensic case means by "402 lines on disk"): count newline characters, plus
- * one more for a trailing partial line with no terminator. A file ending in
- * `\n` therefore reports the same count as its last real line, not one past
- * it — an empty file is 0, `"a\n"` is 1, `"a"` is also 1, `"a\nb"` is 2.
- */
-function countLines(content: string): number {
-	if (content.length === 0) return 0;
-	let newlineCount = 0;
-	for (let i = 0; i < content.length; i++) {
-		if (content.charCodeAt(i) === 10) newlineCount++;
+// Shared across calls/render passes so N files touched once per session cost
+// N recounts total, not N per render — the actual fix for the cost this gate
+// exists to control. Still cannot go stale: every read re-stats first and a
+// mismatched mtime always recomputes (see the module doc comment). Bounded
+// via FIFO eviction (mirrors `READ_GUARD_MAX_FILES`'s precedent) so a long
+// session's file count cannot grow this without limit.
+const MAX_SHARED_CACHE_ENTRIES = 512;
+const sharedLineCountCache: LineCountCache = new Map();
+
+function rememberInSharedCache(
+	cache: LineCountCache,
+	filePath: string,
+	entry: LineCountCacheEntry,
+): void {
+	if (
+		cache === sharedLineCountCache &&
+		cache.size >= MAX_SHARED_CACHE_ENTRIES &&
+		!cache.has(filePath)
+	) {
+		const oldest = cache.keys().next().value;
+		if (oldest !== undefined) cache.delete(oldest);
 	}
-	const endsWithNewline = content.charCodeAt(content.length - 1) === 10;
-	return endsWithNewline ? newlineCount : newlineCount + 1;
+	cache.set(filePath, entry);
+}
+
+/** Test-only: drop the shared memo between test files/cases. */
+export function _resetSharedLineCountCacheForTests(): void {
+	sharedLineCountCache.clear();
 }
 
 /**
- * On-disk line count for `filePath`, memoized in `cache` for the duration of
- * the caller's render pass and invalidated by mtime WITHIN that pass. Returns
- * `undefined` when the file cannot be stat'ed or read (deleted, unreadable,
- * permissions) — callers MUST treat `undefined` as "no verdict", not as
- * "zero lines" (the empty-result-must-distinguish-clean-from-errored screen).
+ * Test-only: seed the shared memo with a fabricated entry, deterministically
+ * proving a cache HIT (and that the default cache used by callers with no
+ * explicit `lineCountCache` is genuinely shared across calls) without relying
+ * on a real write's mtime round-tripping through `fs.utimesSync` at full
+ * precision — a platform-specific hazard on its own, unrelated to what such a
+ * test is actually verifying.
+ */
+export function _seedSharedLineCountCacheForTests(
+	filePath: string,
+	entry: LineCountCacheEntry,
+): void {
+	sharedLineCountCache.set(filePath, entry);
+}
+
+/**
+ * Count newline bytes in `filePath` via bounded raw reads — never a full
+ * `readFileSync`/UTF-8 decode of the whole file. `0x0A` (LF) never appears as
+ * a continuation byte in UTF-8, so counting it at the byte level is exact
+ * regardless of encoding, and multi-byte characters spanning a chunk boundary
+ * cannot produce a false match (a continuation byte's high bits can never
+ * equal `0x0A`).
+ */
+function countNewlinesChunked(filePath: string, sizeBytes: number): number {
+	const fd = fs.openSync(filePath, "r");
+	try {
+		const buffer = Buffer.allocUnsafe(
+			Math.min(NEWLINE_SCAN_CHUNK_BYTES, sizeBytes) || 1,
+		);
+		let newlineCount = 0;
+		let position = 0;
+		while (position < sizeBytes) {
+			const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, position);
+			if (bytesRead <= 0) break;
+			for (let i = 0; i < bytesRead; i++) {
+				if (buffer[i] === NEWLINE_BYTE) newlineCount++;
+			}
+			position += bytesRead;
+		}
+		return newlineCount;
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/**
+ * LSP-addressable line count for `filePath`: newline count + 1, matching
+ * `range.start.line + 1` (a document with zero newlines still has one
+ * addressable line — position 0,0 — and a trailing `\n` adds one more,
+ * empty, addressable line after it). Memoized in `cache` (the shared default
+ * unless a caller injects its own) and invalidated by mtime. Returns
+ * `undefined` when the file cannot be stat'ed, exceeds the byte-size gate, or
+ * cannot be read (deleted, unreadable, permissions, oversized) — callers MUST
+ * treat `undefined` as "no verdict", not as "zero lines" (the empty-result-
+ * must-distinguish-clean-from-errored screen).
  */
 export function getCachedLineCount(
 	filePath: string,
-	cache: LineCountCache,
+	cache: LineCountCache = sharedLineCountCache,
 ): number | undefined {
 	let stat: fs.Stats;
 	try {
@@ -100,14 +195,15 @@ export function getCachedLineCount(
 	}
 	const cached = cache.get(filePath);
 	if (cached && cached.mtimeMs === stat.mtimeMs) return cached.lineCount;
-	let content: string;
+	if (stat.size > MAX_GATE_BYTES) return undefined;
+	let newlineCount: number;
 	try {
-		content = fs.readFileSync(filePath, "utf-8");
+		newlineCount = countNewlinesChunked(filePath, stat.size);
 	} catch {
 		return undefined;
 	}
-	const lineCount = countLines(content);
-	cache.set(filePath, { mtimeMs: stat.mtimeMs, lineCount });
+	const lineCount = newlineCount + 1;
+	rememberInSharedCache(cache, filePath, { mtimeMs: stat.mtimeMs, lineCount });
 	return lineCount;
 }
 
@@ -115,7 +211,8 @@ export function getCachedLineCount(
 export interface PastEofDiagnosticLike {
 	/** 1-based cited line, as stored on `WidgetDiagnostic`. */
 	line?: number;
-	/** Already-demoted marker, shared with sibling freshness gates. */
+	/** Demotion marker, shared with sibling freshness gates. RE-DERIVED on
+	 * every call from the current line count — never trusted as a latch. */
 	stale?: boolean;
 }
 
@@ -125,14 +222,15 @@ export interface PastEofGateResult<T> {
 }
 
 /**
- * Demote (never drop) every diagnostic in `diagnostics` whose cited `line`
- * exceeds `filePath`'s CURRENT on-disk line count. Pure apart from the cached
- * stat/read in {@link getCachedLineCount} and the bounded `logLatency` call
- * emitted on a demotion — never throws, never mutates the input array.
- *
- * `resync`, when supplied, is invoked at most once per call, only when
- * something was demoted, and its own failure is swallowed — a resync is a
- * best-effort heal, not a correctness dependency of the gate.
+ * Recompute the past-EOF verdict for every diagnostic in `diagnostics`
+ * against `filePath`'s CURRENT line count. Sets `stale: true` on a match and
+ * `stale: false` when a previously-past-EOF line is back in bounds (a
+ * transient shrink healed) — the verdict is always derived fresh, never
+ * latched. Pure apart from the cached stat/read in {@link getCachedLineCount}
+ * and the bounded `logLatency`/`resync` calls, which fire only on a RISING
+ * edge (a diagnostic that was not already flagged and now is) so an
+ * unchanged persistent demotion doesn't re-log or re-resync on every render.
+ * Never throws, never mutates the input array.
  */
 export function demotePastEofDiagnostics<T extends PastEofDiagnosticLike>(args: {
 	/** Serving surface name as it appears in telemetry, e.g. `"lens_diagnostics"`. */
@@ -140,29 +238,32 @@ export function demotePastEofDiagnostics<T extends PastEofDiagnosticLike>(args: 
 	cwd: string;
 	filePath: string;
 	diagnostics: readonly T[];
-	/** Pass-scoped memo from {@link createLineCountCache} — never a shared/module cache. */
-	lineCountCache: LineCountCache;
+	/** Defaults to the shared, mtime-invalidated cache. Inject an isolated one in tests. */
+	lineCountCache?: LineCountCache;
 	resync?: (filePath: string) => void;
 }): PastEofGateResult<T> {
 	const { diagnostics } = args;
 	if (diagnostics.length === 0) {
 		return { diagnostics: [], demotedCount: 0 };
 	}
-	const lineCount = getCachedLineCount(args.filePath, args.lineCountCache);
+	const lineCount = getCachedLineCount(
+		args.filePath,
+		args.lineCountCache ?? sharedLineCountCache,
+	);
 	if (lineCount === undefined) {
-		// Fail open: no verdict available for this file right now.
+		// Fail open: no verdict available for this file right now. Leave
+		// whatever `stale` value each entry already carries untouched — this
+		// gate has nothing to say either direction.
 		return { diagnostics: [...diagnostics], demotedCount: 0 };
 	}
-	const demotedLines: number[] = [];
+	const risingEdgeLines: number[] = [];
 	const out = diagnostics.map((d) => {
-		if (d.stale) return d; // already demoted by another gate — leave it be.
-		if (typeof d.line === "number" && d.line > lineCount) {
-			demotedLines.push(d.line);
-			return { ...d, stale: true };
-		}
-		return d;
+		const isPastEof = typeof d.line === "number" && d.line > lineCount;
+		if (isPastEof === !!d.stale) return d; // no transition either direction
+		if (isPastEof) risingEdgeLines.push(d.line as number);
+		return { ...d, stale: isPastEof };
 	});
-	if (demotedLines.length === 0) {
+	if (risingEdgeLines.length === 0) {
 		return { diagnostics: out, demotedCount: 0 };
 	}
 	logLatency({
@@ -174,8 +275,8 @@ export function demotePastEofDiagnostics<T extends PastEofDiagnosticLike>(args: 
 			store: args.store,
 			file: toProjectRelativePath(args.filePath, args.cwd),
 			actualLineCount: lineCount,
-			demotedCount: demotedLines.length,
-			sampleCitedLines: demotedLines.slice(0, MAX_LOGGED_PAST_EOF_LINES),
+			demotedCount: risingEdgeLines.length,
+			sampleCitedLines: risingEdgeLines.slice(0, MAX_LOGGED_PAST_EOF_LINES),
 		},
 	});
 	if (args.resync) {
@@ -185,7 +286,7 @@ export function demotePastEofDiagnostics<T extends PastEofDiagnosticLike>(args: 
 			// Best-effort — a resync failure must never fail the render path.
 		}
 	}
-	return { diagnostics: out, demotedCount: demotedLines.length };
+	return { diagnostics: out, demotedCount: risingEdgeLines.length };
 }
 
 /**

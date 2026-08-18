@@ -1207,6 +1207,18 @@ function recordSentContent(
 	// paired with the send that produced the divergent in-memory document —
 	// today only the symptom (the stale citation) is observable; this is the
 	// cause side of the same timeline.
+	//
+	// Review round F4/F1: `contentLineCount` MUST use the same LSP-addressable
+	// convention as the gate itself (newline count + 1 — a trailing `\n` adds
+	// one more, empty, addressable line; an empty document is still 1 line),
+	// or the two records disagree by one at exactly the boundary this counter
+	// exists to help debug. Counted directly (no `.split("\n")`, which
+	// allocates one substring per line — measured at 13.3ms/200k allocations
+	// on a 7MB send) since only the COUNT is needed here, not the lines.
+	let newlineCount = 0;
+	for (let i = 0; i < content.length; i++) {
+		if (content.charCodeAt(i) === 10) newlineCount++;
+	}
 	logLatency({
 		type: "phase",
 		phase: "lsp_document_send",
@@ -1215,7 +1227,7 @@ function recordSentContent(
 		metadata: {
 			version,
 			contentLength: content.length,
-			contentLineCount: content.length === 0 ? 0 : content.split("\n").length,
+			contentLineCount: newlineCount + 1,
 		},
 	});
 }

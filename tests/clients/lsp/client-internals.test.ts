@@ -12,6 +12,16 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { MessageConnection } from "vscode-jsonrpc";
+
+// #1641 F4: `recordSentContent` (private) logs `lsp_document_send` on every
+// didOpen/didChange — spy on it so a test can assert on `contentLineCount`
+// without needing the real (test-mode-suppressed) latency-log writer.
+const logLatencyMock = vi.hoisted(() => vi.fn());
+vi.mock("../../../clients/latency-logger.js", async (importOriginal) => {
+	const actual =
+		await importOriginal<typeof import("../../../clients/latency-logger.js")>();
+	return { ...actual, logLatency: logLatencyMock };
+});
 import {
 	applyDynamicCapabilities,
 	bumpDiagnosticsVersion,
@@ -651,6 +661,30 @@ describe("handleNotifyOpen", () => {
 		const didOpenCall = calls.find((c) => c[0] === "textDocument/didOpen");
 		expect(didOpenCall).toBeDefined();
 		expect(state.openDocuments.has(TEST_KEY)).toBe(true);
+	});
+
+	it("#1641 F4: lsp_document_send's contentLineCount matches the gate's LSP-addressable convention (newlines + 1), not wc -l", async () => {
+		logLatencyMock.mockClear();
+		const state = createMockState();
+		await handleNotifyOpen(state, TEST_FILE, "a\nb\nc\n", "typescript"); // 3 newlines
+
+		const sendCall = logLatencyMock.mock.calls.find(
+			(c) => c[0]?.phase === "lsp_document_send",
+		);
+		expect(sendCall).toBeDefined();
+		expect(sendCall?.[0].metadata.contentLineCount).toBe(4);
+		expect(sendCall?.[0].metadata.contentLength).toBe(6);
+	});
+
+	it("#1641 F4: an empty document logs contentLineCount 1, not 0 (a doc always has ≥1 addressable line)", async () => {
+		logLatencyMock.mockClear();
+		const state = createMockState();
+		await handleNotifyOpen(state, TEST_FILE, "", "typescript");
+
+		const sendCall = logLatencyMock.mock.calls.find(
+			(c) => c[0]?.phase === "lsp_document_send",
+		);
+		expect(sendCall?.[0].metadata.contentLineCount).toBe(1);
 	});
 
 	it("detaches the classic TypeScript projectInfo probe after didOpen", async () => {

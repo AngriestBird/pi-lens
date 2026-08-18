@@ -85,11 +85,7 @@ import {
 	snapshotAdvisoryProvenance,
 } from "./advisory-provenance.js";
 
-/**
- * #1622 / #1419 precedent: what a demoted finding shows where its cached line
- * number used to be. The finding survives, the untrustworthy coordinate does not.
- */
-const STALE_LINE_MARKER = "[stale — re-run to confirm]";
+import { STALE_LINE_MARKER } from "./stale-marker.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
 
 interface TurnEndDeps {

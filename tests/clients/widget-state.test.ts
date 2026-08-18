@@ -1430,4 +1430,39 @@ describe("past-EOF diagnostic gate (#1641)", () => {
 			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
 		}
 	});
+
+	it("F3 RE-ARM: a transient shrink demotes, restoring the file un-demotes the STORED record", async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "past-eof-rearm-"));
+		const filePath = path.join(tmpDir, "transient.ts");
+		try {
+			await fs.writeFile(filePath, "a\nb\nc\nd\ne\n"); // 6 addressable lines
+			recordDiagnostics(
+				filePath,
+				[{ severity: "error", message: "real blocking error", line: 5, rule: "X" }],
+				1,
+			);
+			expect(getFileDiagnosticSummaries().find((s) => s.filePath === filePath)?.blocking).toBe(1);
+
+			// Transient shrink (formatter pass / checkout / partial write) —
+			// line 5 no longer exists. Force the mtime forward explicitly:
+			// successive writes within one filesystem timestamp tick can
+			// otherwise land on the SAME mtime, defeating the mtime-keyed cache
+			// for reasons unrelated to what this test verifies.
+			await fs.writeFile(filePath, "a\nb\n"); // 3 addressable lines
+			await fs.utimes(filePath, new Date(Date.now() + 1000), new Date(Date.now() + 1000));
+			const shrunk = getFileDiagnosticSummaries().find((s) => s.filePath === filePath);
+			expect(shrunk?.diagnostics[0]?.stale).toBe(true);
+			expect(shrunk?.blocking).toBe(0);
+
+			// Restored to its original content — the STORE must re-arm, not stay
+			// permanently latched stale (the #1633-V1 lesson: derive, don't latch).
+			await fs.writeFile(filePath, "a\nb\nc\nd\ne\n");
+			await fs.utimes(filePath, new Date(Date.now() + 2000), new Date(Date.now() + 2000));
+			const restored = getFileDiagnosticSummaries().find((s) => s.filePath === filePath);
+			expect(restored?.diagnostics[0]?.stale).toBeFalsy();
+			expect(restored?.blocking).toBe(1);
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
 });

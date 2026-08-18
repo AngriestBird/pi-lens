@@ -81,7 +81,6 @@ import { retagAuxiliaryDiagnostics } from "../clients/dispatch/auxiliary-lsp.js"
 import { detectFileRole } from "../clients/file-role.js";
 import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
 import {
-	createLineCountCache,
 	demotePastEofDiagnostics,
 	PAST_EOF_STALE_MARKER,
 	resyncDocumentOnPastEof,
@@ -2024,29 +2023,9 @@ function formatAllMode(
 	// disposition (zero I/O), mode=all applies it here on the cache-only path.
 	// The full path's policyMover is loaded below in `applyInlineSuppressionsToSummaries`.
 	const policyMap = loadProjectRulePolicyMap(cwd);
-	// #1641: the single chokepoint both mode=all (cache-only `summaries`) and
-	// mode=full (widget cache merged with a FRESH LSP sweep, above) converge
-	// through — a fresh sweep's server can still be citing its own stale
-	// in-memory document, so gating only the cached half would miss exactly
-	// the live incident this issue reports. One pass-scoped line-count memo
-	// covers every file exactly once per call regardless of which half
-	// produced its diagnostics.
-	const lineCountCache = createLineCountCache();
-	const eofGated = summaries.map((s) => {
-		const { diagnostics, demotedCount } = demotePastEofDiagnostics({
-			store: "lens_diagnostics",
-			cwd,
-			filePath: s.filePath,
-			diagnostics: s.diagnostics ?? [],
-			lineCountCache,
-			resync: resyncDocumentOnPastEof,
-		});
-		if (demotedCount === 0) return s;
-		return summarizeDiagnostics(s.filePath, diagnostics, s.hasFinalSnapshot);
-	});
 	const dispositioned = isFullMode
-		? eofGated
-		: eofGated.map((s) => {
+		? summaries
+		: summaries.map((s) => {
 				const kept = applyWeakDispositions(s.diagnostics ?? [], cwd, s.filePath);
 				const policyKept = applyRulePolicy(kept, policyMap);
 				if (
@@ -2056,7 +2035,26 @@ function formatAllMode(
 					return s;
 				return summarizeDiagnostics(s.filePath, policyKept, s.hasFinalSnapshot);
 			});
-	const visibleSummaries = dispositioned.filter((s) => includeFile(s.filePath));
+	// #1641: the single chokepoint both mode=all (cache-only `summaries`) and
+	// mode=full (widget cache merged with a FRESH LSP sweep, above) converge
+	// through — a fresh sweep's server can still be citing its own stale
+	// in-memory document, so gating only the cached half would miss exactly
+	// the live incident this issue reports. Runs AFTER dispositions/rule
+	// policy (not before): a finding a mark or a `.pi-lens.json` rule policy
+	// already dropped is not being served, so it must never trigger a resync
+	// or a `diagnostic_past_eof` telemetry record on this call.
+	const eofGated = dispositioned.map((s) => {
+		const { diagnostics, demotedCount } = demotePastEofDiagnostics({
+			store: "lens_diagnostics",
+			cwd,
+			filePath: s.filePath,
+			diagnostics: s.diagnostics ?? [],
+			resync: resyncDocumentOnPastEof,
+		});
+		if (demotedCount === 0) return s;
+		return summarizeDiagnostics(s.filePath, diagnostics, s.hasFinalSnapshot);
+	});
+	const visibleSummaries = eofGated.filter((s) => includeFile(s.filePath));
 
 	// Filter to files with actual issues. A file whose only findings were
 	// demoted by the #1641 past-EOF gate has blocking/errors/warnings at 0 —
