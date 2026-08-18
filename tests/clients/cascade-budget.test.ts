@@ -9,6 +9,7 @@ const ENV_KEYS = [
 	"PI_LENS_CASCADE_SETTLE_WAIT_MS",
 	"PI_LENS_CASCADE_NEIGHBOUR_COST_MS",
 	"PI_LENS_CASCADE_NEIGHBOUR_FLOOR",
+	"PI_LENS_QUIET_WINDOW_WAIT_MS",
 ] as const;
 
 const saved = new Map<string, string | undefined>();
@@ -42,34 +43,77 @@ describe("cascadeSettleWaitMs", () => {
 });
 
 describe("deriveCascadeNeighbourBudget", () => {
-	it("leaves the flat cap alone while the window is ample", () => {
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 0 })).toEqual({
+	it("leaves the flat cap alone while the full walk still fits", () => {
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 0 })).toMatchObject({
 			budget: CASCADE_NEIGHBOUR_BUDGET,
 			ceiling: CASCADE_NEIGHBOUR_BUDGET,
 			remainingMs: 5000,
+			zone: "fits",
 		});
 		// The measured median cascade — 30 ms of prelude buys nothing back.
 		expect(deriveCascadeNeighbourBudget({ elapsedMs: 30 }).budget).toBe(
 			CASCADE_NEIGHBOUR_BUDGET,
 		);
-		// 1000 ms of prelude still affords 40 at 100 ms each: the narrowing
-		// starts only once the flat walk genuinely no longer fits.
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 1000 }).budget).toBe(40);
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 1100 }).budget).toBe(39);
+		// 1000 ms of prelude still affords 40 at 100 ms each: narrowing starts
+		// only once the flat walk genuinely no longer fits.
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 1000 })).toMatchObject({
+			budget: 40,
+			zone: "fits",
+		});
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 1100 })).toMatchObject({
+			budget: 39,
+			zone: "narrowed",
+		});
 	});
 
-	it("narrows the walk in step with the settle time already spent", () => {
+	it("narrows in step with the on-time window left, inside the rescue band", () => {
 		// The measured logger.ts prelude: a 2046 ms reverse-deps refresh.
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 2046 }).budget).toBe(29);
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 4000 }).budget).toBe(10);
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 2046 })).toMatchObject({
+			budget: 29,
+			zone: "narrowed",
+		});
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 4000 })).toMatchObject({
+			budget: 10,
+			zone: "narrowed",
+		});
+		// The band's lower edge: 500 ms left still affords exactly the floor.
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 4500 })).toMatchObject({
+			budget: 5,
+			zone: "narrowed",
+		});
 	});
 
-	it("never narrows below the floor, however far the window is overspent", () => {
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 5000 }).budget).toBe(5);
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 60_000 })).toEqual({
-			budget: 5,
-			ceiling: CASCADE_NEIGHBOUR_BUDGET,
-			remainingMs: -55_000,
+	it("keeps the FULL budget once the window is blown past rescue", () => {
+		// One millisecond past the band: a floor-sized walk no longer fits
+		// either, so narrowing would drop the tail for good AND still miss. The
+		// carry-over (#1443) delivers the whole set one turn late instead.
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 4501 })).toMatchObject({
+			budget: CASCADE_NEIGHBOUR_BUDGET,
+			zone: "past-rescue",
+		});
+		// The cold-session case: a fresh graph build measured at ~19 s.
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 19_000 })).toMatchObject({
+			budget: CASCADE_NEIGHBOUR_BUDGET,
+			remainingMs: -14_000,
+			zone: "past-rescue",
+		});
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 600_000 }).budget).toBe(
+			CASCADE_NEIGHBOUR_BUDGET,
+		);
+	});
+
+	it("stands down when the window could never fit a full walk anyway", () => {
+		// A 1200 ms wait cannot fit 40 neighbours at 100 ms each even at zero
+		// prelude, so there is no LATE run to rescue — only every run to shrink.
+		// Narrowing here would be a budget change wearing a timeout's clothes.
+		setEnv("PI_LENS_CASCADE_SETTLE_WAIT_MS", "1200");
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 0 })).toMatchObject({
+			budget: CASCADE_NEIGHBOUR_BUDGET,
+			zone: "no-rescue-window",
+		});
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 1100 })).toMatchObject({
+			budget: CASCADE_NEIGHBOUR_BUDGET,
+			zone: "no-rescue-window",
 		});
 	});
 
@@ -77,8 +121,23 @@ describe("deriveCascadeNeighbourBudget", () => {
 		// wait 0 means turn_end never blocks on this run — it is carried to the
 		// next turn either way, so there is no window to fit inside.
 		setEnv("PI_LENS_CASCADE_SETTLE_WAIT_MS", "0");
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 30_000 }).budget).toBe(
-			CASCADE_NEIGHBOUR_BUDGET,
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 30_000 })).toMatchObject({
+			budget: CASCADE_NEIGHBOUR_BUDGET,
+			zone: "no-rescue-window",
+		});
+	});
+
+	it("records the pipeline's whole drain, not just the turn_end settle", () => {
+		// The turn_end cap is NOT the only deadline: `cascade_carry_over_settle`
+		// gives a still-pending compute another 15 s at agent_settled. That is
+		// why the past-rescue zone can afford to stay wide, so it belongs on the
+		// record rather than being invisible.
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 0 }).deliveryWindowMs).toBe(
+			20_000,
+		);
+		setEnv("PI_LENS_QUIET_WINDOW_WAIT_MS", "3000");
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 0 }).deliveryWindowMs).toBe(
+			8000,
 		);
 	});
 
@@ -87,27 +146,41 @@ describe("deriveCascadeNeighbourBudget", () => {
 		// one it exists to bound.
 		expect(
 			deriveCascadeNeighbourBudget({
-				elapsedMs: 60_000,
+				elapsedMs: 2000,
+				settleWaitMs: 5000,
 				ceiling: 8,
 				floor: 40,
+				perNeighbourMs: 100,
 			}).budget,
 		).toBe(8);
 	});
 
 	it("treats a non-finite or negative elapsed as no time spent", () => {
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: Number.NaN }).budget).toBe(
-			CASCADE_NEIGHBOUR_BUDGET,
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: Number.NaN })).toMatchObject(
+			{ budget: CASCADE_NEIGHBOUR_BUDGET, zone: "fits" },
 		);
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: -1000 }).budget).toBe(
-			CASCADE_NEIGHBOUR_BUDGET,
-		);
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: -1000 })).toMatchObject({
+			budget: CASCADE_NEIGHBOUR_BUDGET,
+			zone: "fits",
+		});
 	});
 
 	it("honours the per-neighbour cost and floor overrides from env", () => {
+		// A 500 ms cost puts a full walk at 20 s, well over the 5 s window, so
+		// the derivation stands down rather than shrinking every cascade to 10.
 		setEnv("PI_LENS_CASCADE_NEIGHBOUR_COST_MS", "500");
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 0 }).budget).toBe(10);
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 0 })).toMatchObject({
+			budget: CASCADE_NEIGHBOUR_BUDGET,
+			zone: "no-rescue-window",
+		});
+		// A 50 ms cost fits a full walk in 2 s, so the band opens at 3 s of
+		// prelude and a raised floor holds the bottom of it.
+		setEnv("PI_LENS_CASCADE_NEIGHBOUR_COST_MS", "50");
 		setEnv("PI_LENS_CASCADE_NEIGHBOUR_FLOOR", "12");
-		expect(deriveCascadeNeighbourBudget({ elapsedMs: 60_000 }).budget).toBe(12);
+		expect(deriveCascadeNeighbourBudget({ elapsedMs: 4400 })).toMatchObject({
+			budget: 12,
+			zone: "narrowed",
+		});
 	});
 
 	it("falls back to the default cost when the env knob is unusable", () => {

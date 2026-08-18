@@ -1081,12 +1081,13 @@ describe("computeCascadeForFile", () => {
 		return (call![0] as { metadata: Record<string, unknown> }).metadata;
 	}
 
-	it("#1462: a cascade that already spent most of the settle window walks fewer neighbours instead of overrunning it", async () => {
+	it("#1462: a cascade inside the rescue band walks fewer neighbours instead of overrunning the on-time window", async () => {
 		const env = setupTestEnvironment("cascade-budget-pressured-");
 		const fixture = budgetFixture(env.tmpDir, 41);
 		// 4000 ms of the 5000 ms window gone before the walk is even sized —
 		// the shape of the measured logger.ts run (2046 ms reverse-deps refresh
-		// ahead of a 38-neighbour walk that then blew the cap).
+		// ahead of a 38-neighbour walk that then blew the cap). 1000 ms left is
+		// above the floor's 500 ms, so a shorter walk genuinely lands on time.
 		const clock = chargePrelude(4000, impact(fixture.primary, fixture.neighbors));
 		try {
 			const { computeCascadeForFile } = await import(
@@ -1103,6 +1104,7 @@ describe("computeCascadeForFile", () => {
 				neighborBudget: 10,
 				neighborBudgetCeiling: 40,
 				budgetRemainingMs: 1000,
+				budgetZone: "narrowed",
 				budgetTruncated: 31,
 			});
 		} finally {
@@ -1111,10 +1113,10 @@ describe("computeCascadeForFile", () => {
 		}
 	}, 30_000);
 
-	it("#1462: a fully spent settle window narrows the walk to the floor, never to zero", async () => {
-		const env = setupTestEnvironment("cascade-budget-starved-");
+	it("#1462: the transitive expansion is capped by the derived budget, not the flat one", async () => {
+		const env = setupTestEnvironment("cascade-budget-maxhits-");
 		const fixture = budgetFixture(env.tmpDir, 41);
-		const clock = chargePrelude(9000, impact(fixture.primary, fixture.neighbors));
+		const clock = chargePrelude(4000, impact(fixture.primary, fixture.neighbors));
 		try {
 			const { computeCascadeForFile } = await import(
 				"../../clients/dispatch/integration.js"
@@ -1124,14 +1126,46 @@ describe("computeCascadeForFile", () => {
 				writeSeq: 1,
 			});
 
-			// The inversion guard: remaining is -4000 ms, so an unclamped
-			// derivation would walk nothing at all and report a false clean leaf.
-			expect(fixture.touchFile).toHaveBeenCalledTimes(5);
+			// A rescued run must not pay for a 40-hit BFS it is then going to
+			// throw 30 of away — the cap has to carry the SAME derived number the
+			// slice uses, or "expands less as well as walking less" is a claim
+			// with nothing behind it.
+			expect(mocks.computeTransitiveImpact).toHaveBeenCalledWith(
+				expect.anything(),
+				expect.any(String),
+				expect.objectContaining({ maxHits: 10 }),
+			);
+		} finally {
+			clock.restore();
+			env.cleanup();
+		}
+	}, 30_000);
+
+	it("#1462: a window blown past rescue keeps the FULL budget rather than walking a stub", async () => {
+		const env = setupTestEnvironment("cascade-budget-blown-");
+		const fixture = budgetFixture(env.tmpDir, 41);
+		// The cold-session case: a fresh graph build measures up to ~19 s
+		// (runtime-coordinator.ts's carry-over note). Nothing fits the on-time
+		// window any more, so narrowing would drop 35 neighbours PERMANENTLY and
+		// still miss — while #1443's carry-over delivers the whole set one turn
+		// late. Pre-#1462 behaviour is the correct behaviour here.
+		const clock = chargePrelude(19_000, impact(fixture.primary, fixture.neighbors));
+		try {
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			await computeCascadeForFile(fixture.primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 1,
+			});
+
+			expect(fixture.touchFile).toHaveBeenCalledTimes(40);
 			expect(cascadeResultMetadata()).toMatchObject({
-				neighborBudget: 5,
+				neighborBudget: 40,
 				neighborBudgetCeiling: 40,
-				budgetRemainingMs: -4000,
-				budgetTruncated: 36,
+				budgetRemainingMs: -14_000,
+				budgetZone: "past-rescue",
+				budgetTruncated: 1,
 			});
 		} finally {
 			clock.restore();
@@ -1159,6 +1193,7 @@ describe("computeCascadeForFile", () => {
 				neighborBudget: 40,
 				neighborBudgetCeiling: 40,
 				budgetRemainingMs: 5000,
+				budgetZone: "fits",
 				budgetTruncated: 1,
 			});
 		} finally {
@@ -1167,9 +1202,12 @@ describe("computeCascadeForFile", () => {
 		}
 	}, 30_000);
 
-	it("#1462: the budget follows PI_LENS_CASCADE_SETTLE_WAIT_MS, not a second hardcoded window", async () => {
+	it("#1462: shrinking PI_LENS_CASCADE_SETTLE_WAIT_MS does not turn it into a neighbour-count knob", async () => {
 		const env = setupTestEnvironment("cascade-budget-settle-env-");
 		const previous = process.env.PI_LENS_CASCADE_SETTLE_WAIT_MS;
+		// 1200 ms cannot fit a 40-neighbour walk even at zero prelude, so there
+		// is no LATE run to rescue — only every run to shrink. The derivation
+		// stands down instead of capping every cascade at ~12.
 		process.env.PI_LENS_CASCADE_SETTLE_WAIT_MS = "1200";
 		const fixture = budgetFixture(env.tmpDir, 41);
 		const clock = chargePrelude(0, impact(fixture.primary, fixture.neighbors));
@@ -1182,10 +1220,11 @@ describe("computeCascadeForFile", () => {
 				writeSeq: 1,
 			});
 
-			expect(fixture.touchFile).toHaveBeenCalledTimes(12);
+			expect(fixture.touchFile).toHaveBeenCalledTimes(40);
 			expect(cascadeResultMetadata()).toMatchObject({
-				neighborBudget: 12,
+				neighborBudget: 40,
 				budgetRemainingMs: 1200,
+				budgetZone: "no-rescue-window",
 			});
 		} finally {
 			clock.restore();

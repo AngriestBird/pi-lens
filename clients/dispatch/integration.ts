@@ -47,6 +47,7 @@ import * as nodePath from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	CASCADE_NEIGHBOUR_BUDGET,
+	type CascadeBudgetZone,
 	deriveCascadeNeighbourBudget,
 } from "../cascade-budget.js";
 import { formatCascadeNeighborDiagnostics } from "../cascade-format.js";
@@ -986,6 +987,8 @@ export async function computeCascadeForFile(
 	// returns a `non_code` skip before any of this is logged.
 	let cascadeNeighbourBudget = CASCADE_NEIGHBOUR_BUDGET;
 	let cascadeBudgetRemainingMs = 0;
+	let cascadeBudgetZone: CascadeBudgetZone = "fits";
+	let cascadeDeliveryWindowMs = 0;
 
 	if (CASCADE_GRAPH_KINDS.has(fileKind)) {
 		const graphStart = Date.now();
@@ -1299,19 +1302,23 @@ export async function computeCascadeForFile(
 			}
 		}
 
-		// #1462: size the rest of this run against the settle time it has NOT
+		// #1462: size the rest of this run against the on-time window it has NOT
 		// already spent. Derived HERE — after the graph build, the reverse-deps
 		// refresh and the LSP-reference expansion, which is where the measured
 		// overruns were bought — and used for both the transitive BFS cap and the
-		// final slice, so a run that arrives late expands less as well as walking
-		// less. Never below the floor: pressure narrows the walk, it never
-		// starves it.
+		// final slice, so a rescued run expands less as well as walking less.
+		// Narrowing happens ONLY inside the rescue band (see cascade-budget.ts):
+		// a run that is merely late keeps the whole set and is delivered complete
+		// by #1443's carry-over, because a dropped neighbour is lost for good
+		// while a late one is not.
 		{
 			const decision = deriveCascadeNeighbourBudget({
 				elapsedMs: Date.now() - cascadeStart,
 			});
 			cascadeNeighbourBudget = decision.budget;
 			cascadeBudgetRemainingMs = decision.remainingMs;
+			cascadeBudgetZone = decision.zone;
+			cascadeDeliveryWindowMs = decision.deliveryWindowMs;
 		}
 
 		// Bounded transitive expansion: add depth>1 dependents (indirect
@@ -2062,13 +2069,24 @@ export async function computeCascadeForFile(
 			// it cut off this run — the correctness half (a truncated run being
 			// silently discarded) is #1443.
 			// #1462: `neighborBudget` is now the DERIVED budget (still "the one in
-			// force"); `neighborBudgetCeiling` is the flat cap it was narrowed
-			// from, and `budgetRemainingMs` is the settle time that decided it. A
-			// row where budget < ceiling is a run that shortened its own walk to
-			// fit the window instead of overrunning it and delivering nothing.
+			// force"); `neighborBudgetCeiling` is the flat cap, `budgetRemainingMs`
+			// the on-time window left when it was sized, and `budgetZone` the rule
+			// that decided it. Only `budgetZone: "narrowed"` shortens a walk — the
+			// other three keep the flat cap, so a row where budget < ceiling is a
+			// deliberate rescue, never a cold-start stub. `budgetDeliveryWindowMs`
+			// records how long the pipeline (turn_end settle + quiet-window drain)
+			// keeps a slow run alive, which is why the other zones can afford to
+			// stay wide.
+			//
+			// NOTE for whoever reads these rows: `budgetTruncated` INVERTS under a
+			// narrowed budget — it is `eligible - budget`, so a smaller budget
+			// mechanically raises it. Compare truncation WITHIN a zone, never
+			// across one.
 			neighborBudget: cascadeNeighbourBudget,
 			neighborBudgetCeiling: CASCADE_NEIGHBOUR_BUDGET,
 			budgetRemainingMs: cascadeBudgetRemainingMs,
+			budgetZone: cascadeBudgetZone,
+			budgetDeliveryWindowMs: cascadeDeliveryWindowMs,
 			budgetTruncated: cascadeBudgetTruncated,
 			neighbors: visibleNeighbors.slice(0, 10).map((n) => ({
 				file: n.filePath.replace(/\\/g, "/").split("/").slice(-2).join("/"),
