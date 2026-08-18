@@ -21,7 +21,11 @@ import {
 	getManagedToolEnvironment,
 	resolveAvailableOrInstall,
 } from "./dispatch/runners/utils/runner-helpers.js";
-import { createAvailabilityLatch } from "./dispatch/runners/utils/availability-policy.js";
+import {
+	type AvailabilityCause,
+	type AvailabilityOutcome,
+	createAvailabilityLatch,
+} from "./dispatch/runners/utils/availability-policy.js";
 
 // --- Types ---
 
@@ -479,6 +483,26 @@ export class DependencyChecker {
 			verdict.cause ?? "not-found",
 		);
 		return false;
+	}
+
+	/**
+	 * #1623: public availability verdict for callers outside the dispatch
+	 * graph (mode=full's fresh-fetch) that need to say WHY `ensureAvailable()`
+	 * most recently returned false, using the SAME outcome/cause this class
+	 * already latched above — not a re-guessed "madge binary unavailable"
+	 * that can't tell a transient retry-cooldown probe from a durable
+	 * absence.
+	 */
+	getAvailabilityVerdict(): {
+		outcome: AvailabilityOutcome | null;
+		cause: AvailabilityCause | null;
+		retryAtMs: number;
+	} {
+		return {
+			outcome: this.availabilityLatch.getOutcome(),
+			cause: this.availabilityLatch.getCause(),
+			retryAtMs: this.availabilityLatch.getRetryAtMs(),
+		};
 	}
 
 	/**
