@@ -19,8 +19,12 @@ import {
 } from "../../../path-utils.js";
 import {
 	ensureTool,
+	getInstallAttempt,
+	getLastEnsureResolutionSource,
+	getToolInstallStrategy,
 	isSpawnableCommand,
 	resetPathWalkMemo,
+	type InstallAttempt,
 } from "../../../installer/index.js";
 import {
 	getServersForFileWithConfig,
@@ -41,6 +45,7 @@ import {
 	type ProbeFailureShape,
 	classifyProbeFailure,
 	createAvailabilityLatch,
+	describeInstallAttempt,
 	describeProbeEvidence,
 	isLatchingOutcome,
 	logAvailabilityDecision,
@@ -177,6 +182,17 @@ export function createVenvFinder(
 			}
 		}
 
+		// Managed-dir install (~/.pi-lens/tools/node_modules/.bin/<command>) — the
+		// same shim `ensureTool()` installs npm-strategy tools into. Checked BEFORE
+		// the bare-name PATH fallback (#1638): without this, a tool that only
+		// exists in the managed dir never resolves here, so `resolveAvailableOrInstall`
+		// clears the checker's cache on every install recovery for nothing — the
+		// very next probe misses PATH again, spawns a doomed `--version` process,
+		// and only THEN falls through to `ensureTool`'s own cache. One managed-dir
+		// check settles it without a spawn.
+		const managed = findManagedNodeToolBinary(command);
+		if (managed) return managed;
+
 		// Fall back to global
 		return command;
 	};
@@ -287,6 +303,17 @@ const installAttemptsByCwd = new PathKeyedMap<Map<string, InstallAttemptState>>(
 const resolveInstallInFlightByCwd = new PathKeyedMap<
 	Map<string, Promise<string | null>>
 >(normalizeEphemeralMapKey);
+// Which (cwd, toolId) pairs already got their ONE compensating `available`
+// row this session (#1612 review F2). `checker.reset()` clears the checker's
+// own cache on every install recovery, so the NEXT call re-probes PATH from
+// scratch — and that probe keeps missing for a managed-dir-only install
+// (createVenvFinder never searches the managed tools dir; tracked separately
+// as its own bug). Without this memo, every one of those repeat probe
+// failures looks like a fresh correction and re-logs "available", even
+// though only the first call actually ran an install.
+const correctedAvailabilityByCwd = new PathKeyedMap<Set<string>>(
+	normalizeMapKey,
+);
 // Checkers are created by runner modules and may also be created dynamically.
 // Keep the session reset as a generation rather than retaining every checker
 // reset closure forever.
@@ -321,10 +348,144 @@ function noteInstallSuccess(toolId: string, cwd: string): void {
 	if (states?.size === 0) installAttemptsByCwd.delete(cwd);
 }
 
+/**
+ * True once a compensating `available` row has already fired for this
+ * (cwd, toolId) pair this session; `noteAvailabilityCorrected` records it the
+ * first time. #1612 review F2's "once per correction" — see
+ * `correctedAvailabilityByCwd`'s comment for why repeats need suppressing.
+ */
+function hasCorrectedAvailability(cwd: string, toolId: string): boolean {
+	return correctedAvailabilityByCwd.get(cwd)?.has(toolId) ?? false;
+}
+
+function noteAvailabilityCorrected(cwd: string, toolId: string): void {
+	let ids = correctedAvailabilityByCwd.get(cwd);
+	if (!ids) {
+		ids = new Set();
+		correctedAvailabilityByCwd.set(cwd, ids);
+	}
+	ids.add(toolId);
+}
+
+/**
+ * Which installer family resolved a tool, for the compensating row's
+ * `evidence.source` (#1612 review F1). Reads the registry's own
+ * `installStrategy` rather than hand-mapping per toolId — the two cannot
+ * drift apart because there is only one list.
+ */
+function sourceTagForToolId(toolId: string): ProbeEvidence["source"] {
+	switch (getToolInstallStrategy(toolId)) {
+		case "npm":
+			return "managed-dir";
+		case "pip":
+			return "pip-user";
+		case "github":
+			return "github-release";
+		case "archive":
+			return "archive-dist";
+		case "maven":
+			return "maven-jar";
+		default:
+			// "gem" has no CLI runner behind this seam yet, and an unknown toolId
+			// means the registry lookup itself missed — either way, no tag beats
+			// a guessed one.
+			return undefined;
+	}
+}
+
+/**
+ * How to tag a not-fresh install resolution in the compensating row's
+ * evidence (#1636 review, carried over from #1615's verify). `getInstallAttempt`
+ * answers `undefined` for BOTH a genuine cache hit and a plain PATH/managed-dir
+ * discovery, and answers `declined`/`skipped` for a policy refusal that still
+ * hands back whatever discovery found — three different facts a single
+ * `"cache"` tag used to flatten into one. `declined`/`skipped` take priority
+ * over the source map: a project-trust decline overwrites whatever the
+ * discovery pass underneath it found (see `ensureTool`'s trust-gate branch in
+ * installer/index.ts), so by the time this reads it, "declined" is the honest
+ * answer regardless of how the binary was actually found.
+ */
+function resolvedTagForAttempt(
+	toolId: string,
+	attempt: InstallAttempt | undefined,
+): "cache" | "path" | "declined" {
+	if (attempt?.outcome === "declined" || attempt?.outcome === "skipped") {
+		return "declined";
+	}
+	return getLastEnsureResolutionSource(toolId) === "path" ? "path" : "cache";
+}
+
+/**
+ * Emit the ONE compensating `available` row for a (cwd, toolId) correction,
+ * after a latched unavailable probe recovers via `ensureTool`. This is the
+ * SINGLE row constructor for every caller behind this seam —
+ * `resolveAvailableOrInstallUnshared` (#1612) and `verifyOrInstallCommand`
+ * (#1636) both call it rather than each hand-rolling their own, which is
+ * exactly the drift #1610's own review caught the first time this shape
+ * shipped twice.
+ *
+ * Gated on the once-per-correction memo (`correctedAvailabilityByCwd`,
+ * #1612 review F2): `checker.reset()` / a cleared probe cache means the NEXT
+ * call for the same (cwd, toolId) can resolve the same tool again with no
+ * fresh attempt behind it, and that must not re-log a "fresh correction"
+ * every time.
+ */
+function emitCompensatingAvailableRow(
+	cwd: string,
+	toolId: string,
+	installStartedAt: number,
+	installedPath: string,
+): void {
+	if (hasCorrectedAvailability(cwd, toolId)) return;
+	noteAvailabilityCorrected(cwd, toolId);
+	// `installed`/`installedPath` can come back truthy WITHOUT ensureTool
+	// running an install this call — its in-memory cache, its on-disk probe
+	// cache, getToolPath finding it already present, or a concurrent peer's
+	// install all return a path with no fresh attempt recorded. Deriving from
+	// `getInstallAttempt` (rather than asserting "succeeded" because the path
+	// is truthy, or hand-rolling a second mapping) is what #1610's OWN
+	// failure-path mirror bug was caught on review; read the REAL outcome
+	// through the one function that already knows how, don't assume it. Hard
+	// import, no `typeof` guard (#1636 review): a genuinely removed export
+	// must throw here, not silently read as "not attempted".
+	const attempt = getInstallAttempt(toolId);
+	const installEvidence = describeInstallAttempt(attempt);
+	const evidence: ProbeEvidence = {
+		...installEvidence,
+		binary: path.basename(installedPath),
+		source: sourceTagForToolId(toolId),
+		// Set alongside any non-"succeeded" outcome: the path is truthy but
+		// nothing ran this call, so it came from an already-known-good answer
+		// rather than a fresh attempt (#1612 review F2).
+		...(installEvidence.install !== "succeeded" && {
+			resolved: resolvedTagForAttempt(toolId, attempt),
+		}),
+	};
+	logAvailabilityDecision(
+		{
+			tool: toolId,
+			verdict: "available",
+			outcome: "success",
+			cause: "ok",
+			elapsedMs: Date.now() - installStartedAt,
+			// `checker.reset()`/a fresh probe just cleared whatever cache stood
+			// behind this call, so nothing is actually held pinned the instant
+			// this row is written — the very next probe starts fresh
+			// (#1612 review F3). Writing `true` here would claim a durability
+			// this call doesn't have.
+			latched: false,
+			classifiedBy: "caller",
+			evidence,
+		},
+		cwd,
+	);
+}
+
 /** Reset availability/install suppression at the session boundary. */
 export function resetDispatchAvailabilityState(): void {
 	installAttemptsByCwd.clear();
 	resolveInstallInFlightByCwd.clear();
+	correctedAvailabilityByCwd.clear();
 	resetPathWalkMemo();
 	availabilityStateGeneration += 1;
 }
@@ -931,9 +1092,16 @@ async function verifyOrInstallCommand(
 
 	const state = installStateFor(cwd, toolId);
 	if (state.suppressed) return null;
+	const installStartedAt = Date.now();
 	const installed = await ensureTool(toolId);
 	if (installed) {
 		noteInstallSuccess(toolId, cwd);
+		// The command probe just above (or the caller's own probe, for
+		// `resolveCommandArgsWithInstallFallback`) already wrote a latched
+		// `unavailable` row. Without a compensating row here, the durable log
+		// keeps saying the tool is off after the installer just brought it back
+		// — the third seam of #1606/#1610/#1612 (#1636).
+		emitCompensatingAvailableRow(cwd, toolId, installStartedAt, installed);
 		return installed;
 	}
 	noteInstallFailure(toolId, cwd);
@@ -1005,10 +1173,25 @@ async function resolveAvailableOrInstallUnshared(
 	if (state.suppressed) {
 		return null;
 	}
+	const installStartedAt = Date.now();
 	const installed = await ensureTool(toolId);
 	if (installed) {
 		noteInstallSuccess(toolId, cwd);
 		checker.reset?.();
+		// The PATH probe above already wrote a latched `unavailable` row via
+		// `checker.isAvailableAsync`. Without a compensating row here, the durable
+		// log keeps saying the tool is off after the installer just brought it
+		// back — the shape #1606/PR #1610 fixed in `ensureViaInstaller`, shared
+		// here by ~16 runners behind this helper (#1612), and by
+		// `verifyOrInstallCommand` for the third seam (#1636).
+		//
+		// `checker.reset()` above clears the checker's cache, so the NEXT call
+		// re-probes PATH from scratch — and for a managed-dir-only install that
+		// probe misses again unless `createVenvFinder` finds it first (#1638).
+		// Left unguarded, every one of those repeat misses would re-fire this
+		// row, claiming a fresh install each time — `emitCompensatingAvailableRow`
+		// gates on the once-per-correction memo to prevent that.
+		emitCompensatingAvailableRow(cwd, toolId, installStartedAt, installed);
 		return installed;
 	}
 	noteInstallFailure(toolId, cwd);

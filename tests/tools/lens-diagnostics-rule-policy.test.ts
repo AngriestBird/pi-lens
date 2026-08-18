@@ -25,9 +25,22 @@ const freshFetchMocks = vi.hoisted(() => ({
 	fetchFreshProjectDiagnostics: vi.fn(),
 }));
 
-vi.mock("../../clients/project-diagnostics/fresh-fetch.js", () => ({
-	fetchFreshProjectDiagnostics: freshFetchMocks.fetchFreshProjectDiagnostics,
-}));
+// #1623 fix-round F6: `ANALYZER_IDS` flows through from the real module via
+// `importOriginal` rather than a hand-duplicated array — see the sibling
+// mock in lens-diagnostics.test.ts for the full rationale.
+vi.mock(
+	"../../clients/project-diagnostics/fresh-fetch.js",
+	async (importOriginal) => {
+		const actual =
+			await importOriginal<
+				typeof import("../../clients/project-diagnostics/fresh-fetch.js")
+			>();
+		return {
+			...actual,
+			fetchFreshProjectDiagnostics: freshFetchMocks.fetchFreshProjectDiagnostics,
+		};
+	},
+);
 
 vi.mock("../../clients/bootstrap.js", () => ({
 	loadBootstrapClients: vi.fn().mockResolvedValue({}),

@@ -29,9 +29,25 @@ const freshFetchMocks = vi.hoisted(() => ({
 	fetchFreshProjectDiagnostics: vi.fn(),
 }));
 
-vi.mock("../../clients/project-diagnostics/fresh-fetch.js", () => ({
-	fetchFreshProjectDiagnostics: freshFetchMocks.fetchFreshProjectDiagnostics,
-}));
+// #1623 fix-round F6: `ANALYZER_IDS` flows through from the REAL module via
+// `importOriginal` rather than a hand-duplicated array — a hand-copy is
+// exactly the parallel-list anti-pattern #883/#585 (this module's own
+// header) exist to prevent, and it drifted silently once already (the F6
+// finding). Only `fetchFreshProjectDiagnostics` — the expensive, real-tool-
+// spawning half — is replaced.
+vi.mock(
+	"../../clients/project-diagnostics/fresh-fetch.js",
+	async (importOriginal) => {
+		const actual =
+			await importOriginal<
+				typeof import("../../clients/project-diagnostics/fresh-fetch.js")
+			>();
+		return {
+			...actual,
+			fetchFreshProjectDiagnostics: freshFetchMocks.fetchFreshProjectDiagnostics,
+		};
+	},
+);
 
 vi.mock("../../clients/bootstrap.js", () => ({
 	loadBootstrapClients: vi.fn().mockResolvedValue({}),
@@ -778,6 +794,80 @@ describe("lens_diagnostics mode=full", () => {
 		});
 	});
 
+	// #1618: a workspace sweep destroyed mid-run (the idle-reset race) used to
+	// leave every remaining file with a bare `timedOut: true` — rendered
+	// identically to a real budget timeout ("check didn't complete within
+	// budget"), even though the file was never even attempted. The
+	// discriminated `unconfirmedReason` must reach this note honestly.
+	it("renders a service-destroyed file distinctly from a budget timeout, never as 'within budget' (#1618)", async () => {
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{ filePath: "/proj/src/before.ts", diagnostics: [], count: 0 },
+				{
+					filePath: "/proj/src/after-1.ts",
+					diagnostics: [],
+					count: 0,
+					timedOut: true,
+					unconfirmedReason: "service_destroyed",
+				},
+				{
+					filePath: "/proj/src/after-2.ts",
+					diagnostics: [],
+					count: 0,
+					timedOut: true,
+					unconfirmedReason: "service_destroyed",
+				},
+			]),
+		};
+		const result = await run(makeTool({}, lspService), { mode: "full" });
+		const text = String(result.content[0].text);
+
+		expect(text).toContain("after-1.ts");
+		expect(text).toContain("after-2.ts");
+		expect(text).toMatch(/unconfirmed/i);
+		// The whole point: this must NOT read like a budget timeout.
+		expect(text).not.toContain("within budget");
+		expect(text).toContain("reset mid-sweep");
+		expect(result.details).toMatchObject({
+			lspFilesConfirmed: 1,
+			lspFilesUnconfirmed: 2,
+			unconfirmedLspFiles: ["/proj/src/after-1.ts", "/proj/src/after-2.ts"],
+		});
+	});
+
+	// #1618 review round 2: `findFullScanBindingMismatches` discovers a stale
+	// binding (`boundToCurrentDisk: false`) AFTER the sweep already returned
+	// the result as confirmed — no `.timedOut`, no `.error`, no
+	// `.unconfirmedReason`. The `classifyUnconfirmedReason`
+	// `result.unconfirmedReason ?? (result.error ? "error" : "budget")`
+	// fallback would otherwise silently claim it as "within budget", the
+	// exact string this whole PR exists to stop misrendering.
+	it("renders a stale-binding file as binding_mismatch, never as 'within budget' (#1618 R2)", async () => {
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
+				{ filePath: "/proj/src/clean.ts", diagnostics: [], count: 0 },
+				{
+					filePath: "/proj/src/stale-binding.ts",
+					diagnostics: [],
+					count: 0,
+					boundToCurrentDisk: false,
+				},
+			]),
+		};
+		const result = await run(makeTool({}, lspService), { mode: "full" });
+		const text = String(result.content[0].text);
+
+		expect(text).toContain("stale-binding.ts");
+		expect(text).toMatch(/unconfirmed/i);
+		expect(text).not.toContain("within budget");
+		expect(text).toContain("changed on disk");
+		expect(result.details).toMatchObject({
+			lspFilesConfirmed: 1,
+			lspFilesUnconfirmed: 1,
+			unconfirmedLspFiles: ["/proj/src/stale-binding.ts"],
+		});
+	});
+
 	it("does not surface an unconfirmed note when every LSP result is confirmed (#630)", async () => {
 		const lspService = {
 			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([
@@ -1125,6 +1215,118 @@ describe("lens_diagnostics mode=full", () => {
 		).not.toHaveBeenCalled();
 	});
 
+	// #1623 fix-round F3: this pair pins the two halves of cache-age rendering
+	// a mutation probe found completely uncovered — mutating `formatCacheAge`
+	// to return a fixed "MUTANT-AGE" string, and separately deleting the
+	// `cachedAgeMs` filter that excludes cache-read lanes from "fetched fresh
+	// this call", both left the full 122-test suite green. Pinning the EXACT
+	// rendered age string, and the fact that a cache-read id never lands in
+	// the "fetched fresh" list, kills both mutants.
+	it("renders the cache-age string for a cache-read-by-design lane, excluded from 'fetched fresh' (#1623 fix-round F3)", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: ["jscpd", "test-runner"],
+			cold: [],
+			timings: { jscpd: 42, "test-runner": 5 },
+			cachedAgeMs: { "test-runner": 18 * 60_000 },
+		});
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cached",
+		});
+
+		const text = String(result.content[0].text);
+		// The exact rendered age — a mutated `formatCacheAge` returning a fixed
+		// placeholder string would fail this.
+		expect(text).toContain(
+			"served from cache this call (not re-run): test-runner (18m old).",
+		);
+		// A deleted `cachedAgeMs` filter would fold test-runner into this same
+		// sentence as if it had just run fresh.
+		expect(text).toContain("fetched fresh this call: jscpd (42ms).");
+		expect(text).not.toMatch(/fetched fresh this call:[^.]*test-runner/);
+		expect(
+			(result.details as { analyzersCachedAgeMs?: Record<string, number> })
+				.analyzersCachedAgeMs,
+		).toEqual({ "test-runner": 18 * 60_000 });
+	});
+
+	// #1623 fix-round F4: `CacheManager.readCache` accepts a missing/corrupt
+	// `meta.timestamp` as a cache HIT (the timestamp only gates staleness),
+	// so a corrupt test-runner-findings cache reaches `formatCacheAge` as
+	// NaN. Pre-fix-round this rendered "test-runner (NaNh old)" — a fabricated
+	// age is a worse honesty gap than the one #1623 exists to close.
+	it("renders 'age unknown' instead of NaN for a cache-read lane with a corrupt age (#1623 fix-round F4)", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: ["test-runner"],
+			cold: [],
+			timings: { "test-runner": 5 },
+			cachedAgeMs: { "test-runner": Number.NaN },
+		});
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cached",
+		});
+
+		const text = String(result.content[0].text);
+		expect(text).not.toMatch(/NaN/i);
+		expect(text).toContain(
+			"served from cache this call (not re-run): test-runner (age unknown old).",
+		);
+	});
+
+	// #1623 fix-round F4: a corrupt `scannedAt` on the STORED cheap-scan
+	// snapshot (loadProjectDiagnosticsSnapshot) must not compute a NaN age
+	// either — it must fall back to the same "no cached scan" wording F2
+	// added for a genuinely missing snapshot, not "NaNm old".
+	it("mode=full refreshRunners=cached with a corrupt snapshot scannedAt renders not-run, not NaN (#1623 fix-round F4)", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue({
+			version: 1,
+			cwd: "/proj",
+			tier: "cheap",
+			scannedAt: "not-a-date",
+			filesScanned: 1,
+			runners: ["fact-rules"],
+			diagnostics: [],
+		});
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cached",
+		});
+
+		const text = String(result.content[0].text);
+		expect(text).not.toMatch(/NaN/i);
+		expect(text).toMatch(/not run \(no cached scan/);
+	});
+
+	// #1623 fix-round F4 (extractors.ts unit coverage): `formatCacheAge` itself
+	// must guard non-finite input directly, not merely appear to via callers
+	// that happen to pass finite numbers.
+	it("formatCacheAge renders 'age unknown' for non-finite input (#1623 fix-round F4)", async () => {
+		const { formatCacheAge } = await import(
+			"../../clients/project-diagnostics/extractors.js"
+		);
+		expect(formatCacheAge(Number.NaN)).toBe("age unknown");
+		expect(formatCacheAge(Number.POSITIVE_INFINITY)).toBe("age unknown");
+		expect(formatCacheAge(18 * 60_000)).toBe("18m");
+	});
+
 	it("does not read jscpd cache when refreshRunners is not set (LSP-only full mode)", async () => {
 		mockSummaries.length = 0;
 		const lspService = {
@@ -1153,6 +1355,33 @@ describe("lens_diagnostics mode=full", () => {
 
 		expect(String(result.content[0].text)).not.toContain("Duplicate code");
 		expect(cm.readCache).not.toHaveBeenCalledWith("jscpd-ts", "/proj");
+	});
+
+	// #1623 fix-round F2 (blocker): `refreshRunners=cached` REQUESTS the cheap
+	// project scan, but with no snapshot ever written yet
+	// (`loadProjectDiagnosticsSnapshot` returns undefined) the pre-fix-round
+	// code rendered NOTHING — `cheapScanCachedNote` was gated on `scannedAt`
+	// being present, and `cheapScanNotRequestedNote` was gated on the scan
+	// never having been requested at all, so neither fired for "requested,
+	// but nothing cached yet". The original #1623 silence for the ast-grep/
+	// tree-sitter/fact-rules lane survived in exactly this mode.
+	it("mode=full refreshRunners=cached with NO stored snapshot renders the cheap scan as not-run, not silent (#1623 fix-round F2)", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
+			undefined,
+		);
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cached",
+		});
+
+		const text = String(result.content[0].text);
+		expect(text).toContain("ast-grep");
+		expect(text).toMatch(/not run \(no cached scan/);
 	});
 
 	// #533: a cache-only extractor with NO cache entry yet must render as cold,
@@ -1310,18 +1539,44 @@ describe("lens_diagnostics mode=full", () => {
 		expect(String(result.content[0].text)).not.toContain("edit-scoped");
 	});
 
-	it("mode=full without refreshRunners never reports cold extractors (they weren't requested)", async () => {
+	// #1623: pre-fix, this scenario rendered NOTHING about the heavyweight
+	// lanes (gitleaks, knip, trivy, ...) — silence that reads exactly like
+	// "ran clean" (the dogfood forensics finding #1623 documents: an agent
+	// read a mode=full result with no gitleaks section as "gitleaks ran and
+	// found nothing", when in fact no gitleaks scan had run at all). The
+	// (expensive) fresh-fetch must still never run in this mode — only the
+	// RENDERING changes, to say so honestly instead of staying silent.
+	it("mode=full without refreshRunners renders every heavyweight lane as not-run, not silent (#1623)", async () => {
 		mockSummaries.length = 0;
 		const lspService = {
 			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
 		};
 		const result = await run(makeTool({}, lspService), { mode: "full" });
-		expect(String(result.content[0].text)).not.toContain("cold");
+		const text = String(result.content[0].text);
+		// #1623 fix-round F5: the quick-mode batch renders as its own compact
+		// "not run this call (quick mode)" note (bare ids, one shared reason),
+		// distinct from the detailed per-id "cold (not applicable /
+		// unavailable)" format genuinely-cold lanes get — these lanes ARE
+		// applicable and available, this call just didn't ask for them.
+		expect(text).toContain("not run this call (quick mode)");
+		expect(text).not.toContain("cold (not applicable / unavailable");
+		// The secrets lane specifically — the issue's red-first case.
+		expect(text).toMatch(/not run this call \(quick mode\)[^.]*gitleaks/);
+		expect(text).toContain("refreshRunners not requested");
+		// ast-grep isn't one of `ANALYZER_IDS` (it's the cheap in-process scan,
+		// gated separately) — it needs its own marker so it doesn't stay the
+		// one lane still silently absent.
+		expect(text).toContain("ast-grep");
 		expect((result.details as { coldRunners?: string[] }).coldRunners).toEqual(
-			[],
+			expect.arrayContaining(["gitleaks", "knip", "trivy", "govulncheck"]),
 		);
+		expect(
+			(result.details as { coldReasons?: Record<string, string> })
+				.coldReasons?.gitleaks,
+		).toMatch(/refreshRunners not requested/);
 		// #585: without refreshRunners opting in, the (expensive) fresh-fetch of
-		// the heavyweight analyzers must not run at all.
+		// the heavyweight analyzers must still never run — only the rendering
+		// of that skip changed, not the (deliberately cheap) behavior itself.
 		expect(
 			freshFetchMocks.fetchFreshProjectDiagnostics,
 		).not.toHaveBeenCalled();
