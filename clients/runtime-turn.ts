@@ -32,6 +32,7 @@ import {
 	toRunnerDisplayPath,
 } from "./dispatch/runner-context.js";
 import { getKnipIgnorePatterns } from "./file-utils.js";
+import { formatCacheAgeLabel } from "./finding-delivery-gate.js";
 import {
 	getFullScanWallClockMs,
 	isWorkspaceSweepActive,
@@ -1465,6 +1466,19 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// CRITICAL is a blocker (a known-exploitable CVE in a shipped dep is real
 	// production risk); HIGH/MEDIUM/LOW are advisory. The agent gets the upgrade
 	// target as a hint and decides — we never auto-edit lockfiles.
+	//
+	// #1634: these three trivy reports (critical blocker, non-critical
+	// advisory, license advisory below) name a PACKAGE, not a file:line — there
+	// is no cited path for `gateFindingsByPathFreshness` to stat, so unlike the
+	// secrets/govulncheck stores above this store cannot be freshness-GATED.
+	// It is the delivery gate's explicit-label escape hatch instead
+	// (`clients/finding-delivery-gate.ts`, surfaces `runtime-turn:trivy-*`):
+	// the session_start cache can be arbitrarily old, so its age is stated
+	// plainly rather than presenting a CRITICAL blocker as if it were current.
+	// This runs on top of (not instead of) #1625's disposition filter below —
+	// a suppressed finding never reaches this render at all, so the two only
+	// ever compose.
+	const trivyAgeLabel = formatCacheAgeLabel(trivyCacheEntry?.data?.scannedAt);
 	const trivyFindingsFiltered = filterFindingsByDisposition(
 		trivyCacheEntry?.data?.findings ?? [],
 		cwd,
@@ -1487,7 +1501,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		if (critical.length) {
 			const shown = critical.slice(0, 5);
 			let report =
-				"🔴 STOP — CRITICAL dependency CVEs (trivy). Upgrade before shipping:\n";
+				`🔴 STOP — CRITICAL dependency CVEs (trivy, ${trivyAgeLabel}). Upgrade before shipping:\n`;
 			for (const f of shown) report += fmt(f);
 			if (critical.length > shown.length) {
 				report += `  … and ${critical.length - shown.length} more\n`;
@@ -1496,7 +1510,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		}
 		if (advisory.length) {
 			const shown = advisory.slice(0, 5);
-			let report = "🛡️ Dependency CVEs (trivy) — upgrade where possible:\n";
+			let report = `🛡️ Dependency CVEs (trivy, ${trivyAgeLabel}) — upgrade where possible:\n`;
 			for (const f of shown) report += fmt(f);
 			if (advisory.length > shown.length) {
 				report += `  … and ${advisory.length - shown.length} more\n`;
@@ -1507,12 +1521,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 
 	// trivy — dependency license risk (#131 Mode 4). Advisory only: a copyleft /
 	// restricted license in a proprietary tree is a compliance signal, not a
-	// build break. Surfaced from the same cached `trivy fs` pass.
+	// build break. Surfaced from the same cached `trivy fs` pass — same #1634
+	// explicit-label rationale as the CVE reports above (no cited path to gate).
 	const licenses = trivyCacheEntry?.data?.licenses ?? [];
 	if (licenses.length) {
 		const shown = licenses.slice(0, 5);
 		let report =
-			"📜 Dependency license risk (trivy) — review for compliance:\n";
+			`📜 Dependency license risk (trivy, ${trivyAgeLabel}) — review for compliance:\n`;
 		for (const l of shown) {
 			const cat = l.category ? `, ${l.category}` : "";
 			report += `  ${l.pkgName} — ${l.license} (${l.severity}${cat})\n`;
