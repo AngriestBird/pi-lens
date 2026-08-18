@@ -13,12 +13,18 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { TRANSIENT_BASE_COOLDOWN_MS } from "../../../../clients/dispatch/runners/utils/availability-policy.ts";
+import { TRANSIENT_BASE_COOLDOWN_MS } from "../../../../clients/dispatch/runners/utils/availability-policy.js";
 
-const { safeSpawnAsync, logLatencySpy, recordDegradationSpy } = vi.hoisted(() => ({
+const {
+	safeSpawnAsync,
+	logLatencySpy,
+	recordDegradationSpy,
+	incrementDegradationCountSpy,
+} = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),
 	logLatencySpy: vi.fn(),
 	recordDegradationSpy: vi.fn(),
+	incrementDegradationCountSpy: vi.fn(),
 }));
 
 vi.mock("../../../../clients/safe-spawn.js", () => ({
@@ -32,7 +38,7 @@ vi.mock("../../../../clients/latency-logger.js", () => ({
 vi.mock("../../../../clients/degradation-ledger.js", () => ({
 	recordDegradation: recordDegradationSpy,
 	recordDegradationOnce: vi.fn(),
-	incrementDegradationCount: vi.fn(),
+	incrementDegradationCount: incrementDegradationCountSpy,
 }));
 
 /**
@@ -48,7 +54,7 @@ async function loadRunner(): Promise<{
 }> {
 	vi.resetModules();
 	const mod = await import(
-		"../../../../clients/dispatch/runners/psscriptanalyzer.ts"
+		"../../../../clients/dispatch/runners/psscriptanalyzer.js"
 	);
 	return mod.default;
 }
@@ -158,6 +164,7 @@ beforeEach(() => {
 	safeSpawnAsync.mockReset();
 	logLatencySpy.mockReset();
 	recordDegradationSpy.mockReset();
+	incrementDegradationCountSpy.mockReset();
 	vi.useFakeTimers({ toFake: ["Date"] });
 	return () => vi.useRealTimers();
 });
@@ -318,7 +325,7 @@ describe("psscriptanalyzer execution-policy-blocked -File run (#1540)", () => {
 			cause: "policy-denied",
 			latched: true,
 		});
-		expect(recordDegradationSpy).toHaveBeenCalledWith(
+		expect(incrementDegradationCountSpy).toHaveBeenCalledWith(
 			expect.objectContaining({
 				kind: "grammar-blocked",
 				subject: "psscriptanalyzer",
@@ -353,12 +360,45 @@ describe("psscriptanalyzer execution-policy-blocked -File run (#1540)", () => {
 		);
 		expect(execDecision).toBeDefined();
 		expect(execDecision?.metadata).toMatchObject({ outcome: "transient" });
-		expect(recordDegradationSpy).toHaveBeenCalledWith(
+		expect(incrementDegradationCountSpy).toHaveBeenCalledWith(
 			expect.objectContaining({
 				kind: "grammar-blocked",
 				subject: "psscriptanalyzer",
 			}),
 		);
+	});
+
+	it("does not latch a spawn-UNKNOWN -File run off for the session (#1556 review F1)", async () => {
+		const runner = await loadRunner();
+		// The child never started -- the #533 Windows `spawn UNKNOWN` class,
+		// reused from the module-availability suite above. Nothing was learned
+		// about the execution policy, so this must decay the same way the
+		// nonzero-exit branch already does, not latch `-File` off durably.
+		hostWithFileResult(spawnUnknownResult);
+
+		const result = await runner.run(ctx());
+		expect(result.status).not.toBe("succeeded");
+
+		const execDecision = decisions().find(
+			(entry) => entry.metadata?.tool === "psscriptanalyzer-exec",
+		);
+		expect(execDecision?.metadata).toMatchObject({
+			outcome: "transient",
+			cause: "probe-rejected",
+			latched: false,
+		});
+
+		// Pre-fix bug: a spawn-UNKNOWN on this run passed classified.outcome
+		// through raw, which classifyProbeFailure calls "non-installable" and
+		// the latch treats as durable -- permanently disabling PSScriptAnalyzer
+		// for the session. A transient verdict still has a cooldown of its own
+		// (unlike a latching one, it is never permanent) so advance past it and
+		// confirm a later save re-spawns -File instead of reusing a stale
+		// "unavailable" verdict forever.
+		vi.setSystemTime(new Date(Date.now() + TRANSIENT_BASE_COOLDOWN_MS + 1));
+		hostWithFileResult(spawnUnknownResult);
+		await runner.run(ctx());
+		expect(callsMatching("-File")).toHaveLength(2);
 	});
 
 	it("still reports a genuinely clean -File run as succeeded", async () => {

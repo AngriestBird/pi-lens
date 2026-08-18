@@ -1849,8 +1849,9 @@ export async function handleSessionStart(
 	// login` and starts a fresh session still reads the previous session's
 	// stale "no token" verdict until the cooldown (if any) happens to expire.
 	resetZizmorTokenAvailability();
-	// psscriptanalyzer's two latches are module-local, so the generation counter
-	// above does not reach them (#1490).
+	// psscriptanalyzer's three latches (interpreter, module, -File exec) are
+	// module-local, so the generation counter above does not reach them
+	// (#1490, #1540).
 	resetPsScriptAnalyzerAvailability();
 	// #1123 item 3: a fresh session can re-report smells that a prior session
 	// already surfaced once (see `checkSmellsAndNoteOnce`'s once-per-session gate).

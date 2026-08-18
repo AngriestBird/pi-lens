@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { recordDegradation } from "../../degradation-ledger.js";
+import { incrementDegradationCount } from "../../degradation-ledger.js";
 import { safeSpawnAsync, type SpawnResult } from "../../safe-spawn.js";
 import type {
 	Diagnostic,
@@ -356,14 +356,25 @@ const psScriptAnalyzerRunner: RunnerDefinition = {
 			// empty stdout, and never a silent skip.
 			if (result.status === null) {
 				const classified = classifyProbeFailure(result, { hostStallMs });
+				let { outcome, cause } = classified;
+				// A `spawn UNKNOWN`/EMFILE/crash never ran the script, so it is not
+				// evidence that `-File` is broken (mirrors the nonzero-exit guard
+				// below, and checkModuleAvailable's own guard against over-latching
+				// an unclassified failure). Latching an unspawnable prober's
+				// verdict would durably disable analysis for the whole session on
+				// a host where `-File` works fine.
+				if (outcome !== "transient") {
+					outcome = "transient";
+					cause = "probe-rejected";
+				}
 				notePsDecision(execLatch, "psscriptanalyzer-exec", {
 					available: false,
-					outcome: classified.outcome,
-					cause: classified.cause,
+					outcome,
+					cause,
 					elapsedMs,
 					hostStallMs,
 				});
-				recordDegradation({
+				incrementDegradationCount({
 					kind: "grammar-blocked",
 					subject: "psscriptanalyzer",
 					reason: `PowerShell (${cmd}) -File analysis exited with no status -- crash or signal-killed process`,
@@ -373,10 +384,18 @@ const psScriptAnalyzerRunner: RunnerDefinition = {
 
 			if (result.status !== 0) {
 				const stderrText = result.stderr ?? "";
+				// Require the SecurityError/UnauthorizedAccess pairing that a real
+				// script-load block produces, not a bare "unauthorizedaccess"
+				// match (#1556 review F4) -- that word alone also appears in
+				// unrelated file-permission and access-denied stderr that has
+				// nothing to do with the execution policy, and misclassifying it
+				// as `policy-denied` would latch analysis off durably for a
+				// transient, per-file permission error.
 				const policyDenied =
-					/securityerror|execution polic(y|ies)|running scripts is disabled|unauthorizedaccess/i.test(
-						stderrText,
-					);
+					/securityerror/i.test(stderrText) &&
+					(/execution polic(y|ies)/i.test(stderrText) ||
+						/running scripts is disabled/i.test(stderrText) ||
+						/unauthorizedaccess/i.test(stderrText));
 				const classified = classifyProbeFailure(result, { hostStallMs });
 				let { outcome, cause } = classified;
 				if (policyDenied) {
@@ -399,7 +418,7 @@ const psScriptAnalyzerRunner: RunnerDefinition = {
 					elapsedMs,
 					hostStallMs,
 				});
-				recordDegradation({
+				incrementDegradationCount({
 					kind: "grammar-blocked",
 					subject: "psscriptanalyzer",
 					reason: policyDenied
