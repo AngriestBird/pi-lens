@@ -1,5 +1,7 @@
+import fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getGlobalPiLensDir } from "../../clients/file-utils.js";
 import {
 	PROJECT_SNAPSHOT_VERSION,
 	saveProjectSnapshot,
@@ -9,6 +11,19 @@ import { handleSessionStart } from "../../clients/runtime-session.js";
 import { _resetSlowFsForTests } from "../../clients/slow-fs.js";
 import { _resetSubagentModeForTests } from "../../clients/subagent-mode.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
+
+/** A pid guaranteed dead on this machine, for orphan-staging-file tests
+ *  (mirrors tests/clients/atomic-write-stage-gc.test.ts's helper). */
+function findDeadPid(): number {
+	for (let candidate = 999_983; candidate > 1_000; candidate -= 7_919) {
+		try {
+			process.kill(candidate, 0);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ESRCH") return candidate;
+		}
+	}
+	throw new Error("could not find a definitively dead pid");
+}
 
 // Stub the LSP service so the no-warmFiles dominant-language auto-warm (#203)
 // can't spawn a real language server against the throwaway temp dirs (which the
@@ -822,6 +837,49 @@ describe("runtime-session notifications", () => {
 			expect(knipAnalyze).toHaveBeenCalledTimes(1);
 			expect(jscpdEnsure).toHaveBeenCalledTimes(1);
 		} finally {
+			await env.cleanup();
+		}
+	});
+});
+
+// #1609 review F1: sweepOwnStagingFiles never recurses, so the session_start
+// orphan sweep must list every atomic-write-writing directory explicitly.
+// clients/installer/index.ts writes downloaded tool binaries into
+// getGlobalPiLensDir()/bin and /tools (GITHUB_BIN_DIR / TOOLS_DIR) — a kill
+// mid-install (this PR's own motivating scenario) can leave an orphaned
+// staging file behind there, and unique pid-thread-seq staging names mean
+// repeated kills ACCUMULATE orphans rather than overwriting one. Pre-fix,
+// runtime-session.ts's sweep call omitted both directories entirely, so an
+// orphan planted there was never reaped by session_start.
+describe("session_start orphan-stage sweep (#1609 review F1)", () => {
+	it("reaps a dead-pid orphan staging file in the installer's bin/ and tools/ dirs", async () => {
+		const globalDir = getGlobalPiLensDir();
+		const binDir = path.join(globalDir, "bin");
+		const toolsDir = path.join(globalDir, "tools");
+		fs.mkdirSync(binDir, { recursive: true });
+		fs.mkdirSync(toolsDir, { recursive: true });
+		const deadPid = findDeadPid();
+		const binOrphan = path.join(binDir, `ktlint.tmp-${deadPid}-0-1`);
+		const toolsOrphan = path.join(toolsDir, `package.json.tmp-${deadPid}-0-2`);
+		fs.writeFileSync(binOrphan, "orphan binary bytes");
+		fs.writeFileSync(toolsOrphan, "orphan package.json bytes");
+
+		const { env } = await runSessionStart("quick");
+		try {
+			// The sweep is fire-and-forget (void ...).catch(...)) inside
+			// handleSessionStart, so poll for the orphans' removal rather than
+			// asserting synchronously after the call returns.
+			await vi.waitFor(
+				() => {
+					if (fs.existsSync(binOrphan) || fs.existsSync(toolsOrphan)) {
+						throw new Error("orphan staging files not yet reaped");
+					}
+				},
+				{ timeout: 2000 },
+			);
+		} finally {
+			fs.rmSync(binDir, { recursive: true, force: true });
+			fs.rmSync(toolsDir, { recursive: true, force: true });
 			await env.cleanup();
 		}
 	});
