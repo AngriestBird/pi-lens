@@ -1014,7 +1014,10 @@ async function resolveAvailableOrInstallUnshared(
 		// `checker.isAvailableAsync`. Without a compensating row here, the durable
 		// log keeps saying the tool is off after the installer just brought it
 		// back — the shape #1606/PR #1610 fixed in `ensureViaInstaller`, shared
-		// here by ~16 runners behind this helper (#1612).
+		// here by ~16 runners behind this helper (#1612). `ensureTool` here is
+		// the same pi-lens managed-tools installer #1610 used, so this reuses
+		// its exact evidence shape: a basename, never the absolute path
+		// (#1568 review's redaction rule), plus the `managed-dir` source tag.
 		logAvailabilityDecision(
 			{
 				tool: toolId,
@@ -1024,7 +1027,11 @@ async function resolveAvailableOrInstallUnshared(
 				elapsedMs: Date.now() - installStartedAt,
 				latched: true,
 				classifiedBy: "caller",
-				evidence: { install: "succeeded", binaryPath: installed },
+				evidence: {
+					install: "succeeded",
+					binary: path.basename(installed),
+					source: "managed-dir",
+				},
 			},
 			cwd,
 		);

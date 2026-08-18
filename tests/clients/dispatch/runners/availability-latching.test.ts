@@ -503,7 +503,10 @@ describe.each(["ruff", "golangci-lint", "shellcheck"])(
 			// The compensating row #1612 requires: the installer resolved the tool
 			// after the probe latched it absent, so a second row must say so — and
 			// its verdict must agree with what the caller got back (`resolved`
-			// above), not just exist.
+			// above), not just exist. Evidence carries a BASENAME plus the
+			// `managed-dir` source tag, matching #1610's settled shape exactly —
+			// the caller-visible `resolved` value above still carries the full
+			// path; only the durable log row is redacted (#1568 review rule).
 			expect(records[1].metadata).toMatchObject({
 				tool,
 				verdict: "available",
@@ -512,9 +515,18 @@ describe.each(["ruff", "golangci-lint", "shellcheck"])(
 				classifiedBy: "caller",
 				evidence: {
 					install: "succeeded",
-					binaryPath: `/managed/bin/${tool}`,
+					binary: tool,
+					source: "managed-dir",
 				},
 			});
+
+			// Explicit latch/log agreement (#1610 review angle 1, reapplied here):
+			// the value the ~16 callers act on and the verdict this row logs must
+			// say the same thing. A truthy `resolved` with a logged `unavailable`
+			// (or vice versa) would mean the durable record and the runner that
+			// reads `resolveAvailableOrInstall` disagree about whether the tool
+			// works — worse than either being wrong alone.
+			expect(Boolean(resolved)).toBe(records[1].metadata.verdict === "available");
 		});
 	},
 );
