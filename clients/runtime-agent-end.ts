@@ -176,14 +176,20 @@ export async function handleAgentEnd({
 	const rootActionableAutofixEnabled = !!getFlag(
 		"lens-actionable-warning-autofix",
 	);
+	// The actionable-warnings cache is only ever written when the
+	// "lens-actionable-warnings" writer flag is on (clients/runtime-turn.ts).
+	// A reader that ignores this gate always misses in a host where the
+	// writer is off and logs "cache missing or expired" at every agent_end,
+	// misdirecting the debug log toward a bogus cache problem instead of the
+	// real cause: the feature that populates the cache is disabled (#1607).
+	const actionableWarningsWriterEnabled = !!getFlag("lens-actionable-warnings");
 	// A path-aware source resolver signals that nested configs may re-enable
 	// actionable autofix even when the root default is off. Legacy/test hosts
 	// without that resolver keep the old fast exit and avoid a cache read.
 	const inspectActionableReport =
-		rootActionableAutofixEnabled && typeof cacheManager.readCache === "function"
-			? true
-			: getFlagSource !== undefined &&
-				typeof cacheManager.readCache === "function";
+		actionableWarningsWriterEnabled &&
+		typeof cacheManager.readCache === "function" &&
+		(rootActionableAutofixEnabled || getFlagSource !== undefined);
 	if (records.length === 0 && !inspectActionableReport) return undefined;
 	if (deferredToOwner.length > 0) {
 		dbg(
@@ -564,15 +570,39 @@ export async function handleAgentEnd({
 	}
 
 	if (inspectActionableReport) {
+		const actionCwd = ctxCwd ?? runtime.projectRoot;
+		const actionableWarningsMaxAgeMs = 10 * 60_000;
 		const actionReport = cacheManager.readCache<ActionableWarningsReport>(
 			"actionable-warnings",
-			ctxCwd ?? runtime.projectRoot,
-			10 * 60_000,
+			actionCwd,
+			actionableWarningsMaxAgeMs,
 		);
 		if (!actionReport?.data) {
-			dbg(
-				"agent_end actionable_warnings_autofix: cache missing or expired, skipping fixes",
-			);
+			// Distinguish "no cache file was ever written" from "a cache file
+			// exists but its TTL elapsed" (#1607) — both used to collapse into
+			// one "cache missing or expired" line, which doesn't tell a reader
+			// whether the writer ran and produced a stale file, or never ran.
+			const inspection =
+				typeof cacheManager.inspectCache === "function"
+					? cacheManager.inspectCache(
+							"actionable-warnings",
+							actionCwd,
+							actionableWarningsMaxAgeMs,
+						)
+					: undefined;
+			if (inspection === "missing") {
+				dbg(
+					"agent_end actionable_warnings_autofix: cache absent, skipping fixes",
+				);
+			} else if (inspection === "stale") {
+				dbg(
+					"agent_end actionable_warnings_autofix: cache expired, skipping fixes",
+				);
+			} else {
+				dbg(
+					`agent_end actionable_warnings_autofix: cache missing or expired${inspection ? ` (${inspection})` : ""}, skipping fixes`,
+				);
+			}
 		} else {
 			const enabledFiles = actionReport.data.files.filter((file) => {
 				// #1247: the per-edit dispatch surface gates ignored files before
