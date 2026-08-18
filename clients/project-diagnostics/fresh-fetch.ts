@@ -90,7 +90,12 @@ import { getKnipIgnorePatterns } from "../file-utils.js";
 import { isAtOrAboveHomeDir } from "../path-utils.js";
 import { GitleaksClient } from "../gitleaks-client.js";
 import { GovulncheckClient } from "../govulncheck-client.js";
+import {
+	isToolInstallAllowedByTrust,
+	projectTrustDenialReason,
+} from "../project-trust.js";
 import { TrivyClient } from "../trivy-client.js";
+import { reasonFromAvailabilityVerdict } from "./extractors.js";
 import { deadCodeResultToProjectDiagnostics } from "./runner-adapters/dead-code.js";
 import { gitleaksResultToProjectDiagnostics } from "./runner-adapters/gitleaks.js";
 import { govulncheckResultToProjectDiagnostics } from "./runner-adapters/govulncheck.js";
@@ -292,7 +297,13 @@ export async function fetchFreshProjectDiagnostics(
 		// detection, exactly mirroring session_start's own logic.
 		task("jscpd", async () => {
 			if (!(await clients.jscpdClient.ensureAvailable())) {
-				markCold("jscpd", "jscpd binary unavailable");
+				markCold(
+					"jscpd",
+					reasonFromAvailabilityVerdict(
+						"jscpd",
+						clients.jscpdClient.getAvailabilityVerdict?.(),
+					),
+				);
 				return;
 			}
 			const isTsProject = fs.existsSync(
@@ -323,7 +334,13 @@ export async function fetchFreshProjectDiagnostics(
 		// madge — circular-dependency detection.
 		task("madge", async () => {
 			if (!(await clients.depChecker.ensureAvailable())) {
-				markCold("madge", "madge binary unavailable");
+				markCold(
+					"madge",
+					reasonFromAvailabilityVerdict(
+						"madge",
+						clients.depChecker.getAvailabilityVerdict?.(),
+					),
+				);
 				return;
 			}
 			const startMs = Date.now();
@@ -353,7 +370,13 @@ export async function fetchFreshProjectDiagnostics(
 				return;
 			}
 			if (!(await clients.gitleaksClient.ensureAvailable())) {
-				markCold("gitleaks", "gitleaks binary unavailable");
+				markCold(
+					"gitleaks",
+					reasonFromAvailabilityVerdict(
+						"gitleaks",
+						clients.gitleaksClient.getAvailabilityVerdict?.(),
+					),
+				);
 				return;
 			}
 			const startMs = Date.now();
@@ -381,7 +404,24 @@ export async function fetchFreshProjectDiagnostics(
 				return;
 			}
 			if (!(await clients.govulncheckClient.ensureAvailable())) {
-				markCold("govulncheck", "govulncheck binary unavailable");
+				// #1623 fix-round F1: `GovulncheckClient.doEnsureAvailable` has a
+				// branch (`assertInstallAllowed`, govulncheck-client.ts) that returns
+				// false WITHOUT ever touching its availability latch — a
+				// project-trust install denial, deliberately not latched so a later
+				// trust grant can retry (see that file's own comment). The latch's
+				// verdict is genuinely absent in that case, not merely unread, so
+				// check trust denial FIRST via the same taxonomy project-trust.ts
+				// already exposes, and only fall back to the probe-based verdict
+				// (a real timeout/absence) when trust isn't the reason.
+				markCold(
+					"govulncheck",
+					isToolInstallAllowedByTrust()
+						? reasonFromAvailabilityVerdict(
+								"govulncheck",
+								clients.govulncheckClient.getAvailabilityVerdict?.(),
+							)
+						: (projectTrustDenialReason() ?? "govulncheck binary unavailable"),
+				);
 				return;
 			}
 			const startMs = Date.now();
@@ -416,7 +456,13 @@ export async function fetchFreshProjectDiagnostics(
 		// `lens_diagnostics mode=full` — the honesty gap (#533) this task closes.
 		task("opengrep", async () => {
 			if (!(await clients.opengrepClient.ensureAvailable())) {
-				markCold("opengrep", "opengrep binary unavailable");
+				markCold(
+					"opengrep",
+					reasonFromAvailabilityVerdict(
+						"opengrep",
+						clients.opengrepClient.getAvailabilityVerdict?.(),
+					),
+				);
 				return;
 			}
 			const startMs = Date.now();
@@ -445,7 +491,13 @@ export async function fetchFreshProjectDiagnostics(
 				return;
 			}
 			if (!(await clients.trivyClient.ensureAvailable())) {
-				markCold("trivy", "trivy binary unavailable");
+				markCold(
+					"trivy",
+					reasonFromAvailabilityVerdict(
+						"trivy",
+						clients.trivyClient.getAvailabilityVerdict?.(),
+					),
+				);
 				return;
 			}
 			const startMs = Date.now();

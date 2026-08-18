@@ -1,3 +1,8 @@
+import type {
+	AvailabilityCause,
+	AvailabilityOutcome,
+} from "../dispatch/runners/utils/availability-policy.js";
+
 /**
  * Provenance metadata for the heavyweight project analyzers surfaced in
  * `lens_diagnostics mode=full`.
@@ -75,6 +80,15 @@ export function formatNotRunEntry(
  * seconds don't matter, "12m" vs "3h" does.
  */
 export function formatCacheAge(ms: number): string {
+	// #1623 fix-round F4: `CacheManager.readCache` accepts a missing/corrupt
+	// `meta.timestamp` as a HIT (the timestamp only gates staleness, not
+	// validity), so `Date.now() - new Date(badTimestamp).getTime()` reaches
+	// here as NaN. Rendering "NaNh old" is a worse honesty gap than the one
+	// this whole module exists to close — say the age is unknown instead of
+	// fabricating one. Mirrors the sibling `Number.isFinite` guard in
+	// `./cache.ts`'s `reconcileProjectDiagnosticsSnapshot` (fail-safe on an
+	// unparseable timestamp rather than propagate NaN).
+	if (!Number.isFinite(ms)) return "age unknown";
 	if (ms < 0) return "0m";
 	const totalMinutes = Math.round(ms / 60_000);
 	if (totalMinutes < 1) return "under 1m";
@@ -82,4 +96,54 @@ export function formatCacheAge(ms: number): string {
 	const hours = Math.floor(totalMinutes / 60);
 	const minutes = totalMinutes % 60;
 	return minutes > 0 ? `${hours}h${minutes}m` : `${hours}h`;
+}
+
+/**
+ * #1623 fix-round F1: the shape every availability-verdict accessor added to
+ * gitleaks/trivy/opengrep/govulncheck (`SecurityScanClient`), knip
+ * (`KnipClient`), madge (`DependencyChecker`), and jscpd (`JscpdClient`)
+ * returns — mirrors `AvailabilityVerdict` (dispatch/runners/utils/
+ * runner-helpers.ts) minus the fields this caller doesn't need.
+ */
+export interface AvailabilityVerdictLike {
+	outcome: AvailabilityOutcome | null;
+	cause: AvailabilityCause | null;
+	/** Epoch ms after which a transient verdict may be re-probed; 0 = latched. */
+	retryAtMs: number;
+}
+
+/**
+ * #1623 fix-round F1: a "cold" reason for an analyzer whose `ensureAvailable()`
+ * returned false, built from the SAME `AvailabilityOutcome`/`AvailabilityCause`
+ * taxonomy every dispatch-side unavailability message already uses
+ * (`describeUnavailability`, availability-policy.ts) — not a re-guessed
+ * "binary unavailable" for every failure shape.
+ *
+ * `ensureAvailable() === false` collapses at least three distinct causes: a
+ * durable absence (`missing`), a transient probe under an active retry
+ * cooldown (`transient`), and — for govulncheck specifically — a project-trust
+ * install denial the latch never even records (`assertInstallAllowed` returns
+ * before touching it, project-trust.ts). fresh-fetch.ts's govulncheck task
+ * checks trust denial itself, via `projectTrustDenialReason()`, before
+ * falling back to this function. Wording a cooldown as "unavailable" would
+ * repeat, one layer up, exactly the dispatch-layer defect #1467 fixed.
+ */
+export function reasonFromAvailabilityVerdict(
+	tool: string,
+	verdict: AvailabilityVerdictLike | undefined,
+): string {
+	if (!verdict || verdict.outcome === null) return `${tool} binary unavailable`;
+	const { outcome, cause } = verdict;
+	if (outcome === "transient") {
+		if (cause === "install-retry-exhausted") {
+			return `${tool} install kept timing out and hit its retry ceiling this session (not reported missing)`;
+		}
+		const remainingMs = verdict.retryAtMs - Date.now();
+		const remainingS = remainingMs > 0 ? Math.round(remainingMs / 1000) : 0;
+		return `${tool} availability probe — retry cooldown (${remainingS}s), not a missing install`;
+	}
+	if (outcome === "non-installable") {
+		return `${tool} unavailable on this host (non-installable)`;
+	}
+	return `${tool} binary unavailable`;
 }

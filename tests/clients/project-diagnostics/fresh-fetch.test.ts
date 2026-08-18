@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BootstrapClients } from "../../../clients/bootstrap.js";
 import { snapshotAdvisoryProvenance } from "../../../clients/advisory-provenance.js";
 import { fetchFreshProjectDiagnostics } from "../../../clients/project-diagnostics/fresh-fetch.js";
+import {
+	resetProjectTrust,
+	setProjectTrustState,
+} from "../../../clients/project-trust.js";
 import { RuntimeCoordinator } from "../../../clients/runtime-coordinator.js";
 import { removeTempDirSync } from "../test-utils.js";
 
@@ -368,6 +372,60 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		// default in this test's stub clients — the reason must say so, not
 		// just repeat the generic "runs at session-start" guess.
 		expect(result.coldReasons?.jscpd).toMatch(/unavailable/i);
+	});
+
+	// #1623 fix-round F1: `ensureAvailable() === false` collapses a durable
+	// absence and a TRANSIENT probe failure under an active retry cooldown
+	// into the same boolean. Pre-fix-round, every cold reason in this module
+	// said "<tool> binary unavailable" regardless of which one it was — a
+	// confident false claim for a tool that is actually installed and about
+	// to retry on its own. The reason must be built from the client's real
+	// availability verdict (the SAME `AvailabilityOutcome`/`AvailabilityCause`
+	// taxonomy the dispatch layer already uses), not a re-guessed string.
+	it("renders a retry-cooldown reason, not 'binary unavailable', for a transient probe failure (#1623 fix-round F1)", async () => {
+		const cacheManager = makeCacheManager();
+		const clients = makeClients({ jscpdAvailable: false });
+		const retryAtMs = Date.now() + 15_000;
+		(
+			clients.jscpdClient as unknown as {
+				getAvailabilityVerdict: ReturnType<typeof vi.fn>;
+			}
+		).getAvailabilityVerdict = vi.fn().mockReturnValue({
+			outcome: "transient",
+			cause: "probe-timeout",
+			retryAtMs,
+		});
+
+		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+
+		expect(result.coldReasons?.jscpd).toMatch(/retry cooldown \(\d+s\)/);
+		expect(result.coldReasons?.jscpd).not.toMatch(/binary unavailable/i);
+	});
+
+	// #1623 fix-round F1: govulncheck's project-trust denial (govulncheck-
+	// client.ts, `assertInstallAllowed`) deliberately never touches the
+	// availability latch — a later trust grant must be able to retry — so a
+	// reason built purely from the latch would see nothing and fall back to
+	// the generic "binary unavailable" guess for a tool that isn't even
+	// missing, just policy-blocked. fresh-fetch.ts's govulncheck task must
+	// check trust denial itself before falling back to the latch.
+	it("renders the project-trust denial reason for govulncheck, not 'binary unavailable' (#1623 fix-round F1)", async () => {
+		fs.writeFileSync(path.join(tmp, "go.mod"), "module demo\n\ngo 1.21\n");
+		setProjectTrustState("untrusted");
+		try {
+			const cacheManager = makeCacheManager();
+			const clients = makeClients();
+			(
+				clients.govulncheckClient.ensureAvailable as ReturnType<typeof vi.fn>
+			).mockResolvedValue(false);
+
+			const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+
+			expect(result.coldReasons?.govulncheck).toMatch(/not trusted/i);
+			expect(result.coldReasons?.govulncheck).not.toMatch(/binary unavailable/i);
+		} finally {
+			resetProjectTrust();
+		}
 	});
 
 	it("runs gitleaks fresh on a bare git repo with NO explicit gitleaks config (#608 smart-default)", async () => {

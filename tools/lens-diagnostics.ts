@@ -1605,15 +1605,27 @@ async function formatFullMode(
 	// doesn't cover (e.g. a caller-supplied `cold` list from an older cache
 	// shape). Single formatter (extractors.ts) so this note's wording can't
 	// drift from any other caller that renders the same `cold` list.
+	// #1623 fix-round F5: the "not requested" (quick-mode) batch shares ONE
+	// reason (`NOT_REQUESTED_REASON`) across every id — `formatNotRunEntry`
+	// repeating that same ~130-char sentence per id makes the note nearly
+	// unreadable, and the "not applicable / unavailable this run" header
+	// below is a dishonest label for it: these lanes ARE applicable and
+	// available, this call just never asked for them. Render that batch as
+	// its own compact note — bare ids, the shared reason stated once — and
+	// keep the detailed per-id format for genuinely cold lanes, where each
+	// id's reason really does differ (not a git repo vs binary unavailable
+	// vs retry cooldown, ...).
 	const coldNote = extracted.unsafeRoot
 		? `\n\nheavyweight analyzers skipped: the working directory resolves at or above the home directory, so a fresh knip/jscpd/madge/gitleaks/govulncheck/trivy/dead-code scan would walk every unrelated tree under it. Re-run from inside a project directory. Absence of their findings is NOT a clean verdict.`
-		: genuinelyColdIds.length > 0
-			? `\n\ncold (not applicable / unavailable this run): ${genuinelyColdIds
-					.map((id) => formatNotRunEntry(id, extracted.coldReasons))
-					.join(
-						", ",
-					)}. These analyzers have not contributed to this result — absence of their findings is NOT a clean verdict.`
-			: "";
+		: !projectRunnersRequested && genuinelyColdIds.length > 0
+			? `\n\nnot run this call (quick mode): ${genuinelyColdIds.join(", ")}. ${NOT_REQUESTED_REASON}. Absence of their findings is NOT a clean verdict.`
+			: genuinelyColdIds.length > 0
+				? `\n\ncold (not applicable / unavailable this run): ${genuinelyColdIds
+						.map((id) => formatNotRunEntry(id, extracted.coldReasons))
+						.join(
+							", ",
+						)}. These analyzers have not contributed to this result — absence of their findings is NOT a clean verdict.`
+				: "";
 	// #1004: unlike every other analyzer above (knip/jscpd/madge/gitleaks/
 	// govulncheck/opengrep/trivy/dead-code all run a FRESH whole-project scan
 	// per the fresh-fetch.ts header, so "clean" there really does mean "the
@@ -1668,28 +1680,29 @@ async function formatFullMode(
 	const generatedSkipNote = generatedSkipNoticeText
 		? `\n\n${generatedSkipNoticeText}`
 		: "";
-	// #1623: refreshRunners=cached folds in the cheap in-process project scan
-	// (tree-sitter/fact-rules/ast-grep) from a STORED snapshot rather than
-	// scanning it fresh this call (`getProjectDiagnosticsSnapshotForFullMode`
-	// above) — the second #1623 dogfood pass reported exactly this shape
-	// (stale data read as "just ran"), so say the age explicitly rather than
-	// letting it look indistinguishable from a fresh cheap/all scan.
-	const cheapScanCachedNote =
-		options.refreshRunners === "cached" && rawProjectSnapshot?.scannedAt
-			? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): served from cache, ${formatCacheAge(
-					Date.now() - new Date(rawProjectSnapshot.scannedAt).getTime(),
-				)} old — not re-run this call.`
-			: "";
 	// #1623: the cheap in-process project scan (tree-sitter/fact-rules/
-	// ast-grep) is gated by the SAME `refreshRunners` absence as the
-	// heavyweight analyzers above (`getProjectDiagnosticsSnapshotForFullMode`
-	// returns undefined for it too) — it isn't one of `ANALYZER_IDS` though,
-	// so `coldNote` never mentions it. Without this, an ast-grep-only finding
-	// class could silently vanish from a quick mode=full call the same way
-	// the heavyweight lanes used to.
-	const cheapScanNotRequestedNote =
-		!projectRunnersRequested
-			? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run this call (${NOT_REQUESTED_REASON}).`
+	// ast-grep) is a THIRD lane `coldNote` never covers (it isn't one of
+	// `ANALYZER_IDS` — that list is fetch-fetch.ts's heavyweight analyzers
+	// only). It has three distinct states, all of which must render — the
+	// fix-round F2 finding: with `refreshRunners=cached` and no snapshot ever
+	// written yet, BOTH of the two notes below used to stay empty (one gated
+	// on `scannedAt` being present, the other on the "not requested" branch
+	// this call isn't in), so the original #1623 silence survived in exactly
+	// this mode. `cheapScanScannedAtMs` centralizes the one bit every branch
+	// needs: whether the stored snapshot has a usable timestamp (#1623
+	// fix-round F4 — a corrupt/missing `scannedAt` must not compute a NaN
+	// age, mirroring `./cache.ts`'s `Number.isFinite` guard).
+	const cheapScanScannedAtMs = rawProjectSnapshot?.scannedAt
+		? Date.parse(rawProjectSnapshot.scannedAt)
+		: undefined;
+	const cheapScanStatusNote = !projectRunnersRequested
+		? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run this call (${NOT_REQUESTED_REASON}).`
+		: options.refreshRunners === "cached"
+			? cheapScanScannedAtMs !== undefined && Number.isFinite(cheapScanScannedAtMs)
+				? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): served from cache, ${formatCacheAge(
+						Date.now() - cheapScanScannedAtMs,
+					)} old — not re-run this call.`
+				: `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run (no cached scan; refresh with refreshRunners=cheap/all to populate).`
 			: "";
 	const abortedNote =
 		abortedIds.size > 0
@@ -1823,8 +1836,7 @@ async function formatFullMode(
 						abortedNote +
 						freshNote +
 						cachedAgeNote +
-						cheapScanCachedNote +
-						cheapScanNotRequestedNote +
+						cheapScanStatusNote +
 						missingNote,
 				},
 			],
@@ -1842,8 +1854,7 @@ async function formatFullMode(
 		abortedNote ||
 		freshNote ||
 		cachedAgeNote ||
-		cheapScanCachedNote ||
-		cheapScanNotRequestedNote ||
+		cheapScanStatusNote ||
 		unconfirmedLspNote ||
 		lspPrimaryVsAuxiliaryNote
 	) {
@@ -1864,8 +1875,7 @@ async function formatFullMode(
 						abortedNote +
 						freshNote +
 						cachedAgeNote +
-						cheapScanCachedNote +
-						cheapScanNotRequestedNote +
+						cheapScanStatusNote +
 						missingNote,
 				},
 			],
