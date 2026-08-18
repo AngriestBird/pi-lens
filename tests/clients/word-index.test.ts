@@ -19,7 +19,7 @@ import {
 } from "../../clients/word-index.js";
 import { KIND_EXTENSIONS } from "../../clients/file-kinds.js";
 import { loadProjectSnapshot } from "../../clients/project-snapshot.js";
-import { createTempFile, setupTestEnvironment } from "./test-utils.ts";
+import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 describe("splitIdentifier", () => {
 	it("splits camelCase and keeps the whole identifier", () => {

@@ -1,5 +1,5 @@
-﻿/**
- * #1565 â€” the live demonstration behind the guard in
+/**
+ * #1565 — the live demonstration behind the guard in
  * module-instance-coverage.test.ts.
  *
  * `resetDispatchAvailabilityState` is the session reset the availability tests
@@ -10,17 +10,25 @@
  * compiled counter, and the latch the reset was supposed to clear survives.
  *
  * This test asserts the reset actually clears state the COMPILED checker holds.
- * Re-spell the import below as `runner-helpers.ts` and it goes red at the last
- * assertion â€” which is precisely the failure every `.ts`-bound reset in the
- * suite was silently declining to notice.
+ * To reproduce the failure it guards against, re-spell the RESET import below —
+ * the second of the two, on its own line for exactly this reason — as
+ * `runner-helpers.ts`, leaving the checker's import on `.js`. The last
+ * assertion goes red: that is the failure every `.ts`-bound reset in the suite
+ * was declining to notice.
+ *
+ * The two imports are deliberately NOT merged into one statement. Re-spelling a
+ * combined import would move the checker onto the `.ts` instance along with the
+ * reset, leaving the pair self-consistent and the test green — the same
+ * accidental consistency that let 36 all-`.ts` test files look fine on master.
+ * The hazard is the MIX, so the demonstration has to be able to spell a mix.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TRANSIENT_BASE_COOLDOWN_MS } from "../../clients/dispatch/runners/utils/availability-policy.js";
-import {
-	createAvailabilityChecker,
-	resetDispatchAvailabilityState,
-} from "../../clients/dispatch/runners/utils/runner-helpers.js";
+// The code under test. Keep this one `.js` when reproducing.
+import { createAvailabilityChecker } from "../../clients/dispatch/runners/utils/runner-helpers.js";
+// The reset under demonstration. Re-spell THIS one `.ts` to reproduce red.
+import { resetDispatchAvailabilityState } from "../../clients/dispatch/runners/utils/runner-helpers.js";
 
 vi.mock("../../clients/latency-logger.js", () => ({
 	logLatency: vi.fn(),
@@ -85,7 +93,7 @@ describe("session reset binds the compiled module instance (#1565)", () => {
 		expect(await checker.isAvailableAsync(process.cwd())).toBe(false);
 		expect(spawn).toHaveBeenCalledTimes(1);
 
-		// Only the session reset clears it â€” and only if the reset the test holds
+		// Only the session reset clears it — and only if the reset the test holds
 		// is the compiled module's reset, not a `.ts` duplicate's.
 		resetDispatchAvailabilityState();
 		expect(await checker.isAvailableAsync(process.cwd())).toBe(true);
