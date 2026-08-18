@@ -2623,6 +2623,24 @@ export const ClojureServer: LSPServerInfo = {
 	},
 };
 
+export const CueServer: LSPServerInfo = {
+	id: "cue",
+	name: "CUE Language Server",
+	extensions: KIND_EXTENSIONS["cue"],
+	root: RootWithFallback(createRootDetector(["cue.mod", ".git"])),
+	async spawn(root, options) {
+		return resolveAndLaunch(
+			{
+				candidates: ["cue"],
+				args: ["lsp", "serve"],
+				cwd: root,
+				managedToolId: "cue",
+			},
+			options?.allowInstall,
+		);
+	},
+};
+
 export const TerraformServer: LSPServerInfo = {
 	id: "terraform",
 	name: "Terraform LSP",
@@ -3288,6 +3306,7 @@ export const LSP_SERVERS: LSPServerInfo[] = [
 	MarksmanServer,
 	OCamlServer,
 	ClojureServer,
+	CueServer,
 	TerraformServer,
 	NixServer,
 	BashServer,

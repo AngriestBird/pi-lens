@@ -34,6 +34,8 @@ import {
 import { getLSPService } from "../clients/lsp/index.js";
 import { primaryServerId } from "../clients/lsp/config.js";
 import type { LSPDiagnostic } from "../clients/lsp/client.js";
+import type { LSPWorkspaceUnconfirmedReason } from "../clients/lsp/index.js";
+import { getFullScanWallClockMs } from "../clients/lsp/workspace-sweep-hold.js";
 import {
 	hashDiagnosticContent,
 	type BoundToCurrentDisk,
@@ -45,9 +47,15 @@ import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
 	reconcileProjectDiagnosticsSnapshot,
 } from "../clients/project-diagnostics/cache.js";
-import { warmTriggerFor } from "../clients/project-diagnostics/extractors.js";
+import {
+	formatCacheAge,
+	formatNotRunEntry,
+} from "../clients/project-diagnostics/extractors.js";
 import type { FreshProjectDiagnosticsResult } from "../clients/project-diagnostics/fresh-fetch.js";
-import { fetchFreshProjectDiagnostics } from "../clients/project-diagnostics/fresh-fetch.js";
+import {
+	ANALYZER_IDS,
+	fetchFreshProjectDiagnostics,
+} from "../clients/project-diagnostics/fresh-fetch.js";
 import { loadBootstrapClients } from "../clients/bootstrap.js";
 import {
 	generatedSkipNotice,
@@ -85,6 +93,15 @@ const MAX_DIAGNOSTICS_PER_FILE = 50;
 // invariant).
 const MAX_PATHS_ENTRIES = 200;
 
+// #1623: the reason rendered for every heavyweight-analyzer lane (gitleaks,
+// trivy, govulncheck, dead-code, knip, jscpd, madge, opengrep, test-runner)
+// when mode=full is called without refreshRunners=cheap/all/cached — the
+// "quick mode" gate that skips the expensive fresh-fetch entirely (see
+// `formatFullMode`'s `analyzersPromise`). One shared string so it renders
+// identically everywhere it's used.
+const NOT_REQUESTED_REASON =
+	"refreshRunners not requested this call (quick mode) — pass refreshRunners=cheap/all/cached to lens_diagnostics mode=full to run it";
+
 type LSPServiceLike = ReturnType<typeof getLSPService> & {
 	runWorkspaceDiagnostics?: (
 		cwd: string,
@@ -109,6 +126,8 @@ type WorkspaceLspDiagnosticResult = {
 	// file's per-file check didn't complete within budget (or threw), so
 	// `diagnostics` is a default-empty placeholder, not a confirmed result.
 	timedOut?: boolean;
+	// #1618: WHY `timedOut` is true — see LSPWorkspaceUnconfirmedReason.
+	unconfirmedReason?: LSPWorkspaceUnconfirmedReason;
 	// #1093: set only for cache-hit results (a replay of an older scan) — the
 	// wall-clock time the diagnostics were originally observed. Threaded into the
 	// footer reconcile so a cache-served mode=full doesn't re-arm the widget's
@@ -124,10 +143,11 @@ type WorkspaceLspDiagnosticResult = {
 // spawn/initialize across many files) could otherwise stall the tool
 // indefinitely — an unattended session was observed hung for ~8h. This hard cap
 // aborts the scan so it always returns (partial) rather than never. Env-tunable.
-const FULL_SCAN_WALL_CLOCK_MS = (() => {
-	const raw = Number(process.env.PI_LENS_LENS_DIAGNOSTICS_FULL_TIMEOUT_MS);
-	return Number.isFinite(raw) && raw > 0 ? raw : 300_000; // 5 min default
-})();
+// #1618: single source with `clients/runtime-turn.ts`'s idle-reset base delay
+// (see `getBaseLspIdleResetMs`), which derives itself from this value so the
+// two constants can no longer drift back into the idle-reset-fires-mid-sweep
+// relationship that caused #1618 in the first place.
+const FULL_SCAN_WALL_CLOCK_MS = getFullScanWallClockMs();
 
 // Binding verification is a fallback for result producers that supplied a
 // content hash without an already-computed disk verdict. Keep it one-file-at-a-
@@ -947,6 +967,97 @@ function summarizeDiagnostics(
 	};
 }
 
+// #1618: sentence form used when exactly one reason accounts for every
+// unconfirmed file — mirrors the pre-#1618 two-case ternary's phrasing so
+// existing single-reason callers see unchanged text.
+const UNCONFIRMED_REASON_SENTENCE: Record<LSPWorkspaceUnconfirmedReason, string> = {
+	budget: "check didn't complete within budget",
+	inconclusive:
+		"check was inconclusive (notify-write or diagnostics wait timed out)",
+	coverage_gap: "an auxiliary scanner coverage gap",
+	service_destroyed: "the LSP service was reset mid-sweep",
+	error: "check errored",
+	// #1618 review round 2: the LSP layer considered this touch CONFIRMED —
+	// the file's content changed under it (stale binding), which is a
+	// completely different failure from a timeout. Must never collapse into
+	// "within budget", the exact string this PR exists to stop misrendering.
+	binding_mismatch: "the file changed on disk since this result was computed",
+};
+
+// Short per-reason label used only when MORE than one reason is present, so
+// the note can still say "N timed out, M errored" instead of collapsing to
+// one sentence that can't carry two counts.
+const UNCONFIRMED_REASON_COUNT_LABEL: Record<LSPWorkspaceUnconfirmedReason, string> = {
+	budget: "timed out",
+	inconclusive: "inconclusive",
+	coverage_gap: "coverage gap",
+	service_destroyed: "service reset mid-sweep",
+	error: "errored",
+	binding_mismatch: "stale binding",
+};
+
+/**
+ * #1618: a result predating the `unconfirmedReason` field (a legacy/test
+ * double, or `LSPWorkspaceDiagnosticResult`'s own pre-#1618 shape) is
+ * classified from its OTHER fields exactly the way the dead
+ * `unconfirmedErrored = length - unconfirmedTimedOut` subtraction meant to,
+ * before that subtraction was structurally always 0 (the sweep's catch
+ * block sets both `error` and `timedOut`, so `unconfirmedErrored` never had
+ * a way to become nonzero). An explicit `result.error` now wins even when
+ * `unconfirmedReason` is absent, so an errored file is never rendered as
+ * "within budget".
+ *
+ * #1618 review round 2: `mismatched` MUST be checked first. A binding
+ * mismatch is discovered HERE, after the sweep already returned the result
+ * as confirmed (`!timedOut`, no `.error`, no `.unconfirmedReason`) — the
+ * `?? "budget"` fallback below would otherwise silently claim a
+ * stale-binding file as "within budget", the exact string this PR exists to
+ * stop misrendering.
+ */
+function classifyUnconfirmedReason(
+	result: WorkspaceLspDiagnosticResult,
+	mismatched: WeakSet<WorkspaceLspDiagnosticResult>,
+): LSPWorkspaceUnconfirmedReason {
+	if (mismatched.has(result)) return "binding_mismatch";
+	return result.unconfirmedReason ?? (result.error ? "error" : "budget");
+}
+
+/**
+ * #1618: replaces the `unconfirmedTimedOut`/`unconfirmedErrored` dead
+ * subtraction with a real per-reason tally read off each result's own
+ * `unconfirmedReason` (falling back to `classifyUnconfirmedReason` for a
+ * legacy result that predates the field). `mismatched` is threaded through
+ * so a stale-binding file is never counted under a fallback reason it
+ * doesn't have (review round 2).
+ */
+function tallyUnconfirmedReasons(
+	results: readonly WorkspaceLspDiagnosticResult[],
+	mismatched: WeakSet<WorkspaceLspDiagnosticResult>,
+): Map<LSPWorkspaceUnconfirmedReason, number> {
+	const tally = new Map<LSPWorkspaceUnconfirmedReason, number>();
+	for (const result of results) {
+		const reason = classifyUnconfirmedReason(result, mismatched);
+		tally.set(reason, (tally.get(reason) ?? 0) + 1);
+	}
+	return tally;
+}
+
+/** Render `tallyUnconfirmedReasons`' output as the clause inside the
+ *  "unconfirmed (...)" note — a single sentence when one reason accounts for
+ *  everything, else a comma-joined "N label" breakdown. */
+function formatUnconfirmedReasonClause(
+	tally: Map<LSPWorkspaceUnconfirmedReason, number>,
+): string {
+	const entries = [...tally.entries()].filter(([, count]) => count > 0);
+	if (entries.length === 0) return "";
+	if (entries.length === 1) {
+		return UNCONFIRMED_REASON_SENTENCE[entries[0][0]];
+	}
+	return entries
+		.map(([reason, count]) => `${count} ${UNCONFIRMED_REASON_COUNT_LABEL[reason]}`)
+		.join(", ");
+}
+
 /**
  * #646: break the confirmed/unconfirmed LSP-sweep tally down PER primary
  * server id (typescript, pyright, marksman, ...) instead of one flat
@@ -1302,14 +1413,28 @@ async function formatFullMode(
 	// could complete. Building its promise here, alongside the sweep and cheap
 	// scan, makes it genuinely concurrent — all three phases now race the SAME
 	// signal from the same starting point instead of stacking.
-	const analyzersPromise = shouldIncludeProjectRunners(options.refreshRunners)
+	const projectRunnersRequested = shouldIncludeProjectRunners(
+		options.refreshRunners,
+	);
+	const analyzersPromise = projectRunnersRequested
 		? loadBootstrapClients().then((clients) =>
 				fetchFreshProjectDiagnostics(cacheManager, cwd, clients, signal, { runtime: options.runtime }),
 			)
 		: Promise.resolve<FreshProjectDiagnosticsResult>({
 				diagnostics: [],
 				runners: [],
-				cold: [],
+				// #1623: every heavyweight analyzer is ELIGIBLE for this project but
+				// this call never asked for it (refreshRunners wasn't cheap/all/
+				// cached) — the expensive fetch below deliberately never runs in
+				// that case (see the comment above), but rendering total silence
+				// here reads exactly as "ran clean", the false-empty #1623 exists to
+				// close. `ANALYZER_IDS` (fresh-fetch.ts) is the single source of
+				// truth for which lanes this covers — reuse it rather than
+				// hand-listing ids here.
+				cold: [...ANALYZER_IDS],
+				coldReasons: Object.fromEntries(
+					ANALYZER_IDS.map((id) => [id, NOT_REQUESTED_REASON]),
+				),
 				failed: [],
 				timings: {},
 			});
@@ -1502,10 +1627,10 @@ async function formatFullMode(
 	// as "0 diagnostics" — say explicitly which files the LSP sweep could not
 	// confirm and why, distinguishing a hard error from a soft timeout the
 	// same way #570 does upstream.
-	const unconfirmedTimedOut = unconfirmedLspResults.filter(
-		(result) => result.timedOut,
-	).length;
-	const unconfirmedErrored = unconfirmedLspResults.length - unconfirmedTimedOut;
+	const unconfirmedByReason = tallyUnconfirmedReasons(
+		unconfirmedLspResults,
+		mismatchedLspResults,
+	);
 	// #646: per-primary-server breakdown of the same confirmed/unconfirmed
 	// tally — lets an agent see AT A GLANCE which server is responsible for
 	// any unconfirmed files (e.g. "marksman: 0/34") instead of having to
@@ -1525,13 +1650,9 @@ async function formatFullMode(
 	const unconfirmedLspNote =
 		unconfirmedLspResults.length > 0
 			? `\n\n⚠ LSP sweep: ${confirmedLspResults.length} file(s) confirmed via LSP, ` +
-				`${unconfirmedLspResults.length} unconfirmed (${
-					unconfirmedTimedOut > 0 && unconfirmedErrored > 0
-						? `${unconfirmedTimedOut} timed out, ${unconfirmedErrored} errored`
-						: unconfirmedTimedOut > 0
-							? "check didn't complete within budget"
-							: "check errored"
-				})${serverBreakdownClause} — NOT the same as 0 diagnostics for: ${unconfirmedLspResults
+				`${unconfirmedLspResults.length} unconfirmed (${formatUnconfirmedReasonClause(
+					unconfirmedByReason,
+				)})${serverBreakdownClause} — NOT the same as 0 diagnostics for: ${unconfirmedLspResults
 					.slice(0, 20)
 					.map((result) => result.filePath)
 					.join(
@@ -1570,15 +1691,33 @@ async function formatFullMode(
 	// analyzers before anything spawns — rendering that as the per-analyzer
 	// "not applicable / unavailable" list would send the caller chasing seven
 	// wrong reasons. One note with the real one instead.
+	// #1623: prefer the SPECIFIC reason captured at each gate
+	// (`extracted.coldReasons`) over a generic guess — `formatNotRunEntry`
+	// falls back to `warmTriggerFor` only for an id this call's `coldReasons`
+	// doesn't cover (e.g. a caller-supplied `cold` list from an older cache
+	// shape). Single formatter (extractors.ts) so this note's wording can't
+	// drift from any other caller that renders the same `cold` list.
+	// #1623 fix-round F5: the "not requested" (quick-mode) batch shares ONE
+	// reason (`NOT_REQUESTED_REASON`) across every id — `formatNotRunEntry`
+	// repeating that same ~130-char sentence per id makes the note nearly
+	// unreadable, and the "not applicable / unavailable this run" header
+	// below is a dishonest label for it: these lanes ARE applicable and
+	// available, this call just never asked for them. Render that batch as
+	// its own compact note — bare ids, the shared reason stated once — and
+	// keep the detailed per-id format for genuinely cold lanes, where each
+	// id's reason really does differ (not a git repo vs binary unavailable
+	// vs retry cooldown, ...).
 	const coldNote = extracted.unsafeRoot
 		? `\n\nheavyweight analyzers skipped: the working directory resolves at or above the home directory, so a fresh knip/jscpd/madge/gitleaks/govulncheck/trivy/dead-code scan would walk every unrelated tree under it. Re-run from inside a project directory. Absence of their findings is NOT a clean verdict.`
-		: genuinelyColdIds.length > 0
-			? `\n\ncold (not applicable / unavailable this run): ${genuinelyColdIds
-					.map((id) => `${id} — ${warmTriggerFor(id)}`)
-					.join(
-						", ",
-					)}. These analyzers have not contributed to this result — absence of their findings is NOT a clean verdict.`
-			: "";
+		: !projectRunnersRequested && genuinelyColdIds.length > 0
+			? `\n\nnot run this call (quick mode): ${genuinelyColdIds.join(", ")}. ${NOT_REQUESTED_REASON}. Absence of their findings is NOT a clean verdict.`
+			: genuinelyColdIds.length > 0
+				? `\n\ncold (not applicable / unavailable this run): ${genuinelyColdIds
+						.map((id) => formatNotRunEntry(id, extracted.coldReasons))
+						.join(
+							", ",
+						)}. These analyzers have not contributed to this result — absence of their findings is NOT a clean verdict.`
+				: "";
 	// #1004: unlike every other analyzer above (knip/jscpd/madge/gitleaks/
 	// govulncheck/opengrep/trivy/dead-code all run a FRESH whole-project scan
 	// per the fresh-fetch.ts header, so "clean" there really does mean "the
@@ -1651,6 +1790,30 @@ async function formatFullMode(
 	const generatedSkipNote = generatedSkipNoticeText
 		? `\n\n${generatedSkipNoticeText}`
 		: "";
+	// #1623: the cheap in-process project scan (tree-sitter/fact-rules/
+	// ast-grep) is a THIRD lane `coldNote` never covers (it isn't one of
+	// `ANALYZER_IDS` — that list is fetch-fetch.ts's heavyweight analyzers
+	// only). It has three distinct states, all of which must render — the
+	// fix-round F2 finding: with `refreshRunners=cached` and no snapshot ever
+	// written yet, BOTH of the two notes below used to stay empty (one gated
+	// on `scannedAt` being present, the other on the "not requested" branch
+	// this call isn't in), so the original #1623 silence survived in exactly
+	// this mode. `cheapScanScannedAtMs` centralizes the one bit every branch
+	// needs: whether the stored snapshot has a usable timestamp (#1623
+	// fix-round F4 — a corrupt/missing `scannedAt` must not compute a NaN
+	// age, mirroring `./cache.ts`'s `Number.isFinite` guard).
+	const cheapScanScannedAtMs = rawProjectSnapshot?.scannedAt
+		? Date.parse(rawProjectSnapshot.scannedAt)
+		: undefined;
+	const cheapScanStatusNote = !projectRunnersRequested
+		? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run this call (${NOT_REQUESTED_REASON}).`
+		: options.refreshRunners === "cached"
+			? cheapScanScannedAtMs !== undefined && Number.isFinite(cheapScanScannedAtMs)
+				? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): served from cache, ${formatCacheAge(
+						Date.now() - cheapScanScannedAtMs,
+					)} old — not re-run this call.`
+				: `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run (no cached scan; refresh with refreshRunners=cheap/all to populate).`
+			: "";
 	const abortedNote =
 		abortedIds.size > 0
 			? `\n\nstopped mid-scan (still running in the background, not reflected in this result): ${[
@@ -1663,11 +1826,27 @@ async function formatFullMode(
 	// possibly-stale session_start cache — say so honestly, with per-analyzer
 	// elapsed time, since this can legitimately take a while (trivy's own
 	// ~180s ceiling).
-	const timingEntries = Object.entries(extracted.timings ?? {});
+	// #1623: `extracted.cachedAgeMs` marks ids that are a cache-read BY DESIGN
+	// (today, only test-runner — see fresh-fetch.ts) rather than a fresh
+	// execution this call. Exclude those from "fetched fresh" below — folding
+	// a cache replay into the same list as a genuine run is exactly the
+	// misread the second #1623 dogfood pass reported (a cached result read as
+	// "just ran"). They get their own note with an actual age instead.
+	const cachedAgeMs = extracted.cachedAgeMs ?? {};
+	const timingEntries = Object.entries(extracted.timings ?? {}).filter(
+		([id]) => !(id in cachedAgeMs),
+	);
 	const freshNote =
 		timingEntries.length > 0
 			? `\n\nfetched fresh this call: ${timingEntries
 					.map(([id, ms]) => `${id} (${Math.round(ms)}ms)`)
+					.join(", ")}.`
+			: "";
+	const cachedAgeEntries = Object.entries(cachedAgeMs);
+	const cachedAgeNote =
+		cachedAgeEntries.length > 0
+			? `\n\nserved from cache this call (not re-run): ${cachedAgeEntries
+					.map(([id, ms]) => `${id} (${formatCacheAge(ms)} old)`)
 					.join(", ")}.`
 			: "";
 	// coldRunners always lands in details (even when empty) so a caller can
@@ -1680,10 +1859,19 @@ async function formatFullMode(
 		details: {
 			...result.details,
 			coldRunners: extracted.cold,
+			// #1623: the specific reason each cold id was skipped (single source
+			// of truth: extractors.ts's `formatNotRunEntry` renders the same map
+			// into the text note above) — lets a caller check WHY without parsing
+			// text.
+			coldReasons: extracted.coldReasons ?? {},
 			failedAnalyzers,
 			analyzerTimingsMs: extracted.timings,
 			dispositionSuppressed: extracted.dispositionSuppressed ?? 0,
 			dispositionSuppressedByLane: extracted.dispositionSuppressedByLane ?? {},
+			// #1623: ms-old each cache-read-by-design lane's data was (today, only
+			// test-runner) — lets a caller distinguish "just ran" from "served
+			// from cache" without parsing the text note.
+			analyzersCachedAgeMs: cachedAgeMs,
 			analyzersAborted: extracted.aborted ?? false,
 			analyzersAbortedIds: extracted.abortedIds ?? [],
 			// #747: true when the fresh fetch refused an at-or-above-$HOME root —
@@ -1760,6 +1948,8 @@ async function formatFullMode(
 						generatedSkipNote +
 						abortedNote +
 						freshNote +
+						cachedAgeNote +
+						cheapScanStatusNote +
 						missingNote,
 				},
 			],
@@ -1777,6 +1967,8 @@ async function formatFullMode(
 		generatedSkipNote ||
 		abortedNote ||
 		freshNote ||
+		cachedAgeNote ||
+		cheapScanStatusNote ||
 		unconfirmedLspNote ||
 		lspPrimaryVsAuxiliaryNote
 	) {
@@ -1797,6 +1989,8 @@ async function formatFullMode(
 						generatedSkipNote +
 						abortedNote +
 						freshNote +
+						cachedAgeNote +
+						cheapScanStatusNote +
 						missingNote,
 				},
 			],
