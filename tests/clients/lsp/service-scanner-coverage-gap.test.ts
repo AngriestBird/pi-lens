@@ -1270,4 +1270,127 @@ describe("#1586 — deferred-door coverage is judged at merge time", () => {
 		expect(snapshotSites[0]).toContain("const auxPublishedThisContent");
 		expect(snapshotSites[1]).toContain("auxPublishedThisContent.has(serverId)");
 	});
+
+	/**
+	 * #1586 review round (F3). `mergeBinding` used to filter the RAW deferral set
+	 * (`deferredResyncServerIds`), which excludes every deferred scanner from the
+	 * merged binding regardless of whether the merge kept its findings. That
+	 * diverges from `droppedAuxiliaryServerIds` — the frozen set the drop and the
+	 * naming both read — exactly when a deferred scanner is COVERED: its findings
+	 * ride along in `.diags`, but the raw filter still throws away its fingerprint.
+	 *
+	 * The divergence only surfaces with a version-less primary (`makeClient` never
+	 * defines `getDiagnosticBinding`, matching a real primary that never bound a
+	 * publish fingerprint): with a bound primary in the mix, its own fingerprint
+	 * would win the merge and hide the loss. Here the covered auxiliary is the
+	 * ONLY contributor with a fingerprint, so its absence from the merged binding
+	 * is the only signal.
+	 */
+	it("F3: the merged binding carries a deferred-but-covered scanner's fingerprint", async () => {
+		const { hashDiagnosticContent } = await import(
+			"../../../clients/lsp/diagnostic-binding.js"
+		);
+		const contentHash = hashDiagnosticContent(CONTENT);
+		const { deferredResult } = await runDeferredPublishRace(
+			"with-auxiliary",
+			contentHash,
+		);
+
+		// Sanity check first: the scanner's findings really did merge (F1's
+		// guarantee) — otherwise a missing fingerprint would be unsurprising.
+		expect(deferredResult?.diags.map((d) => d.message)).toContain(
+			LATE_FINDING,
+		);
+		expect(
+			(deferredResult as unknown as { binding?: { contentHash?: string } })
+				?.binding?.contentHash,
+		).toBe(contentHash);
+	});
+});
+
+/**
+ * #1586 review round (FIND-1). The reconciliation filter on
+ * `unconfirmedServerIds` (`!auxCoveredAtMerge.has(serverId)`, index.ts) is what
+ * F1's fix rests on: `auxUnconfirmedServerIds` is decided when the aux WAIT
+ * ends, strictly before the merge, so a publication landing between that wait
+ * outcome and the merge freeze would otherwise leave the scanner named while
+ * the merge kept its findings. Deleting the filter leaves every other probe in
+ * this file green — it is reachable but nothing else in the suite exercises it.
+ *
+ * This is its own top-level describe, not nested under the "#1586" block above,
+ * because it needs a publication that lands strictly between the aux
+ * wait-outcome row and the merge's own read of the primary's cache — a single
+ * touch, not the holding/deferred race the other #1586 probes share.
+ */
+describe("#1586 review round (FIND-1) — publication lands between the aux wait outcome and the merge", () => {
+	const FILE = `${ROOT}/a.ts`;
+	const CONTENT = "const value = 1;";
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.resetModules();
+		getServersForFileWithConfig.mockReset();
+		createLSPClient.mockReset();
+		logLatency.mockReset();
+		process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS = String(NOTIFY_BUDGET_MS);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		delete process.env.PI_LENS_LSP_NOTIFY_BUDGET_MS;
+	});
+
+	it("does not name a scanner the merge kept", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const { hashDiagnosticContent } = await import(
+			"../../../clients/lsp/diagnostic-binding.js"
+		);
+		const service = new LSPService();
+		const hash = hashDiagnosticContent(CONTENT);
+
+		let published = false;
+		logLatency.mockImplementation((entry: { phase?: string }) => {
+			if (entry?.phase === "lsp_aux_wait_outcome") published = true;
+		});
+
+		const auxBase = makeClient("opengrep", 0, [], "never");
+		const aux = {
+			...auxBase,
+			getDiagnostics: vi.fn(() =>
+				published ? [makeDiagnostic("late scanner finding")] : [],
+			),
+			getDiagnosticBinding: vi.fn(() =>
+				published ? { contentHash: hash } : undefined,
+			),
+		};
+		const primary = makeClient("typescript", 0, [makeDiagnostic("primary")]);
+		getServersForFileWithConfig.mockReturnValue([
+			makeServer("typescript"),
+			makeServer("opengrep", "auxiliary"),
+		]);
+		createLSPClient.mockImplementation(async (options: { serverId?: string }) =>
+			options?.serverId === "opengrep" ? aux : primary,
+		);
+
+		const touch = service.touchFile(FILE, CONTENT, {
+			clientScope: "with-auxiliary",
+			auxiliaryServerIds: ["opengrep"],
+			diagnostics: "document",
+			collectDiagnostics: true,
+			source: "cascade",
+		});
+		await vi.advanceTimersByTimeAsync(NOTIFY_BUDGET_MS * 200);
+		const result = (await touch) as {
+			diags: Array<{ message: string }>;
+			confirmation?: string;
+			unconfirmedServerIds?: string[];
+		};
+
+		expect(result.diags.map((d) => d.message)).toContain(
+			"late scanner finding",
+		);
+		expect(result.unconfirmedServerIds ?? []).not.toContain("opengrep");
+		expect(result.confirmation).toBe("confirmed");
+	});
 });
