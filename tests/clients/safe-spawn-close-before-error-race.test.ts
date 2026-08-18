@@ -3,25 +3,28 @@
  * genuinely-absent `gh` binary, and passed on Windows but got "non-installable"
  * on Linux CI. Root cause: Node's own docs say the 'error' and 'close' event
  * ORDER for a child that never started (ENOENT) is unspecified — "the 'exit'
- * event may or may not fire after an error has occurred" — and some
- * platforms/loads fire 'close' BEFORE 'error'.
+ * event may or may not fire after an error has occurred" — and Linux's real
+ * shape closes a never-started child with `code = -errno` (e.g. `-2` for
+ * ENOENT, `-4058` on Windows), never `null`.
  *
- * `safeSpawnAsync`'s `close` handler only guarded against 'close' firing
- * AFTER 'error' (`if (spawnErrored) return;`). When 'close' won the race with
- * `code: null, signal: null` — the shape Node emits for a spawn that never
- * launched, since a process that actually RAN always exits with a numeric
- * code or a signal — the handler fell through to the "clean run" branch and
- * resolved `{ status: null, error: undefined }`: a would-be `tool-not-found`
- * (`missing`) misread as a completed, successful probe. Downstream,
- * `classifyGhTokenFailure`'s `!res.error` branch then reads that as a durable
- * `non-installable` rejection instead of `missing`.
+ * Round 1 of this fix re-checked an identity flag after a single microtask
+ * `await` — a same-microtask guard that still loses when 'error' lands a
+ * TICK later (`setImmediate`/`process.nextTick`), and pinned a `close(null,
+ * null)` shape production never actually produces. Review round 2 (F2/F3)
+ * moved the fix to be SHAPE-based instead of timing-based: `close`'s own
+ * handler now decides straight from `code === null || code < 0` — a
+ * completed process never exits with either — independent of whether/when
+ * 'error' ever fires. F4 additionally requires this NOT invert a healthy
+ * run: a `close(0, null)` followed by a late, unrelated 'error' (e.g. a
+ * post-exit `kill()` failing with EPERM) must stay a clean success, never
+ * get downgraded.
  *
- * Windows rarely hits this: `resolveWindowsCommand` fails closed on an
- * unresolvable bare command BEFORE any real `spawn()` call, synthesizing a
- * clean ENOENT deterministically. Linux (and any Windows command that DOES
- * resolve, e.g. an absolute path whose target is later removed) goes through
- * the raw event race every time — this test mocks `spawn()` directly so it
- * reproduces the race regardless of which platform runs the suite.
+ * Windows rarely hits the missing-tool race at all: `resolveWindowsCommand`
+ * fails closed on an unresolvable bare command BEFORE any real `spawn()`
+ * call, synthesizing a clean ENOENT deterministically. Linux (and any
+ * Windows command that resolves but is later removed) always goes through
+ * the raw event path — these tests mock `spawn()` directly so every shape
+ * reproduces regardless of which platform runs the suite.
  */
 import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
@@ -30,6 +33,11 @@ const enoentError = Object.assign(new Error("spawn gh ENOENT"), {
 	code: "ENOENT",
 	syscall: "spawn gh",
 	path: "gh",
+});
+
+const epermKillError = Object.assign(new Error("kill EPERM"), {
+	code: "EPERM",
+	syscall: "kill",
 });
 
 interface FakeChild extends EventEmitter {
@@ -65,13 +73,58 @@ vi.mock("../../clients/latency-logger.js", () => ({
 
 const { safeSpawnAsync } = await import("../../clients/safe-spawn.js");
 
-describe("safeSpawnAsync survives 'close' winning the race against 'error' (#1651)", () => {
-	it("still classifies as tool-not-found when 'close' fires before 'error'", async () => {
+// An absolute, real path so Windows command resolution succeeds and every
+// test reaches the mocked `spawn()` on every platform, exactly like a bare
+// `gh` does on Linux (no pre-resolution step at all there).
+const REAL_ABSOLUTE_COMMAND = process.execPath;
+
+function nextTick(): Promise<void> {
+	return new Promise((resolve) => setImmediate(resolve));
+}
+
+describe("safeSpawnAsync decides from the close-event SHAPE, not event timing (#1651)", () => {
+	it("classifies close(-2, null) as tool-not-found even when 'error' lands a tick later — the real Linux/ENOENT shape", async () => {
 		const child = makeFakeChild();
 		spawnMock.mockImplementation(() => {
-			// Simulate the platform-dependent ordering Node's docs warn about: a
-			// process that never started emits `close(null, null)` — a shape no
-			// completed run ever produces — before its 'error' event lands.
+			queueMicrotask(async () => {
+				// Real Node/Linux shape: `close` fires with the negated errno
+				// BEFORE 'error', and 'error' lands a full tick later (not the
+				// same microtask) — the exact ordering a same-microtask re-check
+				// (round 1 of this fix) still loses against.
+				child.emit("close", -2, null);
+				await nextTick();
+				child.emit("error", enoentError);
+			});
+			return child;
+		});
+
+		const result = await safeSpawnAsync(REAL_ABSOLUTE_COMMAND, ["--version"]);
+
+		expect(result.status).toBe(-2);
+		expect(result.error).toBeInstanceOf(Error);
+		expect(result.spawnFailure?.kind).toBe("tool-not-found");
+	});
+
+	it("classifies close(-2, null) as tool-not-found even when 'error' never fires at all", async () => {
+		const child = makeFakeChild();
+		spawnMock.mockImplementation(() => {
+			queueMicrotask(() => {
+				// No 'error' event at all — the shape alone must be enough.
+				child.emit("close", -2, null);
+			});
+			return child;
+		});
+
+		const result = await safeSpawnAsync(REAL_ABSOLUTE_COMMAND, ["--version"]);
+
+		expect(result.status).toBe(-2);
+		expect(result.error).toBeInstanceOf(Error);
+		expect(result.spawnFailure?.kind).toBe("tool-not-found");
+	});
+
+	it("classifies close(null, null) as tool-not-found (the null shape some platforms also use)", async () => {
+		const child = makeFakeChild();
+		spawnMock.mockImplementation(() => {
 			queueMicrotask(() => {
 				child.emit("close", null, null);
 				child.emit("error", enoentError);
@@ -79,13 +132,34 @@ describe("safeSpawnAsync survives 'close' winning the race against 'error' (#165
 			return child;
 		});
 
-		// An absolute, real path so Windows command resolution succeeds and this
-		// test reaches the mocked `spawn()` on every platform, exactly like a
-		// bare `gh` does on Linux (no pre-resolution step at all there).
-		const result = await safeSpawnAsync(process.execPath, ["--version"]);
+		const result = await safeSpawnAsync(REAL_ABSOLUTE_COMMAND, ["--version"]);
 
-		expect(result.error).toBeInstanceOf(Error);
 		expect(result.status).toBeNull();
+		expect(result.error).toBeInstanceOf(Error);
 		expect(result.spawnFailure?.kind).toBe("tool-not-found");
+	});
+
+	it("never downgrades a healthy close(0, null) run when a late, unrelated 'error' follows (#1651 review F4)", async () => {
+		const child = makeFakeChild();
+		spawnMock.mockImplementation(() => {
+			queueMicrotask(async () => {
+				child.stdout?.emit("data", "ok");
+				// A real, non-negative exit code: the process genuinely ran and
+				// answered. This must settle the result immediately.
+				child.emit("close", 0, null);
+				await nextTick();
+				// An unrelated failure arriving AFTER a clean exit (e.g. a
+				// post-exit kill() attempt that itself failed) must never
+				// overwrite the already-decided clean verdict.
+				child.emit("error", epermKillError);
+			});
+			return child;
+		});
+
+		const result = await safeSpawnAsync(REAL_ABSOLUTE_COMMAND, ["--version"]);
+
+		expect(result.status).toBe(0);
+		expect(result.error).toBeUndefined();
+		expect(result.spawnFailure).toBeUndefined();
 	});
 });
