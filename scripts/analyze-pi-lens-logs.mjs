@@ -202,6 +202,13 @@ function createState(files) {
 				aborted: 0,
 				timedOutSweeps: 0,
 				timedOutFilesTotal: 0,
+				// #1618: per-reason breakdown of the same total. Populated from each
+				// sweep's `unconfirmedByReason` metadata when present; a sweep logged
+				// by a pre-#1618 build carries no such field, so its files are
+				// bucketed under "budget (pre-#1618 build)" — the ABSENT field is
+				// itself the vintage signal, not an assumption that every one of
+				// those files really was a budget timeout.
+				unconfirmedByReason: counter(),
 				sweeps: [],
 				progress: [],
 			},
@@ -367,6 +374,27 @@ async function analyzeLatency(files, state) {
 					if (timedOut > 0) {
 						ws.timedOutSweeps += 1;
 						ws.timedOutFilesTotal += timedOut;
+						// #1618: attribute by the REAL per-reason tally when the build
+						// that wrote this log line has it — a service-destroyed file
+						// must never count toward "hit the per-file budget" the way it
+						// used to (the forensics tool that found #1618 in the first
+						// place read this exact field and mis-blamed budget exhaustion
+						// for what were mostly service-destroyed files).
+						const byReason = entry.metadata?.unconfirmedByReason;
+						if (byReason && typeof byReason === "object") {
+							for (const [reason, count] of Object.entries(byReason)) {
+								const n = Number(count) || 0;
+								if (n > 0) ws.unconfirmedByReason.inc(reason, n);
+							}
+						} else {
+							// Vintage-attribution fallback: no `unconfirmedByReason` means
+							// this line predates #1618 — the absent field IS the signal,
+							// not proof every file here was really a budget timeout.
+							ws.unconfirmedByReason.inc(
+								"budget (pre-#1618 build)",
+								timedOut,
+							);
+						}
 						state.smellTotals.inc("lsp-workspace-file-timeouts");
 						pushTop(
 							ws.sweeps,
@@ -1217,11 +1245,21 @@ function buildReport(state) {
 		"Full LSP workspace sweeps that logged a start but never a completion (hang/kill signature — the 8h-hang class #383 hardened)",
 		ws.progress.slice(0, limit),
 	);
+	// #1618: "hit the per-file budget" used to be this smell's blanket
+	// description regardless of WHY a file was unconfirmed — the exact
+	// mislabeling the forensics pass on this class found (81/111 "budget"
+	// files were actually service-destroyed). Render the real breakdown when
+	// available.
+	const unconfirmedReasonBreakdown = ws.unconfirmedByReason
+		.top(limit)
+		.map(({ key, count }) => `${key}=${count}`)
+		.join(", ");
 	addSmell(
 		smells,
 		"lsp-workspace-file-timeouts",
 		smellCount("lsp-workspace-file-timeouts"),
-		`Full LSP sweeps where files hit the per-file budget (${ws.timedOutFilesTotal} files across ${ws.timedOutSweeps} sweeps)`,
+		`Full LSP sweeps produced an unconfirmed file (${ws.timedOutFilesTotal} files across ${ws.timedOutSweeps} sweeps)` +
+			(unconfirmedReasonBreakdown ? ` — by reason: ${unconfirmedReasonBreakdown}` : ""),
 		ws.sweeps.slice(0, limit),
 	);
 
@@ -1257,6 +1295,11 @@ function buildReport(state) {
 				aborted: ws.aborted,
 				timedOutSweeps: ws.timedOutSweeps,
 				timedOutFilesTotal: ws.timedOutFilesTotal,
+				// #1618: the real per-reason breakdown of `timedOutFilesTotal`.
+				// "budget (pre-#1618 build)" means those log lines predate the
+				// per-reason tally entirely — an older build's absence of the field,
+				// not a claim those files really timed out.
+				unconfirmedByReason: ws.unconfirmedByReason.toJSON(),
 			},
 		},
 		cascade: {
@@ -1458,6 +1501,15 @@ function printReport(report) {
 		console.log(
 			`  started=${ws.started} completed=${ws.completed} incomplete=${ws.incomplete} aborted=${ws.aborted} fileTimeouts=${ws.timedOutFilesTotal} (in ${ws.timedOutSweeps} sweeps)`,
 		);
+		// #1618: never let a flat count alone read as "budget exhaustion" —
+		// print the real per-reason split (or its absence, which itself means
+		// every line here predates the tally).
+		const reasons = Object.entries(ws.unconfirmedByReason ?? {});
+		if (reasons.length) {
+			console.log(
+				`  by reason: ${reasons.map(([reason, count]) => `${reason}=${count}`).join(", ")}`,
+			);
+		}
 	}
 	const wl = report.worklog;
 	if (wl && (wl.byModel.length || wl.byRuleModel.length)) {

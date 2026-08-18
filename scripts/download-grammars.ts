@@ -57,6 +57,43 @@ export const SOURCE_OVERRIDES: Record<string, SourceOverride> = {
 	},
 };
 
+/**
+ * Build provenance for a grammar this repo builds itself and commits to
+ * `vendor/grammars/`, because no publisher ships a wasm for it. Mirrors
+ * `VENDORED_GRAMMARS` in clients/grammar-source.ts. Nothing here is ever
+ * downloaded — the entries exist so the provenance guard can re-hash the
+ * committed bytes, and so the reproduction recipe sits next to the pin.
+ */
+export interface VendoredGrammar {
+	repo: string;
+	commit: string;
+	license: string;
+	buildCommand: string;
+	/** "sha256:<hex>" of the committed wasm. */
+	sha256: string;
+}
+
+/**
+ * Grammars committed under `vendor/grammars/` rather than fetched.
+ *
+ * tree-sitter-cue: no published wasm exists — npm's `tree-sitter-cue` is a
+ * native binding, the `tree-sitter-wasms` aggregator has no CUE, and upstream
+ * cuts no releases — so we build it from a pinned commit (#1522).
+ */
+export const VENDORED_GRAMMARS: Record<string, VendoredGrammar> = {
+	"tree-sitter-cue.wasm": {
+		repo: "https://github.com/eonpatapon/tree-sitter-cue",
+		commit: "dd7b90e0770ff18070c515937ba3c3d6d93db00e",
+		license: "MIT",
+		buildCommand: "npx tree-sitter-cli build --wasm",
+		sha256:
+			"sha256:751f8cc8ccf72da760133e3d365562ff7bbf5b951e0b73568576fd159db7d601",
+	},
+};
+
+/** Directory the committed grammars live in, relative to the package root. */
+export const VENDORED_DIR = "vendor/grammars";
+
 export interface GrammarManifest {
 	package: string;
 	version: string;
@@ -64,6 +101,8 @@ export interface GrammarManifest {
 	grammars: Record<string, string>;
 	/** filename → override provenance, for grammars not from the aggregator. */
 	overrides?: Record<string, SourceOverride>;
+	/** filename → build provenance + pinned sha256, for committed grammars. */
+	vendored?: Record<string, VendoredGrammar>;
 }
 
 export interface GrammarSidecar {
@@ -265,6 +304,13 @@ async function regenerateManifest(): Promise<void> {
 		version: TREE_SITTER_WASMS_VERSION,
 		grammars: sorted,
 		...(Object.keys(SOURCE_OVERRIDES).length ? { overrides: SOURCE_OVERRIDES } : {}),
+		// Re-emitted from the map above, not copied from the old manifest: a
+		// `--write-manifest` run on a tree-sitter-wasms bump must not silently
+		// drop the committed grammars' provenance, which would leave the guard
+		// with nothing to check.
+		...(Object.keys(VENDORED_GRAMMARS).length
+			? { vendored: VENDORED_GRAMMARS }
+			: {}),
 	};
 	writeFileSync(MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`);
 	console.error(`Wrote ${MANIFEST_PATH} (${GRAMMARS.length} grammars).`);

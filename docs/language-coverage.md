@@ -46,4 +46,13 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | Terragrunt            | —   | terragrunt                                                                                                     | terragrunt hcl fmt      |
 | Nix                   | ✓   | lsp                                                                                                            | nixfmt                  |
 | TOML                  | ✓   | lsp, taplo                                                                                                     | taplo                   |
-| CMake                 | ✓ (cmake-language-server) | lsp                                                                                           | cmake-format            |
+| CMake                 | ✓ (cmake-language-server) | lsp                                                                                      | cmake-format            |
+| CUE                   | syntax only (cue lsp)     | lsp                                                                                      | cue fmt                 |
+
+CUE is "syntax only" because `cue lsp` reports load and parse errors as you type
+but leaves conflicting values and failed constraints to `cue vet`. You get
+syntax and parse diagnostics, hover, definition, completion, code actions, and
+formatting; you do not get validation. `.cue` files parse under tree-sitter,
+but no CUE symbol or import queries exist yet, so structural symbol search and
+import extraction skip them and search falls back to the word index. The query
+rules are tracked in #1522.

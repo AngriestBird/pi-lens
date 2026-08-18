@@ -664,6 +664,15 @@ const FORMATTER_POLICY_BY_EXTENSION = new Map<string, FormatterPolicy>([
 			gate: "smart-default",
 		},
 	],
+	[
+		".cue",
+		{
+			formatterNames: ["cue"],
+			defaultFormatter: "cue",
+			defaultWhenUnconfigured: true,
+			gate: "smart-default",
+		},
+	],
 ]);
 
 // oxfmt supports these extensions — registered as a candidate formatter for each.
