@@ -47,6 +47,7 @@ vi.mock("../../../../clients/safe-spawn.js", () => ({
 vi.mock("../../../../clients/installer/index.js", () => ({
 	ensureTool: vi.fn(async () => null),
 	getInstallAttempt: vi.fn(() => undefined),
+	getLastEnsureResolutionSource: vi.fn(() => undefined),
 	getToolInstallStrategy: vi.fn(() => undefined),
 	isSpawnableCommand: vi.fn(async () => true),
 	resetPathWalkMemo: vi.fn(),
