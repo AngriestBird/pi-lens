@@ -1745,7 +1745,15 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 	//      is withdrawn). The cost is a cache seed skipped for that file, bounded by
 	//      how often a fast auxiliary is paired with a slower primary on a collecting
 	//      `"all"` touch.
-	it("case 1 — a per-edit-shaped touch whose aux budget IS the max stays inconclusive, not newly partial", async () => {
+	// #1549 UPDATE to case 1's reasoning. The aggregate deadline lapsing is no
+	// longer, on its own, what makes this touch inconclusive: the verdict is decided
+	// per server, and an auxiliary can never produce it. This touch stays
+	// inconclusive because its PRIMARY published nothing either — `makeClient(100,
+	// [])` settles its wait without a publication, and `ts-primary` is not classified
+	// silent-on-clean, so its silence is genuinely ambiguous. The assertions below
+	// now pin that attribution explicitly, which is what keeps the pin honest: the
+	// touch reads inconclusive for the primary's account, not opengrep's.
+	it("case 1 — a per-edit-shaped touch whose PRIMARY published nothing stays inconclusive, not newly partial", async () => {
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 		getServersForFileWithConfig.mockReturnValue([
@@ -1769,8 +1777,12 @@ describe("#1533 — silent auxiliary honesty on clientScope \"all\"", () => {
 		});
 		await vi.advanceTimersByTimeAsync(6000);
 		const result = await touch;
-		// The pre-existing verdict, unchanged: the aggregate deadline lapsed.
+		// The pre-existing verdict, unchanged.
 		expect(result?.inconclusive).toBe(true);
+		// #1549: and it is the PRIMARY's silence that produced it — opengrep is named
+		// as a coverage gap, never as the cause of an inconclusive touch.
+		expect(result?.inconclusiveServerIds).toEqual(["ts-primary"]);
+		expect(result?.inconclusiveReason).toBe("diagnostics-wait");
 		// And #1533 did not convert it into a confirmation claim of any kind, which is
 		// what `isConfirmedTouch` reads.
 		expect(result?.confirmation).toBeUndefined();
