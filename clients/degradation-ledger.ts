@@ -15,7 +15,8 @@ export type DegradationKind =
 	| "lsp-diagnostics-timeout"
 	| "bus-stale"
 	| "query-predicates-invalid"
-	| "install-retry-exhausted";
+	| "install-retry-exhausted"
+	| "ast-grep-napi-unavailable";
 
 export interface DegradationRecord {
 	kind: unknown;
