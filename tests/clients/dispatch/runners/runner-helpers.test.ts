@@ -41,6 +41,12 @@ vi.mock("../../../../clients/safe-spawn.js", () => ({
 
 vi.mock("../../../../clients/installer/index.js", () => ({
 	ensureTool: vi.fn(async () => null),
+	// #1612: resolveAvailableOrInstallUnshared reads these on the install-
+	// success path to derive honest evidence rather than asserting "succeeded".
+	// Undefined here reads as "no fresh attempt this call" (a cache/discovery
+	// resolution), which is what these dedupe/retry tests exercise.
+	getInstallAttempt: vi.fn(() => undefined),
+	getToolInstallStrategy: vi.fn(() => undefined),
 	// Pass the on-disk pre-check so these tests keep exercising the --version
 	// probe path through the mocked safeSpawnAsync.
 	isSpawnableCommand: vi.fn(async () => true),
