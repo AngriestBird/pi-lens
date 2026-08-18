@@ -65,7 +65,7 @@ const turnCtx = {
 };
 
 async function fireTurnEnd() {
-	const { default: registerExtension } = await import("../index.ts");
+	const { default: registerExtension } = await import("../index.js");
 	const mock = createPiMock({ "lens-lsp": true });
 	registerExtension(mock.asExtensionAPI() as never);
 	const turnEnd = mock.getHandlers("turn_end")[0];
@@ -102,7 +102,7 @@ describe("index turn_end loop_block wiring (#1122)", () => {
 	it("(b) a suspectSystemStall block does not raise the high-water, so a later genuine block still logs", async () => {
 		// resetModules is per-test, so re-import once and drive two turns against
 		// the SAME module instance to exercise the cross-turn high-water.
-		const { default: registerExtension } = await import("../index.ts");
+		const { default: registerExtension } = await import("../index.js");
 		const mock = createPiMock({ "lens-lsp": true });
 		registerExtension(mock.asExtensionAPI() as never);
 		const turnEnd = mock.getHandlers("turn_end")[0];

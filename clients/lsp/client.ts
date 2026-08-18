@@ -571,6 +571,17 @@ const SHUTDOWN_REQUEST_TIMEOUT_MS = positiveIntFromEnv(
 	"PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS",
 	1000,
 );
+// #1620: the `exit` NOTIFICATION needs its own ceiling, for the same reason the
+// `shutdown` REQUEST has one. A notification write on a pipe that is not
+// draining neither resolves nor rejects, so `safeSendNotification`'s catch never
+// runs and the await is unbounded. The #1459 wedged-write breaker calls this
+// teardown precisely when that stdin has already been PROVEN wedged, so the
+// unbounded await was the whole mechanism of the leak. Kept equal to the request
+// budget: a healthy server still gets a brief graceful window before the kill.
+const EXIT_NOTIFY_TIMEOUT_MS = positiveIntFromEnv(
+	"PI_LENS_LSP_EXIT_NOTIFY_TIMEOUT_MS",
+	1000,
+);
 // #1277: cheap liveness round-trip for the silent-clean gates (`index.ts`).
 // Those gates convert a diagnostics-wait timeout into a confirmed-clean
 // result from a STATIC capability classification (`silentOnClean`) alone —
@@ -2215,54 +2226,81 @@ export async function clientShutdown(
 	state.watchQueue?.cancel();
 	state.diagnosticEmitter.removeAllListeners();
 	let shutdownRequestTimedOut = false;
-	if (!options.fast) {
-		try {
-			await withTimeout(
-				safeSendRequest(state.connection, "shutdown", {}),
-				SHUTDOWN_REQUEST_TIMEOUT_MS,
-			);
-		} catch {
-			/* ignore — proceed to exit/kill so shutdown cannot hang the session */
-			shutdownRequestTimedOut = true;
+	let exitNotifyTimedOut = false;
+	// #1620: the graceful handshake is BEST-EFFORT and the teardown is not. A
+	// teardown path must not depend on the health of the thing it is tearing
+	// down — the breaker fires exactly when the server is unresponsive. Keep the
+	// handshake inside the `try` and every irreversible teardown step in the
+	// `finally`, so disposal, the record, the deregistration, and the kill run no
+	// matter how the two writes behave, and so a future added await here cannot
+	// reintroduce the class.
+	try {
+		if (!options.fast) {
+			try {
+				await withTimeout(
+					safeSendRequest(state.connection, "shutdown", {}),
+					SHUTDOWN_REQUEST_TIMEOUT_MS,
+				);
+			} catch {
+				/* ignore — proceed to exit/kill so shutdown cannot hang the session */
+				shutdownRequestTimedOut = true;
+			}
+			try {
+				await withTimeout(
+					safeSendNotification(state.connection, "exit", {}),
+					EXIT_NOTIFY_TIMEOUT_MS,
+				);
+			} catch {
+				/* ignore — same reason as the request above */
+				exitNotifyTimedOut = true;
+			}
 		}
-		try {
-			await safeSendNotification(state.connection, "exit", {});
-		} catch {
-			/* ignore */
-		}
-	}
-	disposeClientConnection(state);
-	const pid = state.lspProcess.pid;
-	logLatency({
-		type: "phase",
-		phase: "lsp_client_shutdown",
-		filePath: state.root,
-		durationMs: Date.now() - shutdownStart,
-		metadata: {
-			serverId: state.serverId,
-			pid,
-			fast: !!options.fast,
-			processExiting: !!options.processExiting,
-			shutdownRequestTimedOut,
-		},
-	});
-	// #449/#472: deregister this LSP child from the instance registry. Fire-
-	// and-forget (async fs, no spawn) — must not add latency/risk to shutdown,
-	// including the `processExiting` path where the event loop is closing
-	// (#234 forbids spawning here, but a plain fs write/rename is fine; even
-	// so, we don't await it to keep this teardown path as fast as before).
-	void removeLspChild(pid).catch((err) => {
+	} finally {
+		disposeClientConnection(state);
+		const pid = state.lspProcess.pid;
 		logLatency({
 			type: "phase",
-			phase: "lsp_registry_write_failed",
-			filePath: "",
-			durationMs: 0,
-			metadata: { op: "remove", pid, error: String(err) },
+			phase: "lsp_client_shutdown",
+			filePath: state.root,
+			durationMs: Date.now() - shutdownStart,
+			metadata: {
+				serverId: state.serverId,
+				pid,
+				fast: !!options.fast,
+				processExiting: !!options.processExiting,
+				shutdownRequestTimedOut,
+				// #1620: `shutdownRequestTimedOut` covered only the request half, so
+				// a hung exit notify was indistinguishable from a clean exit — and
+				// pre-fix no record was emitted at all. Report both halves plus one
+				// rolled-up verdict, so a forced teardown is countable from the log.
+				exitNotifyTimedOut,
+				shutdownOutcome: options.fast
+					? "fast"
+					: shutdownRequestTimedOut || exitNotifyTimedOut
+						? "forced"
+						: "graceful",
+			},
 		});
-	});
-	// On Windows, killing the direct child first can orphan grandchildren before
-	// taskkill can traverse the tree. Kill the full tree first and wait briefly.
-	await killProcessTree(state.lspProcess.process, pid, options);
+		// #449/#472: deregister this LSP child from the instance registry. Fire-
+		// and-forget (async fs, no spawn) — must not add latency/risk to shutdown,
+		// including the `processExiting` path where the event loop is closing
+		// (#234 forbids spawning here, but a plain fs write/rename is fine; even
+		// so, we don't await it to keep this teardown path as fast as before).
+		void removeLspChild(pid).catch((err) => {
+			logLatency({
+				type: "phase",
+				phase: "lsp_registry_write_failed",
+				filePath: "",
+				durationMs: 0,
+				metadata: { op: "remove", pid, error: String(err) },
+			});
+		});
+		// On Windows, killing the direct child first can orphan grandchildren before
+		// taskkill can traverse the tree. Kill the full tree first and wait briefly.
+		// Safe and idempotent on an already-exited child: killProcessTree returns
+		// early on an observed exit rather than signalling a possibly-recycled pid.
+		await killProcessTree(state.lspProcess.process, pid, options);
+	}
 }
 
 /**

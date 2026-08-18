@@ -12,7 +12,7 @@ vi.mock("../../../clients/installer/index.js", () => ({
 	getToolEnvironment: () => ({}),
 }));
 
-import { resolveAndLaunch } from "../../../clients/lsp/server.ts";
+import { resolveAndLaunch } from "../../../clients/lsp/server.js";
 import { SpawnFailureError } from "../../../clients/safe-spawn.js";
 
 const fakeProc = { stdout: {}, stderr: {} } as never;

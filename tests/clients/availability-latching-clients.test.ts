@@ -14,8 +14,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	INSTALL_TRANSIENT_BASE_COOLDOWN_MS,
 	TRANSIENT_BASE_COOLDOWN_MS,
-} from "../../clients/dispatch/runners/utils/availability-policy.ts";
-import { resetDispatchAvailabilityState } from "../../clients/dispatch/runners/utils/runner-helpers.ts";
+} from "../../clients/dispatch/runners/utils/availability-policy.js";
+import { resetDispatchAvailabilityState } from "../../clients/dispatch/runners/utils/runner-helpers.js";
 import { removeTempDirSync } from "./test-utils.js";
 
 const { piLensDirHolder } = vi.hoisted(() => ({

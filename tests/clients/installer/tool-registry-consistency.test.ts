@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { GITHUB_TOOLS, TOOLS } from "../../../clients/installer/index.ts";
+import { GITHUB_TOOLS, TOOLS } from "../../../clients/installer/index.js";
 
 // Use the real installer module, not any mock another test file registered.
-vi.unmock("../../../clients/installer/index.ts");
+vi.unmock("../../../clients/installer/index.js");
 
 /**
  * Deterministic, network-free guard on the auto-install registry wiring.

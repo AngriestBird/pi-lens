@@ -86,7 +86,7 @@ describe("stylelint runner — fixable metadata", () => {
 			});
 
 			const runner = (
-				await import("../../../../clients/dispatch/runners/stylelint.ts")
+				await import("../../../../clients/dispatch/runners/stylelint.js")
 			).default;
 			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
 

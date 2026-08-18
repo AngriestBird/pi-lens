@@ -72,7 +72,7 @@ describe("oxlint runner", () => {
 			});
 
 			const runner = (
-				await import("../../../../clients/dispatch/runners/oxlint.ts")
+				await import("../../../../clients/dispatch/runners/oxlint.js")
 			).default;
 
 			// hasTool returns false → triggers resolveToolCommandWithInstallFallback → ensureTool
@@ -105,7 +105,7 @@ describe("oxlint runner", () => {
 			fs.writeFileSync(path.join(env.tmpDir, ".eslintrc.json"), "{}\n");
 
 			const runner = (
-				await import("../../../../clients/dispatch/runners/oxlint.ts")
+				await import("../../../../clients/dispatch/runners/oxlint.js")
 			).default;
 
 			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
@@ -145,7 +145,7 @@ describe("oxlint runner", () => {
 				});
 
 			const runner = (
-				await import("../../../../clients/dispatch/runners/oxlint.ts")
+				await import("../../../../clients/dispatch/runners/oxlint.js")
 			).default;
 
 			const result = await runner.run(createCtx(filePath, env.tmpDir) as never);
@@ -191,7 +191,7 @@ describe("oxlint runner", () => {
 			});
 
 			const runner = (
-				await import("../../../../clients/dispatch/runners/oxlint.ts")
+				await import("../../../../clients/dispatch/runners/oxlint.js")
 			).default;
 			const result = await runner.run({ ...createCtx(filePath, env.tmpDir), hasTool: async () => false } as never);
 
@@ -221,7 +221,7 @@ describe("oxlint runner", () => {
 			});
 
 			const runner = (
-				await import("../../../../clients/dispatch/runners/oxlint.ts")
+				await import("../../../../clients/dispatch/runners/oxlint.js")
 			).default;
 			const result = await runner.run({ ...createCtx(filePath, env.tmpDir), hasTool: async () => false } as never);
 
