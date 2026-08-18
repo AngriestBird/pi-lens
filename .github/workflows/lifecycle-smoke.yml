@@ -42,8 +42,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: "22"
+      # --ignore-scripts is safe here (unlike install-smoke.yml's tarball-pack
+      # case, S6505's noted exception): this job runs `npm run build:dist`
+      # itself as an explicit next step and never needs the `prepare` script's
+      # grammar download. `npm ci` (not `npm install`) locks to package-lock.json
+      # (S8543).
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund --ignore-scripts
       - name: Build dist
         run: npm run build:dist
       - name: Real-host classification smoke (pwsh + powershell legs)
@@ -62,8 +67,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: "22"
+      # --ignore-scripts is safe here (unlike install-smoke.yml's tarball-pack
+      # case, S6505's noted exception): this job runs `npm run build:dist`
+      # itself as an explicit next step and never needs the `prepare` script's
+      # grammar download. `npm ci` (not `npm install`) locks to package-lock.json
+      # (S8543).
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund --ignore-scripts
       - name: Build dist
         run: npm run build:dist
       - name: Availability lifecycle smoke (fixture gh shim, real cooldown wait)
@@ -82,8 +92,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: "22"
+      # --ignore-scripts is safe here (unlike install-smoke.yml's tarball-pack
+      # case, S6505's noted exception): this job runs `npm run build:dist`
+      # itself as an explicit next step and never needs the `prepare` script's
+      # grammar download. `npm ci` (not `npm install`) locks to package-lock.json
+      # (S8543).
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund --ignore-scripts
       - name: Build dist
         run: npm run build:dist
       # Pinned deliberately (bump by hand after checking
