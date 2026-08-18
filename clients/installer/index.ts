@@ -4220,6 +4220,19 @@ export function isKnownToolId(toolId: string): boolean {
 }
 
 /**
+ * The registry's own install strategy for `toolId`, or `undefined` for an
+ * unknown id. Single source of truth for anything that needs to LABEL how a
+ * tool gets installed (e.g. the availability-decision evidence's `source`
+ * tag, #1612) — derived from the same `TOOLS` entry `ensureTool` dispatches
+ * on, so the label can never drift out of sync with the actual installer.
+ */
+export function getToolInstallStrategy(
+	toolId: string,
+): ToolDefinition["installStrategy"] | undefined {
+	return TOOLS.find((tool) => tool.id === toolId)?.installStrategy;
+}
+
+/**
  * GitHub-release tools that ship an asset for **every** supported
  * platform/arch combo (linux/darwin/win32 × x64/arm64). This is the set the
  * full asset-matrix test (tests/clients/installer/github-release.test.ts)

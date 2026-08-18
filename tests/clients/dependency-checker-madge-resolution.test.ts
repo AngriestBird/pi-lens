@@ -47,6 +47,10 @@ vi.mock("../../clients/package-manager.js", () => ({ findNodeToolBinary }));
 vi.mock("../../clients/installer/index.js", () => ({
 	ensureTool,
 	getManagedToolsDir: () => MANAGED_TOOLS_DIR,
+	// #1612: resolveAvailableOrInstallUnshared reads these on the install-
+	// success path to derive honest evidence rather than asserting "succeeded".
+	getInstallAttempt: vi.fn(() => undefined),
+	getToolInstallStrategy: vi.fn(() => undefined),
 	isSpawnableCommand,
 }));
 
