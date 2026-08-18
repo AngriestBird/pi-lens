@@ -990,6 +990,22 @@ export function resetUtf8ConsoleCodePageStateForTests(): void {
 	utf8ConsoleCodePageApplied = false;
 }
 
+// #1656: post-exit pipe-idle wait constants. Node's "close" event only fires
+// once every stdio fd referencing the child has been released — a
+// daemonized descendant that inherited our stdout/stderr pipe (the Windows
+// no-job-object case) can hold that fd open forever, hanging "close" even
+// though the child we spawned is long dead. A fixed post-exit deadline
+// avoids that hang but truncates a legitimately still-streaming child. The
+// idle-grace construction (adopted from pi's `waitForChildProcess`) does
+// neither: after "exit", wait for the pipes to go quiet — no data for
+// EXIT_PIPE_IDLE_GRACE_MS, re-armed on every chunk — so a quiet inherited
+// handle still releases after one grace window while an actively-writing
+// descendant keeps being read. EXIT_PIPE_IDLE_MAX_WAIT_MS caps the total
+// extra wait so a pathological, never-quiet descendant can't extend the
+// caller's overall budget unboundedly.
+const EXIT_PIPE_IDLE_GRACE_MS = 100;
+const EXIT_PIPE_IDLE_MAX_WAIT_MS = 2000;
+
 // ============================================================================
 // ASYNC VERSION (Recommended - Non-blocking)
 // ============================================================================
@@ -1078,6 +1094,11 @@ export async function safeSpawnAsync(
 		// any `await`, so a timer firing during the close handler's `await
 		// killPromise` still observes the flag correctly).
 		let closed = false;
+		// #1656: set only while the post-exit idle-pipe wait is active (see
+		// waitForPipeIdle below); the stdout/stderr "data" handlers call this to
+		// re-arm the grace timer on every chunk. `undefined` before exit / after
+		// the wait settles, so the calls below are no-ops outside that window.
+		let rearmIdleGrace: (() => void) | undefined;
 		const maxOutputBytes =
 			options?.maxOutputBytes !== undefined &&
 			Number.isFinite(options.maxOutputBytes) &&
@@ -1240,7 +1261,7 @@ export async function safeSpawnAsync(
 		}
 
 		// #620: bracket this spawn's lifetime with a short-interval CPU/RSS poll
-		// (started right here, stopped in the "close" handler below) so transient
+		// (started right here, stopped in finalize() below) so transient
 		// analyzer children (jscpd, knip, madge, gitleaks, etc.) — which live too
 		// briefly for heartbeat-cadence sampling to reliably catch — still get a
 		// peak/average resource reading. `startSpawnUsageSampler` itself is
@@ -1299,7 +1320,7 @@ export async function safeSpawnAsync(
 		};
 		abortSignal?.addEventListener("abort", onAbort, { once: true });
 
-		// Output-cap kills are awaited by the close handler below, just like
+		// Output-cap kills are awaited by finalize() below, just like
 		// timeout/abort kills. This keeps a noisy CLI from continuing in the
 		// background after its retained output has been bounded.
 		let killPromise: Promise<void> | undefined;
@@ -1316,10 +1337,12 @@ export async function safeSpawnAsync(
 		child.stdout?.on("data", (data) => {
 			stdout = appendOutput(stdout, data);
 			stopForOutputLimit();
+			rearmIdleGrace?.();
 		});
 		child.stderr?.on("data", (data) => {
 			stderr = appendOutput(stderr, data);
 			stopForOutputLimit();
+			rearmIdleGrace?.();
 		});
 
 		// Timeout handling - KILL the process, don't just abandon it
@@ -1354,18 +1377,46 @@ export async function safeSpawnAsync(
 			return summary;
 		};
 
+		// #1656: wait for stdout/stderr to fall idle after exit instead of
+		// waiting for Node's "close" event (see the constants' doc comment
+		// above). Resolves immediately if the child has no pipes to drain.
+		const waitForPipeIdle = (): Promise<void> => {
+			if (!child.stdout && !child.stderr) return Promise.resolve();
+			return new Promise((finishIdleWait) => {
+				let settled = false;
+				let graceTimer: ReturnType<typeof setTimeout> | undefined;
+				const capTimer: ReturnType<typeof setTimeout> = setTimeout(() => {
+					finish();
+				}, EXIT_PIPE_IDLE_MAX_WAIT_MS);
+				capTimer.unref?.();
+				const finish = (): void => {
+					if (settled) return;
+					settled = true;
+					rearmIdleGrace = undefined;
+					if (graceTimer) clearTimeout(graceTimer);
+					clearTimeout(capTimer);
+					finishIdleWait();
+				};
+				rearmIdleGrace = (): void => {
+					if (graceTimer) clearTimeout(graceTimer);
+					graceTimer = setTimeout(finish, EXIT_PIPE_IDLE_GRACE_MS);
+					graceTimer.unref?.();
+				};
+				rearmIdleGrace();
+			});
+		};
+
 		// Process completion
-		child.on("close", async (code, signal) => {
-			if (spawnErrored) return;
-			closed = true;
-			clearTimeout(timeoutId);
-			abortSignal?.removeEventListener("abort", onAbort);
-			if (child.pid) lifetimeState.pids.delete(child.pid);
+		const finalize = async (
+			code: number | null,
+			signal: NodeJS.Signals | null,
+		): Promise<void> => {
 			await killPromise;
 			// #1109: the child has exited — if killTree armed the non-Windows
 			// SIGTERM→SIGKILL escalation timer and it hasn't fired yet, clear it
 			// so it doesn't linger as a ref'd handle after this promise resolves.
 			if (escalationTimer) clearTimeout(escalationTimer);
+			await waitForPipeIdle();
 			const resourceUsage = finishResourceUsage();
 
 			const outputInfo = outputTruncated ? { outputTruncated: true } : {};
@@ -1410,6 +1461,15 @@ export async function safeSpawnAsync(
 			} else {
 				resolve({ stdout, stderr, status: code, ...outputInfo, resourceUsage });
 			}
+		};
+
+		child.on("exit", (code, signal) => {
+			if (spawnErrored) return;
+			closed = true;
+			clearTimeout(timeoutId);
+			abortSignal?.removeEventListener("abort", onAbort);
+			if (child.pid) lifetimeState.pids.delete(child.pid);
+			void finalize(code, signal);
 		});
 
 		child.on("error", (err) => {
