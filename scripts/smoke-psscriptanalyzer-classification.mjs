@@ -69,12 +69,18 @@
  * `expected-fail` in the workflow rather than leaving a permanently-red
  * nightly, until #1604 lands a fix.
  *
+ * pwsh is REQUIRED (see the "pwsh-restricted" leg above), including for a
+ * local run of this script -- a Windows dev box without PowerShell 7
+ * installed will exit 2 here, not silently narrow to the powershell-forced
+ * and healthy legs.
+ *
  * Usage: node scripts/smoke-psscriptanalyzer-classification.mjs
- * Exit codes: 0 all required legs classified correctly; 1 a real-host
- * classification mismatch (the defect this lane exists to catch); 2 infra
- * failure (no PowerShell present, pwsh missing on windows-latest, the
- * PSScriptAnalyzer module not installed for an interpreter under test, or the
- * dist build is missing).
+ * Exit codes: 0 all required legs classified correctly (a gated pwsh-leg
+ * failure under `expected-fail` mode still exits 0 -- see
+ * `PI_LENS_SMOKE_PSA_PWSH_MODE` above); 1 a real-host classification mismatch
+ * on a required leg (the defect this lane exists to catch); 2 infra failure
+ * (no pwsh on PATH, the PSScriptAnalyzer module not installed for an
+ * interpreter under test, or the dist build is missing).
  */
 
 import { spawnSync } from "node:child_process";
@@ -416,14 +422,25 @@ async function main() {
 	// A gated leg's failure never blocks the job (F3) -- it is still printed
 	// above so the run stays legible about what actually happened.
 	const blocking = outcomes.filter((o) => !(o.gated && !o.pass));
-	const anyInfra = blocking.some((o) =>
+	// V3: computed over ALL outcomes, not just `blocking` -- a gated leg's own
+	// INFRA failure (e.g. its child never spawned at all) must still be
+	// visible in the exit-code decision, even though it can't block the job.
+	const anyInfra = outcomes.some((o) =>
 		o.problems.some((p) => p.startsWith("INFRA:")),
 	);
 	const allPass = blocking.every((o) => o.pass);
-	console.log(
-		`\n${allPass ? "ALL LEGS CLASSIFIED CORRECTLY" : "CLASSIFICATION MISMATCH DETECTED"}`,
-	);
-	if (allPass) process.exit(0);
+	const gatedFailedCount = outcomes.filter((o) => o.gated && !o.pass).length;
+	if (allPass) {
+		// V3: a gated leg's [FAIL] two lines up must not be followed by "ALL
+		// LEGS CLASSIFIED CORRECTLY" -- name what's actually gated instead.
+		console.log(
+			gatedFailedCount > 0
+				? `\nREQUIRED LEGS CLASSIFIED CORRECTLY (${gatedFailedCount} gated leg${gatedFailedCount === 1 ? "" : "s"} failed, pending #1604)`
+				: "\nALL LEGS CLASSIFIED CORRECTLY",
+		);
+		process.exit(0);
+	}
+	console.log("\nCLASSIFICATION MISMATCH DETECTED");
 	process.exit(
 		anyInfra &&
 			blocking.every(

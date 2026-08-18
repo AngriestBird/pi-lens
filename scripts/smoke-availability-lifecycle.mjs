@@ -52,10 +52,15 @@
  *   5. The OTHER latch half this lane's real subject is: a `missing`
  *      ("not-found") verdict is process-lifetime durable by design
  *      (`isLatchingOutcome`) and does NOT expire on any cooldown -- remove
- *      the fixture entirely, confirm the verdict latches (two calls, same
- *      cached `undefined`, no new probe on the second), then call
+ *      the fixture entirely and confirm the verdict latches, then RESTORE the
+ *      fixture (without resetting the latch) and confirm a second call still
+ *      returns `undefined` -- the binding check: gh being merely present
+ *      again must not be what re-arms it. Only THEN call
  *      `resetZizmorTokenAvailability()` (the real `session_start` reset) and
- *      confirm THAT is what re-arms it, not time.
+ *      confirm that is what re-probes and recovers. (Asserting "still
+ *      undefined" against an absent gh would be vacuous -- indistinguishable
+ *      from a broken latch re-probing and independently getting the same
+ *      missing answer.)
  *
  * Usage: node scripts/smoke-availability-lifecycle.mjs
  * Exit codes: 0 pass; 1 an assertion failed (the latch/cooldown defect this
@@ -146,11 +151,22 @@ function removeFixtureGh(binDir) {
 	}
 }
 
+const FLUSH_TIMEOUT_MS = 10_000;
+
 async function readDecisions(scratch, tool, flush) {
 	// latency.log writes go through an async queue (`createNdjsonLogger`) --
 	// flush it first so a read immediately after an `await` doesn't race a
 	// still-pending write and miss (or misorder) the decision it just made.
-	await flush();
+	// Bounded: an unbounded await here would let a wedged writer hang this
+	// script all the way to the CI job timeout instead of failing legibly.
+	await Promise.race([
+		flush(),
+		sleep(FLUSH_TIMEOUT_MS).then(() => {
+			throw new Error(
+				`flushLatencyLog() did not settle within ${FLUSH_TIMEOUT_MS}ms`,
+			);
+		}),
+	]);
 	const latencyLogPath = path.join(scratch, "latency.log");
 	if (!fs.existsSync(latencyLogPath)) return [];
 	return fs
@@ -304,9 +320,19 @@ async function main() {
 		// wait) lengthens this loop instead of failing the phase as "recovery
 		// failed" -- bounded at 4x the base cooldown, matching the module's own
 		// ZIZMOR_TOKEN_MAX_COOLDOWN_MS (120s) ceiling.
+		// V2: capture the degradation count at the TOP of each iteration, not
+		// after the loop exits -- reading it only once, after a successful call
+		// already happened, would silently absorb a spurious degradation the
+		// successful call itself recorded into the "before" baseline, making
+		// the later "added nothing" comparison vacuous. Capturing per-iteration
+		// isolates exactly the call that succeeded.
 		const pollDeadlineMs = Date.now() + TRANSIENT_BASE_COOLDOWN_MS * 4;
 		let t3;
+		let countBeforeSuccess;
 		do {
+			summary = getDegradationSummary();
+			group = summary.find((g) => g.kind === "mode-suppression");
+			countBeforeSuccess = group?.count ?? 0;
 			t3 = await resolveZizmorGitHubToken();
 			if (t3 !== undefined) break;
 			await sleep(2000);
@@ -328,25 +354,17 @@ async function main() {
 			assertEq("phase4 decision.verdict", d4.metadata.verdict, "available");
 			assertEq("phase4 decision.outcome", d4.metadata.outcome, "success");
 		}
-		// The poll loop above may have made more than one cache-hit call while
-		// still cooling down (each one legitimately counts, same as phase 2), so
-		// assert stability from THIS point rather than a fixed "2" -- one more
-		// call now that the latch is a genuine `available` hit must add nothing.
-		summary = getDegradationSummary();
-		group = summary.find((g) => g.kind === "mode-suppression");
-		const countAtRecovery = group?.count ?? 0;
 		assertTrue(
 			"phase4 degradation count reached recovery with at least phase 1+2's 2",
-			countAtRecovery >= 2,
-			`count: ${countAtRecovery}`,
+			countBeforeSuccess >= 2,
+			`count before the successful call: ${countBeforeSuccess}`,
 		);
-		await resolveZizmorGitHubToken();
 		summary = getDegradationSummary();
 		group = summary.find((g) => g.kind === "mode-suppression");
 		assertEq(
-			"phase4 no NEW degradation recorded once recovered",
+			"phase4 the successful re-probe call itself added no degradation",
 			group?.count ?? 0,
-			countAtRecovery,
+			countBeforeSuccess,
 		);
 
 		console.log(
@@ -373,24 +391,32 @@ async function main() {
 			assertEq("phase5 decision.outcome", d5a.metadata.outcome, "missing");
 			assertEq("phase5 decision.latched", d5a.metadata.latched, true);
 		}
-		// No cooldown applies to a latching outcome (`isLatchingOutcome`) -- a
-		// second immediate call must stay latched on the SAME cached verdict,
-		// proving this is durable, not merely "not yet expired".
-		const t5b = await resolveZizmorGitHubToken();
-		assertEq("phase5 still latched without any wait", t5b, undefined);
-
-		// Bring gh back AND simulate the real session_start reset -- that is
-		// what re-arms a latching verdict, never elapsed time. A real
-		// session_start fires MULTIPLE resets together (`clients/runtime-session.ts`);
-		// besides the zizmor latch itself, `safe-spawn.ts` keeps its own
-		// Windows PATH/PATHEXT resolution cache (`resetSafeSpawnWindowsCommandCache`,
-		// also wired into `handleSessionStart`) that would otherwise keep
-		// serving the "gh not found" answer it just cached in phase 5's
-		// missing-verdict check above, on Windows, for up to its own
-		// negative-cache TTL.
+		// V1: restore the fixture BEFORE the second call, without resetting the
+		// latch. Calling again with gh STILL missing would return `undefined`
+		// either way -- whether the latch genuinely held, or it re-probed an
+		// absent gh and got the same missing answer independently -- so that
+		// assertion alone is vacuous (a deleted durable-latch guard in
+		// `availability-policy.ts` would read identically). Restoring gh first
+		// makes this the BINDING check: if the latch is not durable, this call
+		// re-probes, finds the now-working fixture, and returns the recovered
+		// token -- turning the assertion red. `resetSafeSpawnWindowsCommandCache()`
+		// clears safe-spawn's OWN Windows PATH/PATHEXT cache so a stale "not
+		// found" there can't be mistaken for the zizmor latch holding.
 		writeFixtureGh(binDir, "ok");
-		resetZizmorTokenAvailability();
 		resetSafeSpawnWindowsCommandCache();
+		const t5b = await resolveZizmorGitHubToken();
+		assertEq(
+			"phase5 latch holds even after gh comes back (no reset yet)",
+			t5b,
+			undefined,
+		);
+
+		// Only the real session_start reset re-arms it -- never gh's own
+		// return, and never elapsed time. A real session_start fires MULTIPLE
+		// resets together (`clients/runtime-session.ts`); besides the zizmor
+		// latch itself, `resetSafeSpawnWindowsCommandCache` is wired into the
+		// same `handleSessionStart` call.
+		resetZizmorTokenAvailability();
 		const t5c = await resolveZizmorGitHubToken();
 		assertEq(
 			"phase5 resetZizmorTokenAvailability() re-probes and recovers",
