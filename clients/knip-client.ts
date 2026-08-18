@@ -293,9 +293,26 @@ export class KnipClient {
 		// every other project cache (see cache-manager.ts, call-graph.ts) and is
 		// covered by the existing `.pi-lens/` gitignore entry.
 		//
-		// Caveat (per knip's docs): a cached run does NOT pick up newly-added
-		// `.gitignore` files automatically — the cache must be deleted to detect
-		// them. Not auto-handled here; this is a documented tradeoff, not a bug.
+		// Documented cache-invalidation gaps (both live in knip's own cache, not
+		// in pi-lens):
+		//
+		// 1. `.gitignore` (per knip's docs): a cached run does NOT pick up
+		//    newly-added `.gitignore` files automatically — the cache must be
+		//    deleted to detect them. Not auto-handled here; documented tradeoff.
+		// 2. Consumer-side imports (#1630): knip's glob cache records the mtime of
+		//    every directory that CONTRIBUTED a matched path, and revalidates
+		//    against those. A directory that matched nothing at cache time is not
+		//    recorded, so a file later added to it is invisible to the cached
+		//    glob. A new test that imports an export therefore never reaches the
+		//    graph, and knip keeps reporting that export as unused — a stale
+		//    verdict pi-lens then renders as fresh. Fixed upstream in knip 6.28.0
+		//    (glob cache now tracks every directory it reads), but the managed
+		//    install floats and older versions are common in the field, so
+		//    `pruneStaleGlobCache()` below drops the glob cache on every run
+		//    regardless of version. Measured on this repo with knip 6.4.1:
+		//    uncached 3.3s, fully cached 1.3s, glob-cache-dropped 1.4s. The glob
+		//    cache is worth ~0.1s of the ~2.0s the cache saves, so dropping it
+		//    buys correctness for almost nothing.
 		const cacheLocation = path.join(getProjectDataDir(targetDir), "cache", "knip");
 
 		// knip (verified against 6.26.0) silently fails to persist the cache when
@@ -311,6 +328,8 @@ export class KnipClient {
 		} catch (err) {
 			this.log(`Failed to pre-create knip cache dir ${cacheLocation}: ${err}`);
 		}
+
+		this.pruneStaleGlobCache(cacheLocation);
 
 		const args = [
 			"--reporter=json",
@@ -354,6 +373,39 @@ export class KnipClient {
 		}
 
 		return this.dropOverridePinnedDeps(this.parseOutput(output), targetDir);
+	}
+
+	/**
+	 * Delete knip's glob cache (`glob-<version>.cache`) before every run (#1630).
+	 *
+	 * knip revalidates a cached glob against the mtimes of the directories that
+	 * contributed a matched path. Directories that matched nothing are never
+	 * recorded, so files later added to them stay invisible and knip keeps
+	 * reporting an export as unused after a new consumer imports it. Removing
+	 * this one file forces a fresh file walk while the module and plugin caches —
+	 * which carry nearly all of the cache's speed — survive.
+	 *
+	 * Failures are logged and ignored: a glob cache we could not delete degrades
+	 * to the pre-#1630 behavior, which is stale but not fatal.
+	 */
+	private pruneStaleGlobCache(cacheLocation: string): void {
+		let entries: string[];
+		try {
+			entries = fs.readdirSync(cacheLocation);
+		} catch (err) {
+			this.log(`Failed to read knip cache dir ${cacheLocation}: ${err}`);
+			return;
+		}
+
+		for (const entry of entries) {
+			if (!entry.startsWith("glob-") || !entry.endsWith(".cache")) continue;
+			try {
+				fs.rmSync(path.join(cacheLocation, entry), { force: true });
+				this.log(`Pruned knip glob cache ${entry}`);
+			} catch (err) {
+				this.log(`Failed to prune knip glob cache ${entry}: ${err}`);
+			}
+		}
 	}
 
 	/**
