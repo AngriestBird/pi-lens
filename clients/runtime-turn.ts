@@ -64,8 +64,12 @@ import {
 	writeProjectDiagnosticsDeltaReport,
 } from "./project-diagnostics/cache.js";
 import { deadCodeIssueToProjectDiagnostic } from "./project-diagnostics/runner-adapters/dead-code.js";
+import { gitleaksFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/gitleaks.js";
+import { govulncheckFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/govulncheck.js";
+import { trivyFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/trivy.js";
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
+import { applyDispositionsMultiFile } from "./diagnostic-dispositions.js";
 import { logLatency } from "./latency-logger.js";
 import {
 	getLspBudgetIdleTimeoutMs,
@@ -106,6 +110,50 @@ interface TurnEndDeps {
 	owner?: TurnStateOwner;
 	resetLSPService: () => void;
 	resetFormatService: () => void;
+}
+
+/**
+ * #1617: turn_end reads gitleaks/govulncheck/trivy straight from their
+ * session-scan caches and formats them into advisory/blocker text — a
+ * reporting lane parallel to (and, before this fix, entirely bypassing)
+ * `dispatcher.ts:924`'s `applyDispositions` filter. An agent-marked
+ * false-positive/won't-fix on one of these findings never suppressed it
+ * here, so it re-reported on every turn.
+ *
+ * Filters `findings` through the SAME anchor derivation the dispatch path
+ * and `lens_diagnostics mode=full` use (`applyDispositionsMultiFile` in
+ * `diagnostic-dispositions.ts`), keyed off each lane's own canonical
+ * `ProjectDiagnostic` adapter (`toDiagnostic`) — the exact tool/rule/message
+ * identity `lens_diagnostics` already surfaces and `lens_diagnostic_mark`
+ * already anchors a mark against, not a second, cloned identity that would
+ * silently diverge from what the agent actually marked.
+ *
+ * Returns the surviving findings plus how many were dropped, so a caller can
+ * still surface a "suppressed by disposition: N" trace (the #1616
+ * suppressed-bucket rule — a security finding must never vanish with no
+ * trace, even when the disposition that dropped it is working as intended).
+ */
+function filterFindingsByDisposition<F>(
+	findings: F[],
+	cwd: string,
+	toDiagnostic: (finding: F) => ProjectDiagnostic,
+): { kept: F[]; suppressed: number } {
+	if (findings.length === 0) return { kept: findings, suppressed: 0 };
+	const candidates = findings.map((finding) => ({
+		finding,
+		diagnostic: toDiagnostic(finding),
+	}));
+	const survivors = new Set(
+		applyDispositionsMultiFile(
+			candidates.map((c) => c.diagnostic),
+			cwd,
+			(d) => d.filePath,
+		),
+	);
+	const kept = candidates
+		.filter((c) => survivors.has(c.diagnostic))
+		.map((c) => c.finding);
+	return { kept, suppressed: findings.length - kept.length };
 }
 
 /**
@@ -1137,6 +1185,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		metadata: deadCodeMeta,
 	});
 
+	// #1617: running total of findings this turn's advisory/blocker sections
+	// dropped because an agent/user marked them false-positive/won't-fix —
+	// the #1616 suppressed-bucket rule applied to turn_end's own reporting
+	// lanes, so a mark's effect stays visible even though the finding itself
+	// no longer appears above. Review-round F4 (#1625): kept per-lane, not
+	// just a bare total, so the eventual trace says WHICH lane's marks did
+	// the suppressing.
+	let dispositionSuppressedTotal = 0;
+	const dispositionSuppressedByLane: Record<string, number> = {};
+	function recordDispositionSuppressed(lane: string, count: number): void {
+		if (count <= 0) return;
+		dispositionSuppressedTotal += count;
+		dispositionSuppressedByLane[lane] =
+			(dispositionSuppressedByLane[lane] ?? 0) + count;
+	}
+
 	// govulncheck — surface session_start-cached Go CVE findings as advisory.
 	// No per-turn re-run in this slice; the cache refreshes at next session_start.
 	const govCacheEntry = cacheManager.readCache<GovulncheckResult>(
@@ -1161,9 +1225,20 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		onMissing: "demote",
 	});
 	const govStale = new Set(govGate.stale);
-	const govFindings = [...govGate.live, ...govGate.stale];
-	// Guarded on the POST-gate list. A raw-cache-length guard prints the header
-	// with zero rows beneath it whenever the gate empties the list (review H1).
+	// #1625 review round: the #1622 freshness gate runs FIRST — the disposition
+	// filter's anchor is derived from each finding's post-demotion identity
+	// (this array is already the gate's live+stale partition, never the raw
+	// pre-gate cache). #1627's own post-gate guard (`if (govFindings.length)`)
+	// and this round's disposition guard are the SAME guard — compose them,
+	// never fall back to a raw-cache-length check (that would print the header
+	// with zero rows beneath it whenever either filter empties the list).
+	const govFiltered = filterFindingsByDisposition(
+		[...govGate.live, ...govGate.stale],
+		cwd,
+		(f) => govulncheckFindingToProjectDiagnostic(cwd, f),
+	);
+	recordDispositionSuppressed("govulncheck", govFiltered.suppressed);
+	const govFindings = govFiltered.kept;
 	if (govFindings.length) {
 		const findings = govFindings.slice(0, 5);
 		let report =
@@ -1223,11 +1298,48 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		scannedAt: trivySecretsData?.scannedAt,
 		citedPath: (finding) => finding.file,
 	});
+	// #1617: THE bug this issue exists for — gitleaks findings never passed
+	// through `applyDispositions`, so an agent-marked false-positive/won't-fix
+	// re-reported as a 🔴 STOP blocker on every turn. Filter through the SAME
+	// `gitleaksFindingToProjectDiagnostic` identity `lens_diagnostics
+	// mode=full` surfaces (tool="gitleaks", rule="gitleaks:<ruleId>", the
+	// exact "Potential secret: …" message) so a mark made against what the
+	// agent was shown is honored here too.
+	//
+	// #1625 review round: filtered AFTER the #1622 freshness gate above — the
+	// anchor is derived from each finding's post-demotion identity, never the
+	// raw pre-gate cache. Applied to BOTH `gitleaksGate.live` AND
+	// `gitleaksGate.stale`: `staleSecretEntries` below derives from the stale
+	// arm, and an fp-marked finding that later goes stale must not reappear
+	// there — a suppression escape (and a double count against
+	// `dispositionSuppressedTotal`) that a live-only filter would have missed.
+	//
+	// Trivy-secret findings are NOT yet wired — they have no existing
+	// lens_diagnostics-surfaced identity to anchor against (only the
+	// CVE-scanning trivy lane does); re-homed as a follow-up (#1628) rather
+	// than inventing an unreviewed anchor shape under release time pressure.
+	// ast-grep secret findings need no filtering here — they already went
+	// through dispatch's applyDispositions before reaching
+	// `peekActionableWarnings()`.
+	const gitleaksLiveFiltered = filterFindingsByDisposition(
+		gitleaksGate.live,
+		cwd,
+		(f) => gitleaksFindingToProjectDiagnostic(cwd, f),
+	);
+	const gitleaksStaleFiltered = filterFindingsByDisposition(
+		gitleaksGate.stale,
+		cwd,
+		(f) => gitleaksFindingToProjectDiagnostic(cwd, f),
+	);
+	recordDispositionSuppressed(
+		"gitleaks",
+		gitleaksLiveFiltered.suppressed + gitleaksStaleFiltered.suppressed,
+	);
 	const astSecretWarnings = runtime
 		.peekActionableWarnings()
 		.filter(isSecretWarning);
 	const sessionSecrets = dedupeSecretFindings([
-		...fromGitleaks(gitleaksGate.live),
+		...fromGitleaks(gitleaksLiveFiltered.kept),
 		...fromTrivySecrets(trivySecretsGate.live),
 	]);
 	// Demoted secrets are addressed by FILE, never by line — the line is the one
@@ -1237,7 +1349,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// from a bare path. Deduped on file+rule+source so a file with twenty stale
 	// hits of one rule is named once.
 	const staleSecretEntries = [
-		...gitleaksGate.stale.map((f) => ({
+		...gitleaksStaleFiltered.kept.map((f) => ({
 			file: toRunnerDisplayPath(cwd, f.file),
 			rule: f.ruleId,
 			source: "gitleaks",
@@ -1303,8 +1415,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// CRITICAL is a blocker (a known-exploitable CVE in a shipped dep is real
 	// production risk); HIGH/MEDIUM/LOW are advisory. The agent gets the upgrade
 	// target as a hint and decides — we never auto-edit lockfiles.
-	if (trivyCacheEntry?.data?.findings?.length) {
-		const all = trivyCacheEntry.data.findings;
+	const trivyFindingsFiltered = filterFindingsByDisposition(
+		trivyCacheEntry?.data?.findings ?? [],
+		cwd,
+		(f) => trivyFindingToProjectDiagnostic(cwd, f),
+	);
+	recordDispositionSuppressed("trivy", trivyFindingsFiltered.suppressed);
+	if (trivyFindingsFiltered.kept.length) {
+		const all = trivyFindingsFiltered.kept;
 		const critical = all.filter((f) => f.severity === "CRITICAL");
 		const advisory = all.filter((f) => f.severity !== "CRITICAL");
 		const fmt = (f: TrivyResult["findings"][number]): string => {
@@ -1353,6 +1471,22 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			report += `  … and ${licenses.length - shown.length} more\n`;
 		}
 		advisoryParts.push(report);
+	}
+
+	// #1616 suppressed-bucket rule: surface the running disposition-drop total
+	// as its own advisory line so a mark's effect is visible, not a silent
+	// absence — trace, not a vanish.
+	if (dispositionSuppressedTotal > 0) {
+		// Review-round F4 (#1625): per-lane attribution, e.g.
+		// "gitleaks 2, govulncheck 1" — not just a bare total.
+		const byLane = Object.entries(dispositionSuppressedByLane)
+			.map(([lane, count]) => `${lane} ${count}`)
+			.join(", ");
+		advisoryParts.push(
+			`suppressed by disposition: ${dispositionSuppressedTotal} finding(s) ` +
+				`dropped from this turn's gitleaks/govulncheck/trivy sections (${byLane}) ` +
+				"(marked false-positive or won't-fix).",
+		);
 	}
 
 	const t3 = Date.now();
