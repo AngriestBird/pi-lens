@@ -80,7 +80,18 @@ import { setupTestEnvironment } from "../clients/test-utils.js";
  * The scenario's logical clock. Advancing it does not move wall time; it moves
  * the timestamp the harness stamps onto the next file write or scan record.
  * Scenarios therefore read as a story ("scan, then five seconds later the agent
- * edits") while producing byte-identical mtimes on every run.
+ * edits") while producing the same RELATIVE ordering on every run.
+ *
+ * It starts at `Date.now()`, not at a fixed epoch. Review round R1 (S2) caught
+ * why that matters: the production code the harness drives stamps some of its
+ * own records with the real `Date.now()` — `recordInlineBlockers`' capture
+ * time, which #1633's gate compares file mtimes against. With the clock pinned
+ * to a fixed 2026-08-18 epoch, every scenario file was written a day or more
+ * BEFORE those records, so the era gap between the two clocks decided the
+ * comparison instead of the scenario's own `advance()` calls. Anchoring at
+ * construction puts both on one timeline; determinism then comes from the
+ * relative offsets a scenario asks for, which is the only thing any of these
+ * assertions depend on.
  */
 export interface ScenarioClock {
 	now(): number;
@@ -197,8 +208,26 @@ export interface TurnHarness {
 	/** What knip returns from its next `analyze` call this turn. */
 	knip(result: ScenarioKnipResult): void;
 
-	/** Record an inline blocker for a file, as a dispatch would (#1631). */
-	blocker(relative: string, summary: string): void;
+	/**
+	 * Record an inline blocker for a file exactly as a dispatch does (#1631).
+	 *
+	 * Production's ONE call site (`runtime-tool-result.ts`) always passes both
+	 * the write token and the blocker's tool provenance, and #1561's retirement
+	 * seam fails CLOSED on a record with no `sources` — an unprovenanced entry
+	 * can never be retired or, under #1633's gate, revalidated. A helper that
+	 * omitted `sources` therefore produced blockers every gate silently skips,
+	 * so a scenario would pass without the logic under test ever running
+	 * (review round R1, S3).
+	 *
+	 * The VALUES matter as much as their presence. `sources` holds the tool tag
+	 * each blocking diagnostic carried (`pipeline.ts` derives it from
+	 * `d.tool`), and gates branch on it: #1633's freshness sweep demotes only
+	 * an entry whose sources are ALL `"lsp"`, because an ast-grep secret match
+	 * does not stop being true when a file it imports is edited. Hence the
+	 * default `["lsp"]` — a language-server blocker, the shape every one of
+	 * #1631's live instances had.
+	 */
+	blocker(relative: string, summary: string, sources?: readonly string[]): void;
 
 	/** Run one turn end and return what the agent sees. */
 	turnEnd(): Promise<TurnEndView>;
@@ -217,19 +246,35 @@ export interface TurnHarness {
 	/** The underlying pieces, for a scenario that needs an escape hatch. */
 	runtime: RuntimeCoordinator;
 	cacheManager: CacheManager;
+	/**
+	 * The knip client this harness hands `handleTurnEnd` — the real one when
+	 * {@link TurnHarnessOptions.knipClient} supplied it. A scenario uses this to
+	 * prime the client's own cache out of band, before any turn runs.
+	 */
+	knipClient: unknown;
 }
 
 export interface TurnHarnessOptions {
 	/** Temp-dir prefix, so a failing scenario's leftovers are identifiable. */
 	prefix?: string;
-	/** Logical start time. Fixed by default so scenarios replay identically. */
+	/**
+	 * Logical start time. Defaults to `Date.now()` at harness construction —
+	 * see {@link ScenarioClock} for why a fixed epoch was wrong.
+	 */
 	startMs?: number;
 	/** Session id used for telemetry identity and provenance revision checks. */
 	sessionId?: string;
+	/**
+	 * Knip client for the turn's `analyze` call. Defaults to a stub that
+	 * returns whatever `h.knip(...)` last stated.
+	 *
+	 * Pass the REAL `KnipClient` when the behavior under test lives inside it —
+	 * #1637's fix is glob-cache pruning inside `KnipClient.analyze`, so a
+	 * scenario that stubs the whole client cannot fail the way that bug fails
+	 * (review round R1, S4).
+	 */
+	knipClient?: unknown;
 }
-
-/** 2026-08-18T07:00:00Z — the day of the incidents this harness was built for. */
-export const DEFAULT_SCENARIO_START_MS = Date.UTC(2026, 7, 18, 7, 0, 0);
 
 /**
  * Build a harness. Callers must call the returned `cleanup` in a `finally`;
@@ -241,12 +286,16 @@ export function createTurnHarness(options: TurnHarnessOptions = {}): {
 } {
 	const env = setupTestEnvironment(options.prefix ?? "pi-lens-turn-scenario-");
 	const sessionId = options.sessionId ?? "turn-harness-session";
-	let currentMs = options.startMs ?? DEFAULT_SCENARIO_START_MS;
+	let currentMs = options.startMs ?? Date.now();
 
 	const runtime = new RuntimeCoordinator();
 	runtime.setTelemetryIdentity({ sessionId });
 	const cacheManager = new CacheManager(false);
 	let knipResult: KnipResult = EMPTY_KNIP;
+	const knipClient = options.knipClient ?? {
+		ensureAvailable: async () => knipResult !== EMPTY_KNIP,
+		analyze: async () => knipResult,
+	};
 
 	const clock: ScenarioClock = {
 		now: () => currentMs,
@@ -272,6 +321,7 @@ export function createTurnHarness(options: TurnHarnessOptions = {}): {
 		clock,
 		runtime,
 		cacheManager,
+		knipClient,
 		advance: (ms) => clock.advance(ms),
 		pathOf,
 		write: writeAt,
@@ -303,8 +353,13 @@ export function createTurnHarness(options: TurnHarnessOptions = {}): {
 		knip(result) {
 			knipResult = { ...EMPTY_KNIP, ...result } as KnipResult;
 		},
-		blocker(relative, summary) {
-			runtime.recordInlineBlockers(pathOf(relative), summary);
+		blocker(relative, summary, sources = ["lsp"]) {
+			runtime.recordInlineBlockers(
+				pathOf(relative),
+				summary,
+				runtime.nextWriteIndex(),
+				sources,
+			);
 		},
 		async turnEnd() {
 			await handleTurnEnd({
@@ -313,10 +368,7 @@ export function createTurnHarness(options: TurnHarnessOptions = {}): {
 				dbg: () => {},
 				runtime,
 				cacheManager,
-				knipClient: {
-					ensureAvailable: async () => knipResult !== EMPTY_KNIP,
-					analyze: async () => knipResult,
-				},
+				knipClient,
 				deadCodeClients: [],
 				depChecker: { ensureAvailable: async () => false },
 				testRunnerClient: { getTestRunTarget: () => null },
@@ -381,6 +433,19 @@ export interface TurnScenario {
 	pendingOn?: string;
 	/** Temp-dir prefix override. */
 	prefix?: string;
+	/**
+	 * Harness options this scenario needs — most usefully `knipClient`, for a
+	 * scenario whose defect lives inside a real client rather than in the turn
+	 * pipeline. Built per run so a scenario can construct a fresh client.
+	 */
+	harnessOptions?: () => TurnHarnessOptions;
+	/**
+	 * Skip this scenario when its preconditions are absent, e.g. a real tool
+	 * binary the scenario shells out to. Returning a string skips and says why;
+	 * `undefined` runs. Distinct from {@link pendingOn}, which is about a fix
+	 * not existing yet rather than an environment not having a tool.
+	 */
+	skipWhen?: () => string | undefined;
 	run(harness: TurnHarness): Promise<void>;
 }
 
@@ -393,6 +458,7 @@ export function defineTurnScenario(scenario: TurnScenario): TurnScenario {
 export async function runTurnScenario(scenario: TurnScenario): Promise<void> {
 	const { harness, cleanup } = createTurnHarness({
 		prefix: scenario.prefix ?? `pi-lens-scenario-${scenario.id}-`,
+		...scenario.harnessOptions?.(),
 	});
 	try {
 		await scenario.run(harness);

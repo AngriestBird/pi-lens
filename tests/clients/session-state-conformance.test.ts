@@ -21,9 +21,11 @@ import {
 } from "../support/session-state-registry.js";
 import {
 	SWEEP_HEURISTIC_LIMITS,
+	callsWithinFunction,
 	resetNameDefinitions,
 	scanSessionStateCandidates,
 	sessionStartResetNames,
+	stripCommentsAndStrings,
 } from "../support/session-state-scan.js";
 
 afterEach(() => _resetRegistryProbeState());
@@ -80,6 +82,74 @@ describe("session-state registry — re-arm conformance", () => {
 			expect(probe.isArmed(), `${entry.id} did not re-arm`).toBe(true);
 		});
 	}
+});
+
+// The reachability walk's own correctness, pinned against synthetic source so
+// a regression here cannot hide behind whatever happens to be in clients/
+// today. Review round R1 (S1) got a fabricated bug past the whole suite by
+// swapping a real reset call for a COMMENT naming it: the walk regexed raw
+// source, so 37/37 stayed green while the reset was gone. The narrative
+// comments in runtime-session.ts's reset block name resets by hand, so this
+// was armed on real source, not hypothetical.
+describe("session-state scan — walker smuggle probes (R1/S1)", () => {
+	const withComment = [
+		"function handleSessionStart() {",
+		"\t// resetZizmorTokenAvailability(); — #1535 says this belongs here",
+		"\tresetDegradationLedger();",
+		"}",
+	].join("\n");
+
+	it("a reset named only in a comment does not count as called", () => {
+		const calls = callsWithinFunction(withComment, "handleSessionStart");
+		expect(calls).toContain("resetDegradationLedger");
+		expect(calls).not.toContain("resetZizmorTokenAvailability");
+	});
+
+	it("a reset named only inside a string literal does not count as called", () => {
+		const source = [
+			"function handleSessionStart() {",
+			'\tdbg("calling resetZizmorTokenAvailability() next");',
+			"}",
+		].join("\n");
+		expect(callsWithinFunction(source, "handleSessionStart")).not.toContain(
+			"resetZizmorTokenAvailability",
+		);
+	});
+
+	it("the real call is still found when both forms are present", () => {
+		const source = [
+			"function handleSessionStart() {",
+			"\t// resetZizmorTokenAvailability() — see #1535",
+			"\tresetZizmorTokenAvailability();",
+			"}",
+		].join("\n");
+		expect(callsWithinFunction(source, "handleSessionStart")).toContain(
+			"resetZizmorTokenAvailability",
+		);
+	});
+
+	it("a brace inside a comment or string cannot end the body early", () => {
+		const source = [
+			"function handleSessionStart() {",
+			"\t// a stray } in a comment",
+			'\tconst s = "another } here";',
+			"\tresetDegradationLedger();",
+			"}",
+		].join("\n");
+		expect(callsWithinFunction(source, "handleSessionStart")).toContain(
+			"resetDegradationLedger",
+		);
+	});
+
+	it("stripping preserves length and line structure", () => {
+		const source = 'const a = 1; // note\nconst b = "text";\n';
+		const stripped = stripCommentsAndStrings(source);
+		expect(stripped).toHaveLength(source.length);
+		expect(stripped.split("\n")).toHaveLength(source.split("\n").length);
+		expect(stripped).toContain("const a = 1;");
+		expect(stripped).not.toContain("note");
+		expect(stripped).not.toContain("text");
+	});
 });
 
 describe("session-state registry — session_start wiring", () => {

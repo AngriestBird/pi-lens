@@ -16,9 +16,22 @@
  * delete the `pendingOn` line, run the file, and the scenario fails on current
  * master because the defect is still there. See the PR body for the captured
  * output of each.
+ *
+ * `skipWhen` is a different thing and says so: the fix exists and the scenario
+ * runs, but this host does not have the tool it drives (scenario 2 shells out
+ * to a real knip).
+ *
+ * Live as of this revision: scenario 1 (#1627 merged) and scenario 2 (#1637
+ * merged 2026-08-18). Pending: scenario 3 on PR #1633, still open, and
+ * scenario 4 on nothing — that blind spot has no fix in flight.
  */
 
+import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it } from "vitest";
+import { KnipClient } from "../../clients/knip-client.js";
 import {
 	defineTurnScenario,
 	runTurnScenario,
@@ -68,49 +81,129 @@ const gitleaksStaleReplay = defineTurnScenario({
 	},
 });
 
-// ── Scenario 2 — knip stale cache (#1630, PR #1637 open) ─────────────────────
+// ── Scenario 2 — knip stale cache (#1630, fixed by PR #1637) ─────────────────
+
+/**
+ * knip is a real binary this scenario shells out to, through the REAL
+ * `KnipClient`. Review round R1 (S4) was right that the first cut could never
+ * fail the way #1630 fails: it replaced the whole client with a stub, and
+ * #1637's fix — pruning knip's glob cache before each run — lives inside
+ * `KnipClient.analyze`, the layer the stub removed.
+ *
+ * The availability probe mirrors `tests/clients/knip-cache-consumer-staleness.ts`'s:
+ * the suite redirects `PI_LENS_HOME` to a per-worker temp dir, so the managed
+ * install has to be found through the real home directory and put on PATH.
+ */
+const managedKnipBinDir = (() => {
+	const dir = path.join(os.homedir(), ".pi-lens", "tools", "node_modules", ".bin");
+	return fs.existsSync(dir) ? dir : null;
+})();
+
+/**
+ * Probe the BINARY, not the directory that usually holds it.
+ *
+ * The managed-tools directory can exist while knip itself is absent — a host
+ * that installed some other managed tool, or a first run that has not lazily
+ * installed knip yet. A directory-existence check calls that "available", the
+ * scenario then runs against a client whose `analyze` returns an availability
+ * failure with no findings, and the baseline assertion fails for a reason that
+ * has nothing to do with the defect. Spawning `knip --version` with the same
+ * PATH the scenario will use answers the question that actually matters.
+ */
+function knipUnavailableReason(): string | undefined {
+	const env = { ...process.env };
+	if (managedKnipBinDir) {
+		env.PATH = `${managedKnipBinDir}${path.delimiter}${env.PATH ?? ""}`;
+	}
+	try {
+		if (
+			spawnSync("knip", ["--version"], {
+				shell: process.platform === "win32",
+				encoding: "utf8",
+				env,
+			}).status === 0
+		) {
+			return undefined;
+		}
+	} catch {
+		// fall through to the skip reason
+	}
+	return "knip is not runnable on this host";
+}
 
 const knipStaleCache = defineTurnScenario({
 	id: "knip-stale-unused-export",
 	incident:
 		"pi-lens warned that assertSafeForCmdShell was unused while a test in the same tree imported it; a direct knip run returned 0 hits",
 	issue: "#1630",
-	pendingOn:
-		"#1630 / PR #1637 — knip's own incremental cache still serves a verdict computed before the consumer existed",
+	skipWhen: knipUnavailableReason,
+	harnessOptions: () => ({ knipClient: new KnipClient(false) }),
 	async run(h) {
-		// The symbol's declaring file. knip's cached analysis was computed here,
-		// while nothing imported it.
-		h.edit("src/cmd.ts", "export function assertSafeForCmdShell() {}\n");
+		const originalPath = process.env.PATH;
+		if (managedKnipBinDir) {
+			process.env.PATH = `${managedKnipBinDir}${path.delimiter}${originalPath ?? ""}`;
+		}
+		try {
+			h.write(
+				"package.json",
+				JSON.stringify({
+					name: "knip-1630-scenario",
+					version: "1.0.0",
+					private: true,
+					type: "module",
+				}),
+			);
+			h.write(
+				"knip.json",
+				JSON.stringify({
+					entry: ["src/index.ts", "tests/**/*.test.ts"],
+					project: ["src/**/*.ts", "tests/**/*.ts"],
+				}),
+			);
+			h.write(
+				"src/util.ts",
+				"export function assertSafeForCmdShell(s: string): string { return s; }\n" +
+					'export function used(): string { return "x"; }\n',
+			);
+			h.write("src/index.ts", 'import { used } from "./util.js";\nconsole.log(used());\n');
+			// `tests/` exists but matches nothing when the cache is written — the
+			// exact shape knip's glob cache failed to revalidate.
+			fs.mkdirSync(h.pathOf("tests"), { recursive: true });
 
-		// A consumer appears AFTER that analysis. The declaring file's mtime does
-		// not move — which is exactly why #1622's per-cited-path freshness gate
-		// cannot see this: "unused export" is a whole-graph property.
-		h.advance(10_000);
-		h.write(
-			"tests/cmd.test.ts",
-			"import { assertSafeForCmdShell } from '../src/cmd.js';\nassertSafeForCmdShell();\n",
-		);
+			// Prime knip's own incremental cache while nothing imports the symbol.
+			// This is the session's earlier scan, out of band from any turn.
+			const client = h.knipClient as KnipClient;
+			const primed = await client.analyze(h.cwd);
+			expect(
+				primed.unusedExports.map((e) => e.name),
+				`baseline: knip should flag the export while nothing imports it (success=${primed.success}, summary=${primed.summary})`,
+			).toContain("assertSafeForCmdShell");
 
-		// The next turn re-runs knip, which serves its stale cached verdict.
-		h.advance(1_000);
-		h.edit("src/cmd.ts", "export function assertSafeForCmdShell() {\n\treturn 1;\n}\n");
-		h.knip({
-			issues: [
-				{
-					type: "export",
-					file: h.pathOf("src/cmd.ts"),
-					name: "assertSafeForCmdShell",
-					line: 1,
-				},
-				// biome-ignore lint/suspicious/noExplicitAny: scenario states only
-				// the issue fields the render path reads.
-			] as any,
-		});
-		const view = await h.turnEnd();
+			// The consumer appears AFTER that scan. The declaring file's mtime does
+			// not move, which is why #1622's per-cited-path freshness gate cannot
+			// see this: "unused export" is a whole-graph property.
+			h.advance(10_000);
+			h.write(
+				"tests/consumer.test.ts",
+				'import { assertSafeForCmdShell } from "../src/util.js";\n' +
+					'export const t = assertSafeForCmdShell("a");\n',
+			);
 
-		// The agent must not be told a symbol is unused when the current source
-		// tree contains an importer of it.
-		expect(view.text).not.toContain("assertSafeForCmdShell");
+			// The agent edits the declaring file, and the turn re-runs knip.
+			h.advance(1_000);
+			h.edit(
+				"src/util.ts",
+				"export function assertSafeForCmdShell(s: string): string { return s.trim(); }\n" +
+					'export function used(): string { return "x"; }\n',
+			);
+			const view = await h.turnEnd();
+
+			// The agent must not be told a symbol is unused when the current source
+			// tree contains an importer of it.
+			expect(view.text).not.toContain("assertSafeForCmdShell");
+		} finally {
+			process.env.PATH = originalPath;
+		}
 	},
 });
 
@@ -205,9 +298,17 @@ describe("turn-simulation harness seed scenarios (#1635 item 1)", () => {
 			});
 			continue;
 		}
-		it(title, async () => {
-			await runTurnScenario(scenario);
-		}, 30_000);
+		// `skipWhen` is evaluated at collection time so the reason reaches the
+		// report. It answers a different question from `pendingOn`: the fix
+		// exists, this host just lacks the tool the scenario drives.
+		const absent = scenario.skipWhen?.();
+		it.skipIf(absent !== undefined)(
+			absent ? `${title} [skipped: ${absent}]` : title,
+			async () => {
+				await runTurnScenario(scenario);
+			},
+			120_000,
+		);
 	}
 
 	// The skip list is the honest part of this file, so it is itself asserted:

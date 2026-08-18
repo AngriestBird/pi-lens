@@ -45,11 +45,134 @@ export function clientsRelative(absolute: string): string {
 // ── 1. What session_start actually resets ────────────────────────────────────
 
 /**
- * Extract a named function's body text by brace matching from its `{`.
- * Deliberately naive (no TypeScript parse): it only has to be right about
- * WHICH bare-identifier calls appear inside a reset function, and a brace
- * counter that respects strings, template literals, comments and regex-free
- * source is right about that for this codebase's formatting.
+ * Blank out every comment body and string literal, preserving length and line
+ * breaks so positions and line numbers still line up with the original.
+ *
+ * This is load-bearing, not tidiness. Review round R1 reinstated #1535's bug
+ * by REPLACING the real `resetZizmorTokenAvailability()` call with a comment
+ * that merely names it — and the conformance suite stayed green, because the
+ * reachability walk regexed raw source and a comment mentioning a call is
+ * indistinguishable from the call. `runtime-session.ts`'s reset block is
+ * mostly `#issue`-narrative comments that name resets by hand, so that
+ * false-negative mode was armed on real source, not hypothetical.
+ *
+ * Everything downstream — the declaration search, the brace matcher and the
+ * call extraction — runs on the stripped text, which also closes the sibling
+ * hole of a function DECLARATION appearing inside a comment.
+ *
+ * REGEX LITERALS are recognized too, and have to be: `safe-spawn.ts:384`'s
+ * `arg.replace(/"/g, '""')` puts a bare `"` inside a regex, which a
+ * strings-only scanner reads as the start of a string literal and then
+ * swallows the rest of the file — silently losing every declaration below it.
+ * That is a FALSE NEGATIVE, the direction that matters here, and it showed up
+ * the moment stripping was switched on.
+ */
+export function stripCommentsAndStrings(source: string): string {
+	const out = source.split("");
+	const blank = (index: number) => {
+		if (out[index] !== "\n") out[index] = " ";
+	};
+	/**
+	 * A `/` opens a regex only where a VALUE may start. Deciding that from the
+	 * previous significant character is the standard lexer-free approximation:
+	 * after an identifier, a literal, or a closing `)`/`]`, a `/` is division.
+	 * `}` is treated as regex-position because a statement-block brace is far
+	 * more common in this codebase than an object literal followed by division.
+	 */
+	const regexMayStart = (index: number): boolean => {
+		for (let j = index - 1; j >= 0; j--) {
+			const prev = out[j];
+			if (prev === " " || prev === "\t" || prev === "\n" || prev === "\r") {
+				continue;
+			}
+			return !/[\w$)\]"'`]/.test(prev);
+		}
+		return true;
+	};
+	let quote: string | undefined;
+	let lineComment = false;
+	let blockComment = false;
+	let regex = false;
+	let regexClass = false;
+	for (let i = 0; i < source.length; i++) {
+		const ch = source[i];
+		const next = source[i + 1];
+		if (regex) {
+			blank(i);
+			if (ch === "\\") {
+				blank(i + 1);
+				i++;
+			} else if (ch === "[") regexClass = true;
+			else if (ch === "]") regexClass = false;
+			else if (ch === "/" && !regexClass) regex = false;
+			else if (ch === "\n") regex = false; // unterminated: bail, don't swallow
+			continue;
+		}
+		if (lineComment) {
+			if (ch === "\n") lineComment = false;
+			else blank(i);
+			continue;
+		}
+		if (blockComment) {
+			blank(i);
+			if (ch === "*" && next === "/") {
+				blank(i + 1);
+				blockComment = false;
+				i++;
+			}
+			continue;
+		}
+		if (quote) {
+			// Keep the delimiters, blank the contents: a blanked-out template
+			// literal must not merge with the code around it.
+			if (ch === "\\") {
+				blank(i);
+				blank(i + 1);
+				i++;
+			} else if (ch === quote) {
+				quote = undefined;
+			} else if (ch === "\n" && quote !== "`") {
+				// A `'`/`"` string cannot span a raw newline in valid source, so
+				// reaching one means this scanner mis-identified the opener.
+				// Recover at the line break rather than swallowing the rest of the
+				// file — a second guard behind the regex handling above.
+				quote = undefined;
+			} else {
+				blank(i);
+			}
+			continue;
+		}
+		if (ch === "/" && next === "/") {
+			blank(i);
+			blank(i + 1);
+			lineComment = true;
+			i++;
+			continue;
+		}
+		if (ch === "/" && next === "*") {
+			blank(i);
+			blank(i + 1);
+			blockComment = true;
+			i++;
+			continue;
+		}
+		if (ch === "/" && regexMayStart(i)) {
+			blank(i);
+			regex = true;
+			regexClass = false;
+			continue;
+		}
+		if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+	}
+	return out.join("");
+}
+
+/**
+ * Extract a named function's body by brace matching from its `{`.
+ *
+ * `source` must already be {@link stripCommentsAndStrings}-processed, so the
+ * brace counter cannot be thrown by a brace inside a comment or string and the
+ * call extraction cannot be fooled by a comment naming a call.
  */
 function functionBody(source: string, name: string): string | undefined {
 	const declaration = new RegExp(
@@ -79,44 +202,9 @@ function functionBody(source: string, name: string): string | undefined {
 	const openBrace = source.indexOf("{", afterParams);
 	if (openBrace < 0) return undefined;
 	let depth = 0;
-	let quote: string | undefined;
-	let lineComment = false;
-	let blockComment = false;
 	for (let i = openBrace; i < source.length; i++) {
-		const ch = source[i];
-		const next = source[i + 1];
-		if (lineComment) {
-			if (ch === "\n") lineComment = false;
-			continue;
-		}
-		if (blockComment) {
-			if (ch === "*" && next === "/") {
-				blockComment = false;
-				i++;
-			}
-			continue;
-		}
-		if (quote) {
-			if (ch === "\\") i++;
-			else if (ch === quote) quote = undefined;
-			continue;
-		}
-		if (ch === "/" && next === "/") {
-			lineComment = true;
-			i++;
-			continue;
-		}
-		if (ch === "/" && next === "*") {
-			blockComment = true;
-			i++;
-			continue;
-		}
-		if (ch === '"' || ch === "'" || ch === "`") {
-			quote = ch;
-			continue;
-		}
-		if (ch === "{") depth++;
-		else if (ch === "}") {
+		if (source[i] === "{") depth++;
+		else if (source[i] === "}") {
 			depth--;
 			if (depth === 0) return source.slice(openBrace, i + 1);
 		}
@@ -131,6 +219,18 @@ function bareCalls(body: string): string[] {
 		names.add(match[2]);
 	}
 	return [...names];
+}
+
+/**
+ * The bare-identifier calls made inside `name`'s body in `source`, with
+ * comments and string literals removed first. Exported so the suite can pin
+ * this behavior against synthetic source rather than only against whatever
+ * happens to be in `clients/` today — see the R1 probes in
+ * `tests/clients/session-state-conformance.test.ts`.
+ */
+export function callsWithinFunction(source: string, name: string): string[] {
+	const body = functionBody(stripCommentsAndStrings(source), name);
+	return body ? bareCalls(body) : [];
 }
 
 /**
@@ -170,7 +270,12 @@ export function sessionStartResetNames(): Set<string> {
 	if (cachedResetNames) return cachedResetNames;
 	const sources = new Map<string, string>();
 	for (const absolute of clientSourceFiles()) {
-		sources.set(clientsRelative(absolute), fs.readFileSync(absolute, "utf8"));
+		// Stripped ONCE per file, then used for the declaration search, the brace
+		// match and the call extraction alike (R1).
+		sources.set(
+			clientsRelative(absolute),
+			stripCommentsAndStrings(fs.readFileSync(absolute, "utf8")),
+		);
 	}
 
 	const bodyOf = (name: string): string | undefined => {
@@ -211,7 +316,7 @@ export function sessionStartResetNames(): Set<string> {
 export function resetNameDefinitions(): Map<string, string[]> {
 	const byName = new Map<string, string[]>();
 	for (const absolute of clientSourceFiles()) {
-		const source = fs.readFileSync(absolute, "utf8");
+		const source = stripCommentsAndStrings(fs.readFileSync(absolute, "utf8"));
 		for (const match of source.matchAll(
 			/^export function (_?(?:reset|clear)[A-Za-z0-9_]*)/gm,
 		)) {
@@ -297,7 +402,9 @@ export function scanSessionStateCandidates(): SessionStateCandidate[] {
 	if (cachedCandidates) return cachedCandidates;
 	const found: SessionStateCandidate[] = [];
 	for (const absolute of clientSourceFiles()) {
-		const source = fs.readFileSync(absolute, "utf8");
+		// Stripped for the same reason the reachability walk is (R1): a
+		// commented-out declaration or reset export is not one.
+		const source = stripCommentsAndStrings(fs.readFileSync(absolute, "utf8"));
 		const containers = [...source.matchAll(CONTAINER_DECLARATION)].map(
 			(m) => m[1],
 		);

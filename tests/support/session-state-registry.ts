@@ -209,12 +209,13 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		policy: "session_start",
 		resetName: "_resetDeferredForTests",
 		reason:
-			"#1625: a `defer` mark suppresses a diagnostic for THIS session by design; carrying it into the next session hides a finding nobody deferred.",
+			"A `defer` mark suppresses a diagnostic for THIS session by design; carrying it into the next session hides a finding nobody deferred.",
 		gap:
-			"Not wired: the only reset is the test-only seam, so a deferred diagnostic stays suppressed for the life of the process. Closed by #1617 / PR #1625.",
+			"Not wired: the only reset is the test-only seam, so a deferred diagnostic stays suppressed for the life of the PROCESS rather than the session. PR #1625 does not close this (review round R1, S5): it scopes the Set's key per project and re-signs isDeferredThisSession, but adds no session_start reset. The gap survives #1625 and still needs an owner.",
 		probe: {
 			arm: () => {
 				const cwd = scratchCwd();
+				probeDeferredCwd = cwd;
 				probeDeferredAnchor = markDisposition(
 					cwd,
 					{
@@ -228,9 +229,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 					"conformance probe",
 				);
 			},
-			isArmed: () =>
-				probeDeferredAnchor === undefined ||
-				!isDeferredThisSession(probeDeferredAnchor),
+			isArmed: () => probeDeferredAnchor === undefined || !probeIsDeferred(),
 			reset: () => _resetDeferredForTests(),
 		},
 	},
@@ -415,11 +414,32 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 /** Scratch state the probes above need to hold between `arm` and `isArmed`. */
 let probeLatch: ReturnType<typeof createAvailabilityLatch> | undefined;
 let probeDeferredAnchor: string | undefined;
+let probeDeferredCwd: string | undefined;
+
+/**
+ * Read the defer set across a signature change that is currently in flight.
+ *
+ * `isDeferredThisSession(anchor)` today; PR #1625 makes it
+ * `isDeferredThisSession(cwd, anchor)` because a weak anchor encodes only a
+ * relative path and so collides across projects. Both PRs touch this module,
+ * and neither should have to wait on the other, so the probe reads the arity
+ * rather than pinning one shape. Delete this branch once #1625 lands.
+ */
+function probeIsDeferred(): boolean {
+	const anchor = probeDeferredAnchor as string;
+	const read = isDeferredThisSession as unknown as (
+		...args: string[]
+	) => boolean;
+	return read.length >= 2
+		? read(probeDeferredCwd as string, anchor)
+		: read(anchor);
+}
 
 /** Drop probe scratch state so repeated conformance runs start clean. */
 export function _resetRegistryProbeState(): void {
 	probeLatch = undefined;
 	probeDeferredAnchor = undefined;
+	probeDeferredCwd = undefined;
 	while (scratchDirs.length > 0) {
 		removeTempDirSync(scratchDirs.pop() as string);
 	}
