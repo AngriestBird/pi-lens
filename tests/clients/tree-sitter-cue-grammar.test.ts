@@ -21,6 +21,7 @@ import {
 	isVendoredGrammar,
 	LANGUAGE_TO_GRAMMAR,
 	VENDORED_GRAMMARS,
+	vendoredGrammarRefusal,
 	vendoredGrammarsDir,
 } from "../../clients/grammar-source.js";
 import type { TreeSitterClient } from "../../clients/tree-sitter-client.js";
@@ -161,5 +162,19 @@ describe("vendored grammars are never downloaded", () => {
 
 	it("still downloads a normal grammar through the CDN path", () => {
 		expect(isVendoredGrammar("tree-sitter-python.wasm")).toBe(false);
+	});
+
+	// #1520 review F5: the refusal must be reachable BEFORE a write directory is
+	// resolved. `fetchGrammar` resolved one first, so on a host where
+	// web-tree-sitter is not locatable a missing vendored wasm came back as the
+	// generic RETRYABLE "no writable grammars directory" verdict — a packaging
+	// fault disguised as a transient download failure, arming a cooldown for a
+	// fetch that can never happen. The verdict is shared and dir-independent.
+	it("gives one non-retryable verdict with no write directory in play", () => {
+		expect(vendoredGrammarRefusal(CUE_GRAMMAR)).toEqual({
+			ok: false,
+			retryable: false,
+			reason: expect.stringContaining("vendor/grammars"),
+		});
 	});
 });

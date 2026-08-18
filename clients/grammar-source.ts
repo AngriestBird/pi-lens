@@ -112,6 +112,30 @@ export function isVendoredGrammar(filename: string): boolean {
 }
 
 /**
+ * The verdict for a vendored grammar that isn't on disk. It ships in
+ * `vendor/grammars/`, which the resolve path searches first, so needing to
+ * "fetch" one means the committed file is missing from the install: a
+ * packaging fault, not a network one. No retry, no cooldown ladder, and above
+ * all no fetch of a CDN URL that would 404 forever. Non-retryable is the
+ * honest verdict precisely because a later attempt cannot change it.
+ *
+ * Shared so that every caller answers identically. `tree-sitter-client.ts`'s
+ * `fetchGrammar` has to consult this BEFORE it resolves a write directory:
+ * that resolution can fail on its own (web-tree-sitter not locatable yet) and
+ * would otherwise return the generic RETRYABLE environment verdict, hiding a
+ * missing vendored asset behind a transient-looking download failure.
+ */
+export function vendoredGrammarRefusal(filename: string): GrammarDownloadResult {
+	return {
+		ok: false,
+		retryable: false,
+		reason:
+			`${filename} is built in-house and ships in vendor/grammars/; it has no ` +
+			`download source, so a missing copy means the install is incomplete.`,
+	};
+}
+
+/**
  * Absolute path to the committed `vendor/grammars` directory. Resolved from the
  * package root for the same reason `grammarManifestPath` is (#1564): an
  * `import.meta.url` offset collapses once `dist/index.js` is bundled.
@@ -456,21 +480,7 @@ export async function downloadGrammarDetailed(
 	destDir: string,
 	filename: string,
 ): Promise<GrammarDownloadResult> {
-	// A vendored grammar has no remote source (`VENDORED_GRAMMARS`): it ships in
-	// `vendor/grammars/`, which the resolve path searches first, so reaching here
-	// means the committed file is missing from the install. That is a packaging
-	// fault, not a network one — no retry, no cooldown ladder, and above all no
-	// fetch of a CDN URL that would 404 forever. Non-retryable is the honest
-	// verdict here precisely because a later attempt cannot change it.
-	if (isVendoredGrammar(filename)) {
-		return {
-			ok: false,
-			retryable: false,
-			reason:
-				`${filename} is built in-house and ships in vendor/grammars/; it has no ` +
-				`download source, so a missing copy means the install is incomplete.`,
-		};
-	}
+	if (isVendoredGrammar(filename)) return vendoredGrammarRefusal(filename);
 	try {
 		fs.mkdirSync(destDir, { recursive: true });
 		const res = await fetch(grammarSourceUrl(filename));

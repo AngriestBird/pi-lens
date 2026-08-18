@@ -2,7 +2,7 @@
 
 ### LSP Support
 
-pi-lens includes **42 language server definitions** (including four cross-cutting *auxiliary* scanners that attach alongside the file's language server — Opengrep, ast-grep, zizmor, and typos — see below). LSP is **enabled by default**; use `--no-lsp` to disable it for a session. Servers are auto-discovered from PATH, project `node_modules`, and managed installs. When a server is not installed, pi-lens offers an interactive install prompt.
+pi-lens includes **45 language server definitions** (including four cross-cutting *auxiliary* scanners that attach alongside the file's language server — Opengrep, ast-grep, zizmor, and typos — see below). LSP is **enabled by default**; use `--no-lsp` to disable it for a session. Servers are auto-discovered from PATH, project `node_modules`, and managed installs. When a server is not installed, pi-lens offers an interactive install prompt.
 
 **LSP Idle Management:** LSP servers shut down after 240 seconds of inactivity (no files modified) to free resources. The timer resets when you resume editing, preventing cold-start penalties during active development.
 
@@ -23,7 +23,7 @@ LSP servers for: TypeScript, Deno, Python (pyright/basedpyright + jedi), Go, Rus
 
 ### Formatters
 
-pi-lens auto-detects and runs **33 formatters** based on project config:
+pi-lens auto-detects and runs **34 formatters** based on project config:
 
 biome, prettier, oxfmt, ruff, black, sqlfluff, gofmt, rustfmt, zig fmt, dart format, shfmt, nixfmt, mix format, ocamlformat, clang-format, ktlint, rubocop, standardrb, gleam format, terraform fmt, php-cs-fixer, csharpier, fantomas, swiftformat, stylua, ormolu, taplo, fish_indent, google-java-format, cljfmt, cmake-format, cue fmt, psscriptanalyzer-format
 

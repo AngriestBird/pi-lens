@@ -33,7 +33,9 @@ import {
 	downloadGrammarDetailed,
 	fileHasWasmMagic,
 	grammarBlockReason,
+	isVendoredGrammar,
 	LANGUAGE_TO_GRAMMAR,
+	vendoredGrammarRefusal,
 	vendoredGrammarsDir,
 } from "./grammar-source.js";
 import { resolvePackagePath } from "./package-root.js";
@@ -786,6 +788,22 @@ export class TreeSitterClient {
 	 * try/catch that funnels any throw into `recordGrammarFailure` (#1548).
 	 */
 	private async fetchGrammar(grammarFile: string): Promise<boolean> {
+		// BEFORE resolving a write directory: a vendored grammar is never
+		// downloaded, so the write dir has no bearing on its verdict. Resolving
+		// first let the "no writable grammars directory" branch below answer
+		// RETRYABLE for a missing vendored wasm on any host where
+		// web-tree-sitter isn't locatable — reporting a packaging fault as a
+		// transient download failure, and arming a cooldown for a fetch that can
+		// never happen.
+		if (isVendoredGrammar(grammarFile)) {
+			const { reason } = vendoredGrammarRefusal(grammarFile);
+			this.recordGrammarFailure(
+				grammarFile,
+				reason ?? `${grammarFile} is missing from vendor/grammars/.`,
+				/* retryable */ false,
+			);
+			return false;
+		}
 		const dir =
 			this.grammarsDir && fs.existsSync(this.grammarsDir)
 				? this.grammarsDir

@@ -52,5 +52,7 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 CUE is "syntax only" because `cue lsp` reports load and parse errors as you type
 but leaves conflicting values and failed constraints to `cue vet`. You get
 syntax and parse diagnostics, hover, definition, completion, code actions, and
-formatting; you do not get validation. `.cue` files still parse under
-tree-sitter, so structural analysis (symbols, imports) works.
+formatting; you do not get validation. `.cue` files parse under tree-sitter,
+but no CUE symbol or import queries exist yet, so structural symbol search and
+import extraction skip them and search falls back to the word index. The query
+rules are tracked in #1522.
