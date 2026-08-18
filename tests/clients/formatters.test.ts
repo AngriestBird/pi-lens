@@ -25,6 +25,7 @@ import {
 	oxfmtFormatter,
 	phpCsFixerFormatter,
 	prettierFormatter,
+	psscriptanalyzerFormatFormatter,
 	rubocopFormatter,
 	ruffFormatter,
 	standardrbFormatter,
@@ -976,6 +977,126 @@ describe("getFormattersForFile — policy selection", () => {
 		const filePath = fileIn(tmpDir, "script.psm1");
 		const formatters = await getFormattersForFile(filePath, tmpDir);
 		expect(formatters.map((f) => f.name)).toEqual(["psscriptanalyzer-format"]);
+	});
+
+	// #1572 review F1: `getFormattersForFile` caches its answer per cwd, keyed
+	// by `formatterConfigSignature` — a hash over `FORMATTER_CONFIG_FILES`'
+	// mtimes/sizes. A filename an explicit-config CHECK reads but that list
+	// OMITS is invisible to the signature: adding the file after the first
+	// call for a cwd never invalidates the cache, so the stale (pre-opt-in)
+	// answer sticks for the rest of the session. These tests call
+	// `getFormattersForFile` once with no config (caching `[]`), THEN create
+	// the config, THEN call again in the SAME test/cwd — unlike every test
+	// above, which pre-creates its config in a fresh tmpDir and so can never
+	// observe a signature that fails to move. `stylua` (whose `stylua.toml`
+	// was already listed) is the positive control proving the shape of the
+	// test itself is sound.
+	describe("formatter config signature reacts to config created after the first call", () => {
+		it("control: stylua.toml created after the first call is picked up", async () => {
+			const filePath = fileIn(tmpDir, "init.lua");
+			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
+			createTempFile(tmpDir, "stylua.toml", "column_width = 100\n");
+			const formatters = await getFormattersForFile(filePath, tmpDir);
+			expect(formatters.map((f) => f.name)).toEqual(["stylua"]);
+		});
+
+		it("psscriptanalyzer-format: PSScriptAnalyzerSettings.psd1 created after the first call is picked up", async () => {
+			const filePath = fileIn(tmpDir, "script.ps1");
+			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
+			createTempFile(tmpDir, "PSScriptAnalyzerSettings.psd1", "@{}\n");
+			const formatters = await getFormattersForFile(filePath, tmpDir);
+			expect(formatters.map((f) => f.name)).toEqual(["psscriptanalyzer-format"]);
+		});
+
+		it("google-java-format: .google-java-format created after the first call is picked up", async () => {
+			const filePath = fileIn(tmpDir, "Main.java");
+			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
+			createTempFile(tmpDir, ".google-java-format", "{}\n");
+			await withPathShim("google-java-format", async () => {
+				const formatters = await getFormattersForFile(filePath, tmpDir);
+				expect(formatters.map((f) => f.name)).toEqual(["google-java-format"]);
+			});
+		});
+
+		it("cmake-format: .cmake-format created after the first call is picked up", async () => {
+			const filePath = fileIn(tmpDir, "CMakeLists.cmake");
+			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
+			createTempFile(tmpDir, ".cmake-format", "# cmake-format config\n");
+			await withPathShim("cmake-format", async () => {
+				const formatters = await getFormattersForFile(filePath, tmpDir);
+				expect(formatters.map((f) => f.name)).toEqual(["cmake-format"]);
+			});
+		});
+
+		it("sqlfluff: setup.cfg's [sqlfluff] section created after the first call is picked up", async () => {
+			const filePath = fileIn(tmpDir, "query.sql");
+			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
+			createTempFile(tmpDir, "setup.cfg", "[sqlfluff]\ndialect = postgres\n");
+			const formatters = await getFormattersForFile(filePath, tmpDir);
+			expect(formatters.map((f) => f.name)).toEqual(["sqlfluff"]);
+		});
+
+		it("oxfmt: vite-plus.json created after the first call is picked up", async () => {
+			// .css's policy smart-defaults to biome when nothing has explicit
+			// config; oxfmt only outranks it once oxfmt's OWN explicit-config
+			// check (hasVitePlusConfig) goes true. So the observable signal here
+			// isn't "was anything selected" (biome always is) but "did the WINNER
+			// change" — which only happens if the cache actually re-reads
+			// vite-plus.json after it's created.
+			const filePath = fileIn(tmpDir, "index.css");
+			expect(
+				(await getFormattersForFile(filePath, tmpDir)).map((f) => f.name),
+			).toEqual(["biome"]);
+			createTempFile(tmpDir, "vite-plus.json", "{}\n");
+			const formatters = await getFormattersForFile(filePath, tmpDir);
+			expect(formatters.map((f) => f.name)).toEqual(["oxfmt"]);
+		});
+
+		it("ktfmt: build.gradle.kts's Spotless ktfmt() block created after the first call is picked up", async () => {
+			const filePath = fileIn(tmpDir, "Main.kt");
+			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
+			createTempFile(
+				tmpDir,
+				"build.gradle.kts",
+				"spotless {\n  kotlin {\n    ktfmt()\n  }\n}\n",
+			);
+			const formatters = await getFormattersForFile(filePath, tmpDir);
+			expect(formatters.map((f) => f.name)).toEqual(["ktfmt"]);
+		});
+	});
+
+	// #1572 review F2: the gate DETECTED the settings file but the command
+	// never PASSED it to `Invoke-Formatter`, so an opted-in project silently
+	// got the stock `CodeFormatting` ruleset instead of its declared one — the
+	// exact stock-style imposition #1144 banned in this same file.
+	describe("psscriptanalyzer-format resolveCommand wires -Settings through", () => {
+		it("passes -Settings with the resolved config path when one exists", async () => {
+			createTempFile(tmpDir, "PSScriptAnalyzerSettings.psd1", "@{}\n");
+			await withPathShim("pwsh", async () => {
+				const cmd = await psscriptanalyzerFormatFormatter.resolveCommand!(
+					fileIn(tmpDir, "script.ps1"),
+					tmpDir,
+				);
+				expect(cmd).not.toBeNull();
+				const script = cmd![cmd!.length - 1];
+				expect(script).toContain("-Settings");
+				expect(script).toContain(
+					path.join(tmpDir, "PSScriptAnalyzerSettings.psd1"),
+				);
+			});
+		});
+
+		it("omits -Settings when no config file exists", async () => {
+			await withPathShim("pwsh", async () => {
+				const cmd = await psscriptanalyzerFormatFormatter.resolveCommand!(
+					fileIn(tmpDir, "script.ps1"),
+					tmpDir,
+				);
+				expect(cmd).not.toBeNull();
+				const script = cmd![cmd!.length - 1];
+				expect(script).not.toContain("-Settings");
+			});
+		});
 	});
 
 	it("taplo resolveCommand falls back to managed install when not on PATH", async () => {

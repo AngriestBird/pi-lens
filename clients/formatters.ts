@@ -33,6 +33,7 @@ import { safeSpawnAsync } from "./safe-spawn.js";
 import { assertInstallAllowed } from "./project-trust.js";
 import { tryLazyInstallForFormatter } from "./dispatch/runners/utils/lazy-installer.js";
 import {
+	findPSScriptAnalyzerConfigPath,
 	getAutoInstallToolIdForFormatter,
 	getFormatterPolicyForFile,
 	getSmartDefaultFormatterName,
@@ -585,51 +586,62 @@ async function resolveManagedSmartDefaultCommand(
  * the coverage guard in formatter-policy-consistency.test.ts (#1572) can never
  * drift from what this function actually does.
  */
-const EXPLICIT_FORMATTER_CONFIG_CHECKS: Record<
+// A `Map`, not an object literal: an object literal's lookup inherits
+// `Object.prototype`, so `checks["toString"]` or `checks["constructor"]`
+// resolves to a real (non-formatter) function instead of `undefined` —
+// a formatter genuinely NAMED one of those prototype properties would read
+// as "has an explicit-config check" when it has none (review finding, #1572).
+// `Map.prototype.get` has no such inherited-key hazard.
+const EXPLICIT_FORMATTER_CONFIG_CHECKS = new Map<
 	string,
 	(cwd: string, ext: string) => boolean
-> = {
-	biome: (cwd) => hasBiomeConfig(cwd),
-	prettier: (cwd) =>
-		hasPrettierConfig(cwd) || hasNearestPackageJsonField(cwd, "prettier"),
+>([
+	["biome", (cwd) => hasBiomeConfig(cwd)],
+	[
+		"prettier",
+		(cwd) => hasPrettierConfig(cwd) || hasNearestPackageJsonField(cwd, "prettier"),
+	],
 	// .svelte is conditional beyond "an oxfmt config exists": oxfmt requires the
 	// `svelte` package installed AND the config's `svelte` flag enabled
 	// (verified empirically — see hasOxfmtSvelteConfig). The generic checks
 	// below are NOT sufficient for .svelte — an oxfmt.toml with no svelte flag,
 	// or an oxfmt dependency alone, both fail at runtime for .svelte
 	// specifically (other extensions are unaffected by this stricter gate).
-	oxfmt: (cwd, ext) =>
-		ext === ".svelte"
-			? hasOxfmtSvelteConfig(cwd)
-			: hasOxfmtConfig(cwd) ||
-				hasVitePlusConfig(cwd) ||
-				// The published package is `oxfmt`; `@oxc-project/oxfmt` does not
-				// exist on npm. Accept both (scoped kept for forward-compat).
-				hasNearestPackageJsonDependency(cwd, "oxfmt") ||
-				hasNearestPackageJsonDependency(cwd, "@oxc-project/oxfmt"),
-	ruff: (cwd) => hasRuffConfig(cwd),
-	black: (cwd) => hasBlackConfig(cwd),
-	sqlfluff: (cwd) => hasSqlfluffConfig(cwd),
-	rubocop: (cwd) => hasRubocopConfig(cwd),
-	standardrb: (cwd) => hasStandardrbConfig(cwd),
-	"clang-format": (cwd) => hasClangFormatConfig(cwd),
-	"php-cs-fixer": (cwd) => hasPhpCsFixerConfig(cwd),
-	stylua: (cwd) => hasStyluaConfig(cwd),
-	ocamlformat: (cwd) => hasOcamlformatConfig(cwd),
-	"google-java-format": (cwd) => hasGoogleJavaFormatConfig(cwd),
-	ktfmt: (cwd) => hasKtfmtConfig(cwd),
-	ktlint: (cwd) => hasKtlintConfig(cwd),
-	cljfmt: (cwd) => hasCljfmtConfig(cwd),
-	"cmake-format": (cwd) => hasCmakeFormatConfig(cwd),
-	"psscriptanalyzer-format": (cwd) => hasPSScriptAnalyzerConfig(cwd),
-};
+	[
+		"oxfmt",
+		(cwd, ext) =>
+			ext === ".svelte"
+				? hasOxfmtSvelteConfig(cwd)
+				: hasOxfmtConfig(cwd) ||
+					hasVitePlusConfig(cwd) ||
+					// The published package is `oxfmt`; `@oxc-project/oxfmt` does not
+					// exist on npm. Accept both (scoped kept for forward-compat).
+					hasNearestPackageJsonDependency(cwd, "oxfmt") ||
+					hasNearestPackageJsonDependency(cwd, "@oxc-project/oxfmt"),
+	],
+	["ruff", (cwd) => hasRuffConfig(cwd)],
+	["black", (cwd) => hasBlackConfig(cwd)],
+	["sqlfluff", (cwd) => hasSqlfluffConfig(cwd)],
+	["rubocop", (cwd) => hasRubocopConfig(cwd)],
+	["standardrb", (cwd) => hasStandardrbConfig(cwd)],
+	["clang-format", (cwd) => hasClangFormatConfig(cwd)],
+	["php-cs-fixer", (cwd) => hasPhpCsFixerConfig(cwd)],
+	["stylua", (cwd) => hasStyluaConfig(cwd)],
+	["ocamlformat", (cwd) => hasOcamlformatConfig(cwd)],
+	["google-java-format", (cwd) => hasGoogleJavaFormatConfig(cwd)],
+	["ktfmt", (cwd) => hasKtfmtConfig(cwd)],
+	["ktlint", (cwd) => hasKtlintConfig(cwd)],
+	["cljfmt", (cwd) => hasCljfmtConfig(cwd)],
+	["cmake-format", (cwd) => hasCmakeFormatConfig(cwd)],
+	["psscriptanalyzer-format", (cwd) => hasPSScriptAnalyzerConfig(cwd)],
+]);
 
 function hasExplicitFormatterConfig(
 	formatterName: string,
 	cwd: string,
 	ext: string,
 ): boolean {
-	return EXPLICIT_FORMATTER_CONFIG_CHECKS[formatterName]?.(cwd, ext) ?? false;
+	return EXPLICIT_FORMATTER_CONFIG_CHECKS.get(formatterName)?.(cwd, ext) ?? false;
 }
 
 // Exported for the "every registered formatter is selectable" coverage guard
@@ -637,7 +649,7 @@ function hasExplicitFormatterConfig(
 // not hand-listed, so it cannot drift from what `hasExplicitFormatterConfig`
 // actually checks.
 export const FORMATTERS_WITH_EXPLICIT_CONFIG_CHECK = new Set<string>(
-	Object.keys(EXPLICIT_FORMATTER_CONFIG_CHECKS),
+	EXPLICIT_FORMATTER_CONFIG_CHECKS.keys(),
 );
 
 // --- Formatter Definitions ---
@@ -1302,16 +1314,25 @@ export const cmakeFormatFormatter: FormatterInfo = {
  *  - single-quoted interpolation broke on any path containing an apostrophe.
  * An empty/whitespace-only file exits 0 without touching anything, so "nothing
  * to format" stays a clean no-op rather than a reported failure.
+ *
+ * `settingsPath`, when the project has one (#1572 review F2), is passed
+ * straight to `Invoke-Formatter -Settings`. Gating selection on the file's
+ * presence without ever reading its rules would run the project through the
+ * stock `CodeFormatting` ruleset regardless of what it declared — the same
+ * stock-style imposition #1144 banned for the other config-first formatters.
  */
-function psScriptAnalyzerCommand(filePath: string): string {
+function psScriptAnalyzerCommand(filePath: string, settingsPath?: string): string {
 	// PowerShell single-quoted strings escape an apostrophe by doubling it.
 	const quoted = filePath.replace(/'/g, "''");
+	const settingsArg = settingsPath
+		? ` -Settings '${settingsPath.replace(/'/g, "''")}'`
+		: "";
 	return [
 		"$ErrorActionPreference = 'Stop'",
 		`$p = '${quoted}'`,
 		"$content = Get-Content -Raw -LiteralPath $p",
 		"if ([string]::IsNullOrWhiteSpace($content)) { exit 0 }",
-		"$formatted = Invoke-Formatter -ScriptDefinition $content",
+		`$formatted = Invoke-Formatter -ScriptDefinition $content${settingsArg}`,
 		"if ($null -eq $formatted) { throw 'Invoke-Formatter returned no output' }",
 		"Set-Content -LiteralPath $p -Value $formatted",
 	].join("; ");
@@ -1321,10 +1342,16 @@ export const psscriptanalyzerFormatFormatter: FormatterInfo = {
 	name: "psscriptanalyzer-format",
 	command: ["pwsh", "-NoProfile", "-Command", psScriptAnalyzerCommand("$FILE")],
 	extensions: [".ps1", ".psm1", ".psd1"],
-	async resolveCommand(filePath, _cwd) {
+	async resolveCommand(filePath, cwd) {
 		const pwsh = (await which("pwsh")) ?? (await which("powershell"));
 		if (!pwsh) return null;
-		return [pwsh, "-NoProfile", "-Command", psScriptAnalyzerCommand(filePath)];
+		const settingsPath = findPSScriptAnalyzerConfigPath(cwd);
+		return [
+			pwsh,
+			"-NoProfile",
+			"-Command",
+			psScriptAnalyzerCommand(filePath, settingsPath),
+		];
 	},
 	async detect(_cwd: string) {
 		const pwsh = (await which("pwsh")) ?? (await which("powershell"));
@@ -1398,17 +1425,31 @@ const detectionCache = new BoundedLruCache<
 
 // These are the formatter configuration files consulted by the policy helpers
 // above. Their metadata is part of detection cache identity: changing a file
-// must re-run detection even when PATH and installed tools are unchanged.
+// must re-run detection even when PATH and installed tools are unchanged. A
+// filename a `has*Config` check reads but this list omits is invisible to the
+// cache: the signature never moves when that file is added, so a project that
+// opts in AFTER the first `getFormattersForFile` call for its cwd keeps
+// getting the stale (pre-opt-in) cached answer for the rest of the session
+// (#1572 review F1 — proved for psscriptanalyzer-format's settings file;
+// swept against every `EXPLICIT_FORMATTER_CONFIG_CHECKS` entry below, which
+// turned up the same gap for google-java-format, cljfmt, cmake-format, the
+// Kotlin/Spotless gradle files, sqlfluff's setup.cfg, and oxfmt's
+// vite-plus.json / additional vite.config extensions).
 const FORMATTER_CONFIG_FILES = [
 	"package.json", "biome.json", "biome.jsonc", ".prettierrc", ".prettierrc.json",
 	".prettierrc.yml", ".prettierrc.yaml", ".prettierrc.js", ".prettierrc.cjs",
 	".prettierrc.mjs", "prettier.config.js", "prettier.config.cjs", "prettier.config.mjs",
 	"prettier.config.ts", "pyproject.toml", "ruff.toml", ".ruff.toml", "black.toml",
-	".black", "tox.ini", "requirements.txt", "Pipfile", ".sqlfluff", ".rubocop.yml", ".rubocop.yaml", "Gemfile", ".clang-format",
+	".black", "tox.ini", "setup.cfg", "requirements.txt", "Pipfile", ".sqlfluff", ".rubocop.yml", ".rubocop.yaml", "Gemfile", ".clang-format",
 	"_clang-format", ".php-cs-fixer.php", ".php-cs-fixer.dist.php", "stylua.toml",
-	".stylua.toml", ".ocamlformat", ".editorconfig", ".ktfmt", ".ktfmt.kts",
-	".cljfmt.edn", "cmake-format.py", ".cmake-format.yaml", ".cmake-format.json",
-	"oxfmt.toml", ".oxfmtrc.json", "vite.config.ts", "vite.config.js", "vite.config.mjs",
+	".stylua.toml", ".ocamlformat", ".editorconfig", ".google-java-format",
+	".ktfmt", ".ktfmt.kts", "build.gradle.kts", "build.gradle", "settings.gradle.kts", "settings.gradle",
+	".cljfmt.edn", "cljfmt.edn", ".cljfmt",
+	".cmake-format", ".cmake-format.yaml", ".cmake-format.yml", ".cmake-format.json", ".cmake-format.py",
+	"cmake-format.py", "cmake-format.yaml", "cmake-format.yml",
+	"oxfmt.toml", ".oxfmtrc.json", "vite-plus.json",
+	"vite.config.ts", "vite.config.mts", "vite.config.cts", "vite.config.js", "vite.config.mjs", "vite.config.cjs",
+	"PSScriptAnalyzerSettings.psd1", "ScriptAnalyzerSettings.psd1",
 ];
 
 async function formatterConfigSignature(cwd: string): Promise<string> {

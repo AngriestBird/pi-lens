@@ -2373,13 +2373,31 @@ export function hasCmakeFormatConfig(cwd: string): boolean {
 // into explicit PSScriptAnalyzer config is enough to select the formatter
 // (#1572 — `psscriptanalyzer-format` had no case here at all, so it could
 // never be selected regardless of project config).
+const PSSCRIPTANALYZER_SETTINGS_FILES = [
+	"PSScriptAnalyzerSettings.psd1",
+	"ScriptAnalyzerSettings.psd1",
+];
+
+/**
+ * The nearest PSScriptAnalyzer settings file's full path, or `undefined`.
+ * `formatters.ts`'s `resolveCommand` passes this straight to
+ * `Invoke-Formatter -Settings` (#1572 review F2) — gating on the file's
+ * PRESENCE without ever reading its RULES would run the project's file
+ * through the stock `CodeFormatting` ruleset regardless of what it declared,
+ * the same stock-style imposition #1144 banned for the other formatters.
+ */
+export function findPSScriptAnalyzerConfigPath(cwd: string): string | undefined {
+	for (const dir of walkUpDirs(cwd)) {
+		for (const name of PSSCRIPTANALYZER_SETTINGS_FILES) {
+			const candidate = path.join(dir, name);
+			if (fs.existsSync(candidate)) return candidate;
+		}
+	}
+	return undefined;
+}
+
 export function hasPSScriptAnalyzerConfig(cwd: string): boolean {
-	return (
-		findNearestContaining(cwd, [
-			"PSScriptAnalyzerSettings.psd1",
-			"ScriptAnalyzerSettings.psd1",
-		]) !== undefined
-	);
+	return findPSScriptAnalyzerConfigPath(cwd) !== undefined;
 }
 
 export function hasPhpstanConfig(cwd: string): boolean {
