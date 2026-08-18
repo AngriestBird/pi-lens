@@ -302,6 +302,21 @@ export abstract class SecurityScanClient<TResult> {
 		this.binaryPath = installed;
 		this.available = true;
 		this.log(`${this.toolName} auto-installed at ${installed}`);
+		// The probe already wrote a latched `unavailable` row (#1500's durable
+		// assertion doesn't fire here — install SUCCEEDED — but probeVersion's
+		// verdict still did, before this call ever ran). Without a compensating
+		// row, the durable record says the lane is off when it just came back
+		// on: the exact defect #1606 was filed over.
+		logAvailabilityDecision({
+			tool: this.toolName,
+			verdict: "available",
+			outcome: "success",
+			cause: "ok",
+			elapsedMs: Date.now() - installStartedAt,
+			latched: true,
+			classifiedBy: "caller",
+			evidence: { install: "succeeded", binaryPath: installed },
+		});
 		return true;
 	}
 
