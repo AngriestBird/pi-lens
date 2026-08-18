@@ -45,6 +45,20 @@ const repoRoot = path.resolve(__dirname, "..");
 const LOMBOK_DOWNLOAD_URL = "https://projectlombok.org/downloads/lombok.jar";
 
 /**
+ * Diagnostics whose `message` matches `pattern` (case-insensitive).
+ *
+ * Exported so the decision an `expectMessageMatch` fixture rests on is
+ * testable without a live language server: an empty list must yield zero
+ * matches, which the LSP lane turns into a FAIL. The lane's default verdict
+ * passes on zero diagnostics, so a fixture that exists to prove a diagnostic
+ * fires needs this binding instead.
+ */
+export function matchDiagnosticMessages(pattern, diags) {
+	const re = new RegExp(pattern, "i");
+	return (diags ?? []).filter((d) => re.test(d?.message ?? ""));
+}
+
+/**
  * One minimal real project per language. `targets` are the runner ids whose
  * tool we are smoke-testing; `expectDiagnostic` is the fixture's known defect
  * (used by --step2).
@@ -383,6 +397,19 @@ const LSP_FIXTURES = [
 		file: "bad.md",
 		serverHint: "marksman",
 		tools: ["marksman"],
+	},
+	{
+		// The only lane member that must PROVE a diagnostic fires. cuelsp's
+		// coverage is narrow (parse errors only, and only when the package
+		// clause is on line 1), so a handshake alone says nothing about whether
+		// pi-lens can see a CUE defect at all — the bare-pass default let this
+		// fixture ship broken twice.
+		lang: "cue",
+		dir: "tests/fixtures/tool-smoke/cue",
+		file: "bad.cue",
+		serverHint: "CUE Language Server (cue lsp serve)",
+		tools: ["cue"],
+		expectMessageMatch: "expected '\\}'|found 'EOF'",
 	},
 	{
 		lang: "prisma",
@@ -810,6 +837,13 @@ const FORMAT_FIXTURES = [
 		file: "messy.zig",
 		formatter: "zig",
 		tools: [],
+	},
+	{
+		lang: "cue",
+		dir: "tests/fixtures/format-smoke/cue",
+		file: "messy.cue",
+		formatter: "cue",
+		tools: ["cue"],
 	},
 	{
 		// ktlint is a smart-default (auto-installs); elixir's `mix format` is
@@ -1661,6 +1695,32 @@ async function runLspHandshake({ langs, install, verbose }) {
 						);
 						continue;
 					}
+				}
+				// A fixture whose whole point is that a diagnostic fires. The
+				// lane's default verdict is "handshook — server replied", which
+				// passes on ZERO diagnostics; that is right for fixtures proving
+				// a server starts, and exactly backwards for one proving pi-lens
+				// can SEE a defect. Bind the claim to the message text.
+				if (fx.expectMessageMatch) {
+					const matched = matchDiagnosticMessages(
+						fx.expectMessageMatch,
+						touchedDiags,
+					);
+					if (verbose) {
+						console.error(
+							`[${fx.lang}] messages=${JSON.stringify(touchedDiags.map((d) => d.message))} matched=${matched.length}/${touchedDiags.length}`,
+						);
+					}
+					push(
+						matched.length > 0 ? "pass" : "fail",
+						matched.length > 0
+							? `served ${matched.length} diagnostic${matched.length === 1 ? "" : "s"} matching /${fx.expectMessageMatch}/`
+							: touchedDiags.length
+								? `${touchedDiags.length} diagnostic(s) but none matched /${fx.expectMessageMatch}/ (got: ${touchedDiags.map((d) => d.message).join("; ")})`
+								: `expected a diagnostic matching /${fx.expectMessageMatch}/, got none — a handshake alone does not prove this fixture works`,
+						touchedDiags.length,
+					);
+					continue;
 				}
 				if (fx.expectNoMessageMatch) {
 					const re = new RegExp(fx.expectNoMessageMatch, "i");
