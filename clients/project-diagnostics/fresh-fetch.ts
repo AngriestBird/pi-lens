@@ -139,6 +139,15 @@ export interface FreshProjectDiagnosticsResult {
 	 * dropped it is working exactly as intended.
 	 */
 	dispositionSuppressed?: number;
+	/**
+	 * Review-round F4 (#1617/#1625): the same count as `dispositionSuppressed`,
+	 * broken down per analyzer id — "gitleaks: 2, knip: 1" is actionable in a
+	 * way a bare total isn't (a caller can tell WHICH lane's marks are doing
+	 * the suppressing). Does not attempt to also flag a lane that is 100%
+	 * suppressed (so absent from both `runners` and `cold`) as distinct from
+	 * "ran clean" — that gap is #1623's lane-status territory, not this one.
+	 */
+	dispositionSuppressedByLane?: Record<string, number>;
 }
 
 /** The heavyweight analyzers surfaced in `lens_diagnostics mode=full` — this is
@@ -210,6 +219,7 @@ export async function fetchFreshProjectDiagnostics(
 	const timings: Record<string, number> = {};
 	const settledIds = new Set<string>();
 	let dispositionSuppressed = 0;
+	const dispositionSuppressedByLane: Record<string, number> = {};
 
 	// #1617: this is the ONE choke point every analyzer's findings pass
 	// through on the way into `diagnostics`, so applying the agent/user
@@ -229,7 +239,12 @@ export async function fetchFreshProjectDiagnostics(
 			analysisRoot,
 			(d) => d.filePath,
 		);
-		dispositionSuppressed += adapted.length - kept.length;
+		const suppressedHere = adapted.length - kept.length;
+		dispositionSuppressed += suppressedHere;
+		if (suppressedHere > 0) {
+			dispositionSuppressedByLane[id] =
+				(dispositionSuppressedByLane[id] ?? 0) + suppressedHere;
+		}
 		if (kept.length > 0) {
 			diagnostics.push(...kept);
 			pushUnique(runners, id);
@@ -560,8 +575,17 @@ export async function fetchFreshProjectDiagnostics(
 			aborted: true,
 			abortedIds,
 			dispositionSuppressed,
+			dispositionSuppressedByLane,
 		};
 	}
 
-	return { diagnostics, runners, cold, failed, timings, dispositionSuppressed };
+	return {
+		diagnostics,
+		runners,
+		cold,
+		failed,
+		timings,
+		dispositionSuppressed,
+		dispositionSuppressedByLane,
+	};
 }

@@ -1056,8 +1056,17 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// dropped because an agent/user marked them false-positive/won't-fix —
 	// the #1616 suppressed-bucket rule applied to turn_end's own reporting
 	// lanes, so a mark's effect stays visible even though the finding itself
-	// no longer appears above.
+	// no longer appears above. Review-round F4 (#1625): kept per-lane, not
+	// just a bare total, so the eventual trace says WHICH lane's marks did
+	// the suppressing.
 	let dispositionSuppressedTotal = 0;
+	const dispositionSuppressedByLane: Record<string, number> = {};
+	function recordDispositionSuppressed(lane: string, count: number): void {
+		if (count <= 0) return;
+		dispositionSuppressedTotal += count;
+		dispositionSuppressedByLane[lane] =
+			(dispositionSuppressedByLane[lane] ?? 0) + count;
+	}
 
 	// govulncheck — surface session_start-cached Go CVE findings as advisory.
 	// No per-turn re-run in this slice; the cache refreshes at next session_start.
@@ -1070,7 +1079,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		cwd,
 		(f) => govulncheckFindingToProjectDiagnostic(cwd, f),
 	);
-	dispositionSuppressedTotal += govFiltered.suppressed;
+	recordDispositionSuppressed("govulncheck", govFiltered.suppressed);
 	if (govFiltered.kept.length) {
 		const findings = govFiltered.kept.slice(0, 5);
 		let report =
@@ -1134,7 +1143,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		cwd,
 		(f) => gitleaksFindingToProjectDiagnostic(cwd, f),
 	);
-	dispositionSuppressedTotal += gitleaksFiltered.suppressed;
+	recordDispositionSuppressed("gitleaks", gitleaksFiltered.suppressed);
 	const gitleaksFindings = gitleaksFiltered.kept;
 	const astSecretWarnings = runtime
 		.peekActionableWarnings()
@@ -1180,7 +1189,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		cwd,
 		(f) => trivyFindingToProjectDiagnostic(cwd, f),
 	);
-	dispositionSuppressedTotal += trivyFindingsFiltered.suppressed;
+	recordDispositionSuppressed("trivy", trivyFindingsFiltered.suppressed);
 	if (trivyFindingsFiltered.kept.length) {
 		const all = trivyFindingsFiltered.kept;
 		const critical = all.filter((f) => f.severity === "CRITICAL");
@@ -1237,9 +1246,14 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// as its own advisory line so a mark's effect is visible, not a silent
 	// absence — trace, not a vanish.
 	if (dispositionSuppressedTotal > 0) {
+		// Review-round F4 (#1625): per-lane attribution, e.g.
+		// "gitleaks 2, govulncheck 1" — not just a bare total.
+		const byLane = Object.entries(dispositionSuppressedByLane)
+			.map(([lane, count]) => `${lane} ${count}`)
+			.join(", ");
 		advisoryParts.push(
 			`suppressed by disposition: ${dispositionSuppressedTotal} finding(s) ` +
-				"dropped from this turn's gitleaks/govulncheck/trivy sections " +
+				`dropped from this turn's gitleaks/govulncheck/trivy sections (${byLane}) ` +
 				"(marked false-positive or won't-fix).",
 		);
 	}

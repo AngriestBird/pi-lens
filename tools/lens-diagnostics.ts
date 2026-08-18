@@ -1608,9 +1608,19 @@ async function formatFullMode(
 	// an agent/user marked false-positive/won't-fix now drops out of
 	// `diagnostics` (fresh-fetch.ts's `record()`), but that drop must stay
 	// visible as a count rather than reading as "nothing was wrong here".
+	// Review-round F4 (#1625): per-lane attribution — "gitleaks 2, knip 1" says
+	// WHICH analyzer's marks are doing the suppressing, not just a bare total.
+	// A lane that's 100% suppressed still won't appear in `runners`/`cold` as
+	// distinct from "ran clean" — that gap is #1623's lane-status territory,
+	// not fixed here.
+	const dispositionSuppressedByLaneText = Object.entries(
+		extracted.dispositionSuppressedByLane ?? {},
+	)
+		.map(([id, count]) => `${id} ${count}`)
+		.join(", ");
 	const dispositionSuppressedNote =
 		(extracted.dispositionSuppressed ?? 0) > 0
-			? `\n\nsuppressed by disposition: ${extracted.dispositionSuppressed} finding(s) dropped from this result because they're marked false-positive or won't-fix. Not a clean verdict for those locations — they were found, then intentionally hidden.`
+			? `\n\nsuppressed by disposition: ${extracted.dispositionSuppressed} finding(s) dropped from this result because they're marked false-positive or won't-fix (${dispositionSuppressedByLaneText}). Not a clean verdict for those locations — they were found, then intentionally hidden.`
 			: "";
 	// #747/#250: the cheap project-diagnostics scan (scanProjectDiagnostics) and
 	// the LSP workspace sweep (collectWorkspaceDiagnosticFiles) both refuse to
@@ -1673,6 +1683,7 @@ async function formatFullMode(
 			failedAnalyzers,
 			analyzerTimingsMs: extracted.timings,
 			dispositionSuppressed: extracted.dispositionSuppressed ?? 0,
+			dispositionSuppressedByLane: extracted.dispositionSuppressedByLane ?? {},
 			analyzersAborted: extracted.aborted ?? false,
 			analyzersAbortedIds: extracted.abortedIds ?? [],
 			// #747: true when the fresh fetch refused an at-or-above-$HOME root —
