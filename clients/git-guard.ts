@@ -551,6 +551,54 @@ function unknown(cwd: string, reasonCategory: string, metadata = {}): GuardDecis
  * on tool_result, never tool_call, and therefore does not add disk I/O to the
  * edit preflight path.
  */
+/**
+ * Retire one file's inline blocker on a confirmed-clean verdict, then bring the
+ * commit gate back in line with the map (#1561 F2).
+ *
+ * Retiring the map entry alone is not enough and claiming otherwise was wrong:
+ * the gate reads a LATCH (`gitGuardHasBlockers`) and a PERSISTED record, and
+ * `evaluateGitGuard` short-circuits on the latch before it ever looks at the
+ * record. A retire that touched neither left the commit blocked and quoted the
+ * retired blocker back as the reason.
+ *
+ * Both are recomputed exactly the way a clean dispatch recomputes them:
+ * `updateGitGuardStatus(false, "")` re-derives the latch from the blocker map
+ * — it cannot clear a latch another file's live blocker still justifies,
+ * because that file's entry is still in the map — and `syncGitGuardRecord`
+ * rewrites the persisted record from the same source of truth.
+ *
+ * Colocated with the gate rather than inlined at the wiring site so the claim
+ * is testable without booting the extension.
+ *
+ * @returns true when an entry was retired (the caller logs it — #1432 Gap 1).
+ */
+export function retireInlineBlockerAndResyncGuard(args: {
+	runtime: RuntimeCoordinator;
+	cacheManager: CacheManager;
+	cwd: string;
+	filePath: string;
+	writeIndex?: number;
+	coveredSources: readonly string[];
+	lensGuardEnabled: boolean;
+}): boolean {
+	const retired = args.runtime.retireInlineBlockerOnConfirmedClean(
+		args.filePath,
+		args.writeIndex,
+		args.coveredSources,
+	);
+	if (!retired) return false;
+	args.runtime.updateGitGuardStatus(false, "");
+	if (args.lensGuardEnabled) {
+		syncGitGuardRecord(
+			args.runtime,
+			args.cacheManager,
+			args.cwd,
+			args.filePath,
+		);
+	}
+	return true;
+}
+
 export function syncGitGuardRecord(
 	runtime: RuntimeCoordinator,
 	cacheManager: CacheManager,
