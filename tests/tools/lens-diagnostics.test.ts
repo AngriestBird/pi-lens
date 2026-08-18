@@ -61,12 +61,14 @@ const mockSummaries: ReturnType<
 > = [];
 
 let mockStaleDropped = 0;
+let mockDependencyDemoted = 0;
 
 const reconcileScanDiagnosticsMock = vi.fn();
 
 vi.mock("../../clients/widget-state.js", () => ({
 	getFileDiagnosticSummaries: () => mockSummaries,
 	reconcileStaleWidgetFiles: async () => mockStaleDropped,
+	reconcileStaleWidgetDependencyBlockers: async () => mockDependencyDemoted,
 	reconcileScanDiagnostics: (...args: unknown[]) =>
 		reconcileScanDiagnosticsMock(...args),
 }));
@@ -84,6 +86,7 @@ beforeEach(() => {
 	});
 	mockSummaries.length = 0;
 	mockStaleDropped = 0;
+	mockDependencyDemoted = 0;
 	reconcileScanDiagnosticsMock.mockReset();
 	resetProjectLensConfigCache();
 });

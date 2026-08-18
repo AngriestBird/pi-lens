@@ -5,6 +5,7 @@ import { visibleWidth } from "./deps/pi-tui.js";
 import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { fitLine } from "./tui-fit.js";
 import { WriteOrderingGuard } from "./write-ordering-guard.js";
+import { collectForwardImportMtimes } from "./blocker-freshness.js";
 
 /**
  * Canonical key for the `files` map (and `diagnosticsWriteGuard`) — #1020.
@@ -67,6 +68,14 @@ export interface WidgetDiagnostic {
 	 * inherits the record's `touchedAt` — a safe, over-conservative default.
 	 */
 	observedAt?: number;
+	/**
+	 * #1631: set by the dependency-drift gate
+	 * (`reconcileStaleWidgetDependencyBlockers`) when one of the file's forward
+	 * imports changed on disk after this diagnostic was observed. A stale finding is
+	 * DEMOTED, not dropped (#1419): `isBlocking` answers false for it and `mode=all`
+	 * renders it with a `[stale — re-run to confirm]` marker instead of a 🔴.
+	 */
+	stale?: boolean;
 }
 
 /**
@@ -80,6 +89,10 @@ export interface WidgetDiagnostic {
  * from what the footer counts.
  */
 export function isBlocking(d: WidgetDiagnostic): boolean {
+	// #1631: a dependency-drift-demoted finding is no longer a hard stop. The gate
+	// sets `stale` rather than dropping the entry (#1419 demote-not-drop), so every
+	// tally and render that asks "is this blocking?" must answer no once demoted.
+	if (d.stale) return false;
 	if (d.semantic === "blocking") return true;
 	if (d.semantic == null && d.severity === "error") return true;
 	return false;
@@ -729,6 +742,58 @@ export async function reconcileStaleWidgetFiles(): Promise<number> {
 	}
 	if (dropped > 0) requestRenderFn?.();
 	return dropped;
+}
+
+/**
+ * Dependency-axis freshness gate for the session diagnostics store that feeds
+ * `lens_diagnostics mode=all` (and the footer widget) — the second #1631 surface.
+ *
+ * `reconcileStaleWidgetFiles` (above) already drops a record whose OWN file changed
+ * on disk after the diagnostic was observed. It cannot see the cross-file case: the
+ * diagnosed file is untouched, but a dependency it imports was fixed out-of-band, so
+ * the recorded blocker is stale yet replays on every `mode=all`. This reconcile
+ * resolves each blocking record's forward imports and, when one drifted after a
+ * blocking diagnostic was observed, demotes that diagnostic (`stale = true`) rather
+ * than dropping it (#1419). Own-file staleness stays `reconcileStaleWidgetFiles`'
+ * job; the two reconciles are paired at the `mode=all` read site.
+ *
+ * Returns the number of blocking diagnostics demoted. Never throws on a per-record
+ * failure: an unresolvable import list simply leaves the record untouched.
+ */
+export async function reconcileStaleWidgetDependencyBlockers(
+	cwd: string,
+): Promise<number> {
+	let demoted = 0;
+	for (const [, rec] of files.entries()) {
+		// Only records with an effective (not already stale) blocking finding need the
+		// import-closure check; clean or already-demoted records are skipped cheaply.
+		if (!rec.allDiagnostics.some((d) => isBlocking(d))) continue;
+		let importMtimes: Array<{ path: string; mtimeMs: number }> = [];
+		try {
+			importMtimes = await collectForwardImportMtimes(cwd, rec.filePath);
+		} catch {
+			importMtimes = [];
+		}
+		if (importMtimes.length === 0) continue;
+		let changed = false;
+		for (const d of rec.allDiagnostics) {
+			if (!isBlocking(d)) continue;
+			const baseline = d.observedAt ?? rec.touchedAt;
+			// +1ms tolerance: matches `reconcileStaleWidgetFiles` and the inline-blocker
+			// sweep — a same-millisecond write must not read as drifted.
+			if (importMtimes.some((im) => im.mtimeMs > baseline + 1)) {
+				d.stale = true;
+				changed = true;
+				demoted += 1;
+			}
+		}
+		if (changed) {
+			rec.diagnosticCounts = countDiagnostics(rec.allDiagnostics);
+			rec.diagnostics = capStoredDiagnostics(rec.allDiagnostics);
+		}
+	}
+	if (demoted > 0) requestRenderFn?.();
+	return demoted;
 }
 
 /**

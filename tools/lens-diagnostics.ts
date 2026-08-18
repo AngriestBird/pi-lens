@@ -65,9 +65,11 @@ import {
 	getFileDiagnosticSummaries,
 	type FileDiagnosticSummary,
 	reconcileScanDiagnostics,
+	reconcileStaleWidgetDependencyBlockers,
 	reconcileStaleWidgetFiles,
 	type WidgetDiagnostic,
 } from "../clients/widget-state.js";
+import { logLatency } from "../clients/latency-logger.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import { retagAuxiliaryDiagnostics } from "../clients/dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../clients/file-role.js";
@@ -408,6 +410,21 @@ export function createLensDiagnosticsTool(
 			const staleDropped = await reconcileStaleWidgetFiles();
 
 			if (mode === "all") {
+				// #1631 dependency-axis gate for the mode=all store. `reconcileStaleWidgetFiles`
+				// (above) only sees the diagnosed file's OWN mtime; this demotes blocking
+				// findings whose forward imports drifted out-of-band. Paired reconciles, one
+				// read site — the same gate that covers the turn-end inline-blocker store.
+				const dependencyGateStart = Date.now();
+				const dependencyDemoted =
+					await reconcileStaleWidgetDependencyBlockers(cwd);
+				logLatency({
+					type: "phase",
+					toolName: "lens_diagnostics",
+					filePath: cwd,
+					phase: "blocker_freshness_widget_gate",
+					durationMs: Date.now() - dependencyGateStart,
+					metadata: { demoted: dependencyDemoted, surface: "mode=all" },
+				});
 				return formatAllMode(
 					cwd,
 					severity,
@@ -415,6 +432,7 @@ export function createLensDiagnosticsTool(
 					undefined,
 					staleDropped,
 					pathsScope,
+					dependencyDemoted,
 				);
 			}
 			if (mode === "full") {
@@ -1790,14 +1808,18 @@ function formatAllMode(
 	detailOverrides: Record<string, unknown> = { mode: "all" },
 	staleDropped = 0,
 	pathsScope?: PathsScope,
+	dependencyDemoted = 0,
 ): { content: [{ type: "text"; text: string }]; details: object } {
 	// Files changed/deleted since their diagnostics were recorded have already
 	// been dropped by reconcileStaleWidgetFiles; note them so the agent knows
 	// those aren't "clean", just un-rescanned (use mode=full to refresh).
 	const staleNote =
-		staleDropped > 0
+		(staleDropped > 0
 			? ` (${staleDropped} changed file${staleDropped === 1 ? "" : "s"} omitted as stale — use mode=full to rescan)`
-			: "";
+			: "") +
+		(dependencyDemoted > 0
+			? ` (${dependencyDemoted} blocking finding${dependencyDemoted === 1 ? "" : "s"} demoted to [stale] — an imported file changed since; re-run to confirm)`
+			: "");
 
 	// mode=full already actively scanned exactly the requested paths, so a zero
 	// result there IS a legitimate clean read — the cache-only note only applies
@@ -1888,16 +1910,19 @@ function formatAllMode(
 			.sort(bySeverityThenLine);
 		const shown = matching.slice(0, MAX_DIAGNOSTICS_PER_FILE);
 		for (const d of shown) {
-			const marker = isErrorLike(d)
-				? d.semantic === "blocking"
-					? "🔴 "
-					: ""
-				: "";
+			const marker = d.stale
+				? ""
+				: isErrorLike(d)
+					? d.semantic === "blocking"
+						? "🔴 "
+						: ""
+					: "";
+			const staleTag = d.stale ? " [stale — re-run to confirm]" : "";
 			const label = d.rule ?? d.tool;
 			const tag = label ? ` [${label}]` : "";
 			const flaggedTag = d.flagged ? " 📌 flagged-to-fix" : "";
 			const msg = d.message.replace(/\s+/g, " ").trim();
-			lines.push(`  ${marker}L${d.line ?? "?"}: ${msg}${tag}${flaggedTag}`);
+			lines.push(`  ${marker}L${d.line ?? "?"}: ${msg}${tag}${flaggedTag}${staleTag}`);
 		}
 		if (matching.length > shown.length) {
 			lines.push(

@@ -77,6 +77,7 @@ import {
 	dropFindingsForMissingPaths,
 	snapshotAdvisoryProvenance,
 } from "./advisory-provenance.js";
+import { sweepInlineBlockerFreshness } from "./blocker-freshness.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
 
 interface TurnEndDeps {
@@ -334,14 +335,45 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const projectDiagnosticsDelta: ProjectDiagnostic[] = [];
 	const projectDiagnosticsSources = new Set<string>();
 
+	// #1631: freshness gate. A cached blocker is a verdict about the file AND
+	// everything it imports; before re-serving it, sweep for out-of-band drift of
+	// the file or its forward imports and demote drifted entries to a
+	// `[stale — re-run to confirm]` advisory instead of re-asserting them at full
+	// authority (#1419 demote-not-drop).
+	const blockerFreshnessStart = Date.now();
+	const blockerFreshness = await sweepInlineBlockerFreshness(runtime, cwd);
+	logLatency({
+		type: "phase",
+		toolName: "turn_end",
+		filePath: cwd,
+		phase: "blocker_freshness_sweep",
+		durationMs: Date.now() - blockerFreshnessStart,
+		metadata: {
+			total: blockerFreshness.total,
+			kept: blockerFreshness.kept,
+			revalidated: blockerFreshness.revalidated,
+			retired: blockerFreshness.retired,
+			alreadyStale: blockerFreshness.alreadyStale,
+		},
+	});
+
 	// Re-surface inline blockers from this turn that the agent didn't fix.
 	// These were shown inline during write/edit but the agent moved on without resolving them.
 	const unresolvedBlockers = runtime.getInlineBlockersSnapshot();
-	for (const { filePath: bPath, summary } of unresolvedBlockers) {
+	for (const { filePath: bPath, summary, stale } of unresolvedBlockers) {
 		const displayPath = toRunnerDisplayPath(cwd, bPath);
-		blockerParts.push(
-			`Unresolved from this turn — ${displayPath}:\n${summary}`,
-		);
+		if (stale) {
+			// #1631: demoted — out of the authoritative blocker channel and into the
+			// advisory channel with a stale marker, so the agent is told to re-run
+			// rather than pressured by a verdict that may already be resolved.
+			advisoryParts.push(
+				`[stale — re-run to confirm] ${displayPath}:\n${summary}`,
+			);
+		} else {
+			blockerParts.push(
+				`Unresolved from this turn — ${displayPath}:\n${summary}`,
+			);
+		}
 	}
 
 	// Drain the deferred cascade computes kicked off this turn (#450). They ran
