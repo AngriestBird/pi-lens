@@ -187,8 +187,15 @@ function isAvailable(pm: NodePackageManager): Promise<boolean> {
 	const inFlight = inFlightProbes.get(pm);
 	if (inFlight) return inFlight;
 
-	const probe = probeAvailability(pm).finally(() => {
-		inFlightProbes.delete(pm);
+	// #1653 review F1: a probe started before a session reset can settle AFTER
+	// a later session's own probe for the same manager is already in flight.
+	// An unconditional delete-by-key would evict that NEWER entry out from
+	// under it, so a third caller in the gap finds nothing in-flight and
+	// spawns a duplicate. Only remove the entry if it is still THIS call's
+	// promise — the same identity guard `resolveMadge` uses in
+	// dependency-checker.ts for the equivalent race.
+	const probe: Promise<boolean> = probeAvailability(pm).finally(() => {
+		if (inFlightProbes.get(pm) === probe) inFlightProbes.delete(pm);
 	});
 	inFlightProbes.set(pm, probe);
 	return probe;
