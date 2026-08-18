@@ -192,21 +192,27 @@ export async function handleAgentEnd({
 		typeof cacheManager.readCache === "function" &&
 		(rootActionableAutofixEnabled || getFlagSource !== undefined);
 	if (droppedOrphans.length > 0) {
-		// #1642: a stale/foreign record whose origin (turnStateCwd) does NOT
-		// match this flush's own workspace/worktree is dropped, never
-		// formatted — claiming it would be the same worktree→parent
+		// #1642 F3: a stale/foreign record whose origin (the cwd/worktree it
+		// was actually queued under) does NOT match this flush's own
+		// workspace/worktree is left queued and NEVER formatted by this
+		// flush — claiming it would be the same worktree→parent
 		// re-attribution the reported incident hit, just via the orphan
-		// fallback instead of tool_result's path resolution.
+		// fallback instead of tool_result's path resolution. It stays in
+		// `_pendingDeferredMutations` (not deleted) so a flush whose origin
+		// actually matches can still claim it later; a genuinely abandoned
+		// origin will keep surfacing this record on every subsequent
+		// agent_end, which is the deliberately safer trade-off over silently
+		// losing it forever.
 		dbg(
-			`agent_end deferred_format: dropped ${droppedOrphans.length} orphaned file(s) with a mismatched origin (unclaimed >${staleAfterMs}ms, never formatted): ${droppedOrphans
-				.map((r) => `${r.filePath} origin=${r.turnStateCwd}`)
+			`agent_end deferred_format: left ${droppedOrphans.length} orphaned file(s) queued due to a mismatched origin (unclaimed >${staleAfterMs}ms, not formatted by this flush): ${droppedOrphans
+				.map((r) => `${r.filePath} origin=${r.originCwd}`)
 				.join(", ")}`,
 		);
 		logLatency({
 			type: "phase",
 			toolName: "agent_end",
 			filePath: ctxCwd ?? runtime.projectRoot,
-			phase: "agent_end_deferred_format_orphan_dropped",
+			phase: "agent_end_deferred_format_orphan_origin_mismatch",
 			durationMs: 0,
 			metadata: {
 				fileCount: droppedOrphans.length,
@@ -214,7 +220,7 @@ export async function handleAgentEnd({
 				currentOriginCwd: ctxCwd ?? runtime.projectRoot,
 				files: droppedOrphans.map((r) => ({
 					filePath: r.filePath,
-					originCwd: r.turnStateCwd,
+					originCwd: r.originCwd,
 					ownerSessionId: r.ownerSessionId,
 					queuedTurnIndex: r.queuedTurnIndex,
 					ageMs: Date.now() - r.lastTouchedAt,

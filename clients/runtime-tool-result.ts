@@ -22,6 +22,7 @@ import { isExternalOrVendorFile, normalizeEphemeralMapKey, pathsEqual } from "./
 import { PathKeyedMap } from "./path-keyed-map.js";
 import { resolveLanguageRootForFile } from "./language-profile.js";
 import { logLatency } from "./latency-logger.js";
+import { resolveToolCallCorrelationId } from "./tool-event.js";
 import {
 	boundedIndexesForCount,
 	createReadGuardEditBatchSummary,
@@ -387,59 +388,97 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 
 	const rawFilePath = (event.input as { path?: string }).path;
 	const workspaceRoot = runtime.projectRoot || process.cwd();
-	const naiveResolve = (raw: string | undefined): string | undefined =>
-		raw
-			? path.isAbsolute(raw)
-				? raw
-				: path.resolve(workspaceRoot, raw)
-			: raw;
 
-	// #1642: correlate by tool-call identity instead of re-deriving a path
-	// from this event's own (possibly relative, possibly worktree-collapsing)
-	// metadata. A gitignored worktree edit got re-attributed onto a
-	// same-relative-path file in the parent checkout precisely because this
-	// used to always fall through to `naiveResolve` below, which knows
-	// nothing about the call's own cwd/worktree.
-	const toolCallId = event.toolCallId;
+	// #1642: a gitignored worktree edit got re-attributed onto a
+	// same-relative-path file in the parent checkout because this handler
+	// used to always resolve a relative path against `workspaceRoot`
+	// (`runtime.projectRoot`), with no idea the call actually ran under a
+	// different cwd/worktree.
+	//
+	// Source-level correction (pi host audit, earendil-works/pi): tool_call's
+	// own resolved path is NOT authoritative for what executed —
+	// `agent-session.ts:914-919`'s extension-handler contract lets a LATER
+	// `tool_call` handler mutate `event.input` in place with no
+	// re-validation, and edit's `prepareArguments` rewrites args before the
+	// event fires at all. `tool_result.input`, by contrast, is populated
+	// from the EXECUTED args (`agent-session.ts:502-516`) — it is the
+	// authoritative path source. So the correlation record's job is narrower
+	// than "the path": it is the RESOLUTION BASIS (the cwd/worktree the call
+	// actually ran under). Every tool_result resolves ITS OWN authoritative
+	// `rawFilePath` against that basis, rather than trusting a call-time path
+	// that a later handler may have superseded.
+	const toolCallId = resolveToolCallCorrelationId(event);
 	const attribution =
 		toolCallId !== undefined
-			? runtime.takeToolCallAttribution(String(toolCallId))
+			? runtime.takeToolCallAttribution(toolCallId)
 			: undefined;
 
-	let filePath: string | undefined;
+	let resolutionBasis: string;
 	if (attribution) {
-		if (attribution.skipped) {
-			// tool_call already decided this target — a gitignored file, most
-			// often — must not be processed. Refuse outright, and if this
-			// event's own naive resolution would have landed on a DIFFERENT
-			// path (the collapse), log it legibly: that divergence is exactly
-			// what let the wrong file get queued for formatting.
-			const divergent = naiveResolve(rawFilePath);
-			if (
-				divergent &&
-				attribution.resolvedPath &&
-				!pathsEqual(divergent, attribution.resolvedPath)
-			) {
-				const message = `path_attribution_refused: call target ${attribution.resolvedPath} (originCwd=${attribution.originCwd}) vs tool_result resolved ${divergent}`;
-				dbg(message);
-				logLatency({
-					type: "phase",
-					toolName: event.toolName,
-					filePath: attribution.resolvedPath,
-					phase: "path_attribution_refused",
-					durationMs: 0,
-					metadata: {
-						callTarget: attribution.resolvedPath,
-						resolvedPath: divergent,
-						originCwd: attribution.originCwd,
-					},
-				});
-			}
-			return;
-		}
-		filePath = attribution.resolvedPath;
+		resolutionBasis = attribution.originCwd;
+	} else if (toolCallId !== undefined && rawFilePath && !path.isAbsolute(rawFilePath)) {
+		// A real correlation id existed (the host DOES support one) but no
+		// attribution was recorded under it — evicted, cleared because the
+		// call was blocked before it could execute, or simply never seen by
+		// `handleToolCall`. A RELATIVE path here is ambiguous: we have no
+		// idea which cwd it is relative to, and guessing `workspaceRoot` is
+		// exactly the #1642 collapse. Fail CLOSED instead of guessing — no
+		// turn state, no deferred work — and log it so a real incident is
+		// countable rather than silently mis-attributed.
+		const guessedPath = path.resolve(workspaceRoot, rawFilePath);
+		dbg(
+			`path_attribution_missing: no recorded resolution basis for toolCallId=${toolCallId}, refusing relative path ${rawFilePath} (would have guessed ${guessedPath})`,
+		);
+		logLatency({
+			type: "phase",
+			toolName: event.toolName,
+			filePath: guessedPath,
+			phase: "path_attribution_missing",
+			durationMs: 0,
+			metadata: { toolCallId, rawFilePath, guessedPath },
+		});
+		return;
 	} else {
-		filePath = naiveResolve(rawFilePath);
+		// Either an ABSOLUTE path (bash-synthetic writes always pass one —
+		// unambiguous regardless of any basis, see the bash-write dispatch
+		// below) or a host that supplies NO correlation id at all under any
+		// known field name. The latter cannot be correlated by identity full
+		// stop; this is the SAME exposure every host had before this fix,
+		// not a regression introduced by it.
+		resolutionBasis = workspaceRoot;
+	}
+	const filePath = rawFilePath
+		? path.isAbsolute(rawFilePath)
+			? rawFilePath
+			: path.resolve(resolutionBasis, rawFilePath)
+		: rawFilePath;
+
+	// Purely diagnostic: tool_call's call-time verdict (computed on ITS OWN
+	// resolved path, which may since have been superseded) disagreed with
+	// what actually executed. This does NOT gate anything by itself — the
+	// ignore re-check below, running on the freshly & correctly resolved
+	// `filePath`, is the real decision — but a divergence is exactly the
+	// shape of the reported incident, so it is named legibly.
+	if (
+		attribution?.skipped &&
+		filePath &&
+		attribution.resolvedPath &&
+		!pathsEqual(filePath, attribution.resolvedPath)
+	) {
+		const message = `path_attribution_refused: call target ${attribution.resolvedPath} (originCwd=${attribution.originCwd}) vs tool_result resolved ${filePath}`;
+		dbg(message);
+		logLatency({
+			type: "phase",
+			toolName: event.toolName,
+			filePath,
+			phase: "path_attribution_refused",
+			durationMs: 0,
+			metadata: {
+				callTarget: attribution.resolvedPath,
+				resolvedPath: filePath,
+				originCwd: attribution.originCwd,
+			},
+		});
 	}
 	const behaviorWarnings = agentBehaviorRecord(event.toolName, filePath);
 	const syntheticWriteContent: Array<{ type: string; text?: string }> = [];
@@ -1031,7 +1070,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 		autofixNewlyQueued =
 			(runtime as Partial<RuntimeCoordinator>).deferMutation?.call(
 				runtime, filePath, dispatchCwd, event.toolName, turnStateCwd,
-				"autofix", deps.sessionId,
+				"autofix", deps.sessionId, resolutionBasis,
 			) ?? false;
 		dbg(`tool_result: queued deferred autofix for ${filePath}`);
 	}
@@ -1049,6 +1088,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			event.toolName,
 			turnStateCwd,
 			deps.sessionId,
+			resolutionBasis,
 		);
 		formatQueued = true;
 		dbg(`tool_result: queued deferred format for ${filePath}`);

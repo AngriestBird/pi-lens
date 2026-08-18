@@ -45,7 +45,7 @@ import {
 } from "./read-guard-tool-lines.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import { handleToolResult } from "./runtime-tool-result.js";
-import { isToolCallEventType } from "./tool-event.js";
+import { isToolCallEventType, resolveToolCallCorrelationId } from "./tool-event.js";
 import { getSharedTreeSitterClient } from "./tree-sitter-shared.js";
 
 const LSP_TOOLCALL_NAV_TOUCH_BUDGET_MS = Math.max(
@@ -276,7 +276,30 @@ interface ToolCallDeps {
 
 export type ToolCallResult = { block: true; reason?: string } | void;
 
+/**
+ * #1642 F2: a BLOCKED call (git-guard, read-guard preflight, the
+ * duplicate-export check) never gets a paired `tool_result` — the host never
+ * lets the tool execute. Any path attribution recorded for it below would
+ * otherwise sit in the correlation cache forever (bounded by its LRU cap,
+ * but pure garbage that can crowd out a live in-flight record under enough
+ * blocked-edit volume — a reviewer-reproduced leak). Clear it eagerly on the
+ * way out whenever the call was blocked; a no-op if nothing was recorded (a
+ * gitignored SKIP is not a block, so it is unaffected).
+ */
 export async function handleToolCall(
+	deps: ToolCallDeps,
+): Promise<ToolCallResult> {
+	const result = await handleToolCallImpl(deps);
+	if (result && (result as { block?: boolean }).block) {
+		const toolCallId = resolveToolCallCorrelationId(deps.event);
+		if (toolCallId !== undefined) {
+			deps.runtime.takeToolCallAttribution(toolCallId);
+		}
+	}
+	return result;
+}
+
+async function handleToolCallImpl(
 	deps: ToolCallDeps,
 ): Promise<ToolCallResult> {
 	const {
@@ -378,21 +401,28 @@ export async function handleToolCall(
 	dbg(
 		`tool_call fired for: ${filePath} (exists: ${nodeFs.existsSync(filePath)})`,
 	);
-	const toolCallId = (event as { toolCallId?: string }).toolCallId;
+	const toolCallId = resolveToolCallCorrelationId(event);
 	const attributesMutationTarget =
-		!!toolCallId && (toolName === "write" || toolName === "edit");
+		toolCallId !== undefined && (toolName === "write" || toolName === "edit");
 	const targetMissing = !nodeFs.existsSync(filePath);
-	const targetIgnored =
-		!targetMissing && isPathIgnoredByProject(filePath, runtime.projectRoot, false);
+	// #1642 F1: a brand-new file's WRITE is never a "skip" — `tool_call`
+	// fires PRE-execution, so `existsSync` is false for every path a write
+	// is about to CREATE. Gitignore is a pure pattern match (no existence
+	// requirement), so it is checked regardless of `targetMissing`; only an
+	// actual ignore verdict is a real "refuse". Folding `targetMissing` into
+	// `skipped` (the pre-fix-round-2 shape of this file) made EVERY new-file
+	// write's paired tool_result refuse to run diagnostics/autofix/format at
+	// all — a full pipeline regression worse than the bug #1642 fixes.
+	const targetIgnored = isPathIgnoredByProject(filePath, runtime.projectRoot, false);
 	if (attributesMutationTarget) {
 		// #1642: record the canonical target BY TOOL-CALL IDENTITY — including
 		// (especially) when it is being skipped here. The paired tool_result
 		// must take this exact verdict rather than re-deriving its own path
 		// from relative diff metadata, which is how a gitignored worktree
 		// edit got re-attributed onto a same-relative-path parent file.
-		runtime.recordToolCallAttribution(toolCallId as string, {
+		runtime.recordToolCallAttribution(toolCallId, {
 			resolvedPath: filePath,
-			skipped: targetMissing || targetIgnored,
+			skipped: targetIgnored,
 			originCwd: ctx.cwd ?? runtime.projectRoot,
 		});
 	}
