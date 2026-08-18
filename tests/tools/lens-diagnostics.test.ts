@@ -31,6 +31,21 @@ const freshFetchMocks = vi.hoisted(() => ({
 
 vi.mock("../../clients/project-diagnostics/fresh-fetch.js", () => ({
 	fetchFreshProjectDiagnostics: freshFetchMocks.fetchFreshProjectDiagnostics,
+	// Mirrors fresh-fetch.ts's own ANALYZER_IDS list (the module's single
+	// source of truth, #1623) — this mock predates the real module's export
+	// and must stay in sync with it manually since vi.mock replaces the
+	// whole module.
+	ANALYZER_IDS: [
+		"knip",
+		"jscpd",
+		"madge",
+		"gitleaks",
+		"govulncheck",
+		"opengrep",
+		"trivy",
+		"dead-code",
+		"test-runner",
+	],
 }));
 
 vi.mock("../../clients/bootstrap.js", () => ({
@@ -1310,18 +1325,38 @@ describe("lens_diagnostics mode=full", () => {
 		expect(String(result.content[0].text)).not.toContain("edit-scoped");
 	});
 
-	it("mode=full without refreshRunners never reports cold extractors (they weren't requested)", async () => {
+	// #1623: pre-fix, this scenario rendered NOTHING about the heavyweight
+	// lanes (gitleaks, knip, trivy, ...) — silence that reads exactly like
+	// "ran clean" (the dogfood forensics finding #1623 documents: an agent
+	// read a mode=full result with no gitleaks section as "gitleaks ran and
+	// found nothing", when in fact no gitleaks scan had run at all). The
+	// (expensive) fresh-fetch must still never run in this mode — only the
+	// RENDERING changes, to say so honestly instead of staying silent.
+	it("mode=full without refreshRunners renders every heavyweight lane as not-run, not silent (#1623)", async () => {
 		mockSummaries.length = 0;
 		const lspService = {
 			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
 		};
 		const result = await run(makeTool({}, lspService), { mode: "full" });
-		expect(String(result.content[0].text)).not.toContain("cold");
+		const text = String(result.content[0].text);
+		expect(text).toContain("cold");
+		// The secrets lane specifically — the issue's red-first case.
+		expect(text).toMatch(/gitleaks — not run \(/);
+		expect(text).toContain("refreshRunners not requested");
+		// ast-grep isn't one of `ANALYZER_IDS` (it's the cheap in-process scan,
+		// gated separately) — it needs its own marker so it doesn't stay the
+		// one lane still silently absent.
+		expect(text).toContain("ast-grep");
 		expect((result.details as { coldRunners?: string[] }).coldRunners).toEqual(
-			[],
+			expect.arrayContaining(["gitleaks", "knip", "trivy", "govulncheck"]),
 		);
+		expect(
+			(result.details as { coldReasons?: Record<string, string> })
+				.coldReasons?.gitleaks,
+		).toMatch(/refreshRunners not requested/);
 		// #585: without refreshRunners opting in, the (expensive) fresh-fetch of
-		// the heavyweight analyzers must not run at all.
+		// the heavyweight analyzers must still never run — only the rendering
+		// of that skip changed, not the (deliberately cheap) behavior itself.
 		expect(
 			freshFetchMocks.fetchFreshProjectDiagnostics,
 		).not.toHaveBeenCalled();

@@ -349,6 +349,27 @@ describe("fetchFreshProjectDiagnostics (#585)", () => {
 		expect(result.cold).toContain("gitleaks");
 	});
 
+	// #1623: `cold` alone can't distinguish "not a git repo" from "gitleaks
+	// binary missing" from "no go.mod" — a caller could only ever render a
+	// generic guess (the pre-fix `warmTriggerFor` lookup). Each gate must now
+	// capture ITS OWN reason, at the point it decides, into `coldReasons` —
+	// the single source of truth the render layer reads instead of
+	// re-deriving one.
+	it("captures the SPECIFIC reason each cold analyzer was skipped, not just its id (#1623)", async () => {
+		const cacheManager = makeCacheManager();
+		const clients = makeClients();
+
+		const result = await fetchFreshProjectDiagnostics(cacheManager, tmp, clients);
+
+		expect(result.coldReasons?.gitleaks).toMatch(/not a git repository/i);
+		expect(result.coldReasons?.govulncheck).toMatch(/go\.mod/i);
+		expect(result.coldReasons?.trivy).toBeDefined();
+		// jscpd/madge stayed cold because ensureAvailable() returned false by
+		// default in this test's stub clients — the reason must say so, not
+		// just repeat the generic "runs at session-start" guess.
+		expect(result.coldReasons?.jscpd).toMatch(/unavailable/i);
+	});
+
 	it("runs gitleaks fresh on a bare git repo with NO explicit gitleaks config (#608 smart-default)", async () => {
 		// The whole point of #608: mode=full uses the looser gate (any tracked
 		// git repo), not #130's strict opt-in-config gate — no .gitleaks* marker

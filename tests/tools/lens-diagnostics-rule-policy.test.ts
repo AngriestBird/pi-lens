@@ -27,6 +27,19 @@ const freshFetchMocks = vi.hoisted(() => ({
 
 vi.mock("../../clients/project-diagnostics/fresh-fetch.js", () => ({
 	fetchFreshProjectDiagnostics: freshFetchMocks.fetchFreshProjectDiagnostics,
+	// Mirrors fresh-fetch.ts's own ANALYZER_IDS (#1623) — kept in sync
+	// manually since vi.mock replaces the whole module.
+	ANALYZER_IDS: [
+		"knip",
+		"jscpd",
+		"madge",
+		"gitleaks",
+		"govulncheck",
+		"opengrep",
+		"trivy",
+		"dead-code",
+		"test-runner",
+	],
 }));
 
 vi.mock("../../clients/bootstrap.js", () => ({

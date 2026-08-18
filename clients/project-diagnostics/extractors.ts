@@ -49,3 +49,37 @@ const WARM_TRIGGER: Record<string, string> = {
 export function warmTriggerFor(analyzerId: string): string {
 	return WARM_TRIGGER[analyzerId] ?? "runs at session-start";
 }
+
+/**
+ * #1623: single formatter for a "not run" lane entry — reused by every
+ * caller that renders `fetchFreshProjectDiagnostics`'s `cold` list (today,
+ * `tools/lens-diagnostics.ts`'s mode=full) so the wording can't drift
+ * per-caller. Prefers the SPECIFIC reason captured at the decision point
+ * (`coldReasons`, ./fresh-fetch.ts) over the generic `warmTriggerFor` guess —
+ * the latter only remains a fallback for a `cold` id this map doesn't cover.
+ */
+export function formatNotRunEntry(
+	analyzerId: string,
+	coldReasons: Record<string, string> | undefined,
+): string {
+	const reason = coldReasons?.[analyzerId];
+	return reason
+		? `${analyzerId} — not run (${reason})`
+		: `${analyzerId} — not run (${warmTriggerFor(analyzerId)})`;
+}
+
+/**
+ * #1623: human-readable age, for a lane whose result was served from cache
+ * rather than executed fresh this call (see `cachedAgeMs`, ./fresh-fetch.ts).
+ * Mirrors the granularity an agent actually needs to judge staleness — exact
+ * seconds don't matter, "12m" vs "3h" does.
+ */
+export function formatCacheAge(ms: number): string {
+	if (ms < 0) return "0m";
+	const totalMinutes = Math.round(ms / 60_000);
+	if (totalMinutes < 1) return "under 1m";
+	if (totalMinutes < 60) return `${totalMinutes}m`;
+	const hours = Math.floor(totalMinutes / 60);
+	const minutes = totalMinutes % 60;
+	return minutes > 0 ? `${hours}h${minutes}m` : `${hours}h`;
+}

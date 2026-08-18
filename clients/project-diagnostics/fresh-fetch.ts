@@ -111,6 +111,28 @@ export interface FreshProjectDiagnosticsResult {
 	/** Extractor ids skipped this run (not applicable / tool unavailable, OR
 	 *  aborted before settling — see `abortedIds`). */
 	cold: string[];
+	/**
+	 * #1623: the SPECIFIC reason each `cold` id was skipped, captured at the
+	 * exact gate that made the decision (e.g. "not a git repository" vs
+	 * "gitleaks binary unavailable" — both render as bare "gitleaks" in
+	 * `cold` alone). Single source of truth for the render layer's "not run
+	 * (<reason>)" note — the render side must read this map rather than
+	 * re-deriving a generic guess (that anti-pattern is what `warmTriggerFor`,
+	 * extractors.ts, used to be the ONLY option for; kept there as a
+	 * fallback for ids this map doesn't cover, e.g. a caller-supplied cold
+	 * list from an older cache). Not populated for `abortedIds` — those get
+	 * their own distinct "stopped mid-scan" reason at the render layer.
+	 */
+	coldReasons?: Record<string, string>;
+	/**
+	 * #1623: ms-old each id's data was when this call read it, keyed by
+	 * extractor id — present only for lanes that are a cache-read BY DESIGN
+	 * (today, only "test-runner"), so a caller can render "(cached, Xm old —
+	 * not re-run)" instead of implying the data came from a fresh scan this
+	 * call. A lane triggers-or-joins a genuine run whenever it's attempted
+	 * (see the module header), so this stays empty for every other id.
+	 */
+	cachedAgeMs?: Record<string, number>;
 	/** Analyzers that ran but explicitly reported failure. */
 	failed: FailedProjectAnalyzer[];
 	/** Wall-clock ms spent per extractor id that actually ran (join time
@@ -182,11 +204,16 @@ export async function fetchFreshProjectDiagnostics(
 	// / review-graph's buildOrUpdateGraph; like the latter, there is no safe
 	// substitute root to fall back to — the caller's `paths` scope only filters
 	// REPORTED results, it never narrows what these analyzers walk.
+	const unsafeRootReason =
+		"the working directory resolves at or above the home directory; heavyweight analyzers refuse to walk from there (#747)";
 	if (isAtOrAboveHomeDir(analysisRoot, options.homeDir)) {
 		return {
 			diagnostics: [],
 			runners: [],
 			cold: [...ANALYZER_IDS],
+			coldReasons: Object.fromEntries(
+				ANALYZER_IDS.map((id) => [id, unsafeRootReason]),
+			),
 			failed: [],
 			timings: {},
 			unsafeRoot: true,
@@ -195,9 +222,23 @@ export async function fetchFreshProjectDiagnostics(
 	const diagnostics: ProjectDiagnostic[] = [];
 	const runners: string[] = [];
 	const cold: string[] = [];
+	// #1623: the specific reason each `cold` id was skipped, captured at the
+	// gate that decided it — see FreshProjectDiagnosticsResult.coldReasons.
+	const coldReasons: Record<string, string> = {};
 	const failed: FailedProjectAnalyzer[] = [];
 	const timings: Record<string, number> = {};
+	// #1623: ms-old each id's data was when this call read it, for lanes that
+	// are cache-reads by design (currently only test-runner — see its task
+	// below) rather than a fresh execution this call. Absent for every other
+	// key: this module's other lanes always trigger-or-join a genuine run
+	// when attempted (see the module header), so there is nothing to date.
+	const cachedAgeMs: Record<string, number> = {};
 	const settledIds = new Set<string>();
+
+	function markCold(id: string, reason: string): void {
+		pushUnique(cold, id);
+		coldReasons[id] = reason;
+	}
 
 	function record(id: string, adapted: ProjectDiagnostic[], elapsedMs: number): void {
 		timings[id] = (timings[id] ?? 0) + elapsedMs;
@@ -251,7 +292,7 @@ export async function fetchFreshProjectDiagnostics(
 		// detection, exactly mirroring session_start's own logic.
 		task("jscpd", async () => {
 			if (!(await clients.jscpdClient.ensureAvailable())) {
-				cold.push("jscpd");
+				markCold("jscpd", "jscpd binary unavailable");
 				return;
 			}
 			const isTsProject = fs.existsSync(
@@ -282,7 +323,7 @@ export async function fetchFreshProjectDiagnostics(
 		// madge — circular-dependency detection.
 		task("madge", async () => {
 			if (!(await clients.depChecker.ensureAvailable())) {
-				cold.push("madge");
+				markCold("madge", "madge binary unavailable");
 				return;
 			}
 			const startMs = Date.now();
@@ -308,11 +349,11 @@ export async function fetchFreshProjectDiagnostics(
 		// "cold" on a project with no explicit gitleaks config.
 		task("gitleaks", async () => {
 			if (!GitleaksClient.hasGitRepo(analysisRoot)) {
-				cold.push("gitleaks");
+				markCold("gitleaks", "not a git repository (no .git found)");
 				return;
 			}
 			if (!(await clients.gitleaksClient.ensureAvailable())) {
-				cold.push("gitleaks");
+				markCold("gitleaks", "gitleaks binary unavailable");
 				return;
 			}
 			const startMs = Date.now();
@@ -336,11 +377,11 @@ export async function fetchFreshProjectDiagnostics(
 		// govulncheck — Go module CVE detection. Go-module-gated per #132.
 		task("govulncheck", async () => {
 			if (!GovulncheckClient.hasGoModule(analysisRoot)) {
-				cold.push("govulncheck");
+				markCold("govulncheck", "no go.mod found (not a Go module)");
 				return;
 			}
 			if (!(await clients.govulncheckClient.ensureAvailable())) {
-				cold.push("govulncheck");
+				markCold("govulncheck", "govulncheck binary unavailable");
 				return;
 			}
 			const startMs = Date.now();
@@ -375,7 +416,7 @@ export async function fetchFreshProjectDiagnostics(
 		// `lens_diagnostics mode=full` — the honesty gap (#533) this task closes.
 		task("opengrep", async () => {
 			if (!(await clients.opengrepClient.ensureAvailable())) {
-				cold.push("opengrep");
+				markCold("opengrep", "opengrep binary unavailable");
 				return;
 			}
 			const startMs = Date.now();
@@ -397,11 +438,14 @@ export async function fetchFreshProjectDiagnostics(
 		// trivy — dependency CVE detection. Explicit opt-in per #131.
 		task("trivy", async () => {
 			if (!TrivyClient.shouldScan(analysisRoot)) {
-				cold.push("trivy");
+				markCold(
+					"trivy",
+					"not opted in (.pi-lens.json trivy.enabled) or no dependency manifest found",
+				);
 				return;
 			}
 			if (!(await clients.trivyClient.ensureAvailable())) {
-				cold.push("trivy");
+				markCold("trivy", "trivy binary unavailable");
 				return;
 			}
 			const startMs = Date.now();
@@ -428,7 +472,10 @@ export async function fetchFreshProjectDiagnostics(
 				c.detect(analysisRoot),
 			);
 			if (applicable.length === 0) {
-				cold.push("dead-code");
+				markCold(
+					"dead-code",
+					"no dead-code client detected an applicable language for this project",
+				);
 				return;
 			}
 			await Promise.all(
@@ -486,9 +533,19 @@ export async function fetchFreshProjectDiagnostics(
 				analysisRoot,
 			);
 			if (!cached?.data) {
-				cold.push("test-runner");
+				markCold(
+					"test-runner",
+					"no turn_end test-runner cache entry yet this session",
+				);
 				return;
 			}
+			// #1623: unlike every other lane in this module, test-runner is a
+			// cache-read BY DESIGN (see the task's own header comment above) — it
+			// never performs a fresh run this call, so its age must be surfaced
+			// the same way a genuinely-stale cache read would be, rather than
+			// looking indistinguishable from a lane that just executed.
+			cachedAgeMs["test-runner"] =
+				Date.now() - new Date(cached.meta.timestamp).getTime();
 			record(
 				"test-runner",
 				testRunnerFindingsToProjectDiagnostics(cached.data, analysisRoot, options.runtime),
@@ -526,12 +583,14 @@ export async function fetchFreshProjectDiagnostics(
 			diagnostics,
 			runners,
 			cold,
+			coldReasons,
 			failed,
 			timings,
+			cachedAgeMs,
 			aborted: true,
 			abortedIds,
 		};
 	}
 
-	return { diagnostics, runners, cold, failed, timings };
+	return { diagnostics, runners, cold, coldReasons, failed, timings, cachedAgeMs };
 }
