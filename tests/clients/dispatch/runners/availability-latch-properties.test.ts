@@ -10,17 +10,26 @@
  * fresh `createAvailabilityLatch()`, and asserts five invariants after
  * EVERY step:
  *
- *   1. never durably latched on transient-only evidence
+ *   1. never durably latched on transient-only evidence, and a transient
+ *      verdict actually re-arms (reads `null`) once its own cooldown gate
+ *      has passed — not just "never reads `missing`/`non-installable`"
  *   2. re-arm reachable at session_start — no process-lifetime hiding
- *   3. cooldown ladder monotone non-decreasing and capped
+ *   3. cooldown ladder monotone non-decreasing and capped, checked against
+ *      the PREVIOUS actual delay the latch returned (not by recomputing the
+ *      same formula the latch calls — that would only prove the latch
+ *      agrees with itself)
  *   4. recovery reachable from every state once the condition heals
- *   5. degradation recorded exactly once per episode
+ *   5. `recordDegradationOnce` records at most once per episode when driven
+ *      the way a real call site drives it (govulncheck-client.ts's
+ *      convention) — this exercises the ledger's own dedup, not a latch
+ *      invariant; the latch only supplies the exhaustion transition
  *
  * Deterministic: a mulberry32 PRNG seeded per run, `Date.now()` fully
  * mocked via `vi.useFakeTimers`, no wall clock anywhere. A failing
  * assertion's message carries `seed=<n> step=<n>`, which is everything
- * needed to replay it (set `BASE_SEED` to that seed and narrow
- * `NUM_RUNS`/`STEPS_PER_RUN` to reproduce a single run in isolation).
+ * needed to replay it: set `PI_LENS_PROP_SEED=<n>` (and optionally
+ * `PI_LENS_PROP_RUNS=1`) and re-run this file to reproduce that exact run
+ * in isolation, no file edit required.
  *
  * `fast-check` is not a dependency of this repo (checked before adding
  * one); a hand-rolled seeded PRNG keeps this file dependency-free and the
@@ -127,9 +136,11 @@ function unknownShape(): ProbeFailureShape {
 
 // --- the run -----------------------------------------------------------
 
-const NUM_RUNS = 150;
+// Env overrides (#1609 review F5): replay a failing seed without editing the
+// file — `PI_LENS_PROP_SEED=<n> PI_LENS_PROP_RUNS=1 npx vitest run <this file>`.
+const NUM_RUNS = Number(process.env.PI_LENS_PROP_RUNS) || 150;
 const STEPS_PER_RUN = 35;
-const BASE_SEED = 20260817;
+const BASE_SEED = Number(process.env.PI_LENS_PROP_SEED) || 20260817;
 const LEDGER_KIND = "install-retry-exhausted";
 
 interface Model {
@@ -142,6 +153,15 @@ interface Model {
 	/** Has an install-class exhaustion happened since the last session-start reset? */
 	ledgerHadExhaustionThisEpisode: boolean;
 	maxCooldownMs: number;
+	/**
+	 * The latch's own most recently returned probe-class delay for a
+	 * non-host-stall cause, or `null` when the ladder is fresh (#1609 review
+	 * F2). Compared against the NEXT actual returned delay — never against
+	 * `transientRetryDelayMs` again — so a mutation to the ladder itself
+	 * (e.g. de-escalating instead of escalating) cannot pass by agreeing
+	 * with its own mutated oracle.
+	 */
+	lastNonStallProbeDelay: number | null;
 }
 
 describe("availability latch: state-machine property tests (#1609)", () => {
@@ -172,6 +192,7 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 				sawOnlyTransientEvidence: true,
 				ledgerHadExhaustionThisEpisode: false,
 				maxCooldownMs,
+				lastNonStallProbeDelay: null,
 			};
 			const ledgerSubject = `prop-tool-${seed}`;
 			const trace: string[] = [];
@@ -228,7 +249,28 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 					const expected = transientRetryDelayMs(model.probeAttempts, cause, maxCooldownMs);
 					expect(delay, ctx(step, "probe-ladder-matches-oracle")).toBe(expected);
 					expect(delay, ctx(step, "probe-ladder-capped")).toBeLessThanOrEqual(maxCooldownMs);
+					recordNonStallProbeDelay(step, cause, delay);
 				}
+			}
+
+			/**
+			 * Invariant 3, the real check (#1609 review F2): compare the latch's
+			 * newly returned delay against the PREVIOUS delay it actually
+			 * returned, never against `transientRetryDelayMs` a second time — an
+			 * oracle-equality check on both sides would still pass if the ladder
+			 * itself were mutated to de-escalate, because the "oracle" is the same
+			 * mutated function the latch calls. `host-stall` is excluded: it is a
+			 * deliberate flat 5 s softening, a separate subsequence from the
+			 * escalating one (see `transientRetryDelayMs`'s doc comment).
+			 */
+			function recordNonStallProbeDelay(step: number, cause: AvailabilityCause, delay: number): void {
+				if (cause === "host-stall") return;
+				if (model.lastNonStallProbeDelay !== null) {
+					expect(delay, ctx(step, "probe-ladder-monotone-vs-previous-actual")).toBeGreaterThanOrEqual(
+						model.lastNonStallProbeDelay,
+					);
+				}
+				model.lastNonStallProbeDelay = delay;
 			}
 
 			function assertCommonInvariants(step: number, tag: string): void {
@@ -251,6 +293,16 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 					expect(latch.read(), ctx(step, `${tag}:durable-time-independent`)).toBe(false);
 				}
 
+				// Invariant 1's other half (#1609 review F1): a durable-missing verdict
+				// never expires, but a TRANSIENT one must — once its own cooldown gate
+				// has passed, read() must actually re-arm to `null` (the caller must
+				// re-probe), not stay `false` forever. This is the canonical
+				// #1467/#1490 defect: a transient failure surviving as a permanent
+				// "unavailable" because nothing ever asked read() to reconsider it.
+				if (outcome === "transient" && !exhausted && Date.now() >= latch.getRetryAtMs()) {
+					expect(latch.read(), ctx(step, `${tag}:transient-rearms-past-cooldown`)).toBeNull();
+				}
+
 				// read() is idempotent absent an intervening event or time advance.
 				const first = latch.read();
 				const second = latch.read();
@@ -262,6 +314,7 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 				model.probeAttempts = 0;
 				model.installAttempts = 0;
 				model.sawOnlyTransientEvidence = true;
+				model.lastNonStallProbeDelay = null;
 				// Invariant 4: recovery reachable from every state.
 				expect(latch.read(), ctx(step, "heal-reads-true")).toBe(true);
 				expect(latch.getOutcome(), ctx(step, "heal-outcome-success")).toBe("success");
@@ -276,6 +329,7 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 				model.installAttempts = 0;
 				model.sawOnlyTransientEvidence = true;
 				model.ledgerHadExhaustionThisEpisode = false;
+				model.lastNonStallProbeDelay = null;
 				// Invariant 2: re-arm reachable at session_start, from ANY prior state
 				// (including a durably-latched or install-exhausted one) — no
 				// process-lifetime hiding (#1496 shape).
@@ -300,6 +354,7 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 					model.probeAttempts = 0;
 					model.installAttempts = 0;
 					model.sawOnlyTransientEvidence = true;
+					model.lastNonStallProbeDelay = null;
 				} else {
 					model.installAttempts = 0;
 				}
@@ -307,7 +362,14 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 
 			for (let step = 0; step < STEPS_PER_RUN; step += 1) {
 				const roll = rng();
-				const operationClass: "probe" | "install" = chance(rng, 0.3) ? "install" : "probe";
+				// #1609 review F4: once the install ladder has started, bias TOWARD
+				// continuing it — the random walk otherwise almost never reaches
+				// exhaustion (3 attempts) within budget, so the install-exhausted
+				// and exhausted+generation-bump states go nearly unexplored.
+				const installBias = model.installAttempts > 0 ? 0.7 : 0.3;
+				const operationClass: "probe" | "install" = chance(rng, installBias)
+					? "install"
+					: "probe";
 
 				if (roll < 0.18) {
 					// Transient probe failure, classified for real (not hardcoded).
@@ -357,6 +419,7 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 					expect(delay, ctx(step, "provisional-matches-oracle")).toBe(expected);
 					expect(latch.read(), ctx(step, "provisional-serves-true")).toBe(true);
 					expect(latch.isProvisional(), ctx(step, "provisional-flag-set")).toBe(true);
+					recordNonStallProbeDelay(step, cause, delay);
 					trace.push(`provisional(${cause})`);
 				} else if (roll < 0.56) {
 					trace.push("heal");
@@ -393,16 +456,50 @@ describe("availability latch: state-machine property tests (#1609)", () => {
 				assertCommonInvariants(step, "post-step");
 			}
 
-			// Invariant 5: degradation recorded exactly once per episode. An
+			// Deterministic tail (#1609 review F4): walk straight to install
+			// exhaustion and back, every run. The biased random walk above still
+			// reaches exhaustion often but not reliably within budget, so this
+			// guarantees BOTH post-exhaustion recovery arms — heal and the #1497
+			// review F1 generation-bump-while-exhausted arm — get exercised on
+			// (roughly) half the runs each, rather than almost never.
+			for (
+				let i = 0;
+				i < INSTALL_TRANSIENT_COOLDOWNS_MS.length + 2 && !latch.isInstallExhausted();
+				i += 1
+			) {
+				const shape = TRANSIENT_SHAPES[0]();
+				const { outcome, cause } = classifyProbeFailure(shape, { hostStallMs: 0 });
+				trace.push("tail-install-transient");
+				applyFailure(STEPS_PER_RUN, outcome, cause, "install");
+			}
+			expect(
+				latch.isInstallExhausted(),
+				ctx(STEPS_PER_RUN, "tail-reaches-exhaustion"),
+			).toBe(true);
+			assertCommonInvariants(STEPS_PER_RUN, "tail-post-exhaust");
+			if (runIdx % 2 === 0) {
+				trace.push("tail-heal");
+				doHeal(STEPS_PER_RUN + 1);
+			} else {
+				trace.push("tail-install-generation-bump");
+				doInstallGenerationBump(STEPS_PER_RUN + 1);
+			}
+			assertCommonInvariants(STEPS_PER_RUN + 1, "tail-post-recovery");
+
+			// Invariant 5: `recordDegradationOnce` records at most once per episode
+			// when driven the way a real call site drives it. This exercises the
+			// LEDGER's own dedup contract (#1609 review F3) — the harness itself
+			// calls `recordDegradationOnce` on every exhausted decision, mirroring
+			// `govulncheck-client.ts`'s convention, and the assertion is that the
+			// ledger collapses repeats within an episode to exactly one record. An
 			// episode is bounded by session-start resets (which reset the ledger
-			// alongside the latch), matching the real call-site convention
-			// (govulncheck-client.ts: "Once per session, matching the latch's own
-			// lifetime: both re-arm at session_start").
+			// alongside the latch): "Once per session, matching the latch's own
+			// lifetime: both re-arm at session_start."
 			const group = getDegradationSummary().find((entry) => entry.kind === LEDGER_KIND);
 			const expectedCount = model.ledgerHadExhaustionThisEpisode ? 1 : 0;
 			expect(
 				group?.count ?? 0,
-				`seed=${seed} degradation-recorded-exactly-once-per-episode trace=${JSON.stringify(trace)}`,
+				`seed=${seed} record-degradation-once-dedups-per-episode trace=${JSON.stringify(trace)}`,
 			).toBe(expectedCount);
 		}
 	});
