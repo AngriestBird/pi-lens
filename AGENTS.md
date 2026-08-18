@@ -60,7 +60,14 @@ client cache. Carry them into that read only when their stored SHA-256 content
 binding matches the touch content exactly. Unknown or changed-content bindings
 never replay. (#1458)
 
-Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row.
+Every auxiliary touch emits one bounded `lsp_aux_wait_outcome` latency row, on
+both producers: the `with-auxiliary` grace wait (`waitShape: "aux_grace"`) and,
+since #1533, the `clientScope: "all"` aggregate wait (`waitShape: "aggregate"`),
+which derives the same evidence from post-wait state without arming a grace of
+its own. Read `waitShape` before comparing rows — `cut_off` cannot arise on the
+aggregate path, and its `durationMs` covers the WHOLE diagnostics wait rather
+than just the post-primary aux phase, so the same auxiliary reports a
+systematically larger number there.
 Its per-server outcomes record answered, silent, cut-off, or (#1459) deferred —
 a deferred scanner was never sent the content, so it must never occupy the
 `silent` row, which is reserved for one that had the content and published
@@ -105,6 +112,32 @@ outcomes) cannot see them on the `clientScope: "all"` sweep path, which emits no
 outcome rows at all — they are unioned into `unconfirmedServerIds` separately.
 (#1459)
 
+**A touch's `inconclusive` verdict is PRIMARY-scoped; an auxiliary can only
+narrow it.** `resolveTouchVerdict` (`clients/lsp/diagnostic-binding.ts`) owns the
+one rule, and both its inputs name primary-role servers only. An auxiliary that
+missed any deadline — notify write, aux grace, or its own diagnostics budget — is
+a COVERAGE GAP (`confirmation: "partial"` plus `unconfirmedServerIds`), never a
+verdict, because the diagnostics deadline is the MAX over the servers waited on:
+a touch-wide flag let opengrep's 3500 ms budget discard a TypeScript answer that
+landed in 100 ms (97.6% of 6,079 cascade sweeps read inconclusive, against 15%
+for edit-time touches). The screen when you touch this merge: decide "did it
+answer" from EVIDENCE — a per-path publication stamp advancing past the
+pre-notify baseline (#1531), or a fresh per-file cache entry — never from how a
+promise settled, and fail CLOSED on a client that exposes neither, so the rule
+can only narrow a verdict and never invent a confirmation. The capability-aware
+silent-clean gates are primary-scoped for the same reason. Two obligations ride
+with the change: an auxiliary whose write never landed must have its stale
+findings dropped from `.diags` (they describe the previous revision, and the
+blanket verdict used to hide them) — and that drop is judged on a MERGE-TIME
+content-binding read unioned with the pre-notify snapshot, because #1493's
+snapshot is captured before the write and cannot see a write that lands late and
+then publishes for these bytes (#1459's own signature); one predicate decides both
+the drop and the coverage naming, so a scanner can never be named uncovered while
+its findings ride along. And an inconclusive touch must name its cause
+— `inconclusiveServerIds` plus `inconclusiveReason` (`notify-write` /
+`diagnostics-wait` / `mixed`) on the result, in `lsp_touch_file`, and in the
+cascade's `neighbor_touch` row. (#1549)
+
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
 the agent. `turnSeq` is not a staleness signal for such a run (a late run is by
@@ -138,8 +171,9 @@ pattern. (#1409)
 Helm chart linting uses the shared workspace-topology `Chart.yaml` marker. YAML
 and `.tpl` edits inside a chart dispatch one canonical-root-deduplicated,
 bounded `helm lint` pass through the ordinary typed availability/install seam.
-It is smart-default and read-only; rendered-manifest validation remains deferred
-to #1283 slice B.
+It is smart-default and read-only. Rendered-manifest validation (#1283 slice B)
+ships beside it as the separately-gated, OFF-by-default `helm-render` runner —
+see the IaC-misconfig note in the pipeline section.
 
 Session degradation telemetry owns its dedupe and tally state in
 `clients/degradation-ledger.ts`: use `recordDegradationOnce` for a repeated
@@ -280,6 +314,8 @@ This is the payoff of the two disciplines above: a bounded checklist of defect *
 12. **A durable commit followed by an out-of-guard mirror refresh.** Full treatment in the "Shape 12" paragraph above (#1309); listed here so the catalog's numbering matches it.
 
 13. **A transient failure classified as durable INSIDE an already-governed latch.** Migrating a memo to the shared availability policy makes its *storage* correct and says nothing about its *classification*. `govulncheck-client.ts` wrote `this.available = false` after a failed `go install`, and that setter routes into `availabilityLatch.noteUnavailable("missing", "not-found")` — governed plumbing, wrong classification, and the resulting `availability_decision` row is a well-formed `missing` verdict indistinguishable from a genuine absence. *Screen:* when a call site hands the policy an outcome it did NOT derive from `classifyProbeFailure`, justify it in a comment at the call site AND record what actually failed — `classifiedBy: "caller"` plus `evidence` (`clients/dispatch/runners/utils/availability-policy.ts`), so the row can be audited instead of trusted. An install failure, a stat, or a shim on disk are all legitimate caller assertions; a spawn result is not — derive it. *e.g.* #1500 (the class), #1467/#1476/#1489 (the migrations that made storage correct). *Detect:* **deliberately ungated.** The available shortcut — flag any literal `"missing"`/`"not-found"` passed into a governed latch — fires on every correct post-ENOENT write, and a gate that cries wolf gets baselined rather than fixed. Review-enforced: grep `noteUnavailable(`/`available = false` and ask what spawn result justified each one.
+
+14. **A test that resets a DUPLICATE of the module's state.** Vitest resolves an import specifier literally, and this repo's runtime is the compiled output, so `x.ts` and `x.js` are two module instances: the `.ts` spelling gives the test a private copy of that module's own mutable state (generation counters, latches, memo maps) while everything the module imports stays shared. A `beforeEach` reset called through `.ts` therefore clears the copy, the code under test keeps reading the compiled original, and the assertion passes without ever observing the state it claims to guard — shape 7 with no visible fixture defect to notice. Note the trap in the ordinary case too: a test whose imports are ALL `.ts` is accidentally self-consistent and green, so "it passes" says nothing; one co-imported `.js` module reaching the same file makes it vacuous. *Screen:* tests import the artifact the runtime imports — `.js` — for every module the build compiles, including `vi.mock` and dynamic-`import()` specifiers. *e.g.* #1514 (the near-miss: the fixer's session-re-arm test only bound after switching its imports to `.js`), #1565 (the class; 17 test files were reaching the same module both ways). *Detect:* `tests/config/module-instance-coverage.test.ts` — a static scan (`tests/support/module-instance-scan.ts`) over every specifier in `tests/`, with a reasoned allowlist. Static on purpose: a twin-on-disk check goes silent in an unbuilt tree.
 
 ### AI-authorship smells
 
@@ -1095,7 +1131,7 @@ Bridge records are content-bound at record time through `hashDiagnosticContent`:
 Mounted at `globalThis[Symbol.for("pi-lens:read-bridge")]` after `RuntimeCoordinator` is initialised. Any extension running in the same Node.js process can call `bridge.recordRead({ filePath, requestedOffset, requestedLimit, consumer? })` to register a file read against the live read-guard. Check `bridge.version` (currently `1`) before calling — treat an unrecognised version as unsupported. The timestamp is stamped by the bridge itself (`Date.now()`), matching exactly how the internal read path works. The optional `consumer` string is surfaced as `source: "bridge:<consumer>"` in `read-guard.log` so the worklog shows which extension satisfied the guard. The bridge is an **advisory, trust-based protocol** — same-process extensions are already fully trusted; basic payload validation (non-empty string path, finite positive integer offsets/limits) exists to catch integration bugs early, not to enforce a security boundary. Entries that fail validation are silently dropped. The global slot is permanently locked after first registration: `Object.defineProperty` with `writable: false, configurable: false` plus `Object.freeze` on the bridge object means any attempt to overwrite or mutate throws `TypeError` in strict mode (first-wins is the contract). This lets custom Pi tools that perform file reads outside pi-lens’s normal tool tracking satisfy the read-before-edit guard without pi-lens coupling to any specific tool. The bridge respects `no-read-guard`, gitignored files, and external/vendor paths via the `isRecordable` predicate evaluated at call-time. Registration is a singleton (`_readBridgeRegistered` module-level guard) and happens inside the extension factory so `getLensFlag` is available; `_readBridgeGetFlag` is refreshed on every factory activation so flag changes take effect immediately.
 
 **`tool_result`** → `handleToolResult` (`clients/runtime-tool-result.ts`)
-Tracks modified file ranges per turn for turn_end targeting, bumps project/file sequence state for observed writes/edits, and appends project changes to `change-log.jsonl`. For write/edit events, runs the dispatch pipeline: format → autofix → LSP diagnostics sync → parallel async runner dispatch → dedup/merge → findings stored on `RuntimeCoordinator`. The **cascade** phase (neighbor diagnostics in OTHER files) is kicked off **unawaited** here (#450) — its graph rebuild + neighbor LSP pulls run concurrently after the edit returns rather than blocking it — and its promise is parked on `RuntimeCoordinator` via `appendCascadePromise` for `turn_end` to drain. Pipeline crash recovery fast-resets LSP with `resetLSPService({ fast: true })`. **IaC misconfig** (#131 Mode 2) is a per-edit dispatch runner here, not a session scan: `clients/dispatch/runners/trivy-config.ts` runs `trivy config` over Dockerfiles + Kubernetes manifests (YAML gated by an `apiVersion:`+`kind:` heuristic), `trivy.enabled`-gated, wired into the `docker`/`yaml` `PRIMARY_DISPATCH_GROUPS`; `suppressTrivyConfigDockerOverlap` (dispatcher) drops trivy-config findings hadolint already reports at the same Dockerfile line so it only adds the security checks hadolint lacks (k8s has no hadolint overlap). Terraform/Helm/Compose/CFN deferred.
+Tracks modified file ranges per turn for turn_end targeting, bumps project/file sequence state for observed writes/edits, and appends project changes to `change-log.jsonl`. For write/edit events, runs the dispatch pipeline: format → autofix → LSP diagnostics sync → parallel async runner dispatch → dedup/merge → findings stored on `RuntimeCoordinator`. The **cascade** phase (neighbor diagnostics in OTHER files) is kicked off **unawaited** here (#450) — its graph rebuild + neighbor LSP pulls run concurrently after the edit returns rather than blocking it — and its promise is parked on `RuntimeCoordinator` via `appendCascadePromise` for `turn_end` to drain. Pipeline crash recovery fast-resets LSP with `resetLSPService({ fast: true })`. **IaC misconfig** (#131 Mode 2) is a per-edit dispatch runner here, not a session scan: `clients/dispatch/runners/trivy-config.ts` runs `trivy config` over Dockerfiles + Kubernetes manifests (YAML gated by an `apiVersion:`+`kind:` heuristic), `trivy.enabled`-gated, wired into the `docker`/`yaml` `PRIMARY_DISPATCH_GROUPS`; `suppressTrivyConfigDockerOverlap` (dispatcher) drops trivy-config findings hadolint already reports at the same Dockerfile line so it only adds the security checks hadolint lacks (k8s has no hadolint overlap). Compose/CFN deferred. **Helm rendered-manifest validation** (#1283 Slice B) is a second, separately-gated runner: `clients/dispatch/runners/helm-render.ts` renders the nearest chart with `helm template --output-dir <scratch>` under `os.tmpdir()` (never the chart dir; `--dependency-update` deliberately never passed) and validates the output — a failed render is a blocking finding on the template, every rendered document must declare `apiVersion`+`kind`, and `trivy config` runs over the rendered tree when `trivy.enabled` is also set. It is OFF unless `helm.renderValidation.enabled` is true in `.pi-lens.json` (rendering executes chart-authored template code — a trust boundary, not a lint), and it never spawns when unconfigured. **Two gates, not one:** that switch is a TRACKED file, so a cloned hostile chart repo could ship its own consent — the render therefore ALSO requires `getProjectTrustState() !== "untrusted"` (the same gate as LSP spawns and tool installs), and the refusal is reported as a `render-untrusted` diagnostic rather than a silent skip. The consent lookup is keyed off the WORKSPACE ROOT whose chart runs, never `ctx.cwd`: keying on the cwd let an opt-in in one directory authorize a different project root's chart. Findings map to source templates via helm's `# Source:` annotation, falling back to the `--output-dir` layout and then `Chart.yaml`; rendered line numbers go in the MESSAGE because they do not correspond to template lines. A spawn that never started reports `failureKind: "unavailable"` with no diagnostics; a render that exited non-zero always yields at least one finding, so an errored run can never read as clean.
 
 **`turn_end`** → `handleTurnEnd` (`clients/runtime-turn.ts`)
 First **settles** the turn's deferred cascade computes with a bounded wait (`settleCascadeRuns`, cap via `PI_LENS_CASCADE_SETTLE_WAIT_MS`, default 5000ms; a late compute is carried over to the next turn_end rather than lost), then merges unresolved inline blockers and cascade findings, writes latest-turn actionable/code-quality warning reports with sequence metadata, runs Knip delta analysis when the startup scan is not in flight, runs Madge circular-dependency checks for files whose imports changed, and fires related/failed tests asynchronously for the next context injection. Reads the session-scan caches and surfaces them. **Secrets** (`gitleaks` + `trivy secret` + the ast-grep `*-hardcoded-secret-*` rules) are collapsed **by location** via `clients/secret-findings.ts` (`dedupeSecretFindings`) into a single 🔴 blocker with combined provenance (`[gitleaks + trivy + ast-grep]`) — the rule-keyed diagnostic dedup can't merge them since each source uses a different rule id; the duplicate ast-grep advisory copy is suppressed from the actionable-warnings report at the blocked locations (#131 Mode 3). Trivy **CRITICAL** CVEs are 🔴 blockers ("upgrade before shipping"); `govulncheck`/Trivy non-critical CVEs are advisories (FixedVersion as an upgrade hint — never auto-edits lockfiles). Trivy **license risk** (copyleft/restricted licenses, #131 Mode 4) is a 📜 advisory from the same `trivy fs --scanners vuln,secret,license` pass. Deduplicates findings against previous turn state and injects blockers (🔴) and advisories into the agent's context.

@@ -18,7 +18,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	classifyProbeFailure,
 	describeProbeEvidence,
-} from "../../clients/dispatch/runners/utils/availability-policy.ts";
+} from "../../clients/dispatch/runners/utils/availability-policy.js";
 
 const { safeSpawnAsync, logLatencySpy, ensureTool, getInstallAttempt } =
 	vi.hoisted(() => ({

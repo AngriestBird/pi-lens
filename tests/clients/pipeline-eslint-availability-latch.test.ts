@@ -13,7 +13,7 @@ import { setupTestEnvironment } from "./test-utils.js";
 import {
 	HOST_STALL_COOLDOWN_MS,
 	TRANSIENT_BASE_COOLDOWN_MS,
-} from "../../clients/dispatch/runners/utils/availability-policy.ts";
+} from "../../clients/dispatch/runners/utils/availability-policy.js";
 
 const { safeSpawnAsync, logLatencySpy } = vi.hoisted(() => ({
 	safeSpawnAsync: vi.fn(),

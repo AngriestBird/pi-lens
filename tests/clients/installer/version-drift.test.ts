@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.unmock("../../../clients/installer/index.ts");
+vi.unmock("../../../clients/installer/index.js");
 
 // This file deliberately exercises the REAL getGlobalPiLensDir() resolver
 // (mirrors tool-discovery.test.ts's setup) so TOOLS_DIR paths resolve
@@ -166,7 +166,7 @@ import {
 	getToolPath,
 	resetProbeCacheStateForTesting,
 	TOOLS,
-} from "../../../clients/installer/index.ts";
+} from "../../../clients/installer/index.js";
 
 const TOOLS_DIR = path.join(TEST_HOME, ".pi-lens", "tools");
 const JSCPD_BIN = path.join(

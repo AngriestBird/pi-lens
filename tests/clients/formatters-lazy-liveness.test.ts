@@ -24,7 +24,7 @@ describe("formatter session warm/first-use liveness (#1394)", () => {
 			knipClient: { isAvailable: () => false, analyze: async () => ({ issues: [] }) }, jscpdClient: { isAvailable: () => false }, depChecker: { isAvailable: () => false }, testRunnerClient: { detectRunner: () => null },
 			goClient: { isGoAvailableAsync: async () => false }, rustClient: { isAvailableAsync: async () => false }, agentBehaviorClient: { recordToolCall: () => [], formatWarnings: () => "" }, complexityClient: { isSupportedFile: () => false, analyzeFile: () => null },
 		}) }));
-		const { default: registerExtension } = await import("../../index.ts");
+		const { default: registerExtension } = await import("../../index.js");
 		const pi = createPiMock({ "immediate-format": true, "no-lsp": true });
 		registerExtension(pi.asExtensionAPI());
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-format-live-"));

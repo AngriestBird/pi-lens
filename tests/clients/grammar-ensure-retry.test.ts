@@ -23,6 +23,16 @@ import {
 } from "../../clients/degradation-ledger.js";
 import { removeTempDirSync, setupTestEnvironment } from "./test-utils.js";
 
+/**
+ * A valid wasm module header (magic + version). Any body standing in for a
+ * successful grammar download has to start with the wasm preamble now that
+ * the downloader validates it (#1548) — three arbitrary bytes are rejected as
+ * a poisoned download, which is the whole point of that fix.
+ */
+const WASM_HEADER = new Uint8Array([
+	0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+]);
+
 const notifyUserDegradation = vi.hoisted(() => vi.fn());
 vi.mock("../../clients/user-notify.js", () => ({ notifyUserDegradation }));
 
@@ -92,9 +102,7 @@ describe("grammar download retry after failure (#1536)", () => {
 
 		// Advance past the cooldown and let the network recover.
 		vi.advanceTimersByTime(60_000);
-		fetchSpy.mockResolvedValueOnce(
-			new Response(new Uint8Array([1, 2, 3]), { status: 200 }),
-		);
+		fetchSpy.mockResolvedValueOnce(new Response(WASM_HEADER, { status: 200 }));
 
 		// THIS is the assertion that is red on pre-fix code: pre-fix, the
 		// settled `false` promise was cached forever, so this call — and every
@@ -137,9 +145,7 @@ describe("grammar download retry after failure (#1536)", () => {
 
 		const fetchSpy = vi
 			.spyOn(globalThis, "fetch")
-			.mockResolvedValueOnce(
-				new Response(new Uint8Array([1, 2, 3]), { status: 200 }),
-			);
+			.mockResolvedValueOnce(new Response(WASM_HEADER, { status: 200 }));
 
 		expect(await client.ensureGrammar(grammarFile)).toBe(true);
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -167,7 +173,7 @@ describe("grammar download retry after failure (#1536)", () => {
 			if (url.includes(langA)) {
 				return new Response("no", { status: 500 });
 			}
-			return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+			return new Response(WASM_HEADER, { status: 200 });
 		});
 
 		// langA fails and is now cooling down.
@@ -214,9 +220,7 @@ describe("grammar download retry after failure (#1536)", () => {
 		// the cooldown expires, the next demand retries instead of staying
 		// silently stuck.
 		writeDirSpy.mockReturnValue(env.tmpDir);
-		fetchSpy.mockResolvedValueOnce(
-			new Response(new Uint8Array([1, 2, 3]), { status: 200 }),
-		);
+		fetchSpy.mockResolvedValueOnce(new Response(WASM_HEADER, { status: 200 }));
 		vi.advanceTimersByTime(60_000);
 		expect(await client.ensureGrammar(grammarFile)).toBe(true);
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
@@ -264,9 +268,7 @@ describe("grammar download retry after failure (#1536)", () => {
 		expect(notifyUserDegradation).toHaveBeenCalledTimes(1);
 
 		vi.advanceTimersByTime(60_000);
-		fetchSpy.mockResolvedValueOnce(
-			new Response(new Uint8Array([1, 2, 3]), { status: 200 }),
-		);
+		fetchSpy.mockResolvedValueOnce(new Response(WASM_HEADER, { status: 200 }));
 		expect(await client.ensureGrammar(grammarFile)).toBe(true);
 
 		// Grammar goes missing again (e.g. the on-disk file was removed) and the

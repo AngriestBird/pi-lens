@@ -42,6 +42,19 @@ instructions say so.
    with an honest review-round section. Never argue with a probe — reproduce
    it first.
 
+## Fix rounds
+
+When the orchestrator resumes you with `FIX ROUND` plus review findings, apply
+them on the same branch without being re-briefed on process: reproduce each
+finding before fixing it (never argue with a probe), red-first tests for every
+behavioral fix, rebuild, rerun targeted suites plus anything the findings
+touched, push the same branch, verify Unit tests and Lint genuinely execute on
+the new head (merge origin/master first if the PR reads DIRTY — additive
+resolutions, and screen the merged result SEMANTICALLY: a textually clean merge
+can still recombine into a bug when master moved the seam you built on), and
+update the PR body with an honest review-round section. Report what changed per
+finding with its red-run evidence.
+
 ## Report format
 
 Outcome first: branch, PR URL, then root cause in two sentences, red-run

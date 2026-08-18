@@ -16,10 +16,10 @@ import {
 	wordIndexKey,
 	_resetWordIndexBuildGuardForTests,
 	triggerBackgroundWordIndexBuild,
-} from "../../clients/word-index.ts";
-import { KIND_EXTENSIONS } from "../../clients/file-kinds.ts";
-import { loadProjectSnapshot } from "../../clients/project-snapshot.ts";
-import { createTempFile, setupTestEnvironment } from "./test-utils.ts";
+} from "../../clients/word-index.js";
+import { KIND_EXTENSIONS } from "../../clients/file-kinds.js";
+import { loadProjectSnapshot } from "../../clients/project-snapshot.js";
+import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 describe("splitIdentifier", () => {
 	it("splits camelCase and keeps the whole identifier", () => {
@@ -763,7 +763,7 @@ describe("triggerBackgroundWordIndexBuild (#348 cold-query stampede guard)", () 
 			createTempFile(env.tmpDir, "src/a.ts", "export function helperA() {}");
 			// Seed a snapshot (as a real session would) with unrelated data.
 			const { saveProjectSnapshot, PROJECT_SNAPSHOT_VERSION } = await import(
-				"../../clients/project-snapshot.ts"
+				"../../clients/project-snapshot.js"
 			);
 			saveProjectSnapshot(env.tmpDir, {
 				version: PROJECT_SNAPSHOT_VERSION,

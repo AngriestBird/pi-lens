@@ -2073,6 +2073,149 @@ describe("computeCascadeForFile", () => {
 			}
 		});
 
+		it("#1549: an inconclusive neighbour touch names WHICH server and WHICH deadline in cascade.log", async () => {
+			// The forensic sweep behind #1549 could only infer the cause of an
+			// inconclusive touch from duration histograms, because `neighbor_touch`
+			// recorded the bare flag. `touchFile` now attributes the verdict, and the
+			// cascade must carry that attribution across — this is the issue's own
+			// observability acceptance criterion, so it is pinned end to end through
+			// `computeCascadeForFile` rather than at the touch boundary.
+			const env = setupTestEnvironment("cascade-inconclusive-attribution-");
+			try {
+				const primary = path.join(env.tmpDir, "model.py");
+				const neighbor = path.join(env.tmpDir, "api.py");
+				fs.writeFileSync(primary, "class User: pass\n");
+				fs.writeFileSync(neighbor, "from model import User\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile: vi.fn().mockResolvedValue({
+						diags: [],
+						inconclusive: true,
+						inconclusiveServerIds: ["pyright"],
+						inconclusiveReason: "diagnostics-wait",
+					}),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+
+				const neighborTouchEntry = mocks.logCascade.mock.calls
+					.map(([entry]) => entry)
+					.find((entry) => entry.phase === "neighbor_touch");
+				expect(neighborTouchEntry?.metadata).toMatchObject({
+					inconclusive: true,
+					inconclusiveServerIds: ["pyright"],
+					inconclusiveReason: "diagnostics-wait",
+				});
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("#1549: a CONCLUSIVE touch blames nobody — no attribution fields on the row", async () => {
+			// The other half of the carry: the fields are conditional on the verdict,
+			// so a healthy sweep cannot accumulate empty attribution keys, and a
+			// `partial` touch is never mislabelled as having an inconclusive cause.
+			const env = setupTestEnvironment("cascade-conclusive-attribution-");
+			try {
+				const primary = path.join(env.tmpDir, "model.py");
+				const neighbor = path.join(env.tmpDir, "api.py");
+				fs.writeFileSync(primary, "class User: pass\n");
+				fs.writeFileSync(neighbor, "from model import User\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile: vi.fn().mockResolvedValue({
+						diags: [],
+						confirmation: "partial",
+						unconfirmedServerIds: ["opengrep"],
+					}),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+
+				const neighborTouchEntry = mocks.logCascade.mock.calls
+					.map(([entry]) => entry)
+					.find((entry) => entry.phase === "neighbor_touch");
+				expect(neighborTouchEntry?.metadata).toMatchObject({
+					inconclusive: false,
+				});
+				expect(neighborTouchEntry?.metadata).not.toHaveProperty(
+					"inconclusiveServerIds",
+				);
+				expect(neighborTouchEntry?.metadata).not.toHaveProperty(
+					"inconclusiveReason",
+				);
+			} finally {
+				env.cleanup();
+			}
+		});
+
+		it("#1549: an answered primary beside an unheard scanner delivers its findings to the agent, marked as uncovered", async () => {
+			// The consumer-side end of the fix. Pre-#1549 this exact touch resolved
+			// `inconclusive` (one slow auxiliary set the touch-wide deadline), so the
+			// neighbour reached the agent as a bare "diagnostics inconclusive" line
+			// with the primary's real error discarded. Now the error is rendered AND
+			// the scanner gap is named — neither overclaiming nor underclaiming.
+			const env = setupTestEnvironment("cascade-partial-findings-flow-");
+			try {
+				const primary = path.join(env.tmpDir, "model.py");
+				const neighbor = path.join(env.tmpDir, "api.py");
+				fs.writeFileSync(primary, "class User: pass\n");
+				fs.writeFileSync(neighbor, "from model import User\n");
+				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+				mocks.getLSPService.mockReturnValue({
+					getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+					touchFile: vi.fn().mockResolvedValue({
+						diags: [
+							{
+								severity: 1,
+								message: "undefined name User",
+								range: {
+									start: { line: 0, character: 0 },
+									end: { line: 0, character: 4 },
+								},
+							},
+						],
+						confirmation: "partial",
+						unconfirmedServerIds: ["opengrep"],
+					}),
+					getDiagnostics: vi.fn(),
+				});
+
+				const { computeCascadeForFile } = await import(
+					"../../clients/dispatch/integration.js"
+				);
+				const run = await computeCascadeForFile(primary, env.tmpDir, {
+					turnSeq: 1,
+					writeSeq: 5,
+				});
+
+				expect(run.result?.neighbors[0]).toMatchObject({
+					unconfirmedServerIds: ["opengrep"],
+				});
+				expect(run.result?.neighbors[0]?.inconclusive).toBeUndefined();
+				expect(run.result?.formatted).toContain("undefined name User");
+				expect(run.result?.formatted).not.toContain("inconclusive");
+			} finally {
+				env.cleanup();
+			}
+		});
+
 		it("a confirmed LSP-clean cascade clears the neighbor's LSP error but PRESERVES a live biome finding (merge, not replace)", async () => {
 			const env = setupTestEnvironment("cascade-reconcile-merge-");
 			try {

@@ -55,6 +55,7 @@ import {
 	composeBoundToCurrentDisk,
 	createDiskBindingCache,
 	hashDiagnosticContent,
+	resolveTouchVerdict,
 	touchCoverageGap,
 	type BoundToCurrentDisk,
 	type DiagnosticBinding,
@@ -70,6 +71,7 @@ import {
 	enforceLspRootCeiling,
 	hasProjectBoundaryMarker,
 	isDirectLspCommandTemporarilyUnavailable,
+	resetClassicTsRepairGuard,
 } from "./server.js";
 import {
 	classifyCascadeWaitTier,
@@ -2808,14 +2810,47 @@ export class LSPService {
 				});
 			}
 		}
-		// File-level flag: at least one server's write timed out (kept for the
-		// conservative touch-wide `inconclusive` merge semantics — see below).
+		// File-level flag: at least one server's write timed out. Kept as the
+		// observability summary (`lsp_touch_file.notifyWriteTimedOut`); the
+		// `inconclusive` verdict reads the PRIMARY-scoped flag below (#1549).
 		const notifyWriteTimedOut = notifyWriteTimedOutServerIds.length > 0;
+		// #1549: the honesty verdict is decided from the PRIMARY population only.
+		// An auxiliary that missed a deadline is a named coverage gap, never an
+		// inconclusive touch — see `resolveTouchVerdict` (diagnostic-binding.ts).
+		const primaryEntries = spawned.filter(
+			(entry) => entry.info.role !== "auxiliary",
+		);
+		const primaryServerIds = new Set(primaryEntries.map((e) => e.info.id));
+		const primaryNotifyWriteTimedOutServerIds =
+			notifyWriteTimedOutServerIds.filter((id) => primaryServerIds.has(id));
+		const primaryNotifyWriteTimedOut =
+			primaryNotifyWriteTimedOutServerIds.length > 0;
 		// #1459: read by the diagnostics wait and the merge below — a deferred
 		// server is neither waited on nor read from.
 		const deferredResyncServerIds = new Set(notifyDeferredServerIds);
 
 		let diagnosticsTimedOut = false;
+		// #1549: every server (any role) that produced no publication evidence when
+		// the diagnostics wait lapsed. Read three ways: the primary members decide
+		// `diagnosticsTimedOut` and are the `inconclusiveServerIds` attribution, the
+		// auxiliary members join the coverage gap, and no member may be marked
+		// `demonstratedReady`. Empty when the wait did not lapse.
+		let diagnosticsUnansweredServerIds: string[] = [];
+		// #1549: the primary subset of the list above, captured when the wait lapsed
+		// so the attribution survives the silent-clean/sync gates clearing the flag.
+		let diagnosticsUnansweredPrimaryServerIds: string[] = [];
+		// #1549: a gate that certifies silence AS the answer (the tsserver sync
+		// confirm, either silent-clean gate) retracts the primary attribution with it —
+		// those servers answered, in the only way their capabilities allow, so they
+		// stay eligible for `demonstratedReady` exactly as before this change.
+		// Auxiliary members are left in place: nothing certified them, and they are
+		// what the coverage gap reports.
+		const retractPrimaryTimeoutAttribution = (): void => {
+			diagnosticsUnansweredPrimaryServerIds = [];
+			diagnosticsUnansweredServerIds = diagnosticsUnansweredServerIds.filter(
+				(id) => !primaryServerIds.has(id),
+			);
+		};
 		// R8 (#714): server ids of aux-role servers whose push wait was cut off by
 		// the aux grace window. Undefined when no aux was cut off (primary-only
 		// paths never set this). Logged in lsp_touch_file metadata.
@@ -3271,7 +3306,12 @@ export class LSPService {
 								phase: "lsp_aux_wait_outcome",
 								filePath: normalizedPath,
 								durationMs: Date.now() - auxWaitStartedAt,
-								metadata: { clientScope, outcomes },
+								// #1533: `waitShape` names the producer, because the aggregate
+								// path emits the same row with the same outcome vocabulary
+								// minus `cut_off`. A field query that sees only `silent` rows
+								// must be able to tell "our ceiling was in play" from "the
+								// auxiliary's own full budget lapsed".
+								metadata: { clientScope, waitShape: "aux_grace", outcomes },
 							});
 						});
 					})()
@@ -3353,6 +3393,111 @@ export class LSPService {
 				await pushWait;
 			}
 			const waitedMs = Date.now() - waitStartedAt;
+			// #1533: the same auxiliary coverage evidence for a collecting touch that
+			// did NOT enter the aux-grace wait — in practice `clientScope: "all"`, the
+			// batch/directory scan surface. Auxiliaries ARE spawned on that scope
+			// (`getClientsForFile` returns every matching server, #573) and each one is
+			// waited on inside `Promise.all(perServerWaits)` on its own per-server
+			// budget, but `hasTouchAuxiliaries` is `with-auxiliary`-only, so no evidence
+			// was ever derived and a silent scanner aggregated as an unqualified
+			// `"confirmed"` — the #1493 false clean surviving on a different scope.
+			//
+			// NO SECOND WAIT. Every aux promise here has already settled (the
+			// `Promise.all` above awaited it), so this reads post-wait state only. That
+			// is deliberate: #1459's resync gate exists to ABSORB the aux fan-out of an
+			// "all"-scope sweep into deferrals, and entering a per-neighbour aux grace
+			// here would pay back the latency that gate just recovered. The evidence is
+			// free; only the verdict changes.
+			//
+			// WHICH verdicts change, stated without overreach. Where the auxiliary's
+			// budget is the MAX over waited servers (`perServerTimeout` is
+			// `min(callerCap, strategyWait)` per server, `timeoutMs` is the max across
+			// them), a silent auxiliary already tripped `diagnosticsTimedOut` and the
+			// touch was already `inconclusive` — which is decided BEFORE the coverage
+			// gap, so those results are unchanged. That covers opengrep on every current
+			// per-edit path, whose 3500 exceeds either cap. But a FASTER auxiliary beside
+			// a slower primary (typos 1500 or ast-grep 1800 next to rust-analyzer 3000
+			// under a 2000 cap) settles inside `timeoutMs`, so nothing timed out and this
+			// block genuinely narrows a result that used to read `confirmed`. That is the
+			// fix working: the scanner said nothing about these bytes. It is fail-safe —
+			// the primary's findings still ride along and only the coverage claim is
+			// withdrawn — and the cost is a skipped cache seed for that file. Both cases
+			// are pinned in `tests/clients/lsp/service-aux-grace.test.ts`.
+			//
+			// `cut_off` cannot arise on this path — there is no grace timer to end a
+			// wait early — so the shapes are `answered` / `silent` / `deferred`, decided
+			// by exactly the rules the grace path uses (#1458 S1: a settled promise is
+			// not proof of a publication; only a `diagnosticsVersion` advance past the
+			// pre-notify baseline is). `waitShape` distinguishes the two producers in
+			// field data, since a `silent` row here means the auxiliary's own full
+			// per-server budget lapsed rather than our ceiling cutting it short.
+			//
+			// A server the caller EXCLUDED (`WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS`, #584)
+			// never reaches `spawned`, so it cannot be reported here — an excluded-by-
+			// design scanner is a routing decision, not a coverage gap, exactly as
+			// `brokenSkippedAuxiliaryServerIds` already treats it.
+			//
+			// Written as `!hasTouchAuxiliaries` rather than `clientScope === "all"` so a
+			// future scope that spawns auxiliaries without entering the grace wait fails
+			// closed here by default instead of needing to be remembered. The #707
+			// tsserver sync race can reach here with `pushWait` still pending, but it is
+			// gated on `clientScope === "primary" && spawned.length === 1`, which spawns
+			// no auxiliaries at all — so the per-role filter below is empty and no
+			// evidence is read before its wait ends.
+			//
+			// `elapsedMs` and `elapsedSinceNotifyMs` are equal by construction here:
+			// there is no separate post-primary aux phase to measure, so both describe
+			// the one aggregate wait. Both fields are kept so a query can read either
+			// producer's rows without special-casing the schema.
+			//
+			// The evidence is read PER PATH, through the same `readPathVersion` accessor
+			// the grace path uses (#1531, landed on master while this was in review).
+			// This is NOT interchangeable with `client.diagnosticsVersion`: that global
+			// counter also advances for files this touch never mentions, so two
+			// CONCURRENT touches sharing one auxiliary client cross-satisfy — a
+			// publication for a.ts hands b.ts an unearned `answered`. That matters
+			// especially here, because the highest-frequency `"all"` caller (the cascade
+			// neighbour fan-out in `clients/dispatch/integration.ts`) is a
+			// `Promise.allSettled` and its touches are always concurrent. Reading the
+			// per-path stamp keeps this comparison on the SAME axis `baseline` was
+			// captured on, and `undefined` from a double that predates the accessor fails
+			// CLOSED rather than silently reverting to the global counter.
+			if (!hasTouchAuxiliaries && options.collectDiagnostics === true) {
+				const auxEntries = spawned.filter(
+					(entry) => entry.info.role === "auxiliary",
+				);
+				if (auxEntries.length > 0) {
+					const outcomes = auxEntries.map((entry) => {
+						const baseline = diagnosticBaselines.get(entry.client);
+						const currentPathVersion = readPathVersion(entry.client);
+						const publishedEvidence =
+							Number.isFinite(baseline) &&
+							currentPathVersion !== undefined &&
+							currentPathVersion > (baseline as number);
+						return {
+							serverId: entry.info.id,
+							outcome: deferredResyncServerIds.has(entry.info.id)
+								? ("deferred" as const)
+								: publishedEvidence
+									? ("answered" as const)
+									: ("silent" as const),
+							publishedThisContent: auxPublishedThisContent.has(entry.info.id),
+							budgetMs: timeoutFor(entry.client.serverId),
+							elapsedMs: waitedMs,
+							elapsedSinceNotifyMs: waitedMs,
+						};
+					});
+					const uncovered = auxiliaryCoverageGap(outcomes);
+					if (uncovered.length > 0) auxUnconfirmedServerIds = uncovered;
+					logLatency({
+						type: "phase",
+						phase: "lsp_aux_wait_outcome",
+						filePath: normalizedPath,
+						durationMs: waitedMs,
+						metadata: { clientScope, waitShape: "aggregate", outcomes },
+					});
+				}
+			}
 			if (tsserverSyncConfirmed !== undefined) {
 				// #707: the racing sync confirm won — a definitive answer well under
 				// the push-wait budget. Not a timeout, not inconclusive.
@@ -3376,8 +3521,68 @@ export class LSPService {
 				// Within ~20 ms of the configured budget we treat it as a timeout;
 				// the LSP didn't beat the cap. Diagnostics that arrive late still
 				// land in the client's cache and surface on the next edit.
-				diagnosticsTimedOut = true;
-				for (const entry of spawned) {
+				//
+				// #1549: WHOSE budget lapsed decides the verdict. `timeoutMs` is the MAX
+				// over the servers waited on, so a slow auxiliary (opengrep declares
+				// 3500ms) sets the aggregate deadline for the whole touch — and a
+				// touch-wide `diagnosticsTimedOut = true` then discarded a primary answer
+				// that landed in 100ms. Attribute the lapse per server instead: the
+				// touch is inconclusive only when a PRIMARY produced no evidence; an
+				// auxiliary that produced none becomes a named coverage gap below.
+				//
+				// Evidence, not promise settlement (#1458 S1): `waitForDiagnostics`
+				// resolves on its own timeout, so a settled wait proves nothing. The
+				// per-path publication stamp advancing past this touch's pre-notify
+				// baseline (#1531) is the primary signal; a present per-file cache entry
+				// is the second, because the notify this touch just sent cleared that
+				// entry (`clearDiagnosticsForPath`), so a present one can only be a fresh
+				// answer — the same signal #814's aggregate gate already trusts.
+				//
+				// Every unknown fails CLOSED: a client that exposes neither accessor
+				// reads as unanswered, which for a primary is exactly the pre-#1549
+				// verdict. This block can therefore only ever NARROW an inconclusive
+				// touch, never create one.
+				const answeredForThisTouch = (
+					entry: (typeof spawned)[number],
+				): boolean => {
+					const baseline = diagnosticBaselines.get(entry.client);
+					const currentPathVersion = readPathVersion(entry.client);
+					if (
+						Number.isFinite(baseline) &&
+						currentPathVersion !== undefined &&
+						currentPathVersion > (baseline as number)
+					) {
+						return true;
+					}
+					try {
+						return entry.client.getAllDiagnostics?.().has(normalizedPath) === true;
+					} catch {
+						// Fail closed: an unreadable cache is not evidence of an answer.
+						return false;
+					}
+				};
+				// A deferred server was never sent this content and is not waited on, so
+				// it cannot have "timed out" — it is already reported as a coverage gap.
+				const waited = spawned.filter(
+					(entry) => !deferredResyncServerIds.has(entry.info.id),
+				);
+				const unanswered = waited.filter(
+					(entry) => !answeredForThisTouch(entry),
+				);
+				diagnosticsUnansweredServerIds = unanswered.map((e) => e.info.id);
+				diagnosticsUnansweredPrimaryServerIds = unanswered
+					.filter((entry) => entry.info.role !== "auxiliary")
+					.map((e) => e.info.id);
+				// Fail-safe: a touch with no waited-on primary has no primary answer to
+				// preserve, so it keeps the pre-#1549 touch-wide verdict rather than
+				// absolving itself on an auxiliary's evidence.
+				const hasWaitedPrimary = waited.some(
+					(entry) => entry.info.role !== "auxiliary",
+				);
+				diagnosticsTimedOut =
+					!hasWaitedPrimary ||
+					diagnosticsUnansweredPrimaryServerIds.length > 0;
+				for (const entry of unanswered) {
 					incrementDegradationCount({
 						kind: "lsp-diagnostics-timeout",
 						// `info.id` is the authoritative server identity carried by
@@ -3405,6 +3610,13 @@ export class LSPService {
 						clientScope,
 						diagnosticsMode,
 						timeoutMs,
+						// #1549: which of those servers actually produced no evidence, and
+						// whether the lapse is attributable to a primary (the touch is
+						// inconclusive) or only to auxiliaries (a named coverage gap, with
+						// the primary's findings intact). Without these two fields a
+						// forensic sweep cannot tell the two apart at all.
+						unansweredServerIds: diagnosticsUnansweredServerIds,
+						attributedToPrimary: diagnosticsTimedOut,
 					},
 				});
 			}
@@ -3442,9 +3654,22 @@ export class LSPService {
 			// must have actually landed" conservatism #799 established — a
 			// server's silence is only evidence of "clean" when we know it saw
 			// the new content.
-			if (diagnosticsTimedOut && !notifyWriteTimedOut && clientScope === "all") {
+			//
+			// #1549: both the gate and its "still outstanding" set are PRIMARY-scoped.
+			// An auxiliary is never asked to prove itself tier3-silent here, because an
+			// auxiliary that never reported is already named as a coverage gap — and
+			// requiring it to was the second half of the touch-wide conflation: a clean
+			// markdown file whose marksman silence IS the answer stayed inconclusive
+			// purely because an opengrep scan beside it had not finished. The auxiliary's
+			// absence still costs the touch its full confirmation (`partial`); what it no
+			// longer does is erase the primary's answer.
+			if (
+				diagnosticsTimedOut &&
+				!primaryNotifyWriteTimedOut &&
+				clientScope === "all"
+			) {
 				try {
-					const outstanding = spawned.filter(
+					const outstanding = primaryEntries.filter(
 						(entry) =>
 							!notifyWriteTimedOutServerIds.includes(entry.info.id) &&
 							!entry.client.getAllDiagnostics().has(normalizedPath),
@@ -3478,6 +3703,7 @@ export class LSPService {
 							);
 							if (liveness.every(Boolean)) {
 								diagnosticsTimedOut = false;
+								retractPrimaryTimeoutAttribution(); // #1549
 								logLatency({
 									type: "phase",
 									phase: "lsp_silent_clean_confirm",
@@ -3501,6 +3727,46 @@ export class LSPService {
 			}
 		}
 
+		// #1549: does this auxiliary's CURRENT publication describe exactly the bytes
+		// this touch carries? Read at merge time, and unioned with the pre-notify
+		// snapshot rather than replacing it — the two answer different questions:
+		//
+		//   - `auxPublishedThisContent` was captured BEFORE the notify (#1493), because
+		//     a landed write clears the cache and would erase the evidence that the
+		//     scanner had already reported on these bytes.
+		//   - the live read below catches the opposite race, and it is #1459's own
+		//     documented signature: a write charged as timed out that LANDS LATE, after
+		//     which the scanner publishes for this touch's content. Judging that
+		//     auxiliary on the pre-notify snapshot alone drops its CURRENT findings and
+		//     names it uncovered — an underclaim about a scanner that answered.
+		//
+		// Either match means covered; both are content-bound, so neither can pass off
+		// another revision's findings as this touch's answer.
+		const auxCoversThisContent = (entry: (typeof spawned)[number]): boolean =>
+			auxPublishedThisContent.has(entry.info.id) ||
+			entry.client.getDiagnosticBinding?.(filePath)?.contentHash ===
+				touchContentHash;
+		// An AUXILIARY whose notify write never landed still holds the previous
+		// content's findings — nothing cleared its cache — and before this change that
+		// touch was blanket `inconclusive`, so no consumer read the merged array. Now
+		// the primary's answer flows, which means the auxiliary's stale findings would
+		// flow with it and be reported (with the previous revision's line numbers) as
+		// this touch's answer. Drop them; the write failure is reported as a coverage
+		// gap instead.
+		// Auxiliaries only. A PRIMARY keeps #570's deliberate
+		// timeout-preserves-last-known-diagnostics semantics, and its write failure
+		// makes the touch inconclusive anyway, so no consumer reads the array as
+		// current.
+		const staleWriteAuxiliaryServerIds = new Set(
+			spawned
+				.filter(
+					(entry) =>
+						entry.info.role === "auxiliary" &&
+						notifyWriteTimedOutServerIds.includes(entry.info.id) &&
+						!auxCoversThisContent(entry),
+				)
+				.map((entry) => entry.info.id),
+		);
 		// #707: when the racing sync confirm won the wait, its answer IS the
 		// collected result — the file's real syntactic + semantic state straight
 		// from tsserver (clean = [], dirty = real findings that a silentOnClean
@@ -3516,7 +3782,8 @@ export class LSPService {
 						// its line numbers) as this touch's answer, the one hazard the
 						// gate itself creates. Drop them; the gap is reported instead.
 						...spawned.flatMap((entry) =>
-							deferredResyncServerIds.has(entry.info.id)
+							deferredResyncServerIds.has(entry.info.id) ||
+							staleWriteAuxiliaryServerIds.has(entry.info.id)
 								? []
 								: entry.client.getDiagnostics(filePath),
 						),
@@ -3563,6 +3830,7 @@ export class LSPService {
 					// Sync answered — confirmed result (clean or with diagnostics).
 					// Clear the timed-out flag so the touch is no longer inconclusive.
 					diagnosticsTimedOut = false;
+					retractPrimaryTimeoutAttribution(); // #1549
 					syncConfirmed = true;
 					collected = syncResult.length > 0
 						? mergeLspDiagnostics(syncResult)
@@ -3622,7 +3890,10 @@ export class LSPService {
 		// lower-risk follow-up, not bundled into this fix.
 		if (
 			diagnosticsTimedOut &&
-			!notifyWriteTimedOut &&
+			// #1549: primary-scoped, like the aggregate gate. `spawned.length === 1`
+			// below means the one server IS the primary, so this is the same condition
+			// written in the vocabulary the rest of the merge now uses.
+			!primaryNotifyWriteTimedOut &&
 			!tsserverSyncEligible &&
 			clientScope === "primary" &&
 			spawned.length === 1 &&
@@ -3647,6 +3918,7 @@ export class LSPService {
 					).catch(() => false);
 					if (alive) {
 						diagnosticsTimedOut = false;
+						retractPrimaryTimeoutAttribution(); // #1549
 						if (collected !== undefined) collected = mergeLspDiagnostics([]);
 						logLatency({
 							type: "phase",
@@ -3668,16 +3940,30 @@ export class LSPService {
 			}
 		}
 
-		// A touch is inconclusive when EITHER the notify write or the
-		// diagnostics wait hit their deadline for ANY of the spawned servers
-		// (these flags are touch-wide, covering the whole `Promise.all` over
-		// `spawned` — see the field doc on the return type). We deliberately
-		// err toward caution here: `collected` merges diagnostics across every
-		// spawned server, so even a partial timeout (e.g. a slow auxiliary
-		// while the primary answered) means the merged result may be missing
-		// findings that just hadn't arrived yet — it must not be trusted as a
-		// confirmed answer.
-		const inconclusive = notifyWriteTimedOut || diagnosticsTimedOut;
+		// #1549: a touch is inconclusive when a PRIMARY's notify write or the
+		// diagnostics wait hit their deadline. Both inputs are primary-scoped now.
+		//
+		// The rule this replaced — `notifyWriteTimedOut || diagnosticsTimedOut`, both
+		// flags touch-wide over every spawned server — discarded every good answer in
+		// the touch whenever one auxiliary was slow. `timeoutMs` is the MAX over the
+		// servers waited on, so opengrep's 3500ms budget set the deadline for the whole
+		// touch and a typescript answer that landed in 100ms read as "nothing is known
+		// about this file". Measured over 6,079 cascade neighbour sweeps: 97.6%
+		// inconclusive, against 15% for ordinary edit-time touches in the same window.
+		//
+		// The caution the old comment argued for is preserved, in the honest place: the
+		// merged result IS missing whatever the unreporting auxiliary would have said,
+		// so the touch withdraws its claim of full coverage (`confirmation: "partial"`
+		// plus `unconfirmedServerIds`, below) and every consumer that treats
+		// confirmation as proof of coverage still fails closed. What it no longer does
+		// is throw away the primary's answer, which is the #533 honesty doctrine
+		// cutting both ways.
+		const verdict = resolveTouchVerdict({
+			primaryNotifyWriteTimedOutServerIds,
+			diagnosticsTimedOut,
+			diagnosticsUnansweredServerIds: diagnosticsUnansweredPrimaryServerIds,
+		});
+		const inconclusive = verdict.inconclusive;
 
 		// #1470/#1493: an auxiliary whose push wait was CUT OFF by the aux grace
 		// timer (R8/#714) contributed exactly as much evidence about this file as one
@@ -3699,10 +3985,10 @@ export class LSPService {
 		// resync the fan-out gate deferred never received this content.
 		//
 		// The deferred ids are unioned in rather than left to the aux-wait policy on
-		// purpose: aux outcomes are only computed on the `with-auxiliary` path, and
-		// the sweep that causes deferrals runs `clientScope: "all"`, which emits no
-		// outcome rows at all. On the `with-auxiliary` path the same server arrives
-		// through BOTH routes as outcome `"deferred"` — where a stored publication
+		// purpose: an aux outcome row requires an auxiliary to have been SPAWNED, and a
+		// breaker-skipped scanner never was. #1533: an `"all"`-scope sweep emits outcome
+		// rows now too, so a spawned-but-deferred server arrives through BOTH routes as
+		// outcome `"deferred"` — where a stored publication
 		// for these exact bytes can still exempt it — so the Set dedups rather than
 		// double-reports, and #1493's content-hash exemption is not bypassed here:
 		// a deferred aux is only unioned in because the gate itself proves it was
@@ -3716,9 +4002,30 @@ export class LSPService {
 						spawned,
 					)
 				: [];
+		// #1549: the fourth door, and the one this issue opened. An auxiliary that
+		// missed a deadline no longer makes the touch inconclusive, so it MUST arrive
+		// here instead — otherwise the fix would launder a scanner blackout into a
+		// clean bill of health, which is the #1459/#1493 false-clean pointing the other
+		// way. Two shapes reach this and no aux outcome row: an auxiliary whose notify
+		// write timed out or rejected, and one that produced no publication evidence
+		// when the wait lapsed (including on a NON-collecting touch, which derives no
+		// outcome rows at all). The content-bound exemption is honored through the same
+		// `auxCoversThisContent` predicate the merge uses — one rule, so a scanner
+		// cannot be named uncovered while its findings ride along in `.diags`, or the
+		// reverse. The Set dedups against the ids `auxiliaryCoverageGap` reported.
+		const auxNoAnswerServerIds = spawned
+			.filter(
+				(entry) =>
+					entry.info.role === "auxiliary" &&
+					(diagnosticsUnansweredServerIds.includes(entry.info.id) ||
+						notifyWriteTimedOutServerIds.includes(entry.info.id)) &&
+					!auxCoversThisContent(entry),
+			)
+			.map((entry) => entry.info.id);
 		const unconfirmedServerIds = [
 			...new Set([
 				...(auxUnconfirmedServerIds ?? []),
+				...auxNoAnswerServerIds,
 				...notifyDeferredServerIds.filter(
 					(serverId) => !auxPublishedThisContent.has(serverId),
 				),
@@ -3728,7 +4035,14 @@ export class LSPService {
 		const coverageGap = unconfirmedServerIds.length > 0;
 		// The record that proves a blackout is no longer read as clean: one row per
 		// touch that a scanner did not cover, naming the scanner and the reason.
-		if (brokenSkippedServerIds.length > 0 || notifyDeferredServerIds.length > 0) {
+		if (
+			brokenSkippedServerIds.length > 0 ||
+			notifyDeferredServerIds.length > 0 ||
+			// #1549: the auxiliary deadline misses that used to surface as a blanket
+			// `inconclusive` need their own row now that the touch reports usable
+			// findings — otherwise the fix would remove the only record of the blackout.
+			auxNoAnswerServerIds.length > 0
+		) {
 			logLatency({
 				type: "phase",
 				phase: "lsp_scanner_coverage_gap",
@@ -3741,6 +4055,7 @@ export class LSPService {
 					...(notifyDeferredServerIds.length > 0 && {
 						deferredResyncServerIds: notifyDeferredServerIds,
 					}),
+					...(auxNoAnswerServerIds.length > 0 && { auxNoAnswerServerIds }),
 				},
 			});
 		}
@@ -3769,6 +4084,16 @@ export class LSPService {
 		// because the mark's meaning is "this server answered", and the moment any
 		// reader stops filtering auxiliaries out, marking a cut-off scanner warm
 		// would let it skip a warm-up it never earned.
+		//
+		// #1549: `diagnosticsTimedOut` is primary-attributed now, so this loop can be
+		// reached with an auxiliary that never answered — including on a NON-COLLECTING
+		// touch, which derives no aux wait-outcome rows. `unconfirmedServerIds` covers
+		// that case because `auxNoAnswerServerIds` is computed for every touch, not only
+		// a collecting one; an unheard scanner is therefore already excluded here and
+		// needs no separate guard. A primary cannot reach this loop unheard at all: it
+		// would have set `diagnosticsTimedOut`, and the gates that clear that flag
+		// retract its attribution precisely because they certified its silence AS the
+		// answer (`retractPrimaryTimeoutAttribution`).
 		const notifyTimedOutServerIds = new Set(notifyWriteTimedOutServerIds);
 		const uncoveredServerIds = new Set(unconfirmedServerIds);
 		if (diagnosticsMode !== "none" && !diagnosticsTimedOut) {
@@ -3820,6 +4145,15 @@ export class LSPService {
 
 		if (collected !== undefined && inconclusive) {
 			result.inconclusive = true;
+			// #1549: name the primary that produced the verdict and which deadline it
+			// missed, so a forensic sweep reads the cause instead of inferring it from
+			// duration histograms. Absent ids on an inconclusive touch mean the
+			// attribution was not derivable (a client with no per-path publication
+			// stamp) — honest, and the same fail-closed verdict as before.
+			if (verdict.inconclusiveServerIds) {
+				result.inconclusiveServerIds = verdict.inconclusiveServerIds;
+			}
+			result.inconclusiveReason = verdict.inconclusiveReason;
 		} else if (collected !== undefined && coverageGap) {
 			// #1470/#1493: narrowed, not collapsed. Reached for EITHER no-answer
 			// shape — a cut-off auxiliary or a silent one with nothing published for
@@ -3857,8 +4191,15 @@ export class LSPService {
 						[
 							// #1459: a deferred server contributed no diagnostics (above), so
 							// its stale binding must not decide the merged verdict either.
+							// #1549: same for an auxiliary whose write never landed — its
+							// findings were dropped above, so its binding describes bytes this
+							// result no longer contains.
 							...spawned
-								.filter((entry) => !deferredResyncServerIds.has(entry.info.id))
+								.filter(
+									(entry) =>
+										!deferredResyncServerIds.has(entry.info.id) &&
+										!staleWriteAuxiliaryServerIds.has(entry.info.id),
+								)
 								.map((entry) => entry.client.getDiagnosticBinding?.(filePath)),
 							...carriedAuxiliary.map((entry) => entry.binding),
 						],
@@ -3903,6 +4244,16 @@ export class LSPService {
 				}),
 				diagnosticsTimedOut,
 				inconclusive,
+				// #1549: the attribution the issue's observability contract asks for —
+				// WHICH primary made the touch inconclusive and which deadline it missed
+				// (`notify-write` vs `diagnostics-wait`, or `mixed`). Absent on a
+				// conclusive touch, which blames nobody.
+				...(verdict.inconclusiveServerIds && {
+					inconclusiveServerIds: verdict.inconclusiveServerIds,
+				}),
+				...(verdict.inconclusiveReason && {
+					inconclusiveReason: verdict.inconclusiveReason,
+				}),
 				// #1470: the touch's own honesty verdict, so a `cut_off` row in
 				// `lsp_aux_wait_outcome` can be joined to the touch that produced it and
 				// shown NOT to have claimed confirmation for that server's coverage.
@@ -3933,6 +4284,11 @@ export class LSPService {
 				...(notifyDeferredServerIds.length > 0 && {
 					deferredResyncServerIds: notifyDeferredServerIds,
 				}),
+				// #1549: auxiliaries whose own deadline lapsed — the wait produced no
+				// publication, or the notify write never landed. Distinct from the fields
+				// above (a different door) and from `auxUnconfirmedServerIds` (derived
+				// from aux wait-outcome rows, which a non-collecting touch never emits).
+				...(auxNoAnswerServerIds.length > 0 && { auxNoAnswerServerIds }),
 			},
 		});
 		return result;
@@ -4934,10 +5290,13 @@ export class LSPService {
 	 * attempts never proved it can answer diagnostics. Warm-up stays
 	 * `clientScope:"primary"` (not the sweep's `"all"`) on purpose: `"all"`
 	 * would additionally spawn the sweep-EXCLUDED auxiliaries
-	 * (`WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS`), and because `touchFile`'s
-	 * `inconclusive` flag is touch-wide, one slow advisory auxiliary would then
-	 * suppress the `demonstratedReady` marking for a perfectly healthy primary —
-	 * falsely condemning it. Recording per-primary-server outcomes and skipping
+	 * (`WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS`), which is work this warm-up does not
+	 * need. (Before #1549 it was also unsafe: `touchFile`'s `inconclusive` flag was
+	 * touch-wide, so one slow advisory auxiliary suppressed the `demonstratedReady`
+	 * marking for a perfectly healthy primary — falsely condemning it. The verdict is
+	 * per-server now, and the marking loop skips only the servers that did not answer
+	 * for themselves, so the scope choice is a cost argument rather than a
+	 * correctness one.) Recording per-primary-server outcomes and skipping
 	 * on those is the correct, non-regressing way to cover the servers the sweep
 	 * actually gates on (the sweep groups by primary server, so the group this
 	 * warms IS the one whose per-file touches would drag).
@@ -5500,12 +5859,14 @@ export class LSPService {
 				// record loop below persists every `!timedOut` result into the workspace
 				// cache, so reading `inconclusive` alone caches a partially covered
 				// answer as clean and replays it on every later sweep. The warm-attach
-				// incumbent reaches this branch through the auxiliary wait (its touch
-				// runs `clientScope: "with-auxiliary"`), where both no-answer shapes
-				// arise. #1459: the sweep's own local `clientScope: "all"` touch now
-				// reaches it too — not through that wait, which "all" still never
-				// enters, but through a scanner whose breaker was open or whose resync
-				// the fan-out gate deferred. Every route is gated here.
+				// incumbent reaches this branch through the aux GRACE wait (its touch
+				// runs `clientScope: "with-auxiliary"`), where all three no-answer shapes
+				// arise. #1459 added the two pre-wait doors for the sweep's own local
+				// `clientScope: "all"` touch — a scanner whose breaker was open, or whose
+				// resync the fan-out gate deferred. #1533 closed the last hole: `"all"`
+				// still never enters the grace wait, but it now derives the SAME evidence
+				// from post-wait state, so a silent auxiliary narrows this scope too
+				// instead of aggregating as a confirmed clean. Every route is gated here.
 				const coverageGap = touchCoverageGap(touchResult).length > 0;
 				const timedOut =
 					touchResult === undefined || inconclusive || coverageGap;
@@ -6188,6 +6549,13 @@ export async function isAuxiliaryLspAlive(
 }
 
 export function resetLSPService(options: LSPShutdownOptions = {}): void {
+	// A new session must get its own classic-tsserver-repair attempt: the
+	// guard is a process-lifetime flag (see resetClassicTsRepairGuard), so a
+	// repair that failed transiently in an earlier session must not stay
+	// latched for the rest of the extension-host process (#1570).
+	if (options.reason === "session_start") {
+		resetClassicTsRepairGuard();
+	}
 	const retiringService = globalLSPService;
 	globalLSPService = null;
 	if (!retiringService) return;

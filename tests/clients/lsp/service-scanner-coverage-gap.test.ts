@@ -85,6 +85,15 @@ function makeDiagnostic(message: string) {
  * for a scanner that was not sent this content: its version cannot advance, so a
  * wait on it can only expire. A test that resolves this instantly would let the
  * touch reach `"partial"` on a timing profile production never has.
+ *
+ * #1533: `"immediately"` must ALSO advance `diagnosticsVersion`, because that is
+ * what a real client's early resolve MEANS — the wait settles when a publication
+ * lands (client.ts). A double that resolved without the bump modelled a client
+ * production does not have, and the `"all"`-scope evidence check reads it as a
+ * silent scanner (shape 7: the fixture, not the code, decided the verdict).
+ * `diagnosticsVersion` is therefore a GETTER; a caller that spreads this object
+ * (`{...makeClient(...)}`) freezes the value at spread time and must not rely on
+ * later bumps.
  */
 function makeClient(
 	serverId: string,
@@ -98,6 +107,7 @@ function makeClient(
 	// per auxiliary — and `openOffsets` shows the flood shape when it breaks.
 	const startedAt = Date.now();
 	let inFlight = 0;
+	let version = 0;
 	const stats = { maxInFlight: 0, openOffsets: [] as number[] };
 	const stampsByPath = new Map<string, number>();
 	return {
@@ -111,13 +121,20 @@ function makeClient(
 			diagnosticProviderKind: "none",
 		}),
 		getOperationSupport: () => ({}),
-		diagnosticsVersion: 0,
+		get diagnosticsVersion() {
+			return version;
+		},
 		// #1531: production decides freshness and aux evidence from the PER-PATH
 		// publication stamp, not the client-global counter, so the double answers on
 		// that axis too — an accessor-less double would silently exercise only the
-		// fail-closed branch and never the real read. This double models scanners
-		// whose version never advances (see the note above), so no path is ever
-		// stamped; `stampsByPath` stays empty and every read is an honest 0.
+		// fail-closed branch and never the real read.
+		//
+		// #1533 merge: the `"never"` profile still stamps nothing, so every read is an
+		// honest 0 and its silence is modelled rather than inferred. The
+		// `"immediately"` profile DOES stamp the path it published for, because that is
+		// what an early-resolving wait means for a notified push-only auxiliary — and
+		// the per-path stamp is now the axis the evidence check reads, so stamping only
+		// the global counter would leave a publishing scanner looking silent.
 		stampsByPath,
 		getDiagnosticsVersionForPath: vi.fn(
 			(filePath: string) => stampsByPath.get(filePath) ?? 0,
@@ -144,10 +161,19 @@ function makeClient(
 		// `diagnosticsVersion` — a promise that never settles would model a client
 		// production does not have.
 		waitForDiagnostics: vi.fn(
-			(_filePath: string, timeoutMs?: number) =>
+			(filePath: string, timeoutMs?: number) =>
 				new Promise<void>((resolve) => {
 					if (publishes === "never") setTimeout(resolve, timeoutMs ?? 1000);
-					else resolve();
+					else {
+						// A publication landing is what resolves a real wait early. Stamp
+						// BOTH axes exactly as `client.ts` does: the global counter advances
+						// and the per-path stamp records that counter's value for this file
+						// (#1531). Bumping only the global counter would leave the evidence
+						// check — which reads per-path — seeing a silent scanner.
+						version += 1;
+						stampsByPath.set(filePath, version);
+						resolve();
+					}
 				}),
 		),
 	};
@@ -265,11 +291,16 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 			false,
 		);
 
-		// Every deferred touch says so: the scanner never saw that content.
+		// Every touch says the scanner did not cover its content. Three because the
+		// gate deferred their resync; the FOURTH because the write it did issue took
+		// 3x the budget to land, so that touch has no evidence from opengrep either.
+		// #1549: before the per-server verdict, that fourth touch reported blanket
+		// `inconclusive` instead — a slow-but-healthy scanner discarding a primary
+		// answer, which is the defect the gap list is supposed to replace.
 		const deferred = results.filter((r) =>
 			r?.unconfirmedServerIds?.includes("opengrep"),
 		);
-		expect(deferred).toHaveLength(3);
+		expect(deferred).toHaveLength(4);
 		for (const result of deferred) {
 			// Narrowed, not collapsed: the primary's answer stands, and the deferred
 			// scanner is not waited on, so nothing flips the touch to inconclusive.
@@ -277,10 +308,40 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 			expect(result?.inconclusive).toBeUndefined();
 			expect(result?.diags).toHaveLength(1);
 		}
+		// One row per uncovered touch: three deferrals plus #1549's late write, which
+		// names its own door (`auxNoAnswerServerIds`) so the two causes stay legible.
 		const gapRows = rowsFor("lsp_scanner_coverage_gap");
-		expect(gapRows).toHaveLength(3);
-		expect(gapRows[0]?.metadata).toMatchObject({
+		expect(gapRows).toHaveLength(4);
+		expect(
+			gapRows.filter((row) =>
+				(
+					row.metadata as { deferredResyncServerIds?: string[] }
+				)?.deferredResyncServerIds?.includes("opengrep"),
+			),
+		).toHaveLength(3);
+		expect(
+			gapRows.filter((row) =>
+				(
+					row.metadata as { auxNoAnswerServerIds?: string[] }
+				)?.auxNoAnswerServerIds?.includes("opengrep"),
+			),
+		).toHaveLength(1);
+		// The EXACT list on a deferral row, not just membership: a deferred touch
+		// names the one scanner it does not speak for and nothing else.
+		const deferredRow = gapRows.find((row) =>
+			(row.metadata as { deferredResyncServerIds?: string[] })
+				?.deferredResyncServerIds,
+		);
+		expect(deferredRow?.metadata).toMatchObject({
 			deferredResyncServerIds: ["opengrep"],
+			source: "cascade",
+		});
+		// And the exact list on the late-write row, through its own door.
+		const lateWriteRow = gapRows.find((row) =>
+			(row.metadata as { auxNoAnswerServerIds?: string[] })?.auxNoAnswerServerIds,
+		);
+		expect(lateWriteRow?.metadata).toMatchObject({
+			auxNoAnswerServerIds: ["opengrep"],
 			source: "cascade",
 		});
 	});
@@ -395,6 +456,11 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		});
 	});
 
+	// #1533 makes the "still confirmed" half load-bearing on this scope too: `"all"`
+	// now derives auxiliary coverage evidence from post-wait state, so a scanner that
+	// publishes for every file must keep every touch unqualified. This is the
+	// overcorrection guard for the aggregate path.
+	//
 	// The load-bearing concurrency assertion, and the negative control in one.
 	// The gate is a QUEUE, not a drop: a healthy scanner accepts each write in
 	// milliseconds, so all SIX concurrent touches still get scanned and every touch
@@ -562,7 +628,10 @@ describe("#1459 — sweep fan-out must not black out a scanner silently", () => 
 		const { LSPService } = await import("../../../clients/lsp/index.js");
 		const service = new LSPService();
 
-		// The with-auxiliary path is the one that emits `lsp_aux_wait_outcome`.
+		// The with-auxiliary path, i.e. the `waitShape: "aux_grace"` producer. Since
+		// #1533 the `"all"` scope emits `lsp_aux_wait_outcome` too, so this probe pins
+		// the grace producer specifically; the aggregate producer's deferral row is
+		// pinned by its own test below.
 		const aux = makeClient("opengrep", NOTIFY_BUDGET_MS * 50, [], "never");
 		const primary = makeClient("typescript", 0, [
 			makeDiagnostic("primary finding"),

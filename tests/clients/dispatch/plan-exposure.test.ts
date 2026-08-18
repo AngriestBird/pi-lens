@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	LANGUAGE_CAPABILITY_MATRIX,
 	TOOL_PLANS,
-} from "../../../clients/dispatch/plan.ts";
+} from "../../../clients/dispatch/plan.js";
 
 function flattenRunnerIds(plan: {
 	groups: Array<{ runnerIds: string[] }>;
@@ -83,6 +83,7 @@ describe("dispatch plan exposure", () => {
 	it("routes tpl helpers through the explicit Helm template plan", () => {
 		expect(flattenRunnerIds(TOOL_PLANS["helm-template"])).toEqual([
 			"helm-lint",
+			"helm-render",
 		]);
 	});
 

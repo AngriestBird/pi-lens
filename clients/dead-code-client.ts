@@ -15,6 +15,7 @@
 import { createSubsystemLogger } from "./extension-log.js";
 import * as path from "node:path";
 import { findNearestMarkerRoot } from "./path-utils.js";
+import { getScratchTreeFnmatchPatterns } from "./scratch-tree-policy.js";
 import { safeSpawnAsync } from "./safe-spawn.js";
 import {
 	type ProbeEvidence,
@@ -81,17 +82,18 @@ function emptyResult(language: string): Omit<DeadCodeResult, "summary"> {
 const ANALYSIS_TIMEOUT_MS = 30_000;
 
 // Directories never worth scanning for the user's own dead code.
+//
+// Single-sourced from `scratch-tree-policy.ts`'s `EXCLUDED_DIRS`-derived list
+// (#1562 sweep finding: this array had hand-drifted from `EXCLUDED_DIRS` —
+// missing `.pi`/`.claude`/`.next`/`.turbo`/etc, the same single-source-of-
+// truth defect #883 named for per-language lists). `site-packages`/`.eggs`
+// are Python-packaging-specific and have no `EXCLUDED_DIRS` counterpart (no
+// other scanner needs them), so they stay as a small local addition rather
+// than polluting the shared cross-tool list.
+const VULTURE_PYTHON_ONLY_EXCLUDES = ["*/site-packages/*", "*/.eggs/*"];
 const VULTURE_EXCLUDES = [
-	"*/.venv/*",
-	"*/venv/*",
-	"*/.tox/*",
-	"*/build/*",
-	"*/dist/*",
-	"*/node_modules/*",
-	"*/.git/*",
-	"*/site-packages/*",
-	"*/__pycache__/*",
-	"*/.eggs/*",
+	...getScratchTreeFnmatchPatterns(),
+	...VULTURE_PYTHON_ONLY_EXCLUDES,
 ];
 
 // Decorators whose target is called by a framework, never by name in the tree.

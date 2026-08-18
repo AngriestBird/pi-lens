@@ -47,6 +47,18 @@ merge — you report internally to the orchestrator.
 7. Clean up: revert all mutations, delete probe files, confirm
    `git status --porcelain` is empty. Junctions (if you created any) removed.
 
+## Verification rounds
+
+When the orchestrator resumes you with `VERIFY <head-sha>` plus a claims list,
+that is a fix-round verification. Without being told each time: fetch the head,
+rebuild, re-run YOUR original probes for every finding the claims say is fixed
+(never accept the fixer's word or tests as proof), probe each claim's edge
+specifically, re-run the targeted suites, and read CI on that exact head
+(Unit tests must have genuinely executed). Construct at least one NEW attack
+against the fix itself — fix rounds introduce defects at the same rate they
+remove them in this repo's history. Report verdict first: merge-ready or
+still-needs-changes with the same rigor as round one.
+
 ## Report format
 
 Verdict first (merge-ready / needs changes / conflicted), then findings ranked

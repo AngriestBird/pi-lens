@@ -1,16 +1,16 @@
 import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { GITHUB_TOOLS, GitHubToolId } from "../../../clients/installer/index.ts";
+import { GITHUB_TOOLS, GitHubToolId } from "../../../clients/installer/index.js";
 
 // Ensure the real installer module is used, not any mock registered by other test files
-vi.unmock("../../../clients/installer/index.ts");
+vi.unmock("../../../clients/installer/index.js");
 
 const SUPPORTED_PLATFORMS = ["linux", "darwin", "win32"] as const;
 const COMMON_ARCHES = ["x64", "arm64"] as const;
 
 describe("GitHub release asset selection", () => {
 	it("every github tool has an asset for all supported platform/arch combos", async () => {
-		const { resolveGitHubAsset } = await import("../../../clients/installer/index.ts");
+		const { resolveGitHubAsset } = await import("../../../clients/installer/index.js");
 
 		const missing: string[] = [];
 		for (const toolId of GITHUB_TOOLS) {
@@ -27,7 +27,7 @@ describe("GitHub release asset selection", () => {
 	});
 
 	it("returns undefined for unsupported platforms", async () => {
-		const { resolveGitHubAsset } = await import("../../../clients/installer/index.ts");
+		const { resolveGitHubAsset } = await import("../../../clients/installer/index.js");
 
 		for (const toolId of GITHUB_TOOLS) {
 			expect(resolveGitHubAsset(toolId, "freebsd", "x64")).toBeUndefined();
@@ -38,7 +38,7 @@ describe("GitHub release asset selection", () => {
 	// Table-driven entries (archAssetMatch) only carry x64/arm64 assets, so an
 	// exotic arch must resolve to nothing rather than to the x64 substring.
 	it("returns undefined for a non-x64/arm64 arch on table-driven tools", async () => {
-		const { resolveGitHubAsset } = await import("../../../clients/installer/index.ts");
+		const { resolveGitHubAsset } = await import("../../../clients/installer/index.js");
 
 		for (const toolId of ["gitleaks", "terragrunt"] as const) {
 			expect(resolveGitHubAsset(toolId, "linux", "ia32")).toBeUndefined();
@@ -51,7 +51,7 @@ describe("GitHub release asset selection", () => {
 	// plain `includes` scan installs the sidecar it happens to see first.
 	describe("pickReleaseAsset", () => {
 		it("prefers the exact asset over a signature sibling listed first", async () => {
-			const { pickReleaseAsset } = await import("../../../clients/installer/index.ts");
+			const { pickReleaseAsset } = await import("../../../clients/installer/index.js");
 			const assets = [
 				{ name: "terragrunt_linux_amd64.asc" },
 				{ name: "terragrunt_linux_amd64" },
@@ -62,7 +62,7 @@ describe("GitHub release asset selection", () => {
 		});
 
 		it("skips sidecars when only a substring match exists", async () => {
-			const { pickReleaseAsset } = await import("../../../clients/installer/index.ts");
+			const { pickReleaseAsset } = await import("../../../clients/installer/index.js");
 			const assets = [
 				{ name: "tflint_linux_amd64.zip.sha256" },
 				{ name: "tflint_linux_amd64.zip" },
@@ -73,14 +73,14 @@ describe("GitHub release asset selection", () => {
 		});
 
 		it("returns undefined when every match is a sidecar", async () => {
-			const { pickReleaseAsset } = await import("../../../clients/installer/index.ts");
+			const { pickReleaseAsset } = await import("../../../clients/installer/index.js");
 			expect(
 				pickReleaseAsset([{ name: "expert_linux_amd64.sig" }], "expert_linux_amd64"),
 			).toBeUndefined();
 		});
 
 		it("still matches a plain substring asset with no sidecars present", async () => {
-			const { pickReleaseAsset } = await import("../../../clients/installer/index.ts");
+			const { pickReleaseAsset } = await import("../../../clients/installer/index.js");
 			expect(
 				pickReleaseAsset([{ name: "marksman-linux-x64" }], "marksman-linux-x64")?.name,
 			).toBe("marksman-linux-x64");
@@ -88,7 +88,7 @@ describe("GitHub release asset selection", () => {
 	});
 
 	it("returns undefined for unknown tool id", async () => {
-		const { resolveGitHubAsset } = await import("../../../clients/installer/index.ts");
+		const { resolveGitHubAsset } = await import("../../../clients/installer/index.js");
 		expect(resolveGitHubAsset("nonexistent-tool" as GitHubToolId, "linux", "x64")).toBeUndefined();
 	});
 
@@ -100,7 +100,7 @@ describe("GitHub release asset selection", () => {
 			["darwin", "arm64", "darwin.aarch64.tar.xz"],
 			["win32", "x64", "zip"],
 		] as const)("%s/%s → %s", async (platform, arch, expected) => {
-			const { resolveGitHubAsset } = await import("../../../clients/installer/index.ts");
+			const { resolveGitHubAsset } = await import("../../../clients/installer/index.js");
 			expect(resolveGitHubAsset("shellcheck", platform, arch)).toBe(expected);
 		});
 	});
@@ -114,7 +114,7 @@ describe("GitHub release asset selection", () => {
 			["win32", "x64", "windows_amd64.exe"],
 			["win32", "arm64", "windows_arm64.exe"],
 		] as const)("%s/%s → %s", async (platform, arch, expected) => {
-			const { resolveGitHubAsset } = await import("../../../clients/installer/index.ts");
+			const { resolveGitHubAsset } = await import("../../../clients/installer/index.js");
 			expect(resolveGitHubAsset("shfmt", platform, arch)).toBe(expected);
 		});
 	});
@@ -127,7 +127,7 @@ describe("GitHub release asset selection", () => {
 			["darwin", "arm64", "aarch64-apple-darwin.gz"],
 			["win32", "x64", "x86_64-pc-windows-msvc.zip"],
 		] as const)("%s/%s → %s", async (platform, arch, expected) => {
-			const { resolveGitHubAsset } = await import("../../../clients/installer/index.ts");
+			const { resolveGitHubAsset } = await import("../../../clients/installer/index.js");
 			expect(resolveGitHubAsset("rust-analyzer", platform, arch)).toBe(expected);
 		});
 	});
@@ -141,7 +141,7 @@ describe("GitHub release asset selection", () => {
 			["win32", "x64", "windows-amd64.zip"],
 			["win32", "arm64", "windows-arm64.zip"],
 		] as const)("%s/%s → %s", async (platform, arch, expected) => {
-			const { resolveGitHubAsset } = await import("../../../clients/installer/index.ts");
+			const { resolveGitHubAsset } = await import("../../../clients/installer/index.js");
 			expect(resolveGitHubAsset("golangci-lint", platform, arch)).toBe(expected);
 		});
 	});
@@ -158,7 +158,7 @@ describe("GitHub release asset selection", () => {
 			["win32", "arm64", "terragrunt_windows_amd64.exe"],
 		] as const)("%s/%s → %s", async (platform, arch, expected) => {
 			const { resolveGitHubAsset } = await import(
-				"../../../clients/installer/index.ts"
+				"../../../clients/installer/index.js"
 			);
 			expect(resolveGitHubAsset("terragrunt", platform, arch)).toBe(expected);
 		});
@@ -169,7 +169,7 @@ describe("GitHub release asset selection", () => {
 			const {
 				resolveGitHubArchiveBinaryCandidates,
 				resolveGitHubInstalledBinaryName,
-			} = await import("../../../clients/installer/index.ts");
+			} = await import("../../../clients/installer/index.js");
 
 			expect(
 				resolveGitHubArchiveBinaryCandidates(
@@ -219,7 +219,7 @@ describe("GitHub release asset selection", () => {
 			const {
 				resolveGitHubArchiveBinaryCandidates,
 				resolveGitHubInstalledBinaryName,
-			} = await import("../../../clients/installer/index.ts");
+			} = await import("../../../clients/installer/index.js");
 
 			expect(
 				resolveGitHubArchiveBinaryCandidates("ktlint", "win32", "ktlint.bat"),
@@ -233,7 +233,7 @@ describe("GitHub release asset selection", () => {
 	describe("HashiCorp release fallback", () => {
 		it("derives terraform-ls download URLs from the release tag when GitHub assets are absent", async () => {
 			const { resolveDerivedHashiCorpReleaseAsset } = await import(
-				"../../../clients/installer/index.ts"
+				"../../../clients/installer/index.js"
 			);
 
 			expect(
@@ -260,7 +260,7 @@ describe("GitHub release asset selection", () => {
 			["win32", "x64", "x86_64-windows.zip"],
 			["win32", "arm64", "aarch64-windows.zip"],
 		] as const)("%s/%s → %s", async (platform, arch, expected) => {
-			const { resolveGitHubAsset } = await import("../../../clients/installer/index.ts");
+			const { resolveGitHubAsset } = await import("../../../clients/installer/index.js");
 			expect(resolveGitHubAsset("zls", platform, arch)).toBe(expected);
 		});
 	});
@@ -277,14 +277,14 @@ describe("GitHub release asset selection", () => {
 			["win32", "arm64", "marksman.exe"],
 		] as const)("%s/%s → %s", async (platform, arch, expected) => {
 			const { resolveGitHubAsset } = await import(
-				"../../../clients/installer/index.ts"
+				"../../../clients/installer/index.js"
 			);
 			expect(resolveGitHubAsset("marksman", platform, arch)).toBe(expected);
 		});
 
 		it("installs as marksman.exe on Windows (bare binary, no archive)", async () => {
 			const { resolveGitHubInstalledBinaryName } = await import(
-				"../../../clients/installer/index.ts"
+				"../../../clients/installer/index.js"
 			);
 			expect(
 				resolveGitHubInstalledBinaryName("marksman", "win32", "marksman.exe"),
@@ -305,14 +305,14 @@ describe("GitHub release asset selection", () => {
 			["win32", "arm64", "expert_windows_amd64.exe"],
 		] as const)("%s/%s → %s", async (platform, arch, expected) => {
 			const { resolveGitHubAsset } = await import(
-				"../../../clients/installer/index.ts"
+				"../../../clients/installer/index.js"
 			);
 			expect(resolveGitHubAsset("expert", platform, arch)).toBe(expected);
 		});
 
 		it("installs as expert.exe on Windows (bare binary, no archive)", async () => {
 			const { resolveGitHubInstalledBinaryName } = await import(
-				"../../../clients/installer/index.ts"
+				"../../../clients/installer/index.js"
 			);
 			expect(
 				resolveGitHubInstalledBinaryName("expert", "win32", "expert_windows_amd64.exe"),
@@ -324,7 +324,7 @@ describe("GitHub release asset selection", () => {
 
 		it("does not select an incompatible release binary", async () => {
 			const { resolveGitHubAsset } = await import(
-				"../../../clients/installer/index.ts"
+				"../../../clients/installer/index.js"
 			);
 			expect(resolveGitHubAsset("expert", "linux", "ppc64"))
 				.toBeUndefined();
@@ -336,7 +336,7 @@ describe("GitHub release asset selection", () => {
 
 describe("getToolEnvironment PATH", () => {
 	it("prepends the managed pi-lens bin dir (~/.pi-lens/bin by default) to PATH", async () => {
-		const { getToolEnvironment } = await import("../../../clients/installer/index.ts");
+		const { getToolEnvironment } = await import("../../../clients/installer/index.js");
 		const { getGlobalPiLensDir } = await import("../../../clients/file-utils.js");
 		const env = await getToolEnvironment();
 		// Asserts against the actual machine-global root (respects #525's
@@ -347,7 +347,7 @@ describe("getToolEnvironment PATH", () => {
 	});
 
 	it("also includes local npm tools dir in PATH", async () => {
-		const { getToolEnvironment } = await import("../../../clients/installer/index.ts");
+		const { getToolEnvironment } = await import("../../../clients/installer/index.js");
 		const { getGlobalPiLensDir } = await import("../../../clients/file-utils.js");
 		const env = await getToolEnvironment();
 		const localBin = path.join(getGlobalPiLensDir(), "tools", "node_modules", ".bin");
@@ -355,7 +355,7 @@ describe("getToolEnvironment PATH", () => {
 	});
 
 	it("includes current Node runtime directory in PATH", async () => {
-		const { getToolEnvironment } = await import("../../../clients/installer/index.ts");
+		const { getToolEnvironment } = await import("../../../clients/installer/index.js");
 		const env = await getToolEnvironment();
 		expect(env.PATH).toContain(path.dirname(process.execPath));
 	});

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ALL_FORMATTERS } from "../../clients/formatters.ts";
+import { ALL_FORMATTERS } from "../../clients/formatters.js";
 import {
 	AUTO_INSTALLABLE_DEFAULT_FORMATTERS,
 	FORMATTER_POLICY_BY_EXTENSION,
 	FORMATTER_POLICY_BY_FILENAME,
-} from "../../clients/tool-policy.ts";
+} from "../../clients/tool-policy.js";
 
 // Bidirectional drift guard binding the two hand-maintained INVERSE mappings of
 // the formatter↔extension relation (#1135, the #883/#209 single-source-of-truth
