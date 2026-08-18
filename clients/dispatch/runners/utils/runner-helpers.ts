@@ -484,9 +484,9 @@ function noteAvailabilityCorrected(cwd: string, toolId: string): void {
 
 /**
  * Record that a latched `unavailable` row now stands for this pair. Called
- * from the one place such a row is written for a checker probe, so a later
- * compensating row can tell a genuine correction from a no-op emission
- * (#1657).
+ * from each seam that writes one (the availability checker and the shared
+ * probe latch), so a later compensating row can tell a genuine correction
+ * from a no-op emission (#1657).
  */
 function noteLatchedUnavailable(cwd: string, tool: string): void {
 	addId(latchedUnavailableByCwd, cwd, tool);
