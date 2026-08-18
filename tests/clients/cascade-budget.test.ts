@@ -4,7 +4,7 @@ import {
 	cascadeSettleWaitMs,
 	deriveCascadeNeighbourBudget,
 } from "../../clients/cascade-budget.js";
-import { _resetQuietWindowEnabledForTests } from "../../clients/quiet-window.js";
+import { _resetQuietWindowEnabledForTests } from "../../clients/quiet-window-config.js";
 
 const ENV_KEYS = [
 	"PI_LENS_CASCADE_SETTLE_WAIT_MS",

@@ -2,12 +2,17 @@
  * Quiet-window kill switch and wait budget, split out of `quiet-window.ts` so a
  * caller that only needs the NUMBERS does not have to import the scheduler.
  *
- * `quiet-window.ts` pulls `resource-sampler.ts` for the heartbeat task, which
- * evaluates `pidusage` (a third-party CJS package) at import time. That is fine
- * for the scheduler itself and wrong for a leaf arithmetic module on the
- * dispatch load path — `cascade-budget.ts` reads these two knobs and is
- * imported by both `runtime-turn.ts` and `dispatch/integration.ts` (#1462
- * review N4). This module imports nothing but `env-utils.ts`.
+ * `cascade-budget.ts` is the caller that forced it (#1462): it reads both knobs
+ * to decide how much drain is really left, and depending on `quiet-window.ts`
+ * for that would point a pure arithmetic module at a task registry — module
+ * state (`_tasks`, `_inProgress`), a heartbeat sampler, latency logging, none
+ * of which it wants. Config belongs below the scheduler, not beside it.
+ *
+ * NOT a load-time win, despite what the first version of this comment claimed:
+ * `cascade-budget.ts` imports `runtime-config.ts` for `cascadeMaxFiles`, and
+ * that reaches `pidusage` through `lens-config.ts` regardless — probed, and
+ * `dispatch/integration.ts` already imported `runtime-config.ts` before #1462.
+ * The split is a dependency-direction fix and nothing more.
  *
  * `quiet-window.ts` re-exports all three, so every existing importer keeps
  * working and there is still exactly one memo behind `isQuietWindowEnabled`.

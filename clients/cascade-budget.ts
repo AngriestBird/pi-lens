@@ -47,9 +47,10 @@
  */
 
 import { toPositiveFinite } from "./env-utils.js";
-// The knobs only, never the scheduler: `quiet-window.ts` pulls
-// `resource-sampler.ts` → `pidusage` at import time, and this module sits on
-// the dispatch load path (#1462 review N4).
+// The knobs only, never the scheduler — this module is arithmetic and has no
+// business depending on a task registry to read two numbers (#1462 review N4).
+// Note it buys nothing at load time: `runtime-config.js` below already reaches
+// `pidusage` via `lens-config.js`.
 import {
 	isQuietWindowEnabled,
 	quietWindowWaitMs,
@@ -184,9 +185,13 @@ export function deriveCascadeNeighbourBudget(options: {
 	//
 	// Boundary, acknowledged rather than special-cased: at exactly
 	// `onTimeMs === ceiling * perNeighbourMs` this does not fire and the `fits`
-	// zone has zero width, so any prelude at all narrows slightly. Harmless (the
-	// budget still lands within one neighbour of the ceiling, and the rescue is
-	// genuine at that setting) and not worth a third comparison.
+	// zone has zero width, so ANY prelude narrows. Not slightly, either — at
+	// 4000/100/40 a 2 s prelude gives 20 and a 3.5 s prelude gives the floor.
+	// Left alone because the narrowing is honest at that setting: with the
+	// window sized to exactly one full walk, a run that has spent any of it
+	// really would miss, so every one of those cuts is a genuine rescue rather
+	// than the `no-rescue-window` case this guard exists to catch. What it does
+	// cost is headroom — see the divisor bands in the bench's `--sweep` text.
 	if (onTimeMs <= 0 || onTimeMs < ceiling * perNeighbourMs) {
 		return { ...full, zone: "no-rescue-window" };
 	}
