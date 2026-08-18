@@ -78,12 +78,10 @@ import {
 	snapshotAdvisoryProvenance,
 } from "./advisory-provenance.js";
 import { sweepInlineBlockerFreshness } from "./blocker-freshness.js";
-
-/**
- * #1622 / #1419 precedent: what a demoted finding shows where its cached line
- * number used to be. The finding survives, the untrustworthy coordinate does not.
- */
-export const STALE_LINE_MARKER = "[stale — re-run to confirm]";
+// #1631 review V2: moved to its own leaf module so a low-level store
+// (widget-state.ts) can use the marker without importing this orchestrator —
+// see clients/stale-marker.ts's doc comment.
+import { STALE_LINE_MARKER } from "./stale-marker.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
 
 interface TurnEndDeps {

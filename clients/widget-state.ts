@@ -9,7 +9,7 @@ import {
 	collectForwardImportMtimes,
 	MTIME_DRIFT_TOLERANCE_MS,
 } from "./blocker-freshness.js";
-import { STALE_LINE_MARKER } from "./runtime-turn.js";
+import { STALE_LINE_MARKER } from "./stale-marker.js";
 
 /**
  * Canonical key for the `files` map (and `diagnosticsWriteGuard`) — #1020.
@@ -324,6 +324,22 @@ export function importWidgetState(state: PersistedWidgetState | undefined): bool
 		// gate has a concrete observation time and never treats `undefined` as
 		// epoch-0 (which would drop every migrated entry on the first sweep).
 		const recordTouchedAt = f.touchedAt ?? Date.now();
+		// #1631 review V1: `diagnosticCounts` is DERIVED from `allDiagnostics`
+		// everywhere else in this module (see the `countDiagnostics(rec.allDiagnostics)`
+		// call sites) — it must be recomputed here too, from the just-migrated
+		// (stale-stripped) entries, not restored verbatim from the snapshot. The
+		// persisted counts were computed while a finding was still demoted
+		// (`blocking: 0`); once F3 strips `stale` so `isBlocking` reports true
+		// again, a verbatim count would still say `blocking: 0` for a record
+		// whose entries ARE blocking — inverting the one-predicate invariant
+		// `isBlocking` exists to hold. Every consumer (`getFileDiagnosticSummaries`,
+		// the record-tier classifier, the footer) trusts `diagnosticCounts`, not a
+		// live re-scan of the entries, so a derived count out of sync with its own
+		// entries is silently wrong everywhere at once.
+		const migratedAllDiagnostics = migrateEntryStamps(
+			f.allDiagnostics,
+			recordTouchedAt,
+		);
 		files.set(fileMapKey(f.filePath), {
 			filePath: f.filePath,
 			runners: new Map(f.runners ?? []),
@@ -336,12 +352,8 @@ export function importWidgetState(state: PersistedWidgetState | undefined): bool
 				(f.formatters ?? []).filter(([, outcome]) => outcome?.success !== false),
 			),
 			diagnostics: migrateEntryStamps(f.diagnostics, recordTouchedAt),
-			allDiagnostics: migrateEntryStamps(f.allDiagnostics, recordTouchedAt),
-			diagnosticCounts: f.diagnosticCounts ?? {
-				blocking: 0,
-				errors: 0,
-				warnings: 0,
-			},
+			allDiagnostics: migratedAllDiagnostics,
+			diagnosticCounts: countDiagnostics(migratedAllDiagnostics),
 			hasFinalDiagnosticsSnapshot: f.hasFinalDiagnosticsSnapshot ?? false,
 			touchedAt: recordTouchedAt,
 		});

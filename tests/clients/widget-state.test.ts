@@ -553,6 +553,18 @@ describe("widget-state renderWidget", () => {
 			expect(restored).toHaveLength(1);
 			expect(restored[0]?.stale).toBeUndefined();
 			expect(isBlocking(restored[0]!)).toBe(true);
+
+			// #1631 review V1: `diagnosticCounts` is DERIVED from the entries, not a
+			// second source of truth. The persisted count was computed while the
+			// entry was still demoted (`blocking: 0`) — restoring it verbatim would
+			// leave `isBlocking(entry) === true` but `diagnosticCounts.blocking === 0`
+			// on the SAME record, inverting the one-predicate invariant every
+			// consumer (getFileDiagnosticSummaries, the record-tier classifier)
+			// trusts instead of re-scanning entries itself.
+			const summary = getFileDiagnosticSummaries().find(
+				(s) => path.resolve(s.filePath) === path.resolve(consumer),
+			);
+			expect(summary?.blocking).toBe(1);
 		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		}

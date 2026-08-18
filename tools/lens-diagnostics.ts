@@ -73,7 +73,7 @@ import { logLatency } from "../clients/latency-logger.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import { retagAuxiliaryDiagnostics } from "../clients/dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../clients/file-role.js";
-import { STALE_LINE_MARKER } from "../clients/runtime-turn.js";
+import { STALE_LINE_MARKER } from "../clients/stale-marker.js";
 import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
 
 // The widget state exposes the full per-file diagnostic set; this is the tool's
