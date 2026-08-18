@@ -51,7 +51,25 @@ jobs:
         run: npm ci --no-audit --no-fund --ignore-scripts
       - name: Build dist
         run: npm run build:dist
+      # F1: both interpreters need the module installed SEPARATELY -- pwsh and
+      # Windows PowerShell 5.1 resolve `Install-Module`'s CurrentUser scope
+      # under different module paths, so one interpreter having the module
+      # says nothing about the other. The script's own preflight fails
+      # distinctly (INFRA) if either is missing, but installing it here is
+      # what keeps the lane meaningful instead of exiting 2 every run.
+      - name: Install PSScriptAnalyzer module (pwsh)
+        shell: pwsh
+        run: Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -Confirm:$false
+      - name: Install PSScriptAnalyzer module (Windows PowerShell 5.1)
+        shell: powershell
+        run: Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser -Confirm:$false
+      # F3: one-line toggle for #1604 -- flip to `expected-fail` if the pwsh
+      # leg reds by reproducing ConciseView's stderr evasion, so the nightly
+      # doesn't stay permanently red while #1604 is open. See the script's own
+      # header comment for the full contract.
       - name: Real-host classification smoke (pwsh + powershell legs)
+        env:
+          PI_LENS_SMOKE_PSA_PWSH_MODE: required
         run: node scripts/smoke-psscriptanalyzer-classification.mjs
 
   # Lane 2 (#1605): availability-lifecycle — the latch class

@@ -33,7 +33,10 @@
  *
  * Legs (each its own child `node` process -- the runner's latches are
  * process-lifetime module singletons, so legs must not share state):
- *   - "pwsh"              -- if `pwsh` resolves on PATH: the real #1604 leg.
+ *   - "pwsh-restricted"   -- REQUIRED. windows-latest always ships pwsh; this
+ *                            is the real #1604 leg, so its absence is an
+ *                            infra failure, not a silent skip (a runner image
+ *                            change that drops pwsh must not go unnoticed).
  *   - "powershell-forced" -- Windows PowerShell 5.1, reached by hiding pwsh's
  *                            directory from the child's PATH so
  *                            `resolvePowerShellCmd`'s pwsh->powershell
@@ -42,12 +45,36 @@
  *                            always ships both).
  *   - "healthy"           -- no execution-policy override: a negative control
  *                            so a mis-classifying script can't pass by always
- *                            reporting policy-denied.
+ *                            reporting policy-denied. `PSExecutionPolicyPreference`
+ *                            is explicitly DELETED (not merely omitted) from
+ *                            this leg's env, so an already-Restricted host
+ *                            process can't turn "healthy" into a third policy
+ *                            leg by inheritance.
+ *
+ * Before any leg runs, a preflight confirms the PSScriptAnalyzer MODULE is
+ * actually installed for every interpreter a leg will use. Without it, the
+ * runner's `checkModuleAvailable` gate returns `skipped` for a reason that has
+ * nothing to do with execution-policy classification -- and that `skipped`
+ * status is IDENTICAL to a genuine policy-denied classification failure, so a
+ * missing module would silently read as "the lane passed" or produce the same
+ * failure text as a real #1604 regression. The preflight fails distinctly
+ * (INFRA, exit 2) so the two can never be confused.
+ *
+ * `PI_LENS_SMOKE_PSA_PWSH_MODE` (default `required`) gates the pwsh leg's
+ * effect on the exit code: `required` (default) treats a pwsh-leg failure as
+ * a real lane failure; `expected-fail` still runs and reports the leg, but a
+ * FAIL is annotated "(expected-fail pending #1604)" and does not fail the
+ * job. This is a deliberate one-line workflow toggle for #1604: if the pwsh
+ * leg reds by reproducing ConciseView's stderr evasion, set this env var to
+ * `expected-fail` in the workflow rather than leaving a permanently-red
+ * nightly, until #1604 lands a fix.
  *
  * Usage: node scripts/smoke-psscriptanalyzer-classification.mjs
- * Exit codes: 0 all legs classified correctly; 1 a real-host classification
- * mismatch (the defect this lane exists to catch); 2 infra failure (no
- * PowerShell present at all, or the dist build is missing).
+ * Exit codes: 0 all required legs classified correctly; 1 a real-host
+ * classification mismatch (the defect this lane exists to catch); 2 infra
+ * failure (no PowerShell present, pwsh missing on windows-latest, the
+ * PSScriptAnalyzer module not installed for an interpreter under test, or the
+ * dist build is missing).
  */
 
 import { spawnSync } from "node:child_process";
@@ -87,6 +114,16 @@ async function runChildLeg(legName) {
 	} catch (err) {
 		runnerError = err instanceof Error ? err.message : String(err);
 	}
+
+	// latency.log writes go through an async queue (`createNdjsonLogger`) --
+	// flush it before reading, or a read immediately after `run()` returns can
+	// race a still-pending write and miss the decision it just made (observed
+	// live: flaked on whichever leg's write happened to still be in flight).
+	const { flushLatencyLog } = await import(
+		pathToFileURL(path.join(repoRoot, "dist", "clients", "latency-logger.js"))
+			.href
+	);
+	await flushLatencyLog();
 
 	const latencyLogPath = path.join(scratch, "latency.log");
 	let decisions = [];
@@ -141,6 +178,25 @@ function findOnPath(binName) {
 	return lines[0] ?? null;
 }
 
+/** F1: does `cmd` see the PSScriptAnalyzer module at all? Distinct from
+ * execution-policy classification -- a missing module makes the runner
+ * `skip` for a reason unrelated to #1540/#1604, and that `skipped` status is
+ * indistinguishable from a real policy-denied classification failure unless
+ * this is checked first. */
+function moduleAvailable(cmd) {
+	const res = spawnSync(
+		cmd,
+		[
+			"-NoProfile",
+			"-NonInteractive",
+			"-Command",
+			"if (Get-Module -ListAvailable PSScriptAnalyzer) { exit 0 } else { exit 1 }",
+		],
+		{ encoding: "utf8", timeout: 30_000 },
+	);
+	return res.status === 0;
+}
+
 function pathWithoutDirOf(binPath) {
 	const dir = path.dirname(binPath);
 	const sep = path.delimiter;
@@ -159,8 +215,15 @@ function runLeg(legName, envOverrides) {
 		[LEG_ENV]: legName,
 		[SCRATCH_ENV]: scratch,
 		PI_LENS_HOME: scratch,
-		...envOverrides,
 	};
+	// F5: delete, don't just omit -- `...process.env` above already copied any
+	// inherited value, and on a host whose OWN process scope is already
+	// Restricted (e.g. a corporate runner image) that inherited value would
+	// turn a leg that never asked for a policy override into a THIRD
+	// policy-denied leg. Every leg starts clean; only an explicit override
+	// below re-adds it.
+	delete env.PSExecutionPolicyPreference;
+	Object.assign(env, envOverrides);
 	const res = spawnSync(process.execPath, [__filename], {
 		env,
 		encoding: "utf8",
@@ -244,18 +307,48 @@ async function main() {
 
 	const pwshPath = findOnPath("pwsh");
 	const powershellPath = findOnPath("powershell");
-	if (!pwshPath && !powershellPath) {
+	// F2: pwsh is REQUIRED, not optional -- windows-latest always ships it, and
+	// this leg is the lane's whole reason to exist (the #1604 headline). A
+	// silent narrow-to-zero-pwsh-legs must never read as a green job.
+	if (!pwshPath) {
 		console.error(
-			"INFRA FAILURE: neither pwsh nor powershell resolves on PATH.",
+			"INFRA FAILURE: pwsh not found on PATH. It is required on windows-latest -- " +
+				"the pwsh-restricted leg is this lane's #1604 headline check, and a runner " +
+				"image that dropped pwsh must not silently narrow to zero coverage.",
 		);
 		process.exit(2);
 	}
 
-	const legs = [];
-	if (pwshPath) {
-		legs.push({
+	// F1: preflight every interpreter a leg below will actually spawn. A
+	// missing module makes the runner `skip` for a reason that has nothing to
+	// do with execution-policy classification, and that `skipped` status
+	// prints identically to a real #1604 classification failure -- so this
+	// must fail distinctly (INFRA) rather than let the two be confused.
+	for (const cmd of [pwshPath, powershellPath].filter(Boolean)) {
+		if (!moduleAvailable(cmd)) {
+			console.error(`INFRA: PSScriptAnalyzer not available for ${cmd}`);
+			process.exit(2);
+		}
+	}
+
+	// F3: one-line workflow toggle for #1604. `required` (default) treats a
+	// pwsh-leg failure as a real lane failure; `expected-fail` still runs and
+	// reports it, but does not fail the job -- set this if the pwsh leg reds
+	// by reproducing ConciseView's stderr evasion, instead of leaving a
+	// permanently-red nightly, until #1604 lands a fix.
+	const pwshMode = process.env.PI_LENS_SMOKE_PSA_PWSH_MODE ?? "required";
+	if (pwshMode !== "required" && pwshMode !== "expected-fail") {
+		console.error(
+			`INFRA: PI_LENS_SMOKE_PSA_PWSH_MODE must be "required" or "expected-fail", got ${JSON.stringify(pwshMode)}`,
+		);
+		process.exit(2);
+	}
+
+	const legs = [
+		{
 			name: "pwsh-restricted",
 			env: { PSExecutionPolicyPreference: "Restricted" },
+			gated: pwshMode === "expected-fail",
 			expected: {
 				runnerStatus: "skipped",
 				decision: {
@@ -264,17 +357,18 @@ async function main() {
 					latched: true,
 				},
 			},
-		});
-	}
+		},
+	];
 	if (powershellPath) {
-		const env = { PSExecutionPolicyPreference: "Restricted" };
-		if (pwshPath) {
-			// Force the fallback so this leg exercises powershell.exe (5.1) even
-			// when pwsh is also present -- resolvePowerShellCmd tries pwsh first.
-			env.PATH = pathWithoutDirOf(pwshPath);
-		}
+		// Force the fallback so this leg exercises powershell.exe (5.1) even
+		// though pwsh is (now unconditionally) present -- resolvePowerShellCmd
+		// tries pwsh first.
+		const env = {
+			PSExecutionPolicyPreference: "Restricted",
+			PATH: pathWithoutDirOf(pwshPath),
+		};
 		legs.push({
-			name: pwshPath ? "powershell-forced" : "powershell",
+			name: "powershell-forced",
 			env,
 			expected: {
 				runnerStatus: "skipped",
@@ -306,23 +400,33 @@ async function main() {
 	const outcomes = [];
 	for (const leg of legs) {
 		const result = runLeg(leg.name, leg.env);
-		const verdict = assertLeg(result, leg.expected);
+		const verdict = { ...assertLeg(result, leg.expected), gated: !!leg.gated };
 		outcomes.push(verdict);
-		console.log(`  [${verdict.pass ? "PASS" : "FAIL"}] ${verdict.id}`);
+		const tag =
+			verdict.gated && !verdict.pass ? " (expected-fail pending #1604)" : "";
+		console.log(`  [${verdict.pass ? "PASS" : "FAIL"}] ${verdict.id}${tag}`);
 		for (const p of verdict.problems) console.log(`         ${p}`);
+		if (verdict.gated && verdict.pass) {
+			console.log(
+				"         note: this leg is gated expected-fail but PASSED -- consider removing the gate.",
+			);
+		}
 	}
 
-	const anyInfra = outcomes.some((o) =>
+	// A gated leg's failure never blocks the job (F3) -- it is still printed
+	// above so the run stays legible about what actually happened.
+	const blocking = outcomes.filter((o) => !(o.gated && !o.pass));
+	const anyInfra = blocking.some((o) =>
 		o.problems.some((p) => p.startsWith("INFRA:")),
 	);
-	const allPass = outcomes.every((o) => o.pass);
+	const allPass = blocking.every((o) => o.pass);
 	console.log(
 		`\n${allPass ? "ALL LEGS CLASSIFIED CORRECTLY" : "CLASSIFICATION MISMATCH DETECTED"}`,
 	);
 	if (allPass) process.exit(0);
 	process.exit(
 		anyInfra &&
-			outcomes.every(
+			blocking.every(
 				(o) => !o.pass || o.problems.every((p) => p.startsWith("INFRA:")),
 			)
 			? 2
