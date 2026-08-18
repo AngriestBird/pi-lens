@@ -46,12 +46,12 @@ import {
 	resetInstallRetryLatches,
 	transientRetryDelayMs,
 	TRANSIENT_MAX_COOLDOWN_MS,
-} from "../../../../clients/dispatch/runners/utils/availability-policy.ts";
+} from "../../../../clients/dispatch/runners/utils/availability-policy.js";
 import {
 	getDegradationSummary,
 	recordDegradationOnce,
 	resetDegradationLedger,
-} from "../../../../clients/degradation-ledger.ts";
+} from "../../../../clients/degradation-ledger.js";
 
 // --- deterministic PRNG (mulberry32) -------------------------------------
 
