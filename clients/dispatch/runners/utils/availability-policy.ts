@@ -146,15 +146,23 @@ export interface ProbeEvidence {
 		| "maven-jar";
 	/**
 	 * Set instead of a fresh `install` outcome when `installed` came from an
-	 * already-known-good answer — the installer's in-memory cache, its
-	 * on-disk probe cache, or a concurrent peer's install — rather than an
-	 * install this call actually ran (#1612 review F2). Pairs with
-	 * `install: "not-attempted"`: without this, a row that fires on every
-	 * dispatch (because the checker's own probe keeps missing on PATH, #1612
-	 * follow-up) reads as a fresh install succeeding every time, when only the
-	 * very first one did.
+	 * already-known-good answer rather than an install this call actually ran
+	 * (#1612 review F2, #1636 review). Pairs with `install: "not-attempted"`:
+	 * without this, a row that fires on every dispatch (because the checker's
+	 * own probe keeps missing on PATH, #1612 follow-up) reads as a fresh
+	 * install succeeding every time, when only the very first one did.
+	 *
+	 *   * `"cache"`    — the installer's in-memory session cache or its
+	 *     persistent probe cache already held a verified path.
+	 *   * `"path"`     — a plain PATH / managed-dir discovery this call, no
+	 *     cache and no install involved.
+	 *   * `"declined"` — policy said no (kill switch, `allowInstall: false`,
+	 *     project trust) and the binary it hands back is whatever discovery
+	 *     found anyway. Neither a cache hit nor a fresh install: #1636 review
+	 *     caught this collapsing into `"cache"`, which reads a policy refusal
+	 *     as a resolved-and-trusted answer.
 	 */
-	resolved?: "cache";
+	resolved?: "cache" | "path" | "declined";
 }
 
 /**

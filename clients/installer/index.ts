@@ -1518,6 +1518,33 @@ export function getInstallAttempt(toolId: string): InstallAttempt | undefined {
 	return installAttempts.get(toolId);
 }
 
+/**
+ * How the last `ensureTool` call for `toolId` resolved a path WITHOUT
+ * recording an install attempt (#1636 review). `getInstallAttempt` answers
+ * "undefined" for three different situations that a compensating-row consumer
+ * must not collapse into one label:
+ *
+ *   * `"session-cache"` — the in-memory `resolvedPathCache` already held a
+ *     verified path (fast path 1).
+ *   * `"probe-cache"`   — the persistent on-disk probe cache answered without
+ *     a fresh spawn (fast path 2).
+ *   * `"path"`          — `getToolPath` found the binary this call, on PATH,
+ *     a package manager's global bin dir, or the managed tools dir — a plain
+ *     discovery, not a cache hit.
+ *
+ * Reset alongside `installAttempts` at the top of every `ensureToolResolved`
+ * call so a stale source never survives past the attempt it described.
+ */
+export type EnsureResolutionSource = "session-cache" | "probe-cache" | "path";
+
+const lastEnsureResolutionSource = new Map<string, EnsureResolutionSource>();
+
+export function getLastEnsureResolutionSource(
+	toolId: string,
+): EnsureResolutionSource | undefined {
+	return lastEnsureResolutionSource.get(toolId);
+}
+
 // Session-lifetime cache: once a tool path is resolved, skip the process-spawn check on subsequent calls.
 const resolvedPathCache = new BoundedLruCache<string, string>(256);
 
@@ -1901,6 +1928,7 @@ export function resetProbeCacheStateForTesting(): void {
 	ensureInFlight.clear();
 	installFailureReasons.clear();
 	installAttempts.clear();
+	lastEnsureResolutionSource.clear();
 	lastManagedInstallVersion.clear();
 	lastResolveTransient.clear();
 	resetPathWalkMemo();
@@ -3900,6 +3928,7 @@ async function ensureToolResolved(
 	// A fresh ensure supersedes whatever the last one recorded, and the trust-gate
 	// branch above deliberately keeps its `declined` record by never reaching here.
 	installAttempts.delete(toolId);
+	lastEnsureResolutionSource.delete(toolId);
 	const cacheResolvedPath = (result: string | undefined): string | undefined => {
 		if (result) {
 			resolvedPathCache.set(toolId, result);
@@ -3988,9 +4017,13 @@ async function ensureToolResolved(
 	// Fast path 1: in-memory session cache — no I/O.
 	const cached = resolvedPathCache.get(toolId);
 	if (cached) {
-		if (!isFullyQualified(cached)) return cached;
+		if (!isFullyQualified(cached)) {
+			lastEnsureResolutionSource.set(toolId, "session-cache");
+			return cached;
+		}
 		try {
 			await fs.access(cached);
+			lastEnsureResolutionSource.set(toolId, "session-cache");
 			return cached;
 		} catch {
 			// The executor would report ENOENT for this cached positive. Evict it
@@ -4009,6 +4042,7 @@ async function ensureToolResolved(
 	const diskCached = await checkProbeCache(toolId);
 	if (diskCached) {
 		resolvedPathCache.set(toolId, diskCached);
+		lastEnsureResolutionSource.set(toolId, "probe-cache");
 		logSessionStart(
 			`auto-install ensure ${toolId}: probe cache hit → ${diskCached}`,
 		);
@@ -4070,6 +4104,7 @@ async function ensureToolResolved(
 				existingPath,
 				wasLastResolveTransient(toolId),
 			);
+			lastEnsureResolutionSource.set(toolId, "path");
 			logSessionStart(
 				`auto-install ensure ${toolId}: already available at ${existingPath} (${Date.now() - ensureStartMs}ms)`,
 			);
