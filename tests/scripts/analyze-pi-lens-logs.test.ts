@@ -341,6 +341,12 @@ describe("analyze-pi-lens-logs.mjs", () => {
 		expect(wd.timedOutFilesTotal).toBe(4);
 		expect(report.latency.phaseTimeouts.lsp_diagnostics_timeout).toBe(1);
 
+		// #1618: the /proj/a sweep's `lsp_workspace_diagnostics` line above has
+		// NO `unconfirmedByReason` field — vintage-attribution fallback buckets
+		// its 4 files under a distinctly-labeled "pre-#1618 build" reason
+		// instead of asserting they really were budget timeouts.
+		expect(wd.unconfirmedByReason).toEqual({ "budget (pre-#1618 build)": 4 });
+
 		const incomplete = report.smells.find(
 			(s: any) => s.id === "lsp-workspace-diagnostics-incomplete",
 		);
@@ -407,5 +413,68 @@ describe("analyze-pi-lens-logs.mjs", () => {
 		);
 		expect(smell?.count).toBe(1);
 		expect(smell.examples[0].errorKind).toBe("multiple_ast_nodes");
+	});
+});
+
+// #1618 review round 5: the forensics tool that FOUND #1618 read the flat
+// `timedOutFiles` count and reported every unconfirmed file as "hit the
+// per-file budget" — 81 of the 111 it counted were actually
+// service-destroyed. This isolated fixture (a post-#1618-build log line
+// carrying the new `unconfirmedByReason` field) proves the analyzer now
+// attributes by the real reason instead of collapsing everyone into budget.
+describe("analyze-pi-lens-logs.mjs — unconfirmedByReason attribution (#1618 R5)", () => {
+	let root: string;
+	let report: any;
+
+	beforeAll(() => {
+		root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-loganalyze-1618-"));
+		const latency = [
+			{
+				type: "phase",
+				ts: NOW,
+				phase: "lsp_workspace_diagnostics",
+				filePath: "/proj/c",
+				durationMs: 2000,
+				metadata: {
+					filesChecked: 225,
+					diagnosticCount: 5,
+					timedOutFiles: 111,
+					unconfirmedByReason: {
+						service_destroyed: 81,
+						coverage_gap: 28,
+						budget: 0,
+						inconclusive: 0,
+						error: 2,
+					},
+				},
+			},
+		]
+			.map((e) => JSON.stringify(e))
+			.join("\n");
+		fs.writeFileSync(path.join(root, "latency.log"), `${latency}\n`);
+		report = runReport(root);
+	});
+
+	afterAll(() => removeTempDirSync(root));
+
+	it("attributes the real per-reason breakdown instead of the flat budget count", () => {
+		const wd = report.latency.workspaceDiagnostics;
+		expect(wd.timedOutFilesTotal).toBe(111);
+		// The whole point: this is NOT "budget (pre-#1618 build)": 111 — the
+		// per-reason field is present, so it's read directly, and a zero-count
+		// reason contributes nothing (never a manufactured "budget: 0" that
+		// could read as though budget exhaustion happened at all).
+		expect(wd.unconfirmedByReason).toEqual({
+			service_destroyed: 81,
+			coverage_gap: 28,
+			error: 2,
+		});
+		expect(wd.unconfirmedByReason["budget (pre-#1618 build)"]).toBeUndefined();
+
+		const smell = report.smells.find(
+			(s: any) => s.id === "lsp-workspace-file-timeouts",
+		);
+		expect(smell?.description).toContain("service_destroyed=81");
+		expect(smell?.description).not.toContain("hit the per-file budget");
 	});
 });
