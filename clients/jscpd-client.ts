@@ -154,6 +154,27 @@ export class JscpdClient {
 	}
 
 	/**
+	 * #1623: public availability verdict for callers outside the dispatch
+	 * graph (mode=full's fresh-fetch) that need to say WHY `ensureAvailable()`
+	 * most recently returned false, using the SAME outcome/cause the shared
+	 * `jscpdAvailability` checker already tracks — not a re-guessed "jscpd
+	 * binary unavailable" that can't tell a transient retry-cooldown probe
+	 * from a durable absence.
+	 */
+	getAvailabilityVerdict(): {
+		outcome: ReturnType<typeof jscpdAvailability.getOutcome>;
+		cause: ReturnType<typeof jscpdAvailability.getVerdict>["cause"];
+		retryAtMs: number;
+	} {
+		const verdict = jscpdAvailability.getVerdict(process.cwd());
+		return {
+			outcome: verdict.outcome,
+			cause: verdict.cause,
+			retryAtMs: verdict.retryAtMs,
+		};
+	}
+
+	/**
 	 * Scan a directory for duplicate code blocks.
 	 * Uses a temp output dir to capture JSON report.
 	 * @param isTsProject - If true, excludes .js files (they're compiled artifacts in TS projects)

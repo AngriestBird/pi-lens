@@ -94,7 +94,7 @@ describe("lens_diagnostic_mark tool (#690)", () => {
 		expect(result.isError).toBeFalsy();
 		expect(fs.readFileSync(path.join(tmpDir, "a.ts"), "utf-8")).toBe(content);
 		const anchor = (result.details as { anchor: string }).anchor;
-		expect(isDeferredThisSession(anchor)).toBe(true);
+		expect(isDeferredThisSession(tmpDir, anchor)).toBe(true);
 	});
 
 	it("disposition=flagged records the disposition and getDisposition shows flagged with fix context", async () => {
