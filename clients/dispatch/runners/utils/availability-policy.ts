@@ -110,10 +110,11 @@ export interface ProbeEvidence {
 	installReason?: string;
 	/**
 	 * Basename of the binary the installer resolved, when `install:
-	 * "succeeded"`. The compensating `available` row after a probe-then-install
-	 * recovery (#1606) is the only durable record that the tool came back —
-	 * without a name here, a reader can see the verdict flipped but not what
-	 * resolved it.
+	 * "succeeded"` or a cache resolved it without a fresh attempt. The
+	 * compensating `available` row after a probe-then-install recovery
+	 * (#1606) is the only durable record that the tool came back — without a
+	 * name here, a reader can see the verdict flipped but not what resolved
+	 * it.
 	 *
 	 * Deliberately a BASENAME, never the resolved absolute path — same rule as
 	 * `unreachablePreferred` below (#1568 review): an absolute path under the
@@ -122,13 +123,38 @@ export interface ProbeEvidence {
 	 */
 	binary?: string;
 	/**
-	 * Where `binary` was resolved from, alongside it. `"managed-dir"` for the
-	 * pi-lens installer's own tools directory (gitleaks, trivy, opengrep);
-	 * `"go-install"` for a Go-toolchain install (govulncheck) — a distinct
-	 * label since #1606's two known installer families disagree on where the
-	 * binary ends up and a reader needs to know which convention resolved it.
+	 * Which installer family resolved `binary`, alongside it. Derived from the
+	 * tool registry's own `installStrategy` (#1612 review F1) — never
+	 * hand-mapped per runner, since a second, parallel list drifts out of sync
+	 * with the registry the moment either one changes:
+	 *
+	 *   * `"managed-dir"`  — an npm-strategy install into pi-lens's managed
+	 *     tools directory (gitleaks, trivy, opengrep, pyright, jscpd, knip, …).
+	 *   * `"go-install"`   — a Go-toolchain install (govulncheck).
+	 *   * `"pip-user"`     — a pip --user install (ruff).
+	 *   * `"github-release"` — a GitHub-release binary download (golangci-lint,
+	 *     shellcheck, shfmt, terragrunt, tflint, helm, trivy).
+	 *   * `"archive-dist"` — a downloaded archive's extracted binary (spotbugs).
+	 *   * `"maven-jar"`    — a Maven-resolved jar (ktfmt).
 	 */
-	source?: "managed-dir" | "go-install";
+	source?:
+		| "managed-dir"
+		| "go-install"
+		| "pip-user"
+		| "github-release"
+		| "archive-dist"
+		| "maven-jar";
+	/**
+	 * Set instead of a fresh `install` outcome when `installed` came from an
+	 * already-known-good answer — the installer's in-memory cache, its
+	 * on-disk probe cache, or a concurrent peer's install — rather than an
+	 * install this call actually ran (#1612 review F2). Pairs with
+	 * `install: "not-attempted"`: without this, a row that fires on every
+	 * dispatch (because the checker's own probe keeps missing on PATH, #1612
+	 * follow-up) reads as a fresh install succeeding every time, when only the
+	 * very first one did.
+	 */
+	resolved?: "cache";
 }
 
 /**
