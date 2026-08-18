@@ -464,6 +464,19 @@ const SYMBOL_QUERIES: Record<string, { defs: string; refs: string }> = {
 	// tree-sitter gotcha). `#Definition`s map to `type` (the closest existing
 	// SymbolKind to a reusable CUE schema); plain fields map to `property`;
 	// `let` bindings map to `variable`.
+	//
+	// Two known upstream grammar rough edges (#1522 review round 1, F4;
+	// docs/language-coverage.md's CUE row has the same note, kept in sync):
+	// (1) an aliased field label (`X=name: value`) exposes BOTH identifiers
+	// as untagged siblings under one `label` node — `(label alias:
+	// (identifier) (identifier))` — with no field/structural way to tell the
+	// alias from the real name, so `fieldDef` spuriously captures the alias
+	// too, alongside the correct symbol for `name`. (2) a multi-hash raw
+	// string (`##"..."##`, 2+ `#` delimiters) mis-parses regardless of
+	// content — the field's value becomes a bare `identifier` instead of a
+	// `string`, which can surface as a spurious `#`-prefixed ref via the
+	// `typeIdent` pattern below. Both are grammar bugs, not query bugs — no
+	// query change here can distinguish what the parse tree doesn't.
 	cue: {
 		defs: `
       (field
@@ -653,10 +666,16 @@ const IMPORT_QUERIES: Record<string, string> = {
         (word) @importSource
         (#match? @_m "^(source|\\.)$"))
     `,
-	// import "strings" / import x "encoding/json" — `import_spec`'s `path:` field
-	// is verified against the committed wasm.
+	// import "strings" / import x "encoding/json" — `import_spec`'s `path:`
+	// field is verified against the committed wasm. Block-form
+	// (`import (\n\t"strings"\n)`) nests each `import_spec` one level deeper,
+	// under `import_spec_list`, rather than as a direct child of
+	// `import_declaration` — a second pattern is needed, not a reshaped first
+	// one (#1522 review round 1, F2: the single-line-only pattern extracted
+	// zero imports from the block form).
 	cue: `
       (import_declaration (import_spec path: (string) @importSource))
+      (import_declaration (import_spec_list (import_spec path: (string) @importSource)))
     `,
 };
 

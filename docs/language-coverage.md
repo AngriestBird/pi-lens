@@ -54,6 +54,26 @@ values and failed constraints to `cue vet` — the `cue-vet` auxiliary runner
 (#1522) covers that gap, so together they give full coverage: syntax/parse
 diagnostics, hover, definition, completion, code actions, and formatting from
 the language server, plus evaluation-error validation from `cue vet` on every
-edit. `.cue` files parse under tree-sitter with symbol (`#Definition`s,
-fields, `let` bindings) and import queries (#1522), so structural symbol
-search and import extraction cover CUE the same as any other language.
+edit (vetted at the PACKAGE level — the touched file's directory — with the
+result filtered back to that file, since CUE packages are directory-scoped).
+`.cue` files parse under tree-sitter with symbol (`#Definition`s, fields,
+`let` bindings) and import queries (#1522), giving CUE the same structural
+symbol search and import extraction as any other language, with two known
+rough edges inherited from the young `tree-sitter-cue` grammar itself (not
+this repo's queries):
+
+- **Multi-hash raw strings** (`` ##"..."## ``, two or more `#` delimiters)
+  mis-parse regardless of content — the field's value becomes a bare
+  `identifier` node instead of a `string`, and the parser emits stray
+  top-level nodes outside the field entirely. Because the broken value node
+  can carry `#`-prefixed text, this can surface as a spurious symbol
+  reference in the extracted refs. Single-hash raw strings (`` #"..."# ``)
+  are unaffected.
+- **Aliased field labels** (`X=name: value`) emit the alias identifier (`X`)
+  as its own spurious `property` symbol alongside the real field's correct
+  symbol, because the grammar exposes both identifiers as untagged siblings
+  under the same `label` node with no way to tell them apart structurally.
+
+Both are upstream grammar limitations (tracked among
+[eonpatapon/tree-sitter-cue](https://github.com/eonpatapon/tree-sitter-cue)'s
+open issues), not something a query change here can fix.
