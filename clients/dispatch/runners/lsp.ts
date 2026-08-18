@@ -80,9 +80,9 @@ function buildCodeActionSuggestion(
 const lspRunner: RunnerDefinition = {
 	id: "lsp",
 	// Derived from LANGUAGE_POLICY, never hand-maintained: the copy this
-	// replaced had drifted (fish was lspCapable but absent, so every surface
-	// that consults the registry reported fish as having no runner). Registering
-	// a language as lspCapable is now the only step this seam needs (#1545).
+	// replaced had drifted (fish was lspCapable but absent, so getForKind
+	// answered that no LSP runs on fish). Registering a language as lspCapable
+	// is now the only step this seam needs (#1545).
 	appliesTo: getLspCapableKinds(),
 	priority: PRIORITY.LSP_PRIMARY,
 	enabledByDefault: true,

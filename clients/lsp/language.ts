@@ -217,8 +217,11 @@ const CURATED_LANGUAGE_EXTENSIONS: Record<string, string> = {
  * Curated ids plus a derived fill-in for every extension an lspCapable kind
  * registers. Before #1545 this table was hand-maintained alone and had drifted:
  * powershell had no entry at all and cxx covered a third of its extensions, so
- * `didOpen` announced those files as "plaintext" and the server ignored them.
- * A newly registered language now reaches this seam by being lspCapable.
+ * `didOpen` announced those files as "plaintext". Tolerance for that varies by
+ * server — json/yaml/clangd answer the same either way, a DocumentSelector
+ * server may not handle the document at all — so the id is sent correctly
+ * rather than relied on being ignored. A newly registered language now reaches
+ * this seam by being lspCapable.
  */
 export const LANGUAGE_EXTENSIONS: Record<string, string> = (() => {
 	const map: Record<string, string> = { ...CURATED_LANGUAGE_EXTENSIONS };

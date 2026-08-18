@@ -18,6 +18,65 @@ import {
 	LANGUAGE_EXTENSIONS,
 } from "../../clients/lsp/language.js";
 
+// Every language id an lspCapable file can be announced as on didOpen. Each
+// one is a spelling some real server answers to, which is a fact about that
+// server and not something the code can derive: the registry's own id is a
+// pi-lens-internal label ("shell"), and the id vscode-json-language-server or
+// bash-language-server expects ("shellscript") is a separate decision. So the
+// set is pinned by hand, and a new or renamed id has to be added here
+// deliberately, after someone checks the target server accepts it.
+//
+// tests/clients/language-policy.test.ts already fails a kind with no
+// registered primary server at all; this covers the case that one slips past:
+// a kind that HAS a server but announces itself in a spelling the server's
+// DocumentSelector never matches.
+const ACCEPTED_LSP_LANGUAGE_IDS = [
+	"c",
+	"clojure",
+	"cmake",
+	"cpp",
+	"csharp",
+	"css",
+	"dart",
+	"dockerfile",
+	"elixir",
+	"fish",
+	"fsharp",
+	"gleam",
+	"go",
+	"haskell",
+	"html",
+	"java",
+	"javascript",
+	"javascriptreact",
+	"json",
+	"jsonc",
+	"kotlin",
+	"less",
+	"lua",
+	"markdown",
+	"nix",
+	"ocaml",
+	"php",
+	"powershell",
+	"prisma",
+	"python",
+	"ruby",
+	"rust",
+	"sass",
+	"scss",
+	"shellscript",
+	"svelte",
+	"swift",
+	"terraform",
+	"toml",
+	"typescript",
+	"typescriptreact",
+	"vue",
+	"yaml",
+	"zig",
+];
+
 describe("lspCapable seam coverage", () => {
 	// An empty appliesTo means "every kind" to RunnerRegistry.getForKind, so a
 	// derivation that resolved to nothing would silently invert into running the
@@ -59,7 +118,8 @@ describe("lspCapable seam coverage", () => {
 
 	// The seam that matters is didOpen's languageId, not the table itself.
 	// "plaintext" counts as unresolved: it is what the didOpen call sites
-	// substitute for undefined, and a server ignores a file announced that way.
+	// substitute for undefined, and whether a server tolerates it is that
+	// server's choice, not something this seam gets to assume.
 	it("resolves a language id for every lspCapable extension", () => {
 		const unresolved = getLspCapableKinds().flatMap((kind) =>
 			KIND_EXTENSIONS[kind].filter((extension) => {
@@ -71,6 +131,23 @@ describe("lspCapable seam coverage", () => {
 			unresolved,
 			`extension(s) still falling back to plaintext on didOpen: ${unresolved.join(", ")}`,
 		).toEqual([]);
+	});
+
+	// Presence is not spelling. The derivation fills gaps from the registry's
+	// per-kind id, so a kind registered with a label no server answers to
+	// ("Probe-Lang-Script") satisfies every guard above. Pinning the reachable
+	// set makes the spelling a review decision instead of an accident.
+	it("announces lspCapable files only under an accepted language id", () => {
+		const reachable = [
+			...new Set(
+				getLspCapableKinds().flatMap((kind) =>
+					KIND_EXTENSIONS[kind]
+						.map((extension) => getLanguageId(`file${extension}`))
+						.filter((id): id is string => id !== undefined),
+				),
+			),
+		].sort();
+		expect(reachable).toEqual([...ACCEPTED_LSP_LANGUAGE_IDS].sort());
 	});
 
 	// Sweep findings the derivation fixed alongside fish — powershell had no
