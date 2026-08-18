@@ -1355,3 +1355,79 @@ describe("PersistedWidgetState v1→v2 migration — per-entry stamps inherit th
 		}
 	});
 });
+
+describe("past-EOF diagnostic gate (#1641)", () => {
+	it("RED CASE: demotes a stored diagnostic whose cited line exceeds the file's current on-disk line count", async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "past-eof-"));
+		const filePath = path.join(tmpDir, "kilo.ts");
+		try {
+			// A live in-memory-vs-disk desync never touches mtime — the file was
+			// NEVER re-written on disk (#1641's forensic case: 402 lines on disk,
+			// diagnostics served at 407-410). A 5-line file stands in for that
+			// shape here: the cited line is past EOF from the moment it's recorded.
+			await fs.writeFile(filePath, "a\nb\nc\nd\ne\n");
+			recordDiagnostics(
+				filePath,
+				[
+					{ severity: "error", message: "still valid", line: 3, rule: "X" },
+					{ severity: "error", message: "stale in-memory citation", line: 407, rule: "Y" },
+				],
+				1,
+			);
+
+			// Pre-fix: both entries re-serve verbatim, including the impossible
+			// line-407 citation on a 5-line file, and both count as blocking.
+			const summaries = getFileDiagnosticSummaries();
+			const rec = summaries.find((s) => s.filePath === filePath);
+			expect(rec).toBeDefined();
+			const stale = rec?.diagnostics.find((d) => d.line === 407);
+			const live = rec?.diagnostics.find((d) => d.line === 3);
+			expect(stale?.stale).toBe(true);
+			expect(live?.stale).toBeFalsy();
+			// Demoted out of the blocking tally — same reasoning as isBlocking.
+			expect(rec?.blocking).toBe(1);
+
+			// getFileDiagnostics (the bus-publish/single-file accessor) sees the
+			// same demotion — one gate, every reader.
+			const single = getFileDiagnostics(filePath);
+			expect(single?.find((d) => d.line === 407)?.stale).toBe(true);
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
+
+	it("does not demote a diagnostic whose cited line is still within the current file", async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "past-eof-ok-"));
+		const filePath = path.join(tmpDir, "fine.ts");
+		try {
+			await fs.writeFile(filePath, "a\nb\nc\nd\ne\n");
+			recordDiagnostics(
+				filePath,
+				[{ severity: "error", message: "on the last line", line: 5, rule: "X" }],
+				1,
+			);
+			const rec = getFileDiagnosticSummaries().find((s) => s.filePath === filePath);
+			expect(rec?.diagnostics[0]?.stale).toBeFalsy();
+			expect(rec?.blocking).toBe(1);
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
+
+	it("the TUI render loop demotes a past-EOF blocker out of the blocking list it shows", async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "past-eof-render-"));
+		const filePath = path.join(tmpDir, "widget.ts");
+		try {
+			await fs.writeFile(filePath, "a\nb\nc\n");
+			recordDiagnostics(
+				filePath,
+				[{ severity: "error", message: "phantom citation", line: 999, rule: "X" }],
+				1,
+			);
+			const out = renderWidget(120, theme).join("\n");
+			expect(out).not.toContain("L999");
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
+});

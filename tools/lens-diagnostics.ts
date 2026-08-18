@@ -74,6 +74,12 @@ import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics
 import { retagAuxiliaryDiagnostics } from "../clients/dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../clients/file-role.js";
 import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
+import {
+	createLineCountCache,
+	demotePastEofDiagnostics,
+	PAST_EOF_STALE_MARKER,
+	resyncDocumentOnPastEof,
+} from "../clients/diagnostic-line-freshness.js";
 
 // The widget state exposes the full per-file diagnostic set; this is the tool's
 // own generous display budget per file (independent of the TUI's 12 cap), to
@@ -845,8 +851,11 @@ function applyProjectRulePolicy<T extends { diagnostics: ProjectDiagnostic[] }>(
 	return { ...value, diagnostics: applyRulePolicy(value.diagnostics, policyMap) };
 }
 
-/** A diagnostic counts as error-like when it blocks or has error severity. */
+/** A diagnostic counts as error-like when it blocks or has error severity.
+ * A `stale` (#1641 past-EOF) entry is excluded — its cited line no longer
+ * exists in the current file, so it can no longer count toward a hard stop. */
 function isErrorLike(d: WidgetDiagnostic): boolean {
+	if (d.stale) return false;
 	return d.semantic === "blocking" || d.severity === "error";
 }
 
@@ -938,6 +947,9 @@ function summarizeDiagnostics(
 	let errors = 0;
 	let warnings = 0;
 	for (const diagnostic of diagnostics) {
+		// #1641: a demoted past-EOF entry keeps its severity for display but
+		// drops out of the tallies — same reasoning as widget-state's `isBlocking`.
+		if (diagnostic.stale) continue;
 		if (diagnostic.semantic === "blocking") blocking++;
 		if (diagnostic.severity === "error") errors++;
 		else if (diagnostic.severity === "warning") warnings++;
@@ -1910,9 +1922,29 @@ function formatAllMode(
 	// disposition (zero I/O), mode=all applies it here on the cache-only path.
 	// The full path's policyMover is loaded below in `applyInlineSuppressionsToSummaries`.
 	const policyMap = loadProjectRulePolicyMap(cwd);
+	// #1641: the single chokepoint both mode=all (cache-only `summaries`) and
+	// mode=full (widget cache merged with a FRESH LSP sweep, above) converge
+	// through — a fresh sweep's server can still be citing its own stale
+	// in-memory document, so gating only the cached half would miss exactly
+	// the live incident this issue reports. One pass-scoped line-count memo
+	// covers every file exactly once per call regardless of which half
+	// produced its diagnostics.
+	const lineCountCache = createLineCountCache();
+	const eofGated = summaries.map((s) => {
+		const { diagnostics, demotedCount } = demotePastEofDiagnostics({
+			store: "lens_diagnostics",
+			cwd,
+			filePath: s.filePath,
+			diagnostics: s.diagnostics ?? [],
+			lineCountCache,
+			resync: resyncDocumentOnPastEof,
+		});
+		if (demotedCount === 0) return s;
+		return summarizeDiagnostics(s.filePath, diagnostics, s.hasFinalSnapshot);
+	});
 	const dispositioned = isFullMode
-		? summaries
-		: summaries.map((s) => {
+		? eofGated
+		: eofGated.map((s) => {
 				const kept = applyWeakDispositions(s.diagnostics ?? [], cwd, s.filePath);
 				const policyKept = applyRulePolicy(kept, policyMap);
 				if (
@@ -1924,11 +1956,22 @@ function formatAllMode(
 			});
 	const visibleSummaries = dispositioned.filter((s) => includeFile(s.filePath));
 
-	// Filter to files with actual issues
+	// Filter to files with actual issues. A file whose only findings were
+	// demoted by the #1641 past-EOF gate has blocking/errors/warnings at 0 —
+	// counting it as "issue-free" would tell the agent the file is CLEAN when
+	// it actually has an unconfirmed finding waiting on a rescan. Surface it
+	// under `severity: "all"` (the gate's own advisory tier) so it stays
+	// visible; a narrower `error`/`warning` filter still excludes it, matching
+	// how those filters already treat any other non-matching severity.
 	const withIssues = visibleSummaries.filter((s) => {
 		if (severity === "error") return s.blocking > 0 || s.errors > 0;
 		if (severity === "warning") return s.warnings > 0;
-		return s.blocking > 0 || s.errors > 0 || s.warnings > 0;
+		return (
+			s.blocking > 0 ||
+			s.errors > 0 ||
+			s.warnings > 0 ||
+			(s.diagnostics ?? []).some((d) => d.stale)
+		);
 	});
 
 	const pathsNote = isFullMode ? "" : pathsScopeCacheOnlyNote(pathsScope);
@@ -1968,6 +2011,12 @@ function formatAllMode(
 		if (s.errors > 0 && s.blocking === 0) parts.push(`${s.errors}E`);
 		if (s.warnings > 0) parts.push(`${s.warnings}W`);
 		if (!s.hasFinalSnapshot) parts.push(`(pending)`);
+		const staleCount = (s.diagnostics ?? []).filter((d) => d.stale).length;
+		if (staleCount > 0) {
+			parts.push(
+				`${staleCount} stale — re-run to confirm`,
+			);
+		}
 		lines.push(`${rel}  ${parts.join("  ")}`);
 
 		// List the actual diagnostics (not just counts) so the agent can act on
@@ -1989,7 +2038,11 @@ function formatAllMode(
 			const tag = label ? ` [${label}]` : "";
 			const flaggedTag = d.flagged ? " 📌 flagged-to-fix" : "";
 			const msg = d.message.replace(/\s+/g, " ").trim();
-			lines.push(`  ${marker}L${d.line ?? "?"}: ${msg}${tag}${flaggedTag}`);
+			// #1641: a demoted past-EOF entry no longer has a trustworthy line —
+			// show the marker instead of a coordinate that doesn't exist in the
+			// current file, matching the #1622/#1627 stale-line render convention.
+			const loc = d.stale ? PAST_EOF_STALE_MARKER : `L${d.line ?? "?"}`;
+			lines.push(`  ${marker}${loc}: ${msg}${tag}${flaggedTag}`);
 		}
 		if (matching.length > shown.length) {
 			lines.push(

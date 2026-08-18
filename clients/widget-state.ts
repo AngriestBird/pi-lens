@@ -1,6 +1,11 @@
 import { stat } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+	createLineCountCache,
+	demotePastEofDiagnostics,
+	type LineCountCache,
+} from "./diagnostic-line-freshness.js";
 import { visibleWidth } from "./deps/pi-tui.js";
 import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { fitLine } from "./tui-fit.js";
@@ -67,6 +72,15 @@ export interface WidgetDiagnostic {
 	 * inherits the record's `touchedAt` — a safe, over-conservative default.
 	 */
 	observedAt?: number;
+	/**
+	 * Set when a freshness gate demoted this diagnostic (#1641's past-EOF gate:
+	 * the cited `line` exceeds the file's CURRENT on-disk line count). Demoted
+	 * entries stay in the set — the underlying issue may still be real — but
+	 * are excluded from blocking/error/warning tallies (`isBlocking`,
+	 * `countDiagnostics`) and rendered with `PAST_EOF_STALE_MARKER` in place of
+	 * the line, since that coordinate is no longer trustworthy.
+	 */
+	stale?: boolean;
 }
 
 /**
@@ -80,6 +94,7 @@ export interface WidgetDiagnostic {
  * from what the footer counts.
  */
 export function isBlocking(d: WidgetDiagnostic): boolean {
+	if (d.stale) return false;
 	if (d.semantic === "blocking") return true;
 	if (d.semantic == null && d.severity === "error") return true;
 	return false;
@@ -517,10 +532,47 @@ function countDiagnostics(diags: WidgetDiagnostic[]): {
 	let warnings = 0;
 	for (const diagnostic of diags) {
 		if (isBlocking(diagnostic)) blocking++;
+		// A stale (past-EOF) entry keeps its severity for display purposes but
+		// is excluded from the error/warning tallies alongside blocking — its
+		// cited coordinate is no longer trustworthy, same reasoning as `isBlocking`.
+		if (diagnostic.stale) continue;
 		if (diagnostic.severity === "error") errors++;
 		else if (diagnostic.severity === "warning") warnings++;
 	}
 	return { blocking, errors, warnings };
+}
+
+/**
+ * Apply the #1641 past-EOF gate to `rec` in place: demote (never drop) any
+ * stored diagnostic whose cited line exceeds the file's CURRENT on-disk line
+ * count, then recompute the capped/full diagnostic lists and the counts so
+ * every reader (the TUI render loop, `getFileDiagnosticSummaries`,
+ * `getFileDiagnostics`) sees one consistent, already-gated record instead of
+ * each re-deriving its own verdict. Cheap on the common case: one memoized
+ * stat per record (see `getCachedLineCount`), a full recount only when the
+ * file's mtime moved since the last check.
+ *
+ * No `resync` callback here deliberately: this gate runs on the TUI's render
+ * path and the bus-publish/mark-tool read accessors, all of which fire far
+ * more often than an agent's own edit/tool cadence. Triggering a document
+ * resync from every one of those reads would storm the LSP with didOpen calls
+ * for a file whose drift hasn't yet been fixed. `tools/lens-diagnostics.ts`'s
+ * `formatAllMode` — an explicit, agent-invoked tool call — is the resync
+ * trigger point (#1641 criterion 2); this gate still demotes/logs on its own.
+ */
+function applyPastEofGate(rec: FileRecord, lineCountCache: LineCountCache): void {
+	if (rec.allDiagnostics.length === 0) return;
+	const { diagnostics, demotedCount } = demotePastEofDiagnostics({
+		store: "widget-state",
+		cwd: process.cwd(),
+		filePath: rec.filePath,
+		diagnostics: rec.allDiagnostics,
+		lineCountCache,
+	});
+	if (demotedCount === 0) return;
+	rec.allDiagnostics = diagnostics;
+	rec.diagnostics = capStoredDiagnostics(diagnostics);
+	rec.diagnosticCounts = countDiagnostics(diagnostics);
 }
 
 /** The newest per-entry `observedAt` in `diags`, or `fallback` when empty (or no
@@ -776,14 +828,18 @@ export interface FileDiagnosticSummary {
  * everything, not just the 12 the TUI keeps for rendering.
  */
 export function getFileDiagnosticSummaries(): FileDiagnosticSummary[] {
-	return [...files.values()].map((rec) => ({
-		filePath: rec.filePath,
-		blocking: rec.diagnosticCounts.blocking,
-		errors: rec.diagnosticCounts.errors,
-		warnings: rec.diagnosticCounts.warnings,
-		hasFinalSnapshot: rec.hasFinalDiagnosticsSnapshot,
-		diagnostics: rec.allDiagnostics.map((d) => ({ ...d })),
-	}));
+	const lineCountCache = createLineCountCache();
+	return [...files.values()].map((rec) => {
+		applyPastEofGate(rec, lineCountCache);
+		return {
+			filePath: rec.filePath,
+			blocking: rec.diagnosticCounts.blocking,
+			errors: rec.diagnosticCounts.errors,
+			warnings: rec.diagnosticCounts.warnings,
+			hasFinalSnapshot: rec.hasFinalDiagnosticsSnapshot,
+			diagnostics: rec.allDiagnostics.map((d) => ({ ...d })),
+		};
+	});
 }
 
 /**
@@ -807,6 +863,7 @@ export function getFileDiagnosticSummaries(): FileDiagnosticSummary[] {
 export function getFileDiagnostics(filePath: string): WidgetDiagnostic[] | undefined {
 	const rec = files.get(fileMapKey(filePath));
 	if (!rec) return undefined;
+	applyPastEofGate(rec, createLineCountCache());
 	return rec.allDiagnostics.map((d) => ({ ...d }));
 }
 
@@ -928,6 +985,15 @@ export function renderWidget(
 	);
 	if (withBlocking.length > 0) {
 		const rec = withBlocking[0];
+		// #1641: gate only the ONE record whose line numbers are about to be
+		// rendered, not the whole (potentially session-long) `deduped` list the
+		// header counts read — one memoized stat per redraw, never a per-file
+		// scan of every file pi-lens has touched this session. A past-EOF
+		// citation demoted here can leave the header's aggregate blocking count
+		// one turn stale; `reconcileStaleWidgetFiles`'s existing debounced sweep
+		// (scheduleStaleReconcile) already re-derives that aggregate on its own
+		// cadence, so this is a bounded, self-correcting gap, not a silent one.
+		applyPastEofGate(rec, createLineCountCache());
 		if (!useHorizontal) {
 			lines.push(fitLine(dim("─".repeat(Math.min(w, 60))), w));
 			lines.push(fitLine(` ${dim(path.basename(rec.filePath))}`, w));

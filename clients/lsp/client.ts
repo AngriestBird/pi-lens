@@ -1201,6 +1201,23 @@ function recordSentContent(
 		version,
 		hash: hashDiagnosticContent(content),
 	});
+	// #1641 criterion 3: the in-memory document's version + content length AT
+	// SEND TIME, so a later "diagnostic cited a line past current disk EOF"
+	// record (`diagnostic_past_eof`, clients/diagnostic-line-freshness.ts) can be
+	// paired with the send that produced the divergent in-memory document —
+	// today only the symptom (the stale citation) is observable; this is the
+	// cause side of the same timeline.
+	logLatency({
+		type: "phase",
+		phase: "lsp_document_send",
+		filePath: normalizedPath,
+		durationMs: 0,
+		metadata: {
+			version,
+			contentLength: content.length,
+			contentLineCount: content.length === 0 ? 0 : content.split("\n").length,
+		},
+	});
 }
 
 // Methods that can be registered dynamically and map to operationSupport keys
