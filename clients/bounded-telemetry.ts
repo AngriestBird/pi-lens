@@ -8,8 +8,11 @@
  * timeouts, rising edge per method and file), and #1733 (loop-block floor
  * with a per-turn bound) each rebuilt it, and each needed a review round to
  * get the bounding right. This module is the intersection of those four, not
- * a speculative framework: every option below exists because at least one of
- * them used it.
+ * a speculative framework. Three of its four options come straight from those
+ * sites. The fourth, `capPerTurn`, expresses #1733's per-turn bound
+ * structurally but has no caller yet: that site's bound is its call cadence,
+ * and pinning a cap there would red its own wiring tests. It ships tested and
+ * mutation-proofed, awaiting its first site.
  *
  * Three rules the helper makes structural instead of prose:
  *
@@ -69,6 +72,14 @@ export const BOUNDED_TELEMETRY_PHASES = [
 	"lsp_nav_request_timeout",
 	/** #1716: that abandoned nav request answered anyway, after the caller left. */
 	"lsp_nav_late_answer_discarded",
+	/**
+	 * #1743 review: a per-file touch skipped a server in breaker cooldown or
+	 * latched permanently broken. Fires once per file per touch during an
+	 * outage, so it is rising-edge per (server, file).
+	 */
+	"lsp_client_skipped_broken",
+	/** #1743 review: the same skip, for a temporarily unavailable command. */
+	"lsp_client_skipped_unavailable_command",
 	/**
 	 * #1723: an event-loop block at or above the floor. Not a degradation, so
 	 * no ledger kind; bounded by call cadence (one `turn_end` runs it once per

@@ -25,7 +25,7 @@ export interface EmissionSite {
 const CALLEES = ["logLatency", "emitBounded", "admitBounded"] as const;
 
 /** Directories scanned. Compiled output and tests are not sources of truth. */
-export const SCAN_ROOTS = ["clients", "index.ts"];
+export const SCAN_ROOTS = ["clients", "tools", "index.ts"];
 
 /**
  * A phase name whose shape says the record is written on a FAILURE or
@@ -46,10 +46,29 @@ export const SCAN_ROOTS = ["clients", "index.ts"];
  *   would be noise, and flagging them would bury the paths that matter.
  */
 export function isFailureShapedPhase(phase: string): boolean {
-	return /(?:_timeout|_failure|_failed|_error|_drop|_dropped|_discarded|_unavailable|_unsupported|_abort|_stall|_exhausted|_late_answer|_unresolved|_degraded|_refused|_denied|_evicted|_corrupt|_orphan|_mismatch|_blocked|_skip|_skipped)$/.test(
-		phase,
-	);
+	return OUTCOME_SUFFIX.test(phase) || OUTCOME_INFIX.test(phase);
 }
+
+/**
+ * The outcome the record names, at the END of the phase name. This is the
+ * repo's dominant convention: `lsp_pull_diagnostic_timeout`,
+ * `project_snapshot_persist_failed`, `review_graph_size_skip`.
+ */
+const OUTCOME_SUFFIX =
+	/(?:_timeout|_failure|_failed|_error|_drop|_dropped|_discarded|_unavailable|_unsupported|_abort|_abandoned|_stall|_exhausted|_late_answer|_unresolved|_degraded|_refused|_denied|_evicted|_corrupt|_orphan|_mismatch|_blocked|_broken|_leak|_leaked|_missing|_exit|_skip|_skipped)$/;
+
+/**
+ * The outcome NAMED MID-PHASE, with the reason trailing it:
+ * `lsp_client_skipped_unavailable_command` says what happened (skipped) and
+ * then why (the command was unavailable). A suffix-anchored rule alone cannot
+ * see those, and #1743's review found two real unbounded records hiding there.
+ *
+ * Kept to `skip`/`skipped` deliberately. Those are the outcomes this repo
+ * qualifies with a trailing reason; a general "outcome word anywhere" rule
+ * would match throughput phases like `lsp_timeout_budget_resolved`, whose
+ * subject happens to be a failure concept.
+ */
+const OUTCOME_INFIX = /_skipped?_/;
 
 /** Collect every emission site under `SCAN_ROOTS`, relative to `repoRoot`. */
 export function scanEmissionSites(repoRoot: string): EmissionSite[] {
@@ -148,6 +167,18 @@ export const UNBOUNDED_FAILURE_PHASE_REASONS: Record<string, string> = {
 		"One record per `agent_end`, which fires at most once per turn.",
 	astgrep_napi_unsupported_rules_skipped:
 		"The site already holds a first-seen-per-language set (`unsupportedLanguageLog`) and returns early when it admits nothing, so this is a rising edge per language.",
+	helm_render_scratch_leak:
+		"One record per helm-render scratch-directory discard, so one per render run.",
+	lsp_notify_backpressure_broken:
+		"One record per client demotion, and the demoted client is torn down on the same path, so the same key cannot re-emit until a replacement spawns.",
+	lsp_server_unexpected_exit:
+		"One record per server process exit, which is a per-child lifecycle event.",
+	lsp_sweep_group_skipped_warmup:
+		"One record per sweep group whose primary server failed warm-up, and sweeps are already cadence-limited.",
+	lsp_sync_abandoned:
+		"One record per autofix resync the caller bailed on, so at most one per edit.",
+	path_attribution_missing:
+		"One record per `tool_result` with no recorded resolution basis, bounded by the turn's tool calls.",
 	cascade_tier3_reconcile_error:
 		"One record per tier-3 reconcile pass, and the cascade budget already caps those per turn.",
 	cross_process_lsp_budget_degraded:

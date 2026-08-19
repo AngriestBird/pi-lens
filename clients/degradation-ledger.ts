@@ -10,6 +10,21 @@ export type DegradationKind =
 	| "formatter-skip"
 	| "grammar-blocked"
 	| "lsp-breaker"
+	/**
+	 * A per-file touch skipped a language server because that server is in the
+	 * breaker cooldown or is latched permanently broken (#1743). During an
+	 * outage this fires once per file per touch, so the count here is the exact
+	 * total and only the FIRST skip per (server, file) also writes an
+	 * `lsp_client_skipped_broken` latency.log record.
+	 */
+	| "lsp-client-skipped-broken"
+	/**
+	 * A per-file touch skipped a language server because its direct spawn
+	 * command is temporarily marked unavailable (#1743). Same shape and same
+	 * bounding as `lsp-client-skipped-broken`, but keyed on the command, since
+	 * that is what the availability latch is about.
+	 */
+	| "lsp-client-skipped-unavailable-command"
 	| "formatter-failure"
 	| "wasm-abort"
 	| "lsp-diagnostics-timeout"
@@ -97,7 +112,17 @@ export type DegradationKind =
 	 * degradation, and an abandoned pull is one. Subject carries server and
 	 * file so a storming server is visible in aggregate, not just per-event.
 	 */
-	| "lsp-pull-diagnostic-timeout";
+	| "lsp-pull-diagnostic-timeout"
+	/**
+	 * A shell-out linter/analyzer runner (knip, vulture, jscpd, …) produced no
+	 * usable output — empty stdout, or (for report-file runners) no report
+	 * file — on a NONZERO exit (#1736). The empty-result branches these
+	 * runners fall back to for "no findings" must never fire here: a broken
+	 * shim, crash, or config-load error must read as errored/skipped, not
+	 * clean. Reason names the binary and exit status so a stuck/corrupted
+	 * runner is diagnosable from the ledger alone.
+	 */
+	| "runner-empty-result";
 
 export interface DegradationRecord {
 	kind: unknown;

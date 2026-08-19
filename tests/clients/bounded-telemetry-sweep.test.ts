@@ -26,6 +26,7 @@ import { BOUNDED_TELEMETRY_PHASES } from "../../clients/bounded-telemetry.js";
 import {
 	type EmissionSite,
 	isFailureShapedPhase,
+	SCAN_ROOTS,
 	scanEmissionSites,
 	scanSource,
 	UNBOUNDED_FAILURE_PHASE_REASONS,
@@ -124,6 +125,19 @@ describe("bounded-telemetry sweep (#1743)", () => {
 		).toEqual([]);
 	});
 
+	it("every stated reason is for a phase the predicate can actually see", () => {
+		// Couples the two halves. Narrowing the predicate would otherwise leave
+		// the reasons map full of entries the sweep no longer governs, and the
+		// narrowing itself would pass unnoticed.
+		const invisible = Object.keys(UNBOUNDED_FAILURE_PHASE_REASONS).filter(
+			(phase) => !isFailureShapedPhase(phase),
+		);
+		expect(
+			invisible,
+			"A phase has a stated reason but the failure-shape predicate no longer matches it. Either the predicate was narrowed, or the entry does not belong.",
+		).toEqual([]);
+	});
+
 	it("the registry and the reasons map are disjoint", () => {
 		const both = BOUNDED_TELEMETRY_PHASES.filter(
 			(phase) => phase in UNBOUNDED_FAILURE_PHASE_REASONS,
@@ -155,6 +169,14 @@ describe("bounded-telemetry scanner self-test", () => {
 		expect(found.some((site) => site.line === 4)).toBe(false);
 	});
 
+	it("scans every root that emits records, including tools/", () => {
+		// MUTATION PROOF for the SCAN_ROOTS addition (#1743 review F2): drop
+		// "tools" and this reds. `tools/*.ts` call `logLatency` directly, so a
+		// failure record added there would otherwise never be swept.
+		expect(SCAN_ROOTS).toContain("tools");
+		expect(SITES.some((site) => site.file.startsWith("tools/"))).toBe(true);
+	});
+
 	it("classifies failure-shaped phase names by outcome suffix, not by topic", () => {
 		expect(isFailureShapedPhase("lsp_pull_diagnostic_timeout")).toBe(true);
 		expect(isFailureShapedPhase("project_snapshot_persist_failed")).toBe(true);
@@ -165,5 +187,30 @@ describe("bounded-telemetry scanner self-test", () => {
 		expect(isFailureShapedPhase("memory_sample")).toBe(false);
 		// A suffix must END the name, or `timeout_budget_configured` would match.
 		expect(isFailureShapedPhase("lsp_timeout_budget_resolved")).toBe(false);
+	});
+
+	it("catches the outcome-suffix names the first pass missed (#1743 review F1)", () => {
+		// MUTATION PROOF: remove any of these suffixes from OUTCOME_SUFFIX and
+		// the matching line reds. Each names a real record found by the review.
+		expect(isFailureShapedPhase("lsp_notify_backpressure_broken")).toBe(true);
+		expect(isFailureShapedPhase("helm_render_scratch_leak")).toBe(true);
+		expect(isFailureShapedPhase("lsp_server_unexpected_exit")).toBe(true);
+		expect(isFailureShapedPhase("path_attribution_missing")).toBe(true);
+		expect(isFailureShapedPhase("lsp_sync_abandoned")).toBe(true);
+	});
+
+	it("catches an outcome named mid-phase with its reason trailing", () => {
+		// MUTATION PROOF for OUTCOME_INFIX: delete it and both of these red.
+		// `lsp_client_skipped_unavailable_command` ends in `_command`, so no
+		// suffix-anchored rule can see it — that is how two real unbounded
+		// per-file records hid from the first pass.
+		expect(
+			isFailureShapedPhase("lsp_client_skipped_unavailable_command"),
+		).toBe(true);
+		expect(isFailureShapedPhase("lsp_sweep_group_skipped_warmup")).toBe(true);
+		// The infix rule stays narrow: an outcome word appearing anywhere would
+		// sweep throughput phases whose SUBJECT is a failure concept.
+		expect(isFailureShapedPhase("lsp_timeout_budget_resolved")).toBe(false);
+		expect(isFailureShapedPhase("breaker_state_report")).toBe(false);
 	});
 });
