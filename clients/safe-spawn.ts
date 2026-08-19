@@ -1078,7 +1078,18 @@ export async function safeSpawnAsync(
 		let aborted = false;
 		let killed = false;
 		let outputTruncated = false;
-		let spawnErrored = false;
+		// #1651 review: a single boolean the close/error handlers both check
+		// AND set, so whichever one decides the outcome first wins outright —
+		// the DECISION itself is shape-based (see the `close` handler below),
+		// this flag only stops the loser from resolving a second time.
+		let resolved = false;
+		// The most recent 'error' Error, captured the instant the event fires
+		// regardless of whether that handler goes on to resolve. The `close`
+		// handler's shape-based branch (code === null || code < 0) reads this
+		// when it decides FIRST, so a genuinely informative ENOENT/EACCES/etc.
+		// Error is used when it happens to already be available, instead of
+		// always falling back to a generic synthesized one.
+		let pendingSpawnError: Error | undefined;
 		// #1109: the non-Windows SIGTERM→SIGKILL escalation timer (armed in
 		// killTree below). Stored per-call (never shared) so the close/error
 		// handlers can clear it if the child exits before it fires — same
@@ -1413,11 +1424,50 @@ export async function safeSpawnAsync(
 		};
 
 		// Process completion
+		//
+		// #1656 x #1651/#1670: finalize off BOTH `exit` and `close`, not just
+		// one — each covers a shape the other misses.
+		//   - `exit` is what unblocks the #1656 hang: a daemonized descendant
+		//     that inherited our stdout/stderr pipe can hold that fd open
+		//     forever, so `close` (which waits for every fd referencing the
+		//     child to release) never fires even though the child we spawned
+		//     is long dead. `exit` always fires once the child itself exits,
+		//     independent of who still holds its pipes.
+		//   - `close` is still wired because a child that never actually
+		//     launched (bad binary, EACCES, ...) gets NO `exit` event at all —
+		//     Node only emits `error` then `close(code<0, null)` for that
+		//     shape (#1651/#1670's shape guard below decides from exactly
+		//     this). `exit`-only would make that guard unreachable.
+		// Whichever fires first drives `finalize`; `settled` (distinct from
+		// `resolved`, which `finalize` itself owns) stops the second event
+		// from dispatching a redundant, concurrently-racing `finalize` call —
+		// double-invoking it would double-run `waitForPipeIdle` and
+		// `finishResourceUsage` against the same child.
+		let settled = false;
+		const onChildSettle = (
+			code: number | null,
+			signal: NodeJS.Signals | null,
+		): void => {
+			if (settled || resolved) return;
+			settled = true;
+			closed = true;
+			clearTimeout(timeoutId);
+			abortSignal?.removeEventListener("abort", onAbort);
+			if (child.pid) lifetimeState.pids.delete(child.pid);
+			void finalize(code, signal);
+		};
+
 		const finalize = async (
 			code: number | null,
 			signal: NodeJS.Signals | null,
 		): Promise<void> => {
+			// Belt, not the decision: whichever path settles `resolved` FIRST
+			// wins. A healthy run's outcome must never be discarded by a late,
+			// unrelated 'error' (e.g. a post-exit kill() that itself failed
+			// with EPERM, #1651 review F4) — so this only bails when something
+			// else has ALREADY resolved, never on `error` merely having fired.
 			await killPromise;
+			if (resolved) return;
 			// #1109: the child has exited — if killTree armed the non-Windows
 			// SIGTERM→SIGKILL escalation timer and it hasn't fired yet, clear it
 			// so it doesn't linger as a ref'd handle after this promise resolves.
@@ -1427,6 +1477,7 @@ export async function safeSpawnAsync(
 
 			const outputInfo = outputTruncated ? { outputTruncated: true } : {};
 			if (timedOut) {
+				resolved = true;
 				const cause = new Error(
 					`Process timed out after ${timeout}ms (killed with ${signal || "SIGTERM"})`,
 				);
@@ -1441,6 +1492,7 @@ export async function safeSpawnAsync(
 					resourceUsage,
 				});
 			} else if (aborted) {
+				resolved = true;
 				const cause = new Error("Spawn aborted");
 				resolve({
 					stdout,
@@ -1453,6 +1505,7 @@ export async function safeSpawnAsync(
 					resourceUsage,
 				});
 			} else if (signal) {
+				resolved = true;
 				const cause = new Error(`Process killed by signal: ${signal}`);
 				resolve({
 					stdout,
@@ -1464,22 +1517,54 @@ export async function safeSpawnAsync(
 					...outputInfo,
 					resourceUsage,
 				});
+			} else if (code === null || code < 0) {
+				// #1651 review F3: a real completed process never exits with a
+				// null or negative code (Node reports the negated libuv/errno for
+				// a child that never launched — e.g. ENOENT: -2 on Linux, -4058
+				// on Windows). This decides from that SHAPE alone, independent of
+				// whether/when 'error' has fired — Node's docs leave the
+				// 'error'/'close' ordering for a failed spawn unspecified, and a
+				// same-microtask re-check (the #1651 first-round fix) still loses
+				// if 'error' lands a tick later via setImmediate/nextTick.
+				// Reuse `pendingSpawnError` when 'error' already landed (a more
+				// informative Error — ENOENT vs EACCES vs other); otherwise
+				// synthesize an ENOENT-shaped one so a genuinely missing tool is
+				// never read as a clean, answered run.
+				resolved = true;
+				const cause = pendingSpawnError ?? synthesizeEnoentError(command);
+				const spawnFailure = await classifySpawnFailure(cause, {
+					command,
+					cwd: options?.cwd,
+				});
+				resolve({
+					stdout,
+					stderr,
+					status: code,
+					error: cause,
+					failure: "spawn",
+					spawnFailure,
+					...outputInfo,
+					resourceUsage,
+				});
 			} else {
+				resolved = true;
 				resolve({ stdout, stderr, status: code, ...outputInfo, resourceUsage });
 			}
 		};
 
-		child.on("exit", (code, signal) => {
-			if (spawnErrored) return;
-			closed = true;
-			clearTimeout(timeoutId);
-			abortSignal?.removeEventListener("abort", onAbort);
-			if (child.pid) lifetimeState.pids.delete(child.pid);
-			void finalize(code, signal);
-		});
+		child.on("exit", onChildSettle);
+		child.on("close", onChildSettle);
 
 		child.on("error", (err) => {
-			spawnErrored = true;
+			// Capture unconditionally — even when `close` already resolved, this
+			// keeps the most recent Error available for anyone reading state
+			// mid-flight, and costs nothing (the assignment, not a resolve).
+			pendingSpawnError = err;
+			// A completed run's own verdict must never be downgraded by an
+			// unrelated LATE error (#1651 review F4 — e.g. a post-exit kill()
+			// failing with EPERM after `close(0, null)` already answered).
+			if (resolved) return;
+			resolved = true;
 			closed = true;
 			clearTimeout(timeoutId);
 			abortSignal?.removeEventListener("abort", onAbort);

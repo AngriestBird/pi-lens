@@ -138,6 +138,36 @@ its findings ride along. And an inconclusive touch must name its cause
 `diagnostics-wait` / `mixed`) on the result, in `lsp_touch_file`, and in the
 cascade's `neighbor_touch` row. (#1549)
 
+**Content-bound coverage is ONE rule, evaluated ONCE, at the merge.**
+`auxCoversThisContent` (`clients/lsp/index.ts`, inside `touchFile`) is that rule
+— the pre-notify `auxPublishedThisContent` snapshot unioned with a live
+`getDiagnosticBinding` read, both asking `bindingMatchesTouchContent`, the only
+place `touchContentHash` is compared. `auxCoveredAtMerge` freezes it as the last
+statement before the merge, and every door that shares the merge's consequences
+reads that SET, never the function: the merge drop, the deferred door, the
+merged BINDING (a dropped contributor loses its findings and its fingerprint
+together), and the result's `unconfirmedServerIds`. The two aux wait-outcome
+producers still call the function, because their rows describe their own instant;
+their verdict is reconciled against the freeze before anything is claimed.
+
+Both timing errors are live defects, and they point opposite ways. Asking
+EARLIER than the decision underclaims: #1549 put the notify-write door on the
+merge-time read but left the DEFERRED door on the pre-notify snapshot, which
+cannot see a write that lands after it, so a scanner that had published for
+exactly these bytes while its resync sat queued was dropped and named (#1586).
+Asking LATER overclaims, and that is the worse one: `touchFile` awaits after the
+merge (`brokenSkippedAuxiliaryServerIds` on every collecting touch, the tsserver
+sync and liveness gates on theirs), so re-asking when the gap is named let a
+publication landing in that window un-name a scanner whose findings the merge had
+ALREADY dropped — `confirmed` over a `.diags` that is missing the scanner's
+answer, which unblocks the `lastKnownDiagnostics` prime and the
+`demonstratedReady` mark that `coverageGap` exists to hold shut. A drop is an
+action; a later answer cannot undo it. The screen when you add a door: ask the
+rule where the decision is made, never earlier and never later, and if your door
+acts on the answer, read the freeze. The `lsp_notify_resync_deferred` row keeps
+recording the gate's action either way; the coverage fields report only what the
+touch is actually uncovered for. (#1586)
+
 A deferred cascade result that arrives LATE — past the turn-end settle cap, or
 in the quiet window after the turn already consumed its runs — must still reach
 the agent. `turnSeq` is not a staleness signal for such a run (a late run is by
@@ -1137,6 +1167,7 @@ Tracks modified file ranges per turn for turn_end targeting, bumps project/file 
 
 **`turn_end`** → `handleTurnEnd` (`clients/runtime-turn.ts`)
 First **settles** the turn's deferred cascade computes with a bounded wait (`settleCascadeRuns`, cap via `PI_LENS_CASCADE_SETTLE_WAIT_MS`, default 5000ms; a late compute is carried over to the next turn_end rather than lost), then merges unresolved inline blockers and cascade findings, writes latest-turn actionable/code-quality warning reports with sequence metadata, runs Knip delta analysis when the startup scan is not in flight, runs Madge circular-dependency checks for files whose imports changed, and fires related/failed tests asynchronously for the next context injection. Reads the session-scan caches and surfaces them. **Secrets** (`gitleaks` + `trivy secret` + the ast-grep `*-hardcoded-secret-*` rules) are collapsed **by location** via `clients/secret-findings.ts` (`dedupeSecretFindings`) into a single 🔴 blocker with combined provenance (`[gitleaks + trivy + ast-grep]`) — the rule-keyed diagnostic dedup can't merge them since each source uses a different rule id; the duplicate ast-grep advisory copy is suppressed from the actionable-warnings report at the blocked locations (#131 Mode 3). Trivy **CRITICAL** CVEs are 🔴 blockers ("upgrade before shipping"); `govulncheck`/Trivy non-critical CVEs are advisories (FixedVersion as an upgrade hint — never auto-edits lockfiles). Trivy **license risk** (copyleft/restricted licenses, #131 Mode 4) is a 📜 advisory from the same `trivy fs --scanners vuln,secret,license` pass. Deduplicates findings against previous turn state and injects blockers (🔴) and advisories into the agent's context.
+**Cached-blocker freshness gate (#1631).** A cached inline blocker is a verdict about its file *and everything that file imports*, yet every prior invalidation path keyed on the file alone — so when the cause was fixed in a dependency (especially out-of-band, where the dependency is never dispatched) the stale verdict re-served for the rest of the session (#1561's dependency-axis remainder, live instance). Before a cached blocking finding is re-served at turn end, `clients/blocker-freshness.ts` (`sweepInlineBlockerFreshness`) stats the file and its forward imports (resolved via the parse layer — no reverse-dependency index, so #1561's tests-free-index blocker does not apply) against the verdict's `recordedAtMs`; a drifted entry is DEMOTED, not dropped (#1419 demote-not-drop): `stale = true`, served out of the authoritative blocker channel as a `[stale — re-run to confirm]` advisory, and the gate never re-pulls the LSP itself (re-querying an LSP whose in-memory dependency document is itself stale would regenerate the stale verdict). The SAME gate lives at the widget-store cache layer (`reconcileStaleWidgetDependencyBlockers`, paired with `reconcileStaleWidgetFiles` at the `mode=all` read site) so `lens_diagnostics mode=all` cannot serve a blocking entry a same-minute `mode=full` sweep contradicts. One bounded `blocker_freshness_sweep` latency phase (plus `blocker_freshness_widget_gate` for `mode=all`) names the revalidated/kept/truncatedImports counts (`retired` was removed — the gate is architecturally demote-not-drop, so it never deletes an entry and the count would always read 0). `isBlocking` answers false for a stale finding, which is the single predicate both the footer tally and the mode=all blocking count consult. The full dependency-axis INVALIDATION (actively re-verifying consumers when a dependency dispatches clean) remains deferred to #1561.
 
 Deferred cascades must not charge write-to-`turn_end` time against the `turn_end` settle budget. `runtime-coordinator` exposes the active `turn_end` settle start; `runtime-turn` enables it, and quiet-window carry-over does not. Transitive-impact `truncated` means partial coverage even when the final file slice fits, so `cascade_result.transitiveTruncated` and `CascadeBudgetCoverage.transitiveTruncated` are lower-bound evidence, not an exact omitted count; `truncated` is true only when an additional eligible edge is found beyond the hit cap, so an exact-cap traversal is complete; mixed cascades replay passive findings only for selected no-LSP candidates, while all-no-data runs retain broad fallback.
 

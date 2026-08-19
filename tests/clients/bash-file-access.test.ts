@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	extractDeletedPathsFromCommand,
 	extractGrepSearchReadsFromOutput,
 	extractReadPathsFromCommand,
 	extractWrittenPathsFromCommand,
@@ -189,6 +190,7 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 		["git checkout <ref> -- <file>", (f) => `git checkout HEAD~1 -- ${f}`],
 		["git restore <file>", (f) => `git restore ${f}`],
 		["git restore --staged <file>", (f) => `git restore --staged ${f}`],
+		["git mv destination (#1668 review F2)", (f) => `git mv /other/src.ts ${f}`],
 	];
 
 	for (const [label, build] of cases) {
@@ -201,6 +203,13 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 	it("cp source is NOT registered as a write (only the destination)", () => {
 		const dst = pathIn("dst.ts");
 		const r = extractWrittenPathsFromCommand(`cp /other/src.ts ${dst}`, tmp);
+		expect(r).toContain(dst);
+		expect(r).not.toContain("/other/src.ts");
+	});
+
+	it("git mv source is NOT registered as a write (only the destination)", () => {
+		const dst = pathIn("dst.ts");
+		const r = extractWrittenPathsFromCommand(`git mv /other/src.ts ${dst}`, tmp);
 		expect(r).toContain(dst);
 		expect(r).not.toContain("/other/src.ts");
 	});
@@ -224,6 +233,105 @@ describe("extractWrittenPathsFromCommand — bash writes", () => {
 		expect(extractWrittenPathsFromCommand(`git stash pop`, tmp)).toHaveLength(
 			0,
 		);
+	});
+});
+
+// ── deletes: the #1668 type-3 watched-files gap ─────────────────────────────
+
+describe("extractDeletedPathsFromCommand — bash deletes (#1668)", () => {
+	it("rm FILE registers the target", () => {
+		const f = touchLines("a.ts", 3);
+		expect(extractDeletedPathsFromCommand(`rm ${f}`, tmp)).toContain(f);
+	});
+
+	it("rm -f/-rf FILE ignores the flag, keeps the target", () => {
+		const f = touchLines("a.ts", 3);
+		expect(extractDeletedPathsFromCommand(`rm -f ${f}`, tmp)).toContain(f);
+		expect(extractDeletedPathsFromCommand(`rm -rf ${f}`, tmp)).toContain(f);
+	});
+
+	it("rm A B registers every named target", () => {
+		const a = touchLines("a.ts", 1);
+		const b = touchLines("b.ts", 1);
+		const result = extractDeletedPathsFromCommand(`rm ${a} ${b}`, tmp);
+		expect(result).toContain(a);
+		expect(result).toContain(b);
+	});
+
+	it("git rm FILE registers the target", () => {
+		const f = touchLines("a.ts", 1);
+		expect(extractDeletedPathsFromCommand(`git rm ${f}`, tmp)).toContain(f);
+	});
+
+	it("git rm --cached -- FILE registers the target after --", () => {
+		const f = touchLines("a.ts", 1);
+		expect(
+			extractDeletedPathsFromCommand(`git rm --cached -- ${f}`, tmp),
+		).toContain(f);
+	});
+
+	it("mv SRC DEST registers the source (vanishes) but not the destination", () => {
+		const src = touchLines("a.ts", 1);
+		const dst = pathIn("b.ts");
+		const result = extractDeletedPathsFromCommand(`mv ${src} ${dst}`, tmp);
+		expect(result).toContain(src);
+		expect(result).not.toContain(dst);
+	});
+
+	it("git mv SRC DEST registers the source (vanishes) but not the destination (#1668 review F2)", () => {
+		const src = touchLines("a.ts", 1);
+		const dst = pathIn("b.ts");
+		const result = extractDeletedPathsFromCommand(`git mv ${src} ${dst}`, tmp);
+		expect(result).toContain(src);
+		expect(result).not.toContain(dst);
+	});
+
+	it("git mv registers every source when moving multiple files into a directory", () => {
+		const a = touchLines("a.ts", 1);
+		const b = touchLines("b.ts", 1);
+		const destDir = pathIn("dest/");
+		const result = extractDeletedPathsFromCommand(
+			`git mv ${a} ${b} ${destDir}`,
+			tmp,
+		);
+		expect(result).toContain(a);
+		expect(result).toContain(b);
+	});
+
+	it("KNOWN MISS (#1668 review F3, documented not fixed): `mv -t DEST SRC` misreads the -t target-directory form", () => {
+		// GNU `-t DEST` puts the destination BEFORE the source, but this parser
+		// always treats the destination as the LAST non-flag argument — so `-t`
+		// usage is misread. Documented in extractDeletedPathsFromCommand's doc
+		// comment; this test pins the current (wrong) behavior so a future
+		// change to it is a deliberate, reviewed decision, not a silent drift.
+		const src = touchLines("a.ts", 1);
+		const dst = pathIn("dest.ts");
+		const result = extractDeletedPathsFromCommand(`mv -t ${dst} ${src}`, tmp);
+		// The real source (`src`) is NOT reported as deleted — the miss.
+		expect(result).not.toContain(src);
+	});
+
+	it("bare directory rm is skipped — no explicit file, nothing to confirm", () => {
+		// A dir has no recognized extension, so isReadableSourceFile rejects it —
+		// this is the "don't stat the world" guard: no candidate is proposed.
+		expect(extractDeletedPathsFromCommand(`rm -rf build/`, tmp)).toHaveLength(
+			0,
+		);
+	});
+
+	it("git clean (no named files) proposes nothing", () => {
+		expect(extractDeletedPathsFromCommand(`git clean -fd`, tmp)).toHaveLength(
+			0,
+		);
+	});
+
+	it("unrelated commands (cat, grep, git status) propose nothing", () => {
+		const f = touchLines("a.ts", 1);
+		expect(extractDeletedPathsFromCommand(`cat ${f}`, tmp)).toHaveLength(0);
+		expect(extractDeletedPathsFromCommand(`grep -n foo ${f}`, tmp)).toHaveLength(
+			0,
+		);
+		expect(extractDeletedPathsFromCommand(`git status`, tmp)).toHaveLength(0);
 	});
 });
 
