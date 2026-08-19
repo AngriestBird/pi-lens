@@ -142,34 +142,61 @@ function managedNodeToolCandidates(tool: string): string[] {
 		: [base];
 }
 
+type ManagedVerdict = "absent" | "ok" | "broken" | "unverified";
+
+type ManagedVerdictMemo =
+	| { verdict: "ok" | "broken" }
+	/**
+	 * A probe that never got a fair run. Held under a cooldown, not forever: a
+	 * cold-cache host can blow the budget on a perfectly good shim, and one slow
+	 * first touch must not pin "cannot verify" for the whole session.
+	 */
+	| { verdict: "unverified"; retryAtMs: number; attempts: number };
+
 /**
  * Verification verdicts for managed shims, keyed by path + mtime + size, so a
- * reinstall re-verifies and a session start re-arms. Only a verdict the prober
- * actually produced is stored; a timed-out or unspawnable probe is not.
+ * reinstall re-verifies and a session start re-arms.
  *
  * A plain `Map`, not a `PathKeyedMap`: `managedNodeToolCandidates` is the ONLY
  * producer of these paths, so the write and read forms are the same string by
  * construction and cannot diverge on case or separator.
  */
-const managedBinaryVerdicts = new Map<string, boolean>();
+const managedBinaryVerdicts = new Map<string, ManagedVerdictMemo>();
+/**
+ * Verifications in progress, keyed the same way. Concurrent first touches of
+ * one shim share the single probe instead of each spawning their own — the
+ * same in-flight-share shape `resolveInstallInFlightByCwd` uses for installs
+ * (#1674 review F2).
+ */
+const managedVerifyInFlight = new Map<string, Promise<ManagedVerdict>>();
 
-/** Budget for the managed-shim verification spawn on the dispatch hot path. */
-const MANAGED_VERIFY_TIMEOUT_MS = 2000;
+/**
+ * Budget for the managed-shim verification spawn.
+ *
+ * 5s, not the checker's default probe budget: a cold npm shim on a cold file
+ * cache measured just over 2s in the #1674 review, so a tighter budget spends
+ * the whole wait and still learns nothing. This runs once per shim per session
+ * on the success path, and the installer's own verification keeps its more
+ * generous 10s.
+ */
+const MANAGED_VERIFY_TIMEOUT_MS = 5000;
+/** First cooldown after a verification that never got a fair run. */
+const MANAGED_VERIFY_COOLDOWN_MS = 60_000;
+/** Ceiling for the cooldown ladder — a stalling shim is re-probed hourly. */
+const MANAGED_VERIFY_COOLDOWN_MAX_MS = 15 * 60_000;
 
-type ManagedVerdict = "absent" | "ok" | "broken" | "unverified";
+function managedVerifyCooldownMs(attempts: number): number {
+	return Math.min(
+		MANAGED_VERIFY_COOLDOWN_MAX_MS,
+		MANAGED_VERIFY_COOLDOWN_MS * 2 ** (attempts - 1),
+	);
+}
 
-async function verifyManagedCandidate(
+async function runManagedVerification(
 	candidate: string,
+	stamp: string,
+	priorAttempts: number,
 ): Promise<ManagedVerdict> {
-	let stamp: string;
-	try {
-		const stat = fs.statSync(candidate);
-		stamp = `${candidate}:${stat.mtimeMs}:${stat.size}`;
-	} catch {
-		return "absent";
-	}
-	const memo = managedBinaryVerdicts.get(stamp);
-	if (memo !== undefined) return memo ? "ok" : "broken";
 	let transient = false;
 	let ok: boolean;
 	try {
@@ -186,13 +213,23 @@ async function verifyManagedCandidate(
 		// The verifier itself could not run — installer-isolated unit tests mock
 		// this module without it, and a throw here says nothing about the shim.
 		// "Cannot verify" is not "broken": keep the on-disk answer.
-		return "unverified";
+		transient = true;
+		ok = false;
 	}
 	// An unspawnable prober is never a durable verdict (#1569): a timeout or a
-	// spawn-boundary failure says nothing about the shim, so it is neither
-	// memoized nor allowed to demote the candidate.
-	if (!ok && transient) return "unverified";
-	managedBinaryVerdicts.set(stamp, ok);
+	// spawn-boundary failure says nothing about the shim, so it never demotes
+	// the candidate. It IS remembered, under a cooldown, so the wait is paid
+	// once per window rather than on every resolve (#1674 review F1).
+	if (!ok && transient) {
+		const attempts = priorAttempts + 1;
+		managedBinaryVerdicts.set(stamp, {
+			verdict: "unverified",
+			attempts,
+			retryAtMs: Date.now() + managedVerifyCooldownMs(attempts),
+		});
+		return "unverified";
+	}
+	managedBinaryVerdicts.set(stamp, { verdict: ok ? "ok" : "broken" });
 	if (!ok) {
 		// Once per shim per session, at the moment the verdict is reached — the
 		// memo answers every later call, so this cannot become per-dispatch spam.
@@ -201,6 +238,34 @@ async function verifyManagedCandidate(
 		);
 	}
 	return ok ? "ok" : "broken";
+}
+
+async function verifyManagedCandidate(
+	candidate: string,
+): Promise<ManagedVerdict> {
+	let stamp: string;
+	try {
+		const stat = fs.statSync(candidate);
+		stamp = `${candidate}:${stat.mtimeMs}:${stat.size}`;
+	} catch {
+		return "absent";
+	}
+	const memo = managedBinaryVerdicts.get(stamp);
+	let priorAttempts = 0;
+	if (memo) {
+		if (memo.verdict !== "unverified") return memo.verdict;
+		if (Date.now() < memo.retryAtMs) return "unverified";
+		priorAttempts = memo.attempts;
+	}
+	const existing = managedVerifyInFlight.get(stamp);
+	if (existing) return existing;
+	const probe = runManagedVerification(candidate, stamp, priorAttempts).finally(
+		() => {
+			managedVerifyInFlight.delete(stamp);
+		},
+	);
+	managedVerifyInFlight.set(stamp, probe);
+	return probe;
 }
 
 /**
@@ -215,10 +280,13 @@ async function verifyManagedCandidate(
  * into one definition so the next managed tool inherits the fast path instead
  * of a fourth copy.
  *
- * The verdict is memoized per file identity for the session, so the fast path
- * still answers without a spawn after the first call (#1467), and a probe that
+ * A settled verdict is memoized per file identity for the session, so the fast
+ * path answers without a spawn after the first call (#1467). A probe that
  * cannot run keeps the optimistic answer rather than turning a stall into a
- * "missing tool".
+ * "missing tool", and is memoized under a bounded cooldown ladder so the wait
+ * is paid once per window instead of on every resolve — while a shim that
+ * stalls on a cold cache still gets re-probed later (#1674 review F1).
+ * Concurrent first touches share one probe (#1674 review F2).
  */
 export async function findManagedNodeToolBinary(
 	tool: string,
@@ -468,6 +536,17 @@ function addId(map: PathKeyedMap<Set<string>>, cwd: string, id: string): void {
 	ids.add(id);
 }
 
+function deleteIds(
+	map: PathKeyedMap<Set<string>>,
+	cwd: string,
+	ids: string[],
+): void {
+	const existing = map.get(cwd);
+	if (!existing) return;
+	for (const id of ids) existing.delete(id);
+	if (existing.size === 0) map.delete(cwd);
+}
+
 /**
  * True once a compensating `available` row has already fired for this
  * (cwd, toolId) pair this session; `noteAvailabilityCorrected` records it the
@@ -493,14 +572,35 @@ function noteLatchedUnavailable(cwd: string, tool: string): void {
 }
 
 /**
- * True when a latched `unavailable` row stands for any of these keys. Callers
- * pass every name the row could have been written under — a checker logs its
- * COMMAND, the install seam knows a toolId, and the two are not always the
- * same string. A false positive only restores the pre-#1657 behavior (the row
- * emits and burns the correction memo); a false negative still emits the row,
- * under the uncorrected scope. Neither can swallow a genuine correction.
+ * Drop the latch record for a pair, because the row it described no longer
+ * stands. Called on every `available` verdict as well as on the compensating
+ * row itself, so a latch cannot outlive the state it describes and later back
+ * a "correction" that corrects nothing (#1674 review F3).
  */
-function hasLatchedUnavailable(cwd: string, ...tools: string[]): boolean {
+function clearLatchedUnavailable(cwd: string, ...tools: string[]): void {
+	deleteIds(latchedUnavailableByCwd, cwd, tools);
+}
+
+/**
+ * Every name a latched row for this pair could have been written under. A
+ * checker logs its COMMAND (sometimes a resolved absolute path), the install
+ * seam knows a toolId, and the two are not always the same string. One
+ * derivation feeds BOTH the lookup and the clear, so the two can never
+ * disagree about which key the latch lives under (#1674 review F3).
+ */
+function latchKeysFor(toolId: string, command?: string): string[] {
+	const keys = [toolId];
+	if (command) keys.push(command, path.basename(command));
+	return keys;
+}
+
+/**
+ * True when a latched `unavailable` row stands for any of these keys. A false
+ * positive only restores the pre-#1657 behavior (the row emits and burns the
+ * correction memo); a false negative still emits the row, under the
+ * uncorrected scope. Neither can swallow a genuine correction.
+ */
+function hasLatchedUnavailable(cwd: string, tools: string[]): boolean {
 	return tools.some((tool) => hasId(latchedUnavailableByCwd, cwd, tool));
 }
 
@@ -567,22 +667,27 @@ function resolvedTagForAttempt(
  * fresh attempt behind it, and that must not re-log a "fresh correction"
  * every time.
  *
- * `correctsLatchedRow` says whether a latched `unavailable` row actually stood
- * before this call. Only those burn the correction memo. An emission with
- * nothing to correct dedupes in its own scope, so it cannot silence the
- * genuine latch-then-recover that follows it for the same pair (#1657).
+ * `latchKeys` are every name a latched `unavailable` row for this pair could
+ * carry. A row that clears one of them is a genuine correction and burns the
+ * correction memo; a row with nothing to correct dedupes in its own scope, so
+ * it cannot silence the genuine latch-then-recover that follows it for the
+ * same pair (#1657).
  */
 function emitCompensatingAvailableRow(
 	cwd: string,
 	toolId: string,
 	installStartedAt: number,
 	installedPath: string,
-	correctsLatchedRow: boolean,
+	latchKeys: string[],
 ): void {
 	if (hasCorrectedAvailability(cwd, toolId)) return;
+	const correctsLatchedRow = hasLatchedUnavailable(cwd, latchKeys);
 	if (correctsLatchedRow) {
 		noteAvailabilityCorrected(cwd, toolId);
-		latchedUnavailableByCwd.get(cwd)?.delete(toolId);
+		// Clear every key the latch could live under, not just the toolId: the
+		// checker records the row under its COMMAND, and a leftover entry would
+		// later back a "correction" with nothing behind it (#1674 review F3).
+		clearLatchedUnavailable(cwd, ...latchKeys);
 	} else {
 		if (hasId(uncorrectedEmissionsByCwd, cwd, toolId)) return;
 		addId(uncorrectedEmissionsByCwd, cwd, toolId);
@@ -609,6 +714,11 @@ function emitCompensatingAvailableRow(
 		...(installEvidence.install !== "succeeded" && {
 			resolved: resolvedTagForAttempt(toolId, attempt),
 		}),
+		// The whole point of the memo split, on the record: a reader can tell a
+		// row that cleared a latched `unavailable` from one that corrected
+		// nothing, without re-deriving it from the surrounding rows (#1674
+		// review F4).
+		correctsLatchedRow,
 	};
 	logAvailabilityDecision(
 		{
@@ -638,6 +748,7 @@ export function resetDispatchAvailabilityState(): void {
 	uncorrectedEmissionsByCwd.clear();
 	latchedUnavailableByCwd.clear();
 	managedBinaryVerdicts.clear();
+	managedVerifyInFlight.clear();
 	resetPathWalkMemo();
 	availabilityStateGeneration += 1;
 }
@@ -764,6 +875,11 @@ export function createAvailabilityChecker(
 		// (#1657).
 		if (!verdict.available && latched) {
 			noteLatchedUnavailable(resolvedCwd, command);
+		} else if (verdict.available) {
+			// The latched row this pair carried no longer stands: THIS row says
+			// the tool is back. Dropping the record here keeps a stale latch from
+			// backing a later "correction" that corrects nothing (#1674 F3).
+			clearLatchedUnavailable(resolvedCwd, ...latchKeysFor(command));
 		}
 		logAvailabilityDecision(
 			{
@@ -1051,6 +1167,8 @@ export function createCwdCachedProbe(
 		// Same correction bookkeeping as the checker seam above (#1657).
 		if (!verdict.available && latched) {
 			noteLatchedUnavailable(key, options.tool);
+		} else if (verdict.available) {
+			clearLatchedUnavailable(key, ...latchKeysFor(options.tool));
 		}
 		logAvailabilityDecision(
 			{
@@ -1275,7 +1393,7 @@ async function verifyOrInstallCommand(
 			toolId,
 			installStartedAt,
 			installed,
-			hasLatchedUnavailable(cwd, toolId, command, path.basename(command)),
+			latchKeysFor(toolId, command),
 		);
 		return installed;
 	}
@@ -1367,10 +1485,23 @@ async function resolveAvailableOrInstallUnshared(
 		// row, claiming a fresh install each time — `emitCompensatingAvailableRow`
 		// gates on the once-per-correction memo to prevent that.
 		//
+		// The probe above returned the latching `missing` outcome, so a latched
+		// `unavailable` row stands for this pair right now — recorded under the
+		// checker's own command name. Record it under the toolId too, so the
+		// emitter can READ that a correction is happening from the same ledger
+		// every other caller reads, instead of being told so by an argument
+		// (#1674 review F3).
+		noteLatchedUnavailable(cwd, toolId);
 		// This IS a genuine correction: the probe above returned the latching
 		// `missing` outcome, so a latched `unavailable` row stands for this pair
 		// right now (#1657).
-		emitCompensatingAvailableRow(cwd, toolId, installStartedAt, installed, true);
+		emitCompensatingAvailableRow(
+			cwd,
+			toolId,
+			installStartedAt,
+			installed,
+			latchKeysFor(toolId, checker.getCommand(cwd) ?? undefined),
+		);
 		return installed;
 	}
 	noteInstallFailure(toolId, cwd);
