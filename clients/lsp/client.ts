@@ -8,7 +8,6 @@
  * - Request/response handling
  */
 
-import { logExtension } from "../extension-log.js";
 import { spawn as nodeSpawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { access, readFile } from "node:fs/promises";
@@ -16,9 +15,7 @@ import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { withTimeout } from "../deadline-utils.js";
 import { incrementDegradationCount } from "../degradation-ledger.js";
-import { raceToCompletion } from "./aggregation.js";
 import type { MessageConnection } from "../deps/vscode-jsonrpc.js";
-import { logLatency } from "../latency-logger.js";
 // vscode-jsonrpc v9 ships an `exports` map exposing the Node entry as the
 // `./node` subpath (no `.js`); the old `/node.js` file path no longer resolves.
 import {
@@ -27,24 +24,22 @@ import {
 	StreamMessageReader,
 	StreamMessageWriter,
 } from "../deps/vscode-jsonrpc.js";
+import { logExtension } from "../extension-log.js";
+import { recordLspChild, removeLspChild } from "../instance-registry.js";
+import { logLatency } from "../latency-logger.js";
+import {
+	type LspMutationContext,
+	newLspMutationCorrelationId,
+} from "../lsp-mutation.js";
 import { getAmbientAbortSignal } from "../safe-spawn.js";
+import { raceToCompletion } from "./aggregation.js";
 import {
 	hashDiagnosticContent,
 	type StoredDiagnosticBinding,
 } from "./diagnostic-binding.js";
-import {
-	newLspMutationCorrelationId,
-	type LspMutationContext,
-} from "../lsp-mutation.js";
-
-import {
-	applyWorkspaceEdit,
-	normalizeWorkspaceEditToUtf16,
-} from "./edits.js";
-import { recordLspChild, removeLspChild } from "../instance-registry.js";
+import { applyWorkspaceEdit, normalizeWorkspaceEditToUtf16 } from "./edits.js";
 import type { LSPProcess } from "./launch.js";
 import { normalizeMapKey, uriToPath } from "./path-utils.js";
-import { probeTsserverProjectIdentity } from "./tsserver-sync.js";
 import {
 	ADVERTISED_POSITION_ENCODINGS,
 	convertCharacterOffset,
@@ -58,6 +53,7 @@ import {
 	TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL,
 	type TextDocumentSyncKind,
 } from "./sync-kind.js";
+import { probeTsserverProjectIdentity } from "./tsserver-sync.js";
 import { getStrategy } from "./wait-policy/index.js";
 import { WatchedFilesQueue } from "./watch-queue.js";
 import {
@@ -379,9 +375,7 @@ export interface LSPClientInfo {
 	 * Issue one project-wide `workspace/diagnostic` pull. Resolves per-file
 	 * reports, or `undefined` when unsupported/dead/timed-out/malformed.
 	 */
-	requestWorkspaceDiagnostics(
-		budgetMs: number,
-	): Promise<
+	requestWorkspaceDiagnostics(budgetMs: number): Promise<
 		| Array<{
 				filePath: string;
 				diagnostics: LSPDiagnostic[];
@@ -1401,8 +1395,10 @@ function retirePullSource(state: LSPClientState, identifier: string): void {
 			if (key.endsWith(suffix)) source.delete(key);
 		}
 	}
-	for (const [normalizedPath, sources] of state.documentPullDiagnosticsBySource ??
-		[]) {
+	for (const [
+		normalizedPath,
+		sources,
+	] of state.documentPullDiagnosticsBySource ?? []) {
 		if (!sources.delete(identifier)) continue;
 		state.documentPullDiagnostics.set(
 			normalizedPath,
@@ -1433,10 +1429,7 @@ export function pullDiagnosticSources(
 	}
 	// Sorted for a stable, reproducible request order in logs and tests; the
 	// fan-out is parallel, so order carries no priority.
-	return [
-		undefined,
-		...[...identifiers].sort((a, b) => a.localeCompare(b)),
-	];
+	return [undefined, ...[...identifiers].sort((a, b) => a.localeCompare(b))];
 }
 
 /** #1531: bump the client-global diagnostics counter and stamp the path it was
@@ -1447,7 +1440,10 @@ export function bumpDiagnosticsVersion(
 	normalizedPath: string,
 ): void {
 	state.diagnosticsVersion += 1;
-	state.diagnosticsVersionsByPath?.set(normalizedPath, state.diagnosticsVersion);
+	state.diagnosticsVersionsByPath?.set(
+		normalizedPath,
+		state.diagnosticsVersion,
+	);
 }
 
 /** #1531: the global counter's value when diagnostics were last stored for
@@ -1560,10 +1556,14 @@ function logTypeScriptPullSettle(
 		0,
 		Date.now() - (state.documentOpenedAt.get(normalizedPath) ?? Date.now()),
 	);
-	const diagnosticCodes = [...new Set(diagnostics
-		.map((diagnostic) => diagnostic.code)
-		.filter((code): code is string | number => code !== undefined)
-		.map(String))].slice(0, 8);
+	const diagnosticCodes = [
+		...new Set(
+			diagnostics
+				.map((diagnostic) => diagnostic.code)
+				.filter((code): code is string | number => code !== undefined)
+				.map(String),
+		),
+	].slice(0, 8);
 	const trackedVersion = state.diagnosticsVersionsByPath?.get(normalizedPath);
 	logLatency({
 		type: "phase",
@@ -1666,7 +1666,10 @@ function buildContentChanges(
 	normalizedPath: string,
 	content: string,
 ): Array<{
-	range?: { start: { line: number; character: number }; end: { line: number; character: number } };
+	range?: {
+		start: { line: number; character: number };
+		end: { line: number; character: number };
+	};
 	text: string;
 }> {
 	if (state.syncKind !== TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL) {
@@ -1779,11 +1782,7 @@ export function resolveConfigurationSection(
 	if (!section) return initialization;
 	let cur: unknown = initialization;
 	for (const part of section.split(".")) {
-		if (
-			typeof cur !== "object" ||
-			cur === null ||
-			!Object.prototype.hasOwnProperty.call(cur, part)
-		) {
+		if (typeof cur !== "object" || cur === null || !Object.hasOwn(cur, part)) {
 			return null;
 		}
 		cur = (cur as Record<string, unknown>)[part];
@@ -1839,10 +1838,14 @@ export function setupIncomingHandlers(
 				state.diagnosticPublicationCounts.set(normalizedPath, publicationIndex);
 			}
 			const diagnosticCodes = isTypeScriptTelemetry
-				? [...new Set(newDiags
-					.map((diagnostic) => diagnostic.code)
-					.filter((code): code is string | number => code !== undefined)
-					.map(String))].slice(0, 8)
+				? [
+						...new Set(
+							newDiags
+								.map((diagnostic) => diagnostic.code)
+								.filter((code): code is string | number => code !== undefined)
+								.map(String),
+						),
+					].slice(0, 8)
 				: [];
 			// #1639: `durationMs` measures the settle operation, never
 			// time-since-didOpen — document age keeps its own honest name in
@@ -2089,13 +2092,12 @@ export function setupIncomingHandlers(
 				(state.activeMutationDepth ?? 0) === 1
 					? state.activeMutationContext
 					: undefined;
-			const telemetryContext: LspMutationContext =
-				context ?? {
-					cwd: state.root,
-					correlationId: newLspMutationCorrelationId(),
-					tool: "lsp-workspace-applyEdit",
-					source: "lsp-edit",
-				};
+			const telemetryContext: LspMutationContext = context ?? {
+				cwd: state.root,
+				correlationId: newLspMutationCorrelationId(),
+				tool: "lsp-workspace-applyEdit",
+				source: "lsp-edit",
+			};
 			try {
 				await applyWorkspaceEdit(
 					params.edit as Parameters<typeof applyWorkspaceEdit>[0],
@@ -2398,7 +2400,8 @@ async function clientRequestPullDiagnostics(
 	);
 	const settled = await raceToCompletion(
 		attempts,
-		(results) => results.some((r) => r.status === "found" && r.primaryCount > 0),
+		(results) =>
+			results.some((r) => r.status === "found" && r.primaryCount > 0),
 		{
 			// No graceMs: finalize the instant a source answers for this file.
 			// The per-request `withTimeout` inside each attempt is the real bound;
@@ -2513,7 +2516,11 @@ async function pullDiagnosticSource(
 		const report = await withTimeout(requestPromise, effectiveTimeoutMs);
 
 		if (!report) {
-			recordPullFailure(state, "textDocument/diagnostic", new Error("empty response"));
+			recordPullFailure(
+				state,
+				"textDocument/diagnostic",
+				new Error("empty response"),
+			);
 			return { status: "unavailable" };
 		}
 
@@ -2761,8 +2768,10 @@ function recordPullFailure(
 	error: unknown,
 ): void {
 	const candidate = error as { code?: unknown; message?: unknown };
-	const message = typeof candidate.message === "string" ? candidate.message : "";
-	const unsupportedMessage = /^(?:method not found|unknown method|unsupported method)(?::|$)/i;
+	const message =
+		typeof candidate.message === "string" ? candidate.message : "";
+	const unsupportedMessage =
+		/^(?:method not found|unknown method|unsupported method)(?::|$)/i;
 	if (
 		candidate.code === -32601 ||
 		candidate.code === "-32601" ||
@@ -2776,9 +2785,7 @@ function recordPullFailure(
 			? { code: candidate.code }
 			: {}),
 		message:
-			typeof candidate.message === "string"
-				? candidate.message
-				: String(error),
+			typeof candidate.message === "string" ? candidate.message : String(error),
 	});
 	if (state.pullFailureHistory.length > PULL_FAILURE_HISTORY_LIMIT) {
 		state.pullFailureHistory.splice(
@@ -2799,7 +2806,11 @@ export async function clientRequestWorkspaceDiagnostics(
 	state: LSPClientState,
 	budgetMs: number,
 ): Promise<
-	| Array<{ filePath: string; diagnostics: LSPDiagnostic[]; contentHash?: string }>
+	| Array<{
+			filePath: string;
+			diagnostics: LSPDiagnostic[];
+			contentHash?: string;
+	  }>
 	| undefined
 > {
 	if (!isClientAlive(state)) return undefined;
@@ -2888,8 +2899,10 @@ export async function clientRequestWorkspaceDiagnostics(
 					if (outcome.status === "found") {
 						out.push({
 							filePath,
-							diagnostics: state.documentPullDiagnostics.get(normalizedPath) ?? [],
-							contentHash: state.diagnosticBindings.get(normalizedPath)?.contentHash,
+							diagnostics:
+								state.documentPullDiagnostics.get(normalizedPath) ?? [],
+							contentHash:
+								state.diagnosticBindings.get(normalizedPath)?.contentHash,
 						});
 					} else if (outcome.status === "unavailable") {
 						// Genuinely unconfirmed — never fabricate a clean result. Recorded
@@ -3141,7 +3154,8 @@ export function handleNotifyExternalChange(
 ): void {
 	if (!isClientAlive(state)) return;
 	const normalizedPath = normalizeMapKey(filePath);
-	const uri = state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href;
+	const uri =
+		state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href;
 	state.watchQueue.enqueue(uri, type);
 }
 
@@ -3155,7 +3169,8 @@ export async function handleNotifyOpen(
 ): Promise<void> {
 	if (!isClientAlive(state)) return;
 	const normalizedPath = normalizeMapKey(filePath);
-	const uri = state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href;
+	const uri =
+		state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href;
 
 	if (
 		state.openDocuments.has(normalizedPath) ||
@@ -3204,7 +3219,8 @@ export async function handleNotifyOpen(
 			);
 			// #1669 review F7: only mirror the send locally once it actually left
 			// the process — see safeSendNotification's doc comment.
-			if (reopenSent) recordSentContent(state, normalizedPath, version, content);
+			if (reopenSent)
+				recordSentContent(state, normalizedPath, version, content);
 			state.openDocuments.add(normalizedPath);
 			state.openDocumentUris?.set(normalizedPath, uri);
 			return;
@@ -3291,7 +3307,8 @@ export async function handleNotifyChange(
 ): Promise<void> {
 	if (!isClientAlive(state)) return;
 	const normalizedPath = normalizeMapKey(filePath);
-	const uri = state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href;
+	const uri =
+		state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href;
 
 	if (!state.openDocuments.has(normalizedPath)) {
 		// Safety fallback: keep protocol ordering valid even if caller sends
@@ -3299,7 +3316,14 @@ export async function handleNotifyChange(
 		const fallbackOpenSent = await safeSendNotification(
 			state.connection,
 			"textDocument/didOpen",
-			{ textDocument: { uri, languageId: "plaintext", version: 0, text: content } },
+			{
+				textDocument: {
+					uri,
+					languageId: "plaintext",
+					version: 0,
+					text: content,
+				},
+			},
 		);
 		state.documentVersions.set(normalizedPath, 0);
 		state.documentOpenedAt.set(normalizedPath, Date.now());
@@ -3336,7 +3360,9 @@ export async function closeDocument(
 	if (!state.openDocuments.has(normalizedPath)) return;
 	await safeSendNotification(state.connection, "textDocument/didClose", {
 		textDocument: {
-			uri: state.openDocumentUris?.get(normalizedPath) ?? pathToFileURL(filePath).href,
+			uri:
+				state.openDocumentUris?.get(normalizedPath) ??
+				pathToFileURL(filePath).href,
 		},
 	});
 	state.openDocuments.delete(normalizedPath);
@@ -3515,15 +3541,42 @@ export async function navRequest<T>(
 		normalizedPath !== undefined
 			? state.documentVersions.get(normalizedPath)
 			: undefined;
-	const result = (await withTimeout(
-		safeSendRequest<T>(state.connection, method, params, signal),
-		timeoutMs,
-	).catch((err: unknown) => {
-		if (err instanceof Error && err.message.startsWith("Timeout after")) {
-			return undefined;
-		}
-		throw err;
-	})) as T | undefined;
+	// #1716: captured OUTSIDE withTimeout, mirroring #1713's pull-diagnostic
+	// fix (`pullDiagnosticSource`), so a timeout's catch below still holds a
+	// live handle on the request for the late-answer watch. `withTimeout`
+	// only races it against a timer — the request keeps running server-side
+	// either way, and without this handle an abandoned answer would settle
+	// into the void with no way to observe it.
+	const requestStartedAt = Date.now();
+	const requestPromise = safeSendRequest<T>(
+		state.connection,
+		method,
+		params,
+		signal,
+	);
+	const result = (await withTimeout(requestPromise, timeoutMs).catch(
+		(err: unknown) => {
+			if (isNavTimeoutError(err, timeoutMs)) {
+				recordNavTimeoutTelemetry({
+					method,
+					scope: normalizedPath,
+					budgetMs: timeoutMs,
+					elapsedMs: Date.now() - requestStartedAt,
+				});
+				armNavLateAnswerTelemetry({
+					requestPromise,
+					method,
+					scope: normalizedPath,
+					requestStartedAt,
+				});
+				return undefined;
+			}
+			if (err instanceof Error && err.message.startsWith("Timeout after")) {
+				return undefined;
+			}
+			throw err;
+		},
+	)) as T | undefined;
 	// requestVersion === undefined (never opened, or version-less) → unaffected,
 	// matching the diagnostics path; the request timeout remains the backstop.
 	if (
@@ -3537,6 +3590,121 @@ export async function navRequest<T>(
 		}
 	}
 	return result;
+}
+
+/**
+ * #1716: `withTimeout` rejects with this EXACT message (`clients/deadline-
+ * utils.ts`) only when its own timer wins the race — mirrors #1713's
+ * `isPullTimeoutError`. Only the timer-won case is a "the answer might still
+ * be coming" situation worth a late-answer watch; a request that already
+ * failed fast (or a stale-message coincidence) has nothing further to
+ * observe. `navRequest`'s own behavior still falls back to the looser
+ * `startsWith` check afterward, unchanged, so this stricter check only gates
+ * telemetry — never the existing timeout-handling behavior.
+ */
+function isNavTimeoutError(err: unknown, timeoutMs: number): boolean {
+	return err instanceof Error && err.message === `Timeout after ${timeoutMs}ms`;
+}
+
+// #1716: subject/scope used when a nav request has no `staleCheckPath` (e.g.
+// workspaceSymbol, call-hierarchy follow-ups) — mirrors WORKSPACE_PULL_SCOPE
+// above for the same reason: telemetry identity needs a stable placeholder
+// where there is no real path.
+const NAV_REQUEST_NO_PATH_SCOPE = "*no-path*";
+
+/**
+ * #1716: `navRequest` is the highest-volume LSP call site — hover,
+ * definition, references, signatureHelp, documentSymbol, workspace/symbol,
+ * call hierarchy all route through it, often several times per turn. A stuck
+ * server can storm timeouts across many methods and files far faster than
+ * the pull-diagnostic path #1713 fixed, so a per-event latency.log write
+ * (that fix's shape) would itself become the flood. Every timeout is still
+ * counted exactly, via the degradation ledger (bounded, in-memory, no I/O),
+ * but only the RISING EDGE — the first occurrence per (method, file) this
+ * session — also pays for a detailed log write. `incrementDegradationCount`'s
+ * return value (`true` on the first occurrence for a kind/subject pair) is
+ * reused as that rising-edge gate instead of a second hand-rolled latch: it
+ * already re-arms at session_start via `resetDegradationLedger`, so this
+ * adds zero new module state. Never throws: telemetry must not perturb a
+ * path that has already decided to return `undefined` regardless.
+ */
+function recordNavTimeoutTelemetry(args: {
+	method: string;
+	scope: string | undefined;
+	budgetMs: number;
+	elapsedMs: number;
+}): void {
+	try {
+		const subject = `${args.method}:${args.scope ?? NAV_REQUEST_NO_PATH_SCOPE}`;
+		const isRisingEdge = incrementDegradationCount({
+			kind: "lsp-nav-request-timeout",
+			subject,
+			reason: `timeout budget=${args.budgetMs}ms elapsed=${args.elapsedMs}ms`,
+		});
+		if (!isRisingEdge) return;
+		logLatency({
+			type: "phase",
+			phase: "lsp_nav_request_timeout",
+			filePath: args.scope ?? NAV_REQUEST_NO_PATH_SCOPE,
+			durationMs: args.elapsedMs,
+			metadata: { method: args.method, effectiveBudgetMs: args.budgetMs },
+		});
+	} catch {
+		// Telemetry must never break the observed path.
+	}
+}
+
+/**
+ * #1716: nav-request sibling of #1713's `armLateAnswerTelemetry`. A
+ * telemetry-only continuation on the ALREADY-abandoned request promise —
+ * purely observational, never touches `state`, and attaching `.then` here
+ * creates no new timer, socket, or other handle, so it cannot keep the
+ * process alive a moment longer than the pending request already does.
+ *
+ * Bounded the same way as the timeout record above: every late answer is
+ * counted exactly via the ledger, but only the rising edge per (method,
+ * file) also writes an `lsp_nav_late_answer_discarded` record.
+ *
+ * Nav answers are read-once — unlike diagnostics' persistent pull cache,
+ * there is no stale value this could poison — so this exists purely for
+ * observability: telling a dogfood session "truly hung" apart from
+ * "answered late", the same distinction #1713 made possible for pulls.
+ */
+function armNavLateAnswerTelemetry(args: {
+	requestPromise: Promise<unknown>;
+	method: string;
+	scope: string | undefined;
+	requestStartedAt: number;
+}): void {
+	args.requestPromise.then(
+		() => {
+			try {
+				const elapsedMs = Date.now() - args.requestStartedAt;
+				const subject = `${args.method}:${args.scope ?? NAV_REQUEST_NO_PATH_SCOPE}`;
+				const isRisingEdge = incrementDegradationCount({
+					kind: "lsp-nav-late-answer",
+					subject,
+					reason: `late nav answer discarded after ${elapsedMs}ms`,
+				});
+				if (!isRisingEdge) return;
+				logLatency({
+					type: "phase",
+					phase: "lsp_nav_late_answer_discarded",
+					filePath: args.scope ?? NAV_REQUEST_NO_PATH_SCOPE,
+					durationMs: elapsedMs,
+					metadata: { method: args.method },
+				});
+			} catch {
+				// Telemetry must never break the observed path.
+			}
+		},
+		() => {
+			// The abandoned request eventually failed rather than answering —
+			// not an "answer discarded" event. Nothing more to record here; this
+			// handler exists so the request's eventual rejection never surfaces
+			// as an unhandled rejection.
+		},
+	);
 }
 
 // #1277: cheap liveness round-trip used by the silent-clean gates in
@@ -3599,7 +3767,8 @@ export async function runServerCommand(
 	}
 	state.serverEditsAllowed += 1;
 	state.activeMutationDepth = (state.activeMutationDepth ?? 0) + 1;
-	if (state.activeMutationDepth === 1) state.activeMutationContext = mutationContext;
+	if (state.activeMutationDepth === 1)
+		state.activeMutationContext = mutationContext;
 	else state.activeMutationContext = undefined;
 	try {
 		let result: unknown;
@@ -3627,8 +3796,12 @@ export async function runServerCommand(
 		return { executed: true, result };
 	} finally {
 		state.serverEditsAllowed -= 1;
-		state.activeMutationDepth = Math.max(0, (state.activeMutationDepth ?? 0) - 1);
-		if (state.activeMutationDepth === 0) state.activeMutationContext = undefined;
+		state.activeMutationDepth = Math.max(
+			0,
+			(state.activeMutationDepth ?? 0) - 1,
+		);
+		if (state.activeMutationDepth === 0)
+			state.activeMutationContext = undefined;
 	}
 }
 
@@ -3682,12 +3855,28 @@ function validateWorkspaceEditVersions(
 	edit: { documentChanges?: unknown[] },
 ): void {
 	for (const change of edit.documentChanges ?? []) {
-		if (typeof change !== "object" || change === null || !("textDocument" in change)) continue;
-		const textDocument = (change as { textDocument?: { uri?: unknown; version?: unknown } }).textDocument;
-		if (!textDocument || typeof textDocument.uri !== "string" || textDocument.version == null) continue;
-		const current = state.documentVersions.get(normalizeMapKey(uriToPath(textDocument.uri)));
+		if (
+			typeof change !== "object" ||
+			change === null ||
+			!("textDocument" in change)
+		)
+			continue;
+		const textDocument = (
+			change as { textDocument?: { uri?: unknown; version?: unknown } }
+		).textDocument;
+		if (
+			!textDocument ||
+			typeof textDocument.uri !== "string" ||
+			textDocument.version == null
+		)
+			continue;
+		const current = state.documentVersions.get(
+			normalizeMapKey(uriToPath(textDocument.uri)),
+		);
 		if (current === undefined || current !== textDocument.version) {
-			throw new Error(`stale workspace edit document version for ${textDocument.uri}`);
+			throw new Error(
+				`stale workspace edit document version for ${textDocument.uri}`,
+			);
 		}
 	}
 }
@@ -3747,7 +3936,10 @@ async function resolveCodeActionBestEffort(
 	if (action.edit) {
 		return {
 			...action,
-			edit: await normalizeClientWorkspaceEdit(state, action.edit as LSPWorkspaceEdit),
+			edit: await normalizeClientWorkspaceEdit(
+				state,
+				action.edit as LSPWorkspaceEdit,
+			),
 		};
 	}
 	let resolved: LSPCodeAction | null | undefined;
@@ -3768,7 +3960,13 @@ async function resolveCodeActionBestEffort(
 	if (!resolved || typeof resolved !== "object") return action;
 	const merged = { ...action, ...resolved };
 	return merged.edit
-		? { ...merged, edit: await normalizeClientWorkspaceEdit(state, merged.edit as LSPWorkspaceEdit) }
+		? {
+				...merged,
+				edit: await normalizeClientWorkspaceEdit(
+					state,
+					merged.edit as LSPWorkspaceEdit,
+				),
+			}
 		: merged;
 }
 
@@ -4167,7 +4365,11 @@ export async function createLSPClient(options: {
 		getAllDiagnostics() {
 			const result = new Map<
 				string,
-				{ diags: LSPDiagnostic[]; ts: number; binding?: StoredDiagnosticBinding }
+				{
+					diags: LSPDiagnostic[];
+					ts: number;
+					binding?: StoredDiagnosticBinding;
+				}
 			>();
 			const keys = new Set([
 				...state.pushDiagnostics.keys(),
@@ -4187,10 +4389,12 @@ export async function createLSPClient(options: {
 		},
 
 		getTrackedDiagnosticPaths() {
-			return [...new Set([
-				...state.pushDiagnostics.keys(),
-				...state.documentPullDiagnostics.keys(),
-			])].map((filePath) =>
+			return [
+				...new Set([
+					...state.pushDiagnostics.keys(),
+					...state.documentPullDiagnostics.keys(),
+				]),
+			].map((filePath) =>
 				process.platform === "win32" ? filePath.replace(/\//g, "\\") : filePath,
 			);
 		},
