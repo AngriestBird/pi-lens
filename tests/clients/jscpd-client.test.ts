@@ -145,6 +145,47 @@ describe("jscpd-client", () => {
 		}
 	});
 
+	it("reports a nonzero exit with no report file as errored, never clean (#1736 sweep)", async () => {
+		// jscpd (verified live, 3.5.10) writes NO report file both when it's
+		// genuinely clean (exit 0) and when it crashes (nonzero exit, uncaught
+		// exception). The missing-file check alone can't tell those apart --
+		// the fix must also look at the exit status.
+		const { JscpdClient } = await import("../../clients/jscpd-client.js");
+		const safeSpawnMod = await import("../../clients/safe-spawn.js");
+
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-jscpd-crash-");
+		try {
+			const srcFile = path.join(tmpDir, "src", "feature", "index.ts");
+			fs.mkdirSync(path.dirname(srcFile), { recursive: true });
+			fs.writeFileSync(srcFile, "export const x = 1;\n");
+
+			const client = new JscpdClient(false) as unknown as {
+				scan: (
+					cwd: string,
+					minLines: number,
+					minTokens: number,
+					isTsProject: boolean,
+				) => Promise<{ success: boolean; clones: unknown[] }>;
+				ensureAvailable: () => Promise<boolean>;
+			};
+			await client.ensureAvailable();
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockClear();
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
+				error: undefined,
+				status: 1,
+				stdout: "",
+				stderr: "Error: ENOENT: no such file or directory\n",
+			});
+
+			const result = await client.scan(tmpDir, 5, 50, true);
+
+			expect(result.success).toBe(false);
+			expect(result.clones).toHaveLength(0);
+		} finally {
+			cleanup();
+		}
+	});
+
 	it("does not scan when only excluded directories contain source files", async () => {
 		const { JscpdClient } = await import("../../clients/jscpd-client.js");
 		const safeSpawnMod = await import("../../clients/safe-spawn.js");

@@ -13,6 +13,7 @@
  */
 
 import { createSubsystemLogger } from "./extension-log.js";
+import { incrementDegradationCount } from "./degradation-ledger.js";
 import * as path from "node:path";
 import { findNearestMarkerRoot } from "./path-utils.js";
 import { getScratchTreeFnmatchPatterns } from "./scratch-tree-policy.js";
@@ -24,6 +25,7 @@ import {
 	logAvailabilityDecision,
 	startHostStallSampler,
 } from "./dispatch/runners/utils/availability-policy.js";
+import { spawnFailedWithNoOutput } from "./dispatch/runners/utils/spawn-outcome.js";
 
 // --- Types ---
 
@@ -396,14 +398,30 @@ export class PythonDeadCodeClient implements DeadCodeClient {
 		}
 		// vulture writes parse/usage errors to stderr and exits 1 with no
 		// stdout findings; distinguish that from "found dead code" (exit 1 WITH
-		// findings on stdout).
+		// findings on stdout). #1736 sweep: the ORIGINAL guard here required
+		// non-empty stderr to call it an error, so a nonzero exit with BOTH
+		// empty stdout and empty stderr (a silent crash) still fell through to
+		// "No dead code found" -- the same empty-distinguishes-clean-from-errored
+		// gap the knip fix closes. A nonzero exit with no findings on stdout is
+		// never clean now, regardless of whether stderr said anything.
 		const output = result.stdout || "";
 		if (!output.trim()) {
 			const stderr = (result.stderr || "").trim();
-			if (result.status !== 0 && stderr) {
+			// Same discriminator every dispatch/runners linter uses
+			// (`spawnFailedWithNoOutput`) rather than a parallel hand-rolled
+			// check (result.error is already handled above, so this reduces to
+			// the `status !== 0` half).
+			if (spawnFailedWithNoOutput(result, output)) {
+				const reason = `vulture exited ${result.status} with empty stdout${stderr ? `: ${stderr.split("\n")[0]}` : " (no stderr)"}`;
+				this.log(reason);
+				incrementDegradationCount({
+					kind: "runner-empty-result",
+					subject: "vulture",
+					reason,
+				});
 				return {
 					...emptyResult(this.language),
-					summary: `vulture error: ${stderr.split("\n")[0]}`,
+					summary: stderr ? `vulture error: ${stderr.split("\n")[0]}` : reason,
 					durationMs,
 				};
 			}

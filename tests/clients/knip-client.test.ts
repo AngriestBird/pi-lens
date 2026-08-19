@@ -505,6 +505,99 @@ describe("knip-client", () => {
 		}
 	});
 
+	it("reports a nonzero exit with empty stdout as errored, never clean (#1736)", async () => {
+		// The reviewer's exact fixture from #1732's review: a broken project
+		// knip shim that writes to stderr and exits 1 with no stdout at all.
+		// Empirically (knip 6.4.1), a genuinely clean run ALWAYS prints
+		// `{"issues":[]}` on exit 0 — empty stdout only pairs with a nonzero
+		// exit, so this combination is unambiguous evidence of a failed run.
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-broken-shim-");
+		try {
+			fs.writeFileSync(path.join(tmpDir, "package.json"), '{"name":"demo"}');
+
+			const safeSpawnMod = await import("../../clients/safe-spawn.js");
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValueOnce({
+				error: null,
+				status: 1,
+				stdout: "",
+				stderr: "knip: command not found in this shim\n",
+			} as never);
+
+			const client = new KnipClient(false) as unknown as {
+				runAnalyze: (d: string) => Promise<{
+					success: boolean;
+					summary: string;
+					issues: unknown[];
+				}>;
+			};
+			const result = await client.runAnalyze(tmpDir);
+
+			expect(result.success).toBe(false);
+			expect(result.summary).not.toMatch(/no issues found/i);
+			expect(result.issues).toHaveLength(0);
+		} finally {
+			cleanup();
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("still reports a genuine clean run (exit 0, {\"issues\":[]}) as clean (#1736)", async () => {
+		// Inversion check (the #1700 lesson): prove the discriminator doesn't
+		// misclassify a REAL clean run. knip 6.4.1 verified live: exit 0 always
+		// prints `{"issues":[]}`, never truly empty stdout.
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-genuine-clean-");
+		try {
+			fs.writeFileSync(path.join(tmpDir, "package.json"), '{"name":"demo"}');
+
+			const safeSpawnMod = await import("../../clients/safe-spawn.js");
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValueOnce({
+				error: null,
+				status: 0,
+				stdout: '{"issues":[]}',
+				stderr: "",
+			} as never);
+
+			const client = new KnipClient(false) as unknown as {
+				runAnalyze: (d: string) => Promise<{ success: boolean; issues: unknown[] }>;
+			};
+			const result = await client.runAnalyze(tmpDir);
+
+			expect(result.success).toBe(true);
+			expect(result.issues).toHaveLength(0);
+		} finally {
+			cleanup();
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("still parses a genuine findings run that exits nonzero (knip exits 1 when it finds issues) (#1736)", async () => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-genuine-findings-");
+		try {
+			fs.writeFileSync(path.join(tmpDir, "package.json"), '{"name":"demo"}');
+
+			const safeSpawnMod = await import("../../clients/safe-spawn.js");
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValueOnce({
+				error: null,
+				status: 1,
+				stdout: JSON.stringify({
+					issues: [{ file: "unused-file.js", files: [{ name: "unused-file.js" }] }],
+				}),
+				stderr: "",
+			} as never);
+
+			const client = new KnipClient(false) as unknown as {
+				runAnalyze: (d: string) => Promise<{ success: boolean; issues: unknown[] }>;
+			};
+			const result = await client.runAnalyze(tmpDir);
+
+			expect(result.success).toBe(true);
+			expect(result.issues).toHaveLength(1);
+		} finally {
+			cleanup();
+			vi.restoreAllMocks();
+		}
+	});
+
 	it("routes enumMembers into unusedExports (grouped format)", () => {
 		// NOTE: knip 6.x has no `classMembers` issue type (requesting it makes knip
 		// exit 2), so the only member-level type we include/parse is enumMembers.
