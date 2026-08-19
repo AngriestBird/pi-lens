@@ -17,14 +17,36 @@
 
 let refreshesThisSession = 0;
 
-/** Refresh attempts made in the current session, successful or not. */
+/** Refresh slots taken in the current session, successful or not. */
 export function managedToolRefreshesThisSession(): number {
 	return refreshesThisSession;
 }
 
-/** Count one attempt. Called before the spawn, so a failure still spends it. */
-export function noteManagedToolRefreshAttempt(): void {
+/**
+ * Take one refresh slot if the session still has one, and say whether it did.
+ *
+ * Check-and-take in ONE synchronous call, deliberately (#1746 review F1). The
+ * first cut read the remaining budget, then did two `await`s before counting
+ * the attempt. Two overlapping runs both read "1 slot free" in that window and
+ * both spawned `npm update` for the same package into the same unlocked
+ * `node_modules`. A caller cannot reproduce that race with this signature:
+ * there is no point between the check and the take at which the event loop can
+ * hand control to the other run.
+ */
+export function reserveManagedToolRefreshSlot(maxPerSession: number): boolean {
+	if (refreshesThisSession >= maxPerSession) return false;
 	refreshesThisSession += 1;
+	return true;
+}
+
+/**
+ * Hand a reserved slot back, for a run that reserved one and then found
+ * nothing to do. Only a run that never reached a spawn may call this: a slot
+ * is spent by the ATTEMPT, so a failed `npm update` keeps it and the session
+ * does not retry a second tool in its place.
+ */
+export function releaseManagedToolRefreshSlot(): void {
+	if (refreshesThisSession > 0) refreshesThisSession -= 1;
 }
 
 /**

@@ -32,6 +32,7 @@ import {
 	pmBinary,
 	resolveNodePackageManager,
 	runScriptArgs,
+	updateArgs,
 } from "../../clients/package-manager.js";
 
 const dirs: string[] = [];
@@ -215,6 +216,36 @@ describe("command builders", () => {
 		expect(
 			installArgs("bun", "biome", { ignoreScripts: true, legacyPeerDeps: true }),
 		).toEqual(["add", "--ignore-scripts", "biome"]);
+	});
+
+	it("updateArgs re-resolves a dependency per manager", () => {
+		// The command that moves a dependency the lockfile already satisfies.
+		// `install`/`add` is a no-op there, which is why pi-lens's managed tools
+		// tree froze on its first-install versions (#1730).
+		expect(updateArgs("npm", "knip")).toEqual(["update", "knip"]);
+		expect(updateArgs("pnpm", "knip")).toEqual(["update", "knip"]);
+		expect(updateArgs("bun", "knip")).toEqual(["update", "knip"]);
+		// yarn classic spells it `upgrade`; `yarn update` is not a command.
+		expect(updateArgs("yarn", "knip")).toEqual(["upgrade", "knip"]);
+	});
+
+	it("updateArgs threads ignore-scripts", () => {
+		expect(updateArgs("npm", "knip", { ignoreScripts: true })).toEqual([
+			"update",
+			"--ignore-scripts",
+			"knip",
+		]);
+		expect(updateArgs("yarn", "knip", { ignoreScripts: true })).toEqual([
+			"upgrade",
+			"--ignore-scripts",
+			"knip",
+		]);
+		// Omitted by default: a package whose postinstall fetches its native
+		// binary has to run that postinstall on update too.
+		expect(updateArgs("npm", "@biomejs/biome")).toEqual([
+			"update",
+			"@biomejs/biome",
+		]);
 	});
 
 	it("globalInstallArgs spells the global install per manager", () => {
