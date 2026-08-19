@@ -463,13 +463,21 @@ describe("computeCascadeForFile", () => {
 				writeSeq: 1,
 			});
 
+			// #1720: the cascade's neighbor re-check touches with `clientScope:
+			// "primary"` (language server only), not "all". A neighbor's content did
+			// not change — only its import target did — so an auxiliary scanner's
+			// (ast-grep/opengrep/typos) file-local verdict for it cannot have
+			// changed, and `reconcileCascadeNeighborLspErrors` discards any
+			// aux-sourced re-derivation by construction (see the merge test below).
+			// Asking aux servers here only cost notify traffic and confirmation
+			// latency for a re-derivation nothing ever reads.
 			expect(touchFile).toHaveBeenCalledWith(
 				neighbor,
 				expect.any(String),
 				expect.objectContaining({
 					silent: true,
 					source: "cascade",
-					clientScope: "all",
+					clientScope: "primary",
 					collectDiagnostics: true,
 				}),
 			);
@@ -477,6 +485,77 @@ describe("computeCascadeForFile", () => {
 			expect(result?.result?.neighbors[0]?.diagnostics[0]?.message).toBe(
 				"python broken",
 			);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("#1720: a cascade neighbor re-check does not fan out to auxiliary servers, and the widget still renders the neighbor's preserved aux finding afterward", async () => {
+		const env = setupTestEnvironment("cascade-aux-scope-");
+		try {
+			const { recordDiagnostics, getFileDiagnostics, clearWidgetState } =
+				await import("../../clients/widget-state.js");
+			clearWidgetState();
+
+			const primary = path.join(env.tmpDir, "model.py");
+			const neighbor = path.join(env.tmpDir, "api.py");
+			fs.writeFileSync(primary, "class User: pass\n");
+			fs.writeFileSync(neighbor, "from model import User\n");
+
+			// Seed the neighbor with an existing auxiliary (ast-grep) finding from an
+			// earlier per-edit run — the state a cascade touch can never legitimately
+			// change, since the neighbor's own content is untouched.
+			const normalizedNeighbor = neighbor.split(path.sep).join("/");
+			recordDiagnostics(
+				normalizedNeighbor,
+				[
+					{
+						severity: "warning",
+						tool: "ast-grep",
+						message: "existing ast-grep finding",
+						rule: "no-foo",
+					},
+				],
+				1,
+			);
+
+			mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
+			const touchFile = vi
+				.fn()
+				.mockResolvedValue({ diags: [lspError("cross-file type error")] });
+			mocks.getLSPService.mockReturnValue({
+				getAllDiagnostics: vi.fn().mockResolvedValue(new Map()),
+				touchFile,
+				getDiagnostics: vi.fn(),
+			});
+
+			const { computeCascadeForFile } = await import(
+				"../../clients/dispatch/integration.js"
+			);
+			await computeCascadeForFile(primary, env.tmpDir, {
+				turnSeq: 1,
+				writeSeq: 2,
+			});
+
+			// The fix: no auxiliary server is ever asked for this neighbor.
+			expect(touchFile).toHaveBeenCalledWith(
+				neighbor,
+				expect.any(String),
+				expect.objectContaining({ clientScope: "primary" }),
+			);
+
+			// The widget still renders BOTH: the neighbor's preserved ast-grep
+			// finding (never re-derived, never touched) and the fresh cross-file LSP
+			// error the cascade actually confirmed.
+			const rendered = getFileDiagnostics(normalizedNeighbor);
+			expect(rendered?.find((d) => d.tool === "ast-grep")?.message).toBe(
+				"existing ast-grep finding",
+			);
+			expect(rendered?.find((d) => d.tool === "lsp")?.message).toBe(
+				"cross-file type error",
+			);
+
+			clearWidgetState();
 		} finally {
 			env.cleanup();
 		}
@@ -2741,9 +2820,11 @@ describe("computeCascadeForFile", () => {
 				fs.writeFileSync(primary, "class User: pass\n");
 				fs.writeFileSync(neighbor, "from model import User\n");
 				mocks.computeImpactCascade.mockReturnValue(impact(primary, [neighbor]));
-				// The touch (clientScope:"all") pulls the neighbor's OWN auxiliary
-				// finding — opengrep tags its LSP diagnostics `source: "Semgrep"` —
-				// alongside no genuine language-server error.
+				// Even if a touch result somehow carried an aux-sourced diagnostic
+				// (opengrep tags its LSP diagnostics `source: "Semgrep"`) alongside no
+				// genuine language-server error, the reconcile must still exclude it —
+				// belt-and-suspenders alongside #1720's `clientScope: "primary"` fix,
+				// which stops the cascade from asking aux servers at all.
 				const semgrep = {
 					severity: 1 as const,
 					message: "opengrep: audit finding",
@@ -2860,7 +2941,7 @@ describe("computeCascadeForFile", () => {
 				expect(lsp.touchFile).toHaveBeenCalledWith(
 					neighbor,
 					expect.any(String),
-					expect.objectContaining({ source: "cascade", clientScope: "all" }),
+					expect.objectContaining({ source: "cascade", clientScope: "primary" }),
 				);
 				// The stale snapshot error must not survive as a cascade neighbor result.
 				expect(
