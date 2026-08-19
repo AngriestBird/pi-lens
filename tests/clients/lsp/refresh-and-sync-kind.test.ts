@@ -431,18 +431,23 @@ describe("workspace/diagnostic/refresh clears per-document pull state and re-pul
 		expect(handler).toBeDefined();
 
 		await handler!();
-		// The re-pull is fired without being awaited by the handler itself
-		// (never block a request reply on a follow-up round trip) — flush
-		// microtasks so it has a chance to actually reach the mock.
-		await Promise.resolve();
-		await Promise.resolve();
 
 		// #1104 basis dropped — same fields `clearDiagnosticsForPath` drops for
 		// a normal resync. Pre-fix, only `workspacePullResultCache` (handled
-		// separately, above) was cleared; these all stayed stale.
+		// separately, above) was cleared; these all stayed stale. Checked
+		// BEFORE the deferred re-pull runs (it legitimately re-populates
+		// `pullResultIds` with a fresh basis) — the clear itself is
+		// synchronous, inside the handler's own execution, not behind
+		// `setImmediate`.
 		expect(state.pullResultIds.has(TEST_KEY)).toBe(false);
 		expect(state.diagnosticBindings.has(TEST_KEY)).toBe(false);
 		expect(state.diagnosticsVersionsByPath.has(TEST_KEY)).toBe(false);
+
+		// #1669 review N2: the re-pull is deliberately deferred via
+		// `setImmediate` (so the protocol reply is never delayed behind it) —
+		// a microtask flush alone will NOT reach it; wait a real macrotask
+		// tick to observe it.
+		await new Promise((resolve) => setImmediate(resolve));
 
 		// Proactively re-pulled: a textDocument/diagnostic request went out
 		// for the open document instead of waiting on its next edit.
@@ -572,6 +577,234 @@ describe("clientRequestWorkspaceDiagnostics: unchanged report with no cached bas
 		expect(
 			out!.find((r) => normalizeMapKey(r.filePath) === TEST_KEY),
 		).toBeUndefined();
+	});
+});
+
+describe("clientRequestWorkspaceDiagnostics unchanged-fallback shares ONE deadline (#1669 review N1)", () => {
+	it("does not grant the full call budget to a SECOND file's fallback pull once the first has already exhausted it", async () => {
+		const state = createMockState({
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: true,
+				diagnosticProviderKind: "documentDiagnosticProvider",
+			},
+		});
+		const file1 = "/project/file1.ts";
+		const file2 = "/project/file2.ts";
+		const uri1 = pathToFileURL(file1).href;
+		const uri2 = pathToFileURL(file2).href;
+
+		// A controllable clock: Date.now() reads `baseTime + elapsedOffset`.
+		// `elapsedOffset` only moves when the test explicitly bumps it (inside
+		// file1's mocked response, below) — deterministic regardless of how
+		// many incidental Date.now() calls happen around it.
+		const baseTime = 1_700_000_000_000;
+		let elapsedOffset = 0;
+		const dateNowSpy = vi.spyOn(Date, "now").mockImplementation(
+			() => baseTime + elapsedOffset,
+		);
+
+		vi.mocked(state.connection.sendRequest).mockImplementation(
+			async (method: unknown, params?: unknown) => {
+				if (method === "workspace/diagnostic") {
+					return {
+						items: [
+							{ uri: uri1, kind: "unchanged", resultId: "r1" },
+							{ uri: uri2, kind: "unchanged", resultId: "r2" },
+						],
+					};
+				}
+				if (method === "textDocument/diagnostic") {
+					const uri = (params as { textDocument?: { uri?: string } })
+						?.textDocument?.uri;
+					if (uri === uri1) {
+						// Pre-fix, file2 would still get the FULL 100ms budget next —
+						// budgets were re-granted per file, never shared. Blow the
+						// whole shared budget here to prove the fix shares it.
+						elapsedOffset = 10_000;
+						return { kind: "full", resultId: "r1b", items: [] };
+					}
+					// file2 must never reach here once the shared deadline is fixed.
+					return { kind: "full", resultId: "r2b", items: [] };
+				}
+				return undefined;
+			},
+		);
+
+		try {
+			const out = await clientRequestWorkspaceDiagnostics(state, 100);
+
+			expect(out).toBeDefined();
+			const pullCalls = vi
+				.mocked(state.connection.sendRequest)
+				.mock.calls.filter((c) => c[0] === "textDocument/diagnostic");
+			// Pre-fix: 2 calls, each granted the full 100ms budget serially.
+			// Post-fix: only file1's call — file2 bails once the SHARED deadline
+			// (exhausted by file1) leaves it nothing to spend.
+			expect(pullCalls).toHaveLength(1);
+			expect(
+				(pullCalls[0][1] as { textDocument?: { uri?: string } })?.textDocument
+					?.uri,
+			).toBe(uri1);
+			// file2 must not silently read as clean either — it was never asked.
+			expect(
+				out!.find((r) => normalizeMapKey(r.filePath) === normalizeMapKey(file2)),
+			).toBeUndefined();
+		} finally {
+			dateNowSpy.mockRestore();
+		}
+	});
+});
+
+describe("workspace/diagnostic/refresh caps simultaneous re-pulls (#1669 review N2)", () => {
+	it("never runs more than the configured cap of textDocument/diagnostic requests at once", async () => {
+		const state = createMockState({
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: false,
+				diagnosticProviderKind: "documentDiagnosticProvider",
+			},
+		});
+		const DOC_COUNT = 12;
+		for (let i = 0; i < DOC_COUNT; i++) {
+			const filePath = `/project/concurrency-file-${i}.ts`;
+			const key = normalizeMapKey(filePath);
+			state.openDocuments.add(key);
+			state.openDocumentUris!.set(key, pathToFileURL(filePath).href);
+		}
+
+		let inFlight = 0;
+		let maxInFlight = 0;
+		vi.mocked(state.connection.sendRequest).mockImplementation(
+			async (method: unknown) => {
+				if (method === "textDocument/diagnostic") {
+					inFlight++;
+					maxInFlight = Math.max(maxInFlight, inFlight);
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					inFlight--;
+					return { kind: "full", resultId: "r", items: [] };
+				}
+				return undefined;
+			},
+		);
+
+		setupIncomingHandlers(state, {});
+		const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
+			[string, (...args: unknown[]) => unknown]
+		>;
+		const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+		const reply = await handler!();
+		// #1669 review N2: the reply must not wait on the re-pulls at all.
+		expect(reply).toBeNull();
+
+		// Drain the worker pool fully before asserting.
+		for (let i = 0; i < DOC_COUNT + 4; i++) {
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+
+		expect(inFlight, "worker pool must have fully drained").toBe(0);
+		const pullCalls = vi
+			.mocked(state.connection.sendRequest)
+			.mock.calls.filter((c) => c[0] === "textDocument/diagnostic");
+		expect(pullCalls).toHaveLength(DOC_COUNT);
+		// Pre-fix: `void clientRequestPullDiagnostics` per doc with no cap at
+		// all fired essentially all of them at once — maxInFlight would read
+		// DOC_COUNT (12). Post-fix it must stay at the small fixed cap.
+		expect(maxInFlight).toBeLessThan(DOC_COUNT);
+		expect(maxInFlight).toBeLessThanOrEqual(4);
+	});
+});
+
+describe("workspace/diagnostic/refresh reaches an unregistered cwd's on-disk cache (#1669 review N3)", () => {
+	it("clears the persisted cache at state.root even when no sweep has registered that cwd in this process yet", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-refresh-n3-"));
+		try {
+			// Simulate a PRIOR session's sweep: real entries on disk, written
+			// directly (bypassing `createWorkspaceDiagnosticsCacheContext`, so
+			// `root` is NOT in this process's `_registeredCwds` — a virgin cwd
+			// from `clearAllWorkspaceDiagnosticsCaches`'s point of view, exactly
+			// the "refresh arrives before any sweep this process" scenario).
+			const filePath = path.join(root, "stale.ts");
+			const { saveWorkspaceDiagnosticsCache, WORKSPACE_DIAGNOSTICS_CACHE_VERSION } =
+				await import("../../../clients/lsp/workspace-diagnostics-cache.js");
+			saveWorkspaceDiagnosticsCache(root, {
+				version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
+				entries: {
+					[normalizeMapKey(filePath)]: {
+						diagnostics: [{ message: "stale" } as any],
+						count: 1,
+						mtimeMs: 1,
+						scannedAt: Date.now(),
+						scopeKey: "all|",
+					},
+				},
+			});
+			expect(
+				Object.keys(loadWorkspaceDiagnosticsCache(root)?.entries ?? {}),
+			).toHaveLength(1);
+
+			// The refresh fires for a client whose `state.root` IS this project's
+			// cwd (the common single-root case) — `clearAllWorkspaceDiagnosticsCaches`
+			// alone (registry-only) would clear nothing here.
+			const state = createMockState({ root });
+			setupIncomingHandlers(state, {});
+			const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
+				[string, (...args: unknown[]) => unknown]
+			>;
+			const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+			await handler!();
+
+			// Pre-fix: still 1 stale entry — nothing ever reached this cwd's file.
+			expect(
+				Object.keys(loadWorkspaceDiagnosticsCache(root)?.entries ?? {}),
+			).toHaveLength(0);
+
+			// A LATER sweep for this cwd (its first `createWorkspaceDiagnosticsCacheContext`
+			// call in this process) must not resurrect the stale entry either.
+			const ctx = createWorkspaceDiagnosticsCacheContext(root);
+			expect(ctx.lookup(filePath, "all|")).toBeUndefined();
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("createWorkspaceDiagnosticsCacheContext.lookup() honors a mid-sweep clear (#1669 review N4)", () => {
+	it("stops serving pre-refresh entries for the REST of an in-flight sweep, not only at persist() time", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-refresh-n4-"));
+		try {
+			const { clearWorkspaceDiagnosticsCache } = await import(
+				"../../../clients/lsp/workspace-diagnostics-cache.js"
+			);
+			const filePath = path.join(root, "a.ts");
+			fs.writeFileSync(filePath, "const a = 1;\n");
+			const mtimeMs = fs.statSync(filePath).mtimeMs;
+
+			// A sweep starts and records+persists a fresh entry for `a.ts`.
+			const ctx = createWorkspaceDiagnosticsCacheContext(root);
+			ctx.record(filePath, "all|", [{ message: "pre-refresh" } as any], mtimeMs);
+			ctx.persist();
+			// This SAME sweep's `entries` map still holds `a.ts` in memory — the
+			// next lookup would normally hit it (isEntryFresh only checks mtime,
+			// unchanged here).
+			expect(ctx.lookup(filePath, "all|")).toBeDefined();
+
+			// Mid-sweep, a refresh clears this cwd (e.g. from a concurrent LSP
+			// client's `workspace/diagnostic/refresh` handler for the SAME
+			// project).
+			clearWorkspaceDiagnosticsCache(root);
+
+			// Pre-fix: `lookup()` had no epoch check at all — this sweep kept
+			// serving its own now-disowned in-memory copy for the rest of its
+			// run, even though the epoch would already have blocked its
+			// `persist()`. Post-fix: `lookup()` itself goes dark the instant the
+			// epoch moves.
+			expect(ctx.lookup(filePath, "all|")).toBeUndefined();
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

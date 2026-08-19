@@ -85,6 +85,19 @@ export interface WorkspaceDiagnosticsCacheEntry {
 export interface WorkspaceDiagnosticsCache {
 	version: number;
 	entries: Record<string, WorkspaceDiagnosticsCacheEntry>;
+	/**
+	 * #1669 review N3: the invalidation epoch as of the last write, persisted
+	 * IN the file itself rather than kept only in this process's memory. A
+	 * purely in-memory epoch (`_cacheEpochs` below) is invisible to a later
+	 * `createWorkspaceDiagnosticsCacheContext` call for a cwd this process
+	 * never swept before a refresh fired for it — its clear could still land
+	 * on disk (once the cwd IS reached, via `state.root` — see the refresh
+	 * handler), but a NEW process (or a fresh in-memory epoch after a
+	 * restart) reading this file back has no other way to see that the
+	 * entries here were already invalidated once. Absent on a legacy/v1-era
+	 * file — read as 0, same as an unseen cwd's in-memory epoch.
+	 */
+	generation?: number;
 }
 
 function cachePath(cwd: string): string {
@@ -128,15 +141,45 @@ export function clearAllWorkspaceDiagnosticsCaches(): void {
 // own (now-stale) in-memory copy is written back. Capture the epoch at
 // context-creation (read) time; refuse to publish if it advanced before
 // `persist()` (write) time — the clear wins, and the next sweep starts clean.
+//
+// #1669 review N3: kept in-memory for the fast path, but every read/write
+// also consults the `generation` field persisted IN the cache file (see
+// `WorkspaceDiagnosticsCache.generation`'s doc comment) and takes the max of
+// the two — an in-memory-only epoch is invisible across a process restart,
+// or to a cwd this process is only just now discovering. `cacheEpoch` is
+// used both to seed a NEW context's baseline (`createWorkspaceDiagnosticsCacheContext`)
+// and, per N4, by `lookup()` on every call so an in-flight sweep stops
+// serving pre-refresh entries the moment its OWN epoch goes stale, not only
+// at `persist()` time.
 const _cacheEpochs = new Map<string, number>();
 
-function cacheEpoch(root: string): number {
+/** In-memory-only read — no disk I/O. A refresh clear from THIS process
+ *  always updates `_cacheEpochs` synchronously (`bumpCacheEpoch` below), so
+ *  this is authoritative for an in-process check (`lookup()`'s per-file N4
+ *  guard) without paying a disk read per file. */
+function cacheEpochFast(root: string): number {
 	return _cacheEpochs.get(normalizeMapKey(root)) ?? 0;
 }
 
-function bumpCacheEpoch(root: string): void {
+/** Merges in the on-disk `generation` (see `WorkspaceDiagnosticsCache.
+ *  generation`'s doc comment) so an epoch set by an EARLIER process, or a
+ *  clear that landed on disk before this process's `_cacheEpochs` map ever
+ *  saw this cwd, is not silently invisible. One disk read — call ONLY where
+ *  that cost is amortized over a whole sweep (context creation, persist()),
+ *  never per file. */
+function cacheEpoch(root: string): number {
 	const key = normalizeMapKey(root);
-	_cacheEpochs.set(key, (_cacheEpochs.get(key) ?? 0) + 1);
+	const inMemory = _cacheEpochs.get(key) ?? 0;
+	const onDisk = loadWorkspaceDiagnosticsCache(root)?.generation ?? 0;
+	const merged = Math.max(inMemory, onDisk);
+	if (merged > inMemory) _cacheEpochs.set(key, merged);
+	return merged;
+}
+
+function bumpCacheEpoch(root: string): number {
+	const next = cacheEpoch(root) + 1;
+	_cacheEpochs.set(normalizeMapKey(root), next);
+	return next;
 }
 
 /** Fail-safe on any read/parse/shape problem: return `undefined` so the
@@ -186,11 +229,16 @@ export function clearWorkspaceDiagnosticsCache(cwd: string): void {
 	// Bump FIRST: any sweep context already loaded (whose own `persist()`
 	// hasn't run yet) must observe an epoch mismatch regardless of exactly
 	// when its write lands relative to this clear.
-	bumpCacheEpoch(root);
+	const generation = bumpCacheEpoch(root);
 	try {
+		// #1669 review N3: `generation` rides IN the file, not only in this
+		// process's memory — a later `createWorkspaceDiagnosticsCacheContext`
+		// call, even from a fresh process, reads it back via `cacheEpoch`'s
+		// disk merge instead of seeing an unseeded epoch of 0.
 		saveWorkspaceDiagnosticsCache(root, {
 			version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 			entries: {},
+			generation,
 		});
 	} catch {
 		// best-effort — see doc comment above.
@@ -369,6 +417,18 @@ export function createWorkspaceDiagnosticsCacheContext(
 
 	return {
 		lookup(filePath, scopeKey) {
+			// #1669 review N4: the epoch guarded `persist()` but not `lookup()` —
+			// an in-flight sweep kept REPLAYING disowned entries into its OWN
+			// served results for the rest of its run even though the on-disk
+			// cache was already correctly cleared (disk stayed clean, but the
+			// user still saw stale results for the remainder of THIS sweep).
+			// Check on every call, not just at load time: a refresh landing
+			// mid-sweep must stop lookups from serving pre-refresh entries
+			// immediately, not only prevent them from being written back.
+			// In-memory-only (`cacheEpochFast`) — this runs per file, and a
+			// same-process clear always updates memory synchronously, so a
+			// disk read here would cost real sweep time for no added safety.
+			if (cacheEpochFast(root) !== epoch) return undefined;
 			const entry = entries[cacheKeyFor(filePath)];
 			if (!entry || entry.scopeKey !== scopeKey) return undefined;
 			if (!isEntryFresh(filePath, entry, getImports)) return undefined;
@@ -406,9 +466,15 @@ export function createWorkspaceDiagnosticsCacheContext(
 				return;
 			}
 			try {
+				// #1669 review N3: carry the epoch forward into the file on every
+				// normal persist too, not only on a clear — otherwise a NEXT
+				// process (or this one after `_cacheEpochs` is somehow lost) would
+				// read a stale `generation` even though this write is legitimately
+				// fresh, understating how current the file actually is.
 				saveWorkspaceDiagnosticsCache(root, {
 					version: WORKSPACE_DIAGNOSTICS_CACHE_VERSION,
 					entries,
+					generation: epoch,
 				});
 				dirty = false;
 			} catch {

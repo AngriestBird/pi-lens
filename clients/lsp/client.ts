@@ -59,7 +59,10 @@ import {
 } from "./sync-kind.js";
 import { getStrategy } from "./wait-policy/index.js";
 import { WatchedFilesQueue } from "./watch-queue.js";
-import { clearAllWorkspaceDiagnosticsCaches } from "./workspace-diagnostics-cache.js";
+import {
+	clearAllWorkspaceDiagnosticsCaches,
+	clearWorkspaceDiagnosticsCache,
+} from "./workspace-diagnostics-cache.js";
 
 // Opt-in publishDiagnostics trace (PILENS_PUB_DEBUG=1) — read once, negligible
 // hot-path cost. Surfaces each server's publish behavior (version + count) to
@@ -644,6 +647,35 @@ const LIVENESS_PING_QUERY = "__pi_lens_liveness_ping__";
 // cheaply rebuilt by the next full pull, the worst case is just one extra full
 // (non-`unchanged`) report per affected file.
 const WORKSPACE_PULL_RESULT_CACHE_MAX = 4096;
+// #1669 review N2: cap on simultaneous re-pulls the `workspace/diagnostic/
+// refresh` handler fires for open documents. A workspace with hundreds of
+// open documents fanning out one `textDocument/diagnostic` request each,
+// with no cap, floods the server the refresh itself just told us is under
+// load. Small and fixed — this is a background improvement after the
+// protocol reply, never something worth tuning per project.
+const REFRESH_REPULL_CONCURRENCY = 4;
+
+/** Run `mapper` over `items` with at most `concurrency` in flight at once.
+ *  Same shape as `dependency-checker.ts`'s helper of the same name — a
+ *  worker-pool pattern repeated per-file by design in this codebase rather
+ *  than shared, so each caller can keep it un-exported and file-local. */
+async function mapWithConcurrency<T>(
+	items: readonly T[],
+	concurrency: number,
+	mapper: (item: T) => Promise<void>,
+): Promise<void> {
+	if (items.length === 0) return;
+	let nextIndex = 0;
+	const workerCount = Math.max(1, Math.min(concurrency, items.length));
+	const worker = async (): Promise<void> => {
+		while (true) {
+			const index = nextIndex++;
+			if (index >= items.length) return;
+			await mapper(items[index]);
+		}
+	};
+	await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
 // Anti-deadlock backstop for workspace/executeCommand. Deliberately generous
 // (30s): the command is mutating and legitimately long-running (a real server
 // refactor / organize-imports), so this must not truncate valid work — it only
@@ -1779,13 +1811,27 @@ export function setupIncomingHandlers(
 	// the server just told us to distrust.
 	state.connection.onRequest("workspace/diagnostic/refresh", async () => {
 		state.workspacePullResultCache.clear();
-		// #1669 review F1: clear EVERY on-disk sweep cache this process has
-		// recorded a cwd for, not `state.root` — `state.root` is a per-SERVER
-		// identity marker that a monorepo/multi-root project routinely nests
-		// BELOW the real sweep cwd, so clearing at it misses the cache file the
+		// #1669 review F1: clear every on-disk sweep cache this process has
+		// recorded a cwd for — `state.root` alone is a per-SERVER identity
+		// marker that a monorepo/multi-root project routinely nests BELOW the
+		// real sweep cwd, so clearing ONLY there would miss the cache file the
 		// sweep actually reads/writes. See the doc comment on
 		// `clearAllWorkspaceDiagnosticsCaches`.
 		clearAllWorkspaceDiagnosticsCaches();
+		// #1669 review N3: ALSO clear at `state.root` directly. The registry
+		// above only knows cwds a sweep has already run under IN THIS PROCESS —
+		// a refresh arriving before this project's first sweep this process
+		// (e.g. right after a respawn) would otherwise clear nothing at all,
+		// and a later sweep would load the untouched, now-genuinely-stale
+		// on-disk cache a PRIOR process/session left behind. `state.root` is
+		// the one cwd this handler can always reach regardless of registry
+		// state — imprecise for a monorepo (the F1 gap), but a cheap, durable
+		// backstop for the common single-root case where root and sweep cwd
+		// coincide. `clearWorkspaceDiagnosticsCache` also persists the epoch
+		// INTO the file (see its `generation` field), so even a swept cwd this
+		// call happens to miss is caught by `cacheEpoch`'s disk read the next
+		// time anything opens a context for it.
+		clearWorkspaceDiagnosticsCache(state.root);
 		// #1669 review F3: a server-initiated "everything may be stale" signal
 		// must drop the SAME per-document state a normal resync already drops
 		// via `clearDiagnosticsForPath` (pullResultIds, pushDiagnostics,
@@ -1795,18 +1841,50 @@ export function setupIncomingHandlers(
 		// pull state intact, so the next pull would echo a disowned
 		// `previousResultId`, get back `kind: "unchanged"`, and re-confirm
 		// stale diagnostics under a fresh timestamp; nothing would ever
-		// re-pull on its own. Route every open document through the resync
-		// clear, then proactively re-pull it (pull mode only — a push server
-		// republishes on its own schedule and a pull request would just be
-		// refused) so a consumer sees fresh diagnostics without waiting on
-		// that document's next edit.
+		// re-pull on its own.
+		const toRepull: string[] = [];
 		for (const normalizedPath of state.openDocuments) {
 			clearDiagnosticsForPath(state, normalizedPath);
 			if (state.workspaceDiagnosticsSupport.mode === "pull") {
-				const uri = state.openDocumentUris?.get(normalizedPath);
-				const filePath = uri ? uriToPath(uri) : normalizedPath;
-				void clientRequestPullDiagnostics(state, filePath);
+				toRepull.push(normalizedPath);
 			}
+		}
+		// #1669 review N2: reply to the PROTOCOL request now — every clear
+		// above is synchronous and already complete, so there is nothing left
+		// this reply should wait on. The re-pull below is a background
+		// improvement (so an open document reflects the refresh without
+		// waiting on its next edit), never something worth delaying — or
+		// risking — the required `null` reply over. `setImmediate` defers even
+		// the SYNCHRONOUS prefix of the re-pull loop (URI lookups, map
+		// bookkeeping) to the next tick, so it can never compete with this
+		// reply for the current one regardless of how many documents are open.
+		if (toRepull.length > 0) {
+			setImmediate(() => {
+				// #1669 review N2: capped concurrency — an open workspace with
+				// hundreds of documents fanning out one simultaneous
+				// `textDocument/diagnostic` request each would flood the very
+				// server this refresh just told us is under load. Rejections are
+				// observed (via the shared degradation ledger), never
+				// `void`-swallowed — `clientRequestPullDiagnostics` itself never
+				// throws (it returns an `unavailable` outcome), so this only
+				// fires on a genuine programming error, but a silent throw inside
+				// `mapWithConcurrency`'s `Promise.all` must not vanish either way.
+				void mapWithConcurrency(
+					toRepull,
+					REFRESH_REPULL_CONCURRENCY,
+					async (normalizedPath) => {
+						const uri = state.openDocumentUris?.get(normalizedPath);
+						const filePath = uri ? uriToPath(uri) : normalizedPath;
+						await clientRequestPullDiagnostics(state, filePath);
+					},
+				).catch((err) => {
+					incrementDegradationCount({
+						kind: "lsp-pull-unconfirmed",
+						subject: state.serverId,
+						reason: `refresh re-pull threw: ${err instanceof Error ? err.message : String(err)}`,
+					});
+				});
+			});
 		}
 		return null;
 	});
@@ -2081,6 +2159,16 @@ export async function clientRequestWorkspaceDiagnostics(
 			diagnostics: LSPDiagnostic[];
 			contentHash?: string;
 		}> = [];
+		// #1669 review N1: ONE deadline, shared across every "unchanged, no
+		// cached basis" fallback pull this call makes — not a fresh `budgetMs`
+		// grant handed to EACH one. A refresh clears `workspacePullResultCache`,
+		// so the very next sweep after a refresh can route every item down this
+		// path; granting each one the full budget serially turned a bounded call
+		// unbounded (measured: 6 files x 300ms budget = 1844ms; worst case is
+		// the normal case — 2000 files x 30s). Mirrors the shared-budget shape
+		// `runWorkspaceDiagnosticsSwept`'s `perFileMs` bounds each file to,
+		// scoped to fallback pulls made from within THIS one call.
+		const fallbackPullDeadline = Date.now() + Math.max(1, budgetMs);
 		for (const item of report.items) {
 			if (!item?.uri) continue;
 			const filePath = uriToPath(item.uri);
@@ -2101,10 +2189,25 @@ export async function clientRequestWorkspaceDiagnostics(
 					// a false clean for a file the server just told us it hasn't even
 					// looked at freshly. Treat it as needs-full-pull: request the
 					// per-file diagnostic directly instead.
+					const remainingMs = fallbackPullDeadline - Date.now();
+					if (remainingMs <= 0) {
+						// #1669 review N1: the shared fallback-pull deadline is already
+						// exhausted by earlier files in this same loop — bail WITHOUT
+						// attempting a request (never fabricate clean; this file was
+						// never actually asked about) and surface it as unavailable via
+						// the same degradation ledger path as a real unavailable pull.
+						incrementDegradationCount({
+							kind: "lsp-pull-unconfirmed",
+							subject: state.serverId,
+							reason:
+								"unchanged report with no workspacePullResultCache basis; the shared fallback-pull deadline was already exhausted by earlier files this sweep",
+						});
+						continue;
+					}
 					const outcome = await clientRequestPullDiagnostics(
 						state,
 						filePath,
-						budgetMs,
+						remainingMs,
 					);
 					if (outcome.status === "found") {
 						out.push({
