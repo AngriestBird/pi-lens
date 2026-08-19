@@ -73,6 +73,13 @@ export type DegradationKind =
 	 */
 	| "lsp-pull-late-answer"
 	/**
+	 * A managed npm tool's periodic version refresh did not complete, or the
+	 * refresh state file could not be read (#1730). The tool keeps serving on
+	 * the version already installed — this kind means pi-lens cannot prove that
+	 * version is the newest the tool's declared range permits.
+	 */
+	| "managed-tool-refresh"
+	/**
 	 * `navRequest`'s (`clients/lsp/client.ts`) per-request `withTimeout`
 	 * abandoned a hover/definition/references/etc. request (#1716). Every
 	 * timeout is counted here; only the FIRST occurrence per (method, file)
