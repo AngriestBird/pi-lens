@@ -2,6 +2,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	directoryScopeUnavailable,
 	filterToTouchedFile,
 	parseCueVetOutput,
 } from "../../../clients/dispatch/runners/cue-vet.js";
@@ -165,6 +166,96 @@ describe("filterToTouchedFile (#1522 review round 1, F1)", () => {
 		);
 		expect(filterToTouchedFile(errors, "values.cue")).toBeUndefined();
 	});
+
+	// F7 (review round 2): the mixed case. One error has a location (in a
+	// SIBLING, not the touched file); one error has none at all. The original
+	// rule fell back to `undefined` only when EVERY error lacked a location,
+	// so this combination made `recognized.length` nonzero and the
+	// unattributable error's diagnostic silently vanished behind the
+	// sibling-filtered `[]` result — a real failure reading as clean.
+	it("F7: an unattributable error surfaces even when a SIBLING-located error is also present", () => {
+		const errors = parseCueVetOutput(
+			[
+				"some instances are incomplete; use the -c flag to show errors or -c=false to allow incomplete instances",
+				"otherField: conflicting values 5 and string (mismatched types int and string):",
+				"    .\\sibling.cue:3:11",
+			].join("\n"),
+		);
+		const diagnostics = filterToTouchedFile(errors, "values.cue");
+		// Never undefined (there WAS attributable evidence) and never empty
+		// (the unattributable error must not be dropped).
+		expect(diagnostics).toBeDefined();
+		expect(diagnostics).toHaveLength(1);
+		expect(diagnostics?.[0].message).toContain("some instances are incomplete");
+		expect(diagnostics?.[0].filePath).toBe("values.cue");
+		expect(diagnostics?.[0].line).toBe(1);
+	});
+
+	// F7's other half: the unattributable error surfaces ALONGSIDE a real
+	// touched-file match too, as two distinct diagnostics — the fix never
+	// merges or drops either.
+	it("F7: an unattributable error and a touched-file match both surface, distinctly", () => {
+		const errors = parseCueVetOutput(
+			[
+				"some instances are incomplete; use the -c flag to show errors or -c=false to allow incomplete instances",
+				'a: conflicting values int and "hello" (mismatched types int and string):',
+				"    .\\values.cue:3:4",
+				"    .\\values.cue:3:10",
+			].join("\n"),
+		);
+		const diagnostics = filterToTouchedFile(errors, "values.cue");
+		expect(diagnostics).toHaveLength(2);
+		expect(diagnostics?.some((d) => d.line === 3 && d.column === 4)).toBe(true);
+		expect(
+			diagnostics?.some((d) => d.message.includes("some instances are incomplete")),
+		).toBe(true);
+	});
+});
+
+// ── directoryScopeUnavailable — the F5/F6 fix's detector ────────────────────
+
+describe("directoryScopeUnavailable (#1522 review round 2, F5/F6)", () => {
+	it("recognizes a package-less directory failure (F5)", () => {
+		const raw =
+			"build constraints exclude all CUE files in .:\n    .\\standalone.cue: no package name\n";
+		expect(directoryScopeUnavailable(raw)).toBe(true);
+	});
+
+	it("recognizes a package-less failure with MULTIPLE files listed", () => {
+		const raw =
+			"build constraints exclude all CUE files in .:\n    .\\broken.cue: no package name\n    .\\clean.cue: no package name\n";
+		expect(directoryScopeUnavailable(raw)).toBe(true);
+	});
+
+	it("recognizes a two-different-packages directory failure (F6), with either trailing location form", () => {
+		expect(
+			directoryScopeUnavailable(
+				'found packages "alpha" (alpha.cue) and "beta" (beta.cue) in "."\n',
+			),
+		).toBe(true);
+		// Verified: cue sometimes reports the directory's own basename instead
+		// of "." depending on how it resolves the vet cwd — only the
+		// structural "found packages X and Y" part is load-bearing.
+		expect(
+			directoryScopeUnavailable(
+				'found packages "alpha" (alpha.cue) and "beta" (beta.cue) in "two-packages"\n',
+			),
+		).toBe(true);
+	});
+
+	it("does NOT flag a real conflicting-value error as a scope failure", () => {
+		const raw =
+			'a: conflicting values int and "hello" (mismatched types int and string):\n    .\\bad.cue:3:4\n    .\\bad.cue:3:10\n';
+		expect(directoryScopeUnavailable(raw)).toBe(false);
+	});
+
+	it("does NOT flag the -c=false-suppressed incomplete-values message", () => {
+		expect(
+			directoryScopeUnavailable(
+				"some instances are incomplete; use the -c flag to show errors or -c=false to allow incomplete instances",
+			),
+		).toBe(false);
+	});
 });
 
 // ── run() — mocked spawn, real parser ───────────────────────────────────────
@@ -309,5 +400,82 @@ describe("cue-vet run() — real binary output shapes, mocked spawn", () => {
 		const result = await cueVetRunner.run(createCtx(cueFile, cueCwd));
 		expect(result.status).toBe("skipped");
 		expect(result.diagnostics).toEqual([]);
+	});
+
+	// F5 (review round 2, HIGH): a package-less standalone file used to block
+	// on every edit — the directory vet fails with "build constraints exclude
+	// all CUE files", which has no :line:col, so it read as an unattributable
+	// whole-vet failure. The fix falls back to vetting the touched file alone.
+	it("F5: falls back to single-file vet when the directory is package-less, and reports clean", async () => {
+		safeSpawnAsync
+			.mockResolvedValueOnce({
+				status: 1,
+				stdout:
+					"build constraints exclude all CUE files in .:\n    .\\standalone.cue: no package name\n",
+				stderr: "",
+			})
+			.mockResolvedValueOnce({ status: 0, stdout: "", stderr: "" });
+		const cueVetRunner = (
+			await import("../../../clients/dispatch/runners/cue-vet.js")
+		).default;
+		const standaloneFile = path.join(cueCwd, "standalone.cue");
+		const result = await cueVetRunner.run(createCtx(standaloneFile, cueCwd));
+		expect(result.status).toBe("succeeded");
+		expect(result.diagnostics).toEqual([]);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(2);
+		const [, firstArgs] = safeSpawnAsync.mock.calls[0];
+		const [, secondArgs] = safeSpawnAsync.mock.calls[1];
+		expect(firstArgs).toEqual(["vet", "-c=false", "."]);
+		expect(secondArgs).toEqual(["vet", "-c=false", "./standalone.cue"]);
+	});
+
+	// F5's other half: the fallback still reports a REAL defect in a
+	// package-less file — this must not go permanently quiet.
+	it("F5: the single-file fallback still reports a real error in a package-less file", async () => {
+		safeSpawnAsync
+			.mockResolvedValueOnce({
+				status: 1,
+				stdout:
+					"build constraints exclude all CUE files in .:\n    .\\standalone.cue: no package name\n",
+				stderr: "",
+			})
+			.mockResolvedValueOnce({
+				status: 1,
+				stdout:
+					'a: conflicting values int and "hello" (mismatched types int and string):\n    .\\standalone.cue:1:4\n    .\\standalone.cue:1:10\n',
+				stderr: "",
+			});
+		const cueVetRunner = (
+			await import("../../../clients/dispatch/runners/cue-vet.js")
+		).default;
+		const standaloneFile = path.join(cueCwd, "standalone.cue");
+		const result = await cueVetRunner.run(createCtx(standaloneFile, cueCwd));
+		expect(result.status).toBe("failed");
+		expect(result.diagnostics).toHaveLength(1);
+		expect(result.diagnostics[0].line).toBe(1);
+		expect(result.diagnostics[0].column).toBe(4);
+	});
+
+	// F6 (review round 2, medium): a directory holding two DIFFERENT CUE
+	// packages — legal CUE — blocked both files on every edit for the same
+	// reason as F5. Same fallback fixes it.
+	it("F6: falls back to single-file vet when the directory holds two different packages, and reports clean", async () => {
+		safeSpawnAsync
+			.mockResolvedValueOnce({
+				status: 1,
+				stdout: 'found packages "alpha" (alpha.cue) and "beta" (beta.cue) in "."\n',
+				stderr: "",
+			})
+			.mockResolvedValueOnce({ status: 0, stdout: "", stderr: "" });
+		const cueVetRunner = (
+			await import("../../../clients/dispatch/runners/cue-vet.js")
+		).default;
+		const alphaFile = path.join(cueCwd, "alpha.cue");
+		const result = await cueVetRunner.run(createCtx(alphaFile, cueCwd));
+		expect(result.status).toBe("succeeded");
+		expect(result.diagnostics).toEqual([]);
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(2);
+		const [, secondArgs] = safeSpawnAsync.mock.calls[1];
+		expect(secondArgs).toEqual(["vet", "-c=false", "./alpha.cue"]);
 	});
 });
