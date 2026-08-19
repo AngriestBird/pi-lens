@@ -403,10 +403,10 @@ describe("getCachedLineCount cost discipline (#1641)", () => {
 		cleanups.push(env.cleanup);
 		const filePath = path.join(env.tmpDir, "cached.ts");
 		fs.writeFileSync(filePath, "a\nb\nc\n"); // really 4 addressable lines
-		const mtimeMs = fs.statSync(filePath).mtimeMs;
+		const stat = fs.statSync(filePath);
 
 		const cache = createLineCountCache();
-		cache.set(filePath, { mtimeMs, lineCount: 999 });
+		cache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, lineCount: 999 });
 		expect(getCachedLineCount(filePath, cache)).toBe(999);
 	});
 
@@ -419,8 +419,36 @@ describe("getCachedLineCount cost discipline (#1641)", () => {
 		const cache = createLineCountCache();
 		// A memo entry whose mtime does not match the file's real current mtime
 		// must be ignored — it belongs to a PRIOR state of this file.
-		cache.set(filePath, { mtimeMs: 1, lineCount: 999 });
+		cache.set(filePath, { mtimeMs: 1, size: 999, lineCount: 999 });
 		expect(getCachedLineCount(filePath, cache)).toBe(6);
+	});
+
+	it("V1 RED CASE: a cache entry with matching mtime but MISMATCHED size is a MISS, not a hit", () => {
+		// The review-round finding: mtime resolution on this host (~1ms) is
+		// coarse enough that a truncate-then-write, a formatter write-back, or
+		// our own auto-format immediately followed by the agent's write can
+		// land two DIFFERENT contents on the IDENTICAL mtimeMs. A cache keyed
+		// on mtime alone serves the FIRST content's line count for the SECOND —
+		// measured live at 207/300 shrink/restore cycles. Deterministic proof,
+		// no real utimesSync round-trip: seed a matching mtime but a size that
+		// does not match the file's real current size.
+		const env = setupTestEnvironment("pi-lens-past-eof-v1-");
+		cleanups.push(env.cleanup);
+		const filePath = path.join(env.tmpDir, "same-tick.ts");
+		fs.writeFileSync(filePath, "a\n"); // 1 newline → really 2 addressable lines
+		const stat = fs.statSync(filePath);
+
+		const cache = createLineCountCache();
+		// Same mtime as the file's real current mtime, but a size that does NOT
+		// match — simulating a same-millisecond write that changed content
+		// (and therefore size) without moving mtime forward at this host's
+		// resolution. A HIT here would silently serve the WRONG count.
+		cache.set(filePath, {
+			mtimeMs: stat.mtimeMs,
+			size: stat.size + 1,
+			lineCount: 999,
+		});
+		expect(getCachedLineCount(filePath, cache)).toBe(2); // recomputed, not 999
 	});
 
 	it("an isolated cache from a fresh test never inherits a prior one's entries", () => {
@@ -449,9 +477,13 @@ describe("getCachedLineCount cost discipline (#1641)", () => {
 		cleanups.push(env.cleanup);
 		const filePath = path.join(env.tmpDir, "shared.ts");
 		fs.writeFileSync(filePath, "a\nb\nc\n"); // really 4 addressable lines
-		const mtimeMs = fs.statSync(filePath).mtimeMs;
+		const stat = fs.statSync(filePath);
 
-		_seedSharedLineCountCacheForTests(filePath, { mtimeMs, lineCount: 999 });
+		_seedSharedLineCountCacheForTests(filePath, {
+			mtimeMs: stat.mtimeMs,
+			size: stat.size,
+			lineCount: 999,
+		});
 		expect(getCachedLineCount(filePath)).toBe(999);
 	});
 

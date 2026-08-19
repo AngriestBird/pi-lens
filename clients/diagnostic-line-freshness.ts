@@ -40,12 +40,19 @@
  *     `readFileSync` — no whole-file string materialization, no per-render
  *     re-read of unchanged content), gated by a byte-size cap matching
  *     `captureReadContentBinding`'s precedent (`read-guard.ts`). The count is
- *     memoized by mtime in a small SHARED cache (module-scoped, bounded,
- *     evicted FIFO past a cap) — NOT a process-lifetime latch, because every
- *     read re-stats and only trusts the memo when the mtime it was computed
- *     against still matches; a changed file is always recounted. Tests can
- *     still inject an isolated {@link LineCountCache} via
- *     {@link createLineCountCache} to avoid cross-test bleed.
+ *     memoized in a small SHARED cache (module-scoped, bounded, evicted FIFO
+ *     past a cap), keyed on BOTH mtime AND size (review round V1) — mtime
+ *     ALONE is not a reliable cache key on hosts where its resolution is
+ *     coarser than back-to-back writes: a truncate-then-write, a formatter
+ *     write-back, or pi-lens's own auto-format immediately followed by the
+ *     agent's write can land two DIFFERENT contents on the identical
+ *     `mtimeMs`, and a mtime-only cache serves the first content's count for
+ *     the second — measured live at 207/300 shrink/restore cycles. Requiring
+ *     both to match narrows a same-tick collision to same-mtime-AND-same-size
+ *     (which a shrink/restore cycle never produces, since the whole point is
+ *     the size changed). A changed file is always recounted. Tests can still
+ *     inject an isolated {@link LineCountCache} via {@link createLineCountCache}
+ *     to avoid cross-test bleed.
  *   - On a demotion EDGE (a diagnostic that was not already flagged past-EOF
  *     and now is), best-effort trigger a document resync (didClose/didOpen or
  *     a full-sync didChange) so the desync HEALS instead of re-serving the
@@ -80,6 +87,22 @@ const NEWLINE_BYTE = 0x0a;
 
 interface LineCountCacheEntry {
 	mtimeMs: number;
+	/**
+	 * Byte size at the time `lineCount` was computed. Required alongside
+	 * `mtimeMs` for a cache HIT (review round V1): mtime resolution on this
+	 * host is coarse enough (~1ms) that two writes in the same tick —
+	 * truncate-then-write, a formatter write-back, a checkout, pi-lens's own
+	 * auto-format immediately followed by the agent's write — can land on the
+	 * IDENTICAL `mtimeMs` while the content differs. Measured live: 207/300
+	 * shrink/restore cycles served the wrong line count keyed on mtime alone,
+	 * including a first-read-of-cycle returning a stale count for an 11-line
+	 * file. `size` is cheap (already on the same `fs.Stats` the mtime came
+	 * from) and, combined with mtime, makes a same-tick same-size DIFFERENT-
+	 * content collision the only residual gap — astronomically narrower than
+	 * mtime alone, and not the shape any of this gate's real inputs produce
+	 * (a shrink/restore cycle always changes size).
+	 */
+	size: number;
 	lineCount: number;
 }
 
@@ -177,8 +200,10 @@ function countNewlinesChunked(filePath: string, sizeBytes: number): number {
  * `range.start.line + 1` (a document with zero newlines still has one
  * addressable line — position 0,0 — and a trailing `\n` adds one more,
  * empty, addressable line after it). Memoized in `cache` (the shared default
- * unless a caller injects its own) and invalidated by mtime. Returns
- * `undefined` when the file cannot be stat'ed, exceeds the byte-size gate, or
+ * unless a caller injects its own) and invalidated by mtime AND size (V1 —
+ * mtime alone is not a reliable cache key on hosts where its resolution is
+ * coarser than back-to-back writes). Returns `undefined` when the file
+ * cannot be stat'ed, exceeds the byte-size gate, or
  * cannot be read (deleted, unreadable, permissions, oversized) — callers MUST
  * treat `undefined` as "no verdict", not as "zero lines" (the empty-result-
  * must-distinguish-clean-from-errored screen).
@@ -194,7 +219,9 @@ export function getCachedLineCount(
 		return undefined;
 	}
 	const cached = cache.get(filePath);
-	if (cached && cached.mtimeMs === stat.mtimeMs) return cached.lineCount;
+	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+		return cached.lineCount;
+	}
 	if (stat.size > MAX_GATE_BYTES) return undefined;
 	let newlineCount: number;
 	try {
@@ -203,7 +230,11 @@ export function getCachedLineCount(
 		return undefined;
 	}
 	const lineCount = newlineCount + 1;
-	rememberInSharedCache(cache, filePath, { mtimeMs: stat.mtimeMs, lineCount });
+	rememberInSharedCache(cache, filePath, {
+		mtimeMs: stat.mtimeMs,
+		size: stat.size,
+		lineCount,
+	});
 	return lineCount;
 }
 
