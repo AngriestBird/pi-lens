@@ -120,27 +120,42 @@ function writeFixtureGh(binDir, mode) {
 	if (!isWindows) fs.chmodSync(posixPath, 0o755);
 }
 
-/** Ambient system `gh`, if any -- so it can be excluded (not the WHOLE
- * system PATH) rather than stripping PATH down to just the fixture dir,
- * which would also break the fixture's OWN dependency on system utilities
- * (the "hang" mode shells out to `ping`/`cmd.exe` on Windows). */
-function findOnPath(binName) {
+/**
+ * Every ambient system `gh` on PATH -- so all of them can be excluded (not
+ * the WHOLE system PATH, which would also break the fixture's OWN
+ * dependency on system utilities: the "hang" mode shells out to
+ * `ping`/`cmd.exe` on Windows).
+ *
+ * #1651 review round 3: this used to take only the FIRST `which`/`where`
+ * hit, on the assumption a host has at most one `gh` on PATH. GitHub-hosted
+ * ubuntu-latest runners don't hold that assumption -- they carry a second,
+ * independently-resolvable `gh` (observed at a location `which gh` doesn't
+ * report first) alongside the apt-installed one `which` DOES report.
+ * Excluding only the reported one left phase 5's "genuinely absent gh"
+ * setup silently answering a REAL `gh auth token` call ("no oauth token
+ * found for github.com", a real completed run, exit 1, no spawn error) --
+ * that real, correctly-classified `non-installable` answer is what phase 5
+ * was actually asserting against, not a missing binary at all. `which -a`
+ * (POSIX) / `where` (Windows already lists every match) surfaces all of
+ * them so every directory that holds one gets excluded.
+ */
+function findAllOnPath(binName) {
 	const finder = process.platform === "win32" ? "where" : "which";
-	const res = spawnSync(finder, [binName], { encoding: "utf8" });
-	if (res.status !== 0) return null;
-	const lines = res.stdout
+	const args = process.platform === "win32" ? [binName] : ["-a", binName];
+	const res = spawnSync(finder, args, { encoding: "utf8" });
+	if (res.status !== 0) return [];
+	return res.stdout
 		.split(/\r?\n/)
 		.map((l) => l.trim())
 		.filter(Boolean);
-	return lines[0] ?? null;
 }
 
-function pathWithoutDirOf(fullPath, binPath) {
-	const dir = path.dirname(binPath);
+function pathWithoutDirsOf(fullPath, binPaths) {
+	const dirs = new Set(binPaths.map((p) => path.resolve(path.dirname(p))));
 	const sep = path.delimiter;
 	return fullPath
 		.split(sep)
-		.filter((e) => path.resolve(e || ".") !== path.resolve(dir))
+		.filter((e) => !dirs.has(path.resolve(e || ".")))
 		.join(sep);
 }
 
@@ -208,31 +223,25 @@ async function main() {
 		path.join(os.tmpdir(), "pi-lens-smoke-avail-bin-"),
 	);
 	process.env.PI_LENS_HOME = scratch;
-	// Exclude any REAL system `gh` directory (GitHub-hosted runners ship one
-	// on PATH by default), don't strip PATH down to just the fixture dir --
-	// phase 5 removes the fixture to reproduce a genuinely-absent `gh`
-	// (ENOENT), and a bare "prepend the fixture dir" would silently fall
-	// through to the real system `gh` the moment the fixture is deleted
-	// (exactly the "never touch the real gh CLI" contract this lane
-	// promises). Stripping the WHOLE system PATH instead would also break the
-	// fixture's own "hang" mode, which shells out to `ping`/`cmd.exe` on
-	// Windows -- so only the real gh's directory is excluded, everything else
-	// stays.
-	const realGhPath = findOnPath("gh");
-	const pathSansRealGh = realGhPath
-		? pathWithoutDirOf(process.env.PATH ?? "", realGhPath)
+	// Exclude every REAL system `gh` directory (GitHub-hosted runners can ship
+	// more than one on PATH -- see `findAllOnPath`'s doc comment, #1651 round
+	// 3), don't strip PATH down to just the fixture dir -- phase 5 removes the
+	// fixture to reproduce a genuinely-absent `gh` (ENOENT), and a bare
+	// "prepend the fixture dir" would silently fall through to a real system
+	// `gh` the moment the fixture is deleted (exactly the "never touch the
+	// real gh CLI" contract this lane promises). Stripping the WHOLE system
+	// PATH instead would also break the fixture's own "hang" mode, which
+	// shells out to `ping`/`cmd.exe` on Windows -- so only the real ghs'
+	// directories are excluded, everything else stays.
+	const realGhPaths = findAllOnPath("gh");
+	const pathSansRealGh = realGhPaths.length
+		? pathWithoutDirsOf(process.env.PATH ?? "", realGhPaths)
 		: (process.env.PATH ?? "");
 	process.env.PATH = `${binDir}${path.delimiter}${pathSansRealGh}`;
 	// Never let a real ambient token short-circuit the fixture probe.
 	delete process.env.GH_TOKEN;
 	delete process.env.GITHUB_TOKEN;
 	delete process.env.ZIZMOR_GITHUB_TOKEN;
-	// TEMP DEBUG (#1651 review round 2): the fix landed but lane 2 phase 5
-	// still failed byte-identically -- confirm what "gh" actually resolves
-	// to in this exact environment before trusting the close/error-race
-	// theory any further.
-	console.log(`[debug] realGhPath=${JSON.stringify(realGhPath)}`);
-	console.log(`[debug] PATH=${process.env.PATH}`);
 
 	try {
 		const { resolveZizmorGitHubToken, resetZizmorTokenAvailability } =
@@ -383,15 +392,6 @@ async function main() {
 		// not fighting phase 4's cached good answer.
 		resetZizmorTokenAvailability();
 		removeFixtureGh(binDir);
-		// TEMP DEBUG (#1651 review round 2): probe exactly what a raw spawn of
-		// "gh" does in this exact env/PATH, right where resolveZizmorGitHubToken
-		// is about to do the same thing.
-		{
-			const dbg = spawnSync("gh", ["auth", "token"], { encoding: "utf8" });
-			console.log(
-				`[debug] raw spawnSync("gh", ["auth","token"]) -> status=${JSON.stringify(dbg.status)} signal=${JSON.stringify(dbg.signal)} error=${dbg.error ? dbg.error.code + ":" + dbg.error.message : "undefined"} stdout=${JSON.stringify(dbg.stdout)} stderr=${JSON.stringify(dbg.stderr)}`,
-			);
-		}
 		const t5a = await resolveZizmorGitHubToken();
 		assertEq("phase5 token (gh genuinely absent)", t5a, undefined);
 		const d5a = (
@@ -402,7 +402,6 @@ async function main() {
 			!!d5a,
 			"no availability_decision for the missing-gh probe",
 		);
-		console.log(`[debug] d5a metadata=${JSON.stringify(d5a?.metadata)}`);
 		if (d5a) {
 			assertEq("phase5 decision.outcome", d5a.metadata.outcome, "missing");
 			assertEq("phase5 decision.latched", d5a.metadata.latched, true);
