@@ -56,7 +56,24 @@ vi.mock("../../clients/lsp/index.js", async (importOriginal) => ({
 // budget below matches this repo's `HEAVY_IO_TIMEOUT_MS` convention
 // (tests/clients/ast-grep-rule-precedence-followups.test.ts) and gives ~4x
 // headroom over the worst contended full-test duration observed.
+//
+// The enclosing `describe`/`it` budget is deliberately larger than the
+// `vi.waitFor` budget it wraps (45_000 vs 30_000, not the same number). If
+// they matched, a genuine failure would race the two timeouts and could let
+// the outer, generic "Test timed out in Nms" win instead of the inner
+// `vi.waitFor` — discarding the specific, debuggable message ("orphan
+// staging files not yet reaped", "background startup scans still touching
+// tmpDir", or the mock assertion diff) that a real regression needs. The 15s
+// gap is enough for `vi.waitFor`'s own rejection, plus the `finally` block's
+// `env.cleanup()`, to run and surface before the outer clock fires. This is
+// inherent to the fire-and-forget-scan precedent this file follows (no
+// deterministic completion signal exists to swap in instead — see the
+// file-level comment above) and does not itself detect a genuine slowdown in
+// `handleSessionStart`; at 30x the worst observed solo per-test time, a real
+// regression there would still pass unnoticed until it also blew the 45s
+// ceiling.
 const HEAVY_IO_TIMEOUT_MS = 30_000;
+const TEST_BUDGET_MS = 45_000;
 
 const EMPTY_KNIP_RESULT = {
 	success: true,
@@ -286,11 +303,11 @@ it(
 			await env.cleanup();
 		}
 	},
-	HEAVY_IO_TIMEOUT_MS,
+	TEST_BUDGET_MS,
 );
 
 describe("runtime-session notifications", {
-	timeout: HEAVY_IO_TIMEOUT_MS,
+	timeout: TEST_BUDGET_MS,
 }, () => {
 	it("quick mode hydrates cached exports and rules from a fresh project snapshot", async () => {
 		const env = setupTestEnvironment("pi-lens-session-snapshot-");
@@ -1010,7 +1027,7 @@ describe("runtime-session notifications", {
 // runtime-session.ts's sweep call omitted both directories entirely, so an
 // orphan planted there was never reaped by session_start.
 describe("session_start orphan-stage sweep (#1609 review F1)", {
-	timeout: HEAVY_IO_TIMEOUT_MS,
+	timeout: TEST_BUDGET_MS,
 }, () => {
 	it("reaps a dead-pid orphan staging file in the installer's bin/ and tools/ dirs", async () => {
 		const globalDir = getGlobalPiLensDir();
