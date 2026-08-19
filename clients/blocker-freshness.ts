@@ -438,7 +438,7 @@ export async function sweepInlineBlockerFreshness(
 			);
 			if (truncated) counts.truncatedImports += 1;
 			if (drifted.length > 0) {
-				runtime.markInlineBlockerStale(entry.filePath);
+				runtime.markInlineBlockerStale(entry.filePath, "dependency-drift");
 				counts.revalidated += 1;
 			} else {
 				counts.kept += 1;
