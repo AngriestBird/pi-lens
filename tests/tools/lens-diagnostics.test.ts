@@ -337,38 +337,134 @@ describe("lens_diagnostics mode=delta", () => {
 	});
 
 	it("formats project diagnostics delta records", async () => {
-		projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
-			undefined,
-		);
-		projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue({
-			version: 1,
-			cwd: "/proj",
-			generatedAt: "2026-01-01T00:00:00.000Z",
-			sessionId: "session-1",
-			turnIndex: 3,
-			diagnostics: [
-				{
-					filePath: "/proj/src/knip.ts",
-					line: 12,
-					severity: "error",
-					semantic: "blocking",
-					tool: "knip",
-					runner: "knip",
-					rule: "knip:unlisted",
-					message: "Unlisted dependency lodash",
-					source: "project-scan",
-				},
-			],
-			sources: ["knip"],
-		});
+		// #1634 review round R3: appendProjectDiagnosticsDeltaLines now
+		// freshness-gates against the report's own `generatedAt` (a missing
+		// cited file is dropped), so this needs a REAL file — a fixed fake
+		// path like the pre-fix fixture used would just be dropped as missing.
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-delta-"));
+		try {
+			const filePath = path.join(cwd, "src", "knip.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			// Report generated AFTER the file write, so the gate reads it live.
+			const generatedAt = new Date(Date.now() + 60_000).toISOString();
 
-		const result = await run(makeTool(), { mode: "delta" });
-		const text = String(result.content[0].text);
-		expect(text).toContain("knip.ts");
-		expect(text).toContain("L12");
-		expect(text).toContain("knip:unlisted");
-		expect(text).toContain("Unlisted dependency lodash");
-		expect(result.details).toMatchObject({ projectDiagnostics: 1 });
+			projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
+				undefined,
+			);
+			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue({
+				version: 1,
+				cwd,
+				generatedAt,
+				sessionId: "session-1",
+				turnIndex: 3,
+				diagnostics: [
+					{
+						filePath,
+						line: 12,
+						severity: "error",
+						semantic: "blocking",
+						tool: "knip",
+						runner: "knip",
+						rule: "knip:unlisted",
+						message: "Unlisted dependency lodash",
+						source: "project-scan",
+					},
+				],
+				sources: ["knip"],
+			});
+
+			const result = await run(makeTool(), { mode: "delta" }, cwd);
+			const text = String(result.content[0].text);
+			expect(text).toContain("knip.ts");
+			expect(text).toContain("L12");
+			expect(text).toContain("knip:unlisted");
+			expect(text).toContain("Unlisted dependency lodash");
+			expect(result.details).toMatchObject({ projectDiagnostics: 1 });
+		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
+
+	it("#1634 review round R3: demotes a project-diagnostics-delta finding whose file was edited after the report was generated", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-delta-stale-"));
+		try {
+			const filePath = path.join(cwd, "src", "drift.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			// Report generated BEFORE the file's mtime — the cited line 12 is
+			// stale by the time delta mode re-serves it.
+			const generatedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+
+			projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
+				undefined,
+			);
+			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue({
+				version: 1,
+				cwd,
+				generatedAt,
+				sessionId: "session-1",
+				turnIndex: 3,
+				diagnostics: [
+					{
+						filePath,
+						line: 12,
+						severity: "error",
+						semantic: "blocking",
+						tool: "knip",
+						runner: "knip",
+						rule: "knip:unlisted",
+						message: "Unlisted dependency lodash",
+						source: "project-scan",
+					},
+				],
+				sources: ["knip"],
+			});
+
+			const result = await run(makeTool(), { mode: "delta" }, cwd);
+			const text = String(result.content[0].text);
+			expect(text).toContain("Unlisted dependency lodash");
+			expect(text).not.toContain("L12");
+			expect(text).toContain("stale — re-run to confirm");
+		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
+
+	it("#1634 review round R3: drops a project-diagnostics-delta finding whose cited file no longer exists", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-delta-gone-"));
+		try {
+			projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
+				undefined,
+			);
+			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue({
+				version: 1,
+				cwd,
+				generatedAt: new Date().toISOString(),
+				sessionId: "session-1",
+				turnIndex: 3,
+				diagnostics: [
+					{
+						filePath: path.join(cwd, "src", "gone.ts"),
+						line: 12,
+						severity: "error",
+						semantic: "blocking",
+						tool: "knip",
+						runner: "knip",
+						rule: "knip:unlisted",
+						message: "vanished project finding",
+						source: "project-scan",
+					},
+				],
+				sources: ["knip"],
+			});
+
+			const result = await run(makeTool(), { mode: "delta" }, cwd);
+			const text = String(result.content[0].text);
+			expect(text).not.toContain("vanished project finding");
+		} finally {
+			removeTempDirSync(cwd);
+		}
 	});
 
 	it("filters ignored actionable, quality, and project-delta entries (#279)", async () =>

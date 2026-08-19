@@ -402,14 +402,23 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 	// #1634 review round F3: this was the most important gap — the tool's
 	// DEFAULT mode rendered cached `file:line` findings with zero freshness
 	// check. `applyDeltaFreshnessGate` (this file's sibling in
-	// tools/lens-diagnostics.ts) now routes both caches through the shared
-	// gate using each report's own `generatedAt`.
+	// tools/lens-diagnostics.ts) now routes the actionable/quality-warnings
+	// caches through the shared gate using each report's own `generatedAt`.
+	// Round R3: mode=delta has a THIRD arm — the persisted project-diagnostics
+	// delta report, rendered by `appendProjectDiagnosticsDeltaLines` — which
+	// carried the identical unfixed shape. It now gates the same way, against
+	// its own `generatedAt`.
 	"lens-diagnostics:mode-delta": gated(
 		LENS_DIAGNOSTICS_FILE,
 		"`lens_diagnostics mode=delta` report (the tool's DEFAULT mode) — " +
-			"re-serves the actionable-warnings/code-quality-warnings caches.",
+			"re-serves the actionable-warnings/code-quality-warnings caches AND " +
+			"the persisted project-diagnostics delta report.",
 		["gateFindingsByPathFreshness"],
-		['store: "lens-diagnostics-delta"', "applyDeltaFreshnessGate("],
+		[
+			'store: "lens-diagnostics-delta"',
+			"applyDeltaFreshnessGate(",
+			'store: "lens-diagnostics-delta-project"',
+		],
 	),
 	"widget-state:footer": gated(
 		"clients/widget-state.ts",

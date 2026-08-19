@@ -500,15 +500,30 @@ export function createLensDiagnosticsTool(
 
 // ── delta mode ────────────────────────────────────────────────────────────────
 
-function formatProjectDeltaDiagnostic(diagnostic: ProjectDiagnostic): string {
+function formatProjectDeltaDiagnostic(
+	diagnostic: ProjectDiagnostic,
+	stale: boolean,
+): string {
 	const marker =
 		diagnostic.semantic === "blocking" || diagnostic.severity === "error"
 			? "🔴"
 			: "ℹ";
 	const rule = diagnostic.rule ?? diagnostic.code ?? diagnostic.runner;
-	return `  ${marker} L${diagnostic.line ?? "?"}  ${rule}  ${diagnostic.message}`;
+	const where = stale ? STALE_LINE_MARKER : `L${diagnostic.line ?? "?"}`;
+	return `  ${marker} ${where}  ${rule}  ${diagnostic.message}`;
 }
 
+/**
+ * #1634 review round R3: `appendProjectDiagnosticsDeltaLines` re-serves the
+ * persisted project-diagnostics DELTA report verbatim — the third of
+ * `mode=delta`'s three arms (the other two, actionable/quality warnings, were
+ * gated in the F3 pass above), and it carried the identical unfixed shape:
+ * cited `file:line` findings from a report with its own `generatedAt`, no
+ * freshness check. Same gate, same policy as `applyDeltaFreshnessGate`:
+ * missing file -> DROP, edited-since -> DEMOTE (loses its line, keeps
+ * rule/message), live -> unchanged. See `clients/finding-delivery-gate.ts`
+ * surface `lens-diagnostics:mode-delta`.
+ */
 function appendProjectDiagnosticsDeltaLines(
 	lines: string[],
 	cwd: string,
@@ -516,11 +531,21 @@ function appendProjectDiagnosticsDeltaLines(
 	severity: string,
 	includeFile: (filePath: string) => boolean,
 ): number {
-	const diagnostics = (report?.diagnostics ?? []).filter(
+	const scoped = (report?.diagnostics ?? []).filter(
 		(diagnostic) =>
 			includeFile(diagnostic.filePath) &&
 			matchesSeverity(projectDiagnosticToWidget(diagnostic), severity),
 	);
+	const gated = gateFindingsByPathFreshness({
+		store: "lens-diagnostics-delta-project",
+		findings: scoped,
+		cwd,
+		scannedAt: report?.generatedAt,
+		citedPath: (d) => d.filePath,
+		onMissing: "drop",
+	});
+	const staleSet = new Set(gated.stale);
+	const diagnostics = [...gated.live, ...gated.stale];
 	const byFile = new Map<string, ProjectDiagnostic[]>();
 	for (const diagnostic of diagnostics) {
 		const filePath = path.resolve(diagnostic.filePath);
@@ -532,7 +557,7 @@ function appendProjectDiagnosticsDeltaLines(
 		const rel = path.relative(cwd, filePath);
 		if (!lines.includes(rel)) lines.push(rel);
 		for (const diagnostic of fileDiagnostics) {
-			lines.push(formatProjectDeltaDiagnostic(diagnostic));
+			lines.push(formatProjectDeltaDiagnostic(diagnostic, staleSet.has(diagnostic)));
 		}
 	}
 	return diagnostics.length;
