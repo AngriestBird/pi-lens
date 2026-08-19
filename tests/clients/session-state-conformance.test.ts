@@ -11,6 +11,11 @@
  *    #1266, #1490, #1497, #1535, #1537 and #1625.
  * 3. **Coverage.** Every file the sweep flags as session-state-shaped is
  *    registered or exempted with a reason.
+ *
+ * Claim 3 runs on `tests/support/sweep-kit.ts` (#1755) — the shared
+ * registered-or-fail machinery, so this sweep and the six others stop
+ * re-deriving the same semantics. The stripper behind claims 1 and 2 comes
+ * from the same kit.
  */
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -27,6 +32,7 @@ import {
 	sessionStartResetNames,
 	stripCommentsAndStrings,
 } from "../support/session-state-scan.js";
+import { auditRegistry } from "../support/sweep-kit.js";
 
 afterEach(() => _resetRegistryProbeState());
 
@@ -249,42 +255,47 @@ describe("session-state registry — session_start wiring", () => {
 	});
 });
 
+// Migrated to `tests/support/sweep-kit.ts` (#1755). The three coverage claims
+// below are now one `auditRegistry` call: registered-or-fail, exemptions that
+// require a reason, and stale-exemption self-detection. Behaviour is
+// unchanged; the kit also adds the emptiness floor (defect shape 10) that this
+// sweep never had — a scan that stops flagging files used to report clean.
 describe("session-state sweep — coverage", () => {
-	it("every session-state-shaped file is registered or exempted with a reason", () => {
-		const registered = new Set(SESSION_STATE_REGISTRY.map((e) => e.module));
-		const unaccounted = scanSessionStateCandidates()
-			.map((c) => c.file)
-			.filter(
-				(file) =>
-					!registered.has(file) && !(file in EXEMPT_SESSION_STATE_FILES),
-			);
+	const audit = () =>
+		auditRegistry({
+			sweepName: "session-state sweep",
+			// 71 files match today. The floor catches a scan that dies or
+			// half-dies (a moved clients/ root, a broken container regex) instead
+			// of letting an empty result read as full coverage.
+			minFlagged: 40,
+			flagged: scanSessionStateCandidates().map((c) => c.file),
+			registered: SESSION_STATE_REGISTRY.map((e) => e.module),
+			exemptions: EXEMPT_SESSION_STATE_FILES,
+			minReasonLength: 16,
+			remediation:
+				"Decide which it is. If the state must re-arm at session_start, " +
+				"register it (and wire its reset into handleSessionStart). If it is a " +
+				"host derivation, a config memo or turn-scoped working state, exempt it " +
+				"with the reason.",
+		});
 
-		if (unaccounted.length > 0) {
-			expect.fail(
-				`${unaccounted.length} file(s) hold module-level Map/Set state paired with a ` +
-					"reset seam, but are neither in SESSION_STATE_REGISTRY nor in " +
-					"EXEMPT_SESSION_STATE_FILES:\n" +
-					unaccounted.map((f) => `  ${f}`).join("\n") +
-					"\n\nDecide which it is. If the state must re-arm at session_start, " +
-					"register it (and wire its reset into handleSessionStart). If it is a " +
-					"host derivation, a config memo or turn-scoped working state, exempt it " +
-					"with the reason.",
-			);
-		}
+	it("every session-state-shaped file is registered or exempted with a reason", () => {
+		const { unaccounted, problems } = audit();
+		if (unaccounted.length > 0) expect.fail(problems.join("\n\n"));
 	});
 
 	it("no exemption names a file the sweep no longer flags", () => {
-		const scanned = new Set(scanSessionStateCandidates().map((c) => c.file));
-		const stale = Object.keys(EXEMPT_SESSION_STATE_FILES).filter(
-			(file) => !scanned.has(file),
-		);
-		expect(stale).toEqual([]);
+		expect(audit().staleExemptions).toEqual([]);
 	});
 
 	it("every exemption carries a reason", () => {
-		for (const [file, reason] of Object.entries(EXEMPT_SESSION_STATE_FILES)) {
-			expect(reason.length, `${file} needs a real reason`).toBeGreaterThan(15);
-		}
+		expect(audit().reasonlessExemptions).toEqual([]);
+	});
+
+	it("the sweep still flags files — an empty scan must fail, not read as clean", () => {
+		const { flaggedCount, problems } = audit();
+		expect(problems.filter((p) => p.includes("declared floor")), problems.join("\n")).toEqual([]);
+		expect(flaggedCount).toBeGreaterThanOrEqual(40);
 	});
 
 	it("documents the heuristic's blind spots rather than claiming full coverage", () => {
