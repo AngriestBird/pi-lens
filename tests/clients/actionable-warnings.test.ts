@@ -201,4 +201,105 @@ describe("actionable warnings", () => {
 			removeTempDirSync(cwd);
 		}
 	});
+
+	// #1777: the dispatch path now preserves hint and info, so the fixable-warning
+	// advisory says how much of its count is style opinion rather than defect.
+	it("splits the turn report by severity tier and names the quiet tiers", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-aw-tier-"));
+		const filePath = path.join(cwd, "src", "a.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "console.log('x');\n");
+		try {
+			const records = (["warning", "hint", "hint"] as const).map(
+				(severity, index) =>
+					recordFromDispatchDiagnostic(
+						{
+							...makeWarning(filePath),
+							id: `tier-${index}`,
+							severity,
+							line: 10 + index,
+							message: `${severity} finding ${index}`,
+						},
+						cwd,
+					),
+			);
+			expect(records.every(Boolean)).toBe(true);
+			const report = await buildActionableWarningsReport({
+				cwd,
+				sessionId: "s-tier",
+				turnIndex: 1,
+				files: ["src/a.ts"],
+				modifiedRangesByFile: new Map(),
+				dispatchWarnings: records.map((record) => record!),
+				includeLspCodeActions: false,
+			});
+			expect(report.summary.byTier).toMatchObject({
+				error: 0,
+				warning: 1,
+				info: 0,
+				hint: 2,
+			});
+			expect(formatActionableWarningsAdvisory(report)).toContain(
+				"2 of those are hint/info tier",
+			);
+		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
+
+	it("omits the tier line when every fixable warning is warning-tier", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-aw-tier2-"));
+		const filePath = path.join(cwd, "src", "a.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "console.log('x');\n");
+		try {
+			const record = recordFromDispatchDiagnostic(makeWarning(filePath), cwd);
+			const report = await buildActionableWarningsReport({
+				cwd,
+				sessionId: "s-tier",
+				turnIndex: 1,
+				files: ["src/a.ts"],
+				modifiedRangesByFile: new Map(),
+				dispatchWarnings: record ? [record] : [],
+				includeLspCodeActions: false,
+			});
+			expect(report.summary.byTier).toMatchObject({ warning: 1, hint: 0 });
+			expect(formatActionableWarningsAdvisory(report)).not.toContain(
+				"hint/info tier",
+			);
+		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
+
+	// `actionable-warnings.json` is read back by `clients/runtime-agent-end.ts`
+	// and `tools/lens-diagnostics.ts`, which can find a file written by a build
+	// that predates `byTier`. The advisory must not crash on it.
+	it("formats a cached report that predates the byTier field", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-aw-tier3-"));
+		const filePath = path.join(cwd, "src", "a.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "console.log('x');\n");
+		try {
+			const record = recordFromDispatchDiagnostic(makeWarning(filePath), cwd);
+			const report = await buildActionableWarningsReport({
+				cwd,
+				sessionId: "s-tier",
+				turnIndex: 1,
+				files: ["src/a.ts"],
+				modifiedRangesByFile: new Map(),
+				dispatchWarnings: record ? [record] : [],
+				includeLspCodeActions: false,
+			});
+			const legacy: ActionableWarningsReport = {
+				...report,
+				summary: { ...report.summary, byTier: undefined },
+			};
+			expect(formatActionableWarningsAdvisory(legacy)).toContain(
+				"Fixable warnings introduced this turn: 1",
+			);
+		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
 });

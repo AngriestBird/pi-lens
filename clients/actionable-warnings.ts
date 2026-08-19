@@ -69,6 +69,18 @@ export interface ActionableWarningsReport {
 		files: number;
 		actions: number;
 		autoFixEligible: number;
+		/**
+		 * Unsuppressed warnings split by tier (#1777). The dispatch path now
+		 * preserves a rule's declared severity, so a hint-tier style opinion is
+		 * countable instead of arriving indistinguishable from a real warning.
+		 *
+		 * OPTIONAL on purpose: this report is persisted to
+		 * `.pi-lens/cache/actionable-warnings.json` and read back by
+		 * `clients/runtime-agent-end.ts` and `tools/lens-diagnostics.ts`, which
+		 * can find a file written by a pi-lens build that predates the field.
+		 * Every reader must tolerate its absence.
+		 */
+		byTier?: { warning: number; info: number; hint: number; error: number };
 	};
 }
 
@@ -240,8 +252,14 @@ export function recordFromDispatchDiagnostic(
 	diagnostic: Diagnostic,
 	cwd: string,
 ): ActionableWarningRecord | undefined {
-	if (diagnostic.semantic !== "warning" || diagnostic.severity !== "warning")
-		return undefined;
+	if (diagnostic.semantic !== "warning") return undefined;
+	// #1777: the old gate demanded `severity === "warning"` exactly, which was
+	// invisible while the ast-grep runner collapsed every non-error tier to
+	// "warning". Now that hint and info survive the dispatch path, admit them:
+	// a fix is a fix, and the tier governs how loudly a finding renders, not
+	// whether its fix is worth offering. `error` still routes to the blocking
+	// path, so it stays out even when a runner leaves `semantic` at "warning".
+	if (diagnostic.severity === "error") return undefined;
 	if (!diagnostic.fixable && !diagnostic.fixSuggestion) return undefined;
 	const filePath = path.resolve(cwd, diagnostic.filePath);
 	const id = createActionableWarningId({
@@ -260,7 +278,7 @@ export function recordFromDispatchDiagnostic(
 		displayPath: toRunnerDisplayPath(cwd, filePath),
 		line: diagnostic.line,
 		column: diagnostic.column,
-		severity: "warning",
+		severity: diagnostic.severity,
 		tool: diagnostic.tool,
 		code: diagnostic.code,
 		rule: diagnostic.rule,
@@ -502,9 +520,18 @@ export async function buildActionableWarningsReport(args: {
 		warnings,
 	}));
 	const allActions = merged.flatMap((warning) => warning.actions);
+	const unsuppressed = merged.filter((warning) => !warning.suppressed);
+	const countTier = (tier: ActionableWarningRecord["severity"]): number =>
+		unsuppressed.filter((warning) => warning.severity === tier).length;
 	const summary = {
 		warnings: merged.length,
-		unsuppressed: merged.filter((warning) => !warning.suppressed).length,
+		unsuppressed: unsuppressed.length,
+		byTier: {
+			error: countTier("error"),
+			warning: countTier("warning"),
+			info: countTier("info"),
+			hint: countTier("hint"),
+		},
 		suppressed: merged.filter((warning) => warning.suppressed).length,
 		files: files.length,
 		actions: allActions.length,
@@ -832,8 +859,18 @@ export function formatActionableWarningsAdvisory(
 		report.summary.autoFixEligible > 0
 			? ` ${report.summary.autoFixEligible} appear to have conservative preferred quickfixes.`
 			: "";
+	// #1777: hint and info are style opinions, so say how much of the count is
+	// opinion. The line appears only when a quiet tier is actually present —
+	// an all-warning turn already says everything in the count above.
+	const byTier = report.summary.byTier;
+	const quiet = byTier ? byTier.hint + byTier.info : 0;
+	const tierLine =
+		quiet > 0
+			? `${quiet} of those are hint/info tier — style opinions, worth fixing only while you are already in that code.`
+			: undefined;
 	return [
 		`🟡 Fixable warnings introduced this turn: ${report.summary.unsuppressed}.${safe}`,
+		tierLine,
 		`Details written to .pi-lens/cache/actionable-warnings.json`,
 		fileList ? `Files:\n${fileList}${more}` : undefined,
 		"If continuing in these files, read that JSON and resolve warnings that are safe and relevant. Do not apply broad refactors unless requested.",
