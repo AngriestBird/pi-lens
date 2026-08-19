@@ -885,6 +885,31 @@ function notifyWedgedMs(): number {
 	return notifyWriteBudgetMs() * NOTIFY_WEDGED_BUDGET_MULTIPLIER;
 }
 
+// #1714: how many document notifies one auxiliary may hold UNACKNOWLEDGED
+// before the next notify has to prove the server drained its input.
+//
+// #1459's gate bounds CONCURRENT writes to one per auxiliary. That stops a
+// simultaneous fan-out, but a `lens_diagnostics mode=full` sweep is mostly
+// SEQUENTIAL — one file after another inside a server group (#387) — so every
+// write is alone in flight and the gate never engages. Each write still resolves
+// as soon as the pipe accepts the bytes, not when the scanner has read them, so
+// the sweep can hand a single-threaded scanner hundreds of full re-parses faster
+// than it consumes them. ast-grep stalled and had to be force-killed twice in
+// two full-scan exposures. Counting unacknowledged notifies bounds the BACKLOG
+// the sweep is allowed to build, which pipe-level backpressure alone does not.
+const AUX_NOTIFY_INFLIGHT_DEFAULT = 8;
+
+function auxNotifyInflightLimit(info: LSPServerInfo): number {
+	const perServer = info.notifyInflightLimit;
+	if (typeof perServer === "number" && Number.isFinite(perServer) && perServer > 0) {
+		return Math.floor(perServer);
+	}
+	const raw = Number(process.env.PI_LENS_LSP_AUX_NOTIFY_INFLIGHT);
+	return Number.isFinite(raw) && raw > 0
+		? Math.floor(raw)
+		: AUX_NOTIFY_INFLIGHT_DEFAULT;
+}
+
 // Budget for one project-wide `workspace/diagnostic` pull (#387 Item 2). Larger
 // than a per-file wait — it's a single request but scans the whole program —
 // yet bounded so a hung server still falls back to the per-file path.
@@ -1079,6 +1104,30 @@ export class LSPService {
 	 * successful write clears its entry.
 	 */
 	private readonly notifyWriteBackpressureStreak = new Map<string, number>();
+	/**
+	 * #1714: unacknowledged auxiliary document notifies per server key
+	 * ("serverId:normalizedRoot" — the same identity as every other gate here).
+	 *
+	 * `unacked` counts notifies ISSUED to this client that the server has not yet
+	 * been proven to have read. It rises with each write the sweep hands over and
+	 * falls only when a drain barrier round-trips (see
+	 * {@link awaitAuxNotifyDrain}). `drain` holds the one in-flight barrier so a
+	 * burst shares a single round-trip instead of each touch sending its own.
+	 *
+	 * Cleared wholesale by {@link reset} (session_start runs through it), and per
+	 * key whenever the client identity changes, so no count can outlive the client
+	 * it describes.
+	 */
+	private readonly auxNotifyInflight = new Map<
+		string,
+		{
+			client: LSPClientInfo;
+			unacked: number;
+			drain?: Promise<boolean>;
+			/** One stalled record per barrier, however many waiters give up on it. */
+			stallLogged?: boolean;
+		}
+	>();
 	/**
 	 * #1459: the ONE outstanding auxiliary notify write per server key
 	 * ("serverId:normalizedRoot"). A `reopenOnResync` scanner re-parses the whole
@@ -1559,6 +1608,10 @@ export class LSPService {
 	): void {
 		this.notifyWriteBackpressureStreak.delete(key);
 		this.outstandingAuxNotifyWrites.delete(key);
+		// #1714: the demoted client is torn down, so its backlog count describes a
+		// process that no longer exists. Leaving it would make the replacement start
+		// at the ceiling and pay a barrier on its first file.
+		this.auxNotifyInflight.delete(key);
 		this.state.broken.set(key, Date.now() + BROKEN_BASE_COOLDOWN_MS);
 		void entry.client.shutdown().catch(() => {});
 		this.state.clients.delete(key);
@@ -1607,6 +1660,209 @@ export class LSPService {
 			filePath: normalizeMapKey(filePath),
 			durationMs: outstandingMs,
 			metadata: { serverId, outstandingMs, streakAfter },
+		});
+	}
+
+	/**
+	 * #1714: record that one more document notify went to this auxiliary.
+	 *
+	 * Counted at ISSUE time, not on the write's settle: the backlog the sweep
+	 * builds is what the server still has to read, and a write that has not landed
+	 * yet is part of it. A client-identity change resets the count, because a
+	 * respawned server carries none of its predecessor's backlog.
+	 */
+	private noteAuxNotifyIssued(key: string, client: LSPClientInfo): void {
+		const record = this.auxNotifyInflight.get(key);
+		if (record && record.client === client) {
+			record.unacked += 1;
+			return;
+		}
+		this.auxNotifyInflight.set(key, { client, unacked: 1 });
+	}
+
+	/**
+	 * #1714: is this auxiliary already holding as many documents as it may?
+	 *
+	 * Read by the sweep's PRE-OPEN pass, which writes `didOpen` directly instead
+	 * of going through `touchFile` and so meets neither the #1459 slot gate nor
+	 * the drain barrier. Pre-opening is explicitly best-effort — the file's own
+	 * `touchFile` opens it a moment later, through the barrier — so a backlogged
+	 * scanner is simply left out of the warm-up burst rather than handed a second
+	 * copy of every file in the chunk.
+	 */
+	private auxNotifyBacklogAtCeiling(key: string, entry: SpawnedServer): boolean {
+		const record = this.auxNotifyInflight.get(key);
+		if (!record || record.client !== entry.client) return false;
+		return record.unacked >= auxNotifyInflightLimit(entry.info);
+	}
+
+	/**
+	 * #1714: hold the next notify until this auxiliary has proven it drained the
+	 * ones already sent. Resolves `true` when the caller may write.
+	 *
+	 * Under the limit there is nothing to prove, so the common case is a synchronous
+	 * `true` and the sweep runs at full speed. At the limit the gate sends ONE
+	 * request round-trip (`pingLiveness`, #1277, clients/lsp/client.ts:2577). The
+	 * server reads its stdin in order, so a reply to a request written after N
+	 * `didOpen`s proves it read those N — an acknowledgement no notification can
+	 * give, because a notification has no reply.
+	 *
+	 * A barrier is a QUEUE, not a drop, and it is bounded by the CALLER's remaining
+	 * budget, never by a schedule of its own: every waiter gives the shared
+	 * round-trip only `waitMs`, so a caller that asked for a 1 s touch still gets
+	 * one. A waiter whose budget runs out returns `false` and the caller reports
+	 * the scanner as uncovered for that file (the #1459 deferral path), which keeps
+	 * the file in the sweep's coverage gap instead of letting silence read as clean.
+	 *
+	 * Fails OPEN for a client with no liveness round-trip: unmeasurable is not the
+	 * same as backlogged, and the codebase already reads this capability as
+	 * `pingLiveness?.() ?? true` (clients/lsp/client.ts:281). Every real client
+	 * provides it.
+	 */
+	private async awaitAuxNotifyDrain(
+		key: string,
+		entry: SpawnedServer,
+		filePath: string,
+		waitMs: number,
+		context: { source: string; clientScope: LSPTouchClientScope },
+	): Promise<boolean> {
+		const record = this.auxNotifyInflight.get(key);
+		if (!record) return true;
+		if (record.client !== entry.client) {
+			// A previous generation's backlog says nothing about this client.
+			this.auxNotifyInflight.delete(key);
+			return true;
+		}
+		const limit = auxNotifyInflightLimit(entry.info);
+		if (record.unacked < limit) return true;
+		const ping = entry.client.pingLiveness;
+		if (!ping) {
+			record.unacked = 0;
+			return true;
+		}
+		if (waitMs <= 0) {
+			this.noteDrainBarrierOutcome(key, entry, filePath, context, {
+				unacked: record.unacked,
+				limit,
+				waitMs,
+				durationMs: 0,
+				outcome: "stalled",
+			});
+			return false;
+		}
+		if (!record.drain) {
+			const startedAt = Date.now();
+			const outstanding = record.unacked;
+			const client = entry.client;
+			const barrier = (async (): Promise<boolean> => {
+				let drained = false;
+				try {
+					drained = await ping.call(client, waitMs);
+				} catch {
+					// A ping that throws proves nothing about the backlog; treat it as
+					// undrained rather than waving the next write through.
+					drained = false;
+				}
+				const current = this.auxNotifyInflight.get(key);
+				if (current === record && current.client === client) {
+					current.drain = undefined;
+					// Subtract the snapshot rather than zeroing: a concurrent touch may
+					// have issued a write after this round-trip was sent, and that write
+					// is still unacknowledged.
+					if (drained) current.unacked = Math.max(0, current.unacked - outstanding);
+				}
+				this.noteDrainBarrierOutcome(key, entry, filePath, context, {
+					unacked: outstanding,
+					limit,
+					waitMs,
+					durationMs: Date.now() - startedAt,
+					outcome: drained ? "drained" : "stalled",
+				});
+				return drained;
+			})();
+			barrier.catch(() => {});
+			record.drain = barrier;
+			record.stallLogged = false;
+		}
+		// Each waiter spends only its OWN remaining budget on the shared barrier.
+		const waitStartedAt = Date.now();
+		const drained = await withDeadline(record.drain, {
+			ms: waitMs,
+			onTimeout: "undefined",
+			onReject: "undefined",
+		});
+		if (drained !== true) {
+			// The waiter gave up before the round-trip answered. Record it here as
+			// well: a barrier whose ping NEVER answers would otherwise leave the
+			// stall invisible, which is the shape that reads as "nothing happened".
+			this.noteDrainBarrierOutcome(key, entry, filePath, context, {
+				unacked: record.unacked,
+				limit,
+				waitMs,
+				durationMs: Date.now() - waitStartedAt,
+				outcome: "stalled",
+			});
+		}
+		return drained === true;
+	}
+
+	/**
+	 * #1714: emit at most ONE record per barrier. A stalled barrier can be
+	 * abandoned by every file left in the sweep, and one row per file would turn a
+	 * single stuck scanner into hundreds of identical records.
+	 */
+	private noteDrainBarrierOutcome(
+		key: string,
+		entry: SpawnedServer,
+		filePath: string,
+		context: { source: string; clientScope: LSPTouchClientScope },
+		detail: {
+			unacked: number;
+			limit: number;
+			waitMs: number;
+			durationMs: number;
+			outcome: "drained" | "stalled";
+		},
+	): void {
+		const record = this.auxNotifyInflight.get(key);
+		if (detail.outcome === "stalled" && record) {
+			if (record.stallLogged) return;
+			record.stallLogged = true;
+		}
+		this.logDrainBarrier(key, entry, filePath, context, detail);
+	}
+
+	/**
+	 * #1714: one row per barrier, not per waiter — a burst of N notifies produces
+	 * at most one round-trip and one record, so the volume is bounded by the sweep
+	 * divided by the limit. Names the server and the file that hit the ceiling, so
+	 * "which scanner is falling behind" survives aggregation.
+	 */
+	private logDrainBarrier(
+		key: string,
+		entry: SpawnedServer,
+		filePath: string,
+		context: { source: string; clientScope: LSPTouchClientScope },
+		detail: {
+			unacked: number;
+			limit: number;
+			waitMs: number;
+			durationMs: number;
+			outcome: "drained" | "stalled";
+		},
+	): void {
+		logLatency({
+			type: "phase",
+			phase: "lsp_notify_inflight_barrier",
+			filePath: normalizeMapKey(filePath),
+			durationMs: detail.durationMs,
+			metadata: {
+				serverId: entry.info.id,
+				clientKey: key,
+				source: context.source,
+				clientScope: context.clientScope,
+				...detail,
+			},
 		});
 	}
 
@@ -2904,11 +3160,49 @@ export class LSPService {
 						entry.info.role === "auxiliary" && clientKey !== undefined;
 					let slot: { release: () => void } | undefined;
 					if (gated && clientKey) {
-						const claim = await this.claimAuxNotifySlot(
+						// #1714: before taking the slot, make the server prove it read the
+						// notifies already sent. A sweep is sequential, so the slot gate
+						// below is almost always free and cannot see a backlog building.
+						const barrierStartedAt = Date.now();
+						const paced = await this.awaitAuxNotifyDrain(
 							clientKey,
 							entry,
 							filePath,
 							queueWaitMs,
+							{ source, clientScope },
+						);
+						if (!paced) {
+							// Deferred, not dropped: the scanner is behind, so this touch
+							// reports it as uncovered and the file stays in the coverage gap.
+							// The next sweep pass re-offers the same file.
+							notifyDeferredServerIds.push(entry.info.id);
+							logLatency({
+								type: "phase",
+								phase: "lsp_notify_resync_deferred",
+								filePath: normalizedPath,
+								durationMs: Date.now() - barrierStartedAt,
+								metadata: {
+									serverId: entry.info.id,
+									source,
+									clientScope,
+									reason: "inflight_limit",
+									queueWaitMs,
+								},
+							});
+							return;
+						}
+						// The barrier spends from the SAME budget the caller granted, so
+						// the slot wait gets only what is left. Otherwise a paced touch
+						// could cost two full budgets.
+						const slotWaitMs = Math.max(
+							0,
+							queueWaitMs - (Date.now() - barrierStartedAt),
+						);
+						const claim = await this.claimAuxNotifySlot(
+							clientKey,
+							entry,
+							filePath,
+							slotWaitMs,
 						);
 						if ("outstandingMs" in claim) {
 							// Queued behind a write the scanner has not accepted inside our
@@ -2925,6 +3219,7 @@ export class LSPService {
 									serverId: entry.info.id,
 									source,
 									clientScope,
+									reason: "outstanding_write",
 									outstandingMs: claim.outstandingMs,
 									queueWaitMs,
 								},
@@ -2943,6 +3238,12 @@ export class LSPService {
 						const writePromise = entry.client.notify
 							.open(filePath, content, languageId, undefined, silent)
 							.then(() => true as const);
+						// #1714: the document is now in this auxiliary's input queue,
+						// whether or not the write settles inside our budget. Counted here
+						// so the next file sees the real backlog.
+						if (gated && clientKey) {
+							this.noteAuxNotifyIssued(clientKey, entry.client);
+						}
 						if (slot && clientKey) {
 							const client = entry.client;
 							const release = slot.release;
@@ -6126,8 +6427,23 @@ export class LSPService {
 							WORKSPACE_SWEEP_EXCLUDED_SERVER_IDS,
 						);
 						for (const entry of clients) {
+							// #1714: this pass is the sweep's SECOND source of `didOpen`
+							// volume, and it reaches the server without passing the drain
+							// barrier. Charge it to the same backlog ledger, and leave a
+							// scanner that is already at its ceiling out of the burst.
+							let auxKey: string | undefined;
+							if (entry.info.role === "auxiliary") {
+								auxKey = await this.demonstratedReadyKeyFor(
+									entry.info,
+									filePath,
+								);
+								if (auxKey && this.auxNotifyBacklogAtCeiling(auxKey, entry)) {
+									continue;
+								}
+							}
 							try {
 								await entry.client.notify.open(filePath, content, languageId);
+								if (auxKey) this.noteAuxNotifyIssued(auxKey, entry.client);
 							} catch {
 								// Best-effort: a failed pre-open just means processFile's own
 								// touchFile call below pays for the open instead.
@@ -6815,6 +7131,11 @@ export class LSPService {
 		// describe a live one. The gate's identity check already neutralises a stale
 		// entry; clearing keeps the map honest rather than relying on that.
 		this.outstandingAuxNotifyWrites.clear();
+		// #1714: same reasoning — a backlog count belongs to a client generation,
+		// and every client is gone. `session_start` reaches this through the service
+		// reset, so the pacing state re-arms with the session rather than living for
+		// the process.
+		this.auxNotifyInflight.clear();
 		this.workspaceProbeLogged.clear();
 		this.warmStartLogged.clear();
 	}
