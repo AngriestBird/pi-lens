@@ -175,13 +175,13 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 			"#1615: the once-per-correction memo that suppresses repeat compensating rows is a per-session claim, so a new session must be able to log its own correction.",
 	},
 	{
-		id: "runner-helpers:availabilityStateGeneration",
+		id: "runner-helpers:availabilityGeneration",
 		module: "dispatch/runners/utils/runner-helpers.ts",
-		state: "availabilityStateGeneration",
+		state: "availabilityGeneration",
 		policy: "session_start",
 		resetName: "resetDispatchAvailabilityState",
 		reason:
-			"The generation counter is how every cwd-cached probe latch (eslint, clippy, and the rest of createCwdCachedProbe's users) re-arms without holding a reset closure per checker — one counter, not a parallel list of resets.",
+			"The generation counter is how every cwd-cached probe latch (eslint, clippy, and the rest of createCwdCachedProbe's users) re-arms without holding a reset closure per checker — one counter, not a parallel list of resets. #1754 made it a GenerationSource; resetDispatchAvailabilityState still owns the bump.",
 	},
 	{
 		id: "availability-policy:installRetryLatches",
