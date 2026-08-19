@@ -52,6 +52,22 @@ function makeFakeChild(): FakeChild {
 	const child = new EventEmitter() as FakeChild;
 	child.kill = () => true;
 	child.killed = false;
+	// #1673 review F1b: a real spawned child ALWAYS has stdout/stderr
+	// Readable streams (Node creates them the moment stdio: "pipe" is
+	// requested, even for a child that goes on to fail to launch) — this
+	// double was a bare EventEmitter with neither, which is production-
+	// unfaithful (AGENTS.md shape 7: a double that skips a real seam the
+	// production code path always exercises). `safeSpawnAsync`'s post-exit
+	// wait (`waitForPipeIdle`, #1656) short-circuits when a child has no
+	// pipes at all, so this fixture never entered that wait — hiding a real
+	// race (#1673 review F1) where a late 'error' landing DURING that wait
+	// could steal an already-decided verdict.
+	child.stdout = Object.assign(new EventEmitter(), {
+		setEncoding: () => {},
+	});
+	child.stderr = Object.assign(new EventEmitter(), {
+		setEncoding: () => {},
+	});
 	return child;
 }
 
@@ -80,6 +96,10 @@ const REAL_ABSOLUTE_COMMAND = process.execPath;
 
 function nextTick(): Promise<void> {
 	return new Promise((resolve) => setImmediate(resolve));
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 describe("safeSpawnAsync decides from the close-event SHAPE, not event timing (#1651)", () => {
@@ -147,7 +167,14 @@ describe("safeSpawnAsync decides from the close-event SHAPE, not event timing (#
 				// A real, non-negative exit code: the process genuinely ran and
 				// answered. This must settle the result immediately.
 				child.emit("close", 0, null);
-				await nextTick();
+				// #1673 review F1: land the late error INSIDE the post-close
+				// idle-pipe wait window (EXIT_PIPE_IDLE_GRACE_MS = 100ms), not
+				// merely a tick later. A same-microtask/same-tick re-check isn't
+				// what's being guarded here — #1656 widened the gap between
+				// "outcome decided" and "promise resolved" to the whole
+				// (bounded, up to 2s) idle wait, so the regression only
+				// reproduces with an error landing inside that wider window.
+				await delay(10);
 				// An unrelated failure arriving AFTER a clean exit (e.g. a
 				// post-exit kill() attempt that itself failed) must never
 				// overwrite the already-decided clean verdict.

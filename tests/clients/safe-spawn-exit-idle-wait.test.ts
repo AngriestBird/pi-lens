@@ -205,4 +205,40 @@ describe("safeSpawnAsync post-exit pipe-idle wait (#1656)", () => {
 
 		expect(settled).toBe(true);
 	});
+
+	it("settles right after 'close' instead of paying out the full idle-grace window when nothing holds the child's stdio open (#1673 review F2)", async () => {
+		const child = makeFakeChild();
+		spawnMock.mockReturnValue(child);
+
+		const resultPromise = safeSpawnAsync("fake-cmd", [], {
+			timeout: 30_000,
+		});
+
+		let settled = false;
+		void resultPromise.then(() => {
+			settled = true;
+		});
+
+		child.emit("exit", 0, null);
+		// Let `finalize` progress past its `await killPromise` and register
+		// the idle wait's "close" listener before "close" is emitted below —
+		// this mirrors the real gap between a Node child's "exit" and "close"
+		// (Node emits "close" only once stdio is fully released, a beat after
+		// "exit", never in the same synchronous turn).
+		await vi.advanceTimersByTimeAsync(0);
+
+		// Nothing is holding this child's stdio open, so "close" fires right
+		// behind "exit" — well inside the 100ms idle-grace window.
+		child.emit("close", 0, null);
+
+		// Advance far LESS than the 100ms grace window. This is an
+		// event-order assertion, not a wall-clock race: without the "close"
+		// early-out, only the still-armed grace timer would eventually flip
+		// `settled`, ~100ms later — so if the early-out isn't wired up,
+		// `settled` is deterministically still false at this point, every
+		// run, on every host.
+		await vi.advanceTimersByTimeAsync(5);
+
+		expect(settled).toBe(true);
+	});
 });

@@ -1413,8 +1413,21 @@ export async function safeSpawnAsync(
 					rearmIdleGrace = undefined;
 					if (graceTimer) clearTimeout(graceTimer);
 					clearTimeout(capTimer);
+					child.removeListener("close", finish);
 					finishIdleWait();
 				};
+				// #1673 review F2: `close` fires once every stdio fd referencing
+				// the child has actually released — a STRONGER signal than "no
+				// data for EXIT_PIPE_IDLE_GRACE_MS", and for the overwhelming
+				// majority of real spawns (nothing else holding stdio open) it
+				// fires within a few ms of `exit`. Finishing on it early means a
+				// normal spawn doesn't pay out the full 100ms grace window it
+				// never needed. The anti-hang property this construction exists
+				// for is untouched: a daemonized descendant holding the pipe
+				// open is EXACTLY the case where `close` never fires, so the
+				// grace/cap timers below still bound that case exactly as
+				// before.
+				child.on("close", finish);
 				rearmIdleGrace = (): void => {
 					if (graceTimer) clearTimeout(graceTimer);
 					graceTimer = setTimeout(finish, EXIT_PIPE_IDLE_GRACE_MS);
@@ -1472,12 +1485,25 @@ export async function safeSpawnAsync(
 			// SIGTERM→SIGKILL escalation timer and it hasn't fired yet, clear it
 			// so it doesn't linger as a ref'd handle after this promise resolves.
 			if (escalationTimer) clearTimeout(escalationTimer);
+			// #1673 review F1: latch the verdict as DECIDED here, before the
+			// idle-pipe wait — not after it. `code`/`signal`/`timedOut`/`aborted`
+			// are already fixed by this point (they don't change during the
+			// wait), so nothing below depends on staying unresolved across it.
+			// Leaving `resolved` false across the wait would reopen the exact
+			// race #1651 review F4 closed: a late, unrelated 'error' (e.g. a
+			// post-exit kill() failing with EPERM) landing inside the
+			// idle-grace window (bounded, but up to EXIT_PIPE_IDLE_MAX_WAIT_MS)
+			// would steal an already-decided healthy verdict. Pre-#1656 that
+			// race window was one microtask — the gap between `close` firing
+			// and `resolve()` being called synchronously in the same handler.
+			// This closes the window back down to that same shape instead of
+			// widening it to the whole wait.
+			resolved = true;
 			await waitForPipeIdle();
 			const resourceUsage = finishResourceUsage();
 
 			const outputInfo = outputTruncated ? { outputTruncated: true } : {};
 			if (timedOut) {
-				resolved = true;
 				const cause = new Error(
 					`Process timed out after ${timeout}ms (killed with ${signal || "SIGTERM"})`,
 				);
@@ -1492,7 +1518,6 @@ export async function safeSpawnAsync(
 					resourceUsage,
 				});
 			} else if (aborted) {
-				resolved = true;
 				const cause = new Error("Spawn aborted");
 				resolve({
 					stdout,
@@ -1505,7 +1530,6 @@ export async function safeSpawnAsync(
 					resourceUsage,
 				});
 			} else if (signal) {
-				resolved = true;
 				const cause = new Error(`Process killed by signal: ${signal}`);
 				resolve({
 					stdout,
@@ -1530,7 +1554,6 @@ export async function safeSpawnAsync(
 				// informative Error — ENOENT vs EACCES vs other); otherwise
 				// synthesize an ENOENT-shaped one so a genuinely missing tool is
 				// never read as a clean, answered run.
-				resolved = true;
 				const cause = pendingSpawnError ?? synthesizeEnoentError(command);
 				const spawnFailure = await classifySpawnFailure(cause, {
 					command,
@@ -1547,7 +1570,6 @@ export async function safeSpawnAsync(
 					resourceUsage,
 				});
 			} else {
-				resolved = true;
 				resolve({ stdout, stderr, status: code, ...outputInfo, resourceUsage });
 			}
 		};
