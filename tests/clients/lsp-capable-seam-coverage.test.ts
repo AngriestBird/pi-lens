@@ -11,12 +11,30 @@
 
 import { describe, expect, it } from "vitest";
 import lspRunner from "../../clients/dispatch/runners/lsp.js";
-import { KIND_EXTENSIONS } from "../../clients/file-kinds.js";
+import {
+	KIND_EXTENSIONS,
+	SPECIAL_FILENAMES,
+} from "../../clients/file-kinds.js";
 import { getLspCapableKinds } from "../../clients/language-policy.js";
 import {
 	getLanguageId,
 	LANGUAGE_EXTENSIONS,
 } from "../../clients/lsp/language.js";
+
+// A representative basename for every SPECIAL_FILENAMES pattern (#1594). The
+// patterns are regexes (Dockerfile.<suffix> matches infinitely many names),
+// so they can't be flattened into literal map keys the way extensions can —
+// this sample corpus is what lets the coverage guard below iterate them the
+// same way guards 4-6 iterate KIND_EXTENSIONS. Keyed by pattern.source so a
+// newly added SPECIAL_FILENAMES entry with no sample fails the guard right
+// after it, before the resolution guard could silently skip it.
+const SPECIAL_FILENAME_SAMPLES: Record<string, string> = {
+	"^CMakeLists\\.txt$": "CMakeLists.txt",
+	"^Makefile$": "Makefile",
+	"^Dockerfile(\\.\\w+)?$": "Dockerfile.dev",
+	"^terragrunt\\.hcl$": "terragrunt.hcl",
+	"^root\\.hcl$": "root.hcl",
+};
 
 // Every language id an lspCapable file can be announced as on didOpen.
 //
@@ -178,5 +196,50 @@ describe("lspCapable seam coverage", () => {
 		expect(getLanguageId("scripts/run.sh")).toBe("shellscript");
 		expect(getLanguageId("src/main.c")).toBe("c");
 		expect(getLanguageId("styles/app.scss")).toBe("scss");
+	});
+
+	// #1594: SPECIAL_FILENAMES is the other half of detectFileKind's classifier
+	// (basename patterns, not extensions), and it fed lspCapable kinds
+	// (Makefile -> shell, Dockerfile.<suffix> -> docker) invisibly to guards
+	// 4-6 above, which only iterate KIND_EXTENSIONS. This is that same coverage
+	// applied to the basename half.
+	it("has a representative sample filename for every basename pattern", () => {
+		const missing = SPECIAL_FILENAMES.filter(
+			({ pattern }) => SPECIAL_FILENAME_SAMPLES[pattern.source] === undefined,
+		);
+		expect(
+			missing.map(({ pattern }) => pattern.source),
+			"SPECIAL_FILENAMES pattern(s) missing from SPECIAL_FILENAME_SAMPLES",
+		).toEqual([]);
+	});
+
+	it("resolves a language id for every basename-classified lspCapable file", () => {
+		const capable = new Set(getLspCapableKinds());
+		const unresolved = SPECIAL_FILENAMES.filter(({ kind }) => capable.has(kind))
+			.map(({ pattern }) => SPECIAL_FILENAME_SAMPLES[pattern.source])
+			.filter((sample) => {
+				const id = getLanguageId(sample);
+				return id === undefined || id === "plaintext";
+			});
+		expect(
+			unresolved,
+			`basename-classified lspCapable file(s) still falling back to plaintext on didOpen: ${unresolved.join(", ")}`,
+		).toEqual([]);
+	});
+
+	// Sweep result (#1594): every basename pattern that classifies into an
+	// lspCapable kind, pinned to its resolved id so a future SPECIAL_FILENAMES
+	// addition is a reviewed spelling decision, same as PINNED_LSP_LANGUAGE_IDS
+	// above. CMakeLists.txt and Dockerfile were already reachable via
+	// hand-kept literal keys in CURATED_LANGUAGE_EXTENSIONS; Makefile and
+	// Dockerfile.<suffix> were not reachable at all before this fix.
+	// terragrunt.hcl/root.hcl stay out of scope: terragrunt is lspCapable:
+	// false, so no server ever sees their languageId.
+	it("pins the language ids reachable through basename classification", () => {
+		expect(getLanguageId("CMakeLists.txt")).toBe("cmake");
+		expect(getLanguageId("Makefile")).toBe("shell");
+		expect(getLanguageId("Dockerfile")).toBe("dockerfile");
+		expect(getLanguageId("Dockerfile.dev")).toBe("dockerfile");
+		expect(getLanguageId("Dockerfile.prod")).toBe("dockerfile");
 	});
 });
