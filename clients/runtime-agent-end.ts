@@ -16,6 +16,7 @@ import {
 import type { FormatService } from "./format-service.js";
 import { logLatency } from "./latency-logger.js";
 import { isPathIgnoredByProject } from "./file-utils.js";
+import { incrementDegradationCount } from "./degradation-ledger.js";
 import { newLspMutationCorrelationId, type LspMutationContext } from "./lsp-mutation.js";
 import {
 	getGlobalActionableWarningMaxFixes,
@@ -227,6 +228,21 @@ export async function handleAgentEnd({
 				})),
 			},
 		});
+		// #1678 item 1: a genuinely abandoned origin re-surfaces the SAME
+		// record on every subsequent agent_end for as long as the queued
+		// entry lives — by design (see the comment above), but the repo
+		// invariant is that a repeated degradation goes through the ledger's
+		// counting path rather than accumulating as unbounded raw log lines.
+		// `incrementDegradationCount` collapses every recurrence of the same
+		// file into one ledger group entry with a running count instead of a
+		// new entry per agent_end.
+		for (const record of droppedOrphans) {
+			incrementDegradationCount({
+				kind: "path-attribution-orphan-unresolved",
+				subject: record.filePath,
+				reason: `origin=${record.originCwd} unclaimed >${staleAfterMs}ms`,
+			});
+		}
 	}
 	if (records.length === 0 && !inspectActionableReport) return undefined;
 	if (deferredToOwner.length > 0) {

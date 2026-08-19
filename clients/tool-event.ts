@@ -91,6 +91,13 @@ export function resolveToolCallCorrelationId(event: unknown): string | undefined
 		value.toolCallId,
 		value.callId,
 		value.requestId,
+		// Widest rung, only reached when toolCallId/callId/requestId are all
+		// absent (#1678 item 2): this assumes a host's `id` field identifies
+		// one TOOL CALL. A host that instead populates `id` per MESSAGE (one
+		// id shared by every tool call in that message) would cross two
+		// parallel calls in the same turn under the same id. No known host
+		// shape does this today (#1655's host-shape audit); revisit dropping
+		// this rung if that audit ever turns one up.
 		value.id,
 	]) {
 		const sanitized = sanitizeCorrelationId(candidate);

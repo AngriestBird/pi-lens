@@ -31,7 +31,15 @@ export type DegradationKind =
 	 * The issue names this `path_variant_unresolved`; the ledger's kind
 	 * vocabulary is kebab-case, so it is spelled that way here.
 	 */
-	| "path-variant-unresolved";
+	| "path-variant-unresolved"
+	/**
+	 * A deferred-format record's origin (the cwd/worktree it was queued
+	 * under) does not match the flush attempting to claim it as an orphan,
+	 * so it stays queued and re-surfaces on every subsequent `agent_end`
+	 * until a flush from its actual origin claims it (#1642 F3, #1678
+	 * item 1).
+	 */
+	| "path-attribution-orphan-unresolved";
 
 export interface DegradationRecord {
 	kind: unknown;
