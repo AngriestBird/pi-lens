@@ -318,7 +318,18 @@ export interface LSPClientInfo {
 	waitForDiagnostics(
 		filePath: string,
 		timeoutMs?: number,
-		options?: { minVersion?: number; pullOnly?: boolean },
+		options?: {
+			minVersion?: number;
+			pullOnly?: boolean;
+			/** #1639: distinguishes a genuine content-collecting settle from a
+			 *  warm-up-only touch (`ensureWarmForSweep`'s readiness probe, which
+			 *  runs a real pull round trip but never wants the diagnostics
+			 *  content). Both are legitimate `lsp_typescript_diagnostic_sequence`
+			 *  observations for the same file, often seconds or milliseconds
+			 *  apart — tagging the source keeps them distinguishable instead of
+			 *  reading as duplicates. Defaults to "pull". */
+			pullSettleSource?: "pull" | "pull-warmup";
+		},
 	): Promise<void>;
 	/** Get all tracked diagnostics with timestamps (for cascade checking). #1095:
 	 *  each entry also carries the stored content `binding` (absent when no
@@ -1162,9 +1173,42 @@ export function clearDiagnosticsForPath(
 	legacy.diagnosticTimestamps?.delete(normalizedPath);
 }
 
+/**
+ * #1639: `durationMs` measures the PULL SETTLE ITSELF — the caller passes how
+ * long `clientRequestPullDiagnostics` (plus any retries) took to resolve
+ * `found`/`clean` — never time-since-didOpen. Document age is a genuinely
+ * useful signal but a DIFFERENT one; it stays under its own honest name in
+ * `metadata.elapsedSinceDidOpenMs`, exactly like the push-path `logSequence`
+ * above already does. Before this fix the top-level field carried the same
+ * age value pull requests use for retry-budget bookkeeping, so a session's
+ * latency percentiles for this phase read multi-second document lifetimes as
+ * millisecond operation costs (147/239 records read >60s "durations" for
+ * settles that took milliseconds).
+ *
+ * `version` reads the real tracked version from `diagnosticsVersionsByPath`
+ * (bumped by `bumpDiagnosticsVersion` right after this pull's diagnostics
+ * were stored — see the `documentPullDiagnostics.set` call above it) instead
+ * of a hardcoded `null`, which made every pull settle look "unbound" to
+ * staleness forensics even though this codebase already tracks a real
+ * version for the path. Falls back to the explicit `"pull-unversioned"`
+ * marker only when nothing has been stored yet, so "no data" is never
+ * confused with "confirmed no version" (`null`).
+ *
+ * `pullSettleSource` distinguishes the two legitimate call paths that can
+ * both settle a pull for the same file close together: a real
+ * content-collecting touch ("pull") and `ensureWarmForSweep`'s warm-up-only
+ * touch ("pull-warmup"), which runs a real round trip purely to prove the
+ * server answers before the sweep's real touch immediately follows it.
+ * Before this fix both logged identically as settleSource "pull", so a
+ * session with warm-up sweeps double-counted: 239 records against 145
+ * touches, with same-file pairs ~60ms apart and near-identical document
+ * ages — the warm-up settle and the real touch's settle for the same file.
+ */
 function logTypeScriptPullSettle(
 	state: LSPClientState,
 	normalizedPath: string,
+	durationMs: number,
+	pullSettleSource: "pull" | "pull-warmup",
 ): void {
 	if (state.serverId !== "typescript") return;
 	const diagnostics = state.documentPullDiagnostics.get(normalizedPath) ?? [];
@@ -1176,21 +1220,22 @@ function logTypeScriptPullSettle(
 		.map((diagnostic) => diagnostic.code)
 		.filter((code): code is string | number => code !== undefined)
 		.map(String))].slice(0, 8);
+	const trackedVersion = state.diagnosticsVersionsByPath?.get(normalizedPath);
 	logLatency({
 		type: "phase",
 		phase: "lsp_typescript_diagnostic_sequence",
 		filePath: normalizedPath,
-		durationMs: elapsedSinceDidOpenMs,
+		durationMs,
 		metadata: {
 			launchVariant: state.launchVariant ?? "unknown",
 			publicationIndex:
 				state.diagnosticPublicationCounts.get(normalizedPath) ?? 0,
-			version: null,
+			version: trackedVersion ?? "pull-unversioned",
 			diagnosticCount: diagnostics.length,
 			diagnosticCodes,
 			elapsedSinceDidOpenMs,
 			settledReturn: true,
-			settleSource: "pull",
+			settleSource: pullSettleSource,
 		},
 	});
 }
@@ -1309,6 +1354,12 @@ export function setupIncomingHandlers(
 			diagnostics?: LSPDiagnostic[];
 			version?: number;
 		}) => {
+			// #1639: the settle operation's own clock for THIS publish. A
+			// "quiet-window" settle's durationMs below measures from here (when
+			// this publish arrived and — armed or re-armed — the debounce timer)
+			// to when that timer actually fires, i.e. the real debounce wait, not
+			// time-since-didOpen.
+			const publishReceivedAt = Date.now();
 			const filePath = uriToPath(params.uri);
 			const normalizedPath = normalizeMapKey(filePath);
 			// A server can flush a queued publish after didClose during teardown.
@@ -1342,9 +1393,34 @@ export function setupIncomingHandlers(
 					.filter((code): code is string | number => code !== undefined)
 					.map(String))].slice(0, 8)
 				: [];
+			// #1639: `durationMs` measures the settle operation, never
+			// time-since-didOpen — document age keeps its own honest name in
+			// `metadata.elapsedSinceDidOpenMs`, exactly like the pull-path
+			// producer above. Before this fix EVERY call (settled or not) logged
+			// the doc-age value as durationMs, which is what actually produced
+			// the issue's cited evidence: this push-path producer, not the pull
+			// path, emitted all 239 records (147 of them >60s "durations" for
+			// settles that took milliseconds; a 61ms same-file pair is this
+			// function's OWN unsettled-then-settled shape — the
+			// `logSequence(false)` raw-receipt record immediately followed by
+			// the `logSequence(true, ...)` settle record for the same publish).
+			// - "first-push": settles immediately — the seed-first-push strategy
+			//   bypasses the debounce timer entirely, so there is no wait to
+			//   measure; durationMs is 0.
+			// - "quiet-window": the real debounce wait, timed from THIS publish's
+			//   own receipt (a later publish that re-arms the timer captures its
+			//   OWN `publishReceivedAt`, so a re-armed wait is timed from the
+			//   push that actually won the debounce, not the first one that lost
+			//   it).
+			// - "publication": a raw per-publication receipt, never itself a
+			//   settle — durationMs is 0 and `settledReturn` stays false. This
+			//   is the record that used to log with NO settleSource at all;
+			//   giving it one closes AC3 (distinguish, don't silently overload,
+			//   the phase's two shapes) for the pairs that actually occur.
 			const logSequence = (
 				settledReturn: boolean,
-				settleSource?: "first-push" | "quiet-window",
+				settleSource: "first-push" | "quiet-window" | "publication",
+				durationMs: number,
 			): void => {
 				if (state.serverId !== "typescript") return;
 				const elapsedSinceDidOpenMs = Math.max(
@@ -1356,16 +1432,16 @@ export function setupIncomingHandlers(
 					type: "phase",
 					phase: "lsp_typescript_diagnostic_sequence",
 					filePath: normalizedPath,
-					durationMs: elapsedSinceDidOpenMs,
+					durationMs,
 					metadata: {
 						launchVariant: state.launchVariant ?? "unknown",
 						publicationIndex,
-						version: docVersion ?? null,
+						version: docVersion ?? "push-unversioned",
 						diagnosticCount: newDiags.length,
 						diagnosticCodes,
 						elapsedSinceDidOpenMs,
 						settledReturn,
-						...(settleSource && { settleSource }),
+						settleSource,
 					},
 				});
 			};
@@ -1439,10 +1515,12 @@ export function setupIncomingHandlers(
 				recordDocVersion();
 				bumpDiagnosticsVersion(state, normalizedPath);
 				state.diagnosticEmitter.emit("diagnostics", normalizedPath);
-				logSequence(true, "first-push");
+				// Immediate settle — no debounce wait to measure.
+				logSequence(true, "first-push", 0);
 				return;
 			}
-			logSequence(false);
+			// A raw per-publication receipt, not itself a settle.
+			logSequence(false, "publication", 0);
 
 			const existingTimer = state.pendingDiagnostics.get(normalizedPath);
 			if (existingTimer) clearTimeout(existingTimer);
@@ -1455,7 +1533,8 @@ export function setupIncomingHandlers(
 				recordDocVersion();
 				bumpDiagnosticsVersion(state, normalizedPath);
 				state.diagnosticEmitter.emit("diagnostics", normalizedPath);
-				logSequence(true, "quiet-window");
+				// The real debounce wait, timed from THIS publish's own receipt.
+				logSequence(true, "quiet-window", Date.now() - publishReceivedAt);
 			}, strategy.debounceMs);
 
 			state.pendingDiagnostics.set(normalizedPath, timer);
@@ -1897,10 +1976,15 @@ export async function clientWaitForDiagnostics(
 	state: LSPClientState,
 	filePath: string,
 	timeoutMs: number,
-	options: { minVersion?: number; pullOnly?: boolean } = {},
+	options: {
+		minVersion?: number;
+		pullOnly?: boolean;
+		pullSettleSource?: "pull" | "pull-warmup";
+	} = {},
 ): Promise<void> {
 	const normalizedPath = normalizeMapKey(filePath);
 	const minVersion = options.minVersion;
+	const pullSettleSource = options.pullSettleSource ?? "pull";
 	// #1531: the freshness gate is PER PATH. `minVersion` is a reading of the
 	// client-global counter, and `diagnosticsVersionsByPath` stores that same
 	// counter's value at each store — the two are on one axis, so comparing them
@@ -1936,13 +2020,22 @@ export async function clientWaitForDiagnostics(
 		// `hasFreshDiagnostics()`, which is unconditionally true when there is no
 		// version baseline (`minVersion === undefined`), so a failed pull returned
 		// 0 and was read as a fresh clean.
+		// #1639: the settle operation's OWN clock — durationMs on the eventual
+		// log record measures from here, never from didOpen (that stays in
+		// metadata.elapsedSinceDidOpenMs, computed separately below).
+		const pullSettleStartedAt = Date.now();
 		let outcome = await clientRequestPullDiagnostics(
 			state,
 			filePath,
 			timeoutMs,
 		);
 		if (outcome.status === "found") {
-			logTypeScriptPullSettle(state, normalizedPath);
+			logTypeScriptPullSettle(
+				state,
+				normalizedPath,
+				Date.now() - pullSettleStartedAt,
+				pullSettleSource,
+			);
 			return;
 		}
 		let sawClean = outcome.status === "clean";
@@ -1973,12 +2066,22 @@ export async function clientWaitForDiagnostics(
 		}
 		if (options.pullOnly) {
 			if (outcome.status === "found" || sawClean) {
-				logTypeScriptPullSettle(state, normalizedPath);
+				logTypeScriptPullSettle(
+					state,
+					normalizedPath,
+					Date.now() - pullSettleStartedAt,
+					pullSettleSource,
+				);
 			}
 			return;
 		}
 		if (outcome.status === "found" || sawClean) {
-			logTypeScriptPullSettle(state, normalizedPath);
+			logTypeScriptPullSettle(
+				state,
+				normalizedPath,
+				Date.now() - pullSettleStartedAt,
+				pullSettleSource,
+			);
 			return;
 		}
 	}

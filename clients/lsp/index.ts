@@ -3273,6 +3273,16 @@ export class LSPService {
 							(snapshot) => snapshot.serverId === entry.client.serverId,
 						),
 					) === "pull-capable";
+				// #1639: `ensureWarmForSweep`'s readiness probe (`source:
+				// "lsp_sweep_warmup"`, `collectDiagnostics: false`) runs a real pull
+				// round trip on this same file, then the sweep's real touch follows
+				// immediately after — two legitimate settle observations for one
+				// file, not a duplicate. Tag the warm-up one distinctly so a
+				// consumer can tell them apart instead of double-counting. Omitted
+				// (rather than passed as "pull") on the common path — the client
+				// already defaults to "pull", and existing tests assert the exact
+				// argument list `waitForDiagnostics` is called with.
+				const isWarmupTouch = source === "lsp_sweep_warmup";
 				// #743: per-server — a server we DID push to still gets the
 				// version-baseline wait even when a sibling was debounced away.
 				const wait =
@@ -3280,12 +3290,18 @@ export class LSPService {
 						? entry.client.waitForDiagnostics(filePath, serverTimeout, {
 								minVersion: baseline,
 								...(pullOnly && { pullOnly: true }),
+								...(isWarmupTouch && { pullSettleSource: "pull-warmup" }),
 							})
 						: pullOnly
 							? entry.client.waitForDiagnostics(filePath, serverTimeout, {
 									pullOnly: true,
+									...(isWarmupTouch && { pullSettleSource: "pull-warmup" }),
 								})
-							: entry.client.waitForDiagnostics(filePath, serverTimeout);
+							: isWarmupTouch
+								? entry.client.waitForDiagnostics(filePath, serverTimeout, {
+										pullSettleSource: "pull-warmup",
+									})
+								: entry.client.waitForDiagnostics(filePath, serverTimeout);
 				return wait.catch(() => undefined);
 			});
 
