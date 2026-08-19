@@ -2,8 +2,7 @@
 section: Fixed
 ---
 
-- **taplo, biome, stylua, and vulture now prefer the project's own binary and
-  config over pi-lens's managed copy (refs #1731)** — The #1721 sweep found
+- **taplo, biome, stylua, and vulture now prefer the project's own binary and config over pi-lens's managed copy (refs #1731)** — The #1721 sweep found
   the same defect shape in six more runners. taplo's project-local check was
   unreachable whenever pi-lens's managed shim answered first, and even its
   fallback missed an npm-installed taplo on Windows (wrong extension). biome's
