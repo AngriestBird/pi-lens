@@ -87,6 +87,17 @@ vi.mock("../../clients/widget-state.js", () => ({
 		reconcileScanDiagnosticsMock(...args),
 }));
 
+// #1641: the past-EOF gate's demote/log logic is real (imported for real
+// below); only its resync side effect is mocked here so a demoted-line test
+// never reaches into the real LSP service / spawns a real language server.
+const resyncDocumentOnPastEofMock = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/diagnostic-line-freshness.js", async (importOriginal) => {
+	const actual = await importOriginal<
+		typeof import("../../clients/diagnostic-line-freshness.js")
+	>();
+	return { ...actual, resyncDocumentOnPastEof: resyncDocumentOnPastEofMock };
+});
+
 beforeEach(() => {
 	projectDiagnosticsMocks.scanProjectDiagnostics.mockReset();
 	projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReset();
@@ -2001,6 +2012,129 @@ describe("lens_diagnostics mode=all", () => {
 		mockSummaries.push(sum("/proj/src/clean.ts", {}));
 		const result = await run(makeTool(), { mode: "all" });
 		expect(String(result.content[0].text)).toContain("✓");
+	});
+
+	describe("past-EOF diagnostic gate (#1641)", () => {
+		afterEach(() => {
+			resyncDocumentOnPastEofMock.mockReset();
+		});
+
+		it("RED CASE: demotes a cached diagnostic citing a line past the file's current EOF", async () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-past-eof-"));
+			try {
+				const filePath = path.join(cwd, "kilo.ts");
+				// 6 addressable lines on disk — the widget cache still carries a
+				// diagnostic citing line 407, exactly #1641's forensic shape (a
+				// stale in-memory LSP document that never touched this file's mtime).
+				fs.writeFileSync(filePath, "a\nb\nc\nd\ne\n");
+				mockSummaries.length = 0;
+				mockSummaries.push(
+					sum(
+						filePath,
+						{ blocking: 1, errors: 1 },
+						{
+							diagnostics: [
+								{
+									severity: "error",
+									semantic: "blocking",
+									message: "stale in-memory citation",
+									line: 407,
+									rule: "X",
+								},
+							],
+						},
+					),
+				);
+
+				const result = await run(makeTool(), { mode: "all" }, cwd);
+				const text = String(result.content[0].text);
+				// Pre-fix: served verbatim as "L407" and counted as a 🔴 blocker.
+				expect(text).not.toContain("L407");
+				expect(text).toContain("— line past EOF");
+				expect(text).not.toContain("🔴");
+				expect(resyncDocumentOnPastEofMock).toHaveBeenCalledWith(filePath);
+			} finally {
+				removeTempDirSync(cwd);
+			}
+		});
+
+		it("does not touch a diagnostic whose cited line is still within the current file", async () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-eof-ok-"));
+			try {
+				const filePath = path.join(cwd, "fine.ts");
+				fs.writeFileSync(filePath, "a\nb\nc\nd\ne\n");
+				mockSummaries.length = 0;
+				mockSummaries.push(
+					sum(
+						filePath,
+						{ blocking: 1, errors: 1 },
+						{
+							diagnostics: [
+								{
+									severity: "error",
+									semantic: "blocking",
+									message: "real, current error",
+									line: 5,
+									rule: "X",
+								},
+							],
+						},
+					),
+				);
+
+				const result = await run(makeTool(), { mode: "all" }, cwd);
+				const text = String(result.content[0].text);
+				expect(text).toContain("L5");
+				expect(text).toContain("🔴");
+				expect(resyncDocumentOnPastEofMock).not.toHaveBeenCalled();
+			} finally {
+				removeTempDirSync(cwd);
+			}
+		});
+
+		it("F5: a rule-policy-disabled past-EOF finding is dropped before the gate runs — no resync, no telemetry", async () => {
+			// Gate order matters: a finding the `.pi-lens.json` rule policy already
+			// dropped is not being served to the agent, so it must never trigger a
+			// resync or a `diagnostic_past_eof` record on THIS call — those are
+			// side effects reserved for findings that are actually delivered.
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-eof-policy-"));
+			try {
+				fs.writeFileSync(
+					path.join(cwd, ".pi-lens.json"),
+					JSON.stringify({ rules: { "no-eval": { disable: ["no-eval"] } } }),
+				);
+				resetProjectLensConfigCache();
+				const filePath = path.join(cwd, "policy-dropped.ts");
+				fs.writeFileSync(filePath, "a\nb\n"); // 3 addressable lines
+				mockSummaries.length = 0;
+				mockSummaries.push(
+					sum(
+						filePath,
+						{ blocking: 1, errors: 1 },
+						{
+							diagnostics: [
+								{
+									severity: "error",
+									semantic: "blocking",
+									message: "MSG-NO-EVAL",
+									line: 999, // past EOF — would demote + resync if delivered
+									rule: "no-eval",
+									tool: "ast-grep",
+								},
+							],
+						},
+					),
+				);
+
+				const result = await run(makeTool(), { mode: "all" }, cwd);
+				const text = String(result.content[0].text);
+				expect(text).not.toContain("MSG-NO-EVAL");
+				expect(resyncDocumentOnPastEofMock).not.toHaveBeenCalled();
+			} finally {
+				resetProjectLensConfigCache();
+				removeTempDirSync(cwd);
+			}
+		});
 	});
 
 	it("filters ignored widget summaries in all mode (#279)", async () =>

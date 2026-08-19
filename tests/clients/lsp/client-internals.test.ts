@@ -16,8 +16,13 @@ import type { MessageConnection } from "vscode-jsonrpc";
 // #1639: capture `lsp_typescript_diagnostic_sequence` phase records so the
 // pull-settle regression tests below can assert on durationMs/version/
 // settleSource without spinning up a real logging sink.
-const { pullSequenceEvents } = vi.hoisted(() => ({
+//
+// #1641 F4: ALSO record every logLatency call (any phase) into
+// `logLatencyMock` so `recordSentContent`'s `lsp_document_send` calls are
+// inspectable too, without needing the real (test-mode-suppressed) writer.
+const { pullSequenceEvents, logLatencyMock } = vi.hoisted(() => ({
 	pullSequenceEvents: [] as Array<Record<string, unknown>>,
+	logLatencyMock: vi.fn(),
 }));
 vi.mock("../../../clients/latency-logger.js", async (importOriginal) => {
 	const actual =
@@ -25,6 +30,7 @@ vi.mock("../../../clients/latency-logger.js", async (importOriginal) => {
 	return {
 		...actual,
 		logLatency: vi.fn((event: Record<string, unknown>) => {
+			logLatencyMock(event);
 			if (event.phase === "lsp_typescript_diagnostic_sequence") {
 				pullSequenceEvents.push(event);
 			}
@@ -672,6 +678,30 @@ describe("handleNotifyOpen", () => {
 		const didOpenCall = calls.find((c) => c[0] === "textDocument/didOpen");
 		expect(didOpenCall).toBeDefined();
 		expect(state.openDocuments.has(TEST_KEY)).toBe(true);
+	});
+
+	it("#1641 F4: lsp_document_send's contentLineCount matches the gate's LSP-addressable convention (newlines + 1), not wc -l", async () => {
+		logLatencyMock.mockClear();
+		const state = createMockState();
+		await handleNotifyOpen(state, TEST_FILE, "a\nb\nc\n", "typescript"); // 3 newlines
+
+		const sendCall = logLatencyMock.mock.calls.find(
+			(c) => c[0]?.phase === "lsp_document_send",
+		);
+		expect(sendCall).toBeDefined();
+		expect(sendCall?.[0].metadata.contentLineCount).toBe(4);
+		expect(sendCall?.[0].metadata.contentLength).toBe(6);
+	});
+
+	it("#1641 F4: an empty document logs contentLineCount 1, not 0 (a doc always has ≥1 addressable line)", async () => {
+		logLatencyMock.mockClear();
+		const state = createMockState();
+		await handleNotifyOpen(state, TEST_FILE, "", "typescript");
+
+		const sendCall = logLatencyMock.mock.calls.find(
+			(c) => c[0]?.phase === "lsp_document_send",
+		);
+		expect(sendCall?.[0].metadata.contentLineCount).toBe(1);
 	});
 
 	it("detaches the classic TypeScript projectInfo probe after didOpen", async () => {

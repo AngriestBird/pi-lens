@@ -1267,6 +1267,35 @@ function recordSentContent(
 		version,
 		hash: hashDiagnosticContent(content),
 	});
+	// #1641 criterion 3: the in-memory document's version + content length AT
+	// SEND TIME, so a later "diagnostic cited a line past current disk EOF"
+	// record (`diagnostic_past_eof`, clients/diagnostic-line-freshness.ts) can be
+	// paired with the send that produced the divergent in-memory document —
+	// today only the symptom (the stale citation) is observable; this is the
+	// cause side of the same timeline.
+	//
+	// Review round F4/F1: `contentLineCount` MUST use the same LSP-addressable
+	// convention as the gate itself (newline count + 1 — a trailing `\n` adds
+	// one more, empty, addressable line; an empty document is still 1 line),
+	// or the two records disagree by one at exactly the boundary this counter
+	// exists to help debug. Counted directly (no `.split("\n")`, which
+	// allocates one substring per line — measured at 13.3ms/200k allocations
+	// on a 7MB send) since only the COUNT is needed here, not the lines.
+	let newlineCount = 0;
+	for (let i = 0; i < content.length; i++) {
+		if (content.charCodeAt(i) === 10) newlineCount++;
+	}
+	logLatency({
+		type: "phase",
+		phase: "lsp_document_send",
+		filePath: normalizedPath,
+		durationMs: 0,
+		metadata: {
+			version,
+			contentLength: content.length,
+			contentLineCount: newlineCount + 1,
+		},
+	});
 }
 
 // Methods that can be registered dynamically and map to operationSupport keys
