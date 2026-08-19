@@ -314,6 +314,84 @@ describe("sweep-kit: auditRegistry", () => {
 		expect(audit.reasonlessExemptions).toEqual(["b.ts"]);
 	});
 
+	// #1755 review F1. `item in exemptions` walks the prototype chain, so an
+	// item NAMED like an Object.prototype member exempts itself against a map
+	// that never mentions it — and staleExemptions (own keys only) can never
+	// report the phantom, so nothing else catches it either.
+	it("ATTACK_PROTOTYPE_EXEMPTION (#1755 F1): a flagged item named toString/constructor does not exempt itself", () => {
+		const audit = auditRegistry({
+			sweepName: "probe sweep",
+			flagged: ["toString", "constructor", "valueOf", "__proto__", "real-item"],
+			registered: [],
+			exemptions: {},
+		});
+		expect(audit.unaccounted).toEqual([
+			"toString",
+			"constructor",
+			"valueOf",
+			"__proto__",
+			"real-item",
+		]);
+		expect(audit.staleExemptions).toEqual([]);
+	});
+
+	it("ATTACK_PROTOTYPE_EXEMPTION: a REAL exemption for such a name still works", () => {
+		const audit = auditRegistry({
+			sweepName: "probe sweep",
+			flagged: ["toString", "real-item"],
+			registered: ["real-item"],
+			exemptions: { toString: "a genuinely reviewed exemption, spelled out here" },
+		});
+		expect(audit.unaccounted).toEqual([]);
+		expect(audit.reasonlessExemptions).toEqual([]);
+	});
+
+	// #1755 review F4. "Scanned 0 files" and "scanned 370, flagged 0" are two
+	// different bugs with two different fixes; one message for both hides which.
+	it("F4: a dead WALK and a dead DETECTOR produce different failures", () => {
+		const deadWalk = auditRegistry({
+			sweepName: "probe sweep",
+			flagged: [],
+			registered: [],
+			scannedCount: 0,
+			minScanned: 100,
+			minFlagged: 1,
+		});
+		const deadDetector = auditRegistry({
+			sweepName: "probe sweep",
+			flagged: [],
+			registered: [],
+			scannedCount: 370,
+			minScanned: 100,
+			minFlagged: 1,
+		});
+		expect(deadWalk.problems.join("\n")).toContain("LOOKED AT 0 source item");
+		expect(deadDetector.problems.join("\n")).not.toContain("LOOKED AT");
+		expect(deadDetector.problems.join("\n")).toContain("flagged 0 item");
+		expect(deadWalk.problems.join("\n")).not.toBe(deadDetector.problems.join("\n"));
+	});
+
+	it("F4: a healthy walk above its floor adds no walk problem", () => {
+		const audit = auditRegistry({
+			sweepName: "probe sweep",
+			flagged: ["a.ts"],
+			registered: ["a.ts"],
+			scannedCount: 370,
+			minScanned: 100,
+		});
+		expect(audit.problems).toEqual([]);
+		expect(audit.scannedCount).toBe(370);
+	});
+
+	it("F4: omitting minScanned skips the walk check entirely", () => {
+		const audit = auditRegistry({
+			sweepName: "probe sweep",
+			flagged: ["a.ts"],
+			registered: ["a.ts"],
+		});
+		expect(audit.problems).toEqual([]);
+	});
+
 	it("EMPTINESS (shape 10, #1718): a scan below its declared floor fails, it does not read as clean", () => {
 		const audit = auditRegistry({
 			sweepName: "probe sweep",
@@ -418,6 +496,69 @@ describe("sweep-kit: seam and tag binding", () => {
 	it("a seam-shaped call inside a comment is not a seam", () => {
 		const source = "// advisoryParts.push(x) — for reference only";
 		expect(findUnregisteredSeams(source, SEAM_PATTERN, TAG, registry)).toEqual([]);
+	});
+
+	// #1755 review F2: an unbounded blank-line skip binds a tag eight blank
+	// lines above a seam — "immediately preceding" in the code, but not on the
+	// screen, and a reviewer scrolling that whitespace does not read the two as
+	// one unit.
+	it("ATTACK_BLANK_GAP_LAUNDERING (#1755 F2): a tag beyond the blank-line budget does not bind", () => {
+		const source = [
+			"// @delivery-surface: real-id",
+			"",
+			"",
+			"",
+			'advisoryParts.push("far below its supposed tag");',
+		].join("\n");
+		expect(scanTaggedSeams(source, SEAM_PATTERN, TAG)[0].ids).toEqual([]);
+		expect(
+			findUnregisteredSeams(source, SEAM_PATTERN, TAG, registry)[0],
+		).toMatch(/untagged seam/);
+	});
+
+	it("F2: one blank line still binds (the default budget), and the budget is a caller option", () => {
+		const source = [
+			"// @delivery-surface: real-id",
+			"",
+			'advisoryParts.push("one blank line below its tag");',
+		].join("\n");
+		expect(scanTaggedSeams(source, SEAM_PATTERN, TAG)[0].ids).toEqual(["real-id"]);
+
+		const farSource = [
+			"// @delivery-surface: real-id",
+			"",
+			"",
+			"",
+			'advisoryParts.push("three blank lines below");',
+		].join("\n");
+		expect(scanTaggedSeams(farSource, SEAM_PATTERN, TAG)[0].ids).toEqual([]);
+		expect(
+			scanTaggedSeams(farSource, SEAM_PATTERN, TAG, Number.POSITIVE_INFINITY)[0].ids,
+		).toEqual(["real-id"]);
+	});
+
+	// #1755 review F3: a tag written at the end of a seam line tags nothing,
+	// and silently hands itself to the NEXT seam down.
+	it("ATTACK_INLINE_TAG (#1755 F3): a trailing tag on a seam line is rejected, not bound", () => {
+		const source = 'advisoryParts.push("x"); // @delivery-surface: real-id';
+		const tagged = scanTaggedSeams(source, SEAM_PATTERN, TAG);
+		expect(tagged[0].ids).toEqual([]);
+		expect(tagged[0].inlineTagOnSeamLine).toBe(true);
+		const problems = findUnregisteredSeams(source, SEAM_PATTERN, TAG, registry);
+		expect(problems).toHaveLength(1);
+		expect(problems[0]).toMatch(/sits on the seam's own line/);
+	});
+
+	it("ATTACK_INLINE_TAG: the next seam down does not inherit the misplaced tag either", () => {
+		const source = [
+			'advisoryParts.push("x"); // @delivery-surface: real-id',
+			'advisoryParts.push("y");',
+		].join("\n");
+		const problems = findUnregisteredSeams(source, SEAM_PATTERN, TAG, registry);
+		expect(problems).toHaveLength(2);
+		expect(problems[0]).toMatch(/sits on the seam's own line/);
+		expect(problems[1]).toMatch(/untagged seam/);
+		expect(problems[1]).toContain("line 2:");
 	});
 
 	it("bindTagsToSeams reports no ids when the seam is the first line", () => {

@@ -27,6 +27,7 @@ import {
 import {
 	SWEEP_HEURISTIC_LIMITS,
 	callsWithinFunction,
+	clientSourceFiles,
 	resetNameDefinitions,
 	scanSessionStateCandidates,
 	sessionStartResetNames,
@@ -264,9 +265,14 @@ describe("session-state sweep — coverage", () => {
 	const audit = () =>
 		auditRegistry({
 			sweepName: "session-state sweep",
-			// 71 files match today. The floor catches a scan that dies or
-			// half-dies (a moved clients/ root, a broken container regex) instead
-			// of letting an empty result read as full coverage.
+			// Two floors, two distinguishable failures (#1755 review F4).
+			// `minScanned` catches a dead WALK — a moved clients/ root, a bad
+			// extension filter — and reports "looked at 0 source items".
+			// `minFlagged` catches a dead DETECTOR: a healthy walk whose
+			// container/reset regexes stopped matching. Today the walk sees
+			// roughly 200 files and the detector flags 71.
+			scannedCount: clientSourceFiles().length,
+			minScanned: 100,
 			minFlagged: 40,
 			flagged: scanSessionStateCandidates().map((c) => c.file),
 			registered: SESSION_STATE_REGISTRY.map((e) => e.module),
@@ -296,6 +302,15 @@ describe("session-state sweep — coverage", () => {
 		const { flaggedCount, problems } = audit();
 		expect(problems.filter((p) => p.includes("declared floor")), problems.join("\n")).toEqual([]);
 		expect(flaggedCount).toBeGreaterThanOrEqual(40);
+	});
+
+	it("the walk itself still finds source files — a dead walk fails separately (F4)", () => {
+		// Distinct from the test above: that one proves the DETECTOR matches,
+		// this one proves the WALK has something to look at. A moved clients/
+		// root reds here and names the walk; a broken container regex reds there
+		// and names the detector.
+		expect(clientSourceFiles().length).toBeGreaterThanOrEqual(100);
+		expect(audit().scannedCount).toBe(clientSourceFiles().length);
 	});
 
 	it("documents the heuristic's blind spots rather than claiming full coverage", () => {

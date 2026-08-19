@@ -58,7 +58,34 @@
  *    matches the sweep is dead weight that reads as a screen. Defense:
  *    {@link auditRegistry} reports it ({@link RegistryAudit.staleExemptions}).
  * - **Dead scan** (#1718, #1729). Zero files scanned, or zero rules resolved,
- *    reports as a clean run. Defense: {@link assertNonEmptyScan}.
+ *    reports as a clean run. Defense: {@link assertNonEmptyScan}, and
+ *    {@link auditRegistry}'s two SEPARATE floors — `minScanned` for "the walk
+ *    found nothing to look at" and `minFlagged` for "the walk was healthy but
+ *    the detector matched nothing". Same symptom, two causes, two fixes, so
+ *    they never share a message (#1755 review F4).
+ * - **Prototype-chain exemption** (#1755 review F1). An item named `toString`,
+ *    `constructor`, `valueOf` or `__proto__` satisfies `item in exemptions`
+ *    against a map that never mentions it, and the stale-exemption check reads
+ *    own keys only, so it cannot report the phantom. Defense: `Object.hasOwn`.
+ * - **Misplaced tag** (#1755 review F2/F3). A tag far above its seam across a
+ *    run of blank lines, or written inline at the end of a seam line where it
+ *    silently tags the NEXT seam instead. Defense: a bounded blank-line gap
+ *    (`maxBlankGap`, default 1) and outright rejection of inline tags — see
+ *    {@link bindTagsToSeams}.
+ *
+ * ## Known limits, named rather than papered over
+ *
+ * - {@link listSourceFiles}'s `exclude` filters FILES only. It never prunes a
+ *   directory walk, so excluding `vendor/x.ts` still descends into `vendor/`.
+ *   That is cheap on these trees; a sweep over a `node_modules`-sized tree
+ *   needs directory pruning this kit does not offer (#1755 review F5).
+ * - Under `strings: "blank"`, a call written inside a TEMPLATE EXPRESSION
+ *   (`` `${resetThing()}` ``) is blanked with the rest of the template, so a
+ *   reachability walk cannot see it. This matches the behavior the
+ *   session-state sweep shipped with before the kit, and it is a false
+ *   NEGATIVE — the direction that matters for a guard. No such call exists in
+ *   `clients/` today. A sweep that needs them visible wants `strings: "keep"`
+ *   and a needle-based check (#1755 review F6).
  *
  * This module is deliberately STATELESS — no module-level caches, no latches.
  * A sweep helper that memoized its own scan would be exactly the
@@ -287,12 +314,23 @@ export interface RegistryAuditInput {
 	 * a sweep that flags nothing is dead, not clean (defect shape 10, #1718).
 	 */
 	minFlagged?: number;
+	/**
+	 * How many source items the scan actually LOOKED at, and the floor it must
+	 * clear (#1755 review F4). `minFlagged` alone cannot tell "scanned 0 files"
+	 * from "scanned 370 files, matched none" — two different bugs with two
+	 * different fixes, and the first is #1718's exactly. Pass both to get
+	 * distinguishable failures; omit both to skip the check.
+	 */
+	scannedCount?: number;
+	minScanned?: number;
 	/** Appended to the unaccounted-items message: what the author should do. */
 	remediation?: string;
 }
 
 export interface RegistryAudit {
 	flaggedCount: number;
+	/** Echo of `scannedCount`, so a caller can assert on the walk separately. */
+	scannedCount?: number;
 	/** Flagged, but neither registered nor exempted. */
 	unaccounted: string[];
 	/** Exempted, but the scan no longer flags it — dead weight (#1735). */
@@ -322,6 +360,19 @@ export function auditRegistry(input: RegistryAuditInput): RegistryAudit {
 	const minFlagged = input.minFlagged ?? 1;
 	const problems: string[] = [];
 
+	// Two distinct emptiness failures, reported separately (#1755 review F4).
+	// "Scanned nothing" means the scan lost its target — a moved root, a bad
+	// glob, #1718's nonexistent machine path. "Scanned plenty, matched nothing"
+	// means the DETECTOR broke while the walk stayed healthy. Same symptom, two
+	// causes, so they must not share a message.
+	if (input.minScanned !== undefined && (input.scannedCount ?? 0) < input.minScanned) {
+		problems.push(
+			`${input.sweepName}: the scan LOOKED AT ${input.scannedCount ?? 0} source item(s), ` +
+				`below the declared floor of ${input.minScanned} — the walk itself is broken ` +
+				"(moved root, bad glob, nonexistent path), so nothing downstream means anything.",
+		);
+	}
+
 	if (flagged.length < minFlagged) {
 		problems.push(
 			`${input.sweepName}: the scan flagged ${flagged.length} item(s), below the ` +
@@ -330,8 +381,15 @@ export function auditRegistry(input: RegistryAuditInput): RegistryAudit {
 		);
 	}
 
+	// `Object.hasOwn`, never `item in exemptions` (#1755 review F1). The `in`
+	// operator walks the PROTOTYPE CHAIN, so a flagged item named `toString`,
+	// `constructor`, `valueOf` or `__proto__` would exempt itself against an
+	// exemption map that never mentions it — and `staleExemptions` below reads
+	// `Object.keys` (own properties only), so it could never report the phantom
+	// exemption as stale either. No sweep's id namespace collides today, but the
+	// kit is built for six more with arbitrary id namespaces.
 	const unaccounted = flagged.filter(
-		(item) => !registered.has(item) && !(item in exemptions),
+		(item) => !registered.has(item) && !Object.hasOwn(exemptions, item),
 	);
 	if (unaccounted.length > 0) {
 		problems.push(
@@ -366,6 +424,7 @@ export function auditRegistry(input: RegistryAuditInput): RegistryAudit {
 
 	return {
 		flaggedCount: flagged.length,
+		scannedCount: input.scannedCount,
 		unaccounted,
 		staleExemptions,
 		reasonlessExemptions,
@@ -385,6 +444,11 @@ export interface SeamHit {
 export interface TaggedSeam {
 	seam: SeamHit;
 	ids: string[];
+	/**
+	 * The seam's own line carries a tag comment (#1755 review F3). That is a
+	 * misplacement, never a binding — see {@link bindTagsToSeams}.
+	 */
+	inlineTagOnSeamLine?: boolean;
 }
 
 /**
@@ -423,18 +487,48 @@ export function tagPattern(tagName: string): RegExp {
  * instead. No mutation test reds when it is removed, and the kit does not
  * claim one. It is kept because it is the invariant the rule exists to
  * enforce, and it becomes load-bearing the moment a caller relaxes binding.
+ *
+ * BLANK-LINE GAP (#1755 review F2). The lookback skips blank lines, but only
+ * `maxBlankGap` of them (default 1). #1692's version skipped an UNBOUNDED run,
+ * so a tag eight blank lines above a seam still bound to it — "immediately
+ * preceding" in the code but not on the screen, and a reviewer scrolling past
+ * that much whitespace does not read the two as one unit. Callers that need
+ * the old unbounded rule pass `maxBlankGap: Number.POSITIVE_INFINITY` and say
+ * why.
+ *
+ * INLINE TAGS (#1755 review F3). A tag written at the END of a seam line
+ * (`advisoryParts.push(x); // @surface: alpha`) does NOT tag that seam — the
+ * line above it is what a seam reads. Worse, it would silently tag the NEXT
+ * seam down. That shape is rejected outright: the seam is returned untagged
+ * with `inlineTagOnSeamLine` set, and {@link findUnregisteredSeams} reports it
+ * with the fix. Put the tag on its own line above the seam.
  */
 export function bindTagsToSeams(
 	rawSource: string,
 	seams: readonly SeamHit[],
 	tag: RegExp,
+	maxBlankGap = 1,
 ): TaggedSeam[] {
 	const rawLines = rawSource.split("\n");
 	const consumedTagLines = new Set<number>();
+	const seamLineIndexes = new Set(seams.map((s) => s.line - 1));
 	return seams.map((seam) => {
-		let i = seam.line - 2; // 0-based index of the raw line just above the seam
-		while (i >= 0 && rawLines[i].trim() === "") i--;
+		const seamLineIndex = seam.line - 1;
+		// F3: a tag on the seam's OWN line is a misplacement, not a binding.
+		if (tag.test(rawLines[seamLineIndex] ?? "")) {
+			return { seam, ids: [], inlineTagOnSeamLine: true };
+		}
+		let i = seamLineIndex - 1; // 0-based index of the raw line just above
+		let skipped = 0;
+		while (i >= 0 && rawLines[i].trim() === "") {
+			if (skipped >= maxBlankGap) return { seam, ids: [] };
+			skipped++;
+			i--;
+		}
 		if (i < 0) return { seam, ids: [] };
+		// A tag sitting on ANOTHER seam's line never binds either — same F3
+		// misplacement, seen from below.
+		if (seamLineIndexes.has(i)) return { seam, ids: [] };
 		const m = tag.exec(rawLines[i]);
 		if (!m || consumedTagLines.has(i)) return { seam, ids: [] };
 		consumedTagLines.add(i);
@@ -447,9 +541,15 @@ export function scanTaggedSeams(
 	rawSource: string,
 	seamPattern: RegExp,
 	tag: RegExp,
+	maxBlankGap?: number,
 ): TaggedSeam[] {
 	const stripped = stripSource(rawSource);
-	return bindTagsToSeams(rawSource, findSeams(stripped, seamPattern), tag);
+	return bindTagsToSeams(
+		rawSource,
+		findSeams(stripped, seamPattern),
+		tag,
+		maxBlankGap,
+	);
 }
 
 /**
@@ -462,9 +562,23 @@ export function findUnregisteredSeams(
 	tag: RegExp,
 	registryIds: ReadonlySet<string>,
 	registryName = "the registry",
+	maxBlankGap?: number,
 ): string[] {
 	const problems: string[] = [];
-	for (const { seam, ids } of scanTaggedSeams(rawSource, seamPattern, tag)) {
+	for (const { seam, ids, inlineTagOnSeamLine } of scanTaggedSeams(
+		rawSource,
+		seamPattern,
+		tag,
+		maxBlankGap,
+	)) {
+		if (inlineTagOnSeamLine) {
+			problems.push(
+				`line ${seam.line}: the tag comment sits on the seam's own line, where it ` +
+					"tags nothing — move it to its own line directly above the seam — " +
+					seam.text,
+			);
+			continue;
+		}
 		if (ids.length === 0) {
 			problems.push(`line ${seam.line}: untagged seam — ${seam.text}`);
 			continue;
