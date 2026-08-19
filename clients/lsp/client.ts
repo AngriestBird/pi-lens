@@ -814,6 +814,16 @@ export interface LSPClientState {
 	 *  pull computed against the content it just replaced. A late write whose
 	 *  captured generation no longer matches is dropped. */
 	pullGenerations?: Map<string, number>;
+	/** #1667: the sequence number of the NEWEST request issued for each
+	 *  `pullSourceKey(path, identifier)`. The generation counter above only
+	 *  guards against a resync; it says nothing about two overlapping fan-outs
+	 *  for the SAME unchanged content. `ensureWarmForSweep` touches a file and
+	 *  the real touch follows ~60ms later, so touch 2 can re-pull a source and
+	 *  store a fresh answer while touch 1's slow answer for that same source is
+	 *  still in flight - and the late loser would clobber the newer result.
+	 *  Each request stamps its own number here; a write whose stamp is no longer
+	 *  the newest is dropped. */
+	pullRequestSequences?: Map<string, number>;
 	/** #1104: per-path cache of the last `workspace/diagnostic` pull's resultId +
 	 *  diagnostics + content binding, so an `unchanged` report in a LATER pull can
 	 *  inherit the prior basis instead of the record site staying stuck at
@@ -1283,6 +1293,60 @@ function bumpPullGeneration(
 	);
 }
 
+/** #1667: claim the newest-request slot for a source and return the claim.
+ *  Called at REQUEST time; `isNewestPullRequest` re-checks it at WRITE time so
+ *  a slow answer from an earlier fan-out cannot overwrite a newer one's. */
+function claimPullRequestSequence(
+	state: LSPClientState,
+	sourceKey: string,
+): number {
+	if (!state.pullRequestSequences) state.pullRequestSequences = new Map();
+	const next = (state.pullRequestSequences.get(sourceKey) ?? 0) + 1;
+	state.pullRequestSequences.set(sourceKey, next);
+	return next;
+}
+
+function isNewestPullRequest(
+	state: LSPClientState,
+	sourceKey: string,
+	sequence: number,
+): boolean {
+	return (state.pullRequestSequences?.get(sourceKey) ?? 0) === sequence;
+}
+
+/**
+ * #1667: drop every trace of a diagnostic source the server just unregistered.
+ *
+ * `client/unregisterCapability` retires a source, but its findings sit in
+ * `documentPullDiagnosticsBySource` and its resultId in `pullResultIds`, so
+ * without this the union keeps serving a retired source's diagnostics until
+ * something resyncs the file. Roslyn and vtsls re-register their sources on
+ * solution reload, which is exactly when the old source's findings are stale.
+ *
+ * Purges the source's slice from every path and republishes each affected
+ * path's union, so the removal is visible on the next read rather than only
+ * after the next pull.
+ */
+function retirePullSource(state: LSPClientState, identifier: string): void {
+	const suffix = `${PULL_SOURCE_KEY_SEPARATOR}${identifier}`;
+	for (const source of [state.pullResultIds, state.pullRequestSequences]) {
+		if (!source) continue;
+		for (const key of [...source.keys()]) {
+			if (key.endsWith(suffix)) source.delete(key);
+		}
+	}
+	for (const [normalizedPath, sources] of state.documentPullDiagnosticsBySource ??
+		[]) {
+		if (!sources.delete(identifier)) continue;
+		state.documentPullDiagnostics.set(
+			normalizedPath,
+			mergeDiagnosticLists(...sources.values()),
+		);
+		bumpDiagnosticsVersion(state, normalizedPath);
+		state.diagnosticEmitter.emit("diagnostics", normalizedPath);
+	}
+}
+
 /**
  * #1667: the diagnostic sources to pull for a document - always the bare
  * request (a server may answer it even while registering named sources, and it
@@ -1370,6 +1434,13 @@ export function clearDiagnosticsForPath(
 	for (const key of pullSourceKeysForPath(state, normalizedPath)) {
 		state.pullResultIds?.delete(key);
 	}
+	// `pullRequestSequences` is deliberately NOT cleared here. It is a
+	// monotonic per-source counter, and resetting it would let a request issued
+	// BEFORE this resync claim the same number as one issued after, so the stale
+	// answer would pass the newest-request check. The two guards cover different
+	// cases and neither subsumes the other: the generation bump below invalidates
+	// in-flight work when nothing newer was requested, and the sequence stamp
+	// invalidates it when something newer was.
 	state.documentPullDiagnosticsBySource?.delete(normalizedPath);
 	// #1667: invalidate any pull still in flight for this path. The fan-out lets
 	// losing pulls run to completion so their findings still reach the cache;
@@ -1809,9 +1880,30 @@ export function setupIncomingHandlers(
 	state.connection.onRequest(
 		"client/unregisterCapability",
 		async (params: { unregisterations?: Array<{ id: string }> }) => {
+			const retiredIdentifiers = new Set<string>();
 			for (const unreg of params?.unregisterations ?? []) {
-				if (unreg.id) {
-					state.dynamicRegistrations.delete(unreg.id);
+				if (!unreg.id) continue;
+				const registration = state.dynamicRegistrations.get(unreg.id);
+				state.dynamicRegistrations.delete(unreg.id);
+				if (
+					registration?.method === "textDocument/diagnostic" &&
+					registration.identifier
+				) {
+					retiredIdentifiers.add(registration.identifier);
+				}
+			}
+			// #1667: a retired source's cached findings and resultId must go with
+			// it, or the union keeps serving them. Checked after the deletes above,
+			// and only when NO surviving registration still speaks for that
+			// identifier.
+			const stillRegistered = new Set(
+				[...state.dynamicRegistrations.values()]
+					.filter((r) => r.method === "textDocument/diagnostic")
+					.map((r) => r.identifier),
+			);
+			for (const identifier of retiredIdentifiers) {
+				if (!stillRegistered.has(identifier)) {
+					retirePullSource(state, identifier);
 				}
 			}
 			applyDynamicCapabilities(state);
@@ -2052,6 +2144,16 @@ function aggregatePullOutcomes(
 			count: Math.max(unionCount, ...found.map((o) => o.count)),
 		};
 	}
+	// #240, applied across sources: `clean` is an authoritative "this file has no
+	// findings", and one source saying so proves nothing about a source that
+	// FAILED to answer. A fan-out where any source errored is therefore
+	// unavailable, not clean - the caller falls through to the push-wait/timeout
+	// backstop instead of recording a confirmed-clean touch it cannot support.
+	// (`raceToCompletion` drops still-pending promises from its result array, so
+	// "every source settled, none errored" is the only shape that reads clean.)
+	if (outcomes.some((o) => o.status === "unavailable")) {
+		return { status: "unavailable" };
+	}
 	return outcomes.some((o) => o.status === "clean")
 		? { status: "clean" }
 		: { status: "unavailable" };
@@ -2079,6 +2181,12 @@ async function pullDiagnosticSource(
 	// while the request is in flight bumps it, and every write below is dropped
 	// rather than resurrecting state the resync cleared.
 	const generation = pullGenerationFor(state, normalizedPath);
+	// #1667: claim the newest-request slot for THIS source. Two fan-outs can
+	// overlap for the same file with no resync between them (`ensureWarmForSweep`
+	// touches, then the real touch follows ~60ms later), so the generation check
+	// alone would let a slow answer from the earlier round land on top of a newer
+	// one. Re-checked at write time below.
+	const requestSequence = claimPullRequestSequence(state, sourceKey);
 	try {
 		// withTimeout is the backstop against a hung pull-mode server: without it
 		// this await never settles unless the stream is destroyed. Bounded by the
@@ -2117,10 +2225,18 @@ async function pullDiagnosticSource(
 		// response describes whatever the server had when it answered, which for
 		// a pi-lens-opened document is exactly that last-sent payload.
 		const sentHash = state.documentContentHashes.get(normalizedPath)?.hash;
-		// #1667: a resync landed while this request was in flight. Its findings
-		// describe content that no longer exists, so report the round trip as
-		// unavailable rather than writing over what the resync cleared.
-		if (pullGenerationFor(state, normalizedPath) !== generation) {
+		// #1667: two ways this answer can already be obsolete, and neither may
+		// write. Report the round trip as unavailable - a superseded answer is not
+		// evidence the file is clean (#240).
+		//  - A resync landed while the request was in flight, so these findings
+		//    describe content that no longer exists.
+		//  - A LATER request for this same source has already been issued (an
+		//    overlapping fan-out), so this answer is the stale loser and would
+		//    clobber the newer result.
+		if (
+			pullGenerationFor(state, normalizedPath) !== generation ||
+			!isNewestPullRequest(state, sourceKey, requestSequence)
+		) {
 			return { status: "unavailable" };
 		}
 		let primaryCount: number;
@@ -3301,6 +3417,7 @@ export async function createLSPClient(options: {
 		pullResultIds: new Map(),
 		documentPullDiagnosticsBySource: new Map(),
 		pullGenerations: new Map(),
+		pullRequestSequences: new Map(),
 		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
 		closedDocuments: new Set(),
