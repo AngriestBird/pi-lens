@@ -120,3 +120,80 @@ describe("turn_end secrets gate honors dispositions (#1617)", () => {
 		}
 	});
 });
+
+// #1628: trivy's own *secret* findings (`TrivyResult.secrets`) never passed
+// through the same fix — they were never adapted to a `ProjectDiagnostic` at
+// all, so an agent had nothing to anchor a `lens_diagnostic_mark` call
+// against and a mark could never suppress one. Mirrors the #1617 gitleaks
+// case above, exercising a trivy-only secret (no gitleaks corroboration) so
+// the disposition anchor under test is genuinely `trivySecretFindingToProjectDiagnostic`'s,
+// not `gitleaksFindingToProjectDiagnostic`'s.
+describe("turn_end secrets gate honors dispositions for trivy secrets (#1628)", () => {
+	it("re-reports a trivy-secret finding as a 🔴 STOP blocker when unmarked, then drops it once marked false-positive", async () => {
+		const env = setupTestEnvironment("pi-lens-turnend-trivy-secrets-");
+		try {
+			const cwd = env.tmpDir;
+			const filePath = path.join(cwd, "b.ts");
+			const content = "const apiKey = 'not-a-real-secret';\n";
+			fs.writeFileSync(filePath, content);
+
+			const cacheManager = new CacheManager(false);
+			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, false, cwd);
+			cacheManager.writeCache(
+				"trivy",
+				{
+					success: true,
+					scannedAt: new Date().toISOString(),
+					findings: [],
+					secrets: [
+						{
+							ruleId: "aws-access-key-id",
+							file: filePath,
+							line: 1,
+						},
+					],
+					licenses: [],
+				},
+				cwd,
+			);
+
+			// Baseline: unmarked finding IS a blocker.
+			const runtimeBefore = new RuntimeCoordinator();
+			await handleTurnEnd(makeTurnEndDeps(runtimeBefore, cacheManager, cwd));
+			const before = consumeTurnEndFindings(cacheManager, cwd);
+			expect(before?.messages[0]?.content ?? "").toContain(
+				"STOP — hardcoded secrets detected",
+			);
+
+			// Mark it false-positive using the SAME identity
+			// `trivySecretFindingToProjectDiagnostic` derives (tool="trivy",
+			// rule="trivy-secret:<ruleId>", the exact "Potential secret: …"
+			// message) — what an agent would have gotten from lens_diagnostics
+			// and fed straight into lens_diagnostic_mark.
+			markDisposition(
+				cwd,
+				{
+					cwd,
+					filePath,
+					tool: "trivy",
+					rule: "trivy-secret:aws-access-key-id",
+					message: "Potential secret: aws-access-key-id",
+					line: 1,
+					content,
+				},
+				"false-positive",
+			);
+
+			cacheManager.addModifiedRange(filePath, { start: 1, end: 1 }, false, cwd);
+			const runtimeAfter = new RuntimeCoordinator();
+			await handleTurnEnd(makeTurnEndDeps(runtimeAfter, cacheManager, cwd));
+			const after = consumeTurnEndFindings(cacheManager, cwd);
+			const afterContent = after?.messages[0]?.content ?? "";
+			expect(afterContent).not.toContain("STOP — hardcoded secrets detected");
+			// #1616 suppressed-bucket rule: the drop must stay visible as a trace.
+			expect(afterContent).toContain("suppressed by disposition");
+		} finally {
+			env.cleanup();
+		}
+	});
+});
