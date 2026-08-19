@@ -582,10 +582,14 @@ function countDiagnostics(diags: WidgetDiagnostic[]): {
 	let warnings = 0;
 	for (const diagnostic of diags) {
 		if (isBlocking(diagnostic)) blocking++;
-		// A stale (past-EOF) entry keeps its severity for display purposes but
-		// is excluded from the error/warning tallies alongside blocking — its
-		// cited coordinate is no longer trustworthy, same reasoning as `isBlocking`.
-		if (diagnostic.stale) continue;
+		// A past-EOF stale entry keeps its severity for display purposes but is
+		// excluded from the error/warning tallies alongside blocking — its cited
+		// coordinate is no longer trustworthy, same reasoning as `isBlocking`.
+		// A dependency-drift demotion (#1631 criterion 3) is different: the
+		// finding itself is still real evidence, only its BLOCKING authority is
+		// revoked until re-confirmed, so it stays in the error/warning tally.
+		if (diagnostic.stale && (diagnostic.staleReason ?? "past-eof") === "past-eof")
+			continue;
 		if (diagnostic.severity === "error") errors++;
 		else if (diagnostic.severity === "warning") warnings++;
 	}
