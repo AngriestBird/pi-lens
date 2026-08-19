@@ -18,7 +18,7 @@ vi.mock("../../clients/safe-spawn.js", async (importOriginal) => ({
 	isCommandAvailableAsync: vi.fn(),
 	safeSpawnAsync: vi.fn(),
 }));
-import { safeSpawnAsync } from "../../clients/safe-spawn.js";
+import { SpawnFailureError, safeSpawnAsync } from "../../clients/safe-spawn.js";
 import {
 	_resetPackageManagerCache,
 	allAvailableGlobalBinDirs,
@@ -328,13 +328,14 @@ describe("allAvailableGlobalBinDirs", () => {
 				const target = (args ?? [])[0];
 				if (target === "npm") return { stdout: "npm\n", stderr: "", status: 0 };
 				if (target === "pnpm") {
+					const cause = new Error("Process timed out after 5000ms");
 					return {
 						stdout: "",
 						stderr: "",
 						status: null,
-						error: new Error("Process timed out after 5000ms"),
-						failure: "timeout",
-						spawnFailure: { kind: "timeout" },
+						error: cause,
+						failure: "timeout" as const,
+						spawnFailure: new SpawnFailureError("timeout", cause.message, cause),
 					};
 				}
 				// yarn, bun: genuinely absent.
