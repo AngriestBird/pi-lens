@@ -890,7 +890,11 @@ describe("#1655 review F3 — the bash-side path source, pinned by use", () => {
 		// convention: whatever a new helper is CALLED, handing it the bash
 		// command string makes it a second bash-side path source, and it shows up
 		// here. Every legitimate consumer lives in bash-file-access.ts.
+		// `extractDeletedPathsFromCommand` (#1668) is the fourth legitimate
+		// consumer: it proposes rm/git rm/mv-source delete targets from the
+		// same bash command string.
 		expect([...callees].sort()).toEqual([
+			"extractDeletedPathsFromCommand",
 			"extractGrepSearchReadsFromOutput",
 			"extractReadPathsFromCommand",
 			"extractWrittenPathsFromCommand",
@@ -902,6 +906,7 @@ describe("#1655 review F3 — the bash-side path source, pinned by use", () => {
 			"extractWrittenPathsFromCommand",
 			"extractReadPathsFromCommand",
 			"extractGrepSearchReadsFromOutput",
+			"extractDeletedPathsFromCommand",
 		]) {
 			expect(source).toMatch(
 				new RegExp(`${extractor}\\([\\s\\S]{0,80}?workspaceRoot`),
@@ -909,7 +914,7 @@ describe("#1655 review F3 — the bash-side path source, pinned by use", () => {
 		}
 	});
 
-	it("keeps the three extractors named consistently (naming pin only)", () => {
+	it("keeps the four extractors named consistently (naming pin only)", () => {
 		// Deliberately weaker than the test above, and labelled so. This catches
 		// a COPY of an extractor under the established name in another module. It
 		// cannot catch a differently-named one — that is the use-site test's job,
@@ -919,7 +924,7 @@ describe("#1655 review F3 — the bash-side path source, pinned by use", () => {
 		for (const entry of fs.readdirSync(clientsDir)) {
 			if (!entry.endsWith(".ts") || entry === "bash-file-access.ts") continue;
 			const text = fs.readFileSync(path.join(clientsDir, entry), "utf-8");
-			if (/export function extract\w*(Read|Written)Paths/.test(text)) {
+			if (/export function extract\w*(Read|Written|Deleted)Paths/.test(text)) {
 				offenders.push(entry);
 			}
 		}
