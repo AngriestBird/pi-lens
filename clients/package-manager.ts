@@ -312,6 +312,28 @@ export function installArgs(
 }
 
 /**
+ * Args to re-resolve an already-declared dependency to the newest version its
+ * recorded range still permits. npm/pnpm/bun spell this `update`; yarn classic
+ * spells it `upgrade`.
+ *
+ * This is the command that repairs a dependency frozen by its own lockfile.
+ * `installArgs` re-runs the install, and a lockfile entry that already
+ * satisfies the range makes that a no-op: pi-lens's managed tools tree stayed
+ * on the version written at first install for the life of the machine even
+ * though the declared caret range permitted 28 newer minors (#1730).
+ */
+export function updateArgs(
+	pm: NodePackageManager,
+	pkg: string,
+	options: Pick<InstallOptions, "ignoreScripts"> = {},
+): string[] {
+	const args = [pm === "yarn" ? "upgrade" : "update"];
+	if (options.ignoreScripts) args.push("--ignore-scripts");
+	args.push(pkg);
+	return args;
+}
+
+/**
  * Args to install a single package **globally** (`-g`). npm/pnpm/bun spell this
  * `install -g` / `add -g`; yarn uses `global add` (yarn classic — Berry removed
  * global installs, but pi-lens's manager resolution prefers npm/pnpm first, so
