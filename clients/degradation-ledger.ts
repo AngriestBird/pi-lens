@@ -56,7 +56,14 @@ export type DegradationKind =
 	 * (#1713). The answer arrived too late to serve the caller that timed out,
 	 * so it is discarded — this kind is the only trace that it ever landed.
 	 */
-	| "lsp-pull-late-answer";
+	| "lsp-pull-late-answer"
+	/**
+	 * A managed npm tool's periodic version refresh did not complete, or the
+	 * refresh state file could not be read (#1730). The tool keeps serving on
+	 * the version already installed — this kind means pi-lens cannot prove that
+	 * version is the newest the tool's declared range permits.
+	 */
+	| "managed-tool-refresh";
 
 export interface DegradationRecord {
 	kind: unknown;

@@ -3201,6 +3201,44 @@ const NEEDS_POSTINSTALL = new Set([
 	"intelephense", // postinstall fetches platform binary; --ignore-scripts breaks install
 ]);
 
+/**
+ * Does this npm package need its lifecycle scripts to install correctly?
+ *
+ * Exported so the periodic refresh (#1730) re-runs each package under the SAME
+ * script policy its original install used. A refresh that drops
+ * `--ignore-scripts` for biome or `@ast-grep/cli` leaves the JS launcher
+ * updated and its native binary on the old version.
+ */
+export function npmToolNeedsPostinstall(packageName: string): boolean {
+	return NEEDS_POSTINSTALL.has(packageName);
+}
+
+/**
+ * The managed npm tools whose installed version is free to move — every
+ * registry entry with `installStrategy: "npm"` and an UNPINNED `packageName`.
+ *
+ * Derived from `TOOLS` on every call rather than listed by hand: a hand-kept
+ * copy of a registry is the single-source-of-truth defect this repo keeps
+ * finding, and a new npm tool added to `TOOLS` must be refreshed without anyone
+ * remembering a second list.
+ *
+ * Packages carrying an explicit `name@1.2.3` pin are excluded. The pin IS the
+ * intended version, and #589's drift check already reinstalls a managed copy
+ * that wanders off it.
+ */
+export function getRefreshableManagedNpmTools(): Array<{
+	toolId: string;
+	packageName: string;
+}> {
+	const refreshable: Array<{ toolId: string; packageName: string }> = [];
+	for (const tool of TOOLS) {
+		if (tool.installStrategy !== "npm" || !tool.packageName) continue;
+		if (parsePinnedVersion(tool.packageName) !== undefined) continue;
+		refreshable.push({ toolId: tool.id, packageName: tool.packageName });
+	}
+	return refreshable;
+}
+
 const MAVEN_CENTRAL_BASE = "https://repo1.maven.org/maven2";
 
 /**
