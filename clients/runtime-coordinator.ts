@@ -140,6 +140,24 @@ export interface InlineBlockerRecord {
 	 * authoritative blocker channel at turn end.
 	 */
 	stale?: boolean;
+	/**
+	 * #1641: which gate demoted this entry, so a sibling gate re-deriving its
+	 * OWN verdict never heals a demotion it didn't make — the same discipline
+	 * `WidgetDiagnostic.staleReason` already uses on the widget/lens surfaces.
+	 * `"dependency-drift"` (#1631/`blocker-freshness.ts`) is a one-way latch
+	 * for this session (cleared only by a fresh dispatch or confirmed-clean
+	 * retire); `"past-eof"` (#1641/`blocker-past-eof.ts`) RE-ARMS every turn
+	 * end, since a transient shrink-then-restore of the file must un-demote it.
+	 */
+	staleReason?: "dependency-drift" | "past-eof";
+	/**
+	 * #1641: the 1-based cited lines of the diagnostics behind `summary`,
+	 * captured at write time (`dispatchResult.blockers[].line` in
+	 * `pipeline.ts`) rather than re-parsed from the rendered text — see
+	 * `PipelineResult.inlineBlockerLines`'s doc comment for why. Empty/absent
+	 * when no blocker in this record cited a line.
+	 */
+	lines?: readonly number[];
 }
 
 /**
@@ -810,12 +828,14 @@ export class RuntimeCoordinator {
 		summary: string,
 		writeIndex?: number,
 		sources?: readonly string[],
+		lines?: readonly number[],
 	): void {
 		this._pendingInlineBlockers.set(path.resolve(filePath), {
 			filePath,
 			summary,
 			writeIndex,
 			sources,
+			lines,
 			recordedAtMs: Date.now(),
 			stale: false,
 		});
@@ -829,15 +849,50 @@ export class RuntimeCoordinator {
 	 * #1631: demote a cached blocker to stale without dropping it (#1419
 	 * demote-not-drop). Called by the turn-boundary freshness sweep when the
 	 * file or one of its forward imports drifted on disk after the verdict.
-	 * Idempotent: re-marking an already-stale entry is a no-op. Returns true
-	 * only when this call transitioned the entry to stale, so a caller can log
-	 * the demotion exactly once.
+	 * Idempotent: re-marking an already-stale entry (for ANY reason) is a
+	 * no-op — a `"past-eof"` demotion already took this record out of the
+	 * authoritative channel, and `sweepInlineBlockerFreshness` re-checks next
+	 * turn once that heals. Returns true only when this call transitioned the
+	 * entry to stale, so a caller can log the demotion exactly once.
 	 */
-	markInlineBlockerStale(filePath: string): boolean {
+	markInlineBlockerStale(
+		filePath: string,
+		reason: "dependency-drift" | "past-eof" = "dependency-drift",
+	): boolean {
 		const key = path.resolve(filePath);
 		const existing = this._pendingInlineBlockers.get(key);
 		if (!existing || existing.stale) return false;
-		this._pendingInlineBlockers.set(key, { ...existing, stale: true });
+		this._pendingInlineBlockers.set(key, {
+			...existing,
+			stale: true,
+			staleReason: reason,
+		});
+		return true;
+	}
+
+	/**
+	 * #1641: re-derive the past-EOF demotion for one inline-blocker record.
+	 * Unlike {@link markInlineBlockerStale} (a one-way latch for the
+	 * dependency-drift gate), this RE-ARMS: called every turn end with the
+	 * gate's freshly-computed verdict, it can both demote (rising edge) and
+	 * heal (falling edge — a transient shrink-then-restore of the file). Never
+	 * touches a record a sibling gate demoted (`staleReason !== "past-eof"`
+	 * while `stale`) — composing with #1631's dependency-drift gate means each
+	 * gate only heals its own demotions. Returns true only on an actual
+	 * transition, so the caller logs/resyncs exactly once per edge.
+	 */
+	setInlineBlockerPastEofStale(filePath: string, isPastEof: boolean): boolean {
+		const key = path.resolve(filePath);
+		const existing = this._pendingInlineBlockers.get(key);
+		if (!existing) return false;
+		if (existing.stale && existing.staleReason !== "past-eof") return false;
+		const currentlyPastEof = !!existing.stale && existing.staleReason === "past-eof";
+		if (currentlyPastEof === isPastEof) return false;
+		this._pendingInlineBlockers.set(key, {
+			...existing,
+			stale: isPastEof,
+			staleReason: isPastEof ? "past-eof" : undefined,
+		});
 		return true;
 	}
 
