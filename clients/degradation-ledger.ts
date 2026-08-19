@@ -28,6 +28,7 @@ export type DegradationKind =
 	| "web-tree-sitter-load-failed"
 	| "instance-registry-corrupt"
 	| "cascade-budget-override-disarmed"
+	| "lsp-pull-unconfirmed"
 	/**
 	 * A pi-lens `tool_call` handler threw. pi's `emitToolCall` has no
 	 * per-handler catch, so an escaped throw blocks the user's tool call —
@@ -40,7 +41,14 @@ export type DegradationKind =
 	 * The issue names this `path_variant_unresolved`; the ledger's kind
 	 * vocabulary is kebab-case, so it is spelled that way here.
 	 */
-	| "path-variant-unresolved";
+	| "path-variant-unresolved"
+	/**
+	 * A `textDocument/diagnostic` or `workspace/diagnostic` pull's per-request
+	 * `withTimeout` abandoned the request, and the request later settled anyway
+	 * (#1713). The answer arrived too late to serve the caller that timed out,
+	 * so it is discarded — this kind is the only trace that it ever landed.
+	 */
+	| "lsp-pull-late-answer";
 
 export interface DegradationRecord {
 	kind: unknown;

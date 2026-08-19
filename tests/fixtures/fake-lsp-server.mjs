@@ -126,7 +126,15 @@ function handle(raw) {
 			id: data.id,
 			result: {
 				capabilities: {
-					textDocumentSync: { openClose: true, change: 1 },
+					textDocumentSync: {
+						openClose: true,
+						// #1669 review F5: only advertise a non-default sync kind when
+						// asked, so the bulk of the integration tests stay on Full — the
+						// default this fixture has always advertised.
+						change: process.env.FAKE_LSP_SYNC_KIND
+							? Number(process.env.FAKE_LSP_SYNC_KIND)
+							: 1,
+					},
 					// #269: only advertise a non-default position encoding when asked,
 					// so the bulk of the integration tests stay on the UTF-16 default.
 					...(process.env.FAKE_LSP_POSITION_ENCODING
@@ -181,6 +189,18 @@ function handle(raw) {
 		const text = data.params?.contentChanges?.at(-1)?.text;
 		if (typeof text === "string") {
 			openDocuments.set(data.params?.textDocument?.uri, text);
+		}
+		// #1669 review F5: echo the received contentChanges back so a real-init
+		// integration test can assert the ON-THE-WIRE shape (ranged vs
+		// whole-document) that the client actually sent, proving
+		// `negotiateSyncKind` at the real `createLSPClient` init call site
+		// drove `buildContentChanges` end to end. Off by default.
+		if (process.env.FAKE_LSP_ECHO_DID_CHANGE) {
+			send({
+				jsonrpc: "2.0",
+				method: "$/test/didChangeReceived",
+				params: { contentChanges: data.params?.contentChanges ?? [] },
+			});
 		}
 		return;
 	}

@@ -42,12 +42,16 @@ import {
 	hasClangFormatConfig,
 	hasCljfmtConfig,
 	hasCmakeFormatConfig,
+	hasCsharpierConfig,
+	hasFantomasConfig,
 	hasGoogleJavaFormatConfig,
 	hasKtfmtConfig,
 	hasKtlintConfig,
+	hasMixFormatConfig,
 	hasNearestPackageJsonDependency,
 	hasNearestPackageJsonField,
 	hasOcamlformatConfig,
+	hasOrmoluConfig,
 	hasOxfmtConfig,
 	hasOxfmtSvelteConfig,
 	hasPhpCsFixerConfig,
@@ -58,6 +62,9 @@ import {
 	hasSqlfluffConfig,
 	hasStandardrbConfig,
 	hasStyluaConfig,
+	hasSwiftformatConfig,
+	hasTaploConfig,
+	hasTerraformConfig,
 	hasVitePlusConfig,
 	OXFMT_SUPPORTED_EXTENSIONS,
 } from "./tool-policy.js";
@@ -634,6 +641,17 @@ const EXPLICIT_FORMATTER_CONFIG_CHECKS = new Map<
 	["cljfmt", (cwd) => hasCljfmtConfig(cwd)],
 	["cmake-format", (cwd) => hasCmakeFormatConfig(cwd)],
 	["psscriptanalyzer-format", (cwd) => hasPSScriptAnalyzerConfig(cwd)],
+	// #1595 sweep — see the comment above hasCsharpierConfig et al. in
+	// tool-policy.ts for why nixfmt (the 8th formatter #1572 flagged) is NOT
+	// wired here: it has no config-file convention and no manifest-marker
+	// equivalent to `.terraform.lock.hcl`, so there is no honest opt-in signal.
+	["csharpier", (cwd) => hasCsharpierConfig(cwd)],
+	["ormolu", (cwd) => hasOrmoluConfig(cwd)],
+	["taplo", (cwd) => hasTaploConfig(cwd)],
+	["terraform", (cwd) => hasTerraformConfig(cwd)],
+	["swiftformat", (cwd) => hasSwiftformatConfig(cwd)],
+	["fantomas", (cwd) => hasFantomasConfig(cwd)],
+	["mix", (cwd) => hasMixFormatConfig(cwd)],
 ]);
 
 function hasExplicitFormatterConfig(
@@ -1464,6 +1482,10 @@ const FORMATTER_CONFIG_FILES = [
 	"oxfmt.toml", ".oxfmtrc.json", "vite-plus.json",
 	"vite.config.ts", "vite.config.mts", "vite.config.cts", "vite.config.js", "vite.config.mjs", "vite.config.cjs",
 	"PSScriptAnalyzerSettings.psd1", "ScriptAnalyzerSettings.psd1",
+	// #1595 sweep additions.
+	".csharpierrc", ".csharpierrc.json", ".csharpierrc.yaml", ".csharpierrc.yml",
+	".ormolu", "taplo.toml", ".taplo.toml", ".terraform.lock.hcl", ".swiftformat",
+	".fantomasignore", ".formatter.exs",
 ];
 
 async function formatterConfigSignature(cwd: string): Promise<string> {
