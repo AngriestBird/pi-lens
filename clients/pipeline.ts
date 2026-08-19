@@ -15,7 +15,7 @@
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { PiLensFlagSource } from "./lens-config.js";
-import { findNearestContaining } from "./path-utils.js";
+import { findNearestContaining, normalizeEphemeralMapKey } from "./path-utils.js";
 import {
 	recordFromDispatchDiagnostic,
 	type ActionableWarningRecord,
@@ -323,6 +323,18 @@ export interface PipelineResult {
 	 * retire the record (see `retireInlineBlockerOnConfirmedClean`).
 	 */
 	inlineBlockerSources?: string[];
+	/**
+	 * #1641 remainder: the 1-based cited lines of the blockers behind
+	 * `inlineBlockerSummary`, carried structurally instead of re-parsed from the
+	 * rendered text later. Cheap here — `dispatchResult.blockers` already has
+	 * `.line` on each diagnostic from this same dispatch; re-deriving it by
+	 * regexing the summary string at turn end would be the re-derivation-vs-
+	 * correlation screen's exact failure shape (a line embedded in prose is not
+	 * reliably parseable, and dispatcher-side rendering changes would silently
+	 * break it). Omits entries with no line (a blocker that doesn't cite one,
+	 * e.g. a whole-file secret finding).
+	 */
+	inlineBlockerLines?: number[];
 	/** Fixable warning diagnostics introduced by this pipeline run. */
 	actionableWarnings?: ActionableWarningRecord[];
 	/** Non-fixable code-quality warnings introduced/touched by this pipeline run. */
@@ -1595,6 +1607,41 @@ export async function runPipeline(
 						dispatchResult.blockers.map((d) => d.tool?.trim() || "unknown"),
 					),
 				]
+			: undefined,
+		inlineBlockerLines: dispatchResult.hasBlockers
+			? dispatchResult.blockers
+					// #1641 review F2: `dispatchResult.blockers` is NOT guaranteed to be
+					// scoped to THIS file — a chart-wide runner (helm-lint, helm-render)
+					// reports blocking diagnostics against other files in the chart
+					// (e.g. `values.yaml`) alongside `ctx.filePath`. The precedent every
+					// per-file runner already follows (dotnet-build.ts, javac.ts) is to
+					// drop cross-file rows before they reach a per-file record; this is
+					// that same filter applied at the aggregation point instead, since
+					// `blockers` is pooled across every runner dispatched for this file.
+					// Without it, a cross-file line count gets attributed to THIS
+					// file's past-EOF check and can demote an in-bounds, fully valid
+					// blocker for content the diagnostic never described.
+					//
+					// #1641 review round 2 (LOW): `path.resolve` equality doesn't fold
+					// case, and an LSP-sourced diagnostic's `filePath` is stamped with
+					// realpath canonical casing (dispatch/runners/lsp.ts ->
+					// normalizeMapKey) while `ctx.filePath` can arrive lowercase-drive
+					// on Windows — the drive-letter class from #1139/#1150. A bare
+					// `path.resolve` equality then drops EVERY LSP blocker line and
+					// this record silently skips the past-EOF gate (fail-open, but
+					// exactly the pre-fix behavior on the surface #1641 targets).
+					// `normalizeEphemeralMapKey` slash-folds and (on win32)
+					// lowercase-folds both sides with no filesystem I/O — cheap enough
+					// for this per-blocker hot-path filter. `pathsEqual` was
+					// deliberately NOT used here: it calls `realpathSync` per
+					// comparison, which this filter cannot afford per blocker.
+					.filter(
+						(d) =>
+							normalizeEphemeralMapKey(d.filePath) ===
+							normalizeEphemeralMapKey(filePath),
+					)
+					.map((d) => d.line)
+					.filter((line): line is number => typeof line === "number")
 			: undefined,
 		actionableWarnings,
 		codeQualityWarnings,

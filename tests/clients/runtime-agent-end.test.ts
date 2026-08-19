@@ -1705,6 +1705,219 @@ describe("runtime-agent-end deferred formatting", () => {
 				env.cleanup();
 			}
 		});
+
+		it("#1678 item 1: an orphan re-surfacing across N agent_ends collapses into ONE ledger entry with a running count, not N raw events", async () => {
+			const { getDegradationSummary, resetDegradationLedger } = await import(
+				"../../clients/degradation-ledger.js"
+			);
+			resetDegradationLedger();
+			const env = setupTestEnvironment("pi-lens-agent-end-orphan-ledger-");
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			try {
+				const worktreeRoot = path.join(env.tmpDir, "worktree");
+				const filePath = createTempFile(worktreeRoot, "src/app.ts", "const x=1");
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				// Queued under the worktree's own origin, by a session that will
+				// never come back to flush it (#1642 F3 shape).
+				runtime.deferFormat(
+					filePath,
+					worktreeRoot,
+					"edit",
+					env.tmpDir,
+					"session-dead-worktree",
+					worktreeRoot,
+				);
+
+				const runOnce = () =>
+					handleAgentEnd({
+						ctxCwd: env.tmpDir, // the PARENT checkout claims — origin mismatch
+						getFlag: (name) => name === "no-lsp",
+						notify: vi.fn(),
+						dbg: () => {},
+						runtime,
+						cacheManager: { addModifiedRange: vi.fn() } as any,
+						getFormatService: () =>
+							({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+						currentSessionId: "session-new-parent",
+						staleAfterMs: -1,
+					});
+
+				const AGENT_END_CALLS = 3;
+				for (let i = 0; i < AGENT_END_CALLS; i++) {
+					await runOnce();
+				}
+
+				// Still queued after every flush — never silently dropped.
+				expect(runtime.pendingDeferredFormatCount).toBe(1);
+
+				const summary = getDegradationSummary();
+				const orphanGroups = summary.filter(
+					(group) => group.kind === "path-attribution-orphan-unresolved",
+				);
+				expect(orphanGroups).toHaveLength(1);
+				expect(orphanGroups[0].count).toBe(AGENT_END_CALLS);
+			} finally {
+				if (previousDataDir === undefined) {
+					delete process.env.PILENS_DATA_DIR;
+				} else {
+					process.env.PILENS_DATA_DIR = previousDataDir;
+				}
+				env.cleanup();
+			}
+		});
+
+		it("#1678 item 1 (wrap, not additive): a perpetual orphan fires the raw logLatency event exactly ONCE across N agent_ends, every repeat counted only by the ledger", async () => {
+			const { getDegradationSummary, resetDegradationLedger } = await import(
+				"../../clients/degradation-ledger.js"
+			);
+			resetDegradationLedger();
+			const env = setupTestEnvironment("pi-lens-agent-end-orphan-wrap-");
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			try {
+				const worktreeRoot = path.join(env.tmpDir, "worktree");
+				const filePath = createTempFile(worktreeRoot, "src/app.ts", "const x=1");
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.deferFormat(
+					filePath,
+					worktreeRoot,
+					"edit",
+					env.tmpDir,
+					"session-dead-worktree",
+					worktreeRoot,
+				);
+
+				// spyOn reuses any pre-existing spy on this module-level function
+				// (this file never restores/clears between tests), so its call
+				// history can carry calls from earlier tests. Clear it right
+				// after acquiring it so this test only sees its OWN 3 agent_ends.
+				const logSpy = vi.spyOn(latencyLogger, "logLatency");
+				logSpy.mockClear();
+
+				const runOnce = () =>
+					handleAgentEnd({
+						ctxCwd: env.tmpDir, // the PARENT checkout claims — origin mismatch
+						getFlag: (name) => name === "no-lsp",
+						notify: vi.fn(),
+						dbg: () => {},
+						runtime,
+						cacheManager: { addModifiedRange: vi.fn() } as any,
+						getFormatService: () =>
+							({ recordRead: () => {}, formatFile: vi.fn() }) as any,
+						currentSessionId: "session-new-parent",
+						staleAfterMs: -1,
+					});
+
+				const AGENT_END_CALLS = 3;
+				for (let i = 0; i < AGENT_END_CALLS; i++) {
+					await runOnce();
+				}
+
+				// The raw forensic event must fire on the RISING edge only — the
+				// first time this orphan is observed — not once per agent_end. A
+				// wrap that merely ADDS a ledger call alongside the unconditional
+				// logLatency (rather than gating it) fails this assertion.
+				const orphanMismatchCalls = logSpy.mock.calls.filter(
+					([entry]) =>
+						(entry as { phase?: string }).phase ===
+						"agent_end_deferred_format_orphan_origin_mismatch",
+				);
+				expect(orphanMismatchCalls).toHaveLength(1);
+
+				// Every repeat still shows up, but only through the bounded ledger
+				// count — same evidence as the item-1 test above, re-asserted here
+				// alongside the log-call assertion so the two halves of "wrap it"
+				// (stop the raw spam, keep the count) are pinned together.
+				const summary = getDegradationSummary();
+				const orphanGroups = summary.filter(
+					(group) => group.kind === "path-attribution-orphan-unresolved",
+				);
+				expect(orphanGroups).toHaveLength(1);
+				expect(orphanGroups[0].count).toBe(AGENT_END_CALLS);
+			} finally {
+				if (previousDataDir === undefined) {
+					delete process.env.PILENS_DATA_DIR;
+				} else {
+					process.env.PILENS_DATA_DIR = previousDataDir;
+				}
+				env.cleanup();
+			}
+		});
+
+		it("#1678 item 3: a mismatch-flush leaves the record queued, then a flush from the MATCHING origin reclaims and formats it", async () => {
+			const env = setupTestEnvironment("pi-lens-agent-end-orphan-reclaim-");
+			const previousDataDir = process.env.PILENS_DATA_DIR;
+			process.env.PILENS_DATA_DIR = path.join(env.tmpDir, "data");
+			try {
+				const worktreeRoot = path.join(env.tmpDir, "worktree");
+				const filePath = createTempFile(worktreeRoot, "src/app.ts", "const x=1");
+				const runtime = new RuntimeCoordinator();
+				runtime.projectRoot = env.tmpDir;
+				runtime.deferFormat(
+					filePath,
+					worktreeRoot,
+					"edit",
+					env.tmpDir,
+					"session-dead-worktree",
+					worktreeRoot,
+				);
+
+				const formatFile = vi.fn(async (fp: string) => {
+					fs.writeFileSync(fp, "const x = 1;\n");
+					return {
+						filePath: fp,
+						formatters: [{ name: "biome", success: true, changed: true }],
+						anyChanged: true,
+						allSucceeded: true,
+					};
+				});
+
+				// First flush: the PARENT checkout claims. Origin mismatch (parent
+				// vs. worktree) leaves the record queued, unformatted.
+				const mismatchSummary = await handleAgentEnd({
+					ctxCwd: env.tmpDir,
+					getFlag: (name) => name === "no-lsp",
+					notify: vi.fn(),
+					dbg: () => {},
+					runtime,
+					cacheManager: { addModifiedRange: vi.fn() } as any,
+					getFormatService: () => ({ recordRead: () => {}, formatFile }) as any,
+					currentSessionId: "session-new-parent",
+					staleAfterMs: -1,
+				});
+				expect(formatFile).not.toHaveBeenCalled();
+				expect(mismatchSummary?.changed ?? []).toEqual([]);
+				expect(runtime.pendingDeferredFormatCount).toBe(1);
+
+				// Second flush: this time the WORKTREE itself claims — its origin
+				// matches the record's origin, so the stale-orphan fallback reclaims
+				// and formats it instead of leaving it queued forever.
+				const matchSummary = await handleAgentEnd({
+					ctxCwd: worktreeRoot,
+					getFlag: (name) => name === "no-lsp",
+					notify: vi.fn(),
+					dbg: () => {},
+					runtime,
+					cacheManager: { addModifiedRange: vi.fn() } as any,
+					getFormatService: () => ({ recordRead: () => {}, formatFile }) as any,
+					currentSessionId: "session-new-worktree",
+					staleAfterMs: -1,
+				});
+				expect(formatFile).toHaveBeenCalledTimes(1);
+				expect(matchSummary?.changed).toEqual([filePath]);
+				expect(runtime.pendingDeferredFormatCount).toBe(0);
+			} finally {
+				if (previousDataDir === undefined) {
+					delete process.env.PILENS_DATA_DIR;
+				} else {
+					process.env.PILENS_DATA_DIR = previousDataDir;
+				}
+				env.cleanup();
+			}
+		});
 	});
 
 	describe("#484 turn-summary collection gate", () => {

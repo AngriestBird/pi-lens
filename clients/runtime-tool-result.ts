@@ -1260,6 +1260,7 @@ export async function handleToolResult(deps: ToolResultDeps): Promise<{
 			result.inlineBlockerSummary,
 			writeIndex,
 			result.inlineBlockerSources,
+			result.inlineBlockerLines,
 		);
 	} else {
 		runtime.clearInlineBlockers(filePath);
