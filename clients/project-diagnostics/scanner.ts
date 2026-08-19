@@ -140,6 +140,11 @@ async function scanFileMajorRules(
 	signal?: AbortSignal,
 ): Promise<FileMajorScan> {
 	const client = getSharedTreeSitterClient();
+	// #1715: grow the tree cache to span this scan's working set BEFORE
+	// parsing starts, so a project bigger than the interactive default (50
+	// entries) still gets cross-scan reuse instead of every file re-parsing
+	// on every scan.
+	client?.ensureTreeCacheCapacity(files.length);
 	const treeSitterReady =
 		!!client && client.isAvailable() && (await client.init());
 	// Same singleton the dispatch runner uses (tree-sitter.ts:444) — memoized
