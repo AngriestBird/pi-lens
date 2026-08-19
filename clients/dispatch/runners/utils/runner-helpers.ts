@@ -1594,6 +1594,15 @@ let sgSweepHostStallMs = 0;
  * list is written to latency.log (#1568 review F3).
  */
 let sgSweepUnreachable: string[] = [];
+/**
+ * Candidates that were probed and answered DURABLY missing this sweep — a
+ * real ENOENT/non-installable verdict, not a stall (#1593). The retained-arm
+ * fallback below only knows the sweep saw SOME transient candidate; without
+ * this list it cannot tell "the memoized winner itself just proved absent"
+ * from "an unrelated sibling merely stalled", and re-serves a command this
+ * very sweep disproved.
+ */
+let sgSweepDurablyMissing: string[] = [];
 
 function isAstGrepVersionOutput(output: string): boolean {
 	return /\bast[- ]grep\b/i.test(output);
@@ -1627,6 +1636,8 @@ async function probeAstGrepCommandAsync(
 		sgSweepTransientCause = cause;
 		const name = path.basename(cmd);
 		if (!sgSweepUnreachable.includes(name)) sgSweepUnreachable.push(name);
+	} else if (!sgSweepDurablyMissing.includes(cmd)) {
+		sgSweepDurablyMissing.push(cmd);
 	}
 	return false;
 }
@@ -1688,6 +1699,7 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 		sgSweepTransientCause = "probe-timeout";
 		sgSweepHostStallMs = 0;
 		sgSweepUnreachable = [];
+		sgSweepDurablyMissing = [];
 		// 1. Local node_modules/.bin
 		for (const localBin of buildSgLocalBins()) {
 			if (await probeAstGrepCommandAsync(localBin)) {
@@ -1725,8 +1737,15 @@ export async function isSgAvailableAsync(): Promise<boolean> {
 		// #1476's principle applies to the result as much as to the probe: a
 		// timeout says nothing about the tool, so it cannot erase a command this
 		// process proved working one cooldown ago. Keep serving it and re-arm
-		// (#1568 review F1).
-		if (sgSweepSawTransient && sgLatch.isProvisional() && sgCmd !== null) {
+		// (#1568 review F1) — UNLESS this very sweep just proved the memoized
+		// command durably missing (#1593): a sibling tier stalling is not license
+		// to re-serve a winner that ENOENTed a moment ago in the same pass.
+		if (
+			sgSweepSawTransient &&
+			sgLatch.isProvisional() &&
+			sgCmd !== null &&
+			!sgSweepDurablyMissing.includes(sgCmd)
+		) {
 			noteSgAvailable(startedAt, { retained: true });
 			return true;
 		}
