@@ -74,22 +74,31 @@ async function fireTurnEnd() {
 	return mock;
 }
 
-// #1772: each case here pays a COLD `import("../index.js")` after
-// `vi.resetModules()` in `beforeEach` — deliberate, not accidental. index.ts
-// (and the mocked event-loop-monitor/latency-logger modules under it) carries
-// turn-scoped module state, which is exactly what these wiring guards check
-// (a: reset must be called per turn; b: cross-turn high-water). Sharing one
-// import across cases would defeat the isolation the tests exist to prove, so
-// the fix is a timeout budget, not a hoisted import (matching #1764's
+// #1772: case (a) pays a COLD `import("../index.js")` after
+// `vi.resetModules()` in `beforeEach`. Cases (b) and (c) also resetModules,
+// but their imports land on vitest's already-warm transform cache from case
+// (a)'s run, so they only pay re-execution, not re-transformation — that is
+// why only (a) blows the timeout below.
+//
+// resetModules is not here for "isolation" in the abstract: the actual
+// per-test isolation comes from the beforeEach mock clears
+// (`resetSpy.mockClear()`, `statsToReturn`/`latencyCalls` reset). What
+// resetModules buys is avoiding ORDER-COUPLING: index.ts keeps turn-scoped
+// high-water state at module scope (the #1723 subject case (c) exercises),
+// so hoisting the import to `beforeAll` would let case (c)'s `worstSoFar`
+// assertions silently depend on whatever high-water case (b) left behind,
+// instead of each test starting from a clean module. So the fix here is a
+// timeout budget, not a hoisted import (matching #1764's
 // instance-reaper-prune-concurrency fix and this repo's HEAVY_IO_TIMEOUT_MS
 // convention, tests/clients/ast-grep-rule-precedence-followups.test.ts:210).
-// Solo runs on a busy box measured cold-import cost alone at 5.9-8.4s,
+//
+// Solo runs on a busy box measured case (a)'s cold-import cost up to 9.2s,
 // already over vitest's 5000ms default (timeout, not an assertion failure —
-// both cases pass every time once given room); #1743's and #1761's
-// controlled A/B comparisons showed master fails at the same or higher rate
-// than feature branches, so this is pre-existing and environmental, not a
-// regression. 30s matches the existing convention and leaves ~4x headroom
-// over the worst solo run observed.
+// it passes every time once given room); #1743's and #1761's controlled A/B
+// comparisons showed master fails at the same or higher rate than feature
+// branches, so this is pre-existing and environmental, not a regression. 30s
+// matches the existing convention and leaves ~3.2x headroom over the worst
+// solo run observed.
 const LOOP_BLOCK_WIRING_TIMEOUT_MS = 30_000;
 
 describe("index turn_end loop_block wiring (#1122)", { timeout: LOOP_BLOCK_WIRING_TIMEOUT_MS }, () => {
