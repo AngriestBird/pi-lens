@@ -15,6 +15,9 @@ vi.mock("../../clients/pipeline.js", () => ({
 	runPipeline: vi.fn(),
 }));
 
+const notifyExternalFileChange = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("../../clients/lsp/index.js", () => ({ notifyExternalFileChange }));
+
 describe("bash grep searchReads registration", () => {
 	it("registers bash reads only from a successful tool result", async () => {
 		const env = setupTestEnvironment("pi-lens-bash-read-result-");
@@ -132,6 +135,186 @@ describe("bash grep searchReads registration", () => {
 					effectiveLimit: 5,
 				}),
 			);
+		} finally {
+			env.cleanup();
+		}
+	});
+});
+
+describe("bash external-delete detection (#1668)", () => {
+	beforeEach(() => {
+		notifyExternalFileChange.mockClear();
+	});
+
+	function makeBase(env: { tmpDir: string }, readGuardOverrides: Record<string, unknown> = {}) {
+		return {
+			getFlag: () => false,
+			dbg: () => {},
+			runtime: Object.assign(new RuntimeCoordinator(), {
+				projectRoot: env.tmpDir,
+			}),
+			cacheManager: new CacheManager(false),
+			biomeClient: {},
+			ruffClient: {},
+			metricsClient: {},
+			resetLSPService: () => {},
+			agentBehaviorRecord: () => [],
+			formatBehaviorWarnings: () => "",
+			readGuard: {
+				recordRead: vi.fn(),
+				recordWritten: vi.fn(),
+				hasKnownPath: vi.fn(() => true),
+				forgetPath: vi.fn(),
+				...readGuardOverrides,
+			},
+		} as any;
+	}
+
+	it("a known path that is actually gone after `rm` gets a type-3 notify and is forgotten", async () => {
+		const env = setupTestEnvironment("pi-lens-bash-rm-known-");
+		try {
+			const filePath = path.join(env.tmpDir, "gone.ts");
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			const base = makeBase(env);
+
+			// Simulate the delete actually landing on disk (the command itself
+			// isn't executed by this test — handleToolResult only parses it).
+			fs.rmSync(filePath);
+
+			await handleToolResult({
+				...base,
+				event: {
+					toolName: "bash",
+					input: { command: `rm ${filePath}` },
+					content: [{ type: "text", text: "" }],
+				},
+			});
+
+			expect(notifyExternalFileChange).toHaveBeenCalledTimes(1);
+			expect(notifyExternalFileChange).toHaveBeenCalledWith(filePath, 3);
+			expect(base.readGuard.forgetPath).toHaveBeenCalledWith(filePath);
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a path pi-lens never knew about is NOT notified even if it's gone", async () => {
+		const env = setupTestEnvironment("pi-lens-bash-rm-unknown-");
+		try {
+			const filePath = path.join(env.tmpDir, "gone.ts");
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			fs.rmSync(filePath);
+			const base = makeBase(env, { hasKnownPath: vi.fn(() => false) });
+
+			await handleToolResult({
+				...base,
+				event: {
+					toolName: "bash",
+					input: { command: `rm ${filePath}` },
+					content: [{ type: "text", text: "" }],
+				},
+			});
+
+			expect(notifyExternalFileChange).not.toHaveBeenCalled();
+			expect(base.readGuard.forgetPath).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a known path that still exists (rm failed / no-op) is NOT notified", async () => {
+		const env = setupTestEnvironment("pi-lens-bash-rm-noop-");
+		try {
+			const filePath = path.join(env.tmpDir, "still-here.ts");
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			const base = makeBase(env);
+
+			await handleToolResult({
+				...base,
+				event: {
+					toolName: "bash",
+					input: { command: `rm ${filePath}` },
+					content: [{ type: "text", text: "" }],
+				},
+			});
+
+			expect(notifyExternalFileChange).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a failed bash tool result is NOT treated as a real delete", async () => {
+		const env = setupTestEnvironment("pi-lens-bash-rm-failed-");
+		try {
+			const filePath = path.join(env.tmpDir, "gone.ts");
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			fs.rmSync(filePath);
+			const base = makeBase(env);
+
+			await handleToolResult({
+				...base,
+				event: {
+					toolName: "bash",
+					isError: true,
+					input: { command: `rm ${filePath}` },
+					content: [{ type: "text", text: "rm: permission denied" }],
+				},
+			});
+
+			expect(notifyExternalFileChange).not.toHaveBeenCalled();
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("a burst of deletes in one command notifies once per confirmed-gone known file", async () => {
+		const env = setupTestEnvironment("pi-lens-bash-rm-burst-");
+		try {
+			const files = ["a.ts", "b.ts", "c.ts"].map((name) =>
+				path.join(env.tmpDir, name),
+			);
+			for (const f of files) fs.writeFileSync(f, "export const x = 1;\n");
+			for (const f of files) fs.rmSync(f);
+			const base = makeBase(env);
+
+			await handleToolResult({
+				...base,
+				event: {
+					toolName: "bash",
+					input: { command: `rm ${files.join(" ")}` },
+					content: [{ type: "text", text: "" }],
+				},
+			});
+
+			expect(notifyExternalFileChange).toHaveBeenCalledTimes(files.length);
+			for (const f of files) {
+				expect(notifyExternalFileChange).toHaveBeenCalledWith(f, 3);
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	it("respects --no-lsp: no external-delete notification is sent", async () => {
+		const env = setupTestEnvironment("pi-lens-bash-rm-no-lsp-");
+		try {
+			const filePath = path.join(env.tmpDir, "gone.ts");
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			fs.rmSync(filePath);
+			const base = makeBase(env);
+			base.getFlag = (name: string) => name === "no-lsp";
+
+			await handleToolResult({
+				...base,
+				event: {
+					toolName: "bash",
+					input: { command: `rm ${filePath}` },
+					content: [{ type: "text", text: "" }],
+				},
+			});
+
+			expect(notifyExternalFileChange).not.toHaveBeenCalled();
 		} finally {
 			env.cleanup();
 		}
