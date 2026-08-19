@@ -36,6 +36,7 @@ import { primaryServerId } from "../clients/lsp/config.js";
 import type { LSPDiagnostic } from "../clients/lsp/client.js";
 import type { LSPWorkspaceUnconfirmedReason } from "../clients/lsp/index.js";
 import { getFullScanWallClockMs } from "../clients/lsp/workspace-sweep-hold.js";
+import { demoteInferredProjectSweepResults } from "../clients/lsp/inferred-project.js";
 import {
 	hashDiagnosticContent,
 	type BoundToCurrentDisk,
@@ -47,9 +48,15 @@ import {
 	PROJECT_DIAGNOSTICS_CACHE_VERSION,
 	reconcileProjectDiagnosticsSnapshot,
 } from "../clients/project-diagnostics/cache.js";
-import { warmTriggerFor } from "../clients/project-diagnostics/extractors.js";
+import {
+	formatCacheAge,
+	formatNotRunEntry,
+} from "../clients/project-diagnostics/extractors.js";
 import type { FreshProjectDiagnosticsResult } from "../clients/project-diagnostics/fresh-fetch.js";
-import { fetchFreshProjectDiagnostics } from "../clients/project-diagnostics/fresh-fetch.js";
+import {
+	ANALYZER_IDS,
+	fetchFreshProjectDiagnostics,
+} from "../clients/project-diagnostics/fresh-fetch.js";
 import { loadBootstrapClients } from "../clients/bootstrap.js";
 import {
 	generatedSkipNotice,
@@ -74,6 +81,11 @@ import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics
 import { retagAuxiliaryDiagnostics } from "../clients/dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../clients/file-role.js";
 import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
+import {
+	demotePastEofDiagnostics,
+	PAST_EOF_STALE_MARKER,
+	resyncDocumentOnPastEof,
+} from "../clients/diagnostic-line-freshness.js";
 
 // The widget state exposes the full per-file diagnostic set; this is the tool's
 // own generous display budget per file (independent of the TUI's 12 cap), to
@@ -86,6 +98,15 @@ const MAX_DIAGNOSTICS_PER_FILE = 50;
 // caller can never believe it checked files it didn't (issue's stated
 // invariant).
 const MAX_PATHS_ENTRIES = 200;
+
+// #1623: the reason rendered for every heavyweight-analyzer lane (gitleaks,
+// trivy, govulncheck, dead-code, knip, jscpd, madge, opengrep, test-runner)
+// when mode=full is called without refreshRunners=cheap/all/cached — the
+// "quick mode" gate that skips the expensive fresh-fetch entirely (see
+// `formatFullMode`'s `analyzersPromise`). One shared string so it renders
+// identically everywhere it's used.
+const NOT_REQUESTED_REASON =
+	"refreshRunners not requested this call (quick mode) — pass refreshRunners=cheap/all/cached to lens_diagnostics mode=full to run it";
 
 type LSPServiceLike = ReturnType<typeof getLSPService> & {
 	runWorkspaceDiagnostics?: (
@@ -845,8 +866,11 @@ function applyProjectRulePolicy<T extends { diagnostics: ProjectDiagnostic[] }>(
 	return { ...value, diagnostics: applyRulePolicy(value.diagnostics, policyMap) };
 }
 
-/** A diagnostic counts as error-like when it blocks or has error severity. */
+/** A diagnostic counts as error-like when it blocks or has error severity.
+ * A `stale` (#1641 past-EOF) entry is excluded — its cited line no longer
+ * exists in the current file, so it can no longer count toward a hard stop. */
 function isErrorLike(d: WidgetDiagnostic): boolean {
+	if (d.stale) return false;
 	return d.semantic === "blocking" || d.severity === "error";
 }
 
@@ -938,6 +962,9 @@ function summarizeDiagnostics(
 	let errors = 0;
 	let warnings = 0;
 	for (const diagnostic of diagnostics) {
+		// #1641: a demoted past-EOF entry keeps its severity for display but
+		// drops out of the tallies — same reasoning as widget-state's `isBlocking`.
+		if (diagnostic.stale) continue;
 		if (diagnostic.semantic === "blocking") blocking++;
 		if (diagnostic.severity === "error") errors++;
 		else if (diagnostic.severity === "warning") warnings++;
@@ -1398,14 +1425,28 @@ async function formatFullMode(
 	// could complete. Building its promise here, alongside the sweep and cheap
 	// scan, makes it genuinely concurrent — all three phases now race the SAME
 	// signal from the same starting point instead of stacking.
-	const analyzersPromise = shouldIncludeProjectRunners(options.refreshRunners)
+	const projectRunnersRequested = shouldIncludeProjectRunners(
+		options.refreshRunners,
+	);
+	const analyzersPromise = projectRunnersRequested
 		? loadBootstrapClients().then((clients) =>
 				fetchFreshProjectDiagnostics(cacheManager, cwd, clients, signal, { runtime: options.runtime }),
 			)
 		: Promise.resolve<FreshProjectDiagnosticsResult>({
 				diagnostics: [],
 				runners: [],
-				cold: [],
+				// #1623: every heavyweight analyzer is ELIGIBLE for this project but
+				// this call never asked for it (refreshRunners wasn't cheap/all/
+				// cached) — the expensive fetch below deliberately never runs in
+				// that case (see the comment above), but rendering total silence
+				// here reads exactly as "ran clean", the false-empty #1623 exists to
+				// close. `ANALYZER_IDS` (fresh-fetch.ts) is the single source of
+				// truth for which lanes this covers — reuse it rather than
+				// hand-listing ids here.
+				cold: [...ANALYZER_IDS],
+				coldReasons: Object.fromEntries(
+					ANALYZER_IDS.map((id) => [id, NOT_REQUESTED_REASON]),
+				),
 				failed: [],
 				timings: {},
 			});
@@ -1425,8 +1466,17 @@ async function formatFullMode(
 		analyzersPromise,
 	]);
 	const aborted = signal?.aborted ?? false;
-	const lspResults = rawLspResults.filter((result) =>
-		includeFile(result.filePath),
+	// #1640: before ANY consumer sees them — the footer reconcile, the widget
+	// merge, the rendered counts — demote TypeScript errors on files tsserver
+	// checked in its INFERRED project. Applied once, here, so a single seam
+	// governs the whole sweep instead of each renderer learning the rule.
+	const lspResults = await demoteInferredProjectSweepResults(
+		rawLspResults.filter((result) => includeFile(result.filePath)),
+		cwd,
+		lspService,
+		// #1645 review F1: the sweep that produced these results is signal-bounded,
+		// so the probe loop that post-processes them must be too.
+		signal,
 	);
 	// A result bound to a different document must not replace the current
 	// widget state, even when it contains real diagnostics. Pull results may carry
@@ -1662,15 +1712,33 @@ async function formatFullMode(
 	// analyzers before anything spawns — rendering that as the per-analyzer
 	// "not applicable / unavailable" list would send the caller chasing seven
 	// wrong reasons. One note with the real one instead.
+	// #1623: prefer the SPECIFIC reason captured at each gate
+	// (`extracted.coldReasons`) over a generic guess — `formatNotRunEntry`
+	// falls back to `warmTriggerFor` only for an id this call's `coldReasons`
+	// doesn't cover (e.g. a caller-supplied `cold` list from an older cache
+	// shape). Single formatter (extractors.ts) so this note's wording can't
+	// drift from any other caller that renders the same `cold` list.
+	// #1623 fix-round F5: the "not requested" (quick-mode) batch shares ONE
+	// reason (`NOT_REQUESTED_REASON`) across every id — `formatNotRunEntry`
+	// repeating that same ~130-char sentence per id makes the note nearly
+	// unreadable, and the "not applicable / unavailable this run" header
+	// below is a dishonest label for it: these lanes ARE applicable and
+	// available, this call just never asked for them. Render that batch as
+	// its own compact note — bare ids, the shared reason stated once — and
+	// keep the detailed per-id format for genuinely cold lanes, where each
+	// id's reason really does differ (not a git repo vs binary unavailable
+	// vs retry cooldown, ...).
 	const coldNote = extracted.unsafeRoot
 		? `\n\nheavyweight analyzers skipped: the working directory resolves at or above the home directory, so a fresh knip/jscpd/madge/gitleaks/govulncheck/trivy/dead-code scan would walk every unrelated tree under it. Re-run from inside a project directory. Absence of their findings is NOT a clean verdict.`
-		: genuinelyColdIds.length > 0
-			? `\n\ncold (not applicable / unavailable this run): ${genuinelyColdIds
-					.map((id) => `${id} — ${warmTriggerFor(id)}`)
-					.join(
-						", ",
-					)}. These analyzers have not contributed to this result — absence of their findings is NOT a clean verdict.`
-			: "";
+		: !projectRunnersRequested && genuinelyColdIds.length > 0
+			? `\n\nnot run this call (quick mode): ${genuinelyColdIds.join(", ")}. ${NOT_REQUESTED_REASON}. Absence of their findings is NOT a clean verdict.`
+			: genuinelyColdIds.length > 0
+				? `\n\ncold (not applicable / unavailable this run): ${genuinelyColdIds
+						.map((id) => formatNotRunEntry(id, extracted.coldReasons))
+						.join(
+							", ",
+						)}. These analyzers have not contributed to this result — absence of their findings is NOT a clean verdict.`
+				: "";
 	// #1004: unlike every other analyzer above (knip/jscpd/madge/gitleaks/
 	// govulncheck/opengrep/trivy/dead-code all run a FRESH whole-project scan
 	// per the fresh-fetch.ts header, so "clean" there really does mean "the
@@ -1695,6 +1763,24 @@ async function formatFullMode(
 			? `\n\nfailed (ran, but no trustworthy result): ${failedAnalyzers
 					.map(({ id, summary }) => `${id} — ${summary}`)
 					.join(", ")}. These analyzers were not cached and will be retried; absence of their findings is NOT a clean verdict.`
+			: "";
+	// #1617: the #1616 suppressed-bucket rule applied to mode=full — a finding
+	// an agent/user marked false-positive/won't-fix now drops out of
+	// `diagnostics` (fresh-fetch.ts's `record()`), but that drop must stay
+	// visible as a count rather than reading as "nothing was wrong here".
+	// Review-round F4 (#1625): per-lane attribution — "gitleaks 2, knip 1" says
+	// WHICH analyzer's marks are doing the suppressing, not just a bare total.
+	// A lane that's 100% suppressed still won't appear in `runners`/`cold` as
+	// distinct from "ran clean" — that gap is #1623's lane-status territory,
+	// not fixed here.
+	const dispositionSuppressedByLaneText = Object.entries(
+		extracted.dispositionSuppressedByLane ?? {},
+	)
+		.map(([id, count]) => `${id} ${count}`)
+		.join(", ");
+	const dispositionSuppressedNote =
+		(extracted.dispositionSuppressed ?? 0) > 0
+			? `\n\nsuppressed by disposition: ${extracted.dispositionSuppressed} finding(s) dropped from this result because they're marked false-positive or won't-fix (${dispositionSuppressedByLaneText}). Not a clean verdict for those locations — they were found, then intentionally hidden.`
 			: "";
 	// #747/#250: the cheap project-diagnostics scan (scanProjectDiagnostics) and
 	// the LSP workspace sweep (collectWorkspaceDiagnosticFiles) both refuse to
@@ -1725,6 +1811,30 @@ async function formatFullMode(
 	const generatedSkipNote = generatedSkipNoticeText
 		? `\n\n${generatedSkipNoticeText}`
 		: "";
+	// #1623: the cheap in-process project scan (tree-sitter/fact-rules/
+	// ast-grep) is a THIRD lane `coldNote` never covers (it isn't one of
+	// `ANALYZER_IDS` — that list is fetch-fetch.ts's heavyweight analyzers
+	// only). It has three distinct states, all of which must render — the
+	// fix-round F2 finding: with `refreshRunners=cached` and no snapshot ever
+	// written yet, BOTH of the two notes below used to stay empty (one gated
+	// on `scannedAt` being present, the other on the "not requested" branch
+	// this call isn't in), so the original #1623 silence survived in exactly
+	// this mode. `cheapScanScannedAtMs` centralizes the one bit every branch
+	// needs: whether the stored snapshot has a usable timestamp (#1623
+	// fix-round F4 — a corrupt/missing `scannedAt` must not compute a NaN
+	// age, mirroring `./cache.ts`'s `Number.isFinite` guard).
+	const cheapScanScannedAtMs = rawProjectSnapshot?.scannedAt
+		? Date.parse(rawProjectSnapshot.scannedAt)
+		: undefined;
+	const cheapScanStatusNote = !projectRunnersRequested
+		? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run this call (${NOT_REQUESTED_REASON}).`
+		: options.refreshRunners === "cached"
+			? cheapScanScannedAtMs !== undefined && Number.isFinite(cheapScanScannedAtMs)
+				? `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): served from cache, ${formatCacheAge(
+						Date.now() - cheapScanScannedAtMs,
+					)} old — not re-run this call.`
+				: `\n\ncheap project scan (tree-sitter/fact-rules/ast-grep): not run (no cached scan; refresh with refreshRunners=cheap/all to populate).`
+			: "";
 	const abortedNote =
 		abortedIds.size > 0
 			? `\n\nstopped mid-scan (still running in the background, not reflected in this result): ${[
@@ -1737,11 +1847,27 @@ async function formatFullMode(
 	// possibly-stale session_start cache — say so honestly, with per-analyzer
 	// elapsed time, since this can legitimately take a while (trivy's own
 	// ~180s ceiling).
-	const timingEntries = Object.entries(extracted.timings ?? {});
+	// #1623: `extracted.cachedAgeMs` marks ids that are a cache-read BY DESIGN
+	// (today, only test-runner — see fresh-fetch.ts) rather than a fresh
+	// execution this call. Exclude those from "fetched fresh" below — folding
+	// a cache replay into the same list as a genuine run is exactly the
+	// misread the second #1623 dogfood pass reported (a cached result read as
+	// "just ran"). They get their own note with an actual age instead.
+	const cachedAgeMs = extracted.cachedAgeMs ?? {};
+	const timingEntries = Object.entries(extracted.timings ?? {}).filter(
+		([id]) => !(id in cachedAgeMs),
+	);
 	const freshNote =
 		timingEntries.length > 0
 			? `\n\nfetched fresh this call: ${timingEntries
 					.map(([id, ms]) => `${id} (${Math.round(ms)}ms)`)
+					.join(", ")}.`
+			: "";
+	const cachedAgeEntries = Object.entries(cachedAgeMs);
+	const cachedAgeNote =
+		cachedAgeEntries.length > 0
+			? `\n\nserved from cache this call (not re-run): ${cachedAgeEntries
+					.map(([id, ms]) => `${id} (${formatCacheAge(ms)} old)`)
 					.join(", ")}.`
 			: "";
 	// coldRunners always lands in details (even when empty) so a caller can
@@ -1754,8 +1880,19 @@ async function formatFullMode(
 		details: {
 			...result.details,
 			coldRunners: extracted.cold,
+			// #1623: the specific reason each cold id was skipped (single source
+			// of truth: extractors.ts's `formatNotRunEntry` renders the same map
+			// into the text note above) — lets a caller check WHY without parsing
+			// text.
+			coldReasons: extracted.coldReasons ?? {},
 			failedAnalyzers,
 			analyzerTimingsMs: extracted.timings,
+			dispositionSuppressed: extracted.dispositionSuppressed ?? 0,
+			dispositionSuppressedByLane: extracted.dispositionSuppressedByLane ?? {},
+			// #1623: ms-old each cache-read-by-design lane's data was (today, only
+			// test-runner) — lets a caller distinguish "just ran" from "served
+			// from cache" without parsing the text note.
+			analyzersCachedAgeMs: cachedAgeMs,
 			analyzersAborted: extracted.aborted ?? false,
 			analyzersAbortedIds: extracted.abortedIds ?? [],
 			// #747: true when the fresh fetch refused an at-or-above-$HOME root —
@@ -1826,11 +1963,14 @@ async function formatFullMode(
 						coldNote +
 						testRunnerEditScopedNote +
 						failedNote +
+						dispositionSuppressedNote +
 						walkUnsafeRootNote +
 						scanTruncatedNote +
 						generatedSkipNote +
 						abortedNote +
 						freshNote +
+						cachedAgeNote +
+						cheapScanStatusNote +
 						missingNote,
 				},
 			],
@@ -1842,11 +1982,14 @@ async function formatFullMode(
 		coldNote ||
 		testRunnerEditScopedNote ||
 		failedNote ||
+		dispositionSuppressedNote ||
 		walkUnsafeRootNote ||
 		scanTruncatedNote ||
 		generatedSkipNote ||
 		abortedNote ||
 		freshNote ||
+		cachedAgeNote ||
+		cheapScanStatusNote ||
 		unconfirmedLspNote ||
 		lspPrimaryVsAuxiliaryNote
 	) {
@@ -1861,11 +2004,14 @@ async function formatFullMode(
 						coldNote +
 						testRunnerEditScopedNote +
 						failedNote +
+						dispositionSuppressedNote +
 						walkUnsafeRootNote +
 						scanTruncatedNote +
 						generatedSkipNote +
 						abortedNote +
 						freshNote +
+						cachedAgeNote +
+						cheapScanStatusNote +
 						missingNote,
 				},
 			],
@@ -1922,13 +2068,43 @@ function formatAllMode(
 					return s;
 				return summarizeDiagnostics(s.filePath, policyKept, s.hasFinalSnapshot);
 			});
-	const visibleSummaries = dispositioned.filter((s) => includeFile(s.filePath));
+	// #1641: the single chokepoint both mode=all (cache-only `summaries`) and
+	// mode=full (widget cache merged with a FRESH LSP sweep, above) converge
+	// through — a fresh sweep's server can still be citing its own stale
+	// in-memory document, so gating only the cached half would miss exactly
+	// the live incident this issue reports. Runs AFTER dispositions/rule
+	// policy (not before): a finding a mark or a `.pi-lens.json` rule policy
+	// already dropped is not being served, so it must never trigger a resync
+	// or a `diagnostic_past_eof` telemetry record on this call.
+	const eofGated = dispositioned.map((s) => {
+		const { diagnostics, demotedCount } = demotePastEofDiagnostics({
+			store: "lens_diagnostics",
+			cwd,
+			filePath: s.filePath,
+			diagnostics: s.diagnostics ?? [],
+			resync: resyncDocumentOnPastEof,
+		});
+		if (demotedCount === 0) return s;
+		return summarizeDiagnostics(s.filePath, diagnostics, s.hasFinalSnapshot);
+	});
+	const visibleSummaries = eofGated.filter((s) => includeFile(s.filePath));
 
-	// Filter to files with actual issues
+	// Filter to files with actual issues. A file whose only findings were
+	// demoted by the #1641 past-EOF gate has blocking/errors/warnings at 0 —
+	// counting it as "issue-free" would tell the agent the file is CLEAN when
+	// it actually has an unconfirmed finding waiting on a rescan. Surface it
+	// under `severity: "all"` (the gate's own advisory tier) so it stays
+	// visible; a narrower `error`/`warning` filter still excludes it, matching
+	// how those filters already treat any other non-matching severity.
 	const withIssues = visibleSummaries.filter((s) => {
 		if (severity === "error") return s.blocking > 0 || s.errors > 0;
 		if (severity === "warning") return s.warnings > 0;
-		return s.blocking > 0 || s.errors > 0 || s.warnings > 0;
+		return (
+			s.blocking > 0 ||
+			s.errors > 0 ||
+			s.warnings > 0 ||
+			(s.diagnostics ?? []).some((d) => d.stale)
+		);
 	});
 
 	const pathsNote = isFullMode ? "" : pathsScopeCacheOnlyNote(pathsScope);
@@ -1968,6 +2144,12 @@ function formatAllMode(
 		if (s.errors > 0 && s.blocking === 0) parts.push(`${s.errors}E`);
 		if (s.warnings > 0) parts.push(`${s.warnings}W`);
 		if (!s.hasFinalSnapshot) parts.push(`(pending)`);
+		const staleCount = (s.diagnostics ?? []).filter((d) => d.stale).length;
+		if (staleCount > 0) {
+			parts.push(
+				`${staleCount} stale — re-run to confirm`,
+			);
+		}
 		lines.push(`${rel}  ${parts.join("  ")}`);
 
 		// List the actual diagnostics (not just counts) so the agent can act on
@@ -1989,7 +2171,11 @@ function formatAllMode(
 			const tag = label ? ` [${label}]` : "";
 			const flaggedTag = d.flagged ? " 📌 flagged-to-fix" : "";
 			const msg = d.message.replace(/\s+/g, " ").trim();
-			lines.push(`  ${marker}L${d.line ?? "?"}: ${msg}${tag}${flaggedTag}`);
+			// #1641: a demoted past-EOF entry no longer has a trustworthy line —
+			// show the marker instead of a coordinate that doesn't exist in the
+			// current file, matching the #1622/#1627 stale-line render convention.
+			const loc = d.stale ? PAST_EOF_STALE_MARKER : `L${d.line ?? "?"}`;
+			lines.push(`  ${marker}${loc}: ${msg}${tag}${flaggedTag}`);
 		}
 		if (matching.length > shown.length) {
 			lines.push(

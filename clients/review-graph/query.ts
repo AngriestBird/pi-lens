@@ -100,6 +100,14 @@ export function computeTransitiveImpact(
 			for (const edge of graph.edgesByTo.get(node.id) ?? []) {
 				if (!relations.has(edge.kind)) continue;
 				if (visited.has(edge.from)) continue;
+				if (hits.length >= maxHits) {
+					return {
+						seedFile: normalized,
+						hits,
+						truncated: true,
+						maxDepthReached,
+					};
+				}
 				visited.add(edge.from);
 				const dependent = graph.nodes.get(edge.from);
 				const hitDepth = node.depth + 1;
@@ -110,9 +118,6 @@ export function computeTransitiveImpact(
 					depth: hitDepth,
 					relation: edge.kind,
 				});
-				if (hits.length >= maxHits) {
-					return { seedFile: normalized, hits, truncated: true, maxDepthReached };
-				}
 				next.push({ id: edge.from, depth: hitDepth });
 			}
 		}

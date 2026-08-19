@@ -106,6 +106,20 @@ describe("computeTransitiveImpact", () => {
 		expect(result.truncated).toBe(true);
 	});
 
+	it("does not truncate when maxHits exactly fits the traversal", () => {
+		const graph = makeGraph(
+			[
+				{ id: "a#file", kind: "file", language: "ts", filePath: "a.ts" },
+				{ id: "b#file", kind: "file", language: "ts", filePath: "b.ts" },
+			],
+			[{ from: "b#file", to: "a#file", kind: "imports" }],
+		);
+		const result = computeTransitiveImpact(graph, "a.ts", { maxHits: 1 });
+
+		expect(result.hits).toHaveLength(1);
+		expect(result.truncated).toBe(false);
+	});
+
 	it("returns no hits for a file nothing depends on", () => {
 		const graph = makeGraph(nodes, edges);
 		const result = computeTransitiveImpact(graph, "c.ts");

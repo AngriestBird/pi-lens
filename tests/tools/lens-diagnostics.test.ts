@@ -29,9 +29,25 @@ const freshFetchMocks = vi.hoisted(() => ({
 	fetchFreshProjectDiagnostics: vi.fn(),
 }));
 
-vi.mock("../../clients/project-diagnostics/fresh-fetch.js", () => ({
-	fetchFreshProjectDiagnostics: freshFetchMocks.fetchFreshProjectDiagnostics,
-}));
+// #1623 fix-round F6: `ANALYZER_IDS` flows through from the REAL module via
+// `importOriginal` rather than a hand-duplicated array — a hand-copy is
+// exactly the parallel-list anti-pattern #883/#585 (this module's own
+// header) exist to prevent, and it drifted silently once already (the F6
+// finding). Only `fetchFreshProjectDiagnostics` — the expensive, real-tool-
+// spawning half — is replaced.
+vi.mock(
+	"../../clients/project-diagnostics/fresh-fetch.js",
+	async (importOriginal) => {
+		const actual =
+			await importOriginal<
+				typeof import("../../clients/project-diagnostics/fresh-fetch.js")
+			>();
+		return {
+			...actual,
+			fetchFreshProjectDiagnostics: freshFetchMocks.fetchFreshProjectDiagnostics,
+		};
+	},
+);
 
 vi.mock("../../clients/bootstrap.js", () => ({
 	loadBootstrapClients: vi.fn().mockResolvedValue({}),
@@ -70,6 +86,17 @@ vi.mock("../../clients/widget-state.js", () => ({
 	reconcileScanDiagnostics: (...args: unknown[]) =>
 		reconcileScanDiagnosticsMock(...args),
 }));
+
+// #1641: the past-EOF gate's demote/log logic is real (imported for real
+// below); only its resync side effect is mocked here so a demoted-line test
+// never reaches into the real LSP service / spawns a real language server.
+const resyncDocumentOnPastEofMock = vi.hoisted(() => vi.fn());
+vi.mock("../../clients/diagnostic-line-freshness.js", async (importOriginal) => {
+	const actual = await importOriginal<
+		typeof import("../../clients/diagnostic-line-freshness.js")
+	>();
+	return { ...actual, resyncDocumentOnPastEof: resyncDocumentOnPastEofMock };
+});
 
 beforeEach(() => {
 	projectDiagnosticsMocks.scanProjectDiagnostics.mockReset();
@@ -1199,6 +1226,118 @@ describe("lens_diagnostics mode=full", () => {
 		).not.toHaveBeenCalled();
 	});
 
+	// #1623 fix-round F3: this pair pins the two halves of cache-age rendering
+	// a mutation probe found completely uncovered — mutating `formatCacheAge`
+	// to return a fixed "MUTANT-AGE" string, and separately deleting the
+	// `cachedAgeMs` filter that excludes cache-read lanes from "fetched fresh
+	// this call", both left the full 122-test suite green. Pinning the EXACT
+	// rendered age string, and the fact that a cache-read id never lands in
+	// the "fetched fresh" list, kills both mutants.
+	it("renders the cache-age string for a cache-read-by-design lane, excluded from 'fetched fresh' (#1623 fix-round F3)", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: ["jscpd", "test-runner"],
+			cold: [],
+			timings: { jscpd: 42, "test-runner": 5 },
+			cachedAgeMs: { "test-runner": 18 * 60_000 },
+		});
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cached",
+		});
+
+		const text = String(result.content[0].text);
+		// The exact rendered age — a mutated `formatCacheAge` returning a fixed
+		// placeholder string would fail this.
+		expect(text).toContain(
+			"served from cache this call (not re-run): test-runner (18m old).",
+		);
+		// A deleted `cachedAgeMs` filter would fold test-runner into this same
+		// sentence as if it had just run fresh.
+		expect(text).toContain("fetched fresh this call: jscpd (42ms).");
+		expect(text).not.toMatch(/fetched fresh this call:[^.]*test-runner/);
+		expect(
+			(result.details as { analyzersCachedAgeMs?: Record<string, number> })
+				.analyzersCachedAgeMs,
+		).toEqual({ "test-runner": 18 * 60_000 });
+	});
+
+	// #1623 fix-round F4: `CacheManager.readCache` accepts a missing/corrupt
+	// `meta.timestamp` as a cache HIT (the timestamp only gates staleness),
+	// so a corrupt test-runner-findings cache reaches `formatCacheAge` as
+	// NaN. Pre-fix-round this rendered "test-runner (NaNh old)" — a fabricated
+	// age is a worse honesty gap than the one #1623 exists to close.
+	it("renders 'age unknown' instead of NaN for a cache-read lane with a corrupt age (#1623 fix-round F4)", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		freshFetchMocks.fetchFreshProjectDiagnostics.mockResolvedValue({
+			diagnostics: [],
+			runners: ["test-runner"],
+			cold: [],
+			timings: { "test-runner": 5 },
+			cachedAgeMs: { "test-runner": Number.NaN },
+		});
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cached",
+		});
+
+		const text = String(result.content[0].text);
+		expect(text).not.toMatch(/NaN/i);
+		expect(text).toContain(
+			"served from cache this call (not re-run): test-runner (age unknown old).",
+		);
+	});
+
+	// #1623 fix-round F4: a corrupt `scannedAt` on the STORED cheap-scan
+	// snapshot (loadProjectDiagnosticsSnapshot) must not compute a NaN age
+	// either — it must fall back to the same "no cached scan" wording F2
+	// added for a genuinely missing snapshot, not "NaNm old".
+	it("mode=full refreshRunners=cached with a corrupt snapshot scannedAt renders not-run, not NaN (#1623 fix-round F4)", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue({
+			version: 1,
+			cwd: "/proj",
+			tier: "cheap",
+			scannedAt: "not-a-date",
+			filesScanned: 1,
+			runners: ["fact-rules"],
+			diagnostics: [],
+		});
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cached",
+		});
+
+		const text = String(result.content[0].text);
+		expect(text).not.toMatch(/NaN/i);
+		expect(text).toMatch(/not run \(no cached scan/);
+	});
+
+	// #1623 fix-round F4 (extractors.ts unit coverage): `formatCacheAge` itself
+	// must guard non-finite input directly, not merely appear to via callers
+	// that happen to pass finite numbers.
+	it("formatCacheAge renders 'age unknown' for non-finite input (#1623 fix-round F4)", async () => {
+		const { formatCacheAge } = await import(
+			"../../clients/project-diagnostics/extractors.js"
+		);
+		expect(formatCacheAge(Number.NaN)).toBe("age unknown");
+		expect(formatCacheAge(Number.POSITIVE_INFINITY)).toBe("age unknown");
+		expect(formatCacheAge(18 * 60_000)).toBe("18m");
+	});
+
 	it("does not read jscpd cache when refreshRunners is not set (LSP-only full mode)", async () => {
 		mockSummaries.length = 0;
 		const lspService = {
@@ -1227,6 +1366,33 @@ describe("lens_diagnostics mode=full", () => {
 
 		expect(String(result.content[0].text)).not.toContain("Duplicate code");
 		expect(cm.readCache).not.toHaveBeenCalledWith("jscpd-ts", "/proj");
+	});
+
+	// #1623 fix-round F2 (blocker): `refreshRunners=cached` REQUESTS the cheap
+	// project scan, but with no snapshot ever written yet
+	// (`loadProjectDiagnosticsSnapshot` returns undefined) the pre-fix-round
+	// code rendered NOTHING — `cheapScanCachedNote` was gated on `scannedAt`
+	// being present, and `cheapScanNotRequestedNote` was gated on the scan
+	// never having been requested at all, so neither fired for "requested,
+	// but nothing cached yet". The original #1623 silence for the ast-grep/
+	// tree-sitter/fact-rules lane survived in exactly this mode.
+	it("mode=full refreshRunners=cached with NO stored snapshot renders the cheap scan as not-run, not silent (#1623 fix-round F2)", async () => {
+		mockSummaries.length = 0;
+		const lspService = {
+			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
+		};
+		projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
+			undefined,
+		);
+
+		const result = await run(makeTool({}, lspService), {
+			mode: "full",
+			refreshRunners: "cached",
+		});
+
+		const text = String(result.content[0].text);
+		expect(text).toContain("ast-grep");
+		expect(text).toMatch(/not run \(no cached scan/);
 	});
 
 	// #533: a cache-only extractor with NO cache entry yet must render as cold,
@@ -1384,18 +1550,44 @@ describe("lens_diagnostics mode=full", () => {
 		expect(String(result.content[0].text)).not.toContain("edit-scoped");
 	});
 
-	it("mode=full without refreshRunners never reports cold extractors (they weren't requested)", async () => {
+	// #1623: pre-fix, this scenario rendered NOTHING about the heavyweight
+	// lanes (gitleaks, knip, trivy, ...) — silence that reads exactly like
+	// "ran clean" (the dogfood forensics finding #1623 documents: an agent
+	// read a mode=full result with no gitleaks section as "gitleaks ran and
+	// found nothing", when in fact no gitleaks scan had run at all). The
+	// (expensive) fresh-fetch must still never run in this mode — only the
+	// RENDERING changes, to say so honestly instead of staying silent.
+	it("mode=full without refreshRunners renders every heavyweight lane as not-run, not silent (#1623)", async () => {
 		mockSummaries.length = 0;
 		const lspService = {
 			runWorkspaceDiagnostics: vi.fn().mockResolvedValue([]),
 		};
 		const result = await run(makeTool({}, lspService), { mode: "full" });
-		expect(String(result.content[0].text)).not.toContain("cold");
+		const text = String(result.content[0].text);
+		// #1623 fix-round F5: the quick-mode batch renders as its own compact
+		// "not run this call (quick mode)" note (bare ids, one shared reason),
+		// distinct from the detailed per-id "cold (not applicable /
+		// unavailable)" format genuinely-cold lanes get — these lanes ARE
+		// applicable and available, this call just didn't ask for them.
+		expect(text).toContain("not run this call (quick mode)");
+		expect(text).not.toContain("cold (not applicable / unavailable");
+		// The secrets lane specifically — the issue's red-first case.
+		expect(text).toMatch(/not run this call \(quick mode\)[^.]*gitleaks/);
+		expect(text).toContain("refreshRunners not requested");
+		// ast-grep isn't one of `ANALYZER_IDS` (it's the cheap in-process scan,
+		// gated separately) — it needs its own marker so it doesn't stay the
+		// one lane still silently absent.
+		expect(text).toContain("ast-grep");
 		expect((result.details as { coldRunners?: string[] }).coldRunners).toEqual(
-			[],
+			expect.arrayContaining(["gitleaks", "knip", "trivy", "govulncheck"]),
 		);
+		expect(
+			(result.details as { coldReasons?: Record<string, string> })
+				.coldReasons?.gitleaks,
+		).toMatch(/refreshRunners not requested/);
 		// #585: without refreshRunners opting in, the (expensive) fresh-fetch of
-		// the heavyweight analyzers must not run at all.
+		// the heavyweight analyzers must still never run — only the rendering
+		// of that skip changed, not the (deliberately cheap) behavior itself.
 		expect(
 			freshFetchMocks.fetchFreshProjectDiagnostics,
 		).not.toHaveBeenCalled();
@@ -1820,6 +2012,129 @@ describe("lens_diagnostics mode=all", () => {
 		mockSummaries.push(sum("/proj/src/clean.ts", {}));
 		const result = await run(makeTool(), { mode: "all" });
 		expect(String(result.content[0].text)).toContain("✓");
+	});
+
+	describe("past-EOF diagnostic gate (#1641)", () => {
+		afterEach(() => {
+			resyncDocumentOnPastEofMock.mockReset();
+		});
+
+		it("RED CASE: demotes a cached diagnostic citing a line past the file's current EOF", async () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-past-eof-"));
+			try {
+				const filePath = path.join(cwd, "kilo.ts");
+				// 6 addressable lines on disk — the widget cache still carries a
+				// diagnostic citing line 407, exactly #1641's forensic shape (a
+				// stale in-memory LSP document that never touched this file's mtime).
+				fs.writeFileSync(filePath, "a\nb\nc\nd\ne\n");
+				mockSummaries.length = 0;
+				mockSummaries.push(
+					sum(
+						filePath,
+						{ blocking: 1, errors: 1 },
+						{
+							diagnostics: [
+								{
+									severity: "error",
+									semantic: "blocking",
+									message: "stale in-memory citation",
+									line: 407,
+									rule: "X",
+								},
+							],
+						},
+					),
+				);
+
+				const result = await run(makeTool(), { mode: "all" }, cwd);
+				const text = String(result.content[0].text);
+				// Pre-fix: served verbatim as "L407" and counted as a 🔴 blocker.
+				expect(text).not.toContain("L407");
+				expect(text).toContain("— line past EOF");
+				expect(text).not.toContain("🔴");
+				expect(resyncDocumentOnPastEofMock).toHaveBeenCalledWith(filePath);
+			} finally {
+				removeTempDirSync(cwd);
+			}
+		});
+
+		it("does not touch a diagnostic whose cited line is still within the current file", async () => {
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-eof-ok-"));
+			try {
+				const filePath = path.join(cwd, "fine.ts");
+				fs.writeFileSync(filePath, "a\nb\nc\nd\ne\n");
+				mockSummaries.length = 0;
+				mockSummaries.push(
+					sum(
+						filePath,
+						{ blocking: 1, errors: 1 },
+						{
+							diagnostics: [
+								{
+									severity: "error",
+									semantic: "blocking",
+									message: "real, current error",
+									line: 5,
+									rule: "X",
+								},
+							],
+						},
+					),
+				);
+
+				const result = await run(makeTool(), { mode: "all" }, cwd);
+				const text = String(result.content[0].text);
+				expect(text).toContain("L5");
+				expect(text).toContain("🔴");
+				expect(resyncDocumentOnPastEofMock).not.toHaveBeenCalled();
+			} finally {
+				removeTempDirSync(cwd);
+			}
+		});
+
+		it("F5: a rule-policy-disabled past-EOF finding is dropped before the gate runs — no resync, no telemetry", async () => {
+			// Gate order matters: a finding the `.pi-lens.json` rule policy already
+			// dropped is not being served to the agent, so it must never trigger a
+			// resync or a `diagnostic_past_eof` record on THIS call — those are
+			// side effects reserved for findings that are actually delivered.
+			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-eof-policy-"));
+			try {
+				fs.writeFileSync(
+					path.join(cwd, ".pi-lens.json"),
+					JSON.stringify({ rules: { "no-eval": { disable: ["no-eval"] } } }),
+				);
+				resetProjectLensConfigCache();
+				const filePath = path.join(cwd, "policy-dropped.ts");
+				fs.writeFileSync(filePath, "a\nb\n"); // 3 addressable lines
+				mockSummaries.length = 0;
+				mockSummaries.push(
+					sum(
+						filePath,
+						{ blocking: 1, errors: 1 },
+						{
+							diagnostics: [
+								{
+									severity: "error",
+									semantic: "blocking",
+									message: "MSG-NO-EVAL",
+									line: 999, // past EOF — would demote + resync if delivered
+									rule: "no-eval",
+									tool: "ast-grep",
+								},
+							],
+						},
+					),
+				);
+
+				const result = await run(makeTool(), { mode: "all" }, cwd);
+				const text = String(result.content[0].text);
+				expect(text).not.toContain("MSG-NO-EVAL");
+				expect(resyncDocumentOnPastEofMock).not.toHaveBeenCalled();
+			} finally {
+				resetProjectLensConfigCache();
+				removeTempDirSync(cwd);
+			}
+		});
 	});
 
 	it("filters ignored widget summaries in all mode (#279)", async () =>

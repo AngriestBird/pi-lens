@@ -17,7 +17,21 @@ export type DegradationKind =
 	| "query-predicates-invalid"
 	| "install-retry-exhausted"
 	| "ast-grep-napi-unavailable"
-	| "instance-registry-corrupt";
+	| "instance-registry-corrupt"
+	| "cascade-budget-override-disarmed"
+	/**
+	 * A pi-lens `tool_call` handler threw. pi's `emitToolCall` has no
+	 * per-handler catch, so an escaped throw blocks the user's tool call —
+	 * this kind means the total guard absorbed one (#1655 item 1).
+	 */
+	| "tool-call-handler-throw"
+	/**
+	 * A tool-event path did not resolve to an existing file, and pi's own
+	 * unicode/spacing variant ladder did not find it either (#1655 item 5).
+	 * The issue names this `path_variant_unresolved`; the ledger's kind
+	 * vocabulary is kebab-case, so it is spelled that way here.
+	 */
+	| "path-variant-unresolved";
 
 export interface DegradationRecord {
 	kind: unknown;

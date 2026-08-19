@@ -79,6 +79,54 @@ describe("knip-client", () => {
 		}
 	});
 
+	it("prunes knip's glob cache before every run, keeping module caches (#1630)", async () => {
+		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-globcache-");
+		try {
+			fs.writeFileSync(path.join(tmpDir, "package.json"), '{"name":"demo"}');
+
+			const cacheLocation = path.join(
+				getProjectDataDir(tmpDir),
+				"cache",
+				"knip",
+			);
+			fs.mkdirSync(cacheLocation, { recursive: true });
+
+			// knip's on-disk cache layout: one glob cache plus the module/plugin
+			// caches that carry nearly all of the speed win.
+			const globCache = path.join(cacheLocation, "glob-6.4.1.cache");
+			const gitignoreCache = path.join(cacheLocation, "gitignore-6.4.1.cache");
+			const rootCache = path.join(cacheLocation, "root--6.4.1");
+			const pluginsCache = path.join(cacheLocation, "plugins--6.4.1");
+			for (const file of [globCache, gitignoreCache, rootCache, pluginsCache]) {
+				fs.writeFileSync(file, "stale");
+			}
+
+			const safeSpawnMod = await import("../../clients/safe-spawn.js");
+			// The prune must land BEFORE knip starts, not after it finishes —
+			// otherwise the very run being fixed still reads the stale glob.
+			let globCacheExistedAtSpawn = true;
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementationOnce(async () => {
+				globCacheExistedAtSpawn = fs.existsSync(globCache);
+				return { status: 0, stdout: "", stderr: "" };
+			});
+
+			const client = new KnipClient(false) as unknown as {
+				runAnalyze: (d: string) => Promise<unknown>;
+			};
+			await client.runAnalyze(tmpDir);
+
+			expect(globCacheExistedAtSpawn).toBe(false);
+			expect(fs.existsSync(globCache)).toBe(false);
+			// Everything else survives: the glob cache is the only one that goes
+			// stale on a consumer-side import change.
+			expect(fs.existsSync(rootCache)).toBe(true);
+			expect(fs.existsSync(pluginsCache)).toBe(true);
+			expect(fs.existsSync(gitignoreCache)).toBe(true);
+		} finally {
+			cleanup();
+		}
+	});
+
 	it("resolves project root from nested directory", () => {
 		const { tmpDir, cleanup } = setupTestEnvironment("pi-lens-knip-");
 		try {
