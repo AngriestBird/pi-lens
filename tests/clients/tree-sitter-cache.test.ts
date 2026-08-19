@@ -1,6 +1,11 @@
 import * as fs from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TreeCache } from "../../clients/tree-sitter-cache.js";
+import {
+	deriveScanTreeCacheCapacity,
+	TREE_CACHE_DEFAULT_MAX_SIZE,
+	TREE_CACHE_SCAN_CAPACITY_CEILING,
+	TreeCache,
+} from "../../clients/tree-sitter-cache.js";
 import { createTempFile, setupTestEnvironment } from "./test-utils.js";
 
 const cleanups: Array<() => void> = [];
@@ -368,5 +373,211 @@ describe("TreeCache statistics (#675)", () => {
 			clears: 1,
 			size: 0,
 		});
+	});
+
+	it("distinguishes cold vs capacity misses (#1715 pin — the measurement #890's stats enable)", () => {
+		// Pinned separately from the #890 test above: this is the exact
+		// distinction #1715's dogfood measurement read off cache_stats to prove
+		// EVERY second-scan miss was capacity-bound, not cold. If this
+		// distinction ever collapsed, that live measurement would stop being
+		// possible.
+		const cache = new TreeCache(1);
+		cache.set("a.ts", "a", "typescript", fakeTree()); // first scan: cold
+		cache.set("b.ts", "b", "typescript", fakeTree()); // evicts a (capacity-bound)
+
+		expect(cache.get("z.ts", "z", "typescript")).toBeNull(); // never seen: cold
+		expect(cache.get("a.ts", "a", "typescript")).toBeNull(); // evicted, same content: capacity
+
+		expect(cache.getStats()).toMatchObject({ coldMisses: 1, capacityMisses: 1 });
+	});
+});
+
+describe("TreeCache capacity growth for scan working sets (#1715)", () => {
+	it("cannot span a full-scan working set at the interactive default — every second-scan lookup is a capacityMiss", () => {
+		// Documents the bug this issue reports: a fixed 50-entry cache asked to
+		// hold a 110-file working set evicts the tail, so a second identical
+		// scan re-parses everything the LRU couldn't keep.
+		const env = setupTestEnvironment("pi-lens-tccache-nospan-");
+		cleanups.push(env.cleanup);
+		const cache = new TreeCache(TREE_CACHE_DEFAULT_MAX_SIZE);
+		const fileCount = 110;
+		const files = Array.from({ length: fileCount }, (_, i) =>
+			createTempFile(env.tmpDir, `f${i}.ts`, `content-${i}`),
+		);
+		for (let i = 0; i < fileCount; i++) {
+			cache.set(files[i], `content-${i}`, "typescript", fakeTree());
+		}
+		expect(cache.getStats().size).toBe(TREE_CACHE_DEFAULT_MAX_SIZE);
+
+		let misses = 0;
+		for (let i = 0; i < fileCount; i++) {
+			if (cache.get(files[i], `content-${i}`, "typescript") === null) misses++;
+		}
+		// The first 60 of 110 files were evicted to make room for the last 50 —
+		// EVERY miss on this second pass is capacity-bound, none cold or
+		// stat-failed (all files exist with matching content).
+		expect(misses).toBe(fileCount - TREE_CACHE_DEFAULT_MAX_SIZE);
+		expect(cache.getStats()).toMatchObject({
+			capacityMisses: fileCount - TREE_CACHE_DEFAULT_MAX_SIZE,
+			coldMisses: 0,
+			statFailedMisses: 0,
+		});
+	});
+
+	it("setMaxSize grows capacity without evicting or freeing existing entries", async () => {
+		const env = setupTestEnvironment("pi-lens-tccache-grow-");
+		cleanups.push(env.cleanup);
+		const fileA = createTempFile(env.tmpDir, "a.ts", "a");
+		const fileB = createTempFile(env.tmpDir, "b.ts", "b");
+		const cache = new TreeCache(2);
+		const a = fakeTree();
+		const b = fakeTree();
+		cache.set(fileA, "a", "typescript", a);
+		cache.set(fileB, "b", "typescript", b);
+
+		cache.setMaxSize(10);
+		await flushRetiredTrees();
+
+		expect(cache.getStats().maxSize).toBe(10);
+		expect(a.delete).not.toHaveBeenCalled();
+		expect(b.delete).not.toHaveBeenCalled();
+		expect(cache.get(fileA, "a", "typescript")).toBe(a);
+		expect(cache.get(fileB, "b", "typescript")).toBe(b);
+	});
+
+	it("setMaxSize shrinking evicts the LRU tail AND frees each dropped tree (#417 discipline under the new lifetime)", async () => {
+		const env = setupTestEnvironment("pi-lens-tccache-shrink-");
+		cleanups.push(env.cleanup);
+		const fileA = createTempFile(env.tmpDir, "a.ts", "a");
+		const fileB = createTempFile(env.tmpDir, "b.ts", "b");
+		const fileC = createTempFile(env.tmpDir, "c.ts", "c");
+		const cache = new TreeCache(3);
+		const a = fakeTree();
+		const b = fakeTree();
+		const c = fakeTree();
+		cache.set(fileA, "a", "typescript", a);
+		cache.set(fileB, "b", "typescript", b);
+		cache.set(fileC, "c", "typescript", c);
+
+		cache.setMaxSize(1); // must evict+free a and b (LRU order), keep c
+		await flushRetiredTrees();
+
+		expect(a.delete).toHaveBeenCalledTimes(1);
+		expect(b.delete).toHaveBeenCalledTimes(1);
+		expect(c.delete).not.toHaveBeenCalled();
+		expect(cache.getStats().size).toBe(1);
+		expect(cache.get(fileC, "c", "typescript")).toBe(c);
+	});
+
+	it("after growing to span the working set, a second identical scan sees zero capacityMisses", () => {
+		const env = setupTestEnvironment("pi-lens-tccache-scanreuse-");
+		cleanups.push(env.cleanup);
+		const cache = new TreeCache(TREE_CACHE_DEFAULT_MAX_SIZE);
+		const fileCount = 110;
+		const files = Array.from({ length: fileCount }, (_, i) =>
+			createTempFile(env.tmpDir, `f${i}.ts`, `content-${i}`),
+		);
+		cache.setMaxSize(
+			deriveScanTreeCacheCapacity(fileCount, cache.getMaxSize()),
+		);
+
+		for (let i = 0; i < fileCount; i++) {
+			cache.set(files[i], `content-${i}`, "typescript", fakeTree());
+		}
+		expect(cache.getStats().size).toBe(fileCount);
+
+		let hits = 0;
+		for (let i = 0; i < fileCount; i++) {
+			if (cache.get(files[i], `content-${i}`, "typescript") !== null) hits++;
+		}
+
+		expect(hits).toBe(fileCount);
+		expect(cache.getStats()).toMatchObject({ capacityMisses: 0, coldMisses: 0 });
+	});
+
+	describe("deriveScanTreeCacheCapacity", () => {
+		const previousEnv = process.env.PI_LENS_TREE_SITTER_CACHE_SCAN_CAP;
+		afterEach(() => {
+			if (previousEnv === undefined) {
+				delete process.env.PI_LENS_TREE_SITTER_CACHE_SCAN_CAP;
+			} else {
+				process.env.PI_LENS_TREE_SITTER_CACHE_SCAN_CAP = previousEnv;
+			}
+		});
+
+		it("targets the file count when it fits under the ceiling", () => {
+			delete process.env.PI_LENS_TREE_SITTER_CACHE_SCAN_CAP;
+			expect(deriveScanTreeCacheCapacity(110, TREE_CACHE_DEFAULT_MAX_SIZE)).toBe(110);
+		});
+
+		it("never targets below the interactive default, even for a tiny scan", () => {
+			delete process.env.PI_LENS_TREE_SITTER_CACHE_SCAN_CAP;
+			expect(deriveScanTreeCacheCapacity(3, TREE_CACHE_DEFAULT_MAX_SIZE)).toBe(
+				TREE_CACHE_DEFAULT_MAX_SIZE,
+			);
+		});
+
+		it("clamps at the hard ceiling for a huge project (bounds the heap, not just the count)", () => {
+			delete process.env.PI_LENS_TREE_SITTER_CACHE_SCAN_CAP;
+			expect(
+				deriveScanTreeCacheCapacity(50_000, TREE_CACHE_DEFAULT_MAX_SIZE),
+			).toBe(TREE_CACHE_SCAN_CAPACITY_CEILING);
+		});
+
+		it("never shrinks a capacity the cache already has", () => {
+			delete process.env.PI_LENS_TREE_SITTER_CACHE_SCAN_CAP;
+			expect(deriveScanTreeCacheCapacity(10, 300)).toBe(300);
+		});
+
+		it("respects an operator's PI_LENS_TREE_SITTER_CACHE_SCAN_CAP override", () => {
+			process.env.PI_LENS_TREE_SITTER_CACHE_SCAN_CAP = "75";
+			expect(deriveScanTreeCacheCapacity(1000, TREE_CACHE_DEFAULT_MAX_SIZE)).toBe(75);
+		});
+
+		it("ignores a malformed override and falls back to the hard ceiling", () => {
+			process.env.PI_LENS_TREE_SITTER_CACHE_SCAN_CAP = "not-a-number";
+			expect(
+				deriveScanTreeCacheCapacity(50_000, TREE_CACHE_DEFAULT_MAX_SIZE),
+			).toBe(TREE_CACHE_SCAN_CAPACITY_CEILING);
+		});
+	});
+
+	it("N repeated scans at the grown capacity keep the resident tree count bounded and free every superseded tree exactly once (no leak under the new lifetime)", async () => {
+		const cache = new TreeCache(TREE_CACHE_DEFAULT_MAX_SIZE);
+		const fileCount = 110;
+		const scans = 5;
+		cache.setMaxSize(
+			deriveScanTreeCacheCapacity(fileCount, cache.getMaxSize()),
+		);
+
+		const treesByScan: ReturnType<typeof fakeTree>[][] = [];
+		for (let scan = 0; scan < scans; scan++) {
+			const trees: ReturnType<typeof fakeTree>[] = [];
+			for (let i = 0; i < fileCount; i++) {
+				const tree = fakeTree();
+				trees.push(tree);
+				// Content changes every scan so each set() is a genuine
+				// same-key replacement, not a hash-authoritative hit — the
+				// path that must free the superseded tree.
+				cache.set(`f${i}.ts`, `content-${i}-scan${scan}`, "typescript", tree);
+			}
+			treesByScan.push(trees);
+			await flushRetiredTrees();
+			// Bounded: the resident set never grows past the capacity, scan
+			// after scan — the defining property of a leak-free lifetime.
+			expect(cache.getStats().size).toBe(fileCount);
+		}
+
+		// Every superseded scan's trees were freed exactly once...
+		for (let scan = 0; scan < scans - 1; scan++) {
+			for (const tree of treesByScan[scan]) {
+				expect(tree.delete).toHaveBeenCalledTimes(1);
+			}
+		}
+		// ...and the final scan's trees are still live (not double-freed, not
+		// dropped out from under the resident cache).
+		for (const tree of treesByScan[scans - 1]) {
+			expect(tree.delete).not.toHaveBeenCalled();
+		}
 	});
 });
