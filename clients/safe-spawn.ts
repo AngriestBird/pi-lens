@@ -1413,7 +1413,18 @@ export async function safeSpawnAsync(
 					rearmIdleGrace = undefined;
 					if (graceTimer) clearTimeout(graceTimer);
 					clearTimeout(capTimer);
-					child.removeListener("close", finish);
+					// Optional chaining, not a bare call: `child` is a real Node
+					// ChildProcess (always an EventEmitter, always has this) in
+					// production, but several existing test doubles across the
+					// suite fake stdio-bearing children as plain objects with only
+					// the handful of methods (`on`, `kill`, ...) their scenario
+					// needs — no `removeListener`. Skipping cleanup on those is
+					// harmless (the fake is torn down with the test either way);
+					// crashing here from inside a timer callback is not: it would
+					// throw before `finishIdleWait()` runs, hanging every caller's
+					// `safeSpawnAsync` promise (#1673 review round 2 caught this
+					// live in tests/clients/installer/version-drift.test.ts).
+					child.removeListener?.("close", finish);
 					finishIdleWait();
 				};
 				// #1673 review F2: `close` fires once every stdio fd referencing
