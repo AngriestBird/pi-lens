@@ -26,6 +26,7 @@ import type {
 	RunnerResult,
 } from "../types.js";
 import { convertLspDiagnostics } from "../utils/lsp-diagnostics.js";
+import { demoteInferredProjectDiagnostics } from "../../lsp/inferred-project.js";
 import {
 	enabledAuxiliaryLspServerIds,
 	retagAuxiliaryDiagnostics,
@@ -270,12 +271,37 @@ const lspRunner: RunnerDefinition = {
 
 		// Convert LSP diagnostics to our format
 		// Defensive: filter out malformed diagnostics that may lack range
-		const validLspDiags = lspDiags.filter(
+		const rawValidLspDiags = lspDiags.filter(
 			(d) => d.range?.start?.line !== undefined,
 		);
+		// #1640: the per-edit path renders the same authority as the mode=full
+		// sweep, so it applies the same demotion. Costs one bounded `projectInfo`
+		// request, and only when the file already has a TypeScript ERROR — an edit
+		// that type-checks clean pays nothing.
+		//
+		// #1645 review F2: NOT under warm attach. There, diagnostics came from an
+		// already-running remote session over IPC and no local client exists — so
+		// the probe would have to spawn a whole tsserver fleet to answer, breaking
+		// this branch's spawn-free contract (see the comment below), and the
+		// answer it spawned for would be the NEW server's project resolution, not
+		// the warm session's. A meaningless answer bought with a process is worse
+		// than no answer, so the warm-attach path keeps pre-#1640 rendering. This
+		// is a known gap, recorded on the issue rather than papered over with an
+		// "unverified" label that would fire on every warm-attach file including
+		// the properly configured majority.
+		const validLspDiags = usedWarmAttach
+			? rawValidLspDiags
+			: await demoteInferredProjectDiagnostics(rawValidLspDiags, {
+					filePath: diagnosticPath,
+					cwd: ctx.cwd,
+					service: lspService,
+				});
 		const fixSuggestionByIndex = new Map<number, string>();
 
-		const blockingDiagIndexes = validLspDiags
+		// #1640: read severity off the RAW list. A demoted diagnostic is still
+		// worth a quick-fix suggestion — the demotion changes its authority, not
+		// whether tsserver can offer a fix. Indexes align 1:1 with `validLspDiags`.
+		const blockingDiagIndexes = rawValidLspDiags
 			.map((d, idx) => ({ d, idx }))
 			.filter(({ d }) => d.severity === 1)
 			.slice(0, WARM_CODE_ACTION_LOOKUP_LIMIT);
