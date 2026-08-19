@@ -12,8 +12,10 @@ import {
 	getFileDiagnosticSummaries,
 	getSessionLanguages,
 	importWidgetState,
+	isBlocking,
 	reconcileCascadeNeighborLspErrors,
 	reconcileScanDiagnostics,
+	reconcileStaleWidgetDependencyBlockers,
 	reconcileStaleWidgetFiles,
 	recordDiagnostics,
 	recordFormatter,
@@ -500,6 +502,118 @@ describe("widget-state renderWidget", () => {
 		const line = renderWidget(120, theme).join("");
 		expect(line).not.toContain("fmt-failed:");
 		expect(line).not.toContain("stale-fail.ts");
+	});
+
+	// #1631 review F3: a dependency-drift `stale` demotion is a verdict about
+	// THIS session's disk state. It must not outlive the session, the same
+	// #1348 shape one field over as the formatter-failure test above. Demotes
+	// through the REAL gate (`reconcileStaleWidgetDependencyBlockers`), not a
+	// hand-built `stale: true` literal, so this proves the actual production
+	// path round-trips correctly.
+	it("a dependency-drift stale demotion does not survive a session restore", async () => {
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-stale-restore-"),
+		);
+		try {
+			const consumer = path.join(tmpDir, "consumer.ts");
+			const dep = path.join(tmpDir, "dep.ts");
+			await fs.writeFile(dep, "export const x = 1;\n");
+			await fs.writeFile(
+				consumer,
+				'import { x } from "./dep.js";\nexport const y = x;\n',
+			);
+
+			recordDiagnostics(
+				consumer,
+				[
+					{
+						severity: "error",
+						semantic: "blocking",
+						message: "type error",
+						tool: "lsp",
+					},
+				],
+				1,
+				Date.now() - 60_000,
+			);
+			// Dependency fixed out-of-band after the verdict — demotes for real.
+			const future = new Date(Date.now() + 60_000);
+			await fs.utimes(dep, future, future);
+			const { demoted } = await reconcileStaleWidgetDependencyBlockers(tmpDir);
+			expect(demoted).toBe(1);
+			expect(
+				(getFileDiagnostics(consumer) ?? []).some((d) => isBlocking(d)),
+			).toBe(false);
+
+			const snapshot = exportWidgetState();
+			clearWidgetState();
+			expect(importWidgetState(snapshot)).toBe(true);
+
+			const restored = getFileDiagnostics(consumer) ?? [];
+			expect(restored).toHaveLength(1);
+			expect(restored[0]?.stale).toBeUndefined();
+			expect(isBlocking(restored[0]!)).toBe(true);
+
+			// #1631 review V1: `diagnosticCounts` is DERIVED from the entries, not a
+			// second source of truth. The persisted count was computed while the
+			// entry was still demoted (`blocking: 0`) — restoring it verbatim would
+			// leave `isBlocking(entry) === true` but `diagnosticCounts.blocking === 0`
+			// on the SAME record, inverting the one-predicate invariant every
+			// consumer (getFileDiagnosticSummaries, the record-tier classifier)
+			// trusts instead of re-scanning entries itself.
+			const summary = getFileDiagnosticSummaries().find(
+				(s) => path.resolve(s.filePath) === path.resolve(consumer),
+			);
+			expect(summary?.blocking).toBe(1);
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+
+	// #1631 review F10: `isBlocking` answers false for a demoted finding by design
+	// (#1419 demote-not-drop) — but the footer's detail-line render loop used that
+	// SAME predicate to pick what to SHOW, so a demoted finding vanished from the
+	// footer entirely (silently dropped) instead of rendering with a stale marker.
+	it("renders a dependency-drift-demoted finding with a stale marker instead of dropping it", async () => {
+		const tmpDir = await fs.mkdtemp(
+			path.join(os.tmpdir(), "pi-lens-stale-footer-"),
+		);
+		try {
+			const consumer = path.join(tmpDir, "consumer.ts");
+			const dep = path.join(tmpDir, "dep.ts");
+			await fs.writeFile(dep, "export const x = 1;\n");
+			await fs.writeFile(
+				consumer,
+				'import { x } from "./dep.js";\nexport const y = x;\n',
+			);
+
+			recordDiagnostics(
+				consumer,
+				[
+					{
+						severity: "error",
+						semantic: "blocking",
+						message: "type error demoted by drift",
+						tool: "lsp",
+					},
+				],
+				1,
+				Date.now() - 60_000,
+			);
+			const future = new Date(Date.now() + 60_000);
+			await fs.utimes(dep, future, future);
+			const { demoted } = await reconcileStaleWidgetDependencyBlockers(tmpDir);
+			expect(demoted).toBe(1);
+
+			const lines = renderWidget(120, theme).join("\n");
+			// Not silently dropped: the message and a stale marker are still visible.
+			expect(lines).toContain("type error demoted by drift");
+			expect(lines).toContain("re-run to confirm");
+			// And it must not render as an authoritative red-dot blocker.
+			expect(lines.replace(/\x1b\[[0-9;]*m/g, "")).not.toMatch(/●\s*type error demoted/);
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 
 	it("clears a formatter failure after a subsequent success", () => {
