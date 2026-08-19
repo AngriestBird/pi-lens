@@ -38,7 +38,7 @@
  *     cycles still lose updates: each writer publishes the state it computed
  *     from the snapshot it read, and last-rename-wins silently discards the
  *     other's mutation. Callers needing this must serialize themselves (see
- *     `lspChildRemovalTail` in `instance-registry.ts`).
+ *     `registryChildMutationTail` in `instance-registry.ts`).
  *   - **No ordering.** Nothing sequences concurrent writers, within or across
  *     processes. The winner is whichever `rename` lands last, which is not
  *     necessarily the write that started or finished last.
