@@ -271,13 +271,26 @@ async function checkModuleAvailable(cmd: string): Promise<boolean> {
 	return false;
 }
 
-function parsePSAnalyzerOutput(raw: string, filePath: string): Diagnostic[] {
-	if (!raw.trim() || raw.trim() === "[]") return [];
+/**
+ * `null` means "unreadable" (#1598): empty stdout, or stdout that fails to
+ * parse as JSON. `PS_SCRIPT` always writes either the literal `[]` marker or
+ * a `ConvertTo-Json` array/object on a genuine run, so anything else on an
+ * exit-0 run is not a clean-file answer -- it is a lost or truncated write
+ * between the child and us. The caller must not read `null` the same way it
+ * reads a real `[]`.
+ */
+function parsePSAnalyzerOutput(
+	raw: string,
+	filePath: string,
+): Diagnostic[] | null {
+	const trimmed = raw.trim();
+	if (!trimmed) return null;
+	if (trimmed === "[]") return [];
 	let parsed: PSAnalyzerResult | PSAnalyzerResult[];
 	try {
-		parsed = JSON.parse(raw);
+		parsed = JSON.parse(trimmed);
 	} catch {
-		return [];
+		return null;
 	}
 	const items = Array.isArray(parsed) ? parsed : [parsed];
 	return items
@@ -439,6 +452,35 @@ const psScriptAnalyzerRunner: RunnerDefinition = {
 			}
 
 			const diagnostics = parsePSAnalyzerOutput(result.stdout, ctx.filePath);
+
+			if (diagnostics === null) {
+				// Exit 0 proves `-File` itself ran, so this does NOT reuse the
+				// exec latch above -- one bad read says nothing durable about the
+				// interpreter (mirrors the nonzero-exit branch's own guard against
+				// over-latching an unclassified failure), and it is logged rather
+				// than latched. It must still never be read as a clean file
+				// (#1598): empty/malformed stdout on a successful exit is a lost
+				// or truncated write, not evidence of zero diagnostics.
+				const unreadableReason = result.stdout.trim()
+					? "unparseable"
+					: "empty";
+				logAvailabilityDecision({
+					tool: "psscriptanalyzer-stdout",
+					verdict: "unavailable",
+					outcome: "transient",
+					cause: "empty-result",
+					elapsedMs,
+					latched: false,
+					hostStallMs,
+					budgetMs: PS_TIMEOUT_MS,
+				});
+				incrementDegradationCount({
+					kind: "grammar-blocked",
+					subject: "psscriptanalyzer",
+					reason: `PowerShell -File analysis for ${cmd} exited 0 but stdout was ${unreadableReason}`,
+				});
+				return { status: "skipped", diagnostics: [], semantic: "none" };
+			}
 
 			if (diagnostics.length === 0) {
 				return { status: "succeeded", diagnostics: [], semantic: "none" };

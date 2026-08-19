@@ -130,7 +130,13 @@ describe("safeSpawnAsync — non-Windows kill escalation timer cleanup (#1109)",
 		// The child actually exits from SIGTERM alone — SIGKILL is never
 		// needed, so the escalation timer's callback never fires.
 		child.killed = true;
+		// #1656: safeSpawnAsync now finalizes off "exit" (then waits for the
+		// pipes to fall idle), not "close" — a real Node child always emits
+		// both (exit first), so the fixture must too. Advance past the
+		// post-exit idle-grace window (100ms) so the pipe-idle wait settles.
+		child.emit("exit", null, "SIGTERM");
 		child.emit("close", null, "SIGTERM");
+		await vi.advanceTimersByTimeAsync(150);
 		const result = await resultPromise;
 
 		expect(result.failure).toBe("aborted");
@@ -220,7 +226,13 @@ describe("safeSpawnAsync — non-Windows kill escalation timer cleanup (#1109)",
 		// Let the child actually die now so the pending promise settles and
 		// the test can complete cleanly.
 		child.killed = true;
+		// #1656: safeSpawnAsync now finalizes off "exit" (then waits for the
+		// pipes to fall idle), not "close" — a real Node child always emits
+		// both (exit first), so the fixture must too. Advance past the
+		// post-exit idle-grace window (100ms) so the pipe-idle wait settles.
+		child.emit("exit", null, "SIGKILL");
 		child.emit("close", null, "SIGKILL");
+		await vi.advanceTimersByTimeAsync(150);
 		const result = await resultPromise;
 		expect(result.failure).toBe("aborted");
 	});

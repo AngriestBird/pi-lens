@@ -17,8 +17,18 @@ export type DegradationKind =
 	| "query-predicates-invalid"
 	| "install-retry-exhausted"
 	| "ast-grep-napi-unavailable"
+	/**
+	 * `loadWebTreeSitter()` (clients/deps/web-tree-sitter.js) rejected during
+	 * MODULE EVALUATION, not resolution (#1592). Node's ESM loader permanently
+	 * memoizes a module record that threw while evaluating, so re-importing
+	 * the same resolved URL replays the cached rejection rather than
+	 * re-attempting the load — a same-process retry is dead. TreeSitterClient
+	 * latches this permanently instead of retrying on every parse call.
+	 */
+	| "web-tree-sitter-load-failed"
 	| "instance-registry-corrupt"
 	| "cascade-budget-override-disarmed"
+	| "lsp-pull-unconfirmed"
 	/**
 	 * A pi-lens `tool_call` handler threw. pi's `emitToolCall` has no
 	 * per-handler catch, so an escaped throw blocks the user's tool call —
@@ -39,7 +49,14 @@ export type DegradationKind =
 	 * until a flush from its actual origin claims it (#1642 F3, #1678
 	 * item 1).
 	 */
-	| "path-attribution-orphan-unresolved";
+	| "path-attribution-orphan-unresolved"
+	/**
+	 * A `textDocument/diagnostic` or `workspace/diagnostic` pull's per-request
+	 * `withTimeout` abandoned the request, and the request later settled anyway
+	 * (#1713). The answer arrived too late to serve the caller that timed out,
+	 * so it is discarded — this kind is the only trace that it ever landed.
+	 */
+	| "lsp-pull-late-answer";
 
 export interface DegradationRecord {
 	kind: unknown;

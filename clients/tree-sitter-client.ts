@@ -189,11 +189,107 @@ export function isTreeSitterWasmAbortError(error: unknown): boolean {
 	return message.includes("Aborted") || message.includes("abort()");
 }
 
+/**
+ * Positively-identified RESOLUTION-failure codes for a dynamic `import()`:
+ * the specifier couldn't be found/resolved, or a transient fs error hit
+ * before `import()` got as far as evaluating the target module. All of
+ * these recover once whatever was missing/busy appears — they say nothing
+ * durable about the module itself (mirrors the errno allowlist in
+ * clients/dispatch/runners/ast-grep-napi.ts's `classifyAstGrepLoadFailure`,
+ * kept local here rather than shared because that file is owned by an
+ * in-flight PR, #1701, at the time of writing).
+ */
+const RESOLUTION_ERROR_CODES = new Set([
+	"ERR_MODULE_NOT_FOUND",
+	"MODULE_NOT_FOUND",
+	"ERR_INVALID_MODULE_SPECIFIER",
+	"ERR_UNSUPPORTED_DIR_IMPORT",
+	"ENOENT",
+	"EMFILE",
+	"EBUSY",
+	"EAGAIN",
+	"EPERM",
+	"ETXTBSY",
+]);
+
+/** Walk an error's `.cause` chain, collecting every `code` seen along the
+ * way — a resolution failure's `code` can be wrapped in a cause rather than
+ * sitting on the top-level thrown Error. */
+function collectErrorCodes(err: unknown): string[] {
+	const codes: string[] = [];
+	let current: unknown = err;
+	const seen = new Set<unknown>();
+	while (current instanceof Error && !seen.has(current)) {
+		seen.add(current);
+		const code = (current as Error & { code?: unknown }).code;
+		if (typeof code === "string") codes.push(code);
+		current = (current as Error & { cause?: unknown }).cause;
+	}
+	return codes;
+}
+
+/**
+ * Classify a `loadWebTreeSitter()` rejection (#1592). RESOLUTION failures
+ * (a positively-identified code above) are recoverable: the module gets a
+ * fresh `import()` attempt on the very next `init()` call, same as before
+ * this fix, because whatever blocked resolution can plausibly clear on its
+ * own. Everything else is treated as EVALUATION-shaped and latches — an
+ * unrecognized error is far more likely to be the target module's own
+ * top-level code throwing (which Node's ESM loader then memoizes as a
+ * permanently-rejected module record for that URL) than an unclassified
+ * resolution hiccup, so "unknown" defaults to the case a retry cannot fix.
+ */
+function classifyWebTreeSitterLoadFailure(
+	err: unknown,
+): "resolution" | "evaluation" {
+	const codes = collectErrorCodes(err);
+	return codes.some((code) => RESOLUTION_ERROR_CODES.has(code))
+		? "resolution"
+		: "evaluation";
+}
+
 // --- Parser Manager ---
 
 export class TreeSitterClient {
 	private initialized = false;
 	private initPromise: Promise<boolean> | null = null;
+	/**
+	 * Set when `loadWebTreeSitter()` itself rejects with an EVALUATION-shaped
+	 * error (#1592, review round 2 F1/F2) — `classifyWebTreeSitterLoadFailure`
+	 * above draws that line. That call is a dynamic `import()` of a fixed
+	 * resolved URL, and Node's ESM loader permanently memoizes a module
+	 * record that threw during evaluation — a later `import()` of the SAME
+	 * URL from a later `init()` call would just replay the cached rejection,
+	 * not re-attempt the load. Without this latch, every `withTreeSitterRoot()`
+	 * call (one per file parse) would re-invoke `init()`, see `initPromise`
+	 * cleared by the previous attempt's `finally`, and dynamically re-import —
+	 * a dead retry on the hot path. A RESOLUTION-shaped rejection does NOT
+	 * set this: it leaves `initPromise` cleared as before, so the next
+	 * `init()` call retries for real, because that class of failure can
+	 * plausibly clear before the next call arrives.
+	 *
+	 * SESSION-scoped, not process-lifetime (round 2 F2, the #1567/#1575
+	 * `sgSessionHold` precedent): re-armed by `resetLoadStateForSession()`,
+	 * wired into `resetDispatchBaselines()` via `tree-sitter-shared.ts`'s
+	 * `resetTreeSitterClientLoadState()`. Re-arming does not guarantee the
+	 * next attempt succeeds — if the process itself didn't restart between
+	 * sessions, Node's module cache is unchanged and the replay will just
+	 * fail fast again — but it gives a fresh degradation record for the new
+	 * session (the ledger's own `onceKeys` are cleared at session_start too)
+	 * instead of silently reusing a stale verdict forever, and it does let a
+	 * genuinely fixed install (process WAS restarted) recover.
+	 *
+	 * Distinct from `wasmAborted`, which stays process-lifetime and is
+	 * deliberately NOT included in the session reset: that flag means the
+	 * Emscripten WASM heap itself aborted mid-use — a runtime that DID load
+	 * and then corrupted its own memory. Reusing that heap after a "session"
+	 * boundary that isn't an actual process restart is not a retry, it's
+	 * operating on data already documented (tree-sitter-shared.ts) as
+	 * requiring a real restart to recover. `webTreeSitterLoadFailed` only
+	 * ever covers a runtime that never loaded in the first place, so nothing
+	 * corrupted survives a re-arm.
+	 */
+	private webTreeSitterLoadFailed = false;
 	private languages: Map<string, TreeSitterLanguage> = new Map();
 	private parsers: Map<string, TreeSitterParserInstance> = new Map();
 	private treeCache: TreeCache;
@@ -1004,11 +1100,36 @@ export class TreeSitterClient {
 	async init(): Promise<boolean> {
 		if (this.wasmAborted) return false;
 		if (this.initialized) return true;
+		if (this.webTreeSitterLoadFailed) return false;
 		if (this.initPromise) return this.initPromise;
 
 		this.initPromise = (async () => {
 			try {
-				const mod = await loadWebTreeSitter();
+				let mod: Awaited<ReturnType<typeof loadWebTreeSitter>>;
+				try {
+					mod = await loadWebTreeSitter();
+				} catch (err) {
+					// See webTreeSitterLoadFailed's doc: an EVALUATION-shaped
+					// rejection is a dead retry, so latch instead of leaving
+					// initPromise clearable (the finally below would otherwise let
+					// the very next parse call re-import the same doomed URL). A
+					// RESOLUTION-shaped rejection is left alone — initPromise still
+					// clears below, so the next init() call retries for real.
+					const classification = classifyWebTreeSitterLoadFailure(err);
+					if (classification === "evaluation") {
+						this.webTreeSitterLoadFailed = true;
+					}
+					recordDegradationOnce({
+						kind: "web-tree-sitter-load-failed",
+						subject: "web-tree-sitter",
+						reason:
+							(err instanceof Error ? err.message : String(err)) +
+							(classification === "resolution"
+								? " (resolution failure — retryable)"
+								: " (evaluation failure — latched for the session)"),
+					});
+					throw err;
+				}
 				// biome-ignore lint/suspicious/noExplicitAny: web-tree-sitter module shape varies (Parser direct / default-wrapped)
 				const anyMod = mod as any;
 				const ParserClass = anyMod.Parser || anyMod.default || anyMod;
@@ -1053,6 +1174,18 @@ export class TreeSitterClient {
 		})();
 
 		return this.initPromise;
+	}
+
+	/**
+	 * Re-arm the web-tree-sitter load latch for a new session (#1592 review
+	 * round 2 F2). Deliberately does NOT touch `wasmAborted` or `initialized`
+	 * — see `webTreeSitterLoadFailed`'s doc for why the abort case stays
+	 * process-lifetime, and a successful init has nothing to re-arm. Called
+	 * from `resetTreeSitterClientLoadState()` (tree-sitter-shared.ts), wired
+	 * into `resetDispatchBaselines()` beside `resetAstGrepNapiLoadState()`.
+	 */
+	resetLoadStateForSession(): void {
+		this.webTreeSitterLoadFailed = false;
 	}
 
 	/** Load language grammar */

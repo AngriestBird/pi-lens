@@ -15,6 +15,8 @@ import { access, readFile } from "node:fs/promises";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { withTimeout } from "../deadline-utils.js";
+import { incrementDegradationCount } from "../degradation-ledger.js";
+import { raceToCompletion } from "./aggregation.js";
 import type { MessageConnection } from "../deps/vscode-jsonrpc.js";
 import { logLatency } from "../latency-logger.js";
 // vscode-jsonrpc v9 ships an `exports` map exposing the Node entry as the
@@ -50,8 +52,18 @@ import {
 	negotiatePositionEncoding,
 	type PositionEncoding,
 } from "./position-encoding.js";
+import {
+	negotiateSyncKind,
+	TEXT_DOCUMENT_SYNC_KIND_FULL,
+	TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL,
+	type TextDocumentSyncKind,
+} from "./sync-kind.js";
 import { getStrategy } from "./wait-policy/index.js";
 import { WatchedFilesQueue } from "./watch-queue.js";
+import {
+	clearAllWorkspaceDiagnosticsCaches,
+	clearWorkspaceDiagnosticsCache,
+} from "./workspace-diagnostics-cache.js";
 
 // Opt-in publishDiagnostics trace (PILENS_PUB_DEBUG=1) — read once, negligible
 // hot-path cost. Surfaces each server's publish behavior (version + count) to
@@ -636,6 +648,39 @@ const LIVENESS_PING_QUERY = "__pi_lens_liveness_ping__";
 // cheaply rebuilt by the next full pull, the worst case is just one extra full
 // (non-`unchanged`) report per affected file.
 const WORKSPACE_PULL_RESULT_CACHE_MAX = 4096;
+// #1713: `workspace/diagnostic` has no per-file/per-identifier request to key
+// telemetry identity on — it is one project-wide pull — so timeout/late-answer
+// records use this fixed subject/scope instead of a real path.
+const WORKSPACE_PULL_SCOPE = "*workspace*";
+// #1669 review N2: cap on simultaneous re-pulls the `workspace/diagnostic/
+// refresh` handler fires for open documents. A workspace with hundreds of
+// open documents fanning out one `textDocument/diagnostic` request each,
+// with no cap, floods the server the refresh itself just told us is under
+// load. Small and fixed — this is a background improvement after the
+// protocol reply, never something worth tuning per project.
+const REFRESH_REPULL_CONCURRENCY = 4;
+
+/** Run `mapper` over `items` with at most `concurrency` in flight at once.
+ *  Same shape as `dependency-checker.ts`'s helper of the same name — a
+ *  worker-pool pattern repeated per-file by design in this codebase rather
+ *  than shared, so each caller can keep it un-exported and file-local. */
+async function mapWithConcurrency<T>(
+	items: readonly T[],
+	concurrency: number,
+	mapper: (item: T) => Promise<void>,
+): Promise<void> {
+	if (items.length === 0) return;
+	let nextIndex = 0;
+	const workerCount = Math.max(1, Math.min(concurrency, items.length));
+	const worker = async (): Promise<void> => {
+		while (true) {
+			const index = nextIndex++;
+			if (index >= items.length) return;
+			await mapper(items[index]);
+		}
+	};
+	await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
 // Anti-deadlock backstop for workspace/executeCommand. Deliberately generous
 // (30s): the command is mutating and legitimately long-running (a real server
 // refactor / organize-imports), so this must not truncate valid work — it only
@@ -695,6 +740,29 @@ function installCrashGuard(): void {
 }
 
 // --- Client State + Module-level helpers ---
+
+/**
+ * #1667: one live `client/registerCapability` entry, with the fields of
+ * `registerOptions` this client actually acts on.
+ *
+ * The map used to store the method name alone. That silently discarded
+ * `identifier` — the diagnostic SOURCE a `textDocument/diagnostic` registration
+ * speaks for. Roslyn registers "syntax", "semantic" and "analyzers" as separate
+ * sources; vtsls does the same. With the identifier gone the pull path issued
+ * one bare request and every other source's findings were never asked for.
+ * `workspaceDiagnostics` was discarded the same way, so workspace-pull support
+ * had to be guessed from the method name.
+ */
+export interface DynamicRegistration {
+	readonly method: string;
+	/** `registerOptions.identifier`. Absent = the server's default/bare source. */
+	readonly identifier?: string;
+	/** `registerOptions.workspaceDiagnostics` — whether THIS registration also
+	 *  serves a workspace-wide pull. Absent = the server did not say. */
+	readonly workspaceDiagnostics?: boolean;
+	/** `registerOptions.commands` for a `workspace/executeCommand` registration. */
+	readonly commands?: readonly string[];
+}
 
 export interface LSPClientState {
 	isConnected: boolean;
@@ -760,10 +828,16 @@ export interface LSPClientState {
 	 *  we sent for a path, tagged with the document version it was sent as.
 	 *  Captured at SEND time on in-memory content (never a disk read on the
 	 *  notification path) so a later `publishDiagnostics` echoing that version can
-	 *  bind its diagnostics to the content they were computed against. */
+	 *  bind its diagnostics to the content they were computed against.
+	 *
+	 *  #1669: `text` additionally retains that same payload's full content, but
+	 *  ONLY when `syncKind` is Incremental — the one case that needs it, to
+	 *  compute the NEXT change's full-range replace against the document as the
+	 *  server last saw it (see `buildContentChanges`). Full/None servers never
+	 *  populate it, so the common case pays no extra retained memory. */
 	readonly documentContentHashes: Map<
 		string,
-		{ version: number; hash: string }
+		{ version: number; hash: string; text?: string }
 	>;
 	/** #1095: the content binding for the diagnostics currently stored for a path
 	 *  — {version, contentHash} of the document those diagnostics were computed
@@ -776,8 +850,39 @@ export interface LSPClientState {
 	 *  pull for a path (primary or a `relatedDocuments` entry), so the NEXT pull
 	 *  can send it as `previousResultId` and receive an `unchanged` report instead
 	 *  of a full recompute. Cleared with the rest of a path's diagnostic state by
-	 *  `clearDiagnosticsForPath` so a resync never inherits a stale basis. */
+	 *  `clearDiagnosticsForPath` so a resync never inherits a stale basis.
+	 *
+	 *  #1667: keyed by (path, diagnostic identifier), not by path alone — result
+	 *  ids are per SOURCE. A server registering several diagnostic sources
+	 *  (Roslyn: syntax/semantic/analyzers) issues an independent id per source,
+	 *  and echoing one source's id to another makes the server answer
+	 *  `unchanged` against a basis it never issued. Build keys with
+	 *  `pullSourceKey`; the bare (identifier-less) source keys on the plain path
+	 *  so single-source servers are byte-identical to before. */
 	readonly pullResultIds: Map<string, string>;
+	/** #1667: per-source pull diagnostics for a path — outer key the normalized
+	 *  path, inner key the diagnostic identifier (`""` for the bare source).
+	 *  `documentPullDiagnostics` holds the DEDUPED UNION of these, recomputed
+	 *  after every source's report, so each source can be replaced independently
+	 *  without one source's answer wiping another's. Optional: a state built
+	 *  before this field existed lazily gains it on first pull. */
+	documentPullDiagnosticsBySource?: Map<string, Map<string, LSPDiagnostic[]>>;
+	/** #1667: per-path pull generation, bumped by `clearDiagnosticsForPath`. The
+	 *  fan-out leaves losing pulls running so their results still merge into the
+	 *  cache; a resync that lands in that window must not be overwritten by a
+	 *  pull computed against the content it just replaced. A late write whose
+	 *  captured generation no longer matches is dropped. */
+	pullGenerations?: Map<string, number>;
+	/** #1667: the sequence number of the NEWEST request issued for each
+	 *  `pullSourceKey(path, identifier)`. The generation counter above only
+	 *  guards against a resync; it says nothing about two overlapping fan-outs
+	 *  for the SAME unchanged content. `ensureWarmForSweep` touches a file and
+	 *  the real touch follows ~60ms later, so touch 2 can re-pull a source and
+	 *  store a fresh answer while touch 1's slow answer for that same source is
+	 *  still in flight - and the late loser would clobber the newer result.
+	 *  Each request stamps its own number here; a write whose stamp is no longer
+	 *  the newest is dropped. */
+	pullRequestSequences?: Map<string, number>;
 	/** #1104: per-path cache of the last `workspace/diagnostic` pull's resultId +
 	 *  diagnostics + content binding, so an `unchanged` report in a LATER pull can
 	 *  inherit the prior basis instead of the record site staying stuck at
@@ -811,10 +916,20 @@ export interface LSPClientState {
 	 *  the server advertised otherwise; drives character-offset translation on
 	 *  outgoing navigation requests. */
 	positionEncoding: PositionEncoding;
+	/** #1669: `textDocumentSync.change` kind the server negotiated at initialize
+	 *  — None (0), Full (1) or Incremental (2). Optional so existing state
+	 *  literals across the test suite don't all need updating; every read site
+	 *  falls back to `TEXT_DOCUMENT_SYNC_KIND_FULL`, which is the whole-document
+	 *  `{ text }` shape pi-lens has always sent — an absent value never changes
+	 *  behavior. Set once at initialize, next to `positionEncoding`. */
+	syncKind?: TextDocumentSyncKind;
 	/** Baseline mode from static initResult — used to revert on unregister */
 	staticDiagnosticsMode: "pull" | "push-only";
-	/** Live dynamic registrations from client/registerCapability: id → method */
-	readonly dynamicRegistrations: Map<string, string>;
+	/** Live dynamic registrations from client/registerCapability: id → record.
+	 *  #1667: the record carries the registration's `registerOptions`, not just
+	 *  its method. Dropping `identifier` made every diagnostic source of a
+	 *  multi-source server collapse into one bare pull. */
+	readonly dynamicRegistrations: Map<string, DynamicRegistration>;
 	/**
 	 * Commands the server advertised it can run via workspace/executeCommand
 	 * (initialize `executeCommandProvider.commands` + any dynamically registered
@@ -1084,13 +1199,17 @@ function normalizeLspDiagnostics(
 	return diagnostics.map(normalizeLspDiagnostic);
 }
 
+/**
+ * Union of diagnostic lists, first occurrence wins, exact duplicates dropped.
+ * Variadic since #1667 so the per-identifier pull sources merge through the
+ * SAME key as the push/pull merge rather than growing a second dedupe rule.
+ */
 function mergeDiagnosticLists(
-	push: LSPDiagnostic[] | undefined,
-	pull: LSPDiagnostic[] | undefined,
+	...lists: (LSPDiagnostic[] | undefined)[]
 ): LSPDiagnostic[] {
 	const merged: LSPDiagnostic[] = [];
 	const seen = new Set<string>();
-	for (const diagnostic of [...(push ?? []), ...(pull ?? [])]) {
+	for (const diagnostic of lists.flatMap((list) => list ?? [])) {
 		const key = [
 			diagnostic.range.start.line,
 			diagnostic.range.start.character,
@@ -1119,6 +1238,205 @@ function getMergedDiagnosticsForPath(
 			legacy.diagnostics?.get(normalizedPath),
 		state.documentPullDiagnostics?.get(normalizedPath),
 	);
+}
+
+/**
+ * #1667: per-source pull-diagnostic bookkeeping.
+ *
+ * A pull-mode server can expose several diagnostic SOURCES, each named by its
+ * registration's `registerOptions.identifier` (Roslyn: syntax, semantic,
+ * analyzers). Each source answers independently, with its own `resultId` and
+ * its own findings, so per-path state that used to be a single slot has to
+ * become one slot per (path, source):
+ *
+ *  - `pullResultIds` keys on `pullSourceKey(path, identifier)`, so an
+ *    `unchanged` report is only ever answered against the id THAT source
+ *    issued (#240/#1104 machinery, now per source).
+ *  - `documentPullDiagnosticsBySource` holds each source's findings, and
+ *    `documentPullDiagnostics` is their deduped union - recomputed whenever a
+ *    source reports, so a fresh answer from one source never wipes another's.
+ *
+ * The bare (identifier-less) source keys on the plain path, so a single-source
+ * server stores exactly what it stored before this change.
+ */
+// NUL is the one byte a filesystem path can never contain, so
+// `path + SEP + identifier` is unambiguous: no path/identifier pair can
+// produce the same key as a different pair, and the bare source's key (the
+// plain path) can never collide with a named source's.
+const PULL_SOURCE_KEY_SEPARATOR = "\u0000";
+const BARE_PULL_SOURCE = "";
+
+function pullSourceKey(
+	normalizedPath: string,
+	identifier: string | undefined,
+): string {
+	return identifier === undefined
+		? normalizedPath
+		: `${normalizedPath}${PULL_SOURCE_KEY_SEPARATOR}${identifier}`;
+}
+
+/** Every `pullResultIds` key belonging to a path - the bare key plus one per
+ *  identifier. Used by the clear path so a resync drops EVERY source's basis. */
+function pullSourceKeysForPath(
+	state: LSPClientState,
+	normalizedPath: string,
+): string[] {
+	const prefix = `${normalizedPath}${PULL_SOURCE_KEY_SEPARATOR}`;
+	return [
+		normalizedPath,
+		...[...(state.pullResultIds?.keys() ?? [])].filter((key) =>
+			key.startsWith(prefix),
+		),
+	];
+}
+
+function pullSourcesFor(
+	state: LSPClientState,
+	normalizedPath: string,
+): Map<string, LSPDiagnostic[]> {
+	if (!state.documentPullDiagnosticsBySource) {
+		state.documentPullDiagnosticsBySource = new Map();
+	}
+	let sources = state.documentPullDiagnosticsBySource.get(normalizedPath);
+	if (!sources) {
+		sources = new Map();
+		state.documentPullDiagnosticsBySource.set(normalizedPath, sources);
+	}
+	return sources;
+}
+
+/** This source's currently stored findings for a path - what an `unchanged`
+ *  report inherits. Falls back to the whole per-path list when the source map
+ *  has no entry yet, so a state that pulled before this change (or a caller
+ *  that seeded `documentPullDiagnostics` directly) still inherits correctly. */
+function pullSourceDiagnostics(
+	state: LSPClientState,
+	normalizedPath: string,
+	identifier: string | undefined,
+): LSPDiagnostic[] {
+	const sources = state.documentPullDiagnosticsBySource?.get(normalizedPath);
+	const stored = sources?.get(identifier ?? BARE_PULL_SOURCE);
+	if (stored) return stored;
+	return sources && sources.size > 0
+		? []
+		: (state.documentPullDiagnostics.get(normalizedPath) ?? []);
+}
+
+/** Store one source's findings and republish the union to
+ *  `documentPullDiagnostics`, which every reader outside this file uses. */
+function storePullSourceDiagnostics(
+	state: LSPClientState,
+	normalizedPath: string,
+	identifier: string | undefined,
+	diagnostics: LSPDiagnostic[],
+): void {
+	const sources = pullSourcesFor(state, normalizedPath);
+	sources.set(identifier ?? BARE_PULL_SOURCE, diagnostics);
+	state.documentPullDiagnostics.set(
+		normalizedPath,
+		mergeDiagnosticLists(...sources.values()),
+	);
+}
+
+/** #1667: the pull generation for a path. The fan-out deliberately lets losing
+ *  pulls run to completion so their findings still reach the cache; a resync
+ *  that lands first must win, so every late write re-checks this. */
+function pullGenerationFor(
+	state: LSPClientState,
+	normalizedPath: string,
+): number {
+	return state.pullGenerations?.get(normalizedPath) ?? 0;
+}
+
+function bumpPullGeneration(
+	state: LSPClientState,
+	normalizedPath: string,
+): void {
+	if (!state.pullGenerations) state.pullGenerations = new Map();
+	state.pullGenerations.set(
+		normalizedPath,
+		(state.pullGenerations.get(normalizedPath) ?? 0) + 1,
+	);
+}
+
+/** #1667: claim the newest-request slot for a source and return the claim.
+ *  Called at REQUEST time; `isNewestPullRequest` re-checks it at WRITE time so
+ *  a slow answer from an earlier fan-out cannot overwrite a newer one's. */
+function claimPullRequestSequence(
+	state: LSPClientState,
+	sourceKey: string,
+): number {
+	if (!state.pullRequestSequences) state.pullRequestSequences = new Map();
+	const next = (state.pullRequestSequences.get(sourceKey) ?? 0) + 1;
+	state.pullRequestSequences.set(sourceKey, next);
+	return next;
+}
+
+function isNewestPullRequest(
+	state: LSPClientState,
+	sourceKey: string,
+	sequence: number,
+): boolean {
+	return (state.pullRequestSequences?.get(sourceKey) ?? 0) === sequence;
+}
+
+/**
+ * #1667: drop every trace of a diagnostic source the server just unregistered.
+ *
+ * `client/unregisterCapability` retires a source, but its findings sit in
+ * `documentPullDiagnosticsBySource` and its resultId in `pullResultIds`, so
+ * without this the union keeps serving a retired source's diagnostics until
+ * something resyncs the file. Roslyn and vtsls re-register their sources on
+ * solution reload, which is exactly when the old source's findings are stale.
+ *
+ * Purges the source's slice from every path and republishes each affected
+ * path's union, so the removal is visible on the next read rather than only
+ * after the next pull.
+ */
+function retirePullSource(state: LSPClientState, identifier: string): void {
+	const suffix = `${PULL_SOURCE_KEY_SEPARATOR}${identifier}`;
+	for (const source of [state.pullResultIds, state.pullRequestSequences]) {
+		if (!source) continue;
+		for (const key of [...source.keys()]) {
+			if (key.endsWith(suffix)) source.delete(key);
+		}
+	}
+	for (const [normalizedPath, sources] of state.documentPullDiagnosticsBySource ??
+		[]) {
+		if (!sources.delete(identifier)) continue;
+		state.documentPullDiagnostics.set(
+			normalizedPath,
+			mergeDiagnosticLists(...sources.values()),
+		);
+		bumpDiagnosticsVersion(state, normalizedPath);
+		state.diagnosticEmitter.emit("diagnostics", normalizedPath);
+	}
+}
+
+/**
+ * #1667: the diagnostic sources to pull for a document - always the bare
+ * request (a server may answer it even while registering named sources, and it
+ * is the ONLY request a single-source server understands), plus one per
+ * distinct `identifier` on a live `textDocument/diagnostic` registration.
+ *
+ * Derived from `dynamicRegistrations` on every call rather than cached in a
+ * parallel list: the registration map is the single source of truth, and
+ * `client/unregisterCapability` must be able to retire a source immediately.
+ */
+export function pullDiagnosticSources(
+	state: LSPClientState,
+): (string | undefined)[] {
+	const identifiers = new Set<string>();
+	for (const registration of state.dynamicRegistrations?.values() ?? []) {
+		if (registration.method !== "textDocument/diagnostic") continue;
+		if (registration.identifier) identifiers.add(registration.identifier);
+	}
+	// Sorted for a stable, reproducible request order in logs and tests; the
+	// fan-out is parallel, so order carries no priority.
+	return [
+		undefined,
+		...[...identifiers].sort((a, b) => a.localeCompare(b)),
+	];
 }
 
 /** #1531: bump the client-global diagnostics counter and stamp the path it was
@@ -1176,7 +1494,24 @@ export function clearDiagnosticsForPath(
 	// #1104: a resync invalidates any `unchanged`-report basis too — the next
 	// pull must not inherit a resultId/contentHash computed against the
 	// content this resync just replaced.
-	state.pullResultIds?.delete(normalizedPath);
+	// #1667: every SOURCE's basis, not just the bare one - a multi-source server
+	// holds one resultId per identifier, and leaving even one behind lets the
+	// next pull inherit against content this resync replaced.
+	for (const key of pullSourceKeysForPath(state, normalizedPath)) {
+		state.pullResultIds?.delete(key);
+	}
+	// `pullRequestSequences` is deliberately NOT cleared here. It is a
+	// monotonic per-source counter, and resetting it would let a request issued
+	// BEFORE this resync claim the same number as one issued after, so the stale
+	// answer would pass the newest-request check. The two guards cover different
+	// cases and neither subsumes the other: the generation bump below invalidates
+	// in-flight work when nothing newer was requested, and the sequence stamp
+	// invalidates it when something newer was.
+	state.documentPullDiagnosticsBySource?.delete(normalizedPath);
+	// #1667: invalidate any pull still in flight for this path. The fan-out lets
+	// losing pulls run to completion so their findings still reach the cache;
+	// without this bump one of them could resurrect what this resync cleared.
+	bumpPullGeneration(state, normalizedPath);
 	state.workspacePullResultCache?.delete(normalizedPath);
 	legacy.diagnostics?.delete(normalizedPath);
 	legacy.diagnosticTimestamps?.delete(normalizedPath);
@@ -1266,6 +1601,12 @@ function recordSentContent(
 	state.documentContentHashes.set(normalizedPath, {
 		version,
 		hash: hashDiagnosticContent(content),
+		// #1669: retain the full text only for Incremental — the sole reader
+		// (`buildContentChanges`) needs it to compute the NEXT change against
+		// what the server last saw; Full/None never read this field.
+		...(state.syncKind === TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL && {
+			text: content,
+		}),
 	});
 	// #1641 criterion 3: the in-memory document's version + content length AT
 	// SEND TIME, so a later "diagnostic cited a line past current disk EOF"
@@ -1298,6 +1639,68 @@ function recordSentContent(
 	});
 }
 
+/**
+ * #1669: the `contentChanges` array for a `textDocument/didChange` notification.
+ *
+ * Full/None (or unrecognized/absent) sync kind: unchanged — a single
+ * whole-document `{ text }` event, the shape pi-lens has always sent.
+ *
+ * Incremental: a server registering Incremental-only expects every change
+ * event to carry a `range`; a shapeless whole-document event is out of spec
+ * for it. Rather than hand-roll a real diff, send the SAFEST incremental
+ * representation of a full update — one ranged edit spanning the entire
+ * PREVIOUS document (start of file to its last character), replacing it with
+ * the entire new content. That is spec-valid for any Incremental server and
+ * semantically identical to the Full-sync event it replaces.
+ *
+ * The previous document's end position is computed from the text
+ * `recordSentContent` retained for THIS path the last time content was sent
+ * (reusing that seam rather than a second parallel content store — see its
+ * doc comment). No prior text on record (first change since Incremental was
+ * negotiated, or the path was never sent before) falls back to the
+ * whole-document shape — still spec-valid, and self-heals once the next
+ * change has a retained previous text to diff against.
+ */
+function buildContentChanges(
+	state: LSPClientState,
+	normalizedPath: string,
+	content: string,
+): Array<{
+	range?: { start: { line: number; character: number }; end: { line: number; character: number } };
+	text: string;
+}> {
+	if (state.syncKind !== TEXT_DOCUMENT_SYNC_KIND_INCREMENTAL) {
+		return [{ text: content }];
+	}
+	const previousText = state.documentContentHashes.get(normalizedPath)?.text;
+	if (previousText === undefined) {
+		return [{ text: content }];
+	}
+	// #1669 review F6: split on every LSP line terminator (\r\n, lone \r, or
+	// \n), not just \n — a document using CRLF or lone-CR line endings would
+	// otherwise be undercounted, computing a range that ends mid-document
+	// instead of at the real last line.
+	const previousLines = previousText.split(/\r\n|\r|\n/);
+	const lastLine = previousLines.length - 1;
+	const lastLineText = previousLines[lastLine] ?? "";
+	return [
+		{
+			range: {
+				start: { line: 0, character: 0 },
+				end: {
+					line: lastLine,
+					character: convertCharacterOffset(
+						state.positionEncoding,
+						lastLineText,
+						lastLineText.length,
+					),
+				},
+			},
+			text: content,
+		},
+	];
+}
+
 // Methods that can be registered dynamically and map to operationSupport keys
 const DYNAMIC_OPERATION_METHOD_MAP: Record<string, keyof LSPOperationSupport> =
 	{
@@ -1316,7 +1719,8 @@ const DYNAMIC_OPERATION_METHOD_MAP: Record<string, keyof LSPOperationSupport> =
 	};
 
 export function applyDynamicCapabilities(state: LSPClientState): void {
-	const registeredMethods = new Set(state.dynamicRegistrations.values());
+	const registrations = [...state.dynamicRegistrations.values()];
+	const registeredMethods = new Set(registrations.map((r) => r.method));
 
 	const hasDynamicPull =
 		registeredMethods.has("textDocument/diagnostic") ||
@@ -1326,7 +1730,16 @@ export function applyDynamicCapabilities(state: LSPClientState): void {
 		state.workspaceDiagnosticsSupport = {
 			advertised: true,
 			mode: "pull",
-			workspaceDiagnostics: registeredMethods.has("workspace/diagnostic"),
+			// #1667: workspace-pull support is what the REGISTRATION declares. The
+			// spec registers workspace pull as `registerOptions.workspaceDiagnostics`
+			// on a `textDocument/diagnostic` registration - `workspace/diagnostic` is
+			// not itself a registrable method - so reading the method name alone
+			// missed every conforming server and this client never issued a
+			// workspace pull for one. The method-name check stays as a fallback for
+			// servers that register it as a method anyway.
+			workspaceDiagnostics:
+				registrations.some((r) => r.workspaceDiagnostics === true) ||
+				registeredMethods.has("workspace/diagnostic"),
 			diagnosticProviderKind: "dynamic",
 		};
 	} else if (
@@ -1588,22 +2001,40 @@ export function setupIncomingHandlers(
 			registrations?: Array<{
 				id: string;
 				method: string;
-				registerOptions?: { commands?: unknown };
+				registerOptions?: {
+					commands?: unknown;
+					identifier?: unknown;
+					workspaceDiagnostics?: unknown;
+				};
 			}>;
 		}) => {
 			for (const reg of params?.registrations ?? []) {
+				const options = reg.registerOptions;
+				const commands = Array.isArray(options?.commands)
+					? options.commands.filter(
+							(cmd): cmd is string => typeof cmd === "string",
+						)
+					: undefined;
 				if (reg.id && reg.method) {
-					state.dynamicRegistrations.set(reg.id, reg.method);
+					// #1667: keep the whole registration, not just its method. An empty
+					// `identifier` is treated as absent - it names no source, and
+					// sending `identifier: ""` would be a second, indistinguishable
+					// bare pull.
+					state.dynamicRegistrations.set(reg.id, {
+						method: reg.method,
+						...(typeof options?.identifier === "string" && options.identifier
+							? { identifier: options.identifier }
+							: {}),
+						...(typeof options?.workspaceDiagnostics === "boolean"
+							? { workspaceDiagnostics: options.workspaceDiagnostics }
+							: {}),
+						...(commands ? { commands } : {}),
+					});
 				}
 				// executeCommand commands can arrive dynamically too — merge them
 				// into the allowlist so dynamically-registered commands are runnable.
-				if (
-					reg.method === "workspace/executeCommand" &&
-					Array.isArray(reg.registerOptions?.commands)
-				) {
-					for (const cmd of reg.registerOptions.commands) {
-						if (typeof cmd === "string") state.advertisedCommands.add(cmd);
-					}
+				if (reg.method === "workspace/executeCommand" && commands) {
+					for (const cmd of commands) state.advertisedCommands.add(cmd);
 				}
 			}
 			applyDynamicCapabilities(state);
@@ -1612,9 +2043,30 @@ export function setupIncomingHandlers(
 	state.connection.onRequest(
 		"client/unregisterCapability",
 		async (params: { unregisterations?: Array<{ id: string }> }) => {
+			const retiredIdentifiers = new Set<string>();
 			for (const unreg of params?.unregisterations ?? []) {
-				if (unreg.id) {
-					state.dynamicRegistrations.delete(unreg.id);
+				if (!unreg.id) continue;
+				const registration = state.dynamicRegistrations.get(unreg.id);
+				state.dynamicRegistrations.delete(unreg.id);
+				if (
+					registration?.method === "textDocument/diagnostic" &&
+					registration.identifier
+				) {
+					retiredIdentifiers.add(registration.identifier);
+				}
+			}
+			// #1667: a retired source's cached findings and resultId must go with
+			// it, or the union keeps serving them. Checked after the deletes above,
+			// and only when NO surviving registration still speaks for that
+			// identifier.
+			const stillRegistered = new Set(
+				[...state.dynamicRegistrations.values()]
+					.filter((r) => r.method === "textDocument/diagnostic")
+					.map((r) => r.identifier),
+			);
+			for (const identifier of retiredIdentifiers) {
+				if (!stillRegistered.has(identifier)) {
+					retirePullSource(state, identifier);
 				}
 			}
 			applyDynamicCapabilities(state);
@@ -1679,6 +2131,135 @@ export function setupIncomingHandlers(
 		},
 	);
 	state.connection.onRequest("window/workDoneProgress/create", async () => {});
+	// #1669: a server can send `workspace/diagnostic/refresh` (typically after a
+	// project-wide config change) to say every pull result it has already
+	// reported may be stale. Left unhandled, vscode-jsonrpc replies
+	// MethodNotFound to a server explicitly telling us its results are stale —
+	// this is exactly the signal `workspacePullResultCache` and the persisted
+	// workspace-diagnostics cache want (the #1461 family, server-initiated for
+	// once). Reply null per spec and drop both so the NEXT pull recomputes
+	// instead of replaying — or inheriting an `unchanged` basis from — results
+	// the server just told us to distrust.
+	// #1669 review R1: single-flight coalescing latch for the re-pull pool
+	// below, scoped to THIS client (one `setupIncomingHandlers` call per
+	// connection). A refresh FLOOD — a watch-mode rebuild or a `git checkout`
+	// can legitimately fire many `workspace/diagnostic/refresh` requests in a
+	// tight burst — used to queue one independent capped pool PER refresh:
+	// N refreshes meant N pools running concurrently (peak concurrency N x
+	// the per-pool cap) and N full passes over every open document (N x
+	// redundant pulls for the SAME documents). `refreshRepullRunning` gates a
+	// SECOND pool from ever starting while one is already in flight;
+	// `refreshRepullRerunRequested` remembers that at least one more refresh
+	// arrived meanwhile and coalesces it into exactly ONE trailing rerun
+	// after the current pool finishes, using a FRESH snapshot of open
+	// documents at rerun time (not the stale list from whenever the burst
+	// started) — so an arbitrarily large burst still costs at most 2 passes
+	// and never more than `REFRESH_REPULL_CONCURRENCY` pulls at once.
+	let refreshRepullRunning = false;
+	let refreshRepullRerunRequested = false;
+
+	const runRefreshRepullPool = async (): Promise<void> => {
+		do {
+			refreshRepullRerunRequested = false;
+			const toRepull =
+				state.workspaceDiagnosticsSupport.mode === "pull"
+					? [...state.openDocuments]
+					: [];
+			if (toRepull.length > 0) {
+				try {
+					await mapWithConcurrency(
+						toRepull,
+						REFRESH_REPULL_CONCURRENCY,
+						async (normalizedPath) => {
+							const uri = state.openDocumentUris?.get(normalizedPath);
+							const filePath = uri ? uriToPath(uri) : normalizedPath;
+							await clientRequestPullDiagnostics(state, filePath);
+						},
+					);
+				} catch (err) {
+					// #1669 review N2: rejections are observed, never
+					// `void`-swallowed — `clientRequestPullDiagnostics` itself never
+					// throws (it returns an `unavailable` outcome), so this only
+					// fires on a genuine programming error, but a silent throw
+					// inside `mapWithConcurrency`'s `Promise.all` must not vanish.
+					incrementDegradationCount({
+						kind: "lsp-pull-unconfirmed",
+						subject: state.serverId,
+						reason: `refresh re-pull threw: ${err instanceof Error ? err.message : String(err)}`,
+					});
+				}
+			}
+			// A refresh that arrived WHILE this pool was running gets exactly
+			// one more pass, never a pass per refresh.
+		} while (refreshRepullRerunRequested);
+		refreshRepullRunning = false;
+	};
+
+	state.connection.onRequest("workspace/diagnostic/refresh", async () => {
+		state.workspacePullResultCache.clear();
+		// #1669 review F1: clear every on-disk sweep cache this process has
+		// recorded a cwd for — `state.root` alone is a per-SERVER identity
+		// marker that a monorepo/multi-root project routinely nests BELOW the
+		// real sweep cwd, so clearing ONLY there would miss the cache file the
+		// sweep actually reads/writes. See the doc comment on
+		// `clearAllWorkspaceDiagnosticsCaches`.
+		clearAllWorkspaceDiagnosticsCaches();
+		// #1669 review N3: ALSO clear at `state.root` directly. The registry
+		// above only knows cwds a sweep has already run under IN THIS PROCESS —
+		// a refresh arriving before this project's first sweep this process
+		// (e.g. right after a respawn) would otherwise clear nothing at all,
+		// and a later sweep would load the untouched, now-genuinely-stale
+		// on-disk cache a PRIOR process/session left behind. `state.root` is
+		// the one cwd this handler can always reach regardless of registry
+		// state — a cheap, durable backstop for the common single-root case
+		// where root and sweep cwd coincide. It does NOT cover a monorepo
+		// subproject a sweep hasn't reached yet under a DIFFERENT cwd than
+		// `state.root` — that residual gap is tracked in #1707, not silently
+		// claimed as solved (see `clearAllWorkspaceDiagnosticsCaches`'s doc
+		// comment for the full shape).
+		clearWorkspaceDiagnosticsCache(state.root);
+		// #1669 review F3: a server-initiated "everything may be stale" signal
+		// must drop the SAME per-document state a normal resync already drops
+		// via `clearDiagnosticsForPath` (pullResultIds, pushDiagnostics,
+		// documentPullDiagnostics, diagnosticBindings,
+		// diagnosticsVersionsByPath, ...) — dropping only
+		// `workspacePullResultCache` above left every open document's OTHER
+		// pull state intact, so the next pull would echo a disowned
+		// `previousResultId`, get back `kind: "unchanged"`, and re-confirm
+		// stale diagnostics under a fresh timestamp; nothing would ever
+		// re-pull on its own. This clear is cheap and always runs — every
+		// refresh in a burst gets its own, unlike the re-pull pool below.
+		for (const normalizedPath of state.openDocuments) {
+			clearDiagnosticsForPath(state, normalizedPath);
+		}
+		// #1669 review N2: reply to the PROTOCOL request now — every clear
+		// above is synchronous and already complete, so there is nothing left
+		// this reply should wait on. The re-pull below is a background
+		// improvement (so an open document reflects the refresh without
+		// waiting on its next edit), never something worth delaying — or
+		// risking — the required `null` reply over.
+		if (
+			state.workspaceDiagnosticsSupport.mode === "pull" &&
+			state.openDocuments.size > 0
+		) {
+			if (refreshRepullRunning) {
+				// #1669 review R1: a pool is already in flight from an earlier
+				// refresh in this burst — coalesce instead of starting a second
+				// one.
+				refreshRepullRerunRequested = true;
+			} else {
+				refreshRepullRunning = true;
+				// `setImmediate` defers even the SYNCHRONOUS prefix of the pool
+				// (URI lookups, map bookkeeping) to the next tick, so it can
+				// never compete with this reply for the current one regardless
+				// of how many documents are open.
+				setImmediate(() => {
+					void runRefreshRepullPool();
+				});
+			}
+		}
+		return null;
+	});
 }
 
 /**
@@ -1757,11 +2338,125 @@ type PullDiagnosticsOutcome =
 	| { status: "clean" }
 	| { status: "unavailable" };
 
+/**
+ * One diagnostic SOURCE's outcome. `primaryCount` is the part of `count` that
+ * belongs to the REQUESTED file — `count` also includes `relatedDocuments`.
+ * The fan-out races on `primaryCount` because "the answer arrived" means the
+ * file the caller asked about has an answer, not that some other document did.
+ */
+type PullSourceOutcome =
+	| { status: "found"; count: number; primaryCount: number }
+	| { status: "clean" }
+	| { status: "unavailable" };
+
+/** Margin between each source's own request timeout and the race's backstop
+ *  deadline, so the natural "all sources settled" path wins over the backstop
+ *  and the race never reports `unavailable` for sources that did answer. */
+const PULL_RACE_BACKSTOP_MARGIN_MS = 25;
+
+/**
+ * #1667: pull EVERY registered diagnostic source for a file, in parallel, and
+ * answer as soon as the first source returns findings for that file.
+ *
+ * Roslyn, vtsls and some Java setups register `textDocument/diagnostic` once
+ * per source (syntax, semantic, analyzers), each named by
+ * `registerOptions.identifier`. One bare request asks only the server's default
+ * source, so whole categories of findings were never requested. The fan-out
+ * asks all of them plus the bare request.
+ *
+ * Timing is deliberate and load-bearing:
+ *  - PARALLEL, never one source after another. Sequencing would add every
+ *    slow source's latency to every touch.
+ *  - The race resolves on the FIRST source with findings for the file, with no
+ *    settle or debounce window after the match. A post-match wait is the exact
+ *    latency shape #1112/#1407 already cost this codebase once.
+ *  - Losing sources are NOT cancelled. Each source writes its own findings into
+ *    the pull cache before it resolves, so a late answer merges in the
+ *    background and the NEXT read of the file sees it. Late answers are not
+ *    dropped, they are just not waited for.
+ *
+ * The race runs inside the existing `raceToCompletion` primitive rather than a
+ * second first-wins helper.
+ */
 async function clientRequestPullDiagnostics(
 	state: LSPClientState,
 	filePath: string,
 	budgetMs: number = PULL_REQUEST_TIMEOUT_MS,
 ): Promise<PullDiagnosticsOutcome> {
+	if (!isClientAlive(state)) return { status: "unavailable" };
+	const sources = pullDiagnosticSources(state);
+	if (sources.length === 1) {
+		// The overwhelmingly common case: no named sources registered. Skip the
+		// race entirely so a single-source server pays nothing for this feature.
+		return aggregatePullOutcomes(state, filePath, [
+			await pullDiagnosticSource(state, filePath, budgetMs, undefined),
+		]);
+	}
+
+	const attempts = sources.map((identifier) =>
+		pullDiagnosticSource(state, filePath, budgetMs, identifier),
+	);
+	const settled = await raceToCompletion(
+		attempts,
+		(results) => results.some((r) => r.status === "found" && r.primaryCount > 0),
+		{
+			// No graceMs: finalize the instant a source answers for this file.
+			// The per-request `withTimeout` inside each attempt is the real bound;
+			// this deadline is only a backstop, so it sits just past it.
+			timeoutMs:
+				Math.max(1, Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs)) +
+				PULL_RACE_BACKSTOP_MARGIN_MS,
+		},
+	);
+	return aggregatePullOutcomes(state, filePath, settled);
+}
+
+/**
+ * Collapse the sources that answered into one outcome for the caller.
+ * `found` beats `clean` beats `unavailable`: a source with findings is an
+ * answer, an authoritative empty report is an answer, and only "nobody
+ * answered" is unavailable (#240 — an empty result must distinguish clean
+ * from errored).
+ */
+function aggregatePullOutcomes(
+	state: LSPClientState,
+	filePath: string,
+	outcomes: PullSourceOutcome[],
+): PullDiagnosticsOutcome {
+	const found = outcomes.filter((o) => o.status === "found");
+	if (found.length > 0) {
+		const normalizedPath = normalizeMapKey(filePath);
+		// The union for the requested file, which is what a caller reading the
+		// cache will see. A source that only reported `relatedDocuments` findings
+		// contributes nothing there, so fall back to its own count.
+		const unionCount =
+			state.documentPullDiagnostics.get(normalizedPath)?.length ?? 0;
+		return {
+			status: "found",
+			count: Math.max(unionCount, ...found.map((o) => o.count)),
+		};
+	}
+	// #240, applied across sources: `clean` is an authoritative "this file has no
+	// findings", and one source saying so proves nothing about a source that
+	// FAILED to answer. A fan-out where any source errored is therefore
+	// unavailable, not clean - the caller falls through to the push-wait/timeout
+	// backstop instead of recording a confirmed-clean touch it cannot support.
+	// (`raceToCompletion` drops still-pending promises from its result array, so
+	// "every source settled, none errored" is the only shape that reads clean.)
+	if (outcomes.some((o) => o.status === "unavailable")) {
+		return { status: "unavailable" };
+	}
+	return outcomes.some((o) => o.status === "clean")
+		? { status: "clean" }
+		: { status: "unavailable" };
+}
+
+async function pullDiagnosticSource(
+	state: LSPClientState,
+	filePath: string,
+	budgetMs: number,
+	identifier: string | undefined,
+): Promise<PullSourceOutcome> {
 	if (!isClientAlive(state)) return { status: "unavailable" };
 	const uri = pathToFileURL(filePath).href;
 	const normalizedPath = normalizeMapKey(filePath);
@@ -1769,28 +2464,53 @@ async function clientRequestPullDiagnostics(
 	// hasn't changed its view can answer `kind: "unchanged"` instead of
 	// recomputing — see the `kind === "unchanged"` branch below for how that's
 	// honored (inherit, never treat an omitted `items` as clean).
-	const previousResultId = state.pullResultIds.get(normalizedPath);
+	// #1667: read THIS source's id, never another source's. Result ids are
+	// issued per source, so echoing a syntax id on a semantic request asks the
+	// server to compare against a basis it never handed out.
+	const sourceKey = pullSourceKey(normalizedPath, identifier);
+	const previousResultId = state.pullResultIds.get(sourceKey);
+	// #1667: the generation this pull was computed against. A resync landing
+	// while the request is in flight bumps it, and every write below is dropped
+	// rather than resurrecting state the resync cleared.
+	const generation = pullGenerationFor(state, normalizedPath);
+	// #1667: claim the newest-request slot for THIS source. Two fan-outs can
+	// overlap for the same file with no resync between them (`ensureWarmForSweep`
+	// touches, then the real touch follows ~60ms later), so the generation check
+	// alone would let a slow answer from the earlier round land on top of a newer
+	// one. Re-checked at write time below.
+	const requestSequence = claimPullRequestSequence(state, sourceKey);
+	// #1713: captured OUTSIDE withTimeout so a timeout's `catch` below still
+	// holds a live handle on the request. `withTimeout` itself only races it
+	// against a timer — the request keeps running server-side either way — and
+	// without this handle the abandoned answer would settle into the void with
+	// no way to observe it.
+	const requestStartedAt = Date.now();
+	const effectiveTimeoutMs = Math.max(
+		1,
+		Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs),
+	);
+	const requestPromise = safeSendRequest<{
+		kind?: string;
+		resultId?: string;
+		items?: LSPDiagnostic[];
+		relatedDocuments?: Record<
+			string,
+			{ kind?: string; resultId?: string; items?: LSPDiagnostic[] }
+		>;
+	}>(state.connection, "textDocument/diagnostic", {
+		textDocument: { uri },
+		// #1667: name the source this request is for, so the server answers
+		// from that source instead of its default one.
+		...(identifier !== undefined && { identifier }),
+		...(previousResultId !== undefined && { previousResultId }),
+	});
 	try {
 		// withTimeout is the backstop against a hung pull-mode server: without it
 		// this await never settles unless the stream is destroyed. Bounded by the
 		// smaller of the absolute ceiling and the caller's remaining wait budget.
 		// On timeout the caught error yields `unavailable` below (never a false
 		// `clean`), so it falls through to the push-wait/timeout backstop.
-		const report = await withTimeout(
-			safeSendRequest<{
-				kind?: string;
-				resultId?: string;
-				items?: LSPDiagnostic[];
-				relatedDocuments?: Record<
-					string,
-					{ kind?: string; resultId?: string; items?: LSPDiagnostic[] }
-				>;
-			}>(state.connection, "textDocument/diagnostic", {
-				textDocument: { uri },
-				...(previousResultId !== undefined && { previousResultId }),
-			}),
-			Math.max(1, Math.min(PULL_REQUEST_TIMEOUT_MS, budgetMs)),
-		);
+		const report = await withTimeout(requestPromise, effectiveTimeoutMs);
 
 		if (!report) {
 			recordPullFailure(state, "textDocument/diagnostic", new Error("empty response"));
@@ -1805,29 +2525,58 @@ async function clientRequestPullDiagnostics(
 		// response describes whatever the server had when it answered, which for
 		// a pi-lens-opened document is exactly that last-sent payload.
 		const sentHash = state.documentContentHashes.get(normalizedPath)?.hash;
-		let totalCount: number;
+		// #1667: two ways this answer can already be obsolete, and neither may
+		// write. Report the round trip as unavailable - a superseded answer is not
+		// evidence the file is clean (#240).
+		//  - A resync landed while the request was in flight, so these findings
+		//    describe content that no longer exists.
+		//  - A LATER request for this same source has already been issued (an
+		//    overlapping fan-out), so this answer is the stale loser and would
+		//    clobber the newer result.
+		if (
+			pullGenerationFor(state, normalizedPath) !== generation ||
+			!isNewestPullRequest(state, sourceKey, requestSequence)
+		) {
+			return { status: "unavailable" };
+		}
+		let primaryCount: number;
 		if (report.kind === "unchanged") {
 			// #1104: same resultId basis as last time — an omitted `items` here
 			// means "no change", NOT "clean". Overwriting with `[]` would be the
 			// exact false-clean shape #570/#571 already fixed for the touch path;
 			// keep the previously stored diagnostics and binding as-is.
-			totalCount = state.documentPullDiagnostics.get(normalizedPath)?.length ?? 0;
+			// #1667: "the previously stored diagnostics" means THIS SOURCE's, so
+			// one source reporting unchanged neither inherits nor disturbs another
+			// source's findings for the same file.
+			primaryCount = pullSourceDiagnostics(
+				state,
+				normalizedPath,
+				identifier,
+			).length;
 			// Still a fresh confirmation as of `now` even though the content is
 			// unchanged — bump the timestamp so `getAllDiagnostics()` doesn't read
 			// this entry as aging purely because the server had nothing new to say.
 			state.documentPullDiagnosticTimestamps.set(normalizedPath, now);
 		} else {
 			const primaryItems = normalizeLspDiagnostics(report.items ?? []);
-			state.documentPullDiagnostics.set(normalizedPath, primaryItems);
+			// #1667: replace only this source's slice; `documentPullDiagnostics`
+			// becomes the deduped union of every source that has reported.
+			storePullSourceDiagnostics(
+				state,
+				normalizedPath,
+				identifier,
+				primaryItems,
+			);
 			state.documentPullDiagnosticTimestamps.set(normalizedPath, now);
 			bumpDiagnosticsVersion(state, normalizedPath);
 			state.diagnosticBindings.set(normalizedPath, { contentHash: sentHash });
-			totalCount = primaryItems.length;
+			primaryCount = primaryItems.length;
 		}
+		let totalCount = primaryCount;
 		if (report.resultId !== undefined) {
-			state.pullResultIds.set(normalizedPath, report.resultId);
+			state.pullResultIds.set(sourceKey, report.resultId);
 		} else {
-			state.pullResultIds.delete(normalizedPath);
+			state.pullResultIds.delete(sourceKey);
 		}
 
 		// #1531 note (pre-existing, unchanged): a related document's diagnostics are
@@ -1844,13 +2593,24 @@ async function clientRequestPullDiagnostics(
 			)) {
 				const relatedPath = uriToPath(relatedUri);
 				const relatedNormalized = normalizeMapKey(relatedPath);
+				// #1667: a related document's report belongs to the SAME source as
+				// the request that carried it, so it stores and inherits under that
+				// source's key too.
 				if (related?.kind === "unchanged") {
-					totalCount +=
-						state.documentPullDiagnostics.get(relatedNormalized)?.length ?? 0;
+					totalCount += pullSourceDiagnostics(
+						state,
+						relatedNormalized,
+						identifier,
+					).length;
 					state.documentPullDiagnosticTimestamps.set(relatedNormalized, now);
 				} else {
 					const relatedItems = normalizeLspDiagnostics(related?.items ?? []);
-					state.documentPullDiagnostics.set(relatedNormalized, relatedItems);
+					storePullSourceDiagnostics(
+						state,
+						relatedNormalized,
+						identifier,
+						relatedItems,
+					);
 					state.documentPullDiagnosticTimestamps.set(relatedNormalized, now);
 					// #1104: a related document's diagnostics were NOT computed against
 					// content we independently sent/fingerprinted (we never requested
@@ -1860,19 +2620,137 @@ async function clientRequestPullDiagnostics(
 					totalCount += relatedItems.length;
 				}
 				if (related?.resultId !== undefined) {
-					state.pullResultIds.set(relatedNormalized, related.resultId);
+					state.pullResultIds.set(
+						pullSourceKey(relatedNormalized, identifier),
+						related.resultId,
+					);
 				}
 			}
 		}
 
 		state.diagnosticEmitter.emit("diagnostics", normalizedPath);
 		return totalCount > 0
-			? { status: "found", count: totalCount }
+			? { status: "found", count: totalCount, primaryCount }
 			: { status: "clean" };
 	} catch (err) {
+		if (isPullTimeoutError(err, effectiveTimeoutMs)) {
+			recordPullTimeoutTelemetry({
+				scope: normalizedPath,
+				identifier,
+				effectiveBudgetMs: effectiveTimeoutMs,
+				hadPreviousResultId: previousResultId !== undefined,
+				elapsedMs: Date.now() - requestStartedAt,
+			});
+			armLateAnswerTelemetry({
+				requestPromise,
+				scope: normalizedPath,
+				identifier,
+				subject: sourceKey,
+				requestStartedAt,
+			});
+		}
 		recordPullFailure(state, "textDocument/diagnostic", err);
 		return { status: "unavailable" };
 	}
+}
+
+/**
+ * #1713: `withTimeout` rejects with this EXACT message (`clients/deadline-utils.ts`)
+ * only when its own timer wins the race — every other rejection is the request
+ * itself failing (bad params, dead connection, thrown by the server). Only the
+ * timer-won case is a "the answer might still be coming" situation worth a
+ * late-answer watch; a request that already failed fast has nothing further to
+ * observe.
+ */
+function isPullTimeoutError(err: unknown, timeoutMs: number): boolean {
+	return err instanceof Error && err.message === `Timeout after ${timeoutMs}ms`;
+}
+
+/**
+ * #1713: every pull timeout emits exactly one bounded latency.log record — the
+ * observability gap the issue names (`withTimeout`'s throw previously skipped
+ * ALL telemetry for this site). Never throws: telemetry must not perturb the
+ * timeout path, which has already decided to return `unavailable` regardless.
+ */
+function recordPullTimeoutTelemetry(args: {
+	scope: string;
+	identifier: string | undefined;
+	effectiveBudgetMs: number;
+	hadPreviousResultId: boolean;
+	elapsedMs: number;
+}): void {
+	try {
+		logLatency({
+			type: "phase",
+			phase: "lsp_pull_diagnostic_timeout",
+			filePath: args.scope,
+			durationMs: args.elapsedMs,
+			metadata: {
+				identifier: args.identifier ?? "bare",
+				effectiveBudgetMs: args.effectiveBudgetMs,
+				hadPreviousResultId: args.hadPreviousResultId,
+			},
+		});
+	} catch {
+		// Telemetry must never break the observed path.
+	}
+}
+
+/**
+ * #1713: a telemetry-only continuation on the ALREADY-abandoned request
+ * promise. `withTimeout` only raced it against a timer — the request is still
+ * live server-side — so if it eventually resolves, this is the only place that
+ * ever finds out. Purely observational: it runs after the caller has already
+ * moved on with `unavailable`, and it never writes into `state`.
+ *
+ * Bounded via the degradation-ledger convention (`incrementDegradationCount`,
+ * chosen over a hand-rolled per-identity rising-edge Set): the ledger already
+ * caps entries per kind and re-arms at `session_start`
+ * (`resetDegradationLedger`, wired into `handleSessionStart`), so reusing it
+ * avoids a second latch this fix would otherwise have to register and reset
+ * itself. `subject` is the same `pullSourceKey` (path + identifier) the pull
+ * path already uses, so the discriminating identity survives aggregation.
+ *
+ * Attaching `.then` here creates no timer, socket, or other handle — it only
+ * observes a promise the request already created — so it cannot keep the
+ * process alive a moment longer than that pending request already does.
+ */
+function armLateAnswerTelemetry(args: {
+	requestPromise: Promise<unknown>;
+	scope: string;
+	identifier: string | undefined;
+	subject: string;
+	requestStartedAt: number;
+}): void {
+	args.requestPromise.then(
+		() => {
+			try {
+				const elapsedMs = Date.now() - args.requestStartedAt;
+				incrementDegradationCount({
+					kind: "lsp-pull-late-answer",
+					subject: args.subject,
+					reason: `late pull answer discarded after ${elapsedMs}ms`,
+				});
+				logLatency({
+					type: "phase",
+					phase: "lsp_pull_late_answer_discarded",
+					filePath: args.scope,
+					durationMs: elapsedMs,
+					metadata: { identifier: args.identifier ?? "bare" },
+				});
+			} catch {
+				// Telemetry must never break the observed path.
+			}
+		},
+		() => {
+			// The abandoned request eventually failed rather than answering — not
+			// an "answer discarded" event. Its failure was already visible via
+			// `recordPullFailure` at request time (a general request failure, not
+			// specific to this late arrival); nothing more to record here. This
+			// handler exists so the request's eventual rejection never surfaces as
+			// an unhandled rejection.
+		},
+	);
 }
 
 const PULL_FAILURE_HISTORY_LIMIT = 10;
@@ -1926,23 +2804,30 @@ export async function clientRequestWorkspaceDiagnostics(
 > {
 	if (!isClientAlive(state)) return undefined;
 	if (!state.workspaceDiagnosticsSupport.workspaceDiagnostics) return undefined;
+	// #1104: echo every resultId we hold from a PRIOR pull so the server can
+	// answer `kind: "unchanged"` for files it hasn't recomputed, instead of
+	// resending (and us re-hashing) every file on every sweep.
+	const previousResultIds = Array.from(
+		state.workspacePullResultCache.values(),
+	).map((entry) => ({ uri: entry.uri, value: entry.resultId }));
+	// #1713: declared OUTSIDE the try so the catch below can still reach them —
+	// same shape as `pullDiagnosticSource` above. Captured outside `withTimeout`
+	// so a timeout still holds a live handle on the request for the late-answer
+	// watch.
+	const workspacePullStartedAt = Date.now();
+	const workspacePullTimeoutMs = Math.max(1, budgetMs);
+	const workspaceRequestPromise = safeSendRequest<{
+		items?: Array<{
+			uri?: string;
+			kind?: string;
+			resultId?: string;
+			items?: LSPDiagnostic[];
+		}>;
+	}>(state.connection, "workspace/diagnostic", { previousResultIds });
 	try {
-		// #1104: echo every resultId we hold from a PRIOR pull so the server can
-		// answer `kind: "unchanged"` for files it hasn't recomputed, instead of
-		// resending (and us re-hashing) every file on every sweep.
-		const previousResultIds = Array.from(
-			state.workspacePullResultCache.values(),
-		).map((entry) => ({ uri: entry.uri, value: entry.resultId }));
 		const report = await withTimeout(
-			safeSendRequest<{
-				items?: Array<{
-					uri?: string;
-					kind?: string;
-					resultId?: string;
-					items?: LSPDiagnostic[];
-				}>;
-			}>(state.connection, "workspace/diagnostic", { previousResultIds }),
-			Math.max(1, budgetMs),
+			workspaceRequestPromise,
+			workspacePullTimeoutMs,
 		);
 		if (!report || !Array.isArray(report.items)) return undefined;
 		const out: Array<{
@@ -1950,6 +2835,16 @@ export async function clientRequestWorkspaceDiagnostics(
 			diagnostics: LSPDiagnostic[];
 			contentHash?: string;
 		}> = [];
+		// #1669 review N1: ONE deadline, shared across every "unchanged, no
+		// cached basis" fallback pull this call makes — not a fresh `budgetMs`
+		// grant handed to EACH one. A refresh clears `workspacePullResultCache`,
+		// so the very next sweep after a refresh can route every item down this
+		// path; granting each one the full budget serially turned a bounded call
+		// unbounded (measured: 6 files x 300ms budget = 1844ms; worst case is
+		// the normal case — 2000 files x 30s). Mirrors the shared-budget shape
+		// `runWorkspaceDiagnosticsSwept`'s `perFileMs` bounds each file to,
+		// scoped to fallback pulls made from within THIS one call.
+		const fallbackPullDeadline = Date.now() + Math.max(1, budgetMs);
 		for (const item of report.items) {
 			if (!item?.uri) continue;
 			const filePath = uriToPath(item.uri);
@@ -1960,7 +2855,58 @@ export async function clientRequestWorkspaceDiagnostics(
 				// `items`, so without this a file the server confirmed unchanged
 				// would silently drop out of the sweep result entirely.
 				const prior = state.workspacePullResultCache.get(normalizedPath);
-				if (!prior) continue; // no earlier basis to inherit — nothing to report
+				if (!prior) {
+					// #1669 review F4: no earlier basis to inherit (e.g. right after a
+					// `workspace/diagnostic/refresh` cleared `workspacePullResultCache`)
+					// — the server is answering "unchanged" against a resultId basis we
+					// no longer hold, so there is nothing honest to report for this
+					// file from THIS response. `continue`-ing here would make the file
+					// silently absent from `out`, which the caller reads as "clean" —
+					// a false clean for a file the server just told us it hasn't even
+					// looked at freshly. Treat it as needs-full-pull: request the
+					// per-file diagnostic directly instead.
+					const remainingMs = fallbackPullDeadline - Date.now();
+					if (remainingMs <= 0) {
+						// #1669 review N1: the shared fallback-pull deadline is already
+						// exhausted by earlier files in this same loop — bail WITHOUT
+						// attempting a request (never fabricate clean; this file was
+						// never actually asked about) and surface it as unavailable via
+						// the same degradation ledger path as a real unavailable pull.
+						incrementDegradationCount({
+							kind: "lsp-pull-unconfirmed",
+							subject: state.serverId,
+							reason:
+								"unchanged report with no workspacePullResultCache basis; the shared fallback-pull deadline was already exhausted by earlier files this sweep",
+						});
+						continue;
+					}
+					const outcome = await clientRequestPullDiagnostics(
+						state,
+						filePath,
+						remainingMs,
+					);
+					if (outcome.status === "found") {
+						out.push({
+							filePath,
+							diagnostics: state.documentPullDiagnostics.get(normalizedPath) ?? [],
+							contentHash: state.diagnosticBindings.get(normalizedPath)?.contentHash,
+						});
+					} else if (outcome.status === "unavailable") {
+						// Genuinely unconfirmed — never fabricate a clean result. Recorded
+						// via the shared degradation ledger (AGENTS.md: repeated
+						// degradations use incrementDegradationCount, not a hand-rolled
+						// counter) so a server that keeps racing refresh against sweeps
+						// is visible in aggregate instead of silently absorbed per-file.
+						incrementDegradationCount({
+							kind: "lsp-pull-unconfirmed",
+							subject: state.serverId,
+							reason:
+								"unchanged report with no workspacePullResultCache basis, and the per-file fallback pull was unavailable",
+						});
+					}
+					// "clean": genuinely clean, correctly absent from `out`.
+					continue;
+				}
 				if (item.resultId !== undefined) {
 					state.workspacePullResultCache.set(normalizedPath, {
 						...prior,
@@ -2005,6 +2951,22 @@ export async function clientRequestWorkspaceDiagnostics(
 		}
 		return out;
 	} catch (err) {
+		if (isPullTimeoutError(err, workspacePullTimeoutMs)) {
+			recordPullTimeoutTelemetry({
+				scope: WORKSPACE_PULL_SCOPE,
+				identifier: undefined,
+				effectiveBudgetMs: workspacePullTimeoutMs,
+				hadPreviousResultId: previousResultIds.length > 0,
+				elapsedMs: Date.now() - workspacePullStartedAt,
+			});
+			armLateAnswerTelemetry({
+				requestPromise: workspaceRequestPromise,
+				scope: WORKSPACE_PULL_SCOPE,
+				identifier: undefined,
+				subject: WORKSPACE_PULL_SCOPE,
+				requestStartedAt: workspacePullStartedAt,
+			});
+		}
 		recordPullFailure(state, "workspace/diagnostic", err);
 		return undefined;
 	}
@@ -2235,19 +3197,27 @@ export async function handleNotifyOpen(
 			state.documentOpenedAt.set(normalizedPath, Date.now());
 			state.diagnosticPublicationCounts.set(normalizedPath, 0);
 			if (!isClientAlive(state)) return;
-			await safeSendNotification(state.connection, "textDocument/didOpen", {
-				textDocument: { uri, languageId, version, text: content },
-			});
-			recordSentContent(state, normalizedPath, version, content);
+			const reopenSent = await safeSendNotification(
+				state.connection,
+				"textDocument/didOpen",
+				{ textDocument: { uri, languageId, version, text: content } },
+			);
+			// #1669 review F7: only mirror the send locally once it actually left
+			// the process — see safeSendNotification's doc comment.
+			if (reopenSent) recordSentContent(state, normalizedPath, version, content);
 			state.openDocuments.add(normalizedPath);
 			state.openDocumentUris?.set(normalizedPath, uri);
 			return;
 		}
-		await safeSendNotification(state.connection, "textDocument/didChange", {
-			textDocument: { uri, version },
-			contentChanges: [{ text: content }],
-		});
-		recordSentContent(state, normalizedPath, version, content);
+		const changeSent = await safeSendNotification(
+			state.connection,
+			"textDocument/didChange",
+			{
+				textDocument: { uri, version },
+				contentChanges: buildContentChanges(state, normalizedPath, content),
+			},
+		);
+		if (changeSent) recordSentContent(state, normalizedPath, version, content);
 		return;
 	}
 
@@ -2282,10 +3252,12 @@ export async function handleNotifyOpen(
 
 	if (!isClientAlive(state)) return;
 
-	await safeSendNotification(state.connection, "textDocument/didOpen", {
-		textDocument: { uri, languageId, version: 0, text: content },
-	});
-	recordSentContent(state, normalizedPath, 0, content);
+	const openSent = await safeSendNotification(
+		state.connection,
+		"textDocument/didOpen",
+		{ textDocument: { uri, languageId, version: 0, text: content } },
+	);
+	if (openSent) recordSentContent(state, normalizedPath, 0, content);
 	state.pendingOpens.delete(normalizedPath);
 	state.openDocuments.add(normalizedPath);
 	state.closedDocuments?.delete(normalizedPath);
@@ -2324,13 +3296,15 @@ export async function handleNotifyChange(
 	if (!state.openDocuments.has(normalizedPath)) {
 		// Safety fallback: keep protocol ordering valid even if caller sends
 		// didChange before first didOpen for this document.
-		await safeSendNotification(state.connection, "textDocument/didOpen", {
-			textDocument: { uri, languageId: "plaintext", version: 0, text: content },
-		});
+		const fallbackOpenSent = await safeSendNotification(
+			state.connection,
+			"textDocument/didOpen",
+			{ textDocument: { uri, languageId: "plaintext", version: 0, text: content } },
+		);
 		state.documentVersions.set(normalizedPath, 0);
 		state.documentOpenedAt.set(normalizedPath, Date.now());
 		state.diagnosticPublicationCounts.set(normalizedPath, 0);
-		recordSentContent(state, normalizedPath, 0, content);
+		if (fallbackOpenSent) recordSentContent(state, normalizedPath, 0, content);
 		state.openDocuments.add(normalizedPath);
 		state.openDocumentUris?.set(normalizedPath, uri);
 		return;
@@ -2341,11 +3315,15 @@ export async function handleNotifyChange(
 	// Clear stale diagnostics before sending new content so waitForDiagnostics
 	// doesn't return immediately with the previous edit's results.
 	clearDiagnosticsForPath(state, normalizedPath);
-	await safeSendNotification(state.connection, "textDocument/didChange", {
-		textDocument: { uri, version },
-		contentChanges: [{ text: content }],
-	});
-	recordSentContent(state, normalizedPath, version, content);
+	const changeSent = await safeSendNotification(
+		state.connection,
+		"textDocument/didChange",
+		{
+			textDocument: { uri, version },
+			contentChanges: buildContentChanges(state, normalizedPath, content),
+		},
+	);
+	if (changeSent) recordSentContent(state, normalizedPath, version, content);
 }
 
 /** Close a document through the same lifecycle path exposed by the client. */
@@ -2971,6 +3949,9 @@ export async function createLSPClient(options: {
 		documentContentHashes: new Map(),
 		diagnosticBindings: new Map(),
 		pullResultIds: new Map(),
+		documentPullDiagnosticsBySource: new Map(),
+		pullGenerations: new Map(),
+		pullRequestSequences: new Map(),
 		workspacePullResultCache: new Map(),
 		openDocuments: new Set(),
 		closedDocuments: new Set(),
@@ -2983,6 +3964,7 @@ export async function createLSPClient(options: {
 		operationSupport: undefined as unknown as LSPOperationSupport,
 		staticDiagnosticsMode: "push-only",
 		positionEncoding: "utf-16",
+		syncKind: TEXT_DOCUMENT_SYNC_KIND_FULL,
 		dynamicRegistrations: new Map(),
 		advertisedCommands: new Set(),
 		serverEditsAllowed: 0,
@@ -3099,6 +4081,9 @@ export async function createLSPClient(options: {
 		detectWorkspaceDiagnosticsSupport(initResult);
 	state.operationSupport = detectOperationSupport(initResult);
 	state.positionEncoding = negotiatePositionEncoding(
+		(initResult as { capabilities?: unknown })?.capabilities,
+	);
+	state.syncKind = negotiateSyncKind(
 		(initResult as { capabilities?: unknown })?.capabilities,
 	);
 	state.rawCapabilityKeys = Object.keys(
@@ -3527,17 +4512,28 @@ export async function createLSPClient(options: {
 }
 
 // Helper to safely send notifications - catches stream destruction
+/**
+ * Returns `true` once the notification was actually handed to the transport,
+ * `false` when a stream error was swallowed (connection error handlers will
+ * update state separately). #1669 review F7: callers that mirror what they
+ * just told the server locally (`recordSentContent`) MUST gate on this
+ * return value — recording a send that never left the process would desync
+ * the mirror from what the server actually has, with nothing to self-heal
+ * it (the next Incremental range would be computed against content the
+ * server never saw).
+ */
 async function safeSendNotification(
 	connection: MessageConnection,
 	method: string,
 	params: unknown,
-): Promise<void> {
+): Promise<boolean> {
 	try {
 		await connection.sendNotification(method as never, params as never);
+		return true;
 	} catch (err) {
 		if (isStreamError(err)) {
 			// Silently ignore - stream was destroyed, connection error handlers will update state
-			return;
+			return false;
 		}
 		throw err;
 	}
