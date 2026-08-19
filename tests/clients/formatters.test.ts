@@ -1220,62 +1220,27 @@ describe("getFormattersForFile — policy selection", () => {
 		// #1595 sweep: each of these filenames must be in FORMATTER_CONFIG_FILES
 		// (clients/formatters.ts) or the cache signature never moves when the
 		// file is created after the first call — the exact #1572 review F1 class
-		// of bug, now proven per formatter rather than assumed from the pattern.
-		it("csharpier: .csharpierrc created after the first call is picked up", async () => {
-			const filePath = fileIn(tmpDir, "Program.cs");
-			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
-			createTempFile(tmpDir, ".csharpierrc", "{}\n");
-			const formatters = await getFormattersForFile(filePath, tmpDir);
-			expect(formatters.map((f) => f.name)).toEqual(["csharpier"]);
-		});
-
-		it("ormolu: .ormolu created after the first call is picked up", async () => {
-			const filePath = fileIn(tmpDir, "Main.hs");
-			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
-			createTempFile(tmpDir, ".ormolu", "\n");
-			const formatters = await getFormattersForFile(filePath, tmpDir);
-			expect(formatters.map((f) => f.name)).toEqual(["ormolu"]);
-		});
-
-		it("taplo: taplo.toml created after the first call is picked up", async () => {
-			const filePath = fileIn(tmpDir, "config.toml");
-			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
-			createTempFile(tmpDir, "taplo.toml", "[formatting]\n");
-			const formatters = await getFormattersForFile(filePath, tmpDir);
-			expect(formatters.map((f) => f.name)).toEqual(["taplo"]);
-		});
-
-		it("terraform: .terraform.lock.hcl created after the first call is picked up", async () => {
-			const filePath = fileIn(tmpDir, "main.tf");
-			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
-			createTempFile(tmpDir, ".terraform.lock.hcl", "\n");
-			const formatters = await getFormattersForFile(filePath, tmpDir);
-			expect(formatters.map((f) => f.name)).toEqual(["terraform"]);
-		});
-
-		it("swiftformat: .swiftformat created after the first call is picked up", async () => {
-			const filePath = fileIn(tmpDir, "Main.swift");
-			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
-			createTempFile(tmpDir, ".swiftformat", "--indent 4\n");
-			const formatters = await getFormattersForFile(filePath, tmpDir);
-			expect(formatters.map((f) => f.name)).toEqual(["swiftformat"]);
-		});
-
-		it("fantomas: .fantomasignore created after the first call is picked up", async () => {
-			const filePath = fileIn(tmpDir, "Program.fs");
-			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
-			createTempFile(tmpDir, ".fantomasignore", "\n");
-			const formatters = await getFormattersForFile(filePath, tmpDir);
-			expect(formatters.map((f) => f.name)).toEqual(["fantomas"]);
-		});
-
-		it("mix: .formatter.exs created after the first call is picked up", async () => {
-			const filePath = fileIn(tmpDir, "mix.ex");
-			expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
-			createTempFile(tmpDir, ".formatter.exs", "[inputs: [\"{mix,.formatter}.exs\"]]\n");
-			const formatters = await getFormattersForFile(filePath, tmpDir);
-			expect(formatters.map((f) => f.name)).toEqual(["mix"]);
-		});
+		// of bug, now proven per formatter via one parameterized table rather
+		// than seven near-identical `it` blocks (Sonar CPD; #1661's
+		// bad-duplicate-parameterized-rows shape).
+		it.each([
+			["csharpier", "Program.cs", ".csharpierrc", "{}\n"],
+			["ormolu", "Main.hs", ".ormolu", "\n"],
+			["taplo", "config.toml", "taplo.toml", "[formatting]\n"],
+			["terraform", "main.tf", ".terraform.lock.hcl", "\n"],
+			["swiftformat", "Main.swift", ".swiftformat", "--indent 4\n"],
+			["fantomas", "Program.fs", ".fantomasignore", "\n"],
+			["mix", "mix.ex", ".formatter.exs", "[inputs: [\"{mix,.formatter}.exs\"]]\n"],
+		] as const)(
+			"%s: %s created after the first call is picked up",
+			async (formatterName, fileName, configFile, configContent) => {
+				const filePath = fileIn(tmpDir, fileName);
+				expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
+				createTempFile(tmpDir, configFile, configContent);
+				const formatters = await getFormattersForFile(filePath, tmpDir);
+				expect(formatters.map((f) => f.name)).toEqual([formatterName]);
+			},
+		);
 	});
 
 	// #1572 review F2: the gate DETECTED the settings file but the command
