@@ -12,6 +12,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import { stripSource } from "./sweep-kit.js";
+
 export interface EmissionSite {
 	/** Repo-relative path, forward slashes, so findings read the same on any OS. */
 	file: string;
@@ -85,7 +87,14 @@ export function scanEmissionSites(repoRoot: string): EmissionSite[] {
 }
 
 /** Exported for the sweep's own self-test: scan one source string. */
-export function scanSource(source: string, file: string): EmissionSite[] {
+export function scanSource(raw: string, file: string): EmissionSite[] {
+	// #1755's shared kit owns the comment/string stripper, so this sweep gets
+	// the comment-laundering defense instead of re-deriving it. `strings:
+	// "keep"` is the deliberate half: a phase name IS a string literal, so
+	// blanking string contents would blind the scanner to every phase it
+	// exists to read. Blanking preserves offsets and newlines, so the line
+	// numbers this reports still point at the real source.
+	const source = stripSource(raw, { strings: "keep" });
 	const sites: EmissionSite[] = [];
 	for (const callee of CALLEES) {
 		// `\b` alone would let `recordLogLatency(` match; require the callee to

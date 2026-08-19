@@ -165,6 +165,25 @@ describe("bounded-telemetry scanner self-test", () => {
 		]);
 	});
 
+	it("does not read a call that exists only in a comment", () => {
+		// MUTATION PROOF for the sweep-kit stripSource adoption (#1755): remove
+		// the strip and both of these become findings. A phase discussed in
+		// prose is not a phase emitted in code, in either direction — a
+		// commented example must not red the sweep, and a commented registered
+		// phase must not red the exclusivity check.
+		const laundered = scanSource(
+			[
+				'// logLatency({ phase: "probe_comment_timeout" });',
+				"/* logLatency({ phase: \"probe_block_comment_failed\" }); */",
+				'logLatency({ type: "phase", phase: "probe_real_timeout" });',
+			].join("\n"),
+			"laundered.ts",
+		);
+		expect(laundered.map((site) => site.phase)).toEqual([
+			"probe_real_timeout",
+		]);
+	});
+
 	it("does not match an identifier that merely ends in the callee name", () => {
 		expect(found.some((site) => site.line === 4)).toBe(false);
 	});
