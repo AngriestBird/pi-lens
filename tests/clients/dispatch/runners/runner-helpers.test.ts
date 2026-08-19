@@ -3,7 +3,9 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	createAvailabilityChecker,
+	createCwdCachedProbe,
 	createVenvFinder,
+	findManagedNodeToolBinary,
 	getSgCommand,
 	isSgAvailableAsync,
 	lspPrimaryCoversFile,
@@ -67,6 +69,10 @@ vi.mock("../../../../clients/installer/index.js", () => ({
 	// probe path through the mocked safeSpawnAsync.
 	isSpawnableCommand: vi.fn(async () => true),
 	resetPathWalkMemo: vi.fn(),
+	// #1657: the managed-shim resolver runs the installer's own verification
+	// instead of a bare existsSync. Default "it runs" keeps every pre-existing
+	// managed-dir expectation intact.
+	verifyToolBinary: vi.fn(async () => true),
 }));
 
 vi.mock("../../../../clients/package-manager.js", async (importOriginal) => ({
@@ -337,6 +343,72 @@ describe("runner-helpers availability checker", () => {
 		expect(getSgCommand().cmd).toContain("ast-grep");
 	});
 
+	it("does not re-serve a retained ast-grep winner this sweep just proved durably missing (#1593)", async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		try {
+			vi.useFakeTimers({ toFake: ["Date"] });
+			vi.setSystemTime(new Date(1_700_000_000_000));
+
+			// Sweep 1: every earlier tier stalls (transient); npx answers, so the
+			// win is provisional and memoized as `cmd: "npx"`.
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation(((
+				cmd: string,
+			) => {
+				if (cmd === "npx") {
+					return Promise.resolve({
+						stdout: "ast-grep 0.40.0",
+						stderr: "",
+						status: 0,
+					});
+				}
+				return Promise.resolve({
+					stdout: "",
+					stderr: "",
+					status: null,
+					failure: "timeout",
+					spawnFailure: { kind: "timeout" },
+				});
+			}) as never);
+			expect(await isSgAvailableAsync()).toBe(true);
+			expect(getSgCommand().cmd).toBe("npx");
+
+			// Let the provisional cooldown expire so the next call re-sweeps
+			// instead of serving the memoized verdict straight from the latch.
+			vi.setSystemTime(new Date(Date.now() + 301_000));
+
+			// Sweep 2: the memoized winner (npx) now ENOENTs — durably missing —
+			// while an unrelated earlier tier merely stalls again. The retained
+			// arm must NOT re-serve the dead `npx` command just because a sibling
+			// stalled in the same sweep.
+			vi.mocked(safeSpawnMod.safeSpawnAsync).mockImplementation(((
+				cmd: string,
+			) => {
+				if (cmd === "npx") {
+					return Promise.resolve({
+						stdout: "",
+						stderr: "",
+						status: null,
+						error: Object.assign(new Error("npx ENOENT"), {
+							code: "ENOENT",
+						}),
+						failure: "spawn",
+						spawnFailure: { kind: "tool-not-found" },
+					});
+				}
+				return Promise.resolve({
+					stdout: "",
+					stderr: "",
+					status: null,
+					failure: "timeout",
+					spawnFailure: { kind: "timeout" },
+				});
+			}) as never);
+			expect(await isSgAvailableAsync()).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("bounds missing-tool installs to one attempt and records the failure", async () => {
 		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
 		const installerMod = await import("../../../../clients/installer/index.js");
@@ -547,7 +619,7 @@ describe("runner-helpers availability checker", () => {
 		}
 	});
 
-	it("venv-resolved command path is returned verbatim, never quote-wrapped (#1508)", () => {
+	it("venv-resolved command path is returned verbatim, never quote-wrapped (#1508)", async () => {
 		const env = setupTestEnvironment("pi-lens-venv-quote-");
 		try {
 			const toolPath = path.join(env.tmpDir, ".venv", "bin", "ruff");
@@ -557,7 +629,7 @@ describe("runner-helpers availability checker", () => {
 			// Every spawn consumer runs shell:false (safe-spawn #817), so a
 			// quote-wrapped path is a literal filename that ENOENTs on every
 			// platform.
-			const resolved = createVenvFinder("ruff", ".exe")(env.tmpDir);
+			const resolved = await createVenvFinder("ruff", ".exe")(env.tmpDir);
 			expect(resolved).toBe(toolPath);
 		} finally {
 			env.cleanup();
@@ -587,7 +659,7 @@ describe("createVenvFinder: managed tools dir (#1638)", () => {
 		else process.env.PI_LENS_HOME = originalPiLensHome;
 	});
 
-	it("resolves a managed-dir-only tool without touching PATH", () => {
+	it("resolves a managed-dir-only tool without touching PATH", async () => {
 		const env = setupTestEnvironment("pi-lens-managed-dir-finder-");
 		try {
 			process.env.PI_LENS_HOME = env.tmpDir;
@@ -609,7 +681,7 @@ describe("createVenvFinder: managed tools dir (#1638)", () => {
 			// install. Post-fix, the managed dir is checked first.
 			const cwdWithNoVenv = setupTestEnvironment("pi-lens-no-venv-");
 			try {
-				const resolved = createVenvFinder("pyright", ".exe")(
+				const resolved = await createVenvFinder("pyright", ".exe")(
 					cwdWithNoVenv.tmpDir,
 				);
 				expect(resolved).toBe(managedBin);
@@ -651,7 +723,7 @@ describe("createVenvFinder: managed tools dir (#1638)", () => {
 			// resolver itself never needs a spawn to find the managed binary —
 			// unlike the pre-fix bare-name fallback, which only "finds" the tool
 			// via a `safeSpawnAsync` round trip that has to fail first.
-			const resolved = createVenvFinder("managedtool", ".exe")(env.tmpDir);
+			const resolved = await createVenvFinder("managedtool", ".exe")(env.tmpDir);
 			expect(resolved).toBe(managedBin);
 			expect(safeSpawnMod.safeSpawnAsync).not.toHaveBeenCalled();
 		} finally {
@@ -659,24 +731,24 @@ describe("createVenvFinder: managed tools dir (#1638)", () => {
 		}
 	});
 
-	it("still prefers a venv install over the managed dir", () => {
+	it("still prefers a venv install over the managed dir", async () => {
 		const env = setupTestEnvironment("pi-lens-venv-over-managed-");
 		try {
 			const venvBin = path.join(env.tmpDir, ".venv", "bin", "ruff");
 			fs.mkdirSync(path.dirname(venvBin), { recursive: true });
 			fs.writeFileSync(venvBin, "#!/bin/sh\nexit 0\n");
 
-			const resolved = createVenvFinder("ruff")(env.tmpDir);
+			const resolved = await createVenvFinder("ruff")(env.tmpDir);
 			expect(resolved).toBe(venvBin);
 		} finally {
 			env.cleanup();
 		}
 	});
 
-	it("falls back to the bare command when neither venv nor managed dir has it", () => {
+	it("falls back to the bare command when neither venv nor managed dir has it", async () => {
 		const env = setupTestEnvironment("pi-lens-no-venv-no-managed-");
 		try {
-			const resolved = createVenvFinder("totally-unknown-tool")(env.tmpDir);
+			const resolved = await createVenvFinder("totally-unknown-tool")(env.tmpDir);
 			expect(resolved).toBe("totally-unknown-tool");
 		} finally {
 			env.cleanup();
@@ -872,16 +944,595 @@ describe("resolveToolCommandWithInstallFallback / resolveCommandArgsWithInstallF
 		const checker = createAvailabilityChecker("stylelint");
 		const cwd = process.cwd();
 
-		// First call recovers via the #1636 seam; the SAME (cwd, toolId) pair is
-		// then queried through the #1612 seam. If the two seams forked separate
-		// row constructors / memos, this would double-count the correction.
-		await resolveToolCommandWithInstallFallback(cwd, "stylelint");
-		checker.reset();
+		// Both seams share ONE row constructor and one memo. The first call
+		// corrects a latched row through the #1636 seam; the second finds the
+		// pair already corrected and stays silent, so a repeat never
+		// double-counts one correction.
 		await resolveAvailableOrInstall(checker, "stylelint", cwd);
+		checker.reset();
+		await resolveToolCommandWithInstallFallback(cwd, "stylelint");
 
 		const available = availabilityDecisions().filter(
 			(record) => record.metadata.verdict === "available",
 		);
 		expect(available).toHaveLength(1);
+	});
+});
+
+/**
+ * #1657 — the once-per-correction memo is not a "this pair emitted a row"
+ * memo. `verifyOrInstallCommand` emits through the same seam with NO latched
+ * row behind it: biome-check and oxlint call
+ * `resolveToolCommandWithInstallFallback` directly, with no checker probe of
+ * their own, so nothing has been latched when the installer resolves the tool.
+ *
+ * Burning the shared memo on that no-op emission silenced the NEXT genuine
+ * latch-then-recover for the same (cwd, toolId) — the #1606 defect reachable
+ * again through the #1612 seam, one tool registration away from being live.
+ */
+describe("compensating row: the memo burns only on a genuine correction (#1657)", () => {
+	const missingProbe = {
+		stdout: "",
+		stderr: "",
+		status: null,
+		error: Object.assign(new Error("missing"), { code: "ENOENT" }),
+		failure: "spawn" as const,
+		spawnFailure: missingSpawnFailure(),
+	};
+
+	beforeEach(async () => {
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockReset();
+		vi.mocked(installerMod.ensureTool).mockReset();
+		vi.mocked(installerMod.getInstallAttempt).mockReset();
+		vi.mocked(installerMod.getLastEnsureResolutionSource).mockReset();
+		vi.mocked(installerMod.getToolInstallStrategy).mockReset();
+		vi.mocked(installerMod.isSpawnableCommand).mockReset();
+		logLatencySpy.mockReset();
+		resetDispatchAvailabilityState();
+	});
+
+	it("a no-latch emission does not silence the later genuine latch-then-recover", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue({
+			outcome: "succeeded",
+			at: Date.now(),
+		});
+		const cwd = process.cwd();
+
+		// (a) The biome-check/oxlint shape: straight to the install seam, no
+		// probe, so nothing is latched. The row it emits corrects nothing.
+		await resolveToolCommandWithInstallFallback(cwd, "stylelint");
+
+		// (b) A genuine latch: the checker probes, misses, and writes a latched
+		// `unavailable` row. The installer then brings the tool back.
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
+		const checker = createAvailabilityChecker("stylelint");
+		await resolveAvailableOrInstall(checker, "stylelint", cwd);
+
+		const verdicts = availabilityDecisions().map(
+			(record) => record.metadata.verdict,
+		);
+		// Pre-fix this ended at "unavailable": step (a) burned the memo, so the
+		// real recovery was swallowed and the durable log kept saying the tool
+		// was off while it ran.
+		expect(verdicts).toEqual(["available", "unavailable", "available"]);
+		expect(verdicts.at(-1)).toBe("available");
+	});
+
+	it("repeat no-latch emissions still log at most one row per pair", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
+		const cwd = process.cwd();
+
+		await resolveToolCommandWithInstallFallback(cwd, "stylelint");
+		await resolveToolCommandWithInstallFallback(cwd, "stylelint");
+		await resolveToolCommandWithInstallFallback(cwd, "stylelint");
+
+		// The uncorrected scope dedupes on its own: a runner that reaches this
+		// seam on every dispatch must not re-log the same non-correction.
+		expect(availabilityDecisions()).toHaveLength(1);
+	});
+
+	it("a genuine correction still suppresses the emissions after it", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
+		const checker = createAvailabilityChecker("stylelint");
+		const cwd = process.cwd();
+
+		await resolveAvailableOrInstall(checker, "stylelint", cwd);
+		await resolveToolCommandWithInstallFallback(cwd, "stylelint");
+		await resolveToolCommandWithInstallFallback(cwd, "stylelint");
+
+		const available = availabilityDecisions().filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		expect(available).toHaveLength(1);
+	});
+
+	it("re-arms at the session boundary", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
+		const cwd = process.cwd();
+
+		await resolveAvailableOrInstall(
+			createAvailabilityChecker("stylelint"),
+			"stylelint",
+			cwd,
+		);
+		// A new session must correct the new session's own latch, not inherit
+		// the last one's verdict.
+		resetDispatchAvailabilityState();
+		await resolveAvailableOrInstall(
+			createAvailabilityChecker("stylelint"),
+			"stylelint",
+			cwd,
+		);
+
+		const available = availabilityDecisions().filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		expect(available).toHaveLength(2);
+	});
+
+	/**
+	 * #1674 review F4 — both rows say `verdict: "available"`, and only the
+	 * evidence can tell a reader which one cleared a latched row.
+	 */
+	it("records on the row itself whether it corrected a latched row", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
+		const cwd = process.cwd();
+
+		await resolveToolCommandWithInstallFallback(cwd, "stylelint");
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
+		await resolveAvailableOrInstall(
+			createAvailabilityChecker("stylelint"),
+			"stylelint",
+			cwd,
+		);
+
+		const available = availabilityDecisions().filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		expect(available).toHaveLength(2);
+		expect(available[0].metadata.evidence).toMatchObject({
+			correctsLatchedRow: false,
+		});
+		expect(available[1].metadata.evidence).toMatchObject({
+			correctsLatchedRow: true,
+		});
+	});
+
+	/**
+	 * #1674 review F3 — a latch record must not outlive the row it describes.
+	 * An `available` probe verdict clears it, so a later install-seam emission
+	 * cannot read the stale entry as a correction it did not make.
+	 */
+	it("clears the latch record when a probe reports the tool available", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
+		const cwd = process.cwd();
+		const checker = createAvailabilityChecker("stylelint");
+
+		// Probe misses: a latched `unavailable` row now stands.
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
+		expect(await checker.isAvailableAsync(cwd)).toBe(false);
+		// Probe recovers on its own, with no install seam involved. The latched
+		// row is gone, so nothing is left for a later emission to "correct".
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue({
+			stdout: "1.0.0",
+			stderr: "",
+			status: 0,
+		});
+		checker.reset();
+		expect(await checker.isAvailableAsync(cwd)).toBe(true);
+
+		await resolveToolCommandWithInstallFallback(cwd, "stylelint");
+
+		const available = availabilityDecisions().filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		// Two: the probe's own recovery, then the install-seam row — which must
+		// report itself as correcting nothing.
+		expect(available).toHaveLength(2);
+		expect(available[1].metadata.evidence).toMatchObject({
+			correctsLatchedRow: false,
+		});
+	});
+
+	/**
+	 * #1674 delta F6(a) — the latch lives under whatever name its writer used.
+	 * A checker built on a resolved path records THAT string, so an install-seam
+	 * row keyed on the toolId alone would miss the very row it is correcting.
+	 */
+	it("finds a latch recorded under the checker's command, not the toolId", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		const command = path.join(path.sep, "usr", "local", "bin", "stylelint");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
+		const cwd = process.cwd();
+
+		// The checker's own name IS the resolved path, so the latched row is
+		// recorded under that path — never under "stylelint".
+		expect(
+			await createAvailabilityChecker(command).isAvailableAsync(cwd),
+		).toBe(false);
+		await resolveCommandWithInstallFallback(command, "stylelint", cwd);
+
+		const available = availabilityDecisions().filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		expect(available).toHaveLength(1);
+		expect(available[0].metadata.evidence).toMatchObject({
+			correctsLatchedRow: true,
+		});
+	});
+
+	/**
+	 * #1674 delta F6(b) — `createCwdCachedProbe` is the second latched-row
+	 * producer, and its `available` verdict must clear the record too.
+	 */
+	it("clears the latch record on the shared cwd probe's available verdict", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
+		const cwd = process.cwd();
+
+		let missing = true;
+		const probe = createCwdCachedProbe(
+			async () =>
+				missing
+					? {
+							status: null,
+							error: Object.assign(new Error("missing"), { code: "ENOENT" }),
+							failure: "spawn" as const,
+							spawnFailure: missingSpawnFailure(),
+						}
+					: { status: 0 },
+			{ tool: "stylelint" },
+		);
+
+		expect(await probe(cwd)).toBe(false);
+		missing = false;
+		probe.reset();
+		expect(await probe(cwd)).toBe(true);
+
+		await resolveToolCommandWithInstallFallback(cwd, "stylelint");
+
+		const available = availabilityDecisions().filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		expect(available).toHaveLength(2);
+		expect(available[1].metadata.evidence).toMatchObject({
+			correctsLatchedRow: false,
+		});
+	});
+
+	/**
+	 * #1674 delta F6(c) — the #1612 seam records its own latch before emitting,
+	 * so the emitter READS that a correction is happening from the same ledger
+	 * every caller reads. Without that write, a checker whose command differs
+	 * from the toolId leaves the emitter with nothing to find.
+	 */
+	it("reads its own latch when the checker's command differs from the toolId", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const safeSpawnMod = await import("../../../../clients/safe-spawn.js");
+		vi.mocked(installerMod.isSpawnableCommand).mockResolvedValue(false);
+		vi.mocked(installerMod.ensureTool).mockResolvedValue("/managed/bin/stylelint");
+		vi.mocked(installerMod.getInstallAttempt).mockReturnValue(undefined);
+		vi.mocked(safeSpawnMod.safeSpawnAsync).mockResolvedValue(missingProbe);
+		const cwd = process.cwd();
+
+		// Checker command "stylelint-bin", toolId "stylelint": the latched row
+		// carries the command, and a failed probe leaves `getCommand` null, so
+		// only the seam's own record can answer for this correction.
+		await resolveAvailableOrInstall(
+			createAvailabilityChecker("stylelint-bin"),
+			"stylelint",
+			cwd,
+		);
+
+		const available = availabilityDecisions().filter(
+			(record) => record.metadata.verdict === "available",
+		);
+		expect(available).toHaveLength(1);
+		expect(available[0].metadata.evidence).toMatchObject({
+			correctsLatchedRow: true,
+		});
+	});
+});
+
+/**
+ * #1657 — `findManagedNodeToolBinary` answered from a bare `existsSync` while
+ * the installer's own managed-first branch runs `verifyToolBinary` before it
+ * returns a managed path. A shim that exists but cannot run therefore won a
+ * race it should have lost, and shadowed a working PATH binary for the rest of
+ * the session.
+ */
+describe("managed shim resolution verifies the binary (#1657)", () => {
+	const originalPiLensHome = process.env.PI_LENS_HOME;
+
+	afterEach(() => {
+		if (originalPiLensHome === undefined) delete process.env.PI_LENS_HOME;
+		else process.env.PI_LENS_HOME = originalPiLensHome;
+	});
+
+	function writeManagedShim(homeDir: string, tool: string): string {
+		const shim =
+			process.platform === "win32"
+				? path.join(homeDir, "tools", "node_modules", ".bin", `${tool}.cmd`)
+				: path.join(homeDir, "tools", "node_modules", ".bin", tool);
+		fs.mkdirSync(path.dirname(shim), { recursive: true });
+		fs.writeFileSync(shim, "#!/bin/sh\nexit 0\n");
+		return shim;
+	}
+
+	it("falls through to PATH when the managed shim does not run", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const env = setupTestEnvironment("pi-lens-managed-broken-");
+		try {
+			process.env.PI_LENS_HOME = env.tmpDir;
+			resetDispatchAvailabilityState();
+			writeManagedShim(env.tmpDir, "brokentool");
+			// The prober ran and the binary rejected `--version`: a real verdict.
+			vi.mocked(installerMod.verifyToolBinary).mockResolvedValue(false);
+
+			const cwdWithNoVenv = setupTestEnvironment("pi-lens-managed-broken-cwd-");
+			try {
+				const resolved = await createVenvFinder("brokentool", ".exe")(
+					cwdWithNoVenv.tmpDir,
+				);
+				expect(resolved).toBe("brokentool");
+			} finally {
+				cwdWithNoVenv.cleanup();
+			}
+		} finally {
+			vi.mocked(installerMod.verifyToolBinary).mockResolvedValue(true);
+			env.cleanup();
+		}
+	});
+
+	it("keeps the managed shim when the verification probe never ran", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const env = setupTestEnvironment("pi-lens-managed-transient-");
+		try {
+			process.env.PI_LENS_HOME = env.tmpDir;
+			resetDispatchAvailabilityState();
+			const shim = writeManagedShim(env.tmpDir, "stalledtool");
+			// A spawn timeout, not a verdict: an unspawnable prober is never a
+			// durable answer, so the on-disk shim keeps the fast path (#1569).
+			vi.mocked(installerMod.verifyToolBinary).mockImplementation(
+				async (_bin, _onVersion, onTransient) => {
+					onTransient?.();
+					return false;
+				},
+			);
+
+			const cwdWithNoVenv = setupTestEnvironment(
+				"pi-lens-managed-transient-cwd-",
+			);
+			try {
+				const resolved = await createVenvFinder("stalledtool", ".exe")(
+					cwdWithNoVenv.tmpDir,
+				);
+				expect(resolved).toBe(shim);
+			} finally {
+				cwdWithNoVenv.cleanup();
+			}
+		} finally {
+			vi.mocked(installerMod.verifyToolBinary).mockReset();
+			vi.mocked(installerMod.verifyToolBinary).mockResolvedValue(true);
+			env.cleanup();
+		}
+	});
+
+	it("verifies each shim once per session, then answers from the memo", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const env = setupTestEnvironment("pi-lens-managed-memo-");
+		try {
+			process.env.PI_LENS_HOME = env.tmpDir;
+			resetDispatchAvailabilityState();
+			const shim = writeManagedShim(env.tmpDir, "memotool");
+			vi.mocked(installerMod.verifyToolBinary).mockClear();
+			vi.mocked(installerMod.verifyToolBinary).mockResolvedValue(true);
+
+			const finder = createVenvFinder("memotool", ".exe");
+			const cwdWithNoVenv = setupTestEnvironment("pi-lens-managed-memo-cwd-");
+			try {
+				expect(await finder(cwdWithNoVenv.tmpDir)).toBe(shim);
+				expect(await finder(cwdWithNoVenv.tmpDir)).toBe(shim);
+				expect(await finder(cwdWithNoVenv.tmpDir)).toBe(shim);
+				// #1467's no-spawn fast path survives: one verification, then the
+				// memo answers.
+				expect(installerMod.verifyToolBinary).toHaveBeenCalledTimes(1);
+			} finally {
+				cwdWithNoVenv.cleanup();
+			}
+		} finally {
+			env.cleanup();
+		}
+	});
+
+	/**
+	 * #1674 review F1 — a verification that timed out returned "unverified"
+	 * without recording anything, so every later resolve paid the full budget
+	 * again. The reviewer measured real cold shims at just over 2s and 5
+	 * resolves triggering 5 verifications. The verdict is now remembered under
+	 * a bounded cooldown: the wait is paid once per window, and a shim that
+	 * stalled on a cold cache is still re-probed later instead of being pinned
+	 * "cannot verify" for the session.
+	 */
+	it("verifies once per cooldown window after a probe that never ran", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const env = setupTestEnvironment("pi-lens-managed-transient-memo-");
+		try {
+			process.env.PI_LENS_HOME = env.tmpDir;
+			resetDispatchAvailabilityState();
+			const shim = writeManagedShim(env.tmpDir, "slowtool");
+			vi.mocked(installerMod.verifyToolBinary).mockReset();
+			vi.mocked(installerMod.verifyToolBinary).mockImplementation(
+				async (_bin, _onVersion, onTransient) => {
+					onTransient?.();
+					return false;
+				},
+			);
+
+			const finder = createVenvFinder("slowtool", ".exe");
+			const cwdWithNoVenv = setupTestEnvironment(
+				"pi-lens-managed-transient-memo-cwd-",
+			);
+			try {
+				for (let i = 0; i < 5; i += 1) {
+					expect(await finder(cwdWithNoVenv.tmpDir)).toBe(shim);
+				}
+				expect(installerMod.verifyToolBinary).toHaveBeenCalledTimes(1);
+			} finally {
+				cwdWithNoVenv.cleanup();
+			}
+		} finally {
+			vi.mocked(installerMod.verifyToolBinary).mockReset();
+			vi.mocked(installerMod.verifyToolBinary).mockResolvedValue(true);
+			env.cleanup();
+		}
+	});
+
+	it("re-probes a stalled shim once the cooldown expires", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const env = setupTestEnvironment("pi-lens-managed-cooldown-");
+		try {
+			process.env.PI_LENS_HOME = env.tmpDir;
+			resetDispatchAvailabilityState();
+			const shim = writeManagedShim(env.tmpDir, "cooldowntool");
+			vi.mocked(installerMod.verifyToolBinary).mockReset();
+			vi.mocked(installerMod.verifyToolBinary).mockImplementation(
+				async (_bin, _onVersion, onTransient) => {
+					onTransient?.();
+					return false;
+				},
+			);
+
+			const finder = createVenvFinder("cooldowntool", ".exe");
+			const cwdWithNoVenv = setupTestEnvironment(
+				"pi-lens-managed-cooldown-cwd-",
+			);
+			const realNow = Date.now;
+			try {
+				expect(await finder(cwdWithNoVenv.tmpDir)).toBe(shim);
+				// A stall is not a durable verdict, so the cooldown must expire —
+				// otherwise one slow first touch pins "cannot verify" all session.
+				const later = realNow() + 61_000;
+				vi.spyOn(Date, "now").mockImplementation(() => later);
+				expect(await finder(cwdWithNoVenv.tmpDir)).toBe(shim);
+				expect(installerMod.verifyToolBinary).toHaveBeenCalledTimes(2);
+			} finally {
+				Date.now = realNow;
+				cwdWithNoVenv.cleanup();
+			}
+		} finally {
+			vi.mocked(installerMod.verifyToolBinary).mockReset();
+			vi.mocked(installerMod.verifyToolBinary).mockResolvedValue(true);
+			env.cleanup();
+		}
+	});
+
+	/**
+	 * #1674 review F2 — four concurrent first touches ran four verifiers. The
+	 * in-flight share mirrors `resolveInstallInFlightByCwd`: one probe, four
+	 * awaiters.
+	 */
+	/**
+	 * #1674 delta F5 — a verification that straddles a session boundary answers
+	 * its own caller, but its verdict belongs to the session that asked. Written
+	 * into the fresh session, it hands the new session the old one's cooldown,
+	 * which is exactly the state `session_start` exists to re-arm.
+	 */
+	it("does not seed the fresh session from a verification that straddled the reset", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const env = setupTestEnvironment("pi-lens-managed-straddle-");
+		try {
+			process.env.PI_LENS_HOME = env.tmpDir;
+			resetDispatchAvailabilityState();
+			const shim = writeManagedShim(env.tmpDir, "straddletool");
+			vi.mocked(installerMod.verifyToolBinary).mockReset();
+			// The session boundary falls INSIDE the verification, so the ordering
+			// is deterministic rather than left to scheduling luck. The stall
+			// verdict this call produces belongs to the session that is ending.
+			let boundaryCrossed = false;
+			vi.mocked(installerMod.verifyToolBinary).mockImplementation(
+				async (_bin, _onVersion, onTransient) => {
+					if (!boundaryCrossed) {
+						boundaryCrossed = true;
+						resetDispatchAvailabilityState();
+					}
+					onTransient?.();
+					return false;
+				},
+			);
+
+			expect(await findManagedNodeToolBinary("straddletool")).toBe(shim);
+			// The fresh session starts with no memo and no cooldown, so it probes
+			// for itself instead of inheriting the last session's stall.
+			expect(await findManagedNodeToolBinary("straddletool")).toBe(shim);
+			expect(installerMod.verifyToolBinary).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.mocked(installerMod.verifyToolBinary).mockReset();
+			vi.mocked(installerMod.verifyToolBinary).mockResolvedValue(true);
+			env.cleanup();
+		}
+	});
+
+	it("shares one verification across concurrent first touches", async () => {
+		const installerMod = await import("../../../../clients/installer/index.js");
+		const env = setupTestEnvironment("pi-lens-managed-inflight-");
+		try {
+			process.env.PI_LENS_HOME = env.tmpDir;
+			resetDispatchAvailabilityState();
+			const shim = writeManagedShim(env.tmpDir, "concurrenttool");
+			vi.mocked(installerMod.verifyToolBinary).mockReset();
+			// The second resolve starts from INSIDE the first verification, so
+			// the overlap is guaranteed rather than left to scheduling luck. It
+			// is deliberately not awaited here: the whole point is that it joins
+			// the probe already running instead of starting a second one.
+			let racer: Promise<string | null> | null = null;
+			vi.mocked(installerMod.verifyToolBinary).mockImplementation(async () => {
+				racer ??= findManagedNodeToolBinary("concurrenttool");
+				return true;
+			});
+
+			const first = await findManagedNodeToolBinary("concurrenttool");
+
+			expect(first).toBe(shim);
+			expect(await racer).toBe(shim);
+			expect(installerMod.verifyToolBinary).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.mocked(installerMod.verifyToolBinary).mockReset();
+			vi.mocked(installerMod.verifyToolBinary).mockResolvedValue(true);
+			env.cleanup();
+		}
 	});
 });

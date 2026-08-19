@@ -66,7 +66,10 @@ import {
 import { deadCodeIssueToProjectDiagnostic } from "./project-diagnostics/runner-adapters/dead-code.js";
 import { gitleaksFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/gitleaks.js";
 import { govulncheckFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/govulncheck.js";
-import { trivyFindingToProjectDiagnostic } from "./project-diagnostics/runner-adapters/trivy.js";
+import {
+	trivyFindingToProjectDiagnostic,
+	trivySecretFindingToProjectDiagnostic,
+} from "./project-diagnostics/runner-adapters/trivy.js";
 import { knipIssuesToProjectDiagnostics } from "./project-diagnostics/runner-adapters/knip.js";
 import type { ProjectDiagnostic } from "./project-diagnostics/types.js";
 import { applyDispositionsMultiFile } from "./diagnostic-dispositions.js";
@@ -88,12 +91,11 @@ import {
 	gateFindingsByPathFreshness,
 	snapshotAdvisoryProvenance,
 } from "./advisory-provenance.js";
-
-/**
- * #1622 / #1419 precedent: what a demoted finding shows where its cached line
- * number used to be. The finding survives, the untrustworthy coordinate does not.
- */
-const STALE_LINE_MARKER = "[stale — re-run to confirm]";
+import { sweepInlineBlockerFreshness } from "./blocker-freshness.js";
+// #1631 review V2: moved to its own leaf module so a low-level store
+// (widget-state.ts) can use the marker without importing this orchestrator —
+// see clients/stale-marker.ts's doc comment.
+import { STALE_LINE_MARKER } from "./stale-marker.js";
 import type { TestRunnerFindingsCache } from "./project-diagnostics/runner-adapters/runner-findings.js";
 
 interface TurnEndDeps {
@@ -487,14 +489,45 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	const projectDiagnosticsDelta: ProjectDiagnostic[] = [];
 	const projectDiagnosticsSources = new Set<string>();
 
+	// #1631: freshness gate. A cached blocker is a verdict about the file AND
+	// everything it imports; before re-serving it, sweep for out-of-band drift of
+	// the file or its forward imports and demote drifted entries to a
+	// `[stale — re-run to confirm]` advisory instead of re-asserting them at full
+	// authority (#1419 demote-not-drop).
+	const blockerFreshnessStart = Date.now();
+	const blockerFreshness = await sweepInlineBlockerFreshness(runtime, cwd);
+	logLatency({
+		type: "phase",
+		toolName: "turn_end",
+		filePath: cwd,
+		phase: "blocker_freshness_sweep",
+		durationMs: Date.now() - blockerFreshnessStart,
+		metadata: {
+			total: blockerFreshness.total,
+			kept: blockerFreshness.kept,
+			revalidated: blockerFreshness.revalidated,
+			alreadyStale: blockerFreshness.alreadyStale,
+			truncatedImports: blockerFreshness.truncatedImports,
+		},
+	});
+
 	// Re-surface inline blockers from this turn that the agent didn't fix.
 	// These were shown inline during write/edit but the agent moved on without resolving them.
 	const unresolvedBlockers = runtime.getInlineBlockersSnapshot();
-	for (const { filePath: bPath, summary } of unresolvedBlockers) {
+	for (const { filePath: bPath, summary, stale } of unresolvedBlockers) {
 		const displayPath = toRunnerDisplayPath(cwd, bPath);
-		blockerParts.push(
-			`Unresolved from this turn — ${displayPath}:\n${summary}`,
-		);
+		if (stale) {
+			// #1631: demoted — out of the authoritative blocker channel and into the
+			// advisory channel with a stale marker, so the agent is told to re-run
+			// rather than pressured by a verdict that may already be resolved.
+			advisoryParts.push(
+				`${STALE_LINE_MARKER} ${displayPath}:\n${summary}`,
+			);
+		} else {
+			blockerParts.push(
+				`Unresolved from this turn — ${displayPath}:\n${summary}`,
+			);
+		}
 	}
 
 	// Drain the deferred cascade computes kicked off this turn (#450). They ran
@@ -1314,10 +1347,13 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 	// there — a suppression escape (and a double count against
 	// `dispositionSuppressedTotal`) that a live-only filter would have missed.
 	//
-	// Trivy-secret findings are NOT yet wired — they have no existing
-	// lens_diagnostics-surfaced identity to anchor against (only the
-	// CVE-scanning trivy lane does); re-homed as a follow-up (#1628) rather
-	// than inventing an unreviewed anchor shape under release time pressure.
+	// #1628: trivy-secret findings get the SAME treatment, now that
+	// `trivySecretFindingToProjectDiagnostic` (project-diagnostics/runner-
+	// adapters/trivy.ts) gives them a `lens_diagnostics`-surfaced identity
+	// (tool="trivy", rule="trivy-secret:<ruleId>") to anchor a mark against —
+	// same pattern as gitleaks above, applied to both the live and stale arms
+	// for the same reason.
+	//
 	// ast-grep secret findings need no filtering here — they already went
 	// through dispatch's applyDispositions before reaching
 	// `peekActionableWarnings()`.
@@ -1335,12 +1371,26 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		"gitleaks",
 		gitleaksLiveFiltered.suppressed + gitleaksStaleFiltered.suppressed,
 	);
+	const trivySecretsLiveFiltered = filterFindingsByDisposition(
+		trivySecretsGate.live,
+		cwd,
+		(f) => trivySecretFindingToProjectDiagnostic(cwd, f),
+	);
+	const trivySecretsStaleFiltered = filterFindingsByDisposition(
+		trivySecretsGate.stale,
+		cwd,
+		(f) => trivySecretFindingToProjectDiagnostic(cwd, f),
+	);
+	recordDispositionSuppressed(
+		"trivy-secrets",
+		trivySecretsLiveFiltered.suppressed + trivySecretsStaleFiltered.suppressed,
+	);
 	const astSecretWarnings = runtime
 		.peekActionableWarnings()
 		.filter(isSecretWarning);
 	const sessionSecrets = dedupeSecretFindings([
 		...fromGitleaks(gitleaksLiveFiltered.kept),
-		...fromTrivySecrets(trivySecretsGate.live),
+		...fromTrivySecrets(trivySecretsLiveFiltered.kept),
 	]);
 	// Demoted secrets are addressed by FILE, never by line — the line is the one
 	// field the edit invalidated. Rule id and source survive it and must be
@@ -1354,7 +1404,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			rule: f.ruleId,
 			source: "gitleaks",
 		})),
-		...trivySecretsGate.stale.map((f) => ({
+		...trivySecretsStaleFiltered.kept.map((f) => ({
 			file: toRunnerDisplayPath(cwd, f.file),
 			rule: f.ruleId,
 			source: "trivy",
