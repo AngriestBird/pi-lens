@@ -74,20 +74,51 @@ export function stripCommentsAndStrings(source: string): string {
 	};
 	/**
 	 * A `/` opens a regex only where a VALUE may start. Deciding that from the
-	 * previous significant character is the standard lexer-free approximation:
-	 * after an identifier, a literal, or a closing `)`/`]`, a `/` is division.
+	 * preceding TOKEN is the standard lexer-free approximation: after an
+	 * identifier, a literal, or a closing `)`/`]`, a `/` is division.
 	 * `}` is treated as regex-position because a statement-block brace is far
 	 * more common in this codebase than an object literal followed by division.
+	 *
+	 * The preceding token, not the preceding CHARACTER (review round R2). A
+	 * character check reads the `n` of `return /x/` as an identifier and calls
+	 * the regex a division, leaving its contents unstripped — 41 keyword-position
+	 * regex sites across `clients/` were mis-lexed that way, and a phantom call
+	 * written inside `typeof /resetZizmorTokenAvailability()/` satisfied the
+	 * wiring check. So when the preceding token is a word, read the whole word
+	 * and ask whether it is a keyword an expression can follow.
 	 */
+	const KEYWORDS_BEFORE_REGEX = new Set([
+		"return",
+		"typeof",
+		"instanceof",
+		"in",
+		"of",
+		"case",
+		"await",
+		"yield",
+		"delete",
+		"void",
+		"new",
+		"do",
+		"else",
+		"throw",
+	]);
 	const regexMayStart = (index: number): boolean => {
+		let end = -1;
 		for (let j = index - 1; j >= 0; j--) {
 			const prev = out[j];
 			if (prev === " " || prev === "\t" || prev === "\n" || prev === "\r") {
 				continue;
 			}
-			return !/[\w$)\]"'`]/.test(prev);
+			end = j;
+			break;
 		}
-		return true;
+		if (end < 0) return true; // start of file
+		const prev = out[end];
+		if (!/[\w$]/.test(prev)) return !/[)\]"'`]/.test(prev);
+		let start = end;
+		while (start > 0 && /[\w$]/.test(out[start - 1])) start--;
+		return KEYWORDS_BEFORE_REGEX.has(out.slice(start, end + 1).join(""));
 	};
 	let quote: string | undefined;
 	let lineComment = false;

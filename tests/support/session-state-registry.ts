@@ -286,9 +286,7 @@ export const SESSION_STATE_REGISTRY: SessionStateEntry[] = [
 		policy: "session_start",
 		resetName: "_resetPackageManagerCache",
 		reason:
-			"#1496 shape: a `missing` verdict for pnpm/yarn is durable for a session, not for the process — a manager installed mid-process should be re-probed by the next session.",
-		gap:
-			"Not wired: `_resetPackageManagerCache` is documented `Intended for tests` and has no session_start caller, so a genuine-absence latch survives every later session in the same process.",
+			"#1496 shape: a `missing` verdict for pnpm/yarn is durable for a session, not for the process — a manager installed mid-process should be re-probed by the next session. Declared a gap when this registry landed; PR #1666 wired the reset into handleSessionStart, and the gap test went red naming the fix, which is the registry doing its job.",
 	},
 	{
 		id: "psscriptanalyzer:latches",

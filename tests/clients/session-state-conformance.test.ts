@@ -141,6 +141,54 @@ describe("session-state scan — walker smuggle probes (R1/S1)", () => {
 		);
 	});
 
+	// The regex branch had no probe at all until review round R2: deleting it
+	// wholesale left every other probe here green. These two cover it from both
+	// sides — the lexing decision, and the branch's existence.
+	it("R2: a phantom call inside a KEYWORD-position regex does not count as called", () => {
+		// The reviewer's exploit. Reading the preceding CHARACTER sees the `f` of
+		// `typeof`, calls this division, leaves the regex body unstripped, and the
+		// wiring check accepts a call that is not there.
+		const source = [
+			"function handleSessionStart() {",
+			"\tif (typeof /resetZizmorTokenAvailability()/) {",
+			"\t\tresetDegradationLedger();",
+			"\t}",
+			"}",
+		].join("\n");
+		const calls = callsWithinFunction(source, "handleSessionStart");
+		expect(calls).not.toContain("resetZizmorTokenAvailability");
+		expect(calls).toContain("resetDegradationLedger");
+	});
+
+	it("R2: a regex holding an unbalanced brace cannot truncate the body", () => {
+		// Reds if the regex branch is deleted: the `{` inside the character class
+		// is then counted by the brace matcher, the body never closes, and the
+		// call below it disappears.
+		const source = [
+			"function handleSessionStart() {",
+			"\tconst re = /[{]/;",
+			"\tresetDegradationLedger();",
+			"}",
+		].join("\n");
+		expect(callsWithinFunction(source, "handleSessionStart")).toContain(
+			"resetDegradationLedger",
+		);
+	});
+
+	it("R2: a value-position regex is still lexed as a regex", () => {
+		// The control for the keyword fix — narrowing regex position must not
+		// swing so far that ordinary regex literals stop being recognized.
+		const source = [
+			"function handleSessionStart() {",
+			'\tconst safe = arg.replace(/"/g, \'""\');',
+			"\tresetDegradationLedger();",
+			"}",
+		].join("\n");
+		expect(callsWithinFunction(source, "handleSessionStart")).toContain(
+			"resetDegradationLedger",
+		);
+	});
+
 	it("stripping preserves length and line structure", () => {
 		const source = 'const a = 1; // note\nconst b = "text";\n';
 		const stripped = stripCommentsAndStrings(source);
@@ -193,11 +241,11 @@ describe("session-state registry — session_start wiring", () => {
 		// A named inventory, so a reviewer sees the open population at a glance
 		// rather than grepping for `gap:`. Shrinking it is the point of the
 		// registry; growing it silently is what this asserts against.
+		// One down: #1666 wired package-manager's reset into handleSessionStart,
+		// this list's own test went red naming the fix, and the entry lost its
+		// `gap`. That is the loop the registry exists to close.
 		const gaps = SESSION_STATE_REGISTRY.filter((e) => e.gap).map((e) => e.id);
-		expect(gaps).toEqual([
-			"diagnostic-dispositions:deferredThisSession",
-			"package-manager:availabilityLatches",
-		]);
+		expect(gaps).toEqual(["diagnostic-dispositions:deferredThisSession"]);
 	});
 });
 
