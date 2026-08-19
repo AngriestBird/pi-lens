@@ -1610,6 +1610,20 @@ export async function runPipeline(
 			: undefined,
 		inlineBlockerLines: dispatchResult.hasBlockers
 			? dispatchResult.blockers
+					// #1641 review F2: `dispatchResult.blockers` is NOT guaranteed to be
+					// scoped to THIS file — a chart-wide runner (helm-lint, helm-render)
+					// reports blocking diagnostics against other files in the chart
+					// (e.g. `values.yaml`) alongside `ctx.filePath`. The precedent every
+					// per-file runner already follows (dotnet-build.ts, javac.ts) is to
+					// drop cross-file rows before they reach a per-file record; this is
+					// that same filter applied at the aggregation point instead, since
+					// `blockers` is pooled across every runner dispatched for this file.
+					// Without it, a cross-file line count gets attributed to THIS
+					// file's past-EOF check and can demote an in-bounds, fully valid
+					// blocker for content the diagnostic never described.
+					.filter(
+						(d) => path.resolve(d.filePath) === path.resolve(filePath),
+					)
 					.map((d) => d.line)
 					.filter((line): line is number => typeof line === "number")
 			: undefined,
