@@ -163,6 +163,14 @@ export interface ProbeEvidence {
 	 *     as a resolved-and-trusted answer.
 	 */
 	resolved?: "cache" | "path" | "declined";
+	/**
+	 * Whether this compensating `available` row cleared a latched `unavailable`
+	 * row, or corrected nothing (#1657). The two rows are otherwise identical
+	 * and the once-per-correction memo treats them differently, so without this
+	 * field a log reader cannot tell which one happened — the very distinction
+	 * the memo is built on (#1674 review F4).
+	 */
+	correctsLatchedRow?: boolean;
 }
 
 /**
