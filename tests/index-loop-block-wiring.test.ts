@@ -74,7 +74,25 @@ async function fireTurnEnd() {
 	return mock;
 }
 
-describe("index turn_end loop_block wiring (#1122)", () => {
+// #1772: each case here pays a COLD `import("../index.js")` after
+// `vi.resetModules()` in `beforeEach` — deliberate, not accidental. index.ts
+// (and the mocked event-loop-monitor/latency-logger modules under it) carries
+// turn-scoped module state, which is exactly what these wiring guards check
+// (a: reset must be called per turn; b: cross-turn high-water). Sharing one
+// import across cases would defeat the isolation the tests exist to prove, so
+// the fix is a timeout budget, not a hoisted import (matching #1764's
+// instance-reaper-prune-concurrency fix and this repo's HEAVY_IO_TIMEOUT_MS
+// convention, tests/clients/ast-grep-rule-precedence-followups.test.ts:210).
+// Solo runs on a busy box measured cold-import cost alone at 5.9-8.4s,
+// already over vitest's 5000ms default (timeout, not an assertion failure —
+// both cases pass every time once given room); #1743's and #1761's
+// controlled A/B comparisons showed master fails at the same or higher rate
+// than feature branches, so this is pre-existing and environmental, not a
+// regression. 30s matches the existing convention and leaves ~4x headroom
+// over the worst solo run observed.
+const LOOP_BLOCK_WIRING_TIMEOUT_MS = 30_000;
+
+describe("index turn_end loop_block wiring (#1122)", { timeout: LOOP_BLOCK_WIRING_TIMEOUT_MS }, () => {
 	beforeEach(() => {
 		vi.resetModules();
 		latencyCalls.length = 0;
