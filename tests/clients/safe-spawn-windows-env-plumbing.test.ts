@@ -172,6 +172,10 @@ describe("Windows resolution honors the CALLER's env, not just ambient process.e
 		const child = spawnMock.mock.results[0]?.value as ReturnType<
 			typeof makeFakeChild
 		>;
+		// #1656: safeSpawnAsync now finalizes off "exit" (then waits for the
+		// pipes to go idle), not "close" — a real Node child always emits both
+		// (exit first), so the fixture must too.
+		child.emit("exit", 0, null);
 		child.emit("close", 0, null);
 		await resultPromise;
 	});
