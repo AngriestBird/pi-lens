@@ -278,6 +278,14 @@ export function makeCtx(
 		 * pi-lens must then behave exactly as it did before mode awareness.
 		 */
 		mode: "tui" | "rpc" | "json" | "print" | null;
+		/**
+		 * #1655 item 2: the host's live `Model` behind `ctx.model`
+		 * (`ExtensionContext.model` → `AgentSession.model`). pi-lens reads its
+		 * telemetry identity from HERE, not from any event field — pi sets none
+		 * of `provider`/`model`/`sessionId` on a `session_start` or a
+		 * `tool_result` payload. Omit to simulate a host with no model selected.
+		 */
+		model: { id: string; provider: string } | undefined;
 	}> = {},
 ): MockCtx {
 	const notifications: CapturedNotification[] = [];
@@ -315,7 +323,7 @@ export function makeCtx(
 		sessionManager: {
 			getSessionId: () => overrides.sessionId,
 		},
-		model: undefined,
+		model: overrides.model,
 		signal: undefined,
 		isIdle: () => true,
 		hasPendingMessages: () => false,
