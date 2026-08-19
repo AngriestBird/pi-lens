@@ -688,6 +688,98 @@ describe("workspace/diagnostic/refresh coalesces a burst into one trailing rerun
 		expect(pullCalls.length).toBeLessThanOrEqual(2 * DOC_COUNT);
 		expect(maxInFlight).toBeLessThanOrEqual(4);
 	});
+
+	// #1669 review R1b: the "at most 2 passes" assertion above cannot tell a
+	// working rerun apart from a BROKEN one that silently drops it — 1 pass
+	// (no rerun at all) also satisfies "<= 2". This test gates the mid-burst
+	// refreshes on a REAL in-flight pull (never a timer/tick proxy for one)
+	// and asserts the EXACT pull count a genuine single trailing rerun
+	// produces: 1 initial pass + 10 mid-pool refreshes coalesced into exactly
+	// 1 rerun pass, over 20 open documents, is exactly 40 pulls — never 20
+	// (rerun dropped) and never more than 40 (rerun fired per refresh).
+	it("a refresh arriving while a REAL pull is in flight produces exactly one rerun pass, not zero and not one per refresh", async () => {
+		const state = createMockState({
+			workspaceDiagnosticsSupport: {
+				advertised: true,
+				mode: "pull",
+				workspaceDiagnostics: false,
+				diagnosticProviderKind: "documentDiagnosticProvider",
+			},
+		});
+		const DOC_COUNT = 20;
+		for (let i = 0; i < DOC_COUNT; i++) {
+			const filePath = `/project/r1b-file-${i}.ts`;
+			const key = normalizeMapKey(filePath);
+			state.openDocuments.add(key);
+			state.openDocumentUris!.set(key, pathToFileURL(filePath).href);
+		}
+
+		// Every "textDocument/diagnostic" pull hangs until THIS test releases
+		// it explicitly — the gate is a real outstanding request, not a timer.
+		let inFlight = 0;
+		const pendingReleases: Array<() => void> = [];
+		vi.mocked(state.connection.sendRequest).mockImplementation(
+			async (method: unknown) => {
+				if (method === "textDocument/diagnostic") {
+					inFlight++;
+					await new Promise<void>((resolve) => {
+						pendingReleases.push(() => {
+							inFlight--;
+							resolve();
+						});
+					});
+					return { kind: "full", resultId: "r", items: [] };
+				}
+				return undefined;
+			},
+		);
+
+		setupIncomingHandlers(state, {});
+		const calls = vi.mocked(state.connection.onRequest).mock.calls as unknown as Array<
+			[string, (...args: unknown[]) => unknown]
+		>;
+		const handler = calls.find((c) => c[0] === "workspace/diagnostic/refresh")?.[1];
+		expect(handler).toBeDefined();
+
+		// Initial refresh — starts the pool on the next tick.
+		expect(await handler!()).toBeNull();
+		// Let the pool's setImmediate fire and reach its first real pulls.
+		await new Promise((resolve) => setImmediate(resolve));
+		// Gate on a REAL in-flight pull: wait until at least one is genuinely
+		// outstanding before firing the mid-pool refreshes.
+		for (let i = 0; i < 50 && pendingReleases.length === 0; i++) {
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+		expect(
+			pendingReleases.length,
+			"a real textDocument/diagnostic pull must be in flight before the mid-pool burst",
+		).toBeGreaterThan(0);
+
+		// 10 refreshes arrive WHILE the first pass's pulls are genuinely
+		// unresolved — every one of them must coalesce into a SINGLE trailing
+		// rerun, not zero (dropped) and not ten (uncapped).
+		for (let i = 0; i < 10; i++) {
+			expect(await handler!()).toBeNull();
+		}
+
+		// Drain: release every in-flight/queued pull as it appears, across
+		// both the first pass and the one rerun pass, until nothing is left.
+		for (let tick = 0; tick < DOC_COUNT * 4 + 20; tick++) {
+			if (pendingReleases.length === 0 && inFlight === 0) break;
+			const toRelease = pendingReleases.splice(0, pendingReleases.length);
+			for (const release of toRelease) release();
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+
+		expect(inFlight, "worker pool must have fully drained").toBe(0);
+		const pullCalls = vi
+			.mocked(state.connection.sendRequest)
+			.mock.calls.filter((c) => c[0] === "textDocument/diagnostic");
+		// Exactly 2 passes over 20 open documents. A dropped-rerun mutant
+		// (refreshRepullRerunRequested forced to `false`) produces 20 here —
+		// still "<= 40", but wrong; this assertion is exact, not a ceiling.
+		expect(pullCalls.length).toBe(2 * DOC_COUNT);
+	});
 });
 
 describe("workspace/diagnostic/refresh reaches an unregistered cwd's on-disk cache (#1669 review N3)", () => {
