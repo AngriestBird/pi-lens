@@ -337,38 +337,134 @@ describe("lens_diagnostics mode=delta", () => {
 	});
 
 	it("formats project diagnostics delta records", async () => {
-		projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
-			undefined,
-		);
-		projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue({
-			version: 1,
-			cwd: "/proj",
-			generatedAt: "2026-01-01T00:00:00.000Z",
-			sessionId: "session-1",
-			turnIndex: 3,
-			diagnostics: [
-				{
-					filePath: "/proj/src/knip.ts",
-					line: 12,
-					severity: "error",
-					semantic: "blocking",
-					tool: "knip",
-					runner: "knip",
-					rule: "knip:unlisted",
-					message: "Unlisted dependency lodash",
-					source: "project-scan",
-				},
-			],
-			sources: ["knip"],
-		});
+		// #1634 review round R3: appendProjectDiagnosticsDeltaLines now
+		// freshness-gates against the report's own `generatedAt` (a missing
+		// cited file is dropped), so this needs a REAL file — a fixed fake
+		// path like the pre-fix fixture used would just be dropped as missing.
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-delta-"));
+		try {
+			const filePath = path.join(cwd, "src", "knip.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			// Report generated AFTER the file write, so the gate reads it live.
+			const generatedAt = new Date(Date.now() + 60_000).toISOString();
 
-		const result = await run(makeTool(), { mode: "delta" });
-		const text = String(result.content[0].text);
-		expect(text).toContain("knip.ts");
-		expect(text).toContain("L12");
-		expect(text).toContain("knip:unlisted");
-		expect(text).toContain("Unlisted dependency lodash");
-		expect(result.details).toMatchObject({ projectDiagnostics: 1 });
+			projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
+				undefined,
+			);
+			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue({
+				version: 1,
+				cwd,
+				generatedAt,
+				sessionId: "session-1",
+				turnIndex: 3,
+				diagnostics: [
+					{
+						filePath,
+						line: 12,
+						severity: "error",
+						semantic: "blocking",
+						tool: "knip",
+						runner: "knip",
+						rule: "knip:unlisted",
+						message: "Unlisted dependency lodash",
+						source: "project-scan",
+					},
+				],
+				sources: ["knip"],
+			});
+
+			const result = await run(makeTool(), { mode: "delta" }, cwd);
+			const text = String(result.content[0].text);
+			expect(text).toContain("knip.ts");
+			expect(text).toContain("L12");
+			expect(text).toContain("knip:unlisted");
+			expect(text).toContain("Unlisted dependency lodash");
+			expect(result.details).toMatchObject({ projectDiagnostics: 1 });
+		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
+
+	it("#1634 review round R3: demotes a project-diagnostics-delta finding whose file was edited after the report was generated", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-delta-stale-"));
+		try {
+			const filePath = path.join(cwd, "src", "drift.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const x = 1;\n");
+			// Report generated BEFORE the file's mtime — the cited line 12 is
+			// stale by the time delta mode re-serves it.
+			const generatedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+
+			projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
+				undefined,
+			);
+			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue({
+				version: 1,
+				cwd,
+				generatedAt,
+				sessionId: "session-1",
+				turnIndex: 3,
+				diagnostics: [
+					{
+						filePath,
+						line: 12,
+						severity: "error",
+						semantic: "blocking",
+						tool: "knip",
+						runner: "knip",
+						rule: "knip:unlisted",
+						message: "Unlisted dependency lodash",
+						source: "project-scan",
+					},
+				],
+				sources: ["knip"],
+			});
+
+			const result = await run(makeTool(), { mode: "delta" }, cwd);
+			const text = String(result.content[0].text);
+			expect(text).toContain("Unlisted dependency lodash");
+			expect(text).not.toContain("L12");
+			expect(text).toContain("stale — re-run to confirm");
+		} finally {
+			removeTempDirSync(cwd);
+		}
+	});
+
+	it("#1634 review round R3: drops a project-diagnostics-delta finding whose cited file no longer exists", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lens-diag-delta-gone-"));
+		try {
+			projectDiagnosticsMocks.loadProjectDiagnosticsSnapshot.mockReturnValue(
+				undefined,
+			);
+			projectDiagnosticsMocks.loadProjectDiagnosticsDeltaReport.mockReturnValue({
+				version: 1,
+				cwd,
+				generatedAt: new Date().toISOString(),
+				sessionId: "session-1",
+				turnIndex: 3,
+				diagnostics: [
+					{
+						filePath: path.join(cwd, "src", "gone.ts"),
+						line: 12,
+						severity: "error",
+						semantic: "blocking",
+						tool: "knip",
+						runner: "knip",
+						rule: "knip:unlisted",
+						message: "vanished project finding",
+						source: "project-scan",
+					},
+				],
+				sources: ["knip"],
+			});
+
+			const result = await run(makeTool(), { mode: "delta" }, cwd);
+			const text = String(result.content[0].text);
+			expect(text).not.toContain("vanished project finding");
+		} finally {
+			removeTempDirSync(cwd);
+		}
 	});
 
 	it("filters ignored actionable, quality, and project-delta entries (#279)", async () =>
@@ -2865,6 +2961,84 @@ describe("lens_diagnostics disposition read-filter (#755)", () => {
 		// All cached findings filtered out → delta reports a clean turn.
 		expect(String(after.content[0].text)).toContain("No");
 		expect(after.details).toMatchObject({ mode: "delta" });
+	});
+
+	// #1634 review round: mode=delta is the tool's DEFAULT and re-serves the
+	// actionable/quality-warnings caches verbatim — same shape #1622 fixed for
+	// gitleaks/trivy-secrets, previously unfixed here.
+	it("mode=delta demotes an actionable-warning cited in a file edited after the report was generated", async () => {
+		const filePath = path.join(ddTmp, "drift.ts");
+		fs.writeFileSync(filePath, "const a = 1;\nconst target = bad();\n");
+		const generatedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+		// Edit happened AFTER the report — the cited line 2 is no longer trustworthy.
+		fs.utimesSync(filePath, new Date(), new Date());
+		const cacheData = {
+			"actionable-warnings": {
+				generatedAt,
+				files: [
+					{
+						filePath,
+						displayPath: "drift.ts",
+						warnings: [
+							{
+								id: "1",
+								filePath,
+								displayPath: "drift.ts",
+								line: 2,
+								severity: "warning",
+								tool: "eslint",
+								rule: "no-bad",
+								message: "bad call",
+								actions: [],
+								suppressed: false,
+								origin: "dispatch",
+							},
+						],
+					},
+				],
+			},
+		};
+
+		const result = await run(makeTool(cacheData), { mode: "delta" }, ddTmp);
+		const text = String(result.content[0].text);
+		expect(text).toContain("bad call");
+		expect(text).not.toContain("L2");
+		expect(text).toContain("stale — re-run to confirm");
+	});
+
+	it("mode=delta drops an actionable-warning whose cited file no longer exists", async () => {
+		const filePath = path.join(ddTmp, "gone.ts");
+		const generatedAt = new Date().toISOString();
+		const cacheData = {
+			"actionable-warnings": {
+				generatedAt,
+				files: [
+					{
+						filePath,
+						displayPath: "gone.ts",
+						warnings: [
+							{
+								id: "1",
+								filePath,
+								displayPath: "gone.ts",
+								line: 1,
+								severity: "warning",
+								tool: "eslint",
+								rule: "no-bad",
+								message: "vanished finding",
+								actions: [],
+								suppressed: false,
+								origin: "dispatch",
+							},
+						],
+					},
+				],
+			},
+		};
+
+		const result = await run(makeTool(cacheData), { mode: "delta" }, ddTmp);
+		const text = String(result.content[0].text);
+		expect(text).not.toContain("vanished finding");
 	});
 
 	it("mode=all hides a finding deferred via the mark tool without a re-dispatch", async () => {
