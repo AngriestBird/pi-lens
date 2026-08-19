@@ -32,7 +32,7 @@ import {
 	projectTrustDenialReason,
 } from "../project-trust.js";
 import { shouldPreferPullOnlyDiagnostics } from "../lsp-budget.js";
-import { withDeadline } from "../deadline-utils.js";
+import { withDeadline, withTimeout } from "../deadline-utils.js";
 import {
 	acquireWorkspaceSweepHold,
 	clearWorkspaceSweepHoldForSessionStart,
@@ -285,6 +285,54 @@ const TOUCH_DEBOUNCE_MS = Math.max(
 	Number.parseInt(process.env.PI_LENS_LSP_TOUCH_DEBOUNCE_MS ?? "1500", 10) ||
 		1500,
 );
+// #1621: the rename-propagation notifies (`didClose` ahead of the rename,
+// `workspace/didRenameFiles` after) share the exit-notify defect #1620 fixed —
+// a notify write on a pipe that is not draining neither resolves nor rejects,
+// so the bare `await` was unbounded. Rename propagation is best-effort advice
+// to servers, not a correctness gate, so a wedged client's notify gets its own
+// ceiling and a recorded disposition rather than stalling the `Promise.all`
+// for every healthy client alongside it.
+// #1621 F3: floor at 50ms, not 0 — a negative env value (e.g. "-100") is
+// truthy after `Number.parseInt`, so it survives the `|| 1500` fallback and
+// would otherwise reach `withDeadline`'s `ms <= 0` branch. That branch treats
+// the budget as already expired and settles without ever really attempting
+// the notify — a negative override would silently disable rename propagation
+// instead of merely shortening its budget.
+const RENAME_NOTIFY_TIMEOUT_MS = Math.max(
+	50,
+	Number.parseInt(
+		process.env.PI_LENS_LSP_RENAME_NOTIFY_TIMEOUT_MS ?? "1500",
+		10,
+	) || 1500,
+);
+
+// #1621: bound a single rename-propagation notify call and classify how it
+// failed. `withTimeout` rejects with the deterministic `"Timeout after Nms"`
+// message on the timer branch (see deadline-utils.ts) — the same signal
+// `navRequest`/`clientPingLiveness` in clients/lsp/client.ts already match on
+// to tell a timeout from a genuine rejection, reused here rather than forking
+// a second convention.
+type RenameNotifyResult =
+	| { ok: true }
+	| { ok: false; error: string; disposition: RenameNotifyDisposition };
+
+async function runRenameNotify(
+	send: () => Promise<void>,
+	timeoutMs: number,
+): Promise<RenameNotifyResult> {
+	try {
+		await withTimeout(send(), timeoutMs);
+		return { ok: true };
+	} catch (err) {
+		const timedOut =
+			err instanceof Error && err.message.startsWith("Timeout after");
+		return {
+			ok: false,
+			error: err instanceof Error ? err.message : String(err),
+			disposition: timedOut ? "timedOut" : "rejected",
+		};
+	}
+}
 const DEFAULT_LSP_CLIENT_CEILING = 24;
 const DEFAULT_TS_IDLE_EVICT_MS = 20 * 60_000;
 
@@ -408,11 +456,22 @@ export interface SpawnedServer {
 	info: LSPServerInfo;
 }
 
+// #1621: a rename-propagation notify failure now records WHY it failed —
+// `timedOut` (the notify write never settled inside its budget) is distinct
+// from `rejected` (the send itself errored) — so an empty failure list still
+// means clean, and a timeout doesn't read as an indistinguishable rejection.
+export type RenameNotifyDisposition = "timedOut" | "rejected";
+export interface RenameNotifyFailure {
+	serverId: string;
+	error: string;
+	disposition: RenameNotifyDisposition;
+}
+
 export interface LSPRenameFileResult {
 	applied: boolean;
 	serverIds: string[];
 	willRenameFailures: Array<{ serverId: string; error: string }>;
-	didRenameFailures: Array<{ serverId: string; error: string }>;
+	didRenameFailures: RenameNotifyFailure[];
 	droppedConflicts: number;
 	inputEditCount: number;
 	summary: string[];
@@ -5202,7 +5261,7 @@ export class LSPService {
 		);
 		const activeClients = this.activeClientsForCwd(cwd, priorityServerIds);
 		const willRenameFailures: Array<{ serverId: string; error: string }> = [];
-		const didRenameFailures: Array<{ serverId: string; error: string }> = [];
+		const didRenameFailures: RenameNotifyFailure[] = [];
 
 		const willResults = await Promise.all(
 			activeClients.map(async ({ serverId, client }) => {
@@ -5273,18 +5332,22 @@ export class LSPService {
 				client,
 				oldUri: client.getDocumentUri(oldFilePath),
 			}));
-		const closeFailures: Array<{ serverId: string; error: string }> = [];
+		const closeFailures: RenameNotifyFailure[] = [];
 		await Promise.all(
 			openDocuments.map(async ({ serverId, client }) => {
-				try {
-					await client.closeDocument(oldFilePath);
-					return undefined;
-				} catch (err) {
+				// #1621: bounded so one wedged server's didClose write cannot stall
+				// this Promise.all — and therefore the whole rename — for every
+				// other client alongside it.
+				const result = await runRenameNotify(
+					() => client.closeDocument(oldFilePath),
+					RENAME_NOTIFY_TIMEOUT_MS,
+				);
+				if (!result.ok) {
 					closeFailures.push({
 						serverId,
-						error: err instanceof Error ? err.message : String(err),
+						error: result.error,
+						disposition: result.disposition,
 					});
-					return undefined;
 				}
 			}),
 		);
@@ -5304,13 +5367,57 @@ export class LSPService {
 			// next genuine open (#1147 P3-7).
 			const content = await fs.readFile(oldFilePath, "utf-8");
 			const languageId = getLanguageId(oldFilePath) ?? "plaintext";
+			const resyncFailures: RenameNotifyFailure[] = [];
+			// #1621 F1: the resync write is the SAME class of notify as the didClose
+			// it is repairing after — a pipe that is wedged for didClose is wedged
+			// for every subsequent write on it too, so this bare await reintroduced
+			// the exact unbounded primitive one Promise.all up. Bound it with the
+			// same budget and record the disposition rather than let a wedged
+			// resync silently move the hang here instead of removing it.
 			await Promise.all(
-				openDocuments.map(({ client }) =>
-					client.notify.open(oldFilePath, content, languageId, true, true),
-				),
+				openDocuments.map(async ({ serverId, client }) => {
+					const resyncResult = await runRenameNotify(
+						() =>
+							client.notify.open(oldFilePath, content, languageId, true, true),
+						RENAME_NOTIFY_TIMEOUT_MS,
+					);
+					if (!resyncResult.ok) {
+						resyncFailures.push({
+							serverId,
+							error: resyncResult.error,
+							disposition: resyncResult.disposition,
+						});
+					}
+				}),
 			);
+			if (resyncFailures.length > 0) {
+				// A resync failure is not swallowed: the affected client is left with
+				// no open document at all until its next genuine open, so this is
+				// logged for the same reason lsp_client_shutdown records a forced
+				// teardown — a degraded resync must be countable from the log.
+				logLatency({
+					type: "phase",
+					phase: "lsp_rename_resync_failed",
+					filePath: oldFilePath,
+					durationMs: 0,
+					metadata: {
+						failures: resyncFailures.map((failure) => ({
+							serverId: failure.serverId,
+							disposition: failure.disposition,
+							error: failure.error,
+						})),
+					},
+				});
+			}
+			const closeFailureSummary = closeFailures
+				.map((failure) => `${failure.serverId} (${failure.disposition}): ${failure.error}`)
+				.join("; ");
+			const resyncFailureSummary =
+				resyncFailures.length > 0
+					? ` (resync also failed: ${resyncFailures.map((failure) => `${failure.serverId} (${failure.disposition}): ${failure.error}`).join("; ")})`
+					: "";
 			throw new Error(
-				`workspace/didClose failed; rename aborted: ${closeFailures.map((failure) => `${failure.serverId}: ${failure.error}`).join("; ")}`,
+				`workspace/didClose failed; rename aborted: ${closeFailureSummary}${resyncFailureSummary}`,
 			);
 		}
 		let renameApplied;
@@ -5351,28 +5458,32 @@ export class LSPService {
 		await Promise.all(
 			activeClients.map(async ({ serverId, client }) => {
 				const opened = openDocuments.find((entry) => entry.serverId === serverId);
-				try {
-					if (opened?.oldUri) {
-						await client.didRenameFiles(
-							oldFilePath,
-							newFilePath,
-							opened.oldUri,
-							destinationUriPreservingSpelling(
-								opened.oldUri,
-								oldFilePath,
-								newFilePath,
-							),
-						);
-					} else {
-						await client.didRenameFiles(oldFilePath, newFilePath);
-					}
-					return undefined;
-				} catch (err) {
+				// #1621: bounded for the same reason as the didClose notify above —
+				// rename propagation is best-effort advice to servers, not a
+				// correctness gate, so a wedged client's notify must not stall the
+				// healthy clients settling alongside it in this Promise.all.
+				const result = await runRenameNotify(
+					() =>
+						opened?.oldUri
+							? client.didRenameFiles(
+									oldFilePath,
+									newFilePath,
+									opened.oldUri,
+									destinationUriPreservingSpelling(
+										opened.oldUri,
+										oldFilePath,
+										newFilePath,
+									),
+								)
+							: client.didRenameFiles(oldFilePath, newFilePath),
+					RENAME_NOTIFY_TIMEOUT_MS,
+				);
+				if (!result.ok) {
 					didRenameFailures.push({
 						serverId,
-						error: err instanceof Error ? err.message : String(err),
+						error: result.error,
+						disposition: result.disposition,
 					});
-					return undefined;
 				}
 			}),
 		);
