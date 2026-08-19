@@ -609,6 +609,19 @@ const PULL_REQUEST_TIMEOUT_MS = positiveIntFromEnv(
 	"PI_LENS_LSP_PULL_REQUEST_TIMEOUT_MS",
 	10_000,
 );
+// #1773: below this, dispatching is not a real attempt. The old clamp
+// (`Math.max(1, ...)`) let an exhausted `budgetMs` (0 or negative) through as
+// a 1ms pull — sent, timed out by construction, and recorded as a genuine
+// `lsp_pull_diagnostic_timeout` with a fabricated `effectiveBudgetMs: 1`
+// (observed live: both pull-timeout records in the 2026-08-20 plegma dogfood
+// session carried exactly that). 5ms sits below the smallest budget this
+// codebase's own regression fixtures already treat as a real dispatch
+// (`tests/clients/lsp/pull-diagnostic-timeout-telemetry.test.ts` exercises
+// 20ms and 30ms as genuinely-attempted-then-timed-out) and above the
+// 1-4ms band that is indistinguishable from "already exhausted" — a local
+// stdio server round trip (write + compute + parse) needs more than a
+// handful of milliseconds even on the fast path.
+const PULL_MIN_USABLE_BUDGET_MS = 5;
 const SHUTDOWN_REQUEST_TIMEOUT_MS = positiveIntFromEnv(
 	"PI_LENS_LSP_SHUTDOWN_TIMEOUT_MS",
 	1000,
@@ -2465,8 +2478,32 @@ async function pullDiagnosticSource(
 	identifier: string | undefined,
 ): Promise<PullSourceOutcome> {
 	if (!isClientAlive(state)) return { status: "unavailable" };
-	const uri = pathToFileURL(filePath).href;
 	const normalizedPath = normalizeMapKey(filePath);
+	// #1773: a budget at or below the usable floor cannot complete a real
+	// round trip. Skip the dispatch entirely — no `safeSendRequest` call, no
+	// generation/sequence claim — and say so with a distinct record, so
+	// `lsp_pull_diagnostic_timeout` only ever means a pull was genuinely
+	// attempted. The caller sees the same `unavailable` outcome a timeout
+	// would have produced (#240: unavailable, never a false clean), so
+	// nothing downstream of this call changes shape.
+	if (budgetMs <= PULL_MIN_USABLE_BUDGET_MS) {
+		emitBounded(
+			"lsp_pull_skipped_budget_exhausted",
+			pullSourceKey(normalizedPath, identifier),
+			{
+				type: "phase",
+				filePath: normalizedPath,
+				durationMs: 0,
+				metadata: {
+					identifier: identifier ?? "bare",
+					remainingBudgetMs: budgetMs,
+					server: state.serverId,
+				},
+			},
+		);
+		return { status: "unavailable" };
+	}
+	const uri = pathToFileURL(filePath).href;
 	// #1104: echo the last resultId we hold for this document so a server that
 	// hasn't changed its view can answer `kind: "unchanged"` instead of
 	// recomputing — see the `kind === "unchanged"` branch below for how that's
@@ -2651,6 +2688,7 @@ async function pullDiagnosticSource(
 				effectiveBudgetMs: effectiveTimeoutMs,
 				hadPreviousResultId: previousResultId !== undefined,
 				elapsedMs: Date.now() - requestStartedAt,
+				server: state.serverId,
 			});
 			armLateAnswerTelemetry({
 				requestPromise,
@@ -2658,6 +2696,7 @@ async function pullDiagnosticSource(
 				identifier,
 				subject: sourceKey,
 				requestStartedAt,
+				server: state.serverId,
 			});
 		}
 		recordPullFailure(state, "textDocument/diagnostic", err);
@@ -2696,10 +2735,19 @@ function recordPullTimeoutTelemetry(args: {
 	effectiveBudgetMs: number;
 	hadPreviousResultId: boolean;
 	elapsedMs: number;
+	server: string;
 }): void {
+	// #1771: this record is written on a genuine failure path (a dispatched
+	// pull that never answered), so per the bounded-telemetry rule
+	// (`clients/bounded-telemetry.ts`) it needs a `ledgerKind`, not just the
+	// detailed latency.log record. Before this it counted nothing in the
+	// degradation ledger — every occurrence wrote a detail line, but nothing
+	// tallied. No `risingEdgePer`: timeouts repeat and every one should count,
+	// matching the pre-existing "no rising-edge gate" behavior for the
+	// detailed record itself.
 	emitBounded(
 		"lsp_pull_diagnostic_timeout",
-		`${args.scope}::${args.identifier ?? "bare"}`,
+		`${args.server}::${args.scope}::${args.identifier ?? "bare"}`,
 		{
 			type: "phase",
 			filePath: args.scope,
@@ -2708,7 +2756,12 @@ function recordPullTimeoutTelemetry(args: {
 				identifier: args.identifier ?? "bare",
 				effectiveBudgetMs: args.effectiveBudgetMs,
 				hadPreviousResultId: args.hadPreviousResultId,
+				server: args.server,
 			},
+		},
+		{
+			ledgerKind: "lsp-pull-diagnostic-timeout",
+			reason: `pull timeout on ${args.server} after ${args.elapsedMs}ms (budget ${args.effectiveBudgetMs}ms)`,
 		},
 	);
 }
@@ -2738,6 +2791,7 @@ function armLateAnswerTelemetry(args: {
 	identifier: string | undefined;
 	subject: string;
 	requestStartedAt: number;
+	server: string;
 }): void {
 	args.requestPromise.then(
 		() => {
@@ -2766,13 +2820,46 @@ function armLateAnswerTelemetry(args: {
 				// Telemetry must never break the observed path.
 			}
 		},
-		() => {
-			// The abandoned request eventually failed rather than answering — not
-			// an "answer discarded" event. Its failure was already visible via
-			// `recordPullFailure` at request time (a general request failure, not
-			// specific to this late arrival); nothing more to record here. This
-			// handler exists so the request's eventual rejection never surfaces as
-			// an unhandled rejection.
+		(err: unknown) => {
+			// #1774: the abandoned request eventually REJECTED rather than
+			// answering. Behavior is unchanged — the rejection is still
+			// swallowed here, exactly as before — but "timeout then silence"
+			// and "timeout then server rejection (e.g. ContentModified)" were
+			// previously indistinguishable: `recordPullFailure` at request
+			// time reports the FIRST failure only, and this rejection happens
+			// strictly after that request already timed out, so it needs its
+			// own record. Bounded via the degradation ledger, same shape as
+			// the late-answer branch above, so this rejection cannot outpace
+			// the timeout count that gates it.
+			try {
+				const elapsedMs = Date.now() - args.requestStartedAt;
+				const candidate = err as { code?: unknown; message?: unknown };
+				const code =
+					typeof candidate?.code === "number" ||
+					typeof candidate?.code === "string"
+						? candidate.code
+						: undefined;
+				emitBounded(
+					"lsp_pull_late_rejection",
+					args.subject,
+					{
+						type: "phase",
+						filePath: args.scope,
+						durationMs: elapsedMs,
+						metadata: {
+							identifier: args.identifier ?? "bare",
+							server: args.server,
+							...(code !== undefined && { code }),
+						},
+					},
+					{
+						ledgerKind: "lsp-pull-late-rejection",
+						reason: `late pull rejection ${elapsedMs}ms after timeout${code !== undefined ? ` (code ${code})` : ""}`,
+					},
+				);
+			} catch {
+				// Telemetry must never break the observed path.
+			}
 		},
 	);
 }
@@ -2838,6 +2925,25 @@ export async function clientRequestWorkspaceDiagnostics(
 	const previousResultIds = Array.from(
 		state.workspacePullResultCache.values(),
 	).map((entry) => ({ uri: entry.uri, value: entry.resultId }));
+	// #1773: same floor as `pullDiagnosticSource` — an exhausted budget here is
+	// the SAME clamp-then-dispatch defect via a second entry point. Observed
+	// live in the 2026-08-20 plegma dogfood session via
+	// `lsp_workspace_diagnostics_start` (not just the `lens_diagnostics_full`
+	// fan-out `pullDiagnosticSource` covers), so this call site needs its own
+	// skip, not just a shared helper the caller happens to hit.
+	if (budgetMs <= PULL_MIN_USABLE_BUDGET_MS) {
+		emitBounded("lsp_pull_skipped_budget_exhausted", WORKSPACE_PULL_SCOPE, {
+			type: "phase",
+			filePath: WORKSPACE_PULL_SCOPE,
+			durationMs: 0,
+			metadata: {
+				identifier: "bare",
+				remainingBudgetMs: budgetMs,
+				server: state.serverId,
+			},
+		});
+		return undefined;
+	}
 	// #1713: declared OUTSIDE the try so the catch below can still reach them —
 	// same shape as `pullDiagnosticSource` above. Captured outside `withTimeout`
 	// so a timeout still holds a live handle on the request for the late-answer
@@ -2988,6 +3094,7 @@ export async function clientRequestWorkspaceDiagnostics(
 				effectiveBudgetMs: workspacePullTimeoutMs,
 				hadPreviousResultId: previousResultIds.length > 0,
 				elapsedMs: Date.now() - workspacePullStartedAt,
+				server: state.serverId,
 			});
 			armLateAnswerTelemetry({
 				requestPromise: workspaceRequestPromise,
@@ -2995,6 +3102,7 @@ export async function clientRequestWorkspaceDiagnostics(
 				identifier: undefined,
 				subject: WORKSPACE_PULL_SCOPE,
 				requestStartedAt: workspacePullStartedAt,
+				server: state.serverId,
 			});
 		}
 		recordPullFailure(state, "workspace/diagnostic", err);
@@ -4238,17 +4346,19 @@ export async function createLSPClient(options: {
 		// A child registered above (recordLspChild) but never reaching a healthy
 		// createLSPClient return must still be deregistered here — otherwise the
 		// registry keeps a stale entry for a process we just killed.
-		void removeLspChild(pid, extractSpawnMarker(lspProcess.args)).catch((err) => {
-			// best-effort — a stale registry entry is harmless (the reaper's
-			// liveness check will find it dead on the next sweep regardless)
-			logLatency({
-				type: "phase",
-				phase: "lsp_registry_write_failed",
-				filePath: "",
-				durationMs: 0,
-				metadata: { op: "remove", pid, error: String(err) },
-			});
-		});
+		void removeLspChild(pid, extractSpawnMarker(lspProcess.args)).catch(
+			(err) => {
+				// best-effort — a stale registry entry is harmless (the reaper's
+				// liveness check will find it dead on the next sweep regardless)
+				logLatency({
+					type: "phase",
+					phase: "lsp_registry_write_failed",
+					filePath: "",
+					durationMs: 0,
+					metadata: { op: "remove", pid, error: String(err) },
+				});
+			},
+		);
 		setTimeout(() => {
 			// #1114: gate on the process's own observed `exitCode`/`signalCode`,
 			// not `.killed` — `killProcessTree` above signals the POSIX process

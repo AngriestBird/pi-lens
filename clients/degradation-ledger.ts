@@ -73,7 +73,31 @@ export type DegradationKind =
 	 * to poison), but the count still tells a dogfood session whether a
 	 * "hung" server is truly hung or just answering late.
 	 */
-	| "lsp-nav-late-answer";
+	| "lsp-nav-late-answer"
+	/**
+	 * The abandoned request behind an `lsp-pull-late-answer` timeout REJECTED
+	 * instead of answering (#1774) — e.g. a permanent server error such as
+	 * `RequestFailed` (-32803) surfacing after the caller gave up.
+	 * `ContentModified` (-32801) does NOT reach here: `safeSendRequest`
+	 * retries it once internally and resolves `undefined` rather than
+	 * rejecting. Without this kind, "timeout then silence" and "timeout then
+	 * rejection" both read as the same nothing in latency.log, which is
+	 * exactly the discrimination #1549's requests-die-or-arrive-late verdict
+	 * needs. The rejection handler still swallows the error; this only
+	 * observes it.
+	 */
+	| "lsp-pull-late-rejection"
+	/**
+	 * A `textDocument/diagnostic` or `workspace/diagnostic` pull's per-request
+	 * `withTimeout` abandoned a GENUINELY dispatched request (#1771). Every
+	 * pull timeout emits a detailed `lsp_pull_diagnostic_timeout` latency.log
+	 * record already, but until now that record counted nothing in the
+	 * ledger — the bounded-telemetry rule (`clients/bounded-telemetry.ts`)
+	 * says a failure path omits `ledgerKind` only when it is not a
+	 * degradation, and an abandoned pull is one. Subject carries server and
+	 * file so a storming server is visible in aggregate, not just per-event.
+	 */
+	| "lsp-pull-diagnostic-timeout";
 
 export interface DegradationRecord {
 	kind: unknown;
