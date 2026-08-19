@@ -1879,13 +1879,27 @@ export async function computeCascadeForFile(
 				// which is finalized before any of the above checks run and includes
 				// neighbours that resolve via cache/recently-clean instead.
 				coldTouches++;
+				// #1720: language-server scope only, matching the tier-aware touch
+				// above (`clientScope: "primary"`, integration.ts:1826). A neighbor's
+				// content did not change — only its import target did — so an
+				// auxiliary scanner's (ast-grep/opengrep/typos) file-local verdict for
+				// it cannot have changed; only cross-file type semantics (the
+				// language server) can. `reconcileCascadeNeighborLspErrors` already
+				// merges errors-only and preserves the neighbor's existing aux
+				// findings by construction (see its doc comment and
+				// `cascadeReconcilableLspErrors` above), so an `"all"`-scope touch
+				// paid full aux notify traffic and aux confirmation-wait latency for
+				// a re-derivation nothing downstream ever reads. `"primary"` resolves
+				// per `neighborPath` (`getClientForFile` → `getServersForFileWithConfig`),
+				// so a multi-language neighbor still gets its OWN language server,
+				// not the primary edit's.
 				const rawDiags = await lspService.touchFile(neighborPath, content, {
 					diagnostics: "document",
 					collectDiagnostics: true,
 					maxClientWaitMs: isColdSnapshot ? 1000 : 2000,
 					silent: true,
 					source: "cascade",
-					clientScope: "all",
+					clientScope: "primary",
 				});
 				if (!rawDiags) return undefined;
 				// #1093/#571/#1095: a touch result is only a CONFIRMED observation of the
