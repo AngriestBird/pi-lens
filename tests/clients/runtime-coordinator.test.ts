@@ -5,6 +5,23 @@ import { describe, expect, it } from "vitest";
 import { RuntimeCoordinator } from "../../clients/runtime-coordinator.js";
 
 describe("RuntimeCoordinator", () => {
+	it("resetForSession clears recorded tool-call path attributions (#1642 F5)", () => {
+		// A per-session-numbered host (or a fresh session after a crash) must
+		// never let a new session inherit a dead session's recorded skip
+		// verdict for a reused tool-call id — every sibling correlation/state
+		// map is cleared on resetForSession, and this one must be too.
+		const runtime = new RuntimeCoordinator();
+		runtime.recordToolCallAttribution("call-reused-id", {
+			resolvedPath: path.resolve("src/dead-session-file.ts"),
+			skipped: true,
+			originCwd: path.resolve("."),
+		});
+
+		runtime.resetForSession();
+
+		expect(runtime.takeToolCallAttribution("call-reused-id")).toBeUndefined();
+	});
+
 	it("makes edit autofix deferral sticky after a write until beginTurn", () => {
 		const runtime = new RuntimeCoordinator();
 		const filePath = path.resolve("src/sticky.ts");
