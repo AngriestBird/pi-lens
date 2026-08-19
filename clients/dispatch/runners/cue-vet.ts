@@ -210,11 +210,20 @@ export function directoryScopeUnavailable(raw: string): boolean {
  * non-comment line is decisive: if it isn't `package <name>`, the file has
  * none, and `cue vet .` will silently exclude it from directory-scoped
  * evaluation (F8) rather than fail outright.
+ *
+ * File-level attributes (`@extern(embed)` is the documented real case) are
+ * ALSO legal before the package clause, and are skipped for the same reason
+ * comments are (review round 4, F10) — without this, a file opening with
+ * one reads as package-less, gets routed to single-file scope, and a
+ * cross-file reference into a sibling then false-positives as "reference
+ * not found" on an otherwise clean package (verified against the real
+ * binary). Field-level attributes never collide with this: they attach to
+ * a field and so always start with the field's name, never `@`.
  */
 export function hasPackageClause(content: string): boolean {
 	for (const line of content.split(/\r?\n/)) {
 		const trimmed = line.trim();
-		if (!trimmed || trimmed.startsWith("//")) continue;
+		if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("@")) continue;
 		return /^package\s+[A-Za-z_]\w*\b/.test(trimmed);
 	}
 	return false;

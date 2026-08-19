@@ -608,6 +608,28 @@ describe("cue-vet run() — real binary output shapes, mocked spawn", () => {
 		expect(args).toEqual(["vet", "-c=false", "."]);
 	});
 
+	// F10 (review round 4, medium): a touched file opening with a file-level
+	// attribute BEFORE its package clause (`@extern(embed)` is the
+	// documented real case) must still be classified as packaged and take
+	// the directory-scoped path — the reviewer's real-binary probe found the
+	// pre-fix heuristic misread this as package-less, routing to single-file
+	// scope and false-positiving a clean two-file package as blocking.
+	it("F10: a touched file with a leading file-level attribute before its package clause still takes the directory-scoped path", async () => {
+		readFileSync.mockReturnValue("@extern(embed)\npackage smoke\n\na: int\n");
+		safeSpawnAsync.mockResolvedValueOnce({ status: 0, stdout: "", stderr: "" });
+		const cueVetRunner = (
+			await import("../../../clients/dispatch/runners/cue-vet.js")
+		).default;
+		const result = await cueVetRunner.run(createCtx(cueFile, cueCwd));
+		expect(result.status).toBe("succeeded");
+		expect(result.diagnostics).toEqual([]);
+		// Exactly one spawn call, scoped to the DIRECTORY — a single-file
+		// call here is the false-positive shape F10 fixes.
+		expect(safeSpawnAsync).toHaveBeenCalledTimes(1);
+		const [, args] = safeSpawnAsync.mock.calls[0];
+		expect(args).toEqual(["vet", "-c=false", "."]);
+	});
+
 	// F9 (review round 3, low): pins the `result.status !== 0` guard on the
 	// F5/F6 reactive fallback. A status-0 (successful) directory vet must
 	// NEVER trigger a second spawn, even in the pathological case where its
@@ -664,5 +686,26 @@ describe("hasPackageClause (#1522 review round 3, F8)", () => {
 		// `package:` is a plain field label — the real clause has no colon and
 		// is followed by a bare identifier, and MUST be the first declaration.
 		expect(hasPackageClause('package: "not a clause"\n')).toBe(false);
+	});
+
+	// F10 (review round 4, medium): a file-level attribute (`@extern(embed)`
+	// is the documented real case) is legal BEFORE the package clause, same
+	// as a comment — skipping comments but not attributes misread such a
+	// file as package-less, routing it to single-file scope and false-
+	// positiving a cross-file reference as "reference not found" on an
+	// otherwise clean package (verified against the real binary).
+	it("recognizes a package clause after a leading file-level attribute", () => {
+		expect(hasPackageClause("@extern(embed)\npackage smoke\n\na: int\n")).toBe(
+			true,
+		);
+	});
+
+	it("recognizes a package clause after a leading attribute AND a comment, in either order", () => {
+		expect(
+			hasPackageClause("// header\n@mytag(foo)\npackage smoke\n\na: int\n"),
+		).toBe(true);
+		expect(
+			hasPackageClause("@mytag(foo)\n// header\npackage smoke\n\na: int\n"),
+		).toBe(true);
 	});
 });
