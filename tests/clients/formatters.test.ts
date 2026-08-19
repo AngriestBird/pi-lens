@@ -865,6 +865,52 @@ describe("getFormattersForFile — policy selection", () => {
 				configFile: "PSScriptAnalyzerSettings.psd1",
 				content: "@{}\n",
 			},
+			// #1595: same shape as #1572 for 7 more formatters left unreachable by
+			// 038cd1df (defaultWhenUnconfigured flipped to false, no explicit-config
+			// check added). nixfmt (the 8th) has no config surface at all and stays
+			// unreachable — see tool-policy.ts's comment above hasCsharpierConfig.
+			{
+				name: "csharpier",
+				ext: ".cs",
+				configFile: ".csharpierrc",
+				content: "{}\n",
+			},
+			{
+				name: "ormolu",
+				ext: ".hs",
+				configFile: ".ormolu",
+				content: "\n",
+			},
+			{
+				name: "taplo",
+				ext: ".toml",
+				configFile: "taplo.toml",
+				content: "[formatting]\n",
+			},
+			{
+				name: "terraform",
+				ext: ".tf",
+				configFile: ".terraform.lock.hcl",
+				content: "\n",
+			},
+			{
+				name: "swiftformat",
+				ext: ".swift",
+				configFile: ".swiftformat",
+				content: "--indent 4\n",
+			},
+			{
+				name: "fantomas",
+				ext: ".fs",
+				configFile: ".fantomasignore",
+				content: "\n",
+			},
+			{
+				name: "mix",
+				ext: ".ex",
+				configFile: ".formatter.exs",
+				content: "[inputs: [\"{mix,.formatter}.exs\"]]\n",
+			},
 		];
 
 		for (const testCase of cases) {
@@ -897,6 +943,13 @@ describe("getFormattersForFile — policy selection", () => {
 			["core.clj", ".clj"],
 			["CMakeLists.cmake", ".cmake"],
 			["script.ps1", ".ps1"],
+			["Program.cs", ".cs"],
+			["Main.hs", ".hs"],
+			["config.toml", ".toml"],
+			["main.tf", ".tf"],
+			["Main.swift", ".swift"],
+			["Program.fs", ".fs"],
+			["mix.ex", ".ex"],
 		];
 
 		for (const [fileName] of cases) {
@@ -977,6 +1030,106 @@ describe("getFormattersForFile — policy selection", () => {
 		const filePath = fileIn(tmpDir, "script.psm1");
 		const formatters = await getFormattersForFile(filePath, tmpDir);
 		expect(formatters.map((f) => f.name)).toEqual(["psscriptanalyzer-format"]);
+	});
+
+	// #1595 — same shape as #1572, 7 more formatters (038cd1df flipped
+	// defaultWhenUnconfigured to false without adding an explicit-config check).
+	it("does not force csharpier without config", async () => {
+		const filePath = fileIn(tmpDir, "Program.cs");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters).toEqual([]);
+	});
+
+	it("enables csharpier when .csharpierrc is present", async () => {
+		createTempFile(tmpDir, ".csharpierrc", "{}\n");
+		const filePath = fileIn(tmpDir, "Program.cs");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters.map((f) => f.name)).toEqual(["csharpier"]);
+	});
+
+	it("does not force ormolu without config", async () => {
+		const filePath = fileIn(tmpDir, "Main.hs");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters).toEqual([]);
+	});
+
+	it("enables ormolu when .ormolu is present", async () => {
+		createTempFile(tmpDir, ".ormolu", "\n");
+		const filePath = fileIn(tmpDir, "Main.hs");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters.map((f) => f.name)).toEqual(["ormolu"]);
+	});
+
+	it("does not force taplo without config", async () => {
+		const filePath = fileIn(tmpDir, "config.toml");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters).toEqual([]);
+	});
+
+	it("enables taplo when taplo.toml is present", async () => {
+		createTempFile(tmpDir, "taplo.toml", "[formatting]\n");
+		const filePath = fileIn(tmpDir, "config.toml");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters.map((f) => f.name)).toEqual(["taplo"]);
+	});
+
+	it("does not force terraform without config", async () => {
+		const filePath = fileIn(tmpDir, "main.tf");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters).toEqual([]);
+	});
+
+	it("enables terraform when .terraform.lock.hcl is present (terraform init marker)", async () => {
+		createTempFile(tmpDir, ".terraform.lock.hcl", "\n");
+		const filePath = fileIn(tmpDir, "main.tf");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters.map((f) => f.name)).toEqual(["terraform"]);
+	});
+
+	it("does not force swiftformat without config", async () => {
+		const filePath = fileIn(tmpDir, "Main.swift");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters).toEqual([]);
+	});
+
+	it("enables swiftformat when .swiftformat is present", async () => {
+		createTempFile(tmpDir, ".swiftformat", "--indent 4\n");
+		const filePath = fileIn(tmpDir, "Main.swift");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters.map((f) => f.name)).toEqual(["swiftformat"]);
+	});
+
+	it("does not force fantomas without config", async () => {
+		const filePath = fileIn(tmpDir, "Program.fs");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters).toEqual([]);
+	});
+
+	it("enables fantomas when .fantomasignore is present", async () => {
+		createTempFile(tmpDir, ".fantomasignore", "\n");
+		const filePath = fileIn(tmpDir, "Program.fs");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters.map((f) => f.name)).toEqual(["fantomas"]);
+	});
+
+	it("enables fantomas when .editorconfig is present", async () => {
+		createTempFile(tmpDir, ".editorconfig", "[*.fs]\nfsharp_space_before_uppercase_invocation = true\n");
+		const filePath = fileIn(tmpDir, "Program.fs");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters.map((f) => f.name)).toEqual(["fantomas"]);
+	});
+
+	it("does not force mix without config", async () => {
+		const filePath = fileIn(tmpDir, "mix.ex");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters).toEqual([]);
+	});
+
+	it("enables mix when .formatter.exs is present", async () => {
+		createTempFile(tmpDir, ".formatter.exs", "[inputs: [\"{mix,.formatter}.exs\"]]\n");
+		const filePath = fileIn(tmpDir, "mix.ex");
+		const formatters = await getFormattersForFile(filePath, tmpDir);
+		expect(formatters.map((f) => f.name)).toEqual(["mix"]);
 	});
 
 	// #1572 review F1: `getFormattersForFile` caches its answer per cwd, keyed
@@ -1063,6 +1216,31 @@ describe("getFormattersForFile — policy selection", () => {
 			const formatters = await getFormattersForFile(filePath, tmpDir);
 			expect(formatters.map((f) => f.name)).toEqual(["ktfmt"]);
 		});
+
+		// #1595 sweep: each of these filenames must be in FORMATTER_CONFIG_FILES
+		// (clients/formatters.ts) or the cache signature never moves when the
+		// file is created after the first call — the exact #1572 review F1 class
+		// of bug, now proven per formatter via one parameterized table rather
+		// than seven near-identical `it` blocks (Sonar CPD; #1661's
+		// bad-duplicate-parameterized-rows shape).
+		it.each([
+			["csharpier", "Program.cs", ".csharpierrc", "{}\n"],
+			["ormolu", "Main.hs", ".ormolu", "\n"],
+			["taplo", "config.toml", "taplo.toml", "[formatting]\n"],
+			["terraform", "main.tf", ".terraform.lock.hcl", "\n"],
+			["swiftformat", "Main.swift", ".swiftformat", "--indent 4\n"],
+			["fantomas", "Program.fs", ".fantomasignore", "\n"],
+			["mix", "mix.ex", ".formatter.exs", "[inputs: [\"{mix,.formatter}.exs\"]]\n"],
+		] as const)(
+			"%s: %s created after the first call is picked up",
+			async (formatterName, fileName, configFile, configContent) => {
+				const filePath = fileIn(tmpDir, fileName);
+				expect(await getFormattersForFile(filePath, tmpDir)).toEqual([]);
+				createTempFile(tmpDir, configFile, configContent);
+				const formatters = await getFormattersForFile(filePath, tmpDir);
+				expect(formatters.map((f) => f.name)).toEqual([formatterName]);
+			},
+		);
 	});
 
 	// #1572 review F2: the gate DETECTED the settings file but the command

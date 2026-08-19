@@ -408,4 +408,134 @@ describe("psscriptanalyzer execution-policy-blocked -File run (#1540)", () => {
 		expect(result.status).toBe("succeeded");
 		expect(result.diagnostics).toHaveLength(0);
 	});
+
+	/**
+	 * #1604 N1 -- the #1556 F4 review tightened `policyDenied` from a bare
+	 * `securityerror|execution polic(y|ies)|running scripts is disabled|
+	 * unauthorizedaccess` alternation to requiring `securityerror` paired with
+	 * one of the other three, but shipped with no test proving the false
+	 * positive it was meant to close. Both tests below reproduce a stderr
+	 * shape that matches exactly one side of the old OR and confirm it no
+	 * longer latches `-File` off as a policy block. Reverting the regex to
+	 * the pre-#1556 OR alternation turns both red.
+	 */
+	it("does not classify a bare UnauthorizedAccess file-permission error as policy-denied (#1604 N1)", async () => {
+		const runner = await loadRunner();
+		// A real .NET UnauthorizedAccessException from a locked/permission-denied
+		// file read -- PowerShell files this under CategoryInfo "PermissionDenied",
+		// never "SecurityError". No execution-policy phrase appears either.
+		hostWithFileResult({
+			stdout: "",
+			stderr:
+				"Access to the path 'C:\\locked-repro.ps1' is denied.\n" +
+				"    + CategoryInfo          : PermissionDenied: (:) [], UnauthorizedAccessException\n" +
+				"    + FullyQualifiedErrorId : UnauthorizedAccess",
+			status: 1,
+		});
+
+		const result = await runner.run(ctx());
+		expect(result.status).not.toBe("succeeded");
+
+		const execDecision = decisions().find(
+			(entry) => entry.metadata?.tool === "psscriptanalyzer-exec",
+		);
+		expect(execDecision?.metadata).toMatchObject({
+			outcome: "transient",
+			cause: "probe-rejected",
+			latched: false,
+		});
+	});
+
+	it("does not classify a bare execution-policy mention without SecurityError as policy-denied (#1604 N1)", async () => {
+		const runner = await loadRunner();
+		// Some unrelated failure whose stderr happens to name "execution policy"
+		// (e.g. a module-load warning) but carries no SecurityError -- not
+		// evidence that PowerShell's execution policy blocked this run.
+		hostWithFileResult({
+			stdout: "",
+			stderr:
+				"WARNING: The current execution policy only affects the current user " +
+				"scope and does not apply here.\n" +
+				"Analysis failed for an unrelated reason.",
+			status: 1,
+		});
+
+		const result = await runner.run(ctx());
+		expect(result.status).not.toBe("succeeded");
+
+		const execDecision = decisions().find(
+			(entry) => entry.metadata?.tool === "psscriptanalyzer-exec",
+		);
+		expect(execDecision?.metadata).toMatchObject({
+			outcome: "transient",
+			cause: "probe-rejected",
+			latched: false,
+		});
+	});
+});
+
+describe("psscriptanalyzer exit-0 with unreadable stdout (#1598)", () => {
+	it("does not read an exit-0 run with empty stdout as a clean file", async () => {
+		const runner = await loadRunner();
+		// PS_SCRIPT always writes either the literal `[]` marker or a JSON
+		// diagnostics array before it exits 0 -- empty stdout on an exit-0 run
+		// is a lost or truncated write, not a genuine "nothing to report".
+		hostWithFileResult(ok(""));
+
+		const result = await runner.run(ctx());
+		// The pre-fix bug: empty stdout parses to `[]`, and the runner reports
+		// "succeeded" with zero diagnostics -- identical to a real clean file.
+		expect(result.status).not.toBe("succeeded");
+		expect(incrementDegradationCountSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				kind: "grammar-blocked",
+				subject: "psscriptanalyzer",
+				reason: expect.stringMatching(/empty/i),
+			}),
+		);
+		const stdoutDecision = decisions().find(
+			(entry) => entry.metadata?.tool === "psscriptanalyzer-stdout",
+		);
+		expect(stdoutDecision?.metadata).toMatchObject({
+			outcome: "transient",
+			latched: false,
+		});
+	});
+
+	it("does not read an exit-0 run with malformed JSON stdout as a clean file", async () => {
+		const runner = await loadRunner();
+		// Truncated JSON: a real repro shape for a pipe cut mid-write.
+		hostWithFileResult(ok('[{"RuleName":"PSAvoidUsingCmdletAliases","Line":'));
+
+		const result = await runner.run(ctx());
+		expect(result.status).not.toBe("succeeded");
+		expect(incrementDegradationCountSpy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				kind: "grammar-blocked",
+				subject: "psscriptanalyzer",
+				reason: expect.stringMatching(/unparseable/i),
+			}),
+		);
+	});
+
+	it("does not latch -File off for the session on an unreadable-stdout run", async () => {
+		const runner = await loadRunner();
+		hostWithFileResult(ok(""));
+		await runner.run(ctx());
+
+		// A single bad read is not durable evidence -File itself is broken --
+		// the very next save with a healthy host must still analyze normally.
+		healthyHost();
+		const result = await runner.run(ctx());
+		expect(result.status).toBe("succeeded");
+		expect(callsMatching("-File")).toHaveLength(2);
+	});
+
+	it("still reports a genuine literal `[]` clean run as succeeded", async () => {
+		const runner = await loadRunner();
+		healthyHost();
+		const result = await runner.run(ctx());
+		expect(result.status).toBe("succeeded");
+		expect(result.diagnostics).toHaveLength(0);
+	});
 });
