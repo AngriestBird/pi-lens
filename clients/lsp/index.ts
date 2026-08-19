@@ -1731,10 +1731,16 @@ export class LSPService {
 	 *
 	 * Idle-zero to loaded-seconds, landing within one document of the whole
 	 * backlog, is the ordering property this gate needs; one document of slack is
-	 * immaterial against a ceiling of 4 to 8. A server that answered requests off a
-	 * SEPARATE task would not give this proof — the fail-open latch below is what
-	 * keeps such a server safe, because it hands it to the breaker rather than
-	 * pacing it on a false signal.
+	 * immaterial against a ceiling of 4 to 8.
+	 *
+	 * A server that answered requests off a SEPARATE task would not give this
+	 * proof. What keeps that server safe is NOT the fail-open latch below: the
+	 * latch never arms for it. Such a server answers the barrier instantly,
+	 * `unacked` resets, and the gate stays inert for the whole sweep. Safety comes
+	 * from the outcome that inertness produces — the notify sequence is exactly
+	 * the pre-#1714 one, and #743's write deadline, backpressure streak and wedge
+	 * timer own the stall the same way they did before this change. The throttle
+	 * buys such a server nothing; it also costs it nothing.
 	 *
 	 * The wait is bounded by the CALLER's remaining budget, never by a schedule of
 	 * its own: every waiter gives the shared round-trip only `waitMs`, so a caller
@@ -1869,8 +1875,11 @@ export class LSPService {
 	): void {
 		const record = this.auxNotifyInflight.get(key);
 		if (record && record.client === entry.client) {
+			// `drain` is deliberately left alone. Once the gate is open nothing
+			// reads it again — `paceAuxNotify` returns above the barrier — and the
+			// round-trip's own settle handler clears it when it finally answers.
+			// Clearing it here would be a write no test could hold honest.
 			record.gateOpen = true;
-			record.drain = undefined;
 		}
 		this.noteDrainBarrierOutcome(key, entry, filePath, context, {
 			...detail,
