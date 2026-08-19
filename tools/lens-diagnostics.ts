@@ -74,13 +74,21 @@ import {
 	getFileDiagnosticSummaries,
 	type FileDiagnosticSummary,
 	reconcileScanDiagnostics,
+	reconcileStaleWidgetDependencyBlockers,
 	reconcileStaleWidgetFiles,
 	type WidgetDiagnostic,
 } from "../clients/widget-state.js";
+import { logLatency } from "../clients/latency-logger.js";
 import { convertLspDiagnostics } from "../clients/dispatch/utils/lsp-diagnostics.js";
 import { retagAuxiliaryDiagnostics } from "../clients/dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../clients/file-role.js";
+import { STALE_LINE_MARKER } from "../clients/stale-marker.js";
 import { makeProgressReporter, scanningSummaryLine } from "./scan-progress.js";
+import {
+	demotePastEofDiagnostics,
+	PAST_EOF_STALE_MARKER,
+	resyncDocumentOnPastEof,
+} from "../clients/diagnostic-line-freshness.js";
 
 // The widget state exposes the full per-file diagnostic set; this is the tool's
 // own generous display budget per file (independent of the TUI's 12 cap), to
@@ -429,6 +437,28 @@ export function createLensDiagnosticsTool(
 			const staleDropped = await reconcileStaleWidgetFiles();
 
 			if (mode === "all") {
+				// #1631 dependency-axis gate for the mode=all store. `reconcileStaleWidgetFiles`
+				// (above) only sees the diagnosed file's OWN mtime; this demotes blocking
+				// findings whose forward imports drifted out-of-band. Paired reconciles, one
+				// read site — the same gate that covers the turn-end inline-blocker store.
+				const dependencyGateStart = Date.now();
+				const { demoted: dependencyDemoted, truncatedImports } =
+					await reconcileStaleWidgetDependencyBlockers(
+						cwd,
+						getRuntime?.()?.turnIndex,
+					);
+				logLatency({
+					type: "phase",
+					toolName: "lens_diagnostics",
+					filePath: cwd,
+					phase: "blocker_freshness_widget_gate",
+					durationMs: Date.now() - dependencyGateStart,
+					metadata: {
+						demoted: dependencyDemoted,
+						truncatedImports,
+						surface: "mode=all",
+					},
+				});
 				return formatAllMode(
 					cwd,
 					severity,
@@ -436,6 +466,7 @@ export function createLensDiagnosticsTool(
 					undefined,
 					staleDropped,
 					pathsScope,
+					dependencyDemoted,
 				);
 			}
 			if (mode === "full") {
@@ -861,8 +892,11 @@ function applyProjectRulePolicy<T extends { diagnostics: ProjectDiagnostic[] }>(
 	return { ...value, diagnostics: applyRulePolicy(value.diagnostics, policyMap) };
 }
 
-/** A diagnostic counts as error-like when it blocks or has error severity. */
+/** A diagnostic counts as error-like when it blocks or has error severity.
+ * A `stale` (#1641 past-EOF) entry is excluded — its cited line no longer
+ * exists in the current file, so it can no longer count toward a hard stop. */
 function isErrorLike(d: WidgetDiagnostic): boolean {
+	if (d.stale) return false;
 	return d.semantic === "blocking" || d.severity === "error";
 }
 
@@ -954,6 +988,9 @@ function summarizeDiagnostics(
 	let errors = 0;
 	let warnings = 0;
 	for (const diagnostic of diagnostics) {
+		// #1641: a demoted past-EOF entry keeps its severity for display but
+		// drops out of the tallies — same reasoning as widget-state's `isBlocking`.
+		if (diagnostic.stale) continue;
 		if (diagnostic.semantic === "blocking") blocking++;
 		if (diagnostic.severity === "error") errors++;
 		else if (diagnostic.severity === "warning") warnings++;
@@ -2017,14 +2054,18 @@ function formatAllMode(
 	detailOverrides: Record<string, unknown> = { mode: "all" },
 	staleDropped = 0,
 	pathsScope?: PathsScope,
+	dependencyDemoted = 0,
 ): { content: [{ type: "text"; text: string }]; details: object } {
 	// Files changed/deleted since their diagnostics were recorded have already
 	// been dropped by reconcileStaleWidgetFiles; note them so the agent knows
 	// those aren't "clean", just un-rescanned (use mode=full to refresh).
 	const staleNote =
-		staleDropped > 0
+		(staleDropped > 0
 			? ` (${staleDropped} changed file${staleDropped === 1 ? "" : "s"} omitted as stale — use mode=full to rescan)`
-			: "";
+			: "") +
+		(dependencyDemoted > 0
+			? ` (${dependencyDemoted} blocking finding${dependencyDemoted === 1 ? "" : "s"} demoted to [stale] — an imported file changed since; re-run to confirm)`
+			: "");
 
 	// mode=full already actively scanned exactly the requested paths, so a zero
 	// result there IS a legitimate clean read — the cache-only note only applies
@@ -2057,13 +2098,43 @@ function formatAllMode(
 					return s;
 				return summarizeDiagnostics(s.filePath, policyKept, s.hasFinalSnapshot);
 			});
-	const visibleSummaries = dispositioned.filter((s) => includeFile(s.filePath));
+	// #1641: the single chokepoint both mode=all (cache-only `summaries`) and
+	// mode=full (widget cache merged with a FRESH LSP sweep, above) converge
+	// through — a fresh sweep's server can still be citing its own stale
+	// in-memory document, so gating only the cached half would miss exactly
+	// the live incident this issue reports. Runs AFTER dispositions/rule
+	// policy (not before): a finding a mark or a `.pi-lens.json` rule policy
+	// already dropped is not being served, so it must never trigger a resync
+	// or a `diagnostic_past_eof` telemetry record on this call.
+	const eofGated = dispositioned.map((s) => {
+		const { diagnostics, demotedCount } = demotePastEofDiagnostics({
+			store: "lens_diagnostics",
+			cwd,
+			filePath: s.filePath,
+			diagnostics: s.diagnostics ?? [],
+			resync: resyncDocumentOnPastEof,
+		});
+		if (demotedCount === 0) return s;
+		return summarizeDiagnostics(s.filePath, diagnostics, s.hasFinalSnapshot);
+	});
+	const visibleSummaries = eofGated.filter((s) => includeFile(s.filePath));
 
-	// Filter to files with actual issues
+	// Filter to files with actual issues. A file whose only findings were
+	// demoted by the #1641 past-EOF gate has blocking/errors/warnings at 0 —
+	// counting it as "issue-free" would tell the agent the file is CLEAN when
+	// it actually has an unconfirmed finding waiting on a rescan. Surface it
+	// under `severity: "all"` (the gate's own advisory tier) so it stays
+	// visible; a narrower `error`/`warning` filter still excludes it, matching
+	// how those filters already treat any other non-matching severity.
 	const withIssues = visibleSummaries.filter((s) => {
 		if (severity === "error") return s.blocking > 0 || s.errors > 0;
 		if (severity === "warning") return s.warnings > 0;
-		return s.blocking > 0 || s.errors > 0 || s.warnings > 0;
+		return (
+			s.blocking > 0 ||
+			s.errors > 0 ||
+			s.warnings > 0 ||
+			(s.diagnostics ?? []).some((d) => d.stale)
+		);
 	});
 
 	const pathsNote = isFullMode ? "" : pathsScopeCacheOnlyNote(pathsScope);
@@ -2103,6 +2174,12 @@ function formatAllMode(
 		if (s.errors > 0 && s.blocking === 0) parts.push(`${s.errors}E`);
 		if (s.warnings > 0) parts.push(`${s.warnings}W`);
 		if (!s.hasFinalSnapshot) parts.push(`(pending)`);
+		const staleCount = (s.diagnostics ?? []).filter((d) => d.stale).length;
+		if (staleCount > 0) {
+			parts.push(
+				`${staleCount} stale — re-run to confirm`,
+			);
+		}
 		lines.push(`${rel}  ${parts.join("  ")}`);
 
 		// List the actual diagnostics (not just counts) so the agent can act on
@@ -2115,16 +2192,27 @@ function formatAllMode(
 			.sort(bySeverityThenLine);
 		const shown = matching.slice(0, MAX_DIAGNOSTICS_PER_FILE);
 		for (const d of shown) {
-			const marker = isErrorLike(d)
-				? d.semantic === "blocking"
-					? "🔴 "
-					: ""
-				: "";
+			const marker = d.stale
+				? ""
+				: isErrorLike(d)
+					? d.semantic === "blocking"
+						? "🔴 "
+						: ""
+					: "";
 			const label = d.rule ?? d.tool;
 			const tag = label ? ` [${label}]` : "";
 			const flaggedTag = d.flagged ? " 📌 flagged-to-fix" : "";
 			const msg = d.message.replace(/\s+/g, " ").trim();
-			lines.push(`  ${marker}L${d.line ?? "?"}: ${msg}${tag}${flaggedTag}`);
+			// #1641: a demoted past-EOF entry no longer has a trustworthy line —
+			// show the marker instead of a coordinate that doesn't exist in the
+			// current file, matching the #1622/#1627 stale-line render convention.
+			// Past-EOF demotions replace the untrustworthy coordinate; other
+			// demotions (#1631 drift) keep their in-bounds line and append the
+			// shared stale marker instead.
+			const pastEof = d.stale && (d.staleReason ?? "past-eof") === "past-eof";
+			const loc = pastEof ? PAST_EOF_STALE_MARKER : `L${d.line ?? "?"}`;
+			const staleTag = d.stale && !pastEof ? ` ${STALE_LINE_MARKER}` : "";
+			lines.push(`  ${marker}${loc}: ${msg}${tag}${flaggedTag}${staleTag}`);
 		}
 		if (matching.length > shown.length) {
 			lines.push(
