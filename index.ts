@@ -2148,56 +2148,123 @@ function activateExtension(hostPi: ExtensionAPI) {
 			});
 	});
 
+	// #1654: `agent_end` fires every time pi's internal `_runAgentPrompt` loop
+	// finishes A run — including a run that is about to auto-retry or resume
+	// after overflow-compaction. pi computes `willRetry` only AFTER emitting
+	// this event and never exposes it to extensions (source-level audit:
+	// `AgentEndEvent` is `{type, messages}` only, pi agent-session.ts:643-645;
+	// see node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts).
+	// The #1387 deferred-format/autofix drain below therefore used to be able
+	// to fire MID-RUN, between retries — formatting files the agent is still
+	// actively working on, which can shift lines under queued work and stale
+	// in-flight content bindings (the #1642 harm family).
+	//
+	// `agent_settled` is the documented once-per-run signal — "fired after an
+	// agent run has fully settled and no automatic retry, compaction, or
+	// queued continuation will run" (AgentSettledEvent, same types.d.ts) — so
+	// the drain moves there (see the `agent_settled` registration below) and
+	// is no longer run from `agent_end` at all.
+	//
+	// There is deliberately no capability-detection fallback back onto
+	// `agent_end` for a host that never fires `agent_settled`: `pi.on`
+	// registration is a silent no-op push onto a plain Map regardless of
+	// whether the host will ever emit the event (see quiet-window.ts's module
+	// doc), so "registration succeeded" proves nothing about whether the
+	// event will actually fire — a heuristic built on that would be as
+	// unreliable as no heuristic at all, and a timer-based "drain if settled
+	// hasn't fired within N ms" watchdog would reintroduce this exact bug on
+	// a SUPPORTED host whenever a retry/compaction cycle legitimately takes
+	// longer than the watchdog window.
+	//
+	// There is also deliberately no separate "drain at session_shutdown"
+	// safety net (review round 1, F2/F3/F4/F5): `agent_settled` is
+	// documented to fire from `_runAgentPrompt`'s `finally` on normal
+	// completion, on an aborted run, AND on a throw — the only way to miss it
+	// is the process itself dying (a hard kill, an OOM, a host crash before
+	// the finally runs), and a `session_shutdown`-based net cannot help with
+	// that case either (the process is gone before any handler could run). A
+	// run that dies without settling therefore strands its queued records in
+	// this session's in-memory `_pendingDeferredMutations` map — but not
+	// permanently: `claimDeferredMutations`'s existing staleness fallback
+	// (`DEFERRED_FORMAT_STALE_AFTER_MS`, 10 minutes — the same mechanism
+	// #791 already uses to recover a concurrent-secondary session's orphaned
+	// records) lets the NEXT session in this process claim them as orphaned
+	// once they've aged out. That is a real, honestly-documented behavior
+	// change from pre-#1654 (deferred format used to run every `agent_end`,
+	// so it never truly stranded), traded for correctness: it beats
+	// formatting files the agent is still actively working on mid-retry.
+	type DeferredDrainCtx = {
+		cwd?: string;
+		signal?: AbortSignal;
+		ui?: {
+			setStatus?: (id: string, text: string | undefined) => void;
+			theme?: LspStatusTheme;
+		};
+	};
+
+	async function runDeferredMutationDrain(ctx: DeferredDrainCtx): Promise<void> {
+		const currentSessionId = getStableSessionId(ctx);
+		// #791 defense-in-depth: mirrors how session_start already skips
+		// handleSessionStart for a concurrent in-process secondary
+		// (subagent) — if THIS firing is positively identified as belonging
+		// to a live sibling secondary session rather than the registered
+		// primary, skip the deferred-format flush entirely rather than
+		// relying only on the per-record ownership filter inside
+		// handleAgentEnd. Fail-safe: any inconclusive signal classifies
+		// "primary" and runs as before.
+		const emission = classifyCurrentSessionEmission(ctx, currentSessionId);
+		if (emission === "concurrent-secondary") {
+			dbg(
+				`deferred_mutation_drain: concurrent secondary session detected — skipping (sessionId=${currentSessionId})`,
+			);
+			logLatency({
+				type: "phase",
+				filePath: ctx.cwd ?? "<pi-lens>",
+				phase: "agent_end_concurrent_secondary_skip",
+				durationMs: 0,
+				metadata: { sessionId: currentSessionId },
+			});
+			return;
+		}
+		await handleAgentEnd({
+			ctxCwd: ctx.cwd,
+			getFlag: (name: string, filePath?: string) =>
+				getLensFlag(name, filePath),
+			getFlagSource: (name: string, filePath?: string) =>
+				getLensFlagSource(name, filePath),
+			notify: (msg, level) => notifyUi(ctx, msg, level),
+			dbg,
+			runtime,
+			cacheManager,
+			getFormatService: () =>
+				getFormatService(runtime.telemetrySessionId, true),
+			getAutofixClients: async () => {
+				const { biomeClient, ruffClient } = await loadBootstrapClients();
+				return { biomeClient, ruffClient };
+			},
+			currentSessionId,
+		});
+		if (ctx.ui?.setStatus && ctx.ui.theme) {
+			updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
+		}
+	}
+
 	pi.on("agent_end", async (_event, ctx) => {
 		if (!lensEnabled) return;
-		// Esc/abort during the deferred format + flush kills in-flight children.
+		// Esc/abort during the debounce flush kills in-flight children. The
+		// deferred-format/autofix drain no longer runs from this handler at
+		// all (#1654 — see the module comment above); its own abort/requeue
+		// handling is wired at the `agent_settled` registration below instead.
 		setAmbientAbortSignal((ctx as { signal?: AbortSignal })?.signal);
 		try {
-			const currentSessionId = getStableSessionId(ctx);
-			// #791 defense-in-depth: mirrors how session_start already skips
-			// handleSessionStart for a concurrent in-process secondary
-			// (subagent) — if THIS agent_end firing is positively identified as
-			// belonging to a live sibling secondary session rather than the
-			// registered primary, skip the deferred-format flush entirely
-			// rather than relying only on the per-record ownership filter
-			// inside handleAgentEnd. Fail-safe: any inconclusive signal
-			// classifies "primary" and runs as before.
-			const emission = classifyCurrentSessionEmission(ctx, currentSessionId);
-			if (emission === "concurrent-secondary") {
-				dbg(
-					`agent_end: concurrent secondary session detected — skipping deferred-format flush (sessionId=${currentSessionId})`,
-				);
-				logLatency({
-					type: "phase",
-					filePath: ctx.cwd ?? "<pi-lens>",
-					phase: "agent_end_concurrent_secondary_skip",
-					durationMs: 0,
-					metadata: { sessionId: currentSessionId },
-				});
-				return;
-			}
 			// Ensure any pipeline still queued in the debounce window finishes
 			// before agent_end runs — otherwise project change-log entries and
-			// modified ranges this turn produced may not be reflected yet.
+			// modified ranges this turn produced may not be reflected yet. This
+			// is per-turn bookkeeping for edits the agent already made, not the
+			// once-per-run deferred-format/autofix drain (#1654: that moved to
+			// `agent_settled` below, since — unlike this flush — running it here
+			// can fire mid-run, between auto-retries).
 			await flushDebouncedToolResults();
-			await handleAgentEnd({
-				ctxCwd: ctx.cwd,
-				getFlag: (name: string, filePath?: string) =>
-					getLensFlag(name, filePath),
-				getFlagSource: (name: string, filePath?: string) =>
-					getLensFlagSource(name, filePath),
-				notify: (msg, level) => notifyUi(ctx, msg, level),
-				dbg,
-				runtime,
-				cacheManager,
-				getFormatService: () =>
-					getFormatService(runtime.telemetrySessionId, true),
-				getAutofixClients: async () => {
-					const { biomeClient, ruffClient } = await loadBootstrapClients();
-					return { biomeClient, ruffClient };
-				},
-				currentSessionId,
-			});
 			ctx.ui && updateLspStatus(ctx.ui.setStatus, ctx.ui.theme);
 		} catch (agentEndErr) {
 			dbg(`agent_end crashed: ${agentEndErr}`);
@@ -2514,8 +2581,34 @@ function activateExtension(hostPi: ExtensionAPI) {
 	try {
 		(pi as any).on(
 			"agent_settled",
-			(_event: unknown, ctx: { cwd?: string }) => {
+			async (_event: unknown, ctx: DeferredDrainCtx) => {
 				if (!lensEnabled) return;
+				// #1654: the #1387 deferred-format/autofix drain runs HERE, not at
+				// agent_end — see `runDeferredMutationDrain`'s doc comment above.
+				// Awaited (unlike the quiet-window tasks below): this mirrors the
+				// user-facing latency the drain already had pre-#1654 (it used to
+				// block `agent_end` the same way), just correctly gated on true
+				// settlement instead of firing mid-retry. A throw here must not
+				// skip the quiet window below.
+				//
+				// Review round 1 (F1): `agent_settled` fires on an ABORTED run too
+				// (ESC), and `ctx.signal` on that firing still reflects the
+				// aborted controller. `handleAgentEnd`'s abort/requeue branches
+				// (clients/runtime-agent-end.ts) read the ambient signal via
+				// `getAmbientAbortSignal()`, not a parameter — exactly like
+				// `agent_end`/`turn_end` already do around their own work — so an
+				// ESC-aborted settle must set it here too, or every queued record
+				// gets FORMATTED instead of requeued (an inversion of the #1642
+				// harm this issue exists to fix) and the requeue branches become
+				// production-unreachable.
+				setAmbientAbortSignal(ctx?.signal);
+				try {
+					await runDeferredMutationDrain(ctx);
+				} catch (drainErr) {
+					dbg(`agent_settled deferred_mutation_drain crashed: ${drainErr}`);
+				} finally {
+					setAmbientAbortSignal(undefined);
+				}
 				void runQuietWindow({
 					runtime,
 					dbg,
@@ -2562,6 +2655,11 @@ function activateExtension(hostPi: ExtensionAPI) {
 			);
 			return;
 		}
+
+		// #1654: no drain runs here — see the module comment above
+		// `runDeferredMutationDrain` (review round 1, F2/F3/F4/F5) for why a
+		// session_shutdown-based safety net was deliberately dropped rather
+		// than kept.
 
 		// #1018: drop this (primary) session's prefix baseline now it has ended,
 		// so its entry is reclaimed promptly instead of lingering until the LRU

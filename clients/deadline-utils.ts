@@ -74,8 +74,15 @@ export function withDeadline<T>(
 		options.ms ??
 		(options.deadlineAt !== undefined ? options.deadlineAt - Date.now() : 0);
 
-	// Past deadline / non-positive budget: settle immediately, no timer.
+	// Past deadline / non-positive budget: settle immediately, no timer. This
+	// branch returns before the race below ever runs, so — same reason as the
+	// loser-leg catch a few lines down — `promise` needs its own no-op catch
+	// here too: without it, a `promise` that eventually rejects (the caller
+	// already invoked it; this function only decides how long to wait on it)
+	// surfaces as an unhandled rejection instead of being silently superseded
+	// by the immediate timeout/undefined settlement.
 	if (ms <= 0) {
+		promise.catch(() => {});
 		return onTimeout === "undefined"
 			? Promise.resolve(undefined)
 			: Promise.reject(new Error(`Timeout after ${Math.max(0, ms)}ms`));
