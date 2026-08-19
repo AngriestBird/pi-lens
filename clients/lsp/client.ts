@@ -28,7 +28,6 @@ import {
 	StreamMessageWriter,
 } from "../deps/vscode-jsonrpc.js";
 import { getAmbientAbortSignal } from "../safe-spawn.js";
-import { incrementDegradationCount } from "../degradation-ledger.js";
 import {
 	hashDiagnosticContent,
 	type StoredDiagnosticBinding,
