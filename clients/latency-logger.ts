@@ -42,14 +42,22 @@ export interface LatencyEntry {
 	metadata?: Record<string, unknown>;
 }
 
+/** Bound on the `recentPhases` ring below — keeps the attribution record small. */
+const RECENT_PHASE_CAP = 5;
+
 /**
- * Most recent non-`loop_block` phase seen by `logLatency`, for cheap block
- * attribution (#1122 / #1123 item 1): the event-loop-block probe fires at
- * turn_end and cannot see *what* stalled the loop, so it stamps the last phase
- * that ran as a starting point for root-causing a genuine block. Tracked before
- * the test-mode guard so it is deterministic and unit-testable.
+ * Most recent non-`loop_block` phases seen by `logLatency`, newest first, for
+ * cheap block attribution (#1122 / #1123 item 1, widened #1723): the
+ * event-loop-block probe fires at turn_end and cannot see *what* stalled the
+ * loop, so it stamps the phases that ran as a starting point for root-causing
+ * a genuine block. A single `lastPhase` pointer names only the phase that
+ * finished right before the block — useless when the CPU hog itself never got
+ * to log a completion (it was busy blocking the loop). Keeping a short,
+ * bounded ring instead gives the block's neighborhood, not just one frame of
+ * it, while staying O(1) per call and fixed-size in memory. Tracked before the
+ * test-mode guard so it is deterministic and unit-testable.
  */
-let lastPhase: { phase: string; ts: string } | undefined;
+let recentPhases: Array<{ phase: string; ts: string }> = [];
 
 /**
  * Phases excluded from `lastPhase` attribution alongside `loop_block`.
@@ -127,13 +135,25 @@ const LAST_PHASE_EXCLUDED = new Set([
  * trusting it as the cause (it is a breadcrumb, not proof).
  */
 export function getLastLoggedPhase(): { phase: string; ts: string } | undefined {
-	return lastPhase;
+	return recentPhases[0];
+}
+
+/**
+ * The last `limit` non-`loop_block` phases logged, newest first (#1723).
+ * Bounded to `RECENT_PHASE_CAP` regardless of `limit` — a caller cannot
+ * request an unbounded ring. Same staleness caveat as `getLastLoggedPhase`:
+ * these are breadcrumbs from whatever ran most recently, not proof of cause.
+ */
+export function getRecentLoggedPhases(
+	limit = RECENT_PHASE_CAP,
+): Array<{ phase: string; ts: string }> {
+	return recentPhases.slice(0, Math.min(limit, RECENT_PHASE_CAP));
 }
 
 export function logLatency(entry: LatencyEntry): void {
 	const ts = new Date().toISOString();
 	if (entry.type === "phase" && entry.phase && !LAST_PHASE_EXCLUDED.has(entry.phase)) {
-		lastPhase = { phase: entry.phase, ts };
+		recentPhases = [{ phase: entry.phase, ts }, ...recentPhases].slice(0, RECENT_PHASE_CAP);
 	}
 	if (isTestMode()) {
 		return;
