@@ -363,11 +363,17 @@ export function canHandle(filePath: string): boolean {
  * file. Without this, `language:` reads as a real filter but isn't one for
  * ts↔js pairs, so twin rules sharing a base name (e.g. `hardcoded-url` /
  * `hardcoded-url-js`) both match the same construct in the SAME runner
- * invocation (#657). TSX is deliberately its own grammar here: the primary
- * ast-grep CLI/LSP also treats `tsx` as distinct from `typescript`, so a
- * language-tagged rule only runs on the exact grammar it names. Returns
- * undefined for extensions this scoping doesn't apply to (css/html), where
- * no filtering is added.
+ * invocation (#657). TSX is its own grammar here — the primary ast-grep
+ * CLI/LSP also treats `tsx` as distinct from `typescript` — but the
+ * relationship is one-directional like ts↔js: tsx is a syntactic superset
+ * of typescript (JSX productions plus the removal of the `<T>expr` cast
+ * form, which cannot appear in valid `.tsx` source), so the caller's
+ * language-match check additionally lets a `TypeScript`-tagged rule run
+ * against a `.tsx` file's fileLang (#1608) — otherwise the entire TS
+ * ruleset silently never runs there. `javascript`-tagged rules stay
+ * `.js`/`.jsx`-exclusive; there's no jsx↔tsx typed/untyped overlap to
+ * bridge. Returns undefined for extensions this scoping doesn't apply to
+ * (css/html), where no filtering is added.
  */
 export function ruleLanguageForFile(
 	filePath: string,
@@ -616,9 +622,27 @@ export function evaluateAstGrepRules(
 			}
 			// Scope TypeScript/JavaScript-tagged rules to the file's actual
 			// grammar (#657) — otherwise a `-js` twin sharing generic node
-			// kinds with its TS sibling double-fires on every .ts file.
+			// kinds with its TS sibling double-fires on every .ts file. TSX
+			// is the one deliberate exception (#1608): the tsx grammar is a
+			// syntactic superset of typescript's for every non-JSX construct
+			// (the `<T>expr` cast form is the only TS-only production, and
+			// it can't appear in valid .tsx source anyway), so a
+			// `language: TypeScript` rule still matches a tsx-parsed root
+			// and must run there too, or the entire TS ruleset (120 of 263
+			// rules) goes dark on every .tsx file. `language: TSX` rules
+			// stay tsx-exclusive — they're already scoped to fileLang
+			// "tsx" by the exact-match check.
 			if (lang && fileLang && lang !== fileLang) {
-				continue;
+				const runsAsTsOnTsx = fileLang === "tsx" && lang === "typescript";
+				if (!runsAsTsOnTsx) {
+					const key = `mismatch:${lang}->${fileLang}`;
+					if (!unsupportedLanguageLog.has(key)) {
+						const ids = newlyUnsupported.get(key) ?? [];
+						ids.push(rule.id);
+						newlyUnsupported.set(key, ids);
+					}
+					continue;
+				}
 			}
 
 			if (blockingOnly && rule.rule) {
