@@ -1,8 +1,10 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { suppressTrivyConfigDockerOverlap } from "../../../clients/dispatch/dispatcher.js";
 import {
+	looksLikeCloudFormationTemplate,
 	looksLikeKubernetesManifest,
 	parseTrivyConfigOutput,
 } from "../../../clients/dispatch/runners/trivy-config.js";
@@ -11,11 +13,16 @@ import type { Diagnostic } from "../../../clients/dispatch/types.js";
 // ── appliesTo — Terraform is in scope, Terragrunt is deliberately excluded ────
 
 describe("trivy-config appliesTo", () => {
-	it("applies to docker, yaml, and terraform, but not terragrunt", async () => {
+	it("applies to docker, yaml, terraform, and json, but not terragrunt", async () => {
 		const trivyConfigRunner = (
 			await import("../../../clients/dispatch/runners/trivy-config.js")
 		).default;
-		expect(trivyConfigRunner.appliesTo).toEqual(["docker", "yaml", "terraform"]);
+		expect(trivyConfigRunner.appliesTo).toEqual([
+			"docker",
+			"yaml",
+			"terraform",
+			"json",
+		]);
 		expect(trivyConfigRunner.appliesTo).not.toContain("terragrunt");
 	});
 });
@@ -44,7 +51,11 @@ vi.mock("../../../clients/dispatch/runners/utils/runner-helpers.js", () => ({
 	}),
 }));
 
-function createCtx(kind: "terraform" | "yaml", filePath: string, cwd: string) {
+function createCtx(
+	kind: "terraform" | "yaml" | "json",
+	filePath: string,
+	cwd: string,
+) {
 	return {
 		filePath,
 		cwd,
@@ -122,6 +133,86 @@ describe("trivy-config run() — terraform pass-through", () => {
 	});
 });
 
+// ── CloudFormation content gate — yaml AND json (#1757) ─────────────────────────
+
+describe("trivy-config run() — CloudFormation content gate", () => {
+	let cfnCwd: string;
+
+	beforeEach(() => {
+		vi.resetModules();
+		safeSpawnAsync.mockReset();
+		isTrivyEnabled.mockReset();
+		resolveSeverityFloor.mockReset();
+		isTrivyEnabled.mockReturnValue(true);
+		resolveSeverityFloor.mockReturnValue(["HIGH", "CRITICAL"]);
+		cfnCwd = fs.mkdtempSync(
+			path.join(os.tmpdir(), "pi-lens-trivy-config-cfn-test-"),
+		);
+	});
+
+	it("scans a CloudFormation yaml template", async () => {
+		safeSpawnAsync.mockResolvedValue({
+			error: null,
+			status: 0,
+			stdout: JSON.stringify({ Results: [] }),
+			stderr: "",
+		});
+		const file = path.join(cfnCwd, "template.yaml");
+		fs.writeFileSync(
+			file,
+			"AWSTemplateFormatVersion: '2010-09-09'\nResources:\n  Bucket:\n    Type: AWS::S3::Bucket\n",
+		);
+
+		const runner = (
+			await import("../../../clients/dispatch/runners/trivy-config.js")
+		).default;
+		const result = await runner.run(createCtx("yaml", file, cfnCwd) as never);
+
+		expect(safeSpawnAsync).toHaveBeenCalled();
+		expect(result.status).toBe("succeeded");
+	});
+
+	it("scans a CloudFormation json template", async () => {
+		safeSpawnAsync.mockResolvedValue({
+			error: null,
+			status: 0,
+			stdout: JSON.stringify({ Results: [] }),
+			stderr: "",
+		});
+		const file = path.join(cfnCwd, "template.json");
+		fs.writeFileSync(
+			file,
+			JSON.stringify({
+				AWSTemplateFormatVersion: "2010-09-09",
+				Resources: { Bucket: { Type: "AWS::S3::Bucket" } },
+			}),
+		);
+
+		const runner = (
+			await import("../../../clients/dispatch/runners/trivy-config.js")
+		).default;
+		const result = await runner.run(createCtx("json", file, cfnCwd) as never);
+
+		expect(safeSpawnAsync).toHaveBeenCalled();
+		expect(result.status).toBe("succeeded");
+	});
+
+	// Mutation-proof: adding "json" to appliesTo without a content gate would
+	// make trivy-config spawn on every package.json/tsconfig.json in a repo.
+	it("skips a generic (non-CloudFormation) json file without spawning trivy", async () => {
+		const file = path.join(cfnCwd, "package.json");
+		fs.writeFileSync(file, JSON.stringify({ name: "not-cfn", version: "1.0.0" }));
+
+		const runner = (
+			await import("../../../clients/dispatch/runners/trivy-config.js")
+		).default;
+		const result = await runner.run(createCtx("json", file, cfnCwd) as never);
+
+		expect(safeSpawnAsync).not.toHaveBeenCalled();
+		expect(result.status).toBe("skipped");
+	});
+});
+
 // ── Kubernetes manifest heuristic ─────────────────────────────────────────────
 
 describe("looksLikeKubernetesManifest", () => {
@@ -148,6 +239,62 @@ describe("looksLikeKubernetesManifest", () => {
 		expect(looksLikeKubernetesManifest("kind: only-kind-no-apiversion")).toBe(
 			false,
 		);
+	});
+});
+
+// ── CloudFormation template heuristic (#1757) ──────────────────────────────────
+
+describe("looksLikeCloudFormationTemplate", () => {
+	it("matches on AWSTemplateFormatVersion (yaml)", () => {
+		expect(
+			looksLikeCloudFormationTemplate(
+				"AWSTemplateFormatVersion: '2010-09-09'\nResources:\n  Bucket:\n    Type: AWS::S3::Bucket\n",
+			),
+		).toBe(true);
+	});
+
+	it("matches on AWSTemplateFormatVersion (json)", () => {
+		expect(
+			looksLikeCloudFormationTemplate(
+				JSON.stringify({
+					AWSTemplateFormatVersion: "2010-09-09",
+					Resources: { Bucket: { Type: "AWS::S3::Bucket" } },
+				}),
+			),
+		).toBe(true);
+	});
+
+	it("matches a SAM template's Transform even without AWSTemplateFormatVersion", () => {
+		expect(
+			looksLikeCloudFormationTemplate(
+				"Transform: AWS::Serverless-2016-10-31\nResources:\n  Fn:\n    Type: AWS::Serverless::Function\n",
+			),
+		).toBe(true);
+	});
+
+	it("matches on a bare Resources[].Type in the AWS:: namespace (no version key)", () => {
+		expect(
+			looksLikeCloudFormationTemplate(
+				"Resources:\n  Bucket:\n    Type: AWS::S3::Bucket\n    Properties: {}\n",
+			),
+		).toBe(true);
+	});
+
+	it("does NOT match plain yaml/json with no CFN signal", () => {
+		expect(
+			looksLikeCloudFormationTemplate("name: CI\non: [push]\njobs:\n  build:\n"),
+		).toBe(false);
+		expect(
+			looksLikeCloudFormationTemplate(JSON.stringify({ name: "not-cfn" })),
+		).toBe(false);
+	});
+
+	it("does NOT match a Kubernetes manifest", () => {
+		expect(
+			looksLikeCloudFormationTemplate(
+				"apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n",
+			),
+		).toBe(false);
 	});
 });
 

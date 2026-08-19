@@ -18,13 +18,13 @@ Dispatch is diagnostics-oriented: automatic formatting and safe autofix happen i
 | Fish                  | ✓ (fish-lsp) | lsp, fish-indent                                                                                      | fish_indent             |
 | CSS/SCSS/Less         | ✓   | lsp, stylelint                                                                                                 | biome, prettier         |
 | HTML                  | ✓   | lsp, htmlhint                                                                                                  | prettier                |
-| YAML                  | ✓   | lsp, yamllint, actionlint (GitHub workflows)                                                                   | prettier                |
-| JSON                  | ✓   | lsp                                                                                                            | biome, prettier         |
+| YAML                  | ✓   | lsp, yamllint, actionlint (GitHub workflows), trivy-config (opt-in; Kubernetes manifests, CloudFormation)      | prettier                |
+| JSON                  | ✓   | lsp, trivy-config (opt-in; CloudFormation templates only)                                                      | biome, prettier         |
 | Svelte                | ✓   | lsp                                                                                                            | oxfmt (needs `svelte` pkg installed + config `svelte: true`) |
 | Vue                   | ✓   | lsp                                                                                                            | prettier, oxfmt         |
 | SQL                   | —   | sqlfluff                                                                                                       | sqlfluff                |
 | Markdown              | —   | spellcheck, markdownlint, vale                                                                                 | prettier                |
-| Docker                | ✓   | lsp, hadolint                                                                                                  | —                       |
+| Docker                | ✓   | lsp, hadolint, trivy-config (opt-in)                                                                           | —                       |
 | PHP                   | ✓   | lsp, php-lint, phpstan                                                                                         | php-cs-fixer            |
 | PowerShell            | ✓   | lsp, psscriptanalyzer                                                                                          | psscriptanalyzer-format |
 | Prisma                | ✓   | lsp, prisma-validate                                                                                           | —                       |
@@ -78,12 +78,38 @@ Both are upstream grammar limitations (tracked among
 [eonpatapon/tree-sitter-cue](https://github.com/eonpatapon/tree-sitter-cue)'s
 open issues), not something a query change here can fix.
 
-## Considered and skipped (2026-08-20 survey)
+## Considered and skipped (2026-08-20 survey, closed out by #1757)
 
-Recorded so these are not re-litigated. Each was evaluated for adoption and rejected as a duplicate of an existing lane:
+Recorded so these are not re-litigated. The 2026-08-20 survey's first pass
+rejected `bandit` and `checkov` as duplicates of existing lanes; #1752's
+review disproved both "already covered" claims against the actual code, and
+#1757 closed the resulting gaps:
 
-- **bandit** (Python SAST): ruff's `S` ruleset implements Bandit's checks, but pi-lens's bundled ruff config does not enable `S` today — a project opting into `S` gets the coverage; a default project does not. Tracked as a real gap, not a duplicate (see the ruff-S/IaC lane issue).
-- **checkov** (IaC security): originally skipped on the belief that `trivy config` was wired; verification shows pi-lens runs `trivy fs --scanners vuln,secret,license` only, and tflint checks Terraform correctness, not misconfiguration. pi-lens has no IaC-misconfiguration lane today — tracked as a real gap.
-- **radon / lizard** (complexity): ruff's `C90` (mccabe) covers the capability but is not enabled in the bundled config either; treated as a config decision, not a new runner.
+- **bandit** (Python SAST) — RESOLVED. ruff's `S` ruleset implements Bandit's
+  checks; `config/ruff/core.toml` now selects `S`, with `S101` (assert),
+  `S311` (non-cryptographic random), `S603`/`S607` (subprocess without
+  `shell=True` / partial executable path) excluded as over-firing on real
+  code (measured against the `requests` and `pip` packages — see the config
+  file's comments for the exclusion reasoning and hit counts). `C90`
+  (mccabe complexity) was evaluated and NOT enabled: it is a maintainability
+  metric, not a Bandit-equivalent security check, and its hit volume on a
+  large pre-existing codebase (379 in `pandas`) would drown the security
+  signal `S` adds. As always, a project-local ruff config overrides the
+  bundled one outright.
+- **checkov** (IaC security) — the `trivy config` lane pi-lens's own dispatch
+  registry already carries (`clients/dispatch/runners/trivy-config.ts`,
+  opt-in via `trivy.enabled`) makes checkov a duplicate, not a gap: no
+  second full-scan tool is needed. That lane covers Kubernetes manifests,
+  Dockerfiles, and Terraform; #1757 added CloudFormation (yaml and json
+  templates, detected via `AWSTemplateFormatVersion` / SAM `Transform` /
+  `Type: AWS::*` heuristics) and fixed a real bug found while verifying
+  against the installed binary: the runner passed `--no-progress` to `trivy
+  config`, a flag that subcommand rejects (only `trivy fs` accepts it) —
+  every real invocation exited 1 and, because trivy prints its usage text to
+  stdout on a rejected flag, was misreported as a clean `succeeded` scan
+  rather than an errored one. Dropping the flag was the fix.
+- **radon / lizard** (complexity) — still not enabled; see the C90 note
+  above. Unchanged conclusion, now backed by measurement rather than
+  assumption.
 
 Known coverage holes with no tool currently clearing the adoption bar: Rust and Java dead-code detection, Ruby type checking (sorbet judged too heavy and idiosyncratic for a default lane).
