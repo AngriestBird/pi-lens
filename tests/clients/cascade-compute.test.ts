@@ -605,11 +605,20 @@ describe("computeCascadeForFile", () => {
 			expect(formatted).toContain("normal error");
 			expect(formatted).toContain("no-server error");
 			expect(formatted).not.toContain("unrelated error");
-			const neighborFiles = (result?.result?.neighbors ?? []).map(
-				(n) => n.filePath,
+			// #1683: the no-LSP-configured neighbor is surfaced through the
+			// passive-fallback path, which pushes the raw allDiags Map key as
+			// `filePath` — that key is always `normalizeMapKey`-shaped (forward
+			// slashes), not the native-separator candidate path the "normal"
+			// touched neighbor gets. On POSIX those two shapes are byte-identical,
+			// so a literal `toContain(noLspNeighbor)` passed on Linux CI by
+			// accident and only broke on a Windows host (`\` vs `/`). Compare
+			// through the same normalizer the production code keys on, rather
+			// than assuming a path shape.
+			const neighborFiles = (result?.result?.neighbors ?? []).map((n) =>
+				normalizeMapKey(n.filePath),
 			);
-			expect(neighborFiles).toContain(noLspNeighbor);
-			expect(neighborFiles).not.toContain(unrelated);
+			expect(neighborFiles).toContain(normalizeMapKey(noLspNeighbor));
+			expect(neighborFiles).not.toContain(normalizeMapKey(unrelated));
 
 			const neighborFallbackEntry = mocks.logCascade.mock.calls
 				.map(([entry]) => entry)
