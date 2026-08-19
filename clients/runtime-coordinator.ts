@@ -8,8 +8,9 @@ import type { CascadeRun } from "./cascade-types.js";
 import { logCascade } from "./cascade-logger.js";
 import type { CodeQualityWarningRecord } from "./code-quality-warnings.js";
 import type { FileComplexity } from "./complexity-client.js";
-import { normalizeMapKey } from "./path-utils.js";
+import { normalizeMapKey, pathsEqual } from "./path-utils.js";
 import { PathKeyedMap } from "./path-keyed-map.js";
+import { BoundedLruCache } from "./bounded-cache.js";
 import { ReadGuard } from "./read-guard.js";
 import type { RuleScanResult } from "./rules-scanner.js";
 import { RUNTIME_CONFIG } from "./runtime-config.js";
@@ -72,6 +73,22 @@ export interface DeferredMutationRecord {
 	 * record just because a host doesn't supply stable ids).
 	 */
 	ownerSessionId: string | undefined;
+	/**
+	 * The cwd/worktree this edit's `tool_call` actually ran under (#1642 F3),
+	 * DISTINCT from `turnStateCwd` (which is always the workspace/project
+	 * root, by design, for bookkeeping — see its own doc). Defaults to
+	 * `turnStateCwd` when the caller doesn't supply one, preserving prior
+	 * behavior for callers with no real per-call origin to report.
+	 *
+	 * This is what the staleness/orphan-recovery fallback in
+	 * `claimDeferredFormatFiles` checks before claiming an aged-out foreign
+	 * record: an orphan queued from a DIFFERENT origin (e.g. a worktree) than
+	 * the one now running `agent_end` (e.g. the parent checkout) must not be
+	 * claimed just because its owning session died and it aged out — that IS
+	 * the worktree→parent re-attribution the reported incident hit, just via
+	 * the orphan fallback instead of `tool_result`'s path resolution.
+	 */
+	originCwd: string;
 }
 
 /** @deprecated Use DeferredMutationRecord. */
@@ -125,6 +142,59 @@ export interface InlineBlockerRecord {
 	stale?: boolean;
 }
 
+/**
+ * The canonical target `tool_call` resolved for one specific call, recorded
+ * by tool-call identity (#1642). `tool_result`'s paired handler MUST look
+ * this up and use `resolvedPath` as-is instead of re-deriving a path from its
+ * own (possibly relative, possibly worktree-collapsing) diff metadata — that
+ * re-derivation is exactly how a gitignored worktree edit got re-attributed
+ * onto a same-relative-path file in the parent checkout.
+ */
+export interface ToolCallAttribution {
+	/**
+	 * The absolute path `tool_call` resolved for THIS call, at call time.
+	 * NOT authoritative for what actually executed (a later `tool_call`
+	 * extension handler can mutate `event.input` in place with no
+	 * re-validation, and `edit`'s own `prepareArguments` rewrites args before
+	 * the event fires — pi host `agent-session.ts`/`types.ts`). Kept only for
+	 * the divergence diagnostic in `runtime-tool-result.ts`; never trusted as
+	 * the actual target.
+	 */
+	resolvedPath: string | undefined;
+	/**
+	 * True when `tool_call`'s OWN (possibly-superseded) resolution was
+	 * gitignored. Diagnostic only, same caveat as `resolvedPath` — the real
+	 * decision is `tool_result`'s fresh re-check on the authoritative path.
+	 */
+	skipped: boolean;
+	/**
+	 * The cwd/worktree `tool_call` actually ran under. THIS is the field that
+	 * matters: `tool_result`'s own authoritative `input.path` (populated from
+	 * the EXECUTED args, pi host `agent-session.ts`) is resolved against this
+	 * basis instead of the project root — the fix for #1642's worktree→parent
+	 * collapse.
+	 */
+	originCwd: string;
+	/** `Date.now()` when recorded — see `TOOL_CALL_ATTRIBUTION_TTL_MS`. */
+	recordedAt: number;
+}
+
+/**
+ * Bound on in-flight tool_call → tool_result correlations. A tool_result
+ * follows its tool_call almost immediately, so this only needs to cover
+ * calls genuinely in flight; sized generously above any realistic
+ * in-flight-batch width so a slow paired result is never evicted before use.
+ */
+const TOOL_CALL_ATTRIBUTION_CAPACITY = 256;
+
+/**
+ * A recorded attribution older than this is treated as expired (as if it
+ * were never recorded) rather than trusted — defense in depth against a host
+ * that reuses a call id, or a pathologically delayed/duplicated tool_result,
+ * outliving the LRU capacity bound. Generous relative to any real tool
+ * round-trip; only guards against genuine identity reuse, not slow tools.
+ */
+const TOOL_CALL_ATTRIBUTION_TTL_MS = 5 * 60_000;
 
 export class RuntimeCoordinator {
 	private _projectRoot = normalizeMapKey(process.cwd());
@@ -191,6 +261,11 @@ export class RuntimeCoordinator {
 	private readonly _pendingDeferredMutations = new PathKeyedMap<DeferredMutationRecord>(
 		normalizeMapKey,
 	);
+	/** tool_call → tool_result path-attribution correlation (#1642). */
+	private readonly _toolCallAttributions = new BoundedLruCache<
+		string,
+		ToolCallAttribution
+	>(TOOL_CALL_ATTRIBUTION_CAPACITY);
 	private readonly _lspReadWarmState = new Map<
 		string,
 		{ status: "warming" | "ready"; ts: number }
@@ -249,6 +324,10 @@ export class RuntimeCoordinator {
 		this._gitGuardCacheUnknownReason = undefined;
 		this._readGuard = null;
 		this._pendingDeferredMutations.clear();
+		// #1642 F5: every sibling correlation/state map is cleared here. A
+		// per-session-numbered host reusing tool-call ids across sessions must
+		// not let a NEW session inherit a DEAD session's recorded skip verdict.
+		this._toolCallAttributions.clear();
 		this._lspReadWarmState.clear();
 		this._pendingInlineBlockers.clear();
 		this._actionableWarningsThisTurn.clear();
@@ -942,6 +1021,43 @@ export class RuntimeCoordinator {
 	}
 
 	/**
+	 * Record the canonical target `tool_call` resolved for `toolCallId`
+	 * (#1642). The paired `tool_result` claims this exactly once via
+	 * {@link takeToolCallAttribution} instead of re-deriving a path from its
+	 * own diff metadata.
+	 */
+	recordToolCallAttribution(
+		toolCallId: string,
+		attribution: Omit<ToolCallAttribution, "recordedAt">,
+	): void {
+		this._toolCallAttributions.set(toolCallId, {
+			...attribution,
+			recordedAt: Date.now(),
+		});
+	}
+
+	/**
+	 * One-shot claim of a previously recorded tool-call attribution. Removed
+	 * on read: a given `tool_call`/`tool_result` pair correlates exactly once,
+	 * and leaving it behind would let a later, unrelated `tool_result` that
+	 * happens to reuse a stale id inherit a stranger's resolved path.
+	 *
+	 * An expired entry (older than `TOOL_CALL_ATTRIBUTION_TTL_MS`) is treated
+	 * as a miss and removed rather than returned — see the constant's doc.
+	 */
+	takeToolCallAttribution(
+		toolCallId: string,
+	): ToolCallAttribution | undefined {
+		const attribution = this._toolCallAttributions.get(toolCallId);
+		if (attribution === undefined) return undefined;
+		this._toolCallAttributions.delete(toolCallId);
+		if (Date.now() - attribution.recordedAt > TOOL_CALL_ATTRIBUTION_TTL_MS) {
+			return undefined;
+		}
+		return attribution;
+	}
+
+	/**
 	 * Queue one mutation kind for `filePath` at `agent_end`. Returns `true`
 	 * when this call created a pending entry or added a new kind, and `false`
 	 * for a same-kind re-touch. Callers publish each kind's first transition
@@ -954,9 +1070,11 @@ export class RuntimeCoordinator {
 		turnStateCwd: string,
 		kind: DeferredMutationKind,
 		ownerSessionId?: string,
+		originCwd?: string,
 	): boolean {
 		const key = path.resolve(filePath);
 		const now = Date.now();
+		const resolvedOriginCwd = originCwd ?? turnStateCwd;
 		const existing = this._pendingDeferredMutations.get(key);
 		if (existing) {
 			const addedKind = !existing.kinds.has(kind);
@@ -967,6 +1085,7 @@ export class RuntimeCoordinator {
 			existing.kinds.add(kind);
 			existing.queuedTurnIndex = this._turnIndex;
 			existing.ownerSessionId = ownerSessionId;
+			existing.originCwd = resolvedOriginCwd;
 			return addedKind;
 		}
 		this._pendingDeferredMutations.set(key, {
@@ -979,6 +1098,7 @@ export class RuntimeCoordinator {
 			kinds: new Set([kind]),
 			queuedTurnIndex: this._turnIndex,
 			ownerSessionId,
+			originCwd: resolvedOriginCwd,
 		});
 		return true;
 	}
@@ -989,8 +1109,17 @@ export class RuntimeCoordinator {
 		toolName: "write" | "edit",
 		turnStateCwd: string,
 		ownerSessionId?: string,
+		originCwd?: string,
 	): boolean {
-		return this.deferMutation(filePath, cwd, toolName, turnStateCwd, "format", ownerSessionId);
+		return this.deferMutation(
+			filePath,
+			cwd,
+			toolName,
+			turnStateCwd,
+			"format",
+			ownerSessionId,
+			originCwd,
+		);
 	}
 
 	get pendingDeferredFormatCount(): number {
@@ -1021,26 +1150,42 @@ export class RuntimeCoordinator {
 	 *  - otherwise (both known, and they differ) the record belongs to a
 	 *    DIFFERENT session (e.g. a concurrent in-process secondary/subagent)
 	 *    and is left queued for its owner's own flush — UNLESS it has sat
-	 *    unclaimed longer than `staleAfterMs` (the owner presumably died),
-	 *    in which case this flush claims it anyway as an orphan-recovery
-	 *    fallback.
+	 *    unclaimed longer than `staleAfterMs` (the owner presumably died), in
+	 *    which case this flush claims it as an orphan-recovery fallback ONLY
+	 *    when `currentOriginCwd` (this flush's own workspace/worktree) exactly
+	 *    matches the record's `originCwd` (the cwd it was actually queued
+	 *    under, #1642 F3 — NOT `turnStateCwd`, which is always the workspace
+	 *    root by design and so would match every session unconditionally). A
+	 *    mismatch means the record belongs to a DIFFERENT checkout/worktree
+	 *    than the one now running `agent_end` — claiming it across that
+	 *    boundary is exactly how a worktree's queued edit got formatted onto
+	 *    the parent checkout in the reported incident. It is left queued
+	 *    (NOT deleted) and logged instead: a legitimate crashed-session
+	 *    orphan from, say, a monorepo subdir must still be claimable later by
+	 *    a flush whose origin actually matches, or stay visible for
+	 *    observability — deleting it here would drop it forever with no
+	 *    origin ever able to reclaim it.
 	 *
-	 * Returns both the claimed records and, per skipped record, why it was
-	 * left behind — callers use this for `agent_end`'s latency-log
-	 * provenance and for the "stale fallback fired" log line.
+	 * Returns the claimed records, the left-queued mismatched-origin records,
+	 * and per-skipped record why it was left behind — callers use this for
+	 * `agent_end`'s latency-log provenance and for the "stale fallback
+	 * fired"/"orphan mismatch" log lines.
 	 */
 	claimDeferredFormatFiles(
 		currentSessionId: string | undefined,
 		now: number,
 		staleAfterMs: number,
+		currentOriginCwd?: string,
 	): {
 		claimed: DeferredFormatRecord[];
 		staleClaimed: DeferredFormatRecord[];
 		deferredToOwner: DeferredFormatRecord[];
+		droppedOrphans: DeferredFormatRecord[];
 	} {
 		const claimed: DeferredFormatRecord[] = [];
 		const staleClaimed: DeferredFormatRecord[] = [];
 		const deferredToOwner: DeferredFormatRecord[] = [];
+		const droppedOrphans: DeferredFormatRecord[] = [];
 		for (const [key, record] of this._pendingDeferredMutations) {
 			const sameSession =
 				record.ownerSessionId === undefined ||
@@ -1053,13 +1198,29 @@ export class RuntimeCoordinator {
 			}
 			const age = now - record.lastTouchedAt;
 			if (age > staleAfterMs) {
-				staleClaimed.push(record);
-				this._pendingDeferredMutations.delete(key);
+				// #1642 F3: origin identity is required before an orphan-recovery
+				// claim, not just staleness. `currentOriginCwd === undefined`
+				// means the caller can't state its own origin — fail-safe as
+				// "can't prove different" (same posture as the sameSession check
+				// above), not as a free pass to claim across a KNOWN mismatch.
+				const originMatches =
+					currentOriginCwd === undefined ||
+					pathsEqual(record.originCwd, currentOriginCwd);
+				if (originMatches) {
+					this._pendingDeferredMutations.delete(key);
+					staleClaimed.push(record);
+				} else {
+					// Left queued — see the doc above for why this must not be
+					// deleted. Reported once per claim attempt; a genuinely
+					// abandoned origin will keep surfacing here, which is the
+					// intended, safer trade-off over silent, permanent loss.
+					droppedOrphans.push(record);
+				}
 				continue;
 			}
 			deferredToOwner.push(record);
 		}
-		return { claimed, staleClaimed, deferredToOwner };
+		return { claimed, staleClaimed, deferredToOwner, droppedOrphans };
 	}
 
 	/** Return claimed records that were never started by an aborted drain. */
@@ -1080,8 +1241,18 @@ export class RuntimeCoordinator {
 		}
 	}
 
-	claimDeferredMutations(currentSessionId: string | undefined, now: number, staleAfterMs: number) {
-		return this.claimDeferredFormatFiles(currentSessionId, now, staleAfterMs);
+	claimDeferredMutations(
+		currentSessionId: string | undefined,
+		now: number,
+		staleAfterMs: number,
+		currentOriginCwd?: string,
+	) {
+		return this.claimDeferredFormatFiles(
+			currentSessionId,
+			now,
+			staleAfterMs,
+			currentOriginCwd,
+		);
 	}
 
 	requeueDeferredMutations(records: DeferredMutationRecord[]): void {
