@@ -2867,6 +2867,84 @@ describe("lens_diagnostics disposition read-filter (#755)", () => {
 		expect(after.details).toMatchObject({ mode: "delta" });
 	});
 
+	// #1634 review round: mode=delta is the tool's DEFAULT and re-serves the
+	// actionable/quality-warnings caches verbatim — same shape #1622 fixed for
+	// gitleaks/trivy-secrets, previously unfixed here.
+	it("mode=delta demotes an actionable-warning cited in a file edited after the report was generated", async () => {
+		const filePath = path.join(ddTmp, "drift.ts");
+		fs.writeFileSync(filePath, "const a = 1;\nconst target = bad();\n");
+		const generatedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+		// Edit happened AFTER the report — the cited line 2 is no longer trustworthy.
+		fs.utimesSync(filePath, new Date(), new Date());
+		const cacheData = {
+			"actionable-warnings": {
+				generatedAt,
+				files: [
+					{
+						filePath,
+						displayPath: "drift.ts",
+						warnings: [
+							{
+								id: "1",
+								filePath,
+								displayPath: "drift.ts",
+								line: 2,
+								severity: "warning",
+								tool: "eslint",
+								rule: "no-bad",
+								message: "bad call",
+								actions: [],
+								suppressed: false,
+								origin: "dispatch",
+							},
+						],
+					},
+				],
+			},
+		};
+
+		const result = await run(makeTool(cacheData), { mode: "delta" }, ddTmp);
+		const text = String(result.content[0].text);
+		expect(text).toContain("bad call");
+		expect(text).not.toContain("L2");
+		expect(text).toContain("stale — re-run to confirm");
+	});
+
+	it("mode=delta drops an actionable-warning whose cited file no longer exists", async () => {
+		const filePath = path.join(ddTmp, "gone.ts");
+		const generatedAt = new Date().toISOString();
+		const cacheData = {
+			"actionable-warnings": {
+				generatedAt,
+				files: [
+					{
+						filePath,
+						displayPath: "gone.ts",
+						warnings: [
+							{
+								id: "1",
+								filePath,
+								displayPath: "gone.ts",
+								line: 1,
+								severity: "warning",
+								tool: "eslint",
+								rule: "no-bad",
+								message: "vanished finding",
+								actions: [],
+								suppressed: false,
+								origin: "dispatch",
+							},
+						],
+					},
+				],
+			},
+		};
+
+		const result = await run(makeTool(cacheData), { mode: "delta" }, ddTmp);
+		const text = String(result.content[0].text);
+		expect(text).not.toContain("vanished finding");
+	});
+
 	it("mode=all hides a finding deferred via the mark tool without a re-dispatch", async () => {
 		const filePath = path.join(ddTmp, "b.ts");
 		fs.writeFileSync(filePath, "const target = bad();\n");

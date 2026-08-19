@@ -521,10 +521,12 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// #1631: demoted — out of the authoritative blocker channel and into the
 			// advisory channel with a stale marker, so the agent is told to re-run
 			// rather than pressured by a verdict that may already be resolved.
+			// @delivery-surface: runtime-turn:unresolved-inline-blocker
 			advisoryParts.push(
 				`${STALE_LINE_MARKER} ${displayPath}:\n${summary}`,
 			);
 		} else {
+			// @delivery-surface: runtime-turn:unresolved-inline-blocker
 			blockerParts.push(
 				`Unresolved from this turn — ${displayPath}:\n${summary}`,
 			);
@@ -713,6 +715,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		}
 		if (parts.length > 0) {
 			const section = parts.join("\n\n");
+			// @delivery-surface: runtime-turn:cascade-blocker
 			blockerParts.push(section);
 			// #1446 item 1: proves the cascade section reached `blockerParts` —
 			// i.e. it was QUEUED for persistence into the turn-end advisory — not
@@ -842,6 +845,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					? "changed file not in the review graph"
 					: "review graph unavailable",
 		});
+		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (graphAdvisory) advisoryParts.push(graphAdvisory);
 
 		const bindingAdvisory = buildAdvisory(bindingRuns, {
@@ -851,6 +855,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				`cascade result does not cover them.`,
 			fallbackDetail: () => "cascade diagnostics withheld (binding rejected)",
 		});
+		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (bindingAdvisory) advisoryParts.push(bindingAdvisory);
 
 		const budgetAdvisory = buildAdvisory(budgetRuns, {
@@ -867,6 +872,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					: detail;
 			},
 		});
+		// @delivery-surface: runtime-turn:cascade-coverage-advisory
 		if (budgetAdvisory) advisoryParts.push(budgetAdvisory);
 
 		const fileCount = new Set(
@@ -1033,6 +1039,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 					if (firstPath) {
 						report += `  First location: ${firstPath}\n`;
 					}
+					// @delivery-surface: runtime-turn:knip-blocker
 					blockerParts.push(report);
 				}
 
@@ -1056,6 +1063,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 							: "(unknown)";
 						report += `  ${display}${issue.line ? `:${issue.line}` : ""} — ${issue.name}\n`;
 					}
+					// @delivery-surface: runtime-turn:knip-advisory
 					advisoryParts.push(report);
 				}
 			}
@@ -1197,6 +1205,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 						),
 					);
 					projectDiagnosticsSources.add("dead-code");
+					// @delivery-surface: runtime-turn:dead-code-advisory
 					advisoryParts.push(formatDeadCodeDelta(newIssues, result.language));
 				} catch (err) {
 					dbg(`turn_end: dead-code(${client.id}) failed: ${err}`);
@@ -1291,6 +1300,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		if (govFindings.length > findings.length) {
 			report += `  … and ${govFindings.length - findings.length} more\n`;
 		}
+		// @delivery-surface: runtime-turn:govulncheck-advisory
 		advisoryParts.push(report);
 	}
 
@@ -1441,6 +1451,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		if (enriched.length > shown.length) {
 			report += `  … and ${enriched.length - shown.length} more\n`;
 		}
+		// @delivery-surface: runtime-turn:secrets-gitleaks,runtime-turn:secrets-trivy
 		blockerParts.push(report);
 	}
 	if (staleSecrets.length) {
@@ -1459,6 +1470,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		if (staleSecrets.length > shown.length) {
 			report += `  … and ${staleSecrets.length - shown.length} more\n`;
 		}
+		// @delivery-surface: runtime-turn:stale-secrets-tier
 		staleSecretParts.push(report);
 	}
 
@@ -1506,6 +1518,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			if (critical.length > shown.length) {
 				report += `  … and ${critical.length - shown.length} more\n`;
 			}
+			// @delivery-surface: runtime-turn:trivy-critical-blocker
 			blockerParts.push(report);
 		}
 		if (advisory.length) {
@@ -1515,6 +1528,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			if (advisory.length > shown.length) {
 				report += `  … and ${advisory.length - shown.length} more\n`;
 			}
+			// @delivery-surface: runtime-turn:trivy-cve-advisory
 			advisoryParts.push(report);
 		}
 	}
@@ -1535,6 +1549,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		if (licenses.length > shown.length) {
 			report += `  … and ${licenses.length - shown.length} more\n`;
 		}
+		// @delivery-surface: runtime-turn:trivy-license-advisory
 		advisoryParts.push(report);
 	}
 
@@ -1547,6 +1562,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		const byLane = Object.entries(dispositionSuppressedByLane)
 			.map(([lane, count]) => `${lane} ${count}`)
 			.join(", ");
+		// @delivery-surface: runtime-turn:disposition-suppressed-notice
 		advisoryParts.push(
 			`suppressed by disposition: ${dispositionSuppressedTotal} finding(s) ` +
 				`dropped from this turn's gitleaks/govulncheck/trivy sections (${byLane}) ` +
@@ -1895,6 +1911,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			// into an authoritative-looking clean result for the rest of the file.
 			// Keep the limitation visible and require a complete graph for this
 			// user-facing impact surface (#1070).
+			// @delivery-surface: runtime-turn:call-graph-advisory
 			advisoryParts.push(
 				"Call-graph impact was not emitted because call-graph extraction coverage is incomplete; " +
 					"the affected files may have unreported callers.",
@@ -1953,6 +1970,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 				}
 			}
 			if (impactLines.length > 0) {
+				// @delivery-surface: runtime-turn:call-graph-advisory
 				advisoryParts.push(
 					`📊 Call-graph impact (changed symbols have callers):\n${impactLines.join("\n")}`,
 				);
@@ -2038,6 +2056,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 			writeActionableWarningsReport(cacheManager, cwd, report);
 			appendActionableWarningsHistory(cwd, report);
 			const advisory = formatActionableWarningsAdvisory(report);
+			// @delivery-surface: runtime-turn:actionable-warnings-advisory
 			if (advisory) advisoryParts.push(advisory);
 			logActionableWarningsEvent({
 				event: advisory ? "advisory_injected" : "advisory_skipped",
@@ -2086,6 +2105,7 @@ export async function handleTurnEnd(deps: TurnEndDeps): Promise<void> {
 		writeCodeQualityWarningsReport(cacheManager, cwd, qualityReport);
 		appendCodeQualityWarningsHistory(cwd, qualityReport);
 		const advisory = formatCodeQualityWarningsAdvisory(qualityReport);
+		// @delivery-surface: runtime-turn:code-quality-warnings-advisory
 		if (advisory) advisoryParts.push(advisory);
 		logLatency({
 			type: "phase",

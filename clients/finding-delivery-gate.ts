@@ -2,12 +2,16 @@
  * Single documentation home for the finding-delivery gate stack (#1634).
  *
  * Every store that renders findings to the AGENT — the turn-end blocker/
- * advisory tiers, `lens_diagnostics` mode=full/all, the widget/footer tally,
- * agent nudges, and the persisted project-diagnostics snapshot — invented its
- * own freshness and retirement rules across #1461/#1561/#1622/#1631, so the
- * stores drifted from each other and each new store re-created the class.
- * #1622/#1625/#1627/#1633 converged on two gates; this module names them ONE
- * time so every other file points here instead of re-explaining the contract.
+ * advisory tiers, `lens_diagnostics` mode=full/all/delta, the widget/footer
+ * tally, agent nudges, and the persisted project-diagnostics snapshot —
+ * invented its own freshness and retirement rules across
+ * #1461/#1561/#1622/#1631, so the stores drifted from each other and each new
+ * store re-created the class. #1622/#1625/#1627/#1633 converged on two gates;
+ * this module names them ONE time so every other file points here instead of
+ * re-explaining the contract. `mode=delta` — the tool's DEFAULT mode — was
+ * the review round's live catch: it re-served the actionable/quality-warnings
+ * caches verbatim, unfixed by the earlier per-store passes because it sits
+ * one layer up from any single scanner.
  *
  * ── Freshness (mtime vs scannedAt, onMissing policy) ──────────────────────
  * `gateFindingsByPathFreshness` (advisory-provenance.ts) partitions a cached
@@ -107,8 +111,14 @@ export function formatCacheAgeLabel(
 	const ageMinutes = Math.round(ageMs / MS_PER_MINUTE);
 	if (ageMinutes < 1) return "scanned <1m ago";
 	if (ageMinutes < 60) return `scanned ${ageMinutes}m ago`;
-	const ageHours = Math.round(ageMinutes / 60);
-	return `scanned ${ageHours}h ago`;
+	// Floor the hour, keep the remainder minutes explicit — a naive
+	// `Math.round(ageMinutes / 60)` reported "1h" at 89 minutes (F5), rounding
+	// a finding's age UP is the wrong direction to err for a staleness label.
+	const ageHours = Math.floor(ageMinutes / 60);
+	const remMinutes = ageMinutes % 60;
+	return remMinutes === 0
+		? `scanned ${ageHours}h ago`
+		: `scanned ${ageHours}h ${remMinutes}m ago`;
 }
 
 /** How a delivery surface satisfies #1634's "gated or labeled" contract. */
@@ -119,6 +129,36 @@ interface DeliverySurfaceBase {
 	description: string;
 	/** Source file the surface's render/gate call lives in. */
 	file: string;
+	/**
+	 * "complete" (default, omit the field) means this round's gate/label fully
+	 * covers the surface's known staleness risk. "partial" is an HONEST
+	 * admission that this round registered and named the surface without
+	 * fully closing a known residual risk — `partialReason` must say what's
+	 * left (#1634 review round F3: "gate what's cheap ... say so per-surface,
+	 * honest partial beats claimed total").
+	 */
+	status?: "complete" | "partial";
+	/** Required when `status: "partial"`. What residual risk is NOT covered yet. */
+	partialReason?: string;
+	/**
+	 * Literal, comment/string-STRIPPED source substrings that must each occur
+	 * at least `evidenceMin` times in `file`. This is the ground-truth proof
+	 * that the gate/label call is actually WIRED to this specific surface —
+	 * not merely imported, not merely mentioned in a doc comment (#1634 review
+	 * round F1: `expect(src).toContain(gateName)` matched the IMPORT line and
+	 * a comment; stubbing the three real gate calls to identity and deleting
+	 * the age interpolations left the old check green). Evidence strings are
+	 * chosen to be SURFACE-specific (e.g. a literal `store: "gitleaks"` gate
+	 * argument, or a literal fragment of the rendered header that only exists
+	 * once the age is interpolated in) so a stub of a DIFFERENT surface's call
+	 * to the same shared gate function cannot satisfy this entry. Empty only
+	 * for `ageSource: "live"` labeled surfaces, which call no such helper —
+	 * their proof is the `@delivery-surface:` seam tag the coverage scan
+	 * requires instead (see `tests/clients/finding-delivery-gate.test.ts`).
+	 */
+	evidence: string[];
+	/** Minimum occurrences required for EACH string in `evidence`. Default 1. */
+	evidenceMin?: number;
 }
 
 export interface GatedDeliverySurface extends DeliverySurfaceBase {
@@ -139,14 +179,26 @@ export type DeliverySurfaceEntry = GatedDeliverySurface | LabeledDeliverySurface
 
 /**
  * The enumeration (#1634 criterion 1): every surface that renders findings to
- * the agent, derived by grepping the render seams — `blockerParts.push`/
- * `advisoryParts.push` in `clients/runtime-turn.ts`, the report builders in
- * `tools/lens-diagnostics.ts`, the widget footer's shared `isBlocking`/
- * reconcile predicates, `consumeAgentNudge`, and the persisted project-
- * diagnostics snapshot reconcile. Single source of truth: adding a new
- * render seam without adding an entry here fails
- * `tests/clients/finding-delivery-gate.test.ts`'s enumeration-completeness
- * check.
+ * the agent. Two DIFFERENT seam shapes, each derived structurally rather than
+ * hand-listed (#1634 review round F2):
+ *
+ *   - `clients/runtime-turn.ts`: every `blockerParts.push`/`advisoryParts.push`/
+ *     `staleSecretParts.push` call site carries an `@delivery-surface: <id>`
+ *     comment naming its entry here. `tests/clients/finding-delivery-gate.test.ts`
+ *     scans the file for every such push call (comments/strings stripped, so a
+ *     commented-out or string-embedded false match can't hide a REAL untagged
+ *     seam) and fails if one has no tag, or a tag names an id not in this
+ *     registry — a brand-new ungated `advisoryParts.push` cannot pass silently.
+ *   - `tools/lens-diagnostics.ts`: each `mode=` report is its own function
+ *     (`formatFullMode`/`formatAllMode`/`formatDeltaMode`), tagged the same way
+ *     immediately above its `function` line.
+ *   - `clients/widget-state.ts` (the footer) and `clients/agent-nudge.ts` are
+ *     hand-registered below — one surface each, not a push-site pattern the
+ *     scan can derive structurally, so a coverage test asserts these two
+ *     files are not silently untouched by other tests in the same run.
+ *
+ * Single source of truth: adding a new render seam without adding/tagging an
+ * entry here fails the coverage test, not a human re-reading a hand list.
  */
 export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 	"runtime-turn:secrets-gitleaks": {
@@ -154,18 +206,37 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		file: "clients/runtime-turn.ts",
 		description: "Turn-end 🔴 secrets blocker, gitleaks cache.",
 		gates: ["gateFindingsByPathFreshness"],
+		evidence: ['store: "gitleaks"'],
 	},
 	"runtime-turn:secrets-trivy": {
 		mode: "gated",
 		file: "clients/runtime-turn.ts",
 		description: "Turn-end 🔴 secrets blocker, trivy secrets cache.",
 		gates: ["gateFindingsByPathFreshness"],
+		evidence: ['store: "trivy-secrets"'],
 	},
 	"runtime-turn:govulncheck-advisory": {
 		mode: "gated",
 		file: "clients/runtime-turn.ts",
 		description: "Turn-end 🛡️ Go CVE advisory (call-site line only).",
 		gates: ["gateFindingsByPathFreshness"],
+		evidence: ['store: "govulncheck"'],
+	},
+	"runtime-turn:unresolved-inline-blocker": {
+		mode: "gated",
+		file: "clients/runtime-turn.ts",
+		description: "Turn-end re-surfaced unresolved inline blockers.",
+		gates: ["sweepInlineBlockerFreshness"],
+		evidence: ["sweepInlineBlockerFreshness(runtime, cwd)"],
+	},
+	"runtime-turn:stale-secrets-tier": {
+		mode: "gated",
+		file: "clients/runtime-turn.ts",
+		description: "Turn-end 🔑 demoted-secrets tier (drifted since scan).",
+		gates: ["gateFindingsByPathFreshness"],
+		// Same two gate calls as the live secrets tier — this tier renders their
+		// `.stale` arm, so it has no OWN gate call to point at.
+		evidence: ['store: "gitleaks"', 'store: "trivy-secrets"'],
 	},
 	"runtime-turn:trivy-critical-blocker": {
 		mode: "labeled",
@@ -179,6 +250,10 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			"positive finding never reaches this render, so the age label and the " +
 			"disposition filter compose rather than substitute for each other.",
 		ageSource: "TrivyResult.scannedAt",
+		// The literal header FRAGMENT including the interpolation — proves the
+		// label is actually rendered, not merely computed and discarded (the
+		// review round's exact "deleted the age interpolations" attack).
+		evidence: ["CRITICAL dependency CVEs (trivy, ${trivyAgeLabel}"],
 	},
 	"runtime-turn:trivy-cve-advisory": {
 		mode: "labeled",
@@ -188,6 +263,7 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			"Same package-pinned shape and #1625 disposition composition as the " +
 			"CRITICAL blocker above.",
 		ageSource: "TrivyResult.scannedAt",
+		evidence: ["Dependency CVEs (trivy, ${trivyAgeLabel}"],
 	},
 	"runtime-turn:trivy-license-advisory": {
 		mode: "labeled",
@@ -195,6 +271,7 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 		description: "Turn-end 📜 dependency license-risk advisory (trivy).",
 		reason: "Same package-pinned shape as the CRITICAL blocker above.",
 		ageSource: "TrivyResult.scannedAt",
+		evidence: ["Dependency license risk (trivy, ${trivyAgeLabel}"],
 	},
 	"runtime-turn:dead-code-advisory": {
 		mode: "labeled",
@@ -204,6 +281,26 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			"The delta shown is computed from THIS turn's own analyze() call, " +
 			"diffed against the previous cache — never a replay of a stale cache.",
 		ageSource: "live",
+		evidence: [],
+	},
+	"runtime-turn:knip-blocker": {
+		mode: "labeled",
+		file: "clients/runtime-turn.ts",
+		description: "Turn-end 🔴 Knip unresolved-imports/deps blocker.",
+		reason:
+			"Same shape as the dead-code advisory: `await knipClient.analyze(cwd, " +
+			"...)` runs fresh THIS turn, diffed against the previous cache and " +
+			"filtered to files edited this turn — never a replay of a stale cache.",
+		ageSource: "live",
+		evidence: [],
+	},
+	"runtime-turn:knip-advisory": {
+		mode: "labeled",
+		file: "clients/runtime-turn.ts",
+		description: "Turn-end ⚠️ Knip newly-unused-exports advisory.",
+		reason: "Same live-this-turn shape as the Knip blocker above.",
+		ageSource: "live",
+		evidence: [],
 	},
 	"runtime-turn:actionable-warnings-advisory": {
 		mode: "labeled",
@@ -213,24 +310,109 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			"`peekActionableWarnings` reads `_actionableWarningsThisTurn` — " +
 			"recorded fresh from this turn's own dispatch, never a cross-turn cache.",
 		ageSource: "live",
+		evidence: [],
+	},
+	"runtime-turn:code-quality-warnings-advisory": {
+		mode: "labeled",
+		file: "clients/runtime-turn.ts",
+		description: "Turn-end code-quality-warnings advisory.",
+		reason:
+			"`peekCodeQualityWarnings` reads `_codeQualityWarningsThisTurn` — the " +
+			"same per-turn accumulator shape as actionable-warnings above.",
+		ageSource: "live",
+		evidence: [],
+	},
+	"runtime-turn:disposition-suppressed-notice": {
+		mode: "labeled",
+		file: "clients/runtime-turn.ts",
+		description: "Turn-end running disposition-suppressed-count notice (#1616).",
+		reason:
+			"A live running total accumulated from this turn's own gate/disposition " +
+			"calls above (`dispositionSuppressedTotal`) — telemetry ABOUT the other " +
+			"gated surfaces, not a cache of its own.",
+		ageSource: "live",
+		evidence: [],
+	},
+	"runtime-turn:cascade-blocker": {
+		mode: "labeled",
+		file: "clients/runtime-turn.ts",
+		description: "Turn-end 🧪 cascade neighbor blocker.",
+		reason:
+			"Cascade results settle synchronously this turn where possible " +
+			"(`settleCascadeRuns`), but an unsettled compute can carry over to a " +
+			"later turn (bounded by a carry cap) — this round does not freshness-" +
+			"gate that carry-over window.",
+		ageSource: "live",
+		evidence: [],
+		status: "partial",
+		partialReason:
+			"A carried-over cascade result (run.carriedTurns > 0) is rendered " +
+			"without an age label. Follow-up: surface carriedTurns as an explicit " +
+			"label when > 0, or route through formatCacheAgeLabel using the run's " +
+			"own timestamp.",
+	},
+	"runtime-turn:cascade-coverage-advisory": {
+		mode: "labeled",
+		file: "clients/runtime-turn.ts",
+		description: "Turn-end cascade-coverage-gap advisories (graph/binding/budget).",
+		reason:
+			"Explains what the cascade check could NOT confirm this turn — not a " +
+			"finding with a cited path, an absence-of-coverage disclosure computed " +
+			"from this turn's own indeterminate-run list.",
+		ageSource: "live",
+		evidence: [],
+		status: "partial",
+		partialReason: "Same cascade carry-over caveat as runtime-turn:cascade-blocker.",
+	},
+	"runtime-turn:call-graph-advisory": {
+		mode: "labeled",
+		file: "clients/runtime-turn.ts",
+		description: "Turn-end 📊 call-graph impact advisory.",
+		reason:
+			"`runtime.callGraph` is a session-lifetime in-memory structure; this " +
+			"round does not verify or gate ITS OWN freshness policy (how/when it " +
+			"incorporates edits made earlier in the session).",
+		ageSource: "live",
+		evidence: [],
+		status: "partial",
+		partialReason:
+			"call-graph freshness/invalidation policy is out of this PR's scope — " +
+			"tracked as a follow-up, not silently assumed fresh.",
 	},
 	"lens-diagnostics:mode-full": {
 		mode: "gated",
 		file: "tools/lens-diagnostics.ts",
 		description: "`lens_diagnostics mode=full` report.",
 		gates: ["applyDispositions", "applyRulePolicy", "reconcileProjectDiagnosticsSnapshot"],
+		evidence: ["applyDispositions(", "applyRulePolicy(", "reconcileProjectDiagnosticsSnapshot("],
 	},
 	"lens-diagnostics:mode-all": {
 		mode: "gated",
 		file: "tools/lens-diagnostics.ts",
 		description: "`lens_diagnostics mode=all` report (widget-state read).",
 		gates: ["reconcileStaleWidgetFiles", "reconcileStaleWidgetDependencyBlockers"],
+		evidence: ["reconcileStaleWidgetFiles(", "reconcileStaleWidgetDependencyBlockers("],
+	},
+	"lens-diagnostics:mode-delta": {
+		mode: "gated",
+		file: "tools/lens-diagnostics.ts",
+		description:
+			"`lens_diagnostics mode=delta` report (the tool's DEFAULT mode) — " +
+			"re-serves the actionable-warnings/code-quality-warnings caches.",
+		gates: ["gateFindingsByPathFreshness"],
+		// #1634 review round F3: this was the most important gap — the tool's
+		// DEFAULT mode rendered cached `file:line` findings with zero freshness
+		// check. `applyDeltaFreshnessGate` (this file's sibling in
+		// tools/lens-diagnostics.ts) now routes both caches through the shared
+		// gate using each report's own `generatedAt`.
+		evidence: ['store: "lens-diagnostics-delta"', "applyDeltaFreshnessGate("],
 	},
 	"widget-state:footer": {
 		mode: "gated",
 		file: "clients/widget-state.ts",
 		description: "TUI footer blocking/error/warning tally.",
 		gates: ["reconcileStaleWidgetFiles", "isBlocking"],
+		evidence: ["isBlocking(diagnostic)", "reconcileStaleWidgetFiles()"],
 	},
 	"agent-nudge:context-message": {
 		mode: "labeled",
@@ -241,12 +423,14 @@ export const DELIVERY_SURFACES: Record<string, DeliverySurfaceEntry> = {
 			"the accumulator is drained and cleared at the moment of injection, so " +
 			"the content IS the current state by construction.",
 		ageSource: "live",
+		evidence: [],
 	},
 	"project-diagnostics:persisted-snapshot": {
 		mode: "gated",
 		file: "tools/lens-diagnostics.ts",
 		description: "Cross-session persisted project-diagnostics snapshot read.",
 		gates: ["reconcileProjectDiagnosticsSnapshot"],
+		evidence: ["reconcileProjectDiagnosticsSnapshot("],
 	},
 };
 
@@ -261,10 +445,20 @@ export function assertNoDeliveryBypass(
 	registry: Record<string, DeliverySurfaceEntry> = DELIVERY_SURFACES,
 ): void {
 	for (const [id, entry] of Object.entries(registry)) {
+		if (entry.status === "partial" && !entry.partialReason) {
+			throw new Error(
+				`finding-delivery-gate: surface "${id}" is status=partial but names no partialReason`,
+			);
+		}
 		if (entry.mode === "gated") {
 			if (!Array.isArray(entry.gates) || entry.gates.length === 0) {
 				throw new Error(
 					`finding-delivery-gate: surface "${id}" is mode=gated but names no gate`,
+				);
+			}
+			if (!Array.isArray(entry.evidence) || entry.evidence.length === 0) {
+				throw new Error(
+					`finding-delivery-gate: surface "${id}" is mode=gated but names no evidence`,
 				);
 			}
 			continue;
@@ -273,6 +467,13 @@ export function assertNoDeliveryBypass(
 			if (!entry.reason || !entry.ageSource) {
 				throw new Error(
 					`finding-delivery-gate: surface "${id}" is mode=labeled but is missing reason/ageSource`,
+				);
+			}
+			// "live" surfaces call no age-formatting helper — nothing to grep for.
+			// Every other ageSource claims a real cache, so it must be provable.
+			if (entry.ageSource !== "live" && entry.evidence.length === 0) {
+				throw new Error(
+					`finding-delivery-gate: surface "${id}" claims ageSource "${entry.ageSource}" but names no evidence`,
 				);
 			}
 			continue;
