@@ -32,6 +32,7 @@ import {
 	isAtOrAboveHomeDir,
 	isFullyQualified,
 	isWindowsPath,
+	pathsEqual,
 } from "../path-utils.js";
 import {
 	ensureTool,
@@ -1054,7 +1055,10 @@ async function markerExists(dir: string, pattern: string): Promise<boolean> {
  * NearestRoot(includePatterns, excludePatterns?) → RootFunction
  *
  * - includePatterns: file/dir names that signal the project root (e.g. ["package.json"])
- * - excludePatterns: if any of these exist in a directory, skip it (e.g. ["node_modules"])
+ * - excludePatterns: if any of these exist in a directory, SKIP that directory and
+ *   keep walking up toward stopDir — it does not abort resolution. A directory that
+ *   matches an exclude pattern is simply never returned as a root; the walk still
+ *   continues past it looking for an include-pattern hit higher up (#1671).
  * - stopDir: walk stops here (defaults to filesystem root; set to project cwd for safety)
  *
  * Equivalent to createRootDetector; exported under both names for clarity.
@@ -2063,14 +2067,127 @@ export const GoServer: LSPServerInfo = {
 	},
 };
 
-async function hasWorkspaceSection(cargoPath: string): Promise<boolean> {
+async function readTextFileOrUndefined(filePath: string): Promise<string | undefined> {
 	try {
-		const { readFile } = await import("node:fs/promises");
-		const content = await readFile(cargoPath, "utf-8");
-		return /^\s*\[workspace\]/m.test(content);
+		return await readFile(filePath, "utf-8");
 	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Slice out ONE top-level TOML table's raw body — from its `[name]` heading
+ * to the next top-level `[...]`/`[[...]]` heading or EOF. `members`/`exclude`
+ * must be read from the `[workspace]` table specifically: `[package]` has its
+ * OWN `exclude` key (the standard cargo-publish exclude list, conventionally
+ * written above `[workspace]` in a virtual-manifest-less root crate), and a
+ * whole-file regex would misread it as workspace membership (#1671 F4).
+ */
+function extractTomlTableSection(content: string, tableName: string): string {
+	const heading = new RegExp(`^\\[${tableName}\\][ \\t]*(?:#.*)?$`, "m");
+	const match = heading.exec(content);
+	if (!match) return "";
+	const rest = content.slice(match.index + match[0].length);
+	const nextHeading = rest.match(/^\[{1,2}[^\]]+\]{1,2}[ \t]*(?:#.*)?$/m);
+	return nextHeading?.index !== undefined ? rest.slice(0, nextHeading.index) : rest;
+}
+
+function parseTomlStringArray(content: string, key: string): string[] {
+	const match = content.match(
+		new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*\\[([\\s\\S]*?)\\]`, "m"),
+	);
+	if (!match) return [];
+	return [...match[1].matchAll(/"([^"]*)"|'([^']*)'/g)].map(
+		(m) => (m[1] ?? m[2] ?? "").trim(),
+	);
+}
+
+/** Turn one `/`-delimited glob SEGMENT into a regex source: `*` matches any
+ * run of characters within the segment, `?` matches exactly one character,
+ * everything else is escaped and literal. */
+function segmentGlobToRegExpSource(segment: string): string {
+	let out = "";
+	for (const ch of segment) {
+		if (ch === "*") out += "[^/]*";
+		else if (ch === "?") out += "[^/]";
+		else out += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+	}
+	return out;
+}
+
+/**
+ * A `members`/`exclude` entry names a path exactly, or globs it segment by
+ * segment: `*` and `?` inside a segment work at any depth — one wildcard
+ * segment (`crates/*`), a bare `*`, or several chained together for a
+ * deeper fixed-depth layout — matching cargo's own `glob`-crate semantics
+ * for a fixed number of path components.
+ *
+ * KNOWN LIMITATION (#1671 F6, documented rather than implemented): a
+ * recursive `**` segment (matching a variable number of path components) is
+ * NOT supported and never matches — cargo workspaces that rely on `**` to
+ * pull in an arbitrarily-nested crate tree will under-hoist (the crate stays
+ * independently rooted instead of joining the workspace). This is
+ * deliberately out of #1671's scope: the common, and the issue's fixture,
+ * shape is an explicit fixed-depth `members` list.
+ */
+function matchesCargoWorkspacePattern(pattern: string, relativePath: string): boolean {
+	const normalized = pattern.replace(/\/+$/, "");
+	if (normalized.includes("**")) return false;
+	const patternSegments = normalized.split("/");
+	const pathSegments = relativePath.split("/");
+	if (patternSegments.length !== pathSegments.length) return false;
+	return patternSegments.every((segment, i) =>
+		new RegExp(`^${segmentGlobToRegExpSource(segment)}$`).test(pathSegments[i]),
+	);
+}
+
+/**
+ * Given an ancestor Cargo.toml's raw contents that already contains a
+ * `[workspace]` table, decide whether it actually claims `childDir` as a
+ * member. Cargo's own default is that a bare `[workspace]` with no `members`
+ * key claims only the manifest's own package — a nested crate is NOT
+ * implicitly swept in just because it sits underneath the workspace root on
+ * disk. Without this check any Cargo.toml with a `[workspace]` table would
+ * hoist every crate below it, including ones the workspace never declared
+ * (#1671) — the same defect shape as an undeclared Maven sibling module.
+ *
+ * KNOWN LIMITATION (#1671 F7, documented rather than implemented): cargo also
+ * treats a crate as an implicit workspace member when the workspace root's
+ * OWN `[package]` has a `path = "..."` dependency on it and no explicit
+ * `members` key is present at all. That dependency-graph inference is not
+ * evaluated here — a workspace relying on it alone (no `members` key) reads
+ * as claiming nothing, so its crates stay independently rooted rather than
+ * being (correctly, per cargo) swept in. An explicit `members` list — the
+ * common case and the one #1671's fixtures exercise — is unaffected.
+ */
+function cargoWorkspaceDeclaresMember(
+	workspaceContent: string,
+	parentDir: string,
+	childDir: string,
+): boolean {
+	const relativePath = path.relative(parentDir, childDir).split(path.sep).join("/");
+	if (relativePath === "" || relativePath.startsWith("..")) return false;
+	const workspaceSection = extractTomlTableSection(workspaceContent, "workspace");
+	const excluded = parseTomlStringArray(workspaceSection, "exclude");
+	if (excluded.some((pattern) => matchesCargoWorkspacePattern(pattern, relativePath))) {
 		return false;
 	}
+	const members = parseTomlStringArray(workspaceSection, "members");
+	return members.some((pattern) => matchesCargoWorkspacePattern(pattern, relativePath));
+}
+
+/**
+ * Bound a monorepo-hoist walk-up by the session ceiling: when `file` is inside
+ * the session cwd, the walk must stop AT the cwd rather than climb past it —
+ * matching enforceLspRootCeiling's clamp semantics but avoiding the wasted stat
+ * calls of walking past a boundary we would clamp back down anyway. When
+ * `file` is outside the session (isolated tests, out-of-session API callers),
+ * enforceLspRootCeiling is a no-op, so the walk is left unbounded (`undefined`).
+ */
+function sessionHoistCeiling(sessionCwd: string, file: string): string | undefined {
+	return isSameOrWithin(path.resolve(sessionCwd), path.resolve(file))
+		? path.resolve(sessionCwd)
+		: undefined;
 }
 
 function RustWorkspaceRoot(): RootFunction {
@@ -2078,18 +2195,130 @@ function RustWorkspaceRoot(): RootFunction {
 	return async (file: string): Promise<string | undefined> => {
 		const root = await crateRoot(file);
 		if (!root) return undefined;
+
+		const sessionCwd = process.cwd();
+		// The walk-up for an ancestor Cargo.toml with a [workspace] table stays
+		// bounded by the same session ceiling the crate-root lookup above already
+		// enforces (enforceLspRootCeiling) — a monorepo hoist must never cross the
+		// session boundary just because a workspace manifest happens to sit above
+		// it (#1671).
+		const stop = sessionHoistCeiling(sessionCwd, file);
+
 		let current = root;
 		const fsRoot = path.parse(current).root;
 		while (true) {
+			if (stop !== undefined && current === stop) break;
 			const parent = path.dirname(current);
 			if (parent === current || parent === fsRoot) break;
-			const parentCargo = path.join(parent, "Cargo.toml");
-			if (await hasWorkspaceSection(parentCargo)) {
-				return parent;
+			const parentCargoPath = path.join(parent, "Cargo.toml");
+			const parentCargoContent = await readTextFileOrUndefined(parentCargoPath);
+			if (parentCargoContent !== undefined && /^\s*\[workspace\]/m.test(parentCargoContent)) {
+				// Test membership against the ORIGINAL crate dir (`root`), never the
+				// walk cursor (`current`, which may already have climbed through
+				// gap directories that have no Cargo.toml of their own) — a
+				// `members = ["crates/foo"]` or `["crates/*"]` entry is relative to
+				// the workspace root, spanning the whole gap in one hop (#1671 F1).
+				if (cargoWorkspaceDeclaresMember(parentCargoContent, parent, root)) {
+					return enforceLspRootCeiling(parent, sessionCwd, file);
+				}
+				// A workspace root exists here but its `members`/`exclude` tables do
+				// not claim this crate — stop climbing; the crate stays independently
+				// rooted rather than being swept into a workspace it opted out of.
+				break;
 			}
 			current = parent;
 		}
 		return root;
+	};
+}
+
+/**
+ * Resolve whether `parentPomPath`'s <modules> block declares `childDir` as one
+ * of its member modules. Maven multi-module hoisting must only chain through
+ * poms that actually declare the child (an undeclared sibling directory that
+ * merely happens to sit next to a parent pom stays independently rooted) —
+ * this is the "Maven module-chain verification" #1671 asks for, as opposed to
+ * rust-analyzer's simpler "any ancestor [workspace] wins" hoist.
+ */
+/**
+ * Strip XML comments to a fixed point rather than in one pass: a single
+ * `.replace()` can leave a residual `<!--` behind on adversarially-nested
+ * input (CodeQL flags this class as "incomplete multi-character
+ * sanitization" — the removal of one comment can expose a delimiter that
+ * was itself inside another). Looping until nothing changes closes that gap.
+ */
+function stripXmlComments(content: string): string {
+	let result = content;
+	let previous: string;
+	do {
+		previous = result;
+		result = result.replace(/<!--[\s\S]*?-->/g, "");
+	} while (result !== previous);
+	return result;
+}
+
+async function declaresMavenModule(
+	parentDir: string,
+	parentPomPath: string,
+	childDir: string,
+): Promise<boolean> {
+	try {
+		const content = stripXmlComments(await readFile(parentPomPath, "utf-8"));
+		const modulesBlock = content.match(/<modules>([\s\S]*?)<\/modules>/);
+		if (!modulesBlock) return false;
+		const resolvedChild = path.resolve(childDir);
+		for (const match of modulesBlock[1].matchAll(/<module>\s*([^<]+?)\s*<\/module>/g)) {
+			// Case-insensitive / realpath-aware compare (#1671 F8): a declared
+			// `<module>Foo</module>` must still match a directory actually named
+			// `foo` on a case-insensitive filesystem, the same class of check the
+			// rest of this codebase does via `pathsEqual` (#1139/#1150).
+			if (pathsEqual(path.resolve(parentDir, match[1]), resolvedChild)) return true;
+		}
+		return false;
+	} catch {
+		return false;
+	}
+}
+
+function JavaWorkspaceRoot(): RootFunction {
+	const moduleRoot = createRootDetector(["pom.xml", "build.gradle", ".classpath"]);
+	return async (file: string): Promise<string | undefined> => {
+		const root = await moduleRoot(file);
+		if (!root) return undefined;
+		// Only a Maven (pom.xml) module chain-hoists here — Gradle/.classpath module
+		// roots are returned as found; multi-module Gradle wiring (settings.gradle)
+		// is a different shape and out of scope for #1671.
+		if (!(await markerExists(root, "pom.xml"))) return root;
+
+		const sessionCwd = process.cwd();
+		const stop = sessionHoistCeiling(sessionCwd, file);
+
+		// `current` is the walk CURSOR — it climbs over gap directories (ones
+		// with no pom.xml of their own, e.g. a `<module>sub/dir</module>` entry
+		// spanning more than one filesystem level). `lastHop` is the last
+		// CONFIRMED module boundary; it is what the next ancestor pom's
+		// <modules> must declare, and it is what actually gets returned — never
+		// the cursor, which can land on a bare gap directory that is not itself
+		// a valid module root (#1671 F2).
+		let current = root;
+		let lastHop = root;
+		const fsRoot = path.parse(current).root;
+		while (true) {
+			if (stop !== undefined && current === stop) break;
+			const parent = path.dirname(current);
+			if (parent === current || parent === fsRoot) break;
+			if (await markerExists(parent, "pom.xml")) {
+				const parentPom = path.join(parent, "pom.xml");
+				if (!(await declaresMavenModule(parent, parentPom, lastHop))) break;
+				current = parent;
+				lastHop = parent;
+				continue;
+			}
+			// No pom.xml here — a gap directory, not a module boundary. Keep
+			// climbing without advancing `lastHop`.
+			current = parent;
+		}
+		return enforceLspRootCeiling(lastHop, sessionCwd, file);
 	};
 }
 
@@ -2366,9 +2595,7 @@ export const JavaServer = createInteractiveServer({
 	id: "java",
 	name: "JDT Language Server",
 	extensions: KIND_EXTENSIONS["java"],
-	root: RootWithFallback(
-		createRootDetector(["pom.xml", "build.gradle", ".classpath"]),
-	),
+	root: RootWithFallback(JavaWorkspaceRoot()),
 	language: "java",
 	command: () => process.env.JDTLS_PATH || "jdtls",
 	args: (root) => createLombokJdtlsArgs(root),
