@@ -15,7 +15,7 @@
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
 import type { PiLensFlagSource } from "./lens-config.js";
-import { findNearestContaining } from "./path-utils.js";
+import { findNearestContaining, normalizeEphemeralMapKey } from "./path-utils.js";
 import {
 	recordFromDispatchDiagnostic,
 	type ActionableWarningRecord,
@@ -1621,8 +1621,24 @@ export async function runPipeline(
 					// Without it, a cross-file line count gets attributed to THIS
 					// file's past-EOF check and can demote an in-bounds, fully valid
 					// blocker for content the diagnostic never described.
+					//
+					// #1641 review round 2 (LOW): `path.resolve` equality doesn't fold
+					// case, and an LSP-sourced diagnostic's `filePath` is stamped with
+					// realpath canonical casing (dispatch/runners/lsp.ts ->
+					// normalizeMapKey) while `ctx.filePath` can arrive lowercase-drive
+					// on Windows — the drive-letter class from #1139/#1150. A bare
+					// `path.resolve` equality then drops EVERY LSP blocker line and
+					// this record silently skips the past-EOF gate (fail-open, but
+					// exactly the pre-fix behavior on the surface #1641 targets).
+					// `normalizeEphemeralMapKey` slash-folds and (on win32)
+					// lowercase-folds both sides with no filesystem I/O — cheap enough
+					// for this per-blocker hot-path filter. `pathsEqual` was
+					// deliberately NOT used here: it calls `realpathSync` per
+					// comparison, which this filter cannot afford per blocker.
 					.filter(
-						(d) => path.resolve(d.filePath) === path.resolve(filePath),
+						(d) =>
+							normalizeEphemeralMapKey(d.filePath) ===
+							normalizeEphemeralMapKey(filePath),
 					)
 					.map((d) => d.line)
 					.filter((line): line is number => typeof line === "number")

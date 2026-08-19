@@ -1007,5 +1007,56 @@ describe("Pipeline", () => {
 
 			expect(result.inlineBlockerLines).toEqual([]);
 		});
+
+		// #1641 review round 2 (LOW, win32-only — the dogfood host): an
+		// LSP-sourced diagnostic's `filePath` is stamped with realpath canonical
+		// casing (dispatch/runners/lsp.ts -> normalizeMapKey), but the pipeline's
+		// OWN `ctx.filePath` can arrive with a lowercase drive letter — the same
+		// drive-letter class as #1139/#1150. A bare `path.resolve` equality does
+		// not fold that case difference, so it drops EVERY LSP blocker line and
+		// this record silently skips the past-EOF gate — fail-open, but exactly
+		// the pre-fix behavior on the surface #1641 targets. Guarded like this
+		// repo's other win32-casing probes (see `normalizeEphemeralMapKey`'s own
+		// tests in `path-utils.test.ts`) since CI's Unit tests job runs on
+		// ubuntu-latest and case-folding is a no-op there.
+		it("still captures lines when the blocker's path differs from ctx.filePath only by drive-letter case (win32)", async () => {
+			if (process.platform !== "win32") return;
+			const filePath = createTempFile(tmpDir, "app.ts", "const x = 1;");
+			const lowerDriveFilePath =
+				filePath.charAt(0).toLowerCase() + filePath.slice(1);
+			// The diagnostic's path is the OPPOSITE case from `ctx.filePath` —
+			// simulating an LSP-stamped realpath-canonical path colliding with a
+			// pipeline call site that received a lowercase-drive path.
+			const canonicalCaseFilePath =
+				filePath.charAt(0).toUpperCase() + filePath.slice(1);
+			vi.mocked(dispatchLintWithResult).mockResolvedValue({
+				diagnostics: [],
+				blockers: [
+					{
+						id: "lsp-1",
+						message: "Type error",
+						filePath: canonicalCaseFilePath,
+						line: 3,
+						severity: "error",
+						semantic: "blocking",
+						tool: "lsp",
+					},
+				],
+				warnings: [],
+				baselineWarningCount: 0,
+				fixed: [],
+				resolvedCount: 0,
+				output: "type error",
+				blockerOutput: "type error",
+				hasBlockers: true,
+			});
+
+			const result = await runPipeline(
+				createMockContext(lowerDriveFilePath),
+				createMockDeps(),
+			);
+
+			expect(result.inlineBlockerLines).toEqual([3]);
+		});
 	});
 });
