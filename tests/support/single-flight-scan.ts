@@ -36,9 +36,16 @@ export interface InFlightDeclaration {
 /**
  * Declarations this scan can see, and the two it cannot.
  *
- * IN: module-level `const`/`let`/`var` at column 0, and class fields carrying an
- * accessibility or `readonly`/`static` modifier at any indent. Those are the
- * two places durable in-flight state actually lives.
+ * IN, three forms:
+ *
+ * 1. module-level `const`/`let`/`var` at column 0;
+ * 2. class fields carrying an accessibility, `readonly`, `static` or `abstract`
+ *    modifier, at any indent;
+ * 3. modifier-less class fields — both `#private` ones, which the `#` makes
+ *    unambiguous, and plain ones carrying a TYPE ANNOTATION. Review round 1
+ *    caught this gap: `probeInFlight: Promise<void> | null = null;` is the
+ *    migrated sites' exact field minus the word `private`, and the first
+ *    version of this regex sailed straight past it.
  *
  * OUT, stated rather than papered over:
  *
@@ -48,18 +55,40 @@ export interface InFlightDeclaration {
  *    would make the ratchet noise rather than signal;
  * 2. in-flight state whose name does not contain `inFlight`
  *    (`refreshRepullRunning` in `lsp/client.ts` is exactly that, which is part
- *    of why #1687 went unnoticed).
+ *    of why #1687 went unnoticed);
+ * 3. a modifier-less, UNANNOTATED class field (`inFlight = new Map();` with no
+ *    `private` and no type). By shape that is identical to a bare assignment to
+ *    a closure variable — `ensureInFlight = null;` in
+ *    `toolchain-availability.ts` is exactly that — and this scan chooses the
+ *    false negative over flagging every clear-in-finally in the repo.
  *
- * Both are FALSE NEGATIVES. The ratchet still catches the common case, which
- * is the copy someone writes by pattern-matching a sibling client.
+ * All three are FALSE NEGATIVES. The ratchet still catches the common case,
+ * which is the copy someone writes by pattern-matching a sibling client.
  */
 export const SCAN_HEURISTIC_LIMITS = [
 	"closure-scoped state inside factory functions is not seen",
 	"in-flight state not named /[iI]nFlight/ is not seen",
+	"a modifier-less, unannotated class field is not seen (it is shaped exactly like a bare assignment)",
 ] as const;
 
-const DECLARATION =
-	/^(?:(?:export\s+)?(?:const|let|var)\s+|[\t ]+(?:(?:private|protected|public|static|readonly|abstract)\s+)+)([\w$]*[iI]nFlight[\w$]*)\s*[:=]/gm;
+/**
+ * Three alternatives, in the order the doc comment lists them: a module-level
+ * binding, a modified class field, and a modifier-less class field that is
+ * either `#private` or type-annotated.
+ */
+const DECLARATION = new RegExp(
+	[
+		"^(?:",
+		/*  1 */ "(?:export\\s+)?(?:const|let|var)\\s+#?",
+		"|",
+		/*  2 */ "[\\t ]+(?:(?:private|protected|public|static|readonly|abstract)\\s+)+#?",
+		"|",
+		/* 3a */ "[\\t ]+#",
+		")([\\w$]*[iI]nFlight[\\w$]*)\\s*[:=]",
+		/* 3b */ "|^[\\t ]+([\\w$]*[iI]nFlight[\\w$]*)\\s*(?:\\?\\s*)?:(?!:)",
+	].join(""),
+	"gm",
+);
 
 /** Find every `inFlight`-named module-state declaration in one source text. */
 export function findInFlightDeclarations(
@@ -72,9 +101,12 @@ export function findInFlightDeclarations(
 	const stripped = stripCommentsAndStrings(source);
 	const found: InFlightDeclaration[] = [];
 	DECLARATION.lastIndex = 0;
-	let match: RegExpExecArray | null;
-	while ((match = DECLARATION.exec(stripped)) !== null) {
-		const symbol = match[1];
+	for (;;) {
+		const match = DECLARATION.exec(stripped);
+		if (match === null) break;
+		// Group 1 is the modified/module form, group 2 the annotated
+		// modifier-less field. Exactly one of them participates per match.
+		const symbol = match[1] ?? match[2];
 		found.push({
 			file,
 			symbol,

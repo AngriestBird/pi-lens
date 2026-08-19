@@ -30,6 +30,12 @@
  * instance fields, exactly as their `ensureInFlight` fields did, so neither
  * one's session-state answer changes.
  *
+ * Teardown of a flight that never settles is the owner's question, and neither
+ * converted site answers it today: a wedged probe holds its key until the
+ * process ends, exactly as its `ensureInFlight` field did on master. This
+ * primitive does not make that worse and does not fix it; an owner that needs a
+ * deadline wraps `fn` in one before handing it over.
+ *
  * The generation hook is deliberately thin — a `() => number` the primitive
  * reads at start and again at completion. The standalone generation-guard
  * primitive is #1754's; when it lands, this stays a callback and composes with
@@ -139,13 +145,15 @@ export function createSingleFlight<T>(
 
 	const run = (key: string, fn: () => Promise<T>): Promise<T> => {
 		const existing = flights.get(key);
-		// A flight from an earlier generation answers a question a session reset
-		// already invalidated. Supersede it instead of sharing it: this caller
-		// gets a fresh flight, and the stale one keeps running until it settles,
-		// where `release`'s identity check stops it evicting the replacement.
-		if (existing && existing.generation !== currentGeneration()) {
-			flights.delete(key);
-		} else if (existing) {
+		// Sharing requires BOTH a running flight and a matching generation. A
+		// flight from an earlier generation answers a question a session reset
+		// already invalidated, so this caller falls through and starts a fresh
+		// one; the `flights.set` below replaces the stale entry outright, and the
+		// stale flight's own `release` then finds a foreign entry and leaves it
+		// alone. There is deliberately no explicit delete for the superseded
+		// entry: nothing reads the map between here and that `set`, so a delete
+		// would be a dead statement dressed as a guard.
+		if (existing && existing.generation === currentGeneration()) {
 			// A mid-flight request in the SAME generation. With coalescing it earns
 			// exactly one trailing pass no matter how many such requests arrive;
 			// without it, it shares the running pass. Either way it never starts a
@@ -173,6 +181,20 @@ export function createSingleFlight<T>(
 
 		const chain = async (): Promise<T> => {
 			let result = await fn();
+			// KNOWN INTERACTION, `coalesceTrailing` + `generation`: a flight that
+			// gets superseded mid-pass with its rerun bit already set still runs
+			// that one trailing pass, because the bit lives on the flight and no
+			// caller can reach in to clear it. So a reset can cost ONE extra pass
+			// of pre-reset work, whose result nothing reads — the superseded
+			// promise has no callers left that a live caller depends on.
+			//
+			// Left as-is rather than fixed blind: no site uses both options today,
+			// so any fix would be untested guesswork about which behavior a real
+			// caller wants. A reset arguably SHOULD abandon the pending rerun; it
+			// arguably should also let a pass that is already half-done finish.
+			// The third site to turn this combination on decides, and adds the
+			// test that pins whichever answer it picks.
+			//
 			// Only reruns requested WHILE a pass was running count. Clearing the bit
 			// before each pass — never after — is what pins the coalescing to "at
 			// most one trailing rerun": a request that arrives during pass 2 sets
