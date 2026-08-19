@@ -124,6 +124,62 @@ describe("LSPService race hardening", () => {
 		initialize.restore();
 	});
 
+	// #1766: a resync caller whose own wait budget expires needs to tell "the
+	// server's first spawn is still running" apart from "the server is up and
+	// stalled". isSpawnInFlight reads the real state.inFlight map — no
+	// separate hand-maintained flag — so it must report true exactly while a
+	// spawn for a candidate server of the file is unresolved, and false again
+	// once it settles.
+	it("isSpawnInFlight reports true only while the server's spawn is unresolved", async () => {
+		const { LSPService } = await import("../../../clients/lsp/index.js");
+		const service = new LSPService();
+		const client = {
+			isAlive: () => true,
+			shutdown: vi.fn(async () => {}),
+		};
+		const initialize = suspendAt(createLSPClient, async () => client);
+		const spawn = vi.fn(async () => ({
+			process: {
+				process: { killed: false },
+				stdin: {} as any,
+				stdout: {} as any,
+				stderr: {} as any,
+				pid: 456,
+			},
+		}));
+		getServersForFileWithConfig.mockReturnValue([
+			{
+				id: "json",
+				name: "JSON",
+				extensions: [".json"],
+				root: async () => "C:/repo",
+				spawn,
+			},
+		]);
+
+		const file = "C:/repo/new.json";
+		expect(service.isSpawnInFlight(file)).toBe(false);
+
+		const pending = service.getClientForFile(file);
+		await initialize.admitted;
+		// The spawn is now parked mid-initialize, exactly the state a resync
+		// deadline can expire during (#1766's cold-start-vs-wedged race).
+		expect(service.isSpawnInFlight(file)).toBe(true);
+
+		initialize.release();
+		await pending;
+		expect(service.isSpawnInFlight(file)).toBe(false);
+		initialize.restore();
+	});
+
+	it("isSpawnInFlight is false for a file type with no configured server", () => {
+		getServersForFileWithConfig.mockReturnValue([]);
+		return import("../../../clients/lsp/index.js").then(({ LSPService }) => {
+			const service = new LSPService();
+			expect(service.isSpawnInFlight("C:/repo/unknown.xyz")).toBe(false);
+		});
+	});
+
 	it("retries broken server after cooldown window", async () => {
 		const now = vi.spyOn(Date, "now");
 		now.mockReturnValue(0);

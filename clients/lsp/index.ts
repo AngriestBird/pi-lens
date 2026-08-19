@@ -7113,6 +7113,24 @@ export class LSPService {
 	}
 
 	/**
+	 * Check whether a server that could handle this file is currently mid-spawn
+	 * (`state.inFlight`, keyed `${server.id}:${root}`). Lets a caller whose own
+	 * wait budget expires distinguish "the server hasn't finished its first
+	 * spawn yet" from "the server is running but slow/wedged" (#1766) — a cold
+	 * spawn still in flight is not a verdict on a server that doesn't exist yet.
+	 * Pure lookup — does not spawn or wait for a client.
+	 */
+	isSpawnInFlight(filePath: string): boolean {
+		const servers = getServersForFileWithConfig(filePath);
+		if (servers.length === 0) return false;
+		const prefixes = servers.map((server) => `${server.id}:`);
+		for (const key of this.state.inFlight.keys()) {
+			if (prefixes.some((prefix) => key.startsWith(prefix))) return true;
+		}
+		return false;
+	}
+
+	/**
 	 * Check whether an LSP client is already alive for a file.
 	 * Lightweight — does not spawn or wait for a client.
 	 */
