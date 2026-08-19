@@ -65,8 +65,10 @@ const OUTCOME_SUFFIX =
  *
  * Kept to `skip`/`skipped` deliberately. Those are the outcomes this repo
  * qualifies with a trailing reason; a general "outcome word anywhere" rule
- * would match throughput phases like `lsp_timeout_budget_resolved`, whose
- * subject happens to be a failure concept.
+ * would match a throughput phase whose SUBJECT happens to be a failure
+ * concept. No such phase exists today — `lsp_timeout_budget_resolved` in the
+ * sweep's self-test is a hypothetical name, written to pin the boundary
+ * before a real one arrives.
  */
 const OUTCOME_INFIX = /_skipped?_/;
 
