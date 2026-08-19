@@ -1,6 +1,10 @@
 import { stat } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+	demotePastEofDiagnostics,
+	type LineCountCache,
+} from "./diagnostic-line-freshness.js";
 import { visibleWidth } from "./deps/pi-tui.js";
 import { normalizeEphemeralMapKey, normalizeMapKey } from "./path-utils.js";
 import { fitLine } from "./tui-fit.js";
@@ -9,6 +13,7 @@ import {
 	collectForwardImportMtimes,
 	MTIME_DRIFT_TOLERANCE_MS,
 } from "./blocker-freshness.js";
+import { PAST_EOF_STALE_MARKER } from "./diagnostic-line-freshness.js";
 import { STALE_LINE_MARKER } from "./stale-marker.js";
 
 /**
@@ -73,13 +78,26 @@ export interface WidgetDiagnostic {
 	 */
 	observedAt?: number;
 	/**
-	 * #1631: set by the dependency-drift gate
-	 * (`reconcileStaleWidgetDependencyBlockers`) when one of the file's forward
-	 * imports changed on disk after this diagnostic was observed. A stale finding is
-	 * DEMOTED, not dropped (#1419): `isBlocking` answers false for it and `mode=all`
-	 * renders it with a `[stale — re-run to confirm]` marker instead of a 🔴.
+	 * Set when a freshness gate demoted this diagnostic. Two gates write it:
+	 * #1641's past-EOF gate (the cited `line` exceeds the file's CURRENT
+	 * on-disk line count) and #1631's dependency-drift gate
+	 * (`reconcileStaleWidgetDependencyBlockers`: a forward import changed on
+	 * disk after this diagnostic was observed). Demoted entries stay in the
+	 * set — the underlying issue may still be real — but are excluded from
+	 * blocking/error/warning tallies (`isBlocking`, `countDiagnostics`) and
+	 * rendered with a stale marker in place of a trusted coordinate (#1419
+	 * demote-not-drop).
+	 *
+	 * The past-EOF gate RE-DERIVES this on every read (`applyPastEofGate`),
+	 * never a one-way latch: a transient shrink that later restores clears it
+	 * back to `false` once the line is back in bounds (#1641 review round F3
+	 * — derive, don't latch). The dependency-drift gate likewise re-derives
+	 * from current import mtimes each sweep.
 	 */
 	stale?: boolean;
+	/** Which freshness gate demoted this entry: "past-eof" (#1641) or
+	 * "dependency-drift" (#1631). Each gate heals only its own demotions. */
+	staleReason?: string;
 }
 
 /**
@@ -564,10 +582,53 @@ function countDiagnostics(diags: WidgetDiagnostic[]): {
 	let warnings = 0;
 	for (const diagnostic of diags) {
 		if (isBlocking(diagnostic)) blocking++;
+		// A stale (past-EOF) entry keeps its severity for display purposes but
+		// is excluded from the error/warning tallies alongside blocking — its
+		// cited coordinate is no longer trustworthy, same reasoning as `isBlocking`.
+		if (diagnostic.stale) continue;
 		if (diagnostic.severity === "error") errors++;
 		else if (diagnostic.severity === "warning") warnings++;
 	}
 	return { blocking, errors, warnings };
+}
+
+/**
+ * Apply the #1641 past-EOF gate to `rec` in place: demote (never drop) any
+ * stored diagnostic whose cited line exceeds the file's CURRENT on-disk line
+ * count, then recompute the capped/full diagnostic lists and the counts so
+ * every reader (the TUI render loop, `getFileDiagnosticSummaries`,
+ * `getFileDiagnostics`) sees one consistent, already-gated record instead of
+ * each re-deriving its own verdict. Cheap on the common case: one memoized
+ * stat per record (see `getCachedLineCount`), a full recount only when the
+ * file's mtime moved since the last check.
+ *
+ * No `resync` callback here deliberately: this gate runs on the TUI's render
+ * path and the bus-publish/mark-tool read accessors, all of which fire far
+ * more often than an agent's own edit/tool cadence. Triggering a document
+ * resync from every one of those reads would storm the LSP with didOpen calls
+ * for a file whose drift hasn't yet been fixed. `tools/lens-diagnostics.ts`'s
+ * `formatAllMode` — an explicit, agent-invoked tool call — is the resync
+ * trigger point (#1641 criterion 2); this gate still demotes/logs on its own.
+ *
+ * The gate RE-DERIVES every entry's `stale` flag on every call — it is never
+ * a one-way latch. A transient shrink that later restores (truncate-then-
+ * write, a formatter pass, a checkout) un-demotes on its own next read, so
+ * this always persists the freshly-derived array back into the record, not
+ * only when `demotedCount` (which counts RISING edges only, for telemetry)
+ * is nonzero.
+ */
+function applyPastEofGate(rec: FileRecord, lineCountCache?: LineCountCache): void {
+	if (rec.allDiagnostics.length === 0) return;
+	const { diagnostics } = demotePastEofDiagnostics({
+		store: "widget-state",
+		cwd: process.cwd(),
+		filePath: rec.filePath,
+		diagnostics: rec.allDiagnostics,
+		lineCountCache,
+	});
+	rec.allDiagnostics = diagnostics;
+	rec.diagnostics = capStoredDiagnostics(diagnostics);
+	rec.diagnosticCounts = countDiagnostics(diagnostics);
 }
 
 /** The newest per-entry `observedAt` in `diags`, or `fallback` when empty (or no
@@ -859,6 +920,7 @@ export async function reconcileStaleWidgetDependencyBlockers(
 			// measured skew while staying far below the gap between real edits.
 			if (importMtimes.some((im) => im.mtimeMs > baseline + MTIME_DRIFT_TOLERANCE_MS)) {
 				d.stale = true;
+				d.staleReason = "dependency-drift";
 				changed = true;
 				demoted += 1;
 			}
@@ -917,14 +979,17 @@ export interface FileDiagnosticSummary {
  * everything, not just the 12 the TUI keeps for rendering.
  */
 export function getFileDiagnosticSummaries(): FileDiagnosticSummary[] {
-	return [...files.values()].map((rec) => ({
-		filePath: rec.filePath,
-		blocking: rec.diagnosticCounts.blocking,
-		errors: rec.diagnosticCounts.errors,
-		warnings: rec.diagnosticCounts.warnings,
-		hasFinalSnapshot: rec.hasFinalDiagnosticsSnapshot,
-		diagnostics: rec.allDiagnostics.map((d) => ({ ...d })),
-	}));
+	return [...files.values()].map((rec) => {
+		applyPastEofGate(rec);
+		return {
+			filePath: rec.filePath,
+			blocking: rec.diagnosticCounts.blocking,
+			errors: rec.diagnosticCounts.errors,
+			warnings: rec.diagnosticCounts.warnings,
+			hasFinalSnapshot: rec.hasFinalDiagnosticsSnapshot,
+			diagnostics: rec.allDiagnostics.map((d) => ({ ...d })),
+		};
+	});
 }
 
 /**
@@ -948,6 +1013,7 @@ export function getFileDiagnosticSummaries(): FileDiagnosticSummary[] {
 export function getFileDiagnostics(filePath: string): WidgetDiagnostic[] | undefined {
 	const rec = files.get(fileMapKey(filePath));
 	if (!rec) return undefined;
+	applyPastEofGate(rec);
 	return rec.allDiagnostics.map((d) => ({ ...d }));
 }
 
@@ -1078,13 +1144,31 @@ export function renderWidget(
 	);
 	if (withBlocking.length > 0) {
 		const rec = withBlocking[0];
+		// #1641: gate only the ONE record whose line numbers are about to be
+		// rendered, not the whole (potentially session-long) `deduped` list the
+		// header counts read — one memoized stat per redraw, never a per-file
+		// scan of every file pi-lens has touched this session. A past-EOF
+		// citation demoted here can leave the header's aggregate blocking count
+		// one turn stale; `reconcileStaleWidgetFiles`'s existing debounced sweep
+		// (scheduleStaleReconcile) already re-derives that aggregate on its own
+		// cadence, so this is a bounded, self-correcting gap, not a silent one.
+		applyPastEofGate(rec);
 		if (!useHorizontal) {
 			lines.push(fitLine(dim("─".repeat(Math.min(w, 60))), w));
 			lines.push(fitLine(` ${dim(path.basename(rec.filePath))}`, w));
 		}
 		const blockers = rec.diagnostics.filter(isBlockingOrDemoted).slice(0, 5);
 		for (const d of blockers) {
-			const loc = d.line != null ? osc8(d.uri ?? "", `L${d.line}`) : "";
+			// A past-EOF demotion's coordinate is untrustworthy — render the
+			// marker instead of the line (#1641); drift demotions keep theirs.
+			const pastEof = d.stale && (d.staleReason ?? "past-eof") === "past-eof";
+			// No link for a past-EOF demotion: the anchor would carry the same
+			// untrustworthy line the marker exists to replace.
+			const loc = pastEof
+				? PAST_EOF_STALE_MARKER
+				: d.line != null
+					? osc8(d.uri ?? "", `L${d.line}`)
+					: "";
 			const rule = d.rule ? dim(` ${d.rule}`) : "";
 			const staleTag = d.stale ? dim(` ${STALE_LINE_MARKER}`) : "";
 			const prefix = `   ${d.stale ? dim("○") : red("●")} ${loc}${rule}  `;
