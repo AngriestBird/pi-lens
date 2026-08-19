@@ -22,6 +22,9 @@ interface CallFixture {
 	directory: string;
 	caller: string;
 	callee: string;
+	/** Defaults to "Callee" — override when the language's convention names its
+	 *  referenced symbol differently (e.g. CUE's #-prefixed definitions). */
+	typeRefName?: string;
 }
 
 const CALL_FIXTURES: CallFixture[] = [
@@ -55,6 +58,17 @@ const TYPE_REFERENCE_FIXTURES: CallFixture[] = [
 	// Dart's shipped refs query intentionally exposes type references only; keep
 	// an actual fixture assertion so it is not mistaken for call coverage.
 	{ language: "dart", directory: "dart", caller: "caller.dart", callee: "callee.dart" },
+	// #1522: CUE has no user-defined callable functions, only fields/definitions
+	// and builtin package calls — a #Definition reference is a type reference,
+	// never a call, same shape as dart. The referenced symbol keeps its `#`
+	// (that's how a CUE definition is actually named), hence typeRefName.
+	{
+		language: "cue",
+		directory: "cue",
+		caller: "caller.cue",
+		callee: "callee.cue",
+		typeRefName: "#Callee",
+	},
 ];
 
 let client: TreeSitterClient;
@@ -151,7 +165,9 @@ describe("Tree-sitter call-graph fixtures", () => {
 			async () => {
 				const { caller, graph } = await buildFixtureGraph(fixture);
 				const typeRef = caller.refs.find(
-					(ref) => ref.symbolName === "Callee" && ref.referenceKind === "type",
+					(ref) =>
+						ref.symbolName === (fixture.typeRefName ?? "Callee") &&
+						ref.referenceKind === "type",
 				);
 				expect(typeRef, `${fixture.language} fixture did not emit a type ref`).toBeDefined();
 				expect(graph.edges).toHaveLength(0);
