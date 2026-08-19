@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { getProjectDataDir } from "../file-utils.js";
 import { writeFileAtomic } from "../atomic-write.js";
 import { readJsonCache } from "../json-cache-read.js";
+import { MTIME_DRIFT_TOLERANCE_MS } from "../blocker-freshness.js";
 import type {
 	ProjectDiagnosticsDeltaReport,
 	ProjectDiagnosticsSnapshot,
@@ -70,7 +71,8 @@ export function writeProjectDiagnosticsDeltaReport(
 
 /**
  * Drop diagnostics whose underlying file changed on disk after the snapshot was
- * taken (`mtimeMs > scannedAt`) or no longer exists. The persisted snapshot is a
+ * taken (`mtimeMs > scannedAt + MTIME_DRIFT_TOLERANCE_MS`) or no longer
+ * exists. The persisted snapshot is a
  * cross-session cache served by `lens_diagnostics mode=full refreshRunners=cached`;
  * without this it replays diagnostics the agent has since fixed or for files that
  * were deleted (#298 — "the cache needs to be cleaned before running diagnostics
@@ -78,6 +80,15 @@ export function writeProjectDiagnosticsDeltaReport(
  * in-memory widget, applied at the consumer so `loadProjectDiagnosticsSnapshot`
  * stays a pure reader. Synchronous (a `statSync` per *distinct* file, memoised),
  * since the cached full-mode path is already off the typing hot loop.
+ *
+ * The boundary is `mtime > scannedAt + MTIME_DRIFT_TOLERANCE_MS`
+ * (`blocker-freshness.ts`), not a bare `mtime > scannedAt`: #1711 found this
+ * consumer's old +1ms slack did not cover the measured Windows host skew
+ * between a file's mtime and the `Date.now()` read that produces `scannedAt`
+ * (up to ~11.4ms, #1491/#1498) — a same-tick write-then-scan silently
+ * dropped a live finding here, worse than `findingPathFreshness`'s sibling
+ * gate (#1708) since this arm DROPS rather than demotes. Reusing the shared
+ * constant keeps one source of truth for the measured skew.
  *
  * Fail-safe on an unparseable `scannedAt`: return the snapshot untouched rather
  * than risk dropping live findings on a clock/format anomaly.
@@ -94,8 +105,11 @@ export function reconcileProjectDiagnosticsSnapshot(
 		if (cached !== undefined) return cached;
 		let stale: boolean;
 		try {
-			// +1ms tolerance: a file scanned at scannedAt has mtime <= scannedAt.
-			stale = fs.statSync(filePath).mtimeMs > scannedAtMs + 1;
+			// MTIME_DRIFT_TOLERANCE_MS: a file scanned at scannedAt, or written
+			// within the tolerance window of the scan timestamp being captured,
+			// has mtime <= scannedAt + MTIME_DRIFT_TOLERANCE_MS.
+			stale =
+				fs.statSync(filePath).mtimeMs > scannedAtMs + MTIME_DRIFT_TOLERANCE_MS;
 		} catch {
 			stale = true; // deleted / unreadable → drop
 		}

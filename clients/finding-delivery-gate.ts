@@ -22,7 +22,8 @@
  *     file cannot be rotated). `onMissing: "demote"` keeps it — right when the
  *     cited path is only EVIDENCE for a finding pinned elsewhere (a
  *     govulncheck CVE is pinned by go.mod, not by the traced call site).
- *   - stale (mtime > scannedAt) → DEMOTE, never drop. The finding survives,
+ *   - stale (mtime > scannedAt + MTIME_DRIFT_TOLERANCE_MS,
+ *     `blocker-freshness.ts`) → DEMOTE, never drop. The finding survives,
  *     the now-untrustworthy line number does not.
  *   - live  → deliver unchanged, full authority.
  *   - unknown (unparseable/absent `scannedAt`, unreadable path) → fail OPEN,
