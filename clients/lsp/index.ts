@@ -19,6 +19,7 @@ import {
 import { recordLsp } from "../widget-state.js";
 import { applyAuxiliarySuppressions } from "../dispatch/auxiliary-lsp.js";
 import { detectFileRole } from "../file-role.js";
+import { emitBounded } from "../bounded-telemetry.js";
 import { logLatency } from "../latency-logger.js";
 import { logSessionStart } from "../sessionstart-logger.js";
 import {
@@ -2418,16 +2419,27 @@ export class LSPService {
 			server.availabilityKey &&
 			isDirectLspCommandTemporarilyUnavailable(server.availabilityKey)
 		) {
-			logLatency({
-				type: "phase",
-				phase: "lsp_client_skipped_unavailable_command",
-				filePath,
-				durationMs: 0,
-				metadata: {
-					serverId: server.id,
-					command: server.availabilityKey,
+			// #1743: during an outage this path runs once per file per touch,
+			// so a raw write here is a per-file log storm. The ledger counts
+			// every skip exactly, keyed on (command, file); only the first per
+			// pair also writes the detailed record.
+			emitBounded(
+				"lsp_client_skipped_unavailable_command",
+				`${server.availabilityKey}:${normalizeMapKey(filePath)}`,
+				{
+					filePath,
+					durationMs: 0,
+					metadata: {
+						serverId: server.id,
+						command: server.availabilityKey,
+					},
 				},
-			});
+				{
+					ledgerKind: "lsp-client-skipped-unavailable-command",
+					risingEdgePer: "identity",
+					reason: `command ${server.availabilityKey} temporarily unavailable`,
+				},
+			);
 			return undefined;
 		}
 
@@ -2435,16 +2447,26 @@ export class LSPService {
 			return undefined;
 		}
 		if (this.permanentlyBroken.has(key)) {
-			logLatency({
-				type: "phase",
-				phase: "lsp_client_skipped_broken",
-				filePath,
-				durationMs: 0,
-				metadata: {
-					serverId: server.id,
-					permanent: true,
+			// #1743: same per-file-per-touch storm as the unavailable-command
+			// skip above. Identity is (server, file) so a single wedged server
+			// cannot hide which files it is refusing.
+			emitBounded(
+				"lsp_client_skipped_broken",
+				`${server.id}:${normalizeMapKey(filePath)}`,
+				{
+					filePath,
+					durationMs: 0,
+					metadata: {
+						serverId: server.id,
+						permanent: true,
+					},
 				},
-			});
+				{
+					ledgerKind: "lsp-client-skipped-broken",
+					risingEdgePer: "identity",
+					reason: `${server.id} latched permanently broken`,
+				},
+			);
 			return undefined;
 		}
 
@@ -2655,16 +2677,26 @@ export class LSPService {
 
 		const brokenUntil = this.state.broken.get(key);
 		if (typeof brokenUntil === "number" && brokenUntil > Date.now()) {
-			logLatency({
-				type: "phase",
-				phase: "lsp_client_skipped_broken",
-				filePath,
-				durationMs: 0,
-				metadata: {
-					serverId: server.id,
-					retryInMs: Math.max(0, brokenUntil - Date.now()),
+			// #1743: the breaker-cooldown sibling of the permanently-broken skip
+			// above, sharing its identity so an outage produces one record per
+			// (server, file) rather than one per touch.
+			emitBounded(
+				"lsp_client_skipped_broken",
+				`${server.id}:${normalizeMapKey(filePath)}`,
+				{
+					filePath,
+					durationMs: 0,
+					metadata: {
+						serverId: server.id,
+						retryInMs: Math.max(0, brokenUntil - Date.now()),
+					},
 				},
-			});
+				{
+					ledgerKind: "lsp-client-skipped-broken",
+					risingEdgePer: "identity",
+					reason: `${server.id} in breaker cooldown`,
+				},
+			);
 			return undefined;
 		}
 		if (typeof brokenUntil === "number" && brokenUntil <= Date.now()) {
