@@ -42,6 +42,7 @@ import { initLSPConfig, loadLSPConfig } from "./lsp/config.js";
 import { loadLspService } from "./lsp-lazy.js";
 import type { MetricsClient } from "./metrics-client.js";
 import type { OpengrepClient, OpengrepResult } from "./opengrep-client.js";
+import { _resetPackageManagerCache } from "./package-manager.js";
 import { isAtOrAboveHomeDir } from "./path-utils.js";
 import { isPrintMode } from "./print-mode.js";
 import {
@@ -1868,6 +1869,12 @@ export async function handleSessionStart(
 	// from `clearFormatterRuntimeState()`, which runs every turn, so a failing
 	// install re-spawned every turn instead of once per session.
 	resetLazyInstallAttempts();
+	// #1653: pnpm/yarn/bun/npm's availability latches (package-manager.ts) are
+	// module-local, same #1490/#1535 shape as the two lines above — the
+	// generation counter above does not reach them. Without this line, a
+	// pnpm/yarn/bun install done mid-day stayed invisible: a genuine "missing"
+	// verdict from one session latched into the next until a process restart.
+	_resetPackageManagerCache();
 	// #1123 item 3: a fresh session can re-report smells that a prior session
 	// already surfaced once (see `checkSmellsAndNoteOnce`'s once-per-session gate).
 	resetSmellsSessionState();
