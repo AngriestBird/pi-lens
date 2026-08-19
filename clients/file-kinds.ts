@@ -323,8 +323,10 @@ for (const [kind, exts] of Object.entries(KIND_EXTENSIONS)) {
 	}
 }
 
-// Special filenames that indicate a file kind
-const SPECIAL_FILENAMES: Array<{ pattern: RegExp; kind: FileKind }> = [
+// Special filenames that indicate a file kind. Exported so other seams that
+// classify by basename (e.g. lsp/language.ts's language-id resolution) derive
+// from this list instead of hand-keeping their own basename literals (#1594).
+export const SPECIAL_FILENAMES: Array<{ pattern: RegExp; kind: FileKind }> = [
 	{ pattern: /^CMakeLists\.txt$/i, kind: "cmake" },
 	{ pattern: /^Makefile$/i, kind: "shell" },
 	{ pattern: /^Dockerfile(\.\w+)?$/i, kind: "docker" },
