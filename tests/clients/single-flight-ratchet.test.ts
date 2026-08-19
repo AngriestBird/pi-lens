@@ -82,10 +82,16 @@ const EXEMPTIONS: Record<string, string> = {
 		"exempt: a nested map of pipeline RECORDS (state a turn reads and " +
 		"mutates), not a dedupe of concurrent callers onto one promise",
 
-	// ── Forward-declared: see FORWARD_DECLARED below ──
+	// Landed with #1746 while this branch was open, which is what retired its
+	// forward declaration. A single slot rather than a keyed map, and its clear
+	// is unconditional ON PURPOSE: #1746's own review round proved an identity
+	// check there unreachable, because the slot has one writer and every other
+	// caller returns early while it is non-null. Migrating it would hand it a
+	// check it does not need, so it is backlog on the merits of dedupe, not of
+	// correctness.
 	"installer/managed-tool-refresh.ts:refreshInFlight":
-		"backlog: #1730's managed-tool refresh guard — hand-rolled with an " +
-		"identity-checked clear, migrate to singleFlight, #1753",
+		"backlog: #1730's managed-tool refresh latch — a single slot with a " +
+		"deliberately unconditional clear, migrate opportunistically, #1753",
 };
 
 /**
@@ -93,10 +99,9 @@ const EXEMPTIONS: Record<string, string> = {
  *
  * Normally an exemption naming a declaration that does not exist is a lie the
  * next reader would trust, and the stale check fails it. This set is the one
- * narrow exception: PR #1746 declares `refreshInFlight` in
- * `installer/managed-tool-refresh.ts` and merges BEFORE this branch. Writing
- * its entry ahead of time means neither PR has to be held for the other, and
- * neither author has to notice the interaction.
+ * narrow exception, for a symbol an open PR declares and this branch cannot see
+ * yet. Writing the entry ahead of time means neither PR has to be held for the
+ * other, and neither author has to notice the interaction.
  *
  * The cost is real and bounded. Two failure modes, handled differently:
  *
@@ -109,10 +114,13 @@ const EXEMPTIONS: Record<string, string> = {
  *   catches that, since "not yet" and "never" look identical from here. The size
  *   bound keeps the blast radius to a couple of keys, and a person reading this
  *   comment is the backstop.
+ *
+ * Empty in steady state, and empty right now. Its one entry so far,
+ * `installer/managed-tool-refresh.ts:refreshInFlight`, landed with #1746 while
+ * this branch was open. The retirement test below caught it on the first real
+ * occasion, and it now sits in `EXEMPTIONS` under the ordinary stale check.
  */
-const FORWARD_DECLARED = new Set([
-	"installer/managed-tool-refresh.ts:refreshInFlight",
-]);
+const FORWARD_DECLARED = new Set<string>([]);
 
 describe("singleFlight ratchet (#1753)", () => {
 	it("flags every hand-rolled in-flight declaration outside the primitive", () => {
