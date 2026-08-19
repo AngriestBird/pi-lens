@@ -44,6 +44,14 @@ note: |
   statement, will not satisfy it. That is a narrower, more conservative
   match (more likely to ask for a comment that already exists nearby in
   spirit) rather than a wider one.
+
+  2026-08-20 (review round, refs #1718): `no-chained-type-assertions.yml`
+  now carries the IDENTICAL `SAFETY:` relational check as its own
+  escape valve from `error`, so a site that satisfies THIS hint also
+  clears that hard block — the two rules are a matched pair (this one
+  teaches the convention at `hint`; that one enforces it at `error`
+  once the comment is missing), not two independent checks a caller
+  could satisfy one of and still get blocked by the other.
 rule:
   pattern: $X as unknown as $Y
   not:
