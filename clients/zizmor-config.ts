@@ -127,7 +127,15 @@ function classifyGhTokenFailure(
 	res: SpawnResult,
 	hostStallMs: number,
 ): { outcome: AvailabilityOutcome; cause: AvailabilityCause } {
-	if (!res.error) {
+	// #1651 review F5: `!res.error` alone is not proof gh ran and answered.
+	// A `null` or negative `status` is Node's OWN signal that the process
+	// never completed a real run — no completed process exits with either —
+	// so this never trusts a bare-`error` check over that shape, regardless
+	// of whether `safeSpawnAsync` happened to attach an `error` for this
+	// particular result. OS-independent by construction: it reads the status
+	// Node reports, not a platform-specific errno.
+	const neverAnswered = res.status === null || (res.status ?? 0) < 0;
+	if (!res.error && !neverAnswered) {
 		// The process ran to completion with a real (nonzero, since the zero
 		// exit is handled before this is ever called) exit code — a genuine
 		// "not authenticated" (or otherwise rejected) answer, safe to cache.
